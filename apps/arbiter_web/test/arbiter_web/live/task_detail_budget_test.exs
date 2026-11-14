@@ -15,7 +15,9 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.Event
 
-  @now ~U[2026-09-15 12:00:00.000000Z]
+  # Relative to the real clock: the budget scan only reads a rolling 60-day
+  # window, so a hardcoded date ages out and breaks these tests.
+  defp now, do: DateTime.utc_now()
 
   setup do
     {:ok, ws} =
@@ -46,7 +48,7 @@ defmodule ArbiterWeb.TaskDetailBudgetTest do
         step: :work,
         role: "base",
         workspace_id: ws.id,
-        occurred_at: @now,
+        occurred_at: now(),
         cost_usd: cost
       })
 
