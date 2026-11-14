@@ -302,8 +302,15 @@ defmodule Arbiter.Usage.BudgetPatrolTest do
 
   describe "the supervised ticker" do
     test "a poll on the running process raises the alert the same way", %{ws: ws} do
+      # The poll runs on the real clock, so the baseline history must sit inside
+      # its window too (the setup's @now history falls outside it once the date passes).
+      Enum.each(1..10, fn n ->
+        issue = closed_issue!(ws, %{difficulty: 2, issue_type: :feature})
+        event!(issue.id, ws, %{cost_usd: n * 1.0, occurred_at: DateTime.utc_now()})
+      end)
+
       task = open_issue!(ws, %{difficulty: 2, issue_type: :feature})
-      event!(task.id, ws, %{cost_usd: 40.0})
+      event!(task.id, ws, %{cost_usd: 40.0, occurred_at: DateTime.utc_now()})
 
       pid = start_supervised!({BudgetPatrol, name: nil, enabled: false})
 
