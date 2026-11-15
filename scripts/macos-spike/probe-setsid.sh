@@ -8,8 +8,6 @@ probe_init setsid
 
 command -v perl >/dev/null 2>&1 || inconclusive "no perl"
 parent=$(ps -o sess=,pgid= -p $$ | tr -s ' ')
-child=$(perl -MPOSIX -e 'POSIX::setsid() or die "setsid: $!"; exec @ARGV' ps -o pid=,sess=,pgid= -p '$$' 2>&1)
-# `ps` above got a literal; use a shell child to report its own ids instead.
 child=$(perl -MPOSIX -e 'POSIX::setsid() or die "setsid: $!"; exec @ARGV' sh -c 'ps -o pid=,pgid=,sess= -p $$')
 echo "parent (sess pgid): $parent"
 echo "child  (pid pgid sess): $child"
