@@ -1,8 +1,22 @@
 # Licensing Model & Open-Core Architecture
 
 **Status:** Decided — the 2026-09-18 Apache-2.0 decision is **superseded** by §0 (2026-11-14)  
-**Date:** 2026-09-18 (original); 2026-11-14 (FSL revision)  
+**Date:** 2026-09-18 (original); 2026-11-14 (FSL revision); 2026-11-15 (paid-tier distribution, §0.1)  
 **Task:** bd-gjw1ze · **Tracker:** github:1868  
+
+---
+
+## 0.1 Paid-Tier Distribution (2026-11-15): private repo + licence-keyed bundle
+
+> **Supersedes** the "closed-source Hex package distributed through an authenticated private Hex repository" wording in §0 point 3 and §1. Those passages are kept as the historical record; where they conflict with this section, this section governs. Tracked in bd-chxiip.
+
+**Decision.** The paid tier is a **separate private repository**, built and shipped as a **compiled bundle** that is unlocked by an **offline licence key**. It is not published to Hex or npm, and there is no private Hex repository to authenticate against.
+
+1. **Separate private repo.** The paid-tier source lives outside this repository. There is still no in-repo license zoning and no dual licensing (§1).
+2. **Compiled bundle.** The paid tier is delivered as a compiled artifact, not as a package fetched from a package registry.
+3. **Offline licence key.** The bundle is enabled by a licence key that is verified locally, without a call to a licensing server.
+4. **Extension seams are unchanged.** The seams in §5 and `docs/pro-extension-seams.md` still apply; only the delivery mechanism changes (the bundle is loaded per release, not per workspace).
+5. **Naming.** This document says "the paid tier" neutrally; the product/tier name is being settled in the Wardmast rebrand (bd-2ua50p).
 
 ---
 
@@ -14,7 +28,7 @@
 
 1. **Delayed conversion to Apache-2.0.** Each release converts automatically to Apache-2.0 on the second anniversary of the date it was made available. Releases already published under Apache-2.0 stay Apache-2.0 permanently (§6 point 2 is unchanged).
 2. **Rationale — supersedes §2.2.** §2.2 rejected BUSL/FSL on the grounds that no source-available license defends Arbiter against a real threat and that it costs OSI status. That reasoning is withdrawn. The goal now is to protect the product against others selling it commercially (a competing paid product or hosted service built from our code) while the code stays public and free to use, modify and self-host for any permitted purpose. FSL's competing-use restriction does that; the two-year conversion keeps the long-run commitment to open source. The accepted cost is that Arbiter is source-available, not OSI-approved open source, until each release converts.
-3. **Package-level boundary stays.** A separate commercial "Arbiter Pro" package, closed-source and distributed through an authenticated private Hex repository, remains the model; there is still no in-repo license zoning and no dual licensing (§1).
+3. **Package-level boundary stays.** *(Distribution wording superseded by §0.1.)* A separate commercial "Arbiter Pro" package, closed-source and historically planned for distribution through an authenticated private Hex repository, was the model; there is still no in-repo license zoning and no dual licensing (§1).
 4. **§6 "additive only" is revised.** Point 3 of §6 (no capability subtractions) no longer holds absolutely: some existing team/infrastructure features are planned to move to the commercial tier. Which features, and how they are gated, is a separate design ticket and is deliberately **not** decided or enumerated here. Already-published releases remain Apache-2.0 and forkable regardless.
 
 Elsewhere in this document, "Apache-2.0" describes the 2026-09-18 position and releases published under it. The CLA (§4) already grants the Maintainer relicensing rights, so it covers this change.
@@ -26,7 +40,7 @@ Elsewhere in this document, "Apache-2.0" describes the 2026-09-18 position and r
 Arbiter adopts an **open-core** licensing and distribution model:
 
 * **Core:** Licensed under the **Apache License, Version 2.0 (Apache-2.0)** and developed openly in this repository.
-* **Commercial ("Arbiter Pro"):** Packaged as a separate, closed-source Hex package in a dedicated private repository, distributed exclusively through an authenticated private Hex repository (the proven Oban model).
+* **Commercial ("Arbiter Pro"):** *(Distribution superseded by §0.1: a private repo shipped as a licence-keyed compiled bundle, no Hex.)* Was planned as a separate, closed-source Hex package in a dedicated private repository, distributed through an authenticated private Hex repository (the Oban model).
 
 This architecture is **explicitly not dual licensing**, and **explicitly not in-repo license zoning** (such as an `ee/` directory or per-file proprietary markers).
 
