@@ -157,7 +157,7 @@ defmodule Wardmast.Workflows.Work do
     # this call chain warms — without this, `Trackers.transition/2` raises
     # `config_missing` unless some earlier, unrelated call in the same OS
     # process happened to prime it first.
-    :ok = Trackers.prepare(task, load_workspace(task.workspace_id))
+    :ok = Trackers.prepare_with_repo(task, load_workspace(task.workspace_id), task.repo)
     Trackers.transition(task, :closed)
   end
 

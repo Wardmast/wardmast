@@ -289,8 +289,11 @@ defmodule Wardmast.Trackers.GitHub.Config do
   # workspace's `git_credentials`: the repo `override_repo/2` named, else the one
   # the `owner/repo` slug matches. Anything else uses `credentials_ref`.
   defp app_repo(%{@host_key => workspace} = raw, owner, repo) do
-    [Map.get(raw, @repo_key), "#{owner}/#{repo}"]
+    slug = "#{owner}/#{repo}"
+
+    ([Map.get(raw, @repo_key), slug] ++ forge_repo_keys(workspace, slug))
     |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.uniq()
     |> Enum.find_value(:none, fn candidate ->
       match?(
         {:ok, %GitCredential{mode: :scoped, entry: %{kind: :github_app}}},
@@ -300,6 +303,47 @@ defmodule Wardmast.Trackers.GitHub.Config do
   end
 
   defp app_repo(_raw, _owner, _repo), do: :none
+
+  # The workspace's repo keys (`repo_paths`, `git_credentials.repos`,
+  # `tracker.config.repos`) whose forge target is `slug`. The
+  # `git_credentials` entry is keyed by the repo key (`arbiter`), not the forge
+  # repo name (`wardmast/wardmast`), so a caller that only has the tracker's slug
+  # (no ticket repo) maps it back through each repo's effective merge config
+  # (`merge.config` owner/repo, deep-merged with `merge.repos.<key>.config`) and
+  # any `tracker.config.repos.<key>` owner/repo override.
+  defp forge_repo_keys(%Workspace{config: config} = workspace, slug) when is_map(config) do
+    keys =
+      [
+        config["repo_paths"],
+        get_in(config, ["git_credentials", "repos"]),
+        get_in(config, ["tracker", "config", "repos"])
+      ]
+      |> Enum.flat_map(fn
+        %{} = map -> Map.keys(map)
+        _ -> []
+      end)
+      |> Enum.uniq()
+
+    Enum.filter(keys, &forge_slug?(workspace, &1, slug))
+  end
+
+  defp forge_repo_keys(_workspace, _slug), do: []
+
+  defp forge_slug?(workspace, key, slug) do
+    tracker_override = get_in(workspace.config, ["tracker", "config", "repos", key])
+
+    [
+      get_in(Wardmast.Mergers.merge_config(workspace, key), ["config"]),
+      tracker_override
+    ]
+    |> Enum.any?(fn
+      %{"owner" => o, "repo" => r} when is_binary(o) and is_binary(r) ->
+        String.downcase("#{o}/#{r}") == String.downcase(slug)
+
+      _ ->
+        false
+    end)
+  end
 
   # With an App the personal token is optional: absent, unset or unresolvable, it
   # is simply no personal identity.

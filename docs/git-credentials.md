@@ -393,8 +393,10 @@ no personal token "issues assigned to the workspace user" becomes "open issues
 carrying `tracker.config.claim_label`" (default `arbiter`), and the list/sync
 responses say so. A repo with no `github_app` entry keeps `credentials_ref`, which
 is then required. A token that cannot be minted is an error, never a fallback to
-the personal token. See `docs/external-trackers.md` for the details and the call
-sites.
+the personal token. The entry is found by repo key (the `repo_paths` key, e.g.
+`arbiter`), which need not equal the forge repo name (`wardmast/wardmast`): the ticket's
+repo is used where there is one, else the key whose forge config targets the tracker's
+slug. See `docs/external-trackers.md` for the details and the call sites.
 
 ## The host's push and PR operations (bd-bsmkfu)
 

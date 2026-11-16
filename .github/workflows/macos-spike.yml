@@ -1,0 +1,87 @@
+# macOS assumptions spike (bd-cq5b18, replaces the dev half of bd-cmakp7).
+# Manual only: never runs on push or PR. Each probe is its own step, never
+# fails the job, and records one PASS/FAIL/INCONCLUSIVE line; the final step
+# assembles results.md and uploads it as an artifact.
+name: macOS spike
+
+on:
+  workflow_dispatch:
+    inputs:
+      otp_version:
+        description: OTP version for the static-OpenSSL build probe
+        default: "27.3.4"
+      run_otp_build:
+        description: Run the (slow) static-OpenSSL OTP build probe
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  spike:
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      RESULTS_DIR: ${{ github.workspace }}/macos-spike-results
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: launchd bootstrap / kickstart -k / bootout
+        continue-on-error: true
+        run: scripts/macos-spike/probe-launchd.sh
+
+      - name: launchd AbandonProcessGroup with a tmux child
+        continue-on-error: true
+        run: scripts/macos-spike/probe-abandon-pgroup.sh
+
+      - name: launchd KeepAlive.SuccessfulExit
+        continue-on-error: true
+        run: scripts/macos-spike/probe-keepalive.sh
+
+      - name: Install Erlang
+        id: beam
+        continue-on-error: true
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+
+      - name: LOCAL_PEERCRED / LOCAL_PEERPID via inet:getopts
+        continue-on-error: true
+        run: scripts/macos-spike/probe-peercred.sh
+
+      - name: perl -MPOSIX setsid wrapper
+        continue-on-error: true
+        run: scripts/macos-spike/probe-setsid.sh
+
+      - name: codesign after strip and tar round-trip
+        continue-on-error: true
+        run: scripts/macos-spike/probe-codesign.sh
+
+      - name: quarantine xattr (curl, httpc)
+        continue-on-error: true
+        run: scripts/macos-spike/probe-quarantine.sh
+
+      - name: cp -c clonefile on APFS
+        continue-on-error: true
+        run: scripts/macos-spike/probe-clonefile.sh
+
+      - name: static-OpenSSL OTP build (arm64)
+        if: ${{ inputs.run_otp_build }}
+        continue-on-error: true
+        timeout-minutes: 60
+        env:
+          OTP_VERSION: ${{ inputs.otp_version }}
+        run: scripts/macos-spike/probe-otp-static-ssl.sh
+
+      - name: Assemble results.md
+        if: ${{ always() }}
+        run: scripts/macos-spike/assemble.sh
+
+      - name: Upload results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-spike-results
+          path: ${{ env.RESULTS_DIR }}
+          if-no-files-found: warn

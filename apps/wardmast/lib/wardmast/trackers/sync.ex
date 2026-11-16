@@ -103,7 +103,7 @@ defmodule Wardmast.Trackers.Sync do
          already_transitioned?(issue, opts) do
       :ok
     else
-      Trackers.prepare(issue, load_workspace(issue.workspace_id))
+      Trackers.prepare_with_repo(issue, load_workspace(issue.workspace_id), issue.repo)
 
       if event == :pr_opened do
         do_pr_opened(issue, opts)
@@ -274,7 +274,7 @@ defmodule Wardmast.Trackers.Sync do
   end
 
   defp do_close_and_verify(issue) do
-    Trackers.prepare(issue, load_workspace(issue.workspace_id))
+    Trackers.prepare_with_repo(issue, load_workspace(issue.workspace_id), issue.repo)
 
     case transition_event(issue, :closed) do
       {:skipped, :upstream_past_target} -> :ok
@@ -728,7 +728,7 @@ defmodule Wardmast.Trackers.Sync do
           :ok | {:skipped, :upstream_past_target} | {:error, term()}
   def retry_lifecycle(%Issue{} = issue, event) when is_atom(event) do
     failure_dedup_forget(issue.id, event)
-    Trackers.prepare(issue, load_workspace(issue.workspace_id))
+    Trackers.prepare_with_repo(issue, load_workspace(issue.workspace_id), issue.repo)
 
     case transition_event(issue, event) do
       {:error, _} = err ->
