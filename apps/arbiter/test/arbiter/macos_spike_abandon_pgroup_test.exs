@@ -170,7 +170,10 @@ defmodule Arbiter.MacosSpikeAbandonPgroupTest do
     ]
 
     {output, status} = System.cmd("bash", [@probe], env: env, stderr_to_stdout: true)
-    result = ctx.results_dir |> Path.join("abandon-pgroup.result") |> File.read!() |> String.trim()
+
+    result =
+      ctx.results_dir |> Path.join("abandon-pgroup.result") |> File.read!() |> String.trim()
+
     {status, result, output}
   end
 
