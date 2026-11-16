@@ -432,7 +432,7 @@ defmodule WardmastCli.Cmd.Start do
   # `cannot get bootfile`. The scrub is a no-op when those vars are absent,
   # which is the normal case for `arb` run from a developer shell.
   #
-  # `cmd` is a literal at every call site ("mix", "git", "systemctl"); the
+  # `cmd` is a literal at every call site (mix, git, the Supervisor backend's service manager); the
   # variable exists only so tests can swap the runner through the process
   # dictionary. `System.cmd/3` spawns the executable directly, without a
   # shell, so the argument list cannot be reinterpreted as syntax.
