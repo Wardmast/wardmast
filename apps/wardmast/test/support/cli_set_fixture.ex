@@ -15,8 +15,8 @@ defmodule Wardmast.Worker.CliSetFixture do
   @platform "linux-x64"
 
   @doc """
-  Fill `<root>/cli-cache` and return the `CliSet` options. `:claude`, `:codex`
-  and `:arb` are the versions to cache (`nil` skips the CLI); `:content`
+  Fill `<root>/cli-cache` and return the `CliSet` options. `:claude`, `:codex`,
+  `:agy` (default `nil`) and `:arb` are the versions to cache (`nil` skips the CLI); `:content`
   (`%{name => binary}`) overrides the main file's bytes.
   """
   @spec put(Path.t(), keyword()) :: keyword()
@@ -25,6 +25,8 @@ defmodule Wardmast.Worker.CliSetFixture do
     claude = Keyword.get(opts, :claude, "2.1.310")
     codex = Keyword.get(opts, :codex, "0.130.0")
     arb = Keyword.get(opts, :arb, "1.2.3")
+    # agy is pinned by the fetcher's code (1.5.9), not by `cli_pins`; absent unless asked for.
+    agy = Keyword.get(opts, :agy)
     content = Keyword.get(opts, :content, %{})
     cache_opts = [root: cache, platform: @platform]
 
@@ -49,6 +51,16 @@ defmodule Wardmast.Worker.CliSetFixture do
           {"codex-resources/bwrap", "bwrap-binary", 0o755}
         ],
         "bin/codex",
+        cache_opts
+      )
+    end
+
+    if agy do
+      store(
+        "agy",
+        agy,
+        [{"agy", Map.get(content, "agy", "agy-binary-" <> agy), 0o755}],
+        "agy",
         cache_opts
       )
     end
