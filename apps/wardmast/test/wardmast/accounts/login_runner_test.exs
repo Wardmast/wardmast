@@ -500,7 +500,9 @@ defmodule Wardmast.Accounts.LoginRunnerTest do
 
       # the "restart": the runner process is gone, its tmux server is not
       pid =
-        GenServer.whereis({:via, Registry, {Wardmast.Accounts.LoginRunner.Registry, {:login, id}}})
+        GenServer.whereis(
+          {:via, Registry, {Wardmast.Accounts.LoginRunner.Registry, {:login, id}}}
+        )
 
       ref = Process.monitor(pid)
       Process.exit(pid, :kill)
@@ -556,7 +558,9 @@ defmodule Wardmast.Accounts.LoginRunnerTest do
       await_status(id, :awaiting_user)
 
       pid =
-        GenServer.whereis({:via, Registry, {Wardmast.Accounts.LoginRunner.Registry, {:login, id}}})
+        GenServer.whereis(
+          {:via, Registry, {Wardmast.Accounts.LoginRunner.Registry, {:login, id}}}
+        )
 
       dump = inspect(:sys.get_status(pid), limit: :infinity)
       refute dump =~ FakeLoginCli.codex_code()

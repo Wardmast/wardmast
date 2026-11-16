@@ -141,7 +141,9 @@ defmodule Wardmast.Agents.CredentialWatchdogTest do
       first_reason = %{auth_expired_reason() | summary: "2 consecutive 401s from the usage poll"}
       second_reason = %{auth_expired_reason() | summary: "7 consecutive 401s from the usage poll"}
 
-      :ok = CredentialWatchdog.mark_expired(Wardmast.Agents.Claude, first_reason, pid, :usage_poll)
+      :ok =
+        CredentialWatchdog.mark_expired(Wardmast.Agents.Claude, first_reason, pid, :usage_poll)
+
       :sys.get_state(pid)
 
       :ok =

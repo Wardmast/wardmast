@@ -421,7 +421,9 @@ defmodule WardmastCli.Main do
         WardmastCli.Output.die("unknown option #{flag_label(flag)} for arb #{entry.name}")
 
       flag != nil and is_nil(ws_val) ->
-        WardmastCli.Output.die("option #{flag_label(flag)} for arb #{entry.name} requires a value")
+        WardmastCli.Output.die(
+          "option #{flag_label(flag)} for arb #{entry.name} requires a value"
+        )
 
       true ->
         :ok

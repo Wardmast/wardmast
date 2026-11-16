@@ -84,7 +84,8 @@ defmodule Wardmast.Worker.WatchdogConflictReviewTest do
         mr_ref: mr_ref,
         head_sha: fx.reviewed,
         base_ref: "main",
-        net_diff_id: Wardmast.Mergers.NetDiff.fingerprint_local(fx.clone, "#{mb}..#{fx.reviewed}"),
+        net_diff_id:
+          Wardmast.Mergers.NetDiff.fingerprint_local(fx.clone, "#{mb}..#{fx.reviewed}"),
         kind: :reviewed,
         source: :review_gate
       })

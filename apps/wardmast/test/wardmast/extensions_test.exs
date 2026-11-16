@@ -71,7 +71,8 @@ defmodule WardmastProFake.Extension do
       {:agent, "acme", WardmastProFake.Agent},
       {:routing_policy, "acme_fixed", WardmastProFake.RoutingPolicy},
       {:quota_gate, "acme_budget", WardmastProFake.QuotaGate},
-      {:quota_snapshot, Atom.to_string(WardmastProFake.AcmeQuota), WardmastProFake.AcmeQuotaSource}
+      {:quota_snapshot, Atom.to_string(WardmastProFake.AcmeQuota),
+       WardmastProFake.AcmeQuotaSource}
     ]
   end
 end
@@ -184,7 +185,9 @@ defmodule Wardmast.ExtensionsTest do
                Extensions.fetch(:quota_snapshot, Wardmast.Quota.AnthropicQuota)
 
       assert {:ok, Snapshot.Codex} = Extensions.fetch(:quota_snapshot, Wardmast.Quota.CodexQuota)
-      assert {:ok, Snapshot.Google} = Extensions.fetch(:quota_snapshot, Wardmast.Quota.GoogleQuota)
+
+      assert {:ok, Snapshot.Google} =
+               Extensions.fetch(:quota_snapshot, Wardmast.Quota.GoogleQuota)
     end
 
     test "in-tree quota rows still project through the registry" do

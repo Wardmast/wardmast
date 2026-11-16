@@ -430,7 +430,9 @@ defmodule WardmastWeb.SessionIndexLiveTest do
       :meck.new(WardmastWeb.SessionUsage, [:passthrough, :no_link])
       on_exit(fn -> :meck.unload(WardmastWeb.SessionUsage) end)
 
-      :meck.expect(WardmastWeb.SessionUsage, :for_sessions, fn _sessions -> raise "ledger down" end)
+      :meck.expect(WardmastWeb.SessionUsage, :for_sessions, fn _sessions ->
+        raise "ledger down"
+      end)
 
       {:ok, view, _html} = live(conn, ~p"/sessions")
       render_async(view)

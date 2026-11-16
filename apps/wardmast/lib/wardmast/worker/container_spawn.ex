@@ -545,7 +545,11 @@ defmodule Wardmast.Worker.ContainerSpawn do
   # compile for itself, as it would without the cache. `nil` means no cache.
   defp seed_deps(opts, worktree, image, home) do
     seed =
-      case Keyword.get(opts, :deps_cache, Application.get_env(:wardmast, :worker_deps_cache, true)) do
+      case Keyword.get(
+             opts,
+             :deps_cache,
+             Application.get_env(:wardmast, :worker_deps_cache, true)
+           ) do
         enabled when enabled in [false, nil] ->
           nil
 

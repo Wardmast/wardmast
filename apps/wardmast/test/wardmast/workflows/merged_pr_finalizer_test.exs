@@ -17,7 +17,9 @@ defmodule Wardmast.Workflows.MergedPRFinalizerTest do
     use GenServer
 
     def start_link(task_id, snapshot) do
-      GenServer.start_link(__MODULE__, snapshot, name: Wardmast.Worker.Registry.via_tuple(task_id))
+      GenServer.start_link(__MODULE__, snapshot,
+        name: Wardmast.Worker.Registry.via_tuple(task_id)
+      )
     end
 
     @impl true

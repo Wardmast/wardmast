@@ -111,7 +111,13 @@ defmodule Wardmast.Loop.CanaryTickerTest do
 
       assert :ok = CanaryTicker.poll(start_ticker!())
 
-      assert [%Wardmast.Guardrails.TrustRecord{provider: "codex", model: "gpt-5.1-codex", runs: 1}] =
+      assert [
+               %Wardmast.Guardrails.TrustRecord{
+                 provider: "codex",
+                 model: "gpt-5.1-codex",
+                 runs: 1
+               }
+             ] =
                Wardmast.Loop.Trust.list()
     end
 

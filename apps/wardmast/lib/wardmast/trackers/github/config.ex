@@ -225,7 +225,8 @@ defmodule Wardmast.Trackers.GitHub.Config do
   """
   @spec active_repo_slug() :: String.t() | nil
   def active_repo_slug do
-    raw = Process.get(@pdict_key) || Application.get_env(:wardmast, :github_tracker_default_config)
+    raw =
+      Process.get(@pdict_key) || Application.get_env(:wardmast, :github_tracker_default_config)
 
     case raw do
       %{"owner" => owner, "repo" => repo} when is_binary(owner) and is_binary(repo) ->

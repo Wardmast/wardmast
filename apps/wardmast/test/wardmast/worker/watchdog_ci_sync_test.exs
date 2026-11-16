@@ -411,7 +411,10 @@ defmodule Wardmast.Worker.WatchdogCiSyncTest do
       wait_until(fn -> :sys.get_state(wpid).park_reason == :ci_failed end)
 
       wait_until(fn ->
-        match?(%{reason: "ci_failed"}, Wardmast.Mergers.PendingMerge.get(Ash.get!(Issue, task.id)))
+        match?(
+          %{reason: "ci_failed"},
+          Wardmast.Mergers.PendingMerge.get(Ash.get!(Issue, task.id))
+        )
       end)
 
       assert %{mr_ref: "!ex1", escalated_at: nil} =

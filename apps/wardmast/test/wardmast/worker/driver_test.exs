@@ -780,7 +780,9 @@ defmodule Wardmast.Worker.DriverTest do
     for {label, fail?} <- [{"successful completion", false}, {"a failed worker", true}] do
       test "removes a private clone and its pins on #{label}", %{ws: ws, repo: repo} do
         {:ok, clone} =
-          Wardmast.Worker.Worktree.create(repo, "feature/dt-clone", "main", layout: :private_clone)
+          Wardmast.Worker.Worktree.create(repo, "feature/dt-clone", "main",
+            layout: :private_clone
+          )
 
         pins = Wardmast.Worker.PrivateClone.pin_prefix(Path.basename(clone))
         {:ok, task} = Ash.create(Issue, %{title: "cw-clone", workspace_id: ws.id})

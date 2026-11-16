@@ -41,7 +41,8 @@ defmodule Wardmast.Quota.SpendCacheTest do
   end
 
   test "account_totals/0 and workspace_totals/0 memoize the aggregate until invalidate/0" do
-    account = Ash.create!(Wardmast.Accounts.ProviderAccount, %{provider: :claude, slug: "cache-a"})
+    account =
+      Ash.create!(Wardmast.Accounts.ProviderAccount, %{provider: :claude, slug: "cache-a"})
 
     Ash.create!(Event, %{
       step: :work,
@@ -61,7 +62,8 @@ defmodule Wardmast.Quota.SpendCacheTest do
   end
 
   test "invalidate/0 forces the next read to recompute" do
-    account = Ash.create!(Wardmast.Accounts.ProviderAccount, %{provider: :claude, slug: "cache-b"})
+    account =
+      Ash.create!(Wardmast.Accounts.ProviderAccount, %{provider: :claude, slug: "cache-b"})
 
     Ash.create!(Event, %{
       step: :work,
@@ -78,7 +80,8 @@ defmodule Wardmast.Quota.SpendCacheTest do
   end
 
   test "inserting a usage event invalidates the cache automatically (bd-4p6pw7)" do
-    account = Ash.create!(Wardmast.Accounts.ProviderAccount, %{provider: :claude, slug: "cache-c"})
+    account =
+      Ash.create!(Wardmast.Accounts.ProviderAccount, %{provider: :claude, slug: "cache-c"})
 
     # Warm the cache before the event this test cares about exists.
     assert SpendCache.account_totals()[account.id] == nil
@@ -128,7 +131,8 @@ defmodule Wardmast.Quota.SpendCacheTest do
   test "quota-hook-shaped fixture: pre-fix per-entity scans vs. the cached aggregate" do
     accounts =
       for n <- 1..10,
-          do: Ash.create!(Wardmast.Accounts.ProviderAccount, %{provider: :claude, slug: "fx-#{n}"})
+          do:
+            Ash.create!(Wardmast.Accounts.ProviderAccount, %{provider: :claude, slug: "fx-#{n}"})
 
     workspaces = for n <- 1..3, do: Ash.create!(Wardmast.Tasks.Workspace, %{name: "fx-ws-#{n}"})
 

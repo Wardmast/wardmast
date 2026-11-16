@@ -29,7 +29,12 @@ defmodule Wardmast.Boot.ResumeGateTest do
 
   test "opening tells a running autopilot to plan" do
     {:ok, pid} =
-      Wardmast.Board.Autopilot.start_link(name: nil, paused: true, interval_ms: :never, topics: [])
+      Wardmast.Board.Autopilot.start_link(
+        name: nil,
+        paused: true,
+        interval_ms: :never,
+        topics: []
+      )
 
     ResumeGate.close()
     assert :ok = ResumeGate.sweep(fn -> :ok end)

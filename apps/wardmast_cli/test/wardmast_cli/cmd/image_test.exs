@@ -118,7 +118,10 @@ defmodule WardmastCli.Cmd.ImageTest do
 
     test "--json prints the response body" do
       stub_post("/api/images/build", @built, 200)
-      {out, _err, 0} = capture(fn -> WardmastCli.Cmd.Image.run(["build", "arbiter", "--json"]) end)
+
+      {out, _err, 0} =
+        capture(fn -> WardmastCli.Cmd.Image.run(["build", "arbiter", "--json"]) end)
+
       assert Jason.decode!(out) == @built
     end
   end

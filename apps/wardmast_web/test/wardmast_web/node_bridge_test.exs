@@ -70,7 +70,8 @@ defmodule WardmastWeb.NodeBridgeTest do
     end)
   end
 
-  defp limits(overrides), do: put_env_restoring(:wardmast, Wardmast.Nodes.Bridge, limits: overrides)
+  defp limits(overrides),
+    do: put_env_restoring(:wardmast, Wardmast.Nodes.Bridge, limits: overrides)
 
   # A TCP server on loopback that echoes everything back.
   defp echo_server do

@@ -123,7 +123,14 @@ defmodule Wardmast.Workflows.PRPatrol do
   alias Wardmast.Tasks.IssueRepo
   alias Wardmast.Worker
   alias Wardmast.Worker.Dispatch
-  alias Wardmast.Workflows.{CIFailureFollowUp, PatrolRepoScope, PatrolServer, ReviewThreadFollowUp}
+
+  alias Wardmast.Workflows.{
+    CIFailureFollowUp,
+    PatrolRepoScope,
+    PatrolServer,
+    ReviewThreadFollowUp
+  }
+
   alias Wardmast.Workflows.PRPatrolSupervisor
   require Ash.Query
   require Logger
@@ -695,7 +702,12 @@ defmodule Wardmast.Workflows.PRPatrol do
 
       # RW8: no node free, or the primary's own cap: held like a full account.
       {:error, {:no_node_capacity, info}} ->
-        queue_for_autopilot(task, pr_number, state, Wardmast.Nodes.Placement.refusal_message(info))
+        queue_for_autopilot(
+          task,
+          pr_number,
+          state,
+          Wardmast.Nodes.Placement.refusal_message(info)
+        )
 
       {:error, reason} ->
         record_dispatch_failure(task, pr_number, state, reason)

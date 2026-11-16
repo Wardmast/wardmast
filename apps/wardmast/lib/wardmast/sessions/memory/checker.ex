@@ -102,7 +102,10 @@ defmodule Wardmast.Sessions.Memory.Checker do
         check_contents(root, basename, contents, opts, summary)
 
       {:error, reason} ->
-        Logger.warning("Wardmast.Sessions.Memory.Checker: cannot read #{path}: #{inspect(reason)}")
+        Logger.warning(
+          "Wardmast.Sessions.Memory.Checker: cannot read #{path}: #{inspect(reason)}"
+        )
+
         add(summary, :failed, basename)
     end
   end

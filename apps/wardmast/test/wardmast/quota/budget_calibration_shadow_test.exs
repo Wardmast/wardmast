@@ -126,7 +126,8 @@ defmodule Wardmast.Quota.BudgetCalibrationShadowTest do
 
     output =
       ExUnit.CaptureIO.capture_io(fn ->
-        assert [%{pool: "codex", window: "5h"}] = Wardmast.Release.budget_calibration(start: false)
+        assert [%{pool: "codex", window: "5h"}] =
+                 Wardmast.Release.budget_calibration(start: false)
       end)
 
     assert output =~ "codex / 5h"

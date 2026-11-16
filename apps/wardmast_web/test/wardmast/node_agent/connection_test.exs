@@ -460,7 +460,9 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
       :ok =
         :erl_tar.create(
           String.to_charlist(out),
-          [{~c"arbiter/bin/wardmast", String.to_charlist(Path.join(dir, "arbiter/bin/wardmast"))}],
+          [
+            {~c"arbiter/bin/wardmast", String.to_charlist(Path.join(dir, "arbiter/bin/wardmast"))}
+          ],
           [:compressed]
         )
 

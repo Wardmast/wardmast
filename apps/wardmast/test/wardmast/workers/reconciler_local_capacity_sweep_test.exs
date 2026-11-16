@@ -45,7 +45,9 @@ defmodule Wardmast.Workers.ReconcilerLocalCapacitySweepTest do
         )
       end
 
-      Wardmast.Workers.Reconciler.reconcile_resumable_tasks(Keyword.put(opts, :resume_fun, resume))
+      Wardmast.Workers.Reconciler.reconcile_resumable_tasks(
+        Keyword.put(opts, :resume_fun, resume)
+      )
     end
   end
 

@@ -63,7 +63,8 @@ defmodule Wardmast.Quota.Snapshot do
       codex_message: Quota.codex_absence_message(codex),
       # bd-1fpjgx: live off `CredentialWatchdog`'s held state, not the
       # persisted snapshot.
-      codex_credentials_expired: Wardmast.Agents.CredentialWatchdog.expired?(Wardmast.Agents.Codex),
+      codex_credentials_expired:
+        Wardmast.Agents.CredentialWatchdog.expired?(Wardmast.Agents.Codex),
       antigravity: Quota.CloudCode.serialize_latest(accounts["antigravity"], "antigravity"),
       gemini_credentials_expired:
         Wardmast.Agents.CredentialWatchdog.expired?(Wardmast.Agents.Gemini),
@@ -102,7 +103,8 @@ defmodule Wardmast.Quota.Snapshot do
       budget: budget([account.id]),
       codex: codex,
       codex_message: Quota.codex_absence_message(codex),
-      codex_credentials_expired: Wardmast.Agents.CredentialWatchdog.expired?(Wardmast.Agents.Codex),
+      codex_credentials_expired:
+        Wardmast.Agents.CredentialWatchdog.expired?(Wardmast.Agents.Codex),
       antigravity:
         if(provider == "antigravity",
           do: Quota.CloudCode.serialize_latest(account.id, "antigravity")

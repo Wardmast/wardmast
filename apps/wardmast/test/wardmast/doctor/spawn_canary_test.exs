@@ -128,7 +128,9 @@ defmodule Wardmast.Doctor.SpawnCanaryTest do
     test "a provider paused on its account (grok:default) is n/a and never spawned" do
       sandbox = provision!()
       ws = workspace!(["claude", "grok"])
-      account = Ash.create!(Wardmast.Accounts.ProviderAccount, %{provider: :grok, slug: "default"})
+
+      account =
+        Ash.create!(Wardmast.Accounts.ProviderAccount, %{provider: :grok, slug: "default"})
 
       Ash.create!(Wardmast.Accounts.WorkspaceProviderAccount, %{
         workspace_id: ws.id,

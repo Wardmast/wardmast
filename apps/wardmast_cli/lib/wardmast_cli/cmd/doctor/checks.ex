@@ -771,7 +771,8 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
           name: "agy ssh transport",
           status: :warn,
           detail: "git over ssh inside the jail may fail: #{message}",
-          hint: Map.get(ssh, "fix") || "See Wardmast.Worker.Jail.ssh_shadow_config/0 (bd-5d5mrs).",
+          hint:
+            Map.get(ssh, "fix") || "See Wardmast.Worker.Jail.ssh_shadow_config/0 (bd-5d5mrs).",
           blocks_readiness: false
         }
 

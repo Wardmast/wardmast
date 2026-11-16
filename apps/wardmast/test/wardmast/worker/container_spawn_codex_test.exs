@@ -147,7 +147,9 @@ defmodule Wardmast.Worker.ContainerSpawnCodexTest do
 
   describe "forge credential (bd-1vhect)" do
     setup do
-      Application.put_env(:wardmast, :worker_container_runner, fn _cmd, _args, _opts -> {"", 0} end)
+      Application.put_env(:wardmast, :worker_container_runner, fn _cmd, _args, _opts ->
+        {"", 0}
+      end)
 
       on_exit(fn -> Application.delete_env(:wardmast, :worker_container_runner) end)
       :ok

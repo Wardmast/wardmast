@@ -60,7 +60,9 @@ defmodule Wardmast.Boot.ReconcileSweepTest do
         {:ok, %{task_id: id}}
       end
 
-      Wardmast.Workers.Reconciler.reconcile_resumable_tasks(Keyword.put(opts, :resume_fun, resume))
+      Wardmast.Workers.Reconciler.reconcile_resumable_tasks(
+        Keyword.put(opts, :resume_fun, resume)
+      )
     end
   end
 

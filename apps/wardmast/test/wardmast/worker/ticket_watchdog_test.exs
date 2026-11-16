@@ -9,7 +9,9 @@ defmodule Wardmast.Worker.TicketWatchdogTest.NoAgentFixPass do
   @impl true
   def dispatch(args),
     do:
-      Wardmast.Workflows.MergeQueue.FixPassDispatcher.dispatch(Map.put(args, :start_claude, false))
+      Wardmast.Workflows.MergeQueue.FixPassDispatcher.dispatch(
+        Map.put(args, :start_claude, false)
+      )
 end
 
 defmodule Wardmast.Worker.TicketWatchdogTest.NoAgentConflict do

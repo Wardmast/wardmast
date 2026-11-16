@@ -387,7 +387,9 @@ defmodule Wardmast.Worker.PodmanReadiness do
   end
 
   defp bridge_probe(opts, image) do
-    dir = Path.join(Wardmast.Config.Paths.socket_root(), "pp#{System.unique_integer([:positive])}")
+    dir =
+      Path.join(Wardmast.Config.Paths.socket_root(), "pp#{System.unique_integer([:positive])}")
+
     sock = Path.join(dir, "bridge.sock")
 
     try do

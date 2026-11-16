@@ -246,7 +246,9 @@ defmodule Wardmast.Quota.CloudCode do
          {:ok, row} <- upsert(account_id, provider, snapshot) do
       # A probe that captured nothing re-stores the last good reading (and its
       # old timestamp); recording it would append a fake duplicate sample.
-      if representative(snapshot) != {nil, nil}, do: Wardmast.Quota.History.record(account_id, row)
+      if representative(snapshot) != {nil, nil},
+        do: Wardmast.Quota.History.record(account_id, row)
+
       broadcast(account_id, row)
       snapshot
     else

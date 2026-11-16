@@ -75,8 +75,11 @@ defmodule WardmastCli.ArgParser do
     digits = String.replace(value, ~r/^[Dd]/, "")
 
     case Integer.parse(digits) do
-      {n, ""} when n in 0..5 -> n
-      _ -> WardmastCli.Output.die("invalid --difficulty #{inspect(value)} (must be 0..5 / D0..D5)")
+      {n, ""} when n in 0..5 ->
+        n
+
+      _ ->
+        WardmastCli.Output.die("invalid --difficulty #{inspect(value)} (must be 0..5 / D0..D5)")
     end
   end
 

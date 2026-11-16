@@ -519,8 +519,8 @@ defmodule WardmastWeb.ReviewIndexLiveTest do
       end)
 
       :meck.expect(WardmastWeb.ReviewIndexLive, :load_records_page, fn workspace_id,
-                                                                      status,
-                                                                      page ->
+                                                                       status,
+                                                                       page ->
         send(test, :records_read)
         :meck.passthrough([workspace_id, status, page])
       end)
@@ -542,8 +542,8 @@ defmodule WardmastWeb.ReviewIndexLiveTest do
       test = self()
 
       :meck.expect(WardmastWeb.ReviewIndexLive, :load_records_page, fn workspace_id,
-                                                                      status,
-                                                                      page ->
+                                                                       status,
+                                                                       page ->
         result = :meck.passthrough([workspace_id, status, page])
         send(test, {:loading_records, self()})
 
@@ -580,8 +580,8 @@ defmodule WardmastWeb.ReviewIndexLiveTest do
       record!(ws, %{pr: "behind-the-error"})
 
       :meck.expect(WardmastWeb.ReviewIndexLive, :load_records_page, fn _workspace_id,
-                                                                      _status,
-                                                                      _page ->
+                                                                       _status,
+                                                                       _page ->
         raise "database is locked"
       end)
 
@@ -594,8 +594,8 @@ defmodule WardmastWeb.ReviewIndexLiveTest do
       refute has_element?(view, "#reviews-loading")
 
       :meck.expect(WardmastWeb.ReviewIndexLive, :load_records_page, fn workspace_id,
-                                                                      status,
-                                                                      page ->
+                                                                       status,
+                                                                       page ->
         :meck.passthrough([workspace_id, status, page])
       end)
 

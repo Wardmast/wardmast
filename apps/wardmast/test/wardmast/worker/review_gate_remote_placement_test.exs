@@ -373,7 +373,11 @@ defmodule Wardmast.Worker.ReviewGateRemotePlacementTest do
       :sys.replace_state(gate, &%{&1 | command: [@probe, ctx.log]})
       :sys.replace_state(gate, &%{&1 | placement_opts: placement([])})
 
-      Phoenix.PubSub.broadcast(Wardmast.PubSub, "worker:" <> lost_id, {:worker_node_lost, lost_id})
+      Phoenix.PubSub.broadcast(
+        Wardmast.PubSub,
+        "worker:" <> lost_id,
+        {:worker_node_lost, lost_id}
+      )
 
       assert_gate_reports(gate, rig)
       assert passes(ctx) == 2
@@ -405,7 +409,11 @@ defmodule Wardmast.Worker.ReviewGateRemotePlacementTest do
         %{s | command: [@probe, ctx.log], placement_opts: placement([])}
       end)
 
-      Phoenix.PubSub.broadcast(Wardmast.PubSub, "worker:" <> lost_id, {:worker_node_lost, lost_id})
+      Phoenix.PubSub.broadcast(
+        Wardmast.PubSub,
+        "worker:" <> lost_id,
+        {:worker_node_lost, lost_id}
+      )
 
       wait_until(fn -> :sys.get_state(gate).local_hold != nil end)
       assert passes(ctx) == 1

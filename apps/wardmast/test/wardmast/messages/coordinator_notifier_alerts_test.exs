@@ -168,7 +168,10 @@ defmodule Wardmast.Messages.CoordinatorNotifierAlertsTest do
       alert = only_alert(:credential_expired)
 
       assert :ok =
-               CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Wardmast.Agents.Claude)
+               CoordinatorNotifier.credential_restored(
+                 %{workspace_id: ws},
+                 Wardmast.Agents.Claude
+               )
 
       assert Ash.get!(Wardmast.Alerts.SystemAlert, alert.id).cleared_at
       assert Alerts.active() == []
@@ -228,7 +231,10 @@ defmodule Wardmast.Messages.CoordinatorNotifierAlertsTest do
       ws = uniq("ws")
 
       assert :ok =
-               CoordinatorNotifier.credential_restored(%{workspace_id: ws}, Wardmast.Agents.Claude)
+               CoordinatorNotifier.credential_restored(
+                 %{workspace_id: ws},
+                 Wardmast.Agents.Claude
+               )
 
       assert Alerts.active() == []
       no_mail(ws)

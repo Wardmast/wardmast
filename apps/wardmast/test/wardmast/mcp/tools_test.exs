@@ -3470,7 +3470,10 @@ defmodule Wardmast.MCP.ToolsTest do
                Tools.installation_config_get(ctx.worker, %{"key" => "quota_providers_hidden"})
 
       assert settings.quota_providers_shown == ["antigravity"]
-      assert Wardmast.Quota.Visibility.rule([], ["antigravity"], ["claude"], []) == ["antigravity"]
+
+      assert Wardmast.Quota.Visibility.rule([], ["antigravity"], ["claude"], []) == [
+               "antigravity"
+             ]
 
       assert {:ok, %{value: nil}} =
                Tools.installation_config_set(ctx.coordinator, %{

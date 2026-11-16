@@ -295,7 +295,9 @@ defmodule Wardmast.Agents.CodexTest do
 
       assert "mcp_servers.#{name}.url=#{inspect(Wardmast.MCP.server_url())}" in overrides
       assert "mcp_servers.#{name}.bearer_token_env_var=\"ARBITER_MCP_TOKEN\"" in overrides
+
       assert "mcp_servers.#{name}.tool_timeout_sec=#{Wardmast.MCP.tool_timeout_sec()}" in overrides
+
       # the token itself never lands in argv
       refute Enum.any?(argv, &(is_binary(&1) and &1 =~ "tok\""))
     end
@@ -1221,7 +1223,9 @@ defmodule Wardmast.Agents.CodexTest do
       name = Wardmast.MCP.server_name()
       assert "mcp_servers.#{name}.url=#{inspect(Wardmast.MCP.server_url())}" in overrides
       assert "mcp_servers.#{name}.bearer_token_env_var=\"ARBITER_MCP_TOKEN\"" in overrides
+
       assert "mcp_servers.#{name}.tool_timeout_sec=#{Wardmast.MCP.tool_timeout_sec()}" in overrides
+
       refute Enum.any?(argv, &(is_binary(&1) and &1 =~ "tok\""))
     end
 

@@ -1221,7 +1221,11 @@ defmodule WardmastWeb.ProvidersLive do
                       {@credential_error}
                     </p>
                     <div class="flex gap-2">
-                      <WardmastWeb.CoreComponents.Core.button type="submit" variant="primary" size="sm">
+                      <WardmastWeb.CoreComponents.Core.button
+                        type="submit"
+                        variant="primary"
+                        size="sm"
+                      >
                         Store credential
                       </WardmastWeb.CoreComponents.Core.button>
                       <WardmastWeb.CoreComponents.Core.button

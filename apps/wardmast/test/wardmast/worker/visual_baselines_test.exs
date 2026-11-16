@@ -11,7 +11,11 @@ defmodule Wardmast.Worker.VisualBaselinesTest do
     # Reads what to answer from the :visual_fake_forge app env, so the
     # adapter's calls are observable from the test.
     def ci_job_artifacts(mr_ref, job, opts) do
-      send(Application.get_env(:wardmast, :visual_fake_forge_pid), {:artifacts, mr_ref, job, opts})
+      send(
+        Application.get_env(:wardmast, :visual_fake_forge_pid),
+        {:artifacts, mr_ref, job, opts}
+      )
+
       Application.get_env(:wardmast, :visual_fake_forge_artifacts)
     end
 

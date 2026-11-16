@@ -263,7 +263,11 @@ defmodule WardmastWeb.SettingsLiveTest do
       assert has_element?(view, "#about-version", version.version)
       assert has_element?(view, "#about-version", version.sha)
 
-      assert has_element?(view, "#about-path-worktree_root", Wardmast.Config.Paths.worktree_root())
+      assert has_element?(
+               view,
+               "#about-path-worktree_root",
+               Wardmast.Config.Paths.worktree_root()
+             )
 
       assert has_element?(
                view,
@@ -271,7 +275,12 @@ defmodule WardmastWeb.SettingsLiveTest do
                Wardmast.Config.Paths.output_log_root()
              )
 
-      assert has_element?(view, "#about-path-sessions_root", Wardmast.Config.Paths.sessions_root())
+      assert has_element?(
+               view,
+               "#about-path-sessions_root",
+               Wardmast.Config.Paths.sessions_root()
+             )
+
       assert has_element?(view, "#about-bind-address")
     end
 

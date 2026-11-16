@@ -2912,7 +2912,10 @@ defmodule Wardmast.Worker do
 
     session =
       session_config
-      |> maybe_put(:remote_memory_cap, Wardmast.Worker.ClaudeSession.remote_memory_cap(spawn_args))
+      |> maybe_put(
+        :remote_memory_cap,
+        Wardmast.Worker.ClaudeSession.remote_memory_cap(spawn_args)
+      )
       |> Map.put(:port, port)
       |> Map.put(:scope, scope)
       |> Map.put(:prompt_tmpfile, get_prompt_tmpfile(adapter, spawn_args.argv))
@@ -4032,7 +4035,9 @@ defmodule Wardmast.Worker do
     {:ok, report} =
       Wardmast.Worker.SessionArchive.archive_run(run,
         redact_values:
-          Enum.uniq(Wardmast.Worker.WorkerEnv.secret_values(state.task_id) ++ state.archive_redact)
+          Enum.uniq(
+            Wardmast.Worker.WorkerEnv.secret_values(state.task_id) ++ state.archive_redact
+          )
       )
 
     case report.status do
@@ -4085,7 +4090,8 @@ defmodule Wardmast.Worker do
   defp persist_composed_prompt(%State{run_id: run_id, task_id: task_id}, session_config) do
     case Map.get(session_config, :composed_prompt) do
       prompt when is_binary(prompt) and prompt != "" ->
-        redacted = Wardmast.Redaction.redact(prompt, Map.get(session_config, :redact_values) || [])
+        redacted =
+          Wardmast.Redaction.redact(prompt, Map.get(session_config, :redact_values) || [])
 
         case Wardmast.Worker.PromptLog.write(run_id, redacted) do
           :ok ->
@@ -4491,7 +4497,11 @@ defmodule Wardmast.Worker do
   # `:permission_requested` cause the request already raised, and that cause is
   # what tells the operator a resume cannot work until they act.
   defp notify_stopped(%State{} = state, %{category: :awaiting_operator} = reason) do
-    case Wardmast.Tasks.Attention.raise_cause(state.task_id, :permission_requested, reason.summary) do
+    case Wardmast.Tasks.Attention.raise_cause(
+           state.task_id,
+           :permission_requested,
+           reason.summary
+         ) do
       {:ok, _} ->
         :ok
 
@@ -4780,7 +4790,8 @@ defmodule Wardmast.Worker do
     state
   end
 
-  defp remote_pass_grace_ms, do: Application.get_env(:wardmast, :remote_pass_exit_grace_ms, 60_000)
+  defp remote_pass_grace_ms,
+    do: Application.get_env(:wardmast, :remote_pass_exit_grace_ms, 60_000)
 
   # bd-741sid: the pass is done and its fix is on the PR's branch. The ticket
   # goes back to Merging and the run ends; the ticket's Watchdog, which kept
@@ -5888,7 +5899,12 @@ defmodule Wardmast.Worker do
 
       true ->
         nudge =
-          Wardmast.Worker.PrepushCheck.nudge_prompt(state.task_id, prepush_view(meta), detail, ctx)
+          Wardmast.Worker.PrepushCheck.nudge_prompt(
+            state.task_id,
+            prepush_view(meta),
+            detail,
+            ctx
+          )
 
         case respawn_with_nudge(state, nudge,
                attempts_key: :prepush_nudge_attempts,
@@ -7478,7 +7494,8 @@ defmodule Wardmast.Worker do
 
   defp commit_gate_failure_metadata(:secret_in_commit),
     do:
-      {:secret_in_commit, "Worker committed an Wardmast-injected agent-config (bearer-token) file"}
+      {:secret_in_commit,
+       "Worker committed an Wardmast-injected agent-config (bearer-token) file"}
 
   # Pre-existing complexity 16 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new

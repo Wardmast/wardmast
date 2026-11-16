@@ -27,7 +27,10 @@ defmodule WardmastWeb.Api.EventControllerTest do
   defp extend_keepalive(ms) do
     previous = Application.get_env(:wardmast_web, WardmastWeb.Api.EventController, [])
     Application.put_env(:wardmast_web, WardmastWeb.Api.EventController, keepalive_ms: ms)
-    on_exit(fn -> Application.put_env(:wardmast_web, WardmastWeb.Api.EventController, previous) end)
+
+    on_exit(fn ->
+      Application.put_env(:wardmast_web, WardmastWeb.Api.EventController, previous)
+    end)
   end
 
   # ---- auth ---------------------------------------------------------------

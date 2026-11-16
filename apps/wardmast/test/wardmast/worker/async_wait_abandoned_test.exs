@@ -273,12 +273,26 @@ defmodule Wardmast.Worker.AsyncWaitAbandonedTest do
       # This is what discarded the correct-but-uncommitted fix on emr-20e8kp:
       # the pass's remaining job was *verification*, which legitimately changes
       # no files, so the fingerprint is identical across the resume.
-      assert Wardmast.Worker.resume_decision(:async_wait_abandoned, "sess-1", 1, 3, "fp-a", "fp-a") ==
+      assert Wardmast.Worker.resume_decision(
+               :async_wait_abandoned,
+               "sess-1",
+               1,
+               3,
+               "fp-a",
+               "fp-a"
+             ) ==
                :resume
     end
 
     test "it is still bounded by the hard attempt cap" do
-      assert Wardmast.Worker.resume_decision(:async_wait_abandoned, "sess-1", 3, 3, "fp-a", "fp-a") ==
+      assert Wardmast.Worker.resume_decision(
+               :async_wait_abandoned,
+               "sess-1",
+               3,
+               3,
+               "fp-a",
+               "fp-a"
+             ) ==
                {:fail, :cap_exhausted}
     end
 

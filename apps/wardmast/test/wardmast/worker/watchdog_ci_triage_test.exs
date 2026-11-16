@@ -220,7 +220,11 @@ defmodule Wardmast.Worker.WatchdogCiTriageTest do
       assert StubFixPassDispatcher.call_count() == 0
 
       # The 2nd re-run ends red on yet another set: the budget (2) is spent.
-      StubMerger.set_failing_checks("!tu4", untouched_test("mix test", "test/wardmast/x_test.exs"))
+      StubMerger.set_failing_checks(
+        "!tu4",
+        untouched_test("mix test", "test/wardmast/x_test.exs")
+      )
+
       StubMerger.queue_get("!tu4", [pending("h1"), red("h1")])
       wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
       assert length(reruns("!tu4")) == 2
@@ -456,7 +460,11 @@ defmodule Wardmast.Worker.WatchdogCiTriageTest do
       start(t, ws, "!pr1")
       wait_until(fn -> length(reruns("!pr1")) == 2 end)
 
-      StubMerger.set_failing_checks("!pr1", untouched_test("mix test", "test/wardmast/z_test.exs"))
+      StubMerger.set_failing_checks(
+        "!pr1",
+        untouched_test("mix test", "test/wardmast/z_test.exs")
+      )
+
       StubMerger.queue_get("!pr1", [pending("h1"), red("h1")])
       wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
       assert length(reruns("!pr1")) == 2

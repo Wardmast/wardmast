@@ -343,7 +343,8 @@ defmodule WardmastWeb.RunDetailLive do
             navigate={~p"/"}
             class="text-[12px] font-medium text-[var(--text-link)] hover:text-[var(--text-title)] transition-colors flex items-center gap-1.5 w-fit"
           >
-            <WardmastWeb.CoreComponents.Core.icon name="hero-arrow-left" size={14} /> Back to dashboard
+            <WardmastWeb.CoreComponents.Core.icon name="hero-arrow-left" size={14} />
+            Back to dashboard
           </.link>
         </div>
       </div>

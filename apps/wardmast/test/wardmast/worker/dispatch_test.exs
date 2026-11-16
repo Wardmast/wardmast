@@ -35,7 +35,8 @@ defmodule Wardmast.Worker.DispatchTest do
 
   # The ticket's Watchdog and any run registered for it.
   defp stop_task_processes(task_id) do
-    for pid <- [Wardmast.Worker.Watchdog.whereis(task_id), Worker.whereis(task_id)], is_pid(pid) do
+    for pid <- [Wardmast.Worker.Watchdog.whereis(task_id), Worker.whereis(task_id)],
+        is_pid(pid) do
       try do
         GenServer.stop(pid, :normal)
       catch

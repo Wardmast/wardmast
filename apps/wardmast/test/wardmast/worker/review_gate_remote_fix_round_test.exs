@@ -450,7 +450,11 @@ defmodule Wardmast.Worker.ReviewGateRemoteFixRoundTest do
         %{s | revise_command: [@revise_commit], placement_opts: placement([])}
       end)
 
-      Phoenix.PubSub.broadcast(Wardmast.PubSub, "worker:" <> lost_id, {:worker_node_lost, lost_id})
+      Phoenix.PubSub.broadcast(
+        Wardmast.PubSub,
+        "worker:" <> lost_id,
+        {:worker_node_lost, lost_id}
+      )
 
       wait_until(fn -> Ash.get!(Issue, rig.task.id).last_reviewed_sha != nil end, 60_000)
     end

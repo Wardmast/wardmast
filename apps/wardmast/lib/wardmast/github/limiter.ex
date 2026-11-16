@@ -380,7 +380,8 @@ defmodule Wardmast.GitHub.Limiter do
 
   @impl true
   def init(opts) do
-    probe? = Keyword.get(opts, :probe, Application.get_env(:wardmast, :github_limiter_probe, true))
+    probe? =
+      Keyword.get(opts, :probe, Application.get_env(:wardmast, :github_limiter_probe, true))
 
     state = %{
       background_headroom:

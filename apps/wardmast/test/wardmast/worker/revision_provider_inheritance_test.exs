@@ -805,7 +805,8 @@ defmodule Wardmast.Worker.RevisionProviderInheritanceTest do
         workspace: ws
       }
 
-      {:ok, %{worker_pid: pid}} = Wardmast.Workflows.MergeQueue.FixPassDispatcher.dispatch(context)
+      {:ok, %{worker_pid: pid}} =
+        Wardmast.Workflows.MergeQueue.FixPassDispatcher.dispatch(context)
 
       wait_until(fn ->
         calls(log) |> Enum.any?(&String.starts_with?(&1, "agy"))

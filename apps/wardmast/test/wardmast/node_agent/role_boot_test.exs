@@ -61,7 +61,8 @@ defmodule Wardmast.NodeAgent.RoleBootTest do
     end
 
     test "primary mode returns exactly the primary list" do
-      assert {:ok, [Probe]} = Wardmast.Application.supervisor_children(:primary, fn -> [Probe] end)
+      assert {:ok, [Probe]} =
+               Wardmast.Application.supervisor_children(:primary, fn -> [Probe] end)
     end
 
     test "an unknown role starts nothing" do

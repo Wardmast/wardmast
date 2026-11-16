@@ -68,6 +68,7 @@ defmodule Wardmast.Tasks.MergerUrlBackfillTest do
 
   test "leaves the row alone when the path cannot be resolved" do
     Req.Test.stub(Wardmast.Mergers.Gitlab.HTTP, fn conn -> Plug.Conn.send_resp(conn, 500, "x") end)
+
     ws = ws!()
     bad = issue!(ws, "https://gitlab.com/68258632/-/merge_requests/298")
 

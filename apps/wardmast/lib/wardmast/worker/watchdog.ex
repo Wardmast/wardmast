@@ -2203,7 +2203,9 @@ defmodule Wardmast.Worker.Watchdog do
   # transient wait. The merge call itself stays foreground: it is the one
   # request this whole loop exists to make.
   defp detached_poll(state) do
-    case Wardmast.GitHub.Limiter.with_priority(:background, :merge_retry, fn -> safe_get(state) end) do
+    case Wardmast.GitHub.Limiter.with_priority(:background, :merge_retry, fn ->
+           safe_get(state)
+         end) do
       {:ok, result} when is_map(result) ->
         state =
           state

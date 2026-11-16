@@ -99,7 +99,9 @@ defmodule Wardmast.Env do
   @doc "Forget which deprecations were already logged. Test seam."
   @spec reset_warnings() :: :ok
   def reset_warnings do
-    for {{__MODULE__, :warned, _} = key, _} <- :persistent_term.get(), do: :persistent_term.erase(key)
+    for {{__MODULE__, :warned, _} = key, _} <- :persistent_term.get(),
+        do: :persistent_term.erase(key)
+
     :ok
   end
 

@@ -209,7 +209,9 @@ defmodule Wardmast.Guardrails.SpendPatrolTest do
     end
 
     test "a quarantine decision built by Gate.decision/5 is enforced as built", %{ws: ws} do
-      issue = Ash.create!(Wardmast.Tasks.Issue, %{title: "d1", workspace_id: ws.id, difficulty: 1})
+      issue =
+        Ash.create!(Wardmast.Tasks.Issue, %{title: "d1", workspace_id: ws.id, difficulty: 1})
+
       decision = Wardmast.Guardrails.Gate.decision(issue, ws, :codex, "gpt-5")
       assert decision["tier"] == "quarantine"
 

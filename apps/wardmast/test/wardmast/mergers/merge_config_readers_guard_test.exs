@@ -32,7 +32,8 @@ defmodule Wardmast.Mergers.MergeConfigReadersGuardTest do
     "apps/wardmast/lib/wardmast/tasks/workspace.ex" =>
       "accessors (merger_strategy/1, auto_merge?/1, …) that read the workspace they are handed; " <>
         "per-repo callers hand them a Mergers.scope/2'd one",
-    "apps/wardmast/lib/wardmast/tasks/workspace/changes/validate_config.ex" => "config validation",
+    "apps/wardmast/lib/wardmast/tasks/workspace/changes/validate_config.ex" =>
+      "config validation",
     "apps/wardmast/lib/wardmast/worker/watchdog.ex" =>
       "merge tunables, read off the workspace scoped to the watched repo in init/1",
     "apps/wardmast/lib/wardmast/mcp/tools/workspace.ex" => "raw config display (overview)",
@@ -60,7 +61,8 @@ defmodule Wardmast.Mergers.MergeConfigReadersGuardTest do
     "apps/wardmast/lib/wardmast/workflows/merge_queue.ex" =>
       "enqueue scopes to the task's repo; the workspace-level adapter is only a default that " <>
         "for_item/2 replaces before every item's adapter call",
-    "apps/wardmast/lib/wardmast/workflows/pr_patrol_supervisor.ex" => "scoped to a patrolled slug",
+    "apps/wardmast/lib/wardmast/workflows/pr_patrol_supervisor.ex" =>
+      "scoped to a patrolled slug",
     "apps/wardmast/lib/wardmast/workflows/review_patrol_supervisor.ex" =>
       "scoped to a patrolled slug",
     "apps/wardmast/lib/wardmast/workflows/merged_pr_finalizer_supervisor.ex" =>

@@ -96,7 +96,9 @@ defmodule Wardmast.MCP.Tools.Skills do
         |> Tools.maybe_put("activation_mode", Tools.fetch_string(args, "activation_mode"))
         |> Tools.maybe_put("code_only", code_only)
 
-      case Wardmast.Skills.update_skill(skill, attrs, actor: Wardmast.PaperTrail.actor_label(scope)) do
+      case Wardmast.Skills.update_skill(skill, attrs,
+             actor: Wardmast.PaperTrail.actor_label(scope)
+           ) do
         {:ok, updated} ->
           Logger.info("[skill_update] skill #{updated.id} (#{updated.name}) updated")
           {:ok, updated |> serialize_skill() |> with_bundled_warning(updated.name)}

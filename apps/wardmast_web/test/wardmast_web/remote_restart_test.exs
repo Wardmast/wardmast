@@ -458,7 +458,10 @@ defmodule WardmastWeb.RemoteRestartTest do
       node_id = ctx.node.id
 
       assert %{node_id: ^node_id} =
-               Enum.find(Wardmast.Worker.Registry.live_dispatches(), &(&1.registry_key == task_id))
+               Enum.find(
+                 Wardmast.Worker.Registry.live_dispatches(),
+                 &(&1.registry_key == task_id)
+               )
 
       # the container prints after the adoption: it reaches the new Worker, and the line the
       # old one had already taken is not delivered again

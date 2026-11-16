@@ -171,7 +171,8 @@ defmodule Wardmast.Trackers.Gitlab.Config do
   """
   @spec active_project_id() :: String.t() | nil
   def active_project_id do
-    raw = Process.get(@pdict_key) || Application.get_env(:wardmast, :gitlab_tracker_default_config)
+    raw =
+      Process.get(@pdict_key) || Application.get_env(:wardmast, :gitlab_tracker_default_config)
 
     case raw && Map.get(raw, "project_id") do
       v when is_integer(v) -> Integer.to_string(v)
@@ -185,7 +186,8 @@ defmodule Wardmast.Trackers.Gitlab.Config do
   """
   @spec active_host() :: String.t() | nil
   def active_host do
-    raw = Process.get(@pdict_key) || Application.get_env(:wardmast, :gitlab_tracker_default_config)
+    raw =
+      Process.get(@pdict_key) || Application.get_env(:wardmast, :gitlab_tracker_default_config)
 
     case raw && Map.get(raw, "host") do
       v when is_binary(v) and v != "" -> v

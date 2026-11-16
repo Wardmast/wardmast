@@ -111,7 +111,10 @@ defmodule Wardmast.Test.SessionEnv do
               account
 
             _ ->
-              Ash.create!(Wardmast.Accounts.ProviderAccount, %{provider: provider, slug: "default"})
+              Ash.create!(Wardmast.Accounts.ProviderAccount, %{
+                provider: provider,
+                slug: "default"
+              })
           end
 
         {provider, account}

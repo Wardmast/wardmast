@@ -48,7 +48,8 @@ defmodule Wardmast.Agents.Codex.ModelCatalog do
   @doc "The codex home the CLI reads: test/app config, then `$CODEX_HOME`, then `~/.codex`."
   @spec codex_home() :: String.t()
   def codex_home do
-    configured = Keyword.get(Application.get_env(:wardmast, :codex_model_catalog, []), :codex_home)
+    configured =
+      Keyword.get(Application.get_env(:wardmast, :codex_model_catalog, []), :codex_home)
 
     case configured || System.get_env("CODEX_HOME") do
       dir when is_binary(dir) and dir != "" -> dir

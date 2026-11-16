@@ -333,7 +333,8 @@ defmodule Wardmast.Worker.Toolchain do
   end
 
   defp mix_base(opts) do
-    case Keyword.get(opts, :mix_base) || Application.get_env(:wardmast, :worker_toolchain_mix_base) do
+    case Keyword.get(opts, :mix_base) ||
+           Application.get_env(:wardmast, :worker_toolchain_mix_base) do
       base when is_binary(base) and base != "" -> base
       _ -> Path.join([System.get_env("HOME") || System.user_home() || "/", ".mix", "toolchains"])
     end

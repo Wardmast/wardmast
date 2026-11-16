@@ -1365,7 +1365,10 @@ defmodule WardmastWeb.NodeAgent.RemoteWorkersE2ETest do
       assert [%Run{id: ^id}] = Run |> Ash.Query.filter(task_id == ^task_id) |> Ash.read!()
 
       assert %{node_id: ^node_id} =
-               Enum.find(Wardmast.Worker.Registry.live_dispatches(), &(&1.registry_key == task_id))
+               Enum.find(
+                 Wardmast.Worker.Registry.live_dispatches(),
+                 &(&1.registry_key == task_id)
+               )
 
       # the adopter has its own egress run: new primary-side listeners, same names
       %{meta: %{claude_spawn: %{remote: %{request: new_request}}}} = Worker.state(adopter)

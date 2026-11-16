@@ -1155,7 +1155,10 @@ defmodule Wardmast.Quota.CloudProbeTest do
 
       CloudProbe.probe(pid)
       send(pid, {:codex_refresh_result, codex_ok_result()})
-      wait_until(fn -> CredentialWatchdog.escalated?(Wardmast.Agents.Codex, watchdog) == false end)
+
+      wait_until(fn ->
+        CredentialWatchdog.escalated?(Wardmast.Agents.Codex, watchdog) == false
+      end)
     end
 
     # Proves `default_refresh/2` really sends `{:codex_refresh_result, _}` off

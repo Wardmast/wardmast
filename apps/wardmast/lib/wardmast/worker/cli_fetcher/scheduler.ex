@@ -193,8 +193,11 @@ defmodule Wardmast.Worker.CliFetcher.Scheduler do
 
   defp enabled?(opts) do
     case Keyword.fetch(opts, :enabled) do
-      {:ok, flag} -> flag == true
-      :error -> config(:enabled, false) == true and Wardmast.Env.get("WARDMAST_CLI_FETCHER") != "0"
+      {:ok, flag} ->
+        flag == true
+
+      :error ->
+        config(:enabled, false) == true and Wardmast.Env.get("WARDMAST_CLI_FETCHER") != "0"
     end
   end
 
