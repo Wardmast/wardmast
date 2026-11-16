@@ -34,6 +34,10 @@ defmodule Wardmast.Nodes.Agent do
           size: non_neg_integer()
         }
 
+  @doc "The top-level directory every release tarball unpacks into."
+  @spec archive_root() :: String.t()
+  def archive_root, do: @archive_root
+
   @doc "The deploy data home: `:data_dir` app env, `WARDMAST_DATA_HOME`, else `~/.arbiter`."
   @spec data_home() :: String.t()
   def data_home do
