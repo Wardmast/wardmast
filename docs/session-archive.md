@@ -2,8 +2,8 @@
 
 Every run's agent CLI writes a complete, structured record of itself to disk.
 Arbiter reads that file — for token reconciliation
-(`Arbiter.Usage.ClaudeSessionFile`) and for retroactive step rows
-(`Arbiter.Workers.StepBackfill`) — and, until this change, never kept a copy.
+(`Wardmast.Usage.ClaudeSessionFile`) and for retroactive step rows
+(`Wardmast.Workers.StepBackfill`) — and, until this change, never kept a copy.
 The CLI prunes it. This document covers what is archived, where, what it is
 allowed to contain, and what an operator must do about that.
 
@@ -15,12 +15,12 @@ Everything else Arbiter persists about a run is a *rendering* of it:
 |---|---|
 | `worker_run_steps.input_summary` | 200 chars of one picked field — a 5 KB tool input keeps ~4% |
 | `worker_run_steps.output_summary` | 2,000 chars — a 21.5 KB tool result keeps 9% |
-| `<run_id>.log` (`Arbiter.Worker.OutputLog`) | every rendered line, but each tool result truncated to 40 lines |
+| `<run_id>.log` (`Wardmast.Worker.OutputLog`) | every rendered line, but each tool result truncated to 40 lines |
 | `worker_runs.output_lines` | rendered lines, 1000-line tail only |
 | thinking blocks | **nowhere** |
 | per-message token usage, model, effort, requestId, uuid lineage | **nowhere** |
 
-The session JSONL has all of it. `Arbiter.Workers.StepBackfill`'s own moduledoc
+The session JSONL has all of it. `Wardmast.Workers.StepBackfill`'s own moduledoc
 has said so since bd-apwfmy: it "is the only retroactive source of ground
 truth: the rendered transcript has thrown the structure away."
 
@@ -55,9 +55,9 @@ material, the CLI has deleted it.
 ```
 
 `output_log_root` defaults to `~/dev/arbiter-worker-logs` and is overridable
-with `config :arbiter, :output_log_root`. Keyed by `run_id`, exactly like its
+with `config :wardmast, :output_log_root`. Keyed by `run_id`, exactly like its
 two neighbours, so anything that can already fetch a run's transcript needs
-nothing new. Read it back with `Arbiter.Worker.SessionArchive.read/1`, or
+nothing new. Read it back with `Wardmast.Worker.SessionArchive.read/1`, or
 `zcat` it.
 
 **Yes, things outside Arbiter should read this.** It is the intended input for
@@ -75,11 +75,11 @@ disk. The one-time rescue of the surviving corpus wrote 149 MB.
 ```
 
 A podman run's Claude config dir lives in its run tmp dir, which is deleted
-when the worker goes down. `Arbiter.Worker.SessionHistory.preserve/1` copies the
+when the worker goes down. `Wardmast.Worker.SessionHistory.preserve/1` copies the
 session JSONL here first (`RunTmp.remove/1` and the boot `RunTmp.sweep/1`), so
 `worker_resume` in session mode can seed `--resume <sid>` into a new container.
 It is **not** an archive and not a stable contract: every byte goes through
-`Arbiter.Redaction` with the task's workspace secret values (same as the
+`Wardmast.Redaction` with the task's workspace secret values (same as the
 archive), the entry is deleted once a resume has seeded it, and entries older
 than 14 days are pruned on the next preserve.
 
@@ -90,18 +90,18 @@ it (the v0.2.31 live failure, "No conversation found").
 
 ## Redaction: the decision, and why
 
-The raw JSONL is unredacted. `Arbiter.Worker.StepSummary` warns that a second
+The raw JSONL is unredacted. `Wardmast.Worker.StepSummary` warns that a second
 persistence path "is how a secret escapes redaction on one surface but not
 another", and the risk is not theoretical — a live signing key was printed into
-a coordinator transcript on 2026-07-16, and `ARBITER_CLOAK_KEY` into a subagent
+a coordinator transcript on 2026-07-16, and `WARDMAST_CLOAK_KEY` into a subagent
 transcript on 2026-09-12.
 
 **The decision is: both.** Neither control is sufficient alone.
 
-1. **Redact on ingest.** Every byte goes through `Arbiter.Redaction` — the same
+1. **Redact on ingest.** Every byte goes through `Wardmast.Redaction` — the same
    single choke-point every other surface uses — against the run's workspace
    secret values. Objection considered and rejected: "redaction damages the
-   ground truth you are archiving." `Arbiter.Redaction` is a plain replace over
+   ground truth you are archiving." `Wardmast.Redaction` is a plain replace over
    values a human explicitly marked secret, so the only thing it can damage is
    precisely what must not be in a durable archive. It is also safe for JSONL:
    the `[REDACTED]` placeholder contains no JSON metacharacters and matching is
@@ -128,17 +128,17 @@ is the second reason the permission control exists rather than being optional.
 
 ## Operating it
 
-Live archiving needs nothing: `Arbiter.Worker.record_run_finished/1` archives
+Live archiving needs nothing: `Wardmast.Worker.record_run_finished/1` archives
 each run as it completes. A run whose file is already gone logs a warning and
 carries on — best-effort, never fatal.
 
 The one-time rescue of pre-existing runs:
 
 ```sh
-mix arbiter.archive_sessions                      # dry-run (default)
-mix arbiter.archive_sessions --apply              # write the archives
-mix arbiter.archive_sessions --limit 500 --apply  # in batches
-mix arbiter.archive_sessions --force --apply      # re-archive existing
+mix wardmast.archive_sessions                      # dry-run (default)
+mix wardmast.archive_sessions --apply              # write the archives
+mix wardmast.archive_sessions --limit 500 --apply  # in batches
+mix wardmast.archive_sessions --force --apply      # re-archive existing
 ```
 
 It is idempotent — a run that already has an archive is skipped — so re-running
@@ -196,7 +196,7 @@ split on `config_dir` so this cannot recur.
 
 ### What about `--resume`, then?
 
-It is still real: `Arbiter.Worker.Dispatch.resume_session/2` re-spawns with
+It is still real: `Wardmast.Worker.Dispatch.resume_session/2` re-spawns with
 `--resume <sid>` and the CLI appends to the same `<sid>.jsonl`, while Arbiter
 opens a new `Run` row. The token reader and the step backfill each *window*
 that file by timestamp, because attributing another run's tokens or tool calls
@@ -212,11 +212,11 @@ truncated ground truth.
 ## What the database keeps (bd-6jcebm)
 
 The archive is also what makes it safe to thin the SQLite file. After 14 days
-(`config :arbiter, :output_offload, retention_days:`), `Arbiter.Workers.OutputOffload`
+(`config :wardmast, :output_offload, retention_days:`), `Wardmast.Workers.OutputOffload`
 clears `worker_runs.output_lines` once `<run_id>.log` exists, and
 `worker_run_steps.output_summary` once `<run_id>.jsonl.gz` exists. A run with no
 file keeps its column — it is the only copy — and git-shaped steps, plus the last
-8 steps of every `fix_pass` run, keep theirs, because `Arbiter.Loop.Corpus` reads
+8 steps of every `fix_pass` run, keep theirs, because `Wardmast.Loop.Corpus` reads
 them. The run pages fall back to the
 transcript tail. The policy and the alternatives that were rejected are in the
 module's `@moduledoc`.
@@ -235,10 +235,10 @@ Preview first. Mix is absent from releases, so on a release use the eval entry
 point — the default is a dry run that writes nothing and prints, per table, the
 rows and bytes it would clear plus the runs kept because no on-disk file exists:
 
-    bin/arbiter eval 'Arbiter.Release.offload_report()'
-    bin/arbiter eval 'Arbiter.Release.offload_report(apply: true)'   # one manual sweep
+    bin/wardmast eval 'Wardmast.Release.offload_report()'
+    bin/wardmast eval 'Wardmast.Release.offload_report(apply: true)'   # one manual sweep
 
-`mix arbiter.offload_run_output` (dry by default) is the Mix equivalent. After a
+`mix wardmast.offload_run_output` (dry by default) is the Mix equivalent. After a
 real sweep run `VACUUM` once to give the freed pages back to the OS. The
-`config :arbiter, :output_offload, enabled:` app-env option is a test override
+`config :wardmast, :output_offload, enabled:` app-env option is a test override
 only (`false` hard-disables the sweeper, as in the suite).

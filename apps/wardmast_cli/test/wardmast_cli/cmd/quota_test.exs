@@ -1,0 +1,1112 @@
+defmodule WardmastCli.Cmd.QuotaTest do
+  use WardmastCli.CliCase, async: false
+
+  @snapshot %{
+    "utilization_5h" => 0.24,
+    "reset_5h_at" => "2026-06-23T23:00:00Z",
+    "status_5h" => "allowed",
+    "utilization_7d" => 0.08,
+    "reset_7d_at" => "2026-06-29T00:00:00Z",
+    "status_7d" => "allowed",
+    "representative_claim" => "five_hour",
+    "overage_status" => "rejected",
+    "captured_at" => "2026-06-23T20:20:06Z"
+  }
+
+  @codex %{
+    "plan" => "plus",
+    "limit_reached" => false,
+    "session" => %{
+      "used" => 42.5,
+      "total" => 100,
+      "remaining" => 57.5,
+      "reset_at" => "2026-06-23T23:00:00Z",
+      "unlimited" => false
+    },
+    "weekly" => %{
+      "used" => 8.0,
+      "total" => 100,
+      "remaining" => 92.0,
+      "reset_at" => "2026-06-29T00:00:00Z",
+      "unlimited" => false
+    },
+    "captured_at" => "2026-06-23T20:20:06Z"
+  }
+
+  describe "arb quota (bd-c7ll4t — policy binding)" do
+    # bd-5ps98m: an account's flat ceiling silently capped a workspace set to
+    # paced/looser — `arb quota` said nothing about it beyond the number. Now
+    # it names which side binds.
+    test "says the account side binds when its ceiling is the tighter one" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "account" => %{"slug" => "default", "provider" => "claude"},
+          "account_policy" => %{
+            "threshold_mode" => "flat",
+            "throttle_threshold" => 0.85,
+            "weekly_threshold" => 0.9,
+            "paced_floor" => nil,
+            "weekly_paced_floor" => nil
+          },
+          "policy_binding" => %{
+            "throttle_threshold" => "account",
+            "weekly_threshold" => "account"
+          }
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+
+      assert code == 0
+      assert out =~ "weekly_threshold:    90.0%  (account binds)"
+      assert out =~ "throttle_threshold:  85.0%  (account binds)"
+    end
+
+    # bd-c7ll4t (review finding 1): the number printed next to "workspace
+    # binds" must be the *effective* `min(account, workspace)` ceiling
+    # (70%), not the account's own 90% — printing the account's number here
+    # would read as though the workspace's tighter setting had no effect.
+    test "says the workspace side binds when it tightened the account's ceiling" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "account" => %{"slug" => "default", "provider" => "claude"},
+          "account_policy" => %{
+            "threshold_mode" => "flat",
+            "throttle_threshold" => 0.85,
+            "weekly_threshold" => 0.9,
+            "paced_floor" => nil,
+            "weekly_paced_floor" => nil
+          },
+          "policy_binding" => %{
+            "throttle_threshold" => "workspace",
+            "weekly_threshold" => "workspace"
+          },
+          "effective_policy" => %{
+            "throttle_threshold" => 0.5,
+            "weekly_threshold" => 0.7
+          }
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+
+      assert code == 0
+      assert out =~ "weekly_threshold:    70.0%  (workspace binds; account 90.0%)"
+      assert out =~ "throttle_threshold:  50.0%  (workspace binds; account 85.0%)"
+    end
+  end
+
+  # bd-6omte4: what the quota gate is actually holding, whichever provider.
+  describe "arb quota held dispatches" do
+    test "lists each held dispatch with its provider and the gate's reason" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "held_dispatches" => [
+            %{
+              "task_id" => "bd-aro53b",
+              "intent" => "ReviewGate fix round 2",
+              "provider" => "gemini",
+              "provider_label" => "Antigravity (agy)",
+              "reason" => "Gemini Models 5h quota exhausted",
+              "held_since" => "2026-09-25T05:29:00Z"
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Held dispatches"
+      assert out =~ "bd-aro53b  ReviewGate fix round 2  on Antigravity (agy)"
+      assert out =~ "Gemini Models 5h quota exhausted"
+      assert out =~ "2026-09-25T05:29:00Z"
+    end
+
+    test "says none when nothing is held" do
+      stub_get("/api/quota", %{
+        "data" => %{"workspace_id" => "ws-1", "claude" => @snapshot, "held_dispatches" => []}
+      })
+
+      {out, _err, 0} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert out =~ "Held dispatches: none"
+    end
+  end
+
+  # DC5 (bd-2c2a4g, design §9): the provider concurrency budget of each account,
+  # shadow-labelled until `scheduler_admission` is `enforce`.
+  describe "arb quota budget" do
+    defp budget_block(mode, decides) do
+      %{
+        "account" => "claude:default",
+        "account_id" => "acct-1",
+        "mode" => mode,
+        "decides" => decides,
+        "pools" => [
+          %{
+            "label" => "claude:default",
+            "budget" => 3,
+            "seats" => 3,
+            "free" => 0,
+            "binding" => "ceiling",
+            "reason" => "ceiling max_concurrent 3 (quota allows 4: 5h binds)",
+            "state" => "full"
+          },
+          %{
+            "label" => "antigravity:default gemini",
+            "budget" => 0,
+            "seats" => 0,
+            "free" => 0,
+            "binding" => "window:weekly",
+            "reason" => "weekly 0.43 used ≥ line 0.42",
+            "state" => "held_pace"
+          }
+        ]
+      }
+    end
+
+    test "prints each pool's budget with its reason, labelled shadow" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "budget" => [budget_block("shadow", false)]
+        }
+      })
+
+      {out, _err, 0} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+
+      assert out =~ "Concurrency budget (shadow"
+      assert out =~ "today's gate and caps still decide"
+      assert out =~ ~r/claude:default\s+3 of 3 seats.*ceiling max_concurrent 3/
+      assert out =~ ~r/antigravity:default gemini\s+0 of 0 seats.*weekly 0.43 used/
+    end
+
+    test "enforce is not labelled shadow" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "budget" => [budget_block("enforce", true)]
+        }
+      })
+
+      {out, _err, 0} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+
+      assert out =~ "Concurrency budget (enforce)"
+      refute out =~ "still decide"
+    end
+
+    test "prints nothing for an account with no published pools, or an older server" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "budget" => [%{"account" => "claude:default", "mode" => "shadow", "pools" => []}]
+        }
+      })
+
+      {out, _err, 0} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      refute out =~ "Concurrency budget"
+    end
+
+    test "--json passes the block through" do
+      stub_get("/api/quota", %{
+        "data" => %{"workspace_id" => "ws-1", "budget" => [budget_block("shadow", false)]}
+      })
+
+      {out, _err, 0} = capture(fn -> WardmastCli.Cmd.Quota.run(["--json"]) end)
+      assert [%{"mode" => "shadow", "pools" => [_, _]}] = Jason.decode!(out)["budget"]
+    end
+  end
+
+  # bd-a6grlr: the dollar spend cap of each capped account.
+  describe "arb quota spend caps" do
+    test "prints each capped account's spend state and the hold reason" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "held_dispatches" => [],
+          "spend_caps" => [
+            %{
+              "account" => "claude:api",
+              "cap_usd" => 20.0,
+              "window" => "week",
+              "mode" => "flat",
+              "metered" => true,
+              "state" => "holding",
+              "holding" => true,
+              "used_usd" => 21.4,
+              "spent_usd" => 21.4,
+              "in_flight_usd" => 0.0,
+              "allowed_usd" => 20.0,
+              "resets_at" => "2026-10-19T00:00:00Z",
+              "reason" =>
+                "spend cap $20.00/week reached ($21.40 spent), resets 2026-10-19 00:00 UTC"
+            },
+            %{
+              "account" => "claude:max",
+              "cap_usd" => 5.0,
+              "window" => "day",
+              "mode" => "paced",
+              "metered" => false,
+              "state" => "no_metered_spend",
+              "holding" => false,
+              "resets_at" => "2026-10-11T00:00:00Z"
+            }
+          ]
+        }
+      })
+
+      {out, _err, 0} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert out =~ "Spend caps"
+      assert out =~ "claude:api  $20.00/week (flat)  $21.40 of $20.00 used"
+      assert out =~ "HOLDING fresh dispatches: spend cap $20.00/week reached"
+      assert out =~ "claude:max  $5.00/day (paced)  no metered spend"
+    end
+
+    test "prints nothing when no account has a cap" do
+      stub_get("/api/quota", %{
+        "data" => %{"workspace_id" => "ws-1", "claude" => @snapshot, "spend_caps" => []}
+      })
+
+      {out, _err, 0} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      refute out =~ "Spend caps"
+    end
+  end
+
+  describe "arb quota without a 5h window" do
+    test "omits the 5h line when utilization_5h is nil, keeps 7d" do
+      snap = Map.merge(@snapshot, %{"utilization_5h" => nil, "status_5h" => nil})
+      stub_get("/api/quota", %{"data" => %{"workspace_id" => "ws-1", "claude" => snap}})
+
+      {out, _err, 0} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      refute out =~ "5h:"
+      assert out =~ "7d:  8.0% used"
+    end
+  end
+
+  describe "arb quota" do
+    test "renders 5h and 7d utilization, status, and reset times in text mode" do
+      stub_get("/api/quota", %{"data" => %{"workspace_id" => "ws-1", "claude" => @snapshot}})
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Anthropic quota (workspace ws-1)"
+      assert out =~ "5h:  24.0% used"
+      assert out =~ "7d:  8.0% used"
+      assert out =~ "status=allowed"
+      assert out =~ "2026-06-23T23:00:00Z"
+      assert out =~ "representative window: five_hour"
+    end
+
+    # bd-b0zody: two sources now write the same primary columns — the proxy's
+    # header capture and the /api/oauth/usage poll — so the row has to say
+    # which one produced it, or the overlap window is unreadable.
+    test "names the source that produced the row" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.put(@snapshot, "capture_source", "oauth_poll")
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "source:                /api/oauth/usage poll"
+    end
+
+    test "names the proxy header capture as the source" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.put(@snapshot, "capture_source", "headers")
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "source:                proxy rate-limit headers"
+    end
+
+    # bd-1tuxv8: the 5h and 7d numbers are both printed, but only one window (or
+    # neither) is actually gating dispatch — say which, so "7d is at 76%" can't
+    # be read as the reason Autopilot is idle.
+    test "names the window that is gating dispatch" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" =>
+            Map.merge(@snapshot, %{
+              "utilization_7d" => 0.91,
+              "gating_window" => "7d",
+              "gating_reason" => "7d quota 91% ≥ 90%"
+            })
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "gating dispatch:       7d — 7d quota 91% ≥ 90%"
+    end
+
+    # bd-aw325c: the shown workspace isn't gated but another one on the account
+    # is — the headline must not claim dispatch is not quota-held.
+    test "does not claim nothing is held when another workspace is gated" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" =>
+            Map.merge(@snapshot, %{
+              "gating_window" => nil,
+              "gating_workspaces" => [
+                %{"workspace" => "zzz-tight", "window" => "7d", "reason" => "7d quota 37% ≥ 30%"}
+              ]
+            })
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      refute out =~ "dispatch is not quota-held"
+      assert out =~ "held in 1 other workspace(s)"
+      assert out =~ "zzz-tight: 7d — 7d quota 37% ≥ 30%"
+    end
+
+    # bd-b7umwj: the STALE label used to read "dispatches may be incorrectly
+    # held", which is backwards — staleness makes the gate fail OPEN. It is now
+    # per-window, because the two windows behave differently: the 5h window
+    # fails open on age (bd-y0yup0's recovery valve), the 7d hold is sticky.
+    test "the STALE label says what the gate actually does for each window" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" =>
+            Map.merge(@snapshot, %{
+              "stale" => true,
+              "utilization_7d" => 0.96,
+              "status_7d" => "allowed_warning",
+              "gating_window" => "7d",
+              "gating_reason" => "7d quota 96% ≥ 90%"
+            })
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "STALE"
+      refute out =~ "5h gate"
+      assert out =~ "7d hold stays in force"
+      refute out =~ "incorrectly held"
+      # And the 7d hold is still reported as gating, stale snapshot or not.
+      assert out =~ "gating dispatch:       7d — 7d quota 96% ≥ 90%"
+    end
+
+    # bd-4fbpto: STALE alone can't distinguish "the poll is fine, it just
+    # didn't land a usable 5h figure this cycle" from "nothing has succeeded
+    # in a while" — this asserts the two now read differently.
+    test "STALE says the poll is still succeeding when oauth_poll_fresh is true" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" =>
+            Map.merge(@snapshot, %{
+              "stale" => true,
+              "oauth_poll_fresh" => true,
+              "oauth_captured_at" => "2026-06-23T20:24:00Z"
+            })
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "STALE"
+      assert out =~ "/api/oauth/usage last succeeded 2026-06-23T20:24:00Z"
+      refute out =~ "no fresh data"
+    end
+
+    test "STALE says no fresh data from any source when the poll isn't succeeding either" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" =>
+            Map.merge(@snapshot, %{
+              "stale" => true,
+              "oauth_poll_fresh" => false,
+              "capture_source" => "headers"
+            })
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "STALE"
+      assert out =~ "no fresh data from any source"
+      assert out =~ "proxy rate-limit headers"
+      refute out =~ "last succeeded"
+    end
+
+    # bd-2wnkoq: in the 19-hour incident this STALE wording was the most useful
+    # diagnostic there was — keep it verbatim, and also say how old the
+    # snapshot is rather than leaving the reader to subtract timestamps.
+    test "the captured-at line states the snapshot's age and keeps the STALE wording verbatim" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.merge(@snapshot, %{"stale" => true, "captured_age_seconds" => 68_580})
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "captured at:           2026-06-23T20:20:06Z (19h 3m ago) ⚠️ STALE"
+
+      assert out =~
+               "STALE (older than the gate trusts — a stale 7d hold stays in force)"
+    end
+
+    test "a fresh snapshot's age is shown too" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.merge(@snapshot, %{"stale" => false, "captured_age_seconds" => 42})
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "captured at:           2026-06-23T20:20:06Z (42s ago)\n"
+    end
+
+    test "a days-old snapshot's age reads in days" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" =>
+            Map.merge(@snapshot, %{"stale" => true, "captured_age_seconds" => 3 * 86_400 + 7_200})
+        }
+      })
+
+      {out, _err, _code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert out =~ "(3d 2h ago)"
+    end
+
+    test "works the age out from captured_at when the server does not send it" do
+      captured_at =
+        DateTime.utc_now()
+        |> DateTime.add(-(2 * 3_600 + 30 * 60 + 10), :second)
+        |> DateTime.truncate(:second)
+        |> DateTime.to_iso8601()
+
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.merge(@snapshot, %{"stale" => true, "captured_at" => captured_at})
+        }
+      })
+
+      {out, _err, _code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert out =~ "#{captured_at} (2h 30m ago)"
+    end
+
+    test "no STALE label on a fresh snapshot" do
+      stub_get("/api/quota", %{
+        "data" => %{"workspace_id" => "ws-1", "claude" => Map.put(@snapshot, "stale", false)}
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      refute out =~ "STALE"
+    end
+
+    # bd-1pmf9h: `stale` alone reads identically whether the poll is merely
+    # quiet or the fleet is flatly unauthenticated. `credentials_expired`
+    # surfaces CredentialWatchdog's own expiry state so `arb quota` says so
+    # directly rather than making the operator infer it from an aging poll.
+    test "flags credentials_expired distinctly from a plain stale poll" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.put(@snapshot, "credentials_expired", true)
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "CREDENTIALS EXPIRED"
+    end
+
+    test "no credentials-expired label when credentials are valid" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.put(@snapshot, "credentials_expired", false)
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      refute out =~ "CREDENTIALS EXPIRED"
+    end
+
+    test "says so when no window is gating dispatch" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => Map.merge(@snapshot, %{"gating_window" => nil, "gating_reason" => nil})
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "gating dispatch:       none — dispatch is not quota-held"
+    end
+
+    test "renders codex session + weekly windows in text mode" do
+      stub_get("/api/quota", %{
+        "data" => %{"workspace_id" => "ws-1", "claude" => @snapshot, "codex" => @codex}
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Codex quota (workspace ws-1)"
+      assert out =~ "plan:"
+      assert out =~ "session:  42.5% used"
+      assert out =~ "weekly:   8.0% used"
+      assert out =~ "2026-06-29T00:00:00Z"
+    end
+
+    test "explains the codex empty state with the message" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "codex" => nil,
+          "codex_message" => "Codex CLI not authenticated for this workspace"
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Codex CLI not authenticated for this workspace"
+    end
+
+    # bd-1fpjgx: generalises the Claude-only "CREDENTIALS EXPIRED" line to
+    # Codex and Gemini/Antigravity.
+    test "shows a CREDENTIALS EXPIRED line for codex when codex_credentials_expired is true" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "codex" => @codex,
+          "codex_credentials_expired" => true
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "CREDENTIALS EXPIRED"
+      assert out =~ "codex login"
+    end
+
+    test "does not show a CREDENTIALS EXPIRED line for codex when false" do
+      stub_get("/api/quota", %{
+        "data" => %{"workspace_id" => "ws-1", "claude" => nil, "codex" => @codex}
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      refute out =~ "CREDENTIALS EXPIRED"
+    end
+
+    test "shows a CREDENTIALS EXPIRED line for antigravity when gemini_credentials_expired is true" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "antigravity" => %{"provider" => "antigravity", "plan" => "Pro", "models" => []},
+          "gemini_credentials_expired" => true
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Antigravity quota"
+      assert out =~ "CREDENTIALS EXPIRED"
+    end
+
+    test "shows recent per-provider spend from the quotas list (bd-ajh7bd)" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "quotas" => [%{"provider" => "claude", "cost_usd" => 12.5}]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "recent spend (30d): $12.50"
+    end
+
+    # ---- P5 (docs/provider-account-design.md §6) -------------------------
+
+    test "heads the block with the account, its provider, and the workspaces on it" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              "cost_usd" => 30.0,
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [
+                %{"id" => "ws-1", "name" => "default", "cost_usd" => 10.0},
+                %{"id" => "ws-2", "name" => "emricare", "cost_usd" => 12.5},
+                %{"id" => "ws-3", "name" => "vstim", "cost_usd" => 7.5}
+              ]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+
+      assert out =~
+               "Anthropic quota (account personal-max · claude · 3 workspaces: default, emricare, vstim)"
+
+      refute out =~ "Anthropic quota (workspace"
+    end
+
+    test "prints the account spend total with a per-workspace breakdown underneath" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              "cost_usd" => 30.0,
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [
+                %{"id" => "ws-1", "name" => "default", "cost_usd" => 10.0},
+                %{"id" => "ws-2", "name" => "emricare", "cost_usd" => 12.5},
+                %{"id" => "ws-3", "name" => "vstim", "cost_usd" => 7.5}
+              ]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "recent spend (30d): $30.00"
+      assert out =~ "default $10.00 · emricare $12.50 · vstim $7.50"
+    end
+
+    test "the total can exceed the workspace breakdown sum (probe/preflight spend, bd-adyhvn)" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              # Server-computed total (workspace spend + a preflight row with
+              # no workspace_id) is bigger than the two breakdown lines sum
+              # to (10.0 + 12.5 = 22.5) — the CLI must print the server's
+              # figure verbatim, not recompute it from the breakdown.
+              "cost_usd" => 23.0,
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [
+                %{"id" => "ws-1", "name" => "default", "cost_usd" => 10.0},
+                %{"id" => "ws-2", "name" => "emricare", "cost_usd" => 12.5}
+              ]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "recent spend (30d): $23.00"
+      assert out =~ "default $10.00 · emricare $12.50"
+    end
+
+    test "omits the breakdown when the account has a single workspace" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              "cost_usd" => 10.0,
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [%{"id" => "ws-1", "name" => "default", "cost_usd" => 10.0}]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "recent spend (30d): $10.00"
+      # The breakdown would restate the total for the only workspace on it.
+      refute out =~ "    default $10.00"
+    end
+
+    test "--workspace stays a lookup shorthand and says which workspace it went through" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-2", "name" => "emricare", "prefix" => "em"}]}, 200}},
+        {{"get", "/api/quota"},
+         {%{
+            "data" => %{
+              "workspace_id" => "ws-2",
+              "workspace" => %{"id" => "ws-2", "name" => "emricare"},
+              "claude" => @snapshot,
+              "quotas" => [
+                %{
+                  "provider" => "claude",
+                  "account" => %{"slug" => "personal-max", "provider" => "claude"},
+                  "workspaces" => [%{"id" => "ws-2", "name" => "emricare", "cost_usd" => 1.0}]
+                }
+              ]
+            }
+          }, 200}}
+      ])
+
+      {out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Quota.run(["--workspace", "emricare"]) end)
+
+      assert code == 0
+      assert out =~ "via workspace emricare"
+      assert out =~ "Anthropic quota (account personal-max"
+    end
+
+    test "says nothing about a workspace when none was asked for" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "workspace" => %{"id" => "ws-1", "name" => "default"},
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [%{"id" => "ws-1", "name" => "default", "cost_usd" => 1.0}]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      refute out =~ "via workspace"
+    end
+
+    test "falls back to the workspace header when the server reports no account" do
+      stub_get("/api/quota", %{
+        "data" => %{"workspace_id" => "ws-1", "claude" => @snapshot, "quotas" => []}
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Anthropic quota (workspace ws-1)"
+    end
+
+    test "heads the Codex block with its own account" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "codex" => @codex,
+          "quotas" => [
+            %{
+              "provider" => "codex",
+              "account" => %{"slug" => "work", "provider" => "codex"},
+              "workspaces" => [%{"id" => "ws-1", "name" => "default", "cost_usd" => 2.0}]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Codex quota (account work · codex · 1 workspace: default)"
+    end
+
+    test "--json keeps workspace_id as a deprecated alias alongside account/workspaces" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "account" => %{"slug" => "personal-max", "provider" => "claude"},
+          "workspaces" => [%{"id" => "ws-1", "name" => "default", "cost_usd" => 10.0}],
+          "claude" => @snapshot
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run(["--json"]) end)
+      assert code == 0
+      decoded = Jason.decode!(out)
+      assert decoded["workspace_id"] == "ws-1"
+      assert decoded["account"]["slug"] == "personal-max"
+      assert [%{"name" => "default"}] = decoded["workspaces"]
+    end
+
+    test "--json mode emits the raw snapshot" do
+      stub_get("/api/quota", %{"data" => %{"workspace_id" => "ws-1", "claude" => @snapshot}})
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run(["--json"]) end)
+      assert code == 0
+      decoded = Jason.decode!(out)
+      assert decoded["workspace_id"] == "ws-1"
+      assert decoded["claude"]["utilization_5h"] == 0.24
+    end
+
+    test "explains the empty state when nothing has been captured" do
+      stub_get("/api/quota", %{"data" => %{"workspace_id" => "ws-1", "claude" => nil}})
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "no quota captured yet"
+    end
+
+    test "renders per-model Antigravity utilization when present" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "antigravity" => %{
+            "provider" => "antigravity",
+            "plan" => "Pro",
+            "message" => nil,
+            "captured_at" => "2026-07-06T20:20:06Z",
+            "models" => [
+              %{
+                "model_id" => "gemini-3-flash",
+                "display_name" => "Gemini 3 Flash",
+                "used" => 750,
+                "total" => 1000,
+                "remaining_percentage" => 25.0,
+                "reset_at" => "2026-06-23T21:38:04Z",
+                "unlimited" => false
+              }
+            ]
+          }
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Antigravity"
+      assert out =~ "plan: Pro"
+      assert out =~ "Gemini 3 Flash"
+      assert out =~ "25.0% remaining"
+    end
+
+    # bd-ac53wz: the upstream Gemini CLI provider is dropped. Even a server
+    # that still sends its snapshot (an older build) gets no section — the
+    # recurring "project id not available" line is gone for good.
+    test "never renders a Gemini CLI section, even from a payload that still carries one" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "gemini" => %{
+            "provider" => "gemini-cli",
+            "plan" => "Free",
+            "message" =>
+              "Gemini CLI project id not available; reconnect the CLI or configure a Cloud " <>
+                "project with Code Assist access before checking quota.",
+            "captured_at" => "2026-07-06T20:20:06Z",
+            "models" => []
+          },
+          "antigravity" => nil
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      refute out =~ "Gemini CLI"
+      refute out =~ "project id not available"
+    end
+  end
+
+  describe "--account (P10, bd-icwk2k)" do
+    test "goes straight to the account, with the total + workspace breakdown" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => nil,
+          "claude" => @snapshot,
+          "quotas" => [
+            %{
+              "provider" => "claude",
+              "account" => %{"slug" => "personal-max", "provider" => "claude"},
+              "workspaces" => [
+                %{"id" => "ws-1", "name" => "default", "cost_usd" => 4.0},
+                %{"id" => "ws-2", "name" => "emricare", "cost_usd" => 6.0}
+              ]
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Quota.run(["--account", "personal-max"]) end)
+
+      assert code == 0
+      assert out =~ "Anthropic quota (account personal-max"
+      assert out =~ "2 workspaces: default, emricare"
+      refute out =~ "via workspace"
+    end
+
+    test "shows the account's threshold mode and ceilings (bd-c7ll4t)" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => nil,
+          "claude" => nil,
+          "account" => %{"slug" => "personal-max", "provider" => "claude"},
+          "account_policy" => %{
+            "threshold_mode" => "paced",
+            "throttle_threshold" => 0.85,
+            "weekly_threshold" => 0.9,
+            "paced_floor" => 0.35,
+            "weekly_paced_floor" => 0.2
+          },
+          "policy_binding" => %{
+            "throttle_threshold" => "account",
+            "weekly_threshold" => "account"
+          }
+        }
+      })
+
+      {out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Quota.run(["--account", "personal-max"]) end)
+
+      assert code == 0
+      assert out =~ "Account policy (claude:personal-max)"
+      assert out =~ "threshold_mode:      paced"
+      assert out =~ "throttle_threshold:  85.0%"
+      assert out =~ "weekly_threshold:    90.0%"
+      assert out =~ "paced_floor:         35.0%"
+      assert out =~ "weekly_paced_floor:  20.0%"
+      refute out =~ "binds"
+    end
+
+    test "shows the pace_curve of a paced account, and the ramp effective ceiling" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => nil,
+          "claude" => nil,
+          "account" => %{"slug" => "personal-max", "provider" => "claude"},
+          "account_policy" => %{
+            "threshold_mode" => "paced",
+            "throttle_threshold" => 0.85,
+            "weekly_threshold" => 0.9,
+            "paced_floor" => 0.1,
+            "weekly_paced_floor" => 0.1,
+            "pace_curve" => "ramp"
+          },
+          "policy_binding" => %{
+            "throttle_threshold" => "account",
+            "weekly_threshold" => "account"
+          },
+          "effective_policy" => %{"throttle_threshold" => 0.55, "weekly_threshold" => 0.23}
+        }
+      })
+
+      {out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Quota.run(["--account", "personal-max"]) end)
+
+      assert code == 0
+      assert out =~ "pace_curve:          ramp"
+      assert out =~ "throttle_threshold:  55.0%"
+      assert out =~ "weekly_threshold:    23.0%"
+    end
+
+    test "shows the daily burn governor of an account that sets one (bd-cklotu)" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => nil,
+          "claude" => nil,
+          "account" => %{"slug" => "personal-max", "provider" => "claude"},
+          "account_policy" => %{
+            "threshold_mode" => "flat",
+            "throttle_threshold" => 0.85,
+            "weekly_threshold" => 0.9,
+            "daily_burn_cap" => 0.25,
+            "daily_burn_cap_mode" => "shadow",
+            "burn_24h" => 0.18
+          },
+          "policy_binding" => %{},
+          "effective_policy" => %{}
+        }
+      })
+
+      {out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Quota.run(["--account", "personal-max"]) end)
+
+      assert code == 0
+      assert out =~ "daily_burn_cap:      25.0% (shadow)"
+      assert out =~ "burn_24h:            18.0%"
+    end
+
+    test "--account is forwarded to the API as a query param, taking priority over --workspace" do
+      stub_routes([
+        {{"get", "/api/quota"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           assert conn.query_params["account"] == "personal-max"
+           refute Map.has_key?(conn.query_params, "workspace")
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"data" => %{"workspace_id" => nil, "claude" => nil}})
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn ->
+          WardmastCli.Cmd.Quota.run(["--account", "personal-max", "--workspace", "emricare"])
+        end)
+
+      assert code == 0
+    end
+  end
+
+  describe "arb quota — paused providers (P-18, D-A-4)" do
+    test "prints the PAUSED block when the payload carries paused_providers" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "paused_providers" => [
+            %{
+              "target" => "codex",
+              "label" => "codex",
+              "reason" => "jail escape",
+              "by" => "api",
+              "at" => "2026-10-01T00:00:00Z"
+            }
+          ]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
+
+      assert code == 0
+      assert out =~ "PAUSED providers (dropped from all routing):"
+      assert out =~ "codex — jail escape (by api, 2026-10-01T00:00:00Z)"
+    end
+  end
+end

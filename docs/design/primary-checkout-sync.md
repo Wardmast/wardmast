@@ -14,7 +14,7 @@ directly, distinct from a worker's isolated per-task worktree. Before this
 change, nothing in Arbiter ever fast-forwarded that checkout's local branch
 after a merge.
 
-`Arbiter.Worker.Worktree.fetch_origin/2`, called from `Dispatch` before
+`Wardmast.Worker.Worktree.fetch_origin/2`, called from `Dispatch` before
 provisioning work into a shared checkout, keeps `refs/remotes/origin/<base>`
 fresh — but its own docstring is explicit that this is refs-only: it never
 touches HEAD, the index, the working tree, or any local branch. So a plain
@@ -31,7 +31,7 @@ in project memory).
 
 ### Where it hooks in
 
-`Arbiter.Workflows.MergeQueue.close_task_and_finalize/2` is the single
+`Wardmast.Workflows.MergeQueue.close_task_and_finalize/2` is the single
 funnel every merge-success path already routes through — a fresh
 `adapter.merge/1` call, a poll that discovers the MR was merged externally,
 and the `strategy: "direct"` (no-PR, worker-pushed) path alike. A new
@@ -41,7 +41,7 @@ existing `safe_notify_resolution/2` and `safe_escalate/4` helpers.
 
 ### Safety model
 
-`Arbiter.Worker.PrimarySync.fast_forward/2` performs the actual sync. It
+`Wardmast.Worker.PrimarySync.fast_forward/2` performs the actual sync. It
 only ever does a zero-risk fast-forward — the equivalent of
 `git pull --ff-only` — and skips (not errors) otherwise:
 
@@ -74,8 +74,8 @@ how to turn it on (`arb config set merge.auto_sync_primary true`).
 string `MergeQueue` items already carry (`item.repo`, resolved from the
 task's most recent worker run). The lookup — exact key match, falling back
 to a normalized underscore/hyphen-insensitive match — previously lived only
-as a private helper in `Arbiter.Worker.Dispatch`. It's now
-`Arbiter.Tasks.RepoConfig.find_path/2`, a shared public helper; `Dispatch`
+as a private helper in `Wardmast.Worker.Dispatch`. It's now
+`Wardmast.Tasks.RepoConfig.find_path/2`, a shared public helper; `Dispatch`
 was refactored to delegate to it (behavior-preserving) rather than
 duplicating the logic for `MergeQueue`.
 

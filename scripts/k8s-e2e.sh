@@ -4,7 +4,7 @@
 #   scripts/k8s-e2e.sh [kind|k3d]        # default kind
 #
 # Creates cluster `arb-e2e-<random>` with a kubeconfig of its own under $TMPDIR (the default
-# kubeconfig is never read or written), runs `mix test --include k8s test/k8s` in apps/arbiter,
+# kubeconfig is never read or written), runs `mix test --include k8s test/k8s` in apps/wardmast,
 # and deletes the cluster by its exact name on exit. Needs kind or k3d, kubectl, and a container
 # runtime (podman or docker) that kind/k3d can use. It is not part of `mix test`, CI or the
 # pre-push gate. See docs/remote-workers-k8s-runbook.md.
@@ -64,4 +64,4 @@ esac
 chmod 600 "$kubeconfig"
 
 ARB_K8S_E2E=1 ARB_K8S_E2E_KUBECONFIG="$kubeconfig" ELIXIR_ERL_OPTIONS="${ELIXIR_ERL_OPTIONS:-+fnu}" \
-  sh -c "cd '$root/apps/arbiter' && mix test --include k8s test/k8s"
+  sh -c "cd '$root/apps/wardmast' && mix test --include k8s test/k8s"

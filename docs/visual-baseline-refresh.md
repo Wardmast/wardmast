@@ -11,8 +11,8 @@ that is provably safe, and in no other.
 
 ## What happens
 
-The Watchdog (`Arbiter.Worker.Watchdog`) polls an approved PR it is auto-merging. When
-the head's CI is red (`:ci_failed`) it calls `Arbiter.Worker.VisualBaselines.refresh/1`
+The Watchdog (`Wardmast.Worker.Watchdog`) polls an approved PR it is auto-merging. When
+the head's CI is red (`:ci_failed`) it calls `Wardmast.Worker.VisualBaselines.refresh/1`
 **before** it dispatches a fix pass, once per head:
 
 1. **Only the visual job failed.** `ci_job_artifacts/3` (a `Mergers.Merger` callback;

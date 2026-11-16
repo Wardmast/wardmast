@@ -1,0 +1,136 @@
+defmodule WardmastWeb.MixProject do
+  use Mix.Project
+
+  def project do
+    [
+      app: :wardmast_web,
+      version:
+        case System.get_env("RELEASE_VERSION") do
+          v when is_binary(v) and byte_size(v) > 0 ->
+            v |> String.trim() |> String.trim_leading("v")
+
+          _ ->
+            case System.cmd("git", ["describe", "--tags", "--abbrev=0"], stderr_to_stdout: true) do
+              {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
+              _ -> "0.0.0"
+            end
+        end,
+      build_path: "../../_build",
+      config_path: "../../config/config.exs",
+      deps_path: "../../deps",
+      lockfile: "../../mix.lock",
+      elixir: "~> 1.20",
+      elixirc_paths: elixirc_paths(Mix.env()),
+      start_permanent: Mix.env() == :prod,
+      aliases: aliases(),
+      deps: deps(),
+      compilers: [:phoenix_live_view] ++ Mix.compilers(),
+      listeners: [Phoenix.CodeReloader],
+      dialyzer: dialyzer()
+    ]
+  end
+
+  # Point at the umbrella-root PLT rather than this app's own build dir, so
+  # `mix dialyzer` from inside apps/wardmast_web reuses the single PLT the root builds
+  # instead of spending minutes constructing a near-identical third copy.
+  # See the root mix.exs `dialyzer/0` for the rationale in full.
+  defp dialyzer do
+    [
+      plt_core_path: "../../priv/plts",
+      plt_local_path: "../../priv/plts",
+      plt_add_apps: [:mix, :eex, :ex_unit],
+      ignore_warnings: "../../.dialyzer_ignore.exs",
+      list_unused_filters: true,
+      flags: [:error_handling, :unknown]
+    ]
+  end
+
+  # Configuration for the OTP application.
+  #
+  # Type `mix help compile.app` for more information.
+  def application do
+    [
+      mod: {WardmastWeb.Application, []},
+      extra_applications: [:logger, :runtime_tools]
+    ]
+  end
+
+  # Specifies which paths to compile per environment.
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
+
+  # Specifies your project dependencies.
+  #
+  # Type `mix help deps` for examples and options.
+  defp deps do
+    [
+      {:phoenix, "~> 1.8.3"},
+      # Static analysis / security scanning. Also declared at the umbrella
+      # root, which owns the shared PLT config — see the root mix.exs and the
+      # `mix audit` alias there.
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false},
+      {:phoenix_ecto, "~> 4.5"},
+      {:phoenix_html, "~> 4.1"},
+      {:phoenix_live_reload, "~> 1.2", only: :dev},
+      {:phoenix_live_view, "~> 1.1.0"},
+      {:lazy_html, ">= 0.1.0", only: :test},
+      {:meck, "~> 1.2", only: :test},
+      {:phoenix_live_dashboard, "~> 0.8.3"},
+      {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
+      {:tailwind, "~> 0.3", runtime: Mix.env() == :dev},
+      {:heroicons,
+       github: "tailwindlabs/heroicons",
+       tag: "v2.2.0",
+       sparse: "optimized",
+       app: false,
+       compile: false,
+       depth: 1},
+      {:telemetry_metrics, "~> 1.0"},
+      {:telemetry_poller, "~> 1.0"},
+      {:gettext, "~> 1.0"},
+      {:wardmast, in_umbrella: true},
+      {:jason, "~> 1.2"},
+      # Markdown rendering + HTML sanitization in one pass (comrak + ammonia,
+      # shipped as a precompiled Rust NIF — no local toolchain required).
+      {:mdex, "~> 0.13"},
+      # Only needed so the *release* build can force a source build of that
+      # NIF: upstream's precompiled `mdex_native` artifact requires
+      # GLIBC_2.34, which RHEL 8 / our `redhat/ubi8` build image (2.28)
+      # cannot load — v0.1.64 could not boot because of it (#1728). The
+      # release workflow sets RUSTLER_PRECOMPILED_FORCE_BUILD_ALL=1, which
+      # makes `rustler_precompiled` hand off to Rustler; Rustler in turn has
+      # to already be in the dependency tree (mdex_native declares it
+      # `optional: true`, so it is not fetched otherwise).
+      #
+      # Fetching it costs nothing here: `rustler` is pure Elixir and only
+      # shells out to cargo when a NIF is actually built, so dev machines and
+      # CI still use the downloaded artifact and need no Rust toolchain.
+      # Version must track the `rustler` crate version in
+      # mdex_native's Cargo.toml (0.38) — Rustler refuses a mismatch.
+      {:rustler, "~> 0.38", optional: true, runtime: false},
+      {:finch, "~> 0.19"},
+      {:bandit, "~> 1.5"},
+      # finch pins mint "~> 1.8"; force the patched line to clear known CVEs.
+      {:mint, "~> 1.9", override: true}
+    ]
+  end
+
+  # Aliases are shortcuts or tasks specific to the current project.
+  #
+  # See the documentation for `Mix` for more info on aliases.
+  defp aliases do
+    [
+      setup: ["deps.get", "assets.setup", "assets.build"],
+      test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"],
+      "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
+      "assets.build": ["compile", "tailwind wardmast_web", "esbuild wardmast_web"],
+      "assets.deploy": [
+        "tailwind wardmast_web --minify",
+        "esbuild wardmast_web --minify",
+        "phx.digest"
+      ]
+    ]
+  end
+end

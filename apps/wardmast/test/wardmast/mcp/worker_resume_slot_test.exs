@@ -1,0 +1,72 @@
+defmodule Wardmast.MCP.WorkerResumeSlotTest do
+  @moduledoc """
+  bd-92mx1m acceptance 2/4 on the MCP surface: `worker_resume` of a task that
+  released its slot, at a full cap, is refused with a message naming the cap
+  and the slot-holding tasks; `force: true` admits it and records the override.
+  """
+  use Wardmast.DataCase, async: false
+
+  alias Wardmast.MCP.Scope
+  alias Wardmast.MCP.Tools
+  alias Wardmast.Tasks.Workspace
+  alias Wardmast.Test.ResumeSlotFixture
+  alias Wardmast.Usage.Event, as: UsageEvent
+  alias Wardmast.Worker
+
+  setup do
+    # bd-80ecol: the resume reaches the real-agent dispatch guard, which
+    # refuses a Claude spawn with no credential of its own.
+    claude_credential_env!()
+
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "mcp-resume-slot-#{System.unique_integer([:positive])}",
+        prefix: "mrs#{System.unique_integer([:positive])}"
+      })
+
+    coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
+    incident = ResumeSlotFixture.setup_incident(ws)
+
+    # `worker_resume` continues the prior session (bd-a9hqfb), so it needs one.
+    {:ok, _} =
+      Ash.create(UsageEvent, %{
+        task_id: incident.a.id,
+        workspace_id: ws.id,
+        repo: ResumeSlotFixture.repo(),
+        step: :work,
+        provider: "claude",
+        session_id: "sess-#{System.unique_integer([:positive])}",
+        occurred_at: DateTime.utc_now()
+      })
+
+    Map.merge(%{ws: ws, coordinator: coordinator}, incident)
+  end
+
+  test "refuses at a full cap, naming the cap and the holder", ctx do
+    assert {:error, {:conflict, message}} =
+             Tools.worker_resume(ctx.coordinator, %{"task_id" => ctx.a.id})
+
+    assert message =~ "cap is 1"
+    assert message =~ ctx.b.id
+    assert message =~ "force"
+    assert Worker.whereis(ctx.a.id) == ctx.first.worker_pid
+    assert ResumeSlotFixture.overrides(ctx.ws) == []
+  end
+
+  test "force: true admits it over the cap and records the override", ctx do
+    assert {:ok, data} =
+             Tools.worker_resume(ctx.coordinator, %{"task_id" => ctx.a.id, "force" => true})
+
+    assert data.worker.task_id == ctx.a.id
+    assert Worker.whereis(ctx.a.id) != ctx.first.worker_pid
+
+    assert [event] = ResumeSlotFixture.overrides(ctx.ws)
+    assert event.payload["task_id"] == ctx.a.id
+    assert event.payload["actor"] == "coordinator"
+  end
+
+  test "the catalog schema accepts `force`" do
+    tool = Enum.find(Wardmast.MCP.Catalog.all(), &(&1.name == "worker_resume"))
+    assert %{"type" => "boolean"} = tool.input_schema["properties"]["force"]
+  end
+end

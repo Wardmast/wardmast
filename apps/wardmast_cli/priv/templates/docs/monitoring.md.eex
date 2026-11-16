@@ -1,0 +1,119 @@
+# Runbook: Event-stream monitoring (don't poll)
+
+Everything in this doc is CLI/raw-HTTP, deliberately — a persistent
+streaming connection doesn't fit the discrete-call shape of an MCP tool, and
+minting the token that feeds it is a one-off bootstrapping step, not
+something worth its own MCP tool. No MCP-first guidance applies here.
+
+Wardmast pushes live events over a long-lived chunked HTTP connection instead
+of making you poll. Route: `GET /events?token=<coord_token>&subscribe=<topics>`.
+
+Default topics if you omit `subscribe`: `inbox,review_gate,worker_failed`.
+`worker_done` and `task_state` exist too but are opt-in (the latter is noisy —
+every FSM transition). For coordinator use, subscribe to all four failure and
+completion signals explicitly:
+
+```
+subscribe=inbox,review_gate,worker_failed,worker_done
+```
+
+A **success-only filter makes a crash look like "still running."** Always
+include `worker_failed` and `review_gate`.
+
+> **Inside an Wardmast session** (`$ARB_SESSION_ID` set), skip this whole
+> runbook and use the session's own event monitor (bd-aqafdr) instead. This
+> doc is for the operator's own shell or a Claude Code session opened
+> against a plain `arb init` checkout, with no Wardmast session of its own.
+
+## Minting a token
+
+```bash
+arb mcp token mint --tier coordinator --json | jq -r .token
+```
+
+Tokens expire — mint a fresh one each time you (re)start the monitor rather
+than reusing an old one across a long session.
+
+### If you see "this scope is bound to a single workspace"
+
+This error signals a stale or legacy coordinator token — one minted before
+coordinator tokens became workspace-agnostic by default. Modern coordinator
+tokens carry `workspace_id: null` and work across every workspace in the
+install. The token embedded in your `.mcp.json` is an older single-workspace
+mint. **Fix:** mint a fresh workspace-agnostic token:
+
+```bash
+arb mcp token mint --tier coordinator --json | jq -r .token
+```
+
+Then swap the new token value into `.mcp.json`'s `url` query param
+(`url=...&token=<new-token>`). Unlike adding a brand-new MCP server entry
+(which needs a full client restart), swapping an existing token is picked up
+by a simple `/mcp` reconnect in the client.
+
+## If the server is on this machine
+
+No ssh, no VPN — just curl the loopback address directly:
+
+```bash
+while true; do
+  TOKEN=$(arb mcp token mint --tier coordinator --json | jq -r .token)
+  /usr/bin/curl -sN --connect-timeout 8 --max-time 240 \
+    "<%= @host %>/events?token=$TOKEN&subscribe=inbox,review_gate,worker_failed,worker_done" \
+    2>/dev/null \
+  | /usr/bin/grep --line-buffered at
+  sleep 1
+done
+```
+
+## If the server is remote
+
+**Never wrap the long-lived stream itself in `ssh`** (`ssh host "curl …"`).
+A network blip wedges the ssh transport half-open and the monitor goes
+silently deaf — no error, it just stops receiving events. `curl --max-time`
+can kill a wedged *direct* TCP connection; it cannot kill a wedged *ssh* one.
+Only the one-shot **token mint** may go over ssh — connect the actual stream
+directly to the server's reachable address (VPN IP, tailnet, etc.):
+
+```bash
+while true; do
+  TOKEN=$(ssh -o ConnectTimeout=8 <remote-host> 'arb mcp token mint --tier coordinator --json' 2>/dev/null | jq -r .token)
+  /usr/bin/curl -sN --connect-timeout 8 --max-time 240 \
+    "http://<server-address>:4848/events?token=$TOKEN&subscribe=inbox,review_gate,worker_failed,worker_done" \
+    2>/dev/null \
+  | /usr/bin/grep --line-buffered at
+  sleep 1
+done
+```
+
+## Why each flag
+
+- `--max-time 240` — hard wall that recycles the connection every ~4 minutes,
+  so a blip drops one cycle instead of hanging forever.
+- `--connect-timeout 8` — fail fast if the server's unreachable; the `while`
+  + `sleep 1` reconnects.
+  `--line-buffered` surfaces events immediately instead of buffering.
+- Use absolute `/usr/bin/curl` and `/usr/bin/grep` — a shell with a
+  `command_not_found_handler` (zsh plus a version manager) can choke on the
+  bare command names inside a loop.
+- The route is `/events`, not `/api/events` (the latter 404s). Served as
+  `application/x-ndjson`.
+
+## In an agent harness
+
+Run it through a persistent background "monitor" primitive so each event
+line becomes a notification — not a fire-and-forget background process that
+only buffers to a file you never look at.
+
+## The stream is a wake-up signal, not the payload
+
+`/events` supports replay: pass `since=<cursor>` (the `"cursor"` field of the
+last event you saw) or an ISO-8601 timestamp, and a reconnect replays
+everything persisted after that point before rejoining the live tail — so a
+gap in coverage only happens if the client reconnects without tracking its
+last cursor, the way the self-healing loop above does (it re-mints a token
+and reconnects cold every cycle). Escalations persist in the mailbox
+regardless — `mcp__arbiter__coordinator_inbox` (CLI: `arb message inbox`) is
+the source of truth; the stream is only for waking you up to check it. To
+tell a *broken* stream from a *quiet* one, cause a known event (e.g. send
+yourself a test message) and confirm it appears.

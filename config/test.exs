@@ -9,13 +9,13 @@ Code.require_file("support/test_db_partition.ex", __DIR__)
 # `mix test` invocations running concurrently from different worktrees on the
 # same host, so fall back to a cwd-derived suffix — every worktree gets an
 # isolated database file with no coordination required from the caller. See
-# Arbiter.TestDbPartition for why this matters (it's not just about avoiding
+# Wardmast.TestDbPartition for why this matters (it's not just about avoiding
 # slow queueing — concurrent invocations sharing a file corrupt each other's
 # schema).
 test_db_partition =
-  System.get_env("MIX_TEST_PARTITION") || Arbiter.TestDbPartition.suffix()
+  System.get_env("MIX_TEST_PARTITION") || Wardmast.TestDbPartition.suffix()
 
-config :arbiter, Arbiter.Repo,
+config :wardmast, Wardmast.Repo,
   database:
     Path.join(
       System.tmp_dir!(),
@@ -61,57 +61,57 @@ config :arbiter, Arbiter.Repo,
   queue_target: 5_000,
   queue_interval: 15_000
 
-config :arbiter_web, ArbiterWeb.Endpoint,
+config :wardmast_web, WardmastWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
   secret_key_base: "tP+Fx7+LODDAMtW348NLPMEFQgFBNOCXEW1X3LdQHm5YMSdusJH7vaCC+c18IJgi",
   server: false
 
 # BoardLive refreshes immediately on worker lifecycle broadcasts in tests; the
 # production trailing debounce (500ms) has its own test that widens the window.
-config :arbiter_web, :board_worker_debounce_ms, 0
+config :wardmast_web, :board_worker_debounce_ms, 0
 
-# Cloak vault key for the test suite. Arbiter.Vault reads ARBITER_CLOAK_KEY at
+# Cloak vault key for the test suite. Wardmast.Vault reads WARDMAST_CLOAK_KEY at
 # runtime and refuses to boot without it; this config fallback injects a fixed
 # (non-secret) 32-byte AES key so the suite encrypts/decrypts workspace secrets
 # without depending on a real environment variable. Never used outside :test.
-config :arbiter, Arbiter.Vault, key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+config :wardmast, Wardmast.Vault, key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 # bd-1754qj: no forming period for the auto-merge lane's merge train.
-config :arbiter, :merge_train_settle_ms, 0
+config :wardmast, :merge_train_settle_ms, 0
 
-config :arbiter, :github_http_stub, true
+config :wardmast, :github_http_stub, true
 # The GitHub limiter's owning-account resolution and periodic /rate_limit poll
 # both make real HTTP calls; disable that probing in the suite so the app-wide
 # singleton never reaches out. Its priority/headroom/secondary logic is still
 # fully exercised (LimiterTest starts isolated instances; the integration tests
 # drive it via Req.Test stubs).
-config :arbiter, :github_limiter_probe, false
+config :wardmast, :github_limiter_probe, false
 
 # DC1: the primary's default worker cap is its hardware suggestion
-# (`Arbiter.Nodes.LocalCapacity.suggestion/0`), enforced. Pin the hardware so the
+# (`Wardmast.Nodes.LocalCapacity.suggestion/0`), enforced. Pin the hardware so the
 # suite's cap does not depend on the CI machine: 32 CPUs and 80 GiB suggest 16.
-config :arbiter, :local_hardware, %{cpus: 32, mem_total: 80 * 1024 * 1024 * 1024}
+config :wardmast, :local_hardware, %{cpus: 32, mem_total: 80 * 1024 * 1024 * 1024}
 
 # bd-6w7usy: the primary's own thermal/memory monitor reads the host; the suite must not
 # depend on (or be derated by) the machine running it. Its tests start a scripted one.
-config :arbiter, :machine_monitor, false
+config :wardmast, :machine_monitor, false
 
 # bd-a9zb7w: a ReviewGate REQUEST_CHANGES verdict now auto-dispatches an
-# implementer fix round (`Arbiter.Worker.maybe_dispatch_fix_round/3`). The real
+# implementer fix round (`Wardmast.Worker.maybe_dispatch_fix_round/3`). The real
 # dispatcher calls `Dispatch.resume/2` — a worktree, a fresh worker, a live
 # agent — which no test that merely drives a rejection verdict wants. Point the
 # suite at the recording stub instead: tests that care assert against
-# `Arbiter.Test.StubFixRoundDispatcher`, and every other one gets a no-op.
-config :arbiter,
+# `Wardmast.Test.StubFixRoundDispatcher`, and every other one gets a no-op.
+config :wardmast,
        :review_gate_fix_round_dispatcher,
-       Arbiter.Test.StubFixRoundDispatcher
+       Wardmast.Test.StubFixRoundDispatcher
 
 # bd-92mx1m: an automatic resume of a task that released its slot, arriving at
-# a full cap, is deferred to `Arbiter.Board.Autopilot` — which would replay it
+# a full cap, is deferred to `Wardmast.Board.Autopilot` — which would replay it
 # as a real `Dispatch.resume/2` whenever some later test frees a slot. Record
 # the deferral instead; tests that care assert against
-# `Arbiter.Test.StubResumeDeferrer`.
-config :arbiter, :resume_deferrer, Arbiter.Test.StubResumeDeferrer
+# `Wardmast.Test.StubResumeDeferrer`.
+config :wardmast, :resume_deferrer, Wardmast.Test.StubResumeDeferrer
 
 # bd-8y1i58: the app-wide limiter singleton outlives every individual test, and
 # a secondary-limit trip parks background traffic for a *wall-clock* cooldown.
@@ -122,20 +122,20 @@ config :arbiter, :resume_deferrer, Arbiter.Test.StubResumeDeferrer
 # `secondary_trips` counter still increments) without leaking a pause across
 # test boundaries; the tests that actually exercise the cooldown start their own
 # limiter with an explicit `secondary_cooldown_ms`.
-config :arbiter, :github_limiter_secondary_cooldown_ms, 0
-config :arbiter, :jira_http_stub, true
-config :arbiter, :shortcut_http_stub, true
-config :arbiter, :gitlab_http_stub, true
-config :arbiter, :oauth_usage_http_stub, true
-config :arbiter, :auto_start_refineries, false
+config :wardmast, :github_limiter_secondary_cooldown_ms, 0
+config :wardmast, :jira_http_stub, true
+config :wardmast, :shortcut_http_stub, true
+config :wardmast, :gitlab_http_stub, true
+config :wardmast, :oauth_usage_http_stub, true
+config :wardmast, :auto_start_refineries, false
 
 # Worker CLAUDE_CONFIG_DIR isolation (bd-3y2mda) is off by default in the suite
 # so unit tests never touch the real cache dir or symlink the operator's config.
 # Tests that exercise isolation enable it and point :worker_config_dir at a tmp
 # dir of their own.
-config :arbiter, :worker_isolate_config, false
+config :wardmast, :worker_isolate_config, false
 
-# Arbiter.MCP (bd-dem49g): the server stays enabled (Plug tests exercise it), but
+# Wardmast.MCP (bd-dem49g): the server stays enabled (Plug tests exercise it), but
 # per-spawn `.mcp.json` injection into worktrees is off by default so existing
 # Sling tests don't write config files or mint tokens. Tests that exercise
 # injection flip `inject_config: true` themselves.
@@ -143,23 +143,23 @@ config :arbiter, :worker_isolate_config, false
 # `sse_max_lifetime_ms: 0` closes a GET /mcp SSE stream right after the initial
 # keepalive flush, so the synchronous test request returns instead of blocking
 # on the held-open stream (bd-3m4yop).
-config :arbiter, Arbiter.MCP, inject_config: false, sse_max_lifetime_ms: 0
+config :wardmast, Wardmast.MCP, inject_config: false, sse_max_lifetime_ms: 0
 
 # Durable per-run transcript root, isolated under tmp so the suite never
 # writes into a real data dir. Tests that assert on transcripts override this
 # per-test with a unique tmp dir.
-config :arbiter, :output_log_root, Path.join(System.tmp_dir!(), "arbiter-worker-logs-test")
+config :wardmast, :output_log_root, Path.join(System.tmp_dir!(), "arbiter-worker-logs-test")
 
 # The node agent (RW5) keeps its status file and credential under its node
-# home. A test that starts `Arbiter.NodeAgent.Supervisor` with no explicit paths
+# home. A test that starts `Wardmast.NodeAgent.Supervisor` with no explicit paths
 # must land in tmp, never in the operator's real `~/.arbiter-node`; tests that
 # assert on the files pass their own.
-config :arbiter, Arbiter.NodeAgent,
+config :wardmast, Wardmast.NodeAgent,
   node_home: Path.join(System.tmp_dir!(), "arbiter-node-agent-test"),
   credential_file: Path.join(System.tmp_dir!(), "arbiter-node-agent-test/credential")
 
-# `Arbiter.Worker.Worktree` and `Arbiter.Reviews.Checkout` both resolve their
-# root via `Arbiter.Config.Paths.worktree_root/0`, whose ultimate fallback is
+# `Wardmast.Worker.Worktree` and `Wardmast.Reviews.Checkout` both resolve their
+# root via `Wardmast.Config.Paths.worktree_root/0`, whose ultimate fallback is
 # a `$HOME`-relative default that isn't writable/isolated for the test suite.
 # Historically (before that resolver existed) this config key being unset
 # meant a hardcoded fallback path from the original author's machine, and any
@@ -172,189 +172,191 @@ config :arbiter, Arbiter.NodeAgent,
 #
 # bd-b6noq9 (#1930): NOT under `System.tmp_dir!()`. A worktree holds real git
 # data for the lifetime of the run using it, and on the dogfood host `/tmp` is
-# a tmpfs swept daily by `systemd-tmpfiles` — a root nothing in Arbiter
+# a tmpfs swept daily by `systemd-tmpfiles` — a root nothing in Wardmast
 # controls. `scratch_root/0` is disk-backed and under `$HOME/.cache`.
-# Mirrors `Arbiter.Config.Paths.scratch_root/0`, which cannot be called from a
+# Mirrors `Wardmast.Config.Paths.scratch_root/0`, which cannot be called from a
 # config script (the app isn't loaded yet) — hence the inline resolution. The
 # key is also configured so the resolver and this file agree even where the
 # two defaults could diverge (HOME unset).
+# This is the one env read outside `Wardmast.Env` (uncallable here, see above), so it
+# spells the one-release `ARBITER_SCRATCH_ROOT` fallback itself. Drop it with the shim.
 scratch_root =
-  System.get_env("ARBITER_SCRATCH_ROOT") ||
+  System.get_env("WARDMAST_SCRATCH_ROOT") || System.get_env("ARBITER_SCRATCH_ROOT") ||
     Path.join(System.get_env("HOME") || System.tmp_dir!(), ".cache/arbiter/scratch")
 
-config :arbiter, :scratch_root, scratch_root
-config :arbiter, :worktree_root, Path.join(scratch_root, "worktrees-test")
-config :arbiter, :worker_tmp_root, Path.join(scratch_root, "worker-tmp-test")
+config :wardmast, :scratch_root, scratch_root
+config :wardmast, :worktree_root, Path.join(scratch_root, "worktrees-test")
+config :wardmast, :worker_tmp_root, Path.join(scratch_root, "worker-tmp-test")
 # bd-59m96o: worker-image state (base-image pins, the container's `arb`
 # launcher that `ContainerSpawn.cli_mounts/2` writes) never lands in the
 # developer's own `~/.arbiter/images`.
-config :arbiter, :image_root, Path.join(scratch_root, "images-test")
-config :arbiter, :run_tmp_sweeper, enabled: false
-config :arbiter, :test_services_reaper, enabled: false
+config :wardmast, :image_root, Path.join(scratch_root, "images-test")
+config :wardmast, :run_tmp_sweeper, enabled: false
+config :wardmast, :test_services_reaper, enabled: false
 
 # RW12: nodes are told to reap only when a test asks (a reap query from a Session in
 # every node test would be noise, and the sandbox owns the connection).
-config :arbiter, :node_reaper, enabled: false
+config :wardmast, :node_reaper, enabled: false
 
 # RW12: a Worker that loses its node asks for an automatic resume; tests that care say so.
-config :arbiter, :node_lost_resume, enabled: false
+config :wardmast, :node_lost_resume, enabled: false
 
 # bd-6zuoo6: never wrap test spawns in a systemd scope — whether the host has a
 # user manager must not decide a test's outcome. The tests that exercise the cap
 # set `:worker_memory_max` themselves (fake binaries, or `:live_systemd`).
-config :arbiter, :worker_memory_max, "off"
+config :wardmast, :worker_memory_max, "off"
 
 # bd-5gvqgc: never let the bwrap write-jail probe decide dispatch outcomes
 # under test — whether the host can jail must not flip the :strict gate's
 # answer for agy. Tests that exercise the jail call `Jail.probe/0` directly
 # (it ignores this override) or put_env `true` themselves. The probe's scratch
 # dir must be disk-backed and off /tmp, which is a tmpfs inside the jail.
-config :arbiter, :worker_jail_available, false
+config :wardmast, :worker_jail_available, false
 # bd-8btihu: spawning agy refuses without a keyring; pin it on so tests that
 # build an agy argv don't depend on the host's session bus.
-config :arbiter, :worker_gemini_keyring_available, true
+config :wardmast, :worker_gemini_keyring_available, true
 # bd-9cygoo (G16): a pushing worker is refused without a scoped git credential
 # or an explicit legacy opt-in. Tests that are not about that keep the pre-G16
 # behaviour; the G16 tests put_env this to false (or build a guarded install).
-config :arbiter, :git_credential_unenforced, true
-config :arbiter, :worker_jail_probe_root, Path.join(scratch_root, "jail-probe-test")
+config :wardmast, :git_credential_unenforced, true
+config :wardmast, :worker_jail_probe_root, Path.join(scratch_root, "jail-probe-test")
 
 # Stalled-worker detection (bd-awi4nw): shorten the post-exit grace so the
 # deferred classify+escalate check fires fast under test. Still > 0 so a normal
 # completion's in-flight `arb done` wins the race before the check runs.
-config :arbiter, :worker_exit_grace_ms, 50
+config :wardmast, :worker_exit_grace_ms, 50
 config :logger, level: :warning
 config :phoenix, :plug_init_mode, :runtime
 config :phoenix_live_view, enable_expensive_runtime_checks: true
 config :phoenix, sort_verified_routes_query_params: true
 
 # Disable the pr_state background poller in test — it would otherwise hit the
-# forge on a timer. Tests drive `Arbiter.Reviews.PrStatePoller.poll/1`
+# forge on a timer. Tests drive `Wardmast.Reviews.PrStatePoller.poll/1`
 # synchronously with a Req.Test stub and start their own disabled instance.
-config :arbiter, :pr_state_poller, enabled: false
+config :wardmast, :pr_state_poller, enabled: false
 
 # Disable the stale-review reaper in test — it would otherwise sweep every
 # :running ExternalReview record a test creates on a timer, off the sandbox
-# connection. Tests drive `Arbiter.Reviews.StaleReviewReaper.reap/1`
+# connection. Tests drive `Wardmast.Reviews.StaleReviewReaper.reap/1`
 # synchronously with an explicit :timeout_ms.
-config :arbiter, :stale_review_reaper, enabled: false
+config :wardmast, :stale_review_reaper, enabled: false
 
 # bd-a370ak: tests drive PendingMergeSweeper.sweep/1 synchronously.
-config :arbiter, :pending_merge_sweeper, enabled: false
+config :wardmast, :pending_merge_sweeper, enabled: false
 
 # Disable the coordinator-session reaping GenServers in test — they would
 # otherwise sweep/touch on a timer, off the sandbox connection. Tests drive
-# `Arbiter.Sessions.IdleReaper.reap/1`, `Arbiter.Sessions.OrphanReaper.sweep_once/2`
-# and `Arbiter.Sessions.Heartbeat.touch/0` synchronously (bd-3qkbch, phase 10).
-config :arbiter, :sessions_idle_reaper, enabled: false
-config :arbiter, :sessions_orphan_reaper, enabled: false
-config :arbiter, :sessions_heartbeat, enabled: false
+# `Wardmast.Sessions.IdleReaper.reap/1`, `Wardmast.Sessions.OrphanReaper.sweep_once/2`
+# and `Wardmast.Sessions.Heartbeat.touch/0` synchronously (bd-3qkbch, phase 10).
+config :wardmast, :sessions_idle_reaper, enabled: false
+config :wardmast, :sessions_orphan_reaper, enabled: false
+config :wardmast, :sessions_heartbeat, enabled: false
 
-# bd-9iv4qd: tests drive `Arbiter.Worker.WorktreeSweeper.sweep_once/1` directly.
-config :arbiter, :worktree_sweeper, enabled: false
+# bd-9iv4qd: tests drive `Wardmast.Worker.WorktreeSweeper.sweep_once/1` directly.
+config :wardmast, :worktree_sweeper, enabled: false
 
 # bd-9r5jdt: the weekly image refresh is driven by `Refresher.run_now/2` in tests.
-config :arbiter, :worker_image_refresher, enabled: false
+config :wardmast, :worker_image_refresher, enabled: false
 
 # bd-1wm14e: `ContainerSpawn.prepare/1` would seed the image-keyed deps cache,
 # which runs a real container; tests drive `DepsCache` with a stand-in runner.
-config :arbiter, :worker_deps_cache, false
+config :wardmast, :worker_deps_cache, false
 
 # Same reasoning, one more sweeper: tests drive
-# `Arbiter.Sessions.TranscriptRetention.sweep/1` synchronously (§11, phase 9).
-config :arbiter, :sessions_transcript_retention, enabled: false
+# `Wardmast.Sessions.TranscriptRetention.sweep/1` synchronously (§11, phase 9).
+config :wardmast, :sessions_transcript_retention, enabled: false
 
 # And the shared-memory staleness checker (bd-19qve3): tests call
-# `Arbiter.Sessions.Memory.Checker.run/1` directly, and a mount's nudge to the
+# `Wardmast.Sessions.Memory.Checker.run/1` directly, and a mount's nudge to the
 # app-supervised checker is a no-op.
-config :arbiter, :memory_checker, enabled: false
+config :wardmast, :memory_checker, enabled: false
 
 # A small cap here keeps `TranscriptTest`'s size-cap test from materialising
 # a 100 MB default three times over (bd-5pelo2 round 4 finding 4).
-config :arbiter, :sessions_transcript, max_bytes: 1024
+config :wardmast, :sessions_transcript, max_bytes: 1024
 
-# §8.3's bridge-verification poll (`Arbiter.Sessions.verify_bridge/2`, phase
+# §8.3's bridge-verification poll (`Wardmast.Sessions.verify_bridge/2`, phase
 # 8) defaults to a 15s timeout, backgrounded on every `launch/1` call with
 # `remote_control: true` — a real 15s poll under the default settings would
 # otherwise run, unwatched, behind every such test that does not override it
 # itself. Small enough here that a test asserting the "bridge never came up"
 # path (the common case: nothing in a test's throwaway config dir ever writes
 # a `bridge-session` record) settles in milliseconds instead.
-config :arbiter, :sessions_bridge_verify_timeout_ms, 50
-config :arbiter, :sessions_bridge_verify_poll_interval_ms, 10
+config :wardmast, :sessions_bridge_verify_timeout_ms, 50
+config :wardmast, :sessions_bridge_verify_poll_interval_ms, 10
 
 # Disable the Stage 3 canary ticker in test — it would otherwise walk every
 # workspace a test creates on a timer, off the sandbox connection. Tests drive
-# `Arbiter.Loop.CanaryTicker.poll/1` synchronously on their own instance.
-config :arbiter, :loop_canary_ticker, enabled: false
+# `Wardmast.Loop.CanaryTicker.poll/1` synchronously on their own instance.
+config :wardmast, :loop_canary_ticker, enabled: false
 
 # bd-8j9i9p: no background over-budget sweep in test — it would otherwise walk
 # every issue a test creates on a timer, off the sandbox connection. Tests
-# drive `Arbiter.Usage.BudgetPatrol.sweep/1` synchronously.
-config :arbiter, :budget_patrol, enabled: false
-config :arbiter, :spend_watch, enabled: false
-config :arbiter, :spend_patrol, enabled: false
+# drive `Wardmast.Usage.BudgetPatrol.sweep/1` synchronously.
+config :wardmast, :budget_patrol, enabled: false
+config :wardmast, :spend_watch, enabled: false
+config :wardmast, :spend_patrol, enabled: false
 
 # G18: a spawn never asks the host's real agent CLI for its `--version`; a test
-# that needs a harness version hands `Arbiter.Agents.HarnessVersion` a fake one.
-config :arbiter, :harness_version, probe: false
+# that needs a harness version hands `Wardmast.Agents.HarnessVersion` a fake one.
+config :wardmast, :harness_version, probe: false
 
-# bd-b1b3mp: tests call `Arbiter.Tasks.BacklogTailDigest.sweep/1` directly.
-config :arbiter, :backlog_tail_digest, enabled: false
+# bd-b1b3mp: tests call `Wardmast.Tasks.BacklogTailDigest.sweep/1` directly.
+config :wardmast, :backlog_tail_digest, enabled: false
 
-# bd-8nlez1: tests drive `Arbiter.Tasks.AttentionSweep.run/1` with their own clock.
-config :arbiter, :attention_sweep, enabled: false
+# bd-8nlez1: tests drive `Wardmast.Tasks.AttentionSweep.run/1` with their own clock.
+config :wardmast, :attention_sweep, enabled: false
 
 # Disable the durable events retention sweeper in test — it would otherwise
 # delete rows on a timer off the sandbox connection. Tests drive
-# `Arbiter.Events.Retention.sweep/1` synchronously.
-config :arbiter, :events_retention, enabled: false
+# `Wardmast.Events.Retention.sweep/1` synchronously.
+config :wardmast, :events_retention, enabled: false
 
 # bd-6jcebm: no background output-offload sweep in the suite — tests drive
-# `Arbiter.Workers.OutputOffload.sweep/1` synchronously.
-config :arbiter, :output_offload, enabled: false
+# `Wardmast.Workers.OutputOffload.sweep/1` synchronously.
+config :wardmast, :output_offload, enabled: false
 
 # bd-be804c: no background sweep of anyone's ~/.claude in the suite — the tests
-# drive `Arbiter.Sessions.UsageIngest.ingest/1` synchronously against fixtures.
-config :arbiter, :coordinator_session_ingest, enabled: false
-config :arbiter, :coordinator_session_dirs, []
+# drive `Wardmast.Sessions.UsageIngest.ingest/1` synchronously against fixtures.
+config :wardmast, :coordinator_session_ingest, enabled: false
+config :wardmast, :coordinator_session_dirs, []
 
 # Disable the Codex / Gemini CLI / Antigravity refresh probe in test — there are
 # no real CLIs or endpoints to hit. Tests that exercise the prober inject a
 # :refresh_fun stub and enable explicitly.
-config :arbiter, :cloud_quota_probe, enabled: false
+config :wardmast, :cloud_quota_probe, enabled: false
 
 # Never run the real `claude` CLI against a grant from the test suite; the
 # refresher's tests start their own instance with a fake CLI.
-config :arbiter, :quota_grant_refresher, enabled: false
+config :wardmast, :quota_grant_refresher, enabled: false
 
 # The staleness watch's tests start their own instance; the application's must
 # never raise alerts from whatever snapshots a test happens to seed.
-config :arbiter, :quota_staleness_watch, enabled: false
+config :wardmast, :quota_staleness_watch, enabled: false
 
 # The CI backpressure timer would poll (and log) against the shared sandbox from
 # a process no test owns; its own test starts an instance with `interval_ms: :never`.
-config :arbiter, :ci_backpressure_refresher, enabled: false
+config :wardmast, :ci_backpressure_refresher, enabled: false
 
 # The budget server's tests start their own instance with injected inputs.
-config :arbiter, :quota_budget_server, enabled: false
+config :wardmast, :quota_budget_server, enabled: false
 
 # bd-4f6opo: `arb loop analyze --discover` makes a real model call. Refuse it
 # suite-wide; tests that exercise the pass inject their own `:invoker`.
-config :arbiter, :loop_discovery_invoker, :disabled
+config :wardmast, :loop_discovery_invoker, :disabled
 
 # bd-avt4lt: transcript distillation is the same kind of model call. Same fence.
-config :arbiter, :transcript_distillation_invoker, :disabled
+config :wardmast, :transcript_distillation_invoker, :disabled
 
 # bd-c7lx65 (R15): an offline replay spawns real agent CLIs. Same fence; tests
 # that run a replay pass their own `:runner`.
-config :arbiter, :loop_replay_runner, :disabled
+config :wardmast, :loop_replay_runner, :disabled
 
 # Disable direct Gemini CLI / Antigravity quota fetching in test — there are no
 # real Google credentials or endpoints to hit, so the quota surface stays a pure
 # DB read. Tests that exercise the fetch path pass `enabled: true` explicitly and
 # stub HTTP with a Req.Test plug.
-config :arbiter, :cloud_code_quota, enabled: false
+config :wardmast, :cloud_code_quota, enabled: false
 
 # Direct Codex quota (bd-cqfn5i): point the auth-file read at a path that never
 # exists so surface tests (quota_get / GET /api/quota) get the graceful no-op
@@ -362,45 +364,45 @@ config :arbiter, :cloud_code_quota, enabled: false
 # `credentials:`/`auth_path:` and enable the Req.Test stub explicitly.
 # Also default HTTP stubbing to true in test so any unstubbed usage probe fails
 # closed against the Req.Test stub instead of hitting the live network.
-config :arbiter, :codex_quota, auth_path: "/nonexistent/codex/auth.json"
-config :arbiter, :codex_quota_http_stub, true
+config :wardmast, :codex_quota, auth_path: "/nonexistent/codex/auth.json"
+config :wardmast, :codex_quota_http_stub, true
 
 # Codex model pre-flight reads models_cache.json / auth.json / config.toml from
 # the codex home; never let a test read the operator's real ~/.codex.
-config :arbiter, :codex_model_catalog, codex_home: "/nonexistent/codex-home"
+config :wardmast, :codex_model_catalog, codex_home: "/nonexistent/codex-home"
 
 # The Codex argv auth probe is a real model turn on the operator's quota. Fail
 # closed in test: tests that need the argv shape opt in via Application.put_env.
-config :arbiter, :codex_argv_probe, false
+config :wardmast, :codex_argv_probe, false
 
-# `Arbiter.Quota.CloudCode.antigravity/1` shells out to the `agy` CLI by
+# `Wardmast.Quota.CloudCode.antigravity/1` shells out to the `agy` CLI by
 # name/path via `:agy_cmd` (default `"agy"`, resolved with
 # `System.find_executable/1`). Point the default at a name that can never
 # resolve so the suite's quota surface stays a pure no-op instead of shelling
 # out to a real ~199 MB `agy` binary on whatever machine happens to have it
 # installed. Tests exercising the live path pass `agy_cmd:` (or
 # `agy_usage_probe:`) explicitly.
-config :arbiter, :agy_cmd, "arbiter-test-nonexistent-agy"
+config :wardmast, :agy_cmd, "arbiter-test-nonexistent-agy"
 
-# `Arbiter.Sessions.LaunchProviders` offers a session provider only when its
+# `Wardmast.Sessions.LaunchProviders` offers a session provider only when its
 # CLI resolves on PATH (bd-8qoxst). The suite never runs those CLIs (launches
 # go through a stub runner), so every CLI resolves here; tests of the
 # "not installed" case pass `find_executable:` explicitly.
-config :arbiter, :sessions_find_executable, &Function.identity/1
+config :wardmast, :sessions_find_executable, &Function.identity/1
 
 # Disable the fleet credential Watchdog in test — its probe is a real agent-CLI
 # round-trip per adapter (`codex exec` in particular bills against the ChatGPT
 # session quota), and the suite has no CLIs to hit. Both
-# `Arbiter.Agents.CredentialWatchdog`'s moduledoc and its test file already
+# `Wardmast.Agents.CredentialWatchdog`'s moduledoc and its test file already
 # assumed this was set; it wasn't, so every `mix test` run was firing live
 # probes from the app-started singleton (bd-ajgve2). Tests that need a polling
 # Watchdog start their own unnamed instance with `enabled: true`.
-config :arbiter, :credential_watchdog, enabled: false
+config :wardmast, :credential_watchdog, enabled: false
 
 # bd-9p4lx9: the grok credential broker must never touch the operator's real
 # ~/.grok/auth.json from a test: refreshing it would rotate their live token.
 # Broker tests point `:auth_path` at a private tmp file.
-config :arbiter, :grok_broker, auth_path: "/nonexistent/arbiter-test/grok/auth.json"
+config :wardmast, :grok_broker, auth_path: "/nonexistent/arbiter-test/grok/auth.json"
 
 # The board's auto-dispatcher (bd-bqyeqa). Off and never ticking under test:
 # a test that resumes the scheduler is exercising the switch, not asking for a
@@ -415,7 +417,7 @@ config :arbiter, :grok_broker, auth_path: "/nonexistent/arbiter-test/grok/auth.j
 # test checks out a sandbox connection, so its boot read of the persisted pause
 # state can only fail and then retry ("still unreadable (attempt N)") every few
 # seconds for the whole run. Tests that exercise the read pass `:read_status`.
-config :arbiter, :board_autopilot,
+config :wardmast, :board_autopilot,
   enabled: false,
   interval_ms: :never,
   topics: [],
@@ -427,15 +429,15 @@ config :arbiter, :board_autopilot,
 # the "empty ledger" calibration and issue-estimate tests failed whenever a
 # fixture-heavy test ran just before them (bd-jw7cb0). The cache's own test
 # turns it back on.
-config :arbiter, Arbiter.Usage.EstimateCache, enabled: false
-config :arbiter, Arbiter.Reports.Cache, enabled: false
+config :wardmast, Wardmast.Usage.EstimateCache, enabled: false
+config :wardmast, Wardmast.Reports.Cache, enabled: false
 
 # Coordinator sessions (bd-bpt0ag). The session socket directory is derived
 # from `XDG_RUNTIME_DIR`, which is a real tmpfs on the dogfood host — point it
 # at a scratch path under test so nothing in the suite can create a socket
 # beside a live session's. Tests that assert on paths override this per test
 # with their own `tmp_dir`.
-config :arbiter,
+config :wardmast,
        :sessions_runtime_dir,
        Path.join(System.tmp_dir!(), "arbiter-test-sessions-runtime")
 
@@ -444,22 +446,22 @@ config :arbiter,
 # `:primary_checkout` pinned to a path that exists nowhere — so the §10.2
 # live-checkout guard is exercised deterministically rather than against
 # whatever checkout the developer happens to be running from.
-config :arbiter,
+config :wardmast,
        :sessions_root,
        Path.join(System.tmp_dir!(), "arbiter-test-sessions-root")
 
 # Per-account login config dirs (bd-c99hys): under tmp, never the operator's
 # real `~/.arbiter/accounts`.
-config :arbiter,
+config :wardmast,
        :accounts_root,
        Path.join(System.tmp_dir!(), "arbiter-test-accounts-root")
 
-config :arbiter, :primary_checkout, "/nonexistent/arbiter-primary-checkout"
+config :wardmast, :primary_checkout, "/nonexistent/arbiter-primary-checkout"
 
 # Shared memory root (bd-6dkpf1, RFC §9.4). Same reasoning as :sessions_root
 # above — under tmp so the suite never mounts the operator's real memory
 # files into throwaway session scaffolds.
-config :arbiter,
+config :wardmast,
        :memory_root,
        Path.join(System.tmp_dir!(), "arbiter-test-memory-root")
 
@@ -468,14 +470,14 @@ config :arbiter,
 # suite that provisions dozens of throwaway sessions under tmp. Point the
 # source at a directory that does not exist; the tests that exercise seeding
 # pass their own source explicitly.
-config :arbiter,
+config :wardmast,
        :sessions_credentials_source,
        Path.join(System.tmp_dir!(), "arbiter-test-absent-operator-config")
 
 # Same hazard for an agy session (bd-7xuvfl): its `$HOME` passes the operator's
 # HOME through, and without a Secret Service copies agy's credential files out
 # of it. Point it at nothing; the tests that exercise passthrough pass their own.
-config :arbiter,
+config :wardmast,
        :sessions_agy_source_home,
        Path.join(System.tmp_dir!(), "arbiter-test-absent-operator-home")
 
@@ -483,37 +485,37 @@ config :arbiter,
 # that resolved the real `systemctl` ran `--user stop` on every live `arb-run-*`
 # scope on the host, SIGTERMing running workers. Tests that need a working binary
 # override these keys explicitly (see memory_cap_worker_test).
-config :arbiter,
+config :wardmast,
        :systemctl,
-       Path.expand("../apps/arbiter/test/support/stub_bin/systemctl", __DIR__)
+       Path.expand("../apps/wardmast/test/support/stub_bin/systemctl", __DIR__)
 
-config :arbiter,
+config :wardmast,
        :systemd_run,
-       Path.expand("../apps/arbiter/test/support/stub_bin/systemd-run", __DIR__)
+       Path.expand("../apps/wardmast/test/support/stub_bin/systemd-run", __DIR__)
 
 # K8: the controller-image boot publish is driven by `Publisher.publish_controller/1` in tests.
-config :arbiter, :image_publisher, boot: false, ledger: nil, prefetch: false
+config :wardmast, :image_publisher, boot: false, ledger: nil, prefetch: false
 
 # SI-L: local runs take the published image from the local podman store. Off in the suite:
 # a test that exercises it passes `local_image: [published_image: true, …]`.
-config :arbiter, :local_published_image, false
-config :arbiter, :cli_set_watcher, enabled: false
+config :wardmast, :local_published_image, false
+config :wardmast, :cli_set_watcher, enabled: false
 
 # A merge-permitting ReviewGate ruling resumes the ticket's merge path
-# (`Arbiter.ReviewGate.RulingResume`). Production does it off the recording
+# (`Wardmast.ReviewGate.RulingResume`). Production does it off the recording
 # caller's process; the suite runs it inline so a test can assert the outcome.
-config :arbiter, :ruling_resume, :sync
+config :wardmast, :ruling_resume, :sync
 
 # bd-a2zrh0: the Claude control channel spawns the real `claude` CLI. Off under
 # test so no suite run drives a host's installed CLI (or its login); the tests
 # of the channel itself turn it on and point it at a stub CLI.
-config :arbiter, Arbiter.Agents.Claude.ControlChannel, enabled: false
+config :wardmast, Wardmast.Agents.Claude.ControlChannel, enabled: false
 
 # #1305: no real waiting between bot-token verification retries, and no cross-test
 # reuse of a passing verification (the retry tests opt in with their own values).
-config :arbiter, :gitlab_bot_verify, backoff_ms: [0, 0], cache_ttl_ms: 0
+config :wardmast, :gitlab_bot_verify, backoff_ms: [0, 0], cache_ttl_ms: 0
 
 # #1299: a pinned host run gets its own Mix home, seeded with `mix local.hex`
 # (network) on first use. No suite run installs Hex into a real home; the
 # toolchain tests that cover seeding pass their own `:seed`.
-config :arbiter, :worker_toolchain_mix_seed, false
+config :wardmast, :worker_toolchain_mix_seed, false

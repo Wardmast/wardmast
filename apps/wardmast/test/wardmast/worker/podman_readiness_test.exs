@@ -1,0 +1,450 @@
+defmodule Wardmast.Worker.PodmanReadinessTest do
+  # bd-46xndf (P1): every probe command is stubbed, so this runs on a host with
+  # no podman at all.
+  use ExUnit.Case, async: true
+
+  alias Wardmast.Test.ArbEscriptFixture
+  alias Wardmast.Worker.PodmanReadiness
+
+  @info %{
+    "host" => %{
+      "cgroupVersion" => "v2",
+      "ociRuntime" => %{"name" => "crun"},
+      "networkBackend" => "netavark",
+      "security" => %{"rootless" => true}
+    },
+    "store" => %{"graphDriverName" => "overlay", "graphOptions" => %{}}
+  }
+
+  # A scripted host: map of "cmd arg arg" prefix => {output, status}. The
+  # bridge `podman run` is answered by label mode.
+  defp runner(overrides \\ %{}) do
+    base = %{
+      "podman --version" => {"podman version 5.8.7\n", 0},
+      "podman info --format json" => {Jason.encode!(@info), 0},
+      "getenforce" => {"Enforcing\n", 0},
+      "podman image exists" => {"", 0},
+      "podman run teardown" => {"cid\n", 0},
+      "podman rm" => {"", 0},
+      "podman container exists" => {"", 1},
+      "podman run label=disable" => {"pong\n", 0},
+      "podman run default" => {"connect: Permission denied\n", 1}
+    }
+
+    table = Map.merge(base, overrides)
+
+    fn cmd, args, _opts ->
+      key =
+        cond do
+          cmd == "podman" and List.first(args) == "run" and "-d" in args ->
+            "podman run teardown"
+
+          cmd == "podman" and List.first(args) == "run" and "label=disable" in args ->
+            "podman run label=disable"
+
+          cmd == "podman" and List.first(args) == "run" ->
+            "podman run default"
+
+          cmd == "podman" and List.first(args) == "rm" ->
+            "podman rm"
+
+          cmd == "podman" and Enum.take(args, 2) == ["container", "exists"] ->
+            "podman container exists"
+
+          cmd == "podman" and Enum.take(args, 2) == ["image", "exists"] ->
+            "podman image exists"
+
+          cmd == "podman" and Enum.take(args, 2) == ["image", "inspect"] ->
+            "podman image inspect"
+
+          true ->
+            Enum.join([cmd | args], " ")
+        end
+
+      Map.get(table, key, {"unexpected: #{key}", 127})
+    end
+  end
+
+  defp read_file(files \\ %{}) do
+    base = %{
+      "/etc/subuid" => "ryan:524288:65536\n",
+      "/etc/subgid" => "ryan:524288:65536\n",
+      "/proc/sys/user/max_user_namespaces" => "126539\n"
+    }
+
+    table = Map.merge(base, files)
+
+    fn path ->
+      case Map.fetch(table, path) do
+        {:ok, body} -> {:ok, body}
+        :error -> {:error, :enoent}
+      end
+    end
+  end
+
+  # The arb check reads the host's arb and the configured worker image unless
+  # told otherwise; these name none, so the host never decides an outcome.
+  defp diagnose(runner_overrides \\ %{}, files \\ %{}) do
+    PodmanReadiness.diagnose(
+      runner: runner(runner_overrides),
+      read_file: read_file(files),
+      user: "ryan",
+      arb_path: nil,
+      worker_image: nil
+    )
+  end
+
+  defp check(report, id), do: Enum.find(report.checks, &(&1.id == id))
+
+  test "a healthy Fedora-like host is ready and every check passes" do
+    report = diagnose()
+    assert report.ready
+    assert report.installed
+    assert Enum.all?(report.checks, &(&1.status in ["ok", "warn"]))
+
+    for id <-
+          ~w(podman rootless storage_driver subid user_namespaces selinux cgroups socket_bridge teardown) do
+      assert check(report, id).status == "ok", "#{id} should be ok"
+    end
+
+    assert check(report, "podman").detail =~ "5.8.7"
+    assert check(report, "selinux").detail =~ "Enforcing"
+  end
+
+  test "teardown: a running --init container removed by name passes" do
+    test_pid = self()
+
+    runner = fn
+      "podman", ["rm" | args] = full, _opts ->
+        send(test_pid, {:rm, args})
+        runner().("podman", full, [])
+
+      cmd, args, opts ->
+        runner().(cmd, args, opts)
+    end
+
+    report = PodmanReadiness.diagnose(runner: runner, read_file: read_file(), user: "ryan")
+    assert check(report, "teardown").status == "ok"
+    assert_received {:rm, ["--force", "--ignore", "--time", "0", "arb-teardown-probe-" <> _]}
+  end
+
+  test "teardown: a container that survives its removal fails with a hint" do
+    report = diagnose(%{"podman container exists" => {"", 0}})
+    assert check(report, "teardown").status == "fail"
+    refute report.ready
+    assert check(report, "teardown").hint =~ "podman rm -f"
+  end
+
+  test "teardown: a probe container that cannot start is a warning, not a failure" do
+    report = diagnose(%{"podman run teardown" => {"crun: no such file", 126}})
+    assert check(report, "teardown").status == "warn"
+    assert report.ready
+  end
+
+  test "probes: [] runs no container at all" do
+    test_pid = self()
+
+    runner = fn
+      "podman", ["run" | _], _opts ->
+        send(test_pid, :ran_a_container)
+        {"", 0}
+
+      cmd, args, opts ->
+        runner().(cmd, args, opts)
+    end
+
+    report =
+      PodmanReadiness.diagnose(runner: runner, read_file: read_file(), user: "ryan", probes: [])
+
+    assert report.ready
+    assert check(report, "socket_bridge") == nil
+    assert check(report, "teardown") == nil
+    refute_received :ran_a_container
+  end
+
+  test "podman missing is a single failure with an install hint" do
+    report = diagnose(%{"podman --version" => {"enoent", 127}})
+    refute report.ready
+    refute report.installed
+    assert [%{id: "podman", status: "fail", hint: hint}] = report.checks
+    assert hint =~ "podman"
+  end
+
+  test "missing subuid range fails with an usermod hint" do
+    report = diagnose(%{}, %{"/etc/subuid" => "other:100000:65536\n"})
+    refute report.ready
+    c = check(report, "subid")
+    assert c.status == "fail"
+    assert c.hint =~ "usermod --add-subuids"
+  end
+
+  test "a too-small subgid range fails" do
+    report = diagnose(%{}, %{"/etc/subgid" => "ryan:524288:1000\n"})
+    assert check(report, "subid").status == "fail"
+  end
+
+  test "user namespaces disabled fails with the sysctl hint" do
+    report = diagnose(%{}, %{"/proc/sys/user/max_user_namespaces" => "0\n"})
+    c = check(report, "user_namespaces")
+    assert c.status == "fail"
+    assert c.hint =~ "user.max_user_namespaces"
+  end
+
+  test "SELinux disabled or absent is ok" do
+    report = diagnose(%{"getenforce" => {"enoent", 127}})
+    assert check(report, "selinux").status == "ok"
+    assert check(report, "selinux").detail =~ "not installed"
+  end
+
+  test "cgroups v1 warns (no rootless resource limits) but is not a failure" do
+    info = put_in(@info, ["host", "cgroupVersion"], "v1")
+    report = diagnose(%{"podman info --format json" => {Jason.encode!(info), 0}})
+    c = check(report, "cgroups")
+    assert c.status == "warn"
+    assert c.hint =~ "cgroup"
+    assert report.ready
+  end
+
+  test "fuse-overlayfs storage warns about copy throughput" do
+    info =
+      put_in(@info, ["store", "graphOptions"], %{
+        "overlay.mount_program" => %{"Executable" => "/usr/bin/fuse-overlayfs"}
+      })
+
+    report = diagnose(%{"podman info --format json" => {Jason.encode!(info), 0}})
+    c = check(report, "storage_driver")
+    assert c.status == "warn"
+    assert c.detail =~ "fuse-overlayfs"
+    assert report.ready
+  end
+
+  test "the vfs storage driver fails" do
+    info = put_in(@info, ["store", "graphDriverName"], "vfs")
+    report = diagnose(%{"podman info --format json" => {Jason.encode!(info), 0}})
+    assert check(report, "storage_driver").status == "fail"
+    refute report.ready
+  end
+
+  test "rootful podman fails the rootless check" do
+    info = put_in(@info, ["host", "security", "rootless"], false)
+    report = diagnose(%{"podman info --format json" => {Jason.encode!(info), 0}})
+    assert check(report, "rootless").status == "fail"
+  end
+
+  test "socket bridge: label=disable denied is a failure with the SELinux hint" do
+    report = diagnose(%{"podman run label=disable" => {"connect: Permission denied\n", 1}})
+    c = check(report, "socket_bridge")
+    assert c.status == "fail"
+    assert c.detail =~ "Permission denied"
+    assert c.hint =~ "label=disable"
+    refute report.ready
+  end
+
+  test "socket bridge: default label working too is noted in the detail" do
+    report = diagnose(%{"podman run default" => {"pong\n", 0}})
+    c = check(report, "socket_bridge")
+    assert c.status == "ok"
+    assert c.detail =~ "default"
+  end
+
+  test "socket bridge: a missing probe image fails with a pull hint" do
+    report = diagnose(%{"podman image exists" => {"", 1}})
+    c = check(report, "socket_bridge")
+    assert c.status == "fail"
+    assert c.hint =~ "podman pull"
+  end
+
+  test "the bridge self-test really listens on a unix socket the stub can reach" do
+    test_pid = self()
+
+    runner = fn
+      "podman", ["run" | args], _opts ->
+        mount = Enum.find(args, &String.contains?(&1, ":/proxy"))
+        [dir, _] = String.split(mount, ":/proxy")
+        send(test_pid, {:probe_dir, dir})
+
+        {:ok, sock} =
+          :gen_tcp.connect({:local, String.to_charlist(Path.join(dir, "bridge.sock"))}, 0, [
+            :binary,
+            active: false
+          ])
+
+        {:ok, data} = :gen_tcp.recv(sock, 0, 2000)
+        :gen_tcp.close(sock)
+        {data, 0}
+
+      cmd, args, opts ->
+        runner().(cmd, args, opts)
+    end
+
+    report =
+      PodmanReadiness.diagnose(runner: runner, read_file: read_file(), user: "ryan")
+
+    assert check(report, "socket_bridge").status == "ok"
+    assert_received {:probe_dir, dir}
+    refute File.exists?(dir)
+  end
+
+  test "a probe timeout removes the named probe container" do
+    test_pid = self()
+
+    runner = fn
+      "podman", ["run" | args], _opts ->
+        send(test_pid, {:run_args, args})
+        {"podman timed out", 124}
+
+      "podman", ["rm", "-f", name], _opts ->
+        send(test_pid, {:removed, name})
+        {"", 0}
+
+      cmd, args, opts ->
+        runner().(cmd, args, opts)
+    end
+
+    report = PodmanReadiness.diagnose(runner: runner, read_file: read_file(), user: "ryan")
+
+    assert check(report, "socket_bridge").status == "fail"
+    assert_received {:run_args, args}
+    name = args |> Enum.drop_while(&(&1 != "--name")) |> Enum.at(1)
+    assert name =~ "arb-podman-probe-"
+    assert_received {:removed, ^name}
+  end
+
+  @tag timeout: 30_000
+  test "the bridge listener keeps accepting past the old 5 s window" do
+    runner = fn
+      "podman", ["run" | args], _opts ->
+        # Slow first run (keep-id setup, cold image) before connect().
+        Process.sleep(5_500)
+        mount = Enum.find(args, &String.contains?(&1, ":/proxy"))
+        [dir, _] = String.split(mount, ":/proxy")
+
+        {:ok, sock} =
+          :gen_tcp.connect({:local, String.to_charlist(Path.join(dir, "bridge.sock"))}, 0, [
+            :binary,
+            active: false
+          ])
+
+        {:ok, data} = :gen_tcp.recv(sock, 0, 2000)
+        :gen_tcp.close(sock)
+        {data, 0}
+
+      cmd, args, opts ->
+        runner().(cmd, args, opts)
+    end
+
+    report = PodmanReadiness.diagnose(runner: runner, read_file: read_file(), user: "ryan")
+    assert check(report, "socket_bridge").status == "ok"
+  end
+
+  # bd-59m96o: will `arb` run inside worker containers?
+  describe "arb_runtime" do
+    @describetag :tmp_dir
+
+    defp arb_report(opts, overrides \\ %{}) do
+      PodmanReadiness.diagnose(
+        [runner: runner(overrides), read_file: read_file(), user: "ryan", probes: [:arb]] ++ opts
+      )
+    end
+
+    test "an arb with its build stamp runs on the base image's runtime for that release", %{
+      tmp_dir: dir
+    } do
+      arb = ArbEscriptFixture.build!(dir, stamp: "29")
+      c = check(arb_report(arb_path: arb, worker_image: nil), "arb_runtime")
+
+      assert c.status == "ok"
+      assert c.detail =~ "built on Erlang/OTP 29"
+      assert c.detail =~ "/opt/arbiter/otp"
+    end
+
+    test "no arb on the host is a warning, not a failure" do
+      report = arb_report(arb_path: nil, worker_image: nil)
+      c = check(report, "arb_runtime")
+
+      assert c.status == "warn"
+      assert c.detail =~ "no `arb`"
+      assert c.hint =~ "arb self-update"
+      assert report.ready
+    end
+
+    test "an arb that does not say what it was built on is a warning naming the fix", %{
+      tmp_dir: dir
+    } do
+      arb = ArbEscriptFixture.build!(dir, stamp: nil)
+      c = check(arb_report(arb_path: arb, worker_image: nil), "arb_runtime")
+
+      assert c.status == "warn"
+      assert c.detail =~ arb
+      assert c.detail =~ "OTP #{System.otp_release()}"
+      assert c.hint =~ "arb self-update"
+    end
+
+    test "a configured worker image with no runtime for arb is flagged", %{tmp_dir: dir} do
+      arb = ArbEscriptFixture.build!(dir, stamp: "29")
+
+      report =
+        arb_report([arb_path: arb, worker_image: "localhost/custom:1"], %{
+          "podman image inspect" => {"<no value>\n", 0}
+        })
+
+      c = check(report, "arb_runtime")
+      assert c.status == "warn"
+      assert c.detail =~ "localhost/custom:1 carries no runtime for arb"
+      assert c.detail =~ "OTP 29 or newer"
+      assert c.hint =~ "ARBITER_BASE"
+      assert report.ready
+    end
+
+    test "a configured worker image whose runtime is older than arb is flagged", %{
+      tmp_dir: dir
+    } do
+      arb = ArbEscriptFixture.build!(dir, stamp: "29")
+
+      c =
+        [arb_path: arb, worker_image: "localhost/old:1"]
+        |> arb_report(%{"podman image inspect" => {"27\n", 0}})
+        |> check("arb_runtime")
+
+      assert c.status == "warn"
+      assert c.detail =~ "carries an OTP 27 runtime for arb"
+    end
+
+    test "a configured worker image whose runtime loads arb is ok", %{tmp_dir: dir} do
+      arb = ArbEscriptFixture.build!(dir, stamp: "29")
+
+      c =
+        [arb_path: arb, worker_image: "localhost/new:1"]
+        |> arb_report(%{"podman image inspect" => {"29\n", 0}})
+        |> check("arb_runtime")
+
+      assert c.status == "ok"
+      assert c.detail =~ "localhost/new:1"
+    end
+
+    test "a configured worker image that cannot be inspected is a warning", %{tmp_dir: dir} do
+      arb = ArbEscriptFixture.build!(dir, stamp: "29")
+
+      c =
+        [arb_path: arb, worker_image: "localhost/gone:1"]
+        |> arb_report(%{"podman image inspect" => {"Error: no such image\n", 125}})
+        |> check("arb_runtime")
+
+      assert c.status == "warn"
+      assert c.detail =~ "no such image"
+    end
+
+    test "the doctor's default probes run it; the spawn gate's and a node's do not" do
+      base = [runner: runner(), read_file: read_file(), user: "ryan"]
+      quiet = [arb_path: nil, worker_image: nil]
+
+      assert check(PodmanReadiness.diagnose(base ++ quiet), "arb_runtime")
+      refute check(PodmanReadiness.diagnose(base ++ quiet ++ [probes: []]), "arb_runtime")
+
+      refute check(
+               PodmanReadiness.diagnose(base ++ quiet ++ [probes: PodmanReadiness.node_probes()]),
+               "arb_runtime"
+             )
+    end
+  end
+end

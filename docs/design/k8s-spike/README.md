@@ -19,4 +19,4 @@ nothing here is built or shipped; it exists so the verdicts can be rerun and che
 | K3, K4 | `k4_mint.exs` (mints, and with `serve` runs the OTP mTLS listener), `40-k3-socat-mtls.sh`, `41-k3-socat-fork-load.sh` |
 | K5 | `k5-producer-pod.yaml.tpl` + `pod-scripts-k5-producer.sh`, `k5_logs.py`, `k5_since_probe.py` |
 | K10 | `50-k10-services-pod.yaml` |
-| K11 | `60-k11-tailnet.sh`; the test is `apps/arbiter_web/test/spike/k11_proxy_ws_test.exs` |
+| K11 | `60-k11-tailnet.sh`; the test is `apps/wardmast_web/test/spike/k11_proxy_ws_test.exs` |

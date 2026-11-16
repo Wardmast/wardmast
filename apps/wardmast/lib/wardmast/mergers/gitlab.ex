@@ -1,0 +1,2277 @@
+defmodule Wardmast.Mergers.Gitlab do
+  @moduledoc """
+  GitLab adapter implementing `Wardmast.Mergers.Merger`.
+
+  Wraps GitLab's REST API v4 for merge-request open / inspect / merge /
+  close / comment / review flows. This is the priority hosted-forge merger:
+  the `tonic` and `tonic_device` projects live on GitLab.
+
+  ## Active-workspace contract
+
+  The `Merger` callbacks take an opaque `mr_ref` (e.g. `"!42"`) with no
+  workspace context. But GitLab needs a host, project ID and token — all
+  workspace-scoped. We resolve those through `Wardmast.Mergers.Gitlab.Config`,
+  exactly as `Wardmast.Trackers.Jira` does:
+
+    1. Callers call `Config.put_active(workspace)` to populate the
+       per-process config.
+    2. `Application.get_env(:wardmast, :gitlab_default_config)` is the
+       fallback for tools that run without a workspace context.
+    3. With neither, callbacks return `{:error, %Error{kind: :config_missing}}`.
+
+  ## `mr_ref`
+
+  GitLab identifies a merge request within a project by its `iid` (a
+  per-project integer). We mint the `mr_ref` as the iid prefixed with `"!"`
+  (GitLab's own MR shorthand), e.g. `"!42"`. `parse_ref/1` additionally
+  accepts a bare integer (`"42"` / `42`) and a full GitLab MR URL.
+
+  ## Auth
+
+  GitLab uses a `Private-Token: <token>` header. The token comes from the
+  workspace merger config's `credentials_ref` (`"env:NAME"` or a literal).
+
+  ## `get/1` response
+
+  Returns the task-domain view of the MR:
+
+      %{ref: mr_ref, status: :open | :merged | :closed, approved: boolean(), url: String.t()}
+
+  GitLab states map as: `"opened" -> :open`, `"merged" -> :merged`,
+  `"closed" | "locked" -> :closed`.
+
+  ## Optional callbacks not implemented
+
+  `reply_to_review_comment/4` — GitLab uses a discussion/note model and does
+  not expose a dedicated "reply to comment" endpoint that maps cleanly to
+  GitHub's `POST /pulls/:n/comments/:id/replies`. This optional callback is
+  not exported; callers guard with `function_exported?/3` and fall back to
+  `add_comment/2` when targeting a GitLab MR.
+
+  ## Tests
+
+  Wired up to `Req.Test`: when
+  `Application.get_env(:wardmast, :gitlab_http_stub, false)` is true, every
+  request injects `plug: {Req.Test, #{inspect(Wardmast.Mergers.Gitlab.HTTP)}}`.
+  This adapter **never** hits a real GitLab endpoint from tests.
+  """
+
+  @behaviour Wardmast.Mergers.Merger
+
+  require Logger
+
+  alias Wardmast.Http.Client
+  alias Wardmast.Http.Error, as: ErrorSpec
+  alias Wardmast.Mergers.BranchSync
+  alias Wardmast.Mergers.CILogExcerpt
+  alias Wardmast.Mergers.CIQueue
+  alias Wardmast.Mergers.CIRerun
+  alias Wardmast.Mergers.Gitlab.{Budget, Config, Error}
+
+  @stub_name Wardmast.Mergers.Gitlab.HTTP
+
+  # Job statuses that count as a CI failure for the fix-pass briefing.
+  @failing_job_statuses ["failed", "canceled"]
+
+  # How much of each failing job's trace to keep in the fix-pass briefing.
+  @log_tail_limit 4_000
+
+  # Pipeline statuses a superseded merge-train car's pipeline is cancelled from.
+  @unfinished_pipeline_statuses ~w(created waiting_for_resource preparing pending running scheduled)
+
+  # ---- Merger behaviour ----------------------------------------------------
+
+  @impl true
+  def prepare(workspace, opts \\ []) do
+    Config.put_active(workspace)
+
+    case Keyword.get(opts, :repo) do
+      repo when is_binary(repo) and repo != "" ->
+        Config.override_repo(workspace, repo)
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  end
+
+  @impl true
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  def open(branch, title, description, opts)
+      when is_binary(branch) and is_binary(title) and is_binary(description) and is_map(opts) do
+    with {:ok, cfg} <- Config.resolve(),
+         :ok <- maybe_push_branch(branch, opts) do
+      target_branch = Map.get(opts, :target_branch) || cfg.default_target_branch
+
+      payload =
+        %{
+          "source_branch" => branch,
+          "target_branch" => target_branch,
+          "title" => title,
+          "description" => description
+        }
+        |> maybe_put("reviewer_ids", reviewers(opts, cfg))
+        |> maybe_put("labels", labels(opts))
+
+      case request(cfg, :post, "/merge_requests", json: payload) do
+        {:ok, %Req.Response{status: status, body: %{"iid" => iid}}}
+        when status in 200..299 and is_integer(iid) ->
+          {:ok, ref_for(iid)}
+
+        {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: status,
+             message: "merge-request response missing integer \"iid\"",
+             raw: body
+           }}
+
+        {:ok, %Req.Response{status: status, body: body}} when status in [409, 422] ->
+          if duplicate_mr_error?(body) do
+            adopt_existing_mr(cfg, branch, target_branch)
+          else
+            {:error, http_error(status, body)}
+          end
+
+        {:ok, %Req.Response{status: status, body: body}} ->
+          {:error, http_error(status, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @impl true
+  def get(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      case cfg
+           |> request(:get, "/merge_requests/#{iid}", [])
+           |> recheck_phantom_conflict(cfg, iid) do
+        {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+          merge_status = Map.get(body, "merge_status", "")
+          {pipeline, pipeline_id} = fetch_pipeline_status(cfg, iid, Map.get(body, "sha"))
+          status = map_state(Map.get(body, "state"))
+          block_reason = block_reason(cfg, body, status, pipeline, pipeline_id)
+
+          {:ok,
+           %{
+             ref: ref_for(iid),
+             status: status,
+             # MR head commit SHA — ReviewPatrol records this into an
+             # engagement's `last_reviewed_sha` to detect new commits later.
+             head_sha: Map.get(body, "sha"),
+             # The commit the merge landed on the target branch as — the deploy
+             # watch follows this commit's pipeline (#967).
+             merge_sha: Map.get(body, "merge_commit_sha") || Map.get(body, "squash_commit_sha"),
+             # The MR's target branch — used to build a local `git diff
+             # base_ref..HEAD` against a Tier-2 checkout worktree, sidestepping
+             # a REST diff size cap (bd-5yp6yn).
+             base_ref: Map.get(body, "target_branch"),
+             # The MR's source branch: what a host-side push to the MR lands on
+             # (the visual-baseline refresh, bd-9obzu9).
+             head_ref: Map.get(body, "source_branch"),
+             # MR title/description — folded into the reviewer prompt
+             # (bd-adpwl0) so the reviewer sees the author's own account of
+             # the change's intent.
+             title: Map.get(body, "title"),
+             body: Map.get(body, "description"),
+             approved: approved?(body),
+             changes_requested: false,
+             latest_review_id: nil,
+             pipeline: pipeline,
+             pipeline_id: pipeline_id,
+             # No pipeline on a head that needs one is not green CI, whatever the
+             # legacy `merge_status` says (#918).
+             ci_clean: merge_status == "can_be_merged" and block_reason != :no_pipeline,
+             conflicting: settled_conflict?(body),
+             block_reason: block_reason,
+             url: Map.get(body, "web_url") || link_for(ref_for(iid))
+           }}
+
+        {:ok, %Req.Response{status: status, body: body}} ->
+          {:error, http_error(status, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @deploy_pipeline_limit 10
+
+  @impl true
+  def deploy_pipelines(_mr_ref, branch, _opts) when is_binary(branch) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, pipelines} <-
+           cfg
+           |> request(:get, "/pipelines", params: [ref: branch, per_page: 20])
+           |> deploy_pipeline_list() do
+      pipelines
+      |> Enum.take(@deploy_pipeline_limit)
+      |> Enum.reduce_while({:ok, []}, fn pipeline, {:ok, acc} ->
+        case pipeline_jobs(cfg, Map.get(pipeline, "id")) do
+          {:ok, jobs} ->
+            entry = %{
+              id: Map.get(pipeline, "id"),
+              sha: Map.get(pipeline, "sha"),
+              status: Map.get(pipeline, "status"),
+              url: Map.get(pipeline, "web_url"),
+              jobs: Enum.map(jobs, &%{name: Map.get(&1, "name"), status: Map.get(&1, "status")})
+            }
+
+            {:cont, {:ok, [entry | acc]}}
+
+          {:error, _} = error ->
+            {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, entries} -> {:ok, Enum.reverse(entries)}
+        error -> error
+      end
+    end
+  end
+
+  @impl true
+  def branch_pipeline(_mr_ref, branch, _opts) when is_binary(branch) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, pipelines} <-
+           cfg
+           |> request(:get, "/pipelines", params: [ref: branch, per_page: 10])
+           |> deploy_pipeline_list() do
+      case Enum.find(pipelines, &(Map.get(&1, "status") in ["success", "failed"])) do
+        nil ->
+          {:ok, nil}
+
+        pipeline ->
+          {:ok,
+           %{
+             id: Map.get(pipeline, "id"),
+             sha: Map.get(pipeline, "sha"),
+             status: Map.get(pipeline, "status"),
+             url: Map.get(pipeline, "web_url"),
+             jobs: branch_pipeline_jobs(cfg, pipeline)
+           }}
+      end
+    end
+  end
+
+  # Job-level detail only for a failed pipeline (the one the target-red hold
+  # must judge); a job-read error leaves `nil`, so the pipeline-level verdict
+  # stands. A failed job with `allow_failure` never reddened the pipeline.
+  defp branch_pipeline_jobs(cfg, %{"status" => "failed", "id" => id}) do
+    case pipeline_jobs(cfg, id) do
+      {:ok, jobs} ->
+        for job <- jobs, Map.get(job, "allow_failure") != true do
+          %{
+            name: Map.get(job, "name"),
+            stage: Map.get(job, "stage"),
+            status: Map.get(job, "status")
+          }
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp branch_pipeline_jobs(_cfg, _pipeline), do: nil
+
+  # ---- speculative merge-train cars (bd-6dyva0) ------------------------------
+  #
+  # A car is pushed to its Wardmast-owned ref with `-o ci.skip` and then given
+  # exactly one pipeline here, through the pipelines API, carrying
+  # `ARBITER_TRAIN_CAR=true` so a project's `workflow:rules` can admit it (a
+  # project that only admits merge-request pipelines refuses it, and the train
+  # falls back to the serial sync for that MR).
+
+  @impl true
+  def ref_push_options, do: ["-o", "ci.skip"]
+
+  @impl true
+  def run_ref_pipeline(_mr_ref, %{ref: ref}, _opts) when is_binary(ref) do
+    body = %{
+      ref: ref,
+      variables: [%{key: "ARBITER_TRAIN_CAR", value: "true", variable_type: "env_var"}]
+    }
+
+    with {:ok, cfg} <- Config.resolve() do
+      case request(cfg, :post, "/pipeline", json: body) do
+        {:ok, %Req.Response{status: status, body: %{} = pipeline}} when status in 200..299 ->
+          {:ok, car_pipeline(pipeline, nil)}
+
+        {:ok, %Req.Response{status: status, body: body}} when status in [400, 422] ->
+          {:error,
+           %Error{
+             kind: :pipeline_refused,
+             status: status,
+             message: "cannot start CI on merge-train car #{ref}: " <> refusal_message(body),
+             raw: body
+           }}
+
+        other ->
+          {:error, request_error(other)}
+      end
+    end
+  end
+
+  @impl true
+  def ref_pipeline(_mr_ref, %{pipeline: id}, _opts) when is_integer(id) or is_binary(id) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, %{} = pipeline} <- cfg |> request(:get, "/pipelines/#{id}", []) |> handle_json() do
+      {:ok, car_pipeline(pipeline, failed_jobs(cfg, pipeline))}
+    end
+  end
+
+  def ref_pipeline(_mr_ref, %{ref: ref, sha: sha}, _opts) when is_binary(ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, pipelines} <- car_pipelines(cfg, ref, sha) do
+      case pipelines do
+        [] -> {:ok, nil}
+        [newest | _] -> {:ok, car_pipeline(newest, failed_jobs(cfg, newest))}
+      end
+    end
+  end
+
+  @impl true
+  def cancel_ref_pipeline(_mr_ref, %{pipeline: id}, _opts) when is_integer(id) or is_binary(id) do
+    with {:ok, cfg} <- Config.resolve() do
+      cfg |> request(:post, "/pipelines/#{id}/cancel", json: %{}) |> handle_ok()
+    end
+  end
+
+  def cancel_ref_pipeline(_mr_ref, %{ref: ref, sha: sha}, _opts) when is_binary(ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, pipelines} <- car_pipelines(cfg, ref, sha) do
+      pipelines
+      |> Enum.filter(&(Map.get(&1, "status") in @unfinished_pipeline_statuses))
+      |> Enum.reduce_while(:ok, fn pipeline, :ok ->
+        case cfg
+             |> request(:post, "/pipelines/#{Map.get(pipeline, "id")}/cancel", json: %{})
+             |> handle_ok() do
+          :ok -> {:cont, :ok}
+          error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  defp car_pipelines(cfg, ref, sha) do
+    params = [ref: ref, per_page: 20] ++ if(is_binary(sha), do: [sha: sha], else: [])
+    cfg |> request(:get, "/pipelines", params: params) |> deploy_pipeline_list()
+  end
+
+  defp car_pipeline(pipeline, jobs) do
+    %{
+      id: Map.get(pipeline, "id"),
+      sha: Map.get(pipeline, "sha"),
+      status: Map.get(pipeline, "status"),
+      url: Map.get(pipeline, "web_url")
+    }
+    |> then(fn map -> if is_list(jobs), do: Map.put(map, :jobs, jobs), else: map end)
+  end
+
+  defp failed_jobs(cfg, %{"status" => "failed"} = pipeline),
+    do: branch_pipeline_jobs(cfg, pipeline)
+
+  defp failed_jobs(_cfg, _pipeline), do: nil
+
+  defp deploy_pipeline_list({:ok, %Req.Response{status: status, body: pipelines}})
+       when status in 200..299 and is_list(pipelines),
+       do: {:ok, newest_first(pipelines)}
+
+  defp deploy_pipeline_list(other), do: {:error, request_error(other)}
+
+  # The rebase strategy: GitLab's rebase endpoint (PUT …/rebase) queues an async
+  # rebase of the MR branch onto the target branch and returns 202 Accepted. It
+  # rewrites and force-pushes the branch, so every commit gets a new SHA. With no
+  # workspace context there is no checkout to merge in, so this is also what
+  # `update_branch/1` does; callers that have the context use `update_branch/2`.
+  @impl true
+  def update_branch(mr_ref) when is_binary(mr_ref), do: rebase_branch(mr_ref)
+
+  @doc """
+  Sync the MR branch with its target per `merge.sync_strategy`
+  (`Wardmast.Mergers.BranchSync.strategy/2`, default `merge`).
+
+  `merge` merges `origin/<target>` into the branch in the ticket worktree and
+  pushes it as a plain fast-forward, so the previously reviewed head stays an
+  ancestor and nothing is force-pushed (`Wardmast.Mergers.BranchSync`). A merge
+  that conflicts is aborted and comes back as `{:error, %Error{kind: :conflict}}`,
+  which callers route to the conflict path. `rebase` is the rebase endpoint —
+  needed by fast-forward / semi-linear projects, which refuse merge commits.
+
+  `ctx` is `%{workspace: Workspace.t() | nil, repo: String.t() | nil}`.
+  """
+  @impl true
+  def update_branch(mr_ref, ctx) when is_binary(mr_ref) and is_map(ctx) do
+    workspace = Map.get(ctx, :workspace)
+    repo = Map.get(ctx, :repo)
+
+    case BranchSync.strategy(workspace, repo) do
+      :rebase -> rebase_branch(mr_ref)
+      :merge -> merge_branch(mr_ref, workspace, repo)
+    end
+  end
+
+  defp rebase_branch(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      # A 409 means the rebase can't be applied cleanly (conflict); the queue
+      # treats that as non-fatal and lets the next get/1 poll surface the
+      # conflict state.
+      request(cfg, :put, "/merge_requests/#{iid}/rebase", json: %{})
+      |> handle_ok()
+    end
+  end
+
+  defp merge_branch(mr_ref, workspace, repo) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, mr} <- request(cfg, :get, "/merge_requests/#{iid}", []) |> handle_json(),
+         {:ok, branch, target} <- mr_branches(mr) do
+      case BranchSync.sync(workspace, repo, branch, target) do
+        {:ok, _synced_or_current} -> :ok
+        {:error, reason} -> {:error, branch_sync_error(reason)}
+      end
+    end
+  end
+
+  defp mr_branches(%{"source_branch" => branch, "target_branch" => target})
+       when is_binary(branch) and branch != "" and is_binary(target) and target != "",
+       do: {:ok, branch, target}
+
+  defp mr_branches(mr) do
+    {:error,
+     %Error{
+       kind: :validation_failed,
+       status: nil,
+       message: "merge request carries no source/target branch to sync",
+       raw: mr
+     }}
+  end
+
+  defp branch_sync_error({:conflict, files} = reason) do
+    %Error{
+      kind: :conflict,
+      status: nil,
+      message: "merging the target into the branch conflicts in: #{Enum.join(files, ", ")}",
+      raw: reason
+    }
+  end
+
+  defp branch_sync_error(reason) do
+    %Error{
+      kind: :git_push_failed,
+      status: nil,
+      message: "merge sync failed: #{inspect(reason)}",
+      raw: reason
+    }
+  end
+
+  @impl true
+  def failing_check_logs(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      fetch_failing_check_logs(cfg, iid)
+    end
+  end
+
+  @impl true
+  def unrun_pipeline(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      fetch_unrun_pipeline(cfg, iid)
+    end
+  end
+
+  @impl true
+  def ci_job_artifacts(mr_ref, job_name, _opts) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, [latest | _]} <- mr_pipelines(cfg, iid) |> no_pipeline(),
+         {:ok, jobs} <- pipeline_jobs(cfg, Map.get(latest, "id")) do
+      # Only genuinely `failed` jobs: under fail-fast CI (`auto_cancel:
+      # on_job_failure: all`) a cancelled job never uploaded artifacts and is
+      # collateral, not a failure (#1312). `failing_job?/1` is left alone for
+      # its other callers.
+      failed = Enum.filter(jobs, &genuinely_failed_job?/1)
+
+      with %{"id" => job_id} <- Enum.find(failed, &(Map.get(&1, "name") == job_name)),
+           {:ok, archive} <- job_artifacts(cfg, job_id) do
+        {:ok,
+         %{
+           sha: Map.get(latest, "sha"),
+           failed_jobs: failed |> Enum.map(&Map.get(&1, "name")) |> Enum.uniq(),
+           archive: archive
+         }}
+      else
+        nil -> {:error, :job_not_failed}
+        {:error, _} = error -> error
+      end
+    end
+  end
+
+  @impl true
+  def last_green_job_sha(mr_ref, job_name, _opts) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, pipelines} <- mr_pipelines(cfg, iid) do
+      pipelines
+      |> Enum.filter(&(Map.get(&1, "status") in ["success", "failed"]))
+      |> Enum.find_value({:ok, nil}, &green_pipeline(cfg, &1, job_name))
+    end
+  end
+
+  # `{:ok, sha}` when `job_name` passed in `pipeline`, an error to stop the walk,
+  # `nil` to go on to the next (older) pipeline.
+  defp green_pipeline(cfg, pipeline, job_name) do
+    case pipeline_jobs(cfg, Map.get(pipeline, "id")) do
+      {:ok, jobs} ->
+        passed? =
+          Enum.any?(
+            jobs,
+            &(Map.get(&1, "name") == job_name and Map.get(&1, "status") == "success")
+          )
+
+        if passed?, do: {:ok, Map.get(pipeline, "sha")}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @impl true
+  def rerun_ci(mr_ref, opts) when is_binary(mr_ref) and is_map(opts) do
+    inputs = string_inputs(Map.get(opts, :inputs))
+    requested = Map.get(opts, :mode) || :auto
+
+    with :ok <- check_rerun_mode(inputs, requested),
+         {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, mr} <- request(cfg, :get, "/merge_requests/#{iid}", []) |> handle_json(),
+         {:ok, pipelines} <- head_pipelines(cfg, iid, Map.get(mr, "sha")),
+         {:ok, pipeline} <- rerun_base_pipeline(pipelines, requested, Map.get(mr, "sha")) do
+      jobs = rerun_jobs(cfg, Map.get(pipeline, "id"))
+
+      decision =
+        CIRerun.choose(%{
+          run_attempt: max(length(pipelines), retry_attempt(jobs)),
+          jobs: Enum.map(latest_jobs(jobs), &Map.put(&1, "conclusion", Map.get(&1, "status"))),
+          inputs: inputs
+        })
+
+      {mode, rationale} = pick_mode(requested, decision, latest_jobs(jobs))
+
+      with {:ok, started} <-
+             post_rerun(cfg, pipeline, mode, iid, Map.get(mr, "source_branch"), inputs) do
+        {:ok,
+         %{
+           mode: mode,
+           run_id: Map.get(started, "id"),
+           workflow: nil,
+           run_attempt: decision.run_attempt,
+           reused_jobs: decision.reused_jobs,
+           rationale: rationale,
+           url: Map.get(started, "web_url") || Map.get(pipeline, "web_url")
+         }}
+      end
+    end
+  end
+
+  # bd-4y9dno. A merge train push for an MR that is not the head carries
+  # `git push -o ci.skip`; the head's pipeline is a merge request pipeline.
+  @impl true
+  def ci_skip_mechanism(_opts), do: {:push_option, "ci.skip"}
+
+  @impl true
+  def trigger_pipeline(mr_ref, _opts) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, started} <-
+           request(cfg, :post, "/merge_requests/#{iid}/pipelines", json: %{})
+           |> handle_pipeline_create() do
+      {:ok,
+       %{
+         mode: :mr_pipeline,
+         run_id: Map.get(started, "id"),
+         url: Map.get(started, "web_url")
+       }}
+    end
+  end
+
+  # Pipeline variables are the only way to carry inputs, and only a new pipeline
+  # takes them; pipeline retry replays the original variables (same contract as
+  # the GitHub adapter).
+  defp check_rerun_mode(inputs, mode)
+       when map_size(inputs) > 0 and mode in [:failed_jobs, :all_jobs],
+       do:
+         {:error,
+          %Error{
+            kind: :validation_failed,
+            status: nil,
+            message:
+              "cannot re-run CI: `inputs` can only be carried by a new pipeline, " <>
+                "but mode is #{inspect(mode)} — use mode `workflow` (or `auto`)",
+            raw: nil
+          }}
+
+  defp check_rerun_mode(_inputs, mode) when mode in [:auto, :failed_jobs, :all_jobs, :workflow],
+    do: :ok
+
+  defp check_rerun_mode(_inputs, mode),
+    do:
+      {:error,
+       %Error{
+         kind: :validation_failed,
+         status: nil,
+         message: "cannot re-run CI: unknown mode #{inspect(mode)}",
+         raw: nil
+       }}
+
+  # Pipelines on the MR's head SHA, newest first (same pick as ReviewCi's read).
+  defp head_pipelines(_cfg, _iid, sha) when sha in [nil, ""],
+    do: {:error, rerun_not_found("the MR has no head SHA")}
+
+  defp head_pipelines(cfg, iid, sha) do
+    case request(cfg, :get, "/merge_requests/#{iid}/pipelines", params: [per_page: 100])
+         |> handle_json() do
+      {:ok, pipelines} when is_list(pipelines) ->
+        {:ok, pipelines |> Enum.filter(&(Map.get(&1, "sha") == sha)) |> newest_first()}
+
+      {:ok, _} ->
+        {:ok, []}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp no_pipeline({:ok, []}), do: {:error, :no_pipeline}
+  defp no_pipeline(other), do: other
+
+  # Newest first (a bounded window: enough to find the last green run).
+  defp mr_pipelines(cfg, iid) do
+    case request(cfg, :get, "/merge_requests/#{iid}/pipelines", params: [per_page: 20]) do
+      {:ok, %Req.Response{status: status, body: pipelines}}
+      when status in 200..299 and is_list(pipelines) ->
+        {:ok, newest_first(pipelines)}
+
+      other ->
+        {:error, request_error(other)}
+    end
+  end
+
+  defp pipeline_jobs(cfg, pipeline_id) do
+    case request(cfg, :get, "/pipelines/#{pipeline_id}/jobs", params: [per_page: 100]) do
+      {:ok, %Req.Response{status: status, body: jobs}}
+      when status in 200..299 and is_list(jobs) ->
+        {:ok, jobs}
+
+      other ->
+        {:error, request_error(other)}
+    end
+  end
+
+  # The job's artifacts archive, raw (a zip): never JSON-decoded.
+  defp job_artifacts(cfg, job_id) do
+    case request(cfg, :get, "/jobs/#{job_id}/artifacts", decode_body: false) do
+      {:ok, %Req.Response{status: status, body: body}}
+      when status in 200..299 and is_binary(body) ->
+        {:ok, body}
+
+      other ->
+        {:error, request_error(other)}
+    end
+  end
+
+  defp request_error({:ok, %Req.Response{status: status, body: body}}),
+    do: http_error(status, body)
+
+  defp request_error({:error, exception}), do: transport_error(exception)
+
+  defp newest_first(pipelines), do: Enum.sort_by(pipelines, &(Map.get(&1, "id") || 0), :desc)
+
+  # `:all_jobs` / `:workflow` start a fresh pipeline, so they need no existing one
+  # (a head whose workflow:rules created none is exactly when they are wanted).
+  defp rerun_base_pipeline([], mode, _sha) when mode in [:all_jobs, :workflow], do: {:ok, %{}}
+  defp rerun_base_pipeline(pipelines, _mode, sha), do: settled_failed_pipeline(pipelines, sha)
+
+  defp settled_failed_pipeline([], sha),
+    do: {:error, rerun_not_found("no pipeline on head SHA #{sha}")}
+
+  defp settled_failed_pipeline([latest | _], sha) do
+    case Map.get(latest, "status") do
+      status when status in @failing_job_statuses ->
+        {:ok, latest}
+
+      status ->
+        # An unfinished latest pipeline has not produced a verdict: say so
+        # distinctly so callers wait for CI instead of reading a refusal as a
+        # real failure (bd-8o35da). Any older failed pipeline on the same SHA is
+        # superseded by it.
+        if map_pipeline_status(status) in [:running, :pending] do
+          {:error, :ci_in_progress}
+        else
+          {:error,
+           rerun_not_found("the latest pipeline on head SHA #{sha} is #{status}, not a failure")}
+        end
+    end
+  end
+
+  defp rerun_not_found(detail),
+    do: %Error{kind: :not_found, status: nil, message: "cannot re-run CI: " <> detail, raw: nil}
+
+  # Best-effort: jobs only feed the granularity policy, so an API error degrades
+  # to "no known upstream jobs" (the cheapest re-run).
+  defp rerun_jobs(_cfg, nil), do: []
+
+  defp rerun_jobs(cfg, pipeline_id) do
+    case request(cfg, :get, "/pipelines/#{pipeline_id}/jobs",
+           params: [per_page: 100, include_retried: true]
+         )
+         |> handle_json() do
+      {:ok, jobs} when is_list(jobs) -> jobs
+      _ -> []
+    end
+  end
+
+  # With `include_retried` a retried job appears once per attempt; keep the newest.
+  defp latest_jobs(jobs) do
+    jobs
+    |> Enum.group_by(&Map.get(&1, "name"))
+    |> Enum.map(fn {_name, attempts} -> Enum.max_by(attempts, &(Map.get(&1, "id") || 0)) end)
+  end
+
+  defp retry_attempt(jobs) do
+    jobs
+    |> Enum.frequencies_by(&Map.get(&1, "name"))
+    |> Map.values()
+    |> Enum.max(fn -> 1 end)
+  end
+
+  defp pick_mode(requested, decision, _jobs)
+       when requested in [:failed_jobs, :all_jobs, :workflow],
+       do: {requested, decision.rationale}
+
+  # GitLab's retry reruns only the failed jobs. When the first attempt's passed
+  # jobs left no artifacts behind (only the job trace), reusing them cannot hide
+  # a stale upstream build, so a likely flake is retried cheaply first; a repeat
+  # failure reaches attempt 2 and escalates to a fresh pipeline.
+  defp pick_mode(:auto, %{mode: :all_jobs, run_attempt: 1} = decision, jobs) do
+    if jobs_without_artifacts?(jobs) do
+      {:failed_jobs,
+       "first attempt; the #{length(decision.reused_jobs)} passed job(s) produced no artifacts, " <>
+         "so retrying only the failed job(s) first (a repeat failure escalates to a fresh pipeline)"}
+    else
+      {:all_jobs, decision.rationale}
+    end
+  end
+
+  defp pick_mode(_auto, decision, _jobs), do: {decision.mode, decision.rationale}
+
+  # Unknown (no `artifacts` key) counts as "may have artifacts".
+  defp jobs_without_artifacts?(jobs) do
+    jobs
+    |> Enum.filter(&(Map.get(&1, "status") == "success"))
+    |> Enum.all?(fn job ->
+      case Map.get(job, "artifacts") do
+        list when is_list(list) -> Enum.all?(list, &(Map.get(&1, "file_type") == "trace"))
+        _ -> false
+      end
+    end)
+  end
+
+  defp post_rerun(cfg, pipeline, :failed_jobs, _iid, _ref, _inputs) do
+    request(cfg, :post, "/pipelines/#{Map.get(pipeline, "id")}/retry", json: %{})
+    |> handle_json()
+  end
+
+  # `:all_jobs`: GitLab retry reuses succeeded jobs, so only a fresh pipeline
+  # rebuilds upstream artifacts. Start a merge request pipeline: projects whose
+  # `workflow:rules` only admit merge_request_event pipelines reject a branch
+  # pipeline ("The pipeline did not run").
+  defp post_rerun(cfg, _pipeline, :all_jobs, iid, _ref, inputs) when map_size(inputs) == 0 do
+    request(cfg, :post, "/merge_requests/#{iid}/pipelines", json: %{}) |> handle_pipeline_create()
+  end
+
+  defp post_rerun(_cfg, _pipeline, _mode, _iid, ref, _inputs) when ref in [nil, ""],
+    do: {:error, rerun_not_found("the MR has no source branch")}
+
+  # `:workflow`: only the branch-pipeline endpoint accepts variables.
+  defp post_rerun(cfg, _pipeline, _mode, _iid, ref, inputs) do
+    variables =
+      for {key, value} <- Enum.sort(inputs),
+          do: %{key: key, value: value, variable_type: "env_var"}
+
+    body = if variables == [], do: %{ref: ref}, else: %{ref: ref, variables: variables}
+    request(cfg, :post, "/pipeline", json: body) |> handle_pipeline_create()
+  end
+
+  # GitLab refuses a pipeline the project's `workflow:rules` don't admit with a
+  # 400/422 ("The pipeline did not run. Review the workflow:rules
+  # configuration"). That is a real answer about the project's CI setup, not a
+  # request fault: surface GitLab's message verbatim under its own kind.
+  defp handle_pipeline_create({:ok, %Req.Response{status: status, body: body}})
+       when status in [400, 422] do
+    {:error,
+     %Error{
+       kind: :pipeline_refused,
+       status: status,
+       message: "cannot re-run CI: " <> refusal_message(body),
+       raw: body
+     }}
+  end
+
+  defp handle_pipeline_create(result), do: handle_json(result)
+
+  defp refusal_message(%{"message" => message}), do: refusal_message(message)
+  defp refusal_message(%{"error" => message}), do: refusal_message(message)
+  defp refusal_message(message) when is_binary(message), do: message
+
+  defp refusal_message(%{} = map),
+    do: map |> Map.values() |> List.flatten() |> Enum.map_join("; ", &refusal_message/1)
+
+  defp refusal_message(list) when is_list(list), do: Enum.map_join(list, "; ", &refusal_message/1)
+  defp refusal_message(other), do: inspect(other)
+
+  defp string_inputs(inputs) when is_map(inputs) and map_size(inputs) > 0,
+    do: Map.new(inputs, fn {k, v} -> {to_string(k), to_string(v)} end)
+
+  defp string_inputs(_), do: %{}
+
+  @impl true
+  def merge(mr_ref, expected_sha)
+
+  # bd-dxgris / #1493: the caller supplied the SHA its merge decision was
+  # computed against. Send exactly that — no head re-read. GitLab enforces it
+  # atomically: a branch that advanced since the decision comes back 409
+  # ("SHA does not match HEAD of source branch") instead of merging commits no
+  # reviewer ever saw.
+  def merge(mr_ref, expected_sha)
+      when is_binary(mr_ref) and is_binary(expected_sha) and expected_sha != "" do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      merge_with_sha(cfg, iid, expected_sha)
+    end
+  end
+
+  # No reviewed SHA to guard on (`nil`). Fall back to the MR's current head so
+  # the request is still well-formed — GitLab rejects a merge with no `sha`
+  # ("SHA must be provided when merging", bd-6i2k7u/#1491) — but note that this
+  # merges whatever head the forge reports right now. Callers reach this only
+  # on paths with no MR head to race against; see `Wardmast.Mergers.ReviewedSha`.
+  def merge(mr_ref, _expected_sha) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      case request(cfg, :get, "/merge_requests/#{iid}", []) do
+        {:ok, %Req.Response{status: status, body: mr_body}} when status in 200..299 ->
+          case Map.get(mr_body, "sha") do
+            sha when is_binary(sha) and sha != "" ->
+              merge_with_sha(cfg, iid, sha)
+
+            _ ->
+              {:error,
+               %Error{
+                 kind: :validation_failed,
+                 message: "MR !#{iid} has no head SHA to merge"
+               }}
+          end
+
+        {:ok, %Req.Response{status: status, body: body}} ->
+          {:error, http_error(status, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  defp merge_with_sha(cfg, iid, sha) do
+    payload =
+      %{"sha" => sha}
+      |> maybe_put("squash", squash_param(cfg.merge_method))
+
+    request(cfg, :put, "/merge_requests/#{iid}/merge", json: payload)
+    |> handle_ok()
+    |> reclassify_merge_refusal(cfg, iid)
+  end
+
+  # GitLab answers 405/406 for every "can't merge right now" state (no pipeline,
+  # pipeline must succeed, draft, unresolved threads, ...), not only conflicts.
+  # Calling them all `:conflict` mislabelled a missing pipeline as a conflict
+  # (#918), so re-read the MR and keep `:conflict` only when it says so.
+  defp reclassify_merge_refusal({:error, %Error{kind: :conflict, status: status} = err}, cfg, iid)
+       when status in [405, 406] do
+    case request(cfg, :get, "/merge_requests/#{iid}", []) |> handle_json() do
+      {:ok, %{"has_conflicts" => true}} ->
+        {:error, err}
+
+      {:ok, %{} = mr} ->
+        detail = Map.get(mr, "detailed_merge_status") || Map.get(mr, "merge_status")
+
+        {:error,
+         %{err | kind: :not_mergeable, message: not_mergeable_message(err.message, detail)}}
+
+      _ ->
+        {:error, %{err | kind: :not_mergeable}}
+    end
+  end
+
+  defp reclassify_merge_refusal(result, _cfg, _iid), do: result
+
+  defp not_mergeable_message(message, detail) when is_binary(detail) and detail != "",
+    do: "#{message} (detailed_merge_status=#{detail})"
+
+  defp not_mergeable_message(message, _detail), do: message
+
+  # GitLab's merge endpoint only accepts "squash" as a per-call parameter (boolean).
+  # The merge strategy (merge/rebase/ff) is a project-level setting, not per-MR.
+  defp squash_param(:squash), do: true
+  defp squash_param(_), do: nil
+
+  @impl true
+  def close(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      request(cfg, :put, "/merge_requests/#{iid}", json: %{"state_event" => "close"})
+      |> handle_ok()
+    end
+  end
+
+  @impl true
+  def update_description(mr_ref, body) when is_binary(mr_ref) and is_binary(body) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      request(cfg, :put, "/merge_requests/#{iid}", json: %{"description" => body})
+      |> handle_ok()
+    end
+  end
+
+  @impl true
+  def add_comment(mr_ref, body) when is_binary(mr_ref) and is_binary(body) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      request(cfg, :post, "/merge_requests/#{iid}/notes", json: %{"body" => body})
+      |> handle_ok()
+    end
+  end
+
+  @impl true
+  def request_review(mr_ref, reviewers) when is_binary(mr_ref) and is_list(reviewers) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      request(cfg, :put, "/merge_requests/#{iid}", json: %{"reviewer_ids" => reviewers})
+      |> handle_ok()
+    end
+  end
+
+  @impl true
+  def link_for(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, path} <- resolve_project_path(cfg) do
+      "https://#{cfg.host}/#{path}/-/merge_requests/#{iid}"
+    else
+      _ -> ""
+    end
+  end
+
+  @impl true
+  def ref_for_pr(pr, opts) when is_binary(pr) and is_map(opts) do
+    pr = String.trim(pr)
+
+    cond do
+      # Full forge URL: https://<host>/<group>[/<sub>...]/<project>/-/merge_requests/<iid>.
+      # The URL's own project path is embedded in the ref so the review reads
+      # THAT project, never the workspace's configured one (bd-96d5z4).
+      m = Regex.run(~r{^(?:https?://[^/\s]+/)?(.+?)/-/merge_requests/(\d+)}, pr) ->
+        [_, path, iid] = m
+        {:ok, qualified_ref(path, iid)}
+
+      # Bare iid or GitLab's own "!<iid>" shorthand: the project comes from the
+      # named repo's checkout origin remote; with no checkout the ref stays
+      # unqualified (the workspace's configured project).
+      m = Regex.run(~r/^!?(\d+)$/, pr) ->
+        [_, iid] = m
+        bare_ref(iid, opts)
+
+      true ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: nil,
+           message:
+             "could not parse #{inspect(pr)} as a GitLab MR reference — expected an MR URL " <>
+               "(…/-/merge_requests/N), a bare iid, or \"!N\". A bare iid is resolved within " <>
+               "the named repo's origin project (or the workspace's configured project_id).",
+           raw: pr
+         }}
+    end
+  end
+
+  defp bare_ref(iid, %{repo_path: path}) when is_binary(path) and path != "" do
+    case project_path_from_remote(path) do
+      {:ok, project} ->
+        {:ok, qualified_ref(project, iid)}
+
+      :error ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: nil,
+           message:
+             "could not determine the GitLab project of the repo checkout at #{path} " <>
+               "(no readable `origin` remote); refusing to guess which project MR !#{iid} " <>
+               "belongs to — pass the full MR URL",
+           raw: path
+         }}
+    end
+  end
+
+  defp bare_ref(iid, _opts), do: {:ok, ref_for(iid)}
+
+  # `group/sub/project` from an origin URL (scp-style or scheme://).
+  defp project_path_from_remote(repo_path) do
+    case System.cmd("git", ["-C", repo_path, "remote", "get-url", "origin"],
+           stderr_to_stdout: true
+         ) do
+      {out, 0} -> parse_remote_project(String.trim(out))
+      _ -> :error
+    end
+  rescue
+    ErlangError -> :error
+  end
+
+  @doc false
+  def parse_remote_project(url) when is_binary(url) do
+    cond do
+      m = Regex.run(~r{^[^@\s/]+@[^:\s/]+:(.+?)(?:\.git)?/?$}, url) ->
+        clean_project(m)
+
+      m = Regex.run(~r{^[a-z+]+://(?:[^@/\s]+@)?[^/\s]+/(.+?)(?:\.git)?/?$}, url) ->
+        clean_project(m)
+
+      true ->
+        :error
+    end
+  end
+
+  defp clean_project([_, path]) do
+    if String.contains?(path, "/"), do: {:ok, path}, else: :error
+  end
+
+  defp qualified_ref(path, iid), do: path <> ref_for(iid)
+
+  @impl true
+  def get_diff(mr_ref, opts) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      {path, req_opts} =
+        case diff_range(opts) do
+          # bd-6bg54c / #1573: a bounded `base...head` compare, the same range
+          # GitHub's adapter already served. The merge guard uses it to ask
+          # whether a head that moved past the reviewed commit still has the
+          # SAME net diff against the base (a merge from main), and ReviewPatrol
+          # uses it for new-diff-only re-reviews. Answering it with the MR's own
+          # changes — which is what this used to do for every caller, `opts`
+          # ignored — makes both comparisons vacuous.
+          {base, head} ->
+            {"/repository/compare", [params: [from: base, to: head]]}
+
+          nil ->
+            {"/merge_requests/#{iid}/changes", []}
+        end
+
+      # `/changes` sets `overflow: true` when it cut the diff short. A caller
+      # that reasons about the WHOLE diff (the CI triage) passes `complete: true`
+      # and gets an error rather than a part it would mistake for all.
+      complete? = is_map(opts) and Map.get(opts, :complete) == true
+
+      case request(cfg, :get, path, req_opts) do
+        {:ok, %Req.Response{status: status, body: %{"overflow" => true}}}
+        when status in 200..299 and complete? ->
+          {:error, :diff_overflow}
+
+        {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+          {:ok, changes_to_diff(body)}
+
+        {:ok, %Req.Response{status: status, body: body}} ->
+          {:error, http_error(status, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  # Extract a `{base, head}` compare range from the caller's opts, or nil for
+  # the whole-MR diff. Mirrors the GitHub adapter's helper of the same name,
+  # including reading both atom (the internal call sites) and string keys.
+  defp diff_range(opts) when is_map(opts) do
+    base = Map.get(opts, :base) || Map.get(opts, "base")
+    head = Map.get(opts, :head) || Map.get(opts, "head")
+
+    if is_binary(base) and base != "" and is_binary(head) and head != "" do
+      {base, head}
+    else
+      nil
+    end
+  end
+
+  defp diff_range(_opts), do: nil
+
+  @impl true
+  def ancestor?(mr_ref, ancestor, descendant) when is_binary(mr_ref) do
+    with {:ok, ancestor} <- validate_sha(ancestor),
+         {:ok, descendant} <- validate_sha(descendant) do
+      if ancestor == descendant do
+        {:ok, true}
+      else
+        merge_base_ancestry(ancestor, descendant)
+      end
+    end
+  end
+
+  # bd-df3zlo / #1736. GitLab has no `status` field on its compare response, so
+  # ancestry is read off `repository/merge_base` instead: the merge base of two
+  # commits IS the older one exactly when the older one is an ancestor of the
+  # newer. It is also the cheaper of the two endpoints — `repository/compare`
+  # would carry the whole diff payload for a question that needs one sha.
+  #
+  # `refs[]` has to appear twice, which Req's `:params` cannot express (it
+  # de-duplicates keys), so the query is written into the path already encoded.
+  #
+  # Every non-2xx is an `{:error, _}` — notably the 400 `Could not find ref`
+  # GitLab returns for a commit it has not seen yet (verified against
+  # gitlab.com), which is the forge-lag case itself: `Wardmast.Reviews.Coverage`
+  # must pause there rather than conclude the head is unrelated to our push.
+  # A 404 (`no merge base`) is treated the same way; unrelated histories are
+  # rare enough that paying a bounded wait for one is the cheaper mistake.
+  defp merge_base_ancestry(ancestor, descendant) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, body} <-
+           handle_json(
+             request(
+               cfg,
+               :get,
+               "/repository/merge_base?refs%5B%5D=#{ancestor}&refs%5B%5D=#{descendant}",
+               []
+             )
+           ) do
+      case body do
+        %{"id" => id} when is_binary(id) -> {:ok, String.downcase(id) == ancestor}
+        other -> {:error, {:unexpected_merge_base, other}}
+      end
+    end
+  end
+
+  # Mirrors the GitHub adapter's helper of the same name: a 40-hex commit id and
+  # nothing else, so the probe can never answer about a moving symbolic ref.
+  defp validate_sha(sha) when is_binary(sha) do
+    if Regex.match?(~r/\A[0-9a-fA-F]{40}\z/, sha) do
+      {:ok, String.downcase(sha)}
+    else
+      {:error, {:invalid_sha, sha}}
+    end
+  end
+
+  defp validate_sha(sha), do: {:error, {:invalid_sha, sha}}
+
+  @impl true
+  def post_inline_comment(mr_ref, finding, _opts)
+      when is_binary(mr_ref) and is_map(finding) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      %{severity: sev, file: file, line: line, message: msg} = finding
+      body = "**#{sev |> Atom.to_string() |> String.upcase()}** at `#{file}:#{line}`: #{msg}"
+
+      request(cfg, :post, "/merge_requests/#{iid}/notes", json: %{"body" => body})
+      |> handle_json()
+    end
+  end
+
+  @impl true
+  def submit_review(mr_ref, verdict, body, _opts)
+      when is_binary(mr_ref) and verdict in [:approve, :request_changes] do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      case verdict do
+        :approve ->
+          approve_result =
+            request(cfg, :post, "/merge_requests/#{iid}/approve", json: %{}) |> handle_json()
+
+          case approve_result do
+            {:ok, _} ->
+              post_summary_note(cfg, iid, body, "Approved")
+
+            {:error, %Error{} = err} ->
+              # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+              # wired Credo up. Thresholds stay at the tool's own default so new
+              # code is held to it; see the note in .credo.exs.
+              # credo:disable-for-next-line Credo.Check.Refactor.Nesting
+              if self_approve_error?(err) do
+                Logger.warning(
+                  "GitLab self-review: approve rejected (#{err.message}); " <>
+                    "falling back to verdict note for MR #{iid}"
+                )
+
+                note_body = "VERDICT: APPROVE\n\n#{body || ""}" |> String.trim()
+                post_summary_note(cfg, iid, note_body, "Approved (comment fallback)")
+              else
+                {:error, err}
+              end
+          end
+
+        :request_changes ->
+          # GitLab has no native "request changes" REST verb. Post a
+          # clearly-marked note so reviewers see the verdict in the
+          # discussion timeline, and unapprove if previously approved (the
+          # endpoint is idempotent and tolerates "not currently approved").
+          with {:ok, _} <-
+                 request(cfg, :post, "/merge_requests/#{iid}/unapprove", json: %{})
+                 |> handle_unapprove(),
+               {:ok, _} = ok <-
+                 post_summary_note(cfg, iid, body, "Requesting changes") do
+            ok
+          end
+      end
+    end
+  end
+
+  # GitLab has no native "request changes" review verb (see submit_review/4),
+  # so there is no distinct CHANGES_REQUESTED signal to ingest. The auto-revise
+  # path is GitHub-shaped (bd-95lsjb); GitLab no-ops here rather than guessing a
+  # verdict from discussion notes.
+  @impl true
+  def list_review_feedback(mr_ref) when is_binary(mr_ref),
+    do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
+  # The unresolved review threads on an MR — the provider-agnostic "open review
+  # feedback" signal PRPatrol triggers on (bd-823q7e). GitLab models a review
+  # thread as a *discussion* whose notes carry `resolvable` / `resolved`; a
+  # discussion is open when it has at least one resolvable note that is not
+  # resolved. Non-resolvable, system, and individual (non-discussion) notes are
+  # ignored. Each open discussion is normalized to a `t:review_thread/0`.
+  @impl true
+  def list_open_review_threads(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, discussions} <-
+           request(cfg, :get, "/merge_requests/#{iid}/discussions", params: [per_page: 100])
+           |> handle_json() do
+      threads =
+        discussions
+        |> List.wrap()
+        |> Enum.filter(&unresolved_discussion?/1)
+        |> Enum.map(&normalize_discussion/1)
+
+      {:ok, threads}
+    end
+  end
+
+  @spec self_approved?(String.t()) :: {:ok, boolean()} | {:error, term()}
+  def self_approved?(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, approvals} <-
+           request(cfg, :get, "/merge_requests/#{iid}/approvals", [])
+           |> handle_json() do
+      case authenticated_username(cfg) do
+        name when is_binary(name) and name != "" ->
+          {:ok, approved_by_username?(approvals, name)}
+
+        _ ->
+          {:ok, false}
+      end
+    end
+  end
+
+  defp approved_by_username?(%{"approved_by" => approved_by}, username) do
+    approved_by
+    |> List.wrap()
+    |> Enum.any?(fn entry -> get_in(entry, ["user", "username"]) == username end)
+  end
+
+  defp approved_by_username?(_approvals, _username), do: false
+
+  # Pipelines that are waiting for a runner, in GitLab's status vocabulary.
+  @queued_pipeline_statuses ~w(pending waiting_for_resource created)
+
+  # The CI backpressure signal (#1126): the project's merge-request pipelines that
+  # have not started. One list per status (the API filters on a single status); a
+  # page is the cap, since a queue that deep is saturated whatever its exact count.
+  @impl true
+  def ci_queue do
+    with {:ok, cfg} <- Config.resolve() do
+      @queued_pipeline_statuses
+      |> Enum.reduce_while({:ok, %{}}, fn status, {:ok, acc} ->
+        params = [status: status, source: "merge_request_event", per_page: 100]
+
+        case cfg |> request(:get, "/pipelines", params: params) |> handle_json() do
+          {:ok, pipelines} when is_list(pipelines) ->
+            {:cont, {:ok, Enum.reduce(pipelines, acc, &Map.put(&2, &1["id"], &1["created_at"]))}}
+
+          {:ok, _other} ->
+            {:halt, {:error, :unexpected_pipelines_response}}
+
+          {:error, _} = error ->
+            {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, queued} -> {:ok, CIQueue.build(map_size(queued), Map.values(queued))}
+        error -> error
+      end
+    end
+  end
+
+  @impl true
+  def list_open do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, mrs} <-
+           request(cfg, :get, "/merge_requests", params: [state: "opened", per_page: 100])
+           |> handle_json() do
+      summaries =
+        mrs
+        |> List.wrap()
+        |> Enum.map(fn mr ->
+          iid = mr["iid"]
+
+          %{
+            ref: ref_for(iid),
+            number: iid,
+            title: mr["title"] || "",
+            url: mr["web_url"] || "",
+            author: get_in(mr, ["author", "username"])
+          }
+        end)
+
+      {:ok, summaries}
+    end
+  end
+
+  # ---- Public helpers ------------------------------------------------------
+
+  @doc """
+  Parse a user- or system-supplied MR reference into the canonical
+  `mr_ref` form (`"!<iid>"`).
+
+  Accepts:
+
+    * the `"!42"` shorthand,
+    * a bare integer, as a binary (`"42"`) or an integer (`42`),
+    * a full GitLab MR URL (`".../-/merge_requests/42"`).
+
+  Returns `{:ok, mr_ref}` or `:error`.
+  """
+  @spec parse_ref(String.t() | integer()) :: {:ok, Wardmast.Mergers.Merger.mr_ref()} | :error
+  def parse_ref(iid) when is_integer(iid) and iid > 0, do: {:ok, ref_for(iid)}
+
+  def parse_ref(s) when is_binary(s) do
+    # Tolerate a leading `gitlab:` strategy prefix (bd-3jjk0e) so a prefixed ref
+    # still resolves to the underlying iid.
+    s = s |> String.trim() |> String.replace_prefix("gitlab:", "")
+
+    cond do
+      String.starts_with?(s, "http://") or String.starts_with?(s, "https://") ->
+        case Regex.run(~r{^https?://[^/\s]+/(.+?)/-/merge_requests/(\d+)}, s) do
+          [_, path, iid] -> {:ok, qualified_ref(path, iid)}
+          _ -> :error
+        end
+
+      # "!42" or project-qualified "group/proj!42"
+      m = Regex.run(~r/^(?:(.+?))?!(\d+)$/, s) ->
+        [_, path, iid] = m
+        if path == "", do: {:ok, ref_for(iid)}, else: {:ok, qualified_ref(path, iid)}
+
+      Regex.match?(~r/^\d+$/, s) ->
+        {:ok, ref_for(s)}
+
+      true ->
+        :error
+    end
+  end
+
+  def parse_ref(_), do: :error
+
+  @doc """
+  Convenience: set the active workspace for the current process and run
+  `fun`, restoring the previous config when `fun` returns. Useful in tests
+  and one-shot scripts. Mirrors `Wardmast.Trackers.Jira.with_workspace/2`.
+  """
+  @spec with_workspace(map() | Wardmast.Tasks.Workspace.t(), (-> result)) :: result
+        when result: any()
+  def with_workspace(workspace_or_config, fun) when is_function(fun, 0) do
+    prev = Process.get({Config, :active_workspace_config})
+    Config.put_active(workspace_or_config)
+
+    try do
+      fun.()
+    after
+      if prev, do: Config.put_active(prev), else: Config.clear()
+    end
+  end
+
+  # ---- Internals: project path resolution --------------------------------
+
+  # Resolves a project_id to a valid browser URL path (namespace/project).
+  # A non-numeric project_id is already a path. A numeric one is looked up via
+  # the API (`path_with_namespace`) and the result cached durably in
+  # `Budget` (host + project_id; failures negatively cached with a TTL), shared across
+  # processes. Never falls back to the numeric id:
+  # `https://<host>/<digits>/-/merge_requests/N` is a 404.
+  defp resolve_project_path(cfg) do
+    project_id = to_string(cfg.project_id)
+
+    case Integer.parse(project_id) do
+      {_num, ""} -> resolve_numeric_project_path(cfg, project_id)
+      _ -> {:ok, project_id}
+    end
+  end
+
+  defp resolve_numeric_project_path(cfg, project_id) do
+    case Budget.path_lookup(cfg.host, project_id, fn -> fetch_project_path(cfg) end) do
+      {:ok, path} ->
+        {:ok, path}
+
+      {:error, _reason, :cached} ->
+        :error
+
+      {:error, reason, :fresh} ->
+        Logger.warning(
+          "GitLab: could not resolve path_with_namespace for project #{project_id} " <>
+            "on #{cfg.host} (#{inspect(reason)}); not building a numeric-id MR link " <>
+            "(failure cached; not logged again until it expires)"
+        )
+
+        :error
+    end
+  end
+
+  defp fetch_project_path(cfg) do
+    case request(cfg, :get, "", []) do
+      {:ok, %Req.Response{status: status, body: %{"path_with_namespace" => path}}}
+      when status in 200..299 and is_binary(path) and path != "" ->
+        {:ok, path}
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:http_status, status}}
+
+      other ->
+        {:error, other}
+    end
+  rescue
+    e -> {:error, e}
+  end
+
+  # ---- Internals: ref handling --------------------------------------------
+
+  defp ref_for(iid) when is_integer(iid), do: "!" <> Integer.to_string(iid)
+  defp ref_for(iid) when is_binary(iid), do: "!" <> iid
+
+  # The behaviour callbacks receive the canonical "!<iid>" form, but tolerate
+  # a bare integer string too in case a caller hands one through directly.
+  # `detailed_merge_status == "conflict"` while `has_conflicts == false` is
+  # GitLab's cached mergeability disagreeing with itself (bd-9kfdkf): ask it to
+  # recompute (`with_merge_status_recheck`) and read that answer instead of
+  # escalating the stale one. A failed recheck keeps the first response.
+  defp recheck_phantom_conflict(
+         {:ok, %Req.Response{status: status, body: %{} = body}} = first,
+         cfg,
+         iid
+       )
+       when status in 200..299 do
+    if Map.get(body, "detailed_merge_status") == "conflict" and
+         Map.get(body, "has_conflicts") == false do
+      case request(cfg, :get, "/merge_requests/#{iid}", params: [with_merge_status_recheck: true]) do
+        {:ok, %Req.Response{status: s, body: %{}}} = rechecked when s in 200..299 -> rechecked
+        _ -> first
+      end
+    else
+      first
+    end
+  end
+
+  defp recheck_phantom_conflict(response, _cfg, _iid), do: response
+
+  # Config for the project an `mr_ref` names: the workspace's host + token, with
+  # the project overridden by the ref's own project path when it carries one
+  # (bd-96d5z4). Unqualified refs keep the configured project_id.
+  defp cfg_for_ref(mr_ref) do
+    with {:ok, cfg} <- Config.resolve() do
+      case parse_ref(mr_ref) do
+        {:ok, ref} ->
+          case String.split(ref, "!", parts: 2) do
+            ["", _] -> {:ok, cfg}
+            [path, _] -> {:ok, %{cfg | project_id: path}}
+          end
+
+        :error ->
+          {:ok, cfg}
+      end
+    end
+  end
+
+  defp iid_from_ref(ref) do
+    case parse_ref(ref) do
+      {:ok, ref} ->
+        [_, iid] = String.split(ref, "!", parts: 2)
+        {:ok, iid}
+
+      :error ->
+        {:error,
+         %Error{
+           kind: :bad_ref,
+           status: nil,
+           message: "could not parse GitLab mr_ref #{inspect(ref)}",
+           raw: ref
+         }}
+    end
+  end
+
+  # ---- Internals: payload helpers -----------------------------------------
+
+  defp reviewers(opts, cfg) do
+    case Map.get(opts, :reviewer_ids) do
+      ids when is_list(ids) and ids != [] -> ids
+      _ -> cfg.default_reviewers
+    end
+  end
+
+  defp labels(opts) do
+    case Map.get(opts, :labels) do
+      labels when is_list(labels) and labels != [] -> Enum.join(labels, ",")
+      _ -> nil
+    end
+  end
+
+  # Omit empty/nil values so we send a minimal body (GitLab treats an empty
+  # reviewer_ids list as "clear reviewers", which is not what `open` means).
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, _key, []), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # ---- Internals: duplicate-MR adoption ------------------------------------
+
+  # GitLab returns 422 or 409 (observed on gitlab.com; version-dependent) with
+  # a message list containing "another open merge request already exists for
+  # this source branch" when an MR for the branch already exists — e.g. the
+  # worker created it itself (via `glab mr create`), or an earlier attempt of
+  # a resumed session already opened it before failing on something else
+  # (bd-dm2t5d). Match case-insensitively against the canonical substring.
+  defp duplicate_mr_error?(%{"message" => messages}) when is_list(messages) do
+    Enum.any?(messages, fn
+      msg when is_binary(msg) ->
+        msg |> String.downcase() |> String.contains?("open merge request already exists")
+
+      _ ->
+        false
+    end)
+  end
+
+  defp duplicate_mr_error?(%{"message" => msg}) when is_binary(msg) do
+    msg |> String.downcase() |> String.contains?("open merge request already exists")
+  end
+
+  defp duplicate_mr_error?(_), do: false
+
+  # When the branch already has an open MR, look it up and return its ref so
+  # the merger can adopt it instead of failing.
+  defp adopt_existing_mr(cfg, branch, target_branch) do
+    params = [state: "opened", source_branch: branch, target_branch: target_branch]
+
+    case request(cfg, :get, "/merge_requests", params: params) do
+      {:ok, %Req.Response{status: status, body: [%{"iid" => iid} | _]}}
+      when status in 200..299 and is_integer(iid) ->
+        Logger.info(
+          "GitLab merger: adopting existing open MR !#{iid} for branch #{inspect(branch)}"
+        )
+
+        {:ok, ref_for(iid)}
+
+      {:ok, %Req.Response{status: status, body: []}} when status in 200..299 ->
+        {:error,
+         %Error{
+           kind: :conflict,
+           status: 422,
+           message: "another open merge request already exists but none found in listing",
+           raw: []
+         }}
+
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: "unexpected response shape when listing open merge requests",
+           raw: body
+         }}
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # ---- Internals: response shaping ----------------------------------------
+
+  defp map_state("opened"), do: :open
+  defp map_state("merged"), do: :merged
+  defp map_state("closed"), do: :closed
+  defp map_state("locked"), do: :closed
+  defp map_state(_), do: :open
+
+  # `approved` is present when the project uses approval rules; absent
+  # otherwise. Treat absence as "not approved".
+  defp approved?(%{"approved" => approved}) when is_boolean(approved), do: approved
+  defp approved?(_), do: false
+
+  # Classify *why* an open MR can't merge, or nil when it is mergeable (or
+  # already terminal). The block-reason surface Phase 1 (#354) escalates on so an
+  # approved-but-unmergeable MR never parks silently. Prefers GitLab's
+  # `detailed_merge_status` (richest signal); falls back to `merge_status` /
+  # `has_conflicts` on older GitLab versions that omit it.
+  #
+  #   :conflict                  — merge conflict with the target branch
+  #   :behind_base               — fast-forward-only target needs a rebase
+  #   :ci_failed                 — required pipeline actually failed
+  #   :no_pipeline               — a pipeline is required but the head has none
+  #   :needs_approval            — required approvals not yet satisfied
+  #   :needs_nonauthor_approval  — `not_approved` on a fleet-authored MR (GitLab's
+  #                                approval rules forbid the author self-approving)
+  #   :draft                     — MR is a draft / work in progress
+  #   :blocked_other             — blocked by some other settled rule (threads, …)
+  #
+  # In-progress / transient statuses map to `nil` (not a block): "ci_still_running"
+  # / "ci_must_pass" mean CI is required but not yet green — it may still be
+  # running — so a CI block is keyed off the *resolved* `pipeline == :failed`,
+  # never the detailed-status string; and "preparing" / "checking" / "unchecked"
+  # mean GitLab is still computing the merge status. Escalating any of these
+  # would fire while the MR is merely being prepared, not genuinely blocked.
+  #
+  # `broken_status` and the legacy `merge_status == "cannot_be_merged"` are
+  # *not* trusted as a confirmed conflict on their own (bd-1x4r25): GitLab
+  # computes mergeability asynchronously, so either can read a stale value
+  # right after the target branch moves, with zero actual divergence. GitLab
+  # doesn't even document `broken_status` as target-conflict-specific (it's
+  # absent from the current REST API docs entirely). Only `has_conflicts ==
+  # true` or the explicit `detailed_merge_status == "conflict"` are trusted;
+  # everything else in that family is treated as "not settled yet", same as
+  # preparing/checking/unchecked, until a positive signal corroborates it.
+  defp block_reason(_cfg, _body, status, _pipeline, _pipeline_id)
+       when status in [:merged, :closed], do: nil
+
+  # Pre-existing complexity 17 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp block_reason(cfg, body, _status, pipeline, pipeline_id) do
+    draft? = Map.get(body, "draft") == true or Map.get(body, "work_in_progress") == true
+    detailed = Map.get(body, "detailed_merge_status")
+    merge_status = Map.get(body, "merge_status")
+    conflicts? = Map.get(body, "has_conflicts") == true
+
+    cond do
+      draft? or detailed == "draft_status" ->
+        :draft
+
+      settled_conflict?(body) ->
+        log_conflict_verdict(body, detailed, merge_status, conflicts?)
+        :conflict
+
+      detailed == "need_rebase" ->
+        :behind_base
+
+      # Only a settled, failed pipeline is a CI block. "ci_must_pass" /
+      # "ci_still_running" are handled in the in-progress bucket below.
+      pipeline == :failed ->
+        :ci_failed
+
+      # The project requires a pipeline (`ci_must_pass`) but none exists on the
+      # head and the MR carries no `head_pipeline` — its workflow:rules created
+      # none, so CI can never go green and merging will only be refused (#918).
+      detailed == "ci_must_pass" and is_nil(pipeline_id) and
+          is_nil(Map.get(body, "head_pipeline")) ->
+        :no_pipeline
+
+      detailed in ["not_approved", "approvals_syncing", "requested_changes"] ->
+        approval_block_reason(cfg, body, detailed)
+
+      detailed == "mergeable" ->
+        nil
+
+      # In-progress / transient / unconfirmed — CI not yet green, merge status
+      # still being computed, or an unconfirmed "broken" report. Non-blocking
+      # until it settles (findings: ci_still_running is not a failure;
+      # preparing/checking/unchecked are not a block; broken_status alone is
+      # not a confirmed conflict — see the block comment above).
+      detailed in [
+        "ci_must_pass",
+        "ci_still_running",
+        "preparing",
+        "checking",
+        "unchecked",
+        "broken_status"
+      ] ->
+        nil
+
+      # Legacy fallback (no `detailed_merge_status` at all): `merge_status` is
+      # deprecated and asynchronously recomputed, so a bare "cannot_be_merged"
+      # without a corroborating `has_conflicts: true` (already checked above)
+      # is not trusted as a settled conflict — it's treated the same as the
+      # other not-yet-settled statuses. `cannot_be_merged_recheck` and
+      # `cannot_be_merged_rechecking` are the legacy enum's explicit "a
+      # mergeability recheck is queued / running" states — they appear on the
+      # same older GitLab versions that omit `detailed_merge_status`, and are
+      # *by definition* unsettled, so they belong here too.
+      #
+      # Unlike the pre-bd-1x4r25 code, an unrecognized `merge_status` with a nil
+      # `detailed` no longer returns `nil` — it falls through to `:blocked_other`
+      # below. That is a deliberate tightening: an unknown status is surfaced
+      # once to the coordinator rather than silently treated as mergeable.
+      is_nil(detailed) and
+          merge_status in [
+            "can_be_merged",
+            "unchecked",
+            "checking",
+            "cannot_be_merged",
+            "cannot_be_merged_recheck",
+            "cannot_be_merged_rechecking",
+            nil,
+            ""
+          ] ->
+        nil
+
+      true ->
+        :blocked_other
+    end
+  end
+
+  # Trusted, settled conflict signal only: an explicit `has_conflicts: true` or
+  # `detailed_merge_status == "conflict"`. `broken_status` and the legacy
+  # `merge_status == "cannot_be_merged"` are deliberately excluded — see the
+  # block comment above `block_reason/5` (bd-1x4r25). Shared by `block_reason/5`
+  # and the `conflicting` field on `get/1` so both paths agree on what counts
+  # as a real conflict worth dispatching a resolver for.
+  defp settled_conflict?(body) do
+    Map.get(body, "has_conflicts") == true or Map.get(body, "detailed_merge_status") == "conflict"
+  end
+
+  # Surfaces the exact GitLab fields behind a :conflict verdict so a future
+  # false positive is diagnosable from the log record rather than by
+  # reconstruction after the fact (bd-1x4r25). This fires on every `get/1`
+  # poll for the lifetime of a genuinely conflicting MR (Watchdog/MergeQueue
+  # poll on a timer), so it stays at `warning` deliberately — a real conflict
+  # blocks a merge and is worth surfacing at that level on every poll — but
+  # carries `target_branch`/`sha` so the repeated line still earns its keep,
+  # showing whether the conflict is against the same target commit each time
+  # or has moved (which would mean it's worth re-checking, not stale).
+  defp log_conflict_verdict(body, detailed, merge_status, conflicts?) do
+    Logger.warning(
+      "GitLab block_reason: :conflict — detailed_merge_status=#{inspect(detailed)} " <>
+        "merge_status=#{inspect(merge_status)} has_conflicts=#{inspect(conflicts?)} " <>
+        "iid=#{inspect(Map.get(body, "iid"))} target_branch=#{inspect(Map.get(body, "target_branch"))} " <>
+        "sha=#{inspect(Map.get(body, "sha"))}"
+    )
+  end
+
+  # `not_approved` on an otherwise-green MR means the only thing left is a
+  # required approval. If the MR was opened by the fleet's own identity, GitLab's
+  # approval rules require an approval from someone *other than the author* (a
+  # project commonly enables "prevent author approval"), which the fleet can't
+  # supply. The Watchdog parks + escalates to a human once on `:needs_nonauthor_approval`
+  # rather than failing at the poll ceiling (bd-c3lchp). `requested_changes` is a
+  # genuine review action and `approvals_syncing` is transient, so both stay
+  # `:needs_approval`; non-fleet authorship also falls back to `:needs_approval`.
+  defp approval_block_reason(cfg, body, "not_approved") do
+    if fleet_authored?(cfg, body), do: :needs_nonauthor_approval, else: :needs_approval
+  end
+
+  defp approval_block_reason(_cfg, _body, _detailed), do: :needs_approval
+
+  # True only when the MR's author username matches the authenticated token's own
+  # username. Skips the `/user` lookup when the MR carries no author, so the
+  # common path (and stubs that don't model `/user`) never make the call.
+  defp fleet_authored?(cfg, body) do
+    case get_in(body, ["author", "username"]) do
+      name when is_binary(name) and name != "" -> name == authenticated_username(cfg)
+      _ -> false
+    end
+  end
+
+  # The username of the token's own identity (`GET /user`, at the API root rather
+  # than the project-scoped base `request/4` uses). Best-effort: any failure
+  # yields nil so the caller falls back to the generic block reason. Reached only
+  # in the narrow `not_approved` branch, not on every poll.
+  defp authenticated_username(cfg) do
+    case Client.request(root_client(cfg), :get, "/user", []) do
+      {:ok, %Req.Response{status: status, body: %{"username" => name}}}
+      when status in 200..299 and is_binary(name) and name != "" ->
+        name
+
+      _ ->
+        nil
+    end
+  end
+
+  # Fetch the latest pipeline for the MR and map its status to a domain atom.
+  # Returns nil when there are no pipelines (no CI configured) or the request
+  # fails (best-effort — a transient API error must not block the MR poll).
+  #
+  # With a known head SHA the verdict is the newest pipeline ON THAT SHA, never an
+  # older failed one on the same SHA nor the previous head's result; a head with
+  # no pipeline yet is `:pending` (bd-8o35da).
+  defp fetch_pipeline_status(cfg, iid, head_sha) do
+    case request(cfg, :get, "/merge_requests/#{iid}/pipelines", params: [per_page: 100]) do
+      {:ok, %Req.Response{status: status, body: [_ | _] = pipelines}} when status in 200..299 ->
+        pipelines
+        |> head_pipeline_candidates(head_sha)
+        |> newest_first()
+        |> case do
+          [latest | _] -> {map_pipeline_status(Map.get(latest, "status")), Map.get(latest, "id")}
+          [] -> {:pending, nil}
+        end
+
+      _ ->
+        {nil, nil}
+    end
+  end
+
+  defp head_pipeline_candidates(pipelines, sha) when sha in [nil, ""], do: pipelines
+
+  defp head_pipeline_candidates(pipelines, sha),
+    do: Enum.filter(pipelines, &(Map.get(&1, "sha") == sha))
+
+  defp map_pipeline_status("success"), do: :success
+  defp map_pipeline_status("failed"), do: :failed
+  defp map_pipeline_status("canceled"), do: :failed
+  defp map_pipeline_status("running"), do: :running
+  # "skipped" (pipeline explicitly skipped) and "manual" (pipeline is done
+  # except for an optional manual job) are both *settled*, mergeable outcomes,
+  # not CI-still-running — folding them into the queued/transient bucket below
+  # made the Watchdog defer indefinitely on an already-mergeable MR
+  # (bd-cnytw3 finding #1).
+  defp map_pipeline_status("skipped"), do: :neutral
+  defp map_pipeline_status("manual"), do: :neutral
+  # "created" / "waiting_for_resource" / "preparing" / "pending" / "scheduled",
+  # and any future GitLab status we don't recognize yet, are treated as
+  # queued/transient — safer to keep deferring on an unknown status than to
+  # risk attempting a merge GitLab isn't ready for.
+  defp map_pipeline_status(_), do: :pending
+
+  # ---- A failed pipeline that never ran a job -------------------------------
+  #
+  # GitLab fails a pipeline at creation when it refuses to run it: the pushing
+  # user is not identity-verified, a quota is spent, the YAML does not parse. The
+  # pipeline is `failed` with no jobs at all, so there is no check to brief a fix
+  # pass with and no code change can clear it. The REST pipeline carries none of
+  # the reason (`started_at: null`, `yaml_errors: null`); only GraphQL's
+  # `failureReason` / `errorMessages` do, so they are read from there, best
+  # effort — a GraphQL failure still reports the unrun pipeline, without a reason.
+  defp fetch_unrun_pipeline(cfg, iid) do
+    with {:ok, pipelines} <- mr_pipelines(cfg, iid),
+         %{"id" => id, "status" => "failed"} = pipeline <- newest_head_pipeline(pipelines),
+         {:ok, []} <- pipeline_jobs(cfg, id) do
+      {:ok, unrun_info(cfg, pipeline)}
+    else
+      {:error, _} = err -> err
+      _ -> {:ok, nil}
+    end
+  end
+
+  # The newest pipeline on the MR's current head (the newest pipeline's sha).
+  defp newest_head_pipeline([%{} = latest | _] = pipelines) do
+    head = Map.get(latest, "sha")
+    Enum.find(pipelines, &(Map.get(&1, "sha") in [nil, head]))
+  end
+
+  defp newest_head_pipeline(_), do: nil
+
+  defp unrun_info(cfg, pipeline) do
+    id = Map.get(pipeline, "id")
+    rest = rest_pipeline(cfg, id)
+    gql = graphql_pipeline(cfg, Map.get(pipeline, "iid"))
+    reason = gql["failureReason"]
+    messages = error_messages_text(gql["errorMessages"])
+
+    %{
+      pipeline_id: id,
+      sha: Map.get(pipeline, "sha"),
+      user: get_in(rest, ["user", "username"]) || get_in(gql, ["user", "username"]),
+      failure_reason: reason,
+      error_messages: messages,
+      yaml_errors: rest["yaml_errors"],
+      verification?: verification_text?(reason) or verification_text?(messages)
+    }
+  end
+
+  defp verification_text?(text) when is_binary(text), do: text =~ ~r/verif/i
+  defp verification_text?(_), do: false
+
+  defp rest_pipeline(cfg, id) do
+    case request(cfg, :get, "/pipelines/#{id}", []) |> handle_json() do
+      {:ok, %{} = body} -> body
+      _ -> %{}
+    end
+  end
+
+  @pipeline_reason_query """
+  query($path: ID!, $iid: ID!) {
+    project(fullPath: $path) {
+      pipeline(iid: $iid) {
+        failureReason
+        errorMessages { nodes { content } }
+        user { username }
+      }
+    }
+  }
+  """
+
+  defp graphql_pipeline(cfg, iid) when not is_nil(iid) do
+    with {:ok, path} <- resolve_project_path(cfg),
+         {:ok, %{"data" => %{"project" => %{"pipeline" => %{} = pipeline}}}} <-
+           cfg
+           |> build_client("https://#{cfg.host}/api")
+           |> Client.request(:post, "/graphql",
+             json: %{
+               "query" => @pipeline_reason_query,
+               "variables" => %{"path" => path, "iid" => to_string(iid)}
+             }
+           )
+           |> handle_json() do
+      pipeline
+    else
+      _ -> %{}
+    end
+  end
+
+  defp graphql_pipeline(_cfg, _iid), do: %{}
+
+  defp error_messages_text(%{"nodes" => nodes}) when is_list(nodes),
+    do: nodes |> Enum.map(& &1["content"]) |> Enum.filter(&is_binary/1) |> blank_to_nil()
+
+  defp error_messages_text(text) when is_binary(text), do: blank_to_nil([text])
+  defp error_messages_text(_), do: nil
+
+  defp blank_to_nil([]), do: nil
+  defp blank_to_nil(parts), do: Enum.join(parts, "; ")
+
+  # Fetch the latest failed pipeline for the MR, collect its failing jobs, and
+  # return a normalized `failing_check` list for the fix-pass briefing. Returns
+  # `{:ok, []}` when no failed pipeline or no failing jobs exist — the fix pass
+  # dispatches without log context rather than erroring.
+  defp fetch_failing_check_logs(cfg, iid) do
+    case request(cfg, :get, "/merge_requests/#{iid}/pipelines", params: [per_page: 20]) do
+      {:ok, %Req.Response{status: status, body: pipelines}} when status in 200..299 ->
+        case find_latest_failed_pipeline(pipelines) do
+          nil ->
+            {:ok, []}
+
+          pipeline_id ->
+            fetch_jobs_for_pipeline(cfg, pipeline_id)
+        end
+
+      {:ok, _} ->
+        {:ok, []}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # The newest failed pipeline OF THE MR'S CURRENT HEAD. The list is newest
+  # first, so its first entry names the head; a failed pipeline on an older head
+  # (the head moved, and the new one is running or green) is history, not the
+  # red the caller is asking about (bd-3ij7dw). Pipelines carrying no `sha` match
+  # any head, as before.
+  defp find_latest_failed_pipeline([%{} = latest | _] = pipelines) do
+    head = Map.get(latest, "sha")
+
+    pipelines
+    |> Enum.find(fn p ->
+      Map.get(p, "status") in ["failed", "canceled"] and
+        (not is_binary(head) or Map.get(p, "sha") in [nil, head])
+    end)
+    |> case do
+      %{"id" => id} -> id
+      _ -> nil
+    end
+  end
+
+  defp find_latest_failed_pipeline(_), do: nil
+
+  defp fetch_jobs_for_pipeline(cfg, pipeline_id) do
+    case request(cfg, :get, "/pipelines/#{pipeline_id}/jobs", params: [per_page: 100]) do
+      {:ok, %Req.Response{status: status, body: jobs}} when status in 200..299 ->
+        failing_jobs = jobs |> List.wrap() |> Enum.filter(&failing_job?/1)
+        checks = Enum.map(failing_jobs, &fetch_job_log(cfg, &1))
+        {:ok, checks}
+
+      {:ok, _} ->
+        {:ok, []}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # A job allowed to fail never blocks the pipeline, so it is not a failing check.
+  defp genuinely_failed_job?(job),
+    do: Map.get(job, "status") == "failed" and Map.get(job, "allow_failure") != true
+
+  defp failing_job?(job),
+    do: Map.get(job, "status") in @failing_job_statuses and Map.get(job, "allow_failure") != true
+
+  defp fetch_job_log(cfg, job) do
+    job_id = Map.get(job, "id")
+    name = Map.get(job, "name") || "job"
+    url = get_in(job, ["web_url"])
+
+    # `truncated`: the excerpt left failure text out, so the CI triage must not
+    # classify from it (bd-3ij7dw). No trace at all is as unreadable as a cut one.
+    {summary, truncated} =
+      case request(cfg, :get, "/jobs/#{job_id}/trace", []) do
+        {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+          body |> to_string() |> CILogExcerpt.extract_with_status(@log_tail_limit)
+
+        _ ->
+          {"", true}
+      end
+
+    # `status` / `failure_reason` let the CI triage (#1144) tell a runner failure
+    # (`runner_system_failure`, `stuck_or_timeout_failure`, a cancel) from a script's.
+    %{
+      name: name,
+      summary: summary,
+      truncated: truncated,
+      url: url,
+      status: Map.get(job, "status"),
+      failure_reason: Map.get(job, "failure_reason")
+    }
+  end
+
+  defp handle_ok(result), do: Client.expect_ok(error_spec(), result)
+
+  defp handle_json(result), do: Client.handle_json(error_spec(), result)
+
+  # POST `/unapprove` is idempotent in spirit but GitLab returns 401/404
+  # depending on whether the caller was the original approver. Treat any
+  # non-2xx that isn't a hard auth/transport failure as "best-effort" —
+  # the summary note is the real signal of `:request_changes`.
+  defp handle_unapprove({:ok, %Req.Response{status: status}}) when status in 200..299,
+    do: {:ok, :unapproved}
+
+  defp handle_unapprove({:ok, %Req.Response{status: 404}}), do: {:ok, :not_previously_approved}
+
+  defp handle_unapprove({:ok, %Req.Response{status: status, body: body}}),
+    do: {:error, http_error(status, body)}
+
+  defp handle_unapprove({:error, exception}), do: {:error, transport_error(exception)}
+
+  # GitLab returns 401/403/422 when prevent_author_approval is enabled and the
+  # reviewer is the MR author. The exact message varies across GitLab versions;
+  # match on status + common message fragments that indicate identity conflict.
+  defp self_approve_error?(%Error{status: status, message: msg})
+       when status in [401, 403, 422] and is_binary(msg) do
+    lower = String.downcase(msg)
+
+    String.contains?(lower, "own merge request") or
+      String.contains?(lower, "not allowed to approve") or
+      String.contains?(lower, "not permitted to approve") or
+      String.contains?(lower, "author of this merge request") or
+      String.contains?(lower, "author cannot approve")
+  end
+
+  defp self_approve_error?(_), do: false
+
+  # GitLab returns no top-level diff field on `/changes`; the diff sits in
+  # `changes[].diff` per-file. Assemble a single unified-diff text the
+  # check runner can feed to its reviewer.
+  defp changes_to_diff(%{"changes" => changes}) when is_list(changes) do
+    changes
+    |> Enum.map_join("", &render_change/1)
+  end
+
+  # `/repository/compare` returns the identical per-file shape under "diffs".
+  defp changes_to_diff(%{"diffs" => diffs}) when is_list(diffs) do
+    diffs
+    |> Enum.map_join("", &render_change/1)
+  end
+
+  defp changes_to_diff(_), do: ""
+
+  defp render_change(%{} = change) do
+    old_path = Map.get(change, "old_path") || Map.get(change, "new_path") || ""
+    new_path = Map.get(change, "new_path") || Map.get(change, "old_path") || ""
+    diff = Map.get(change, "diff") || ""
+
+    "diff --git a/#{old_path} b/#{new_path}\n--- a/#{old_path}\n+++ b/#{new_path}\n" <> diff
+  end
+
+  # A discussion is an *open review thread* when it has at least one resolvable
+  # note that is not yet resolved. GitLab marks the diff/inline notes that make
+  # up a review thread as `resolvable: true`; general comments and system notes
+  # are `resolvable: false` and never count.
+  defp unresolved_discussion?(%{"notes" => notes}) when is_list(notes) do
+    Enum.any?(notes, fn note ->
+      Map.get(note, "resolvable") == true and Map.get(note, "resolved") != true
+    end)
+  end
+
+  defp unresolved_discussion?(_), do: false
+
+  defp normalize_discussion(%{} = discussion) do
+    notes = discussion |> Map.get("notes") |> List.wrap()
+    first = List.first(notes) || %{}
+    position = Map.get(first, "position") || %{}
+
+    # bd-45x4yo: populate `:comments` from the notes already in this response
+    # (GitLab discussions come back with the full note list, unlike GitHub's
+    # paginated batch query) — `answered_by_us?/2` in pr_patrol.ex reads
+    # `List.last(comments)[:author]` to detect a thread we've already replied
+    # to. Without this, GitLab hits `answered_by_us?/2`'s `_ -> false` clause
+    # for every thread and stays exposed to the same unbounded re-dispatch
+    # loop this task fixed on GitHub.
+    comments =
+      Enum.map(notes, fn note ->
+        %{
+          id: Map.get(note, "id"),
+          author: get_in(note, ["author", "username"]),
+          body: Map.get(note, "body")
+        }
+      end)
+
+    %{
+      id: Map.get(discussion, "id"),
+      path: Map.get(position, "new_path") || Map.get(position, "old_path"),
+      line: Map.get(position, "new_line") || Map.get(position, "old_line"),
+      author: get_in(first, ["author", "username"]),
+      body: Map.get(first, "body"),
+      comments: comments
+    }
+  end
+
+  defp post_summary_note(cfg, iid, body, prefix) do
+    text =
+      case body do
+        b when is_binary(b) and b != "" -> "#{prefix}: #{b}"
+        _ -> prefix
+      end
+
+    request(cfg, :post, "/merge_requests/#{iid}/notes", json: %{"body" => text})
+    |> handle_json()
+  end
+
+  # ---- Internals: git operations ------------------------------------------
+
+  defp maybe_push_branch(branch, opts) do
+    case Map.get(opts, :repo_path) do
+      path when is_binary(path) ->
+        case System.cmd("git", ["push", "--set-upstream", "origin", branch],
+               stderr_to_stdout: true,
+               cd: path
+             ) do
+          {_output, 0} ->
+            :ok
+
+          {output, _nonzero} ->
+            {:error,
+             %Error{
+               kind: :git_push_failed,
+               status: nil,
+               message: "Failed to push branch #{inspect(branch)}: #{String.trim(output)}",
+               raw: output
+             }}
+        end
+
+      _ ->
+        :ok
+    end
+  rescue
+    e in ErlangError ->
+      {:error,
+       %Error{
+         kind: :git_push_failed,
+         status: nil,
+         message: "Failed to push branch #{inspect(branch)}: #{Exception.message(e)}",
+         raw: e
+       }}
+  end
+
+  # ---- Internals: HTTP ----------------------------------------------------
+
+  # Project-scoped client: prepends /api/v4/projects/:project_id to `path`.
+  defp client(cfg),
+    do: build_client(cfg, "https://#{cfg.host}/api/v4/projects/#{encode_project(cfg.project_id)}")
+
+  defp encode_project(id), do: id |> to_string() |> URI.encode(&URI.char_unreserved?/1)
+
+  # Root client: prepends /api/v4 to `path` (for `GET /user`, which is not
+  # scoped to a project).
+  defp root_client(cfg), do: build_client(cfg, "https://#{cfg.host}/api/v4")
+
+  defp build_client(cfg, base_url) do
+    Client.new(
+      base_url: base_url,
+      headers: headers(cfg),
+      errors: error_spec(),
+      stub: {:gitlab_http_stub, @stub_name},
+      gate: fn {method, url}, fun ->
+        Budget.gate(cfg.host, Budget.site(method, url), fun)
+      end
+    )
+  end
+
+  # Classification needs no request config, so call sites holding only a
+  # response can build an error without re-resolving the client.
+  defp error_spec do
+    ErrorSpec.new(
+      module: Error,
+      classify_kind: fn status, _body -> kind_for_status(status) end,
+      error_message: &error_message/2
+    )
+  end
+
+  defp request(cfg, method, path, req_opts),
+    do: Client.request(client(cfg), method, path, req_opts)
+
+  defp headers(%{token: token}) do
+    [
+      {"private-token", token},
+      {"accept", "application/json"},
+      {"content-type", "application/json"},
+      {"user-agent", "arbiter"}
+    ]
+  end
+
+  defp http_error(status, body), do: Client.http_error(error_spec(), status, body)
+
+  defp kind_for_status(400), do: :validation_failed
+  defp kind_for_status(401), do: :unauthenticated
+  defp kind_for_status(403), do: :forbidden
+  defp kind_for_status(404), do: :not_found
+  defp kind_for_status(405), do: :conflict
+  defp kind_for_status(406), do: :conflict
+  defp kind_for_status(409), do: :conflict
+  defp kind_for_status(422), do: :validation_failed
+  defp kind_for_status(s) when s >= 500 and s < 600, do: :server_error
+  defp kind_for_status(_), do: :http
+
+  # GitLab error bodies use "message" (string or map) or "error".
+  defp error_message(%{"message" => msg}, _) when is_binary(msg), do: msg
+  defp error_message(%{"message" => msg}, _) when is_map(msg) or is_list(msg), do: inspect(msg)
+  defp error_message(%{"error" => msg}, _) when is_binary(msg), do: msg
+  defp error_message(_, status), do: "HTTP #{status}"
+
+  defp transport_error(exception), do: Client.transport_error(error_spec(), exception)
+end

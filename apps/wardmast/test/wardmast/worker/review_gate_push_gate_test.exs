@@ -1,0 +1,970 @@
+defmodule Wardmast.Worker.ReviewGatePushGateTest do
+  @moduledoc """
+  bd-2jkrqu / #1701 — the ReviewGate reviewed the worker's LOCAL head, not the
+  pushed PR head.
+
+  vs-5l45oz (vstim MR !228), 2026-09-15: round 1 said REQUEST_CHANGES; the fix
+  round committed `edadf22c` in the worktree and never pushed; origin and the
+  MR's pipeline stayed on the unfixed `8deed4e5`. Round 2 read the **local**
+  worktree, marked every finding `[ADDRESSED]` citing lines that only existed
+  locally, and APPROVED. The park escalation then said "the work is committed
+  and the branch is pushed … merge it by hand, if the diff is fine" — a human
+  following it would have merged the unfixed commit. Two days earlier
+  (vs-bdrbp0) a timed-out fix round left sixteen commits unpushed.
+
+  What is pinned here, against real git repos with a real bare origin:
+
+    * **AC1** — no review round runs against a head that is not on the remote
+      branch. Round 1 and the fix round's re-review both push first; a head
+      that *cannot* be pushed (diverged) parks `:head_not_pushed` and the
+      reviewer is never paid for.
+    * **AC2** — the reviewed-SHA stamp and the `review_coverage` row only ever
+      name a head the remote carries.
+    * **AC3** — the park escalation states the push state it *checked*, and
+      withholds "merge it by hand" when the PR head is not the reviewed head.
+
+  The reviewer fixture (`review_push_check.sh`) encodes the push state it saw
+  in its own verdict, so a regression shows up as a REQUEST_CHANGES rather
+  than as a test that passes for the wrong reason.
+  """
+
+  use Wardmast.DataCase, async: false
+
+  import Wardmast.LifecycleFixtures, only: [put_state!: 2]
+
+  require Ash.Query
+
+  alias Wardmast.CircuitBreaker
+  alias Wardmast.Messages.Message
+  alias Wardmast.Reviews.Coverage.Entry
+  alias Wardmast.Reviews.RemoteHead
+  alias Wardmast.Tasks.{Issue, ReviewPark, Workspace}
+  alias Wardmast.Worker
+  alias Wardmast.Worker.ReviewGate
+
+  @push_check Path.expand("../../fixtures/review_push_check.sh", __DIR__)
+  @commit_then_approve Path.expand("../../fixtures/review_commit_then_approve.sh", __DIR__)
+  @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
+  @revise_conflict Path.expand("../../fixtures/revise_commit_then_target_conflict.sh", __DIR__)
+  @revise_rewrite Path.expand("../../fixtures/revise_rewrite.sh", __DIR__)
+
+  setup do
+    CircuitBreaker.reset_all()
+    on_exit(&CircuitBreaker.reset_all/0)
+
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "rg-push-#{System.unique_integer([:positive])}-#{:erlang.phash2(self())}"
+      )
+
+    File.mkdir_p!(tmp)
+    repo = init_repo(tmp)
+
+    put_app_env(:wardmast, :worktree_root, Path.join(tmp, "worktrees"))
+    put_app_env(:wardmast, :repo_paths, %{"trib/repo" => repo})
+
+    on_exit(fn -> File.rm_rf!(tmp) end)
+
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "rg-push-#{System.unique_integer([:positive])}",
+        prefix: "rp",
+        config: %{"review" => %{"required" => true}}
+      })
+
+    %{repo: repo, ws: ws, tmp: tmp}
+  end
+
+  # ---- git rig -------------------------------------------------------------
+
+  defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
+  defp git!(args, repo), do: {_, 0} = git(args, repo)
+
+  defp init_repo(dir) do
+    repo = Path.join(dir, "repo")
+    bare = Path.join(dir, "origin.git")
+    File.mkdir_p!(repo)
+    {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+    git!(["config", "user.email", "repo@example.com"], repo)
+    git!(["config", "user.name", "Repo"], repo)
+    git!(["config", "commit.gpgsign", "false"], repo)
+    File.write!(Path.join(repo, "README.md"), "seed\n")
+    git!(["add", "README.md"], repo)
+    git!(["commit", "-q", "-m", "seed"], repo)
+    {_, 0} = System.cmd("git", ["clone", "--bare", "-q", repo, bare])
+    git!(["remote", "add", "origin", bare], repo)
+    git!(["fetch", "-q", "origin"], repo)
+    repo
+  end
+
+  defp seed_feature_branch(repo, branch) do
+    git!(["checkout", "-q", "-b", branch], repo)
+    File.write!(Path.join(repo, "feature.txt"), "worker work\n")
+    git!(["add", "feature.txt"], repo)
+    git!(["commit", "-q", "-m", "feature work"], repo)
+    git!(["checkout", "-q", "main"], repo)
+    :ok
+  end
+
+  defp branch_worktree(repo, tmp, branch) do
+    wt = Path.join(tmp, "wt-#{System.unique_integer([:positive])}")
+    {_, 0} = System.cmd("git", ["worktree", "add", "-q", wt, branch], cd: repo)
+    git!(["config", "user.email", "wt@example.com"], wt)
+    git!(["config", "user.name", "WT"], wt)
+    git!(["config", "commit.gpgsign", "false"], wt)
+
+    on_exit(fn ->
+      _ = System.cmd("git", ["-C", repo, "worktree", "remove", "--force", wt])
+      File.rm_rf!(wt)
+    end)
+
+    wt
+  end
+
+  defp sha(repo, ref) do
+    case git(["rev-parse", ref], repo) do
+      {out, 0} -> String.trim(out)
+      _ -> nil
+    end
+  end
+
+  defp commit_in(wt, name, body) do
+    File.write!(Path.join(wt, name), body)
+    git!(["add", name], wt)
+    git!(["commit", "-q", "-m", "local #{name}"], wt)
+    sha(wt, "HEAD")
+  end
+
+  # ---- app rig -------------------------------------------------------------
+
+  defp new_task(ws) do
+    {:ok, task} =
+      Ash.create(Issue, %{title: "push-gate task", workspace_id: ws.id, issue_type: :feature})
+
+    task = put_state!(task, :active)
+    task
+  end
+
+  defp start_author(task, ws, repo, branch, wt) do
+    {:ok, author} =
+      Worker.start(
+        task_id: task.id,
+        repo: "trib/repo",
+        workspace_id: ws.id,
+        meta: %{
+          branch: branch,
+          repo_path: repo,
+          worktree_path: wt,
+          target_branch: "main",
+          merge_title: "Merge #{task.id}",
+          review_required: true,
+          review_spawn: false
+        }
+      )
+
+    on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
+    :ok = Worker.advance(author, :claude)
+    send(author, {:__claude_session_done__, "arb done"})
+
+    wait_until(fn ->
+      match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(author))
+    end)
+
+    author
+  end
+
+  defp start_gate(author, task, ws, branch, wt, opts) do
+    {:ok, gate} =
+      ReviewGate.start(
+        [
+          author: author,
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo: "trib/repo",
+          worktree_path: wt,
+          branch: branch,
+          target_branch: "main",
+          timeout_ms: 15_000
+        ] ++ opts
+      )
+
+    gate
+  end
+
+  defp coverage_rows(task_id) do
+    Entry |> Ash.Query.filter(task_id == ^task_id) |> Ash.read!()
+  end
+
+  defp escalations(ws, task) do
+    Message
+    |> Ash.Query.filter(workspace_id == ^ws.id and kind == :escalation)
+    |> Ash.read!()
+    |> Enum.filter(&(&1.task_ref == task.id))
+  end
+
+  defp wait_until(fun, timeout \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(20)
+        do_wait(fun, deadline)
+    end
+  end
+
+  # ---- AC1: no round reviews an unpushed head ------------------------------
+
+  describe "round start (AC1)" do
+    test "a branch origin has never seen is pushed before the reviewer reads it",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-1"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      head = sha(wt, "HEAD")
+
+      assert sha(repo, "origin/" <> branch) == nil
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      # The fixture only APPROVEs when the head it read is on origin/<branch>,
+      # and only an APPROVE stamps the reviewed SHA.
+      wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha == head end, 20_000)
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == head
+    end
+
+    test "a local commit ahead of origin (the vs-5l45oz shape) is pushed before review",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-2"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      stale = sha(wt, "HEAD")
+
+      # The unpushed fix-round commit.
+      local = commit_in(wt, "fix.txt", "the fix the MR never got\n")
+      refute local == stale
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha == local end, 20_000)
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == local
+    end
+
+    test "a head that cannot be pushed parks :head_not_pushed and never pays for a reviewer",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-3"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      base = sha(wt, "HEAD")
+
+      # Someone else advances origin/<branch>; this worktree rewrites its own
+      # tip. The branches have genuinely diverged, so a push would clobber.
+      other = Path.join(tmp, "other")
+      {_, 0} = System.cmd("git", ["clone", "-q", Path.join(tmp, "origin.git"), other])
+      git!(["config", "user.email", "o@example.com"], other)
+      git!(["config", "user.name", "O"], other)
+      git!(["config", "commit.gpgsign", "false"], other)
+      git!(["checkout", "-q", branch], other)
+      File.write!(Path.join(other, "theirs.txt"), "theirs\n")
+      git!(["add", "theirs.txt"], other)
+      git!(["commit", "-q", "-m", "theirs"], other)
+      git!(["push", "-q", "origin", branch], other)
+      theirs = sha(other, "HEAD")
+
+      git!(["reset", "-q", "--hard", base], wt)
+      mine = commit_in(wt, "mine.txt", "mine\n")
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, task.id)) end, 20_000)
+
+      assert Ash.get!(Issue, task.id).attention_cause == :head_not_pushed
+
+      # The reviewer was never launched: no sentinel, no verdict, no coverage.
+      # (The fixture writes its sentinel to the COMMON git dir: since bd-a22hib
+      # a reviewer runs in its round's own linked checkout, not in `wt`.)
+      {git_dir, 0} = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], wt)
+      refute File.exists?(Path.join(String.trim(git_dir), "review_gate_push_check_ran"))
+      refute Worker.state(author).meta[:review_gate_verdict] == :approve
+      assert coverage_rows(task.id) == []
+      assert Ash.get!(Issue, task.id).last_reviewed_sha == nil
+
+      # And the remote was not clobbered.
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == theirs
+      assert sha(wt, "HEAD") == mine
+    end
+  end
+
+  describe "a push GitHub refuses for the missing `workflows` permission" do
+    defp reject_origin_pushes(tmp, message) do
+      hook = Path.join([tmp, "origin.git", "hooks", "pre-receive"])
+      File.write!(hook, "#!/bin/sh\necho '#{message}' >&2\nexit 1\n")
+      File.chmod!(hook, 0o755)
+    end
+
+    @refusal "! [remote rejected] (refusing to allow a GitHub App to create or update " <>
+               "workflow `.github/workflows/ci.yml` without `workflows` permission)"
+
+    test "parks :needs_operator_push, naming the file, branch, head and the commands",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-wf"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      mine = commit_in(wt, "wf.txt", "workflow edit\n")
+      reject_origin_pushes(tmp, @refusal)
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, task.id)) end, 20_000)
+
+      assert Ash.get!(Issue, task.id).attention_cause == :needs_operator_push
+
+      {git_dir, 0} = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], wt)
+      refute File.exists?(Path.join(String.trim(git_dir), "review_gate_push_check_ran"))
+
+      wait_until(fn -> escalations(ws, task) != [] end)
+      body = hd(escalations(ws, task)).body
+      assert body =~ ".github/workflows/ci.yml"
+      assert body =~ branch
+      assert body =~ mine
+      assert body =~ "HEAD:refs/heads/#{branch}"
+      assert body =~ "arb worker resume #{task.id}"
+    end
+
+    test "any other rejection still parks :head_not_pushed", %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-prot"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      _mine = commit_in(wt, "x.txt", "x\n")
+      reject_origin_pushes(tmp, "branch is protected")
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, task.id)) end, 20_000)
+
+      assert Ash.get!(Issue, task.id).attention_cause == :head_not_pushed
+    end
+  end
+
+  describe "the worktree-on-another-branch shape (AC1)" do
+    # bd-2jkrqu review round 1, finding 1: `push_gate/1` runs
+    # before anything else in a round, and `PushState.ensure_pushed/3` pushes
+    # `HEAD:refs/heads/<branch>`. Some ad-hoc runs and test rigs reuse the repo
+    # itself as the worktree with HEAD on `main` and `branch:` checked out
+    # elsewhere — the shape `prepare_branch_for_review/1` and
+    # `reviewer_commit_check/1` already guard for. Unguarded, the gate would
+    # publish `main`'s tip AS the PR branch: a merge-safety guard writing the
+    # wrong commit to the branch it protects.
+    test "never publishes the checked-out branch's HEAD as the PR branch",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/push-9"
+      :ok = seed_feature_branch(repo, branch)
+
+      # The repo IS the worktree: HEAD on `main`, `branch` checked out nowhere
+      # and one commit ahead.
+      assert String.trim(elem(git(["rev-parse", "--abbrev-ref", "HEAD"], repo), 0)) == "main"
+      main_head = sha(repo, "HEAD")
+      refute sha(repo, branch) == main_head
+      assert sha(repo, "origin/" <> branch) == nil
+
+      author = start_author(task, ws, repo, branch, repo)
+
+      # `rounds: 1`: the worktree is off-branch, so `push_gate/1` fails open
+      # (`:unknown`, matching the ad-hoc/test-rig posture `PushState` documents)
+      # instead of blocking the round — this test is about `push_gate/1` never
+      # publishing the wrong commit, not about the round-cap. Left at the
+      # default of 3, the fixture's honest REQUEST_CHANGES (the branch really
+      # is unpushed) would route into a revise round with no `revise_command`,
+      # spawning a real (non-fixture) implementer session.
+      start_gate(author, task, ws, branch, repo,
+        command: [@push_check, branch, "ROUND1"],
+        rounds: 1
+      )
+
+      # A REQUEST_CHANGES that never converges fails the run rather than
+      # parking it (only a liveness failure of the gate itself parks) — well
+      # after `push_gate/1` ran.
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(author)) end,
+        20_000
+      )
+
+      {out, 0} = System.cmd("git", ["-C", repo, "ls-remote", "--heads", "origin", branch])
+
+      assert String.trim(out) == "",
+             "push_gate published a commit from the wrong branch to origin/#{branch}: #{out}"
+
+      assert sha(repo, "origin/main") == main_head, "origin/main was moved"
+    end
+
+    test "pushed_head/1 falls back to the local head instead of accusing a branch it is not on",
+         %{repo: repo} do
+      branch = "feature/push-10"
+      :ok = seed_feature_branch(repo, branch)
+      main_head = sha(repo, "HEAD")
+
+      # Not `{:error, {:head_not_pushed, _}}`: the worktree's HEAD is another
+      # branch's commit, so it is neither accused nor blessed — the exact
+      # pre-guard behaviour.
+      assert {:ok, ^main_head} =
+               ReviewGate.pushed_head(%{worktree_path: repo, branch: branch})
+    end
+  end
+
+  describe "the fix round's re-review (AC1)" do
+    test "a fix-round commit is pushed before round 2 reads it",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-4"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      round1_head = sha(wt, "HEAD")
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      start_gate(author, task, ws, branch, wt,
+        command: [@push_check, branch, "ROUND2"],
+        revise_command: [@revise_commit],
+        rounds: 2
+      )
+
+      wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha != nil end, 60_000)
+
+      fix_head = sha(wt, "HEAD")
+      refute fix_head == round1_head, "the revise round should have committed"
+
+      assert Ash.get!(Issue, task.id).last_reviewed_sha == fix_head
+
+      git!(["fetch", "-q", "origin"], repo)
+
+      assert sha(repo, "origin/" <> branch) == fix_head,
+             "round 2 approved a head the remote does not carry"
+    end
+  end
+
+  # bd-4ynfr7: a head that conflicts with the target is never sent to a reviewer
+  # to discover; a clean, pushed head proceeds with no extra commit.
+  describe "the fix round's re-review vs the target (bd-4ynfr7)" do
+    test "a head that now conflicts with the target escalates for a conflict pass, not a review",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-conflict"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      start_gate(author, task, ws, branch, wt,
+        command: [@push_check, branch, "ROUND2"],
+        revise_command: [@revise_conflict, "main"],
+        rounds: 2
+      )
+
+      wait_until(
+        fn ->
+          Wardmast.ReviewGate.Round
+          |> Ash.Query.filter(task_id == ^task.id)
+          |> Ash.read!()
+          |> Enum.any?(&Wardmast.Worker.ConflictAbortFindings.escalation?(&1.findings))
+        end,
+        60_000
+      )
+
+      # Round 2 never reached a reviewer: no approve, so no reviewed-SHA stamp.
+      assert Ash.get!(Issue, task.id).last_reviewed_sha == nil
+    end
+
+    test "a clean, pushed head goes to round 2 with no extra commit",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-clean"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      start_gate(author, task, ws, branch, wt,
+        command: [@push_check, branch, "ROUND2"],
+        revise_command: [@revise_commit],
+        rounds: 2
+      )
+
+      wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha != nil end, 60_000)
+      {log, 0} = git(["log", "--format=%s", "main..HEAD"], wt)
+      refute log =~ "Merge"
+    end
+  end
+
+  # bd-a7yaer: a fix round whose worker.pre_push_checks stay red must not have
+  # its head pushed by the gate; the round parks instead.
+  describe "a fix round with a red pre-push recipe (bd-a7yaer)" do
+    test "parks without pushing the red head", %{repo: repo, tmp: tmp} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rg-red-#{System.unique_integer([:positive])}",
+          prefix: "rr",
+          config: %{
+            "review" => %{"required" => true},
+            "worker" => %{
+              "pre_push_checks" => [
+                %{
+                  "name" => "credo",
+                  "cmd" => "test ! -f guard.txt|| { echo 'alias warning'; exit 2; }"
+                }
+              ],
+              "pre_push_max_attempts" => 0
+            }
+          }
+        })
+
+      task = new_task(ws)
+      branch = "feature/push-red"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      round1_head = sha(wt, "HEAD")
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      start_gate(author, task, ws, branch, wt,
+        command: [@push_check, branch, "ROUND2"],
+        revise_command: [@revise_commit],
+        rounds: 2
+      )
+
+      wait_until(
+        fn -> Ash.get!(Issue, task.id).attention_cause == :commit_gate_prepush_failed end,
+        60_000
+      )
+
+      red_head = sha(wt, "HEAD")
+      refute red_head == round1_head, "the fix round should have committed"
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == round1_head, "the red head was pushed"
+    end
+  end
+
+  # bd-4axlg0: a fix round (a podman container, which cannot push) that rebases
+  # or amends its branch hands the host a head that has "diverged" from the one
+  # the gate pushed in round 1. The gate delivers it with a lease pinned to the
+  # head it pushed, and reviews the new head.
+  describe "a fix round that rewrites its own branch (bd-4axlg0)" do
+    test "the rewrite is pushed with a lease and round 2 reviews the new head",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-rewrite"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      round1_head = sha(wt, "HEAD")
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      start_gate(author, task, ws, branch, wt,
+        command: [@push_check, branch, "ROUND2"],
+        revise_command: [@revise_rewrite],
+        rounds: 2
+      )
+
+      wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha != nil end, 60_000)
+
+      rewritten = sha(wt, "HEAD")
+      refute rewritten == round1_head, "the revise round should have rewritten the tip"
+      assert Ash.get!(Issue, task.id).last_reviewed_sha == rewritten
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == rewritten
+    end
+
+    test "a third party's push during the round is not overwritten; the task parks",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-rewrite-race"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+
+      # The third party lands its commit on the remote branch from inside the
+      # round, while the implementer rewrites the local tip.
+      other = Path.join(tmp, "other-race")
+      {_, 0} = System.cmd("git", ["clone", "-q", Path.join(tmp, "origin.git"), other])
+      git!(["config", "user.email", "o@example.com"], other)
+      git!(["config", "user.name", "O"], other)
+      git!(["config", "commit.gpgsign", "false"], other)
+      git!(["checkout", "-q", branch], other)
+      File.write!(Path.join(other, "theirs.txt"), "theirs\n")
+      git!(["add", "theirs.txt"], other)
+      git!(["commit", "-q", "-m", "theirs"], other)
+      theirs = sha(other, "HEAD")
+
+      script = Path.join(tmp, "rewrite_then_third_party_push.sh")
+
+      File.write!(script, """
+      #!/bin/sh
+      #{@revise_rewrite}
+      git -C #{other} push -q origin #{branch}
+      """)
+
+      File.chmod!(script, 0o755)
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      start_gate(author, task, ws, branch, wt,
+        command: [@push_check, branch, "ROUND2"],
+        revise_command: [script],
+        rounds: 2
+      )
+
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, task.id)) end, 60_000)
+      assert Ash.get!(Issue, task.id).attention_cause == :head_not_pushed
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == theirs
+    end
+
+    test "a third-party commit seen while :behind is not a lease for a later rewrite",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-rewrite-behind"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+
+      # Before the gate starts, a third party lands a commit on top of the
+      # local head: the round begins `:behind`, and the remote head is a SHA
+      # Wardmast neither pushed nor reviewed.
+      other = Path.join(tmp, "other-behind")
+      {_, 0} = System.cmd("git", ["clone", "-q", Path.join(tmp, "origin.git"), other])
+      git!(["config", "user.email", "o@example.com"], other)
+      git!(["config", "user.name", "O"], other)
+      git!(["config", "commit.gpgsign", "false"], other)
+      git!(["checkout", "-q", branch], other)
+      File.write!(Path.join(other, "theirs.txt"), "theirs\n")
+      git!(["add", "theirs.txt"], other)
+      git!(["commit", "-q", "-m", "theirs"], other)
+      git!(["push", "-q", "origin", branch], other)
+      theirs = sha(other, "HEAD")
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      # An untracked file in the way makes the gate's fast-forward onto their
+      # commit fail, so it falls through to the ordinary fix round.
+      File.write!(Path.join(wt, "theirs.txt"), "in the way\n")
+
+      start_gate(author, task, ws, branch, wt,
+        command: [@push_check, branch, "ROUND2"],
+        revise_command: [@revise_rewrite],
+        rounds: 2
+      )
+
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, task.id)) end, 60_000)
+      assert Ash.get!(Issue, task.id).attention_cause == :head_not_pushed
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == theirs
+    end
+  end
+
+  # bd-6ao60c (#1203): a ticket's own run rebased its branch (on another node, or
+  # after an interrupted pass) before the gate ever ran, so the gate has no
+  # in-memory `pushed_remote_head`. The remote head Wardmast recorded on the ticket
+  # when it last pushed the branch is what clears the rewrite.
+  describe "a branch rewritten before the gate started (bd-6ao60c)" do
+    # Rewrites the branch's only commit so it no longer patch-matches the pushed
+    # one (main's `mix format` changing the commit's context, in miniature).
+    defp reformat_tip(wt) do
+      File.write!(Path.join(wt, "reformatted.txt"), "reformatted\n")
+      git!(["add", "reformatted.txt"], wt)
+      git!(["commit", "-q", "--amend", "-m", "work, reformatted"], wt)
+      sha(wt, "HEAD")
+    end
+
+    test "is pushed with a lease pinned to the recorded head and reviewed, not parked",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-recorded"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      :ok = RemoteHead.record(task.id, branch, sha(wt, "HEAD"))
+      rewritten = reformat_tip(wt)
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha == rewritten end, 30_000)
+      refute ReviewPark.parked?(Ash.get!(Issue, task.id))
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == rewritten
+      assert RemoteHead.recorded(task.id, branch) == rewritten
+    end
+
+    test "with no recorded head it parks :head_not_pushed and leaves the remote alone",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-unrecorded"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      pushed = sha(wt, "HEAD")
+      _rewritten = reformat_tip(wt)
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, task.id)) end, 30_000)
+      assert Ash.get!(Issue, task.id).attention_cause == :head_not_pushed
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == pushed
+    end
+
+    test "a third party's push after the recorded head is not overwritten",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-recorded-race"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      :ok = RemoteHead.record(task.id, branch, sha(wt, "HEAD"))
+
+      other = Path.join(tmp, "other-recorded")
+      {_, 0} = System.cmd("git", ["clone", "-q", Path.join(tmp, "origin.git"), other])
+      git!(["config", "user.email", "o@example.com"], other)
+      git!(["config", "user.name", "O"], other)
+      git!(["config", "commit.gpgsign", "false"], other)
+      git!(["checkout", "-q", branch], other)
+      File.write!(Path.join(other, "theirs.txt"), "theirs\n")
+      git!(["add", "theirs.txt"], other)
+      git!(["commit", "-q", "-m", "theirs"], other)
+      git!(["push", "-q", "origin", branch], other)
+      theirs = sha(other, "HEAD")
+
+      _rewritten = reformat_tip(wt)
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      wait_until(fn -> ReviewPark.parked?(Ash.get!(Issue, task.id)) end, 30_000)
+      assert Ash.get!(Issue, task.id).attention_cause == :head_not_pushed
+
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == theirs
+    end
+
+    test "a head the gate pushes is recorded for the next run", %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-records"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      head = sha(wt, "HEAD")
+
+      author = start_author(task, ws, repo, branch, wt)
+      start_gate(author, task, ws, branch, wt, command: [@push_check, branch, "ROUND1"])
+
+      wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha == head end, 20_000)
+      assert RemoteHead.recorded(task.id, branch) == head
+    end
+  end
+
+  # ---- AC2: stamps and coverage name the pushed head -----------------------
+
+  describe "reviewed-SHA stamp and coverage (AC2)" do
+    # bd-a22hib: this used to prove the stamping path REFUSED a head the
+    # reviewer had itself committed into the implementer's worktree. The
+    # reviewer now runs in a detached throwaway checkout, so its drive-by commit
+    # can no longer move the branch at all: the branch stays on the pushed head,
+    # and the stamp and coverage row name exactly the SHA it was handed.
+    test "a reviewer's drive-by commit cannot move the branch; the pushed head is what is recorded",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-5"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      pushed_head = sha(wt, "HEAD")
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      start_gate(author, task, ws, branch, wt,
+        command: [@commit_then_approve],
+        pr_ref: "owner/repo#228"
+      )
+
+      wait_until(fn -> Ash.get!(Issue, task.id).last_reviewed_sha != nil end, 20_000)
+
+      # The drive-by commit landed in the reviewer's throwaway checkout, not on
+      # the branch under review.
+      assert sha(wt, "HEAD") == pushed_head
+      refute File.exists?(Path.join(wt, "reviewer-note.txt"))
+      git!(["fetch", "-q", "origin"], repo)
+      assert sha(repo, "origin/" <> branch) == pushed_head
+
+      assert Ash.get!(Issue, task.id).last_reviewed_sha == pushed_head
+      wait_until(fn -> coverage_rows(task.id) != [] end)
+      assert [%{head_sha: ^pushed_head}] = coverage_rows(task.id)
+
+      refute Enum.any?(escalations(ws, task), &(&1.subject =~ "review coverage write failed"))
+    end
+
+    test "pushed_head/1 refuses an unpushed local head and passes a pushed one",
+         %{repo: repo, tmp: tmp} do
+      branch = "feature/push-6"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      pushed = sha(wt, "HEAD")
+
+      assert {:ok, ^pushed} = ReviewGate.pushed_head(%{worktree_path: wt, branch: branch})
+
+      commit_in(wt, "local.txt", "unpushed\n")
+
+      assert {:error, {:head_not_pushed, state}} =
+               ReviewGate.pushed_head(%{worktree_path: wt, branch: branch})
+
+      assert state.status == :ahead
+    end
+  end
+
+  # ---- AC3: the park escalation tells the truth ----------------------------
+
+  describe "park escalation text (AC3)" do
+    test "an unpushed branch is named as such and merge-by-hand is withheld",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-7"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      commit_in(wt, "fix.txt", "the unpushed fix\n")
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      :ok =
+        Worker.review_gate_verdict(
+          author,
+          {:parked, :verdict_guard_exhausted, "VERDICT: APPROVE\nbut F1.4 is open"}
+        )
+
+      wait_until(fn -> escalations(ws, task) != [] end)
+
+      body = hd(escalations(ws, task)).body
+
+      refute body =~ "the branch is pushed",
+             "the escalation asserted a push state it never checked"
+
+      assert body =~ "NOT pushed"
+      assert body =~ "Do NOT merge by hand"
+      refute body =~ "merge it by hand, if the diff is fine"
+    end
+
+    # bd-2jkrqu review round 1, finding 2: `:diverged` is the state that
+    # PRODUCES the `:head_not_pushed` park (a diverged branch is never
+    # force-pushed), so it is the likeliest reader of this bullet — and
+    # "push it first" is precisely what git will reject. The ReviewGate's own
+    # findings body says "reconcile … never force-push"; the two texts in one
+    # escalation must not contradict each other.
+    test "a diverged branch is told to reconcile, not to push",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-11"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      base = sha(wt, "HEAD")
+
+      other = Path.join(tmp, "other-#{System.unique_integer([:positive])}")
+      {_, 0} = System.cmd("git", ["clone", "-q", Path.join(tmp, "origin.git"), other])
+      git!(["config", "user.email", "o@example.com"], other)
+      git!(["config", "user.name", "O"], other)
+      git!(["config", "commit.gpgsign", "false"], other)
+      git!(["checkout", "-q", branch], other)
+      File.write!(Path.join(other, "theirs.txt"), "theirs\n")
+      git!(["add", "theirs.txt"], other)
+      git!(["commit", "-q", "-m", "theirs"], other)
+      git!(["push", "-q", "origin", branch], other)
+
+      git!(["reset", "-q", "--hard", base], wt)
+      commit_in(wt, "mine.txt", "mine\n")
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      :ok =
+        Worker.review_gate_verdict(
+          author,
+          {:parked, :head_not_pushed, "ReviewGate refused to review an unpushed head"}
+        )
+
+      wait_until(fn -> escalations(ws, task) != [] end)
+
+      body = hd(escalations(ws, task)).body
+
+      assert body =~ "DIVERGED"
+      assert body =~ "Do NOT merge by hand"
+      assert body =~ "Reconcile `#{branch}`"
+      assert body =~ "never force-push"
+
+      refute body =~ "Push `#{branch}` first",
+             "a diverged branch was told to do the one thing git will reject"
+    end
+
+    test "a genuinely pushed branch still offers the merge-by-hand option",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      task = new_task(ws)
+      branch = "feature/push-8"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      :ok =
+        Worker.review_gate_verdict(
+          author,
+          {:parked, :reviewer_timeout, "ReviewGate reviewing pass timed out"}
+        )
+
+      wait_until(fn -> escalations(ws, task) != [] end)
+
+      body = hd(escalations(ws, task)).body
+
+      assert body =~ "is pushed"
+      assert body =~ "merge it by hand"
+      refute body =~ "Do NOT merge by hand"
+    end
+  end
+end

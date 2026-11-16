@@ -1,0 +1,453 @@
+// The browser terminal's protocol engine (bd-c76fu9, phase 5 of
+// `docs/browser-hosted-coordinator-sessions.md`).
+//
+// This module speaks phase 4's channel (§5.2/§5.3) and knows nothing about
+// xterm, the DOM or LiveView. That split is deliberate and load-bearing: the
+// parts of the terminal that are easy to get subtly wrong — the `last_seq`
+// rejoin, duplicate suppression after a resume, binary stdin framing, the
+// debounced resize — are exactly the parts a browser makes impossible to test.
+// Keeping them DOM-free lets `apps/wardmast_web/test/js/session_stream_test.mjs`
+// drive them under `node --test`, and lets
+// `scripts/verify_session_transport.mjs` drive this same code against a real
+// socket and a real reader.
+//
+// `assets/js/session_terminal.mjs` is the other half: xterm, the canvas
+// renderer and the DOM. `session_fit.mjs` and `session_keys.mjs` are the same
+// bargain for the pane's geometry and its copy/paste bindings.
+
+export const MAGIC = "ARB1"
+export const HEADER_SIZE = 12
+
+// Keystrokes are tiny; a paste is not. 4 KiB keeps a single frame well under
+// the socket's 1 MiB `max_frame_size` and under any reasonable PTY write.
+const DEFAULT_STDIN_CHUNK_BYTES = 4096
+const DEFAULT_RESIZE_DEBOUNCE_MS = 100
+
+const encoder = new TextEncoder()
+
+/**
+ * Frame `payload` under `seq` as `Wardmast.Sessions.Frame` does:
+ *
+ *     <<"ARB1", seq::unsigned-big-64, payload::binary>>
+ *
+ * The payload is copied verbatim — never decoded, never validated. A PTY read
+ * boundary lands wherever the kernel put it, and anything that re-encodes
+ * mid-escape-sequence corrupts it permanently.
+ */
+export function encodeFrame(seq, payload) {
+  const frame = new Uint8Array(HEADER_SIZE + payload.length)
+
+  frame[0] = 0x41 // A
+  frame[1] = 0x52 // R
+  frame[2] = 0x42 // B
+  frame[3] = 0x31 // 1
+  new DataView(frame.buffer).setBigUint64(4, BigInt(seq))
+  frame.set(payload, HEADER_SIZE)
+
+  return frame
+}
+
+/** `{seq, payload}` for an ARB1 frame, or `null` for anything else. */
+export function decodeFrame(buffer) {
+  const view = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
+
+  if (view.length < HEADER_SIZE) return null
+  if (view[0] !== 0x41 || view[1] !== 0x52 || view[2] !== 0x42 || view[3] !== 0x31) return null
+
+  const header = new DataView(view.buffer, view.byteOffset, view.byteLength)
+
+  return { seq: Number(header.getBigUint64(4)), payload: view.subarray(HEADER_SIZE) }
+}
+
+/**
+ * Tag a refused `join` reply so a consumer can tell it from an in-band `error`
+ * event.
+ *
+ * The difference is the difference between "retry" and "give up". phoenix.js
+ * re-joins on its own timer forever, so a refusal it cannot fix — a session
+ * that is gone, a bridge that is not there, a topic it will never accept —
+ * looks exactly like a slow reconnect unless the client is told. Anything
+ * driving this stream headlessly (`scripts/verify_session_transport.mjs`) has
+ * to stop rather than loop.
+ */
+function joinRefusal(err) {
+  const base = err && typeof err === "object" ? err : { code: "join_refused", detail: err }
+  return { ...base, join_refused: true }
+}
+
+/**
+ * Refusals that will never become a join, whoever asks and however often
+ * (bd-3r2otb).
+ *
+ * Everything else is "ask again": the bridge that is not up yet, the reader
+ * that went away mid-attach, the session row a launch has created but not
+ * finished marking running. Those are exactly what the first join after a
+ * launch redirect can land in, and the client's job there is to keep asking.
+ */
+const PERMANENT_REFUSALS = ["session_gone", "bad_topic", "transcript_unavailable"]
+
+/**
+ * One attached terminal client.
+ *
+ * `mode: "transcript"` is the same client reading a session that is already
+ * over (bd-3tf4oo): the join asks the server to replay the persisted raw
+ * capture instead of attaching a reader, the bytes arrive as the one
+ * `snapshot` every other client path already knows how to paint, and then
+ * this stream *hangs up*. It puts nothing on the wire — no stdin, no resize,
+ * no redraw — and it never reports `"live"`: its statuses are `"connecting"`
+ * then `"transcript"`, or `"unavailable"` for a file that is gone. A finished
+ * session has nothing to reconnect to, and a client that kept trying would be
+ * the "is this live?" ambiguity this mode exists to remove.
+ *
+ * `sink` is the renderer-shaped side of it, all optional:
+ *
+ *   write(payload, info)   fresh terminal bytes; `info` carries the frame's
+ *                          `seq`, and the `skipped`/`gap` byte counts
+ *   repaint(seq, data, info)  a snapshot: clear and redraw from `data`
+ *   meta(meta) / exit(payload) / error(err)
+ *   usage(payload)         live cost HUD feed (§7.5, phase 7):
+ *                          `{tokens_in, tokens_out, cache_creation,
+ *                          cache_read, cost_usd, model, estimated}`
+ *   status(state)          "connecting" | "live" | "reconnecting" |
+ *                          "detached" | "ended" | "transcript" |
+ *                          "unavailable"
+ */
+export class SessionStream {
+  constructor({
+    socket,
+    sessionId,
+    geometry,
+    sink = {},
+    lastSeq = null,
+    mode = null,
+    stdinChunkBytes = DEFAULT_STDIN_CHUNK_BYTES,
+    resizeDebounceMs = DEFAULT_RESIZE_DEBOUNCE_MS
+  }) {
+    this.socket = socket
+    this.sessionId = sessionId
+    this.geometry = geometry || (() => ({}))
+    this.sink = sink
+    // `"transcript"` or nothing. Kept as the server's own word for it, since
+    // it goes back out in the join params verbatim.
+    this.mode = mode === "transcript" ? "transcript" : null
+    this.stdinChunkBytes = stdinChunkBytes
+    this.resizeDebounceMs = resizeDebounceMs
+
+    this.joins = 0
+    this.joinRefusals = 0
+    this.reconnects = 0
+    this.snapshots = 0
+    this.finished = false
+
+    // A **seeded** resume point (bd-9myzv8). The session dock disposes the
+    // stream when a window collapses, so the offset the next expand has to
+    // resume from does not live in this object any more — it is handed back
+    // in. Anything that is not a whole, non-negative byte offset is "no
+    // opinion": it goes on the wire as `null`, which is the server's cue to
+    // send a snapshot rather than a replay from a made-up offset.
+    this._lastSeq = Number.isInteger(lastSeq) && lastSeq >= 0 ? lastSeq : null
+    this._status = null
+    this._stdinSeq = 0
+    this._pendingResize = null
+    // The geometry this client last put on the wire, and still believes the
+    // pane holds — a resize matching it is a no-op. `noteGeometry` retires it
+    // the moment a `meta` says the pane is somewhere else.
+    this._pushedGeometry = null
+    this._resizeTimer = null
+  }
+
+  /** The stream offset of the last byte rendered — the resume point. */
+  get lastSeq() {
+    return this._lastSeq
+  }
+
+  connect() {
+    this._setStatus("connecting")
+
+    this.socket.onError((err) => this._emit("error", { code: "socket_error", detail: err }))
+    this.socket.onClose((event) => this._onSocketClose(event))
+
+    // Params as a FUNCTION, not an object. phoenix.js re-evaluates the join
+    // payload on every rejoin, so the reconnect after a restart carries the
+    // newest `last_seq`. An object literal here would silently resume from
+    // wherever the very first connection started — a real trap, and a silent
+    // one: the terminal would look fine and repaint the whole session.
+    this.channel = this.socket.channel(`session:${this.sessionId}`, () => {
+      if (this.mode === "transcript") return { mode: "transcript" }
+
+      const { cols, rows } = this.geometry() || {}
+      return { last_seq: this._lastSeq, cols, rows }
+    })
+
+    this.channel.on("stdout", (payload) => this._onStdout(payload))
+    this.channel.on("snapshot", (payload) => this._onSnapshot(payload))
+    this.channel.on("meta", (meta) => this._emit("meta", meta))
+    this.channel.on("usage", (payload) => this._emit("usage", payload))
+    this.channel.on("error", (err) => this._emit("error", err))
+    this.channel.on("exit", (payload) => this._onExit(payload))
+
+    // Channel errors are the rejoin path, not a failure: the socket is down
+    // and phoenix.js will re-run the params closure when it comes back.
+    this.channel.onError(() => {
+      if (!this.finished) this._setStatus("reconnecting")
+    })
+
+    this.channel
+      .join()
+      .receive("ok", (reply) => {
+        this.joins += 1
+        if (this.joins > 1) this.reconnects += 1
+        this._setStatus(this.mode === "transcript" ? "transcript" : "live")
+        this._emit("joined", reply)
+      })
+      .receive("error", (err) => this._onJoinRefused(err))
+
+    this.socket.connect()
+
+    return this
+  }
+
+  /**
+   * Type `text` into the pane. UTF-8 encoded here; never decoded in transit.
+   *
+   * This is also the paste path (§6.3), and deliberately the *only* one: a
+   * paste reaches it through `Terminal.paste()` -> `onData`, so it arrives
+   * already newline-normalized and bracketed. There is no second entry point
+   * that would skip that.
+   */
+  send(text) {
+    return this.sendBytes(encoder.encode(text))
+  }
+
+  sendBytes(bytes) {
+    if (!this.channel || this.finished || this.mode === "transcript" || bytes.length === 0) {
+      return false
+    }
+
+    for (let offset = 0; offset < bytes.length; offset += this.stdinChunkBytes) {
+      const chunk = bytes.subarray(offset, offset + this.stdinChunkBytes)
+
+      // The client's own monotonic counter, not a stream offset: it is what
+      // lets the server drop stdin a reconnecting client re-sends rather than
+      // typing the same keystrokes into the pane twice.
+      this._stdinSeq += 1
+      this.channel.push("stdin", encodeFrame(this._stdinSeq, chunk).buffer)
+    }
+
+    return true
+  }
+
+  /**
+   * Note a new geometry and push it once the operator stops dragging.
+   *
+   * Debounced because a window drag emits a `ResizeObserver` callback per
+   * frame, and every `resize` that reaches the server re-lays-out the pane for
+   * *every* attached client, then makes the agent redraw.
+   */
+  resize(cols, rows) {
+    if (this.mode === "transcript") return
+    if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) return
+
+    this._pendingResize = { cols, rows }
+
+    if (this._resizeTimer) return
+
+    this._resizeTimer = setTimeout(() => {
+      this._resizeTimer = null
+      this._flushResize()
+    }, this.resizeDebounceMs)
+  }
+
+  /**
+   * Note the geometry the pane actually has. Pushes nothing (bd-4tjw34).
+   *
+   * `resize` skips a push that would land the pane where this client already
+   * put it, which is only sound while this client is the only one attached.
+   * It is not: the pane is shared and last-writer-wins, so another client's
+   * resize moves it out from under that cache — and a client that later
+   * reclaims the pane at the very size it itself last pushed would have the
+   * reclaim swallowed as a no-op, leaving the pane at the other client's
+   * geometry and the operator's interaction doing nothing at all.
+   *
+   * So a `meta` that does not agree with what this client last sent retires
+   * it: the cache only ever suppresses a push the pane genuinely does not
+   * need. `session_terminal.mjs` calls this for every `meta`.
+   */
+  noteGeometry(cols, rows) {
+    if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) return
+
+    const pushed = this._pushedGeometry
+    if (pushed && (pushed.cols !== cols || pushed.rows !== rows)) this._pushedGeometry = null
+  }
+
+  /**
+   * Ask the pane to make the agent repaint the whole screen (bd-14b11h).
+   *
+   * A `resize` only helps if the geometry actually changed; when a mount fits
+   * to a size the pane is already at, nothing signals the agent and whatever
+   * the snapshot captured — content the pane reflowed for a geometry the agent
+   * has not redrawn at — stays on screen until the agent happens to repaint on
+   * its own. This is the explicit ask, and the server owns how to deliver it.
+   */
+  redraw() {
+    if (!this.channel || this.finished || this.mode === "transcript") return false
+
+    this.channel.push("redraw", {})
+    return true
+  }
+
+  /** Leave the session running, drop this client's reader. */
+  detach() {
+    if (this.channel) this.channel.push("detach", {})
+    this._finish("detached")
+  }
+
+  /** End the session. The channel requires the confirmation explicitly. */
+  kill() {
+    if (!this.channel) return null
+    return this.channel.push("kill", { confirm: true })
+  }
+
+  dispose() {
+    this._finish(null)
+  }
+
+  // -- internals --------------------------------------------------------------
+
+  _onStdout(raw) {
+    const frame = decodeFrame(raw)
+
+    if (!frame) {
+      this._emit("error", { code: "bad_frame", detail: "stdout was not an ARB1 frame" })
+      return
+    }
+
+    const { seq, payload } = frame
+    const start = seq - payload.length
+
+    let skipped = 0
+    let gap = 0
+
+    if (this._lastSeq !== null) {
+      if (start > this._lastSeq) {
+        // Bytes the pane produced that never reached us. Nothing here can
+        // recover them; the renderer is told so it can say so.
+        gap = start - this._lastSeq
+      } else if (start < this._lastSeq) {
+        // Overlap. A resume replays from `last_seq`, and a ring that re-sent a
+        // frame boundary would otherwise redraw bytes already on screen — for
+        // a terminal that is not cosmetic, it is a second prompt and a second
+        // half-line of output.
+        skipped = Math.min(this._lastSeq - start, payload.length)
+      }
+    }
+
+    this._lastSeq = this._lastSeq === null ? seq : Math.max(this._lastSeq, seq)
+    this._emit("write", skipped ? payload.subarray(skipped) : payload, {
+      seq,
+      start,
+      skipped,
+      gap
+    })
+  }
+
+  _onSnapshot({ seq, data }) {
+    this.snapshots += 1
+
+    // A snapshot restarts the byte stream at `seq`, so the resume arithmetic
+    // restarts with it. On a *re*join it also means the ring could not cover
+    // the outage: the operator keeps their session, but loses the gap.
+    const rejoin = this.joins > 1
+    this._lastSeq = seq
+    this._emit("repaint", seq, data, { rejoin })
+
+    // A transcript is one snapshot and then nothing, ever. Hanging up here —
+    // rather than leaving a socket open against a session that ended days ago
+    // — is what makes "no reconnect behaviour" true rather than merely
+    // unlikely, and it costs an ended window zero connections.
+    if (this.mode === "transcript") this._finish("transcript")
+  }
+
+  _onJoinRefused(err) {
+    const refusal = joinRefusal(err)
+
+    this.joinRefusals += 1
+    this._emit("error", refusal)
+
+    if (PERMANENT_REFUSALS.includes(refusal.code)) {
+      // phoenix.js would otherwise rejoin a topic that can never accept it,
+      // every few seconds, for as long as the tab is open.
+      this._finish(refusal.code === "transcript_unavailable" ? "unavailable" : "ended")
+      return
+    }
+
+    // Retryable, and phoenix.js has already scheduled the next attempt — on
+    // its rejoin timer if the socket is up, on the socket's next open if it is
+    // not. Because the join params are a closure, that retry carries the
+    // newest `last_seq` rather than the one this client started with.
+    //
+    // What is left is to stop the page claiming to be "connecting…" while it
+    // waits: a refused first join looked exactly like a wedged one, which is
+    // how the live check spent a minute on a terminal that was retrying.
+    this._setStatus("reconnecting")
+  }
+
+  _onExit(payload) {
+    this._emit("exit", payload)
+    this._finish("ended")
+  }
+
+  _onSocketClose(event) {
+    if (this.finished) return
+
+    this._setStatus("reconnecting")
+
+    // phoenix.js deliberately does not reconnect after a 1000 (normal
+    // closure), and a graceful `systemctl --user restart arbiter` produces
+    // exactly that — Bandit closes every WebSocket with 1000 before the BEAM
+    // exits. For a session that outlives the server by design (§4.3) that is
+    // the wrong reading: a clean server close means "back shortly", not "stop
+    // watching". §10.1 is the whole point of the feature.
+    if (event && event.code === 1000) this.socket.reconnectTimer.scheduleTimeout()
+  }
+
+  _flushResize() {
+    const next = this._pendingResize
+    this._pendingResize = null
+
+    if (!next || !this.channel || this.finished) return
+
+    const current = this._pushedGeometry
+    if (current && current.cols === next.cols && current.rows === next.rows) return
+
+    this._pushedGeometry = next
+    this.channel.push("resize", next)
+  }
+
+  _finish(status) {
+    if (this.finished) return
+    this.finished = true
+
+    if (this._resizeTimer) {
+      clearTimeout(this._resizeTimer)
+      this._resizeTimer = null
+    }
+
+    if (status) this._setStatus(status)
+    if (this.socket) this.socket.disconnect()
+  }
+
+  // A drop raises both `socket.onClose` and `channel.onError`, and a rejoin
+  // can raise `status("live")` more than once. The sink is a UI: it wants
+  // transitions, not every notification that produced one.
+  _setStatus(status) {
+    if (this._status === status) return
+    this._status = status
+    this._emit("status", status)
+  }
+
+  _emit(name, ...args) {
+    const handler = this.sink[name]
+    if (typeof handler === "function") handler(...args)
+  }
+}

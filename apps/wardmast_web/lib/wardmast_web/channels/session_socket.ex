@@ -1,0 +1,80 @@
+defmodule WardmastWeb.SessionSocket do
+  @moduledoc """
+  The dedicated socket for browser-hosted coordinator sessions
+  (bd-3ymdvi, phase 4 of `docs/browser-hosted-coordinator-sessions.md` §5.1).
+
+  A **channel**, not a LiveView hook alone. LiveView's diffing is the wrong
+  tool for a 60 fps ANSI byte stream — every frame would become a diff against
+  an element the hook is mutating anyway — and a channel gives three things
+  that matter here: a raw binary path, its own backpressure, and a topic keyed
+  to the *session id* rather than to a LiveView process, so a browser reload
+  reattaches to the same session instead of re-mounting terminal state.
+
+  ## Auth (§10.4)
+
+  Loopback is **not** a credential (bd-3gycsz): `tailscale serve` proxies
+  the tailnet to 127.0.0.1, so a proxied peer is loopback too. The socket
+  therefore takes the same dashboard grant the rest of the dashboard needs —
+  the signed session cookie, checked through
+  `WardmastWeb.DashboardAuth.authenticate_session/1` (`connect_info: [:session]`;
+  the browser dock already carries the cookie). Anything else must present a
+  signed `Wardmast.MCP.Scope` token as the `token` connect param. No new
+  remote-auth scheme is designed here, deliberately.
+
+  That includes phase 3's per-session tokens (§9.3), which carry a `session_id`
+  claim and stop verifying once the session ends or the token is revoked — so
+  revoking a session's credential closes its terminal socket too, not just its
+  `/mcp` access.
+
+  ## `caller_session_id`
+
+  A client may declare which session *it* is running inside. That is the input
+  to phase 1's self-kill guard (§10.1): a coordinator session driving its own
+  terminal in a browser tab must not be able to `kill` itself out from under
+  the call. It is a hint from the client and is only ever used to **refuse**
+  an action, never to grant one, so a client lying about it can only reduce
+  its own privileges.
+  """
+
+  use Phoenix.Socket
+
+  alias Wardmast.MCP.Scope
+  alias WardmastWeb.DashboardAuth
+  alias WardmastWeb.Plugs.WorkerBridge
+
+  channel "session:*", WardmastWeb.SessionChannel
+
+  @impl true
+  def connect(params, socket, connect_info) do
+    if authorized?(params, connect_info) do
+      {:ok, assign(socket, :caller_session_id, caller_session_id(params))}
+    else
+      :error
+    end
+  end
+
+  @impl true
+  def id(_socket), do: nil
+
+  # bd-c1qq7l (G9): a connection that came through a jailed worker's Wardmast
+  # bridge is loopback by address only. It never gets a coordinator's terminal,
+  # whatever token it presents.
+  defp authorized?(params, connect_info) do
+    not WorkerBridge.bridged?(connect_info) and
+      (dashboard_grant?(connect_info) or valid_token?(params))
+  end
+
+  defp dashboard_grant?(connect_info) do
+    session = Map.get(connect_info, :session) || %{}
+    match?({:ok, _identity}, DashboardAuth.authenticate_session(session))
+  end
+
+  defp valid_token?(%{"token" => token}) when is_binary(token) do
+    match?({:ok, _scope}, Scope.from_token(String.trim(token)))
+  end
+
+  defp valid_token?(_params), do: false
+
+  defp caller_session_id(%{"caller_session_id" => id}) when is_binary(id) and id != "", do: id
+  defp caller_session_id(_params), do: nil
+end

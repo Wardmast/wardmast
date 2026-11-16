@@ -1,0 +1,326 @@
+defmodule WardmastCli.Cmd.ServerTest do
+  # async: false — tests that mutate ARB_HOME / ARB_WORKER_BEAD_ID and route
+  # through the shared `:bd2_cmd_runner` / `:bd2_sleep` process-dict seams.
+  use WardmastCli.CliCase, async: false
+
+  alias WardmastCli.Cmd.Server
+
+  @green %{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}
+  @no_workers %{"data" => []}
+
+  setup do
+    System.delete_env("ARB_WORKER_BEAD_ID")
+    System.delete_env("ARB_HOME")
+    System.delete_env("ARB_RELEASE_REPO")
+    :ok
+  end
+
+  # ---- migrate: server is DOWN (standalone migration path) ----------------
+
+  describe "migrate — server down" do
+    setup do
+      # Simulate server unreachable so Doctor.reachable?() returns false and we
+      # take the standalone migration path.
+      stub_transport_error(:get, "/api/workspaces", :econnrefused)
+      System.put_env("ARB_HOME", System.tmp_dir!())
+      :ok
+    end
+
+    test "runs standalone migrations and reports the applied count" do
+      Process.put(:bd2_cmd_runner, fn _cmd, _args, _opts ->
+        {~s({"migrations_applied":3,"status":"ok"}), 0}
+      end)
+
+      {out, _err, code} = capture(fn -> Server.run(["migrate"]) end)
+      assert code == 0
+      assert out =~ "Applied 3 migration(s)"
+    end
+
+    test "reports a current schema when nothing to apply" do
+      Process.put(:bd2_cmd_runner, fn _cmd, _args, _opts ->
+        {~s({"migrations_applied":0,"status":"ok"}), 0}
+      end)
+
+      {out, _err, code} = capture(fn -> Server.run(["migrate"]) end)
+      assert code == 0
+      assert out =~ "already current"
+    end
+
+    test "--json emits machine-readable output with migrations_applied count" do
+      Process.put(:bd2_cmd_runner, fn _cmd, _args, _opts ->
+        {~s({"migrations_applied":2,"status":"ok"}), 0}
+      end)
+
+      {out, _err, code} = capture(fn -> Server.run(["migrate", "--json"]) end)
+      assert code == 0
+      assert {:ok, payload} = Jason.decode(String.trim(out))
+      assert payload["migrations_applied"] == 2
+      assert payload["status"] == "ok"
+    end
+  end
+
+  # ---- migrate: server is RUNNING (restart path) --------------------------
+
+  describe "migrate — server running" do
+    setup do
+      System.put_env("ARB_HOME", System.tmp_dir!())
+      System.delete_env("ARB_WORKER_BEAD_ID")
+      Process.put(:bd2_sleep, fn _ms -> :ok end)
+      # Port check seam: report port as free so wait_port_free returns immediately.
+      Process.put(:bd2_port_check, fn _port -> true end)
+
+      # /api/workspaces green (server reachable) + /api/workers empty (no active workers).
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+
+      :ok
+    end
+
+    test "restarts the server (applies migrations via Boot.Migrator on boot)" do
+      test_pid = self()
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
+        send(test_pid, {:cmd, cmd, args})
+
+        case {cmd, args} do
+          # No systemd unit installed — fall back to the SIGTERM+sh path.
+          {"systemctl", ["--user", "cat", "arbiter.service"]} ->
+            {"No files found for arbiter.service.\n", 1}
+
+          # Nothing listening on the port (already down).
+          {"lsof", _} ->
+            {"", 1}
+
+          # Starting Phoenix — flip the API to green.
+          {"sh", _} ->
+            stub_get("/api/workspaces", @green)
+            {"", 0}
+
+          _ ->
+            {"", 0}
+        end
+      end)
+
+      {out, _err, code} = capture(fn -> Server.run(["migrate"]) end)
+
+      assert code == 0
+      assert out =~ "restarted" or out =~ "Wardmast"
+      # The restart lifecycle was triggered, not a standalone mix migrate.
+      refute_received {:cmd, "mix", ["wardmast.migrate"]}
+      assert_received {:cmd, "sh", ["-c", script]}
+      assert script =~ "mix phx.server"
+    end
+
+    test "--json emits restarted: true" do
+      Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
+        case {cmd, args} do
+          {"systemctl", ["--user", "cat", "arbiter.service"]} ->
+            {"No files found for arbiter.service.\n", 1}
+
+          {"lsof", _} ->
+            {"", 1}
+
+          {"sh", _} ->
+            stub_get("/api/workspaces", @green)
+            {"", 0}
+
+          _ ->
+            {"", 0}
+        end
+      end)
+
+      {out, _err, code} = capture(fn -> Server.run(["migrate", "--json"]) end)
+
+      assert code == 0
+      assert {:ok, payload} = Jason.decode(String.trim(out))
+      assert payload["restarted"] == true
+      assert payload["status"] == "ok"
+    end
+
+    test "active-worker guard blocks migrate without --force" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"},
+         {%{"data" => [%{"task_id" => "bd-abc", "kind" => "implement", "state" => "working"}]},
+          200}}
+      ])
+
+      {_out, err, code} = capture(fn -> Server.run(["migrate"]) end)
+
+      assert code == 1
+      assert err =~ "worker"
+      assert err =~ "--force"
+    end
+
+    test "--force migrates even with active workers" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"},
+         {%{"data" => [%{"task_id" => "bd-abc", "kind" => "implement", "state" => "working"}]},
+          200}}
+      ])
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
+        case {cmd, args} do
+          {"systemctl", ["--user", "cat", "arbiter.service"]} ->
+            {"No files found for arbiter.service.\n", 1}
+
+          {"lsof", _} ->
+            {"", 1}
+
+          {"sh", _} ->
+            stub_get("/api/workspaces", @green)
+            {"", 0}
+
+          _ ->
+            {"", 0}
+        end
+      end)
+
+      {out, _err, code} = capture(fn -> Server.run(["migrate", "--force"]) end)
+
+      assert code == 0
+      assert out =~ "restarted" or out =~ "Wardmast"
+    end
+  end
+
+  # ---- deploy: dev-mode fallback when ARB_RELEASE_REPO is unset ------------
+
+  describe "deploy — no ARB_RELEASE_REPO" do
+    setup do
+      System.put_env("ARB_HOME", "/tmp/arbiter-server-deploy-test")
+      System.delete_env("ARB_RELEASE_REPO")
+      on_exit(fn -> System.delete_env("ARB_HOME") end)
+      Process.put(:bd2_sleep, fn _ms -> :ok end)
+      Process.put(:bd2_port_check, fn _port -> true end)
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+
+      test_pid = self()
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
+        send(test_pid, {:cmd, cmd, args})
+
+        case {cmd, args} do
+          {"git", ["rev-parse", "--abbrev-ref", "HEAD"]} ->
+            {"main\n", 0}
+
+          {"git", ["status", "--porcelain"]} ->
+            {"", 0}
+
+          {"git", ["rev-parse", "HEAD"]} ->
+            {"aaaaaaa\n", 0}
+
+          {"git", ["pull", "--ff-only"]} ->
+            {"Already up to date.\n", 0}
+
+          {"git", ["log" | _]} ->
+            {"", 0}
+
+          {"git", ["diff" | _]} ->
+            {"", 0}
+
+          {"systemctl", ["--user", "cat", "arbiter.service"]} ->
+            {"No files found for arbiter.service.\n", 1}
+
+          {"lsof", _} ->
+            {"", 1}
+
+          {"sh", _} ->
+            {"", 0}
+
+          _ ->
+            {"", 0}
+        end
+      end)
+
+      :ok
+    end
+
+    test "never falls back to git-pull silently when no release repo can be resolved" do
+      Process.put(:bd2_build_release_repo, false)
+
+      {_out, err, code} = capture(fn -> Server.run(["deploy"]) end)
+
+      assert code == 1
+      assert err =~ "--git-pull"
+      assert err =~ "ARB_RELEASE_REPO"
+      refute_received {:cmd, "git", _}
+    end
+
+    test "an unset ARB_RELEASE_REPO deploys from the repo the server reports, naming the source" do
+      stub_routes([
+        {{"get", "/api/version"},
+         {%{"version" => "1.0.0", "release_repo" => "acme/arbiter"}, 200}},
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+
+      {_out, err, code} = capture(fn -> Server.run(["deploy"]) end)
+
+      # Proceeds down the release path (and dies reaching the unstubbed GitHub
+      # API), never the git-pull path.
+      assert code == 1
+      assert err =~ "Release source: acme/arbiter"
+      assert err =~ "running server"
+      refute err =~ "ARB_RELEASE_REPO is not set"
+      refute_received {:cmd, "git", _}
+    end
+
+    test "--git-pull is the only way to reach the legacy path, and names it" do
+      {out, err, code} = capture(fn -> Server.run(["deploy", "--git-pull"]) end)
+
+      assert code == 0
+      refute out =~ "ARB_RELEASE_REPO is not set"
+      assert err =~ "Deploy source: legacy git-pull"
+      assert_received {:cmd, "git", ["pull", "--ff-only"]}
+    end
+  end
+
+  describe "deploy — release path unchanged when ARB_RELEASE_REPO is set" do
+    test "still requires reaching the GitHub Releases API, not the git-pull path" do
+      System.put_env("ARB_RELEASE_REPO", "acme/arbiter")
+      on_exit(fn -> System.delete_env("ARB_RELEASE_REPO") end)
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+
+      test_pid = self()
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
+        send(test_pid, {:cmd, cmd, args})
+        {"", 0}
+      end)
+
+      {_out, err, code} = capture(fn -> Server.run(["deploy"]) end)
+
+      # Never even gets to `git` — it dies inside the release path trying to
+      # reach the (unstubbed) GitHub Releases API, proving dispatch went to
+      # Cmd.ReleaseDeploy, not Cmd.Update.
+      assert code == 1
+      refute_received {:cmd, "git", _}
+      refute err =~ "ARB_RELEASE_REPO is not set"
+    end
+  end
+
+  # ---- other verbs ---------------------------------------------------------
+
+  test "unknown subcommand errors with a usage hint" do
+    {_out, err, code} = capture(fn -> Server.run(["frobnicate"]) end)
+    assert code == 1
+    assert err =~ "unknown server subcommand"
+  end
+
+  test "no subcommand errors" do
+    {_out, err, code} = capture(fn -> Server.run([]) end)
+    assert code == 1
+    assert err =~ "server requires a subcommand"
+  end
+end

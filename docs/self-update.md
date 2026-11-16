@@ -11,7 +11,7 @@ Both end up running `arb server deploy --version <tag> --json`.
 
 ## What a deploy does
 
-1. **Resolve the release source.** `ARB_RELEASE_REPO` if exported; otherwise the
+1. **Resolve the release source.** `WARDMAST_RELEASE_REPO` if exported; otherwise the
    running server's own release metadata (`release_repo` on `GET /api/version`);
    otherwise the repo this `arb` was built from. The output names which
    (`Release source: acme/arbiter (from the running server's release metadata).`).
@@ -26,7 +26,7 @@ Both end up running `arb server deploy --version <tag> --json`.
 3. **Back up the database** (see below). A failed backup or integrity check
    **aborts the deploy before the swap**.
 4. **Swap `current`, restart, health-check.** The new release migrates the
-   database during its own boot (`Arbiter.Boot.Migrator`), before the endpoint
+   database during its own boot (`Wardmast.Boot.Migrator`), before the endpoint
    opens.
 5. **Roll back if it does not come back green** (see below).
 6. **Install the matching CLI.** After a green deploy the `arb` escript is
@@ -43,8 +43,8 @@ Before the swap, the deploy takes an **online** SQLite backup into
 
     <data-home>/snapshots/arbiter-pre-<tag>-<utc>.sqlite3
 
-It is made by the release being deployed (`bin/arbiter eval
-Arbiter.Release.Backup.eval_from_env`) with `VACUUM INTO` on a normal connection —
+It is made by the release being deployed (`bin/wardmast eval
+Wardmast.Release.Backup.eval_from_env`) with `VACUUM INTO` on a normal connection —
 a consistent snapshot of the live WAL-mode database, **not** a file copy of the
 `.sqlite3`/`-wal`/`-shm` trio. `PRAGMA integrity_check` runs on the copy, which
 only gets its final name if it passes. The path is in the deploy's text and
@@ -99,7 +99,7 @@ be determined).
 
       systemd-run --user --unit=arbiter-deploy-<tag> --collect \
         --property=EnvironmentFile=-<data-home>/arbiter.env \
-        --setenv=ARB_DATA_HOME=<data-home> \
+        --setenv=WARDMAST_DATA_HOME=<data-home> \
         ~/.local/bin/arb server deploy --version <tag> --json
 
   because the deploy restarts `arbiter.service`. The transient unit belongs to the
@@ -119,7 +119,7 @@ be determined).
 
 `POST /api/release/deploy` (`{"version": "vX.Y.Z"}`, or empty for the latest when
 an update is available) and `GET /api/release/deploy` are `:operator` in
-`ArbiterWeb.ApiPolicy`: an operator-proof token only. A coordinator session, a
+`WardmastWeb.ApiPolicy`: an operator-proof token only. A coordinator session, a
 worker and an anonymous caller are refused (403 / 401) and launch nothing. `202`
 returns the unit; `409` means a deploy is already running (or nothing is newer, or
 systemd cannot be reached); `422` is a version that is not a plain `vX.Y.Z` tag.
@@ -139,9 +139,9 @@ hint, but never blocks readiness or fails `arb doctor`.
 
 | Variable | Meaning |
 |---|---|
-| `ARB_RELEASE_REPO` | `owner/repo` to take releases from (optional; see above). |
+| `WARDMAST_RELEASE_REPO` | `owner/repo` to take releases from (optional; see above). |
 | `GITHUB_TOKEN` | Authenticates the Releases API / asset downloads (private repos). Never printed or logged. |
-| `ARB_DATA_HOME` | Deploy root (default `~/.arbiter`). |
+| `WARDMAST_DATA_HOME` | Deploy root (default `~/.arbiter`). |
 | `DATABASE_PATH` | The SQLite database to back up (default from `arbiter.env`, else `<data-home>/arbiter.sqlite3`). |
 | `ARB_DEPLOY_BACKUP_RETAIN` | Backups to keep (default `5`). |
 | `ARB_INSTALL_BIN` | Where the `arb` escript is installed (default `~/.local/bin/arb`); the button runs this one. |

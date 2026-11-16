@@ -48,33 +48,33 @@ config :spark,
   ]
 
 # Configure Mix tasks and generators
-config :arbiter,
-  ecto_repos: [Arbiter.Repo],
+config :wardmast,
+  ecto_repos: [Wardmast.Repo],
   ash_domains: [
-    Arbiter.Accounts,
-    Arbiter.Tasks,
-    Arbiter.Messages,
-    Arbiter.Workers,
-    Arbiter.Usage,
-    Arbiter.Quota,
-    Arbiter.Workflows,
-    Arbiter.Reviews,
-    Arbiter.ReviewGate,
-    Arbiter.Settings,
-    Arbiter.Skills,
-    Arbiter.Loop,
-    Arbiter.Events,
-    Arbiter.Alerts,
-    Arbiter.Nodes,
-    Arbiter.Sessions,
-    Arbiter.Guardrails.Subjects
+    Wardmast.Accounts,
+    Wardmast.Tasks,
+    Wardmast.Messages,
+    Wardmast.Workers,
+    Wardmast.Usage,
+    Wardmast.Quota,
+    Wardmast.Workflows,
+    Wardmast.Reviews,
+    Wardmast.ReviewGate,
+    Wardmast.Settings,
+    Wardmast.Skills,
+    Wardmast.Loop,
+    Wardmast.Events,
+    Wardmast.Alerts,
+    Wardmast.Nodes,
+    Wardmast.Sessions,
+    Wardmast.Guardrails.Subjects
   ]
 
 # Quota-aware dispatch throttle (bd-7cd38f). Governs what the fleet dispatcher
 # does when the workspace nears / crosses the Anthropic quota cap (the 7d weekly
 # window — Anthropic retired the 5h window, so for Claude only the weekly
 # window gates; the 5h-named keys below govern Codex/Antigravity), consuming
-# the quota snapshots `Arbiter.Quota.CloudProbe` polls off `/api/oauth/usage`
+# the quota snapshots `Wardmast.Quota.CloudProbe` polls off `/api/oauth/usage`
 # (bd-b0zody; the pass-through proxy that used to capture the same figures off
 # response headers was removed in bd-7cvh8z):
 #
@@ -87,7 +87,7 @@ config :arbiter,
 #
 # `throttle_threshold` is the primary-window (5h/session) `utilization` at/above
 # which :throttle holds — INERT for Claude since the 5h window was retired (boot
-# warning: Arbiter.Quota.PrimaryKeyDeprecation); `weekly_threshold` gates Claude
+# warning: Wardmast.Quota.PrimaryKeyDeprecation); `weekly_threshold` gates Claude
 # (0.85 = Ryan's hand-enforced ceiling, between the dashboard's 0.7/0.9 bands;
 # the shipped 0.85 below is not warned about, only an operator override).
 # `overage_alert_usd` is the global default alert threshold for :continue, below
@@ -101,15 +101,15 @@ config :arbiter,
 # and `polled_staleness_threshold_seconds` (default 1200) are how old a
 # header-captured / polled snapshot the gate still trusts before the gating window
 # fails open; `stale_alert_threshold_seconds` (default 1800) is when
-# `Arbiter.Quota.StalenessWatch` raises the "quota accounting is blind" alert.
-config :arbiter, :quota,
+# `Wardmast.Quota.StalenessWatch` raises the "quota accounting is blind" alert.
+config :wardmast, :quota,
   on_exhaustion: :throttle,
   throttle_threshold: 0.85,
   overage_alert_usd: 50.0
 
 # Quota-bar colours (bd-clzkvp) have no config of their own: each bar is
 # coloured by the dispatch gate's pace verdict for its window
-# (`Arbiter.Quota.Pace`, via `Arbiter.Quota.Gate.pace/6`), so the paced gate's
+# (`Wardmast.Quota.Pace`, via `Wardmast.Quota.Gate.pace/6`), so the paced gate's
 # settings — `paced_floor` / `weekly_paced_floor` / `pace_curve` in an account's
 # `quota_config` or a workspace's `config["quota"]` — are what move them.
 
@@ -118,88 +118,88 @@ config :arbiter, :quota,
 # Google's Cloud Code Assist API when `GET /api/quota` / `arb quota` / the MCP
 # `quota_get` tool is invoked. Enabled by default; `config/test.exs` turns it
 # off so the quota surface stays a pure DB read under test.
-config :arbiter, :cloud_code_quota, enabled: true
+config :wardmast, :cloud_code_quota, enabled: true
 
 # Periodic refresh of the non-Anthropic quota providers (Codex, Gemini CLI,
-# Antigravity) — `Arbiter.Quota.CloudProbe` (bd-ajh7bd). These have no passive
+# Antigravity) — `Wardmast.Quota.CloudProbe` (bd-ajh7bd). These have no passive
 # proxy signal, so the prober fetches them on a timer, persists a snapshot, and
 # broadcasts a quota_updated event; `GET /api/quota` then reads the persisted
 # rows rather than fetching live. `config/test.exs` turns it off.
-config :arbiter, :cloud_quota_probe, enabled: true, interval_ms: 300_000
+config :wardmast, :cloud_quota_probe, enabled: true, interval_ms: 300_000
 
 # Keeps the quota poller's dedicated Claude grant (an account's
 # `cli_credentials_path` credential) fresh by letting the `claude` CLI refresh
-# it just before its access token expires — `Arbiter.Quota.GrantRefresher`
+# it just before its access token expires — `Wardmast.Quota.GrantRefresher`
 # (bd-b632tz). A no-op until an account has such a credential.
-config :arbiter, :quota_grant_refresher, enabled: true, interval_ms: 60_000
+config :wardmast, :quota_grant_refresher, enabled: true, interval_ms: 60_000
 
 # Raises an operator alert when a Claude account's persisted quota snapshot is
 # older than `:quota` `:stale_alert_threshold_seconds` (default 1800 s, never
 # below the gate's own staleness margin) — quota accounting is blind and the gate
 # gate fails open — independent of whether anything reports a poll failure.
-# Clears itself when a fresh snapshot lands. `Arbiter.Quota.StalenessWatch`
+# Clears itself when a fresh snapshot lands. `Wardmast.Quota.StalenessWatch`
 # (bd-2wnkoq).
-config :arbiter, :quota_staleness_watch, enabled: true, interval_ms: 60_000
+config :wardmast, :quota_staleness_watch, enabled: true, interval_ms: 60_000
 
 # The provider concurrency budget (bd-6c8g4t, DC3 of
 # docs/design/provider-dynamic-concurrency.md): recomputed every `interval_ms`,
 # on each quota capture and at each window reset. Read by nothing on an
 # admission path until DC8, so it changes no dispatch decision.
-config :arbiter, :quota_budget_server, enabled: true, interval_ms: 60_000
+config :wardmast, :quota_budget_server, enabled: true, interval_ms: 60_000
 
 # Append-only quota history (`quota_snapshots`) retention window in days
 # (bd-3qfc81, R2).
-config :arbiter, :quota_history, retention_days: 90
+config :wardmast, :quota_history, retention_days: 90
 
 # Install-wide default worker security posture (the floor every spawn
 # inherits before per-domain workspace overrides). The hardcoded safe baseline
-# lives in `Arbiter.Agents.SecurityPolicy.base/0` — auto mode, a non-empty
+# lives in `Wardmast.Agents.SecurityPolicy.base/0` — auto mode, a non-empty
 # destructive-op deny list, worktree-scoped filesystem. Set this to override
 # the install default without editing source or anyone's ~/.claude. Example:
 #
-#   config :arbiter, :worker_security_policy, %{
+#   config :wardmast, :worker_security_policy, %{
 #     "permissions" => %{"mode" => "auto", "deny" => ["Bash(docker:*)"]},
 #     "sandbox" => %{"network" => false}
 #   }
 #
 # Per-domain overrides go in `workspace.config["agent"]["security"]`; see
 # docs/worker-security.md.
-config :arbiter, :worker_security_policy, %{}
+config :wardmast, :worker_security_policy, %{}
 
-config :arbiter_web,
-  ecto_repos: [Arbiter.Repo],
-  generators: [context_app: :arbiter]
+config :wardmast_web,
+  ecto_repos: [Wardmast.Repo],
+  generators: [context_app: :wardmast]
 
 # Configures the endpoint
-config :arbiter_web, ArbiterWeb.Endpoint,
+config :wardmast_web, WardmastWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,
   render_errors: [
-    formats: [html: ArbiterWeb.ErrorHTML, json: ArbiterWeb.ErrorJSON],
+    formats: [html: WardmastWeb.ErrorHTML, json: WardmastWeb.ErrorJSON],
     layout: false
   ],
-  pubsub_server: Arbiter.PubSub,
+  pubsub_server: Wardmast.PubSub,
   live_view: [signing_salt: "0ekr3cZr"]
 
 # Configure esbuild (the version is required)
 config :esbuild,
   version: "0.25.4",
-  arbiter_web: [
+  wardmast_web: [
     args:
       ~w(js/app.js js/theme.js --bundle --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/* --alias:@=.),
-    cd: Path.expand("../apps/arbiter_web/assets", __DIR__),
+    cd: Path.expand("../apps/wardmast_web/assets", __DIR__),
     env: %{"NODE_PATH" => [Path.expand("../deps", __DIR__), Mix.Project.build_path()]}
   ]
 
 # Configure tailwind (the version is required)
 config :tailwind,
   version: "4.1.12",
-  arbiter_web: [
+  wardmast_web: [
     args: ~w(
       --input=assets/css/app.css
       --output=priv/static/assets/css/app.css
     ),
-    cd: Path.expand("../apps/arbiter_web", __DIR__)
+    cd: Path.expand("../apps/wardmast_web", __DIR__)
   ]
 
 # Configure Elixir's Logger
@@ -238,7 +238,7 @@ config :exqlite, force_build: true
 #                     dropped to snapshot mode
 #   read_chunk_bytes  ceiling on one frame's payload, i.e. how much a burst
 #                     coalesces into before it is shipped
-config :arbiter, Arbiter.Sessions.Stream,
+config :wardmast, Wardmast.Sessions.Stream,
   ring_bytes: 2_097_152,
   max_replay_bytes: 2_097_152,
   high_water_bytes: 262_144,
@@ -250,23 +250,23 @@ config :arbiter, Arbiter.Sessions.Stream,
 # Scrollback lines a `snapshot` reaches back for. tmux's pane history is
 # 30,000 lines (§12 item 2); shipping all of it on every attach is a lot of
 # bytes for a repaint, so the snapshot is a window onto it.
-config :arbiter, :sessions_snapshot_lines, 2_000
+config :wardmast, :sessions_snapshot_lines, 2_000
 
 # Persisted raw PTY transcript (§11, phase 9). `max_bytes` is a per-session
 # safety ceiling — measured sessions land well under it (§11: 25 MB for a
 # long JSONL, and the raw stream is smaller still). `retention_days` outlives
 # Claude Code's own ~21-day session-store prune (§11's whole reason to exist)
 # with margin for an operator's own investigation window.
-config :arbiter, :sessions_transcript,
+config :wardmast, :sessions_transcript,
   max_bytes: 100 * 1024 * 1024,
   retention_days: 30
 
-# See `Arbiter.Sessions.TranscriptRetention` moduledoc for the sweep cadence.
-config :arbiter, :sessions_transcript_retention, interval_ms: 6 * 60 * 60_000
+# See `Wardmast.Sessions.TranscriptRetention` moduledoc for the sweep cadence.
+config :wardmast, :sessions_transcript_retention, interval_ms: 6 * 60 * 60_000
 
 # Shared-memory staleness checker (bd-19qve3, RFC §9.4 phase 13). See
-# `Arbiter.Sessions.Memory.Checker` moduledoc for what a pass does.
-config :arbiter, :memory_checker,
+# `Wardmast.Sessions.Memory.Checker` moduledoc for what a pass does.
+config :wardmast, :memory_checker,
   interval_ms: 15 * 60_000,
   initial_delay_ms: 30_000,
   max_age_ms: 24 * 60 * 60_000

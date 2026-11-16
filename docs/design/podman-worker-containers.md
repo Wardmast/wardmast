@@ -24,7 +24,7 @@ against scratch clones under `/tmp`. The ticket plan is in
    SELinux enforcing). This installation has no EC2 access (operator,
    2026-10-02), so the former "check the EC2" gate is now **`arb server
    doctor` on the target host**: its `podman sandbox readiness` check
-   (`Arbiter.Worker.PodmanReadiness`, P1) reports each prerequisite with a hint
+   (`Wardmast.Worker.PodmanReadiness`, P1) reports each prerequisite with a hint
    per failure. A RHEL 8 host would run podman 4.9.4 with slirp4netns,
    fuse-overlayfs and, by default, cgroups v1 (package inventory from Rocky
    8.10, [§2.4](#24-build-rebuild-and-versioning-laptop-and-ec2)); the items
@@ -153,7 +153,7 @@ Read from the repos on the laptop on 2026-10-02.
 
 | Repo | Runtimes | Services for tests | Notes |
 |---|---|---|---|
-| **arbiter** (umbrella: `arbiter`, `arbiter_web`, `arbiter_cli`, `arbiter_release_env`) | Elixir 1.20.4, Erlang 29.1.1 (`.tool-versions`; `mix.exs` says `~> 1.20`; CI pins the same pair; was 1.19.4 / 28.2 before bd-7nl3x0). Node for assets (esbuild and tailwind binaries come from `mix`). C toolchain for `exqlite` | **None.** SQLite. `compose.yml` has a Postgres on 5433 for dev only; tests do not use it | In-container tests need `procps` (`pgrep`, used by `OsProcess` and `teardown_test.exs`), `git`, `tmux`/systemd tests are excluded by tag. `mdex_native` downloads a precompiled NIF at build, which needs network at *image* build time |
+| **arbiter** (umbrella: `arbiter`, `wardmast_web`, `wardmast_cli`, `wardmast_release_env`) | Elixir 1.20.4, Erlang 29.1.1 (`.tool-versions`; `mix.exs` says `~> 1.20`; CI pins the same pair; was 1.19.4 / 28.2 before bd-7nl3x0). Node for assets (esbuild and tailwind binaries come from `mix`). C toolchain for `exqlite` | **None.** SQLite. `compose.yml` has a Postgres on 5433 for dev only; tests do not use it | In-container tests need `procps` (`pgrep`, used by `OsProcess` and `teardown_test.exs`), `git`, `tmux`/systemd tests are excluded by tag. `mdex_native` downloads a precompiled NIF at build, which needs network at *image* build time |
 | **vstim** (`~/dev/trading/vstim`) | Elixir `~> 1.18` (Dockerfile.worker: 1.19.4-erlang-28.2), Node (`assets/package.json`) | **Postgres 15** (compose) / **16** (`.gitlab-ci.yml`, `postgres:16-alpine`), nginx for dev only | No `.tool-versions`. Workers can reach prod through SSH today (vs-adx9r7, guardrail-profiles); under a container that reach disappears unless G14 grants it |
 | **emricare/tonic** | Elixir **1.17.3**, Erlang **27.1.2** (`.tool-versions`); Node via assets | **Postgres 15** and an S3-compatible store (`pgsty/silo`) per `docker-compose.yml` | PHI repo; its own CI image `test_runner:1.17.3`. Pinned compose uses a bind of `../tonic_database` and `../db_socket` outside the repo |
 | **emricare/tonic_device** | **Nix** (NixOS modules, `tests/` as Nix VM tests, `hosts/`, `secrets/` with age keys) | Nix VM tests need KVM and `/dev/kvm`, which a default container does not have | Not a BEAM repo. Needs a `nix` image; may be a poor fit for rootless containers (nested virtualisation, `secrets/`) |
@@ -195,7 +195,7 @@ therefore carries an Erlang for arb alone ([§4.3](#43-arb-in-a-worker-container
   - `/etc/subuid` and `/etc/subgid` entries must exist for the user.
   - The two-host check bd-8xy1mf did for bwrap must be repeated for podman (P1).
 
-**Implemented (P4, bd-9r5jdt).** `Arbiter.Worker.Image` plans an image from
+**Implemented (P4, bd-9r5jdt).** `Wardmast.Worker.Image` plans an image from
 the default branch's committed tree (`origin/<default>`, else the local branch;
 read with `git cat-file`, never a worktree) and builds it from an **empty
 context**. Two layers: `localhost/arbiter-dev/base:<hash>` (Debian trixie,
@@ -350,7 +350,7 @@ cache, **17 to 18 s** ([§6](#6-measurements)). A cache is essential.
   copy at `~/.mix`. A container has no operator `~/.mix` to link in (the bwrap
   jail does), and without Hex `mix` stops to ask whether to install it, offline.
 
-**As built (bd-1wm14e, `Arbiter.Worker.DepsCache`).**
+**As built (bd-1wm14e, `Wardmast.Worker.DepsCache`).**
 
 | Question | Answer |
 |---|---|
@@ -360,7 +360,7 @@ cache, **17 to 18 s** ([§6](#6-measurements)). A cache is essential.
 | Per-worker copy | `cp -a --reflink=always` into the private clone, falling back to a plain `cp -a` where the filesystem cannot clone. The cache is never mounted into any container and never written after it is complete. The key is stamped in `<clone>/.git/arbiter-deps-cache`: the same key is left alone (a resumed worker keeps its compiled work), a new one replaces `deps/` and `_build/` |
 | Failure | Best-effort. No lockfile, offline, or a failed seed logs a warning and the worker starts without the cache (it fetches through the egress proxy, as before) |
 | Where | `ContainerSpawn.prepare/1`, after the image is resolved and before the egress run starts: a cold seed takes minutes |
-| Config | `config :arbiter, :worker_deps_cache` (default `true`; `false` in the test env) |
+| Config | `config :wardmast, :worker_deps_cache` (default `true`; `false` in the test env) |
 
 **Measured (bd-1wm14e, 2026-10-04, this repo, image `beam-1.19.4-28.2`, reflink
 filesystem).** `mix deps.compile --skip-umbrella-children` at `MIX_ENV=test` in a
@@ -435,7 +435,7 @@ through (bd-d2o3xb):
   host readiness (`Container.status/0`, `network_status/0`), the private clone's
   mount set (`PrivateClone.mounts/1`; anything that is not a private clone is
   refused), the image (`Image.ensure/3` from the repo's default branch, or
-  `config :arbiter, :worker_container_image`), the egress run
+  `config :wardmast, :worker_container_image`), the egress run
   (`Egress.JailRun`, learn mode, the same one agy's jail starts), and the
   per-run `HOME` and `CLAUDE_CONFIG_DIR`. The result rides in
   `port_args.sandbox`, so the commit-gate nudge and the auto-resume, which
@@ -524,7 +524,7 @@ reaches the remote through the proxy bridge with the `ProxyCommand socat`
 | `CODEX_HOME` | Per run, under the run's temp dir (`Codex.ConfigDir.seed_run_home/2`): the generated backend-only `config.toml`, the worker `AGENTS.md`, the execpolicy deny rules (`rules/arbiter.rules`, enforced in every mode), and **a copy** of the operator's `auth.json` (0600, a regular file). The operator's home is never mounted, so `mountinfo` in the container names nothing of it. `Codex.spawn_env/1` skips the host's per-worktree home and its symlinked `auth.json` for a container spawn. The container's `TMPDIR`/`TMP`/`TEMP` is `<run dir>/tmp`, never the run dir: codex 0.164 refuses to create its PATH helpers when `CODEX_HOME` is under the temp dir (bd-83gbsh, #1040) |
 | The CLI | The `codex` on a host `PATH` is a node launcher; a container has no node. The vendored static binary beside it in the npm package (`node_modules/@openai/codex-linux-*/vendor/<triple>/bin/codex`) is mounted at `/opt/arbiter/cli/codex`, with `rg`, `bwrap` and the `codex-code-mode-host` sibling (the CLI spawns it by path, and without it the turn starts with a "Code Mode is unavailable" error). A cargo/brew `codex` that is already an ELF is mounted as it is |
 | Egress baseline | The proxy's infra hosts are the OpenAI ones (`chatgpt.com`, `api.openai.com`, `auth.openai.com`) instead of Anthropic's. The proxy still runs in learn mode |
-| MCP | Unchanged: the adapter's `-c mcp_servers.<name>.url=…` and `bearer_token_env_var="ARBITER_MCP_TOKEN"` overrides (bd-avq0wb) name `Arbiter.MCP.server_url/0`, which the in-container `socat` bridge serves on the same loopback port; the bearer is a `-e ARBITER_MCP_TOKEN` from the client's environment, never on argv |
+| MCP | Unchanged: the adapter's `-c mcp_servers.<name>.url=…` and `bearer_token_env_var="ARBITER_MCP_TOKEN"` overrides (bd-avq0wb) name `Wardmast.MCP.server_url/0`, which the in-container `socat` bridge serves on the same loopback port; the bearer is a `-e ARBITER_MCP_TOKEN` from the client's environment, never on argv |
 
 `Codex.default_argv/2` takes `sandbox_wrap: true` like Claude's: the argv names
 `/opt/arbiter/cli/codex`, drops `--ignore-user-config` (the per-run home is the
@@ -581,8 +581,8 @@ and an image with no Erlang cannot run arb at all. A worker without arb still
 has the MCP tools, but not `arb message`, `arb inbox` and the rest of the CLI.
 
 * **The stamp.** `mix escript.build` writes the release into the escript's
-  comment line: `%% arb-otp=29` (`apps/arbiter_cli/mix.exs`).
-  `Arbiter.Worker.ArbCli.built_otp/1` reads it.
+  comment line: `%% arb-otp=29` (`apps/wardmast_cli/mix.exs`).
+  `Wardmast.Worker.ArbCli.built_otp/1` reads it.
 * **The runtime.** The base image copies `/usr/local/lib/erlang` out of the
   official `docker.io/library/erlang:<release>-slim` image (digest-pinned like
   every `FROM`, multi-arch, Debian trixie like the base) to
@@ -677,9 +677,9 @@ and other workers throughout, so differences under about 10 percent are noise.
 | **Cold: first `keep-id` run of a never-run image** | n/a | **5.9 s** (the 777 MB image), **3.5 s** (a fresh derived image). Podman chowns the image layers for the UID mapping once per image id. The same image run without `keep-id`: 0.20 s |
 | Image build, apt layer + users | n/a | 66 s first, 49 s with the base cached; base pull 5.3 s |
 
-### 6.2 Toolchain stages (Arbiter, `MIX_ENV=test`, `test/arbiter/tasks`, 1,013 tests)
+### 6.2 Toolchain stages (Arbiter, `MIX_ENV=test`, `test/wardmast/tasks`, 1,013 tests)
 
-The bwrap column is the **real `Arbiter.Worker.Jail.wrap/2` argv** (fresh
+The bwrap column is the **real `Wardmast.Worker.Jail.wrap/2` argv** (fresh
 clone, fresh per-worker HOME, per-worker `HEX_HOME`/`MIX_HOME`). The podman
 column is the image above with a fresh clone and fresh HOME. "No cache" means
 no `deps/` and no `_build/`; "warm" means the second run in the same
@@ -710,7 +710,7 @@ A real `claude -p` (version 2.1.287, `--model haiku` to keep quota small,
 `--dangerously-skip-permissions`, as workers run) inside the container, on a
 scratch clone of this branch with its remote removed (no push possible) on a
 scratch branch, with warm deps. The task: run `mix test
-test/arbiter/tasks/epic_floor_test.exs`, write the count to
+test/wardmast/tasks/epic_floor_test.exs`, write the count to
 `PODMAN_PROBE.txt`, `git add` and commit.
 
 | Measure | Result |
@@ -749,7 +749,7 @@ or `podman rm -f` by name.
 
 ## 7. Fit with Arbiter
 
-### 7.1 Can it slot into `Arbiter.Worker.Jail`?
+### 7.1 Can it slot into `Wardmast.Worker.Jail`?
 
 Mostly yes. `Jail.wrap/2` returns an argv list that the adapters splice the
 CLI into; `gemini.ex:570` and `codex.ex:257` just use the result. Constraints
@@ -771,7 +771,7 @@ the survey found:
   branch: `podman` present, `/etc/subuid` entry, user namespaces, SELinux mode
   and a real `podman run` probe.
 
-The right shape is a small behaviour, `Arbiter.Worker.Sandbox`
+The right shape is a small behaviour, `Wardmast.Worker.Sandbox`
 (`status/0`, `wrap/2`, `teardown/1`), with `Jail` (bwrap) and a new
 `Container` module as implementations, chosen per provider by policy. An
 estimate for the new module's argv builder is a few hundred lines; the jail's
@@ -803,15 +803,15 @@ difficulty.
 | # | Title | D | Depends on |
 |---|---|---|---|
 | **P1** | **Spike/doctor: rootless podman readiness.** Re-scoped 2026-10-02 (no EC2 access): laptop go/no-go ([Appendix C](#appendix-c-p1-laptop-results-and-gono-go-bd-46xndf)) plus the portable `podman sandbox readiness` doctor check (`/etc/subuid`, `user.max_user_namespaces`, SELinux mode, cgroup version, podman version and storage driver, `label=disable` socket-bridge self-test). **Done (bd-46xndf).** The gate for any other host is that check | 2 | none |
-| P2 | `agent.security.sandbox.backend: bwrap \| podman` key in `SecurityPolicy` (layering by most-restrictive), plus the `Arbiter.Worker.Sandbox` behaviour with `Jail` as the first implementation. No behavior change by default | 3 | none |
-| P3 | **Done (bd-bu4ye2).** `Arbiter.Worker.Container`: a pure argv builder like `Jail.argv/2` (`--name`, `--init`, `--rm`, `--userns=keep-id`, `--read-only`, `--cap-drop=all`, `no-new-privileges`, tmpfs, explicit `-e NAME` allowlist, mounts, label policy), a doctor probe and teardown by name | 3 | P1, P2 |
-| P4 | **Done (bd-9r5jdt, `Arbiter.Worker.Image`).** Image lifecycle: `.arbiter/Containerfile` or a generated default, content-hash tags, single-flight lazy build from the **default branch**, weekly base refresh, prune, `arb image list/build`. Provider CLIs in the base image or a versioned read-only CLI dir | 3 | P3 |
-| P5 | **Done (bd-4wy1w1, `Arbiter.Worker.PrivateClone`).** Git layout B: private `--shared` clone with read-only `:O` alternates, sync-back into the main repo, a pinned base ref against gc, cleanup and sweeper changes, ReviewGate and MergeQueue reads. **The riskiest item.** Re-estimated D3 after the reading day (§3.2) | 4 | P3 |
-| P6 | **Done (bd-1wm14e, `Arbiter.Worker.DepsCache`).** Image-keyed deps cache: seed job inside the image, per-worker `cp --reflink` copy, key `(lockfile hash, image tag)`. Extend bd-5tncmq | 3 | P4 |
-| P7 | **Done (bd-d2o3xb, `Arbiter.Worker.ContainerSpawn`).** Claude under the container backend (replaces G7 bd-d2o3xb): config dir, token env, `.mcp.json`, `arb`, proxy and Arbiter bridges via G5's sockets, wrap point in `ClaudeSession`. See [§4.1](#41-claude-under-podman-p7) | 3 | P3, P5, G5 |
+| P2 | `agent.security.sandbox.backend: bwrap \| podman` key in `SecurityPolicy` (layering by most-restrictive), plus the `Wardmast.Worker.Sandbox` behaviour with `Jail` as the first implementation. No behavior change by default | 3 | none |
+| P3 | **Done (bd-bu4ye2).** `Wardmast.Worker.Container`: a pure argv builder like `Jail.argv/2` (`--name`, `--init`, `--rm`, `--userns=keep-id`, `--read-only`, `--cap-drop=all`, `no-new-privileges`, tmpfs, explicit `-e NAME` allowlist, mounts, label policy), a doctor probe and teardown by name | 3 | P1, P2 |
+| P4 | **Done (bd-9r5jdt, `Wardmast.Worker.Image`).** Image lifecycle: `.arbiter/Containerfile` or a generated default, content-hash tags, single-flight lazy build from the **default branch**, weekly base refresh, prune, `arb image list/build`. Provider CLIs in the base image or a versioned read-only CLI dir | 3 | P3 |
+| P5 | **Done (bd-4wy1w1, `Wardmast.Worker.PrivateClone`).** Git layout B: private `--shared` clone with read-only `:O` alternates, sync-back into the main repo, a pinned base ref against gc, cleanup and sweeper changes, ReviewGate and MergeQueue reads. **The riskiest item.** Re-estimated D3 after the reading day (§3.2) | 4 | P3 |
+| P6 | **Done (bd-1wm14e, `Wardmast.Worker.DepsCache`).** Image-keyed deps cache: seed job inside the image, per-worker `cp --reflink` copy, key `(lockfile hash, image tag)`. Extend bd-5tncmq | 3 | P4 |
+| P7 | **Done (bd-d2o3xb, `Wardmast.Worker.ContainerSpawn`).** Claude under the container backend (replaces G7 bd-d2o3xb): config dir, token env, `.mcp.json`, `arb`, proxy and Arbiter bridges via G5's sockets, wrap point in `ClaudeSession`. See [§4.1](#41-claude-under-podman-p7) | 3 | P3, P5, G5 |
 | P8 | **Done (bd-50d5j6, `ContainerSpawn` `provider: "codex"`, `Codex.AuthSync`).** Codex under the container backend (replaces G8 bd-50d5j6, with bd-99emmd): per-run `CODEX_HOME`, refresh-token rotation handling. See [§4.2](#42-codex-under-podman-p8) and [Appendix F](#appendix-f-p8-codex-live-run-bd-50d5j6) | 3 | P7 |
 | P9 | Deploy-key delivery as `--secret` (the body of G16 bd-9cygoo and the per-run-agent part of G14) | 3 | P7 |
-| P10 | **Done (bd-dmcbos, `Arbiter.Worker.TestServices`).** Test services: a per-worker pod with a Postgres sidecar on the pod's `lo` for vstim and tonic (Postgres 15/16, plus an S3 store for tonic). Optional; arbiter needs none. See [Appendix E](#appendix-e-p10-test-services-probes-bd-dmcbos) | 3 | P7 |
+| P10 | **Done (bd-dmcbos, `Wardmast.Worker.TestServices`).** Test services: a per-worker pod with a Postgres sidecar on the pod's `lo` for vstim and tonic (Postgres 15/16, plus an S3 store for tonic). Optional; arbiter needs none. See [Appendix E](#appendix-e-p10-test-services-probes-bd-dmcbos) | 3 | P7 |
 | P11 | Re-plan the six tickets in [§7.2](#72-what-happens-to-each-guardrail-ticket): re-scope G7 and G8, shrink G3 and G14, annotate G6 and G16 | 1 | this decision |
 
 **What to do first.** P1 and P2 are independent and cheap, and P1 decides
@@ -840,7 +840,7 @@ worktree registration, because the D4 estimate rests on that.
    those; the sidecar-listener variant is not built. Isolation rests on the
    user, mount, PID and network namespaces, `--cap-drop=all`,
    `no-new-privileges`, `--read-only` and the explicit mount set.
-   `Arbiter.Worker.Container` (P3) adds the flag exactly when a container has
+   `Wardmast.Worker.Container` (P3) adds the flag exactly when a container has
    bridge sockets. (The doctor check still reports the host's SELinux mode,
    which makes it moot where SELinux is permissive or disabled.)
 2. ~~Can agy's file-seeded credentials work everywhere (guardrail-profiles
@@ -912,7 +912,7 @@ None of this is measured; it is the prediction the check exists to confirm.
 
 Run 2026-10-03 on the Fedora 44 laptop (podman 5.8.7), scratch dir under `/tmp`,
 images `debian:12`. Probes ran by hand and through
-`Arbiter.Worker.PodmanReadiness.diagnose/0` (`MIX_ENV=test mix run --no-start`).
+`Wardmast.Worker.PodmanReadiness.diagnose/0` (`MIX_ENV=test mix run --no-start`).
 **Not run:** a full dispatch through the real Arbiter spawn path; there is no
 container backend yet (P3), so "the real spawn path" is the doctor probe plus
 the equivalent `podman run` argv (`--userns=keep-id --init --rm`).
@@ -990,14 +990,14 @@ checked by dispatching a vstim ticket with `agent.security.sandbox.backend: podm
 Run 2026-10-05 on the Fedora 44 laptop (podman 5.8.7, SELinux enforcing, codex-cli
 0.153.4), with `container_spawn_codex_podman_test.exs`:
 
-    cd apps/arbiter && ARB_LIVE_CODEX=1 ARB_LIVE_IMAGE=localhost/arbiter-dev/beam-1.19.4-28.2:f0def79aaf5f \
-      mix test --include podman --include live_codex test/arbiter/worker/container_spawn_codex_podman_test.exs
+    cd apps/wardmast && ARB_LIVE_CODEX=1 ARB_LIVE_IMAGE=localhost/arbiter-dev/beam-1.19.4-28.2:f0def79aaf5f \
+      mix test --include podman --include live_codex test/wardmast/worker/container_spawn_codex_podman_test.exs
 
 It goes through the production path (`ContainerSpawn.prepare/1`, the real
 `Egress.JailRun` proxy and Arbiter bridge, `Codex.default_argv/2` and
 `spawn_env/1`, `wrap_port/1`, a real `podman run`) with the operator's real
 `~/.codex/auth.json` as the login to copy. A stand-in MCP server
-(`Arbiter.Test.StubMcpServer`, one `ping` tool) plays Arbiter's `/mcp`.
+(`Wardmast.Test.StubMcpServer`, one `ping` tool) plays Arbiter's `/mcp`.
 
 | Check | Result |
 |---|---|
@@ -1021,7 +1021,7 @@ an Elixir 1.17.3 / OTP 27 toolchain image (tonic's `.tool-versions`), mounts an
 escript compiled by the test VM's OTP the way a dispatch mounts arb, and runs
 it with `Container.run/2`:
 
-    cd apps/arbiter && mix test --include podman test/arbiter/worker/arb_runtime_podman_test.exs
+    cd apps/wardmast && mix test --include podman test/wardmast/worker/arb_runtime_podman_test.exs
 
 It asserts that the image's `erl` is still OTP 27, that the image's own
 `escript` still fails to load the fixture (`corrupt atom table`), that `arb`
@@ -1067,7 +1067,7 @@ image's `PATH` (`env -i`):
 The real OTP 27.1.2 the ticket names (a `builds.hex.pm` build) was checked the
 same way in ExUnit:
 
-    cd apps/arbiter && ARB_TEST_OLD_OTP_ROOT=/path/to/OTP-27.1.2 mix test test/arbiter/worker/arb_cli_test.exs
+    cd apps/wardmast && ARB_TEST_OLD_OTP_ROOT=/path/to/OTP-27.1.2 mix test test/wardmast/worker/arb_cli_test.exs
 
 which loads the OTP 29 fixture with 27.1.2 (`corrupt atom table`), then runs it
 through the launcher (OTP 29) and without a runtime (exit 69, `OTP 27`).

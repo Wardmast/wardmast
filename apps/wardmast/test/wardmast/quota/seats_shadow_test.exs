@@ -1,0 +1,110 @@
+defmodule Wardmast.Quota.SeatsShadowTest do
+  @moduledoc """
+  DC4 is shadow only (bd-5oquxn; design §10, I1/I2): seats are computed per
+  (account, pool), but nothing on an admission, gate, dispatch, scheduler or
+  run-stopping path reads them, and today's per-account count is unchanged.
+  These tests pin the construction, and that a real worker and a real
+  admission stamp what `Wardmast.Quota.Seats` reads.
+
+  DC6 (bd-9ycsk4) adds one reader: `Wardmast.Board.WalkInputs`, the scheduler
+  walk's capacity sets, gathered only under `scheduler_admission: shadow` or
+  `enforce` (`Wardmast.Board.AdmissionLegacyTest` pins that `legacy` reads none).
+
+  DC8 (bd-30d5qo) adds the seat check, `Wardmast.Accounts.SeatCheck`: under
+  `enforce` admission compares the seats on a pool with its budget. It is asked
+  only for an account in `enforce`; under `legacy` and `shadow` today's
+  per-account count still decides.
+  """
+  use Wardmast.DataCase, async: false
+
+  alias Wardmast.Accounts.Concurrency
+  alias Wardmast.Accounts.ProviderAccount
+  alias Wardmast.Accounts.WorkspaceProviderAccount
+  alias Wardmast.Quota.Seats
+  alias Wardmast.Tasks.Issue
+  alias Wardmast.Tasks.Workspace
+  alias Wardmast.Test.ResumeSlotFixture
+  alias Wardmast.Worker.Dispatch
+  alias Wardmast.Worker.Registry, as: WorkerRegistry
+
+  @lib Path.expand("../../../lib", __DIR__)
+  @consumers ~r/alias Wardmast\.Quota\.Seats|\bSeats\.(counts|count|holders|seats|tally|base_task_id)\(/
+
+  # The seats module, the scheduler walk's inputs (DC6, shadow and enforce only),
+  # the capacity view (DC5, display only: it shows the live holders next to each
+  # budget and decides nothing) and the seat check (DC8, enforce only).
+  @allowed ~w(wardmast/quota/seats.ex wardmast/board/walk_inputs.ex wardmast/board/capacity_view.ex
+              wardmast/accounts/seat_check.ex)
+
+  test "only the seats module, the walk's inputs and the capacity view name it" do
+    offenders =
+      @lib
+      |> Path.join("**/*.{ex,exs}")
+      |> Path.wildcard()
+      |> Enum.reject(&(Path.relative_to(&1, @lib) in @allowed))
+      |> Enum.filter(&(File.read!(&1) =~ @consumers))
+      |> Enum.map(&Path.relative_to(&1, @lib))
+
+    assert offenders == []
+  end
+
+  test "neither the web app nor the CLI reads it yet" do
+    for app <- ~w(wardmast_web wardmast_cli) do
+      root = Path.expand("../../../../#{app}/lib", __DIR__)
+
+      offenders =
+        root
+        |> Path.join("**/*.{ex,exs}")
+        |> Path.wildcard()
+        |> Enum.filter(&(File.read!(&1) =~ @consumers))
+
+      assert offenders == [], "#{app} reads the seats"
+    end
+  end
+
+  describe "a real dispatch" do
+    @repo ResumeSlotFixture.repo()
+
+    setup do
+      ResumeSlotFixture.setup_repo!()
+      ResumeSlotFixture.put_local_cap(10)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "seats-#{System.unique_integer([:positive])}",
+          prefix: "st#{System.unique_integer([:positive])}"
+        })
+
+      account =
+        Ash.create!(ProviderAccount, %{
+          provider: :claude,
+          slug: "seats-#{System.unique_integer([:positive])}",
+          max_concurrent: 2
+        })
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+
+      %{ws: ws, account: account}
+    end
+
+    test "the worker stamps its account and pool, and the pin seat and legacy count agree", ctx do
+      %{ws: ws, account: account} = ctx
+      {:ok, issue} = Ash.create(Issue, %{title: "seat me", workspace_id: ws.id})
+
+      assert {:ok, %{worker_pid: pid}} =
+               Dispatch.dispatch(issue.id, force: true, repo: @repo, start_driver: false)
+
+      assert %{account_id: account_id, pool: "claude"} =
+               Enum.find(WorkerRegistry.live_dispatches(), &(&1.pid == pid))
+
+      assert account_id == account.id
+      assert Seats.count(account.id, "claude") == 1
+      # Today's count is untouched, and agrees here.
+      assert Concurrency.live_count(account) == 1
+    end
+  end
+end

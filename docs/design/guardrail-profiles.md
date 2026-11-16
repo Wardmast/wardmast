@@ -102,20 +102,20 @@ Nothing below is replaced. Every row is a mechanism this design composes with.
 
 | Mechanism | Where | What it covers | What it doesn't cover |
 |---|---|---|---|
-| `SecurityPolicy` modes and layering | `apps/arbiter/lib/arbiter/agents/security_policy.ex:473-481` (base → app env → workspace → `repos.<repo>` → per-dispatch) | Deny categories, `:bypass`/`:auto`/`:strict`, sandbox flags | `mode` and `sandbox.network` are *replaced* by later layers, so a repo or dispatch override can loosen as well as tighten. Nothing is keyed by provider or model |
-| Safe-default deny categories | Categories at `apps/arbiter/lib/arbiter/agents/security_policy.ex:200-209`; public upload hosts at `:216-248` | `:no_public_upload`, `:no_gh_publish` and six others, at the permission layer for Claude and agy | Codex enforces none of them (`security_enforced? = false`, bd-99emmd) |
-| `sandbox.network: false` | `apps/arbiter/lib/arbiter/agents/claude/security.ex:236-246`, `apps/arbiter/lib/arbiter/agents/gemini/security.ex:698-708` | Tool-level denies for curl, wget, WebFetch and similar (`net=tools-off`) | Native traffic: git, ssh, package managers, any `python -c` |
-| agy bwrap write jail | `apps/arbiter/lib/arbiter/worker/jail.ex:222-236`. Every mode since bd-3s82pf; agy review dispatches get a read-only worktree | Writes outside the worktree fail with `EROFS` | Network, reads, and (new) the D-Bus/systemd escape in §2.1. Claude and Codex are never jailed |
-| Fail-closed `:strict` gate | `apps/arbiter/lib/arbiter/worker/dispatch.ex:2682-2694`, through `Agents.strict_eligible_provider/4` (`apps/arbiter/lib/arbiter/agents.ex:193-219`) | Never sends `:strict` work to an adapter whose `write_confinement/1` is `:none` | Only the write-confinement capability |
+| `SecurityPolicy` modes and layering | `apps/wardmast/lib/wardmast/agents/security_policy.ex:473-481` (base → app env → workspace → `repos.<repo>` → per-dispatch) | Deny categories, `:bypass`/`:auto`/`:strict`, sandbox flags | `mode` and `sandbox.network` are *replaced* by later layers, so a repo or dispatch override can loosen as well as tighten. Nothing is keyed by provider or model |
+| Safe-default deny categories | Categories at `apps/wardmast/lib/wardmast/agents/security_policy.ex:200-209`; public upload hosts at `:216-248` | `:no_public_upload`, `:no_gh_publish` and six others, at the permission layer for Claude and agy | Codex enforces none of them (`security_enforced? = false`, bd-99emmd) |
+| `sandbox.network: false` | `apps/wardmast/lib/wardmast/agents/claude/security.ex:236-246`, `apps/wardmast/lib/wardmast/agents/gemini/security.ex:698-708` | Tool-level denies for curl, wget, WebFetch and similar (`net=tools-off`) | Native traffic: git, ssh, package managers, any `python -c` |
+| agy bwrap write jail | `apps/wardmast/lib/wardmast/worker/jail.ex:222-236`. Every mode since bd-3s82pf; agy review dispatches get a read-only worktree | Writes outside the worktree fail with `EROFS` | Network, reads, and (new) the D-Bus/systemd escape in §2.1. Claude and Codex are never jailed |
+| Fail-closed `:strict` gate | `apps/wardmast/lib/wardmast/worker/dispatch.ex:2682-2694`, through `Agents.strict_eligible_provider/4` (`apps/wardmast/lib/wardmast/agents.ex:193-219`) | Never sends `:strict` work to an adapter whose `write_confinement/1` is `:none` | Only the write-confinement capability |
 | Provider accounts and role positions | `workspace_provider_accounts.implementer_position` / `reviewer_position` (`docs/provider-account-design.md` §3.3) | Which accounts a workspace may use, per role | Anything per ticket or per model |
-| Implementer routing (bd-40pzpj) | `apps/arbiter/lib/arbiter/agents/provider_routing.ex:594-604` (the `check/2` drop-reason list), with the pin on `issues.implementer_account_id` / `implementer_family` | Availability filters, then the headroom ranking. Each drop is recorded in `worker_runs.routing_decision` | Eligibility by trust or by ticket need |
-| Reviewer family rule (bd-a1ke2c) | `apps/arbiter/lib/arbiter/agents/reviewer_routing.ex:104-105` (`@fallback_triggers`) | Reviewer family differs from the implementer's; a same-family fallback is immediate and recorded | Data-class eligibility of reviewers |
-| Difficulty routing | `apps/arbiter/lib/arbiter/agents/routing/by_difficulty.ex:111-118` | Picks the model tier and thinking level within a family | A ceiling per model |
-| Quota gate and DispatchQueue hold | `apps/arbiter/lib/arbiter/worker/dispatch.ex:1463-1506` → `DispatchQueue.hold/5` (`apps/arbiter/lib/arbiter/workflows/dispatch_queue.ex:201`) | Holds work when a pool is over its line, and drains it when the pool frees | Anything that isn't quota |
-| Evidence integrity (bd-80talz) | `apps/arbiter/lib/arbiter/worker/evidence_integrity.ex:111` | Fabricated-evidence findings escalate instead of starting another fix round | A lasting mark against the subject |
-| BudgetPatrol | `apps/arbiter/lib/arbiter/usage/budget_patrol.ex` | Pages the coordinator once when a task passes its estimate's p90 | By design, it never stops anything |
-| Loop Stage 2 and Stage 3 | `apps/arbiter/lib/arbiter/loop/pending_write.ex`, `apps/arbiter/lib/arbiter/loop/canary.ex`; docs/loop-review.md:163, :299 | An operator-gated proposal queue, and a canary with auto-revert | Anything about trust |
-| MCP worker scope | Minted by `apps/arbiter/lib/arbiter/mcp/scope.ex:100-127`. `Scope.own_task/2` (`:335-337`) enforces own-task-only, and the refusal reads "this scope may only act on its own task" (`apps/arbiter/lib/arbiter/mcp/tools.ex:1323`) | What a worker can do through MCP | Anonymous loopback `/api`: a documented trust assumption (docs/remote-access.md:62-74), see §2.5 |
+| Implementer routing (bd-40pzpj) | `apps/wardmast/lib/wardmast/agents/provider_routing.ex:594-604` (the `check/2` drop-reason list), with the pin on `issues.implementer_account_id` / `implementer_family` | Availability filters, then the headroom ranking. Each drop is recorded in `worker_runs.routing_decision` | Eligibility by trust or by ticket need |
+| Reviewer family rule (bd-a1ke2c) | `apps/wardmast/lib/wardmast/agents/reviewer_routing.ex:104-105` (`@fallback_triggers`) | Reviewer family differs from the implementer's; a same-family fallback is immediate and recorded | Data-class eligibility of reviewers |
+| Difficulty routing | `apps/wardmast/lib/wardmast/agents/routing/by_difficulty.ex:111-118` | Picks the model tier and thinking level within a family | A ceiling per model |
+| Quota gate and DispatchQueue hold | `apps/wardmast/lib/wardmast/worker/dispatch.ex:1463-1506` → `DispatchQueue.hold/5` (`apps/wardmast/lib/wardmast/workflows/dispatch_queue.ex:201`) | Holds work when a pool is over its line, and drains it when the pool frees | Anything that isn't quota |
+| Evidence integrity (bd-80talz) | `apps/wardmast/lib/wardmast/worker/evidence_integrity.ex:111` | Fabricated-evidence findings escalate instead of starting another fix round | A lasting mark against the subject |
+| BudgetPatrol | `apps/wardmast/lib/wardmast/usage/budget_patrol.ex` | Pages the coordinator once when a task passes its estimate's p90 | By design, it never stops anything |
+| Loop Stage 2 and Stage 3 | `apps/wardmast/lib/wardmast/loop/pending_write.ex`, `apps/wardmast/lib/wardmast/loop/canary.ex`; docs/loop-review.md:163, :299 | An operator-gated proposal queue, and a canary with auto-revert | Anything about trust |
+| MCP worker scope | Minted by `apps/wardmast/lib/wardmast/mcp/scope.ex:100-127`. `Scope.own_task/2` (`:335-337`) enforces own-task-only, and the refusal reads "this scope may only act on its own task" (`apps/wardmast/lib/wardmast/mcp/tools.ex:1323`) | What a worker can do through MCP | Anonymous loopback `/api`: a documented trust assumption (docs/remote-access.md:62-74), see §2.5 |
 
 ## 2. What the probes found (2026-09-30)
 
@@ -195,7 +195,7 @@ as well.
 - `SSH_AUTH_SOCK`
 - `DBUS_SESSION_BUS_ADDRESS`
 
-**Cause.** `ClaudeSession.env_pairs/3` (`apps/arbiter/lib/arbiter/worker/claude_session.ex:1825-1846`)
+**Cause.** `ClaudeSession.env_pairs/3` (`apps/wardmast/lib/wardmast/worker/claude_session.ex:1825-1846`)
 *adds* pairs to the BEAM's inherited environment. `ReleaseEnv` and
 `DevServerEnv` strip only a short denylist (the `RELEASE_*` vars, `ROOTDIR`,
 `BINDIR`, `ERTS_LIB_DIR`) and override `DATABASE_PATH`/`PORT`.
@@ -205,7 +205,7 @@ as well.
   are unrestricted, so any worker can open `~/.arbiter/arbiter.sqlite3` and
   decrypt every workspace secret and provider credential.
 - **Token forgery.** `SECRET_KEY_BASE` is the default MCP token-signing key
-  (`apps/arbiter/lib/arbiter/mcp.ex:203-216`: `secret/0` falls back to the
+  (`apps/wardmast/lib/wardmast/mcp.ex:203-216`: `secret/0` falls back to the
   endpoint's `secret_key_base`, which `config/runtime.exs:28` reads from the
   env). With it, a worker can forge any scope token.
 
@@ -215,14 +215,14 @@ Escalated on 2026-09-30 (message `7ea3e0a8`) and filed as **bd-7r0qrj**
 ### 2.4 Every worker gets every provider's credential
 
 This one is by code reading and was not verified live.
-`Credentials.workspace_pairs/1` (`apps/arbiter/lib/arbiter/accounts/credentials.ex:55-61`)
+`Credentials.workspace_pairs/1` (`apps/wardmast/lib/wardmast/accounts/credentials.ex:55-61`)
 returns every active credential of every account linked to the workspace,
 across all providers. The one exception is quota-grant credentials, which it
 leaves out (`:59`). `WorkerEnv.resolve/1` injects all of them. The Claude
 path sets or unsets `CLAUDE_CODE_OAUTH_TOKEN` explicitly, but agy's and
 Codex's `spawn_env/1` don't:
-- `apps/arbiter/lib/arbiter/agents/gemini.ex:231-256`
-- `apps/arbiter/lib/arbiter/agents/codex.ex:288-293`, which sets only
+- `apps/wardmast/lib/wardmast/agents/gemini.ex:231-256`
+- `apps/wardmast/lib/wardmast/agents/codex.ex:288-293`, which sets only
   `OPENAI_API_KEY`. So an agy or Codex worker
 in the default workspace receives the Claude setup token. This is also part
 of **G2**.
@@ -238,8 +238,8 @@ of **G2**.
   --public` in bd-80talz.
 - **Anonymous loopback.** `POST /api/mcp/tokens` with no `Authorization`
   header returns a coordinator token
-  (`apps/arbiter_web/lib/arbiter_web/controllers/api/mcp_controller.ex:66-75`
-  with the loopback exemption in `apps/arbiter_web/lib/arbiter_web/plugs/api_auth.ex`).
+  (`apps/wardmast_web/lib/wardmast_web/controllers/api/mcp_controller.ex:66-75`
+  with the loopback exemption in `apps/wardmast_web/lib/wardmast_web/plugs/api_auth.ex`).
   docs/remote-access.md:62-74 keeps this **on purpose**. Its heading reads
   "loopback means the same Unix user", it calls the minting "a deliberate,
   retained trust assumption", and it says a real boundary "would need a
@@ -257,7 +257,7 @@ still holds for the operator's shell and for coordinator sessions.
 Since this was reported, it has been filed as **bd-8381tk** (P1). That
 ticket removes anonymous coordinator minting for everyone, and requires
 operator proof for write-capable tiers. **Landed:** anonymous minting now gets
-403. The operator's proof is `Arbiter.MCP.OperatorSocket`, a Unix socket
+403. The operator's proof is `Wardmast.MCP.OperatorSocket`, a Unix socket
 whose peer is identified by `SO_PEERCRED` and refused if it descends from
 the server or sits in its service cgroup. See
 [../worker-security.md](../worker-security.md#operator-proof-for-token-minting-bd-8381tk).
@@ -268,7 +268,7 @@ the server or sits in its service cgroup. See
 
 A subject is `(provider, model)`: the harness `ClaudeSession` spawns, plus
 the model `ModelFamily.model_for_tier/3` resolves for this dispatch.
-`ModelFamily.classify/2` (`apps/arbiter/lib/arbiter/agents/model_family.ex:72-88`) already maps it to
+`ModelFamily.classify/2` (`apps/wardmast/lib/wardmast/agents/model_family.ex:72-88`) already maps it to
 `{family, pool}`. Tiers are assigned by an ordered list of subject rules. The
 most specific match wins: `model` glob, then `family`, then `provider`. A
 subject that matches no rule is `quarantine`, the fail-safe default.
@@ -303,7 +303,7 @@ Why this key, not the alternatives:
 - **Not per provider only.** Both agy incidents were on agy's economy model,
   `gemini-3.8-flash-low`: bd-80talz, and bd-bxwsvo, which was found in the
   bd-90kjvk trust probe. agy's flagship tier routes to
-  `claude-opus-4-6-thinking` (`apps/arbiter/lib/arbiter/agents/gemini/config.ex:46-51`),
+  `claude-opus-4-6-thinking` (`apps/wardmast/lib/wardmast/agents/gemini/config.ex:46-51`),
   an Anthropic model. Keying trust on the provider alone would give that
   model flash-low's record.
 
@@ -433,7 +433,7 @@ kernel settings were not read.**
 |---|---|---|---|---|---|
 | **E1. Permission-layer host rules** (extend today's `WebFetch(domain:…)` / `Bash(curl *host*)` / agy `read_url` denies into allowlists) | **No.** `python -c`, git, ssh, package managers and flag reordering all get past it. agy's `command()` is a literal prefix and can't match hosts. Codex has no rules at all | Config only | Same as today | Same | **Keep as the second fence** and for readable denials. It is not the boundary |
 | **E2. bwrap `--unshare-net` + an Arbiter filtering CONNECT proxy on per-worker Unix sockets + in-namespace `socat` bridges** | **Yes, once G1 hides the host sockets (§2.1).** The namespace has only `lo`. The only exit is the proxy, and DNS is resolved host-side (probed, §4.3) | Three D3 tickets for agy (G5, G6, G9); G7 and G8 extend it to Claude and Codex. At run time: one `socat` per bridge, **4.2 MB RSS** each (measured), plus a listener per run in the BEAM. A fresh HTTPS connection took a median **~49 ms direct vs ~70 ms proxied** (6 samples each, noisy; the probe proxy was Python). That is negligible next to model-API turns | **Works end to end**: bubblewrap 0.12.0, socat 1.8.1.1 | **Userland present:**<br>- bubblewrap **0.4.0** (BaseOS) runs the same recipe, including `--unshare-net` and the §2.1 tmpfs mounts; the el8 binary was run on the laptop kernel.<br>- socat **1.7.4.1** (AppStream) has the `tcp-listen`, `unix-connect`, `unix-listen` and `proxy` addresses; installation on the EC2 was not checked.<br><br>**Unverified:** the EC2's userns and netns sysctls (bd-8xy1mf's two-host check is still pending). If the self-test fails there, subjects that need egress are ineligible on that host | **Chosen** |
-| **E3. Vendor-native sandboxes** (Claude Code's own sandbox, Codex `workspace-write`, agy `--sandbox`) | **No, not uniformly:**<br>- **Claude.** Claude Code 2.1.285 ships a bwrap `--unshare-net` sandbox with HTTP and SOCKS bridge sockets and a filtering proxy. Its strings include `sandbox.network.httpProxyPort`, `allowUnixSockets`, `allowManagedDomainsOnly` and "Linux HTTP bridge socket". It sandboxes the commands Claude runs, not the CLI process itself, so the CLI's own traffic (the model API, and any in-process fetches) stays outside. This is from binary strings and wasn't run.<br>- **Codex.** Network is on/off only (`apps/arbiter/lib/arbiter/agents/codex.ex:421-432`).<br>- **agy.** `--sandbox` disables its allowlist gate (bd-25ivqe) | Per-vendor config with three semantics to keep in sync. There's no per-worker identity or audit in Arbiter. Nesting it inside Arbiter's jail is untested; the binary's `enableWeakerNestedSandbox` setting suggests nested use needs a weaker mode | Claude's needs bwrap + socat, which are present | Same packages as E2 | **Rejected** as the boundary. It is the same architecture as E2, but per vendor and partial |
+| **E3. Vendor-native sandboxes** (Claude Code's own sandbox, Codex `workspace-write`, agy `--sandbox`) | **No, not uniformly:**<br>- **Claude.** Claude Code 2.1.285 ships a bwrap `--unshare-net` sandbox with HTTP and SOCKS bridge sockets and a filtering proxy. Its strings include `sandbox.network.httpProxyPort`, `allowUnixSockets`, `allowManagedDomainsOnly` and "Linux HTTP bridge socket". It sandboxes the commands Claude runs, not the CLI process itself, so the CLI's own traffic (the model API, and any in-process fetches) stays outside. This is from binary strings and wasn't run.<br>- **Codex.** Network is on/off only (`apps/wardmast/lib/wardmast/agents/codex.ex:421-432`).<br>- **agy.** `--sandbox` disables its allowlist gate (bd-25ivqe) | Per-vendor config with three semantics to keep in sync. There's no per-worker identity or audit in Arbiter. Nesting it inside Arbiter's jail is untested; the binary's `enableWeakerNestedSandbox` setting suggests nested use needs a weaker mode | Claude's needs bwrap + socat, which are present | Same packages as E2 | **Rejected** as the boundary. It is the same architecture as E2, but per vendor and partial |
 | **E4. Host firewall per worker cgroup or UID** (nftables `socket cgroupv2` / `meta skuid` + DNS-derived IP sets) | For TCP and UDP by **IP only**. CDN-fronted hosts (github.com, model APIs) share and rotate IPs, and there is no hostname in the audit trail | Needs root to install rules and a privileged helper for per-worker changes. Each worker also needs its own systemd scope | nftables 1.1.6, cgroup v2 (`cgroup2fs`): feasible **with root** | nftables 1.0.4 (BaseOS). But "RHEL 8 mounts `cgroups-v1` by default" ([Red Hat, RHEL 8 kernel guide](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/8/html/managing_monitoring_and_updating_the_kernel/using-cgroups-v2-to-control-distribution-of-cpu-time-for-applications_managing-monitoring-and-updating-the-kernel)). `socket cgroupv2` needs `systemd.unified_cgroup_hierarchy=1` and a reboot. UID matching needs a second Unix user, which bd-ca7xko rejected because it breaks keyring auth | **Rejected** |
 | **E5. User-mode networking into the namespace** (pasta or slirp4netns) **+ nftables inside the namespace** | Only if the rules are installed before capabilities drop, and it's IP-level again | The tool differs per host. General outbound is the default, so missing rules fail open | pasta (passt 2026-07-28) installed; slirp4netns not installed | slirp4netns 1.2.3 (AppStream, container-tools); **pasta not packaged** | **Rejected** |
 | **E6. Rootless container per worker** (podman, network none + proxy) | Yes (same model as E2) | An image per toolchain, the keyring passed into the container, UID mapping on binds. Heavier start-up | podman installed | container-tools module: slirp4netns 1.2.3 present; podman itself not queried | **Rejected**, as in bd-ca7xko (2''): it duplicates what bwrap does with one binary. **Revisited 2026-10-02** in [podman-worker-containers.md](podman-worker-containers.md) (bd-jk49nc), which proposes it as a second backend for Claude and Codex |
@@ -494,7 +494,7 @@ run covered each one. The allowlist was `example.com:443` and
   Matching is by exact host:port. A leading `*.` wildcard is allowed only in
   baselines the operator writes, never in ticket grants: `*.googleapis.com`
   would include signed-URL uploads to Cloud Storage. The
-  `:no_public_upload` hosts (`apps/arbiter/lib/arbiter/agents/security_policy.ex:216-248`) are denied at the
+  `:no_public_upload` hosts (`apps/wardmast/lib/wardmast/agents/security_policy.ex:216-248`) are denied at the
   proxy even when granted. Only a workspace `safe_defaults_exclude` can lift
   that, which is the same rule the permission layer follows.
 - **DNS happens on the host.** Clients send `CONNECT host:port`, and nothing
@@ -565,9 +565,9 @@ the posture shows it.
   canonical (lower-case host, explicit port), sorted and de-duplicated. A
   trailing `?` marks a permission optional (§5.7), e.g. `network?:status.example.com`.
   The migration follows
-  `apps/arbiter/priv/repo/migrations/20260930071903_add_reviewer_family_fields.exs`,
+  `apps/wardmast/priv/repo/migrations/20260930071903_add_reviewer_family_fields.exs`,
   and `{:array, :text}` has precedent in
-  `apps/arbiter/priv/repo/migrations/20260808062000_add_loop_pending_writes.exs:45`.
+  `apps/wardmast/priv/repo/migrations/20260808062000_add_loop_pending_writes.exs:45`.
 - **`permission_events`** (append-only), with these fields:
   - `issue_id`, `permission`
   - `event`: one of `declared`, `defaulted`, `suggested`, `requested`,
@@ -591,7 +591,7 @@ the posture shows it.
 
 1. **Workspace and repo defaults, at creation.** A `ResolvePermissions`
    change runs on every create path, the way `ResolveRepo` does
-   (`apps/arbiter/lib/arbiter/tasks/issue.ex:212-215`). It records `defaulted` events. For example,
+   (`apps/wardmast/lib/wardmast/tasks/issue.ex:212-215`). It records `defaulted` events. For example,
    `guardrails.repos.tonic.defaults.permissions: ["phi_data"]`, and the same
    for `tonic_device`, makes every emricare tonic ticket carry `phi_data`
    without anyone remembering to add it.
@@ -699,7 +699,7 @@ worktree is bound read-only, as agy's reviews already are.
 | Situation | Outcome | Recorded as |
 |---|---|---|
 | Some subjects are eligible, but every eligible pool is quota-held, auth-expired, circuit-broken or at capacity | **Hold** in the existing `DispatchQueue`, which drains on `quota_updated`. **No fallback to an ineligible subject**, ever | The hold reason names both sides, e.g. "eligible: claude/default (quota_held: 7d 0.99, resets 16:00Z); ineligible: antigravity (prod_read needs privileged, tier probation)" |
-| No subject is eligible at all | This is not a quota problem, so waiting can't fix it. A card-specific hold `{:guardrail, reason}` goes into `Lifecycle.Dispatchable`; like other card holds it doesn't advance the queue (`apps/arbiter/lib/arbiter/board/scheduler.ex:224-227`). A new attention cause `:no_eligible_model` goes to the coordinator | Attention cause plus a board card reason |
+| No subject is eligible at all | This is not a quota problem, so waiting can't fix it. A card-specific hold `{:guardrail, reason}` goes into `Lifecycle.Dispatchable`; like other card holds it doesn't advance the queue (`apps/wardmast/lib/wardmast/board/scheduler.ex:224-227`). A new attention cause `:no_eligible_model` goes to the coordinator | Attention cause plus a board card reason |
 | Only an **optional** permission (`network?:…`) blocks every available eligible subject | Dispatch **without** the optional permission on the best available subject. The worker is told it was withheld, and may request it | `guardrail_decision.permission_fallback: [...]` with its reason, shown in `worker_show` and on the task page. This mirrors bd-a1ke2c's `same_family_fallback`. A binding may forbid it (`optional_allowed: false`), and data classes and prod permissions are never optional |
 | A **review** of a `phi_data` ticket where only the implementer's family is eligible | A same-family review, through bd-a1ke2c's existing fallback: `guardrail_ineligible` joins its fallback triggers | `same_family_fallback: true`, reason "no other family eligible: google (phi_data: account has no agreement)" |
 | A review where no family is eligible, or the implementer's profile says `same_family_fallback: :hold` | The review **holds** | The ReviewGate round is not started. The attention cause names the reason |
@@ -713,7 +713,7 @@ hard ceiling. It applies only to quota lines and **never** to eligibility.
 
 | Event | Source | Severity |
 |---|---|---|
-| Egress attempt, or permission-layer attempt, at a public upload/paste host | Proxy (new, G5).<br>- **agy, today:** a tool step that fails with "permission check failed" is recognised in-session. That covers explicit denies and `:strict` auto-denials (`permission_denial?/1`, `apps/arbiter/lib/arbiter/worker/claude_session.ex:1157-1160`), and the error step is kept in `worker_run_steps`. Nothing turns it into a per-run event yet (G17). `result.denied_actions` (`:977-983`) only flags a soft-deny that ended the turn.<br>- **Claude:** `permission_denials` is not parsed today (G17) | **critical** |
+| Egress attempt, or permission-layer attempt, at a public upload/paste host | Proxy (new, G5).<br>- **agy, today:** a tool step that fails with "permission check failed" is recognised in-session. That covers explicit denies and `:strict` auto-denials (`permission_denial?/1`, `apps/wardmast/lib/wardmast/worker/claude_session.ex:1157-1160`), and the error step is kept in `worker_run_steps`. Nothing turns it into a per-run event yet (G17). `result.denied_actions` (`:977-983`) only flags a soft-deny that ended the turn.<br>- **Claude:** `permission_denials` is not parsed today (G17) | **critical** |
 | Fabricated or falsified evidence finding | `EvidenceIntegrity` (exists) | **critical** |
 | Reaching for an escape or a token: executed commands such as `systemd-run`, `busctl`, `secret-tool` or `gh auth token` | A scan of *executed* tool inputs in the run transcript (new, G17): shell commands and agy `run_command` calls, not prose. After G1 these calls fail, but trying is the signal | **critical** |
 | Reading credential dirs or the install DB (`~/.ssh`, `~/.aws`, `arbiter.sqlite3`, …) | Same scan | major |
@@ -776,7 +776,7 @@ It may not promote, and it may not raise a binding's `grant_by` authority or
 a workspace cap.
 
 "Operator-only" needs an authority Arbiter doesn't have yet. MCP has worker,
-coordinator and refine tiers (`apps/arbiter/lib/arbiter/mcp/scope.ex:81`), and the coordinator can
+coordinator and refine tiers (`apps/wardmast/lib/wardmast/mcp/scope.ex:81`), and the coordinator can
 already rewrite `agent.security` through `workspace_config_set`. This design
 proposes:
 
@@ -804,7 +804,7 @@ Yes, the Loop can compute it, reusing the existing substrate:
 - **`Loop.SubjectStats`** holds per-(provider, model, difficulty, issue_type)
   aggregates over `worker_runs`, `review_gate_rounds` and `usage_events`. It
   uses the same raw `Repo.query!` discipline as `Loop.Canary.Metrics`
-  (`apps/arbiter/lib/arbiter/loop/canary/metrics.ex`), and adds the new `guardrail_events`. It is
+  (`apps/wardmast/lib/wardmast/loop/canary/metrics.ex`), and adds the new `guardrail_events`. It is
   **shared with bd-9ck2a7's competence model**, so round-1 approve per
   subject is computed once, with two consumers.
 - **`Loop.Trust`** runs on the canary ticker. It:
@@ -827,8 +827,8 @@ from work the subject was already allowed to do.
 
 | Layer | What | Store | Who may loosen | Who may tighten |
 |---|---|---|---|---|
-| Code | Tier bundles (defaults), the permission vocabulary, default `min_tier` and `grant_by` | `Arbiter.Guardrails` | release | release |
-| Installation, app env | Tier-bundle overrides, like `:worker_security_policy` today | `config :arbiter, :guardrail_tiers` | operator | operator |
+| Code | Tier bundles (defaults), the permission vocabulary, default `min_tier` and `grant_by` | `Wardmast.Guardrails` | release | release |
+| Installation, app env | Tier-bundle overrides, like `:worker_security_policy` today | `config :wardmast, :guardrail_tiers` | operator | operator |
 | Installation, DB | Subject rules (tier, scope, overrides, pin), trust events, trust records | `guardrail_subjects`, `trust_events`, `trust_records` | **operator** | operator, coordinator, system (demotion) |
 | Account | Data agreements (`phi_data`) | a new field on `provider_accounts`, or installation config | operator | operator, coordinator |
 | Workspace config | Bindings, ticket defaults, subject caps | `config.guardrails` (new top-level key, validated by `ValidateConfig`) | **operator** | coordinator |
@@ -889,7 +889,7 @@ proj    = Guardrails.projection(ticket.permissions, role, profile, bindings)   #
 ### 7.3 Doctor and posture
 
 `arb server doctor` checks are `ok`/`fail`, with non-fatal fails used for
-advisories (`apps/arbiter_cli/lib/arbiter_cli/cmd/doctor/checks.ex:10-22`). The proposed new checks are below.
+advisories (`apps/wardmast_cli/lib/wardmast_cli/cmd/doctor/checks.ex:10-22`). The proposed new checks are below.
 These are check *definitions*, not captured output:
 
 | Check | Passes when | Fails (non-fatal unless noted) when |
@@ -917,14 +917,14 @@ shows `permissions` with their provenance, plus each run's
 | Concern | Owner | Mechanism, with no duplication |
 |---|---|---|
 | Which accounts may serve a role in a workspace | bd-64apru / bd-40pzpj (shipped) | Role positions on `workspace_provider_accounts` |
-| **Hard eligibility for security and trust**: tier, ticket permissions, data classes, the `max_difficulty` ceiling, `scope` | **this design** | One more check, `check_guardrails`, in `ProviderRouting.check/2` (`apps/arbiter/lib/arbiter/agents/provider_routing.ex:594-604`). The drop reason is `guardrail_ineligible` with detail. It is mirrored in `ReviewerRouting`'s candidate checks |
+| **Hard eligibility for security and trust**: tier, ticket permissions, data classes, the `max_difficulty` ceiling, `scope` | **this design** | One more check, `check_guardrails`, in `ProviderRouting.check/2` (`apps/wardmast/lib/wardmast/agents/provider_routing.ex:594-604`). The drop reason is `guardrail_ineligible` with detail. It is mirrored in `ReviewerRouting`'s candidate checks |
 | Hard eligibility for functional capability: resume, async reliability, CLI under `:strict` | bd-9ck2a7 (its capability matrix, Insight 7) | The **same** `check/2` pipeline, with its own drop reason. It uses a separate data source because it answers a separate question |
 | Write confinement under `:strict` | bd-1abj7u (shipped) | The existing `write_confinement_none` drop. A `strict` floor reuses it |
 | Ranking among eligible accounts | bd-40pzpj (headroom), then bd-9ck2a7 (scarcity and competence) | The rank step, over survivors only |
 | Blast-radius floor (bd-9ck2a7 Insight 8) | **this design** supplies it | Ticket permissions plus the tier's `max_difficulty`. bd-9ck2a7 consumes `Guardrails.eligible?/5` instead of defining its own floor |
 | Exploration and offline replay (bd-9ck2a7 Insight 9) | bd-9ck2a7 / Loop canary | It explores **within** eligibility only. Replay jobs run under the subject's profile like any dispatch |
 | "Block when every eligible pool is over its line" (bd-9ck2a7 notes, gate ↔ router) | Quota gate / DispatchQueue | "Eligible" now includes guardrails, so §5.7's hold is that same statement. Nothing new is needed |
-| Reviewer family diversity | bd-a1ke2c (shipped) | Unchanged. Guardrails add:<br>- data-class eligibility for reviewers;<br>- `guardrail_ineligible` in `@fallback_triggers` (`apps/arbiter/lib/arbiter/agents/reviewer_routing.ex:104-105`);<br>- the profile's `review` knobs (force cross-family, hold instead of fallback, minimum reviewer tier) |
+| Reviewer family diversity | bd-a1ke2c (shipped) | Unchanged. Guardrails add:<br>- data-class eligibility for reviewers;<br>- `guardrail_ineligible` in `@fallback_triggers` (`apps/wardmast/lib/wardmast/agents/reviewer_routing.ex:104-105`);<br>- the profile's `review` knobs (force cross-family, hold instead of fallback, minimum reviewer tier) |
 | The implementer pin and its fallback | bd-40pzpj (shipped) | Reused when a mid-run grant makes the pinned subject ineligible (§5.6) |
 | Round-1 approve per subject | bd-9ck2a7 (competence) and this design (trust quality) | **One** `Loop.SubjectStats`, with two consumers (§6.5) |
 | Codex under a jail | bd-99emmd | The same jail (G8). bd-99emmd's deny-category translation stays its own work |
@@ -952,14 +952,14 @@ before it. Each ticket's type is one of:
 | G3 | Jail: hide sensitive read paths (credential dirs, the install DB, the durable log root, other workspaces' repo paths and worktree roots) | 2 | G1 | jail |
 | **Phase 1: egress** | | | | |
 | G4 | Spike: run claude, agy and codex behind `--unshare-net` plus the proxy in learn mode, on the laptop and on the RHEL 8 EC2. Record the infra host set per CLI, whether proxy env is honoured (Bun, agy, Rust), keyring and auth behaviour, and each workspace's loopback test dependencies. Needs operator-approved quota | 2 | G1 | net (spike) |
-| G5 | `Arbiter.Worker.Egress`: host-side filtering CONNECT proxy on per-run Unix sockets. Host:port policy with live grants, the public-upload hard deny, an `egress_events` table and migration, learn and enforce modes | 3 | — | net |
+| G5 | `Wardmast.Worker.Egress`: host-side filtering CONNECT proxy on per-run Unix sockets. Host:port policy with live grants, the public-upload hard deny, an `egress_events` table and migration, learn and enforce modes | 3 | — | net |
 | G6 | agy jail network mode: `--unshare-net`, in-namespace socat bridges (proxy, Arbiter, fixed-destination tunnels), proxy env, git-over-SSH `ProxyCommand` in the jail's `GIT_SSH_COMMAND` | 3 | G1, G4, G5 | jail + net |
 | G7 | Claude under the jail, for the first time, with network mode. Covers the `CLAUDE_CONFIG_DIR` bind, token env, and the MCP and `arb` bridges | 3 | G6 | jail + net |
 | G8 | Codex under the jail with network mode. Fold into bd-99emmd or run as its sibling | 3 | G6, bd-99emmd | jail + net |
 | G9 | Arbiter bridge identity: every request arriving through a worker bridge is that worker's scope and never anonymous loopback. Token minting is refused through a bridge. bd-8381tk (filed, P1) removes anonymous coordinator minting for everyone; this ticket covers only the jailed worker's bridge | 3 | G6, bd-8381tk | net |
 | G10 | `SecurityPolicy` `sandbox.egress` (`open`/`allowlist`/`none`) and `sandbox.allow_hosts`, with their layering. Posture fields and the doctor "egress jail" self-test against a local stand-in | 2 | G5, G6 | config + net |
 | **Phase 2: profiles and ticket permissions** | | | | |
-| G11 | **Implemented (bd-anwb0u); see [worker-security](../worker-security.md#guardrail-profiles-tiers-the-floor-and-who-may-loosen-bd-anwb0u-g11).** `Arbiter.Guardrails`: tier bundles (code plus app env), the `guardrail_subjects` table, the workspace `guardrails` block with `ValidateConfig`, pure `effective/3` and `floor/2` wired after `SecurityPolicy.resolve/3`, and `egress_confinement/1`. Loosening edits to `guardrails.*` and `agent.security` become operator-only; the coordinator keeps tighten-only edits. Doctor checks | 3 | G10 | config |
+| G11 | **Implemented (bd-anwb0u); see [worker-security](../worker-security.md#guardrail-profiles-tiers-the-floor-and-who-may-loosen-bd-anwb0u-g11).** `Wardmast.Guardrails`: tier bundles (code plus app env), the `guardrail_subjects` table, the workspace `guardrails` block with `ValidateConfig`, pure `effective/3` and `floor/2` wired after `SecurityPolicy.resolve/3`, and `egress_confinement/1`. Loosening edits to `guardrails.*` and `agent.security` become operator-only; the coordinator keeps tighten-only edits. Doctor checks | 3 | G10 | config |
 | G12 | Ticket `permissions` field, the `permission_events` table, `ResolvePermissions` defaults at creation, and surfaces (CLI `--permission`, REST, MCP coordinator-only). `grant_by` authority. Refine suggests but never grants | 3 | G11 | schema |
 | G13 | **Implemented (bd-atll60); see [worker-security](../worker-security.md#routing-eligibility-from-guardrails-bd-atll60-g13).** Routing eligibility:<br>- `check_guardrails` in `ProviderRouting` and `ReviewerRouting`, plus `guardrail_ineligible` as a fallback trigger<br>- the profile `review` knobs<br>- a hard gate on explicit and legacy (`agent.type` failover) dispatch paths<br>- the DispatchQueue guardrail hold, the `{:guardrail, _}` card hold, and the `:no_eligible_model` attention cause<br>- `guardrail_decision` on runs | 3 | G11, G12 | routing |
 | G14 | **Implemented (bd-ld8qde); see [worker-security](../worker-security.md#dispatch-time-withholding-undeclared-means-withheld-bd-ld8qde-g14).** Dispatch-time withholding: project grants into env, jail mounts (a per-worker `ssh-agent` for `prod_ssh`), proxy allowlist and MCP claims. Adds the worker prompt PERMISSIONS block | 3 | G2, G3, G7, G12 | env + jail + net |
@@ -1064,7 +1064,7 @@ Results are in §4.3. Raw lines from the el8 run:
     el8 bwrap 0.4.0 exit=0
     HOST CHECK: ls: cannot access '/tmp/bd8apkz6/escape-marker-E': No such file or directory
 
-**§2.1 escape** (the argv printed by `Arbiter.Worker.Jail.argv/2`, then run):
+**§2.1 escape** (the argv printed by `Wardmast.Worker.Jail.argv/2`, then run):
 
     jail exit: 0
     stdout: systemd-run-exit=0

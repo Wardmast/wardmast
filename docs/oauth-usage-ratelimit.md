@@ -19,7 +19,7 @@ during quota polling integration.
   access token lasts about 8h and only refreshes while a `claude` process
   runs against it (see "Dedicated quota grant" below for what refreshes it
   and how Arbiter now keeps its own grant alive). When it expires (401) or the file disappears,
-  `Arbiter.Quota.CloudProbe` escalates once, after 3 failed cycles, naming
+  `Wardmast.Quota.CloudProbe` escalates once, after 3 failed cycles, naming
   the lapsed interactive login and the fix (run `claude` on the host) — when
   workers run on their own token. With no worker token anywhere, workers are
   seeded that same file, so a 401 is treated as a worker-credential expiry
@@ -30,7 +30,7 @@ during quota polling integration.
   with 429.
 
 - **`retry-after: 0` header is uninformative.** Do not trust it for cooldown
-  timing. `Arbiter.Quota.OAuthUsage` never lets a `Retry-After` shorten its
+  timing. `Wardmast.Quota.OAuthUsage` never lets a `Retry-After` shorten its
   cooldown below the default (one CloudProbe cycle plus 30 s, `cooldown_ms/0`);
   a longer delay-seconds value does lengthen it, up to one hour
   (`max_cooldown_ms/0`) — see "Implications" below.
@@ -40,8 +40,8 @@ during quota polling integration.
 The poll can authenticate with a Claude grant of its own instead of the
 operator's interactive login: the operator logs in once into a separate config
 dir, the account references that dir by **path** (a `cli_credentials_path`
-credential), `Arbiter.Quota` re-reads the access token from the file on every
-poll, and `Arbiter.Quota.GrantRefresher` has the `claude` CLI refresh it before
+credential), `Wardmast.Quota` re-reads the access token from the file on every
+poll, and `Wardmast.Quota.GrantRefresher` has the `claude` CLI refresh it before
 it expires. Arbiter never calls the OAuth token endpoint and never stores the
 grant's tokens.
 
@@ -141,7 +141,7 @@ grant ~/.claude/.credentials.json
 
 - **P1: does the refresher's argv renew?** Right after the dedicated grant's
   `expiresAt` passes (it is ~8h after login), look for the server log line
-  `Arbiter.Quota.GrantRefresher: renewed ~/.arbiter/quota-claude/.credentials.json`,
+  `Wardmast.Quota.GrantRefresher: renewed ~/.arbiter/quota-claude/.credentials.json`,
   and run `grant` on the file. The expected result is that `expiresAt` jumped
   about 8h later and `refreshToken#` changed. A failure shows up as the
   escalation "Anthropic quota grant needs re-login — …" instead. Record the
@@ -188,12 +188,12 @@ The endpoint returns quota data as JSON with these keys. They map to the
 ## Implications
 
 Because this endpoint rate-limits per account and refills slowly (~1 req/5min),
-it is the primary constraint on quota polling. `Arbiter.Quota.CloudProbe` runs
+it is the primary constraint on quota polling. `Wardmast.Quota.CloudProbe` runs
 once per cycle per provider account (not per-workspace), authenticating with
 the account's dedicated quota grant when it has one, and otherwise with the
 operator's credentials-file token. Only these interactive-login grants work.
 
-When a 429 occurs, `Arbiter.Quota.OAuthUsage.fetch/1` cools down so that the
+When a 429 occurs, `Wardmast.Quota.OAuthUsage.fetch/1` cools down so that the
 next scheduled CloudProbe poll is skipped rather than sent into the same empty
 bucket (#1876 — the old fixed 180s cooldown lapsed before the 300s poll and
 never skipped anything):
@@ -206,10 +206,10 @@ never skipped anything):
 
 A 429 therefore costs two polls, and the next successful poll can land about
 900s after the last one. The gate's staleness margin for a polled row
-(1200s, `Arbiter.Quota.Gate.staleness_threshold_seconds/1`) absorbs that
+(1200s, `Wardmast.Quota.Gate.staleness_threshold_seconds/1`) absorbs that
 without failing the gating window open (the 7d window for Claude). A longer blackout — a second 429 in a row,
 a long `Retry-After`, a lapsed credential — ages the snapshot past that
-margin; once it is older than 30 minutes, `Arbiter.Quota.StalenessWatch`
+margin; once it is older than 30 minutes, `Wardmast.Quota.StalenessWatch`
 raises an operator alert that quota accounting is blind.
 
 The header-capture source (`anthropic-ratelimit-unified-*` from worker responses)

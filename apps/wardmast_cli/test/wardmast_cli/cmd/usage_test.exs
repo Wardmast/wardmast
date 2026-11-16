@@ -1,0 +1,637 @@
+defmodule WardmastCli.Cmd.UsageTest do
+  @moduledoc """
+  bd-3j4ch4 AC4: `arb usage --calibration` renders the mis-rating report.
+  """
+
+  use WardmastCli.CliCase, async: false
+
+  @report %{
+    "window_days" => 60,
+    "re_dispatched_flagged" => 1,
+    "tiers" => [
+      %{
+        "difficulty" => 1,
+        "n" => 10,
+        "re_dispatched" => 0,
+        "n_scored" => 10,
+        "p25" => 3.0,
+        "median" => 5.0,
+        "p75" => 8.0,
+        "p90" => 9.0,
+        "under_rated" => 0,
+        "over_rated" => 0,
+        "under_rate" => 0.0,
+        "over_rate" => 0.0
+      },
+      %{
+        "difficulty" => 2,
+        "n" => 13,
+        "re_dispatched" => 1,
+        "n_scored" => 12,
+        "p25" => 13.0,
+        "median" => 16.0,
+        "p75" => 19.0,
+        "p90" => 25.0,
+        "under_rated" => 1,
+        "over_rated" => 1,
+        "under_rate" => 1 / 12,
+        "over_rate" => 1 / 12
+      }
+    ],
+    "flagged" => [
+      %{
+        "task_id" => "bd-under1",
+        "title" => "looks like a D3",
+        "difficulty" => 2,
+        "issue_type" => "feature",
+        "actual_cost_usd" => 25.0,
+        "direction" => "under_rated",
+        "suggested_difficulty" => 3,
+        "re_dispatched" => false
+      },
+      %{
+        "task_id" => "bd-reslung",
+        "title" => "re-slung, not mis-rated",
+        "difficulty" => 2,
+        "issue_type" => "feature",
+        "actual_cost_usd" => 26.0,
+        "direction" => "under_rated",
+        "suggested_difficulty" => 3,
+        "re_dispatched" => true
+      },
+      %{
+        "task_id" => "bd-over1",
+        "title" => "looks like a D1",
+        "difficulty" => 2,
+        "issue_type" => "chore",
+        "actual_cost_usd" => 5.0,
+        "direction" => "over_rated",
+        "suggested_difficulty" => 1,
+        "re_dispatched" => false
+      }
+    ]
+  }
+
+  describe "arb usage --calibration" do
+    test "prints per-tier rates and both mis-rating directions" do
+      stub_get("/api/usage/calibration", @report)
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Usage.run(["--calibration"]) end)
+
+      assert code == 0
+      assert out =~ "Cost calibration"
+      assert out =~ "60-day window"
+
+      # Per-tier rates.
+      assert out =~ "D2"
+      assert out =~ "$13.00"
+      assert out =~ "$19.00"
+      assert out =~ "8.3%"
+
+      # Both directions are listed, with the suggested tier.
+      assert out =~ "under-rated"
+      assert out =~ "over-rated"
+      assert out =~ "bd-under1"
+      assert out =~ "bd-over1"
+      assert out =~ "D2 -> D3"
+      assert out =~ "D2 -> D1"
+    end
+
+    test "footnotes the re-dispatched tasks it kept out of the rates" do
+      stub_get("/api/usage/calibration", @report)
+
+      {out, _err, 0} = capture(fn -> WardmastCli.Cmd.Usage.run(["--calibration"]) end)
+
+      assert out =~ "bd-reslung"
+      assert out =~ "re-dispatched"
+      # The marker on the row itself, so the table is readable without the
+      # footnote.
+      assert out =~ "*"
+    end
+
+    test "--json emits the raw report" do
+      stub_get("/api/usage/calibration", @report)
+
+      {out, _err, 0} =
+        capture(fn -> WardmastCli.Cmd.Usage.run(["--calibration", "--json"]) end)
+
+      assert {:ok, decoded} = Jason.decode(out)
+      assert decoded["window_days"] == 60
+      assert length(decoded["flagged"]) == 3
+    end
+
+    test "an empty report says so rather than printing an empty table" do
+      stub_get("/api/usage/calibration", %{
+        "window_days" => 60,
+        "re_dispatched_flagged" => 0,
+        "tiers" => [],
+        "flagged" => []
+      })
+
+      {out, _err, 0} = capture(fn -> WardmastCli.Cmd.Usage.run(["--calibration"]) end)
+
+      assert out =~ "no rated closed tasks"
+    end
+  end
+
+  describe "arb usage (summarize)" do
+    test "renders rollup rows in text mode" do
+      stub_get("/api/usage", %{
+        "by" => "day",
+        "data" => [
+          %{
+            "group" => "2026-06-01",
+            "rows" => 2,
+            "total_cost_usd" => 1.2345,
+            "tokens_in" => 1000,
+            "tokens_out" => 500,
+            "cache_creation_tokens" => 10,
+            "cache_read_tokens" => 20,
+            "duration_ms" => 12_500
+          }
+        ]
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Usage.run([]) end)
+      assert code == 0
+      assert out =~ "Usage rollup by day"
+      assert out =~ "2026-06-01"
+      assert out =~ "1.2345"
+      assert out =~ "1000"
+    end
+
+    test "--json mode emits the raw payload" do
+      stub_get("/api/usage", %{"by" => "task", "data" => [%{"group" => "bd-1", "rows" => 1}]})
+
+      {out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Usage.run(["--by", "task", "--json"]) end)
+
+      assert code == 0
+      decoded = Jason.decode!(out)
+      assert decoded["by"] == "task"
+    end
+
+    test "empty results say so" do
+      stub_get("/api/usage", %{"by" => "day", "data" => []})
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Usage.run([]) end)
+      assert code == 0
+      assert out =~ "(no usage rows for --by day)"
+    end
+
+    # bd-481sz7: agy/Antigravity never reports cost (subscription, metered by
+    # quota %, not dollars) — a group whose rows are entirely agy must render
+    # the cost column as "n/a", never "$0.0000", which would read as "this
+    # session was free" rather than "cost is unknowable for this provider".
+    test "a group with no known cost renders the cost column as n/a, not $0.0000" do
+      stub_get("/api/usage", %{
+        "by" => "model",
+        "data" => [
+          %{
+            "group" => "gemini-3.8-flash-low",
+            "rows" => 2,
+            "total_cost_usd" => nil,
+            "tokens_in" => 4000,
+            "tokens_out" => 250,
+            "cache_creation_tokens" => 0,
+            "cache_read_tokens" => 0,
+            "duration_ms" => 5_000
+          }
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Usage.run(["--by", "model"]) end)
+
+      assert code == 0
+      row_line = out |> String.split("\n") |> Enum.find(&(&1 =~ "gemini-3.8-flash-low"))
+      assert row_line =~ "n/a"
+      refute row_line =~ "0.0000"
+    end
+
+    # bd-481sz7 round 2, finding 3: the totals footer folded a nil
+    # `total_cost_usd` to 0.0 before formatting, so an all-agy rollup's
+    # "-- total: $0.0000" line contradicted the "n/a" cost column right above
+    # it — the exact "this looks free" misreport this ticket removes.
+    test "the totals footer renders n/a, not $0.0000, when every group is unpriced" do
+      stub_get("/api/usage", %{
+        "by" => "model",
+        "data" => [
+          %{
+            "group" => "gemini-3.8-flash-low",
+            "rows" => 2,
+            "total_cost_usd" => nil,
+            "tokens_in" => 4000,
+            "tokens_out" => 250,
+            "cache_creation_tokens" => 0,
+            "cache_read_tokens" => 0,
+            "duration_ms" => 5_000
+          },
+          %{
+            "group" => "claude-opus-4-6-thinking",
+            "rows" => 1,
+            "total_cost_usd" => nil,
+            "tokens_in" => 1000,
+            "tokens_out" => 100,
+            "cache_creation_tokens" => 0,
+            "cache_read_tokens" => 0,
+            "duration_ms" => 1_000
+          }
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Usage.run(["--by", "model"]) end)
+
+      assert code == 0
+      total_line = out |> String.split("\n") |> Enum.find(&(&1 =~ "-- total:"))
+      assert total_line =~ "n/a"
+      refute total_line =~ "0.0000"
+    end
+
+    test "the totals footer still renders a priced total when at least one group has cost" do
+      stub_get("/api/usage", %{
+        "by" => "model",
+        "data" => [
+          %{
+            "group" => "gemini-3.8-flash-low",
+            "rows" => 1,
+            "total_cost_usd" => nil,
+            "tokens_in" => 4000,
+            "tokens_out" => 250,
+            "cache_creation_tokens" => 0,
+            "cache_read_tokens" => 0,
+            "duration_ms" => 5_000
+          },
+          %{
+            "group" => "claude-sonnet-5",
+            "rows" => 1,
+            "total_cost_usd" => 0.02,
+            "tokens_in" => 1000,
+            "tokens_out" => 100,
+            "cache_creation_tokens" => 0,
+            "cache_read_tokens" => 0,
+            "duration_ms" => 1_000
+          }
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Usage.run(["--by", "model"]) end)
+
+      assert code == 0
+      total_line = out |> String.split("\n") |> Enum.find(&(&1 =~ "-- total:"))
+      assert total_line =~ "$0.0200"
+      refute total_line =~ "n/a"
+    end
+  end
+
+  describe "arb usage --by session" do
+    test "renders one row per session" do
+      stub_get("/api/usage", %{
+        "by" => "session",
+        "data" => [
+          %{
+            "group" => "sess-abc123",
+            "rows" => 4,
+            "total_cost_usd" => 9.7842,
+            "tokens_in" => 42_000,
+            "tokens_out" => 18_500,
+            "cache_creation_tokens" => 100,
+            "cache_read_tokens" => 900,
+            "duration_ms" => 3_600_000
+          }
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Usage.run(["--by", "session"]) end)
+
+      assert code == 0
+      assert out =~ "Usage rollup by session"
+      assert out =~ "sess-abc123"
+      assert out =~ "9.7842"
+    end
+  end
+
+  describe "arb usage --session <id>" do
+    test "shows that session's events, drilling into /api/usage/events" do
+      stub_get("/api/usage/events", %{
+        "data" => [
+          %{
+            "id" => "x",
+            "task_id" => nil,
+            "source" => "coordinator_session",
+            "session_id" => "sess-abc123",
+            "step" => "other",
+            "model" => "claude-opus-4-7",
+            "cost_usd" => 5.0,
+            "tokens_in" => 20_000,
+            "tokens_out" => 9_000,
+            "duration_ms" => 1_800_000,
+            "occurred_at" => "2026-09-10T12:00:00Z"
+          }
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Usage.run(["--session", "sess-abc123"]) end)
+
+      assert code == 0
+      assert out =~ "Usage events (1)"
+      assert out =~ "session=sess-abc123"
+      assert out =~ "source=coordinator_session"
+    end
+
+    test "`arb usage events --session <id>` also passes the session filter through" do
+      stub_routes([
+        {{"get", "/api/usage/events"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           assert conn.query_params["session_id"] == "sess-abc123"
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => []})
+         end}
+      ])
+
+      {out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Usage.run(["events", "--session", "sess-abc123"]) end)
+
+      assert code == 0
+      assert out =~ "(no usage events)"
+    end
+
+    test "`--session` with no value errors instead of silently falling back to --by day" do
+      {_out, err, code} = capture(fn -> WardmastCli.Cmd.Usage.run(["--session"]) end)
+
+      assert code != 0
+      assert err =~ "--session requires an id"
+    end
+
+    test "passes --workspace through to the drill-down, like `events` does" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {%{"data" => [%{"id" => "ws-1", "name" => "acme"}]}, 200}},
+        {{"get", "/api/usage/events"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           assert conn.query_params["session_id"] == "sess-abc123"
+           assert conn.query_params["workspace_id"] == "ws-1"
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => []})
+         end}
+      ])
+
+      {out, err, code} =
+        capture(fn ->
+          WardmastCli.Cmd.Usage.run(["--session", "sess-abc123", "--workspace", "acme"])
+        end)
+
+      assert code == 0, "exit #{code}: #{err}"
+      assert out =~ "(no usage events)"
+    end
+  end
+
+  describe "arb usage events" do
+    test "lists one line per event in text mode" do
+      stub_get("/api/usage/events", %{
+        "data" => [
+          %{
+            "id" => "x",
+            "task_id" => "bd-1",
+            "step" => "work",
+            "model" => "claude-opus-4-7",
+            "cost_usd" => 0.4321,
+            "tokens_in" => 1000,
+            "tokens_out" => 200,
+            "duration_ms" => 30_000,
+            "occurred_at" => "2026-06-01T12:00:00Z"
+          }
+        ]
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Usage.run(["events"]) end)
+      assert code == 0
+      assert out =~ "Usage events (1)"
+      assert out =~ "bd-1"
+      assert out =~ "claude-opus-4-7"
+      assert out =~ "0.4321"
+    end
+  end
+
+  describe "source discriminator (bd-adyhvn)" do
+    test "--by source renders the whole-bill split" do
+      stub_get("/api/usage", %{
+        "by" => "source",
+        "data" => [
+          %{"group" => "task", "rows" => 10, "total_cost_usd" => 12.5},
+          %{"group" => "probe", "rows" => 243, "total_cost_usd" => 3.08},
+          %{"group" => "preflight", "rows" => 322, "total_cost_usd" => 2.05}
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Usage.run(["--by", "source"]) end)
+
+      assert code == 0
+      assert out =~ "Usage rollup by source"
+      assert out =~ "probe"
+      assert out =~ "preflight"
+      assert out =~ "3.08"
+    end
+
+    test "events --source is forwarded to the API as a query param" do
+      pid = self()
+
+      stub_routes([
+        {{"get", "/api/usage/events"},
+         fn conn ->
+           send(pid, {:query, conn.query_string})
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => []})
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Usage.run(["events", "--source", "probe"]) end)
+
+      assert code == 0
+      assert_receive {:query, query}
+      assert query =~ "source=probe"
+    end
+
+    test "a task-less event line shows its source and a dash for the task" do
+      stub_get("/api/usage/events", %{
+        "data" => [
+          %{
+            "occurred_at" => "2026-09-12T10:00:00Z",
+            "source" => "probe",
+            "task_id" => nil,
+            "step" => "other",
+            "model" => "claude-opus-5",
+            "cost_usd" => 0.25,
+            "tokens_in" => 4,
+            "tokens_out" => 7,
+            "duration_ms" => 1200
+          }
+        ]
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Usage.run(["events"]) end)
+
+      assert code == 0
+      assert out =~ "source=probe"
+      assert out =~ "task=-"
+    end
+  end
+
+  describe "account dimension (P10, bd-icwk2k)" do
+    test "--by provider_account renders the account rollup" do
+      stub_get("/api/usage", %{
+        "by" => "provider_account",
+        "data" => [
+          %{"group" => "acct-1", "rows" => 12, "total_cost_usd" => 9.5}
+        ]
+      })
+
+      {out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Usage.run(["--by", "provider_account"]) end)
+
+      assert code == 0
+      assert out =~ "Usage rollup by provider_account"
+      assert out =~ "acct-1"
+      assert out =~ "9.50"
+    end
+
+    test "--by account is accepted as an alias for --by provider_account" do
+      # The server normalizes `by=account` to `provider_account` (`Usage.normalize_by/1`)
+      # and echoes the normalized name back, same as any other `--by` value.
+      stub_get("/api/usage", %{
+        "by" => "provider_account",
+        "data" => [
+          %{"group" => "acct-1", "rows" => 12, "total_cost_usd" => 9.5}
+        ]
+      })
+
+      {out, _err, code} = capture(fn -> WardmastCli.Cmd.Usage.run(["--by", "account"]) end)
+
+      assert code == 0
+      assert out =~ "acct-1"
+      assert out =~ "9.50"
+    end
+
+    test "--account is forwarded to the summarize API as a query param" do
+      stub_routes([
+        {{"get", "/api/usage"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           assert conn.query_params["account"] == "personal-max"
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"by" => "day", "data" => []})
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> WardmastCli.Cmd.Usage.run(["--account", "personal-max"]) end)
+
+      assert code == 0
+    end
+
+    test "events --account is forwarded to the API as a query param" do
+      stub_routes([
+        {{"get", "/api/usage/events"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           assert conn.query_params["account"] == "claude:personal-max"
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => []})
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn ->
+          WardmastCli.Cmd.Usage.run(["events", "--account", "claude:personal-max"])
+        end)
+
+      assert code == 0
+    end
+  end
+
+  describe "flag strictness (bd-cqw11s)" do
+    test "an unknown flag is rejected" do
+      {_out, err, code} = capture(fn -> WardmastCli.Cmd.Usage.run(["--sinse", "7d"]) end)
+
+      assert code == 1
+      assert err =~ "unknown option --sinse for arb usage"
+    end
+
+    test "--session honours --account/--step/--source instead of dropping them" do
+      stub_routes([
+        {{"get", "/api/usage/events"},
+         fn conn ->
+           conn = Plug.Conn.fetch_query_params(conn)
+           assert conn.query_params["session_id"] == "sess-1"
+           assert conn.query_params["account"] == "acct"
+           assert conn.query_params["step"] == "work"
+           assert conn.query_params["source"] == "worker"
+           conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"data" => []})
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn ->
+          WardmastCli.Cmd.Usage.run([
+            "--session",
+            "sess-1",
+            "--account",
+            "acct",
+            "--step",
+            "work",
+            "--source",
+            "worker"
+          ])
+        end)
+
+      assert code == 0
+    end
+  end
+
+  describe "--since parsing (P-18, D-A-9)" do
+    defp since_sent(argv) do
+      test_pid = self()
+
+      stub_routes([
+        {{"get", "/api/usage"},
+         fn conn ->
+           send(test_pid, {:query, conn.query_string})
+           Req.Test.json(conn, %{"by" => "day", "data" => []})
+         end}
+      ])
+
+      {_out, _err, code} = capture(fn -> WardmastCli.Cmd.Usage.run(argv) end)
+
+      query =
+        receive do
+          {:query, q} -> URI.decode_query(q)
+        after
+          0 -> nil
+        end
+
+      {code, query}
+    end
+
+    test "a bare date becomes midnight UTC" do
+      assert {0, %{"since" => "2026-06-01T00:00:00Z"}} = since_sent(["--since", "2026-06-01"])
+    end
+
+    test "minutes are understood" do
+      assert {0, %{"since" => since}} = since_sent(["--since", "30m"])
+      {:ok, dt, _} = DateTime.from_iso8601(since)
+      assert_in_delta DateTime.diff(DateTime.utc_now(), dt), 1800, 5
+    end
+
+    test "a full ISO8601 datetime passes through" do
+      assert {0, %{"since" => "2026-06-01T12:00:00Z"}} =
+               since_sent(["--since", "2026-06-01T12:00:00Z"])
+    end
+
+    test "a zero window is refused instead of querying all time" do
+      {code, query} = since_sent(["--since", "0d"])
+      assert code != 0
+      assert query == nil
+    end
+  end
+end

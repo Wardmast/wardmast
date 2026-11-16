@@ -33,11 +33,11 @@ ManagedOOMPreference=avoid
 
 ## 2. `/api` concurrency is bounded
 
-`ArbiterWeb.Plugs.ApiConcurrencyLimit` caps in-flight `/api` requests (the
+`WardmastWeb.Plugs.ApiConcurrencyLimit` caps in-flight `/api` requests (the
 `GET /api/events` SSE stream is exempt). Over the cap a request gets an immediate
 `503 busy` with `Retry-After: 1` rather than queuing and growing the heap.
 
-- Default 128; set `ARBITER_API_MAX_CONCURRENCY=N` in `arbiter.env` (`0` disables).
+- Default 128; set `WARDMAST_API_MAX_CONCURRENCY=N` in `arbiter.env` (`0` disables).
 - The `arb` CLI retries 429/503-with-`Retry-After` up to 3 times (exponential
   backoff from the server's `Retry-After`), then fails with
   "server is busy … gave up after 4 attempts".

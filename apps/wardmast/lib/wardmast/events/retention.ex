@@ -1,0 +1,133 @@
+defmodule Wardmast.Events.Retention do
+  @moduledoc """
+  Periodically prunes `Wardmast.Events.Record` rows older than the retention
+  window, so the durable event log backing `GET /events?since=` doesn't grow
+  without bound.
+
+  ## Configuration
+
+  Via `config :wardmast, :events_retention`:
+
+    * `:enabled`         — master switch (default `true`; `false` in test,
+                           where tests drive `sweep/1` synchronously).
+    * `:interval_ms`     — sweep cadence (default 3 600 000, one hour).
+    * `:retention_days`  — age past which a row is deleted, measured from
+                           `inserted_at` (default 7). Read by the default policy.
+    * `:policy`          — module implementing `Wardmast.Events.Retention.Policy`
+                           that decides the prune cutoff (default
+                           `Wardmast.Events.Retention.Default`, which reproduces
+                           the `:retention_days` window). A policy may return
+                           `:keep` to prune nothing.
+
+  A row older than the retention window is unreplayable regardless of this
+  sweeper's cadence — `Wardmast.Events.replay/3` has no special-casing for
+  "gap predates retention", it just won't find the rows. A coordinator that
+  reconnects after a longer outage than the retention window has a real gap;
+  that's the tradeoff this setting makes explicit.
+  """
+
+  use GenServer
+
+  require Ash.Query
+  require Logger
+
+  alias Wardmast.Events.Record
+
+  @default_interval_ms 60 * 60_000
+  @default_policy Wardmast.Events.Retention.Default
+
+  @doc false
+  def start_link(opts \\ []) do
+    name = Keyword.get(opts, :name, __MODULE__)
+    gen_opts = if name, do: [name: name], else: []
+    GenServer.start_link(__MODULE__, opts, gen_opts)
+  end
+
+  @doc """
+  Delete every `Record` row older than `:retention_days` (default from
+  config, overridable via opts — mainly for tests). Best-effort: a delete
+  failure is logged and swallowed rather than crashing the caller.
+
+  Prunes by `seq`, not `inserted_at`: the only index on this table is
+  `[:workspace_id, :seq]` (see `Wardmast.Events.Record`), so filtering on
+  `inserted_at` directly would full-scan every sweep. Instead the cutoff
+  timestamp is resolved to a `seq` once (via the highest-`seq` row still
+  older than the cutoff), then rows are pruned with `seq <= cutoff_seq`,
+  which reuses the primary key. Resolving against `occurred_at` — the same
+  clock `Wardmast.Events.replay/3` filters on for its `{:timestamp, _}` mode
+  — also removes the clock skew that existed between retention and replay
+  when retention pruned by `inserted_at` instead.
+  """
+  @spec sweep(keyword()) :: :ok
+  def sweep(opts \\ []) do
+    policy = Keyword.get(opts, :policy, cfg(:policy, @default_policy))
+
+    with %DateTime{} = cutoff <- policy.cutoff(DateTime.utc_now(), opts),
+         cutoff_seq when is_integer(cutoff_seq) <- cutoff_seq(cutoff) do
+      Record
+      |> Ash.Query.filter(seq <= ^cutoff_seq)
+      |> Ash.bulk_destroy!(:destroy, %{}, return_errors?: false)
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.error("Wardmast.Events.Retention sweep failed: #{Exception.message(e)}")
+      :ok
+  end
+
+  @doc false
+  def config(key, default), do: cfg(key, default)
+
+  # The highest seq among rows at or before the cutoff, or nil if none exist.
+  defp cutoff_seq(cutoff) do
+    Record
+    |> Ash.Query.filter(occurred_at < ^cutoff)
+    |> Ash.Query.sort(seq: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%Record{seq: seq}] -> seq
+      [] -> nil
+    end
+  end
+
+  # ---- GenServer callbacks -------------------------------------------------
+
+  @impl true
+  def init(opts) do
+    state = %{
+      enabled: cfg_opt(:enabled, opts, true),
+      interval_ms: cfg_opt(:interval_ms, opts, @default_interval_ms)
+    }
+
+    if state.enabled, do: schedule(self(), state.interval_ms)
+
+    {:ok, state}
+  end
+
+  @impl true
+  def handle_info(:sweep, state) do
+    sweep()
+    schedule(self(), state.interval_ms)
+    {:noreply, state}
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  defp schedule(pid, ms), do: Process.send_after(pid, :sweep, ms)
+
+  defp cfg_opt(key, opts, default) do
+    case Keyword.fetch(opts, key) do
+      {:ok, val} -> val
+      :error -> cfg(key, default)
+    end
+  end
+
+  defp cfg(key, default) do
+    case get_in(Application.get_env(:wardmast, :events_retention, []), [key]) do
+      nil -> default
+      val -> val
+    end
+  end
+end

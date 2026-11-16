@@ -59,7 +59,7 @@ failed. The version check passes. The "use our ChatGPT login this way" check doe
 ## What stays as it is
 
 The existing path stays: per-run `CODEX_HOME` with a copy of `auth.json` for podman and remote
-runs, kept in step by `Arbiter.Agents.Codex.AuthSync` and its reaper. Grok's
+runs, kept in step by `Wardmast.Agents.Codex.AuthSync` and its reaper. Grok's
 `GROK_AUTH_PROVIDER_COMMAND` broker (`docs/grok-credential-broker.md`) is the template if OpenAI
 later ships a helper-style hook for ChatGPT-managed auth, or if the operator chooses an API-key
 fleet.

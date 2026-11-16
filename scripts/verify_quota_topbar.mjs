@@ -2,7 +2,7 @@
 //
 // bd-i2gwwn (was bd-gukyy1) — the status bar's quota chip, in a real browser.
 //
-// `ArbiterWeb.QuotaTopbarTest` proves the markup: one ring object per shown
+// `WardmastWeb.QuotaTopbarTest` proves the markup: one ring object per shown
 // provider, its inner 5h and outer 7d rings, the popover's bars, the ARIA. What
 // it cannot prove is the geometry and the interaction: that the 36px chip sits
 // inside the 46px status bar at the same height whatever the provider count,
@@ -172,7 +172,7 @@ function stateScript() {
       shown: shown(document.getElementById(id)),
       rect: rect(document.getElementById(id))
     })),
-    wordmark: rect(header.querySelector("[aria-label=Arbiter]:not(.sm\\\\:hidden)")),
+    wordmark: rect(header.querySelector("[aria-label=Wardmast]:not(.sm\\\\:hidden)")),
     errored: !!document.querySelector(".phx-error")
   })
 })()`

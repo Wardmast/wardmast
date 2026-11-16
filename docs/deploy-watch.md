@@ -30,7 +30,7 @@ jobs of push-event runs.
 
 ## Behaviour
 
-`MergedPRFinalizer` runs the sweep every tick for the repo (`Arbiter.Workflows.DeployWatch`):
+`MergedPRFinalizer` runs the sweep every tick for the repo (`Wardmast.Workflows.DeployWatch`):
 
 * Merged tickets (closed or `:verifying`, within 7 days) get a `deploy_watch`
   record in their `merger_status` holding the merge commit (`merge_sha`).

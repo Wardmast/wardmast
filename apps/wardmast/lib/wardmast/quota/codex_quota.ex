@@ -1,0 +1,116 @@
+defmodule Wardmast.Quota.CodexQuota do
+  @moduledoc """
+  Per-**account** snapshot of Codex's (OpenAI) rate-limit / quota state
+  (bd-cqfn5i; re-keyed to the account by P5, bd-3yokey).
+
+  Unlike `Wardmast.Quota.AnthropicQuota`, which is updated by explicit fetch
+  (`Wardmast.Quota.OAuthUsage`) and header capture from worker responses, this
+  snapshot is populated *actively* by `Wardmast.Quota.Codex.fetch/2`, which makes
+  one direct GET to OpenAI's usage endpoint using the `codex` CLI's stored OAuth
+  token. See that module for the fetch/parse logic.
+
+  Codex reports two windows:
+
+    * `session` — the primary (short) window.
+    * `weekly`  — the secondary (long) window.
+
+  Each carries a used-percent (0–100) and a reset timestamp, mirroring the
+  `{used, total: 100, remaining, resetAt}` shape 9router normalizes to.
+
+  One row per `{provider_account_id, provider}` — the `:upsert` action
+  overwrites the prior snapshot in place, so this stays a cache of the latest
+  reading, not a time series. Every window field is optional: a response
+  carrying only the session window still writes a row with the weekly columns
+  left `nil`. The OpenAI limit is per account, so workspaces sharing a Codex
+  plan share one row (`docs/provider-account-design.md` §6).
+  """
+
+  use Ash.Resource,
+    otp_app: :wardmast,
+    domain: Wardmast.Quota,
+    data_layer: AshSqlite.DataLayer
+
+  sqlite do
+    table "codex_quotas"
+    repo Wardmast.Repo
+  end
+
+  actions do
+    defaults [:read, :destroy]
+
+    create :upsert do
+      primary? true
+      upsert? true
+      upsert_identity :account_provider
+
+      accept [
+        :provider_account_id,
+        :provider,
+        :plan,
+        :session_used_percent,
+        :session_reset_at,
+        :weekly_used_percent,
+        :weekly_reset_at,
+        :session_window_minutes,
+        :weekly_window_minutes,
+        :limit_reached,
+        :captured_at
+      ]
+    end
+  end
+
+  attributes do
+    uuid_primary_key :id
+
+    attribute :provider_account_id, :uuid do
+      allow_nil? false
+      public? true
+      description "Provider account these quota figures were captured for (§6)."
+    end
+
+    attribute :provider, :string do
+      allow_nil? false
+      public? true
+      default "codex"
+      constraints max_length: 64, trim?: true
+    end
+
+    attribute :plan, :string do
+      public? true
+      description "Codex plan tier reported by the usage endpoint (e.g. \"plus\")."
+    end
+
+    attribute :session_used_percent, :float, public?: true
+    attribute :session_reset_at, :utc_datetime, public?: true
+
+    attribute :weekly_used_percent, :float, public?: true
+
+    attribute :session_window_minutes, :integer do
+      public? true
+      description "Length of the primary window in minutes (nil = not reported)."
+    end
+
+    attribute :weekly_window_minutes, :integer do
+      public? true
+      description "Length of the secondary window in minutes (nil = not reported)."
+    end
+
+    attribute :weekly_reset_at, :utc_datetime, public?: true
+
+    attribute :limit_reached, :boolean, public?: true
+
+    attribute :captured_at, :utc_datetime do
+      allow_nil? false
+      public? true
+      description "When the direct usage call observed these figures."
+    end
+
+    create_timestamp :inserted_at
+    update_timestamp :updated_at
+  end
+
+  identities do
+    # One snapshot per account+provider; fetch/2 upserts onto this.
+    identity :account_provider, [:provider_account_id, :provider]
+  end
+end

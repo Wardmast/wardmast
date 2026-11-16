@@ -1,0 +1,163 @@
+defmodule Wardmast.VernacularSweepBah63uTest do
+  @moduledoc """
+  Validates that old vernacular terms (Admiral, acolyte, Warden, summons,
+  Warships) reintroduced since the 2026-07-10 sweep (#859) have been
+  replaced with new terms (coordinator, worker, Watchdog, escalates,
+  Workspaces) in comments and prose. Task bd-bah63u.
+  """
+
+  use ExUnit.Case
+
+  @target_files ~w(
+    lib/wardmast/mcp/catalog.ex
+    lib/wardmast/mcp/tools.ex
+    lib/wardmast/mcp/tools/loop_pending.ex
+    lib/wardmast/mcp/tools/messaging.ex
+    lib/wardmast/mcp/tools/skills.ex
+    lib/wardmast/mcp/tools/task.ex
+    lib/wardmast/mcp/tools/worker.ex
+    lib/wardmast/mcp/tools/workspace.ex
+    lib/wardmast/worker/watchdog.ex
+    lib/wardmast/worker/dispatch.ex
+    lib/wardmast/worker/run_provenance.ex
+    lib/wardmast/worker/worktree.ex
+    lib/wardmast/worker/review_gate.ex
+    lib/wardmast/worker/resume_context.ex
+    lib/wardmast/worker/stop_reason.ex
+    lib/wardmast/usage/workspace_backfill.ex
+    lib/wardmast/messages/coordinator_notifier.ex
+    lib/wardmast/mergers/github.ex
+    lib/wardmast/mergers/gitlab.ex
+    lib/wardmast/worker.ex
+    lib/wardmast/workflows/merge_queue/conflict_resolver.ex
+    lib/wardmast/workflows/merge_queue/fix_pass_dispatcher.ex
+    lib/wardmast/workflows/work.ex
+    lib/wardmast/workflows/merge_queue.ex
+    lib/wardmast/workflows/pr_patrol.ex
+    lib/wardmast/workflows/code_review/checks.ex
+  )
+
+  @web_target_files ~w(
+    lib/wardmast_web/live/board_live.ex
+  )
+
+  @cli_target_files ~w(
+    lib/wardmast_cli/cmd/queue.ex
+    lib/wardmast_cli/cmd/update.ex
+  )
+
+  describe "stale vocabulary is gone from lib targets" do
+    for file <- @target_files do
+      test "#{file}: no bare Admiral/acolyte/Warden/summons vocabulary remains" do
+        content = read_file(unquote(file))
+
+        refute content =~ ~r/\bAdmiral\b/,
+               "#{unquote(file)} still contains 'Admiral' — should be 'coordinator'"
+
+        refute content =~ ~r/\bacolyte(s)?\b/i,
+               "#{unquote(file)} still contains 'acolyte' — should be 'worker'"
+
+        refute content =~ ~r/\bWarden\b/,
+               "#{unquote(file)} still contains 'Warden' — should be 'Watchdog'"
+
+        refute content =~ ~r/\bsummons\b/i,
+               "#{unquote(file)} still contains 'summons' — should be 'escalates'"
+      end
+    end
+  end
+
+  describe "stale vocabulary is gone from web targets" do
+    for file <- @web_target_files do
+      test "#{file}: no stale Warships label remains" do
+        content = read_file(Path.join("../wardmast_web", unquote(file)))
+
+        refute content =~ "Warships",
+               "#{unquote(file)} still contains 'Warships'"
+      end
+    end
+  end
+
+  describe "stale vocabulary is gone from wardmast_cli targets" do
+    for file <- @cli_target_files do
+      test "#{file}: no bare Admiral vocabulary remains" do
+        content = read_file(Path.join("../wardmast_cli", unquote(file)))
+
+        refute content =~ ~r/\bAdmiral\b/,
+               "#{unquote(file)} still contains 'Admiral' — should be 'coordinator'"
+      end
+    end
+  end
+
+  describe "workflows/work.ex mailbox grammar" do
+    test "says 'a worker checks its mailbox', not 'an worker'" do
+      content = read_file("lib/wardmast/workflows/work.ex")
+
+      refute content =~ "an worker checks its mailbox",
+             "should be 'a worker checks its mailbox', not 'an worker'"
+
+      assert content =~ "a worker checks its mailbox",
+             "expected 'a worker checks its mailbox' after the grammar fix"
+    end
+  end
+
+  describe "MCP tool-description strings (highest priority)" do
+    test "catalog.ex: coordinator_inbox description uses coordinator, not Admiral" do
+      content = read_file("lib/wardmast/mcp/catalog.ex")
+
+      assert content =~ "Read the coordinator escalation mailbox for the workspace",
+             "catalog.ex coordinator_inbox description should read 'coordinator escalation mailbox'"
+
+      # bd-a14qd1: the second assertion here pinned `queue_resume`'s
+      # description, which went with the Conductor. `coordinator_inbox_clear`
+      # is the surviving mailbox tool whose wording this sweep still owns.
+      assert content =~ "Soft-clear specific coordinator-mailbox messages",
+             "catalog.ex coordinator_inbox_clear description should say 'coordinator-mailbox'"
+    end
+
+    test "tools/messaging.ex: coordinator_inbox doc uses coordinator, not Admiral" do
+      content = read_file("lib/wardmast/mcp/tools/messaging.ex")
+
+      assert content =~ "The coordinator escalation mailbox for the bound workspace",
+             "tools/messaging.ex @doc for coordinator_inbox should say 'coordinator escalation mailbox'"
+    end
+  end
+
+  describe "watchdog.ex acolyte/Admiral/summons cluster" do
+    test "renamed to worker/coordinator/escalates" do
+      content = read_file("lib/wardmast/worker/watchdog.ex")
+
+      assert content =~ "dispatch a fix-pass worker"
+      assert content =~ "escalates to a human reviewer"
+      assert content =~ "escalate to the coordinator on the first poll"
+      assert content =~ "escalating to coordinator, staying parked"
+    end
+  end
+
+  describe "coordinator_notifier.ex Warden→Watchdog" do
+    test "message bodies say Watchdog, not Warden" do
+      content = read_file("lib/wardmast/messages/coordinator_notifier.ex")
+
+      assert content =~ "The Watchdog detected this on its merge poll"
+      assert content =~ "The Watchdog auto-resolved this block"
+    end
+  end
+
+  describe "mergers summons→escalates" do
+    test "github.ex" do
+      content = read_file("lib/wardmast/mergers/github.ex")
+      assert content =~ "escalates to a human once"
+    end
+
+    test "gitlab.ex" do
+      content = read_file("lib/wardmast/mergers/gitlab.ex")
+      assert content =~ "escalates to a human once"
+    end
+  end
+
+  defp read_file(path) do
+    case File.read(path) do
+      {:ok, content} -> content
+      {:error, reason} -> raise "Could not read file #{path}: #{inspect(reason)}"
+    end
+  end
+end

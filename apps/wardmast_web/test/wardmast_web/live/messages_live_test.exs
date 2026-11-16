@@ -1,0 +1,462 @@
+defmodule WardmastWeb.MessagesLiveTest do
+  use WardmastWeb.ConnCase, async: false
+
+  import Phoenix.LiveViewTest
+
+  alias Wardmast.Tasks.{Issue, Workspace}
+  alias Wardmast.Messages.Message
+  alias Wardmast.Worker
+
+  setup do
+    for snap <- Worker.list_children() do
+      Worker.stop(snap.task_id)
+    end
+
+    Process.sleep(50)
+
+    {:ok, ws} =
+      Ash.create(Workspace, %{name: "msg-ws-#{System.unique_integer([:positive])}", prefix: "mw"})
+
+    {:ok, ws: ws}
+  end
+
+  describe "per-worker mailbox" do
+    test "lists unread mailbox messages addressed to the task", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "mbx", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :flag,
+          from_ref: "bd-varek",
+          to_ref: task.id,
+          body: "the API shape changed"
+        })
+
+      {:ok, view, _html} = live_worker(conn, task.id)
+      html = render_async(view)
+
+      assert html =~ "Mailbox"
+      assert html =~ "the API shape changed"
+      assert html =~ "bd-varek"
+    end
+
+    test "compose form sends a direction to the task", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "compose", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+
+      {:ok, view, _html} = live_worker(conn, task.id)
+      render_async(view)
+
+      view
+      |> form("#mailbox form", %{"body" => "check the API contract"})
+      |> render_submit()
+
+      assert render(view) =~ "the API contract"
+
+      # The direction landed as a real mailbox-family message addressed to the task.
+      assert [%Message{kind: :direction, from_ref: "coordinator", body: "check the API contract"}] =
+               Message.inbox(task.id, workspace_id: ws.id)
+    end
+
+    test "marking a message read removes it from the unread list", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "read", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+
+      {:ok, msg} =
+        Message.send_mail(%{workspace_id: ws.id, to_ref: task.id, body: "ack me"})
+
+      {:ok, view, _html} = live_worker(conn, task.id)
+      render_async(view)
+      assert render(view) =~ "ack me"
+
+      view
+      |> element(~s(button[phx-click="mark_read"][phx-value-id="#{msg.id}"]))
+      |> render_click()
+
+      refute render(view) =~ "ack me"
+    end
+
+    test "updates live when mail is broadcast after mount", %{conn: conn, ws: ws} do
+      # Regression: WardmastWeb.LiveHooks' global :coordinator_inbox on_mount
+      # attaches a :handle_info hook for every live_session and used to
+      # {:halt, ...} on {:new_message, _} — attached hooks run before the
+      # LiveView's own callback, so halting there made
+      # WorkerDetailLive.handle_info/2's own {:new_message, _} clause
+      # unreachable and the mailbox never refreshed live (bd-3kgb0e).
+      {:ok, task} = Ash.create(Issue, %{title: "live-mail", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+
+      {:ok, view, _html} = live_worker(conn, task.id)
+      html = render_async(view)
+      refute html =~ "arrived-after-mount"
+
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          to_ref: task.id,
+          body: "arrived-after-mount"
+        })
+
+      assert render(view) =~ "arrived-after-mount"
+    end
+  end
+
+  describe "coordinator mailbox panel" do
+    # bd-3kgb0e: the coordinator mailbox moved off the board page into the
+    # shared AppShell drawer (WardmastWeb.Layouts.app/1), so it must surface
+    # on every screen, not just "/".
+    test "surfaces from the AppShell drawer on a page other than the board",
+         %{conn: conn, ws: ws} do
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          escalation_kind: :agent_raised,
+          from_ref: "bd-soren",
+          to_ref: "admiral",
+          subject: "needs a decision off-board",
+          body: "surfaces on the tasks screen too"
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks")
+      html = render_async(view)
+
+      assert html =~ "Coordinator Mailbox"
+      assert html =~ "needs a decision off-board"
+      assert html =~ "surfaces on the tasks screen too"
+      assert html =~ "1 unread"
+      assert html =~ ~s(id="coordinator-inbox-trigger")
+      assert html =~ ~s(id="coordinator-inbox-unread-badge")
+    end
+
+    test "renders unread mailbox-family mail addressed to the coordinator", %{conn: conn, ws: ws} do
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          escalation_kind: :agent_raised,
+          from_ref: "bd-soren",
+          to_ref: "admiral",
+          subject: "needs a decision",
+          body: "the device API contract is ambiguous",
+          directive_ref: "bd-soren"
+        })
+
+      {:ok, view, _html} = live(conn, "/")
+      html = render_async(view)
+
+      assert html =~ "Coordinator Mailbox"
+      assert html =~ "needs a decision"
+      assert html =~ "the device API contract is ambiguous"
+      assert html =~ "bd-soren"
+      assert html =~ "escalation"
+      # The stat-card count reflects the one unread item.
+      assert html =~ "1 unread"
+    end
+
+    test "a plain :notification does NOT land in the coordinator mailbox", %{conn: conn, ws: ws} do
+      # Notifications are broadcast events, not addressed mail — they never
+      # reach the coordinator's actionable inbox (the dashboard's notification
+      # feed panel was removed in #680; only the mailbox-emptiness contract
+      # remains relevant here).
+      {:ok, _} =
+        Message.notify(%{workspace_id: ws.id, subject: "just-an-fyi", body: "background hum"})
+
+      {:ok, view, _html} = live(conn, "/")
+      html = render_async(view)
+
+      assert html =~ "coordinator-mailbox-empty"
+      assert html =~ "0 unread"
+      assert Message.inbox("admiral") == []
+    end
+
+    test "updates live when coordinator mail is broadcast", %{conn: conn, ws: ws} do
+      {:ok, view, _html} = live(conn, "/")
+      html = render_async(view)
+      refute html =~ "freshly-escalated"
+
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          escalation_kind: :agent_raised,
+          to_ref: "admiral",
+          subject: "freshly-escalated",
+          body: "live arrival"
+        })
+
+      assert render(view) =~ "freshly-escalated"
+    end
+
+    test "marking a message read removes it from the unread list", %{conn: conn, ws: ws} do
+      {:ok, msg} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :info,
+          to_ref: "admiral",
+          body: "ack-this-up"
+        })
+
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view)
+      assert render(view) =~ "ack-this-up"
+
+      view
+      |> element(
+        ~s(#coordinator-drawer button[phx-click="coordinator_mark_read"][phx-value-id="#{msg.id}"])
+      )
+      |> render_click()
+
+      refute render(view) =~ "ack-this-up"
+      # It's stamped read, not destroyed — still in the table, just not unread.
+      assert {:ok, %Message{read_at: read_at}} = Ash.get(Message, msg.id)
+      assert read_at
+    end
+
+    test "clear read drains the read tail but keeps unread mail", %{conn: conn, ws: ws} do
+      {:ok, read_msg} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :info,
+          to_ref: "admiral",
+          body: "old-read"
+        })
+
+      {:ok, _} = Message.mark_read(read_msg)
+
+      {:ok, unread_msg} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          escalation_kind: :agent_raised,
+          to_ref: "admiral",
+          body: "still-unread"
+        })
+
+      {:ok, view, _html} = live(conn, "/")
+      html = render_async(view)
+      # The read one is not in the unread view; the unread one is.
+      refute html =~ "old-read"
+      assert html =~ "still-unread"
+
+      view
+      |> element(~s(button[phx-click="coordinator_clear"]))
+      |> render_click()
+
+      # Read message soft-cleared (retained, cleared_at stamped); unread untouched.
+      assert {:ok, %Message{cleared_at: cleared_at}} = Ash.get(Message, read_msg.id)
+      assert cleared_at
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, unread_msg.id)
+      assert render(view) =~ "still-unread"
+    end
+
+    test "clear_all via CLI/API (external PubSub) updates the inbox live without refresh",
+         %{conn: conn, ws: ws} do
+      # Regression for bd-12tg9s: clear_all destroyed messages but never
+      # broadcast a PubSub event, so open dashboard sessions stayed stale.
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :completion,
+          to_ref: "admiral",
+          subject: "live-clear-test",
+          body: "should disappear live"
+        })
+
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view)
+      assert render(view) =~ "live-clear-test"
+
+      # Simulate arb inbox clear --all (the external, non-LiveView path).
+      Message.clear_all("admiral", workspace_id: ws.id)
+
+      # The {:mailbox_cleared, _} broadcast must drive a live refresh
+      # without any manual page reload.
+      refute render(view) =~ "live-clear-test"
+    end
+
+    test "clear_read via CLI/API (external PubSub) updates the inbox live without refresh",
+         %{conn: conn, ws: ws} do
+      # Regression for bd-12tg9s: clear_read had the same missing broadcast.
+      {:ok, msg} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :info,
+          to_ref: "admiral",
+          body: "read-then-cleared"
+        })
+
+      {:ok, _} = Message.mark_read(msg)
+
+      {:ok, unread} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :info,
+          to_ref: "admiral",
+          body: "stays-unread"
+        })
+
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view)
+      # Only unread shows in the inbox panel.
+      assert render(view) =~ "stays-unread"
+
+      # External clear_read: soft-clears the read message and broadcasts.
+      Message.clear_read("admiral", workspace_id: ws.id)
+
+      # The unread message must still be present (clear_read doesn't touch unread).
+      assert render(view) =~ "stays-unread"
+      # The read message is retained (soft clear), now with cleared_at stamped.
+      assert {:ok, %Message{cleared_at: cleared_at}} = Ash.get(Message, msg.id)
+      assert cleared_at
+      # And the unread one is still there, still uncleared.
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, unread.id)
+    end
+
+    test "shows pending (unread) and outstanding (read-but-uncleared) as distinct figures",
+         %{conn: conn, ws: ws} do
+      # One unread (pending) and one read-but-uncleared (outstanding).
+      {:ok, _pending} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          escalation_kind: :agent_raised,
+          to_ref: "admiral",
+          body: "still-pending"
+        })
+
+      {:ok, seen} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          escalation_kind: :agent_raised,
+          to_ref: "admiral",
+          body: "seen-not-cleared"
+        })
+
+      {:ok, _} = Message.mark_read(seen)
+
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view)
+
+      # Two distinct figures, both rendered.
+      assert render(view) =~ "1 unread"
+      assert render(view) =~ "1 outstanding"
+
+      # Reading the pending item moves it from pending → outstanding: the two
+      # figures track independently (pending drops, outstanding rises).
+      pending_msg =
+        Message.inbox("admiral", workspace_id: ws.id) |> Enum.find(&(&1.body == "still-pending"))
+
+      {:ok, _} = Message.mark_read(pending_msg)
+      html = render(view)
+      assert html =~ "0 unread"
+      assert html =~ "2 outstanding"
+
+      # Clearing soft-clears the outstanding tail → outstanding drops to 0, rows retained.
+      view |> element(~s(button[phx-click="coordinator_clear"])) |> render_click()
+      html = render(view)
+      assert html =~ "0 unread"
+      assert html =~ "0 outstanding"
+      assert {:ok, %Message{cleared_at: cleared_at}} = Ash.get(Message, seen.id)
+      assert cleared_at
+    end
+
+    # bd-8akewg: the drawer is the sessionless coordinator reader. A browser
+    # session polling `coordinator_inbox` used to consume the operator's mail
+    # out from under it (and vice versa) because read/cleared state lived on the
+    # shared row.
+    test "a session's reads and clears leave the drawer's figures alone",
+         %{conn: conn, ws: ws} do
+      {:ok, msg} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          escalation_kind: :agent_raised,
+          to_ref: "admiral",
+          body: "shared-escalation"
+        })
+
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view)
+      assert render(view) =~ "1 unread"
+
+      # Stop this mount before re-mounting below: an orphaned view stays
+      # subscribed to the workspace topic and queries the sandbox connection as
+      # the test process exits, which drops it for everybody (bd-5scl0c).
+      GenServer.stop(view.pid)
+
+      # A browser session reads it and then clears its whole view.
+      session = Message.session_reader("sess-drawer")
+      {:ok, _} = Message.mark_read(msg, reader: session)
+      {:ok, _, _, _} = Message.clear_all(Message.coordinator_ref(), reader: session)
+
+      # The drawer still owes it — nothing about the operator's view moved.
+      {:ok, view, _html} = live(conn, "/")
+      render_async(view)
+      html = render(view)
+      assert html =~ "1 unread"
+      assert html =~ "0 outstanding"
+      assert html =~ "shared-escalation"
+
+      # …and the drawer's own clear — which does stamp the shared row, because
+      # the sessionless reader mirrors onto it — still leaves a session that has
+      # not triaged the message owing it.
+      {:ok, _} = Message.mark_read(msg, reader: Message.coordinator_reader())
+      view |> element(~s(button[phx-click="coordinator_clear"])) |> render_click()
+      assert {:ok, %Message{cleared_at: %DateTime{}}} = Ash.get(Message, msg.id)
+
+      # Same reason as the stop above: this re-mounted view is the one that ran
+      # the clear, and it outlives the assertions below unless we stop it here.
+      GenServer.stop(view.pid)
+
+      other = Message.session_reader("sess-drawer-other")
+
+      assert [%{id: id}] =
+               Message.inbox(Message.coordinator_ref(), workspace_id: ws.id, reader: other)
+
+      assert id == msg.id
+    end
+
+    test "a page with no catch-all handle_info survives a coordinator mail broadcast",
+         %{conn: conn, ws: ws} do
+      # Regression (bd-3kgb0e review finding 2): the global :coordinator_inbox
+      # on_mount subscribes every LiveView in live_session :default to every
+      # workspace's mail topic and `:cont`s on {:new_message, _} so the host
+      # view's own handle_info runs. WorkspaceDetailLive has no matching
+      # clause, so without a catch-all it crashed on any mail broadcast.
+      {:ok, view, _html} = live_workspace(conn, ws.id)
+      render_async(view)
+
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          escalation_kind: :agent_raised,
+          to_ref: "admiral",
+          subject: "unrelated to this page",
+          body: "must not crash the workspace detail view"
+        })
+
+      assert Process.alive?(view.pid)
+      assert render(view) =~ ws.name
+    end
+
+    test "a page with no catch-all handle_info survives the coordinator inbox tick",
+         %{conn: conn, ws: ws} do
+      # Regression (bd-3kgb0e review finding 1): the 60s :coordinator_inbox_tick
+      # used to `:cont` to every LiveView in live_session :default.
+      # WorkspaceDetailLive has no matching clause, so it crashed every
+      # minute. The tick is hook-private state, so it must `:halt`.
+      {:ok, view, _html} = live_workspace(conn, ws.id)
+      render_async(view)
+
+      send(view.pid, :coordinator_inbox_tick)
+
+      assert Process.alive?(view.pid)
+      assert render(view) =~ ws.name
+    end
+  end
+end

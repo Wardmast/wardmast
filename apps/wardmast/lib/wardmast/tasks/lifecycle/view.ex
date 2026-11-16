@@ -1,0 +1,631 @@
+defmodule Wardmast.Tasks.Lifecycle.View do
+  @moduledoc """
+  The one projection of a ticket (bd-9yqspm, child 2: bd-6zapbl): its column,
+  its computed step, what blocks it and whether it needs attention (child 6,
+  bd-8if9zt). Every surface that asks "where is this ticket?" reads the
+  answer from here: the board (`Wardmast.Board.Snapshot.derive/1`), the epic
+  mini-board (`Snapshot.classify_columns/2`), the `/epics` rollup
+  (`Wardmast.Tasks.EpicRollup`) and `Wardmast.Tasks.Issue.ready/1`.
+
+  It is pure. Everything that would need a read — the ticket's blockers, its
+  runs, its PR's last poll, the clock — arrives in `ctx`:
+
+    * `:blocked_by` — ids of the ticket's **unsatisfied** gating blockers,
+      as `Wardmast.Tasks.EdgeGate.blockers/2` computes them (with
+      `blocker_satisfied?/1`);
+    * `:runs` — the worker rows touching the ticket: its author, any
+      subordinate fix / conflict pass under the same id, and any reviewer /
+      implementer round pointing back at it;
+    * `:merger_status` — the PR's last `Wardmast.Mergers.get/1` result,
+      defaulting to the one the ticket's Watchdog recorded on its row;
+    * `:now` — for the interim board's dispatch grace (`board_column/2`);
+    * `:watchdog_alive` — whether the ticket's Watchdog is running, when the
+      caller knows (a Registry read, so an input like the rest);
+    * `:resume_queued` — whether a round for the ticket is deferred until a
+      worker slot frees (`Wardmast.Board.Autopilot.deferred_resume_ids/1`), when
+      the caller knows (bd-1u15tl).
+
+  ## Column
+
+  | state | column |
+  |---|---|
+  | `:backlog` | `:backlog` |
+  | `:queued` | `:blocked` when `:blocked_by` is non-empty, else `:ready` |
+  | `:active` | `:in_progress` (`:merging` when waiting on ReviewGate CI, bd-dc468g; `:blocked` when the quota gate holds it, bd-abg443) |
+  | `:merging` | `:merging` |
+  | `:verifying` | `:verifying` |
+  | `:closed` | `:closed` |
+
+  A gating blocker is satisfied once it is `:verifying` or `:closed`:
+  **verifying unblocks dependents** (`blocker_satisfied?/1`).
+
+  The column comes from the stored state, never from a run: a `:queued`
+  ticket with a leftover `:completed` or `:failed` author row is still Ready
+  or Blocked. The exceptions are:
+    * a *live* author run on a `:backlog` or `:queued` ticket (reads as `:in_progress`);
+    * an `:active` ticket whose ReviewGate is waiting on CI (`:awaiting_ci`, bd-dc468g)
+      which appears in `:merging` because it holds no scheduler slot;
+    * an `:active` ticket the quota gate is holding (`Wardmast.Workflows.DispatchQueue`,
+      bd-zkmvia) which appears in `:blocked`, with a `hold` (reason + resume time),
+      because it holds no scheduler slot either. Display only: the stored state,
+      slot accounting and the queue's resume are untouched, and `Dispatchable`
+      still refuses it as already In progress.
+
+  A row with no stored state at all (a bare `%{id: ...}` for a run whose ticket
+  was not read) is claimed by any non-completed author row.
+
+  ## Step
+
+  Computed for `:in_progress` and `:merging` only, `nil` elsewhere.
+
+    * in progress: `:implementing | :in_review |
+      :addressing_review | :fixing_ci | :resolving_conflict`, from the runs
+      through `Wardmast.Worker.Phase` — a live subordinate round names the step,
+      otherwise the author's own phase does, and a ticket with nothing more
+      specific on record is `:implementing`.
+    * awaiting ReviewGate CI: `:awaiting_ci` (bd-cut6uv, bd-dc468g) is
+      `:in_review` while the ReviewGate holds its reviewer back until CI is green
+      on the head (the ticket's `ci_wait` marker, `Wardmast.Worker.ReviewCi.waiting/2`):
+      no agent is live, the ticket holds no slot (`Wardmast.Tasks.SlotGate`), and it
+      appears in the `:merging` column so In progress matches the slot-holding set.
+    * merging: `:waiting_ci | :in_merge_queue | :behind_base |
+      :merge_blocked`, from the merger status. A conflict, red CI or a draft
+      blocks whatever the approval state; an approval-type block counts only
+      once the PR is approved (`Wardmast.Worker.Watchdog.effective_block_reason/1`),
+      since an unapproved PR waiting on its review is simply queued.
+
+  ## Attention
+
+  `%{owner, waiting_on, reason, cause, since}` or nil, from the ticket's stored
+  attention cause, its state, its latest runs and its PR, through the owner
+  table in `Wardmast.Tasks.Lifecycle.Attention` (which documents both). The
+  run facts are read here: the primary author run waiting on a question, every
+  author run finished without succeeding with no run on the ticket still live,
+  or — when `:runs` was given — no run at all past the dispatch grace.
+  """
+
+  alias Wardmast.Tasks.Issue
+  alias Wardmast.Tasks.Lifecycle
+  alias Wardmast.Tasks.Lifecycle.Attention
+  alias Wardmast.Tasks.PullRequest
+  alias Wardmast.Worker
+  alias Wardmast.Worker.Phase
+  alias Wardmast.Worker.ReviewCi
+  alias Wardmast.Worker.ReviewPass
+  alias Wardmast.Worker.Watchdog
+  alias Wardmast.Workers.Run
+  alias Wardmast.Workflows.DispatchQueue
+
+  require Ash.Query
+
+  @type column ::
+          :backlog | :blocked | :ready | :in_progress | :merging | :verifying | :closed
+
+  @type step ::
+          :implementing
+          | :in_review
+          | :awaiting_ci
+          | :addressing_review
+          | :fixing_ci
+          | :resolving_conflict
+          | :waiting_ci
+          | :in_merge_queue
+          | :behind_base
+          | :merge_blocked
+
+  @typedoc "A quota hold on an `:active` ticket: the operator-facing reason and when it resumes."
+  @type hold :: %{reason: String.t(), resumes_at: DateTime.t() | nil}
+
+  @type t :: %{
+          state: Lifecycle.state() | nil,
+          column: column() | nil,
+          step: step() | nil,
+          blocked_by: [String.t()],
+          attention: Attention.t() | nil,
+          hold: hold() | nil,
+          ci_wait: %{sha: String.t(), since: String.t() | nil, round: term()} | nil
+        }
+
+  @type board_column :: :backlog | :ready | :running | :waiting | :closed
+
+  @columns %{
+    backlog: :backlog,
+    active: :in_progress,
+    merging: :merging,
+    verifying: :verifying,
+    closed: :closed
+  }
+
+  @active_steps [:implementing, :in_review, :addressing_review, :fixing_ci, :resolving_conflict]
+
+  @ci_pending [:running, :pending, :not_started]
+  @hard_blocks [:conflict, :ci_failed, :ci_cancelled, :draft]
+
+  # Dispatch moves a ticket to :active before its run registers (worktree
+  # provisioning, fetch). Below this age a workerless :active ticket is still
+  # mid-dispatch, not orphaned.
+  @orphan_grace_seconds 60
+
+  @doc "Project `ticket` given `ctx`. See the moduledoc."
+  @spec view(map(), map()) :: t()
+  def view(ticket, ctx \\ %{}) when is_map(ticket) and is_map(ctx) do
+    runs = runs_for(ticket, ctx)
+    state = effective_state(ticket, runs)
+    blocked_by = ctx |> Map.get(:blocked_by) |> List.wrap() |> Enum.uniq() |> Enum.sort()
+    initial_column = column(state, blocked_by)
+    ci_wait = if initial_column == :in_progress, do: ReviewCi.waiting(ticket, ctx_now(ctx))
+    cut_off = if initial_column == :in_progress, do: ReviewPass.current(ticket, ctx_now(ctx))
+    initial_step = step(initial_column, ticket, runs, ctx)
+    step = awaiting_ci(initial_step, ci_wait, runs)
+
+    hold = if is_nil(ci_wait), do: quota_hold(initial_column, state, ticket, ctx)
+
+    {column, step} =
+      cond do
+        initial_column == :in_progress and not is_nil(ci_wait) -> {:merging, step}
+        not is_nil(hold) -> {:blocked, nil}
+        true -> {initial_column, step}
+      end
+
+    %{
+      state: state,
+      column: column,
+      step: step,
+      blocked_by: blocked_by,
+      hold: hold,
+      attention:
+        Attention.of(ticket, attention_facts(state, ticket, runs, ctx, ci_wait, cut_off)),
+      ci_wait: ci_wait
+    }
+  end
+
+  @doc """
+  The ticket's stored state. `nil` for a map that carries none — a bare
+  `%{id: ...}` standing in for a run whose ticket was not read.
+  """
+  @spec state_of(map() | nil) :: Lifecycle.state() | nil
+  def state_of(%{state: state}) when is_atom(state) and not is_nil(state), do: state
+  def state_of(_), do: nil
+
+  @doc """
+  Whether a gating blocker in this state (or this ticket) no longer holds its
+  dependents back: `:verifying` or `:closed`. The one predicate
+  `Wardmast.Tasks.EdgeGate.blockers/2`, `Issue.ready/1` and
+  `Wardmast.Tasks.EpicRollup` all gate on.
+  """
+  @spec blocker_satisfied?(map() | atom() | nil) :: boolean()
+  def blocker_satisfied?(state) when state in [:verifying, :closed], do: true
+  def blocker_satisfied?(ticket) when is_map(ticket), do: blocker_satisfied?(state_of(ticket))
+  def blocker_satisfied?(_), do: false
+
+  @doc """
+  The interim mapping onto five columns. The board itself reads the seven
+  lifecycle columns since bd-79w1fs; this mapping remains for the epic
+  mini-board (`Wardmast.Board.Snapshot.classify_columns/3`) and the `/epics`
+  rollup until those move too:
+
+  | board | lifecycle |
+  |---|---|
+  | `:backlog` | `:backlog` |
+  | `:ready` | `:blocked` and `:ready` (a blocked card keeps its reason) |
+  | `:running` | `:in_progress` |
+  | `:waiting` | `:merging`, `:verifying`, and an `:in_progress` ticket whose primary author run is parked (`:waiting` on a question, or finished without succeeding) or gone past the dispatch grace |
+  | `:closed` | `:closed` |
+
+  An `:in_progress` ticket whose primary author run (or, with that gone, any
+  subordinate pass) is still live is Running; with no author run left it is
+  Running only inside the dispatch grace window, and
+  never flagged at all when it is a non-dispatchable type (an epic never gets
+  a run). `nil` when the ticket has no column.
+  """
+  @spec board_column(map(), map()) :: board_column() | nil
+  def board_column(ticket, ctx \\ %{}) when is_map(ticket) and is_map(ctx) do
+    view = view(ticket, ctx)
+
+    case view.column do
+      nil ->
+        nil
+
+      :backlog ->
+        :backlog
+
+      :blocked when not is_nil(view.hold) ->
+        in_progress_board_column(ticket, runs_for(ticket, ctx), ctx)
+
+      column when column in [:blocked, :ready] ->
+        :ready
+
+      :in_progress ->
+        in_progress_board_column(ticket, runs_for(ticket, ctx), ctx)
+
+      column when column in [:merging, :verifying] ->
+        :waiting
+
+      :closed ->
+        :closed
+    end
+  end
+
+  @doc """
+  The author rows among `runs` — the worker rows registered under the ticket's
+  own id that are not a reviewer / implementer round. A subordinate fix or
+  conflict pass shares the id and counts, as it does on the board.
+  """
+  @spec author_runs([map()], String.t() | nil) :: [map()]
+  def author_runs(runs, ticket_id) do
+    Enum.filter(runs, &(Map.get(&1, :task_id) == ticket_id and author?(&1)))
+  end
+
+  @doc "Whether a worker row is an author row (not a reviewer / implementer round)."
+  @spec author?(map()) :: boolean()
+  def author?(run), do: meta(run, :role) not in [:reviewer, :implementer]
+
+  @doc "The dispatch grace window, in seconds (see `board_column/2`)."
+  @spec orphan_grace_seconds() :: pos_integer()
+  def orphan_grace_seconds, do: @orphan_grace_seconds
+
+  # ---- column -------------------------------------------------------------
+
+  defp effective_state(ticket, runs) do
+    authors = author_runs(runs, Map.get(ticket, :id))
+
+    case state_of(ticket) do
+      state when state in [:backlog, :queued] ->
+        if Enum.any?(authors, &(Map.get(&1, :state) != :finished)),
+          do: :active,
+          else: state
+
+      nil ->
+        if Enum.any?(authors, &(run_class(&1) != :succeeded)), do: :active
+
+      state ->
+        state
+    end
+  end
+
+  # bd-abg443: a stored-`:active` ticket (a non-epic: it is a slot-holder but for
+  # the hold) the quota gate is holding. `ctx.held` is the hold, its
+  # `DispatchQueue.describe/1` map (or `true`, with no detail); absent, the
+  # workspace's queue is asked.
+  defp quota_hold(:in_progress, :active, ticket, ctx) do
+    if Map.get(ticket, :state) == :active and
+         Map.get(ticket, :issue_type) not in Issue.non_dispatchable_types() do
+      ctx |> held_for(ticket) |> hold_of()
+    end
+  end
+
+  defp quota_hold(_column, _state, _ticket, _ctx), do: nil
+
+  defp held_for(ctx, ticket) do
+    case Map.fetch(ctx, :held) do
+      {:ok, held} -> held
+      :error -> held_item(ticket)
+    end
+  end
+
+  defp held_item(ticket) do
+    case DispatchQueue.held_item(Map.get(ticket, :workspace_id), Map.get(ticket, :id)) do
+      nil -> false
+      item -> DispatchQueue.describe(item)
+    end
+  end
+
+  defp hold_of(held) when held in [nil, false], do: nil
+  defp hold_of(true), do: hold_of(%{})
+
+  defp hold_of(%{} = held) do
+    reason = held |> Map.get(:reason) |> DispatchQueue.reason_text()
+    resumes_at = Map.get(held, :retry_not_before)
+
+    resume =
+      case resumes_at do
+        %DateTime{} = at -> "; resumes ~#{Calendar.strftime(at, "%H:%MZ")}"
+        _ -> ""
+      end
+
+    %{reason: "held — quota (#{reason}#{resume})", resumes_at: resumes_at}
+  end
+
+  defp column(nil, _blocked_by), do: nil
+  defp column(:queued, []), do: :ready
+  defp column(:queued, _blocked_by), do: :blocked
+  defp column(state, _blocked_by), do: Map.fetch!(@columns, state)
+
+  # The primary author row decides: a fix pass running under a parked author
+  # does not make the card Running, and a failed pass under a working author
+  # does not make it Waiting. Only once the primary is gone do the subordinate
+  # passes speak for the ticket.
+  defp in_progress_board_column(ticket, runs, ctx) do
+    id = Map.get(ticket, :id)
+
+    classes =
+      case primary(runs, id) do
+        nil -> runs |> author_runs(id) |> Enum.map(&run_class/1)
+        author -> [run_class(author)]
+      end
+
+    cond do
+      :running in classes -> :running
+      :waiting in classes -> :waiting
+      orphaned?(ticket, ctx) -> :waiting
+      true -> :running
+    end
+  end
+
+  # How an author run's state reads on the board (bd-1uu19b):
+  #   * `:running` — its agent (or its reviewer) is still the machine's turn:
+  #     `:starting`, `:working`, or `:waiting` on the review gate;
+  #   * `:waiting` — done, and the outcome is someone else's: `:waiting` on a
+  #     question, or finished without succeeding;
+  #   * `:succeeded` — finished and successful; it no longer claims the ticket.
+  defp run_class(run) do
+    case {Map.get(run, :state), Map.get(run, :outcome)} do
+      {state, _} when state in [:starting, :working] -> :running
+      {:waiting, _} -> if Worker.awaiting_review_gate?(run), do: :running, else: :waiting
+      {:finished, :succeeded} -> :succeeded
+      {:finished, :stopped} -> :stopped
+      {:finished, _} -> :waiting
+      _ -> nil
+    end
+  end
+
+  # No live author run at all: orphaned once past the dispatch grace. An epic
+  # never gets a run, so it never reads as orphaned.
+  #
+  # bd-98gi5m: nor is a ticket whose latest run was deliberately stopped.
+  defp orphaned?(ticket, ctx) do
+    Map.get(ticket, :issue_type) not in Issue.non_dispatchable_types() and
+      past_grace?(ticket, Map.get(ctx, :now)) and
+      not stopped?(ticket, ctx)
+  end
+
+  defp stopped?(ticket, ctx) do
+    runs = runs_for(ticket, ctx)
+    id = Map.get(ticket, :id)
+
+    cond do
+      Enum.any?(author_runs(runs, id), &(run_class(&1) == :stopped)) ->
+        true
+
+      is_binary(id) ->
+        latest_run_stopped?(id)
+
+      true ->
+        false
+    end
+  end
+
+  defp latest_run_stopped?(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id or base_task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%Run{state: :finished, outcome: :stopped}] -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp past_grace?(_ticket, nil), do: true
+
+  defp past_grace?(ticket, now) do
+    case Map.get(ticket, :updated_at) || Map.get(ticket, :created_at) do
+      %DateTime{} = at -> DateTime.diff(now, at) >= @orphan_grace_seconds
+      _ -> true
+    end
+  end
+
+  # ---- step ---------------------------------------------------------------
+
+  # bd-cut6uv: a gate waiting on CI is `:in_review` with nothing live; the
+  # marker only renames that step, never a live round or an unrelated phase.
+  #
+  # bd-2gc809: also from `:implementing`, which is what a ticket reads as once a
+  # restart has taken its author row — the wait is re-armed with no author.
+  defp awaiting_ci(step, %{sha: _}, runs) when step in [:in_review, :implementing] do
+    if Enum.any?(runs, &(Map.get(&1, :agent_live) == true)), do: step, else: :awaiting_ci
+  end
+
+  defp awaiting_ci(step, _ci_wait, _runs), do: step
+
+  defp ctx_now(ctx), do: Map.get(ctx, :now) || DateTime.utc_now()
+
+  defp step(:in_progress, ticket, runs, _ctx), do: active_step(Map.get(ticket, :id), runs)
+  defp step(:merging, ticket, _runs, ctx), do: merging_step(ticket, ctx)
+  defp step(_column, _ticket, _runs, _ctx), do: nil
+
+  defp active_step(ticket_id, runs) do
+    phase =
+      case primary(runs, ticket_id) do
+        nil -> live_subordinate_phase(runs, ticket_id)
+        author -> Phase.of(author, runs)
+      end
+
+    if phase in @active_steps, do: phase, else: :implementing
+  end
+
+  # A fix / conflict pass whose author row is already gone still names the
+  # round it is.
+  defp live_subordinate_phase(runs, ticket_id) do
+    runs
+    |> Enum.filter(&(Map.get(&1, :task_id) == ticket_id))
+    |> Enum.map(&Phase.of(&1, runs))
+    |> Enum.find(&(&1 in @active_steps))
+  end
+
+  defp merging_step(ticket, ctx) do
+    status = merger_status(ticket, ctx)
+    raw = Watchdog.block_reason(status)
+
+    cond do
+      raw == :behind_base -> :behind_base
+      raw in @hard_blocks or Watchdog.effective_block_reason(status) != nil -> :merge_blocked
+      ci_pending?(status, Map.get(ticket, :pending_merge)) -> :waiting_ci
+      true -> :in_merge_queue
+    end
+  end
+
+  # The PR's last poll: `ctx` wins, then what the ticket's Watchdog recorded on
+  # its row (bd-741sid).
+  #
+  # A status read for a head the PR has since moved off (bd-9kfdkf) says
+  # nothing about the current head, so it reads as no status until the
+  # Watchdog's next poll refreshes it — a phantom conflict on a superseded head
+  # must not raise `:merge_blocked`.
+  defp merger_status(ticket, ctx) do
+    status =
+      case Map.get(ctx, :merger_status) do
+        %{} = status -> status
+        _ -> PullRequest.merger_status(ticket) || %{}
+      end
+
+    if stale_head?(status, ticket), do: %{}, else: status
+  end
+
+  defp stale_head?(status, ticket) do
+    current = ticket |> Map.get(:merge_watch) |> current_head()
+    seen = Map.get(status, :head_sha)
+    is_binary(current) and is_binary(seen) and current != "" and seen != "" and seen != current
+  end
+
+  defp current_head(%{} = watch),
+    do: Map.get(watch, "local_head_sha") || Map.get(watch, :local_head_sha)
+
+  defp current_head(_), do: nil
+
+  defp ci_pending?(status, pending_merge) do
+    Map.get(status, :pipeline) in @ci_pending or pending_reason(pending_merge) == "ci_pending"
+  end
+
+  defp pending_reason(%{} = pending), do: Map.get(pending, "reason") || Map.get(pending, :reason)
+  defp pending_reason(_), do: nil
+
+  # ---- attention ----------------------------------------------------------
+
+  defp attention_facts(state, ticket, runs, ctx, ci_wait, cut_off) do
+    %{
+      state: state,
+      run:
+        if(state == :active,
+          do: run_fact(ticket, runs, ctx) |> waiting_not_crashed(ci_wait, cut_off)
+        ),
+      block: if(state == :merging, do: block_fact(merger_status(ticket, ctx))),
+      watchdog_alive: Map.get(ctx, :watchdog_alive),
+      resume_queued: Map.get(ctx, :resume_queued),
+      conflict_pass: if(state == :merging, do: conflict_pass?(runs))
+    }
+  end
+
+  # bd-1u15tl: a conflict-resolver pass on the ticket, whatever its state — it
+  # lingers `:finished` until the Watchdog's next poll tears it down, and that
+  # poll is also what refreshes the stored `conflict` status.
+  defp conflict_pass?(runs), do: Enum.any?(runs, &(meta(&1, :role) == :conflict_resolver))
+
+  # bd-2gc809: a gate waiting on CI has no agent by design, and after a restart
+  # not even the author row: the run that finished or vanished is not a crash.
+  #
+  # bd-2yt0d2: nor is a pass the stop cut off (`ReviewPass`), in the moment
+  # before the boot sweep has a gate running it again.
+  defp waiting_not_crashed(fact, %{sha: _}, _cut_off) when fact in [:failed, :orphaned], do: nil
+
+  defp waiting_not_crashed(fact, _ci_wait, %{} = _cut_off) when fact in [:failed, :orphaned],
+    do: nil
+
+  defp waiting_not_crashed(fact, _ci_wait, _cut_off), do: fact
+
+  # What the ticket's runs say, for `Attention`: a live run anywhere on the
+  # ticket is the machine's turn, whatever an earlier run did — which is what
+  # keeps a failed run with a follow-up round under way out of anyone's
+  # attention.
+  defp run_fact(ticket, runs, ctx) do
+    id = Map.get(ticket, :id)
+
+    cond do
+      Enum.any?(runs, &(run_class(&1) == :running)) ->
+        :live
+
+      match?(%{state: :waiting}, primary(runs, id)) ->
+        :question
+
+      true ->
+        author_fact(author_runs(runs, id), ticket, ctx)
+    end
+  end
+
+  defp author_fact([], ticket, ctx) do
+    if Map.has_key?(ctx, :runs) and orphaned?(ticket, ctx) do
+      held_or(:orphaned, ticket, ctx)
+    end
+  end
+
+  defp author_fact(authors, ticket, ctx) do
+    classes = Enum.map(authors, &run_class/1)
+
+    cond do
+      # bd-98gi5m: a deliberate stop is not a crash.
+      Enum.all?(classes, &(&1 in [:waiting, :stopped])) and :stopped in classes ->
+        nil
+
+      Enum.all?(classes, &(&1 == :waiting)) ->
+        held_or(:failed, ticket, ctx)
+
+      true ->
+        nil
+    end
+  end
+
+  # bd-zkmvia: a ticket whose next round the quota gate is holding has no run
+  # on purpose and resumes by itself — it is not a crash. `ctx.held` wins; else
+  # the workspace's DispatchQueue is asked, only once a crash is the verdict.
+  defp held_or(fact, ticket, ctx) do
+    held =
+      case Map.fetch(ctx, :held) do
+        {:ok, held} -> held not in [nil, false]
+        :error -> DispatchQueue.held?(Map.get(ticket, :workspace_id), Map.get(ticket, :id))
+      end
+
+    if held, do: :held, else: fact
+  end
+
+  # The block that reads as `:merge_blocked` in `merging_step/2`: a conflict,
+  # red CI or a draft whatever the approval state, otherwise the effective
+  # (approval-gated) block reason.
+  defp block_fact(status) do
+    case Watchdog.block_reason(status) do
+      raw when raw in @hard_blocks or raw == :behind_base -> raw
+      _ -> Watchdog.effective_block_reason(status)
+    end
+  end
+
+  # ---- runs ---------------------------------------------------------------
+
+  defp runs_for(ticket, ctx) do
+    ctx |> Map.get(:runs) |> List.wrap() |> Enum.filter(&touches?(&1, Map.get(ticket, :id)))
+  end
+
+  defp touches?(run, id) do
+    Map.get(run, :task_id) == id or meta(run, :reviews) == id or meta(run, :revises) == id
+  end
+
+  # The author's primary row — no role of its own — rather than a subordinate
+  # pass sharing its id. nil when every author row is a subordinate.
+  defp primary(runs, ticket_id) do
+    case author_runs(runs, ticket_id) do
+      [] ->
+        nil
+
+      authors ->
+        Enum.find(authors, &(is_nil(Map.get(&1, :role)) and is_nil(meta(&1, :role))))
+    end
+  end
+
+  defp meta(run, key) do
+    case Map.get(run, :meta) do
+      %{} = meta -> Map.get(meta, key)
+      _ -> nil
+    end
+  end
+end

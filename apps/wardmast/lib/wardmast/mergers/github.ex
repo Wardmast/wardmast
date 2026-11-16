@@ -1,0 +1,3293 @@
+defmodule Wardmast.Mergers.Github do
+  @moduledoc """
+  GitHub adapter implementing `Wardmast.Mergers.Merger`.
+
+  Wraps GitHub's REST API v3 for pull-request open / get / merge / close /
+  comment / request-review flows. This is the hosted-forge merge path for
+  GitHub-hosted rigs (and for Wardmast's own repo).
+
+  ## Active-workspace contract
+
+  The `Merger` behaviour callbacks take an opaque `mr_ref` with no workspace
+  context. But GitHub needs an owner, repo, token, and default settings — all
+  workspace-scoped. We resolve those through `Wardmast.Mergers.Github.Config`,
+  exactly as `Wardmast.Trackers.Jira` does for the tracker side:
+
+    1. Callers (request middleware, CLI command, scheduler job) call
+       `Config.put_active(workspace)` to populate the per-process config.
+    2. `Application.get_env(:wardmast, :github_merger_default_config)` is the
+       fallback for tools that run without a workspace context.
+    3. With neither, callbacks return `{:error, %Error{kind: :config_missing}}`.
+
+  ## `mr_ref`
+
+  The opaque ref minted by `open/4` is one of:
+
+    * `"<owner>/<repo>#<number>"` — when the target repo was derived per-repo
+      from the repo's git remote (multi-repo workspaces where `merge.config`
+      omits `repo`). The owner/repo are baked into the ref so later
+      callbacks (`get/1`, `merge/2`, …) talk to the same repo without
+      re-resolving.
+    * `"#<number>"` — when the target repo came from workspace config
+      (`merge.config.repo`). The legacy single-repo shape; owner/repo are
+      re-read from the active workspace cfg on each callback.
+
+  Callers should treat the ref as opaque — the shape is internal.
+
+  ## Per-repo repo derivation
+
+  When `workspace.config["merge"]["config"]` omits `repo` (a multi-repo
+  workspace whose repos live in *different* repos, e.g. the `acme`
+  workspace's four `acme-corp/*` repos), `open/4` derives the
+  target repo from the repo's `origin` remote via
+  `Wardmast.Mergers.Github.RepoResolver` and bakes the result into the
+  minted `mr_ref`. The caller passes the repo path through `opts.repo_path`
+  (the same key the `Direct` adapter already requires; the worker seeds
+  it from the repo's worktree).
+
+  ## Config selection
+
+  The `Wardmast.Mergers` dispatcher resolves this adapter when a workspace's
+  `config["merge"]["strategy"]` is `"github"`. The adapter's own settings live
+  under `config["merge"]["config"]` — see `Wardmast.Mergers.Github.Config`.
+
+  ## Auth
+
+  GitHub uses **Bearer** auth. The credentials reference lives in the merger
+  config; `credentials_ref` is a small DSL — currently only `"env:NAME"` is
+  supported (looks up `System.get_env/1`); a bare string is treated as a
+  literal token.
+
+  ## Tests
+
+  Wired up to `Req.Test`: when
+  `Application.get_env(:wardmast, :github_http_stub, false)` is true, every
+  request injects `plug: {Req.Test, #{inspect(Wardmast.Mergers.Github.HTTP)}}`.
+  This adapter **never** hits a real GitHub endpoint from tests.
+  """
+
+  @behaviour Wardmast.Mergers.Merger
+
+  require Logger
+
+  alias Wardmast.Http.Client
+
+  alias Wardmast.Mergers.{
+    CILogExcerpt,
+    CIQueue,
+    CIRerun,
+    Github.BlockedState,
+    Github.Config,
+    Github.Error,
+    Github.RepoResolver,
+    Merger
+  }
+
+  alias Wardmast.Providers.Github, as: Provider
+
+  @stub_name Wardmast.Mergers.Github.HTTP
+
+  # Cap pages so a runaway response can't hammer the API. 50 pages × 100/page
+  # = 5,000 reviews, well above any long-lived PR's review history.
+  @max_review_pages 50
+
+  # Check-run conclusions that count as a CI failure (shared by the pipeline
+  # classifier and the `:ci_failed` log fetch). `timed_out` stays a code failure:
+  # a hung test is as likely this diff's as the runner's.
+  @failing_conclusions ["failure", "timed_out", "action_required"]
+
+  # Conclusions that say the check never gave a verdict — the runner was
+  # cancelled out from under it (a superseded duplicate run, a GitHub Actions
+  # incident), not the code. They re-run; they never dispatch a fix round (#360).
+  @infra_conclusions ["cancelled", "stale"]
+
+  # A run `rerun_ci/2` can act on: a settled failure or an infrastructure outcome.
+  @rerunnable_conclusions @failing_conclusions ++ @infra_conclusions
+
+  # How much of each failing check's output to keep in the fix-pass briefing.
+  @log_tail_limit 4_000
+
+  # GraphQL query for a PR's review threads with their full comment history.
+  # REST has no `isResolved` field, so unresolved-thread detection (bd-823q7e)
+  # goes through GraphQL. `databaseId` is the integer comment id used as a
+  # high-watermark cursor (find replies newer than `last_seen_comment_id`).
+  # `first: 100` on both threads and comments covers all but pathological PRs;
+  # we don't paginate (PRPatrol's follow-up worker re-reads as needed).
+  @review_threads_query """
+  query($owner: String!, $repo: String!, $number: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        reviewThreads(first: 100) {
+          nodes {
+            id
+            isResolved
+            path
+            line
+            comments(first: 100) {
+              nodes {
+                databaseId
+                body
+                author { login }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  """
+
+  # GraphQL mutation to close a review thread (bd-76ydsu) — the author-side
+  # follow-up worker's counterpart to reply_to_review_comment/4, used after a
+  # bot/Copilot thread has been addressed and replied to.
+  @resolve_review_thread_mutation """
+  mutation($id: ID!) {
+    resolveReviewThread(input: {threadId: $id}) {
+      thread { id isResolved }
+    }
+  }
+  """
+
+  # GraphQL query for the PR head commit's status-check rollup, used by
+  # `list_required_check_failures/1` (bd-ayetel) to tell a required check
+  # apart from an optional/informational one. REST's check-runs API (used by
+  # `failing_check_logs/1`) has no notion of "required for merge" — that only
+  # exists via GraphQL's `isRequired` field on each rollup context, which
+  # works for both a `CheckRun` (Actions / most CI) and a legacy
+  # `StatusContext` (external CI posting via the Statuses API). `isRequired`
+  # takes the PR number so GitHub can resolve it against that PR's branch
+  # protection rule. Also carries the PR's `reviewDecision`, which the
+  # blocked-state classification reads (bd-ati3cp, `BlockedState`).
+  @required_checks_query """
+  query($owner: String!, $repo: String!, $number: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        reviewDecision
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                contexts(first: 100) {
+                  nodes {
+                    __typename
+                    ... on CheckRun {
+                      name
+                      status
+                      conclusion
+                      detailsUrl
+                      isRequired(pullRequestNumber: $number)
+                    }
+                    ... on StatusContext {
+                      context
+                      state
+                      targetUrl
+                      description
+                      isRequired(pullRequestNumber: $number)
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  """
+
+  # `CheckRun.conclusion` values (GraphQL enum, upper snake case) that count as
+  # a settled failure — the GraphQL-side counterpart to `@failing_conclusions`.
+  @failing_check_run_conclusions ["FAILURE", "TIMED_OUT", "ACTION_REQUIRED"]
+
+  # `StatusContext.state` values that count as a settled failure. Legacy
+  # commit statuses have no separate "still running" status field — PENDING
+  # already means "not settled" and is excluded by omission.
+  @failing_status_context_states ["FAILURE", "ERROR"]
+
+  # ---- Merger behaviour ----------------------------------------------------
+
+  @impl true
+  def prepare(workspace, opts \\ []) do
+    Config.put_active(workspace)
+
+    case Keyword.get(opts, :repo) do
+      repo when is_binary(repo) and repo != "" ->
+        Config.override_repo(repo)
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  end
+
+  @impl true
+  def open(branch, title, description, opts)
+      when is_binary(branch) and is_binary(title) and is_map(opts) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, ref_form}} <- resolve_target(cfg, opts) do
+      # Look-before-create (bd-8rrn9t): a re-entry into open/4 for a branch
+      # that already has an open PR — e.g. a worker opened the PR itself
+      # earlier in its run, or finalize is re-run after a restart — should
+      # adopt that PR rather than race a create against it. The 422
+      # "already exists" handling below stays as a fallback for the case
+      # where the PR is created concurrently between this lookup and the
+      # POST (or the lookup itself fails).
+      case find_existing_open_pr_number(cfg, owner, repo, branch) do
+        {:ok, number} ->
+          {:ok, build_mr_ref(ref_form, owner, repo, number)}
+
+        _ ->
+          create_pr(cfg, owner, repo, ref_form, branch, title, description, opts)
+      end
+    end
+  end
+
+  # Pre-existing complexity 13 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp create_pr(cfg, owner, repo, ref_form, branch, title, description, opts) do
+    target = Map.get(opts, :target_branch) || cfg.default_target_branch
+
+    payload = %{
+      "head" => branch,
+      "base" => target,
+      "title" => title,
+      "body" => description || "",
+      "draft" => Map.get(opts, :draft, false)
+    }
+
+    case request(cfg, :post, "/repos/#{owner}/#{repo}/pulls", json: payload) do
+      {:ok, %Req.Response{status: status, body: %{"number" => number}}}
+      when status in 200..299 and is_integer(number) ->
+        mr_ref = build_mr_ref(ref_form, owner, repo, number)
+        maybe_request_reviewers(cfg, owner, repo, number, reviewers(cfg, opts))
+        {:ok, mr_ref}
+
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: "PR creation response missing \"number\"",
+           raw: body
+         }}
+
+      {:ok, %Req.Response{status: 422, body: body}} ->
+        # GitHub returns 422 when an open PR already exists for the head
+        # branch — the look-before-create GET above raced the PR's creation
+        # (or itself failed). Treat open/4 as idempotent: resolve the
+        # existing PR instead of failing the retry. Reviewer requests are
+        # skipped — the existing PR may already have them, and the merge
+        # step is what the caller actually wants on retry.
+        if already_exists_error?(body) do
+          case find_existing_open_pr_number(cfg, owner, repo, branch) do
+            {:ok, number} -> {:ok, build_mr_ref(ref_form, owner, repo, number)}
+            :none -> {:error, http_error(422, body)}
+            {:error, _} -> {:error, http_error(422, body)}
+          end
+        else
+          {:error, http_error(422, body)}
+        end
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  @impl true
+  def get(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, pr} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", [])
+           |> handle_json(),
+         {:ok, reviews} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}/reviews",
+             params: [per_page: 100]
+           )
+           |> handle_json() do
+      head_sha = get_in(pr, ["head", "sha"])
+      pipeline = fetch_pipeline_status(cfg, owner, repo, head_sha)
+      status = pr_status(pr)
+      approved = approved?(reviews)
+      changes_requested = changes_requested?(reviews)
+
+      {block_reason, block_detail} =
+        block_reason(
+          cfg,
+          {owner, repo, number},
+          pr,
+          status,
+          pipeline,
+          approved,
+          changes_requested
+        )
+
+      {:ok,
+       %{
+         ref: mr_ref,
+         status: status,
+         # PR head commit SHA — ReviewPatrol records this into an engagement's
+         # `last_reviewed_sha` so it can detect new commits on later ticks.
+         head_sha: head_sha,
+         # The commit the merge landed on the base branch — the deploy watch
+         # follows this commit's workflow runs (#967).
+         merge_sha: Map.get(pr, "merge_commit_sha"),
+         # The PR's target branch — used to build a local `git diff
+         # base_ref..HEAD` against a Tier-2 checkout worktree, sidestepping
+         # GitHub's REST diff endpoint 20k-line cap (bd-5yp6yn).
+         base_ref: get_in(pr, ["base", "ref"]),
+         # The PR's head branch: what a host-side push to the PR lands on (the
+         # visual-baseline refresh, bd-9obzu9).
+         head_ref: get_in(pr, ["head", "ref"]),
+         # The PR author's login — ReviewPatrol uses this to tell an author's
+         # reply on a review thread apart from another reviewer's comment
+         # (phase-2 author-reply handling, bd-8fg64x).
+         author: get_in(pr, ["user", "login"]),
+         # PR title/body — folded into the reviewer prompt (bd-adpwl0) so the
+         # reviewer sees the author's own account of the change's intent.
+         title: Map.get(pr, "title"),
+         body: Map.get(pr, "body"),
+         approved: approved,
+         changes_requested: changes_requested,
+         latest_review_id: latest_changes_requested_id(reviews),
+         pipeline: pipeline,
+         ci_clean: merge_state(pr) == "clean",
+         conflicting: Map.get(pr, "mergeable") == false or merge_state(pr) == "dirty",
+         block_reason: block_reason,
+         # For `:blocked_other`, the forge rule(s) still unmet, e.g.
+         # "required_deployments (staging)" — nil when there is nothing to name
+         # (bd-ati3cp). Recorded with the rest of this map as the worker's
+         # `last_merger_status`.
+         block_detail: block_detail,
+         url: Map.get(pr, "html_url") || ""
+       }}
+    end
+  end
+
+  @doc """
+  Whether the authenticated token's own identity already has a *current*
+  APPROVED verdict on the PR — i.e. the login this adapter posts reviews under
+  has approved it. Used by the external-review dispatch guard (bd-7z5pi5) to
+  avoid double-posting an approval under our own identity.
+
+  Returns `{:ok, boolean()}` or `{:error, term()}`. When the token's own login
+  can't be resolved (a GitHub App token with no user, a `/user` failure), returns
+  `{:ok, false}` — we can't attribute an approval to ourselves, so we don't block.
+
+  Not part of the `Merger` behaviour: an optional capability the guard probes
+  via `function_exported?/3`, so an adapter without it (e.g. GitLab) fails open.
+  """
+  @spec self_approved?(String.t()) :: {:ok, boolean()} | {:error, term()}
+  def self_approved?(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, reviews} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}/reviews",
+             params: [per_page: 100]
+           )
+           |> handle_json() do
+      case authenticated_login(cfg) do
+        login when is_binary(login) and login != "" ->
+          {:ok, latest_state_for(reviews, login) == "APPROVED"}
+
+        _ ->
+          {:ok, false}
+      end
+    end
+  end
+
+  @doc """
+  Whether our identity's latest verdict is an APPROVED review whose
+  `commit_id` equals the PR's current head SHA (bd-8vb2z6). Such an approval
+  is current by definition, whatever `reviewDecision` says. `{:ok, false}`
+  when we have no approval, it was given on an older commit, or our login
+  can't be resolved.
+
+  Optional capability probed via `function_exported?/3`.
+  """
+  @spec self_approved_at_head?(String.t()) :: {:ok, boolean()} | {:error, term()}
+  def self_approved_at_head?(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, reviews} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}/reviews",
+             params: [per_page: 100]
+           )
+           |> handle_json() do
+      case authenticated_login(cfg) do
+        login when is_binary(login) and login != "" ->
+          approved_commit_is_head(cfg, {owner, repo, number}, latest_verdict_for(reviews, login))
+
+        _ ->
+          {:ok, false}
+      end
+    end
+  end
+
+  defp approved_commit_is_head(
+         cfg,
+         {owner, repo, number},
+         %{"state" => "APPROVED", "commit_id" => commit}
+       )
+       when is_binary(commit) do
+    with {:ok, head} <- fetch_commit_id(cfg, owner, repo, number, %{}) do
+      {:ok, head == commit}
+    end
+  end
+
+  defp approved_commit_is_head(_cfg, _ref, _verdict), do: {:ok, false}
+
+  @doc """
+  GitHub's own judgment of the PR's review state — the GraphQL
+  `reviewDecision` (`"APPROVED"`, `"REVIEW_REQUIRED"`, `"CHANGES_REQUESTED"`,
+  or `nil` when no branch rule requires a review). Unlike `self_approved?/1`
+  (which only reads our latest review verdict), this reflects branch
+  protection: a stale-review dismissal or a rule that stops counting an
+  approval after new commits shows up here as `REVIEW_REQUIRED`
+  (bd-6zlfq6, see `Wardmast.Reviews.ApprovalCurrency`).
+
+  Returns `{:ok, String.t() | nil}` or `{:error, term()}`. Not part of the
+  `Merger` behaviour: an optional capability probed via `function_exported?/3`.
+  """
+  @spec review_decision(String.t()) :: {:ok, String.t() | nil} | {:error, term()}
+  def review_decision(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, body} <- graphql_required_checks(cfg, owner, repo, number) do
+      case body do
+        %{"data" => %{"repository" => %{"pullRequest" => %{} = pull}}} ->
+          {:ok, Map.get(pull, "reviewDecision")}
+
+        other ->
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: 200,
+             message: "unexpected reviewDecision shape",
+             raw: other
+           }}
+      end
+    end
+  end
+
+  @doc """
+  bd-a16rgk: best-effort fetch of a single file's content at `ref` (normally
+  the PR's head SHA), so a reviewer finding that depends on code outside the
+  diff can be checked before its severity is finalized instead of posted as
+  a blocking, unverified guess. Not part of the `Merger` behaviour — like
+  `self_approved?/1` above, `CodeReview.Checks` probes for it via
+  `function_exported?/3`, so an adapter without it (GitLab, Direct) simply
+  skips verification and falls back to the existing hedge/CI-based capping.
+
+  Returns `{:ok, content}` (raw file text) or `{:error, term}` — a 404 (file
+  doesn't exist at that ref) surfaces as an ordinary error, same as any
+  other fetch failure, so the caller can fail open.
+  """
+  @spec file_content(String.t(), String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def file_content(mr_ref, path, ref)
+      when is_binary(mr_ref) and is_binary(path) and is_binary(ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, body} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/contents/#{URI.encode(path)}",
+             params: [ref: ref]
+           )
+           |> handle_json() do
+      decode_content(body)
+    end
+  end
+
+  defp decode_content(%{"content" => b64, "encoding" => "base64"}) when is_binary(b64) do
+    case Base.decode64(String.replace(b64, "\n", "")) do
+      {:ok, bin} ->
+        {:ok, bin}
+
+      :error ->
+        {:error,
+         %Error{kind: :validation_failed, status: 200, message: "bad base64 content", raw: b64}}
+    end
+  end
+
+  defp decode_content(other) do
+    {:error,
+     %Error{
+       kind: :validation_failed,
+       status: 200,
+       message: "unexpected contents shape",
+       raw: other
+     }}
+  end
+
+  @doc """
+  bd-a16rgk: resolve a bare filename or module reference mentioned in
+  reviewer prose (e.g. "FallbackController", with no path attached) to an
+  actual repo path, via GitHub code search — `file_content/3` above needs a
+  real path, and the reviewer's own claim text rarely includes one. Returns
+  `{:ok, path}` for the first match or `:error` for no match / any failure
+  (best-effort: the Search API only indexes the default branch, so a file
+  added on the PR branch itself can be missed — that just means
+  verification is skipped for that finding, not that it produces a wrong
+  answer).
+  """
+  @spec search_path(String.t(), String.t()) :: {:ok, String.t()} | :error
+  def search_path(mr_ref, filename) when is_binary(mr_ref) and is_binary(filename) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, %{"items" => [%{"path" => path} | _]}} <-
+           request(cfg, :get, "/search/code",
+             params: [q: "filename:#{filename} repo:#{owner}/#{repo}"]
+           )
+           |> handle_json() do
+      {:ok, path}
+    else
+      _ -> :error
+    end
+  end
+
+  @doc """
+  The commit SHA the authenticated identity's most recent submitted verdict
+  review (APPROVED or CHANGES_REQUESTED) was posted against — the
+  source-of-truth check for "have we already verdicted this exact commit,"
+  independent of any local bookkeeping (bd-3948ey: ReviewPatrol re-reviewed
+  and downgraded a verdict on a SHA it had just approved). Used by
+  `Wardmast.Workflows.CodeReview`'s `:verdict` step to refuse posting a second
+  verdict for a commit we've already verdicted, regardless of which caller
+  (ReviewPatrol's tick, a `force: true` `ExternalReview` re-dispatch, …) got
+  there.
+
+  Paginates through GitHub's `pulls/N/reviews` (walking `rel="next"` via
+  `Wardmast.Http.Client.paginate/4`) — the default page size (30) was silently
+  truncating this list on a long-lived engagement with many re-review rounds,
+  hiding the actual latest review (at the end of the chronological list)
+  behind older ones on unfetched pages.
+
+  Returns `{:ok, sha_or_nil}` or `{:error, term()}`. `nil` when we hold no
+  verdict review yet, or when the token's own login can't be resolved (fails
+  open — we can't attribute a prior review to ourselves, so we don't block).
+
+  Not part of the `Merger` behaviour: an optional capability the verdict step
+  probes via `function_exported?/3`, so an adapter without it (e.g. GitLab)
+  fails open (no guard; unchanged prior behavior).
+  """
+  @spec latest_own_review_sha(String.t()) :: {:ok, String.t() | nil} | {:error, term()}
+  def latest_own_review_sha(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, reviews} <- paginate_reviews(cfg, owner, repo, number) do
+      case authenticated_login(cfg) do
+        login when is_binary(login) and login != "" ->
+          {:ok, latest_own_review_commit(reviews, login)}
+
+        _ ->
+          {:ok, nil}
+      end
+    end
+  end
+
+  defp paginate_reviews(cfg, owner, repo, number) do
+    Client.paginate(
+      client(cfg),
+      "/repos/#{owner}/#{repo}/pulls/#{number}/reviews",
+      [params: [per_page: 100]],
+      max_pages: @max_review_pages,
+      next_page: &Provider.next_page/3
+    )
+  end
+
+  # The commit_id of our own most recent verdict review. Mirrors
+  # `latest_state_for/2`'s ordering assumption (GitHub returns reviews
+  # chronologically, so the last matching entry is the current one).
+  defp latest_own_review_commit(reviews, login) when is_list(reviews) and is_binary(login) do
+    reviews
+    |> Enum.filter(
+      &(Map.get(&1, "state") in ["APPROVED", "CHANGES_REQUESTED"] and
+          review_author(&1) == login)
+    )
+    |> List.last()
+    |> case do
+      nil -> nil
+      review -> Map.get(review, "commit_id")
+    end
+  end
+
+  defp latest_own_review_commit(_reviews, _login), do: nil
+
+  @doc """
+  Whether the authenticated token's own identity currently has a *pending*
+  review request on the PR — i.e. its login appears in GitHub's
+  `requested_reviewers`. GitHub clears that bit automatically the moment we
+  submit a review, so seeing it set again means someone (typically the PR
+  author) explicitly re-requested review from us since our last one — the
+  same signal a human "approval is sticky unless asked again" convention
+  keys on. Used to override ReviewPatrol's sticky-approval decline
+  (bd-8us1cp) even when the new commits would otherwise classify as
+  doc/test/formatting-only.
+
+  Returns `{:ok, boolean()}` or `{:error, term()}`. When the token's own
+  login can't be resolved, returns `{:ok, false}` — we can't tell whether the
+  request targets us, so we don't override.
+
+  Not part of the `Merger` behaviour: an optional capability the sticky-
+  approval gate probes via `function_exported?/3`, so an adapter without it
+  (e.g. GitLab) fails open (no override; unchanged prior behavior).
+  """
+  @spec review_requested?(String.t()) :: {:ok, boolean()} | {:error, term()}
+  def review_requested?(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, pr} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", [])
+           |> handle_json() do
+      case authenticated_login(cfg) do
+        login when is_binary(login) and login != "" ->
+          requested =
+            pr
+            |> Map.get("requested_reviewers", [])
+            |> List.wrap()
+            |> Enum.any?(&(get_in(&1, ["login"]) == login))
+
+          {:ok, requested}
+
+        _ ->
+          {:ok, false}
+      end
+    end
+  end
+
+  @impl true
+  def list_review_feedback(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, reviews} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}/reviews", [])
+           |> handle_json(),
+         {:ok, comments} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}/comments", [])
+           |> handle_json() do
+      reviews = List.wrap(reviews)
+      comments = List.wrap(comments)
+
+      {:ok,
+       %{
+         changes_requested: changes_requested?(reviews),
+         latest_review_id: latest_changes_requested_id(reviews),
+         feedback: build_feedback(reviews, comments)
+       }}
+    end
+  end
+
+  @impl true
+  def merge(mr_ref, expected_sha) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
+      # bd-dxgris / #1493: GitHub's merge endpoint takes the same `sha`
+      # precondition GitLab's does — "SHA that pull request head must match to
+      # allow merge" — so the race closes on both forges in the same change
+      # rather than being left asymmetric. A head that advanced past the
+      # reviewed commit comes back 409 ("Head branch was modified") instead of
+      # merging commits no reviewer ever saw.
+      payload =
+        %{"merge_method" => Atom.to_string(cfg.merge_method)}
+        |> maybe_put_sha(expected_sha)
+
+      request(cfg, :put, "/repos/#{owner}/#{repo}/pulls/#{number}/merge", json: payload)
+      |> expect_ok()
+    end
+  end
+
+  defp maybe_put_sha(payload, sha) when is_binary(sha) and sha != "",
+    do: Map.put(payload, "sha", sha)
+
+  defp maybe_put_sha(payload, _sha), do: payload
+
+  @impl true
+  def update_branch(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
+      # GitHub's update-branch merges the base into the PR head (202 Accepted,
+      # async). A 422 here means the update can't be performed cleanly (e.g. the
+      # base advanced in a way that conflicts); the queue treats that as
+      # non-fatal and lets the next `get/1` poll surface the conflict.
+      request(cfg, :put, "/repos/#{owner}/#{repo}/pulls/#{number}/update-branch", json: %{})
+      |> expect_ok()
+    end
+  end
+
+  @impl true
+  def failing_check_logs(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, pr} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", []) |> handle_json() do
+      fetch_failing_checks(cfg, owner, repo, get_in(pr, ["head", "sha"]))
+    end
+  end
+
+  # Actions artifacts belong to a workflow run, not a job, so the caller names the
+  # artifact the visual job uploads (`opts.artifact`).
+  @impl true
+  def ci_job_artifacts(_mr_ref, _job_name, %{artifact: artifact})
+      when artifact in [nil, ""],
+      do: {:error, :artifact_name_required}
+
+  def ci_job_artifacts(_mr_ref, _job_name, opts) when not is_map_key(opts, :artifact),
+    do: {:error, :artifact_name_required}
+
+  def ci_job_artifacts(mr_ref, job_name, %{artifact: artifact}) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, pr} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", []) |> handle_json(),
+         sha when is_binary(sha) <- get_in(pr, ["head", "sha"]) || {:error, :no_head_sha},
+         {:ok, checks} <- head_check_runs(cfg, owner, repo, sha) do
+      failed =
+        checks
+        |> latest_per_check()
+        |> Enum.filter(&failing_check?/1)
+        |> Enum.map(&Map.get(&1, "name"))
+        |> Enum.uniq()
+
+      with true <- job_name in failed,
+           {:ok, archive} <- run_artifact(cfg, owner, repo, sha, artifact) do
+        {:ok, %{sha: sha, failed_jobs: failed, archive: archive}}
+      else
+        false -> {:error, :job_not_failed}
+        {:error, _} = error -> error
+      end
+    end
+  end
+
+  @deploy_run_limit 10
+
+  @impl true
+  def deploy_pipelines(mr_ref, branch, _opts) when is_binary(mr_ref) and is_binary(branch) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, %{"workflow_runs" => runs}} when is_list(runs) <-
+           cfg
+           |> request(:get, "/repos/#{owner}/#{repo}/actions/runs",
+             params: [branch: branch, event: "push", per_page: 20]
+           )
+           |> handle_json() do
+      runs
+      |> Enum.sort_by(&(Map.get(&1, "id") || 0), :desc)
+      |> Enum.take(@deploy_run_limit)
+      |> Enum.reduce_while({:ok, []}, fn run, {:ok, acc} ->
+        path = "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/jobs"
+
+        case cfg |> request(:get, path, params: [per_page: 100]) |> handle_json() do
+          {:ok, %{"jobs" => jobs}} when is_list(jobs) ->
+            entry = %{
+              id: Map.get(run, "id"),
+              sha: Map.get(run, "head_sha"),
+              status: deploy_status(run),
+              url: Map.get(run, "html_url"),
+              jobs: Enum.map(jobs, &%{name: Map.get(&1, "name"), status: deploy_status(&1)})
+            }
+
+            {:cont, {:ok, [entry | acc]}}
+
+          {:ok, _} ->
+            {:halt, {:error, :unexpected_jobs_response}}
+
+          {:error, _} = error ->
+            {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, entries} -> {:ok, Enum.reverse(entries)}
+        error -> error
+      end
+    else
+      {:ok, _} -> {:error, :unexpected_runs_response}
+      {:error, _} = error -> error
+    end
+  end
+
+  # The target branch's verdict is its newest *commit's* workflow runs together:
+  # one commit runs several workflows, and a green one beside a red one is red.
+  # A commit still running or cancelled has no verdict yet, so the walk passes
+  # over it to the newest commit that settled.
+  @impl true
+  def branch_pipeline(mr_ref, branch, _opts) when is_binary(mr_ref) and is_binary(branch) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, %{"workflow_runs" => runs}} when is_list(runs) <-
+           cfg
+           |> request(:get, "/repos/#{owner}/#{repo}/actions/runs",
+             params: [branch: branch, event: "push", per_page: 30]
+           )
+           |> handle_json() do
+      {:ok, runs |> settled_branch_run() |> with_branch_jobs(cfg, owner, repo)}
+    else
+      {:ok, _} -> {:error, :unexpected_runs_response}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp settled_branch_run(runs) do
+    runs
+    |> Enum.group_by(&Map.get(&1, "head_sha"))
+    |> Enum.sort_by(
+      fn {_sha, group} -> group |> Enum.map(&(Map.get(&1, "id") || 0)) |> Enum.max() end,
+      :desc
+    )
+    |> Enum.find_value(fn {sha, group} ->
+      statuses = Enum.map(group, &deploy_status/1)
+
+      cond do
+        "failed" in statuses -> branch_run(sha, group, "failed")
+        Enum.all?(statuses, &(&1 in ["success", "skipped"])) -> branch_run(sha, group, "success")
+        true -> nil
+      end
+    end)
+  end
+
+  defp branch_run(sha, group, status) do
+    run = Enum.find(group, &(deploy_status(&1) == status)) || hd(group)
+
+    %{
+      id: Map.get(run, "id"),
+      sha: sha,
+      status: status,
+      url: Map.get(run, "html_url"),
+      failed_runs: Enum.filter(group, &(deploy_status(&1) == "failed"))
+    }
+  end
+
+  # Job-level detail for a failed commit: every failed workflow run's jobs
+  # (`stage` is the workflow name — GitHub has no stages). Any job-read error
+  # leaves `jobs: nil`, so the pipeline-level verdict stands.
+  defp with_branch_jobs(nil, _cfg, _owner, _repo), do: nil
+
+  defp with_branch_jobs(%{failed_runs: failed_runs} = pipeline, cfg, owner, repo) do
+    jobs =
+      Enum.reduce_while(failed_runs, {:ok, []}, fn run, {:ok, acc} ->
+        path = "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/jobs"
+
+        case cfg |> request(:get, path, params: [per_page: 100]) |> handle_json() do
+          {:ok, %{"jobs" => jobs}} when is_list(jobs) ->
+            entries =
+              Enum.map(
+                jobs,
+                &%{
+                  name: Map.get(&1, "name"),
+                  stage: Map.get(run, "name"),
+                  status: deploy_status(&1)
+                }
+              )
+
+            {:cont, {:ok, acc ++ entries}}
+
+          _ ->
+            {:halt, :error}
+        end
+      end)
+
+    pipeline = Map.delete(pipeline, :failed_runs)
+
+    case jobs do
+      {:ok, entries} when failed_runs != [] -> Map.put(pipeline, :jobs, entries)
+      _ -> pipeline
+    end
+  end
+
+  # A workflow run / job in GitLab's status vocabulary, the one
+  # `Wardmast.Workflows.DeployWatch` reads.
+  defp deploy_status(%{"status" => "completed", "conclusion" => conclusion}) do
+    case conclusion do
+      "success" -> "success"
+      "skipped" -> "skipped"
+      "cancelled" -> "canceled"
+      "action_required" -> "manual"
+      _ -> "failed"
+    end
+  end
+
+  defp deploy_status(%{"status" => "in_progress"}), do: "running"
+  defp deploy_status(%{"status" => "waiting"}), do: "manual"
+  defp deploy_status(_), do: "pending"
+
+  @green_walk_limit 30
+
+  @impl true
+  def last_green_job_sha(mr_ref, job_name, _opts) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, commits} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}/commits",
+             params: [per_page: 100]
+           )
+           |> handle_json() do
+      commits
+      |> List.wrap()
+      |> Enum.reverse()
+      |> Enum.take(@green_walk_limit)
+      |> Enum.find_value({:ok, nil}, &green_commit(cfg, owner, repo, &1, job_name))
+    end
+  end
+
+  # `{:ok, sha}` when `job_name` passed on the commit, an error to stop the walk,
+  # `nil` to go on to the next (older) commit.
+  defp green_commit(cfg, owner, repo, %{"sha" => sha}, job_name) do
+    case head_check_runs(cfg, owner, repo, sha) do
+      {:ok, runs} ->
+        passed? =
+          runs
+          |> latest_per_check()
+          |> Enum.any?(
+            &(Map.get(&1, "name") == job_name and Map.get(&1, "conclusion") == "success")
+          )
+
+        if passed?, do: {:ok, sha}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp head_check_runs(cfg, owner, repo, sha) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/commits/#{sha}/check-runs",
+           params: [per_page: 100]
+         )
+         |> handle_json() do
+      {:ok, %{"check_runs" => runs}} when is_list(runs) -> {:ok, runs}
+      {:ok, _} -> {:ok, []}
+      {:error, _} = error -> error
+    end
+  end
+
+  # The named artifact of the newest finished workflow run on `sha` that has one
+  # that has not expired, downloaded raw (a zip; the API redirects to storage).
+  defp run_artifact(cfg, owner, repo, sha, name) do
+    with {:ok, %{"workflow_runs" => runs}} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/actions/runs",
+             params: [head_sha: sha, per_page: 100]
+           )
+           |> handle_json(),
+         {:ok, id} <- find_artifact(cfg, owner, repo, runs, name) do
+      case request(cfg, :get, "/repos/#{owner}/#{repo}/actions/artifacts/#{id}/zip",
+             decode_body: false
+           ) do
+        {:ok, %Req.Response{status: status, body: body}}
+        when status in 200..299 and is_binary(body) ->
+          {:ok, body}
+
+        other ->
+          {:error, artifact_error(other)}
+      end
+    else
+      {:ok, _} -> {:error, :no_artifact}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp find_artifact(cfg, owner, repo, runs, name) do
+    runs
+    |> Enum.filter(&(Map.get(&1, "status") == "completed"))
+    |> Enum.sort_by(&Map.get(&1, "id", 0), :desc)
+    |> Enum.find_value({:error, :no_artifact}, fn run ->
+      path = "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/artifacts"
+
+      case request(cfg, :get, path, params: [name: name, per_page: 100]) |> handle_json() do
+        {:ok, %{"artifacts" => artifacts}} when is_list(artifacts) ->
+          case Enum.find(
+                 artifacts,
+                 &(Map.get(&1, "name") == name and Map.get(&1, "expired") != true)
+               ) do
+            %{"id" => id} -> {:ok, id}
+            _ -> nil
+          end
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp artifact_error({:ok, %Req.Response{status: status, body: body}}),
+    do: http_error(status, body)
+
+  defp artifact_error({:error, exception}), do: transport_error(exception)
+
+  @impl true
+  def rerun_ci(mr_ref, opts) when is_binary(mr_ref) and is_map(opts) do
+    inputs = string_inputs(Map.get(opts, :inputs))
+
+    with :ok <- check_inputs_mode(inputs, Map.get(opts, :mode)),
+         {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, pr} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", []) |> handle_json(),
+         {:ok, run} <-
+           failed_run_for(cfg, owner, repo, get_in(pr, ["head", "sha"]), Map.get(opts, :workflow)),
+         {:ok, jobs} <- run_jobs(cfg, owner, repo, Map.get(run, "id")) do
+      decision =
+        CIRerun.choose(%{
+          run_attempt: Map.get(run, "run_attempt"),
+          jobs: jobs,
+          inputs: inputs
+        })
+
+      # An explicit mode wins over the heuristic — except that
+      # `check_inputs_mode/2` has already rejected the one combination that
+      # would silently drop the operator's intent (inputs + a re-run mode that
+      # cannot carry them).
+      mode = Map.get(opts, :mode) || :auto
+      mode = if mode in [:failed_jobs, :all_jobs, :workflow], do: mode, else: decision.mode
+
+      head_ref = get_in(pr, ["head", "ref"])
+
+      with :ok <- post_rerun(cfg, owner, repo, run, mode, head_ref, inputs) do
+        {:ok,
+         %{
+           mode: mode,
+           run_id: Map.get(run, "id"),
+           workflow: Map.get(run, "name"),
+           run_attempt: decision.run_attempt,
+           reused_jobs: decision.reused_jobs,
+           rationale: decision.rationale,
+           url: Map.get(run, "html_url")
+         }}
+      end
+    end
+  end
+
+  # bd-4y9dno. A merge train push for a PR that is not the head carries a
+  # `[skip ci]` marker; the head's pipeline is a `workflow_dispatch` of the
+  # workflow the operator names (`merge.train_ci_workflow`). Without one the
+  # head could not be started again, so the marker is never offered.
+  @impl true
+  def ci_skip_mechanism(opts) when is_map(opts) do
+    if workflow_name(opts), do: {:commit_marker, "[skip ci]"}
+  end
+
+  @impl true
+  def trigger_pipeline(mr_ref, opts) when is_binary(mr_ref) and is_map(opts) do
+    with {:ok, workflow} <- fetch_workflow(opts),
+         {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, pr} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", []) |> handle_json(),
+         head_ref when is_binary(head_ref) and head_ref != "" <- get_in(pr, ["head", "ref"]),
+         :ok <-
+           request(
+             cfg,
+             :post,
+             "/repos/#{owner}/#{repo}/actions/workflows/#{URI.encode(workflow)}/dispatches",
+             json: %{ref: head_ref}
+           )
+           |> expect_ok() do
+      {:ok, %{mode: :workflow_dispatch, run_id: nil, workflow: workflow, url: nil}}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, trigger_error("the PR has no head branch to dispatch on")}
+    end
+  end
+
+  defp workflow_name(opts) do
+    case Map.get(opts, :workflow) do
+      name when is_binary(name) and name != "" -> name
+      _ -> nil
+    end
+  end
+
+  defp fetch_workflow(opts) do
+    case workflow_name(opts) do
+      nil -> {:error, trigger_error("no CI workflow is configured (merge.train_ci_workflow)")}
+      name -> {:ok, name}
+    end
+  end
+
+  defp trigger_error(message),
+    do: %Error{kind: :validation_failed, status: nil, message: message, raw: nil}
+
+  # Only a fresh `workflow_dispatch` can carry inputs; `rerun`/`rerun-failed-jobs`
+  # replay the original run's inputs and would drop these on the floor. The
+  # documented contract (`Merger.rerun_ci/2`, the MCP catalog, `arb queue
+  # rerun-ci --help`) is that supplying inputs forces `:workflow`, so reject the
+  # contradiction outright rather than silently honouring one half of it —
+  # re-running the failed jobs *without* `force_deploy` is the exact
+  # non-informative retry this verb exists to avoid (bd-5mzzww).
+  defp check_inputs_mode(inputs, mode)
+       when map_size(inputs) > 0 and mode in [:failed_jobs, :all_jobs] do
+    {:error,
+     %Error{
+       kind: :validation_failed,
+       status: nil,
+       message:
+         "cannot re-run CI: `inputs` can only be carried by a workflow_dispatch, " <>
+           "but mode is #{inspect(mode)} — use mode `workflow` (or `auto`)",
+       raw: nil
+     }}
+  end
+
+  defp check_inputs_mode(_inputs, _mode), do: :ok
+
+  # Pick the workflow run to re-run: a *settled failure* on the PR's head SHA.
+  # `workflow` (name or file basename) disambiguates when several workflows ran
+  # on the same commit — the incident repo has both a `CI` and a `Deploy Review
+  # App` workflow, and only one of them was red.
+  defp failed_run_for(_cfg, _owner, _repo, sha, _workflow) when sha in [nil, ""] do
+    {:error,
+     %Error{
+       kind: :not_found,
+       status: nil,
+       message: "cannot re-run CI: the PR has no head SHA",
+       raw: nil
+     }}
+  end
+
+  defp failed_run_for(cfg, owner, repo, sha, workflow) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/actions/runs",
+           params: [head_sha: sha, per_page: 100]
+         )
+         |> handle_json() do
+      {:ok, %{"workflow_runs" => runs}} when is_list(runs) ->
+        matching = Enum.filter(runs, &matches_workflow?(&1, workflow))
+
+        matching
+        |> Enum.filter(&failed_run?/1)
+        |> List.first()
+        |> case do
+          nil ->
+            # A run still going has no verdict yet: a distinct result so callers
+            # wait for CI rather than read the refusal as a real failure.
+            if Enum.any?(matching, &in_flight_run?/1) do
+              {:error, :ci_in_progress}
+            else
+              {:error,
+               %Error{
+                 kind: :not_found,
+                 status: nil,
+                 message:
+                   "cannot re-run CI: no failed workflow run on head SHA #{sha}" <>
+                     if(workflow, do: " matching #{inspect(workflow)}", else: ""),
+                 raw: nil
+               }}
+            end
+
+          run ->
+            {:ok, run}
+        end
+
+      {:ok, _} ->
+        {:error,
+         %Error{
+           kind: :not_found,
+           status: nil,
+           message: "cannot re-run CI: no failed workflow run on head SHA #{sha}",
+           raw: nil
+         }}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp failed_run?(run) do
+    Map.get(run, "status") == "completed" and
+      Map.get(run, "conclusion") in @rerunnable_conclusions
+  end
+
+  defp in_flight_run?(run),
+    do: Map.get(run, "status") in ["queued", "in_progress", "waiting", "requested", "pending"]
+
+  defp matches_workflow?(_run, nil), do: true
+
+  defp matches_workflow?(run, workflow) do
+    wanted = String.downcase(workflow)
+
+    [Map.get(run, "name"), Path.basename(Map.get(run, "path") || ""), Map.get(run, "path")]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.any?(&(String.downcase(&1) == wanted))
+  end
+
+  # Best-effort: the job list only feeds the granularity policy, so an API error
+  # degrades to "no known upstream jobs" (the cheapest re-run) rather than
+  # failing the whole verb.
+  defp run_jobs(cfg, owner, repo, run_id) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/actions/runs/#{run_id}/jobs",
+           params: [per_page: 100]
+         )
+         |> handle_json() do
+      {:ok, %{"jobs" => jobs}} when is_list(jobs) -> {:ok, jobs}
+      _ -> {:ok, []}
+    end
+  end
+
+  defp post_rerun(cfg, owner, repo, run, :failed_jobs, _head_ref, _inputs) do
+    request(
+      cfg,
+      :post,
+      "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/rerun-failed-jobs",
+      json: %{}
+    )
+    |> expect_ok()
+  end
+
+  defp post_rerun(cfg, owner, repo, run, :all_jobs, _head_ref, _inputs) do
+    request(cfg, :post, "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/rerun",
+      json: %{}
+    )
+    |> expect_ok()
+  end
+
+  defp post_rerun(cfg, owner, repo, run, :workflow, head_ref, inputs)
+       when is_binary(head_ref) and head_ref != "" do
+    workflow_id = Map.get(run, "workflow_id") || Map.get(run, "path")
+
+    request(cfg, :post, "/repos/#{owner}/#{repo}/actions/workflows/#{workflow_id}/dispatches",
+      json: %{ref: head_ref, inputs: inputs}
+    )
+    |> expect_ok()
+  end
+
+  defp post_rerun(_cfg, _owner, _repo, _run, :workflow, _head_ref, _inputs) do
+    {:error,
+     %Error{
+       kind: :not_found,
+       status: nil,
+       message:
+         "cannot workflow_dispatch: the PR has no head ref (a cross-fork PR cannot be " <>
+           "re-dispatched on this repository)",
+       raw: nil
+     }}
+  end
+
+  # workflow_dispatch inputs are string->string over the wire.
+  defp string_inputs(inputs) when is_map(inputs) and map_size(inputs) > 0 do
+    Map.new(inputs, fn {k, v} -> {to_string(k), stringify_input(v)} end)
+  end
+
+  defp string_inputs(_), do: %{}
+
+  defp stringify_input(v) when is_binary(v), do: v
+  defp stringify_input(v), do: to_string(v)
+
+  @impl true
+  def list_required_check_failures(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, body} <- graphql_required_checks(cfg, owner, repo, number) do
+      {:ok,
+       body
+       |> rollup_contexts()
+       |> Enum.reject(&is_nil/1)
+       |> required_failures()
+       |> Enum.map(&summarize_required_check/1)}
+    end
+  end
+
+  # Batch all three PRPatrol trigger signals for many PRs (across many repos)
+  # into ONE aliased GraphQL request (bd-3byp1n), replacing the ~3 per-PR calls
+  # (`list_review_feedback/1` + `list_open_review_threads/1` +
+  # `list_required_check_failures/1`). The per-PR decomposition reuses the exact
+  # same extractors as those callbacks — `changes_requested?/1`,
+  # `normalize_review_thread/1`, `required_settled_failure?/1`,
+  # `summarize_required_check/1` — so trigger semantics are bit-for-bit
+  # identical; only the transport changes.
+  #
+  # One credential per batch: `Config.resolve/0` yields a single token for the
+  # calling process (workspace-scoped, NOT per-repo), so every repo aliased into
+  # one query is read with that one token and bills one GraphQL points pool.
+  # There is no per-repo credential to diverge, so nothing to split — a PRPatrol
+  # tick, which is per-repo anyway, always batches one repo under one token.
+  @impl true
+  def batch_pr_signals(refs) when is_list(refs) do
+    with {:ok, cfg} <- Config.resolve() do
+      case batch_entries(cfg, refs) do
+        [] ->
+          # Nothing resolvable (empty input, or every ref unparseable) — no
+          # request, empty map. The caller falls back per-PR for any ref it
+          # passed that isn't in the result.
+          {:ok, %{}}
+
+        entries ->
+          {query, variables} = build_batch_query(entries)
+
+          case graphql_batch(cfg, query, variables) do
+            {:ok, data} -> {:ok, extract_batch(entries, data)}
+            {:error, _} = err -> err
+          end
+      end
+    end
+  end
+
+  @impl true
+  def close(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
+      payload = %{"state" => "closed"}
+
+      request(cfg, :patch, "/repos/#{owner}/#{repo}/pulls/#{number}", json: payload)
+      |> expect_ok()
+    end
+  end
+
+  @impl true
+  def update_description(mr_ref, body) when is_binary(mr_ref) and is_binary(body) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
+      request(cfg, :patch, "/repos/#{owner}/#{repo}/pulls/#{number}", json: %{"body" => body})
+      |> expect_ok()
+    end
+  end
+
+  @impl true
+  def add_comment(mr_ref, body) when is_binary(mr_ref) and is_binary(body) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
+      payload = %{"body" => body}
+
+      request(cfg, :post, "/repos/#{owner}/#{repo}/issues/#{number}/comments", json: payload)
+      |> expect_ok()
+    end
+  end
+
+  @impl true
+  def request_review(mr_ref, reviewers) when is_binary(mr_ref) and is_list(reviewers) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
+      do_request_reviewers(cfg, owner, repo, number, reviewers)
+    end
+  end
+
+  @impl true
+  def get_diff(mr_ref, opts) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
+      case diff_range(opts) do
+        {base, head} ->
+          # A bounded diff since a prior SHA — ReviewPatrol's "new-diff-only"
+          # re-review (bd-f3fg22) diffs the commits pushed SINCE `last_reviewed_sha`
+          # rather than the whole PR. GitHub's compare endpoint returns exactly
+          # `base..head` in the same unified-diff media type as the PR diff.
+          request_diff(cfg, "/repos/#{owner}/#{repo}/compare/#{base}...#{head}")
+
+        nil ->
+          request_diff(cfg, "/repos/#{owner}/#{repo}/pulls/#{number}")
+      end
+    end
+  end
+
+  # Extract a `{base, head}` compare range from the caller's opts, or nil to fall
+  # back to the whole-PR diff. Both endpoints must be non-empty binaries; a
+  # missing/blank head or base means "no bounded range requested". Keys are read
+  # both as atoms (the ReviewPatrol call site) and strings (defensive).
+  defp diff_range(opts) when is_map(opts) do
+    base = opts[:base] || opts["base"]
+    head = opts[:head] || opts["head"]
+
+    if is_binary(base) and base != "" and is_binary(head) and head != "" do
+      {base, head}
+    else
+      nil
+    end
+  end
+
+  defp diff_range(_opts), do: nil
+
+  @impl true
+  def ancestor?(mr_ref, ancestor, descendant) when is_binary(mr_ref) do
+    with {:ok, ancestor} <- validate_sha(ancestor),
+         {:ok, descendant} <- validate_sha(descendant) do
+      if ancestor == descendant do
+        # Git's own answer (`merge-base --is-ancestor X X` is true), and one
+        # fewer forge call on a path that runs per merge poll.
+        {:ok, true}
+      else
+        compare_ancestry(mr_ref, ancestor, descendant)
+      end
+    end
+  end
+
+  # bd-df3zlo / #1736. `compare/{base}...{head}` reports `status` relative to
+  # `base`: `ahead` means every commit of `base` is reachable from `head`, which
+  # is exactly "base is an ancestor of head". `per_page=1` because the commit
+  # list is never read — only `status` is — and the default page would carry up
+  # to 250 commits per probe.
+  #
+  # Anything that is not one of GitHub's four documented statuses is an
+  # `{:error, _}`, never a `false`: `Wardmast.Reviews.Coverage`'s rule 2 treats
+  # an error as "could not tell" and pauses, and treats a `false` as proof that
+  # the head is not our own push arriving late.
+  defp compare_ancestry(mr_ref, ancestor, descendant) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, body} <-
+           handle_json(
+             request(cfg, :get, "/repos/#{owner}/#{repo}/compare/#{ancestor}...#{descendant}",
+               params: [per_page: 1]
+             )
+           ) do
+      compare_status(body)
+    end
+  end
+
+  defp compare_status(%{"status" => status}) when status in ["ahead", "identical"],
+    do: {:ok, true}
+
+  defp compare_status(%{"status" => status}) when status in ["behind", "diverged"],
+    do: {:ok, false}
+
+  defp compare_status(%{"status" => status}), do: {:error, {:unexpected_compare_status, status}}
+  defp compare_status(body), do: {:error, {:unexpected_compare_status, body}}
+
+  # A 40-hex commit id and nothing else. A branch name or `HEAD~1` would still
+  # *resolve* on the forge, but the coverage model compares shas for equality,
+  # so a symbolic ref would make the probe answer a question about a moving
+  # target. Mirrored in the GitLab adapter.
+  defp validate_sha(sha) when is_binary(sha) do
+    if Regex.match?(~r/\A[0-9a-fA-F]{40}\z/, sha) do
+      {:ok, String.downcase(sha)}
+    else
+      {:error, {:invalid_sha, sha}}
+    end
+  end
+
+  defp validate_sha(sha), do: {:error, {:invalid_sha, sha}}
+
+  @impl true
+  def post_inline_comment(mr_ref, finding, opts)
+      when is_binary(mr_ref) and is_map(finding) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, commit_id} <- fetch_commit_id(cfg, owner, repo, number, opts) do
+      %{severity: sev, file: file, line: line, message: msg} = finding
+
+      payload = %{
+        "body" => "**#{severity_label(sev)}**: #{msg}",
+        "path" => file,
+        "line" => line,
+        "commit_id" => commit_id,
+        "side" => "RIGHT"
+      }
+
+      request(cfg, :post, "/repos/#{owner}/#{repo}/pulls/#{number}/comments", json: payload)
+      |> handle_json()
+    end
+  end
+
+  @impl true
+  def submit_review(mr_ref, verdict, body, _opts)
+      when is_binary(mr_ref) and verdict in [:approve, :request_changes] do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
+      payload = %{
+        "event" => verdict_event(verdict),
+        "body" => body || ""
+      }
+
+      case request(cfg, :post, "/repos/#{owner}/#{repo}/pulls/#{number}/reviews", json: payload) do
+        {:ok, %Req.Response{status: 422, body: err_body}} when is_map(err_body) ->
+          if self_review_error?(err_body) do
+            Logger.warning(
+              "GitHub self-review: #{verdict} rejected (#{inspect(err_body["message"])}); " <>
+                "falling back to issue comment for #{owner}/#{repo}##{number}"
+            )
+
+            fallback_self_review_comment(cfg, owner, repo, number, verdict, body)
+          else
+            {:error, http_error(422, err_body)}
+          end
+
+        other ->
+          handle_json(other)
+      end
+    end
+  end
+
+  @impl true
+  def link_for(mr_ref) when is_binary(mr_ref) do
+    if String.starts_with?(mr_ref, "http://") or String.starts_with?(mr_ref, "https://") do
+      mr_ref
+    else
+      case parse_mr_ref(mr_ref) do
+        {:embedded, owner, repo, number} ->
+          "https://github.com/#{owner}/#{repo}/pull/#{number}"
+
+        {:bare, number} ->
+          case Config.active_repo_slug() do
+            slug when is_binary(slug) -> "https://github.com/#{slug}/pull/#{number}"
+            nil -> "https://github.com/owner/repo/pull/#{number}"
+          end
+
+        :invalid ->
+          ""
+      end
+    end
+  end
+
+  # ---- speculative merge-train cars (bd-6dyva0) ------------------------------
+  #
+  # A car branch's push starts the repo's `on: push` workflows for it; a repo
+  # that runs CI some other way names a workflow to dispatch on the car instead
+  # (`merge.train.workflow`). Either way the car's verdict is every workflow run
+  # on the car's sha, taken together, as `branch_pipeline/3` judges a commit.
+
+  @impl true
+  def run_ref_pipeline(mr_ref, %{ref: ref}, opts) when is_binary(mr_ref) and is_binary(ref) do
+    case Map.get(opts, :workflow) do
+      workflow when is_binary(workflow) and workflow != "" ->
+        with {:ok, cfg} <- Config.resolve(),
+             {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+             :ok <-
+               cfg
+               |> request(
+                 :post,
+                 "/repos/#{owner}/#{repo}/actions/workflows/#{URI.encode(workflow)}/dispatches",
+                 json: %{ref: ref}
+               )
+               |> expect_ok() do
+          {:ok, nil}
+        end
+
+      _ ->
+        {:ok, nil}
+    end
+  end
+
+  @impl true
+  def ref_pipeline(mr_ref, %{ref: ref, sha: sha}, _opts)
+      when is_binary(mr_ref) and is_binary(ref) and is_binary(sha) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, runs} <- car_runs(cfg, owner, repo, ref, sha) do
+      case runs |> newest_per_workflow() |> car_verdict(sha) do
+        nil -> {:ok, nil}
+        %{failed_runs: _} = verdict -> {:ok, with_branch_jobs(verdict, cfg, owner, repo)}
+        verdict -> {:ok, verdict}
+      end
+    end
+  end
+
+  # Every unfinished run on the car's sha, superseded or not: none of them is
+  # testing anything the train will merge any more.
+  @impl true
+  def cancel_ref_pipeline(mr_ref, %{ref: ref, sha: sha}, _opts)
+      when is_binary(mr_ref) and is_binary(ref) and is_binary(sha) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, runs} <- car_runs(cfg, owner, repo, ref, sha) do
+      runs
+      |> Enum.reject(&(Map.get(&1, "status") == "completed"))
+      |> Enum.reduce_while(:ok, fn run, :ok ->
+        path = "/repos/#{owner}/#{repo}/actions/runs/#{Map.get(run, "id")}/cancel"
+
+        case cfg |> request(:post, path, json: %{}) |> expect_ok() do
+          :ok -> {:cont, :ok}
+          error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  # The workflow runs on the car's branch at the car's sha.
+  defp car_runs(cfg, owner, repo, ref, sha) do
+    case cfg
+         |> request(:get, "/repos/#{owner}/#{repo}/actions/runs",
+           params: [head_sha: sha, branch: ref, per_page: 50]
+         )
+         |> handle_json() do
+      {:ok, %{"workflow_runs" => runs}} when is_list(runs) ->
+        {:ok, Enum.filter(runs, &(Map.get(&1, "head_sha") == sha))}
+
+      {:ok, _} ->
+        {:error, :unexpected_runs_response}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  # One verdict per workflow, its newest run: a dispatch and a push of the same
+  # commit (or a re-trigger) are one verdict, not two.
+  defp newest_per_workflow(runs) do
+    runs
+    |> Enum.group_by(&(Map.get(&1, "workflow_id") || Map.get(&1, "name")))
+    |> Enum.map(fn {_workflow, group} -> Enum.max_by(group, &(Map.get(&1, "id") || 0)) end)
+  end
+
+  defp car_verdict([], _sha), do: nil
+
+  defp car_verdict(runs, sha) do
+    case runs |> Enum.map(&deploy_status/1) |> car_status() do
+      "failed" ->
+        branch_run(sha, runs, "failed")
+
+      status ->
+        newest = Enum.max_by(runs, &(Map.get(&1, "id") || 0))
+        %{id: Map.get(newest, "id"), sha: sha, status: status, url: Map.get(newest, "html_url")}
+    end
+  end
+
+  # One status for every workflow run on the car: any red is red; anything still
+  # going is going; only skipped runs mean nothing tested it.
+  defp car_status(statuses) do
+    cond do
+      "failed" in statuses -> "failed"
+      "running" in statuses -> "running"
+      Enum.any?(statuses, &(&1 in ["pending", "manual"])) -> "pending"
+      "canceled" in statuses -> "canceled"
+      Enum.all?(statuses, &(&1 == "skipped")) -> "skipped"
+      true -> "success"
+    end
+  end
+
+  # The CI backpressure signal (#1126): the repo's workflow runs for pull requests
+  # that are `queued` (waiting for a runner). `total_count` is the whole queue; the
+  # page (newest first) only dates the oldest, so a deeper queue than a page reads
+  # the oldest of the page — a lower bound, which only under-reports the age.
+  # A PR with several workflows counts once per workflow run.
+  @impl true
+  def ci_queue do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, owner} <- require_owner_repo(cfg, :owner),
+         {:ok, repo} <- require_owner_repo(cfg, :repo),
+         {:ok, %{"workflow_runs" => runs} = body} when is_list(runs) <-
+           cfg
+           |> request(:get, "/repos/#{owner}/#{repo}/actions/runs",
+             params: [status: "queued", event: "pull_request", per_page: 100]
+           )
+           |> handle_json() do
+      {:ok, CIQueue.build(queued_total(body, runs), Enum.map(runs, &Map.get(&1, "created_at")))}
+    else
+      {:ok, _} -> {:error, :unexpected_runs_response}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp queued_total(%{"total_count" => total}, _runs) when is_integer(total) and total >= 0,
+    do: total
+
+  defp queued_total(_body, runs), do: length(runs)
+
+  @impl true
+  def list_open do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, owner} <- require_owner_repo(cfg, :owner),
+         {:ok, repo} <- require_owner_repo(cfg, :repo),
+         {:ok, prs} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls",
+             params: [state: "open", per_page: 100]
+           )
+           |> handle_json() do
+      mrs =
+        prs
+        |> List.wrap()
+        |> Enum.map(fn pr ->
+          number = pr["number"]
+
+          %{
+            ref: build_mr_ref(:embedded, owner, repo, number),
+            number: number,
+            title: pr["title"] || "",
+            url: pr["html_url"] || "",
+            author: get_in(pr, ["user", "login"])
+          }
+        end)
+
+      {:ok, mrs}
+    end
+  end
+
+  # The unresolved review threads on a PR. GitHub only exposes per-thread
+  # resolution state through GraphQL (`pullRequest.reviewThreads { isResolved }`);
+  # the REST `/pulls/:n/comments` surface `list_review_feedback/1` uses has no
+  # `isResolved`, so a COMMENTED review's inline comments are invisible there.
+  # We keep only the unresolved nodes and normalize each to a `t:review_thread/0`.
+  @impl true
+  def list_open_review_threads(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, body} <- graphql_review_threads(cfg, owner, repo, number) do
+      threads =
+        body
+        |> get_in(["data", "repository", "pullRequest", "reviewThreads", "nodes"])
+        |> List.wrap()
+        |> Enum.reject(&(is_nil(&1) or Map.get(&1, "isResolved") == true))
+        |> Enum.map(&normalize_review_thread/1)
+
+      {:ok, threads}
+    end
+  end
+
+  @impl true
+  def reply_to_review_comment(mr_ref, comment_id, body, _opts)
+      when is_binary(mr_ref) and is_integer(comment_id) and comment_id > 0 and is_binary(body) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
+      payload = %{"body" => body}
+
+      request(
+        cfg,
+        :post,
+        "/repos/#{owner}/#{repo}/pulls/#{number}/comments/#{comment_id}/replies",
+        json: payload
+      )
+      |> handle_json()
+    end
+  end
+
+  @impl true
+  def resolve_review_thread(mr_ref, thread_id, _opts)
+      when is_binary(mr_ref) and is_binary(thread_id) do
+    with {:ok, cfg} <- Config.resolve() do
+      graphql_resolve_review_thread(cfg, thread_id)
+    end
+  end
+
+  @impl true
+  def ref_for_pr(pr, opts) when is_binary(pr) and is_map(opts) do
+    pr = String.trim(pr)
+
+    cond do
+      # Full forge URL: https://github[.enterprise.host]/<owner>/<repo>/pull[s]/<n>
+      m = Regex.run(~r{//[^/\s]+/([^/\s]+)/([^/\s]+?)(?:\.git)?/pulls?/(\d+)}, pr) ->
+        [_, owner, repo, number] = m
+        {:ok, build_mr_ref(:embedded, owner, repo, String.to_integer(number))}
+
+      # Slug forms: "<owner>/<repo>#<n>" or "<owner>/<repo>/pull[s]/<n>"
+      m = Regex.run(~r{^([^/\s]+)/([^/\s#]+?)(?:\.git)?(?:#|/pulls?/)(\d+)$}, pr) ->
+        [_, owner, repo, number] = m
+        {:ok, build_mr_ref(:embedded, owner, repo, String.to_integer(number))}
+
+      # Bare number or "#<n>": embed the {owner, repo} derived from the local
+      # checkout's origin remote when a :repo_path is given (so the ref talks to
+      # that external repo regardless of workspace cfg); otherwise mint a bare
+      # ref that falls back to the active workspace cfg's owner/repo.
+      m = Regex.run(~r/^#?(\d+)$/, pr) ->
+        [_, number] = m
+        number = String.to_integer(number)
+
+        case derive_owner_repo(opts) do
+          {:ok, {owner, repo}} ->
+            {:ok, build_mr_ref(:embedded, owner, repo, number)}
+
+          :none ->
+            {:ok, build_mr_ref(:bare, nil, nil, number)}
+
+          {:error, %Error{} = err} ->
+            # A checkout was named but its origin can't be read: refuse rather
+            # than review whatever repo the workspace config points at (bd-96d5z4).
+            {:error,
+             %Error{
+               err
+               | kind: :validation_failed,
+                 message:
+                   "could not determine the GitHub owner/repo of the checkout at " <>
+                     "#{opts.repo_path} (#{err.message}); refusing to guess which repo PR " <>
+                     "#{number} belongs to — pass the full PR URL"
+             }}
+        end
+
+      true ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: nil,
+           message:
+             "could not parse #{inspect(pr)} as a GitHub PR reference — expected a PR URL, " <>
+               "an \"owner/repo#N\" slug, or a number (pass --repo so a bare number can be " <>
+               "resolved to owner/repo via the checkout's origin remote)",
+           raw: pr
+         }}
+    end
+  end
+
+  # Returns {:ok, value} for a required cfg field (owner or repo), or a
+  # :config_missing error when the field is nil (not set in workspace config).
+  defp require_owner_repo(cfg, :owner) do
+    case cfg.owner do
+      v when is_binary(v) and v != "" ->
+        {:ok, v}
+
+      _ ->
+        {:error,
+         %Error{
+           kind: :config_missing,
+           status: nil,
+           message: "GitHub merger config missing \"owner\"",
+           raw: nil
+         }}
+    end
+  end
+
+  defp require_owner_repo(cfg, :repo) do
+    case cfg.repo do
+      v when is_binary(v) and v != "" ->
+        {:ok, v}
+
+      _ ->
+        {:error,
+         %Error{
+           kind: :config_missing,
+           status: nil,
+           message: "GitHub merger config missing \"repo\"",
+           raw: nil
+         }}
+    end
+  end
+
+  # Derive {owner, repo} from a local checkout's origin remote, for a bare PR
+  # number. Returns :none when no :repo_path was supplied (the caller then mints
+  # a bare ref that resolves against the active workspace cfg).
+  defp derive_owner_repo(%{repo_path: path}) when is_binary(path) and path != "" do
+    case RepoResolver.from_remote(path) do
+      {:ok, {_owner, _repo}} = ok -> ok
+      {:error, _} = err -> err
+    end
+  end
+
+  defp derive_owner_repo(_opts), do: :none
+
+  # ---- Public helpers ------------------------------------------------------
+
+  @doc """
+  Filter `threads` to only the ones where `our_login` participated — either
+  by authoring the opening comment or by posting any reply in the thread.
+  Used by ReviewPatrol to ignore threads started and carried entirely by other
+  reviewers when multiple reviewers are active on the same PR.
+
+  Threads returned by `list_open_review_threads/1` carry a `:comments` list;
+  this helper operates on that shape. Threads without a `:comments` key are
+  matched solely on `:author`.
+  """
+  @spec filter_to_our_threads([Merger.review_thread()], String.t()) ::
+          [Merger.review_thread()]
+  def filter_to_our_threads(threads, our_login)
+      when is_list(threads) and is_binary(our_login) do
+    Enum.filter(threads, fn thread ->
+      thread[:author] == our_login or
+        Enum.any?(Map.get(thread, :comments, []), fn c -> c[:author] == our_login end)
+    end)
+  end
+
+  @doc """
+  Convenience: set the active workspace for the current process and run
+  `fun`, restoring the previous config when `fun` returns. Useful in tests and
+  one-shot scripts. Mirrors `Wardmast.Trackers.Jira.with_workspace/2`.
+  """
+  @spec with_workspace(map() | Wardmast.Tasks.Workspace.t(), (-> result)) :: result
+        when result: any()
+  def with_workspace(workspace_or_config, fun) when is_function(fun, 0) do
+    prev = Process.get({Config, :active_workspace_config})
+    Config.put_active(workspace_or_config)
+
+    try do
+      fun.()
+    after
+      if prev, do: Config.put_active(prev), else: Config.clear()
+    end
+  end
+
+  # ---- Internals: reviewers ------------------------------------------------
+
+  defp reviewers(cfg, opts) do
+    case Map.get(opts, :reviewer_ids) do
+      list when is_list(list) -> list
+      _ -> cfg.default_reviewers
+    end
+  end
+
+  # On open, requesting reviewers is best-effort: the PR already exists, so a
+  # failed reviewer request must not orphan it by surfacing as an open/4 error.
+  defp maybe_request_reviewers(_cfg, _owner, _repo, _number, []), do: :ok
+
+  defp maybe_request_reviewers(cfg, owner, repo, number, reviewers) do
+    _ = do_request_reviewers(cfg, owner, repo, number, reviewers)
+    :ok
+  end
+
+  defp do_request_reviewers(_cfg, _owner, _repo, _number, []), do: :ok
+
+  defp do_request_reviewers(cfg, owner, repo, number, reviewers) do
+    payload = %{"reviewers" => reviewers}
+
+    request(
+      cfg,
+      :post,
+      "/repos/#{owner}/#{repo}/pulls/#{number}/requested_reviewers",
+      json: payload
+    )
+    |> expect_ok()
+  end
+
+  # ---- Internals: idempotent open ------------------------------------------
+
+  # GitHub's 422 "already exists" payload looks like:
+  #   %{"message" => "Validation Failed",
+  #     "errors" => [%{"code" => "custom",
+  #                    "message" => "A pull request already exists for owner:branch."}]}
+  defp already_exists_error?(%{"errors" => errors}) when is_list(errors) do
+    Enum.any?(errors, fn
+      %{"message" => msg} when is_binary(msg) -> String.contains?(msg, "already exists")
+      _ -> false
+    end)
+  end
+
+  defp already_exists_error?(_), do: false
+
+  defp find_existing_open_pr_number(cfg, owner, repo, branch) do
+    head = "#{owner}:#{branch}"
+
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/pulls", params: [head: head, state: "open"]) do
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        case body do
+          [%{"number" => number} | _] when is_integer(number) -> {:ok, number}
+          _ -> :none
+        end
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # ---- Internals: response interpretation ----------------------------------
+
+  # GitHub PR JSON: "state" is "open" | "closed"; "merged" (bool) and
+  # "merged_at" distinguish a merged-closed PR from a plain-closed one.
+  defp pr_status(%{"merged" => true}), do: :merged
+  defp pr_status(%{"merged_at" => at}) when is_binary(at), do: :merged
+  defp pr_status(%{"state" => "closed"}), do: :closed
+  defp pr_status(_), do: :open
+
+  # Classify *why* an open PR can't merge, or nil when it is mergeable (or
+  # already terminal), as `{reason, detail}` — `detail` names the unmet rule
+  # for `:blocked_other` (bd-ati3cp) and is nil otherwise. This is the
+  # block-reason surface Phase 1 (#354) escalates on so an
+  # approved-but-unmergeable PR never parks silently. Derived from GitHub's
+  # merge-state signal plus the resolved CI pipeline and review state:
+  #
+  #   :conflict                  — mergeable=false / mergeable_state "dirty"
+  #   :behind_base               — "behind" (no conflict, just stale vs base)
+  #   :ci_failed                 — a required check failed (pipeline :failed)
+  #   :ci_cancelled              — checks were cancelled, none failed (pipeline :canceled)
+  #   :needs_approval            — "blocked" by required review, or a dismissed
+  #                                approval (a review the fleet can still wait on)
+  #   :needs_nonauthor_approval  — "blocked" on a required review of a
+  #                                fleet-authored PR (the fleet can't self-approve)
+  #   :draft                     — PR is a draft
+  #   :blocked_other             — blocked by some other forge rule
+  #
+  # "blocked" alone does NOT mean a review is missing — see `blocked_reason/5`.
+  defp block_reason(_cfg, _target, _pr, status, _pipeline, _approved, _changes_requested)
+       when status in [:merged, :closed],
+       do: {nil, nil}
+
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp block_reason(cfg, target, pr, _status, pipeline, approved, changes_requested) do
+    state = merge_state(pr)
+    draft? = Map.get(pr, "draft") == true or state == "draft"
+
+    cond do
+      draft? -> {:draft, nil}
+      state == "dirty" or Map.get(pr, "mergeable") == false -> {:conflict, nil}
+      state == "behind" -> {:behind_base, nil}
+      pipeline == :failed -> {:ci_failed, nil}
+      pipeline == :canceled -> {:ci_cancelled, nil}
+      changes_requested -> {:needs_approval, nil}
+      state == "blocked" -> blocked_reason(cfg, target, pr, pipeline, approved)
+      state in ["clean", "has_hooks", "unstable", "unknown", nil] -> {nil, nil}
+      true -> {:blocked_other, nil}
+    end
+  end
+
+  # GitHub reports "blocked" for ANY unmet branch rule — a required status check
+  # still running blocks a PR exactly like a missing required review. Reading
+  # the bare state as a review block parked every fleet-authored PR polled
+  # mid-CI as `:needs_nonauthor_approval` on a repo requiring status checks and
+  # 0 approvals (bd-ati3cp / #2149). So:
+  #
+  #   * CI still in flight → not blocked yet (nil); the Watchdog keeps polling
+  #     and classifies once the checks conclude. No extra requests.
+  #   * otherwise ask the forge why, via `BlockedState`: the PR's GraphQL
+  #     `reviewDecision` + required-check rollup, then the branch's rules.
+  #   * neither readable → the old author heuristic, so a forge hiccup degrades
+  #     to the previous behaviour rather than to "mergeable".
+  defp blocked_reason(_cfg, _target, _pr, pipeline, _approved)
+       when pipeline in [:running, :pending],
+       do: {nil, nil}
+
+  defp blocked_reason(cfg, {owner, repo, number}, pr, pipeline, approved) do
+    signals = fetch_block_signals(cfg, owner, repo, number)
+    rules = fn -> fetch_branch_rules(cfg, owner, repo, get_in(pr, ["base", "ref"])) end
+
+    case BlockedState.classify(signals, rules, pipeline, approved) do
+      :pending ->
+        {nil, nil}
+
+      :changes_requested ->
+        {:needs_approval, nil}
+
+      {:blocked_other, detail} ->
+        {:blocked_other, detail}
+
+      verdict when verdict in [:review_required, :unknown] ->
+        {blocked_review_reason(cfg, pr), nil}
+    end
+  end
+
+  # The PR's `reviewDecision` and head-commit rollup contexts (with
+  # `isRequired`), from the same query `list_required_check_failures/1` uses.
+  defp fetch_block_signals(cfg, owner, repo, number) do
+    case graphql_required_checks(cfg, owner, repo, number) do
+      {:ok, %{"data" => %{"repository" => %{"pullRequest" => %{} = pull}}} = body} ->
+        {:ok,
+         %{review_decision: Map.get(pull, "reviewDecision"), contexts: rollup_contexts(body)}}
+
+      _ ->
+        :error
+    end
+  end
+
+  # The rules in effect on the PR's base branch, across every ruleset
+  # (`GET /repos/{o}/{r}/rules/branches/{b}`). Classic branch protection is not
+  # listed here; `reviewDecision` and the rollup's `isRequired` cover it.
+  defp fetch_branch_rules(_cfg, _owner, _repo, branch) when branch in [nil, ""], do: :error
+
+  defp fetch_branch_rules(cfg, owner, repo, branch) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/rules/branches/#{URI.encode(branch)}",
+           params: [per_page: 100]
+         )
+         |> handle_json() do
+      {:ok, rules} when is_list(rules) -> {:ok, Enum.filter(rules, &is_map/1)}
+      _ -> :error
+    end
+  end
+
+  defp rollup_contexts(body) do
+    body
+    |> get_in(["data", "repository", "pullRequest", "commits", "nodes"])
+    |> List.wrap()
+    |> List.first()
+    |> case do
+      %{"commit" => %{"statusCheckRollup" => %{"contexts" => %{"nodes" => nodes}}}}
+      when is_list(nodes) ->
+        nodes
+
+      _ ->
+        []
+    end
+  end
+
+  # A PR whose review policy demands an approval it lacks (per `BlockedState`).
+  # If that PR was opened by the fleet's *own* identity (the authenticated
+  # token's user), the forge requires an approval from someone *other than the
+  # author* — which the fleet can never supply, because GitHub forbids approving
+  # your own pull request. The Watchdog treats `:needs_nonauthor_approval`
+  # specially: it parks indefinitely and escalates to a human once, instead of
+  # failing at the auto_merge poll ceiling (bd-c3lchp / lt-4kjaoe). When
+  # authorship can't be confirmed as the fleet's, fall back to the generic
+  # `:needs_approval` (a reviewer may still act).
+  defp blocked_review_reason(cfg, pr) do
+    if fleet_authored?(cfg, pr), do: :needs_nonauthor_approval, else: :needs_approval
+  end
+
+  # True only when the PR's author login matches the authenticated token's own
+  # login. Skips the `/user` lookup entirely when the PR carries no author, so
+  # the common path (and stubs that don't model `/user`) never make the call.
+  defp fleet_authored?(cfg, pr) do
+    case get_in(pr, ["user", "login"]) do
+      login when is_binary(login) and login != "" -> login == authenticated_login(cfg)
+      _ -> false
+    end
+  end
+
+  # The login of the token's own identity (GET /user). Best-effort: any failure
+  # (a GitHub App token with no user, a network error) yields nil so the caller
+  # falls back to the generic block reason. Reached only in the narrow
+  # blocked-on-review branch, not on every poll.
+  defp authenticated_login(cfg) do
+    case request(cfg, :get, "/user", []) |> handle_json() do
+      {:ok, %{"login" => login}} when is_binary(login) and login != "" -> login
+      _ -> nil
+    end
+  end
+
+  # Normalize GitHub's merge-state signal to a lowercase string. Prefers the REST
+  # `mergeable_state`; falls back to the GraphQL `mergeStateStatus` enum
+  # (uppercase) some payloads carry. nil when neither is present.
+  defp merge_state(pr) do
+    case Map.get(pr, "mergeable_state") || Map.get(pr, "mergeStateStatus") do
+      s when is_binary(s) and s != "" -> String.downcase(s)
+      _ -> nil
+    end
+  end
+
+  # Approved when the *latest* verdict per reviewer settles on APPROVED with no
+  # outstanding CHANGES_REQUESTED. Using the latest-per-reviewer state (rather
+  # than "any APPROVED ever") is what lets a re-review APPROVE clear an earlier
+  # CHANGES_REQUESTED that still lives in the PR's review history — the
+  # post-revise re-approval the MergeQueue relies on (bd-95lsjb).
+  defp approved?(reviews) when is_list(reviews) do
+    states = latest_review_states(reviews)
+    "APPROVED" in states and "CHANGES_REQUESTED" not in states
+  end
+
+  defp approved?(_), do: false
+
+  # True when the latest verdict from any reviewer is CHANGES_REQUESTED — the
+  # signal the MergeQueue turns into an auto-revise pass.
+  defp changes_requested?(reviews) when is_list(reviews) do
+    "CHANGES_REQUESTED" in latest_review_states(reviews)
+  end
+
+  defp changes_requested?(_), do: false
+
+  # The verdict state of each reviewer's most recent verdict review. GitHub
+  # returns reviews in chronological order, so the last entry per author is the
+  # current one. Non-verdict reviews (COMMENTED, PENDING) don't change approval
+  # state and are dropped; DISMISSED is retained so a dismissed verdict can
+  # supersede an earlier APPROVED/CHANGES_REQUESTED (and is then itself ignored
+  # by the approve/changes checks above).
+  defp latest_review_states(reviews) do
+    reviews
+    |> Enum.filter(&(Map.get(&1, "state") in ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]))
+    |> Enum.group_by(&review_author/1)
+    |> Enum.map(fn {_author, group} -> group |> List.last() |> Map.get("state") end)
+  end
+
+  defp review_author(review), do: get_in(review, ["user", "login"])
+
+  # The current (latest) verdict state for a single reviewer login, or nil when
+  # that login left no verdict review. Mirrors `latest_review_states/1` but scoped
+  # to one author: GitHub returns reviews chronologically, so the last verdict
+  # entry for `login` is the current one — a DISMISSED that follows an APPROVED
+  # correctly reads as "not currently approved".
+  defp latest_state_for(reviews, login) do
+    case latest_verdict_for(reviews, login) do
+      nil -> nil
+      review -> Map.get(review, "state")
+    end
+  end
+
+  defp latest_verdict_for(reviews, login) when is_list(reviews) and is_binary(login) do
+    reviews
+    |> Enum.filter(
+      &(Map.get(&1, "state") in ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"] and
+          review_author(&1) == login)
+    )
+    |> List.last()
+  end
+
+  defp latest_verdict_for(_reviews, _login), do: nil
+
+  # An opaque debounce handle for the most recent CHANGES_REQUESTED review:
+  # its numeric id when present, else its submitted_at timestamp. nil when no
+  # CHANGES_REQUESTED review exists.
+  defp latest_changes_requested_id(reviews) when is_list(reviews) do
+    reviews
+    |> Enum.filter(&(Map.get(&1, "state") == "CHANGES_REQUESTED"))
+    |> List.last()
+    |> case do
+      nil -> nil
+      review -> Map.get(review, "id") || Map.get(review, "submitted_at")
+    end
+  end
+
+  defp latest_changes_requested_id(_), do: nil
+
+  # Assemble the feedback list the revise worker is briefed with: every review
+  # that carries a non-blank summary body, plus every inline review comment.
+  defp build_feedback(reviews, comments) do
+    review_items =
+      reviews
+      |> Enum.filter(fn r -> present_body?(Map.get(r, "body")) end)
+      |> Enum.map(fn r ->
+        %{
+          kind: :review,
+          author: review_author(r),
+          state: Map.get(r, "state"),
+          body: Map.get(r, "body")
+        }
+      end)
+
+    comment_items =
+      comments
+      |> Enum.filter(fn c -> present_body?(Map.get(c, "body")) end)
+      |> Enum.map(fn c ->
+        %{
+          kind: :comment,
+          author: get_in(c, ["user", "login"]),
+          path: Map.get(c, "path"),
+          line: Map.get(c, "line") || Map.get(c, "original_line"),
+          body: Map.get(c, "body")
+        }
+      end)
+
+    review_items ++ comment_items
+  end
+
+  defp present_body?(body) when is_binary(body), do: String.trim(body) != ""
+  defp present_body?(_), do: false
+
+  # Fetch CI status via the check-runs API for the head commit SHA.
+  # Returns nil when the SHA is absent or the request fails (best-effort — a
+  # transient API error must not block the MR poll). Returns `:not_started`
+  # when the SHA is present and the request succeeded but zero check-runs
+  # exist yet (bd-aeb9wv / #1189: PR #1188 merged a full second *before* its
+  # check-suite existed). Zero check-runs is genuinely ambiguous from this API
+  # alone — it means either "GitHub hasn't created the check-suite yet" (the
+  # #1188 race) or "no CI is configured for this repo/commit at all" (no
+  # workflow, or every workflow excluded by its `on:` path filters); nothing
+  # in this response distinguishes the two. The Watchdog deliberately errs
+  # toward waiting on `:not_started` rather than treating it as clear-to-merge,
+  # but only for a bounded number of polls — see `@not_started_grace_polls` in
+  # watchdog.ex — so a repo with no CI at all still becomes mergeable.
+  defp fetch_pipeline_status(_cfg, _owner, _repo, nil), do: nil
+  defp fetch_pipeline_status(_cfg, _owner, _repo, ""), do: nil
+
+  defp fetch_pipeline_status(cfg, owner, repo, sha) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/commits/#{sha}/check-runs",
+           params: [per_page: 100]
+         )
+         |> handle_json() do
+      {:ok, %{"check_runs" => [_ | _] = runs}} ->
+        runs |> latest_per_check() |> map_check_run_status()
+
+      {:ok, %{"check_runs" => []}} ->
+        :not_started
+
+      _ ->
+        nil
+    end
+  end
+
+  # Collect the failing check runs for the PR's head commit and render each one
+  # into a `name` + `summary` (output tail) + `url` map the Watchdog hands to a
+  # fix-pass worker. No head SHA (or no check runs) → an empty list, never an
+  # error — a `:ci_failed` block with nothing fetchable still dispatches the
+  # fix pass, just without log context.
+  defp fetch_failing_checks(_cfg, _owner, _repo, sha) when sha in [nil, ""], do: {:ok, []}
+
+  defp fetch_failing_checks(cfg, owner, repo, sha) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/commits/#{sha}/check-runs",
+           params: [per_page: 100]
+         )
+         |> handle_json() do
+      {:ok, %{"check_runs" => runs}} when is_list(runs) ->
+        {:ok,
+         runs
+         |> latest_per_check()
+         |> Enum.filter(&failing_check?/1)
+         |> Enum.map(
+           &summarize_check(
+             &1,
+             fn id -> fetch_annotations(cfg, owner, repo, id) end,
+             fn id -> fetch_job_log(cfg, owner, repo, id) end
+           )
+         )}
+
+      {:ok, _} ->
+        {:ok, []}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp failing_check?(run), do: Map.get(run, "conclusion") in @failing_conclusions
+
+  # One check-run per check name: the newest, by id (bd-2l0hzm). Re-running a
+  # job on the same head adds a new check-run under the same name, and the
+  # failed attempt it replaces is still listed. Judging every run would call a
+  # head whose re-run is queued `:failed`. Unnamed runs are kept as they are,
+  # since there is nothing to group them by.
+  #
+  # A workflow run superseded by a newer one on the same SHA (concurrency
+  # cancel, bd-dtl93z) is not a verdict: its aggregate job, which fails because
+  # its shards were cancelled, is dropped, and a cancelled attempt never
+  # outranks an attempt that was not cancelled, however much newer its id.
+  # With only cancelled attempts left, the cancelled one is what is judged.
+  defp latest_per_check(runs) do
+    runs = Enum.reject(runs, &cancelled_aggregate?(&1, runs))
+
+    latest =
+      runs
+      |> Enum.filter(&is_binary(Map.get(&1, "name")))
+      |> Enum.group_by(&Map.get(&1, "name"))
+      |> Enum.map(fn {_name, attempts} -> Enum.max_by(attempts, &attempt_rank/1) end)
+
+    Enum.filter(runs, &(not is_binary(Map.get(&1, "name")) or &1 in latest))
+  end
+
+  defp attempt_rank(run) do
+    {Map.get(run, "conclusion") not in @infra_conclusions, run_order(run)}
+  end
+
+  # The workflow run (check suite) a check-run belongs to, when the forge says.
+  defp suite_id(run), do: get_in(run, ["check_suite", "id"])
+
+  defp run_order(run) do
+    case Map.get(run, "id") do
+      id when is_integer(id) -> id
+      _ -> -1
+    end
+  end
+
+  defp summarize_check(run, annotations_fun, log_fun) do
+    output = Map.get(run, "output") || %{}
+    annotations = failure_annotations(run, output, annotations_fun)
+
+    head_text =
+      ([Map.get(output, "title"), Map.get(output, "summary"), Map.get(output, "text")] ++
+         Enum.map(annotations, &render_annotation/1))
+      |> Enum.reject(&(&1 in [nil, ""]))
+      |> Enum.join("\n")
+
+    head = truncate(head_text, @log_tail_limit)
+    {log_excerpt, log_path, log_truncated?} = job_log(run, log_fun)
+
+    # The log excerpt is bounded on its own so a long output summary cannot crowd it out.
+    summary =
+      [head, log_excerpt]
+      |> Enum.reject(&(&1 in [nil, ""]))
+      |> Enum.join("\n")
+
+    %{
+      name: Map.get(run, "name") || "check",
+      summary: summary,
+      conclusion: Map.get(run, "conclusion"),
+      log_path: log_path,
+      # The summary left failure text out (a long output summary or a log excerpt
+      # that dropped blocks): the CI triage re-reads `log_path` or gives up
+      # (bd-3ij7dw).
+      truncated: log_truncated? or head != head_text,
+      url: Map.get(run, "details_url") || Map.get(run, "html_url"),
+      # The source files the run's failure annotations point at. GitHub Actions
+      # leaves `output` empty on a failed job, so these are often the only
+      # pointer to the failing test (bd-2l0hzm). The Watchdog uses them to tell
+      # a failure in a file this PR never touched.
+      files: annotations |> Enum.map(&Map.get(&1, "path")) |> Enum.uniq()
+    }
+  end
+
+  # Failure-level annotations with a real source path. The runner's own
+  # annotations (`.github`: "Process completed with exit code 2.", deprecation
+  # warnings) name no file of the repo's.
+  defp failure_annotations(run, output, annotations_fun) do
+    id = Map.get(run, "id")
+    count = Map.get(output, "annotations_count")
+
+    if is_integer(id) and count != 0 do
+      id
+      |> annotations_fun.()
+      |> Enum.filter(fn annotation ->
+        path = Map.get(annotation, "path")
+
+        Map.get(annotation, "annotation_level") == "failure" and is_binary(path) and
+          path != "" and not String.starts_with?(path, ".github")
+      end)
+    else
+      []
+    end
+  end
+
+  defp render_annotation(annotation) do
+    line = Map.get(annotation, "start_line")
+    location = if line, do: "#{annotation["path"]}:#{line}", else: annotation["path"]
+    "#{location} #{Map.get(annotation, "message")}"
+  end
+
+  # Best-effort: an annotations read that fails leaves the check without file
+  # pointers, which only means the Watchdog cannot call it a suspected flake.
+  defp fetch_annotations(cfg, owner, repo, check_run_id) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/check-runs/#{check_run_id}/annotations",
+           params: [per_page: 100]
+         )
+         |> handle_json() do
+      {:ok, annotations} when is_list(annotations) -> annotations
+      _ -> []
+    end
+  end
+
+  # The filtered job log (failing tests, file:line, assertion blocks). A GitHub
+  # Actions job's id is its check-run id. Fetched host-side so a podman worker,
+  # which has neither `gh` nor a token, still sees why CI failed (bd-1fzpx8).
+  defp job_log(run, log_fun) do
+    case Map.get(run, "id") do
+      id when is_integer(id) -> log_fun.(id)
+      _ -> {nil, nil, false}
+    end
+  end
+
+  # Best-effort, like annotations: GitHub answers `/logs` with a redirect to a
+  # short-lived download URL (Req follows it), and non-Actions check runs 404.
+  defp fetch_job_log(cfg, owner, repo, job_id) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/actions/jobs/#{job_id}/logs", []) do
+      {:ok, %Req.Response{status: status, body: body}}
+      when status in 200..299 and is_binary(body) ->
+        {excerpt, truncated?} = CILogExcerpt.extract_with_status(body, @log_tail_limit)
+
+        excerpt =
+          case excerpt do
+            "" -> nil
+            excerpt -> "--- job log (filtered) ---\n" <> excerpt
+          end
+
+        {excerpt, save_full_log(owner, repo, job_id, body), truncated?}
+
+      # No log at all (a non-Actions check run, a 404): nothing to classify from.
+      _ ->
+        {nil, nil, true}
+    end
+  end
+
+  # The whole log, kept so the fix pass can grep it instead of asking the forge
+  # (bd-d0q7s4). Best-effort: a write that fails leaves the briefing without a path.
+  # Under the disk-backed, operator-owned scratch root (0700), NOT `/tmp`: a jailed
+  # worker's `/tmp` is a private tmpfs, while the scratch root is visible through the
+  # jail's read-only root bind. Podman and remote-node workers can't see it; the
+  # briefing only lists the path as "where listed" and the excerpt is inline.
+  defp save_full_log(owner, repo, job_id, body) do
+    dir = Path.join(Wardmast.Config.Paths.scratch_root(), "ci-logs")
+    path = Path.join(dir, "#{owner}-#{repo}-job-#{job_id}.log")
+
+    with :ok <- File.mkdir_p(dir),
+         :ok <- File.chmod(dir, 0o700),
+         :ok <- File.write(path, body),
+         :ok <- File.chmod(path, 0o600) do
+      prune_old_logs(dir)
+      path
+    else
+      _ -> nil
+    end
+  end
+
+  # Retention: drop saved logs older than a week so the directory can't grow unbounded.
+  defp prune_old_logs(dir) do
+    cutoff = System.os_time(:second) - 7 * 86_400
+
+    for name <- File.ls!(dir),
+        path = Path.join(dir, name),
+        {:ok, %File.Stat{mtime: mtime}} <- [File.stat(path, time: :posix)],
+        mtime < cutoff do
+      File.rm(path)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp truncate(str, limit) when is_binary(str) do
+    if String.length(str) > limit, do: String.slice(str, 0, limit) <> "…", else: str
+  end
+
+  # `:pending` here means genuinely in-flight (queued/running); `:neutral`
+  # means every check run has *completed* with a non-failing, non-all-success
+  # conclusion mix (e.g. `neutral`/`skipped`/`stale`) — a settled, mergeable
+  # state, not CI-still-running (bd-cnytw3 finding #1: conflating the two made
+  # the Watchdog defer indefinitely on a PR that was actually done and
+  # mergeable).
+  defp map_check_run_status(runs) do
+    conclusions = Enum.map(runs, &Map.get(&1, "conclusion"))
+    statuses = Enum.map(runs, &Map.get(&1, "status"))
+
+    in_flight? =
+      Enum.any?(statuses, &(&1 in ["in_progress", "queued", "waiting", "requested", "pending"]))
+
+    cond do
+      real_failure?(runs) ->
+        :failed
+
+      # Cancelled with nothing real failing: an infrastructure outcome. A re-run
+      # of it still in flight is `:running`, not cancelled (#360).
+      Enum.any?(conclusions, &(&1 in @infra_conclusions)) ->
+        if in_flight?, do: :running, else: :canceled
+
+      Enum.all?(statuses, &(&1 == "completed")) and
+          Enum.all?(conclusions, &(&1 in ["success", "skipped", "neutral"])) ->
+        :success
+
+      true ->
+        in_flight_status(in_flight?, statuses)
+    end
+  end
+
+  # Every unfinished run still queued (none started) is `:pending`, which
+  # ReviewGate's CI wait holds on a long queue ceiling rather than the poll budget.
+  defp in_flight_status(false, _statuses), do: :neutral
+
+  defp in_flight_status(true, statuses) do
+    if Enum.any?(statuses, &(&1 == "in_progress")), do: :running, else: :pending
+  end
+
+  # A genuine code failure: a failing conclusion that is not an aggregate job
+  # merely reporting a cancelled shard.
+  defp real_failure?(runs) do
+    Enum.any?(runs, fn run ->
+      Map.get(run, "conclusion") in @failing_conclusions and
+        not cancelled_aggregate?(run, runs)
+    end)
+  end
+
+  # The aggregate job (`mix test`, which `needs:` every `mix test (app 1/3)`
+  # shard) fails when a shard is cancelled, though nothing failed. Look through
+  # it: a failing check whose "<name> (…" matrix siblings include a cancelled
+  # one and no failed one is that cancellation echoed, not a second failure.
+  defp cancelled_aggregate?(run, runs) do
+    name = Map.get(run, "name")
+
+    if is_binary(name) and Map.get(run, "conclusion") == "failure" do
+      suite = suite_id(run)
+
+      siblings =
+        Enum.filter(runs, fn other ->
+          other_name = Map.get(other, "name")
+
+          is_binary(other_name) and String.starts_with?(other_name, name <> " (") and
+            (is_nil(suite) or suite_id(other) in [nil, suite])
+        end)
+
+      Enum.any?(siblings, &(Map.get(&1, "conclusion") in @infra_conclusions)) and
+        not Enum.any?(siblings, &(Map.get(&1, "conclusion") in @failing_conclusions))
+    else
+      false
+    end
+  end
+
+  # ---- Internals: target / ref resolution ----------------------------------
+
+  # Resolve the {owner, repo, ref_form} target for a fresh open/4. ref_form
+  # determines whether the minted mr_ref will embed owner/repo (per-repo
+  # derivation) or just carry the PR number (single-repo workspace).
+  defp resolve_target(cfg, opts) do
+    cond do
+      is_binary(cfg.repo) ->
+        {:ok, {cfg.owner, cfg.repo, :bare}}
+
+      path = Map.get(opts, :repo_path) ->
+        with {:ok, {owner, repo}} <- RepoResolver.from_remote(path) do
+          {:ok, {owner, repo, :embedded}}
+        end
+
+      true ->
+        {:error,
+         %Error{
+           kind: :config_missing,
+           status: nil,
+           message:
+             "GitHub merger config missing \"repo\" and no :repo_path in opts to derive it from. " <>
+               ~s(Set workspace.config["merge"]["config"]["repo"] for single-repo workspaces, ) <>
+               "or pass :repo_path so the adapter can derive owner/repo from the repo's git remote.",
+           raw: nil
+         }}
+    end
+  end
+
+  # Resolve {owner, repo, number} for a callback that takes an existing mr_ref.
+  # An embedded mr_ref ("<owner>/<repo>#<n>") is self-describing; a bare
+  # ("#<n>") falls back to the active workspace cfg's owner/repo.
+  defp resolve_ref(cfg, mr_ref) do
+    case parse_mr_ref(mr_ref) do
+      {:embedded, owner, repo, number} ->
+        {:ok, {owner, repo, number}}
+
+      {:bare, number} ->
+        case cfg.repo do
+          repo when is_binary(repo) ->
+            {:ok, {cfg.owner, repo, number}}
+
+          _ ->
+            {:error,
+             %Error{
+               kind: :config_missing,
+               status: nil,
+               message:
+                 "mr_ref #{inspect(mr_ref)} omits owner/repo and workspace cfg has no \"repo\"",
+               raw: nil
+             }}
+        end
+
+      :invalid ->
+        {:error, %Error{kind: :validation_failed, message: "invalid mr_ref: #{inspect(mr_ref)}"}}
+    end
+  end
+
+  defp build_mr_ref(:bare, _owner, _repo, number), do: "#" <> Integer.to_string(number)
+
+  defp build_mr_ref(:embedded, owner, repo, number),
+    do: "#{owner}/#{repo}##{number}"
+
+  defp parse_mr_ref(mr_ref) do
+    # Tolerate a leading `github:` strategy prefix (bd-3jjk0e): some stored refs
+    # / callers carry the strategy tag, and without stripping it the owner would
+    # parse as "github:owner" and every REST path would 404.
+    mr_ref = String.replace_prefix(mr_ref, "github:", "")
+
+    case String.split(mr_ref, "#", parts: 2) do
+      ["", num_str] ->
+        case parse_pos_int(num_str) do
+          {:ok, n} -> {:bare, n}
+          :error -> :invalid
+        end
+
+      [slug, num_str] when slug != "" ->
+        with [owner, repo] when owner != "" and repo != "" <- String.split(slug, "/", parts: 2),
+             {:ok, n} <- parse_pos_int(num_str) do
+          {:embedded, owner, repo, n}
+        else
+          _ -> :invalid
+        end
+
+      [num_str] ->
+        # Bare integer string — backward compat with old MergeQueue pr_ref storage ("42").
+        case parse_pos_int(num_str) do
+          {:ok, n} -> {:bare, n}
+          :error -> :invalid
+        end
+    end
+  end
+
+  defp parse_pos_int(str) do
+    case Integer.parse(str) do
+      {n, ""} when n > 0 -> {:ok, n}
+      _ -> :error
+    end
+  end
+
+  # ---- Internals: review threads (GraphQL) ---------------------------------
+
+  # POST the review-threads query to GitHub's GraphQL endpoint. GraphQL returns
+  # HTTP 200 even for query-level errors (carried in a top-level "errors" list),
+  # so surface those as an error rather than silently treating an error payload
+  # as "no threads".
+  defp graphql_review_threads(cfg, owner, repo, number) do
+    variables = %{"owner" => owner, "repo" => repo, "number" => number}
+    payload = %{"query" => @review_threads_query, "variables" => variables}
+
+    case request(cfg, :post, "/graphql", json: payload) do
+      {:ok, %Req.Response{status: status, body: %{"errors" => [_ | _] = errors}}} ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: graphql_error_message(errors),
+           raw: errors
+         }}
+
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:ok, body}
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # POST the required-checks query. Same error-surfacing shape as
+  # `graphql_review_threads/4` — GraphQL returns HTTP 200 even for
+  # query-level errors.
+  defp graphql_required_checks(cfg, owner, repo, number) do
+    variables = %{"owner" => owner, "repo" => repo, "number" => number}
+    payload = %{"query" => @required_checks_query, "variables" => variables}
+
+    case request(cfg, :post, "/graphql", json: payload) do
+      {:ok, %Req.Response{status: status, body: %{"errors" => [_ | _] = errors}}} ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: graphql_error_message(errors),
+           raw: errors
+         }}
+
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:ok, body}
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # ---- Internals: batched PR signals (GraphQL, bd-3byp1n) ------------------
+
+  # Parse each ref to {owner, repo, number} and assign aliases: a repo alias
+  # (`r0`, `r1`, …) per distinct {owner, repo} in first-seen order, and a
+  # globally-unique PR alias (`p0`, `p1`, …) per entry. Unparseable refs are
+  # dropped (the caller falls back per-PR for any ref missing from the result).
+  defp batch_entries(cfg, refs) do
+    {entries, _repo_aliases, _k} =
+      refs
+      |> Enum.reduce({[], %{}, 0}, fn ref, {acc, repo_aliases, k} ->
+        case resolve_ref(cfg, ref) do
+          {:ok, {owner, repo, number}} ->
+            key = {owner, repo}
+
+            {ralias, repo_aliases} =
+              case Map.get(repo_aliases, key) do
+                nil ->
+                  ra = "r#{map_size(repo_aliases)}"
+                  {ra, Map.put(repo_aliases, key, ra)}
+
+                ra ->
+                  {ra, repo_aliases}
+              end
+
+            entry = %{
+              ref: ref,
+              owner: owner,
+              repo: repo,
+              number: number,
+              ralias: ralias,
+              palias: "p#{k}"
+            }
+
+            {[entry | acc], repo_aliases, k + 1}
+
+          _ ->
+            {acc, repo_aliases, k + 1}
+        end
+      end)
+
+    Enum.reverse(entries)
+  end
+
+  # Build one aliased query for all entries. owner/name go through GraphQL
+  # variables (`$o<j>`/`$n<j>`) so repo identifiers can't inject query text; the
+  # PR number is interpolated as a literal integer — safe (an int) and needed in
+  # two spots, `pullRequest(number:)` and `isRequired(pullRequestNumber:)`, the
+  # latter resolved per PR against that PR's own branch protection (never
+  # hoisted). Returns `{query, variables_map}`.
+  defp build_batch_query(entries) do
+    repo_aliases = entries |> Enum.map(& &1.ralias) |> Enum.uniq()
+
+    {var_decls, variables} =
+      Enum.reduce(repo_aliases, {[], %{}}, fn "r" <> j = ra, {decls, vars} ->
+        %{owner: owner, repo: repo} = Enum.find(entries, &(&1.ralias == ra))
+
+        {decls ++ ["$o#{j}: String!", "$n#{j}: String!"],
+         vars |> Map.put("o#{j}", owner) |> Map.put("n#{j}", repo)}
+      end)
+
+    repo_blocks =
+      repo_aliases
+      |> Enum.map_join("\n", fn "r" <> j = ra ->
+        pr_blocks =
+          entries
+          |> Enum.filter(&(&1.ralias == ra))
+          |> Enum.map_join("\n", &batch_pr_block/1)
+
+        "    #{ra}: repository(owner: $o#{j}, name: $n#{j}) {\n#{pr_blocks}\n    }"
+      end)
+
+    # `rateLimit { cost }` is itself free of points and makes GitHub return the
+    # exact points this query billed, so a sweep's cost is observable in the logs
+    # (bd-3byp1n's "measure the points cost") rather than merely estimated.
+    query =
+      "query(#{Enum.join(var_decls, ", ")}) {\n#{repo_blocks}\n    rateLimit { cost nodeCount }\n}\n"
+
+    {query, variables}
+  end
+
+  # The per-PR selection set — the "...PRBits" fragment inlined per alias (a
+  # shared fragment can't carry the per-PR `isRequired(pullRequestNumber:)`
+  # argument). Fetches exactly what the three trigger decisions need — and no
+  # more, to keep the GraphQL points cost low (bd-3byp1n: "the points budget
+  # must not become the new ceiling"):
+  #
+  #   * `reviews` states → changes_requested (same as `list_review_feedback/1`).
+  #   * `reviewThreads { isResolved }` → the unresolved-thread COUNT PRPatrol
+  #     triggers on. Comments are fetched `first: 1` (the opening comment, for
+  #     thread author/body context) plus a second aliased `last: 1` page (the
+  #     latest comment, bd-45x4yo — `answered_by_us?/2` needs to know who spoke
+  #     LAST, not who opened the thread, or a thread we already replied to and
+  #     left unresolved gets miscounted as still-open every tick) — NOT
+  #     `first: 100` like the single-PR `@review_threads_query`. PRPatrol
+  #     doesn't need the full comment tree; that's re-read per-PR by the
+  #     follow-up worker via `list_open_review_threads/1`. Dropping the 100×100
+  #     comment fan-out (2 comment nodes/thread instead) is what keeps this
+  #     query's node cost ~one rollup page per PR instead of ~10k nodes/PR.
+  #   * `statusCheckRollup` contexts with per-PR `isRequired` → required-check
+  #     failures (same as `@required_checks_query`).
+  defp batch_pr_block(%{palias: palias, number: number}) do
+    """
+        #{palias}: pullRequest(number: #{number}) {
+          reviews(last: 100) { nodes { databaseId state author { login } } }
+          reviewThreads(first: 100) {
+            nodes {
+              id
+              isResolved
+              path
+              line
+              comments(first: 1) { nodes { databaseId body author { login } } }
+              latest: comments(last: 1) { nodes { databaseId body author { login } } }
+            }
+          }
+          commits(last: 1) {
+            nodes {
+              commit {
+                statusCheckRollup {
+                  contexts(first: 100) {
+                    nodes {
+                      __typename
+                      ... on CheckRun {
+                        name
+                        status
+                        conclusion
+                        detailsUrl
+                        isRequired(pullRequestNumber: #{number})
+                      }
+                      ... on StatusContext {
+                        context
+                        state
+                        targetUrl
+                        description
+                        isRequired(pullRequestNumber: #{number})
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }\
+    """
+  end
+
+  # POST the batched query. Partial failure is tolerated: a body carrying a
+  # `data` map is returned as `{:ok, data}` EVEN IF a top-level `errors` list is
+  # also present (some aliased nodes came back null) — per-PR extraction then
+  # skips the null nodes and the caller falls back for those refs. Only an
+  # errors-only response (no usable `data`), an unexpected shape, a non-2xx, or a
+  # transport error is a total `{:error, ...}`.
+  defp graphql_batch(cfg, query, variables) do
+    payload = %{"query" => query, "variables" => variables}
+
+    case request(cfg, :post, "/graphql", json: payload) do
+      {:ok, %Req.Response{status: status, body: %{"data" => data}}}
+      when status in 200..299 and is_map(data) ->
+        log_batch_points(data)
+        {:ok, data}
+
+      {:ok, %Req.Response{status: status, body: %{"errors" => [_ | _] = errors}}} ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: graphql_error_message(errors),
+           raw: errors
+         }}
+
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: "unexpected GraphQL response shape",
+           raw: body
+         }}
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # Log the GraphQL points this batched sweep actually billed (bd-3byp1n), so the
+  # secondary-vs-primary budget can be watched in production. `cost` is the exact
+  # points the query consumed against the token's 5,000 points/hr pool;
+  # `nodeCount` is how many nodes it touched. Debug-level: one line per sweep.
+  defp log_batch_points(%{"rateLimit" => %{"cost" => cost, "nodeCount" => nodes}})
+       when is_integer(cost) do
+    Logger.debug("GitHub batch_pr_signals: GraphQL points cost=#{cost} nodeCount=#{nodes}")
+  end
+
+  defp log_batch_points(_), do: :ok
+
+  # Destructure the aliased response back to `%{ref => pr_signals}`. A ref whose
+  # aliased node is null/missing (partial failure) is simply omitted so the
+  # caller re-fetches it per-PR — never dropped silently.
+  defp extract_batch(entries, data) do
+    Enum.reduce(entries, %{}, fn e, acc ->
+      case get_in(data, [e.ralias, e.palias]) do
+        node when is_map(node) -> Map.put(acc, e.ref, extract_pr_signals(node))
+        _ -> acc
+      end
+    end)
+  end
+
+  # Decompose one aliased PullRequest node into the three trigger signals,
+  # reusing the SAME extractors the per-PR callbacks use so decisions are
+  # identical.
+  defp extract_pr_signals(node) do
+    %{
+      changes_requested: batch_changes_requested?(node),
+      latest_review_id: batch_latest_review_id(node),
+      review_threads: batch_review_threads(node),
+      required_check_failures: batch_required_check_failures(node)
+    }
+  end
+
+  # Normalize the GraphQL reviews (`author { login }`) to the REST shape
+  # `changes_requested?/1` expects (`user.login`), then reuse it verbatim — same
+  # latest-verdict-per-reviewer semantics as `list_review_feedback/1`.
+  defp batch_changes_requested?(node), do: node |> batch_reviews() |> changes_requested?()
+
+  # bd-9uyoy0: the same debounce handle `list_review_feedback/1` reports (the
+  # REST `id`, which is GraphQL's `databaseId`), so the fallback and batched
+  # paths fingerprint a review identically.
+  defp batch_latest_review_id(node),
+    do: node |> batch_reviews() |> latest_changes_requested_id()
+
+  defp batch_reviews(node) do
+    node
+    |> get_in(["reviews", "nodes"])
+    |> List.wrap()
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(fn r ->
+      %{
+        "id" => Map.get(r, "databaseId"),
+        "state" => Map.get(r, "state"),
+        "user" => %{"login" => get_in(r, ["author", "login"])}
+      }
+    end)
+  end
+
+  # Same unresolved-thread filter + normalization as `list_open_review_threads/1`.
+  defp batch_review_threads(node) do
+    node
+    |> get_in(["reviewThreads", "nodes"])
+    |> List.wrap()
+    |> Enum.reject(&(is_nil(&1) or Map.get(&1, "isResolved") == true))
+    |> Enum.map(&merge_latest_thread_comment/1)
+    |> Enum.map(&normalize_review_thread/1)
+  end
+
+  # bd-45x4yo: fold the `latest: comments(last: 1)` alias into `comments.nodes`
+  # so `normalize_review_thread/1`'s `List.last(comments)` sees the thread's
+  # most recent comment, not just its `first: 1` opener. When the thread has
+  # only one comment, the first-page and last-page nodes are the same comment
+  # (by `databaseId`) — keep just the one node rather than duplicating it.
+  defp merge_latest_thread_comment(node) do
+    opener_nodes =
+      node |> get_in(["comments", "nodes"]) |> List.wrap() |> Enum.reject(&is_nil/1)
+
+    latest_nodes =
+      node |> get_in(["latest", "nodes"]) |> List.wrap() |> Enum.reject(&is_nil/1)
+
+    merged =
+      case {opener_nodes, latest_nodes} do
+        {[o], [l]} when o != l -> [o, l]
+        {[o], _} -> [o]
+        _ -> opener_nodes
+      end
+
+    case get_in(node, ["comments", "nodes"]) do
+      nil -> node
+      _ -> put_in(node, ["comments", "nodes"], merged)
+    end
+  end
+
+  # Same required+settled filter + summary as `list_required_check_failures/1`.
+  defp batch_required_check_failures(node) do
+    node
+    |> get_in(["commits", "nodes"])
+    |> List.wrap()
+    |> List.first()
+    |> case do
+      %{"commit" => %{"statusCheckRollup" => %{"contexts" => %{"nodes" => nodes}}}}
+      when is_list(nodes) ->
+        nodes
+
+      _ ->
+        []
+    end
+    |> Enum.reject(&is_nil/1)
+    |> required_failures()
+    |> Enum.map(&summarize_required_check/1)
+  end
+
+  # Required+settled failures, minus an aggregate CheckRun that failed only
+  # because a matrix shard was cancelled (#360). Same look-through as
+  # `cancelled_aggregate?/2`, with the GraphQL upper-case enums normalised to
+  # the REST lower-case values, so PRPatrol files no fix follow-up for it.
+  defp required_failures(contexts) do
+    runs = for %{"__typename" => "CheckRun"} = ctx <- contexts, do: rest_run(ctx)
+
+    contexts
+    |> Enum.filter(&required_settled_failure?/1)
+    |> Enum.reject(fn ctx ->
+      Map.get(ctx, "__typename") == "CheckRun" and cancelled_aggregate?(rest_run(ctx), runs)
+    end)
+  end
+
+  defp rest_run(ctx) do
+    %{
+      "name" => Map.get(ctx, "name"),
+      "conclusion" => ctx |> Map.get("conclusion") |> downcase_enum()
+    }
+  end
+
+  defp downcase_enum(v) when is_binary(v), do: String.downcase(v)
+  defp downcase_enum(v), do: v
+
+  # A required rollup context (CheckRun or legacy StatusContext) that has
+  # settled on a failing outcome. A required check still IN_PROGRESS/PENDING
+  # is excluded — not yet a failure, just not green yet.
+  defp required_settled_failure?(%{"isRequired" => true} = ctx) do
+    case Map.get(ctx, "__typename") do
+      "CheckRun" ->
+        Map.get(ctx, "status") == "COMPLETED" and
+          Map.get(ctx, "conclusion") in @failing_check_run_conclusions
+
+      "StatusContext" ->
+        Map.get(ctx, "state") in @failing_status_context_states
+
+      _ ->
+        false
+    end
+  end
+
+  defp required_settled_failure?(_), do: false
+
+  defp summarize_required_check(%{"__typename" => "CheckRun"} = ctx) do
+    %{
+      name: Map.get(ctx, "name") || "",
+      summary: Map.get(ctx, "conclusion") || "",
+      url: Map.get(ctx, "detailsUrl")
+    }
+  end
+
+  defp summarize_required_check(%{"__typename" => "StatusContext"} = ctx) do
+    %{
+      name: Map.get(ctx, "context") || "",
+      summary: Map.get(ctx, "description") || Map.get(ctx, "state") || "",
+      url: Map.get(ctx, "targetUrl")
+    }
+  end
+
+  defp graphql_resolve_review_thread(cfg, thread_id) do
+    payload = %{"query" => @resolve_review_thread_mutation, "variables" => %{"id" => thread_id}}
+
+    case request(cfg, :post, "/graphql", json: payload) do
+      {:ok, %Req.Response{status: status, body: %{"errors" => [_ | _] = errors}}} ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: graphql_error_message(errors),
+           raw: errors
+         }}
+
+      {:ok,
+       %Req.Response{
+         status: status,
+         body: %{"data" => %{"resolveReviewThread" => %{"thread" => thread}}}
+       }}
+      when status in 200..299 ->
+        {:ok, thread}
+
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: "unexpected GraphQL response shape",
+           raw: body
+         }}
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  defp normalize_review_thread(node) do
+    comment_nodes =
+      node
+      |> get_in(["comments", "nodes"])
+      |> List.wrap()
+      |> Enum.reject(&is_nil/1)
+
+    first_comment = List.first(comment_nodes) || %{}
+
+    comments =
+      Enum.map(comment_nodes, fn c ->
+        %{
+          id: Map.get(c, "databaseId"),
+          author: get_in(c, ["author", "login"]),
+          body: Map.get(c, "body")
+        }
+      end)
+
+    %{
+      id: Map.get(node, "id"),
+      resolved: Map.get(node, "isResolved") == true,
+      path: Map.get(node, "path"),
+      line: Map.get(node, "line"),
+      author: get_in(first_comment, ["author", "login"]),
+      body: Map.get(first_comment, "body"),
+      comments: comments
+    }
+  end
+
+  defp graphql_error_message(errors) do
+    errors
+    |> Enum.map(&Map.get(&1, "message"))
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join("; ")
+    |> case do
+      "" -> "GraphQL query error"
+      msg -> msg
+    end
+  end
+
+  # ---- Internals: review helpers -------------------------------------------
+
+  defp severity_label(:info), do: "INFO"
+  defp severity_label(:warning), do: "WARNING"
+  defp severity_label(:error), do: "ERROR"
+  defp severity_label(other), do: other |> to_string() |> String.upcase()
+
+  defp verdict_event(:approve), do: "APPROVE"
+  defp verdict_event(:request_changes), do: "REQUEST_CHANGES"
+
+  # GitHub returns HTTP 422 with "Can not approve your own pull request." or
+  # "You can not request changes on your own pull request." when reviewer and
+  # PR author share the same identity. Both contain "your own pull request".
+  defp self_review_error?(%{"message" => msg}) when is_binary(msg) do
+    msg |> String.downcase() |> String.contains?("your own pull request")
+  end
+
+  defp self_review_error?(_), do: false
+
+  # Post the verdict as a top-level issue comment when a formal review
+  # submission is rejected because the reviewer is the PR author. The fleet
+  # merge gate uses the internal worker verdict, not GitHub's review state,
+  # so this comment is for human visibility only.
+  defp fallback_self_review_comment(cfg, owner, repo, number, verdict, body) do
+    verdict_label = if verdict == :approve, do: "APPROVE", else: "REQUEST_CHANGES"
+    text = "VERDICT: #{verdict_label}\n\n#{body || ""}" |> String.trim()
+    payload = %{"body" => text}
+
+    case request(cfg, :post, "/repos/#{owner}/#{repo}/issues/#{number}/comments", json: payload) do
+      {:ok, %Req.Response{status: status, body: resp_body}} when status in 200..299 ->
+        {:ok, resp_body}
+
+      {:ok, %Req.Response{status: status, body: err_body}} ->
+        {:error, http_error(status, err_body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # Inline review comments require the head SHA of the PR (GitHub's API
+  # anchors the comment to a specific commit). Callers can short-circuit
+  # the lookup by passing `:commit_id` in opts.
+  defp fetch_commit_id(_cfg, _owner, _repo, _number, %{commit_id: id})
+       when is_binary(id) and id != "",
+       do: {:ok, id}
+
+  defp fetch_commit_id(cfg, owner, repo, number, _opts) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", []) |> handle_json() do
+      {:ok, %{"head" => %{"sha" => sha}}} when is_binary(sha) and sha != "" ->
+        {:ok, sha}
+
+      {:ok, _} ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: nil,
+           message: "PR payload missing head.sha",
+           raw: nil
+         }}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # GitHub returns the raw unified diff when Accept negotiates for it. We
+  # piggy-back on the existing `request/4` plumbing but swap headers so the
+  # response body is a string, not JSON. Stub plugs see the same path; tests
+  # can stub-text-body the response.
+  defp request_diff(cfg, path) do
+    diff_headers = [
+      {"authorization", "Bearer " <> cfg.token},
+      {"accept", "application/vnd.github.v3.diff"},
+      {"x-github-api-version", "2022-11-28"},
+      {"user-agent", "arbiter"}
+    ]
+
+    case Client.request(client(cfg), :get, path, headers: diff_headers) do
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:ok, to_string(body)}
+
+      {:ok, %Req.Response{status: status, body: body} = resp} ->
+        {:error, http_error(status, body, resp)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # ---- Internals: HTTP -----------------------------------------------------
+
+  # Every real HTTP request passes through the shared priority-aware GitHub
+  # budget (bd-3p5vqc): background patrol traffic may be withheld here so it can
+  # never starve foreground work (PR open/merge/finalize, deploys), and the
+  # limiter observes each response to drive its headroom + secondary-limit
+  # accounting.
+  #
+  # `:retry` attaches bounded retries for GitHub's *secondary* (abuse) rate
+  # limit — a transient, burst-triggered 403/429 distinct from primary quota
+  # exhaustion (bd-1yva53, bd-2o4b8f). ReviewPatrol's per-tick poll of every
+  # open engagement is the main source of these bursts; retrying here (rather
+  # than in every caller) also covers mid-review adapter calls (get_diff,
+  # post_inline_comment, …) so a single secondary-limit 403/429 no longer
+  # fails an entire CodeReview run.
+  #
+  # bd-8y1i58: the gate is *inside* the retry loop, not around it (see
+  # `Wardmast.Providers.Github` / `Wardmast.Http.Client`). With the loop inside a
+  # single gate, one acquire could issue up to three real requests — the
+  # limiter's counters (what an operator reads when the account is exhausted)
+  # undercounted by up to 3x, and a background retry storm could not be shed
+  # once it had started. Gating per attempt also means the first 403 arms the
+  # secondary backoff before the retry is decided, so background retry
+  # traffic — the thing that *sustains* a secondary limit — is withheld.
+  defp client(cfg),
+    do: Provider.client(cfg, Error, stub_name: @stub_name, retry: :secondary_rate_limit)
+
+  defp request(cfg, method, path, req_opts),
+    do: Client.request(client(cfg), method, path, req_opts)
+
+  defp handle_json(result), do: Client.handle_json(Provider.error_spec(Error), result)
+
+  # For callbacks that only care about success vs failure (merge/close/comment).
+  defp expect_ok(result), do: Client.expect_ok(Provider.error_spec(Error), result)
+
+  # `resp` is the full `%Req.Response{}` when available (so rate-limit headers
+  # can be read) — omitted at call sites that only destructured status/body
+  # before GitHub's rate-limit shape mattered there (bd-1m8k7d).
+  defp http_error(status, body, resp \\ nil),
+    do: Client.http_error(Provider.error_spec(Error), status, body, resp)
+
+  defp transport_error(exception),
+    do: Client.transport_error(Provider.error_spec(Error), exception)
+end

@@ -1,0 +1,1800 @@
+defmodule Wardmast.Agents.ProviderRouting do
+  @moduledoc """
+  Implementer provider routing by **most quota left** (bd-40pzpj, phase 1 of
+  bd-9ck2a7): at dispatch, the implementer goes to the workspace's provider
+  account with the most quota headroom against its pace, instead of the first
+  healthy `agent.type` (`Wardmast.Agents.ProviderPool`).
+
+  ## Opt-in, per workspace
+
+  `routing.provider_selection: most_quota` turns it on. Unset (or
+  `"failover"`) is today's behaviour exactly — nothing here runs, nothing is
+  recorded. It ships **off** everywhere: the operator's condition is that no
+  workspace turns it on until the agy write jail lands (bd-5gvqgc, bd-3s82pf).
+
+  ## Candidates
+
+  The workspace's attached provider accounts that its provider settings
+  (`Wardmast.Accounts.ProviderSettings`, bd-64apru) allow for the
+  **implementer** role, in their configured order. An account linked only for
+  metering or for the reviewer is not a candidate, and a workspace with no
+  implementer attachment has no candidates at all (its `agent.type` fallback
+  is not an account set). Each candidate is classified by
+  `Wardmast.Agents.ModelFamily` from its provider and the model difficulty
+  routing would run on it (`ModelFamily.model_for_tier/3`), which is also what
+  picks agy's quota pool.
+
+  ## Availability
+
+  A candidate is dropped, with its reason recorded, when any of these hold
+  (checked in this order):
+
+    * `provider_constraint` — the ticket's own provider constraint
+      (`Wardmast.Agents.ProviderConstraint`, bd-13pqcp) does not allow the
+      account's provider; the detail is the constraint (`exclude gemini`);
+    * `disabled` / `merged` — the account is parked or merged away;
+    * `no_adapter` — its provider has no agent adapter;
+    * `cli_unavailable` — an `antigravity` account on a host where the
+      `gemini` adapter would not spawn agy;
+    * `auth_expired` — `Wardmast.Agents.AuthHold` is open, or
+      `Wardmast.Agents.CredentialWatchdog` holds the adapter's credential
+      expired. agy and Codex authenticate through their CLI logins, so a
+      healthy probe is all they need — no account credential row is required
+      of any candidate;
+    * `circuit_broken` — `ProviderPool.healthy?/1` is false;
+    * `at_capacity` — `Wardmast.Accounts.Concurrency.account_headroom/3` is 0:
+      the account is at `max_concurrent` or at this workspace's share. For
+      every role but `:main` the task's own live workers are left out of the
+      count (`exclude_task:`): the role replaces them rather than running
+      beside them — the author worker parked through a ReviewGate round
+      still holds its registry slot, and counting it would drop the pin for
+      a slot it is not using;
+    * `write_confinement_none` — the scope is `:strict` and the adapter's
+      `write_confinement/1` (bd-1abj7u) is `:none`. An adapter that does not
+      implement the callback answers `:none`;
+    * `capability_missing` — `routing.capability_gates` is on and the candidate's
+      provider/model lacks a capability the role or the repo requires
+      (`Wardmast.Agents.CapabilityMatrix`, bd-57uzkl); checked ahead of quota, so
+      a candidate that cannot do the work never has its quota weighed;
+    * `below_floor` — a floor is configured (`routing.floors`, bd-c675ny,
+      `Wardmast.Agents.Floors`) and the model the candidate would run is on a
+      known tier below the repo's blast-radius floor, or — with
+      `routing.floors.policy_floor` — below the tier the routing policy
+      chose; checked ahead of quota, like `capability_missing`;
+    * `sandbox_backend` — the workspace's resolved `sandbox.backend` has no
+      wrap point for the provider (`Wardmast.Worker.Sandbox.module/2`; podman
+      runs claude and codex only), so a spawn would be refused. Checked ahead
+      of the account checks so no slot or attention item is burnt on it;
+    * `paused` — the account or its provider is paused (`Wardmast.Providers.Pause`,
+      `arb provider pause`), with the operator's reason as the detail;
+    * `quota_held` — the workspace's `Wardmast.Quota.Gate` would hold a
+      dispatch on this account's snapshot (account ∧ workspace policy, paced
+      included) for the model it would run.
+
+  For an account in `scheduler_admission: enforce` (DC8, design
+  `provider-dynamic-concurrency.md` §7, E12) feasibility is a free seat:
+  `at_capacity` is the candidate's pool at `min(budget, max_concurrent, share)`
+  seats (`Wardmast.Accounts.SeatCheck`, never for a follow-up role, which holds
+  its ticket's seat already), its `:capacity` is the pool's free seats, and
+  `quota_held` is the gate's hard rules only (`pace: false`). A dispatch the
+  scheduler walk planned (`:planned`) takes the planned account while it is
+  available.
+
+  ## Ranking
+
+  The survivors are ranked by `Wardmast.Quota.Headroom.binding/3` —
+  `threshold_now − used` on the binding window, where `threshold_now` is the
+  gate's own paced or flat ceiling composed `min(account, workspace)` — most
+  headroom first, ties to configured order, accounts with no reading after
+  every known one.
+
+  ## The pin, fallback and override
+
+  The first routed dispatch pins the chosen account and family on the task
+  (`implementer_account_id` / `implementer_family`). Every implementer role
+  after it — resumes, ReviewGate implementer rounds, CI fix passes, conflict
+  resolvers, reconciler resumes — reuses the pin while it is available. When
+  it is not, the role falls back at once to the best available account,
+  excluding the reviewer's model family when another option exists
+  (bd-a1ke2c), and the decision records the fallback. The pin is kept.
+
+  A dispatch-time provider override wins: it is recorded as an override,
+  alongside the headroom evaluation, and pins nothing.
+
+  With no candidate available the dispatch goes ahead exactly as it would
+  have without routing, and the decision says so (`outcome: "no_candidate"`).
+
+  ## One "who can take this?" for every surface
+
+  `availability/3` is the single candidate/availability computation. `select/4`
+  (dispatch) is built on it, and so are the board's Autopilot hold and slot
+  arithmetic (bd-3fvue3): `Wardmast.Board.Snapshot.quota_hold/2` holds a
+  most-quota workspace only when no candidate is available, and
+  `effective_max_concurrent/3` sums the available candidates' account headroom.
+  The per-card hold display (bd-1qjv3j) reads the same function (per ticket, so
+  its model tier and pin apply) instead of re-deriving the drop reasons.
+
+  ## The decision record
+
+  `select/4` returns a JSON-safe, string-keyed map the run stores in
+  `worker_runs.routing_decision`: `mode`, `role`, `outcome` (`selected` /
+  `pinned` / `fallback` / `override` / `no_candidate`), the chosen
+  `account_id` / `account_slug` / `provider` / `agent_type` / `family` /
+  `pool` / `model` / `model_tier` / `headroom`, the ranked `candidates` with
+  their headroom, the `dropped` candidates with `reason` and `detail`, and
+  `fallback` / `override` / `excluded_family` / `pinned_account_id` when they
+  apply.
+  """
+
+  require Ash.Query
+  require Logger
+
+  alias Wardmast.Accounts.AdmissionMode
+  alias Wardmast.Accounts.Concurrency
+  alias Wardmast.Accounts.ProviderAccount
+  alias Wardmast.Accounts.ProviderSettings
+  alias Wardmast.Accounts.SeatCheck
+  alias Wardmast.Agents
+  alias Wardmast.Agents.AuthHold
+  alias Wardmast.Agents.CapabilityMatrix
+  alias Wardmast.Agents.CredentialWatchdog
+  alias Wardmast.Agents.Floors
+  alias Wardmast.Agents.ModelFamily
+  alias Wardmast.Agents.PoolReservations
+  alias Wardmast.Agents.ProviderConstraint
+  alias Wardmast.Agents.ProviderPool
+  alias Wardmast.Agents.ReviewerRouting
+  alias Wardmast.Agents.Routing
+  alias Wardmast.Agents.Routing.Competence
+  alias Wardmast.Agents.Routing.Score
+  alias Wardmast.Agents.SecurityPolicy
+  alias Wardmast.Guardrails
+  alias Wardmast.Guardrails.Eligibility
+  alias Wardmast.Guardrails.Rules
+  alias Wardmast.Loop.Canary
+  alias Wardmast.Quota.Gate
+  alias Wardmast.Quota.Headroom
+  alias Wardmast.Quota.SpendCap
+  alias Wardmast.Tasks.Issue
+  alias Wardmast.Tasks.Workspace
+  alias Wardmast.Worker.Sandbox
+  alias Wardmast.Workers.Run
+
+  @selections ~w(failover most_quota scored)
+  @max_fallback_length 255
+
+  @type role :: atom()
+  @type decision :: %{String.t() => term()}
+  @type selection :: %{
+          agent_type: atom(),
+          account: ProviderAccount.t() | nil,
+          family: ModelFamily.family() | nil,
+          model: String.t() | nil,
+          decision: decision()
+        }
+
+  @doc "Valid `routing.provider_selection` values (for workspace-config validation)."
+  @spec valid_selections() :: [String.t()]
+  def valid_selections, do: @selections
+
+  @doc """
+  Whether `workspace` routes its implementer by quota: `most_quota`, or
+  `scored` (which routes the same way — see `scored?/1`).
+  """
+  @spec enabled?(Workspace.t() | nil) :: boolean()
+  def enabled?(%Workspace{config: config}),
+    do: get_in(config || %{}, ["routing", "provider_selection"]) in ["most_quota", "scored"]
+
+  def enabled?(_), do: false
+
+  @doc """
+  Whether `workspace` runs `routing.provider_selection: scored` (bd-adtnto, R5).
+  `routing.scoring.mode` then picks `shadow` (the default: `most_quota`
+  dispatches and the scorer's choice is only recorded) or `enforce` (the
+  scorer's order dispatches).
+  """
+  @spec scored?(Workspace.t() | nil) :: boolean()
+  def scored?(%Workspace{config: config}),
+    do: get_in(config || %{}, ["routing", "provider_selection"]) == "scored"
+
+  def scored?(_), do: false
+
+  @doc """
+  Evaluate every implementer candidate for `task`: the ranked available ones
+  (`"candidates"`) and the dropped ones with their reasons (`"dropped"`).
+
+  Options (all optional; the defaults read the live system):
+
+    * `:security` — the dispatch's resolved `SecurityPolicy` (default: the
+      workspace's);
+    * `:now`;
+    * `:quota_fun` — `(ProviderAccount.t() -> quota row | nil)`;
+    * `:gemini_code` — the quota code of the CLI the `gemini` adapter would
+      spawn (`"antigravity"` for agy, `nil` otherwise);
+    * `:write_confinement` — `(adapter, policy -> atom)`;
+    * `:role` — the role being routed (default `:main`; `select/4` sets it),
+      which decides whether the task's own live workers count toward
+      `at_capacity`;
+    * `:repo` — the repo this dispatch runs in (default: the task's), whose
+      `routing.repos.<repo>.requires` the capability gate reads.
+  """
+  @spec evaluate(Workspace.t(), Issue.t() | nil, keyword()) :: decision()
+  def evaluate(%Workspace{} = ws, task, opts \\ []) do
+    ws |> availability(task, opts) |> Map.fetch!(:record)
+  end
+
+  @doc """
+  "Who can take this?" — the one candidate/availability computation, shared by
+  every surface that asks it (bd-3fvue3): `select/4` at dispatch, the board's
+  Autopilot hold and slot arithmetic (`Wardmast.Board.Snapshot.quota_hold/2`,
+  `effective_max_concurrent/3`) and the per-card hold display (bd-1qjv3j).
+  None of them re-derives the candidate set or the drop reasons.
+
+  Takes `evaluate/3`'s options. `task` may be `nil` for a board-wide question
+  that is not about one ticket (the model tier is then the workspace default).
+
+    * `:record` — the decision map `evaluate/3` returns;
+    * `:available` — the ranked available entries, best first; each carries its
+      `:account`, `:agent_type`, `:model`, `:family`, `:headroom` (quota) and
+      `:capacity` (`Concurrency.account_headroom/3`: a positive integer, or
+      `:unlimited`);
+    * `:dropped` — the dropped entries, each with a `:reason` and `:detail`;
+    * `:capacity` — how many more workers the available candidates can take
+      between them: the sum of their `:capacity`, `:unlimited` when any of them
+      is unbounded, `0` with none available.
+  """
+  @spec availability(Workspace.t(), Issue.t() | nil, keyword()) :: %{
+          record: decision(),
+          available: [map()],
+          dropped: [map()],
+          capacity: non_neg_integer() | :unlimited
+        }
+  def availability(%Workspace{} = ws, task, opts \\ []) do
+    {record, available, dropped} = run_evaluation(ws, task, opts)
+
+    # The walk counts seats against budgets itself; account headroom is not read.
+    capacity =
+      if walk?(opts),
+        do: nil,
+        else: available |> Enum.uniq_by(& &1.account.id) |> total_capacity()
+
+    %{record: record, available: available, dropped: dropped, capacity: capacity}
+  end
+
+  # DC6 (provider-dynamic-concurrency §4.2): `admission: :walk` asks who the
+  # ticket is *eligible* for. The scheduler walk's pool budgets and live seats
+  # replace the account-capacity and paced-line drops, so neither runs; every
+  # other drop — constraint, guardrails, sandbox, account, adapter, CLI, auth,
+  # circuit, confinement, capability, floor, the spend cap — is dispatch's.
+  # Only the walk passes it (`Wardmast.Board.WalkInputs`); dispatch never does.
+  defp walk?(opts), do: Keyword.get(opts, :admission) == :walk
+
+  # bd-13pqcp: a constrained ticket's record names its constraint.
+  defp put_constraint(record, task) do
+    case ProviderConstraint.describe(task) do
+      nil -> record
+      constraint -> Map.put(record, "constraint", constraint)
+    end
+  end
+
+  defp total_capacity(available) do
+    Enum.reduce_while(available, 0, fn
+      %{capacity: :unlimited}, _sum -> {:halt, :unlimited}
+      %{capacity: n}, sum -> {:cont, sum + n}
+    end)
+  end
+
+  # The record, plus the available (ranked) and dropped entries behind it.
+  defp run_evaluation(ws, task, opts) do
+    ctx = context(ws, task, opts)
+    candidates = candidates(ws)
+    ctx = with_seat_reads(ctx, candidates)
+
+    {available, dropped} =
+      candidates
+      |> Enum.flat_map(&entries(&1, ctx))
+      |> Enum.with_index()
+      |> Enum.map(fn {entry, index} -> check(Map.put(entry, :index, index), ctx) end)
+      |> Enum.split_with(&match?({:ok, _}, &1))
+
+    {available, scoring_fields} = available |> Enum.map(&elem(&1, 1)) |> order(ctx)
+    dropped = Enum.map(dropped, &elem(&1, 1))
+
+    record =
+      %{
+        "mode" => if(ctx.scoring, do: "scored", else: "most_quota"),
+        "candidates" => Enum.map(available, &candidate_record/1),
+        "dropped" => Enum.map(dropped, &drop_record/1),
+        "evaluated_at" => DateTime.to_iso8601(ctx.now),
+        "model_tier" => ctx.tier
+      }
+      |> Map.merge(scoring_fields)
+      |> put_constraint(task)
+
+    {record, available, dropped}
+  end
+
+  @doc """
+  Choose the implementer account for `task` in `role` (`:main`, `:resume`,
+  `:fix_pass`, …). `{:ok, selection}` names the adapter type to spawn and the
+  decision to record; `{:legacy, decision}` means no candidate is available
+  and the caller keeps its pre-routing resolution.
+
+  Options: those of `evaluate/3`, plus `:override` (an explicit adapter
+  type), `:reviewer_family` (default: the task's cross-family reviewer pin
+  (bd-a1ke2c), else its latest review run's) and
+  `:pin` (default `true`).
+  """
+  @spec select(Workspace.t(), Issue.t(), role(), keyword()) ::
+          {:ok, selection()} | {:legacy, decision()}
+  def select(%Workspace{} = ws, %Issue{} = task, role, opts \\ []) do
+    {record, entries, dropped} = run_evaluation(ws, task, Keyword.put(opts, :role, role))
+    base = Map.put(record, "role", to_string(role))
+
+    result =
+      case Keyword.get(opts, :override) do
+        override when is_atom(override) and not is_nil(override) ->
+          override(base, entries, ws, override)
+
+        _ ->
+          choose(base, entries, dropped, task, opts)
+      end
+
+    finish_shadow(result)
+  end
+
+  @doc """
+  The provider an implementer role on `task` runs with —
+  `{provider, fallback_reason, decision}`.
+
+  Off (`enabled?/1` false): exactly `Wardmast.Agents.resolve_revision_provider/2`
+  (or the `:override`), with a `nil` decision. On: the pin, a recorded
+  fallback, or — with no candidate available — the same pre-routing
+  resolution, with the decision recording why.
+
+  `fallback_reason` is meant for the run's `provider_fallback`; see
+  `escalate_fallback?/1` for whether it warrants the coordinator's attention.
+  """
+  @spec implementer_provider(Issue.t() | String.t(), Workspace.t() | nil, role(), keyword()) ::
+          {atom(), String.t() | nil, decision() | nil}
+  def implementer_provider(task, workspace, role, opts \\ [])
+
+  def implementer_provider(task_id, workspace, role, opts) when is_binary(task_id) do
+    with true <- enabled?(workspace),
+         {:ok, %Issue{} = task} <- Ash.get(Issue, task_id) do
+      implementer_provider(task, workspace, role, opts)
+    else
+      _ -> legacy(task_id, workspace, opts)
+    end
+  end
+
+  def implementer_provider(%Issue{} = task, workspace, role, opts) do
+    if enabled?(workspace) do
+      case select(workspace, task, role, opts) do
+        {:ok, selection} ->
+          {selection.agent_type, selection.decision["fallback"], selection.decision}
+
+        {:legacy, decision} ->
+          {provider, fallback} = legacy_resolution(task, workspace, opts)
+          {provider, fallback, Map.put(decision, "agent_type", to_string(provider))}
+      end
+    else
+      legacy(task, workspace, opts)
+    end
+  rescue
+    e ->
+      Logger.warning("ProviderRouting: routing #{task.id} crashed: #{Exception.message(e)}")
+      legacy(task, workspace, opts)
+  end
+
+  @doc """
+  Whether a `fallback_reason` from `implementer_provider/4` is the
+  pre-routing credential fallback the coordinator is told about — as opposed
+  to a routing fallback off an unavailable pin, which is routine under
+  `most_quota` and is recorded on the run only.
+  """
+  @spec escalate_fallback?(decision() | nil) :: boolean()
+  def escalate_fallback?(nil), do: true
+  def escalate_fallback?(%{"outcome" => "no_candidate"}), do: true
+  def escalate_fallback?(_decision), do: false
+
+  @doc """
+  Worker-meta fields for a decision: the decision itself plus the flat
+  `provider_account_id` / `model_family` the run row is indexed by, and the
+  fallback (truncated to the run column's width). `%{}` for `nil`.
+  """
+  @spec run_meta(decision() | nil) :: map()
+  def run_meta(nil), do: %{}
+
+  def run_meta(%{} = decision) do
+    %{
+      routing_decision: decision,
+      provider_account_id: decision["account_id"],
+      model_family: decision["family"]
+    }
+    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+    |> Map.new()
+  end
+
+  @doc "A fallback reason trimmed to fit `worker_runs.provider_fallback`."
+  @spec truncate_fallback(String.t() | nil) :: String.t() | nil
+  def truncate_fallback(nil), do: nil
+
+  def truncate_fallback(reason) when is_binary(reason) do
+    if String.length(reason) > @max_fallback_length,
+      do: String.slice(reason, 0, @max_fallback_length - 1) <> "…",
+      else: reason
+  end
+
+  # ---- selection ------------------------------------------------------------
+
+  defp override(base, entries, ws, override) do
+    type = to_string(override)
+
+    entry =
+      Enum.find(entries, &(&1.agent_type == type and not &1.picked?)) ||
+        override_entry(ws, override)
+
+    decision =
+      base
+      |> put_chosen(entry, override)
+      |> Map.merge(%{
+        "outcome" => "override",
+        "override" => "dispatch-time provider override: #{type}"
+      })
+
+    {:ok, %{selection(override, entry, decision) | model: nil}}
+  end
+
+  # The override's own account when it is a candidate that was dropped (or not
+  # a candidate at all): the account the workspace meters that provider under.
+  defp override_entry(ws, override) do
+    case ws.id |> Wardmast.Quota.account_id(override) |> Wardmast.Accounts.Resolver.get() do
+      %ProviderAccount{} = account ->
+        %{family: family, pool: pool} = ModelFamily.classify(account.provider, nil)
+
+        %{
+          account: account,
+          agent_type: to_string(override),
+          family: family,
+          pool: pool,
+          model: nil
+        }
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  # DC8 (design provider-dynamic-concurrency §4.4): under `enforce` the
+  # scheduler walk placed the card on a (pool, node) pair, and that pair rides
+  # in as `:planned`. Its account is taken while it is still an available
+  # candidate on the planned pool, and pinned when the ticket has no pin yet. A
+  # pin on another account that is still available wins (the walk ranks the
+  # pin first, so the two differ only across a race); anything else falls
+  # through to the usual choice.
+  defp choose(base, entries, dropped, task, opts) do
+    case planned_entry(entries, task, Keyword.get(opts, :planned)) do
+      %{} = entry ->
+        if Keyword.get(opts, :pin, true) and is_nil(task.implementer_account_id),
+          do: pin(task, entry)
+
+        {:ok, selection(entry, Map.put(put_chosen(base, entry), "outcome", "planned"))}
+
+      nil ->
+        choose_unplanned(base, entries, dropped, task, opts)
+    end
+  end
+
+  defp planned_entry(entries, task, %{account_id: account_id, pool: pool})
+       when is_binary(account_id) do
+    with entry when not is_nil(entry) <-
+           Enum.find(entries, &(&1.account.id == account_id and &1.pool == pool)) ||
+             Enum.find(entries, &(&1.account.id == account_id)),
+         true <- pin_allows?(task, entries, account_id) do
+      entry
+    else
+      _ -> nil
+    end
+  end
+
+  defp planned_entry(_entries, _task, _planned), do: nil
+
+  # A ticket pinned to another account that is still available stays on it.
+  defp pin_allows?(%Issue{implementer_account_id: nil}, _entries, _account_id), do: true
+  defp pin_allows?(%Issue{implementer_account_id: account_id}, _entries, account_id), do: true
+
+  defp pin_allows?(%Issue{implementer_account_id: pinned}, entries, _account_id),
+    do: not Enum.any?(entries, &(&1.account.id == pinned))
+
+  defp choose_unplanned(base, entries, dropped, task, opts) do
+    case pinned(task, entries, dropped) do
+      {:pinned, entry} ->
+        {:ok, selection(entry, Map.put(put_chosen(base, entry), "outcome", "pinned"))}
+
+      {:unavailable, why} ->
+        fallback(base, entries, task, why, opts)
+
+      :none ->
+        first(base, entries, task, opts)
+    end
+  end
+
+  defp first(base, [], _task, _opts), do: no_candidate(base, nil)
+
+  defp first(base, [best | _], task, opts) do
+    if Keyword.get(opts, :pin, true), do: pin(task, best)
+    {:ok, selection(best, Map.put(put_chosen(base, best), "outcome", "selected"))}
+  end
+
+  defp fallback(base, entries, task, why, opts) do
+    reviewer = Keyword.get_lazy(opts, :reviewer_family, fn -> reviewer_family(task) end)
+    others = Enum.reject(entries, &(reviewer && &1.family == reviewer))
+
+    {pool, excluded} =
+      if others != [] and others != entries,
+        do: {others, reviewer && to_string(reviewer)},
+        else: {entries, nil}
+
+    base =
+      Map.merge(base, %{
+        "pinned_account_id" => task.implementer_account_id,
+        "excluded_family" => excluded
+      })
+
+    case pool do
+      [] ->
+        no_candidate(base, why)
+
+      [best | _] ->
+        reason = truncate_fallback("#{why}; fell back to #{label(best.account)}")
+
+        decision =
+          base
+          |> put_chosen(best)
+          |> Map.merge(%{"outcome" => "fallback", "fallback" => reason})
+
+        {:ok, selection(best, decision)}
+    end
+  end
+
+  defp no_candidate(base, why) do
+    reason =
+      [why, "no implementer account available; dispatching on the pre-routing provider"]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("; ")
+
+    {:legacy,
+     Map.merge(base, %{"outcome" => "no_candidate", "fallback" => truncate_fallback(reason)})}
+  end
+
+  defp pinned(%Issue{implementer_account_id: nil}, _entries, _dropped), do: :none
+
+  defp pinned(%Issue{implementer_account_id: id} = task, entries, dropped) do
+    case pinned_entry(entries, id, task.implementer_family) do
+      %{} = entry ->
+        {:pinned, entry}
+
+      nil ->
+        # Why it is not available: its drop reason, or that it is no longer an
+        # implementer candidate at all.
+        case Enum.find(dropped, &(&1.account.id == id)) do
+          %{guardrail_lacks: [_ | _] = lacks} ->
+            # G15c (design §5.6): a grant widened the ticket past what the
+            # pinned subject may hold under its profile.
+            {:unavailable, "guardrail: pinned subject lacks #{Enum.join(lacks, ", ")}"}
+
+          %{} = entry ->
+            {:unavailable,
+             "pinned account #{label(entry.account)} unavailable (#{drop_text(entry)})"}
+
+          nil ->
+            {:unavailable,
+             "pinned account #{id |> pinned_account() |> label()} unavailable " <>
+               "(no longer allowed for the implementer role)"}
+        end
+    end
+  end
+
+  # The pin is (account, family): of the pinned account's available entries —
+  # already ranked — the one in the pinned family, so a later role stays in the
+  # pool the first choice drew on; else the account's best. A pin with no
+  # recorded family is the account alone, as it always was.
+  defp pinned_entry(entries, account_id, family) do
+    case Enum.filter(entries, &(&1.account.id == account_id)) do
+      [] -> nil
+      [best | _] = mine -> Enum.find(mine, &same_family?(&1, family)) || best
+    end
+  end
+
+  defp same_family?(_entry, family) when family in [nil, ""], do: false
+
+  defp same_family?(%{family: entry_family}, family),
+    do: to_string(entry_family) == to_string(family)
+
+  @doc """
+  Whether a dropped availability entry was dropped by the guardrails (G13) —
+  ineligible by tier, scope, difficulty, permissions or data class, or because
+  the adapter cannot meet the profile's floor here — as opposed to being
+  eligible but unavailable (quota, capacity, auth, a pause). The line
+  `Wardmast.Worker.Dispatch` draws between "hold" and "no eligible model".
+  """
+  @spec guardrail_drop?(map()) :: boolean()
+  def guardrail_drop?(%{reason: "guardrail_ineligible"}), do: true
+  def guardrail_drop?(%{reason: "egress_unenforceable"}), do: true
+
+  def guardrail_drop?(%{reason: "write_confinement_none", detail: detail}) when is_binary(detail),
+    do: String.contains?(detail, "guardrail floor")
+
+  def guardrail_drop?(_entry), do: false
+
+  @doc "A dropped (or available) entry as `provider:slug (reason: detail)`, for a hold phrase."
+  @spec describe_drop(map()) :: String.t()
+  def describe_drop(%{account: account} = entry) do
+    reason = entry |> Map.get(:reason, "available") |> to_string() |> String.replace("_", " ")
+
+    case Map.get(entry, :detail) do
+      detail when is_binary(detail) and detail != "" ->
+        "#{label(account)} (#{reason}: #{detail})"
+
+      _ ->
+        "#{label(account)} (#{reason})"
+    end
+  end
+
+  defp drop_text(%{reason: reason, detail: nil}), do: reason
+  defp drop_text(%{reason: reason, detail: detail}), do: "#{reason}: #{detail}"
+
+  defp pinned_account(id) do
+    Wardmast.Accounts.Resolver.get(id)
+  rescue
+    _ -> nil
+  end
+
+  defp pin(%Issue{} = task, %{account: account, family: family}) do
+    task
+    |> Ash.Changeset.for_update(:pin_implementer, %{
+      implementer_account_id: account.id,
+      implementer_family: family && to_string(family)
+    })
+    |> Ash.update()
+    |> case do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("ProviderRouting: could not pin #{task.id}: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp selection(entry, decision) do
+    selection(String.to_existing_atom(entry.agent_type), entry, decision)
+  end
+
+  defp selection(agent_type, entry, decision) do
+    %{
+      agent_type: agent_type,
+      account: entry && entry.account,
+      family: entry && entry.family,
+      model: entry && picked_model(entry),
+      decision: decision
+    }
+  end
+
+  # What the spawn must be told: only a model the tier's default resolution would
+  # not run. The default one needs no carrying, so a one-model-per-tier
+  # workspace dispatches exactly as before.
+  defp picked_model(%{picked?: true, model: model}), do: model
+  defp picked_model(_entry), do: nil
+
+  defp put_chosen(decision, entry, override \\ nil)
+
+  defp put_chosen(decision, nil, override) do
+    Map.merge(decision, %{"agent_type" => to_string(override)})
+  end
+
+  defp put_chosen(decision, entry, _override) do
+    Map.merge(decision, %{
+      "account_id" => entry.account.id,
+      "account_slug" => entry.account.slug,
+      "provider" => to_string(entry.account.provider),
+      "agent_type" => entry.agent_type,
+      "family" => entry.family && to_string(entry.family),
+      "pool" => entry.pool,
+      "model" => entry.model,
+      "headroom" => entry |> Map.get(:headroom) |> headroom_value()
+    })
+    |> put_pace_exempt_record(entry)
+  end
+
+  # Present only when the P0 exemption decided the dispatch (design §4.2) — a
+  # decision with the layer off is byte-identical to what it was.
+  defp put_pace_exempt_record(decision, %{pace_exempt: %{} = exemption}) do
+    Map.put(decision, "pace_exempt", %{
+      "window" => exemption.window,
+      "used" => round4(exemption.used),
+      "paced" => round4(exemption.paced),
+      "cap" => round4(exemption.cap)
+    })
+  end
+
+  defp put_pace_exempt_record(decision, _entry), do: decision
+
+  @doc """
+  Refuse to start a pass on a paused provider/account (bd-5ef587). The legacy
+  resolvers hand back the paused original when nothing else is available, so
+  every direct `Worker.start` caller checks the resolved provider here.
+  """
+  @spec ensure_unpaused(atom(), String.t() | nil) ::
+          :ok | {:error, {:provider_paused, atom(), String.t()}}
+  def ensure_unpaused(provider, ws_id) do
+    case Wardmast.Providers.Pause.blocking(provider, ws_id) do
+      nil ->
+        :ok
+
+      pause ->
+        {:error,
+         {:provider_paused, provider,
+          "held — #{provider} paused: #{pause.reason || "no reason given"}"}}
+    end
+  end
+
+  @doc """
+  Refuse to start a pass on a provider the workspace's sandbox backend cannot
+  run (`sandbox_backend_unavailable` at spawn). Checked before any worktree or
+  run exists, like `ensure_unpaused/2`, so the pass is held with the reason.
+  """
+  @spec ensure_sandbox_backend(atom(), term(), term()) ::
+          :ok | {:error, {:sandbox_backend, atom(), String.t()}}
+  def ensure_sandbox_backend(provider, task, workspace) do
+    case backend_refusal(legacy_policy(task, workspace, []), provider) do
+      nil -> :ok
+      detail -> {:error, {:sandbox_backend, provider, "held — " <> detail}}
+    end
+  end
+
+  # ---- legacy --------------------------------------------------------------
+
+  defp legacy(task, workspace, opts) do
+    {provider, fallback} = legacy_resolution(task, workspace, opts)
+    {provider, fallback, nil}
+  end
+
+  # The pre-routing resolution. bd-13pqcp: it honours the ticket's provider
+  # constraint too, so the no-candidate / routing-off paths cannot hand back an
+  # excluded provider while a constrained one is available. A caller's explicit
+  # `:override` is returned as given — the spawn site's
+  # `ProviderConstraint.check/2` is what refuses it if it violates.
+  defp legacy_resolution(task, workspace, opts) do
+    case Keyword.get(opts, :override) do
+      override when is_atom(override) and not is_nil(override) ->
+        {override, nil}
+
+      _ ->
+        {provider, fallback} =
+          Agents.resolve_revision_provider(task_id_of(task), workspace, constraint_of(task))
+
+        backend_aware(provider, fallback, task, workspace, opts)
+    end
+  end
+
+  # A provider the workspace's sandbox backend cannot run is refused at spawn,
+  # so the pre-routing resolution swaps it for the first pool provider that
+  # both the backend and the ticket's constraint allow. When none is left the
+  # original stands (with the reason) and the caller holds it: dispatch at
+  # `Dispatch.ensure_sandbox_backend/2`, the fix, conflict and ReviewGate
+  # implementer passes at `ensure_sandbox_backend/3`. Alternatives come only
+  # from the workspace's `agent.type` pool, as in `Dispatch.backend_unrouted/3`.
+  defp backend_aware(provider, fallback, task, workspace, opts) do
+    policy = legacy_policy(task, workspace, opts)
+
+    case backend_refusal(policy, provider) do
+      nil ->
+        {provider, fallback}
+
+      detail ->
+        constraint = constraint_of(task)
+        pool = Agents.agent_pool(workspace)
+
+        alt =
+          pool
+          |> then(&ProviderConstraint.filter(constraint, &1))
+          |> Enum.find(&(&1 != provider and is_nil(backend_refusal(policy, &1))))
+
+        if alt,
+          do: {alt, "fell back from #{provider}: #{detail}"},
+          else: {provider, detail}
+    end
+  end
+
+  defp legacy_policy(task, workspace, opts) do
+    case Keyword.get(opts, :security) do
+      %SecurityPolicy{} = policy ->
+        policy
+
+      _ when is_nil(workspace) ->
+        nil
+
+      _ ->
+        repo = repo_opt(opts) || task_repo(task)
+        SecurityPolicy.resolve(workspace, %{}, repo)
+    end
+  end
+
+  @doc """
+  Why the policy's sandbox backend cannot run `provider`, or `nil` when it can
+  (or no policy is known). Same text as the routing drop detail.
+  """
+  @spec backend_refusal(SecurityPolicy.t() | nil, atom() | String.t()) :: String.t() | nil
+  def backend_refusal(%SecurityPolicy{} = policy, provider) do
+    case Sandbox.module(policy, provider) do
+      {:error, {:sandbox_backend_unavailable, backend, _}} ->
+        "#{provider}: not supported by sandbox.backend #{backend}"
+
+      _ ->
+        nil
+    end
+  end
+
+  def backend_refusal(_policy, _provider), do: nil
+
+  defp task_id_of(%Issue{id: id}), do: id
+  defp task_id_of(id) when is_binary(id), do: id
+
+  defp constraint_of(%Issue{} = task), do: ProviderConstraint.from(task)
+
+  defp constraint_of(id) when is_binary(id) do
+    case Ash.get(Issue, id) do
+      {:ok, %Issue{} = task} -> ProviderConstraint.from(task)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  # ---- evaluation ------------------------------------------------------------
+
+  defp context(ws, task, opts) do
+    routed = routed_choice(task, ws, opts)
+
+    %{
+      ws: ws,
+      task: task,
+      role: Keyword.get(opts, :role, :main),
+      now: Keyword.get_lazy(opts, :now, &DateTime.utc_now/0),
+      routed: routed,
+      tier: routed.config["model_tier"],
+      agent_config: get_in(ws.config || %{}, ["agent", "config"]) || %{},
+      security:
+        Keyword.get_lazy(opts, :security, fn ->
+          SecurityPolicy.resolve(ws, %{}, repo_opt(opts) || task_repo(task))
+        end),
+      quota_fun: Keyword.get(opts, :quota_fun, &latest_quota/1),
+      gemini_code:
+        Keyword.get_lazy(opts, :gemini_code, fn -> Wardmast.Quota.provider_code("gemini") end),
+      confinement: Keyword.get(opts, :write_confinement, &Agents.write_confinement/2),
+      egress_confinement: Keyword.get(opts, :egress_confinement, &Agents.egress_confinement/2),
+      capability: capability_gate(ws, task, opts),
+      scoring: scoring_config(ws, task, opts),
+      allow_upgrade: allow_upgrade(ws),
+      floor: Floors.gate(ws, repo_opt(opts) || task_repo(task), task),
+      guardrails: guardrail_gate(task, opts),
+      gate: Wardmast.Quota.gate_for_workspace(ws),
+      walk?: walk?(opts),
+      # DC8: the installation's `scheduler_admission`, which each candidate's
+      # account follows unless it overrides it. The walk asks no capacity or
+      # pace question, so it reads nothing.
+      install_mode: if(walk?(opts), do: nil, else: install_mode(opts)),
+      seat_opts: Keyword.get(opts, :seat_opts, [])
+    }
+  end
+
+  defp install_mode(opts) do
+    Keyword.get_lazy(opts, :scheduler_admission, &AdmissionMode.installation/0)
+  end
+
+  # DC8 (design provider-dynamic-concurrency §7, E12): whether this candidate's
+  # account admits by the budgets — its own `admission`, else the installation's.
+  defp enforced?(account, %{install_mode: install}),
+    do: AdmissionMode.mode(account, install) == :enforce
+
+  # R9: `routing.scoring.allow_upgrade` (default 0: the policy's tier only).
+  defp allow_upgrade(%Workspace{config: config}) do
+    case get_in(config || %{}, ["routing", "scoring", "allow_upgrade"]) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> 0
+    end
+  end
+
+  # G13 (bd-atll60): `nil` — no subject rule configured — is the whole off path:
+  # no check runs, nothing is recorded. Otherwise the ticket's side of the
+  # eligibility question is read once per evaluation, not once per candidate:
+  # its difficulty, its in-force permissions (`Wardmast.Tasks.Permissions`: a
+  # permission pending an operator grant gives no reach) and the repo.
+  defp guardrail_gate(task, opts) do
+    case Keyword.get_lazy(opts, :guardrail_rules, &Rules.all/0) do
+      [] ->
+        nil
+
+      rules ->
+        %{
+          rules: rules,
+          difficulty: task_difficulty_or_nil(task),
+          permissions: in_force_permissions(task),
+          repo: repo_opt(opts) || task_repo(task)
+        }
+    end
+  end
+
+  defp task_difficulty_or_nil(%Issue{difficulty: difficulty}), do: difficulty
+  defp task_difficulty_or_nil(_task), do: nil
+
+  defp in_force_permissions(%Issue{} = task), do: Wardmast.Tasks.Permissions.in_force(task)
+  defp in_force_permissions(_task), do: []
+
+  # bd-adtnto: `nil` (anything but `provider_selection: scored`) is the whole
+  # off path — no window list, no score, no extra record key.
+  defp scoring_config(ws, task, opts) do
+    if scored?(ws) do
+      config = Score.config(ws)
+
+      {estimate_fun, candidate_estimate_fun} = estimate_funs(ws, task, opts)
+
+      %{
+        mode: config.mode,
+        weight: Score.weight(config, task),
+        estimate_fun: estimate_fun,
+        candidate_estimate_fun: candidate_estimate_fun
+      }
+    end
+  end
+
+  # The live and candidate estimators (`:estimate_fun` / `:candidate_estimate_fun`
+  # are the test seams). One matrix read per evaluation, not one per candidate
+  # (the board snapshot calls `availability/3` per issue) and not one per
+  # matrix: `Competence.matrices/0` reads the live and candidate together.
+  #
+  # bd-dde4l7: the candidate estimator is `nil` (no second ranking, no record
+  # key) unless a candidate is stored. It ranks with the candidate's rows and
+  # NOTHING of the live override — `:rows` is replaced, not defaulted — and its
+  # result only ever lands in the record, never in the dispatch order.
+  defp estimate_funs(ws, task, opts) do
+    matrices = if competence?(ws), do: Competence.matrices()
+
+    live =
+      case Keyword.fetch(opts, :estimate_fun) do
+        {:ok, fun} ->
+          fun
+
+        :error ->
+          matrices &&
+            estimator(ws, task, Keyword.put_new(opts, :rows, live_rows(ws, task, matrices)))
+      end
+
+    candidate =
+      case Keyword.fetch(opts, :candidate_estimate_fun) do
+        {:ok, fun} ->
+          fun
+
+        :error ->
+          matrices && matrices.candidate &&
+            estimator(ws, task, Keyword.put(opts, :rows, matrices.candidate))
+      end
+
+    {live, candidate}
+  end
+
+  # R13 (bd-d5rdsc): a running matrix canary's rows rank AHEAD of the live matrix
+  # for a task in its canary arm (`Loop.Canary.matrix_rows/2`; `[]` for every other
+  # task, and whenever no matrix canary is running, so the live rows are returned
+  # untouched). Only the live estimator takes them; the candidate matrix and the
+  # records are unchanged.
+  defp live_rows(ws, task, matrices), do: Canary.matrix_rows(ws, task) ++ matrices.live
+
+  defp estimator(ws, task, opts), do: fn entry -> Competence.estimate(ws, entry, task, opts) end
+
+  defp competence?(%Workspace{config: config}) do
+    get_in(config || %{}, ["routing", "scoring", "competence"]) == true
+  end
+
+  # bd-57uzkl: `nil` (the default) is the whole off path — no check runs.
+  defp capability_gate(ws, task, opts) do
+    repo = repo_opt(opts) || task_repo(task)
+    CapabilityMatrix.gate(ws, Keyword.get(opts, :role, :main), repo)
+  end
+
+  defp repo_opt(opts) do
+    case Keyword.get(opts, :repo) do
+      repo when is_binary(repo) and repo != "" -> repo
+      _ -> nil
+    end
+  end
+
+  defp task_repo(%Issue{repo: repo}), do: repo
+  defp task_repo(_task), do: nil
+
+  defp routed_choice(%Issue{} = task, ws, opts), do: Routing.decide(task, ws, opts)
+  defp routed_choice(_task, ws, _opts), do: Routing.default_choice(ws)
+
+  defp candidates(ws) do
+    case ProviderSettings.effective(ws, :implementer) do
+      %{source: :attached, candidates: candidates} -> candidates
+      _ -> []
+    end
+  end
+
+  # R9 (design §5.2): a candidate is an (account, model) pair, one entry for
+  # each model the account could run this ticket on — the policy tier's listed
+  # models (`ModelFamily.models_for_tier/3`), then, with
+  # `routing.scoring.allow_upgrade: n`, those of the next `n` tiers up. Never a
+  # tier below the policy's. The first entry is the default the spawn resolves
+  # by itself; the others are `picked?` choices the dispatch must carry
+  # (`selection.model`). With one model per tier — every workspace's config
+  # today — this is the single entry per account there always was.
+  defp entries(%{account: account, agent_type: agent_type}, ctx) do
+    ctx
+    |> candidate_models(account, agent_type)
+    |> Enum.with_index()
+    |> Enum.map(fn {model, position} ->
+      %{family: family, pool: pool} = ModelFamily.classify(account.provider, model)
+
+      %{
+        account: account,
+        agent_type: agent_type,
+        model: model,
+        family: family,
+        pool: pool,
+        tier: ctx.tier,
+        picked?: position > 0
+      }
+    end)
+  end
+
+  defp candidate_models(ctx, account, agent_type) do
+    case routed_model(agent_type, ctx) do
+      model when is_binary(model) ->
+        [model]
+
+      nil ->
+        listed = ModelFamily.models_for_tier(account.provider, ctx.tier, ctx.agent_config)
+        upgrades = upgrade_models(account, ctx)
+        Enum.uniq(if(listed == [], do: [nil], else: listed) ++ upgrades)
+    end
+  end
+
+  # The models of the `allow_upgrade` tiers above the policy's, lowest first.
+  defp upgrade_models(account, ctx) do
+    for tier <- ModelFamily.tiers_above(ctx.tier, ctx.allow_upgrade),
+        model <- ModelFamily.models_for_tier(account.provider, tier, ctx.agent_config),
+        do: model
+  end
+
+  # The routed config's explicit `"model"` only when the account runs the
+  # routed adapter (Dispatch drops it for any other —
+  # `apply_agent_type_override/2`); an explicit model is a rule, not a tier,
+  # and is never expanded.
+  defp routed_model(agent_type, ctx) do
+    routed_model = ctx.routed.config["model"]
+
+    if is_binary(routed_model) and routed_model != "" and
+         to_string(ctx.routed.type) == agent_type,
+       do: routed_model
+  end
+
+  defp check(entry, ctx) do
+    Enum.reduce_while(checks(ctx), {:ok, entry}, fn check, {:ok, entry} ->
+      case check.(entry, ctx) do
+        {:ok, entry} -> {:cont, {:ok, entry}}
+        {:drop, reason, detail} -> {:halt, {:drop, drop(entry, reason, detail)}}
+        {:drop, reason, detail, extra} -> {:halt, {:drop, drop(entry, reason, detail, extra)}}
+      end
+    end)
+  end
+
+  # The walk's eligibility (`walk?/1`): no capacity check, and the quota step
+  # keeps only the spend cap, ranking by headroom without the paced hold.
+  defp checks(%{walk?: true}) do
+    [
+      &check_guardrails/2,
+      &check_constraint/2,
+      &check_sandbox_backend/2,
+      &check_account/2,
+      &check_adapter/2,
+      &check_guardrail_floor/2,
+      &check_cli/2,
+      &check_auth/2,
+      &check_circuit/2,
+      &check_confinement/2,
+      &check_capability/2,
+      &check_floor/2,
+      &check_walk_quota/2
+    ]
+  end
+
+  defp checks(_ctx) do
+    [
+      &check_guardrails/2,
+      &check_constraint/2,
+      &check_sandbox_backend/2,
+      &check_account/2,
+      &check_adapter/2,
+      &check_guardrail_floor/2,
+      &check_cli/2,
+      &check_auth/2,
+      &check_circuit/2,
+      &check_capacity/2,
+      &check_confinement/2,
+      &check_capability/2,
+      &check_floor/2,
+      &check_quota/2
+    ]
+  end
+
+  defp drop(entry, reason, detail, extra \\ %{}),
+    do: entry |> Map.merge(extra) |> Map.merge(%{reason: reason, detail: detail})
+
+  # G13 (bd-atll60, design §5.4, §8): the guardrail eligibility of the
+  # (provider, model) subject this candidate would run as — first, so that a
+  # dropped candidate is `guardrail_ineligible` rather than whatever else would
+  # also have dropped it, and so every other drop reason is, by construction, a
+  # candidate that *is* eligible (§5.7's hold names both sides from this). A
+  # hard filter before any optimisation: it never looks at quota.
+  defp check_guardrails(entry, %{guardrails: nil}), do: {:ok, entry}
+
+  defp check_guardrails(%{account: account} = entry, %{guardrails: gate} = ctx) do
+    attrs = %{
+      provider: account.provider,
+      model: entry.model,
+      role: :implementer,
+      account: account,
+      difficulty: gate.difficulty,
+      permissions: gate.permissions,
+      workspace: ctx.ws,
+      repo: gate.repo
+    }
+
+    case Eligibility.evaluate(attrs, rules: gate.rules) do
+      {:ok, %{profile: profile, permission_fallback: fallback}} ->
+        {:ok, Map.put(entry, :guardrail, %{profile: profile, permission_fallback: fallback})}
+
+      {:error, detail} ->
+        # G15c: which of the ticket's in-force permissions the subject cannot
+        # hold, so a pinned subject's fallback can name them.
+        {:drop, "guardrail_ineligible", detail,
+         %{guardrail_lacks: Eligibility.lacking(attrs, rules: gate.rules)}}
+    end
+  end
+
+  # §3.4: capability is not trust. A tier states what must hold (the floored
+  # mode, the egress ceiling); the adapter says whether it *can* hold here. A
+  # candidate that cannot is dropped with the existing reason — never run under
+  # a weaker posture (bd-1abj7u, generalised). Asked of the policy **after** the
+  # floor, because the floor is what the spawn will actually run under.
+  defp check_guardrail_floor(
+         %{guardrail: %{profile: %Guardrails.Profile{} = profile}, adapter: adapter} = entry,
+         %{security: %SecurityPolicy{} = policy} = ctx
+       ) do
+    floored = Guardrails.floor(policy, profile)
+
+    case Guardrails.enforceable(adapter, floored, profile,
+           write_confinement: ctx.confinement,
+           egress_confinement: ctx.egress_confinement
+         ) do
+      :ok ->
+        {:ok, entry}
+
+      {:error, reason} ->
+        {:drop, Atom.to_string(reason), Guardrails.unmet_detail(reason, profile, floored)}
+    end
+  end
+
+  defp check_guardrail_floor(entry, _ctx), do: {:ok, entry}
+
+  # bd-13pqcp: the ticket's own provider constraint — first, so the drop names
+  # it rather than whatever else would have dropped the account.
+  defp check_constraint(%{account: %ProviderAccount{provider: provider}} = entry, ctx) do
+    if ProviderConstraint.allows?(ctx.task, provider),
+      do: {:ok, entry},
+      else: {:drop, "provider_constraint", ProviderConstraint.describe(ctx.task)}
+  end
+
+  defp check_constraint(%{agent_type: type} = entry, ctx) do
+    if ProviderConstraint.allows?(ctx.task, type),
+      do: {:ok, entry},
+      else: {:drop, "provider_constraint", ProviderConstraint.describe(ctx.task)}
+  end
+
+  # A provider the workspace's sandbox backend cannot run is refused at spawn
+  # (`sandbox_backend_unavailable`); never route to it.
+  defp check_sandbox_backend(%{agent_type: type} = entry, %{security: %SecurityPolicy{} = policy}) do
+    case Sandbox.module(policy, type) do
+      {:ok, _} ->
+        {:ok, entry}
+
+      {:error, {:sandbox_backend_unavailable, backend, _}} ->
+        {:drop, "sandbox_backend", "#{type}: not supported by sandbox.backend #{backend}"}
+    end
+  end
+
+  defp check_sandbox_backend(entry, _ctx), do: {:ok, entry}
+
+  defp check_account(%{account: %ProviderAccount{enabled: false}}, _ctx),
+    do: {:drop, "disabled", nil}
+
+  defp check_account(%{account: %ProviderAccount{merged_into_id: into}}, _ctx)
+       when not is_nil(into),
+       do: {:drop, "merged", "merged into #{into}"}
+
+  defp check_account(%{account: %ProviderAccount{} = account} = entry, _ctx) do
+    case Wardmast.Providers.Pause.for_account(account) do
+      nil -> {:ok, entry}
+      pause -> {:drop, "paused", pause.reason || "paused by #{pause.by || "the operator"}"}
+    end
+  end
+
+  defp check_account(%{account: nil, agent_type: type} = entry, _ctx) do
+    case Wardmast.Providers.Pause.for_provider(type) do
+      nil -> {:ok, entry}
+      pause -> {:drop, "paused", pause.reason}
+    end
+  end
+
+  defp check_account(entry, _ctx), do: {:ok, entry}
+
+  defp check_adapter(%{agent_type: type} = entry, _ctx) do
+    adapter = type && Map.get(Agents.adapters(), String.to_existing_atom(type))
+
+    if adapter,
+      do: {:ok, Map.put(entry, :adapter, adapter)},
+      else: {:drop, "no_adapter", nil}
+  rescue
+    ArgumentError -> {:drop, "no_adapter", nil}
+  end
+
+  defp check_cli(%{account: %{provider: :antigravity}} = entry, ctx) do
+    if ctx.gemini_code == "antigravity",
+      do: {:ok, entry},
+      else:
+        {:drop, "cli_unavailable", "the gemini adapter would run #{ctx.gemini_code || "nothing"}"}
+  end
+
+  defp check_cli(entry, _ctx), do: {:ok, entry}
+
+  defp check_auth(%{adapter: adapter} = entry, _ctx) do
+    cond do
+      AuthHold.open?(adapter) -> {:drop, "auth_expired", "auth hold open"}
+      CredentialWatchdog.expired?(adapter) -> {:drop, "auth_expired", "credential expired"}
+      true -> {:ok, entry}
+    end
+  end
+
+  defp check_circuit(%{agent_type: type} = entry, _ctx) do
+    if ProviderPool.healthy?(String.to_existing_atom(type)),
+      do: {:ok, entry},
+      else: {:drop, "circuit_broken", nil}
+  end
+
+  defp check_capacity(%{account: account} = entry, ctx) do
+    if enforced?(account, ctx) do
+      check_seat(entry, ctx)
+    else
+      case Concurrency.account_headroom(account, ctx.ws, capacity_opts(ctx)) do
+        0 -> {:drop, "at_capacity", "no concurrency slot left (max_concurrent / share)"}
+        capacity -> {:ok, Map.put(entry, :capacity, capacity)}
+      end
+    end
+  end
+
+  # DC8 (§4.4, §7): under `enforce` a fresh dispatch is feasible on a pool with a
+  # free seat (`seats < min(budget, max_concurrent, share)`), and its capacity
+  # is that pool's free seats. A follow-up role already holds its ticket's seat,
+  # so a full pool never drops it (I9).
+  defp check_seat(entry, %{role: role}) when role != :main,
+    do: {:ok, Map.put(entry, :capacity, :unlimited)}
+
+  defp check_seat(%{account: account, pool: pool} = entry, ctx) do
+    seat_opts =
+      Keyword.merge(
+        [
+          workspace_id: ctx.ws.id,
+          pool: pool,
+          model: Map.get(entry, :model),
+          priority: task_priority(ctx.task),
+          exclude_task: ctx.task && Map.get(ctx.task, :id)
+        ],
+        ctx.seat_opts
+      )
+
+    case SeatCheck.check(account, seat_opts) do
+      {:ok, seat} -> {:ok, Map.put(entry, :capacity, SeatCheck.free_seats(seat))}
+      {:full, seat} -> {:drop, "at_capacity", "no free seat: #{SeatCheck.describe(seat)}"}
+    end
+  end
+
+  # The seat check's reads, once per evaluation rather than once per candidate:
+  # the live holders and this workspace (for the exemption). Only when a fresh
+  # dispatch has a candidate whose account is in `enforce`.
+  defp with_seat_reads(%{walk?: false, role: :main} = ctx, candidates) do
+    if Enum.any?(candidates, &enforced?(&1.account, ctx)) do
+      seat_opts =
+        ctx.seat_opts
+        |> Keyword.put_new_lazy(:holders, &SeatCheck.holders/0)
+        |> Keyword.put_new(:workspace, ctx.ws)
+
+      %{ctx | seat_opts: seat_opts}
+    else
+      ctx
+    end
+  end
+
+  defp with_seat_reads(ctx, _candidates), do: ctx
+
+  # A follow-up role replaces the task's own workers on the account (see the
+  # moduledoc's `at_capacity`); a first dispatch adds to what is running.
+  defp capacity_opts(%{role: role, task: %Issue{id: id}}) when role != :main,
+    do: [exclude_task: id]
+
+  defp capacity_opts(_ctx), do: []
+
+  defp check_confinement(
+         %{adapter: adapter} = entry,
+         %{security: %SecurityPolicy{} = policy} = ctx
+       ) do
+    if policy.permissions.mode == :strict and ctx.confinement.(adapter, policy) == :none,
+      do: {:drop, "write_confinement_none", "cannot confine writes under a :strict scope"},
+      else: {:ok, entry}
+  end
+
+  defp check_confinement(entry, _ctx), do: {:ok, entry}
+
+  # bd-57uzkl: a hard gate after availability and before quota (design §6.1).
+  defp check_capability(entry, %{capability: nil}), do: {:ok, entry}
+
+  defp check_capability(%{account: account, model: model} = entry, %{capability: gate} = ctx) do
+    provider = CapabilityMatrix.provider_code(account.provider, ctx.gemini_code)
+
+    case CapabilityMatrix.check(gate.rows, gate.requires, provider, model) do
+      :ok -> {:ok, entry}
+      {:missing, _capability, detail} -> {:drop, "capability_missing", detail}
+    end
+  end
+
+  # bd-c675ny (design §6.4): the floors are a hard gate after capability and
+  # before quota. `nil` (no `routing.floors` config, the default) is the whole
+  # off path. A model on no known tier is not below any floor.
+  defp check_floor(entry, %{floor: nil}), do: {:ok, entry}
+
+  defp check_floor(%{account: account, model: model} = entry, %{floor: gate} = ctx) do
+    case Floors.check(gate, ctx.routed, account.provider, model, ctx.agent_config) do
+      :ok -> {:ok, entry}
+      {:below, detail} -> {:drop, "below_floor", detail}
+    end
+  end
+
+  defp check_quota(%{account: account} = entry, ctx) do
+    case spend_hold(account, ctx) do
+      {:hold, reason} -> {:drop, "quota_held", Map.get(reason, :phrase)}
+      :ok -> check_quota_window(entry, ctx)
+    end
+  end
+
+  # bd-a6grlr: an account past its dollar spend cap takes no fresh work, so a
+  # fresh implementer (`:main`) routes to another account instead of being
+  # held on this one. Follow-up roles are never spend-held.
+  defp spend_hold(account, %{role: :main, task: %Issue{} = task}) do
+    if SpendCap.fresh_dispatch?(task, []), do: SpendCap.check(account, task), else: :ok
+  end
+
+  defp spend_hold(_account, _ctx), do: :ok
+
+  # DC8: under `enforce` the gate keeps its hard rules only (`pace: false`); the
+  # paced line is the pool's budget, answered by `check_seat/2`.
+  defp check_quota_window(%{account: account, model: model} = entry, ctx) do
+    quota = ctx.quota_fun.(account)
+    gate_opts = [account: account, model: model, now: ctx.now]
+    gate_opts = if enforced?(account, ctx), do: [{:pace, false} | gate_opts], else: gate_opts
+
+    case ctx.gate.check(ctx.task, quota, ctx.ws, gate_opts) do
+      {:hold, reason} ->
+        {:drop, "quota_held", Map.get(reason, :phrase)}
+
+      _ ->
+        {:ok, with_headroom(entry, quota, ctx)}
+    end
+  end
+
+  # The walk (`walk?/1`): the spend cap still drops an account, as it does for
+  # dispatch; the paced line does not — the pool's budget answers it — but the
+  # headroom still ranks the survivors, so an account past its line ranks
+  # after every account with room (§7, R5).
+  defp check_walk_quota(%{account: account} = entry, ctx) do
+    case spend_hold(account, ctx) do
+      {:hold, reason} -> {:drop, "quota_held", Map.get(reason, :phrase)}
+      :ok -> {:ok, with_headroom(entry, ctx.quota_fun.(account), ctx)}
+    end
+  end
+
+  # The P0 pace exemption (bd-6bxv7h) reads the task's own priority: an exempt
+  # dispatch's headroom is against the lifted line, the same one the gate just
+  # allowed it through, and a dispatch that only got through on the exemption
+  # says so on its candidate.
+  defp with_headroom(%{account: account, model: model} = entry, quota, ctx) do
+    priority = task_priority(ctx.task)
+    headroom_opts = [model: model, now: ctx.now, priority: priority]
+    entry = put_pace_exempt(entry, quota, account, ctx, headroom_opts)
+
+    if ctx.scoring do
+      windows = Headroom.windows(quota, {account, ctx.ws}, headroom_opts)
+      headroom = Enum.min_by(windows, & &1.headroom, fn -> nil end)
+
+      entry
+      |> Map.put(:headroom, headroom)
+      |> Map.put(:windows, windows)
+      |> Map.put(:reserved, reserved(entry, quota, ctx))
+    else
+      Map.put(entry, :headroom, Headroom.binding(quota, {account, ctx.ws}, headroom_opts))
+    end
+  end
+
+  # R9 (design §2.5): runs dispatched onto this pool since its snapshot was
+  # captured. Only the scorer reads it, so `most_quota` is untouched.
+  defp reserved(%{account: account, pool: pool}, quota, ctx) do
+    PoolReservations.pending(account.id, pool, captured_at(quota), ctx.now,
+      exclude: ctx.task && Map.get(ctx.task, :id)
+    )
+  end
+
+  defp captured_at(%{captured_at: %DateTime{} = at}), do: at
+  defp captured_at(_quota), do: nil
+
+  defp task_priority(%{priority: priority}) when is_integer(priority), do: priority
+  defp task_priority(_task), do: nil
+
+  defp put_pace_exempt(entry, quota, account, ctx, opts) do
+    case Gate.pace_exemption(quota, {account, ctx.ws}, opts) do
+      nil -> entry
+      exemption -> Map.put(entry, :pace_exempt, exemption)
+    end
+  end
+
+  defp latest_quota(%ProviderAccount{id: id, provider: provider}),
+    do: Wardmast.Quota.latest_for_provider(id, provider)
+
+  # The survivors, best first, plus the scoring fields for the record.
+  #
+  # Off (`most_quota`): by headroom. `scored` in `enforce`: by the scorer's J,
+  # with the headroom ranking recorded beside it (`"policy" => "headroom"`,
+  # bd-dde4l7). `scored` in `shadow`: still by headroom — dispatch is
+  # unchanged — with the scorer's ranking recorded beside it (design §9.2 item
+  # 3; `"policy" => "scorer"`). Either way a stored candidate competence matrix
+  # is ranked too and recorded as `shadow_candidate`; it never orders anything.
+  defp order(entries, %{scoring: nil}), do: {rank(entries), %{}}
+
+  defp order(entries, %{scoring: scoring, task: task}) do
+    estimated = Enum.map(entries, &estimate(&1, scoring.estimate_fun))
+    scored = Score.rank(estimated, weight: scoring.weight)
+    base = %{"scoring_mode" => to_string(scoring.mode), "time_weight" => scoring.weight}
+    base = put_candidate_ranking(base, entries, scoring, task)
+    scores = Map.new(scored, &{&1.index, &1.score})
+    headroom_order = estimated |> rank() |> Enum.map(&annotate(&1, scores))
+
+    case scoring.mode do
+      :enforce ->
+        {scored,
+         Map.put(base, "shadow", %{
+           "policy" => "headroom",
+           "ranking" => Enum.map(headroom_order, &ranking_row/1)
+         })}
+
+      :shadow ->
+        {headroom_order,
+         Map.put(base, "shadow", %{
+           "policy" => "scorer",
+           "ranking" => Enum.map(scored, &ranking_row/1)
+         })}
+    end
+  end
+
+  defp put_candidate_ranking(base, _entries, %{candidate_estimate_fun: nil}, _task), do: base
+
+  defp put_candidate_ranking(base, entries, scoring, task) do
+    ranking =
+      entries
+      |> Enum.map(&estimate(&1, scoring.candidate_estimate_fun))
+      |> Score.rank(weight: scoring.weight)
+      |> Enum.map(&ranking_row/1)
+
+    Map.put(base, "shadow_candidate", %{
+      "ranking" => ranking,
+      "difficulty" => task_difficulty(task),
+      "issue_type" => task_issue_type(task)
+    })
+  end
+
+  # The cell coordinates `Competence` keys on, recorded so the report can
+  # group candidate disagreements without re-reading the task.
+  defp task_difficulty(nil), do: 2
+
+  defp task_difficulty(task),
+    do: Map.get(task, :difficulty_at_dispatch) || Map.get(task, :difficulty) || 2
+
+  defp task_issue_type(task) do
+    case task && Map.get(task, :issue_type) do
+      nil -> nil
+      type -> to_string(type)
+    end
+  end
+
+  defp annotate(entry, scores), do: Map.put(entry, :score, Map.fetch!(scores, entry.index))
+
+  # R6's competence matrix plugs in here: `(entry -> %{draw:, time_h:} | nil)`.
+  defp estimate(entry, nil), do: entry
+
+  defp estimate(entry, fun) do
+    case fun.(entry) do
+      %{} = estimate ->
+        Map.merge(entry, Map.take(estimate, [:draw, :time_h, :sides, :reviewer_windows, :cell]))
+
+      _ ->
+        entry
+    end
+  end
+
+  defp rank(entries) do
+    Enum.sort_by(entries, fn entry ->
+      case Map.get(entry, :headroom) do
+        %{headroom: h} -> {0, -h, entry.index}
+        nil -> {1, 0, entry.index}
+      end
+    end)
+  end
+
+  # bd-a1ke2c: the task's cross-family reviewer pin, when it has one, is the
+  # family every later review pass uses; otherwise the latest review run's.
+  defp reviewer_family(%Issue{reviewer_family: pinned, id: task_id}) do
+    ReviewerRouting.known_family(pinned) || latest_reviewer_family(task_id)
+  end
+
+  defp latest_reviewer_family(task_id) do
+    Run
+    |> Ash.Query.filter(base_task_id == ^task_id and kind == :review)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%Run{provider: provider, model: model}] -> ModelFamily.classify(provider, model).family
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  # ---- records -----------------------------------------------------------------
+
+  defp candidate_record(entry) do
+    headroom = Map.get(entry, :headroom)
+
+    %{
+      "account_id" => entry.account.id,
+      "account_slug" => entry.account.slug,
+      "provider" => to_string(entry.account.provider),
+      "agent_type" => entry.agent_type,
+      "family" => entry.family && to_string(entry.family),
+      "pool" => entry.pool,
+      "model" => entry.model,
+      "headroom" => headroom_value(headroom),
+      "window" => headroom && headroom.window,
+      "threshold" => headroom && round4(headroom.threshold),
+      "used" => headroom && round4(headroom.used),
+      "mode" => headroom && to_string(headroom.mode)
+    }
+    |> put_reserved(entry)
+    |> Map.merge(score_fields(Map.get(entry, :score)))
+    |> maybe_put_cell(entry)
+  end
+
+  defp put_reserved(record, %{reserved: n}) when is_integer(n) and n > 0,
+    do: Map.put(record, "reserved", n)
+
+  defp put_reserved(record, _entry), do: record
+
+  defp score_fields(nil), do: %{}
+
+  defp score_fields(%{} = score) do
+    base = %{
+      "price" => finite4(score.price),
+      "draw" => round4(score.draw),
+      "time_h" => round4(score.time_h),
+      "score" => finite4(score.score),
+      "over_line" => score.over_line?
+    }
+
+    base =
+      if Map.get(score, :reviewer_unpriced?),
+        do: Map.put(base, "reviewer_unpriced", true),
+        else: base
+
+    if score.sides do
+      runs =
+        %{
+          "author" => round4(Map.get(score.sides, :author))
+        }
+        |> then(fn m ->
+          case Map.get(score.sides, :review) do
+            rev when is_number(rev) -> Map.put(m, "review", round4(rev))
+            _ -> m
+          end
+        end)
+
+      Map.put(base, "expected_runs", runs)
+    else
+      base
+    end
+  end
+
+  defp maybe_put_cell(record, %{cell: %{} = cell}), do: Map.put(record, "cell", cell)
+  defp maybe_put_cell(record, _), do: record
+
+  defp ranking_row(entry) do
+    %{
+      "account_id" => entry.account.id,
+      "account_slug" => entry.account.slug,
+      "family" => entry.family && to_string(entry.family),
+      "model" => entry.model,
+      "price" => finite4(entry.score.price),
+      "time_term" => round4(entry.score.time_term),
+      "score" => finite4(entry.score.score)
+    }
+  end
+
+  # ---- shadow ------------------------------------------------------------------
+
+  # Once the real pick is known, say what the shadowed policy would have picked
+  # in its place and whether they agree. Only a fresh choice (`selected`,
+  # `fallback`) is comparable: a pin, an override or no candidate never
+  # consulted the rank.
+  #
+  # `shadow` is the other policy than the one that dispatched (`policy` says
+  # which: `scorer` in `shadow` mode, `headroom` in `enforce`); `shadow_candidate`
+  # is the candidate matrix's scorer ranking, compared with the LIVE scorer's
+  # pick — the dispatched one in `enforce`, `shadow`'s own pick in `shadow`.
+  defp finish_shadow({:ok, %{decision: decision} = selection}),
+    do: {:ok, %{selection | decision: shadow_outcome(decision)}}
+
+  defp finish_shadow({:legacy, decision}), do: {:legacy, shadow_outcome(decision)}
+
+  defp shadow_outcome(decision) do
+    decision |> baseline_outcome() |> candidate_outcome()
+  end
+
+  defp baseline_outcome(%{"shadow" => %{"ranking" => ranking} = shadow} = decision) do
+    comparable = decision["outcome"] in ["selected", "fallback"]
+    pick = if comparable, do: shadow_pick(ranking, decision["excluded_family"])
+    actual = if comparable, do: Enum.find(ranking, &same_pick?(&1, decision))
+
+    fields =
+      cond do
+        is_nil(pick) or is_nil(actual) ->
+          %{"comparable" => false, "pick" => nil, "agrees" => nil}
+
+        same_pick?(pick, decision) ->
+          %{"comparable" => true, "pick" => pick, "agrees" => true}
+
+        true ->
+          %{
+            "comparable" => true,
+            "pick" => pick,
+            "agrees" => false,
+            "reason" => baseline_reason(shadow["policy"], pick, actual)
+          }
+      end
+
+    Map.put(decision, "shadow", Map.merge(shadow, fields))
+  end
+
+  defp baseline_outcome(decision), do: decision
+
+  # `disagreement_reason/2` explains why the SCORER's pick differs from the
+  # other one; in `enforce` the scorer's pick is the dispatched one.
+  defp baseline_reason("headroom", headroom_pick, scorer_pick),
+    do: disagreement_reason(scorer_pick, headroom_pick)
+
+  defp baseline_reason(_scorer, scorer_pick, headroom_pick),
+    do: disagreement_reason(scorer_pick, headroom_pick)
+
+  defp candidate_outcome(%{"shadow_candidate" => %{"ranking" => ranking} = candidate} = decision) do
+    pick = candidate_pick(decision, ranking)
+    live = live_pick(decision)
+
+    fields =
+      cond do
+        is_nil(pick) or is_nil(live) ->
+          %{"comparable" => false, "pick" => nil, "live_pick" => nil, "agrees" => nil}
+
+        same_row?(pick, live) ->
+          %{"comparable" => true, "pick" => pick, "live_pick" => live, "agrees" => true}
+
+        true ->
+          %{"comparable" => true, "pick" => pick, "live_pick" => live, "agrees" => false}
+      end
+
+    Map.put(decision, "shadow_candidate", Map.merge(candidate, fields))
+  end
+
+  defp candidate_outcome(decision), do: decision
+
+  defp candidate_pick(decision, ranking) do
+    if decision["outcome"] in ["selected", "fallback"],
+      do: shadow_pick(ranking, decision["excluded_family"])
+  end
+
+  # What the live scorer picked: in `enforce` the dispatched pick itself; in
+  # `shadow` (headroom dispatched) the scorer's own comparable pick.
+  defp live_pick(%{"outcome" => outcome} = decision) when outcome in ["selected", "fallback"] do
+    case decision do
+      %{"scoring_mode" => "enforce"} ->
+        Map.take(decision, ["account_id", "account_slug", "model"])
+
+      %{"shadow" => %{"comparable" => true, "pick" => %{} = pick}} ->
+        pick
+
+      _ ->
+        nil
+    end
+  end
+
+  defp live_pick(_decision), do: nil
+
+  defp same_row?(a, b), do: a["account_id"] == b["account_id"] and a["model"] == b["model"]
+
+  # The fallback path's own rule: leave the reviewer's family out unless that
+  # would leave nothing.
+  defp shadow_pick(ranking, excluded) do
+    others = Enum.reject(ranking, &(excluded && &1["family"] == excluded))
+    List.first(if others == [], do: ranking, else: others)
+  end
+
+  defp same_pick?(row, decision),
+    do: row["account_id"] == decision["account_id"] and row["model"] == decision["model"]
+
+  defp disagreement_reason(pick, actual) do
+    cond do
+      pick["time_term"] < actual["time_term"] and pick["price"] >= actual["price"] ->
+        "time term: scored pick merges sooner (#{pick["time_term"]} vs #{actual["time_term"]})"
+
+      pick["price"] < actual["price"] ->
+        "price: scored pick is cheaper (#{pick["price"]} vs #{actual["price"]})"
+
+      true ->
+        "tiebreak"
+    end
+  end
+
+  defp drop_record(entry) do
+    %{
+      "account_id" => entry.account.id,
+      "account_slug" => entry.account.slug,
+      "provider" => to_string(entry.account.provider),
+      "family" => entry.family && to_string(entry.family),
+      "pool" => entry.pool,
+      "model" => entry.model,
+      "reason" => entry.reason,
+      "detail" => entry.detail
+    }
+  end
+
+  defp headroom_value(%{headroom: h}), do: round4(h)
+  defp headroom_value(_), do: nil
+
+  defp finite4(n) when is_number(n), do: round4(n)
+  defp finite4(_), do: nil
+
+  defp round4(n) when is_number(n), do: Float.round(n * 1.0, 4)
+  defp round4(_), do: nil
+
+  defp label(%ProviderAccount{provider: provider, slug: slug}), do: "#{provider}:#{slug}"
+  defp label(_), do: "(unknown account)"
+end

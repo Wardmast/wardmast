@@ -1,0 +1,136 @@
+defmodule Wardmast.Workflows.MergeQueue.PassAdmissionLocalCapacityTest do
+  @moduledoc """
+  RW8: a fix or conflict pass runs on the primary, so a primary cap of 0 holds
+  it (never fails it), and it resumes when the cap rises.
+  """
+  use Wardmast.DataCase, async: false
+
+  alias Wardmast.Nodes
+  alias Wardmast.Settings
+  alias Wardmast.Tasks.Issue
+  alias Wardmast.Tasks.Workspace
+  alias Wardmast.Workflows.MergeQueue.PassAdmission
+
+  setup do
+    on_exit(fn -> Settings.set_nodes_local_max_workers(nil) end)
+
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "pal-#{System.unique_integer([:positive])}",
+        prefix: "pal#{System.unique_integer([:positive])}"
+      })
+
+    {:ok, issue} = Ash.create(Issue, %{title: "a pass", workspace_id: ws.id})
+    {:ok, task: issue}
+  end
+
+  for kind <- [:fix_pass, :conflict] do
+    test "#{kind}: held at local cap 0 with the follow-up reason, admitted once it rises",
+         %{task: task} do
+      {:ok, 0} = Nodes.set_local_max_workers(0, nil)
+
+      assert {:error, {:no_node_capacity, info}} = PassAdmission.admit(task, unquote(kind), %{})
+      assert info.node == "local"
+      assert info.phrase =~ "held — local capacity 0 (run is local-only:"
+      assert info.phrase =~ "stay on the primary"
+
+      {:ok, 1} = Nodes.set_local_max_workers(1, nil)
+
+      refute match?(
+               {:error, {:no_node_capacity, _}},
+               PassAdmission.admit(task, unquote(kind), %{})
+             )
+    end
+
+    test "#{kind}: not held by an override above 0 or by no override at all", %{task: task} do
+      refute match?(
+               {:error, {:no_node_capacity, _}},
+               PassAdmission.admit(task, unquote(kind), %{})
+             )
+
+      {:ok, 1} = Nodes.set_local_max_workers(1, nil)
+
+      refute match?(
+               {:error, {:no_node_capacity, _}},
+               PassAdmission.admit(task, unquote(kind), %{})
+             )
+    end
+  end
+
+  # bd-bg87oz: a pass may be placed on a node, so a primary cap of 0 is not the
+  # whole story for a workspace that allows one.
+  describe "a workspace that allows a node" do
+    defp placed_task(mode) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "pal-#{System.unique_integer([:positive])}",
+          prefix: "pp#{System.unique_integer([:positive])}",
+          config: %{"worker" => %{"placement" => mode}}
+        })
+
+      {:ok, issue} = Ash.create(Issue, %{title: "a placed pass", workspace_id: ws.id})
+      issue
+    end
+
+    defp node_row(attrs \\ []) do
+      Map.merge(
+        %{
+          id: "node-a",
+          name: "a",
+          state: :online,
+          health: :ready,
+          labels: [],
+          workspace_ids: [],
+          live: 0,
+          max: 2
+        },
+        Map.new(attrs)
+      )
+    end
+
+    defp with_nodes(rows), do: %{placement_opts: [nodes: rows, remote_available?: true]}
+
+    for kind <- [:fix_pass, :conflict] do
+      test "#{kind}: a node with room means the primary's cap 0 does not hold it" do
+        task = placed_task("prefer_remote")
+        {:ok, 0} = Nodes.set_local_max_workers(0, nil)
+
+        refute match?(
+                 {:error, {:no_node_capacity, _}},
+                 PassAdmission.admit(task, unquote(kind), with_nodes([node_row()]))
+               )
+      end
+
+      test "#{kind}: prefer_remote with no node free is the primary's to hold" do
+        task = placed_task("prefer_remote")
+        {:ok, 0} = Nodes.set_local_max_workers(0, nil)
+
+        assert {:error, {:no_node_capacity, %{node: "local"}}} =
+                 PassAdmission.admit(
+                   task,
+                   unquote(kind),
+                   with_nodes([node_row(live: 2, max: 2)])
+                 )
+      end
+
+      test "#{kind}: remote_only with no node free is held with the node hold" do
+        task = placed_task("remote_only")
+
+        assert {:error, {:no_node_capacity, %{mode: :remote_only, node: nil}}} =
+                 PassAdmission.admit(
+                   task,
+                   unquote(kind),
+                   with_nodes([node_row(live: 2, max: 2)])
+                 )
+      end
+
+      test "#{kind}: local_only is decided as before, by the primary's cap" do
+        task = placed_task("local_only")
+        {:ok, 0} = Nodes.set_local_max_workers(0, nil)
+
+        assert {:error, {:no_node_capacity, %{node: "local"}}} =
+                 PassAdmission.admit(task, unquote(kind), %{})
+      end
+    end
+  end
+end

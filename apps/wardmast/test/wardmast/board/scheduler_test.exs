@@ -1,0 +1,491 @@
+defmodule Wardmast.Board.SchedulerTest do
+  use ExUnit.Case, async: true
+
+  alias Wardmast.Board.Scheduler
+
+  defp card(id, opts \\ []) do
+    %{
+      id: id,
+      scope: MapSet.new(Keyword.get(opts, :files, [])),
+      blocked_by: Keyword.get(opts, :blocked_by, []),
+      conflicts_with: Keyword.get(opts, :conflicts_with, [])
+    }
+  end
+
+  defp running(task_id, files) do
+    %{task_id: task_id, scope: MapSet.new(files)}
+  end
+
+  defp plan(overrides) do
+    Scheduler.plan(
+      Map.merge(
+        %{
+          ready: [],
+          running: [],
+          conflict_claims: %{},
+          slots_free: 1,
+          quota: :ok,
+          paused: false
+        },
+        Map.new(overrides)
+      )
+    )
+  end
+
+  defp reason(plan, id) do
+    Enum.find(plan.entries, &(&1.id == id))
+  end
+
+  describe "promotion" do
+    test "promotes the top ready card when a slot is free" do
+      plan = plan(ready: [card("bd-1"), card("bd-2")])
+
+      assert plan.promote == "bd-1"
+      assert %{state: :next, reason: "next up — dispatching..."} = reason(plan, "bd-1")
+    end
+
+    test "promotes at most one card per plan, whatever the headroom" do
+      plan = plan(ready: [card("bd-1"), card("bd-2"), card("bd-3")], slots_free: 3)
+
+      assert plan.promote == "bd-1"
+      assert %{state: :queued, reason: "1 ahead in queue"} = reason(plan, "bd-2")
+      assert %{state: :queued, reason: "2 ahead in queue"} = reason(plan, "bd-3")
+    end
+
+    test "an empty ready queue promotes nothing" do
+      assert %{promote: nil, entries: []} = plan(ready: [])
+    end
+  end
+
+  describe "concurrency" do
+    test "no free slot holds the top card and names the reason" do
+      plan = plan(ready: [card("bd-1"), card("bd-2")], slots_free: 0)
+
+      assert plan.promote == nil
+      assert %{state: :blocked, reason: "blocked — no free worker slot"} = reason(plan, "bd-1")
+      assert %{state: :queued, reason: "1 ahead in queue"} = reason(plan, "bd-2")
+    end
+  end
+
+  describe "dependencies" do
+    test "a card with an open blocker is blocked and skipped over" do
+      plan = plan(ready: [card("bd-1", blocked_by: ["bd-9"]), card("bd-2")])
+
+      assert plan.promote == "bd-2"
+      assert %{state: :blocked, reason: "blocked — waiting on bd-9"} = reason(plan, "bd-1")
+      assert %{state: :next} = reason(plan, "bd-2")
+    end
+
+    test "several blockers are listed" do
+      plan = plan(ready: [card("bd-1", blocked_by: ["bd-9", "bd-8"])])
+
+      assert %{reason: "blocked — waiting on bd-8, bd-9"} = reason(plan, "bd-1")
+    end
+  end
+
+  describe "file overlap" do
+    test "a card whose files are in flight is blocked and skipped over" do
+      plan =
+        plan(
+          ready: [card("bd-1", files: ["lib/a.ex"]), card("bd-2", files: ["lib/b.ex"])],
+          running: [running("bd-7", ["lib/a.ex"])]
+        )
+
+      assert plan.promote == "bd-2"
+
+      assert %{state: :blocked, reason: "blocked — lib/a.ex in flight on bd-7 (diff)"} =
+               reason(plan, "bd-1")
+    end
+
+    test "several colliding files collapse to the first plus a count" do
+      plan =
+        plan(
+          ready: [card("bd-1", files: ["lib/a.ex", "lib/b.ex", "lib/c.ex"])],
+          running: [running("bd-7", ["lib/a.ex", "lib/b.ex", "lib/c.ex"])]
+        )
+
+      assert %{reason: "blocked — lib/a.ex +2 more in flight on bd-7 (diff)"} =
+               reason(plan, "bd-1")
+    end
+
+    test "a card promoted this cycle does not hold a card whose text names the same file" do
+      plan =
+        plan(
+          ready: [card("bd-1", files: ["lib/a.ex"]), card("bd-2", files: ["lib/a.ex"])],
+          slots_free: 2
+        )
+
+      assert plan.promote == "bd-1"
+
+      assert %{state: :queued, hold: nil} = reason(plan, "bd-2")
+    end
+
+    test "a card held by a global block does not claim its files" do
+      plan =
+        plan(
+          ready: [card("bd-1", files: ["lib/a.ex"]), card("bd-2", files: ["lib/a.ex"])],
+          slots_free: 0
+        )
+
+      assert %{state: :blocked, reason: "blocked — no free worker slot"} = reason(plan, "bd-1")
+      assert %{state: :queued, reason: "1 ahead in queue"} = reason(plan, "bd-2")
+    end
+  end
+
+  describe "quota" do
+    test "an exhausted quota holds promotion and surfaces as a blocked reason" do
+      plan = plan(ready: [card("bd-1")], quota: {:hold, "quota exhausted"})
+
+      assert plan.promote == nil
+      assert %{state: :blocked, reason: "blocked — quota exhausted"} = reason(plan, "bd-1")
+    end
+
+    test "quota outranks a missing slot when both would hold" do
+      plan = plan(ready: [card("bd-1")], quota: {:hold, "quota near exhaustion"}, slots_free: 0)
+
+      assert %{reason: "blocked — quota near exhaustion"} = reason(plan, "bd-1")
+    end
+  end
+
+  describe "pause" do
+    test "a paused scheduler promotes nothing and says so on every card" do
+      plan = plan(ready: [card("bd-1"), card("bd-2")], paused: true)
+
+      assert plan.promote == nil
+
+      assert Enum.all?(plan.entries, &match?(%{state: :blocked, reason: "scheduler paused"}, &1))
+    end
+
+    test "pause still reports a real block ahead of itself" do
+      plan = plan(ready: [card("bd-1", blocked_by: ["bd-9"])], paused: true)
+
+      assert %{reason: "blocked — waiting on bd-9"} = reason(plan, "bd-1")
+    end
+  end
+
+  describe "conflicts_with" do
+    test "a card conflicting with in-flight work is blocked, and names its state" do
+      plan =
+        plan(
+          ready: [card("bd-1", conflicts_with: ["bd-7"]), card("bd-2")],
+          conflict_claims: %{"bd-7" => "running"}
+        )
+
+      assert plan.promote == "bd-2"
+
+      assert %{state: :blocked, reason: "blocked — conflicts with bd-7 (running)"} =
+               reason(plan, "bd-1")
+    end
+
+    test "the counterpart's state rides on the reason, whatever it is" do
+      for state <- ["running", "resuming", "in review", "awaiting review", "dispatching"] do
+        plan =
+          plan(
+            ready: [card("bd-1", conflicts_with: ["bd-7"])],
+            conflict_claims: %{"bd-7" => state}
+          )
+
+        assert reason(plan, "bd-1").reason == "blocked — conflicts with bd-7 (#{state})"
+      end
+    end
+
+    test "a counterpart that is not in flight holds nothing back" do
+      plan = plan(ready: [card("bd-1", conflicts_with: ["bd-7"])], conflict_claims: %{})
+
+      assert plan.promote == "bd-1"
+    end
+
+    test "the exact incident: two conflicting cards promoted seconds apart" do
+      # bd-1c4pg3 and bd-7srf5d, both Ready, mutex-edged, nothing in flight.
+      plan =
+        plan(
+          ready: [
+            card("bd-1c4pg3", conflicts_with: ["bd-7srf5d"]),
+            card("bd-7srf5d", conflicts_with: ["bd-1c4pg3"])
+          ],
+          slots_free: 4
+        )
+
+      assert plan.promote == "bd-1c4pg3"
+
+      assert %{state: :blocked, reason: "blocked — conflicts with bd-1c4pg3 (dispatching)"} =
+               reason(plan, "bd-7srf5d")
+    end
+
+    test "the second of a conflicting pair goes once the first is no longer in flight" do
+      first =
+        plan(
+          ready: [card("bd-1", conflicts_with: ["bd-2"])],
+          conflict_claims: %{"bd-2" => "running"}
+        )
+
+      assert first.promote == nil
+
+      after_finish = plan(ready: [card("bd-1", conflicts_with: ["bd-2"])], conflict_claims: %{})
+
+      assert after_finish.promote == "bd-1"
+    end
+
+    test "a conflict blocks whichever direction the edge was stored in" do
+      # The caller hands each card its counterparts; symmetry is EdgeGate's job,
+      # so both sides read the same regardless of which row exists.
+      plan =
+        plan(
+          ready: [card("bd-2", conflicts_with: ["bd-7"])],
+          conflict_claims: %{"bd-7" => "running"}
+        )
+
+      assert %{reason: "blocked — conflicts with bd-7 (running)"} = reason(plan, "bd-2")
+    end
+
+    test "an open blocker outranks a conflict" do
+      plan =
+        plan(
+          ready: [card("bd-1", blocked_by: ["bd-9"], conflicts_with: ["bd-7"])],
+          conflict_claims: %{"bd-7" => "running"}
+        )
+
+      assert %{reason: "blocked — waiting on bd-9"} = reason(plan, "bd-1")
+    end
+
+    test "a conflict outranks an incidental file overlap" do
+      plan =
+        plan(
+          ready: [card("bd-1", files: ["lib/a.ex"], conflicts_with: ["bd-7"])],
+          running: [running("bd-7", ["lib/a.ex"])],
+          conflict_claims: %{"bd-7" => "running"}
+        )
+
+      assert %{reason: "blocked — conflicts with bd-7 (running)"} = reason(plan, "bd-1")
+    end
+
+    test "a card blocked by a conflict does not advance the queue position" do
+      plan =
+        plan(
+          ready: [card("bd-1", conflicts_with: ["bd-7"]), card("bd-2"), card("bd-3")],
+          conflict_claims: %{"bd-7" => "running"},
+          slots_free: 3
+        )
+
+      assert plan.promote == "bd-2"
+      assert %{state: :next} = reason(plan, "bd-2")
+      assert %{state: :queued, reason: "1 ahead in queue"} = reason(plan, "bd-3")
+    end
+
+    test "a card held by a global block does not claim the mutex" do
+      plan =
+        plan(
+          ready: [card("bd-1", conflicts_with: ["bd-2"]), card("bd-2", conflicts_with: ["bd-1"])],
+          slots_free: 0
+        )
+
+      assert %{state: :blocked, reason: "blocked — no free worker slot"} = reason(plan, "bd-1")
+      assert %{state: :queued, reason: "1 ahead in queue"} = reason(plan, "bd-2")
+    end
+
+    test "a plan without the key at all behaves exactly as before" do
+      plan =
+        Scheduler.plan(%{ready: [card("bd-1", conflicts_with: ["bd-7"])], slots_free: 1})
+
+      assert plan.promote == "bd-1"
+    end
+  end
+
+  describe "order (bd-asxw4e)" do
+    test "priority, then rank, then created_at: the lower rank dispatches first" do
+      t0 = ~U[2026-09-27 10:00:00Z]
+
+      older =
+        Map.merge(card("bd-old"), %{state: :queued, priority: 2, rank: 2048, created_at: t0})
+
+      newer =
+        Map.merge(card("bd-new"), %{
+          state: :queued,
+          priority: 2,
+          rank: 1024,
+          created_at: DateTime.add(t0, 3600)
+        })
+
+      urgent =
+        Map.merge(card("bd-p1"), %{
+          state: :queued,
+          priority: 1,
+          rank: 9999,
+          created_at: DateTime.add(t0, 7200)
+        })
+
+      tie =
+        Map.merge(card("bd-tie"), %{
+          state: :queued,
+          priority: 2,
+          rank: 2048,
+          created_at: DateTime.add(t0, 60)
+        })
+
+      plan = plan(ready: [tie, older, newer, urgent], slots_free: 0)
+      assert Enum.map(plan.entries, & &1.id) == ["bd-p1", "bd-new", "bd-old", "bd-tie"]
+
+      plan = plan(ready: [tie, older, newer])
+      assert plan.promote == "bd-new"
+    end
+
+    test "a card the ready list carries that is no longer Ready is held in its column" do
+      plan = plan(ready: [Map.put(card("bd-1"), :state, :backlog), card("bd-2")])
+
+      assert %{state: :blocked, reason: "blocked — in Backlog"} = reason(plan, "bd-1")
+      assert plan.promote == "bd-2"
+    end
+  end
+
+  describe "order/1: the epic-aware key (ES3)" do
+    @t0 ~U[2026-10-02 10:00:00Z]
+
+    defp qcard(id, attrs) do
+      Map.merge(%{id: id, priority: 2, rank: 1024, created_at: @t0}, Map.new(attrs))
+    end
+
+    defp ids(cards), do: Enum.map(cards, & &1.id)
+
+    test "cards with none of the new fields sort exactly as {priority, rank, created_at}" do
+      cards =
+        for {id, p, r, mins} <- [
+              {"a", 2, 2048, 0},
+              {"b", 1, 9999, 5},
+              {"c", 2, 1024, 3},
+              {"d", 2, 1024, 1},
+              {"e", 4, 1, 0},
+              {"f", 0, 3, 9},
+              {"g", 2, nil, 2}
+            ] do
+          qcard(id, priority: p, rank: r, created_at: DateTime.add(@t0, mins * 60))
+        end
+
+      today =
+        Enum.sort_by(cards, &{&1.priority, &1.rank || :none, DateTime.to_unix(&1.created_at)})
+
+      assert ids(Scheduler.order(cards)) == ids(today)
+      assert ids(Scheduler.order(Enum.reverse(cards))) == ids(today)
+    end
+
+    test "effective priority outranks own priority and rank" do
+      lifted = qcard("lifted", priority: 4, rank: 9999, effective_priority: 1)
+      own = qcard("own", priority: 1, rank: 1)
+
+      assert ids(Scheduler.order([lifted, own])) == ["own", "lifted"]
+
+      assert ids(Scheduler.order([own, qcard("p2", priority: 2), lifted])) == [
+               "own",
+               "lifted",
+               "p2"
+             ]
+    end
+
+    test "pinned, then finish class, then open leaves, then own priority, then rank" do
+      base = [effective_priority: 1]
+
+      cards = [
+        qcard("rank", base ++ [priority: 2, rank: 5, finish_class: 2]),
+        qcard("own3", base ++ [priority: 3, rank: 1, finish_class: 1, open_leaves: 2]),
+        qcard("own2", base ++ [priority: 2, rank: 9, finish_class: 1, open_leaves: 2]),
+        qcard("few", base ++ [priority: 4, rank: 9, finish_class: 1, open_leaves: 1]),
+        qcard("aged", base ++ [priority: 4, rank: 9, finish_class: 0]),
+        qcard("pinned", base ++ [priority: 4, rank: 9, finish_class: 2, rank_pinned: true])
+      ]
+
+      assert ids(Scheduler.order(cards)) == ~w(pinned aged few own2 own3 rank)
+    end
+  end
+
+  describe "entries" do
+    test "cards with nothing to order them by keep the order given" do
+      plan = plan(ready: [card("bd-3"), card("bd-1"), card("bd-2")])
+
+      assert Enum.map(plan.entries, & &1.id) == ["bd-3", "bd-1", "bd-2"]
+    end
+  end
+
+  describe "a provider-constraint hold (bd-13pqcp)" do
+    test "a constrained card with no eligible provider is held by its own constraint and the next card goes" do
+      plan =
+        plan(
+          ready: [card("bd-1"), card("bd-2")],
+          card_constraint: %{
+            "bd-1" => {:hold, "exclude gemini: no allowed provider has a free slot"}
+          }
+        )
+
+      assert %{state: :blocked, reason: "held — provider constraint (exclude gemini" <> _} =
+               reason(plan, "bd-1")
+
+      # A card's own block never advances the queue: bd-2 is next in line.
+      assert plan.promote == "bd-2"
+      assert %{state: :next} = reason(plan, "bd-2")
+    end
+
+    test "a card whose constraint has an eligible provider, or none at all, is unaffected" do
+      plan = plan(ready: [card("bd-1")], card_constraint: %{"bd-1" => :ok})
+      assert plan.promote == "bd-1"
+
+      plan = plan(ready: [card("bd-1")])
+      assert plan.promote == "bd-1"
+    end
+  end
+
+  describe "a guardrail hold (bd-atll60, G13)" do
+    test "a card no eligible model can take is held by its own guardrail and the next card goes" do
+      plan =
+        plan(
+          ready: [card("bd-1"), card("bd-2")],
+          card_guardrail: %{"bd-1" => {:hold, "no eligible model: codex: D3 exceeds D1"}}
+        )
+
+      assert %{state: :blocked, reason: "held — guardrail (no eligible model" <> _} =
+               reason(plan, "bd-1")
+
+      # A card's own block never advances the queue.
+      assert plan.promote == "bd-2"
+    end
+
+    test "a permission awaiting the operator's grant holds the card the same way" do
+      plan =
+        plan(
+          ready: [card("bd-1")],
+          card_guardrail: %{"bd-1" => {:hold, "awaiting operator grant: prod_ssh"}}
+        )
+
+      assert %{state: :blocked, reason: "held — guardrail (awaiting operator grant: prod_ssh)"} =
+               reason(plan, "bd-1")
+
+      assert plan.promote == nil
+    end
+
+    test ":ok, or no entry, does not hold" do
+      assert plan(ready: [card("bd-1")], card_guardrail: %{"bd-1" => :ok}).promote == "bd-1"
+      assert plan(ready: [card("bd-1")]).promote == "bd-1"
+    end
+  end
+
+  describe "a CI backpressure hold (#1126)" do
+    test "a card of a saturated repo is held by its own hold, naming the counts, and the next card goes" do
+      plan =
+        plan(
+          ready: [card("bd-1"), card("bd-2")],
+          card_ci: %{"bd-1" => {:hold, "6 pending, oldest 42m"}}
+        )
+
+      assert %{
+               state: :blocked,
+               reason: "held — CI saturated (6 pending, oldest 42m)",
+               hold: {:ci_saturated, "6 pending, oldest 42m"}
+             } = reason(plan, "bd-1")
+
+      # A card's own block never advances the queue.
+      assert plan.promote == "bd-2"
+    end
+
+    test "no entry, or :ok, does not hold" do
+      assert plan(ready: [card("bd-1")], card_ci: %{"bd-1" => :ok}).promote == "bd-1"
+      assert plan(ready: [card("bd-1")]).promote == "bd-1"
+    end
+  end
+end

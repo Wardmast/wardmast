@@ -31,8 +31,8 @@ erl_crash.dump
 # Local Claude Code agent config.
 .claude/
 
-# Per-spawn Arbiter.MCP client config — written into each acolyte worktree by
-# Arbiter.MCP.AgentConfig with a bearer scope token baked in. Never commit it.
+# Per-spawn Wardmast.MCP client config — written into each acolyte worktree by
+# Wardmast.MCP.AgentConfig with a bearer scope token baked in. Never commit it.
 .mcp.json
 
 # Agent-generated build artifacts — not part of the canonical repo.
@@ -44,11 +44,11 @@ MORNING-BRIEF.md
 .arbiter/
 
 # Compiled Erlang/Elixir beam artifacts — mix test can compile these into the
-# worktree root (e.g. Elixir.Arbiter.Worker.Worktree.beam). They are never
+# worktree root (e.g. Elixir.Wardmast.Worker.Worktree.beam). They are never
 # part of the canonical repo and must not trip the commit gate (bd-3gpeoz).
 *.beam
 
-# Local environment file with secrets (DATABASE_PATH, ARBITER_CLOAK_KEY, SECRET_KEY_BASE).
+# Local environment file with secrets (DATABASE_PATH, WARDMAST_CLOAK_KEY, SECRET_KEY_BASE).
 # Never commit to version control.
 .arbiter.env
 .arbiter.env.backup
@@ -68,7 +68,7 @@ MORNING-BRIEF.md
 # Scratch test files at root — never commit (prevents test.exs scratch scripts).
 /test.exs
 
-# Candidate account plan emitted by `mix arbiter.accounts.census` (bd-1p8n2d).
+# Candidate account plan emitted by `mix wardmast.accounts.census` (bd-1p8n2d).
 # Workspace names, env var names and credential fingerprints — not to be
 # committed by accident.
 accounts.json

@@ -2,7 +2,7 @@
 //
 // bd-2wmxt5 — the `/epics` page in a real browser, at a real narrow width.
 //
-// `ArbiterWeb.EpicIndexLiveTest` proves the page's data: the right epics, the
+// `WardmastWeb.EpicIndexLiveTest` proves the page's data: the right epics, the
 // right buckets, the right chips, live on PubSub. What it cannot prove is
 // acceptance criterion 6 — "usable at ~400px width, with rows stacked" —
 // because `ConnCase` has no layout engine. Asserting that a row carries
@@ -16,7 +16,7 @@
 //   node scripts/verify_epics_page.mjs --url http://127.0.0.1:4848 --epic bd-xxxx
 //
 // Output is one `CHECK <name>: PASS|FAIL — <detail>` line per claim and a final
-// `RESULT: PASS|FAIL`. `ArbiterWeb.EpicPageBrowserTest` runs it against a
+// `RESULT: PASS|FAIL`. `WardmastWeb.EpicPageBrowserTest` runs it against a
 // Bandit listener as part of `mix test`; exit 3 means SKIP (no browser).
 //
 // No npm (RFC §6.1): the browser is one already on the machine and the driver

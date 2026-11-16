@@ -1,0 +1,108 @@
+defmodule Wardmast.Quota.Overage do
+  @moduledoc """
+  Overage-spend accounting for `:continue`-mode dispatch (bd-7cd38f).
+
+  When a workspace dispatches past the Anthropic plan cap (see
+  `Wardmast.Quota.Gate.Continue`), we account the overage as the **provider
+  account's** spend over the current 5h window, read straight from the
+  token-cost ledger (`Wardmast.Usage.summarize/1`). This is the zero-migration
+  v1 approach from the bd-3qcd8y design: a windowed sum of `cost_usd`, not a
+  per-request tag.
+
+  The sum is `by: :provider_account` since P7
+  (`docs/provider-account-design.md` §5 row 9) — the plan that was exhausted
+  is the account's, so every workspace metered under it contributes to the
+  overage figure, and the window comes from the account's snapshot.
+
+  The spend window is explicit (bd-5zwj09): while the snapshot reports a primary
+  (5h) window still ahead of now it is `[reset - 5h, now]`; otherwise it is the
+  **trailing 5 hours** `[now - 5h, now]`. Anthropic retired the 5h window, so a
+  long-only Claude (no `reset_5h_at`; only a 7d reset) always takes the trailing
+  form — its 7d reset is never used to derive the start, since a week-long span
+  is not an "overage window". A stale primary reset (bd-2wnkoq) takes the same
+  trailing form. See `window_start/2`.
+  """
+
+  alias Wardmast.Accounts.ProviderAccount
+  alias Wardmast.Quota.AnthropicQuota
+  alias Wardmast.Quota.Gate.Snapshot
+  alias Wardmast.Usage
+
+  @five_hours_seconds 5 * 60 * 60
+
+  @doc """
+  The **account's** total spend (USD) over the current 5h window — the figure
+  the overage indicator and alert threshold compare against. Returns `0.0` on
+  any read error so accounting never disrupts dispatch.
+
+  Keyed by the provider account since P7 (§5 row 9): the plan whose cap was
+  passed is the account's, so the spend that ran past it is every workspace's
+  on that account, not just the one whose dispatch happened to trip the gate.
+  Accepts a `ProviderAccount`, a bare account id, or anything else (which
+  spends `0.0`).
+  """
+  @spec windowed_spend(
+          ProviderAccount.t() | String.t() | nil,
+          Snapshot.t() | AnthropicQuota.t() | map() | nil
+        ) :: float()
+  def windowed_spend(account, quota) do
+    case account_id(account) do
+      nil ->
+        0.0
+
+      id ->
+        case Usage.summarize(
+               by: :provider_account,
+               since: window_start(quota),
+               provider_account_id: id
+             ) do
+          {:ok, rows} -> Enum.reduce(rows, 0.0, fn r, acc -> acc + (r.total_cost_usd || 0.0) end)
+          _ -> 0.0
+        end
+    end
+  rescue
+    _ -> 0.0
+  end
+
+  defp account_id(%ProviderAccount{id: id}), do: id
+  defp account_id(id) when is_binary(id) and id != "", do: id
+  defp account_id(_), do: nil
+
+  @doc """
+  Start of the Claude spend window as a `DateTime`, as of `now` (default
+  `DateTime.utc_now/0`). Derived from the snapshot's primary-window reset
+  while that reset is still ahead of `now` (the window opens 5h before it
+  resets); otherwise the trailing `now - 5h`.
+
+  A reset at or before `now` means the window it describes has **closed** —
+  the snapshot is stale, and the current window's reset is unknown. Deriving
+  the start from it would stretch "the current 5h window" back to one that
+  ended hours ago and sum all the spend since (bd-2wnkoq), so that case takes
+  the same trailing-5h approximation as a snapshot with no reset at all.
+
+  A snapshot with no primary window (`reset_at` nil, e.g. a long-only Claude
+  carrying only `secondary_reset_at`) is the trailing 5h.
+
+  Accepts a normalized `Wardmast.Quota.Gate.Snapshot` (any provider) as well as a
+  raw `AnthropicQuota` row. The 5h span is Anthropic's; for Codex / Google —
+  which have no paid-overage passthrough — this is only ever the accounting
+  window for the alert figure, so the trailing-5h approximation is deliberate.
+  """
+  @spec window_start(Snapshot.t() | AnthropicQuota.t() | nil, DateTime.t()) :: DateTime.t()
+  def window_start(quota, now \\ DateTime.utc_now())
+
+  def window_start(%AnthropicQuota{reset_5h_at: %DateTime{} = reset}, now),
+    do: from_reset(reset, now)
+
+  def window_start(%Snapshot{reset_at: %DateTime{} = reset}, now), do: from_reset(reset, now)
+
+  def window_start(_quota, now), do: trailing(now)
+
+  defp from_reset(reset, now) do
+    if DateTime.after?(reset, now),
+      do: DateTime.add(reset, -@five_hours_seconds, :second),
+      else: trailing(now)
+  end
+
+  defp trailing(now), do: DateTime.add(now, -@five_hours_seconds, :second)
+end

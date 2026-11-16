@@ -15,7 +15,7 @@
 //   node scripts/verify_session_terminal.mjs
 //
 // Output is one `CHECK <name>: PASS|FAIL — <detail>` line per claim and a
-// final `RESULT: PASS|FAIL`. `ArbiterWeb.SessionTerminalBrowserTest` runs this
+// final `RESULT: PASS|FAIL`. `WardmastWeb.SessionTerminalBrowserTest` runs this
 // as part of `mix test` wherever a Chromium and an esbuild are on disk.
 //
 // No npm, as everywhere else in this repo (RFC §6.1): esbuild is the binary
@@ -31,8 +31,8 @@ import { fileURLToPath } from "node:url"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, "..")
-const ASSETS = path.join(ROOT, "apps/arbiter_web/assets")
-const PROBE = path.join(ROOT, "apps/arbiter_web/test/js/terminal_probe.mjs")
+const ASSETS = path.join(ROOT, "apps/wardmast_web/assets")
+const PROBE = path.join(ROOT, "apps/wardmast_web/test/js/terminal_probe.mjs")
 
 const CHROME_CANDIDATES = [
   process.env.ARB_CHROME,

@@ -8,9 +8,9 @@
 #
 # Entries may be:
 #
-#     {"lib/arbiter/some_module.ex"}                      # whole file
-#     {"lib/arbiter/some_module.ex", :unknown_function}   # file + warning type
-#     {"lib/arbiter/some_module.ex", :call, 42}           # file + type + line
+#     {"lib/wardmast/some_module.ex"}                      # whole file
+#     {"lib/wardmast/some_module.ex", :unknown_function}   # file + warning type
+#     {"lib/wardmast/some_module.ex", :call, 42}           # file + type + line
 #     ~r/regex against the formatted warning/
 #
 # Add one only with a comment saying which warning it silences and why the
@@ -33,7 +33,7 @@
 # MCP.Scope.mint_worker/3), Watchdog.parked_on/1's missing
 # `:ci_failed_external`, Quota.Overage.windowed_spend/2's over-narrow
 # params, Tasks.Claim.claim_result's missing tuple errors, and a bogus
-# `allow_nonexistent_atoms?` option that typed ArbiterCli.Output.
+# `allow_nonexistent_atoms?` option that typed WardmastCli.Output.
 # extract_mode/1 as `none()`. That is 33 of the original 94 warnings.
 [
   # ── 1. Defensive catch-all clauses (`pattern_match_cov`) ──────────────────
@@ -47,18 +47,18 @@
   # value. Deleting the clause converts that into a FunctionClauseError inside
   # a GenServer — for the Watchdog and the patrols, a crash loop on live
   # workers. The clause stays; the warning does not.
-  {"lib/arbiter/mcp/tools/task.ex", :pattern_match_cov},
-  {"lib/arbiter/tasks/claim.ex", :pattern_match_cov},
-  {"lib/arbiter/worker.ex", :pattern_match_cov},
-  {"lib/arbiter/worker/claude_session.ex", :pattern_match_cov},
-  {"lib/arbiter/worker/driver.ex", :pattern_match_cov},
-  {"lib/arbiter/worker/review_gate.ex", :pattern_match_cov},
-  {"lib/arbiter/worker/watchdog.ex", :pattern_match_cov},
-  {"lib/arbiter/workflows/machine.ex", :pattern_match_cov},
-  {"lib/arbiter/workflows/pr_patrol.ex", :pattern_match_cov},
-  {"lib/arbiter/workflows/review_patrol.ex", :pattern_match_cov},
-  {"lib/arbiter_cli/cmd/loop.ex", :pattern_match_cov},
-  {"lib/arbiter_web/live/loop_proposal_index_live.ex", :pattern_match_cov},
+  {"lib/wardmast/mcp/tools/task.ex", :pattern_match_cov},
+  {"lib/wardmast/tasks/claim.ex", :pattern_match_cov},
+  {"lib/wardmast/worker.ex", :pattern_match_cov},
+  {"lib/wardmast/worker/claude_session.ex", :pattern_match_cov},
+  {"lib/wardmast/worker/driver.ex", :pattern_match_cov},
+  {"lib/wardmast/worker/review_gate.ex", :pattern_match_cov},
+  {"lib/wardmast/worker/watchdog.ex", :pattern_match_cov},
+  {"lib/wardmast/workflows/machine.ex", :pattern_match_cov},
+  {"lib/wardmast/workflows/pr_patrol.ex", :pattern_match_cov},
+  {"lib/wardmast/workflows/review_patrol.ex", :pattern_match_cov},
+  {"lib/wardmast_cli/cmd/loop.ex", :pattern_match_cov},
+  {"lib/wardmast_web/live/loop_proposal_index_live.ex", :pattern_match_cov},
 
   # ── 2. Defensive error branches (`pattern_match`) ─────────────────────────
   #
@@ -72,7 +72,7 @@
   #   * agents/preflight.ex — not a defensive clause at all: dialyzer
   #     resolves a build-time `function_exported?/3` check against a module
   #     it has already analysed to a constant and calls the other branch of
-  #     the `if` dead. `arbiter_cli/version.ex` has the same shape (`if
+  #     the `if` dead. `wardmast_cli/version.ex` has the same shape (`if
   #     @git_dirty`, baked in by `git status --porcelain` at compile time)
   #     but isn't filtered here: CI always builds from a clean checkout, so
   #     `@git_dirty` is `false` there and the warning never fires — a filter
@@ -81,7 +81,7 @@
   #   * worker/review_gate.ex — a bare `:no_verdict` atom clause beside the
   #     `{:no_verdict, reason}` tuple one. Cheap total-function hygiene on a
   #     private helper.
-  #   * arbiter_cli/version.ex / cmd/doctor/checks.ex — the same
+  #   * wardmast_cli/version.ex / cmd/doctor/checks.ex — the same
   #     compile-time-constant shape as the `@git_dirty` case above, for
   #     `@git_available` (`dev_build?/0`). A prior pass here assumed this
   #     bakes to `true` in CI (git present, no `RELEASE_VERSION`) and added
@@ -90,12 +90,12 @@
   #     fails and `@git_available` folds to `false` there instead — same as
   #     `@git_dirty`, the warning never fires in CI and a filter for it sits
   #     unused. No entry needed for either module.
-  {"lib/arbiter/agents/preflight.ex", :pattern_match},
-  {"lib/arbiter/mcp/tools.ex", :pattern_match},
-  {"lib/arbiter/worker/review_gate.ex", :pattern_match},
-  {"lib/arbiter_web/controllers/api/loop_controller.ex", :pattern_match},
-  {"lib/arbiter_web/controllers/api/scheduler_controller.ex", :pattern_match},
-  {"lib/mix/tasks/arbiter.loop.analyze.ex", :pattern_match},
+  {"lib/wardmast/agents/preflight.ex", :pattern_match},
+  {"lib/wardmast/mcp/tools.ex", :pattern_match},
+  {"lib/wardmast/worker/review_gate.ex", :pattern_match},
+  {"lib/wardmast_web/controllers/api/loop_controller.ex", :pattern_match},
+  {"lib/wardmast_web/controllers/api/scheduler_controller.ex", :pattern_match},
+  {"lib/mix/tasks/wardmast.loop.analyze.ex", :pattern_match},
 
   # ── 3. Defensive nil / type guards (`guard_fail`, `neg_guard_fail`) ───────
   #
@@ -111,13 +111,13 @@
   #     persisted task rows, where a NULL column is one migration away.
   #   * loop/analysis.ex — the same shape on a report map.
   #
-  #   `arbiter_cli/cmd/doctor/checks.ex`'s `if dev_install?() do` is
-  #   downstream of the same `ArbiterCli.Version.dev_build?/0` constant noted
+  #   `wardmast_cli/cmd/doctor/checks.ex`'s `if dev_install?() do` is
+  #   downstream of the same `WardmastCli.Version.dev_build?/0` constant noted
   #   in group 2 — no filter here either, for the same reason.
-  {"lib/arbiter/loop/analysis.ex", :guard_fail},
-  {"lib/arbiter/worker.ex", :guard_fail},
-  {"lib/arbiter/worker/dispatch.ex", :guard_fail},
-  {"lib/arbiter/worker/dispatch.ex", :neg_guard_fail},
+  {"lib/wardmast/loop/analysis.ex", :guard_fail},
+  {"lib/wardmast/worker.ex", :guard_fail},
+  {"lib/wardmast/worker/dispatch.ex", :guard_fail},
+  {"lib/wardmast/worker/dispatch.ex", :neg_guard_fail},
 
   # ── 4. MapSet opaqueness (`contract_with_opaque`, `call_without_opaque`) ──
   #
@@ -129,8 +129,8 @@
   # site here builds a MapSet and passes it straight to another MapSet
   # function — `MapSet.union/2`, `MapSet.disjoint?/2` — which is exactly the
   # supported use.
-  {"lib/arbiter/tasks/epic_rollup.ex", :call_without_opaque},
-  {"lib/arbiter/usage/estimate.ex", :call_without_opaque},
+  {"lib/wardmast/tasks/epic_rollup.ex", :call_without_opaque},
+  {"lib/wardmast/usage/estimate.ex", :call_without_opaque},
 
   # ── 5. `pattern_match` fallout from the `:exact_compare` fixes ────────────
   #
@@ -141,7 +141,7 @@
   # site was therefore rewritten in source rather than suppressed
   # (pr_patrol.ex `meta: nil` in the clause head), moving the nil check into
   # a clause the analysed types say is unreachable, i.e. group 1 again.
-  {"lib/arbiter/workflows/pr_patrol.ex", :pattern_match},
+  {"lib/wardmast/workflows/pr_patrol.ex", :pattern_match},
 
   # ── 6. Mint.WebSocket.new/4 success path (`pattern_match`, `unused_fun`) ───
   #
@@ -153,6 +153,6 @@
   # unused. The success arm is the whole point of the client and is covered
   # end to end by ws_client_test.exs and connection_test.exs against a Bandit
   # endpoint, so the warnings are a library-spec artefact, not dead code.
-  {"lib/arbiter/node_agent/ws_client.ex", :pattern_match},
-  {"lib/arbiter/node_agent/ws_client.ex", :unused_fun}
+  {"lib/wardmast/node_agent/ws_client.ex", :pattern_match},
+  {"lib/wardmast/node_agent/ws_client.ex", :unused_fun}
 ]

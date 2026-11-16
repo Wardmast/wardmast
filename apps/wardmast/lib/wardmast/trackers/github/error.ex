@@ -1,0 +1,49 @@
+defmodule Wardmast.Trackers.GitHub.Error do
+  @moduledoc """
+  Normalised error returned by every `Wardmast.Trackers.GitHub` callback on
+  failure. Mirrors the shape of `Wardmast.Trackers.Jira.Error`,
+  `Wardmast.Mergers.Github.Error`, and `Wardmast.GitHub.Error` for consistency.
+
+  ## Kinds
+
+    * `:unauthenticated` — 401, token missing/rejected
+    * `:forbidden` — 403, scope/permission issue (NOT a rate limit — see below)
+    * `:rate_limited` — 429, or a 403 whose body identifies it as a rate-limit
+      failure (primary quota exhaustion or secondary/abuse detection). Distinct
+      from `:forbidden` so callers can retry with backoff instead of
+      escalating immediately (bd-2wilou). `retry_after_ms` is set when GitHub
+      told us how long to wait.
+    * `:not_found` — 404, issue/repo doesn't exist
+    * `:validation_failed` — 400/422, GitHub rejected the body (or a response
+      came back shaped wrong)
+    * `:server_error` — 5xx
+    * `:http` — any other 4xx not covered above
+    * `:network` — transport-level failure
+    * `:transition_not_found` — the requested tracker status had no mapping to a
+      GitHub state/label in the workspace's `status_map`
+    * `:config_missing` — workspace config is missing owner / repo /
+      credentials, or no active workspace is set
+  """
+
+  defstruct [:kind, :status, :message, :raw, :retry_after_ms]
+
+  @type kind ::
+          :unauthenticated
+          | :forbidden
+          | :rate_limited
+          | :not_found
+          | :validation_failed
+          | :server_error
+          | :http
+          | :network
+          | :transition_not_found
+          | :config_missing
+
+  @type t :: %__MODULE__{
+          kind: kind,
+          status: nil | non_neg_integer(),
+          message: String.t(),
+          raw: any(),
+          retry_after_ms: nil | non_neg_integer()
+        }
+end

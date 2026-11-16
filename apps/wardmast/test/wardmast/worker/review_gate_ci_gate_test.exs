@@ -1,0 +1,1832 @@
+defmodule Wardmast.Worker.ReviewGateCiGateTest do
+  @moduledoc """
+  bd-cut6uv / #228 — CI-gated review: ReviewGate dispatches a reviewer only
+  after CI is green on the exact head SHA it is about to review.
+
+  Real git (a bare origin and a linked worktree), a real author `Worker`, the
+  real gate, and `Wardmast.Test.StubMerger` standing in for the forge, answering
+  from a scripted pipeline and the live tip of the bare origin's branch — so a
+  commit pushed mid-wait really moves the head the forge reports.
+
+  The reviewer fixture (`review_ci_probe.sh`) counts its own passes in the
+  common git dir; "the reviewer was never paid for" is `passes == 0`.
+  """
+
+  use Wardmast.DataCase, async: false
+
+  import Wardmast.LifecycleFixtures, only: [put_state!: 2]
+
+  require Ash.Query
+
+  alias Wardmast.Accounts.Concurrency
+  alias Wardmast.Accounts.ProviderAccount
+  alias Wardmast.Accounts.WorkspaceProviderAccount
+  alias Wardmast.Board.Drain
+  alias Wardmast.CircuitBreaker
+  alias Wardmast.Loop.FlakeEvent
+  alias Wardmast.Messages.Message
+  alias Wardmast.Tasks.{Issue, SlotGate, Workspace}
+  alias Wardmast.Tasks.Lifecycle.Projection
+  alias Wardmast.Test.StubMerger
+  alias Wardmast.Worker
+  alias Wardmast.Worker.ReviewGate
+  alias Wardmast.Worker.VisualBaselines
+
+  @probe Path.expand("../../fixtures/review_ci_probe.sh", __DIR__)
+  @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
+  @echo_done Path.expand("../../fixtures/echo_with_done.sh", __DIR__)
+  @pr "#1"
+
+  setup do
+    CircuitBreaker.reset_all()
+    on_exit(&CircuitBreaker.reset_all/0)
+    StubMerger.reset()
+
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "rg-ci-#{System.unique_integer([:positive])}-#{:erlang.phash2(self())}"
+      )
+
+    File.mkdir_p!(tmp)
+    repo = init_repo(tmp)
+
+    put_app_env(:wardmast, :worktree_root, Path.join(tmp, "worktrees"))
+    put_app_env(:wardmast, :repo_paths, %{"trib/repo" => repo})
+
+    on_exit(fn -> File.rm_rf!(tmp) end)
+
+    %{
+      repo: repo,
+      tmp: tmp,
+      ws: new_ws(%{"review" => %{"required" => true, "require_ci_green" => true}})
+    }
+  end
+
+  # ---- AC1: the reviewer waits for green on the exact head ------------------
+
+  describe "the gate (AC1)" do
+    test "holds the reviewer back while CI is pending and dispatches it on green", ctx do
+      rig = rig(ctx, "feature/ci-1")
+      forge = start_forge(ctx, rig, [:running])
+
+      gate = start_gate(rig, ctx, command: [@probe, "HOLD"])
+
+      wait_until(fn -> StubMerger.get_count(@pr) >= 3 end)
+      assert awaiting_ci?(gate)
+      assert passes(rig) == 0
+
+      # While it waits, the ticket says so.
+      wait = Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"]
+      assert wait["sha"] == rig.head
+
+      set_pipeline(forge, [:success])
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+      assert reviewed_head(rig) == rig.head
+
+      # The reviewer was told CI passed on this very sha, and not to run the suite.
+      prompt = :sys.get_state(gate).current_prompt
+      assert prompt =~ "CI passed on #{rig.head}"
+      assert prompt =~ "Do not run the full test suite."
+
+      # The marker is gone with the wait.
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"] == nil
+      stop_gate(gate)
+    end
+
+    test "CI green on a different commit is not green: a push after CI started blocks the review",
+         ctx do
+      rig = rig(ctx, "feature/ci-2")
+      forge = start_forge(ctx, rig, [:running])
+
+      gate = start_gate(rig, ctx, command: [@probe, "HOLD"])
+      wait_until(fn -> StubMerger.get_count(@pr) >= 2 end)
+      assert awaiting_ci?(gate)
+
+      # A commit lands on origin after CI started on the old head. The forge
+      # still reports the OLD head — green there.
+      pushed = push_other_commit(ctx, rig)
+      refute pushed == rig.head
+      set_head(forge, rig.head)
+      set_pipeline(forge, [:success])
+
+      polls = StubMerger.get_count(@pr)
+      wait_until(fn -> StubMerger.get_count(@pr) >= polls + 3 end)
+      assert passes(rig) == 0, "green on #{rig.head} must not release a review of #{pushed}"
+      assert awaiting_ci?(gate)
+
+      # CI now reports the new head, pending, then green.
+      set_head(forge, nil)
+      set_pipeline(forge, [:running, :running, :success])
+
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+      assert reviewed_head(rig) == pushed
+      assert :sys.get_state(gate).current_prompt =~ "CI passed on #{pushed}"
+      stop_gate(gate)
+    end
+  end
+
+  # ---- RW8: the primary's own worker cap ----------------------------------------
+
+  describe "the primary's worker cap at 0 (RW8)" do
+    setup do
+      on_exit(fn -> Wardmast.Settings.set_nodes_local_max_workers(nil) end)
+      :ok
+    end
+
+    test "holds the reviewer (nothing spawned, no verdict) and starts it once the cap rises",
+         ctx do
+      {:ok, 0} = Wardmast.Nodes.set_local_max_workers(0, nil)
+      rig = rig(ctx, "feature/rw8-hold")
+      start_forge(ctx, rig, [:success])
+
+      gate = start_gate(rig, ctx, local_capacity_retry_ms: 25)
+
+      wait_until(fn -> :sys.get_state(gate).local_hold != nil end)
+      assert :sys.get_state(gate).local_hold.info.phrase =~ "held — local capacity 0"
+      assert passes(rig) == 0
+      assert Process.alive?(gate)
+
+      # Held, not failed: no verdict was written to the ticket.
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["verdict"] == nil
+
+      {:ok, 1} = Wardmast.Nodes.set_local_max_workers(1, nil)
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+      stop_gate(gate)
+    end
+
+    test "a fix round held at cap 0 stays held past the reviewer's timer, then starts on resume",
+         ctx do
+      rig = rig(ctx, "feature/rw8-fix-hold")
+      start_forge(ctx, rig, [:success])
+
+      # A reviewer that waits for the flag, then answers REQUEST_CHANGES, so the
+      # test can drop the cap to 0 while the reviewer is still running.
+      flag = Path.join(ctx.tmp, "rw8-reviewer-go")
+      wrapper = Path.join(ctx.tmp, "rw8-reviewer.sh")
+
+      File.write!(wrapper, """
+      #!/bin/sh
+      until [ -f "#{flag}" ]; do sleep 0.05; done
+      exec "#{@probe}" RC_SUITE
+      """)
+
+      File.chmod!(wrapper, 0o755)
+
+      gate =
+        start_gate(rig, ctx,
+          command: [wrapper],
+          revise_command: [@revise_commit],
+          rounds: 3,
+          timeout_ms: 1_500,
+          local_capacity_retry_ms: 25
+        )
+
+      ref = Process.monitor(gate)
+      wait_until(fn -> :sys.get_state(gate).phase == :reviewing end)
+
+      {:ok, 0} = Wardmast.Nodes.set_local_max_workers(0, nil)
+      File.write!(flag, "go")
+
+      wait_until(fn -> :sys.get_state(gate).local_hold != nil end)
+      held = :sys.get_state(gate)
+      assert held.phase == :revising
+      assert held.local_hold.info.phrase =~ "held — local capacity 0"
+      assert remote_head(ctx, rig) == rig.head
+
+      # The reviewer's own timer (1.5s) fires inside this window. It must be
+      # stale: a hold is not a reviewer timeout.
+      refute_receive {:DOWN, ^ref, :process, ^gate, _}, 2_500
+      still = :sys.get_state(gate)
+      assert still.local_hold != nil
+      refute still.reported?
+
+      assert Wardmast.ReviewGate.Round
+             |> Ash.read!()
+             |> Enum.filter(&(&1.task_id == rig.task.id and &1.verdict == :timed_out)) == []
+
+      {:ok, 1} = Wardmast.Nodes.set_local_max_workers(1, nil)
+
+      # The fix round's implementer ran (the fixture commits) and the gate pushed it.
+      wait_until(fn -> remote_head(ctx, rig) != rig.head end, 20_000)
+      stop_gate(gate)
+    end
+
+    test "with no override the gate is unaffected", ctx do
+      rig = rig(ctx, "feature/rw8-nohold")
+      start_forge(ctx, rig, [:success])
+
+      gate = start_gate(rig, ctx, local_capacity_retry_ms: 25)
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+      stop_gate(gate)
+    end
+  end
+
+  # ---- AC2: red CI reruns once ----------------------------------------------
+
+  describe "red CI (AC2)" do
+    test "red then green on the rerun is a flake: recorded, and no fix pass runs", ctx do
+      rig = rig(ctx, "feature/ci-3")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      start_forge(ctx, rig, [:failed, :running, :success])
+
+      start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert [{_ref, _opts}] = StubMerger.ci_reruns()
+
+      assert [%FlakeEvent{ci_job: "unit tests", repo: "trib/repo"}] =
+               FlakeEvent |> Ash.read!() |> Enum.filter(&(&1.task_id == rig.task.id))
+
+      # No fix pass: the implementer fixture would have committed.
+      assert remote_head(ctx, rig) == rig.head
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["verdict"] != "request_changes"
+    end
+
+    # bd-7eve8a: GitLab failed the head's pipeline at creation with no jobs (the
+    # pushing user is not identity-verified). Not a code failure: no re-run, no
+    # fix round, and when the head later reads green it is NOT a flake.
+    test "a zero-job failed pipeline is no flake and no fix round, and it raises attention",
+         ctx do
+      rig = rig(ctx, "feature/ci-unrun")
+
+      StubMerger.set_unrun_pipeline(@pr, %{
+        pipeline_id: 99,
+        user: "seriousalchemy",
+        failure_reason: "The pipeline failed due to the user not being verified.",
+        error_messages: "Identity verification is required in order to run CI jobs",
+        verification?: true
+      })
+
+      # red (zero jobs), then a later pipeline on the same head goes green.
+      forge = start_forge(ctx, rig, [:failed])
+
+      start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+
+      wait_until(fn ->
+        Enum.any?(gate_messages(ctx, rig), &(&1.body =~ "user not being verified"))
+      end)
+
+      set_pipeline(forge, [:success])
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert StubMerger.ci_reruns() == []
+
+      assert FlakeEvent |> Ash.read!() |> Enum.filter(&(&1.task_id == rig.task.id)) == []
+
+      # No fix round: the implementer fixture would have committed.
+      assert remote_head(ctx, rig) == rig.head
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["verdict"] != "request_changes"
+    end
+
+    # bd-8o35da (emr-7f0ljf): a red earlier pipeline, then the head's newest
+    # pipeline is still running. The re-run is refused as :ci_in_progress; that is
+    # "wait for CI", never a real failure — no fix round, no park.
+    test "a first re-run refused as ci_in_progress waits for CI instead of dispatching a fix round",
+         ctx do
+      rig = rig(ctx, "feature/ci-inprogress")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      StubMerger.queue_rerun_results([
+        {:error, :ci_in_progress},
+        {:ok, %{mode: :auto, run_id: 1, workflow: "CI"}}
+      ])
+
+      # red, (rerun refused: pipeline still going), still red once, rerun ok, green
+      start_forge(ctx, rig, [:failed, :failed, :running, :success])
+
+      start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      assert remote_head(ctx, rig) == rig.head
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["verdict"] != "request_changes"
+    end
+
+    test "a failure confined to merge.ci.no_rerun_jobs goes straight to the fix path, no rerun",
+         ctx do
+      ws =
+        new_ws(%{
+          "review" => %{"required" => true, "require_ci_green" => true},
+          "merge" => %{"ci" => %{"no_rerun_jobs" => ["visual"]}}
+        })
+
+      ctx = %{ctx | ws: ws}
+      rig = rig(ctx, "feature/ci-norerun")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "visual (1/2)", summary: "screenshot differs", url: "https://ci/1", files: []}
+      ])
+
+      start_forge(ctx, rig, [:failed, :success])
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@revise_commit],
+          rounds: 3,
+          command: [@probe, "HOLD"]
+        )
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      refute remote_head(ctx, rig) == rig.head
+      assert StubMerger.ci_reruns() == []
+      stop_gate(gate)
+    end
+
+    # GitHub #1284: the Watchdog's re-runs and the gate's draw on one per-SHA tally.
+    test "a head the cap says has been re-run enough goes straight to the fix path", ctx do
+      ws =
+        new_ws(%{
+          "review" => %{"required" => true, "require_ci_green" => true},
+          "merge" => %{"ci" => %{"max_reruns_per_sha" => 1}}
+        })
+
+      ctx = %{ctx | ws: ws}
+      rig = rig(ctx, "feature/ci-rerun-cap")
+      {:ok, 1} = Wardmast.Worker.CiRerunBudget.record(rig.task.id, rig.head, :known_flake)
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      start_forge(ctx, rig, [:failed, :success])
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@revise_commit],
+          rounds: 3,
+          command: [@probe, "HOLD"]
+        )
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      refute remote_head(ctx, rig) == rig.head
+      assert StubMerger.ci_reruns() == []
+      notes = Ash.get!(Issue, rig.task.id).notes || ""
+      assert notes =~ "re-run cap reached on head #{rig.head}"
+      assert notes =~ "unit tests"
+      stop_gate(gate)
+    end
+
+    test "the gate's one re-run is booked on the SHA tally", ctx do
+      rig = rig(ctx, "feature/ci-rerun-book")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      start_forge(ctx, rig, [:failed, :running, :success])
+      start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert [_] = StubMerger.ci_reruns()
+      assert Wardmast.Worker.CiRerunBudget.count(rig.task.id, rig.head) == 1
+    end
+
+    test "a head that already failed the same job set is not re-run by the next gate", ctx do
+      rig = rig(ctx, "feature/ci-dedupe")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      forge = start_forge(ctx, rig, [:failed, :running])
+
+      first = start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+
+      # The first gate does the one flake re-run, then waits on it.
+      wait_until(fn -> length(StubMerger.ci_reruns()) == 1 end, 30_000)
+      stop_gate(first)
+
+      # A redispatched / re-armed gate meets the same head red on the same job set.
+      set_pipeline(forge, [:failed, :success])
+
+      second =
+        start_gate(rig, ctx,
+          revise_command: [@revise_commit],
+          rounds: 3,
+          command: [@probe, "HOLD"]
+        )
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      refute remote_head(ctx, rig) == rig.head
+      assert length(StubMerger.ci_reruns()) == 1
+      stop_gate(second)
+    end
+
+    test "red then red dispatches the existing fix path, then waits for CI on the fix", ctx do
+      rig = rig(ctx, "feature/ci-4")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      start_forge(ctx, rig, [:failed, :running, :failed, :success])
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@revise_commit],
+          rounds: 3,
+          command: [@probe, "HOLD"]
+        )
+
+      # The fix pass commits and the gate pushes it; the reviewer then reads THAT head.
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+      fixed = remote_head(ctx, rig)
+      refute fixed == rig.head
+
+      assert length(StubMerger.ci_reruns()) == 1
+      assert FlakeEvent |> Ash.read!() |> Enum.filter(&(&1.task_id == rig.task.id)) == []
+      assert reviewed_head(rig) == fixed
+      assert :sys.get_state(gate).current_prompt =~ "CI passed on #{fixed}"
+      stop_gate(gate)
+    end
+
+    test "a CI-red fix round with no diff reruns CI; green re-reviews the head instead of parking",
+         ctx do
+      rig = rig(ctx, "feature/ci-noop-green")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      # red, rerun red -> fix round (no diff) -> red, the gate's own rerun -> green
+      start_forge(ctx, rig, [:failed, :running, :failed, :failed, :running, :success])
+
+      gate =
+        start_gate(rig, ctx, revise_command: [@echo_done], rounds: 4, command: [@probe, "HOLD"])
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      # The fix round changed nothing, and the head it left is what got reviewed.
+      assert remote_head(ctx, rig) == rig.head
+      assert reviewed_head(rig) == rig.head
+      assert length(StubMerger.ci_reruns()) == 2
+
+      assert [%FlakeEvent{ci_job: "unit tests"}] =
+               FlakeEvent |> Ash.read!() |> Enum.filter(&(&1.task_id == rig.task.id))
+
+      refute Ash.get!(Issue, rig.task.id).attention_cause == :commit_gate_no_changes
+      stop_gate(gate)
+    end
+
+    # bd-9m6wl0 (bd-54m4vv / PR #579): the gate's own rerun after a no-diff fix round
+    # was refused because the head's run was still in progress (`mix audit`
+    # pending). That refusal was taken as "cannot rerun -> real failure" and parked
+    # the ticket. It now waits for the run to finish and reruns then.
+    test "a rerun refused while the run is still in progress waits and retries instead of parking",
+         ctx do
+      rig = rig(ctx, "feature/ci-noop-inflight")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      in_flight = {:error, :ci_in_progress}
+
+      # 1st rerun ok, 2nd (the gate's own after the no-diff round) refused while
+      # in flight, 3rd ok.
+      StubMerger.queue_rerun_results([
+        {:ok, %{mode: :auto, run_id: 1, workflow: "CI"}},
+        in_flight,
+        {:ok, %{mode: :auto, run_id: 2, workflow: "CI"}}
+      ])
+
+      start_forge(ctx, rig, [:failed, :running, :failed, :failed, :failed, :running, :success])
+
+      gate =
+        start_gate(rig, ctx, revise_command: [@echo_done], rounds: 4, command: [@probe, "HOLD"])
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      assert remote_head(ctx, rig) == rig.head
+      assert reviewed_head(rig) == rig.head
+      assert length(StubMerger.ci_reruns()) == 3
+      refute Ash.get!(Issue, rig.task.id).attention_cause == :commit_gate_no_changes
+      stop_gate(gate)
+    end
+
+    # bd-cbbgot (bd-ckx0uf / PR #559): main's CI was red, so the branch's CI stayed
+    # red no matter what the worker did. No reviewer had ever read this head, and
+    # the fix round had nothing to change — parking "fix round produced no
+    # changes" there left a coordinator to hand-merge an unreviewed head. The head
+    # goes to a reviewer, who is told CI could not vouch for it and runs the tests.
+    test "a CI-red fix round with no diff, CI still red, and a head no reviewer has read: reviews it",
+         ctx do
+      rig = rig(ctx, "feature/ci-noop-red")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      # red, rerun red -> one fix round (no diff) -> red, the gate's own rerun red
+      start_forge(ctx, rig, [:failed, :running, :failed, :failed, :running, :failed])
+
+      gate =
+        start_gate(rig, ctx, revise_command: [@echo_done], rounds: 3, command: [@probe, "HOLD"])
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      # The unchanged, never-reviewed head is what the reviewer read; nothing parked.
+      assert remote_head(ctx, rig) == rig.head
+      assert reviewed_head(rig) == rig.head
+      refute Ash.get!(Issue, rig.task.id).attention_cause == :commit_gate_no_changes
+
+      prompt = :sys.get_state(gate).current_prompt
+      assert prompt =~ "CI could not vouch for this head"
+      assert prompt =~ "unit tests"
+
+      stop_gate(gate)
+    end
+
+    # bd-651ine regression: routing an unreviewed head to a reviewer is not an
+    # approval. The reviewer's REQUEST_CHANGES is on the gate's record, so the
+    # merge chokepoints refuse the head until a round approves it.
+    test "the unreviewed head sent to a reviewer is not mergeable until a round approves it",
+         ctx do
+      rig = rig(ctx, "feature/ci-noop-rc")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      start_forge(ctx, rig, [:failed, :running, :failed, :failed, :running, :failed])
+
+      # Round 1 (CI-red, no diff) -> review of the same head: REQUEST_CHANGES.
+      # The head was reviewed now, so the fix round that follows parks.
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@echo_done],
+          rounds: 4,
+          command: [@probe, "RC_OTHER"]
+        )
+
+      ref = Process.monitor(gate)
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 30_000
+
+      # (RC_OTHER discloses a partial verification, which earns a re-prompt pass.)
+      assert passes(rig) >= 1
+      assert Ash.get!(Issue, rig.task.id).attention_cause == :commit_gate_no_changes
+      assert Ash.get!(Issue, rig.task.id).last_reviewed_sha in [nil, ""]
+
+      assert {:error, {:review_not_approved, %{verdict: :request_changes}}} =
+               Wardmast.ReviewGate.MergeAuthorization.check(rig.task.id, rig.head)
+    end
+
+    test "the fix-round prompt for red CI names ci_rerun and flake_record", ctx do
+      state = %{
+        task_id: rig(ctx, "feature/ci-prompt").task.id,
+        workspace_id: ctx.ws.id,
+        branch: "feature/ci-prompt",
+        target_branch: "main",
+        round: 1,
+        thread: [],
+        ci_fix_pending: %{sha: "abc", checks: []}
+      }
+
+      prompt = ReviewGate.revise_prompt(state, "CI is red")
+      assert prompt =~ "ci_rerun"
+      assert prompt =~ "flake_record"
+    end
+
+    test "the fix-round prompt steers to run_tests only when the session has the MCP server",
+         ctx do
+      state = %{
+        task_id: rig(ctx, "feature/ci-run-tests").task.id,
+        workspace_id: ctx.ws.id,
+        branch: "feature/ci-run-tests",
+        target_branch: "main",
+        round: 1,
+        thread: []
+      }
+
+      put_app_env(:wardmast, Wardmast.MCP, inject_config: true)
+      assert ReviewGate.revise_prompt(state, "1. fix it") =~ "`run_tests` MCP tool"
+
+      put_app_env(:wardmast, Wardmast.MCP, inject_config: false)
+      refute ReviewGate.revise_prompt(state, "1. fix it") =~ "run_tests"
+    end
+
+    test "the fix-round prompt carries no gate wording when no pre-push recipe is configured",
+         ctx do
+      state = %{
+        task_id: rig(ctx, "feature/ci-no-gate").task.id,
+        workspace_id: ctx.ws.id,
+        branch: "feature/ci-no-gate",
+        target_branch: "main",
+        round: 1,
+        thread: []
+      }
+
+      refute ReviewGate.revise_prompt(state, "1. fix it") =~ "Do NOT run them yourself"
+    end
+
+    test "the fix-round prompt names the configured gate steps and the changed tests", ctx do
+      rig = rig(ctx, "feature/ci-gate-steps")
+      File.mkdir_p!(Path.join(rig.wt, "test"))
+      File.write!(Path.join(rig.wt, "test/foo_test.exs"), "")
+      git!(["add", "-A"], rig.wt)
+      git!(["commit", "-q", "-m", "add test"], rig.wt)
+
+      ws =
+        new_ws(%{
+          "worker" => %{
+            "pre_push_checks" => [
+              %{"name" => "fmt", "cmd" => "mix format --check-formatted", "scope" => "all"}
+            ]
+          }
+        })
+
+      state = %{
+        task_id: rig.task.id,
+        workspace_id: ws.id,
+        branch: "feature/ci-gate-steps",
+        target_branch: "main",
+        worktree_path: rig.wt,
+        round: 1,
+        thread: []
+      }
+
+      prompt = ReviewGate.revise_prompt(state, "1. fix it")
+      assert prompt =~ "`mix format --check-formatted`"
+      assert prompt =~ "Do NOT run them yourself"
+      assert prompt =~ "Tests for your changed files"
+      assert prompt =~ "test/foo_test.exs"
+    end
+
+    test "the revise-round implementer gets a freshly written .mcp.json and token", ctx do
+      rig = rig(ctx, "feature/ci-mcp")
+      put_app_env(:wardmast, Wardmast.MCP, inject_config: true)
+      File.rm(Path.join(rig.wt, ".mcp.json"))
+
+      state = %{
+        task_id: rig.task.id,
+        workspace_id: ctx.ws.id,
+        worktree_path: rig.wt,
+        repo: "trib/repo"
+      }
+
+      opts = ReviewGate.implementer_mcp_opts(state, :implementer, Wardmast.Agents.Claude)
+
+      assert path = opts[:mcp_config]
+      assert File.exists?(path)
+      assert Path.basename(path) == ".mcp.json"
+      assert is_binary(opts[:arb_token])
+
+      assert ReviewGate.implementer_mcp_opts(state, :reviewer, Wardmast.Agents.Claude) == []
+    end
+
+    test "the revise-round implementer's token carries the permission claims its projection granted",
+         ctx do
+      rig = rig(ctx, "feature/ci-claims")
+
+      state = %{
+        task_id: rig.task.id,
+        workspace_id: ctx.ws.id,
+        worktree_path: rig.wt,
+        repo: "trib/repo"
+      }
+
+      opts =
+        ReviewGate.implementer_mcp_opts(state, :implementer, Wardmast.Agents.Claude, [
+          "tracker_write"
+        ])
+
+      assert {:ok, scope} = Wardmast.MCP.Scope.from_token(opts[:arb_token])
+      assert Wardmast.MCP.Scope.permission?(scope, "tracker_write")
+
+      plain = ReviewGate.implementer_mcp_opts(state, :implementer, Wardmast.Agents.Claude)
+      assert {:ok, %{permissions: []}} = Wardmast.MCP.Scope.from_token(plain[:arb_token])
+    end
+
+    test "red CI at the round cap escalates instead of reviewing", ctx do
+      rig = rig(ctx, "feature/ci-5")
+      start_forge(ctx, rig, [:failed, :running, :failed])
+
+      gate = start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 1)
+      ref = Process.monitor(gate)
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 20_000
+
+      assert passes(rig) == 0
+      assert remote_head(ctx, rig) == rig.head
+    end
+  end
+
+  # ---- #360: cancelled checks are infrastructure, never a fix round -----------
+
+  # bd-6vvpau: the deterministic visual-baseline refresh on the pre-review CI wait.
+  describe "visual-baseline refresh on red CI (bd-6vvpau)" do
+    defmodule Refresher do
+      @moduledoc false
+      # Records its context and answers what the test installed (a fun of the ctx).
+      def refresh(ctx) do
+        send(Application.get_env(:wardmast, :vb_pid), {:refresh, ctx})
+        Application.get_env(:wardmast, :vb_reply).(ctx)
+      end
+    end
+
+    setup do
+      Application.put_env(:wardmast, :vb_pid, self())
+      on_exit(fn -> Application.delete_env(:wardmast, :vb_pid) end)
+
+      ws =
+        new_ws(%{
+          "review" => %{"required" => true, "require_ci_green" => true},
+          "worker" => %{
+            "repos" => %{
+              "trib/repo" => %{
+                "visual_baselines" => %{"job" => "visual", "baseline_dir" => "e2e"}
+              }
+            }
+          }
+        })
+
+      %{ws: ws}
+    end
+
+    defp reply(fun), do: Application.put_env(:wardmast, :vb_reply, fun)
+
+    test "a refresh on a drift-only red head waits on CI for the new head: no round, still reviewed",
+         ctx do
+      rig = rig(ctx, "feature/vb-1")
+
+      StubMerger.set_failing_checks(@pr, [%{name: "visual", summary: "diff", url: "u", files: []}])
+
+      start_forge(ctx, rig, [:failed, :success])
+
+      reply(fn _ctx ->
+        new = push_other_commit(ctx, rig)
+        {:refreshed, %{sha: new, files: ["e2e/a.png"]}}
+      end)
+
+      implement_runs_before = implement_runs(rig)
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@revise_commit],
+          rounds: 3,
+          command: [@probe, "HOLD"],
+          visual_refresher: &Refresher.refresh/1
+        )
+
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert_received {:refresh, %{mr_ref: @pr, repo: "trib/repo", result: %{head_sha: head}}}
+      assert head == rig.head
+      refute_received {:refresh, _}
+
+      refreshed = remote_head(ctx, rig)
+      refute refreshed == rig.head
+      assert reviewed_head(rig) == refreshed
+      assert StubMerger.ci_reruns() == []
+      assert implement_runs(rig) == implement_runs_before
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["verdict"] != "request_changes"
+      assert VisualBaselines.tried?(rig.task.id, rig.head)
+      stop_gate(gate)
+    end
+
+    test "a refused refresh (drift refuses, or other jobs failed) sends the CI-red round as before",
+         ctx do
+      rig = rig(ctx, "feature/vb-2")
+
+      StubMerger.set_failing_checks(@pr, [%{name: "visual", summary: "diff", url: "u", files: []}])
+
+      start_forge(ctx, rig, [:failed, :running, :failed, :success])
+      reply(fn _ -> {:skip, {:other_jobs_failed, ["unit tests"]}} end)
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@revise_commit],
+          rounds: 3,
+          command: [@probe, "HOLD"],
+          visual_refresher: &Refresher.refresh/1
+        )
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      assert_received {:refresh, _}
+      refute_received {:refresh, _}
+      fixed = remote_head(ctx, rig)
+      refute fixed == rig.head
+      assert length(StubMerger.ci_reruns()) == 1
+      assert reviewed_head(rig) == fixed
+      stop_gate(gate)
+    end
+
+    test "a head already tried (by the Watchdog) is not refreshed again", ctx do
+      rig = rig(ctx, "feature/vb-3")
+
+      StubMerger.set_failing_checks(@pr, [%{name: "visual", summary: "diff", url: "u", files: []}])
+
+      start_forge(ctx, rig, [:failed, :running, :success])
+      reply(fn _ -> flunk("refresh must not run twice for one head") end)
+      VisualBaselines.mark_tried(rig.task.id, rig.head)
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [@revise_commit],
+          rounds: 3,
+          command: [@probe, "HOLD"],
+          visual_refresher: &Refresher.refresh/1
+        )
+
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+      refute_received {:refresh, _}
+      assert length(StubMerger.ci_reruns()) == 1
+      stop_gate(gate)
+    end
+  end
+
+  describe "cancelled CI (#360)" do
+    test "cancelled then green on the re-run proceeds to the reviewer, no fix round", ctx do
+      rig = rig(ctx, "feature/ci-cancel-1")
+      start_forge(ctx, rig, [:canceled, :running, :success])
+
+      start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert length(StubMerger.ci_reruns()) == 1
+      assert FlakeEvent |> Ash.read!() |> Enum.filter(&(&1.task_id == rig.task.id)) == []
+      # No fix round: the implementer fixture would have committed.
+      assert remote_head(ctx, rig) == rig.head
+    end
+
+    test "cancelled past the re-run cap escalates once as CI infrastructure and never fixes",
+         ctx do
+      rig = rig(ctx, "feature/ci-cancel-2")
+      start_forge(ctx, rig, [:canceled])
+
+      start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert length(StubMerger.ci_reruns()) == 2
+      assert remote_head(ctx, rig) == rig.head
+
+      assert [%{subject: subject}] =
+               gate_messages(ctx, rig) |> Enum.filter(&(&1.subject =~ "cancelled"))
+
+      assert subject =~ "not failed"
+    end
+  end
+
+  # ---- AC3: a waiting ticket holds no slot ------------------------------------
+
+  describe "waiting on CI (AC3)" do
+    # bd-dtdeff: the release changes no phase, so this event is the Autopilot's
+    # only cue to re-plan against the freed provider slot.
+    test "announces the released slot so the Autopilot re-plans", ctx do
+      rig = rig(ctx, "feature/ci-slot-released")
+      start_forge(ctx, rig, [:running])
+      :ok = Phoenix.PubSub.subscribe(Wardmast.PubSub, "events")
+
+      gate = start_gate(rig, ctx, command: [@probe, "HOLD"])
+      wait_until(fn -> awaiting_ci?(gate) end)
+
+      task_id = rig.task.id
+      assert_receive {:event, %{topic: "worker_slot_released", task_id: ^task_id}}, 2_000
+    end
+
+    test "holds no scheduler slot and no agent, and shows its state", ctx do
+      rig = rig(ctx, "feature/ci-6")
+      start_forge(ctx, rig, [:running])
+
+      # The author is on a provider account (its ReviewGate holds it, no agent).
+      account =
+        Ash.create!(ProviderAccount, %{
+          provider: :claude,
+          slug: "rg-ci-#{System.unique_integer([:positive])}"
+        })
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ctx.ws.id,
+        provider: :claude,
+        provider_account_id: account.id
+      })
+
+      assert Concurrency.live_count(account) == 1
+
+      gate = start_gate(rig, ctx, command: [@probe, "HOLD"])
+      wait_until(fn -> awaiting_ci?(gate) end)
+
+      # Waiting on CI releases the account: no agent is live for the ticket.
+      wait_until(fn -> Concurrency.live_count(account) == 0 end)
+
+      issue = Ash.get!(Issue, rig.task.id)
+
+      # No agent is live for the ticket: the author's own session is over and no
+      # reviewer was spawned.
+      refute Worker.active?(Worker.state(rig.author))
+      assert passes(rig) == 0
+
+      # The scheduler's slot count drops it, as it does a merging ticket.
+      refute SlotGate.holds_slot?(issue)
+      assert issue.state == :active
+
+      cleared = %{issue | review_gate_state: Map.delete(issue.review_gate_state, "ci_wait")}
+      assert SlotGate.holds_slot?(cleared)
+
+      # And the board / `arb ticket show` projection names it.
+      view = Projection.view(issue)
+      assert view.step == :awaiting_ci
+      assert view.ci_wait.sha == rig.head
+
+      assert Projection.payload(view).ci_wait["label"] =~
+               "waiting on CI #{String.slice(rig.head, 0, 12)}"
+
+      # And the account is held again once the wait is over.
+      stop_gate(gate)
+      wait_until(fn -> Concurrency.live_count(account) == 1 end)
+    end
+  end
+
+  # ---- bd-3726k8: the wait is visible ----------------------------------------
+
+  describe "observability of the CI wait (bd-3726k8)" do
+    import ExUnit.CaptureLog
+
+    setup do
+      Logger.put_module_level(ReviewGate, :info)
+      on_exit(fn -> Logger.delete_module_level(ReviewGate) end)
+    end
+
+    test "logs one line entering the wait and one line leaving it on green", ctx do
+      rig = rig(ctx, "feature/ci-log-green")
+      forge = start_forge(ctx, rig, [:running])
+
+      log =
+        capture_log([level: :info], fn ->
+          gate = start_gate(rig, ctx, command: [@probe, "HOLD"])
+          wait_until(fn -> awaiting_ci?(gate) end)
+          set_pipeline(forge, [:success])
+          wait_until(fn -> passes(rig) == 1 end, 20_000)
+          stop_gate(gate)
+        end)
+
+      entering = lines(log, "entering the CI wait")
+      assert [line] = entering
+      assert line =~ "task=#{rig.task.id}"
+      assert line =~ rig.head
+      assert line =~ @pr
+      assert line =~ "polling up to 40 times"
+
+      assert [left] = lines(log, "left the CI wait")
+      assert left =~ rig.head
+      assert left =~ "CI green"
+      assert left =~ ~r{after \d+/40 polls}
+    end
+
+    test "logs the outcome when CI is red", ctx do
+      rig = rig(ctx, "feature/ci-log-red")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      start_forge(ctx, rig, [:failed])
+
+      log =
+        capture_log([level: :info], fn ->
+          gate = start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+          wait_until(fn -> remote_head(ctx, rig) != rig.head end, 20_000)
+          stop_gate(gate)
+        end)
+
+      assert [left | _] = lines(log, "left the CI wait")
+      assert left =~ "CI red"
+    end
+
+    test "logs that CI could not vouch when the poll budget runs out", ctx do
+      rig = rig(ctx, "feature/ci-log-budget")
+      start_forge(ctx, rig, [:running])
+
+      log =
+        capture_log([level: :info], fn ->
+          gate = start_gate(rig, ctx, ci_max_polls: 3)
+          wait_until(fn -> passes(rig) == 1 end, 20_000)
+          stop_gate(gate)
+        end)
+
+      assert [left] = lines(log, "left the CI wait")
+      assert left =~ "CI could not vouch"
+      assert left =~ "3/3 polls"
+    end
+
+    test "the ticket's marker carries the poll count and the in-flight gate its task_id", ctx do
+      rig = rig(ctx, "feature/ci-poll-count")
+      start_forge(ctx, rig, [:running])
+
+      gate = start_gate(rig, ctx, command: [@probe, "HOLD"])
+      wait_until(fn -> StubMerger.get_count(@pr) >= 4 end)
+      wait_until(fn -> awaiting_ci?(gate) end)
+
+      marker = Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"]
+      assert marker["max_polls"] == 40
+      assert is_integer(marker["polls"]) and marker["polls"] >= 1
+
+      assert [entry] =
+               Drain.status().in_flight
+               |> Enum.filter(&(&1.kind == :review_gate and &1.pid == gate))
+
+      assert entry.task_id == rig.task.id
+      stop_gate(gate)
+    end
+  end
+
+  # ---- AC4: the reviewer prompt and the partial-verification carve-out --------
+
+  describe "partial verification (AC4)" do
+    test "a disclosure only about the full suite does not re-prompt when CI is green", ctx do
+      rig = rig(ctx, "feature/ci-7")
+      start_forge(ctx, rig, [:success])
+
+      gate = start_gate(rig, ctx, command: [@probe, "RC_SUITE"])
+      ref = Process.monitor(gate)
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 20_000
+
+      assert passes(rig) == 1
+    end
+
+    test "any other partial disclosure still re-prompts, CI green or not", ctx do
+      rig = rig(ctx, "feature/ci-8")
+      start_forge(ctx, rig, [:success])
+
+      gate = start_gate(rig, ctx, command: [@probe, "RC_OTHER"])
+      ref = Process.monitor(gate)
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 20_000
+
+      assert passes(rig) == 2
+    end
+
+    test "without the gate the suite-only disclosure re-prompts exactly as before", ctx do
+      ws = new_ws(%{"review" => %{"required" => true, "require_ci_green" => false}})
+      rig = rig(Map.put(ctx, :ws, ws), "feature/ci-9")
+
+      gate = start_gate(rig, Map.put(ctx, :ws, ws), command: [@probe, "RC_SUITE"])
+      ref = Process.monitor(gate)
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 20_000
+
+      assert passes(rig) == 2
+      # #1146: only the reviewer brief reads the forge (one read per reviewer prompt), no CI wait.
+      assert StubMerger.get_count(@pr) == 2
+    end
+  end
+
+  # ---- bd-49r9ns: post-merge criteria deferred to deployment_notes ------------
+
+  describe "deferred post-merge criteria (bd-49r9ns)" do
+    @acceptance "1. The gate approves.\n2. The dashboard shows the metric after deploy."
+
+    @deferred_only """
+    VERDICT: APPROVE
+    CRITERIA:
+    - [MET] The gate approves — feature.txt:1
+    - [NOT MET] [DEFERRED] The dashboard shows the metric after deploy — only observable live
+    """
+
+    defp deferral_gate(ctx, branch, findings, ws \\ nil, prepare \\ fn _ctx, _rig -> :ok end) do
+      ctx = if ws, do: Map.put(ctx, :ws, ws), else: ctx
+      rig = rig(ctx, branch)
+      prepare.(ctx, rig)
+      {:ok, _} = Ash.update(rig.task, %{acceptance: @acceptance})
+      start_forge(ctx, rig, [:success])
+
+      findings_file = Path.join(ctx.tmp, "findings-#{System.unique_integer([:positive])}.md")
+      File.write!(findings_file, findings)
+      script = Path.join(ctx.tmp, "reviewer-#{System.unique_integer([:positive])}.sh")
+      File.write!(script, "#!/bin/sh\ncat '#{findings_file}'\n")
+      File.chmod!(script, 0o755)
+
+      gate = start_gate(rig, ctx, command: [script])
+      ref = Process.monitor(gate)
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 20_000
+      {rig, Ash.get!(Issue, rig.task.id)}
+    end
+
+    defp approved_round?(rig) do
+      Wardmast.ReviewGate.Round
+      |> Ash.Query.filter(task_id == ^rig.task.id)
+      |> Ash.read!()
+      |> Enum.any?(&(&1.verdict == :approve and &1.converged))
+    end
+
+    test "approves, defers the criterion to deployment_notes and sets verify_after_deploy", ctx do
+      {rig, issue} = deferral_gate(ctx, "feature/defer-1", @deferred_only)
+
+      assert approved_round?(rig)
+      assert issue.verify_after_deploy
+      assert issue.deployment_notes =~ "deferred from acceptance by ReviewGate round 1"
+      assert issue.deployment_notes =~ "The dashboard shows the metric after deploy"
+    end
+
+    @standalone_deferred """
+    VERDICT: APPROVE
+    CRITERIA:
+    - [MET] The gate approves — feature.txt:1
+    #{Wardmast.Worker.DeferredCriteria.example_line("The dashboard shows the metric after deploy", "only observable live")}
+    """
+
+    test "a standalone [DEFERRED] (prompt-documented form) defers and merges (#958)", ctx do
+      {rig, issue} = deferral_gate(ctx, "feature/defer-sa-1", @standalone_deferred)
+
+      assert approved_round?(rig)
+      assert issue.verify_after_deploy
+      assert issue.deployment_notes =~ "The dashboard shows the metric after deploy"
+    end
+
+    test "a standalone [DEFERRED] with VERIFICATION: PARTIAL still parks (#958)", ctx do
+      findings = @standalone_deferred <> "VERIFICATION: PARTIAL — could not build\n"
+      {rig, issue} = deferral_gate(ctx, "feature/defer-sa-2", findings)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+    end
+
+    test "a standalone [DEFERRED] with a pre-merge tag still parks (#958)", ctx do
+      findings =
+        @standalone_deferred <>
+          "- [NOT MET] [NEEDS-COORDINATOR-PREMERGE] The operator registers a runner first\n"
+
+      {rig, issue} = deferral_gate(ctx, "feature/defer-sa-3", findings)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+    end
+
+    test "a standalone [DEFERRED] with a bare [NEEDS-COORDINATOR] still parks (#958)", ctx do
+      findings =
+        @standalone_deferred <>
+          "- [NOT MET] [NEEDS-COORDINATOR] The operator rotates a credential\n"
+
+      {rig, issue} = deferral_gate(ctx, "feature/defer-sa-4", findings)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+    end
+
+    test "a REQUEST_CHANGES with a code finding and a standalone [DEFERRED] revises, not escalates (#958)",
+         ctx do
+      findings =
+        """
+        VERDICT: REQUEST_CHANGES
+        CRITERIA:
+        - [MET] The gate approves — feature.txt:1
+        #{Wardmast.Worker.DeferredCriteria.example_line("Observed live", "only observable live")}
+        Findings:
+        1. Severity: Medium. feature.txt:1 — nil crash
+        """
+
+      {rig, _issue} = deferral_gate(ctx, "feature/defer-sa-5", findings)
+
+      rounds =
+        Wardmast.ReviewGate.Round |> Ash.Query.filter(task_id == ^rig.task.id) |> Ash.read!()
+
+      assert Enum.any?(rounds, &(&1.verdict == :request_changes))
+
+      refute Enum.any?(
+               rounds,
+               &Wardmast.Worker.CoordinatorOnlyFindings.escalation?(&1.findings)
+             )
+    end
+
+    # The branch's content lands on main by another route and main is merged
+    # back in, so HEAD moves but nets to nothing (G20).
+    defp absorb_into_main(ctx, rig) do
+      git!(["checkout", "-q", "main"], ctx.repo)
+      File.write!(Path.join(ctx.repo, "feature.txt"), "worker work\n")
+      git!(["add", "feature.txt"], ctx.repo)
+      git!(["commit", "-q", "-m", "already squashed onto main"], ctx.repo)
+      git!(["push", "-q", "origin", "main"], ctx.repo)
+      git!(["merge", "-q", "main", "-m", "merge main"], rig.wt)
+      git!(["push", "-q", "origin", rig.branch], rig.wt)
+    end
+
+    test "an approval G20 parks for an empty net diff leaves no deferral on the ticket", ctx do
+      {rig, issue} =
+        deferral_gate(ctx, "feature/defer-g20", @deferred_only, nil, &absorb_into_main/2)
+
+      refute approved_round?(rig)
+      assert issue.attention_cause == :empty_net_diff
+      refute issue.verify_after_deploy
+      assert issue.deployment_notes in [nil, ""]
+    end
+
+    test "an implementer-fixable unmet criterion alongside a deferred one still parks", ctx do
+      findings = @deferred_only <> "- [NOT MET] The guard clause exists — it is missing\n"
+      {rig, issue} = deferral_gate(ctx, "feature/defer-2", findings)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+      assert issue.deployment_notes in [nil, ""]
+    end
+
+    test "a coordinator-only criterion marked pre-merge still parks", ctx do
+      findings = """
+      VERDICT: APPROVE
+      CRITERIA:
+      - [MET] The gate approves — feature.txt:1
+      - [NOT MET] [NEEDS-COORDINATOR-PREMERGE] The operator registers a runner first
+      """
+
+      {rig, issue} = deferral_gate(ctx, "feature/defer-3", findings)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+      assert issue.deployment_notes in [nil, ""]
+    end
+
+    test "an ambiguous bare [NEEDS-COORDINATOR] criterion parks", ctx do
+      findings = String.replace(@deferred_only, "[DEFERRED]", "[NEEDS-COORDINATOR]")
+      {rig, issue} = deferral_gate(ctx, "feature/defer-4", findings)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+    end
+
+    test "review.defer_post_merge_criteria: false restores parking", ctx do
+      ws =
+        new_ws(%{
+          "review" => %{
+            "required" => true,
+            "require_ci_green" => true,
+            "defer_post_merge_criteria" => false
+          }
+        })
+
+      {rig, issue} = deferral_gate(ctx, "feature/defer-5", @deferred_only, ws)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+      assert issue.deployment_notes in [nil, ""]
+    end
+
+    test "without green CI evidence the deferral is not honored", ctx do
+      ws = new_ws(%{"review" => %{"required" => true, "require_ci_green" => false}})
+      {rig, issue} = deferral_gate(ctx, "feature/defer-6", @deferred_only, ws)
+
+      refute approved_round?(rig)
+      refute issue.verify_after_deploy
+    end
+  end
+
+  # ---- AC5: off, and no CI result ------------------------------------------------
+
+  describe "off, and falling back (AC5)" do
+    test "with the setting off the reviewer is dispatched at once and CI is never read", ctx do
+      ws = new_ws(%{"review" => %{"required" => true, "require_ci_green" => false}})
+      ctx = Map.put(ctx, :ws, ws)
+      rig = rig(ctx, "feature/ci-10")
+      start_forge(ctx, rig, [:failed])
+
+      gate = start_gate(rig, ctx)
+      ref = Process.monitor(gate)
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 20_000
+
+      assert passes(rig) == 1
+      # #1146: the one read is the reviewer brief, not a CI wait.
+      assert StubMerger.get_count(@pr) == 1
+    end
+
+    # bd-48kmfe: a pipeline queued in the forge (pending, not started) is not a stuck
+    # run. It outlasts the poll window without falling back, shows as waiting in the CI
+    # queue, and the review proceeds when the pipeline completes.
+    test "a long-pending pipeline outlasts the poll budget and proceeds on green", ctx do
+      rig = rig(ctx, "feature/ci-queued")
+      forge = start_forge(ctx, rig, [:pending])
+
+      gate = start_gate(rig, ctx, ci_max_polls: 3, command: [@probe, "HOLD"])
+
+      wait_until(fn -> StubMerger.get_count(@pr) >= 8 end)
+      assert awaiting_ci?(gate)
+      assert passes(rig) == 0
+
+      wait_until(fn ->
+        Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"]["queued_minutes"] != nil or
+          :sys.get_state(gate).ci_wait.wait.queued_polls >= 4
+      end)
+
+      assert :sys.get_state(gate).ci_wait.wait.polls == 0
+
+      set_pipeline(forge, [:success])
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      prompt = :sys.get_state(gate).current_prompt
+      assert prompt =~ "CI passed on #{rig.head}"
+      stop_gate(gate)
+    end
+
+    test "a poll timeout falls back to a reviewer that runs the tests, and records why", ctx do
+      rig = rig(ctx, "feature/ci-11")
+      start_forge(ctx, rig, [:running])
+
+      gate = start_gate(rig, ctx, ci_max_polls: 3, command: [@probe, "HOLD"])
+
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      prompt = :sys.get_state(gate).current_prompt
+      refute prompt =~ "Do not run the full test suite."
+      assert prompt =~ "CI could not vouch for this head"
+      assert prompt =~ "within 3 polls"
+
+      assert Enum.any?(gate_messages(ctx, rig), &(&1.body =~ "CI did not gate this review"))
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"] == nil
+      stop_gate(gate)
+    end
+
+    test "no PR to read CI from falls back at once", ctx do
+      rig = rig(ctx, "feature/ci-12")
+
+      gate = start_gate(rig, ctx, pr_ref: nil, command: [@probe, "HOLD"])
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert StubMerger.get_count(@pr) == 0
+      assert :sys.get_state(gate).current_prompt =~ "no PR"
+      stop_gate(gate)
+    end
+  end
+
+  # ---- the author's liveness check (AC3) ------------------------------------------
+
+  describe "the author's liveness check" do
+    test "does not stall out a gate that is waiting on CI by design", ctx do
+      rig = rig(ctx, "feature/ci-13")
+      start_forge(ctx, rig, [:running])
+
+      gate = start_gate(rig, ctx, command: [@probe, "HOLD"], ci_max_polls: 500)
+      wait_until(fn -> awaiting_ci?(gate) end)
+
+      # The author probes its gate every 50ms and would stop one with nothing in
+      # flight after 200ms. A CI wait has nothing in flight and must survive it.
+      ref = Process.monitor(rig.author)
+
+      :sys.replace_state(rig.author, fn s ->
+        meta =
+          Map.merge(s.meta, %{
+            review_gate_pid: gate,
+            review_gate_ref: Process.monitor(gate),
+            review_gate_liveness_ms: 50,
+            review_gate_stall_ms: 200
+          })
+
+        %{s | meta: meta}
+      end)
+
+      send(rig.author, {:__review_gate_liveness__, gate})
+
+      # Several liveness ticks, well past the stall limit.
+      probes_before = StubMerger.get_count(@pr)
+      wait_until(fn -> StubMerger.get_count(@pr) >= probes_before + 40 end, 10_000)
+      Process.sleep(600)
+
+      assert Process.alive?(gate)
+      assert awaiting_ci?(gate)
+      assert %{state: :waiting, waiting_on: :review_gate} = Worker.state(rig.author)
+      refute_received {:DOWN, ^ref, :process, _, _}
+      stop_gate(gate)
+    end
+  end
+
+  # ---- boot: a server restart during the wait (bd-2gc809) ---------------------
+
+  describe "a server restart during the CI wait" do
+    test "re-arms as a slotless CI wait: no worker, no slot, attention reads waiting-on-CI",
+         ctx do
+      rig = rig(ctx, "feature/ci-14")
+      start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+
+      # Restarted: nothing resident, but the ticket still carries the marker.
+      assert Worker.whereis(rig.task.id) == nil
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"]["sha"] == rig.head
+
+      assert {:ok, gate} = ReviewGate.rearm_ci_wait(rig.task.id, gate_opts())
+      wait_until(fn -> awaiting_ci?(gate) end)
+
+      issue = Ash.get!(Issue, rig.task.id)
+      refute SlotGate.holds_slot?(issue)
+      assert issue.state == :active
+      assert issue.review_gate_state["ci_wait"]["sha"] == rig.head
+      assert Worker.whereis(rig.task.id) == nil
+      assert passes(rig) == 0
+      assert implement_runs(rig) == 1
+
+      view = Projection.view(issue)
+      assert view.step == :awaiting_ci
+      assert view.ci_wait.sha == rig.head
+      refute view.attention in [:run_crashed, :worker_stopped]
+
+      assert Projection.payload(view).ci_wait["label"] =~
+               "waiting on CI #{String.slice(rig.head, 0, 12)}"
+
+      stop_gate(gate)
+    end
+
+    test "CI already green on the head: the reviewer is dispatched, the implementer is not resumed",
+         ctx do
+      rig = rig(ctx, "feature/ci-15")
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      set_pipeline(forge, [:success])
+
+      assert {:ok, gate} = ReviewGate.rearm_ci_wait(rig.task.id, gate_opts())
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert reviewed_head(rig) == rig.head
+      assert :sys.get_state(gate).current_prompt =~ "CI passed on #{rig.head}"
+      assert Worker.whereis(rig.task.id) == nil
+      assert implement_runs(rig) == 1
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"] == nil
+      stop_gate(gate)
+    end
+
+    test "CI red on the head takes the existing red path (rerun, then the fix round)", ctx do
+      rig = rig(ctx, "feature/ci-16")
+
+      StubMerger.set_failing_checks(@pr, [
+        %{name: "unit tests", summary: "1) boom", url: "https://ci/1", files: []}
+      ])
+
+      forge = start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      set_pipeline(forge, [:failed, :running, :failed, :success])
+
+      assert {:ok, gate} =
+               ReviewGate.rearm_ci_wait(
+                 rig.task.id,
+                 gate_opts(revise_command: [@revise_commit], rounds: 3)
+               )
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+      fixed = remote_head(ctx, rig)
+      refute fixed == rig.head
+      assert length(StubMerger.ci_reruns()) == 1
+      assert reviewed_head(rig) == fixed
+      assert Worker.whereis(rig.task.id) == nil
+      stop_gate(gate)
+    end
+
+    test "the head moved while the server was down: waits on the head that is there", ctx do
+      rig = rig(ctx, "feature/ci-17")
+      start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      pushed = push_other_commit(ctx, rig)
+
+      assert {:ok, gate} = ReviewGate.rearm_ci_wait(rig.task.id, gate_opts())
+      wait_until(fn -> awaiting_ci?(gate) end)
+
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"]["sha"] == pushed
+      assert passes(rig) == 0
+      stop_gate(gate)
+    end
+
+    test "a ticket with no marker, or no worktree, is not re-armed", ctx do
+      rig = rig(ctx, "feature/ci-18")
+      assert {:error, :no_ci_wait} = ReviewGate.rearm_ci_wait(rig.task.id, gate_opts())
+
+      start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      File.rm_rf!(rig.wt)
+      assert {:error, :no_worktree} = ReviewGate.rearm_ci_wait(rig.task.id, gate_opts())
+    end
+  end
+
+  describe "Reconciler.reconcile_ci_waits/1" do
+    alias Wardmast.Workers.Reconciler
+
+    test "re-arms a waiting ticket and keeps the resume sweep off it", ctx do
+      rig = rig(ctx, "feature/ci-19")
+      start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+      me = self()
+
+      rearm = fn issue ->
+        result = ReviewGate.rearm_ci_wait(issue.id, gate_opts())
+        send(me, {:rearmed, result})
+        result
+      end
+
+      assert {:ok, %{rearmed: 1, failed: 0}} =
+               Reconciler.reconcile_ci_waits(rearm_fun: rearm)
+
+      assert_received {:rearmed, {:ok, gate}}
+
+      assert {:ok, %{resumed: 0, escalated: 0}} =
+               Reconciler.reconcile_resumable_tasks(
+                 resume_fun: fn issue -> flunk("resumed #{issue.id}") end
+               )
+
+      wait_until(fn -> awaiting_ci?(gate) end)
+      stop_gate(gate)
+    end
+
+    test "a wait that cannot be re-armed is cleared so the ordinary resume path takes it",
+         ctx do
+      rig = rig(ctx, "feature/ci-20")
+      start_forge(ctx, rig, [:running])
+      restart_during_wait(ctx, rig)
+
+      assert {:ok, %{rearmed: 0, failed: 1}} =
+               Reconciler.reconcile_ci_waits(rearm_fun: fn _ -> {:error, :no_worktree} end)
+
+      assert Ash.get!(Issue, rig.task.id).review_gate_state["ci_wait"] == nil
+      me = self()
+
+      assert {:ok, %{resumed: 1}} =
+               Reconciler.reconcile_resumable_tasks(
+                 resume_fun: fn issue ->
+                   send(me, {:resumed, issue.id})
+                   {:ok, %{}}
+                 end
+               )
+
+      assert_received {:resumed, id}
+      assert id == rig.task.id
+    end
+
+    test "is a no-op off the primary instance", _ctx do
+      assert {:ok, :skipped} = Reconciler.reconcile_ci_waits(primary?: false)
+    end
+  end
+
+  # ---- git rig -------------------------------------------------------------
+
+  defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
+  defp git!(args, repo), do: {_, 0} = git(args, repo)
+
+  defp init_repo(dir) do
+    repo = Path.join(dir, "repo")
+    bare = Path.join(dir, "origin.git")
+    File.mkdir_p!(repo)
+    {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+    git!(["config", "user.email", "repo@example.com"], repo)
+    git!(["config", "user.name", "Repo"], repo)
+    git!(["config", "commit.gpgsign", "false"], repo)
+    File.write!(Path.join(repo, "README.md"), "seed\n")
+    git!(["add", "README.md"], repo)
+    git!(["commit", "-q", "-m", "seed"], repo)
+    {_, 0} = System.cmd("git", ["clone", "--bare", "-q", repo, bare])
+    git!(["remote", "add", "origin", bare], repo)
+    git!(["fetch", "-q", "origin"], repo)
+    repo
+  end
+
+  defp sha(repo, ref) do
+    case git(["rev-parse", ref], repo) do
+      {out, 0} -> String.trim(out)
+      _ -> nil
+    end
+  end
+
+  # A feature branch with one commit, checked out in its own worktree and
+  # already pushed (so the head the gate waits on is the head origin carries).
+  defp rig(ctx, branch) do
+    {:ok, task} =
+      Ash.create(Issue, %{title: "ci-gate task", workspace_id: ctx.ws.id, issue_type: :feature})
+
+    task = put_state!(task, :active)
+
+    git!(["checkout", "-q", "-b", branch], ctx.repo)
+    File.write!(Path.join(ctx.repo, "feature.txt"), "worker work\n")
+    git!(["add", "feature.txt"], ctx.repo)
+    git!(["commit", "-q", "-m", "feature work"], ctx.repo)
+    git!(["checkout", "-q", "main"], ctx.repo)
+
+    wt = Path.join(ctx.tmp, "wt-#{System.unique_integer([:positive])}")
+    {_, 0} = System.cmd("git", ["worktree", "add", "-q", wt, branch], cd: ctx.repo)
+    git!(["config", "user.email", "wt@example.com"], wt)
+    git!(["config", "user.name", "WT"], wt)
+    git!(["config", "commit.gpgsign", "false"], wt)
+    git!(["push", "-q", "-u", "origin", branch], wt)
+
+    on_exit(fn ->
+      _ = System.cmd("git", ["-C", ctx.repo, "worktree", "remove", "--force", wt])
+      File.rm_rf!(wt)
+    end)
+
+    %{
+      task: task,
+      branch: branch,
+      wt: wt,
+      head: sha(wt, "HEAD"),
+      author: start_author(task, ctx, branch, wt)
+    }
+  end
+
+  defp remote_head(ctx, rig),
+    do: sha(Path.join(ctx.tmp, "origin.git"), "refs/heads/" <> rig.branch)
+
+  # Another actor pushes a commit to the branch on origin.
+  defp push_other_commit(ctx, rig) do
+    other = Path.join(ctx.tmp, "other-#{System.unique_integer([:positive])}")
+    {_, 0} = System.cmd("git", ["clone", "-q", Path.join(ctx.tmp, "origin.git"), other])
+    git!(["config", "user.email", "o@example.com"], other)
+    git!(["config", "user.name", "O"], other)
+    git!(["config", "commit.gpgsign", "false"], other)
+    git!(["checkout", "-q", rig.branch], other)
+    File.write!(Path.join(other, "theirs.txt"), "theirs\n")
+    git!(["add", "theirs.txt"], other)
+    git!(["commit", "-q", "-m", "theirs"], other)
+    git!(["push", "-q", "origin", rig.branch], other)
+    sha(other, "HEAD")
+  end
+
+  defp common_dir(rig) do
+    {dir, 0} = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], rig.wt)
+    String.trim(dir)
+  end
+
+  defp passes(rig) do
+    case File.read(Path.join(common_dir(rig), "review_ci_passes")) do
+      {:ok, n} ->
+        case Integer.parse(String.trim(n)) do
+          {count, ""} -> count
+          _ -> 0
+        end
+
+      _ ->
+        0
+    end
+  end
+
+  # The commit the reviewer's own checkout was at.
+  defp reviewed_head(rig),
+    do: Path.join(common_dir(rig), "review_ci_reviewed_head") |> File.read!() |> String.trim()
+
+  defp gate_opts(extra \\ []) do
+    Keyword.merge(
+      [
+        timeout_ms: 15_000,
+        rounds: 1,
+        ci_adapter: StubMerger,
+        ci_poll_ms: 25,
+        ci_max_polls: 40,
+        command: [@probe, "HOLD"]
+      ],
+      extra
+    )
+  end
+
+  defp implement_runs(rig) do
+    Wardmast.Workers.Run
+    |> Ash.Query.filter(task_id == ^rig.task.id and kind == :implement)
+    |> Ash.read!()
+    |> length()
+  end
+
+  # Wait on CI under a real gate, then kill the gate and its author outright —
+  # no terminate/2, so nothing clears the ticket's marker: what a deploy leaves.
+  # The head is also recorded on the PR the way the author's hand-off does.
+  defp restart_during_wait(ctx, rig) do
+    :ok = Wardmast.Tasks.PullRequest.record_review_gate(rig.task.id, %{pr_ref: @pr})
+    gate = start_gate(rig, ctx, command: [@probe, "HOLD"])
+    wait_until(fn -> awaiting_ci?(gate) end)
+
+    for pid <- [gate, rig.author] do
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000
+    end
+
+    # The registry drops the killed author asynchronously; a restart starts empty.
+    wait_until(fn -> Worker.whereis(rig.task.id) == nil end)
+  end
+
+  defp lines(log, needle),
+    do: log |> String.split("\n") |> Enum.filter(&String.contains?(&1, needle))
+
+  defp stop_gate(gate) do
+    ref = Process.monitor(gate)
+    GenServer.stop(gate, :normal)
+    assert_receive {:DOWN, ^ref, :process, ^gate, _}, 5_000
+  end
+
+  # ---- app rig -------------------------------------------------------------
+
+  defp new_ws(config) do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "rg-ci-#{System.unique_integer([:positive])}",
+        prefix: "rc",
+        config: Map.put(config, "review_gate", %{"max_fix_rounds" => 0})
+      })
+
+    ws
+  end
+
+  defp start_author(task, ctx, branch, wt) do
+    {:ok, author} =
+      Worker.start(
+        task_id: task.id,
+        repo: "trib/repo",
+        workspace_id: ctx.ws.id,
+        meta: %{
+          branch: branch,
+          repo_path: ctx.repo,
+          worktree_path: wt,
+          target_branch: "main",
+          merge_title: "Merge #{task.id}",
+          review_required: true,
+          review_spawn: false
+        }
+      )
+
+    on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
+    :ok = Worker.advance(author, :claude)
+    send(author, {:__claude_session_done__, "arb done"})
+
+    wait_until(fn ->
+      match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(author))
+    end)
+
+    author
+  end
+
+  defp start_gate(rig, ctx, opts \\ []) do
+    {:ok, gate} =
+      ReviewGate.start(
+        [
+          author: rig.author,
+          task_id: rig.task.id,
+          workspace_id: ctx.ws.id,
+          repo: "trib/repo",
+          worktree_path: rig.wt,
+          branch: rig.branch,
+          target_branch: "main",
+          timeout_ms: 15_000,
+          rounds: 1,
+          pr_ref: @pr,
+          ci_adapter: StubMerger,
+          ci_poll_ms: 25,
+          ci_max_polls: 40,
+          command: [@probe, "APPROVE"]
+        ]
+        |> Keyword.merge(opts)
+      )
+
+    gate
+  end
+
+  # The forge: answers from a scripted pipeline and, unless pinned, the live tip
+  # of the origin branch.
+  defp start_forge(ctx, rig, script) do
+    agent =
+      start_supervised!(%{
+        id: make_ref(),
+        start: {Agent, :start_link, [fn -> %{head: nil, script: script} end]}
+      })
+
+    StubMerger.queue_get(@pr, [
+      fn ->
+        Agent.get_and_update(agent, fn %{script: [pipeline | rest]} = st ->
+          next = if rest == [], do: [pipeline], else: rest
+          head = st.head || remote_head(ctx, rig)
+          {%{head_sha: head, pipeline: pipeline}, %{st | script: next}}
+        end)
+      end
+    ])
+
+    agent
+  end
+
+  defp set_pipeline(forge, script), do: Agent.update(forge, &%{&1 | script: script})
+  defp set_head(forge, head), do: Agent.update(forge, &%{&1 | head: head})
+
+  defp awaiting_ci?(gate), do: :sys.get_state(gate).phase == :awaiting_ci
+
+  defp gate_messages(ctx, rig) do
+    Message
+    |> Ash.Query.filter(workspace_id == ^ctx.ws.id)
+    |> Ash.read!()
+    |> Enum.filter(&(&1.task_ref == rig.task.id))
+  end
+
+  defp wait_until(fun, timeout \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(20)
+        do_wait(fun, deadline)
+    end
+  end
+end

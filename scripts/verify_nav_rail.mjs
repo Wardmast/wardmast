@@ -2,7 +2,7 @@
 //
 // bd-d63b1c — the nav rail in a real browser, at real viewports.
 //
-// `ArbiterWeb.LayoutsTest` proves the markup: the rail is `position: fixed`,
+// `WardmastWeb.LayoutsTest` proves the markup: the rail is `position: fixed`,
 // out of `<main>`, and `app.css` never mentions `:hover` in an inset rule.
 // What it cannot prove is where the browser actually puts things — that the
 // hover float really does not reflow the page, that pinning really does, that
@@ -12,7 +12,7 @@
 //   node scripts/verify_nav_rail.mjs --url http://127.0.0.1:4848 [--run <run id>]
 //
 // Output is one `CHECK <name>: PASS|FAIL — <detail>` line per claim and a final
-// `RESULT: PASS|FAIL`. `ArbiterWeb.NavRailBrowserTest` runs it against a
+// `RESULT: PASS|FAIL`. `WardmastWeb.NavRailBrowserTest` runs it against a
 // Bandit listener as part of `mix test`; exit 3 means SKIP (no browser). The
 // same script serves the post-merge check against the running server — it
 // clears only its own `arbiter:nav-rail` key, in its own throwaway profile.

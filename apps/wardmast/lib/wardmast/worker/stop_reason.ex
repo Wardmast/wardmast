@@ -1,0 +1,2208 @@
+defmodule Wardmast.Worker.StopReason do
+  @moduledoc """
+  Classify *why* an worker's agent subprocess stopped.
+
+  This module is the **classification** half of stalled-worker detection
+  (bd-awi4nw). Detection itself keys on **process/port liveness** — the worker
+  learns the subprocess is gone from the Erlang port's `{:exit_status, n}`
+  message (or, for a silent hang, from a no-output watchdog), never from
+  scraping stdout for a success/failure pattern. A crashed or flag-rejected
+  agent emits nothing useful, so output is not a reliable *stop* signal.
+
+  Once a stop is detected, *this* module looks at the exit status and the tail
+  of captured output to put a human-actionable label on it. The exit
+  status/signal is authoritative; the output signatures only refine the label
+  (e.g. distinguishing an auth-expiry 401 from a generic non-zero crash) so the
+  coordinator escalation carries the right remediation.
+
+  ## Categories
+
+    * `:auth_expired` — the agent CLI could not authenticate (401 / "invalid
+      authentication credentials" / OAuth expiry). Remediation: re-authenticate.
+      Distinct from a generic failure because the fix is operator credentials,
+      not the task. Provider-agnostic (Claude OAuth, Gemini API key).
+    * `:quota_exhausted` — the Claude CLI's own 5h (or 7d) plan usage-limit
+      was reached ("Claude AI usage limit reached", "5-hour limit reached"),
+      distinct from `:credit_exhausted` (bd-3hr6g2). Not a billing problem —
+      the account has a *time-boxed* allowance that refills on a known
+      schedule, so this is provider-imposed throttling, not agent or task
+      failure. When the CLI reports a reset timestamp it is parsed into
+      `retry_after`; remediation is to wait for the window to reset (or
+      switch to a workspace/key not sharing the exhausted plan), never a
+      re-dispatch against the same account. Provider-agnostic since bd-a6vh2x:
+      Claude's session/weekly limit, agy's `RESOURCE_EXHAUSTED` quota 429
+      (`Resets in 11m34s` parsed into `retry_after`) and grok's free
+      Grok Build usage limit all land here. A ticket's own run that stops on
+      it is held, not failed: `Wardmast.Worker` opens a timed account hold
+      (`Wardmast.Providers.Pause.quota_hold/4`) and queues a resume
+      (`Wardmast.Workflows.DispatchQueue`).
+    * `:credit_exhausted` — out of credits / insufficient balance / quota /
+      billing. Remediation: top up credits or rotate to a funded key.
+    * `:rate_limited` — 429 / rate-limit / overloaded / resource exhausted.
+      Often transient; remediation is retry/backoff.
+    * `:gateway_error` — 502 / 503 / upstream unreachable from the local
+      Anthropic proxy (transient network blip between the harness and
+      api.anthropic.com). Distinct from a rate-limit or auth failure: the
+      session was healthy, the transport layer dropped the request.
+      Remediation: auto-resume — the session context is intact, a retry should
+      succeed once connectivity recovers.
+    * `:max_turns` — the Claude CLI's own `result` event says the run hit its
+      turn limit (`subtype: "error_max_turns"` / `terminal_reason: "max_turns"`).
+      Only ever produced from the structured result; retrying identically hits
+      the same limit, so it is not auto-resumed.
+    * `:context_thrash` — the agent CLI's own autocompact loop detector fired
+      ("Autocompact is thrashing: the context refilled to the limit within N
+      turns of the previous compact, N times in a row") and the session
+      aborted before doing any real work (bd-8cn795). Distinct from a generic
+      `:crashed`: the cause is a working set too large for the model's
+      context window (whole-file reads of several 500-1100+ line modules, or
+      a huge PR body / API dump), not a task or agent bug. Retrying
+      identically reproduces it — the remediation is a bigger context window
+      or narrower reads, not a re-dispatch.
+    * `:memory_cap_exceeded` — the worker's per-spawn memory-capped systemd scope
+      (`Wardmast.Worker.MemoryScope`) was OOM-killed (bd-6zuoo6). Synthesized by
+      `Wardmast.Worker` from systemd's own `Result=oom-kill` for the scope, never
+      by `classify/3`: the exit status is a bare 137, indistinguishable from any
+      other SIGKILL. A deliberate refinement of `:killed` — the cause is a
+      runaway process tree *inside* the run (almost always a `mix test`), so a
+      re-dispatch reproduces it; the remediation is a smaller workload or a
+      larger `WARDMAST_WORKER_MEMORY_MAX`, not a retry. Not resumable.
+    * `:spend_cap` — a `park`-action guardrail tier (`quarantine`, `probation`)
+      crossed its token or wall-clock spend cap and
+      `Wardmast.Guardrails.SpendPatrol` stopped the run (G19). Built by
+      `spend_cap/1`, never by `classify/3`. A policy stop, not an agent failure; not
+      resumable, since the cap is per ticket and would trip again.
+    * `:trust_suspended` — the run's subject was suspended after a critical
+      guardrail event and `Wardmast.Loop.Trust` parked every run of it in flight
+      (G18). Built by `trust_suspended/1`, never by `classify/3`. A policy stop;
+      not resumable until the coordinator dismisses the suspension.
+    * `:killed` — terminated by a signal (the `sh` wrapper reports `128 + N`).
+      External kill, OOM, host restart.
+    * `:spawn_exec_failed` — non-zero exit with **zero captured output** at
+      all — the child never ran, so it never got a chance to write anything.
+      The canonical cause (bd-11abk2) is `execve()` failing before the
+      process starts: exit 7 is Linux's E2BIG (a spliced argv element, almost
+      always the prompt, exceeded the per-argument `MAX_ARG_STRLEN` =
+      131 072-byte kernel limit). Distinct from `:crashed` because a crash
+      normally leaves *some* stderr; a truly empty capture plus a non-zero
+      status points at the exec step itself, not the agent's own logic —
+      the remediation is a harness/argv fix, not a task re-dispatch.
+    * `:container_create_failed` (bd-325sps) — `podman run` exited 125/126 with
+      only `Error:` lines naming a libpod/OCI creation failure (`container
+      creation timeout`, `internal libpod error`): the agent never started. Infra,
+      not the agent; the worker retries creation a bounded number of times first,
+      and the worktree is kept.
+    * `:crashed` — non-zero exit with no recognized signature. The
+      flag-rejection proof case (`unknown option --reasoning-effort` → immediate
+      non-zero exit) lands here unless its stderr matches a more specific
+      signature.
+    * `:exited_without_done` — clean exit (status 0) but the worker never
+      emitted `arb done`. It quit early without completing the task.
+    * `:sentinel_in_tool_output` — a Codex-only refinement of
+      `:exited_without_done`: clean exit whose last shell command was an
+      echo/printf of `arb done` (the harness only trusts the agent's own message
+      text). Not a crash; the worker routes it to the commit gate as a completion.
+    * `:async_wait_abandoned` — a *refinement* of `:exited_without_done`
+      (bd-606zlr): the clean exit happened immediately after the agent armed
+      an asynchronous wait — a `Monitor`, a `ScheduleWakeup`, or a
+      backgrounded `Bash` — and then yielded the turn to await the
+      notification. `claude --print` is non-interactive: the agent loop ends
+      the instant a turn produces no tool call, so that notification can never
+      be delivered — there is no session left to deliver it to. The agent was
+      doing the *right* thing (recognising a command that won't finish inside
+      the tool-call timeout) with a primitive this harness cannot honour.
+      Distinct from a plain early quit because the remediation is a
+      `--resume` carrying corrective guidance, never a re-dispatch: the
+      worktree usually holds real, uncommitted work.
+    * `:permission_denied` — another *refinement* of `:exited_without_done`
+      (bd-7wymls), never produced by `classify/3` itself: headless `agy`
+      soft-denied a command its `:strict` allowlist does not name and then
+      ended the turn, so the model never got to carry on without it.
+      `Wardmast.Worker` builds it via `permission_denied/1` from the session's
+      structured denial flag (`Wardmast.Worker.ClaudeSession.denial_ended_turn?/1`),
+      not from the output tail. Resumable: the conversation is intact and the
+      remediation is a `--conversation` resume telling the model the command
+      was denied.
+    * `:awaiting_operator` — a *refinement* of `:exited_without_done` (#1299),
+      never produced by `classify/3` itself: the run asked for a permission
+      (`permission_request`), got "recorded, not granted", and exited cleanly
+      rather than carry on without it. The environment must change before any
+      run can succeed, so a resume (or a re-dispatch) just repeats the exit.
+      `Wardmast.Worker` builds it via `awaiting_operator/1` from the ticket's
+      pending permission requests; the run is parked on that request
+      (`:permission_requested` attention), not failed as `run_crashed`, and is
+      not auto-resumed.
+    * `:stalled` — no exit at all; the subprocess is alive within the watchdog
+      window (caller passes `exit_status: nil`). The summary distinguishes a
+      wholly silent subprocess from one that was mid-flight: "produced no
+      output" is a *finding*, not a synonym for "timed out" (bd-svczq4).
+    * `:preflight_timeout` — the dispatch's auth **pre-flight probe** (not a
+      worker) outran its watchdog. Synthesized by
+      `Wardmast.Agents.Preflight`, never by `classify/2`: there is no worker,
+      no transcript and no work in progress, so it carries its own summary
+      (elapsed, watchdog, whether any output arrived) and a remediation that
+      names the probe's own config rather than sending the operator to a
+      transcript that does not exist (bd-svczq4).
+    * `:missing_worktree` — the worker signalled `arb done` on a reviewable
+      code directive but no per-task branch/worktree was ever provisioned, so
+      there is nothing to integrate (bd-7pe74i). Not a subprocess-exit
+      classification — synthesized by the completion path to refuse closing a
+      task that produced no deliverable. Remediation: investigate why
+      provisioning was skipped, then re-dispatch.
+    * `:tampered_clone` — the worker signalled `arb done` but the private clone's
+      `.git` is no longer the directory the clone was created with: it renamed it
+      and put its own in place (bd-6t7u81). Synthesized by the completion path,
+      never by `classify/2`. A replacement `.git` carries a config the host's git
+      would act on (`core.fsmonitor`, a hook, a diff driver), so the tree is not
+      diffed, reviewed or merged: the original `.git` is put back and the run
+      fails for the coordinator.
+    * `:workspace_destroyed` — the worker's workspace **was** provisioned and
+      then vanished from disk while the run was alive (bd-b6noq9). The exact
+      opposite of `:missing_worktree`: there was a worktree, a branch and work
+      in progress, and the directory holding them is simply gone. Synthesized
+      by the completion and stop paths, never by `classify/2` — the exit status
+      of a subprocess whose cwd was deleted says nothing useful.
+
+      Called out separately because both of the generic outcomes are actively
+      wrong here. `commit_gate/1` gates on `File.dir?(worktree)` and fails
+      *open*, so a destroyed workspace used to route to the review gate /
+      merger like a healthy completion and surface as a free-text "merge
+      failed" page; and `:exited_without_done` is *resumable*, so the worker
+      would respawn `claude --resume` into a directory that no longer exists.
+      Remediation is neither re-dispatch-as-is nor resume: the branch may have
+      existed only inside the destroyed root, so the first question is whether
+      any copy of the work survives (a pushed remote, another checkout) before
+      the task is re-run from scratch.
+    * `:agent_print_timeout` — the `agy` (Gemini fork) CLI's own internal
+      print-mode turn timeout fired mid-turn ("print timeout … with turn in
+      progress; returning partial output") and agy returned whatever partial
+      output it had — with a `result.status` of `"SUCCESS"` (bd-1xss5z). A
+      turn that was cut off is not a successful one no matter what agy's own
+      terminal event claims, so this is trusted even on a clean (status 0)
+      exit, the same way `:stream_schema_drift` is: the marker is agy's own
+      fixed harness wording, not model prose that could coincidentally
+      appear in a real review's output.
+    * `:egress_denied` — a jailed qwen run could not reach a host the worker
+      jail's egress proxy does not allow (a proxy `403` on `CONNECT`, or no route
+      in the network namespace) and exited non-zero (bd-az8ycn). Built by
+      `Wardmast.Agents.Qwen.Egress.stop_reason/2` from the output tail. The cause
+      is the allowlist, not the task or the agent: remediation is a
+      `sandbox.allow_hosts` entry or a `network:` grant, not a re-dispatch.
+    * `:spawn_failed` — a step of `Wardmast.Worker.Dispatch.dispatch/2` AFTER
+      `start_worker/3` failed (e.g. a transient network/VPN outage during the
+      agent subprocess spawn, or a workflow-machine attach failure). Not a
+      subprocess-exit classification — there is no port/process to exit,
+      since the agent never got a chance to start (bd-bi5pn0). Distinct from
+      `:exited_without_done`, which covers a port that opened then exited
+      early. Synthesized by `Dispatch.dispatch/2` itself so the worker it just
+      registered `:idle` does not zombie with no retry/escalate. Remediation:
+      investigate the dispatch error (often transient connectivity), then
+      re-dispatch.
+
+  ## Provider-agnostic signatures
+
+  The auth / credit / rate-limit signatures are matched case-insensitively
+  against the captured output and cover both the Claude CLI and the
+  Gemini/`agy` CLIs (e.g. Gemini's `RESOURCE_EXHAUSTED`, `API key not valid`).
+  They are intentionally broad: a false *refinement* (labelling a crash as
+  rate-limited) is far cheaper than burying an auth-expiry as a generic
+  failure.
+
+  bd-35ujxv: "broad" stops at tool-result content. A worker whose own task is
+  Wardmast itself routinely runs `mix test`, which logs fixture scenarios
+  containing this exact vocabulary verbatim ("API Error: 401 Invalid
+  authentication credentials", "AuthHold: Claude dispatch hold OPEN") — that
+  is the *worker's own Bash tool output*, not evidence its own session hit an
+  auth failure. A worker whose session otherwise ended normally was
+  misclassified `:auth_expired` from this, reopening its task and counting
+  toward the fleet-wide `AuthHold` streak. `signature_haystack/1` excludes
+  every line a display-line producer tagged as tool-result content (the "⏴ "
+  glyph prefix, applied to the header AND every body line) before any
+  signature regex below runs. A provider's *own* auth/quota/credit/rate-limit
+  failure is never reported as a tool result — it surfaces as the CLI's own
+  `result` event, assistant text, or raw stderr — so a genuine failure is
+  unaffected.
+  """
+
+  alias Wardmast.Agents.Qwen.Egress, as: QwenEgress
+
+  @typedoc "Classified stop category."
+  @type category ::
+          :auth_expired
+          | :quota_exhausted
+          | :credit_exhausted
+          | :rate_limited
+          | :gateway_error
+          | :max_turns
+          | :session_not_found
+          | :context_thrash
+          | :killed
+          | :memory_cap_exceeded
+          | :spend_cap
+          | :trust_suspended
+          | :spawn_exec_failed
+          | :container_create_failed
+          | :crashed
+          | :stream_schema_drift
+          | :agent_print_timeout
+          | :exited_without_done
+          | :async_wait_abandoned
+          | :sentinel_in_tool_output
+          | :permission_denied
+          | :awaiting_operator
+          | :stalled
+          | :preflight_timeout
+          | :missing_worktree
+          | :workspace_destroyed
+          | :tampered_clone
+          | :spawn_failed
+          | :model_unavailable
+          | :node_lost
+          | :pod_disrupted
+          | :preempted
+          | :placement_refused
+          | :egress_denied
+
+  @type t :: %__MODULE__{
+          category: category(),
+          summary: String.t(),
+          remediation: String.t() | nil,
+          exit_status: integer() | nil,
+          signal: integer() | nil,
+          retry_after: DateTime.t() | nil
+        }
+
+  @enforce_keys [:category, :summary]
+  defstruct [:category, :summary, :remediation, :exit_status, :signal, :retry_after]
+
+  # Output signatures. Ordered most-specific-first; the first hit wins so an
+  # auth 401 isn't swallowed by the broader rate-limit pattern. Matched
+  # case-insensitively against the joined output tail.
+  @auth_signature ~r/
+      \b401\b
+    | invalid[ _]authentication[ _]credentials
+    | invalid[ _]api[ _]key
+    | api[ _]key[ _]not[ _]valid
+    | authentication[ _]error
+    | unauthorized
+    | not[ _]authenticated
+    | not[ _]signed[ _]in
+    | (oauth|token|credentials?|session)[^\n]{0,40}(expired|invalid|revoked)
+    | please[ _](run|sign|log)[ _-]?in
+    | \/login\b
+    | refresh[ _]token[^\n]{0,40}already[ _]used
+    | log[ _]?out[ _]and[ _]sign[ _]in[ _]again
+    | codex[ _]authentication[ _]error
+    | refresh[ _]?token[ _]?(rejected|invalid)
+    | invalid[ _]grant
+  /ix
+
+  # bd-3hr6g2: the Claude CLI's own plan usage-limit message, distinct from a
+  # billing/credit failure — this is a time-boxed allowance, not an account
+  # balance. Checked ahead of @credit_signature so "usage limit reached" isn't
+  # swallowed by the generic quota wording below (it wouldn't match anyway,
+  # but ordering keeps the two signatures independent as either evolves).
+  # The CLI appends the reset time as a unix-epoch-seconds after a `|`
+  # (`"Claude AI usage limit reached|1735689600"`); parsed opportunistically
+  # by `retry_after_from/1` — its absence just means no reset time is known.
+  #
+  # bd-3wgdie: the bare phrase is NOT anchored — a worker whose last 80 output
+  # lines happen to include a tool result or file read that quotes/discusses
+  # this exact wording (e.g. this very module's docstring, or a grep hit) would
+  # otherwise false-match and pay a 5h+ park instead of a fast fail (the
+  # `:quota_exhausted` remediation is "wait", not "re-dispatch", so a false hit
+  # is expensive). Require the phrase to lead its line (only whitespace before
+  # it, as the CLI actually emits it standalone) UNLESS the `|<epoch>` reset
+  # suffix is present, which is specific enough on its own — real prose
+  # discussing the message doesn't happen to append a matching unix timestamp.
+  #
+  # bd-6dxit2: the CLI's current wording for the same condition is
+  # `You've hit your session limit · resets 4:50am (America/New_York)` — it
+  # never says "usage limit reached" any more. Runs refused this way exit 1
+  # within a second having emitted three lines, so before this alternative was
+  # added they classified as `:crashed`: a generic non-zero exit whose
+  # remediation is "re-dispatch". That misroute is what made ReviewGate re-prompt
+  # a reviewer that could not run and then report "no parseable VERDICT line"
+  # (the reviewer's fault) instead of "the account is out of 5h allowance".
+  # Any apostrophe form the CLI may emit is accepted (`.{0,3}` spans a plain
+  # `'` or a 3-byte UTF-8 `\u2019`; the regex carries no /u flag), and the line-leading
+  # anchor from bd-3wgdie applies here too so quoting this wording in source or
+  # tool output cannot buy a 5h park.
+  # bd-cfhj7z: the four `usage limit reached` alternatives are RETAINED, kept
+  # defensively rather than confirmed still-live — a scan of every run in the
+  # live DB whose tail contains "limit reached" (14 runs, 2026-07-07..2026-09-09)
+  # turned up no CLI emission of that wording at line start, only Wardmast's own
+  # log line and workers grepping this repo's fixtures. Absence of a recent hit
+  # is not proof an older pinned CLI build never emits it, so they stay.
+  @quota_signature ~r/
+      ^[ \t]*(claude[ _]ai[ _])?usage[ _]limit[ _]reached
+    | ^[ \t]*5[ -]hour[ _]limit[ _]reached
+    | ^[ \t]*5h[ _]limit[ _]reached
+    | usage[ _]limit[ _]reached\|\d+
+    | ^[ \t]*you.{0,3}ve[ ]hit[ ]your[ ](session|usage|weekly|opus|sonnet)[ ]limit
+    | ^[ \t]*(session|usage|weekly)[ _]limit[ _]reached
+  /mix
+
+  @quota_reset_signature ~r/usage[ _]limit[ _]reached\|(\d+)/i
+
+  # bd-a6vh2x: agy's own quota stop (run ddebab52, exit 3):
+  #
+  #     error: Individual quota reached. Please upgrade your subscription to
+  #       increase your limits. Resets in 11m34s.
+  #     AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual
+  #       quota reached. ... Resets in 11m34s.","status":"RESOURCE_EXHAUSTED",
+  #       "error_code":429,"retryable":true,...}
+  #
+  # It used to fall through to `@rate_limit_signature` (`resource_exhausted`)
+  # and so to `:rate_limited`, whose remediation is "retry" — but this is a
+  # time-boxed allowance, the same thing as Claude's session limit. Anchored to
+  # the two line heads agy emits it under (`AGY_ERROR:` / `error:`), the same
+  # discipline as `@grok_free_usage_signature`, so prose or a tool result that
+  # quotes the wording cannot park a run; and it needs the *quota* wording, so
+  # a plain `RESOURCE_EXHAUSTED ... too many requests` stays a rate limit.
+  @agy_quota_signature ~r/
+      ^[ \t]*AGY_ERROR:[^\n]*RESOURCE_EXHAUSTED[^\n]*quota[ ](?:reached|exceeded|exhausted)
+    | ^[ \t]*error:[ ](?:individual[ ]|team[ ])?quota[ ](?:reached|exceeded|exhausted)
+  /imx
+
+  # `Resets in 11m34s` / `2h5m` / `45s`, as agy renders the time left.
+  @relative_reset_signature ~r/
+      \bresets[ ]in[ ]
+      (?:(?<h>\d+)h)?(?:(?<m>\d+)m)?(?:(?<s>\d+)s)?
+  /ix
+
+  # bd-a6vh2x: grok's free-tier cap reached the other way round — not the 429
+  # `subscription:free-usage-exhausted` above but the CLI's own refusal (run
+  # 4a76953c, exit 1, which classified as a plain `:crashed`):
+  #
+  #     grok error: You\u2019ve reached your free Grok Build usage limit for now.
+  #       Get SuperGrok for much higher limits, or try again later: ...
+  #
+  # No reset time and no token counts. Anchored to the `grok error:` /
+  # `Error:` heads and checked on a non-zero exit only, as above.
+  @grok_build_limit_signature ~r/
+      ^[ \t]*(?:grok[ ]error:|error:)[ ]*you.{0,3}ve[ ]reached[ ]your[ ]free[ ]grok[ ]build[ ]usage[ ]limit
+  /imx
+
+  # bd-cwq8b0: grok's free-tier 429, `subscription:free-usage-exhausted: You've
+  # used all the included free usage for model grok-4.7 for now. Usage resets
+  # over a rolling 24-hour window — tokens (actual/limit): 604183/500000.`
+  # grok reports it in the terminal `result`'s `errors[]` (rendered as
+  # `grok error: ...` by `Wardmast.Agents.Grok.Stream.error_lines/1`) or on
+  # stderr (`Error: ...`). Anchored to those line heads so the same code quoted
+  # in prose (this repo's docs, a ticket) cannot fake a quota stop, and checked
+  # only on a non-zero exit. A rolling window has no reset time, so there is no
+  # `retry_after`: the hold lifts as the ledger's trailing 24h drains
+  # (`Wardmast.Quota.GrokLedger`).
+  @grok_free_usage_signature ~r/
+      ^[ \t]*(?:grok[ ]error:|error:|api[ ]error)[^\n]*subscription:free-usage-exhausted
+      (?<detail>[^\n]*)
+  /imx
+
+  @grok_free_usage_model ~r/for[ ]model[ ](?<model>[\w.:\/-]+)/i
+  @grok_free_usage_counts ~r/tokens[ ]\(actual\/limit\):[ ]*(?<actual>\d+)\/(?<limit>\d+)/i
+
+  # bd-cfhj7z: the CLI build seen in run 7e9e5ea5 reports the reset as a
+  # human-readable *local wall clock* with an IANA zone name
+  # (`resets 3:30am (America/New_York)`) rather than the `|<epoch>` suffix
+  # `@quota_reset_signature` knows. `retry_after_from/1` therefore returned nil
+  # and `Wardmast.Worker.quota_resume_backoff_ms/1` fell back to its blanket 5h
+  # default — parking a worker and its worktree for five hours even when the
+  # window was ten minutes from resetting.
+  #
+  # The reset clause is only read off the CLI's own phrase line (the same
+  # bd-3wgdie line-leading anchor `@quota_signature` uses). Reading it from
+  # anywhere in the tail would let prose that merely mentions a reset time
+  # *shorten* a park, which is the more dangerous direction of the two.
+  #
+  # Review round 1, finding 2: nothing after the meridiem is parsed *inside* this
+  # regex. Any bounded zone-name class — an IANA-shaped one, or even raw
+  # `[^)\n]{1,40}` — makes the trailing group optional in practice: a rendering
+  # it cannot span (`(UTC-04:00)`, a non-ASCII dash, an unclosed or overlong
+  # parenthetical) fails the group, leaves `zone` empty, and silently takes the
+  # "no zone named, assume host-local" path — applying *this* host's offset to a
+  # wall clock that may have been written somewhere else, in either direction.
+  # So the regex captures the whole remainder of the line as `tail` and
+  # `zone_from_tail/1` decides: empty tail means no zone was named (host-local),
+  # a closed `(...)` yields whatever is between the parens for
+  # `host_zone_matches?/1` to accept or reject, and anything else declines the
+  # parse outright.
+  @quota_reset_wallclock_signature ~r/
+      ^[ \t]*you.{0,3}ve[ ]hit[ ]your[ ](?:session|usage)[ ]limit
+      [^\n]*?
+      \bresets[ \t]+(?<hour>\d{1,2})(?::(?<minute>\d{2}))?[ \t]*(?<meridiem>am|pm)
+      (?<tail>[^\n]*)
+  /mix
+
+  @credit_signature ~r/
+      insufficient[^\n]{0,20}(credit|balance|funds|quota)
+    | credit[ _]balance[^\n]{0,20}(too[ _]low|low)
+    | out[ _]of[^\n]{0,20}(credit|token|quota)
+    | (quota|billing)[^\n]{0,20}(exceeded|exhausted|required)
+    | payment[ _]required
+    | \b402\b
+    | upgrade[^\n]{0,20}plan
+  /ix
+
+  # bd-6nr53z: tightened to require a *positive* signal — a status code, an
+  # explicit provider error token, or "overloaded"/"rate limit" in close
+  # proximity to "api" — rather than the bare words "rate-limit"/"overloaded"
+  # anywhere in the tail. The bare-word form false-matched a worker's own
+  # tool output (e.g. grepping source that mentions "rate-limit" identifiers
+  # in comments/code, as in run c88c77b0) with no genuine API error at all.
+  @rate_limit_signature ~r/
+      \b429\b
+    | \b529\b
+    | overloaded_error
+    | rate_limit_error
+    | too[ _]many[ _]requests
+    | resource_exhausted
+    | api[^\n]{0,20}overload
+    | overload[^\n]{0,20}api
+    | http[ _]?5(0|2|3)\d\b[^\n]{0,30}(overload|rate[ _-]?limit)
+  /ix
+
+  # Matches the local Anthropic proxy's 502/503 error body and common upstream
+  # connectivity failures. Ordered AFTER rate-limit so an "overloaded" 503 from
+  # Anthropic itself is captured as rate-limited (the right remediation), while
+  # a proxy-side "upstream unreachable" 502 is captured here.
+  @gateway_error_signature ~r/
+      proxy_error
+    | upstream[ _]unreachable
+    | \b502\b
+    | bad[ _]gateway
+    | \b503\b[^\n]{0,40}(service[ _]unavailable|temporarily)
+    | upstream[^\n]{0,40}(timeout|unreachable|refused)
+    | connection[^\n]{0,40}(refused|reset|timeout)
+    | receive[ _]timeout
+  /ix
+
+  # `claude --resume <sid>` for a session whose JSONL is not in the run's config
+  # dir. Deterministic: a retry with the same `--resume` fails identically.
+  @session_not_found_signature ~r/no[ _]conversation[ _]found[ _]with[ _]session[ _]id/i
+
+  # bd-80kdgy: the marker an agent stream parser emits when it meets an event
+  # vocabulary it doesn't know (see `Wardmast.Agents.Codex.Stream`). Its presence
+  # means the transcript is incomplete by construction, so whatever the exit
+  # status says about the run is not trustworthy.
+  @schema_drift_signature ~r/unrecognized[ _]stream[ _]event/i
+
+  # bd-2s755v: the model the CLI was started with does not exist for this
+  # account. Real Codex texts: the 400 "The 'gpt-5.4-mini' model is not
+  # supported when using Codex with a ChatGPT account." and the 404 "The model
+  # `gpt-5.5` does not exist or you do not have access to it". The named
+  # group captures the model id for the summary.
+  @model_unavailable_signature ~r/
+      the[ ]['`"]?(?<a>[\w.:\/-]+)['`"]?[ ]model[ ]is[ ]not[ ]supported[ ]when[ ]using[ ]codex
+    | the[ ]model[ ]['`"]?(?<b>[\w.:\/-]+)['`"]?[ ]does[ ]not[ ]exist[ ]or[ ]you[ ]do[ ]not[ ]have[ ]access
+    | invalid[ ]model[ ]selection:?[ ]*['`"]?(?<c>[\w.:\/-]*)
+  /ix
+
+  # bd-1xss5z: agy's own fixed wording when its `--print-timeout` fires
+  # mid-turn. Matched loosely ("print timeout" ... "returning partial
+  # output", tolerating the reported duration in between) rather than the
+  # exact "5m0s" so a configured non-default timeout still matches.
+  @print_timeout_signature ~r/print[ _]timeout[^\n]*returning[ _]partial[ _]output/i
+
+  # bd-8cn795: the Claude CLI's own autocompact-loop detector. Fires when the
+  # context refills to the limit within a few turns of the previous compact,
+  # several times in a row — a deterministic function of the task's working
+  # set (whole-file reads of large modules), not a transient blip. Matched
+  # loosely on "autocompact" + "thrash" rather than the exact N/N wording so a
+  # future CLI phrasing tweak doesn't silently fall through to :crashed.
+  @context_thrash_signature ~r/autocompact[^\n]{0,20}thrash/i
+
+  # bd-1zz5mn: the "an asynchronous wait is now armed" signature is
+  # provider-shaped — each agent CLI wraps a backgrounded call / monitor /
+  # wakeup in its own fixed wording, so there is no single shared regex that
+  # covers every harness (the previous one only matched Claude's markers,
+  # which meant every agy early-quit was misclassified — see
+  # `abandoned_async_wait?/2`). Each adapter declares its own via the
+  # `Wardmast.Agents.Agent` behaviour's optional `async_arm_signature/0`
+  # callback; this is the fallback for a provider that hasn't (or can't be
+  # resolved), so existing callers of `classify/2` are unaffected.
+  @default_async_arm_signature Wardmast.Agents.Claude.async_arm_signature()
+
+  # The counterpart: evidence the agent actually *drained* what it armed, in
+  # the same session, before the run ended. A blocking `TaskOutput` /
+  # `BashOutput` read (or a `TaskStop`) after the arm marker means the wait was
+  # honoured synchronously and the run ended for some other reason — the
+  # correct pattern, not this bug.
+  @async_drain_signature ~r/\b(TaskOutput|BashOutput|TaskStop)\(/i
+
+  # How many lines back from the END of the run to look for an un-drained arm.
+  # Deliberately much tighter than @tail_lines (80): a background task armed
+  # mid-run and properly drained is separated from the run's end by the drain
+  # call plus its output, so a narrow terminal window is what distinguishes
+  # "armed and abandoned" from "armed and handled".
+  @async_arm_window 12
+
+  # The sentinel as a shell tool's output line, and the command that produced it
+  # (an echo/printf of the sentinel — not a grep that happened to print it).
+  @sentinel_tool_line ~r/\A⏴\s*[^\p{L}\p{N}]*arb done[^\p{L}\p{N}]*\z/u
+  @sentinel_echo_command ~r/\A⏵ \$.*\b(?:printf|echo)\b.*arb done/u
+
+  @doc """
+  Classify a stop from the subprocess exit status and captured output.
+
+  `exit_status` is the integer the Erlang port reported, or `nil` when the
+  subprocess is still alive (a no-output stall detected by the watchdog).
+
+  `output_lines` is the captured stdout/stderr, **newest-first or oldest-first**
+  — order does not matter, we only scan the tail for signatures. Pass the
+  worker's `meta[:output_lines]` (oldest-first) directly.
+
+  `provider` (bd-1zz5mn) is the session's provider string (e.g. `"gemini"`,
+  `"codex"`, `nil`/`"claude"`) — it selects which adapter's
+  `async_arm_signature/0` is used to recognize an abandoned async wait.
+  Defaults to `nil`, which resolves to the Claude signature, so every
+  existing caller that doesn't know its provider (or doesn't care — the
+  async-wait refinement is the only thing that's provider-shaped) is
+  unaffected.
+
+  Returns a `%StopReason{}`.
+  """
+  @spec classify(integer() | nil, [String.t()], String.t() | nil, keyword()) :: t()
+  def classify(exit_status, output_lines, provider \\ nil, opts \\ [])
+      when is_list(output_lines) and is_list(opts) do
+    # qwen's documented exit codes (auth, config, turn/token budget) are
+    # authoritative and outrank incidental output vocabulary.
+    with nil <- provider_exit_reason(provider, exit_status),
+         nil <- provider_output_reason(provider, exit_status, output_lines) do
+      classify_by_output(exit_status, output_lines, provider, Keyword.get(opts, :result))
+    end
+  end
+
+  # A jailed qwen whose connection the egress proxy refused. Ahead of the
+  # generic signatures: a refused CONNECT reads like a gateway error, and the
+  # remediation (an allowlist entry) is not "retry". A signal death or a clean
+  # exit says nothing about the network, and tool-result lines are the worker's
+  # own commands failing, not the run's stop cause (`signature_haystack/1`).
+  defp provider_output_reason("qwen", exit_status, output_lines)
+       when is_integer(exit_status) and exit_status != 0 do
+    haystack = signature_haystack(output_lines)
+
+    if is_nil(signal_for(exit_status)) and QwenEgress.denied?(haystack),
+      do: QwenEgress.stop_reason(exit_status, haystack)
+  end
+
+  defp provider_output_reason(_provider, _exit_status, _output_lines), do: nil
+
+  defp provider_exit_reason("qwen", exit_status),
+    do: Wardmast.Agents.Qwen.Stream.stop_reason(exit_status)
+
+  defp provider_exit_reason(_provider, _exit_status), do: nil
+
+  # Pre-existing complexity 18 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp classify_by_output(exit_status, output_lines, provider, result) do
+    haystack = signature_haystack(output_lines)
+    signal = signal_for(exit_status)
+
+    structured = structured_failure(provider, result)
+
+    clean_end? =
+      clean_completion?(exit_status, output_lines, provider) or
+        clean_result?(exit_status, provider, result)
+
+    cond do
+      # bd-8praoz: a signal-terminated run is checked FIRST, ahead of every
+      # output signature (including the auth/quota/credit/rate-limit/gateway
+      # ones below). A SIGTERM/SIGKILL is an external kill — the unit's
+      # cgroup (`KillMode=control-group`) kills every live worker CLI on a
+      # server restart — and says nothing about *why* the CLI itself stopped.
+      # If the worker's own transcript happens to contain auth-shaped
+      # vocabulary (e.g. it was working on credential/resume code, or grepped
+      # a fixture full of "401"/"invalid"/"expired"), the previous ordering
+      # let that incidental text outrank the exit status and mislabel an
+      # external kill as `:auth_expired`, which then paged CredentialWatchdog
+      # with a false "credentials expired" alert. The exit status/signal is
+      # authoritative for a killed run; there is no CLI failure to refine.
+      is_integer(signal) ->
+        %__MODULE__{
+          category: :killed,
+          summary: "agent subprocess was killed by signal #{signal}",
+          remediation:
+            "External kill, OOM, or host restart. Check dmesg/host health, then re-dispatch.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      # bd-325sps: the `podman run` client itself failed to create the container.
+      # The agent never started; nothing it did is in the output.
+      container_create_failure?(exit_status, output_lines) ->
+        %__MODULE__{
+          category: :container_create_failed,
+          summary:
+            "container creation failed before the agent started (exit #{exit_status}): " <>
+              creation_error_line(output_lines),
+          remediation:
+            "Transient podman/libpod infrastructure failure (often host load), not the " <>
+              "agent. The worktree is preserved: re-dispatch or `arb worker resume` once " <>
+              "the host is healthy (`podman info`, `podman ps`).",
+          exit_status: exit_status,
+          signal: nil
+        }
+
+      # bd-6nr53z: checked FIRST among the output signatures, ahead of every
+      # other provider-error signature. The
+      # autocompact-thrash message is the CLI's own deterministic loop
+      # detector and the run's genuine terminal signal — it must win even
+      # when the same tail window also contains incidental "rate-limit" /
+      # "overloaded" -shaped words from a tool result the worker merely read
+      # (source comments, grep output, the task's own prose). Those weaker
+      # signatures are matched by substring anywhere in the haystack with no
+      # positional awareness, so ordering is the only thing that lets the
+      # true signal outrank them (see run c88c77b0-2927-41ec-b582-6210538a43b3).
+      Regex.match?(@context_thrash_signature, haystack) ->
+        %__MODULE__{
+          category: :context_thrash,
+          summary:
+            "agent's context window thrashed (autocompact refilled immediately, several " <>
+              "cycles in a row) before completing any work — the task's working set is too " <>
+              "large for this model's context window",
+          remediation:
+            "Deterministic for this task's file set — retrying identically will fail the " <>
+              "same way. Re-dispatch on a 1M-context model (e.g. claude-sonnet-5[1m]), or " <>
+              "narrow reads with grep + bounded offset/limit ranges instead of whole-file reads.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      # The CLI's own refusal of `--resume`, before any work. Checked ahead of
+      # the gateway signature: the container's socat "Connection reset by peer"
+      # on exit is collateral noise, not a transport failure.
+      exit_status != 0 and Regex.match?(@session_not_found_signature, haystack) ->
+        %__MODULE__{
+          category: :session_not_found,
+          summary:
+            "the agent CLI has no record of the session it was told to --resume " <>
+              "(No conversation found with session ID)",
+          remediation:
+            "The prior run's session history is not in this run's config dir. Resume in " <>
+              "briefing mode (`arb worker resume <id> --mode briefing`) instead of --resume.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      # bd-2s755v: deterministic — every retry sends the same `-m` and gets
+      # the same rejection, before any work. Non-zero exit only: a run that
+      # exited cleanly merely mentioned the text.
+      exit_status != 0 and Regex.match?(@model_unavailable_signature, haystack) ->
+        model = unavailable_model(haystack)
+
+        %__MODULE__{
+          category: :model_unavailable,
+          summary: "the account cannot use model #{model} (rejected before any work)",
+          remediation:
+            "Re-dispatching repeats the rejection. Point the workspace's Codex " <>
+              "`tier_models` (agent.config.codex.tier_models; the agy/gemini tier models for " <>
+              "an \"invalid model selection\") or the requested --model at a model this " <>
+              "account's CLI lists and its plan can call.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      exit_status != 0 and Regex.match?(@grok_free_usage_signature, haystack) ->
+        %__MODULE__{
+          category: :quota_exhausted,
+          summary: grok_free_usage_summary(haystack),
+          remediation:
+            "grok's free tier allows about 500K tokens per rolling 24h and that is spent; " <>
+              "there is no fixed reset time. Dispatch to grok stays held until the trailing " <>
+              "24h of usage drains below the cap (Wardmast.Quota.GrokLedger), or route to " <>
+              "another provider.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      exit_status != 0 and Regex.match?(@agy_quota_signature, haystack) ->
+        retry_after = relative_reset_from(haystack)
+
+        %__MODULE__{
+          category: :quota_exhausted,
+          summary: "agy's provider quota was reached (RESOURCE_EXHAUSTED, code 429)",
+          remediation: quota_remediation(retry_after),
+          exit_status: exit_status,
+          signal: signal,
+          retry_after: retry_after
+        }
+
+      exit_status != 0 and Regex.match?(@grok_build_limit_signature, haystack) ->
+        %__MODULE__{
+          category: :quota_exhausted,
+          summary: "grok's free Grok Build usage limit was reached (no reset time reported)",
+          remediation:
+            "The free tier is spent and grok reports no reset time. Dispatch to grok stays " <>
+              "held for a bounded wait, or the task moves to another provider.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      Regex.match?(@quota_signature, haystack) ->
+        retry_after = retry_after_from(haystack)
+
+        %__MODULE__{
+          category: :quota_exhausted,
+          summary: "agent's plan usage limit was reached (not a billing/credit failure)",
+          remediation: quota_remediation(retry_after),
+          exit_status: exit_status,
+          signal: signal,
+          retry_after: retry_after
+        }
+
+      # bd-bjewzj (#1090): the CLI's own `result` fields (`authentication_failed`,
+      # `api_error_status`, `terminal_reason`) say how the run ended, so they are read ahead
+      # of the text regexes below — those match prose anywhere in the tail and produced the
+      # false "credentials expired" verdict of 2026-10-27. Absent fields (older CLI, truncated
+      # stream, no result event) leave `structured` nil and the text heuristics decide.
+      not clean_end? and structured != nil ->
+        structured_reason(structured, exit_status, signal)
+
+      # bd-czvxfs: a run that finished cleanly (`clean_completion?/3`) is not an auth death on
+      # the strength of earlier auth-looking text (a Codex MCP transport warning; a Claude
+      # agent's own prose about a file that mentions 401 / expired tokens).
+      not clean_end? and
+          Regex.match?(@auth_signature, haystack) ->
+        %__MODULE__{
+          category: :auth_expired,
+          summary: "agent could not authenticate (credentials expired or invalid)",
+          remediation:
+            "Re-authenticate the agent CLI (Claude: refresh ~/.claude/.credentials.json " <>
+              "via `claude` login; Gemini: refresh GEMINI_API_KEY / re-run `gemini` auth; " <>
+              "Codex: run `codex login` to re-seed auth.json — a rotated refresh token " <>
+              "cannot be reused), then re-dispatch.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      not clean_end? and Regex.match?(@credit_signature, haystack) ->
+        %__MODULE__{
+          category: :credit_exhausted,
+          summary: "agent ran out of credits / quota",
+          remediation:
+            "Top up the provider account or rotate to a funded API key, then re-dispatch.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      not clean_end? and Regex.match?(@rate_limit_signature, haystack) ->
+        %__MODULE__{
+          category: :rate_limited,
+          summary: "agent was rate-limited / the API was overloaded",
+          remediation: "Usually transient — retry with backoff, or reduce concurrent workers.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      not clean_end? and Regex.match?(@gateway_error_signature, haystack) ->
+        %__MODULE__{
+          category: :gateway_error,
+          summary: "agent lost connectivity to the API (transient gateway / proxy error)",
+          remediation:
+            "Transient network blip between the harness proxy and Anthropic. " <>
+              "Auto-resuming the session — if retries are exhausted, check proxy logs.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      # Ordered after the provider-error signatures (a real 401/429 still reads
+      # off raw stderr and is the better diagnosis) but ahead of :stalled and
+      # :exited_without_done. Both of those would otherwise mis-explain drift:
+      # an unparsed stream renders no output, so the no-output watchdog trips,
+      # and the run exits 0 having "never signalled done" — and both remediations
+      # say "re-dispatch", which reproduces the failure exactly.
+      Regex.match?(@schema_drift_signature, haystack) ->
+        %__MODULE__{
+          category: :stream_schema_drift,
+          summary:
+            "the agent CLI emitted a --json event schema this Wardmast build does not " <>
+              "understand — the transcript, token usage, and `arb done` detection for this " <>
+              "run are all incomplete, so a clean exit here means nothing",
+          remediation:
+            "This is a harness bug, not a task failure — re-dispatching will fail " <>
+              "identically. Pin the agent CLI to a known-good version or update the " <>
+              "provider's stream parser (Wardmast.Agents.*.Stream) to the new vocabulary.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      # Ordered alongside :stream_schema_drift, ahead of :stalled and the
+      # clean-exit clauses: agy reports its own cut-off turn as a clean exit
+      # with a "SUCCESS" result event, so exit status alone can't tell this
+      # apart from a genuine completion — only the harness-emitted marker can.
+      Regex.match?(@print_timeout_signature, haystack) ->
+        %__MODULE__{
+          category: :agent_print_timeout,
+          summary:
+            "agy's own print-mode turn timed out mid-turn and it returned partial output — " <>
+              "the turn was cut off, not completed, even though agy's own terminal event " <>
+              "reports SUCCESS",
+          remediation:
+            "Raise the timeout passed to agy for this run (Gemini adapter's `:timeout_ms` " <>
+              "opt, e.g. `review_gate.timeout_ms` for a reviewer pass) so it covers a full " <>
+              "turn, or reduce what the turn has to read/do.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      is_nil(exit_status) ->
+        stalled(output_lines)
+
+      exit_status == 7 and blank_output?(output_lines) ->
+        %__MODULE__{
+          category: :spawn_exec_failed,
+          summary:
+            "agent subprocess never started — exec() failed with E2BIG (exit 7): an argv " <>
+              "element exceeded Linux's 131 072-byte MAX_ARG_STRLEN limit, almost certainly " <>
+              "the prompt spliced directly into argv",
+          remediation:
+            "This is a harness bug, not a task failure — the prompt-building path must " <>
+              "deliver oversized prompts via stdin/temp file instead of argv. Re-dispatching " <>
+              "without a harness fix will crash identically every time.",
+          exit_status: exit_status,
+          signal: nil
+        }
+
+      exit_status not in [0, nil] and blank_output?(output_lines) ->
+        %__MODULE__{
+          category: :spawn_exec_failed,
+          summary:
+            "agent subprocess exited (code #{exit_status}) with zero captured output — the " <>
+              "process likely never ran (exec failure before the child started)",
+          remediation:
+            "Check for a bad CLI flag, missing/non-executable binary, or an oversized argv " <>
+              "element (MAX_ARG_STRLEN). Not a normal task crash — investigate the spawn path.",
+          exit_status: exit_status,
+          signal: nil
+        }
+
+      # bd-606zlr. Ordered AFTER every provider-error signature (a genuine
+      # 401/429 in the same tail is the better diagnosis) but ahead of the
+      # plain clean-exit clause it refines. Scoped to `exit_status == 0`
+      # because a crash that happens to have backgrounded something earlier is
+      # a crash — the exit status stays authoritative.
+      exit_status == 0 and sentinel_in_tool_output?(output_lines, provider) ->
+        %__MODULE__{
+          category: :sentinel_in_tool_output,
+          summary:
+            "agent exited cleanly and its last shell command printed `arb done`, but the " <>
+              "sentinel appeared only in tool output, never in the agent's own message " <>
+              "text, so the harness did not see it",
+          remediation:
+            "Not a crash. The worker treats this as completion when the worktree is clean " <>
+              "with commits ahead (the commit gate decides); otherwise resume it and ask " <>
+              "for `arb done` as the final line of its own message, not via a tool.",
+          exit_status: 0,
+          signal: nil
+        }
+
+      exit_status == 0 and abandoned_async_wait?(output_lines, provider) ->
+        %__MODULE__{
+          category: :async_wait_abandoned,
+          summary:
+            "agent armed an asynchronous wait (Monitor / ScheduleWakeup / backgrounded " <>
+              "command) and yielded the turn to await the notification — but a " <>
+              "non-interactive `--print` session ends on the first turn with no tool " <>
+              "call, so that notification could never be delivered",
+          remediation:
+            "Not a task failure and not the agent's judgement — the command genuinely " <>
+              "exceeded the tool-call timeout. The worktree usually still holds real, " <>
+              "uncommitted work, so resume the session in place with corrective guidance " <>
+              "(drain background tasks with a blocking `TaskOutput` in the SAME turn; " <>
+              "never wait on `Monitor`/`ScheduleWakeup`) rather than discarding it.",
+          exit_status: 0,
+          signal: nil
+        }
+
+      exit_status == 0 ->
+        %__MODULE__{
+          category: :exited_without_done,
+          summary: "agent exited cleanly but never signalled `arb done` (quit before completing)",
+          remediation:
+            "The worker stopped early without finishing the task. Review the transcript, " <>
+              "then re-dispatch.",
+          exit_status: 0,
+          signal: nil
+        }
+
+      true ->
+        %__MODULE__{
+          category: :crashed,
+          summary: "agent subprocess crashed (exit code #{exit_status})",
+          remediation:
+            "Non-zero exit with no recognized cause — often a bad CLI flag or an immediate " <>
+              "subprocess error. Check the captured stderr/exit code, then re-dispatch.",
+          exit_status: exit_status,
+          signal: signal
+        }
+    end
+  end
+
+  # bd-svczq4: a watchdog expiry with output already in hand is NOT "produced no
+  # output" — that wording sent an operator hunting a hang that never happened.
+  # Report what was actually observed; keep the silent case's wording verbatim
+  # so the (accurate) no-output diagnosis is unchanged.
+  defp stalled(output_lines) do
+    count = length(output_lines)
+
+    summary =
+      if blank_output?(output_lines) do
+        "agent produced no output within the watchdog window (possible hang)"
+      else
+        "agent stopped producing output within the watchdog window " <>
+          "(#{count} line(s) seen, then silence — possible hang)"
+      end
+
+    %__MODULE__{
+      category: :stalled,
+      summary: summary,
+      remediation:
+        "Inspect the worker's transcript; if genuinely hung, stop and re-dispatch the task.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc """
+  Build a `:preflight_timeout` reason (bd-svczq4): the dispatch's **auth
+  pre-flight probe** outran its watchdog.
+
+  Synthesized by `Wardmast.Agents.Preflight`, never by `classify/2`. A pre-flight
+  is not a worker: there is no transcript to inspect, no partial work to
+  preserve, and "re-dispatch the task" is not remediation — re-dispatching is
+  what the operator was trying to do. So this carries its own summary (what the
+  probe was actually observed doing) and its own remediation (the probe's own
+  config levers).
+
+  `opts`:
+    * `:timeout_ms` — the watchdog that fired.
+    * `:elapsed_ms` — how long the probe actually ran before it fired.
+    * `:lines` — the output lines captured before the deadline (default `[]`).
+    * `:provider` — the adapter's provider, when known.
+  """
+  @spec preflight_timeout(keyword()) :: t()
+  def preflight_timeout(opts \\ []) do
+    timeout_ms = Keyword.get(opts, :timeout_ms)
+    elapsed_ms = Keyword.get(opts, :elapsed_ms)
+    lines = Keyword.get(opts, :lines) || []
+    provider = Keyword.get(opts, :provider)
+
+    who = if is_binary(provider) and provider != "", do: "#{provider} ", else: ""
+
+    observed =
+      case length(lines) do
+        0 -> "it had produced no output yet"
+        n -> "it was mid-flight, having produced #{n} line(s) of output"
+      end
+
+    %__MODULE__{
+      category: :preflight_timeout,
+      summary:
+        "#{who}auth pre-flight probe timed out after #{ms(elapsed_ms)}" <>
+          " (watchdog #{ms(timeout_ms)}) — #{observed}. The probe was terminated;" <>
+          " this is the pre-flight itself, not a worker.",
+      remediation:
+        "No worker ran and nothing is hung. Raise this adapter's probe watchdog " <>
+          "(`config :wardmast, Wardmast.Agents.Preflight, timeout_ms_by_provider: " <>
+          "%{\"#{provider || "<provider>"}\" => ms}`) if the CLI is legitimately slow to " <>
+          "start, or check the CLI by hand. By default a pre-flight timeout is advisory " <>
+          "only — the adapter's expiry state is left exactly as it was, so no dispatch is " <>
+          "refused because of it (`on_timeout: :refuse` records it as a probe failure instead).",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  defp ms(nil), do: "?ms"
+  defp ms(n) when is_integer(n), do: "#{n}ms"
+  defp ms(n), do: "#{n}"
+
+  @pre_agent_categories [
+    :spawn_failed,
+    :placement_refused,
+    :container_create_failed,
+    :spawn_exec_failed
+  ]
+
+  @doc """
+  The `stop_category` names (strings, as stored on the run) of a run that ended
+  before its agent started (bd-amm00p): a redispatch after one is placed afresh.
+  """
+  @spec pre_agent_categories() :: [String.t()]
+  def pre_agent_categories, do: Enum.map(@pre_agent_categories, &Atom.to_string/1)
+
+  @doc """
+  Build a `:spawn_failed` reason (bd-bi5pn0): a `Dispatch.dispatch/2` step
+  after `start_worker/3` failed, before any agent subprocess ever ran. Unlike
+  `classify/2` this isn't derived from an exit status — there is no
+  process/port to inspect — so the dispatch error term itself is folded into
+  the summary.
+  """
+  @spec spawn_failed(term()) :: t()
+  def spawn_failed(dispatch_error) do
+    %__MODULE__{
+      category: :spawn_failed,
+      summary: "worker spawn failed after registration: #{inspect(dispatch_error)}",
+      remediation:
+        "A dispatch step failed after the worker was registered (often a transient " <>
+          "network/VPN outage). Investigate the error above, then re-dispatch the task.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc """
+  Build a `:tampered_clone` reason (bd-6t7u81): the worker replaced the `.git`
+  of its private clone at `path`, and `why` is what `PrivateClone` found.
+  """
+  @spec tampered_clone(String.t(), String.t()) :: t()
+  def tampered_clone(path, why) when is_binary(path) and is_binary(why) do
+    %__MODULE__{
+      category: :tampered_clone,
+      summary:
+        "the worker replaced the .git of its checkout #{path} (#{why}) — the tree is not " <>
+          "trusted, so nothing was diffed, reviewed or merged from it",
+      remediation:
+        "Do NOT merge or re-run git in #{path} by hand: a replacement .git can carry a " <>
+          "config or hook that runs code as the host user. The original .git was put back " <>
+          "when it could be found, and the replacement is kept beside it as .git.tampered " <>
+          "for inspection (read it as data, never `cd` in and run git). Establish what the " <>
+          "worker was doing before re-dispatching the task.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc """
+  Build a `:workspace_destroyed` reason (bd-b6noq9): the run's provisioned
+  workspace is gone from disk while the run is still alive.
+
+  `path` is the directory that went missing and `kind` says which role it
+  played (`:worktree` or `:repo`). Both are named in the summary so the
+  coordinator escalation identifies the destroyed root exactly, instead of the
+  four differently-worded free-text pages that #1930 was raised from.
+  """
+  @spec workspace_destroyed(:worktree | :repo, String.t()) :: t()
+  def workspace_destroyed(kind, path) when kind in [:worktree, :repo] and is_binary(path) do
+    what =
+      case kind do
+        :worktree -> "worktree"
+        :repo -> "repo checkout"
+      end
+
+    %__MODULE__{
+      category: :workspace_destroyed,
+      summary:
+        "the run's #{what} #{path} was provisioned but no longer exists — the workspace " <>
+          "was destroyed while the run was still alive, so there is no checkout to " <>
+          "commit, review, rebase or push from",
+      remediation:
+        "Do NOT resume or re-dispatch blindly: the per-task branch may have existed only " <>
+          "inside the destroyed root, in which case the work is unrecoverable. First " <>
+          "establish whether any copy survives (a pushed remote, another checkout), then " <>
+          "find what deleted #{path} while the run owned it — an automatic /tmp sweep, a " <>
+          "test fixture teardown racing a live run, or a manual cleanup — before re-running " <>
+          "the task from scratch.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc """
+  Build a `:memory_cap_exceeded` reason (bd-6zuoo6): the worker's memory-capped
+  scope reported `Result=oom-kill`. `info` is `MemoryScope.outcome/2`'s map
+  (`:max` the configured cap, `:peak` the scope's high-water mark in bytes or
+  `nil`).
+  """
+  @spec memory_cap_exceeded(%{max: String.t(), peak: integer() | nil}, integer() | nil) :: t()
+  def memory_cap_exceeded(%{max: max} = info, exit_status) do
+    peak =
+      case Map.get(info, :peak) do
+        bytes when is_integer(bytes) -> ", peak #{format_bytes(bytes)}"
+        _ -> ""
+      end
+
+    %__MODULE__{
+      category: :memory_cap_exceeded,
+      summary:
+        "memory cap exceeded: the worker's process tree hit its per-worker limit " <>
+          "(MemoryMax=#{max}#{peak}) and was OOM-killed — the agent and everything it had " <>
+          "spawned (typically a runaway `mix test` BEAM) were stopped; the server was not",
+      remediation:
+        "Find what grew without bound (the run's transcript names the last command) and " <>
+          "fix or narrow it. Re-dispatching the same work will usually hit the cap again. " <>
+          "If the workload is legitimately large, raise WARDMAST_WORKER_MEMORY_MAX " <>
+          "(e.g. 24G or 60%) and restart the server. The OOM is attributable via the " <>
+          "run's cgroup scope (worker_runs.cgroup_scopes).",
+      exit_status: exit_status,
+      signal: signal_for(exit_status)
+    }
+  end
+
+  @doc """
+  Build a `:spend_cap` reason (G19, guardrail-profiles §3.3): a run of a
+  `park`-action tier (`quarantine` / `probation`) crossed the tier's token or
+  wall-clock cap and was stopped by `Wardmast.Guardrails.SpendPatrol`.
+
+  `info` is `%{cap: :tokens | :wall_clock_s, limit: n, measured: n, tier: tier}`.
+  """
+  @spec spend_cap(%{
+          cap: :tokens | :wall_clock_s,
+          limit: number(),
+          measured: number(),
+          tier: atom()
+        }) :: t()
+  def spend_cap(%{cap: cap, limit: limit, measured: measured, tier: tier}) do
+    %__MODULE__{
+      category: :spend_cap,
+      summary:
+        "spend cap reached: the #{tier}-tier run crossed its #{cap_label(cap)} cap " <>
+          "(#{spend_cap_figures(%{cap: cap, limit: limit, measured: measured})}) and was " <>
+          "parked — the agent was stopped and its worktree kept",
+      remediation:
+        "Look at the transcript for what spent it (a busy-wait or a polling loop is the " <>
+          "usual cause). If the work is legitimate, raise the tier's spend cap " <>
+          "(`config :wardmast, :guardrail_tiers`, or a subject-rule `spend` override), or " <>
+          "re-route the ticket to a more trusted subject. Resuming the same subject on the " <>
+          "same ticket will trip the cap again.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc """
+  Build a `:trust_suspended` reason (G18, guardrail-profiles §6.3): the run's
+  subject was suspended after a critical guardrail event, and every run of it in
+  flight is parked until the coordinator decides.
+
+  `info` is `%{subject: "provider/model", kind: event_kind, run_id: run}`, the
+  run being the one the event was recorded on.
+  """
+  @spec trust_suspended(%{subject: String.t(), kind: String.t(), run_id: String.t() | nil}) ::
+          t()
+  def trust_suspended(%{subject: subject, kind: kind} = info) do
+    %__MODULE__{
+      category: :trust_suspended,
+      summary:
+        "subject #{subject} was suspended after a critical guardrail event " <>
+          "(#{kind} on run #{info[:run_id] || "?"}) and this run was parked — the agent " <>
+          "was stopped and its worktree kept",
+      remediation:
+        "The coordinator confirms the suspension (`arb trust confirm #{subject}`: the " <>
+          "subject drops to quarantine) or dismisses it as a false positive " <>
+          "(`arb trust dismiss #{subject} --reason …`: its tier returns). Re-dispatch " <>
+          "the ticket after that; a suspended subject is not eligible for any work.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc "A tripped spend cap's figures for a page, e.g. 7.7M tokens against a cap of 3.0M tokens."
+  @spec spend_cap_figures(%{
+          :cap => :tokens | :wall_clock_s,
+          :limit => number(),
+          :measured => number(),
+          optional(atom()) => term()
+        }) ::
+          String.t()
+  def spend_cap_figures(%{cap: cap, limit: limit, measured: measured}),
+    do: "#{format_cap(cap, measured)} against a cap of #{format_cap(cap, limit)}"
+
+  @doc "The cap's name as it reads in a page: token or wall-clock."
+  @spec spend_cap_label(:tokens | :wall_clock_s) :: String.t()
+  def spend_cap_label(cap), do: cap_label(cap)
+
+  defp cap_label(:tokens), do: "token"
+  defp cap_label(:wall_clock_s), do: "wall-clock"
+
+  defp format_cap(:tokens, n) when n >= 1_000_000, do: "#{Float.round(n / 1_000_000, 1)}M tokens"
+  defp format_cap(:tokens, n) when n >= 1_000, do: "#{Float.round(n / 1_000, 1)}k tokens"
+  defp format_cap(:tokens, n), do: "#{n} tokens"
+  defp format_cap(:wall_clock_s, s), do: "#{div(round(s), 60)}m"
+
+  @doc """
+  Build a `:node_lost` reason (RW12, `docs/design/remote-workers.md` §10.3): the node
+  a run was placed on stopped answering for `lost_after` seconds (or never came back
+  after a primary restart), so the run is **interrupted, not failed**, and no
+  resume attempt is consumed. Not a signal and not an agent failure: nothing in the
+  output tail says anything about why, so it is never classified from one.
+  """
+  @spec node_lost(String.t()) :: t()
+  def node_lost(node_name) when is_binary(node_name) do
+    %__MODULE__{
+      category: :node_lost,
+      summary:
+        "node lost: #{node_name} stopped answering while this run was placed on it; " <>
+          "the run was interrupted (not failed) and any work since its last checkpoint " <>
+          "on the node is only recoverable if the node returns",
+      remediation:
+        "Nothing to fix in the task. The run resumes from the last checkpoint in the home " <>
+          "clone, on another node or locally, without consuming a resume attempt. If the " <>
+          "node comes back, what it retained is salvageable; see `arb node show #{node_name}`.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc """
+  Build a `:pod_disrupted` reason (K12, `docs/design/remote-workers.md` §16 amendment A5): the
+  pod a run was placed on was evicted, preempted or deleted from outside the run. The
+  cluster took the run away; nothing the agent did. It carries the `node_lost` policy:
+  **interrupted, not failed, no resume attempt consumed**, re-dispatched through placement.
+  """
+  @spec pod_disrupted(String.t()) :: t()
+  def pod_disrupted(node_name) when is_binary(node_name) do
+    %__MODULE__{
+      category: :pod_disrupted,
+      summary:
+        "pod disrupted: the pod this run was placed on at #{node_name} was evicted, " <>
+          "preempted or deleted from outside; the run was interrupted (not failed) and any " <>
+          "work since its last checkpoint is only recoverable from that checkpoint",
+      remediation:
+        "Nothing to fix in the task. The run resumes from the last checkpoint in the home " <>
+          "clone, on another node or locally, without consuming a resume attempt. If pods " <>
+          "keep being disrupted, look at the cluster's node pressure and priority classes " <>
+          "(`arb node show #{node_name}`).",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc """
+  Build a `:preempted` reason (bd-bmecet): the cluster's scheduler preempted the pod this run
+  was placed on to make room for a higher-priority pod. Cluster contention, **not a node
+  failure**: the node and its controller are fine. `detail` is the scheduler's own message
+  (naming the preempting pod) when the pod's status carried one. Same policy as `node_lost`:
+  **interrupted, not failed, no resume attempt consumed**, re-dispatched through placement.
+  """
+  @spec preempted(String.t(), String.t() | nil) :: t()
+  def preempted(node_name, detail) when is_binary(node_name) do
+    %__MODULE__{
+      category: :preempted,
+      summary:
+        "preempted: the pod this run was placed on at #{node_name} was preempted by the " <>
+          "cluster scheduler#{detail_suffix(detail)} (cluster contention, not a node failure); " <>
+          "the run was interrupted (not failed) and any work since its last checkpoint is " <>
+          "only recoverable from that checkpoint",
+      remediation:
+        "Nothing to fix in the task. The run resumes from the last checkpoint in the home " <>
+          "clone, on another node or locally, without consuming a resume attempt. If it keeps " <>
+          "happening, the cluster is busy with higher-priority pods: raise the worker " <>
+          "PriorityClass above the competing workload or give the node more capacity " <>
+          "(`arb node show #{node_name}`).",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc """
+  Build a `:placement_refused` reason (K12, amendment A3): the node answered the assign with
+  `refuse{reason}` (`no_capacity`, `unschedulable`, `image_unavailable`, `bad_spec`,
+  `service_not_ready`), so the run never started. It is a **hold**, not a failure: interrupted, no resume attempt consumed.
+  """
+  @spec placement_refused(String.t(), String.t(), String.t() | nil) :: t()
+  def placement_refused(node_name, reason, detail) when is_binary(node_name) do
+    %__MODULE__{
+      category: :placement_refused,
+      summary:
+        "node #{node_name} refused the run (#{reason}#{detail_suffix(detail)}); it never " <>
+          "started and the task is held for another attempt, not failed",
+      remediation:
+        "Nothing to fix in the task. It is queued again and starts when a node (or the " <>
+          "primary, per `worker.placement`) can take it; see `arb node show #{node_name}`.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  defp detail_suffix(detail) when is_binary(detail) and detail != "", do: ": " <> detail
+  defp detail_suffix(_), do: ""
+
+  defp format_bytes(bytes) do
+    gib = bytes / 1_073_741_824
+    "#{:erlang.float_to_binary(gib, decimals: 1)} GiB"
+  end
+
+  @doc """
+  A compact one-line label for logs / message subjects, e.g.
+  `"credentials expired (exit 1)"`.
+  """
+  @spec label(t()) :: String.t()
+  # Pre-existing complexity 18 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  def label(%__MODULE__{category: category} = reason) do
+    base =
+      case category do
+        :auth_expired ->
+          "credentials expired"
+
+        :quota_exhausted ->
+          "5h usage limit reached"
+
+        :credit_exhausted ->
+          "credits exhausted"
+
+        :rate_limited ->
+          "rate-limited"
+
+        :session_not_found ->
+          "session not found — resume in briefing mode (--mode briefing)"
+
+        :gateway_error ->
+          "gateway error (proxy/upstream)"
+
+        :max_turns ->
+          "hit the max-turns limit (agent ran out of turns)"
+
+        :context_thrash ->
+          "context window thrashed (autocompact loop)"
+
+        :killed ->
+          "killed by signal #{reason.signal}"
+
+        :memory_cap_exceeded ->
+          "memory cap exceeded (worker process tree OOM-killed)"
+
+        :spend_cap ->
+          "spend cap reached (parked by the guardrail tier)"
+
+        :trust_suspended ->
+          "subject suspended after a critical guardrail event (parked)"
+
+        :spawn_exec_failed ->
+          "spawn failed (no output — exec error)"
+
+        :container_create_failed ->
+          "container creation failed (infra, before the agent started)"
+
+        :crashed ->
+          "crashed"
+
+        :stream_schema_drift ->
+          "agent CLI stream schema not understood (harness bug)"
+
+        :agent_print_timeout ->
+          "agy print-mode turn timed out (partial output only)"
+
+        :exited_without_done ->
+          "exited without completing"
+
+        :async_wait_abandoned ->
+          "abandoned an async wait (background task never drained)"
+
+        :sentinel_in_tool_output ->
+          "printed `arb done` only in tool output (not the agent's message)"
+
+        :permission_denied ->
+          "strict permission policy denied a command (agy ended the turn)"
+
+        :awaiting_operator ->
+          "stopped awaiting the operator (a permission request is pending)"
+
+        :stalled ->
+          "stalled (no output)"
+
+        :preflight_timeout ->
+          "auth pre-flight probe timed out"
+
+        :missing_worktree ->
+          "no worktree provisioned (nothing to integrate)"
+
+        :workspace_destroyed ->
+          "workspace destroyed mid-run (worktree gone from disk)"
+
+        :tampered_clone ->
+          "the worker replaced its clone's .git (refused, not trusted)"
+
+        :spawn_failed ->
+          "spawn failed (dispatch error after worker registration)"
+
+        :model_unavailable ->
+          "model unavailable for this account"
+
+        :node_lost ->
+          "node lost (run interrupted)"
+
+        :pod_disrupted ->
+          "pod disrupted (run interrupted)"
+
+        :preempted ->
+          "pod preempted by the cluster scheduler (run interrupted)"
+
+        :placement_refused ->
+          "node refused the run (held)"
+
+        :egress_denied ->
+          "egress denied by the worker jail (host not allowlisted)"
+      end
+
+    case reason.exit_status do
+      nil -> base
+      code -> "#{base} (exit #{code})"
+    end
+  end
+
+  @doc """
+  The `:permission_denied` stop (bd-7wymls): an agy turn ended by a headless
+  permission soft-deny under `:strict`. `denied` is the denied command line
+  when the session could attribute one, else `nil`.
+  """
+  @spec permission_denied(String.t() | nil) :: t()
+  def permission_denied(denied) do
+    what = if is_binary(denied) and denied != "", do: "command `#{denied}`", else: "an action"
+
+    %__MODULE__{
+      category: :permission_denied,
+      summary:
+        "strict policy denied #{what}, and headless agy ended the turn instead of " <>
+          "letting the agent continue without it",
+      remediation:
+        "Not an agent failure: the workspace's `:strict` permissions do not allow it. " <>
+          "The session is resumed in place and told not to retry; if the command is " <>
+          "genuinely needed, add a `permissions.allow` rule for it.",
+      exit_status: 0,
+      signal: nil
+    }
+  end
+
+  @doc """
+  The `:awaiting_operator` stop (#1299): a run that asked for `pending`
+  permissions and exited cleanly without `arb done`. The worker explained what
+  it needed and stopped; it is waiting on a person, so it is not a crash.
+  """
+  @spec awaiting_operator([String.t()]) :: t()
+  def awaiting_operator(pending) when is_list(pending) do
+    %__MODULE__{
+      category: :awaiting_operator,
+      summary:
+        "agent stopped without `arb done` because it is waiting on a permission request " <>
+          "that was recorded, not granted (#{Enum.join(pending, ", ")})",
+      remediation:
+        "Not a crash, and a resume would only repeat it: the environment has to change " <>
+          "first. Grant or deny the pending permission (or fix whatever the worker " <>
+          "reported it needed), then resume or re-dispatch the ticket.",
+      exit_status: 0,
+      signal: nil
+    }
+  end
+
+  @doc """
+  Serialize to a plain map for stashing in worker `meta` / persisting in a
+  message body. Keeps the struct out of any place that must survive a term
+  round-trip (PubSub, Ash JSON columns).
+  """
+  @spec to_map(t()) :: map()
+  def to_map(%__MODULE__{} = reason) do
+    %{
+      category: reason.category,
+      summary: reason.summary,
+      remediation: reason.remediation,
+      exit_status: reason.exit_status,
+      signal: reason.signal,
+      retry_after: reason.retry_after
+    }
+  end
+
+  # ---- internals ---------------------------------------------------------
+
+  # The agent runs under `sh -c 'exec "$@"'`, so a child terminated by signal N
+  # surfaces as exit status `128 + N` (POSIX shell convention). Map that band
+  # back to the signal number so the escalation can name it. Codes outside the
+  # band are ordinary exit codes (no signal).
+  defp signal_for(status) when is_integer(status) and status > 128 and status < 160,
+    do: status - 128
+
+  defp signal_for(_), do: nil
+
+  # Scan only the tail — the error/auth message a CLI prints on a failed spawn
+  # is among the last lines, and bounding the scan keeps a chatty 1000-line
+  # buffer from making the regex pass expensive.
+  @tail_lines 80
+
+  # bd-35ujxv: a worker's own tool output (most commonly `mix test` run via
+  # Bash) routinely contains provider-error-shaped vocabulary verbatim —
+  # Wardmast's own test suite logs fixture strings like "API Error: 401
+  # Invalid authentication credentials" and "AuthHold: Claude dispatch hold
+  # OPEN" — which is not evidence the *worker's own* session hit that error.
+  # Every display-line producer (`ClaudeSession.tool_result_lines/1`,
+  # `Gemini.Stream`'s tool_result/step clauses, `Codex.Stream`'s
+  # exec_command_end/command_execution clauses) tags EVERY line of a tool
+  # result — header and body alike — with the "⏴ " glyph prefix, so those
+  # lines are excluded here before any signature regex runs.
+  # A provider's own auth/quota/credit/rate-limit/gateway failure is never
+  # reported as a tool result — it surfaces as the CLI's own `result` event,
+  # assistant text, or raw stderr, none of which carry this prefix — so a
+  # genuine failure is unaffected (see the "still classifies" tests in
+  # `stop_reason_test.exs`).
+  @tool_result_prefix "⏴ "
+
+  # The summary is persisted as the run's `failure_reason`, and
+  # `Wardmast.Quota.GrokLedger.exhaustion/1` reads the server's own count back
+  # off it, so the `tokens (actual/limit): N/M` wording is part of the contract.
+  defp grok_free_usage_summary(haystack) do
+    detail =
+      case Regex.named_captures(@grok_free_usage_signature, haystack) do
+        %{"detail" => detail} -> detail
+        _ -> ""
+      end
+
+    model =
+      case Regex.named_captures(@grok_free_usage_model, detail) do
+        %{"model" => model} -> " for #{model}"
+        _ -> ""
+      end
+
+    counts =
+      case Regex.named_captures(@grok_free_usage_counts, detail) do
+        %{"actual" => actual, "limit" => limit} ->
+          ", tokens (actual/limit): #{actual}/#{limit}"
+
+        _ ->
+          ""
+      end
+
+    "grok free-tier usage exhausted#{model} — rolling 24h window#{counts}"
+  end
+
+  defp unavailable_model(haystack) do
+    case Regex.named_captures(@model_unavailable_signature, haystack) do
+      %{"a" => a, "b" => b, "c" => c} -> Enum.find([a, b, c], "(unknown)", &(&1 != ""))
+      _ -> "(unknown)"
+    end
+  end
+
+  # The CLI finished its own work and said so: exit 0 AND its terminal event reported
+  # success. Anything auth/credit/rate-limit/gateway-shaped earlier in such a transcript is
+  # prose the run itself produced (an assistant message or a tool_use summary about a file
+  # that mentions "401" or "token expired"; `signature_haystack/1` can only drop tool
+  # *results*), not the CLI failing — so it must not outrank the clean end (bd-czvxfs: the
+  # first cluster run, a k8s-runbook edit, was reopened as `:auth_expired` on exactly that).
+  # A real CLI auth/limit failure ends with an `is_error` result (rendered `session error`)
+  # and a non-zero exit, so it is unaffected.
+  defp clean_completion?(0, output_lines, "codex"),
+    do: Enum.any?(output_lines, &String.contains?(&1, "codex session complete"))
+
+  defp clean_completion?(0, output_lines, provider) when provider in [nil, "claude"] do
+    marker =
+      output_lines
+      |> Enum.filter(&claude_session_marker?/1)
+      |> List.last()
+
+    match?("⚙ claude session success" <> _, marker) or
+      match?("⚙ claude session done" <> _, marker)
+  end
+
+  defp clean_completion?(_exit_status, _output_lines, _provider), do: false
+
+  # bd-5wm92s: the same verdict from the session's decoded `result` event (its `:usage`
+  # map, `ClaudeSession.absorb_usage/2`), for when the rendered `⚙ claude session success`
+  # line is not in `output_lines`: the in-memory buffer keeps the newest 1000 lines, and a
+  # pod's bridge can fill it with socat/TLS noise after the result (cluster canary #3, run
+  # 2b2bd5ce, ended "gateway error" with a clean result and exit 0). The event is the CLI's
+  # own record of how the turn ended, so no trailing log line can contradict it.
+  defp clean_result?(0, provider, %{} = result) when provider in [nil, "claude"] do
+    raw = Map.get(result, :raw) || %{}
+
+    Map.get(result, :result_subtype) == "success" and Map.get(result, :is_error) in [false, nil] and
+      is_nil(raw["api_error_status"]) and raw["stop_reason"] in [nil, "end_turn"]
+  end
+
+  defp clean_result?(_exit_status, _provider, _result), do: false
+
+  # bd-bjewzj: the failure verdict carried by a Claude `result` event's structured fields,
+  # or nil when it carries none (so the text heuristics decide). 401 is the only status read
+  # as auth (a 403 may be a plain permission refusal); 429/529 are rate limiting, 402 is
+  # billing, any other 5xx is the transient upstream class.
+  defp structured_failure(provider, %{} = result) when provider in [nil, "claude"] do
+    raw = Map.get(result, :raw) || %{}
+
+    cond do
+      raw["authentication_failed"] == true or raw["error"] == "authentication_failed" ->
+        :auth_expired
+
+      status_failure = status_failure(raw["api_error_status"]) ->
+        status_failure
+
+      raw["terminal_reason"] == "max_turns" or raw["subtype"] == "error_max_turns" ->
+        :max_turns
+
+      true ->
+        nil
+    end
+  end
+
+  defp structured_failure(_provider, _result), do: nil
+
+  defp status_failure(401), do: :auth_expired
+  defp status_failure(402), do: :credit_exhausted
+  defp status_failure(status) when status in [429, 529], do: :rate_limited
+  defp status_failure(status) when is_integer(status) and status in 500..599, do: :gateway_error
+  defp status_failure(_status), do: nil
+
+  defp structured_reason(:auth_expired, exit_status, signal) do
+    %__MODULE__{
+      category: :auth_expired,
+      summary:
+        "agent could not authenticate (the CLI's result reported an authentication failure)",
+      remediation:
+        "Re-authenticate the agent CLI (Claude: refresh ~/.claude/.credentials.json via " <>
+          "`claude` login), then re-dispatch.",
+      exit_status: exit_status,
+      signal: signal
+    }
+  end
+
+  defp structured_reason(:credit_exhausted, exit_status, signal) do
+    %__MODULE__{
+      category: :credit_exhausted,
+      summary: "agent ran out of credits (the CLI's result reported API status 402)",
+      remediation: "Top up the provider account or rotate to a funded API key, then re-dispatch.",
+      exit_status: exit_status,
+      signal: signal
+    }
+  end
+
+  defp structured_reason(:rate_limited, exit_status, signal) do
+    %__MODULE__{
+      category: :rate_limited,
+      summary:
+        "agent was rate-limited / the API was overloaded (the CLI's result reported 429/529)",
+      remediation: "Usually transient — retry with backoff, or reduce concurrent workers.",
+      exit_status: exit_status,
+      signal: signal
+    }
+  end
+
+  defp structured_reason(:gateway_error, exit_status, signal) do
+    %__MODULE__{
+      category: :gateway_error,
+      summary: "the API returned a 5xx error (the CLI's result reported an upstream failure)",
+      remediation:
+        "Transient upstream failure. Auto-resuming the session — if retries are exhausted, " <>
+          "check proxy logs.",
+      exit_status: exit_status,
+      signal: signal
+    }
+  end
+
+  defp structured_reason(:max_turns, exit_status, signal) do
+    %__MODULE__{
+      category: :max_turns,
+      summary: "agent hit its max-turns limit before finishing (the CLI's result reported it)",
+      remediation:
+        "Retrying identically hits the same limit. Split the task, raise the CLI's " <>
+          "max-turns setting, or resume with narrower instructions.",
+      exit_status: exit_status,
+      signal: signal
+    }
+  end
+
+  # `ClaudeSession`'s init / result display lines (oldest-first): the last one tells
+  # whether the final session started and never finished, errored, or succeeded.
+  defp claude_session_marker?(line) when is_binary(line),
+    do: String.starts_with?(line, "⚙ claude session ")
+
+  defp claude_session_marker?(_line), do: false
+
+  defp signature_haystack(output_lines) do
+    output_lines
+    |> Enum.reject(&(tool_result_line?(&1) or bridge_noise_line?(&1) or undecoded_json_line?(&1)))
+    |> Enum.take(-@tail_lines)
+    |> Enum.join("\n")
+  end
+
+  # bd-1t1uhd: a stream event the session could not decode (a pod stream line that kept its
+  # kubelet timestamp, or one cut mid-object) reaches the transcript raw, with the tool-result
+  # text inside it and none of the "⏴ " tagging. It is the CLI's JSON, not the CLI failing,
+  # so it carries no signature. An optional leading RFC 3339 stamp is allowed for.
+  @raw_json_line ~r/\A(?:\d{4}-\d\d-\d\dT\S+ )?\{"/
+
+  defp undecoded_json_line?(line) when is_binary(line) do
+    Regex.match?(@raw_json_line, line) and match?({:error, _}, Jason.decode(line))
+  end
+
+  defp undecoded_json_line?(_line), do: false
+
+  defp tool_result_line?(line) when is_binary(line),
+    do: String.starts_with?(line, @tool_result_prefix)
+
+  defp tool_result_line?(_line), do: false
+
+  # bd-1ppeua: the pod bridge's `socat[<pid>] <level> …` diagnostics share the agent's
+  # merged stdout/stderr stream, but they are transport chatter (every cluster run ends
+  # with `SSL_write(): … unexpected eof`), never the agent CLI failing. They carry no
+  # signature; a real failure surfaces as the CLI's own `result` event or stderr.
+  # bd-5wm92s: the same stream also carries the OpenSSL error text socat prints on its own
+  # lines and the TLS peer's `CLIENT ALERT: …`, and a log shipper may put a tag or
+  # timestamp ahead of the `socat[` token, so the match allows a short prefix.
+  @bridge_noise ~r/^(?:\S+ ){0,3}socat\[\d+\] [EWNID] |^SSL_write\(\)|^OpenSSL: error:|^CLIENT ALERT: /
+
+  defp bridge_noise_line?(line) when is_binary(line), do: Regex.match?(@bridge_noise, line)
+
+  defp bridge_noise_line?(_line), do: false
+
+  # bd-11abk2: an exec() failure (bad argv, E2BIG, missing binary) happens
+  # before the child process runs, so it can produce no stdout/stderr at
+  # all — not even a blank line. Genuine crashes almost always leave *some*
+  # trace. `output_lines` may contain empty-string entries from the port's
+  # line-buffering, so trim before checking for emptiness.
+  # bd-325sps: libpod / OCI-runtime failures that happen while the container is
+  # being created, before the agent runs. `podman run` exits 126 (125 for its own
+  # errors) and prints only `Error: ...` lines. Requiring every non-blank line to
+  # be such an error keeps an agent that merely quotes the phrase a crash.
+  @container_create_exit_statuses [125, 126]
+  @container_create_signature ~r/container creation timeout|internal libpod error|OCI runtime create|runtime create failed|error creating container/i
+
+  @doc """
+  True when `exit_status` and `output_lines` (either order) show `podman run`
+  failing to create the container: exit 125/126 and nothing but `Error:` lines,
+  at least one of them a libpod/OCI creation failure.
+  """
+  @spec container_create_failure?(integer() | nil, [String.t()]) :: boolean()
+  def container_create_failure?(exit_status, output_lines)
+      when exit_status in @container_create_exit_statuses and is_list(output_lines) do
+    lines = non_blank_lines(output_lines)
+
+    lines != [] and Enum.all?(lines, &String.starts_with?(&1, "Error")) and
+      Enum.any?(lines, &Regex.match?(@container_create_signature, &1))
+  end
+
+  def container_create_failure?(_exit_status, _output_lines), do: false
+
+  defp non_blank_lines(output_lines) do
+    output_lines
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp creation_error_line(output_lines) do
+    output_lines
+    |> non_blank_lines()
+    |> Enum.find(&Regex.match?(@container_create_signature, &1))
+    |> String.slice(0, 200)
+  end
+
+  defp blank_output?(output_lines) do
+    Enum.all?(output_lines, fn line -> is_binary(line) and String.trim(line) == "" end)
+  end
+
+  # Codex only: did the run's LAST tool call echo the sentinel itself
+  # (`printf 'arb done\n'`) and nothing run after it? `output_lines` is
+  # oldest-first. Scoped to the final command block (its `⏵ $` header through
+  # the lines up to the end, which may include trailing agent prose), and the
+  # command text must itself be an echo/printf of the sentinel — so a grep that
+  # merely printed `arb done`, or any earlier command, never qualifies.
+  defp sentinel_in_tool_output?(output_lines, "codex") do
+    case output_lines |> Enum.filter(&is_binary/1) |> last_command_block() do
+      [header | rest] ->
+        Regex.match?(@sentinel_echo_command, header) and
+          Enum.any?(rest, &Regex.match?(@sentinel_tool_line, &1))
+
+      [] ->
+        false
+    end
+  end
+
+  defp sentinel_in_tool_output?(_output_lines, _provider), do: false
+
+  defp last_command_block(lines) do
+    case Enum.take(lines, -@async_arm_window * 4)
+         |> Enum.reverse()
+         |> Enum.split_while(&(not String.starts_with?(&1, "⏵ $"))) do
+      {_, []} -> []
+      {tail, [header | _]} -> [header | Enum.reverse(tail)]
+    end
+  end
+
+  # bd-606zlr: did the run end with an asynchronous wait armed and never
+  # drained? `output_lines` is oldest-first (every caller reverses its
+  # newest-first accumulator before calling in), so the terminal window is the
+  # LAST @async_arm_window entries.
+  #
+  # "Abandoned" means: an arm marker appears in that window, and nothing after
+  # it drains the thing it armed. The drain check is what keeps the correct
+  # pattern — background a command, then block on `TaskOutput` in the same
+  # turn — from being misread as this failure.
+  defp abandoned_async_wait?(output_lines, provider) do
+    window = Enum.take(output_lines, -@async_arm_window)
+    signature = async_arm_signature_for(provider)
+
+    case last_index_matching(window, signature) do
+      nil ->
+        false
+
+      idx ->
+        window
+        |> Enum.drop(idx + 1)
+        |> Enum.any?(&Regex.match?(@async_drain_signature, &1))
+        |> Kernel.not()
+    end
+  end
+
+  # bd-1zz5mn: resolve the provider string carried on the session (`"gemini"`,
+  # `"codex"`, `nil`/`"claude"`) to its adapter's own async-arm markers,
+  # falling back to Claude's when the provider is unknown or its adapter
+  # hasn't declared one yet — the same "optional, caller-side default"
+  # convention `async_tool_instruction/0` already uses.
+  defp async_arm_signature_for(provider) do
+    adapter =
+      case provider do
+        "gemini" -> Wardmast.Agents.Gemini
+        "codex" -> Wardmast.Agents.Codex
+        _ -> Wardmast.Agents.Claude
+      end
+
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :async_arm_signature, 0) do
+      # bd-1zz5mn: `apply/3` (not a direct remote call) deliberately, so the
+      # compiler's xref pass doesn't flag adapters (e.g. Codex today) that
+      # haven't implemented this optional callback yet — the `function_exported?`
+      # guard above is what actually protects the call at runtime.
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(adapter, :async_arm_signature, [])
+    else
+      @default_async_arm_signature
+    end
+  end
+
+  defp last_index_matching(lines, regex) do
+    lines
+    |> Enum.with_index()
+    |> Enum.reduce(nil, fn {line, idx}, acc ->
+      if is_binary(line) and Regex.match?(regex, line), do: idx, else: acc
+    end)
+  end
+
+  # Opportunistically pull the unix-epoch-seconds reset time the Claude CLI
+  # appends to its usage-limit message ("...reached|1735689600"). Returns nil
+  # when the message doesn't carry one (older CLI versions, or a paraphrase
+  # like "5-hour limit reached, try again later") — the caller falls back to a
+  # generic "wait for the window to reset" remediation.
+  # The `|<epoch>` form is unambiguous, so it wins when both are present; the
+  # wall-clock form (bd-cfhj7z) is the fallback.
+  defp retry_after_from(haystack) do
+    epoch_reset_from(haystack) || wallclock_reset_from(haystack) ||
+      dated_reset_from(haystack)
+  end
+
+  # bd-a6vh2x: `Resets in 11m34s` is a duration from the moment the message was
+  # printed — which is about when the run stopped, so "now" is the anchor. A
+  # match with no units (`Resets in .`) is no reset time.
+  defp relative_reset_from(haystack) do
+    with %{"h" => h, "m" => m, "s" => s} <-
+           Regex.named_captures(@relative_reset_signature, haystack),
+         secs when secs > 0 <- unit_secs(h, 3600) + unit_secs(m, 60) + unit_secs(s, 1) do
+      DateTime.add(DateTime.utc_now(), secs, :second)
+    else
+      _ -> nil
+    end
+  end
+
+  defp unit_secs("", _per), do: 0
+  defp unit_secs(n, per), do: String.to_integer(n) * per
+
+  defp epoch_reset_from(haystack) do
+    with [_, secs] <- Regex.run(@quota_reset_signature, haystack),
+         {secs, _} <- Integer.parse(secs),
+         {:ok, dt} <- DateTime.from_unix(secs) do
+      dt
+    else
+      _ -> nil
+    end
+  end
+
+  # bd-cfhj7z: no tz database is bundled (the umbrella has neither :tzdata nor
+  # :tz, and Elixir's default `Calendar.UTCOnlyTimeZoneDatabase` cannot resolve
+  # "America/New_York"). We do not need one: the CLI renders that wall clock in
+  # *its own host's* local zone, and its host is this host — so the offset we
+  # need is the one the BEAM already gets from the OS's zoneinfo via
+  # `NaiveDateTime.local_now/0`.
+  #
+  # That equivalence is asserted, not assumed: when the message names a zone we
+  # only use the local offset if that name matches the host's configured zone
+  # (TZ, then the /etc/localtime symlink, then /etc/timezone). A mismatch — or
+  # a host whose zone we cannot name — yields nil, which is the pre-existing
+  # "no reset time reported" path, not a wrong one.
+  #
+  # Known bound: if a DST transition falls between now and the reset, the
+  # current offset is off by up to an hour. That is a ≤1h error twice a year
+  # against a 5h blanket default, and `quota_resume_backoff_ms/1` clamps the
+  # result to a 60s floor, so the failure mode is one early retry, not a hang.
+  #
+  # Review round 1, finding 1: `classify/2` runs at *session exit*, not when the
+  # CLI printed the phrase, and the two can be far apart (`claude session error
+  # 674.5s` in the very run this ticket cites). If the reset instant falls
+  # inside that gap, a naive "always the next occurrence" roll turns a window
+  # that has ALREADY reset into a ~24h park -- strictly worse than the 5h
+  # default it replaces. Two bounds prevent that, both resting on the fact that
+  # this wording only ever describes the 5h window (a 7-day reset carries a
+  # date, which `@quota_reset_wallclock_signature` cannot match):
+  #
+  #   * `@wallclock_past_slack_seconds` -- a candidate less than an hour behind
+  #     the local clock is the reset we just missed, not tomorrow's. It is
+  #     returned in the past, so `Wardmast.Worker.quota_resume_backoff_ms/1`
+  #     takes its 60s floor and the worker retries promptly. A wasted retry
+  #     costs one re-detect; a wrong day costs a day.
+  #   * `@wallclock_max_horizon_seconds` -- any reset that survives the roll but
+  #     lands further out than the window itself means the date guess was wrong,
+  #     so we decline entirely and the pre-existing 5h default stands. That
+  #     makes the wall-clock path never worse than the behaviour before this
+  #     branch, in either direction.
+  @wallclock_past_slack_seconds 3_600
+  @wallclock_max_horizon_seconds 6 * 3_600
+
+  # bd-2z3ogf: the weekly limit names a *date* as well as a clock time
+  # (`resets Oct 9, 2am (America/New_York)`). Same line-leading anchor, zone
+  # handling and host-zone check as the same-day form above; the year is
+  # optional and inferred. Phrasing is tolerant (optional `.`/`,`, minutes,
+  # full or abbreviated month name) because no real weekly capture has been
+  # obtained to pin it.
+  @quota_reset_dated_signature ~r/
+      ^[ \t]*you.{0,3}ve[ ]hit[ ]your[ ](?:weekly|session|usage|opus|sonnet)[ ]limit
+      [^\n]*?
+      \bresets[ \t]+(?:on[ \t]+)?(?<month>[a-z]{3,9})\.?[ \t]+(?<day>\d{1,2})(?:st|nd|rd|th)?
+      (?:,?[ \t]+(?<year>\d{4}))?,?[ \t]*(?:at[ \t]+)?
+      (?<hour>\d{1,2})(?::(?<minute>\d{2}))?[ \t]*(?<meridiem>am|pm)
+      (?<tail>[^\n]*)
+  /mix
+
+  @months ~w(jan feb mar apr may jun jul aug sep oct nov dec)
+
+  defp dated_reset_from(haystack) do
+    with %{"month" => mon, "day" => day, "hour" => raw_hour, "meridiem" => mer} = caps <-
+           Regex.named_captures(@quota_reset_dated_signature, haystack),
+         month when is_integer(month) <- month_number(mon),
+         {day, ""} <- Integer.parse(day),
+         {hour12, ""} when hour12 in 0..12 <- Integer.parse(raw_hour),
+         minute when minute in 0..59 <- parse_minute(caps["minute"]),
+         {:ok, zone} <- zone_from_tail(caps["tail"]),
+         true <- host_zone_matches?(zone),
+         local_now = NaiveDateTime.local_now(),
+         {:ok, naive} <-
+           dated_candidate(
+             local_now,
+             caps["year"],
+             month,
+             day,
+             to_24h(hour12, String.downcase(mer)),
+             minute
+           ) do
+      naive
+      |> NaiveDateTime.add(-local_utc_offset_seconds(), :second)
+      |> DateTime.from_naive!("Etc/UTC")
+    else
+      _ -> nil
+    end
+  end
+
+  # bd-2z3ogf: Codex's plain-text limit message ends `... or try again at Nov
+  # 4th, 2026 7:04 AM.` -- a local wall clock with no zone name, so the host's
+  # own offset applies (same equivalence as the forms above). The Codex stream
+  # normalizer calls this to put the date on its `usage limit reached|<epoch>`
+  # line; without it the date was dropped and every weekly stop lost its reset.
+  @codex_try_again_signature ~r/try[ ]again[ ]at[ ]+(?<month>[a-z]{3,9})\.?[ \t]+(?<day>\d{1,2})(?:st|nd|rd|th)?(?:,?[ \t]+(?<year>\d{4}))?,?[ \t]*(?:at[ \t]+)?(?<hour>\d{1,2})(?::(?<minute>\d{2}))?[ \t]*(?<meridiem>am|pm)/i
+
+  @doc false
+  @spec codex_try_again_epoch(String.t()) :: integer() | nil
+  def codex_try_again_epoch(message) when is_binary(message) do
+    with %{"month" => mon, "day" => day, "hour" => raw_hour, "meridiem" => mer} = caps <-
+           Regex.named_captures(@codex_try_again_signature, message),
+         month when is_integer(month) <- month_number(mon),
+         {day, ""} <- Integer.parse(day),
+         {hour12, ""} when hour12 in 0..12 <- Integer.parse(raw_hour),
+         minute when minute in 0..59 <- parse_minute(caps["minute"]),
+         {:ok, naive} <-
+           dated_candidate(
+             NaiveDateTime.local_now(),
+             caps["year"],
+             month,
+             day,
+             to_24h(hour12, String.downcase(mer)),
+             minute
+           ) do
+      naive
+      |> NaiveDateTime.add(-local_utc_offset_seconds(), :second)
+      |> DateTime.from_naive!("Etc/UTC")
+      |> DateTime.to_unix()
+    else
+      _ -> nil
+    end
+  end
+
+  def codex_try_again_epoch(_), do: nil
+
+  defp month_number(name) do
+    key = name |> String.downcase() |> String.slice(0, 3)
+    idx = Enum.find_index(@months, &(&1 == key))
+    if idx, do: idx + 1
+  end
+
+  # No year printed: this year, or next when that date is already well past
+  # (a late-December stop naming a January reset).
+  defp dated_candidate(local_now, year, month, day, hour, minute) do
+    this_year = local_now.year
+    missing? = year in [nil, ""]
+    year = if missing?, do: this_year, else: String.to_integer(year)
+
+    with {:ok, date} <- Date.new(year, month, day),
+         {:ok, naive} <- NaiveDateTime.new(date, Time.new!(hour, minute, 0)) do
+      if missing? and
+           NaiveDateTime.diff(local_now, naive, :second) > @wallclock_past_slack_seconds do
+        NaiveDateTime.new(Date.new!(year + 1, month, day), Time.new!(hour, minute, 0))
+      else
+        {:ok, naive}
+      end
+    end
+  end
+
+  defp wallclock_reset_from(haystack) do
+    with {hour, minute, zone} <- parse_wallclock(haystack),
+         true <- host_zone_matches?(zone),
+         reset =
+           wallclock_reset_utc(
+             NaiveDateTime.local_now(),
+             local_utc_offset_seconds(),
+             hour,
+             minute
+           ),
+         true <- DateTime.diff(reset, DateTime.utc_now()) <= @wallclock_max_horizon_seconds do
+      reset
+    else
+      _ -> nil
+    end
+  end
+
+  @doc false
+  @spec parse_wallclock(String.t()) :: {0..23, 0..59, String.t() | nil} | nil
+  def parse_wallclock(haystack) when is_binary(haystack) do
+    with %{"hour" => raw_hour, "meridiem" => meridiem} = caps <-
+           Regex.named_captures(@quota_reset_wallclock_signature, haystack),
+         {hour12, ""} when hour12 in 0..12 <- Integer.parse(raw_hour),
+         minute when minute in 0..59 <- parse_minute(caps["minute"]),
+         {:ok, zone} <- zone_from_tail(caps["tail"]) do
+      {to_24h(hour12, String.downcase(meridiem)), minute, zone}
+    else
+      _ -> nil
+    end
+  end
+
+  @wallclock_zone_tail ~r/^[ \t]*\((?<zone>[^)\n]*)\)/
+
+  # See the capture note on `@quota_reset_wallclock_signature`. `{:ok, nil}` is
+  # "no zone was named"; `{:ok, zone}` hands a raw string to
+  # `host_zone_matches?/1`, which rejects anything that is not this host's zone
+  # name (so `(UTC-04:00)` and `()` alike decline); `:error` is text we cannot
+  # account for, which must not be read as an absent zone.
+  defp zone_from_tail(tail) do
+    cond do
+      String.trim(tail) == "" ->
+        {:ok, nil}
+
+      caps = Regex.named_captures(@wallclock_zone_tail, tail) ->
+        {:ok, caps["zone"]}
+
+      true ->
+        :error
+    end
+  end
+
+  defp parse_minute(minute) when minute in [nil, ""], do: 0
+  defp parse_minute(minute), do: String.to_integer(minute)
+
+  defp to_24h(12, "am"), do: 0
+  defp to_24h(12, "pm"), do: 12
+  defp to_24h(hour, "pm"), do: hour + 12
+  defp to_24h(hour, _am), do: hour
+
+  # `3:30am` names a wall-clock time, not a date. The CLI only prints a reset
+  # that had not happened yet *when it printed*, so a time well past locally
+  # belongs to tomorrow -- but only well past: within
+  # `@wallclock_past_slack_seconds` the reset is the one that elapsed between
+  # the phrase and this exit, and is returned in the past so the caller retries
+  # on its 60s floor. An exact tie is likewise "now", not a full day out.
+  @doc false
+  @spec wallclock_reset_utc(NaiveDateTime.t(), integer(), 0..23, 0..59) :: DateTime.t()
+  def wallclock_reset_utc(%NaiveDateTime{} = local_now, offset_seconds, hour, minute)
+      when is_integer(offset_seconds) do
+    candidate = NaiveDateTime.new!(NaiveDateTime.to_date(local_now), Time.new!(hour, minute, 0))
+
+    candidate =
+      if NaiveDateTime.diff(local_now, candidate, :second) > @wallclock_past_slack_seconds do
+        NaiveDateTime.add(candidate, 86_400, :second)
+      else
+        candidate
+      end
+
+    candidate
+    |> NaiveDateTime.add(-offset_seconds, :second)
+    |> DateTime.from_naive!("Etc/UTC")
+  end
+
+  # Whole-minute rounding: the two clock reads are microseconds apart, and every
+  # modern IANA offset is a whole number of minutes.
+  defp local_utc_offset_seconds do
+    diff = NaiveDateTime.diff(NaiveDateTime.local_now(), NaiveDateTime.utc_now(), :second)
+    round(diff / 60) * 60
+  end
+
+  @doc false
+  @spec host_time_zone_name() :: String.t() | nil
+  def host_time_zone_name do
+    case presence(System.get_env("TZ")) do
+      nil -> host_zone_from_files()
+      tz -> tz |> String.trim_leading(":") |> zone_from_path()
+    end
+  end
+
+  defp host_zone_from_files do
+    case File.read_link("/etc/localtime") do
+      {:ok, target} ->
+        zone_from_path(target)
+
+      _ ->
+        case File.read("/etc/timezone") do
+          {:ok, contents} -> contents |> String.trim() |> presence()
+          _ -> nil
+        end
+    end
+  end
+
+  defp zone_from_path(path) do
+    case String.split(path, "zoneinfo/", parts: 2) do
+      [_, zone] -> presence(zone)
+      _ -> presence(path)
+    end
+  end
+
+  # A message whose reset clause names no zone at all is taken at face value: the
+  # CLI wrote it in host-local time and we only need the offset, not the name.
+  # `zone_from_tail/1` guarantees this clause is reached only for a genuinely
+  # empty tail — every parenthetical, parseable or not, reaches the comparison
+  # below and must match the host's own zone name to be trusted.
+  defp host_zone_matches?(nil), do: true
+
+  defp host_zone_matches?(zone) do
+    case host_time_zone_name() do
+      nil -> false
+      host -> String.downcase(host) == String.downcase(zone)
+    end
+  end
+
+  defp presence(value) when value in [nil, ""], do: nil
+  defp presence(value), do: value
+
+  defp quota_remediation(%DateTime{} = retry_after) do
+    "Provider-side plan usage limit, not a billing failure — no action needed. " <>
+      "The window resets at #{DateTime.to_iso8601(retry_after)}; auto-resuming after that."
+  end
+
+  defp quota_remediation(nil) do
+    "Provider-side plan usage limit, not a billing failure — no action needed. " <>
+      "Wait for the usage limit to reset (no reset time was reported), then re-dispatch."
+  end
+end

@@ -1,0 +1,412 @@
+defmodule Wardmast.Usage.Event do
+  @moduledoc """
+  A single agent-session usage row.
+
+  One row per finished Claude session (work worker or ReviewGate reviewer),
+  inserted from `Wardmast.Worker` when the session port emits its terminal
+  `result` event. The worker captures the structured fields off
+  `Wardmast.Worker.ClaudeSession`'s session state — see `usage_summary/1`
+  there.
+
+  Multiple rows per task are the point of this table: a re-slung task writes
+  a second `:work` row, a ReviewGate review adds a `:review` row, and so the
+  spend-on-rework story falls out of `Wardmast.Usage.summarize/1` for free.
+  That is keyed on `session_id` being genuinely distinct per pass, which
+  holds for Claude but not for agy/Gemini: a worker respawn that resumes the
+  SAME agy `session_id` gets a `result` event re-reporting the whole
+  session's running total, not a delta. `Wardmast.Worker.record_usage_event/3`
+  handles this by refreshing the existing row for a repeated
+  `(task_id, session_id)` (the `:refresh_snapshot` action) instead of
+  inserting a second one — see bd-28t80i. This refresh is gated to
+  non-Claude providers only (a resumed Claude `--resume` launch reports only
+  that launch's own usage, not a running total, so it must keep inserting a
+  row per launch) and only replaces the stored token/cache/cost fields when
+  the new snapshot actually has tokens and is no smaller than what is
+  already stored — a token-less or partial snapshot (e.g. a relaunch killed
+  before its `result` event) only refreshes bookkeeping fields and leaves
+  the real numbers alone.
+
+  ## Step
+
+  `:work` — the worker's own session that produced the diff.
+  `:review` — a ReviewGate-spawned reviewer session. `task_id` carries the
+              `#review` suffix used by `Wardmast.Worker.ReviewGate` so the row
+              is still attributable to the task being reviewed (drop the
+              suffix at read time).
+  `:impl` — a ReviewGate-spawned implementer session revising the diff in
+            response to review findings. `task_id` carries an `#impl<N>`
+            suffix (chained onto the reviewer suffix), stripped the same way.
+  `:other` — escape hatch for future non-Claude agents that don't fit the
+              author/reviewer/implementer split.
+  `:loop_discovery` — the opt-in `arb loop analyze --discover` model call
+              (`Wardmast.Loop.Discovery`, bd-4f6opo): `source: :maintenance`,
+              no task. Its own step so the loop's model draw is visible in
+              the ledger it optimises, apart from the deterministic pass's
+              zero-token `:other` row.
+  `:transcript_distillation` — one pass of
+              `Wardmast.Sessions.TranscriptDistillation` (bd-avt4lt), the model
+              call that proposes memory candidates from an ended session's
+              transcript: `source: :maintenance`, no task, and no `session_id`
+              (the distilled session is in `raw`), so the spend is not billed
+              to that session. Its own step so the pass's rolling daily budget
+              can be summed from the ledger.
+
+  Every step's `workspace_id` is the *authoring task's* workspace, resolved
+  from `Wardmast.Worker.ReviewGate.base_task_id/1` when the worker's own
+  `workspace_id` is nil (deliberately the case for reviewer/implementer
+  workers, to suppress notifications and merge-queue pickup for the synthetic
+  id). The ledger row still needs the real workspace so
+  `Wardmast.Usage.summarize/1` doesn't silently drop review/impl spend.
+
+  ## Source (bd-adyhvn)
+
+  `task_id` is nullable, and `source` says what kind of caller spent the
+  tokens:
+
+  | source | `task_id` | who writes it |
+  |---|---|---|
+  | `:task` | set | `Wardmast.Worker` (work / review / impl), `Wardmast.Reviews.ExternalReview` |
+  | `:probe` | nil | historical: `Wardmast.Quota.RefreshProbe` — one `claude --print` per workspace to refresh the quota snapshot, deleted in bd-atyrrq once the quota poll made it unnecessary |
+  | `:preflight` | nil as of bd-2jgs2h (2026-09-18) | `Wardmast.Agents.Preflight` via the `CredentialWatchdog`'s task-less periodic probe — the sole live producer. Task-attributed rows predating bd-2jgs2h are historical: a per-dispatch / per-resume auth check used to write them before it was retired (see `Wardmast.Worker.Dispatch`'s moduledoc and `docs/quota-and-auth.md`) |
+  | `:coordinator_session` | nil | a browser-hosted coordinator session (bd-cyxzvq), attributed by `session_id` |
+  | `:terminal_session` | nil | an interactive terminal session, likewise by `session_id` |
+  | `:maintenance` | nil | Wardmast's own internal passes (the Loop analysis pass and transcript distillation; formerly the synthetic `loop-analyze` task id) |
+
+  A `nil` `task_id` is never a missing value — it means "this spend belongs to
+  no task", which is why `Wardmast.Usage.summarize/1` drops those rows from
+  `:task` rollups rather than inventing a group for them.
+
+  ## Graceful degradation
+
+  Every cost / token / duration field is optional. A CLI that doesn't return
+  structured usage still writes a row with `cost_usd: nil` so the *attempt* is
+  visible — we never drop the row just because the numbers are missing.
+  """
+
+  use Ash.Resource,
+    otp_app: :wardmast,
+    domain: Wardmast.Usage,
+    data_layer: AshSqlite.DataLayer
+
+  @steps ~w(work review impl other loop_discovery transcript_distillation)a
+  @sources ~w(task probe preflight coordinator_session terminal_session maintenance)a
+
+  sqlite do
+    table "usage_events"
+    repo Wardmast.Repo
+
+    custom_indexes do
+      # Powers the per-workspace / per-day / per-task dashboards. Keep narrow
+      # — the table is small for now and we read it eagerly into memory in
+      # Wardmast.Usage.summarize/1.
+      index [:workspace_id, :occurred_at]
+      index [:task_id, :occurred_at]
+      index [:base_task_id, :occurred_at]
+      index [:source, :occurred_at]
+      # P9 (bd-al9qqe): powers `arb usage --by account` / `arb quota --account`.
+      index [:provider_account_id, :occurred_at]
+      # bd-be804c: the ingest's idempotency lookup ("what have I already billed
+      # this session?") runs once per session file per cycle, and `--by session`
+      # groups on it. `task_id` is nil for session rows, so this is the only key
+      # they have.
+      index [:session_id]
+    end
+  end
+
+  actions do
+    defaults [:read, :destroy]
+
+    create :create do
+      primary? true
+
+      # Seams #4: stamp attribution dimensions on every row at write time.
+      change before_action(fn changeset, _context ->
+               attrs =
+                 Map.new(
+                   [:workspace_id, :repo, :provider, :model, :step, :source],
+                   &{&1, Ash.Changeset.get_attribute(changeset, &1)}
+                 )
+
+               Ash.Changeset.force_change_attribute(
+                 changeset,
+                 :attribution,
+                 Wardmast.Usage.Attributor.resolve(attrs)
+               )
+             end)
+
+      change after_action(fn _changeset, record, _context ->
+               Wardmast.Quota.SpendCache.invalidate()
+               Wardmast.Usage.EstimateCache.invalidate()
+               {:ok, record}
+             end)
+
+      accept [
+        :task_id,
+        :source,
+        :workspace_id,
+        :repo,
+        :step,
+        :model,
+        :provider,
+        :tokens_in,
+        :tokens_out,
+        :thinking_tokens,
+        :cache_creation_tokens,
+        :cache_read_tokens,
+        :cost_usd,
+        :duration_ms,
+        :exit_status,
+        :worker_run_id,
+        :occurred_at,
+        :session_id,
+        :raw,
+        :cost_note,
+        :base_task_id,
+        :role,
+        :provider_account_id,
+        :provider_credential_id
+      ]
+    end
+
+    # bd-96mn8i round 2, finding 1: recovers codex's zero-token preflight
+    # rows from the on-disk rollout JSONL (`Wardmast.Usage.CodexSessionFile`)
+    # after the fact. Only the fields a backfill can honestly know are
+    # accepted — `occurred_at`/`source`/etc. stay whatever the live probe
+    # wrote them as.
+    update :backfill_usage do
+      # `raw` is a :map attribute — AshSqlite's atomic-update SQL builder
+      # can't pass it as a query param (mirrors `Wardmast.Loop.PendingWrite`'s
+      # map-carrying update actions).
+      require_atomic? false
+      accept [:tokens_in, :tokens_out, :cache_read_tokens, :cost_note, :raw]
+    end
+
+    # bd-28t80i: agy/gemini's terminal `result.usage` is a running total since
+    # session start, not a per-invocation delta (confirmed live: a resumed
+    # agy conversation's second `result` event carries the first result's
+    # counts plus a small increment, with `duration_seconds` measured from
+    # session start both times). A worker respawn (nudge / auto-resume) that
+    # resumes the SAME agy `session_id` therefore reports the whole session's
+    # usage again — `Wardmast.Worker.record_usage_event/3` refreshes the
+    # existing row for that `(task_id, session_id)` in place with this action
+    # instead of inserting a second one, so the row always reflects the
+    # session's latest (most complete) snapshot exactly once. A genuine
+    # Claude multi-pass task keeps a distinct `session_id` per pass and never
+    # matches an existing row, so this never collapses real separate
+    # sessions together.
+    update :refresh_snapshot do
+      require_atomic? false
+
+      change after_action(fn _changeset, record, _context ->
+               Wardmast.Quota.SpendCache.invalidate()
+               Wardmast.Usage.EstimateCache.invalidate()
+               {:ok, record}
+             end)
+
+      accept [
+        :workspace_id,
+        :repo,
+        :model,
+        :provider,
+        :provider_account_id,
+        :provider_credential_id,
+        :tokens_in,
+        :tokens_out,
+        :thinking_tokens,
+        :cache_creation_tokens,
+        :cache_read_tokens,
+        :cost_usd,
+        :cost_note,
+        :duration_ms,
+        :exit_status,
+        :worker_run_id,
+        :occurred_at,
+        :raw
+      ]
+    end
+  end
+
+  attributes do
+    uuid_primary_key :id
+
+    attribute :task_id, :string do
+      # Nullable since bd-adyhvn: probes, auth pre-flights and coordinator /
+      # terminal sessions spend real quota with no task to attribute it to.
+      # `source` says which kind of row this is; a `nil` here is never a
+      # missing value, it is "this spend belongs to no task".
+      allow_nil? true
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description "Task this session worked. For ReviewGate reviewers carries a `#review` suffix. Nil for non-task sources."
+    end
+
+    attribute :source, :atom do
+      allow_nil? false
+      public? true
+      default :task
+      constraints one_of: @sources
+
+      description ~s[What kind of caller spent this. `task` — a worker/reviewer session on a task (the only source with a non-nil `task_id`). `probe` — historical: `Wardmast.Quota.RefreshProbe`, deleted in bd-atyrrq. `preflight` — `Wardmast.Agents.Preflight`. `coordinator_session` / `terminal_session` — an interactive session, attributed by `session_id`. `maintenance` — Wardmast's own internal passes (e.g. the Loop analysis pass).]
+    end
+
+    attribute :workspace_id, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+    end
+
+    attribute :repo, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+    end
+
+    attribute :step, :atom do
+      allow_nil? false
+      public? true
+      default :work
+      constraints one_of: @steps
+    end
+
+    attribute :model, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+    end
+
+    attribute :provider, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+
+      description ~s[Provider key (e.g. "claude", "openai"). Normalised so future non-Claude agents fit this same ledger.]
+    end
+
+    attribute :tokens_in, :integer do
+      public? true
+    end
+
+    attribute :tokens_out, :integer do
+      public? true
+    end
+
+    attribute :thinking_tokens, :integer do
+      public? true
+
+      description "agy/Antigravity's thinking-token count (bd-481sz7). Confirmed live: " <>
+                    "input_tokens + output_tokens == total_tokens, with no separate " <>
+                    "third bucket — thinking tokens are a subset already counted inside " <>
+                    "tokens_out, not additional spend. Kept here for visibility only; " <>
+                    "never add this to tokens_out. Nil for every non-agy provider and " <>
+                    "for agy rows predating this column."
+    end
+
+    attribute :cache_creation_tokens, :integer do
+      public? true
+    end
+
+    attribute :cache_read_tokens, :integer do
+      public? true
+    end
+
+    attribute :cost_usd, :float do
+      public? true
+      description "Total session cost in USD. Nil when the CLI didn't return structured cost."
+    end
+
+    attribute :cost_note, :string do
+      public? true
+      constraints max_length: 500, trim?: true
+
+      description "Why cost_usd is nil (e.g. no priced model resolved, metered plan with no per-call dollar figure) — so a null cost reads as a known, explained limitation rather than a silent parse failure. Nil when cost_usd was actually derived."
+    end
+
+    attribute :duration_ms, :integer do
+      public? true
+    end
+
+    attribute :exit_status, :integer do
+      public? true
+    end
+
+    attribute :worker_run_id, :uuid do
+      public? true
+
+      description "FK-like pointer to the Wardmast.Workers.Run this session belonged to. Not a hard FK (the run row is best-effort)."
+    end
+
+    attribute :session_id, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+      description "Upstream session identifier from the CLI's `system/init` event, when present."
+    end
+
+    attribute :occurred_at, :utc_datetime_usec do
+      allow_nil? false
+      public? true
+      description "When the session terminated (the `result` event arrival)."
+    end
+
+    attribute :raw, :map do
+      public? true
+
+      description "Original CLI usage payload (the parsed `result` event). Kept for forensic debugging; never queried."
+    end
+
+    attribute :attribution, :map do
+      public? true
+
+      description "Attribution dimensions stamped at write time by `Wardmast.Usage.Attributor` (string keys; core-known ones by default, plus whatever a configured attributor adds). Nil on rows written before the column existed."
+    end
+
+    attribute :base_task_id, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description "The root task id this event is part of (bd-5fhyry). For ReviewGate " <>
+                    "review/impl events, this is the base task; for base events, it equals " <>
+                    "task_id. Nullable for backfill purposes."
+    end
+
+    attribute :role, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+
+      description "The role this session played: 'base' for main authoring, 'review' for " <>
+                    "review-gate reviewer, 'impl' for review-gate implementer, etc. Replaces " <>
+                    "suffix-encoded task_id hierarchy."
+    end
+
+    attribute :provider_account_id, :uuid do
+      public? true
+
+      description "P9 (bd-al9qqe, docs/provider-account-design.md §8): the ProviderAccount " <>
+                    "whose plan this spend counts against. Written wherever workspace_id is " <>
+                    "written. Non-nil for source: probe | preflight even when workspace_id " <>
+                    "and task_id are both nil — a probe is issued as a credential, so it " <>
+                    "always has an account (§8's falsifiable seam statement with bd-adyhvn)."
+    end
+
+    attribute :provider_credential_id, :uuid do
+      public? true
+
+      description "The specific ProviderCredential used, when known (§2.5: this is the only " <>
+                    "thing that can tell a late-discovered split apart after the fact). Nil " <>
+                    "whenever the account has more than one active credential and which one " <>
+                    "carried this spend isn't recorded."
+    end
+
+    create_timestamp :inserted_at
+    update_timestamp :updated_at
+  end
+
+  @doc "All valid step atoms."
+  def steps, do: @steps
+
+  @doc "All valid source atoms."
+  def sources, do: @sources
+
+  @doc """
+  Sources whose rows carry a real `task_id`. Everything else is spend that
+  belongs to no task and must be kept out of task-shaped rollups — see
+  `Wardmast.Usage.summarize/1`.
+  """
+  def task_sources, do: [:task]
+end

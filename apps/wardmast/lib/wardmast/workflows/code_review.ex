@@ -1,0 +1,764 @@
+defmodule Wardmast.Workflows.CodeReview do
+  @moduledoc """
+  Peer-review workflow (gte-021). The Elixir port of Go GT's
+  `mol-worker-code-review` formula.
+
+  Reviews a PR/MR's diff against a task's acceptance criteria and produces
+  a verdict (`:approve` or `:request_changes`). Two modes:
+
+    * `:local`    — writes `reviews/<branch>.md` in a local worktree.
+    * `:adapter`  — dispatches every side-effect through an
+      `Wardmast.Mergers.Merger` adapter (Direct / GitLab / GitHub), so a
+      review can run against an arbitrary PR/MR — including ones the fleet
+      did not author — through the configured tracker.
+
+  ## Report-only (a.k.a. propose) reviews (bd-36qzgx)
+
+  When `report_only: true` is set on the state (adapter mode only), the workflow
+  runs the *full* review — read the diff, compute findings, compute the verdict —
+  but posts **NOTHING** to the PR. Instead of calling `post_inline_comment` /
+  `submit_review`, `:file_findings` captures the per-finding **proposed comment
+  text** under `:proposed_comments` and `:verdict` captures the *recommended*
+  verdict + summary under `:verdict` / `:proposed_review_body`. A caller
+  (`Wardmast.Reviews.ExternalReview`) then surfaces these to the coordinator, who
+  greenlights which comments actually post. This is the human-in-the-loop review
+  path required for infra repos.
+
+  ## Steps
+
+  1. `:load_pr`       — record branch / load PR metadata (no-op in `:adapter` mode)
+  2. `:read_diff`     — fetch the diff via the adapter, or `git diff` locally
+                        when a `:worktree_path` is set (`:local` mode always;
+                        `:adapter` mode when a Tier-2 checkout was provisioned —
+                        bd-5yp6yn, sidesteps GitHub's REST 20k-line diff cap)
+  3. `:run_checks`    — invoke the `:check_runner` to produce findings
+  4. `:file_findings` — write the review file (local) or post comments (adapter)
+  5. `:verdict`       — compute approve / request_changes; finalize
+
+  ## State
+
+      %{
+        mode: :local | :adapter,
+
+        # :local mode requires:
+        worktree_path: "/path/to/worktree",
+        base: "main",                # diff base; default "main"
+
+        # :adapter mode requires:
+        adapter: module(),           # an Wardmast.Mergers.Merger impl
+        mr_ref: String.t(),          # opaque ref minted by the adapter
+        workspace: Workspace.t() | nil,  # when set, Mergers.prepare/1 is called
+        adapter_opts: %{...},        # forwarded to every adapter call
+
+        # Common:
+        task: %{id: _, title: _},    # optional, included in the file/notes
+        check_runner: fun | nil,     # 2-arity (diff, state) -> {:ok, findings}
+        report_only: boolean(),      # adapter mode: review but post nothing (bd-36qzgx)
+
+        # Populated as steps run:
+        branch: String.t() | nil,
+        diff: String.t(),
+        findings: [Checks.finding()],
+        verdict: :approve | :request_changes,
+        review_path: String.t() | nil  # populated by the local file mode
+      }
+
+  ## Default check runner
+
+  Without an explicit `:check_runner`, `Wardmast.Workflows.CodeReview.Checks`
+  runs a Claude session on the diff and parses structured findings from its
+  JSON output. Tests can short-circuit Claude by passing a stub runner via
+  `state.check_runner`.
+
+  ## Forbidden actions
+
+  A reviewer worker MUST NOT:
+
+    * push code (no `Worker.Worktree.push/2` call lives in this workflow)
+    * merge PRs (no `GitHub.pr_merge/4` / `Merger.merge/2` call lives here)
+    * make non-comment mutations beyond inline comments + a single review
+
+  These constraints are enforced **statically** (this module simply does
+  not call those functions) and documented here.
+
+  After `:verdict` runs, control returns to the worker which transitions
+  back to `:idle`. The workflow does not drive the worker state directly.
+  """
+
+  use Wardmast.Workflow,
+    steps: [:load_pr, :read_diff, :run_checks, :file_findings, :verdict]
+
+  require Logger
+
+  alias Wardmast.Mergers
+  alias Wardmast.Worker.Worktree
+  alias Wardmast.Workflows.CodeReview.{Checks, ConsumerTrace, DiffScope, LocalMode}
+
+  step(:load_pr,
+    description: "Record branch (local) or accept adapter mr_ref (adapter)",
+    needs: [],
+    vars: [:worktree_path, :mode, :adapter, :mr_ref]
+  )
+
+  step(:read_diff,
+    description: "Read the diff via the adapter or local git",
+    needs: [:load_pr],
+    vars: [:base, :adapter_opts]
+  )
+
+  step(:run_checks,
+    description: "Run automated checks against the diff",
+    needs: [:read_diff],
+    vars: [:check_runner]
+  )
+
+  step(:file_findings,
+    description: "Write review file (local) or post comments (adapter)",
+    needs: [:run_checks],
+    vars: [:task]
+  )
+
+  step(:verdict,
+    description: "Approve or request_changes based on findings",
+    needs: [:file_findings],
+    vars: []
+  )
+
+  # ---- :load_pr ----------------------------------------------------------
+
+  @impl Wardmast.Workflow
+  def run_step(:load_pr, %{mode: :local, worktree_path: wt} = state) when is_binary(wt) do
+    case Worktree.current_branch(wt) do
+      {:ok, branch} -> {:ok, state |> Map.put(:branch, branch) |> Map.put(:pr, nil)}
+      {:error, _} = err -> err
+    end
+  end
+
+  def run_step(:load_pr, %{mode: :adapter, adapter: adapter, mr_ref: mr_ref} = state)
+      when is_atom(adapter) and is_binary(mr_ref) do
+    prepare_adapter(state)
+
+    case safe_adapter_call(adapter, :get, [mr_ref]) do
+      {:ok, info} ->
+        branch = Map.get(info, :branch) || Map.get(info, "branch")
+        {:ok, state |> Map.put(:pr, info) |> Map.put(:branch, branch)}
+
+      # Adapters whose `get/1` doesn't surface a branch (Direct, GitLab in
+      # the abbreviated task-domain view) still let the workflow proceed —
+      # the branch isn't load-bearing for any later step in :adapter mode.
+      {:error, _} ->
+        {:ok, state |> Map.put(:pr, nil) |> Map.put(:branch, nil)}
+    end
+  end
+
+  def run_step(:load_pr, state) do
+    {:error,
+     {:bad_state,
+      "load_pr requires :mode + :worktree_path (local) or :adapter + :mr_ref (adapter), got: " <>
+        inspect(Map.take(state, [:mode, :worktree_path, :adapter, :mr_ref]))}}
+  end
+
+  # ---- :read_diff --------------------------------------------------------
+
+  def run_step(:read_diff, %{mode: :local, worktree_path: wt} = state) when is_binary(wt) do
+    base = Map.get(state, :base, "main")
+
+    case System.cmd("git", ["-C", wt, "diff", "#{base}..HEAD"], stderr_to_stdout: true) do
+      {output, 0} -> {:ok, Map.put(state, :diff, output)}
+      {output, _nonzero} -> {:error, {:git_diff_failed, String.trim(output)}}
+    end
+  rescue
+    e in ErlangError -> {:error, {:git_diff_failed, Exception.message(e)}}
+  end
+
+  # Tier-2 (bd-5yp6yn): a checkout worktree was provisioned alongside the
+  # adapter mr_ref (external PR review). Read the diff locally via `git
+  # diff` instead of the REST diff endpoint — the REST endpoint 406s on
+  # PRs whose diff exceeds GitHub's 20k-line cap, which the local `git
+  # diff` has no equivalent limit on.
+  #
+  # `base` is a *bare* branch name from the adapter (e.g. `"dolphin"`); it
+  # only resolves in the worktree when it happens to be the checked-out
+  # local branch. Since `Checkout.provision/2` never fetches the base
+  # branch, the reachable ref is the remote-tracking one, so resolution is
+  # tried as `origin/<base>` first, then the bare name as a last resort.
+  # When `base` is missing/unresolvable, fall back to the adapter's REST
+  # diff rather than guessing a base and silently producing the wrong diff.
+  def run_step(:read_diff, %{mode: :adapter, worktree_path: wt} = state) when is_binary(wt) do
+    with base when is_binary(base) <- Map.get(state, :base),
+         :ok <- refresh_base_ref(wt, base),
+         {:ok, ref} <- resolve_base_ref(wt, base) do
+      case System.cmd("git", ["-C", wt, "diff", "#{ref}...HEAD"], stderr_to_stdout: true) do
+        {output, 0} -> {:ok, Map.put(state, :diff, output)}
+        {output, _nonzero} -> {:error, {:git_diff_failed, String.trim(output)}}
+      end
+    else
+      _ -> read_diff_via_adapter(state)
+    end
+  rescue
+    e in ErlangError -> {:error, {:git_diff_failed, Exception.message(e)}}
+  end
+
+  def run_step(:read_diff, %{mode: :adapter, adapter: adapter, mr_ref: mr_ref} = state)
+      when is_atom(adapter) and is_binary(mr_ref) do
+    read_diff_via_adapter(state)
+  end
+
+  def run_step(:read_diff, _state),
+    do: {:error, {:bad_state, "read_diff requires :worktree_path (local) or :adapter+:mr_ref"}}
+
+  # ---- :run_checks -------------------------------------------------------
+
+  def run_step(:run_checks, state) do
+    diff = Map.get(state, :diff, "")
+    runner = Map.get(state, :check_runner) || (&Checks.run/2)
+    state = maybe_add_consumer_refs(state, diff)
+
+    case runner.(diff, state) do
+      {:ok, findings} when is_list(findings) ->
+        {:ok, Map.put(state, :findings, findings)}
+
+      {:ok, findings, usage} when is_list(findings) ->
+        {:ok, state |> Map.put(:findings, findings) |> Map.put(:check_usage, usage)}
+
+      {:error, _} = err ->
+        err
+
+      other ->
+        {:error, {:bad_check_runner_return, other}}
+    end
+  end
+
+  # ---- :file_findings ----------------------------------------------------
+
+  def run_step(:file_findings, %{mode: :local, worktree_path: wt, branch: branch} = state) do
+    findings = Map.get(state, :findings, [])
+    task = Map.get(state, :task)
+    :ok = LocalMode.write_findings(wt, branch, task, findings)
+    {:ok, Map.put(state, :review_path, LocalMode.review_path(wt, branch))}
+  end
+
+  # Report-only: capture the per-finding proposed comment text and post NOTHING.
+  # This clause must precede the posting clause below. Each proposed comment is
+  # labeled `:in_diff` (bd-887swr) — same `DiffScope` check the posting path
+  # runs — so a coordinator can triage which proposed comments are postable
+  # before greenlighting, without diffing the PR by hand.
+  def run_step(:file_findings, %{mode: :adapter, report_only: true} = state) do
+    scope = diff_scope_for(state)
+
+    proposed =
+      state
+      |> Map.get(:findings, [])
+      |> Enum.map(fn finding ->
+        Map.put(proposed_comment(finding), :in_diff, finding_in_diff?(scope, finding))
+      end)
+
+    {:ok, Map.put(state, :proposed_comments, proposed)}
+  end
+
+  def run_step(:file_findings, %{mode: :adapter, adapter: adapter, mr_ref: mr_ref} = state)
+      when is_atom(adapter) and is_binary(mr_ref) do
+    prepare_adapter(state)
+    findings = Map.get(state, :findings, [])
+    opts = adapter_opts(state)
+
+    # Scope findings to the diff (bd-2n3qm6): the Tier-2 reviewer has
+    # read-only file access beyond the diff for context and can (mis)report
+    # a finding on a line/file GitHub's inline-comment API can't resolve —
+    # a 422 there would otherwise fail the whole step and discard every
+    # finding. Only attempt to post findings the diff itself touches; route
+    # the rest to the review summary body via :out_of_diff_findings. A
+    # missing `:diff` key (unit tests exercising this step directly,
+    # bypassing :read_diff) skips scoping and posts everything, unchanged.
+    {in_diff, out_of_scope} = partition_by_diff_scope(findings, state)
+
+    # Inline comments are the per-finding artifact; the verdict step posts
+    # the single review-level summary via submit_review/4. No separate
+    # add_comment call — that would double-post on hosted forges where
+    # submit_review already carries a body.
+    case post_each_finding(adapter, mr_ref, in_diff, opts, state) do
+      {:ok, state, demoted} ->
+        {:ok,
+         Map.update(
+           state,
+           :out_of_diff_findings,
+           out_of_scope ++ demoted,
+           &(&1 ++ out_of_scope ++ demoted)
+         )}
+
+      # bd-2o4b8f: a hard adapter error (e.g. a 403 secondary rate limit that
+      # outlasted the adapter's own retries) must not discard the completed
+      # review — the diff was already read and the findings already computed.
+      # Findings not yet posted (the one that just failed + everything after
+      # it, plus anything the diff-scope partition routed out-of-diff) are
+      # salvaged into `proposed_comments` so `ExternalReview.greenlight/1` can
+      # post them once the forge is healthy again. Findings already posted
+      # before the failure are NOT re-included here, so a later greenlight
+      # can't double-post them.
+      {:error, reason, remaining_in_diff} ->
+        {:error, {:post_failed, reason, salvage_unposted(state, remaining_in_diff, out_of_scope)}}
+    end
+  end
+
+  def run_step(:file_findings, _state),
+    do: {:error, {:bad_state, "file_findings: unknown mode"}}
+
+  # ---- :verdict ----------------------------------------------------------
+
+  def run_step(:verdict, %{mode: :local} = state) do
+    verdict = compute_verdict(Map.get(state, :findings, []))
+    path = Map.fetch!(state, :review_path)
+    :ok = LocalMode.set_verdict(path, verdict)
+    {:ok, state |> Map.put(:verdict, verdict) |> Map.put(:verdict_posted, true)}
+  end
+
+  # Report-only: compute the recommended verdict + summary and post NOTHING.
+  # This clause must precede the submitting clause below.
+  def run_step(:verdict, %{mode: :adapter, report_only: true} = state) do
+    findings = Map.get(state, :findings, [])
+    verdict = compute_verdict(findings)
+    body = verdict_summary(verdict, findings)
+
+    {:ok,
+     state
+     |> Map.put(:verdict, verdict)
+     |> Map.put(:verdict_posted, false)
+     |> Map.put(:proposed_review_body, body)}
+  end
+
+  def run_step(:verdict, %{mode: :adapter, adapter: adapter, mr_ref: mr_ref} = state)
+      when is_atom(adapter) and is_binary(mr_ref) do
+    prepare_adapter(state)
+    findings = Map.get(state, :findings, [])
+    out_of_diff = Map.get(state, :out_of_diff_findings, [])
+    verdict = compute_verdict(findings)
+    opts = adapter_opts(state)
+
+    # bd-3948ey: one verdict per SHA. Before posting, ask the adapter (if it
+    # exposes the optional capability) for the commit SHA our own latest
+    # verdict review was posted against. If it matches the PR's current head,
+    # we've already verdicted this exact commit — skip posting again rather
+    # than trusting local bookkeeping, which can be stale or bypassed (e.g. a
+    # forced re-dispatch that never updated the engagement record).
+    cond do
+      # #1291: our earlier approval still counts under the base branch's rules
+      # (ReviewPatrol set `approval_stands`), so another APPROVE is a redundant
+      # stacked approval. Only a blocking verdict is posted.
+      redundant_approval?(verdict, state) ->
+        Logger.info(
+          "CodeReview: earlier approval still stands — not posting another approval " <>
+            "for mr_ref=#{mr_ref}"
+        )
+
+        {:ok, state |> Map.put(:verdict, verdict) |> Map.put(:verdict_posted, false)}
+
+      same_sha_already_verdicted?(adapter, mr_ref, pr_head_sha(state)) ->
+        Logger.info(
+          "CodeReview: skipping duplicate verdict — adapter's latest own review already " <>
+            "covers head SHA #{inspect(pr_head_sha(state))} (mr_ref=#{mr_ref})"
+        )
+
+        {:ok, state |> Map.put(:verdict, verdict) |> Map.put(:verdict_posted, false)}
+
+      # bd-3948ey: monotonic on a fixed head. Even when the head SHA has
+      # moved (so the guard above doesn't apply), a downgrade FROM a prior
+      # approval must be backed by new information — new commits that
+      # actually touch a line one of this pass's blocking findings is
+      # anchored on. Without this, a re-review round triggered by something
+      # other than a real code change (an author's inline reply, a
+      # re-requested review with no push) can flip an approval to
+      # request_changes purely because the pass re-litigated findings that
+      # were already visible — and implicitly accepted — at approval time.
+      verdict == :request_changes and
+          downgrade_without_new_info?(adapter, mr_ref, pr_head_sha(state), findings) ->
+        Logger.info(
+          "CodeReview: no new information — declining to downgrade prior approval for " <>
+            "mr_ref=#{mr_ref} at head #{inspect(pr_head_sha(state))}: no blocking finding is " <>
+            "anchored on a line the new commits changed"
+        )
+
+        {:ok, state |> Map.put(:verdict, verdict) |> Map.put(:verdict_posted, false)}
+
+      true ->
+        body = verdict_summary(verdict, findings) <> out_of_diff_section(out_of_diff)
+
+        case submit_verdict(adapter, mr_ref, verdict, body, findings, out_of_diff, opts) do
+          {:ok, response} ->
+            {:ok,
+             state
+             |> Map.put(:verdict, verdict)
+             |> Map.put(:verdict_posted, true)
+             |> maybe_capture_path(response)}
+
+          # bd-ats4ds: the review is complete; only the posting failed. Hand
+          # the findings + verdict back so the record keeps them.
+          {:error, reason} ->
+            {:error, {:post_failed, reason, verdict_salvage(state, verdict, out_of_diff)}}
+        end
+    end
+  end
+
+  def run_step(:verdict, _state), do: {:error, {:bad_state, "verdict: unknown mode"}}
+
+  defp redundant_approval?(:approve, state), do: Map.get(state, :approval_stands) == true
+  defp redundant_approval?(_verdict, _state), do: false
+
+  # ---- scope resolution / consumer trace ---------------------------------
+
+  # Repo-scoped reviews get a deterministic cross-file consumer trace (see
+  # `ConsumerTrace` moduledoc for why this isn't just handed to the LLM as
+  # filesystem access). Diff scope (the default) never touches disk here.
+  defp maybe_add_consumer_refs(%{repo_path: repo_path} = state, diff) when is_binary(repo_path) do
+    if effective_scope(state, diff) == :repo do
+      Map.put(state, :consumer_refs, ConsumerTrace.trace(diff, repo_path))
+    else
+      state
+    end
+  end
+
+  defp maybe_add_consumer_refs(state, _diff), do: state
+
+  # Explicit `:scope` wins; otherwise a changed file matching any of
+  # `:sensitive_globs` (workspace `review_scope.sensitive_globs`, resolved by
+  # the caller) auto-escalates a security/cross-cutting PR to repo scope.
+  defp effective_scope(%{scope: :repo}, _diff), do: :repo
+
+  defp effective_scope(state, diff) do
+    globs = Map.get(state, :sensitive_globs) || []
+
+    if globs != [] and touches_sensitive_path?(diff, globs) do
+      :repo
+    else
+      Map.get(state, :scope, :diff)
+    end
+  end
+
+  defp touches_sensitive_path?(diff, globs) do
+    diff
+    |> ConsumerTrace.changed_files()
+    |> Enum.any?(fn file ->
+      Enum.any?(globs, &Wardmast.Worker.ReviewScope.glob_match?(&1, file))
+    end)
+  end
+
+  # ---- helpers -----------------------------------------------------------
+
+  @doc false
+  @spec compute_verdict([Checks.finding()]) :: :approve | :request_changes
+  def compute_verdict(findings) when is_list(findings) do
+    if Enum.any?(findings, &(&1[:severity] == :error)) do
+      :request_changes
+    else
+      :approve
+    end
+  end
+
+  @doc """
+  Build the report-only "proposed comment" for a single finding: the finding's
+  `file` / `line` / `severity` / `message`, plus `body` — the exact inline
+  comment text that would be posted on the PR (mirrors the hosted adapters'
+  `post_inline_comment` body format). The greenlight step re-posts the selected
+  subset of these verbatim.
+  """
+  @spec proposed_comment(Checks.finding()) :: map()
+  def proposed_comment(%{} = finding) do
+    %{
+      file: finding[:file] || finding["file"],
+      line: finding[:line] || finding["line"],
+      severity: finding[:severity] || finding["severity"],
+      message: finding[:message] || finding["message"],
+      body: finding_comment_body(finding)
+    }
+  end
+
+  @doc "The inline-comment body text for a finding (`**SEVERITY**: message`)."
+  @spec finding_comment_body(map()) :: String.t()
+  def finding_comment_body(%{} = finding) do
+    sev = finding[:severity] || finding["severity"]
+    msg = finding[:message] || finding["message"] || ""
+    "**#{severity_label(sev)}**: #{msg}"
+  end
+
+  defp severity_label(:info), do: "INFO"
+  defp severity_label(:warning), do: "WARNING"
+  defp severity_label(:error), do: "ERROR"
+  defp severity_label(nil), do: "INFO"
+  defp severity_label(other), do: other |> to_string() |> String.upcase()
+
+  defp verdict_summary(:approve, []), do: "Approved: no findings."
+
+  defp verdict_summary(:approve, findings),
+    do: "Approved with #{length(findings)} non-blocking finding(s)."
+
+  defp verdict_summary(:request_changes, findings) do
+    errors = Enum.count(findings, &(&1[:severity] == :error))
+    "Requesting changes: #{errors} blocking finding(s) out of #{length(findings)}."
+  end
+
+  # Posts each finding inline. A `:validation_failed` (422) response — GitHub
+  # rejecting a (path, line) it can't resolve against the diff (bd-2n3qm6) —
+  # is treated as best-effort: that finding is demoted (returned in the third
+  # tuple slot for the caller to fold into `:out_of_diff_findings`) rather
+  # than halting the step and discarding every other finding + the verdict.
+  # Any other adapter error still halts, unchanged.
+  # A finding on a file/line the diff doesn't touch can't be posted inline
+  # (bd-2n3qm6) — surface it as prose in the review summary instead of
+  # silently dropping it, so the reviewer's out-of-diff observation still
+  # reaches the PR.
+  # bd-ats4ds: GitHub 422s a review submission it can't process. Retry once
+  # with every finding spelled out (file:line + message) in the body so
+  # nothing is lost to an unanchorable line.
+  defp submit_verdict(adapter, mr_ref, verdict, body, findings, out_of_diff, opts) do
+    case safe_adapter_call(adapter, :submit_review, [mr_ref, verdict, body, opts]) do
+      {:error, %{kind: :validation_failed}} ->
+        retry_body =
+          verdict_summary(verdict, findings) <> out_of_diff_section(findings ++ out_of_diff)
+
+        safe_adapter_call(adapter, :submit_review, [mr_ref, verdict, retry_body, opts])
+
+      other ->
+        other
+    end
+  end
+
+  # Findings already posted inline are not re-offered as proposed comments (a
+  # greenlight would double-post them); only the out-of-diff ones are.
+  defp verdict_salvage(state, verdict, out_of_diff) do
+    %{
+      findings: Map.get(state, :findings, []),
+      verdict: verdict,
+      proposed_comments: Enum.map(out_of_diff, &Map.put(proposed_comment(&1), :in_diff, false)),
+      check_usage: Map.get(state, :check_usage, %{})
+    }
+  end
+
+  defp out_of_diff_section([]), do: ""
+
+  defp out_of_diff_section(findings) do
+    lines =
+      Enum.map(findings, fn f ->
+        "- **#{severity_label(f[:severity] || f["severity"])}** " <>
+          "#{finding_file(f)}:#{finding_line(f)} — #{f[:message] || f["message"]}"
+      end)
+
+    "\n\nOut-of-diff findings (context the reviewer explored but that isn't " <>
+      "part of this diff, so it can't be posted inline):\n" <> Enum.join(lines, "\n")
+  end
+
+  # Returns `{:ok, state, demoted}` when every finding was attempted (posted or
+  # demoted as out-of-diff), or `{:error, reason, remaining}` on a hard adapter
+  # error — `remaining` is the failing finding plus every finding after it that
+  # was never attempted, so the caller can salvage them (bd-2o4b8f) instead of
+  # discarding the whole review.
+  defp post_each_finding(adapter, mr_ref, findings, opts, state) do
+    findings
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, state, []}, fn {finding, idx}, {:ok, acc, demoted} ->
+      case safe_adapter_call(adapter, :post_inline_comment, [mr_ref, finding, opts]) do
+        {:ok, response} -> {:cont, {:ok, maybe_capture_path(acc, response), demoted}}
+        :ok -> {:cont, {:ok, acc, demoted}}
+        {:error, %{kind: :validation_failed}} -> {:cont, {:ok, acc, [finding | demoted]}}
+        {:error, err} -> {:halt, {:error, err, Enum.drop(findings, idx)}}
+      end
+    end)
+    |> case do
+      {:ok, state, demoted} -> {:ok, state, Enum.reverse(demoted)}
+      {:error, _reason, _remaining} = err -> err
+    end
+  end
+
+  # Build the salvage payload for a `:file_findings` post failure: every
+  # finding that never made it to the PR (still-to-post in-diff findings +
+  # whatever the diff-scope partition routed out-of-diff) becomes a
+  # `proposed_comment`, and the verdict is computed from the full finding set
+  # so it reflects the whole review, not just the unposted remainder.
+  defp salvage_unposted(state, remaining_in_diff, out_of_scope) do
+    findings = Map.get(state, :findings, [])
+
+    proposed =
+      Enum.map(remaining_in_diff, &Map.put(proposed_comment(&1), :in_diff, true)) ++
+        Enum.map(out_of_scope, &Map.put(proposed_comment(&1), :in_diff, false))
+
+    %{
+      findings: findings,
+      verdict: compute_verdict(findings),
+      proposed_comments: proposed,
+      check_usage: Map.get(state, :check_usage, %{})
+    }
+  end
+
+  # Which findings the diff itself touches, vs. ones the reviewer flagged
+  # outside it. A state with no `:diff` key (adapter-mode tests that call
+  # `run_step(:file_findings, ...)` directly, never having run `:read_diff`)
+  # skips scoping entirely so existing callers/tests are unaffected.
+  defp partition_by_diff_scope(findings, state) do
+    case diff_scope_for(state) do
+      nil -> {findings, []}
+      scope -> Enum.split_with(findings, &finding_in_diff?(scope, &1))
+    end
+  end
+
+  # The diff scope for `state`, or `nil` when no `:diff` key is present (unit
+  # tests exercising a step directly, bypassing `:read_diff`) — callers treat
+  # `nil` as "scoping skipped", not "empty diff".
+  defp diff_scope_for(state) do
+    case Map.fetch(state, :diff) do
+      {:ok, diff} -> DiffScope.build(diff)
+      :error -> nil
+    end
+  end
+
+  # `nil` scope (scoping skipped) treats every finding as in-diff, matching
+  # `partition_by_diff_scope/2`'s pre-bd-887swr behavior for callers with no
+  # `:diff` key.
+  defp finding_in_diff?(nil, _finding), do: true
+
+  defp finding_in_diff?(scope, finding),
+    do: DiffScope.in_diff?(scope, finding_file(finding), finding_line(finding))
+
+  defp finding_file(finding), do: finding[:file] || finding["file"]
+  defp finding_line(finding), do: finding[:line] || finding["line"]
+
+  # Some adapters (Direct) write findings to a local file and return its
+  # path. Expose that on the state so callers can locate the artifact.
+  defp maybe_capture_path(state, %{path: path}) when is_binary(path),
+    do: Map.put_new(state, :review_path, path)
+
+  defp maybe_capture_path(state, _), do: state
+
+  defp adapter_opts(state) do
+    state
+    |> Map.get(:adapter_opts, %{})
+    |> Map.put_new(:task, Map.get(state, :task))
+  end
+
+  # Adapters that need workspace-scoped per-process state (Github, Gitlab)
+  # have their `prepare/1` invoked by `Wardmast.Mergers.prepare/1` before any
+  # adapter call. The workflow forwards the workspace once at the start of
+  # every step — adapters that don't need it (Direct) ignore the call.
+  defp prepare_adapter(%{workspace: ws}) when not is_nil(ws), do: Mergers.prepare(ws)
+  defp prepare_adapter(_), do: :ok
+
+  defp safe_adapter_call(adapter, fun, args) do
+    apply(adapter, fun, args)
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp pr_head_sha(%{pr: pr}) when is_map(pr),
+    do: Map.get(pr, :head_sha) || Map.get(pr, "head_sha")
+
+  defp pr_head_sha(_state), do: nil
+
+  # Fails open: nil head SHA, an adapter without the optional capability, or
+  # any error resolving it all mean "don't block" — we can't prove we've
+  # already verdicted this commit, so we let the caller proceed as before.
+  defp same_sha_already_verdicted?(_adapter, _mr_ref, nil), do: false
+
+  defp same_sha_already_verdicted?(adapter, mr_ref, head_sha) when is_binary(head_sha) do
+    if function_exported?(adapter, :latest_own_review_sha, 1) do
+      case safe_adapter_call(adapter, :latest_own_review_sha, [mr_ref]) do
+        {:ok, ^head_sha} -> true
+        _ -> false
+      end
+    else
+      false
+    end
+  end
+
+  # Fails open in every way: no blocking findings, no prior-approval SHA, the
+  # adapter lacking either optional capability, an errored lookup, or a
+  # failed/empty diff fetch all mean "can't prove this is a stale re-litigation"
+  # — so the caller posts the downgrade as usual. Only an actual diff fetch
+  # that comes back clean of every blocking finding's (file, line) counts as
+  # "no new information".
+  defp downgrade_without_new_info?(_adapter, _mr_ref, nil, _findings), do: false
+
+  defp downgrade_without_new_info?(adapter, mr_ref, head_sha, findings)
+       when is_binary(head_sha) do
+    blocking = Enum.filter(findings, &(&1[:severity] == :error))
+
+    with true <- blocking != [],
+         true <- function_exported?(adapter, :latest_own_review_sha, 1),
+         {:ok, prev_sha} when is_binary(prev_sha) and prev_sha != head_sha <-
+           safe_adapter_call(adapter, :latest_own_review_sha, [mr_ref]),
+         true <- function_exported?(adapter, :self_approved?, 1),
+         {:ok, true} <- safe_adapter_call(adapter, :self_approved?, [mr_ref]),
+         {:ok, diff} when is_binary(diff) <-
+           safe_adapter_call(adapter, :get_diff, [mr_ref, %{base: prev_sha, head: head_sha}]) do
+      scope = DiffScope.build(diff)
+      not Enum.any?(blocking, &DiffScope.in_diff?(scope, &1[:file], &1[:line]))
+    else
+      _ -> false
+    end
+  end
+
+  defp read_diff_via_adapter(%{adapter: adapter, mr_ref: mr_ref} = state)
+       when is_atom(adapter) and is_binary(mr_ref) do
+    prepare_adapter(state)
+    opts = adapter_opts(state)
+
+    case safe_adapter_call(adapter, :get_diff, [mr_ref, opts]) do
+      {:ok, diff} when is_binary(diff) -> {:ok, Map.put(state, :diff, diff)}
+      {:error, _} = err -> err
+    end
+  end
+
+  # bd-ch8zbp: `Checkout.provision/2` only ever fetches the PR head SHA, so
+  # the worktree's `origin/<base>` remote-tracking ref is whatever the
+  # shared clone last happened to have — which can be many commits behind
+  # the real base on origin. Diffing against that stale ref silently pulls
+  # in every commit the local base is missing, inflating the diff by
+  # orders of magnitude (a 2-file PR read as 528 files, observed on
+  # v0.1.61). Force-refresh `origin/<base>` from origin immediately before
+  # resolving/diffing.
+  #
+  # Best-effort: any failure (offline, base branch renamed/deleted) is
+  # swallowed — `resolve_base_ref/2` then falls back to whatever ref (stale
+  # or absent) it can still find, and the caller falls back further to the
+  # adapter's REST diff if nothing resolves at all.
+  defp refresh_base_ref(wt, base) do
+    case System.cmd(
+           "git",
+           [
+             "-C",
+             wt,
+             "fetch",
+             "--no-tags",
+             "origin",
+             "+refs/heads/#{base}:refs/remotes/origin/#{base}"
+           ],
+           stderr_to_stdout: true
+         ) do
+      {_output, 0} ->
+        :ok
+
+      {output, status} ->
+        Logger.warning(
+          "bd-ch8zbp: refresh of origin/#{base} in #{wt} failed (exit #{status}): #{output} " <>
+            "— diff will fall back to whatever ref is already present, which may be stale"
+        )
+
+        :ok
+    end
+  end
+
+  # `Checkout.provision/2` only fetches the PR head SHA, not the base
+  # branch, so the base is reachable in the worktree as a remote-tracking
+  # ref (`origin/<base>`) rather than a local branch of that name — try
+  # that first, then the bare name as a last resort (e.g. it happens to be
+  # the worktree's checked-out branch).
+  defp resolve_base_ref(wt, base) do
+    ["origin/#{base}", base]
+    |> Enum.find_value(:error, fn ref ->
+      case System.cmd("git", ["-C", wt, "rev-parse", "--verify", "#{ref}^{commit}"],
+             stderr_to_stdout: true
+           ) do
+        {_output, 0} -> {:ok, ref}
+        _ -> nil
+      end
+    end)
+  end
+end

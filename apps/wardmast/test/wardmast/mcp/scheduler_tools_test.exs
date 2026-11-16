@@ -1,0 +1,324 @@
+defmodule Wardmast.MCP.SchedulerToolsTest do
+  use Wardmast.DataCase, async: false
+
+  alias Wardmast.MCP.Scope
+  alias Wardmast.MCP.Tools
+  alias Wardmast.Board.Autopilot
+  alias Wardmast.Tasks.Workspace
+
+  setup do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "scheduler-tools-ws-#{System.unique_integer([:positive])}",
+        prefix: "stw#{System.unique_integer([:positive])}"
+      })
+
+    coordinator = %Scope{tier: :coordinator, workspace_id: ws.id}
+
+    # Start an autopilot instance for testing. Supervised rather than
+    # start_link'd: a linked instance races the test process's exit, so an
+    # on_exit `Process.alive?` + `GenServer.stop` could hit a dead pid.
+    start_supervised!(
+      {Autopilot,
+       name: nil,
+       paused: false,
+       interval_ms: :never,
+       topics: [],
+       snapshot: fn opts -> default_board(opts[:paused]) end}
+    )
+
+    on_exit(fn ->
+      # Reset the global Autopilot singleton to paused state to prevent test pollution
+      Autopilot.pause(Autopilot)
+    end)
+
+    {:ok, ws: ws, coordinator: coordinator}
+  end
+
+  defp default_board(paused?) do
+    %{
+      ready: [],
+      backlog: [],
+      blocked: [],
+      in_progress: [],
+      merging: [],
+      verifying: [],
+      closed_today: [],
+      attention: [],
+      promote: nil,
+      slots_total: 4,
+      slots_free: 4,
+      quota: :ok,
+      paused: paused?,
+      now: DateTime.utc_now()
+    }
+  end
+
+  describe "scheduler_pause/2" do
+    test "pauses the autopilot and records who", ctx do
+      # Ensure we start in resumed state
+      :ok = Autopilot.resume()
+
+      assert false == Autopilot.paused?()
+
+      assert {:ok, data} = Tools.scheduler_pause(ctx.coordinator, %{})
+
+      assert data.paused == true
+      assert data.changed_by == "coordinator via mcp"
+      assert %DateTime{} = data.changed_at
+      assert Autopilot.paused?() == true
+    end
+
+    test "audits the pause and notifies the coordinator, naming the actor", ctx do
+      :ok = Autopilot.resume()
+
+      assert {:ok, _} = Tools.scheduler_pause(ctx.coordinator, %{})
+
+      assert [%{paused: true, actor: "coordinator", surface: "mcp"} | _] =
+               Wardmast.Settings.scheduler_changes()
+
+      assert [msg | _] =
+               Wardmast.Messages.Message
+               |> Ash.read!()
+               |> Enum.filter(&(&1.escalation_kind == :scheduler_paused))
+
+      assert msg.subject =~ "coordinator"
+      assert msg.body =~ "mcp"
+    end
+
+    test "returns current state when already paused", ctx do
+      :ok = Autopilot.pause()
+      assert true == Autopilot.paused?()
+
+      assert {:ok, data} = Tools.scheduler_pause(ctx.coordinator, %{})
+
+      assert data.paused == true
+    end
+  end
+
+  describe "scheduler_resume/2" do
+    test "resumes the autopilot and records who", ctx do
+      :ok = Autopilot.pause()
+      assert true == Autopilot.paused?()
+
+      assert {:ok, data} = Tools.scheduler_resume(ctx.coordinator, %{})
+
+      assert data.paused == false
+      assert data.changed_by == "coordinator via mcp"
+      assert %DateTime{} = data.changed_at
+      assert Autopilot.paused?() == false
+    end
+
+    test "returns current state when already running", ctx do
+      :ok = Autopilot.resume()
+      assert false == Autopilot.paused?()
+
+      assert {:ok, data} = Tools.scheduler_resume(ctx.coordinator, %{})
+
+      assert data.paused == false
+    end
+  end
+
+  describe "server_status/2" do
+    test "returns the version stamp and migration status, with no host paths", ctx do
+      assert {:ok, data} = Tools.server_status(ctx.coordinator, %{})
+
+      assert data |> Map.keys() |> Enum.sort() ==
+               Enum.sort([
+                 :version,
+                 :sha,
+                 :built_at,
+                 :booted_at,
+                 :release_repo,
+                 :update,
+                 :migrations
+               ])
+
+      assert is_binary(data.version)
+      assert %{status: status} = data.migrations
+      assert status in ["ok", "warning", "unknown"]
+
+      refute inspect(data) =~ System.user_home!()
+    end
+
+    test "is a coordinator-only tool" do
+      {:ok, tool} = Wardmast.MCP.Catalog.fetch("server_status")
+      assert tool.tiers == [:coordinator]
+    end
+  end
+
+  describe "scheduler_status/2" do
+    test "returns the current pause state", ctx do
+      :ok = Autopilot.pause()
+
+      assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
+
+      assert data.paused == true
+    end
+
+    test "returns running state", ctx do
+      :ok = Autopilot.resume()
+
+      assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
+
+      assert data.paused == false
+    end
+
+    # bd-9fgg04: the body is `Wardmast.Board.Drain.to_json/1` — a pause alone is
+    # not "idle", so the drain state rides along with the flag.
+    test "reports the drain state: running while the autopilot promotes", ctx do
+      :ok = Autopilot.resume()
+
+      assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
+
+      assert data.state == "running"
+      assert data.safe_to_restart == false
+      assert is_list(data.in_flight)
+    end
+
+    test "a paused scheduler with live work reports draining, naming the work", ctx do
+      :ok = Autopilot.pause()
+      test_pid = self()
+
+      runner =
+        spawn_link(fn ->
+          Wardmast.Board.Drain.track(:external_review, %{detail: "github:o/r#9"}, fn ->
+            send(test_pid, :running)
+
+            receive do
+              :release -> :ok
+            end
+          end)
+        end)
+
+      assert_receive :running
+
+      assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
+
+      assert data.paused == true
+      assert data.state == "draining"
+      assert data.safe_to_restart == false
+
+      assert Enum.any?(
+               data.in_flight,
+               &(&1.kind == "external_review" and &1.detail == "github:o/r#9")
+             )
+
+      send(runner, :release)
+    end
+
+    test "reports when and by what the state last changed", ctx do
+      :ok = Autopilot.resume(Autopilot)
+      :ok = Autopilot.pause(Autopilot, "mcp")
+
+      assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
+
+      assert data.changed_by == "mcp"
+      assert %DateTime{} = data.changed_at
+    end
+  end
+
+  # DC5 (bd-2c2a4g, design §9): the per-pool budgets, machines and the admission
+  # mode ride `scheduler_status`, the same body `GET /api/scheduler/status` gives.
+  describe "scheduler_status/2 budgets (DC5)" do
+    setup do
+      :ok = :meck.new(Wardmast.Board.CapacityView, [:passthrough, :no_link])
+      on_exit(fn -> :meck.unload(Wardmast.Board.CapacityView) end)
+
+      view = %{
+        admission: %{
+          mode: "shadow",
+          label: "shadow",
+          decides: false,
+          agreement: %{comparable: 52, agrees: 47, since: ~U[2026-10-12 00:00:00Z]}
+        },
+        pools: [
+          %{
+            account: "acct-1",
+            account_name: "claude:default",
+            pool: "claude",
+            budget: 3,
+            seats: 3,
+            free: 0,
+            binding: "ceiling",
+            reason: "ceiling max_concurrent 3 (quota allows 4: 5h binds)",
+            state: "full"
+          }
+        ],
+        machines: [%{id: "local", name: "local", cap: 6, live: 3, free: 3, state: "online"}],
+        repos: [],
+        fair_share: [],
+        ci_backpressure: [
+          %{
+            repo: "vstim",
+            label: "vstim",
+            workspace: "vstim-ws",
+            pending: 6,
+            oldest_pending_min: 42,
+            max_pending: 4,
+            max_oldest_pending_min: nil,
+            state: "held",
+            detail: "6 pending, oldest 42m"
+          }
+        ]
+      }
+
+      :meck.expect(Wardmast.Board.CapacityView, :status, fn -> view end)
+      %{view: view}
+    end
+
+    test "carries admission, one budget per pool, machines, repos and fair_share", ctx do
+      assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
+
+      assert data.admission.label == "shadow"
+      assert data.admission.decides == false
+      assert data.admission.agreement.agrees == 47
+      assert [%{pool: "claude", budget: 3, reason: reason}] = data.budgets
+      assert reason =~ "ceiling max_concurrent 3"
+      assert [%{id: "local", cap: 6, live: 3, free: 3}] = data.machines
+      assert data.repos == []
+      assert data.fair_share == []
+    end
+
+    test "carries a per-repo CI backpressure entry: pending count, threshold, hold state (#1126)",
+         ctx do
+      assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
+
+      assert [
+               %{
+                 repo: "vstim",
+                 pending: 6,
+                 max_pending: 4,
+                 state: "held",
+                 detail: "6 pending, oldest 42m"
+               }
+             ] = data.ci_backpressure
+    end
+
+    test "is byte-for-byte the body the REST endpoint renders", ctx do
+      assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
+      rest = Wardmast.Board.Drain.status() |> Wardmast.Board.Drain.to_json()
+
+      for key <- [:admission, :budgets, :machines, :repos, :fair_share, :ci_backpressure] do
+        assert Map.fetch!(data, key) == Map.fetch!(rest, key)
+      end
+    end
+  end
+
+  describe "internal failures are not :invalid (P-19)" do
+    setup do
+      :ok = :meck.new(Wardmast.Board.Drain, [:passthrough, :no_link])
+      on_exit(fn -> :meck.unload(Wardmast.Board.Drain) end)
+    end
+
+    test "a raise in scheduler_status is :internal", %{coordinator: coordinator} do
+      :meck.expect(Wardmast.Board.Drain, :status, fn -> raise "boom" end)
+      assert {:error, {:internal, _}} = Tools.scheduler_status(coordinator, %{})
+    end
+
+    test "an exit in scheduler_status is :busy", %{coordinator: coordinator} do
+      :meck.expect(Wardmast.Board.Drain, :status, fn -> exit(:timeout) end)
+      assert {:error, {:busy, _}} = Tools.scheduler_status(coordinator, %{})
+    end
+  end
+end

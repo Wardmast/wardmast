@@ -1,0 +1,165 @@
+defmodule Wardmast.Sessions.SessionTokenTest do
+  @moduledoc """
+  The per-session, revocable MCP scope token (bd-aprlbb, RFC §9.3 / §10.1).
+
+  Acceptance criterion 3: minted at `--tier coordinator`, `can_dispatch`
+  defaults **off**, the workspace binding is honoured, and ending or killing
+  the session revokes it.
+  """
+  use Wardmast.DataCase, async: false
+
+  alias Wardmast.MCP.Scope
+  alias Wardmast.Sessions
+  alias Wardmast.Test.SessionEnv
+  alias Wardmast.Test.SessionRunnerStub
+
+  setup do
+    SessionEnv.sandbox("session-token")
+    SessionRunnerStub.reset()
+    :ok
+  end
+
+  defp launch!(opts \\ []) do
+    {:ok, session} = Sessions.launch(Keyword.merge([runner: SessionRunnerStub], opts))
+    session
+  end
+
+  describe "minting (§9.3)" do
+    test "is a coordinator-tier token carrying the session id" do
+      session = launch!()
+      token = Sessions.mint_mcp_token(session)
+
+      assert {:ok, scope} = Scope.from_token(token)
+      assert scope.tier == :coordinator
+      assert scope.session_id == session.id
+    end
+
+    test "never carries operator proof, whatever the claims say (bd-anwb0u)" do
+      session = launch!()
+
+      assert {:ok, scope} = Scope.from_token(Sessions.mint_mcp_token(session))
+      refute Scope.operator?(scope)
+
+      forged =
+        Wardmast.MCP.mint(%{
+          tier: :coordinator,
+          workspace_id: nil,
+          session_id: session.id,
+          operator: true
+        })
+
+      assert {:ok, forged_scope} = Scope.from_token(forged)
+      refute Scope.operator?(forged_scope)
+      assert Wardmast.Guardrails.Authority.from_scope(forged_scope) == :coordinator
+    end
+
+    test "can_dispatch defaults off (§10.1 recursion guardrail)" do
+      session = launch!()
+
+      assert {:ok, scope} = Scope.from_token(Sessions.mint_mcp_token(session))
+      refute scope.can_dispatch
+    end
+
+    test "can_dispatch is honoured when the operator opts in" do
+      session = launch!(can_dispatch: true)
+
+      assert session.can_dispatch
+      assert {:ok, scope} = Scope.from_token(Sessions.mint_mcp_token(session))
+      assert scope.can_dispatch
+    end
+
+    test "cross-workspace by default, bound when the session is bound" do
+      cross = launch!()
+      assert {:ok, scope} = Scope.from_token(Sessions.mint_mcp_token(cross))
+      assert scope.workspace_id == nil
+      assert Scope.same_workspace?(scope, "any-workspace")
+
+      bound = launch!(workspace_id: "ws-42")
+      assert {:ok, bound_scope} = Scope.from_token(Sessions.mint_mcp_token(bound))
+      assert bound_scope.workspace_id == "ws-42"
+      assert Scope.same_workspace?(bound_scope, "ws-42")
+      refute Scope.same_workspace?(bound_scope, "ws-other")
+    end
+  end
+
+  describe "revocation — the session row is the handle (§9.3)" do
+    test "a live session's token verifies" do
+      session = launch!()
+      assert {:ok, _} = Scope.from_token(Sessions.mint_mcp_token(session))
+    end
+
+    test "killing the session revokes its token" do
+      session = launch!()
+      token = Sessions.mint_mcp_token(session)
+      assert {:ok, _} = Scope.from_token(token)
+
+      {:ok, killed} = Sessions.kill(session.id, runner: SessionRunnerStub)
+
+      assert killed.mcp_token_revoked_at
+      assert {:error, :revoked} = Scope.from_token(token)
+    end
+
+    test "ending the session for any other reason revokes it too" do
+      session = launch!()
+      token = Sessions.mint_mcp_token(session)
+
+      {:ok, _} = Sessions.mark_ended(session, "scope vanished")
+
+      assert {:error, :revoked} = Scope.from_token(token)
+    end
+
+    test "an exit racing an operator kill keeps the first ended_at/end_reason (bd-bsdeb2)" do
+      session = launch!()
+
+      {:ok, exited} = Sessions.mark_ended(session, "exited")
+      {:ok, killed_again} = Sessions.mark_ended(exited, "killed")
+
+      assert killed_again.end_reason == "exited"
+      assert DateTime.compare(killed_again.ended_at, exited.ended_at) == :eq
+
+      assert DateTime.compare(killed_again.mcp_token_revoked_at, exited.mcp_token_revoked_at) ==
+               :eq
+    end
+
+    test "revoke_mcp_token/1 revokes without ending the session" do
+      session = launch!()
+      token = Sessions.mint_mcp_token(session)
+
+      {:ok, revoked} = Sessions.revoke_mcp_token(session)
+
+      assert revoked.status == :running
+      assert {:error, :revoked} = Scope.from_token(token)
+    end
+
+    test "a Kill winning against a stale in-memory struct's later exit keeps the kill (bd-bsdeb2 finding 1)" do
+      # Regression for the real ordering: `Wardmast.Sessions.Stream` holds a
+      # `session` struct captured at `init/1` and never refreshes it, so the
+      # second `mark_ended/2` call it makes is *always* against a stale
+      # "still running" struct, not the just-ended row. `mark_ended/2` must
+      # re-read the persisted row itself rather than trust its argument.
+      session = launch!()
+
+      {:ok, killed} = Sessions.kill(session.id, runner: SessionRunnerStub)
+      assert killed.end_reason == "killed"
+
+      # The Stream's stale pre-kill struct, exactly as it would call in.
+      {:ok, exited_again} = Sessions.mark_ended(session, "exited")
+
+      assert exited_again.end_reason == "killed"
+      assert DateTime.compare(exited_again.ended_at, killed.ended_at) == :eq
+
+      assert DateTime.compare(exited_again.mcp_token_revoked_at, killed.mcp_token_revoked_at) ==
+               :eq
+    end
+
+    test "a token naming a session with no row is revoked, not accepted" do
+      token = Scope.mint_session(Ash.UUID.generate())
+      assert {:error, :revoked} = Scope.from_token(token)
+    end
+
+    test "tokens with no session id are unaffected by the revocation check" do
+      assert {:ok, scope} = Scope.from_token(Scope.mint_coordinator())
+      assert scope.session_id == nil
+    end
+  end
+end

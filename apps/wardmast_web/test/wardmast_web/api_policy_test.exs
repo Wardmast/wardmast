@@ -1,0 +1,147 @@
+defmodule WardmastWeb.ApiPolicyTest do
+  @moduledoc """
+  bd-asawcq: every `/api` route is classified in `WardmastWeb.ApiPolicy`, and
+  an anonymous loopback caller reaches only the routes classified
+  `:anonymous`. Iterates the router itself, so a newly added route cannot
+  silently stay anonymous: it has no policy entry, and this test fails.
+  """
+  use WardmastWeb.ConnCase, async: true
+
+  alias WardmastWeb.ApiPolicy
+
+  @write_verbs [:post, :put, :patch, :delete]
+
+  defp api_routes do
+    WardmastWeb.Router.__routes__()
+    |> Enum.filter(&String.starts_with?(&1.path, "/api/"))
+  end
+
+  # A concrete path for a route pattern: every `:param` becomes a placeholder.
+  defp concrete(path) do
+    path
+    |> String.split("/")
+    |> Enum.map_join("/", fn
+      ":" <> _ -> "bd-nonexistent"
+      seg -> seg
+    end)
+  end
+
+  defp anonymous_loopback(method, path) do
+    Phoenix.ConnTest.build_conn()
+    |> Map.put(:remote_ip, {127, 0, 0, 1})
+    |> put_req_header("content-type", "application/json")
+    |> Phoenix.ConnTest.dispatch(@endpoint, method, path, "{}")
+  end
+
+  test "every /api route has an explicit policy" do
+    missing =
+      for route <- api_routes(), ApiPolicy.policy(route.verb, route.path) == :unclassified do
+        "#{route.verb |> to_string() |> String.upcase()} #{route.path}"
+      end
+
+    assert missing == [], "unclassified /api routes: #{inspect(missing)}"
+  end
+
+  test "no write route is anonymous" do
+    anonymous_writes =
+      for route <- api_routes(),
+          route.verb in @write_verbs,
+          ApiPolicy.policy(route.verb, route.path) == :anonymous,
+          do: "#{route.verb} #{route.path}"
+
+    assert anonymous_writes == []
+  end
+
+  test "an anonymous loopback request to every write route is rejected with 401" do
+    accepted =
+      for route <- api_routes(), route.verb in @write_verbs do
+        conn = anonymous_loopback(route.verb, concrete(route.path))
+        {route.verb, route.path, conn.status}
+      end
+      |> Enum.reject(fn {_, _, status} -> status == 401 end)
+
+    assert accepted == [], "anonymous loopback writes not rejected: #{inspect(accepted)}"
+  end
+
+  test "an anonymous loopback request to every non-anonymous read route is rejected with 401" do
+    accepted =
+      for route <- api_routes(),
+          route.verb == :get,
+          ApiPolicy.policy(route.verb, route.path) != :anonymous do
+        conn = anonymous_loopback(:get, concrete(route.path))
+        {route.path, conn.status}
+      end
+      |> Enum.reject(fn {_, status} -> status == 401 end)
+
+    assert accepted == [], "anonymous loopback reads not rejected: #{inspect(accepted)}"
+  end
+
+  test "the anonymous routes stay reachable without a token" do
+    for route <- api_routes(), ApiPolicy.policy(route.verb, route.path) == :anonymous do
+      conn = anonymous_loopback(route.verb, concrete(route.path))
+      refute conn.status in [401, 403], "#{route.path} rejected an anonymous caller"
+    end
+  end
+
+  describe ":operator policy (node administration, RW3)" do
+    alias Wardmast.MCP.Scope
+
+    test "admits only an operator-proof coordinator token" do
+      operator = %Scope{tier: :coordinator, operator: true}
+      assert ApiPolicy.authorize(:operator, operator, %{}) == :ok
+    end
+
+    test "refuses a coordinator session without operator proof (403), so an LLM cannot enrol machines" do
+      session = %Scope{tier: :coordinator, operator: false}
+
+      assert {:error, :forbidden, message} = ApiPolicy.authorize(:operator, session, %{})
+      assert message =~ "operator"
+    end
+
+    test "refuses worker and refine tokens (403) and a missing token (401)" do
+      assert {:error, :forbidden, _} =
+               ApiPolicy.authorize(:operator, %Scope{tier: :worker, task_id: "bd-1"}, %{})
+
+      assert {:error, :forbidden, _} =
+               ApiPolicy.authorize(:operator, %Scope{tier: :refine, issue_id: "bd-1"}, %{})
+
+      assert {:error, :unauthenticated, _} = ApiPolicy.authorize(:operator, nil, %{})
+    end
+
+    test "a real operator-proof token and a real coordinator token are told apart" do
+      {:ok, operator} = Scope.from_token(Scope.mint_coordinator(nil, operator: true))
+      {:ok, session} = Scope.from_token(Scope.mint_coordinator(nil))
+
+      assert ApiPolicy.authorize(:operator, operator, %{}) == :ok
+      assert {:error, :forbidden, _} = ApiPolicy.authorize(:operator, session, %{})
+    end
+  end
+
+  describe ":quota_read policy (P-18, D-A-6)" do
+    test "workers may read their workspace's quota, but not reach for ?account=" do
+      worker = %Wardmast.MCP.Scope{tier: :worker, task_id: "bd-1"}
+      assert ApiPolicy.policy(:get, "/api/quota") == :quota_read
+      assert ApiPolicy.authorize(:quota_read, worker, %{}) == :ok
+      assert ApiPolicy.authorize(:quota_read, worker, %{"workspace" => "x"}) == :ok
+
+      assert {:error, :forbidden, _} =
+               ApiPolicy.authorize(:quota_read, worker, %{"account" => "claude:main"})
+    end
+
+    test "coordinators read everything; refine tokens and anonymous callers are refused" do
+      assert ApiPolicy.authorize(:quota_read, %Wardmast.MCP.Scope{tier: :coordinator}, %{
+               "account" => "a"
+             }) ==
+               :ok
+
+      assert {:error, :forbidden, _} =
+               ApiPolicy.authorize(
+                 :quota_read,
+                 %Wardmast.MCP.Scope{tier: :refine, issue_id: "bd-1"},
+                 %{}
+               )
+
+      assert {:error, :unauthenticated, _} = ApiPolicy.authorize(:quota_read, nil, %{})
+    end
+  end
+end

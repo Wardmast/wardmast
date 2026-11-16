@@ -1,0 +1,1554 @@
+defmodule WardmastWeb.ProvidersLive do
+  @moduledoc """
+  Provider accounts at `/providers` (bd-cb86s4): one card per
+  `Wardmast.Accounts.ProviderAccount`, read from `Wardmast.Accounts.Overview`.
+
+  Each card shows the provider, the account's name and attached workspaces;
+  every quota pool's utilization against its pace — `QuotaHelpers.quota_pace/3`
+  under the account's `Wardmast.Quota.gate_policy/2`, which is the paced
+  dispatch gate's own `Wardmast.Quota.Gate.pace/6`; the account concurrency
+  ceiling against its registry-derived live count; credential health
+  (`AuthHold` / `CredentialWatchdog` for the provider's adapter, the active
+  credentials by fingerprint, the last probe); and the last 30 days of usage
+  and cost — `n/a` for a provider whose usage cannot be priced.
+
+  ## Actions
+
+  Create an account, add or rotate a credential, attach or detach a
+  workspace. Provider accounts are always on since the P13 flip (bd-9gqj8e),
+  so the page is never read-only.
+
+  ## The secret
+
+  ## Login (bd-bh50vs)
+
+  "Log in" / "Re-authenticate" runs the provider CLI's own login through
+  `Wardmast.Accounts.Logins` and shows it in a panel that works at phone width:
+  the sign-in link, the device code, a paste box, the live state, Cancel, and
+  the hidden terminal in a collapsed "Show terminal" fallback. The action is
+  for the operator — a loopback dashboard peer, the same rule the session
+  terminal applies (§10.4) — and is refused server-side for anyone else, not
+  just hidden. The runner pushes its state to a topic private to this view; a
+  pasted code goes `handle_event` → `LoginRunner.relay_paste/2` and is never
+  assigned, rendered or flashed. Past logins are listed per account with a
+  link to the redacted transcript.
+
+  The credential form's secret is a `type="password"` input whose rendered
+  `value` is always empty, on no `phx-change` — it crosses the socket once,
+  on submit, straight into `Wardmast.Accounts.rotate_credential/2` (the
+  ash_cloak-encrypted `ProviderCredential`), and is never assigned, echoed
+  back into the form, or flashed. `secret` is in `:phoenix,
+  :filter_parameters`, so LiveView's event logging prints it `[FILTERED]`.
+  """
+
+  use WardmastWeb, :live_view
+
+  import WardmastWeb.QuotaHelpers,
+    only: [quota_pace: 2, quota_pct: 1, quota_provider_label: 1, quota_windows: 1]
+
+  alias Wardmast.Accounts
+  alias Wardmast.Accounts.LoginRunner
+  alias Wardmast.Accounts.Logins
+  alias Wardmast.Accounts.Overview
+  alias Wardmast.Quota.SpendCap
+  alias WardmastWeb.ProvidersLive.AccountEditForm
+
+  @refresh_ms 15_000
+
+  @providers [
+    {"Claude", "claude"},
+    {"Codex", "codex"},
+    {"Antigravity", "antigravity"},
+    {"Grok", "grok"}
+  ]
+
+  @kinds [
+    {"OAuth token", "oauth_token"},
+    {"API key", "api_key"},
+    {"CLI credentials file", "cli_credentials_file"},
+    {"Quota grant (config dir path)", "cli_credentials_path"}
+  ]
+
+  # What a fresh credential form pre-fills per provider — the env var a
+  # worker of that provider reads (`Wardmast.Accounts.Census`'s known set).
+  @credential_defaults %{
+    claude: %{"kind" => "oauth_token", "env_var" => "CLAUDE_CODE_OAUTH_TOKEN"},
+    codex: %{"kind" => "api_key", "env_var" => "OPENAI_API_KEY"},
+    antigravity: %{"kind" => "api_key", "env_var" => "ANTIGRAVITY_API_KEY"}
+  }
+
+  @impl true
+  def mount(_params, _session, socket) do
+    live? = connected?(socket)
+    if live?, do: :timer.send_interval(@refresh_ms, :refresh)
+
+    socket =
+      socket
+      |> assign(:page_title, "Providers")
+      |> assign(:creating?, false)
+      |> assign(:account_form, account_form())
+      |> assign(:account_error, nil)
+      |> assign(:edit_for, nil)
+      |> assign(:edit_form, nil)
+      |> assign(:edit_errors, %{})
+      |> assign(:edit_error, nil)
+      |> assign(:credential_for, nil)
+      |> assign(:credential_form, nil)
+      |> assign(:credential_error, nil)
+      |> assign(:attach_for, nil)
+      |> assign(:attach_form, nil)
+      |> assign(:attach_error, nil)
+      |> assign(:rows, [])
+      |> assign(:history, %{})
+      |> assign(:logins, %{})
+      |> assign(:login_topic, "providers-login:" <> Ash.UUID.generate())
+      |> assign(:pauses, %{})
+      |> assign(:workspace_options, [])
+      |> assign(:providers_loaded?, false)
+      |> assign(:providers_loading?, false)
+      |> assign(:providers_stale?, false)
+      |> assign(:providers_error, nil)
+
+    if live?, do: Phoenix.PubSub.subscribe(Wardmast.PubSub, socket.assigns.login_topic)
+
+    {:ok, if(live?, do: fetch_providers(socket), else: socket)}
+  end
+
+  @impl true
+  def handle_info(:refresh, socket), do: {:noreply, fetch_providers(socket)}
+
+  # The runner's state push for a login this view started (private topic).
+  def handle_info({:login_state, login_id, snapshot}, socket) do
+    case Enum.find(socket.assigns.logins, fn {_id, login} -> login.id == login_id end) do
+      nil ->
+        {:noreply, socket}
+
+      {account_id, login} ->
+        socket = put_login(socket, account_id, %{login | snapshot: snapshot})
+
+        # A finished login wrote a history row (and maybe a credential).
+        {:noreply,
+         if(login_terminal?(snapshot.status), do: fetch_providers(socket), else: socket)}
+    end
+  end
+
+  # Every live_session LiveView also receives the coordinator-inbox
+  # `{:new_message, _}` / `{:message_read, _}` broadcasts (LiveHooks `:cont`s
+  # them on); this page has no use for them.
+  def handle_info(_msg, socket), do: {:noreply, socket}
+
+  @impl true
+  def handle_async(:providers, {:ok, data}, socket) do
+    socket
+    |> assign(:rows, data.rows)
+    |> assign(:history, data.history)
+    |> assign(:pauses, data.pauses)
+    |> assign(:workspace_options, data.workspace_options)
+    |> assign(:providers_loaded?, true)
+    |> assign(:providers_error, nil)
+    |> providers_read_done()
+  end
+
+  # A read that fails must not take the page down. Whatever was on screen
+  # stays there — the skeleton on a first load, the last good read on a
+  # refresh — under an error that says so.
+  def handle_async(:providers, {:exit, reason}, socket) do
+    socket
+    |> assign(:providers_error, load_error(reason))
+    |> providers_read_done()
+  end
+
+  # ---- events ---------------------------------------------------------------
+
+  @impl true
+  def handle_event("new_account", _params, socket),
+    do:
+      {:noreply,
+       assign(socket, creating?: true, account_form: account_form(), account_error: nil)}
+
+  def handle_event("cancel_account", _params, socket),
+    do: {:noreply, assign(socket, creating?: false, account_error: nil)}
+
+  def handle_event("create_account", %{"account" => params}, socket) do
+    with {:ok, attrs} <- account_attrs(params),
+         {:ok, account} <- Accounts.create_account(attrs) do
+      {:noreply,
+       socket
+       |> assign(creating?: false, account_error: nil)
+       |> put_flash(:info, "Created #{account.provider}:#{account.slug}.")
+       |> fetch_providers()}
+    else
+      {:error, error} ->
+        {:noreply,
+         assign(socket,
+           creating?: true,
+           account_form: account_form(params),
+           account_error: error_message(error)
+         )}
+    end
+  end
+
+  # bd-8vkqd3: edit an existing account. The whole submission is validated
+  # before any write (`AccountEditForm.parse/1`), so a bad value leaves the
+  # account untouched and the form open with what was typed.
+  def handle_event("open_edit", %{"id" => id}, socket) do
+    case find_row(socket, id) do
+      %{account: account} ->
+        {:noreply,
+         assign(socket,
+           edit_for: id,
+           edit_form: edit_form(AccountEditForm.params(account)),
+           edit_errors: %{},
+           edit_error: nil
+         )}
+
+      nil ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("cancel_edit", _params, socket),
+    do: {:noreply, assign(socket, edit_for: nil, edit_errors: %{}, edit_error: nil)}
+
+  def handle_event("save_edit", %{"account_id" => id, "edit" => params}, socket) do
+    with %{account: account} <- find_row(socket, id) || {:error, "This account no longer exists."},
+         {:ok, edit} <- AccountEditForm.parse(params),
+         {:ok, _account} <- AccountEditForm.save(account.id, edit) do
+      {:noreply,
+       socket
+       |> assign(edit_for: nil, edit_form: nil, edit_errors: %{}, edit_error: nil)
+       |> put_flash(:info, "Saved #{account.provider}:#{account.slug}.")
+       |> fetch_providers()}
+    else
+      {:error, errors} when is_map(errors) ->
+        {:noreply,
+         assign(socket,
+           edit_for: id,
+           edit_form: edit_form(params),
+           edit_errors: errors,
+           edit_error: nil
+         )}
+
+      {:error, message} when is_binary(message) ->
+        {:noreply,
+         assign(socket,
+           edit_for: id,
+           edit_form: edit_form(params),
+           edit_errors: %{},
+           edit_error: message
+         )}
+    end
+  end
+
+  def handle_event("open_credential", %{"id" => id}, socket) do
+    defaults =
+      case find_row(socket, id) do
+        %{account: account} -> Map.get(@credential_defaults, account.provider, %{})
+        nil -> %{}
+      end
+
+    {:noreply,
+     assign(socket,
+       credential_for: id,
+       credential_form: credential_form(defaults),
+       credential_error: nil
+     )}
+  end
+
+  def handle_event("cancel_credential", _params, socket),
+    do: {:noreply, assign(socket, credential_for: nil, credential_error: nil)}
+
+  def handle_event(
+        "rotate_credential",
+        %{"account_id" => id, "credential" => params},
+        socket
+      ) do
+    secret = params |> Map.get("secret", "") |> to_string() |> String.trim()
+    # Everything the form re-renders with — never the secret.
+    echo = Map.take(params, ["kind", "env_var"])
+
+    result =
+      if secret == "" do
+        {:error, {:missing, :secret}}
+      else
+        Accounts.rotate_credential(id, %{
+          "kind" => Map.get(params, "kind"),
+          "env_var" => params |> Map.get("env_var", "") |> to_string() |> String.trim(),
+          "secret" => secret
+        })
+      end
+
+    case result do
+      {:ok, credential} ->
+        {:noreply,
+         socket
+         |> assign(credential_for: nil, credential_form: nil, credential_error: nil)
+         |> put_flash(
+           :info,
+           "Stored #{credential.env_var} (#{String.slice(credential.fingerprint, 0, 12)}…)."
+         )
+         |> fetch_providers()}
+
+      {:error, error} ->
+        {:noreply,
+         assign(socket,
+           credential_for: id,
+           credential_form: credential_form(echo),
+           credential_error: error_message(error)
+         )}
+    end
+  end
+
+  def handle_event("open_attach", %{"id" => id}, socket),
+    do: {:noreply, assign(socket, attach_for: id, attach_form: attach_form(), attach_error: nil)}
+
+  def handle_event("cancel_attach", _params, socket),
+    do: {:noreply, assign(socket, attach_for: nil, attach_error: nil)}
+
+  def handle_event("attach", %{"account_id" => id, "attach" => params}, socket) do
+    with %{account: account} <- find_row(socket, id) || {:error, :not_found},
+         {:ok, opts} <- share_opts(Map.get(params, "share")),
+         {:ok, _link} <-
+           Accounts.attach_workspace(
+             Map.get(params, "workspace_id", ""),
+             account.provider,
+             account.id,
+             opts
+           ) do
+      {:noreply,
+       socket
+       |> assign(attach_for: nil, attach_form: nil, attach_error: nil)
+       |> put_flash(:info, "Attached to #{account.provider}:#{account.slug}.")
+       |> fetch_providers()}
+    else
+      {:error, error} ->
+        {:noreply,
+         assign(socket,
+           attach_for: id,
+           attach_form: attach_form(params),
+           attach_error: error_message(error)
+         )}
+    end
+  end
+
+  def handle_event("detach", %{"account" => account_id, "workspace" => workspace_id}, socket) do
+    case Accounts.detach_workspace(workspace_id, account_id) do
+      {:ok, _link} ->
+        {:noreply, socket |> put_flash(:info, "Detached.") |> fetch_providers()}
+
+      {:error, error} ->
+        {:noreply, socket |> put_flash(:error, error_message(error)) |> fetch_providers()}
+    end
+  end
+
+  def handle_event("delete_account", %{"id" => id}, socket) do
+    case Accounts.delete_account(id) do
+      {:ok, account} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Deleted #{account.provider}:#{account.slug}.")
+         |> fetch_providers()}
+
+      {:error, error} ->
+        {:noreply, socket |> put_flash(:error, error_message(error)) |> fetch_providers()}
+    end
+  end
+
+  # bd-5ef587: pause / resume a provider or one account. A pause is dropped
+  # from every routing decision; running workers are left alone here (the
+  # `--stop-running` lever is CLI / MCP only).
+  def handle_event("pause_provider", %{"ref" => ref} = params, socket) do
+    reason =
+      case params |> Map.get("reason", "") |> String.trim() do
+        "" -> nil
+        text -> text
+      end
+
+    case Wardmast.Providers.Pause.pause(ref, reason: reason, by: "dashboard") do
+      {:ok, _} ->
+        {:noreply, socket |> put_flash(:info, "Paused #{ref}.") |> fetch_providers()}
+
+      {:error, error} ->
+        {:noreply,
+         socket |> put_flash(:error, "Could not pause: #{inspect(error)}") |> fetch_providers()}
+    end
+  end
+
+  def handle_event("resume_provider", %{"ref" => ref}, socket) do
+    case Wardmast.Providers.Pause.resume(ref, by: "dashboard") do
+      {:ok, _} ->
+        {:noreply, socket |> put_flash(:info, "Resumed #{ref}.") |> fetch_providers()}
+
+      {:error, error} ->
+        {:noreply,
+         socket |> put_flash(:error, "Could not resume: #{inspect(error)}") |> fetch_providers()}
+    end
+  end
+
+  # ---- login (bd-bh50vs) ----
+
+  def handle_event("start_login", %{"id" => id}, socket) do
+    with :ok <- authorize_login(socket),
+         %{account: account} <- find_row(socket, id) do
+      opts = [started_by: "dashboard", topic: socket.assigns.login_topic]
+
+      case Logins.start(account.id, opts) do
+        {:ok, login_id} ->
+          {:ok, snapshot} = Logins.status(login_id)
+          {:noreply, put_login(socket, id, %{id: login_id, snapshot: snapshot, error: nil})}
+
+        {:error, reason} ->
+          {:noreply, put_login(socket, id, %{id: nil, snapshot: nil, error: login_error(reason)})}
+      end
+    else
+      {:error, :forbidden} ->
+        {:noreply, put_flash(socket, :error, "Logging in is for the operator.")}
+
+      nil ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("cancel_login", %{"id" => id}, socket) do
+    with :ok <- authorize_login(socket),
+         %{id: login_id} when is_binary(login_id) <- Map.get(socket.assigns.logins, id) do
+      _ = Logins.cancel(login_id)
+    end
+
+    {:noreply, socket}
+  end
+
+  def handle_event("toggle_login_terminal", %{"id" => id}, socket) do
+    with :ok <- authorize_login(socket),
+         %{} = login <- Map.get(socket.assigns.logins, id) do
+      {:noreply, put_login(socket, id, Map.update(login, :terminal?, true, &(not &1)))}
+    else
+      _ -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("paste_login", %{"_id" => id, "login" => %{"code" => code}}, socket) do
+    with :ok <- authorize_login(socket),
+         %{id: login_id} = login when is_binary(login_id) <- Map.get(socket.assigns.logins, id) do
+      case Logins.relay_paste(login_id, code) do
+        :ok ->
+          {:noreply, put_login(socket, id, %{login | error: nil})}
+
+        {:error, reason} ->
+          {:noreply, put_login(socket, id, %{login | error: login_error(reason)})}
+      end
+    else
+      _ -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("retry_providers", _params, socket),
+    do: {:noreply, socket |> assign(:providers_error, nil) |> fetch_providers()}
+
+  def handle_event(_event, _params, socket), do: {:noreply, socket}
+
+  # ---- state ----------------------------------------------------------------
+
+  defp fetch_providers(%{assigns: %{providers_loading?: true}} = socket),
+    do: assign(socket, :providers_stale?, true)
+
+  defp fetch_providers(socket) do
+    socket
+    |> assign(:providers_loading?, true)
+    |> assign(:providers_stale?, false)
+    |> start_async(:providers, fn -> load_providers() end)
+  end
+
+  defp providers_read_done(socket) do
+    socket = assign(socket, :providers_loading?, false)
+
+    {:noreply, if(socket.assigns.providers_stale?, do: fetch_providers(socket), else: socket)}
+  end
+
+  # The operator is the dashboard peer on this box (§10.4); the same gate the
+  # terminal socket applies. Checked in every login event, not just the view.
+  defp authorize_login(%{assigns: %{loopback?: false}}), do: {:error, :forbidden}
+  defp authorize_login(_socket), do: :ok
+
+  defp put_login(socket, account_id, login),
+    do: update(socket, :logins, &Map.put(&1, account_id, login))
+
+  @terminal_statuses ~w(succeeded failed timed_out cancelled)a
+  defp login_terminal?(status), do: status in @terminal_statuses
+
+  # A login for this row is running — started here or from anywhere else.
+  defp login_active?(row, logins) do
+    case Map.get(logins, row.account.id) do
+      %{snapshot: %{status: status}} -> not login_terminal?(status)
+      _ -> LoginRunner.active?(row.account.provider, row.account.slug)
+    end
+  end
+
+  defp login_error(:already_active), do: "A login is already running for this account."
+  defp login_error(:not_awaiting_code), do: "The login is not waiting for a code."
+  defp login_error(:invalid_input), do: "The code must be a single printable line."
+  defp login_error(:relay_failed), do: "The code could not be delivered — try again."
+
+  defp login_error(reason) when reason in [:unsupported, :disabled],
+    do: "Dashboard login is #{reason} for this provider."
+
+  defp login_error(other), do: "Could not start the login: #{inspect(other)}"
+
+  defp login_status_label(:starting), do: "Starting the provider CLI…"
+  defp login_status_label(:awaiting_user), do: "Waiting for you to sign in"
+  defp login_status_label(:verifying), do: "Verifying the login…"
+  defp login_status_label(:succeeded), do: "Logged in"
+  defp login_status_label(:failed), do: "Login failed"
+  defp login_status_label(:timed_out), do: "Timed out"
+  defp login_status_label(:cancelled), do: "Cancelled"
+
+  defp login_status_class(:succeeded), do: "text-[var(--arb-live)]"
+
+  defp login_status_class(status) when status in [:failed, :timed_out],
+    do: "text-[var(--arb-fail-text)]"
+
+  defp login_status_class(_), do: "text-[var(--text-body)]"
+
+  # The pane's session, if the dock-less terminal can attach to it.
+  defp login_session_id(%{snapshot: %{session_id: id}}), do: id
+  defp login_session_id(_), do: nil
+
+  defp stamp(%DateTime{} = at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")
+  defp stamp(_), do: "—"
+
+  # The pause that applies to an account: its own, else its provider's.
+  defp account_pause(pauses, account),
+    do: Map.get(pauses, "account:#{account.id}") || Map.get(pauses, to_string(account.provider))
+
+  defp pause_at(%{at: %DateTime{} = at}), do: ", " <> Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")
+  defp pause_at(_), do: ""
+
+  defp load_error({%{__exception__: true} = error, _stacktrace}), do: Exception.message(error)
+  defp load_error(reason), do: Exception.format_exit(reason)
+
+  # Runs in the async task: the account/pool/pace,
+  # concurrency, credential-health and per-account cost overview (ledger
+  # reads), and the workspace options for the attach form — kept off the
+  # connected mount and every tick so a slow ledger scan can never block the
+  # LiveView process (bd-34f7gt).
+  defp load_providers do
+    rows = Overview.list([])
+
+    %{
+      rows: rows,
+      pauses: Map.new(Wardmast.Providers.Pause.list(), &{&1.target, &1}),
+      workspace_options: Overview.workspace_options(),
+      history:
+        Map.new(rows, &{&1.account.id, Logins.history(&1.account.provider, &1.account.slug)})
+    }
+  end
+
+  defp providers_state(_loaded?, error) when not is_nil(error), do: "error"
+  defp providers_state(true, nil), do: "loaded"
+  defp providers_state(false, nil), do: "loading"
+
+  defp find_row(socket, id), do: Enum.find(socket.assigns.rows, &(&1.account.id == id))
+
+  defp account_form(params \\ %{"provider" => "claude"}), do: to_form(params, as: :account)
+  defp credential_form(params), do: to_form(params, as: :credential)
+  defp edit_form(params), do: to_form(params, as: :edit)
+
+  defp attach_form(params \\ %{}), do: to_form(params, as: :attach)
+
+  defp account_attrs(params) do
+    with {:ok, max_concurrent} <- optional_int(Map.get(params, "max_concurrent"), :max_concurrent) do
+      attrs =
+        params
+        |> Map.take(["provider", "slug", "label", "plan"])
+        |> Map.reject(fn {_k, v} -> v in [nil, ""] end)
+        |> Map.put("max_concurrent", max_concurrent)
+
+      {:ok, attrs}
+    end
+  end
+
+  defp share_opts(value) do
+    case optional_int(value, :share) do
+      {:ok, nil} -> {:ok, []}
+      {:ok, share} -> {:ok, [share: share]}
+      error -> error
+    end
+  end
+
+  defp optional_int(value, _field) when value in [nil, ""], do: {:ok, nil}
+
+  defp optional_int(value, field) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {n, ""} when n >= 0 -> {:ok, n}
+      _ -> {:error, {:not_a_count, field}}
+    end
+  end
+
+  defp error_message(%Ash.Error.Invalid{errors: errors}),
+    do: Enum.map_join(errors, "; ", &Exception.message/1)
+
+  defp error_message(error) when is_exception(error), do: Exception.message(error)
+  defp error_message({:missing, :secret}), do: "Paste the secret to store."
+  defp error_message({:missing, field}), do: "#{humanize(field)} is required."
+  defp error_message({:invalid_kind, _}), do: "Pick a credential kind."
+
+  defp error_message({:invalid_credentials_path, reason}),
+    do:
+      "No readable Claude grant there (#{reason}). Log the config dir in first: " <>
+        "`CLAUDE_CONFIG_DIR=<dir> claude auth login`."
+
+  defp error_message({:not_a_count, field}), do: "#{humanize(field)} must be a whole number ≥ 0."
+  defp error_message({:merged_away, _}), do: "This account was merged into another one."
+
+  defp error_message({:provider_mismatch, provider}),
+    do: "That account is a #{provider} account."
+
+  defp error_message(:not_found), do: "Not found — pick a workspace."
+
+  defp error_message(:grok_routed_by_opt_in),
+    do:
+      "Grok is routed by the \"Route D1 tickets to Grok\" toggle in workspace settings, not attached."
+
+  defp error_message(:not_attached), do: "That workspace is no longer attached to this account."
+  defp error_message(:ambiguous), do: "That account reference is ambiguous."
+  defp error_message(:already_deleted), do: "This account has already been deleted."
+
+  defp error_message({:pinned_by_task, task_id}),
+    do: "Pinned by running task #{task_id}'s provider routing."
+
+  defp error_message({:required_by_workspace, _workspace_id, roles}),
+    do: "Required by a workspace's #{Enum.join(roles, "/")} setting — clear it first."
+
+  defp error_message({:attached, workspace_ids}),
+    do: "Attached to #{length(workspace_ids)} workspace(s) — detach first."
+
+  defp error_message({:missing_credential_risk, _workspace_id}),
+    do: "A workspace still needs this account's credential — detaching would break it."
+
+  defp error_message(:hard_delete_blocked),
+    do: "Hard delete needs an account with no usage or credentials, ever."
+
+  defp error_message(other), do: inspect(other)
+
+  defp humanize(field),
+    do: field |> to_string() |> String.replace("_", " ") |> String.capitalize()
+
+  # ---- view helpers ---------------------------------------------------------
+
+  defp account_name(account), do: account.label || account.slug
+
+  # `provider_icon/1` knows the three agent logos; Antigravity uses Gemini's.
+  defp icon_provider(:antigravity), do: "gemini"
+  defp icon_provider(provider), do: Atom.to_string(provider)
+
+  # One row per pool window: the bar plus the pace readout, both read from
+  # the paced gate's verdict.
+  defp pools(view) do
+    for bar <- quota_windows(view) do
+      bar =
+        Map.merge(bar, %{
+          provider: view.provider,
+          overage_status: view[:overage_status]
+        })
+
+      Map.put(bar, :pace, quota_pace(bar, view.gate_policy))
+    end
+  end
+
+  defp pace_text(%{utilization: nil}), do: "no reading"
+
+  defp pace_text(%{utilization: u, pace: %{elapsed: elapsed, ceiling: ceiling, mode: mode}}) do
+    used = "#{quota_pct(u)}% used"
+    pace = if is_number(elapsed), do: "#{round(elapsed * 100)}% pace", else: "pace n/a"
+    ceiling = "#{if mode == :paced, do: "paced ", else: ""}ceiling #{round(ceiling * 100)}%"
+    Enum.join([used, pace, ceiling], " · ")
+  end
+
+  # bd-a6grlr: the dollar spend cap line under an account's pools.
+  defp spend_cap_text(%{metered?: false} = cap),
+    do: "spend cap $#{SpendCap.money(cap.cap)}/#{cap.window} (#{cap.mode}) · no metered spend"
+
+  defp spend_cap_text(cap) do
+    "spend cap $#{SpendCap.money(cap.cap)}/#{cap.window} (#{cap.mode}) · " <>
+      "$#{SpendCap.money(cap.used)} used · $#{SpendCap.money(cap.allowed)} allowed by now"
+  end
+
+  defp spend_class(:holding), do: "text-[var(--arb-fail-text)]"
+  defp spend_class(:warning), do: "text-[var(--arb-attention)]"
+  defp spend_class(_), do: "text-[var(--arb-text-muted)]"
+
+  defp verdict_class(:holding), do: "text-[var(--arb-fail-text)]"
+  defp verdict_class(:approaching), do: "text-[var(--arb-attention)]"
+  defp verdict_class(_), do: "text-[var(--arb-text-muted)]"
+
+  defp verdict_label(:holding), do: "holding"
+  defp verdict_label(:approaching), do: "approaching"
+  defp verdict_label(:sampling), do: "sampling"
+  defp verdict_label(:ok), do: "on pace"
+
+  defp concurrency_text(%{live_count: live, max_concurrent: nil}), do: "#{live} live · no cap"
+  defp concurrency_text(%{live_count: live, max_concurrent: cap}), do: "#{live} / #{cap}"
+
+  defp concurrency_pct(%{max_concurrent: cap}) when cap in [nil, 0], do: 0
+
+  defp concurrency_pct(%{live_count: live, max_concurrent: cap}),
+    do: min(100, round(live / cap * 100))
+
+  defp health_label(%{state: :ok}), do: "healthy"
+  defp health_label(%{state: :no_credential}), do: "no credential"
+  defp health_label(%{state: :expired}), do: "credential expired"
+  defp health_label(%{state: :auth_hold, auth_hold: %{deaths: d}}), do: "auth hold · #{d} deaths"
+  defp health_label(%{state: :auth_hold}), do: "auth hold"
+
+  defp health_class(:ok),
+    do: "bg-[var(--arb-live-wash)] text-[var(--arb-live)] border-[var(--arb-live-edge)]"
+
+  defp health_class(:no_credential),
+    do:
+      "bg-[var(--arb-attention-wash)] text-[var(--arb-attention)] border-[var(--arb-attention-edge)]"
+
+  defp health_class(_),
+    do: "bg-[var(--arb-fail-wash)] text-[var(--arb-fail-text)] border-[var(--arb-fail-edge)]"
+
+  defp health_title(account),
+    do:
+      "Auth hold and watchdog state are per #{quota_provider_label(Atom.to_string(account.provider))} CLI adapter — shared by every account on this provider."
+
+  defp usage_rows_text(1), do: "1 usage event"
+  defp usage_rows_text(n), do: "#{n} usage events"
+
+  defp cost_text(%{cost_usd: nil}), do: "n/a"
+  defp cost_text(%{cost_usd: cost}), do: format_usd(cost)
+
+  defp ago(nil), do: "never"
+
+  defp ago(%DateTime{} = at) do
+    secs = max(DateTime.diff(DateTime.utc_now(), at), 0)
+
+    cond do
+      secs < 60 -> "just now"
+      secs < 3600 -> "#{div(secs, 60)}m ago"
+      secs < 86_400 -> "#{div(secs, 3600)}h ago"
+      true -> "#{div(secs, 86_400)}d ago"
+    end
+  end
+
+  defp attachable(options, row) do
+    attached = MapSet.new(row.workspaces, & &1.workspace_id)
+    Enum.reject(options, fn {_name, id} -> MapSet.member?(attached, id) end)
+  end
+
+  # ---- render ---------------------------------------------------------------
+
+  @impl true
+  def render(assigns) do
+    assigns =
+      assigns
+      |> assign(:providers, @providers)
+      |> assign(:kinds, @kinds)
+      |> assign(:window_days, Overview.usage_window_days())
+
+    ~H"""
+    <Layouts.app
+      flash={@flash}
+      banner_rev={@banner_rev}
+      current_path={@current_path}
+      quotas={@quotas}
+      quota_on_exhaustion={@quota_on_exhaustion}
+      open_epic_count={@open_epic_count}
+      live={@live}
+      coordinator_inbox={@coordinator_inbox}
+      coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
+    >
+      <div id="providers-page" class="p-4 sm:p-6 max-w-7xl mx-auto flex flex-col gap-4">
+        <WardmastWeb.CoreComponents.Domain.index_header
+          icon="hero-key"
+          title="Providers"
+          count={length(@rows)}
+          subtitle="Provider accounts: quota pools against pace, concurrency, credential health and cost. Credentials, quota and the concurrency ceiling hang off the account, not the workspace."
+        >
+          <:actions>
+            <WardmastWeb.CoreComponents.Core.button
+              :if={@providers_loaded? and not @creating?}
+              id="new-account-button"
+              phx-click="new_account"
+              variant="primary"
+              size="sm"
+            >
+              <:icon><WardmastWeb.CoreComponents.Core.icon name="hero-plus" size={13} /></:icon>
+              New account
+            </WardmastWeb.CoreComponents.Core.button>
+          </:actions>
+        </WardmastWeb.CoreComponents.Domain.index_header>
+
+        <p id="providers-routing-help" class="m-0 text-[12px] text-[var(--arb-text-muted)]">
+          Attaching an account to a workspace is metering and concurrency only. To route work to a provider, add it in the workspace's settings (Providers section); Grok is switched on there too, with its routing toggle.
+        </p>
+
+        <div
+          id="providers-panel"
+          data-state={providers_state(@providers_loaded?, @providers_error)}
+          aria-busy={to_string(not @providers_loaded? and is_nil(@providers_error))}
+          class="flex flex-col gap-4"
+        >
+          <div
+            :if={@providers_error}
+            id="providers-error"
+            role="alert"
+            class="flex items-start gap-2 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12px] text-[var(--arb-fail-text)]"
+          >
+            <WardmastWeb.CoreComponents.Core.icon
+              name="hero-exclamation-triangle-micro"
+              class="size-4 shrink-0 mt-px"
+            />
+            <span class="grow min-w-0 break-words">
+              Could not load provider accounts: {@providers_error}<span :if={@providers_loaded?}> — showing the last list that loaded.</span>
+            </span>
+            <button
+              type="button"
+              id="providers-retry"
+              phx-click="retry_providers"
+              class={[
+                "shrink-0 px-2 h-[22px] rounded-[var(--radius-field)] cursor-pointer",
+                "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+                "text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+              ]}
+            >
+              Retry
+            </button>
+          </div>
+
+          <div
+            :if={@providers_loaded?}
+            id="provider-pauses"
+            class="flex flex-wrap items-start gap-3 px-3 py-2.5 rounded-[var(--radius-field)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)]"
+          >
+            <div
+              :if={@pauses != %{}}
+              id="provider-pause-banner"
+              role="status"
+              class="basis-full text-[12px] text-[var(--arb-fail-text)]"
+            >
+              <span class="font-medium">Paused — dropped from all routing:</span>
+              <span :for={{target, p} <- Enum.sort(@pauses)} id={"pause-entry-#{target}"} class="ml-2">
+                {Wardmast.Providers.Pause.label(target)} — {p.reason || "no reason given"} (by {p.by ||
+                  "unknown"}{pause_at(p)})
+              </span>
+            </div>
+            <form
+              :for={provider <- ["claude", "codex", "antigravity"]}
+              id={"pause-provider-#{provider}"}
+              phx-submit={
+                if Map.has_key?(@pauses, provider), do: "resume_provider", else: "pause_provider"
+              }
+              class="flex items-center gap-1.5 text-[12px]"
+            >
+              <input type="hidden" name="ref" value={provider} />
+              <span class="font-[family-name:var(--font-mono)]">{provider}</span>
+              <input
+                :if={not Map.has_key?(@pauses, provider)}
+                type="text"
+                name="reason"
+                placeholder="reason"
+                class="h-[22px] px-1.5 text-[11px] rounded-[var(--radius-field)] border border-solid border-[var(--border-default)] bg-[var(--surface-panel)]"
+              />
+              <button
+                type="submit"
+                id={"pause-toggle-#{provider}"}
+                class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)] hover:text-[var(--text-title)] cursor-pointer"
+              >
+                {if Map.has_key?(@pauses, provider), do: "Resume", else: "Pause"}
+              </button>
+            </form>
+          </div>
+
+          <div
+            :if={not @providers_loaded? and is_nil(@providers_error)}
+            id="providers-loading"
+            aria-label="Loading provider accounts"
+            class="flex flex-col gap-3"
+          >
+            <div
+              :for={n <- 1..3}
+              id={"providers-loading-#{n}"}
+              aria-hidden="true"
+              class="h-[132px] rounded-[var(--radius-panel)] border border-solid border-[var(--border-default)] bg-[var(--arb-panel-alt)] animate-pulse"
+            >
+            </div>
+          </div>
+
+          <WardmastWeb.CoreComponents.Core.panel
+            :if={@providers_loaded? and @creating?}
+            id="new-account-panel"
+            title="New provider account"
+            meta="no credential needed yet"
+          >
+            <.form
+              for={@account_form}
+              id="account-form"
+              phx-submit="create_account"
+              class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end"
+            >
+              <.input
+                field={@account_form[:provider]}
+                type="select"
+                label="Provider"
+                options={@providers}
+              />
+              <.input field={@account_form[:slug]} label="Slug" placeholder="work-max" required />
+              <.input field={@account_form[:label]} label="Label" placeholder="Work Max plan" />
+              <.input field={@account_form[:plan]} label="Plan" placeholder="max_20x" />
+              <.input
+                field={@account_form[:max_concurrent]}
+                type="number"
+                min="0"
+                label="Concurrency cap"
+                placeholder="none"
+              />
+              <p
+                :if={@account_error}
+                id="account-form-error"
+                class="sm:col-span-2 lg:col-span-5 text-[12px] text-[var(--arb-fail-text)]"
+              >
+                {@account_error}
+              </p>
+              <div class="sm:col-span-2 lg:col-span-5 flex gap-2">
+                <WardmastWeb.CoreComponents.Core.button type="submit" variant="primary" size="sm">
+                  Create account
+                </WardmastWeb.CoreComponents.Core.button>
+                <WardmastWeb.CoreComponents.Core.button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  phx-click="cancel_account"
+                >
+                  Cancel
+                </WardmastWeb.CoreComponents.Core.button>
+              </div>
+            </.form>
+          </WardmastWeb.CoreComponents.Core.panel>
+
+          <div :if={@providers_loaded? and @rows == []} id="providers-empty">
+            <WardmastWeb.CoreComponents.Feedback.empty_state
+              icon="hero-key"
+              detail="arb account create <provider> <slug>, or New account above"
+            >
+              No provider accounts yet.
+            </WardmastWeb.CoreComponents.Feedback.empty_state>
+          </div>
+
+          <div id="provider-accounts" class="flex flex-col gap-3">
+            <article
+              :for={row <- @rows}
+              id={"account-#{row.account.id}"}
+              class="rounded-[var(--radius-panel)] border border-[var(--border-default)] bg-[var(--surface-panel)] overflow-hidden transition-shadow duration-150 hover:shadow-sm"
+            >
+              <header class="flex flex-wrap items-center gap-3 px-[18px] py-3 border-b border-[var(--border-default)]">
+                <span
+                  id={"account-#{row.account.id}-provider"}
+                  class="inline-flex size-8 items-center justify-center rounded-[var(--radius-box)] bg-[var(--surface-card)] text-[var(--text-title)]"
+                >
+                  <.provider_icon provider={icon_provider(row.account.provider)} class="size-4" />
+                </span>
+                <div class="flex flex-col min-w-0">
+                  <span
+                    id={"account-#{row.account.id}-name"}
+                    class="font-medium text-[14px] text-[var(--text-title)] truncate"
+                  >
+                    {account_name(row.account)}
+                  </span>
+                  <span class="text-[11px] text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+                    {row.account.provider}:{row.account.slug}<span :if={row.account.plan}> · {row.account.plan}</span>
+                  </span>
+                </div>
+                <span
+                  :if={not row.account.enabled}
+                  id={"account-#{row.account.id}-parked"}
+                  class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)]"
+                >
+                  parked
+                </span>
+                <span
+                  :if={pause = account_pause(@pauses, row.account)}
+                  id={"account-#{row.account.id}-paused"}
+                  title={pause.reason}
+                  class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--arb-fail-edge)] text-[var(--arb-fail-text)]"
+                >
+                  paused
+                </span>
+                <span
+                  id={"account-#{row.account.id}-health"}
+                  data-health={row.health.state}
+                  title={health_title(row.account)}
+                  class={[
+                    "ml-auto text-[11px] font-medium px-2 py-0.5 rounded-[var(--radius-chip)] border",
+                    health_class(row.health.state)
+                  ]}
+                >
+                  {health_label(row.health)}
+                </span>
+                <form
+                  :if={not Map.has_key?(@pauses, "account:#{row.account.id}")}
+                  id={"pause-account-form-#{row.account.id}"}
+                  phx-submit="pause_provider"
+                  class="flex items-center gap-1"
+                >
+                  <input type="hidden" name="ref" value={row.account.id} />
+                  <input
+                    id={"pause-account-reason-#{row.account.id}"}
+                    type="text"
+                    name="reason"
+                    placeholder="Reason"
+                    class="text-[11px] px-2 py-0.5 w-28 rounded-[var(--radius-chip)] border border-[var(--border-default)] bg-transparent"
+                  />
+                  <button
+                    id={"pause-account-#{row.account.id}"}
+                    type="submit"
+                    class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)] hover:text-[var(--text-title)]"
+                  >
+                    Pause
+                  </button>
+                </form>
+                <button
+                  :if={Map.has_key?(@pauses, "account:#{row.account.id}")}
+                  id={"resume-account-#{row.account.id}"}
+                  type="button"
+                  phx-click="resume_provider"
+                  phx-value-ref={row.account.id}
+                  class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)] hover:text-[var(--text-title)]"
+                >
+                  Resume
+                </button>
+                <WardmastWeb.CoreComponents.Core.button
+                  :if={@loopback?}
+                  id={"login-start-#{row.account.id}"}
+                  type="button"
+                  phx-click="start_login"
+                  phx-value-id={row.account.id}
+                  disabled={login_active?(row, @logins)}
+                  variant="ghost"
+                  size="sm"
+                >
+                  {if row.credentials == [], do: "Log in", else: "Re-authenticate"}
+                </WardmastWeb.CoreComponents.Core.button>
+                <WardmastWeb.CoreComponents.Core.button
+                  :if={@edit_for != row.account.id}
+                  id={"account-#{row.account.id}-edit-button"}
+                  type="button"
+                  phx-click="open_edit"
+                  phx-value-id={row.account.id}
+                  variant="ghost"
+                  size="sm"
+                >
+                  <:icon>
+                    <WardmastWeb.CoreComponents.Core.icon name="hero-pencil-square" size={13} />
+                  </:icon>
+                  Edit
+                </WardmastWeb.CoreComponents.Core.button>
+                <button
+                  id={"delete-account-#{row.account.id}"}
+                  type="button"
+                  phx-click="delete_account"
+                  phx-value-id={row.account.id}
+                  data-confirm={"Delete #{row.account.provider}:#{row.account.slug}? " <>
+                  "It will be hidden from lists but its usage history is kept."}
+                  class="text-[11px] px-2 py-0.5 rounded-[var(--radius-chip)] border border-[var(--border-default)] text-[var(--arb-text-muted)] hover:text-[var(--text-title)]"
+                >
+                  Delete
+                </button>
+              </header>
+
+              <AccountEditForm.edit_form
+                :if={@edit_for == row.account.id}
+                row={row}
+                form={@edit_form}
+                errors={@edit_errors}
+                save_error={@edit_error}
+              />
+
+              <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,0.8fr)_minmax(0,1.2fr)_minmax(0,0.8fr)] gap-px bg-[var(--arb-line-soft)]">
+                <section
+                  id={"account-#{row.account.id}-quota"}
+                  class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-2"
+                >
+                  <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">Pools</h3>
+                  <p :if={row.quotas == []} class="text-[12px] text-[var(--arb-text-muted)]">
+                    No quota snapshot yet.
+                  </p>
+                  <div :for={view <- row.quotas} class="flex flex-col gap-1.5">
+                    <div :for={pool <- pools(view)} class="flex flex-col gap-0.5">
+                      <.quota_bar
+                        provider={view.provider}
+                        window={pool.window}
+                        label={pool.label}
+                        utilization={pool.utilization}
+                        reset_at={pool.reset_at}
+                        overage_status={pool.overage_status}
+                        gate_policy={view.gate_policy}
+                        stale_message={view[:message]}
+                        width={160}
+                        label_width={52}
+                      />
+                      <span
+                        id={"account-#{row.account.id}-pace-#{pool.window}"}
+                        data-pace-verdict={pool.pace.verdict}
+                        class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--arb-text-muted)]"
+                      >
+                        {pace_text(pool)} ·
+                        <span class={verdict_class(pool.pace.verdict)}>
+                          {verdict_label(pool.pace.verdict)}
+                        </span>
+                      </span>
+                    </div>
+                  </div>
+                  <div
+                    :if={row.spend_cap}
+                    id={"account-#{row.account.id}-spend-cap"}
+                    data-spend-state={row.spend_cap.state}
+                    class="flex flex-col gap-0.5"
+                  >
+                    <span class="text-[11px] font-[family-name:var(--font-mono)] text-[var(--arb-text-muted)]">
+                      {spend_cap_text(row.spend_cap)}
+                    </span>
+                    <span
+                      :if={row.spend_cap.phrase}
+                      class={["text-[11px]", spend_class(row.spend_cap.state)]}
+                    >
+                      {row.spend_cap.phrase}
+                    </span>
+                  </div>
+                </section>
+
+                <section class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-2">
+                  <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">
+                    Concurrency
+                  </h3>
+                  <span
+                    id={"account-#{row.account.id}-concurrency"}
+                    class="text-[18px] font-medium tabular-nums text-[var(--text-title)]"
+                  >
+                    {concurrency_text(row)}
+                  </span>
+                  <div
+                    :if={row.max_concurrent}
+                    class="h-1.5 w-full rounded-[var(--radius-pill)] bg-[var(--surface-card)] overflow-hidden"
+                  >
+                    <div
+                      class="h-full bg-[var(--arb-live)] transition-[width] duration-300"
+                      style={"width: #{concurrency_pct(row)}%"}
+                    />
+                  </div>
+                  <span class="text-[11px] text-[var(--arb-text-muted)]">
+                    workers live across every attached workspace
+                  </span>
+                </section>
+
+                <section class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-2">
+                  <div class="flex items-center justify-between gap-2">
+                    <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">
+                      Credential
+                    </h3>
+                    <WardmastWeb.CoreComponents.Core.button
+                      :if={@credential_for != row.account.id}
+                      id={"account-#{row.account.id}-credential-button"}
+                      phx-click="open_credential"
+                      phx-value-id={row.account.id}
+                      variant="ghost"
+                      size="sm"
+                    >
+                      {if row.credentials == [], do: "Add", else: "Rotate"}
+                    </WardmastWeb.CoreComponents.Core.button>
+                  </div>
+                  <ul
+                    id={"account-#{row.account.id}-credentials"}
+                    class="flex flex-col gap-1 list-none m-0 p-0"
+                  >
+                    <li :if={row.credentials == []} class="text-[12px] text-[var(--arb-text-muted)]">
+                      No active credential.
+                    </li>
+                    <li
+                      :for={credential <- row.credentials}
+                      class="flex flex-wrap items-baseline gap-x-2 text-[12px] font-[family-name:var(--font-mono)]"
+                    >
+                      <span class="text-[var(--text-title)]">{credential.env_var}</span>
+                      <span class="text-[var(--arb-text-muted)]">{credential.kind}</span>
+                      <span class="text-[var(--arb-text-faint)]" title="sha256 fingerprint prefix">
+                        {credential.fingerprint}…
+                      </span>
+                    </li>
+                  </ul>
+                  <span class="text-[11px] text-[var(--arb-text-muted)]">
+                    last probe
+                    <span id={"account-#{row.account.id}-last-probe"} class="text-[var(--text-body)]">
+                      {ago(row.health.last_probe_at)}
+                    </span>
+                  </span>
+
+                  <.form
+                    :if={@credential_for == row.account.id}
+                    for={@credential_form}
+                    id={"credential-form-#{row.account.id}"}
+                    phx-submit="rotate_credential"
+                    autocomplete="off"
+                    class="flex flex-col gap-2 pt-2 border-t border-[var(--arb-line-soft)]"
+                  >
+                    <input type="hidden" name="account_id" value={row.account.id} />
+                    <div class="grid grid-cols-2 gap-2">
+                      <.input
+                        field={@credential_form[:kind]}
+                        type="select"
+                        label="Kind"
+                        options={@kinds}
+                      />
+                      <.input field={@credential_form[:env_var]} label="Env var" required />
+                    </div>
+                    <.input
+                      id={"credential-form-#{row.account.id}-secret"}
+                      name="credential[secret]"
+                      type="password"
+                      value=""
+                      label="Secret"
+                      autocomplete="new-password"
+                      placeholder="pasted once, stored encrypted, never shown again"
+                      required
+                    />
+                    <p
+                      :if={@credential_error}
+                      id={"credential-form-#{row.account.id}-error"}
+                      class="text-[12px] text-[var(--arb-fail-text)]"
+                    >
+                      {@credential_error}
+                    </p>
+                    <div class="flex gap-2">
+                      <WardmastWeb.CoreComponents.Core.button
+                        type="submit"
+                        variant="primary"
+                        size="sm"
+                      >
+                        Store credential
+                      </WardmastWeb.CoreComponents.Core.button>
+                      <WardmastWeb.CoreComponents.Core.button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        phx-click="cancel_credential"
+                      >
+                        Cancel
+                      </WardmastWeb.CoreComponents.Core.button>
+                    </div>
+                  </.form>
+                </section>
+
+                <section class="bg-[var(--surface-panel)] px-[18px] py-3 flex flex-col gap-1">
+                  <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">
+                    Last {@window_days} days
+                  </h3>
+                  <span
+                    id={"account-#{row.account.id}-cost"}
+                    title={
+                      if row.usage.cost_usd == nil, do: "usage on this provider cannot be priced"
+                    }
+                    class="text-[18px] font-medium tabular-nums text-[var(--text-title)]"
+                  >
+                    {cost_text(row.usage)}
+                  </span>
+                  <span class="text-[11px] text-[var(--arb-text-muted)] tabular-nums">
+                    {format_tokens(row.usage.tokens)} tokens · {usage_rows_text(row.usage.rows)}
+                  </span>
+                </section>
+              </div>
+
+              <section
+                :if={login = Map.get(@logins, row.account.id)}
+                id={"login-panel-#{row.account.id}"}
+                data-status={login.snapshot && login.snapshot.status}
+                class="flex flex-col gap-3 px-4 sm:px-[18px] py-3 border-t border-[var(--border-default)] bg-[var(--surface-card)]"
+              >
+                <div class="flex flex-wrap items-center gap-2">
+                  <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">
+                    Login
+                  </h3>
+                  <span
+                    :if={login.snapshot}
+                    id={"login-status-#{row.account.id}"}
+                    role="status"
+                    class={["text-[13px] font-medium", login_status_class(login.snapshot.status)]}
+                  >
+                    {login_status_label(login.snapshot.status)}<span :if={
+                      login.snapshot.reason && login.snapshot.status != :succeeded
+                    }> — {login.snapshot.reason}</span>
+                  </span>
+                  <WardmastWeb.CoreComponents.Core.button
+                    :if={login.snapshot && not login_terminal?(login.snapshot.status)}
+                    id={"login-cancel-#{row.account.id}"}
+                    type="button"
+                    phx-click="cancel_login"
+                    phx-value-id={row.account.id}
+                    variant="ghost"
+                    size="sm"
+                    class="ml-auto"
+                  >
+                    Cancel
+                  </WardmastWeb.CoreComponents.Core.button>
+                </div>
+
+                <p
+                  :if={login.error}
+                  id={"login-error-#{row.account.id}"}
+                  role="alert"
+                  class="text-[12px] text-[var(--arb-fail-text)]"
+                >
+                  {login.error}
+                </p>
+
+                <div
+                  :if={login.snapshot && login.snapshot.status == :awaiting_user}
+                  class="flex flex-col gap-3"
+                >
+                  <a
+                    :if={login.snapshot.url}
+                    id={"login-open-#{row.account.id}"}
+                    href={login.snapshot.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="inline-flex items-center justify-center gap-1.5 h-11 sm:h-9 px-4 rounded-[var(--radius-field)] bg-[var(--text-title)] text-[var(--surface-panel)] text-[13px] font-medium transition-opacity hover:opacity-90"
+                  >
+                    <WardmastWeb.CoreComponents.Core.icon
+                      name="hero-arrow-top-right-on-square"
+                      size={14}
+                    /> Open sign-in page
+                  </a>
+
+                  <div :if={login.snapshot.device_code} class="flex flex-col gap-1">
+                    <span class="text-[11px] text-[var(--arb-text-muted)]">
+                      Enter this code on the sign-in page
+                    </span>
+                    <code
+                      id={"login-device-code-#{row.account.id}"}
+                      class="block select-all break-all text-[26px] sm:text-[22px] tracking-[0.15em] font-[family-name:var(--font-mono)] text-[var(--text-title)] px-3 py-2 rounded-[var(--radius-field)] border border-solid border-[var(--border-default)] bg-[var(--surface-panel)]"
+                    >
+                      {login.snapshot.device_code}
+                    </code>
+                  </div>
+
+                  <.form
+                    :if={login.snapshot.needs_paste?}
+                    for={to_form(%{"code" => ""}, as: :login)}
+                    id={"login-paste-form-#{row.account.id}"}
+                    phx-submit="paste_login"
+                    autocomplete="off"
+                    class="flex flex-col sm:flex-row gap-2 sm:items-end"
+                  >
+                    <input type="hidden" name="_id" value={row.account.id} />
+                    <div class="grow min-w-0">
+                      <.input
+                        name="login[code]"
+                        id={"login-paste-code-#{row.account.id}"}
+                        type="password"
+                        value=""
+                        label="Code from the sign-in page"
+                        autocomplete="off"
+                        required
+                      />
+                    </div>
+                    <WardmastWeb.CoreComponents.Core.button
+                      id={"login-paste-submit-#{row.account.id}"}
+                      type="submit"
+                      variant="primary"
+                      size="sm"
+                    >
+                      Submit
+                    </WardmastWeb.CoreComponents.Core.button>
+                  </.form>
+                </div>
+
+                <div
+                  :if={login_session_id(login) && @loopback?}
+                  id={"login-terminal-#{row.account.id}"}
+                  data-open={to_string(login[:terminal?] == true)}
+                  class="flex flex-col gap-2"
+                >
+                  <button
+                    type="button"
+                    id={"login-terminal-toggle-#{row.account.id}"}
+                    phx-click="toggle_login_terminal"
+                    phx-value-id={row.account.id}
+                    class="self-start text-[12px] text-[var(--arb-text-muted)] hover:text-[var(--text-title)] underline underline-offset-2 cursor-pointer"
+                  >
+                    {if login[:terminal?] == true, do: "Hide terminal", else: "Show terminal"}
+                  </button>
+                  <div
+                    :if={login[:terminal?] == true}
+                    id={"login-terminal-pane-#{login_session_id(login)}"}
+                    phx-hook="WardmastWeb.SessionDockLive.SessionTerminal"
+                    phx-update="ignore"
+                    data-arb-terminal
+                    data-session-id={login_session_id(login)}
+                    class="h-64 max-w-full overflow-x-auto p-1.5 rounded-[var(--radius-field)] bg-black"
+                  >
+                  </div>
+                </div>
+              </section>
+
+              <section
+                :if={@loopback? or Map.get(@history, row.account.id, []) != []}
+                class="flex flex-col gap-1.5 px-4 sm:px-[18px] py-3 border-t border-[var(--border-default)]"
+              >
+                <h3 class="text-[11px] uppercase tracking-wide text-[var(--text-label)]">
+                  Login history
+                </h3>
+                <ul
+                  id={"login-history-#{row.account.id}"}
+                  class="flex flex-col gap-1.5 list-none m-0 p-0"
+                >
+                  <li
+                    :if={Map.get(@history, row.account.id, []) == []}
+                    class="text-[12px] text-[var(--arb-text-muted)]"
+                  >
+                    No logins yet.
+                  </li>
+                  <li
+                    :for={record <- Map.get(@history, row.account.id, [])}
+                    id={"login-record-#{record.id}"}
+                    class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[12px]"
+                  >
+                    <span class={["font-medium", login_status_class(record.outcome)]}>
+                      {record.outcome}
+                    </span>
+                    <span class="text-[var(--arb-text-muted)]">
+                      {stamp(record.started_at)} → {stamp(record.ended_at)}
+                    </span>
+                    <span class="text-[var(--arb-text-muted)]">
+                      by {record.started_by || "unknown"}
+                    </span>
+                    <span
+                      :if={record.fingerprint}
+                      class="font-[family-name:var(--font-mono)] text-[var(--arb-text-faint)]"
+                      title="credential fingerprint"
+                    >
+                      {record.fingerprint}
+                    </span>
+                    <a
+                      :if={record.transcript}
+                      href={~p"/providers/logins/#{record.id}/transcript"}
+                      target="_blank"
+                      class="underline underline-offset-2 text-[var(--arb-text-muted)] hover:text-[var(--text-title)]"
+                    >
+                      transcript
+                    </a>
+                  </li>
+                </ul>
+              </section>
+
+              <footer class="flex flex-wrap items-center gap-2 px-[18px] py-2.5 border-t border-[var(--border-default)] bg-[var(--surface-chrome)]">
+                <span class="text-[11px] uppercase tracking-wide text-[var(--text-label)] mr-1">
+                  Workspaces
+                </span>
+                <span :if={row.workspaces == []} class="text-[12px] text-[var(--arb-text-muted)]">
+                  none attached
+                </span>
+                <span
+                  :for={link <- row.workspaces}
+                  id={"account-#{row.account.id}-ws-#{link.workspace_id}"}
+                  class="inline-flex items-center gap-1 rounded-[var(--radius-chip)] border border-[var(--border-default)] bg-[var(--surface-card)] pl-2 pr-1 py-0.5 text-[12px]"
+                >
+                  <.link navigate={~p"/workspaces/#{link.workspace_id}"} class="hover:underline">
+                    {link.workspace_name}
+                  </.link>
+                  <span
+                    :if={link.share}
+                    class="text-[var(--arb-text-muted)] font-[family-name:var(--font-mono)]"
+                    title="this workspace's cap on the account's concurrency"
+                  >
+                    ≤{link.share}
+                  </span>
+                  <button
+                    type="button"
+                    id={"detach-#{row.account.id}-#{link.workspace_id}"}
+                    phx-click="detach"
+                    phx-value-account={row.account.id}
+                    phx-value-workspace={link.workspace_id}
+                    data-confirm={"Detach #{link.workspace_name} from #{row.account.slug}?"}
+                    aria-label={"Detach #{link.workspace_name}"}
+                    class="inline-flex size-4 items-center justify-center rounded-full text-[var(--arb-text-muted)] transition-colors hover:bg-[var(--arb-fail-wash)] hover:text-[var(--arb-fail-text)]"
+                  >
+                    <WardmastWeb.CoreComponents.Core.icon name="hero-x-mark" size={11} />
+                  </button>
+                </span>
+                <p
+                  :if={row.account.provider == :grok}
+                  id={"account-#{row.account.id}-grok-routing-note"}
+                  class="m-0 ml-auto max-w-md text-[12px] text-[var(--arb-text-muted)]"
+                >
+                  Grok has no workspace attach: it routes only through "Route D1 tickets to Grok" in each workspace's settings (Providers section).
+                </p>
+                <WardmastWeb.CoreComponents.Core.button
+                  :if={@attach_for != row.account.id and row.account.provider != :grok}
+                  id={"account-#{row.account.id}-attach-button"}
+                  phx-click="open_attach"
+                  phx-value-id={row.account.id}
+                  variant="ghost"
+                  size="sm"
+                  class="ml-auto"
+                >
+                  <:icon><WardmastWeb.CoreComponents.Core.icon name="hero-link" size={13} /></:icon>
+                  Attach workspace
+                </WardmastWeb.CoreComponents.Core.button>
+
+                <.form
+                  :if={@attach_for == row.account.id}
+                  for={@attach_form}
+                  id={"attach-form-#{row.account.id}"}
+                  phx-submit="attach"
+                  class="basis-full flex flex-wrap items-end gap-2 pt-2"
+                >
+                  <input type="hidden" name="account_id" value={row.account.id} />
+                  <p
+                    id={"attach-form-#{row.account.id}-help"}
+                    class="m-0 basis-full text-[12px] text-[var(--arb-text-muted)]"
+                  >
+                    Metering and concurrency only; to route work here, add it in the workspace settings.
+                  </p>
+                  <.input
+                    field={@attach_form[:workspace_id]}
+                    type="select"
+                    label="Workspace"
+                    prompt="Pick a workspace"
+                    options={attachable(@workspace_options, row)}
+                  />
+                  <.input
+                    field={@attach_form[:share]}
+                    type="number"
+                    min="0"
+                    label="Share (optional cap)"
+                    placeholder="none"
+                  />
+                  <WardmastWeb.CoreComponents.Core.button type="submit" variant="primary" size="sm">
+                    Attach
+                  </WardmastWeb.CoreComponents.Core.button>
+                  <WardmastWeb.CoreComponents.Core.button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    phx-click="cancel_attach"
+                  >
+                    Cancel
+                  </WardmastWeb.CoreComponents.Core.button>
+                  <p
+                    :if={@attach_error}
+                    id={"attach-form-#{row.account.id}-error"}
+                    class="basis-full text-[12px] text-[var(--arb-fail-text)]"
+                  >
+                    {@attach_error}
+                  </p>
+                </.form>
+              </footer>
+            </article>
+          </div>
+        </div>
+      </div>
+    </Layouts.app>
+    """
+  end
+end

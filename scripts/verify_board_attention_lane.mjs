@@ -3,7 +3,7 @@
 // bd-79w1fs — the board's Needs-attention swimlane remembers its toggle and
 // its coordinator chip per viewer, in browser storage, in a real browser.
 //
-// `ArbiterWeb.BoardLifecycleLiveTest` proves the server half: the
+// `WardmastWeb.BoardLifecycleLiveTest` proves the server half: the
 // `attention_lane_restore` event the `.AttentionLane` hook sends, and the
 // `attention_lane_pref` push it answers each toggle with. Neither can run the
 // hook itself — the `localStorage` read on mount, the write on each push, and

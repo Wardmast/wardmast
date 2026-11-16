@@ -1,0 +1,997 @@
+defmodule Wardmast.Sessions.Provisioning do
+  @moduledoc """
+  Builds the RFC §9.1 scaffold a session launches into (bd-aprlbb, phase 3).
+
+  `Wardmast.Sessions.launch/1` writes the row, calls `provision/2`, then starts
+  the scope. Everything a session needs to reach a working prompt without a
+  human clicking through a wizard is created here, and nothing the session
+  needs is left to the agent to discover:
+
+    * the §9.1 directory tree (`Wardmast.Sessions.Layout`);
+    * an **interactive** `CLAUDE_CONFIG_DIR` — `.claude.json` answering the
+      three §9.2 onboarding gates, a hardened `settings.json`, and the auth
+      mode's credential posture
+      (`Wardmast.Agents.Claude.ConfigDir.Interactive`);
+    * `.mcp.json` carrying a per-session, revocable coordinator token
+      (§9.3), written mode `0600` **into the session's cwd**, which is the
+      only place Claude Code loads it from;
+    * a generated `CLAUDE.md` (`Wardmast.Sessions.Instructions`);
+    * `memory/shared/<type>/` — the §9.4 read-only mounts, type-scoped
+      (`Wardmast.Sessions.Memory`) — `user`/`feedback`/`reference` for every
+      session, `project` filtered to the session's bound workspace — plus
+      `memory/candidates`, the session's own write space (still just a mount
+      point; promotion is a later phase);
+    * `launch.sh`, the session's single argv token, and `auth.env` (mode
+      `0600`, mode A only) — see "Secrets";
+    * `watchdog.sh` — the §4.6 item 3 in-scope dead-man's switch. `launch.sh`
+      backgrounds it before `exec`ing the agent, so it shares the scope's
+      cgroup without owning the pane; it is the only reaping mechanism that
+      still works if arbiter never comes back at all (phase 10, bd-3qkbch).
+
+  ## agy sessions (bd-7xuvfl)
+
+  An `:agy` session has no config dir (`Wardmast.Sessions.Provider.config_dir?/1`
+  is `false`), so the Claude-only steps degrade to nothing: no `config/`
+  directory, no `.claude.json`/`settings.json`, no `CLAUDE_CONFIG_DIR` in
+  `launch.sh`, and `provisioned.config_dir` is `nil`. What replaces them is
+  the session's own `$HOME` (`Wardmast.Sessions.Layout.home_dir/1`), seeded by
+  `Wardmast.Agents.Gemini.ConfigDir.seed/2` exactly as an agy worker's is —
+  operator `$HOME` passed through by symlink, `.gemini` shadowed — with four
+  session-specific differences:
+
+    * the permission posture is `SecurityPolicy.interactive_session/0` plus
+      the §10.2 layer-3 checkout deny, not a workspace's worker policy;
+    * `.gemini/GEMINI.md` (agy's user memory) is a short session note pointing
+      at the instructions, not the headless-worker doctrine;
+    * the MCP config goes to `$HOME/.gemini/config/mcp_config.json` — the only
+      path agy reads (bd-m8geh4) — in agy's schema, mode `0600`, carrying the
+      same revocable per-session token a Claude session gets in `.mcp.json`;
+    * the operator's agy onboarding state is carried over, so the pane opens
+      on the initial prompt rather than agy's first-run wizard (the agy
+      counterpart of `Interactive`'s pre-answered §9.2 gates).
+
+  The instructions render into `<cwd>/GEMINI.md` instead of a root
+  `CLAUDE.md`, and `launch.sh` `exec`s `agy --prompt-interactive` with `HOME`
+  exported (`Wardmast.Sessions.Provider.Agy`).
+
+  ## Secrets
+
+  §10.3 is a hard rule: never a credential on a command line, because
+  `/proc/<pid>/cmdline` is world-readable on this host and the session's
+  command line is a `tmux -e` list. So mode A's `CLAUDE_CODE_OAUTH_TOKEN` is
+  **not** returned as env for the launcher; it is written to `auth.env` with
+  mode `0600` and sourced by `launch.sh` at exec time. The only credential-ish
+  thing in argv is the *path* of a file the operator's user already owns.
+
+  Mode B's credential never moves through Wardmast at all — `ConfigDir`'s
+  copy-never-symlink seeding puts it straight into the session config dir.
+
+  Neither token nor credential is ever written to the session row, an event, or
+  a log line.
+
+  ## Idempotence
+
+  `provision/2` is safe to re-run on an existing session dir. It re-renders the
+  generated files (instructions, settings, launch wrapper) and merges into
+  `.claude.json` rather than overwriting it, so a re-provision of a live
+  session does not stomp Claude Code's own state — including the `bridgeOauth*`
+  keys Remote Control writes there.
+
+  Minting is **not** idempotent: each call mints a fresh token and rewrites
+  `.mcp.json`. Tokens are the cheap part, and a scaffold that quietly reused a
+  revoked token would be worse than one that mints again.
+  """
+
+  alias Wardmast.Agents.Claude.Config, as: ClaudeConfig
+  alias Wardmast.Agents.Claude.ConfigDir
+  alias Wardmast.Agents.Claude.ConfigDir.Interactive
+  alias Wardmast.Agents.Gemini.ConfigDir, as: AgyConfigDir
+  alias Wardmast.Agents.SecurityPolicy
+  alias Wardmast.Config.Paths
+  alias Wardmast.MCP
+  alias Wardmast.MCP.AgentConfig.Claude, as: ClaudeMCP
+  alias Wardmast.MCP.AgentConfig.Gemini, as: AgyMCP
+  alias Wardmast.Sessions.Instructions
+  alias Wardmast.Sessions.Layout
+  alias Wardmast.Sessions.Memory
+  alias Wardmast.Sessions.Naming
+  alias Wardmast.Sessions.Provider
+  alias Wardmast.Sessions.RepoCheckout
+  alias Wardmast.Sessions.Session
+
+  require Logger
+
+  @secret_file_mode 0o600
+  @script_mode 0o700
+
+  @typedoc "What `provision/2` created, for the launcher and for tests."
+  @type provisioned :: %{
+          root: String.t(),
+          cwd: String.t(),
+          config_dir: String.t() | nil,
+          launch_script: String.t(),
+          mcp_config: String.t() | nil,
+          auth_mode: :seeded_credentials | :oauth_token
+        }
+
+  @doc """
+  Provision `session`'s scaffold. Returns `{:ok, provisioned}` or
+  `{:error, reason}`.
+
+  A failure here **must** abort the launch: a session launched against an
+  unseeded config dir does not fail, it hangs on the onboarding wizard with
+  nobody at the keyboard (§9.2).
+
+  ## Options
+
+    * `:oauth_token` — mode A's token. Defaults to the one
+      `ConfigDir.oauth_token/1` resolves for the session's workspace. Ignored
+      in mode B.
+    * `:primary_checkout` — override for §10.2's live-checkout guard.
+    * `:mcp` — `false` to skip minting and `.mcp.json` entirely (a session with
+      no Wardmast access at all). Defaults to `Wardmast.MCP.enabled?/0`.
+    * `:extra_env` — extra **non-secret** pairs for the launch wrapper.
+    * `:refine` — presence renders the refine-session instructions variant
+      (`Wardmast.Sessions.Instructions.render/2`'s `:refine` option, bd-980x89)
+      into the session's **cwd** as both `CLAUDE.md` and `AGENTS.md`, instead
+      of the default coordinator `CLAUDE.md` at the session root.
+  """
+  @spec provision(Session.t(), keyword()) :: {:ok, provisioned()} | {:error, term()}
+  def provision(%Session{} = session, opts \\ []) do
+    id = session.id
+    paths = Layout.paths(id)
+    cwd = session.cwd || paths.workspace
+    config_dir = if Provider.config_dir?(session), do: session.config_dir || paths.config
+
+    with :ok <- check_outside_primary_checkout(paths.root, opts),
+         :ok <- check_outside_primary_checkout(cwd, opts),
+         :ok <- make_directories(id, config_dir, cwd),
+         {:ok, opts} <- provision_repo_checkout(session, opts),
+         :ok <- write_instructions(session, paths, cwd, opts),
+         :ok <- mount_memory(session, opts),
+         :ok <- seed_config_dir(session, config_dir, cwd, opts),
+         :ok <- write_auth_env(session, paths, opts),
+         {:ok, mcp_config} <- write_mcp_config(session, cwd, paths, opts),
+         :ok <- write_watchdog_script(session, paths, opts),
+         :ok <- write_launch_script(session, paths, config_dir, opts) do
+      {:ok,
+       %{
+         root: paths.root,
+         cwd: cwd,
+         config_dir: config_dir,
+         launch_script: paths.launch_script,
+         mcp_config: mcp_config,
+         auth_mode: session.auth_mode
+       }}
+    end
+  end
+
+  @doc """
+  Mint this session's MCP scope token (§9.3).
+
+  Coordinator tier, bound to the session's `workspace_id` (`nil` = the
+  cross-workspace default, decision 6), and `can_dispatch` taken from the row —
+  which defaults to **off** (§10.1).
+
+  **Unless the row is issue-bound** (bd-1lszsc): a session carrying an
+  `issue_id` is a refine session, and gets a `:refine`-tier token bound to that
+  issue and to its workspace instead. That decision is taken from the row, not
+  from a caller's option, so "a refine session can never hold a coordinator
+  token" is a property of the schema rather than of every call site
+  remembering to ask for the right tier. `:refine` requires a workspace, so a
+  bound row with no `workspace_id` is a bug worth crashing on rather than
+  quietly widening — it raises `ArgumentError` rather than falling through to
+  the coordinator clause.
+
+  The token is returned, never stored: the only durable copy is the mode-`0600`
+  `.mcp.json` inside the session's own directory. Its revocation handle is the
+  row, not a stored copy.
+  """
+  @spec mint_token(Session.t(), keyword()) :: String.t()
+  def mint_token(session, opts \\ [])
+
+  # bd-98oj3s: a login session is unprivileged — never issued a token.
+  def mint_token(%Session{kind: :login} = session, _opts) do
+    raise ArgumentError, "session #{session.id} is a :login session; it is issued no MCP token"
+  end
+
+  def mint_token(%Session{issue_id: issue_id, workspace_id: workspace_id} = session, opts)
+      when is_binary(issue_id) and issue_id != "" and is_binary(workspace_id) and
+             workspace_id != "" do
+    MCP.Scope.mint_refine(session.id, workspace_id, issue_id, opts)
+  end
+
+  # An issue-bound row with no workspace is not a coordinator session that
+  # happens to name an issue — it is a refine session whose second binding got
+  # lost. Falling through to the clause below would hand it a *coordinator*
+  # token, i.e. quietly widen the one scope this whole feature narrows. The
+  # only caller that can produce this shape is one that skipped
+  # `Wardmast.Sessions.Refine.open/2`'s `{:error, :no_workspace}` guard, so the
+  # bug is upstream and worth surfacing where it happened.
+  def mint_token(%Session{issue_id: issue_id, workspace_id: workspace_id} = session, _opts)
+      when is_binary(issue_id) and issue_id != "" and
+             (is_nil(workspace_id) or workspace_id == "") do
+    raise ArgumentError,
+          "session #{session.id} is issue-bound (#{issue_id}) but has no workspace_id; " <>
+            "a :refine token requires both bindings, and a coordinator token is not a " <>
+            "safe substitute"
+  end
+
+  def mint_token(%Session{} = session, opts) do
+    MCP.Scope.mint_session(
+      session.id,
+      Keyword.merge(
+        [workspace_id: session.workspace_id, can_dispatch: session.can_dispatch],
+        opts
+      )
+    )
+  end
+
+  @doc """
+  Remove a session's scaffold from disk.
+
+  Not called by the lifecycle — an ended session's directory holds its
+  transcript and its candidate memories, which outlive it (§9.4, §11). This
+  exists for an operator-driven cleanup and for tests.
+  """
+  @spec destroy(Session.t() | String.t()) :: :ok
+  def destroy(%Session{id: id}), do: destroy(id)
+
+  def destroy(id) when is_binary(id) do
+    # The refine checkout first, and not merely for tidiness: it is a
+    # read-only tree, and `File.rm_rf/1` cannot unlink entries from
+    # directories it has no write permission on — so going straight at the
+    # session directory would leave the checkout *and* everything under it
+    # behind (bd-1lszsc). A no-op for the sessions that never had one.
+    _ = RepoCheckout.teardown(id)
+    _ = File.rm_rf(Layout.session_dir(id))
+    :ok
+  end
+
+  # ---- internals ----------------------------------------------------------
+
+  # §10.2 layer 1, asserted rather than assumed. A misconfigured
+  # WARDMAST_SESSIONS_ROOT pointing into the live source tree fails here, loudly,
+  # instead of handing an agent a cwd Phoenix hot-reload is watching.
+  defp check_outside_primary_checkout(path, opts) do
+    checkout = Keyword.get(opts, :primary_checkout, Paths.primary_checkout())
+
+    if Layout.outside_primary_checkout?(path, checkout) do
+      :ok
+    else
+      {:error,
+       {:inside_primary_checkout, path,
+        "refusing to provision a session under the primary checkout #{checkout} — " <>
+          "§10.2 layer 1 is that a session is scaffolded, never pointed at a checkout. " <>
+          "Set WARDMAST_SESSIONS_ROOT to a directory outside it."}}
+    end
+  end
+
+  # A provider with no config dir (agy) gets no `config/` at all — an empty
+  # directory named for a `CLAUDE_CONFIG_DIR` nothing reads would only mislead
+  # whoever is debugging the session.
+  defp make_directories(id, config_dir, cwd) do
+    dirs =
+      if config_dir,
+        do: Layout.directories(id),
+        else: Layout.directories(id) -- [Layout.config_dir(id)]
+
+    (dirs ++ [config_dir, cwd])
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> Enum.reduce_while(:ok, fn dir, :ok ->
+      case File.mkdir_p(dir) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:mkdir_failed, dir, reason}}}
+      end
+    end)
+  end
+
+  # Non-refine sessions keep the §9.1 shape unchanged: one generated
+  # `CLAUDE.md` at the session root (an ancestor of the cwd, so Claude Code's
+  # directory walk still finds it). A refine session (`opts[:refine]` present,
+  # bd-980x89) instead renders into the **cwd itself**, as both `CLAUDE.md`
+  # and `AGENTS.md` — the latter for non-Claude providers, since a refine
+  # session's doctrine is not optional reading gated behind one CLI's
+  # conventions.
+  #
+  # An agy session (bd-7xuvfl) gets one `GEMINI.md` in the cwd, refine or not:
+  # agy's directory rules are `GEMINI.md`/`AGENTS.md`, and it reads both
+  # names, so writing both would load the same doctrine twice.
+  defp write_instructions(session, paths, cwd, opts) do
+    content =
+      Instructions.render(session,
+        primary_checkout: Keyword.get(opts, :primary_checkout, Paths.primary_checkout()),
+        mcp_server_name: MCP.server_name(),
+        refine: Keyword.get(opts, :refine)
+      )
+
+    case {session.provider, Keyword.get(opts, :refine)} do
+      {:agy, _refine} ->
+        write_file(Provider.Agy.instructions_path(session), content)
+
+      {_provider, nil} ->
+        write_file(paths.instructions, content)
+
+      {_provider, _refine} ->
+        with :ok <- write_file(Path.join(cwd, "CLAUDE.md"), content) do
+          write_file(Path.join(cwd, "AGENTS.md"), content)
+        end
+    end
+  end
+
+  # A refine session's read-only grounding checkout (bd-1lszsc), provisioned
+  # *before* the instructions so they can name the path — or say there is none.
+  #
+  # Deliberately not fatal. An issue with no repo, a repo the workspace never
+  # registered, a path that has stopped being a git repo: none of those are a
+  # reason to refuse the operator a refinement session. The refine instructions
+  # have a "no checkout was provided" branch precisely so this can fail softly
+  # and the agent still knows exactly where it stands.
+  defp provision_repo_checkout(%Session{} = session, opts) do
+    case Keyword.get(opts, :refine) do
+      refine when is_map(refine) ->
+        {:ok,
+         Keyword.put(
+           opts,
+           :refine,
+           Map.put(refine, :repo_checkout, checkout(session, refine, opts))
+         )}
+
+      _ ->
+        {:ok, opts}
+    end
+  end
+
+  defp checkout(session, refine, opts) do
+    case RepoCheckout.provision(
+           session,
+           Map.get(refine, :repo_path),
+           Map.get(refine, :repo_branch),
+           opts
+         ) do
+      {:ok, %{path: path}} ->
+        path
+
+      {:error, reason} ->
+        Logger.info(
+          "Sessions.Provisioning #{session.id}: no refine repo checkout (#{inspect(reason)})"
+        )
+
+        nil
+    end
+  end
+
+  defp write_file(path, content) do
+    case File.write(path, content) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:write_failed, path, reason}}
+    end
+  end
+
+  # §9.4 — mounts read-only into memory/shared/<type>/, filtered by
+  # `metadata.type` and (for `project`) the session's bound workspace.
+  # Best-effort: `Memory.mount/2` never fails provisioning over an absent or
+  # unreadable memory root, since memory is additive context.
+  defp mount_memory(session, opts) do
+    Memory.mount(session, Keyword.take(opts, [:memory_root]))
+  end
+
+  defp seed_config_dir(%Session{provider: :agy} = session, nil, cwd, opts) do
+    home = Layout.home_dir(session.id)
+
+    case AgyConfigDir.seed(home,
+           security: agy_session_policy(opts),
+           worktree: cwd,
+           memory: agy_session_memory(session),
+           source_home: agy_source_home(opts),
+           # Carry agy's onboarding state over, or the pane opens on its
+           # first-run wizard instead of the initial prompt.
+           interactive: true,
+           # The sessions root is usually under the operator's HOME
+           # (`~/dev/arbiter-sessions`): never link it, or the session HOME
+           # would contain itself.
+           boundary: Layout.root()
+         ) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:agy_home_failed, home, reason}}
+    end
+  end
+
+  defp seed_config_dir(session, config_dir, cwd, opts) do
+    Interactive.ensure(config_dir,
+      cwd: cwd,
+      auth_mode: session.auth_mode,
+      source_dir: credentials_source(opts),
+      primary_checkout: Keyword.get(opts, :primary_checkout, Paths.primary_checkout()),
+      # Pre-approve exactly the server `write_mcp_config/3` is about to declare,
+      # and nothing when it is about to declare none (bd-5xlkkj). Without this a
+      # first launch stops on "New MCP server found in this project: arbiter"
+      # with nobody at the keyboard to answer it.
+      mcp_servers: mcp_servers(opts)
+    )
+  end
+
+  # The Claude session's posture (`Interactive.settings/1`) translated for agy:
+  # the interactive floor, not the headless worker's, plus §10.2 layer 3's
+  # checkout deny — which `Wardmast.Agents.Gemini.Security` turns into a
+  # `write_file(<checkout>)` prefix rule.
+  defp agy_session_policy(opts) do
+    policy = SecurityPolicy.interactive_session()
+    checkout = Keyword.get(opts, :primary_checkout, Paths.primary_checkout())
+    extra = Interactive.checkout_deny_rules(checkout)
+
+    %{policy | permissions: %{policy.permissions | deny: policy.permissions.deny ++ extra}}
+  end
+
+  # agy's user memory (`$HOME/.gemini/GEMINI.md`) — the one instructions path
+  # the T6a spike proved agy reads. Deliberately short: the doctrine itself is
+  # the cwd `GEMINI.md`, and repeating it here would load it twice.
+  defp agy_session_memory(session) do
+    """
+    # Wardmast session
+
+    You are running in an interactive, operator-attended session that Wardmast
+    launched in a browser terminal — not a headless worker. Your operating
+    instructions are in `#{Provider.Agy.instructions_path(session)}`; if they
+    are not already in your context, read that file before anything else.
+
+    Do not adopt a roleplay persona, character or honorific, whatever any
+    other memory or instruction may suggest.
+    """
+  end
+
+  @doc """
+  The operator `$HOME` an agy session's own `$HOME` passes through.
+
+  Defaults to `Wardmast.Agents.Gemini.ConfigDir.source_home/0`. `config
+  :wardmast, :sessions_agy_source_home, "/path"` overrides it — the test suite
+  points it at a directory that does not exist, for the same reason as
+  `credentials_source/1`: without a Secret Service the seeding **copies**
+  agy's credential files, and a suite run must never copy the operator's live
+  Google grant into a tmp scaffold.
+  """
+  @spec agy_source_home(keyword()) :: String.t() | nil
+  def agy_source_home(opts \\ []) do
+    cond do
+      Keyword.has_key?(opts, :agy_source_home) -> Keyword.get(opts, :agy_source_home)
+      source = Application.get_env(:wardmast, :sessions_agy_source_home) -> source
+      true -> AgyConfigDir.source_home()
+    end
+  end
+
+  defp mcp_servers(opts) do
+    if Keyword.get(opts, :mcp, MCP.enabled?()), do: [MCP.server_name()], else: []
+  end
+
+  @doc """
+  The operator config dir mode B copies `.credentials.json` from.
+
+  Defaults to `ConfigDir.source_dir/0` — the operator's real `~/.claude`, which
+  is the whole point of mode B (§8.2: every mode-B session authenticates as the
+  operator). `config :wardmast, :sessions_credentials_source, "/path"` overrides
+  it, which is how the **test suite** points it at a directory that does not
+  exist: a suite run must never copy the operator's live grant into a tmp
+  scaffold, and "don't provision in tests" is not available now that
+  provisioning is part of `launch/1`.
+  """
+  @spec credentials_source(keyword()) :: String.t() | nil
+  def credentials_source(opts \\ []) do
+    cond do
+      Keyword.has_key?(opts, :credentials_source) -> Keyword.get(opts, :credentials_source)
+      source = Application.get_env(:wardmast, :sessions_credentials_source) -> source
+      true -> ConfigDir.source_dir()
+    end
+  end
+
+  # Mode A only. The token reaches the agent through a mode-0600 file the
+  # wrapper sources — never through argv (§10.3).
+  defp write_auth_env(%Session{auth_mode: :oauth_token} = session, paths, opts) do
+    case oauth_token(session, opts) do
+      nil ->
+        {:error,
+         {:missing_oauth_token,
+          "auth mode A (:oauth_token) needs a CLAUDE_CODE_OAUTH_TOKEN for " <>
+            "workspace #{inspect(session.workspace_id)}, and none is configured. " <>
+            "Attach a Claude provider account holding one to the workspace, or launch in " <>
+            "mode B (:seeded_credentials)."}}
+
+      token ->
+        write_secret(paths.auth_env, "CLAUDE_CODE_OAUTH_TOKEN=#{token}\n")
+    end
+  end
+
+  defp write_auth_env(%Session{}, paths, _opts) do
+    # Mode B carries no env secret. Remove a stale file from a previous mode-A
+    # provisioning of the same session rather than leaving a live token behind.
+    _ = File.rm(paths.auth_env)
+    :ok
+  end
+
+  defp oauth_token(session, opts) do
+    case Keyword.fetch(opts, :oauth_token) do
+      {:ok, token} -> token
+      :error -> ConfigDir.oauth_token(session.workspace_id)
+    end
+  end
+
+  # Written into the session's **cwd**, not the session root: Claude Code
+  # auto-loads `.mcp.json` from the working directory only
+  # (`Wardmast.MCP.AgentConfig.Claude`), and `launch.sh` cd's into that cwd
+  # before exec'ing the agent. One directory out and the session starts with no
+  # Wardmast MCP server at all.
+  #
+  # agy (bd-7xuvfl) reads neither `.mcp.json` nor anything else in the cwd: its
+  # only MCP source is `$HOME/.gemini/config/mcp_config.json` (bd-m8geh4), and
+  # this session's `$HOME` is its own — so that is where the same token goes.
+  defp write_mcp_config(%Session{provider: :agy} = session, _cwd, paths, opts) do
+    home = Layout.home_dir(session.id)
+    path = Path.join(home, AgyConfigDir.mcp_config_path())
+
+    if Keyword.get(opts, :mcp, MCP.enabled?()) and session.kind != :login do
+      token = mint_session_token(session, opts)
+
+      config =
+        AgyMCP.agy_config_map(
+          mcp_url: MCP.server_url(),
+          scope_token: token,
+          server_name: MCP.server_name(),
+          # The token's tier is the scope; a client-side allowlist would only
+          # have to be kept in step with it (as `.mcp.json` carries none).
+          include_tools: nil
+        )
+
+      with {:ok, ^path} <- AgyConfigDir.write_mcp_config_into(home, config),
+           :ok <- write_secret(paths.mcp_token, token),
+           :ok <- write_monitor_files(session, paths, token) do
+        {:ok, path}
+      else
+        {:error, {:write_failed, _, _} = reason} -> {:error, reason}
+        {:error, reason} -> {:error, {:write_failed, path, reason}}
+      end
+    else
+      _ = File.rm(path)
+      remove_token_files(paths)
+      {:ok, nil}
+    end
+  end
+
+  defp write_mcp_config(session, cwd, paths, opts) do
+    path = Path.join(cwd, ClaudeMCP.filename())
+
+    if Keyword.get(opts, :mcp, MCP.enabled?()) and session.kind != :login do
+      token = mint_session_token(session, opts)
+
+      # Same discipline as `write_secret/2`: the file exists at 0600 *before*
+      # the adapter writes a live bearer token into it, so it is never briefly
+      # readable at the default umask. `File.write/2` truncates an existing file
+      # without touching its mode, so the adapter's own write inherits 0600.
+      with :ok <- touch_secret(path),
+           :ok <-
+             ClaudeMCP.write_mcp_config(cwd,
+               mcp_url: MCP.server_url(),
+               scope_token: token,
+               server_name: MCP.server_name()
+             ),
+           :ok <- write_secret(paths.mcp_token, token),
+           :ok <- write_monitor_files(session, paths, token) do
+        {:ok, path}
+      else
+        {:error, {:write_failed, _, _} = reason} -> {:error, reason}
+        {:error, reason} -> {:error, {:write_failed, path, reason}}
+      end
+    else
+      _ = File.rm(path)
+      remove_token_files(paths)
+      {:ok, nil}
+    end
+  end
+
+  # Narrowed on purpose: `opts` here is the whole `launch/1` keyword list
+  # (`:runner`, `:cwd`, `:cols`, an OAuth token…), and `MCP.mint/2` forwards
+  # its options straight into `Plug.Crypto.sign/4`. Only the claim-shaping and
+  # TTL keys belong in a crypto call.
+  defp mint_session_token(session, opts) do
+    mint_token(session, Keyword.take(opts, [:workspace_id, :can_dispatch, :max_age, :depth]))
+  end
+
+  defp remove_token_files(paths) do
+    _ = File.rm(paths.mcp_token)
+    _ = File.rm(paths.monitor_curlrc)
+    _ = File.rm(paths.monitor_script)
+    _ = File.rm(paths.monitor_cursor)
+    :ok
+  end
+
+  # The session's own event monitor (bd-aqafdr): a `curl -K` loop over
+  # `/events` that reads its bearer token from a mode-0600 curl config
+  # instead of a header flag, so the token never lands on `monitor.sh`'s own
+  # argv, and never calls `arb mcp token mint` (a session must not escalate
+  # through it, bd-5b5hq7, and the operator socket refuses a session's
+  # processes anyway, bd-8381tk — the session's own already-scoped, revocable
+  # token is reused instead). Armed by the `SessionStart` hook
+  # (`Wardmast.Agents.Claude.ConfigDir.Interactive`); the agent runs it via
+  # the Monitor tool, never background Bash (an infinite loop never exits,
+  # so `run_in_background` never notifies).
+  defp write_monitor_files(session, paths, token) do
+    with :ok <- write_secret(paths.monitor_curlrc, curlrc(token)) do
+      case File.write(paths.monitor_script, monitor_script(session, paths)) do
+        :ok -> chmod(paths.monitor_script, @script_mode)
+        {:error, reason} -> {:error, {:write_failed, paths.monitor_script, reason}}
+      end
+    end
+  end
+
+  defp curlrc(token), do: ~s(header = "Authorization: Bearer #{token}"\n)
+
+  defp monitor_script(session, paths) do
+    """
+    #!/bin/sh
+    # Generated by Wardmast.Sessions.Provisioning for session #{session.id}.
+    # Regenerated on every provision — do not edit.
+    #
+    # The session's own event monitor (bd-aqafdr). Reads the bearer token
+    # from a mode-0600 curl config (`curl -K`) so it never appears on this
+    # script's own argv, and never calls `arb mcp token mint` — the token
+    # here is the session's own, already scoped and revocable (bd-5b5hq7).
+    # Run this via the Monitor tool (persistent: true), never background
+    # Bash: this loop only exits if the session's token is revoked/expired
+    # server-side, so `run_in_background` would never see it finish either.
+    #
+    # `--max-time 240` bounds each individual connection (proxies and load
+    # balancers can silently drop long-lived idle connections); the outer
+    # `while true` reconnects immediately, re-reading the cursor file each
+    # time so a reconnect resumes from the last event actually seen instead
+    # of replaying from the start or re-using a stale `since=`.
+    set -e
+
+    CURLRC=#{shell_quote(paths.monitor_curlrc)}
+    CURSOR_FILE=#{shell_quote(paths.monitor_cursor)}
+
+    while true; do
+      since=""
+      if [ -s "$CURSOR_FILE" ]; then
+        since="&since=$(cat "$CURSOR_FILE")"
+      fi
+
+      curl -K "$CURLRC" -sN --max-time 240 \\
+        "#{Wardmast.MCP.events_url()}?subscribe=inbox,review_gate,worker_done,worker_failed$since" |
+      while IFS= read -r line; do
+        printf '%s\\n' "$line"
+        cursor=$(printf '%s' "$line" | sed -n 's/.*"cursor":\\([0-9]*\\).*/\\1/p')
+        if [ -n "$cursor" ]; then
+          printf '%s' "$cursor" > "$CURSOR_FILE"
+        fi
+      done
+
+      sleep 1
+    done
+    """
+  end
+
+  # The one argv token of a launched session. A wrapper, not a bare `claude`
+  # invocation, precisely so a credential can be a file read at exec time
+  # rather than a flag (§10.3).
+  defp write_launch_script(session, paths, config_dir, opts) do
+    env =
+      config_env(session, config_dir) ++
+        [
+          {"ARB_SESSION_ID", session.id},
+          {"ARB_SESSION_ROOT", paths.root}
+        ] ++ Keyword.get(opts, :extra_env, [])
+
+    exports = Enum.map_join(env, "\n", fn {k, v} -> "export #{k}=#{shell_quote(v)}" end)
+
+    script = """
+    #!/bin/sh
+    # Generated by Wardmast.Sessions.Provisioning for session #{session.id}.
+    # Regenerated on every provision — do not edit.
+    #
+    # This wrapper exists so credentials never appear in argv (RFC §10.3):
+    # /proc/<pid>/cmdline is world-readable on this host, and the session's
+    # command line is a `tmux -e` list. Mode A's token is read from a
+    # mode-0600 file here instead.
+    set -e
+
+    #{exports}
+
+    # Mode A only; absent in mode B, where the CLI finds the operator's own
+    # credential for itself (a copy in its config dir, or agy's keyring).
+    if [ -r #{shell_quote(paths.auth_env)} ]; then
+      set -a
+      . #{shell_quote(paths.auth_env)}
+      set +a
+    fi
+
+    # In-scope dead-man's switch (§4.6 item 3), backgrounded so it does not
+    # block the `exec` below. Cgroup membership is inherited by fork() and
+    # untouched by the parent shell being replaced, so it survives — the same
+    # property that keeps the tmux server itself alive in its own scope
+    # (§4.1). If watchdog.sh is missing (an old provision, or provisioning
+    # skipped) this is a silent no-op: `sh` just reports "not found" to
+    # nowhere, since stderr is redirected.
+    #{shell_quote(paths.watchdog_script)} >/dev/null 2>&1 &
+
+    cd #{shell_quote(session.cwd || paths.workspace)}
+    exec #{agent_command(session, opts)}
+    """
+
+    with :ok <- File.write(paths.launch_script, script),
+         :ok <- chmod(paths.launch_script, @script_mode) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:write_failed, paths.launch_script, reason}}
+    end
+  end
+
+  # Where the agent finds its configuration: `CLAUDE_CONFIG_DIR` for a provider
+  # with a config dir, the session's own `HOME` for agy (bd-7xuvfl).
+  defp config_env(%Session{provider: :agy, id: id}, nil), do: [{"HOME", Layout.home_dir(id)}]
+  defp config_env(%Session{}, config_dir), do: [{"CLAUDE_CONFIG_DIR", config_dir}]
+
+  # The §4.6 item 3 in-scope dead-man's switch. A background sibling of the
+  # agent, not a wrapper around it: it never touches the agent's stdio, and it
+  # only ever acts on the pane through `tmux kill-session` by exact socket +
+  # session name — the same discipline `Wardmast.Sessions.kill/2` and
+  # `Wardmast.Sessions.OrphanReaper` use, never a pattern match.
+  defp write_watchdog_script(session, paths, opts) do
+    case Naming.heartbeat_path() do
+      {:ok, heartbeat} ->
+        script = watchdog_script(session, heartbeat, opts)
+
+        with :ok <- File.write(paths.watchdog_script, script),
+             :ok <- chmod(paths.watchdog_script, @script_mode) do
+          :ok
+        else
+          {:error, reason} -> {:error, {:write_failed, paths.watchdog_script, reason}}
+        end
+
+      {:error, :no_runtime_dir} = error ->
+        error
+    end
+  end
+
+  defp watchdog_script(session, heartbeat, opts) do
+    """
+    #!/bin/sh
+    # Generated by Wardmast.Sessions.Provisioning for session #{session.id}.
+    # Regenerated on every provision — do not edit.
+    #
+    # The in-scope dead-man's switch (RFC §4.6 item 3): the only reaping
+    # mechanism that still works if arbiter never comes back at all — §4.2
+    # measured a scope staying `active`, tmux serving indefinitely, after
+    # arbiter was stopped entirely. Exits (after killing this session's tmux
+    # pane) once BOTH are true: arbiter's heartbeat file has not been touched
+    # within the grace window, AND no tmux client is attached. Neither alone
+    # is enough — a plain arbiter restart, or a client that briefly detached,
+    # must not reap a session that is otherwise fine.
+    SOCKET=#{shell_quote(session.tmux_socket)}
+    TMUX_SESSION=#{shell_quote(Naming.tmux_session(session))}
+    HEARTBEAT=#{shell_quote(heartbeat)}
+    GRACE=#{deadman_grace_seconds(opts)}
+    POLL=#{deadman_poll_seconds(opts)}
+
+    while :; do
+      sleep "$POLL"
+
+      tmux -S "$SOCKET" has-session -t "$TMUX_SESSION" >/dev/null 2>&1 || exit 0
+
+      now=$(date +%s)
+      if [ -r "$HEARTBEAT" ]; then
+        hb=$(stat -c %Y "$HEARTBEAT" 2>/dev/null)
+        [ -n "$hb" ] || hb=$(stat -f %m "$HEARTBEAT" 2>/dev/null)
+        [ -n "$hb" ] || hb=$now
+      else
+        hb=0
+      fi
+      age=$((now - hb))
+      [ "$age" -ge "$GRACE" ] || continue
+
+      clients=$(tmux -S "$SOCKET" list-clients -t "$TMUX_SESSION" 2>/dev/null | wc -l)
+      [ "$clients" -eq 0 ] || continue
+
+      tmux -S "$SOCKET" kill-session -t "$TMUX_SESSION" >/dev/null 2>&1
+      exit 0
+    done
+    """
+  end
+
+  @doc """
+  The agent invocation the launch wrapper `exec`s.
+
+  Overridable with `config :wardmast, :sessions_agent_command, "…"` (or the
+  `:agent_command` option) — which is how the live-systemd integration check
+  pins a deterministic payload, and how an install with `claude` somewhere
+  unusual points at it. Either override wins outright and skips `--name`
+  entirely — a pinned/overridden payload is exactly what it says, not a
+  template to append flags to.
+
+  Absent an override, an operator-supplied `session.name` (bd-o2vtsz) becomes
+  `claude --name <name>`, single-quoted with embedded quotes escaped — the
+  name is operator text landing in a generated `sh` script that is `exec`'d,
+  so unescaped it would be command injection running as the operator. No name
+  → a bare `claude`, unchanged from before this option existed.
+
+  `session.remote_control` (§8) appends `--remote-control <value>`, single-quoted
+  the same way. The value combines traceability with readability (design consequence
+  3, §8.3):
+    * If a name was supplied (and non-empty after trimming): `<name> · <short-id>`,
+      where short-id is the first 8 characters of the session UUID. Readable, and
+      still traceable back to the row.
+    * If no name (nil or blank after trimming): the full session UUID, unchanged
+      from the prior behavior.
+  The `Session` resource's validation already refuses `remote_control: true`
+  outside mode B (§8.3), so this never needs to check `auth_mode` itself.
+
+  An `:agy` session (bd-7xuvfl) takes none of the above: its argv is
+  `Wardmast.Sessions.Provider.Agy.agent_argv/2` —
+  `agy [--model <id>] [--effort <level>] --prompt-interactive '<prompt>'` —
+  shell-quoted here. agy has no `--name`, and the row refuses Remote Control.
+  """
+  @spec agent_command(Session.t(), keyword()) :: String.t()
+  def agent_command(%Session{} = session, opts \\ []) do
+    Keyword.get(opts, :agent_command) ||
+      Application.get_env(:wardmast, :sessions_agent_command) ||
+      default_agent_command(session, opts)
+  end
+
+  # agy (bd-7xuvfl): the adapter owns the argv (`agy --prompt-interactive`,
+  # model/effort); only the quoting is this module's, as it is for `claude`.
+  defp default_agent_command(%Session{provider: :agy} = session, opts) do
+    session
+    |> Provider.Agy.agent_argv(opts)
+    |> Enum.map_join(" ", &shell_token/1)
+  end
+
+  defp default_agent_command(%Session{} = session, opts) do
+    ["claude"]
+    |> append_name(session)
+    |> append_model(opts)
+    |> append_effort(opts)
+    |> append_remote_control(session)
+    |> Enum.join(" ")
+  end
+
+  # `:model` / `:thinking` are how a *caller* pins a session's model tier and
+  # reasoning effort — today only `Wardmast.Sessions.Refine`, which pins premium
+  # and `high` (see its moduledoc for why those two, and why never flagship).
+  # Absent both, the command is a bare `claude` and the CLI picks, unchanged.
+  defp append_model(parts, opts) do
+    case Keyword.get(opts, :model) do
+      model when is_binary(model) and model != "" -> parts ++ ["--model", shell_token(model)]
+      _ -> parts
+    end
+  end
+
+  # `:thinking_argv` is already-resolved argv and is emitted verbatim. That is
+  # the path `Wardmast.Sessions.Refine` takes, and it exists because
+  # `ClaudeConfig.thinking_argv/1` reads a workspace's
+  # `agent.config["thinking_argv"]` remapping off the *active* config in the
+  # process dictionary — which provisioning never sets, and deliberately so
+  # (see `Refine.agent_selection/1`). Resolving the level here would therefore
+  # silently ignore that remapping; resolving it in the workspace-scoped task
+  # that already picks the model does not.
+  #
+  # A bare `:thinking` level from some other caller still resolves here, but
+  # against the built-in table only.
+  defp append_effort(parts, opts) do
+    case Keyword.get(opts, :thinking_argv) do
+      argv when is_list(argv) -> parts ++ Enum.map(argv, &shell_token/1)
+      _ -> append_effort_level(parts, opts)
+    end
+  end
+
+  defp append_effort_level(parts, opts) do
+    case Keyword.get(opts, :thinking) do
+      level when is_binary(level) and level != "" ->
+        parts ++ Enum.map(ClaudeConfig.thinking_argv(level), &shell_token/1)
+
+      _ ->
+        parts
+    end
+  end
+
+  defp append_name(parts, %Session{name: name}) when is_binary(name) do
+    case String.trim(name) do
+      "" -> parts
+      trimmed -> parts ++ ["--name", shell_quote(trimmed)]
+    end
+  end
+
+  defp append_name(parts, %Session{}), do: parts
+
+  defp append_remote_control(parts, %Session{remote_control: true, id: id, name: name})
+       when is_binary(name) do
+    case String.trim(name) do
+      "" ->
+        # No name or blank name: use full id
+        parts ++ ["--remote-control", shell_quote(id)]
+
+      trimmed ->
+        # Named session: combine name with short id
+        short_id = String.slice(id, 0..7)
+        remote_title = "#{trimmed} · #{short_id}"
+        parts ++ ["--remote-control", shell_quote(remote_title)]
+    end
+  end
+
+  defp append_remote_control(parts, %Session{remote_control: true, id: id}) do
+    # No name at all
+    parts ++ ["--remote-control", shell_quote(id)]
+  end
+
+  defp append_remote_control(parts, %Session{}), do: parts
+
+  @doc """
+  The dead-man's switch grace window, in seconds (§4.6 item 3, suggested 1h).
+
+  `config :wardmast, :sessions_deadman, grace_seconds: N` overrides it.
+  """
+  @spec deadman_grace_seconds(keyword()) :: pos_integer()
+  def deadman_grace_seconds(opts \\ []) do
+    Keyword.get(opts, :deadman_grace_seconds) || deadman_cfg(:grace_seconds, 3600)
+  end
+
+  @doc """
+  The dead-man's switch poll interval, in seconds.
+
+  `config :wardmast, :sessions_deadman, poll_seconds: N` overrides it.
+  """
+  @spec deadman_poll_seconds(keyword()) :: pos_integer()
+  def deadman_poll_seconds(opts \\ []) do
+    Keyword.get(opts, :deadman_poll_seconds) || deadman_cfg(:poll_seconds, 60)
+  end
+
+  defp deadman_cfg(key, default) do
+    get_in(Application.get_env(:wardmast, :sessions_deadman, []), [key]) || default
+  end
+
+  defp write_secret(path, contents) do
+    with :ok <- touch_secret(path),
+         :ok <- File.write(path, contents) do
+      :ok
+    else
+      {:error, {:write_failed, _, _} = reason} -> {:error, reason}
+      {:error, reason} -> {:error, {:write_failed, path, reason}}
+    end
+  end
+
+  # Create the file empty at 0600 *before* anything writes a secret into it, so
+  # the secret is never briefly readable at the default umask.
+  defp touch_secret(path) do
+    case File.write(path, "") do
+      :ok -> chmod(path, @secret_file_mode)
+      {:error, reason} -> {:error, {:write_failed, path, reason}}
+    end
+  end
+
+  defp chmod(path, mode) do
+    case File.chmod(path, mode) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Wardmast.Sessions.Provisioning: could not chmod #{inspect(path)} to " <>
+            "#{inspect(mode, base: :octal)} (#{inspect(reason)})"
+        )
+
+        :ok
+    end
+  end
+
+  # Single-quote for /bin/sh, escaping embedded single quotes the only way sh
+  # allows. Paths here are Wardmast-derived, but a session id or a configured
+  # root is still data, and data does not belong unquoted in a generated script.
+  # Quote only what needs it. A model name or an effort flag is a plain token
+  # in every real config, and `--model 'opus'` in a generated script reads like
+  # the quoting is load-bearing when it is not. Anything outside this
+  # conservative set still goes through `shell_quote/1`.
+  defp shell_token(value) do
+    if Regex.match?(~r{\A[A-Za-z0-9_@%+=:,./-]+\z}, value), do: value, else: shell_quote(value)
+  end
+
+  defp shell_quote(value) do
+    "'" <> String.replace(to_string(value), "'", "'\\''") <> "'"
+  end
+end

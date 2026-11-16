@@ -1,0 +1,527 @@
+defmodule WardmastWeb.UsageLiveTest do
+  use WardmastWeb.ConnCase, async: false
+
+  import Phoenix.LiveViewTest
+  import WardmastWeb.QuotaFixtures
+
+  alias Wardmast.Tasks.{Issue, Workspace}
+  alias Wardmast.Usage.Event
+
+  setup do
+    # Claude and Antigravity in use, so the Rate limits panel shows both
+    # (`Wardmast.Quota.Visibility`, bd-i2gwwn).
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "usage-#{System.unique_integer([:positive])}",
+        prefix: "usg",
+        config: %{"agent" => %{"type" => ["claude", "gemini"]}}
+      })
+
+    {:ok, ws: ws}
+  end
+
+  defp new_issue!(ws, title) do
+    {:ok, issue} = Ash.create(Issue, %{title: title, workspace_id: ws.id})
+    issue
+  end
+
+  defp event!(attrs) do
+    base = %{
+      repo: "arbiter",
+      step: :work,
+      occurred_at: DateTime.utc_now(),
+      model: "sonnet"
+    }
+
+    {:ok, ev} = Ash.create(Event, Map.merge(base, attrs))
+    ev
+  end
+
+  test "renders header, stat row, and the by-task table", %{conn: conn, ws: ws} do
+    single = new_issue!(ws, "Collapse duplicate status helpers")
+    reworked = new_issue!(ws, "Loop proposal queue: apply / reject")
+
+    event!(%{
+      task_id: single.id,
+      workspace_id: ws.id,
+      cost_usd: 0.42,
+      tokens_in: 30_000,
+      tokens_out: 8_400
+    })
+
+    event!(%{
+      task_id: reworked.id,
+      workspace_id: ws.id,
+      cost_usd: 0.60,
+      tokens_in: 40_000,
+      tokens_out: 10_000
+    })
+
+    event!(%{
+      task_id: reworked.id,
+      workspace_id: ws.id,
+      cost_usd: 0.28,
+      tokens_in: 10_000,
+      tokens_out: 4_000
+    })
+
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    html = render_async(view)
+
+    assert html =~ "Usage"
+    assert html =~ "Total spend"
+    assert html =~ "$1.30"
+    assert html =~ "Rework tasks"
+    assert html =~ single.id
+    assert html =~ "Collapse duplicate status helpers"
+    assert html =~ reworked.id
+  end
+
+  test "rework metrics collapse ReviewGate synthetic task ids to the base task", %{
+    conn: conn,
+    ws: ws
+  } do
+    task = new_issue!(ws, "Probe task two")
+    now = DateTime.utc_now()
+
+    event!(%{
+      task_id: task.id,
+      workspace_id: ws.id,
+      step: :work,
+      cost_usd: 2.0,
+      occurred_at: DateTime.add(now, -20, :minute)
+    })
+
+    event!(%{
+      task_id: "#{task.id}#review",
+      workspace_id: ws.id,
+      step: :work,
+      cost_usd: 1.0,
+      occurred_at: DateTime.add(now, -10, :minute)
+    })
+
+    event!(%{
+      task_id: "#{task.id}#review",
+      workspace_id: ws.id,
+      step: :review,
+      cost_usd: 0.5,
+      occurred_at: now
+    })
+
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    html = render_async(view)
+
+    assert html =~ "$3.50"
+    assert [_] = Regex.scan(~r/Probe task two/, html)
+    assert html =~ "$1.00"
+    refute html =~ "$2.00"
+  end
+
+  test "switching to the By model tab renders per-model bars", %{conn: conn, ws: ws} do
+    task = new_issue!(ws, "Some task")
+    event!(%{task_id: task.id, workspace_id: ws.id, model: "claude-sonnet-4-6", cost_usd: 1.0})
+    event!(%{task_id: task.id, workspace_id: ws.id, model: "claude-opus-4-6", cost_usd: 0.5})
+
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    render_async(view)
+
+    html =
+      view
+      |> element("button[phx-value-tab=by_model]")
+      |> render_click()
+
+    assert html =~ "Sonnet"
+    assert html =~ "Opus"
+  end
+
+  test "switching to the By repo tab renders per-repo bars", %{conn: conn, ws: ws} do
+    task = new_issue!(ws, "Some task")
+    event!(%{task_id: task.id, workspace_id: ws.id, repo: "arbiter", cost_usd: 1.0})
+    event!(%{task_id: task.id, workspace_id: ws.id, repo: "apex-api", cost_usd: 0.4})
+
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    render_async(view)
+
+    html =
+      view
+      |> element("button[phx-value-tab=by_repo]")
+      |> render_click()
+
+    assert html =~ "arbiter"
+    assert html =~ "apex-api"
+  end
+
+  test "switching to the By account tab renders per-account bars with the account slug", %{
+    conn: conn,
+    ws: ws
+  } do
+    account =
+      Ash.create!(Wardmast.Accounts.ProviderAccount, %{provider: :claude, slug: "personal-max"})
+
+    task = new_issue!(ws, "Some task")
+
+    event!(%{
+      task_id: task.id,
+      workspace_id: ws.id,
+      provider_account_id: account.id,
+      cost_usd: 1.0
+    })
+
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    render_async(view)
+
+    html =
+      view
+      |> element("button[phx-value-tab=by_account]")
+      |> render_click()
+
+    assert html =~ "personal-max"
+  end
+
+  test "changing the range segmented control reloads data", %{conn: conn, ws: ws} do
+    task = new_issue!(ws, "Old task")
+
+    event!(%{
+      task_id: task.id,
+      workspace_id: ws.id,
+      cost_usd: 5.0,
+      occurred_at: DateTime.add(DateTime.utc_now(), -40, :day)
+    })
+
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    render_async(view)
+
+    view
+    |> element("button[phx-value-option='all']")
+    |> render_click()
+
+    html = render_async(view)
+    assert html =~ "$5.00"
+
+    view
+    |> element("button[phx-value-option='7d']")
+    |> render_click()
+
+    html = render_async(view)
+    refute html =~ "$5.00"
+  end
+
+  test "the usage rollups render a loading state on mount, then the loaded data", %{
+    conn: conn,
+    ws: ws
+  } do
+    task = new_issue!(ws, "Old task")
+
+    event!(%{
+      task_id: task.id,
+      workspace_id: ws.id,
+      cost_usd: 5.0
+    })
+
+    {:ok, view, dead_html} = live(conn, ~p"/usage")
+
+    assert dead_html =~ "usage-loading"
+    refute dead_html =~ "$5.00"
+
+    html = render_async(view)
+    refute html =~ "usage-loading"
+    assert html =~ "$5.00"
+  end
+
+  # bd-481sz7 round 2, finding 4: agy rows carry `cost_usd: nil` (subscription,
+  # not a priced API) — before this fix the dashboard folded that nil to 0.0
+  # and rendered "$0.00" (Total spend, By task, By model), contradicting the
+  # CLI/API's "n/a" for the same all-agy window.
+  test "an all-agy window (unpriced rows) never renders $0.00 for spend", %{conn: conn, ws: ws} do
+    task = new_issue!(ws, "agy-only task")
+
+    event!(%{
+      task_id: task.id,
+      workspace_id: ws.id,
+      model: "gemini-3.8-flash-low",
+      cost_usd: nil,
+      tokens_in: 4_000,
+      tokens_out: 250
+    })
+
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    html = render_async(view)
+
+    [_, total_spend_value] =
+      Regex.run(~r/Total spend\s*<\/span><span[^>]*>\s*([^<]+?)\s*<\/span>/s, html)
+
+    assert total_spend_value == "—"
+
+    by_model_html =
+      view
+      |> element("button[phx-value-tab=by_model]")
+      |> render_click()
+
+    [_, model_bar_segment] = Regex.run(~r/(Flash.{0,700})/s, by_model_html)
+    refute model_bar_segment =~ "$0.00"
+    assert model_bar_segment =~ "—"
+  end
+
+  # bd-5cevwg: the page used to call `Usage.summarize/1` once per rollup (by
+  # task, model, repo, account) — four full-row reads of the window, each
+  # decoding every row's `raw` JSON — plus a full-row read for the rework
+  # sessions. It now takes all four rollups from one `summarize_many/2` read.
+  #
+  # bd-5qjpp5: that read now runs via `start_async/3` on the connected mount,
+  # not the dead render — so the dead render does zero rollup reads, and the
+  # single read happens once the socket connects and `render_async/1` awaits it.
+  test "the connected mount reads the ledger window once for all four rollups, never selecting raw",
+       %{
+         conn: conn,
+         ws: ws
+       } do
+    task = new_issue!(ws, "One read")
+    event!(%{task_id: task.id, workspace_id: ws.id, cost_usd: 0.5, raw: %{"type" => "result"}})
+
+    ref = make_ref()
+    parent = self()
+
+    :telemetry.attach(
+      ref,
+      [:wardmast, :repo, :query],
+      fn _event, _measurements, metadata, _config ->
+        if metadata.source == "usage_events", do: send(parent, {:usage_sql, ref, metadata.query})
+      end,
+      nil
+    )
+
+    html =
+      try do
+        {:ok, view, dead_html} = live(conn, ~p"/usage")
+        refute dead_html =~ "One read"
+
+        render_async(view)
+      after
+        :telemetry.detach(ref)
+      end
+
+    assert html =~ "One read"
+
+    queries = collect_usage_sql(ref, [])
+    rollup_reads = Enum.filter(queries, &(&1 =~ ~s("tokens_in")))
+
+    assert length(rollup_reads) == 1, "expected one rollup read, got: #{inspect(rollup_reads)}"
+
+    for sql <- queries do
+      refute sql =~ ~r/(?<!json_valid\(|json_extract\()u0\."raw"/, "selected raw: #{sql}"
+    end
+  end
+
+  test "the disconnected render shows a loading state and does not hit usage_events", %{
+    conn: conn,
+    ws: ws
+  } do
+    task = new_issue!(ws, "Not yet loaded")
+    event!(%{task_id: task.id, workspace_id: ws.id, cost_usd: 0.5})
+
+    ref = make_ref()
+    parent = self()
+
+    :telemetry.attach(
+      ref,
+      [:wardmast, :repo, :query],
+      fn _event, _measurements, metadata, _config ->
+        if metadata.source == "usage_events", do: send(parent, {:usage_sql, ref, metadata.query})
+      end,
+      nil
+    )
+
+    html =
+      try do
+        conn |> get(~p"/usage") |> html_response(200)
+      after
+        :telemetry.detach(ref)
+      end
+
+    refute html =~ "Not yet loaded"
+    assert html =~ "usage-loading"
+    assert collect_usage_sql(ref, []) == []
+  end
+
+  test "an async failure loading the usage rollups renders an inline error, not a crash", %{
+    conn: conn
+  } do
+    :meck.new(Wardmast.Usage, [:passthrough, :no_link])
+    on_exit(fn -> :meck.unload(Wardmast.Usage) end)
+
+    :meck.expect(Wardmast.Usage, :summarize_many, fn _bys, _opts ->
+      raise "database is locked"
+    end)
+
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    render_async(view)
+
+    assert has_element?(view, "#usage-error")
+    refute has_element?(view, "#usage-loading")
+    refute has_element?(view, "#usage-by-task")
+  end
+
+  defp collect_usage_sql(ref, acc) do
+    receive do
+      {:usage_sql, ^ref, sql} -> collect_usage_sql(ref, [sql | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  test "shows an empty state when there is no usage yet", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    html = render_async(view)
+    assert html =~ "Usage"
+    assert html =~ "$0.00"
+  end
+
+  test "renders Rate limits and Rework panels", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    html = render_async(view)
+    assert html =~ "Rate limits"
+    assert html =~ "Rework"
+    assert html =~ "hairline is elapsed time"
+  end
+
+  test "stat row and spend/rate-limits panels use responsive grid layouts for mobile", %{
+    conn: conn
+  } do
+    {:ok, view, _html} = live(conn, ~p"/usage")
+    html = render_async(view)
+    # Stat row should stack 2x2 on mobile (grid-cols-2) and 4-across on desktop (sm:grid-cols-4)
+    assert html =~ "grid-cols-2"
+    assert html =~ "sm:grid-cols-4"
+
+    # Spend/Rate-limits should stack vertically on mobile (grid-cols-1) and side-by-side on desktop
+    assert html =~ "grid-cols-1"
+    assert html =~ "lg:grid-cols-[minmax(0,1fr)_320px]"
+  end
+
+  describe "Rate limits panel with antigravity (bd-gukyy1)" do
+    test "antigravity renders four bars in two labelled groups; claude stays a pair", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, _} =
+        Wardmast.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
+
+      antigravity_quota!(ws)
+
+      {:ok, view, _html} = live(conn, ~p"/usage")
+      html = render_async(view)
+      doc = LazyHTML.from_fragment(html)
+
+      assert quota_bars(doc, "#usage-quota-claude") == 2
+      assert quota_bars(doc, "#usage-quota-antigravity") == 4
+
+      gemini = "#usage-quota-antigravity-gemini_models"
+      claude_gpt = "#usage-quota-antigravity-claude_and_gpt_models"
+
+      assert has_element?(view, gemini, "Gemini Models")
+      assert has_element?(view, claude_gpt, "Claude and GPT models")
+      assert quota_pcts(doc, gemini) == ["25%", "60%"]
+      assert quota_pcts(doc, claude_gpt) == ["10%", "20%"]
+      assert quota_labels(doc, gemini) == ["5h", "weekly"]
+      assert quota_labels(doc, claude_gpt) == ["5h", "weekly"]
+    end
+
+    test "a stale antigravity reading is muted with the message in its title", %{
+      conn: conn,
+      ws: ws
+    } do
+      antigravity_quota!(ws, message: agy_missing_message())
+
+      {:ok, view, _html} = live(conn, ~p"/usage")
+      render_async(view)
+
+      assert has_element?(view, "#usage-quota-antigravity [data-quota-bar][data-quota-stale]")
+
+      refute has_element?(
+               view,
+               "#usage-quota-antigravity [data-quota-bar]:not([data-quota-stale])"
+             )
+
+      assert has_element?(view, "#usage-quota-antigravity [data-quota-note]", "stale")
+
+      assert has_element?(
+               view,
+               ~s(#usage-quota-antigravity [data-quota-bar][title*="is not installed on this host"])
+             )
+    end
+
+    test "a snapshot with no parseable buckets renders the single collapsed bar", %{
+      conn: conn,
+      ws: ws
+    } do
+      antigravity_quota!(ws, models: [])
+
+      {:ok, view, _html} = live(conn, ~p"/usage")
+      html = render_async(view)
+      doc = LazyHTML.from_fragment(html)
+
+      assert quota_bars(doc, "#usage-quota-antigravity") == 1
+      assert quota_labels(doc, "#usage-quota-antigravity") == ["used"]
+    end
+  end
+
+  defp quota_bars(doc, scope),
+    do: doc |> LazyHTML.query("#{scope} [data-quota-bar]") |> Enum.count()
+
+  defp quota_labels(doc, scope),
+    do:
+      doc
+      |> LazyHTML.query("#{scope} [data-quota-label]")
+      |> Enum.map(&String.trim(LazyHTML.text(&1)))
+
+  defp quota_pcts(doc, scope),
+    do:
+      doc
+      |> LazyHTML.query("#{scope} [data-quota-pct]")
+      |> Enum.map(&String.trim(LazyHTML.text(&1)))
+
+  # bd-adewb4: the Rate limits panel reads the top bar's quota, which
+  # `LiveHooks` now loads off the mount, and the overage indicator reads the
+  # same quota through its own `start_async/3`.
+  describe "Rate limits panel loads off the mount" do
+    test "loading, then the overage indicator for an account in paid overage", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, _} =
+        Wardmast.Quota.capture(ws.id, [
+          {"anthropic-ratelimit-unified-5h-utilization", "1.0"},
+          {"anthropic-ratelimit-unified-overage-status", "in_overage"}
+        ])
+
+      {:ok, view, html} = live(conn, ~p"/usage")
+
+      doc = LazyHTML.from_fragment(html)
+      assert LazyHTML.query(doc, "#usage-quota-loading") |> Enum.count() == 1
+      assert LazyHTML.query(doc, "#overage-indicator") |> Enum.count() == 0
+
+      render_async(view)
+
+      refute has_element?(view, "#usage-quota-loading")
+      assert has_element?(view, "#usage-quota-claude")
+      assert has_element?(view, "#overage-indicator")
+    end
+
+    @tag :capture_log
+    test "a failed quota load says so in the panel and leaves the page up", %{conn: conn} do
+      :meck.new(Wardmast.Quota.QuotaCache, [:passthrough, :no_link])
+      on_exit(fn -> :meck.unload(Wardmast.Quota.QuotaCache) end)
+
+      :meck.expect(Wardmast.Quota.QuotaCache, :fetch, fn _ws_id, _opts, _compute ->
+        raise "database is locked"
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/usage")
+      render_async(view)
+
+      assert has_element?(view, "#usage-quota-error")
+      refute has_element?(view, "#overage-indicator")
+      assert has_element?(view, "#quota-topbar-error")
+    end
+  end
+end

@@ -1,0 +1,121 @@
+defmodule Wardmast.Quota.GoogleQuota do
+  @moduledoc """
+  Per-**account** snapshot of **Antigravity**'s (`provider: "antigravity"`)
+  quota state, persisted for the web dashboard and history (bd-ajh7bd). The
+  upstream Gemini CLI (`"gemini_cli"`) rows went with that provider
+  (bd-ac53wz).
+
+  Before this table, `Wardmast.Quota.CloudCode` fetched Google's quota live on
+  every `/api/quota` call and threw the result away, so Antigravity
+  could never appear on the topbar or `/usage` page (which only ever read the
+  persisted quota tables). `Wardmast.Quota.CloudProbe` now refreshes these on a
+  timer and upserts one row per `{provider_account_id, provider}` here —
+  mirroring `Wardmast.Quota.CodexQuota` (re-keyed off the workspace by P5,
+  `docs/provider-account-design.md` §6).
+
+  Google's API reports a *per-model* `remainingFraction` rather than time
+  windows, so this row stores:
+
+    * `snapshot` — the full serialized `CloudCode` snapshot (plan, per-model
+      quota list, message) reconstructed verbatim for `arb quota` / the REST +
+      MCP quota surface.
+    * `used_percent` / `reset_at` — a single **representative** figure (the
+      worst / most-used important model) so the topbar and `/usage` page — which
+      render a utilization bar — have one number to draw without unpacking the
+      per-model list.
+
+  One row per `{provider_account_id, provider}` — the `:upsert` action
+  overwrites the prior snapshot in place, so this stays a cache of the latest
+  reading.
+  """
+
+  use Ash.Resource,
+    otp_app: :wardmast,
+    domain: Wardmast.Quota,
+    data_layer: AshSqlite.DataLayer
+
+  sqlite do
+    table "cloud_code_quotas"
+    repo Wardmast.Repo
+  end
+
+  actions do
+    defaults [:read, :destroy]
+
+    create :upsert do
+      primary? true
+      upsert? true
+      upsert_identity :account_provider
+
+      accept [
+        :provider_account_id,
+        :provider,
+        :plan,
+        :message,
+        :used_percent,
+        :reset_at,
+        :snapshot,
+        :captured_at
+      ]
+    end
+  end
+
+  attributes do
+    uuid_primary_key :id
+
+    attribute :provider_account_id, :uuid do
+      allow_nil? false
+      public? true
+      description "Provider account these quota figures were captured for (§6)."
+    end
+
+    attribute :provider, :string do
+      allow_nil? false
+      public? true
+      constraints max_length: 64, trim?: true
+      description ~s("antigravity".)
+    end
+
+    attribute :plan, :string do
+      public? true
+      description ~s[Plan / tier reported by loadCodeAssist (e.g. "Free", "Pro").]
+    end
+
+    attribute :message, :string do
+      public? true
+
+      description "Non-fatal status note (e.g. auth expired / project missing) when the fetch degraded."
+    end
+
+    attribute :used_percent, :float do
+      public? true
+
+      description "Representative used-percent (0-100): the worst / most-used important model, for the utilization bar."
+    end
+
+    attribute :reset_at, :utc_datetime do
+      public? true
+      description "Reset time of the representative model, when known."
+    end
+
+    attribute :snapshot, :map do
+      public? true
+      default %{}
+
+      description "The full serialized CloudCode snapshot (plan, per-model quota list, message) for the CLI/REST/MCP surface."
+    end
+
+    attribute :captured_at, :utc_datetime do
+      allow_nil? false
+      public? true
+      description "When the direct Cloud Code Assist call observed these figures."
+    end
+
+    create_timestamp :inserted_at
+    update_timestamp :updated_at
+  end
+
+  identities do
+    identity :account_provider, [:provider_account_id, :provider]
+  end
+end

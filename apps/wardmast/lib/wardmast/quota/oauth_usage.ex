@@ -1,0 +1,629 @@
+defmodule Wardmast.Quota.OAuthUsage do
+  @moduledoc """
+  On-demand fetch of Anthropic's `/api/oauth/usage` endpoint (bd-8tpha6,
+  part of bd-5qe3qs).
+
+  This is a **primary** quota source. `Wardmast.Quota` writes the parsed
+  aggregate figures (`utilization_5h`, `utilization_7d`, reset times, status
+  flags, etc.) into the columns the dispatch gate reads, so a fleet that is
+  quota-held or idle still has a current snapshot to un-hold on. It is also
+  the only way to get a **per-model** weekly breakdown (`seven_day_sonnet`,
+  `seven_day_opus`, ...) and the account's `extra_usage` overage spend.
+
+  See `Wardmast.Quota.Gate.staleness_threshold_seconds/1` for why a row written
+  from here gets four times the staleness margin of a header-captured one:
+  this endpoint's budget is roughly one request per 5 minutes per account, and
+  the cooldown below makes a single 429 cost two polls — the rejected one and
+  the next, which it suppresses. For rate-limit characteristics and documented
+  behavior, see `docs/oauth-usage-ratelimit.md`.
+
+  ## Auth
+
+  Uses the operator's own Claude Code consumer OAuth token —
+  `claudeAiOauth.accessToken` in `~/.claude/.credentials.json` (or
+  `$CLAUDE_CONFIG_DIR/.credentials.json`), the same file
+  `Wardmast.Agents.Claude.ConfigDir` seeds worker spawns from. This is a
+  read-only fetch: we only ever open + read the file, never write to or
+  watch it, so a concurrent token refresh by the CLI is never at risk.
+
+  ## Rate limiting
+
+  This specific endpoint 429s far more readily than normal `/v1/messages`
+  traffic. On a 429 we start a cooldown for that token (or account, see
+  `fetch/1`) — `fetch/1` skips the call and returns `{:error, {:backoff, 429}}`
+  until it lapses, so a hot polling loop can never hammer this endpoint into a
+  harder ban. The header-capture aggregate figures are entirely unaffected by
+  this cooldown.
+
+  The cooldown is sized to actually suppress something (#1876). It used to be
+  a fixed 180 s (mirroring 9router's `open-sse/services/usage/claude.js`),
+  which lapsed before `Wardmast.Quota.CloudProbe`'s next 300 s poll and so never
+  skipped one. It is now:
+
+    * by default, `cooldown_ms/0` — one CloudProbe cycle plus 30 s, so a 429
+      suppresses the next scheduled poll and only that one;
+    * when the 429 carries a delay-seconds `Retry-After`, that delay — but
+      never less than the default (the endpoint sends `retry-after: 0` on
+      429s it has not recovered from) and never more than `max_cooldown_ms/0`
+      (one hour, the longest wait it has been seen to ask for).
+
+  A suppressed poll leaves the last snapshot to age, which is what the polled
+  staleness margin in `Wardmast.Quota.Gate.staleness_threshold_seconds/1` is
+  sized for; a longer blackout trips `Wardmast.Quota.StalenessWatch`'s alert.
+
+  ## Cadence
+
+  `Wardmast.Quota.CloudProbe` polls this once per cycle for each distinct
+  provider account (P6, `docs/provider-account-design.md` §9), authenticating
+  with that account's own `cli_credentials_file` credential (bd-4fbpto
+  deleted the workspace-token grouping bd-5xuneh had used before that — see
+  PR #1607 for why a workspace's `worker_env` token doesn't work against this
+  endpoint at all), every `interval_ms` (default 5 min, matching the
+  endpoint's own per-account budget), and `refresh_and_serialize/2` tops it up
+  on demand when `arb quota`
+  / the `quota_get` MCP tool is invoked. The cadence is deliberately *not*
+  faster than 5 min — see `Wardmast.Quota.Gate.staleness_threshold_seconds/1`,
+  which buys the gate's margin by trusting a polled row for longer rather than
+  by spending more of this endpoint's scarce budget. This poll is the *only*
+  thing that refreshes the snapshot for an idle fleet (bd-atyrrq) — there is
+  no separate probe that spends a billed request to keep it warm.
+  """
+
+  require Logger
+
+  alias Wardmast.Agents.Claude.ConfigDir
+
+  @default_base_url "https://api.anthropic.com"
+  @stub_name __MODULE__.HTTP
+  @anthropic_version "2023-06-01"
+  @anthropic_beta "oauth-2025-04-20"
+
+  # #1876: the default 429 cooldown is one `Wardmast.Quota.CloudProbe` cycle
+  # plus this much slack, so it outlasts the next scheduled poll even when the
+  # 429 landed a few seconds into its own cycle. A fixed 180 s cooldown against
+  # the 300 s cadence lapsed before the next poll and never suppressed one.
+  @cooldown_slack_ms 30_000
+
+  # The most a `Retry-After` may stretch the cooldown to: the longest value
+  # this endpoint has been seen to send (the setup token's per-token lockout,
+  # `docs/oauth-usage-ratelimit.md`). A longer one would silence the poll, and
+  # so blind the gate, for longer than any observed upstream wait.
+  @max_cooldown_ms 3_600_000
+
+  # Mirrors the `warningThresholds` table shipped in Anthropic's own Claude
+  # Code CLI v2.1.269 (bd-3uwku6 / bd-3x0na3): burn-rate-ahead-of-schedule
+  # warnings, keyed by window. Each `{utilization, elapsed_fraction}` pair
+  # means "warn once utilization is at least this high while elapsed_fraction
+  # is still at or below this" — i.e. burning faster than the window's own
+  # clock. This is a mirrored constant, not a derivation; re-check it against
+  # the CLI if the observed behavior ever drifts.
+  @warning_thresholds %{
+    five_hour: [{0.90, 0.72}],
+    seven_day: [{0.75, 0.60}, {0.50, 0.35}, {0.25, 0.15}]
+  }
+  @window_seconds %{five_hour: 18_000, seven_day: 604_800}
+
+  @type usage :: %{
+          utilization_5h: float() | nil,
+          utilization_7d: float() | nil,
+          per_model_utilization: %{String.t() => float()},
+          extra_usage: map(),
+          reset_5h_at: DateTime.t() | nil,
+          reset_7d_at: DateTime.t() | nil,
+          status_5h: String.t() | nil,
+          status_7d: String.t() | nil,
+          representative_claim: String.t() | nil,
+          overage_status: String.t() | nil,
+          limits: [limit()],
+          scoped: [map()],
+          spend: map() | nil
+        }
+
+  @typedoc """
+  One `limits[]` entry: `percent` is a 0-1 fraction; `scope` is the raw value
+  (nil, a string, or a `%{"model" => ..., "surface" => ...}` map).
+  """
+  @type limit :: %{
+          kind: String.t() | nil,
+          group: String.t() | nil,
+          scope: term(),
+          percent: float() | nil,
+          severity: String.t() | nil,
+          resets_at: DateTime.t() | nil,
+          is_active: boolean()
+        }
+
+  # `limits[].severity` values we know how to map onto the `status_*` strings
+  # the gate reads. Anything else is "unknown" and is treated as a warning
+  # (bd-6sxrud).
+  @severity_status %{
+    "normal" => "allowed",
+    "warning" => "allowed_warning",
+    "critical" => "allowed_warning",
+    "rejected" => "rejected"
+  }
+
+  @doc """
+  Fetch the current oauth/usage snapshot.
+
+  Options:
+
+    * `:token` — access token to use instead of reading `.credentials.json`.
+    * `:source_dir` — directory to read `.credentials.json` from, instead of
+      `Wardmast.Agents.Claude.ConfigDir.source_dir/0`.
+    * `:base_url` — override the Anthropic base URL (tests).
+    * `:plug` — a `Req` plug to inject (tests); otherwise the
+      `:wardmast, :oauth_usage_http_stub` app-env flag routes through
+      `Req.Test` the same way `Wardmast.GitHub` does.
+    * `:provider_account_id` — when given, the 429 cooldown below is keyed on
+      this account id instead of the token (P6, §5 row 12). The rate limit is
+      per *account*, so a rotated-in second credential on the same account
+      must share the same cooldown window rather than getting its own —
+      `Wardmast.Quota.capture_oauth_usage/2` always passes this once it knows
+      the account. Omitted (or blank), the cooldown falls back to the
+      pre-P6 per-token key.
+    * `:now_ms` — the `System.monotonic_time(:millisecond)` reading to check
+      and start the cooldown against (tests), instead of the real clock.
+
+  Returns `{:error, {:backoff, last_status}}` without making a request while
+  this token (or account, see `:provider_account_id` above) is cooling down
+  from a 429 — see "Rate limiting" above for how long that lasts.
+  `last_status` is the HTTP status that triggered the cooldown, so a caller
+  can log the actual upstream response behind a client-side skip rather than
+  a bare "rate limited" that looks identical to a fresh 429. Never raises.
+  """
+  @spec fetch(keyword()) :: {:ok, usage()} | {:error, term()}
+  def fetch(opts \\ []) do
+    with {:ok, token} <- fetch_token(opts) do
+      key = cooldown_key(opts, token)
+      now_ms = Keyword.get_lazy(opts, :now_ms, fn -> System.monotonic_time(:millisecond) end)
+
+      case cooling_down_status(key, now_ms) do
+        nil -> request(token, key, now_ms, opts)
+        status -> {:error, {:backoff, status}}
+      end
+    end
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  end
+
+  # ---- token resolution ---------------------------------------------------
+
+  defp fetch_token(opts) do
+    case Keyword.get(opts, :token) do
+      token when is_binary(token) and token != "" ->
+        {:ok, token}
+
+      _ ->
+        read_token_from_credentials(opts)
+    end
+  end
+
+  defp read_token_from_credentials(opts) do
+    dir = Keyword.get(opts, :source_dir) || ConfigDir.source_dir()
+
+    with dir when is_binary(dir) <- dir,
+         path <- Path.join(dir, ".credentials.json"),
+         {:ok, content} <- File.read(path),
+         {:ok, json} <- Jason.decode(content),
+         %{"accessToken" => token} when is_binary(token) and token != "" <-
+           Map.get(json, "claudeAiOauth") do
+      {:ok, token}
+    else
+      _ -> {:error, :no_credentials}
+    end
+  end
+
+  # ---- HTTP ----------------------------------------------------------------
+
+  defp request(token, cooldown_key, now_ms, opts) do
+    base = Keyword.get(opts, :base_url, @default_base_url)
+
+    full_opts =
+      [
+        method: :get,
+        url: base <> "/api/oauth/usage",
+        headers: [
+          {"authorization", "Bearer " <> token},
+          {"anthropic-beta", @anthropic_beta},
+          {"anthropic-version", @anthropic_version}
+        ],
+        receive_timeout: 10_000,
+        retry: false
+      ]
+      |> Keyword.merge(stub_opts(opts))
+
+    case Req.request(full_opts) do
+      {:ok, %Req.Response{status: 200, body: body}} ->
+        {:ok, parse_usage(body)}
+
+      {:ok, %Req.Response{status: 429} = resp} ->
+        set_cooldown(cooldown_key, 429, now_ms + cooldown_for(resp))
+        {:error, :rate_limited}
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:http_error, status}}
+
+      {:error, reason} ->
+        {:error, {:transport_error, reason}}
+    end
+  end
+
+  defp stub_opts(opts) do
+    cond do
+      Keyword.has_key?(opts, :plug) ->
+        [plug: Keyword.fetch!(opts, :plug)]
+
+      Application.get_env(:wardmast, :oauth_usage_http_stub, false) ->
+        [plug: {Req.Test, @stub_name}]
+
+      true ->
+        []
+    end
+  end
+
+  # ---- parsing ---------------------------------------------------------
+
+  # Anthropic's `utilization` fields here are 0-100 percentages (9router
+  # derives `remaining = 100 - utilization`), unlike the
+  # `anthropic-ratelimit-unified-*` headers this app already parses as 0-1
+  # fractions (see `Wardmast.Quota.parse_unified_headers/1`). Normalize to the
+  # same 0-1 fraction scale so both sources render identically downstream.
+  @doc false
+  @spec parse_usage(term()) :: usage()
+  def parse_usage(body) when is_map(body) do
+    limits = Map.get(body, "limits")
+    five_hour = Map.get(body, "five_hour")
+    # Anthropic now reports `five_hour: null` and may null `seven_day`; the
+    # `limits[]` array (kind: weekly_all | weekly_scoped) backs the weekly
+    # figures when the legacy keys are null (bd-bmoe8s).
+    seven_day = Map.get(body, "seven_day") || weekly_all_window(limits)
+    extra_usage = Map.get(body, "extra_usage")
+
+    %{
+      utilization_5h: utilization(five_hour),
+      utilization_7d: utilization(seven_day),
+      per_model_utilization: per_model_utilization(body, limits),
+      extra_usage: normalize_extra_usage(extra_usage),
+      reset_5h_at: resets_at(five_hour),
+      reset_7d_at: resets_at(seven_day),
+      status_5h: window_status(five_hour, :five_hour),
+      status_7d: status_7d(seven_day, limits),
+      representative_claim: representative_claim(limits),
+      overage_status: overage_status(extra_usage),
+      limits: parse_limits(limits),
+      scoped: scoped_windows(limits),
+      spend: spend(Map.get(body, "spend"))
+    }
+  end
+
+  def parse_usage(_),
+    do: %{
+      utilization_5h: nil,
+      utilization_7d: nil,
+      per_model_utilization: %{},
+      extra_usage: %{},
+      reset_5h_at: nil,
+      reset_7d_at: nil,
+      status_5h: nil,
+      status_7d: nil,
+      representative_claim: nil,
+      overage_status: nil,
+      limits: [],
+      scoped: [],
+      spend: nil
+    }
+
+  # The `spend` block is kept verbatim (bd-6sxrud); its shape is not yet
+  # modeled, so nothing downstream may depend on its keys.
+  defp spend(%{} = spend), do: spend
+  defp spend(_), do: nil
+
+  defp parse_limits(limits) when is_list(limits) do
+    for %{} = l <- limits do
+      %{
+        kind: string_or_nil(Map.get(l, "kind")),
+        group: string_or_nil(Map.get(l, "group")),
+        scope: Map.get(l, "scope"),
+        percent: percent(Map.get(l, "percent")),
+        severity: string_or_nil(Map.get(l, "severity")),
+        resets_at: resets_at(l),
+        is_active: Map.get(l, "is_active") == true
+      }
+    end
+  end
+
+  defp parse_limits(_), do: []
+
+  # `kind: weekly_scoped` limits as the string-keyed maps the
+  # `anthropic_quotas.scoped_limits` column stores (bd-e0b7so): the model's
+  # display name, a 0-1 fraction, the window's own status and reset, and
+  # whether Anthropic marks it the active limit. An entry with no display name
+  # or no percent is dropped: a limit we cannot name or read is not invented.
+  defp scoped_windows(limits) when is_list(limits) do
+    for %{"kind" => "weekly_scoped"} = l <- limits,
+        name = scoped_name(l),
+        is_number(Map.get(l, "percent")) do
+      window = %{"utilization" => l["percent"], "resets_at" => Map.get(l, "resets_at")}
+      reset_at = resets_at(window)
+
+      %{
+        "scope" => name,
+        "utilization" => l["percent"] / 100.0,
+        "status" => scoped_status(window, Map.get(l, "severity")),
+        "reset_at" => reset_at && DateTime.to_iso8601(reset_at),
+        "is_active" => Map.get(l, "is_active") == true
+      }
+    end
+  end
+
+  defp scoped_windows(_), do: []
+
+  defp scoped_name(limit) do
+    case get_in(limit, ["scope", "model", "display_name"]) do
+      name when is_binary(name) and name != "" -> name
+      _ -> nil
+    end
+  end
+
+  # The same rule as the 7d status: the window's derived status, raised (never
+  # lowered) by the limit's own severity.
+  defp scoped_status(window, severity) do
+    derived = window_status(window, :seven_day)
+
+    case severity do
+      s when is_binary(s) and s != "" -> worst_status(derived, severity_status(s))
+      _ -> derived
+    end
+  end
+
+  defp string_or_nil(v) when is_binary(v), do: v
+  defp string_or_nil(_), do: nil
+
+  defp percent(p) when is_number(p), do: p / 100.0
+  defp percent(_), do: nil
+
+  # 7d status: the `weekly_all` limit's `severity` when it carries one, else the
+  # utilization-derived status. Severity can only raise the derived status, never
+  # lower it: a full window (>= 100%), a `locked_reason`, or our own burn-rate
+  # warning still reads as such when the API says "normal". A window with no
+  # utilization at all has no status.
+  defp status_7d(seven_day, limits) do
+    derived = window_status(seven_day, :seven_day)
+
+    case {derived, weekly_all_severity(limits)} do
+      {nil, _} -> nil
+      {_, nil} -> derived
+      {_, severity} -> worst_status(derived, severity_status(severity))
+    end
+  end
+
+  @status_rank %{"allowed" => 0, "allowed_warning" => 1, "rejected" => 2}
+
+  defp worst_status(a, b), do: Enum.max_by([a, b], &Map.fetch!(@status_rank, &1))
+
+  defp weekly_all_severity(limits) when is_list(limits) do
+    Enum.find_value(limits, fn
+      %{"kind" => "weekly_all", "severity" => s} when is_binary(s) and s != "" -> s
+      _ -> nil
+    end)
+  end
+
+  defp weekly_all_severity(_), do: nil
+
+  defp severity_status(severity) do
+    case Map.fetch(@severity_status, severity) do
+      {:ok, status} ->
+        status
+
+      :error ->
+        Logger.warning(
+          "Wardmast.Quota.OAuthUsage: unknown limits[] severity #{inspect(severity)}; treating as allowed_warning"
+        )
+
+        "allowed_warning"
+    end
+  end
+
+  defp utilization(%{"utilization" => u}) when is_number(u), do: u / 100.0
+  defp utilization(_), do: nil
+
+  defp resets_at(%{"resets_at" => raw}) when is_binary(raw) do
+    case DateTime.from_iso8601(raw) do
+      {:ok, dt, _offset} -> DateTime.truncate(dt, :second)
+      _ -> nil
+    end
+  end
+
+  defp resets_at(_), do: nil
+
+  defp window_locked_reason(%{"locked_reason" => reason}) when is_binary(reason) and reason != "",
+    do: reason
+
+  defp window_locked_reason(_), do: nil
+
+  defp window_status(window, key) do
+    case utilization(window) do
+      nil ->
+        nil
+
+      u ->
+        cond do
+          u >= 1.0 or not is_nil(window_locked_reason(window)) -> "rejected"
+          warning?(key, u, resets_at(window)) -> "allowed_warning"
+          true -> "allowed"
+        end
+    end
+  end
+
+  defp warning?(key, utilization, resets_at) do
+    window = Map.fetch!(@window_seconds, key)
+    thresholds = Map.fetch!(@warning_thresholds, key)
+    elapsed_fraction = elapsed_fraction(resets_at, window)
+
+    Enum.any?(thresholds, fn {u_threshold, elapsed_threshold} ->
+      utilization >= u_threshold and elapsed_fraction <= elapsed_threshold
+    end)
+  end
+
+  # No resets_at to anchor the window on — can't tell how far along we are,
+  # so don't synthesize a warning off unknown data.
+  defp elapsed_fraction(nil, _window), do: 1.0
+
+  defp elapsed_fraction(%DateTime{} = resets_at, window) do
+    window_start = DateTime.add(resets_at, -window, :second)
+    elapsed = DateTime.diff(DateTime.utc_now(), window_start, :second)
+
+    (elapsed / window)
+    |> max(0.0)
+    |> min(1.0)
+  end
+
+  defp representative_claim(limits) when is_list(limits) do
+    limits
+    |> Enum.find(&match?(%{"is_active" => true}, &1))
+    |> case do
+      %{"group" => "session"} -> "five_hour"
+      %{"group" => "weekly"} -> "seven_day"
+      %{"kind" => "weekly" <> _} -> "seven_day"
+      _ -> nil
+    end
+  end
+
+  defp representative_claim(_), do: nil
+
+  defp overage_status(%{"is_enabled" => is_enabled} = extra_usage) do
+    disabled_reason = Map.get(extra_usage, "disabled_reason")
+    spend_limit_reached = Map.get(extra_usage, "spend_limit_reached", false)
+
+    if is_enabled == false or spend_limit_reached == true or not is_nil(disabled_reason) do
+      "rejected"
+    else
+      "allowed"
+    end
+  end
+
+  defp overage_status(_), do: nil
+
+  defp per_model_utilization(body, limits) do
+    legacy =
+      for {key, %{"utilization" => u}} <- body,
+          is_binary(key),
+          key != "seven_day",
+          String.starts_with?(key, "seven_day_"),
+          is_number(u),
+          into: %{} do
+        {String.replace_prefix(key, "seven_day_", ""), u / 100.0}
+      end
+
+    Map.merge(scoped_from_limits(limits), legacy)
+  end
+
+  # `limits[]` entry `kind: weekly_all` → a legacy-shaped `seven_day` window.
+  defp weekly_all_window(limits) when is_list(limits) do
+    case Enum.find(
+           limits,
+           &match?(%{"kind" => "weekly_all", "percent" => p} when is_number(p), &1)
+         ) do
+      %{"percent" => p} = l -> %{"utilization" => p, "resets_at" => Map.get(l, "resets_at")}
+      _ -> nil
+    end
+  end
+
+  defp weekly_all_window(_), do: nil
+
+  # `kind: weekly_scoped` → per-model map keyed by the lowercased display name.
+  defp scoped_from_limits(limits) when is_list(limits) do
+    for %{"kind" => "weekly_scoped", "percent" => p} = l <- limits,
+        is_number(p),
+        name when is_binary(name) and name != "" <- [
+          get_in(l, ["scope", "model", "display_name"])
+        ],
+        into: %{} do
+      {name |> String.downcase() |> String.replace(~r/\s+/, "_"), p / 100.0}
+    end
+  end
+
+  defp scoped_from_limits(_), do: %{}
+
+  defp normalize_extra_usage(nil), do: %{}
+  defp normalize_extra_usage(n) when is_number(n), do: %{"amount_usd" => n / 1.0}
+  defp normalize_extra_usage(%{} = m), do: m
+  defp normalize_extra_usage(_), do: %{}
+
+  # ---- 429 cooldown --------------------------------------------------------
+
+  @doc """
+  The default 429 cooldown: one `Wardmast.Quota.CloudProbe.interval_ms/0`
+  cycle plus 30 s, so a 429 always suppresses the next scheduled poll — and
+  only that one: the poll after it goes out as normal (#1876).
+  """
+  @spec cooldown_ms() :: pos_integer()
+  def cooldown_ms, do: Wardmast.Quota.CloudProbe.interval_ms() + @cooldown_slack_ms
+
+  @doc """
+  The cap on a `Retry-After`-derived cooldown: #{div(@max_cooldown_ms, 60_000)} minutes.
+  """
+  @spec max_cooldown_ms() :: pos_integer()
+  def max_cooldown_ms, do: @max_cooldown_ms
+
+  # A delay-seconds `Retry-After` can only lengthen the cooldown — up to
+  # `max_cooldown_ms/0` — never shorten it below `cooldown_ms/0`: this
+  # endpoint sends `retry-after: 0` on 429s whose bucket has not refilled
+  # (`docs/oauth-usage-ratelimit.md`). An HTTP-date form, which Anthropic has
+  # not been seen to send, is ignored like a missing header.
+  defp cooldown_for(%Req.Response{} = resp) do
+    default = cooldown_ms()
+
+    case retry_after_ms(resp) do
+      nil -> default
+      ms -> ms |> min(@max_cooldown_ms) |> max(default)
+    end
+  end
+
+  defp retry_after_ms(resp) do
+    with [value | _] <- Req.Response.get_header(resp, "retry-after"),
+         {seconds, ""} when seconds >= 0 <- Integer.parse(String.trim(value)) do
+      seconds * 1_000
+    else
+      _ -> nil
+    end
+  end
+
+  defp cooldown_key(opts, token) do
+    case Keyword.get(opts, :provider_account_id) do
+      id when is_binary(id) and id != "" -> {:arbiter_oauth_usage_cooldown, :account, id}
+      _ -> {:arbiter_oauth_usage_cooldown, :token, :erlang.phash2(token)}
+    end
+  end
+
+  # Returns the HTTP status that triggered the still-active cooldown, or
+  # `nil` when not cooling down (never started, or lapsed).
+  defp cooling_down_status(key, now_ms) do
+    case :persistent_term.get(key, nil) do
+      nil ->
+        nil
+
+      {until, status} ->
+        if now_ms < until, do: status, else: nil
+    end
+  end
+
+  defp set_cooldown(key, status, until_ms) do
+    :persistent_term.put(key, {until_ms, status})
+  end
+
+  @doc false
+  @spec reset_cooldown!(String.t()) :: :ok
+  def reset_cooldown!(token) do
+    _ = :persistent_term.erase(cooldown_key([], token))
+    :ok
+  end
+
+  @doc false
+  @spec reset_account_cooldown!(String.t()) :: :ok
+  def reset_account_cooldown!(account_id) do
+    _ = :persistent_term.erase(cooldown_key([provider_account_id: account_id], nil))
+    :ok
+  end
+end

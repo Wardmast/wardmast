@@ -8,7 +8,7 @@
 # `crypto` NIF is dynamically linked against the build image's OpenSSL 1.1
 # (`libcrypto.so.1.1`). Hosts that only carry OpenSSL 3 — Fedora >= 36,
 # Ubuntu >= 22.04, Debian >= 12, RHEL 9 — cannot load that NIF, so `kernel`
-# died in `on_load` before any Arbiter code ran.
+# died in `on_load` before any Wardmast code ran.
 #
 # Building OTP here with `--disable-dynamic-ssl-lib` against a static,
 # upstream OpenSSL 3 (an LTS line) gives a `crypto` NIF with no host libcrypto

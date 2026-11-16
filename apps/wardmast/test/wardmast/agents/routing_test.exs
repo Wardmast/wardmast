@@ -1,0 +1,578 @@
+defmodule Wardmast.Agents.RoutingTest do
+  use ExUnit.Case, async: true
+
+  alias Wardmast.Agents.Routing
+  alias Wardmast.Agents.Routing.{ByBudget, ByDifficulty, ByPriority, RoundRobin, Static}
+  alias Wardmast.Tasks.Issue
+  alias Wardmast.Tasks.Workspace
+
+  describe "policy_for_workspace/1" do
+    test "defaults to Static when workspace has no routing block" do
+      ws = %Workspace{config: %{}}
+      assert Routing.policy_for_workspace(ws) == Static
+    end
+
+    test "resolves `static`/`by_priority`/`by_difficulty`/`by_budget`/`round_robin` strings" do
+      for {policy_str, mod} <- [
+            {"static", Static},
+            {"by_priority", ByPriority},
+            {"by_difficulty", ByDifficulty},
+            {"by_budget", ByBudget},
+            {"round_robin", RoundRobin}
+          ] do
+        ws = %Workspace{config: %{"routing" => %{"policy" => policy_str}}}
+        assert Routing.policy_for_workspace(ws) == mod
+      end
+    end
+
+    test "falls back to Static for malformed / unknown policy strings" do
+      ws = %Workspace{config: %{"routing" => %{"policy" => "magic"}}}
+      assert Routing.policy_for_workspace(ws) == Static
+    end
+
+    test "nil workspace → Static" do
+      assert Routing.policy_for_workspace(nil) == Static
+    end
+  end
+
+  describe "Static policy" do
+    test "returns the workspace `agent` config unchanged" do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{
+            "type" => "claude",
+            "config" => %{"model" => "sonnet"}
+          }
+        }
+      }
+
+      task = %Issue{priority: 2}
+      assert Routing.choose(task, ws, %{}) == %{type: :claude, config: %{"model" => "sonnet"}}
+    end
+
+    test "nil workspace → default {:claude, %{}}" do
+      task = %Issue{priority: 2}
+      assert Routing.choose(task, nil, %{}) == %{type: :claude, config: %{}}
+    end
+  end
+
+  describe "ByPriority policy" do
+    setup do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{
+            "type" => "claude",
+            "config" => %{"model" => "sonnet"}
+          },
+          "routing" => %{
+            "policy" => "by_priority",
+            "rules" => %{
+              "P0" => %{"model" => "opus"},
+              "P1" => %{"model" => "opus"},
+              "P4" => %{"model" => "haiku"}
+            }
+          }
+        }
+      }
+
+      {:ok, ws: ws}
+    end
+
+    test "P0 routes to opus", %{ws: ws} do
+      task = %Issue{priority: 0}
+      assert Routing.choose(task, ws, %{}) == %{type: :claude, config: %{"model" => "opus"}}
+    end
+
+    test "P4 routes to haiku", %{ws: ws} do
+      task = %Issue{priority: 4}
+      assert Routing.choose(task, ws, %{}) == %{type: :claude, config: %{"model" => "haiku"}}
+    end
+
+    test "P2 (no rule) falls back to the workspace default", %{ws: ws} do
+      task = %Issue{priority: 2}
+      assert Routing.choose(task, ws, %{}) == %{type: :claude, config: %{"model" => "sonnet"}}
+    end
+
+    test "rule overrides only the keys it specifies (default keys survive)" do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{
+            "type" => "claude",
+            "config" => %{"model" => "sonnet", "tool_budget" => 100}
+          },
+          "routing" => %{
+            "policy" => "by_priority",
+            "rules" => %{"P0" => %{"model" => "opus"}}
+          }
+        }
+      }
+
+      task = %Issue{priority: 0}
+
+      assert Routing.choose(task, ws, %{}) == %{
+               type: :claude,
+               config: %{"model" => "opus", "tool_budget" => 100}
+             }
+    end
+  end
+
+  describe "ByDifficulty policy" do
+    setup do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{
+            "type" => "claude",
+            "config" => %{}
+          },
+          "routing" => %{"policy" => "by_difficulty"}
+        }
+      }
+
+      {:ok, ws: ws}
+    end
+
+    test "D0 → economy / none (default mapping)", %{ws: ws} do
+      task = %Issue{difficulty: 0}
+
+      assert Routing.choose(task, ws, %{}) == %{
+               type: :claude,
+               config: %{"model_tier" => "economy", "thinking" => "none"}
+             }
+    end
+
+    test "D1 → economy / low (default mapping)", %{ws: ws} do
+      task = %Issue{difficulty: 1}
+
+      assert Routing.choose(task, ws, %{}) == %{
+               type: :claude,
+               config: %{"model_tier" => "economy", "thinking" => "low"}
+             }
+    end
+
+    test "D2 → standard / medium (default mapping)", %{ws: ws} do
+      task = %Issue{difficulty: 2}
+
+      assert Routing.choose(task, ws, %{}) == %{
+               type: :claude,
+               config: %{"model_tier" => "standard", "thinking" => "medium"}
+             }
+    end
+
+    test "D3 → premium / high (default mapping)", %{ws: ws} do
+      task = %Issue{difficulty: 3}
+
+      assert Routing.choose(task, ws, %{}) == %{
+               type: :claude,
+               config: %{"model_tier" => "premium", "thinking" => "high"}
+             }
+    end
+
+    test "D4 → premium / max (default mapping)", %{ws: ws} do
+      # #1519: D4 is the top *non-opt-in* tier. It gets the strongest effort
+      # source knows about so it is no longer identical to D3.
+      task = %Issue{difficulty: 4}
+
+      assert Routing.choose(task, ws, %{}) == %{
+               type: :claude,
+               config: %{"model_tier" => "premium", "thinking" => "max"}
+             }
+    end
+
+    test "D5 → premium / max in source (flagship only via workspace rule)", %{ws: ws} do
+      # #1519: flagship exists only in workspace config. An install that has
+      # not defined a flagship tier must still get the strongest thing source
+      # knows about rather than an unresolvable tier name.
+      task = %Issue{difficulty: 5}
+
+      assert Routing.choose(task, ws, %{}) == %{
+               type: :claude,
+               config: %{"model_tier" => "premium", "thinking" => "max"}
+             }
+    end
+
+    test "a D5 workspace rule routes the flagship tier" do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{"type" => "claude", "config" => %{}},
+          "routing" => %{
+            "policy" => "by_difficulty",
+            "rules" => %{
+              "D5" => %{"model_tier" => "flagship", "thinking" => "xhigh"}
+            }
+          }
+        }
+      }
+
+      assert Routing.choose(%Issue{difficulty: 5}, ws, %{}) == %{
+               type: :claude,
+               config: %{"model_tier" => "flagship", "thinking" => "xhigh"}
+             }
+    end
+
+    test "unset difficulty falls back to D2 (standard / medium)", %{ws: ws} do
+      task = %Issue{difficulty: nil}
+
+      assert Routing.choose(task, ws, %{}) == %{
+               type: :claude,
+               config: %{"model_tier" => "standard", "thinking" => "medium"}
+             }
+    end
+
+    test "workspace rule overrides only the keys it sets; defaults survive" do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{"type" => "claude", "config" => %{}},
+          "routing" => %{
+            "policy" => "by_difficulty",
+            "rules" => %{
+              # Override only thinking for D3 — model_tier stays at the default.
+              "D3" => %{"thinking" => "medium"}
+            }
+          }
+        }
+      }
+
+      task = %Issue{difficulty: 3}
+
+      assert Routing.choose(task, ws, %{}) == %{
+               type: :claude,
+               config: %{"model_tier" => "premium", "thinking" => "medium"}
+             }
+    end
+
+    test "workspace can pin a concrete model alongside tier/thinking" do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{"type" => "claude", "config" => %{}},
+          "routing" => %{
+            "policy" => "by_difficulty",
+            "rules" => %{
+              "D4" => %{"model" => "opus", "thinking" => "high"}
+            }
+          }
+        }
+      }
+
+      task = %Issue{difficulty: 4}
+
+      assert Routing.choose(task, ws, %{}) == %{
+               type: :claude,
+               config: %{
+                 "model" => "opus",
+                 "model_tier" => "premium",
+                 "thinking" => "high"
+               }
+             }
+    end
+
+    test "rule keys merge on top of the workspace default agent config" do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{
+            "type" => "claude",
+            "config" => %{"tool_budget" => 100}
+          },
+          "routing" => %{"policy" => "by_difficulty"}
+        }
+      }
+
+      task = %Issue{difficulty: 0}
+
+      assert Routing.choose(task, ws, %{}) == %{
+               type: :claude,
+               config: %{
+                 "tool_budget" => 100,
+                 "model_tier" => "economy",
+                 "thinking" => "none"
+               }
+             }
+    end
+
+    test "effective_difficulty/1 normalizes nil and out-of-range" do
+      assert ByDifficulty.effective_difficulty(nil) == 2
+      assert ByDifficulty.effective_difficulty(0) == 0
+      assert ByDifficulty.effective_difficulty(4) == 4
+      assert ByDifficulty.effective_difficulty(5) == 5
+      assert ByDifficulty.effective_difficulty(-1) == 0
+      assert ByDifficulty.effective_difficulty(99) == 5
+    end
+
+    # bd-3xultf: the reviewer tier is derived from the author's nominal tier
+    # (this table), then bumped one step by ReviewGate — kept independent of
+    # any workspace `routing.rules` override, which only affects the author.
+    test "tier_for_difficulty/1 returns the default-mapping tier for each difficulty" do
+      assert ByDifficulty.tier_for_difficulty(0) == "economy"
+      assert ByDifficulty.tier_for_difficulty(1) == "economy"
+      assert ByDifficulty.tier_for_difficulty(2) == "standard"
+      assert ByDifficulty.tier_for_difficulty(3) == "premium"
+      assert ByDifficulty.tier_for_difficulty(4) == "premium"
+      # #1519: D5's *source* tier is premium — "flagship" is not a source
+      # concept, so the ReviewGate's reviewer bump has a real tier to work from.
+      assert ByDifficulty.tier_for_difficulty(5) == "premium"
+      assert ByDifficulty.tier_for_difficulty(nil) == "standard"
+    end
+
+    test "bump_tier/2 bumps one step, offset 1" do
+      assert ByDifficulty.bump_tier("economy", 1) == "standard"
+      assert ByDifficulty.bump_tier("standard", 1) == "premium"
+    end
+
+    test "bump_tier/2 caps at premium rather than overflowing" do
+      assert ByDifficulty.bump_tier("premium", 1) == "premium"
+      assert ByDifficulty.bump_tier("economy", 5) == "premium"
+    end
+
+    test "bump_tier/2 offset 0 is a no-op (the fixed-reviewer rollback knob)" do
+      assert ByDifficulty.bump_tier("economy", 0) == "economy"
+      assert ByDifficulty.bump_tier("premium", 0) == "premium"
+    end
+
+    test "reviewer_tier/2 bumps the difficulty's tier by the default offset of 1" do
+      assert ByDifficulty.reviewer_tier(%{}, 1) == "standard"
+      assert ByDifficulty.reviewer_tier(nil, 2) == "premium"
+      assert ByDifficulty.reviewer_tier(%{}, nil) == "premium"
+    end
+
+    test "reviewer_tier/2 honours tier_offset and an explicit model_tier" do
+      assert ByDifficulty.reviewer_tier(
+               %{"review_agent" => %{"config" => %{"tier_offset" => 0}}},
+               1
+             ) ==
+               "economy"
+
+      explicit = %{"review_agent" => %{"config" => %{"model_tier" => "economy"}}}
+      assert ByDifficulty.reviewer_tier(explicit, 4) == "economy"
+      # An explicit tier never reads the difficulty.
+      assert ByDifficulty.reviewer_tier(explicit, fn -> flunk("difficulty read") end) == "economy"
+    end
+
+    test "bump_tier/2 passes an unrecognized tier through unchanged" do
+      assert ByDifficulty.bump_tier("weird", 1) == "weird"
+    end
+  end
+
+  describe "ByBudget policy (with :by_priority base, default)" do
+    setup do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{
+            "type" => "claude",
+            "config" => %{"model" => "sonnet"}
+          },
+          "routing" => %{
+            "policy" => "by_budget",
+            "budget_usd_per_day" => 5.0,
+            "rules" => %{"P0" => %{"model" => "opus"}}
+          }
+        }
+      }
+
+      {:ok, ws: ws}
+    end
+
+    test "behaves like :by_priority below the budget", %{ws: ws} do
+      task = %Issue{priority: 0}
+
+      assert Routing.choose(task, ws, %{cost_usd_today: 0.10}) ==
+               %{type: :claude, config: %{"model" => "opus"}}
+    end
+
+    test "degrades one tier when daily spend has crossed the budget", %{ws: ws} do
+      task = %Issue{priority: 0}
+
+      assert Routing.choose(task, ws, %{cost_usd_today: 9.99}) ==
+               %{type: :claude, config: %{"model" => "sonnet"}}
+    end
+
+    test "treats an empty ledger snapshot as not-over-budget", %{ws: ws} do
+      task = %Issue{priority: 0}
+
+      assert Routing.choose(task, ws, %{}) ==
+               %{type: :claude, config: %{"model" => "opus"}}
+    end
+
+    test "leaves the model alone when no model is set on the default config" do
+      ws = %Workspace{
+        config: %{
+          "routing" => %{
+            "policy" => "by_budget",
+            "budget_usd_per_day" => 1.0
+          }
+        }
+      }
+
+      task = %Issue{priority: 2}
+
+      assert Routing.choose(task, ws, %{cost_usd_today: 999.0}) ==
+               %{type: :claude, config: %{}}
+    end
+  end
+
+  describe "ByBudget policy (with :by_difficulty base)" do
+    setup do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{"type" => "claude", "config" => %{}},
+          "routing" => %{
+            "policy" => "by_budget",
+            "base_policy" => "by_difficulty",
+            "budget_usd_per_day" => 5.0
+          }
+        }
+      }
+
+      {:ok, ws: ws}
+    end
+
+    test "below budget: passes through the difficulty default", %{ws: ws} do
+      task = %Issue{difficulty: 3}
+
+      assert Routing.choose(task, ws, %{cost_usd_today: 0.10}) == %{
+               type: :claude,
+               config: %{"model_tier" => "premium", "thinking" => "high"}
+             }
+    end
+
+    test "over budget: degrades premium → standard", %{ws: ws} do
+      task = %Issue{difficulty: 3}
+
+      assert Routing.choose(task, ws, %{cost_usd_today: 9.99}) == %{
+               type: :claude,
+               config: %{"model_tier" => "standard", "thinking" => "high"}
+             }
+    end
+
+    test "over budget: standard → economy", %{ws: ws} do
+      task = %Issue{difficulty: 2}
+
+      assert Routing.choose(task, ws, %{cost_usd_today: 9.99}) == %{
+               type: :claude,
+               config: %{"model_tier" => "economy", "thinking" => "medium"}
+             }
+    end
+
+    test "over budget: economy stays at economy (floor)", %{ws: ws} do
+      task = %Issue{difficulty: 0}
+
+      assert Routing.choose(task, ws, %{cost_usd_today: 9.99}) == %{
+               type: :claude,
+               config: %{"model_tier" => "economy", "thinking" => "none"}
+             }
+    end
+
+    # #1519: D5 is the level a workspace points at the flagship model, so it is
+    # the single most expensive dispatch the budget ceiling exists to stop. An
+    # unmapped tier passes through `maybe_degrade/3` unchanged, which would make
+    # `flagship` the one tier the ceiling could not touch.
+    test "over budget: a workspace D5 flagship rule degrades flagship → premium", %{ws: ws} do
+      ws =
+        put_in(ws.config["routing"]["rules"], %{
+          "D5" => %{"model_tier" => "flagship", "thinking" => "xhigh"}
+        })
+
+      task = %Issue{difficulty: 5}
+
+      assert Routing.choose(task, ws, %{cost_usd_today: 0.10}) == %{
+               type: :claude,
+               config: %{"model_tier" => "flagship", "thinking" => "xhigh"}
+             }
+
+      assert Routing.choose(task, ws, %{cost_usd_today: 9.99}) == %{
+               type: :claude,
+               config: %{"model_tier" => "premium", "thinking" => "xhigh"}
+             }
+    end
+
+    # The concrete-model ladder is the legacy `by_priority` path, but a
+    # workspace may pin `"model" => "fable"` directly. Without a rung above
+    # opus, that config is likewise undegradable.
+    test "over budget: a pinned concrete flagship model degrades fable → opus", %{ws: ws} do
+      ws =
+        put_in(ws.config["routing"]["rules"], %{
+          "D5" => %{"model" => "fable", "thinking" => "xhigh"}
+        })
+
+      task = %Issue{difficulty: 5}
+
+      # Both ladders apply independently: the D5 default still supplies
+      # `model_tier`, so it degrades alongside the pinned concrete model.
+      assert Routing.choose(task, ws, %{cost_usd_today: 9.99}) == %{
+               type: :claude,
+               config: %{
+                 "model_tier" => "standard",
+                 "model" => "opus",
+                 "thinking" => "xhigh"
+               }
+             }
+    end
+  end
+
+  describe "RoundRobin policy" do
+    test "cycles through `routing.adapters` per dispatch" do
+      ws = %Workspace{
+        id: "ws-rr-test",
+        config: %{
+          "agent" => %{"type" => "claude", "config" => %{"model" => "sonnet"}},
+          "routing" => %{
+            "policy" => "round_robin",
+            "adapters" => [
+              %{"model" => "opus"},
+              %{"model" => "sonnet"},
+              %{"model" => "haiku"}
+            ]
+          }
+        }
+      }
+
+      task = %Issue{priority: 2}
+
+      first = Routing.choose(task, ws, %{})
+      second = Routing.choose(task, ws, %{})
+      third = Routing.choose(task, ws, %{})
+      fourth = Routing.choose(task, ws, %{})
+
+      assert first.config["model"] == "opus"
+      assert second.config["model"] == "sonnet"
+      assert third.config["model"] == "haiku"
+      # Wraps back to the first entry.
+      assert fourth.config["model"] == "opus"
+    end
+
+    test "falls back to the workspace default with an empty adapters list" do
+      ws = %Workspace{
+        id: "ws-rr-empty",
+        config: %{
+          "agent" => %{"type" => "claude", "config" => %{"model" => "sonnet"}},
+          "routing" => %{"policy" => "round_robin", "adapters" => []}
+        }
+      }
+
+      task = %Issue{priority: 2}
+      assert Routing.choose(task, ws, %{}) == %{type: :claude, config: %{"model" => "sonnet"}}
+    end
+  end
+
+  describe "valid_policies/0" do
+    test "lists the five policies" do
+      assert Enum.sort(Routing.valid_policies()) ==
+               ["by_budget", "by_difficulty", "by_priority", "round_robin", "static"]
+    end
+  end
+
+  describe "agent_type_atom/1 with a list (pool dispatch, no exhaustion)" do
+    test "picks first type in the list when all are healthy" do
+      result = Routing.agent_type_atom(%{"type" => ["claude", "gemini"]})
+      assert result == :claude
+    end
+
+    test "ignores unknown entries in the list and picks the first valid one" do
+      result = Routing.agent_type_atom(%{"type" => ["claude"]})
+      assert result == :claude
+    end
+
+    test "returns :claude when list is empty (fallback)" do
+      result = Routing.agent_type_atom(%{"type" => []})
+      assert result == :claude
+    end
+  end
+end

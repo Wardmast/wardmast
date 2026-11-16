@@ -1,0 +1,144 @@
+defmodule Wardmast.Workflows.MergeQueue.FixPassDispatcherTest do
+  use ExUnit.Case, async: true
+
+  alias Wardmast.Tasks.Issue
+  alias Wardmast.Workflows.MergeQueue.FixPassDispatcher
+
+  describe "render_checks/1" do
+    test "renders each failing check's name, url, and indented summary" do
+      rendered =
+        FixPassDispatcher.render_checks([
+          %{
+            name: "test (1.16)",
+            summary: "lib/foo_test.exs:12\nassertion failed",
+            url: "https://x/9"
+          }
+        ])
+
+      assert rendered =~ "test (1.16)"
+      assert rendered =~ "(https://x/9)"
+      assert rendered =~ "lib/foo_test.exs:12"
+      assert rendered =~ "assertion failed"
+    end
+
+    test "falls back to a clear hint when no checks were captured" do
+      assert FixPassDispatcher.render_checks([]) =~ "No check details were captured"
+    end
+
+    test "omits the url parenthetical when there is no url" do
+      rendered = FixPassDispatcher.render_checks([%{name: "build", summary: "boom", url: nil}])
+      assert rendered =~ "build"
+      refute rendered =~ "()"
+    end
+  end
+
+  describe "prompt_for/1" do
+    test "is narrowly scoped to fixing CI on the same branch and embeds the checks" do
+      context = %{
+        task: %Issue{id: "bd-fix1"},
+        branch: "feature/bd-fix1",
+        target_branch: "main",
+        checks: [%{name: "test", summary: "1 failed", url: nil}]
+      }
+
+      prompt = FixPassDispatcher.prompt_for(context)
+
+      assert prompt =~ "CI fix-pass worker for task bd-fix1"
+      assert prompt =~ "feature/bd-fix1"
+      assert prompt =~ "do NOT open a new PR"
+      assert prompt =~ "Failing checks:"
+      assert prompt =~ "test"
+      assert prompt =~ "1 failed"
+      assert prompt =~ "arb message coordinator"
+      assert prompt =~ "arb done"
+    end
+
+    test "offers the CI-retry verb, with the granularity warning (bd-5mzzww / #1448)" do
+      context = %{
+        task: %Issue{id: "bd-fix2"},
+        branch: "feature/bd-fix2",
+        target_branch: "main",
+        checks: [%{name: "playwright-smoke", summary: "review app 502", url: nil}]
+      }
+
+      prompt = FixPassDispatcher.prompt_for(context)
+
+      # The incident: the only re-run a human reaches for reuses the stale
+      # upstream deploy, so it is guaranteed to fail identically.
+      assert prompt =~ "ci_rerun"
+      assert prompt =~ "all_jobs"
+      assert prompt =~ "workflow"
+      assert prompt =~ "failed_jobs"
+      assert prompt =~ ~r/reuse[sd]?/i
+    end
+
+    test "gives an 'infra, not my diff' verdict somewhere to go (bd-5mzzww / #1448)" do
+      context = %{
+        task: %Issue{id: "bd-fix3"},
+        branch: "feature/bd-fix3",
+        target_branch: "main",
+        checks: []
+      }
+
+      prompt = FixPassDispatcher.prompt_for(context)
+
+      # A follow-up worker reached exactly this conclusion hours before the
+      # human did, and had nowhere to put it but free-text chat.
+      assert prompt =~ "ci_mark_external"
+      assert prompt =~ "evidence"
+    end
+
+    test "tells the worker to record a flake conclusion with flake_record (bd-6vullc)" do
+      context = %{
+        task: %Issue{id: "bd-fix4"},
+        branch: "feature/bd-fix4",
+        target_branch: "main",
+        checks: []
+      }
+
+      prompt = FixPassDispatcher.prompt_for(context)
+
+      assert prompt =~ "flake_record"
+      assert prompt =~ "signature"
+      assert prompt =~ "test_file"
+      assert prompt =~ ~r/no\s+code change/i
+    end
+
+    # bd-2l0hzm AC4: a failure in tests the PR never touched that reproduced on
+    # a re-run. The pass must fix the PR's own code, not edit those tests (a
+    # #2003 fix pass "fixed" an unrelated flaky test on a docs-only branch).
+    test "briefs a pass whose failing tests are outside the diff not to edit them" do
+      context = %{
+        task: %Issue{id: "bd-fix5"},
+        branch: "feature/bd-fix5",
+        target_branch: "main",
+        checks: [],
+        outside_diff_files: ["apps/wardmast/test/wardmast/board/drain_test.exs"]
+      }
+
+      prompt = FixPassDispatcher.prompt_for(context)
+
+      assert prompt =~ "NOT in this PR's diff"
+      assert prompt =~ "apps/wardmast/test/wardmast/board/drain_test.exs"
+      assert prompt =~ ~r/do not edit/i
+      assert prompt =~ "re-run"
+    end
+
+    test "says nothing about outside-diff tests when there are none" do
+      context = %{
+        task: %Issue{id: "bd-fix6"},
+        branch: "feature/bd-fix6",
+        target_branch: "main",
+        checks: []
+      }
+
+      refute FixPassDispatcher.prompt_for(context) =~ "NOT in this PR's diff"
+    end
+  end
+
+  describe "dispatch/1 guards" do
+    test "returns {:error, :missing_task_id} without a task id" do
+      assert {:error, :missing_task_id} = FixPassDispatcher.dispatch(%{})
+    end
+  end
+end

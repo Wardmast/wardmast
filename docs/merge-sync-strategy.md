@@ -32,8 +32,8 @@ guards refuse keeps only its place in queue order.
 
 On the **auto-merge lane** (`merge.auto_merge=true`) there is no queue process:
 each ticket's Watchdog syncs its own approved MR. The same rule is applied
-through `Arbiter.Worker.MergeTrain` (bd-1754qj), a registry the Watchdogs share
-that uses the same head election as the queue (`Arbiter.Workflows.MergeHead`).
+through `Wardmast.Worker.MergeTrain` (bd-1754qj), a registry the Watchdogs share
+that uses the same head election as the queue (`Wardmast.Workflows.MergeHead`).
 Per (workspace, repo, target branch) one MR at a time is in a sync or
 CI-after-sync state, the head, chosen by priority and then by when it first
 asked. Every other MR that needs a sync (the merge-time freshness sync, a
@@ -72,7 +72,7 @@ until they are the head:
 
 1. **Conflict probe.** A waiting approved MR (not the head) is probed on every
    poll: its branch and the target are fetched into the repo's own object store
-   and `git merge-tree` judges them in memory (`Arbiter.Worker.MergeProbe`: no
+   and `git merge-tree` judges them in memory (`Wardmast.Worker.MergeProbe`: no
    commit, no ref, no push). It is judged again only when the target or the
    branch moved. Clean, or anything git cannot answer, does nothing. A conflict
    is handled exactly as the forge's own `conflicting` flag would be: the
@@ -81,7 +81,7 @@ until they are the head:
    approval carry as usual, and the MR is re-reviewed while it waits.
    `merge.train_conflict_probe=false` turns it off.
 2. **Pushes without CI.** The pass dispatched for a waiting MR pushes with the
-   forge's CI-skip mechanism (`Arbiter.Mergers.CiSkip`, the optional
+   forge's CI-skip mechanism (`Wardmast.Mergers.CiSkip`, the optional
    `ci_skip_mechanism/1` and `trigger_pipeline/2` adapter callbacks): GitLab
    `git push -o ci.skip`; GitHub a `[skip ci]` marker on the unpushed tip commit
    (only when `merge.train_ci_workflow` names a `workflow_dispatch` workflow, so

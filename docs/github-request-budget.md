@@ -1,8 +1,8 @@
 # GitHub request budget (priority-aware limiter)
 
-`Arbiter.GitHub.Limiter` is a shared, priority-aware budget that governs every
-GitHub-calling path in the fleet (`Arbiter.GitHub`, `Arbiter.Mergers.Github`,
-`Arbiter.Trackers.GitHub`). It exists to stop low-value **background** traffic
+`Wardmast.GitHub.Limiter` is a shared, priority-aware budget that governs every
+GitHub-calling path in the fleet (`Wardmast.GitHub`, `Wardmast.Mergers.Github`,
+`Wardmast.Trackers.GitHub`). It exists to stop low-value **background** traffic
 (patrol polling, speculative refreshes) from starving high-value **foreground**
 work (a `server deploy`, a dispatch, a PR open/merge/finalize, a tracker
 transition, or a human debugging by hand). Tracking: `bd-3p5vqc`.
@@ -83,7 +83,7 @@ work in flight and so are the ones that can violate this:
   instead of all at once. Note one `adapter.get/1` costs *two* GitHub calls (the
   PR, then its reviews).
 
-`Arbiter.GitHub.IdleFloorTest` locks all three invariants down: nothing in
+`Wardmast.GitHub.IdleFloorTest` locks all three invariants down: nothing in
 flight issues zero traffic, a backlog is swept entirely as background, and a
 settled backlog decays toward zero.
 
@@ -144,7 +144,7 @@ while idle shows `bg_paused` frozen at zero, and that is correct rather than a
 sign the mechanism is broken. Pacing is the pollers' job: the limiter only ever
 sees a request after its caller has already decided to make it.
 
-## Configuration (application env, `:arbiter`)
+## Configuration (application env, `:wardmast`)
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -154,7 +154,7 @@ sees a request after its caller has already decided to make it.
 | `:github_limiter_probe` | `true` (`false` in test) | Whether to resolve owning accounts (`GET /user`) and poll the exempt `/rate_limit` endpoint. |
 | `:merged_pr_finalizer_max_checks_per_tick` | `25` | Tasks the merged-PR sweep checks per tick (non-positive disables the cap). |
 
-`PrStatePoller` is configured separately, under `config :arbiter, :pr_state_poller`:
+`PrStatePoller` is configured separately, under `config :wardmast, :pr_state_poller`:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -176,7 +176,7 @@ It is **off by default**. Below a nearly-exhausted pool a foreground call would
 very likely 403 anyway, but the limiter should not be the thing that fails a
 deploy unless the operator has asked for that trade. Enable with:
 
-    config :arbiter, :github_limiter_foreground_reserve, 500
+    config :wardmast, :github_limiter_foreground_reserve, 500
 
 The limiter **fails open**: if it is not running, the request seam lets traffic
 through untouched — it is a protection layer, not a correctness gate.
@@ -188,7 +188,7 @@ genuinely separate, installation-scaled pool, but `GET /user` is refused for an
 installation token, so the limiter could not name its pool and would have
 accounted the App's calls to `:shared` (the operator's account pool). The caller
 therefore states it: a request made with a repo's `github_app` installation token
-(the GitHub tracker, `Arbiter.Trackers.GitHub`, when the repo has a `github_app`
+(the GitHub tracker, `Wardmast.Trackers.GitHub`, when the repo has a `github_app`
 entry in `git_credentials`) is gated with `Limiter.gate_in_pool/4` and the pool
 `{:installation, installation_id}`. The token is pinned to that pool before the
 call is admitted, so its calls, rate-limit headers and secondary-limit trips all

@@ -1,0 +1,3543 @@
+defmodule WardmastCli.Cmd.DoctorTest do
+  use WardmastCli.CliCase, async: true
+
+  alias WardmastCli.Cmd.Doctor
+  alias WardmastCli.Cmd.Doctor.Checks
+
+  @workspaces_resp %{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}
+
+  # The severity of the named check, from a fresh run against the current stubs
+  # (`--all` collapses a passing composite such as the agy jail into one line).
+  defp result_of(name) do
+    case Enum.find(Checks.run(), &(&1.name == name)) do
+      nil -> flunk("no check named #{inspect(name)}")
+      result -> result
+    end
+  end
+
+  defp status_of(name), do: result_of(name).status
+
+  @repos_resp %{
+    "data" => [
+      %{"name" => "tonic", "source" => "default", "path" => "/srv/tonic"}
+    ]
+  }
+
+  defp legacy_workspaces_resp do
+    %{
+      "data" => [
+        %{
+          "id" => "ws-1",
+          "name" => "default",
+          "prefix" => "bd",
+          "config" => %{"rig_paths" => %{"tonic" => "/srv/tonic"}}
+        }
+      ]
+    }
+  end
+
+  # Use the actual compiled CLI version so the version check passes in all-green tests.
+  defp matching_version_resp do
+    %{
+      "version" => WardmastCli.Version.app_version(),
+      "sha" => WardmastCli.Version.git_sha_clean(),
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+  end
+
+  test "all-green when Phoenix responds with a workspace named default" do
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {matching_version_resp(), 200}},
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 0
+    assert out =~ "[ ok ] phoenix reachable"
+    assert out =~ "[ ok ] at least one workspace exists"
+    assert out =~ "[ ok ] active workspace resolves"
+    assert out =~ "[ ok ] version"
+    assert out =~ "[ ok ] migrations up to date"
+  end
+
+  test "pending migrations is a [fail] with the count in detail, and exits 1" do
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {matching_version_resp(), 200}},
+      {{"get", "/api/server/migrations"}, {%{"status" => "warning", "pending_count" => 3}, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 1
+    assert out =~ "[fail] migrations up to date"
+    assert out =~ "3 pending"
+  end
+
+  test "unreachable DB or DB error is a [warn] with 'could not check'" do
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {matching_version_resp(), 200}},
+      {{"get", "/api/server/migrations"},
+       {%{"status" => "unknown", "pending_count" => nil, "error" => "unreachable"}, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 0
+    assert out =~ "[warn] migrations up to date"
+    assert out =~ "could not check"
+    refute out =~ "[ ok ] migrations up to date"
+  end
+
+  # bd-337f2i round 1 regression: a server predating the migrations endpoint
+  # returns 404, landing exactly in the mid-deploy version-skew window this
+  # check exists for — that must not be a hard [fail], consistent with how
+  # check_versions/0 treats server errors.
+  test "server without the migrations endpoint (404) is a [warn], never ok, and does not fail doctor" do
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {matching_version_resp(), 200}},
+      {{"get", "/api/server/migrations"}, {%{}, 404}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 0
+    assert out =~ "[warn] migrations up to date"
+    assert out =~ "could not check"
+  end
+
+  test "unexpected migrations response shape does not crash doctor" do
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {matching_version_resp(), 200}},
+      {{"get", "/api/server/migrations"}, {%{"unexpected" => "shape"}, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 0
+    assert out =~ "[warn] migrations up to date"
+    assert out =~ "could not check"
+  end
+
+  test "connection refused → all fail with actionable hint" do
+    stub_transport_error(:get, "/api/workspaces", :econnrefused)
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 1
+    assert out =~ "[fail] phoenix reachable"
+    assert out =~ "mix phx.server"
+  end
+
+  test "connection refused on a release install hints at the service manager, not mix phx.server" do
+    Process.put(:bd2_dev_build, false)
+    stub_transport_error(:get, "/api/workspaces", :econnrefused)
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 1
+    assert out =~ "[fail] phoenix reachable"
+    refute out =~ "mix phx.server"
+    assert out =~ "systemctl --user start arbiter"
+  end
+
+  test "no workspaces → workspace check fails with hint" do
+    stub_routes([
+      {{"get", "/api/workspaces"}, {%{"data" => []}, 200}},
+      {{"get", "/api/repos"}, {%{"data" => []}, 200}},
+      {{"get", "/api/version"}, {matching_version_resp(), 200}},
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 1
+    assert out =~ "[ ok ] phoenix reachable"
+    assert out =~ "[fail] at least one workspace exists"
+    assert out =~ "seeds.exs"
+  end
+
+  # An older server answers 404 for every /api/server endpoint it predates;
+  # a route left unstubbed is a 500 and doctor now reports that as a failure.
+  @server_paths [
+    "/api/server/agy_models",
+    "/api/server/agy_write_jail",
+    "/api/server/bind_address",
+    "/api/server/claude_credentials",
+    "/api/server/cli_versions",
+    "/api/server/dashboard_auth",
+    "/api/server/egress_jail",
+    "/api/server/grok_auth",
+    "/api/server/guardrails",
+    "/api/server/merge_routing",
+    "/api/server/migrations",
+    "/api/server/podman_sandbox",
+    "/api/server/provider_accounts",
+    "/api/server/tmux",
+    "/api/server/worker_jail_unmask",
+    "/api/server/worker_memory",
+    "/api/server/worker_tmp"
+  ]
+
+  defp predating(routes) do
+    routes ++
+      for path <- ["/api/nodes" | @server_paths],
+          not List.keymember?(routes, {"get", path}, 0),
+          do: {{"get", path}, {%{"error" => "not found"}, 404}}
+  end
+
+  test "--json emits structured payload" do
+    stub_routes(
+      predating([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+    )
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--json"]) end)
+    assert exit_code == 0
+    assert {:ok, %{"ok" => true, "checks" => checks}} = Jason.decode(String.trim(out))
+    assert is_list(checks)
+    assert length(checks) == length(Checks.ids())
+    assert Enum.all?(checks, &is_binary(&1["severity"]))
+  end
+
+  test "version mismatch is a [fail] and exits 1, but does not block readiness" do
+    mismatched_version_resp = %{
+      "version" => "9.9.9",
+      "sha" => "mismatched_sha",
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {mismatched_version_resp, 200}},
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 1
+    assert out =~ "[ ok ] phoenix reachable"
+    assert out =~ "[ ok ] at least one workspace exists"
+    assert out =~ "[ ok ] active workspace resolves"
+    assert out =~ "[fail] version"
+    assert out =~ "server 9.9.9"
+    assert out =~ "CLI #{WardmastCli.Version.app_version()}"
+    refute out =~ "CLI and server match"
+  end
+
+  test "version mismatch does not block arb start readiness" do
+    mismatched_version_resp = %{
+      "version" => "9.9.9",
+      "sha" => "mismatched_sha",
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {mismatched_version_resp, 200}},
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+    ])
+
+    assert Doctor.green?() == true
+  end
+
+  test "release build (SHA unavailable) with matching version shows [ ok ]" do
+    # When the server is an OTP release, it may report sha: "unknown" because
+    # no git process is available at runtime. If the semantic version matches
+    # the CLI, the check should pass — this is the expected state after
+    # `arb server deploy`.
+    release_version_resp = %{
+      "version" => WardmastCli.Version.app_version(),
+      "sha" => "unknown",
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {release_version_resp, 200}},
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 0
+    assert out =~ "[ ok ] version"
+    assert out =~ "CLI and server match"
+  end
+
+  test "release build (SHA unavailable) with matching version is fully green" do
+    release_version_resp = %{
+      "version" => WardmastCli.Version.app_version(),
+      "sha" => "unknown",
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {release_version_resp, 200}},
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+    ])
+
+    assert Doctor.green?() == true
+  end
+
+  test "release build (SHA unavailable) with mismatched version shows [fail], exits 1, and does not block readiness" do
+    # Regression for the false-green bug: both CLI and server report
+    # sha: "unknown" in this scenario (neither has git at runtime), so a SHA
+    # comparison alone would spuriously report a match. The version numbers
+    # must actually be compared.
+    release_version_resp = %{
+      "version" => "0.0.1",
+      "sha" => "unknown",
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {release_version_resp, 200}},
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 1
+    assert out =~ "[fail] version"
+    assert out =~ "server 0.0.1"
+    assert out =~ "CLI #{WardmastCli.Version.app_version()}"
+    refute out =~ "CLI and server match"
+    assert Doctor.green?() == true
+  end
+
+  test "dev/source install with server version newer than CLI hints to rebuild and reinstall CLI" do
+    # When the server is newer than the CLI (e.g. server 0.1.68, CLI 0.1.67),
+    # hint should tell operator to rebuild and reinstall the arb CLI, not restart the server.
+    res = Checks.check_versions("0.1.67", "41474cae", "0.1.68", "41474cae")
+    assert res.status == :fail
+    assert res.hint =~ "rebuild and reinstall the `arb` CLI"
+    refute res.hint =~ "restart the server"
+
+    # Also test with different SHAs where CLI sha is ancestor of server sha
+    res_sha = Checks.check_versions("0.1.67", "f21bdd4d", "0.1.68", "41474cae")
+    assert res_sha.status == :fail
+    assert res_sha.hint =~ "rebuild and reinstall the `arb` CLI"
+    refute res_sha.hint =~ "restart the server"
+
+    # And verify via Doctor.run with a newer server version (same major)
+    Process.put(:bd2_app_version, "0.1.67")
+
+    server_version_resp = %{
+      "version" => "0.1.68",
+      "sha" => "unknown",
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {server_version_resp, 200}},
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+    ])
+
+    {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert out =~ "[fail] version"
+    assert out =~ "rebuild and reinstall the `arb` CLI"
+    refute out =~ "restart the server"
+  end
+
+  test "dev/source install with server version older than CLI hints to restart the server" do
+    # When the server is older than the CLI (e.g. server 0.1.64, CLI 0.1.68),
+    # hint should keep the restart-the-server instruction.
+    res = Checks.check_versions("0.1.68", "41474cae", "0.1.64", "41474cae")
+    assert res.status == :fail
+    assert res.hint =~ "The server's compiled version is stale — restart the server"
+    refute res.hint =~ "rebuild and reinstall"
+
+    # Also test with server sha older than CLI sha (CLI has newer sha)
+    res_sha = Checks.check_versions("0.1.68", "41474cae", "0.1.67", "f21bdd4d")
+    assert res_sha.status == :fail
+    assert res_sha.hint =~ "The server's compiled version is stale — restart the server"
+    refute res_sha.hint =~ "rebuild and reinstall"
+
+    # And verify via Doctor.run
+    Process.put(:bd2_app_version, "0.1.68")
+
+    mismatched_version_resp = %{
+      "version" => "0.1.64",
+      "sha" => "eb0c8690",
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {mismatched_version_resp, 200}},
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+    ])
+
+    {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert out =~ "[fail] version"
+    refute out =~ "reinstall the CLI from"
+    refute out =~ "rebuild and reinstall"
+    assert out =~ "The server's compiled version is stale — restart the server"
+  end
+
+  test "workspace resolution failure is an operator-actionable exit 1, but must not block deploy readiness" do
+    prev = System.get_env("ARB_WORKSPACE")
+    System.delete_env("ARB_WORKSPACE")
+    on_exit(fn -> if prev, do: System.put_env("ARB_WORKSPACE", prev) end)
+
+    ambiguous_workspaces = %{
+      "data" => [
+        %{"id" => "ws-a", "name" => "alpha", "prefix" => "al"},
+        %{"id" => "ws-b", "name" => "beta", "prefix" => "be"}
+      ]
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {ambiguous_workspaces, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {matching_version_resp(), 200}},
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    # `arb doctor` still exits non-zero — this is an operator-actionable
+    # misconfiguration, same as any other broken `Workspace.resolve/0` caller.
+    assert exit_code == 1
+    assert out =~ "[ ok ] phoenix reachable"
+    assert out =~ "[ ok ] at least one workspace exists"
+    assert out =~ "[fail] active workspace resolves"
+    # ...but it must never gate `arb server deploy`'s auto-rollback wait
+    # (bd-8ix2tw): an unresolvable workspace selector says nothing about
+    # whether the deployed server itself is healthy.
+    assert Doctor.green?() == true
+  end
+
+  test "server on the same SHA the CLI's own build carries, but a different version, is a real mismatch" do
+    # Guards the exact bug: `cli_sha == server_sha` (e.g. both literally
+    # "unknown") must never by itself imply the versions match.
+    same_sha_diff_version_resp = %{
+      "version" => "9.9.9",
+      "sha" => WardmastCli.Version.git_sha_clean(),
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {same_sha_diff_version_resp, 200}},
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 1
+    assert out =~ "[fail] version"
+    refute out =~ "CLI and server match"
+  end
+
+  test "surfaces a failed-swap mismatch: server still on the pre-deploy version" do
+    # The failed-swap case from the ticket: the CLI has just been upgraded to
+    # the version being deployed, but the server's /api/version shows the
+    # swap/restart never actually took (still reporting the prior release).
+    just_deployed_vsn = WardmastCli.Version.app_version()
+
+    stale_server_resp = %{
+      "version" => "0.0.1",
+      "sha" => "unknown",
+      "built_at" => "2023-01-01T00:00:00Z",
+      "booted_at" => "2023-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/repos"}, {@repos_resp, 200}},
+      {{"get", "/api/version"}, {stale_server_resp, 200}},
+      {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+    assert exit_code == 1
+    assert out =~ "[fail] version"
+    assert out =~ "server 0.0.1"
+    assert out =~ "CLI #{just_deployed_vsn}"
+    refute out =~ "CLI and server match"
+    # A version check on its own must not gate `arb server deploy`'s
+    # auto-rollback — only Phoenix/workspace reachability does.
+    assert Doctor.green?() == true
+  end
+
+  # ---- repo config check (bd-3pqzsa) --------------------------------------
+  #
+  # v0.1.56 dropped the `rig_paths` fallback, so an un-migrated install
+  # resolved zero repos while doctor stayed 5/5 green. Zero repos is now an
+  # explicit, failing line.
+
+  describe "repos resolved check" do
+    test "reports the repo count on a healthy install" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] repos resolved"
+      assert out =~ "1 repo(s)"
+    end
+
+    test "an (unconfigured) repo on open tickets is a warning naming it" do
+      resp = %{
+        "data" => [
+          %{"name" => "tonic", "source" => "emricare"},
+          %{"name" => "emricare/tonic", "source" => "(unconfigured)"}
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "[warn] repos resolved"
+      assert out =~ "emricare/tonic"
+    end
+
+    test "zero repos with a workspace present is a failing, actionable line" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {%{"data" => []}, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] repos resolved"
+      assert out =~ "no repos registered"
+      assert out =~ "repo_paths"
+    end
+
+    test "zero repos names the legacy rig_paths key when a workspace still carries it" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {legacy_workspaces_resp(), 200}},
+        {{"get", "/api/repos"}, {%{"data" => []}, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] repos resolved"
+      assert out =~ "rig_paths"
+      assert out =~ "wardmast.migrate_rig_paths"
+    end
+
+    # `/api/repos` aggregates across every workspace (plus the app-env
+    # fallback), so a count-only check goes green the moment *anything* supplies
+    # repos — while the un-migrated workspace still dispatches nothing.
+    test "a workspace on rig_paths fails even when other workspaces supply repos" do
+      mixed = %{
+        "data" => [
+          %{"id" => "ws-1", "name" => "migrated", "prefix" => "bd", "config" => %{}},
+          %{
+            "id" => "ws-2",
+            "name" => "acme",
+            "prefix" => "ac",
+            "config" => %{"rig_paths" => %{"tonic" => "/srv/tonic"}}
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {mixed, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] repos resolved"
+      assert out =~ "1 workspace still on the retired `rig_paths` key: acme"
+    end
+
+    # A release install has no Mix, so the mix task cannot be the lead
+    # instruction — `arb server restart` works everywhere.
+    test "the rig_paths hint leads with a remediation that works on a release install" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {legacy_workspaces_resp(), 200}},
+        {{"get", "/api/repos"}, {%{"data" => []}, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "arb server restart"
+      assert out =~ "Wardmast.Release.migrate_config"
+
+      [hint] = Regex.run(~r/hint: .*/, out)
+      restart_at = :binary.match(hint, "arb server restart") |> elem(0)
+      mix_at = :binary.match(hint, "mix wardmast.migrate_rig_paths") |> elem(0)
+      assert restart_at < mix_at
+    end
+
+    # Only a map under `rig_paths` is a migration candidate, so only a map is
+    # worth reporting — otherwise doctor pins red on junk no migration clears.
+    test "a non-map rig_paths value is not reported as the legacy key" do
+      junk = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{"rig_paths" => "x"}
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {junk, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] repos resolved"
+    end
+
+    test "zero repos is not a deploy-rollback signal" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {%{"data" => []}, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      # An empty repo map says nothing about whether the *deployed server* is
+      # healthy — it must never auto-roll-back a deploy (cf. bd-8ix2tw).
+      assert Doctor.green?() == true
+    end
+
+    test "no workspaces at all does not double-report as a repo failure" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {%{"data" => []}, 200}},
+        {{"get", "/api/repos"}, {%{"data" => []}, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "[n/a ] repos resolved"
+      assert out =~ "no workspaces"
+    end
+  end
+
+  # ---- bind address check (bd-1c4pg3) --------------------------------------
+  #
+  # The dashboard's auth model is "a loopback peer is trusted; there is no
+  # login" — a server bound off-loopback exposes unauthenticated pages to
+  # anyone who can reach the port. This check warns (never fails the exit
+  # code) when that's the case.
+
+  # bd-asawcq: `/api` refuses anonymous callers on loopback too. Doctor proves
+  # it with harmless anonymous probes and fails if the server takes them.
+  describe "anonymous /api access check" do
+    @probe_write "/api/workspaces/arb-doctor-anonymous-probe/config"
+
+    defp anon_green_routes do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ]
+    end
+
+    # Answers like the server: 401 for a request with no Authorization header,
+    # `accepted` for one that carries a token (the probe must never send one).
+    defp probe_route(method, path, accepted) do
+      {{method, path},
+       fn conn ->
+         case Plug.Conn.get_req_header(conn, "authorization") do
+           [] ->
+             conn
+             |> Plug.Conn.put_status(401)
+             |> Req.Test.json(%{
+               "error" => %{"message" => "Authorization: Bearer <token> required"}
+             })
+
+           _ ->
+             {body, status} = accepted
+             conn |> Plug.Conn.put_status(status) |> Req.Test.json(body)
+         end
+       end}
+    end
+
+    test "green when the server refuses the anonymous probes, and they carry no token" do
+      # A token is on hand (minted over the operator socket, or ARB_TOKEN in
+      # a worker shell); the probes must still go out without one.
+      WardmastCli.FakeOperatorSocket.start!(%{"token" => "operator-tok", "tier" => "coordinator"})
+
+      stub_routes(
+        anon_green_routes() ++
+          [
+            probe_route("patch", @probe_write, {%{"error" => "not found"}, 404}),
+            probe_route("get", "/api/issues", {%{"data" => []}, 200})
+          ]
+      )
+
+      result = Checks.check_anonymous_api()
+      assert result.status == :ok
+      assert result.name == "anonymous /api access refused"
+    end
+
+    test "fails, fatally, when an anonymous loopback write is accepted" do
+      stub_routes(
+        anon_green_routes() ++
+          [
+            # A validation error means the request got past auth.
+            {{"patch", @probe_write}, {%{"error" => %{"message" => "invalid"}}, 422}},
+            probe_route("get", "/api/issues", {%{"data" => []}, 200})
+          ]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+
+      assert exit_code == 1
+      assert out =~ "[fail] anonymous /api access refused"
+      assert out =~ "PATCH #{@probe_write} → 422"
+    end
+
+    test "fails when an anonymous read of every workspace's tickets is accepted" do
+      stub_routes(
+        anon_green_routes() ++
+          [
+            probe_route("patch", @probe_write, {%{}, 404}),
+            {{"get", "/api/issues"}, {%{"data" => []}, 200}}
+          ]
+      )
+
+      result = Checks.check_anonymous_api()
+      assert result.status == :fail
+      refute result.blocks_readiness
+      assert result.detail =~ "GET /api/issues → 200"
+    end
+
+    test "an unreachable server is a warn, never an all-clear (the reachability check owns the fail)" do
+      stub_transport_error(:patch, @probe_write, :econnrefused)
+
+      result = Checks.check_anonymous_api()
+      assert result.status == :warn
+      assert result.detail =~ "could not check"
+    end
+  end
+
+  describe "bind address check" do
+    test "loopback bind is green" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/bind_address"}, {%{"ip" => "127.0.0.1", "loopback" => true}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] bind address is loopback"
+      assert out =~ "127.0.0.1"
+    end
+
+    test "non-loopback bind is a [warn]: exit 0, and it does not block deploy readiness" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/bind_address"}, {%{"ip" => "0.0.0.0", "loopback" => false}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] bind address is loopback"
+      assert out =~ "0.0.0.0"
+      assert out =~ "no login"
+      assert out =~ "ARB_BIND_ADDRESS"
+      assert Doctor.green?() == true
+    end
+
+    # A server predating this check (or an unreachable one) returns something
+    # this check can't interpret — must never spuriously fail doctor over it.
+    test "server without the bind_address endpoint (404) is a warn, not an all-clear" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/bind_address"}, {%{}, 404}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] bind address is loopback"
+      assert out =~ "could not check"
+    end
+  end
+
+  # bd-9fgg04: "is it safe to restart?" is what doctor is reached for.
+  describe "restart safety check" do
+    defp stub_with_scheduler(scheduler_resp) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/scheduler/status"}, scheduler_resp}
+      ])
+    end
+
+    test "paused and draining is a [warn], lists the work, and never blocks readiness" do
+      stub_with_scheduler(
+        {%{
+           "state" => "draining",
+           "paused" => true,
+           "safe_to_restart" => false,
+           "in_flight" => [
+             %{"kind" => "conflict_resolver", "task_id" => "vs-3fpek0", "state" => "working"}
+           ]
+         }, 200}
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+
+      assert exit_code == 0
+      assert out =~ "[warn] safe to restart"
+      assert out =~ "conflict_resolver"
+      assert out =~ "vs-3fpek0"
+      assert out =~ "arb scheduler wait"
+      assert Doctor.green?() == true
+    end
+
+    test "paused and quiescent is green and says so" do
+      stub_with_scheduler(
+        {%{
+           "state" => "quiescent",
+           "paused" => true,
+           "safe_to_restart" => true,
+           "in_flight" => []
+         }, 200}
+      )
+
+      {out, _err, 0} = capture(fn -> Doctor.run(["--all"]) end)
+
+      assert out =~ "[ ok ] safe to restart"
+      assert out =~ "paused, quiescent"
+    end
+
+    test "a running scheduler is a [warn] (not a safe restart point), with how to reach one" do
+      stub_with_scheduler(
+        {%{
+           "state" => "running",
+           "paused" => false,
+           "safe_to_restart" => false,
+           "in_flight" => []
+         }, 200}
+      )
+
+      {out, _err, 0} = capture(fn -> Doctor.run(["--all"]) end)
+
+      assert out =~ "[warn] safe to restart"
+      assert out =~ "not a safe restart point"
+      refute out =~ "[ ok ] safe to restart"
+      assert out =~ "arb scheduler pause && arb scheduler wait"
+    end
+
+    test "an unreadable scheduler status is a warn, never an all-clear" do
+      stub_with_scheduler({%{}, 404})
+
+      {out, _err, 0} = capture(fn -> Doctor.run(["--all"]) end)
+
+      assert out =~ "[warn] safe to restart"
+      assert out =~ "could not check"
+    end
+  end
+
+  # bd-4420va: a pinned `safe_defaults` list used to silently resolve fewer
+  # categories than the workspace default the moment a new one shipped
+  # (vstim missed :no_public_upload after v0.1.78 added it). The legacy key
+  # is now inert, so this only fires on an explicit `safe_defaults_exclude` —
+  # but that should be visible in `arb doctor`, not just discoverable live.
+  describe "workspace safe-default categories check" do
+    test "green when no workspace excludes a current default category" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] workspace safe-default categories"
+    end
+
+    test "names the workspace and the missing categories when one excludes a default" do
+      workspaces_with_gap = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "vs",
+            "config" => %{},
+            "security_posture" => %{
+              "mode" => "bypass",
+              "allow" => [],
+              "deny" => [],
+              "safe_defaults" => ["no_destructive_fs", "no_force_push"],
+              "safe_defaults_exclude" => ["no_public_upload"],
+              "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => true}
+            }
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspaces_with_gap, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      # Non-fatal: named, but does not block readiness or fail the exit code.
+      assert exit_code == 0
+      assert out =~ "[warn] workspace safe-default categories"
+      assert out =~ "default: no_public_upload"
+    end
+  end
+
+  # The `legacy safe_defaults key` check was removed (bd-7pnat1): the migration
+  # it watched for finished. `doctor_severity_test.exs` pins the id inventory.
+
+  # bd-3s82pf: outside :strict, a host that can't jail agy just runs it
+  # unconfined instead of refusing, so `security_posture.write_jail_warning`
+  # (Wardmast.Agents.Gemini.write_jail_warning/1) is the only place that
+  # degradation is visible.
+  describe "agy write jail check" do
+    test "green when no workspace has a write_jail_warning" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}}
+      ])
+
+      assert status_of("agy write jail") == :ok
+    end
+
+    # bd-8xy1mf: outside :strict the gap is real but never fatal (agy just
+    # runs unconfined), so it is a [warn] — not a [fail] — with the cause and
+    # fix named in the detail line.
+    test "names the workspace and the warning as a warn, exit 0, outside :strict" do
+      workspaces_with_warning = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "vs",
+            "config" => %{},
+            "security_posture" => %{
+              "mode" => "bypass",
+              "allow" => [],
+              "deny" => [],
+              "safe_defaults" => [],
+              "safe_defaults_exclude" => [],
+              "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => true},
+              "write_jail_warning" =>
+                "agy write jail unavailable (bwrap (bwrap) not found on PATH — Install " <>
+                  "bubblewrap: `dnf install bubblewrap` (Fedora/RHEL 8+/AL2023) or " <>
+                  "`apt install bubblewrap` (Debian/Ubuntu).) — writes are not confined to " <>
+                  "the worktree outside :strict"
+            }
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspaces_with_warning, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] agy write jail"
+      assert out =~ "default: agy write jail unavailable"
+      assert out =~ "dnf install bubblewrap"
+    end
+
+    # bd-8xy1mf: a `:strict` workspace can't fall back to running agy
+    # unconfined, so the same gap is fatal here — [fail], non-zero exit.
+    test "fails, and exits non-zero, when a :strict workspace can't jail" do
+      workspaces_with_warning = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "vs",
+            "config" => %{},
+            "security_posture" => %{
+              "mode" => "strict",
+              "allow" => [],
+              "deny" => [],
+              "safe_defaults" => [],
+              "safe_defaults_exclude" => [],
+              "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => true},
+              "write_jail_warning" =>
+                "agy write jail unavailable (unprivileged user namespaces are disabled) — " <>
+                  "writes are not confined to the worktree outside :strict"
+            }
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspaces_with_warning, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] agy write jail"
+      assert out =~ "default: agy write jail unavailable"
+      assert out =~ "hint:"
+    end
+
+    # bd-99emmd: Codex reports its own `write_jail_warning` (bypass default and
+    # strict). Neither is about the bwrap jail, and a `:strict` Codex workspace
+    # is not fatal (the pool substitutes a strict-capable provider), so the agy
+    # check must ignore both.
+    for {mode, warning} <- [
+          {"bypass", "codex runs with --dangerously-bypass-approvals-and-sandbox: ..."},
+          {"strict",
+           ":strict dispatches of codex are skipped or refused (no worktree write confinement)"}
+        ] do
+      test "ignores a codex #{mode} write_jail_warning" do
+        workspaces = %{
+          "data" => [
+            %{
+              "id" => "ws-1",
+              "name" => "codexws",
+              "prefix" => "vs",
+              "config" => %{},
+              "security_posture" => %{
+                "provider" => "codex",
+                "mode" => unquote(mode),
+                "allow" => [],
+                "deny" => [],
+                "safe_defaults" => [],
+                "safe_defaults_exclude" => [],
+                "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => true},
+                "write_jail_warning" => unquote(warning),
+                "repos" => %{
+                  "r" => %{"mode" => unquote(mode), "write_jail_warning" => unquote(warning)}
+                }
+              }
+            }
+          ]
+        }
+
+        stub_routes([
+          {{"get", "/api/workspaces"}, {workspaces, 200}},
+          {{"get", "/api/repos"}, {@repos_resp, 200}},
+          {{"get", "/api/version"}, {matching_version_resp(), 200}},
+          {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+          {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}}
+        ])
+
+        {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+        assert exit_code == 0
+        assert status_of("agy write jail") == :ok
+        refute out =~ "codex runs with"
+        refute out =~ "skipped or refused"
+        refute out =~ "[fail] agy write jail"
+      end
+    end
+
+    # bd-8xy1mf AC1: the host's own can-jail-agy answer must show even when no
+    # workspace/repo currently needs it — that's the whole point of exposing
+    # `Jail.diagnose/0` via `/api/server/agy_write_jail` rather than only
+    # reading it back out of a workspace posture.
+    test "reports the host can jail agy when no workspace has a warning" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}}
+      ])
+
+      result = result_of("agy write jail")
+      assert result.status == :ok
+      assert result.detail =~ "host can jail agy — agy is :strict-eligible"
+    end
+
+    test "warns that the host cannot jail agy when no workspace is :strict" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"},
+         {%{
+            "available" => false,
+            "cause" => "user_namespaces_disabled",
+            "message" =>
+              "unprivileged user namespaces are disabled (`user.max_user_namespaces = 0`)",
+            "fix" => "Enable them: `sysctl -w user.max_user_namespaces=<N>`."
+          }, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] agy write jail"
+      assert out =~ "cannot jail agy: unprivileged user namespaces are disabled"
+      assert out =~ "runs unconfined rather than refusing"
+      assert out =~ "sysctl -w user.max_user_namespaces"
+    end
+
+    # bd-8xy1mf finding: a repo-level `agent.security.repos.<repo>` override
+    # can resolve `:strict` while the workspace default doesn't — the
+    # workspace-level `write_jail_warning` alone never sees that, so this
+    # would previously print `[ ok ]` even though every agy dispatch against
+    # that repo is refused.
+    test "fails when a repo override resolves :strict and the host can't jail" do
+      workspace_with_repo_override = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "vs",
+            "config" => %{},
+            "security_posture" => %{
+              "mode" => "bypass",
+              "allow" => [],
+              "deny" => [],
+              "safe_defaults" => [],
+              "safe_defaults_exclude" => [],
+              "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => true},
+              "write_jail_warning" => nil,
+              "repos" => %{
+                "tonic" => %{
+                  "mode" => "strict",
+                  "write_jail_warning" =>
+                    "agy write jail unavailable (unprivileged user namespaces are disabled) — " <>
+                      ":strict dispatches of agy are refused"
+                }
+              }
+            }
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspace_with_repo_override, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] agy write jail"
+      assert out =~ "default (repo tonic): agy write jail unavailable"
+      assert out =~ "hint:"
+    end
+  end
+
+  # bd-5d5mrs: `ssh -G` inside the jail is a separate probe from the write
+  # jail's — a host can jail writes fine while this regresses (a changed
+  # `/etc/ssh/ssh_config`, no `ssh` on `PATH`), and that would otherwise
+  # only surface as a jailed worker's `git push` quietly failing.
+  describe "agy ssh transport" do
+    test "ok when the host's ssh probe passes" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"},
+         {%{"available" => true, "ssh" => %{"available" => true}}, 200}}
+      ])
+
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert status_of("agy ssh transport") == :ok
+    end
+
+    test "fails, with the cause and a hint, when the host's ssh probe fails" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"},
+         {%{
+            "available" => true,
+            "ssh" => %{
+              "available" => false,
+              "cause" => "other",
+              "message" => "ssh still rejected the mirrored config inside the jail: boom",
+              "fix" => "Check the ownership of Jail.ssh_shadow_config/0's output."
+            }
+          }, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      # Not fatal and doesn't block readiness on its own.
+      assert exit_code == 0
+      assert out =~ "[warn] agy ssh transport"
+      assert out =~ "ssh still rejected the mirrored config"
+      assert out =~ "hint:"
+      assert out =~ "Check the ownership of Jail.ssh_shadow_config/0's output."
+    end
+
+    test "warns (could not check) when the server predates the ssh key" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}}
+      ])
+
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert status_of("agy ssh transport") == :warn
+    end
+  end
+
+  describe "agy jail escape vectors (bd-7o08mj)" do
+    defp escape_routes(jail_body) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {jail_body, 200}}
+      ])
+    end
+
+    test "ok when no escape vector is reachable" do
+      escape_routes(%{"available" => true, "escape" => %{"available" => true}})
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert status_of("agy jail escape vectors") == :ok
+      assert result_of("agy jail escape vectors").detail =~ "xdg-dbus-proxy not installed"
+    end
+
+    test "FAILs with the vectors named when one is reachable" do
+      escape_routes(%{
+        "available" => true,
+        "escape" => %{
+          "available" => false,
+          "message" => "jail escape vector(s) reachable: systemd-run --user",
+          "fix" => "mask /run/user/<uid>"
+        }
+      })
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "[warn] agy jail escape vectors"
+      assert out =~ "systemd-run --user"
+      assert out =~ "mask /run/user/<uid>"
+    end
+
+    test "warns (could not check) when the server predates the escape key" do
+      escape_routes(%{"available" => true})
+      {_out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert status_of("agy jail escape vectors") == :warn
+    end
+  end
+
+  describe "agy jail hidden reads (bd-3q2djr)" do
+    defp reads_routes(jail_body) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {jail_body, 200}}
+      ])
+    end
+
+    test "ok when the jail cannot read the install DB or other workspaces" do
+      reads_routes(%{"available" => true, "reads" => %{"available" => true}})
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert status_of("agy jail hidden reads") == :ok
+    end
+
+    test "FAILs with the paths named, without blocking readiness" do
+      reads_routes(%{
+        "available" => true,
+        "reads" => %{
+          "available" => false,
+          "message" => "sensitive path(s) readable inside the jail: /h/.arbiter/arbiter.sqlite3",
+          "fix" => "hide these"
+        }
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] agy jail hidden reads"
+      assert out =~ "/h/.arbiter/arbiter.sqlite3"
+      assert out =~ "hide these"
+    end
+
+    test "warns (could not check) when the server predates the reads key" do
+      reads_routes(%{"available" => true})
+      {_out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert status_of("agy jail hidden reads") == :warn
+    end
+  end
+
+  describe "agy jail network mode (bd-cfktou)" do
+    defp network_routes(jail_body) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {jail_body, 200}}
+      ])
+    end
+
+    test "ok when the host can run the jail in a network namespace" do
+      network_routes(%{"available" => true, "network" => %{"available" => true}})
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert status_of("agy jail network") == :ok
+    end
+
+    test "FAILs with the cause and fix when it cannot, without blocking readiness" do
+      network_routes(%{
+        "available" => true,
+        "network" => %{
+          "available" => false,
+          "cause" => "socat_missing",
+          "message" => "no `socat` on PATH",
+          "fix" => "Install socat"
+        }
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] agy jail network"
+      assert out =~ "no `socat` on PATH"
+      assert out =~ "Install socat"
+    end
+
+    test "warns (could not check) when the server predates the network key" do
+      network_routes(%{"available" => true})
+      {_out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert status_of("agy jail network") == :warn
+    end
+  end
+
+  describe "agy jail keyring proxy (bd-c9fqsk)" do
+    test "ok when the proxy comes up under a per-run TMPDIR" do
+      network_routes(%{"available" => true, "keyring" => %{"available" => true}})
+      {_out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert status_of("agy jail keyring proxy") == :ok
+    end
+
+    test "FAILs with the cause, without blocking readiness" do
+      network_routes(%{
+        "available" => true,
+        "keyring" => %{"available" => false, "message" => "proxy down", "fix" => "shorten it"}
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] agy jail keyring proxy"
+      assert out =~ "proxy down"
+    end
+  end
+
+  describe "egress jail self-test (bd-5yydxh)" do
+    defp egress_routes(egress_resp, status \\ 200) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/agy_write_jail"}, {%{"available" => true}, 200}},
+        {{"get", "/api/server/egress_jail"}, {egress_resp, status}}
+      ])
+    end
+
+    test "ok, naming 1 allow and 1 deny, when the proxy and jail work" do
+      egress_routes(%{"available" => true, "allowed" => 1, "denied" => 1})
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] egress jail"
+      assert out =~ "1 allow"
+      assert out =~ "1 deny"
+    end
+
+    test "a host that cannot enforce the allowlist warns, naming the missing package (scope unknown)" do
+      egress_routes(%{
+        "available" => false,
+        "cause" => "socat_missing",
+        "message" => "no `socat` on PATH: the jail's network mode bridges its loopback with it",
+        "fix" => "Install socat (`dnf install socat` / `apt install socat`)."
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] egress jail"
+      assert out =~ "no `socat` on PATH"
+      assert out =~ "dnf install socat"
+    end
+
+    test "warns (could not check) when the server predates the endpoint" do
+      egress_routes(%{"error" => "not found"}, 404)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] egress jail"
+      assert out =~ "could not check"
+    end
+  end
+
+  describe "guardrail profiles (bd-anwb0u, G11)" do
+    defp guardrail_routes(resp, status \\ 200) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/guardrails"}, {resp, status}}
+      ])
+    end
+
+    test "ok and says guardrails are off when nothing is configured" do
+      guardrail_routes(%{"active" => false, "rules" => 0, "workspaces" => [], "issues" => []})
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] guardrail profiles"
+      assert out =~ "guardrails are off"
+    end
+
+    test "ok, reporting each workspace's effective tiers" do
+      guardrail_routes(%{
+        "active" => true,
+        "rules" => 2,
+        "issues" => [],
+        "workspaces" => [
+          %{
+            "workspace" => "default",
+            "subjects" => [
+              %{"provider" => "claude", "model" => "opus", "tier" => "privileged"},
+              %{"provider" => "antigravity", "model" => nil, "tier" => "quarantine"}
+            ]
+          }
+        ]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] guardrail profiles"
+      assert out =~ "default: claude/opus=privileged, antigravity=quarantine"
+    end
+
+    # bd-8ufzng: the GitLab bot token's expiry is shown even when nothing is wrong.
+    test "ok, showing a GitLab bot token's expiry" do
+      guardrail_routes(%{
+        "active" => true,
+        "rules" => 1,
+        "issues" => [],
+        "workspaces" => [
+          %{
+            "workspace" => "default",
+            "subjects" => [%{"provider" => "claude", "model" => nil, "tier" => "privileged"}],
+            "git_credential_tokens" => [
+              %{"repo" => "tonic", "expires_at" => "2027-01-31", "days_left" => 60}
+            ]
+          }
+        ]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] guardrail profiles"
+      assert out =~ "tonic bot token expires 2027-01-31 (60d)"
+    end
+
+    test "warns 14 days ahead of a GitLab bot token's expiry" do
+      guardrail_routes(%{
+        "active" => false,
+        "rules" => 0,
+        "workspaces" => [
+          %{
+            "workspace" => "default",
+            "subjects" => [],
+            "git_credential_tokens" => [
+              %{"repo" => "tonic", "expires_at" => "2027-01-31", "days_left" => 9}
+            ]
+          }
+        ],
+        "issues" => [
+          %{
+            "kind" => "git_credential_token_expiring",
+            "workspace" => "default",
+            "message" =>
+              "git_credentials.repos.tonic bot token (GL_BOT) expires 2027-01-31 (9 days)"
+          }
+        ]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] guardrail profiles"
+      assert out =~ "bot token (GL_BOT) expires 2027-01-31"
+    end
+
+    test "FAILs (not warns) when the bot token's dispatch guard would refuse" do
+      guardrail_routes(%{
+        "active" => false,
+        "rules" => 0,
+        "workspaces" => [%{"workspace" => "default", "subjects" => []}],
+        "issues" => [
+          %{
+            "kind" => "git_credential_refused",
+            "workspace" => "default",
+            "message" =>
+              "git_credentials.repos.tonic bot token (GL_BOT): every dispatch is refused, " <>
+                "the GitLab bot token could not be verified (personal_access_tokens/self: HTTP 403)"
+          }
+        ]
+      })
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "[fail] guardrail profiles"
+      assert out =~ "HTTP 403"
+    end
+
+    test "FAILs naming inconsistent config, without blocking readiness" do
+      guardrail_routes(%{
+        "active" => true,
+        "rules" => 1,
+        "workspaces" => [%{"workspace" => "default", "subjects" => []}],
+        "issues" => [
+          %{
+            "kind" => "unmatched_subject",
+            "workspace" => "default",
+            "message" => "codex matches no subject rule, so it runs as quarantine"
+          }
+        ]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] guardrail profiles"
+      assert out =~ "codex matches no subject rule"
+    end
+
+    test "warns (could not check) when the server predates the endpoint" do
+      guardrail_routes(%{"error" => "not found"}, 404)
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] guardrail profiles"
+      assert out =~ "could not check"
+    end
+  end
+
+  describe "account/workspace quota policy check (bd-c7ll4t)" do
+    test "green when no workspace configures its own quota settings" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] account/workspace quota policy"
+    end
+
+    # bd-5ps98m: a workspace explicitly configured `paced`/no ceiling, but the
+    # account's own flat, stricter setting was the one actually binding —
+    # invisible until this check.
+    test "names the workspace when the account overrides its own quota config" do
+      workspace_with_quota_config = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{"quota" => %{"threshold_mode" => "paced"}}
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspace_with_quota_config, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/quota"},
+         fn conn ->
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{
+             "data" => %{
+               "policy_binding" => %{
+                 "throttle_threshold" => "account",
+                 "weekly_threshold" => "account"
+               }
+             }
+           })
+         end}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      # Non-fatal: named, but does not block readiness or fail the exit code.
+      assert exit_code == 0
+      assert out =~ "[warn] account/workspace quota policy"
+      assert out =~ "default: account overrides its own throttle_threshold"
+      assert out =~ "default: account overrides its own weekly_threshold"
+    end
+
+    test "quiet when the workspace's own config is the side that binds" do
+      workspace_with_quota_config = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{"quota" => %{"throttle_threshold" => 0.5}}
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspace_with_quota_config, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/quota"},
+         fn conn ->
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{
+             "data" => %{
+               "policy_binding" => %{
+                 "throttle_threshold" => "workspace",
+                 "weekly_threshold" => "default"
+               }
+             }
+           })
+         end}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] account/workspace quota policy"
+    end
+
+    # bd-c7ll4t (review finding 3): a workspace that only set
+    # `throttle_threshold` never expressed an opinion about the weekly
+    # window, so the account binding that window must not be reported as an
+    # override — there is nothing of the workspace's own being overridden.
+    test "does not flag a window the workspace never configured" do
+      workspace_with_quota_config = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{"quota" => %{"throttle_threshold" => 0.7}}
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspace_with_quota_config, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/quota"},
+         fn conn ->
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{
+             "data" => %{
+               "policy_binding" => %{
+                 "throttle_threshold" => "account",
+                 "weekly_threshold" => "account"
+               }
+             }
+           })
+         end}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] account/workspace quota policy"
+      assert out =~ "default: account overrides its own throttle_threshold"
+      refute out =~ "weekly_threshold"
+    end
+
+    # bd-c7ll4t (review finding 3): a `quota` map that only sets an unrelated
+    # key (no flat key of its own, no `threshold_mode: "paced"`) expressed no
+    # opinion about either window, so the account binding both is not an
+    # override of anything.
+    test "stays ok when the workspace's quota config sets only an unrelated key" do
+      workspace_with_quota_config = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{"quota" => %{"weekly_warning_policy" => "hold"}}
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {workspace_with_quota_config, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/quota"},
+         fn conn ->
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{
+             "data" => %{
+               "policy_binding" => %{
+                 "throttle_threshold" => "account",
+                 "weekly_threshold" => "account"
+               }
+             }
+           })
+         end}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] account/workspace quota policy"
+    end
+  end
+
+  # bd-80ecol: a Claude workspace with no setup token of its own used to be
+  # handed a copy of the operator's `.credentials.json` (mode B), whose
+  # refresh-token rotation locked the operator out. Dispatch for it is now
+  # held; doctor lists every such workspace with the command that fixes it.
+  describe "claude worker credentials check" do
+    defp base_routes do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ]
+    end
+
+    test "ok when every Claude workspace has a credential of its own" do
+      stub_routes(
+        base_routes() ++
+          [{{"get", "/api/server/claude_credentials"}, {%{"checked" => 2, "missing" => []}, 200}}]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] claude worker credentials"
+      assert out =~ "2 Claude workspace(s)"
+    end
+
+    test "fails, exits non-zero, and names each workspace/provider and its fix" do
+      missing = %{
+        "workspace_id" => "ws-9",
+        "workspace" => "no-token-ws",
+        "provider" => "claude",
+        "account" => "bare",
+        "reason" => "no_credential",
+        "summary" =>
+          "no Claude setup token resolves for workspace no-token-ws: account claude:bare " <>
+            "has no active CLAUDE_CODE_OAUTH_TOKEN",
+        "fix" =>
+          "`arb account rotate claude:bare --kind oauth_token --env-var " <>
+            "CLAUDE_CODE_OAUTH_TOKEN --secret <token from `claude setup-token`>`"
+      }
+
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/claude_credentials"},
+             {%{"checked" => 3, "missing" => [missing]}, 200}}
+          ]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] claude worker credentials"
+      assert out =~ "no-token-ws (claude)"
+      assert out =~ "arb account rotate claude:bare"
+    end
+
+    test "never blocks readiness — a held workspace is not a broken server" do
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/claude_credentials"},
+             {%{
+                "checked" => 1,
+                "missing" => [
+                  %{"workspace" => "w", "provider" => "claude", "summary" => "s", "fix" => "f"}
+                ]
+              }, 200}}
+          ]
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "claude worker credentials"))
+      assert result.status == :fail
+      refute result.blocks_readiness
+    end
+
+    test "grok auth: n/a when disabled, reports state when enabled" do
+      stub_routes(
+        base_routes() ++
+          [{{"get", "/api/server/grok_auth"}, {%{"enabled" => false, "workspaces" => []}, 200}}]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[n/a ] grok auth"
+      assert out =~ "not enabled"
+
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/grok_auth"},
+             {%{"enabled" => true, "workspaces" => ["w1"], "state" => "logged_in"}, 200}}
+          ]
+      )
+
+      {out, _err, 0} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "[ ok ] grok auth"
+      assert out =~ "logged in (w1)"
+    end
+
+    test "grok auth: a missing login fails with the fix and never blocks readiness" do
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/grok_auth"},
+             {%{
+                "enabled" => true,
+                "workspaces" => ["w1"],
+                "state" => "not_logged_in",
+                "fix" => "Run `grok login --device-code` on the Wardmast host."
+              }, 200}}
+          ]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] grok auth"
+      assert out =~ "grok login --device-code"
+      result = Enum.find(Checks.run(), &(&1.name == "grok auth"))
+      refute result.blocks_readiness
+    end
+
+    test "grok auth: an expired token the broker cannot refresh fails, naming the path and expiry" do
+      path = "/home/op/.arbiter/accounts/grok-default/auth.json"
+
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/grok_auth"},
+             {%{
+                "enabled" => true,
+                "workspaces" => ["w1"],
+                "state" => "refresh_unverified",
+                "path" => path,
+                "expires_at" => "2026-10-02T12:00:00Z",
+                "fix" => "Log in again from the dashboard, which writes #{path}."
+              }, 200}}
+          ]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] grok auth"
+      assert out =~ path
+      assert out =~ "2026-10-02T12:00:00Z"
+      refute out =~ "the broker's last refresh worked"
+    end
+
+    test "grok auth: the refreshes-on-next-dispatch hint only appears when a refresh worked" do
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/grok_auth"},
+             {%{
+                "enabled" => true,
+                "workspaces" => ["w1"],
+                "state" => "expired",
+                "path" => "/a/auth.json",
+                "expires_at" => "2026-10-06T10:00:00Z"
+              }, 200}}
+          ]
+      )
+
+      {out, _err, 0} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "[ ok ] grok auth"
+      assert out =~ "/a/auth.json"
+      assert out =~ "the broker's last refresh worked"
+    end
+
+    test "a server that predates the check is reported as unknown (warn), not as ok" do
+      stub_routes(predating(base_routes()))
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "[warn] claude worker credentials"
+      assert out =~ "could not check"
+    end
+  end
+
+  describe "worker temp dir check" do
+    defp worker_tmp_routes(body) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/worker_tmp"}, {body, 200}}
+      ]
+    end
+
+    test "a 500 from the endpoint is a warn with the status and detail" do
+      stub_routes(
+        List.keystore(
+          worker_tmp_routes(%{}),
+          {"get", "/api/server/worker_tmp"},
+          0,
+          {{"get", "/api/server/worker_tmp"},
+           {%{"error" => %{"message" => "expand_default crashed"}}, 500}}
+        )
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "worker temp dir"))
+      assert result.status == :warn
+      assert result.detail =~ "could not check"
+      assert result.detail =~ "expand_default crashed"
+    end
+
+    test "a 404 means the server predates the check, and is a warn" do
+      stub_routes(
+        List.keystore(
+          worker_tmp_routes(%{}),
+          {"get", "/api/server/worker_tmp"},
+          0,
+          {{"get", "/api/server/worker_tmp"}, {%{"error" => "not found"}, 404}}
+        )
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "worker temp dir"))
+      assert result.status == :warn
+      assert result.detail =~ "could not check"
+      assert result.detail =~ "predate"
+    end
+
+    test "another server-backed check (tmux) warns on a 500 instead of skipping" do
+      stub_routes(
+        List.keystore(
+          worker_tmp_routes(%{}),
+          {"get", "/api/server/tmux"},
+          0,
+          {{"get", "/api/server/tmux"}, {%{"error" => "boom"}, 500}}
+        )
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "tmux"))
+      assert result.status == :warn
+      assert result.detail =~ "HTTP 500"
+    end
+
+    test "every server-backed endpoint warns on a 500 instead of skipping" do
+      for path <- @server_paths -- ["/api/server/migrations"] do
+        stub_routes(
+          List.keystore(
+            worker_tmp_routes(%{}),
+            {"get", path},
+            0,
+            {{"get", path}, {%{"error" => "boom"}, 500}}
+          )
+        )
+
+        assert Enum.any?(Checks.run(), &(&1.status == :warn and &1.detail =~ "HTTP 500")),
+               "#{path} hid a 500"
+      end
+    end
+
+    test "bind_address 500 warns" do
+      stub_routes(
+        List.keystore(
+          worker_tmp_routes(%{}),
+          {"get", "/api/server/bind_address"},
+          0,
+          {{"get", "/api/server/bind_address"}, {%{"error" => "boom"}, 500}}
+        )
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "bind address is loopback"))
+      assert result.status == :warn
+      assert result.detail =~ "HTTP 500"
+    end
+
+    test "warns when the temp root is on tmpfs" do
+      stub_routes(worker_tmp_routes(%{"root" => "/tmp/w", "fstype" => "tmpfs", "tmpfs" => true}))
+
+      result = Enum.find(Checks.run(), &(&1.name == "worker temp dir"))
+      assert result.status == :warn
+      assert result.detail =~ "RAM-backed"
+      refute result.blocks_readiness
+    end
+
+    test "warns when the temp root is over its size threshold" do
+      stub_routes(
+        worker_tmp_routes(%{
+          "root" => "/d/w",
+          "tmpfs" => false,
+          "over_threshold" => true,
+          "size_bytes" => 9,
+          "threshold_bytes" => 5
+        })
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "worker temp dir"))
+      assert result.status == :warn
+    end
+
+    test "is ok for a small disk-backed root" do
+      stub_routes(
+        worker_tmp_routes(%{"root" => "/d/w", "tmpfs" => false, "over_threshold" => false})
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "worker temp dir"))
+      assert result.status == :ok
+    end
+  end
+
+  # bd-6zuoo6: one worker's runaway process must not be able to stop the server.
+  describe "worker memory check" do
+    defp worker_memory_routes(body) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/worker_memory"}, {body, 200}}
+      ]
+    end
+
+    defp memory_body(overrides) do
+      Map.merge(
+        %{
+          "enabled" => true,
+          "capped" => true,
+          "available" => true,
+          "cap" => "40%",
+          "unavailable_reason" => nil,
+          "service_unit" => "arbiter.service",
+          "service_manager" => "user",
+          "oom_policy" => "continue",
+          "memory_max" => "infinity"
+        },
+        overrides
+      )
+    end
+
+    defp memory_result(body) do
+      stub_routes(worker_memory_routes(body))
+      Enum.find(Checks.run(), &(&1.name == "worker memory cap"))
+    end
+
+    test "warns loudly for OOMPolicy=stop with no per-worker cap" do
+      result =
+        memory_result(
+          memory_body(%{"oom_policy" => "stop", "capped" => false, "enabled" => false})
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "OOMPolicy=stop"
+      assert result.detail =~ "no per-worker memory cap"
+      assert result.hint =~ "OOMPolicy=continue"
+      refute result.blocks_readiness
+    end
+
+    test "an unreadable OOMPolicy is reported as unknown, not as OOMPolicy=stop" do
+      result = memory_result(memory_body(%{"oom_policy" => nil}))
+
+      assert result.status == :warn
+      assert result.detail =~ "could not read OOMPolicy for arbiter.service"
+      refute result.detail =~ "OOMPolicy=stop"
+      refute result.blocks_readiness
+    end
+
+    test "says why an enabled cap is not in force" do
+      result =
+        memory_result(
+          memory_body(%{
+            "oom_policy" => "stop",
+            "capped" => false,
+            "available" => false,
+            "unavailable_reason" => "cgroup v2 (unified hierarchy) is not mounted"
+          })
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "cgroup v2"
+    end
+
+    test "still warns for OOMPolicy=stop when workers are capped" do
+      result = memory_result(memory_body(%{"oom_policy" => "stop"}))
+
+      assert result.status == :warn
+      assert result.detail =~ "capped at 40%"
+      assert result.hint =~ "OOMPolicy=continue"
+    end
+
+    test "is ok with OOMPolicy=continue and a cap in force" do
+      result = memory_result(memory_body(%{}))
+
+      assert result.status == :ok
+      assert result.detail =~ "40%"
+    end
+
+    test "warns about a missing cap even with OOMPolicy=continue" do
+      result = memory_result(memory_body(%{"capped" => false, "enabled" => false}))
+
+      assert result.status == :warn
+      assert result.detail =~ "no per-worker memory cap"
+    end
+
+    test "a server that is not a systemd service has no OOM policy to judge" do
+      result =
+        memory_result(
+          memory_body(%{"service_unit" => nil, "service_manager" => nil, "oom_policy" => nil})
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "not running as a systemd service"
+    end
+
+    test "still queries the memory cap when worker_tmp returns a 500" do
+      stub_routes(
+        List.keystore(
+          worker_memory_routes(memory_body(%{})),
+          {"get", "/api/server/worker_tmp"},
+          0,
+          {{"get", "/api/server/worker_tmp"}, {%{"error" => "boom"}, 500}}
+        )
+      )
+
+      results = Checks.run()
+      assert Enum.find(results, &(&1.name == "worker temp dir")).status == :warn
+      memory = Enum.find(results, &(&1.name == "worker memory cap"))
+      refute memory.detail =~ "skipping"
+      assert memory.detail =~ "OOMPolicy"
+    end
+
+    test "an unreachable or older server is a warn, not an all-clear" do
+      stub_routes(
+        predating(
+          List.keydelete(worker_memory_routes(%{}), {"get", "/api/server/worker_memory"}, 0)
+        )
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "worker memory cap"))
+      assert result.status == :warn
+      assert result.detail =~ "could not check"
+    end
+  end
+
+  # bd-c99hys: the dashboard login relay drives each provider CLI's login inside
+  # a hidden tmux session, so a host without tmux cannot log an account in.
+  describe "tmux check" do
+    defp tmux_routes(body) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/tmux"}, {body, 200}}
+      ]
+    end
+
+    test "reports tmux present, with its version" do
+      stub_routes(
+        tmux_routes(%{"available" => true, "path" => "/usr/bin/tmux", "version" => "tmux 3.4"})
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] tmux"
+      assert out =~ "tmux 3.4"
+    end
+
+    test "reports tmux missing, informationally, with the fix" do
+      stub_routes(
+        tmux_routes(%{
+          "available" => false,
+          "message" => "tmux is not installed",
+          "fix" => "Install tmux (e.g. `sudo dnf install tmux`)"
+        })
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] tmux"
+      assert out =~ "tmux is not installed"
+      assert out =~ "sudo dnf install tmux"
+
+      result = Enum.find(Checks.run(), &(&1.name == "tmux"))
+      refute result.blocks_readiness
+    end
+
+    test "warns when the server predates the endpoint" do
+      stub_routes(predating(tmux_routes(%{}) |> List.keydelete({"get", "/api/server/tmux"}, 0)))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] tmux"
+      assert out =~ "could not check"
+      assert out =~ "predate"
+    end
+  end
+
+  # bd-73zv62: a repo whose effective merge strategy is a forge but whose
+  # checkout has no origin remote (or the wrong one) can never open its PR.
+  describe "merge routing check" do
+    defp routing_routes(body) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/merge_routing"}, {body, 200}}
+      ]
+    end
+
+    @arbiter_ok %{
+      "workspace" => "default",
+      "repo" => "arbiter",
+      "strategy" => "github",
+      "remote" => "serious-alchemy/arbiter",
+      "problem" => nil
+    }
+
+    test "ok, naming each repo's effective strategy" do
+      mesaana = %{
+        "workspace" => "default",
+        "repo" => "mesaana",
+        "strategy" => "direct",
+        "problem" => nil
+      }
+
+      stub_routes(routing_routes(%{"repos" => [@arbiter_ok, mesaana], "problems" => []}))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] merge routing"
+      assert out =~ "default/arbiter: github"
+      assert out =~ "default/mesaana: direct"
+    end
+
+    test "warns with the last 429 time when GitLab rate-limited Wardmast" do
+      budget = %{
+        "severity" => "warn",
+        "summary" => "GitLab rate limit hit",
+        "detail" => "gitlab.com: remaining 0, last 429 2026-11-06T10:00:00Z"
+      }
+
+      stub_routes(
+        routing_routes(%{"repos" => [@arbiter_ok], "problems" => [], "gitlab_budget" => budget})
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "merge routing"))
+      assert result.status == :warn
+      assert result.detail =~ "last 429 2026-11-06T10:00:00Z"
+    end
+
+    test "fails on a remote-less repo under a forge strategy, with the fix" do
+      flagged = %{
+        "workspace" => "default",
+        "repo" => "mesaana",
+        "strategy" => "github",
+        "remote" => nil,
+        "problem" => "no_remote",
+        "fix" => "`arb config set merge.repos.mesaana.strategy direct --workspace default`"
+      }
+
+      stub_routes(routing_routes(%{"repos" => [@arbiter_ok, flagged], "problems" => [flagged]}))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] merge routing"
+      assert out =~ "default/mesaana"
+      assert out =~ "no origin remote"
+      assert out =~ "arb config set merge.repos.mesaana.strategy direct"
+
+      result = Enum.find(Checks.run(), &(&1.name == "merge routing"))
+      refute result.blocks_readiness
+    end
+
+    test "fails on a remote that is not the effective owner/repo" do
+      flagged = %{
+        "workspace" => "default",
+        "repo" => "infra",
+        "strategy" => "github",
+        "remote" => "serious-alchemy/infra",
+        "expected" => "serious-alchemy/arbiter",
+        "problem" => "remote_mismatch",
+        "fix" => "set merge.repos.infra.config.owner/repo"
+      }
+
+      stub_routes(routing_routes(%{"repos" => [flagged], "problems" => [flagged]}))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 1
+      assert out =~ "serious-alchemy/arbiter"
+      assert out =~ "serious-alchemy/infra"
+    end
+
+    test "an old server without the endpoint is a warn, not a failure or an all-clear" do
+      stub_routes(predating(Enum.drop(routing_routes(%{}), -1)))
+
+      result = Enum.find(Checks.run(), &(&1.name == "merge routing"))
+      assert result.status == :warn
+      assert result.detail =~ "could not check"
+    end
+  end
+
+  # bd-cvvb02 / P13 (bd-9gqj8e): provider accounts are always on. An
+  # un-migrated install still carrying legacy credentials cannot spawn in
+  # those workspaces (MissingCredentialError) and its server-env token is
+  # read by nothing; doctor is where the operator is told, and pointed at the
+  # runbook.
+  describe "provider accounts check" do
+    defp accounts_routes(status) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/provider_accounts"},
+         {Map.merge(
+            %{
+              "decision" => "no_legacy_credentials",
+              "stranded_workspaces" => [],
+              "server_env_token" => false,
+              "runbook" => "docs/provider-accounts-release-runbook.md"
+            },
+            status
+          ), 200}}
+      ]
+    end
+
+    test "ok on a fresh or migrated install" do
+      stub_routes(accounts_routes(%{"decision" => "migrated"}))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] provider accounts"
+      assert out =~ "on (migrated)"
+    end
+
+    test "warns on a migrated install with a leftover server-env token, telling the operator to remove it" do
+      stub_routes(accounts_routes(%{"decision" => "migrated", "server_env_token" => true}))
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[warn] provider accounts"
+      assert out =~ "CLAUDE_CODE_OAUTH_TOKEN"
+      assert out =~ "ignored"
+    end
+
+    test "fails, pointing at the runbook, on un-migrated legacy credentials" do
+      stub_routes(
+        accounts_routes(%{
+          "decision" => "unmigrated_legacy_credentials",
+          "stranded_workspaces" => ["default", "emricare"],
+          "server_env_token" => true
+        })
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] provider accounts"
+      assert out =~ "default, emricare"
+      assert out =~ "CLAUDE_CODE_OAUTH_TOKEN"
+      assert out =~ "docs/provider-accounts-release-runbook.md"
+      # There is no legacy chain to keep any more, so no switch is offered.
+      refute out =~ "ARBITER_PROVIDER_ACCOUNTS"
+      refute out =~ "held OFF"
+
+      result = Enum.find(Checks.run(), &(&1.name == "provider accounts"))
+      refute result.blocks_readiness
+    end
+
+    test "fails when a workspace would raise MissingCredentialError" do
+      stub_routes(
+        accounts_routes(%{
+          "decision" => "migrated",
+          "stranded_workspaces" => ["straggler"]
+        })
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] provider accounts"
+      assert out =~ "straggler"
+      assert out =~ "MissingCredentialError"
+    end
+
+    test "a server that predates the check is reported as unknown (warn), not as ok" do
+      stub_routes(predating(accounts_routes(%{}) |> List.delete_at(-1)))
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "[warn] provider accounts"
+      assert out =~ "could not check"
+    end
+  end
+
+  describe "erlang distribution check (bd-51m9ba)" do
+    @describetag :tmp_dir
+
+    defp green_routes do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ]
+    end
+
+    test "an exposed epmd and a world-readable cookie fail doctor with exit 1", %{tmp_dir: dir} do
+      tcp = Path.join(dir, "tcp")
+
+      File.write!(tcp, [
+        "  sl  local_address rem_address   st\n",
+        "  27: 00000000:1111 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 7 1 0 100 0 0 10 0\n"
+      ])
+
+      cookie = Path.join(dir, "COOKIE")
+      File.write!(cookie, "secret")
+      File.chmod!(cookie, 0o644)
+
+      Process.put(:bd2_distribution_probe,
+        proc_net: [tcp],
+        epmd_port: nil,
+        epmd_listen_port: 4369,
+        cookie_paths: [cookie]
+      )
+
+      stub_routes(green_routes())
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 1
+      assert out =~ "[fail] erlang distribution is loopback-only"
+      assert out =~ "epmd listens on 0.0.0.0:4369"
+      assert out =~ "#{cookie} is 0644"
+    end
+
+    test "is part of every doctor run and green when nothing is exposed" do
+      stub_routes(green_routes())
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] erlang distribution is loopback-only"
+    end
+  end
+
+  # bd-46xndf: the rootless-podman readiness check. Probes run server-side and
+  # are stubbed in the arbiter app's PodmanReadinessTest; this covers rendering.
+  describe "podman sandbox readiness check" do
+    defp podman_routes(body) do
+      [
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/podman_sandbox"}, {body, 200}}
+      ]
+    end
+
+    defp find_podman, do: Enum.find(Checks.run(), &(&1.name == "podman sandbox readiness"))
+
+    test "ok, surfacing warnings in the detail" do
+      stub_routes(
+        podman_routes(%{
+          "ready" => true,
+          "installed" => true,
+          "checks" => [
+            %{"id" => "podman", "name" => "podman", "status" => "ok", "detail" => "podman 4.9"},
+            %{
+              "id" => "cgroups",
+              "name" => "cgroups",
+              "status" => "warn",
+              "detail" => "cgroups v1"
+            }
+          ]
+        })
+      )
+
+      result = find_podman()
+      assert result.status == :ok
+      assert result.detail =~ "cgroups: cgroups v1"
+      refute result.blocks_readiness
+    end
+
+    test "warns with each failed check's hint (scope unknown), without blocking readiness" do
+      stub_routes(
+        podman_routes(%{
+          "ready" => false,
+          "installed" => true,
+          "checks" => [
+            %{
+              "id" => "subid",
+              "name" => "subuid/subgid",
+              "status" => "fail",
+              "detail" => "ryan lacks a range",
+              "hint" => "Run usermod."
+            },
+            %{
+              "id" => "socket_bridge",
+              "name" => "socket bridge",
+              "status" => "fail",
+              "detail" => "denied",
+              "hint" => "Use label=disable."
+            }
+          ]
+        })
+      )
+
+      result = find_podman()
+      assert result.status == :warn
+      assert result.detail =~ "subuid/subgid: ryan lacks a range"
+      assert result.hint =~ "Run usermod."
+      assert result.hint =~ "Use label=disable."
+      refute result.blocks_readiness
+    end
+
+    test "podman not installed is a warn when the scope is unknown (it may not be used)" do
+      stub_routes(
+        podman_routes(%{
+          "ready" => false,
+          "installed" => false,
+          "checks" => [%{"id" => "podman", "status" => "fail", "detail" => "missing"}]
+        })
+      )
+
+      result = find_podman()
+      assert result.status == :warn
+      assert result.detail =~ "not installed"
+      assert result.hint =~ "Install podman"
+    end
+
+    test "a timed-out probe request is a warn naming the timeout, not a skip" do
+      routes =
+        podman_routes(%{})
+        |> Enum.reject(&match?({{_, "/api/server/podman_sandbox"}, _}, &1))
+
+      stub_routes([
+        {{"get", "/api/server/podman_sandbox"},
+         fn conn -> Req.Test.transport_error(conn, :timeout) end}
+        | routes
+      ])
+
+      result = find_podman()
+      assert result.status == :warn
+      assert result.detail =~ "did not complete"
+      assert result.hint =~ "podman run"
+      refute result.blocks_readiness
+    end
+
+    test "a server that predates the check is a warn" do
+      stub_routes(
+        predating(
+          podman_routes(%{})
+          |> Enum.reject(&match?({{_, "/api/server/podman_sandbox"}, _}, &1))
+        )
+      )
+
+      assert find_podman().status == :warn
+    end
+  end
+
+  # RW7: the nodes section (`docs/design/remote-workers.md` §4.3, §14), fed by
+  # the operator-only `GET /api/nodes`.
+  describe "nodes section" do
+    @url "https://primary.example.ts.net"
+
+    defp local_row(attrs \\ %{}),
+      do:
+        Map.merge(
+          %{"name" => "local", "kind" => "local", "state" => "online", "max" => 3, "live" => 0},
+          attrs
+        )
+
+    defp node_row(attrs) do
+      Map.merge(
+        %{
+          "name" => "box-1",
+          "kind" => "machine",
+          "status" => "active",
+          "state" => "online",
+          "health" => "ready",
+          "agent_version" => "1.2.3",
+          "server_version" => "1.2.3",
+          "live" => 1,
+          "max" => 4,
+          "last_heartbeat_at" => DateTime.to_iso8601(DateTime.add(DateTime.utc_now(), -5)),
+          "last_seen_at" => nil
+        },
+        attrs
+      )
+    end
+
+    defp nodes_resp(attrs \\ %{}) do
+      Map.merge(
+        %{
+          "nodes" => [],
+          "local" => local_row(),
+          "total" => 3,
+          "ceiling" => 3,
+          "warnings" => [],
+          "public_url" => nil,
+          "exposure" => "unset",
+          "allow_public_endpoint" => false
+        },
+        attrs
+      )
+    end
+
+    defp stub_nodes(resp, ping \\ {"pong", 200}, status \\ 200) do
+      stub_routes([
+        {{"get", "/api/nodes"}, {resp, status}},
+        {{"get", "/nodes/ping"}, ping}
+      ])
+    end
+
+    defp nodes_results, do: Checks.check_nodes()
+    defp named(results, name), do: Enum.find(results, &(&1.name == name))
+
+    test "with no nodes and no public_url the section is one n/a line" do
+      stub_nodes(nodes_resp())
+
+      assert [%{name: "nodes", status: :na, detail: detail}] = nodes_results()
+      assert detail =~ "no remote nodes enrolled"
+    end
+
+    test "nodes.public_url reachable: an anonymous GET /nodes/ping that answers" do
+      stub_nodes(nodes_resp(%{"public_url" => @url, "exposure" => "private"}))
+
+      assert %{status: :ok, detail: detail} = named(nodes_results(), "nodes.public_url reachable")
+      assert detail =~ @url
+    end
+
+    test "a cluster node with a public_url the controller refuses is flagged" do
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => "http://172.26.0.1:4949",
+          "exposure" => "private",
+          "nodes" => [%{"id" => "n1", "name" => "k", "kind" => "cluster", "state" => "active"}]
+        })
+      )
+
+      assert %{status: :warn, detail: detail, hint: hint} =
+               named(nodes_results(), "nodes.public_url cluster-safe")
+
+      assert detail =~ "http://172.26.0.1:4949"
+      assert hint =~ "https"
+    end
+
+    test "an unreachable public_url fails, non-fatal, with a hint" do
+      stub_nodes(nodes_resp(%{"public_url" => @url, "exposure" => "private"}), {%{}, 502})
+
+      assert %{status: :warn, blocks_readiness: false} =
+               result = named(nodes_results(), "nodes.public_url reachable")
+
+      assert result.detail =~ "502"
+      assert result.hint =~ "tailscale serve"
+    end
+
+    test "a transport failure to public_url fails the same way" do
+      stub_routes([
+        {{"get", "/api/nodes"},
+         {nodes_resp(%{"public_url" => @url, "exposure" => "private"}), 200}},
+        {{"get", "/nodes/ping"}, fn conn -> Req.Test.transport_error(conn, :econnrefused) end}
+      ])
+
+      assert %{status: :warn} = named(nodes_results(), "nodes.public_url reachable")
+    end
+
+    test "nodes enrolled but no public_url fails" do
+      stub_nodes(nodes_resp(%{"nodes" => [node_row(%{})]}))
+
+      assert %{status: :warn, detail: detail} =
+               named(nodes_results(), "nodes.public_url reachable")
+
+      assert detail =~ "not set"
+    end
+
+    # K13 (docs/design/remote-workers.md §9.4, §13): a cluster node's readiness block.
+    defp cluster_row(attrs \\ %{}) do
+      node_row(
+        Map.merge(
+          %{
+            "name" => "k3s",
+            "kind" => "cluster",
+            "k8s_version" => "v1.31.2+k3s1",
+            "degraded" => [],
+            "readiness" => [
+              %{
+                "id" => "netpol",
+                "name" => "NetworkPolicy enforcement",
+                "status" => "ok",
+                "detail" => "enforced: only the bridge port connects",
+                "hint" => nil
+              },
+              %{
+                "id" => "quota",
+                "name" => "ResourceQuota",
+                "status" => "warn",
+                "detail" => "no ResourceQuota in the namespace",
+                "hint" => "Apply the install manifest's quota."
+              }
+            ]
+          },
+          attrs
+        )
+      )
+    end
+
+    test "a cluster node gets one row per readiness check, named for the node" do
+      stub_nodes(nodes_resp(%{"nodes" => [cluster_row()], "public_url" => @url}))
+      results = nodes_results()
+
+      assert %{status: :ok, detail: detail} =
+               named(results, "cluster k3s: NetworkPolicy enforcement")
+
+      assert detail =~ "enforced"
+
+      assert %{status: :warn, hint: hint, blocks_readiness: false} =
+               named(results, "cluster k3s: ResourceQuota")
+
+      assert hint =~ "quota"
+    end
+
+    test "a failing check is a warn that never blocks readiness (the section's rule)" do
+      row =
+        cluster_row(%{
+          "degraded" => ["netpol_unenforced"],
+          "readiness" => [
+            %{
+              "id" => "netpol",
+              "name" => "NetworkPolicy enforcement",
+              "status" => "fail",
+              "detail" => "NOT enforced: a worker-labelled pod reached internet",
+              "hint" => "The CNI does not enforce."
+            }
+          ]
+        })
+
+      stub_nodes(nodes_resp(%{"nodes" => [row], "public_url" => @url}))
+
+      assert %{status: :warn, blocks_readiness: false, detail: detail} =
+               named(nodes_results(), "cluster k3s: NetworkPolicy enforcement")
+
+      assert detail =~ "NOT enforced"
+    end
+
+    test "a node degraded netpol_unenforced is called out, with the override when set" do
+      stub_nodes(
+        nodes_resp(%{
+          "nodes" => [
+            cluster_row(%{
+              "degraded" => ["netpol_unenforced"],
+              "allow_unenforced_network" => true
+            })
+          ],
+          "public_url" => @url
+        })
+      )
+
+      assert %{status: :warn, detail: detail} = named(nodes_results(), "cluster k3s: placement")
+      assert detail =~ "netpol_unenforced"
+      assert detail =~ "allow_unenforced_network"
+    end
+
+    test "a psa_unenforced node is called out (KH4)" do
+      stub_nodes(
+        nodes_resp(%{
+          "nodes" => [cluster_row(%{"degraded" => ["psa_unenforced"]})],
+          "public_url" => @url
+        })
+      )
+
+      assert %{status: :warn, detail: detail, hint: hint} =
+               named(nodes_results(), "cluster k3s: placement")
+
+      assert detail =~ "psa_unenforced"
+      assert hint =~ "pod-security.kubernetes.io/enforce"
+    end
+
+    test "a runtime-class row and a shared-kernel line when no RuntimeClass is set (KH4)" do
+      check = %{
+        "id" => "runtime_class",
+        "name" => "RuntimeClass",
+        "status" => "ok",
+        "detail" => "none configured: worker pods run on the node's own kernel",
+        "hint" => nil,
+        "runtime_class" => nil
+      }
+
+      stub_nodes(
+        nodes_resp(%{"nodes" => [cluster_row(%{"readiness" => [check]})], "public_url" => @url})
+      )
+
+      results = nodes_results()
+      assert %{status: :ok} = named(results, "cluster k3s: RuntimeClass")
+      assert %{status: :warn, detail: detail} = named(results, "cluster k3s: shared kernel")
+      assert detail =~ "share"
+    end
+
+    test "no shared-kernel line when a RuntimeClass is configured (KH4)" do
+      check = %{
+        "id" => "runtime_class",
+        "name" => "RuntimeClass",
+        "status" => "ok",
+        "detail" => "gvisor accepted by the dry run",
+        "hint" => nil,
+        "runtime_class" => "gvisor"
+      }
+
+      stub_nodes(
+        nodes_resp(%{"nodes" => [cluster_row(%{"readiness" => [check]})], "public_url" => @url})
+      )
+
+      refute Enum.any?(nodes_results(), &(&1.name == "cluster k3s: shared kernel"))
+    end
+
+    test "a cluster node that has reported no readiness yet says so" do
+      stub_nodes(
+        nodes_resp(%{"nodes" => [cluster_row(%{"readiness" => []})], "public_url" => @url})
+      )
+
+      assert %{status: :warn, detail: detail} = named(nodes_results(), "cluster k3s: readiness")
+      assert detail =~ "no readiness report"
+    end
+
+    test "a machine node gets no cluster rows" do
+      stub_nodes(nodes_resp(%{"nodes" => [node_row(%{})], "public_url" => @url}))
+      refute Enum.any?(nodes_results(), &String.starts_with?(&1.name, "cluster "))
+    end
+
+    test "an unset registry adds no row and does not change the n/a line (K8)" do
+      stub_nodes(nodes_resp(%{"registry" => %{"configured" => false}}))
+      assert [%{name: "nodes", status: :na}] = nodes_results()
+    end
+
+    test "a reachable registry is an ok row naming it and the last published image (K8)" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => true,
+            "registry" => "registry.example.com/arb",
+            "reachable" => true,
+            "password_set" => true,
+            "published" => [
+              %{"kind" => "worker", "ref" => "registry.example.com/arb/worker@sha256:abc"}
+            ],
+            "last_error" => nil,
+            "seed_excluded" => []
+          }
+        })
+      )
+
+      assert %{status: :ok, detail: detail} = named(nodes_results(), "nodes.registry")
+      assert detail =~ "registry.example.com/arb"
+      assert detail =~ "worker"
+      refute Enum.any?(nodes_results(), &(&1.name == "nodes"))
+    end
+
+    test "an unreachable registry warns, non-fatally, with a hint (K8)" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => true,
+            "registry" => "registry.example.com/arb",
+            "reachable" => false,
+            "reachable_detail" => ":econnrefused",
+            "published" => [],
+            "seed_excluded" => []
+          }
+        })
+      )
+
+      assert %{status: :warn, blocks_readiness: false} =
+               result = named(nodes_results(), "nodes.registry")
+
+      assert result.detail =~ "econnrefused"
+      assert result.hint =~ "nodes.registry"
+    end
+
+    test "a failed publish and excluded seed paths each warn (K8, K26)" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => true,
+            "registry" => "registry.example.com/arb",
+            "reachable" => true,
+            "published" => [],
+            "last_error" => "worker: {:timeout, 600000}",
+            "seed_excluded" => ["priv/plts"]
+          }
+        })
+      )
+
+      results = nodes_results()
+      assert %{status: :warn, detail: detail} = named(results, "nodes.registry")
+      assert detail =~ "timeout"
+      assert %{status: :warn, detail: seed} = named(results, "nodes.registry seed_paths")
+      assert seed =~ "priv/plts"
+    end
+
+    test "a registry whose password is missing for a username is called out (K8)" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => true,
+            "registry" => "registry.example.com/arb",
+            "username" => "bot",
+            "password_set" => false,
+            "reachable" => true,
+            "published" => [],
+            "seed_excluded" => []
+          }
+        })
+      )
+
+      assert %{status: :warn, detail: detail} = named(nodes_results(), "nodes.registry")
+      assert detail =~ "password"
+    end
+
+    defp config_registry(extra \\ %{}) do
+      Map.merge(
+        %{
+          "registry" => "ghcr.io/ryan",
+          "origin" => "config",
+          "repositories" => ["vstim/worker"],
+          "credentials" => "set",
+          "public_ok" => false,
+          "reachable" => true,
+          "reachable_detail" => nil,
+          "anonymous" => %{"vstim/worker" => "private"},
+          "public" => []
+        },
+        extra
+      )
+    end
+
+    defp image_row(extra \\ %{}) do
+      Map.merge(
+        %{
+          "workspace" => "main",
+          "repo" => "vstim",
+          "ref" => "registry.example.com/vstim/ci:main",
+          "status" => "ok",
+          "digest" => "sha256:" <> String.duplicate("a", 64),
+          "revision" => String.duplicate("b", 40),
+          "seed" => "primary",
+          "seed_note" => nil,
+          "error" => nil
+        },
+        extra
+      )
+    end
+
+    test "a prebuilt repo gets an image row with the digest and revision (KH14)" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{"configured" => false, "registries" => [], "images" => [image_row()]}
+        })
+      )
+
+      results = nodes_results()
+      assert %{status: :ok, detail: detail} = named(results, "image vstim")
+      assert detail =~ "registry.example.com/vstim/ci:main"
+      assert detail =~ "sha256:aaaaaaaaaaaa"
+      assert detail =~ "bbbbbbbbbbbb"
+      refute Enum.any?(results, &(&1.name == "nodes"))
+    end
+
+    test "a refused prebuilt image warns with the reason (KH14)" do
+      row =
+        image_row(%{
+          "status" => "error",
+          "error" => "revision bbbbbbbbbbbb is not an ancestor of the tip of main"
+        })
+
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{"configured" => false, "registries" => [], "images" => [row]}
+        })
+      )
+
+      assert %{status: :warn, detail: detail, hint: hint} = named(nodes_results(), "image vstim")
+      assert detail =~ "not an ancestor"
+      assert hint =~ "image.ref"
+    end
+
+    test "a seed fallback is shown on an ok image row (KH14)" do
+      row = image_row(%{"seed" => "primary", "seed_note" => "arbiter.seed-lock does not match"})
+
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{"configured" => false, "registries" => [], "images" => [row]}
+        })
+      )
+
+      assert %{status: :ok, detail: detail} = named(nodes_results(), "image vstim")
+      assert detail =~ "arbiter.seed-lock"
+    end
+
+    test "SI6: a node's images row is ok, warns on unrelieved pressure and lists legacy images" do
+      stub_nodes(
+        nodes_resp(%{
+          "nodes" => [
+            node_row(%{
+              "name" => "tidy",
+              "images" => %{"count" => 2, "bytes" => 3_221_225_472, "legacy" => []}
+            }),
+            node_row(%{
+              "name" => "full",
+              "images" => %{"count" => 1, "bytes" => 0, "pressure_unrelieved" => true}
+            }),
+            node_row(%{
+              "name" => "old",
+              "images" => %{
+                "count" => 0,
+                "bytes" => 0,
+                "legacy" => ["localhost/arbiter-dev/abc:latest"]
+              }
+            })
+          ]
+        })
+      )
+
+      results = nodes_results()
+      assert %{status: :ok, detail: detail} = named(results, "node tidy images")
+      assert detail =~ "2 held"
+      assert %{status: :warn, detail: detail} = named(results, "node full images")
+      assert detail =~ "pressure"
+
+      assert %{status: :warn, detail: detail, hint: hint} = named(results, "node old images")
+      assert detail =~ "localhost/arbiter-dev/abc:latest"
+      assert hint =~ "podman image rm"
+    end
+
+    test "SI4a: a machine node gets an image source row; build is the legacy-path warning" do
+      stub_nodes(
+        nodes_resp(%{
+          "nodes" => [
+            node_row(%{"name" => "pulls", "image_source" => "registry"}),
+            node_row(%{"name" => "builds", "image_source" => "build"})
+          ]
+        })
+      )
+
+      results = nodes_results()
+      assert %{status: :ok, detail: detail} = named(results, "node pulls image source")
+      assert detail =~ "registry"
+
+      assert %{status: :warn, detail: detail, hint: hint} =
+               named(results, "node builds image source")
+
+      assert detail =~ "legacy"
+      assert hint =~ "nodes.machine_image_source"
+    end
+
+    test "SI4a: a node that cannot reach a registry or was refused a pull is a warning" do
+      stub_nodes(
+        nodes_resp(%{
+          "nodes" => [
+            node_row(%{
+              "name" => "boxed",
+              "image_source" => "registry",
+              "registry_reach" => %{"ghcr.io" => "unreachable", "r.io" => "reachable"},
+              "pull_blocked" => ["r.io"]
+            })
+          ]
+        })
+      )
+
+      assert %{status: :warn, detail: detail} = named(nodes_results(), "node boxed image source")
+      assert detail =~ "ghcr.io unreachable"
+      assert detail =~ "r.io pull refused"
+    end
+
+    test "SI4a: a registry row per registry: pull credential configured, and its reach" do
+      reg = fn registry, pull ->
+        config_registry(%{"registry" => registry, "pull_credential" => pull})
+      end
+
+      stub_nodes(
+        nodes_resp(%{
+          "nodes" => [
+            node_row(%{
+              "name" => "boxed",
+              "image_source" => "registry",
+              "registry_reach" => %{
+                "ghcr.io" => "unreachable",
+                "registry.gitlab.com" => "reachable"
+              }
+            })
+          ],
+          "registry" => %{
+            "configured" => false,
+            "registries" => [
+              reg.("ghcr.io/ryan", "ref"),
+              reg.("registry.gitlab.com/vstim", "none"),
+              reg.("docker.io/pub", "anonymous")
+            ]
+          }
+        })
+      )
+
+      results = nodes_results()
+
+      assert %{status: :warn, detail: detail} = named(results, "registry pull ghcr.io/ryan")
+      assert detail =~ "credential configured"
+      assert detail =~ "unreachable from boxed"
+
+      assert %{status: :warn, detail: detail, hint: hint} =
+               named(results, "registry pull registry.gitlab.com/vstim")
+
+      assert detail =~ "no pull credential"
+      assert hint =~ "pull_credentials_ref"
+
+      assert %{status: :ok} = named(results, "registry pull docker.io/pub")
+    end
+
+    test "SI11: an `image <repo>` row per published repo: digest, CLIs, providers, seed" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => false,
+            "registries" => [],
+            "repo_images" => [
+              %{
+                "repo" => "vstim",
+                "ref" =>
+                  "registry.example.com/arb/vstim/worker@sha256:" <> String.duplicate("a", 64),
+                "providers" => ["claude", "codex"],
+                "clis" => [
+                  %{"name" => "claude", "version" => "2.1.0"},
+                  %{"name" => "codex", "version" => "0.9.1"}
+                ],
+                "seed" => %{"status" => "pushed", "reason" => nil}
+              },
+              %{
+                "repo" => "bare",
+                "ref" =>
+                  "registry.example.com/arb/bare/worker@sha256:" <> String.duplicate("b", 64),
+                "providers" => ["claude"],
+                "clis" => [%{"name" => "claude", "version" => "2.1.0"}],
+                "seed" => %{"status" => "skipped", "reason" => "seed: none"}
+              }
+            ]
+          }
+        })
+      )
+
+      results = nodes_results()
+
+      assert %{status: :ok, detail: detail} = named(results, "image vstim")
+      assert detail =~ "sha256:aaaaaaaaaaaa"
+      assert detail =~ "claude 2.1.0"
+      assert detail =~ "codex 0.9.1"
+      assert detail =~ "providers claude, codex"
+      assert detail =~ "seed pushed"
+
+      assert %{status: :ok, detail: detail} = named(results, "image bare")
+      assert detail =~ "seed skipped (seed: none)"
+    end
+
+    test "each workspace/repo registry gets its own row, with the anonymous-read answer (KH12)" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => false,
+            "registries" => [
+              config_registry(),
+              config_registry(%{"registry" => "registry.gitlab.com/vstim"})
+            ]
+          }
+        })
+      )
+
+      results = nodes_results()
+      assert %{status: :ok, detail: detail} = named(results, "worker.image registry ghcr.io/ryan")
+      assert detail =~ "vstim/worker"
+      assert detail =~ "private"
+      assert %{status: :ok} = named(results, "worker.image registry registry.gitlab.com/vstim")
+      refute Enum.any?(results, &(&1.name == "nodes"))
+    end
+
+    test "a registry that answers anonymous reads warns unless public_ok (KH12)" do
+      public =
+        config_registry(%{
+          "anonymous" => %{"vstim/worker" => "public"},
+          "public" => ["vstim/worker"]
+        })
+
+      stub_nodes(nodes_resp(%{"registry" => %{"configured" => false, "registries" => [public]}}))
+
+      assert %{status: :warn, detail: detail, hint: hint} =
+               named(nodes_results(), "worker.image registry ghcr.io/ryan")
+
+      assert detail =~ "anonymous"
+      assert detail =~ "vstim/worker"
+      assert hint =~ "public_ok"
+
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => false,
+            "registries" => [%{public | "public_ok" => true}]
+          }
+        })
+      )
+
+      assert %{status: :ok, detail: ok_detail} =
+               named(nodes_results(), "worker.image registry ghcr.io/ryan")
+
+      assert ok_detail =~ "public_ok"
+    end
+
+    test "an unreachable registry and an unusable credential warn (KH12)" do
+      bad =
+        config_registry(%{
+          "reachable" => false,
+          "reachable_detail" => ":nxdomain",
+          "credentials" => "error: secret:GH secret_not_found",
+          "anonymous" => %{"vstim/worker" => "unknown"}
+        })
+
+      stub_nodes(nodes_resp(%{"registry" => %{"configured" => false, "registries" => [bad]}}))
+
+      assert %{status: :warn, detail: detail} =
+               named(nodes_results(), "worker.image registry ghcr.io/ryan")
+
+      assert detail =~ "not reachable"
+      assert detail =~ "secret:GH"
+    end
+
+    test "nodes.registry itself warns when one of its repositories answers anonymously (KH12)" do
+      stub_nodes(
+        nodes_resp(%{
+          "registry" => %{
+            "configured" => true,
+            "registry" => "registry.example.com/arb",
+            "reachable" => true,
+            "password_set" => true,
+            "published" => [],
+            "seed_excluded" => [],
+            "registries" => [
+              config_registry(%{
+                "registry" => "registry.example.com/arb",
+                "origin" => "install",
+                "repositories" => ["controller"],
+                "anonymous" => %{"controller" => "public"},
+                "public" => ["controller"]
+              })
+            ]
+          }
+        })
+      )
+
+      results = nodes_results()
+      assert %{status: :warn, detail: detail} = named(results, "nodes.registry")
+      assert detail =~ "anonymous"
+      refute Enum.any?(results, &String.starts_with?(&1.name, "worker.image registry"))
+    end
+
+    test "a private endpoint is quiet; a public one warns" do
+      stub_nodes(nodes_resp(%{"public_url" => @url, "exposure" => "private"}))
+      assert %{status: :ok} = named(nodes_results(), "nodes.public_url is a private endpoint")
+
+      stub_nodes(
+        nodes_resp(%{"public_url" => "https://arbiter.example.com", "exposure" => "public"})
+      )
+
+      assert %{status: :warn, detail: detail} =
+               named(nodes_results(), "nodes.public_url is a private endpoint")
+
+      assert detail =~ "arbiter.example.com"
+      assert detail =~ "internet"
+    end
+
+    test "a public endpoint that was allowed is still a standing warning" do
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => "https://arbiter.example.com",
+          "exposure" => "public",
+          "allow_public_endpoint" => true
+        })
+      )
+
+      assert %{status: :warn, detail: detail} =
+               named(nodes_results(), "nodes.public_url is a private endpoint")
+
+      assert detail =~ "allow_public_endpoint"
+    end
+
+    test "each live node is a line with its age, version and capacity" do
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => @url,
+          "exposure" => "private",
+          "nodes" => [node_row(%{})]
+        })
+      )
+
+      assert %{status: :ok, detail: detail} = named(nodes_results(), "node box-1")
+      assert detail =~ "online"
+      assert detail =~ "5s ago" or detail =~ "6s ago"
+      assert detail =~ "1.2.3"
+      assert detail =~ "1/4"
+    end
+
+    test "offline, suspect and unready nodes fail; revoked ones are not listed" do
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => @url,
+          "exposure" => "private",
+          "nodes" => [
+            node_row(%{"name" => "asleep", "state" => "offline", "agent_version" => nil}),
+            node_row(%{"name" => "shaky", "state" => "suspect"}),
+            node_row(%{"name" => "stale", "health" => "outdated", "agent_version" => "1.0.0"}),
+            node_row(%{"name" => "gone", "state" => "revoked", "status" => "revoked"})
+          ]
+        })
+      )
+
+      results = nodes_results()
+      assert %{status: :warn} = named(results, "node asleep")
+      assert %{status: :warn, detail: shaky} = named(results, "node shaky")
+      assert shaky =~ "suspect"
+      assert %{status: :warn, detail: stale} = named(results, "node stale: outdated")
+      assert stale =~ "behind" and stale =~ "1.0.0"
+      assert named(results, "node gone") == nil
+    end
+
+    test "an outdated node excluded from placement names both versions and the upgrade command" do
+      cmd = "helm upgrade arbiter-node oci://x/chart --set image.tag=v0.2.90"
+
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => @url,
+          "exposure" => "private",
+          "nodes" => [
+            node_row(%{
+              "name" => "mesaana",
+              "health" => "outdated",
+              "agent_version" => "0.2.88",
+              "server_version" => "0.2.90",
+              "upgrade_command" => cmd
+            })
+          ]
+        })
+      )
+
+      assert %{status: :warn, detail: detail, hint: hint} =
+               named(nodes_results(), "node mesaana: outdated")
+
+      assert detail =~ "mesaana" and detail =~ "0.2.88" and detail =~ "0.2.90"
+      assert detail =~ "no work is placed"
+      assert hint =~ cmd
+    end
+
+    test "a local cap of 0 warns that local-only work will wait" do
+      stub_nodes(
+        nodes_resp(%{"local" => local_row(%{"max" => 0}), "warnings" => ["local_cap_zero"]})
+      )
+
+      assert %{status: :warn, detail: detail, hint: hint} =
+               named(nodes_results(), "local worker cap")
+
+      assert detail =~ "0"
+      assert detail =~ "wait"
+      assert hint =~ "arb node set local"
+    end
+
+    test "the capacity is green and shows the breakdown, with no ceiling to compare it to" do
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => @url,
+          "exposure" => "private",
+          "nodes" => [node_row(%{"contributes" => 4})],
+          "total" => 7
+        })
+      )
+
+      assert %{status: :ok, detail: detail} = named(nodes_results(), "node capacity")
+      assert detail =~ "capacity 7 = local 3 + box-1 4"
+      refute detail =~ "ceiling"
+      assert named(nodes_results(), "node capacity vs conductor.max_concurrent") == nil
+    end
+
+    test "the DC1 migration's advisory for a removed install cap is shown until the local cap is set" do
+      advisory =
+        "conductor_system_max_concurrent (6) was removed: the install's concurrency is the " <>
+          "sum of its machines' caps. To keep 6 on this machine: `arb node set local --max-workers 6`."
+
+      stub_nodes(nodes_resp(%{"local_cap_advisory" => advisory}))
+
+      assert %{status: :warn, detail: ^advisory, hint: hint} =
+               named(nodes_results(), "conductor_system_max_concurrent removed")
+
+      assert hint =~ "arb node set local"
+    end
+
+    test "a placement still in flight past the placement timeout is a warn naming the run" do
+      stub_nodes(
+        nodes_resp(%{
+          "placements" => %{
+            "timeout_ms" => 1_800_000,
+            "in_flight" => [],
+            "stuck" => [
+              %{
+                "task_id" => "bd-7jluyk",
+                "node_name" => "mesaana",
+                "stage" => "assign",
+                "age_ms" => 7_200_000,
+                "timeout_ms" => 1_800_000
+              }
+            ]
+          }
+        })
+      )
+
+      assert %{status: :warn, detail: detail, hint: hint} =
+               named(nodes_results(), "placement stuck: bd-7jluyk")
+
+      assert detail =~ "placing on mesaana for 2h0m"
+      assert detail =~ "stage assign"
+      assert detail =~ "timeout 30m"
+      assert hint =~ "arb worker stop bd-7jluyk"
+    end
+
+    test "placements within their budget add no line" do
+      stub_nodes(
+        nodes_resp(%{
+          "placements" => %{"timeout_ms" => 1_800_000, "in_flight" => [%{}], "stuck" => []}
+        })
+      )
+
+      refute Enum.any?(nodes_results(), &String.starts_with?(&1.name, "placement stuck"))
+    end
+
+    test "no advisory, no line" do
+      stub_nodes(nodes_resp(%{"local_cap_advisory" => nil}))
+      assert named(nodes_results(), "conductor_system_max_concurrent removed") == nil
+    end
+
+    test "a server without /api/nodes, or an operator-less token (403), is a warn, not skipped" do
+      for status <- [404, 403] do
+        stub_nodes(%{"error" => "nope"}, {"pong", 200}, status)
+        assert [%{name: "nodes", status: :warn, detail: detail}] = nodes_results()
+        assert detail =~ "could not check"
+      end
+    end
+
+    test "a 5xx from /api/nodes is a warn, not a skip" do
+      stub_nodes(%{"error" => "boom"}, {"pong", 200}, 500)
+      assert [%{name: "nodes", status: :warn}] = nodes_results()
+    end
+
+    test "nothing in the section blocks deploy readiness or exits non-zero" do
+      stub_nodes(
+        nodes_resp(%{
+          "public_url" => "https://arbiter.example.com",
+          "exposure" => "public",
+          "nodes" => [node_row(%{"state" => "offline"})],
+          "local" => local_row(%{"max" => 0}),
+          "warnings" => ["local_cap_zero"]
+        }),
+        {%{}, 502}
+      )
+
+      for r <- nodes_results() do
+        refute r.status == :fail
+        refute r.blocks_readiness
+      end
+    end
+  end
+end
+
+defmodule WardmastCli.Cmd.Doctor.SocketPathsTest do
+  use ExUnit.Case, async: true
+
+  alias WardmastCli.Cmd.Doctor.Checks
+
+  test "socket_paths warns on an over-length operator socket path, naming path and length" do
+    path = "/tmp/" <> String.duplicate("x", 110) <> "/op.sock"
+    Process.put(:bd2_operator_socket, path)
+
+    result = Checks.check_socket_paths()
+    assert result.status == :warn
+    assert result.detail =~ path
+    assert result.detail =~ "#{byte_size(path)} bytes"
+  end
+
+  test "socket_paths is ok for a short path" do
+    Process.put(:bd2_operator_socket, "/tmp/op.sock")
+    assert Checks.check_socket_paths().status == :ok
+  end
+end

@@ -1,0 +1,92 @@
+defmodule Wardmast.Worker.CliFetcher.Status do
+  @moduledoc """
+  The CLI fetcher as the doctor reports it (`GET /api/server/cli_versions`):
+  per CLI the pinned version, the latest version upstream last reported, whether
+  the pinned bytes are in the verified cache, whether the pin is `manual`, and the
+  last `cli_version_bumped` row; plus the `worker.cli_set.hold` token and when the
+  daily job last ran.
+
+  Reads settings, the audit table, the local cache and the scheduler's last
+  report. It never touches the network: the "latest" it shows is whatever the
+  scheduler saw on its last run.
+
+  Option `:scheduler_status` replaces the scheduler read (tests).
+  """
+
+  alias Wardmast.Settings
+  alias Wardmast.Worker.CliFetcher
+  alias Wardmast.Worker.CliFetcher.Cache
+  alias Wardmast.Worker.CliFetcher.Scheduler
+  alias Wardmast.Worker.CliSet.Watcher
+  alias Wardmast.Worker.Image.LocalPublished
+
+  @spec build(keyword()) :: map()
+  def build(opts \\ []) do
+    scheduler = Keyword.get_lazy(opts, :scheduler_status, &Scheduler.status/0)
+    watcher = Keyword.get_lazy(opts, :watcher_status, &Watcher.status/0)
+    manual = Settings.worker_cli_manual() || []
+    latest = Map.get(scheduler, :latest, %{})
+
+    %{
+      hold: Settings.worker_cli_set_hold(),
+      local_published: LocalPublished.enabled?(),
+      scheduler: %{
+        enabled: Map.get(scheduler, :enabled, false),
+        checked_at: iso(Map.get(scheduler, :checked_at))
+      },
+      republish: republish(watcher),
+      clis: Enum.map(CliFetcher.names(), &cli(&1, latest, manual, opts))
+    }
+  end
+
+  defp republish(watcher) do
+    retries =
+      for {{repo, repo_path}, entry} <- Enum.sort(Map.get(watcher, :retries, %{})) do
+        %{
+          repo: repo,
+          repo_path: repo_path,
+          ref: Map.get(entry, :ref),
+          attempts: Map.get(entry, :attempts, 0),
+          next_delay_ms: Map.get(entry, :next_delay_ms),
+          reason: Watcher.format_reason(Map.get(entry, :last_error))
+        }
+      end
+
+    failed =
+      for {{repo, repo_path}, entry} <- Enum.sort(Map.get(watcher, :failed, %{})) do
+        %{
+          repo: repo,
+          repo_path: repo_path,
+          ref: Map.get(entry, :ref),
+          attempts: Map.get(entry, :attempts, 0),
+          at: iso(Map.get(entry, :at)),
+          reason: Watcher.format_reason(Map.get(entry, :reason))
+        }
+      end
+
+    %{retries: retries, failed: failed}
+  end
+
+  defp cli(name, latest, manual, opts) do
+    pinned = CliFetcher.pin(name, opts)
+
+    %{
+      name: name,
+      pinned: pinned,
+      latest: Map.get(latest, name),
+      cached: pinned != nil and match?({:ok, _}, Cache.lookup(name, pinned, opts)),
+      manual: name in manual,
+      last_bump: last_bump(name)
+    }
+  end
+
+  defp last_bump(name) do
+    case Enum.find(Settings.cli_version_events(cli: name), &(&1.kind == "cli_version_bumped")) do
+      nil -> nil
+      event -> %{from: event.from_version, to: event.to_version, at: iso(event.at)}
+    end
+  end
+
+  defp iso(%DateTime{} = at), do: DateTime.to_iso8601(at)
+  defp iso(_), do: nil
+end

@@ -1,4 +1,4 @@
-# Arbiter.MCP — a single MCP server for agent sessions — design spec
+# Wardmast.MCP — a single MCP server for agent sessions — design spec
 
 **Status:** design proposal (this is the spike deliverable for #254; not yet
 approved)
@@ -11,7 +11,7 @@ MCP work reuses both seams.
 
 ## TL;DR
 
-Stand up **`Arbiter.MCP`**, a single in-process Model Context Protocol server
+Stand up **`Wardmast.MCP`**, a single in-process Model Context Protocol server
 that exposes Arbiter's domain operations (tasks, convoys, dependencies,
 messages, workers, workspace) as schema-backed MCP tools, and connect agent
 sessions to it. Capability is a **scope token** presented at connection time,
@@ -51,10 +51,10 @@ The issue's framing is GT-era. Two corrections matter for the design:
 - **The current structured route is the `arb` CLI, not `bd2`.** A worker's only
   structured path back into Arbiter today is shelling out to the **`arb`
   escript**, which talks to the Phoenix REST API at `http://127.0.0.1:4848`
-  (`apps/arbiter_cli/lib/arbiter_cli/client.ex`, base URL + `ARB_HOST`). The
+  (`apps/wardmast_cli/lib/wardmast_cli/client.ex`, base URL + `ARB_HOST`). The
   work prompt literally instructs the agent to run `arb inbox <task>`,
   `arb message <task> <text>`, and `arb ticket update <task> --qa-notes …`
-  (`apps/arbiter/lib/arbiter/worker/dispatch.ex`, `base_work_prompt/1`). The model
+  (`apps/wardmast/lib/wardmast/worker/dispatch.ex`, `base_work_prompt/1`). The model
   constructs those argv strings and parses `--json`; the tool surface is
   discoverable only via `--help`. (`bd2` in this repo is just a test-seam prefix
   for process-dictionary keys — `:bd2_req_options` etc. — not a route.)
@@ -81,12 +81,12 @@ detail — the same shape as the multi-adapter pattern already in `Trackers`,
 
 ## 2. Architecture: one server, in-process with the domain
 
-`Arbiter.MCP` is a single Streamable-HTTP MCP server hosted **inside the BEAM**,
-mounted on the existing Phoenix endpoint in `arbiter_web` (Bandit, port 4848).
+`Wardmast.MCP` is a single Streamable-HTTP MCP server hosted **inside the BEAM**,
+mounted on the existing Phoenix endpoint in `wardmast_web` (Bandit, port 4848).
 Because it runs in the same VM as the Ash domain, **tool handlers call Ash
 directly** — exactly the path the REST controllers already take
 (`Ash.read/2`, `Ash.create/2`, `Ash.update/3`, e.g.
-`apps/arbiter_web/lib/arbiter_web/controllers/api/issue_controller.ex`). There
+`apps/wardmast_web/lib/wardmast_web/controllers/api/issue_controller.ex`). There
 is no internal HTTP hop and no second source of truth.
 
 ```
@@ -96,20 +96,20 @@ is no internal HTTP hop and no second source of truth.
    Phoenix endpoint :4848  (Bandit)
         │
    ┌────────────────────────────────────────────┐
-   │ Arbiter.MCP                                 │
+   │ Wardmast.MCP                                 │
    │  • transport plug (Streamable HTTP)         │
-   │  • Arbiter.MCP.Scope  — token → claims      │  ← enforcement point
-   │  • Arbiter.MCP.Tools.* — one module/tool    │
+   │  • Wardmast.MCP.Scope  — token → claims      │  ← enforcement point
+   │  • Wardmast.MCP.Tools.* — one module/tool    │
    └───────────────┬────────────────────────────┘
                    │ Ash.read/create/update (in-process)
                    ▼
-   Arbiter.Tasks / Messages / Workers / Usage   (Ash domains)
+   Wardmast.Tasks / Messages / Workers / Usage   (Ash domains)
 ```
 
 ### 2.1 Transport: Streamable HTTP
 
 A single MCP endpoint (say `POST|GET /mcp`) under the existing `/api`-style
-scope in `apps/arbiter_web/lib/arbiter_web/router.ex`. Clients POST JSON-RPC
+scope in `apps/wardmast_web/lib/wardmast_web/router.ex`. Clients POST JSON-RPC
 2.0; the server returns a single JSON body for fast calls and upgrades to SSE
 only for long ones. This works behind the load balancer / reverse proxy an
 operator may already front :4848 with, and avoids spawning a fresh stdio MCP
@@ -118,7 +118,7 @@ server per session per agent type.
 Streamable HTTP is the **only** transport `/mcp` serves, and `GET /mcp` with
 `Accept: text/event-stream` is only its server → client channel: keepalives and
 server-initiated messages, no POST-back `endpoint` handshake. See the moduledoc
-of `ArbiterWeb.MCP.Plug` for the authoritative contract.
+of `WardmastWeb.MCP.Plug` for the authoritative contract.
 
 The legacy two-endpoint HTTP+SSE transport (2024-11-05) is deprecated upstream
 and we do not implement it. Serving *half* of it is strictly worse than not
@@ -130,9 +130,9 @@ already came back on its POST, so it blocks to its 30s ceiling and reports
 pointed at the streamable-HTTP entry instead; every such client supports one.
 
 Every MCP config Arbiter generates already uses **Streamable HTTP**:
-`Arbiter.MCP.AgentConfig.Claude` writes `"type": "http"`, `.Gemini` writes
+`Wardmast.MCP.AgentConfig.Claude` writes `"type": "http"`, `.Gemini` writes
 `httpUrl`, `.Codex` writes `[mcp_servers.arbiter] url`, and the `arb init`
-template (`apps/arbiter_cli/priv/templates/mcp_json.eex`) writes `"type":
+template (`apps/wardmast_cli/priv/templates/mcp_json.eex`) writes `"type":
 "http"`. Operators should use `"type": "http"` too. The GET stream is
 coordinator-tier, so a worker token gets `401` on it and workspace isolation
 holds.
@@ -174,12 +174,12 @@ JSON. `R` = readable, `W` = writable.
 | `ticket_list` | coordinator | R | `Ash.read(Issue)` + filters |
 | `ticket_ready` | coordinator | R | `Issue.ready/1` |
 | `ticket_update_progress` | worker (own task) | W | `Ash.update(issue, …, action: :update)` — notes / qa_notes / deployment_notes / pr_body / `verify_after_deploy` only |
-| `ticket_create` | coordinator | W | `Arbiter.Tasks.Create.run/2` — dedup (`force` overrides), upstream-failure drain, `parent_of` edge, AC warning (P-14) |
-| `ticket_update` | coordinator | W | `Ash.update(issue, …, action: :update)` (priority/…; fields bounded by `Arbiter.Tasks.IssueFields`) |
+| `ticket_create` | coordinator | W | `Wardmast.Tasks.Create.run/2` — dedup (`force` overrides), upstream-failure drain, `parent_of` edge, AC warning (P-14) |
+| `ticket_update` | coordinator | W | `Ash.update(issue, …, action: :update)` (priority/…; fields bounded by `Wardmast.Tasks.IssueFields`) |
 | `ticket_resume_review` | coordinator | W | `Ash.update(issue, …, action: :resume_review)` — clears a tripped ReviewPatrol breaker (P-14) |
 | `ticket_close` | coordinator | W | `Ash.update(issue, %{reason}, action: :close)` |
 | `ticket_reopen` | coordinator | W | `Ash.update(issue, …, action: :reopen)` |
-| `ticket_verify` | coordinator | W | `Arbiter.Tasks.Verification.record_outcome/3` — the post-merge restart-and-observe verdict (bd-9so315) |
+| `ticket_verify` | coordinator | W | `Wardmast.Tasks.Verification.record_outcome/3` — the post-merge restart-and-observe verdict (bd-9so315) |
 | `dep_add` / `dep_remove` | coordinator | W | `Ash.create/destroy(Dependency)` |
 | `convoy_status` | worker (own), coordinator | R | `Ash.get(Convoy, id)` + calcs |
 | `convoy_list` / `convoy_create` / `convoy_add_member` / `convoy_close` | coordinator | R/W | `Convoy` actions / `ConvoyMembership.:add` |
@@ -187,15 +187,15 @@ JSON. `R` = readable, `W` = writable.
 | `notify_list` | worker (own ws), coordinator | R | `Messages.Mailbox.notifications/1` |
 | `message_send` | worker, coordinator | W | `Messages.send_mail/1` — coordinator→direction, worker→flag-to-sibling |
 | `worker_list` | coordinator | R | `Ash.read(Workers.Run)` / live snapshot |
-| `worker_dispatch` | **coordinator only** (`can_dispatch`) | W | `Arbiter.Worker.Dispatch.dispatch/2` |
-| `worker_resume` | **coordinator only** (`can_dispatch`) | W | `Arbiter.Worker.Dispatch.resume_task/2` (continues the prior session via `resume_session/2`; `mode: "briefing"` opts into `resume/2`) |
-| `worker_review` | **coordinator only** (`can_dispatch`) | W | `Arbiter.Worker.Dispatch.dispatch/2` (`review: true`) |
-| `worker_stop` | coordinator | W | `Arbiter.Worker.stop/2` |
-| `tracker_claim` | coordinator | W | `Arbiter.Tasks.Claim.claim/3` |
-| `tracker_sync` | coordinator | W | `Arbiter.Tasks.Claim.plan/1` + `apply_plan/2` |
+| `worker_dispatch` | **coordinator only** (`can_dispatch`) | W | `Wardmast.Worker.Dispatch.dispatch/2` |
+| `worker_resume` | **coordinator only** (`can_dispatch`) | W | `Wardmast.Worker.Dispatch.resume_task/2` (continues the prior session via `resume_session/2`; `mode: "briefing"` opts into `resume/2`) |
+| `worker_review` | **coordinator only** (`can_dispatch`) | W | `Wardmast.Worker.Dispatch.dispatch/2` (`review: true`) |
+| `worker_stop` | coordinator | W | `Wardmast.Worker.stop/2` |
+| `tracker_claim` | coordinator | W | `Wardmast.Tasks.Claim.claim/3` |
+| `tracker_sync` | coordinator | W | `Wardmast.Tasks.Claim.plan/1` + `apply_plan/2` |
 | `workspace_show` | worker, coordinator | R | `Ash.get(Workspace, id)` (config/security posture) |
 | `workspace_list` | coordinator | R | `Ash.read(Workspace)` — id/name/prefix/tracker only |
-| `usage_summarize` | coordinator | R | `Arbiter.Usage.summarize/1` |
+| `usage_summarize` | coordinator | R | `Wardmast.Usage.summarize/1` |
 
 Notes:
 
@@ -278,14 +278,14 @@ CLI, reached by an operator with shell access to the box.
 
 Capability is a pure function of the bearer token presented on the MCP
 connection. The token is validated and decoded into claims by
-`Arbiter.MCP.Scope`, which is the single enforcement point: it holds the
+`Wardmast.MCP.Scope`, which is the single enforcement point: it holds the
 session's bound identity and **rejects out-of-scope calls** rather than trusting
 the agent.
 
 ### 4.1 Claims
 
 ```elixir
-%Arbiter.MCP.Scope{
+%Wardmast.MCP.Scope{
   tier:         :worker | :coordinator,
   workspace_id: "uuid",          # every call is filtered to this workspace
   task_id:      "bd-…" | nil,    # worker tier: the one task it may read/progress
@@ -340,7 +340,7 @@ or touch anything outside the issue it was opened on).
 So there is a third tier, `:refine`, bound to one workspace **and one issue**:
 
 ```elixir
-%Arbiter.MCP.Scope{
+%Wardmast.MCP.Scope{
   tier:         :refine,
   workspace_id: "uuid",   # every call is filtered to this workspace
   issue_id:     "bd-…",   # the bound issue; writes must land in its subtree
@@ -351,7 +351,7 @@ So there is a third tier, `:refine`, bound to one workspace **and one issue**:
 
 Two gates, not one:
 
-1. **Tool-level.** `Arbiter.MCP.RefinePolicy` is an exhaustive allow/deny table
+1. **Tool-level.** `Wardmast.MCP.RefinePolicy` is an exhaustive allow/deny table
    over every catalog tool. It is a table rather than a `:refine` entry in each
    tool's `:tiers` list precisely so that a newly added tool cannot default into
    (or silently out of) the tier — a conformance test fails the build when a
@@ -359,10 +359,10 @@ Two gates, not one:
 2. **Data-level.** Every allowed *write* (`ticket_update`, `ticket_update_progress`,
    `ticket_create`, `ticket_promote`, `dep_add`, `dep_remove`) must target the bound
    issue or a descendant reachable from it by `parent_of`
-   (`Arbiter.MCP.Tools.authorize_subtree/2`). Reads stay broad across the bound
+   (`Wardmast.MCP.Tools.authorize_subtree/2`). Reads stay broad across the bound
    workspace, because refining an issue means reading its neighbours.
 
-   Edges have two rules (`Arbiter.MCP.Tools.authorize_subtree_edge/4`).
+   Edges have two rules (`Wardmast.MCP.Tools.authorize_subtree_edge/4`).
    `relates_to` / `depends_on` / `blocks` / `discovered_from` / `conflicts_with`
    need **one** endpoint inside — wiring the subtree to the work around it is
    most of what refinement does, and none of those types confers authority over
@@ -387,7 +387,7 @@ every possible result is a widening, not the intended narrowing.
 The tools are written once; only the spawn-time config file differs. This rides
 the **existing** worker-spawn seam — no new spawn path.
 
-A small behaviour `Arbiter.MCP.AgentConfig` with one callback per agent type
+A small behaviour `Wardmast.MCP.AgentConfig` with one callback per agent type
 emits the right config pointing at the same Arbiter MCP URL with the right scope
 token:
 
@@ -400,28 +400,28 @@ token:
 |---|---|---|
 | **Claude Code** (Phase 1) | `.mcp.json` in the worktree (or `--mcp-config <file>`) | `{"mcpServers":{"arbiter":{"type":"http","url":"…/mcp","headers":{"Authorization":"Bearer <token>"}}}}` |
 | **Gemini CLI** — upstream `gemini` only (Phase 3; the `gemini_cli` provider was dropped in bd-ac53wz — this only applies to the Gemini adapter's fallback when `agy` is not on `PATH`) | `.gemini/settings.json` or `gemini mcp add` | bonus: Gemini's `includeTools`/`excludeTools` allowlist (most-restrictive-wins) is a clean secondary per-worker scoping hook |
-| **`agy`** (Antigravity fork of the Gemini CLI) | **nowhere in the worktree** — `$HOME/.gemini/config/mcp_config.json` or `$HOME/.gemini/config/plugins/<name>/mcp_config.json` only | **unsupported (bd-m8geh4):** agy does *not* read `.gemini/settings.json`, nor any worktree-local `.agents/plugins/**` path (probed live, agy v1.2.5 — see `Arbiter.MCP.AgentConfig.Gemini`'s moduledoc). Since `Arbiter.Agents.Gemini.resolve_executable/0` prefers `agy` over `gemini`, an Antigravity host gets `{:error, :unsupported}` and a loud dispatch-time log instead of a dead config file. Its schema differs too: `serverUrl` / `enabledTools`, not `httpUrl` / `includeTools` (`Gemini.agy_config_map/1`). Per-spawn injection needs a per-worker `$HOME` (agy exposes no config-dir env var) — tracked separately as the config-isolation spike |
+| **`agy`** (Antigravity fork of the Gemini CLI) | **nowhere in the worktree** — `$HOME/.gemini/config/mcp_config.json` or `$HOME/.gemini/config/plugins/<name>/mcp_config.json` only | **unsupported (bd-m8geh4):** agy does *not* read `.gemini/settings.json`, nor any worktree-local `.agents/plugins/**` path (probed live, agy v1.2.5 — see `Wardmast.MCP.AgentConfig.Gemini`'s moduledoc). Since `Wardmast.Agents.Gemini.resolve_executable/0` prefers `agy` over `gemini`, an Antigravity host gets `{:error, :unsupported}` and a loud dispatch-time log instead of a dead config file. Its schema differs too: `serverUrl` / `enabledTools`, not `httpUrl` / `includeTools` (`Gemini.agy_config_map/1`). Per-spawn injection needs a per-worker `$HOME` (agy exposes no config-dir env var) — tracked separately as the config-isolation spike |
 | **Codex** (Phase 3) | `.codex/config.toml` (`[mcp_servers.arbiter]`) | **caveat:** Codex MCP support is newer and has reports of silent connect failures — verify the session with a `/mcp`-equivalent check rather than trusting the spawn |
 
 ### 5.1 Where it cuts in the spawn path
 
 The injection point already exists. For Claude, the seam is one of:
 
-- `Arbiter.Agents.Claude.spawn_env/1`
-  (`apps/arbiter/lib/arbiter/agents/claude.ex`) — env injected into the port;
-- `Arbiter.Agents.Claude.ConfigDir.ensure/0`
-  (`apps/arbiter/lib/arbiter/agents/claude/config_dir.ex`) — already writes the
+- `Wardmast.Agents.Claude.spawn_env/1`
+  (`apps/wardmast/lib/wardmast/agents/claude.ex`) — env injected into the port;
+- `Wardmast.Agents.Claude.ConfigDir.ensure/0`
+  (`apps/wardmast/lib/wardmast/agents/claude/config_dir.ex`) — already writes the
   isolated `CLAUDE_CONFIG_DIR` `settings.json` + `CLAUDE.md`; add a `.mcp.json`
   here, or pass `--mcp-config` from `default_argv/2`
-  (`apps/arbiter/lib/arbiter/agents/claude.ex`, `default_argv/2`);
-- the token is minted in `Arbiter.Worker.Dispatch`
-  (`apps/arbiter/lib/arbiter/worker/dispatch.ex`, where `build_agent_session_opts/4`
+  (`apps/wardmast/lib/wardmast/agents/claude.ex`, `default_argv/2`);
+- the token is minted in `Wardmast.Worker.Dispatch`
+  (`apps/wardmast/lib/wardmast/worker/dispatch.ex`, where `build_agent_session_opts/4`
   already assembles per-spawn opts) with the task/repo/workspace claims, and
   threaded to the adapter.
 
 This mirrors how the security policy is already resolved per dispatch and mapped
-per adapter (`Arbiter.Agents.SecurityPolicy` →
-`Arbiter.Agents.Claude.Security`): MCP access is the same kind of per-spawn
+per adapter (`Wardmast.Agents.SecurityPolicy` →
+`Wardmast.Agents.Claude.Security`): MCP access is the same kind of per-spawn
 capability grant, resolved centrally and translated per agent. Note one known
 cosmetic quirk: Claude Code's `/mcp` dialog shows header-bearer HTTP servers as
 "not authenticated" even when the token works — the auth indicator only tracks
@@ -458,11 +458,11 @@ Reuses, unchanged:
 - **Completion + review protocol.** `arb done` stays a stdout sentinel; review
   gate `VERDICT:` unchanged. MCP is a side channel for structured reads/writes,
   not a replacement for the lifecycle.
-- **Usage ledger.** No change; `Arbiter.Usage.Event` already provider-neutral.
+- **Usage ledger.** No change; `Wardmast.Usage.Event` already provider-neutral.
 
 Adds:
 
-- `Arbiter.MCP` — transport mount, `Scope` plug, `Tools.*` modules, `AgentConfig`
+- `Wardmast.MCP` — transport mount, `Scope` plug, `Tools.*` modules, `AgentConfig`
   behaviour + Claude adapter.
 - One MCP dependency (`anubis_mcp`, pending spike sign-off).
 - A signed scope-token minting/validation path.
@@ -472,11 +472,11 @@ Adds:
 Each phase is independently shippable.
 
 ### Phase 1 — read tools, Claude Code, two tiers
-- `Arbiter.MCP` mounted on :4848 via Streamable HTTP (`anubis_mcp` or Plug).
-- `Arbiter.MCP.Scope` token mint (in `Dispatch`) + validate (plug); two tiers.
+- `Wardmast.MCP` mounted on :4848 via Streamable HTTP (`anubis_mcp` or Plug).
+- `Wardmast.MCP.Scope` token mint (in `Dispatch`) + validate (plug); two tiers.
 - Read tools: `ticket_show`, `ticket_ready`, `convoy_status`, `inbox_check`,
   `workspace_show`; plus the one narrowed write `ticket_update_progress`.
-- `Arbiter.MCP.AgentConfig` + Claude `.mcp.json` adapter, wired into the spawn.
+- `Wardmast.MCP.AgentConfig` + Claude `.mcp.json` adapter, wired into the spawn.
 - Steer the generated `CLAUDE.md` toward the tools for those ops.
 - Exit criteria: a dispatched Claude worker reads its task and writes its
   completion notes via MCP tools; existing suite green; an out-of-scope call

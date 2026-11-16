@@ -1,0 +1,783 @@
+defmodule WardmastWeb.UsageLive do
+  @moduledoc """
+  LiveView at `/usage` — the operator-console redesign's spend dashboard
+  (design handoff README §9).
+
+  Renders the token-cost ledger rolled up three ways (by task, by model, by
+  repo) plus the rework signal: tasks that needed more than one `:work`
+  session, and what those extra sessions cost. Also surfaces the primary
+  provider's 5h/7d rate-limit windows, sourced the same way `Layouts.app`'s
+  nav quota bars are.
+
+  Refresh-on-load only, same as the page it replaces (`live/usage_live.ex`
+  v1) — no PubSub subscription since spend events aren't broadcast yet.
+
+  Calls every redesigned component fully-qualified
+  (`WardmastWeb.CoreComponents.{Core,Domain,Feedback,Navigation}`) rather than
+  through the bare `<.name>` tag: `WardmastWeb.html_helpers/0` still imports
+  the pre-redesign `WardmastWeb.CoreComponents`/`WardmastWeb.ListComponents`
+  versions of `icon/1`, `button/1`, `index_header/1`, `live_badge/1`,
+  `empty_state/1`, `filter_tabs/1`, `pager/1`, `see_all_link/1`, and
+  `back_link/1` unqualified, so a bare call would silently render the old
+  component instead.
+  """
+
+  use WardmastWeb, :live_view
+  import WardmastWeb.QuotaHelpers
+
+  alias Phoenix.LiveView.AsyncResult
+  alias Wardmast.Agents.ModelDisplay
+  alias Wardmast.Tasks.Issue
+  alias Wardmast.Usage
+  alias Wardmast.Usage.Event
+  alias WardmastWeb.CoreComponents.{Data, Domain, Feedback, Navigation}
+  require Ash.Query
+  require Logger
+
+  @ranges ~w(7d 30d all)
+  @tabs ~w(by_task by_model by_repo by_account)
+
+  @impl true
+  def mount(_params, _session, socket) do
+    {:ok,
+     socket
+     |> assign(:range, "30d")
+     |> assign(:tab, "by_task")
+     |> assign(:overage_spend, 0.0)
+     |> assign(:in_overage, false)
+     |> assign(:usage, AsyncResult.loading())
+     |> maybe_load_overage()
+     |> maybe_load_usage()}
+  end
+
+  @impl true
+  def handle_event("range", %{"option" => range}, socket) do
+    range = if range in @ranges, do: range, else: "30d"
+
+    {:noreply,
+     socket
+     |> assign(:range, range)
+     |> assign(:usage, AsyncResult.loading(socket.assigns.usage))
+     |> start_async(:usage, fn -> load_usage_data(range) end)}
+  end
+
+  def handle_event("tab", %{"tab" => tab}, socket) do
+    tab = if tab in @tabs, do: tab, else: "by_task"
+    {:noreply, assign(socket, :tab, tab)}
+  end
+
+  # ---- data ----
+
+  # The ledger rollups (`summarize_many!/2`, `load_work_sessions/1`,
+  # `load_titles/1`) run in `start_async/3` on the connected mount only
+  # (bd-5qjpp5): a 30-day scan over `usage_events` is slow enough (worse
+  # still under bd-bdjgwc's CAST-index problem) that it must never block the
+  # LiveView process, and the dead render reads nothing and shows the loading
+  # state instead.
+  defp maybe_load_usage(socket) do
+    if connected?(socket) do
+      range = socket.assigns.range
+      start_async(socket, :usage, fn -> load_usage_data(range) end)
+    else
+      socket
+    end
+  end
+
+  # Trapping exits lets a read in flight finish when the view goes away,
+  # rather than dying holding a DB checkout (bd-6mfl0s) — this page's 30-day
+  # scan is the slowest of the async loads on it, so it's the one most likely
+  # to be caught mid-query by a closed tab.
+  defp load_usage_data(range) do
+    Process.flag(:trap_exit, true)
+    since = since_for_range(range)
+
+    %{
+      task: task_rollup,
+      model: model_rollup,
+      repo: repo_rollup,
+      provider_account: account_rollup
+    } = summarize_many!([:task, :model, :repo, :provider_account], since: since)
+
+    exit_if_view_gone()
+    work_sessions = load_work_sessions(since)
+    exit_if_view_gone()
+    titles = load_titles(task_rollup)
+
+    grand_cost = if sum_cost_known?(task_rollup), do: sum_cost(task_rollup), else: nil
+    grand_tokens = sum_tokens(task_rollup)
+    total_sessions = sum_rows(task_rollup)
+    base_ids = base_ids(task_rollup)
+
+    rework_buckets = rework_buckets(base_ids, work_sessions)
+    rework_task_count = rework_buckets.two + rework_buckets.three_plus
+    rework_extra_cost = rework_extra_cost(base_ids, work_sessions)
+
+    %{
+      grand_cost: grand_cost,
+      grand_tokens: grand_tokens,
+      total_sessions: total_sessions,
+      total_tasks: length(base_ids),
+      rework_task_count: rework_task_count,
+      rework_extra_cost: rework_extra_cost,
+      rework_buckets: rework_buckets,
+      by_task_rows: build_by_task_rows(task_rollup, work_sessions, titles),
+      model_bars: bar_rows(model_rollup, grand_cost, &model_hue/2, &ModelDisplay.short/1),
+      repo_bars: bar_rows(repo_rollup, grand_cost, &repo_hue/2, &to_string/1),
+      account_bars: bar_rows(account_rollup, grand_cost, &repo_hue/2, &account_label/1)
+    }
+  end
+
+  # Overage-spend indicator (bd-7cd38f): when the Claude quota snapshot shows
+  # the default workspace is dispatching past the plan cap (`:continue`
+  # mode), surface the windowed overage spend in the Rate limits panel.
+  # Sourced from the same windowed `Usage.summarize/1` sum the gate uses for
+  # the alert threshold — which sums by *provider account* since P7, so this
+  # resolves the workspace's Claude account first and shows the whole plan's
+  # overage rather than one workspace's slice of it.
+  #
+  # The quota it reads is the top bar's, which `LiveHooks` loads off the mount
+  # (bd-adewb4), so it can't be read from the socket here; this runs its own
+  # `start_async/3` through the same `QuotaCache`-backed `load_quotas/0`. It
+  # doesn't depend on the range, so it runs once, on the connected mount.
+  defp maybe_load_overage(socket) do
+    if connected?(socket),
+      do: start_async(socket, :overage, &load_overage/0),
+      else: socket
+  end
+
+  defp exit_if_view_gone do
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> :ok
+    end
+  end
+
+  # Trapping exits lets a read in flight finish when the view goes away,
+  # rather than dying holding a DB checkout (bd-6mfl0s).
+  defp load_overage do
+    Process.flag(:trap_exit, true)
+    {:ok, ws_id, quotas} = WardmastWeb.LiveHooks.load_quotas()
+
+    case {Enum.find(quotas, &(&1.provider == "claude")), ws_id} do
+      {%{overage_status: "in_overage"} = q, ws} when is_binary(ws) ->
+        {Wardmast.Quota.Overage.windowed_spend(Wardmast.Quota.account_id(ws, "claude"), q), true}
+
+      _ ->
+        {0.0, false}
+    end
+  end
+
+  @impl true
+  def handle_async(:overage, {:ok, {spend, in_overage?}}, socket) do
+    {:noreply, socket |> assign(:overage_spend, spend) |> assign(:in_overage, in_overage?)}
+  end
+
+  # An indicator, not the page: a failed read leaves it off.
+  def handle_async(:overage, {:exit, reason}, socket) do
+    Logger.warning("UsageLive: reading the overage spend failed: #{inspect(reason)}")
+    {:noreply, socket}
+  end
+
+  def handle_async(:usage, {:ok, data}, socket) do
+    {:noreply, assign(socket, :usage, AsyncResult.ok(socket.assigns.usage, data))}
+  end
+
+  def handle_async(:usage, {:exit, reason}, socket) do
+    Logger.warning("UsageLive: loading usage rollups failed: #{inspect(reason)}")
+    {:noreply, assign(socket, :usage, AsyncResult.failed(socket.assigns.usage, reason))}
+  end
+
+  # One ledger read for every rollup on the page (bd-5cevwg) — the read, not
+  # the grouping, is what costs; four `summarize/1` calls read the window
+  # four times.
+  defp summarize_many!(bys, opts) do
+    case Usage.summarize_many(bys, opts) do
+      {:ok, rollups} -> rollups
+      _ -> Map.new(bys, &{&1, []})
+    end
+  end
+
+  defp since_for_range("7d"), do: DateTime.add(DateTime.utc_now(), -7, :day)
+  defp since_for_range("30d"), do: DateTime.add(DateTime.utc_now(), -30, :day)
+  defp since_for_range(_), do: nil
+
+  # Tasks with more than one `:work` row are re-dispatchs — the rework story.
+  # Queried directly (not via `Usage.summarize/1`, which lumps every step
+  # together per task) so the session count is `:work` sessions specifically.
+  #
+  # bd-adyhvn: `task_id` is nullable now (probes / pre-flights / sessions), and
+  # a nil id would collapse into one bogus `""` bucket here. Those rows carry
+  # `step: :other` so the step filter already excludes them, but the `not
+  # is_nil` predicate makes the invariant explicit rather than incidental.
+  defp load_work_sessions(since) do
+    base_query = Ash.Query.filter(Event, step == :work and not is_nil(task_id))
+
+    query =
+      case since do
+        nil -> base_query
+        dt -> Ash.Query.filter(base_query, occurred_at >= ^dt)
+      end
+
+    # Only the three columns the rework math reads — never `raw` (bd-5cevwg).
+    query
+    |> Ash.Query.select([:task_id, :cost_usd, :occurred_at])
+    |> Ash.read!()
+    |> Enum.group_by(&base_task_id/1)
+    |> Map.new(fn {task_id, events} ->
+      sorted = Enum.sort_by(events, & &1.occurred_at, DateTime)
+      total = Enum.reduce(sorted, 0.0, fn ev, acc -> acc + (ev.cost_usd || 0.0) end)
+      first_cost = hd(sorted).cost_usd || 0.0
+
+      {task_id, %{sessions: length(sorted), extra_cost: total - first_cost}}
+    end)
+  rescue
+    _ -> %{}
+  end
+
+  defp base_task_id(%{task_id: task_id}), do: base_task_id(task_id)
+
+  defp base_task_id(task_id) when is_binary(task_id),
+    do: task_id |> String.split("#", parts: 2) |> hd()
+
+  defp base_task_id(task_id), do: to_string(task_id)
+
+  defp load_titles(task_rollup) do
+    base_ids = task_rollup |> Enum.map(&base_task_id(&1.group)) |> Enum.uniq()
+
+    case base_ids do
+      [] ->
+        %{}
+
+      ids ->
+        Issue
+        |> Ash.Query.filter(id in ^ids)
+        |> Ash.read!()
+        |> Map.new(&{&1.id, &1.title})
+    end
+  rescue
+    _ -> %{}
+  end
+
+  # Reviewer/implementer sessions write suffixed task ids (`bd-x#review`,
+  # `bd-x#review#impl1`), so `task_rollup` (grouped on the raw task_id) has
+  # one row per synthetic id for what is really a single task. Collapse to
+  # unique base ids before counting tasks or summing rework — otherwise one
+  # real task is counted once per synthetic row.
+  defp base_ids(task_rollup), do: task_rollup |> Enum.map(&base_task_id(&1.group)) |> Enum.uniq()
+
+  defp build_by_task_rows(task_rollup, work_sessions, titles) do
+    task_rollup
+    |> Enum.group_by(&base_task_id(&1.group))
+    |> Enum.map(fn {base_id, rows} ->
+      ws = Map.get(work_sessions, base_id, %{sessions: 0, extra_cost: 0.0})
+      cost_known = Enum.any?(rows, & &1.cost_known)
+
+      %{
+        task_id: base_id,
+        title: Map.get(titles, base_id, "—"),
+        sessions: ws.sessions,
+        extra_cost: ws.extra_cost,
+        tokens:
+          Enum.reduce(rows, 0, fn r, acc -> acc + (r.tokens_in || 0) + (r.tokens_out || 0) end),
+        # nil (never a folded 0.0) when every underlying event's cost is
+        # unknown (e.g. an all-agy task) — `format_usd/1` renders that as
+        # "—", not the misleading "$0.00" a priced task would show.
+        cost_usd:
+          if cost_known do
+            Enum.reduce(rows, 0.0, fn r, acc -> acc + (r.total_cost_usd || 0.0) end)
+          end
+      }
+    end)
+    |> Enum.sort_by(&(-(&1.cost_usd || 0.0)))
+    |> Enum.take(20)
+  end
+
+  defp rework_buckets(base_ids, work_sessions) do
+    counts =
+      base_ids
+      |> Enum.map(fn base_id ->
+        Map.get(work_sessions, base_id, %{sessions: 1}).sessions
+      end)
+      |> Enum.frequencies_by(fn
+        n when n <= 1 -> :one
+        2 -> :two
+        _ -> :three_plus
+      end)
+
+    %{
+      one: Map.get(counts, :one, 0),
+      two: Map.get(counts, :two, 0),
+      three_plus: Map.get(counts, :three_plus, 0)
+    }
+  end
+
+  defp rework_extra_cost(base_ids, work_sessions) do
+    base_ids
+    |> Enum.reduce(0.0, fn base_id, acc ->
+      acc + Map.get(work_sessions, base_id, %{extra_cost: 0.0}).extra_cost
+    end)
+  end
+
+  defp bar_rows(rollup, total_cost, hue_fn, label_fn) do
+    rollup
+    |> Enum.with_index()
+    |> Enum.map(fn {row, index} ->
+      pct =
+        if row.cost_known and is_number(total_cost) and total_cost > 0 do
+          round(row.total_cost_usd / total_cost * 100)
+        else
+          0
+        end
+
+      label = label_fn.(to_string(row.group))
+
+      %{
+        label: label,
+        # `format_usd(nil)` renders "—" — never fold an unpriced (agy) row's
+        # nil cost into $0.00, which would misreport a subscription run as free.
+        value: format_usd(if row.cost_known, do: row.total_cost_usd),
+        pct: pct,
+        hue: hue_fn.(label, index)
+      }
+    end)
+  end
+
+  defp model_hue("Sonnet", _index), do: "var(--arb-live)"
+  defp model_hue("Opus", _index), do: "var(--arb-proposal)"
+  defp model_hue("Haiku", _index), do: "var(--arb-info)"
+  defp model_hue(_model, _index), do: "var(--arb-done)"
+
+  defp repo_hue(_repo, 0), do: "var(--arb-live)"
+  defp repo_hue(_repo, 1), do: "var(--arb-info)"
+  defp repo_hue(_repo, _index), do: "var(--arb-done)"
+
+  # `Usage.summarize(by: :provider_account)`'s group is an account id (or the
+  # `"(none)"` sentinel) — resolve it to the slug an operator recognizes,
+  # falling back to the raw id for an account that has since been deleted.
+  defp account_label("(none)"), do: "(none)"
+
+  defp account_label(account_id) do
+    case Wardmast.Accounts.Resolver.get(account_id) do
+      %{slug: slug} -> slug
+      nil -> account_id
+    end
+  end
+
+  defp sum_cost(rollup),
+    do: Enum.reduce(rollup, 0.0, fn r, acc -> acc + (r.total_cost_usd || 0.0) end)
+
+  # No rows at all means zero spend, definitively — not "unpriced provider"
+  # (the reason a non-empty rollup can be cost-unknown).
+  defp sum_cost_known?([]), do: true
+  defp sum_cost_known?(rollup), do: Enum.any?(rollup, & &1.cost_known)
+
+  defp sum_tokens(rollup),
+    do: Enum.reduce(rollup, 0, fn r, acc -> acc + (r.tokens_in || 0) + (r.tokens_out || 0) end)
+
+  defp sum_rows(rollup), do: Enum.reduce(rollup, 0, fn r, acc -> acc + (r.rows || 0) end)
+
+  # ---- render ----
+
+  @impl true
+  def render(assigns) do
+    ~H"""
+    <Layouts.app
+      flash={@flash}
+      banner_rev={@banner_rev}
+      current_path={@current_path}
+      quotas={@quotas}
+      quota_on_exhaustion={@quota_on_exhaustion}
+      open_epic_count={@open_epic_count}
+      live={@live}
+      coordinator_inbox={@coordinator_inbox}
+      coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
+    >
+      <div class="p-4 sm:p-6 max-w-7xl mx-auto flex flex-col gap-4">
+        <Domain.index_header
+          icon="hero-clock"
+          title="Usage"
+          subtitle={"Actual spend over the #{since_label(@range)} from the usage ledger. Rework is the number to watch — extra sessions on one task."}
+          stack_on_mobile
+        >
+          <:actions>
+            <div class="flex flex-wrap items-center gap-3">
+              <.segmented_control options={~w(7d 30d all)} value={@range} event="range" />
+              <Feedback.live_badge id="usage-live" live={@live} />
+            </div>
+          </:actions>
+        </Domain.index_header>
+
+        <.async_result :let={usage} assign={@usage}>
+          <:loading>
+            <div id="usage-loading" class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div
+                :for={_ <- 1..4}
+                class="h-[74px] rounded-[var(--radius-md)] bg-[var(--arb-done-wash)] animate-pulse"
+              />
+            </div>
+          </:loading>
+          <:failed>
+            <div id="usage-error">
+              <Feedback.empty_state icon="hero-exclamation-triangle">
+                Could not load usage data. Try reloading the page.
+              </Feedback.empty_state>
+            </div>
+          </:failed>
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <Domain.stat_card
+              label="Total spend"
+              value={format_usd(usage.grand_cost)}
+              tone="live"
+              note={since_label(@range)}
+            />
+            <Domain.stat_card label="Total tokens" value={format_tokens(usage.grand_tokens)} />
+            <Domain.stat_card
+              label="Sessions"
+              value={usage.total_sessions}
+              note={"#{usage.total_tasks} tasks"}
+            />
+            <Domain.stat_card
+              label="Rework tasks"
+              value={usage.rework_task_count}
+              tone="attention"
+              note="2+ sessions"
+            />
+          </div>
+        </.async_result>
+
+        <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px] gap-4 items-start">
+          <.panel title="Spend" meta={tab_meta(@tab)}>
+            <Navigation.filter_tabs
+              tabs={[
+                %{label: "By task", value: "by_task"},
+                %{label: "By model", value: "by_model"},
+                %{label: "By repo", value: "by_repo"},
+                %{label: "By account", value: "by_account"}
+              ]}
+              active={@tab}
+              event="tab"
+              class="mb-3"
+            />
+
+            <.async_result :let={usage} assign={@usage}>
+              <:loading>
+                <div class="flex flex-col gap-[10px]">
+                  <div
+                    :for={_ <- 1..5}
+                    class="h-[18px] rounded bg-[var(--arb-done-wash)] animate-pulse"
+                  />
+                </div>
+              </:loading>
+              <:failed>
+                <Feedback.empty_state icon="hero-exclamation-triangle">
+                  Could not load spend data.
+                </Feedback.empty_state>
+              </:failed>
+
+              <Data.data_table
+                :if={@tab == "by_task" && usage.by_task_rows != []}
+                id="usage-by-task"
+                rows={usage.by_task_rows}
+              >
+                <:col :let={row} label="task" width="84px">{row.task_id}</:col>
+                <:col :let={row} label="title" mono={false}>{row.title}</:col>
+                <:col :let={row} label="sessions" width="70px" align="right">
+                  <span
+                    class={row.sessions > 1 && "text-[var(--arb-attention)]"}
+                    title="Number of :work sessions for this task"
+                  >
+                    {row.sessions}
+                  </span>
+                </:col>
+                <:col :let={row} label="rework" width="64px" align="right">
+                  <span
+                    class={
+                      if row.extra_cost > 0,
+                        do: "text-[var(--arb-attention)]",
+                        else: "text-[var(--text-label)]"
+                    }
+                    title="Extra sessions cost (sessions beyond the first)"
+                  >
+                    {if row.extra_cost > 0, do: format_usd(row.extra_cost), else: "—"}
+                  </span>
+                </:col>
+                <:col :let={row} label="tokens" width="64px" align="right">
+                  {format_tokens(row.tokens)}
+                </:col>
+                <:col :let={row} label="spend" width="60px" align="right">
+                  {format_usd(row.cost_usd)}
+                </:col>
+              </Data.data_table>
+              <Feedback.empty_state :if={@tab == "by_task" && usage.by_task_rows == []} icon={nil}>
+                No usage events yet.
+              </Feedback.empty_state>
+
+              <div :if={@tab == "by_model"} class="flex flex-col gap-[10px]">
+                <.usage_bar
+                  :for={bar <- usage.model_bars}
+                  label={bar.label}
+                  value={bar.value}
+                  pct={bar.pct}
+                  hue={bar.hue}
+                />
+                <Feedback.empty_state :if={usage.model_bars == []} icon={nil}>
+                  No usage events yet.
+                </Feedback.empty_state>
+              </div>
+
+              <div :if={@tab == "by_repo"} class="flex flex-col gap-[10px]">
+                <.usage_bar
+                  :for={bar <- usage.repo_bars}
+                  label={bar.label}
+                  value={bar.value}
+                  pct={bar.pct}
+                  hue={bar.hue}
+                />
+                <Feedback.empty_state :if={usage.repo_bars == []} icon={nil}>
+                  No usage events yet.
+                </Feedback.empty_state>
+              </div>
+
+              <div :if={@tab == "by_account"} class="flex flex-col gap-[10px]">
+                <.usage_bar
+                  :for={bar <- usage.account_bars}
+                  label={bar.label}
+                  value={bar.value}
+                  pct={bar.pct}
+                  hue={bar.hue}
+                />
+                <Feedback.empty_state :if={usage.account_bars == []} icon={nil}>
+                  No usage events yet.
+                </Feedback.empty_state>
+              </div>
+            </.async_result>
+          </.panel>
+
+          <div class="flex flex-col gap-4">
+            <.panel title="Rate limits" meta="live">
+              <div class="flex flex-col gap-3">
+                <%!-- The top bar's quota, loaded off the mount by `LiveHooks`
+                      (bd-adewb4). --%>
+                <.async_result :let={quotas} assign={@quotas}>
+                  <:loading>
+                    <p
+                      id="usage-quota-loading"
+                      class="m-0 flex items-center gap-2 text-[12px] text-[var(--text-secondary)]"
+                    >
+                      <.icon name="hero-arrow-path-micro" class="size-4 shrink-0 animate-spin" />
+                      Loading rate limits…
+                    </p>
+                  </:loading>
+                  <:failed>
+                    <p
+                      id="usage-quota-error"
+                      role="alert"
+                      class="m-0 flex items-start gap-2 text-[12px] text-[var(--arb-fail-text)]"
+                    >
+                      <.icon name="hero-exclamation-triangle-micro" class="size-4 shrink-0 mt-px" />
+                      Could not load rate limits.
+                    </p>
+                  </:failed>
+                  <%!-- The providers the installation uses
+                        (`Wardmast.Quota.Visibility`, bd-i2gwwn) — the same
+                        list the status bar's chip shows. --%>
+                  <div
+                    :if={quotas == []}
+                    id="usage-quota-empty"
+                    class="flex flex-col gap-[4px] text-[12px] text-[var(--text-secondary)]"
+                  >
+                    <p class="m-0 font-medium text-[var(--text-title)]">No providers configured</p>
+                    <p class="m-0 leading-[1.5]">
+                      This installation has no provider whose quota to show.
+                      <.link
+                        navigate={provider_setup_path(@quota_workspace_id)}
+                        class="text-[var(--accent-primary)] underline-offset-2 hover:underline"
+                      >
+                        Set up providers
+                      </.link>
+                    </p>
+                  </div>
+                  <div
+                    :for={quota <- quotas}
+                    id={"usage-quota-#{quota.provider}"}
+                    class="flex flex-col gap-[3px]"
+                  >
+                    <span class="text-[9.5px] uppercase tracking-[0.08em] leading-none text-[var(--text-label)] font-[family-name:var(--font-mono)]">
+                      {quota_provider_label(quota.provider)}
+                    </span>
+                    <%!-- Antigravity's two bucket groups each get their own pair
+                        (bd-gukyy1); anything else — including an antigravity
+                        row with no parseable buckets — is the view's own
+                        primary/secondary windows. --%>
+                    <%= case {quota_no_data?(quota), usage_quota_groups(quota)} do %>
+                      <% {true, _groups} -> %>
+                        <Feedback.quota_no_data />
+                      <% {false, []} -> %>
+                        <div class="flex flex-col gap-[6px]">
+                          <.usage_quota_bar
+                            :for={w <- quota_windows(quota)}
+                            quota={quota}
+                            w={w}
+                          />
+                        </div>
+                      <% {false, groups} -> %>
+                        <div
+                          :for={group <- groups}
+                          id={"usage-quota-#{quota.provider}-#{group.group}"}
+                          class="flex flex-col gap-[4px] mt-[3px]"
+                        >
+                          <span class="text-[10px] leading-none text-[var(--text-secondary)] font-[family-name:var(--font-mono)]">
+                            {group.label}
+                          </span>
+                          <div class="flex flex-col gap-[6px]">
+                            <.usage_quota_bar :for={w <- group.windows} quota={quota} w={w} />
+                          </div>
+                        </div>
+                    <% end %>
+                  </div>
+                </.async_result>
+                <p class="m-0 text-[11.5px] leading-[1.55] text-[var(--text-secondary)]">
+                  The hairline is elapsed time. Bar past the line means you are burning faster than the window.
+                </p>
+                <p
+                  :if={@in_overage}
+                  id="overage-indicator"
+                  class="m-0 text-[11.5px] leading-[1.55] text-[var(--arb-fail)]"
+                >
+                  Paid overage active — approximately
+                  <span class="font-[family-name:var(--font-mono)] font-semibold">
+                    {format_usd(@overage_spend)}
+                  </span>
+                  spent this billing period past the plan cap.
+                </p>
+              </div>
+            </.panel>
+
+            <.panel title="Rework" meta={rework_meta(@usage)}>
+              <.async_result :let={usage} assign={@usage}>
+                <:loading>
+                  <div class="flex flex-col gap-[10px]">
+                    <div
+                      :for={_ <- 1..3}
+                      class="h-[16px] rounded bg-[var(--arb-done-wash)] animate-pulse"
+                    />
+                  </div>
+                </:loading>
+                <:failed>
+                  <Feedback.empty_state icon="hero-exclamation-triangle">
+                    Could not load rework data.
+                  </Feedback.empty_state>
+                </:failed>
+
+                <div class="flex flex-col gap-[10px]">
+                  <.usage_bar
+                    label="1 session"
+                    value={"#{usage.rework_buckets.one} tasks"}
+                    pct={bucket_pct(usage.rework_buckets.one, usage.total_tasks)}
+                    hue="var(--arb-done)"
+                  />
+                  <.usage_bar
+                    label="2 sessions"
+                    value={"#{usage.rework_buckets.two} tasks"}
+                    pct={bucket_pct(usage.rework_buckets.two, usage.total_tasks)}
+                    hue="var(--arb-attention)"
+                  />
+                  <.usage_bar
+                    label="3+"
+                    value={"#{usage.rework_buckets.three_plus} tasks"}
+                    pct={bucket_pct(usage.rework_buckets.three_plus, usage.total_tasks)}
+                    hue="var(--arb-fail)"
+                  />
+                  <p class="m-0 text-[11.5px] leading-[1.55] text-[var(--text-secondary)]">
+                    Extra sessions cost {format_usd(usage.rework_extra_cost)} over the {since_label(
+                      @range
+                    )} — the loop pass reads this to propose routing changes.
+                  </p>
+                </div>
+              </.async_result>
+            </.panel>
+          </div>
+        </div>
+
+        <Navigation.back_link />
+      </div>
+    </Layouts.app>
+    """
+  end
+
+  # One rate-limit bar: `w` is a `QuotaHelpers.quota_windows/1` /
+  # `quota_antigravity_groups/1` window, `quota` the view it came from.
+  attr :quota, :map, required: true
+  attr :w, :map, required: true
+
+  defp usage_quota_bar(assigns) do
+    ~H"""
+    <Feedback.quota_bar
+      provider={@quota.provider}
+      show_label={false}
+      window={@w.window}
+      label={@w.label}
+      utilization={@w.utilization}
+      reset_at={@w.reset_at}
+      overage_status={@quota.overage_status}
+      representative_claim={@quota.representative_claim}
+      stale_message={@quota.message}
+      gate_policy={Map.get(@quota, :gate_policy)}
+      label_width={34}
+      width={150}
+    />
+    """
+  end
+
+  defp provider_setup_path(ws_id) when is_binary(ws_id),
+    do: ~p"/workspaces/#{ws_id}?section=providers"
+
+  defp provider_setup_path(_ws_id), do: ~p"/workspaces"
+
+  defp usage_quota_groups(%{provider: "antigravity"} = quota), do: quota_antigravity_groups(quota)
+  defp usage_quota_groups(_quota), do: []
+
+  attr :label, :string, required: true
+  attr :value, :string, required: true
+  attr :pct, :integer, required: true
+  attr :hue, :string, required: true
+
+  defp usage_bar(assigns) do
+    ~H"""
+    <div class="flex items-center gap-[10px]">
+      <span
+        class="w-[74px] shrink-0 truncate text-[11px] font-[family-name:var(--font-mono)] text-[var(--text-secondary)]"
+        title={@label}
+      >
+        {@label}
+      </span>
+      <span class="relative flex-1 h-[8px] rounded-[var(--radius-pill)] bg-[var(--arb-done-wash)] overflow-hidden">
+        <span
+          class="absolute inset-y-0 left-0 rounded-[var(--radius-pill)]"
+          style={"width: #{@pct}%; background-color: #{@hue};"}
+        />
+      </span>
+      <span class="w-[56px] shrink-0 text-right text-[11px] tabular-nums font-[family-name:var(--font-mono)] text-[var(--text-body)]">
+        {@value}
+      </span>
+    </div>
+    """
+  end
+
+  defp since_label("7d"), do: "last 7 days"
+  defp since_label("30d"), do: "last 30 days"
+  defp since_label(_), do: "all time"
+
+  defp tab_meta("by_task"), do: "by task"
+  defp tab_meta("by_model"), do: "by model"
+  defp tab_meta("by_repo"), do: "by repo"
+  defp tab_meta("by_account"), do: "by account"
+
+  defp rework_meta(%AsyncResult{ok?: true, result: %{rework_task_count: n}}), do: "#{n} tasks"
+  defp rework_meta(_usage), do: nil
+
+  defp bucket_pct(_count, 0), do: 0
+  defp bucket_pct(count, total), do: round(count / total * 100)
+end

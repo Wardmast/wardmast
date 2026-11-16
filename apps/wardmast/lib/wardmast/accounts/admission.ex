@@ -1,0 +1,408 @@
+defmodule Wardmast.Accounts.Admission do
+  @moduledoc """
+  Admit a fresh dispatch against its provider account's `max_concurrent`, and
+  count it from that moment (bd-8suxac, #207).
+
+  ## The incident
+
+  On 2026-10-01 `claude:default` ran at `max_concurrent=2` with two Claude
+  runs live, and four more Claude workers started between 20:11Z and 20:14Z.
+  Autopilot admitted none of them: each was a PRPatrol follow-up forced out of
+  Backlog through `Wardmast.Worker.Dispatch.dispatch/2` (the `dispatch_forced`
+  rows say `dispatched_by: "pr_patrol"`), and until this module nothing on that
+  path asked the account anything. The cap was enforced only by the board's
+  plan (`Wardmast.Board.Snapshot.effective_max_concurrent/3`), so any dispatch
+  the board did not plan — PRPatrol, `arb dispatch`, MCP `worker_dispatch`,
+  the dashboard's dispatch button — went straight past it.
+
+  ## The rule
+
+  Every **fresh admission** through `Dispatch.dispatch/2` passes `admit/3`
+  before the ticket moves or a worker starts: a ticket that is not In progress
+  being started, by anyone, including Autopilot (whose plan can be stale by
+  the time its dispatch runs). With no headroom left on the account the
+  dispatch is refused with `{:account_at_capacity, info}` — `force: true`
+  (`Dispatch`'s `:force_slot`) goes over, and the override is recorded as an
+  `account_cap_override` event. Autopilot plans headroom on the workspace's
+  default provider while this checks the account the ticket routes to, so it
+  can be refused here too; it holds the card briefly and does not page
+  (`Wardmast.Board.Autopilot`). Not admissions, and so never refused here (see
+  `Wardmast.Accounts.Concurrency`'s moduledoc for how each still counts):
+
+    * resumes and re-dispatches of a ticket already In progress
+      (`Wardmast.Worker.ResumeSlot`: stranding work is worse than overshooting);
+    * a ticket's own follow-up roles — fix passes, conflict passes, ReviewGate
+      reviewers and fix rounds — which never go through `Dispatch.dispatch/2`
+      as fresh work;
+    * a review dispatch (`review: true`), which reads a PR rather than
+      starting work.
+
+  ## An admission counts before its worker exists
+
+  `Concurrency.live_count/2` is registry-derived: a worker counts once
+  `Worker.init/1` has stamped its dispatch context on its registry entry. A
+  dispatch between the gate and that stamp (resolving a repo, provisioning a
+  worktree, the worker's own run-row insert) would otherwise be invisible to
+  the next check, and a burst of checks would each see the same free slot. So
+  an admission **reserves**: it registers the task in `#{inspect(__MODULE__)}.Registry`
+  from the dispatching process, and `live_count/2` counts each reservation
+  whose task has no context-stamped worker yet. The reservation dies with that
+  process, and `Dispatch` releases it when the dispatch returns, by which
+  point `Worker.start/1` has returned — `init/1` has stamped — and the worker
+  (if any) is counted instead.
+
+  The check and the reservation run under one lock per account
+  (`:global.trans/3`, local node only), so concurrent admissions on one
+  account serialize and a burst can admit no more than the headroom.
+
+  Like every other read of the ceiling, an unreadable count fails **open**: a
+  bug here must not stop the fleet.
+
+  ## Under `scheduler_admission: enforce` (DC8)
+
+  For an account whose effective mode is `enforce` (`Wardmast.Accounts.AdmissionMode`,
+  or the caller's `:mode`), the slot rule above becomes the pool's **seat
+  check** (`Wardmast.Accounts.SeatCheck`, design `provider-dynamic-concurrency.md`
+  §4.4): the seats on the dispatch's pool must be below `min(budget,
+  max_concurrent, share)`. The pool is the planned one (`:pool`, which
+  `Dispatch` takes from the scheduler walk's planned pair or the routing
+  decision), else the model's, else the account's lowest budget (§3.1). The
+  lock, the spend cap ahead of it, the reservation (now seated on that pool),
+  `force` and its `account_cap_override` record, and the
+  `{:account_at_capacity, info}` refusal are unchanged; the refusal's `info`
+  also carries the pool and the seat check behind it (`:seat`). Under `legacy`
+  and `shadow` nothing here reads a budget or a seat.
+  """
+
+  alias Wardmast.Accounts.AdmissionMode
+  alias Wardmast.Accounts.Concurrency
+  alias Wardmast.Accounts.ProviderAccount
+  alias Wardmast.Accounts.Resolver
+  alias Wardmast.Accounts.SeatCheck
+  alias Wardmast.Agents.ModelFamily
+  alias Wardmast.Agents.ProviderConstraint
+  alias Wardmast.Quota.SpendCap
+  alias Wardmast.Tasks.Issue
+
+  require Logger
+
+  @registry __MODULE__.Registry
+
+  @typedoc """
+  What a refusal or an override knows about the account. Under `enforce` it
+  also names the `pool` and carries the `seat` check (`SeatCheck.info/0`).
+  """
+  @type info :: %{
+          required(:task_id) => String.t(),
+          required(:account) => String.t(),
+          required(:cap) => non_neg_integer(),
+          required(:holders) => [String.t()],
+          optional(:pool) => String.t() | nil,
+          optional(:seat) => SeatCheck.info(),
+          optional(:hard_zero) => boolean()
+        }
+
+  @type result ::
+          {:ok, :unlimited | :admitted | :forced}
+          | {:error, {:account_at_capacity, info()}}
+          | {:error, {:spend_cap, map()}}
+          | {:error, {:provider_constraint, atom() | String.t() | nil, String.t()}}
+
+  @doc """
+  Admit `task` onto the account its workspace is metered under for `provider`.
+
+    * `{:ok, :unlimited}` — no account, or one with no ceiling: nothing to count.
+    * `{:ok, :admitted}` — headroom was left; the slot is now reserved.
+    * `{:ok, :forced}` — no headroom, but `force: true`; reserved and recorded.
+    * `{:error, {:account_at_capacity, info}}` — no headroom; nothing reserved.
+    * `{:error, {:spend_cap, reason}}` — the account's dollar spend cap
+      (`Wardmast.Quota.SpendCap`, bd-a6grlr) is reached or past its paced line,
+      counting the settled ledger plus the estimated remaining cost of every
+      slot holder; nothing reserved. `reason` is the dispatch queue's hold
+      reason (`gate: :spend`, a `phrase`). Checked under the same per-account
+      lock as the slot, and before it, so a burst of fresh dispatches each sees
+      the earlier ones. An account with no cap, or with no *metered* spend,
+      never answers this. `:skip_spend` (an operator's `force_quota`) skips it;
+      `:spend_opts` are `SpendCap.status/2`'s.
+
+  Options: `:force`, `:actor` (named in the override event), and `:account` —
+  a `ProviderAccount` (or `nil`) the caller already resolved, e.g. the one a
+  routing decision picked. `:mode` is the account's `scheduler_admission` mode
+  (read from the account and the installation when absent); under `:enforce`,
+  `:pool` names the pool to seat on and `:seat_opts` are
+  `Wardmast.Accounts.SeatCheck.check/2`'s seams (see the moduledoc).
+
+  A ticket's provider constraint (`Wardmast.Agents.ProviderConstraint`,
+  bd-13pqcp) is checked before anything is counted or reserved: an account on
+  a provider the constraint does not allow is refused with
+  `{:error, {:provider_constraint, provider, phrase}}` — never reserved, and
+  not overridable by `force`, which goes over a *cap*, not over a ticket's
+  stated rule. `Dispatch` has already routed a constrained ticket to an
+  allowed provider, so this is the backstop for any caller that reaches
+  admission with another one.
+  """
+  @spec admit(Issue.t(), atom() | String.t() | nil, keyword()) :: result()
+  def admit(%Issue{} = task, provider, opts \\ []) do
+    account =
+      Keyword.get_lazy(opts, :account, fn -> Resolver.account(task.workspace_id, provider) end)
+
+    with :ok <- ProviderConstraint.check(task, (account && account.provider) || provider) do
+      admit_on(task, account, provider, opts)
+    end
+  rescue
+    e ->
+      Logger.warning("Admission: account check crashed for #{task.id}: #{Exception.message(e)}")
+      {:ok, :unlimited}
+  end
+
+  @doc """
+  Drop the calling process's reservation for `task_id`. A no-op when it holds
+  none — only the process that reserved can release.
+  """
+  @spec release(String.t()) :: :ok
+  def release(task_id) when is_binary(task_id) do
+    Registry.unregister(@registry, task_id)
+  rescue
+    _ -> :ok
+  end
+
+  @doc """
+  Every live reservation, shaped like `Wardmast.Worker.Registry.live_dispatches/0`
+  so `Concurrency` can count the two together. `registry_key` is the task id.
+  """
+  @spec pending() :: [
+          %{
+            registry_key: String.t(),
+            pid: pid(),
+            workspace_id: String.t() | nil,
+            provider: String.t() | nil,
+            account_id: String.t() | nil,
+            pool: String.t() | nil,
+            model: String.t() | nil
+          }
+        ]
+  def pending do
+    @registry
+    |> Registry.select([{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}])
+    |> Enum.flat_map(fn {task_id, pid, %{workspace_id: ws_id, provider: provider} = value} ->
+      if Process.alive?(pid) do
+        [
+          %{
+            registry_key: task_id,
+            pid: pid,
+            workspace_id: ws_id,
+            provider: provider,
+            account_id: Map.get(value, :account_id),
+            pool: Map.get(value, :pool),
+            model: Map.get(value, :model)
+          }
+        ]
+      else
+        []
+      end
+    end)
+  rescue
+    _ -> []
+  end
+
+  @doc """
+  The operator-facing refusal for `{:error, {:account_at_capacity, info}}` —
+  one source of truth for MCP, the REST API (and so the CLI), and the dashboard.
+  """
+  @spec refusal_message(info()) :: String.t()
+  # A hard quota rule is a zero, not a full pool: `over_cap` does not go past it
+  # (the gate runs after the seat check and refuses again), only the quota bypass does.
+  def refusal_message(%{task_id: task_id, account: account, seat: %{} = seat, hard_zero: true}) do
+    "provider account #{account} cannot take #{task_id}: #{SeatCheck.describe(seat)}. " <>
+      "Wait for the rule to clear — Autopilot dispatches Ready tickets once it does — " <>
+      "or bypass the quota gate (`arb dispatch --force-quota`, MCP `force_quota: true`); " <>
+      "the override is recorded."
+  end
+
+  def refusal_message(%{task_id: task_id, account: account, seat: %{} = seat}) do
+    "provider account #{account} has no free seat to dispatch #{task_id}: " <>
+      "#{SeatCheck.describe(seat)}#{seat_holders(seat.holders)}. " <>
+      "Wait for a seat to free — Autopilot dispatches Ready tickets as seats free — " <>
+      "or dispatch over the cap (`arb dispatch --over-cap`, MCP `over_cap: true`); " <>
+      "the override is recorded."
+  end
+
+  def refusal_message(%{task_id: task_id, account: account, cap: cap, holders: holders}) do
+    "provider account #{account} has no free slot to dispatch #{task_id}: its cap is " <>
+      "#{cap} (max_concurrent, or this workspace's share) and #{held_by(holders)}. " <>
+      "Wait for a run to finish — Autopilot dispatches Ready tickets as slots free — " <>
+      "or dispatch over the cap (`arb dispatch --over-cap`, MCP `over_cap: true`); " <>
+      "the override is recorded."
+  end
+
+  defp held_by([]), do: "nothing holds a slot (the cap itself is 0)"
+  defp held_by(holders), do: "#{length(holders)} held by #{Enum.join(holders, ", ")}"
+
+  defp seat_holders([]), do: ""
+  defp seat_holders(holders), do: ", held by #{Enum.join(holders, ", ")}"
+
+  # ---- internals ------------------------------------------------------------
+
+  defp admit_on(_task, nil, _provider, _opts), do: {:ok, :unlimited}
+
+  defp admit_on(%Issue{} = task, %ProviderAccount{} = account, provider, opts) do
+    :global.trans(
+      {{__MODULE__, account.id}, self()},
+      fn -> decide(task, account, provider, opts) end,
+      [node()]
+    )
+  end
+
+  defp decide(%Issue{} = task, account, provider, opts) do
+    with :ok <- spend_check(task, account, opts) do
+      if enforced?(account, opts),
+        do: decide_seat(task, account, provider, opts),
+        else: decide_slot(task, account, provider, opts)
+    end
+  end
+
+  # The caller's `:mode` (`Dispatch` passes the routed account's), else the
+  # account's own effective mode.
+  defp enforced?(account, opts) do
+    Keyword.get_lazy(opts, :mode, fn -> AdmissionMode.mode(account) end) == :enforce
+  end
+
+  # A capped account reserves even with no slot ceiling, so the next admission
+  # in a burst counts this one's estimated cost.
+  defp spend_check(%Issue{} = task, account, opts) do
+    if Keyword.get(opts, :skip_spend) == true do
+      :ok
+    else
+      case SpendCap.check(account, task, Keyword.get(opts, :spend_opts, [])) do
+        :ok -> :ok
+        {:hold, reason} -> {:error, {:spend_cap, reason}}
+      end
+    end
+  end
+
+  defp decide_slot(%Issue{} = task, account, provider, opts) do
+    case Concurrency.limit(account, task.workspace_id) do
+      nil ->
+        if SpendCap.config(account), do: reserve(task, account, provider, opts)
+        {:ok, :unlimited}
+
+      cap ->
+        holders = Concurrency.holders(account, exclude_task: task.id)
+
+        cond do
+          length(holders) < cap ->
+            reserve(task, account, provider, opts)
+            {:ok, :admitted}
+
+          Keyword.get(opts, :force) == true ->
+            reserve(task, account, provider, opts)
+            record_override(task, info(task, account, cap, holders), opts)
+            {:ok, :forced}
+
+          true ->
+            {:error, {:account_at_capacity, info(task, account, cap, holders)}}
+        end
+    end
+  end
+
+  # DC8: under `enforce`, the pool's seats against `min(budget, max_concurrent,
+  # share)`. The reservation seats on the pool that was checked, so the next
+  # admission in a burst counts it there.
+  defp decide_seat(%Issue{} = task, account, provider, opts) do
+    seat_opts =
+      Keyword.merge(
+        [
+          workspace_id: task.workspace_id,
+          pool: Keyword.get(opts, :pool) || model_pool(provider, Keyword.get(opts, :model)),
+          model: Keyword.get(opts, :model),
+          priority: task.priority,
+          exclude_task: task.id
+        ],
+        Keyword.get(opts, :seat_opts, [])
+      )
+
+    case SeatCheck.check(account, seat_opts) do
+      {:ok, seat} ->
+        reserve(task, account, provider, Keyword.put(opts, :pool, seat.pool))
+        {:ok, :admitted}
+
+      {:full, seat} ->
+        info = seat_info(task, seat)
+
+        if Keyword.get(opts, :force) == true do
+          reserve(task, account, provider, Keyword.put(opts, :pool, seat.pool))
+          record_override(task, info, opts)
+          {:ok, :forced}
+        else
+          {:error, {:account_at_capacity, info}}
+        end
+    end
+  end
+
+  # Only an explicit model names one of agy's two pools; without one the seat
+  # check takes the account's lowest budget (§3.1).
+  defp model_pool(_provider, nil), do: nil
+  defp model_pool(provider, model), do: pool(provider, model)
+
+  defp seat_info(%Issue{id: id}, seat),
+    do: %{
+      task_id: id,
+      account: seat.account,
+      cap: seat.limit,
+      holders: seat.holders,
+      pool: seat.pool,
+      seat: seat
+    }
+
+  # A second concurrent dispatch of the same task finds the key taken: the
+  # first holds the slot, and only one of the two can start a worker.
+  defp reserve(%Issue{id: id, workspace_id: ws_id}, %ProviderAccount{} = account, provider, opts) do
+    value = %{
+      workspace_id: ws_id,
+      provider: code(provider),
+      account_id: account.id,
+      pool: Keyword.get(opts, :pool) || pool(provider, Keyword.get(opts, :model)),
+      model: Keyword.get(opts, :model)
+    }
+
+    case Registry.register(@registry, id, value) do
+      {:ok, _owner} -> :ok
+      {:error, {:already_registered, _pid}} -> :ok
+    end
+  end
+
+  # DC4: the pool the reservation seats (`Wardmast.Quota.Seats`). Only an explicit
+  # model can tell agy's two pools apart; without one the provider's default pool.
+  defp pool(provider, model) do
+    case code(provider) do
+      nil -> nil
+      code -> ModelFamily.classify(code, model).pool
+    end
+  end
+
+  defp code(provider) when is_atom(provider) and not is_nil(provider),
+    do: Atom.to_string(provider)
+
+  defp code(provider) when is_binary(provider) and provider != "", do: provider
+  defp code(_), do: nil
+
+  defp info(%Issue{id: id}, %ProviderAccount{} = account, cap, holders),
+    do: %{task_id: id, account: label(account), cap: cap, holders: holders}
+
+  defp label(%ProviderAccount{provider: provider, slug: slug}), do: "#{provider}:#{slug}"
+
+  defp record_override(%Issue{workspace_id: ws_id}, info, opts) do
+    Logger.warning(
+      "Admission: #{info.task_id} dispatched over #{info.account}'s cap (#{info.cap}, held by " <>
+        "#{inspect(info.holders)}) by force from #{inspect(Keyword.get(opts, :actor))}"
+    )
+
+    Wardmast.Events.broadcast(ws_id, "account_cap_override", %{
+      "task_id" => info.task_id,
+      "account" => info.account,
+      "cap" => info.cap,
+      "holders" => info.holders,
+      "actor" => Keyword.get(opts, :actor)
+    })
+  end
+end

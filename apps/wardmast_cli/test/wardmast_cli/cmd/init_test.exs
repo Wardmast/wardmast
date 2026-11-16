@@ -1,0 +1,537 @@
+defmodule WardmastCli.Cmd.InitTest do
+  # async: false — one test changes the process cwd, which is global state.
+  use WardmastCli.CliCase, async: false
+
+  alias WardmastCli.Cmd.Init
+
+  # The generated docs use the plain code terms directly (coordinator, worker,
+  # issue, repo). The custom domain prefix proves the domain data is templated
+  # in rather than hardcoded.
+  defp stub_install do
+    # Named "default" so Workspace.resolve/0 (which targets ARB_WORKSPACE,
+    # defaulting to "default") matches it.
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "emr"}]}, 200}}
+    ])
+  end
+
+  defp tmp_dir do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "arb_init_test_" <> Integer.to_string(System.unique_integer([:positive]))
+      )
+
+    on_exit(fn -> File.rm_rf!(path) end)
+    path
+  end
+
+  describe "scaffolding" do
+    test "creates all six artifacts pre-filled with the active install" do
+      stub_install()
+      dir = tmp_dir()
+
+      {out, _err, exit_code} = capture(fn -> Init.run([dir]) end)
+      assert exit_code == 0
+
+      assert File.exists?(Path.join(dir, "AGENTS.md"))
+      assert File.exists?(Path.join(dir, "ARBITER_OPERATOR.md"))
+      assert File.exists?(Path.join(dir, "AGENTS.local.md"))
+      assert File.exists?(Path.join(dir, ".gitignore"))
+      assert File.exists?(Path.join(dir, "memory/MEMORY.md"))
+      assert File.exists?(Path.join(dir, "notes/README.md"))
+      assert File.exists?(Path.join(dir, "runbooks/arbiter-event-monitor.md"))
+
+      assert out =~ "created"
+      assert out =~ "AGENTS.md"
+      assert out =~ "ARBITER_OPERATOR.md"
+      assert out =~ "runbooks/arbiter-event-monitor.md"
+    end
+
+    test "runbooks/arbiter-event-monitor.md is the canonical event monitor runbook" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      runbook = File.read!(Path.join(dir, "runbooks/arbiter-event-monitor.md"))
+
+      assert runbook =~ "arbiter event monitor"
+      assert runbook =~ "http://127.0.0.1:4848"
+      assert runbook =~ "/events"
+    end
+
+    test "runbooks/arbiter-event-monitor.md no longer claims the stream has no replay (bd-aqafdr)" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      runbook = File.read!(Path.join(dir, "runbooks/arbiter-event-monitor.md"))
+
+      refute runbook =~ ~r/no replay/i
+      assert runbook =~ "since="
+    end
+
+    # `Wardmast.Sessions.Instructions` (the per-session CLAUDE.md) and this
+    # runbook both describe the event monitor, but can't share code: the
+    # runbook is a template compiled into the `wardmast_cli` escript, and
+    # `Instructions` lives in the `arbiter` server app, which must not
+    # depend on the escript. Pinning both here catches the two drifting.
+    test "the runbook's session forward-reference and the session's own instructions agree on the key facts (bd-aqafdr)" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      runbook = File.read!(Path.join(dir, "runbooks/arbiter-event-monitor.md"))
+
+      assert runbook =~ "bd-aqafdr"
+      assert runbook =~ "$ARB_SESSION_ID"
+      refute runbook =~ ~r/no replay/i
+
+      session = %Wardmast.Sessions.Session{
+        id: "sess1",
+        cwd: "/tmp/sess1",
+        workspace_id: nil,
+        can_dispatch: false
+      }
+
+      instructions = Wardmast.Sessions.Instructions.render(session)
+
+      for phrase <- ["Monitor", "monitor.sh", "coordinator_inbox", "since="] do
+        assert instructions =~ phrase,
+               "expected the session's generated CLAUDE.md to mention #{inspect(phrase)}"
+      end
+    end
+
+    test "docs/monitoring.md documents workspace-agnostic coordinator tokens and token recovery" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      monitoring = File.read!(Path.join(dir, "docs/monitoring.md"))
+
+      # Verifies documentation about stale/legacy tokens and workspace-agnostic tokens
+      assert monitoring =~ "workspace-agnostic"
+      assert monitoring =~ "arb mcp token mint --tier coordinator"
+      assert monitoring =~ ".mcp.json"
+      assert monitoring =~ "/mcp"
+    end
+
+    test "docs/worktrees-and-workers.md covers coordinator-mediated conflict resolution" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      doc = File.read!(Path.join(dir, "docs/worktrees-and-workers.md"))
+
+      # Verify the new section exists
+      assert doc =~ "Coordinator-mediated conflict resolution"
+      # Verify key concepts from the pattern
+      assert doc =~ "resolve/<issue-id>"
+      assert doc =~ "--force-with-lease"
+      assert doc =~ "Authorization is required"
+      assert doc =~ "mix compile"
+      assert doc =~ "mix test"
+    end
+
+    test "ARBITER_OPERATOR.md is the operator field guide with all key sections" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      guide = File.read!(Path.join(dir, "ARBITER_OPERATOR.md"))
+
+      # Rendered with the plain code terms.
+      assert guide =~ "Coordinator Operator Field Guide"
+      assert guide =~ "workers"
+      assert guide =~ "issue"
+
+      # Covers the required sections.
+      assert guide =~ "Role & Loop"
+      assert guide =~ "Concurrency Discipline"
+      assert guide =~ "Config Safety"
+      assert guide =~ "Deploy Safely"
+      assert guide =~ "Trust State, But Verify"
+      assert guide =~ "ReviewGate"
+      assert guide =~ "Provider-Agnostic"
+
+      # Generic — no operator-personal content.
+      refute guide =~ "ryan"
+      refute guide =~ "Ryan"
+    end
+
+    test "scaffolded rubrics carry the D0..D5 scale with the opt-in D5 flagship rung" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      guide = File.read!(Path.join(dir, "ARBITER_OPERATOR.md"))
+      agents = File.read!(Path.join(dir, "AGENTS.md"))
+
+      # The ceiling is D5 everywhere the rubric is stated, not D4.
+      assert guide =~ "Difficulty scale (D0\u2013D5)"
+      assert guide =~ "**DIFFICULTY (D0\u2013D5)**"
+      assert agents =~ "`--difficulty 0..5` (D0..D5)"
+      refute guide =~ "D0\u2013D4"
+      refute agents =~ "D0..D4"
+
+      # D5 reads as a deliberate escalation, not merely "harder than D4".
+      for doc <- [guide, agents] do
+        assert doc =~ "D5 Flagship"
+        assert doc =~ "deliberate escalation"
+        assert doc =~ ~s(not a reason)
+      end
+    end
+
+    test "ARBITER_OPERATOR.md uses the plain code terms and domain prefix" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      guide = File.read!(Path.join(dir, "ARBITER_OPERATOR.md"))
+
+      assert guide =~ "Coordinator"
+      assert guide =~ "worker"
+      assert guide =~ "issue"
+    end
+
+    test "AGENTS.md uses the plain code terms and the domain name/prefix" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      agents = File.read!(Path.join(dir, "AGENTS.md"))
+
+      # Plain coordinator term, capitalised in the heading.
+      assert agents =~ "# Coordinator — Wardmast command session"
+      assert agents =~ "workers"
+      assert agents =~ "issue"
+
+      # Domain name + prefix templated from Workspace.resolve/0.
+      assert agents =~ "**default** (prefix `emr`)"
+      assert agents =~ "emr-001"
+      assert agents =~ "emr-1 blocks emr-2"
+
+      # Host templated from ARB_HOST default.
+      assert agents =~ "http://127.0.0.1:4848"
+
+      # Tells the agent to read standing orders from `arb prime` (sibling task).
+      assert agents =~ "arb prime"
+      assert agents =~ "standing orders"
+    end
+
+    test "generated AGENTS.md carries NO persona" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      agents = File.read!(Path.join(dir, "AGENTS.md"))
+
+      refute agents =~ "Darth"
+      refute agents =~ "Gnosis"
+      refute agents =~ "Sith"
+      refute agents =~ "Penumbral"
+    end
+
+    test "AGENTS.local.md is a stub overlay with no persona, and .gitignore hides it" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+
+      local = File.read!(Path.join(dir, "AGENTS.local.md"))
+      assert local =~ "Personal overlay"
+      assert local =~ "gitignored"
+      refute local =~ "Darth"
+
+      gitignore = File.read!(Path.join(dir, ".gitignore"))
+      assert gitignore =~ "AGENTS.local.md"
+    end
+
+    test "MEMORY.md is a clean skeleton index" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      memory = File.read!(Path.join(dir, "memory/MEMORY.md"))
+
+      assert memory =~ "Coordinator Memory"
+      assert memory =~ "Add entries below"
+    end
+
+    test "defaults the target directory to cwd when no path is given" do
+      stub_install()
+      dir = tmp_dir()
+      File.mkdir_p!(dir)
+
+      File.cd!(dir, fn ->
+        {_out, _err, exit_code} = capture(fn -> Init.run([]) end)
+        assert exit_code == 0
+      end)
+
+      assert File.exists?(Path.join(dir, "AGENTS.md"))
+    end
+  end
+
+  describe "--dev mode" do
+    test "AGENTS.md covers both bare and systemd-wrapped dev sub-cases" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir, "--dev"]) end)
+      agents = File.read!(Path.join(dir, "AGENTS.md"))
+
+      # Bare source checkout sub-case (existing).
+      assert agents =~ "mix phx.server &"
+
+      # Systemd-wrapped dev sub-case (new).
+      assert agents =~ "arb start"
+      assert agents =~ "systemctl --user restart"
+      assert agents =~ "journalctl --user-unit"
+      assert agents =~ "arb install-service"
+
+      # deploy.md pointer still present for the dev-mode restart-kills-workers note.
+      assert agents =~ "docs/deploy.md"
+    end
+
+    test "docs/deploy.md renders the dev-mode manual deploy sequence" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir, "--dev"]) end)
+      deploy = File.read!(Path.join(dir, "docs/deploy.md"))
+
+      assert deploy =~ "git pull"
+      assert deploy =~ "git status"
+      assert deploy =~ "mix deps.get"
+      assert deploy =~ "systemctl --user restart"
+      assert deploy =~ "mix escript.build"
+      assert deploy =~ "\\cp -f"
+      assert deploy =~ "arb server doctor"
+      assert deploy =~ "mix clean"
+
+      # Prod-only content must not leak into the dev runbook.
+      refute deploy =~ "arb server deploy --version"
+      refute deploy =~ "~/.arbiter/current"
+    end
+
+    test "docs/deploy.md without --dev is unchanged prod release runbook" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      deploy = File.read!(Path.join(dir, "docs/deploy.md"))
+
+      assert deploy =~ "OTP release"
+      assert deploy =~ "arb server deploy --version"
+      assert deploy =~ "~/.arbiter/current"
+      refute deploy =~ "mix escript.build"
+    end
+  end
+
+  describe "non-destructive behavior" do
+    test "skips files that already exist and reports them" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+
+      # Tamper with an existing file; a plain re-run must not clobber it.
+      sentinel = "DO NOT OVERWRITE\n"
+      File.write!(Path.join(dir, "AGENTS.md"), sentinel)
+
+      {out, _err, exit_code} = capture(fn -> Init.run([dir]) end)
+      assert exit_code == 0
+      assert out =~ "skipped"
+      assert File.read!(Path.join(dir, "AGENTS.md")) == sentinel
+    end
+
+    test "--force overwrites existing files" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      File.write!(Path.join(dir, "AGENTS.md"), "stale\n")
+
+      {out, _err, exit_code} = capture(fn -> Init.run([dir, "--force"]) end)
+      assert exit_code == 0
+      assert out =~ "overwritten"
+      assert File.read!(Path.join(dir, "AGENTS.md")) =~ "Wardmast command session"
+    end
+  end
+
+  describe "resilience" do
+    test "scaffolds with the default domain when the server is unreachable" do
+      stub_transport_error(:get, "/api/workspaces", :econnrefused)
+      dir = tmp_dir()
+
+      {_out, _err, exit_code} = capture(fn -> Init.run([dir]) end)
+      assert exit_code == 0
+
+      agents = File.read!(Path.join(dir, "AGENTS.md"))
+      # Plain code terms, with the fallback default domain prefix.
+      assert agents =~ "worker"
+      assert agents =~ "bd-001"
+    end
+  end
+
+  describe "--json mode" do
+    test "emits a machine-readable summary" do
+      stub_install()
+      dir = tmp_dir()
+
+      {out, _err, exit_code} = capture(fn -> Init.run([dir, "--json"]) end)
+      assert exit_code == 0
+
+      {:ok, decoded} = Jason.decode(String.trim(out))
+      assert decoded["dir"] == dir
+      assert decoded["terms"]["coordinator"] == "coordinator"
+      assert decoded["domain"]["prefix"] == "emr"
+      assert is_list(decoded["files"])
+      assert Enum.any?(decoded["files"], fn f -> f["path"] == "AGENTS.md" end)
+    end
+  end
+
+  describe "--diff mode" do
+    # `diff -u` is a pure read-only text tool; opt in to the real spawn.
+    setup do
+      Process.put(:bd2_allow_real_cmd, true)
+      :ok
+    end
+
+    test "reports all files as new when the target dir is empty" do
+      stub_install()
+      dir = tmp_dir()
+      File.mkdir_p!(dir)
+
+      {out, _err, exit_code} = capture(fn -> Init.run([dir, "--diff"]) end)
+      assert exit_code == 0
+
+      assert out =~ "new upstream file, not present locally"
+      assert out =~ "AGENTS.md"
+
+      # Strictly a reporting mode — nothing is written.
+      refute File.exists?(Path.join(dir, "AGENTS.md"))
+    end
+
+    test "reports no diff for a file that matches the current template" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+
+      {out, _err, exit_code} = capture(fn -> Init.run([dir, "--diff"]) end)
+      assert exit_code == 0
+
+      # AGENTS.md was just scaffolded from the current template, so it's
+      # unchanged and shouldn't show up as a diffed or new file.
+      refute out =~ "AGENTS.md\n"
+      refute out =~ "new upstream file"
+    end
+
+    test "prints unified diff hunks for a locally-modified file, without writing anything" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      original = File.read!(Path.join(dir, "AGENTS.md"))
+      File.write!(Path.join(dir, "AGENTS.md"), original <> "\nLocal note: filed under X.\n")
+
+      {out, _err, exit_code} = capture(fn -> Init.run([dir, "--diff"]) end)
+      assert exit_code == 0
+
+      assert out =~ "AGENTS.md"
+      assert out =~ "@@"
+      assert out =~ "Local note: filed under X."
+
+      # Report-only — the on-disk file must be untouched.
+      assert File.read!(Path.join(dir, "AGENTS.md")) ==
+               original <> "\nLocal note: filed under X.\n"
+    end
+
+    test "--json --diff emits {path, status, diff} per file" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      original = File.read!(Path.join(dir, "AGENTS.md"))
+      File.write!(Path.join(dir, "AGENTS.md"), original <> "\nLocal note.\n")
+      File.rm!(Path.join(dir, "ARBITER_OPERATOR.md"))
+
+      {out, _err, exit_code} = capture(fn -> Init.run([dir, "--diff", "--json"]) end)
+      assert exit_code == 0
+
+      {:ok, decoded} = Jason.decode(String.trim(out))
+      files = decoded["files"]
+
+      agents = Enum.find(files, fn f -> f["path"] == "AGENTS.md" end)
+      assert agents["status"] == "diff"
+      assert is_binary(agents["diff"])
+      assert agents["diff"] =~ "Local note."
+
+      operator = Enum.find(files, fn f -> f["path"] == "ARBITER_OPERATOR.md" end)
+      assert operator["status"] == "new"
+      assert operator["diff"] == nil
+
+      memory = Enum.find(files, fn f -> f["path"] == "memory/MEMORY.md" end)
+      assert memory["status"] == "unchanged"
+      assert memory["diff"] == nil
+    end
+
+    test "does not report .mcp.json as drift or leak the minted coordinator token" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "emr"}]}, 200}}
+      ])
+
+      # bd-8381tk: the token comes over the operator socket, not anonymous HTTP.
+      WardmastCli.FakeOperatorSocket.start!(%{"token" => "REAL-LIVE-TOKEN-abc123"})
+
+      dir = tmp_dir()
+
+      # Scaffold with a real minted token on disk (as any live install would
+      # have), then diff — `--diff` itself never mints a token.
+      capture(fn -> Init.run([dir]) end)
+      assert File.read!(Path.join(dir, ".mcp.json")) =~ "REAL-LIVE-TOKEN-abc123"
+
+      {text_out, _err, exit_code} = capture(fn -> Init.run([dir, "--diff"]) end)
+      assert exit_code == 0
+      refute text_out =~ "REAL-LIVE-TOKEN-abc123"
+      assert text_out =~ ".mcp.json: not compared (install-local credential config)"
+      assert text_out =~ "no template drift."
+
+      {json_out, _err, exit_code} = capture(fn -> Init.run([dir, "--diff", "--json"]) end)
+      assert exit_code == 0
+      refute json_out =~ "REAL-LIVE-TOKEN-abc123"
+
+      {:ok, decoded} = Jason.decode(String.trim(json_out))
+      mcp_json = Enum.find(decoded["files"], fn f -> f["path"] == ".mcp.json" end)
+      assert mcp_json["status"] == "not_comparable"
+      assert mcp_json["diff"] == nil
+    end
+  end
+
+  describe "docs/external-trackers.md" do
+    test "includes gotchas for code-evidence audits, GitLab config, and status_map" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      trackers = File.read!(Path.join(dir, "docs/external-trackers.md"))
+
+      # Gotcha 1: Code-evidence audits are inconclusive, not "not started"
+      assert trackers =~ "code-evidence"
+      assert trackers =~ "inconclusive"
+
+      # Gotcha 2: GitLab-strategy workspaces need both host and project_id
+      assert trackers =~ "GitLab"
+      assert trackers =~ "host"
+      assert trackers =~ "project_id"
+      assert trackers =~ "merge.config"
+
+      # Gotcha 3: Tracker status_map mismatch
+      assert trackers =~ "status_map"
+      assert trackers =~ "tracker_ref"
+    end
+  end
+end

@@ -32,7 +32,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/check-release-glibc.sh [--baseline X.Y] <path>...
 
-  <path>   An assembled release directory (e.g. _build/prod/rel/arbiter) or a
+  <path>   An assembled release directory (e.g. _build/prod/rel/wardmast) or a
            release tarball (.tar.gz / .tgz / .tar). May be repeated.
 
   --baseline X.Y
@@ -49,9 +49,9 @@ Exit status:
      found nothing to check / the arguments were wrong
 
 Examples:
-  scripts/check-release-glibc.sh _build/prod/rel/arbiter
+  scripts/check-release-glibc.sh _build/prod/rel/wardmast
   scripts/check-release-glibc.sh arbiter-v0.1.65-linux.tar.gz
-  scripts/check-release-glibc.sh --baseline 2.34 _build/prod/rel/arbiter
+  scripts/check-release-glibc.sh --baseline 2.34 _build/prod/rel/wardmast
 USAGE
 }
 

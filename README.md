@@ -16,8 +16,8 @@
   (`otp-version` / `elixir-version` and the cache keys), in the release
   workflow (`ELIXIR_VERSION` / `OTP_MAJOR`, and `OTP_VERSION` in
   `scripts/build-release-otp.sh`), as the worker-image fallback in
-  `Arbiter.Worker.Image`, and as each app's `elixir: "~> 1.20"`. A test
-  (`apps/arbiter/test/arbiter/toolchain_pins_test.exs`) fails when they drift,
+  `Wardmast.Worker.Image`, and as each app's `elixir: "~> 1.20"`. A test
+  (`apps/wardmast/test/wardmast/toolchain_pins_test.exs`) fails when they drift,
   so bump them together. Elixir 1.20's type checker is why the floor is 1.20:
   the build compiles with `--warnings-as-errors`, and its type warnings are
   part of that gate.
@@ -38,7 +38,7 @@ mix setup
 arb install cli
 ```
 
-`arb install cli` builds the CLI escript from `apps/arbiter_cli` and installs
+`arb install cli` builds the CLI escript from `apps/wardmast_cli` and installs
 it to `~/.local/bin/arb`. If `~/.local/bin` isn't in your PATH yet, add this
 to your shell profile (`.bashrc`, `.zshrc`, etc.) and restart your terminal:
 
@@ -50,11 +50,11 @@ Since `arb install cli` itself depends on `arb` already being on your PATH the
 very first time, bootstrap it once by hand:
 
 ```sh
-cd apps/arbiter_cli && mix escript.build && cd ../..
-mkdir -p ~/.local/bin && cp apps/arbiter_cli/arb ~/.local/bin/
+cd apps/wardmast_cli && mix escript.build && cd ../..
+mkdir -p ~/.local/bin && cp apps/wardmast_cli/arb ~/.local/bin/
 ```
 
-Re-run `arb install cli` any time you pull changes to `apps/arbiter_cli`.
+Re-run `arb install cli` any time you pull changes to `apps/wardmast_cli`.
 
 ## Architecture
 
@@ -76,7 +76,7 @@ Re-run `arb install cli` any time you pull changes to `apps/arbiter_cli`.
 
 **Escalation mailbox** — the coordinator's inbox for anything that needs a human or coordinator ruling (e.g. a ReviewGate escalation, a worker failure). Read it via `arb message inbox` or the `inbox_check` / `notify_list` MCP tools.
 
-**`/events`** — a server-push event stream (`GET /events`) for the coordinator: newline-delimited JSON, one event per line, for topics like `inbox`, `review_gate`, `worker_failed`, `worker_done`, and (opt-in) `task_state` / `external_review`. Every event carries a `"cursor"`; pass `since=<cursor|timestamp>` to replay what was missed since a disconnect before rejoining the live stream (see `ArbiterWeb.Api.EventController` moduledoc).
+**`/events`** — a server-push event stream (`GET /events`) for the coordinator: newline-delimited JSON, one event per line, for topics like `inbox`, `review_gate`, `worker_failed`, `worker_done`, and (opt-in) `task_state` / `external_review`. Every event carries a `"cursor"`; pass `since=<cursor|timestamp>` to replay what was missed since a disconnect before rejoining the live stream (see `WardmastWeb.Api.EventController` moduledoc).
 
 ## Coordinating via MCP
 
@@ -87,7 +87,7 @@ The primary integration path for a coordinator agent (e.g. a dedicated Claude Co
 - **Gate escalations** — `review_gate_rounds_list` shows a ticket's ReviewGate rounds, plus the coordinator's recorded answer and an `outcome` (`converged` / `resolved` / `not_converged`); `review_gate_resolve` (CLI: `arb review resolve <ticket> --amend "<reasoning>"`) records that answer — `accept_as_is` / `amend` / `send_back` / `reject`, with reasoning, actor and timestamp — when a gate escalates on its round or send-back cap, so an override of a reviewer's standing finding is on record rather than only in a commit message. The merge path reads it: a PR whose latest reviewer verdict is not APPROVE merges only when an `accept_as_is` / `amend` covers its head; `send_back` means another review round follows the implementer's completion and never permits a merge by itself. Cap hits and resolutions are the opt-in `gate_cap_hit` / `gate_resolved` event topics.
 - **ExternalReview** — `external_review_list`, `external_review_show`, `external_review_transcript`, `review_greenlight` for inspecting and unblocking worktree-backed external code review. `external_review_transcript` is `worker_log`'s counterpart for a review: the prompt it was given, the raw transcript its reviewer emitted, and every tool call paired with its result — keyed on the review record id, since an external review is not ticket-linked.
 
-See `apps/arbiter/lib/arbiter/mcp/catalog.ex` for the full, current catalog and which tier (worker vs. coordinator) can call each tool.
+See `apps/wardmast/lib/wardmast/mcp/catalog.ex` for the full, current catalog and which tier (worker vs. coordinator) can call each tool.
 
 To mint a token for a coordinator to use, run this on the server host from
 your own shell:
@@ -174,7 +174,7 @@ To run Arbiter as a self-contained OTP release under a systemd user unit, instal
 arb install service
 ```
 
-This writes `~/.config/systemd/user/arbiter.service` (`ExecStart=~/.arbiter/current/bin/arbiter start`), enables it via `loginctl enable-linger` for machine-boot startup, and starts the release. Manage it with `systemctl --user status arbiter.service` and view logs with `journalctl --user -u arbiter.service -f`. Pass `--system` to install a system-wide unit instead (needs root). Secrets and PATH configuration live in `~/.arbiter/arbiter.env`. Uninstall with `arb install service --uninstall`. The unit sets `OOMPolicy=continue` and each worker runs in its own memory-capped scope (`ARBITER_WORKER_MEMORY_MAX`, default 40% of RAM), so one runaway worker process cannot stop the server — see [docs/worker-memory-cap.md](docs/worker-memory-cap.md), including the drop-in for a unit installed before this.
+This writes `~/.config/systemd/user/arbiter.service` (`ExecStart=~/.arbiter/current/bin/wardmast start`), enables it via `loginctl enable-linger` for machine-boot startup, and starts the release. Manage it with `systemctl --user status arbiter.service` and view logs with `journalctl --user -u arbiter.service -f`. Pass `--system` to install a system-wide unit instead (needs root). Secrets and PATH configuration live in `~/.arbiter/arbiter.env`. Uninstall with `arb install service --uninstall`. The unit sets `OOMPolicy=continue` and each worker runs in its own memory-capped scope (`WARDMAST_WORKER_MEMORY_MAX`, default 40% of RAM), so one runaway worker process cannot stop the server — see [docs/worker-memory-cap.md](docs/worker-memory-cap.md), including the drop-in for a unit installed before this.
 
 `arb install service` only writes the release-shaped unit above. There is no
 CLI command yet for a dev-mode unit (one whose `ExecStart` runs
@@ -213,7 +213,7 @@ arb server doctor     # confirm CLI and server report the same version
 
 `arb server deploy --git-pull` does the pull → rebuild → restart → migrate
 sequence for you: `git pull --ff-only` on `main`, rebuild and install the CLI
-escript if `apps/arbiter_cli` changed, then restart Phoenix — via
+escript if `apps/wardmast_cli` changed, then restart Phoenix — via
 `systemctl --user restart arbiter` when the systemd unit is present, a plain
 process bounce otherwise. The restart's boot sequence (`Boot.Migrator`)
 applies any pending migrations before the endpoint opens, so migrations are
@@ -228,8 +228,8 @@ will not have — running `mix deps.get` *before* the pull is a no-op, since
 `git fetch` doesn't move `HEAD` and the old lockfile is still checked out.
 Instead, either run `mix deps.get && arb server restart` immediately *after*
 the deploy, or skip `--git-pull` and do the whole thing manually: `git pull
---ff-only origin main` → `mix deps.get` → `(cd apps/arbiter_cli && mix
-escript.build && cp arb ~/.local/bin/arb)` if `apps/arbiter_cli` changed →
+--ff-only origin main` → `mix deps.get` → `(cd apps/wardmast_cli && mix
+escript.build && cp arb ~/.local/bin/arb)` if `apps/wardmast_cli` changed →
 `arb server restart` → `arb server doctor`. The manual form is the safer
 choice when deps changed, since it never restarts against unfetched deps.
 
@@ -252,16 +252,16 @@ arb server deploy --version v1.2.3
 
 This is the primary path, and the **"Update to vX.Y.Z"** button in the dashboard's update banner runs the same command. The full runbook is [docs/self-update.md](docs/self-update.md).
 
-It resolves the release repo (`ARB_RELEASE_REPO`, else the running server's own release metadata, else the repo your `arb` was built from — and says which), downloads the release tarball + checksum from GitHub Releases, verifies the SHA-256, unpacks it, takes an **integrity-checked online backup of the database** into `~/.arbiter/snapshots/` (aborting if that fails), atomically swaps `current`, restarts the service, and health-checks it. If it doesn't come back green it rolls back to the last-known-good release — and when the new release had migrations, **restores the backup first**. After a green deploy it installs the matching `arb` escript. `arb doctor` reports the last deploy (tag, time, outcome, backup path).
+It resolves the release repo (`WARDMAST_RELEASE_REPO`, else the running server's own release metadata, else the repo your `arb` was built from — and says which), downloads the release tarball + checksum from GitHub Releases, verifies the SHA-256, unpacks it, takes an **integrity-checked online backup of the database** into `~/.arbiter/snapshots/` (aborting if that fails), atomically swaps `current`, restarts the service, and health-checks it. If it doesn't come back green it rolls back to the last-known-good release — and when the new release had migrations, **restores the backup first**. After a green deploy it installs the matching `arb` escript. `arb doctor` reports the last deploy (tag, time, outcome, backup path).
 
 #### Migration ordering, and rollback across a migration
 
 **The deploy does not run migrations.** SQLite allows exactly one writer, so a
-`bin/arbiter eval Arbiter.Release.migrate` from the new release while the old
+`bin/wardmast eval Wardmast.Release.migrate` from the new release while the old
 server is still serving would be a second writer racing the live one. Instead
-the new release migrates during its **own boot**: `Arbiter.Boot.Migrator` is a
+the new release migrates during its **own boot**: `Wardmast.Boot.Migrator` is a
 synchronous supervision-tree child that brings the schema to head before
-`ArbiterWeb.Endpoint` binds its port, gated on the single-instance advisory
+`WardmastWeb.Endpoint` binds its port, gated on the single-instance advisory
 lock so only one node ever migrates. The real ordering is therefore:
 
     stop the old server  →  new release boots  →  migrate  →  serve
@@ -284,7 +284,7 @@ release adds any:
 - on a health-check failure it **refuses** to roll back, leaves `current` on the
   new release, names the crossed migrations, and exits non-zero with the
   operator's options (fix forward, or roll the schema back first with
-  `bin/arbiter eval "Arbiter.Release.rollback(Arbiter.Repo, <version>)"` and then
+  `bin/wardmast eval "Wardmast.Release.rollback(Wardmast.Repo, <version>)"` and then
   `arb server deploy --version <prior> --force`);
 - `--allow-cross-migration-rollback` overrides the refusal, rolling back anyway
   with a loud warning that the prior release is now on a newer schema.
@@ -303,14 +303,14 @@ old release) rather than a green-wait timeout, the message says the new
 release's migrations *may* have been applied rather than claiming they were —
 a release that never booted never ran its boot migrator.
 
-### Worker jail unmask (`ARB_WORKER_JAIL_UNMASK`)
+### Worker jail unmask (`WARDMAST_WORKER_JAIL_UNMASK`)
 
 The worker jail hides credential directories such as `~/.config/glab-cli`. To
-re-expose one, set `ARB_WORKER_JAIL_UNMASK` (e.g. in `~/.arbiter/arbiter.env`)
+re-expose one, set `WARDMAST_WORKER_JAIL_UNMASK` (e.g. in `~/.arbiter/arbiter.env`)
 to colon- or comma-separated absolute paths; `~` expands against `HOME`:
 
 ```sh
-echo "ARB_WORKER_JAIL_UNMASK=~/.config/glab-cli" >> ~/.arbiter/arbiter.env
+echo "WARDMAST_WORKER_JAIL_UNMASK=~/.config/glab-cli" >> ~/.arbiter/arbiter.env
 ```
 
 Malformed (non-absolute) entries are skipped with a warning and never block
@@ -318,7 +318,7 @@ boot. Don't use `ERL_FLAGS=-arbiter worker_jail_unmask ...`: systemd strips the
 quotes and every release then refuses to boot. `arb server doctor` lists the
 unmasked paths ("worker jail unmask").
 
-### Server bind address (`ARB_BIND_ADDRESS`)
+### Server bind address (`WARDMAST_BIND_ADDRESS`)
 
 The dashboard's auth model is "a loopback peer is trusted; there is no login" —
 LiveView pages, including a terminal into every worker session, have no
@@ -331,15 +331,15 @@ prod/release, in dev and runtime config alike.
 with a permissive security group. An install that relied on that for remote
 access will stop being reachable after upgrading. Use an SSH port-forward
 instead (`ssh -L 4848:127.0.0.1:4848 <host>`), which needs no server-side
-change; or, if off-loopback really is required, set `ARB_BIND_ADDRESS`
+change; or, if off-loopback really is required, set `WARDMAST_BIND_ADDRESS`
 explicitly (below) — `arb server doctor` will keep warning about it every time
 as a reminder of the exposure.
 
-To bind elsewhere, set `ARB_BIND_ADDRESS` to any address `:inet.parse_address/1`
+To bind elsewhere, set `WARDMAST_BIND_ADDRESS` to any address `:inet.parse_address/1`
 accepts (e.g. `0.0.0.0`, `::`, a specific interface IP):
 
 ```sh
-echo "ARB_BIND_ADDRESS=0.0.0.0" >> ~/.arbiter/arbiter.env
+echo "WARDMAST_BIND_ADDRESS=0.0.0.0" >> ~/.arbiter/arbiter.env
 ```
 
 Any non-loopback value logs a boot `WARNING` naming the exposure, and
@@ -431,13 +431,13 @@ By default, `arb` talks to a local server on `http://127.0.0.1:4848` (loopback).
 - **Local loopback** (`ARB_HOST` unset or `http://127.0.0.1:4848`) needs no `ARB_TOKEN` from your own shell: `arb` mints a short-lived token over the operator socket for each invocation (bd-asawcq). The server itself no longer exempts localhost; a bare `curl` to `/api` gets 401.
 - **Remote access** requires both `ARB_HOST` and `ARB_TOKEN`, *and* the server
   must be reachable at that address in the first place — since the server now
-  binds loopback-only by default (above), that means either `ARB_BIND_ADDRESS`
+  binds loopback-only by default (above), that means either `WARDMAST_BIND_ADDRESS`
   set server-side, or reaching it through an SSH port-forward / VPN tunnel that
   terminates on `127.0.0.1` locally. The API's own token check is unaffected
   either way; only the dashboard's login-free LiveView pages are the reason to
-  prefer a tunnel over a raw `ARB_BIND_ADDRESS` override.
+  prefer a tunnel over a raw `WARDMAST_BIND_ADDRESS` override.
 
-### Encryption key (`ARBITER_CLOAK_KEY`) — required
+### Encryption key (`WARDMAST_CLOAK_KEY`) — required
 
 Arbiter encrypts workspace secrets (tracker / merger credentials) at rest using
 AES-256-GCM via [`ash_cloak`](https://hex.pm/packages/ash_cloak). **The server
@@ -445,11 +445,11 @@ refuses to start without an encryption key.** Generate a 32-byte Base64 key and
 add it to your environment before deploying:
 
 ```sh
-echo "ARBITER_CLOAK_KEY=$(openssl rand -base64 32)" >> ~/.arbiter/arbiter.env
+echo "WARDMAST_CLOAK_KEY=$(openssl rand -base64 32)" >> ~/.arbiter/arbiter.env
 # (for a non-service run, put it in the project-root .arbiter.env or export it)
 ```
 
-`arb install service` forwards `ARBITER_CLOAK_KEY` from the installing shell
+`arb install service` forwards `WARDMAST_CLOAK_KEY` from the installing shell
 into `~/.arbiter/arbiter.env` automatically if it is set. Treat this key like a
 database password: back it up and keep it stable — rotating it (re-encrypting
 existing secrets) is a separate runbook and is not yet automated. Losing it
@@ -458,7 +458,7 @@ makes existing encrypted secrets unrecoverable.
 ### Claude CLI authentication (`CLAUDE_CODE_OAUTH_TOKEN`) — required
 
 Real worker spawns and the `CredentialWatchdog`'s health probe both authenticate
-the `claude` CLI via `Arbiter.Agents.Claude.spawn_env/1`, and a Claude worker
+the `claude` CLI via `Wardmast.Agents.Claude.spawn_env/1`, and a Claude worker
 needs a credential of its own: a setup token (`claude setup-token`) or an
 `ANTHROPIC_API_KEY`. Arbiter **never** copies your own
 `~/.claude/.credentials.json` into a worker — Claude rotates that login's refresh
@@ -480,7 +480,7 @@ and emits an explicit unset when there is none, so a server-env value can
 never leak into a worker.
 
 **Migrating an install that still keeps its token in `worker_env` or
-`.arbiter.env`:** `mix arbiter.accounts.census` only ever sees credentials
+`.arbiter.env`:** `mix wardmast.accounts.census` only ever sees credentials
 already stored in a workspace's `worker_env` (`docs/provider-account-design.md`
 §7.1) — it has no visibility into the arbiter server's own process
 environment, so a token that has only ever lived in `.arbiter.env` will not
@@ -489,17 +489,17 @@ release, which requires provider accounts:
 
 1. Set the token as a `worker_env` value (`CLAUDE_CODE_OAUTH_TOKEN`) on at
    least one workspace via the dashboard's workspace environment editor, so
-   `mix arbiter.accounts.census` has something to fingerprint.
-2. Run `mix arbiter.accounts.census` (optionally with
+   `mix wardmast.accounts.census` has something to fingerprint.
+2. Run `mix wardmast.accounts.census` (optionally with
    `--operator-credential ~/.claude/.credentials.json`), edit the resulting
    plan to merge/name the candidate account, then apply it with
-   `mix arbiter.accounts.migrate --plan accounts.json`, and restart.
-3. Remove `CLAUDE_CODE_OAUTH_TOKEN` (and any `ARBITER_PROVIDER_ACCOUNTS` line)
+   `mix wardmast.accounts.migrate --plan accounts.json`, and restart.
+3. Remove `CLAUDE_CODE_OAUTH_TOKEN` (and any `WARDMAST_PROVIDER_ACCOUNTS` line)
    from `.arbiter.env` / the service unit — nothing reads them, and a stale
    credential lying around in a secrets file is its own risk.
 
 On a **release install** (no Mix), the same census, migrate and rollback steps
-run as `bin/arbiter eval 'Arbiter.Release.accounts_census(...)'`,
+run as `bin/wardmast eval 'Wardmast.Release.accounts_census(...)'`,
 `accounts_migrate/1` and `accounts_rollback/1`.
 [`docs/provider-accounts-release-runbook.md`](docs/provider-accounts-release-runbook.md)
 is the step-by-step procedure (census, dry run, migrate, restart, verify), the
@@ -537,7 +537,7 @@ workspace's `ANTHROPIC_API_KEY` must win, verify the CLI's actual precedence
 before relying on it, or leave that workspace's Claude account without a
 setup token.
 
-**Redaction:** `Arbiter.Worker.ClaudeSession.start/1` adds
+**Redaction:** `Wardmast.Worker.ClaudeSession.start/1` adds
 `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` values to the session's
 redaction list alongside the workspace's secret-flagged `worker_env` values —
 both the values carried in the spawn's explicit `:env` (the Dispatch/
@@ -610,7 +610,7 @@ needed, orient itself with `arb prime`, and be ready to coordinate your work.
 A **repo** is a local git repository that workers check out and work in. Register your projects via the dashboard (Workspace → Repos), or directly in `config/dev.exs`:
 
 ```elixir
-config :arbiter, :repo_paths, %{
+config :wardmast, :repo_paths, %{
   "my-project" => Path.expand("~/dev/my-project"),
   "another-project" => Path.expand("~/dev/another-project")
 }
@@ -622,7 +622,7 @@ After editing `config/dev.exs`, restart the server for changes to take effect.
 
 The CLI uses an `arb <resource> <verb>` grammar: `arb [resource] verb [args]`.
 Run `arb help` (or `arb --help`) for the exhaustive, always-current usage text
-(`apps/arbiter_cli/lib/arbiter_cli/main.ex`); the table below covers the
+(`apps/wardmast_cli/lib/wardmast_cli/main.ex`); the table below covers the
 commands you'll reach for most.
 
 ### Key commands
@@ -672,6 +672,17 @@ As a guard, `arb` counts the other `arb` VMs running for your user (a `/proc` re
 skipped where `/proc` is unavailable). Above `ARB_FANOUT_WARN` (default 16) it warns on
 stderr; above `ARB_FANOUT_MAX` (default 64) it refuses unless you pass `--force` (or `--allow-fanout`)
 or set `ARB_ALLOW_FANOUT=1`.
+
+## Renamed: Arbiter -> Wardmast (environment variables)
+
+The OTP apps, modules, Mix tasks and release are now `Wardmast.*` (release
+binary `bin/wardmast`, tasks `mix wardmast.*`, config `config :wardmast`).
+Operator environment variables are read as `WARDMAST_*` first; for **one release**
+the old `ARB_*` / `ARBITER_*` spelling still works and logs a one-time deprecation
+warning (`WARDMAST_CLOAK_KEY` for `ARBITER_CLOAK_KEY`, `WARDMAST_DATA_HOME` for
+`ARB_DATA_HOME`, ...). The variables the server exports to workers and the `arb` CLI
+(`ARB_TOKEN`, `ARB_HOST`, `ARB_WORKSPACE`, `ARB_WORKER_BEAD_ID`, ...) and the CLI
+binary name are unchanged. Database tables and migrations are unchanged.
 
 ## Documentation
 

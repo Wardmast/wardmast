@@ -3,7 +3,7 @@
 // bd-9myzv8 — the session dock's terminal, in a real browser against a real
 // server, a real `/session` socket and a real reader.
 //
-// `ArbiterWeb.SessionDockLiveTest` proves the markup: that the expanded window
+// `WardmastWeb.SessionDockLiveTest` proves the markup: that the expanded window
 // hosts the hook and the collapsed ones do not. What it structurally cannot
 // prove is everything that only exists on the client — that the hook's
 // lifecycle really disposes the xterm and closes the socket on collapse, that
@@ -17,7 +17,7 @@
 //
 // `--sync` is a two-file handshake with the Elixir side driving the pane: this
 // script writes `<dir>/req` as `<n> <command>`, and
-// `ArbiterWeb.SessionDockTerminalBrowserTest` answers in `<dir>/ack` as
+// `WardmastWeb.SessionDockTerminalBrowserTest` answers in `<dir>/ack` as
 // `<n> <result>`. That is how output is produced *while a window is collapsed*
 // — the one thing neither side can do alone.
 //
