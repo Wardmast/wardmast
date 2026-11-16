@@ -2093,7 +2093,8 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
     case Client.get("/api/server/cli_versions") do
       {:ok, %{"clis" => clis, "hold" => hold} = resp} when is_list(clis) ->
         Enum.map(clis, &cli_row/1) ++
-          [cli_hold_row(hold, resp["scheduler"]), local_published_row(resp)]
+          [cli_hold_row(hold, resp["scheduler"]), local_published_row(resp)] ++
+          cli_republish_rows(resp["republish"])
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         [server_error_result("cli versions", err)]
@@ -2178,6 +2179,23 @@ defmodule ArbiterCli.Cmd.Doctor.Checks do
 
   defp cli_scheduler_note(%{"checked_at" => at}) when is_binary(at), do: " (last checked #{at})"
   defp cli_scheduler_note(_), do: ""
+
+  defp cli_republish_rows(%{"failed" => [_ | _] = failed}) do
+    for %{"repo" => repo} = entry <- failed do
+      ref = entry["ref"] || repo
+      reason = entry["reason"] || "unknown error"
+
+      nodes_result(
+        "cli republish #{repo}",
+        :warn,
+        "#{ref}: republish failed (#{reason})",
+        "Check registry credentials and permissions (`arb workspace secret` / " <>
+          "`arb settings get nodes.registry`), then republish or bump the CLI set."
+      )
+    end
+  end
+
+  defp cli_republish_rows(_), do: []
 
   # ---- nodes (RW7, docs/design/remote-workers.md §4.3, §14) ------------------
   #

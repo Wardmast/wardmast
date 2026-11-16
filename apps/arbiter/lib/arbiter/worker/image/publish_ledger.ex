@@ -43,18 +43,26 @@ defmodule Arbiter.Worker.Image.PublishLedger do
       file ->
         now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
         key = {Map.get(ctx, :repo), Map.get(ctx, :repo_path)}
+        touch? = Keyword.get(opts, :touch, true)
 
         :global.trans({{__MODULE__, file}, self()}, fn ->
+          entries = read(file)
+
+          at =
+            case {touch?, Map.get(entries, key)} do
+              {false, %{at: existing_at}} -> existing_at
+              _ -> now
+            end
+
           entry = %{
             key: key,
             ctx: ctx,
-            at: now,
+            at: at,
             ref: Keyword.get(opts, :ref),
             image: Keyword.get(opts, :image)
           }
 
-          entries = Map.put(read(file), key, entry)
-          write(file, entries)
+          write(file, Map.put(entries, key, entry))
         end)
 
         :ok
