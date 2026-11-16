@@ -55,7 +55,7 @@ defmodule WardmastCli.Cmd.Doctor.DistributionTest do
   defp check(opts), do: Distribution.check(Keyword.put_new(opts, :cookie_paths, []))
 
   test "all loopback and an owner-only cookie is green, and says what it saw", %{tmp_dir: dir} do
-    {epmd_port, serve} = fake_epmd!([{"arbiter", 39_783}])
+    {epmd_port, serve} = fake_epmd!([{"wardmast", 39_783}])
 
     tcp = proc_net!(dir, "tcp", [row("0100007F:1111"), row("0100007F:9B67")])
     tcp6 = proc_net!(dir, "tcp6", [])
@@ -72,7 +72,7 @@ defmodule WardmastCli.Cmd.Doctor.DistributionTest do
     Task.await(serve)
     assert %Result{status: :ok, blocks_readiness: false} = result
     assert result.detail =~ "epmd 127.0.0.1:4369"
-    assert result.detail =~ "arbiter 127.0.0.1:39783"
+    assert result.detail =~ "wardmast 127.0.0.1:39783"
     assert result.detail =~ "#{cookie} 0600"
   end
 
@@ -110,7 +110,7 @@ defmodule WardmastCli.Cmd.Doctor.DistributionTest do
   end
 
   test "the release node's distribution port on 0.0.0.0 fails", %{tmp_dir: dir} do
-    {epmd_port, serve} = fake_epmd!([{"rpc-1a2b-arbiter", 41_000}, {"arbiter", 39_783}])
+    {epmd_port, serve} = fake_epmd!([{"rpc-1a2b-wardmast", 41_000}, {"wardmast", 39_783}])
 
     # An established connection's local side is not a listener — ignored.
     tcp =
@@ -124,7 +124,7 @@ defmodule WardmastCli.Cmd.Doctor.DistributionTest do
 
     Task.await(serve)
     assert result.status == :fail
-    assert result.detail =~ "arbiter listens on 0.0.0.0:39783"
+    assert result.detail =~ "wardmast listens on 0.0.0.0:39783"
     refute result.detail =~ "192.168.1.38"
     assert result.hint =~ "inet_dist_use_interface"
   end

@@ -19,15 +19,15 @@ defmodule WardmastWeb.NodeFixtures do
 
     tarball = Path.join(releases, tag <> ".tar.gz")
     staging = Path.join(home, "staging-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(Path.join(staging, "arbiter/bin"))
-    File.cp!(Path.join(tree, "bin/wardmast"), Path.join(staging, "arbiter/bin/wardmast"))
-    File.chmod!(Path.join(staging, "arbiter/bin/wardmast"), 0o755)
+    File.mkdir_p!(Path.join(staging, "wardmast/bin"))
+    File.cp!(Path.join(tree, "bin/wardmast"), Path.join(staging, "wardmast/bin/wardmast"))
+    File.chmod!(Path.join(staging, "wardmast/bin/wardmast"), 0o755)
 
     # `layout: :flat` is a hand-rolled `--local` tarball with no top-level dir.
     entries =
       case Keyword.get(opts, :layout, :rooted) do
-        :rooted -> [{~c"arbiter", String.to_charlist(Path.join(staging, "arbiter"))}]
-        :flat -> [{~c"bin", String.to_charlist(Path.join(staging, "arbiter/bin"))}]
+        :rooted -> [{~c"wardmast", String.to_charlist(Path.join(staging, "wardmast"))}]
+        :flat -> [{~c"bin", String.to_charlist(Path.join(staging, "wardmast/bin"))}]
       end
 
     :ok = :erl_tar.create(String.to_charlist(tarball), entries, [:compressed])

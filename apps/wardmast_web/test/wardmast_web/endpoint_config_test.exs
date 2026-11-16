@@ -71,9 +71,20 @@ defmodule WardmastWeb.EndpointConfigTest do
     end
   end
 
-  describe "config/dev.exs bind address" do
+  describe "config/runtime.exs bind address (dev)" do
+    setup do
+      previous = System.get_env("SECRET_KEY_BASE")
+      System.put_env("SECRET_KEY_BASE", previous || "test-secret-key-base")
+
+      on_exit(fn ->
+        if previous,
+          do: System.put_env("SECRET_KEY_BASE", previous),
+          else: System.delete_env("SECRET_KEY_BASE")
+      end)
+    end
+
     defp read_dev_http_ip do
-      config = Config.Reader.read!("../../config/dev.exs")
+      config = Config.Reader.read!("../../config/runtime.exs", env: :dev)
       get_in(config, [:wardmast_web, WardmastWeb.Endpoint, :http, :ip])
     end
 
