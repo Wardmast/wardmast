@@ -36,7 +36,7 @@ On success prints two lines to stdout:
   TARBALL=<path to the arbiter-local-<sha>-<timestamp>-linux.tar.gz release>
   ESCRIPT=<path to the matching arb escript, built from the same commit>
 
-Feed TARBALL (or the unpacked _build/prod/rel/arbiter directory) to:
+Feed TARBALL (or the unpacked _build/prod/rel/wardmast directory) to:
   arb server deploy --local <path>
 USAGE
 }
@@ -147,7 +147,7 @@ mix deps.get --only prod
 mix cmd --app wardmast_web mix assets.setup
 mix compile
 mix cmd --app wardmast_web mix assets.deploy
-mix release arbiter --overwrite
+mix release wardmast --overwrite
 
 # Force-recompile the CLI's version module to ensure the escript captures
 # the correct version when building right after a tag is added (#1943, #1993).
@@ -160,7 +160,7 @@ TARBALL="$OUTPUT_DIR/arbiter-local-${SHA}-${TIMESTAMP}-linux.tar.gz"
 # Package exactly like .github/workflows/release.yml: no leading top-level
 # directory, so `ReleaseFiles.unpack!/2`'s generic (non-nested) branch
 # handles it identically to a published release asset.
-tar -czf "$TARBALL" -C "$CLONE_PATH/_build/prod/rel/arbiter" .
+tar -czf "$TARBALL" -C "$CLONE_PATH/_build/prod/rel/wardmast" .
 
 # Never hand `arb server deploy --local` a tarball that cannot boot here.
 GLIBC_GUARD="$CLONE_PATH/scripts/check-release-glibc.sh"

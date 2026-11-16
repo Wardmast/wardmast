@@ -553,11 +553,11 @@ install_agent() {
     rm -rf -- "$stage"
     mkdir -p "$stage"
     tar -xzf "$TMP_DIR/agent.tar.gz" -C "$stage"
-    # A published release has one top-level arbiter/ directory; a hand-rolled
+    # A published release has one top-level wardmast/ directory; a hand-rolled
     # --local tarball may be flat.
     root="$stage"
-    if [ -x "$stage/arbiter/bin/wardmast" ]; then
-      root="$stage/arbiter"
+    if [ -x "$stage/wardmast/bin/wardmast" ]; then
+      root="$stage/wardmast"
     fi
     [ -x "$root/bin/wardmast" ] || die "the agent archive has no bin/wardmast"
     printf '%s\n' "$AGENT_SHA" >"$root/.agent-sha256"

@@ -10,7 +10,7 @@ defmodule WardmastWeb.Api.ParamsAdoptionTest do
   require Ash.Query
 
   @controllers Path.expand("../../../../lib/wardmast_web/controllers/api", __DIR__)
-  @mcp Path.expand("../../../../../arbiter/lib/arbiter/mcp", __DIR__)
+  @mcp Path.expand("../../../../../wardmast/lib/wardmast/mcp", __DIR__)
 
   setup %{conn: conn} do
     {:ok, ws} =

@@ -166,7 +166,7 @@ jobs:
 
       - name: Build OTP release
         run: |
-          MIX_ENV=prod mix release arbiter
+          MIX_ENV=prod mix release wardmast
         env:
           RELEASE_VERSION: ${{ steps.tag.outputs.name }}
           MIX_ENV: prod
@@ -182,7 +182,7 @@ jobs:
         run: |
           TAG="${{ steps.tag.outputs.name }}"
           TARBALL="arbiter-${TAG}-linux.tar.gz"
-          tar -czf "${TARBALL}" -C _build/prod/rel/arbiter .
+          tar -czf "${TARBALL}" -C _build/prod/rel/wardmast .
           sha256sum "${TARBALL}" > "${TARBALL}.sha256"
           sha256sum apps/wardmast_cli/arb > arb.sha256
           # One migration name per line: lets a running server tell, before an
@@ -197,7 +197,7 @@ jobs:
         # Last line of defence for #1728: fail the release here, naming the
         # file, rather than shipping a tarball that cannot boot on RHEL 8.
         # Runs against the packaged tarball, i.e. exactly what gets published.
-        # Locally: scripts/check-release-glibc.sh _build/prod/rel/arbiter
+        # Locally: scripts/check-release-glibc.sh _build/prod/rel/wardmast
         run: |
           bash scripts/check-release-glibc.sh --baseline 2.28 "${TARBALL}"
 
@@ -207,7 +207,7 @@ jobs:
         # script (glibc family, libgcc_s, libstdc++, libtinfo) fails the
         # release here, naming the file and the library — e.g. a crypto NIF
         # that links libcrypto.so.1.1 and so cannot boot on an OpenSSL-3 host.
-        # Locally: scripts/check-release-shared-libs.sh _build/prod/rel/arbiter
+        # Locally: scripts/check-release-shared-libs.sh _build/prod/rel/wardmast
         run: |
           bash scripts/check-release-shared-libs.sh "${TARBALL}"
 
@@ -216,7 +216,7 @@ jobs:
         # shared worker base are built from the Containerfiles the primary itself
         # uses (`mix wardmast.containerfile`), digest-pinned here, where Erlang/Elixir
         # already are; the publish-oci job below only needs docker and helm.
-        # The controller tarball has a top-level `arbiter/` (the primary's own
+        # The controller tarball has a top-level `wardmast/` (the primary's own
         # layout), unlike the release asset, which unpacks to `.`.
         run: |
           mkdir -p dist
@@ -225,7 +225,7 @@ jobs:
             && mix wardmast.containerfile worker-base --pin \
                  --out "${GITHUB_WORKSPACE}/dist/Containerfile.worker-base" \
                  --hash-out "${GITHUB_WORKSPACE}/dist/worker-base.hash")
-          tar -czf dist/release.tar.gz -C _build/prod/rel arbiter
+          tar -czf dist/release.tar.gz -C _build/prod/rel wardmast
 
       - name: Upload the container build inputs
         uses: actions/upload-artifact@v4

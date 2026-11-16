@@ -70,8 +70,8 @@ defmodule Wardmast.Umbrella.MixProject do
 
   defp releases do
     [
-      arbiter: [
-        applications: [arbiter: :permanent, wardmast_web: :permanent],
+      wardmast: [
+        applications: [wardmast: :permanent, wardmast_web: :permanent],
         include_executables_for: [:unix],
         version: @version,
         steps: [:assemble, &restrict_cookie/1]
@@ -146,7 +146,7 @@ defmodule Wardmast.Umbrella.MixProject do
       # first time. Pin `:wardmast` to run first explicitly rather than rely
       # on incidental ordering again.
       test: [
-        "do --app arbiter test",
+        "do --app wardmast test",
         "do --app wardmast_cli --app wardmast_release_env --app wardmast_web test"
       ],
       # Static analysis + security scan. Mirrors the `mix audit` alias the

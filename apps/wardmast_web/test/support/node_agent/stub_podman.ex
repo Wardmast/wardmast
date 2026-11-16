@@ -6,7 +6,7 @@ defmodule WardmastWeb.StubPodman do
   the directory it is installed in.
   """
 
-  @script_path Path.expand("../../../../arbiter/test/support/node_agent/stub_podman.sh", __DIR__)
+  @script_path Path.expand("../../../../wardmast/test/support/node_agent/stub_podman.sh", __DIR__)
   @external_resource @script_path
   @script File.read!(@script_path)
 

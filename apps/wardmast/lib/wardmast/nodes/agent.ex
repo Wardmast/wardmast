@@ -23,7 +23,7 @@ defmodule Wardmast.Nodes.Agent do
 
   @tag_re ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
   @sha_re ~r/\A[0-9a-f]{64}\z/
-  @archive_root "arbiter"
+  @archive_root "wardmast"
   @excluded_names ["COOKIE", "tmp"]
   @cache_key {__MODULE__, :sha_cache}
 

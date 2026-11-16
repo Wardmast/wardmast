@@ -162,7 +162,7 @@ jobs:
   # `data_case.ex` drains the same way as the other detached background
   # writers.
   #
-  # bd-4uoj4m: the umbrella ran its apps back to back in one VM (arbiter
+  # bd-4uoj4m: the umbrella ran its apps back to back in one VM (wardmast
   # ~369s, wardmast_web ~217s, cli ~8s) and ~85-93% of that is `async: false`
   # time, so in-VM concurrency is no lever; separate VMs are. The suite is now
   # a matrix of per-app, `--partitions`-sharded jobs. config/test.exs already
@@ -191,9 +191,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { app: arbiter, partition: 1, partitions: 3 }
-          - { app: arbiter, partition: 2, partitions: 3 }
-          - { app: arbiter, partition: 3, partitions: 3 }
+          - { app: wardmast, partition: 1, partitions: 3 }
+          - { app: wardmast, partition: 2, partitions: 3 }
+          - { app: wardmast, partition: 3, partitions: 3 }
           - { app: wardmast_web, partition: 1, partitions: 2 }
           - { app: wardmast_web, partition: 2, partitions: 2 }
           - { app: wardmast_cli, partition: 1, partitions: 1 }
@@ -247,7 +247,7 @@ jobs:
 
       # Only one shard saves, so shards do not race on the identical key.
       - name: Save deps/build cache
-        if: ${{ !cancelled() && github.event_name == 'push' && matrix.app == 'arbiter' && matrix.partition == 1 && steps.cache3.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && github.event_name == 'push' && matrix.app == 'wardmast' && matrix.partition == 1 && steps.cache3.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: |

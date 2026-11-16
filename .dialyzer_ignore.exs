@@ -95,7 +95,7 @@
   {"lib/wardmast/worker/review_gate.ex", :pattern_match},
   {"lib/wardmast_web/controllers/api/loop_controller.ex", :pattern_match},
   {"lib/wardmast_web/controllers/api/scheduler_controller.ex", :pattern_match},
-  {"lib/mix/tasks/arbiter.loop.analyze.ex", :pattern_match},
+  {"lib/mix/tasks/wardmast.loop.analyze.ex", :pattern_match},
 
   # ── 3. Defensive nil / type guards (`guard_fail`, `neg_guard_fail`) ───────
   #

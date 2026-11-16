@@ -43,7 +43,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/check-release-shared-libs.sh [--allow LIB]... [--host] <path>...
 
-  <path>       An assembled release directory (e.g. _build/prod/rel/arbiter),
+  <path>       An assembled release directory (e.g. _build/prod/rel/wardmast),
                an OTP install root, or a release tarball (.tar.gz / .tgz /
                .tar). May be repeated.
 
@@ -66,7 +66,7 @@ Exit status:
      be read, the scan found nothing to check, or the arguments were wrong
 
 Examples:
-  scripts/check-release-shared-libs.sh _build/prod/rel/arbiter
+  scripts/check-release-shared-libs.sh _build/prod/rel/wardmast
   scripts/check-release-shared-libs.sh arbiter-v0.1.70-linux.tar.gz
 USAGE
 }
