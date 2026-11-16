@@ -263,7 +263,7 @@ The description cites `worker/dispatch.ex:747`. At this baseline that line is in
 
 "An installation can run multiple workspaces side by side, each with its own repos, tracker, and merge settings". A paid capability that can only be switched on for the whole installation forces the operator to buy Pro for every workspace, or for none. It also makes a gradual rollout (one workspace first) impossible.
 
-The good news is that **per-workspace *selection* already exists for four of the five genuine seams.** What is missing is **open *registration***, and registration does not need to be per workspace: a Hex package is installed per release, not per workspace.
+The good news is that **per-workspace *selection* already exists for four of the five genuine seams.** What is missing is **open *registration***, and registration does not need to be per workspace: the paid-tier bundle is installed per release, not per workspace (distribution is a private repo plus a licence-keyed compiled bundle, no Hex; see `licensing-model.md` §0.1, which supersedes the earlier Hex-package plan).
 
 ### 4.4 Proposed mechanism: install-global registry, per-workspace selection
 
