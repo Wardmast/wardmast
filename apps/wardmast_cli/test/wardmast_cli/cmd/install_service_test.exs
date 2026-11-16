@@ -245,7 +245,9 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
 
   describe "EnvFile.capture_secrets/1 with secret-manager references" do
     setup do
-      vars = ~w(GITHUB_TOKEN GITHUB_TOKEN_REF ARBITER_CLOAK_KEY ARBITER_CLOAK_KEY_REF)
+      vars =
+        ~w(GITHUB_TOKEN GITHUB_TOKEN_REF ARBITER_CLOAK_KEY ARBITER_CLOAK_KEY_REF WARDMAST_CLOAK_KEY WARDMAST_CLOAK_KEY_REF)
+
       prev = Map.new(vars, &{&1, System.get_env(&1)})
 
       on_exit(fn ->
