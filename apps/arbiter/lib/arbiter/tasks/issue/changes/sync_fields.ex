@@ -56,7 +56,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncFields do
   defp maybe_sync(%{review_only: true}, _changed), do: :ok
 
   defp maybe_sync(issue, changed) do
-    Trackers.prepare(issue, load_workspace(issue.workspace_id))
+    Trackers.prepare_with_repo(issue, load_workspace(issue.workspace_id), issue.repo)
 
     case Trackers.update_fields(issue, changed) do
       :ok ->

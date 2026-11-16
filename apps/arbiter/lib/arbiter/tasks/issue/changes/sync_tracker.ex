@@ -99,7 +99,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
   end
 
   defp sync(issue) do
-    Trackers.prepare(issue, load_workspace(issue.workspace_id))
+    Trackers.prepare_with_repo(issue, load_workspace(issue.workspace_id), issue.repo)
     do_transition(issue)
   rescue
     e ->
