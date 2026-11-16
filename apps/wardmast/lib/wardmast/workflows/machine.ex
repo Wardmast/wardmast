@@ -225,7 +225,7 @@ defmodule Wardmast.Workflows.Machine do
   """
   @spec load_workflow_module(String.t()) :: {:ok, module()} | {:error, term()}
   def load_workflow_module(name) when is_binary(name) do
-    mod = Module.safe_concat([name])
+    mod = Module.safe_concat([Wardmast.LegacyModuleName.normalize(name)])
 
     case validate_workflow_module(mod) do
       :ok -> {:ok, mod}

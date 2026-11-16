@@ -9478,7 +9478,7 @@ defmodule Wardmast.Worker do
   end
 
   defp restored_module("Elixir." <> _ = name, fun, arity) do
-    module = String.to_existing_atom(name)
+    module = name |> Wardmast.LegacyModuleName.normalize() |> String.to_existing_atom()
     if Code.ensure_loaded?(module) and function_exported?(module, fun, arity), do: module
   rescue
     ArgumentError -> nil

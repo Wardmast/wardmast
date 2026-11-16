@@ -444,7 +444,7 @@ defmodule Wardmast.Tasks.PullRequest do
   end
 
   defp existing_module("Elixir." <> _ = name) do
-    String.to_existing_atom(name)
+    name |> Wardmast.LegacyModuleName.normalize() |> String.to_existing_atom()
   rescue
     ArgumentError -> nil
   end

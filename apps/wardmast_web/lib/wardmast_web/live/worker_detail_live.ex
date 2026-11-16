@@ -879,7 +879,7 @@ defmodule WardmastWeb.WorkerDetailLive do
   defp workflow_steps_for(nil), do: []
 
   defp workflow_steps_for(%MachineState{workflow_module: name}) when is_binary(name) do
-    mod = Module.safe_concat([name])
+    mod = Module.safe_concat([Wardmast.LegacyModuleName.normalize(name)])
 
     if function_exported?(mod, :steps, 0) do
       Enum.map(mod.steps(), &Atom.to_string/1)
