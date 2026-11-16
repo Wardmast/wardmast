@@ -454,7 +454,7 @@ defmodule WardmastWeb.Api.ServerControllerTest do
 
       assert resp["hold"] == "a1b2c3d4"
       assert %{"enabled" => false} = resp["scheduler"]
-      assert ["claude", "codex", "arb"] = Enum.map(resp["clis"], & &1["name"])
+      assert ["claude", "codex", "agy", "arb"] = Enum.map(resp["clis"], & &1["name"])
 
       assert %{"pinned" => "2.1.308", "manual" => false} =
                Enum.find(resp["clis"], &(&1["name"] == "claude"))
