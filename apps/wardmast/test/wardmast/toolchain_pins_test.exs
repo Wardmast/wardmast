@@ -70,7 +70,7 @@ defmodule Wardmast.ToolchainPinsTest do
   test "every app requires the pinned Elixir minor" do
     [major, minor | _] = String.split(elixir(), ".")
 
-    for app <- ~w(arbiter wardmast_web wardmast_cli wardmast_release_env) do
+    for app <- ~w(wardmast wardmast_web wardmast_cli wardmast_release_env) do
       assert scan(read!("apps/#{app}/mix.exs"), ~r/^\s*elixir: "([^"]+)"/m) ==
                ["~> #{major}.#{minor}"],
              "apps/#{app}/mix.exs elixir requirement"

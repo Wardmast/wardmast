@@ -273,7 +273,7 @@ defmodule Wardmast.NodeAgent.WrapperTest do
 
       assert unit =~ "Restart=always"
       assert unit =~ "Environment=ARB_ROLE=agent"
-      assert unit =~ "WARDMAST_DATA_HOME=%h/.arbiter-node"
+      assert unit =~ "ARB_DATA_HOME=%h/.arbiter-node"
       assert unit =~ "RELEASE_NODE=arbiter_node@127.0.0.1"
       assert unit =~ "ExecStart=%h/.arbiter-node/current/bin/wardmast start"
       assert unit =~ "ExecStartPre=%h/.arbiter-node/bin/arbiter-node pre-start"

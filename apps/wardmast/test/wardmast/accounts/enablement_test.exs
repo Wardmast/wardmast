@@ -32,7 +32,7 @@ defmodule Wardmast.Accounts.EnablementTest do
   alias Wardmast.Worker.WorkerEnv
 
   @oauth_var "CLAUDE_CODE_OAUTH_TOKEN"
-  @retired_var "WARDMAST_PROVIDER_ACCOUNTS"
+  @retired_var "ARBITER_PROVIDER_ACCOUNTS"
 
   setup do
     prev_resolution = Application.get_env(:wardmast, :provider_accounts_resolution)
@@ -124,7 +124,7 @@ defmodule Wardmast.Accounts.EnablementTest do
     end
   end
 
-  describe "the retired WARDMAST_PROVIDER_ACCOUNTS switch" do
+  describe "the retired ARBITER_PROVIDER_ACCOUNTS switch" do
     test "config no longer carries the flag" do
       for file <- ~w(config.exs runtime.exs test.exs) do
         config = File.read!(Path.join([File.cwd!(), "../../config", file]))
