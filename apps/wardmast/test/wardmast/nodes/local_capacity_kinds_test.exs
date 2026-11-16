@@ -96,10 +96,10 @@ defmodule Wardmast.Nodes.LocalCapacityKindsTest do
     end
   end
 
-  describe "only podman-backed Claude and Codex runs on a private clone are ever placement candidates" do
+  describe "only podman-backed Claude, Codex and agy runs on a private clone are ever placement candidates" do
     test "across every kind, provider, layout and mode, only those kinds are eligible" do
       kinds = Placement.kinds()
-      providers = [:claude, :codex, :agy, :gemini, :grok, nil]
+      providers = [:claude, :codex, :gemini, :grok, nil]
       layouts = [:private_clone, :worktree, :shared, nil]
 
       eligible =
@@ -119,7 +119,7 @@ defmodule Wardmast.Nodes.LocalCapacityKindsTest do
           {kind, provider, layout, no_pr?, mode}
         end
 
-      # Exactly the Claude and Codex (SI11; Codex per node) runs that have a container backend and a private clone
+      # Exactly the Claude, Codex and agy (SI11, bd-2esasx; Codex and agy per node) runs that have a container backend and a private clone
       # (bd-7ays3v; the `review: true` dispatch and the reviewer, bd-cgdhlu; a
       # resume, bd-4ic681), in the two modes that allow a node.
       assert Enum.sort(eligible) ==
@@ -134,7 +134,7 @@ defmodule Wardmast.Nodes.LocalCapacityKindsTest do
                      :review_fix_round,
                      :reviewer
                    ],
-                 provider <- [:claude, :codex],
+                 provider <- [:claude, :codex, :gemini],
                  mode <- [:prefer_remote, :remote_only],
                  do: {kind, provider, :private_clone, false, mode}
                )
