@@ -530,6 +530,7 @@ defmodule Wardmast.Worker.ReviewGatePushGateTest do
   # bd-a7yaer: a fix round whose worker.pre_push_checks stay red must not have
   # its head pushed by the gate; the round parks instead.
   describe "a fix round with a red pre-push recipe (bd-a7yaer)" do
+    @tag :linux
     test "parks without pushing the red head", %{repo: repo, tmp: tmp} do
       {:ok, ws} =
         Ash.create(Workspace, %{

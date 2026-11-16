@@ -53,6 +53,16 @@ max_cases_opts =
   |> elem(0)
   |> then(& &1.(System.get_env()))
 
+# bd-cblu5p: `:linux` tests need a Linux-only facility (/proc, GNU `timeout`,
+# `setsid`, a real bwrap/systemd, ELF tooling). They are excluded on darwin (the
+# macOS CI smoke job) and wherever WARDMAST_TEST_EXCLUDE_LINUX=1 is set.
+linux_exclude =
+  "../../../scripts/test_exclude_linux.exs"
+  |> Path.expand(__DIR__)
+  |> Code.eval_file()
+  |> elem(0)
+  |> then(& &1.(System.get_env(), :os.type()))
+
 # bd-6tx1xv (RW2 spike): the remote-workers go/no-go prototypes move real bytes
 # over real sockets (and, for some, `tc netem` / `tailscale serve`); opt in with
 # `mix test --include spike_rw <file>`. See docs/design/remote-workers.md §17.
@@ -64,7 +74,7 @@ ExUnit.start(
   [
     exclude:
       [:podman, :spike_rw, :spike_serve, :spike_k8s, :node_agent] ++
-        node_exclude ++ browser_exclude ++ tmux_exclude
+        node_exclude ++ browser_exclude ++ tmux_exclude ++ linux_exclude
   ] ++
     max_cases_opts
 )

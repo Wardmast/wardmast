@@ -47,6 +47,7 @@ defmodule Wardmast.Worker.TestRunnerTest do
     assert Worker.test_runner(ctx.task.id) == {:error, :no_worktree}
   end
 
+  @tag :linux
   test "an unsandboxed run executes in its worktree on the host", ctx do
     start_worker(ctx, %{worktree_path: ctx.dir})
 
@@ -58,6 +59,7 @@ defmodule Wardmast.Worker.TestRunnerTest do
     assert String.trim(out) == Path.expand(ctx.dir) or String.trim(out) =~ Path.basename(ctx.dir)
   end
 
+  @tag :linux
   test "the host runner hands the command the run's TMPDIR", ctx do
     tmp = Path.join(ctx.dir, "run-tmp")
     File.mkdir_p!(tmp)

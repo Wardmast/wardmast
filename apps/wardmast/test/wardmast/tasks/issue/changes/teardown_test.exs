@@ -311,6 +311,7 @@ defmodule Wardmast.Tasks.Issue.Changes.TeardownTest do
     # either on port close, so stopping the GenServer alone leaves both
     # running in a directory `:close` is about to delete. Teardown must kill
     # the whole tree first.
+    @tag :linux
     test "kills the sub-worker's agent OS process tree before removing the worktree",
          %{ws: ws, repo: repo} do
       {:ok, task} = Ash.create(Issue, %{title: "live agent wt", workspace_id: ws.id})
