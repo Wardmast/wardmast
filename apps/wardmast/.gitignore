@@ -23,4 +23,4 @@ erl_crash.dump
 /tmp/
 
 # Ignore package tarball (built via "mix hex.build").
-arbiter-*.tar
+wardmast-*.tar
