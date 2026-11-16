@@ -116,7 +116,7 @@ defmodule Wardmast.Sessions.UsageIngest do
 
   Which directories to sweep comes from
   `Wardmast.Config.Paths.coordinator_session_dirs/0`
-  (`ARBITER_COORDINATOR_SESSION_DIRS`, or `config :wardmast,
+  (`WARDMAST_COORDINATOR_SESSION_DIRS`, or `config :wardmast,
   :coordinator_session_dirs`). It defaults to **empty**, so an install that has
   not opted in ingests nothing and this module is inert.
 

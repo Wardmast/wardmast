@@ -70,7 +70,7 @@ config :wardmast_web, WardmastWeb.Endpoint,
 # production trailing debounce (500ms) has its own test that widens the window.
 config :wardmast_web, :board_worker_debounce_ms, 0
 
-# Cloak vault key for the test suite. Wardmast.Vault reads ARBITER_CLOAK_KEY at
+# Cloak vault key for the test suite. Wardmast.Vault reads WARDMAST_CLOAK_KEY at
 # runtime and refuses to boot without it; this config fallback injects a fixed
 # (non-secret) 32-byte AES key so the suite encrypts/decrypts workspace secrets
 # without depending on a real environment variable. Never used outside :test.
@@ -178,8 +178,10 @@ config :wardmast, Wardmast.NodeAgent,
 # config script (the app isn't loaded yet) — hence the inline resolution. The
 # key is also configured so the resolver and this file agree even where the
 # two defaults could diverge (HOME unset).
+# This is the one env read outside `Wardmast.Env` (uncallable here, see above), so it
+# spells the one-release `ARBITER_SCRATCH_ROOT` fallback itself. Drop it with the shim.
 scratch_root =
-  System.get_env("ARBITER_SCRATCH_ROOT") ||
+  System.get_env("WARDMAST_SCRATCH_ROOT") || System.get_env("ARBITER_SCRATCH_ROOT") ||
     Path.join(System.get_env("HOME") || System.tmp_dir!(), ".cache/arbiter/scratch")
 
 config :wardmast, :scratch_root, scratch_root

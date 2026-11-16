@@ -77,7 +77,7 @@ defmodule Wardmast.Worker.MemoryScope.Diagnosis do
   defp cap_state(opts) do
     case MemoryScope.configured_max() do
       :disabled ->
-        {false, nil, false, "disabled (ARBITER_WORKER_MEMORY_MAX=off)"}
+        {false, nil, false, "disabled (WARDMAST_WORKER_MEMORY_MAX=off)"}
 
       {:ok, max} ->
         case MemoryScope.probe(max, Keyword.take(opts, [:cmd, :systemd_run, :runtime_dir])) do

@@ -56,7 +56,7 @@ defmodule Wardmast.Worker.PodmanReadiness do
   @doc """
   Probe the host. Options: `:runner` (`(cmd, args, opts -> {output, status})`),
   `:read_file` (`path -> {:ok, binary} | {:error, term}`), `:user`, `:image`
-  (the probe image; default `ARBITER_PODMAN_PROBE_IMAGE` or
+  (the probe image; default `WARDMAST_PODMAN_PROBE_IMAGE` or
   `#{@default_probe_image}`) and `:probes` (which probes to run past the host
   checks: the container-starting `:bridge` and `:teardown`, and `:arb`; default
   all three).
@@ -381,7 +381,7 @@ defmodule Wardmast.Worker.PodmanReadiness do
       _ ->
         bridge_fail(
           "probe image #{image} is not present locally",
-          "Run `podman pull #{image}` (or set ARBITER_PODMAN_PROBE_IMAGE to a local image with perl, socat or nc)."
+          "Run `podman pull #{image}` (or set WARDMAST_PODMAN_PROBE_IMAGE to a local image with perl, socat or nc)."
         )
     end
   end
@@ -537,7 +537,7 @@ defmodule Wardmast.Worker.PodmanReadiness do
   end
 
   defp probe_image(opts) do
-    Keyword.get(opts, :image) || System.get_env("ARBITER_PODMAN_PROBE_IMAGE") ||
+    Keyword.get(opts, :image) || Wardmast.Env.get("WARDMAST_PODMAN_PROBE_IMAGE") ||
       @default_probe_image
   end
 

@@ -3,15 +3,15 @@ defmodule Wardmast.Vault do
   Cloak vault used to encrypt sensitive `Workspace` / `ProviderCredential`
   attributes at rest (see `ash_cloak` `cloak` blocks on those resources).
 
-  The AES-256-GCM key is read at **runtime** from the `ARBITER_CLOAK_KEY`
+  The AES-256-GCM key is read at **runtime** from the `WARDMAST_CLOAK_KEY`
   environment variable, which must be a Base64-encoded 32-byte value:
 
-      ARBITER_CLOAK_KEY="$(openssl rand -base64 32)"
+      WARDMAST_CLOAK_KEY="$(openssl rand -base64 32)"
 
   To keep the key out of the env file (and every copy of it), set a pointer
-  instead — `ARBITER_CLOAK_KEY_REF=aws-sm:prod/arbiter#cloak_key` (also
+  instead — `WARDMAST_CLOAK_KEY_REF=aws-sm:prod/arbiter#cloak_key` (also
   `aws-ssm:` / `file:`; see `Wardmast.SecretRefs.External`). The pointer wins
-  over an inline value, and `ARBITER_CLOAK_KEY_OLD_REF` does the same for the
+  over an inline value, and `WARDMAST_CLOAK_KEY_OLD_REF` does the same for the
   retired key. An unresolvable pointer aborts the boot, as a missing key does.
 
   The vault is a `GenServer` in the supervision tree; `init/1` resolves the key
@@ -23,12 +23,12 @@ defmodule Wardmast.Vault do
   ## Key rotation
 
   Rotation is Cloak's native two-cipher scheme, driven by two **optional**
-  env vars: `ARBITER_CLOAK_KEY_OLD` and `ARBITER_CLOAK_KEY_GENERATION`.
+  env vars: `WARDMAST_CLOAK_KEY_OLD` and `WARDMAST_CLOAK_KEY_GENERATION`.
 
   The `:default` cipher's tag is `"AES.GCM.V<generation>"`, where
   `<generation>` defaults to `1` — so an install that has never rotated
   needs neither env var, and keeps writing/reading the same tag
-  (`"AES.GCM.V1"`) it always has. **Only bump `ARBITER_CLOAK_KEY_GENERATION`
+  (`"AES.GCM.V1"`) it always has. **Only bump `WARDMAST_CLOAK_KEY_GENERATION`
   as a permanent step of actually completing a rotation** — bumping it
   without also migrating the data (see below) makes existing ciphertext
   (tagged with the previous generation) undecryptable, since nothing
@@ -36,8 +36,8 @@ defmodule Wardmast.Vault do
 
   To rotate from generation N to N+1:
 
-    1. Set `ARBITER_CLOAK_KEY` to the new key, `ARBITER_CLOAK_KEY_OLD` to the
-       key that generation N used, and bump `ARBITER_CLOAK_KEY_GENERATION`
+    1. Set `WARDMAST_CLOAK_KEY` to the new key, `WARDMAST_CLOAK_KEY_OLD` to the
+       key that generation N used, and bump `WARDMAST_CLOAK_KEY_GENERATION`
        to N+1 — all three at once, in the same deploy. `init/1` now
        registers `:default` (tag `V<N+1>`, the new key) and `:retired` (tag
        `V<N>`, the old key, decrypt-only), so both old and new ciphertext
@@ -46,8 +46,8 @@ defmodule Wardmast.Vault do
        arbiter.rotate_cloak_key --sweep`) to re-encrypt every row onto the
        new cipher, and `verify/0` (`--verify`) to confirm zero rows remain
        tagged `V<N>`.
-    3. Remove `ARBITER_CLOAK_KEY_OLD` and redeploy — leave
-       `ARBITER_CLOAK_KEY_GENERATION` at N+1 permanently. The retired cipher
+    3. Remove `WARDMAST_CLOAK_KEY_OLD` and redeploy — leave
+       `WARDMAST_CLOAK_KEY_GENERATION` at N+1 permanently. The retired cipher
        drops out of `init/1`; the current generation's tag doesn't change,
        so the now fully-migrated data keeps decrypting.
 
@@ -78,7 +78,7 @@ defmodule Wardmast.Vault do
   @doc """
   Tag stamped on ciphertext written by the previous generation's cipher —
   only meaningful (i.e. actually registered as `:retired`) while
-  `ARBITER_CLOAK_KEY_OLD` is configured.
+  `WARDMAST_CLOAK_KEY_OLD` is configured.
   """
   @spec retired_tag() :: String.t()
   def retired_tag, do: tag_for(generation!() - 1)
@@ -104,7 +104,7 @@ defmodule Wardmast.Vault do
 
   Resolution order:
 
-    1. `ARBITER_CLOAK_KEY_GENERATION` environment variable (a positive integer).
+    1. `WARDMAST_CLOAK_KEY_GENERATION` environment variable (a positive integer).
     2. `config :wardmast, Wardmast.Vault, key_generation: <integer>` — test-only
        fallback.
     3. `1`, when neither is set.
@@ -121,13 +121,13 @@ defmodule Wardmast.Vault do
             n
 
           _ ->
-            raise "ARBITER_CLOAK_KEY_GENERATION must be a positive integer, got: #{inspect(raw)}"
+            raise "WARDMAST_CLOAK_KEY_GENERATION must be a positive integer, got: #{inspect(raw)}"
         end
     end
   end
 
   defp raw_generation do
-    case System.get_env("ARBITER_CLOAK_KEY_GENERATION") do
+    case Wardmast.Env.get("WARDMAST_CLOAK_KEY_GENERATION") do
       v when is_binary(v) and v != "" ->
         v
 
@@ -144,7 +144,7 @@ defmodule Wardmast.Vault do
 
   Resolution order:
 
-    1. `ARBITER_CLOAK_KEY` environment variable (Base64, 32 bytes once decoded).
+    1. `WARDMAST_CLOAK_KEY` environment variable (Base64, 32 bytes once decoded).
     2. `config :wardmast, Wardmast.Vault, key: <base64>` — a config fallback used
        only by the test suite.
 
@@ -156,21 +156,21 @@ defmodule Wardmast.Vault do
     case raw_key() do
       nil ->
         raise """
-        ARBITER_CLOAK_KEY is not set.
+        WARDMAST_CLOAK_KEY is not set.
 
         Wardmast encrypts workspace secrets at rest and refuses to start without
         an encryption key. Generate one and add it to your environment
         (.arbiter.env or ~/.arbiter/arbiter.env):
 
-            ARBITER_CLOAK_KEY="$(openssl rand -base64 32)"
+            WARDMAST_CLOAK_KEY="$(openssl rand -base64 32)"
 
         or point at a secret manager instead, so the env file holds no secret:
 
-            ARBITER_CLOAK_KEY_REF="aws-sm:prod/arbiter#cloak_key"
+            WARDMAST_CLOAK_KEY_REF="aws-sm:prod/arbiter#cloak_key"
         """
 
       raw ->
-        decode!(raw, "ARBITER_CLOAK_KEY")
+        decode!(raw, "WARDMAST_CLOAK_KEY")
     end
   end
 
@@ -180,7 +180,7 @@ defmodule Wardmast.Vault do
 
   Resolution order mirrors `key!/0`:
 
-    1. `ARBITER_CLOAK_KEY_OLD` environment variable.
+    1. `WARDMAST_CLOAK_KEY_OLD` environment variable.
     2. `config :wardmast, Wardmast.Vault, old_key: <base64>` — test-only fallback.
 
   Raises the same way `key!/0` does when the value is present but malformed —
@@ -191,22 +191,22 @@ defmodule Wardmast.Vault do
   def old_key do
     case raw_old_key() do
       nil -> nil
-      raw -> decode!(raw, "ARBITER_CLOAK_KEY_OLD")
+      raw -> decode!(raw, "WARDMAST_CLOAK_KEY_OLD")
     end
   end
 
-  # Inline `ARBITER_CLOAK_KEY`, or a pointer in `ARBITER_CLOAK_KEY_REF`
+  # Inline `WARDMAST_CLOAK_KEY`, or a pointer in `WARDMAST_CLOAK_KEY_REF`
   # (`aws-sm:` / `aws-ssm:` / `file:`, see `Wardmast.SecretRefs.External`). A
   # pointer that cannot be resolved raises here, so the boot fails loudly.
   defp raw_key do
-    case External.env_or_ref!("ARBITER_CLOAK_KEY") do
+    case External.env_or_ref!("WARDMAST_CLOAK_KEY") do
       nil -> Application.get_env(:wardmast, __MODULE__)[:key]
       v -> v
     end
   end
 
   defp raw_old_key do
-    case External.env_or_ref!("ARBITER_CLOAK_KEY_OLD") do
+    case External.env_or_ref!("WARDMAST_CLOAK_KEY_OLD") do
       nil -> Application.get_env(:wardmast, __MODULE__)[:old_key]
       v -> v
     end

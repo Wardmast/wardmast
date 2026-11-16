@@ -2743,7 +2743,7 @@ defmodule Wardmast.Worker.ClaudeSession do
 
     # bd-7r0qrj: the child starts from an EMPTY environment — `SpawnEnv` unsets
     # every inherited var that is not on its allowlist (so the server's
-    # ARBITER_CLOAK_KEY / SECRET_KEY_BASE / DATABASE_PATH / SSH_AUTH_SOCK never
+    # WARDMAST_CLOAK_KEY / SECRET_KEY_BASE / DATABASE_PATH / SSH_AUTH_SOCK never
     # reach it) and drops any other provider's credential from these pairs.
     # Release cleanup (bd-4hkzn3) is folded into `SpawnEnv.port_env/2`.
     case task_id do

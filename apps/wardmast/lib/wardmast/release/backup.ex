@@ -14,7 +14,7 @@ defmodule Wardmast.Release.Backup do
   Invoked from the CLI through the release's own binary, because the arb
   escript carries no SQLite NIF:
 
-      ARB_BACKUP_SRC=… ARB_BACKUP_DEST=… bin/wardmast eval Wardmast.Release.Backup.eval_from_env
+      WARDMAST_BACKUP_SRC=… WARDMAST_BACKUP_DEST=… bin/wardmast eval Wardmast.Release.Backup.eval_from_env
 
   which prints one JSON line and exits non-zero on failure.
   """
@@ -60,13 +60,13 @@ defmodule Wardmast.Release.Backup do
   end
 
   @doc """
-  The `bin/wardmast eval` entrypoint: reads `ARB_BACKUP_SRC` / `ARB_BACKUP_DEST`,
+  The `bin/wardmast eval` entrypoint: reads `WARDMAST_BACKUP_SRC` / `WARDMAST_BACKUP_DEST`,
   prints one JSON line, and halts non-zero on failure.
   """
   @spec eval_from_env() :: no_return()
   def eval_from_env do
-    src = System.get_env("ARB_BACKUP_SRC")
-    dest = System.get_env("ARB_BACKUP_DEST")
+    src = Wardmast.Env.get("WARDMAST_BACKUP_SRC")
+    dest = Wardmast.Env.get("WARDMAST_BACKUP_DEST")
 
     result =
       if is_binary(src) and src != "" and is_binary(dest) and dest != "",

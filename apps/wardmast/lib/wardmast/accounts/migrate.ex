@@ -33,7 +33,7 @@ defmodule Wardmast.Accounts.Migrate do
       operator's `~/.claude/.credentials.json`, a `config` entry) that is
       invisible; where it does not, **run `mix wardmast.accounts.rollback` or
       wait for P3**. The task says so in its own output.
-    * §7.6 requires `ARBITER_CLOAK_KEY` to have been rotated, and the provider
+    * §7.6 requires `WARDMAST_CLOAK_KEY` to have been rotated, and the provider
       credential itself re-issued, *before* this runs — otherwise it writes
       fresh ciphertext under a key considered exposed.
 

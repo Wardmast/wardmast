@@ -862,7 +862,7 @@ defmodule Wardmast.Release do
 
   Local and remote workers run only these cached bytes
   (`Wardmast.Worker.CliSet`), never a CLI installed on the host, so an install
-  whose daily CLI fetcher job is off (`ARBITER_CLI_FETCHER=0`)
+  whose daily CLI fetcher job is off (`WARDMAST_CLI_FETCHER=0`)
   or has not run yet fills the cache once, here:
   `bin/wardmast eval 'Wardmast.Release.fetch_clis()'` or `mix wardmast.fetch_clis`.
   Touches the network only for a version that is not cached. Starts only Ash +
@@ -904,7 +904,7 @@ defmodule Wardmast.Release do
   `Wardmast.Application` tree, and equally safe to call repeatedly or from a
   node that already has the app running.
 
-  The vault resolves `ARBITER_CLOAK_KEY` from the environment, so a
+  The vault resolves `WARDMAST_CLOAK_KEY` from the environment, so a
   `bin/wardmast eval` needs `~/.arbiter/arbiter.env` loaded first; a missing
   key raises `Wardmast.Vault.key!/0`'s own explanation before anything starts.
   """

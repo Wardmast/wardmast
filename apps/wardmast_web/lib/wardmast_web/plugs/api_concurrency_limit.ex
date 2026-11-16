@@ -8,7 +8,7 @@ defmodule WardmastWeb.Plugs.ApiConcurrencyLimit do
   queuing and growing the heap; the `arb` CLI backs off and retries.
 
   The limit is `config :wardmast_web, :api_max_concurrency` (default
-  128; `ARBITER_API_MAX_CONCURRENCY` sets it at boot). `0` or `:infinity`
+  128; `WARDMAST_API_MAX_CONCURRENCY` sets it at boot). `0` or `:infinity`
   disables the limit. `GET /api/events` is a long-lived SSE stream, not
   a request in the burst sense, so it is exempt.
 

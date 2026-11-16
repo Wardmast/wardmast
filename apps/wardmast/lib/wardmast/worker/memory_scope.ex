@@ -57,7 +57,7 @@ defmodule Wardmast.Worker.MemoryScope do
 
   ## Configuration
 
-  `ARBITER_WORKER_MEMORY_MAX` (or `config :wardmast, :worker_memory_max`): a
+  `WARDMAST_WORKER_MEMORY_MAX` (or `config :wardmast, :worker_memory_max`): a
   size systemd accepts for `MemoryMax=` — `12G`, `512M`, or a percentage of
   physical RAM (`40%`, the default). `off` / `0` / `none` / `infinity` disable
   the cap entirely.
@@ -115,7 +115,7 @@ defmodule Wardmast.Worker.MemoryScope do
   @spec configured_max() :: {:ok, String.t()} | :disabled
   def configured_max do
     raw =
-      presence(System.get_env("ARBITER_WORKER_MEMORY_MAX")) ||
+      presence(Wardmast.Env.get("WARDMAST_WORKER_MEMORY_MAX")) ||
         presence(Application.get_env(:wardmast, :worker_memory_max))
 
     case normalize(raw) do
@@ -127,7 +127,7 @@ defmodule Wardmast.Worker.MemoryScope do
 
       :error ->
         Logger.warning(
-          "MemoryScope: ignoring invalid ARBITER_WORKER_MEMORY_MAX #{inspect(raw)} " <>
+          "MemoryScope: ignoring invalid WARDMAST_WORKER_MEMORY_MAX #{inspect(raw)} " <>
             "(want e.g. 12G, 512M, 40% or off) — using the default #{@default_max}"
         )
 

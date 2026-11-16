@@ -129,6 +129,15 @@ defmodule Wardmast.EnvTest do
     end
   end
 
+  describe "read/1" do
+    test "applies the fallback to WARDMAST_ names and leaves other names alone" do
+      System.put_env(@arb, "legacy")
+      capture_log(fn -> assert Env.read(@new) == "legacy" end)
+      assert Env.read(@arb) == "legacy"
+      assert Env.read("ENVTEST_UNSET_VAR") == nil
+    end
+  end
+
   describe "legacy_names/1" do
     test "maps WARDMAST_ to the ARB_ and ARBITER_ spellings" do
       assert Env.legacy_names("WARDMAST_CLOAK_KEY") == ["ARB_CLOAK_KEY", "ARBITER_CLOAK_KEY"]

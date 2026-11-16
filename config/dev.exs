@@ -17,24 +17,10 @@ config :wardmast, :output_log_root, Path.expand("~/dev/arbiter-worker-logs")
 # dev-only; the rest of the Repo config is covered by the runtime block.
 config :wardmast, Wardmast.Repo, stacktrace: true
 
-# The dashboard's auth model is "a loopback peer is trusted; there is no
-# login" (see WardmastWeb.Loopback) — bind loopback-only by default (bd-1c4pg3).
-# ARB_BIND_ADDRESS overrides it explicitly; WardmastWeb.Application logs a
-# WARNING at boot if the result isn't loopback.
-bind_ip =
-  case System.get_env("ARB_BIND_ADDRESS") do
-    addr when addr in [nil, ""] ->
-      {127, 0, 0, 1}
-
-    addr ->
-      case :inet.parse_address(String.to_charlist(addr)) do
-        {:ok, parsed} -> parsed
-        {:error, _} -> raise "ARB_BIND_ADDRESS is not a valid IP address: #{inspect(addr)}"
-      end
-  end
-
+# The bind address (loopback unless WARDMAST_BIND_ADDRESS says otherwise, bd-1c4pg3)
+# is set in config/runtime.exs, which can call `Wardmast.Env`; this file cannot.
 config :wardmast_web, WardmastWeb.Endpoint,
-  http: [ip: bind_ip, port: String.to_integer(System.get_env("PORT") || "4848")],
+  http: [port: String.to_integer(System.get_env("PORT") || "4848")],
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
@@ -67,5 +53,5 @@ config :phoenix, :stacktrace_depth, 20
 
 # SI1: workers run only the verified, pinned upstream CLIs (Wardmast.Worker.CliSet), and the
 # scheduler is what fills that cache, so the dogfooded dev coordinator needs it on too.
-# `ARBITER_CLI_FETCHER=0` still turns it off; `mix wardmast.fetch_clis` fills the cache by hand.
+# `WARDMAST_CLI_FETCHER=0` still turns it off; `mix wardmast.fetch_clis` fills the cache by hand.
 config :wardmast, :cli_fetcher, enabled: true

@@ -7,7 +7,7 @@ defmodule WardmastWeb.Loopback do
   Wardmast binds directly to `127.0.0.1:4848` by default, with no reverse proxy
   in front, so `conn.remote_ip` / `peer_data.address` is always the real peer
   and `X-Forwarded-For` is never to be trusted. An operator can override the
-  bind address with `ARB_BIND_ADDRESS` (`WardmastWeb.Boot.BindAddressCheck`
+  bind address with `WARDMAST_BIND_ADDRESS` (`WardmastWeb.Boot.BindAddressCheck`
   logs a boot WARNING when that override isn't loopback, since every
   unauthenticated LiveView page becomes reachable by anyone who can reach the
   port). The worker-session terminal stays gated by this module's

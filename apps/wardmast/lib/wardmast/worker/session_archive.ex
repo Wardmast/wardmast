@@ -52,7 +52,7 @@ defmodule Wardmast.Worker.SessionArchive do
       matching is verbatim, so a redacted line still parses.
     * **Treat the root as secret-bearing anyway.** Redaction only knows the
       secrets someone marked; it cannot catch a live signing key a subprocess
-      printed (2026-07-16) or a `ARBITER_CLOAK_KEY` an agent echoed into its
+      printed (2026-07-16) or a `WARDMAST_CLOAK_KEY` an agent echoed into its
       own transcript (2026-09-12). So archives are written `0600` and the
       archive root is best-effort `chmod 0700`. **Operators must treat
       `output_log_root` as secret-bearing storage** — see

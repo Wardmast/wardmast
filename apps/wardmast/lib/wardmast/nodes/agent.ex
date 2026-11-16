@@ -34,10 +34,10 @@ defmodule Wardmast.Nodes.Agent do
           size: non_neg_integer()
         }
 
-  @doc "The deploy data home: `:data_dir` app env, `ARB_DATA_HOME`, else `~/.arbiter`."
+  @doc "The deploy data home: `:data_dir` app env, `WARDMAST_DATA_HOME`, else `~/.arbiter`."
   @spec data_home() :: String.t()
   def data_home do
-    case {Application.fetch_env(:wardmast, :data_dir), System.get_env("ARB_DATA_HOME")} do
+    case {Application.fetch_env(:wardmast, :data_dir), Wardmast.Env.get("WARDMAST_DATA_HOME")} do
       {{:ok, dir}, _} when is_binary(dir) -> Path.expand(dir)
       {_, dir} when is_binary(dir) and dir != "" -> Path.expand(dir)
       _ -> Path.join(System.user_home!(), ".arbiter")

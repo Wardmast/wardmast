@@ -251,7 +251,7 @@ defmodule Wardmast.Sessions.Provisioning do
   # ---- internals ----------------------------------------------------------
 
   # §10.2 layer 1, asserted rather than assumed. A misconfigured
-  # ARBITER_SESSIONS_ROOT pointing into the live source tree fails here, loudly,
+  # WARDMAST_SESSIONS_ROOT pointing into the live source tree fails here, loudly,
   # instead of handing an agent a cwd Phoenix hot-reload is watching.
   defp check_outside_primary_checkout(path, opts) do
     checkout = Keyword.get(opts, :primary_checkout, Paths.primary_checkout())
@@ -263,7 +263,7 @@ defmodule Wardmast.Sessions.Provisioning do
        {:inside_primary_checkout, path,
         "refusing to provision a session under the primary checkout #{checkout} — " <>
           "§10.2 layer 1 is that a session is scaffolded, never pointed at a checkout. " <>
-          "Set ARBITER_SESSIONS_ROOT to a directory outside it."}}
+          "Set WARDMAST_SESSIONS_ROOT to a directory outside it."}}
     end
   end
 

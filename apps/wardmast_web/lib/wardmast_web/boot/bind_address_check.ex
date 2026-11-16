@@ -3,7 +3,7 @@ defmodule WardmastWeb.Boot.BindAddressCheck do
   Boot-time check: is the HTTP listener bound off-loopback?
 
   The dashboard's auth model is "a loopback peer is trusted; there is no
-  login" (`WardmastWeb.Loopback`). Binding anywhere else — `ARB_BIND_ADDRESS`
+  login" (`WardmastWeb.Loopback`). Binding anywhere else — `WARDMAST_BIND_ADDRESS`
   set to something other than loopback — hands every unauthenticated
   LiveView page to anyone who can reach the port. The worker-session
   terminal is the exception: it stays loopback-gated regardless of the bind
@@ -26,7 +26,7 @@ defmodule WardmastWeb.Boot.BindAddressCheck do
           "is reachable by anyone who can reach this address. The " <>
           "worker-session terminal is the exception: it stays loopback-only, " <>
           "so off-loopback peers get no terminal. This is controlled by " <>
-          "ARB_BIND_ADDRESS. If this isn't intentional, unset it (or set it to " <>
+          "WARDMAST_BIND_ADDRESS. If this isn't intentional, unset it (or set it to " <>
           "127.0.0.1) and use SSH port-forwarding for remote access instead " <>
           "(`ssh -L 4848:127.0.0.1:4848 <host>`)."
       )

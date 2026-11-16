@@ -19,7 +19,7 @@ defmodule Mix.Tasks.Wardmast.Accounts.Migrate do
 
   ## Before you run this (§7.6)
 
-  `ARBITER_CLOAK_KEY` should already have been rotated **and the provider
+  `WARDMAST_CLOAK_KEY` should already have been rotated **and the provider
   credential itself re-issued**. Otherwise this writes fresh ciphertext under a
   key considered exposed, and the rotation sweep then has to cover the new
   tables too.

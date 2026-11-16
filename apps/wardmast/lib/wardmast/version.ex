@@ -96,8 +96,8 @@ defmodule Wardmast.Version do
   @built_at DateTime.utc_now() |> DateTime.to_iso8601()
 
   # The GitHub `owner/repo` the release workflow built this from
-  # (`ARB_BUILD_RELEASE_REPO`); nil for a source build.
-  @build_release_repo (case System.get_env("ARB_BUILD_RELEASE_REPO") do
+  # (`WARDMAST_BUILD_RELEASE_REPO`); nil for a source build.
+  @build_release_repo (case Wardmast.Env.get("WARDMAST_BUILD_RELEASE_REPO") do
                          repo when is_binary(repo) and byte_size(repo) > 0 -> String.trim(repo)
                          _ -> nil
                        end)
@@ -158,14 +158,14 @@ defmodule Wardmast.Version do
   def build_release_repo, do: @build_release_repo
 
   @doc """
-  The GitHub `owner/repo` this install takes releases from: `ARB_RELEASE_REPO`
+  The GitHub `owner/repo` this install takes releases from: `WARDMAST_RELEASE_REPO`
   when set, else the repo the build was stamped with. Reported on
   `GET /api/version` so `arb server deploy` can find its release source without
   the operator exporting anything, and used by `Wardmast.Release.UpdateCheck`.
   """
   @spec release_repo() :: String.t() | nil
   def release_repo do
-    case System.get_env("ARB_RELEASE_REPO") do
+    case Wardmast.Env.get("WARDMAST_RELEASE_REPO") do
       repo when is_binary(repo) and repo != "" -> repo
       _ -> @build_release_repo
     end

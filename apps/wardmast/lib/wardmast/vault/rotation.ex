@@ -90,7 +90,7 @@ defmodule Wardmast.Vault.Rotation do
   @doc """
   Counts rows still tagged with the retired cipher, per column. An empty
   list of nonzero counts (every `:retired` is `0`) means it is safe to drop
-  `ARBITER_CLOAK_KEY_OLD` from the environment and redeploy.
+  `WARDMAST_CLOAK_KEY_OLD` from the environment and redeploy.
   """
   @spec verify() :: [verify_report()]
   def verify do

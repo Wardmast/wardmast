@@ -31,7 +31,7 @@ defmodule Wardmast.Sessions.Layout do
   "Scaffold, never point at a checkout" (decision 4) is only true if the
   scaffold is genuinely elsewhere. `outside_primary_checkout?/1` is the
   assertion of that, and `Wardmast.Sessions.Provisioning` refuses to provision
-  when it is false — so a misconfigured `ARBITER_SESSIONS_ROOT` pointing into
+  when it is false — so a misconfigured `WARDMAST_SESSIONS_ROOT` pointing into
   the live source tree fails loudly at provision time rather than handing an
   agent a cwd Phoenix hot-reload is watching.
   """

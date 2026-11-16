@@ -17,7 +17,7 @@ defmodule WardmastWeb.DashboardAuth.Default do
        plain `http://127.0.0.1:4848`, and the only way to get a token is to
        already hold a coordinator bearer token (i.e. be the operator).
     2. **Tailscale identity allowlist** (opt-in). When
-       `ARB_DASHBOARD_TAILSCALE_LOGINS` (comma-separated) or
+       `WARDMAST_DASHBOARD_TAILSCALE_LOGINS` (comma-separated) or
        `config :wardmast_web, :dashboard_tailscale_logins` names logins, a
        request carrying `Tailscale-User-Login` is accepted if that login is on
        the list **and** the request came through `tailscale serve`: the peer
@@ -27,7 +27,7 @@ defmodule WardmastWeb.DashboardAuth.Default do
        and is ignored. The login is re-checked against the allowlist on every
        request and LiveView mount, so removing it revokes live sessions.
 
-  3. **Direct loopback (opt-in, off by default).** `ARB_DASHBOARD_TRUST_LOOPBACK=true`
+  3. **Direct loopback (opt-in, off by default).** `WARDMAST_DASHBOARD_TRUST_LOOPBACK=true`
      or `config :wardmast_web, :dashboard_trust_loopback, true`. A request is
      trusted without a login only if the peer is loopback, it carries no
      proxy/identity header (`X-Forwarded-*`, `Forwarded`, `Tailscale-*`) and
@@ -132,7 +132,7 @@ defmodule WardmastWeb.DashboardAuth.Default do
   @spec trust_loopback?() :: boolean()
   def trust_loopback? do
     truthy?(Application.get_env(:wardmast_web, :dashboard_trust_loopback, false)) or
-      truthy?(System.get_env("ARB_DASHBOARD_TRUST_LOOPBACK"))
+      truthy?(Wardmast.Env.get("WARDMAST_DASHBOARD_TRUST_LOOPBACK"))
   end
 
   defp truthy?(v) when v in [true, "true", "1"], do: true
@@ -212,7 +212,7 @@ defmodule WardmastWeb.DashboardAuth.Default do
 
   defp allowlist do
     configured = Application.get_env(:wardmast_web, :dashboard_tailscale_logins, [])
-    env = String.split(System.get_env("ARB_DASHBOARD_TAILSCALE_LOGINS") || "", ",")
+    env = String.split(Wardmast.Env.get("WARDMAST_DASHBOARD_TAILSCALE_LOGINS") || "", ",")
 
     (List.wrap(configured) ++ env)
     |> Enum.map(&(&1 |> String.trim() |> String.downcase()))

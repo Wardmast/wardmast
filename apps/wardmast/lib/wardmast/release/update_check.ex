@@ -19,7 +19,7 @@ defmodule Wardmast.Release.UpdateCheck do
 
   ## "Latest" matches `arb server deploy`
 
-  Both use `GET /repos/<release repo>/releases/latest` (`ARB_RELEASE_REPO`, else
+  Both use `GET /repos/<release repo>/releases/latest` (`WARDMAST_RELEASE_REPO`, else
   the repo the build was stamped with — `Wardmast.Version.release_repo/0`), which GitHub
   defines as the newest non-draft, non-prerelease release. `GITHUB_TOKEN` is
   sent when set (needed for a private repo); otherwise the request is
@@ -38,10 +38,10 @@ defmodule Wardmast.Release.UpdateCheck do
 
   `config :wardmast, :update_check` (prod enables it; dev/test leave it off):
 
-    * `:enabled` — master switch. `ARBITER_UPDATE_CHECK=0` also disables it, for
+    * `:enabled` — master switch. `WARDMAST_UPDATE_CHECK=0` also disables it, for
       air-gapped installs.
     * `:interval_ms` — base interval (default 6h, jittered ±10%);
-      `ARBITER_UPDATE_CHECK_INTERVAL_HOURS` overrides.
+      `WARDMAST_UPDATE_CHECK_INTERVAL_HOURS` overrides.
     * `:initial_delay_ms` — delay before the first check (default 1 minute).
   """
 
@@ -175,7 +175,7 @@ defmodule Wardmast.Release.UpdateCheck do
   # ── checking ──────────────────────────────────────────────────────────────
 
   defp run_check(%{repo: repo} = state) when repo in [nil, ""] do
-    record_error(state, "ARB_RELEASE_REPO is not set")
+    record_error(state, "WARDMAST_RELEASE_REPO is not set")
   end
 
   defp run_check(state) do
@@ -355,12 +355,12 @@ defmodule Wardmast.Release.UpdateCheck do
 
   defp enabled?(opts) do
     Keyword.get_lazy(opts, :enabled, fn ->
-      config(:enabled, false) and env("ARBITER_UPDATE_CHECK") not in ["0", "false"]
+      config(:enabled, false) and env("WARDMAST_UPDATE_CHECK") not in ["0", "false"]
     end)
   end
 
   defp interval_ms do
-    with hours when is_binary(hours) <- env("ARBITER_UPDATE_CHECK_INTERVAL_HOURS"),
+    with hours when is_binary(hours) <- env("WARDMAST_UPDATE_CHECK_INTERVAL_HOURS"),
          {h, ""} when h > 0 <- Float.parse(hours) do
       round(h * 3_600_000)
     else
@@ -370,14 +370,14 @@ defmodule Wardmast.Release.UpdateCheck do
 
   defp jitter(ms), do: ms + :rand.uniform(max(div(ms, 5), 1)) - div(ms, 10)
 
-  defp api, do: String.trim_trailing(env("ARB_GITHUB_API") || @default_api, "/")
+  defp api, do: String.trim_trailing(env("WARDMAST_GITHUB_API") || @default_api, "/")
 
   defp config(key, default) do
     :wardmast |> Application.get_env(:update_check, []) |> Keyword.get(key, default)
   end
 
   defp env(name) do
-    case System.get_env(name) do
+    case Wardmast.Env.get(name) do
       v when is_binary(v) and v != "" -> v
       _ -> nil
     end

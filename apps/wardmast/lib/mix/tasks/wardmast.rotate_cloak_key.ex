@@ -9,14 +9,14 @@ defmodule Mix.Tasks.Wardmast.RotateCloakKey do
       mix wardmast.rotate_cloak_key --verify   # count rows still on the retired cipher
       mix wardmast.rotate_cloak_key --sweep    # re-encrypt every row under the current cipher
 
-  Run `--verify` first, mid-rotation (`ARBITER_CLOAK_KEY`,
-  `ARBITER_CLOAK_KEY_OLD`, and a bumped `ARBITER_CLOAK_KEY_GENERATION` all
+  Run `--verify` first, mid-rotation (`WARDMAST_CLOAK_KEY`,
+  `WARDMAST_CLOAK_KEY_OLD`, and a bumped `WARDMAST_CLOAK_KEY_GENERATION` all
   set together — see `Wardmast.Vault`'s moduledoc), to see what's
   outstanding, then `--sweep` to do the re-encryption. `--sweep` is safe to
   re-run — rows already on the current cipher are left untouched. Run
   `--verify` again afterward; it must report zero retired rows before
-  `ARBITER_CLOAK_KEY_OLD` is removed from the environment (keep
-  `ARBITER_CLOAK_KEY_GENERATION` at its bumped value permanently).
+  `WARDMAST_CLOAK_KEY_OLD` is removed from the environment (keep
+  `WARDMAST_CLOAK_KEY_GENERATION` at its bumped value permanently).
 
   Prints only counts and table/column names — never plaintext or ciphertext.
 
@@ -65,7 +65,7 @@ defmodule Mix.Tasks.Wardmast.RotateCloakKey do
             "Rotation incomplete: retired-cipher rows remain. Run `mix wardmast.rotate_cloak_key --sweep`."
           )
         else
-          Mix.shell().info("\nAll clear — safe to drop ARBITER_CLOAK_KEY_OLD and redeploy.")
+          Mix.shell().info("\nAll clear — safe to drop WARDMAST_CLOAK_KEY_OLD and redeploy.")
         end
 
       true ->

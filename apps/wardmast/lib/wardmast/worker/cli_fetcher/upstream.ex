@@ -11,7 +11,7 @@ defmodule Wardmast.Worker.CliFetcher.Upstream do
   Every call takes `opts[:req_options]` (merged into the `Req` request; tests
   inject `plug: {Req.Test, ...}`), `opts[:registry]` (default
   `https://registry.npmjs.org`) and `opts[:github_api]` (default
-  `https://api.github.com`, `ARB_GITHUB_API` overrides).
+  `https://api.github.com`, `WARDMAST_GITHUB_API` overrides).
   """
 
   @registry "https://registry.npmjs.org"
@@ -106,7 +106,7 @@ defmodule Wardmast.Worker.CliFetcher.Upstream do
   @doc "The GitHub API base URL."
   @spec github_api(keyword()) :: String.t()
   def github_api(opts) do
-    case Keyword.get(opts, :github_api) || System.get_env("ARB_GITHUB_API") do
+    case Keyword.get(opts, :github_api) || Wardmast.Env.get("WARDMAST_GITHUB_API") do
       url when is_binary(url) and url != "" -> String.trim_trailing(url, "/")
       _ -> @github_api
     end

@@ -102,7 +102,7 @@ defmodule Wardmast.Application do
       Wardmast.SecretRefs.Cache,
       Wardmast.Repo,
       # Cloak vault for encrypting workspace secrets at rest. Started early (it
-      # has no deps) and resolves ARBITER_CLOAK_KEY in its init — a missing key
+      # has no deps) and resolves WARDMAST_CLOAK_KEY in its init — a missing key
       # aborts the boot here, before any workspace read can hit an encrypted
       # column. See Wardmast.Vault.
       Wardmast.Vault,
@@ -232,7 +232,7 @@ defmodule Wardmast.Application do
         # sweeping the session JSONLs the CLI writes to disk, and writing the
         # per-session delta as `source: :coordinator_session`. Inert until an
         # install names its session directories
-        # (`ARBITER_COORDINATOR_SESSION_DIRS`), and inert in test. See
+        # (`WARDMAST_COORDINATOR_SESSION_DIRS`), and inert in test. See
         # `Wardmast.Sessions.UsageIngest`.
         Wardmast.Sessions.UsageIngest,
         # Touches arbiter's own liveness file (bd-3qkbch, phase 10, §4.6.3) so

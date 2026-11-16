@@ -20,7 +20,7 @@ defmodule Wardmast.Worker.Worktree do
       config :wardmast, :worktree_root, "/some/other/dir"
 
   or at runtime with `Application.put_env/3` (tests rely on this), or the
-  `ARBITER_WORKTREE_ROOT` environment variable.
+  `WARDMAST_WORKTREE_ROOT` environment variable.
 
   The branch name is mapped to a directory leaf by replacing `/` with `-`,
   so `feature/gte-009-worktree` lives at

@@ -25,7 +25,7 @@ defmodule Wardmast.SecretRefs.External do
   ## Handling of the values
 
   Resolution is lazy and cached **in memory only** (`Wardmast.SecretRefs.Cache`,
-  ETS) for `ARBITER_SECRET_CACHE_TTL` seconds (default 300; `0` disables the
+  ETS) for `WARDMAST_SECRET_CACHE_TTL` seconds (default 300; `0` disables the
   cache). A failed refresh serves the last value rather than breaking a running
   system. Values are never logged or written to disk, error terms carry only the
   reference and a coarse reason (never a response body), and every cached value
@@ -147,12 +147,12 @@ defmodule Wardmast.SecretRefs.External do
   defp serve_stale(_cached, _ref, reason), do: {:error, reason}
 
   @doc """
-  The cache TTL in milliseconds: `ARBITER_SECRET_CACHE_TTL` seconds (a
+  The cache TTL in milliseconds: `WARDMAST_SECRET_CACHE_TTL` seconds (a
   non-negative integer), default #{@default_ttl_s}s.
   """
   @spec ttl_ms() :: non_neg_integer()
   def ttl_ms do
-    case Integer.parse(System.get_env("ARBITER_SECRET_CACHE_TTL", "")) do
+    case Integer.parse(Wardmast.Env.get("WARDMAST_SECRET_CACHE_TTL", "")) do
       {n, ""} when n >= 0 -> n * 1000
       _ -> @default_ttl_s * 1000
     end
@@ -167,7 +167,7 @@ defmodule Wardmast.SecretRefs.External do
   """
   @spec env_or_ref(String.t()) :: {:ok, String.t()} | :unset | {:error, String.t(), reason()}
   def env_or_ref(name) do
-    case System.get_env(name <> "_REF") do
+    case Wardmast.Env.read(name <> "_REF") do
       ref when is_binary(ref) and ref != "" ->
         ref = String.trim(ref)
 
@@ -177,7 +177,7 @@ defmodule Wardmast.SecretRefs.External do
         end
 
       _ ->
-        case System.get_env(name) do
+        case Wardmast.Env.read(name) do
           value when is_binary(value) and value != "" -> {:ok, value}
           _ -> :unset
         end

@@ -50,7 +50,7 @@ defmodule Wardmast.NodeAgent.PodChannel.BridgeListener do
   def init(opts) do
     Process.flag(:trap_exit, true)
 
-    # `:tls12_only` comes from the caller, else the `ARBITER_BRIDGE_TLS12_ONLY`
+    # `:tls12_only` comes from the caller, else the `WARDMAST_BRIDGE_TLS12_ONLY`
     # setting (config/runtime.exs); off by default.
     tls12_only? =
       Keyword.get_lazy(opts, :tls12_only, fn ->

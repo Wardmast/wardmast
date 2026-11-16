@@ -87,6 +87,15 @@ defmodule Wardmast.Env do
     end
   end
 
+  @doc """
+  `System.get_env/1` for a name that may or may not be a Wardmast variable: a
+  `WARDMAST_*` name gets the legacy fallback, any other name (a user-chosen
+  `env:` credential such as `GITHUB_TOKEN`) is read as-is.
+  """
+  @spec read(String.t()) :: String.t() | nil
+  def read(@prefix <> _ = name), do: get(name)
+  def read(name), do: System.get_env(name)
+
   @doc "Forget which deprecations were already logged. Test seam."
   @spec reset_warnings() :: :ok
   def reset_warnings do

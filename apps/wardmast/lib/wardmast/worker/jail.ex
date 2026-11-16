@@ -798,7 +798,7 @@ defmodule Wardmast.Worker.Jail do
       can sign its own coordinator token.
     * `<data-home>/release.cookie`, the per-install Erlang distribution
       cookie the release's `env.sh` creates (the data home is the `:data_dir`
-      app env when set, else `ARB_DATA_HOME`, default `~/.arbiter`). The jail
+      app env when set, else `WARDMAST_DATA_HOME`, default `~/.arbiter`). The jail
       shares the host's network, so with the cookie a worker could reach
       epmd on loopback and `bin/wardmast rpc` straight into the server.
     * `$RELEASE_ROOT/releases/COOKIE`, the build-time cookie, for a release
@@ -839,7 +839,7 @@ defmodule Wardmast.Worker.Jail do
   # Where env.sh keeps the per-install cookie. An explicit `:data_dir` wins
   # so tests that repoint it stay hermetic.
   defp release_data_home do
-    case {Application.fetch_env(:wardmast, :data_dir), System.get_env("ARB_DATA_HOME"),
+    case {Application.fetch_env(:wardmast, :data_dir), Wardmast.Env.get("WARDMAST_DATA_HOME"),
           System.user_home()} do
       {{:ok, dir}, _, _} when is_binary(dir) -> Path.expand(dir)
       {_, dir, _} when is_binary(dir) and dir != "" -> Path.expand(dir)

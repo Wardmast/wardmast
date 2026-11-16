@@ -179,7 +179,7 @@ defmodule Wardmast.Nodes.Bridge.Stream do
 
   def terminate(_reason, _state), do: :ok
 
-  # Close reasons log at debug unless `ARBITER_BRIDGE_STREAM_LOG_LEVEL` (see
+  # Close reasons log at debug unless `WARDMAST_BRIDGE_STREAM_LOG_LEVEL` (see
   # config/runtime.exs) raises them, so they are reachable at prod log level.
   defp close_log_level, do: Application.get_env(:wardmast, :bridge_stream_close_log_level, :debug)
 

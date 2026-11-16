@@ -11,11 +11,11 @@ defmodule Wardmast.Config.Paths do
   `Application.get_env(:wardmast, :worktree_root, "/some/other/box/arbiter-worktrees")`
   fallback bakes one developer's home directory into every release.
   Resolution order, checked fresh on every call (no caching, so
-  `ARBITER_*` env vars take effect immediately — note this also means an
-  `ARBITER_*` var exported in a shell outranks any test's own
+  `WARDMAST_*` env vars take effect immediately — note this also means an
+  `WARDMAST_*` var exported in a shell outranks any test's own
   `Application.put_env/3`):
 
-    1. environment variable (`ARBITER_WORKTREE_ROOT` / `ARBITER_OUTPUT_LOG_ROOT`)
+    1. environment variable (`WARDMAST_WORKTREE_ROOT` / `WARDMAST_OUTPUT_LOG_ROOT`)
     2. application config (`config :wardmast, :worktree_root, ...`) — set by
        `config/dev.exs`, `config/test.exs`, or a test's own
        `Application.put_env/3`
@@ -24,12 +24,12 @@ defmodule Wardmast.Config.Paths do
 
   @spec worktree_root() :: String.t()
   def worktree_root do
-    resolve("ARBITER_WORKTREE_ROOT", :worktree_root, "~/dev/arbiter-worktrees")
+    resolve("WARDMAST_WORKTREE_ROOT", :worktree_root, "~/dev/arbiter-worktrees")
   end
 
   @spec output_log_root() :: String.t()
   def output_log_root do
-    resolve("ARBITER_OUTPUT_LOG_ROOT", :output_log_root, "~/dev/arbiter-worker-logs")
+    resolve("WARDMAST_OUTPUT_LOG_ROOT", :output_log_root, "~/dev/arbiter-worker-logs")
   end
 
   @doc """
@@ -45,7 +45,7 @@ defmodule Wardmast.Config.Paths do
   """
   @spec sessions_root() :: String.t()
   def sessions_root do
-    resolve("ARBITER_SESSIONS_ROOT", :sessions_root, "~/dev/arbiter-sessions")
+    resolve("WARDMAST_SESSIONS_ROOT", :sessions_root, "~/dev/arbiter-sessions")
   end
 
   @doc """
@@ -56,7 +56,7 @@ defmodule Wardmast.Config.Paths do
   """
   @spec accounts_root() :: String.t()
   def accounts_root do
-    resolve("ARBITER_ACCOUNTS_ROOT", :accounts_root, "~/.arbiter/accounts")
+    resolve("WARDMAST_ACCOUNTS_ROOT", :accounts_root, "~/.arbiter/accounts")
   end
 
   @doc """
@@ -65,7 +65,7 @@ defmodule Wardmast.Config.Paths do
   """
   @spec image_root() :: String.t()
   def image_root do
-    resolve("ARBITER_IMAGE_ROOT", :image_root, "~/.arbiter/images")
+    resolve("WARDMAST_IMAGE_ROOT", :image_root, "~/.arbiter/images")
   end
 
   @doc """
@@ -85,7 +85,7 @@ defmodule Wardmast.Config.Paths do
   """
   @spec scratch_root() :: String.t()
   def scratch_root do
-    resolve("ARBITER_SCRATCH_ROOT", :scratch_root, "~/.cache/arbiter/scratch")
+    resolve("WARDMAST_SCRATCH_ROOT", :scratch_root, "~/.cache/arbiter/scratch")
   end
 
   @doc """
@@ -97,14 +97,14 @@ defmodule Wardmast.Config.Paths do
   egress proxy, bridges, ssh-agent and their tests create lives under this
   root instead.
 
-  Resolution: `ARBITER_SOCKET_ROOT`, then `config :wardmast, :socket_root`,
+  Resolution: `WARDMAST_SOCKET_ROOT`, then `config :wardmast, :socket_root`,
   then `/tmp/arb-<8 hex>` where the hex is a hash of `scratch_root/0` (so two
   installs, or a sandbox with its own scratch root, never share a directory).
   Callers create it (`File.mkdir_p/1` + `chmod 0o700`).
   """
   @spec socket_root() :: String.t()
   def socket_root do
-    System.get_env("ARBITER_SOCKET_ROOT") ||
+    Wardmast.Env.get("WARDMAST_SOCKET_ROOT") ||
       Application.get_env(:wardmast, :socket_root) ||
       default_socket_root()
   end
@@ -126,7 +126,7 @@ defmodule Wardmast.Config.Paths do
   """
   @spec worker_tmp_root() :: String.t()
   def worker_tmp_root do
-    resolve("ARBITER_WORKER_TMP_ROOT", :worker_tmp_root, Path.join(scratch_root(), "worker-tmp"))
+    resolve("WARDMAST_WORKER_TMP_ROOT", :worker_tmp_root, Path.join(scratch_root(), "worker-tmp"))
   end
 
   @doc """
@@ -138,13 +138,13 @@ defmodule Wardmast.Config.Paths do
   `metadata.type` key, and for `project` a `metadata.workspace_id` key). This
   is not the layout `arb init` produces today (`memory/MEMORY.md` has no such
   frontmatter); an operator wanting real memory mounted into sessions must
-  point `ARBITER_MEMORY_ROOT` at a directory laid out this way. The default is
+  point `WARDMAST_MEMORY_ROOT` at a directory laid out this way. The default is
   an empty directory that just happens not to exist yet, which
   `Wardmast.Sessions.Memory` treats as "no memories" rather than an error.
   """
   @spec memory_root() :: String.t()
   def memory_root do
-    resolve("ARBITER_MEMORY_ROOT", :memory_root, "~/.arbiter/memory")
+    resolve("WARDMAST_MEMORY_ROOT", :memory_root, "~/.arbiter/memory")
   end
 
   @doc """
@@ -165,7 +165,7 @@ defmodule Wardmast.Config.Paths do
   their environment variable first. `ARB_HOME` is **ambient**, not an override:
   it is exported into every process the server spawns (including every worker
   and every test run started from a checkout), so treating it the way those
-  roots treat their dedicated `ARBITER_*` vars would mean an explicit
+  roots treat their dedicated `WARDMAST_*` vars would mean an explicit
   configuration could never win. `ARB_PRIMARY_CHECKOUT` is the dedicated
   override and keeps its place at the top.
 
@@ -226,7 +226,7 @@ defmodule Wardmast.Config.Paths do
   the fleet, so an install that wants coordinator metering names its
   directories explicitly.
 
-  `ARBITER_COORDINATOR_SESSION_DIRS` takes a `:`- or `,`-separated list;
+  `WARDMAST_COORDINATOR_SESSION_DIRS` takes a `:`- or `,`-separated list;
   application config takes a list or a single string. Blank entries are
   dropped (an empty segment would otherwise expand to the cwd) and `~` is
   expanded.
@@ -234,7 +234,7 @@ defmodule Wardmast.Config.Paths do
   @spec coordinator_session_dirs() :: [String.t()]
   def coordinator_session_dirs do
     raw =
-      System.get_env("ARBITER_COORDINATOR_SESSION_DIRS") ||
+      Wardmast.Env.get("WARDMAST_COORDINATOR_SESSION_DIRS") ||
         Application.get_env(:wardmast, :coordinator_session_dirs) ||
         []
 
@@ -248,7 +248,7 @@ defmodule Wardmast.Config.Paths do
   end
 
   defp resolve(env_var, config_key, default) do
-    System.get_env(env_var) ||
+    Wardmast.Env.get(env_var) ||
       Application.get_env(:wardmast, config_key) ||
       expand_default(default, env_var)
   end

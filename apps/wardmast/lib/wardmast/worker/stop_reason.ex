@@ -66,7 +66,7 @@ defmodule Wardmast.Worker.StopReason do
       other SIGKILL. A deliberate refinement of `:killed` — the cause is a
       runaway process tree *inside* the run (almost always a `mix test`), so a
       re-dispatch reproduces it; the remediation is a smaller workload or a
-      larger `ARBITER_WORKER_MEMORY_MAX`, not a retry. Not resumable.
+      larger `WARDMAST_WORKER_MEMORY_MAX`, not a retry. Not resumable.
     * `:spend_cap` — a `park`-action guardrail tier (`quarantine`, `probation`)
       crossed its token or wall-clock spend cap and
       `Wardmast.Guardrails.SpendPatrol` stopped the run (G19). Built by
@@ -1134,7 +1134,7 @@ defmodule Wardmast.Worker.StopReason do
       remediation:
         "Find what grew without bound (the run's transcript names the last command) and " <>
           "fix or narrow it. Re-dispatching the same work will usually hit the cap again. " <>
-          "If the workload is legitimately large, raise ARBITER_WORKER_MEMORY_MAX " <>
+          "If the workload is legitimately large, raise WARDMAST_WORKER_MEMORY_MAX " <>
           "(e.g. 24G or 60%) and restart the server. The OOM is attributable via the " <>
           "run's cgroup scope (worker_runs.cgroup_scopes).",
       exit_status: exit_status,

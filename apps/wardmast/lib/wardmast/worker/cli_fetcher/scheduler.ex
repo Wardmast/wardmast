@@ -19,7 +19,7 @@ defmodule Wardmast.Worker.CliFetcher.Scheduler do
 
   `config :wardmast, :cli_fetcher` (prod enables it; dev and test leave it off):
 
-    * `:enabled` — master switch. `ARBITER_CLI_FETCHER=0` also disables it, for
+    * `:enabled` — master switch. `WARDMAST_CLI_FETCHER=0` also disables it, for
       air-gapped installs.
     * `:interval_ms` — default 24 hours.
     * `:initial_delay_ms` — delay before the first full run (default 5 minutes).
@@ -194,7 +194,7 @@ defmodule Wardmast.Worker.CliFetcher.Scheduler do
   defp enabled?(opts) do
     case Keyword.fetch(opts, :enabled) do
       {:ok, flag} -> flag == true
-      :error -> config(:enabled, false) == true and System.get_env("ARBITER_CLI_FETCHER") != "0"
+      :error -> config(:enabled, false) == true and Wardmast.Env.get("WARDMAST_CLI_FETCHER") != "0"
     end
   end
 
