@@ -4,7 +4,7 @@ defmodule WardmastCli.Cmd.Doctor.SecretsAtRest do
   the service's `EnvironmentFile` (`<data-home>/arbiter.env`) and which are
   references to an external secret manager (`NAME_REF=aws-sm:…`).
 
-  An inline `ARBITER_CLOAK_KEY` or `SECRET_KEY_BASE` is the finding a host
+  An inline `ARBITER_CLOAK_KEY` or `WARDMAST_CLOAK_KEY` or `SECRET_KEY_BASE` is the finding a host
   secret scanner raises (the cloak key then sits in plaintext beside the
   database it protects), so those — and an inline value a `*_REF` pointer
   already shadows, and a pointer with an unrecognised scheme — are a `warn`.
@@ -55,7 +55,7 @@ defmodule WardmastCli.Cmd.Doctor.SecretsAtRest do
           status: :warn,
           detail: Enum.join(problems, "; ") <> " (" <> summary <> ")",
           hint:
-            "Keep secret values out of arbiter.env: set e.g. ARBITER_CLOAK_KEY_REF=aws-sm:<id>#<key> " <>
+            "Keep secret values out of arbiter.env: set e.g. WARDMAST_CLOAK_KEY_REF=aws-sm:<id>#<key> " <>
               "(also SECRET_KEY_BASE_REF, GITHUB_TOKEN_REF; aws-ssm:/file: work too) and remove the inline " <>
               "value. See docs/secrets-at-rest.md.",
           meta: %{secrets: report(entries)}

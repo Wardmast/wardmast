@@ -23,6 +23,7 @@ defmodule WardmastCli.Cmd.InstallService.EnvFile do
     GEMINI_API_KEY
     GOOGLE_GENAI_API_KEY
     ARBITER_CLOAK_KEY
+    WARDMAST_CLOAK_KEY
   )
 
   # Pointers into an external secret manager (`aws-sm:…`, `aws-ssm:…`,
@@ -36,7 +37,9 @@ defmodule WardmastCli.Cmd.InstallService.EnvFile do
     GEMINI_API_KEY_REF
     GOOGLE_GENAI_API_KEY_REF
     ARBITER_CLOAK_KEY_REF
+    WARDMAST_CLOAK_KEY_REF
     ARBITER_CLOAK_KEY_OLD_REF
+    WARDMAST_CLOAK_KEY_OLD_REF
     SECRET_KEY_BASE_REF
     AWS_REGION
     AWS_PROFILE

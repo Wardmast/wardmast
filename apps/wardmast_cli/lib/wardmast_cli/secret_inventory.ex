@@ -16,7 +16,9 @@ defmodule WardmastCli.SecretInventory do
 
   @secrets ~w(
     ARBITER_CLOAK_KEY
+    WARDMAST_CLOAK_KEY
     ARBITER_CLOAK_KEY_OLD
+    WARDMAST_CLOAK_KEY_OLD
     SECRET_KEY_BASE
     GITHUB_TOKEN
     ANTHROPIC_API_KEY
@@ -27,7 +29,7 @@ defmodule WardmastCli.SecretInventory do
 
   # Secrets the server cannot boot without: an inline copy of one of these is the
   # at-rest exposure a secret scanner flags first.
-  @boot_secrets ~w(ARBITER_CLOAK_KEY SECRET_KEY_BASE)
+  @boot_secrets ~w(ARBITER_CLOAK_KEY WARDMAST_CLOAK_KEY SECRET_KEY_BASE)
 
   @schemes ~w(aws-sm aws-ssm file)
   @fingerprint_len 8

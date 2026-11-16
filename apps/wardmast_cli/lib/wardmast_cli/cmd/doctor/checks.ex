@@ -1180,7 +1180,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
 
   # bd-5ad4ch: the per-run worker TMPDIR root must be disk-backed and small.
   # Unix domain socket paths are capped at 108 bytes (`sun_path`, NUL included).
-  # The operator socket and everything under ARBITER_SOCKET_ROOT (ssh-agent,
+  # The operator socket and everything under WARDMAST_SOCKET_ROOT (ssh-agent,
   # egress, bridges) fail to bind past it. The root gets headroom for the
   # longest subpath the server appends.
   @sun_path_max 107
@@ -1189,13 +1189,13 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   @doc false
   @spec check_socket_paths() :: Result.t()
   def check_socket_paths do
-    root = System.get_env("ARBITER_SOCKET_ROOT")
+    root = Wardmast.Env.get("WARDMAST_SOCKET_ROOT")
 
     over =
       [{"operator socket", OperatorSocket.path(), @sun_path_max}] ++
         if(root in [nil, ""],
           do: [],
-          else: [{"ARBITER_SOCKET_ROOT", root, @sun_path_max - @socket_root_headroom}]
+          else: [{"WARDMAST_SOCKET_ROOT", root, @sun_path_max - @socket_root_headroom}]
         )
 
     case Enum.filter(over, fn {_, path, max} -> byte_size(path) > max end) do
@@ -1217,7 +1217,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
             end),
           hint:
             "Use a shorter path: ARB_OPERATOR_SOCKET for the operator socket, " <>
-              "ARBITER_SOCKET_ROOT (e.g. /tmp/arb) for the rest. The socket is silently unusable otherwise.",
+              "WARDMAST_SOCKET_ROOT (e.g. /tmp/arb) for the rest. The socket is silently unusable otherwise.",
           blocks_readiness: false
         }
     end
@@ -1232,7 +1232,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
           detail:
             "#{Map.get(body, "root")} is on #{Map.get(body, "fstype")} (RAM-backed): worker " <>
               "scratch files consume memory",
-          hint: "Set ARBITER_WORKER_TMP_ROOT (or ARBITER_SCRATCH_ROOT) to a disk-backed path.",
+          hint: "Set WARDMAST_WORKER_TMP_ROOT (or WARDMAST_SCRATCH_ROOT) to a disk-backed path.",
           blocks_readiness: false
         }
 
@@ -1454,7 +1454,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       if Map.get(body, "capped"),
         do: "",
         else:
-          " Cap each worker with ARBITER_WORKER_MEMORY_MAX (e.g. 12G or 40%) — it needs " <>
+          " Cap each worker with WARDMAST_WORKER_MEMORY_MAX (e.g. 12G or 40%) — it needs " <>
             "systemd, cgroup v2 and the memory controller delegated to user units."
 
     policy_hint <> cap_hint
@@ -2174,7 +2174,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   end
 
   defp cli_scheduler_note(%{"enabled" => false}),
-    do: " (daily bump job off: ARBITER_CLI_FETCHER=0 or not a release install)"
+    do: " (daily bump job off: WARDMAST_CLI_FETCHER=0 or not a release install)"
 
   defp cli_scheduler_note(%{"checked_at" => at}) when is_binary(at), do: " (last checked #{at})"
   defp cli_scheduler_note(_), do: ""

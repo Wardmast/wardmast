@@ -59,7 +59,7 @@ defmodule WardmastCli.Cmd.Usage do
   (bd-be804c), which meters the coordinator's session JSONLs on a timer. The
   coordinator is roughly a quarter of total consumption, so before that landed
   `--by source` was the "whole bill" only in principle. An install that has not
-  set `ARBITER_COORDINATOR_SESSION_DIRS` still sees no such rows.
+  set `WARDMAST_COORDINATOR_SESSION_DIRS` still sees no such rows.
 
   Those rows are dated from the **session transcript's own timestamps**, one row
   per session per UTC day, so `--by day` and `--since` place the spend when it
