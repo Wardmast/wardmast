@@ -415,7 +415,7 @@ defmodule Arbiter.Worker.CliSet.Watcher do
     %{state | retries: Map.put(state.retries, key, retry_entry)}
   end
 
-  defp record_outcome(state, %{key: key} = entry, {:error, reason}, ref, attempt, schedule) do
+  defp record_outcome(state, entry, {:error, reason}, ref, attempt, schedule) do
     case classify_error(reason) do
       :transient ->
         record_transient_failure(state, entry, reason, ref, attempt, schedule)
