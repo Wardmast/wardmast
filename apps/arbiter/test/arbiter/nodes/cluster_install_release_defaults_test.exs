@@ -8,7 +8,7 @@ defmodule Arbiter.Nodes.ClusterInstallReleaseDefaultsTest do
   @release_yml Path.expand("../../../../../.github/workflows/release.yml", __DIR__)
 
   # Release CI publishes under ghcr.io/${OWNER}; the owner is this repo's.
-  @owner "serious-alchemy"
+  @owner "wardmast"
 
   test "chart defaults point where release CI publishes" do
     values = File.read!(@chart_values)
