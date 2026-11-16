@@ -151,8 +151,8 @@ defmodule WardmastWeb do
       import WardmastWeb.Labels
 
       # Common modules used in templates
-      alias WardmastWeb.Layouts
       alias Phoenix.LiveView.JS
+      alias WardmastWeb.Layouts
 
       # Routes generation with the ~p sigil
       unquote(verified_routes())

@@ -16,8 +16,8 @@ defmodule Wardmast.Tasks.Issue.Changes.GuardDemote do
 
   use Ash.Resource.Change
 
-  alias Wardmast.Worker.Registry, as: WorkerRegistry
   alias Ash.Changeset
+  alias Wardmast.Worker.Registry, as: WorkerRegistry
 
   @impl true
   def change(changeset, _opts, _context) do

@@ -20,8 +20,8 @@ defmodule Wardmast.Tasks.Issue.Changes.SetFloor do
 
   use Ash.Resource.Change
 
-  alias Wardmast.MCP.Scope
   alias Ash.Changeset
+  alias Wardmast.MCP.Scope
 
   @impl true
   def change(changeset, _opts, context) do

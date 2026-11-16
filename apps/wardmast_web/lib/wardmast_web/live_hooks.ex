@@ -95,9 +95,9 @@ defmodule WardmastWeb.LiveHooks do
   import Phoenix.Component, only: [assign: 3]
   import Phoenix.LiveView, only: [attach_hook: 4, connected?: 1, start_async: 3]
 
+  alias Phoenix.LiveView.AsyncResult
   alias Wardmast.Messages.Message
   alias WardmastWeb.DashboardUpdateController
-  alias Phoenix.LiveView.AsyncResult
 
   require Logger
 

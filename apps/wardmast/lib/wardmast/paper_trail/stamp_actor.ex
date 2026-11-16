@@ -31,8 +31,8 @@ defmodule Wardmast.PaperTrail.StampActor do
 
   use Ash.Resource.Change
 
-  alias Wardmast.Actor
   alias Ash.Changeset
+  alias Wardmast.Actor
 
   @impl true
   def change(changeset, opts, context) do

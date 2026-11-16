@@ -23,9 +23,9 @@ defmodule Wardmast.Tasks.Issue.Changes.ClearAttention do
 
   use Ash.Resource.Change
 
+  alias Ash.Changeset
   alias Wardmast.Messages.Message
   alias Wardmast.Tasks.Issue.Changes.RecordAttentionSpan
-  alias Ash.Changeset
 
   @fields [
     :attention_cause,

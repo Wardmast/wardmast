@@ -9,8 +9,8 @@ defmodule Wardmast.Tasks.Issue.Changes.NormalizeProviderConstraint do
 
   use Ash.Resource.Change
 
-  alias Wardmast.Agents.ProviderConstraint
   alias Ash.Changeset
+  alias Wardmast.Agents.ProviderConstraint
 
   @impl true
   def change(changeset, _opts, _context) do

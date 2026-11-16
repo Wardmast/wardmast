@@ -31,10 +31,10 @@ defmodule WardmastWeb.ReportsLive do
     Throughput
   }
 
+  alias Phoenix.LiveView.AsyncResult
   alias Wardmast.Tasks.{Issue, Workspace}
   alias WardmastWeb.Charts
   alias WardmastWeb.CoreComponents.Feedback
-  alias Phoenix.LiveView.AsyncResult
   require Ash.Query
   require Logger
 

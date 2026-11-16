@@ -21,8 +21,8 @@ defmodule Wardmast.Tasks.Workspace.Changes.MergeSecrets do
 
   use Ash.Resource.Change
 
-  alias Wardmast.Tasks.Workspace
   alias Ash.Changeset
+  alias Wardmast.Tasks.Workspace
 
   @impl true
   def change(changeset, _opts, _context) do

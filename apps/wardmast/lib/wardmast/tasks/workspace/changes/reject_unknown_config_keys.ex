@@ -14,8 +14,8 @@ defmodule Wardmast.Tasks.Workspace.Changes.RejectUnknownConfigKeys do
 
   use Ash.Resource.Change
 
-  alias Wardmast.Tasks.Workspace.ConfigSchema
   alias Ash.Changeset
+  alias Wardmast.Tasks.Workspace.ConfigSchema
 
   @impl true
   def change(changeset, _opts, _context) do

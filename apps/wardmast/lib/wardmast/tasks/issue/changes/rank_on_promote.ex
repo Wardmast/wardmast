@@ -11,8 +11,8 @@ defmodule Wardmast.Tasks.Issue.Changes.RankOnPromote do
 
   use Ash.Resource.Change
 
-  alias Wardmast.Tasks.Issue.Changes.AssignRank
   alias Ash.Changeset
+  alias Wardmast.Tasks.Issue.Changes.AssignRank
 
   @impl true
   def change(changeset, _opts, _context) do

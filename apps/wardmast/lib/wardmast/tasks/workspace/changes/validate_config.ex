@@ -118,11 +118,11 @@ defmodule Wardmast.Tasks.Workspace.Changes.ValidateConfig do
 
   use Ash.Resource.Change
 
+  alias Ash.Changeset
   alias Wardmast.Tasks.Workspace.ConfigSchema
   alias Wardmast.Worker.Egress.Policy, as: EgressPolicy
   alias Wardmast.Worker.Image.RepoConfig
   alias Wardmast.Worker.VisualBaselines.Config, as: VisualBaselinesConfig
-  alias Ash.Changeset
 
   @impl true
   def change(changeset, _opts, _context) do

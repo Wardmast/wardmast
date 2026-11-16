@@ -38,9 +38,9 @@ defmodule Wardmast.Tasks.Issue.Changes.Transition do
 
   use Ash.Resource.Change
 
+  alias Ash.Changeset
   alias Wardmast.Tasks.Issue.Changes.ClearAttention
   alias Wardmast.Tasks.Lifecycle
-  alias Ash.Changeset
 
   @impl true
   def change(changeset, opts, _context) do

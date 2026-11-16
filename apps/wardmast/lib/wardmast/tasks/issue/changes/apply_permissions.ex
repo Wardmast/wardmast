@@ -19,9 +19,9 @@ defmodule Wardmast.Tasks.Issue.Changes.ApplyPermissions do
 
   use Ash.Resource.Change
 
+  alias Ash.Changeset
   alias Wardmast.Guardrails.Permissions, as: Vocabulary
   alias Wardmast.Tasks.Permissions
-  alias Ash.Changeset
 
   @impl true
   def change(changeset, _opts, _context) do

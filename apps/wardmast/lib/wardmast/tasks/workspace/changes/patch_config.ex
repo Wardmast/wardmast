@@ -21,8 +21,8 @@ defmodule Wardmast.Tasks.Workspace.Changes.PatchConfig do
 
   use Ash.Resource.Change
 
-  alias Wardmast.Tasks.Workspace.ConfigPath
   alias Ash.Changeset
+  alias Wardmast.Tasks.Workspace.ConfigPath
 
   @impl true
   def change(changeset, _opts, _context) do

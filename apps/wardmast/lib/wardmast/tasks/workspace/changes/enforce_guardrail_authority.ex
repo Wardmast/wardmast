@@ -19,8 +19,8 @@ defmodule Wardmast.Tasks.Workspace.Changes.EnforceGuardrailAuthority do
 
   use Ash.Resource.Change
 
-  alias Wardmast.Guardrails.Authority
   alias Ash.Changeset
+  alias Wardmast.Guardrails.Authority
 
   @impl true
   def change(changeset, _opts, _context) do

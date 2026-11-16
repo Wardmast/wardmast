@@ -15,8 +15,8 @@ defmodule Wardmast.Tasks.Issue.Changes.RecordAttentionSpan do
 
   use Ash.Resource.Change
 
-  alias Wardmast.Tasks.AttentionSpans
   alias Ash.Changeset
+  alias Wardmast.Tasks.AttentionSpans
 
   @impl true
   def change(changeset, _opts, _context), do: record(changeset)

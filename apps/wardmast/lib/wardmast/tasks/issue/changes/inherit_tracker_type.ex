@@ -33,9 +33,9 @@ defmodule Wardmast.Tasks.Issue.Changes.InheritTrackerType do
 
   use Ash.Resource.Change
 
+  alias Ash.Changeset
   alias Wardmast.Tasks.Issue
   alias Wardmast.Tasks.Workspace
-  alias Ash.Changeset
 
   @valid ~w(none jira shortcut linear github gitlab)
 

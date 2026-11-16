@@ -25,12 +25,12 @@ defmodule WardmastWeb.UsageLive do
   use WardmastWeb, :live_view
   import WardmastWeb.QuotaHelpers
 
+  alias Phoenix.LiveView.AsyncResult
   alias Wardmast.Agents.ModelDisplay
   alias Wardmast.Tasks.Issue
   alias Wardmast.Usage
   alias Wardmast.Usage.Event
   alias WardmastWeb.CoreComponents.{Data, Domain, Feedback, Navigation}
-  alias Phoenix.LiveView.AsyncResult
   require Ash.Query
   require Logger
 

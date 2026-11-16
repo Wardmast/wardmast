@@ -29,9 +29,9 @@ defmodule Wardmast.Tasks.Issue.Changes.SetRank do
 
   require Ash.Query
 
+  alias Ash.Changeset
   alias Wardmast.Tasks.Issue
   alias Wardmast.Tasks.Issue.Changes.AssignRank
-  alias Ash.Changeset
 
   @impl true
   def change(changeset, _opts, _context) do

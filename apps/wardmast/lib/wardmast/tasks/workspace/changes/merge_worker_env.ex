@@ -27,8 +27,8 @@ defmodule Wardmast.Tasks.Workspace.Changes.MergeWorkerEnv do
 
   use Ash.Resource.Change
 
-  alias Wardmast.Tasks.Workspace
   alias Ash.Changeset
+  alias Wardmast.Tasks.Workspace
 
   @name_re ~r/^[A-Za-z_][A-Za-z0-9_]*$/
 

@@ -6,8 +6,8 @@ defmodule WardmastWeb.Layouts do
   use WardmastWeb, :html
   import WardmastWeb.QuotaHelpers
 
-  alias Wardmast.Messages.Message
   alias Phoenix.LiveView.AsyncResult
+  alias Wardmast.Messages.Message
 
   # Embed all files in layouts/* within this module.
   # The default root.html.heex file contains the HTML

@@ -25,8 +25,8 @@ defmodule Wardmast.Tasks.Issue.Changes.ResolveRepo do
 
   use Ash.Resource.Change
 
-  alias Wardmast.Tasks.IssueRepo
   alias Ash.Changeset
+  alias Wardmast.Tasks.IssueRepo
 
   @impl true
   def change(changeset, _opts, _context) do
