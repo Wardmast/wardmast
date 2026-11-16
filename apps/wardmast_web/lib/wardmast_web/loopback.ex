@@ -1,0 +1,40 @@
+defmodule WardmastWeb.Loopback do
+  @moduledoc """
+  Is this peer on the box? Loopback is *not* a dashboard identity (bd-3gycsz:
+  `tailscale serve` proxies from 127.0.0.1; see `WardmastWeb.DashboardAuth`), but
+  it still gates the terminal and is half of the Tailscale-header trust check.
+
+  Wardmast binds directly to `127.0.0.1:4848` by default, with no reverse proxy
+  in front, so `conn.remote_ip` / `peer_data.address` is always the real peer
+  and `X-Forwarded-For` is never to be trusted. An operator can override the
+  bind address with `ARB_BIND_ADDRESS` (`WardmastWeb.Boot.BindAddressCheck`
+  logs a boot WARNING when that override isn't loopback, since every
+  unauthenticated LiveView page becomes reachable by anyone who can reach the
+  port). The worker-session terminal stays gated by this module's
+  `loopback?/1` regardless of the bind address, so it is the one page that
+  does *not* become reachable off-loopback. Loopback covers the three shapes
+  a same-box peer actually arrives as:
+
+    * IPv4 `127.0.0.0/8`
+    * IPv6 `::1`
+    * IPv4-mapped IPv6 `::ffff:127.x.x.x`, which is what a dual-stack listener
+      reports for an IPv4 client
+
+  Extracted from `WardmastWeb.Plugs.ApiAuth` when the session socket
+  (bd-3ymdvi, RFC §10.4 "loopback only") needed the same rule: a WebSocket
+  upgrade has a `peer_data`, not a `Plug.Conn`, and two copies of an
+  address-range check is exactly the sort of duplication that drifts.
+  """
+
+  import Bitwise
+
+  @typedoc "An `:inet` address tuple, as `Plug.Conn` and `Phoenix.Socket` report it."
+  @type address :: :inet.ip_address()
+
+  @doc "Whether `address` is a loopback address."
+  @spec loopback?(address() | term()) :: boolean()
+  def loopback?({127, _, _, _}), do: true
+  def loopback?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  def loopback?({0, 0, 0, 0, 0, 0xFFFF, hi, _lo}), do: hi >>> 8 == 127
+  def loopback?(_), do: false
+end

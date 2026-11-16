@@ -1,0 +1,57 @@
+defmodule WardmastWeb.Api.DependencyJSON do
+  @moduledoc "Render functions for Dependency resources."
+
+  alias Wardmast.Tasks.Dependency
+  alias Wardmast.Tasks.Issue
+  alias WardmastWeb.Api.WorkspaceParam
+
+  def show(%{dependency: dep}), do: data(dep)
+
+  @doc """
+  Renders the `Wardmast.Tasks.Dependencies.list/1` shape: one row per edge,
+  each carrying both endpoints' id/title/state/priority so a live edge is
+  distinguishable from a closed↔closed one without a second lookup
+  (bd-1defgu).
+  """
+  def index(%{dependencies: rows} = assigns) do
+    %{data: Enum.map(rows, &edge_row/1)} |> WorkspaceParam.echo(assigns)
+  end
+
+  defp edge_row(%{edge: dep, from: from, to: to}) do
+    dep
+    |> data()
+    |> Map.put(:workspace_id, from.workspace_id)
+    |> Map.put(:from, endpoint(from))
+    |> Map.put(:to, endpoint(to))
+  end
+
+  defp endpoint(%Issue{} = issue) do
+    %{
+      id: issue.id,
+      title: issue.title,
+      state: to_string_atom(issue.state),
+      priority: issue.priority
+    }
+  end
+
+  def data(%Dependency{} = dep) do
+    %{
+      id: dep.id,
+      from_issue_id: dep.from_issue_id,
+      to_issue_id: dep.to_issue_id,
+      type: to_string_atom(dep.type),
+      created_by: dep.created_by,
+      notes: dep.notes,
+      created_at: iso(dep.created_at),
+      updated_at: iso(dep.updated_at)
+    }
+  end
+
+  defp to_string_atom(nil), do: nil
+  defp to_string_atom(a) when is_atom(a), do: Atom.to_string(a)
+  defp to_string_atom(s) when is_binary(s), do: s
+
+  defp iso(nil), do: nil
+  defp iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  defp iso(%NaiveDateTime{} = dt), do: NaiveDateTime.to_iso8601(dt)
+end

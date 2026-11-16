@@ -1,0 +1,115 @@
+defmodule WardmastWeb.Api.TrackerController do
+  @moduledoc """
+  REST endpoints for querying a workspace's external tracker directly.
+
+  Routes:
+
+    * `GET  /api/workspaces/:workspace_id/tracker/issues` — list the open
+      items assigned to the workspace's authenticated user. Adapters that
+      don't have a backlog notion (currently: `:none`, plus Jira/Shortcut
+      until their search is wired) reply with `supported: false` and an
+      empty data list, so callers (`arb list --tracker`) can degrade
+      cleanly without treating it as an error.
+
+    * `POST /api/workspaces/:workspace_id/tracker/tickets` — create an
+      upstream tracker ticket WITHOUT creating a local task. Used by
+      `arb create --ticket-only` to post unclaimed work to the shared
+      tracker so any fleet contributor can pick it up via `arb claim`.
+      Requires a configured tracker (`tracker_type != :none`).
+
+  `POST /tracker/tickets` response shape on success:
+
+      {
+        "ref": "42",
+        "url": "https://github.com/owner/repo/issues/42",
+        "tracker_type": "github"
+      }
+
+  bd-1ozks5: `assignee` is still accepted in the ticket body for one release
+  — the local assignee field is gone, so it's silently ignored and reported
+  back as a `warnings` entry rather than rejected.
+  """
+
+  use WardmastWeb, :controller
+
+  alias Wardmast.Tasks.AssigneeCompat
+  alias Wardmast.Trackers
+
+  action_fallback WardmastWeb.Api.FallbackController
+
+  def issues(conn, %{"workspace_id" => workspace_id}) do
+    with {:ok, workspace} <- get_workspace(conn, workspace_id) do
+      case Trackers.list_open(workspace) do
+        {:ok, summaries} ->
+          json(
+            conn,
+            put_claim_filter(
+              %{data: Enum.map(summaries, &serialize/1), supported: true},
+              workspace
+            )
+          )
+
+        {:error, :not_supported} ->
+          json(conn, %{data: [], supported: false})
+
+        {:error, _} = err ->
+          err
+      end
+    end
+  end
+
+  def create_ticket(conn, %{"workspace_id" => workspace_id} = params) do
+    with {:ok, workspace} <- get_workspace(conn, workspace_id),
+         {:ok, body} <- Trackers.create_ticket_only(workspace, build_ticket_attrs(params)) do
+      conn
+      |> put_status(:created)
+      |> json(maybe_put_warnings(body, AssigneeCompat.warnings(params)))
+    end
+  end
+
+  # ---- helpers -----------------------------------------------------------
+
+  # bd-43sydg: with a GitHub App and no personal token the claim set is the claim
+  # label, not "assigned to me"; the response says so.
+  defp put_claim_filter(payload, workspace) do
+    case Trackers.claim_filter(workspace) do
+      nil -> payload
+      filter -> Map.put(payload, :filter, filter)
+    end
+  end
+
+  defp build_ticket_attrs(params) do
+    %{}
+    |> put_if_present(:title, params["title"])
+    |> put_if_present(:description, params["description"])
+    |> put_if_present(:priority, params["priority"])
+    |> put_if_present(:issue_type, params["issue_type"])
+  end
+
+  defp put_if_present(map, _key, nil), do: map
+  defp put_if_present(map, _key, ""), do: map
+  defp put_if_present(map, key, value), do: Map.put(map, key, value)
+
+  defp maybe_put_warnings(map, []), do: map
+  defp maybe_put_warnings(map, warnings), do: Map.put(map, :warnings, warnings)
+
+  # ---- serialization -----------------------------------------------------
+
+  defp serialize(%{
+         ref: ref,
+         title: title,
+         url: url,
+         status: status,
+         assignees: assignees
+       }) do
+    %{
+      ref: ref,
+      title: title,
+      url: url,
+      status: Atom.to_string(status),
+      assignees: assignees
+    }
+  end
+
+  defp get_workspace(conn, id), do: WardmastWeb.Api.WorkspaceParam.resolve_ref(conn, id)
+end

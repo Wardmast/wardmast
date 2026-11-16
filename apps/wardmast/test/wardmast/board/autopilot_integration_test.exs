@@ -1,0 +1,361 @@
+defmodule Wardmast.Board.AutopilotIntegrationTest do
+  @moduledoc """
+  The autopilot against a real board read.
+
+  `Wardmast.Board.AutopilotTest` stubs the snapshot so it can drive one
+  decision at a time; this file leaves `Snapshot.load/1` in place and only
+  stubs the dispatch, so the wiring the product actually depends on — issues
+  in the database → `Snapshot.load/1` → `Scheduler.plan/1` → a dispatch —
+  is exercised end to end. Nothing here spawns a worker: the seam under test
+  is *which* id the autopilot hands to dispatch, not what dispatch does with
+  it.
+  """
+
+  use Wardmast.DataCase, async: false
+
+  alias Wardmast.Board.Autopilot
+  alias Wardmast.Board.Snapshot
+  alias Wardmast.Messages.Message
+  alias Wardmast.Tasks.{Dependency, Issue, Workspace}
+
+  setup do
+    # Workers are supervised at the VM level and every one of them lands in a
+    # column, so a leftover child from an earlier test would occupy a slot.
+    for snap <- Wardmast.Worker.list_children(), do: Wardmast.Worker.stop(snap.task_id)
+
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "autopilot-#{System.unique_integer([:positive])}",
+        prefix: "bd"
+      })
+
+    {:ok, ws: ws}
+  end
+
+  # bd-b5wyjd: a created issue is unrefined, i.e. Backlog, and the autopilot
+  # only ever dispatches out of Ready. Every fixture here is meant to be a
+  # queue candidate, so it is promoted on the way out.
+  defp issue(ws, title, attrs) do
+    # bd-7mbrlg: `:promote_to_ready` now refuses a gated type with no
+    # acceptance criteria. Nothing here is testing that guard.
+    base = %{title: title, workspace_id: ws.id, acceptance: "- autopilot fixture"}
+    {:ok, created} = Ash.create(Issue, Map.merge(base, attrs))
+    {:ok, issue} = Ash.update(created, %{}, action: :promote_to_ready)
+    issue
+  end
+
+  # A live autopilot reading the real world, dispatching into the mailbox.
+  defp start_autopilot(opts \\ []) do
+    test = self()
+
+    {:ok, pid} =
+      Autopilot.start_link(
+        Keyword.merge(
+          [
+            name: nil,
+            interval_ms: :never,
+            paused: false,
+            # This test drives every pass explicitly via `tick/2`; a real
+            # subscription would pick up this file's own (and other tests')
+            # `Ash.create`/`Ash.update` broadcasts on the real "tasks" topic
+            # and race an unplanned reactive pass against the explicit one.
+            topics: [],
+            # And no immediate follow-up pass after a successful dispatch —
+            # each `tick/2` call below asserts on one pass at a time (see
+            # `after_dispatch/2`'s moduledoc note on this test knob).
+            follow_up: false,
+            snapshot: &Snapshot.load/1,
+            dispatch: fn id ->
+              send(test, {:dispatched, id})
+              {:ok, %{task_id: id}}
+            end
+          ],
+          opts
+        )
+      )
+
+    pid
+  end
+
+  # `Snapshot.load/1` reads every workspace, and the suite's database is shared
+  # across tests in this file, so assert on *our* ids rather than on the shape
+  # of the whole queue.
+  defp ready_ids(board), do: Enum.map(board.ready, & &1.id)
+
+  test "promotes the top eligible card in the real queue", %{ws: ws} do
+    task = issue(ws, "the only thing ready", %{priority: 0})
+
+    pid = start_autopilot()
+    board = Autopilot.board(pid, [])
+
+    assert task.id in ready_ids(board)
+    assert {:ok, promoted} = Autopilot.tick(pid)
+    assert_receive {:dispatched, ^promoted}
+    # Priority 0 beats anything another test left behind at the default.
+    assert promoted == task.id
+  end
+
+  test "a dependency-blocked card is Blocked, naming its blocker, and never dispatched", %{ws: ws} do
+    blocker = issue(ws, "must land first", %{priority: 1})
+    blocked = issue(ws, "waits on the other", %{priority: 0})
+
+    {:ok, _} =
+      Ash.create(Dependency, %{
+        from_issue_id: blocked.id,
+        to_issue_id: blocker.id,
+        type: :depends_on
+      })
+
+    pid = start_autopilot()
+    board = Autopilot.board(pid, [])
+
+    # bd-79w1fs: a ticket with an unsatisfied blocker is in Blocked, out of
+    # the scheduler's queue, carrying the ids it waits on.
+    refute Enum.any?(board.ready, &(&1.id == blocked.id))
+    assert %{blocked_by: [blocker_id_on_card]} = Enum.find(board.blocked, &(&1.id == blocked.id))
+    assert blocker_id_on_card == blocker.id
+
+    # Even though the blocked card sorts ahead on priority, the one that goes
+    # is its blocker.
+    assert {:ok, blocker_id} = Autopilot.tick(pid)
+    assert blocker_id == blocker.id
+    assert_receive {:dispatched, ^blocker_id}
+  end
+
+  # bd-6bax7s / #1780. The real incident: two tasks that both edit RFC §10.4,
+  # joined by `conflicts_with` while still in Backlog, then both promoted. The
+  # board dispatched both, 19 seconds apart.
+  test "two conflicting Ready cards are dispatched one at a time", %{ws: ws} do
+    bind = issue(ws, "bind address", %{priority: 0})
+    docs = issue(ws, "remote-access docs", %{priority: 1})
+
+    {:ok, _} =
+      Ash.create(Dependency, %{
+        from_issue_id: docs.id,
+        to_issue_id: bind.id,
+        type: :conflicts_with
+      })
+
+    pid = start_autopilot()
+
+    # The higher-priority one goes; its counterpart is held, not queued.
+    assert {:ok, first} = Autopilot.tick(pid)
+    assert first == bind.id
+    assert_receive {:dispatched, ^first}
+
+    board = Autopilot.board(pid, [])
+    entry = Enum.find(board.ready, &(&1.id == docs.id))
+    assert entry.state == :blocked
+    assert entry.reason == "blocked — conflicts with #{bind.id} (dispatching)"
+
+    # Dispatch moves the ticket to :active before its worker registers —
+    # the exact 19-second window the incident dispatched the second task into.
+    {:ok, running} = Ash.update(bind, %{}, action: :start)
+
+    docs_id = docs.id
+    assert Autopilot.tick(pid) == :idle
+    refute_receive {:dispatched, ^docs_id}, 50
+
+    board = Autopilot.board(pid, [])
+    entry = Enum.find(board.ready, &(&1.id == docs.id))
+    assert entry.state == :blocked
+    assert entry.reason == "blocked — conflicts with #{bind.id} (dispatching)"
+
+    # …and once the counterpart lands, the second one goes.
+    {:ok, _} = Ash.update(running, %{reason: "merged"}, action: :close)
+
+    assert {:ok, second} = Autopilot.tick(pid)
+    assert second == docs.id
+    assert_receive {:dispatched, ^second}
+  end
+
+  test "a paused autopilot reads the same world and dispatches nothing", %{ws: ws} do
+    task = issue(ws, "ready but held", %{priority: 0})
+
+    pid = start_autopilot(paused: true)
+    board = Autopilot.board(pid, [])
+
+    entry = Enum.find(board.ready, &(&1.id == task.id))
+    assert entry.state == :blocked
+    assert entry.reason == "scheduler paused"
+
+    assert :paused = Autopilot.tick(pid)
+    refute_receive {:dispatched, _}
+  end
+
+  # bd-b5wyjd — the safety property the Backlog column buys: an unrefined card
+  # is not merely rendered elsewhere, it is invisible to dispatch. Asserted
+  # end to end (database → Snapshot.load → Scheduler.plan → dispatch) rather
+  # than against a hand-built snapshot, because that is the path that would
+  # actually spend credits on an unrefined ticket.
+  test "an unrefined card is never dispatched, however free the fleet is", %{ws: ws} do
+    {:ok, unrefined} =
+      Ash.create(Issue, %{
+        title: "not thought through",
+        workspace_id: ws.id,
+        priority: 0,
+        acceptance: "- autopilot fixture"
+      })
+
+    pid = start_autopilot()
+    board = Autopilot.board(pid, [])
+
+    refute unrefined.id in ready_ids(board)
+    assert unrefined.id in Enum.map(board.backlog, & &1.id)
+
+    assert :idle = Autopilot.tick(pid)
+    refute_receive {:dispatched, _}
+
+    # ...and promotion is all it takes.
+    {:ok, _} = Ash.update(unrefined, %{}, action: :promote_to_ready)
+
+    assert {:ok, promoted} = Autopilot.tick(pid)
+    assert promoted == unrefined.id
+    assert_receive {:dispatched, ^promoted}
+  end
+
+  # bd-asxw4e: Autopilot dispatches in the persisted order — priority, then
+  # rank.
+  test "within a priority band the lower rank goes next, whatever the creation order", %{
+    ws: ws
+  } do
+    first_filed = issue(ws, "filed first", %{priority: 2})
+    ranked_ahead = issue(ws, "ranked ahead", %{priority: 2})
+    assert first_filed.rank < ranked_ahead.rank
+
+    # Forces an arbitrary absolute rank. The real reordering door is the
+    # `:set_rank` action (bd-djapyj, `arb ticket rank`); it only supports
+    # relative moves (top/bottom/before/after), not an arbitrary absolute
+    # value, so raw SQL is still the right tool for this ordering test.
+    Ecto.Adapters.SQL.query!(Wardmast.Repo, "UPDATE issues SET rank = ? WHERE id = ?", [
+      first_filed.rank - 1,
+      ranked_ahead.id
+    ])
+
+    pid = start_autopilot()
+
+    assert %{promote: promoted} = Autopilot.board(pid, [])
+    assert promoted == ranked_ahead.id
+
+    assert {:ok, ^promoted} = Autopilot.tick(pid)
+    assert_receive {:dispatched, ^promoted}
+  end
+
+  # `Wardmast.Board.AutopilotTest` covers the retry/escalation bookkeeping
+  # against a stubbed `:escalate` seam; this exercises the real
+  # `default_escalate/3` path (an `Ash.get(Issue, id)` lookup for the
+  # workspace, then a real `CoordinatorNotifier.dispatch_stuck/3` post) so the
+  # end-to-end wiring — dispatch failure -> Issue lookup -> coordinator inbox
+  # — is proven, not just the seam it plugs into (bd-a40f4q).
+  test "a card stuck on a deterministic dispatch error lands in the coordinator inbox", %{
+    ws: ws
+  } do
+    task = issue(ws, "ambiguous repo victim", %{priority: 0})
+
+    pid =
+      start_autopilot(
+        dispatch: fn _id -> {:error, {:ambiguous_repo, ["tonic", "tonic_device"]}} end
+      )
+
+    assert {:error, {:ambiguous_repo, _}} = Autopilot.tick(pid)
+
+    assert [escalation] = Message.inbox("admiral", workspace_id: ws.id)
+    assert escalation.kind == :escalation
+    assert escalation.directive_ref == task.id
+    assert escalation.subject =~ "dispatch stuck"
+    assert escalation.body =~ "tonic"
+  end
+
+  # `start_autopilot/1` always pins `:paused` (explicitly, or via its
+  # `paused: false` default) so every other test in this file drives the
+  # scheduler deterministically — but that means it can never exercise the
+  # fallback path in `init/1`. This starts a process with no `:paused` option
+  # at all, the same thing a real server restart does.
+  defp restart_autopilot(opts \\ []) do
+    test = self()
+
+    {:ok, pid} =
+      Autopilot.start_link(
+        Keyword.merge(
+          [
+            name: nil,
+            interval_ms: :never,
+            # The test env skips the persisted-state read by default (config/test.exs);
+            # a restart is exactly what these tests exercise, so read it for real.
+            read_status: &Wardmast.Settings.read_board_autopilot_status/0,
+            snapshot: &Snapshot.load/1,
+            dispatch: fn id ->
+              send(test, {:dispatched, id})
+              {:ok, %{task_id: id}}
+            end
+          ],
+          opts
+        )
+      )
+
+    pid
+  end
+
+  # bd-pgi97m: the pause flag used to live only in the GenServer's own state,
+  # so every restart came back paused whatever the operator last chose. These
+  # start a *second* Autopilot process with no explicit `:paused` option — the
+  # same thing `init/1` sees on a real server restart — and check it picks up
+  # what a previous instance persisted, rather than what that instance's own
+  # in-memory state happened to be.
+  describe "persisted pause state (bd-pgi97m)" do
+    test "a restart after a pause comes back paused" do
+      first = start_autopilot(paused: false)
+      assert :ok = Autopilot.pause(first, "test-suite")
+
+      restarted = restart_autopilot()
+
+      assert Autopilot.paused?(restarted) == true
+
+      assert %{paused?: true, changed_at: %DateTime{}, changed_by: "test-suite"} =
+               Autopilot.status(restarted)
+    end
+
+    test "a restart after a resume comes back resumed" do
+      first = start_autopilot(paused: true)
+      assert :ok = Autopilot.resume(first, "test-suite")
+
+      restarted = restart_autopilot()
+
+      assert Autopilot.paused?(restarted) == false
+
+      assert %{paused?: false, changed_at: %DateTime{}, changed_by: "test-suite"} =
+               Autopilot.status(restarted)
+    end
+
+    test "with nothing persisted, a restart falls back to the app-env default" do
+      saved_config = Application.get_env(:wardmast, :board_autopilot, :not_set)
+
+      try do
+        Application.put_env(:wardmast, :board_autopilot, enabled: true, interval_ms: :never)
+
+        pid = restart_autopilot()
+
+        assert Autopilot.paused?(pid) == false
+        assert %{changed_at: nil, changed_by: nil} = Autopilot.status(pid)
+      after
+        if saved_config == :not_set do
+          Application.delete_env(:wardmast, :board_autopilot)
+        else
+          Application.put_env(:wardmast, :board_autopilot, saved_config)
+        end
+      end
+    end
+
+    test "a pause/resume in one test's sandboxed transaction does not leak into the next" do
+      # Every other test in this describe block pauses or resumes and then
+      # relies on the DB transaction rollback (Ecto.Adapters.SQL.Sandbox) to
+      # undo it. If that isolation broke, whichever test happened to run
+      # first would leave a real row behind and this one would see it.
+      assert Wardmast.Settings.board_autopilot_status() == %{
+               paused: nil,
+               changed_at: nil,
+               changed_by: nil
+             }
+    end
+  end
+end

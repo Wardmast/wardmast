@@ -1,0 +1,7687 @@
+defmodule Wardmast.MCP.ToolsTest do
+  use Wardmast.DataCase, async: false
+
+  import Wardmast.LifecycleFixtures, only: [put_state!: 2]
+
+  alias Wardmast.Loop.FlakeEvent
+  alias Wardmast.Tasks.Dependency
+  alias Wardmast.Tasks.Issue
+  alias Wardmast.Tasks.Workspace
+  alias Wardmast.MCP
+  alias Wardmast.MCP.Catalog
+  alias Wardmast.MCP.Scope
+  alias Wardmast.MCP.Tools
+  alias Wardmast.Sessions.Session
+  alias Wardmast.Messages.Message
+  alias Wardmast.Worker
+
+  require Ash.Query
+
+  setup do
+    {:ok, ws} = Ash.create(Workspace, %{name: "mcp-tools-ws", prefix: "mcp"})
+    # bd-7mbrlg: `:promote_to_ready` refuses a gated type with blank
+    # `acceptance`; several tests in this file promote `task`, so the shared
+    # fixture carries a placeholder.
+    {:ok, task} =
+      Ash.create(Issue, %{
+        title: "the bound task",
+        workspace_id: ws.id,
+        acceptance: "- mcp tools fixture"
+      })
+
+    worker = %Scope{tier: :worker, workspace_id: ws.id, task_id: task.id, repo: "shipyard"}
+    coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
+
+    {:ok, ws: ws, task: task, worker: worker, coordinator: coordinator}
+  end
+
+  # bd-31ylsv: block until the `Wardmast.Worker.Driver` GenServer that owns
+  # `worktree_path` has actually terminated — or confirm it already has.
+  # Callers use this before doing their own filesystem teardown of a tree the
+  # Driver's `:DOWN`-triggered `maybe_cleanup_worktree/1` might still be
+  # mutating (a `git worktree remove` + `File.rm_rf`), which otherwise races a
+  # caller-side `File.rm_rf!` on an overlapping path. A driver not found is a
+  # safe no-op: a `Driver` processes its `:DOWN` handler (cleanup included)
+  # to completion before it stops, so if it's gone, the cleanup already ran.
+  defp wait_for_driver_settled(worktree_path) do
+    case find_driver_pid(worktree_path) do
+      nil ->
+        :ok
+
+      pid ->
+        ref = Process.monitor(pid)
+        assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
+    end
+  end
+
+  defp find_driver_pid(worktree_path) do
+    Wardmast.Worker.Supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.find_value(fn {_, pid, _, _} -> driver_owning?(pid, worktree_path) end)
+  end
+
+  defp driver_owning?(pid, worktree_path) when is_pid(pid) do
+    case :sys.get_state(pid, 200) do
+      %{worktree_path: ^worktree_path} -> pid
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp driver_owning?(_pid, _worktree_path), do: nil
+
+  # bd-asxw4e: a ticket a manual dispatch accepts without `force` — queued,
+  # so in the Ready column.
+  defp ready_issue(ctx, title) do
+    {:ok, issue} =
+      Ash.create(Issue, %{title: title, workspace_id: ctx.ws.id, acceptance: "- fixture"})
+
+    Ash.update(issue, %{}, action: :promote_to_ready)
+  end
+
+  defp create_usage_event!(ctx, attrs) do
+    base = %{
+      task_id: ctx.task.id,
+      repo: "shipyard",
+      workspace_id: ctx.ws.id,
+      step: :work,
+      occurred_at: DateTime.utc_now()
+    }
+
+    {:ok, ev} = Ash.create(Wardmast.Usage.Event, base |> Map.merge(Map.new(attrs)))
+    ev
+  end
+
+  describe "task_show/2" do
+    test "a worker reads its own task (id defaulted from the token)", ctx do
+      assert {:ok, data} = Tools.task_show(ctx.worker, %{})
+      assert data.id == ctx.task.id
+      assert data.title == "the bound task"
+      assert data.state == "backlog"
+    end
+
+    test "a worker may not read another task", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "someone else", workspace_id: ctx.ws.id})
+      assert {:error, {:unauthorized, _}} = Tools.task_show(ctx.worker, %{"id" => other.id})
+    end
+
+    test "a coordinator reads any task in its workspace", ctx do
+      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id})
+      assert data.id == ctx.task.id
+    end
+
+    test "a coordinator cannot see a task in another workspace (reported not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "other-ws", prefix: "oth"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} = Tools.task_show(ctx.coordinator, %{"id" => foreign.id})
+    end
+
+    test "a coordinator must supply an id", ctx do
+      assert {:error, {:invalid, _}} = Tools.task_show(ctx.coordinator, %{})
+    end
+  end
+
+  describe "task_ready/2" do
+    test "lists open, unblocked tasks in the workspace", ctx do
+      # bd-6zapbl: the Ready column — a Backlog ticket is not ready.
+      {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
+
+      assert {:ok, %{tasks: tasks, count: count}} = Tools.task_ready(ctx.coordinator, %{})
+      assert count >= 1
+      assert Enum.any?(tasks, &(&1.id == ctx.task.id))
+    end
+  end
+
+  describe "task_show/2 child-progress rollup" do
+    test "a parent task reports child_total / child_closed over its parent_of children", ctx do
+      {:ok, parent} =
+        Ash.create(Issue, %{title: "epic parent", issue_type: :epic, workspace_id: ctx.ws.id})
+
+      {:ok, c1} = Ash.create(Issue, %{title: "c1", workspace_id: ctx.ws.id})
+      {:ok, c2} = Ash.create(Issue, %{title: "c2", workspace_id: ctx.ws.id})
+
+      for c <- [c1, c2] do
+        {:ok, _} =
+          Ash.create(Dependency, %{
+            from_issue_id: parent.id,
+            to_issue_id: c.id,
+            type: :parent_of
+          })
+      end
+
+      {:ok, _} = Ash.update(c1, %{}, action: :close)
+
+      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => parent.id, "full" => true})
+      assert data.child_total == 2
+      assert data.child_closed == 1
+      assert data.child_open == 1
+      assert data.auto_close == false
+    end
+
+    test "a leaf task reports zero children", ctx do
+      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id})
+      assert data.child_total == 0
+      assert data.child_closed == 0
+    end
+  end
+
+  describe "task_show/2 slim vs full payload" do
+    test "default (no full param) returns slim fields only", ctx do
+      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id})
+      assert Map.has_key?(data, :id)
+      assert Map.has_key?(data, :title)
+      assert Map.has_key?(data, :description)
+      assert Map.has_key?(data, :acceptance)
+      assert Map.has_key?(data, :state)
+      # bd-36ytcl: the legacy fields are gone.
+      refute Map.has_key?(data, :status)
+      refute Map.has_key?(data, :refined)
+      assert Map.has_key?(data, :priority)
+      assert Map.has_key?(data, :difficulty)
+      assert Map.has_key?(data, :issue_type)
+      refute Map.has_key?(data, :notes)
+      refute Map.has_key?(data, :qa_notes)
+      refute Map.has_key?(data, :deployment_notes)
+      refute Map.has_key?(data, :pr_body)
+      refute Map.has_key?(data, :auto_close)
+      refute Map.has_key?(data, :created_at)
+    end
+
+    test "full: false returns slim fields only", ctx do
+      assert {:ok, data} =
+               Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => false})
+
+      refute Map.has_key?(data, :notes)
+      refute Map.has_key?(data, :auto_close)
+    end
+
+    # bd-9zuvbh: `ticket_show` is the coordinator's main surface, so the reason a
+    # ReviewGate-parked task is sitting still has to be readable there. The
+    # park is the ticket's attention cause (bd-36ytcl).
+    test "full: true carries the ReviewGate park as the attention cause", ctx do
+      {:ok, :claimed, _} = Wardmast.Tasks.ReviewPark.park(ctx.task.id, :verdict_guard_exhausted)
+
+      assert {:ok, data} =
+               Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => true})
+
+      assert data.attention_cause == "verdict_guard_exhausted"
+      assert is_binary(data.attention_since)
+      refute Map.has_key?(data, :review_park_reason)
+      refute Map.has_key?(data, :review_parked_at)
+    end
+
+    test "full: true returns complete record including review fields", ctx do
+      assert {:ok, data} =
+               Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => true})
+
+      assert Map.has_key?(data, :notes)
+      assert Map.has_key?(data, :qa_notes)
+      assert Map.has_key?(data, :deployment_notes)
+      refute Map.has_key?(data, :pr_body)
+      assert Map.has_key?(data, :auto_close)
+      assert Map.has_key?(data, :created_at)
+      assert Map.has_key?(data, :updated_at)
+      assert data.state == "backlog"
+      refute Map.has_key?(data, :status)
+      refute Map.has_key?(data, :refined)
+    end
+
+    # bd-1defgu: the domain-layer read (`Dependencies.list/1`) existed but
+    # wasn't reachable from `ticket_show` — a worker/coordinator had to open the
+    # DB to see an edge it could already create/delete via dep_add/dep_remove.
+    test "full: true includes the task's dependency edges", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "conflicts with me", workspace_id: ctx.ws.id})
+      {:ok, dep} = Wardmast.Tasks.Dependencies.add(ctx.task.id, other.id, :conflicts_with)
+
+      assert {:ok, data} =
+               Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => true})
+
+      assert [row] = data.dependencies
+      assert row.id == dep.id
+      assert row.type == "conflicts_with"
+      assert row.to.id == other.id
+    end
+
+    test "slim payload omits dependency edges", ctx do
+      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id})
+      refute Map.has_key?(data, :dependencies)
+    end
+  end
+
+  describe "inbox_check/2" do
+    test "returns the unread mailbox for the worker's task and marks it read", ctx do
+      {:ok, _} = Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: ctx.task.id, body: "ping"})
+
+      assert {:ok, %{messages: [msg], count: 1, task_id: task_id}} =
+               Tools.inbox_check(ctx.worker, %{})
+
+      assert task_id == ctx.task.id
+      assert msg.body == "ping"
+
+      # Second check is empty — the first marked them read.
+      assert {:ok, %{count: 0}} = Tools.inbox_check(ctx.worker, %{})
+    end
+
+    test "state: \"outstanding\" returns read-but-uncleared messages without mutating", ctx do
+      Phoenix.PubSub.subscribe(Wardmast.PubSub, Message.topic(ctx.ws.id))
+
+      # Create and read a message
+      {:ok, msg1} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: ctx.task.id, body: "first"})
+
+      {:ok, _} = Tools.inbox_check(ctx.worker, %{})
+      assert_receive {:message_read, _}
+
+      # Create another unread message
+      {:ok, _msg2} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: ctx.task.id, body: "second"})
+
+      assert_receive {:new_message, _}
+
+      # Get the pre-call state for comparison
+      {:ok, pre_call_msg1} = Ash.get(Message, msg1.id)
+
+      # Get the outstanding message (the first one, which is now read but uncleared)
+      assert {:ok, %{messages: [returned_msg], count: 1}} =
+               Tools.inbox_check(ctx.worker, %{"state" => "outstanding"})
+
+      assert returned_msg.body == "first"
+
+      # Verify the message was not mutated
+      {:ok, refreshed_msg1} = Ash.get(Message, msg1.id)
+
+      assert returned_msg.read_at == DateTime.to_iso8601(refreshed_msg1.read_at)
+      assert returned_msg.cleared_at == refreshed_msg1.cleared_at
+      assert refreshed_msg1.updated_at == pre_call_msg1.updated_at
+
+      # Verify no PubSub broadcasts fired
+      refute_receive {:message_read, _}, 100
+      refute_receive {:mailbox_cleared, _}, 100
+
+      # Verify the second (unread) message is still there
+      assert {:ok, %{messages: [unread_msg]}} =
+               Tools.inbox_check(ctx.worker, %{})
+
+      assert unread_msg.body == "second"
+    end
+
+    test "invalid state value is rejected", ctx do
+      {:ok, _} = Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: ctx.task.id, body: "test"})
+
+      assert {:error, {kind, message}} =
+               Tools.inbox_check(ctx.worker, %{"state" => "invalid_state"})
+
+      assert kind == :invalid_args
+      assert message =~ "state"
+    end
+
+    test "default (omitted state) reproduces today's behaviour: returns unread, marks them read",
+         ctx do
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: ctx.task.id, body: "test"})
+
+      # Default behaviour: returns unread messages and marks them read
+      assert {:ok, %{messages: [msg], count: 1}} =
+               Tools.inbox_check(ctx.worker, %{})
+
+      assert msg.body == "test"
+
+      # Second call is empty
+      assert {:ok, %{count: 0}} = Tools.inbox_check(ctx.worker, %{})
+    end
+  end
+
+  describe "coordinator_inbox/2" do
+    test "lists unread Admiral messages and marks them read", ctx do
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "Escalation!"})
+
+      assert {:ok,
+              %{
+                messages: [msg],
+                count: 1,
+                deleted_read: 0,
+                deleted_unread: 0,
+                remaining_unread: 0
+              }} =
+               Tools.coordinator_inbox(ctx.coordinator, %{})
+
+      assert msg.body == "Escalation!"
+      assert msg.to_ref == "admiral"
+
+      # Second call is empty — the first marked them read.
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(ctx.coordinator, %{})
+    end
+
+    test "clear: true destroys already-read messages (including the ones just marked read)",
+         ctx do
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "first"})
+
+      # First call: lists "first" and marks it read.
+      {:ok, %{count: 1}} = Tools.coordinator_inbox(ctx.coordinator, %{})
+
+      # Send a second unread message.
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "second"})
+
+      # With clear: true — lists "second" (count: 1), marks it read, then clears all already-read
+      # messages. "first" and "second" are both read at this point, so deleted_read: 2.
+      assert {:ok, %{count: 1, deleted_read: 2, deleted_unread: 0, remaining_unread: 0}} =
+               Tools.coordinator_inbox(ctx.coordinator, %{"clear" => true})
+    end
+
+    test "does not surface messages from another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "ci-other", prefix: "cio"})
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: other_ws.id, to_ref: "admiral", body: "foreign"})
+
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(ctx.coordinator, %{})
+    end
+
+    test "worker tier is denied (catalog-level gating)", ctx do
+      assert {:rpc_error, -32_003, message} =
+               Catalog.call(ctx.worker, "coordinator_inbox", %{})
+
+      assert message =~ "not permitted"
+    end
+
+    # ---- bd-8akewg: per-reader read state -------------------------------
+
+    test "two session tokens each see a new shared message as unread", ctx do
+      {:ok, a} = new_session(ctx.ws)
+      {:ok, b} = new_session(ctx.ws)
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "shared"})
+
+      assert {:ok, %{count: 1, messages: [%{body: "shared"}]}} =
+               Tools.coordinator_inbox(a, %{})
+
+      # Session A's poll consumed its own copy only.
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(a, %{})
+      assert {:ok, %{count: 1, messages: [%{body: "shared"}]}} = Tools.coordinator_inbox(b, %{})
+    end
+
+    test "a session clearing leaves another session's unread and outstanding intact", ctx do
+      {:ok, a} = new_session(ctx.ws)
+      {:ok, b} = new_session(ctx.ws)
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "shared"})
+
+      # B reads it (now outstanding for B), A reads *and* clears.
+      {:ok, %{count: 1}} = Tools.coordinator_inbox(b, %{})
+      assert {:ok, %{count: 1, deleted_read: 1}} = Tools.coordinator_inbox(a, %{"clear" => true})
+
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(a, %{"state" => "outstanding"})
+      assert {:ok, %{count: 1}} = Tools.coordinator_inbox(b, %{"state" => "outstanding"})
+    end
+
+    test "a session's reads and clears leave the sessionless coordinator's view alone", ctx do
+      {:ok, a} = new_session(ctx.ws)
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "shared"})
+
+      {:ok, %{count: 1}} = Tools.coordinator_inbox(a, %{"clear" => true})
+
+      # The sessionless coordinator (session_id: nil) still has it unread.
+      assert {:ok, %{count: 1, messages: [%{body: "shared"}]}} =
+               Tools.coordinator_inbox(ctx.coordinator, %{})
+    end
+
+    test "a session does not inherit the resolved archive that predates it", ctx do
+      {:ok, archived} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "before"})
+
+      # The operator already dealt with it from the drawer/CLI, which stamps the
+      # shared row — that is the global "resolved" signal.
+      {:ok, _} = Message.mark_read(archived, reader: Message.coordinator_reader())
+      {:ok, _} = Message.mark_cleared(archived)
+
+      {:ok, a} = new_session(ctx.ws)
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "after"})
+
+      assert {:ok, %{count: 1, messages: [%{body: "after"}]}} = Tools.coordinator_inbox(a, %{})
+    end
+
+    test "a session launched after an unresolved escalation still sees it", ctx do
+      # The feature's primary use case: the notifier raises an escalation while
+      # no session is running, the operator launches one to deal with it. The
+      # row stays uncleared, so `last_escalation/2` keeps suppressing a
+      # repeat — if the session could not see it, nothing ever would re-deliver
+      # it.
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ctx.ws.id,
+          kind: :escalation,
+          escalation_kind: :agent_raised,
+          to_ref: "coordinator",
+          subject: "budget exhausted",
+          body: "before-the-session"
+        })
+
+      {:ok, a} = new_session(ctx.ws)
+
+      assert {:ok, %{count: 1, messages: [%{body: "before-the-session"}]}} =
+               Tools.coordinator_inbox(a, %{})
+
+      # …and having read it, the session owes it, not the archive.
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(a, %{})
+
+      assert {:ok, %{count: 1, messages: [%{body: "before-the-session"}]}} =
+               Tools.coordinator_inbox(a, %{"state" => "outstanding"})
+
+      # The dedupe signal is untouched by the session reading it.
+      assert %{body: "before-the-session"} =
+               Message.last_escalation(:agent_raised, workspace_id: ctx.ws.id, open: true)
+    end
+
+    test "the minted-token path carries session identity all the way to the handler", ctx do
+      # The production call path: `Provisioning.mint_token/2` → the session's
+      # `.mcp.json` → `Scope.from_token/1` in the plug → `Catalog.call/3`. The
+      # hand-built `%Scope{}` the other tests use would not catch a `session_id`
+      # claim that failed to survive minting or decoding.
+      {:ok, session_a} = Ash.create(Session, %{cwd: "/tmp/mcp-e2e", workspace_id: ctx.ws.id})
+      {:ok, session_b} = Ash.create(Session, %{cwd: "/tmp/mcp-e2e", workspace_id: ctx.ws.id})
+
+      {:ok, scope_a} = Scope.from_token(Wardmast.Sessions.Provisioning.mint_token(session_a))
+      {:ok, scope_b} = Scope.from_token(Wardmast.Sessions.Provisioning.mint_token(session_b))
+
+      assert scope_a.session_id == session_a.id
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "e2e"})
+
+      assert {:ok, %{count: 1, messages: [%{body: "e2e"}]}} =
+               Catalog.call(scope_a, "coordinator_inbox", %{})
+
+      assert {:ok, %{count: 0}} = Catalog.call(scope_a, "coordinator_inbox", %{})
+
+      # Session B's copy survived session A's poll.
+      assert {:ok, %{count: 1, messages: [%{body: "e2e"}]}} =
+               Catalog.call(scope_b, "coordinator_inbox", %{})
+    end
+
+    test "a cross-workspace session reads every workspace, and `workspace` filters", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "xws-other", prefix: "xwo"})
+      {:ok, a} = new_session(nil)
+      {:ok, b} = new_session(nil)
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "here"})
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: other_ws.id, to_ref: "coordinator", body: "there"})
+
+      assert {:ok, %{count: 2, messages: messages}} =
+               Tools.coordinator_inbox(a, %{"state" => "unread"})
+
+      assert Enum.map(messages, & &1.body) |> Enum.sort() == ["here", "there"]
+
+      # …and `workspace` still narrows it to one, for a reader that has seen
+      # neither message yet.
+      assert {:ok, %{count: 1, messages: [%{body: "there"}]}} =
+               Tools.coordinator_inbox(b, %{"workspace" => other_ws.id})
+    end
+
+    test "state: \"outstanding\" returns read-but-uncleared messages without mutating", ctx do
+      Phoenix.PubSub.subscribe(Wardmast.PubSub, Message.topic(ctx.ws.id))
+
+      # Create and read a message
+      {:ok, msg1} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "first"})
+
+      {:ok, _} = Tools.coordinator_inbox(ctx.coordinator, %{})
+      assert_receive {:message_read, _}
+
+      # Create another unread message
+      {:ok, _msg2} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "second"})
+
+      assert_receive {:new_message, _}
+
+      # Get the pre-call state for comparison
+      {:ok, pre_call_msg1} = Ash.get(Message, msg1.id)
+
+      # Get the outstanding message (the first one, which is now read but uncleared)
+      assert {:ok, %{messages: [returned_msg], count: 1}} =
+               Tools.coordinator_inbox(ctx.coordinator, %{"state" => "outstanding"})
+
+      assert returned_msg.body == "first"
+
+      # Verify the message was not mutated (read_at and cleared_at unchanged)
+      {:ok, refreshed_msg1} = Ash.get(Message, msg1.id)
+
+      assert returned_msg.read_at == DateTime.to_iso8601(refreshed_msg1.read_at)
+      assert returned_msg.cleared_at == refreshed_msg1.cleared_at
+      assert refreshed_msg1.updated_at == pre_call_msg1.updated_at
+
+      # Verify no PubSub broadcasts fired
+      refute_receive {:message_read, _}, 100
+      refute_receive {:mailbox_cleared, _}, 100
+
+      # Verify the second (unread) message is not included
+      assert {:ok, %{messages: [unread_msg]}} =
+               Tools.coordinator_inbox(ctx.coordinator, %{})
+
+      assert unread_msg.body == "second"
+    end
+
+    test "state: \"outstanding\" with clear: true is rejected", ctx do
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "test"})
+
+      {:ok, _} = Tools.coordinator_inbox(ctx.coordinator, %{})
+
+      # Try to combine state: outstanding with clear: true
+      assert {:error, {kind, message}} =
+               Tools.coordinator_inbox(ctx.coordinator, %{
+                 "state" => "outstanding",
+                 "clear" => true
+               })
+
+      assert kind == :invalid_args
+      assert message =~ "outstanding"
+    end
+
+    test "invalid state value is rejected", ctx do
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "test"})
+
+      assert {:error, {kind, message}} =
+               Tools.coordinator_inbox(ctx.coordinator, %{"state" => "invalid_state"})
+
+      assert kind == :invalid_args
+      assert message =~ "state"
+    end
+
+    test "default (omitted state) reproduces today's behaviour: returns unread, marks them read",
+         ctx do
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "test"})
+
+      # Default behaviour: returns unread messages and marks them read
+      assert {:ok, %{messages: [msg], count: 1}} =
+               Tools.coordinator_inbox(ctx.coordinator, %{})
+
+      assert msg.body == "test"
+
+      # Second call is empty
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(ctx.coordinator, %{})
+    end
+  end
+
+  describe "coordinator_inbox_peek/2 removed (bd-9kmq04)" do
+    test "the tool no longer exists in the catalog", ctx do
+      refute Enum.any?(Catalog.all(), &(&1.name == "coordinator_inbox_peek"))
+
+      assert {:rpc_error, -32_602, message} =
+               Catalog.call(ctx.coordinator, "coordinator_inbox_peek", %{})
+
+      assert message =~ "Unknown tool"
+    end
+  end
+
+  describe "coordinator_inbox/2 serialization (bd-9kmq04)" do
+    test "surfaces read_at and cleared_at so the three states are visible", ctx do
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "state check"})
+
+      assert {:ok, %{messages: [msg]}} = Tools.coordinator_inbox(ctx.coordinator, %{})
+      assert Map.has_key?(msg, :read_at)
+      assert Map.has_key?(msg, :cleared_at)
+    end
+  end
+
+  describe "coordinator_inbox_clear/2" do
+    test "clears specific ids regardless of read state, retaining the rows", ctx do
+      {:ok, unread} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "unread"})
+
+      {:ok, read} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "read"})
+
+      {:ok, _} = Message.mark_read(read)
+
+      assert {:ok, %{cleared: cleared, not_found: [], cleared_count: 2}} =
+               Tools.coordinator_inbox_clear(ctx.coordinator, %{"ids" => [unread.id, read.id]})
+
+      assert Enum.sort(cleared) == Enum.sort([unread.id, read.id])
+
+      assert {:ok, %Message{cleared_at: c1}} = Ash.get(Message, unread.id)
+      assert {:ok, %Message{cleared_at: c2}} = Ash.get(Message, read.id)
+      assert c1
+      assert c2
+    end
+
+    test "resolves ids regardless of workspace binding — no `workspace` arg needed", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "ci-clear-other", prefix: "cico"})
+
+      {:ok, foreign} =
+        Message.send_mail(%{workspace_id: other_ws.id, to_ref: "coordinator", body: "foreign"})
+
+      assert {:ok, %{cleared: [cleared], not_found: []}} =
+               Tools.coordinator_inbox_clear(ctx.coordinator, %{"ids" => [foreign.id]})
+
+      assert cleared == foreign.id
+    end
+
+    test "reports unknown ids as not_found", ctx do
+      {:ok, m} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "m"})
+
+      bogus = Ecto.UUID.generate()
+
+      assert {:ok, %{cleared: [cleared], not_found: [^bogus]}} =
+               Tools.coordinator_inbox_clear(ctx.coordinator, %{"ids" => [m.id, bogus]})
+
+      assert cleared == m.id
+    end
+
+    test "clears every coordinator message concerning a task_id", ctx do
+      {:ok, escalation} =
+        Message.send_mail(%{
+          kind: :escalation,
+          escalation_kind: :agent_raised,
+          workspace_id: ctx.ws.id,
+          to_ref: "coordinator",
+          task_ref: ctx.task.id,
+          body: "needs a decision"
+        })
+
+      {:ok, unrelated} =
+        Message.send_mail(%{
+          kind: :escalation,
+          escalation_kind: :agent_raised,
+          workspace_id: ctx.ws.id,
+          to_ref: "coordinator",
+          task_ref: "some-other-task",
+          body: "not this task"
+        })
+
+      assert {:ok, %{cleared: [cleared]}} =
+               Tools.coordinator_inbox_clear(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert cleared == escalation.id
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, unrelated.id)
+    end
+
+    # ---- bd-8akewg: per-reader clears ------------------------------------
+
+    test "a session's id-clear leaves the row and every other reader alone", ctx do
+      {:ok, a} = new_session(ctx.ws)
+      {:ok, b} = new_session(ctx.ws)
+
+      {:ok, m} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "shared"})
+
+      {:ok, %{count: 1}} = Tools.coordinator_inbox(b, %{})
+
+      assert {:ok, %{cleared: [cleared], not_found: []}} =
+               Tools.coordinator_inbox_clear(a, %{"ids" => [m.id]})
+
+      assert cleared == m.id
+
+      # The shared row survives, so the sessionless coordinator and session B
+      # both still owe the message.
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, m.id)
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(a, %{"state" => "outstanding"})
+      assert {:ok, %{count: 1}} = Tools.coordinator_inbox(b, %{"state" => "outstanding"})
+      assert {:ok, %{count: 1}} = Tools.coordinator_inbox(ctx.coordinator, %{})
+    end
+
+    test "a session's task-clear leaves the row and every other reader alone", ctx do
+      {:ok, a} = new_session(ctx.ws)
+
+      {:ok, m} =
+        Message.send_mail(%{
+          kind: :escalation,
+          escalation_kind: :agent_raised,
+          workspace_id: ctx.ws.id,
+          to_ref: "coordinator",
+          task_ref: ctx.task.id,
+          body: "needs a decision"
+        })
+
+      assert {:ok, %{cleared: [cleared]}} =
+               Tools.coordinator_inbox_clear(a, %{"task_id" => ctx.task.id})
+
+      assert cleared == m.id
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, m.id)
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(a, %{})
+      assert {:ok, %{count: 1}} = Tools.coordinator_inbox(ctx.coordinator, %{})
+    end
+
+    test "the minted-token path clears only the calling session's view", ctx do
+      # The production call path for a browser-hosted session: mint its token,
+      # decode it back to a scope, dispatch through the catalog. A hand-built
+      # %Scope{} would not catch a `session_id` claim lost in minting/decoding.
+      {:ok, session_a} = Ash.create(Session, %{cwd: "/tmp/mcp-clear", workspace_id: ctx.ws.id})
+      {:ok, session_b} = Ash.create(Session, %{cwd: "/tmp/mcp-clear", workspace_id: ctx.ws.id})
+
+      {:ok, scope_a} = Scope.from_token(Wardmast.Sessions.Provisioning.mint_token(session_a))
+      {:ok, scope_b} = Scope.from_token(Wardmast.Sessions.Provisioning.mint_token(session_b))
+
+      {:ok, m} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "e2e-clear"})
+
+      assert {:ok, %{cleared: [cleared_id]}} =
+               Catalog.call(scope_a, "coordinator_inbox_clear", %{"ids" => [m.id]})
+
+      assert cleared_id == m.id
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, m.id)
+
+      assert {:ok, %{count: 0}} = Catalog.call(scope_a, "coordinator_inbox", %{})
+
+      assert {:ok, %{count: 1, messages: [%{body: "e2e-clear"}]}} =
+               Catalog.call(scope_b, "coordinator_inbox", %{})
+    end
+
+    test "requires ids and/or task_id", ctx do
+      assert {:error, {:invalid_args, message}} =
+               Tools.coordinator_inbox_clear(ctx.coordinator, %{})
+
+      assert message =~ "ids and/or task_id"
+    end
+
+    test "worker tier is denied (catalog-level gating)", ctx do
+      assert {:rpc_error, -32_003, message} =
+               Catalog.call(ctx.worker, "coordinator_inbox_clear", %{"ids" => ["x"]})
+
+      assert message =~ "not permitted"
+    end
+  end
+
+  describe "workspace_show/2" do
+    test "returns the scope's own workspace config + resolved security posture", ctx do
+      assert {:ok, data} = Tools.workspace_show(ctx.worker, %{})
+      assert data.id == ctx.ws.id
+      assert data.prefix == "mcp"
+      assert is_map(data.config)
+      assert is_binary(data.security["mode"])
+    end
+
+    test "carries the release update block", ctx do
+      assert {:ok, %{update: update}} = Tools.workspace_show(ctx.worker, %{})
+      assert %{enabled: _, update_available: false, latest: nil, current: current} = update
+      assert current == Wardmast.Version.app_version()
+    end
+
+    test "reports a detected update (update_available, latest, release_url)", ctx do
+      Req.Test.stub(Wardmast.Release.UpdateCheck, fn conn ->
+        Req.Test.json(conn, %{"tag_name" => "v99.0.0", "html_url" => "https://example.test/r"})
+      end)
+
+      pid =
+        start_supervised!(
+          {Wardmast.Release.UpdateCheck,
+           enabled: true,
+           repo: "acme/arbiter",
+           running_version: "0.2.0",
+           initial_delay_ms: :infinity,
+           req_options: [plug: {Req.Test, Wardmast.Release.UpdateCheck}]}
+        )
+
+      Req.Test.allow(Wardmast.Release.UpdateCheck, self(), pid)
+      Wardmast.Release.UpdateCheck.check_now()
+
+      assert {:ok, %{update: update}} = Tools.workspace_show(ctx.worker, %{})
+      assert update.update_available == true
+      assert update.latest == "v99.0.0"
+      assert update.release_url == "https://example.test/r"
+      assert update.current == Wardmast.Version.app_version()
+    end
+  end
+
+  describe "serialize_workspace/1 egress posture (bd-5yydxh)" do
+    test "reports the effective egress level per workspace and per repo override" do
+      ws = %Wardmast.Tasks.Workspace{
+        id: Ecto.UUID.generate(),
+        name: "eg",
+        config: %{
+          "agent" => %{
+            "security" => %{
+              "sandbox" => %{"egress" => "allowlist"},
+              "repos" => %{
+                "tonic" => %{"sandbox" => %{"egress" => "none"}},
+                "plain" => %{"permissions" => %{"mode" => "strict"}}
+              }
+            }
+          }
+        }
+      }
+
+      security = Tools.serialize_workspace(ws).security
+
+      assert security["egress"] == "allowlist"
+
+      assert security["repos"] == %{
+               "tonic" => %{"egress" => "none"},
+               "plain" => %{"egress" => "allowlist"}
+             }
+    end
+
+    test "defaults to open with no repo overrides" do
+      security =
+        Tools.serialize_workspace(%Wardmast.Tasks.Workspace{
+          id: Ecto.UUID.generate(),
+          name: "d",
+          config: %{}
+        }).security
+
+      assert security["egress"] == "open"
+      assert security["repos"] == %{}
+    end
+  end
+
+  describe "quota_get/2" do
+    test "returns null claude quota before anything is captured", ctx do
+      assert {:ok, %{claude: nil} = payload} = Tools.quota_get(ctx.worker, %{})
+      # Antigravity fetch is disabled in test → present but nil. The upstream
+      # Gemini CLI key is gone (bd-ac53wz).
+      assert Map.has_key?(payload, :antigravity)
+      assert payload.antigravity == nil
+      refute Map.has_key?(payload, :gemini)
+    end
+
+    test "carries the full REST payload, bare (P-18, D-A-5)", ctx do
+      assert {:ok, payload} = Tools.quota_get(ctx.worker, %{})
+
+      for key <- ~w(workspace_id quotas account workspaces held_dispatches paused_providers
+                    account_policy policy_binding effective_policy)a do
+        assert Map.has_key?(payload, key), "missing #{key}"
+      end
+    end
+
+    test "includes a graceful codex no-op when Codex is not authenticated", ctx do
+      assert {:ok, result} = Tools.quota_get(ctx.worker, %{})
+      assert result.codex == nil
+      assert is_binary(result.codex_message)
+    end
+
+    test "surfaces the persisted Codex snapshot from the DB (no live fetch, bd-ajh7bd)", ctx do
+      # quota_get is now a pure DB read: the periodic CloudProbe is the only
+      # thing that fetches Codex live. Persist a snapshot the way the probe
+      # would, then assert quota_get reads it straight back.
+      Ash.create!(Wardmast.Quota.CodexQuota, %{
+        provider_account_id: quota_account_id!(ctx.ws.id, "codex"),
+        provider: "codex",
+        plan: "plus",
+        session_used_percent: 33.0,
+        session_reset_at: DateTime.utc_now() |> DateTime.truncate(:second),
+        captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
+
+      assert {:ok, result} = Tools.quota_get(ctx.worker, %{})
+      assert result.codex.session.used == 33.0
+      assert result.codex_message == nil
+    end
+
+    test "surfaces the persisted Antigravity snapshot and no Gemini CLI key (bd-ac53wz)", ctx do
+      Ash.create!(Wardmast.Quota.GoogleQuota, %{
+        provider_account_id: quota_account_id!(ctx.ws.id, "antigravity"),
+        provider: "antigravity",
+        plan: "Pro",
+        used_percent: 75.0,
+        snapshot: %{"provider" => "antigravity", "plan" => "Pro", "models" => []},
+        captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
+
+      assert {:ok, result} = Tools.quota_get(ctx.worker, %{})
+      assert result.antigravity["plan"] == "Pro"
+      assert result.antigravity["models"] == []
+      refute Map.has_key?(result, :gemini)
+    end
+
+    test "returns the captured snapshot for the scope's workspace", ctx do
+      {:ok, _} =
+        Wardmast.Quota.capture(ctx.ws.id, [
+          {"anthropic-ratelimit-unified-5h-utilization", "0.42"},
+          {"anthropic-ratelimit-unified-5h-status", "allowed"},
+          {"anthropic-ratelimit-unified-representative-claim", "five_hour"}
+        ])
+
+      assert {:ok, %{claude: claude}} = Tools.quota_get(ctx.worker, %{})
+      assert claude.utilization_5h == 0.42
+      assert claude.representative_claim == "five_hour"
+    end
+
+    # bd-1fpjgx: `credentials_expired` (already reported for Claude, see
+    # `serialize_quota/1`) is now reported for Codex and Gemini/Antigravity
+    # too — read live off `CredentialWatchdog`, not the persisted snapshot,
+    # so it's present even before any quota row has landed.
+    test "reports credentials_expired false for codex/gemini with no watchdog state", ctx do
+      assert {:ok, result} = Tools.quota_get(ctx.worker, %{})
+      assert result.codex_credentials_expired == false
+      assert result.gemini_credentials_expired == false
+    end
+
+    test "reports credentials_expired true for codex/gemini once CredentialWatchdog marks them",
+         ctx do
+      alias Wardmast.Agents.CredentialWatchdog
+      alias Wardmast.Worker.StopReason
+
+      on_exit(fn -> CredentialWatchdog.reset() end)
+
+      reason = %StopReason{
+        category: :auth_expired,
+        summary: "test",
+        remediation: nil,
+        exit_status: nil,
+        signal: nil
+      }
+
+      :ok = CredentialWatchdog.mark_expired(Wardmast.Agents.Codex, reason)
+      :ok = CredentialWatchdog.mark_expired(Wardmast.Agents.Gemini, reason)
+      # Synchronize on the GenServer's own mailbox so the casts above are
+      # guaranteed processed before quota_get reads `expired?/1`.
+      _ = CredentialWatchdog.expired?(Wardmast.Agents.Claude)
+
+      assert {:ok, result} = Tools.quota_get(ctx.worker, %{})
+      assert result.codex_credentials_expired == true
+      assert result.gemini_credentials_expired == true
+    end
+  end
+
+  describe "task_update_progress/2" do
+    test "a worker records qa/deployment notes on its own task", ctx do
+      assert {:ok, data} =
+               Tools.task_update_progress(ctx.worker, %{
+                 "qa_notes" => "verify the login flow",
+                 "deployment_notes" => "None"
+               })
+
+      assert data.id == ctx.task.id
+      assert data.state == "backlog"
+
+      {:ok, full} = Tools.task_show(ctx.worker, %{"full" => true})
+      assert full.qa_notes == "verify the login flow"
+      assert full.deployment_notes == "None"
+    end
+
+    test "a worker records pr_body on its own task (bd-53xrmi)", ctx do
+      body = "## Summary\nWorker-authored.\n\n## Test plan\n- [x] mix test"
+
+      assert {:ok, data} = Tools.task_update_progress(ctx.worker, %{"pr_body" => body})
+      assert data.id == ctx.task.id
+
+      {:ok, full} = Tools.task_show(ctx.worker, %{"full" => true})
+      assert full.pr_body == body
+    end
+
+    test "ignores non-progress fields (cannot move the state)", ctx do
+      assert {:ok, data} =
+               Tools.task_update_progress(ctx.worker, %{"notes" => "wip", "state" => "closed"})
+
+      assert data.state == "backlog"
+
+      {:ok, full} = Tools.task_show(ctx.worker, %{"full" => true})
+      assert full.notes == "wip"
+    end
+
+    test "requires at least one progress field", ctx do
+      assert {:error, {:invalid, _}} = Tools.task_update_progress(ctx.worker, %{})
+    end
+
+    test "an empty string clears a progress field (D-T-18/29)", ctx do
+      assert {:ok, _} = Tools.task_update_progress(ctx.worker, %{"qa_notes" => "check it"})
+      assert {:ok, _} = Tools.task_update_progress(ctx.worker, %{"qa_notes" => ""})
+
+      {:ok, full} = Tools.task_show(ctx.worker, %{"full" => true})
+      assert full.qa_notes == nil
+    end
+
+    test "append_notes appends without replacing (D-T-19)", ctx do
+      assert {:ok, _} = Tools.task_update_progress(ctx.worker, %{"notes" => "first"})
+      assert {:ok, _} = Tools.task_update_progress(ctx.worker, %{"append_notes" => "second"})
+
+      {:ok, full} = Tools.task_show(ctx.worker, %{"full" => true})
+      assert full.notes == "first\n\nsecond"
+    end
+
+    test "a worker may not progress another task", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "not yours", workspace_id: ctx.ws.id})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.task_update_progress(ctx.worker, %{"id" => other.id, "notes" => "x"})
+    end
+  end
+
+  # ---- Phase 2: coordinator-only mutating tools --------------------------
+
+  # bd-dtfe9x (D-T-21): the REST `:issue_create` / `:dependency_add` worker
+  # rules (`Wardmast.Tasks.WorkerFiling`) now hold on MCP too.
+  describe "ticket_create/dep_add as a worker (bd-dtfe9x)" do
+    test "files a child of its own task, in its own workspace", ctx do
+      assert {:ok, child} =
+               Tools.task_create(ctx.worker, %{
+                 "title" => "deferred review thread",
+                 "description" => "follow-up",
+                 "parent_id" => ctx.task.id,
+                 "priority" => 3
+               })
+
+      assert child.parent_id == ctx.task.id
+      assert Ash.get!(Issue, child.id).workspace_id == ctx.ws.id
+      assert Ash.get!(Issue, child.id).state == :backlog
+    end
+
+    test "naming its own workspace explicitly is fine", ctx do
+      assert {:ok, _} =
+               Tools.task_create(ctx.worker, %{
+                 "title" => "explicit ws",
+                 "parent_id" => ctx.task.id,
+                 "workspace" => ctx.ws.name
+               })
+    end
+
+    test "must name a parent — and it must be its own task", ctx do
+      {:ok, sibling} = Ash.create(Issue, %{title: "sibling", workspace_id: ctx.ws.id})
+
+      assert {:error, {:unauthorized, msg}} =
+               Tools.task_create(ctx.worker, %{"title" => "orphan"})
+
+      assert msg =~ "own task"
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.task_create(ctx.worker, %{"title" => "x", "parent_id" => sibling.id})
+    end
+
+    test "cannot file into another workspace", ctx do
+      {:ok, other} = Ash.create(Workspace, %{name: "mcp-tools-other", prefix: "mto"})
+
+      assert {:error, {kind, _}} =
+               Tools.task_create(ctx.worker, %{
+                 "title" => "elsewhere",
+                 "parent_id" => ctx.task.id,
+                 "workspace" => other.name
+               })
+
+      assert kind in [:unauthorized, :not_found]
+    end
+
+    test "cannot set fields outside the worker's subset", ctx do
+      for extra <- [
+            %{"repo" => "r"},
+            %{"target_branch" => "x"},
+            %{"auto_close" => true},
+            %{"verify_after_deploy" => true},
+            %{"tracker_ref" => "7"},
+            %{"notes" => "n"}
+          ] do
+        args = Map.merge(%{"title" => "x", "parent_id" => ctx.task.id}, extra)
+        assert {:error, {:unauthorized, msg}} = Tools.task_create(ctx.worker, args)
+        assert msg =~ extra |> Map.keys() |> hd()
+      end
+    end
+
+    test "dep_add: a worker adopts an unparented ticket under its own task", ctx do
+      {:ok, orphan} = Ash.create(Issue, %{title: "orphan", workspace_id: ctx.ws.id})
+
+      assert {:ok, _} =
+               Tools.dep_add(ctx.worker, %{
+                 "from_issue_id" => ctx.task.id,
+                 "to_issue_id" => orphan.id,
+                 "type" => "parent_of"
+               })
+    end
+
+    test "dep_add: nothing but a parent_of edge from its own task", ctx do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ctx.ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ctx.ws.id})
+
+      for {from, to, type} <- [
+            {ctx.task.id, a.id, "blocks"},
+            {a.id, b.id, "parent_of"}
+          ] do
+        assert {:error, {:unauthorized, msg}} =
+                 Tools.dep_add(ctx.worker, %{
+                   "from_issue_id" => from,
+                   "to_issue_id" => to,
+                   "type" => type
+                 })
+
+        assert msg =~ "parent_of"
+      end
+    end
+
+    test "dep_add and ticket_create accept the fixes edge for a coordinator", ctx do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ctx.ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ctx.ws.id})
+
+      assert {:ok, _} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => b.id,
+                 "to_issue_id" => a.id,
+                 "type" => "fixes"
+               })
+
+      assert {:ok, %{id: new_id}} =
+               Tools.task_create(ctx.coordinator, %{"title" => "fixer", "fixes" => [a.id]})
+
+      assert {:ok, edges} = Wardmast.Tasks.Dependencies.list(issue_id: new_id)
+      assert Enum.any?(edges, &(&1.edge.type == :fixes and &1.edge.to_issue_id == a.id))
+    end
+
+    test "dep_add: refuses a ticket that already has a parent, and caller-set created_by/notes",
+         ctx do
+      {:ok, child} = Ash.create(Issue, %{title: "child", workspace_id: ctx.ws.id})
+      {:ok, other_parent} = Ash.create(Issue, %{title: "p", workspace_id: ctx.ws.id})
+
+      assert {:ok, _} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => other_parent.id,
+                 "to_issue_id" => child.id,
+                 "type" => "parent_of"
+               })
+
+      assert {:error, {:unauthorized, msg}} =
+               Tools.dep_add(ctx.worker, %{
+                 "from_issue_id" => ctx.task.id,
+                 "to_issue_id" => child.id,
+                 "type" => "parent_of"
+               })
+
+      assert msg =~ "no parent"
+
+      {:ok, orphan} = Ash.create(Issue, %{title: "orphan2", workspace_id: ctx.ws.id})
+
+      for extra <- [%{"created_by" => "coordinator"}, %{"notes" => "n"}] do
+        assert {:error, {:unauthorized, _}} =
+                 Tools.dep_add(
+                   ctx.worker,
+                   Map.merge(
+                     %{
+                       "from_issue_id" => ctx.task.id,
+                       "to_issue_id" => orphan.id,
+                       "type" => "parent_of"
+                     },
+                     extra
+                   )
+                 )
+      end
+    end
+  end
+
+  describe "task_create/2" do
+    test "a coordinator creates a task forced into its own workspace", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{
+                 "title" => "new work",
+                 "priority" => 1,
+                 "issue_type" => "bug"
+               })
+
+      assert data.title == "new work"
+      assert data.priority == 1
+      assert data.issue_type == "bug"
+      assert data.state == "backlog"
+
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      assert reloaded.workspace_id == ctx.ws.id
+    end
+
+    test "requires a title", ctx do
+      assert {:error, {:invalid, _}} = Tools.task_create(ctx.coordinator, %{"priority" => 1})
+    end
+
+    # bd-7mbrlg
+    test "warns (non-blocking) when a gated type is created with no acceptance criteria", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{"title" => "no ACs", "issue_type" => "bug"})
+
+      assert [warning] = data.warnings
+      assert warning =~ "acceptance criteria"
+
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      assert reloaded.state == :backlog
+    end
+
+    test "no warning when acceptance criteria are given", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{
+                 "title" => "has ACs",
+                 "issue_type" => "bug",
+                 "acceptance" => "- it works"
+               })
+
+      refute Map.has_key?(data, :warnings)
+    end
+
+    test "no warning for exempt types (task/decision/epic) with no acceptance criteria", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{"title" => "a task", "issue_type" => "task"})
+
+      refute Map.has_key?(data, :warnings)
+    end
+
+    test "accepts research (bd-9s9dqz) on create and update, with no acceptance warning", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{
+                 "title" => "investigate",
+                 "issue_type" => "research"
+               })
+
+      refute Map.has_key?(data, :warnings)
+      assert Ash.get!(Issue, data.id).issue_type == :research
+
+      assert {:ok, _} =
+               Tools.task_update(ctx.coordinator, %{"id" => data.id, "issue_type" => "task"})
+
+      assert Ash.get!(Issue, data.id).issue_type == :task
+
+      assert {:ok, _} =
+               Tools.task_update(ctx.coordinator, %{"id" => data.id, "issue_type" => "research"})
+
+      assert Ash.get!(Issue, data.id).issue_type == :research
+    end
+
+    test "accepts a repo assignment, and task_update can retarget it (bd-2jum8j)", ctx do
+      assert {:ok, created} =
+               Tools.task_create(ctx.coordinator, %{
+                 "title" => "belongs to tonic",
+                 "repo" => "emricare/tonic"
+               })
+
+      assert Ash.get!(Issue, created.id).repo == "emricare/tonic"
+
+      {:ok, shown} = Tools.task_show(ctx.coordinator, %{"id" => created.id, "full" => true})
+      assert shown.repo == "emricare/tonic"
+
+      assert {:ok, _} =
+               Tools.task_update(ctx.coordinator, %{
+                 "id" => created.id,
+                 "repo" => "emricare/tonic_device"
+               })
+
+      assert Ash.get!(Issue, created.id).repo == "emricare/tonic_device"
+    end
+
+    test "rejects an unknown enum value", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.task_create(ctx.coordinator, %{"title" => "x", "issue_type" => "nope"})
+
+      assert msg =~ "issue_type"
+    end
+
+    test "accepts tracker_context_type and tracker_context_ref (bd-2eo4cg)", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{
+                 "title" => "review context task",
+                 "tracker_type" => "none",
+                 "tracker_context_type" => "jira",
+                 "tracker_context_ref" => "AX-18004"
+               })
+
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      assert reloaded.tracker_context_type == :jira
+      assert reloaded.tracker_context_ref == "AX-18004"
+      # tracker_type stays none — context ref is read-only and never claimed
+      assert reloaded.tracker_type == :none
+    end
+
+    # bd-1ozks5: the local assignee field is gone; an existing coordinator
+    # prompt/script may still pass it — accept and ignore, with a warning.
+    test "accepts and ignores a deprecated `assignee`, with a warning", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{
+                 "title" => "still has assignee",
+                 "issue_type" => "task",
+                 "assignee" => "alice"
+               })
+
+      refute Map.has_key?(data, :assignee)
+      assert [warning] = data.warnings
+      assert warning =~ "assignee"
+
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      refute Map.has_key?(reloaded, :assignee)
+    end
+  end
+
+  # bd-9dwbvt: the MCP creation path's slice of "every issue carries a repo".
+  describe "task_create/2 — repo resolution (bd-9dwbvt)" do
+    defp repo_ws!(config) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "mcp-repo-#{System.unique_integer([:positive])}",
+          prefix: "mcr",
+          config: config
+        })
+
+      {ws, %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}}
+    end
+
+    test "auto-fills the workspace's only repo" do
+      {_ws, coordinator} = repo_ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic"}})
+
+      assert {:ok, data} = Tools.task_create(coordinator, %{"title" => "sole repo"})
+      assert Ash.get!(Issue, data.id).repo == "tonic"
+    end
+
+    test "falls back to the workspace default_repo" do
+      {_ws, coordinator} =
+        repo_ws!(%{
+          "repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"},
+          "default_repo" => "tonic"
+        })
+
+      assert {:ok, data} = Tools.task_create(coordinator, %{"title" => "defaulted"})
+      assert Ash.get!(Issue, data.id).repo == "tonic"
+    end
+
+    test "refuses with the configured keys when nothing resolves" do
+      {_ws, coordinator} =
+        repo_ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"}})
+
+      assert {:error, {:invalid, msg}} = Tools.task_create(coordinator, %{"title" => "ambiguous"})
+      assert msg =~ "tonic"
+      assert msg =~ "tonic_device"
+    end
+
+    test "rejects a repo that is not a configured repo_paths key" do
+      {_ws, coordinator} = repo_ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic"}})
+
+      assert {:error, {:invalid, msg}} =
+               Tools.task_create(coordinator, %{"title" => "typo", "repo" => "tonc"})
+
+      assert msg =~ "tonc"
+    end
+
+    test "a `task`-typed issue gets a repo like any other issue" do
+      {ws, coordinator} = repo_ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic"}})
+
+      assert {:ok, data} =
+               Tools.task_create(coordinator, %{"title" => "a directive", "issue_type" => "task"})
+
+      issue = Ash.get!(Issue, data.id)
+      assert issue.repo == "tonic"
+      assert issue.workspace_id == ws.id
+    end
+  end
+
+  describe "task_update/2" do
+    test "a coordinator updates fields on a task in its workspace", ctx do
+      assert {:ok, data} =
+               Tools.task_update(ctx.coordinator, %{
+                 "id" => ctx.task.id,
+                 "priority" => 0
+               })
+
+      assert data.state == "backlog"
+      assert data.priority == 0
+    end
+
+    test "persists pr_ref", ctx do
+      assert {:ok, _data} =
+               Tools.task_update(ctx.coordinator, %{
+                 "id" => ctx.task.id,
+                 "pr_ref" => "owner/repo#1"
+               })
+
+      {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
+      assert reloaded.pr_ref == "owner/repo#1"
+    end
+
+    # bd-36ytcl: `status` is no longer a field, and `state` never was one —
+    # the lifecycle only moves through the transition tools.
+    test "cannot move the lifecycle through task_update", ctx do
+      for field <- ["status", "state"] do
+        assert {:error, {:invalid, _}} =
+                 Tools.task_update(ctx.coordinator, %{"id" => ctx.task.id, field => "closed"})
+      end
+
+      {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
+      assert reloaded.state == :backlog
+    end
+
+    test "requires at least one field to update", ctx do
+      assert {:error, {:invalid, _}} = Tools.task_update(ctx.coordinator, %{"id" => ctx.task.id})
+    end
+
+    # bd-1ozks5: the local assignee field is gone; an existing coordinator
+    # prompt/script may still pass it — accept and ignore, with a warning,
+    # rather than failing (even when it's the only field passed).
+    test "a deprecated `assignee`-only update succeeds as a no-op, with a warning", ctx do
+      assert {:ok, data} =
+               Tools.task_update(ctx.coordinator, %{"id" => ctx.task.id, "assignee" => "alice"})
+
+      assert [warning] = data.warnings
+      assert warning =~ "assignee"
+    end
+
+    test "a deprecated `assignee` alongside a real field still applies the field, with a warning",
+         ctx do
+      assert {:ok, data} =
+               Tools.task_update(ctx.coordinator, %{
+                 "id" => ctx.task.id,
+                 "priority" => 0,
+                 "assignee" => "alice"
+               })
+
+      assert data.priority == 0
+      assert [warning] = data.warnings
+      assert warning =~ "assignee"
+    end
+
+    test "cannot update a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "bu-other", prefix: "buo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.task_update(ctx.coordinator, %{"id" => foreign.id, "notes" => "x"})
+    end
+
+    test "preserves source_pr (a PRPatrol/lifecycle-owned attribute) when updating unrelated fields (bd-ag9pq3)",
+         ctx do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "PR ##{3266}: needs follow-up",
+          workspace_id: ctx.ws.id,
+          tracker_type: :none,
+          source_pr: "3266"
+        })
+
+      assert task.source_pr == "3266"
+
+      assert {:ok, data} =
+               Tools.task_update(ctx.coordinator, %{
+                 "id" => task.id,
+                 "title" => "retasked title",
+                 "description" => "retasked description"
+               })
+
+      assert data.title == "retasked title"
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.source_pr == "3266"
+    end
+  end
+
+  describe "task_close/2" do
+    test "a coordinator closes a task in its workspace", ctx do
+      assert {:ok, data} =
+               Tools.task_close(ctx.coordinator, %{"id" => ctx.task.id, "reason" => "done"})
+
+      assert data.state == "closed"
+
+      {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
+      assert reloaded.state == :closed
+    end
+  end
+
+  # bd-9so315 — post-merge verification surface.
+  describe "verify_after_deploy flag over MCP" do
+    test "ticket_create accepts it", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{
+                 "title" => "flagged",
+                 "verify_after_deploy" => true
+               })
+
+      {:ok, created} = Ash.get(Issue, data.id)
+      assert created.verify_after_deploy == true
+    end
+
+    test "ticket_update sets and clears it", ctx do
+      assert {:ok, _} =
+               Tools.task_update(ctx.coordinator, %{
+                 "id" => ctx.task.id,
+                 "verify_after_deploy" => true
+               })
+
+      assert Ash.get!(Issue, ctx.task.id).verify_after_deploy == true
+
+      assert {:ok, _} =
+               Tools.task_update(ctx.coordinator, %{
+                 "id" => ctx.task.id,
+                 "verify_after_deploy" => false
+               })
+
+      assert Ash.get!(Issue, ctx.task.id).verify_after_deploy == false
+    end
+
+    test "a worker can flag its own task via task_update_progress", ctx do
+      assert {:ok, _} =
+               Tools.task_update_progress(ctx.worker, %{"verify_after_deploy" => true})
+
+      assert Ash.get!(Issue, ctx.task.id).verify_after_deploy == true
+    end
+
+    test "ticket_show full view reports the flag and the verification state", ctx do
+      # bd-842qio: only work in progress parks for verification.
+      {:ok, task} = Ash.update(ctx.task, %{verify_after_deploy: true}, action: :update)
+      put_state!(task, :verifying)
+
+      assert {:ok, data} = Tools.task_show(ctx.worker, %{"full" => true})
+      assert data.verify_after_deploy == true
+      assert is_binary(data.awaiting_verification_at)
+      # bd-842qio: the stored lifecycle state, mirroring the REST shape.
+      assert {data.state, data.close_reason} == {"verifying", nil}
+    end
+  end
+
+  describe "task_verify/2" do
+    setup ctx do
+      {:ok, task} = Ash.update(ctx.task, %{verify_after_deploy: true}, action: :update)
+      {:ok, awaiting: put_state!(task, :verifying)}
+    end
+
+    test "observed evidence closes the task and persists the evidence", ctx do
+      assert {:ok, data} =
+               Tools.task_verify(ctx.coordinator, %{
+                 "id" => ctx.awaiting.id,
+                 "observed" => "restarted; /api/doctor reports 3 repos"
+               })
+
+      assert data.state == "closed"
+
+      reloaded = Ash.get!(Issue, ctx.awaiting.id)
+      assert reloaded.state == :closed
+      assert reloaded.verification_outcome == :observed
+      assert reloaded.verification_evidence == "restarted; /api/doctor reports 3 repos"
+    end
+
+    test "failed evidence reopens the task and persists the evidence", ctx do
+      assert {:ok, data} =
+               Tools.task_verify(ctx.coordinator, %{
+                 "id" => ctx.awaiting.id,
+                 "failed" => "still reads the deleted key"
+               })
+
+      assert data.state == "queued"
+
+      reloaded = Ash.get!(Issue, ctx.awaiting.id)
+      assert reloaded.state == :queued
+      assert reloaded.verification_outcome == :failed
+      assert reloaded.verification_evidence == "still reads the deleted key"
+    end
+
+    test "requires exactly one of observed/failed", ctx do
+      assert {:error, {:invalid, _}} =
+               Tools.task_verify(ctx.coordinator, %{"id" => ctx.awaiting.id})
+
+      assert {:error, {:invalid, _}} =
+               Tools.task_verify(ctx.coordinator, %{
+                 "id" => ctx.awaiting.id,
+                 "observed" => "a",
+                 "failed" => "b"
+               })
+    end
+
+    test "rejects a task that is not awaiting verification", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "not parked", workspace_id: ctx.ws.id})
+
+      assert {:error, {:invalid, msg}} =
+               Tools.task_verify(ctx.coordinator, %{"id" => other.id, "observed" => "x"})
+
+      assert msg =~ "awaiting"
+    end
+  end
+
+  describe "dep_add/2 + dep_remove/2" do
+    setup ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "blocker", workspace_id: ctx.ws.id})
+      {:ok, other: other}
+    end
+
+    test "adds and removes a dependency edge between tasks in the workspace", ctx do
+      assert {:ok, dep} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => ctx.task.id,
+                 "to_issue_id" => ctx.other.id,
+                 "type" => "depends_on"
+               })
+
+      assert dep.from_issue_id == ctx.task.id
+      assert dep.to_issue_id == ctx.other.id
+      assert dep.type == "depends_on"
+
+      assert {:ok, %{removed: 1}} =
+               Tools.dep_remove(ctx.coordinator, %{
+                 "from_issue_id" => ctx.task.id,
+                 "to_issue_id" => ctx.other.id
+               })
+
+      assert Dependency |> Ash.read!() |> Enum.empty?()
+    end
+
+    test "rejects an unknown dependency type", ctx do
+      assert {:error, {:invalid, _}} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => ctx.task.id,
+                 "to_issue_id" => ctx.other.id,
+                 "type" => "nonsense"
+               })
+    end
+
+    test "cannot point an edge at a task in another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "dep-other", prefix: "dpo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => ctx.task.id,
+                 "to_issue_id" => foreign.id,
+                 "type" => "blocks"
+               })
+    end
+
+    test "dep_remove is idempotent (absent edge → removed: 0)", ctx do
+      assert {:ok, %{removed: 0}} =
+               Tools.dep_remove(ctx.coordinator, %{
+                 "from_issue_id" => ctx.task.id,
+                 "to_issue_id" => ctx.other.id
+               })
+    end
+
+    # bd-apj0gq: dep_add now routes through `Wardmast.Tasks.Dependencies`, so it
+    # inherits the facade's cycle guard. Before, this pair of edges persisted
+    # and deadlocked both tasks silently.
+    test "rejects a gating edge that would close a cycle, naming the cycle", ctx do
+      assert {:ok, _} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => ctx.task.id,
+                 "to_issue_id" => ctx.other.id,
+                 "type" => "depends_on"
+               })
+
+      assert {:error, {:invalid, msg}} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => ctx.other.id,
+                 "to_issue_id" => ctx.task.id,
+                 "type" => "depends_on"
+               })
+
+      assert msg =~ "cycle"
+      assert msg =~ ctx.task.id
+      assert msg =~ ctx.other.id
+    end
+
+    test "a non-gating edge is never cycle-checked", ctx do
+      assert {:ok, _} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => ctx.task.id,
+                 "to_issue_id" => ctx.other.id,
+                 "type" => "relates_to"
+               })
+
+      assert {:ok, _} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => ctx.other.id,
+                 "to_issue_id" => ctx.task.id,
+                 "type" => "relates_to"
+               })
+    end
+  end
+
+  describe "dep_list/2" do
+    setup ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "blocker", workspace_id: ctx.ws.id})
+
+      {:ok, dep} =
+        Wardmast.Tasks.Dependencies.add(ctx.task.id, other.id, :conflicts_with)
+
+      {:ok, other: other, dep: dep}
+    end
+
+    test "a coordinator lists a workspace's edges (naming the workspace)", ctx do
+      assert {:ok, %{dependencies: [row], count: 1}} =
+               Tools.dep_list(ctx.coordinator, %{"workspace" => ctx.ws.id})
+
+      assert row.id == ctx.dep.id
+      assert row.type == "conflicts_with"
+      assert row.from.id == ctx.task.id
+      assert row.to.id == ctx.other.id
+      assert row.to.state == "backlog"
+      refute Map.has_key?(row.to, :status)
+      assert row.to.priority == ctx.other.priority
+    end
+
+    test "a coordinator lists edges scoped to one issue", ctx do
+      assert {:ok, %{dependencies: [row], count: 1}} =
+               Tools.dep_list(ctx.coordinator, %{"issue_id" => ctx.task.id})
+
+      assert row.id == ctx.dep.id
+    end
+
+    test "filters by type", ctx do
+      {:ok, _} = Wardmast.Tasks.Dependencies.add(ctx.task.id, ctx.other.id, :relates_to)
+
+      assert {:ok, %{dependencies: rows}} =
+               Tools.dep_list(ctx.coordinator, %{
+                 "workspace" => ctx.ws.id,
+                 "type" => "relates_to"
+               })
+
+      assert [%{type: "relates_to"}] = rows
+    end
+
+    test "a worker lists its own workspace's edges with no `workspace` arg", ctx do
+      assert {:ok, %{dependencies: [row]}} = Tools.dep_list(ctx.worker, %{})
+      assert row.id == ctx.dep.id
+    end
+
+    test "a worker naming a different workspace is unauthorized", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "dep-list-other", prefix: "dlo"})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.dep_list(ctx.worker, %{"workspace" => other_ws.id})
+    end
+
+    test "a symmetric edge appears exactly once whether queried from a or b", ctx do
+      assert {:ok, %{dependencies: [_]}} =
+               Tools.dep_list(ctx.coordinator, %{"issue_id" => ctx.task.id})
+
+      assert {:ok, %{dependencies: [_]}} =
+               Tools.dep_list(ctx.coordinator, %{"issue_id" => ctx.other.id})
+    end
+  end
+
+  describe "dep_list/2 at scale (bd-a1ar6n)" do
+    # 1,100 edges is past SQLite's expression-tree depth limit (1000) for the
+    # `id = ? OR id = ? …` chain Ash emits when loading a relationship over the set.
+    setup ctx do
+      inputs = for i <- 1..1100, do: %{title: "fan-#{i}", workspace_id: ctx.ws.id}
+
+      %{records: issues} =
+        Ash.bulk_create!(inputs, Issue, :create, return_records?: true, return_errors?: true)
+
+      now = DateTime.utc_now()
+
+      rows =
+        issues
+        |> Enum.with_index()
+        |> Enum.map(fn {i, n} ->
+          %{
+            id: Ash.UUIDv7.generate(),
+            from_issue_id: ctx.task.id,
+            to_issue_id: i.id,
+            type: "relates_to",
+            notes: "",
+            created_at: DateTime.add(now, n, :millisecond),
+            updated_at: now
+          }
+        end)
+
+      {1100, _} = Wardmast.Repo.insert_all("dependencies", rows)
+      :ok
+    end
+
+    test "Dependencies.list/1 loads endpoints for >1,000 edges", ctx do
+      assert {:ok, rows} = Wardmast.Tasks.Dependencies.list(workspace_id: ctx.ws.id)
+      assert length(rows) == 1100
+      assert Enum.all?(rows, &(&1.from.id == ctx.task.id and is_binary(&1.to.title)))
+    end
+
+    test "dep_list with no filter returns a bounded page and a cursor", ctx do
+      assert {:ok, %{dependencies: deps, count: count, next_cursor: cursor}} =
+               Tools.dep_list(ctx.coordinator, %{"workspace" => ctx.ws.id})
+
+      assert count == length(deps)
+      assert count == Tools.dep_list_default_limit()
+      assert is_binary(cursor)
+    end
+
+    test "cursor pages cover every edge exactly once", ctx do
+      ids = page_all(ctx, %{"workspace" => ctx.ws.id, "limit" => 500}, nil, [])
+      assert length(ids) == 1100
+      assert length(Enum.uniq(ids)) == 1100
+    end
+
+    test "limit is capped and validated", ctx do
+      assert {:ok, %{count: 500}} =
+               Tools.dep_list(ctx.coordinator, %{"workspace" => ctx.ws.id, "limit" => 100_000})
+
+      assert {:error, {:invalid, _}} =
+               Tools.dep_list(ctx.coordinator, %{"workspace" => ctx.ws.id, "limit" => 0})
+
+      assert {:error, {:invalid, _}} =
+               Tools.dep_list(ctx.coordinator, %{"workspace" => ctx.ws.id, "cursor" => "junk"})
+    end
+
+    defp page_all(ctx, args, cursor, acc) do
+      args = if cursor, do: Map.put(args, "cursor", cursor), else: args
+      {:ok, page} = Tools.dep_list(ctx.coordinator, args)
+      acc = acc ++ Enum.map(page.dependencies, & &1.id)
+
+      case page[:next_cursor] do
+        nil -> acc
+        next -> page_all(ctx, args, next, acc)
+      end
+    end
+  end
+
+  describe "parent/child grouping via dep_add parent_of + auto_close" do
+    test "ticket_create accepts auto_close and task_update can toggle it", ctx do
+      assert {:ok, parent} =
+               Tools.task_create(ctx.coordinator, %{
+                 "title" => "epic",
+                 "issue_type" => "epic",
+                 "auto_close" => true
+               })
+
+      assert parent.issue_type == "epic"
+
+      {:ok, created} = Tools.task_show(ctx.coordinator, %{"id" => parent.id, "full" => true})
+      assert created.auto_close == true
+
+      assert {:ok, _updated} =
+               Tools.task_update(ctx.coordinator, %{"id" => parent.id, "auto_close" => false})
+
+      {:ok, updated_full} = Tools.task_show(ctx.coordinator, %{"id" => parent.id, "full" => true})
+      assert updated_full.auto_close == false
+    end
+
+    test "attaching a child with a parent_of edge auto-closes the parent when done", ctx do
+      assert {:ok, parent} =
+               Tools.task_create(ctx.coordinator, %{"title" => "epic", "auto_close" => true})
+
+      {:ok, child} = Ash.create(Issue, %{title: "child", workspace_id: ctx.ws.id})
+
+      assert {:ok, _dep} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => parent.id,
+                 "to_issue_id" => child.id,
+                 "type" => "parent_of"
+               })
+
+      {:ok, _} = Ash.update(child, %{}, action: :close)
+
+      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => parent.id})
+      assert data.state == "closed"
+      assert data.child_closed == 1
+      assert data.child_total == 1
+    end
+
+    # bd-apj0gq: `maybe_auto_close` used to be reachable only from the child's
+    # own `:close` action, so attaching an already-closed child left the parent
+    # wrongly open. The facade re-evaluates it on the edge write.
+    test "attaching an already-closed child closes the auto_close parent", ctx do
+      assert {:ok, parent} =
+               Tools.task_create(ctx.coordinator, %{"title" => "epic", "auto_close" => true})
+
+      {:ok, child} = Ash.create(Issue, %{title: "child", workspace_id: ctx.ws.id})
+      {:ok, child} = Ash.update(child, %{}, action: :close)
+
+      assert {:ok, _dep} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => parent.id,
+                 "to_issue_id" => child.id,
+                 "type" => "parent_of"
+               })
+
+      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => parent.id})
+      assert data.state == "closed"
+    end
+
+    test "detaching the last open child closes the auto_close parent", ctx do
+      assert {:ok, parent} =
+               Tools.task_create(ctx.coordinator, %{"title" => "epic", "auto_close" => true})
+
+      {:ok, done} = Ash.create(Issue, %{title: "done", workspace_id: ctx.ws.id})
+      {:ok, open} = Ash.create(Issue, %{title: "open", workspace_id: ctx.ws.id})
+
+      for child <- [done, open] do
+        {:ok, _} =
+          Tools.dep_add(ctx.coordinator, %{
+            "from_issue_id" => parent.id,
+            "to_issue_id" => child.id,
+            "type" => "parent_of"
+          })
+      end
+
+      {:ok, _} = Ash.update(done, %{}, action: :close)
+      assert {:ok, %{state: "backlog"}} = Tools.task_show(ctx.coordinator, %{"id" => parent.id})
+
+      assert {:ok, %{removed: 1}} =
+               Tools.dep_remove(ctx.coordinator, %{
+                 "from_issue_id" => parent.id,
+                 "to_issue_id" => open.id,
+                 "type" => "parent_of"
+               })
+
+      assert {:ok, %{state: "closed"}} = Tools.task_show(ctx.coordinator, %{"id" => parent.id})
+    end
+  end
+
+  describe "message_send/2" do
+    test "a coordinator sends a direction to a task's mailbox, scoped to its workspace", ctx do
+      assert {:ok, msg} =
+               Tools.message_send(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "body" => "pick this up next"
+               })
+
+      assert msg.kind == "direction"
+      assert msg.from_ref == "coordinator"
+      assert msg.to_ref == ctx.task.id
+
+      # It lands in the task's inbox.
+      [inbox_msg] = Message.inbox(ctx.task.id, workspace_id: ctx.ws.id)
+      assert inbox_msg.body == "pick this up next"
+    end
+
+    test "a worker raises a flag from its own task to a sibling", ctx do
+      {:ok, sibling} = Ash.create(Issue, %{title: "sibling", workspace_id: ctx.ws.id})
+
+      assert {:ok, msg} =
+               Tools.message_send(ctx.worker, %{
+                 "task_id" => sibling.id,
+                 "body" => "heads up — the API shape changed"
+               })
+
+      # The sender identity is the worker's own task, set from the scope — not
+      # spoofable by the client.
+      assert msg.kind == "flag"
+      assert msg.from_ref == ctx.task.id
+      assert msg.to_ref == sibling.id
+
+      [inbox_msg] = Message.inbox(sibling.id, workspace_id: ctx.ws.id)
+      assert inbox_msg.body == "heads up — the API shape changed"
+    end
+
+    test "requires a recipient and a body", ctx do
+      assert {:error, {:invalid, _}} =
+               Tools.message_send(ctx.coordinator, %{"task_id" => ctx.task.id})
+    end
+
+    test "accepts optional kind parameter to override auto-derived kind", ctx do
+      assert {:ok, msg} =
+               Tools.message_send(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "body" => "escalation needed",
+                 "kind" => "escalation"
+               })
+
+      assert msg.kind == "escalation"
+      assert msg.from_ref == "coordinator"
+      assert msg.to_ref == ctx.task.id
+    end
+
+    test "accepts optional task_ref parameter", ctx do
+      {:ok, other_task} = Ash.create(Issue, %{title: "other", workspace_id: ctx.ws.id})
+
+      assert {:ok, msg} =
+               Tools.message_send(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "body" => "issue with this task",
+                 "task_ref" => other_task.id
+               })
+
+      assert msg.task_ref == other_task.id
+      assert msg.directive_ref == other_task.id
+    end
+
+    test "accepts the deprecated directive_ref alias for task_ref", ctx do
+      {:ok, other_task} = Ash.create(Issue, %{title: "other", workspace_id: ctx.ws.id})
+
+      assert {:ok, msg} =
+               Tools.message_send(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "body" => "issue with this task",
+                 "directive_ref" => other_task.id
+               })
+
+      assert msg.task_ref == other_task.id
+      assert msg.directive_ref == other_task.id
+    end
+
+    test "task_ref wins over directive_ref when both are given", ctx do
+      {:ok, canonical_task} = Ash.create(Issue, %{title: "canonical", workspace_id: ctx.ws.id})
+      {:ok, legacy_task} = Ash.create(Issue, %{title: "legacy", workspace_id: ctx.ws.id})
+
+      assert {:ok, msg} =
+               Tools.message_send(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "body" => "issue with this task",
+                 "task_ref" => canonical_task.id,
+                 "directive_ref" => legacy_task.id
+               })
+
+      assert msg.task_ref == canonical_task.id
+      assert msg.directive_ref == canonical_task.id
+    end
+
+    test "rejects invalid kind values", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.message_send(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "body" => "message",
+                 "kind" => "invalid_kind"
+               })
+
+      assert String.contains?(msg, "invalid kind")
+    end
+
+    test "kind=escalation sent by coordinator produces escalation message", ctx do
+      assert {:ok, msg} =
+               Tools.message_send(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "body" => "review failed — needs escalation",
+                 "kind" => "escalation"
+               })
+
+      assert msg.kind == "escalation"
+
+      # Verify it's stored correctly in the database
+      {:ok, stored} = Ash.get(Message, msg.id)
+      assert stored.kind == :escalation
+    end
+  end
+
+  describe "task_reopen/2" do
+    test "a coordinator reopens a closed task", ctx do
+      {:ok, _} = Ash.update(ctx.task, %{reason: "done"}, action: :close)
+
+      assert {:ok, data} = Tools.task_reopen(ctx.coordinator, %{"id" => ctx.task.id})
+      assert data.state == "queued"
+
+      {:ok, full} = Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => true})
+      assert is_nil(full.closed_at)
+
+      {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
+      assert reloaded.state == :queued
+    end
+
+    test "reopening a non-closed task is rejected (transition refusal)", ctx do
+      assert {:error, {:invalid, message}} =
+               Tools.task_reopen(ctx.coordinator, %{"id" => ctx.task.id})
+
+      assert message =~ "Cannot reopen a ticket that is :backlog"
+    end
+
+    test "cannot reopen a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "ro-other", prefix: "roo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.task_reopen(ctx.coordinator, %{"id" => foreign.id})
+    end
+  end
+
+  describe "task_promote/2" do
+    test "a coordinator promotes a task from Backlog to Ready", ctx do
+      assert ctx.task.state == :backlog
+
+      assert {:ok, data} = Tools.task_promote(ctx.coordinator, %{"id" => ctx.task.id})
+      assert data.state == "queued"
+
+      {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
+      assert reloaded.state == :queued
+    end
+
+    test "promoting an already-queued task is a no-op success", ctx do
+      {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
+      assert ctx.task.state == :backlog
+      {:ok, task} = Ash.get(Issue, ctx.task.id)
+      assert task.state == :queued
+
+      assert {:ok, data} = Tools.task_promote(ctx.coordinator, %{"id" => ctx.task.id})
+      assert data.state == "queued"
+    end
+
+    test "cannot promote a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "pt-other", prefix: "pto"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.task_promote(ctx.coordinator, %{"id" => foreign.id})
+    end
+
+    # bd-7mbrlg
+    test "refuses a bug/feature/chore with no acceptance criteria and no waiver", ctx do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "no ACs", workspace_id: ctx.ws.id, issue_type: :bug})
+
+      assert {:error, {:invalid, message}} =
+               Tools.task_promote(ctx.coordinator, %{"id" => task.id})
+
+      assert message =~ "acceptance criteria"
+    end
+
+    test "acceptance_waived allows promotion and is persisted", ctx do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "waived", workspace_id: ctx.ws.id, issue_type: :chore})
+
+      assert {:ok, data} =
+               Tools.task_promote(ctx.coordinator, %{
+                 "id" => task.id,
+                 "acceptance_waived" => "trivial config bump"
+               })
+
+      assert data.state == "queued"
+      assert data.acceptance_waived == "trivial config bump"
+
+      assert {:ok, shown} = Tools.task_show(ctx.coordinator, %{"id" => task.id})
+      assert shown.acceptance_waived == "trivial config bump"
+    end
+  end
+
+  describe "task_demote/2" do
+    test "a coordinator demotes a task from Ready to Backlog", ctx do
+      {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
+      {:ok, task} = Ash.get(Issue, ctx.task.id)
+      assert task.state == :queued
+
+      assert {:ok, data} = Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
+      assert data.state == "backlog"
+
+      {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
+      assert reloaded.state == :backlog
+    end
+
+    test "demoting an already-backlog task is a no-op success", ctx do
+      assert ctx.task.state == :backlog
+
+      assert {:ok, data} = Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
+      assert data.state == "backlog"
+    end
+
+    test "cannot demote a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "dem-other", prefix: "dmo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.task_demote(ctx.coordinator, %{"id" => foreign.id})
+    end
+
+    test "refuses to demote a task with a live worker", ctx do
+      {:ok, _} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
+
+      # Simulate a live worker by registering it in the Worker.Registry
+      {:ok, _} = Registry.register(Wardmast.Worker.Registry, ctx.task.id, nil)
+
+      assert {:error, {:invalid, message}} =
+               Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
+
+      assert message =~ "live worker" or message =~ "worker"
+    end
+
+    test "demotes an active task with no live worker back to backlog", ctx do
+      put_state!(ctx.task, :active)
+
+      assert {:ok, %{state: "backlog"}} =
+               Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
+    end
+
+    test "refuses to demote an active task with a live worker", ctx do
+      put_state!(ctx.task, :active)
+
+      via = Wardmast.Worker.Registry.via_tuple(ctx.task.id)
+
+      start_supervised!(%{
+        id: :fake_live_worker,
+        start: {Agent, :start_link, [fn -> :ok end, [name: via]]}
+      })
+
+      assert {:error, {:invalid, message}} =
+               Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
+
+      assert message =~ "live worker"
+    end
+
+    test "refuses to demote a task that is verifying", ctx do
+      {:ok, promoted} = Ash.update(ctx.task, %{}, action: :promote_to_ready)
+      {:ok, started} = Ash.update(promoted, %{}, action: :start)
+      {:ok, _} = Ash.update(started, %{}, action: :await_verification)
+
+      assert {:error, {:invalid, message}} =
+               Tools.task_demote(ctx.coordinator, %{"id" => ctx.task.id})
+
+      assert message =~ "awaiting verification"
+    end
+  end
+
+  describe "task_rank/2" do
+    test "top moves a task ahead of every other task in the workspace", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "other", workspace_id: ctx.ws.id})
+
+      assert {:ok, data} = Tools.task_rank(ctx.coordinator, %{"id" => ctx.task.id, "top" => true})
+      assert data.rank < other.rank
+    end
+
+    test "bottom moves a task behind every other task in the workspace", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "other", workspace_id: ctx.ws.id})
+
+      assert {:ok, data} =
+               Tools.task_rank(ctx.coordinator, %{"id" => ctx.task.id, "bottom" => true})
+
+      assert data.rank > other.rank
+    end
+
+    test "before_id places a task immediately ahead of the target", ctx do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ctx.ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ctx.ws.id})
+
+      assert {:ok, data} =
+               Tools.task_rank(ctx.coordinator, %{"id" => b.id, "before_id" => a.id})
+
+      assert data.rank < a.rank
+    end
+
+    test "after_id places a task immediately behind the target", ctx do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ctx.ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ctx.ws.id})
+
+      assert {:ok, data} =
+               Tools.task_rank(ctx.coordinator, %{"id" => a.id, "after_id" => b.id})
+
+      assert data.rank > b.rank
+    end
+
+    test "never changes priority", ctx do
+      assert {:ok, data} =
+               Tools.task_rank(ctx.coordinator, %{"id" => ctx.task.id, "bottom" => true})
+
+      assert data.priority == ctx.task.priority
+    end
+
+    test "rejects a before_id target in a different workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "rank-other", prefix: "rko"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:invalid, message}} =
+               Tools.task_rank(ctx.coordinator, %{"id" => ctx.task.id, "before_id" => foreign.id})
+
+      assert message =~ "different workspace" or message =~ "workspace"
+    end
+
+    test "rejects no arguments", ctx do
+      assert {:error, {:invalid, _}} = Tools.task_rank(ctx.coordinator, %{"id" => ctx.task.id})
+    end
+
+    test "rejects more than one rank argument", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "other", workspace_id: ctx.ws.id})
+
+      assert {:error, {:invalid, _}} =
+               Tools.task_rank(ctx.coordinator, %{
+                 "id" => ctx.task.id,
+                 "top" => true,
+                 "before_id" => other.id
+               })
+    end
+
+    test "rejects a before_id target that is the task itself", ctx do
+      assert {:error, {:invalid, _}} =
+               Tools.task_rank(ctx.coordinator, %{"id" => ctx.task.id, "before_id" => ctx.task.id})
+    end
+
+    test "cannot rank a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "rank-other2", prefix: "rk2"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.task_rank(ctx.coordinator, %{"id" => foreign.id, "top" => true})
+    end
+  end
+
+  describe "epic_floor/2" do
+    # ES2 (bd-3e7inj): the MCP surface of `:set_floor`.
+    setup ctx do
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "epic", workspace_id: ctx.ws.id, issue_type: :epic})
+
+      {:ok, epic: epic}
+    end
+
+    test "sets and clears a floor", ctx do
+      assert {:ok, %{id: id, floor_priority: 1}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => 1})
+
+      assert id == ctx.epic.id
+      assert Ash.get!(Issue, ctx.epic.id).floor_priority == 1
+
+      assert {:ok, %{floor_priority: nil}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => nil})
+
+      assert Ash.get!(Issue, ctx.epic.id).floor_priority == nil
+    end
+
+    test "accepts P-notation and none", ctx do
+      assert {:ok, %{floor_priority: 2}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => "P2"})
+
+      assert {:ok, %{floor_priority: nil}} =
+               Tools.epic_floor(ctx.coordinator, %{
+                 "id" => ctx.epic.id,
+                 "floor_priority" => "none"
+               })
+    end
+
+    test "does not touch the epic's own priority", ctx do
+      assert {:ok, %{priority: priority}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => 1})
+
+      assert priority == ctx.epic.priority
+    end
+
+    test "rejects a non-epic", ctx do
+      assert {:error, {:invalid, message}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => ctx.task.id, "floor_priority" => 1})
+
+      assert message =~ "epic"
+    end
+
+    test "rejects P0, P4 and junk, and a missing floor_priority key", ctx do
+      for bad <- [0, 4, "P0", "banana"] do
+        assert {:error, {:invalid, _}} =
+                 Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => bad})
+      end
+
+      assert {:error, {:invalid, _}} = Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id})
+      assert Ash.get!(Issue, ctx.epic.id).floor_priority == nil
+    end
+
+    test "cannot reach an epic in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "floor-other", prefix: "fo"})
+
+      {:ok, foreign} =
+        Ash.create(Issue, %{title: "f", workspace_id: other_ws.id, issue_type: :epic})
+
+      assert {:error, {:not_found, _}} =
+               Tools.epic_floor(ctx.coordinator, %{"id" => foreign.id, "floor_priority" => 1})
+    end
+
+    test "is a coordinator-tier tool: a worker neither sees nor can call it", ctx do
+      assert "epic_floor" in Enum.map(Wardmast.MCP.Catalog.visible(ctx.coordinator), & &1.name)
+      refute "epic_floor" in Enum.map(Wardmast.MCP.Catalog.visible(ctx.worker), & &1.name)
+
+      assert {:rpc_error, -32003, message} =
+               Wardmast.MCP.Catalog.call(ctx.worker, "epic_floor", %{
+                 "id" => ctx.epic.id,
+                 "floor_priority" => 1
+               })
+
+      assert message =~ "not permitted for a worker"
+      assert Ash.get!(Issue, ctx.epic.id).floor_priority == nil
+    end
+
+    test "a coordinator call lands in the paper trail", ctx do
+      require Ash.Query
+      {:ok, _} = Tools.epic_floor(ctx.coordinator, %{"id" => ctx.epic.id, "floor_priority" => 3})
+
+      assert [%{changes: %{"floor_priority" => 3}}] =
+               Issue.Version
+               |> Ash.Query.filter(
+                 version_source_id == ^ctx.epic.id and version_action_name == :set_floor
+               )
+               |> Ash.read!()
+    end
+  end
+
+  describe "notify_list/2" do
+    test "lists recent notifications scoped to the workspace (both tiers)", ctx do
+      {:ok, _} = Message.notify(%{workspace_id: ctx.ws.id, body: "a worker finished"})
+
+      assert {:ok, %{notifications: [n], count: 1}} = Tools.notify_list(ctx.coordinator, %{})
+      assert n.body == "a worker finished"
+      assert n.kind == "notification"
+
+      # A worker sees the same workspace feed.
+      assert {:ok, %{count: 1}} = Tools.notify_list(ctx.worker, %{})
+    end
+
+    test "does not leak notifications from another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "nf-other", prefix: "nfo"})
+      {:ok, _} = Message.notify(%{workspace_id: other_ws.id, body: "elsewhere"})
+      {:ok, _} = Message.notify(%{workspace_id: ctx.ws.id, body: "here"})
+
+      assert {:ok, %{notifications: notifications}} = Tools.notify_list(ctx.coordinator, %{})
+      assert Enum.all?(notifications, &(&1.body == "here"))
+    end
+
+    test "honors a limit", ctx do
+      for i <- 1..3, do: Message.notify(%{workspace_id: ctx.ws.id, body: "n#{i}"})
+
+      assert {:ok, %{count: 2}} = Tools.notify_list(ctx.coordinator, %{"limit" => 2})
+    end
+  end
+
+  describe "tracker_claim/2 + tracker_sync/2 (tracker = none)" do
+    test "claim refuses when the workspace tracker does not support it", ctx do
+      assert {:error, {:invalid_request, msg}} =
+               Tools.tracker_claim(ctx.coordinator, %{"ref" => "42"})
+
+      assert msg =~ "tracker"
+    end
+
+    test "claim requires a ref", ctx do
+      assert {:error, {:invalid, _}} = Tools.tracker_claim(ctx.coordinator, %{})
+    end
+
+    test "claim with epic or query on an unsupported tracker is a typed refusal", ctx do
+      assert {:error, {:invalid_request, _}} =
+               Tools.tracker_claim(ctx.coordinator, %{"epic" => "9"})
+
+      assert {:error, {:invalid_request, _}} =
+               Tools.tracker_claim(ctx.coordinator, %{"query" => "x"})
+    end
+
+    test "claim rejects ref combined with epic", ctx do
+      assert {:error, {:invalid_request, msg}} =
+               Tools.tracker_claim(ctx.coordinator, %{"ref" => "1", "epic" => "9"})
+
+      assert msg =~ "exactly one"
+    end
+
+    test "sync (dry) returns an empty plan for a none-tracker workspace", ctx do
+      assert {:ok, %{applied: false, actions: [], count: 0}} =
+               Tools.tracker_sync(ctx.coordinator, %{"dry" => true})
+    end
+
+    test "sync (apply) no-ops cleanly for a none-tracker workspace", ctx do
+      assert {:ok, %{applied: true, actions: [], results: []}} =
+               Tools.tracker_sync(ctx.coordinator, %{})
+    end
+  end
+
+  describe "tracker_claim/2 (github) — difficulty/repo parity with the CLI" do
+    @gh_viewer "mcp-claim-worker"
+    @gh_env_var "ARBITER_MCP_CLAIM_TEST_TOKEN"
+
+    setup do
+      System.put_env(@gh_env_var, "mcp-claim-test-token")
+
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "mcp-claim-gh",
+          prefix: "mcgh",
+          config: %{
+            "tracker" => %{
+              "type" => "github",
+              "config" => %{
+                "owner" => "ryanrborn",
+                "repo" => "arbiter",
+                "credentials_ref" => "env:#{@gh_env_var}"
+              }
+            }
+          }
+        })
+
+      on_exit(fn ->
+        Wardmast.Trackers.GitHub.Config.clear()
+        System.delete_env(@gh_env_var)
+      end)
+
+      {:ok, gh_ws: gh_ws, gh_coordinator: %Scope{tier: :coordinator, workspace_id: gh_ws.id}}
+    end
+
+    defp stub_gh_claim(fun), do: Req.Test.stub(Wardmast.Trackers.GitHub.HTTP, fun)
+
+    test "difficulty and repo args are persisted, matching what the CLI/HTTP surface accepts",
+         ctx do
+      stub_gh_claim(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @gh_viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/77"} ->
+            Req.Test.json(conn, %{
+              "number" => 77,
+              "title" => "MCP-claimed issue",
+              "body" => "via tracker_claim",
+              "state" => "open",
+              "assignees" => [%{"login" => @gh_viewer}],
+              "labels" => [%{"name" => "bug"}]
+            })
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/77/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/77/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/77/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, data} =
+               Tools.tracker_claim(ctx.gh_coordinator, %{
+                 "ref" => "77",
+                 "difficulty" => 4,
+                 "repo" => "emricare/tonic"
+               })
+
+      assert data.status == "created"
+      assert data.task.difficulty == 4
+      assert data.task.issue_type == "bug"
+      assert data.task.repo == "emricare/tonic"
+    end
+  end
+
+  describe "workspace_list/2" do
+    test "enumerates workspaces with summary fields", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "wl-other", prefix: "wlo"})
+
+      assert {:ok, %{workspaces: workspaces, count: count}} =
+               Tools.workspace_list(ctx.coordinator, %{})
+
+      assert count >= 2
+      entry = Enum.find(workspaces, &(&1.id == ctx.ws.id))
+      assert entry.name == "mcp-tools-ws"
+      assert entry.prefix == "mcp"
+      assert is_binary(entry.tracker_type)
+      assert Enum.any?(workspaces, &(&1.id == other_ws.id))
+
+      # Summary only — no config / security posture leaks through.
+      refute Map.has_key?(entry, :config)
+      refute Map.has_key?(entry, :security)
+    end
+  end
+
+  describe "workspace_config_get/2" do
+    test "returns the full config when no key is given", ctx do
+      {:ok, ws} =
+        Ash.update(ctx.ws, %{patch: %{"merge" => %{"auto_merge" => true}}, unset_paths: []},
+          action: :patch_config
+        )
+
+      assert {:ok, data} = Tools.workspace_config_get(ctx.worker, %{})
+      assert data.workspace == ws.name
+      assert is_nil(data.key)
+      assert is_map(data.value)
+      assert get_in(data.value, ["merge", "auto_merge"]) == true
+      assert is_list(data.secret_keys)
+    end
+
+    test "returns a leaf value for a dotted key", ctx do
+      {:ok, _} =
+        Ash.update(ctx.ws, %{patch: %{"review" => %{"required" => true}}, unset_paths: []},
+          action: :patch_config
+        )
+
+      assert {:ok, data} = Tools.workspace_config_get(ctx.worker, %{"key" => "review.required"})
+      assert data.key == "review.required"
+      assert data.value == true
+    end
+
+    test "returns a nested map for a non-leaf dotted key", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{patch: %{"review" => %{"required" => true, "rounds" => 2}}, unset_paths: []},
+          action: :patch_config
+        )
+
+      assert {:ok, data} = Tools.workspace_config_get(ctx.worker, %{"key" => "review"})
+      assert data.value["required"] == true
+      assert data.value["rounds"] == 2
+    end
+
+    test "errors when a key is not found", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.workspace_config_get(ctx.worker, %{"key" => "nonexistent.key"})
+
+      assert msg =~ "nonexistent.key"
+    end
+
+    test "a coordinator can read another workspace by name", _ctx do
+      {:ok, other_ws} =
+        Ash.create(Workspace, %{name: "cfg-get-other", prefix: "cgo"})
+
+      {:ok, _} =
+        Ash.update(
+          other_ws,
+          %{patch: %{"routing" => %{"policy" => "round_robin"}}, unset_paths: []},
+          action: :patch_config
+        )
+
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil}
+
+      assert {:ok, data} =
+               Tools.workspace_config_get(agnostic, %{"workspace" => "cfg-get-other"})
+
+      assert data.workspace == "cfg-get-other"
+      assert is_map(data.value)
+    end
+  end
+
+  describe "workspace_config_overview/2" do
+    test "returns the grouped overview map with all expected sections", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{
+            patch: %{
+              "tracker" => %{"type" => "none"},
+              "merge" => %{"strategy" => "direct", "auto_merge" => false},
+              "routing" => %{"policy" => "static"}
+            },
+            unset_paths: []
+          },
+          action: :patch_config
+        )
+
+      assert {:ok, data} = Tools.workspace_config_overview(ctx.worker, %{})
+
+      assert data.workspace.id == ctx.ws.id
+      assert data.workspace.name == ctx.ws.name
+      assert data.workspace.prefix == "mcp"
+      assert is_map(data.tracker)
+      assert is_map(data.merge)
+      assert is_map(data.agent)
+      assert is_map(data.review_agent)
+      assert is_map(data.routing)
+      assert is_map(data.review)
+      assert is_map(data.review_gate)
+      assert is_list(data.standing_orders)
+      assert is_list(data.secret_keys)
+    end
+
+    test "a worker can call overview on its own workspace", ctx do
+      assert {:ok, data} = Tools.workspace_config_overview(ctx.worker, %{})
+      assert data.workspace.id == ctx.ws.id
+    end
+
+    test "surfaces provider-scoped tier_models overrides (bd-7ifdke)", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{
+            patch: %{
+              "agent" => %{
+                "config" => %{
+                  "gemini" => %{"tier_models" => %{"standard" => "gemini-3.1-pro-high"}}
+                }
+              }
+            },
+            unset_paths: []
+          },
+          action: :patch_config
+        )
+
+      assert {:ok, data} = Tools.workspace_config_overview(ctx.worker, %{})
+
+      assert data.tier_model_overrides == %{
+               "agent.config.gemini.tier_models" => %{"standard" => "gemini-3.1-pro-high"}
+             }
+    end
+  end
+
+  describe "workspace_config_set/2 multi-key (P-21)" do
+    test "applies patch + unset_paths in one write and preserves siblings", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{
+            patch: %{"merge" => %{"strategy" => "direct", "auto_merge" => false}, "skills" => 1},
+            unset_paths: []
+          },
+          action: :patch_config
+        )
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "patch" => %{
+                   "merge" => %{"auto_merge" => true},
+                   "routing" => %{"policy" => "static"}
+                 },
+                 "unset_paths" => ["skills"]
+               })
+
+      assert get_in(data.config, ["merge", "auto_merge"]) == true
+      assert get_in(data.config, ["merge", "strategy"]) == "direct"
+      assert get_in(data.config, ["routing", "policy"]) == "static"
+      refute Map.has_key?(data.config, "skills")
+    end
+
+    test "a patch can write a key containing a dot", ctx do
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "patch" => %{"repo_paths" => %{"my.repo" => %{"path" => "/tmp/my.repo"}}}
+               })
+
+      assert get_in(data.config, ["repo_paths", "my.repo", "path"]) == "/tmp/my.repo"
+    end
+
+    test "the safety rails apply to a patch too", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "patch" => %{"secret_token" => "sk-nope"}
+               })
+
+      assert msg =~ "secret"
+    end
+
+    test "key and patch together, or neither, are refused", ctx do
+      assert {:error, {:invalid, _}} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "a",
+                 "value" => 1,
+                 "patch" => %{"b" => 2}
+               })
+
+      assert {:error, {:invalid, _}} = Tools.workspace_config_set(ctx.coordinator, %{})
+    end
+
+    test "an unset_paths-only call works", ctx do
+      {:ok, _} =
+        Ash.update(ctx.ws, %{patch: %{"skills" => 1, "standing_orders" => 2}, unset_paths: []},
+          action: :patch_config
+        )
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{"unset_paths" => ["skills"]})
+
+      refute Map.has_key?(data.config, "skills")
+      assert data.config["standing_orders"] == 2
+    end
+  end
+
+  describe "workspace_config_set/2 unknown top-level key (bd-311cun)" do
+    test "refuses sandbox.backend at the root and names the canonical path", ctx do
+      assert {:error, {_, msg}} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "sandbox.backend",
+                 "value" => "podman"
+               })
+
+      assert msg =~ "agent.security.sandbox.backend"
+    end
+
+    test "the canonical path writes", ctx do
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "agent.security.sandbox.backend",
+                 "value" => "podman"
+               })
+
+      assert get_in(data.config, ["agent", "security", "sandbox", "backend"]) == "podman"
+    end
+  end
+
+  describe "workspace_config_schema/2 (P-21)" do
+    test "returns the reference text and enum lists to both tiers", ctx do
+      for scope <- [ctx.coordinator, ctx.worker] do
+        assert {:ok, %{text: text, enums: enums}} = Tools.workspace_config_schema(scope, %{})
+        assert text =~ "WORKSPACE CONFIG REFERENCE"
+        assert enums.tracker_types == Wardmast.Tasks.Workspace.valid_tracker_types()
+      end
+    end
+  end
+
+  describe "workspace standing orders (P-21)" do
+    test "add then remove, global and repo-scoped", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{patch: %{"repo_paths" => %{"r1" => %{"path" => "/tmp/r1"}}}, unset_paths: []},
+          action: :patch_config
+        )
+
+      assert {:ok, data} =
+               Tools.workspace_standing_order_add(ctx.coordinator, %{"text" => "check inbox"})
+
+      assert data.standing_orders == ["check inbox"]
+
+      assert {:ok, data} =
+               Tools.workspace_standing_order_add(ctx.coordinator, %{
+                 "text" => "repo rule",
+                 "repo" => "r1"
+               })
+
+      assert data.standing_orders == ["repo rule"]
+      assert data.repo == "r1"
+
+      assert {:ok, data} =
+               Tools.workspace_standing_order_remove(ctx.coordinator, %{
+                 "target" => "1",
+                 "repo" => "r1"
+               })
+
+      assert data.standing_orders == []
+
+      assert {:ok, data} =
+               Tools.workspace_standing_order_remove(ctx.coordinator, %{"target" => "check inbox"})
+
+      assert data.standing_orders == []
+
+      assert {:error, {:not_found, _}} =
+               Tools.workspace_standing_order_remove(ctx.coordinator, %{"target" => "ghost"})
+    end
+
+    test "add requires text", ctx do
+      assert {:error, {:invalid, _}} = Tools.workspace_standing_order_add(ctx.coordinator, %{})
+    end
+  end
+
+  describe "workspace_show worker_env names (P-21)" do
+    test "lists names and flags but never a value", ctx do
+      {:ok, ws} =
+        Ash.update(
+          ctx.ws,
+          %{
+            worker_env: %{"API_TOKEN" => %{"value" => "tok_supersecret_value", "secret" => true}}
+          },
+          action: :update
+        )
+
+      assert ws.id == ctx.ws.id
+      assert {:ok, data} = Tools.workspace_show(ctx.coordinator, %{})
+      assert data.worker_env == [%{name: "API_TOKEN", secret: true}]
+      assert is_list(data.secret_keys)
+      refute inspect(data) =~ "tok_supersecret_value"
+    end
+  end
+
+  describe "workspace_config_set/2" do
+    test "sets a scalar leaf and preserves siblings", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{
+            patch: %{"merge" => %{"strategy" => "direct", "auto_merge" => false}},
+            unset_paths: []
+          },
+          action: :patch_config
+        )
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "merge.auto_merge",
+                 "value" => true
+               })
+
+      assert get_in(data.config, ["merge", "auto_merge"]) == true
+      # sibling preserved
+      assert get_in(data.config, ["merge", "strategy"]) == "direct"
+      assert is_map(data.workspace)
+      assert is_list(data.secret_keys)
+    end
+
+    # bd-73zv62: the per-repo merge override is set through the same deep merge,
+    # and workspace_config_get then reports each repo's effective strategy.
+    test "sets a per-repo merge strategy override; get shows the effective strategy", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{
+            patch: %{
+              "merge" => %{"strategy" => "github", "config" => %{"owner" => "o", "repo" => "r"}},
+              "repo_paths" => %{"arbiter" => "/src/arbiter", "mesaana" => "/src/mesaana"}
+            },
+            unset_paths: []
+          },
+          action: :patch_config
+        )
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "merge.repos.mesaana.strategy",
+                 "value" => "direct"
+               })
+
+      assert get_in(data.config, ["merge", "repos", "mesaana", "strategy"]) == "direct"
+      assert get_in(data.config, ["merge", "strategy"]) == "github"
+      assert get_in(data.config, ["merge", "config", "owner"]) == "o"
+
+      assert {:ok, got} = Tools.workspace_config_get(ctx.coordinator, %{})
+      assert got.effective_merge_strategies == %{"arbiter" => "github", "mesaana" => "direct"}
+
+      assert {:ok, got} =
+               Tools.workspace_config_get(ctx.coordinator, %{"key" => "merge.repos.mesaana"})
+
+      assert got.value == %{"strategy" => "direct"}
+      assert got.effective_merge_strategies["mesaana"] == "direct"
+    end
+
+    test "sets a nested object, deep-merging into existing config", ctx do
+      {:ok, _} =
+        Ash.update(ctx.ws, %{patch: %{"routing" => %{"policy" => "static"}}, unset_paths: []},
+          action: :patch_config
+        )
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "routing.policy",
+                 "value" => "round_robin"
+               })
+
+      assert get_in(data.config, ["routing", "policy"]) == "round_robin"
+    end
+
+    test "sets an array leaf (multi-provider agent.type)", ctx do
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "agent.type",
+                 "value" => ["claude", "gemini"]
+               })
+
+      assert get_in(data.config, ["agent", "type"]) == ["claude", "gemini"]
+    end
+
+    test "unwraps a stringified JSON array value (bd-1dtufq)", ctx do
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "agent.type",
+                 "value" => "[\"claude\", \"gemini\"]"
+               })
+
+      assert get_in(data.config, ["agent", "type"]) == ["claude", "gemini"]
+    end
+
+    test "unwraps a stringified JSON object value (bd-1dtufq)", ctx do
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "agent.config",
+                 "value" => "{\"vernacular\": \"terse\"}"
+               })
+
+      assert get_in(data.config, ["agent", "config"]) == %{"vernacular" => "terse"}
+    end
+
+    test "leaves a genuine scalar string value that happens to start with [ untouched", ctx do
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "tracker.config.label",
+                 "value" => "[urgent]"
+               })
+
+      assert get_in(data.config, ["tracker", "config", "label"]) == "[urgent]"
+    end
+
+    test "preserves JSON-scalar-shaped string values as strings, not numbers/booleans (regression: bd-7lmjc5)",
+         ctx do
+      # workspace_config_set's schema explicitly allows string type. A client sending
+      # "5", "true", "5.0" as legitimate string config values should NOT be decoded
+      # to numbers/booleans. The unwrap helper only unwraps structural types (list/map)
+      # for workspace_config_set, not scalars.
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "worker.constraint",
+                 "value" => "5.0"
+               })
+
+      # Should be stored as string "5.0", not float 5.0
+      assert get_in(data.config, ["worker", "constraint"]) == "5.0"
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "worker.flag",
+                 "value" => "true"
+               })
+
+      # Should be stored as string "true", not boolean true
+      assert get_in(data.config, ["worker", "flag"]) == "true"
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "worker.count",
+                 "value" => "5"
+               })
+
+      # Should be stored as string "5", not integer 5
+      assert get_in(data.config, ["worker", "count"]) == "5"
+    end
+
+    test "requires a key argument", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.workspace_config_set(ctx.coordinator, %{"value" => "x"})
+
+      assert msg =~ "key"
+    end
+
+    test "requires a value argument", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.workspace_config_set(ctx.coordinator, %{"key" => "merge.auto_merge"})
+
+      assert msg =~ "value"
+    end
+
+    test "blocks secret key prefix (enforced by the :patch_config change, P-20)", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "secrets.my_token",
+                 "value" => "tok_1234"
+               })
+
+      assert msg =~ "secrets"
+      assert msg =~ "arb workspace secret"
+    end
+
+    test "blocks credentials key prefix", ctx do
+      assert {:error, {:invalid, _}} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "credentials.api_key",
+                 "value" => "x"
+               })
+    end
+
+    test "a key with an escaped dot addresses a repo name containing a dot (D-C-17)", ctx do
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "repo_paths.my\\.repo",
+                 "value" => "/srv/my.repo"
+               })
+
+      assert data.config["repo_paths"] == %{"my.repo" => "/srv/my.repo"}
+
+      assert {:ok, _data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "repo_paths.other",
+                 "value" => "/srv/other"
+               })
+
+      assert {:ok, data} =
+               Tools.workspace_config_unset(ctx.coordinator, %{"key" => "repo_paths.my\\.repo"})
+
+      assert data.config["repo_paths"] == %{"other" => "/srv/other"}
+    end
+
+    test "the server safety rails apply, and force overrides them (D-C-16)", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "tracker.type",
+                 "value" => "github"
+               })
+
+      assert msg =~ "tracker.config is missing/empty"
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "tracker.type",
+                 "value" => "github",
+                 "force" => true
+               })
+
+      assert data.config["tracker"]["type"] == "github"
+    end
+  end
+
+  describe "workspace_config_unset/2" do
+    test "removes a key and preserves siblings", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{
+            patch: %{"merge" => %{"strategy" => "direct", "auto_merge" => true}},
+            unset_paths: []
+          },
+          action: :patch_config
+        )
+
+      assert {:ok, data} =
+               Tools.workspace_config_unset(ctx.coordinator, %{"key" => "merge.auto_merge"})
+
+      refute Map.has_key?(data.config["merge"] || %{}, "auto_merge")
+      # sibling preserved
+      assert get_in(data.config, ["merge", "strategy"]) == "direct"
+    end
+
+    test "an absent key is an idempotent success, as on REST (D-C-15)", ctx do
+      assert {:ok, data} =
+               Tools.workspace_config_unset(ctx.coordinator, %{"key" => "nonexistent.key"})
+
+      assert data.config == (Ash.get!(Workspace, ctx.ws.id).config || %{})
+    end
+
+    test "a leaked secret key can be unset (cleanup is never refused)", ctx do
+      assert {:ok, _} =
+               Tools.workspace_config_unset(ctx.coordinator, %{"key" => "secret.foo"})
+    end
+
+    test "requires a key argument", ctx do
+      assert {:error, {:invalid, _}} = Tools.workspace_config_unset(ctx.coordinator, %{})
+    end
+  end
+
+  describe "installation_config_get/2 + installation_config_set/2" do
+    setup do
+      on_exit(fn ->
+        Wardmast.Settings.set_credential_watchdog_adapters(nil)
+        Wardmast.Settings.set_credential_watchdog_interval_ms(nil)
+        Wardmast.Settings.set_credential_watchdog_recovery_interval_ms(nil)
+        Wardmast.Settings.set_quota_providers_shown(nil)
+        Wardmast.Settings.set_quota_providers_hidden(nil)
+        Wardmast.Settings.set_output_offload_enabled(nil)
+        Wardmast.Settings.set_scheduling_epic_floors_enabled(nil)
+        Wardmast.Settings.set_scheduling_max_lifted_in_flight(nil)
+        Wardmast.Settings.set_scheduling_finish_first(nil)
+        Wardmast.Settings.set_scheduling_finish_first_max_wait_hours(nil)
+        Wardmast.Settings.set_scheduler_admission(nil)
+      end)
+
+      :ok
+    end
+
+    @empty_settings %{
+      credential_watchdog_adapters: nil,
+      credential_watchdog_interval_ms: nil,
+      credential_watchdog_recovery_interval_ms: nil,
+      quota_providers_shown: nil,
+      quota_providers_hidden: nil,
+      output_offload_enabled: nil,
+      scheduling_epic_floors_enabled: nil,
+      scheduling_max_lifted_in_flight: nil,
+      scheduling_finish_first: nil,
+      scheduling_finish_first_max_wait_hours: nil,
+      scheduler_admission: nil,
+      "machine.derate": nil,
+      "nodes.public_url": nil,
+      "nodes.allow_public_endpoint": nil,
+      "nodes.join_token_ttl_minutes": nil,
+      "nodes.fence_after_s": nil,
+      "nodes.lost_after_s": nil,
+      "nodes.registry": nil,
+      "nodes.registry.publish_timeout_ms": nil,
+      "nodes.registry_username": nil,
+      "nodes.registry_password": nil,
+      "nodes.registry_insecure": nil,
+      "nodes.registry_public_ok": nil,
+      "nodes.registry_pull_username": nil,
+      "nodes.registry_pull_password": nil,
+      "nodes.machine_image_source": nil,
+      "nodes.chart_ref": nil,
+      "worker.cli.versions": nil,
+      "worker.cli.manual": nil,
+      "worker.cli_set.hold": nil,
+      "worker.image.local_published": nil
+    }
+
+    test "the coordinator tunes finish-first but not the operator-only floor switches", ctx do
+      assert {:ok, %{value: true}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "scheduling_finish_first",
+                 "value" => true
+               })
+
+      assert {:ok, %{value: 12}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "scheduling_finish_first_max_wait_hours",
+                 "value" => 12
+               })
+
+      for key <-
+            ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
+                    nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
+                    nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.registry_username
+                    nodes.registry_password nodes.registry_insecure nodes.registry_public_ok nodes.chart_ref
+                    nodes.registry_pull_username nodes.registry_pull_password
+                    nodes.machine_image_source) do
+        assert {:error, {:unauthorized, msg}} =
+                 Tools.installation_config_set(ctx.coordinator, %{"key" => key, "value" => 1})
+
+        assert msg =~ "operator-only"
+      end
+
+      assert Wardmast.Settings.scheduling_max_lifted_in_flight() == nil
+    end
+
+    test "the coordinator may set scheduler_admission to shadow or legacy, never enforce (DC6)",
+         ctx do
+      assert {:ok, %{value: "shadow"}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "scheduler_admission",
+                 "value" => "shadow"
+               })
+
+      assert {:error, {:unauthorized, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "scheduler_admission",
+                 "value" => "enforce"
+               })
+
+      assert msg =~ "operator-only"
+      assert Wardmast.Settings.scheduler_admission() == :shadow
+
+      assert {:ok, %{value: "legacy"}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "scheduler_admission",
+                 "value" => "legacy"
+               })
+
+      operator = %Scope{tier: :coordinator, workspace_id: ctx.ws.id, operator: true}
+
+      assert {:ok, %{value: "enforce"}} =
+               Tools.installation_config_set(operator, %{
+                 "key" => "scheduler_admission",
+                 "value" => "enforce"
+               })
+    end
+
+    test "an operator-proof coordinator token may set an operator-only key (P-20)", ctx do
+      operator = %Scope{tier: :coordinator, workspace_id: ctx.ws.id, operator: true}
+
+      assert {:ok, %{value: 2}} =
+               Tools.installation_config_set(operator, %{
+                 "key" => "scheduling_max_lifted_in_flight",
+                 "value" => 2
+               })
+
+      assert Wardmast.Settings.scheduling_max_lifted_in_flight() == 2
+    end
+
+    test "returns the effective values when no key is given (worker tier)", ctx do
+      assert {:ok, data} = Tools.installation_config_get(ctx.worker, %{})
+      assert is_nil(data.key)
+      assert data.settings == @empty_settings
+
+      effective =
+        Map.new(Wardmast.Settings.Registry.all(), fn item ->
+          {Wardmast.Settings.Registry.key_atom(item.key), item.value}
+        end)
+
+      assert data.value == effective
+      # the default is in force, so the effective value is not the bare override
+      assert data.value.credential_watchdog_interval_ms ==
+               Wardmast.Settings.Registry.default("credential_watchdog_interval_ms")
+
+      assert data.value.credential_watchdog_interval_ms != nil
+      assert Enum.map(data.items, & &1.key) == Wardmast.Settings.Registry.keys()
+    end
+
+    test "returns the same item as REST/CLI for a known key (effective + override)", ctx do
+      default = Wardmast.Settings.Registry.default("credential_watchdog_interval_ms")
+
+      assert {:ok, data} =
+               Tools.installation_config_get(ctx.worker, %{
+                 "key" => "credential_watchdog_interval_ms"
+               })
+
+      assert data.value == default
+      assert data.override == nil
+      assert data.overridden == false
+      assert data.default == default
+      assert data.type == "positive_integer"
+
+      {:ok, 5} = Wardmast.Settings.set_credential_watchdog_interval_ms(5)
+
+      assert {:ok, data} =
+               Tools.installation_config_get(ctx.worker, %{
+                 "key" => "credential_watchdog_interval_ms"
+               })
+
+      assert data.key == "credential_watchdog_interval_ms"
+      assert data.value == 5
+      assert data.override == 5
+      assert data.overridden == true
+      assert data.settings.credential_watchdog_interval_ms == 5
+    end
+
+    test "errors for an unknown key", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.installation_config_get(ctx.worker, %{"key" => "nonexistent"})
+
+      assert msg =~ "nonexistent"
+    end
+
+    test "coordinator can set a positive integer value", ctx do
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_interval_ms",
+                 "value" => 3
+               })
+
+      assert data.key == "credential_watchdog_interval_ms"
+      assert data.value == 3
+      assert Wardmast.Settings.credential_watchdog_interval_ms() == 3
+    end
+
+    test "coordinator can clear the override with a null value", ctx do
+      {:ok, 3} = Wardmast.Settings.set_credential_watchdog_interval_ms(3)
+
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_interval_ms",
+                 "value" => nil
+               })
+
+      assert data.value == nil
+      assert Wardmast.Settings.credential_watchdog_interval_ms() == nil
+    end
+
+    test "rejects an unknown key", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "nonexistent",
+                 "value" => 1
+               })
+
+      assert msg =~ "nonexistent"
+    end
+
+    test "rejects a non-positive-integer value", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_interval_ms",
+                 "value" => 0
+               })
+
+      assert msg =~ "value"
+    end
+
+    test "requires a key argument", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{"value" => 1})
+
+      assert msg =~ "key"
+    end
+
+    test "requires a value argument", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_interval_ms"
+               })
+
+      assert msg =~ "value"
+    end
+
+    test "coordinator can set the credential watchdog adapter list", ctx do
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => ["claude", "gemini"]
+               })
+
+      assert data.value == ["claude", "gemini"]
+      assert Wardmast.Settings.credential_watchdog_adapters() == ["claude", "gemini"]
+
+      assert {:ok, read} =
+               Tools.installation_config_get(ctx.worker, %{
+                 "key" => "credential_watchdog_adapters"
+               })
+
+      assert read.value == ["claude", "gemini"]
+    end
+
+    test "coordinator can clear the credential watchdog adapter list", ctx do
+      {:ok, _} = Wardmast.Settings.set_credential_watchdog_adapters(["claude"])
+
+      assert {:ok, %{value: nil}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => nil
+               })
+
+      assert Wardmast.Settings.credential_watchdog_adapters() == nil
+    end
+
+    test "rejects an unknown adapter name", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => ["claude", "not-an-agent"]
+               })
+
+      assert msg =~ "value"
+    end
+
+    test "rejects a non-list value for the adapter list", ctx do
+      assert {:error, {:invalid, _msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => "claude"
+               })
+    end
+
+    test "coordinator can set the credential watchdog intervals", ctx do
+      assert {:ok, %{value: 900_000}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_interval_ms",
+                 "value" => 900_000
+               })
+
+      assert {:ok, %{value: 120_000}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_recovery_interval_ms",
+                 "value" => 120_000
+               })
+
+      assert Wardmast.Settings.credential_watchdog_interval_ms() == 900_000
+      assert Wardmast.Settings.credential_watchdog_recovery_interval_ms() == 120_000
+    end
+
+    test "rejects a non-positive interval", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_interval_ms",
+                 "value" => 0
+               })
+
+      assert msg =~ "value"
+    end
+
+    # bd-i2gwwn: the quota-provider visibility override.
+    test "coordinator can force quota providers on and off, and clear them", ctx do
+      assert {:ok, %{value: ["antigravity"]}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "quota_providers_shown",
+                 "value" => ["antigravity"]
+               })
+
+      assert {:ok, %{value: ["claude"]}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "quota_providers_hidden",
+                 "value" => ["claude"]
+               })
+
+      assert {:ok, %{value: ["claude"], settings: settings}} =
+               Tools.installation_config_get(ctx.worker, %{"key" => "quota_providers_hidden"})
+
+      assert settings.quota_providers_shown == ["antigravity"]
+      assert Wardmast.Quota.Visibility.rule([], ["antigravity"], ["claude"], []) == ["antigravity"]
+
+      assert {:ok, %{value: nil}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "quota_providers_hidden",
+                 "value" => nil
+               })
+
+      assert Wardmast.Settings.quota_providers_hidden() == nil
+    end
+
+    test "quota provider overrides take quota provider codes, not agent types", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "quota_providers_shown",
+                 "value" => ["gemini"]
+               })
+
+      assert msg =~ "antigravity"
+
+      assert {:error, {:invalid, _}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => ["antigravity"]
+               })
+
+      assert {:ok, %{value: ["codex"]}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "quota_providers_shown",
+                 "value" => ~s(["codex"])
+               })
+    end
+  end
+
+  describe "installation config tools — catalog visibility" do
+    test "installation_config_get is visible to workers and coordinators", ctx do
+      worker_names = Catalog.visible(ctx.worker) |> Enum.map(& &1.name)
+      coord_names = Catalog.visible(ctx.coordinator) |> Enum.map(& &1.name)
+      assert "installation_config_get" in worker_names
+      assert "installation_config_get" in coord_names
+    end
+
+    test "installation_config_set is coordinator-only", ctx do
+      worker_names = Catalog.visible(ctx.worker) |> Enum.map(& &1.name)
+      coord_names = Catalog.visible(ctx.coordinator) |> Enum.map(& &1.name)
+      assert "installation_config_set" in coord_names
+      refute "installation_config_set" in worker_names
+    end
+  end
+
+  describe "installation_config_set — schema validation" do
+    test "value property must have an explicit type (not bare/untyped)", ctx do
+      tool = Enum.find(Catalog.visible(ctx.coordinator), &(&1.name == "installation_config_set"))
+      assert tool != nil
+
+      value_schema = tool.input_schema["properties"]["value"]
+      assert value_schema != nil
+      # The value property must have a "type" key or "oneOf"/"anyOf" for proper MCP type coercion
+      assert Map.has_key?(value_schema, "type") or Map.has_key?(value_schema, "oneOf") or
+               Map.has_key?(value_schema, "anyOf"),
+             "value property must declare a type (via 'type', 'oneOf', or 'anyOf') so MCP clients send native types, not JSON strings"
+    end
+
+    test "schema permits native integer, boolean, array, and null types for value", ctx do
+      tool = Enum.find(Catalog.visible(ctx.coordinator), &(&1.name == "installation_config_set"))
+      value_schema = tool.input_schema["properties"]["value"]
+
+      # Verify oneOf contains the five expected type schemas (the string is
+      # nodes.public_url, P-20)
+      one_of = value_schema["oneOf"]
+      assert one_of != nil
+      assert length(one_of) == 5
+
+      types = Enum.map(one_of, & &1["type"])
+      assert "null" in types
+      assert "integer" in types
+      assert "boolean" in types
+      assert "array" in types
+      assert "string" in types
+
+      # Verify integer has minimum constraint
+      integer_schema = Enum.find(one_of, &(&1["type"] == "integer"))
+      assert integer_schema["minimum"] == 1
+
+      # Verify array items are constrained to known agent types
+      array_schema = Enum.find(one_of, &(&1["type"] == "array"))
+      items_enum = array_schema["items"]["enum"]
+      assert items_enum == ["claude", "gemini", "codex", "antigravity"]
+    end
+
+    test "native integer value round-trips successfully (coordinator)", ctx do
+      # This verifies the backend validation accepts native integers (what well-formed MCP clients send)
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_interval_ms",
+                 "value" => 5
+               })
+
+      assert data.value == 5
+      assert Wardmast.Settings.credential_watchdog_interval_ms() == 5
+    end
+
+    test "native list value round-trips successfully for adapter key (coordinator)", ctx do
+      # This verifies the backend validation accepts native lists (what well-formed MCP clients send)
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => ["claude", "gemini"]
+               })
+
+      assert data.value == ["claude", "gemini"]
+      assert Wardmast.Settings.credential_watchdog_adapters() == ["claude", "gemini"]
+    end
+
+    test "native null value round-trips successfully (coordinator)", ctx do
+      # Set a value first
+      {:ok, _} = Wardmast.Settings.set_credential_watchdog_adapters(["claude"])
+
+      # Clear with native null
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => nil
+               })
+
+      assert data.value == nil
+      assert Wardmast.Settings.credential_watchdog_adapters() == nil
+    end
+
+    test "unwraps a stringified JSON array value for credential_watchdog_adapters", ctx do
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => "[\"claude\", \"gemini\"]"
+               })
+
+      assert data.value == ["claude", "gemini"]
+      assert Wardmast.Settings.credential_watchdog_adapters() == ["claude", "gemini"]
+    end
+
+    test "unwraps a stringified integer value for credential_watchdog_interval_ms", ctx do
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_interval_ms",
+                 "value" => "5"
+               })
+
+      assert data.value == 5
+      assert Wardmast.Settings.credential_watchdog_interval_ms() == 5
+    end
+
+    test "malformed string for credential_watchdog_adapters fails validation", ctx do
+      # A stringified object where a list was expected should still fail
+      assert {:error,
+              {:invalid,
+               "value must be a list of agent types (claude, gemini, codex, grok) or null"}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_adapters",
+                 "value" => "{\"invalid\": \"object\"}"
+               })
+    end
+
+    test "malformed string for credential_watchdog_interval_ms fails validation", ctx do
+      # A non-integer string should fail validation
+      assert {:error, {:invalid, "value must be a positive integer or null"}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "credential_watchdog_interval_ms",
+                 "value" => "not a number"
+               })
+    end
+  end
+
+  describe "workspace config tools — catalog visibility" do
+    test "workspace_config_get and workspace_config_overview are visible to workers", ctx do
+      visible_names = Catalog.visible(ctx.worker) |> Enum.map(& &1.name)
+      assert "workspace_config_get" in visible_names
+      assert "workspace_config_overview" in visible_names
+    end
+
+    test "workspace_config_set and workspace_config_unset are coordinator-only", ctx do
+      coord_names = Catalog.visible(ctx.coordinator) |> Enum.map(& &1.name)
+      worker_names = Catalog.visible(ctx.worker) |> Enum.map(& &1.name)
+
+      assert "workspace_config_set" in coord_names
+      assert "workspace_config_unset" in coord_names
+      refute "workspace_config_set" in worker_names
+      refute "workspace_config_unset" in worker_names
+    end
+
+    test "all four config tools advertise the optional workspace field", _ctx do
+      tools = Catalog.all()
+
+      for name <-
+            ~w(workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset) do
+        tool = Enum.find(tools, &(&1.name == name))
+        assert tool != nil, "tool #{name} not found in catalog"
+
+        assert Map.has_key?(tool.input_schema["properties"], "workspace"),
+               "#{name} missing workspace field"
+      end
+    end
+  end
+
+  # bd-a14qd1: `queue_resume` is gone with the Conductor. Its dispatch
+  # guardrail (bd-5b5hq7) is still covered by `worker_resume`/`worker_review`
+  # below, which are the surviving dispatching tools.
+  describe "queue_resume/2 (removed, bd-a14qd1)" do
+    test "the tool is no longer exported or in the catalog" do
+      Code.ensure_loaded!(Tools)
+      refute function_exported?(Tools, :queue_resume, 2)
+      refute "queue_resume" in Enum.map(Wardmast.MCP.Catalog.all(), & &1.name)
+    end
+  end
+
+  describe "worker_resume/2 + worker_review/2 (dispatch-recursion guardrail, §4.3)" do
+    test "resume refuses a coordinator scope without can_dispatch", ctx do
+      no_dispatch = %{ctx.coordinator | can_dispatch: false}
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.worker_resume(no_dispatch, %{"task_id" => ctx.task.id})
+    end
+
+    test "review refuses a coordinator scope without can_dispatch", ctx do
+      no_dispatch = %{ctx.coordinator | can_dispatch: false}
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.worker_review(no_dispatch, %{"task_id" => ctx.task.id})
+    end
+
+    test "resume refuses once the depth limit is reached", ctx do
+      at_limit = %{ctx.coordinator | depth: MCP.max_depth()}
+
+      assert {:error, {:unauthorized, msg}} =
+               Tools.worker_resume(at_limit, %{"task_id" => ctx.task.id})
+
+      assert msg =~ "depth"
+    end
+
+    test "review cannot target a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "rv-other", prefix: "rvo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_review(ctx.coordinator, %{"task_id" => foreign.id})
+    end
+
+    test "external review (pr) refuses a coordinator scope without can_dispatch", ctx do
+      no_dispatch = %{ctx.coordinator | can_dispatch: false}
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.worker_review(no_dispatch, %{"pr" => "octo/widget#5"})
+    end
+
+    test "external review (pr) on a direct-strategy workspace is unsupported", ctx do
+      # The bound workspace has no merge config → :direct, which can't review an
+      # external PR. The dispatch gate passes; the strategy check rejects it.
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_review(ctx.coordinator, %{"pr" => "octo/widget#5"})
+
+      assert msg =~ "not supported"
+    end
+
+    test "external review (pr) acks against a github-strategy workspace" do
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "rv-github",
+          prefix: "rvg",
+          config: %{"merge" => %{"strategy" => "github", "config" => %{}}}
+        })
+
+      coordinator = %Scope{tier: :coordinator, workspace_id: gh_ws.id, can_dispatch: true}
+
+      assert {:ok, ack} =
+               Tools.worker_review(coordinator, %{
+                 "pr" => "https://github.com/acme/apex_sigv4/pull/5"
+               })
+
+      assert ack.external == true
+      assert ack.status == "dispatched"
+      assert ack.mr_ref == "acme/apex_sigv4#5"
+      assert ack.strategy == :github
+    end
+
+    test "external review (pr) accepts a scope: \"repo\" override (bd-5xsp25)" do
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "rv-github-scope",
+          prefix: "rvgs",
+          config: %{"merge" => %{"strategy" => "github", "config" => %{}}}
+        })
+
+      coordinator = %Scope{tier: :coordinator, workspace_id: gh_ws.id, can_dispatch: true}
+
+      assert {:ok, ack} =
+               Tools.worker_review(coordinator, %{
+                 "pr" => "https://github.com/acme/apex_sigv4/pull/6",
+                 "scope" => "repo"
+               })
+
+      assert ack.external == true
+      assert ack.status == "dispatched"
+    end
+
+    test "resume surfaces the no-worktree error for a task never slung", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "never slung", workspace_id: ctx.ws.id})
+
+      # can_dispatch + in-workspace + below depth, but no preserved worktree exists.
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_resume(ctx.coordinator, %{"task_id" => task.id, "repo" => "test/repo"})
+
+      assert msg =~ "worktree" or msg =~ "repo"
+    end
+
+    test "worker_review persists tracker_context_ref/type on task without claiming (bd-2eo4cg)",
+         ctx do
+      # A task with no tracker_ref — the review is for a coworker's ticket.
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "review for coworker PR",
+          workspace_id: ctx.ws.id,
+          tracker_type: :none
+        })
+
+      # worker_review with tracker_context_ref should set the fields without dispatch failing.
+      # It will fail with a no-worktree/no-repo error (expected in the test env) but AFTER
+      # persisting the tracker context on the task — that's what we verify.
+      _result =
+        Tools.worker_review(ctx.coordinator, %{
+          "task_id" => task.id,
+          "tracker_context_ref" => "AX-18004",
+          "tracker_context_type" => "jira",
+          "with_claude" => false
+        })
+
+      # The tracker context must be persisted on the task regardless of dispatch outcome.
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.tracker_context_ref == "AX-18004"
+      assert reloaded.tracker_context_type == :jira
+      # tracker_type must remain :none — no claim, no write-back.
+      assert reloaded.tracker_type == :none
+    end
+
+    test "ticket_show includes tracker_context_ref and tracker_context_type in full view (bd-2eo4cg)",
+         ctx do
+      {:ok, task} =
+        Ash.update(ctx.task, %{tracker_context_type: :jira, tracker_context_ref: "AX-18004"},
+          action: :update
+        )
+
+      {:ok, full} = Tools.task_show(ctx.coordinator, %{"id" => task.id, "full" => true})
+      assert full.tracker_context_ref == "AX-18004"
+      assert full.tracker_context_type == "jira"
+    end
+
+    # bd-dtfe9x (D-W-2): with no review_automation config anywhere, the resolved
+    # :flag is the conservative fallback, not a decision — it must not be written
+    # onto the engagement (ReviewPatrol already reads an unset mode as :flag).
+    test "worker_review does not persist :flag when no review_automation config exists",
+         ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "review mode default", workspace_id: ctx.ws.id})
+
+      _result =
+        Tools.worker_review(ctx.coordinator, %{
+          "task_id" => task.id,
+          "with_claude" => false
+        })
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == nil
+    end
+
+    # bd-dtfe9x (D-W-2) regression: a normal coordinator token is
+    # workspace-agnostic (workspace_id: nil). The guard used to read the
+    # CALLER's workspace, found no config, and let an `off` workspace through.
+    test "worker_review refuses an off workspace for a workspace-agnostic coordinator" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-agnostic-off-ws",
+          prefix: "raag",
+          config: %{"review_automation" => %{"default" => "off"}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "agnostic off review", workspace_id: ws.id})
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_review(agnostic, %{"task_id" => task.id, "with_claude" => false})
+
+      assert msg =~ "review_automation.default"
+      assert msg =~ "force"
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == nil
+    end
+
+    test "worker_review persists the TASK workspace's resolved mode for an agnostic coordinator" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-agnostic-auto-ws",
+          prefix: "raaa",
+          config: %{"review_automation" => %{"default" => "report_only"}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "agnostic report_only", workspace_id: ws.id})
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      _ = Tools.worker_review(agnostic, %{"task_id" => task.id, "with_claude" => false})
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :report_only
+    end
+
+    test "worker_review: explicit automation override wins over policy (bd-577w96)", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "review mode override", workspace_id: ctx.ws.id})
+
+      _result =
+        Tools.worker_review(ctx.coordinator, %{
+          "task_id" => task.id,
+          "automation" => "auto",
+          "with_claude" => false
+        })
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :auto
+    end
+
+    test "worker_review: author in auto_authors resolves to :auto (bd-577w96)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-tools-ws",
+          prefix: "rat",
+          config: %{
+            "review_automation" => %{
+              "default" => "flag",
+              "auto_authors" => ["trusted-dev"]
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "review auto author", workspace_id: ws.id})
+      coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
+
+      _result =
+        Tools.worker_review(coordinator, %{
+          "task_id" => task.id,
+          "pr_author" => "trusted-dev",
+          "with_claude" => false
+        })
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :auto
+    end
+
+    test "worker_review: author not in auto_authors falls back to default :flag (bd-577w96)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-tools-ws2",
+          prefix: "ra2",
+          config: %{
+            "review_automation" => %{
+              "default" => "flag",
+              "auto_authors" => ["trusted-dev"]
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "review flag author", workspace_id: ws.id})
+      coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
+
+      _result =
+        Tools.worker_review(coordinator, %{
+          "task_id" => task.id,
+          "pr_author" => "untrusted-dev",
+          "with_claude" => false
+        })
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :flag
+    end
+
+    test "worker_review: report_only automation persists :report_only mode (bd-36qzgx)", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "review report_only", workspace_id: ctx.ws.id})
+
+      _result =
+        Tools.worker_review(ctx.coordinator, %{
+          "task_id" => task.id,
+          "automation" => "report_only",
+          "with_claude" => false
+        })
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :report_only
+    end
+
+    test "worker_review: the propose alias persists :report_only mode (bd-36qzgx)", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "review propose", workspace_id: ctx.ws.id})
+
+      _result =
+        Tools.worker_review(ctx.coordinator, %{
+          "task_id" => task.id,
+          "automation" => "propose",
+          "with_claude" => false
+        })
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :report_only
+    end
+
+    test "worker_review: an infra repo_override resolves to :report_only (bd-36qzgx)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-infra-ws",
+          prefix: "rai",
+          config: %{
+            "review_automation" => %{
+              "default" => "auto",
+              "repo_overrides" => %{"atlas" => "report_only"}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "infra review", workspace_id: ws.id})
+      coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
+
+      _result =
+        Tools.worker_review(coordinator, %{
+          "task_id" => task.id,
+          "repo" => "atlas",
+          "pr_author" => "anyone",
+          "with_claude" => false
+        })
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :report_only
+    end
+
+    test "worker_review: an :off repo_override refuses before dispatch, no persist (bd-7opdaf)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-off-ws",
+          prefix: "raof",
+          config: %{
+            "review_automation" => %{
+              "default" => "auto",
+              "repo_overrides" => %{"quiet_repo" => "off"}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "off review", workspace_id: ws.id})
+      coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_review(coordinator, %{
+                 "task_id" => task.id,
+                 "repo" => "quiet_repo",
+                 "with_claude" => false
+               })
+
+      assert msg =~ "quiet_repo"
+      assert msg =~ "repo_overrides"
+      assert msg =~ "force"
+
+      # No agent spawned, nothing persisted — review_automation stays unset.
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == nil
+    end
+
+    test "worker_review: an explicit automation: \"off\" refuses regardless of policy (bd-7opdaf)",
+         ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "explicit off review", workspace_id: ctx.ws.id})
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_review(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "automation" => "off",
+                 "with_claude" => false
+               })
+
+      assert msg =~ "off"
+    end
+
+    test "worker_review: force: true overrides an :off repo_override refusal (bd-7opdaf)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-off-force-ws",
+          prefix: "raoff",
+          config: %{
+            "review_automation" => %{
+              "default" => "auto",
+              "repo_overrides" => %{"quiet_repo" => "off"}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "off review forced", workspace_id: ws.id})
+      coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
+
+      _result =
+        Tools.worker_review(coordinator, %{
+          "task_id" => task.id,
+          "repo" => "quiet_repo",
+          "force" => true,
+          "with_claude" => false
+        })
+
+      # force bypasses the refusal — dispatch proceeds (fails later on no-worktree
+      # in this test env, which is expected and irrelevant here).
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :off
+    end
+  end
+
+  describe "review_greenlight/2 (bd-36qzgx)" do
+    test "refuses a coordinator scope without can_dispatch", ctx do
+      no_dispatch = %{ctx.coordinator | can_dispatch: false}
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.review_greenlight(no_dispatch, %{"record_id" => "whatever"})
+    end
+
+    test "requires a record_id", ctx do
+      assert {:error, {:invalid, msg}} = Tools.review_greenlight(ctx.coordinator, %{})
+      assert msg =~ "record_id"
+    end
+
+    test "rejects a non-array, non-\"all\" select", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.review_greenlight(ctx.coordinator, %{
+                 "record_id" => "r1",
+                 "select" => "some"
+               })
+
+      assert msg =~ "select"
+    end
+
+    test "an unknown record_id is reported not-found", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.review_greenlight(ctx.coordinator, %{"record_id" => "no-such-record"})
+
+      assert msg =~ "no review record" or msg =~ "not"
+    end
+  end
+
+  describe "queue_retry_auto_resolve/2 (bd-bspakl)" do
+    alias Wardmast.Worker.Watchdog
+    alias Wardmast.Test.StubFixPassDispatcher
+    alias Wardmast.Test.StubMerger
+
+    setup do
+      StubMerger.reset()
+      StubFixPassDispatcher.reset()
+      :ok
+    end
+
+    test "requires task_id", ctx do
+      assert {:error, {:invalid, _}} = Tools.queue_retry_auto_resolve(ctx.coordinator, %{})
+    end
+
+    test "reports not-found when no watchdog is running for the task", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.queue_retry_auto_resolve(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert msg =~ "no merge watchdog"
+    end
+
+    test "re-arms a watchdog parked on an exhausted :ci_failed block", ctx do
+      {:ok, wpid} =
+        Worker.start(task_id: ctx.task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+
+      :ok = Worker.advance(wpid, :implement)
+      on_exit(fn -> Process.alive?(wpid) && Worker.stop(wpid, :normal) end)
+
+      StubMerger.queue_get(ctx.task.id, [
+        %{status: :open, approved: true, block_reason: :ci_failed}
+      ])
+
+      {:ok, watchdog_pid} =
+        Watchdog.start(
+          task_id: ctx.task.id,
+          worker: wpid,
+          mr_ref: ctx.task.id,
+          adapter: StubMerger,
+          auto_merge: true,
+          max_auto_resolve_attempts: 1,
+          max_polls: 3,
+          interval_ms: 15,
+          fix_pass_dispatcher: StubFixPassDispatcher
+        )
+
+      on_exit(fn -> Process.alive?(watchdog_pid) && GenServer.stop(watchdog_pid, :normal) end)
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      Process.sleep(60)
+
+      assert {:ok, %{retried: true, task_id: task_id}} =
+               Tools.queue_retry_auto_resolve(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert task_id == ctx.task.id
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 2 end)
+    end
+
+    # bd-4olwyg AC4: the incident's ticket had spent its conflict passes, and
+    # this tool answered that there was nothing to re-arm.
+    test "re-arms a watchdog whose conflict auto-resolve is exhausted", ctx do
+      alias Wardmast.Test.RefusingConflictResolver
+
+      RefusingConflictResolver.arm(ctx.task.id, self())
+
+      StubMerger.queue_get(ctx.task.id, [
+        %{status: :open, approved: true, block_reason: :conflict}
+      ])
+
+      {:ok, watchdog_pid} =
+        Watchdog.start(
+          task_id: ctx.task.id,
+          mr_ref: ctx.task.id,
+          adapter: StubMerger,
+          auto_merge: false,
+          interval_ms: 15,
+          initial_delay_ms: 0,
+          workspace: ctx.ws,
+          conflict_resolver: RefusingConflictResolver
+        )
+
+      on_exit(fn -> Process.alive?(watchdog_pid) && GenServer.stop(watchdog_pid, :normal) end)
+
+      assert_receive {:conflict_resolve_called, _}, 1_000
+      assert_receive {:conflict_escalated, _}, 1_000
+      refute_receive {:conflict_resolve_called, _}, 100
+
+      assert {:ok, %{retried: true, task_id: task_id}} =
+               Tools.queue_retry_auto_resolve(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert task_id == ctx.task.id
+      assert_receive {:conflict_resolve_called, _}, 1_000
+    end
+
+    test "names both blocks it can re-arm when there is nothing to re-arm", ctx do
+      StubMerger.queue_get(ctx.task.id, [%{status: :open, approved: false}])
+
+      {:ok, watchdog_pid} =
+        Watchdog.start(
+          task_id: ctx.task.id,
+          mr_ref: ctx.task.id,
+          adapter: StubMerger,
+          auto_merge: false,
+          interval_ms: 600_000,
+          initial_delay_ms: 600_000
+        )
+
+      on_exit(fn -> Process.alive?(watchdog_pid) && GenServer.stop(watchdog_pid, :normal) end)
+
+      assert {:error, {:conflict, msg}} =
+               Tools.queue_retry_auto_resolve(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert msg =~ ":ci_failed"
+      assert msg =~ "conflict"
+    end
+  end
+
+  # bd-741sid: the Watchdog belongs to the ticket and is restarted from its row,
+  # so every case here is about the ticket — there is no parked worker.
+  describe "queue_restart_watchdog/2 (bd-8jixav)" do
+    alias Wardmast.Tasks.PullRequest
+    alias Wardmast.Worker.Watchdog
+    alias Wardmast.Test.StubMerger
+
+    setup ctx do
+      StubMerger.reset()
+      on_exit(fn -> stop_ticket_watchdog(ctx.task.id) end)
+      :ok
+    end
+
+    test "requires task_id", ctx do
+      assert {:error, {:invalid, _}} = Tools.queue_restart_watchdog(ctx.coordinator, %{})
+    end
+
+    test "reports not-found for a ticket that does not exist", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => "mcp-nosuch"})
+
+      assert msg =~ ~r/no ticket mcp-nosuch/i
+    end
+
+    test "mints a fresh watchdog for a Merging ticket whose watchdog is gone", ctx do
+      put_state!(ctx.task, :active)
+
+      {:ok, wpid} =
+        Worker.start(task_id: ctx.task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+
+      :ok = Worker.advance(wpid, :implement)
+      ref = Process.monitor(wpid)
+
+      StubMerger.next_open_ref("!rw1")
+      StubMerger.queue_get("!rw1", [%{status: :open, approved: false}])
+
+      {:ok, "!rw1"} =
+        Worker.open_mr(wpid, "feature/rw1", "MR", "desc", %{
+          adapter: StubMerger,
+          workspace: nil,
+          interval_ms: 20,
+          initial_delay_ms: 0,
+          watchdog_start_error: true
+        })
+
+      # The run ended with its PR open and nothing watching it.
+      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 1_000
+      assert Ash.get!(Issue, ctx.task.id).state == :merging
+      refute Watchdog.alive?(ctx.task.id)
+
+      assert {:ok, %{restarted: true, task_id: task_id}} =
+               Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert task_id == ctx.task.id
+      assert Watchdog.alive?(ctx.task.id)
+    end
+
+    test "refuses to put a second watchdog on a ticket that has one", ctx do
+      put_state!(ctx.task, :active)
+
+      lane =
+        PullRequest.lane(adapter: StubMerger, interval_ms: 60_000, initial_delay_ms: 60_000)
+
+      {:ok, %{state: :merging}} = Issue.pr_opened(ctx.task.id, "!rw2", merge_watch: lane)
+
+      assert {:ok, %{restarted: true}} =
+               Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert {:error, {:conflict, msg}} =
+               Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert msg =~ ~r/already running/i
+    end
+
+    test "refuses a ticket with no open PR to watch", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert msg =~ ~r/no PR on record/i
+
+      # A ticket whose PR is on the row but which is no longer Merging.
+      put_state!(ctx.task, :active)
+      {:ok, merging} = Issue.pr_opened(ctx.task.id, "!rw3")
+      {:ok, _closed} = Ash.update(merging, %{}, action: :close)
+
+      assert {:error, {:conflict, msg}} =
+               Tools.queue_restart_watchdog(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert msg =~ ~r/not Merging/i
+      refute Watchdog.alive?(ctx.task.id)
+    end
+  end
+
+  defp stop_ticket_watchdog(task_id) do
+    case Wardmast.Worker.Watchdog.whereis(task_id) do
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal)
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  describe "worker_stop/2" do
+    test "stops a running worker in the workspace", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "stop target", workspace_id: ctx.ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      assert {:ok, %{task_id: task_id, stopped: true}} =
+               Tools.worker_stop(ctx.coordinator, %{"task_id" => task.id})
+
+      assert task_id == task.id
+    end
+
+    test "a task with no live worker is reported not-found", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "no worker", workspace_id: ctx.ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_stop(ctx.coordinator, %{"task_id" => task.id})
+    end
+
+    # bd-cgmidt: `worker_stop` is teardown — it must NEVER transition the bead to
+    # `:closed`. A bead only reaches `:closed` via a real completion or an
+    # explicit close, never from tearing down a zombie/idle worker.
+    test "stopping a worker leaves the bead not-:closed (bd-cgmidt Guard 1)", ctx do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "stop teardown", workspace_id: ctx.ws.id})
+
+      active = put_state!(task, :active)
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      assert {:ok, %{stopped: true}} =
+               Tools.worker_stop(ctx.coordinator, %{"task_id" => task.id})
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      refute reloaded.state == :closed
+      assert reloaded.state == active.state
+    end
+
+    test "cannot stop a worker for a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "st-other", prefix: "sto"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      {:ok, pid} = Worker.start(task_id: foreign.id, repo: "test/repo", workspace_id: other_ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(foreign.id, :normal) end)
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_stop(ctx.coordinator, %{"task_id" => foreign.id})
+    end
+  end
+
+  describe "worker_show/2" do
+    test "returns the live snapshot for a running worker", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "show-me", workspace_id: ctx.ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      :ok = Worker.report(pid, :output_lines, ["hello", "world"])
+
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+
+      assert snap.source == "live"
+      assert snap.task_id == task.id
+      assert snap.repo == "test/repo"
+      assert snap.output_lines == ["hello", "world"]
+    end
+
+    test "falls back to the most recent historical run when no live worker exists", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "hist target", workspace_id: ctx.ws.id})
+      older = DateTime.add(DateTime.utc_now(), -60, :second)
+      newer = DateTime.utc_now()
+
+      {:ok, _old} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: older,
+          completed_at: older,
+          output_lines: ["stale"]
+        })
+
+      {:ok, _recent} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :failed,
+          started_at: newer,
+          completed_at: newer,
+          exit_code: 2,
+          failure_reason: "claude_crashed",
+          output_lines: ["a", "b", "boom"]
+        })
+
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+
+      assert snap.source == "history"
+      assert snap.state == "finished"
+      assert snap.outcome == "failed"
+      assert snap.exit_status == 2
+      assert snap.failure_reason == "claude_crashed"
+      assert snap.output_lines == ["a", "b", "boom"]
+    end
+
+    test "a task with neither a live worker nor any run is reported not-found", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "no worker at all", workspace_id: ctx.ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+    end
+
+    test "cannot show a worker for a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "ws-other", prefix: "wso"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      {:ok, pid} = Worker.start(task_id: foreign.id, repo: "test/repo", workspace_id: other_ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(foreign.id, :normal) end)
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_show(ctx.coordinator, %{"task_id" => foreign.id})
+    end
+
+    test "surfaces resumable/blocked_reason for a live worker", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "resumable-test", workspace_id: ctx.ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      # A finished (failed) run should be resumable
+      :ok = Worker.fail(pid)
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+      assert snap.resumable == true
+      assert snap.blocked_reason == nil
+    end
+
+    # bd-741sid: a run whose PR is open has ended, so the parked worker that
+    # must not be stopped is the one waiting on its ReviewGate.
+    test "surfaces blocked_reason for a worker waiting on the review gate", ctx do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "awaiting-review-gate-test", workspace_id: ctx.ws.id})
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ctx.ws.id,
+          meta: %{branch: "feature/guard", review_required: true, review_spawn: false}
+        )
+
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      :ok = Worker.advance(pid, :implement)
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> Worker.state(pid).waiting_on == :review_gate end)
+
+      # bd-7xtz6w: the wait alone is not evidence of a live review — with no
+      # gate spawned (`review_spawn: false`) and no pass running, it resumes.
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+      assert snap.state == "waiting"
+      assert snap.waiting_on == "review_gate"
+      assert snap.resumable == true
+
+      # A live review pass for the task is.
+      {:ok, reviewer} =
+        Worker.start(
+          task_id: task.id <> "#review",
+          repo: "test/repo",
+          workspace_id: nil,
+          meta: %{role: :reviewer, reviews: task.id}
+        )
+
+      on_exit(fn -> Process.alive?(reviewer) && GenServer.stop(reviewer, :normal) end)
+
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+      assert snap.resumable == false
+      assert is_binary(snap.blocked_reason)
+      assert String.contains?(snap.blocked_reason, "waiting on the review gate")
+      assert String.contains?(snap.blocked_reason, task.id <> "#review")
+    end
+
+    test "surfaces resumable/blocked_reason for worker_list", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "list-resumable-test", workspace_id: ctx.ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      # A finished (failed) run should be resumable
+      :ok = Worker.fail(pid)
+      assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
+      entry = Enum.find(workers, &(&1.task_id == task.id))
+      assert entry.resumable == true
+      assert entry.blocked_reason == nil
+    end
+
+    test "returns only the tail of output_lines when lines parameter is provided (live worker)",
+         ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "show-tail-live", workspace_id: ctx.ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      lines = ["line 1", "line 2", "line 3", "line 4", "line 5"]
+      :ok = Worker.report(pid, :output_lines, lines)
+
+      assert {:ok, snap} =
+               Tools.worker_show(ctx.coordinator, %{"task_id" => task.id, "lines" => 2})
+
+      assert snap.output_lines == ["line 4", "line 5"]
+    end
+
+    test "returns only the tail of output_lines when lines parameter is provided (historical run)",
+         ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "show-tail-hist", workspace_id: ctx.ws.id})
+
+      {:ok, _run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now(),
+          output_lines: ["line 1", "line 2", "line 3", "line 4", "line 5"]
+        })
+
+      assert {:ok, snap} =
+               Tools.worker_show(ctx.coordinator, %{"task_id" => task.id, "lines" => 2})
+
+      assert snap.output_lines == ["line 4", "line 5"]
+    end
+  end
+
+  describe "worker_runs/2" do
+    test "lists every historical run for a task, newest first", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "runs target", workspace_id: ctx.ws.id})
+      older = DateTime.add(DateTime.utc_now(), -60, :second)
+      newer = DateTime.utc_now()
+
+      {:ok, old_run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: older,
+          completed_at: older,
+          output_lines: ["stale"]
+        })
+
+      {:ok, new_run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :failed,
+          started_at: newer,
+          completed_at: newer,
+          exit_code: 2,
+          failure_reason: "review_gate_rejected",
+          failure_summary: "VERDICT: REQUEST_CHANGES — needs a guard",
+          output_lines: ["a", "b", "boom"]
+        })
+
+      assert {:ok, %{runs: [first, second]}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id})
+
+      assert first.id == new_run.id
+      assert first.state == "finished"
+      assert first.outcome == "failed"
+      assert first.exit_code == 2
+      assert first.failure_reason == "review_gate_rejected"
+      # bd-2ddf2x: `worker_runs` surfaces failure_summary directly, so a
+      # ReviewGate rejection doesn't require a separate review_gate_rounds_list
+      # call just to see why.
+      assert first.failure_summary == "VERDICT: REQUEST_CHANGES — needs a guard"
+      refute Map.has_key?(first, :output_lines)
+
+      assert second.id == old_run.id
+      assert second.state == "finished"
+      assert second.outcome == "succeeded"
+    end
+
+    test "returns an empty list when no runs are recorded", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "no runs", workspace_id: ctx.ws.id})
+
+      assert {:ok, %{runs: []}} = Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id})
+    end
+
+    # bd-dzz6ly: "which runs had skill X active, grouped by outcome" must be
+    # answerable straight off this MCP surface, without reading a transcript.
+    test "surfaces run provenance (resolved_skills/routing_policy/model_tier/thinking/standing_orders_digest/difficulty_at_dispatch)",
+         ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "provenance target", workspace_id: ctx.ws.id})
+
+      {:ok, run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now(),
+          resolved_skills: [
+            %{"name" => "tdd", "activation_mode" => "always_on", "skill_version" => "v1"}
+          ],
+          standing_orders_digest: String.duplicate("a", 64),
+          routing_policy: "by_difficulty",
+          model_tier: "premium",
+          thinking: "high",
+          difficulty_at_dispatch: 3
+        })
+
+      assert {:ok, %{runs: [entry]}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id})
+
+      assert entry.id == run.id
+
+      assert entry.resolved_skills == [
+               %{"name" => "tdd", "activation_mode" => "always_on", "skill_version" => "v1"}
+             ]
+
+      assert entry.standing_orders_digest == String.duplicate("a", 64)
+      assert entry.routing_policy == "by_difficulty"
+      assert entry.model_tier == "premium"
+      assert entry.thinking == "high"
+      assert entry.difficulty_at_dispatch == 3
+    end
+
+    # bd-b7e33c post-merge finding (2026-09-22): only `provider` was surfaced
+    # here; `session_id` and `resumed_from_run_id` were silently dropped, the
+    # same gap the REST `/api/workers/history` endpoint had — which is what
+    # made the 04:26Z production verification misread a captured agy
+    # conversation id as NULL. Surface both so resume continuity is directly
+    # observable through this tool too.
+    test "surfaces session_id and resumed_from_run_id", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "session fields target", workspace_id: ctx.ws.id})
+
+      {:ok, prior} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          provider: "gemini",
+          session_id: "25df47b0-054e-434e-84c1-6876fd9f77de",
+          started_at: DateTime.add(DateTime.utc_now(), -600, :second)
+        })
+
+      {:ok, resumed} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          provider: "gemini",
+          session_id: "89a2b784-6bd5-46e6-a971-2178ca58cdcd",
+          resumed_from_run_id: prior.id,
+          started_at: DateTime.utc_now()
+        })
+
+      assert {:ok, %{runs: [resumed_entry, prior_entry]}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id})
+
+      assert prior_entry.id == prior.id
+      assert prior_entry.session_id == "25df47b0-054e-434e-84c1-6876fd9f77de"
+      assert prior_entry.resumed_from_run_id == nil
+
+      assert resumed_entry.id == resumed.id
+      assert resumed_entry.session_id == "89a2b784-6bd5-46e6-a971-2178ca58cdcd"
+      assert resumed_entry.resumed_from_run_id == prior.id
+    end
+
+    test "honors a bounded limit", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "many runs", workspace_id: ctx.ws.id})
+
+      for i <- 1..3 do
+        {:ok, _} =
+          Ash.create(Wardmast.Workers.Run, %{
+            task_id: task.id,
+            repo: "arbiter",
+            workspace_id: ctx.ws.id,
+            state: :finished,
+            outcome: :succeeded,
+            started_at: DateTime.add(DateTime.utc_now(), -i, :second)
+          })
+      end
+
+      assert {:ok, %{runs: runs}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id, "limit" => 2})
+
+      assert length(runs) == 2
+    end
+
+    test "cannot list runs for a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "wr-other", prefix: "wro"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => foreign.id})
+    end
+  end
+
+  describe "provider routing on worker_runs / worker_show (bd-40pzpj)" do
+    defp routed_run!(ctx, task) do
+      account_id = Ash.UUID.generate()
+
+      decision = %{
+        "mode" => "most_quota",
+        "role" => "fix_pass",
+        "outcome" => "fallback",
+        "account_id" => account_id,
+        "account_slug" => "work",
+        "provider" => "codex",
+        "family" => "openai",
+        "fallback" =>
+          "pinned account claude:main unavailable (quota_held); fell back to codex:work",
+        "candidates" => [%{"account_slug" => "work", "headroom" => 0.42}],
+        "dropped" => [%{"account_slug" => "main", "reason" => "quota_held"}]
+      }
+
+      {:ok, run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now(),
+          provider: "codex",
+          provider_fallback: decision["fallback"],
+          provider_account_id: account_id,
+          model_family: "openai",
+          routing_decision: decision
+        })
+
+      {run, account_id}
+    end
+
+    test "worker_runs carries the account, family, provider and the whole decision", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "routed runs", workspace_id: ctx.ws.id})
+      {_run, account_id} = routed_run!(ctx, task)
+
+      assert {:ok, %{runs: [run]}} = Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id})
+
+      assert run.provider == "codex"
+      assert run.provider_account_id == account_id
+      assert run.model_family == "openai"
+      assert run.provider_fallback =~ "fell back to codex:work"
+      assert run.routing_decision["outcome"] == "fallback"
+      assert [%{"headroom" => 0.42}] = run.routing_decision["candidates"]
+      assert [%{"reason" => "quota_held"}] = run.routing_decision["dropped"]
+    end
+
+    test "worker_show's historical view carries them too", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "routed show", workspace_id: ctx.ws.id})
+      {_run, account_id} = routed_run!(ctx, task)
+
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+
+      assert snap.source == "history"
+      assert snap.provider_account_id == account_id
+      assert snap.model_family == "openai"
+      assert snap.routing_decision["outcome"] == "fallback"
+    end
+
+    test "worker_show's live view reads them off the worker's meta", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "routed live", workspace_id: ctx.ws.id})
+      account_id = Ash.UUID.generate()
+      decision = %{"outcome" => "selected", "account_id" => account_id, "family" => "google"}
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ctx.ws.id,
+          meta: %{
+            provider: "gemini",
+            routing_decision: decision,
+            provider_account_id: account_id,
+            model_family: "google"
+          }
+        )
+
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+
+      assert snap.source == "live"
+      assert snap.provider == "gemini"
+      assert snap.provider_account_id == account_id
+      assert snap.model_family == "google"
+      assert snap.routing_decision == decision
+
+      # The run row was written too — a malformed account id would have made
+      # the worker drop it whole.
+      _ = :sys.get_state(pid)
+
+      assert [%{provider_account_id: ^account_id, model_family: "google"}] =
+               Wardmast.Workers.Run
+               |> Ash.Query.filter(task_id == ^task.id)
+               |> Ash.read!()
+    end
+  end
+
+  describe "worker_log/2" do
+    test "reads the full durable transcript for the task's most recent run", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "log target", workspace_id: ctx.ws.id})
+
+      {:ok, run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        })
+
+      {:ok, handle} = Wardmast.Worker.OutputLog.open(run.id)
+      Wardmast.Worker.OutputLog.append(handle, "line one")
+      Wardmast.Worker.OutputLog.append(handle, "line two")
+      Wardmast.Worker.OutputLog.close(handle)
+      on_exit(fn -> File.rm(Wardmast.Worker.OutputLog.path_for(run.id)) end)
+
+      assert {:ok, data} = Tools.worker_log(ctx.coordinator, %{"task_id" => task.id})
+
+      assert data.task_id == task.id
+      assert data.run_id == run.id
+      assert data.exists == true
+      assert data.line_count == 2
+      assert data.lines == ["line one", "line two"]
+    end
+
+    test "exists: false when the run row exists but no transcript was captured", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "no transcript", workspace_id: ctx.ws.id})
+
+      {:ok, run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        })
+
+      assert {:ok, data} = Tools.worker_log(ctx.coordinator, %{"task_id" => task.id})
+
+      assert data.run_id == run.id
+      assert data.exists == false
+      assert data.lines == []
+    end
+
+    test "not-found when the task has no run at all", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "no run at all", workspace_id: ctx.ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_log(ctx.coordinator, %{"task_id" => task.id})
+    end
+
+    test "cannot read the log for a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "wl-other", prefix: "wlo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_log(ctx.coordinator, %{"task_id" => foreign.id})
+    end
+
+    test "run_id: reads a specific run's transcript, independent of which run is latest", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "multi-run", workspace_id: ctx.ws.id})
+      older = DateTime.add(DateTime.utc_now(), -60, :second)
+      newer = DateTime.utc_now()
+
+      {:ok, failed_run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :failed,
+          started_at: older,
+          completed_at: older
+        })
+
+      {:ok, latest} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: newer,
+          completed_at: newer
+        })
+
+      {:ok, handle} = Wardmast.Worker.OutputLog.open(failed_run.id)
+      Wardmast.Worker.OutputLog.append(handle, "the failed attempt's learning signal")
+      Wardmast.Worker.OutputLog.close(handle)
+      on_exit(fn -> File.rm(Wardmast.Worker.OutputLog.path_for(failed_run.id)) end)
+
+      assert {:ok, data} = Tools.worker_log(ctx.coordinator, %{"run_id" => failed_run.id})
+
+      assert data.run_id == failed_run.id
+      assert data.task_id == task.id
+      assert data.lines == ["the failed attempt's learning signal"]
+      refute data.run_id == latest.id
+    end
+
+    test "run_id: not-found for a run in another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "wl-run-other", prefix: "wlro"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      {:ok, foreign_run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: foreign.id,
+          repo: "arbiter",
+          workspace_id: other_ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_log(ctx.coordinator, %{"run_id" => foreign_run.id})
+    end
+
+    test "task_id: accepts a ReviewGate synthetic id (reviewer corpus, bd-cuy75r)", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "reviewed task", workspace_id: ctx.ws.id})
+      review_id = task.id <> "#review"
+
+      {:ok, run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: review_id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          kind: :review,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, handle} = Wardmast.Worker.OutputLog.open(run.id)
+      Wardmast.Worker.OutputLog.append(handle, "reviewer verdict")
+      Wardmast.Worker.OutputLog.close(handle)
+      on_exit(fn -> File.rm(Wardmast.Worker.OutputLog.path_for(run.id)) end)
+
+      assert {:ok, data} = Tools.worker_log(ctx.coordinator, %{"task_id" => review_id})
+
+      assert data.task_id == review_id
+      assert data.lines == ["reviewer verdict"]
+    end
+  end
+
+  describe "worker_prompt/2 (bd-9rdwe4)" do
+    test "reads the persisted prompt for the task's most recent run", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "prompt target", workspace_id: ctx.ws.id})
+
+      {:ok, run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        })
+
+      :ok = Wardmast.Worker.PromptLog.write(run.id, "you are a worker\n\ndo the thing")
+      on_exit(fn -> File.rm(Wardmast.Worker.PromptLog.path_for(run.id)) end)
+
+      digest =
+        Ash.update!(
+          run,
+          %{prompt_sha256: Wardmast.Worker.PromptLog.sha256("you are a worker\n\ndo the thing")},
+          action: :update
+        ).prompt_sha256
+
+      assert {:ok, data} = Tools.worker_prompt(ctx.coordinator, %{"task_id" => task.id})
+
+      assert data.task_id == task.id
+      assert data.run_id == run.id
+      assert data.exists == true
+      assert data.prompt == "you are a worker\n\ndo the thing"
+      assert data.prompt_sha256 == digest
+    end
+
+    test "exists: false when the run row exists but no prompt was captured", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "no prompt", workspace_id: ctx.ws.id})
+
+      {:ok, run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        })
+
+      assert {:ok, data} = Tools.worker_prompt(ctx.coordinator, %{"task_id" => task.id})
+
+      assert data.run_id == run.id
+      assert data.exists == false
+      assert data.prompt == nil
+    end
+
+    test "not-found when the task has no run at all", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "no run at all", workspace_id: ctx.ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_prompt(ctx.coordinator, %{"task_id" => task.id})
+    end
+
+    test "cannot read the prompt for a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "wp-other", prefix: "wpo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_prompt(ctx.coordinator, %{"task_id" => foreign.id})
+    end
+
+    test "run_id: reads a specific run's prompt, independent of which run is latest", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "multi-run prompt", workspace_id: ctx.ws.id})
+      older = DateTime.add(DateTime.utc_now(), -60, :second)
+      newer = DateTime.utc_now()
+
+      {:ok, older_run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :failed,
+          started_at: older,
+          completed_at: older
+        })
+
+      {:ok, _latest} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: newer,
+          completed_at: newer
+        })
+
+      :ok = Wardmast.Worker.PromptLog.write(older_run.id, "the earlier attempt's prompt")
+      on_exit(fn -> File.rm(Wardmast.Worker.PromptLog.path_for(older_run.id)) end)
+
+      assert {:ok, data} = Tools.worker_prompt(ctx.coordinator, %{"run_id" => older_run.id})
+
+      assert data.run_id == older_run.id
+      assert data.prompt == "the earlier attempt's prompt"
+    end
+  end
+
+  describe "worker_runs/2 with ReviewGate synthetic ids (bd-cuy75r)" do
+    test "resolves auth against the base task while matching the synthetic id's own runs", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "reviewed task", workspace_id: ctx.ws.id})
+      review_id = task.id <> "#review"
+
+      {:ok, _author_run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          kind: :implement,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, review_run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: review_id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          kind: :review,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      assert {:ok, %{runs: [only]}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => review_id})
+
+      assert only.id == review_run.id
+    end
+
+    test "not-found when the base task is in another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "wr-synth-other", prefix: "wrso"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => foreign.id <> "#review"})
+    end
+  end
+
+  describe "run_log_list/2 (bd-cuy75r)" do
+    test "enumerates the base task's own runs plus its synthetic children", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "full corpus", workspace_id: ctx.ws.id})
+
+      {:ok, author_run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          kind: :implement,
+          state: :finished,
+          outcome: :succeeded,
+          model: "sonnet",
+          started_at: DateTime.add(DateTime.utc_now(), -30, :second)
+        })
+
+      {:ok, review_run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id <> "#review",
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          kind: :review,
+          state: :finished,
+          outcome: :succeeded,
+          model: "opus",
+          started_at: DateTime.add(DateTime.utc_now(), -20, :second)
+        })
+
+      {:ok, reprompt_run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id <> "#review#t2",
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          kind: :review,
+          state: :finished,
+          outcome: :failed,
+          started_at: DateTime.add(DateTime.utc_now(), -10, :second)
+        })
+
+      {:ok, unrelated} = Ash.create(Issue, %{title: "unrelated", workspace_id: ctx.ws.id})
+
+      {:ok, _unrelated_run} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: unrelated.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, handle} = Wardmast.Worker.OutputLog.open(review_run.id)
+      Wardmast.Worker.OutputLog.append(handle, "line a")
+      Wardmast.Worker.OutputLog.append(handle, "line b")
+      Wardmast.Worker.OutputLog.close(handle)
+      on_exit(fn -> File.rm(Wardmast.Worker.OutputLog.path_for(review_run.id)) end)
+
+      assert {:ok, %{runs: runs}} = Tools.run_log_list(ctx.coordinator, %{"task_id" => task.id})
+
+      ids = Enum.map(runs, & &1.run_id)
+      assert Enum.sort(ids) == Enum.sort([author_run.id, review_run.id, reprompt_run.id])
+
+      review_entry = Enum.find(runs, &(&1.run_id == review_run.id))
+      assert review_entry.transcript_exists == true
+      assert review_entry.line_count == 2
+      assert review_entry.kind == "review"
+      assert review_entry.state == "finished"
+      assert review_entry.outcome == "succeeded"
+      assert review_entry.task_id == task.id <> "#review"
+
+      author_entry = Enum.find(runs, &(&1.run_id == author_run.id))
+      assert author_entry.kind == "implement"
+      assert author_entry.transcript_exists == false
+      assert author_entry.line_count == 0
+    end
+
+    test "not-found when the task is in another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "rll-other", prefix: "rllo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.run_log_list(ctx.coordinator, %{"task_id" => foreign.id})
+    end
+  end
+
+  describe "transcript_capture_stats/2 (bd-9wotbo)" do
+    test "reports capture rate over Claude-driven runs only, excluding workflow-only runs", ctx do
+      base = ~U[2026-07-01 00:00:00Z]
+
+      {:ok, captured} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          session_id: "sess-captured",
+          started_at: base
+        })
+
+      {:ok, handle} = Wardmast.Worker.OutputLog.open(captured.id)
+      Wardmast.Worker.OutputLog.append(handle, "line")
+      Wardmast.Worker.OutputLog.close(handle)
+      on_exit(fn -> File.rm(Wardmast.Worker.OutputLog.path_for(captured.id)) end)
+
+      {:ok, missing} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          session_id: "sess-missing",
+          started_at: DateTime.add(base, 60, :second)
+        })
+
+      {:ok, _workflow_only} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.add(base, 120, :second)
+        })
+
+      {:ok, _pre_corpus} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          session_id: "sess-pre-corpus",
+          started_at: ~U[2026-06-10 00:00:00Z]
+        })
+
+      assert {:ok, stats} = Tools.transcript_capture_stats(ctx.coordinator, %{})
+
+      assert stats.corpus_start_date == "2026-06-20"
+      assert stats.claude_sessions == 2
+      assert stats.transcript_missing == 1
+      assert stats.workflow_only_runs == 1
+      assert stats.capture_rate_pct == 50.0
+      assert is_binary(missing.id)
+      # No config_dir on either fixture, so neither is a JSONL-archivable run.
+      assert stats.jsonl_sessions == 0
+      assert stats.jsonl_archive_rate_pct == nil
+    end
+
+    test "JSONL-archive presence is counted separately from the rendered log (bd-db0p38)", ctx do
+      base = ~U[2026-07-02 00:00:00Z]
+
+      # A run with BOTH artifacts.
+      {:ok, both} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          session_id: "sess-both",
+          config_dir: "/tmp/cfg",
+          provider: "claude",
+          started_at: base
+        })
+
+      {:ok, handle} = Wardmast.Worker.OutputLog.open(both.id)
+      Wardmast.Worker.OutputLog.append(handle, "line")
+      Wardmast.Worker.OutputLog.close(handle)
+
+      File.write!(
+        Wardmast.Worker.SessionArchive.path_for(both.id),
+        :zlib.gzip(~s({"type":"assistant"}\n))
+      )
+
+      # A run with the rendered log but NO JSONL archive — exactly the case the
+      # old 60.6% figure hid.
+      {:ok, log_only} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          session_id: "sess-log-only",
+          config_dir: "/tmp/cfg",
+          provider: "claude",
+          started_at: DateTime.add(base, 60, :second)
+        })
+
+      {:ok, h2} = Wardmast.Worker.OutputLog.open(log_only.id)
+      Wardmast.Worker.OutputLog.append(h2, "line")
+      Wardmast.Worker.OutputLog.close(h2)
+
+      # A run on neither provider: has a session_id but no JSONL/db archive
+      # branch at all. It must not be counted as a Claude session.
+      {:ok, other} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          session_id: "sess-other",
+          started_at: DateTime.add(base, 120, :second)
+        })
+
+      # A gemini (agy) run WITH its db archive present. Since bd-6nupvc T9 it
+      # records config_dir too (its effective $HOME) — that must not make it
+      # count as a Claude session or a JSONL loss.
+      {:ok, gemini_ok} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          session_id: "sess-gemini-ok",
+          config_dir: "/tmp/agy-home",
+          provider: "gemini",
+          started_at: DateTime.add(base, 180, :second)
+        })
+
+      File.write!(
+        Wardmast.Worker.SessionArchive.db_path_for(gemini_ok.id),
+        :zlib.gzip("db-bytes")
+      )
+
+      # A gemini run with NO db archive — this is the real loss finding 2 was
+      # about being unable to see (folded into jsonl_missing before this fix).
+      {:ok, gemini_missing} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          session_id: "sess-gemini-missing",
+          config_dir: "/tmp/agy-home",
+          provider: "gemini",
+          started_at: DateTime.add(base, 240, :second)
+        })
+
+      on_exit(fn ->
+        for r <- [both, log_only, other, gemini_ok, gemini_missing] do
+          File.rm(Wardmast.Worker.OutputLog.path_for(r.id))
+          File.rm(Wardmast.Worker.SessionArchive.path_for(r.id))
+          File.rm(Wardmast.Worker.SessionArchive.db_path_for(r.id))
+        end
+      end)
+
+      assert {:ok, stats} = Tools.transcript_capture_stats(ctx.coordinator, %{})
+
+      # The rendered-log denominator is unchanged: every provider writes one.
+      # `other`, `gemini_ok`, and `gemini_missing` never opened an OutputLog
+      # in this fixture (only the JSONL/db-archive branch is under test
+      # here), so they count toward transcript_missing alongside log_only.
+      assert stats.claude_sessions == 5
+      assert stats.transcript_missing == 3
+
+      # The JSONL denominator is Claude runs only — the gemini runs (which
+      # also carry a config_dir) must not land in it.
+      assert stats.non_claude_sessions == 1
+      assert stats.jsonl_sessions == 2
+      assert stats.jsonl_archived == 1
+      assert stats.jsonl_missing == 1
+      assert stats.jsonl_archive_rate_pct == 50.0
+
+      # The gemini/agy db-archive denominator is counted separately.
+      assert stats.gemini_db_sessions == 2
+      assert stats.gemini_db_archived == 1
+      assert stats.gemini_db_missing == 1
+      assert stats.gemini_db_archive_rate_pct == 50.0
+    end
+  end
+
+  describe "usage_summarize/2" do
+    test "requires a valid `by` grouping", ctx do
+      assert {:error, {:invalid, _}} = Tools.usage_summarize(ctx.coordinator, %{})
+      assert {:error, {:invalid, _}} = Tools.usage_summarize(ctx.coordinator, %{"by" => "nope"})
+    end
+
+    test "returns rollups for a valid grouping (empty ledger → no rows)", ctx do
+      assert {:ok, %{by: "task", rollups: rollups, count: 0}} =
+               Tools.usage_summarize(ctx.coordinator, %{"by" => "task"})
+
+      assert rollups == []
+    end
+
+    # P-18 (D-A-7): same wire shape as REST — an unpriced group is null, not 0.0.
+    test "an unpriced group reports total_cost_usd: nil, like REST", ctx do
+      create_usage_event!(ctx,
+        provider: "antigravity",
+        model: "gemini-3.8-flash-low",
+        cost_usd: nil,
+        tokens_in: 10,
+        tokens_out: 5
+      )
+
+      assert {:ok, %{rollups: [row]}} =
+               Tools.usage_summarize(ctx.coordinator, %{"by" => "model"})
+
+      assert row.total_cost_usd == nil
+      assert row.cost_known == false
+    end
+
+    test "campaign is accepted as a deprecated alias and normalized to epic", ctx do
+      assert {:ok, %{by: "epic", rollups: []}} =
+               Tools.usage_summarize(ctx.coordinator, %{"by" => "campaign"})
+    end
+
+    test "returns no warnings when every provider has at least one non-zero row", ctx do
+      create_usage_event!(ctx, provider: "claude", tokens_in: 100, tokens_out: 50)
+
+      assert {:ok, %{warnings: []}} = Tools.usage_summarize(ctx.coordinator, %{"by" => "task"})
+    end
+
+    test "warns when a provider's rows are wholly zero-token (bd-2fzwlc)", ctx do
+      create_usage_event!(ctx, provider: "gemini", tokens_in: 0, tokens_out: 0)
+      create_usage_event!(ctx, provider: "gemini", tokens_in: nil, tokens_out: nil)
+      create_usage_event!(ctx, provider: "claude", tokens_in: 100, tokens_out: 50)
+
+      assert {:ok, %{warnings: [warning]}} =
+               Tools.usage_summarize(ctx.coordinator, %{"by" => "task"})
+
+      assert warning =~ "gemini"
+      assert warning =~ "2 usage_events row"
+      refute warning =~ "claude"
+    end
+
+    test "does not flag a provider with at least one non-zero row", ctx do
+      create_usage_event!(ctx, provider: "gemini", tokens_in: 0, tokens_out: 0)
+      create_usage_event!(ctx, provider: "gemini", tokens_in: 42, tokens_out: 10)
+
+      assert {:ok, %{warnings: []}} = Tools.usage_summarize(ctx.coordinator, %{"by" => "task"})
+    end
+  end
+
+  describe "worker_dispatch/2 (dispatch-recursion guardrail, §4.3)" do
+    test "refuses a coordinator scope without can_dispatch", ctx do
+      no_dispatch = %{ctx.coordinator | can_dispatch: false}
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.worker_dispatch(no_dispatch, %{"task_id" => ctx.task.id})
+    end
+
+    test "refuses once the depth limit is reached", ctx do
+      at_limit = %{ctx.coordinator | depth: MCP.max_depth()}
+
+      assert {:error, {:unauthorized, msg}} =
+               Tools.worker_dispatch(at_limit, %{"task_id" => ctx.task.id})
+
+      assert msg =~ "depth"
+    end
+
+    test "cannot dispatch a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "sl-other", prefix: "slo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_dispatch(ctx.coordinator, %{"task_id" => foreign.id})
+    end
+
+    # Without a provider, the workspace's `agent.type` config is used — the same
+    # real-work path as an explicit `provider`. Without a configured repo that
+    # path surfaces a repo error, proving the workspace default was honored (a
+    # park would return {:ok, ...} with claude_started: false).
+    test "omitting provider takes the workspace-default real-work path (not a park)", ctx do
+      {:ok, task} = ready_issue(ctx, "default dispatch")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "repo" => "test/repo"
+               })
+
+      assert msg =~ "repo"
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+
+    test "no_agent: true moves the task to active (explicit hand-off)", ctx do
+      {:ok, task} = ready_issue(ctx, "parked dispatch")
+
+      assert {:ok, data} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "repo" => "test/repo",
+                 "no_agent" => true
+               })
+
+      assert data.task.state == "active"
+      assert data.claude_started == false
+      assert data.depth == ctx.coordinator.depth + 1
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+
+    # bd-asxw4e: a Backlog or Blocked ticket is refused with the reason unless
+    # `force: true`, and a forced dispatch is recorded.
+    test "a Backlog ticket is refused, naming why and how to force it", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "unrefined", workspace_id: ctx.ws.id})
+
+      assert {:error, {:conflict, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "repo" => "test/repo",
+                 "no_agent" => true
+               })
+
+      assert msg =~ "#{task.id} is in Backlog"
+      assert msg =~ "force: true"
+      assert Ash.get!(Issue, task.id).state == :backlog
+    end
+
+    test "a Blocked ticket is refused, naming its blockers", ctx do
+      {:ok, blocker} =
+        Ash.create(Issue, %{title: "blocker", workspace_id: ctx.ws.id, acceptance: "- ok"})
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "blocked", workspace_id: ctx.ws.id, acceptance: "- ok"})
+
+      {:ok, _} = Ash.update(task, %{}, action: :promote_to_ready)
+
+      {:ok, _} =
+        Ash.create(Wardmast.Tasks.Dependency, %{
+          from_issue_id: task.id,
+          to_issue_id: blocker.id,
+          type: :depends_on
+        })
+
+      assert {:error, {:conflict, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{"task_id" => task.id, "no_agent" => true})
+
+      assert msg =~ "blocked by #{blocker.id}"
+    end
+
+    test "force: true dispatches a Backlog ticket and records the bypass", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "forced", workspace_id: ctx.ws.id})
+
+      assert {:ok, data} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "repo" => "test/repo",
+                 "no_agent" => true,
+                 "force" => true
+               })
+
+      assert data.task.state == "active"
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+
+      [event] =
+        Wardmast.Events.Record
+        |> Ash.Query.filter(workspace_id == ^ctx.ws.id and topic == "dispatch_forced")
+        |> Ash.read!()
+
+      assert event.payload["task_id"] == task.id
+      assert event.payload["bypassed"] == "in Backlog"
+      assert event.payload["dispatched_by"] == "mcp"
+    end
+
+    # `provider` (and the deprecated `with_claude` alias) take the real-work
+    # dispatch path. Without a configured repo that path surfaces a repo error —
+    # which is exactly the signal that the provider was honored as a worker
+    # dispatch (a park would have returned {:ok, ...} with claude_started: false).
+    test "provider: \"gemini\" takes the real-work path (not a park)", ctx do
+      {:ok, task} = ready_issue(ctx, "gem dispatch")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "provider" => "gemini",
+                 "repo" => "test/repo"
+               })
+
+      assert msg =~ "repo"
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+
+    test "provider: \"claude\" takes the real-work path (not a park)", ctx do
+      {:ok, task} = ready_issue(ctx, "claude dispatch")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "provider" => "claude",
+                 "repo" => "test/repo"
+               })
+
+      assert msg =~ "repo"
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+
+    test "the deprecated with_claude: true alias still dispatches a worker", ctx do
+      {:ok, task} = ready_issue(ctx, "alias dispatch")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "with_claude" => true,
+                 "repo" => "test/repo"
+               })
+
+      assert msg =~ "repo"
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+
+    # bd-dcvo3n: an unrecognized `provider` value must fail LOUDLY rather than
+    # silently falling back to the workspace-default agent. Before the fix the
+    # `dispatch_provider/1` catch-all mapped any unknown provider to `nil`
+    # ("use the workspace default"), so a typo — or `provider: "codex"` against
+    # a server too old to know it — silently spawned the default agent (Claude)
+    # with zero error/warning. The tell: the error is about the bad provider,
+    # NOT the (also-unconfigured) repo, proving we reject before dispatching.
+    test "an unrecognized provider is rejected loudly (not a silent default)", ctx do
+      {:ok, task} = ready_issue(ctx, "bad provider")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "provider" => "kodex",
+                 "repo" => "test/repo"
+               })
+
+      assert msg =~ "provider"
+      assert msg =~ "kodex"
+      # It must NOT have fallen through to the real-work path (whose failure
+      # would be about the missing repo).
+      refute msg =~ "repo"
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+  end
+
+  # bd-a9hqfb: one normaliser (`Wardmast.Worker.Dispatch.Params`) behind
+  # worker_dispatch — provider list, unknown arguments, exclusive selectors.
+  describe "worker_dispatch/2 params (D-W-5, D-W-9, D-W-10)" do
+    # An unconfigured workspace has no repo, so a dispatch that gets past
+    # normalisation fails on the repo — proof the arguments were accepted.
+    test "provider: \"grok\" is accepted", ctx do
+      {:ok, task} = ready_issue(ctx, "grok dispatch")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "provider" => "grok"
+               })
+
+      assert msg =~ "repo"
+      refute msg =~ "unknown provider"
+    end
+
+    test "with_gemini is read, not silently dropped", ctx do
+      {:ok, task} = ready_issue(ctx, "gemini alias")
+
+      # Read: it conflicts with an explicit, different provider.
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "provider" => "claude",
+                 "with_gemini" => true
+               })
+
+      assert msg =~ "conflicting provider"
+
+      # And alone it is accepted (falls through to the repo error).
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "with_gemini" => true
+               })
+
+      assert msg =~ "repo"
+    end
+
+    test "an unknown argument is refused and nothing is dispatched", ctx do
+      {:ok, task} = ready_issue(ctx, "typo")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "no_agnet" => true,
+                 "no_agent" => true
+               })
+
+      assert msg =~ "no_agnet"
+      assert {:ok, %Issue{state: state}} = Ash.get(Issue, task.id)
+      refute state == :active
+    end
+
+    test "no_agent with a provider is refused, not half-honoured", ctx do
+      {:ok, task} = ready_issue(ctx, "park or spawn")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "no_agent" => true,
+                 "provider" => "claude"
+               })
+
+      assert msg =~ "no_agent"
+      assert {:ok, %Issue{state: state}} = Ash.get(Issue, task.id)
+      refute state == :active
+    end
+
+    test "a junk force_quota is a typed error, not a crash", ctx do
+      {:ok, task} = ready_issue(ctx, "junk bool")
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "no_agent" => true,
+                 "force_quota" => 1.5
+               })
+
+      assert msg =~ "force_quota"
+    end
+  end
+
+  describe "worker_dispatch/2 provider: \"codex\" writes the Codex MCP config (bd-bi5t54)" do
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "mcp-codex-#{System.pid()}-#{:erlang.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+      on_exit(fn -> File.rm_rf!(tmp) end)
+
+      stub_dir = Path.join(tmp, "stub-bin")
+      File.mkdir_p!(stub_dir)
+      codex_file = Path.join(tmp, "codex-argv.txt")
+      stub = Path.join(stub_dir, "codex")
+
+      File.write!(stub, """
+      #!/bin/sh
+      for a in "$@"; do echo "$a" >> #{codex_file}; done
+      exit 0
+      """)
+
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
+      repo = Path.join(tmp, "repo")
+      File.mkdir_p!(repo)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "x\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+
+      remote = Path.join(tmp, "repo-remote.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      put_app_env(:wardmast, :worktree_root, Path.join(tmp, "wt"))
+      put_app_env(:wardmast, :repo_paths, %{"mcp/codex-repo" => repo})
+
+      prior_mcp = Application.get_env(:wardmast, Wardmast.MCP)
+      put_app_env(:wardmast, Wardmast.MCP, Keyword.put(prior_mcp || [], :inject_config, true))
+
+      %{tmp: tmp, codex_file: codex_file}
+    end
+
+    test "the dispatched worktree gets .codex/config.toml, not .mcp.json", ctx do
+      # Workspace's `agent.type` pool deliberately excludes codex, mirroring the
+      # live `default` workspace — the explicit `provider` override must win.
+      {:ok, ws} =
+        Ash.update(ctx.ws, %{config: %{"agent" => %{"type" => ["claude", "gemini"]}}})
+
+      {:ok, task} = ready_issue(%{ws: ws}, "codex mcp dispatch")
+      coordinator = %{ctx.coordinator | workspace_id: ws.id}
+
+      assert {:ok, data} =
+               Tools.worker_dispatch(coordinator, %{
+                 "task_id" => task.id,
+                 "provider" => "codex",
+                 "repo" => "mcp/codex-repo"
+               })
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+
+      worktree_path = data.worktree_path
+      assert is_binary(worktree_path)
+
+      # `maybe_write_mcp_config/3` (Worker.Dispatch) runs synchronously inside
+      # `Dispatch.dispatch/2`, before `ClaudeSession.start/1` — the file is
+      # already on disk the moment `worker_dispatch/2` returns, so there is
+      # nothing async to wait for here.
+      assert File.exists?(Path.join(worktree_path, ".codex/config.toml")),
+             "provider: \"codex\" dispatch must write .codex/config.toml, not fall back to .mcp.json"
+
+      refute File.exists?(Path.join(worktree_path, ".mcp.json"))
+
+      # The stub `codex` binary exits immediately, so the just-spawned worker
+      # dies almost as soon as it starts. That fires `Worker.Driver`'s `:DOWN`
+      # handler, which runs its own worktree cleanup (`maybe_cleanup_worktree/1`
+      # — a `git worktree remove` plus `File.rm_rf`) asynchronously, in the
+      # Driver's own process. Left alone, that races the `on_exit` below, which
+      # `File.rm_rf!`s the whole `tmp` tree the worktree lives under —
+      # including the repo's `.git/worktrees/...` administrative directory the
+      # Driver's `git worktree remove` also touches. Two independent recursive
+      # deletes on overlapping paths is exactly what produced the flaky
+      # `** (File.Error) ... file already exists` teardown failures (bd-31ylsv,
+      # CI runs 34943777241 / 34989855343 / 34998217553 / 35021857096) — not
+      # the `/tmp` collision d58adb43 fixed. Waiting for the Driver to actually
+      # finish (or confirming it already has) makes the teardown deterministic.
+      wait_for_driver_settled(worktree_path)
+    end
+  end
+
+  # bd-2aslx6 (#1428): `Dispatch.dispatch/2` refuses a second agent-spawning
+  # dispatch onto a task whose worker is already mid-session. The coordinator
+  # calls this tool, so the refusal has to arrive as a sentence it can act on —
+  # not the raw `{:agent_session_active, id}` tuple the generic fallback renders.
+  describe "worker_dispatch/2 onto a task with a live agent session" do
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "mcp-live-#{System.pid()}-#{:erlang.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+      on_exit(fn -> File.rm_rf!(tmp) end)
+
+      stub_dir = Path.join(tmp, "stub-bin")
+      File.mkdir_p!(stub_dir)
+      stub = Path.join(stub_dir, "claude")
+
+      # Answers the cheap `claude --print ping` auth pre-flight immediately, then
+      # stays alive for the real session — so the first dispatch's agent is still
+      # running when the second one lands.
+      File.write!(stub, """
+      #!/bin/sh
+      for a in "$@"; do
+        if [ "$a" = "ping" ]; then echo pong; exit 0; fi
+      done
+      sleep 30
+      """)
+
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
+      repo = Path.join(tmp, "repo")
+      File.mkdir_p!(repo)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "x\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+
+      remote = Path.join(tmp, "repo-remote.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      put_app_env(:wardmast, :worktree_root, Path.join(tmp, "wt"))
+      put_app_env(:wardmast, :repo_paths, %{"mcp/live-repo" => repo})
+      # bd-80ecol: a real-agent Claude dispatch needs a credential of its own.
+      claude_credential_env!()
+
+      :ok
+    end
+
+    test "the refusal names the live session and how to clear it", ctx do
+      {:ok, task} = ready_issue(ctx, "live session dispatch")
+
+      args = %{
+        "task_id" => task.id,
+        "provider" => "claude",
+        "repo" => "mcp/live-repo"
+      }
+
+      assert {:ok, _} = Tools.worker_dispatch(ctx.coordinator, args)
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+
+      :ok =
+        wait_until(fn -> Worker.agent_session_live?(task.id) end)
+
+      assert {:error, {:conflict, msg}} = Tools.worker_dispatch(ctx.coordinator, args)
+
+      assert msg =~ "live agent session"
+      assert msg =~ "arb worker stop #{task.id}"
+    end
+  end
+
+  describe "worker_dispatch/2 with force_quota: true" do
+    test "force_quota: true is accepted in the schema", ctx do
+      {:ok, task} = ready_issue(ctx, "force quota dispatch")
+
+      # Use no_agent: true to test the force_quota flag without dealing with repo setup
+      assert {:ok, data} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "no_agent" => true,
+                 "force_quota" => true
+               })
+
+      assert data.task.state == "active"
+      assert data.depth == ctx.coordinator.depth + 1
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+
+    test "force_quota: true with force_quota_reason creates audit event with reason via MCP args",
+         ctx do
+      {:ok, task} =
+        ready_issue(ctx, "force quota with reason")
+
+      # Call Tools.worker_dispatch (the MCP tool handler) with force_quota_reason
+      assert {:ok, data} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "no_agent" => true,
+                 "force_quota" => true,
+                 "force_quota_reason" => "critical path test via MCP"
+               })
+
+      assert data.task.state == "active"
+
+      # Verify the audit event was created with the reason from the MCP argument
+      events =
+        Wardmast.Events.Record
+        |> Ash.Query.filter(workspace_id == ^ctx.ws.id and topic == "quota_gate_bypass")
+        |> Ash.read!()
+
+      assert length(events) == 1
+      event = List.first(events)
+      payload = event.payload
+
+      assert payload["task_id"] == task.id
+      assert payload["actor"] == "coordinator"
+      assert payload["reason"] == "critical path test via MCP"
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+
+    test "force_quota: false is accepted in the schema", ctx do
+      {:ok, task} = ready_issue(ctx, "normal quota dispatch")
+
+      assert {:ok, data} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "no_agent" => true,
+                 "force_quota" => false
+               })
+
+      assert data.task.state == "active"
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+  end
+
+  describe "worker_resume/2 with force_quota: true" do
+    test "force_quota: true is accepted in the schema on resume", ctx do
+      {:ok, task} = ready_issue(ctx, "force quota resume")
+
+      # First dispatch with no_agent to park the task
+      {:ok, _dispatch_result} =
+        Tools.worker_dispatch(ctx.coordinator, %{
+          "task_id" => task.id,
+          "no_agent" => true
+        })
+
+      # Resume with force_quota: true
+      # Note: This will fail because there's no actual worktree to resume from,
+      # but we're testing that the flag is accepted in the schema, not the full logic
+      result =
+        Tools.worker_resume(ctx.coordinator, %{
+          "task_id" => task.id,
+          "force_quota" => true
+        })
+
+      # The schema should accept force_quota, so we shouldn't get an "additional properties" error
+      case result do
+        {:ok, _} ->
+          :ok
+
+        {:error, {:invalid, msg}} ->
+          # Should not complain about force_quota being unknown
+          refute msg =~ "force_quota"
+
+        {:error, _} ->
+          # Other errors are fine (e.g., no worktree to resume from)
+          :ok
+      end
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+
+    test "force_quota_reason is accepted in the schema and does not cause additional properties error",
+         ctx do
+      {:ok, task} =
+        ready_issue(ctx, "force quota resume with reason")
+
+      # First dispatch with no_agent to park the task
+      {:ok, _dispatch_result} =
+        Tools.worker_dispatch(ctx.coordinator, %{
+          "task_id" => task.id,
+          "no_agent" => true
+        })
+
+      # Resume with force_quota: true and force_quota_reason
+      result =
+        Tools.worker_resume(ctx.coordinator, %{
+          "task_id" => task.id,
+          "force_quota" => true,
+          "force_quota_reason" => "resume for critical fix via MCP"
+        })
+
+      # The schema should accept force_quota_reason, so we shouldn't get an "additional properties" error
+      case result do
+        {:ok, _} ->
+          :ok
+
+        {:error, {:invalid, msg}} ->
+          # Should not complain about force_quota_reason being unknown
+          refute msg =~ "force_quota_reason"
+
+        {:error, _} ->
+          # Other errors are fine (e.g., no worktree to resume from)
+          :ok
+      end
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+  end
+
+  describe "worker_list/2" do
+    test "returns an empty list when no workers are running in the workspace", ctx do
+      assert {:ok, %{workers: [], count: 0}} = Tools.worker_list(ctx.coordinator, %{})
+    end
+
+    test "returns active workers scoped to the coordinator's workspace", ctx do
+      {:ok, task} = ready_issue(ctx, "worker-list target")
+
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      assert {:ok, %{workers: workers, count: count}} = Tools.worker_list(ctx.coordinator, %{})
+      assert count >= 1
+      assert Enum.any?(workers, &(&1.task_id == task.id))
+
+      entry = Enum.find(workers, &(&1.task_id == task.id))
+      assert is_binary(entry.repo)
+      assert entry.run_task_id == task.id
+      assert entry.kind == "implement"
+      assert entry.state == "starting"
+      assert entry.outcome == nil
+      assert entry.repo == "test/repo"
+    end
+
+    # bd-45tkhq: closes the loop the CLI-level `Worker.list_children/0` tests
+    # (worker_test.exs) don't — those pin the underlying supervisor sweep, but
+    # nothing asserted that a *resumed* worker actually survives up through
+    # `Tools.worker_list/2`, the layer the acceptance criterion names. This
+    # dispatches, stops, and restarts under the same task_id (the `Worker`-
+    # level shape of `worker_resume`), then suspends the resumed process past
+    # the original 500ms probe budget before calling worker_list — the exact
+    # scenario the incident's second observation hit.
+    test "a resumed worker suspended past the old snapshot budget still appears", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "resumed worker target", workspace_id: ctx.ws.id})
+
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      ref = Process.monitor(pid)
+      :ok = Worker.stop(task.id, :normal)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+
+      {:ok, resumed_pid} =
+        Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+
+      on_exit(fn -> Process.alive?(resumed_pid) && Worker.stop(task.id, :normal) end)
+
+      :sys.suspend(resumed_pid)
+
+      spawn(fn ->
+        Process.sleep(700)
+        :sys.resume(resumed_pid)
+      end)
+
+      try do
+        assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
+        assert Enum.any?(workers, &(&1.task_id == task.id))
+      after
+        Process.alive?(resumed_pid) && :sys.resume(resumed_pid)
+      end
+    end
+
+    test "does not include workers from another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "pl-other", prefix: "plo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign pc", workspace_id: other_ws.id})
+
+      {:ok, _pid} =
+        Worker.start(task_id: foreign.id, repo: "test/repo", workspace_id: other_ws.id)
+
+      on_exit(fn -> Worker.stop(foreign.id, :normal) end)
+
+      assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
+      refute Enum.any?(workers, &(&1.task_id == foreign.id))
+    end
+
+    test "surfaces the provider/model from the worker's routing config", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "gemini worker", workspace_id: ctx.ws.id})
+
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      # Stamp the routing config the way Dispatch does at dispatch time.
+      :ok = Worker.report(pid, :routing_config, %{provider: "gemini", model: "gemini-2.5-pro"})
+
+      assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
+      entry = Enum.find(workers, &(&1.task_id == task.id))
+
+      assert entry.provider == "gemini"
+      assert entry.model == "gemini-2.5-pro"
+    end
+
+    # bd-8lq2g7 + bd-1uu19b: a subordinate pass registered under the ticket's
+    # id stays legible. worker_list is one entry per ticket — its current run,
+    # the newest unfinished one (the pass) — and worker_show lists both runs,
+    # each labelled with its kind.
+    test "labels a subordinate pass as the ticket's current run (bd-8lq2g7)", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "two runs one task", workspace_id: ctx.ws.id})
+
+      {:ok, primary} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+
+      # bd-8tjcms: `Worker.start/1` refuses a second *active* worker for one
+      # task. The primary here is only `:starting`, so opt out explicitly
+      # rather than staging a full park.
+      {:ok, fixpass} =
+        Worker.start(
+          task_id: task.id,
+          registry_key: task.id <> ":fixpass",
+          repo: "test/repo",
+          workspace_id: ctx.ws.id,
+          meta: %{role: :fix_pass},
+          allow_concurrent_task_worker: true
+        )
+
+      on_exit(fn ->
+        Process.alive?(primary) && GenServer.stop(primary, :normal)
+        Process.alive?(fixpass) && GenServer.stop(fixpass, :normal)
+      end)
+
+      assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
+      assert [row] = Enum.filter(workers, &(&1.task_id == task.id))
+
+      assert row.registry_key == task.id <> ":fixpass"
+      assert row.role == "fix_pass"
+      assert row.kind == "fix_pass"
+
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+      assert snap.kind == "fix_pass"
+
+      assert snap.runs |> Enum.map(& &1.kind) |> Enum.sort() == ["fix_pass", "implement"]
+      assert [%{kind: "fix_pass"}] = Enum.filter(snap.runs, & &1.current)
+    end
+  end
+
+  describe "task_list/2" do
+    test "lists all tasks in the workspace with no filters", ctx do
+      assert {:ok, %{tasks: tasks, count: count}} = Tools.task_list(ctx.coordinator, %{})
+      assert count >= 1
+      assert Enum.any?(tasks, &(&1.id == ctx.task.id))
+    end
+
+    test "filters by issue_type", ctx do
+      {:ok, bug} =
+        Ash.create(Issue, %{title: "a bug", workspace_id: ctx.ws.id, issue_type: :bug})
+
+      assert {:ok, %{tasks: bugs}} =
+               Tools.task_list(ctx.coordinator, %{"issue_type" => "bug"})
+
+      assert Enum.all?(bugs, &(&1.issue_type == "bug"))
+      assert Enum.any?(bugs, &(&1.id == bug.id))
+    end
+
+    test "filters by priority", ctx do
+      {:ok, p0} = Ash.create(Issue, %{title: "urgent", workspace_id: ctx.ws.id, priority: 0})
+
+      assert {:ok, %{tasks: p0_tasks}} = Tools.task_list(ctx.coordinator, %{"priority" => 0})
+      assert Enum.any?(p0_tasks, &(&1.id == p0.id))
+    end
+
+    test "does not include tasks from another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "bl-other", prefix: "blo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign task", workspace_id: other_ws.id})
+
+      assert {:ok, %{tasks: tasks}} = Tools.task_list(ctx.coordinator, %{})
+      refute Enum.any?(tasks, &(&1.id == foreign.id))
+    end
+
+    # bd-crk6tb decision: `task_list` is an API other agents consume, so the
+    # default stays inclusive and hiding is an explicit `engagements` param.
+    test "engagements: default and `all` keep review engagements, `exclude` drops them, `only` isolates them",
+         ctx do
+      {:ok, eng} =
+        Ash.create(Issue, %{
+          title: "Review engagement: 7",
+          workspace_id: ctx.ws.id,
+          tracker_type: :none,
+          review_only: true,
+          source_pr: "7"
+        })
+
+      {:ok, worker_review} =
+        Ash.create(Issue, %{title: "worker review", workspace_id: ctx.ws.id, review_only: true})
+
+      {:ok, follow_up} =
+        Ash.create(Issue, %{
+          title: "pr follow-up",
+          workspace_id: ctx.ws.id,
+          tracker_type: :none,
+          source_pr: "8"
+        })
+
+      ids = fn args ->
+        {:ok, %{tasks: tasks}} = Tools.task_list(ctx.coordinator, args)
+        MapSet.new(tasks, & &1.id)
+      end
+
+      for args <- [%{}, %{"engagements" => "all"}] do
+        assert MapSet.subset?(MapSet.new([eng.id, worker_review.id, follow_up.id]), ids.(args))
+      end
+
+      excluded = ids.(%{"engagements" => "exclude"})
+      refute eng.id in excluded
+      assert worker_review.id in excluded
+      assert follow_up.id in excluded
+
+      assert ids.(%{"engagements" => "only"}) == MapSet.new([eng.id])
+
+      assert {:error, {:invalid, msg}} =
+               Tools.task_list(ctx.coordinator, %{"engagements" => "bogus"})
+
+      assert msg =~ "engagements"
+    end
+
+    test "rejects an invalid state value", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.task_list(ctx.coordinator, %{"state" => "bogus"})
+
+      assert msg =~ "state"
+    end
+
+    test "rejects an invalid issue_type value", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.task_list(ctx.coordinator, %{"issue_type" => "bogus"})
+
+      assert msg =~ "issue_type"
+    end
+  end
+
+  describe "external_review_list/2 (bd-dmy4pk: workspace: arg)" do
+    setup ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "erl-other-ws", prefix: "erl"})
+
+      {:ok, here} =
+        Ash.create(Wardmast.Reviews.Record, %{
+          pr_ref: "github:acme/here#1",
+          pr: "1",
+          workspace_id: ctx.ws.id,
+          strategy: "github",
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, there} =
+        Ash.create(Wardmast.Reviews.Record, %{
+          pr_ref: "github:acme/there#2",
+          pr: "2",
+          workspace_id: other_ws.id,
+          strategy: "github",
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, Map.merge(ctx, %{other_ws: other_ws, here: here, there: there})}
+    end
+
+    test "with no `workspace` arg, lists only the scope's own workspace", ctx do
+      assert {:ok, %{external_reviews: records}} =
+               Tools.external_review_list(ctx.coordinator, %{})
+
+      assert Enum.any?(records, &(&1.id == ctx.here.id))
+      refute Enum.any?(records, &(&1.id == ctx.there.id))
+    end
+
+    test "passing `workspace:` scopes the list to that workspace", ctx do
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      assert {:ok, %{external_reviews: records}} =
+               Tools.external_review_list(agnostic, %{"workspace" => ctx.other_ws.name})
+
+      assert Enum.any?(records, &(&1.id == ctx.there.id))
+      refute Enum.any?(records, &(&1.id == ctx.here.id))
+    end
+
+    test "the catalog advertises the optional `workspace` param", _ctx do
+      tool = Enum.find(Catalog.all(), &(&1.name == "external_review_list"))
+      assert is_map(tool.input_schema["properties"]["workspace"])
+      refute "workspace" in (tool.input_schema["required"] || [])
+    end
+  end
+
+  describe "external_review_show/2 (bd-dmy4pk: pre-greenlight findings read)" do
+    test "returns a record's full proposed_comments regardless of workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "ers-other-ws", prefix: "ers"})
+
+      {:ok, record} =
+        Ash.create(Wardmast.Reviews.Record, %{
+          pr_ref: "github:acme/there#3",
+          pr: "3",
+          workspace_id: other_ws.id,
+          strategy: "github",
+          status: :completed,
+          mode: :report_only,
+          proposed_comments: [
+            %{"file" => "lib/foo.ex", "line" => 12, "severity" => "warn", "body" => "fix this"}
+          ],
+          started_at: DateTime.utc_now()
+        })
+
+      assert {:ok, data} =
+               Tools.external_review_show(ctx.coordinator, %{"record_id" => record.id})
+
+      assert data.id == record.id
+      assert data.workspace_id == other_ws.id
+      assert [%{"file" => "lib/foo.ex"}] = data.proposed_comments
+    end
+
+    test "an unknown record_id is not-found", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.external_review_show(ctx.coordinator, %{"record_id" => "no-such-record"})
+
+      assert msg =~ "no external review record"
+    end
+
+    test "requires record_id", ctx do
+      assert {:error, {:invalid, msg}} = Tools.external_review_show(ctx.coordinator, %{})
+      assert msg =~ "record_id"
+    end
+  end
+
+  describe "external_review transcript retrieval (bd-7efini)" do
+    setup ctx do
+      prev = Application.get_env(:wardmast, :output_log_root)
+
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "review-transcript-mcp-#{System.unique_integer([:positive])}"
+        )
+
+      Application.put_env(:wardmast, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev,
+          do: Application.put_env(:wardmast, :output_log_root, prev),
+          else: Application.delete_env(:wardmast, :output_log_root)
+      end)
+
+      {:ok, record} =
+        Ash.create(Wardmast.Reviews.Record, %{
+          pr_ref: "github:acme/here#77",
+          pr: "77",
+          workspace_id: ctx.ws.id,
+          strategy: "github",
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      stream_json =
+        Enum.join(
+          [
+            ~s({"type":"system","subtype":"init","model":"claude-opus-5","session_id":"s-1"}),
+            ~s({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"lib/a.ex"}}]}}),
+            ~s({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"contents"}]}}),
+            ~s({"type":"result","subtype":"success","result":"done"})
+          ],
+          "\n"
+        )
+
+      {:ok, Map.merge(ctx, %{record: record, stream_json: stream_json})}
+    end
+
+    test "external_review_show reports transcript capture state and the tool histogram", ctx do
+      :ok = Wardmast.Worker.PromptLog.write(ctx.record.id, "You are a code reviewer.")
+      :ok = Wardmast.Reviews.Transcript.write(ctx.record.id, ctx.stream_json)
+
+      assert {:ok, data} =
+               Tools.external_review_show(ctx.coordinator, %{"record_id" => ctx.record.id})
+
+      assert data.transcript_exists
+      assert data.prompt_exists
+      assert data.transcript_line_count == 4
+      assert data.tool_use_count == 1
+      assert data.tools_used == [%{name: "Read", count: 1}]
+    end
+
+    test "external_review_show reports absence for a review with no captured transcript", ctx do
+      assert {:ok, data} =
+               Tools.external_review_show(ctx.coordinator, %{"record_id" => ctx.record.id})
+
+      refute data.transcript_exists
+      refute data.prompt_exists
+      assert data.transcript_line_count == 0
+      assert data.tools_used == []
+    end
+
+    test "external_review_list stays summary-only (no per-row disk reads)", ctx do
+      :ok = Wardmast.Reviews.Transcript.write(ctx.record.id, ctx.stream_json)
+
+      assert {:ok, %{external_reviews: [record | _]}} =
+               Tools.external_review_list(ctx.coordinator, %{})
+
+      refute Map.has_key?(record, :transcript_line_count)
+    end
+
+    test "external_review_transcript returns the prompt, the raw lines and the tool uses", ctx do
+      :ok = Wardmast.Worker.PromptLog.write(ctx.record.id, "You are a code reviewer.")
+      :ok = Wardmast.Reviews.Transcript.write(ctx.record.id, ctx.stream_json)
+
+      assert {:ok, data} =
+               Tools.external_review_transcript(ctx.coordinator, %{"record_id" => ctx.record.id})
+
+      assert data.record_id == ctx.record.id
+      assert data.pr_ref == ctx.record.pr_ref
+      assert data.exists
+      assert data.path == Wardmast.Reviews.Transcript.path_for(ctx.record.id)
+      assert data.prompt == "You are a code reviewer."
+      assert data.line_count == 4
+      assert length(data.lines) == 4
+      assert [%{name: "Read", tool_use_id: "t1", result: "contents"}] = data.tool_uses
+    end
+
+    test "external_review_transcript survives a multibyte tool result straddling the preview cutoff",
+         ctx do
+      # A `Read` of a real source file: ASCII right up to the 2000-char preview
+      # cap, then an em-dash spanning it. A byte-offset slice would hand
+      # `Jason.encode!/1` (WardmastWeb.MCP.Plug) invalid UTF-8 — a transport
+      # failure the handler's own `rescue` never sees.
+      long = String.duplicate("a", 1999) <> "— rest of the file " <> String.duplicate("b", 200)
+
+      stream_json =
+        Enum.join(
+          [
+            ~s({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"lib/a.ex"}}]}}),
+            Jason.encode!(%{
+              "type" => "user",
+              "message" => %{
+                "content" => [
+                  %{"type" => "tool_result", "tool_use_id" => "t1", "content" => long}
+                ]
+              }
+            })
+          ],
+          "\n"
+        )
+
+      :ok = Wardmast.Reviews.Transcript.write(ctx.record.id, stream_json)
+
+      assert {:ok, data} =
+               Tools.external_review_transcript(ctx.coordinator, %{"record_id" => ctx.record.id})
+
+      assert [%{name: "Read", result: result}] = data.tool_uses
+      assert String.valid?(result)
+      assert String.ends_with?(result, "… [truncated]")
+      # What the MCP plug does with the handler's return value.
+      assert is_binary(Jason.encode!(data))
+    end
+
+    test "external_review_transcript can omit the prompt and tail the lines", ctx do
+      :ok = Wardmast.Worker.PromptLog.write(ctx.record.id, "You are a code reviewer.")
+      :ok = Wardmast.Reviews.Transcript.write(ctx.record.id, ctx.stream_json)
+
+      assert {:ok, data} =
+               Tools.external_review_transcript(ctx.coordinator, %{
+                 "record_id" => ctx.record.id,
+                 "include_prompt" => false,
+                 "tail" => 2
+               })
+
+      assert data.prompt == nil
+      assert data.line_count == 4
+      assert length(data.lines) == 2
+      assert data.truncated
+      assert List.last(data.lines) =~ ~s("type":"result")
+    end
+
+    test "external_review_transcript distinguishes uncaptured from empty", ctx do
+      assert {:ok, data} =
+               Tools.external_review_transcript(ctx.coordinator, %{"record_id" => ctx.record.id})
+
+      refute data.exists
+      assert data.lines == []
+      assert data.line_count == 0
+      assert data.tool_uses == []
+    end
+
+    test "external_review_transcript is not-found for an unknown record", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.external_review_transcript(ctx.coordinator, %{"record_id" => "nope"})
+
+      assert msg =~ "no external review record"
+    end
+
+    test "external_review_transcript requires record_id", ctx do
+      assert {:error, {:invalid, msg}} = Tools.external_review_transcript(ctx.coordinator, %{})
+      assert msg =~ "record_id"
+    end
+
+    test "the catalog advertises external_review_transcript to coordinators", _ctx do
+      tool = Enum.find(Catalog.all(), &(&1.name == "external_review_transcript"))
+      assert tool, "external_review_transcript missing from the MCP catalog"
+      assert "record_id" in tool.input_schema["required"]
+      assert is_map(tool.input_schema["properties"]["tail"])
+      assert is_map(tool.input_schema["properties"]["include_prompt"])
+    end
+  end
+
+  describe "review_gate_rounds_list/2 (bd-aqyjuc)" do
+    test "shows a scoped conflict review as its own role and reports the counters (bd-954ym8)",
+         ctx do
+      {:ok, _} =
+        Ash.create(Wardmast.ReviewGate.Round, %{
+          task_id: ctx.task.id,
+          round: 1,
+          role: :conflict_review,
+          verdict: :approve,
+          reviewer_tier: "standard",
+          converged: true
+        })
+
+      :ok =
+        Wardmast.Reviews.ConflictReview.record("auto_cover", %{
+          task_id: ctx.task.id,
+          workspace_id: ctx.ws.id
+        })
+
+      :ok =
+        Wardmast.Reviews.ConflictReview.record("scoped_review", %{
+          task_id: ctx.task.id,
+          workspace_id: ctx.ws.id
+        })
+
+      :ok =
+        Wardmast.Reviews.ConflictReview.record("fallback", %{
+          task_id: ctx.task.id,
+          workspace_id: ctx.ws.id
+        })
+
+      assert {:ok, %{rounds: [round], conflict_review: %{task: counts, fleet: fleet}}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert round.role == :conflict_review
+      assert round.reviewer_tier == "standard"
+      assert %{"auto_cover" => 1, "scoped_review" => 1, "fallback" => 1} = counts
+      assert fleet["auto_cover"] >= 1
+    end
+
+    test "exposes the reviewer family, implementer family and any same-family fallback (bd-a1ke2c)",
+         ctx do
+      {:ok, _} =
+        Ash.create(Wardmast.ReviewGate.Round, %{
+          task_id: ctx.task.id,
+          round: 1,
+          role: :review,
+          verdict: :approve,
+          reviewer_provider: "claude",
+          reviewer_family: "anthropic",
+          implementer_family: "anthropic",
+          same_family_fallback: true,
+          same_family_fallback_reason:
+            "no other model family available: google (gemini: quota_held)",
+          converged: true
+        })
+
+      assert {:ok, %{rounds: [round]}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert round.reviewer_family == "anthropic"
+      assert round.implementer_family == "anthropic"
+      assert round.same_family_fallback == true
+      assert round.same_family_fallback_reason =~ "quota_held"
+    end
+
+    test "returns rounds for a task, oldest-first, distinguishing round-1 reject from round-2 approve",
+         ctx do
+      {:ok, _r1} =
+        Ash.create(Wardmast.ReviewGate.Round, %{
+          task_id: ctx.task.id,
+          round: 1,
+          role: :review,
+          verdict: :request_changes,
+          findings: "VERDICT: REQUEST_CHANGES\n1. fix the thing",
+          finding_count: 1,
+          reviewer_model: "claude-sonnet-5",
+          reviewer_tier: "standard",
+          reviewer_provider: "gemini",
+          cost_usd: 0.12,
+          converged: false
+        })
+
+      {:ok, _r2} =
+        Ash.create(Wardmast.ReviewGate.Round, %{
+          task_id: ctx.task.id,
+          round: 2,
+          role: :review,
+          verdict: :approve,
+          findings: "VERDICT: APPROVE",
+          finding_count: 0,
+          reviewer_model: "claude-sonnet-5",
+          cost_usd: 0.09,
+          converged: true
+        })
+
+      assert {:ok, %{rounds: rounds, count: 2}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert [round1, round2] = rounds
+      assert round1.round == 1
+      assert round1.verdict == :request_changes
+      assert round1.converged == false
+      # bd-3xultf: the resolved reviewer tier is exposed alongside
+      # reviewer_model so analysis can control for the judge.
+      assert round1.reviewer_tier == "standard"
+      # bd-3hb4ih: and the provider that actually ran it, so a reviewer that
+      # rotated off a print-timeout is readable without the transcript.
+      assert round1.reviewer_provider == "gemini"
+      assert round2.reviewer_provider == nil
+      assert round2.round == 2
+      assert round2.verdict == :approve
+      assert round2.converged == true
+    end
+
+    # bd-6d3h8m: an automatic fix round (bd-a9zb7w) re-attaches a fresh
+    # ReviewGate that restarts its own round numbering at 1, so rounds 1..3 of
+    # the original pass and rounds 1..3 of the fix-round pass both get
+    # `round: 1, 2, 3` — sorting on `round` alone (the pre-fix behavior)
+    # interleaves them as round1/round1/round2/round2/round3/round3 instead of
+    # reading as two consecutive passes.
+    test "a fix round's rounds do not interleave with the original pass's (bd-6d3h8m)", ctx do
+      for round <- 1..3 do
+        {:ok, _} =
+          Ash.create(Wardmast.ReviewGate.Round, %{
+            task_id: ctx.task.id,
+            round: round,
+            fix_round_attempt: 0,
+            role: :review,
+            verdict: :request_changes,
+            findings: "VERDICT: REQUEST_CHANGES pass 1 round #{round}",
+            finding_count: 1,
+            reviewer_model: "claude-sonnet-5",
+            cost_usd: 0.1,
+            converged: false
+          })
+      end
+
+      for round <- 1..3 do
+        {:ok, _} =
+          Ash.create(Wardmast.ReviewGate.Round, %{
+            task_id: ctx.task.id,
+            round: round,
+            fix_round_attempt: 1,
+            role: :review,
+            verdict: :request_changes,
+            findings: "VERDICT: REQUEST_CHANGES pass 2 round #{round}",
+            finding_count: 1,
+            reviewer_model: "claude-sonnet-5",
+            cost_usd: 0.1,
+            converged: false
+          })
+      end
+
+      assert {:ok, %{rounds: rounds, count: 6, total_count: 6}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert Enum.map(rounds, &{&1.fix_round_attempt, &1.round}) == [
+               {0, 1},
+               {0, 2},
+               {0, 3},
+               {1, 1},
+               {1, 2},
+               {1, 3}
+             ]
+
+      assert Enum.map(rounds, & &1.findings) == [
+               "VERDICT: REQUEST_CHANGES pass 1 round 1",
+               "VERDICT: REQUEST_CHANGES pass 1 round 2",
+               "VERDICT: REQUEST_CHANGES pass 1 round 3",
+               "VERDICT: REQUEST_CHANGES pass 2 round 1",
+               "VERDICT: REQUEST_CHANGES pass 2 round 2",
+               "VERDICT: REQUEST_CHANGES pass 2 round 3"
+             ]
+    end
+
+    # bd-cmvmzl: rows order by time, not (fix_round_attempt, round).
+    test "orders by inserted_at across attempts; limit 1 is the newest; a later APPROVE converges",
+         ctx do
+      for {attempt, round, verdict} <- [
+            {0, 1, :request_changes},
+            {1, 2, :request_changes},
+            {1, 1, :approve}
+          ] do
+        {:ok, _} =
+          Ash.create(Wardmast.ReviewGate.Round, %{
+            task_id: ctx.task.id,
+            round: round,
+            fix_round_attempt: attempt,
+            role: :review,
+            verdict: verdict,
+            converged: verdict == :approve
+          })
+      end
+
+      assert {:ok, %{rounds: rounds, outcome: "converged"}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert Enum.map(rounds, &{&1.fix_round_attempt, &1.round}) == [{0, 1}, {1, 2}, {1, 1}]
+
+      assert {:ok, %{rounds: [last], outcome: "converged"}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "limit" => 1
+               })
+
+      assert last.verdict == :approve
+    end
+
+    test "fix_round_attempt defaults to 0 for a row that doesn't specify one", ctx do
+      {:ok, _} =
+        Ash.create(Wardmast.ReviewGate.Round, %{
+          task_id: ctx.task.id,
+          round: 1,
+          role: :review,
+          verdict: :approve,
+          findings: "VERDICT: APPROVE",
+          finding_count: 0,
+          converged: true
+        })
+
+      assert {:ok, %{rounds: [round]}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert round.fix_round_attempt == 0
+    end
+
+    test "requires task_id", ctx do
+      assert {:error, {:invalid, msg}} = Tools.review_gate_rounds_list(ctx.coordinator, %{})
+      assert msg =~ "task_id"
+    end
+
+    test "an unknown task_id returns an empty list", ctx do
+      assert {:ok, %{rounds: [], count: 0}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => "no-such-task"})
+    end
+
+    test "limit caps the returned rows to the most recent N, oldest-first (bd-dp7hiw)", ctx do
+      for round <- 1..3 do
+        {:ok, _} =
+          Ash.create(Wardmast.ReviewGate.Round, %{
+            task_id: ctx.task.id,
+            round: round,
+            role: :review,
+            verdict: :request_changes,
+            findings: "VERDICT: REQUEST_CHANGES round #{round}",
+            finding_count: 1,
+            reviewer_model: "claude-sonnet-5",
+            cost_usd: 0.1,
+            converged: false
+          })
+      end
+
+      assert {:ok, %{rounds: rounds, count: 2, total_count: 3}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "limit" => 2
+               })
+
+      assert [round2, round3] = rounds
+      assert round2.round == 2
+      assert round3.round == 3
+    end
+
+    test "omitting limit preserves full-history behavior (bd-dp7hiw)", ctx do
+      for round <- 1..3 do
+        {:ok, _} =
+          Ash.create(Wardmast.ReviewGate.Round, %{
+            task_id: ctx.task.id,
+            round: round,
+            role: :review,
+            verdict: :request_changes,
+            findings: "VERDICT: REQUEST_CHANGES round #{round}",
+            finding_count: 1,
+            reviewer_model: "claude-sonnet-5",
+            cost_usd: 0.1,
+            converged: false
+          })
+      end
+
+      assert {:ok, %{rounds: rounds, count: 3, total_count: 3}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert Enum.map(rounds, & &1.round) == [1, 2, 3]
+    end
+
+    test "limit rejects a non-positive value", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "limit" => 0
+               })
+
+      assert msg =~ "limit"
+    end
+  end
+
+  describe "workspace-agnostic coordinator" do
+    setup ctx do
+      # A coordinator token with no bound workspace (workspace_id: nil) — the
+      # shape `arb mcp token mint` / POST /api/mcp/tokens now produce.
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "agnostic-other-ws", prefix: "agw"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "in the other ws", workspace_id: other_ws.id})
+
+      {:ok, Map.merge(ctx, %{agnostic: agnostic, other_ws: other_ws, foreign: foreign})}
+    end
+
+    test "reads a task in any workspace, inferring the workspace from the entity", ctx do
+      assert {:ok, here} = Tools.task_show(ctx.agnostic, %{"id" => ctx.task.id})
+      assert here.id == ctx.task.id
+
+      assert {:ok, there} =
+               Tools.task_show(ctx.agnostic, %{"id" => ctx.foreign.id, "full" => true})
+
+      assert there.id == ctx.foreign.id
+      assert there.workspace_id == ctx.other_ws.id
+    end
+
+    test "creates a task in the workspace named by the `workspace` param (by name)", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.agnostic, %{
+                 "title" => "explicit by name",
+                 "workspace" => ctx.other_ws.name
+               })
+
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      assert reloaded.workspace_id == ctx.other_ws.id
+    end
+
+    test "creates a task in the workspace named by the `workspace` param (by id)", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.agnostic, %{
+                 "title" => "explicit by id",
+                 "workspace" => ctx.other_ws.id
+               })
+
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      assert reloaded.workspace_id == ctx.other_ws.id
+    end
+
+    test "an unknown `workspace` ref is a not-found tool error", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.task_create(ctx.agnostic, %{"title" => "x", "workspace" => "nope-ws"})
+
+      assert msg =~ "workspace"
+    end
+
+    test "lists tasks in the workspace named by the `workspace` param", ctx do
+      assert {:ok, %{tasks: tasks}} =
+               Tools.task_list(ctx.agnostic, %{"workspace" => ctx.other_ws.name})
+
+      assert Enum.any?(tasks, &(&1.id == ctx.foreign.id))
+      refute Enum.any?(tasks, &(&1.id == ctx.task.id))
+    end
+
+    test "shows the workspace named by the `workspace` param", ctx do
+      assert {:ok, data} = Tools.workspace_show(ctx.agnostic, %{"workspace" => ctx.other_ws.id})
+      assert data.id == ctx.other_ws.id
+      assert data.name == ctx.other_ws.name
+    end
+
+    test "directs a message to a task in any workspace, pinned to that task's workspace", ctx do
+      assert {:ok, _msg} =
+               Tools.message_send(ctx.agnostic, %{
+                 "task_id" => ctx.foreign.id,
+                 "body" => "do this"
+               })
+
+      [mail] = Message.inbox(ctx.foreign.id, workspace_id: ctx.other_ws.id)
+      assert mail.workspace_id == ctx.other_ws.id
+      assert mail.from_ref == "coordinator"
+    end
+
+    test "with no `workspace` and multiple workspaces, create needs an explicit workspace", ctx do
+      # The setup created several workspaces and none is named "default", so the
+      # installation default is ambiguous.
+      assert {:error, {:invalid, msg}} =
+               Tools.task_create(ctx.agnostic, %{"title" => "ambiguous"})
+
+      assert msg =~ "workspace"
+    end
+  end
+
+  describe "default workspace resolution" do
+    test "a workspace-agnostic coordinator with no `workspace` falls back to the lone workspace",
+         ctx do
+      # The module setup creates exactly one workspace (ctx.ws) in this sandbox,
+      # so it is unambiguously the installation default.
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      assert {:ok, data} = Tools.task_create(agnostic, %{"title" => "lands in the only ws"})
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      assert reloaded.workspace_id == ctx.ws.id
+    end
+
+    # Operator ruling on bd-26s98f (parity P-04): a write never lands in the
+    # workspace that merely happens to be called `default`.
+    test "a write with no `workspace` fails when several exist, even with one named \"default\"" do
+      {:ok, default} = Ash.create(Workspace, %{name: "default", prefix: "def"})
+      {:ok, _other} = Ash.create(Workspace, %{name: "another-ws", prefix: "anow"})
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      assert {:error, {:invalid, msg}} = Tools.task_create(agnostic, %{"title" => "to default"})
+      assert msg =~ "multiple workspaces; pass workspace (name or id)"
+      assert msg =~ "another-ws"
+
+      assert [] = Issue |> Ash.read!() |> Enum.filter(&(&1.title == "to default"))
+
+      # Naming it — by name or by id — still works.
+      assert {:ok, by_name} =
+               Tools.task_create(agnostic, %{"title" => "explicit", "workspace" => "default"})
+
+      assert {:ok, by_id} =
+               Tools.task_create(agnostic, %{"title" => "explicit 2", "workspace" => default.id})
+
+      assert Ash.get!(Issue, by_name.id).workspace_id == default.id
+      assert Ash.get!(Issue, by_id.id).workspace_id == default.id
+    end
+
+    # bd-45tkhq: an unscoped `worker_list` used to silently resolve to a guessed
+    # workspace and return `count: 0` for a worker live elsewhere. Reads now
+    # cover ALL workspaces and echo the scope they used.
+    test "an agnostic coordinator's unscoped worker_list covers every workspace and echoes it" do
+      {:ok, _default} = Ash.create(Workspace, %{name: "default", prefix: "def"})
+      {:ok, other} = Ash.create(Workspace, %{name: "another-ws", prefix: "anow"})
+      {:ok, task} = Ash.create(Issue, %{title: "live elsewhere", workspace_id: other.id})
+
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: other.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      assert {:ok, %{workers: workers, workspace_id: nil}} = Tools.worker_list(agnostic, %{})
+      assert Enum.any?(workers, &(&1.task_id == task.id and &1.workspace_id == other.id))
+
+      assert {:ok, %{workers: [], workspace_id: ws_id}} =
+               Tools.worker_list(agnostic, %{"workspace" => "default"})
+
+      assert ws_id != other.id
+    end
+
+    test "an unscoped ticket_list reads every workspace and echoes `workspace_id: nil`" do
+      {:ok, default} = Ash.create(Workspace, %{name: "default", prefix: "def"})
+      {:ok, other} = Ash.create(Workspace, %{name: "another-ws", prefix: "anow"})
+      {:ok, a} = Ash.create(Issue, %{title: "in default", workspace_id: default.id})
+      {:ok, b} = Ash.create(Issue, %{title: "in other", workspace_id: other.id})
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      assert {:ok, %{tasks: tasks, workspace_id: nil}} = Tools.task_list(agnostic, %{})
+      ids = Enum.map(tasks, & &1.id)
+      assert a.id in ids and b.id in ids
+      assert Enum.find(tasks, &(&1.id == b.id)).workspace_id == other.id
+
+      assert {:ok, %{tasks: only, workspace_id: ws_id}} =
+               Tools.task_list(agnostic, %{"workspace" => "another-ws"})
+
+      assert ws_id == other.id
+      assert b.id in Enum.map(only, & &1.id)
+      refute a.id in Enum.map(only, & &1.id)
+    end
+  end
+
+  describe "workspace-bound scope rejection" do
+    test "a bound coordinator naming a different workspace is unauthorized", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "bound-other-ws", prefix: "bow"})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.task_create(ctx.coordinator, %{"title" => "x", "workspace" => other_ws.id})
+    end
+
+    test "over the MCP transport a bound coordinator naming another workspace is -32003", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "bound-rpc-ws", prefix: "brw"})
+
+      for {tool, args} <- [
+            {"ticket_list", %{}},
+            {"ticket_ready", %{}},
+            {"worker_list", %{}},
+            {"usage_summarize", %{"by" => "day"}},
+            {"notify_list", %{}},
+            {"coordinator_inbox", %{}},
+            {"alert_list", %{}},
+            {"breaker_list", %{}},
+            {"ticket_create", %{"title" => "x"}}
+          ] do
+        for ref <- [other_ws.id, other_ws.name] do
+          assert {:rpc_error, -32003, message} =
+                   Catalog.call(ctx.coordinator, tool, Map.put(args, "workspace", ref)),
+                 "#{tool} naming #{ref}"
+
+          assert message =~ "bound to a single workspace"
+        end
+      end
+    end
+
+    test "a worker naming a different workspace is unauthorized", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "pc-other-ws", prefix: "pco"})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.task_show(ctx.worker, %{"id" => ctx.task.id, "workspace" => other_ws.id})
+    end
+  end
+
+  describe "repo_list/2" do
+    test "returns an empty list when no repos are configured", ctx do
+      assert {:ok, data} = Tools.repo_list(ctx.coordinator, %{})
+      assert is_list(data.repos)
+      assert data.count == length(data.repos)
+    end
+
+    test "returns repos with expected fields", ctx do
+      # Configure a repo in the workspace
+      ws_config = ctx.ws.config || %{}
+
+      repo_config = %{
+        "repo_paths" => %{
+          "test-repo" => "/tmp/test-repo"
+        }
+      }
+
+      {:ok, _updated_ws} = Ash.update(ctx.ws, %{config: Map.merge(ws_config, repo_config)})
+
+      assert {:ok, data} = Tools.repo_list(ctx.coordinator, %{})
+      assert is_list(data.repos)
+      assert data.count >= 1
+
+      # Find the test repo
+      repo = Enum.find(data.repos, fn r -> r.name == "test-repo" end)
+      refute is_nil(repo)
+      assert repo.path == "/tmp/test-repo"
+      assert repo.source == ctx.ws.name
+      assert repo.workspace_id == ctx.ws.id
+      assert is_integer(repo.workers)
+      assert is_integer(repo.worktrees)
+    end
+
+    test "two-workspace same-name fixture returns both entries", ctx do
+      {:ok, ws2} =
+        Ash.create(Workspace, %{
+          name: "second-ws",
+          prefix: "sws",
+          config: %{"repo_paths" => %{"twin-repo" => "/tmp/twin-repo-2"}}
+        })
+
+      ws_config = ctx.ws.config || %{}
+
+      {:ok, _updated_ws} =
+        Ash.update(ctx.ws, %{
+          config: Map.merge(ws_config, %{"repo_paths" => %{"twin-repo" => "/tmp/twin-repo-1"}})
+        })
+
+      assert {:ok, data} = Tools.repo_list(ctx.coordinator, %{})
+      twins = Enum.filter(data.repos, &(&1.name == "twin-repo"))
+      assert length(twins) == 2
+      assert Enum.map(twins, & &1.source) |> Enum.sort() == Enum.sort([ctx.ws.name, "second-ws"])
+      assert Enum.map(twins, & &1.workspace_id) |> Enum.sort() == Enum.sort([ctx.ws.id, ws2.id])
+    end
+  end
+
+  describe "repo_show/2" do
+    test "requires a repo name", ctx do
+      assert {:error, {:invalid, _}} = Tools.repo_show(ctx.coordinator, %{})
+    end
+
+    test "returns not-found for unknown repo", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.repo_show(ctx.coordinator, %{"name" => "unknown-repo"})
+
+      assert msg =~ "unknown-repo"
+    end
+
+    test "returns repo details for a configured repo", ctx do
+      # Configure a repo in the workspace
+      ws_config = ctx.ws.config || %{}
+
+      repo_config = %{
+        "repo_paths" => %{
+          "test-repo" => "/tmp/test-repo"
+        }
+      }
+
+      {:ok, _updated_ws} = Ash.update(ctx.ws, %{config: Map.merge(ws_config, repo_config)})
+
+      assert {:ok, repo} = Tools.repo_show(ctx.coordinator, %{"name" => "test-repo"})
+      assert repo.name == "test-repo"
+      assert repo.path == "/tmp/test-repo"
+      assert repo.source == ctx.ws.name
+      assert repo.workspace_id == ctx.ws.id
+      assert is_integer(repo.workers)
+      assert is_integer(repo.worktrees)
+    end
+
+    test "two-workspace same-name fixture rejects unqualified lookup and accepts workspace qualifier",
+         ctx do
+      %Scope{} = coordinator = %{ctx.coordinator | workspace_id: nil}
+
+      {:ok, ws2} =
+        Ash.create(Workspace, %{
+          name: "second-ws",
+          prefix: "sws",
+          config: %{"repo_paths" => %{"twin-repo" => "/tmp/twin-repo-2"}}
+        })
+
+      ws_config = ctx.ws.config || %{}
+
+      {:ok, _updated_ws} =
+        Ash.update(ctx.ws, %{
+          config: Map.merge(ws_config, %{"repo_paths" => %{"twin-repo" => "/tmp/twin-repo-1"}})
+        })
+
+      # Unqualified lookup against multiple workspaces fails with ambiguity error
+      assert {:error, {:invalid_request, msg}} =
+               Tools.repo_show(coordinator, %{"name" => "twin-repo"})
+
+      assert msg =~ "ambiguous"
+
+      # Qualified lookup returns the specific workspace entry with its workspace_id
+      assert {:ok, repo1} =
+               Tools.repo_show(coordinator, %{"name" => "twin-repo", "workspace" => ctx.ws.id})
+
+      assert repo1.path == "/tmp/twin-repo-1"
+      assert repo1.source == ctx.ws.name
+      assert repo1.workspace_id == ctx.ws.id
+
+      assert {:ok, repo2} =
+               Tools.repo_show(coordinator, %{"name" => "twin-repo", "workspace" => ws2.name})
+
+      assert repo2.path == "/tmp/twin-repo-2"
+      assert repo2.source == "second-ws"
+      assert repo2.workspace_id == ws2.id
+    end
+  end
+
+  # bd-9j2g3x — the loop proposal queue over MCP. Coordinator-only tiering is
+  # asserted in Wardmast.MCP.CatalogTest; here we check the handlers themselves.
+  describe "loop_pending_* (bd-9j2g3x)" do
+    setup ctx do
+      {:ok, target} =
+        Ash.create(Issue, %{title: "loop target", difficulty: 2, workspace_id: ctx.ws.id})
+
+      {:ok, row} =
+        Wardmast.Loop.record(%{
+          kind: :difficulty_override,
+          scope: :task,
+          gist: "raise difficulty on #{target.id}: D2 → D3",
+          category: "difficulty misestimate (rework)",
+          target: target.id,
+          difficulty: 2,
+          repo: "arbiter",
+          incident_refs: [target.id],
+          task_refs: [target.id],
+          payload: %{"task_id" => target.id, "difficulty" => 3},
+          diff: "--- a/task\n+++ b/task\n@@ @@\n-difficulty: 2\n+difficulty: 3\n",
+          workspace_id: ctx.ws.id
+        })
+
+      {:ok, target: target, row: row}
+    end
+
+    test "loop_pending_list returns the live queue and the evidence bar", ctx do
+      assert {:ok, data} = Tools.loop_pending_list(ctx.coordinator, %{})
+
+      summary = Enum.find(data.pending, &(&1.id == ctx.row.id))
+      assert summary
+      assert data.count == length(data.pending)
+      assert data.evidence_bar == Wardmast.Loop.default_evidence_bar()
+      # Amendment D: a coordinator deciding over MCP sees the same recurring
+      # price a human sees in the CLI. A per-task override is free forever.
+      assert summary.context_cost_tokens == 0
+      # bd-bldypb: a difficulty override's payload is always complete, so it
+      # never needs authoring.
+      refute summary.needs_authoring
+    end
+
+    test "loop_pending_list marks a payload-less row as needing authoring (bd-bldypb)", ctx do
+      {:ok, gapped} =
+        Wardmast.Loop.record(%{
+          kind: :skill_patch,
+          scope: :task,
+          gist: "teach read discipline: context exhaustion",
+          category: "missing test coverage",
+          target: nil,
+          incident_refs: ["run-a"],
+          task_refs: ["bd-1"],
+          payload: %{},
+          workspace_id: ctx.ws.id
+        })
+
+      assert {:ok, data} = Tools.loop_pending_list(ctx.coordinator, %{})
+      summary = Enum.find(data.pending, &(&1.id == gapped.id))
+      assert summary.needs_authoring
+    end
+
+    test "loop_pending_list rejects an unknown state rather than silently returning nothing",
+         ctx do
+      assert {:error, {:invalid, message}} =
+               Tools.loop_pending_list(ctx.coordinator, %{"state" => "propsed"})
+
+      assert message =~ "`state` must be one of"
+    end
+
+    test "loop_pending_diff returns the full row including the unified diff", ctx do
+      assert {:ok, data} = Tools.loop_pending_diff(ctx.coordinator, %{"id" => ctx.row.id})
+
+      assert data.diff =~ "+difficulty: 3"
+      assert data.fingerprint == ctx.row.fingerprint
+      assert data.applicable == true
+      refute data.authoring_gap
+    end
+
+    test "loop_pending_apply goes through the domain API and paper-trails the proposal id", ctx do
+      assert {:ok, data} = Tools.loop_pending_apply(ctx.coordinator, %{"id" => ctx.row.id})
+      assert data.state == :applied
+
+      {:ok, target} = Ash.get(Issue, ctx.target.id)
+      assert target.difficulty == 3
+
+      versions =
+        Wardmast.Tasks.Issue.Version
+        |> Ash.Query.filter(version_source_id == ^ctx.target.id)
+        |> Ash.read!()
+
+      assert Enum.any?(
+               versions,
+               &(&1.version_action_inputs["change_origin"] == "loop:proposal:#{ctx.row.id}")
+             )
+    end
+
+    test "loop_pending_reject is soft — the row persists as rejected", ctx do
+      assert {:ok, data} =
+               Tools.loop_pending_reject(ctx.coordinator, %{
+                 "id" => ctx.row.id,
+                 "reason" => "handled in CLAUDE.md"
+               })
+
+      assert data.state == :rejected
+      assert {:ok, still_there} = Wardmast.Loop.get_pending(ctx.row.id)
+      assert still_there.rejection_reason == "handled in CLAUDE.md"
+    end
+
+    test "a scope bound to another workspace cannot reach the row", ctx do
+      {:ok, other} = Ash.create(Workspace, %{name: "other-loop-ws", prefix: "olw"})
+      intruder = %Scope{tier: :coordinator, workspace_id: other.id}
+
+      assert {:error, {:not_found, message}} =
+               Tools.loop_pending_diff(intruder, %{"id" => ctx.row.id})
+
+      assert message =~ "no loop proposal matching"
+    end
+
+    test "a fleet-scoped row is visible in its own workspace but not another (bd-3dasqm)",
+         ctx do
+      {:ok, fleet_row} =
+        Wardmast.Loop.record(%{
+          kind: :skill_patch,
+          scope: :fleet,
+          gist: "teach read discipline: context exhaustion",
+          category: "context exhaustion — agent burned its own context window",
+          incident_refs: ["run-a", "run-b", "run-c"],
+          task_refs: ["bd-1", "bd-2"],
+          payload: %{},
+          workspace_id: ctx.ws.id
+        })
+
+      refute is_nil(fleet_row.workspace_id)
+
+      own_scope = %Scope{tier: :coordinator, workspace_id: ctx.ws.id}
+      assert {:ok, _data} = Tools.loop_pending_diff(own_scope, %{"id" => fleet_row.id})
+
+      {:ok, other} = Ash.create(Workspace, %{name: "other-loop-ws-2", prefix: "olw2"})
+      intruder = %Scope{tier: :coordinator, workspace_id: other.id}
+
+      assert {:error, {:not_found, message}} =
+               Tools.loop_pending_diff(intruder, %{"id" => fleet_row.id})
+
+      assert message =~ "no loop proposal matching"
+
+      assert {:ok, data} = Tools.loop_pending_list(intruder, %{})
+      refute Enum.any?(data.pending, &(&1.id == fleet_row.id))
+    end
+
+    test "an unknown id is a tool error, not a crash", ctx do
+      assert {:error, {:not_found, message}} =
+               Tools.loop_pending_apply(ctx.coordinator, %{"id" => Ecto.UUID.generate()})
+
+      assert message =~ "no loop proposal matching"
+    end
+  end
+
+  describe "Catalog.call/3 dispatch" do
+    test "routes an authorized call to its handler and returns structured data", ctx do
+      assert {:ok, data} = Catalog.call(ctx.worker, "ticket_show", %{})
+      assert data.id == ctx.task.id
+    end
+
+    test "maps a handler not-found into a tool error (not a JSON-RPC error)", ctx do
+      assert {:tool_error, message, _type} =
+               Catalog.call(ctx.coordinator, "ticket_show", %{"id" => "bd-does-not-exist"})
+
+      assert message =~ "not found"
+    end
+  end
+
+  defp wait_until(fun, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(15)
+        do_wait(fun, deadline)
+    end
+  end
+
+  describe "ci_rerun/2 (bd-5mzzww / #1448)" do
+    test "a worker may not re-run CI for another task", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "someone else", workspace_id: ctx.ws.id})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.ci_rerun(ctx.worker, %{"task_id" => other.id})
+    end
+
+    test "an unknown mode is rejected before any forge call", ctx do
+      assert {:error, {:invalid, msg}} = Tools.ci_rerun(ctx.worker, %{"mode" => "nuke"})
+      assert msg =~ "mode"
+    end
+
+    test "a task with no open PR is a clear error, not a crash", ctx do
+      assert {:error, {:invalid, msg}} = Tools.ci_rerun(ctx.worker, %{})
+      assert msg =~ "no PR"
+    end
+
+    test "a workspace whose merger has no re-run primitive says so", ctx do
+      {:ok, task} =
+        Ash.update(ctx.task, %{pr_ref: "#7"}, action: :update)
+
+      assert {:error, {:conflict, msg}} =
+               Tools.ci_rerun(%{ctx.worker | task_id: task.id}, %{})
+
+      assert msg =~ "does not support"
+    end
+
+    test "the coordinator must name a task", ctx do
+      assert {:error, {:invalid, _}} = Tools.ci_rerun(ctx.coordinator, %{})
+    end
+
+    # bd-dtfe9x (D-W-17): the same own-task rule the REST route applies.
+    test "a worker re-runs CI on its own task through the live watchdog", ctx do
+      alias Wardmast.Test.StubMerger
+      StubMerger.reset()
+
+      {:ok, task} = Ash.create(Issue, %{title: "own ci", workspace_id: ctx.ws.id})
+      put_state!(task, :active)
+
+      {:ok, task} =
+        Issue.pr_opened(task.id, "!mcp-own-ci",
+          merger_url: "https://example.test/mr/mcp-own-ci",
+          merge_watch:
+            Wardmast.Tasks.PullRequest.lane(
+              adapter: StubMerger,
+              repo: "mcp/repo",
+              interval_ms: 600_000,
+              initial_delay_ms: 600_000
+            )
+        )
+
+      assert :ok = Wardmast.Worker.Watchdog.restart(task.id)
+
+      on_exit(fn ->
+        case Wardmast.Worker.Watchdog.whereis(task.id) do
+          nil -> :ok
+          wd -> Wardmast.ProcessTeardown.stop_child(Wardmast.Worker.WatchdogSupervisor, wd)
+        end
+      end)
+
+      worker = %{ctx.worker | task_id: task.id}
+
+      assert {:ok, %{task_id: id, via: "watchdog"}} =
+               Tools.ci_rerun(worker, %{"mode" => "all_jobs"})
+
+      assert id == task.id
+      assert [{"!mcp-own-ci", %{mode: :all_jobs}} | _] = StubMerger.ci_reruns()
+    end
+
+    test "with no watchdog the fallback is shared with REST (CIRerun)", ctx do
+      {:ok, task} = Ash.update(ctx.task, %{pr_ref: "#8"}, action: :update)
+
+      # Same outcome the REST route gives for the same task: the workspace's
+      # merger is reached, and says it cannot re-run.
+      assert {:error, :unsupported} = Wardmast.Worker.CIRerun.rerun(task.id, %{})
+
+      assert {:error, {:conflict, _}} =
+               Tools.ci_rerun(%{ctx.worker | task_id: task.id}, %{})
+    end
+  end
+
+  describe "ci_mark_external/2 (bd-5mzzww / #1448)" do
+    test "with no watchdog running it reports not-found rather than silently succeeding", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.ci_mark_external(ctx.worker, %{"note" => "day-wide infra outage"})
+
+      assert msg =~ "watchdog"
+    end
+
+    test "a note is required — an unevidenced verdict is not actionable", ctx do
+      assert {:error, {:invalid, msg}} = Tools.ci_mark_external(ctx.worker, %{})
+      assert msg =~ "note"
+    end
+
+    test "a worker may not mark another task", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "someone else", workspace_id: ctx.ws.id})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.ci_mark_external(ctx.worker, %{"task_id" => other.id, "note" => "infra"})
+    end
+  end
+
+  describe "flake_record/2 (bd-6vullc)" do
+    test "records a flake event for the calling worker's own task", ctx do
+      assert {:ok, data} =
+               Tools.flake_record(ctx.worker, %{
+                 "ci_job" => "mix test",
+                 "signature" => "DataCase teardown timeout",
+                 "test_file" => "test/coverage_test.exs",
+                 "test_line" => 150
+               })
+
+      assert data.task_id == ctx.task.id
+      assert data.repo == "shipyard"
+      assert data.ci_job == "mix test"
+      assert data.test_file == "test/coverage_test.exs"
+      assert data.test_line == 150
+      assert data.signature == "DataCase teardown timeout"
+
+      assert [event] = Ash.read!(FlakeEvent)
+      assert event.task_id == ctx.task.id
+    end
+
+    test "ci_job is required", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.flake_record(ctx.worker, %{"signature" => "timeout"})
+
+      assert msg =~ "ci_job"
+    end
+
+    test "signature is required", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.flake_record(ctx.worker, %{"ci_job" => "mix test"})
+
+      assert msg =~ "signature"
+    end
+
+    test "a worker may not record a flake for another task", ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "someone else", workspace_id: ctx.ws.id})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.flake_record(ctx.worker, %{
+                 "task_id" => other.id,
+                 "ci_job" => "mix test",
+                 "signature" => "timeout"
+               })
+    end
+
+    test "test_file/test_line and note are optional", ctx do
+      assert {:ok, data} =
+               Tools.flake_record(ctx.worker, %{
+                 "ci_job" => "deploy",
+                 "signature" => "runner OOM",
+                 "note" => "same OOM on two unrelated branches today"
+               })
+
+      assert data.test_file == nil
+      assert data.test_line == nil
+    end
+
+    test "is visible to a worker, not just the coordinator" do
+      names =
+        %Scope{tier: :worker, workspace_id: "ws", task_id: "t"}
+        |> Catalog.visible()
+        |> Enum.map(& &1.name)
+
+      assert "flake_record" in names
+    end
+  end
+
+  describe "catalog: CI-retry tools (bd-5mzzww / #1448)" do
+    test "ci_rerun and ci_mark_external are visible to a worker, not just the coordinator" do
+      names =
+        %Scope{tier: :worker, workspace_id: "ws", task_id: "t"}
+        |> Catalog.visible()
+        |> Enum.map(& &1.name)
+
+      assert "ci_rerun" in names
+      assert "ci_mark_external" in names
+    end
+  end
+
+  # bd-8akewg: a real `Wardmast.Sessions.Session` row plus the coordinator scope
+  # its MCP token would decode to. The row has to exist because
+  # `coordinator_inbox` floors a session's unread view at the session's own
+  # start time.
+  defp new_session(workspace) do
+    ws_id = if workspace, do: workspace.id, else: nil
+
+    with {:ok, session} <-
+           Ash.create(Session, %{cwd: "/tmp/mcp-tools-session", workspace_id: ws_id}) do
+      {:ok, %Scope{tier: :coordinator, workspace_id: ws_id, session_id: session.id}}
+    end
+  end
+
+  describe "P-26 mailbox parity" do
+    test "message_send refuses a recipient that is not a task, for both tiers", ctx do
+      for scope <- [ctx.coordinator, ctx.worker] do
+        assert {:error, {:not_found, _}} =
+                 Tools.message_send(scope, %{"task_id" => "no-such-task", "body" => "hi"})
+      end
+    end
+
+    test "message_send files a worker's message under the recipient's workspace", ctx do
+      {:ok, sibling} =
+        Ash.create(Issue, %{title: "sibling", workspace_id: ctx.ws.id, acceptance: "- x"})
+
+      assert {:ok, %{workspace_id: ws_id, task_ref: task_ref}} =
+               Tools.message_send(ctx.worker, %{"task_id" => sibling.id, "body" => "hi"})
+
+      assert ws_id == ctx.ws.id
+      assert task_ref == sibling.id
+    end
+
+    test "a message sent the way the CLI sends it (no workspace) reaches the recipient's inbox_check in a multi-workspace install",
+         _ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "p26-multi", prefix: "pmu"})
+
+      {:ok, other_task} =
+        Ash.create(Issue, %{title: "elsewhere", workspace_id: other_ws.id, acceptance: "- x"})
+
+      # `POST /api/messages` as `arb message send` issues it: recipient only.
+      assert {:ok, %{workspace_id: ws_id}} =
+               Wardmast.Messages.Mailbox.send_message(%Scope{tier: :coordinator}, %{
+                 to_ref: other_task.id,
+                 body: "from the cli",
+                 kind: "info"
+               })
+
+      assert ws_id == other_ws.id
+
+      worker = %Scope{
+        tier: :worker,
+        workspace_id: other_ws.id,
+        task_id: other_task.id,
+        repo: "shipyard"
+      }
+
+      assert {:ok, %{count: 1, messages: [%{body: "from the cli"}]}} =
+               Tools.inbox_check(worker, %{})
+    end
+
+    test "inbox_check mark_read: false peeks without consuming", ctx do
+      {:ok, _} =
+        Message.send_mail(%{
+          kind: :direction,
+          workspace_id: ctx.ws.id,
+          from_ref: "coordinator",
+          to_ref: ctx.task.id,
+          body: "peek"
+        })
+
+      assert {:ok, %{count: 1}} = Tools.inbox_check(ctx.worker, %{"mark_read" => false})
+      assert {:ok, %{count: 1}} = Tools.inbox_check(ctx.worker, %{"mark_read" => false})
+      assert {:ok, %{count: 1}} = Tools.inbox_check(ctx.worker, %{})
+      assert {:ok, %{count: 0}} = Tools.inbox_check(ctx.worker, %{})
+    end
+
+    test "coordinator_inbox_clear task_id clears the thread in every workspace", _ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "p26-clear-other", prefix: "pcl"})
+
+      {:ok, other_task} =
+        Ash.create(Issue, %{title: "other", workspace_id: other_ws.id, acceptance: "- x"})
+
+      {:ok, _} =
+        Message.send_mail(%{
+          kind: :failure,
+          workspace_id: other_ws.id,
+          to_ref: "coordinator",
+          task_ref: other_task.id,
+          body: "elsewhere"
+        })
+
+      unbound = %Scope{tier: :coordinator}
+
+      assert {:ok, %{cleared_count: 1}} =
+               Tools.coordinator_inbox_clear(unbound, %{"task_id" => other_task.id})
+    end
+  end
+end

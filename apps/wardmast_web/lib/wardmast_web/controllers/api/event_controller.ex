@@ -1,0 +1,382 @@
+defmodule WardmastWeb.Api.EventController do
+  @moduledoc """
+  Server-push event stream over a long-lived chunked HTTP connection.
+
+  Route: GET /events?token=<coord_token>&subscribe=<comma-separated topics>&since=<cursor|timestamp>
+
+  Auth: a coordinator-tier MCP token, either as `Authorization: Bearer <token>`
+  or in the `token=` query parameter (checked in that order). The header form
+  exists for a session's own event monitor (bd-aqafdr): a session's token
+  lives only in a mode-0600 `curl -K` config, never in argv, so it is sent as
+  a header rather than a query string. `token=` stays supported unchanged for
+  the `arb init` runbook's `curl -N` loop, which has no header to send.
+
+  Topics (default: inbox,review_gate,worker_failed):
+    * inbox          — a message arrived in the coordinator's mailbox
+    * review_gate       — a review_gate escalation requires coordinator ruling
+    * worker_failed — a worker stopped unexpectedly (status → failed).
+                      Carries `status` + `phase` (bd-aw2cyt).
+    * worker_done   — a worker completed (status → completed).
+                      Carries `status` + `phase` (bd-aw2cyt).
+    * worker_phase  — a worker's phase changed (bd-aw2cyt): `implementing`,
+                      `in_review`, `addressing_review`, `fixing_ci`,
+                      `resolving_conflict`, `waiting_on_you`, `done`.
+                      (An open PR is no worker phase: the ticket is
+                      `merging`, bd-36ytcl.) Carries
+                      `task_id`, `registry_key`, `role`, `status`, `phase`,
+                      `phase_label` and `agent_live`. The record's `status`
+                      outlives its agent — a `running` worker whose main agent
+                      exited is shepherding review / CI / the merge and spends
+                      no quota; `phase` is what says which. Opt-in only
+                      (pass `subscribe=...,worker_phase`).
+    * task_state     — any task FSM transition (noisier — opt-in only)
+    * external_review — an ExternalReview lifecycle transition: running / completed /
+                        failed (opt-in only — pass subscribe=...,external_review)
+    * loop_proposal  — a loop-engineering proposal was recorded, reinforced,
+                       promoted to `proposed`, applied or rejected (opt-in only —
+                       pass subscribe=...,loop_proposal)
+    * gate_cap_hit   — a gate escalated because its round / send-back budget ran
+                       out (bd-4qjl0q): `task_id`, `gate`, `rounds`, `cap`
+                       (opt-in only — pass subscribe=...,gate_cap_hit)
+    * gate_resolved  — the coordinator recorded its answer to a gate escalation
+                       (bd-4qjl0q): `task_id`, `gate`, `decision`, `actor`,
+                       `round` (opt-in only — pass subscribe=...,gate_resolved)
+    * conflict_review — a head after an approved commit was classified by the
+                       conflict-resolution review path (bd-954ym8): `outcome`
+                       (auto_cover / scoped_review / scoped_approved /
+                       scoped_rejected / fallback), `task_id`, `head`
+                       (opt-in only — pass subscribe=...,conflict_review)
+
+  Wire format: one newline-terminated JSON object per event. A bare newline
+  is sent every 30 seconds on idle connections as a keepalive. Every event
+  carries a `"cursor"` field — an integer that only ever increases — so a
+  reconnecting client can pass the highest cursor it saw back as `since=`.
+
+  ## Replay (`since=`)
+
+  `since` accepts either an integer cursor (a value previously seen in an
+  event's `"cursor"` field) or an ISO-8601 timestamp. When present, the
+  connection first replays every persisted event after that point — scoped
+  to the requested topics and workspace, oldest first — before joining the
+  live stream, so a client that was disconnected for N minutes and
+  reconnects with `since=<last cursor>` sees the gap exactly once, in
+  order, with no duplicate delivery from the live tail. See
+  `Wardmast.Events.replay/3` for the persistence and ordering guarantees.
+  Omitting `since` skips replay entirely (today's behavior: live events only).
+
+  Client usage:
+      curl -N "http://127.0.0.1:4848/events?token=...&subscribe=inbox,review_gate"
+      curl -N "http://127.0.0.1:4848/events?token=...&since=1042"
+  """
+
+  use WardmastWeb, :controller
+
+  require Logger
+
+  alias Wardmast.Events
+  alias Wardmast.MCP.Scope
+  alias WardmastWeb.ErrorResponse
+
+  @default_topics ~w(inbox review_gate worker_failed)
+  @default_keepalive_ms 30_000
+
+  @doc """
+  Subscribe and stream events. Returns 401 for missing/invalid tokens,
+  400 for unknown topic names or an unparseable `since=`, 200 + chunked
+  body for valid requests.
+  """
+  def stream(conn, params) do
+    with {:ok, scope} <- authenticate(conn, params),
+         {:ok, topics} <- parse_topics(params),
+         {:ok, since} <- parse_since(params) do
+      # Subscribe BEFORE querying replay, so any event that lands in the gap
+      # between "replay query ran" and "live loop starts receiving" is
+      # caught by the mailbox rather than dropped — see the cursor-watermark
+      # dedup in event_loop/3, which is what makes this race-safe rather
+      # than just race-reduced.
+      Phoenix.PubSub.subscribe(Wardmast.PubSub, Events.pubsub_topic(scope.workspace_id))
+
+      conn =
+        conn
+        |> put_resp_content_type("application/x-ndjson")
+        |> send_chunked(200)
+
+      topic_set = MapSet.new(topics)
+      {conn, last_cursor} = replay(conn, scope.workspace_id, topic_set, since)
+
+      event_loop(conn, topic_set, last_cursor, scope, next_revocation_check())
+    else
+      {:error, :unauthorized} ->
+        ErrorResponse.send_error(conn, :unauthenticated, "unauthorized")
+
+      {:error, :invalid_topics, invalid} ->
+        ErrorResponse.send_error(
+          conn,
+          :invalid_request,
+          "unknown topics: #{Enum.join(invalid, ", ")}",
+          %{topics: invalid}
+        )
+
+      {:error, :invalid_since} ->
+        ErrorResponse.send_error(
+          conn,
+          :invalid_request,
+          "invalid since: must be an integer cursor or an ISO-8601 timestamp"
+        )
+    end
+  end
+
+  # ---- auth ---------------------------------------------------------------
+
+  # Header first (a session's own token lives only in a mode-0600 curl
+  # config, never in argv — Wardmast.Sessions.Provisioning's monitor.sh sends
+  # it as `Authorization: Bearer`), falling back to `token=` for the `arb
+  # init` runbook's `curl -N` loop, which has no header to send.
+  defp authenticate(conn, params) do
+    case bearer_token(conn) || query_token(params) do
+      token when is_binary(token) and token != "" ->
+        case Scope.from_token(token) do
+          {:ok, %Scope{tier: :coordinator} = scope} -> {:ok, scope}
+          # Any narrower tier (worker, refine) is refused here.
+          {:ok, _other_tier} -> {:error, :unauthorized}
+          {:error, _} -> {:error, :unauthorized}
+        end
+
+      _ ->
+        {:error, :unauthorized}
+    end
+  end
+
+  defp bearer_token(conn) do
+    case Plug.Conn.get_req_header(conn, "authorization") do
+      ["Bearer " <> token] -> token
+      _ -> nil
+    end
+  end
+
+  defp query_token(%{"token" => token}) when is_binary(token) and token != "", do: token
+  defp query_token(_), do: nil
+
+  # ---- topic parsing ------------------------------------------------------
+
+  defp parse_topics(%{"subscribe" => s}) when is_binary(s) and s != "" do
+    requested =
+      s
+      |> String.split(",")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+
+    valid = Events.valid_topics()
+    invalid = Enum.reject(requested, &(&1 in valid))
+
+    if invalid == [] do
+      {:ok, requested}
+    else
+      {:error, :invalid_topics, invalid}
+    end
+  end
+
+  defp parse_topics(_), do: {:ok, @default_topics}
+
+  # ---- since parsing --------------------------------------------------------
+
+  # An integer cursor (a value previously seen in an event's "cursor" field)
+  # or an ISO-8601 timestamp. Absent `since` skips replay (nil).
+  defp parse_since(%{"since" => s}) when is_binary(s) and s != "" do
+    case Integer.parse(s) do
+      {cursor, ""} ->
+        {:ok, {:cursor, cursor}}
+
+      _ ->
+        case DateTime.from_iso8601(s) do
+          {:ok, dt, _offset} -> {:ok, {:timestamp, dt}}
+          {:error, _} -> {:error, :invalid_since}
+        end
+    end
+  end
+
+  defp parse_since(_), do: {:ok, nil}
+
+  # ---- replay ---------------------------------------------------------------
+
+  # Streams every persisted event after `since` (oldest first) before the
+  # live loop starts. Returns the last cursor sent — the watermark
+  # event_loop/3 uses to skip anything already delivered here. `since ==
+  # nil` skips replay entirely, but still gives event_loop/3 a starting
+  # watermark of `nil` (deliver everything).
+  defp replay(conn, _workspace_id, _topics, nil), do: {conn, nil}
+
+  defp replay(conn, workspace_id, topics, since) do
+    %{events: events, truncated?: truncated?} =
+      Events.replay(workspace_id, MapSet.to_list(topics), since)
+
+    conn =
+      Enum.reduce(events, conn, fn event, conn ->
+        case Plug.Conn.chunk(conn, Jason.encode!(event) <> "\n") do
+          {:ok, conn} -> conn
+          {:error, _} -> conn
+        end
+      end)
+
+    last_cursor =
+      case List.last(events) do
+        nil -> since_watermark(since)
+        %{"cursor" => cursor} -> cursor
+      end
+
+    conn =
+      if truncated? do
+        chunk_truncation_notice(conn, last_cursor)
+      else
+        conn
+      end
+
+    {conn, last_cursor}
+  end
+
+  defp chunk_truncation_notice(conn, last_cursor) do
+    notice = %{
+      "topic" => "_replay_truncated",
+      "cursor" => last_cursor,
+      "note" =>
+        "replay hit Events.replay_limit/0 (#{Events.replay_limit()} rows); " <>
+          "reconnect with since=#{last_cursor} to continue"
+    }
+
+    case Plug.Conn.chunk(conn, Jason.encode!(notice) <> "\n") do
+      {:ok, conn} -> conn
+      {:error, _} -> conn
+    end
+  end
+
+  # No rows replayed: fall back to the requested cursor, clamped to the
+  # log's actual high-water mark. Without the clamp, a client-supplied
+  # cursor past the end of the table (e.g. after a DB reset, or a stale/
+  # hand-typed value) would make event_loop/3 drop every future live event
+  # for the life of the connection — indistinguishable from "fleet quiet".
+  # Clamping degrades that to "stream everything live" instead.
+  defp since_watermark({:cursor, cursor}) do
+    max_seq = Events.max_cursor()
+
+    if cursor > max_seq do
+      Logger.error(
+        "GET /events since=#{cursor} exceeds the log's high-water mark (#{max_seq}); " <>
+          "clamping — client cursor is likely stale or invalid"
+      )
+
+      max_seq
+    else
+      cursor
+    end
+  end
+
+  defp since_watermark({:timestamp, _}), do: nil
+
+  # ---- event loop ---------------------------------------------------------
+
+  # Tail-recursive receive loop. Waits up to @keepalive_ms for an event; on
+  # timeout sends a bare newline keepalive to prevent proxy timeouts.
+  #
+  # `watermark` is FROZEN at the replay high-water mark for the life of the
+  # connection — it is never advanced by live sends. It only exists to
+  # suppress events the replay query already returned (cursor <=
+  # watermark), which is what makes the subscribe-before-replay race in
+  # stream/2 safe: an event that arrives both via the replay query and via a
+  # queued PubSub message is only ever sent once. PubSub never redelivers a
+  # message, so advancing the watermark on every live send buys nothing —
+  # and it actively breaks delivery for concurrent broadcasters, since two
+  # events persisted close together can be broadcast out of cursor order
+  # (persist and PubSub broadcast aren't atomic across processes): if a
+  # higher-cursor event's PubSub message is scheduled first, advancing the
+  # watermark to it would cause the lower-cursor event that follows to be
+  # wrongly treated as already-delivered and silently dropped. An event with
+  # no cursor (persist failed) is always sent — it was never a replay
+  # candidate to begin with.
+  # `revocation_deadline` is a `System.monotonic_time(:millisecond)` value:
+  # the next time revocation is due to be re-checked. It is independent of
+  # the receive timeout below — a stream that never idles (an event arrives
+  # at least once per `keepalive_ms`) would otherwise never hit the `after`
+  # clause, and a revoked/ended session's already-open stream would keep
+  # streaming forever instead of closing within one keepalive interval.
+  defp event_loop(conn, topics, watermark, scope, revocation_deadline) do
+    receive do
+      {:event, event} ->
+        if due?(revocation_deadline) and revoked?(scope) do
+          conn
+        else
+          revocation_deadline = advance(revocation_deadline)
+
+          if deliver?(event, topics, watermark) do
+            json_line = Jason.encode!(stringify_keys(event)) <> "\n"
+
+            case Plug.Conn.chunk(conn, json_line) do
+              {:ok, conn} -> event_loop(conn, topics, watermark, scope, revocation_deadline)
+              {:error, _} -> conn
+            end
+          else
+            event_loop(conn, topics, watermark, scope, revocation_deadline)
+          end
+        end
+    after
+      keepalive_ms() ->
+        # Session tokens are revocable (Wardmast.MCP.Scope) but a long-lived
+        # chunked connection is only checked once, at authenticate/2 —
+        # re-check here too so an idle stream closes within one tick.
+        # Plain coordinator/worker tokens carry no session_id and are never
+        # revocable, so this is a no-op for them.
+        if revoked?(scope) do
+          conn
+        else
+          case Plug.Conn.chunk(conn, "\n") do
+            {:ok, conn} ->
+              event_loop(conn, topics, watermark, scope, advance(revocation_deadline))
+
+            {:error, _} ->
+              conn
+          end
+        end
+    end
+  end
+
+  defp due?(deadline), do: System.monotonic_time(:millisecond) >= deadline
+
+  defp advance(deadline) do
+    if due?(deadline), do: next_revocation_check(), else: deadline
+  end
+
+  defp next_revocation_check, do: System.monotonic_time(:millisecond) + keepalive_ms()
+
+  defp revoked?(%Scope{session_id: nil}), do: false
+  defp revoked?(%Scope{session_id: id}), do: Wardmast.Sessions.mcp_token_revoked?(id)
+
+  defp keepalive_ms do
+    :wardmast_web
+    |> Application.get_env(__MODULE__, [])
+    |> Keyword.get(:keepalive_ms, @default_keepalive_ms)
+  end
+
+  @doc false
+  # Exposed for unit testing (finding #3): pure delivery decision, independent
+  # of the receive loop and the conn plumbing.
+  def deliver?(event, topics, watermark) do
+    MapSet.member?(topics, Map.get(event, :topic)) and not already_delivered?(event, watermark)
+  end
+
+  defp already_delivered?(%{cursor: cursor}, watermark)
+       when is_integer(cursor) and is_integer(watermark),
+       do: cursor <= watermark
+
+  defp already_delivered?(_event, _watermark), do: false
+
+  # The event map uses atom keys internally; JSON encoding expects string keys
+  # or structs — Jason handles atom keys fine, but to be explicit and safe we
+  # convert atoms so the wire format is consistent regardless of how the map
+  # was constructed.
+  defp stringify_keys(map) when is_map(map) do
+    Map.new(map, fn
+      {k, v} when is_atom(k) -> {Atom.to_string(k), v}
+      {k, v} -> {k, v}
+    end)
+  end
+end

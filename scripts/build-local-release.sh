@@ -66,7 +66,7 @@ if ! git -C "$CLONE_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 # Resolve "the primary checkout" the same way the server itself does
-# (ArbiterCli.Cmd.Start): ARB_HOME override, else the path recorded by
+# (WardmastCli.Cmd.Start): ARB_HOME override, else the path recorded by
 # `arb install-service` at ~/.config/arbiter/home, else ~/dev/arbiter.
 # ARB_PRIMARY_CHECKOUT remains available as an explicit override for callers
 # who know better than all of the above.
@@ -144,14 +144,14 @@ fi
 mix local.hex --force --if-missing
 mix local.rebar --force --if-missing
 mix deps.get --only prod
-mix cmd --app arbiter_web mix assets.setup
+mix cmd --app wardmast_web mix assets.setup
 mix compile
-mix cmd --app arbiter_web mix assets.deploy
+mix cmd --app wardmast_web mix assets.deploy
 mix release arbiter --overwrite
 
 # Force-recompile the CLI's version module to ensure the escript captures
 # the correct version when building right after a tag is added (#1943, #1993).
-(cd apps/arbiter_cli && mix compile --force && mix escript.build)
+(cd apps/wardmast_cli && mix compile --force && mix escript.build)
 
 OUTPUT_DIR="${2:-$CLONE_PATH/.local-release}"
 mkdir -p "$OUTPUT_DIR"
@@ -183,7 +183,7 @@ else
 fi
 
 ESCRIPT="$OUTPUT_DIR/arb-local-${SHA}-${TIMESTAMP}"
-cp "$CLONE_PATH/apps/arbiter_cli/arb" "$ESCRIPT"
+cp "$CLONE_PATH/apps/wardmast_cli/arb" "$ESCRIPT"
 chmod +x "$ESCRIPT"
 
 echo "TARBALL=$TARBALL"

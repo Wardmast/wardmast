@@ -4,8 +4,8 @@ Deterministic tests for the qwen CLI, plus an opt-in live smoke test.
 
 | Piece | Where |
 | --- | --- |
-| Scripted OpenAI-compatible server (`tool_calls`, SSE, 4xx/5xx/429, sleep steps) | `apps/arbiter/test/support/scripted_openai.ex`, `scripted_openai/router.ex` |
-| Server self-tests (no qwen needed) | `apps/arbiter/test/arbiter/test_support/scripted_openai_test.exs` |
+| Scripted OpenAI-compatible server (`tool_calls`, SSE, 4xx/5xx/429, sleep steps) | `apps/wardmast/test/support/scripted_openai.ex`, `scripted_openai/router.ex` |
+| Server self-tests (no qwen needed) | `apps/wardmast/test/wardmast/test_support/scripted_openai_test.exs` |
 | Real qwen CLI against the fixtures (`@tag :qwen_cli`) | `.../test_support/qwen_cli_test.exs`, runner in `test/support/qwen_cli.ex` |
 | Live smoke against local Ollama (`@tag :live_ollama`) | `.../test_support/qwen_ollama_live_test.exs` |
 
@@ -14,7 +14,7 @@ Deterministic tests for the qwen CLI, plus an opt-in live smoke test.
 
 ## Pinned qwen version
 
-`Arbiter.Test.QwenCli.pinned_version/0` — currently **0.25.0**. qwen's flags churn
+`Wardmast.Test.QwenCli.pinned_version/0` — currently **0.25.0**. qwen's flags churn
 quickly (bd-3km00p §13), so `qwen_cli_test.exs` fails when the installed version
 differs. **Caveat:** the harness was authored on a host without qwen installed, so
 the pin and the flags in `QwenCli.run/2` (`--auth-type openai --yolo --bare -p`,
@@ -23,9 +23,9 @@ with qwen must confirm or correct them.
 
 ## Re-running the fixtures after a qwen upgrade
 
-    cd apps/arbiter
+    cd apps/wardmast
     qwen --version
-    mix test --include qwen_cli test/arbiter/test_support/qwen_cli_test.exs
+    mix test --include qwen_cli test/wardmast/test_support/qwen_cli_test.exs
 
 Fix any flag/output drift in `QwenCli.run/2` or the fixtures, then bump `@pinned_version`
 in `test/support/qwen_cli.ex` in the same commit.
@@ -33,16 +33,16 @@ in `test/support/qwen_cli.ex` in the same commit.
 ## Live Ollama smoke
 
     ollama pull qwen2.5-coder
-    cd apps/arbiter
-    mix test --include live_ollama test/arbiter/test_support/qwen_ollama_live_test.exs
+    cd apps/wardmast
+    mix test --include live_ollama test/wardmast/test_support/qwen_ollama_live_test.exs
 
 Env: `OLLAMA_URL` (default `http://127.0.0.1:11434`), `ARB_LIVE_OLLAMA_MODEL`.
 
 ## Adapter and stream fixtures (bd-1cm12v, Q2)
 
-`Arbiter.Agents.Qwen` (argv, prompt delivery, env) and `Arbiter.Agents.Qwen.Stream`
+`Wardmast.Agents.Qwen` (argv, prompt delivery, env) and `Wardmast.Agents.Qwen.Stream`
 (stream quirks, exit-code → `StopReason` table) are covered by
-`test/arbiter/agents/qwen_test.exs` and `test/arbiter/agents/qwen/stream_test.exs`,
+`test/wardmast/agents/qwen_test.exs` and `test/wardmast/agents/qwen/stream_test.exs`,
 which replay `test/fixtures/qwen/*.jsonl`. Those fixtures are **hand-authored from
 the documented stream-json schema, not live captures** (no qwen binary or hosted
 endpoint was available). On the first host with qwen, re-record them from a real

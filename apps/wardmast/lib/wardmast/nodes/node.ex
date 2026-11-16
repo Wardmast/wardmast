@@ -1,0 +1,200 @@
+defmodule Wardmast.Nodes.Node do
+  @moduledoc """
+  An enrolled remote node (`docs/design/remote-workers.md` §5.2).
+
+    * `status` — `:active`, `:draining` or `:revoked`. Online/offline is a live
+      property of the node's channel session (a later child), not persisted.
+    * `credential_hash` — `sha256` of the secret half of the node's
+      `arbn_<id>.<secret>` credential. The secret itself is never stored, and
+      the attribute is not public. `nil` once revoked.
+    * `previous_credential_hash` / `previous_valid_until` — the credential
+      before the last rotation, honoured until the overlap ends so the agent
+      can persist the new one before the old one stops working.
+
+  Write through `Wardmast.Nodes`: it owns redemption, rotation, revocation and
+  the `NodeEvent` for each.
+  """
+
+  use Ash.Resource,
+    otp_app: :wardmast,
+    domain: Wardmast.Nodes,
+    data_layer: AshSqlite.DataLayer
+
+  @statuses [:active, :draining, :revoked]
+
+  @doc "Every node status."
+  @spec statuses() :: [atom()]
+  def statuses, do: @statuses
+
+  sqlite do
+    table "nodes"
+    repo Wardmast.Repo
+  end
+
+  actions do
+    defaults [:read, :destroy]
+
+    create :enroll do
+      primary? true
+
+      accept [
+        :id,
+        :name,
+        :labels,
+        :max_workers,
+        :workspace_ids,
+        :kind,
+        :credential_hash,
+        :credential_prefix,
+        :join_token_id,
+        :enrolled_at
+      ]
+    end
+
+    update :rotate do
+      accept [
+        :credential_hash,
+        :credential_prefix,
+        :previous_credential_hash,
+        :previous_valid_until,
+        :rotated_at
+      ]
+    end
+
+    update :revoke do
+      accept []
+      require_atomic? false
+
+      change fn changeset, _context ->
+        changeset
+        |> Ash.Changeset.force_change_attribute(:status, :revoked)
+        |> Ash.Changeset.force_change_attribute(:revoked_at, DateTime.utc_now())
+        |> Ash.Changeset.force_change_attribute(:credential_hash, nil)
+        |> Ash.Changeset.force_change_attribute(:previous_credential_hash, nil)
+        |> Ash.Changeset.force_change_attribute(:previous_valid_until, nil)
+      end
+    end
+
+    # The operator's edit surface (`arb node set`): what the node is called and
+    # how much it may run. Never credentials or status.
+    update :set do
+      accept [:name, :labels, :max_workers, :workspace_ids, :allow_unenforced_network]
+    end
+
+    # Drain: no new assignments, live runs untouched (§13). Revoked stays revoked,
+    # so these two never leave `:revoked`; the domain checks that first.
+    update :drain do
+      accept []
+      change set_attribute(:status, :draining)
+    end
+
+    update :undrain do
+      accept []
+      change set_attribute(:status, :active)
+    end
+
+    # bd-5v5od0: the upgrade an operator asked for, kept until the node reports that version.
+    update :set_upgrade_pending do
+      accept [:upgrade_pending_to, :upgrade_refused_reason]
+    end
+
+    update :touch do
+      accept [:last_seen_at]
+    end
+  end
+
+  attributes do
+    uuid_v7_primary_key :id, writable?: true
+
+    attribute :name, :string do
+      allow_nil? false
+      public? true
+      constraints min_length: 1, max_length: 128, match: ~r/\A[A-Za-z0-9._=:\/@-]+\z/
+    end
+
+    attribute :status, :atom do
+      allow_nil? false
+      public? true
+      default :active
+      constraints one_of: @statuses
+    end
+
+    attribute :kind, :string do
+      allow_nil? false
+      public? true
+      default "machine"
+      constraints match: ~r/\A(machine|cluster)\z/
+
+      description "K9: `machine` or `cluster`, inherited from the join token at enrolment. " <>
+                    "What the node says in `hello` (`kind`) still wins for a live row."
+    end
+
+    attribute :labels, {:array, :string} do
+      allow_nil? false
+      public? true
+      default []
+    end
+
+    attribute :workspace_ids, {:array, :string} do
+      allow_nil? false
+      public? true
+      default []
+
+      description "Node-to-workspace pin (RW8): empty means any workspace may be placed here, " <>
+                    "otherwise only runs of the listed workspaces."
+    end
+
+    attribute :allow_unenforced_network, :boolean do
+      allow_nil? false
+      public? true
+      default false
+
+      description "A7: the operator's per-node override that lets Placement use a cluster " <>
+                    "node reporting `degraded: netpol_unenforced` or `psa_unenforced` (its NetworkPolicy is not " <>
+                    "enforced, so the pod's deny-all is not real). Audited."
+    end
+
+    attribute :max_workers, :integer do
+      public? true
+      constraints min: 1
+    end
+
+    # Secret-derived: not public, never serialized.
+    attribute :credential_hash, :string
+    attribute :credential_prefix, :string, public?: true
+    attribute :previous_credential_hash, :string
+    attribute :previous_valid_until, :utc_datetime_usec
+
+    attribute :rotated_at, :utc_datetime_usec, public?: true
+
+    attribute :enrolled_at, :utc_datetime_usec do
+      allow_nil? false
+      public? true
+    end
+
+    attribute :upgrade_pending_to, :string do
+      public? true
+
+      description "bd-5v5od0: the version `arb node upgrade` asked this node to move to; " <>
+                    "re-sent on every connect until the node's hello reports it."
+    end
+
+    attribute :upgrade_refused_reason, :string do
+      public? true
+
+      description "bd-4kvxun: why the node's controller refused the requested upgrade " <>
+                    "(it needs the operator); cleared by the next upgrade request."
+    end
+
+    attribute :revoked_at, :utc_datetime_usec, public?: true
+    attribute :last_seen_at, :utc_datetime_usec, public?: true
+    attribute :join_token_id, :string, public?: true
+
+    create_timestamp :inserted_at
+    update_timestamp :updated_at
+  end
+
+  identities do
+    identity :unique_name, [:name]
+  end
+end

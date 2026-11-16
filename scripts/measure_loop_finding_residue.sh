@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Measure the Loop analyser's *finding residue* — reviewer findings that match
-# none of `Arbiter.Loop.Analysis`'s `@finding_buckets` regexes and are therefore
+# none of `Wardmast.Loop.Analysis`'s `@finding_buckets` regexes and are therefore
 # dropped by `finding_categories/1` (analysis.ex:246) without being counted.
 #
 # This is the empirical measure of the deterministic pass's ceiling, and the
@@ -40,7 +40,7 @@ base = os.environ.get("BASE_URL", "http://localhost:4848")
 md = json.load(open(f"{work}/analysis.json"))["markdown"]
 task_ids = sorted(set(re.findall(r"\b[a-z]+-[a-z0-9]{6}\b", md)))
 
-# Mirrors Arbiter.Loop.Corpus.finding_line?/1 + split_findings/1 (corpus.ex:279-293).
+# Mirrors Wardmast.Loop.Corpus.finding_line?/1 + split_findings/1 (corpus.ex:279-293).
 LINE = [re.compile(r"^\d+\.\s"), re.compile(r"^\*\*\["), re.compile(r"^-\s+\*\*")]
 
 def split_findings(text):
@@ -48,7 +48,7 @@ def split_findings(text):
     items = [l for l in items if any(r.match(l) for r in LINE)]
     return items or [text]
 
-# Mirrors Arbiter.Loop.Analysis.@finding_buckets (analysis.ex:222-228).
+# Mirrors Wardmast.Loop.Analysis.@finding_buckets (analysis.ex:222-228).
 BUCKETS = [
     (re.compile(r"inert|never (?:executed|called|invoked|run|wired)|not (?:wired|reachable)|green tests? but|passes? but .*runtime", re.I), "plausible code, green tests, inert at runtime"),
     (re.compile(r"no test|missing test|untested|test coverage|without a test", re.I), "missing test coverage"),

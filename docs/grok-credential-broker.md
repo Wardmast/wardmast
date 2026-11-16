@@ -14,16 +14,16 @@ worker jail                              Arbiter server
 grok ── GROK_AUTH_PROVIDER_COMMAND ──►   POST /api/grok/token   (worker ARB_TOKEN)
         <GROK_HOME>/arbiter-grok-token         │
         └─ exec arb grok-token                 ▼
-                                      Arbiter.Grok.CredentialBroker   ← the only
+                                      Wardmast.Grok.CredentialBroker   ← the only
                                                │                        refresher
                                                ▼
                                       accounts/grok-<slug>/auth.json (canonical)
 ```
 
 * **Canonical credential**: one `auth.json` per install, resolved by
-  `Arbiter.Grok.CredentialStore.resolve/1` (bd-8rvkqd), the same way for the
+  `Wardmast.Grok.CredentialStore.resolve/1` (bd-8rvkqd), the same way for the
   broker, the doctor and the login relay:
-  1. `config :arbiter, :grok_broker, auth_path:` when set (an explicit pin);
+  1. `config :wardmast, :grok_broker, auth_path:` when set (an explicit pin);
   2. else the **grok provider account's** `<accounts_root>/grok-<slug>/auth.json`
      (`~/.arbiter/accounts/grok-default/auth.json`), which is where the dashboard
      login relay writes (`GROK_HOME=<that dir>`). With several grok accounts,
@@ -39,14 +39,14 @@ grok ── GROK_AUTH_PROVIDER_COMMAND ──►   POST /api/grok/token   (worke
   (not `/tmp`: the jail mounts a private `--tmpfs /tmp`) that `exec`s
   `arb grok-token`. grok runs it for its first token, ~5 minutes before expiry
   and on a 401 (with `GROK_AUTH_EXPIRED=1`). The reply is exactly
-  `{"access_token", "expires_in"}`. See `Arbiter.Grok.AuthProvider.spawn_env/2`.
+  `{"access_token", "expires_in"}`. See `Wardmast.Grok.AuthProvider.spawn_env/2`.
 * **A cold `GROK_HOME` is hydrated first** (bd-8rvkqd). Measured on grok 1.0.25:
   headless `grok -p` does **not** run `GROK_AUTH_PROVIDER_COMMAND` when its
   `GROK_HOME` has no `auth.json`; it answers "Not signed in" without asking (so
   the broker saw no request). The command is only consulted to *refresh* a
   credential grok already holds, and `grok login` is what creates one (an
   `auth.json` with `auth_mode: external` and no refresh token). So the adapter's
-  launch script (`Arbiter.Agents.Grok`) runs `grok login` once per home, in the
+  launch script (`Wardmast.Agents.Grok`) runs `grok login` once per home, in the
   worker's env, before `exec`ing grok; that is the run's first token request.
   Once hydrated, an expired token makes grok run the command with
   `GROK_AUTH_EXPIRED=1`.
@@ -57,7 +57,7 @@ grok ── GROK_AUTH_PROVIDER_COMMAND ──►   POST /api/grok/token   (worke
   `credentials_ref`: `env:XAI_API_KEY`, `secret:xai`). The key replaces the
   broker for that worker. A ref that does not resolve is an error, not a silent
   fall-back to the operator's login.
-* **The jail hides `~/.grok`** (`Arbiter.Worker.Jail.Hide`) so a worker cannot
+* **The jail hides `~/.grok`** (`Wardmast.Worker.Jail.Hide`) so a worker cannot
   read the canonical file under `--ro-bind / /`.
 
 ## Single writer
@@ -79,7 +79,7 @@ token fields change. **Nothing here ever deletes it.**
 
 ## Permanent failure
 
-The broker marks the provider expired in `Arbiter.Agents.CredentialWatchdog`:
+The broker marks the provider expired in `Wardmast.Agents.CredentialWatchdog`:
 the dispatch gate closes, coordinators are paged, quota surfaces report
 `credentials_expired`. Every worker request then fails fast (503
 `grok_reauth_required` / `grok_not_logged_in`, remedy in the message) without
@@ -93,12 +93,12 @@ holds a different login (re-run the login from the dashboard, or
 A grok worker that dies "Not signed in" at spawn opens the grok `AuthHold` on
 its **first** death (other providers need two): the credential is one shared
 login, so one death is conclusive. While it is open `routing.grok` stops
-selecting grok (`Arbiter.Agents.GrokRouting.route?/3`), so the ticket
+selecting grok (`Wardmast.Agents.GrokRouting.route?/3`), so the ticket
 `AuthDeath` reopens goes to the next eligible provider. Clear it with
 `arb breaker reset --auth-hold grok` after fixing the login.
 
-The hold's identity is the module `Arbiter.Agents.adapters()[:grok]`, else
-`Arbiter.Agents.Grok`; the adapter must register under that name.
+The hold's identity is the module `Wardmast.Agents.adapters()[:grok]`, else
+`Wardmast.Agents.Grok`; the adapter must register under that name.
 
 ## Not logged
 

@@ -1,0 +1,616 @@
+defmodule Wardmast.Worker.ContainerSpawnRemoteSpecTest do
+  @moduledoc "RW12: the remote run spec carries the install id the node reaps by (§10.6)."
+  use ExUnit.Case, async: false
+
+  alias Wardmast.Nodes.InstallId
+  alias Wardmast.Worker.ContainerSpawn
+
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: dir} do
+    previous = Application.fetch_env(:wardmast, :data_dir)
+    Application.put_env(:wardmast, :data_dir, Path.join(dir, "data"))
+
+    on_exit(fn ->
+      case previous do
+        {:ok, v} -> Application.put_env(:wardmast, :data_dir, v)
+        :error -> Application.delete_env(:wardmast, :data_dir)
+      end
+    end)
+
+    proxy = Path.join(dir, "proxy.sock")
+    File.write!(proxy, "")
+
+    request = %{
+      name: "arb-t-1",
+      image: %{tag: "localhost/x:1", plan: nil},
+      worktree: "/work/tree",
+      home: "/work/home",
+      config_dir: "/work/config",
+      config_files: %{},
+      tmp_dir: "/work/tmp",
+      cli: [],
+      prompt_paths: [],
+      network: [proxy_socket: proxy, socat: "socat"],
+      env: [],
+      services: [],
+      limits: %{},
+      checkout: nil,
+      task_id: "bd-t"
+    }
+
+    %{request: request}
+  end
+
+  test "the spec names the install", %{request: request} do
+    assert {:ok, spec} =
+             ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+    assert spec["install"] == InstallId.get()
+  end
+
+  # bd-8tg3uv (#891): a pod has none of the primary's Unix sockets, so a cluster node's
+  # command forwards each loopback listener over TCP to the controller's bridge address.
+  describe "the network script per node kind (bd-8tg3uv)" do
+    setup %{request: request, tmp_dir: dir} do
+      arb = Path.join(dir, "arb.sock")
+      File.write!(arb, "")
+      network = Keyword.put(request.network, :bridges, [{4848, arb}])
+      %{request: %{request | network: network}, arb: arb}
+    end
+
+    test "a cluster node's command has no UNIX-CONNECT and no primary path", ctx do
+      request = Map.put(ctx.request, :node_kind, "cluster")
+
+      assert {:ok, spec} =
+               ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+      text = Enum.join(spec["command"], "\n")
+      refute text =~ "UNIX-CONNECT"
+      refute text =~ ".sock"
+      refute text =~ Path.dirname(ctx.arb)
+      assert text =~ "OPENSSL:$addr"
+      assert text =~ "ARB_BRIDGE_ADDR"
+      assert Enum.take(spec["command"], -1) == ["claude"]
+    end
+
+    test "every listener the cluster command opens has a declared bridge (a leaf) in the spec",
+         ctx do
+      request = Map.put(ctx.request, :node_kind, "cluster")
+
+      assert {:ok, spec} =
+               ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+      declared = Enum.map(spec["bridges"], & &1["name"])
+      assert declared == ["proxy", "4848"]
+
+      ["sh", "-c", _script, "sh", "socat" | rest] = spec["command"]
+      listeners = rest |> Enum.take_while(&(&1 != "--")) |> Enum.chunk_every(2)
+      assert listeners == [["3128", "proxy"], ["4848", "4848"]]
+    end
+
+    test "a machine node (or no kind) keeps the Unix-socket forwarder", ctx do
+      for request <- [ctx.request, Map.put(ctx.request, :node_kind, "machine")] do
+        assert {:ok, spec} =
+                 ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+        assert Enum.join(spec["command"], "\n") =~ "UNIX-CONNECT:$2"
+        assert ctx.arb in spec["command"]
+      end
+    end
+  end
+
+  test "a registry request puts the digest-pinned ref in the spec image (A2)", %{request: request} do
+    ref = "registry.example.com/arbiter/worker@sha256:" <> String.duplicate("b", 64)
+    request = put_in(request.image, %{tag: "localhost/x:1", plan: nil, ref: ref})
+
+    assert {:ok, spec} =
+             ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+    assert spec["image"] == %{"tag" => "localhost/x:1", "plan" => nil, "ref" => ref}
+    refute Map.has_key?(spec, "pull_auth")
+  end
+
+  # SI4: a machine node that pulls is told what to check the image against and given
+  # the read credential for that one pull, and nothing it would have to fetch.
+  test "a pull request's spec carries the ref and its CLI set and provider and pull_auth and no CLI mount",
+       %{
+         request: request
+       } do
+    ref = "registry.example.com/arbiter/vstim/worker@sha256:" <> String.duplicate("c", 64)
+
+    auth = %Wardmast.NodeAgent.PullAuth{
+      registry: "registry.example.com",
+      username: "reader",
+      password: "PULL-pw-MARKER"
+    }
+
+    request =
+      request
+      |> Map.put(:provider, "claude")
+      |> Map.put(:image, %{
+        tag: "localhost/x:1",
+        plan: nil,
+        ref: ref,
+        cli_set: "0a1b2c3d",
+        pull: %{auth: auth, level: :install, insecure?: true}
+      })
+
+    assert {:ok, spec} =
+             ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+    assert spec["image"] == %{
+             "tag" => "localhost/x:1",
+             "plan" => nil,
+             "ref" => ref,
+             "cli_set" => "0a1b2c3d",
+             "provider" => "claude",
+             "insecure" => true
+           }
+
+    assert spec["pull_auth"] == auth
+    refute Enum.any?(spec["mounts"], &(&1["kind"] == "cli"))
+
+    # the wire form carries the credential; nothing that prints the spec does
+    wire = spec |> Jason.encode!() |> Jason.decode!()
+
+    assert wire["pull_auth"] == %{
+             "registry" => "registry.example.com",
+             "username" => "reader",
+             "password" => "PULL-pw-MARKER"
+           }
+
+    refute inspect(spec, limit: :infinity, printable_limit: :infinity) =~ "PULL-pw-MARKER"
+
+    # and the agent accepts exactly what the primary sends
+    assert {:ok, %Wardmast.NodeAgent.RunSpec{pull_auth: ^auth, image: image}} =
+             Wardmast.NodeAgent.RunSpec.validate(wire)
+
+    assert %{ref: ^ref, cli_set: "0a1b2c3d", provider: "claude", insecure?: true} = image
+  end
+
+  test "an anonymous pull (public_ok) sends no pull_auth", %{request: request} do
+    ref = "ghcr.io/acme/vstim/worker@sha256:" <> String.duplicate("c", 64)
+
+    request =
+      request
+      |> Map.put(:provider, "claude")
+      |> Map.put(:image, %{
+        tag: "localhost/x:1",
+        plan: nil,
+        ref: ref,
+        cli_set: "0a1b2c3d",
+        pull: %{auth: nil, level: :anonymous, insecure?: false}
+      })
+
+    assert {:ok, spec} =
+             ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+    refute Map.has_key?(spec, "pull_auth")
+    refute Map.has_key?(spec["image"], "insecure")
+    assert spec["image"]["cli_set"] == "0a1b2c3d"
+  end
+
+  # bd-akp9ae: a GitHub App token carried to the node rides in the spec's secrets
+  # (the node's per-run tmpfs file), never in its env or command.
+  test "a carried git token is a secret of the spec, not env and not the command", %{
+    request: request
+  } do
+    request = Map.put(request, :git_secrets, %{"ARB_GIT_TOKEN" => "ghs_carried"})
+
+    assert {:ok, spec} =
+             ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+    assert spec["secrets"]["ARB_GIT_TOKEN"] == "ghs_carried"
+    refute inspect(spec["env"]) =~ "ghs_carried"
+    refute inspect(spec["command"]) =~ "ghs_carried"
+  end
+
+  # bd-akp9ae: a long-lived git credential (an App's private key, a deploy key, a
+  # static token) never leaves the primary, even when the workspace also exposes it
+  # as a worker env var: the spec is sent without that var.
+  test "an env value carrying a withheld credential is not sent", %{request: request} do
+    pem =
+      "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAwithheldkeybody\n-----END RSA PRIVATE KEY-----"
+
+    request = Map.put(request, :withheld, [pem])
+
+    port_args = %{
+      argv: ["claude"],
+      env: [{"APP_PEM", pem <> "\n"}, {"WRAPPED", "key=" <> pem}, {"KEEP_ME", "plain"}]
+    }
+
+    assert {:ok, spec} = ContainerSpawn.remote_spec(request, port_args, "run-1")
+
+    sent = inspect(spec, limit: :infinity, printable_limit: :infinity)
+    refute sent =~ "withheldkeybody"
+    refute Map.has_key?(spec["secrets"], "APP_PEM")
+    refute Map.has_key?(spec["secrets"], "WRAPPED")
+    assert spec["secrets"]["KEEP_ME"] == "plain"
+  end
+
+  # bd-3llb3y: a GitLab run's spec carries the minted token (git push and
+  # GITLAB_TOKEN) as secrets, and never the parent credential, even when the
+  # workspace also exposes the parent as a worker env var.
+  test "a GitLab run's spec holds the minted token as secrets and never the parent", %{
+    request: request
+  } do
+    alias Wardmast.Worker.GitCredential
+    alias Wardmast.Worker.GitCredential.Material
+
+    parent = "glpat-parent-0123456789abcdef"
+
+    material = %Material{
+      kind: :gitlab_project_token,
+      token: "glpat-run-token",
+      token_id: 3,
+      parent_token: parent,
+      host: "gitlab.com",
+      username: "oauth2",
+      remote: "acme/tonic"
+    }
+
+    {:ok, git} = GitCredential.remote_delivery(material)
+    request = Map.merge(request, %{git_secrets: git.secrets, env: git.env, withheld: [parent]})
+
+    port_args = %{
+      argv: ["claude"],
+      env: [{"GITLAB_PARENT_PAT", parent}, {"KEEP_ME", "plain"}]
+    }
+
+    assert {:ok, spec} = ContainerSpawn.remote_spec(request, port_args, "run-1")
+
+    assert spec["secrets"]["ARB_GIT_TOKEN"] == "glpat-run-token"
+    assert spec["secrets"]["GITLAB_TOKEN"] == "glpat-run-token"
+    assert spec["secrets"]["KEEP_ME"] == "plain"
+    # Every non-client env name rides the secrets file, not the spec env.
+    assert spec["secrets"]["GITLAB_HOST"] == "gitlab.com"
+
+    sent = inspect(spec, limit: :infinity, printable_limit: :infinity)
+    refute sent =~ "0123456789abcdef"
+    refute Map.has_key?(spec["secrets"], "GITLAB_PARENT_PAT")
+    refute inspect(spec["env"]) =~ "glpat-run-token"
+    refute inspect(spec["command"]) =~ "glpat-run-token"
+  end
+
+  # bd-8ufzng: the Free-tier bot PAT rides the spec's secrets (tmpfs on the node),
+  # never its env or command, and the bot's own secret is not in `withheld`.
+  test "a gitlab_bot_token run's spec holds the PAT as secrets only", %{request: request} do
+    alias Wardmast.Worker.GitCredential
+    alias Wardmast.Worker.GitCredential.Material
+
+    material = %Material{
+      kind: :gitlab_bot_token,
+      token: "glpat-bot-0123456789",
+      host: "gitlab.com",
+      username: "oauth2",
+      remote: "acme/tonic"
+    }
+
+    {:ok, git} = GitCredential.remote_delivery(material)
+    request = Map.merge(request, %{git_secrets: git.secrets, env: git.env, withheld: []})
+
+    assert {:ok, spec} =
+             ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+    assert spec["secrets"]["ARB_GIT_TOKEN"] == "glpat-bot-0123456789"
+    assert spec["secrets"]["GITLAB_TOKEN"] == "glpat-bot-0123456789"
+    assert spec["secrets"]["GITLAB_HOST"] == "gitlab.com"
+    refute inspect(spec["env"]) =~ "glpat-bot"
+    refute inspect(spec["command"]) =~ "glpat-bot"
+  end
+
+  test "no ref, no ref key: a build node's spec is unchanged", %{request: request} do
+    assert {:ok, spec} =
+             ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+    assert spec["image"] == %{"tag" => "localhost/x:1", "plan" => nil}
+  end
+
+  describe "worktree files and host paths (bd-8y8ztm)" do
+    alias Wardmast.Agents.{Claude, SecurityPolicy}
+    alias Wardmast.MCP.AgentConfig
+
+    # The real argv the dispatcher builds for a podman-sandboxed Claude run that
+    # was handed an injected `.mcp.json` (the shape that crashed the RW13 canary).
+    defp real_argv(mcp_config) do
+      policy =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}})
+
+      {:ok, argv} =
+        Claude.default_argv("do the thing",
+          security: policy,
+          sandbox_wrap: true,
+          mcp_config: mcp_config
+        )
+
+      argv
+    end
+
+    defp injected_worktree(dir) do
+      worktree = Path.join(dir, "wt")
+      File.mkdir_p!(Path.join(worktree, ".claude/skills/tdd"))
+      File.write!(Path.join(worktree, ".claude/skills/tdd/SKILL.md"), "# tdd")
+
+      :ok =
+        AgentConfig.Claude.write_mcp_config(worktree,
+          mcp_url: "http://127.0.0.1:4848/mcp",
+          scope_token: "scope-token-xyz",
+          server_name: "arbiter"
+        )
+
+      worktree
+    end
+
+    test "worktree_files/1 ships .mcp.json with the token swapped for an env reference", %{
+      tmp_dir: dir
+    } do
+      worktree = injected_worktree(dir)
+
+      assert {:ok, files, secrets} = ContainerSpawn.worktree_files(worktree)
+
+      assert secrets == %{"ARBITER_MCP_TOKEN" => "scope-token-xyz"}
+      refute files[".mcp.json"] =~ "scope-token-xyz"
+
+      assert %{"mcpServers" => %{"arbiter" => %{"headers" => %{"Authorization" => auth}}}} =
+               Jason.decode!(files[".mcp.json"])
+
+      assert auth == "Bearer ${ARBITER_MCP_TOKEN}"
+      assert files[".claude/skills/tdd/SKILL.md"] == "# tdd"
+    end
+
+    test "worktree_files/1 of a worktree with nothing injected is empty", %{tmp_dir: dir} do
+      File.mkdir_p!(Path.join(dir, "bare"))
+      assert {:ok, %{}, %{}} = ContainerSpawn.worktree_files(Path.join(dir, "bare"))
+    end
+
+    test "the spec carries the files on the worktree mount and the token as a secret", %{
+      request: request,
+      tmp_dir: dir
+    } do
+      worktree = injected_worktree(dir)
+      {:ok, files, secrets} = ContainerSpawn.worktree_files(worktree)
+      request = Map.merge(request, %{worktree_files: files, worktree_secrets: secrets})
+
+      assert {:ok, spec} =
+               ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+      mount = Enum.find(spec["mounts"], &(&1["kind"] == "worktree"))
+
+      assert Map.keys(mount["files"]) |> Enum.sort() == [
+               ".claude/skills/tdd/SKILL.md",
+               ".mcp.json"
+             ]
+
+      assert Base.decode64!(mount["files"][".mcp.json"]) == files[".mcp.json"]
+      assert spec["secrets"]["ARBITER_MCP_TOKEN"] == "scope-token-xyz"
+      refute inspect(spec["env"]) =~ "scope-token-xyz"
+    end
+
+    # AC2: every absolute path the primary hands the node must resolve on the
+    # node side: under a mount the agent makes (worktree files declared or
+    # tracked, home, config_dir, tmp), a published CLI, or a prompt file.
+    test "every host path in the real argv resolves inside the container", %{
+      request: request,
+      tmp_dir: dir
+    } do
+      worktree = injected_worktree(dir)
+      {:ok, files, secrets} = ContainerSpawn.worktree_files(worktree)
+
+      request =
+        Map.merge(request, %{
+          worktree: worktree,
+          home: Path.join(dir, "run/home"),
+          config_dir: Path.join(dir, "run/claude-config"),
+          tmp_dir: Path.join(dir, "run"),
+          cli: [{String.duplicate("a", 64), "claude", ContainerSpawn.claude_path()}],
+          worktree_files: files,
+          worktree_secrets: secrets
+        })
+
+      argv = real_argv(Path.join(worktree, AgentConfig.Claude.filename()))
+      env = [{"TMPDIR", request.tmp_dir}, {"CLAUDE_CONFIG_DIR", request.config_dir}]
+
+      assert {:ok, spec} = ContainerSpawn.remote_spec(request, %{argv: argv, env: env}, "run-1")
+
+      # Every argv element and env value that is itself an absolute path (free
+      # text, such as the prompt or the inline settings JSON, is not a path).
+      mounts = spec["mounts"] ++ spec["bridges"]
+      worktree_mount = Enum.find(mounts, &(&1["kind"] == "worktree"))
+
+      values =
+        spec["command"] ++
+          Map.values(spec["env"]) ++
+          Map.values(Map.delete(spec["secrets"], "ARBITER_MCP_TOKEN"))
+
+      paths = Enum.filter(values, &String.starts_with?(&1, "/"))
+
+      assert Enum.any?(paths, &String.ends_with?(&1, "/.mcp.json")),
+             "the argv should carry --mcp-config: #{inspect(spec["command"] |> Enum.take(-8))}"
+
+      for path <- paths, path not in ["/dev/null"] do
+        under =
+          Enum.find(mounts, &(path == &1["path"] or String.starts_with?(path, &1["path"] <> "/")))
+
+        assert under, "#{path} is under no mount of the spec"
+
+        if under == worktree_mount do
+          rel = Path.relative_to(path, worktree_mount["path"])
+
+          assert Map.has_key?(worktree_mount["files"] || %{}, rel),
+                 "#{path} is inside the worktree but is neither tracked nor shipped as a worktree file"
+        end
+      end
+    end
+  end
+end
+
+defmodule Wardmast.Worker.ContainerSpawnRegistryImageTest do
+  @moduledoc """
+  K8/A2: a node that advertises `caps.image = "registry"` is given the
+  digest-pinned `ref` of a published image and no build plan; a build node, and
+  an install with no `nodes.registry`, are untouched.
+  """
+  use ExUnit.Case, async: true
+
+  alias Wardmast.Worker.ContainerSpawn
+  alias Wardmast.Worker.Image.Publisher
+
+  @ref "registry.example.com/arbiter/worker@sha256:" <> String.duplicate("e", 64)
+  @plan %{tag: "localhost/arbiter-dev/x:abc", plan: :a_plan_map}
+  @ctx %{repo_path: "/repo", base: "main", seed_paths: nil}
+
+  defp registry_node, do: %{id: "n1", caps: %{"image" => "registry"}}
+  defp build_node, do: %{id: "n2", caps: %{"image" => "build"}}
+
+  defp publish_opts(result) do
+    server =
+      start_supervised!(%{
+        id: :pub,
+        start: {Agent, :start_link, [fn -> result end]}
+      })
+
+    [publish: [stub: fn _ctx -> Agent.get(server, & &1) end]]
+  end
+
+  test "a build node keeps the plan and nothing is published" do
+    assert {:ok, @plan} =
+             ContainerSpawn.registry_image(@plan, build_node(), @ctx,
+               publish: [stub: fn _ -> flunk("published") end]
+             )
+  end
+
+  test "a registry node gets the ref and no plan" do
+    opts = publish_opts({:ok, %{ref: @ref}})
+
+    assert {:ok, %{tag: "localhost/arbiter-dev/x:abc", plan: nil, ref: @ref}} =
+             ContainerSpawn.registry_image(@plan, registry_node(), @ctx, opts)
+  end
+
+  test "a registry node with nodes.registry unset is refused, not sent a plan it cannot build" do
+    opts = publish_opts(:disabled)
+
+    assert {:error, {:image_unavailable, :no_registry}} =
+             ContainerSpawn.registry_image(@plan, registry_node(), @ctx, opts)
+  end
+
+  test "a timeout or push failure surfaces as image_unavailable" do
+    opts = publish_opts({:error, {:timeout, 5}})
+
+    assert {:error, {:image_unavailable, {:timeout, 5}}} =
+             ContainerSpawn.registry_image(@plan, registry_node(), @ctx, opts)
+  end
+
+  test "Publisher is the default publisher" do
+    assert Code.ensure_loaded?(Publisher)
+  end
+
+  # SI4 (`docs/design/remote-workers.md` §21.2.1, §21.4): the per-run choice of source
+  # replaces `registry_node?/1`; a machine node that lists `registry` in
+  # `caps.image_sources` pulls under `nodes.machine_image_source: auto`.
+  describe "a machine node that can pull (SI4)" do
+    @push_pw "PUSH-pw-NEVER-ON-A-NODE"
+    @install %{
+      registry: "registry.example.com/arbiter",
+      username: "pusher",
+      password: @push_pw,
+      pull_username: "reader",
+      pull_password: "PULL-pw"
+    }
+
+    defp machine_node,
+      do: %{
+        id: "n3",
+        name: "oryx",
+        kind: :machine,
+        workspace_ids: [],
+        caps: %{"image" => "build", "image_sources" => ["registry", "build"]}
+      }
+
+    defp source(extra),
+      do: [image_source: Keyword.merge([config: @install, workspaces: []], extra)]
+
+    test "under auto it gets the ref, the image's CLI set and a pull credential, no plan" do
+      opts =
+        publish_opts({:ok, %{ref: @ref, cli_set: "0a1b2c3d"}}) ++
+          source(machine_image_source: "auto")
+
+      assert {:ok, image} = ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
+
+      assert %{tag: "localhost/arbiter-dev/x:abc", plan: nil, ref: @ref, cli_set: "0a1b2c3d"} =
+               image
+
+      assert %{
+               auth: %Wardmast.NodeAgent.PullAuth{
+                 registry: "registry.example.com",
+                 username: "reader",
+                 password: "PULL-pw"
+               },
+               level: :install,
+               insecure?: false
+             } = image.pull
+
+      refute inspect(image, limit: :infinity, printable_limit: :infinity) =~ @push_pw
+    end
+
+    test "build forces the plan: the same node keeps it, nothing is published" do
+      opts =
+        [publish: [stub: fn _ -> flunk("published") end]] ++ source(machine_image_source: "build")
+
+      assert {:ok, @plan} = ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
+    end
+
+    test "under auto with no pull credential it keeps the plan; the push credential is not used" do
+      no_pull = Map.drop(@install, [:pull_username, :pull_password])
+
+      opts =
+        [publish: [stub: fn _ -> flunk("published") end]] ++
+          source(machine_image_source: "auto", config: no_pull)
+
+      assert {:ok, image} = ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
+      assert image == @plan
+    end
+
+    test "an explicit image (no plan) on a machine node stays a tag it holds" do
+      opts =
+        [publish: [stub: fn _ -> flunk("published") end]] ++ source(machine_image_source: "auto")
+
+      image = %{tag: "localhost/x:1", plan: nil}
+      assert {:ok, ^image} = ContainerSpawn.registry_image(image, machine_node(), %{}, opts)
+    end
+
+    test "a publish that fails is image_unavailable, as for a cluster" do
+      opts = publish_opts({:error, {:timeout, 5}}) ++ source(machine_image_source: "auto")
+
+      assert {:error, {:image_unavailable, {:timeout, 5}}} =
+               ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
+    end
+
+    # bd-5fpj59 meets SI4: the board's promotion publishes without waiting
+    # (`publish: [wait: false, on_done: _]`, the stub among them). A machine node that
+    # pulls needs the published image as a cluster does, so a publish still running is
+    # `image_pending` (Dispatch holds the card), not a failure and not a plan.
+    test "a publish still running is image_pending, as for a cluster" do
+      publish = [
+        stub: fn _ctx -> {:pending, :image_key_1} end,
+        wait: false,
+        on_done: fn _key, _result -> :ok end
+      ]
+
+      opts = [publish: publish] ++ source(machine_image_source: "auto")
+
+      assert {:error, {:image_pending, :image_key_1}} =
+               ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
+
+      assert {:error, {:image_pending, :image_key_1}} =
+               ContainerSpawn.registry_image(@plan, registry_node(), @ctx, publish: publish)
+
+      # forced to build, the same node builds: nothing is published or held
+      build =
+        [publish: [stub: fn _ -> flunk("published") end, wait: false]] ++
+          source(machine_image_source: "build")
+
+      assert {:ok, @plan} = ContainerSpawn.registry_image(@plan, machine_node(), @ctx, build)
+    end
+  end
+end

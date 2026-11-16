@@ -45,14 +45,14 @@ The highest-risk path is one the issue does not name — see
 ### 1. There is no version anywhere in the data
 
 No `version` column on `worker_runs` (checked all three resource snapshots in
-`apps/arbiter/priv/resource_snapshots/repo/worker_runs/`), none on
+`apps/wardmast/priv/resource_snapshots/repo/worker_runs/`), none on
 `usage_events` or `loop_pending_writes`, and **no releases/deploys table at
 all** — the snapshot directory holds 17 tables and none of them record a
 deploy. So the version is not recoverable per run, and it is not derivable
 from a deploy timeline either, because no deploy timeline is persisted.
 
-The version *is* available at runtime: `Arbiter.Version.app_version/0`,
-`git_sha/0` and `built_at/0` (`apps/arbiter/lib/arbiter/version.ex:90-96`),
+The version *is* available at runtime: `Wardmast.Version.app_version/0`,
+`git_sha/0` and `built_at/0` (`apps/wardmast/lib/wardmast/version.ex:90-96`),
 surfaced by `GET /api/version`. Live response from the running fleet:
 
 ```json
@@ -152,7 +152,7 @@ Those 12 become `:difficulty_override` candidates at `scope: :task`
 (`proposals.ex:171-200`), and:
 
 ```elixir
-# apps/arbiter/lib/arbiter/loop.ex:432
+# apps/wardmast/lib/wardmast/loop.ex:432
 defp clears_bar?(:task, _incidents, _tasks, _bar), do: true
 ```
 
@@ -178,7 +178,7 @@ has to confront this; see [rung 4](#the-ladder).
 
 ### 6. The canary is already immune; the pre-registered baseline is not
 
-`Arbiter.Loop.Canary` measures a change against a **concurrent** untouched arm —
+`Wardmast.Loop.Canary` measures a change against a **concurrent** untouched arm —
 a stable 50/50 split of task ids under the same running build
 (`canary.ex:55-66`). Both arms therefore always share a build, and no release
 can confound it. This is the correct pattern and it already exists here.
@@ -198,16 +198,16 @@ checker is built, which is the reason to settle it now.
 
 **No, and it must become so. This is the prerequisite for everything else.**
 
-Add two attributes to `Arbiter.Workers.Run`:
+Add two attributes to `Wardmast.Workers.Run`:
 
 ```elixir
 attribute :arbiter_version, :string   # "0.1.56"  — display rollup
 attribute :arbiter_sha,     :string   # "4daeac8a" — the actual identity
 ```
 
-Stamp both in `Arbiter.Worker.record_run_started/1`
-(`apps/arbiter/lib/arbiter/worker.ex:712`), in the same `attrs` map as
-`difficulty_at_dispatch`. Values come straight from `Arbiter.Version` — **no
+Stamp both in `Wardmast.Worker.record_run_started/1`
+(`apps/wardmast/lib/wardmast/worker.ex:712`), in the same `attrs` map as
+`difficulty_at_dispatch`. Values come straight from `Wardmast.Version` — **no
 dispatcher plumbing is needed**, unlike `difficulty_at_dispatch` which has to
 travel through `state.meta`, because the node executing `record_run_started/1`
 *is* the fleet that runs the worker.
@@ -279,7 +279,7 @@ Mechanically this requires `Corpus.base_runs/3` to select the two new columns
 `Corpus.fetch/1` to carry them onto each row.
 
 Also surface `builds: N` in `summary/1`
-(`arbiter_web/.../api/loop_controller.ex:191`) so `--json` consumers see it
+(`wardmast_web/.../api/loop_controller.ex:191`) so `--json` consumers see it
 without parsing markdown.
 
 ### Q3 — Should `--propose` refuse or warn when the window straddles a release?
@@ -406,7 +406,7 @@ plausibly: a missed mapping looks identical to "nothing broke". Instead declare
 the mapping in code, appended by the same PR that breaks the metric:
 
 ```elixir
-defmodule Arbiter.Loop.Comparability do
+defmodule Wardmast.Loop.Comparability do
   @moduledoc "Builds after which a named metric is not comparable with before."
 
   @breaks [
@@ -480,7 +480,7 @@ Cheapest-first, with the dependency order that actually holds.
 |---|---|---|---|
 | **1** | `arbiter_version` + `arbiter_sha` on `worker_runs`, stamped at `record_run_started/1`; version/sha into `record_pass_cost/1`'s `raw` map | one migration, ~20 lines | everything |
 | **2** | Header composition line + entirely-predates warning + **per-cell `builds` column** + cross-build caveat note + `builds` in the JSON summary | read-only, no behaviour change | the diagnostic |
-| **3** | `Arbiter.Loop.Comparability` + narrow `--propose` downgrade for cost-justified mixed-build candidates + `--allow-mixed-build` | small, declarative | Q3 |
+| **3** | `Wardmast.Loop.Comparability` + narrow `--propose` downgrade for cost-justified mixed-build candidates + `--allow-mixed-build` | small, declarative | Q3 |
 | **4** | Ref normalisation (`run:` / `task:`) + promotion liveness condition + build composition on escalation / `arb loop pending` | the largest piece | Q4 |
 | **5** | Standing constraint: outcome measurement stays concurrent-arm | a doc paragraph + a moduledoc note | Q6 |
 

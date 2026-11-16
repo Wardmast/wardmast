@@ -60,7 +60,7 @@ when the label stands in for the assignee, and no `filter` key otherwise.
 
 ### Call sites
 
-All of them go through `Arbiter.Trackers.GitHub.Config.resolve/0`:
+All of them go through `Wardmast.Trackers.GitHub.Config.resolve/0`:
 
 | Operation | Function | Token |
 | --- | --- | --- |

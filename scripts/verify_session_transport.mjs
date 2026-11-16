@@ -8,7 +8,7 @@
 // Criterion 8 cannot be a merge gate: it needs a *running* arbiter to restart.
 // This is the headless client. Since phase 5 it is not merely shaped like the
 // browser's — it **is** the browser's: the resume protocol here is
-// `apps/arbiter_web/assets/js/session_stream.mjs`, the same module the
+// `apps/wardmast_web/assets/js/session_stream.mjs`, the same module the
 // LiveView hook drives xterm with. What this script proves about resume is
 // therefore what the browser gets, rather than what a second implementation of
 // the same protocol happens to do.
@@ -34,7 +34,7 @@
 
 import { Socket } from "../deps/phoenix/priv/static/phoenix.mjs"
 
-import { SessionStream } from "../apps/arbiter_web/assets/js/session_stream.mjs"
+import { SessionStream } from "../apps/wardmast_web/assets/js/session_stream.mjs"
 
 function usage(message) {
   console.error(`${message}

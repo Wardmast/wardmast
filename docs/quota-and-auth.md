@@ -7,8 +7,8 @@ predict one.
 ## Dispatch no longer pre-checks auth
 
 Through 2026-06-05 → 2026-09-18, every real dispatch and every resume paid a
-model turn to run a live CLI probe (`Arbiter.Worker.Dispatch.run_preflight/2`,
-`Arbiter.Agents.Preflight.check/2`) before spawning the actual worker, purely
+model turn to run a live CLI probe (`Wardmast.Worker.Dispatch.run_preflight/2`,
+`Wardmast.Agents.Preflight.check/2`) before spawning the actual worker, purely
 to ask "are you logged in?" ahead of time.
 
 The operator retired that probe on 2026-09-18. The evidence, measured from the
@@ -29,10 +29,10 @@ live DB and the code on that date:
 - **A rejected request bills nothing at the provider.** The probe does.
 
 So the policy inverted: **dispatch, and react to the provider's own error
-instead of paying to guess beforehand.** `Arbiter.Worker.Dispatch.dispatch/2`
+instead of paying to guess beforehand.** `Wardmast.Worker.Dispatch.dispatch/2`
 still runs a guard ahead of every real-agent dispatch
-(`Arbiter.Worker.Dispatch.maybe_preflight/2`), but that guard is now a plain,
-free state lookup — `Arbiter.Agents.CredentialWatchdog.expired?/1` — never a
+(`Wardmast.Worker.Dispatch.maybe_preflight/2`), but that guard is now a plain,
+free state lookup — `Wardmast.Agents.CredentialWatchdog.expired?/1` — never a
 live CLI call. Opt out entirely with `preflight: false`; the guard is also
 skipped whenever `start_claude: false` (no real agent about to spawn).
 
@@ -44,13 +44,13 @@ each failed worker frees its slot, the next Ready card promotes, and it
 fails again — each pass leaving a failed run and an escalation behind it.
 
 Since bd-21bmdh that bound is an explicit **auth hold**
-(`Arbiter.Agents.AuthHold`), and a single auth death is a *retry* rather than
+(`Wardmast.Agents.AuthHold`), and a single auth death is a *retry* rather than
 a stranded task:
 
-1. `Arbiter.Worker.fail_stopped/2` classifies a dying worker's stop reason. If
+1. `Wardmast.Worker.fail_stopped/2` classifies a dying worker's stop reason. If
    it comes back `:auth_expired`, it records the death on the provider's
    `AuthHold` streak and escalates the stopped worker as before.
-2. `Arbiter.Worker.AuthDeath` (called by the Driver) then **returns the task
+2. `Wardmast.Worker.AuthDeath` (called by the Driver) then **returns the task
    to Ready**: it removes the worktree and branch if the worker never
    committed (a dirty worktree or one with commits is kept), stops the
    `:failed` worker process (its `worker_runs` row stays `:failed`), and puts
@@ -65,17 +65,17 @@ a stranded task:
    once to every workspace and flips `credentials_expired` on the quota
    surfaces.
 4. While the hold is open:
-   - `Arbiter.Worker.Dispatch`'s guard refuses every agent dispatch and
+   - `Wardmast.Worker.Dispatch`'s guard refuses every agent dispatch and
      resume for the provider — before the task transitions, before a
      worktree is provisioned, before a worker registers. The guard's read is
      **fail-closed**: an unreadable hold refuses too.
    - The board shows `blocked — <provider> auth hold (N consecutive auth
-     deaths)` as its board-wide hold (`Arbiter.Board.Snapshot.quota_hold/1`)
+     deaths)` as its board-wide hold (`Wardmast.Board.Snapshot.quota_hold/1`)
      for a workspace whose default provider is held, so
-     `Arbiter.Board.Autopilot` does not even attempt the dispatch. The
+     `Wardmast.Board.Autopilot` does not even attempt the dispatch. The
      reopened tasks sit in Ready.
 5. The refusal escalates to the coordinator (once — behind
-   `Arbiter.CircuitBreaker`, not once per retry) with a re-authenticate
+   `Wardmast.CircuitBreaker`, not once per retry) with a re-authenticate
    remediation.
 
 None of this requires a live probe. It is pure state held in the `AuthHold`
@@ -85,7 +85,7 @@ and `CredentialWatchdog` GenServers and served for free to every dispatch.
 
 Only a positive signal clears an open hold:
 
-- **A free credential check passing.** `Arbiter.Quota.CloudProbe`'s usage
+- **A free credential check passing.** `Wardmast.Quota.CloudProbe`'s usage
   polls (Claude `/api/oauth/usage`, Codex's usage GET, agy `/usage`) call
   `CredentialWatchdog.mark_recovered/2` + `AuthHold.recovered/2` on a
   passing check whenever the provider's hold is open.
@@ -105,13 +105,13 @@ be true; probation bounds that case to one death per recovery signal, and
 `max_task_reopens` bounds it per task. A completed worker on the provider
 ends probation; an operator reset is a full reset.
 
-Configuration: `config :arbiter, :auth_hold, threshold: 2, max_task_reopens: 3`.
+Configuration: `config :wardmast, :auth_hold, threshold: 2, max_task_reopens: 3`.
 State is in-memory; a restart clears it, costing at most N more fast deaths.
 
 ## The periodic probe is now optional, and "off" is a supported posture
 
 `CredentialWatchdog` still *can* run its own periodic CLI probe
-(`:adapters`, runtime-settable via `Arbiter.Settings`) to catch expiry that no
+(`:adapters`, runtime-settable via `Wardmast.Settings`) to catch expiry that no
 worker ever surfaced organically, and to auto-recover an adapter once
 credentials are restored. That's a separate, much lower-frequency cost center
 than the old per-dispatch probe — and it's fully independent of the
@@ -127,14 +127,14 @@ posture**, not an accident to route around:
   operations.
 - Nothing will *clear* an expiry mark on its own once nothing probes that
   adapter. Recovery then comes from an independent success signal instead —
-  `Arbiter.Quota.CloudProbe`'s consecutive-401 tracking calls
+  `Wardmast.Quota.CloudProbe`'s consecutive-401 tracking calls
   `mark_recovered/2` on a successful `/api/oauth/usage` poll for Claude — or
   an operator running `CredentialWatchdog.reset/1`.
-- `quota_get.credentials_expired` (`Arbiter.Quota.serialize/1`) reflects the
+- `quota_get.credentials_expired` (`Wardmast.Quota.serialize/1`) reflects the
   same held state either way, so the dashboard's expiry signal doesn't
   depend on probing being on.
 
-See `Arbiter.Agents.CredentialWatchdog`'s moduledoc for the exact
+See `Wardmast.Agents.CredentialWatchdog`'s moduledoc for the exact
 configuration resolution order and the adapter-list semantics.
 
 ## The probe that survived is bounded (bd-svczq4)
@@ -159,12 +159,12 @@ The probe is now bounded on five axes:
 |---|---|---|
 | agy's own turn budget | its 5-minute default | `--print-timeout` at 80% of the harness watchdog, so agy yields first and a real exit status is always observed |
 | structured output | plain text (bd-481sz7 fixed this) | `--output-format stream-json`, parseable and ledgerable |
-| working directory | the BEAM's cwd — the live checkout | `Arbiter.Agents.Preflight.probe_cwd/0`, an empty dir under the system temp dir |
-| a timed-out child | survived; `Port.close/1` does not reap it | whole process tree SIGKILLed (`Arbiter.Worker.OsProcess.kill_tree/1`) |
+| working directory | the BEAM's cwd — the live checkout | `Wardmast.Agents.Preflight.probe_cwd/0`, an empty dir under the system temp dir |
+| a timed-out child | survived; `Port.close/1` does not reap it | whole process tree SIGKILLed (`Wardmast.Worker.OsProcess.kill_tree/1`) |
 | the watchdog itself | one hard-coded 30s module attribute | per adapter and configurable; gemini's built-in default is 120s, above its observed cold-start floor |
 
 ```elixir
-config :arbiter, Arbiter.Agents.Preflight,
+config :wardmast, Wardmast.Agents.Preflight,
   timeout_ms: 30_000,                              # install-wide default
   timeout_ms_by_provider: %{"gemini" => 120_000},  # per adapter, wins over the above
   on_timeout: :proceed                             # :proceed (default) | :refuse
@@ -218,7 +218,7 @@ model round-trip entirely) is follow-up work.
 The Claude pre-flight used to be one billed `claude --print ping` turn, and the
 quota poll rode `/api/oauth/usage` with whatever access token sat in a
 `.credentials.json` — a token that only refreshes while an interactive `claude`
-session runs. `Arbiter.Agents.Claude.ControlChannel` replaces both *when it can*
+session runs. `Wardmast.Agents.Claude.ControlChannel` replaces both *when it can*
 by driving the CLI in SDK mode:
 
     claude -p --input-format stream-json --output-format stream-json --verbose
@@ -251,7 +251,7 @@ A 2026-11-03 probe of claude 2.1.317 (operator login) showed:
   `utilization` and epoch-seconds `resets_at`. A success body that still has no
   `five_hour` / `seven_day` / `limits` is an error carrying its top-level keys.
 
-The test fixtures in `apps/arbiter/test/fixtures/claude_control/` are
+The test fixtures in `apps/wardmast/test/fixtures/claude_control/` are
 **reconstructed from that report, not a raw capture** (no `claude` binary was
 available to the author); replace them with a captured response when one is at
 hand.
@@ -272,7 +272,7 @@ hand.
 not a published, versioned contract. So nothing depends on it:
 
 * **Minimum CLI version: `2.1.0`** (`ControlChannel.min_cli_version/0`;
-  `config :arbiter, Arbiter.Agents.Claude.ControlChannel, min_cli_version: …`,
+  `config :wardmast, Wardmast.Agents.Claude.ControlChannel, min_cli_version: …`,
   `nil` disables the gate). It is a **conservative floor, not a measured
   one** — the CLI used to develop this was not available to the author, so the
   exact release that introduced `get_usage` is unverified. The floor only saves
@@ -291,9 +291,9 @@ not a published, versioned contract. So nothing depends on it:
   (bd-4ag0nj), so an install whose workers run *only* on setup tokens will
   mostly see the `ping` fallback. The saving applies to installs with a
   usage-capable login.
-* Kill switch: `config :arbiter, Arbiter.Agents.Claude.ControlChannel, enabled: false`.
+* Kill switch: `config :wardmast, Wardmast.Agents.Claude.ControlChannel, enabled: false`.
   It is off in `config/test.exs`; tests drive it against a stub CLI
-  (`Arbiter.Test.ClaudeControlStub`).
+  (`Wardmast.Test.ClaudeControlStub`).
 
 The spawn runs in `Preflight.probe_cwd/0`, never the BEAM's cwd, in a process
 that traps exits (a CLI that dies before reading stdin makes its port exit with
@@ -315,7 +315,7 @@ killed afterwards.
 
 The status bar's quota chip and the `/usage` "Rate limits" panel show only the
 providers this installation uses. Both read one list —
-`ArbiterWeb.LiveHooks.load_quotas/0` → `Arbiter.Quota.Visibility` — so they
+`WardmastWeb.LiveHooks.load_quotas/0` → `Wardmast.Quota.Visibility` — so they
 can't disagree. A provider is shown iff
 
     (detected OR forced on) AND NOT forced off AND NOT in Quota.hidden_providers/0
@@ -337,9 +337,9 @@ can't disagree. A provider is shown iff
   - `quota_providers_hidden` — codes to hide even if detected. Hidden wins
     over shown. `null` clears either.
   A change drops the cached top-bar quota, so it lands on the next page load.
-- **Hidden pending parity** — `Arbiter.Quota.hidden_providers/0` (Codex)
+- **Hidden pending parity** — `Wardmast.Quota.hidden_providers/0` (Codex)
   wins over everything, the override included. Showing Codex is deleting it
-  from `@hidden_providers` in `apps/arbiter/lib/arbiter/quota.ex`.
+  from `@hidden_providers` in `apps/wardmast/lib/wardmast/quota.ex`.
 
 A shown provider with no snapshot yet appears as "no data yet" (dashed rings,
 a popover line) rather than disappearing. With nothing shown, the chip is
@@ -379,7 +379,7 @@ click/tap anywhere outside closes it. There is no hover-only content, so touch
 behaves like a mouse. It shows from `sm` (640px) up — it fits beside the
 wordmark, live badge, inbox trigger and theme toggle at `lg` and `xl` with
 three providers — and hides below `sm`.
-`ArbiterWeb.QuotaTopbarBrowserTest` (`--include browser`) checks the fit for
+`WardmastWeb.QuotaTopbarBrowserTest` (`--include browser`) checks the fit for
 one, two and three providers and the popover interaction in Chromium.
 
 ## grok: a ledger-estimated rolling 24h cap (bd-cwq8b0)
@@ -387,10 +387,10 @@ one, two and three providers and the popover interaction in Chromium.
 grok's free tier allows about 500K tokens per **rolling 24h** window, cached
 tokens counted, and has no safe pollable quota endpoint (calling the billing
 endpoint with the session token directly is the ToS grey area bd-73uvlo
-flagged). So grok's quota is an estimate, `Arbiter.Quota.GrokLedger`:
+flagged). So grok's quota is an estimate, `Wardmast.Quota.GrokLedger`:
 
   * **Headroom** is the sum of grok `usage_events` (input + cache + output)
-    over the trailing 24h against `config :arbiter, :grok_quota, cap_tokens:`
+    over the trailing 24h against `config :wardmast, :grok_quota, cap_tokens:`
     (default 500_000), projected onto a `Quota.Gate.Snapshot` with window
     `"24h"`. `Quota.latest_for_provider(_, :grok)` serves it, so
     `Quota.Gate` holds grok dispatch (and `Quota.Headroom` ranks it) like any
@@ -415,15 +415,15 @@ flagged). So grok's quota is an estimate, `Arbiter.Quota.GrokLedger`:
 ## A run that stops on its provider's quota is held, not crashed (bd-a6vh2x)
 
 A ticket's own run that ends because the provider says its allowance is spent
-classifies as `:quota_exhausted` (`Arbiter.Worker.StopReason`): agy's
+classifies as `:quota_exhausted` (`Wardmast.Worker.StopReason`): agy's
 `RESOURCE_EXHAUSTED (code 429): Individual quota reached … Resets in 11m34s`,
 Claude's session / weekly / model limit, grok's free Grok Build usage limit.
 Before, agy's came out as `:rate_limited` and grok's as `:crashed`, both of which
-left the ticket waiting on the coordinator. Now `Arbiter.Worker`:
+left the ticket waiting on the coordinator. Now `Wardmast.Worker`:
 
 1. **Holds the account** until the reset — the provider's stated reset time,
    else the quota probe's latest reset for the account, else 1 hour — as a timed
-   `Arbiter.Providers.Pause` entry (`kind: quota`, `until`). Every router that
+   `Wardmast.Providers.Pause` entry (`kind: quota`, `until`). Every router that
    honours a pause (`ProviderRouting`, `ReviewerRouting`, `ProviderPool`,
    `Dispatch`'s pause gate) routes round it with no further wiring; it lifts
    itself at `until`, and `arb provider resume` lifts it early. An operator pause
@@ -480,14 +480,14 @@ never holds anything.
 **Paced like the percentages.** `flat` allows the whole cap at any time; `paced`
 allows `cap x elapsed fraction of the window` by now. The dollar window goes
 through `Gate.pace/6` (the `:spend` window, `utilization = spend / cap`), so there
-is one definition of the line (`Arbiter.Quota.Pace`) for % and $ windows. The
+is one definition of the line (`Wardmast.Quota.Pace`) for % and $ windows. The
 planning margin (design O8) and the strict / look-ahead setting (design O1) are
 design proposals that are not in the gate yet; when they land in `Gate.pace/6`
 the spend window inherits them. Until then the line is strict: a fresh dispatch
 is held the moment spend is at or past the line.
 
 **Admission counts settled spend plus what is in flight.** Under the same
-per-account lock as the concurrency cap (`Arbiter.Accounts.Admission`), a fresh
+per-account lock as the concurrency cap (`Wardmast.Accounts.Admission`), a fresh
 dispatch is checked against the settled ledger spend plus, for every worker or
 admitted dispatch holding a slot on the account, the rest of its ticket's
 estimated cost (`Usage.Estimate` median less what the ticket has already spent).
@@ -516,7 +516,7 @@ one has room. The same reason shows in `arb account show`, `arb quota` /
 `quota_get` (`spend_caps`), `arb scheduler status` (the board-wide hold) and the
 Providers page.
 
-**Paging.** `Arbiter.Quota.SpendWatch` raises an operator system alert
+**Paging.** `Wardmast.Quota.SpendWatch` raises an operator system alert
 (`spend_cap`) when metered spend (plus the in-flight estimate) reaches 80% of the
 cap and another when the cap is reached; each clears itself when the window
 resets or the cap is raised or removed.
@@ -532,13 +532,13 @@ Two follow-ups were filed instead of folded in:
 - Free (non-billed) expiry signals for codex/agy, so those adapters get the
   same organic detection Claude gets from the usage-poll 401 tracking.
 - Whether an auth-shaped pre-flight hold (mirroring the existing
-  `:quota_exhausted` hold in `Arbiter.Worker.PreflightHold`) is worth
+  `:quota_exhausted` hold in `Wardmast.Worker.PreflightHold`) is worth
   reintroducing now that pre-flight itself is gone. (Done in bd-21bmdh as
-  `Arbiter.Agents.AuthHold` — see "What bounds a wave" above.)
+  `Wardmast.Agents.AuthHold` — see "What bounds a wave" above.)
 
 A quota-exhausted live-probe signal (the other thing the old pre-flight probe
-used to produce, consumed by `Arbiter.Worker.PreflightHold`,
-`Arbiter.Board.Autopilot`'s retry hold and `Arbiter.Workflows.DispatchQueue`'s
+used to produce, consumed by `Wardmast.Worker.PreflightHold`,
+`Wardmast.Board.Autopilot`'s retry hold and `Wardmast.Workflows.DispatchQueue`'s
 held-intent backoff) no longer arrives from pre-flight either, for the same
 reason: producing it required the same live probe this change removes. Those
 call sites are unchanged and harmless — `PreflightHold.retry_not_before/3`
@@ -555,7 +555,7 @@ window) are therefore inert for Claude accounts. They are still accepted and
 stored exactly as before — no migration, existing configs validate unchanged —
 and Codex and Antigravity, which keep a real primary window, still honour them.
 
-On boot, `Arbiter.Quota.PrimaryKeyDeprecation` logs **one** warning listing any
+On boot, `Wardmast.Quota.PrimaryKeyDeprecation` logs **one** warning listing any
 primary-class key set on a Claude account's `quota_config`, in a workspace's
 `config["quota"]`, or overridden in the `:quota` app env.
 
@@ -641,7 +641,7 @@ shadow-first. Decide whether to have it from data, after the 7d budget has run i
 shadow for a couple of weeks.
 
 **`burn_24h`** is the share of the 7d window used in the last 24 hours. Each OAuth
-poll computes it from the `quota_snapshots` 7d samples (`Arbiter.Quota.Burn`) and
+poll computes it from the `quota_snapshots` 7d samples (`Wardmast.Quota.Burn`) and
 stores it on the account's quota row (`burn_24h`, `burn_24h_at`). A window reset
 inside the 24 hours restarts the baseline at zero (a moved `resets_at`, or a fall in
 utilization when there is none), so a rollover is not read as negative burn. A
@@ -660,7 +660,7 @@ workspace (`arb config set quota.daily_burn_cap 0.2 --workspace <ws>`, or the wo
 policy form). `arb account set <ref> --daily-burn-cap none` turns it off.
 
 - **`shadow`** holds nothing. The "would have held" record is the **Burn governor**
-  section of the admission shadow report (`mix arbiter.admission_shadow_report`),
+  section of the admission shadow report (`mix wardmast.admission_shadow_report`),
   which appears once any account sets a cap: how many hourly readings reached it.
 - **`enforce`** adds two things, both honouring the P0 pace exemption (an exempt
   priority is never held on the burn): a flat **Gate** rule, `burn_24h >= cap` holds the
@@ -669,11 +669,11 @@ policy form). `arb account set <ref> --daily-burn-cap none` turns it off.
   window whose line is the cap and whose draw is the 7d window's `ρ`, so the seat count
   shrinks before the cap is reached.
 
-### Picking the cap: `mix arbiter.burn_report`
+### Picking the cap: `mix wardmast.burn_report`
 
-    mix arbiter.burn_report                 # last 30 days, per account
-    mix arbiter.burn_report --cap 0.25      # replay a cap no account has yet
-    bin/arbiter eval 'Arbiter.Release.burn_report()'   # on a release
+    mix wardmast.burn_report                 # last 30 days, per account
+    mix wardmast.burn_report --cap 0.25      # replay a cap no account has yet
+    bin/wardmast eval 'Wardmast.Release.burn_report()'   # on a release
 
 prints the p50 / p90 / p99 of the historical rolling-24h burn per account, and, with a
 cap, how many readings it would have held and when the first was. A cap near p99

@@ -124,7 +124,7 @@ fetches, so the number stops being a sample.
 
 ### The determinism claim, re-verified
 
-`Arbiter.Loop.*` remains deterministic end to end. No HTTP client
+`Wardmast.Loop.*` remains deterministic end to end. No HTTP client
 (`Req`/`Finch`/`Tesla`/`:httpc`), no provider module, no model call: the
 outbound alias set across `loop.ex` and `loop/*.ex` is exactly `Repo`,
 `Tasks.{Issue, Workspace}`, `Messages.Message`, `Agents.Routing`, `Quota`,
@@ -398,7 +398,7 @@ Filed by this ticket:
    of Stage 1. The mechanics of taking an accepted
    candidate to a merged `@finding_buckets` tuple and backfilling it.
 
-### Stage 2 recipe: admitting an accepted detector (`Arbiter.Loop.DetectorBackfill`)
+### Stage 2 recipe: admitting an accepted detector (`Wardmast.Loop.DetectorBackfill`)
 
 Admission is a reviewed pull request — there is no auto-merge path and no
 runtime write of a regex. A model's output never reaches `DetectorBackfill`;
@@ -407,7 +407,7 @@ stored `review_gate_rounds`.
 
 1. **Hand-merge the detector.** Open a PR that appends the accepted candidate's
    `{regex, category}` tuple to `@finding_buckets` in
-   `Arbiter.Loop.FindingBuckets` (append, so existing categories keep their
+   `Wardmast.Loop.FindingBuckets` (append, so existing categories keep their
    first-match precedence), plus the category's attribution row — a bucket
    without one fails to compile. The category is a compile-time constant, so
    `Loop.fingerprint/1` is stable and cross-window reinforcement needs no new
@@ -415,11 +415,11 @@ stored `review_gate_rounds`.
 2. **After the release is deployed, backfill — one step.** Dry run first (the
    default; writes nothing):
 
-       bin/arbiter eval 'Arbiter.Release.backfill(:finding_detector, category: "<category>")'
+       bin/wardmast eval 'Wardmast.Release.backfill(:finding_detector, category: "<category>")'
 
    then apply:
 
-       bin/arbiter eval 'Arbiter.Release.backfill(:finding_detector, category: "<category>", apply?: true)'
+       bin/wardmast eval 'Wardmast.Release.backfill(:finding_detector, category: "<category>", apply?: true)'
 
    The backfill re-reads the retained findings, keeps the units the merged
    allowlist maps to the category, and records them through the ordinary

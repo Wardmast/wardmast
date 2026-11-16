@@ -2,7 +2,7 @@
 //
 // bd-dlc136 — the session dock in a real browser.
 //
-// `ArbiterWeb.SessionDockLiveTest` proves everything the server decides: the
+// `WardmastWeb.SessionDockLiveTest` proves everything the server decides: the
 // roster's contents, one-expanded-at-a-time, dismiss-is-view-only, and that a
 // hostile `localStorage` payload is re-validated. What it cannot prove is the
 // acceptance criterion the whole phase exists for — that **LiveView
@@ -34,7 +34,7 @@
 // the strip's own invariant, that there is never more than one of them.
 //
 // Output is one `CHECK <name>: PASS|FAIL — <detail>` line per claim and a
-// final `RESULT: PASS|FAIL`. `ArbiterWeb.SessionDockBrowserTest` runs it
+// final `RESULT: PASS|FAIL`. `WardmastWeb.SessionDockBrowserTest` runs it
 // against a Bandit listener as part of `mix test`; exit 3 means SKIP.
 //
 // No npm (RFC §6.1): the browser is one already on the machine and the driver

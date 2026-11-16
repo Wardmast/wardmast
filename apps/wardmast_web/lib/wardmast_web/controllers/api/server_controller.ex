@@ -1,0 +1,271 @@
+defmodule WardmastWeb.Api.ServerController do
+  @moduledoc """
+  Server health and status endpoints.
+
+  Routes:
+    * `GET /api/server/migrations` — check for pending database migrations
+    * `GET /api/server/bind_address` — what address the HTTP listener is
+      actually bound to (bd-1c4pg3). `arb server doctor` uses this to warn
+      when a server — possibly remote, via `ARB_HOST` — is reachable
+      off-loopback despite the dashboard's no-login auth model.
+    * `GET /api/server/agy_write_jail` — whether *this host* can jail an agy
+      spawn (bd-8xy1mf), i.e. `Wardmast.Worker.Jail.diagnose/0`. The
+      per-workspace `write_jail_warning` in the workspace posture only says
+      whether a given workspace's resolved policy is degraded by this; a CLI
+      running on the server host needs the host's own answer even when no
+      workspace currently resolves `:strict`, so `arb server doctor` has
+      something to show for AC1/AC6's "can this host jail agy at all" check.
+      The response's `ssh` key is a second, independent diagnosis (bd-5d5mrs,
+      `Wardmast.Worker.Jail.diagnose_ssh/0`) — whether `ssh -G` can parse the
+      jail's mirrored ssh config, since a host can jail writes fine while
+      that regresses (a changed `/etc/ssh/ssh_config`, no `ssh` on `PATH`).
+      Its `network` key (bd-cfktou, `Wardmast.Worker.Jail.diagnose_network/0`)
+      is a third: whether the jail can run in a network namespace with its
+      `socat` bridges, which an agy spawn needs for its only route out.
+    * `GET /api/server/egress_jail` — the "egress jail" self-test (bd-5yydxh,
+      G10, `Wardmast.Worker.Egress.SelfTest`): `bwrap --unshare-net` and `socat`
+      present, a proxy listener up, and against a local stand-in (no internet)
+      one allow and one deny. Run on demand rather than cached, since it
+      starts a proxy. A failure carries the same `cause`/`message`/`fix` as the
+      jail diagnoses above.
+    * `GET /api/server/guardrails` — the guardrail posture (bd-anwb0u, G11,
+      `Wardmast.Guardrails.Report`): per workspace, the effective tier of each
+      attached (provider, model) subject, and the issues (an inert block, an
+      unmatched or out-of-scope subject, a tier its adapter cannot enforce on
+      this host, a dead cap). `active: false` with no issues when nothing is
+      configured.
+    * `GET /api/server/claude_credentials` — every workspace that runs Claude
+      with no setup token (or API key) of its own (bd-80ecol,
+      `Wardmast.Agents.Claude.CredentialCheck.workspace_report/0`): the ones
+      that used to fall back to a copy of the operator's `.credentials.json`,
+      and whose Claude dispatch is now held. `arb server doctor` lists them.
+      A failed read is a 500, so the doctor reports "could not check" rather
+      than a false all-clear.
+    * `GET /api/server/agy_models` — the configured agy tier models (built-in
+      defaults plus each agy workspace role's `tier_models` override) checked
+      against a fresh `agy models` listing (bd-7wx2lh,
+      `Wardmast.Agents.Gemini.ModelCheck`): `status` `ok` / `missing` /
+      `unknown` (listing unreadable), and a `problems` entry per missing
+      `{tier, model}` with its `source`, `used_by` and spawn-time `fallback`.
+    * `GET /api/server/grok_auth` — grok's login state (bd-dpv4vt,
+      `Wardmast.Grok.AuthReport`): `enabled: false` unless a workspace routes to
+      or pins grok, else `state` (`logged_in` / `expired` / `refresh_unverified` /
+      `refresh_failed` / `reauth_required` / `not_logged_in`), the `path` the
+      broker reads and its `expires_at` (bd-8rvkqd), and the fix. An expired
+      token the broker has not refreshed yet is refreshed here (`probe: true`),
+      through the broker. `arb server doctor` reports it.
+    * `GET /api/server/provider_accounts` — how this boot classified the
+      install's provider accounts (bd-cvvb02, P13 bd-9gqj8e,
+      `Wardmast.Accounts.Enablement.status/0`): the decision, and — re-read
+      live — every workspace a spawn would raise `MissingCredentialError` for
+      and whether a now-ignored `CLAUDE_CODE_OAUTH_TOKEN` is still in the
+      server environment. `arb server doctor` fails on either, and points at
+      the runbook.
+    * `GET /api/server/merge_routing` — every workspace repo's effective merge
+      strategy (a `merge.repos.<repo>` override, else the workspace's), and
+      each one whose checkout cannot carry it (bd-73zv62,
+      `Wardmast.Mergers.RoutingCheck.report/0`): a forge strategy with no
+      `origin` remote, or an `origin` that is not the effective
+      `owner/repo`. `arb server doctor` lists them with the fix.
+    * `GET /api/server/cli_versions` — the pinned upstream CLI versions
+      (SI1a, OD13, `Wardmast.Worker.CliFetcher.Status`): per CLI the `pinned` and
+      last-seen `latest` version, whether the pin is `cached`, `manual`, and the
+      `last_bump`; plus the `worker.cli_set.hold` token. `arb server doctor`
+      reports it. Never touches the network.
+    * `GET /api/server/podman_sandbox` — rootless-podman sandbox readiness
+      checks (`arb server doctor`)
+    * `GET /api/server/tmux` — whether `tmux` is installed on this host
+      (bd-c99hys, `Wardmast.Accounts.LoginRunner.tmux_diagnosis/0`). The dashboard
+      login relay runs each provider CLI's login in a hidden tmux session, so
+      without it no account can be logged in or re-authenticated.
+      `arb server doctor` reports it with the install hint.
+    * `GET /api/server/doctor_scope` — which providers, sandbox backends and
+      egress modes this install uses (bd-7pnat1, `Wardmast.Doctor.Scope`), so
+      `arb server doctor` reports a check that cannot matter here as `n/a`
+      instead of probing it.
+    * `POST /api/server/spawn_canary` — the doctor's end-to-end canary spawn
+      (bd-8t4yui, `Wardmast.Doctor.SpawnCanary`): for each enabled, unpaused
+      provider, spawn the agent CLI through the real spawn pipeline with
+      `--version` (no model tokens, no ticket, run record, usage row or
+      scheduler slot) and report whether it spawned, reached the agent, its
+      exit and duration, and the first error line. One canary at a time: a
+      concurrent call is a 409. Coordinator tier, so a worker token is refused.
+    * `GET /api/server/spawn_canary` — the last canary report this boot ran
+      (`report: null` when none has), so `arb server doctor` runs the canary
+      once per boot rather than every time.
+  """
+
+  use WardmastWeb, :controller
+
+  alias Wardmast.Accounts.Enablement
+  alias Wardmast.Accounts.LoginRunner
+  alias Wardmast.Agents.Claude.CredentialCheck
+  alias Wardmast.Agents.Gemini.ModelCheck
+  alias Wardmast.Guardrails
+  alias Wardmast.Mergers.Gitlab.Budget, as: GitlabBudget
+  alias Wardmast.Mergers.RoutingCheck
+  alias Wardmast.Worker.CliFetcher.Status, as: CliStatus
+  alias Wardmast.Worker.Egress.SelfTest
+  alias Wardmast.Worker.Jail
+  alias Wardmast.Worker.MemoryScope.Diagnosis, as: MemoryDiagnosis
+
+  action_fallback(WardmastWeb.Api.FallbackController)
+
+  def migrations(conn, _params), do: json(conn, Wardmast.Server.Status.migrations())
+
+  def dashboard_auth(conn, _params), do: json(conn, WardmastWeb.DashboardAuth.mode())
+
+  def bind_address(conn, _params), do: json(conn, WardmastWeb.InstallationSettings.bind_address())
+
+  def worker_jail_unmask(conn, _params) do
+    paths =
+      :wardmast
+      |> Application.get_env(:worker_jail_unmask, [])
+      |> List.wrap()
+      |> Enum.filter(&is_binary/1)
+
+    json(conn, %{paths: paths})
+  end
+
+  def agy_write_jail(conn, _params) do
+    json(
+      conn,
+      jail_diagnosis(Jail.diagnose())
+      |> Map.put(:ssh, jail_diagnosis(Jail.diagnose_ssh()))
+      |> Map.put(:escape, jail_diagnosis(Jail.diagnose_escape()))
+      |> Map.put(:reads, jail_diagnosis(Jail.diagnose_reads()))
+      |> Map.put(:network, jail_diagnosis(Jail.diagnose_network()))
+      |> Map.put(:keyring, jail_diagnosis(Jail.diagnose_keyring()))
+      |> Map.put(:dbus_proxy, Jail.dbus_proxy())
+    )
+  end
+
+  # bd-5yydxh (G10): the "egress jail" self-test, run on demand. It starts a
+  # proxy against a local stand-in and expects 1 allow and 1 deny, so it is
+  # not a cached probe like the others.
+  def egress_jail(conn, _params) do
+    case SelfTest.run() do
+      {:ok, %{allowed: allowed, denied: denied}} ->
+        json(conn, %{available: true, allowed: allowed, denied: denied})
+
+      {:error, reason} ->
+        json(conn, jail_diagnosis(SelfTest.explain(reason)))
+    end
+  end
+
+  # bd-anwb0u (G11): the guardrail posture, per workspace: each attached
+  # subject's tier, and what is inconsistent or unmeetable on this host
+  # (`Wardmast.Guardrails.Report`).
+  def guardrails(conn, _params) do
+    case Ash.read(Wardmast.Tasks.Workspace) do
+      {:ok, workspaces} ->
+        json(
+          conn,
+          Guardrails.Report.build(workspaces,
+            probe: true,
+            req_options: git_credential_req_options()
+          )
+        )
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # The request options the GitLab bot-token expiry probe merges (tests stub with `plug:`).
+  defp git_credential_req_options,
+    do: Application.get_env(:wardmast, :git_credential_req_options, [])
+
+  defp jail_diagnosis(nil), do: %{available: true}
+
+  defp jail_diagnosis(%{cause: cause, message: message, fix: fix}),
+    do: %{available: false, cause: Atom.to_string(cause), message: message, fix: fix}
+
+  def claude_credentials(conn, _params) do
+    %{checked: checked, missing: missing} = CredentialCheck.workspace_report()
+
+    json(conn, %{
+      checked: checked,
+      missing:
+        Enum.map(missing, fn m ->
+          %{
+            workspace_id: m.workspace_id,
+            workspace: m.workspace,
+            provider: Atom.to_string(m.provider),
+            account: m.account,
+            reason: Atom.to_string(m.reason),
+            summary: m.summary,
+            fix: m.fix
+          }
+        end)
+    })
+  end
+
+  # bd-7wx2lh: do the configured agy tier models still exist in `agy models`?
+  def agy_models(conn, _params), do: json(conn, ModelCheck.report())
+
+  # bd-dpv4vt: grok's login state, reported only when a workspace uses grok.
+  def grok_auth(conn, _params), do: json(conn, Wardmast.Grok.AuthReport.report(probe: true))
+
+  # bd-5ad4ch: where per-run worker TMPDIRs live, and whether that is RAM.
+  def worker_tmp(conn, _params), do: json(conn, Wardmast.Worker.RunTmp.diagnosis())
+
+  # bd-46xndf: is this host ready for the rootless-podman worker sandbox?
+  def podman_sandbox(conn, _params) do
+    opts = Application.get_env(:wardmast, :podman_readiness_opts, [])
+    json(conn, Wardmast.Worker.PodmanReadiness.diagnose(opts))
+  end
+
+  # bd-6zuoo6: is the per-worker memory cap in force, and what does the
+  # server's own unit do when the kernel OOM-kills one of its processes?
+  def worker_memory(conn, _params), do: json(conn, MemoryDiagnosis.run())
+
+  def tmux(conn, _params), do: json(conn, LoginRunner.tmux_diagnosis())
+
+  # bd-7pnat1: which providers / sandbox backends this install uses, so
+  # `arb server doctor` can report a check as n/a instead of probing it.
+  def doctor_scope(conn, _params), do: json(conn, Wardmast.Doctor.Scope.report())
+
+  # bd-8t4yui: the end-to-end canary spawn, and its cached result for this boot.
+  def spawn_canary(conn, _params) do
+    case Wardmast.Doctor.SpawnCanary.run() do
+      {:ok, report} ->
+        json(conn, %{report: report})
+
+      {:error, :busy} ->
+        conn
+        |> put_status(:conflict)
+        |> json(%{error: "busy", detail: "a spawn canary is already running; try again shortly"})
+    end
+  end
+
+  def spawn_canary_report(conn, _params),
+    do: json(conn, %{report: Wardmast.Doctor.SpawnCanary.cached()})
+
+  def cli_versions(conn, _params), do: json(conn, CliStatus.build())
+
+  def merge_routing(conn, _params) do
+    repos = Enum.map(RoutingCheck.report(), &routing_entry/1)
+
+    json(conn, %{
+      repos: repos,
+      problems: Enum.filter(repos, & &1.problem),
+      gitlab_budget: GitlabBudget.doctor_check()
+    })
+  end
+
+  defp routing_entry(entry) do
+    %{entry | problem: entry.problem && Atom.to_string(entry.problem)}
+  end
+
+  def provider_accounts(conn, _params) do
+    status = Enablement.status()
+
+    json(conn, %{
+      decision: Atom.to_string(status.decision),
+      stranded_workspaces: status.stranded_workspaces,
+      server_env_token: status.server_env_token?,
+      runbook: Enablement.runbook()
+    })
+  end
+end

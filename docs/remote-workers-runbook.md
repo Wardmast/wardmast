@@ -252,8 +252,8 @@ arb config set worker.placement local_only      # the default
 `prefer_remote` is the safe first step. Only a fresh implementer run of a Claude task in
 a podman container with a private clone is eligible; follow-ups, reviews, merge-queue
 passes, non-Claude providers and bwrap/unsandboxed runs stay local whatever the mode
-(the ineligible reasons in `Arbiter.Nodes.Placement`).
-Switch it off instantly, install-wide, with `config :arbiter, remote_execution: false`.
+(the ineligible reasons in `Wardmast.Nodes.Placement`).
+Switch it off instantly, install-wide, with `config :wardmast, remote_execution: false`.
 
 ### Select the podman sandbox
 
@@ -328,7 +328,7 @@ Deploys and crashes restart the primary. What happens to a run on a node (§10.4
    the run running and uncancelled for the collect. An adoption gets at most half of
    what is left of its node's budget (30 s at most); one that runs over it is given up
    the same way, so the collect still has time. To turn adoption off, set
-   `config :arbiter, :node_run_adoption, false` before the restart: every run is then
+   `config :wardmast, :node_run_adoption, false` before the restart: every run is then
    collected.
 4. A node that never comes back has its runs stamped `interrupted` / `node_lost`
    (no resume attempt consumed) and auto-resumed through placement, once. A run
@@ -357,7 +357,7 @@ What good looks like:
 
 ## 6. Verifying an install: the `:node_agent` suite
 
-`apps/arbiter_web/test/node_agent/remote_workers_e2e_test.exs` runs the whole feature with
+`apps/wardmast_web/test/node_agent/remote_workers_e2e_test.exs` runs the whole feature with
 nothing stubbed: a real `ARB_ROLE=agent` OS process configured by the `agent.env` the real
 join script wrote, a Bandit-served endpoint, real rootless podman containers, the real
 egress proxy and `arb` bridge, a real git bundle through the quarantine, and a primary
@@ -367,7 +367,7 @@ drain and revoke.
 
 It is tagged `:node_agent` and **excluded from the default `mix test` and CI** (it needs a
 rootless podman, a local image with `sh` and `socat`, and boots a second BEAM). Run it
-deliberately, memory-capped, from `apps/arbiter_web`:
+deliberately, memory-capped, from `apps/wardmast_web`:
 
 ```sh
 systemd-run --user --scope -p MemoryMax=3G \

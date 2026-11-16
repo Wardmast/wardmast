@@ -1,0 +1,898 @@
+defmodule Wardmast.Workflows.ReviewPatrolSupervisorTest do
+  # async: false — the ReviewPatrolSupervisor and its Registry are singletons.
+  use Wardmast.DataCase, async: false
+
+  alias Wardmast.Tasks.Workspace
+  alias Wardmast.Workflows.{ReviewPatrol, ReviewPatrolSupervisor}
+
+  @registry Wardmast.Workflows.ReviewPatrolRegistry
+
+  # Seed an open review engagement (the lazy-start watched item, bd-7tr11p) for a
+  # repo: a review_only task with a source_pr. `source_pr` encodes the repo —
+  # qualified "owner/repo#N" for multi-repo, bare "#N" in a single-repo workspace.
+  # Repo deliberately nil (bd-9dwbvt's `:create` would otherwise refuse in these
+  # multi-repo, no-`default_repo` workspaces): the derivation under test reads
+  # `source_pr`, not the issue's repo.
+  defp open_engagement!(ws, source_pr) do
+    issue_without_repo!(%{
+      title: "eng-#{System.unique_integer([:positive])}",
+      tracker_type: :none,
+      source_pr: to_string(source_pr),
+      review_only: true,
+      workspace_id: ws.id
+    })
+  end
+
+  # A long interval means the GenServer never touches the DB/forge during the
+  # test; we only assert on registration/derivation — the behaviour this module
+  # owns (mirrors PRPatrolSupervisorTest).
+  defp start(workspace, opts \\ []) do
+    opts = Keyword.put_new(opts, :interval_ms, 600_000)
+    result = ReviewPatrolSupervisor.start_patrol(workspace, opts)
+
+    on_exit(fn ->
+      for {pid, _} <- Registry.select(@registry, [{{:_, :"$1", :"$2"}, [], [{{:"$1", :"$2"}}]}]),
+          is_pid(pid),
+          Process.alive?(pid) do
+        Wardmast.ProcessTeardown.stop_child(ReviewPatrolSupervisor, pid)
+      end
+    end)
+
+    result
+  end
+
+  defp git_repo_with_origin(remote_url) do
+    dir = Path.join(System.tmp_dir!(), "reviewpatrol-repo-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    {_, 0} = System.cmd("git", ["-C", dir, "init", "-q"], stderr_to_stdout: true)
+
+    {_, 0} =
+      System.cmd("git", ["-C", dir, "remote", "add", "origin", remote_url],
+        stderr_to_stdout: true
+      )
+
+    on_exit(fn -> File.rm_rf(dir) end)
+    dir
+  end
+
+  defp keys_for_workspace(ws_id) do
+    @registry
+    |> Registry.select([{{:"$1", :_, :_}, [], [:"$1"]}])
+    |> Enum.filter(fn
+      ^ws_id -> true
+      key when is_binary(key) -> String.starts_with?(key, ws_id <> ":")
+      _ -> false
+    end)
+    |> Enum.sort()
+  end
+
+  describe "start_patrol/2 — single-repo workspace" do
+    test "starts exactly one patrol registered under the workspace id" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-single-#{System.unique_integer([:positive])}",
+          prefix: "rs#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "octo",
+                "repo" => "widget",
+                "credentials_ref" => "env:GITHUB_TOKEN"
+              }
+            }
+          }
+        })
+
+      open_engagement!(ws, "#1")
+
+      assert {:ok, pid} = start(ws)
+      assert is_pid(pid) and Process.alive?(pid)
+
+      assert ReviewPatrolSupervisor.whereis(ws.id) == pid
+      assert keys_for_workspace(ws.id) == [ws.id]
+      assert ReviewPatrol.state(pid).repo == "octo/widget"
+    end
+
+    test "duplicate start collapses to {:error, {:already_started, pid}}" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-dup-#{System.unique_integer([:positive])}",
+          prefix: "rd#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      open_engagement!(ws, "#1")
+
+      assert {:ok, pid} = start(ws)
+
+      assert {:error, {:already_started, ^pid}} =
+               ReviewPatrolSupervisor.start_patrol(ws, interval_ms: 600_000)
+    end
+  end
+
+  describe "start_patrol/2 — separate registry from PRPatrol" do
+    test "a ReviewPatrol registration does not appear in the PRPatrol registry" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-sep-#{System.unique_integer([:positive])}",
+          prefix: "rx#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      open_engagement!(ws, "#1")
+
+      assert {:ok, pid} = start(ws)
+
+      # Present in ReviewPatrol's registry…
+      assert ReviewPatrolSupervisor.whereis(ws.id) == pid
+      # …absent from PRPatrol's registry (the two are disjoint namespaces).
+      assert Registry.lookup(Wardmast.Workflows.PRPatrolRegistry, ws.id) == []
+    end
+  end
+
+  describe "start_patrol/2 — multi-repo workspace (acme shape)" do
+    test "starts one patrol per repo, keyed by workspace_id:owner/repo" do
+      repo_a = git_repo_with_origin("git@github.com:acme-corp/apex_server.git")
+      repo_b = git_repo_with_origin("https://github.com/acme-corp/apex_web.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-multi-#{System.unique_integer([:positive])}",
+          prefix: "rm#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "acme-corp",
+                "credentials_ref" => "env:GITHUB_TOKEN"
+              }
+            },
+            "repo_paths" => %{"apex_server" => repo_a, "apex_web" => repo_b}
+          }
+        })
+
+      open_engagement!(ws, "acme-corp/apex_server#1")
+      open_engagement!(ws, "acme-corp/apex_web#1")
+
+      assert {:ok, _pid} = start(ws)
+
+      assert keys_for_workspace(ws.id) ==
+               Enum.sort([
+                 "#{ws.id}:acme-corp/apex_server",
+                 "#{ws.id}:acme-corp/apex_web"
+               ])
+
+      [{pid_a, _}] = Registry.lookup(@registry, "#{ws.id}:acme-corp/apex_server")
+      [{pid_b, _}] = Registry.lookup(@registry, "#{ws.id}:acme-corp/apex_web")
+      assert ReviewPatrol.state(pid_a).repo == "acme-corp/apex_server"
+      assert ReviewPatrol.state(pid_b).repo == "acme-corp/apex_web"
+    end
+  end
+
+  describe "start_patrol/2 — gitlab single-project workspace" do
+    test "starts exactly one patrol registered under the workspace id" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-gl-single-#{System.unique_integer([:positive])}",
+          prefix: "rgs#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "gitlab",
+              "config" => %{
+                "host" => "gitlab.com",
+                "project_id" => 12345,
+                "credentials_ref" => "env:GITLAB_TOKEN"
+              }
+            }
+          }
+        })
+
+      open_engagement!(ws, "!1")
+
+      assert {:ok, pid} = start(ws)
+      assert is_pid(pid) and Process.alive?(pid)
+
+      assert ReviewPatrolSupervisor.whereis(ws.id) == pid
+      assert keys_for_workspace(ws.id) == [ws.id]
+      assert ReviewPatrol.state(pid).repo == "12345"
+    end
+  end
+
+  describe "start_patrol/2 — gitlab multi-repo workspace (emricare/vstim shape)" do
+    test "starts one patrol per repo, derived from repo_paths origin remotes" do
+      repo_a = git_repo_with_origin("git@gitlab.com:emricare/tonic.git")
+      repo_b = git_repo_with_origin("git@gitlab.com:emricare/tonic_device.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-gl-multi-#{System.unique_integer([:positive])}",
+          prefix: "rgm#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "gitlab",
+              "config" => %{
+                "host" => "gitlab.com",
+                "credentials_ref" => "env:GITLAB_TOKEN"
+              }
+            },
+            "repo_paths" => %{"tonic" => repo_a, "tonic_device" => repo_b}
+          }
+        })
+
+      open_engagement!(ws, "emricare/tonic#1")
+      open_engagement!(ws, "emricare/tonic_device#1")
+
+      assert {:ok, _pid} = start(ws)
+
+      assert keys_for_workspace(ws.id) ==
+               Enum.sort([
+                 "#{ws.id}:emricare/tonic",
+                 "#{ws.id}:emricare/tonic_device"
+               ])
+    end
+  end
+
+  describe "start_patrol/2 — skips" do
+    test "skips a workspace with no github merge config (direct strategy)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-direct-#{System.unique_integer([:positive])}",
+          prefix: "ri#{System.unique_integer([:positive])}"
+        })
+
+      assert :skip = start(ws)
+      assert keys_for_workspace(ws.id) == []
+    end
+
+    test "skips a github workspace from which no repo can be derived" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-norepo-#{System.unique_integer([:positive])}",
+          prefix: "rn#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{"strategy" => "github", "config" => %{"owner" => "octo"}}
+          }
+        })
+
+      assert :skip = start(ws)
+      assert keys_for_workspace(ws.id) == []
+    end
+
+    # bd-4brb2j: a repo whose review_automation resolves to :off has no
+    # reviewer we would ever dispatch — no engagement on it can ever do
+    # anything but sit there, so the patrol process itself should never start.
+    test "skips a single-repo workspace whose review_automation default is :off" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-off-#{System.unique_integer([:positive])}",
+          prefix: "ro#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            },
+            "review_automation" => %{"default" => "off"}
+          }
+        })
+
+      # Seed an engagement so the ONLY reason to skip is the :off mode, not the
+      # lazy-start gate (bd-7tr11p).
+      open_engagement!(ws, "#1")
+
+      assert :skip = start(ws)
+      assert keys_for_workspace(ws.id) == []
+    end
+
+    # Same, but the :off comes from a repo_overrides entry keyed by the bare
+    # repo name (merge.config.repo IS the repo name for a single-repo workspace)
+    # rather than the workspace-wide default.
+    test "skips a single-repo workspace whose repo_overrides entry is :off" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-offover-#{System.unique_integer([:positive])}",
+          prefix: "rv#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            },
+            "review_automation" => %{
+              "default" => "auto",
+              "repo_overrides" => %{"widget" => "off"}
+            }
+          }
+        })
+
+      open_engagement!(ws, "#1")
+
+      assert :skip = start(ws)
+      assert keys_for_workspace(ws.id) == []
+    end
+
+    # A repo_overrides entry takes precedence over the workspace-wide default
+    # even when the override is a non-off mode and the default is :off — the
+    # operator explicitly opted this repo in, and default-off must not veto it.
+    test "starts a patrol when the default is :off but the repo_overrides entry is :auto" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-offdefault-override-#{System.unique_integer([:positive])}",
+          prefix: "rd#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            },
+            "review_automation" => %{
+              "default" => "off",
+              "repo_overrides" => %{"widget" => "auto"}
+            }
+          }
+        })
+
+      open_engagement!(ws, "#1")
+
+      assert {:ok, pid} = start(ws)
+      assert Process.alive?(pid)
+    end
+
+    # A running patrol for a repo that gets flipped to :off must be stopped on
+    # the next start_patrol/2 call (mirrors the stale-registration reconciler),
+    # not left running until the next full app restart.
+    test "stops an already-running patrol once its repo is flipped to :off" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-offlive-#{System.unique_integer([:positive])}",
+          prefix: "rl#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      open_engagement!(ws, "#1")
+
+      assert {:ok, pid} = start(ws)
+      assert Process.alive?(pid)
+
+      {:ok, flipped} =
+        Ash.update(ws, %{patch: %{"review_automation" => %{"default" => "off"}}},
+          action: :patch_config
+        )
+
+      assert :skip = start(flipped)
+      refute Process.alive?(pid)
+
+      # DynamicSupervisor.terminate_child/2 waits for the child process itself
+      # to exit before returning, but Registry's own removal of the :via entry
+      # runs via a separate monitor reacting to that exit — under heavy
+      # concurrent test load it can lag the terminate_child call by a beat, so
+      # poll briefly rather than asserting immediately.
+      assert Enum.any?(1..20, fn _ ->
+               keys_for_workspace(ws.id) == [] or (Process.sleep(10) && false)
+             end),
+             "expected patrol #{ws.id} to be unregistered, got #{inspect(keys_for_workspace(ws.id))}"
+    end
+
+    # Only the OFF-configured repo is skipped in a multi-repo workspace — the
+    # others still get their patrol.
+    test "in a multi-repo workspace, only the :off repo is skipped" do
+      alpha = git_repo_with_origin("git@github.com:octo/alpha.git")
+      beta = git_repo_with_origin("git@github.com:octo/beta.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-offmulti-#{System.unique_integer([:positive])}",
+          prefix: "rm#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{"strategy" => "github", "config" => %{"owner" => "octo"}},
+            "repo_paths" => %{"alpha" => alpha, "beta" => beta},
+            "review_automation" => %{
+              "default" => "auto",
+              "repo_overrides" => %{"alpha" => "off"}
+            }
+          }
+        })
+
+      # Both repos have an engagement; alpha is skipped only because it is :off.
+      open_engagement!(ws, "octo/alpha#1")
+      open_engagement!(ws, "octo/beta#1")
+
+      # start_patrol/2 returns the first per-repo result (alpha's, which is
+      # :skip since it sorts before beta) — beta still gets its own patrol.
+      start(ws)
+
+      keys = keys_for_workspace(ws.id)
+      assert keys == ["#{ws.id}:octo/beta"]
+    end
+  end
+
+  describe "whereis_all/1" do
+    test "returns empty list for an unknown workspace" do
+      assert ReviewPatrolSupervisor.whereis_all("ws-nope-#{System.unique_integer([:positive])}") ==
+               []
+    end
+
+    test "returns the pid for a single-repo workspace" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-wa-#{System.unique_integer([:positive])}",
+          prefix: "rw#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      open_engagement!(ws, "#1")
+
+      assert {:ok, pid} = start(ws)
+      assert ReviewPatrolSupervisor.whereis_all(ws.id) == [{ws.id, pid}]
+    end
+  end
+
+  describe "start_patrol/2 — stale registration reconciliation" do
+    test "N→1: stops the old composite-keyed patrols when repo count drops to one" do
+      repo_a = git_repo_with_origin("git@github.com:acme/alpha.git")
+      repo_b = git_repo_with_origin("https://github.com/acme/beta.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-recon-n1-#{System.unique_integer([:positive])}",
+          prefix: "rp#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{"strategy" => "github", "config" => %{"owner" => "acme"}},
+            "repo_paths" => %{"alpha" => repo_a, "beta" => repo_b}
+          }
+        })
+
+      open_engagement!(ws, "acme/alpha#1")
+      open_engagement!(ws, "acme/beta#1")
+
+      assert {:ok, _} = start(ws)
+      assert length(keys_for_workspace(ws.id)) == 2
+
+      single_repo_ws = %{ws | config: Map.put(ws.config, "repo_paths", %{"alpha" => repo_a})}
+
+      assert {:ok, _} = ReviewPatrolSupervisor.start_patrol(single_repo_ws, interval_ms: 600_000)
+      assert keys_for_workspace(ws.id) == [ws.id]
+    end
+
+    test "1→N: stops the old bare-keyed patrol when repo count grows to more than one" do
+      repo_a = git_repo_with_origin("git@github.com:acme/alpha.git")
+      repo_b = git_repo_with_origin("https://github.com/acme/beta.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-recon-1n-#{System.unique_integer([:positive])}",
+          prefix: "ro#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{"strategy" => "github", "config" => %{"owner" => "acme"}},
+            "repo_paths" => %{"alpha" => repo_a}
+          }
+        })
+
+      open_engagement!(ws, "acme/alpha#1")
+      open_engagement!(ws, "acme/beta#1")
+
+      assert {:ok, _} = start(ws)
+      assert keys_for_workspace(ws.id) == [ws.id]
+
+      two_repo_ws = %{
+        ws
+        | config: Map.put(ws.config, "repo_paths", %{"alpha" => repo_a, "beta" => repo_b})
+      }
+
+      assert {:ok, _} = ReviewPatrolSupervisor.start_patrol(two_repo_ws, interval_ms: 600_000)
+
+      assert keys_for_workspace(ws.id) ==
+               Enum.sort(["#{ws.id}:acme/alpha", "#{ws.id}:acme/beta"])
+    end
+  end
+
+  describe "start_patrol/2 — lazy-start gate (bd-7tr11p)" do
+    test "skips a single-repo workspace with no open engagement" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-lazy-none-#{System.unique_integer([:positive])}",
+          prefix: "ln#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      assert :skip = start(ws)
+      assert keys_for_workspace(ws.id) == []
+    end
+
+    test "starts a single-repo workspace once an engagement is open" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-lazy-one-#{System.unique_integer([:positive])}",
+          prefix: "lo#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      open_engagement!(ws, "#1")
+
+      assert {:ok, pid} = start(ws)
+      assert ReviewPatrolSupervisor.whereis(ws.id) == pid
+    end
+
+    test "in a multi-repo workspace starts only the repo(s) with an open engagement" do
+      repo_a = git_repo_with_origin("git@github.com:acme-corp/apex_server.git")
+      repo_b = git_repo_with_origin("https://github.com/acme-corp/apex_web.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-lazy-multi-#{System.unique_integer([:positive])}",
+          prefix: "lm#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{"strategy" => "github", "config" => %{"owner" => "acme-corp"}},
+            "repo_paths" => %{"apex_server" => repo_a, "apex_web" => repo_b}
+          }
+        })
+
+      # Only apex_server has an engagement (qualified source_pr names its repo).
+      open_engagement!(ws, "acme-corp/apex_server#1")
+
+      assert {:ok, _} = start(ws)
+      assert keys_for_workspace(ws.id) == ["#{ws.id}:acme-corp/apex_server"]
+    end
+  end
+
+  describe "start_for_existing_workspaces/0 — boot path (bd-7tr11p)" do
+    test "a work-free workspace produces no patrol sweep at boot" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-boot-none-#{System.unique_integer([:positive])}",
+          prefix: "bn#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      assert :ok = ReviewPatrolSupervisor.start_for_existing_workspaces()
+      assert keys_for_workspace(ws.id) == []
+    end
+
+    test "a workspace with an open engagement starts its patrol at boot" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-boot-work-#{System.unique_integer([:positive])}",
+          prefix: "bw#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      open_engagement!(ws, "#1")
+
+      assert :ok = ReviewPatrolSupervisor.start_for_existing_workspaces()
+
+      on_exit(fn ->
+        for {_k, pid} <- ReviewPatrolSupervisor.whereis_all(ws.id),
+            is_pid(pid),
+            Process.alive?(pid),
+            do: Wardmast.ProcessTeardown.stop_child(ReviewPatrolSupervisor, pid)
+      end)
+
+      assert [ws.id] == keys_for_workspace(ws.id)
+    end
+  end
+
+  describe "recheck_all/1 (bd-7tr11p)" do
+    test "reaps a patrol whose last engagement has closed" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-recheck-#{System.unique_integer([:positive])}",
+          prefix: "rc#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      eng = open_engagement!(ws, "#1")
+      assert {:ok, pid} = start(ws)
+      mref = Process.monitor(pid)
+
+      {:ok, _} = Ash.update(eng, %{}, action: :close)
+      ReviewPatrolSupervisor.recheck_all(ws.id)
+
+      assert_receive {:DOWN, ^mref, :process, ^pid, :normal}, 2_000
+
+      # Registry removes the :via entry via a monitor reacting to the exit, which
+      # can lag the DOWN by a beat — poll briefly (mirrors the :off-flip test).
+      assert Enum.any?(1..20, fn _ ->
+               keys_for_workspace(ws.id) == [] or (Process.sleep(10) && false)
+             end)
+    end
+  end
+
+  # bd-7feiul: mirrors PRPatrolSupervisorTest's reconcile block — a patrol is
+  # pinned to the owner/repo it was started for, so a config edit that moved
+  # merge.config owner/repo (or repo_paths) left the live patrol polling the old
+  # repo's engagements until a restart. A workspace :update / :patch_config that
+  # changes `config` now reconciles the patrols, never starting one the
+  # lazy-start gate (bd-7tr11p) would skip.
+  describe "reconcile on workspace update (bd-7feiul)" do
+    @stub_name Wardmast.Mergers.Github.HTTP
+
+    setup do
+      put_system_env("GITHUB_TOKEN", "test-token-rps")
+      prior_auto_start = Application.fetch_env(:wardmast, :auto_start_refineries)
+
+      on_exit(fn ->
+        restore_auto_start(prior_auto_start)
+
+        # The update hooks start children under the app's supervisors (PRPatrol
+        # and the finalizer reconcile on the same update) — stop them all.
+        for sup <- [
+              ReviewPatrolSupervisor,
+              Wardmast.Workflows.PRPatrolSupervisor,
+              Wardmast.Workflows.MergedPRFinalizerSupervisor
+            ],
+            {_, pid, _, _} <- DynamicSupervisor.which_children(sup),
+            is_pid(pid) do
+          Wardmast.ProcessTeardown.stop_child(sup, pid)
+        end
+      end)
+
+      :ok
+    end
+
+    defp restore_auto_start({:ok, value}),
+      do: Application.put_env(:wardmast, :auto_start_refineries, value)
+
+    defp restore_auto_start(:error), do: Application.delete_env(:wardmast, :auto_start_refineries)
+
+    defp github_workspace(merge_config, extra \\ %{}) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-up-#{System.unique_integer([:positive])}",
+          prefix: "rpu#{System.unique_integer([:positive])}",
+          config: Map.merge(%{"merge" => github_merge(merge_config)}, extra)
+        })
+
+      ws
+    end
+
+    defp github_merge(merge_config) do
+      %{
+        "strategy" => "github",
+        "config" => Map.put(merge_config, "credentials_ref", "env:GITHUB_TOKEN")
+      }
+    end
+
+    defp enable_auto_start, do: Application.put_env(:wardmast, :auto_start_refineries, true)
+
+    defp repos_for_workspace(ws_id) do
+      ws_id
+      |> keys_for_workspace()
+      |> Enum.map(fn key ->
+        [{pid, _}] = Registry.lookup(@registry, key)
+        ReviewPatrol.state(pid).repo
+      end)
+      |> Enum.sort()
+    end
+
+    test ":update changing merge.config owner replaces the patrol; its next tick queries the new repo" do
+      ws = github_workspace(%{"owner" => "ryanrborn", "repo" => "arbiter"})
+      open_engagement!(ws, "7")
+      assert {:ok, old_pid} = start(ws)
+      assert ReviewPatrol.state(old_pid).repo == "ryanrborn/arbiter"
+
+      enable_auto_start()
+
+      {:ok, ws} =
+        Ash.update(
+          ws,
+          %{
+            config: %{
+              "merge" => github_merge(%{"owner" => "serious-alchemy", "repo" => "arbiter"})
+            }
+          },
+          action: :update
+        )
+
+      refute Process.alive?(old_pid)
+      new_pid = ReviewPatrolSupervisor.whereis(ws.id)
+      assert is_pid(new_pid) and new_pid != old_pid
+      assert keys_for_workspace(ws.id) == [ws.id]
+      assert ReviewPatrol.state(new_pid).repo == "serious-alchemy/arbiter"
+
+      test_pid = self()
+
+      Req.Test.stub(@stub_name, fn conn ->
+        send(test_pid, {:requested, conn.request_path})
+        conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
+      end)
+
+      Req.Test.allow(@stub_name, self(), new_pid)
+      :ok = ReviewPatrol.tick(new_pid)
+
+      assert_received {:requested, "/repos/serious-alchemy/arbiter/pulls/7"}
+      refute_received {:requested, "/repos/ryanrborn/" <> _}
+    end
+
+    test ":patch_config changing merge.config owner replaces the patrol" do
+      ws = github_workspace(%{"owner" => "ryanrborn", "repo" => "arbiter"})
+      open_engagement!(ws, "7")
+      assert {:ok, old_pid} = start(ws)
+
+      enable_auto_start()
+
+      {:ok, ws} =
+        Ash.update(
+          ws,
+          %{patch: %{"merge" => %{"config" => %{"owner" => "serious-alchemy"}}}},
+          action: :patch_config
+        )
+
+      refute Process.alive?(old_pid)
+      new_pid = ReviewPatrolSupervisor.whereis(ws.id)
+      assert is_pid(new_pid) and new_pid != old_pid
+      assert ReviewPatrol.state(new_pid).repo == "serious-alchemy/arbiter"
+    end
+
+    test "a moved repo with no open engagement gets no patrol — the lazy-start gate still applies" do
+      ws = github_workspace(%{"owner" => "ryanrborn", "repo" => "arbiter"})
+      # Qualified to the OLD repo: an engagement there, none in the new one.
+      open_engagement!(ws, "ryanrborn/arbiter#7")
+      assert {:ok, old_pid} = start(ws)
+
+      enable_auto_start()
+
+      {:ok, ws} =
+        Ash.update(
+          ws,
+          %{patch: %{"merge" => %{"config" => %{"owner" => "serious-alchemy"}}}},
+          action: :patch_config
+        )
+
+      refute Process.alive?(old_pid)
+      assert keys_for_workspace(ws.id) == []
+    end
+
+    test "a repo_paths change stops the dropped repo's patrol and starts only gated repos" do
+      repo_a = git_repo_with_origin("git@github.com:acme/alpha.git")
+      repo_b = git_repo_with_origin("git@github.com:acme/beta.git")
+      repo_c = git_repo_with_origin("git@github.com:acme/gamma.git")
+
+      ws = github_workspace(%{"owner" => "acme"}, %{"repo_paths" => %{"alpha" => repo_a}})
+      open_engagement!(ws, "acme/alpha#1")
+      open_engagement!(ws, "acme/beta#2")
+      # acme/gamma has no engagement: reconcile must never start it.
+
+      assert {:ok, _pid} = start(ws)
+      assert repos_for_workspace(ws.id) == ["acme/alpha"]
+
+      enable_auto_start()
+
+      {:ok, ws} =
+        Ash.update(
+          ws,
+          %{
+            config: %{
+              "merge" => github_merge(%{"owner" => "acme"}),
+              "repo_paths" => %{"alpha" => repo_a, "beta" => repo_b, "gamma" => repo_c}
+            }
+          },
+          action: :update
+        )
+
+      assert keys_for_workspace(ws.id) == ["#{ws.id}:acme/alpha", "#{ws.id}:acme/beta"]
+      assert repos_for_workspace(ws.id) == ["acme/alpha", "acme/beta"]
+
+      {:ok, ws} =
+        Ash.update(
+          ws,
+          %{
+            config: %{
+              "merge" => github_merge(%{"owner" => "acme"}),
+              "repo_paths" => %{"beta" => repo_b, "gamma" => repo_c}
+            }
+          },
+          action: :update
+        )
+
+      assert keys_for_workspace(ws.id) == ["#{ws.id}:acme/beta"]
+      assert repos_for_workspace(ws.id) == ["acme/beta"]
+    end
+
+    test "an update that drops the GitHub merge config stops the patrol" do
+      ws = github_workspace(%{"owner" => "ryanrborn", "repo" => "arbiter"})
+      open_engagement!(ws, "7")
+      assert {:ok, old_pid} = start(ws)
+
+      enable_auto_start()
+
+      {:ok, ws} = Ash.update(ws, %{config: %{}}, action: :update)
+
+      refute Process.alive?(old_pid)
+      assert keys_for_workspace(ws.id) == []
+    end
+
+    test "an update that leaves config alone keeps the running patrol" do
+      ws = github_workspace(%{"owner" => "ryanrborn", "repo" => "arbiter"})
+      open_engagement!(ws, "7")
+      assert {:ok, pid} = start(ws)
+
+      enable_auto_start()
+
+      {:ok, ws} = Ash.update(ws, %{description: "renamed"}, action: :update)
+
+      assert ReviewPatrolSupervisor.whereis(ws.id) == pid
+    end
+
+    test "a config update with the same repo keeps the running patrol" do
+      ws = github_workspace(%{"owner" => "ryanrborn", "repo" => "arbiter"})
+      open_engagement!(ws, "7")
+      assert {:ok, pid} = start(ws)
+
+      enable_auto_start()
+
+      {:ok, ws} =
+        Ash.update(
+          ws,
+          %{patch: %{"review_patrol" => %{"our_login" => "botreviewer"}}},
+          action: :patch_config
+        )
+
+      assert ReviewPatrolSupervisor.whereis(ws.id) == pid
+    end
+
+    test "demand-start replaces a patrol still pinned to the old repo under the same key" do
+      ws = github_workspace(%{"owner" => "ryanrborn", "repo" => "arbiter"})
+      open_engagement!(ws, "7")
+      assert {:ok, old_pid} = start(ws)
+
+      # Auto-start off: the update hook does not run, so the stale patrol is
+      # still registered under the bare workspace id when the lifecycle event
+      # demand-starts the (same-keyed) patrol for the new repo.
+      {:ok, ws} =
+        Ash.update(
+          ws,
+          %{patch: %{"merge" => %{"config" => %{"owner" => "serious-alchemy"}}}},
+          action: :patch_config
+        )
+
+      assert ReviewPatrolSupervisor.whereis(ws.id) == old_pid
+
+      assert {:ok, new_pid} = ReviewPatrolSupervisor.ensure_started(ws, "8")
+      refute Process.alive?(old_pid)
+      assert ReviewPatrol.state(new_pid).repo == "serious-alchemy/arbiter"
+    end
+  end
+end

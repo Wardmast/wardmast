@@ -3,7 +3,7 @@
 A worker that pushes uses a credential that reaches **one repo**. It never gets
 the operator's ssh-agent or keys, and no worker is ever given a token with the
 `gist` or `delete_repo` scope. Design: `docs/design/guardrail-profiles.md` §5.5
-and §9 (G16). Mechanism: `Arbiter.Worker.GitCredential`.
+and §9 (G16). Mechanism: `Wardmast.Worker.GitCredential`.
 
 ## What you (the operator) have to create
 
@@ -402,7 +402,7 @@ A podman run holds no git credential: the **host** pushes the collected branch
 after `arb done` (also a fix round's or conflict pass's rewritten branch, and the
 review gate's pre-review push) and opens, comments on and merges the PR. With a
 scoped entry for the repo the host does all of that with it, not with the
-operator's ssh/gh credentials (`Arbiter.Worker.HostCredential`):
+operator's ssh/gh credentials (`Wardmast.Worker.HostCredential`):
 
 * **Push.** `git push` runs with the entry's credential: for a `github_app`, a
   fresh installation token restricted to the repo (Contents, Pull requests and

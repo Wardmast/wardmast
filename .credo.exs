@@ -85,7 +85,7 @@
           #
           # `if_nested_deeper_than: 3`, not the default 0.
           #
-          # Nearly every module here is `Arbiter.<Context>.<Module>` — three
+          # Nearly every module here is `Wardmast.<Context>.<Module>` — three
           # parts. At the default, `Messages.Message.new(...)` and its 235
           # siblings are all "nested modules that could be aliased", which is
           # not a finding about this code, it is a finding about Elixir's
@@ -93,7 +93,7 @@
           # which context it is crossing into, and aliasing them away costs
           # more readability at the call site than it saves in line length.
           #
-          # Four parts and up is a different claim: `Arbiter.Agents.Claude.
+          # Four parts and up is a different claim: `Wardmast.Agents.Claude.
           # Security.foo()` really is long enough at a call site to be worth
           # a top-of-module alias, and those (13 at the time of writing) were
           # fixed rather than tuned away.

@@ -1,0 +1,1083 @@
+defmodule WardmastWeb.Api.WorkerControllerTest do
+  use WardmastWeb.ConnCase, async: false
+
+  alias Wardmast.Tasks.{Issue, Workspace}
+  alias Wardmast.Worker
+  alias Wardmast.Worker.OutputLog
+  alias Wardmast.Worker.PromptLog
+  alias Wardmast.Workers.Run
+
+  require Ash.Query
+
+  setup %{conn: conn} do
+    # Clean slate — other tests in the umbrella may have left workers running.
+    for snap <- Worker.list_children() do
+      Worker.stop(snap.task_id)
+    end
+
+    Process.sleep(50)
+
+    {:ok, ws} = Ash.create(Workspace, %{name: "pol-ctrl-ws", prefix: "pc"})
+    {:ok, conn: put_req_header(conn, "accept", "application/json"), ws: ws}
+  end
+
+  # bd-6omte4: a ReviewGate fix round the quota gate queued reads as held,
+  # with its provider and the gate's reason — not as the rejected run's failure.
+  describe "GET /api/workers/:task_id for a ticket with a held dispatch" do
+    test "reads held_for_quota, naming the round, provider and reason", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "held-round", workspace_id: ws.id})
+
+      {:ok, _run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          state: :finished,
+          outcome: :failed,
+          failure_reason: "review_gate_rejected",
+          started_at: DateTime.utc_now()
+        })
+
+      :ok =
+        Wardmast.Workflows.DispatchQueue.hold(
+          ws.id,
+          task.id,
+          [resume: true, review_gate_fix_round_attempts: 2],
+          %{window: "5h", phrase: "quota exhausted"},
+          :gemini
+        )
+
+      on_exit(fn -> stop_queue(ws.id) end)
+
+      body = conn |> get(~p"/api/workers/#{task.id}") |> json_response(200)
+
+      assert body["phase"] == "held_for_quota"
+      assert body["phase_label"] == "held for quota, will resume"
+      assert body["held"]["intent"] == "ReviewGate fix round 2"
+      assert body["held"]["fix_round"] == 2
+      assert body["held"]["provider"] == "gemini"
+      assert body["held"]["provider_label"] == "Antigravity (agy)"
+      assert body["held"]["reason"] == "quota exhausted"
+      assert is_binary(body["held"]["held_since"])
+    end
+
+    test "a ticket with nothing held carries held: null", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "not-held", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
+
+      body = conn |> get(~p"/api/workers/#{task.id}") |> json_response(200)
+      assert Map.has_key?(body, "held")
+      assert body["held"] == nil
+    end
+  end
+
+  defp stop_queue(ws_id) do
+    if q = Wardmast.Workflows.DispatchQueueSupervisor.whereis(ws_id),
+      do: Wardmast.ProcessTeardown.stop_child(Wardmast.Workflows.DispatchQueueSupervisor, q)
+  end
+
+  describe "GET /api/workers/:task_id" do
+    test "returns the snapshot including output_lines for a running worker",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "show-me", workspace_id: ws.id})
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "test/repo")
+
+      # Simulate Claude output flowing through the worker.
+      :ok = Worker.report(worker_pid, :output_lines, ["hello", "world", "arb done"])
+
+      conn = get(conn, ~p"/api/workers/#{task.id}")
+      body = json_response(conn, 200)
+
+      assert body["task_id"] == task.id
+      assert body["repo"] == "test/repo"
+      assert body["kind"] == "implement"
+      assert body["state"] in ["starting", "working"]
+      refute Map.has_key?(body, "status")
+      assert body["output_lines"] == ["hello", "world", "arb done"]
+    end
+
+    test "returns 404 for an unknown task_id", %{conn: conn} do
+      conn = get(conn, ~p"/api/workers/no-such-task")
+      assert json_response(conn, 404)
+    end
+
+    test "reports the ticket's most recent run when no live worker exists",
+         %{conn: conn, ws: ws} do
+      task_id = "bd-hist-#{System.unique_integer([:positive])}"
+      older = DateTime.add(DateTime.utc_now(), -60, :second)
+      newer = DateTime.utc_now()
+
+      {:ok, _old} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: older,
+          completed_at: older,
+          output_lines: ["stale"]
+        })
+
+      {:ok, _recent} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          state: :finished,
+          outcome: :failed,
+          started_at: newer,
+          completed_at: newer,
+          exit_code: 2,
+          failure_reason: "claude_crashed",
+          output_lines: ["a", "b", "boom"]
+        })
+
+      conn = get(conn, ~p"/api/workers/#{task_id}")
+      body = json_response(conn, 200)
+
+      assert body["source"] == "history"
+      assert body["task_id"] == task_id
+      # Most-recent run wins (failed, not the older succeeded one), read into
+      # the same run vocabulary a live run reports (bd-1uu19b).
+      assert {body["kind"], body["state"], body["outcome"]} == {"implement", "finished", "failed"}
+      assert body["exit_status"] == 2
+      assert body["failure_reason"] == "claude_crashed"
+      assert body["output_lines"] == ["a", "b", "boom"]
+      assert body["completed_at"]
+    end
+
+    test "live snapshot is marked source=live and wins over history",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "live-wins", workspace_id: ws.id})
+
+      {:ok, _run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.add(DateTime.utc_now(), -60, :second)
+        })
+
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "test/repo")
+      :ok = Worker.report(worker_pid, :output_lines, ["live-line"])
+
+      conn = get(conn, ~p"/api/workers/#{task.id}")
+      body = json_response(conn, 200)
+
+      assert body["source"] == "live"
+      assert body["repo"] == "test/repo"
+      assert body["output_lines"] == ["live-line"]
+    end
+
+    test "returns 404 when neither a live worker nor a historical run exists",
+         %{conn: conn} do
+      conn = get(conn, ~p"/api/workers/bd-never-ran-#{System.unique_integer([:positive])}")
+      assert json_response(conn, 404)
+    end
+
+    test "snapshot includes failure_reason when the worker failed",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "failed-pol", workspace_id: ws.id})
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
+
+      :ok = Worker.fail(worker_pid, {:claude_crashed, "bad token"})
+
+      conn = get(conn, ~p"/api/workers/#{task.id}")
+      body = json_response(conn, 200)
+
+      assert {body["state"], body["outcome"]} == {"finished", "failed"}
+      assert body["failure_reason"] =~ "claude_crashed"
+    end
+  end
+
+  # bd-asxw4e: a ticket `arb dispatch` accepts without `--force` — queued, so
+  # in the Ready column.
+  defp ready_issue(ws, title) do
+    {:ok, issue} = Ash.create(Issue, %{title: title, workspace_id: ws.id, acceptance: "- ok"})
+    Ash.update(issue, %{}, action: :promote_to_ready)
+  end
+
+  describe "POST /api/workers/dispatch" do
+    # bd-asxw4e: `arb dispatch` of a Backlog or Blocked ticket is refused with
+    # the reason unless `force`, and a forced dispatch is recorded.
+    test "a Backlog ticket is refused with the reason", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "in backlog", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{"task_id" => task.id, "no_agent" => true})
+
+      body = json_response(conn, 409)
+      assert body["error"]["type"] == "conflict"
+      assert inspect(body) =~ "#{task.id} is in Backlog"
+      assert inspect(body) =~ "--force"
+      assert Ash.get!(Issue, task.id).state == :backlog
+    end
+
+    test "force dispatches a Backlog ticket and records the bypass", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "forced", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "repo" => "test/repo",
+          "no_agent" => true,
+          "force" => true
+        })
+
+      assert json_response(conn, 201)["task"]["state"] == "active"
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+
+      [event] =
+        Wardmast.Events.Record
+        |> Ash.Query.filter(workspace_id == ^ws.id and topic == "dispatch_forced")
+        |> Ash.read!()
+
+      assert event.payload["bypassed"] == "in Backlog"
+      assert event.payload["dispatched_by"] == "http_api"
+    end
+
+    # --no-agent preserves the manual-attach path: the task parks in
+    # `:active` with no Driver, so the no-op Work workflow never races
+    # to a bogus `:closed`. Regression against the old dry-dispatch footgun.
+    test "--no-agent parks the task and does NOT close it",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "dry-dispatch-me")
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "repo" => "test/repo",
+          "no_agent" => true
+        })
+
+      body = json_response(conn, 201)
+
+      assert body["task"]["id"] == task.id
+      assert body["task"]["state"] == "active"
+
+      # Wait well past the old ~500ms Driver-close race window. Under the old
+      # behaviour the task would be `:closed` by now; it must remain parked.
+      Process.sleep(900)
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.state == :active
+    end
+
+    # A `provider` takes the real-work dispatch path (start_claude: true) rather
+    # than parking. With an unconfigured repo that path returns a 400 repo error —
+    # the signal that the provider was honored as a worker dispatch (a park would
+    # 201 with the task active and no agent).
+    test "provider routes to a real worker dispatch (repo error rather than park)",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "gem-provider")
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "provider" => "gemini",
+          "repo" => "no-such-repo"
+        })
+
+      body = json_response(conn, 422)
+      assert body["error"]["message"] =~ "repo"
+    end
+
+    # bd-dcvo3n: `provider: "codex"` must take the real-work dispatch path with
+    # the codex agent — not silently fall back to the workspace default. With an
+    # unconfigured repo that path returns a 400 repo error, proving the provider
+    # was honored (a silent default would still error on repo, so the decisive
+    # check is the unknown-provider test below).
+    test "provider \"codex\" routes to a real worker dispatch (repo error)",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "codex-provider")
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "provider" => "codex",
+          "repo" => "no-such-repo"
+        })
+
+      body = json_response(conn, 422)
+      assert body["error"]["message"] =~ "repo"
+    end
+
+    # bd-dcvo3n: an unrecognized `provider` must fail LOUDLY (400) rather than
+    # silently falling back to the workspace-default agent. The error must be
+    # about the bad provider, NOT the (also-unconfigured) repo — proving we
+    # reject before ever reaching the dispatch path.
+    test "an unrecognized provider is rejected with a 400 (not a silent default)",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "bad-provider", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "provider" => "kodex",
+          "repo" => "no-such-repo"
+        })
+
+      body = json_response(conn, 400)
+      assert body["error"]["message"] =~ "provider"
+      assert body["error"]["message"] =~ "kodex"
+      refute body["error"]["message"] =~ "repo"
+    end
+
+    test "returns 404 for an unknown task_id", %{conn: conn} do
+      conn = post(conn, ~p"/api/workers/dispatch", %{"task_id" => "no-such-task"})
+      assert json_response(conn, 404)
+    end
+
+    test "accepts force_quota: true to bypass the quota gate", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "force-quota-dispatch")
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "repo" => "test/repo",
+          "no_agent" => true,
+          "force_quota" => true
+        })
+
+      body = json_response(conn, 201)
+      assert body["task"]["id"] == task.id
+      assert body["task"]["state"] == "active"
+    end
+
+    test "requires a task_id", %{conn: conn} do
+      conn = post(conn, ~p"/api/workers/dispatch", %{})
+      assert json_response(conn, 400)
+    end
+
+    # bd-5b5hq7: this endpoint is loopback-exempt from auth, so a caller
+    # presenting no token at all (the operator's own `arb dispatch`) is
+    # unaffected — but a caller that DOES present a token (a session's own
+    # `arb`, which now always does) cannot use this REST route to dispatch a
+    # worker its token isn't allowed to dispatch. Without this, denying
+    # `can_dispatch` on a session's MCP token would be pure theater: curl the
+    # loopback REST route instead and it just works.
+    test "a bearer token with can_dispatch: false is refused, even over loopback",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "no-dispatch-token", workspace_id: ws.id})
+      token = Wardmast.MCP.Scope.mint_coordinator(nil, can_dispatch: false)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> post(~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "repo" => "test/repo",
+          "no_agent" => true
+        })
+
+      body = json_response(conn, 403)
+      assert body["error"]["message"] =~ "can_dispatch"
+    end
+
+    test "a bearer token with can_dispatch: true is allowed", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "can-dispatch-token")
+      token = Wardmast.MCP.Scope.mint_coordinator(nil, can_dispatch: true)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> post(~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "repo" => "test/repo",
+          "no_agent" => true
+        })
+
+      body = json_response(conn, 201)
+      assert body["task"]["id"] == task.id
+    end
+  end
+
+  # bd-a9hqfb: one normaliser (`Wardmast.Worker.Dispatch.Params`) behind REST
+  # and MCP — what `arb dispatch` posts is judged by the same rules.
+  describe "POST /api/workers/dispatch params (D-W-5, D-W-7, D-W-8, D-W-10)" do
+    test "no_agent together with a provider is a 400 and spawns/parks nothing",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "park or spawn")
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "repo" => "test/repo",
+          "provider" => "claude",
+          "no_agent" => true
+        })
+
+      body = json_response(conn, 400)
+      assert body["error"]["message"] =~ "no_agent"
+      assert Ash.get!(Issue, task.id).state == :queued
+      assert Worker.whereis(task.id) == nil
+    end
+
+    test "an unknown argument is a 400 naming it", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "typo")
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{"task_id" => task.id, "no_agnet" => true})
+
+      assert json_response(conn, 400)["error"]["message"] =~ "no_agnet"
+      assert Worker.whereis(task.id) == nil
+    end
+
+    test "grok is a valid provider", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "grok")
+
+      conn = post(conn, ~p"/api/workers/dispatch", %{"task_id" => task.id, "provider" => "grok"})
+
+      # Past normalisation: the workspace has no repo, so that is the refusal.
+      refute inspect(json_response(conn, 422)) =~ "unknown provider"
+    end
+
+    test "a token at the dispatch-recursion limit is refused", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "too deep")
+      token = Wardmast.MCP.Scope.mint_coordinator(nil, depth: Wardmast.MCP.max_depth())
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> post(~p"/api/workers/dispatch", %{"task_id" => task.id, "no_agent" => true})
+
+      assert json_response(conn, 403)["error"]["message"] =~ "depth limit"
+      assert Worker.whereis(task.id) == nil
+    end
+
+    test "a force_quota bypass over REST is attributed to the token's actor, with its reason",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "rest quota bypass")
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "repo" => "test/repo",
+          "no_agent" => true,
+          "force_quota" => true,
+          "force_quota_reason" => "critical path via REST"
+        })
+
+      assert json_response(conn, 201)
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+
+      assert [event] =
+               Wardmast.Events.Record
+               |> Ash.Query.filter(workspace_id == ^ws.id and topic == "quota_gate_bypass")
+               |> Ash.read!()
+
+      assert event.payload["task_id"] == task.id
+      assert event.payload["actor"] == "coordinator"
+      assert event.payload["reason"] == "critical path via REST"
+    end
+
+    test "force_quota_reason without force_quota is a 400", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "reason only")
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "no_agent" => true,
+          "force_quota_reason" => "because"
+        })
+
+      assert json_response(conn, 400)["error"]["message"] =~ "force_quota"
+    end
+  end
+
+  describe "POST /api/workers/:task_id/resume params (bd-a9hqfb)" do
+    test "an argument resume does not take is a 400, not silently ignored", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "resume typo")
+
+      conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{"provider" => "claude"})
+      assert json_response(conn, 400)["error"]["message"] =~ "provider"
+    end
+
+    test "an unknown mode is a 400", %{conn: conn, ws: ws} do
+      {:ok, task} = ready_issue(ws, "resume bad mode")
+
+      conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{"mode" => "fresh"})
+      assert json_response(conn, 400)["error"]["message"] =~ "mode"
+    end
+  end
+
+  describe "POST /api/workers/:task_id/resume" do
+    test "returns 404 for an unknown task_id", %{conn: conn} do
+      conn = post(conn, ~p"/api/workers/no-such-task/resume", %{})
+      assert json_response(conn, 404)
+    end
+
+    test "a task with no prior run nor repo can't be resumed (422 validation_error)", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "never slung", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{})
+      body = json_response(conn, 422)
+      assert body["error"]["message"] =~ "repo"
+    end
+
+    test "a closed task can't be resumed (409 conflict)", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "closed", workspace_id: ws.id})
+      {:ok, _} = Ash.update(task, %{}, action: :close)
+
+      conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{"repo" => "test/repo"})
+      body = json_response(conn, 409)
+      assert body["error"]["message"] =~ "closed"
+    end
+
+    test "accepts force_quota: true to bypass the quota gate", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "force-quota-resume", workspace_id: ws.id})
+
+      # Try to resume with force_quota — should fail with "no prior session" rather than
+      # "no repo" (proving force_quota was processed) but that's the expected error
+      # when there's no actual prior session to resume.
+      conn =
+        post(conn, ~p"/api/workers/#{task.id}/resume", %{
+          "repo" => "test/repo",
+          "force_quota" => true
+        })
+
+      body = json_response(conn, 422)
+      # The specific error varies (no session, no outpost) — the test is that force_quota
+      # is accepted without error and the request proceeds to the expected dispatch path.
+      assert body["error"]["message"] =~ "resume"
+    end
+  end
+
+  describe "POST /api/workers/review" do
+    test "dispatches a review-only worker: no worktree, CodeReview workflow attached",
+         %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "review me",
+          workspace_id: ws.id,
+          tracker_type: "github",
+          tracker_ref: "42"
+        })
+
+      conn =
+        post(conn, ~p"/api/workers/review", %{
+          "task_id" => task.id,
+          # Drop the Claude session — the test only cares about wiring.
+          "with_claude" => false,
+          "repo" => "no-such-repo"
+        })
+
+      body = json_response(conn, 201)
+
+      assert body["task"]["id"] == task.id
+      assert body["task"]["state"] == "active"
+      assert is_nil(body["worktree_path"])
+
+      # The worker is tagged review_only so completion bypasses the MergeQueue.
+      pid = Worker.whereis(task.id)
+      assert is_pid(pid)
+      snap = Worker.state(pid)
+      assert snap.meta[:review_only] == true
+
+      # Cleanup so the next test isn't tripped by a lingering worker.
+      Worker.stop(task.id)
+    end
+
+    # bd-dtfe9x (D-W-2/D-W-24): REST used to apply no review_automation guard.
+    # The token is workspace-agnostic; the guard reads the TASK's workspace.
+    test "refuses a task whose workspace review_automation default is off", %{conn: conn} do
+      {:ok, off_ws} =
+        Ash.create(Workspace, %{
+          name: "ctrl-off-ws",
+          prefix: "cof",
+          config: %{"review_automation" => %{"default" => "off"}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "no reviews here", workspace_id: off_ws.id})
+
+      conn =
+        post(conn, ~p"/api/workers/review", %{"task_id" => task.id, "with_claude" => false})
+
+      body = json_response(conn, 422)
+      assert body["error"]["message"] =~ "review_automation"
+      assert body["error"]["message"] =~ "force"
+
+      # Nothing spawned, nothing persisted.
+      assert Worker.whereis(task.id) == nil
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == nil
+    end
+
+    test "an explicit automation: off refuses, and force: true overrides it", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "explicit off", workspace_id: ws.id})
+
+      refused =
+        post(conn, ~p"/api/workers/review", %{
+          "task_id" => task.id,
+          "automation" => "off",
+          "with_claude" => false
+        })
+
+      assert json_response(refused, 422)["error"]["message"] =~ "automation argument"
+
+      forced =
+        post(conn, ~p"/api/workers/review", %{
+          "task_id" => task.id,
+          "automation" => "off",
+          "force" => true,
+          "with_claude" => false
+        })
+
+      assert json_response(forced, 201)["task"]["id"] == task.id
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :off
+      Worker.stop(task.id)
+    end
+
+    test "persists the resolved mode and tracker_context_* before dispatching",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "ctx review", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/workers/review", %{
+          "task_id" => task.id,
+          "automation" => "report_only",
+          "tracker_context_ref" => "AX-18004",
+          "tracker_context_type" => "jira",
+          "with_claude" => false
+        })
+
+      assert json_response(conn, 201)
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :report_only
+      assert reloaded.tracker_context_ref == "AX-18004"
+      assert reloaded.tracker_context_type == :jira
+      Worker.stop(task.id)
+    end
+
+    test "does not persist :flag when the workspace has no review_automation config",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "no config", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/workers/review", %{"task_id" => task.id, "with_claude" => false})
+
+      assert json_response(conn, 201)
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == nil
+      Worker.stop(task.id)
+    end
+
+    test "returns 404 for an unknown task_id", %{conn: conn} do
+      conn = post(conn, ~p"/api/workers/review", %{"task_id" => "no-such-task"})
+      assert json_response(conn, 404)
+    end
+
+    test "requires a task_id or pr", %{conn: conn} do
+      conn = post(conn, ~p"/api/workers/review", %{})
+      assert json_response(conn, 400)
+    end
+
+    test "external PR review acks against a github-strategy workspace", %{conn: conn} do
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "ctrl-gh-ws",
+          prefix: "cgh",
+          config: %{"merge" => %{"strategy" => "github", "config" => %{}}}
+        })
+
+      conn =
+        post(conn, ~p"/api/workers/review", %{
+          "pr" => "https://github.com/acme/apex_sigv4/pull/5",
+          "workspace" => gh_ws.name
+        })
+
+      body = json_response(conn, 201)
+      assert body["data"]["external"] == true
+      assert body["data"]["status"] == "dispatched"
+      assert body["data"]["mr_ref"] == "acme/apex_sigv4#5"
+      assert body["data"]["strategy"] == "github"
+    end
+
+    # P-12 (D-W-6): the refusal text tells a caller to "pass force: true"; the
+    # route now judges force / follow_up with the same normaliser MCP uses.
+    test "external PR review rejects a junk force / follow_up flag", %{conn: conn, ws: ws} do
+      for flag <- ["force", "follow_up"] do
+        conn =
+          post(conn, ~p"/api/workers/review", %{
+            "pr" => "octo/widget#1",
+            "workspace" => ws.name,
+            flag => "yes"
+          })
+
+        assert json_response(conn, 400)["error"]["message"] =~ flag
+      end
+    end
+
+    test "external PR review on a direct-strategy workspace is rejected", %{conn: conn, ws: ws} do
+      conn =
+        post(conn, ~p"/api/workers/review", %{"pr" => "octo/widget#1", "workspace" => ws.name})
+
+      body = json_response(conn, 400)
+      assert body["error"]["message"] =~ "not supported"
+    end
+  end
+
+  describe "POST /api/workers/:task_id/stop" do
+    test "terminates a running worker", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "stop-me", workspace_id: ws.id})
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
+      ref = Process.monitor(worker_pid)
+
+      conn = post(conn, ~p"/api/workers/#{task.id}/stop", %{})
+      body = json_response(conn, 200)
+
+      assert body["task_id"] == task.id
+      assert body["stopped"] == true
+
+      assert_receive {:DOWN, ^ref, :process, _pid, _reason}, 1_000
+      assert Worker.whereis(task.id) == nil
+    end
+
+    test "returns 404 for an unknown task_id", %{conn: conn} do
+      conn = post(conn, ~p"/api/workers/no-such-task/stop", %{})
+      assert json_response(conn, 404)
+    end
+  end
+
+  describe "GET /api/workers/:task_id/log" do
+    setup do
+      root = Path.join(System.tmp_dir!(), "pol-log-ctrl-#{System.unique_integer([:positive])}")
+      prev = Application.get_env(:wardmast, :output_log_root)
+      Application.put_env(:wardmast, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev,
+          do: Application.put_env(:wardmast, :output_log_root, prev),
+          else: Application.delete_env(:wardmast, :output_log_root)
+      end)
+
+      :ok
+    end
+
+    test "returns the full, uncapped durable transcript for the most recent run",
+         %{conn: conn, ws: ws} do
+      task_id = "bd-log-#{System.unique_integer([:positive])}"
+
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        })
+
+      {:ok, handle} = OutputLog.open(run.id)
+      Enum.each(1..1500, fn i -> OutputLog.append(handle, "line-#{i}") end)
+      OutputLog.close(handle)
+
+      conn = get(conn, ~p"/api/workers/#{task_id}/log")
+      data = json_response(conn, 200)["data"]
+
+      assert data["task_id"] == task_id
+      assert data["run_id"] == run.id
+      assert data["path"] == OutputLog.path_for(run.id)
+      assert data["exists"] == true
+      # Every line is retained — well past the 1000-line in-memory cap.
+      assert data["line_count"] == 1500
+      assert List.first(data["lines"]) == "line-1"
+      assert List.last(data["lines"]) == "line-1500"
+    end
+
+    test "exists=false with empty lines when the run has no transcript on disk",
+         %{conn: conn, ws: ws} do
+      task_id = "bd-nolog-#{System.unique_integer([:positive])}"
+
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          state: :working,
+          started_at: DateTime.utc_now()
+        })
+
+      conn = get(conn, ~p"/api/workers/#{task_id}/log")
+      data = json_response(conn, 200)["data"]
+
+      assert data["run_id"] == run.id
+      assert data["exists"] == false
+      assert data["lines"] == []
+      assert data["line_count"] == 0
+    end
+
+    test "returns 404 when no run was ever recorded for the task", %{conn: conn} do
+      conn = get(conn, ~p"/api/workers/bd-never-#{System.unique_integer([:positive])}/log")
+      assert json_response(conn, 404)
+    end
+
+    test "?run_id= reads a specific run's transcript, independent of which run is latest",
+         %{conn: conn, ws: ws} do
+      task_id = "bd-multirun-#{System.unique_integer([:positive])}"
+      older = DateTime.add(DateTime.utc_now(), -60, :second)
+      newer = DateTime.utc_now()
+
+      {:ok, failed_run} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          state: :finished,
+          outcome: :failed,
+          started_at: older,
+          completed_at: older
+        })
+
+      {:ok, _latest} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: newer,
+          completed_at: newer
+        })
+
+      {:ok, handle} = OutputLog.open(failed_run.id)
+      OutputLog.append(handle, "the failed attempt's learning signal")
+      OutputLog.close(handle)
+
+      conn = get(conn, ~p"/api/workers/#{task_id}/log?run_id=#{failed_run.id}")
+      data = json_response(conn, 200)["data"]
+
+      assert data["run_id"] == failed_run.id
+      assert data["lines"] == ["the failed attempt's learning signal"]
+    end
+
+    test "accepts a ReviewGate synthetic task_id (reviewer corpus, bd-cuy75r)",
+         %{conn: conn, ws: ws} do
+      base_id = "bd-synth-#{System.unique_integer([:positive])}"
+      review_id = base_id <> "#review"
+
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: review_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          kind: :review,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, handle} = OutputLog.open(run.id)
+      OutputLog.append(handle, "reviewer verdict")
+      OutputLog.close(handle)
+
+      conn = get(conn, ~p"/api/workers/#{review_id}/log")
+      data = json_response(conn, 200)["data"]
+
+      assert data["task_id"] == review_id
+      assert data["lines"] == ["reviewer verdict"]
+    end
+  end
+
+  describe "GET /api/workers/:task_id/prompt (bd-9rdwe4)" do
+    setup do
+      root = Path.join(System.tmp_dir!(), "pol-prompt-ctrl-#{System.unique_integer([:positive])}")
+      prev = Application.get_env(:wardmast, :output_log_root)
+      Application.put_env(:wardmast, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev,
+          do: Application.put_env(:wardmast, :output_log_root, prev),
+          else: Application.delete_env(:wardmast, :output_log_root)
+      end)
+
+      :ok
+    end
+
+    test "returns the persisted prompt and its sha256 for the most recent run",
+         %{conn: conn, ws: ws} do
+      task_id = "bd-prompt-#{System.unique_integer([:positive])}"
+      prompt_text = "you are a worker\n\ndo the thing"
+
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        })
+
+      {:ok, run} =
+        Ash.update(run, %{prompt_sha256: PromptLog.sha256(prompt_text)}, action: :update)
+
+      :ok = PromptLog.write(run.id, prompt_text)
+
+      conn = get(conn, ~p"/api/workers/#{task_id}/prompt")
+      data = json_response(conn, 200)["data"]
+
+      assert data["task_id"] == task_id
+      assert data["run_id"] == run.id
+      assert data["path"] == PromptLog.path_for(run.id)
+      assert data["exists"] == true
+      assert data["prompt"] == prompt_text
+      assert data["prompt_sha256"] == PromptLog.sha256(prompt_text)
+    end
+
+    test "exists=false with nil prompt when the run has no prompt on disk",
+         %{conn: conn, ws: ws} do
+      task_id = "bd-noprompt-#{System.unique_integer([:positive])}"
+
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          state: :working,
+          started_at: DateTime.utc_now()
+        })
+
+      conn = get(conn, ~p"/api/workers/#{task_id}/prompt")
+      data = json_response(conn, 200)["data"]
+
+      assert data["run_id"] == run.id
+      assert data["exists"] == false
+      assert data["prompt"] == nil
+    end
+
+    test "returns 404 when no run was ever recorded for the task", %{conn: conn} do
+      conn = get(conn, ~p"/api/workers/bd-never-#{System.unique_integer([:positive])}/prompt")
+      assert json_response(conn, 404)
+    end
+
+    test "?run_id= reads a specific run's prompt, independent of which run is latest",
+         %{conn: conn, ws: ws} do
+      task_id = "bd-multirunprompt-#{System.unique_integer([:positive])}"
+      older = DateTime.add(DateTime.utc_now(), -60, :second)
+      newer = DateTime.utc_now()
+
+      {:ok, failed_run} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          state: :finished,
+          outcome: :failed,
+          started_at: older,
+          completed_at: older
+        })
+
+      {:ok, _latest} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: newer,
+          completed_at: newer
+        })
+
+      :ok = PromptLog.write(failed_run.id, "the failed attempt's prompt")
+
+      conn = get(conn, ~p"/api/workers/#{task_id}/prompt?run_id=#{failed_run.id}")
+      data = json_response(conn, 200)["data"]
+
+      assert data["run_id"] == failed_run.id
+      assert data["prompt"] == "the failed attempt's prompt"
+    end
+  end
+
+  describe "GET /api/workers/:task_id/run_log_list (bd-cuy75r)" do
+    setup do
+      root = Path.join(System.tmp_dir!(), "pol-runlog-ctrl-#{System.unique_integer([:positive])}")
+      prev = Application.get_env(:wardmast, :output_log_root)
+      Application.put_env(:wardmast, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev,
+          do: Application.put_env(:wardmast, :output_log_root, prev),
+          else: Application.delete_env(:wardmast, :output_log_root)
+      end)
+
+      :ok
+    end
+
+    test "enumerates the base task's own runs plus its synthetic children",
+         %{conn: conn, ws: ws} do
+      task_id = "bd-corpus-#{System.unique_integer([:positive])}"
+
+      {:ok, author_run} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          kind: :implement,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.add(DateTime.utc_now(), -20, :second)
+        })
+
+      {:ok, review_run} =
+        Ash.create(Run, %{
+          task_id: task_id <> "#review",
+          repo: "arbiter",
+          workspace_id: ws.id,
+          kind: :review,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.add(DateTime.utc_now(), -10, :second)
+        })
+
+      {:ok, unrelated} =
+        Ash.create(Run, %{
+          task_id: "bd-unrelated-#{System.unique_integer([:positive])}",
+          repo: "arbiter",
+          workspace_id: ws.id,
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, handle} = OutputLog.open(review_run.id)
+      OutputLog.append(handle, "line a")
+      OutputLog.append(handle, "line b")
+      OutputLog.close(handle)
+
+      conn = get(conn, ~p"/api/workers/#{task_id}/run_log_list")
+      entries = json_response(conn, 200)["data"]
+
+      ids = Enum.map(entries, & &1["run_id"])
+      assert author_run.id in ids
+      assert review_run.id in ids
+      refute unrelated.id in ids
+
+      review_entry = Enum.find(entries, &(&1["run_id"] == review_run.id))
+      assert review_entry["transcript_exists"] == true
+      assert review_entry["line_count"] == 2
+
+      author_entry = Enum.find(entries, &(&1["run_id"] == author_run.id))
+      assert author_entry["transcript_exists"] == false
+      assert author_entry["line_count"] == 0
+    end
+  end
+end

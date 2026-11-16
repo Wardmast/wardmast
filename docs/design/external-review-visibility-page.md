@@ -18,15 +18,15 @@ reviews, their in-flight progress, or their results.
 
 The data already exists and is fully queryable — this is a pure UI gap:
 
-* `Arbiter.Reviews.Record` (`apps/arbiter/lib/arbiter/reviews/record.ex`) —
+* `Wardmast.Reviews.Record` (`apps/wardmast/lib/wardmast/reviews/record.ex`) —
   the audit-ledger resource, one row per review run.
 * `GET /api/external_reviews` — already supports `workspace_id`, `status`,
   `since`, `limit`, newest-first
-  (`apps/arbiter_web/lib/arbiter_web/controllers/api/external_review_controller.ex`).
+  (`apps/wardmast_web/lib/wardmast_web/controllers/api/external_review_controller.ex`).
 * `external_review_list` MCP tool — same data, MCP-transport naming.
 * The `external_review` PubSub topic already broadcasts `running` →
-  `completed`/`failed` transitions (`Arbiter.Events`, fired from
-  `Arbiter.Reviews.ExternalReview.create_review_record/2` and
+  `completed`/`failed` transitions (`Wardmast.Events`, fired from
+  `Wardmast.Reviews.ExternalReview.create_review_record/2` and
   `complete_review_record/3`).
 
 No backend work is needed for the list/detail view itself — the one piece of
@@ -41,7 +41,7 @@ into the UI.
 
 **Recommendation: a new standalone AppShell nav page at `/reviews`**, styled
 after the two most recent standalone pages — Usage (`/usage`,
-`ArbiterWeb.UsageLive`) and Audit Log (`/audit`, `ArbiterWeb.AuditLogLive`).
+`WardmastWeb.UsageLive`) and Audit Log (`/audit`, `WardmastWeb.AuditLogLive`).
 
 External reviews are explicitly *not* task-linked (no `Issue`, no board
 column) — they don't fit Backlog/Ready/Running/Review/Done, which are
@@ -52,7 +52,7 @@ engagement, so the record — not the engagement — is the primary entity this
 page is built around.
 
 Nav entry: add `%{label: "Reviews", href: ~p"/reviews"}` to the global-chrome
-`nav_items/0` list in `apps/arbiter_web/lib/arbiter_web/components/layouts.ex`
+`nav_items/0` list in `apps/wardmast_web/lib/wardmast_web/components/layouts.ex`
 (bd-53pfbg), between "Loop"/"Usage" and "Audit" — reviews are, like usage and
 audit, cross-cutting operator visibility rather than a task-management view.
 
@@ -79,7 +79,7 @@ and back-button safe, matching the Audit Log page's existing convention.
 | Findings | `finding_count` | Numeric; nil while running. |
 | Cost | `cost_usd` | Formatted like the Usage page's cost figures; nil when not captured. |
 
-Status badge semantics (reuse `ArbiterWeb.CoreComponents.Data.status_chip/1`
+Status badge semantics (reuse `WardmastWeb.CoreComponents.Data.status_chip/1`
 or the live/fail/attention hue tokens already used elsewhere, e.g.
 `--arb-live`, `--arb-fail`):
 
@@ -106,7 +106,7 @@ alongside the two required filters.
 
 ### Pagination
 
-Reuse `ArbiterWeb.Paging`, same as `AuditLogLive`. The API's `limit`/`since`
+Reuse `WardmastWeb.Paging`, same as `AuditLogLive`. The API's `limit`/`since`
 params are sufficient to back a "load more" or classic pager; either is
 fine, follow whichever `AuditLogLive`/`UsageLive` already established for
 consistency (Audit Log uses a classic pager via `Paging`).
@@ -133,7 +133,7 @@ Expanded content, conditional on status/mode:
   the state an operator most needs a fast diagnostic path for.
 * **Linked engagement:** when a `review_only` Issue exists for this PR
   (`engagement_id` is already populated on the record when ReviewPatrol
-  adopted it — see `Arbiter.Reviews.Record`'s `engagement_id` field,
+  adopted it — see `Wardmast.Reviews.Record`'s `engagement_id` field,
   `record.ex:271`, and the `(source_pr, workspace)` lookup in
   `existing_engagement/2`, `external_review.ex:1212`), render a link to that
   task's board/detail page.
@@ -147,8 +147,8 @@ Expanded content, conditional on status/mode:
 
 **Recommendation: subscribe to the `external_review` PubSub topic via
 LiveView, same pattern the codebase already uses for other live pages/event
-consumers** (`Arbiter.Events.pubsub_topic/1` + `Phoenix.PubSub.subscribe`,
-`Arbiter.Events.broadcast/3` fires the topic from
+consumers** (`Wardmast.Events.pubsub_topic/1` + `Phoenix.PubSub.subscribe`,
+`Wardmast.Events.broadcast/3` fires the topic from
 `create_review_record/2`/`complete_review_record/3`).
 
 On mount, subscribe to the current workspace-filtered topic (or the global
@@ -162,7 +162,7 @@ On mount, subscribe to the current workspace-filtered topic (or the global
   cheap indexed primary-key read, and it also self-heals against any field
   the payload doesn't carry.
 * This is necessary because `broadcast_review_event/3`
-  (`apps/arbiter/lib/arbiter/reviews/external_review.ex:1562-1570`) only
+  (`apps/wardmast/lib/wardmast/reviews/external_review.ex:1562-1570`) only
   emits `status`, `pr_ref`, `verdict`, `finding_count`, `mode`,
   `review_record_id`, and `engagement_id` (plus `topic`/`at`/`cursor` from
   `Events.broadcast/3`) — it does not carry `link`, `workspace_id`,
@@ -196,7 +196,7 @@ implementation to a v1.1 (or the first cut, if implementation finds it
 cheap) — but design the detail view so it's a natural slot-in, not a
 retrofit.**
 
-Current state: `Arbiter.Reviews.ExternalReview.greenlight/1` takes
+Current state: `Wardmast.Reviews.ExternalReview.greenlight/1` takes
 `record_id` + `select` (`:all`, a list of zero-based indices into
 `proposed_comments`, or `[]`), posts the approved subset of
 `proposed_comments`, and optionally submits the recommended verdict. It's
@@ -239,7 +239,7 @@ considered done.
 1. Standalone page at `/reviews`, nav entry beside Usage/Audit Log.
 2. List: started/PR/workspace/strategy/status/mode/verdict/findings/cost
    columns; workspace + status filters (API already supports both);
-   `ArbiterWeb.Paging` for pagination.
+   `WardmastWeb.Paging` for pagination.
 3. Inline row expansion for detail (findings, proposed comments,
    failure diagnostics, linked engagement task) — no separate route.
 4. Live updates via the existing `external_review` PubSub topic, LiveView

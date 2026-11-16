@@ -1,0 +1,52 @@
+# Script for populating the database. Run via:
+#
+#     mix run apps/wardmast/priv/repo/seeds.exs
+#
+# (or automatically as part of `mix ecto.setup` via the aliases in mix.exs)
+#
+# Idempotent — re-running won't duplicate.
+
+require Ash.Query
+
+alias Wardmast.Tasks.Workspace
+
+default_name = "default"
+
+existing =
+  Workspace
+  |> Ash.Query.filter(name == ^default_name)
+  |> Ash.read_one!()
+
+case existing do
+  nil ->
+    {:ok, _ws} =
+      Ash.create(Workspace, %{
+        name: default_name,
+        description: "Default workspace shipped at boot. No external tracker.",
+        config: %{
+          "tracker" => %{"type" => "none"},
+          # Read by Wardmast.Agents.Codex.Config (Codex-scoped, so other
+          # providers in a pool keep their own tier maps).
+          "agent" => %{
+            "config" => %{
+              "codex" => %{
+                "tier_models" => %{
+                  "economy" => "gpt-5.6-luna",
+                  "standard" => "gpt-5.6-terra",
+                  "premium" => "gpt-5.6-terra",
+                  "flagship" => "gpt-5.6-terra"
+                }
+              }
+            }
+          }
+        }
+      })
+
+    IO.puts("✓ Seeded default workspace")
+
+  %Workspace{} ->
+    IO.puts("• Default workspace already exists; skipping")
+end
+
+Wardmast.Skills.Seeds.seed!()
+IO.puts("✓ Seeded built-in skills")

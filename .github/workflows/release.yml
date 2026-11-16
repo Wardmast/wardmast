@@ -34,7 +34,7 @@ jobs:
       MIX_ENV: prod
       # Stamped into the server release and the arb escript so `arb server
       # deploy` / `arb self-update` find their release source with no
-      # ARB_RELEASE_REPO exported (ArbiterCli.ReleaseRepo, Arbiter.Version).
+      # ARB_RELEASE_REPO exported (WardmastCli.ReleaseRepo, Wardmast.Version).
       ARB_BUILD_RELEASE_REPO: ${{ github.repository }}
       # Build every `rustler_precompiled` NIF from source inside this
       # container instead of downloading upstream's prebuilt artifact.
@@ -148,7 +148,7 @@ jobs:
 
       - name: Install asset build tools
         run: |
-          MIX_ENV=prod mix cmd --app arbiter_web mix assets.setup
+          MIX_ENV=prod mix cmd --app wardmast_web mix assets.setup
         env:
           RELEASE_VERSION: ${{ steps.tag.outputs.name }}
           MIX_ENV: prod
@@ -162,7 +162,7 @@ jobs:
 
       - name: Build and digest web assets
         run: |
-          MIX_ENV=prod mix cmd --app arbiter_web mix assets.deploy
+          MIX_ENV=prod mix cmd --app wardmast_web mix assets.deploy
 
       - name: Build OTP release
         run: |
@@ -173,7 +173,7 @@ jobs:
 
       - name: Build arb escript
         run: |
-          cd apps/arbiter_cli && MIX_ENV=prod mix escript.build
+          cd apps/wardmast_cli && MIX_ENV=prod mix escript.build
         env:
           RELEASE_VERSION: ${{ steps.tag.outputs.name }}
           MIX_ENV: prod
@@ -184,12 +184,12 @@ jobs:
           TARBALL="arbiter-${TAG}-linux.tar.gz"
           tar -czf "${TARBALL}" -C _build/prod/rel/arbiter .
           sha256sum "${TARBALL}" > "${TARBALL}.sha256"
-          sha256sum apps/arbiter_cli/arb > arb.sha256
+          sha256sum apps/wardmast_cli/arb > arb.sha256
           # One migration name per line: lets a running server tell, before an
           # operator clicks "Update", whether the release carries migrations it
-          # has not applied (Arbiter.Release.UpdateCheck).
+          # has not applied (Wardmast.Release.UpdateCheck).
           MANIFEST="arbiter-${TAG}-migrations.txt"
-          (cd apps/arbiter/priv/repo/migrations && ls -1 *.exs | sed 's/\.exs$//' | sort) > "${MANIFEST}"
+          (cd apps/wardmast/priv/repo/migrations && ls -1 *.exs | sed 's/\.exs$//' | sort) > "${MANIFEST}"
           echo "TARBALL=${TARBALL}" >> "$GITHUB_ENV"
           echo "MANIFEST=${MANIFEST}" >> "$GITHUB_ENV"
 
@@ -214,15 +214,15 @@ jobs:
       - name: Render the container build inputs for the GHCR job
         # KH7 (docs/design/remote-workers.md §20.8): the controller image and the
         # shared worker base are built from the Containerfiles the primary itself
-        # uses (`mix arbiter.containerfile`), digest-pinned here, where Erlang/Elixir
+        # uses (`mix wardmast.containerfile`), digest-pinned here, where Erlang/Elixir
         # already are; the publish-oci job below only needs docker and helm.
         # The controller tarball has a top-level `arbiter/` (the primary's own
         # layout), unlike the release asset, which unpacks to `.`.
         run: |
           mkdir -p dist
-          (cd apps/arbiter \
-            && mix arbiter.containerfile controller --pin --out "${GITHUB_WORKSPACE}/dist/Containerfile.controller" \
-            && mix arbiter.containerfile worker-base --pin \
+          (cd apps/wardmast \
+            && mix wardmast.containerfile controller --pin --out "${GITHUB_WORKSPACE}/dist/Containerfile.controller" \
+            && mix wardmast.containerfile worker-base --pin \
                  --out "${GITHUB_WORKSPACE}/dist/Containerfile.worker-base" \
                  --hash-out "${GITHUB_WORKSPACE}/dist/worker-base.hash")
           tar -czf dist/release.tar.gz -C _build/prod/rel arbiter
@@ -239,12 +239,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.name }}
-          name: "Arbiter ${{ steps.tag.outputs.name }}"
+          name: "Wardmast ${{ steps.tag.outputs.name }}"
           files: |
             ${{ env.TARBALL }}
             ${{ env.TARBALL }}.sha256
             ${{ env.MANIFEST }}
-            apps/arbiter_cli/arb
+            apps/wardmast_cli/arb
             arb.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -323,7 +323,7 @@ jobs:
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=FSL-1.1-ALv2
-            org.opencontainers.image.description=Arbiter controller (open-core release)
+            org.opencontainers.image.description=Wardmast controller (open-core release)
             arbiter.base-image=${{ env.BASE_IMAGE }}
 
       - name: Build and push the worker base
@@ -345,7 +345,7 @@ jobs:
             --file dist/Containerfile.worker-base \
             --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.licenses=FSL-1.1-ALv2" \
-            --label "org.opencontainers.image.description=Arbiter shared worker image base" \
+            --label "org.opencontainers.image.description=Wardmast shared worker image base" \
             --tag "${REF}" \
             --metadata-file "${RUNNER_TEMP}/base-metadata.json" \
             --push \

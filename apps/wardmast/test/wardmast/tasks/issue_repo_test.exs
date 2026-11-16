@@ -1,0 +1,213 @@
+defmodule Wardmast.Tasks.IssueRepoTest do
+  @moduledoc """
+  bd-9dwbvt: the shared repo resolver every issue-creation path runs through.
+  """
+  use Wardmast.DataCase, async: false
+
+  alias Wardmast.Tasks.IssueRepo
+  alias Wardmast.Tasks.Workspace
+
+  @env_key :repo_paths
+
+  setup do
+    prior = Application.get_env(:wardmast, @env_key)
+    Application.delete_env(:wardmast, @env_key)
+
+    on_exit(fn ->
+      if prior,
+        do: Application.put_env(:wardmast, @env_key, prior),
+        else: Application.delete_env(:wardmast, @env_key)
+    end)
+
+    :ok
+  end
+
+  defp ws!(config) do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "ir-#{System.unique_integer([:positive])}",
+        prefix: "ir",
+        config: config
+      })
+
+    ws
+  end
+
+  describe "resolve/2 — no explicit repo" do
+    test "auto-fills the workspace's only configured repo" do
+      ws = ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic"}})
+
+      assert {:ok, "tonic"} = IssueRepo.resolve(ws.id, nil)
+    end
+
+    test "falls back to the workspace default_repo when several are configured" do
+      ws =
+        ws!(%{
+          "repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"},
+          "default_repo" => "tonic_device"
+        })
+
+      assert {:ok, "tonic_device"} = IssueRepo.resolve(ws.id, nil)
+    end
+
+    test "errors with the configured keys when several are configured and no default" do
+      ws = ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"}})
+
+      assert {:error, {:repo_required, repos}} = IssueRepo.resolve(ws.id, nil)
+      assert repos == ["tonic", "tonic_device"]
+    end
+
+    test "errors when default_repo names a repo that is not configured" do
+      ws =
+        ws!(%{
+          "repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"},
+          "default_repo" => "gone"
+        })
+
+      assert {:error, {:repo_required, _}} = IssueRepo.resolve(ws.id, nil)
+    end
+
+    test "leaves the repo nil when the workspace configures no repos at all" do
+      ws = ws!(%{})
+
+      assert {:ok, nil} = IssueRepo.resolve(ws.id, nil)
+    end
+
+    test "leaves the repo nil when there is no workspace" do
+      assert {:ok, nil} = IssueRepo.resolve(nil, nil)
+    end
+
+    test "sees repos configured in the install-wide application env" do
+      Application.put_env(:wardmast, @env_key, %{"arbiter" => "/srv/arbiter"})
+      ws = ws!(%{})
+
+      assert {:ok, "arbiter"} = IssueRepo.resolve(ws.id, nil)
+    end
+  end
+
+  describe "Issue create — parent_id repo inheritance" do
+    alias Wardmast.Tasks.Issue
+
+    setup do
+      ws = ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic", "device" => "/srv/device"}})
+      {:ok, parent} = Ash.create(Issue, %{title: "parent", workspace_id: ws.id, repo: "device"})
+      %{ws: ws, parent: parent}
+    end
+
+    test "a child with parent_id and no repo inherits the parent's repo", %{ws: ws, parent: p} do
+      assert {:ok, child} =
+               Ash.create(Issue, %{title: "child", workspace_id: ws.id, parent_id: p.id})
+
+      assert child.repo == "device"
+    end
+
+    test "an explicit repo wins over the parent's", %{ws: ws, parent: p} do
+      assert {:ok, child} =
+               Ash.create(Issue, %{
+                 title: "child",
+                 workspace_id: ws.id,
+                 parent_id: p.id,
+                 repo: "tonic"
+               })
+
+      assert child.repo == "tonic"
+    end
+
+    test "without parent_id the multi-repo refusal is unchanged", %{ws: ws} do
+      assert {:error, _} = Ash.create(Issue, %{title: "orphan", workspace_id: ws.id})
+    end
+  end
+
+  describe "resolve/2 — explicit repo" do
+    test "keeps an explicit repo that is a configured key" do
+      ws = ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"}})
+
+      assert {:ok, "tonic_device"} = IssueRepo.resolve(ws.id, "tonic_device")
+    end
+
+    test "an explicit repo wins over a default_repo" do
+      ws =
+        ws!(%{
+          "repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"},
+          "default_repo" => "tonic"
+        })
+
+      assert {:ok, "tonic_device"} = IssueRepo.resolve(ws.id, "tonic_device")
+    end
+
+    test "rejects an explicit repo that is not a configured repo_paths key" do
+      ws = ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"}})
+
+      assert {:error, {:repo_not_configured, "nope", repos}} = IssueRepo.resolve(ws.id, "nope")
+      assert repos == ["tonic", "tonic_device"]
+    end
+
+    test "canonicalizes a loosely-spelled key onto the configured one" do
+      ws = ws!(%{"repo_paths" => %{"apex-server" => "/srv/vs"}})
+
+      assert {:ok, "apex-server"} = IssueRepo.resolve(ws.id, "apex_server")
+      assert {:ok, "apex-server"} = IssueRepo.resolve(ws.id, "acme/apex-server")
+    end
+
+    test "accepts an explicit repo when the workspace configures no repos at all" do
+      ws = ws!(%{})
+
+      assert {:ok, "whatever"} = IssueRepo.resolve(ws.id, "whatever")
+    end
+
+    test "treats a blank explicit repo as absent" do
+      ws = ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic"}})
+
+      assert {:ok, "tonic"} = IssueRepo.resolve(ws.id, "   ")
+    end
+  end
+
+  describe "resolve/2 — a forge slug that no key spells" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "ir-slug-#{:erlang.unique_integer([:positive])}")
+      path = Path.join(tmp, "checkout")
+      File.mkdir_p!(path)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", path])
+
+      {_, 0} =
+        System.cmd("git", [
+          "-C",
+          path,
+          "remote",
+          "add",
+          "origin",
+          "git@github.com:acme/apex-client.git"
+        ])
+
+      on_exit(fn -> File.rm_rf!(tmp) end)
+      %{path: path}
+    end
+
+    test "resolves an owner/repo slug onto the repo_paths key by origin remote", %{path: path} do
+      # The acme shape: the key is "client", the forge slug is
+      # "acme/apex-client", and neither spelling contains the other. This
+      # is the repo PRPatrol hands a follow-up.
+      ws = ws!(%{"repo_paths" => %{"client" => path, "server" => "/srv/server"}})
+
+      assert {:ok, "client"} = IssueRepo.resolve(ws.id, "acme/apex-client")
+      assert IssueRepo.configured_key(ws.id, "acme/apex-client") == "client"
+    end
+
+    test "still rejects a slug that matches no configured repo's remote", %{path: path} do
+      ws = ws!(%{"repo_paths" => %{"client" => path, "server" => "/srv/server"}})
+
+      assert {:error, {:repo_not_configured, "someone/else", _}} =
+               IssueRepo.resolve(ws.id, "someone/else")
+    end
+  end
+
+  describe "configured_key/2" do
+    test "returns the canonical key, or nil when nothing matches" do
+      ws = ws!(%{"repo_paths" => %{"apex-server" => "/srv/vs"}})
+
+      assert IssueRepo.configured_key(ws.id, "apex_server") == "apex-server"
+      assert IssueRepo.configured_key(ws.id, "nope") == nil
+      assert IssueRepo.configured_key(ws.id, nil) == nil
+    end
+  end
+end

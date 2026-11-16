@@ -19,7 +19,7 @@ operator's k3s out as a **test bed**. The design is
 podman worker gets from the kernel becomes "the CNI enforces the NetworkPolicies of
 the bootstrap manifest", and a CNI that does not enforce them accepts the objects and
 ignores them (k8s §9.4). So the controller does not assume. A
-`ReadinessMonitor` (`Arbiter.NodeAgent.K8s.ReadinessMonitor`) **proves** it:
+`ReadinessMonitor` (`Wardmast.NodeAgent.K8s.ReadinessMonitor`) **proves** it:
 
 * **When:** at start, on every controller config change, and every 10 minutes.
 * **How:** a short-lived **canary pod**, built by the worker's own pod builder (so it has
@@ -178,7 +178,7 @@ anything else they keep `hostUsers: false`. For the admission policy, install wi
   used) when the controller does not acknowledge the assignment within 120 s
   (`unacknowledged`), reconnects without it (`placement_lost`), or leaves the pod `Pending`
   for 300 s (`unschedulable`, with the scheduler's message). `arb worker show <task>` names the
-  cause. Tune with `config :arbiter, :node_placement, ack_timeout_ms:, pending_timeout_ms:,
+  cause. Tune with `config :wardmast, :node_placement, ack_timeout_ms:, pending_timeout_ms:,
   stalled_cooldown_ms:`. The failed-over node is ranked last for `stalled_cooldown_ms` (300 s).
 * A worker pod the scheduler preempts reports `preempted` (with the scheduler's message),
   not `node lost`: cluster contention, not a node failure. No resume attempt is consumed.
@@ -391,10 +391,10 @@ The first real enrollment (mesaana k3s, 2026-10-26) hit these (the last was foun
 
 ## 5. Running the end-to-end suite on a disposable cluster
 
-The `:k8s` suite (`apps/arbiter/test/k8s/`) runs the canary, the readiness checks and
+The `:k8s` suite (`apps/wardmast/test/k8s/`) runs the canary, the readiness checks and
 the monitor against a **real** API server, on a kind or k3d cluster created for the
 run. It is excluded from `mix test`, from CI and from the pre-push gate by the `:k8s`
-tag (`apps/arbiter/test/test_helper.exs`).
+tag (`apps/wardmast/test/test_helper.exs`).
 
 ```sh
 scripts/k8s-e2e.sh            # kind (needs kind, kubectl, podman or docker)
@@ -402,15 +402,15 @@ scripts/k8s-e2e.sh k3d        # k3d
 ```
 
 The script creates `arb-e2e-<random>` with a kubeconfig of its own under `$TMPDIR`,
-runs `mix test --include k8s test/k8s` in `apps/arbiter`, and deletes the cluster by its
+runs `mix test --include k8s test/k8s` in `apps/wardmast`, and deletes the cluster by its
 exact name on exit. To use a cluster you created yourself:
 
 ```sh
 ARB_K8S_E2E=1 ARB_K8S_E2E_KUBECONFIG=/path/to/kubeconfig \
-  mix test --include k8s test/k8s          # from apps/arbiter
+  mix test --include k8s test/k8s          # from apps/wardmast
 ```
 
-**What stops it reaching a real cluster** (`Arbiter.Test.K8sE2E.connect!/0`, itself
+**What stops it reaching a real cluster** (`Wardmast.Test.K8sE2E.connect!/0`, itself
 tested in the default suite by `e2e_guard_test.exs`): it needs both variables; it never
 reads `~/.kube/config` or `$KUBECONFIG`; it refuses any context not named `kind-*` or
 `k3d-*` and any API server not on loopback; every namespace is `arb-e2e-<random>` and is
@@ -449,15 +449,15 @@ the three `ARB_*` Helm env vars), and compares `controller.yaml` through `Contro
 ## 6. What is and is not wired (as of K14)
 
 In the tree: the canary, the readiness checks, `ReadinessMonitor`, the controller
-boot (`Arbiter.NodeAgent.K8s.ControllerSupervisor`: the monitor, then the controller,
+boot (`Wardmast.NodeAgent.K8s.ControllerSupervisor`: the monitor, then the controller,
 `rest_for_one`, the monitor subscribed to the config loader), the controller
 carrying the monitor's `degraded` and readiness block in `Controller.report/1` (and
 pushing `"readiness"` after each run), the primary storing a cluster node's readiness
 from `hello`, `hb` and that push, `GET /api/nodes` serving it, and the doctor section.
 
 Since K14 (bd-54nxyr) the node-agent boot is in the tree too: with
-`ARB_AGENT_BACKEND=k8s` the release starts `Arbiter.NodeAgent.K8s.Boot` (§7), which
-starts the controller under the node supervisor, and `Arbiter.NodeAgent.Backend.K8s`
+`ARB_AGENT_BACKEND=k8s` the release starts `Wardmast.NodeAgent.K8s.Boot` (§7), which
+starts the controller under the node supervisor, and `Wardmast.NodeAgent.Backend.K8s`
 maps `Controller.report/1` onto the cluster `hello`/`hb` (`kind: cluster`, `capacity`,
 `degraded`, `readiness`). The controller manifest gives the controller what the canary
 needs (`ARB_POD_IP`, `ARB_NODE_IP` from the downward API;
@@ -483,7 +483,7 @@ kubelet port. A target that cannot be named is `skipped`, shown in the detail
 
 The controller is the Arbiter release with `ARB_ROLE=agent` and
 `ARB_AGENT_BACKEND=k8s`, as the rendered Deployment runs it. Before it can label, build
-or watch a pod it has to learn who it is, so its boot (`Arbiter.NodeAgent.K8s.Boot`)
+or watch a pod it has to learn who it is, so its boot (`Wardmast.NodeAgent.K8s.Boot`)
 does, on every start:
 
 1. the in-cluster API client (the `arbiter-controller` service account);

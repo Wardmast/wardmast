@@ -58,7 +58,7 @@ it in ExUnit against fixtures and with a dry run on a copy of the live DB (§3.5
 | `created_at` / `closed_at` are complete and exact | 0 closed tickets with a null `closed_at`, 0 non-closed tickets with one. `closed_at` is within 16 s (median 1 s) of the last `close` version on all 1,355 closed tickets. |
 | `usage_events` grouping belongs in SQL (the `Usage.summarize/1` fix) | Unchanged, and now more important (12,654 rows, three providers). |
 | No chart library in the app | Still none (`mix.lock`, `assets/vendor`: daisyui, heroicons, topbar, xterm). |
-| `/reports` belongs in the "Analysis" nav group | Still right: `ArbiterWeb.Nav` has Usage `/usage`, Reviews `/reviews`, Audit `/audit` there. |
+| `/reports` belongs in the "Analysis" nav group | Still right: `WardmastWeb.Nav` has Usage `/usage`, Reviews `/reviews`, Audit `/audit` there. |
 | Epic burn-up, not burn-down | Still right (epics have no fixed scope). `dependencies.created_at` is still the "added to epic" event. |
 | `flake_events` too sparse for a report | Now 20 rows (was 12). Still an annotation, not a report. |
 | A shared version-replay helper is needed | Yes, and it is now a *one-off backfill* rather than a runtime helper (§3.4). |
@@ -224,7 +224,7 @@ time-series.
 
 ### 3.4 Where the mapping lives, and why a backfill beats query-time mapping
 
-**Recommendation: a pure module `Arbiter.Tasks.Lifecycle.History` (beside
+**Recommendation: a pure module `Wardmast.Tasks.Lifecycle.History` (beside
 `Lifecycle`) with `replay(versions, opts) :: [transition]`, called by a
 one-off, idempotent backfill; reports read only `ticket_transitions`.**
 
@@ -238,7 +238,7 @@ one-off, idempotent backfill; reports read only `ticket_transitions`.**
 | Other installs | Works unchanged. | Must run on every install (below). |
 
 **How it runs on every install.** `Release.backfill/2` is manual and dry-run by
-default (`bin/arbiter eval 'Arbiter.Release.backfill(:ticket_transitions, apply?: true)'`),
+default (`bin/wardmast eval 'Wardmast.Release.backfill(:ticket_transitions, apply?: true)'`),
 which is right for the operator but not for an installed product that a
 reports page must work on. Follow `Boot.ProviderAccounts`: a one-shot,
 synchronous, primary-instance-only boot worker placed **after** the schema
@@ -258,11 +258,11 @@ in Elixir (tested, with the `Lifecycle` table next to it) beats a second copy in
 SQL. A migration that calls application modules is the pattern this repo
 avoids.
 
-> **As built (bd-d8fi92):** `Arbiter.Tasks.Lifecycle.History.replay/2` (pure)
-> and `Arbiter.Tasks.TicketTransitionBackfill`, applied on every primary boot
-> by `Arbiter.Boot.TicketTransitions` (after `Boot.ProviderAccounts`, before
+> **As built (bd-d8fi92):** `Wardmast.Tasks.Lifecycle.History.replay/2` (pure)
+> and `Wardmast.Tasks.TicketTransitionBackfill`, applied on every primary boot
+> by `Wardmast.Boot.TicketTransitions` (after `Boot.ProviderAccounts`, before
 > the queues) and by hand via `Release.backfill(:ticket_transitions)` (dry run
-> by default) or `mix arbiter.backfill_ticket_transitions`. Three refinements:
+> by default) or `mix wardmast.backfill_ticket_transitions`. Three refinements:
 >
 > - **Tickets the triggers already cover.** The bd-5gkqdr triggers can ship
 >   (and write live rows) before this backfill runs, so "no rows" is not the
@@ -575,7 +575,7 @@ the attention report.
 
 - **Location:** a `ReportsLive` at `/reports` (router near
   `live("/usage", UsageLive)`), nav entry **Reports** in the **Analysis** group
-  of `ArbiterWeb.Nav` beside Usage / Reviews / Audit, icon `hero-chart-bar-square`.
+  of `WardmastWeb.Nav` beside Usage / Reviews / Audit, icon `hero-chart-bar-square`.
   Sub-views are tabs (`?tab=throughput|cost|…`) with filters in the query string
   so a view is linkable, following `UsageLive`'s `range` and `tab` events.
   Pages begin with `<Layouts.app flash={@flash} …>` and use `to_form/2` for the
@@ -585,7 +585,7 @@ the attention report.
   `assets/vendor` is daisyui, heroicons, topbar and xterm, and the repo rules
   forbid external `<script src>` and inline `<script>`.
 - **Recommendation: server-rendered inline SVG function components**
-  (`ArbiterWeb.Charts`: `bar`, `stacked_bar`, `area`, `step_line`, `histogram`,
+  (`WardmastWeb.Charts`: `bar`, `stacked_bar`, `area`, `step_line`, `histogram`,
   `stat_tile`, shared axes/legend), **no new dependency, no JS** for slice 1.
   Reasons: charts have ≤ ~200 points; LiveViewTest can assert real elements
   (`has_element?(view, "#throughput-chart rect[data-week='…']")`) which a canvas
@@ -641,7 +641,7 @@ Not filed — the coordinator files them under bd-ibiwci. P = priority
 | 1 | Reports: `ticket_transitions` table and Lifecycle writer | P1 / D3 | Migration + Ash resource per §4.2; insert in `Changes.Transition`'s `after_action`, in `:create`, and in `DoltImport.Mapper`; indexes; `verify_after_deploy` because the first real transitions run in the live server. | Every named transition writes one row with correct `from`/`to`/`at`; creation writes `nil → backlog`; an idempotent no-op writes nothing; a failing insert rolls the transition back; invariant test: last row's `to_state == issues.state` across the lifecycle test matrix. | — |
 | 2 | Reports: `Lifecycle.History` replay + boot-time `Release.backfill(:ticket_transitions)` | P1 / D3 | Pure replay module (§3.2, incl. per-install refined-cutover seed); `Release.backfill/2` entry (dry-run default); one-shot primary-only boot worker after the migrator, before the queues; reconcile row on mismatch. | Fixture matrix per era; dry-run on a live-DB snapshot gives 0 mismatches, 0 unmapped values, 0 illegal transitions, CFD invariant on sample days; second run inserts 0 rows. | 1 |
 | 3 | Reports: backfill `usage_events.base_task_id` and `role` | P2 / D1 | `Release.backfill(:usage_base_task)` applying `Estimate.fold_task_id/1` and the suffix → role rule to the 2,112 rows with null `base_task_id` (all ≤ 2026-08-28); `ext:*` left null. | Dry-run reports the count; after apply 0 task rows with null `base_task_id` except `ext:`; per-ticket totals equal `Budget.spend_so_far/2` for 5 sampled tickets. | — |
-| 4 | Reports: `/reports` shell, nav entry, SVG chart components, filter bar | P1 / D2 | `ReportsLive` + `Nav` item; `ArbiterWeb.Charts` function components (bar, stacked bar, area, step line, histogram, stat tile); shared filter form (workspace, repo, type, difficulty, range); short-TTL result cache; empty/loading states. | Page renders at `/reports` under Analysis; each component has a LiveViewTest asserting its elements; passes `mix precommit` and `mix audit`; no new dependency. | — |
+| 4 | Reports: `/reports` shell, nav entry, SVG chart components, filter bar | P1 / D2 | `ReportsLive` + `Nav` item; `WardmastWeb.Charts` function components (bar, stacked bar, area, step line, histogram, stat tile); shared filter form (workspace, repo, type, difficulty, range); short-TTL result cache; empty/loading states. | Page renders at `/reports` under Analysis; each component has a LiveViewTest asserting its elements; passes `mix precommit` and `mix audit`; no new dependency. | — |
 | 5 | Reports: throughput & lead time | P1 / D2 | §5.3 and the lead half of §5.2: weekly counts by difficulty, weighted size with the named weight table, lead-time histogram with P50/P90; era annotation at 2026-08-24. | Weekly bars match a manual `GROUP BY` for 3 sample weeks; lead P50/P90 match a hand computation on 5 tickets; weighting constant documented on the page. | 4 |
 | 6 | Reports: cost per ticket by difficulty and provider | P1 / D2 | §5.6: median + P25–P75 per difficulty, provider/model/account split, unmetered rendering for Gemini/Codex, coordinator-overhead tile, windowed like `ticket_show.estimate`. | Totals match a manual `usage_events` sum for one workspace; no row-level load or `raw` select (query-count/shape test); null cost never rendered as $0; matches the `estimate` P25/median/P90 for a sample difficulty. | 3, 4 |
 | 7 | Reports: ReviewGate health | P2 / D3 | §5.4 including a SQL port of `Resolutions.outcome/2`; same-family fallback; resolutions table. | Outcome parity test against `outcome/2` on fixtures for converged/resolved/not_converged/none; first-pass approve rate matches 20 hand-counted cycles; provider charts start at 2026-09-20 with a note. | 4 |

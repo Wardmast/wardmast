@@ -3,7 +3,7 @@
 // bd-aro53b — the provider marks on the workers index and the board's
 // In progress column (bd-79w1fs), in a real browser.
 //
-// `ArbiterWeb.CoreComponents.ProviderIconTest` and `WorkerIndexLiveTest` prove
+// `WardmastWeb.CoreComponents.ProviderIconTest` and `WorkerIndexLiveTest` prove
 // the markup (an <svg>/<image>, a title, an aria-label). Neither can show that
 // the Antigravity mark actually paints, or that all three marks are visually
 // distinct on a real Running card in both themes. `ConnCase` has no layout

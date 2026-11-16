@@ -6,7 +6,7 @@
 # Its bundled ERTS came from the rabbitmq el8 RPM, whose `crypto` NIF is
 # linked against the build image's `libcrypto.so.1.1`; OpenSSL-3-only hosts
 # (Fedora >= 36, Ubuntu >= 22.04, Debian >= 12, RHEL 9) have no such file, so
-# `kernel` died in `on_load` before any Arbiter code ran. The glibc guard
+# `kernel` died in `on_load` before any Wardmast code ran. The glibc guard
 # (scripts/check-release-glibc.sh) passed: the NIF's glibc symbol versions
 # were fine — the library it asked for simply was not there.
 #

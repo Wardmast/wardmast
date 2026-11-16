@@ -1,0 +1,162 @@
+defmodule Wardmast.Workflows.ReviewGateFixRoundDispatcherTest do
+  @moduledoc """
+  bd-6d3h8m: the fix-rounds-exhausted escalation names the total review
+  rounds across every pass, not just the fix-round count.
+
+  On bd-28t80i "1 round" (the fix-round counter) was 6 Opus reviews and 4
+  Sonnet implementer passes across 2 passes — a coordinator reading the
+  escalation alone had no way to see that.
+  """
+
+  use Wardmast.DataCase, async: false
+
+  alias Wardmast.Messages.Message
+  alias Wardmast.ReviewGate.Round
+  alias Wardmast.Tasks.{Issue, Workspace}
+  alias Wardmast.Workflows.ReviewGateFixRoundDispatcher
+
+  setup do
+    {:ok, ws} =
+      Ash.create(Workspace, %{name: "dispatcher-msg-ws-#{System.unique_integer([:positive])}"})
+
+    {:ok, task} =
+      Ash.create(Issue, %{title: "exhausted task", workspace_id: ws.id, issue_type: :feature})
+
+    %{ws: ws, task: task}
+  end
+
+  defp create_review_round!(task_id, fix_round_attempt, round) do
+    {:ok, _} =
+      Ash.create(Round, %{
+        task_id: task_id,
+        round: round,
+        fix_round_attempt: fix_round_attempt,
+        role: :review,
+        verdict: :request_changes,
+        findings: "VERDICT: REQUEST_CHANGES",
+        converged: false
+      })
+  end
+
+  defp escalation_for(task_id, ws_id) do
+    Message.inbox("admiral", workspace_id: ws_id)
+    |> Enum.find(&(&1.task_ref == task_id))
+  end
+
+  describe "escalate_exhausted/4 with :budget_exhausted" do
+    test "states the total review rounds across both passes, not just the fix-round count",
+         %{ws: ws, task: task} do
+      # Pass 1 (the original gate): 3 review rounds. Pass 2 (the one automatic
+      # fix round): 3 more. 1 fix round ran; 6 reviews total.
+      for round <- 1..3, do: create_review_round!(task.id, 0, round)
+      for round <- 1..3, do: create_review_round!(task.id, 1, round)
+
+      assert :ok =
+               ReviewGateFixRoundDispatcher.escalate_exhausted(
+                 task.id,
+                 ws.id,
+                 1,
+                 :budget_exhausted
+               )
+
+      msg = escalation_for(task.id, ws.id)
+      refute is_nil(msg)
+
+      # The fix-round count alone (bd-a9zb7w's original wording).
+      assert msg.subject =~ "exhausted after 1 round(s)"
+      # bd-6d3h8m: the total review count and pass count are now also named.
+      assert msg.subject =~ "6 reviews"
+      assert msg.subject =~ "2 pass"
+      assert msg.body =~ "6 reviews"
+      assert msg.body =~ "2 review pass"
+    end
+
+    test "still sends a sensible message when no Round rows exist (query returns 0, not a crash)",
+         %{ws: ws, task: task} do
+      assert :ok =
+               ReviewGateFixRoundDispatcher.escalate_exhausted(
+                 task.id,
+                 ws.id,
+                 0,
+                 :budget_exhausted
+               )
+
+      msg = escalation_for(task.id, ws.id)
+      refute is_nil(msg)
+      assert msg.subject =~ "0 reviews"
+    end
+  end
+
+  # bd-6omte4: on bd-aro53b a round the quota gate queued was paged as
+  # "FAILED to dispatch after 0 round(s)".
+  describe "escalate_exhausted/4 with {:quota_held, hold}" do
+    test "says held for quota, will resume — with the round, provider and reason",
+         %{ws: ws, task: task} do
+      hold = %{
+        attempt: 2,
+        provider: :gemini,
+        reason: "Gemini Models 5h quota near exhaustion (97% of window used, ceiling 90%)",
+        held_since: ~U[2026-09-25 05:29:00Z]
+      }
+
+      assert :ok =
+               ReviewGateFixRoundDispatcher.escalate_exhausted(
+                 task.id,
+                 ws.id,
+                 1,
+                 {:quota_held, hold}
+               )
+
+      msg = escalation_for(task.id, ws.id)
+      refute is_nil(msg)
+      assert msg.escalation_kind == :fix_round_held
+      assert msg.subject =~ "fix round 2 held for quota on Antigravity (agy)"
+      assert msg.subject =~ "will resume"
+      assert msg.subject =~ hold.reason
+      refute msg.subject =~ "FAILED"
+      assert msg.body =~ "held for quota, will resume"
+      assert msg.body =~ "hold reason: #{hold.reason}"
+      assert msg.body =~ "2026-09-25T05:29:00Z"
+      refute msg.body =~ "could not start"
+    end
+
+    test "does not dedupe into, or read as, a fix-rounds-exhausted page", %{ws: ws, task: task} do
+      assert :ok =
+               ReviewGateFixRoundDispatcher.escalate_exhausted(
+                 task.id,
+                 ws.id,
+                 0,
+                 {:quota_held, %{attempt: 1, provider: nil, reason: "quota"}}
+               )
+
+      assert :ok =
+               ReviewGateFixRoundDispatcher.escalate_exhausted(
+                 task.id,
+                 ws.id,
+                 1,
+                 :budget_exhausted
+               )
+
+      kinds =
+        Message.inbox("admiral", workspace_id: ws.id)
+        |> Enum.filter(&(&1.task_ref == task.id))
+        |> Enum.map(& &1.escalation_kind)
+        |> Enum.sort()
+
+      assert kinds == [:fix_round_held, :fix_rounds_exhausted]
+    end
+  end
+
+  describe "escalate_exhausted/4 with other reasons" do
+    test ":not_converging does not claim a review count it wasn't asked to explain",
+         %{ws: ws, task: task} do
+      assert :ok =
+               ReviewGateFixRoundDispatcher.escalate_exhausted(task.id, ws.id, 1, :not_converging)
+
+      msg = escalation_for(task.id, ws.id)
+      refute is_nil(msg)
+      assert msg.subject =~ "not converging"
+      refute msg.subject =~ "reviews"
+    end
+  end
+end

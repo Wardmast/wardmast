@@ -1,0 +1,609 @@
+defmodule WardmastWeb.Api.WorkspaceControllerTest do
+  use WardmastWeb.ConnCase, async: false
+
+  alias Wardmast.Tasks.Workspace
+
+  setup %{conn: conn} do
+    {:ok, conn: put_req_header(conn, "accept", "application/json")}
+  end
+
+  describe "POST /api/workspaces" do
+    test "creates a workspace", %{conn: conn} do
+      conn =
+        post(conn, ~p"/api/workspaces", %{
+          name: "new-ws",
+          prefix: "nws",
+          description: "test"
+        })
+
+      body = json_response(conn, 201)
+      assert body["name"] == "new-ws"
+      assert body["prefix"] == "nws"
+      assert body["description"] == "test"
+      assert is_binary(body["id"])
+    end
+
+    test "returns 422 on invalid prefix", %{conn: conn} do
+      conn = post(conn, ~p"/api/workspaces", %{name: "x", prefix: "Bad-Prefix!"})
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+  end
+
+  describe "GET /api/workspaces/:id" do
+    test "returns workspace", %{conn: conn} do
+      {:ok, ws} = Ash.create(Workspace, %{name: "showme", prefix: "shw"})
+
+      conn = get(conn, ~p"/api/workspaces/#{ws.id}")
+      body = json_response(conn, 200)
+      assert body["id"] == ws.id
+      assert body["name"] == "showme"
+    end
+
+    test "exposes worker_env key names + secret flags, never values", %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "we-json",
+          prefix: "wej",
+          worker_env: %{
+            "API_TOKEN" => %{"value" => "tok_supersecret", "secret" => true},
+            "LOG_LEVEL" => %{"value" => "debug", "secret" => false}
+          }
+        })
+
+      body = json_response(get(conn, ~p"/api/workspaces/#{ws.id}"), 200)
+
+      assert body["worker_env"] == [
+               %{"name" => "API_TOKEN", "secret" => true},
+               %{"name" => "LOG_LEVEL", "secret" => false}
+             ]
+
+      # The plaintext value must never appear anywhere in the serialised body.
+      refute Jason.encode!(body) =~ "tok_supersecret"
+    end
+
+    test "includes the resolved worker security_posture", %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "secure-ws",
+          prefix: "scw",
+          config: %{"agent" => %{"security" => %{"permissions" => %{"mode" => "strict"}}}}
+        })
+
+      conn = get(conn, ~p"/api/workspaces/#{ws.id}")
+      posture = json_response(conn, 200)["security_posture"]
+
+      assert posture["mode"] == "strict"
+      # The safe-default deny baseline is surfaced and non-empty.
+      assert is_list(posture["safe_defaults"]) and posture["safe_defaults"] != []
+      assert posture["sandbox"]["filesystem"] == "worktree"
+      # Claude adapter enforces the policy; future adapters default to false.
+      assert posture["provider"] == "claude"
+      assert posture["policy_enforced"] == true
+      # bd-1abj7u: Claude's permission layer is the confinement mechanism —
+      # distinct from `policy_enforced` (whether the deny-list contract holds).
+      assert posture["write_confinement"] == "permission_layer"
+    end
+
+    # bd-5yydxh (G10): the effective egress level, per workspace and per repo
+    # override. Defaults to `open`, so a workspace that never opts in reads open.
+    test "security_posture reports the effective egress level per workspace and repo", %{
+      conn: conn
+    } do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "egress-posture-ws",
+          prefix: "egp",
+          config: %{
+            "agent" => %{
+              "security" => %{
+                "sandbox" => %{"egress" => "allowlist", "allow_hosts" => ["repo.hex.pm:443"]},
+                "repos" => %{
+                  "tonic" => %{"sandbox" => %{"egress" => "none"}},
+                  "plain" => %{"permissions" => %{"mode" => "strict"}}
+                }
+              }
+            }
+          }
+        })
+
+      posture =
+        conn
+        |> get(~p"/api/workspaces/#{ws.id}")
+        |> json_response(200)
+        |> Map.fetch!("security_posture")
+
+      assert posture["egress"] == "allowlist"
+      assert posture["sandbox"]["allow_hosts"] == ["repo.hex.pm:443"]
+      assert posture["repos"]["tonic"]["egress"] == "none"
+      assert posture["repos"]["plain"]["egress"] == "allowlist"
+    end
+
+    test "security_posture egress is open for a workspace that does not opt in", %{conn: conn} do
+      {:ok, ws} = Ash.create(Workspace, %{name: "egress-default-ws", prefix: "egd"})
+
+      posture =
+        conn
+        |> get(~p"/api/workspaces/#{ws.id}")
+        |> json_response(200)
+        |> Map.fetch!("security_posture")
+
+      assert posture["egress"] == "open"
+    end
+
+    # bd-1abj7u: agy/gemini enforces its own deny-list contract when config
+    # isolation is on (`policy_enforced` can be true), but nothing today
+    # verifiably confines its writes to the worktree — the posture must say
+    # so plainly rather than let `policy_enforced: true` imply it.
+    test "security_posture.write_confinement is \"none\" for gemini regardless of policy_enforced",
+         %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "agy-ws-confinement",
+          prefix: "agycf",
+          config: %{
+            "agent" => %{
+              "type" => "gemini",
+              "security" => %{"permissions" => %{"mode" => "strict"}}
+            }
+          }
+        })
+
+      conn = get(conn, ~p"/api/workspaces/#{ws.id}")
+      posture = json_response(conn, 200)["security_posture"]
+
+      assert posture["provider"] == "gemini"
+      assert posture["write_confinement"] == "none"
+    end
+
+    # bd-8xy1mf: a repo can override the workspace's resolved mode via
+    # `agent.security.repos.<repo>` — a repo-level `:strict` while the
+    # workspace default is `:bypass` must still show up somewhere, since
+    # `SecurityPolicy.resolve/2` (no `repo` arg) never sees it and every agy
+    # dispatch against that repo is refused despite the workspace itself
+    # reading "ok".
+    test "security_posture.repos carries a per-repo write_jail_warning distinct from the workspace's",
+         %{conn: conn} do
+      # The warning only exists for agy on a host whose jail can't run, so pin
+      # both rather than depend on the machine: a stub `agy` on PATH (never
+      # executed), the isolated agy HOME on, and the jail forced unavailable.
+      bin =
+        Path.join(
+          System.tmp_dir!(),
+          "ws-jail-warn-#{System.pid()}-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(bin)
+      File.write!(Path.join(bin, "agy"), "#!/bin/sh\nexit 0\n")
+      File.chmod!(Path.join(bin, "agy"), 0o755)
+
+      keys = ~w(worker_isolate_config worker_jail_available)a
+      prev = Map.new(keys, &{&1, Application.fetch_env(:wardmast, &1)})
+      old_path = System.get_env("PATH")
+
+      Application.put_env(:wardmast, :worker_isolate_config, true)
+      Application.put_env(:wardmast, :worker_jail_available, false)
+      System.put_env("PATH", bin <> ":" <> (old_path || ""))
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+
+        Enum.each(prev, fn
+          {k, :error} -> Application.delete_env(:wardmast, k)
+          {k, {:ok, v}} -> Application.put_env(:wardmast, k, v)
+        end)
+
+        File.rm_rf!(bin)
+      end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "agy-ws-repo-override",
+          prefix: "agyro",
+          config: %{
+            "agent" => %{
+              "type" => "gemini",
+              "security" => %{
+                "permissions" => %{"mode" => "bypass"},
+                "repos" => %{"tonic" => %{"permissions" => %{"mode" => "strict"}}}
+              }
+            }
+          }
+        })
+
+      conn = get(conn, ~p"/api/workspaces/#{ws.id}")
+      posture = json_response(conn, 200)["security_posture"]
+
+      assert posture["mode"] == "bypass"
+      assert posture["write_jail_warning"] =~ "writes are not confined"
+
+      repo_posture = posture["repos"]["tonic"]
+      assert repo_posture["mode"] == "strict"
+      assert repo_posture["write_jail_warning"] =~ ":strict dispatches of agy are refused"
+    end
+
+    # bd-7s29yq AC3: the posture surface must tell the truth for agy too. The
+    # Gemini adapter used to hard-code `policy_enforced: false` because nothing
+    # enforced the policy; now it answers from the live seam (agy on PATH +
+    # worker config isolation on), so this asserts the endpoint *tracks the
+    # adapter* rather than a constant either way.
+    test "security_posture.policy_enforced tracks the gemini adapter's own answer", %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "agy-ws",
+          prefix: "agyws",
+          config: %{
+            "agent" => %{
+              "type" => "gemini",
+              "security" => %{"permissions" => %{"mode" => "strict"}}
+            }
+          }
+        })
+
+      conn = get(conn, ~p"/api/workspaces/#{ws.id}")
+      posture = json_response(conn, 200)["security_posture"]
+
+      assert posture["provider"] == "gemini"
+      assert posture["mode"] == "strict"
+      assert posture["policy_enforced"] == Wardmast.Agents.Gemini.security_enforced?()
+    end
+
+    # ...and the assertion above is only worth anything if BOTH branches are
+    # reachable. `config/test.exs` pins `worker_isolate_config: false` for the
+    # suite, so without this the comparison is `false == false` and would still
+    # pass with the whole seam ripped out. Drive the enforced branch explicitly.
+    test "security_posture.policy_enforced is true for agy with config isolation on", %{
+      conn: conn
+    } do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "agy-ws-enforced",
+          prefix: "agyenf",
+          config: %{
+            "agent" => %{
+              "type" => "gemini",
+              "security" => %{"permissions" => %{"mode" => "strict"}}
+            }
+          }
+        })
+
+      with_agy_on_path(fn ->
+        assert Wardmast.Agents.Gemini.security_enforced?()
+
+        posture =
+          conn
+          |> get(~p"/api/workspaces/#{ws.id}")
+          |> json_response(200)
+          |> Map.fetch!("security_posture")
+
+        assert posture["provider"] == "gemini"
+        assert posture["policy_enforced"] == true
+      end)
+
+      # And with isolation off there is nowhere to put the generated
+      # settings.json, so the endpoint must go back to reporting `false`.
+      posture =
+        conn
+        |> get(~p"/api/workspaces/#{ws.id}")
+        |> json_response(200)
+        |> Map.fetch!("security_posture")
+
+      assert posture["policy_enforced"] == false
+    end
+
+    # A stub `agy` on PATH plus the isolation switch on — the two things
+    # `Gemini.security_enforced?/0` reads. Restores both unconditionally.
+    defp with_agy_on_path(fun) do
+      tmp = Path.join(System.tmp_dir!(), "agy-posture-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+      agy = Path.join(tmp, "agy")
+      File.write!(agy, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy, 0o755)
+
+      prev_isolate = Application.get_env(:wardmast, :worker_isolate_config)
+      prev_path = System.get_env("PATH")
+
+      try do
+        Application.put_env(:wardmast, :worker_isolate_config, true)
+        System.put_env("PATH", tmp)
+        fun.()
+      after
+        if is_nil(prev_isolate),
+          do: Application.delete_env(:wardmast, :worker_isolate_config),
+          else: Application.put_env(:wardmast, :worker_isolate_config, prev_isolate)
+
+        System.put_env("PATH", prev_path)
+        File.rm_rf!(tmp)
+      end
+    end
+
+    test "returns 404 for missing", %{conn: conn} do
+      bogus = "00000000-0000-0000-0000-000000000000"
+      conn = get(conn, ~p"/api/workspaces/#{bogus}")
+      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
+  end
+
+  describe "GET /api/workspaces" do
+    test "lists workspaces", %{conn: conn} do
+      {:ok, _} = Ash.create(Workspace, %{name: "w1", prefix: "w1"})
+      {:ok, _} = Ash.create(Workspace, %{name: "w2", prefix: "w2"})
+
+      conn = get(conn, ~p"/api/workspaces")
+      assert %{"data" => list} = json_response(conn, 200)
+      assert length(list) >= 2
+    end
+  end
+
+  describe "PATCH /api/workspaces/:id" do
+    test "activates the GitHub tracker via the config route", %{conn: conn} do
+      {:ok, ws} = Ash.create(Workspace, %{name: "to-activate", prefix: "act"})
+
+      github_config = %{
+        "tracker" => %{
+          "type" => "github",
+          "config" => %{
+            "owner" => "ryanrborn",
+            "repo" => "arbiter",
+            "credentials_ref" => "env:GITHUB_TOKEN"
+          }
+        }
+      }
+
+      conn = patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{patch: github_config})
+
+      body = json_response(conn, 200)
+      assert body["id"] == ws.id
+      assert body["config"]["tracker"]["type"] == "github"
+      assert body["config"]["tracker"]["config"]["owner"] == "ryanrborn"
+    end
+
+    # P-20 / D-C-6: PATCH/PUT used to replace the whole `config` map, silently
+    # wiping every sibling key including system-written ones like loop.canary.
+    for verb <- ["PATCH", "PUT"] do
+      test "#{verb} with a `config` map is refused and wipes nothing", %{conn: conn} do
+        canary = %{"state" => "armed", "since" => "2026-10-06T00:00:00Z"}
+
+        {:ok, ws} =
+          Ash.create(Workspace, %{
+            name: "no-wipe-#{unquote(verb)}",
+            prefix: "nw#{String.downcase(unquote(verb))}",
+            config: %{"loop" => %{"canary" => canary}, "merge" => %{"strategy" => "github"}}
+          })
+
+        conn =
+          dispatch(
+            conn,
+            @endpoint,
+            unquote(verb),
+            ~p"/api/workspaces/#{ws.id}",
+            %{"name" => "renamed", "config" => %{"merge" => %{"auto_merge" => true}}}
+          )
+
+        assert %{"error" => %{"type" => "validation_error", "message" => msg}} =
+                 json_response(conn, 422)
+
+        assert msg =~ "/config"
+
+        reloaded = Ash.get!(Workspace, ws.id)
+        assert reloaded.name == "no-wipe-#{unquote(verb)}"
+        assert reloaded.config["loop"]["canary"] == canary
+        assert reloaded.config["merge"] == %{"strategy" => "github"}
+      end
+    end
+
+    test "updates scalar fields", %{conn: conn} do
+      {:ok, ws} = Ash.create(Workspace, %{name: "rename-me", prefix: "rnm"})
+
+      conn = patch(conn, ~p"/api/workspaces/#{ws.id}", %{name: "renamed", description: "now set"})
+
+      body = json_response(conn, 200)
+      assert body["name"] == "renamed"
+      assert body["description"] == "now set"
+    end
+
+    test "returns 422 on an invalid tracker type", %{conn: conn} do
+      {:ok, ws} = Ash.create(Workspace, %{name: "bad-cfg", prefix: "bad"})
+
+      conn =
+        patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{
+          patch: %{"tracker" => %{"type" => "bitbucket"}}
+        })
+
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+
+    test "returns 404 for a missing workspace", %{conn: conn} do
+      bogus = "00000000-0000-0000-0000-000000000000"
+      conn = patch(conn, ~p"/api/workspaces/#{bogus}", %{name: "nope"})
+      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
+
+    test "PUT is also accepted", %{conn: conn} do
+      {:ok, ws} = Ash.create(Workspace, %{name: "put-me", prefix: "put"})
+
+      conn = put(conn, ~p"/api/workspaces/#{ws.id}", %{description: "via put"})
+      assert json_response(conn, 200)["description"] == "via put"
+    end
+  end
+
+  describe "secrets (write-only, encrypted)" do
+    test "POST accepts secrets and never returns their values", %{conn: conn} do
+      conn =
+        post(conn, ~p"/api/workspaces", %{
+          name: "sec-api-create",
+          prefix: "sac",
+          secrets: %{"tracker_token" => "sct_rw_secret"}
+        })
+
+      body = json_response(conn, 201)
+      # The plaintext is nowhere in the serialised response...
+      refute Jason.encode!(body) =~ "sct_rw_secret"
+      refute Map.has_key?(body, "secrets")
+      refute Map.has_key?(body, "encrypted_secrets")
+      # ...but the key name is surfaced for `arb workspace secret ls`.
+      assert body["secret_keys"] == ["tracker_token"]
+    end
+
+    test "GET never returns secret values, only key names", %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "sec-api-get",
+          secrets: %{"b_token" => "vvv", "a_token" => "www"}
+        })
+
+      conn = get(conn, ~p"/api/workspaces/#{ws.id}")
+      body = json_response(conn, 200)
+
+      refute Jason.encode!(body) =~ "vvv"
+      refute Jason.encode!(body) =~ "www"
+      # Sorted key names only.
+      assert body["secret_keys"] == ["a_token", "b_token"]
+    end
+
+    test "PATCH merge-patches secrets (set, then remove via null)", %{conn: conn} do
+      {:ok, ws} = Ash.create(Workspace, %{name: "sec-api-patch", secrets: %{"keep" => "1"}})
+
+      conn = patch(conn, ~p"/api/workspaces/#{ws.id}", %{secrets: %{"added" => "2"}})
+      body = json_response(conn, 200)
+      assert body["secret_keys"] == ["added", "keep"]
+
+      conn =
+        patch(
+          coordinator_conn() |> put_req_header("accept", "application/json"),
+          ~p"/api/workspaces/#{ws.id}",
+          %{secrets: %{"keep" => nil}}
+        )
+
+      body = json_response(conn, 200)
+      assert body["secret_keys"] == ["added"]
+    end
+
+    test "the secret: ref resolves end-to-end with no env var", %{conn: conn} do
+      conn =
+        post(conn, ~p"/api/workspaces", %{
+          name: "sec-api-e2e",
+          prefix: "e2e",
+          secrets: %{"tracker_token" => "sct_e2e"},
+          config: %{
+            "tracker" => %{
+              "type" => "shortcut",
+              "config" => %{"credentials_ref" => "secret:tracker_token"}
+            }
+          }
+        })
+
+      id = json_response(conn, 201)["id"]
+
+      {:ok, ws} = Ash.get(Workspace, id)
+      Wardmast.Trackers.Shortcut.Config.put_active(ws)
+      assert {:ok, %{token: "sct_e2e"}} = Wardmast.Trackers.Shortcut.Config.resolve()
+      Wardmast.Trackers.Shortcut.Config.clear()
+    end
+  end
+
+  describe "PATCH /api/workspaces/:id/config" do
+    setup do
+      initial = %{
+        "tracker" => %{"type" => "github", "config" => %{"owner" => "acme"}},
+        "repo_paths" => %{"arbiter" => "/srv/arbiter"},
+        "merge" => %{"strategy" => "github", "config" => %{"owner" => "acme", "repo" => "arb"}}
+      }
+
+      {:ok, ws} = Ash.create(Workspace, %{name: "patch-cfg", prefix: "pcf", config: initial})
+      {:ok, ws: ws}
+    end
+
+    test "deep-merges a partial patch — sibling keys untouched", %{conn: conn, ws: ws} do
+      conn =
+        patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{
+          "patch" => %{"merge" => %{"auto_merge" => true}}
+        })
+
+      body = json_response(conn, 200)
+      assert body["config"]["merge"]["auto_merge"] == true
+      # The original footgun: replace semantics would have wiped these.
+      assert body["config"]["merge"]["strategy"] == "github"
+      assert body["config"]["merge"]["config"]["owner"] == "acme"
+      assert body["config"]["tracker"]["type"] == "github"
+      assert body["config"]["repo_paths"]["arbiter"] == "/srv/arbiter"
+    end
+
+    test "refuses sandbox.backend at the root and names the canonical path", %{conn: conn, ws: ws} do
+      conn =
+        patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{
+          "patch" => %{"sandbox" => %{"backend" => "podman"}}
+        })
+
+      body = json_response(conn, 422)
+      assert inspect(body) =~ "agent.security.sandbox.backend"
+    end
+
+    test "unset_paths removes a dotted leaf", %{conn: conn, ws: ws} do
+      conn =
+        patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{
+          "unset_paths" => ["merge.config.repo"]
+        })
+
+      body = json_response(conn, 200)
+      refute Map.has_key?(body["config"]["merge"]["config"], "repo")
+      assert body["config"]["merge"]["config"]["owner"] == "acme"
+      assert body["config"]["tracker"]["type"] == "github"
+    end
+
+    test "empty body is a no-op (no fields changed)", %{conn: conn, ws: ws} do
+      conn = patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{})
+      body = json_response(conn, 200)
+      assert body["config"]["merge"]["strategy"] == "github"
+    end
+
+    test "validation runs on the merged result", %{conn: conn, ws: ws} do
+      conn =
+        patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{
+          "patch" => %{"tracker" => %{"type" => "asana"}}
+        })
+
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+
+    test "refuses a secret*/credentials* top-level key (P-20, D-C-4)", %{conn: conn, ws: ws} do
+      for key <- ~w(secrets credentials secret) do
+        conn =
+          patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{"patch" => %{key => %{"x" => "t"}}})
+
+        assert %{"error" => %{"type" => "validation_error"}} = resp = json_response(conn, 422)
+        assert inspect(resp) =~ "arb workspace secret"
+      end
+
+      refute Map.has_key?(Ash.get!(Workspace, ws.id).config, "secrets")
+    end
+
+    test "the dedicated secrets field still works on PATCH /workspaces/:id", %{conn: conn, ws: ws} do
+      conn = patch(conn, ~p"/api/workspaces/#{ws.id}", %{secrets: %{"gh" => "ghp_x"}})
+      assert %{"secret_keys" => ["gh"]} = json_response(conn, 200)
+    end
+
+    test "safety rails: emptying repo_paths is refused unless force (D-C-16)", %{
+      conn: conn,
+      ws: ws
+    } do
+      body = %{"unset_paths" => ["repo_paths.arbiter"]}
+      conn1 = patch(conn, ~p"/api/workspaces/#{ws.id}/config", body)
+      assert %{"error" => %{"type" => "validation_error"}} = resp = json_response(conn1, 422)
+      assert inspect(resp) =~ "repo_paths is empty"
+
+      conn2 = patch(conn, ~p"/api/workspaces/#{ws.id}/config", Map.put(body, "force", true))
+      assert json_response(conn2, 200)["config"]["repo_paths"] == %{}
+    end
+
+    test "unset of an absent key is a 200 no-op", %{conn: conn, ws: ws} do
+      conn = patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{"unset_paths" => ["nope.x"]})
+      assert json_response(conn, 200)["config"]["merge"]["strategy"] == "github"
+    end
+
+    test "returns 404 for a missing workspace", %{conn: conn} do
+      bogus = "00000000-0000-0000-0000-000000000000"
+      conn = patch(conn, ~p"/api/workspaces/#{bogus}/config", %{"patch" => %{}})
+      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
+  end
+end

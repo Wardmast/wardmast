@@ -1,0 +1,731 @@
+defmodule WardmastCli.Cmd.Worker do
+  @moduledoc """
+  Worker subcommand router:
+
+      arb worker list             — each ticket with a live run: its current run's kind + state
+      arb worker show <task-id>   — the ticket's current run (incl. recent output) + its recent runs
+                      + the pre-push check steps the commit gate ran for it (bd-8wdrql)
+      arb worker runs [<task-id>] [--kind K] [--state S] [--outcome O] [--before <iso8601>]
+                      [--limit N] — run history; with no task id, fleet-wide
+      arb worker runs --run <run-id> — one run by id (metadata + output tail)
+      arb worker runs <task-id> --corpus [--limit N] — every run of the task AND its
+                      ReviewGate synthetic children, with transcript presence
+      arb worker log <task-id> [--run <run-id>] [--tail N] — durable transcript (audit)
+      arb worker prompt <task-id> [--run <run-id>] — the composed prompt a run was spawned with
+      arb worker stop <task-id>   — terminate a running worker cleanly
+      arb worker resume <task-id> [<repo> | --repo <repo>] [--model <name>] [--force] [--force-quota
+                      [--force-quota-reason <why>]] [--mode session|briefing] — resume the prior session
+      arb worker review <task-id> [--repo <repo>] [--model <name>] [--force] [--force-quota]
+                      [--force-quota-reason <why>]
+                      [--automation <mode>] [--pr-author <login>]
+                      [--tracker-context-ref <ref>] [--tracker-context-type <type>] — spawn a review worker
+
+  Use `arb dispatch` to start a worker in the first place.
+
+  `resume` continues the task's PRIOR Claude session — it re-spawns the worker
+  with `claude --print --resume <session_id>` in the SAME preserved worktree, so
+  the original mind picks up where it left off (token exhaustion, kill, mid-task
+  exit). This is distinct from `arb dispatch`, which starts a fresh session in a
+  fresh worktree. When there is no resumable prior session/worktree, `resume`
+  fails with a clear message rather than silently starting fresh. The repo is
+  optional — it's inherited from the task's most recent run when omitted. The
+  top-level `arb resume <task-id>` alias behaves identically.
+
+  A task that released its worker slot — parked for you, stopped, completed —
+  must re-acquire one to resume (bd-92mx1m). When the concurrency cap is full
+  the server refuses, naming the cap and the tasks holding it; `--force` goes
+  over the cap anyway, and the override is recorded.
+
+  `--mode briefing` is the explicit opt-in for the other kind of resume: a FRESH
+  agent briefed from the preserved worktree's git state, with no prior session
+  continued. The default (`--mode session`) is what the MCP `worker_resume` tool
+  does too — the two are one operation (`Wardmast.Worker.Dispatch.resume_task/2`).
+
+  `list` and `show` read the same thing (bd-1uu19b): a ticket's current run,
+  in one run vocabulary — its kind (`implement`, `review`, `fix_pass`,
+  `conflict`), its state (`starting`, `working`, `waiting`, `finished`) and,
+  once finished, its outcome (`succeeded`, `failed`, `interrupted`,
+  `handed_off`). The current run is the ticket's live run when it has one,
+  else its latest run; `show` adds its recent runs, each labelled with its
+  kind. `runs` lists *every* recorded run for the task newest-first — use it
+  to see how many times a task was worked, by what kind of run, and the
+  outcome of each. `show`'s output is the bounded UI tail (capped); `log` returns the
+  **full, uncapped** transcript of the task's most recent run from the durable
+  on-disk store — the audit source of record, retaining every line however
+  long the run.
+
+  A ReviewGate synthetic id (`<task>#review`, `#r<N>`, `#impl<N>`, `#v<N>`,
+  `#t<N>`) is accepted wherever a task id is: the `#` is URL-encoded into the
+  request path. `log` and `prompt` read the task's latest run unless `--run`
+  names one (which must belong to the task); `log --tail N` returns only the
+  last N lines. Every list is capped server-side — `--limit` defaults to 20
+  and is clamped to 200 (`--corpus`: 200 and 1000), the same bounds MCP and
+  REST use.
+
+  `review` spawns a worker specialized for review tasks, optionally overriding
+  the repo and model. It is refused when the task's workspace resolves
+  `review_automation` to `off` for the repo, unless `--force` is given;
+  `--automation` overrides the resolved mode for this review.
+  """
+
+  alias WardmastCli.{ArgParser, Client, Output, RunLabel}
+
+  @switches [
+    json: :boolean,
+    repo: :string,
+    model: :string,
+    force_quota: :boolean,
+    force_quota_reason: :string,
+    mode: :string,
+    force: :boolean,
+    automation: :string,
+    pr_author: :string,
+    tracker_context_ref: :string,
+    tracker_context_type: :string,
+    run: :string,
+    tail: :integer,
+    corpus: :boolean,
+    kind: :string,
+    state: :string,
+    outcome: :string,
+    before: :string,
+    limit: :integer,
+    lines: :integer
+  ]
+
+  # Pre-existing complexity 18 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  def run(argv) do
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
+    else
+      {flags, rest, mode} = ArgParser.parse(argv, command: "arb worker", switches: @switches)
+
+      case rest do
+        ["list" | _] ->
+          list(mode)
+
+        ["ls" | _] ->
+          list(mode)
+
+        ["show", task_id | _] ->
+          show(task_id, flags, mode)
+
+        ["show" | _] ->
+          Output.die("worker show requires: <task-id>")
+
+        ["runs" | positional] ->
+          runs(positional, flags, mode)
+
+        ["prompt", task_id | _] ->
+          prompt(task_id, flags, mode)
+
+        ["prompt" | _] ->
+          Output.die("worker prompt requires: <task-id>")
+
+        ["log", task_id | _] ->
+          log(task_id, flags, mode)
+
+        ["log" | _] ->
+          Output.die("worker log requires: <task-id>")
+
+        ["stop", task_id | _] ->
+          stop(task_id, mode)
+
+        ["stop" | _] ->
+          Output.die("worker stop requires: <task-id>")
+
+        ["resume", task_id | positional] ->
+          resume(task_id, positional, flags, mode)
+
+        ["resume" | _] ->
+          Output.die("worker resume requires: <task-id>")
+
+        ["review", task_id | _] ->
+          review(task_id, flags, mode)
+
+        ["review" | _] ->
+          Output.die("worker review requires: <task-id>")
+
+        [] ->
+          Output.die(
+            "worker requires a subcommand: `list`, `show`, `runs`, `log`, `prompt`, `stop`, `resume`, or `review`"
+          )
+
+        [unknown | _] ->
+          Output.die("unknown worker subcommand: #{unknown}")
+      end
+    end
+  end
+
+  defp list(mode) do
+    params =
+      case WardmastCli.Workspace.selected_id() do
+        nil -> []
+        ws_id -> [workspace_id: ws_id]
+      end
+
+    case Client.get("/api/workers", params) do
+      {:ok, %{"data" => list}} -> emit_list(list, mode)
+      {:ok, _} -> emit_list([], mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp show(task_id, flags, mode) do
+    params = take_params(flags, lines: :lines)
+
+    case Client.get("/api/workers/#{Client.path_segment(task_id)}", params) do
+      {:ok, snap} -> emit_show(snap, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  # `runs` is three reads behind one verb: one run by id (`--run`), the
+  # task's whole transcript corpus (`--corpus`), and run history — scoped to a
+  # task when one is named, fleet-wide when not.
+  defp runs(positional, flags, mode) do
+    task_id = List.first(positional)
+
+    cond do
+      flags[:run] -> run_by_id(flags[:run], mode)
+      flags[:corpus] && is_nil(task_id) -> Output.die("worker runs --corpus requires: <task-id>")
+      flags[:corpus] -> corpus(task_id, flags, mode)
+      true -> history(task_id, flags, mode)
+    end
+  end
+
+  defp run_by_id(run_id, mode) do
+    case Client.get("/api/workers/history/#{Client.path_segment(run_id)}") do
+      {:ok, %{"data" => run}} -> emit_run(run, mode)
+      {:ok, run} -> emit_run(run, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp corpus(task_id, flags, mode) do
+    params = take_params(flags, limit: :limit)
+
+    case Client.get("/api/workers/#{Client.path_segment(task_id)}/run_log_list", params) do
+      {:ok, %{"data" => list}} -> emit_corpus(task_id, list, mode)
+      {:ok, _} -> emit_corpus(task_id, [], mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp history(task_id, flags, mode) do
+    params =
+      [task_id: task_id, workspace_id: WardmastCli.Workspace.selected_id()]
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+      |> Kernel.++(
+        take_params(flags,
+          kind: :kind,
+          state: :state,
+          outcome: :outcome,
+          before: :before,
+          limit: :limit
+        )
+      )
+
+    case Client.get("/api/workers/history", params) do
+      {:ok, %{"data" => list}} -> emit_runs(task_id, list, mode)
+      {:ok, _} -> emit_runs(task_id, [], mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  # The durable transcript of the task's latest run, or of `--run <id>`.
+  defp log(task_id, flags, mode) do
+    params = take_params(flags, run_id: :run, tail: :tail)
+
+    case Client.get("/api/workers/#{Client.path_segment(task_id)}/log", params) do
+      {:ok, %{"data" => data}} -> emit_log(data, mode)
+      {:ok, payload} -> emit_log(payload, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  # The composed prompt of the task's latest run, or of `--run <id>`.
+  defp prompt(task_id, flags, mode) do
+    params = take_params(flags, run_id: :run)
+
+    case Client.get("/api/workers/#{Client.path_segment(task_id)}/prompt", params) do
+      {:ok, %{"data" => data}} -> emit_prompt(data, mode)
+      {:ok, payload} -> emit_prompt(payload, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  # `[query_key: flag_key]` -> the query params whose flag was given.
+  defp take_params(flags, mapping) do
+    for {param, flag} <- mapping, not is_nil(flags[flag]), do: {param, flags[flag]}
+  end
+
+  defp stop(task_id, mode) do
+    case Client.post("/api/workers/#{Client.path_segment(task_id)}/stop", %{}) do
+      {:ok, payload} -> emit_stop(payload, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  # Session-level resume (bd-1z7624). `[<repo>]` is positional (inherited from
+  # the task's most recent run when omitted); `--model` is an optional per-run
+  # override. POSTs to the same endpoint regardless of whether the user typed
+  # `arb worker resume` or the top-level `arb resume` alias.
+  @resume_timeout_ms 180_000
+
+  defp resume(task_id, positional, flags, mode) do
+    repo =
+      case positional do
+        [] -> nil
+        [repo] -> repo
+        _ -> Output.die("worker resume takes at most: <task-id> [<repo>]")
+      end
+
+    body =
+      %{}
+      |> maybe_put("repo", repo || flags[:repo])
+      |> maybe_put("model", flags[:model])
+      |> maybe_put("force_quota", if(flags[:force_quota], do: true))
+      |> maybe_put("force_quota_reason", flags[:force_quota_reason])
+      |> maybe_put("force", if(flags[:force], do: true))
+      |> maybe_put("mode", flags[:mode])
+
+    # The resume POST runs worktree reuse + agent spawn inline, which can outlast
+    # the default 10s client timeout although the resume succeeds (bd-k51pj3);
+    # a timeout would read as failure and prompt a duplicate retry.
+    case Client.post(
+           "/api/workers/#{Client.path_segment(task_id)}/resume",
+           body,
+           receive_timeout: @resume_timeout_ms
+         ) do
+      {:ok, payload} -> emit_resume(payload, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp review(task_id, flags, mode) do
+    body =
+      %{"task_id" => task_id}
+      |> maybe_put("repo", flags[:repo])
+      |> maybe_put("model", flags[:model])
+      |> maybe_put("force_quota", if(flags[:force_quota], do: true))
+      |> maybe_put("force_quota_reason", flags[:force_quota_reason])
+      |> maybe_put("force", if(flags[:force], do: true))
+      |> maybe_put("automation", flags[:automation])
+      |> maybe_put("pr_author", flags[:pr_author])
+      |> maybe_put("tracker_context_ref", flags[:tracker_context_ref])
+      |> maybe_put("tracker_context_type", flags[:tracker_context_type])
+
+    case Client.post("/api/workers/review", body) do
+      {:ok, payload} -> emit_review(payload, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # ---- render ---------------------------------------------------------
+
+  # SI3: what the run ran in: the image (digest-pinned for a registry node), the
+  # CLI set's short hash and the harness version. Absent for a host-local run.
+  defp emit_provenance(run) do
+    if run["image_ref"], do: IO.puts("Image:      #{run["image_ref"]}")
+    if run["cli_set"], do: IO.puts("CLI set:    #{run["cli_set"]}")
+    if run["image_fallback"], do: IO.puts("Fallback:   #{run["image_fallback"]}")
+    if run["harness_version"], do: IO.puts("Harness:    #{run["harness_version"]}")
+  end
+
+  defp emit_show(snap, :json), do: IO.puts(Jason.encode!(snap))
+
+  # Pre-existing complexity 13 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp emit_show(snap, :text) do
+    if snap["source"] == "history" do
+      IO.puts("(no live run — showing the ticket's latest run)")
+    end
+
+    IO.puts("Ticket:      #{snap["task_id"]}")
+    IO.puts("Run:        #{RunLabel.label(snap)}")
+    if place = RunLabel.where(snap), do: IO.puts("Node:       #{place}")
+
+    # A ReviewGate reviewer / implementer runs under its own `<ticket>#…` id.
+    if snap["run_task_id"] && snap["run_task_id"] != snap["task_id"] do
+      IO.puts("Run id:     #{snap["run_task_id"]}")
+    end
+
+    # bd-aw2cyt: the record's status outlives its agent. Say which phase the
+    # work is actually in, and whether anything is running for it at all.
+    if snap["phase"] do
+      IO.puts("Phase:      #{phase_text(snap)}")
+    end
+
+    emit_held(snap["held"])
+
+    # A claude-driven worker has no ticking workflow step; show the live
+    # activity derived from its stream instead of a frozen step. See bd-c919xj.
+    if snap["claude_session"] do
+      IO.puts("Activity:   #{activity_label(snap)}")
+    else
+      IO.puts("Step:       #{snap["current_step"]}")
+    end
+
+    IO.puts("Repo:        #{snap["repo"]}")
+    IO.puts("Started:    #{snap["started_at"]}")
+    if snap["completed_at"], do: IO.puts("Completed:  #{snap["completed_at"]}")
+    if label = cost_label(snap), do: IO.puts("Spend:      #{label}")
+    if snap["exit_status"], do: IO.puts("Exit:       #{snap["exit_status"]}")
+    if snap["result"], do: IO.puts("Result:     #{snap["result"]}")
+    if snap["failure_reason"], do: IO.puts("Failure:    #{snap["failure_reason"]}")
+    emit_provenance(snap)
+
+    emit_pre_push_checks(snap["pre_push_checks"] || [])
+
+    case snap["output_lines"] || [] do
+      [] ->
+        IO.puts("\n(no output lines captured)")
+
+      lines ->
+        IO.puts("\nOutput (#{length(lines)} lines, oldest first):")
+        Enum.each(lines, fn line -> IO.puts("  | #{line}") end)
+    end
+
+    emit_recent_runs(snap["runs"] || [])
+  end
+
+  # bd-8wdrql: the pre-push recipe's steps for this run, per attempt; a red
+  # step carries the tail of its output.
+  defp emit_pre_push_checks([]), do: :ok
+
+  defp emit_pre_push_checks(steps) do
+    IO.puts("\nPre-push checks (#{length(steps)}):")
+
+    Enum.each(steps, fn s ->
+      exit_part = if s["exit_status"], do: "  exit #{s["exit_status"]}", else: ""
+
+      IO.puts(
+        "  attempt #{s["attempt"]}  #{String.pad_trailing(to_string(s["name"]), 14)} " <>
+          "#{String.pad_trailing(to_string(s["status"]), 8)}#{exit_part}  " <>
+          duration_label(s["duration_ms"])
+      )
+
+      if s["status"] in ["failed", "timeout", "error"] and is_binary(s["output"]) do
+        s["output"]
+        |> output_lines()
+        |> Enum.each(&IO.puts("      | #{&1}"))
+
+        if is_binary(s["log_path"]), do: IO.puts("      full log: #{s["log_path"]}")
+      end
+    end)
+  end
+
+  defp duration_label(ms) when is_integer(ms), do: "#{Float.round(ms / 1000, 1)}s"
+  defp duration_label(_), do: ""
+
+  # An extracted ExUnit failure digest leads with the failing tests: show its
+  # head (names first), not the last lines, which are the raw tail behind it.
+  defp output_lines("ExUnit failures:" <> _ = output) do
+    output |> String.split("\n--- output tail ---\n", parts: 2) |> hd() |> String.split("\n")
+  end
+
+  defp output_lines(output), do: output |> String.split("\n") |> Enum.take(-20)
+
+  # bd-1uu19b: the ticket's recent runs, each labelled with its kind; `*`
+  # marks the current one.
+  defp emit_recent_runs([]), do: :ok
+
+  defp emit_recent_runs(runs) do
+    IO.puts("\nRuns (#{length(runs)}, newest first):")
+
+    Enum.each(runs, fn r ->
+      mark = if r["current"], do: "*", else: " "
+      completed = if r["completed_at"], do: "  completed=#{r["completed_at"]}", else: ""
+
+      IO.puts(
+        "  #{mark} #{r["run_id"]}  #{RunLabel.label(r)}  started=#{r["started_at"]}#{completed}#{RunLabel.node_suffix(r)}"
+      )
+    end)
+  end
+
+  defp emit_runs(_task_id, list, :json), do: IO.puts(Jason.encode!(%{"data" => list}))
+
+  defp emit_runs(_task_id, [], :text) do
+    IO.puts("(no historical runs recorded for this task)")
+  end
+
+  defp emit_runs(task_id, list, :text) do
+    IO.puts(
+      "Historical runs#{if task_id, do: " for #{task_id}"} (#{length(list)}, newest first):"
+    )
+
+    Enum.each(list, fn r ->
+      model_part = if r["model"], do: "  model=#{r["model"]}", else: ""
+      completed = r["completed_at"] || "—"
+
+      IO.puts(
+        "  #{r["id"]}  #{RunLabel.label(r)}  " <>
+          "started=#{r["started_at"]}  completed=#{completed}#{model_part}#{RunLabel.node_suffix(r)}"
+      )
+
+      if r["failure_reason"], do: IO.puts("      #{reason_label(r)}: #{r["failure_reason"]}")
+      if r["failure_summary"], do: IO.puts("      #{summary_label(r)}: #{r["failure_summary"]}")
+    end)
+  end
+
+  # bd-aje6fj: an `interrupted` run (shut down with the server) carries its
+  # cause in failure_reason too, but it is not a failure — don't label it one.
+  defp reason_label(%{"outcome" => "interrupted"}), do: "reason"
+  defp reason_label(_run), do: "failure"
+
+  # bd-1eb6fc: `failure_summary` also carries a non-failure completion note on
+  # a succeeded run (arb done fired with a background task still RUNNING)
+  # — same reason_label/1 pattern above, so a succeeded run isn't labeled
+  # with the word "failure" it didn't have.
+  defp summary_label(%{"outcome" => "succeeded"}), do: "note"
+  defp summary_label(_run), do: "failure summary"
+
+  defp emit_log(data, :json), do: IO.puts(Jason.encode!(data))
+
+  defp emit_log(data, :text) do
+    IO.puts("Ticket:      #{data["task_id"]}")
+    IO.puts("Run:        #{data["run_id"]}")
+    IO.puts("Transcript: #{data["path"]}")
+
+    cond do
+      data["exists"] == false ->
+        IO.puts("\n(no durable transcript on disk for this run)")
+
+      (data["lines"] || []) == [] ->
+        IO.puts("\n(durable transcript is empty)")
+
+      true ->
+        lines = data["lines"]
+
+        if data["truncated"] do
+          IO.puts(
+            "\nTranscript tail (last #{length(lines)} of #{data["line_count"]} lines, oldest first):"
+          )
+        else
+          IO.puts("\nFull transcript (#{length(lines)} lines, oldest first):")
+        end
+
+        Enum.each(lines, fn line -> IO.puts("  | #{line}") end)
+    end
+  end
+
+  defp emit_run(run, :json), do: IO.puts(Jason.encode!(%{"data" => run}))
+
+  defp emit_run(run, :text) do
+    IO.puts("Run:        #{run["id"]}  #{RunLabel.label(run)}#{RunLabel.node_suffix(run)}")
+    IO.puts("Ticket:      #{run["task_id"]}")
+    if run["repo"], do: IO.puts("Repo:        #{run["repo"]}")
+    if run["model"], do: IO.puts("Model:      #{run["model"]}")
+    emit_provenance(run)
+    IO.puts("Started:    #{run["started_at"]}")
+    if run["completed_at"], do: IO.puts("Completed:  #{run["completed_at"]}")
+    if run["failure_reason"], do: IO.puts("#{reason_label(run)}:    #{run["failure_reason"]}")
+    if run["failure_summary"], do: IO.puts("#{summary_label(run)}: #{run["failure_summary"]}")
+
+    case run["output_lines"] || [] do
+      [] ->
+        IO.puts("\n(no output lines captured)")
+
+      lines ->
+        IO.puts("\nOutput (#{length(lines)} lines, oldest first):")
+        Enum.each(lines, fn line -> IO.puts("  | #{line}") end)
+    end
+  end
+
+  defp emit_corpus(_task_id, list, :json), do: IO.puts(Jason.encode!(%{"data" => list}))
+
+  defp emit_corpus(task_id, [], :text),
+    do: IO.puts("(no runs recorded for #{task_id} or its synthetic children)")
+
+  defp emit_corpus(task_id, list, :text) do
+    IO.puts("Transcript corpus for #{task_id} (#{length(list)} runs, newest first):")
+
+    Enum.each(list, fn r ->
+      transcript =
+        if r["transcript_exists"], do: "#{r["line_count"]} lines", else: "no transcript"
+
+      IO.puts(
+        "  #{r["run_id"]}  #{r["task_id"]}  #{RunLabel.label(r)}  " <>
+          "started=#{r["started_at"]}  #{transcript}#{RunLabel.node_suffix(r)}"
+      )
+    end)
+  end
+
+  defp emit_prompt(data, :json), do: IO.puts(Jason.encode!(data))
+
+  defp emit_prompt(data, :text) do
+    IO.puts("Ticket:      #{data["task_id"]}")
+    IO.puts("Run:        #{data["run_id"]}")
+    if data["path"], do: IO.puts("Prompt:     #{data["path"]}")
+
+    if data["exists"] == false or is_nil(data["prompt"]) do
+      IO.puts("\n(no prompt was persisted for this run)")
+    else
+      IO.puts("\n" <> data["prompt"])
+    end
+  end
+
+  defp emit_stop(payload, :json), do: IO.puts(Jason.encode!(payload))
+
+  defp emit_stop(payload, :text) do
+    IO.puts("Stopped worker for ticket #{payload["task_id"]}.")
+  end
+
+  defp emit_resume(payload, :json), do: IO.puts(Jason.encode!(payload))
+
+  defp emit_resume(payload, :text) do
+    task = payload["task"] || %{}
+    worker = payload["worker"] || %{}
+    machine = payload["machine"] || %{}
+
+    IO.puts("Resume:")
+    IO.puts("  Ticket:   #{task["id"]} — #{task["title"]}")
+    IO.puts("  State:    #{task["state"]}")
+    IO.puts("  Worker:   #{worker["pid"]}")
+    IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
+
+    case payload["worktree_path"] do
+      nil -> :ok
+      path -> IO.puts("  Worktree: #{path} (reused)")
+    end
+
+    case payload["claude_started"] do
+      true -> IO.puts("  Session:  resumed")
+      _ -> :ok
+    end
+  end
+
+  defp emit_review(payload, :json), do: IO.puts(Jason.encode!(payload))
+
+  defp emit_review(payload, :text) do
+    task = payload["task"] || %{}
+    worker = payload["worker"] || %{}
+
+    IO.puts("Review worker spawned:")
+    IO.puts("  Ticket: #{task["id"]}")
+    IO.puts("  Worker: #{worker["pid"]}")
+
+    case payload["worktree_path"] do
+      nil -> :ok
+      path -> IO.puts("  Worktree: #{path}")
+    end
+  end
+
+  defp emit_list(list, :json), do: IO.puts(Jason.encode!(%{"data" => list}))
+
+  defp emit_list([], :text) do
+    IO.puts("(no active workers)")
+  end
+
+  defp emit_list(list, :text) do
+    IO.puts("Active workers (#{length(list)}):")
+
+    Enum.each(list, fn p ->
+      step =
+        if p["claude_session"],
+          do: "activity=#{activity_label(p)}",
+          else: "step=#{p["current_step"]}"
+
+      model_part = if p["model"], do: "  model=#{p["model"]}", else: ""
+      cost_part = format_cost(p)
+      phase_part = if p["phase"], do: "  phase=#{p["phase"]}", else: ""
+
+      IO.puts(
+        "  #{p["task_id"]}  #{RunLabel.label(p)}#{phase_part}#{agent_note(p)}#{ci_wait_part(p)}  #{step}  " <>
+          "repo=#{p["repo"]}  started=#{p["started_at"]}#{model_part}#{cost_part}" <>
+          RunLabel.node_suffix(p) <>
+          RunLabel.run_suffix(p)
+      )
+    end)
+  end
+
+  # bd-6omte4: the dispatch the quota gate is holding for the ticket — a
+  # ReviewGate fix round refused for quota is queued, not failed.
+  defp emit_held(%{} = held) do
+    IO.puts(
+      "Held:       #{held["intent"]} held for quota on " <>
+        "#{held["provider_label"] || held["provider"]} (#{held["reason"]}), will resume" <>
+        if(held["held_since"], do: " — held since #{held["held_since"]}", else: "")
+    )
+  end
+
+  defp emit_held(_held), do: :ok
+
+  # bd-aw2cyt: `agent_live == false` is the whole point of the phase model —
+  # a row that looks like work in progress with no process behind it. Only the
+  # negative is worth ink; a live row is the unremarkable case, and an unknown
+  # one (an older server that does not send the field) says nothing.
+  # bd-3726k8: a gate in the CI wait has no agent, which reads like a hung gate
+  # under "in review — no live agent". The server names the wait instead.
+  defp phase_text(%{"ci_wait_label" => label}) when is_binary(label), do: label
+  defp phase_text(snap), do: "#{snap["phase_label"] || snap["phase"]}#{agent_note(snap, :long)}"
+
+  defp ci_wait_part(%{"ci_wait_label" => label}) when is_binary(label), do: "  [#{label}]"
+  defp ci_wait_part(_row), do: ""
+
+  defp agent_note(row, style \\ :short)
+  defp agent_note(%{"ci_wait_label" => label}, _style) when is_binary(label), do: ""
+  defp agent_note(%{"agent_live" => false}, :long), do: " — no live agent"
+  defp agent_note(%{"agent_live" => false}, :short), do: "  (no agent)"
+  defp agent_note(_row, _style), do: ""
+
+  defp format_cost(row) do
+    case cost_label(row) do
+      nil -> ""
+      label -> "  cost=#{label}"
+    end
+  end
+
+  # bd-8vnuy3: `cost_usd` is the task's settled + in-flight worker spend — the
+  # issue page's figure. An in-flight estimate reads `~`, never like a settled
+  # total; nothing priced (agy/antigravity) reads n/a, never $0.00. A plain
+  # zero with nothing to qualify it stays hidden, as it always was.
+  defp cost_label(%{"cost_usd" => nil, "cost_unpriced" => true}), do: "n/a"
+
+  defp cost_label(%{"cost_usd" => cost} = row) when is_number(cost) do
+    unpriced? = row["cost_unpriced"] == true
+    degraded? = row["cost_degraded"] == true
+
+    if cost <= 0 and not (unpriced? or degraded?) do
+      nil
+    else
+      [
+        live_figure(cost, row),
+        unpriced? && " + n/a unpriced",
+        degraded? && " (live read incomplete)"
+      ]
+      |> Enum.filter(&is_binary/1)
+      |> Enum.join()
+    end
+  end
+
+  defp cost_label(_row), do: nil
+
+  defp live_figure(cost, %{"cost_live" => true, "cost_live_usd" => in_flight})
+       when is_number(in_flight) and in_flight > 0,
+       do: "~#{dollars(cost)} (incl. ~#{dollars(in_flight)} in flight)"
+
+  defp live_figure(cost, %{"cost_live" => true}), do: "~#{dollars(cost)}"
+  defp live_figure(cost, _row), do: dollars(cost)
+
+  defp dollars(n), do: "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
+
+  # The JSON API exposes a claude-driven worker's live activity as a map
+  # (%{"label", "kind", "since"}) or null; render its label, falling back to a
+  # plain "working" until the first stream event lands. See bd-c919xj.
+  defp activity_label(snap) do
+    case snap["activity"] do
+      %{"label" => label} when is_binary(label) and label != "" -> label
+      _ -> "working"
+    end
+  end
+end

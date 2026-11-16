@@ -1,0 +1,670 @@
+defmodule Wardmast.Quota.OAuthUsageTest do
+  # async: false — the 429 cooldown lives in :persistent_term (VM-global).
+  use ExUnit.Case, async: false
+
+  alias Wardmast.Quota.CloudProbe
+  alias Wardmast.Quota.OAuthUsage
+
+  defp stub(fun), do: Req.Test.stub(OAuthUsage.HTTP, fun)
+
+  setup do
+    on_exit(fn -> OAuthUsage.reset_cooldown!("test-token") end)
+    :ok
+  end
+
+  describe "fetch/1" do
+    test "parses aggregate + per-model utilization and extra_usage from a 200" do
+      stub(fn conn ->
+        assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer test-token"]
+        assert Plug.Conn.get_req_header(conn, "anthropic-beta") == ["oauth-2025-04-20"]
+        assert Plug.Conn.get_req_header(conn, "anthropic-version") == ["2023-06-01"]
+
+        Req.Test.json(conn, %{
+          "five_hour" => %{"utilization" => 42, "resets_at" => "2026-07-06T12:00:00Z"},
+          "seven_day" => %{"utilization" => 10},
+          "seven_day_sonnet" => %{"utilization" => 55},
+          "seven_day_opus" => %{"utilization" => 5},
+          "extra_usage" => 12.5
+        })
+      end)
+
+      assert {:ok, usage} = OAuthUsage.fetch(token: "test-token")
+      assert usage.utilization_5h == 0.42
+      assert usage.utilization_7d == 0.10
+      assert usage.per_model_utilization == %{"sonnet" => 0.55, "opus" => 0.05}
+      assert usage.extra_usage == %{"amount_usd" => 12.5}
+    end
+
+    test "treats a nil extra_usage as an empty map" do
+      stub(fn conn ->
+        Req.Test.json(conn, %{"five_hour" => %{"utilization" => 1}, "extra_usage" => nil})
+      end)
+
+      assert {:ok, usage} = OAuthUsage.fetch(token: "test-token")
+      assert usage.extra_usage == %{}
+    end
+
+    test "starts a cooldown on a 429 and skips the next call without hitting the network" do
+      Req.Test.stub(OAuthUsage.HTTP, fn conn ->
+        Plug.Conn.send_resp(conn, 429, "")
+      end)
+
+      assert {:error, :rate_limited} = OAuthUsage.fetch(token: "test-token")
+
+      # A stub that would blow up if called again — proves the second fetch
+      # never reaches the network while cooling down.
+      Req.Test.stub(OAuthUsage.HTTP, fn _conn -> flunk("should not call the network again") end)
+
+      assert {:error, {:backoff, 429}} = OAuthUsage.fetch(token: "test-token")
+    end
+
+    test "surfaces a non-200/429 status as an http_error" do
+      stub(fn conn -> Plug.Conn.send_resp(conn, 500, "boom") end)
+
+      assert {:error, {:http_error, 500}} = OAuthUsage.fetch(token: "test-token")
+    end
+
+    test "reads the token from .credentials.json when none is passed" do
+      tmp =
+        System.tmp_dir!() |> Path.join("oauth_usage_test_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp)
+      on_exit(fn -> File.rm_rf!(tmp) end)
+
+      File.write!(
+        Path.join(tmp, ".credentials.json"),
+        Jason.encode!(%{"claudeAiOauth" => %{"accessToken" => "from-disk-token"}})
+      )
+
+      stub(fn conn ->
+        assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer from-disk-token"]
+        Req.Test.json(conn, %{})
+      end)
+
+      on_exit(fn -> OAuthUsage.reset_cooldown!("from-disk-token") end)
+
+      assert {:ok, _usage} = OAuthUsage.fetch(source_dir: tmp)
+    end
+
+    test "errors when there is no credentials file to read" do
+      tmp =
+        System.tmp_dir!()
+        |> Path.join("oauth_usage_test_missing_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp)
+      on_exit(fn -> File.rm_rf!(tmp) end)
+
+      assert {:error, :no_credentials} = OAuthUsage.fetch(source_dir: tmp)
+    end
+  end
+
+  # #1876: the cooldown used to be a fixed 180 s against CloudProbe's 300 s
+  # cadence, so it expired before the next scheduled poll and never suppressed
+  # one. `:now_ms` pins the monotonic clock the cooldown is set and checked
+  # against, so a test can stand at "the next poll" without waiting for it.
+  describe "fetch/1 — the 429 cooldown outlasts a CloudProbe cycle (#1876)" do
+    defp rate_limited(retry_after \\ nil) do
+      stub(fn conn ->
+        conn =
+          if retry_after,
+            do: Plug.Conn.put_resp_header(conn, "retry-after", retry_after),
+            else: conn
+
+        Plug.Conn.send_resp(conn, 429, "")
+      end)
+    end
+
+    # A stub that reports every request it serves, so a test can tell a
+    # client-side backoff apart from a real call.
+    defp counting_ok do
+      test_pid = self()
+
+      stub(fn conn ->
+        send(test_pid, :network_call)
+        Req.Test.json(conn, %{})
+      end)
+    end
+
+    defp fetch_at(now_ms), do: OAuthUsage.fetch(token: "test-token", now_ms: now_ms)
+
+    defp never_called do
+      stub(fn _conn -> flunk("a suppressed poll must not reach the network") end)
+    end
+
+    test "the cooldown lapses: a fetch well past it reaches the network again" do
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited()
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      counting_ok()
+      assert {:ok, _usage} = fetch_at(t0 + :timer.hours(2))
+      assert_received :network_call
+    end
+
+    test "a 429 at t0 makes the poll at t0 + interval back off, without an HTTP call" do
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited()
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      never_called()
+      assert {:error, {:backoff, 429}} = fetch_at(t0 + CloudProbe.interval_ms())
+    end
+
+    test "only that one poll: the poll after it reaches the network" do
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited()
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      counting_ok()
+      assert {:ok, _usage} = fetch_at(t0 + 2 * CloudProbe.interval_ms())
+      assert_received :network_call
+    end
+
+    test "the default cooldown follows the configured CloudProbe cadence" do
+      prior = Application.get_env(:wardmast, :cloud_quota_probe)
+      on_exit(fn -> Application.put_env(:wardmast, :cloud_quota_probe, prior) end)
+      Application.put_env(:wardmast, :cloud_quota_probe, enabled: false, interval_ms: 900_000)
+
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited()
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      never_called()
+      assert {:error, {:backoff, 429}} = fetch_at(t0 + 900_000)
+    end
+
+    test "a 429 carrying Retry-After sets the cooldown from that header" do
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited("1800")
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      never_called()
+      assert {:error, {:backoff, 429}} = fetch_at(t0 + 1_799_000)
+
+      counting_ok()
+      assert {:ok, _usage} = fetch_at(t0 + 1_800_000)
+      assert_received :network_call
+    end
+
+    # docs/oauth-usage-ratelimit.md: this endpoint sends `retry-after: 0` on a
+    # 429 whose bucket has not refilled — it is not an invitation to retry.
+    test "a Retry-After shorter than the default cooldown never shortens it" do
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited("0")
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      never_called()
+      assert {:error, {:backoff, 429}} = fetch_at(t0 + CloudProbe.interval_ms())
+    end
+
+    test "a Retry-After past the cap is capped" do
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited("86400")
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      never_called()
+      assert {:error, {:backoff, 429}} = fetch_at(t0 + OAuthUsage.max_cooldown_ms() - 1_000)
+
+      counting_ok()
+      assert {:ok, _usage} = fetch_at(t0 + OAuthUsage.max_cooldown_ms())
+      assert_received :network_call
+    end
+
+    test "a Retry-After that is not delay-seconds falls back to the default cooldown" do
+      t0 = System.monotonic_time(:millisecond)
+      rate_limited("Wed, 21 Oct 2026 07:28:00 GMT")
+      assert {:error, :rate_limited} = fetch_at(t0)
+
+      never_called()
+      assert {:error, {:backoff, 429}} = fetch_at(t0 + CloudProbe.interval_ms())
+
+      counting_ok()
+      assert {:ok, _usage} = fetch_at(t0 + OAuthUsage.cooldown_ms())
+      assert_received :network_call
+    end
+  end
+
+  describe "fetch/1 — 429 cooldown keyed by :provider_account_id (P6, §5 row 12)" do
+    setup do
+      on_exit(fn ->
+        OAuthUsage.reset_account_cooldown!("account-1")
+        OAuthUsage.reset_account_cooldown!("account-2")
+      end)
+
+      :ok
+    end
+
+    test "two different tokens on the same account share one cooldown window" do
+      Req.Test.stub(OAuthUsage.HTTP, fn conn -> Plug.Conn.send_resp(conn, 429, "") end)
+
+      assert {:error, :rate_limited} =
+               OAuthUsage.fetch(token: "credential-a", provider_account_id: "account-1")
+
+      # A stub that would blow up if called again — the second credential's
+      # request must never reach the network while the account is cooling
+      # down, proving the two credentials share one cooldown key.
+      Req.Test.stub(OAuthUsage.HTTP, fn _conn -> flunk("should not call the network again") end)
+
+      assert {:error, {:backoff, 429}} =
+               OAuthUsage.fetch(token: "credential-b", provider_account_id: "account-1")
+    end
+
+    test "two distinct accounts do not share a cooldown, even with the same token" do
+      Req.Test.stub(OAuthUsage.HTTP, fn conn -> Plug.Conn.send_resp(conn, 429, "") end)
+
+      assert {:error, :rate_limited} =
+               OAuthUsage.fetch(token: "shared-token", provider_account_id: "account-1")
+
+      test_pid = self()
+
+      Req.Test.stub(OAuthUsage.HTTP, fn conn ->
+        send(test_pid, :network_call)
+        Req.Test.json(conn, %{})
+      end)
+
+      assert {:ok, _usage} =
+               OAuthUsage.fetch(token: "shared-token", provider_account_id: "account-2")
+
+      assert_received :network_call
+    end
+  end
+
+  describe "fetch/1 — resets_at, representative_claim, overage_status, status synthesis" do
+    # A recorded shape of the real /api/oauth/usage body (2026-09-12), with no
+    # token values — see bd-3uwku6. `resets_at` timestamps are placeholders,
+    # overridden per-test below.
+    defp fixture(overrides) do
+      %{
+        "five_hour" => %{
+          "utilization" => 42,
+          "resets_at" => "2026-07-06T12:00:00Z",
+          "limit_dollars" => 140,
+          "used_dollars" => 58.8,
+          "remaining_dollars" => 81.2,
+          "locked_reason" => nil
+        },
+        "seven_day" => %{
+          "utilization" => 10,
+          "resets_at" => "2026-07-10T00:00:00Z",
+          "limit_dollars" => 1000,
+          "used_dollars" => 100,
+          "remaining_dollars" => 900,
+          "locked_reason" => nil
+        },
+        "seven_day_sonnet" => %{"utilization" => 55},
+        "seven_day_opus" => %{"utilization" => 5},
+        "seven_day_breakdown" => nil,
+        "seven_day_cowork" => nil,
+        "limits" => [
+          %{
+            "kind" => "session",
+            "group" => "session",
+            "percent" => 42,
+            "severity" => "normal",
+            "resets_at" => "2026-07-06T12:00:00Z",
+            "is_active" => true,
+            "scope" => "account"
+          },
+          %{
+            "kind" => "weekly_all",
+            "group" => "weekly",
+            "percent" => 10,
+            "severity" => "normal",
+            "resets_at" => "2026-07-10T00:00:00Z",
+            "is_active" => false,
+            "scope" => "account"
+          }
+        ],
+        "extra_usage" => %{
+          "is_enabled" => true,
+          "monthly_limit" => 2000,
+          "used_credits" => 66,
+          "utilization" => 3.3,
+          "currency" => "usd",
+          "decimal_places" => 2,
+          "disabled_reason" => nil,
+          "user_disabled" => false,
+          "spend_limit_reached" => false,
+          "credits_ever_enabled" => true,
+          "daily" => nil,
+          "weekly" => nil
+        },
+        "member_dashboard_available" => true
+      }
+      |> Map.merge(overrides)
+    end
+
+    defp fetch_fixture(overrides \\ %{}) do
+      stub(fn conn -> Req.Test.json(conn, fixture(overrides)) end)
+      assert {:ok, usage} = OAuthUsage.fetch(token: "test-token")
+      usage
+    end
+
+    test "parses reset_5h_at / reset_7d_at from resets_at, truncated to the second" do
+      usage = fetch_fixture()
+
+      assert usage.reset_5h_at == ~U[2026-07-06 12:00:00Z]
+      assert usage.reset_7d_at == ~U[2026-07-10 00:00:00Z]
+    end
+
+    test "representative_claim maps the active limits[] entry's group" do
+      usage = fetch_fixture()
+      assert usage.representative_claim == "five_hour"
+
+      usage =
+        fetch_fixture(%{
+          "limits" => [
+            %{"group" => "session", "is_active" => false},
+            %{"group" => "weekly", "is_active" => true}
+          ]
+        })
+
+      assert usage.representative_claim == "seven_day"
+    end
+
+    test "representative_claim is nil when no limits entry is active or limits is missing" do
+      usage =
+        fetch_fixture(%{
+          "limits" => [
+            %{"group" => "session", "is_active" => false},
+            %{"group" => "weekly", "is_active" => false}
+          ]
+        })
+
+      assert usage.representative_claim == nil
+
+      usage = fetch_fixture(%{"limits" => nil})
+      assert usage.representative_claim == nil
+    end
+
+    test "overage_status is allowed when extra_usage is enabled and not spend-capped" do
+      usage = fetch_fixture()
+      assert usage.overage_status == "allowed"
+    end
+
+    test "overage_status is rejected when extra_usage.is_enabled is false" do
+      usage =
+        fetch_fixture(%{
+          "extra_usage" => %{
+            "is_enabled" => false,
+            "user_disabled" => true,
+            "disabled_reason" => nil,
+            "spend_limit_reached" => false
+          }
+        })
+
+      assert usage.overage_status == "rejected"
+    end
+
+    test "overage_status is rejected when spend_limit_reached is true" do
+      usage =
+        fetch_fixture(%{
+          "extra_usage" => %{
+            "is_enabled" => true,
+            "spend_limit_reached" => true,
+            "disabled_reason" => nil
+          }
+        })
+
+      assert usage.overage_status == "rejected"
+    end
+
+    test "overage_status is rejected when disabled_reason is present" do
+      usage =
+        fetch_fixture(%{
+          "extra_usage" => %{
+            "is_enabled" => true,
+            "spend_limit_reached" => false,
+            "disabled_reason" => "fraud_review"
+          }
+        })
+
+      assert usage.overage_status == "rejected"
+    end
+
+    test "overage_status is nil when extra_usage is missing or not a map" do
+      usage = fetch_fixture(%{"extra_usage" => nil})
+      assert usage.overage_status == nil
+
+      usage = fetch_fixture(%{"extra_usage" => 12.5})
+      assert usage.overage_status == nil
+    end
+
+    test "status_5h / status_7d are rejected when utilization is >= 100" do
+      usage =
+        fetch_fixture(%{
+          "five_hour" => %{"utilization" => 100, "resets_at" => "2026-07-06T12:00:00Z"}
+        })
+
+      assert usage.status_5h == "rejected"
+    end
+
+    test "status_5h / status_7d are rejected when locked_reason is present, regardless of utilization" do
+      usage =
+        fetch_fixture(%{
+          "seven_day" => %{
+            "utilization" => 10,
+            "resets_at" => "2026-07-10T00:00:00Z",
+            "locked_reason" => "manual_review"
+          }
+        })
+
+      assert usage.status_7d == "rejected"
+    end
+
+    test "status is nil when the window sub-object is missing or utilization is absent" do
+      usage = fetch_fixture(%{"five_hour" => nil})
+      assert usage.status_5h == nil
+      assert usage.reset_5h_at == nil
+
+      usage = fetch_fixture(%{"seven_day" => %{"resets_at" => "2026-07-10T00:00:00Z"}})
+      assert usage.status_7d == nil
+    end
+
+    test "status_5h warns at the elapsed-fraction boundary (>= 0.90 util, <= 0.72 elapsed)" do
+      now = DateTime.utc_now()
+      window = 18_000
+
+      # elapsed_fraction ~ 0.71 (inside threshold) -> warn
+      inside_resets_at = DateTime.add(now, round(window * (1 - 0.71)), :second)
+
+      usage =
+        fetch_fixture(%{
+          "five_hour" => %{
+            "utilization" => 90,
+            "resets_at" => DateTime.to_iso8601(inside_resets_at)
+          }
+        })
+
+      assert usage.status_5h == "allowed_warning"
+
+      # elapsed_fraction ~ 0.73 (outside threshold) -> no warn
+      outside_resets_at = DateTime.add(now, round(window * (1 - 0.73)), :second)
+
+      usage =
+        fetch_fixture(%{
+          "five_hour" => %{
+            "utilization" => 90,
+            "resets_at" => DateTime.to_iso8601(outside_resets_at)
+          }
+        })
+
+      assert usage.status_5h == "allowed"
+    end
+
+    test "status_5h does not warn below the 0.90 utilization threshold" do
+      now = DateTime.utc_now()
+      window = 18_000
+      inside_resets_at = DateTime.add(now, round(window * (1 - 0.71)), :second)
+
+      usage =
+        fetch_fixture(%{
+          "five_hour" => %{
+            "utilization" => 89,
+            "resets_at" => DateTime.to_iso8601(inside_resets_at)
+          }
+        })
+
+      assert usage.status_5h == "allowed"
+    end
+
+    test "status_7d warns at each of its three threshold rows" do
+      now = DateTime.utc_now()
+      window = 604_800
+
+      for {util, elapsed_inside} <- [{75, 0.59}, {50, 0.34}, {25, 0.14}] do
+        resets_at = DateTime.add(now, round(window * (1 - elapsed_inside)), :second)
+
+        usage =
+          fetch_fixture(%{
+            "seven_day" => %{
+              "utilization" => util,
+              "resets_at" => DateTime.to_iso8601(resets_at)
+            }
+          })
+
+        assert usage.status_7d == "allowed_warning",
+               "expected warning at util=#{util} elapsed=#{elapsed_inside}"
+      end
+    end
+
+    test "status_7d does not warn once elapsed fraction passes each threshold row" do
+      now = DateTime.utc_now()
+      window = 604_800
+
+      for {util, elapsed_outside} <- [{75, 0.61}, {50, 0.36}, {25, 0.16}] do
+        resets_at = DateTime.add(now, round(window * (1 - elapsed_outside)), :second)
+
+        usage =
+          fetch_fixture(%{
+            "seven_day" => %{
+              "utilization" => util,
+              "resets_at" => DateTime.to_iso8601(resets_at)
+            }
+          })
+
+        assert usage.status_7d == "allowed",
+               "expected no warning at util=#{util} elapsed=#{elapsed_outside}"
+      end
+    end
+
+    test "member_dashboard_available and unmodeled null sub-objects don't raise" do
+      usage = fetch_fixture(%{"seven_day_breakdown" => nil, "member_dashboard_available" => nil})
+      assert usage.status_5h in [nil, "allowed", "allowed_warning", "rejected"]
+    end
+  end
+end
+
+defmodule Wardmast.Quota.OAuthUsageParseTest do
+  @moduledoc "`parse_usage/1` over the recorded live and legacy bodies (bd-6sxrud)."
+  use ExUnit.Case, async: true
+
+  import ExUnit.CaptureLog
+
+  alias Wardmast.Quota.OAuthUsage
+  alias Wardmast.Quota.OAuthUsageFixtures, as: Fixtures
+
+  describe "five_hour: null live shape" do
+    setup do: %{usage: OAuthUsage.parse_usage(Fixtures.five_hour_null())}
+
+    test "5h trio is nil, 7d comes from seven_day", %{usage: u} do
+      assert u.utilization_5h == nil
+      assert u.status_5h == nil
+      assert u.reset_5h_at == nil
+      assert u.utilization_7d == 0.61
+      assert u.reset_7d_at == ~U[2026-11-02 15:59:59Z]
+      assert u.status_7d == "allowed"
+    end
+
+    test "limits[] are parsed into windows", %{usage: u} do
+      assert [all, scoped] = u.limits
+
+      assert %{
+               kind: "weekly_all",
+               group: "weekly",
+               scope: nil,
+               percent: 0.61,
+               severity: "normal",
+               is_active: true,
+               resets_at: ~U[2026-11-02 15:59:59Z]
+             } = all
+
+      assert scoped.kind == "weekly_scoped"
+      assert scoped.percent == 0.0
+      assert scoped.is_active == false
+
+      assert scoped.scope == %{
+               "model" => %{"id" => nil, "display_name" => "Fable"},
+               "surface" => nil
+             }
+    end
+
+    test "spend is kept as the raw map", %{usage: u} do
+      assert u.spend == Fixtures.five_hour_null()["spend"]
+    end
+
+    test "weekly_all backs the 7d trio when seven_day is null" do
+      body = Map.put(Fixtures.five_hour_null(), "seven_day", nil)
+      u = OAuthUsage.parse_usage(body)
+      assert u.utilization_7d == 0.61
+      assert u.reset_7d_at == ~U[2026-11-02 15:59:59Z]
+      assert u.status_7d == "allowed"
+    end
+  end
+
+  describe "legacy shape" do
+    test "5h and 7d windows parse as before; spend is nil" do
+      u = OAuthUsage.parse_usage(Fixtures.legacy())
+      assert u.utilization_5h == 0.42
+      assert u.utilization_7d == 0.10
+      assert u.status_5h == "allowed"
+      assert u.spend == nil
+      assert Enum.map(u.limits, & &1.kind) == ["session", "weekly_all"]
+    end
+  end
+
+  describe "status_7d from severity" do
+    defp with_severity(sev) do
+      body = Fixtures.five_hour_null()
+
+      limits =
+        Enum.map(body["limits"], fn
+          %{"kind" => "weekly_all"} = l -> Map.put(l, "severity", sev)
+          l -> l
+        end)
+
+      OAuthUsage.parse_usage(%{body | "limits" => limits})
+    end
+
+    test "warning severity maps to allowed_warning" do
+      assert with_severity("warning").status_7d == "allowed_warning"
+    end
+
+    test "rejected severity maps to rejected" do
+      assert with_severity("rejected").status_7d == "rejected"
+    end
+
+    test "an unknown severity maps to allowed_warning and logs one warning" do
+      log = capture_log(fn -> assert with_severity("mauve").status_7d == "allowed_warning" end)
+      assert length(Regex.scan(~r/unknown limits\[\] severity/, log)) == 1
+      assert log =~ "mauve"
+    end
+
+    test "utilization >= 100% stays rejected even when severity says normal" do
+      body = Fixtures.five_hour_null()
+      body = %{body | "seven_day" => %{"utilization" => 100, "resets_at" => nil}}
+      assert OAuthUsage.parse_usage(body).status_7d == "rejected"
+    end
+
+    test "no severity falls back to the utilization-derived status" do
+      body = Map.put(Fixtures.legacy(), "limits", nil)
+      assert OAuthUsage.parse_usage(body).status_7d == "allowed"
+    end
+  end
+
+  test "a non-map body parses to the empty shape" do
+    u = OAuthUsage.parse_usage(nil)
+    assert u.limits == []
+    assert u.spend == nil
+  end
+end

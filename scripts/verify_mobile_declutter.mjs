@@ -3,8 +3,8 @@
 // bd-9inpfa — the Sessions list header and the Workspace detail page at
 // phone widths, in a real browser.
 //
-// `ArbiterWeb.CoreComponents.DomainTest`, `ArbiterWeb.SessionIndexLiveTest`
-// and `ArbiterWeb.WorkspaceConfigScreenTest` prove the markup carries the
+// `WardmastWeb.CoreComponents.DomainTest`, `WardmastWeb.SessionIndexLiveTest`
+// and `WardmastWeb.WorkspaceConfigScreenTest` prove the markup carries the
 // right responsive classes. None of them has a layout engine, so none can
 // prove the thing the acceptance criteria actually ask for: that the page
 // has no horizontal scroll at 375/414px, in light and dark, and that 1280px

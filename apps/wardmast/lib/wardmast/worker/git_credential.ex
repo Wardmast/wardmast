@@ -1,0 +1,1693 @@
+defmodule Wardmast.Worker.GitCredential do
+  @moduledoc """
+  Scoped git and tracker credentials (G16, bd-9cygoo;
+  `docs/design/guardrail-profiles.md` §5.5, §9): a worker pushes with a
+  credential that reaches **one repo**, never the operator's ssh-agent or keys,
+  and the tracker token it is given is scoped the same way. No worker is given a
+  token with the `gist` or `delete_repo` scope.
+
+  Setup is per repo, in the workspace config (see `docs/git-credentials.md`):
+
+      "git_credentials": {
+        "legacy_operator": false,
+        "repos": {
+          "tonic":  {"kind": "deploy_key", "key_secret": "TONIC_DEPLOY_KEY"},
+          "vstim":  {"kind": "github_app", "app_id": "123", "installation_id": "456",
+                     "private_key_secret": "ARBITER_APP_KEY"},
+          "infra":  {"kind": "token", "token_secret": "INFRA_TOKEN", "host": "gitlab.com",
+                     "username": "oauth2"},
+          "scratch": {"legacy_operator": true}
+        }
+      }
+
+  The secret names are keys of the workspace's encrypted `secrets` store.
+
+    * `deploy_key` — an SSH private key registered as a deploy key on that one
+      repo (GitHub and GitLab both bind a deploy key to a single repo).
+    * `github_app` — a GitHub App installed on the repo. At each dispatch
+      Wardmast mints an installation token restricted (`repositories`) to that
+      repo with only the permissions a worker needs.
+    * `token` — a fine-grained / project access token for one repo (GitHub or
+      GitLab). A classic GitHub PAT is refused: it cannot be limited to a repo.
+    * `gitlab_project_token` — GitLab, bd-3llb3y. A long-lived *parent* credential
+      (a personal access token, `api` scope, of a Maintainer/Owner of the project)
+      that never leaves the primary. At each spawn Wardmast uses it to mint a
+      project access token for that one project (`read_api` + `write_repository`,
+      role Developer, expiring in days), revokes it when the worker exits, and
+      hands the worker only the minted token: git push over https and the GitLab
+      API (`GITLAB_TOKEN`, so `glab` and `curl` work without the operator's session).
+
+    * `gitlab_bot_token` — GitLab **Free** tier, bd-8ufzng (project access tokens are a
+      Premium feature). The operator's *bot user* — Developer on the target projects
+      and nothing else — has a personal access token (`read_api`, `read_repository`,
+      `write_repository`, with an expiry); the entry names it as `secret`. It is
+      delivered as it is (no mint, no revoke), is **weaker** than the minted kinds
+      (not per run; a node holds it until its expiry) and is limited to the projects
+      by membership, so every dispatch checks it first (`GitlabBot.check/5`): the
+      PAT's scopes, an expiry, and `GET /projects?membership=true` against the
+      configured projects. Anything wider refuses the spawn.
+
+  ## When it is required
+
+  `plan/3` decides, per spawn. A spawn that needs push (an implementer; a
+  reviewer does not, and neither does a spawn the host pushes for) is **refused**
+  when no scoped credential is configured for its repo, unless the workspace (or
+  that repo) sets `legacy_operator: true`. There is no implicit fallback: a
+  workspace with no `git_credentials` block is refused too, and the refusal names
+  the opt-in. (`config :wardmast, :git_credential_unenforced, true` is a
+  test/development knob that restores the pre-G16 behaviour, `mode: :unenforced`,
+  for a workspace that is neither guarded nor configured; it is not set in a
+  release.)
+
+  ## Delivery
+
+    * **Deploy key** — written `0600` into a per-worker directory
+      (`stage/3`) and named by `GIT_SSH_COMMAND` (`-i <key> -o IdentitiesOnly=yes
+      -o IdentityAgent=none`), so neither the operator's agent nor their default
+      keys are offered. The agy jail binds nothing else and blanks the default
+      identities (`Wardmast.Worker.Jail`'s `:git_ssh_key`); podman gets it as a
+      `--secret` (`podman_secrets/2`).
+    * **Token** — in the worker's env (`ARB_GIT_TOKEN`; a podman `--secret` of
+      type env) and served by a git credential helper that answers **only for
+      the repo's own path** (`credential.useHttpPath`): a push to another repo
+      finds no credential and fails, whatever the token could reach.
+    * **Tracker** — `GH_TOKEN` for a `tracker_write` projection is the repo-scoped
+      token (a second, narrower App installation token, or the `token` kind's
+      own), not a binding's broad one.
+    * **A run on a remote node** (bd-akp9ae) — only a GitHub App's or a
+      `gitlab_project_token`'s short-lived token (or, opted in, a `gitlab_bot_token`'s PAT) goes, as a secret of the run spec
+      the node keeps on tmpfs (`remote_delivery/1`), and it is revoked when the
+      run's worker exits (`revoke/2`, `revoke_when_down/3`). A deploy key or a
+      static token never leaves the primary, nor does any long-lived value the
+      block names (a GitLab parent credential included), even one also exposed as a
+      worker env var (`withheld_values/1`).
+    * An ssh agent socket is never delivered (`SSH_AUTH_SOCK` stays unset).
+  """
+
+  alias Wardmast.Guardrails.Config, as: GuardrailsConfig
+  alias Wardmast.Messages.CoordinatorNotifier
+  alias Wardmast.Tasks.RepoConfig
+  alias Wardmast.Tasks.Workspace
+  alias Wardmast.Worker.GitCredential.GitlabBot
+  alias Wardmast.Worker.GitCredential.Material
+
+  require Logger
+
+  @kinds ~w(deploy_key token github_app gitlab_project_token gitlab_bot_token)
+  @remote_re ~r/\A[A-Za-z0-9_.-]+\/[A-Za-z0-9_.\/-]+\z/
+  @host_re ~r/\A[A-Za-z0-9.-]+\z/
+  @name_re ~r/\A[A-Za-z0-9_.:-]+\z/
+
+  @entry_keys ~w(kind key_secret token_secret private_key_secret parent_token_secret app_id
+                 installation_id host username remote api_url expires_in_days legacy_operator
+                 secret projects expires_at)
+
+  # GitLab project access tokens expire on a date (midnight UTC), so a token minted
+  # now with `expires_at` tomorrow could die within minutes. The default of 2 days
+  # guarantees more than 24h; the worker's exit revokes it long before.
+  @gitlab_default_days 2
+  @gitlab_max_days 7
+  # The role (30 = Developer) and scopes a worker's GitLab token is minted with:
+  # `read_api` reads pipelines, jobs and artifacts but cannot approve or merge (that
+  # is `api`), `write_repository` is git push/pull over https.
+  @gitlab_access_level 30
+  @gitlab_scopes ~w(read_api write_repository)
+  # bd-1vhect: a reviewer in a container reads MRs, pipelines and jobs, and pushes nothing.
+  @gitlab_read_scopes ~w(read_api)
+  @gitlab_read_access_level 20
+  # Kinds whose credential a container holds even when the host pushes for it
+  # (`plan/3`'s `:host_pushes?`): a GitLab project token is also the worker's API access, and
+  # both are short-lived and repo-pinned, so the container can `git fetch origin` over
+  # the https rewrite (`Material.env/2`) instead of failing on ssh with no key.
+  @container_kinds [:gitlab_project_token, :gitlab_bot_token, :github_app]
+  # On a remote node (`plan/3`'s `:remote_node?`) the host keeps the App's token: only the
+  # GitLab project token (the worker's API access) goes.
+  @remote_container_kinds [:gitlab_project_token, :gitlab_bot_token]
+  @block_keys ~w(legacy_operator repos)
+
+  defstruct mode: :unenforced, repo: nil, entry: nil, read_only: false
+
+  @type kind :: :deploy_key | :token | :github_app | :gitlab_project_token | :gitlab_bot_token
+  @type entry :: %{
+          required(:kind) => kind(),
+          optional(atom()) => term()
+        }
+  @type t :: %__MODULE__{
+          mode: :scoped | :legacy | :unenforced | :not_needed,
+          repo: String.t() | nil,
+          entry: entry() | nil,
+          read_only: boolean()
+        }
+
+  # ---- config -----------------------------------------------------------------
+
+  @doc "The workspace's `git_credentials` block (string keys), or `%{}`."
+  @spec block(map() | nil) :: map()
+  def block(%{config: %{} = config}), do: block_of(config)
+  def block(%{"config" => %{} = config}), do: block_of(config)
+  def block(_), do: %{}
+
+  defp block_of(config) do
+    case Map.get(config, "git_credentials") || Map.get(config, :git_credentials) do
+      %{} = block -> GuardrailsConfig.stringify(block)
+      _ -> %{}
+    end
+  end
+
+  @doc "True when the workspace config carries a non-empty `git_credentials` block."
+  @spec configured?(map() | nil) :: boolean()
+  def configured?(workspace), do: block(workspace) != %{}
+
+  @doc """
+  One line naming the credential a repo's pushes go out under — its
+  `git_credentials.repos.<repo>` entry, kind and secret name — for a message
+  that has to tell the coordinator what to roll back. `nil` when there is none.
+  """
+  @spec describe_credential(map() | nil, String.t() | nil) :: String.t() | nil
+  def describe_credential(workspace, repo) when is_binary(repo) do
+    case workspace |> block() |> Map.get("repos", %{}) |> map_or_empty() |> Map.get(repo) do
+      %{"kind" => kind} = entry when is_binary(kind) ->
+        detail =
+          case entry["secret"] do
+            secret when is_binary(secret) and secret != "" -> "#{kind}, secret #{secret}"
+            _ -> kind
+          end
+
+        "git_credentials.repos.#{repo} (#{detail})"
+
+      _ ->
+        nil
+    end
+  end
+
+  def describe_credential(_workspace, _repo), do: nil
+
+  defp map_or_empty(%{} = map), do: map
+  defp map_or_empty(_), do: %{}
+
+  @doc """
+  Whether a scoped credential is *required* for a spawn: always, except under the
+  `:git_credential_unenforced` test/development knob, where only a guarded install
+  or a workspace with a `git_credentials` block requires one.
+  """
+  @spec enforced?(map() | nil, boolean()) :: boolean()
+  def enforced?(workspace, guarded?) do
+    not Application.get_env(:wardmast, :git_credential_unenforced, false) or guarded? or
+      configured?(workspace)
+  end
+
+  @doc """
+  The credential decision for a spawn of `repo` in `workspace`.
+
+  Options: `:role` (`:implementer`, the default, or `:reviewer`), `:guarded?`
+  (the spawn's projection is guarded), `:host_pushes?` (the host pushes the
+  branch, so the worker needs no credential), `:remote_node?` (the run is placed on a remote
+  node, which is never handed a GitHub App token).
+
+  `{:error, {:git_credential_missing, repo, message}}` is the refusal.
+  """
+  @spec plan(map() | nil, String.t() | nil, keyword()) ::
+          {:ok, t()} | {:error, {:git_credential_missing, String.t() | nil, String.t()}}
+  def plan(workspace, repo, opts \\ []) do
+    block = block(workspace)
+    entry = repo_entry(block, repo)
+
+    cond do
+      # bd-1vhect: a reviewer in a container has no host `glab` session and was
+      # handed no forge credential at all. Where the repo has a GitLab project
+      # token, it gets a read-only one (`read_api`, Reporter): enough to read the
+      # MR description and pipelines, never to push or comment.
+      read_only_reviewer?(opts, entry) ->
+        {:ok, %__MODULE__{mode: :scoped, repo: repo, entry: parse_entry(entry), read_only: true}}
+
+      not_needed?(opts, entry) ->
+        {:ok, %__MODULE__{mode: :not_needed, repo: repo}}
+
+      scoped?(entry) ->
+        {:ok, %__MODULE__{mode: :scoped, repo: repo, entry: parse_entry(entry)}}
+
+      legacy?(block, entry) ->
+        {:ok, %__MODULE__{mode: :legacy, repo: repo}}
+
+      enforced?(workspace, Keyword.get(opts, :guarded?, false)) ->
+        {:error, {:git_credential_missing, repo, missing_message(repo)}}
+
+      true ->
+        {:ok, %__MODULE__{mode: :unenforced, repo: repo}}
+    end
+  end
+
+  defp read_only_reviewer?(opts, entry) do
+    Keyword.get(opts, :role, :implementer) == :reviewer and
+      Keyword.get(opts, :host_pushes?, false) and
+      match?(%{"kind" => "gitlab_project_token"}, entry)
+  end
+
+  defp not_needed?(opts, entry) do
+    Keyword.get(opts, :role, :implementer) == :reviewer or
+      (Keyword.get(opts, :host_pushes?, false) and
+         not container_credential?(entry, Keyword.get(opts, :remote_node?, false)))
+  end
+
+  @doc """
+  The kind of git credential registered for `repo` in `workspace`
+  (`:github_app`, `:deploy_key`, ...), or `nil` when none is.
+  """
+  @spec kind(map() | nil, String.t() | nil) :: kind() | nil
+  def kind(workspace, repo) do
+    case repo_entry(block(workspace), repo) do
+      %{"kind" => kind} when kind in @kinds -> String.to_existing_atom(kind)
+      _ -> nil
+    end
+  end
+
+  defp repo_entry(block, repo) when is_binary(repo) and repo != "" do
+    case block do
+      %{"repos" => %{} = repos} ->
+        case RepoConfig.find_entry(repos, repo) do
+          %{} = entry -> entry
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp repo_entry(_block, _repo), do: nil
+
+  defp scoped?(%{"kind" => kind}) when kind in @kinds, do: true
+  defp scoped?(_), do: false
+
+  defp container_credential?(%{"kind" => kind}, remote_node?) when is_binary(kind) do
+    kinds = if remote_node?, do: @remote_container_kinds, else: @container_kinds
+    Enum.any?(kinds, &(Atom.to_string(&1) == kind))
+  end
+
+  defp container_credential?(_, _remote_node?), do: false
+
+  # A repo entry's own `legacy_operator` (true or false) wins over the workspace's.
+  defp legacy?(_block, %{"legacy_operator" => value}) when is_boolean(value), do: value
+  defp legacy?(block, _entry), do: Map.get(block, "legacy_operator") == true
+
+  defp missing_message(repo) do
+    name = repo || "(no repo)"
+
+    "no scoped git credential is configured for repo #{name}, and a worker that pushes " <>
+      "must not run on the operator's ssh-agent or keys. Register a per-repo deploy key, " <>
+      "GitHub App or repo-scoped token under the workspace's config git_credentials.repos." <>
+      "#{name} (docs/git-credentials.md), or opt in to the operator's credential with " <>
+      "git_credentials.legacy_operator: true"
+  end
+
+  defp parse_entry(entry) do
+    gitlab? = entry["kind"] in ["gitlab_project_token", "gitlab_bot_token"]
+
+    %{
+      kind: String.to_existing_atom(entry["kind"]),
+      key_secret: entry["key_secret"],
+      token_secret: entry["token_secret"],
+      private_key_secret: entry["private_key_secret"],
+      parent_token_secret: entry["parent_token_secret"],
+      app_id: stringify_id(entry["app_id"]),
+      installation_id: stringify_id(entry["installation_id"]),
+      host: entry["host"] || if(gitlab?, do: "gitlab.com", else: "github.com"),
+      username: entry["username"] || if(gitlab?, do: "oauth2", else: "x-access-token"),
+      remote: entry["remote"],
+      api_url: entry["api_url"],
+      expires_in_days: entry["expires_in_days"] || @gitlab_default_days,
+      secret: entry["secret"],
+      projects: entry["projects"] || [],
+      expires_at: entry["expires_at"]
+    }
+  end
+
+  defp stringify_id(nil), do: nil
+  defp stringify_id(id), do: to_string(id)
+
+  # ---- validation ---------------------------------------------------------------
+
+  @doc "Validate a workspace `git_credentials` block (shape only; secrets are checked at dispatch)."
+  @spec validate(term()) :: :ok | {:error, String.t()}
+  def validate(%{} = block) do
+    block = GuardrailsConfig.stringify(block)
+
+    with :ok <- unknown_keys(block, @block_keys, "git_credentials"),
+         :ok <- boolean(block, "legacy_operator", "git_credentials"),
+         do: validate_repos(Map.get(block, "repos"))
+  end
+
+  def validate(_), do: {:error, "git_credentials must be a map"}
+
+  defp validate_repos(nil), do: :ok
+
+  defp validate_repos(%{} = repos) do
+    Enum.reduce_while(repos, :ok, fn {repo, entry}, :ok ->
+      case validate_entry(to_string(repo), entry) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp validate_repos(_), do: {:error, "git_credentials.repos must be a map"}
+
+  defp validate_entry(repo, %{} = entry) do
+    entry = GuardrailsConfig.stringify(entry)
+    where = "git_credentials.repos.#{repo}"
+
+    with :ok <- unknown_keys(entry, @entry_keys, where),
+         :ok <- boolean(entry, "legacy_operator", where),
+         :ok <- validate_kind(entry, where),
+         :ok <- optional_match(entry, "host", @host_re, where),
+         :ok <- optional_match(entry, "remote", @remote_re, where),
+         :ok <- optional_days(entry, where),
+         :ok <- optional_date(entry, "expires_at", where),
+         :ok <- optional_projects(entry, where),
+         do: optional_match(entry, "username", @name_re, where)
+  end
+
+  defp validate_entry(repo, _), do: {:error, "git_credentials.repos.#{repo} must be a map"}
+
+  defp validate_kind(entry, where) do
+    case Map.get(entry, "kind") do
+      nil ->
+        if map_size(Map.delete(entry, "legacy_operator")) == 0,
+          do: :ok,
+          else: {:error, "#{where}.kind is required (#{Enum.join(@kinds, ", ")})"}
+
+      "deploy_key" ->
+        require_names(entry, ["key_secret"], where)
+
+      "token" ->
+        require_names(entry, ["token_secret"], where)
+
+      "github_app" ->
+        require_names(entry, ["app_id", "installation_id", "private_key_secret"], where)
+
+      "gitlab_project_token" ->
+        require_names(entry, ["parent_token_secret"], where)
+
+      "gitlab_bot_token" ->
+        require_names(entry, ["secret"], where)
+
+      other ->
+        {:error, "#{where}.kind #{inspect(other)} must be one of #{Enum.join(@kinds, ", ")}"}
+    end
+  end
+
+  defp require_names(entry, keys, where) do
+    case Enum.find(keys, fn key -> blank?(Map.get(entry, key)) end) do
+      nil -> :ok
+      key -> {:error, "#{where}.#{key} is required for kind #{entry["kind"]}"}
+    end
+  end
+
+  defp blank?(value), do: value in [nil, ""]
+
+  defp unknown_keys(map, allowed, where) do
+    case Map.keys(map) -- allowed do
+      [] -> :ok
+      unknown -> {:error, "#{where} has unknown key(s): #{Enum.join(Enum.sort(unknown), ", ")}"}
+    end
+  end
+
+  defp boolean(map, key, where) do
+    case Map.get(map, key) do
+      nil -> :ok
+      value when is_boolean(value) -> :ok
+      _ -> {:error, "#{where}.#{key} must be a boolean"}
+    end
+  end
+
+  defp optional_match(map, key, re, where) do
+    case Map.get(map, key) do
+      nil -> :ok
+      value when is_binary(value) -> if value =~ re, do: :ok, else: bad(where, key)
+      _ -> bad(where, key)
+    end
+  end
+
+  defp bad(where, key), do: {:error, "#{where}.#{key} is not valid"}
+
+  defp optional_date(entry, key, where) do
+    with value when not is_nil(value) <- Map.get(entry, key),
+         true <- is_binary(value),
+         {:ok, _date} <- Date.from_iso8601(value) do
+      :ok
+    else
+      nil -> :ok
+      _ -> {:error, "#{where}.#{key} must be a date (YYYY-MM-DD)"}
+    end
+  end
+
+  defp optional_projects(entry, where) do
+    case Map.get(entry, "projects") do
+      nil ->
+        :ok
+
+      list when is_list(list) ->
+        if Enum.all?(list, &(is_binary(&1) and &1 =~ @remote_re)),
+          do: :ok,
+          else: {:error, "#{where}.projects must be a list of owner/repo project paths"}
+
+      _ ->
+        {:error, "#{where}.projects must be a list of owner/repo project paths"}
+    end
+  end
+
+  defp optional_days(entry, where) do
+    case Map.get(entry, "expires_in_days") do
+      nil ->
+        :ok
+
+      days when is_integer(days) and days >= 1 and days <= @gitlab_max_days ->
+        :ok
+
+      _ ->
+        {:error,
+         "#{where}.expires_in_days must be a whole number of days, 1 to #{@gitlab_max_days}"}
+    end
+  end
+
+  # ---- remotes ------------------------------------------------------------------
+
+  @doc """
+  The `owner/repo` path of a git remote URL (`git@host:o/r.git`,
+  `https://host/o/r`, `ssh://git@host/o/r.git`), or `:error`.
+  """
+  @spec parse_remote(String.t()) :: {:ok, String.t()} | :error
+  def parse_remote(url) when is_binary(url) do
+    path =
+      cond do
+        match?(
+          %URI{scheme: scheme} when scheme in ["http", "https", "ssh", "git"],
+          URI.parse(url)
+        ) ->
+          URI.parse(url).path
+
+        match?([_, _], Regex.run(~r/\A[^\/@]+@[^:\/]+:(.+)\z/, url)) ->
+          [_, path] = Regex.run(~r/\A[^\/@]+@[^:\/]+:(.+)\z/, url)
+          path
+
+        true ->
+          nil
+      end
+
+    with path when is_binary(path) <- path,
+         path = path |> String.trim("/") |> String.replace_suffix(".git", ""),
+         true <- path =~ @remote_re do
+      {:ok, path}
+    else
+      _ -> :error
+    end
+  end
+
+  def parse_remote(_), do: :error
+
+  # ---- materializing ---------------------------------------------------------------
+
+  @push_permissions %{
+    "contents" => "write",
+    "metadata" => "read",
+    "pull_requests" => "read",
+    "workflows" => "write"
+  }
+  @tracker_permissions %{
+    "contents" => "read",
+    "issues" => "write",
+    "metadata" => "read",
+    "pull_requests" => "write"
+  }
+  # The host's own token (`Wardmast.Worker.HostCredential`): it pushes the branch
+  # and opens, comments on and merges the PR, so it is one token with both sets.
+  # Still restricted to the one repo, and never held by a worker.
+  @host_permissions %{
+    "actions" => "write",
+    "contents" => "write",
+    "issues" => "write",
+    "metadata" => "read",
+    "pull_requests" => "write",
+    "workflows" => "write"
+  }
+  # The GitHub tracker's own token (bd-43sydg): issues and PR comments on the one
+  # tracker repo, nothing else (no contents, no actions).
+  @issue_tracker_permissions %{
+    "issues" => "write",
+    "metadata" => "read",
+    "pull_requests" => "write"
+  }
+  # Scopes that no worker may ever hold. A classic PAT cannot be limited to a
+  # repo at all, so any OAuth-scoped token is refused; these are the ones that do
+  # the most damage if one is ever allowed through.
+  @forbidden_scopes ~w(gist delete_repo)
+
+  @doc """
+  Resolve a `:scoped` plan to its secrets (`{:ok, nil}` for any other mode).
+
+  Options: `:remote` (the `owner/repo` the spawn's origin points at; the
+  entry's own `remote` wins), `:tracker?` (also produce `tracker_token`),
+  `:req_options` (merged into the forge requests; tests stub with `plug:`),
+  `:host?` (the token is the host's, for its push and PR operations: a github_app
+  token then carries the pull-request and merge permissions), `:tracker_only?`
+  (the token is the GitHub tracker's: a github_app token is minted for `:remote`
+  with issues:write, pull_requests:write and metadata:read only, bd-43sydg).
+
+  A secret that is not in the workspace's store, a token that cannot be pinned
+  to one repo, or a mint that fails is an error: the spawn is refused, never
+  run on the operator's credential.
+  """
+  @spec materialize(t(), map() | nil, keyword()) :: {:ok, Material.t() | nil} | {:error, term()}
+  def materialize(%__MODULE__{mode: :scoped, entry: entry} = plan, workspace, opts) do
+    case entry.kind do
+      :deploy_key -> materialize_key(entry, workspace)
+      :token -> materialize_token(entry, workspace, opts)
+      :github_app -> materialize_app(entry, workspace, opts)
+      :gitlab_project_token -> materialize_gitlab(entry, workspace, opts, plan.read_only)
+      :gitlab_bot_token -> materialize_gitlab_bot(entry, workspace, plan.repo, opts)
+    end
+  end
+
+  def materialize(%__MODULE__{}, _workspace, _opts), do: {:ok, nil}
+
+  defp materialize_key(entry, workspace) do
+    with {:ok, key} <- secret(workspace, entry.key_secret) do
+      {:ok, %Material{kind: :deploy_key, key: String.trim_trailing(key) <> "\n"}}
+    end
+  end
+
+  defp materialize_token(entry, workspace, opts) do
+    with {:ok, token} <- secret(workspace, entry.token_secret),
+         {:ok, remote} <- remote(entry, opts),
+         :ok <- check_token_scope(entry, token, opts) do
+      {:ok,
+       %Material{
+         kind: :token,
+         token: token,
+         tracker_token: if(Keyword.get(opts, :tracker?, false), do: token),
+         host: entry.host,
+         username: entry.username,
+         remote: remote
+       }}
+    end
+  end
+
+  defp materialize_app(entry, workspace, opts) do
+    with {:ok, pem} <- secret(workspace, entry.private_key_secret),
+         {:ok, remote} <- remote(entry, opts),
+         repo = remote |> String.split("/") |> List.last(),
+         {:ok, push} <- mint(entry, pem, repo, push_permissions(opts), opts),
+         {:ok, tracker} <- maybe_mint_tracker(entry, pem, repo, opts) do
+      {:ok,
+       %Material{
+         kind: :github_app,
+         token: push,
+         tracker_token: tracker,
+         host: entry.host,
+         username: "x-access-token",
+         remote: remote,
+         api_url: entry.api_url
+       }}
+    end
+  end
+
+  # The parent credential mints a project access token for this one project and
+  # stays here: the material keeps it only so the primary can revoke the token.
+  defp materialize_gitlab(entry, workspace, opts, read_only?) do
+    with {:ok, parent} <- secret(workspace, entry.parent_token_secret),
+         {:ok, remote} <- remote(entry, opts),
+         {:ok, %{id: id, token: token}} <- gitlab_mint(entry, parent, remote, opts, read_only?) do
+      {:ok,
+       %Material{
+         kind: :gitlab_project_token,
+         token: token,
+         token_id: id,
+         parent_token: parent,
+         read_only: read_only?,
+         host: entry.host,
+         username: entry.username,
+         remote: remote,
+         api_url: entry.api_url
+       }}
+    end
+  end
+
+  # bd-8ufzng: the operator's bot-user PAT is delivered as it is (nothing is minted
+  # or revoked), after the dispatch guard has checked its scopes, expiry and
+  # membership (`GitlabBot.check/5`). Any refusal means nothing is delivered.
+  defp materialize_gitlab_bot(entry, workspace, repo, opts) do
+    result =
+      with {:ok, token} <- secret(workspace, entry.secret),
+           {:ok, remote} <- remote(entry, opts),
+           :ok <-
+             GitlabBot.check(
+               entry,
+               token,
+               remote,
+               Map.get(block(workspace), "repos", %{}),
+               forge_req_options(opts)
+             ) do
+        {:ok,
+         %Material{
+           kind: :gitlab_bot_token,
+           token: token,
+           host: entry.host,
+           username: entry.username,
+           remote: remote,
+           api_url: entry.api_url
+         }}
+      end
+
+    note_bot_guard(workspace, repo, result)
+    result
+  end
+
+  # Issue #1270: the guard sits under every spawn, fix round and push of the repo, so
+  # its verdict is where the repo-level alert is kept. A refusal raises (or refreshes)
+  # the one alert for the repo; a pass clears it. Other failures (a missing secret, an
+  # unknown remote) are not the guard's and leave the alert alone.
+  defp note_bot_guard(%Workspace{id: ws_id}, repo, result) when is_binary(repo) do
+    case result do
+      {:ok, _material} ->
+        CoordinatorNotifier.git_credential_refused_cleared(ws_id, repo)
+
+      {:error, {tag, _} = reason}
+      when tag in [:git_credential_bot_token_refused, :git_credential_bot_token_unverifiable] ->
+        CoordinatorNotifier.git_credential_refused(ws_id, repo, format_error(reason))
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp note_bot_guard(_workspace, _repo, _result), do: :ok
+
+  @doc """
+  Whether `reason` (a spawn error, possibly wrapped by the callers that start a
+  session) is the `gitlab_bot_token` dispatch guard refusing the credential. Such a
+  refusal is the credential's, not the run's: nothing ran, and the same spawn works
+  once the credential does (issue #1270).
+  """
+  @spec bot_guard_refusal?(term()) :: boolean()
+  def bot_guard_refusal?({tag, inner}) when tag in [:worker_session_failed, :claude_start_failed],
+    do: bot_guard_refusal?(inner)
+
+  def bot_guard_refusal?({tag, _})
+      when tag in [:git_credential_bot_token_refused, :git_credential_bot_token_unverifiable],
+      do: true
+
+  def bot_guard_refusal?(_), do: false
+
+  @doc """
+  Whether `reason` is the guard being unable to *check* the bot token (timeout, transport,
+  5xx, 429) after its retries, as opposed to GitLab rejecting it. Nothing ran and the same
+  dispatch passes once GitLab answers, so the caller defers it (requeue / hold) rather than
+  failing the run (#1305).
+  """
+  @spec bot_guard_transient?(term()) :: boolean()
+  def bot_guard_transient?({tag, inner})
+      when tag in [:worker_session_failed, :claude_start_failed],
+      do: bot_guard_transient?(inner)
+
+  def bot_guard_transient?({:git_credential_bot_token_unverifiable, _}), do: true
+  def bot_guard_transient?(_), do: false
+
+  @doc """
+  Runs the `gitlab_bot_token` dispatch guard for `repo` without delivering anything
+  (issue #1270): `doctor`, `workspace_config_set` and the repo-level credential alert
+  ask what a dispatch would be told. `:ok` for a repo with no bot-token entry or one
+  the guard passes; `{:error, {:git_credential_bot_token_refused, _}}` /
+  `{:error, {:git_credential_bot_token_unverifiable, _}}` is what a dispatch would
+  refuse with. A missing secret is `{:error, {:git_credential_secret_missing, name}}`.
+
+  An entry with no `remote` (the spawn's origin names it) gets the token checks only
+  (scopes, expiry, readable): its membership is checked per spawn. Options as
+  `materialize/3` (`:remote`, `:req_options`).
+  """
+  @spec verify_bot_token(map() | nil, String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def verify_bot_token(workspace, repo, opts \\ []) do
+    case plan(workspace, repo, role: :implementer) do
+      {:ok, %__MODULE__{mode: :scoped, entry: %{kind: :gitlab_bot_token} = entry}} ->
+        with {:ok, token} <- secret(workspace, entry.secret) do
+          case remote(entry, opts) do
+            {:ok, remote} ->
+              repos = Map.get(block(workspace), "repos", %{})
+              GitlabBot.check(entry, token, remote, repos, forge_req_options(opts))
+
+            {:error, _} ->
+              GitlabBot.check_token(entry, token, forge_req_options(opts))
+          end
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp push_permissions(opts) do
+    cond do
+      Keyword.get(opts, :tracker_only?, false) -> @issue_tracker_permissions
+      Keyword.get(opts, :host?, false) -> @host_permissions
+      true -> @push_permissions
+    end
+  end
+
+  defp maybe_mint_tracker(entry, pem, repo, opts) do
+    if Keyword.get(opts, :tracker?, false),
+      do: mint(entry, pem, repo, @tracker_permissions, opts),
+      else: {:ok, nil}
+  end
+
+  defp secret(%Workspace{} = ws, name) when is_binary(name), do: stored(secret_store(ws), name)
+  defp secret(_workspace, name), do: {:error, {:git_credential_secret_missing, name}}
+
+  defp secret_store(%Workspace{} = ws),
+    do: Map.merge(Workspace.worker_env_map(ws), Workspace.secrets_map(ws))
+
+  defp secret_store(_workspace), do: %{}
+
+  defp stored(store, name) do
+    case Map.get(store, name) do
+      value when is_binary(value) and value != "" -> {:ok, value}
+      _ -> {:error, {:git_credential_secret_missing, name}}
+    end
+  end
+
+  # A token is pinned to the repo the spawn's origin names (or the entry's own
+  # `remote`); without one the helper could not refuse another repo.
+  # The GitHub tracker's token is pinned to the tracker's own repo, which the
+  # caller names and which may not be the entry's code repo (`:tracker_only?`).
+  defp remote(entry, opts) do
+    named = Keyword.get(opts, :remote)
+    pinned = if Keyword.get(opts, :tracker_only?, false), do: named
+
+    case pinned || entry.remote || named do
+      remote when is_binary(remote) and remote != "" -> {:ok, remote}
+      _ -> {:error, :git_credential_remote_unknown}
+    end
+  end
+
+  @doc "The `owner/repo` of the `origin` remote of the checkout at `path`, or `nil`."
+  @spec origin_remote(Path.t() | nil) :: String.t() | nil
+  def origin_remote(path) when is_binary(path) do
+    case System.cmd("git", ["-C", path, "config", "--get", "remote.origin.url"],
+           stderr_to_stdout: true
+         ) do
+      {url, 0} ->
+        case parse_remote(String.trim(url)) do
+          {:ok, remote} -> remote
+          :error -> nil
+        end
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  def origin_remote(_), do: nil
+
+  # ---- GitHub App ------------------------------------------------------------------
+
+  # `workflows: write` is requested wherever a token pushes, since GitHub refuses
+  # any push touching `.github/workflows/*` without it. An installation that was
+  # never granted it answers 422 "permissions requested are not granted"; retry
+  # once without it rather than failing every push, and say so loudly.
+  defp mint(entry, pem, repo, permissions, opts) do
+    case do_mint(entry, pem, repo, permissions, opts) do
+      {:error, {:git_credential_mint_failed, 422, message}} = error ->
+        if Map.has_key?(permissions, "workflows") and not_granted?(message) do
+          Logger.warning(
+            "GitCredential: the GitHub App installation #{entry.installation_id} was not granted " <>
+              "`workflows: write` (#{message}); minting without it. Pushes that change " <>
+              ".github/workflows/* will be refused until the App has Workflows read & write and " <>
+              "the installation owner accepts the new permissions."
+          )
+
+          do_mint(entry, pem, repo, Map.delete(permissions, "workflows"), opts)
+        else
+          error
+        end
+
+      other ->
+        other
+    end
+  end
+
+  defp not_granted?(message), do: String.contains?(String.downcase(message), "not granted")
+
+  defp do_mint(entry, pem, repo, permissions, opts) do
+    with {:ok, jwt} <- app_jwt(entry.app_id, pem) do
+      base = entry.api_url || "https://api.github.com"
+
+      request =
+        Keyword.merge(
+          [
+            url: "#{base}/app/installations/#{entry.installation_id}/access_tokens",
+            json: %{"repositories" => [repo], "permissions" => permissions},
+            headers: [
+              {"authorization", "Bearer " <> jwt},
+              {"accept", "application/vnd.github+json"},
+              {"x-github-api-version", "2022-11-28"}
+            ],
+            retry: false,
+            receive_timeout: 15_000
+          ],
+          forge_req_options(opts)
+        )
+
+      case Req.post(request) do
+        {:ok, %Req.Response{status: 201, body: %{"token" => token}}} when is_binary(token) ->
+          {:ok, token}
+
+        {:ok, %Req.Response{status: status, body: body}} ->
+          {:error, {:git_credential_mint_failed, status, message_of(body)}}
+
+        {:error, exception} ->
+          {:error, {:git_credential_mint_failed, :transport, Exception.message(exception)}}
+      end
+    end
+  end
+
+  defp message_of(%{"message" => message}) when is_binary(message), do: message
+  defp message_of(%{"error" => message}) when is_binary(message), do: message
+  defp message_of(_), do: "no message"
+
+  # ---- GitLab project access token ---------------------------------------------------
+
+  # `POST /projects/:id/access_tokens`, authenticated by the parent personal access
+  # token (GitLab refuses a project access token here). The project id is the
+  # URL-encoded path. What comes back is checked against what was asked: a token
+  # with more scopes or a higher role than a worker's is revoked at once and the
+  # spawn refused, so a forge that widens a request never hands a worker more.
+  defp gitlab_mint(entry, parent, remote, opts, read_only?) do
+    {scopes, level} =
+      if read_only?,
+        do: {@gitlab_read_scopes, @gitlab_read_access_level},
+        else: {@gitlab_scopes, @gitlab_access_level}
+
+    today = Date.utc_today()
+    days = entry.expires_in_days
+
+    request =
+      Keyword.merge(
+        [
+          url: "#{gitlab_api(entry)}/projects/#{gitlab_project(remote)}/access_tokens",
+          json: %{
+            "name" => "arbiter-run-#{System.unique_integer([:positive])}",
+            "scopes" => scopes,
+            "access_level" => level,
+            "expires_at" => today |> Date.add(days) |> Date.to_iso8601()
+          },
+          headers: [{"private-token", parent}],
+          retry: false,
+          receive_timeout: 15_000
+        ],
+        forge_req_options(opts)
+      )
+
+    case Req.post(request) do
+      {:ok, %Req.Response{status: 201, body: %{"token" => token, "id" => id} = body}}
+      when is_binary(token) and is_integer(id) ->
+        if gitlab_grant_ok?(body, scopes, level) do
+          {:ok, %{id: id, token: token}}
+        else
+          _ = gitlab_revoke_token(gitlab_api(entry), remote, id, parent, opts)
+
+          {:error,
+           {:git_credential_mint_failed, :too_broad,
+            "GitLab granted scopes #{inspect(body["scopes"])} at role #{inspect(body["access_level"])}, " <>
+              "not #{inspect(scopes)} at #{level}"}}
+        end
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, {:git_credential_mint_failed, status, message_of(body)}}
+
+      {:error, exception} ->
+        message = String.replace(Exception.message(exception), parent, "[redacted]")
+        {:error, {:git_credential_mint_failed, :transport, message}}
+    end
+  end
+
+  defp gitlab_grant_ok?(%{"scopes" => granted, "access_level" => level}, scopes, level)
+       when is_list(granted),
+       do: Enum.sort(granted) == Enum.sort(scopes)
+
+  defp gitlab_grant_ok?(_, _, _), do: false
+
+  defp gitlab_project(remote), do: URI.encode_www_form(remote)
+
+  # `api_url` is the REST base (`https://gitlab.example.com/api/v4`); the default
+  # follows `host`.
+  defp gitlab_api(%{api_url: url}) when is_binary(url) and url != "",
+    do: String.trim_trailing(url, "/")
+
+  defp gitlab_api(%{host: host}), do: "https://#{host}/api/v4"
+
+  # `DELETE /projects/:id/access_tokens/:token_id`, with the parent credential. A
+  # token already gone (404) is revoked.
+  defp gitlab_revoke_token(api, remote, id, parent, opts) do
+    request =
+      Keyword.merge(
+        [
+          url: "#{api}/projects/#{gitlab_project(remote)}/access_tokens/#{id}",
+          headers: [{"private-token", parent}],
+          retry: false,
+          receive_timeout: 15_000
+        ],
+        forge_req_options(opts)
+      )
+
+    case Req.delete(request) do
+      {:ok, %Req.Response{status: status}} when status in [204, 404] ->
+        :ok
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:git_credential_revoke_failed, status}}
+
+      {:error, exception} ->
+        message = String.replace(Exception.message(exception), parent, "[redacted]")
+        {:error, {:git_credential_revoke_failed, {:transport, message}}}
+    end
+  end
+
+  defp app_jwt(app_id, pem) do
+    now = System.system_time(:second)
+
+    header = %{"alg" => "RS256", "typ" => "JWT"}
+    claims = %{"iat" => now - 60, "exp" => now + 540, "iss" => app_id}
+    signing_input = b64(Jason.encode!(header)) <> "." <> b64(Jason.encode!(claims))
+
+    with {:ok, key} <- private_key(pem) do
+      signature = :public_key.sign(signing_input, :sha256, key)
+      {:ok, signing_input <> "." <> b64(signature)}
+    end
+  end
+
+  defp private_key(pem) do
+    case :public_key.pem_decode(pem) do
+      [entry | _] -> {:ok, :public_key.pem_entry_decode(entry)}
+      _ -> {:error, {:git_credential_bad_key, :not_pem}}
+    end
+  rescue
+    _ -> {:error, {:git_credential_bad_key, :undecodable}}
+  end
+
+  defp b64(data), do: Base.url_encode64(data, padding: false)
+
+  # Merged into every forge request: the caller's `:req_options`, else
+  # `config :wardmast, :git_credential_req_options` (a spawn passes none; tests stub
+  # with `plug:`).
+  defp forge_req_options(opts) do
+    Keyword.get_lazy(opts, :req_options, fn ->
+      Application.get_env(:wardmast, :git_credential_req_options, [])
+    end)
+  end
+
+  # ---- revoking ----------------------------------------------------------------------
+
+  @doc """
+  Revoke the GitHub App installation tokens `material` carries (`token`, and the
+  `tracker_token` when there is one) with `DELETE /installation/token`, each
+  authenticated by itself (bd-akp9ae). A token that left the primary with a run
+  placed on a node is revoked when the run ends (`revoke_when_down/3`), so a copy
+  taken off the node is dead then, not at the end of its hour. A token GitHub
+  already refuses (401: expired or revoked) counts as revoked. Anything but an App
+  material is `:ok` with nothing sent: a deploy key or a static token never leaves
+  the primary.
+
+  An error names the status, never the token. Options: `:req_options` (else
+  `config :wardmast, :git_credential_req_options`).
+  """
+  @spec revoke(Material.t() | nil, keyword()) :: :ok | {:error, term()}
+  def revoke(material, opts \\ [])
+
+  def revoke(%Material{kind: :github_app} = material, opts) do
+    material
+    |> app_tokens()
+    |> Enum.map(&revoke_token(&1, material.api_url, opts))
+    |> Enum.find(:ok, &(&1 != :ok))
+  end
+
+  def revoke(%Material{kind: :gitlab_project_token, token_id: id, parent_token: parent} = m, opts)
+      when is_integer(id) and is_binary(parent),
+      do: gitlab_revoke_token(gitlab_api(m), m.remote, id, parent, opts)
+
+  def revoke(_material, _opts), do: :ok
+
+  defp app_tokens(%Material{token: token, tracker_token: tracker}),
+    do: Enum.filter([token, tracker], &(is_binary(&1) and &1 != ""))
+
+  defp revoke_token(token, api_url, opts) do
+    request =
+      Keyword.merge(
+        [
+          url: "#{api_url || "https://api.github.com"}/installation/token",
+          headers: [
+            {"authorization", "Bearer " <> token},
+            {"accept", "application/vnd.github+json"},
+            {"x-github-api-version", "2022-11-28"}
+          ],
+          retry: false,
+          receive_timeout: 15_000
+        ],
+        forge_req_options(opts)
+      )
+
+    case Req.delete(request) do
+      {:ok, %Req.Response{status: status}} when status in [204, 401] ->
+        :ok
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:git_credential_revoke_failed, status}}
+
+      {:error, exception} ->
+        message = String.replace(Exception.message(exception), token, "[redacted]")
+        {:error, {:git_credential_revoke_failed, {:transport, message}}}
+    end
+  end
+
+  @doc """
+  `revoke/2` once `owner` exits, however it exits: the hook a spawn arms when it
+  takes an App token off the primary (bd-akp9ae) or mints a GitLab project token
+  (bd-3llb3y), so the token dies with the run. A revoke that fails is logged (never
+  the token); the token then still expires (an App's within the hour, a GitLab
+  project token on its `expires_at` date). Any other material arms nothing.
+
+  `:max_ms` also revokes that long after arming even if `owner` lives on: for a
+  token only a short step needs (the host's push).
+  """
+  @spec revoke_when_down(pid(), Material.t() | nil, keyword()) :: :ok
+  def revoke_when_down(owner, %Material{kind: kind} = material, opts)
+      when is_pid(owner) and kind in [:github_app, :gitlab_project_token] do
+    max_ms = Keyword.get(opts, :max_ms, :infinity)
+
+    {:ok, _pid} =
+      Task.start(fn ->
+        ref = Process.monitor(owner)
+
+        receive do
+          {:DOWN, ^ref, :process, _, _} -> log_revoke(revoke(material, opts), material)
+        after
+          max_ms -> log_revoke(revoke(material, opts), material)
+        end
+      end)
+
+    :ok
+  end
+
+  def revoke_when_down(_owner, _material, _opts), do: :ok
+
+  defp log_revoke(:ok, _material), do: :ok
+
+  defp log_revoke({:error, reason}, material) do
+    Logger.warning(
+      "GitCredential: could not revoke the #{kind_name(material)} token for #{material.remote}: " <>
+        "#{inspect(reason)}; it expires on its own"
+    )
+  end
+
+  defp kind_name(%Material{kind: :gitlab_project_token}), do: "GitLab project access"
+  defp kind_name(%Material{}), do: "GitHub App"
+
+  # ---- static-token scope check ---------------------------------------------------
+
+  # A classic PAT answers `GET /user` with an `X-OAuth-Scopes` header; a
+  # fine-grained token or an App installation token has none. Classic PATs reach
+  # every repo their owner does (and may carry `gist` / `delete_repo`), so they
+  # are refused. A token whose scope cannot be verified (the API is unreachable, or
+  # answers anything but 2xx) is refused too: the check fails closed.
+  defp check_token_scope(%{host: "github.com"} = entry, token, opts) do
+    request =
+      Keyword.merge(
+        [
+          url: "#{entry.api_url || "https://api.github.com"}/user",
+          headers: [
+            {"authorization", "Bearer " <> token},
+            {"accept", "application/vnd.github+json"}
+          ],
+          retry: false,
+          receive_timeout: 10_000
+        ],
+        forge_req_options(opts)
+      )
+
+    case Req.get(request) do
+      {:ok, %Req.Response{status: status} = response} when status in 200..299 ->
+        case Req.Response.get_header(response, "x-oauth-scopes") do
+          [] -> :ok
+          [scopes | _] -> {:error, {:git_credential_token_too_broad, split_scopes(scopes)}}
+        end
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:git_credential_token_unverifiable, "HTTP #{status}"}}
+
+      {:error, exception} ->
+        Logger.warning(
+          "GitCredential: could not check the scopes of the #{entry.token_secret} token: " <>
+            Exception.message(exception)
+        )
+
+        {:error, {:git_credential_token_unverifiable, Exception.message(exception)}}
+    end
+  end
+
+  defp check_token_scope(_entry, _token, _opts), do: :ok
+
+  defp split_scopes(scopes),
+    do: scopes |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+
+  @doc "The scopes no worker credential may carry."
+  @spec forbidden_scopes() :: [String.t()]
+  def forbidden_scopes, do: @forbidden_scopes
+
+  @doc "Human text for a `plan/3` or `materialize/3` refusal reason."
+  @spec format_error(term()) :: String.t()
+  def format_error({:git_credential_missing, _repo, message}), do: message
+
+  def format_error({:git_credential_secret_missing, name}),
+    do:
+      "the scoped git credential names the workspace secret #{inspect(name)}, which is not set; " <>
+        "refusing to fall back to the operator's credential"
+
+  def format_error(:git_credential_remote_unknown),
+    do:
+      "cannot tell which repo the scoped git credential is for (no github/gitlab origin remote and " <>
+        "no git_credentials.repos.<repo>.remote); refusing to issue an unpinned token"
+
+  def format_error({:git_credential_mint_failed, :too_broad, message}),
+    do: "the GitLab project access token was refused (and revoked): #{message}"
+
+  def format_error({:git_credential_mint_failed, status, message}),
+    do: "minting the repo-scoped git token failed (#{status}): #{message}"
+
+  def format_error({:git_credential_bot_token_refused, reason}),
+    do: "the GitLab bot token was refused: " <> bot_refusal(reason)
+
+  def format_error({:git_credential_bot_token_unverifiable, why}),
+    do:
+      "the GitLab bot token could not be verified (#{why}); retrying. Nothing is delivered " <>
+        "until it can be checked, and the operator's credential is never used instead"
+
+  def format_error({:git_credential_token_too_broad, scopes}),
+    do:
+      "the configured token is a classic personal access token (scopes: " <>
+        "#{Enum.join(scopes, ", ")}) and cannot be limited to one repo; use a fine-grained " <>
+        "token, a GitHub App or a deploy key"
+
+  def format_error({:git_credential_token_unverifiable, why}),
+    do:
+      "the configured token's scope could not be verified (#{why}); refusing to fall back to " <>
+        "an unchecked token or the operator's credential"
+
+  def format_error({:git_credential_bad_key, why}),
+    do: "the GitHub App private key could not be read (#{why})"
+
+  def format_error({:git_credential_stage_failed, reason}),
+    do: "could not stage the scoped git credential: #{inspect(reason)}"
+
+  def format_error(other), do: "scoped git credential unavailable: #{inspect(other)}"
+
+  defp bot_refusal({:rejected, status}),
+    do:
+      "GitLab rejected the token (HTTP #{status}); it is revoked, expired or lacks access. " <>
+        "Fix the credential; nothing is delivered and the operator credential is not used"
+
+  defp bot_refusal({:scopes, extra}),
+    do:
+      "it carries scope(s) #{Enum.join(extra, ", ")}; only " <>
+        "#{Enum.join(GitlabBot.allowed_scopes(), ", ")} are allowed (never api or sudo)"
+
+  defp bot_refusal(:no_expiry),
+    do: "it has no expiry; give the personal access token an expiry date"
+
+  defp bot_refusal(:expired), do: "it has expired; issue the bot user a new personal access token"
+
+  defp bot_refusal(:inactive), do: "it is revoked or inactive"
+
+  defp bot_refusal({:membership, extra}),
+    do:
+      "the bot user is a member of project(s) beyond the configured ones " <>
+        "(#{Enum.join(extra, ", ")}); remove that membership, or list them under " <>
+        "git_credentials.repos.<repo>.projects. Bot membership must be exactly the configured projects"
+
+  defp bot_refusal({:resources, extra}),
+    do:
+      "the fine-grained token reaches project(s) beyond the configured ones " <>
+        "(#{Enum.join(extra, ", ")}); remove them from the token's resources, or list them under " <>
+        "git_credentials.repos.<repo>.projects. The token's resources must be exactly the configured projects"
+
+  defp bot_refusal({:granular_permissions, extra}),
+    do:
+      "the fine-grained token carries permission(s) #{Enum.join(extra, ", ")}; only " <>
+        "#{Enum.join(GitlabBot.allowed_granular_permissions(), ", ")} are allowed"
+
+  defp bot_refusal({:granular_boundary, wide}),
+    do:
+      "the fine-grained token is not limited to a list of projects (#{Enum.join(wide, "; ")}); " <>
+        "select the individual projects as its resources"
+
+  defp bot_refusal(:not_reachable),
+    do: "the fine-grained token's resources do not include this repo's project"
+
+  defp bot_refusal(:not_a_member),
+    do:
+      "the bot user is not a member of this repo's project (membership is what scopes the token)"
+
+  # ---- staging & delivery -----------------------------------------------------------
+
+  @doc """
+  The directory deploy keys are staged in, under the scratch root. Every jail blanks
+  it (`Wardmast.Worker.Jail.mask_paths/0`) and binds back only its own key, so a
+  sibling worker's key is unreadable; it has to exist by then, because a read-only
+  bind of `/` shows a directory created after the jail started.
+  """
+  @spec default_dir() :: Path.t()
+  def default_dir, do: Path.join(Wardmast.Config.Paths.scratch_root(), "git-key")
+
+  @doc "Creates (`0700`) and returns `default_dir/0`."
+  @spec ensure_default_dir() :: Path.t()
+  def ensure_default_dir do
+    dir = default_dir()
+    _ = File.mkdir_p(dir)
+    _ = File.chmod(dir, 0o700)
+    dir
+  end
+
+  @doc """
+  Writes the material's key (if it has one) for the worker `owner` and returns
+  `%{dir:, key_path:, env:}`. The file is `0600` in a `0700` directory under the
+  `default_dir/0` (`:root` overrides it); the directory is removed when `owner` exits. Idempotent per owner: a resume or a second
+  caller (the agy jail, then the session) gets the same path.
+  """
+  @spec stage(Material.t() | nil, pid(), keyword()) ::
+          {:ok, %{dir: Path.t() | nil, key_path: Path.t() | nil, env: [{String.t(), String.t()}]}}
+          | {:error, term()}
+  def stage(nil, _owner, _opts), do: {:ok, %{dir: nil, key_path: nil, env: []}}
+
+  # The OS pid of the server that staged the key, so `sweep_orphans/1` can tell a
+  # dead server's leftovers from a live worker's key.
+  @server_marker ".server"
+
+  def stage(%Material{kind: :deploy_key, key: key} = material, owner, opts) do
+    root = Keyword.get(opts, :root) || ensure_default_dir()
+    hash = :crypto.hash(:sha256, :erlang.term_to_binary(owner))
+    name = "git-key-" <> Base.encode32(binary_part(hash, 0, 8), case: :lower, padding: false)
+    dir = Path.join(root, name)
+    path = Path.join(dir, "key")
+
+    with :ok <- File.mkdir_p(dir),
+         :ok <- File.chmod(dir, 0o700),
+         :ok <- File.write(path, key),
+         :ok <- File.chmod(path, 0o600),
+         :ok <- File.write(Path.join(dir, @server_marker), System.pid()) do
+      remove_when_down(owner, dir)
+      {:ok, %{dir: dir, key_path: path, env: Material.env(material, path)}}
+    else
+      {:error, reason} -> {:error, {:git_credential_stage_failed, reason}}
+    end
+  end
+
+  def stage(%Material{} = material, _owner, _opts),
+    do: {:ok, %{dir: nil, key_path: nil, env: Material.env(material, nil)}}
+
+  # A worker killed without cleaning up must not leave its key on disk: this
+  # outlives nothing but the server (leftovers of a dead server go at the next
+  # stage, `sweep/1`).
+  defp remove_when_down(owner, dir) when is_pid(owner) do
+    {:ok, _pid} =
+      Task.start(fn ->
+        ref = Process.monitor(owner)
+
+        receive do
+          {:DOWN, ^ref, :process, _, _} -> File.rm_rf(dir)
+        end
+      end)
+
+    :ok
+  end
+
+  defp remove_when_down(_owner, _dir), do: :ok
+
+  @doc """
+  Removes staged keys older than `:max_age_ms` (default a day): what a server that
+  died left behind. Run at boot.
+  """
+  @spec sweep(keyword()) :: [Path.t()]
+  def sweep(opts \\ []) do
+    root = Keyword.get(opts, :root) || default_dir()
+    cutoff = System.os_time(:second) - div(Keyword.get(opts, :max_age_ms, 86_400_000), 1000)
+
+    case File.ls(root) do
+      {:ok, entries} ->
+        stale =
+          entries
+          |> Enum.map(&Path.join(root, &1))
+          |> Enum.filter(fn dir ->
+            match?(
+              {:ok, %File.Stat{mtime: mtime}} when mtime < cutoff,
+              File.stat(dir, time: :posix)
+            )
+          end)
+
+        Enum.each(stale, &File.rm_rf/1)
+        stale
+
+      _ ->
+        []
+    end
+  end
+
+  @doc """
+  Removes the staged key directories whose server is gone: those whose `.server`
+  marker names an OS pid that is no longer running. Safe to run while workers are
+  live (a supervisor restart of the reaper): a live server's keys are never touched.
+  A directory with no marker falls back to the `sweep/1` age cutoff (`:max_age_ms`,
+  default a day). Where `/proc` is not available a marker's pid is assumed alive.
+  """
+  @spec sweep_orphans(keyword()) :: [Path.t()]
+  def sweep_orphans(opts \\ []) do
+    root = Keyword.get(opts, :root) || default_dir()
+    cutoff = System.os_time(:second) - div(Keyword.get(opts, :max_age_ms, 86_400_000), 1000)
+    alive? = Keyword.get(opts, :alive?, &os_pid_alive?/1)
+
+    case File.ls(root) do
+      {:ok, entries} ->
+        orphans =
+          entries
+          |> Enum.map(&Path.join(root, &1))
+          |> Enum.filter(&orphan_dir?(&1, cutoff, alive?))
+
+        Enum.each(orphans, &File.rm_rf/1)
+        orphans
+
+      _ ->
+        []
+    end
+  end
+
+  defp orphan_dir?(dir, cutoff, alive?) do
+    case File.read(Path.join(dir, @server_marker)) do
+      {:ok, pid} ->
+        not alive?.(String.trim(pid))
+
+      {:error, _} ->
+        match?({:ok, %File.Stat{mtime: m}} when m < cutoff, File.stat(dir, time: :posix))
+    end
+  end
+
+  defp os_pid_alive?(pid) do
+    cond do
+      pid == System.pid() -> true
+      not File.dir?("/proc") -> true
+      true -> File.dir?(Path.join("/proc", pid))
+    end
+  end
+
+  @key_options "-o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes"
+
+  @doc "The ssh options that offer exactly the key at `key_path` and no agent."
+  @spec ssh_options(Path.t()) :: String.t()
+  def ssh_options(key_path), do: "-i #{shell_quote(key_path)} #{@key_options}"
+
+  @doc """
+  The `GIT_SSH_COMMAND` for a deploy key at `key_path` where no jail composes it
+  (`-F /dev/null`: a `Host` block's `IdentityFile` cannot add the operator's key).
+  """
+  @spec ssh_command(Path.t()) :: String.t()
+  def ssh_command(key_path), do: "ssh -F /dev/null " <> ssh_options(key_path)
+
+  defp shell_quote(path) do
+    if path =~ ~r/\A[A-Za-z0-9_\/.@:+=,-]+\z/,
+      do: path,
+      else: "'" <> String.replace(path, "'", "'\\''") <> "'"
+  end
+
+  @podman_key_name "arb_git_key"
+
+  @doc "Where a deploy key's podman secret appears inside the container."
+  @spec podman_key_path() :: String.t()
+  def podman_key_path, do: "/run/secrets/" <> @podman_key_name
+
+  @doc """
+  The podman secrets that carry `material` into a container (`--secret`), named
+  from `prefix` (the container name): a deploy key as a mounted file, a token as
+  an env var. Value-bearing; create them with `podman secret create` and remove
+  them with the container.
+  """
+  @spec podman_secrets(Material.t() | nil, String.t()) :: [map()]
+  def podman_secrets(nil, _prefix), do: []
+
+  def podman_secrets(%Material{kind: :deploy_key, key: key}, prefix),
+    do: [%{name: prefix <> "-git-key", type: :mount, target: @podman_key_name, value: key}]
+
+  # bd-1vhect: a read-only (reviewer) token is the API credential and nothing
+  # else; it is not offered to git, so no `ARB_GIT_TOKEN`.
+  def podman_secrets(
+        %Material{kind: :gitlab_project_token, read_only: true, token: token},
+        prefix
+      )
+      when is_binary(token) do
+    [%{name: prefix <> "-git-api-token", type: :env, target: "GITLAB_TOKEN", value: token}]
+  end
+
+  # A GitLab project or bot token is also the worker's API credential: a second secret of
+  # the same value, under the name `glab` and `curl` scripts read.
+  def podman_secrets(%Material{kind: kind, token: token}, prefix)
+      when kind in [:gitlab_project_token, :gitlab_bot_token] and is_binary(token) do
+    [
+      %{name: prefix <> "-git-token", type: :env, target: "ARB_GIT_TOKEN", value: token},
+      %{name: prefix <> "-git-api-token", type: :env, target: "GITLAB_TOKEN", value: token}
+    ]
+  end
+
+  def podman_secrets(%Material{token: token}, prefix) when is_binary(token),
+    do: [%{name: prefix <> "-git-token", type: :env, target: "ARB_GIT_TOKEN", value: token}]
+
+  def podman_secrets(%Material{}, _prefix), do: []
+
+  @doc """
+  The env a container carries for `material` alongside its `--secret`s: the
+  token's value is *not* in it (it arrives as a secret), only the git config
+  that makes use of it. A deploy key adds nothing here: its `GIT_SSH_COMMAND`
+  (`ssh_command/1` of `podman_key_path/0`) is composed with the container's proxy
+  `ProxyCommand` by `Wardmast.Worker.ContainerSpawn`.
+  """
+  @spec container_env(Material.t() | nil) :: [{String.t(), String.t()}]
+  def container_env(nil), do: []
+
+  def container_env(%Material{kind: :deploy_key}), do: []
+
+  def container_env(%Material{read_only: true, host: host}), do: [{"GITLAB_HOST", host}]
+
+  def container_env(%Material{} = material),
+    do:
+      material
+      |> Material.env(nil)
+      |> Enum.reject(fn {name, _} -> name in Material.secret_env_names() end)
+
+  @doc """
+  What a run placed on a **node** takes of `material` (bd-akp9ae): `env`, the git
+  config that makes use of the credential (`container_env/1`: the helper that
+  answers only for the repo's own path, prompts off), which names no secret, and
+  `secrets`, the values the node delivers through its per-run tmpfs file
+  (`Wardmast.NodeAgent.Secrets`), never as container env. Only a GitHub App's
+  short-lived installation token, minted on the primary for the run and
+  restricted to the one repo, may leave the primary; a deploy key or a static
+  token is `{:error, {:git_credential_unsupported, :remote_node}}`. The App's
+  private key never does: it signs the mint here and nothing else.
+  """
+  @spec remote_delivery(Material.t() | nil) ::
+          {:ok, %{env: [{String.t(), String.t()}], secrets: %{String.t() => String.t()}}}
+          | {:error, {:git_credential_unsupported, :remote_node}}
+  def remote_delivery(nil), do: {:ok, %{env: [], secrets: %{}}}
+
+  def remote_delivery(%Material{kind: :github_app, token: token} = material)
+      when is_binary(token) and token != "",
+      do: {:ok, %{env: container_env(material), secrets: %{"ARB_GIT_TOKEN" => token}}}
+
+  # bd-1vhect: a reviewer's read-only token is the API credential only.
+  def remote_delivery(%Material{kind: :gitlab_project_token, read_only: true, token: token} = m)
+      when is_binary(token) and token != "",
+      do: {:ok, %{env: container_env(m), secrets: %{"GITLAB_TOKEN" => token}}}
+
+  def remote_delivery(%Material{kind: kind, token: token} = material)
+      when kind in [:gitlab_project_token, :gitlab_bot_token] and is_binary(token) and token != "",
+      do:
+        {:ok,
+         %{
+           env: container_env(material),
+           secrets: %{"ARB_GIT_TOKEN" => token, "GITLAB_TOKEN" => token}
+         }}
+
+  def remote_delivery(%Material{}), do: {:error, {:git_credential_unsupported, :remote_node}}
+
+  @doc """
+  The long-lived secrets the workspace's `git_credentials` name (a GitHub App's
+  private key, a deploy key, a static token), trimmed: what is never sent to a
+  node (bd-akp9ae), even when the operator also exposed one as a worker env var
+  (`Wardmast.Worker.ContainerSpawn.remote_spec/3` drops any env value carrying
+  one). A named secret that is not set contributes nothing.
+  """
+  @spec withheld_values(map() | nil) :: [String.t()]
+  def withheld_values(workspace) do
+    case block(workspace) do
+      %{"repos" => %{} = repos} when map_size(repos) > 0 ->
+        store = secret_store(workspace)
+
+        for {_repo, %{} = entry} <- repos,
+            name <-
+              Enum.map(
+                ~w(private_key_secret key_secret token_secret parent_token_secret),
+                &entry[&1]
+              ),
+            is_binary(name),
+            {:ok, value} <- [stored(store, name)],
+            value = String.trim(value),
+            value != "",
+            uniq: true,
+            do: value
+
+      _ ->
+        []
+    end
+  end
+
+  # ---- the spawn seam -------------------------------------------------------------------
+
+  @type prepared :: %{
+          mode: atom(),
+          material: Material.t() | nil,
+          key_path: Path.t() | nil,
+          env: [{String.t(), String.t()}],
+          redact: [String.t()]
+        }
+
+  @doc """
+  Everything a spawn needs of its credential: `material/3`'s secrets, a deploy
+  key staged on the host (`stage/3`) unless the spawn is a container (`:container?`;
+  its key is a `podman_secrets/2` secret), and the env that delivers them.
+
+  Options: `:worktree_path` (whose `origin` pins a token), `:projection` (a
+  `tracker_write` grant also asks for a tracker token), `:container?`, `:root`,
+  `:req_options`, `:remote`.
+  """
+  @spec prepare(t() | nil, map() | nil, pid(), keyword()) :: {:ok, prepared()} | {:error, term()}
+  def prepare(plan, workspace, owner, opts) do
+    mode = if match?(%__MODULE__{}, plan), do: plan.mode, else: :unenforced
+
+    tracker? =
+      match?(
+        %{claims: [_ | _], tracker_env: var} when is_binary(var),
+        Keyword.get(opts, :projection)
+      )
+
+    materialize_opts =
+      [
+        remote: Keyword.get(opts, :remote) || origin_remote(Keyword.get(opts, :worktree_path)),
+        tracker?: tracker?
+      ] ++ Keyword.take(opts, [:req_options])
+
+    with {:ok, material} <- materialize(plan || %__MODULE__{}, workspace, materialize_opts),
+         :ok <- arm_gitlab_revoke(owner, material, opts),
+         {:ok, staged} <- stage_unless_container(material, owner, opts) do
+      {:ok,
+       %{
+         mode: mode,
+         material: material,
+         key_path: staged.key_path,
+         env: staged.env,
+         redact: redact_values(material)
+       }}
+    end
+  end
+
+  # A GitLab project token outlives the hour a GitHub App token does (it expires on
+  # a date), so it is revoked when the spawn's worker exits wherever the run is
+  # (local, podman or a node): the revoke is armed here, before anything carries it.
+  defp arm_gitlab_revoke(owner, %Material{kind: :gitlab_project_token} = material, opts),
+    do: revoke_when_down(owner, material, Keyword.take(opts, [:req_options]))
+
+  defp arm_gitlab_revoke(_owner, _material, _opts), do: :ok
+
+  defp stage_unless_container(material, owner, opts) do
+    if Keyword.get(opts, :container?, false),
+      do: {:ok, %{dir: nil, key_path: nil, env: []}},
+      else: stage(material, owner, Keyword.take(opts, [:root]))
+  end
+
+  @doc """
+  The worker env pairs with the credential applied: the tracker var (the
+  projection's `tracker_env`) carries the repo-scoped tracker token instead of
+  whatever a binding named, and the delivery env is appended.
+
+  Where the credential has no tracker token of its own (a deploy key), the
+  binding's token stays, but under a scoped plan it is checked first
+  (`verify_tracker_token/2`): a classic PAT reaches every repo its owner does and
+  is refused. A legacy or unenforced spawn is left exactly as it was.
+  """
+  @spec spawn_env(prepared(), map(), [{String.t(), String.t()}], keyword()) ::
+          {:ok, [{String.t(), String.t()}]} | {:error, term()}
+  def spawn_env(%{mode: mode} = git, projection, pairs, opts) when mode in [:scoped] do
+    var = Map.get(projection, :tracker_env)
+
+    with {:ok, pairs} <- scope_tracker(git, var, pairs, opts) do
+      {:ok, pairs ++ git.env}
+    end
+  end
+
+  def spawn_env(git, _projection, pairs, _opts), do: {:ok, pairs ++ Map.get(git, :env, [])}
+
+  defp scope_tracker(_git, nil, pairs, _opts), do: {:ok, pairs}
+
+  defp scope_tracker(git, var, pairs, opts) do
+    case tracker_token(git.material) do
+      token when is_binary(token) ->
+        {:ok, List.keystore(Enum.reject(pairs, &(elem(&1, 0) == var)), var, 0, {var, token})}
+
+      nil ->
+        case List.keyfind(pairs, var, 0) do
+          {^var, token} ->
+            with :ok <- verify_tracker_token(token, opts), do: {:ok, pairs}
+
+          nil ->
+            {:ok, pairs}
+        end
+    end
+  end
+
+  @doc """
+  Refuses a tracker token that is a classic GitHub PAT (`X-OAuth-Scopes` is
+  reported): it cannot be limited to one repo and may carry `gist` or
+  `delete_repo`. A fine-grained token or an App installation token passes.
+  """
+  @spec verify_tracker_token(String.t(), keyword()) :: :ok | {:error, term()}
+  def verify_tracker_token(token, opts \\ []) when is_binary(token),
+    do:
+      check_token_scope(
+        %{host: "github.com", api_url: nil, token_secret: "tracker_write binding"},
+        token,
+        opts
+      )
+
+  # ---- tracker & redaction ------------------------------------------------------------
+
+  @doc "The repo-scoped token for `tracker_write`, or `nil` (a deploy key has none)."
+  @spec tracker_token(Material.t() | nil) :: String.t() | nil
+  def tracker_token(%Material{tracker_token: token}) when is_binary(token), do: token
+  def tracker_token(_), do: nil
+
+  @doc "Secret strings the output scrubber must mask for `material`."
+  @spec redact_values(Material.t() | nil) :: [String.t()]
+  def redact_values(nil), do: []
+
+  def redact_values(%Material{key: key, token: token, tracker_token: tracker} = material) do
+    key_value = if is_binary(key), do: String.trim(key)
+
+    Enum.filter(
+      [key_value, token, tracker, material.parent_token],
+      &(is_binary(&1) and &1 != "")
+    )
+  end
+end

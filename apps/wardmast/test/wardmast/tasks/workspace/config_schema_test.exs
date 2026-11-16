@@ -1,0 +1,132 @@
+defmodule Wardmast.Tasks.Workspace.ConfigSchemaTest do
+  use ExUnit.Case, async: true
+
+  alias Wardmast.Tasks.Workspace.ConfigSchema
+
+  # ConfigSchema's enum lists are literal copies; these tests are the drift
+  # guard asserting each equals the server-side source of truth.
+
+  test "tracker types match Wardmast.Tasks.Workspace.valid_tracker_types/0" do
+    assert ConfigSchema.tracker_types() == Wardmast.Tasks.Workspace.valid_tracker_types()
+  end
+
+  test "merger strategies match Wardmast.Tasks.Workspace.valid_merger_strategies/0" do
+    assert ConfigSchema.merger_strategies() == Wardmast.Tasks.Workspace.valid_merger_strategies()
+  end
+
+  test "agent types match Wardmast.Agents.valid_agent_types/0" do
+    assert ConfigSchema.agent_types() == Wardmast.Agents.valid_agent_types()
+  end
+
+  test "routing policies match Wardmast.Agents.Routing.valid_policies/0" do
+    assert ConfigSchema.routing_policies() == Wardmast.Agents.Routing.valid_policies()
+  end
+
+  test "security modes match Wardmast.Agents.SecurityPolicy.valid_modes/0" do
+    assert ConfigSchema.security_modes() ==
+             Enum.map(Wardmast.Agents.SecurityPolicy.valid_modes(), &Atom.to_string/1)
+  end
+
+  test "sandbox filesystems match Wardmast.Agents.SecurityPolicy.valid_filesystems/0" do
+    assert ConfigSchema.sandbox_filesystems() ==
+             Enum.map(Wardmast.Agents.SecurityPolicy.valid_filesystems(), &Atom.to_string/1)
+  end
+
+  test "safe-default categories match Wardmast.Agents.SecurityPolicy.safe_default_categories/0" do
+    assert ConfigSchema.safe_default_categories() ==
+             Enum.map(Wardmast.Agents.SecurityPolicy.safe_default_categories(), &Atom.to_string/1)
+  end
+
+  test "review_automation modes match Wardmast.Tasks.Workspace.Changes.ValidateConfig.valid_review_automation_modes/0" do
+    assert ConfigSchema.review_automation_modes() ==
+             Wardmast.Tasks.Workspace.Changes.ValidateConfig.valid_review_automation_modes()
+  end
+
+  test "quota modes match Wardmast.Tasks.Workspace.Changes.ValidateConfig.valid_quota_modes/0" do
+    assert ConfigSchema.quota_modes() ==
+             Wardmast.Tasks.Workspace.Changes.ValidateConfig.valid_quota_modes()
+  end
+
+  test "render/0 mentions every top-level config key" do
+    text = ConfigSchema.render()
+
+    for key <- ~w(tracker merge agent review_agent security routing review_gate
+                  review_automation quota loop standing_orders repo_paths
+                  pr_patrol review_patrol worker seed_paths git_credentials
+                  legacy_operator key_secret private_key_secret installation_id
+                  token_secret api_url) do
+      assert text =~ key
+    end
+  end
+
+  # bd-6edc0u: the only kill switch for Wardmast's one autonomous-write path.
+  # `arb config --help` is where an operator goes looking for it, so the
+  # reference has to name it and say which way is off.
+  test "render/0 documents the Stage 3 autonomy flag and its sample-size floor" do
+    text = ConfigSchema.render()
+
+    assert text =~ "autonomous_routing_enabled"
+    assert text =~ "canary_min_dispatches"
+    assert text =~ "canary_regression_tolerance"
+
+    assert text =~ ~r/autonomous_routing_enabled\s+bool — OFF/,
+           "the reference must be explicit that autonomous routing is off by default"
+
+    assert Wardmast.Loop.Canary.min_dispatches() == 20,
+           "the documented >= 20 floor must match the server's own constant"
+
+    assert Wardmast.Loop.Canary.max_regression_tolerance() == 0.5,
+           "the documented 0..0.5 tolerance range must match the server's own ceiling"
+  end
+
+  # bd-77cbif: arb prime is a coordinator command, not a per-worker briefing.
+  # bd-dlvegd: standing_orders IS now injected into worker prompts, and the
+  # reference must say so.
+  test "render/0 describes standing_orders as injected into worker prompts" do
+    text = ConfigSchema.render()
+
+    refute text =~ ~r/worker's `arb prime`/,
+           "arb prime is a coordinator command, not a per-worker briefing"
+
+    assert text =~ "injected into worker prompts"
+    refute text =~ "never reaches a worker"
+  end
+
+  test "describe/0 carries the rendered text and the enum lists" do
+    %{text: text, enums: enums} = ConfigSchema.describe()
+
+    assert text == ConfigSchema.render()
+    assert enums.tracker_types == ConfigSchema.tracker_types()
+    assert enums.quota_modes == ConfigSchema.quota_modes()
+  end
+
+  test "suggest_path/1 maps a known leaf written at the wrong root" do
+    assert ConfigSchema.suggest_path("sandbox.backend") == "agent.security.sandbox.backend"
+
+    assert ConfigSchema.suggest_path("sandbox.review_backend") ==
+             "agent.security.sandbox.review_backend"
+
+    assert ConfigSchema.suggest_path("permissions.mode") == "agent.security.permissions.mode"
+    assert ConfigSchema.suggest_path("totally_unknown") == nil
+  end
+
+  test "known_top_level_keys/0 covers every top-level key the reference documents" do
+    for key <- ~w(tracker merge agent review_agent routing worker repo_paths) do
+      assert key in ConfigSchema.known_top_level_keys()
+    end
+  end
+
+  # Hand-kept inventory of every root the code reads off `workspace.config`
+  # (grep `config["…"]` / `Map.get(config, "…")` in apps/*/lib). Add a root
+  # here when code starts reading one; a miss in `known_top_level_keys/0`
+  # would otherwise silently refuse valid operator writes.
+  @config_roots ~w(tracker merge agent review_agent security guardrails routing review
+                   review_gate notes_gate review_automation quota worker attention
+                   loop standing_orders repo_paths default_repo pr_patrol review_patrol skills
+                   refine coordinator_notifications review_scope)
+
+  test "every root the code reads is a known top-level key" do
+    assert @config_roots -- ConfigSchema.known_top_level_keys() == []
+    assert "review_scope" in ConfigSchema.known_top_level_keys()
+  end
+end

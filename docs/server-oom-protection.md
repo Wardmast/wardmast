@@ -33,7 +33,7 @@ ManagedOOMPreference=avoid
 
 ## 2. `/api` concurrency is bounded
 
-`ArbiterWeb.Plugs.ApiConcurrencyLimit` caps in-flight `/api` requests (the
+`WardmastWeb.Plugs.ApiConcurrencyLimit` caps in-flight `/api` requests (the
 `GET /api/events` SSE stream is exempt). Over the cap a request gets an immediate
 `503 busy` with `Retry-After: 1` rather than queuing and growing the heap.
 

@@ -1,0 +1,400 @@
+defmodule Wardmast.Worker.MemoryScopeTest do
+  # bd-6zuoo6: the per-spawn memory-capped scope. The argv shape, the config
+  # surface and the OOM detection are exercised against an injected command
+  # runner; the real-systemd behaviour is in
+  # `Wardmast.Integration.WorkerMemoryCapTest` (`:live_systemd`).
+  use ExUnit.Case, async: false
+
+  alias Wardmast.Worker.MemoryScope
+
+  setup do
+    prev_env = System.get_env("ARBITER_WORKER_MEMORY_MAX")
+    prev_app = Application.get_env(:wardmast, :worker_memory_max)
+    System.delete_env("ARBITER_WORKER_MEMORY_MAX")
+    Application.delete_env(:wardmast, :worker_memory_max)
+    MemoryScope.reset_probe()
+
+    on_exit(fn ->
+      if prev_env,
+        do: System.put_env("ARBITER_WORKER_MEMORY_MAX", prev_env),
+        else: System.delete_env("ARBITER_WORKER_MEMORY_MAX")
+
+      if prev_app,
+        do: Application.put_env(:wardmast, :worker_memory_max, prev_app),
+        else: Application.delete_env(:wardmast, :worker_memory_max)
+
+      MemoryScope.reset_probe()
+    end)
+
+    :ok
+  end
+
+  # A fake `systemd-run` that answers the two probe invocations the way a
+  # healthy host does. `expands?` models whether it expands `$`.
+  defp healthy_cmd(expands?, memory_max \\ "12884901888") do
+    fn _bin, args, _opts ->
+      cond do
+        "printf" in args -> {if(expands?, do: "$\n", else: "$$\n"), 0}
+        "sh" in args -> {memory_max <> "\n", 0}
+      end
+    end
+  end
+
+  defp probe_opts(cmd),
+    do: [
+      cmd: cmd,
+      systemd_run: "/usr/bin/systemd-run",
+      runtime_dir: "/run/user/1",
+      service_unit: nil
+    ]
+
+  defp port_args(env \\ []) do
+    %{
+      exec: "/usr/bin/claude",
+      argv: ["claude", "--print", "cost $5 and ${HOME}"],
+      cd: "/tmp",
+      env: env
+    }
+  end
+
+  describe "configured_max/0" do
+    test "defaults to a percentage of RAM" do
+      assert MemoryScope.configured_max() == {:ok, "40%"}
+    end
+
+    test "environment beats application config" do
+      Application.put_env(:wardmast, :worker_memory_max, "8G")
+      assert MemoryScope.configured_max() == {:ok, "8G"}
+
+      System.put_env("ARBITER_WORKER_MEMORY_MAX", "12g")
+      assert MemoryScope.configured_max() == {:ok, "12G"}
+    end
+
+    test "off-ish values disable the cap" do
+      for v <- ~w(off 0 none infinity OFF) do
+        System.put_env("ARBITER_WORKER_MEMORY_MAX", v)
+        assert MemoryScope.configured_max() == :disabled, v
+      end
+    end
+
+    test "an invalid value falls back to the default instead of disabling" do
+      for v <- ["lots", "12 gigs", "0G", "150%x", "-1"] do
+        System.put_env("ARBITER_WORKER_MEMORY_MAX", v)
+        assert MemoryScope.configured_max() == {:ok, "40%"}, v
+      end
+    end
+  end
+
+  describe "wrap/3" do
+    test "wraps the agent in a capped, kill-on-OOM scope with the original argv last" do
+      System.put_env("ARBITER_WORKER_MEMORY_MAX", "12G")
+
+      {wrapped, scope} =
+        MemoryScope.wrap(port_args(), "bd-abc123", probe_opts(healthy_cmd(false)))
+
+      assert wrapped.exec == "/usr/bin/systemd-run"
+      assert [_argv0 | args] = wrapped.argv
+      assert "--user" in args and "--scope" in args
+      assert "MemoryMax=12G" in args
+      assert "MemorySwapMax=0" in args
+      assert "OOMPolicy=kill" in args
+      assert "--unit=" <> unit = Enum.find(args, &String.starts_with?(&1, "--unit="))
+      assert unit =~ ~r/\Aarb-run-i[0-9a-f]{8}-bd-abc123-[0-9a-f]{8}\z/
+      assert scope == %{unit: unit <> ".scope", max: "12G"}
+
+      # `env -u XDG_RUNTIME_DIR <exec> <rest…>` is the tail, argument for argument.
+      tail = Enum.drop(args, Enum.find_index(args, &(&1 == "-u")) - 1)
+      assert [_env, "-u", "XDG_RUNTIME_DIR", "/usr/bin/claude", "--print", prompt] = tail
+      assert prompt == "cost $5 and ${HOME}"
+      assert wrapped.cd == "/tmp"
+    end
+
+    test "binds the scope to the server's service unit so it cannot outlive it" do
+      {wrapped, _} =
+        MemoryScope.wrap(
+          port_args(),
+          "t",
+          Keyword.put(probe_opts(healthy_cmd(false)), :service_unit, "arbiter.service")
+        )
+
+      assert [_argv0 | args] = wrapped.argv
+      assert "BindsTo=arbiter.service" in args
+      assert "After=arbiter.service" in args
+
+      # The agent argv is still the tail, after the properties.
+      assert List.last(args) == "cost $5 and ${HOME}"
+    end
+
+    test "adds no binding when the server is not running as a service" do
+      {wrapped, _} = MemoryScope.wrap(port_args(), "t", probe_opts(healthy_cmd(false)))
+
+      refute Enum.any?(wrapped.argv, &String.starts_with?(&1, "BindsTo="))
+      refute Enum.any?(wrapped.argv, &String.starts_with?(&1, "After="))
+    end
+
+    test "the capability probe is never bound to the service" do
+      test_pid = self()
+
+      cmd = fn bin, args, opts ->
+        send(test_pid, {:probe_args, args})
+        healthy_cmd(false).(bin, args, opts)
+      end
+
+      opts = Keyword.put(probe_opts(cmd), :service_unit, "arbiter.service")
+      assert {_, %{}} = MemoryScope.wrap(port_args(), "t", opts)
+
+      assert_received {:probe_args, args}
+      refute Enum.any?(args, &String.contains?(&1, "BindsTo"))
+    end
+
+    test "restores XDG_RUNTIME_DIR for systemd-run only" do
+      {wrapped, _} =
+        MemoryScope.wrap(
+          port_args([{"XDG_RUNTIME_DIR", false}, {"FOO", "bar"}]),
+          "t",
+          probe_opts(healthy_cmd(false))
+        )
+
+      assert {"XDG_RUNTIME_DIR", "/run/user/1"} in wrapped.env
+      assert {"FOO", "bar"} in wrapped.env
+      assert "-u" in wrapped.argv
+    end
+
+    test "an XDG_RUNTIME_DIR the spawn env set explicitly is left alone" do
+      {wrapped, _} =
+        MemoryScope.wrap(
+          port_args([{"XDG_RUNTIME_DIR", "/custom"}]),
+          "t",
+          probe_opts(healthy_cmd(false))
+        )
+
+      assert wrapped.env == [{"XDG_RUNTIME_DIR", "/custom"}]
+      refute "-u" in wrapped.argv
+    end
+
+    test "doubles `$` when this systemd-run expands it, so prompts survive" do
+      {wrapped, _} = MemoryScope.wrap(port_args(), "t", probe_opts(healthy_cmd(true)))
+
+      assert List.last(wrapped.argv) == "cost $$5 and $${HOME}"
+    end
+
+    test "passes the argv through untouched when systemd-run does not expand" do
+      {wrapped, _} = MemoryScope.wrap(port_args(), "t", probe_opts(healthy_cmd(false)))
+
+      assert List.last(wrapped.argv) == "cost $5 and ${HOME}"
+    end
+
+    test "returns the args untouched and no scope when the cap is disabled" do
+      System.put_env("ARBITER_WORKER_MEMORY_MAX", "off")
+      args = port_args()
+
+      assert {^args, nil} = MemoryScope.wrap(args, "t", probe_opts(healthy_cmd(false)))
+    end
+
+    test "returns the args untouched when systemd-run cannot create the scope" do
+      failing = fn _bin, _args, _opts -> {"Failed to connect to user scope bus", 1} end
+      args = port_args()
+
+      assert {^args, nil} = MemoryScope.wrap(args, "t", probe_opts(failing))
+    end
+
+    test "a wedged systemd-run probe times out instead of hanging the caller" do
+      hung = fn _bin, _args, _opts -> Process.sleep(:infinity) end
+      args = port_args()
+
+      opts = Keyword.put(probe_opts(hung), :probe_timeout_ms, 50)
+
+      assert {^args, nil} = MemoryScope.wrap(args, "t", opts)
+      assert {:error, reason} = MemoryScope.probe("12G", opts)
+      assert reason =~ "timed out"
+    end
+
+    test "treats a limit the user manager did not apply as unavailable" do
+      args = port_args()
+
+      assert {^args, nil} =
+               MemoryScope.wrap(args, "t", probe_opts(healthy_cmd(false, "max")))
+    end
+  end
+
+  describe "outcome/2" do
+    @scope %{unit: "arb-run-t-1.scope", max: "12G"}
+
+    defp ctl_cmd(show_output, test_pid) do
+      fn _bin, args, _opts ->
+        send(test_pid, {:systemctl, args})
+
+        case args do
+          ["--user", "show" | _] -> {show_output, 0}
+          ["--user", "reset-failed" | _] -> {"", 0}
+        end
+      end
+    end
+
+    test "reports an OOM kill with the peak and clears the failed scope" do
+      out = "Result=oom-kill\nMemoryPeak=12884901888\n"
+
+      assert {:memory_cap_exceeded, %{peak: 12_884_901_888, max: "12G"}} =
+               MemoryScope.outcome(@scope, cmd: ctl_cmd(out, self()), systemctl: "/bin/systemctl")
+
+      assert_received {:systemctl, ["--user", "reset-failed", "arb-run-t-1.scope"]}
+    end
+
+    test "a scope that ended normally is :ok and is not reset" do
+      out = "Result=success\nMemoryPeak=1048576\n"
+
+      assert :ok =
+               MemoryScope.outcome(@scope, cmd: ctl_cmd(out, self()), systemctl: "/bin/systemctl")
+
+      refute_received {:systemctl, ["--user", "reset-failed" | _]}
+    end
+
+    test "an unreadable systemctl answer is :ok rather than a crash" do
+      boom = fn _, _, _ -> raise "no bus" end
+      assert :ok = MemoryScope.outcome(@scope, cmd: boom, systemctl: "/bin/systemctl")
+    end
+
+    test "tolerates an unset MemoryPeak" do
+      out = "Result=oom-kill\nMemoryPeak=[not set]\n"
+
+      assert {:memory_cap_exceeded, %{peak: nil}} =
+               MemoryScope.outcome(@scope, cmd: ctl_cmd(out, self()), systemctl: "/bin/systemctl")
+    end
+  end
+
+  describe "stop/2, list/1 and sweep/2 (bd-6zm33r)" do
+    @listing """
+    arb-run-iaaaaaaaa-bd-a-1111.scope   loaded active   running Wardmast worker bd-a
+    arb-run-iaaaaaaaa-bd-b-2222.scope   loaded failed   failed  Wardmast worker bd-b
+    arb-run-iaaaaaaaa-bd-c-3333.scope   loaded active   running Wardmast worker bd-c
+    """
+
+    defp scope_cmd(test_pid, stop_exit \\ 0) do
+      fn _bin, args, _opts ->
+        send(test_pid, {:systemctl, args})
+
+        case args do
+          ["--user", "list-units" | _] -> {@listing, 0}
+          ["--user", "stop", _] -> {"", stop_exit}
+          ["--user", "reset-failed", _] -> {"", 0}
+        end
+      end
+    end
+
+    defp ctl_opts(cmd),
+      do: [
+        cmd: cmd,
+        systemctl: "/bin/systemctl",
+        runtime_dir: "/run/user/1",
+        install_id: "aaaaaaaa"
+      ]
+
+    test "stop/2 stops the unit and clears a failed state" do
+      assert :ok =
+               MemoryScope.stop(
+                 %{unit: "arb-run-x-1.scope", max: "1G"},
+                 ctl_opts(scope_cmd(self()))
+               )
+
+      assert_received {:systemctl, ["--user", "stop", "arb-run-x-1.scope"]}
+      assert_received {:systemctl, ["--user", "reset-failed", "arb-run-x-1.scope"]}
+    end
+
+    test "stop/2 reports a failure instead of raising" do
+      assert {:error, _} =
+               MemoryScope.stop("arb-run-x-1.scope", ctl_opts(scope_cmd(self(), 1)))
+    end
+
+    test "list/1 returns the loaded arb-run scopes" do
+      assert MemoryScope.list(ctl_opts(scope_cmd(self()))) ==
+               [
+                 "arb-run-iaaaaaaaa-bd-a-1111.scope",
+                 "arb-run-iaaaaaaaa-bd-b-2222.scope",
+                 "arb-run-iaaaaaaaa-bd-c-3333.scope"
+               ]
+    end
+
+    test "sweep/2 stops scopes without a live run and never touches a live one" do
+      stopped =
+        MemoryScope.sweep(["arb-run-iaaaaaaaa-bd-b-2222.scope"], ctl_opts(scope_cmd(self())))
+
+      assert stopped == ["arb-run-iaaaaaaaa-bd-a-1111.scope", "arb-run-iaaaaaaaa-bd-c-3333.scope"]
+      assert_received {:systemctl, ["--user", "stop", "arb-run-iaaaaaaaa-bd-a-1111.scope"]}
+      assert_received {:systemctl, ["--user", "stop", "arb-run-iaaaaaaaa-bd-c-3333.scope"]}
+      refute_received {:systemctl, ["--user", "stop", "arb-run-iaaaaaaaa-bd-b-2222.scope"]}
+    end
+  end
+
+  describe "install-scoped scopes (bd-a2e7hk)" do
+    @shared_listing """
+    arb-run-iaaaaaaaa-bd-a-1111.scope  loaded active running Wardmast worker bd-a
+    arb-run-iaaaaaaaa-bd-orphan-2222.scope loaded active running Wardmast worker bd-orphan
+    arb-run-ibbbbbbbb-bd-b-3333.scope  loaded active running Wardmast worker bd-b
+    arb-run-ibbbbbbbb-bd-b2-4444.scope loaded active running Wardmast worker bd-b2
+    arb-run-bd-legacy-5555.scope       loaded active running Wardmast worker bd-legacy
+    """
+
+    defp shared_opts(install, test_pid) do
+      [
+        install_id: install,
+        systemctl: "/bin/systemctl",
+        runtime_dir: "/run/user/1",
+        cmd: fn _bin, args, _opts ->
+          send(test_pid, {:systemctl, args})
+
+          case args do
+            ["--user", "list-units" | _] -> {@shared_listing, 0}
+            _ -> {"", 0}
+          end
+        end
+      ]
+    end
+
+    test "unit names carry the install id" do
+      assert MemoryScope.unit_name("bd-x", install_id: "aaaaaaaa") =~
+               ~r/\Aarb-run-iaaaaaaaa-bd-x-[0-9a-f]{8}\z/
+    end
+
+    test "install_id/1 is stable, 8 hex chars and differs per database" do
+      assert MemoryScope.install_id([]) =~ ~r/\A[0-9a-f]{8}\z/
+      assert MemoryScope.install_id([]) == MemoryScope.install_id([])
+
+      assert MemoryScope.install_id(database: "/a/db.sqlite3") !=
+               MemoryScope.install_id(database: "/b/db.sqlite3")
+    end
+
+    test "list/1 returns only this install's scopes" do
+      assert MemoryScope.list(shared_opts("aaaaaaaa", self())) ==
+               ["arb-run-iaaaaaaaa-bd-a-1111.scope", "arb-run-iaaaaaaaa-bd-orphan-2222.scope"]
+    end
+
+    test "install B's sweep never stops install A's scopes, nor legacy untagged ones" do
+      stopped = MemoryScope.sweep([], shared_opts("bbbbbbbb", self()))
+
+      assert stopped == [
+               "arb-run-ibbbbbbbb-bd-b-3333.scope",
+               "arb-run-ibbbbbbbb-bd-b2-4444.scope"
+             ]
+
+      refute_received {:systemctl, ["--user", "stop", "arb-run-iaaaaaaaa-" <> _]}
+      refute_received {:systemctl, ["--user", "stop", "arb-run-bd-legacy-5555.scope"]}
+    end
+
+    test "A's own orphans are still swept, its live scope is kept" do
+      stopped =
+        MemoryScope.sweep(["arb-run-iaaaaaaaa-bd-a-1111.scope"], shared_opts("aaaaaaaa", self()))
+
+      assert stopped == ["arb-run-iaaaaaaaa-bd-orphan-2222.scope"]
+      refute_received {:systemctl, ["--user", "stop", "arb-run-ibbbbbbbb-" <> _]}
+    end
+
+    test "sweep/2 refuses foreign units even when handed a prior listing" do
+      units = ["arb-run-ibbbbbbbb-bd-b-3333.scope", "arb-run-bd-legacy-5555.scope"]
+
+      assert [] =
+               MemoryScope.sweep([], Keyword.put(shared_opts("aaaaaaaa", self()), :units, units))
+
+      refute_received {:systemctl, ["--user", "stop", _]}
+    end
+  end
+end

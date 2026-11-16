@@ -1,0 +1,126 @@
+defmodule Wardmast.Test.SessionEnv do
+  @moduledoc """
+  Point the session roots at throwaway tmp dirs for one test (bd-aprlbb).
+
+  Exists because the obvious spelling is wrong in a way that only shows up in
+  *another* test file: `Application.put_env/3` in `setup` plus
+  `Application.delete_env/2` in `on_exit` does not restore the value
+  `config/test.exs` set — it **deletes** it, so every later test in the same VM
+  falls through to the `$HOME`-relative default and provisions a session into
+  the operator's real `~/dev/arbiter-sessions`. Save-and-restore, always.
+  """
+
+  @keys [
+    :sessions_root,
+    :accounts_root,
+    :sessions_runtime_dir,
+    :primary_checkout,
+    :sessions_credentials_source,
+    :sessions_agy_source_home,
+    :sessions_agent_command,
+    :sessions_launch_command,
+    :sessions_bridge_verify_timeout_ms,
+    :sessions_bridge_verify_poll_interval_ms,
+    :memory_root
+  ]
+
+  @doc """
+  Override the given `:wardmast` keys for this test, restoring the previous
+  values (including "was unset") on exit. Returns the overrides, so a `setup`
+  block can hand them straight to the test context.
+  """
+  @spec override(keyword()) :: keyword()
+  def override(overrides) do
+    previous = Enum.map(@keys, &{&1, Application.fetch_env(:wardmast, &1)})
+
+    Enum.each(overrides, fn {key, value} ->
+      true = key in @keys
+      Application.put_env(:wardmast, key, value)
+    end)
+
+    ExUnit.Callbacks.on_exit(fn ->
+      Enum.each(previous, fn
+        {key, {:ok, value}} -> Application.put_env(:wardmast, key, value)
+        {key, :error} -> Application.delete_env(:wardmast, key)
+      end)
+    end)
+
+    overrides
+  end
+
+  @doc """
+  A full set of unique tmp roots for a session test — `:sessions_root`,
+  `:sessions_runtime_dir`, `:primary_checkout`, `:sessions_credentials_source`
+  and `:sessions_agy_source_home` — all removed on exit.
+  """
+  @spec sandbox(String.t()) :: keyword()
+  def sandbox(tag) do
+    unique = "#{tag}-#{System.unique_integer([:positive])}"
+    base = Path.join(System.tmp_dir!(), "arbiter-session-test-#{unique}")
+
+    overrides = [
+      sessions_root: Path.join(base, "sessions"),
+      sessions_runtime_dir: Path.join(base, "runtime"),
+      accounts_root: Path.join(base, "accounts"),
+      primary_checkout: Path.join(base, "checkout"),
+      sessions_credentials_source: Path.join(base, "operator"),
+      sessions_agy_source_home: Path.join(base, "operator-home"),
+      memory_root: Path.join(base, "memory")
+    ]
+
+    File.mkdir_p!(overrides[:primary_checkout])
+    File.mkdir_p!(overrides[:sessions_credentials_source])
+    File.mkdir_p!(overrides[:sessions_agy_source_home])
+    ExUnit.Callbacks.on_exit(fn -> Wardmast.Worker.RunTmp.force_rm_rf(base) end)
+
+    override(overrides)
+  end
+
+  @doc """
+  Sandbox the session roots and launch one stubbed session, returning the row.
+
+  For tests outside `apps/wardmast` that need a real session row (and therefore
+  a real revocation handle) without caring how it got there.
+  """
+  @spec launch_session!(keyword()) :: struct()
+  def launch_session!(opts \\ []) do
+    sandbox("launched")
+
+    {:ok, session} =
+      Wardmast.Sessions.launch(Keyword.put_new(opts, :runner, Wardmast.Test.SessionRunnerStub))
+
+    session
+  end
+
+  @doc """
+  Give the launch form something to offer (bd-8qoxst): it lists a session
+  provider only when a live provider account exists for it, and — once a
+  workspace is picked — only when that workspace is joined to the account.
+  Creates `claude:default` and `antigravity:default` and joins each of
+  `workspaces` to both. Idempotent; call it from a `setup` that owns the
+  sandbox.
+  """
+  @spec launch_accounts!([struct()]) :: :ok
+  def launch_accounts!(workspaces \\ []) do
+    accounts =
+      for provider <- [:claude, :antigravity] do
+        account =
+          Wardmast.Accounts.get_account("#{provider}:default")
+          |> case do
+            {:ok, account} ->
+              account
+
+            _ ->
+              Ash.create!(Wardmast.Accounts.ProviderAccount, %{provider: provider, slug: "default"})
+          end
+
+        {provider, account}
+      end
+
+    for workspace <- workspaces, {provider, account} <- accounts do
+      {:ok, _} = Wardmast.Accounts.attach_workspace(workspace.id, provider, account.id)
+    end
+
+    :ok
+  end
+end

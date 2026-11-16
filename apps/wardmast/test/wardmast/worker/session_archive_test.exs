@@ -1,0 +1,458 @@
+defmodule Wardmast.Worker.SessionArchiveTest do
+  # async: false — we swap the :output_log_root application env per test.
+  use ExUnit.Case, async: false
+
+  alias Wardmast.Worker.SessionArchive
+
+  setup do
+    prev = Application.get_env(:wardmast, :output_log_root)
+
+    root =
+      Path.join(System.tmp_dir!(), "session-archive-test-#{System.unique_integer([:positive])}")
+
+    Application.put_env(:wardmast, :output_log_root, root)
+
+    cfg =
+      Path.join(System.tmp_dir!(), "session-archive-cfg-#{System.unique_integer([:positive])}")
+
+    on_exit(fn ->
+      File.rm_rf(root)
+      File.rm_rf(cfg)
+
+      if prev do
+        Application.put_env(:wardmast, :output_log_root, prev)
+      else
+        Application.delete_env(:wardmast, :output_log_root)
+      end
+    end)
+
+    %{root: root, config_dir: cfg, run_id: "run-#{System.unique_integer([:positive])}"}
+  end
+
+  # Build a fake Claude Code config dir holding one session JSONL (and,
+  # optionally, subagent transcripts) exactly where `ClaudeSessionFile.locate/2`
+  # globs for it.
+  defp seed_session(cfg, session_id, lines, subagents \\ []) do
+    slug = "-home-ryan-dev-arbiter"
+    dir = Path.join([cfg, "projects", slug])
+    File.mkdir_p!(dir)
+    path = Path.join(dir, session_id <> ".jsonl")
+    File.write!(path, Enum.map_join(lines, "\n", &Jason.encode!/1) <> "\n")
+
+    Enum.each(subagents, fn {name, body} ->
+      sub_dir = Path.join([dir, session_id, "subagents"])
+      File.mkdir_p!(sub_dir)
+      File.write!(Path.join(sub_dir, name), body)
+    end)
+
+    path
+  end
+
+  defp gunzip_at!(path), do: path |> File.read!() |> :zlib.gunzip()
+
+  # Build a real agy $HOME holding one conversation db exactly where
+  # `GeminiSessionFile.locate/2` looks for it — a real SQLite database (not
+  # fake bytes), since `write_db_archive/2` now opens the source with
+  # `Exqlite` to fold any WAL content back in before archiving.
+  defp seed_gemini_db(home, session_id, bodies) do
+    dir = Path.join([home, ".gemini", "antigravity-cli", "conversations"])
+    File.mkdir_p!(dir)
+    path = Path.join(dir, session_id <> ".db")
+    File.rm(path)
+
+    {:ok, conn} = Exqlite.start_link(database: path, mode: [:readwrite, :create])
+    Exqlite.query!(conn, "CREATE TABLE steps (body TEXT)")
+
+    Enum.each(bodies, fn body ->
+      Exqlite.query!(conn, "INSERT INTO steps (body) VALUES (?1)", [body])
+    end)
+
+    GenServer.stop(conn)
+    path
+  end
+
+  # Read the `steps.body` column back out of a (possibly gunzipped) SQLite
+  # database's raw bytes, via a private temp file.
+  defp read_step_bodies(db_bytes) do
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "session-archive-readback-#{System.unique_integer([:positive])}.db"
+      )
+
+    File.write!(tmp, db_bytes)
+
+    {:ok, conn} = Exqlite.start_link(database: tmp, mode: :readonly)
+    {:ok, result} = Exqlite.query(conn, "SELECT body FROM steps", [])
+    GenServer.stop(conn)
+    File.rm(tmp)
+
+    Enum.map(result.rows, fn [body] -> body end)
+  end
+
+  describe "path_for/1" do
+    test "lives in the durable log root, keyed by run id", %{root: root, run_id: run_id} do
+      assert SessionArchive.path_for(run_id) == Path.join(root, run_id <> ".jsonl.gz")
+    end
+
+    test "subagent archives hang off a run-keyed directory", %{root: root, run_id: run_id} do
+      assert SessionArchive.subagents_dir_for(run_id) ==
+               Path.join(root, run_id <> ".subagents")
+    end
+  end
+
+  describe "archive/3" do
+    test "gzips the agent's session JSONL into the log root", ctx do
+      sid = "11111111-1111-1111-1111-111111111111"
+      lines = [%{"type" => "assistant", "message" => %{"id" => "m1"}}]
+      seed_session(ctx.config_dir, sid, lines)
+
+      assert {:ok, report} = SessionArchive.archive(ctx.run_id, ctx.config_dir, sid)
+      assert report.status == :ok
+      assert report.subagents == 0
+
+      archive = SessionArchive.path_for(ctx.run_id)
+      assert File.regular?(archive)
+      assert gunzip_at!(archive) =~ ~s("type":"assistant")
+    end
+
+    test "redacts known secret values before the bytes reach disk", ctx do
+      sid = "22222222-2222-2222-2222-222222222222"
+      secret = "sk-live-DEADBEEFCAFE"
+      lines = [%{"type" => "user", "message" => %{"content" => "export KEY=#{secret}"}}]
+      seed_session(ctx.config_dir, sid, lines)
+
+      assert {:ok, _} =
+               SessionArchive.archive(ctx.run_id, ctx.config_dir, sid, redact_values: [secret])
+
+      body = gunzip_at!(SessionArchive.path_for(ctx.run_id))
+      refute body =~ secret
+      assert body =~ "[REDACTED]"
+      # Redaction must not corrupt the JSONL: every line still parses.
+      assert [%{"type" => "user"}] =
+               body |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    end
+
+    test "the archive is written 0600 — the root is secret-bearing", ctx do
+      sid = "33333333-3333-3333-3333-333333333333"
+      seed_session(ctx.config_dir, sid, [%{"type" => "assistant"}])
+
+      assert {:ok, _} = SessionArchive.archive(ctx.run_id, ctx.config_dir, sid)
+
+      %File.Stat{mode: mode} = File.stat!(SessionArchive.path_for(ctx.run_id))
+      assert Bitwise.band(mode, 0o777) == 0o600
+    end
+
+    test "archives subagent transcripts under the parent run", ctx do
+      sid = "44444444-4444-4444-4444-444444444444"
+
+      seed_session(ctx.config_dir, sid, [%{"type" => "assistant"}], [
+        {"agent-aad6d0303db231aef.jsonl", ~s({"type":"assistant","sub":true}\n)},
+        {"agent-aad6d0303db231aef.meta.json", ~s({"name":"Explore"})}
+      ])
+
+      assert {:ok, report} = SessionArchive.archive(ctx.run_id, ctx.config_dir, sid)
+      assert report.subagents == 1
+
+      sub =
+        Path.join(
+          SessionArchive.subagents_dir_for(ctx.run_id),
+          "agent-aad6d0303db231aef.jsonl.gz"
+        )
+
+      assert File.regular?(sub)
+      assert gunzip_at!(sub) =~ ~s("sub":true)
+    end
+
+    test "a run with no locatable session file reports :no_session_file, not an error", ctx do
+      assert {:ok, %{status: :no_session_file}} =
+               SessionArchive.archive(ctx.run_id, ctx.config_dir, "no-such-session")
+
+      refute File.exists?(SessionArchive.path_for(ctx.run_id))
+    end
+
+    test "a run with no config root recorded at all reports :no_config_dir", ctx do
+      assert {:ok, %{status: :no_config_dir}} = SessionArchive.archive(ctx.run_id, "", "sid")
+      assert {:ok, %{status: :no_config_dir}} = SessionArchive.archive(ctx.run_id, nil, "sid")
+    end
+
+    test "a config root with neither a Claude JSONL nor an agy db reports :no_session_file",
+         ctx do
+      assert {:ok, %{status: :no_session_file}} =
+               SessionArchive.archive(ctx.run_id, ctx.config_dir, "no-such-session")
+    end
+
+    test "a workflow-mode run (neither coordinate) reports :no_session_id", ctx do
+      assert {:ok, %{status: :no_session_id}} = SessionArchive.archive(ctx.run_id, nil, nil)
+
+      assert {:ok, %{status: :no_session_id}} =
+               SessionArchive.archive(ctx.run_id, ctx.config_dir, "")
+    end
+
+    test "re-archiving overwrites rather than appending (idempotent)", ctx do
+      sid = "55555555-5555-5555-5555-555555555555"
+      seed_session(ctx.config_dir, sid, [%{"type" => "assistant", "n" => 1}])
+      assert {:ok, _} = SessionArchive.archive(ctx.run_id, ctx.config_dir, sid)
+
+      seed_session(ctx.config_dir, sid, [%{"type" => "assistant", "n" => 2}])
+      assert {:ok, _} = SessionArchive.archive(ctx.run_id, ctx.config_dir, sid)
+
+      body = gunzip_at!(SessionArchive.path_for(ctx.run_id))
+      assert body =~ ~s("n":2)
+      refute body =~ ~s("n":1)
+    end
+  end
+
+  describe "archive/3 — codex rollout (bd-agsn2b)" do
+    test "archives and redacts the rollout found by thread id under the codex home", ctx do
+      sid = "019f95ae-1111-7000-8000-000000000002"
+      dir = Path.join([ctx.config_dir, "sessions", "2026", "09", "29"])
+      File.mkdir_p!(dir)
+
+      File.write!(
+        Path.join(dir, "rollout-2026-09-29T10-00-00-#{sid}.jsonl"),
+        ~s({"k":"s3cret-token"}\n)
+      )
+
+      assert {:ok, report} =
+               SessionArchive.archive(ctx.run_id, ctx.config_dir, sid,
+                 redact_values: ["s3cret-token"]
+               )
+
+      assert report.status == :ok
+      assert report.redacted == true
+      body = gunzip_at!(SessionArchive.path_for(ctx.run_id))
+      refute body =~ "s3cret-token"
+    end
+
+    test "reports :no_session_file when no rollout carries the thread id", ctx do
+      File.mkdir_p!(ctx.config_dir)
+
+      assert {:ok, %{status: :no_session_file}} =
+               SessionArchive.archive(ctx.run_id, ctx.config_dir, "missing")
+    end
+  end
+
+  describe "archive/3 — qwen chat JSONL (bd-7yj8qv Q8)" do
+    test "archives and redacts <home>/.qwen/projects/<slug>/chats/<sid>.jsonl", ctx do
+      sid = "0b9f3c1e-2f64-4c53-9a43-8f2f7c1d9a10"
+      dir = Path.join([ctx.config_dir, ".qwen", "projects", "-work-tree", "chats"])
+      File.mkdir_p!(dir)
+      File.write!(Path.join(dir, sid <> ".jsonl"), ~s({"k":"s3cret-token"}\n))
+
+      assert {:ok, %{status: :ok, redacted: true}} =
+               SessionArchive.archive(ctx.run_id, ctx.config_dir, sid,
+                 redact_values: ["s3cret-token"]
+               )
+
+      refute gunzip_at!(SessionArchive.path_for(ctx.run_id)) =~ "s3cret-token"
+    end
+  end
+
+  describe "archive/3 — agy conversation db (bd-6nupvc T9)" do
+    test "archives the raw db unredacted when no Claude JSONL exists at the same coordinates",
+         ctx do
+      sid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+      seed_gemini_db(ctx.config_dir, sid, ["conversation-body"])
+
+      assert {:ok, report} = SessionArchive.archive(ctx.run_id, ctx.config_dir, sid)
+      assert report.status == :ok
+      assert report.redacted == false
+      assert report.subagents == 0
+
+      archive = SessionArchive.db_path_for(ctx.run_id)
+      assert File.regular?(archive)
+      assert read_step_bodies(gunzip_at!(archive)) == ["conversation-body"]
+    end
+
+    test "does not scrub known secret values — redaction is unsafe on raw SQLite bytes", ctx do
+      sid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+      secret = "sk-live-DEADBEEFCAFE"
+      seed_gemini_db(ctx.config_dir, sid, ["prefix" <> secret <> "suffix"])
+
+      assert {:ok, %{redacted: false}} =
+               SessionArchive.archive(ctx.run_id, ctx.config_dir, sid, redact_values: [secret])
+
+      assert read_step_bodies(gunzip_at!(SessionArchive.db_path_for(ctx.run_id))) == [
+               "prefix" <> secret <> "suffix"
+             ]
+    end
+
+    test "the db archive is written 0600, same as the Claude path", ctx do
+      sid = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+      seed_gemini_db(ctx.config_dir, sid, ["bytes"])
+
+      assert {:ok, _} = SessionArchive.archive(ctx.run_id, ctx.config_dir, sid)
+
+      %File.Stat{mode: mode} = File.stat!(SessionArchive.db_path_for(ctx.run_id))
+      assert Bitwise.band(mode, 0o777) == 0o600
+    end
+
+    test "db_archived?/1 and read_db/1 round-trip", ctx do
+      sid = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+      refute SessionArchive.db_archived?(ctx.run_id)
+
+      seed_gemini_db(ctx.config_dir, sid, ["hello-agy"])
+      assert {:ok, _} = SessionArchive.archive(ctx.run_id, ctx.config_dir, sid)
+
+      assert SessionArchive.db_archived?(ctx.run_id)
+      assert {:ok, bytes} = SessionArchive.read_db(ctx.run_id)
+      assert read_step_bodies(bytes) == ["hello-agy"]
+    end
+
+    test "a run whose recorded config root has an agy db, driven through archive_run/2", ctx do
+      sid = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+      seed_gemini_db(ctx.config_dir, sid, ["via-run"])
+
+      run = %{
+        id: ctx.run_id,
+        config_dir: ctx.config_dir,
+        session_id: sid,
+        provider: "gemini",
+        task_id: nil
+      }
+
+      assert {:ok, %{status: :ok, redacted: false}} =
+               SessionArchive.archive_run(run, redact_values: [])
+
+      assert read_step_bodies(gunzip_at!(SessionArchive.db_path_for(ctx.run_id))) == ["via-run"]
+    end
+
+    test "captures rows that are only in the WAL sidecar, not yet checkpointed into the .db file",
+         ctx do
+      sid = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+      path = seed_gemini_db(ctx.config_dir, sid, [])
+
+      {:ok, conn} = Exqlite.start_link(database: path, mode: [:readwrite, :create])
+      Exqlite.query!(conn, "PRAGMA journal_mode=WAL")
+      Exqlite.query!(conn, "INSERT INTO steps (body) VALUES ('checkpointed')")
+      Exqlite.query!(conn, "PRAGMA wal_checkpoint")
+      Exqlite.query!(conn, "INSERT INTO steps (body) VALUES ('wal-only')")
+
+      assert File.exists?(path <> "-wal")
+
+      # Sanity check that this test actually exercises the bug: reading the
+      # `.db` file alone (the old, broken behavior) must miss the WAL-only row.
+      assert read_step_bodies(File.read!(path)) == ["checkpointed"]
+
+      assert {:ok, report} = SessionArchive.archive(ctx.run_id, ctx.config_dir, sid)
+      assert report.status == :ok
+
+      archived_bodies =
+        ctx.run_id
+        |> SessionArchive.db_path_for()
+        |> File.read!()
+        |> :zlib.gunzip()
+        |> read_step_bodies()
+
+      assert archived_bodies == ["checkpointed", "wal-only"]
+
+      GenServer.stop(conn)
+    end
+  end
+
+  describe "archived?/1 and read/1" do
+    test "archived?/1 reports presence; read/1 returns the decompressed bytes", ctx do
+      sid = "66666666-6666-6666-6666-666666666666"
+      refute SessionArchive.archived?(ctx.run_id)
+
+      seed_session(ctx.config_dir, sid, [%{"type" => "assistant", "hello" => "world"}])
+      assert {:ok, _} = SessionArchive.archive(ctx.run_id, ctx.config_dir, sid)
+
+      assert SessionArchive.archived?(ctx.run_id)
+      assert {:ok, body} = SessionArchive.read(ctx.run_id)
+      assert body =~ ~s("hello":"world")
+    end
+
+    test "read/1 on a run with no archive is {:error, :enoent}", ctx do
+      assert {:error, :enoent} = SessionArchive.read(ctx.run_id)
+    end
+  end
+
+  describe "archive_run/2" do
+    test "reads config_dir / session_id off a run struct", ctx do
+      sid = "77777777-7777-7777-7777-777777777777"
+      seed_session(ctx.config_dir, sid, [%{"type" => "assistant", "via" => "run"}])
+
+      run = %{id: ctx.run_id, config_dir: ctx.config_dir, session_id: sid, task_id: nil}
+
+      assert {:ok, %{status: :ok}} = SessionArchive.archive_run(run, redact_values: [])
+      assert gunzip_at!(SessionArchive.path_for(ctx.run_id)) =~ ~s("via":"run")
+    end
+
+    test "a run with no config root recorded at all is :no_config_dir, not a loss", ctx do
+      run = %{
+        id: ctx.run_id,
+        config_dir: nil,
+        session_id: "3ab7e7ea-8b87-4537-a271-840980e60907",
+        provider: "gemini",
+        task_id: nil
+      }
+
+      assert {:ok, %{status: :no_config_dir}} = SessionArchive.archive_run(run, redact_values: [])
+      refute SessionArchive.archived?(ctx.run_id)
+    end
+  end
+
+  describe "archive_session/4 — session-keyed entry point (§11, phase 9)" do
+    test "archives under the coordinator session id, not the provider session id", ctx do
+      coordinator_session_id = "88888888-8888-8888-8888-888888888888"
+      provider_session_id = "99999999-9999-9999-9999-999999999999"
+
+      seed_session(ctx.config_dir, provider_session_id, [
+        %{"type" => "assistant", "via" => "coordinator_session"}
+      ])
+
+      assert {:ok, %{status: :ok}} =
+               SessionArchive.archive_session(
+                 coordinator_session_id,
+                 ctx.config_dir,
+                 provider_session_id
+               )
+
+      assert SessionArchive.archived?(coordinator_session_id)
+      refute SessionArchive.archived?(provider_session_id)
+
+      assert gunzip_at!(SessionArchive.path_for(coordinator_session_id)) =~
+               ~s("via":"coordinator_session")
+    end
+
+    test "walks the provider session's subagent transcripts", ctx do
+      coordinator_session_id = "10101010-1010-1010-1010-101010101010"
+      provider_session_id = "20202020-2020-2020-2020-202020202020"
+
+      seed_session(
+        ctx.config_dir,
+        provider_session_id,
+        [%{"type" => "assistant"}],
+        [
+          {"agent-sub1.jsonl", ~s({"type":"assistant","sub":true}\n)},
+          {"agent-sub1.meta.json", ~s({"name":"Explore"})}
+        ]
+      )
+
+      assert {:ok, report} =
+               SessionArchive.archive_session(
+                 coordinator_session_id,
+                 ctx.config_dir,
+                 provider_session_id
+               )
+
+      assert report.subagents == 1
+
+      sub =
+        Path.join(
+          SessionArchive.subagents_dir_for(coordinator_session_id),
+          "agent-sub1.jsonl.gz"
+        )
+
+      assert File.regular?(sub)
+      assert gunzip_at!(sub) =~ ~s("sub":true)
+    end
+
+    test "no provider session id yet reports :no_session_id", ctx do
+      assert {:ok, %{status: :no_session_id}} =
+               SessionArchive.archive_session("session-id", ctx.config_dir, nil)
+    end
+  end
+end

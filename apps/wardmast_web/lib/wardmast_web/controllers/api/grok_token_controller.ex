@@ -1,0 +1,119 @@
+defmodule WardmastWeb.Api.GrokTokenController do
+  @moduledoc """
+  The server half of a grok worker's `GROK_AUTH_PROVIDER_COMMAND` (bd-9p4lx9).
+
+    * `POST /api/grok/token` — `{"force"?: true}` →
+      `{"access_token", "expires_in"}`
+
+  `arb grok-token` (run by grok itself through the wrapper
+  `Wardmast.Grok.AuthProvider` installs) calls this with the worker's own bearer
+  token. Each request is logged by the broker with the task (and, for a jailed
+  worker, the run) that asked. The answer comes from `Wardmast.Grok.CredentialBroker`, the single
+  refresher: the rotating refresh token stays on the server, and the worker only
+  ever holds an access token that expires in hours. `force` is grok's
+  `GROK_AUTH_EXPIRED=1`.
+
+  Failures are `503`, `Cache-Control: no-store`, and carry the remedy and no
+  token: `grok_reauth_required` / `grok_not_logged_in` (the operator has to run
+  a grok login; an auth hold is already open) or `grok_unavailable` (the issuer
+  is unreachable; retry).
+  """
+
+  use WardmastWeb, :controller
+
+  alias Wardmast.Errors
+  alias Wardmast.Grok.CredentialBroker
+  alias Wardmast.MCP.Scope
+  alias Wardmast.Params
+  alias Wardmast.Tasks.Issue
+
+  action_fallback(WardmastWeb.Api.FallbackController)
+
+  @relogin "Log in to grok again from the dashboard (the grok provider account's login); " <>
+             "with no grok account, run `grok login --device-code` on the Wardmast host."
+
+  def create(conn, params) do
+    conn = put_resp_header(conn, "cache-control", "no-store")
+
+    if worker_in_workspace?(conn), do: fetch(conn, params), else: refuse(conn)
+  end
+
+  defp fetch(conn, params) do
+    with {:ok, force?} <- params |> Params.fetch_bool("force", false) |> Params.to_rest() do
+      fetch_token(conn, force?)
+    end
+  end
+
+  defp fetch_token(conn, force?) do
+    case CredentialBroker.fetch_token(
+           force: force?,
+           task_id: requester_task(conn),
+           run_id: requester_run(conn)
+         ) do
+      {:ok, %{access_token: token, expires_in: expires_in}} ->
+        json(conn, %{access_token: token, expires_in: expires_in})
+
+      {:error, reason} ->
+        failure(conn, reason)
+    end
+  end
+
+  # P-28: a worker token is honoured only while its task still exists and sits
+  # in the workspace the token names, so a stale or forged-claim token cannot
+  # draw the installation's grok login. A coordinator token is not workspace-
+  # bound and passes (`docs/design/tier-proof-boundaries.md`).
+  defp worker_in_workspace?(%{assigns: %{mcp_scope: %Scope{tier: :worker} = scope}}) do
+    case is_binary(scope.task_id) && Ash.get(Issue, scope.task_id, error?: false) do
+      {:ok, %Issue{workspace_id: ws}} -> is_binary(ws) and ws == scope.workspace_id
+      _ -> false
+    end
+  end
+
+  defp worker_in_workspace?(_conn), do: true
+
+  defp refuse(conn) do
+    conn
+    |> put_status(:forbidden)
+    |> json(%{
+      error: %{
+        type: "forbidden",
+        message: "this worker token's task is not in its workspace (or no longer exists)",
+        details: %{}
+      }
+    })
+  end
+
+  # Who asked, for the broker's per-request log line (bd-8rvkqd). A worker
+  # token is bound to its task; a jailed worker's bridge also names its run.
+  defp requester_task(%{assigns: %{mcp_scope: %{task_id: task_id}}}), do: task_id
+  defp requester_task(_conn), do: nil
+
+  defp requester_run(%{assigns: %{worker_bridge: {run_id, _resolution}}}), do: run_id
+  defp requester_run(_conn), do: nil
+
+  defp failure(conn, :reauth_required) do
+    fail(
+      conn,
+      "grok_reauth_required",
+      "The grok login was refused by x.ai. #{@relogin}"
+    )
+  end
+
+  defp failure(conn, :not_logged_in) do
+    fail(
+      conn,
+      "grok_not_logged_in",
+      "There is no usable grok login. #{@relogin}"
+    )
+  end
+
+  defp failure(conn, :unavailable) do
+    fail(conn, "grok_unavailable", "x.ai could not be reached to refresh the grok token; retry.")
+  end
+
+  defp fail(conn, type, message) do
+    conn
+    |> put_status(Errors.http_status(:busy))
+    |> json(Errors.body(:busy, message, %{}, type: type))
+  end
+end

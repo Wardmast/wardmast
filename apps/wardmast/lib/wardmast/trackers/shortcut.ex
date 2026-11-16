@@ -1,0 +1,1020 @@
+defmodule Wardmast.Trackers.Shortcut do
+  @moduledoc """
+  Shortcut adapter implementing `Wardmast.Trackers.Tracker`.
+
+  Wraps Shortcut's REST API v3 (`api.app.shortcut.com/api/v3`) for story
+  fetch/update/transition flows. Used by the Emricare domains (Varek/tonic,
+  Soren/tonic_device) to sync tasks with their Shortcut board.
+
+  ## Active-workspace contract
+
+  Like the Jira adapter, the `Tracker` callbacks take only a `ref` (a story id)
+  with no workspace context. Shortcut needs an API token and a task-status →
+  workflow-state mapping, both workspace-scoped. We resolve those through
+  `Wardmast.Trackers.Shortcut.Config`:
+
+    1. Callers (request middleware, CLI command, scheduler job) call
+       `Config.put_active(workspace)` to populate the per-process config.
+    2. `Application.get_env(:wardmast, :shortcut_default_config)` is the fallback
+       for tools that run without a workspace context.
+    3. With neither, callbacks return `{:error, %Error{kind: :config_missing}}`.
+
+  ## Auth
+
+  Shortcut authenticates with a `Shortcut-Token: <token>` header (NOT Basic
+  auth like Jira, NOT Bearer). The token comes from the workspace's
+  `credentials_ref` (`"env:NAME"` or a bare literal).
+
+  ## Status mapping
+
+  Tracker-vocabulary atoms (`:open | :in_progress | :closed`) map to Shortcut
+  workflow *state names*. Shortcut moves a story between states by PUT-ing its
+  `workflow_state_id`, so we resolve the mapped state name to a concrete state
+  id via `GET /workflows`. Defaults are conservative ("Unstarted", "In
+  Progress", "Done"); each workspace can override via `tracker.config.status_map`.
+
+  An optional `workflow_id` narrows the state search (and `list_transitions/1`)
+  to a single workflow — useful when a workspace has multiple workflows that
+  share state names.
+
+  ## Tests
+
+  Wired up to `Req.Test`: when
+  `Application.get_env(:wardmast, :shortcut_http_stub, false)` is true, every
+  request injects `plug: {Req.Test, #{inspect(Wardmast.Trackers.Shortcut.HTTP)}}`.
+  This adapter **never** hits a real Shortcut endpoint from tests.
+  """
+
+  @behaviour Wardmast.Trackers.Tracker
+
+  alias Wardmast.Http.Client
+  alias Wardmast.Http.Error, as: ErrorSpec
+  alias Wardmast.Trackers.Shortcut.{Config, Error}
+
+  @base_url "https://api.app.shortcut.com/api/v3"
+  @stub_name Wardmast.Trackers.Shortcut.HTTP
+
+  # ---- Tracker behaviour ---------------------------------------------------
+
+  @impl true
+  def prepare(workspace, opts \\ []) do
+    Config.put_active(workspace)
+
+    case Keyword.get(opts, :repo) do
+      repo when is_binary(repo) and repo != "" ->
+        Config.override_repo(workspace, repo)
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  end
+
+  @impl true
+  def fetch(ref) when is_binary(ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, story} <- request(cfg, :get, "/stories/#{ref}", []) |> handle_json() do
+      {:ok, annotate_priority_field(cfg, story)}
+    end
+  end
+
+  # A story's `custom_fields` carry only `field_id` + `value`; the field's
+  # name lives on `/custom-fields`, and ids differ per org. Resolve the field
+  # named "Priority" and stash its id on the story (`arbiter_priority_field_id`)
+  # so the pure `extract_priority/1` can find the entry. Best-effort: a failed
+  # lookup leaves the story untouched (priority then falls back to default).
+  defp annotate_priority_field(cfg, %{"custom_fields" => [_ | _]} = story) do
+    with {:ok, %Req.Response{status: status, body: fields}} when status in 200..299 <-
+           request(cfg, :get, "/custom-fields", []),
+         true <- is_list(fields) do
+      story
+      |> Map.put("arbiter_custom_field_names", field_names(fields))
+      |> put_priority_field_id(fields)
+    else
+      _ -> story
+    end
+  end
+
+  defp annotate_priority_field(_cfg, story), do: story
+
+  defp put_priority_field_id(story, fields) do
+    case Enum.find(fields, &priority_field?/1) do
+      %{"id" => id} -> Map.put(story, "arbiter_priority_field_id", id)
+      _ -> story
+    end
+  end
+
+  defp field_names(fields) do
+    for %{"id" => id, "name" => name} <- fields, is_binary(name), into: %{}, do: {id, name}
+  end
+
+  defp priority_field?(%{"name" => name}) when is_binary(name),
+    do: name |> String.trim() |> String.downcase() == "priority"
+
+  defp priority_field?(_), do: false
+
+  @impl true
+  def transition(ref, status) when is_binary(ref) and is_atom(status) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, target_name} <- map_status(cfg, status),
+         {:ok, workflows} <- list_workflows(cfg),
+         {:ok, state_id} <- find_state_id(cfg, workflows, target_name),
+         guard <- guard_forward(cfg, ref, status, workflows, state_id) do
+      case guard do
+        :ok -> put_state(cfg, ref, state_id)
+        :noop -> :ok
+        {:error, _} = err -> err
+      end
+    end
+  end
+
+  defp put_state(cfg, ref, state_id) do
+    case request(cfg, :put, "/stories/#{ref}", json: %{"workflow_state_id" => state_id}) do
+      {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+        :ok
+
+      {:ok, %Req.Response{status: status_code, body: body}} ->
+        {:error, http_error(status_code, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  @impl true
+  def update_fields(ref, fields_map) when is_binary(ref) and is_map(fields_map) do
+    with {:ok, cfg} <- Config.resolve() do
+      payload = translate_fields(fields_map)
+
+      case request(cfg, :put, "/stories/#{ref}", json: payload) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @impl true
+  def add_comment(ref, body) when is_binary(ref) and is_binary(body) do
+    post_comment(ref, body)
+  end
+
+  # Shortcut has no dedicated "create external link" endpoint (a POST to
+  # /stories/{id}/external_links 404s). `external_links` is a plain array of
+  # URL strings on the Story object itself, so attaching a link is a
+  # read-modify-write: fetch the story, append the URL if it isn't already
+  # present, then PUT the story back. `title` has no home in Shortcut's
+  # schema for this field (external_links holds bare URLs), so it's accepted
+  # for interface parity with other adapters but otherwise unused here.
+  @impl true
+  def add_remote_link(ref, url, title)
+      when is_binary(ref) and is_binary(url) and is_binary(title) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, story} <- request(cfg, :get, "/stories/#{ref}", []) |> handle_json() do
+      current_links = story |> Map.get("external_links") |> List.wrap()
+      new_links = if url in current_links, do: current_links, else: current_links ++ [url]
+
+      case request(cfg, :put, "/stories/#{ref}", json: %{"external_links" => new_links}) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @impl true
+  def link_for(ref) when is_binary(ref), do: "https://app.shortcut.com/story/#{ref}"
+
+  @impl true
+  def parse_ref(s) when is_binary(s) do
+    cond do
+      String.starts_with?(s, "shortcut:") ->
+        s |> String.replace_prefix("shortcut:", "") |> integer_ref()
+
+      String.starts_with?(s, "sc-") ->
+        s |> String.replace_prefix("sc-", "") |> integer_ref()
+
+      String.starts_with?(s, "http://") or String.starts_with?(s, "https://") ->
+        case Regex.run(~r{/story/(\d+)}, s) do
+          [_, id] -> {:ok, id}
+          _ -> :error
+        end
+
+      true ->
+        integer_ref(s)
+    end
+  end
+
+  def parse_ref(_), do: :error
+
+  @impl true
+  def list_open(opts) when is_list(opts) do
+    with {:ok, cfg} <- Config.resolve() do
+      case Keyword.get(opts, :assignee, :viewer) do
+        :viewer ->
+          with {:ok, member_id} <- current_user() do
+            fetch_stories_by_owner(cfg, member_id)
+          end
+
+        id when is_binary(id) and id != "" ->
+          fetch_stories_by_owner(cfg, id)
+
+        other ->
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: nil,
+             message: "list_open: invalid :assignee option #{inspect(other)}",
+             raw: nil
+           }}
+      end
+    end
+  end
+
+  @impl true
+  def create(attrs) when is_map(attrs) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, title} <- fetch_title(attrs),
+         {:ok, workflows} <- list_workflows(cfg),
+         {:ok, state_id} <- resolve_initial_state(cfg, workflows, attrs),
+         {:ok, payload} <- build_create_payload(title, state_id, attrs) do
+      case request(cfg, :post, "/stories", json: payload) do
+        {:ok, %Req.Response{status: status_code, body: %{"id" => id}}}
+        when status_code in 200..299 and is_integer(id) ->
+          {:ok, Integer.to_string(id)}
+
+        {:ok, %Req.Response{status: status_code, body: body}} when status_code in 200..299 ->
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: status_code,
+             message: "Shortcut create response missing \"id\"",
+             raw: body
+           }}
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  defp fetch_title(%{title: title}) when is_binary(title) and title != "", do: {:ok, title}
+  defp fetch_title(%{"title" => title}) when is_binary(title) and title != "", do: {:ok, title}
+
+  defp fetch_title(_),
+    do:
+      {:error,
+       %Error{
+         kind: :validation_failed,
+         status: nil,
+         message: "create requires a non-empty :title",
+         raw: nil
+       }}
+
+  defp resolve_initial_state(cfg, workflows, attrs) do
+    status = pluck(attrs, [:status, "status"]) || :open
+    target_name = Map.get(cfg.status_map, status)
+
+    case target_name do
+      name when is_binary(name) and name != "" ->
+        find_state_id(cfg, workflows, name)
+
+      _ ->
+        find_state_id(cfg, workflows, Map.get(cfg.status_map, :open, "Unstarted"))
+    end
+  end
+
+  defp build_create_payload(title, state_id, attrs) do
+    description = pluck(attrs, [:description, "description"])
+
+    payload =
+      %{"name" => title, "workflow_state_id" => state_id}
+      |> maybe_put_description(description)
+
+    {:ok, payload}
+  end
+
+  defp pluck(map, keys) do
+    Enum.find_value(keys, fn k ->
+      case Map.fetch(map, k) do
+        {:ok, v} -> v
+        :error -> nil
+      end
+    end)
+  end
+
+  defp maybe_put_description(payload, nil), do: payload
+  defp maybe_put_description(payload, ""), do: payload
+  defp maybe_put_description(payload, desc), do: Map.put(payload, "description", desc)
+
+  @impl true
+  def search_by_title(title) when is_binary(title) do
+    with {:ok, cfg} <- Config.resolve() do
+      escaped = String.replace(title, "\"", "\\\"")
+      query = "title:\"#{escaped}\""
+
+      case request(cfg, :get, "/search/stories", params: [query: query, page_size: 25]) do
+        {:ok, %Req.Response{status: status_code, body: %{"data" => stories}}}
+        when status_code in 200..299 and is_list(stories) ->
+          norm = normalize_title(title)
+
+          matches =
+            stories
+            |> Enum.filter(fn story ->
+              normalize_title(Map.get(story, "name", "")) == norm
+            end)
+            |> Enum.map(&summarize_story/1)
+
+          {:ok, matches}
+
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          {:ok, []}
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @search_page_limit 10
+
+  @impl true
+  def search_stories({:epic, epic_id}) when is_binary(epic_id) do
+    with {:ok, cfg} <- Config.resolve() do
+      case request(cfg, :get, "/epics/#{URI.encode(epic_id)}/stories", []) do
+        {:ok, %Req.Response{status: status_code, body: stories}}
+        when status_code in 200..299 and is_list(stories) ->
+          {:ok, Enum.map(stories, &summarize_story/1)}
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  def search_stories({:query, query}) when is_binary(query) do
+    with {:ok, cfg} <- Config.resolve() do
+      search_pages(cfg, [query: query, page_size: 25], [], @search_page_limit)
+    end
+  end
+
+  defp search_pages(_cfg, _params, acc, 0), do: {:ok, Enum.reverse(acc)}
+
+  defp search_pages(cfg, params, acc, pages_left) do
+    case request(cfg, :get, "/search/stories", params: params) do
+      {:ok, %Req.Response{status: status_code, body: %{"data" => stories} = body}}
+      when status_code in 200..299 and is_list(stories) ->
+        acc = Enum.reduce(stories, acc, &[summarize_story(&1) | &2])
+
+        case next_page_token(body["next"]) do
+          nil -> {:ok, Enum.reverse(acc)}
+          token -> search_pages(cfg, Keyword.put(params, :next, token), acc, pages_left - 1)
+        end
+
+      {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+        {:ok, Enum.reverse(acc)}
+
+      {:ok, %Req.Response{status: status_code, body: body}} ->
+        {:error, http_error(status_code, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # Shortcut's `next` is a relative URL (`/api/v3/search/stories?...&next=<token>`).
+  defp next_page_token(next) when is_binary(next) do
+    case URI.parse(next) do
+      %URI{query: q} when is_binary(q) -> Map.get(URI.decode_query(q), "next")
+      _ -> nil
+    end
+  end
+
+  defp next_page_token(_), do: nil
+  @impl true
+  def list_transitions(ref) when is_binary(ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, workflows} <- list_workflows(cfg) do
+      # Reverse-map Shortcut state names to task-status atoms via the
+      # workspace's status_map (which maps atom -> state name).
+      reverse = Enum.into(cfg.status_map, %{}, fn {k, v} -> {v, k} end)
+
+      atoms =
+        cfg
+        |> states_for(workflows)
+        |> Enum.map(fn %{"name" => name} -> Map.get(reverse, name) end)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.uniq()
+
+      {:ok, atoms}
+    end
+  end
+
+  # ---- Tracker behaviour: claim callbacks ------------------------------------
+
+  @ownership_marker "Wardmast installation:"
+
+  @impl true
+  def check_prior_claim(ref) when is_binary(ref) do
+    case list_comments(ref) do
+      {:ok, comments} ->
+        case Enum.find(comments, &String.contains?(&1["text"] || "", @ownership_marker)) do
+          nil -> :ok
+          %{"text" => body} -> {:error, {:already_claimed, body}}
+        end
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
+  @impl true
+  def signal_claim(
+        ref,
+        task_id,
+        %{
+          workspace_name: name,
+          workspace_prefix: prefix,
+          current_user: member_id,
+          host: host
+        } = ctx
+      ) do
+    body =
+      "Claimed as #{task_id} by #{name} (#{prefix}). #{@ownership_marker} #{host}."
+
+    post_comment(ref, body)
+    # Ownership on the tracker is never changed unless the claim asked for it (`assign: true`).
+    if Map.get(ctx, :assign, false), do: assign_user(ref, member_id)
+    :ok
+  end
+
+  @impl true
+  def current_user do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, %{"id" => id}} when is_binary(id) <-
+           request(cfg, :get, "/member", []) |> handle_json() do
+      {:ok, id}
+    else
+      {:ok, _other} ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: nil,
+           message: "GET /member returned no id",
+           raw: nil
+         }}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  @impl true
+  def assignees(%{"owner_ids" => ids}) when is_list(ids), do: ids
+  def assignees(_), do: []
+
+  @impl true
+  def issue_status(%{"archived" => true}), do: :closed
+  def issue_status(%{"completed" => true}), do: :closed
+  def issue_status(%{"started" => true}), do: :in_progress
+  def issue_status(_), do: :open
+
+  @impl true
+  def extract_title(%{"name" => name}) when is_binary(name) and name != "", do: name
+  def extract_title(_), do: "(no title)"
+
+  # A story's `epic_id` points at a Shortcut epic; resolve its name for the
+  # local mirror. The `epic-` prefix keeps the ref out of the story id space.
+  @impl true
+  def epic_for(%{"epic_id" => epic_id}) when is_integer(epic_id) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, epic} <- request(cfg, :get, "/epics/#{epic_id}", []) |> handle_json() do
+      {:ok,
+       %{
+         ref: "epic-#{epic_id}",
+         title: extract_title(epic),
+         description: extract_description(epic)
+       }}
+    end
+  end
+
+  def epic_for(_), do: nil
+
+  # Shortcut story links are directional `subject --verb--> object`; "blocks"
+  # means the subject blocks the object. Re-expressed relative to this story.
+  @impl true
+  def links_for(%{"id" => id, "story_links" => links}) when is_list(links) do
+    self_id = to_string(id)
+
+    Enum.flat_map(links, fn
+      %{"subject_id" => s, "object_id" => o, "verb" => verb} ->
+        {subject, object} = {to_string(s), to_string(o)}
+
+        cond do
+          subject == self_id -> [%{kind: link_kind(verb, :subject), ref: object, verb: verb}]
+          object == self_id -> [%{kind: link_kind(verb, :object), ref: subject, verb: verb}]
+          true -> []
+        end
+
+      _ ->
+        []
+    end)
+  end
+
+  def links_for(_), do: []
+
+  defp link_kind("blocks", :subject), do: :blocks
+  defp link_kind("blocks", :object), do: :blocked_by
+  defp link_kind("relates to", _), do: :relates_to
+  defp link_kind(_, _), do: :other
+
+  @impl true
+  def extract_description(%{
+        "description" => desc
+      })
+      when is_binary(desc), do: desc
+
+  def extract_description(_), do: ""
+
+  @impl true
+  def extract_checklist(%{"tasks" => [_ | _] = tasks}) do
+    for %{"description" => d} when is_binary(d) <- tasks, do: d
+  end
+
+  def extract_checklist(_), do: []
+
+  # Priority is the org's "Priority" custom field (Highest/High/Medium/Low →
+  # 0/1/2/3), located by name in `fetch/1` (field ids differ per workspace).
+  # Unset or unrecognised returns nil so the schema default applies.
+  @impl true
+  def extract_priority(%{"arbiter_priority_field_id" => field_id, "custom_fields" => fields})
+      when is_list(fields) do
+    fields
+    |> Enum.find(&(is_map(&1) and &1["field_id"] == field_id))
+    |> case do
+      %{"value" => value} when is_binary(value) -> priority_from_value(value)
+      _ -> nil
+    end
+  end
+
+  def extract_priority(_), do: nil
+
+  defp priority_from_value(value) do
+    case value |> String.trim() |> String.downcase() do
+      "highest" -> {:ok, 0}
+      "high" -> {:ok, 1}
+      "medium" -> {:ok, 2}
+      "low" -> {:ok, 3}
+      _ -> nil
+    end
+  end
+
+  # The value of the story's custom field named `name` (case-insensitive), e.g.
+  # "Technical Area". Field names are resolved in `fetch/1`.
+  @impl true
+  def extract_field(%{"arbiter_custom_field_names" => names, "custom_fields" => fields}, name)
+      when is_list(fields) and is_binary(name) do
+    wanted = name |> String.trim() |> String.downcase()
+
+    Enum.find_value(fields, fn
+      %{"field_id" => id, "value" => value} when is_binary(value) ->
+        field = Map.get(names, id)
+        if is_binary(field) and String.downcase(String.trim(field)) == wanted, do: value
+
+      _ ->
+        nil
+    end)
+  end
+
+  def extract_field(_, _), do: nil
+
+  @impl true
+  def extract_estimate(%{"estimate" => pts}) when is_number(pts), do: pts
+  def extract_estimate(_), do: nil
+
+  # Shortcut's `story_type` is bug | feature | chore, which are Wardmast issue types.
+  @impl true
+  def extract_issue_type(%{"story_type" => "bug"}), do: {:ok, :bug}
+  def extract_issue_type(%{"story_type" => "feature"}), do: {:ok, :feature}
+  def extract_issue_type(%{"story_type" => "chore"}), do: {:ok, :chore}
+  def extract_issue_type(_), do: nil
+
+  # Shortcut stories expose an `estimate` integer when story-point estimation
+  # is enabled for the workflow. Difficulty extraction is off by default; it
+  # activates when the workspace sets `difficulty.buckets` in the tracker config.
+  @impl true
+  def extract_difficulty(raw_issue) do
+    with {:ok, %{estimate_buckets: buckets}} when not is_nil(buckets) <- Config.resolve(),
+         pts when is_number(pts) <- Map.get(raw_issue, "estimate") do
+      {:ok, points_to_difficulty(buckets, pts)}
+    else
+      _ -> nil
+    end
+  end
+
+  # ---- Public helpers ------------------------------------------------------
+
+  @doc """
+  Convenience: set the active workspace for the current process and run `fun`,
+  clearing the config when `fun` returns. Useful in tests and one-shot scripts.
+  """
+  @spec with_workspace(map() | Wardmast.Tasks.Workspace.t(), (-> result)) :: result
+        when result: any()
+  def with_workspace(workspace_or_config, fun) when is_function(fun, 0) do
+    prev = Process.get({Config, :active_workspace_config})
+    Config.put_active(workspace_or_config)
+
+    try do
+      fun.()
+    after
+      if prev, do: Config.put_active(prev), else: Config.clear()
+    end
+  end
+
+  # ---- Internals: title search --------------------------------------------
+
+  defp normalize_title(title), do: title |> String.downcase() |> String.trim()
+
+  # ---- Internals: list_open -----------------------------------------------
+
+  defp fetch_stories_by_owner(cfg, member_id) do
+    payload = %{
+      "owner_ids" => [member_id],
+      "workflow_state_types" => ["backlog", "unstarted", "started"],
+      "archived" => false
+    }
+
+    case request(cfg, :post, "/stories/search", json: payload) do
+      {:ok, %Req.Response{status: status_code, body: stories}}
+      when status_code in 200..299 and is_list(stories) ->
+        {:ok, Enum.map(stories, &summarize_story/1)}
+
+      {:ok, %Req.Response{status: status_code, body: _body}} when status_code in 200..299 ->
+        {:ok, []}
+
+      {:ok, %Req.Response{status: status_code, body: body}} ->
+        {:error, http_error(status_code, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  defp summarize_story(%{"id" => id} = story) do
+    %{
+      ref: to_string(id),
+      title: Map.get(story, "name") || "(no title)",
+      url: Map.get(story, "app_url"),
+      status: issue_status(story),
+      assignees: assignees(story),
+      raw: story
+    }
+  end
+
+  # ---- Internals: claim helpers -------------------------------------------
+
+  defp list_comments(ref) do
+    with {:ok, cfg} <- Config.resolve() do
+      case request(cfg, :get, "/stories/#{ref}/comments", []) do
+        {:ok, %Req.Response{status: status_code, body: list}}
+        when status_code in 200..299 and is_list(list) ->
+          {:ok, list}
+
+        {:ok, %Req.Response{status: status_code, body: body}} when status_code in 200..299 ->
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: status_code,
+             message: "comments response was not a list",
+             raw: body
+           }}
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  defp post_comment(ref, text) do
+    with {:ok, cfg} <- Config.resolve() do
+      case request(cfg, :post, "/stories/#{ref}/comments", json: %{"text" => text}) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  defp assign_user(ref, member_id) do
+    with {:ok, cfg} <- Config.resolve() do
+      current_ids =
+        case request(cfg, :get, "/stories/#{ref}", []) |> handle_json() do
+          {:ok, %{"owner_ids" => ids}} when is_list(ids) -> ids
+          _ -> []
+        end
+
+      new_ids = Enum.uniq([member_id | current_ids])
+
+      case request(cfg, :put, "/stories/#{ref}", json: %{"owner_ids" => new_ids}) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  # ---- Internals: workflows / states --------------------------------------
+
+  defp list_workflows(cfg) do
+    case request(cfg, :get, "/workflows", []) do
+      {:ok, %Req.Response{status: status_code, body: list}}
+      when status_code in 200..299 and is_list(list) ->
+        {:ok, list}
+
+      {:ok, %Req.Response{status: status_code, body: body}} when status_code in 200..299 ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status_code,
+           message: "workflows response was not a list",
+           raw: body
+         }}
+
+      {:ok, %Req.Response{status: status_code, body: body}} ->
+        {:error, http_error(status_code, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # All workflow states, narrowed to the configured workflow_id when set.
+  defp states_for(%{workflow_id: workflow_id}, workflows) do
+    workflows
+    |> Enum.filter(fn wf ->
+      is_nil(workflow_id) or Map.get(wf, "id") == workflow_id
+    end)
+    |> Enum.flat_map(fn wf -> Map.get(wf, "states") || [] end)
+  end
+
+  defp map_status(%{status_map: map}, status) do
+    case Map.fetch(map, status) do
+      {:ok, name} when is_binary(name) and name != "" ->
+        {:ok, name}
+
+      _ ->
+        {:error,
+         %Error{
+           kind: :transition_not_found,
+           status: nil,
+           message: "no Shortcut state name mapped for tracker status #{inspect(status)}",
+           raw: nil
+         }}
+    end
+  end
+
+  defp find_state_id(cfg, workflows, target_name) do
+    states = states_for(cfg, workflows)
+
+    case Enum.find(states, fn %{"name" => n} -> n == target_name end) do
+      %{"id" => id} when is_integer(id) ->
+        {:ok, id}
+
+      _ ->
+        {:error,
+         %Error{
+           kind: :transition_not_found,
+           status: nil,
+           message:
+             "Shortcut state #{inspect(target_name)} not found; " <>
+               "available: #{inspect(Enum.map(states, & &1["name"]))}",
+           raw: workflows
+         }}
+    end
+  end
+
+  # A forward transition must never move a story backwards (bd-4i7kky for
+  # `:closed`, every lifecycle event since bd-30ukqo). A status can map to
+  # an intermediate state ("Ready for Deploy"), and a story other people have
+  # since moved on ("QA", "Deployed") is then *past* it; an unconditional PUT
+  # would drag it back under the token owner's name. Shortcut, unlike Jira,
+  # exposes an ordering: a state's `type` (unstarted < started < done) and its
+  # `position` within the workflow. A story already at, or later than, the
+  # target is left alone. A story whose current state can't be placed (not in
+  # any workflow listed, or no positions to compare) is closed as before.
+  #
+  # `:open` is exempt (the deliberate `:requeue` / `:reopen` reset,
+  # bd-36ytcl), and a story already exactly on the target is `:noop`.
+  defp guard_forward(_cfg, _ref, :open, _workflows, _target_id), do: :ok
+
+  defp guard_forward(cfg, ref, status, workflows, target_id) do
+    with {:ok, story} <-
+           request(cfg, :get, "/stories/#{ref}", []) |> handle_json() do
+      states = indexed_states(workflows)
+
+      if story["workflow_state_id"] == target_id do
+        :noop
+      else
+        guard_ordering(ref, status, story, states, target_id)
+      end
+    end
+  end
+
+  defp guard_ordering(ref, status, story, states, target_id) do
+    with current_id when is_integer(current_id) <- story["workflow_state_id"],
+         {wf_cur, current} <- Map.get(states, current_id),
+         {wf_target, target} <- Map.get(states, target_id),
+         true <- state_at_or_past?(current, wf_cur == wf_target, target) do
+      {:error,
+       %Error{
+         kind: :upstream_past_target,
+         status: nil,
+         message:
+           "story #{ref} is in #{inspect(current["name"])}, already at or past the " <>
+             "#{status}-mapped state #{inspect(target["name"])} — leaving it where it is",
+         raw: nil
+       }}
+    else
+      _ -> :ok
+    end
+  end
+
+  # state id => {workflow id, state}, across every workflow (not just the
+  # configured one — a story can sit in another workflow's state).
+  defp indexed_states(workflows) do
+    for wf <- workflows,
+        state <- Map.get(wf, "states") || [],
+        is_integer(state["id"]),
+        into: %{} do
+      {state["id"], {wf["id"], state}}
+    end
+  end
+
+  @state_type_rank %{"unstarted" => 0, "started" => 1, "done" => 2}
+
+  defp state_at_or_past?(%{"id" => id}, _same_workflow?, %{"id" => id}), do: true
+
+  defp state_at_or_past?(current, same_workflow?, target) do
+    cur_rank = Map.get(@state_type_rank, current["type"])
+    target_rank = Map.get(@state_type_rank, target["type"])
+
+    cond do
+      is_nil(cur_rank) or is_nil(target_rank) ->
+        false
+
+      cur_rank != target_rank ->
+        cur_rank > target_rank
+
+      # Equal rank in different workflows: positions are not comparable, so
+      # there is no proof the story is still short of the target. Decline
+      # rather than move it across workflows into a possibly earlier slot.
+      not same_workflow? ->
+        true
+
+      true ->
+        is_integer(current["position"]) and is_integer(target["position"]) and
+          current["position"] > target["position"]
+    end
+  end
+
+  # ---- Internals: field translation ---------------------------------------
+
+  # Task-domain field keys -> Shortcut story attributes.
+  @field_map %{
+    title: "name",
+    description: "description"
+  }
+
+  defp translate_fields(fields_map) do
+    Enum.reduce(fields_map, %{}, fn {key, value}, acc ->
+      atom_key = if is_atom(key), do: key, else: safe_atom(key)
+
+      case Map.fetch(@field_map, atom_key) do
+        {:ok, sc_key} -> Map.put(acc, sc_key, value)
+        :error -> acc
+      end
+    end)
+  end
+
+  defp safe_atom(key) when is_binary(key) do
+    String.to_existing_atom(key)
+  rescue
+    ArgumentError -> :__unknown__
+  end
+
+  # ---- Internals: ref parsing ---------------------------------------------
+
+  defp integer_ref(s) do
+    case Integer.parse(s) do
+      {n, ""} when n > 0 -> {:ok, Integer.to_string(n)}
+      _ -> :error
+    end
+  end
+
+  # ---- Internals: HTTP ----------------------------------------------------
+
+  defp client(cfg) do
+    Client.new(
+      base_url: @base_url,
+      headers: headers(cfg),
+      errors: error_spec(),
+      stub: {:shortcut_http_stub, @stub_name}
+    )
+  end
+
+  # Classification needs no request config, so call sites holding only a
+  # response can build an error without re-resolving the client.
+  defp error_spec do
+    ErrorSpec.new(
+      module: Error,
+      classify_kind: fn status_code, _body -> kind_for_status(status_code) end,
+      error_message: &error_message/2
+    )
+  end
+
+  defp request(cfg, method, path, req_opts),
+    do: Client.request(client(cfg), method, path, req_opts)
+
+  defp handle_json(result), do: Client.handle_json(error_spec(), result)
+
+  defp headers(%{token: token}) do
+    [
+      {"shortcut-token", token},
+      {"accept", "application/json"},
+      {"content-type", "application/json"},
+      {"user-agent", "arbiter"}
+    ]
+  end
+
+  defp http_error(status_code, body),
+    do: Client.http_error(error_spec(), status_code, body)
+
+  defp kind_for_status(400), do: :validation_failed
+  defp kind_for_status(401), do: :unauthenticated
+  defp kind_for_status(403), do: :forbidden
+  defp kind_for_status(404), do: :not_found
+  defp kind_for_status(422), do: :validation_failed
+  defp kind_for_status(s) when s >= 500 and s < 600, do: :server_error
+  defp kind_for_status(_), do: :http
+
+  defp error_message(%{"message" => msg}, _) when is_binary(msg), do: msg
+
+  defp error_message(%{"errors" => errors}, status_code),
+    do: "HTTP #{status_code}: #{inspect(errors)}"
+
+  defp error_message(_, status_code), do: "HTTP #{status_code}"
+
+  defp transport_error(exception), do: Client.transport_error(error_spec(), exception)
+
+  defp points_to_difficulty(buckets, pts) do
+    case Enum.find(buckets, fn {max, _} -> pts <= max end) do
+      {_, d} -> d
+      nil -> over_ceiling_difficulty(buckets)
+    end
+  end
+
+  # Points above the top bucket land at D4 ("extreme") — the stock behaviour,
+  # and the reason the default table stops at D3: D5 is never reached by an
+  # implicit fallthrough. #1519: if an operator explicitly configured a bucket
+  # above D4, honour it here too, otherwise a high point count would map
+  # *lower* than a smaller one.
+  defp over_ceiling_difficulty(buckets) do
+    buckets
+    |> Enum.map(fn {_, d} -> d end)
+    |> Enum.max(fn -> 4 end)
+    |> max(4)
+  end
+end

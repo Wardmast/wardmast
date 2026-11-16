@@ -1,0 +1,1399 @@
+defmodule Wardmast.Trackers.Jira do
+  @moduledoc """
+  Jira adapter implementing `Wardmast.Trackers.Tracker`.
+
+  Wraps Jira Cloud's REST API v3 for issue fetch/update/transition flows.
+
+  ## Active-workspace contract
+
+  The `Tracker` behaviour callbacks take a `ref` (e.g. `"AX-17585"`) with no
+  workspace context. But Jira needs a host, project key, email + token, and
+  field-id / status-name mappings — all workspace-scoped. We resolve those
+  through `Wardmast.Trackers.Jira.Config`:
+
+    1. Callers (request middleware, CLI command, scheduler job) call
+       `Config.put_active(workspace)` to populate the per-process config.
+    2. `Application.get_env(:wardmast, :jira_default_config)` is the
+       fallback for tools that run without a workspace context.
+    3. With neither, callbacks return `{:error, %Error{kind: :config_missing}}`.
+
+  This uses a per-process active config populated by the caller. Two
+  alternatives were considered and rejected:
+
+    * **Extra `Workspace` argument**: breaks the behaviour signature and
+      forces every caller to thread workspace through the stack.
+    * **Resolve workspace from the task via Ash inside the adapter**: the
+      adapter takes only a `ref` (string), not the task — and reaching back
+      to Ash from inside a tracker callback couples the HTTP layer to the
+      database. Worse for testability.
+
+  ## Auth
+
+  Jira Cloud uses **Basic auth** (NOT Bearer) with `email:api_token`. The
+  email and the credentials reference both live in the workspace tracker
+  config. `credentials_ref` is a small DSL — currently only `"env:NAME"`
+  is supported (looks up `System.get_env/1`); a bare string is treated as
+  a literal token.
+
+  ## Status mapping & path-finding
+
+  Tracker-vocabulary atoms (`:open | :in_progress | :closed`, plus the richer
+  `:pr_opened | :approved_unmerged | :merged`) map to a Jira target **status
+  name** (NOT a transition name) via `tracker.config.status_map`. Jira's REST
+  API moves issues by invoking transitions, so `transition/2` resolves a *path*
+  to the target:
+
+    * **Single-hop fast path** — if a live transition's `to` already equals the
+      target status, invoke it directly (no graph needed).
+    * **Multi-hop** — otherwise fetch the issue's current status and BFS the
+      configured `transition_graph` (e.g. Backlog → To Do → In Progress),
+      executing each hop and re-listing the available transitions between hops.
+
+  The graph describes a **route** — which statuses to pass through — and every
+  hop is resolved against the live transitions by its *destination status*, not
+  by the transition's name. Jira workflows (and therefore transition names) can
+  differ per issue type on the same project, so a name-matched graph is only
+  ever correct for one type; a route is type-agnostic by construction.
+
+  A lifecycle event with no `status_map` entry yields `:status_unmapped` (a
+  benign "this tracker doesn't model that" skip); a *mapped* target that can't
+  be reached yields `:no_transition_path` (BFS found no path in the configured
+  graph) or `:transition_unavailable` (BFS planned a path, but when the hop was
+  executed no live transition landed on its destination status — the route
+  passes through a status this issue can't reach from here), both of which the
+  sync layer surfaces loudly. See
+  `Wardmast.Trackers.Jira.Config` and `Wardmast.Trackers.Sync`.
+
+  ## Tests
+
+  Wired up to `Req.Test`: when
+  `Application.get_env(:wardmast, :jira_http_stub, false)` is true, every
+  request injects `plug: {Req.Test, #{inspect(Wardmast.Trackers.Jira.HTTP)}}`.
+  This adapter **never** hits a real Atlassian endpoint from tests.
+  """
+
+  @behaviour Wardmast.Trackers.Tracker
+
+  alias Wardmast.Http.Client
+  alias Wardmast.Http.Error, as: ErrorSpec
+  alias Wardmast.Trackers.Jira.{ADF, Config, Error}
+
+  @stub_name Wardmast.Trackers.Jira.HTTP
+
+  # ---- Tracker behaviour ---------------------------------------------------
+
+  @impl true
+  def prepare(workspace, opts \\ []) do
+    Config.put_active(workspace)
+
+    case Keyword.get(opts, :repo) do
+      repo when is_binary(repo) and repo != "" ->
+        Config.override_repo(workspace, repo)
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  end
+
+  @impl true
+  def fetch(ref) when is_binary(ref) do
+    with {:ok, cfg} <- Config.resolve() do
+      request(cfg, :get, "/issue/#{ref}", [])
+      |> handle_json()
+    end
+  end
+
+  @impl true
+  def transition(ref, status) when is_binary(ref) and is_atom(status) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, target_status} <- map_status(cfg, status),
+         {:ok, transitions} <- list_raw_transitions(cfg, ref) do
+      case direct_transition_id(transitions, target_status) do
+        {:ok, id} ->
+          # Single-hop fast path: a live transition lands directly on the
+          # target status (its `to` already equals the target).
+          case guard_forward(cfg, ref, status, target_status, transitions) do
+            :ok -> post_transition(cfg, ref, id)
+            :noop -> :ok
+            {:error, _} = err -> err
+          end
+
+        :none ->
+          # No direct edge — fetch the current status and walk the workflow
+          # graph (multi-hop, e.g. Backlog -> … -> In Progress).
+          resolve_multi_hop(cfg, ref, status, target_status)
+      end
+    end
+  end
+
+  # A forward transition must never move a ticket backwards (bd-4i7kky for
+  # `:closed`, generalised to every lifecycle event by bd-30ukqo). Jira has no
+  # ordering between statuses, and a workflow commonly lets *any* status
+  # transition straight to any other, so "a live transition to the target
+  # exists" proves nothing about the ticket still being short of it.
+  #
+  # A `done`-category target is terminal, so any ticket not already done is
+  # genuinely behind it and the guard has nothing to say. An intermediate
+  # target (`closed => "Code Complete"`, the recommendation when the tracker's
+  # `Done` means "deployed", or `merged => "Code Complete"`) has others'
+  # statuses after it — QA, Ready To Deploy — so the ticket is only moved when
+  # it is *demonstrably* still before it: Jira's `new` category, a status the
+  # workspace maps to an earlier lifecycle event, or one the `transition_graph` routes into the target. Any
+  # other status is somebody else's progress and is left where they put it.
+  #
+  # The target's category comes from the live transition's own `to` block; a
+  # transition without one (never the case on real Jira) skips the guard.
+  #
+  # `:open` is exempt: it is the deliberate reset `:requeue` / `:reopen` push
+  # (bd-36ytcl), not a forward move. A ticket already exactly on the target
+  # returns `:noop` — nothing to write, nothing declined, so no notice.
+  defp guard_forward(_cfg, _ref, :open, _target_status, _transitions), do: :ok
+
+  defp guard_forward(cfg, ref, status, target_status, transitions) do
+    case target_category(transitions, target_status) do
+      category when is_binary(category) and category != "done" ->
+        with {:ok, current, current_category} <- current_status_info(cfg, ref) do
+          cond do
+            current == target_status ->
+              :noop
+
+            may_proceed?(cfg, status, target_status, current, current_category) ->
+              :ok
+
+            true ->
+              {:error, past_target_error(ref, status, current, target_status)}
+          end
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp past_target_error(ref, status, current, target_status) do
+    %Error{
+      kind: :upstream_past_target,
+      status: nil,
+      message:
+        "#{ref} is in #{inspect(current)}, which is not known to precede the " <>
+          "#{status}-mapped status #{inspect(target_status)} — leaving it where it is",
+      raw: nil
+    }
+  end
+
+  defp target_category(transitions, target_status) do
+    Enum.find_value(transitions, fn t ->
+      transition_target(t) == target_status && get_in(t, ["to", "statusCategory", "key"])
+    end)
+  end
+
+  defp may_proceed?(_cfg, _status, _target, _current, "done"), do: false
+  defp may_proceed?(_cfg, _status, _target, _current, "new"), do: true
+
+  defp may_proceed?(cfg, status, target, current, _category) do
+    current != target and current in statuses_before(cfg, status, target)
+  end
+
+  # Lifecycle events in the order a ticket meets them. A status mapped to an
+  # event strictly earlier than `status` is known to precede its target.
+  @lifecycle_order [:open, :in_progress, :pr_opened, :approved_unmerged, :merged, :closed]
+
+  # Statuses known to sit before the target: where the workspace's own
+  # earlier lifecycle events put a ticket (its "anchors"), plus any graph node
+  # that is demonstrably on the forward route from an anchor to the target.
+  #
+  # "A route from X to the target exists" is NOT enough — a rework edge
+  # (`QA -> In Progress -> … -> Code Complete`) gives QA a route to Code
+  # Complete by going backwards. So a graph node X counts only when
+  #
+  #   * X can reach the target, and
+  #   * the target cannot reach X again (X is not in a cycle with it), and
+  #   * an anchor can reach X (the graph walks *forward* into it from where
+  #     arbiter itself puts tickets) — QA, with only outgoing edges, fails this.
+  #
+  # A workspace with its own pre-close status therefore names the forward route
+  # into it in `transition_graph`, e.g. `"In Progress" => Peer Review => Code
+  # Complete`.
+  defp statuses_before(cfg, status, target) do
+    graph = cfg.transition_graph
+
+    earlier = Enum.take_while(@lifecycle_order, &(&1 != status))
+
+    anchors =
+      for {event, name} <- cfg.status_map,
+          event in earlier,
+          is_binary(name),
+          name != "",
+          name != target,
+          do: name
+
+    routed =
+      for {from, _edges} <- graph,
+          from != target,
+          match?({:ok, _}, plan_transition_path(graph, from, target)),
+          match?({:error, _}, plan_transition_path(graph, target, from)),
+          Enum.any?(anchors, &match?({:ok, _}, plan_transition_path(graph, &1, from))),
+          do: from
+
+    Enum.uniq(anchors ++ routed)
+  end
+
+  @impl true
+  def update_fields(ref, fields_map) when is_binary(ref) and is_map(fields_map) do
+    with {:ok, cfg} <- Config.resolve() do
+      translated = translate_fields(cfg, fields_map)
+      payload = %{"fields" => translated}
+
+      case request(cfg, :put, "/issue/#{ref}", json: payload) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @impl true
+  def link_for(ref) when is_binary(ref) do
+    case Config.resolve() do
+      {:ok, %{host: host}} -> "https://#{host}/browse/#{ref}"
+      {:error, _} -> "https://example.atlassian.net/browse/#{ref}"
+    end
+  end
+
+  @impl true
+  def add_remote_link(ref, url, title)
+      when is_binary(ref) and is_binary(url) and is_binary(title) do
+    with {:ok, cfg} <- Config.resolve() do
+      # `globalId` makes the link idempotent: re-posting the same PR URL
+      # updates the existing remote link rather than creating a duplicate.
+      payload = %{
+        "globalId" => "arbiter-pr=#{url}",
+        "object" => %{"url" => url, "title" => title}
+      }
+
+      case request(cfg, :post, "/issue/#{ref}/remotelink", json: payload) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @impl true
+  def add_comment(ref, body) when is_binary(ref) and is_binary(body) do
+    with {:ok, cfg} <- Config.resolve() do
+      # v3 comment endpoint takes the body as an ADF document.
+      payload = %{"body" => ADF.from_markdown(body)}
+
+      case request(cfg, :post, "/issue/#{ref}/comment", json: payload) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: resp_body}} ->
+          {:error, http_error(status_code, resp_body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @impl true
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  def parse_ref(s) when is_binary(s) do
+    cond do
+      String.starts_with?(s, "jira:") ->
+        rest = String.replace_prefix(s, "jira:", "")
+
+        if issue_key?(rest), do: {:ok, rest}, else: :error
+
+      String.starts_with?(s, "http://") or String.starts_with?(s, "https://") ->
+        case Regex.run(~r{/browse/([A-Z][A-Z0-9_]*-\d+)}, s) do
+          [_, key] -> {:ok, key}
+          _ -> :error
+        end
+
+      issue_key?(s) ->
+        case Config.active_project_key() do
+          nil ->
+            # No active workspace — can't know which project this belongs to,
+            # so we refuse rather than guess.
+            :error
+
+          project_key ->
+            if String.starts_with?(s, project_key <> "-"), do: {:ok, s}, else: :error
+        end
+
+      true ->
+        :error
+    end
+  end
+
+  def parse_ref(_), do: :error
+
+  @impl true
+  def list_open(opts) when is_list(opts) do
+    with {:ok, cfg} <- Config.resolve() do
+      assignee_jql =
+        case Keyword.get(opts, :assignee, :viewer) do
+          :viewer -> "currentUser()"
+          id when is_binary(id) and id != "" -> "\"#{id}\""
+          _ -> "currentUser()"
+        end
+
+      jql = "assignee = #{assignee_jql} AND statusCategory != Done ORDER BY updated DESC"
+
+      fetch_search_pages(cfg, jql, nil, [])
+    end
+  end
+
+  # Jira requires an issue type on create; "Task" is present in every
+  # default Jira project scheme. Workspaces with a different scheme pass
+  # `:issue_type` through `arb create`.
+  @default_issue_type "Task"
+
+  @impl true
+  def create(attrs) when is_map(attrs) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, title} <- fetch_title(attrs),
+         {:ok, payload} <- build_create_payload(cfg, attrs, title) do
+      case request(cfg, :post, "/issue", json: payload) do
+        {:ok, %Req.Response{status: status_code, body: %{"key" => key}}}
+        when status_code in 200..299 and is_binary(key) ->
+          {:ok, key}
+
+        {:ok, %Req.Response{status: status_code, body: body}} when status_code in 200..299 ->
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: status_code,
+             message: "Jira create response missing \"key\"",
+             raw: body
+           }}
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @impl true
+  def list_transitions(ref) when is_binary(ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, jira_transitions} <- list_raw_transitions(cfg, ref) do
+      # status_map maps task lifecycle atom -> target STATUS name. Reverse it
+      # and key each available transition by the status it lands on (`to`),
+      # falling back to the transition name for payloads without a `to`.
+      reverse = Enum.into(cfg.status_map, %{}, fn {k, v} -> {v, k} end)
+
+      atoms =
+        jira_transitions
+        |> Enum.map(fn t -> Map.get(reverse, transition_target(t) || t["name"]) end)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.uniq()
+
+      {:ok, atoms}
+    end
+  end
+
+  @impl true
+  def gating_fields(ref, status) when is_binary(ref) and is_atom(status) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, target_status} <- map_status(cfg, status),
+         {:ok, transitions} <- list_raw_transitions(cfg, ref, with_fields: true) do
+      # The gate lives on the *specific transition* the adapter will invoke to
+      # reach the target — the same one `transition/2` resolves (a direct edge,
+      # or the first hop of a multi-hop path). Discovering it from Jira (rather
+      # than a hardcoded field list) keeps this provider-accurate and free of
+      # per-workspace gating config.
+      case gating_transition(cfg, ref, transitions, target_status) do
+        {:ok, transition} ->
+          detected = required_field_descriptors(cfg, transition)
+          {:ok, merge_forced_note_descriptors(cfg, status, detected)}
+
+        :none ->
+          {:ok, []}
+      end
+    end
+  end
+
+  # `expand=transitions.fields` only reports fields required by the
+  # transition's *screen* — a workflow *validator* requiring a field (e.g.
+  # Acme's AX Story workflow gates "Pull request created" on QA/Deployment
+  # notes this way) has no screen and is invisible to that call, so live
+  # detection alone under-reports the gate (bd-4isprn). For lifecycle events
+  # listed in `cfg.gated_note_events`, force qa_notes/deployment_notes into
+  # the gate whenever the workspace has them mapped in `field_ids`, merging
+  # with (not replacing) whatever live detection already found.
+  defp merge_forced_note_descriptors(cfg, status, descriptors) do
+    if status in cfg.gated_note_events do
+      existing_ids = MapSet.new(descriptors, & &1.id)
+
+      forced =
+        [:qa_notes, :deployment_notes]
+        |> Enum.map(&forced_note_descriptor(cfg, &1))
+        |> Enum.reject(&(is_nil(&1) or MapSet.member?(existing_ids, &1.id)))
+
+      descriptors ++ forced
+    else
+      descriptors
+    end
+  end
+
+  defp forced_note_descriptor(cfg, key) do
+    case Map.get(cfg.field_ids, key) do
+      id when is_binary(id) and id != "" -> %{id: id, key: key, name: forced_note_name(key)}
+      _ -> nil
+    end
+  end
+
+  defp forced_note_name(:qa_notes), do: "QA Testing Notes"
+  defp forced_note_name(:deployment_notes), do: "Deployment Notes"
+
+  # Resolve the transition `transition/2` would fire first: a live transition
+  # that lands directly on the target, else the first hop of the planned
+  # multi-hop path. Returns `:none` (treated as "no gate") when there's no
+  # reachable/known first hop — `transition/2` surfaces that loudly on its own,
+  # so we don't double-report it here.
+  defp gating_transition(cfg, ref, transitions, target_status) do
+    case Enum.find(transitions, fn t -> transition_target(t) == target_status end) do
+      %{} = direct ->
+        {:ok, direct}
+
+      nil ->
+        case current_status_info(cfg, ref) do
+          {:ok, ^target_status, _cat} -> :none
+          {:ok, current, _cat} -> first_hop_transition(cfg, transitions, current, target_status)
+          {:error, _} -> :none
+        end
+    end
+  end
+
+  defp first_hop_transition(cfg, transitions, current, target_status) do
+    case plan_transition_path(cfg.transition_graph, current, target_status) do
+      {:ok, [first_hop | _]} ->
+        case hop_transition(transitions, first_hop) do
+          %{} = t -> {:ok, t}
+          _ -> :none
+        end
+
+      _ ->
+        :none
+    end
+  end
+
+  # Map a transition's required-field metadata to provider-agnostic descriptors.
+  # `expand=transitions.fields` returns `fields` as
+  # `%{field_id => %{"required" => bool, "name" => label, ...}}`. We keep only
+  # the required ones and reverse-map each id to its task-domain key (via
+  # `field_ids`) so the sync layer can pull the task's produced value; an id
+  # with no task-domain mapping yields `key: nil` and is escalated by name.
+  #
+  # For fields that cannot be sourced from the task, the descriptor includes
+  # a pre-resolved `:value` from the workspace config. Currently only
+  # `fixVersions`: when the workspace has `fix_version_name` set, the value is
+  # pre-resolved as `[%{"name" => name}]` so the sync layer can push it before
+  # the transition without knowing Jira internals. A nil value falls back to the
+  # task's produced value (or escalates as missing if neither is set).
+  defp required_field_descriptors(cfg, %{"fields" => fields}) when is_map(fields) do
+    reverse = Map.new(cfg.field_ids, fn {k, v} -> {v, k} end)
+
+    fields
+    |> Enum.filter(fn {_id, meta} -> is_map(meta) and meta["required"] == true end)
+    |> Enum.map(fn {id, meta} ->
+      key = Map.get(reverse, id)
+      base = %{id: id, key: key, name: field_label(meta, id)}
+
+      case pre_resolve_field_value(cfg, id) do
+        nil -> base
+        value -> Map.put(base, :value, value)
+      end
+    end)
+  end
+
+  defp required_field_descriptors(_cfg, _transition), do: []
+
+  # Pre-resolve field values from the workspace config for fields that cannot be
+  # sourced from the task directly. Only `fixVersions` is handled here;
+  # all other fields return nil (deferring to the task's produced value).
+  defp pre_resolve_field_value(%{fix_version_name: name}, "fixVersions")
+       when is_binary(name) and name != "",
+       do: [%{"name" => name}]
+
+  defp pre_resolve_field_value(_cfg, _id), do: nil
+
+  defp field_label(%{"name" => name}, _id) when is_binary(name) and name != "", do: name
+  defp field_label(_meta, id), do: id
+
+  # ---- Tracker behaviour: claim callbacks ------------------------------------
+
+  @ownership_marker "Wardmast installation:"
+
+  @impl true
+  def check_prior_claim(ref) when is_binary(ref) do
+    with {:ok, cfg} <- Config.resolve() do
+      case request(cfg, :get, "/issue/#{ref}/comment", params: [maxResults: 100]) do
+        {:ok, %Req.Response{status: status_code, body: %{"comments" => comments}}}
+        when status_code in 200..299 and is_list(comments) ->
+          # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+          # wired Credo up. Thresholds stay at the tool's own default so new
+          # code is held to it; see the note in .credo.exs.
+          # credo:disable-for-next-line Credo.Check.Refactor.Nesting
+          case Enum.find(comments, fn c ->
+                 String.contains?(comment_text(c), @ownership_marker)
+               end) do
+            nil -> :ok
+            comment -> {:error, {:already_claimed, comment_text(comment)}}
+          end
+
+        _ ->
+          :ok
+      end
+    end
+  end
+
+  @impl true
+  def signal_claim(
+        ref,
+        task_id,
+        %{
+          workspace_name: name,
+          workspace_prefix: prefix,
+          current_user: account_id,
+          host: host
+        } = ctx
+      ) do
+    body =
+      "Claimed as #{task_id} by #{name} (#{prefix}). #{@ownership_marker} #{host}."
+
+    add_comment(ref, body)
+    # Ownership on the tracker is never changed unless the claim asked for it (`assign: true`).
+    if Map.get(ctx, :assign, false), do: assign_user(ref, account_id)
+    :ok
+  end
+
+  @impl true
+  def current_user do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, %{"accountId" => id}} when is_binary(id) <-
+           request(cfg, :get, "/myself", []) |> handle_json() do
+      {:ok, id}
+    else
+      {:ok, _other} ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: nil,
+           message: "GET /myself returned no accountId",
+           raw: nil
+         }}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  @impl true
+  def assignees(%{"fields" => %{"assignee" => %{"accountId" => id}}}) when is_binary(id),
+    do: [id]
+
+  def assignees(_), do: []
+
+  @impl true
+  def issue_status(%{"fields" => %{"status" => %{"statusCategory" => %{"key" => key}}}}) do
+    case key do
+      "done" -> :closed
+      "indeterminate" -> :in_progress
+      _ -> :open
+    end
+  end
+
+  def issue_status(_), do: :open
+
+  @impl true
+  def extract_title(%{"fields" => %{"summary" => title}}) when is_binary(title) and title != "",
+    do: title
+
+  def extract_title(%{"key" => key}) when is_binary(key), do: key
+  def extract_title(_), do: "(no title)"
+
+  @impl true
+  def extract_description(%{"fields" => %{"description" => description}}),
+    do: description_to_text(description)
+
+  def extract_description(_), do: ""
+
+  @impl true
+  def extract_priority(%{"fields" => %{"priority" => %{"name" => name}}})
+      when is_binary(name) do
+    case Config.resolve() do
+      {:ok, %{priority_map: pmap}} ->
+        case Map.fetch(pmap, name) do
+          {:ok, p} -> {:ok, p}
+          :error -> nil
+        end
+
+      {:error, _} ->
+        nil
+    end
+  end
+
+  def extract_priority(_), do: nil
+
+  @impl true
+  def extract_difficulty(raw_issue) do
+    with {:ok, %{story_points_field: field_id, difficulty_buckets: buckets}}
+         when not is_nil(field_id) and not is_nil(buckets) <- Config.resolve(),
+         pts when is_number(pts) <- get_in(raw_issue, ["fields", field_id]) do
+      {:ok, points_to_difficulty(buckets, pts)}
+    else
+      _ -> nil
+    end
+  end
+
+  # Jira v3 returns `description` as an ADF document (a map); legacy/v2
+  # payloads or plain-text fields come through as a string. We flatten ADF
+  # to plain text (block boundaries become blank lines) — good enough for
+  # mirroring the body into a task; we don't attempt a full round-trip.
+  defp description_to_text(nil), do: ""
+  defp description_to_text(text) when is_binary(text), do: text
+
+  defp description_to_text(%{"type" => "doc", "content" => content}) when is_list(content) do
+    content
+    |> Enum.map(&adf_block_text/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n\n")
+  end
+
+  defp description_to_text(_), do: ""
+
+  defp adf_block_text(%{"content" => content}) when is_list(content),
+    do: content |> Enum.map_join("", &adf_inline_text/1)
+
+  defp adf_block_text(%{"text" => text}) when is_binary(text), do: text
+  defp adf_block_text(_), do: ""
+
+  defp adf_inline_text(%{"text" => text}) when is_binary(text), do: text
+
+  defp adf_inline_text(%{"content" => content}) when is_list(content),
+    do: content |> Enum.map_join("", &adf_inline_text/1)
+
+  defp adf_inline_text(_), do: ""
+
+  # ---- Public helpers ------------------------------------------------------
+
+  @doc """
+  Convenience: set the active workspace for the current process and run
+  `fun`, clearing the config when `fun` returns. Useful in tests and
+  one-shot scripts.
+  """
+  @spec with_workspace(map() | Wardmast.Tasks.Workspace.t(), (-> result)) :: result
+        when result: any()
+  def with_workspace(workspace_or_config, fun) when is_function(fun, 0) do
+    prev = Process.get({Config, :active_workspace_config})
+    Config.put_active(workspace_or_config)
+
+    try do
+      fun.()
+    after
+      if prev, do: Config.put_active(prev), else: Config.clear()
+    end
+  end
+
+  @doc """
+  Searches open issues in the workspace's configured Jira project for issues
+  whose summary matches `title` (case-insensitive, trimmed exact match).
+
+  Uses JQL `project = "KEY" AND summary ~ "title" AND statusCategory != Done`
+  to narrow the candidate set, then filters client-side for an exact
+  case-insensitive match — mirroring the GitHub adapter's strategy.
+
+  Returns `{:ok, [%{ref, title, url}]}` or `{:error, %Error{}}`.
+  Returns `{:ok, []}` when no matches are found. API errors return
+  `{:error, %Error{}}`.
+  """
+  @impl true
+  @spec search_by_title(String.t()) :: {:ok, [map()]} | {:error, Error.t()}
+  def search_by_title(title) when is_binary(title) do
+    with {:ok, cfg} <- Config.resolve() do
+      escaped = String.replace(title, "\"", "\\\"")
+
+      jql =
+        ~s(project = "#{cfg.project_key}" AND summary ~ "#{escaped}" ) <>
+          "AND statusCategory != Done ORDER BY created DESC"
+
+      body = %{
+        "jql" => jql,
+        "maxResults" => 25,
+        "fields" => ["summary"]
+      }
+
+      case request(cfg, :post, "/search/jql", json: body) do
+        {:ok, %Req.Response{status: status_code, body: %{"issues" => issues}}}
+        when status_code in 200..299 and is_list(issues) ->
+          norm = normalize_title(title)
+
+          matches =
+            issues
+            |> Enum.filter(fn issue ->
+              summary = get_in(issue, ["fields", "summary"]) || ""
+              normalize_title(summary) == norm
+            end)
+            |> Enum.map(fn %{"key" => key} = issue ->
+              %{
+                ref: key,
+                title: get_in(issue, ["fields", "summary"]) || "(no title)",
+                url: "https://#{cfg.host}/browse/#{key}"
+              }
+            end)
+
+          {:ok, matches}
+
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          {:ok, []}
+
+        {:ok, %Req.Response{status: status_code, body: resp_body}} ->
+          {:error, http_error(status_code, resp_body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  # ---- Internals: list_open -----------------------------------------------
+
+  # Atlassian removed the old `GET /search` (CHANGE-2046). The replacement
+  # `POST /search/jql` takes a JSON body and paginates with an opaque
+  # `nextPageToken` (the old `startAt`/`total`/`maxResults`-offset paging is
+  # gone). We follow the token until the response omits it, accumulating one
+  # page of summaries at a time. `fields` is explicit because the new
+  # endpoint returns only `id`/`key` by default — we ask for exactly what
+  # `summarize_issue/2` reads.
+  @search_fields ["summary", "status", "assignee"]
+  @search_page_size 100
+
+  defp fetch_search_pages(cfg, jql, next_token, acc) do
+    body =
+      %{
+        "jql" => jql,
+        "maxResults" => @search_page_size,
+        "fields" => @search_fields
+      }
+      |> maybe_put_token(next_token)
+
+    case request(cfg, :post, "/search/jql", json: body) do
+      {:ok, %Req.Response{status: status_code, body: %{"issues" => issues} = resp}}
+      when status_code in 200..299 and is_list(issues) ->
+        acc = [Enum.map(issues, &summarize_issue(&1, cfg)) | acc]
+
+        case resp["nextPageToken"] do
+          token when is_binary(token) and token != "" ->
+            fetch_search_pages(cfg, jql, token, acc)
+
+          _ ->
+            {:ok, acc |> Enum.reverse() |> Enum.concat()}
+        end
+
+      {:ok, %Req.Response{status: status_code, body: _body}} when status_code in 200..299 ->
+        {:ok, acc |> Enum.reverse() |> Enum.concat()}
+
+      {:ok, %Req.Response{status: status_code, body: body}} ->
+        {:error, http_error(status_code, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  defp maybe_put_token(body, token) when is_binary(token) and token != "",
+    do: Map.put(body, "nextPageToken", token)
+
+  defp maybe_put_token(body, _), do: body
+
+  defp summarize_issue(%{"key" => key} = issue, cfg) do
+    fields = Map.get(issue, "fields") || %{}
+
+    %{
+      ref: key,
+      title: Map.get(fields, "summary") || "(no title)",
+      url: "https://#{cfg.host}/browse/#{key}",
+      status: issue_status(issue),
+      assignees: assignees(issue),
+      raw: issue
+    }
+  end
+
+  # ---- Internals: transitions ---------------------------------------------
+
+  defp list_raw_transitions(cfg, ref, opts \\ []) do
+    req_opts =
+      if Keyword.get(opts, :with_fields, false) do
+        # `expand=transitions.fields` makes Jira include, per transition, the
+        # field metadata (`required`, `name`, ...) for the screen that
+        # transition presents — i.e. exactly which fields *gate* it.
+        [params: [expand: "transitions.fields"]]
+      else
+        []
+      end
+
+    case request(cfg, :get, "/issue/#{ref}/transitions", req_opts) do
+      {:ok, %Req.Response{status: status_code, body: %{"transitions" => list}}}
+      when status_code in 200..299 and is_list(list) ->
+        {:ok, list}
+
+      {:ok, %Req.Response{status: status_code, body: body}} when status_code in 200..299 ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status_code,
+           message: "transitions response missing \"transitions\" key",
+           raw: body
+         }}
+
+      {:ok, %Req.Response{status: status_code, body: body}} ->
+        {:error, http_error(status_code, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # status_map maps a task lifecycle atom -> target STATUS name. A missing or
+  # blank entry is NOT an error here: it means "this tracker doesn't model that
+  # lifecycle event". Callers (e.g. `Wardmast.Trackers.Sync`) treat
+  # `:status_unmapped` as a benign skip, while a *mapped* status that can't be
+  # reached surfaces loudly.
+  defp map_status(%{status_map: map}, status) do
+    case Map.fetch(map, status) do
+      {:ok, name} when is_binary(name) and name != "" ->
+        {:ok, name}
+
+      _ ->
+        {:error,
+         %Error{
+           kind: :status_unmapped,
+           status: nil,
+           message: "no Jira target status mapped for task lifecycle event #{inspect(status)}",
+           raw: nil
+         }}
+    end
+  end
+
+  # A live transition that lands directly on the target status (its `to`
+  # already equals the target). The common single-hop case — needs no graph.
+  defp direct_transition_id(transitions, target_status) do
+    case Enum.find(transitions, fn t -> transition_target(t) == target_status end) do
+      %{"id" => id} when is_binary(id) -> {:ok, id}
+      _ -> :none
+    end
+  end
+
+  defp transition_target(%{"to" => %{"name" => name}}) when is_binary(name), do: name
+  defp transition_target(_), do: nil
+
+  # No direct edge to the target — fetch the issue's current status and BFS the
+  # configured transition graph for a path, executing each hop in turn.
+  defp resolve_multi_hop(cfg, ref, status, target_status) do
+    with {:ok, current_status, current_category} <- current_status_info(cfg, ref) do
+      cond do
+        current_status == target_status ->
+          # Already at the exact target status — nothing to do.
+          :ok
+
+        current_category == "done" ->
+          # Issue is already in Jira's Done status category (statusCategory.key = "done")
+          # even though the exact status name differs from the target (e.g. issue is
+          # "Done" but workspace maps :closed to "Code Merged"). Treat as a no-op:
+          # the issue is complete and no further transition is needed. Without this check
+          # the BFS returns :no_transition_path and the sync layer escalates — which
+          # produces noisy escalations when reconciling wrongly-imported tasks whose
+          # Jira tickets were already Done.
+          :ok
+
+        status != :open and
+            not may_proceed?(cfg, status, target_status, current_status, current_category) ->
+          # A route in the graph from here is not proof the ticket is still
+          # short of the target — with a rework edge it can lead backwards
+          # (bd-4i7kky). Same rule as the single-hop fast path.
+          {:error, past_target_error(ref, status, current_status, target_status)}
+
+        true ->
+          case plan_transition_path(cfg.transition_graph, current_status, target_status) do
+            {:ok, names} -> execute_path(cfg, ref, names)
+            {:error, _} = err -> err
+          end
+      end
+    end
+  end
+
+  @doc """
+  Returns true when `raw` (a fetched issue's JSON body) shows the issue
+  already at, or downstream of, the status mapped from `event` — i.e. moving
+  it there now would be a no-op.
+
+  Used by `Wardmast.Trackers.Sync` to distinguish a benign "ticket already
+  advanced" transition failure (the tracker rejects the transition because
+  there's nothing left to do) from a genuine one. Any event with a
+  `status_map` entry is supported, not just `:closed` — e.g. `:merged`
+  rejected by a workflow where the ticket already reached Code Complete (or
+  beyond) is exactly this case.
+
+  Checks, in order: exact status-name match, Jira's "done" status category
+  (catches terminal statuses under any name), and — for a configured
+  `transition_graph` — whether the current status is reachable by walking
+  *forward* from the target (i.e. downstream of it, so it was already
+  passed). Returns false (never escalation-suppressing) on any resolution
+  failure, so a genuinely unreachable tracker still escalates.
+  """
+  @spec at_or_past_target?(map(), atom()) :: boolean()
+  def at_or_past_target?(raw, event) when is_atom(event) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, target_status} <- map_status(cfg, event) do
+      current_status = get_in(raw, ["fields", "status", "name"])
+      current_category = get_in(raw, ["fields", "status", "statusCategory", "key"])
+
+      current_status == target_status or
+        current_category == "done" or
+        (is_binary(current_status) and
+           match?(
+             {:ok, _},
+             plan_transition_path(cfg.transition_graph, target_status, current_status)
+           ))
+    else
+      _ -> false
+    end
+  end
+
+  @doc """
+  BFS over a transition graph for the shortest *route* — the sequence of hop
+  edges — that moves an issue from `from` status to `to` status.
+
+  `graph` is `%{from_status => [%{"to" => to_status, "transition" => name}]}`,
+  where `"transition"` is optional. Returns `{:ok, [edge, ...]}` (empty list
+  when already there) or `{:error, %Error{kind: :no_transition_path}}` when no
+  path exists. Pure — the graph is the only input, so multi-hop planning is
+  testable without HTTP.
+
+  The plan names *statuses*, not transitions: `execute_path/3` resolves each hop
+  against the live `/transitions` response by destination status, so a graph
+  stays correct on projects whose transition names differ per issue type
+  (bd-bwwkvr). An edge's `"transition"`, when present, is only a tie-break hint
+  for when several live transitions land on the same destination.
+  """
+  @spec plan_transition_path(map(), String.t(), String.t()) ::
+          {:ok, [Config.transition_edge()]} | {:error, Error.t()}
+  def plan_transition_path(_graph, from, to) when from == to, do: {:ok, []}
+
+  def plan_transition_path(graph, from, to) when is_map(graph) do
+    bfs(graph, to, [{from, []}], MapSet.new([from]))
+  end
+
+  defp bfs(_graph, to, [], _visited) do
+    {:error,
+     %Error{
+       kind: :no_transition_path,
+       status: nil,
+       message: "no transition path to #{inspect(to)} in the configured workflow graph",
+       raw: nil
+     }}
+  end
+
+  defp bfs(graph, to, [{node, path} | rest], visited) do
+    edges = Map.get(graph, node, [])
+
+    case Enum.find(edges, fn e -> e["to"] == to end) do
+      %{} = edge ->
+        {:ok, Enum.reverse([edge | path])}
+
+      nil ->
+        {queue, visited} =
+          Enum.reduce(edges, {rest, visited}, fn %{"to" => next} = edge, {q, v} ->
+            if MapSet.member?(v, next) do
+              {q, v}
+            else
+              {q ++ [{next, [edge | path]}], MapSet.put(v, next)}
+            end
+          end)
+
+        bfs(graph, to, queue, visited)
+    end
+  end
+
+  # Execute a planned route one hop at a time. Each hop re-lists the live
+  # transitions (the available set changes after every move), matches the hop by
+  # its DESTINATION status — exactly as the single-hop fast path does — and
+  # POSTs it. A failed hop halts loudly.
+  #
+  # Matching by destination rather than by the graph's transition name is what
+  # makes a graph portable across issue types: on projects where the workflow
+  # differs per type, the same Backlog -> To Do move is called "To do next" on a
+  # Story and "Ready to work (2)" on a Task, so a name-matched graph silently
+  # failed to transition one of them (bd-bwwkvr).
+  defp execute_path(_cfg, _ref, []), do: :ok
+
+  defp execute_path(cfg, ref, hops) do
+    Enum.reduce_while(hops, :ok, fn hop, _acc ->
+      with {:ok, transitions} <- list_raw_transitions(cfg, ref),
+           {:ok, id} <- hop_transition_id(transitions, hop),
+           :ok <- post_transition(cfg, ref, id) do
+        {:cont, :ok}
+      else
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp hop_transition_id(transitions, hop) do
+    case hop_transition(transitions, hop) do
+      %{"id" => id} when is_binary(id) ->
+        {:ok, id}
+
+      _ ->
+        {:error,
+         %Error{
+           kind: :transition_unavailable,
+           status: nil,
+           message:
+             "no Jira transition to #{inspect(hop["to"])} available in current state; " <>
+               "available: #{inspect(Enum.map(transitions, &{&1["name"], transition_target(&1)}))}",
+           raw: transitions
+         }}
+    end
+  end
+
+  # The live transition for one planned hop: any transition landing on the hop's
+  # destination status, preferring the edge's configured name when several do.
+  defp hop_transition(transitions, %{"to" => target} = hop) do
+    candidates = Enum.filter(transitions, fn t -> transition_target(t) == target end)
+    named = hop["transition"]
+
+    Enum.find(candidates, fn t -> is_binary(named) and t["name"] == named end) ||
+      List.first(candidates)
+  end
+
+  defp hop_transition(_transitions, _hop), do: nil
+
+  defp post_transition(cfg, ref, transition_id) do
+    payload = %{"transition" => %{"id" => transition_id}}
+
+    case request(cfg, :post, "/issue/#{ref}/transitions", json: payload) do
+      {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+        :ok
+
+      {:ok, %Req.Response{status: status_code, body: body}} ->
+        error = http_error(status_code, body)
+        maybe_retry_with_fix_version(cfg, ref, transition_id, error, body)
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # When Jira rejects a transition with a fix-version validation error but did
+  # NOT surface `fixVersions` via `expand=transitions.fields` (a workflow-
+  # validator gap — some Jira instances enforce fix-version as a workflow
+  # condition, not as a screen field), retry once after setting the fix version
+  # from the workspace `fix_version_name` config.
+  # If the config isn't set or the error isn't fix-version related, return the
+  # original error unchanged.
+  defp maybe_retry_with_fix_version(cfg, ref, transition_id, original_error, body) do
+    with true <- fix_version_required_error?(body),
+         name when is_binary(name) and name != "" <- Map.get(cfg, :fix_version_name) do
+      set_fix_version_payload = %{"fields" => %{"fixVersions" => [%{"name" => name}]}}
+
+      case request(cfg, :put, "/issue/#{ref}", json: set_fix_version_payload) do
+        {:ok, %Req.Response{status: s}} when s in 200..299 ->
+          case request(cfg, :post, "/issue/#{ref}/transitions",
+                 json: %{"transition" => %{"id" => transition_id}}
+               ) do
+            {:ok, %Req.Response{status: s}} when s in 200..299 -> :ok
+            {:ok, %Req.Response{status: s, body: b}} -> {:error, http_error(s, b)}
+            {:error, e} -> {:error, transport_error(e)}
+          end
+
+        _ ->
+          {:error, original_error}
+      end
+    else
+      _ -> {:error, original_error}
+    end
+  end
+
+  defp fix_version_required_error?(body) when is_map(body) do
+    errors_map = Map.get(body, "errors") || %{}
+
+    messages =
+      List.wrap(Map.get(body, "errorMessages")) ++ Map.values(errors_map)
+
+    Enum.any?(messages, fn
+      msg when is_binary(msg) -> String.contains?(String.downcase(msg), "fix version")
+      _ -> false
+    end)
+  end
+
+  defp fix_version_required_error?(_), do: false
+
+  # Returns {:ok, status_name, category_key} where category_key is the
+  # statusCategory.key string (e.g. "done", "indeterminate", "new") or nil
+  # when Jira omits the statusCategory field.
+  defp current_status_info(cfg, ref) do
+    case request(cfg, :get, "/issue/#{ref}", params: [fields: "status"]) do
+      {:ok, %Req.Response{status: status_code, body: body}} when status_code in 200..299 ->
+        status = get_in(body, ["fields", "status"]) || %{}
+        name = status["name"]
+        category_key = get_in(status, ["statusCategory", "key"])
+
+        if is_binary(name) and name != "" do
+          {:ok, name, category_key}
+        else
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: status_code,
+             message: "issue #{ref} response missing fields.status.name",
+             raw: body
+           }}
+        end
+
+      {:ok, %Req.Response{status: status_code, body: body}} ->
+        {:error, http_error(status_code, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # ---- Internals: field translation ---------------------------------------
+
+  # Markdown fields (the rich-text ones we ship). Other fields pass through
+  # as-is.
+  @markdown_fields ~w(description qa_notes deployment_notes)a
+
+  defp translate_fields(cfg, fields_map) do
+    fields_map
+    |> Enum.reduce(%{}, fn {key, value}, acc ->
+      # `String.to_existing_atom/1` (sobelow DOS.StringToAtom). A string key
+      # with no existing atom cannot be in `cfg.field_ids` either — that map
+      # is keyed by atoms Wardmast's own code defined — so it would have
+      # fallen through to the `customfield_` branch regardless. `nil` here
+      # takes the same path, without minting a permanent atom first.
+      atom_key = if is_atom(key), do: key, else: existing_atom(to_string(key))
+
+      case atom_key && Map.fetch(cfg.field_ids, atom_key) do
+        {:ok, jira_id} ->
+          Map.put(acc, jira_id, encode_value(atom_key, value))
+
+        _ ->
+          # Allow callers to pass raw Jira field IDs (e.g. "customfield_10999")
+          # through unchanged for one-off needs.
+          if is_binary(key) and String.starts_with?(key, "customfield_") do
+            Map.put(acc, key, value)
+          else
+            acc
+          end
+      end
+    end)
+  end
+
+  defp existing_atom(string) do
+    String.to_existing_atom(string)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp encode_value(atom_key, value) when atom_key in @markdown_fields and is_binary(value) do
+    ADF.from_markdown(value)
+  end
+
+  defp encode_value(_atom_key, value), do: value
+
+  # ---- Internals: create --------------------------------------------------
+
+  defp fetch_title(%{title: title}) when is_binary(title) and title != "", do: {:ok, title}
+  defp fetch_title(%{"title" => title}) when is_binary(title) and title != "", do: {:ok, title}
+
+  defp fetch_title(_),
+    do:
+      {:error,
+       %Error{
+         kind: :validation_failed,
+         status: nil,
+         message: "create requires a non-empty :title",
+         raw: nil
+       }}
+
+  # Build the `POST /issue` body. `project` and `issuetype` are create-only
+  # required fields (not part of `field_ids`); `summary` / `description` and
+  # any other configured rich-text fields go through `translate_fields/2` so
+  # they pick up the workspace's field-id mapping and ADF encoding — exactly
+  # like `update_fields/2`.
+  defp build_create_payload(cfg, attrs, title) do
+    issue_type = pluck(attrs, [:issue_type, "issue_type"]) || @default_issue_type
+    description = pluck(attrs, [:description, "description"])
+
+    domain_fields =
+      %{title: title}
+      |> maybe_put(:description, description)
+
+    fields =
+      %{
+        "project" => %{"key" => cfg.project_key},
+        "issuetype" => %{"name" => issue_type}
+      }
+      |> Map.merge(translate_fields(cfg, domain_fields))
+
+    {:ok, %{"fields" => fields}}
+  end
+
+  defp pluck(map, keys) do
+    Enum.find_value(keys, fn k ->
+      case Map.fetch(map, k) do
+        {:ok, v} -> v
+        :error -> nil
+      end
+    end)
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, _key, ""), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # ---- Internals: HTTP ----------------------------------------------------
+
+  defp client(cfg) do
+    Client.new(
+      base_url: "https://#{cfg.host}/rest/api/3",
+      headers: headers(cfg),
+      errors: error_spec(),
+      stub: {:jira_http_stub, @stub_name}
+    )
+  end
+
+  # Classification needs no request config, so call sites holding only a
+  # response can build an error without re-resolving the client.
+  defp error_spec do
+    ErrorSpec.new(
+      module: Error,
+      classify_kind: fn status_code, _body -> kind_for_status(status_code) end,
+      error_message: &error_message/2
+    )
+  end
+
+  defp request(cfg, method, path, req_opts),
+    do: Client.request(client(cfg), method, path, req_opts)
+
+  defp handle_json(result), do: Client.handle_json(error_spec(), result)
+
+  defp headers(%{email: email, token: token}) do
+    auth =
+      case email do
+        e when is_binary(e) and e != "" -> Base.encode64(e <> ":" <> token)
+        # Some workspaces (rare) use a bare API token without an email
+        # prefix; let Jira reject it cleanly rather than 401 here.
+        _ -> Base.encode64(":" <> token)
+      end
+
+    [
+      {"authorization", "Basic " <> auth},
+      {"accept", "application/json"},
+      {"content-type", "application/json"},
+      {"user-agent", "arbiter"}
+    ]
+  end
+
+  defp http_error(status_code, body),
+    do: Client.http_error(error_spec(), status_code, body)
+
+  defp kind_for_status(400), do: :validation_failed
+  defp kind_for_status(401), do: :unauthenticated
+  defp kind_for_status(403), do: :forbidden
+  defp kind_for_status(404), do: :not_found
+  defp kind_for_status(422), do: :validation_failed
+  defp kind_for_status(s) when s >= 500 and s < 600, do: :server_error
+  defp kind_for_status(_), do: :http
+
+  defp error_message(%{"errorMessages" => [msg | _]}, _) when is_binary(msg), do: msg
+  defp error_message(%{"message" => msg}, _) when is_binary(msg), do: msg
+  defp error_message(_, status_code), do: "HTTP #{status_code}"
+
+  defp transport_error(exception), do: Client.transport_error(error_spec(), exception)
+
+  defp assign_user(ref, account_id) do
+    with {:ok, cfg} <- Config.resolve() do
+      case request(cfg, :put, "/issue/#{ref}/assignee", json: %{"accountId" => account_id}) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: resp_body}} ->
+          {:error, http_error(status_code, resp_body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  defp comment_text(%{"renderedBody" => text}) when is_binary(text) and text != "", do: text
+  defp comment_text(%{"body" => body}), do: adf_to_text(body)
+  defp comment_text(_), do: ""
+
+  defp adf_to_text(%{"text" => text}) when is_binary(text), do: text
+
+  defp adf_to_text(%{"content" => nodes}) when is_list(nodes),
+    do: Enum.map_join(nodes, " ", &adf_to_text/1)
+
+  defp adf_to_text(_), do: ""
+
+  # ---- Misc ---------------------------------------------------------------
+
+  defp normalize_title(title), do: title |> String.downcase() |> String.trim()
+
+  defp issue_key?(s), do: Regex.match?(~r/^[A-Z][A-Z0-9_]*-\d+$/, s)
+
+  # Map story-points to a difficulty integer using sorted bucket thresholds.
+  # Each {max_pts, difficulty} pair means: if pts <= max_pts, return that
+  # difficulty. Falls back to D4 when pts exceeds all thresholds.
+  #
+  # The 0..4 range here is the *mapper's* ceiling, not the scale's — #1519
+  # widened the scale to D5, but deliberately did not raise this bucket table:
+  # D5 routes to the flagship model and must be a deliberate operator
+  # escalation, which an estimate-field threshold is not. See
+  # `Jira.Config` for the same decision on the default buckets.
+  defp points_to_difficulty(buckets, pts) do
+    case Enum.find(buckets, fn {max, _} -> pts <= max end) do
+      {_, d} -> d
+      nil -> over_ceiling_difficulty(buckets)
+    end
+  end
+
+  # Points above the top bucket land at D4 ("extreme") — the stock behaviour,
+  # and the reason the default table stops at D3: D5 is never reached by an
+  # implicit fallthrough. #1519: if an operator explicitly configured a bucket
+  # above D4, honour it here too, otherwise a high point count would map
+  # *lower* than a smaller one.
+  defp over_ceiling_difficulty(buckets) do
+    buckets
+    |> Enum.map(fn {_, d} -> d end)
+    |> Enum.max(fn -> 4 end)
+    |> max(4)
+  end
+end

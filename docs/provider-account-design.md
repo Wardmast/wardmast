@@ -52,7 +52,7 @@ works:
 ## 1. Motivation, in one paragraph
 
 Workspaces own their credentials (`workspaces.encrypted_worker_env`,
-`apps/arbiter/lib/arbiter/tasks/workspace.ex:256`), so every quota, probe, budget
+`apps/wardmast/lib/wardmast/tasks/workspace.ex:256`), so every quota, probe, budget
 and cost mechanism in the tree is keyed to a workspace. The resource being
 metered is not a workspace — it is a provider account. On this install, three
 workspaces carry a fingerprint-identical token, so `anthropic_quotas` holds three
@@ -187,7 +187,7 @@ What happens to the historical rows:
 |---|---|
 | `usage_events` | `provider_account_id` re-pointed `from → into`. **Historical cost rollups become correct retroactively**, with no re-derivation, because the account id lives on the *event*. |
 | `provider_credentials` | rows move across and stay distinct. An account legitimately has several credentials; this is the normal end state, not a cleanup step. |
-| `anthropic_quotas` / `codex_quotas` / `cloud_code_quotas` | collide on `(provider_account_id, provider)`. These are **caches of the latest reading, not time series** (`apps/arbiter/lib/arbiter/quota/anthropic_quota.ex:12`), so keep the freshest and discard the rest — with the per-column-group caveat in §6. |
+| `anthropic_quotas` / `codex_quotas` / `cloud_code_quotas` | collide on `(provider_account_id, provider)`. These are **caches of the latest reading, not time series** (`apps/wardmast/lib/wardmast/quota/anthropic_quota.ex:12`), so keep the freshest and discard the rest — with the per-column-group caveat in §6. |
 | `workspace_provider_accounts` | re-pointed; a workspace that pointed at `from` now points at `into`. If both rows existed for one `(workspace, provider)`, that was already impossible (unique index), so no conflict. |
 | the `from` account row | soft-deleted with `merged_into_id` set, so an audit trail survives and a mistaken merge is traceable. |
 
@@ -213,7 +213,7 @@ would discard the one fact a split needs.
 | Field | Type | Notes |
 |---|---|---|
 | `id` | uuid, pk | locally minted; the identity of record (§2.4) |
-| `provider` | string | `claude` / `codex` / `antigravity` — the codes `Arbiter.Quota.provider_code/1` already speaks. P1 shipped the Google CLI as `gemini_cli`; that upstream Gemini CLI provider was **dropped** in bd-ac53wz (see "Removed: `gemini_cli`" below) |
+| `provider` | string | `claude` / `codex` / `antigravity` — the codes `Wardmast.Quota.provider_code/1` already speaks. P1 shipped the Google CLI as `gemini_cli`; that upstream Gemini CLI provider was **dropped** in bd-ac53wz (see "Removed: `gemini_cli`" below) |
 | `slug` | string | operator handle, unique per provider — `arb quota --account personal-max` |
 | `label` | string | display name |
 | `plan` | string, nullable | `max_5x` / `max_20x` / `pro` / `team` — operator-stated, or from `claudeAiOauth.rateLimitTier` / the profile when known |
@@ -259,7 +259,7 @@ entirely:
   removed account still groups under its raw id in `--by provider_account`
   (the `/usage` page shows the raw id for any deleted account).
 
-agy stays. Its adapter is still `Arbiter.Agents.Gemini`, dispatched with
+agy stays. Its adapter is still `Wardmast.Agents.Gemini`, dispatched with
 `--provider gemini`, and is unchanged — including its own fallback to the
 upstream `gemini` binary when `agy` is not on `PATH`, which now runs with no
 provider account or quota code behind it.
@@ -272,7 +272,7 @@ provider account or quota code behind it.
 | `provider_account_id` | uuid | FK |
 | `kind` | atom | `oauth_token` \| `api_key` \| `cli_credentials_file` |
 | `env_var` | string | the variable a worker receives it as, e.g. `CLAUDE_CODE_OAUTH_TOKEN`. Keeps `Dispatch`'s spawn env a pure projection with no provider `case` statement |
-| `encrypted_secret` | binary | `ash_cloak` + `Arbiter.Vault`, the same pattern as `workspaces.encrypted_worker_env`. `public? false`, `sensitive? true` |
+| `encrypted_secret` | binary | `ash_cloak` + `Wardmast.Vault`, the same pattern as `workspaces.encrypted_worker_env`. `public? false`, `sensitive? true` |
 | `fingerprint` | string | sha256 hex of the secret — evidence only (§2.4) |
 | `active?` | boolean | exactly one active per `(account, provider, kind)`, enforced by a partial unique index |
 | `scopes` | list, nullable | recorded when known; explains *why* a credential cannot self-profile |
@@ -298,7 +298,7 @@ Unique on `(workspace_id, provider)`.
 > `reviewer_position`: the account's place in that role's preference order on
 > this workspace, `nil` = not allowed for the role. They are the per-role
 > candidate set provider routing selects from (bd-40pzpj), read through
-> `Arbiter.Accounts.ProviderSettings.effective/2`, which falls back to
+> `Wardmast.Accounts.ProviderSettings.effective/2`, which falls back to
 > `agent.type` / `review_agent.type` while a role has nothing attached. Writes
 > project the attached list back onto those keys so today's dispatch path runs
 > on it. The workspace page's **Providers** section is the editor. §3.4's
@@ -332,9 +332,9 @@ provider)` shape the quota tables are keyed by today, which makes the backfill i
 
 Repos, trackers and tracker secrets, review-gate config, routing and dispatch
 policy, `conductor.max_concurrent` (with changed *semantics*, §4), the default
-provider (`Arbiter.Quota.default_provider/1`,
-`apps/arbiter/lib/arbiter/quota.ex:199`), exhaustion routing
-(`default_workspace_on_exhaustion/0`, `apps/arbiter/lib/arbiter/quota.ex:728`),
+provider (`Wardmast.Quota.default_provider/1`,
+`apps/wardmast/lib/wardmast/quota.ex:199`), exhaustion routing
+(`default_workspace_on_exhaustion/0`, `apps/wardmast/lib/wardmast/quota.ex:728`),
 and every non-credential key in `worker_env`.
 
 ---
@@ -352,24 +352,24 @@ and every non-credential key in `worker_env`.
 ```
 effective_cap = min(workspace_max, system_max, quota_headroom)
 ```
-(`apps/arbiter/lib/arbiter/workflows/conductor.ex:9`, computed at
-`apps/arbiter/lib/arbiter/workflows/conductor.ex:513`)
+(`apps/wardmast/lib/wardmast/workflows/conductor.ex:9`, computed at
+`apps/wardmast/lib/wardmast/workflows/conductor.ex:513`)
 
 * `workspace_max` ← `workspace.config["conductor"]["max_concurrent"]`
-  (`apps/arbiter/lib/arbiter/tasks/workspace.ex:579`, read at
-  `apps/arbiter/lib/arbiter/workflows/conductor.ex:491`).
-* `system_max` ← `Arbiter.Settings.conductor_system_max_concurrent/0`
-  (`apps/arbiter/lib/arbiter/settings.ex:36`), default 16
-  (`apps/arbiter/lib/arbiter/workflows/conductor.ex:150`).
-* `quota_headroom` ← *(Historical note: previously `Arbiter.Workflows.QuotaGate.Default.quota_headroom/1`,
-  `apps/arbiter/lib/arbiter/workflows/quota_gate.ex:83`, which read the
+  (`apps/wardmast/lib/wardmast/tasks/workspace.ex:579`, read at
+  `apps/wardmast/lib/wardmast/workflows/conductor.ex:491`).
+* `system_max` ← `Wardmast.Settings.conductor_system_max_concurrent/0`
+  (`apps/wardmast/lib/wardmast/settings.ex:36`), default 16
+  (`apps/wardmast/lib/wardmast/workflows/conductor.ex:150`).
+* `quota_headroom` ← *(Historical note: previously `Wardmast.Workflows.QuotaGate.Default.quota_headroom/1`,
+  `apps/wardmast/lib/wardmast/workflows/quota_gate.ex:83`, which read the
   **workspace's own** snapshot row and deferred to `Gate.over_cap?/2`
-  at `apps/arbiter/lib/arbiter/quota/gate.ex:310`. `Workflows.QuotaGate` was deleted with the Conductor in `a05a2403` (#1965);
-  the board scheduler now reads `Arbiter.Quota.Gate` and `Board.Snapshot.quota_hold/1` directly.)*
+  at `apps/wardmast/lib/wardmast/quota/gate.ex:310`. `Workflows.QuotaGate` was deleted with the Conductor in `a05a2403` (#1965);
+  the board scheduler now reads `Wardmast.Quota.Gate` and `Board.Snapshot.quota_hold/1` directly.)*
 
 The ticket says three workspaces at 4 give three gates. The code says something
 stronger: **a Conductor is per-Graph**
-(`apps/arbiter/lib/arbiter/workflows/conductor.ex:3`), and `workspace_max` is
+(`apps/wardmast/lib/wardmast/workflows/conductor.ex:3`), and `workspace_max` is
 resolved per Conductor. Two running graphs in one workspace at
 `max_concurrent: 4` already permit 8 on that workspace alone. The account-facing
 ceiling today is `graphs × workspaces × max_concurrent`, bounded only by
@@ -393,7 +393,7 @@ account_headroom(a, ws) =
 ```
 
 * `live_count(a)` is **one authoritative counter**: workers currently registered
-  in `Arbiter.Worker.Registry` whose workspace points at account `a` for the
+  in `Wardmast.Worker.Registry` whose workspace points at account `a` for the
   provider they were dispatched with. Not per-Conductor state — that is precisely
   the bug. Being registry-derived, it is also crash-safe in the same way the
   Conductor's other state is (rebuilt from live processes, not remembered).
@@ -408,13 +408,13 @@ account_headroom(a, ws) =
   workspaces share one budget ("`vstim` stops at 70% so `default` can run to
   90%"), while keeping the account's number a hard floor nobody can raise.
   Today's readers are `Gate.threshold/1`
-  (`apps/arbiter/lib/arbiter/quota/gate.ex:97`), `weekly_threshold/1`
-  (`apps/arbiter/lib/arbiter/quota/gate.ex:116`) and `weekly_warning_policy/1`
-  (`apps/arbiter/lib/arbiter/quota/gate.ex:139`).
+  (`apps/wardmast/lib/wardmast/quota/gate.ex:97`), `weekly_threshold/1`
+  (`apps/wardmast/lib/wardmast/quota/gate.ex:116`) and `weekly_warning_policy/1`
+  (`apps/wardmast/lib/wardmast/quota/gate.ex:139`).
 
 ### 4.2.1 Editing an account: one field registry
 
-> **As shipped (bd-1kr3qf, parity P-16).** `Arbiter.Accounts.Fields` is the one
+> **As shipped (bd-1kr3qf, parity P-16).** `Wardmast.Accounts.Fields` is the one
 > list of what an operator can set on an account — field, type, validation,
 > whether `null` clears it, and who may set it. `POST /api/accounts`,
 > `PATCH /api/accounts/:ref`, `arb account create|set`, the Providers Edit form
@@ -446,7 +446,7 @@ arb account attach vstim claude personal-max --share 2
 > is how a config surface starts disagreeing with itself. P8 added
 > `arb account set <ref> --max-concurrent N|none` and the semantics below;
 > the ceiling and the share are read by
-> `Arbiter.Accounts.Concurrency.account_headroom/2`.
+> `Wardmast.Accounts.Concurrency.account_headroom/2`.
 
 `share` is a **cap, not a reservation**. Shares may sum to more than the ceiling
 — that is the useful configuration, because it lets a quiet workspace's slots be
@@ -487,37 +487,37 @@ workspace-scoped. `splits` = part moves, part stays.
 
 | # | Surface | `file:line` | Keyed by today | Verdict | Note |
 |---|---|---|---|---|---|
-| 1 | `anthropic_quotas` table + identity | `apps/arbiter/lib/arbiter/quota/anthropic_quota.ex:25`, `:161` | `(workspace_id, provider)` | **moves** | → `(provider_account_id, provider)`; §6 |
-| 2 | `codex_quotas` table + identity | `apps/arbiter/lib/arbiter/quota/codex_quota.ex:31`, `:99` | `(workspace_id, provider)` | **moves** | same shape |
-| 3 | `cloud_code_quotas` table + identity | `apps/arbiter/lib/arbiter/quota/google_quota.ex:36`, `:118` | `(workspace_id, provider)` | **moves** | same shape |
-| 4 | `Quota.Gate.over_cap?/2` | `apps/arbiter/lib/arbiter/quota/gate.ex:310` | workspace + its snapshot | **splits** | snapshot moves to account; thresholds become `min(account, workspace)` (§4.2) |
-| 5 | `Gate.threshold/1`, `weekly_threshold/1`, `weekly_warning_policy/1` | `apps/arbiter/lib/arbiter/quota/gate.ex:97`, `:116`, `:139` | `workspace.config["quota"]` | **splits** | account default, workspace may tighten only |
-| 6 | `Gate.Snapshot.normalize/1` | `apps/arbiter/lib/arbiter/quota/gate/snapshot.ex:79` | — | **stays** | pure shape normaliser; takes whatever row it is handed |
-| 7 | `Gate.stale?/1`, `long_window_stale?/1`, staleness threshold | `apps/arbiter/lib/arbiter/quota/gate.ex:215`, `:259`, `:292` | workspace snapshot | **stays** | logic unchanged; the input row becomes the account's |
-| 8 | `Quota.Gate.Continue` / overage decision | `apps/arbiter/lib/arbiter/quota/gate.ex:310` via `Arbiter.Quota.Gate.Continue` | workspace | **moves** | `extra_usage` is an account-level plan feature in the `/api/oauth/usage` body |
-| 9 | `Quota.Overage.windowed_spend/2` | `apps/arbiter/lib/arbiter/quota/overage.ex:36`, sum at `:42` | `by: :workspace` | **splits** | window from the account snapshot; spend sums `by: :provider_account` |
-| 10 | `CloudProbe.default_refresh/1` + `list_workspaces/0` | `apps/arbiter/lib/arbiter/quota/cloud_probe.ex:179`, `:189` | one request **per workspace** | **moves** | iterate accounts; bd-4fbpto deleted bd-5xuneh's grouping (the workspace token it grouped on turned out unable to authenticate this endpoint at all), so P6 now builds account iteration fresh rather than re-keying it (§9) |
-| 11 | `RefreshProbe.due_for_probe?/1`, `default_probe/2` | `apps/arbiter/lib/arbiter/quota/refresh_probe.ex:219`, `:256` | per workspace | **moves — if it still exists** | bd-atyrrq deletes it; do **not** re-key it first (§9) |
-| 12 | `OAuthUsage` 429 cooldown key | `apps/arbiter/lib/arbiter/quota/oauth_usage.ex:207` | `phash2(token)` | **moves** | → account id. Closes bd-3x0na3's gap: the limit is per *account*, so two tokens on one account currently get two cooldowns for one shared budget |
-| 13 | `usage_events` table | `apps/arbiter/lib/arbiter/usage/event.ex:50`, `workspace_id` at `:104` | `workspace_id`, non-null `task_id` | **splits** | keep `workspace_id`; **add** `provider_account_id` + `provider_credential_id` (§8) |
-| 14 | `Usage.summarize/1` group keys | `apps/arbiter/lib/arbiter/usage.ex:203`–`:210` | `:task`/`:workspace`/… | **splits** | one new clause: `:provider_account` |
-| 15 | `ConfigDir.oauth_token/1` precedence chain | `apps/arbiter/lib/arbiter/agents/claude/config_dir.ex:205`, chain at `:206` | workspace `worker_env` → server env → "unambiguous install-wide" | **moves, then collapses** | becomes a join read. The three-step chain exists *only* because accounts have no first-class answer; steps 2–3 become migration inputs and are then deleted |
-| 16 | `ConfigDir.env/1` | `apps/arbiter/lib/arbiter/agents/claude/config_dir.ex:151` | workspace | **stays** | still projects to env pairs; sources from the account |
-| 17 | `Worker.WorkerEnv.resolve/1` | `apps/arbiter/lib/arbiter/worker/worker_env.ex:63`, reads at `:68` | workspace `worker_env` | **splits** | non-credential vars stay; provider credentials come from the account |
-| 18 | `Workspace.worker_env_map/1` | `apps/arbiter/lib/arbiter/tasks/workspace.ex:331` | workspace | **stays** | minus the moved credential keys |
-| 19 | `workspaces.encrypted_worker_env` + `worker_env_meta` | `apps/arbiter/lib/arbiter/tasks/workspace.ex:256`, `:270` | workspace | **splits** | §7 |
-| 20 | `Dispatch` spawn env + `anthropic_proxy_opts/2` | `apps/arbiter/lib/arbiter/worker/dispatch.ex:2073`, `:2085`, call sites `:1496`, `:1877` | workspace | **stays** | shape unchanged (credentials still arrive as env pairs); the proxy opts die with bd-7cvh8z regardless of this RFC |
-| 21 | `Conductor.resolve_workspace_max/3` + `effective_cap/1` | `apps/arbiter/lib/arbiter/workflows/conductor.ex:474`, `:491`, `:513` | workspace + system | **splits** | gains the `account_headroom` term (§4.2) |
-| 22 | *(Historical)* `Workflows.QuotaGate` behaviour callback | `apps/arbiter/lib/arbiter/workflows/quota_gate.ex:36` *(deleted in #1965)* | `workspace_id` | **deleted** | Deleted with the Conductor in `a05a2403` (#1965); Autopilot reads `Quota.Gate` / `Board.Snapshot.quota_hold/1` |
-| 23 | `Board.Snapshot.effective_max_concurrent/1` | `apps/arbiter/lib/arbiter/board/snapshot.ex:305`, used at `:238` | workspace + system | **splits** | must fold in account headroom or the board lies about slots |
-| 24 | `Quota.latest/2`, `latest_for_provider/2`, `serialize/2`, `list_latest/1` | `apps/arbiter/lib/arbiter/quota.ex:290`, `:162`, `:307`, `:579` | `workspace_id` | **moves** | take an account |
-| 25 | `Quota.capture_oauth_usage/2` | `apps/arbiter/lib/arbiter/quota.ex:513` | `workspace_id` | **moves** | one call per account per cycle |
-| 26 | `Quota.provider_spend/1` | `apps/arbiter/lib/arbiter/quota.ex:607` | `workspace_id` | **splits** | account total is the headline; workspace breakdown stays available |
-| 27 | `Quota.default_workspace_id/0`, `default_workspace_on_exhaustion/0` | `apps/arbiter/lib/arbiter/quota.ex:702`, `:728` | workspace | **stays** | workspace routing, not metering |
-| 28 | `arb quota` | `apps/arbiter_cli/lib/arbiter_cli/cmd/quota.ex:28`, output at `:96` | `--workspace` | **splits** | gains `--account`; §8 |
-| 29 | `arb usage` | `apps/arbiter_cli/lib/arbiter_cli/cmd/usage.ex:13` | `--by …`, `--workspace` | **splits** | gains `--by account`, `--account`; §8 |
-| 30 | Web quota/usage surfaces | `apps/arbiter_web/lib/arbiter_web/controllers/api/quota_controller.ex`, `apps/arbiter_web/lib/arbiter_web/live/usage_live.ex`, `apps/arbiter_web/lib/arbiter_web/live/workspace_detail_live.ex` | workspace | **splits** | workspace detail keeps a workspace view that names its account |
-| 31 | `MergeWorkerEnv` change | `apps/arbiter/lib/arbiter/tasks/workspace/changes/merge_worker_env.ex` | workspace | **splits** | reused verbatim by the migration to remove moved keys (§7.3) |
+| 1 | `anthropic_quotas` table + identity | `apps/wardmast/lib/wardmast/quota/anthropic_quota.ex:25`, `:161` | `(workspace_id, provider)` | **moves** | → `(provider_account_id, provider)`; §6 |
+| 2 | `codex_quotas` table + identity | `apps/wardmast/lib/wardmast/quota/codex_quota.ex:31`, `:99` | `(workspace_id, provider)` | **moves** | same shape |
+| 3 | `cloud_code_quotas` table + identity | `apps/wardmast/lib/wardmast/quota/google_quota.ex:36`, `:118` | `(workspace_id, provider)` | **moves** | same shape |
+| 4 | `Quota.Gate.over_cap?/2` | `apps/wardmast/lib/wardmast/quota/gate.ex:310` | workspace + its snapshot | **splits** | snapshot moves to account; thresholds become `min(account, workspace)` (§4.2) |
+| 5 | `Gate.threshold/1`, `weekly_threshold/1`, `weekly_warning_policy/1` | `apps/wardmast/lib/wardmast/quota/gate.ex:97`, `:116`, `:139` | `workspace.config["quota"]` | **splits** | account default, workspace may tighten only |
+| 6 | `Gate.Snapshot.normalize/1` | `apps/wardmast/lib/wardmast/quota/gate/snapshot.ex:79` | — | **stays** | pure shape normaliser; takes whatever row it is handed |
+| 7 | `Gate.stale?/1`, `long_window_stale?/1`, staleness threshold | `apps/wardmast/lib/wardmast/quota/gate.ex:215`, `:259`, `:292` | workspace snapshot | **stays** | logic unchanged; the input row becomes the account's |
+| 8 | `Quota.Gate.Continue` / overage decision | `apps/wardmast/lib/wardmast/quota/gate.ex:310` via `Wardmast.Quota.Gate.Continue` | workspace | **moves** | `extra_usage` is an account-level plan feature in the `/api/oauth/usage` body |
+| 9 | `Quota.Overage.windowed_spend/2` | `apps/wardmast/lib/wardmast/quota/overage.ex:36`, sum at `:42` | `by: :workspace` | **splits** | window from the account snapshot; spend sums `by: :provider_account` |
+| 10 | `CloudProbe.default_refresh/1` + `list_workspaces/0` | `apps/wardmast/lib/wardmast/quota/cloud_probe.ex:179`, `:189` | one request **per workspace** | **moves** | iterate accounts; bd-4fbpto deleted bd-5xuneh's grouping (the workspace token it grouped on turned out unable to authenticate this endpoint at all), so P6 now builds account iteration fresh rather than re-keying it (§9) |
+| 11 | `RefreshProbe.due_for_probe?/1`, `default_probe/2` | `apps/wardmast/lib/wardmast/quota/refresh_probe.ex:219`, `:256` | per workspace | **moves — if it still exists** | bd-atyrrq deletes it; do **not** re-key it first (§9) |
+| 12 | `OAuthUsage` 429 cooldown key | `apps/wardmast/lib/wardmast/quota/oauth_usage.ex:207` | `phash2(token)` | **moves** | → account id. Closes bd-3x0na3's gap: the limit is per *account*, so two tokens on one account currently get two cooldowns for one shared budget |
+| 13 | `usage_events` table | `apps/wardmast/lib/wardmast/usage/event.ex:50`, `workspace_id` at `:104` | `workspace_id`, non-null `task_id` | **splits** | keep `workspace_id`; **add** `provider_account_id` + `provider_credential_id` (§8) |
+| 14 | `Usage.summarize/1` group keys | `apps/wardmast/lib/wardmast/usage.ex:203`–`:210` | `:task`/`:workspace`/… | **splits** | one new clause: `:provider_account` |
+| 15 | `ConfigDir.oauth_token/1` precedence chain | `apps/wardmast/lib/wardmast/agents/claude/config_dir.ex:205`, chain at `:206` | workspace `worker_env` → server env → "unambiguous install-wide" | **moves, then collapses** | becomes a join read. The three-step chain exists *only* because accounts have no first-class answer; steps 2–3 become migration inputs and are then deleted |
+| 16 | `ConfigDir.env/1` | `apps/wardmast/lib/wardmast/agents/claude/config_dir.ex:151` | workspace | **stays** | still projects to env pairs; sources from the account |
+| 17 | `Worker.WorkerEnv.resolve/1` | `apps/wardmast/lib/wardmast/worker/worker_env.ex:63`, reads at `:68` | workspace `worker_env` | **splits** | non-credential vars stay; provider credentials come from the account |
+| 18 | `Workspace.worker_env_map/1` | `apps/wardmast/lib/wardmast/tasks/workspace.ex:331` | workspace | **stays** | minus the moved credential keys |
+| 19 | `workspaces.encrypted_worker_env` + `worker_env_meta` | `apps/wardmast/lib/wardmast/tasks/workspace.ex:256`, `:270` | workspace | **splits** | §7 |
+| 20 | `Dispatch` spawn env + `anthropic_proxy_opts/2` | `apps/wardmast/lib/wardmast/worker/dispatch.ex:2073`, `:2085`, call sites `:1496`, `:1877` | workspace | **stays** | shape unchanged (credentials still arrive as env pairs); the proxy opts die with bd-7cvh8z regardless of this RFC |
+| 21 | `Conductor.resolve_workspace_max/3` + `effective_cap/1` | `apps/wardmast/lib/wardmast/workflows/conductor.ex:474`, `:491`, `:513` | workspace + system | **splits** | gains the `account_headroom` term (§4.2) |
+| 22 | *(Historical)* `Workflows.QuotaGate` behaviour callback | `apps/wardmast/lib/wardmast/workflows/quota_gate.ex:36` *(deleted in #1965)* | `workspace_id` | **deleted** | Deleted with the Conductor in `a05a2403` (#1965); Autopilot reads `Quota.Gate` / `Board.Snapshot.quota_hold/1` |
+| 23 | `Board.Snapshot.effective_max_concurrent/1` | `apps/wardmast/lib/wardmast/board/snapshot.ex:305`, used at `:238` | workspace + system | **splits** | must fold in account headroom or the board lies about slots |
+| 24 | `Quota.latest/2`, `latest_for_provider/2`, `serialize/2`, `list_latest/1` | `apps/wardmast/lib/wardmast/quota.ex:290`, `:162`, `:307`, `:579` | `workspace_id` | **moves** | take an account |
+| 25 | `Quota.capture_oauth_usage/2` | `apps/wardmast/lib/wardmast/quota.ex:513` | `workspace_id` | **moves** | one call per account per cycle |
+| 26 | `Quota.provider_spend/1` | `apps/wardmast/lib/wardmast/quota.ex:607` | `workspace_id` | **splits** | account total is the headline; workspace breakdown stays available |
+| 27 | `Quota.default_workspace_id/0`, `default_workspace_on_exhaustion/0` | `apps/wardmast/lib/wardmast/quota.ex:702`, `:728` | workspace | **stays** | workspace routing, not metering |
+| 28 | `arb quota` | `apps/wardmast_cli/lib/wardmast_cli/cmd/quota.ex:28`, output at `:96` | `--workspace` | **splits** | gains `--account`; §8 |
+| 29 | `arb usage` | `apps/wardmast_cli/lib/wardmast_cli/cmd/usage.ex:13` | `--by …`, `--workspace` | **splits** | gains `--by account`, `--account`; §8 |
+| 30 | Web quota/usage surfaces | `apps/wardmast_web/lib/wardmast_web/controllers/api/quota_controller.ex`, `apps/wardmast_web/lib/wardmast_web/live/usage_live.ex`, `apps/wardmast_web/lib/wardmast_web/live/workspace_detail_live.ex` | workspace | **splits** | workspace detail keeps a workspace view that names its account |
+| 31 | `MergeWorkerEnv` change | `apps/wardmast/lib/wardmast/tasks/workspace/changes/merge_worker_env.ex` | workspace | **splits** | reused verbatim by the migration to remove moved keys (§7.3) |
 
 ---
 
@@ -532,16 +532,16 @@ Three tables, one shape, one migration each:
    `(provider_account_id, provider)` and drop `workspace_id`.
 
 **Which row survives the collapse.** The snapshot tables are caches of the latest
-reading, not time series (`apps/arbiter/lib/arbiter/quota/anthropic_quota.ex:12`),
+reading, not time series (`apps/wardmast/lib/wardmast/quota/anthropic_quota.ex:12`),
 so freshest-wins loses nothing: on this install the three rows' header figures
 differ only by capture jitter (0.24 / 0.24 / 0.22 at 06:28, per bd-3x0na3 §6).
 
 **The subtlety that a naive collapse gets wrong:** `anthropic_quotas` is written
 by *two* actions with **disjoint** `upsert_fields` — `:upsert` (header capture)
 and `:record_oauth_usage`
-(`apps/arbiter/lib/arbiter/quota/anthropic_quota.ex:32`, `:57`), which is why
+(`apps/wardmast/lib/wardmast/quota/anthropic_quota.ex:32`, `:57`), which is why
 there are two independent timestamps, `captured_at` and `oauth_captured_at`
-(`apps/arbiter/lib/arbiter/quota/anthropic_quota.ex:113`, `:150`). Newest-row-wins
+(`apps/wardmast/lib/wardmast/quota/anthropic_quota.ex:113`, `:150`). Newest-row-wins
 can therefore silently discard a fresher oauth block. **Collapse per column
 group:** header columns from the row with the newest `captured_at`, oauth columns
 from the row with the newest `oauth_captured_at`. `codex_quotas` and
@@ -549,7 +549,7 @@ from the row with the newest `oauth_captured_at`. `codex_quotas` and
 
 **How `arb quota` output changes.** Today the header is
 `Anthropic quota (workspace <uuid>)`
-(`apps/arbiter_cli/lib/arbiter_cli/cmd/quota.ex:96`), printed three times with the
+(`apps/wardmast_cli/lib/wardmast_cli/cmd/quota.ex:96`), printed three times with the
 same numbers if you ask three times. After:
 
 ```
@@ -569,10 +569,10 @@ mid-sequence.
 
 **What P5 actually shipped (bd-3yokey).** As written above, plus one decision
 the section does not spell out: **what happens to a quota row whose workspace
-has no account.** An install that has never run `mix arbiter.accounts.migrate`
+has no account.** An install that has never run `mix wardmast.accounts.migrate`
 has no join rows at all, and a snapshot keyed by nothing cannot be written —
 so both the migration and the runtime write path resolve through
-`Arbiter.Accounts.Resolver`, which takes the join row, else the provider's
+`Wardmast.Accounts.Resolver`, which takes the join row, else the provider's
 **sole enabled** account (the same "unambiguous install-wide" rule
 `ConfigDir.oauth_token/1` already applies to credentials), else a single
 shared `default` account minted per provider. One account per provider, never
@@ -588,7 +588,7 @@ P11) is the correction when the guess is wrong.
 
 ### 7.1 Census first — read-only, fingerprints only
 
-`mix arbiter.accounts.census` decrypts each workspace's `worker_env` in memory,
+`mix wardmast.accounts.census` decrypts each workspace's `worker_env` in memory,
 partitions its keys into provider-credential keys and everything else, and prints
 **counts, key names and fingerprints — never values**. It writes a candidate plan
 file (`accounts.json`) the operator edits.
@@ -605,10 +605,10 @@ That grouping is sound in one direction only. Fingerprint equality proves
 sameness; inequality proves nothing (§2.2), and the counter-example is already on
 this host. So the plan is **proposed, not applied**: the operator renames the
 candidates and merges any they know to be one plan, then
-`mix arbiter.accounts.migrate --plan accounts.json` applies it. On a release
+`mix wardmast.accounts.migrate --plan accounts.json` applies it. On a release
 install (no Mix), the census, migrate and rollback steps are
-`Arbiter.Release.accounts_census/1`, `accounts_migrate/1` and
-`accounts_rollback/1` through `bin/arbiter eval`. See
+`Wardmast.Release.accounts_census/1`, `accounts_migrate/1` and
+`accounts_rollback/1` through `bin/wardmast eval`. See
 [`provider-accounts-release-runbook.md`](provider-accounts-release-runbook.md)
 (bd-1zceei).
 
@@ -632,11 +632,11 @@ general, so the rule is conservative:
   non-allowlisted key is reported by the census, never moved.
 * The removal is a **normal `Workspace` update through the existing
   `MergeWorkerEnv` change**
-  (`apps/arbiter/lib/arbiter/tasks/workspace/changes/merge_worker_env.ex`), with
+  (`apps/wardmast/lib/wardmast/tasks/workspace/changes/merge_worker_env.ex`), with
   each moved key set to `nil` — that change already treats a null value as
-  "remove" (`apps/arbiter/lib/arbiter/tasks/workspace.ex:113`). The encrypted
+  "remove" (`apps/wardmast/lib/wardmast/tasks/workspace.ex:113`). The encrypted
   column is re-encrypted by the existing code path and `worker_env_meta`
-  (`apps/arbiter/lib/arbiter/tasks/workspace.ex:270`) is kept in lockstep
+  (`apps/wardmast/lib/wardmast/tasks/workspace.ex:270`) is kept in lockstep
   automatically. **The migration writes no new crypto code**, which is the single
   most valuable property of this plan.
 
@@ -645,7 +645,7 @@ general, so the rule is conservative:
 | Risk | Control |
 |---|---|
 | Plan file | contains fingerprints and key *names* only. Asserted by a test that feeds a known token through the census and greps the emitted plan for it. Written mode `0600`; deleted after apply. |
-| New table | `provider_credentials.encrypted_secret` is `public? false, sensitive? true`, `ash_cloak`-encrypted, and added to the resource's audit `ignore_attributes` — mirroring `apps/arbiter/lib/arbiter/tasks/workspace.ex:95`, which already excludes `encrypted_secrets` and `encrypted_worker_env` from the audit trail. |
+| New table | `provider_credentials.encrypted_secret` is `public? false, sensitive? true`, `ash_cloak`-encrypted, and added to the resource's audit `ignore_attributes` — mirroring `apps/wardmast/lib/wardmast/tasks/workspace.ex:95`, which already excludes `encrypted_secrets` and `encrypted_worker_env` from the audit trail. |
 | Logs | run the migration with `Logger` at `:info`; the census prints fingerprints only. A test asserts the migration emits no log line containing the secret. |
 | Post-migration sweep | scan every `TEXT` column of `provider_accounts`, `provider_credentials` and `workspaces` for the secret's first 12 characters; assert zero hits. |
 | SQLite WAL / backups | contain the old **ciphertext** only, which is the pre-existing situation and unchanged by this work. Note however §7.6: that ciphertext is under a key currently considered exposed. |
@@ -666,7 +666,7 @@ Three releases, with exactly one point of no return, and it is late:
 * **Release N+2 — destructive.** Remove the moved keys from `worker_env`. Before
   deleting, the migration writes the pre-change `worker_env` to a
   `provider_account_migration_backups` row, **encrypted with the same Vault** —
-  never a plaintext file on disk. `mix arbiter.accounts.rollback` re-merges it
+  never a plaintext file on disk. `mix wardmast.accounts.rollback` re-merges it
   through `MergeWorkerEnv`. *Rollback from here is a restore, and is gated on
   that backup row existing.*
 
@@ -675,14 +675,14 @@ reverse. Do not collapse them to save a release.
 
 **What P2 actually shipped (bd-77j2if), and how it differs from the three
 releases above.** The P2 ticket folded the `worker_env` removal, the encrypted
-backup row and `mix arbiter.accounts.rollback` into a single release — matching
+backup row and `mix wardmast.accounts.rollback` into a single release — matching
 the P2 row of §10's phase table ("move allowlisted keys, encrypted backup row,
-`mix arbiter.accounts.rollback`") rather than the N / N+1 / N+2 split written
+`mix wardmast.accounts.rollback`") rather than the N / N+1 / N+2 split written
 here. The properties that made the split worth having are preserved a different
 way:
 
 * **Reversibility is per-workspace and immediate, not per-release.** The backup
-  row is written before the blob is touched, and `mix arbiter.accounts.rollback
+  row is written before the blob is touched, and `mix wardmast.accounts.rollback
   --migration-id <id>` merges it straight back through `MergeWorkerEnv`. That
   is N+2's restore path, available from the first release rather than the third.
 * **Nothing reads the new tables.** `:provider_accounts_enabled` is `false` and
@@ -692,24 +692,24 @@ way:
   schema half.
 * **The cost of the fold is real and is the operator's to absorb**: between P2
   and P3 a workspace whose key was moved no longer supplies it to a spawned
-  worker from the blob. `mix arbiter.accounts.migrate` says so in its own
+  worker from the blob. `mix wardmast.accounts.migrate` says so in its own
   output and prints the rollback command. Run it on an install only when P3 is
   close behind, or when the credential reaches workers by another route.
 
 **What P3 actually shipped (bd-aiodva).** The read flip landed as written —
 `ConfigDir.oauth_token/1`, `ConfigDir.env/1` and `WorkerEnv.resolve/1` source
-provider credentials from `Arbiter.Accounts.Credentials` (one join hop:
+provider credentials from `Wardmast.Accounts.Credentials` (one join hop:
 `workspace_provider_accounts` → the account's active `provider_credentials`
 row) when `:provider_accounts_enabled` is true, and are untouched when it is
 false. Two decisions the rows above do not spell out:
 
 * **A dropped credential is loud, not silent.** If a workspace's blob still
   carries an allowlisted credential key and no account supplies it, the read
-  raises `Arbiter.Accounts.MissingCredentialError` rather than handing a
+  raises `Wardmast.Accounts.MissingCredentialError` rather than handing a
   worker an environment with the credential quietly missing — which would
   401 minutes later and burn the run. So the operator order is "migrate every
   workspace that carries a credential, *then* flip the flag", and the two
-  undos (flip the flag back, or `mix arbiter.accounts.rollback`) both stay
+  undos (flip the flag back, or `mix wardmast.accounts.rollback`) both stay
   cheap.
 * **Install-level sources are not what P3 moved.** `oauth_token/1`'s steps 2
   and 3 (the server process env, and the unambiguous install-wide value) are
@@ -743,8 +743,8 @@ only path.
 **What v0.2.0 shipped: the default (bd-cvvb02).** The flag no longer ships
 off. `config/config.exs` ships `:provider_accounts_enabled, :auto`, and
 `config/runtime.exs` turns an explicit `ARBITER_PROVIDER_ACCOUNTS=1/true` or
-`0/false` into a boolean that always wins. `Arbiter.Boot.ProviderAccounts`
-resolves `auto` once per boot (`Arbiter.Accounts.Enablement`). It runs after
+`0/false` into a boolean that always wins. `Wardmast.Boot.ProviderAccounts`
+resolves `auto` once per boot (`Wardmast.Accounts.Enablement`). It runs after
 the schema and config migrators and before the boot tasks that dispatch work.
 
 * **Already migrated.** An un-restored `provider_account_migration_backups`
@@ -768,15 +768,15 @@ drop the server-env token. The legacy chain still serves those workers
 correctly, and a refused boot would take down the dashboard and the running
 fleet for a condition the operator fixes with the runbook's read-only census
 while the server keeps running. Until the boot has resolved `auto`,
-`Accounts.enabled?/0` answers `false`, and so does a `bin/arbiter eval` or
-`mix arbiter.accounts.*` run, since neither starts the boot children. The
+`Accounts.enabled?/0` answers `false`, and so does a `bin/wardmast eval` or
+`mix wardmast.accounts.*` run, since neither starts the boot children. The
 rollback for this release is unchanged: `ARBITER_PROVIDER_ACCOUNTS=0`, or a
 restore of the backup rows. Leaving the variable unset is no longer a
 rollback, because `auto` resolves a migrated install on.
 
 **What P13 shipped: the flip (bd-9gqj8e).** The `:provider_accounts_enabled`
 flag is gone, along with `config/runtime.exs`'s `ARBITER_PROVIDER_ACCOUNTS`
-parsing and `Arbiter.Accounts.enabled?/0`. `ConfigDir.oauth_token/1` is the
+parsing and `Wardmast.Accounts.enabled?/0`. `ConfigDir.oauth_token/1` is the
 account join and nothing else: the flag-off legacy chain (workspace
 `worker_env` → server env → install-wide-unambiguous workspace token) is
 deleted, together with `any_workspace_oauth_token?/0` and
@@ -784,7 +784,7 @@ deleted, together with `any_workspace_oauth_token?/0` and
 survives only as the `MissingCredentialError` guard. `WorkerEnv.resolve/1`,
 `CredentialCheck` and the quota poll's "workers run on their own token" test
 read the account unconditionally, and `/providers` is never read-only.
-`Arbiter.Accounts.Enablement` still classifies each boot, but the answer
+`Wardmast.Accounts.Enablement` still classifies each boot, but the answer
 decides only the fresh-install `<provider>:default` joins and what doctor
 reports. An un-migrated install carrying legacy credentials is no longer held
 on the legacy chain: its boot warning and doctor `[fail]` say those workspaces
@@ -807,17 +807,17 @@ question is whether a re-encryption pass should ride along with this migration.
    urgent thing for no benefit.
 2. **Different blast radius, different rollback.** Rotation touches **every**
    encrypted column — `encrypted_secrets` and `encrypted_worker_env`
-   (`apps/arbiter/lib/arbiter/tasks/workspace.ex:240`, `:256`) — and its failure
+   (`apps/wardmast/lib/wardmast/tasks/workspace.ex:240`, `:256`) — and its failure
    mode is "nothing decrypts". Extraction touches one key inside one column and
    its failure mode is "a worker spawns without a token". Fused, a failure is
    ambiguous: you cannot tell which half broke, and the rollback for one is not
    the rollback for the other.
 3. **Cloak already supports rotation natively**, as two ciphers with distinct
    tags: add the new cipher as `:default`, keep the old one for decryption, sweep
-   to re-encrypt, drop the old. `Arbiter.Vault.init/1` builds a single-element
-   `ciphers` list (`apps/arbiter/lib/arbiter/vault.ex:26`), so rotation is a
+   to re-encrypt, drop the old. `Wardmast.Vault.init/1` builds a single-element
+   `ciphers` list (`apps/wardmast/lib/wardmast/vault.ex:26`), so rotation is a
    small self-contained change plus a re-encrypt task. It does not need this RFC,
-   and `apps/arbiter/lib/arbiter/vault.ex:17` already declares the runbook a
+   and `apps/wardmast/lib/wardmast/vault.ex:17` already declares the runbook a
    separate concern — **file it as its own ticket**.
 4. **But the exposure means something concrete for this work, and the order
    matters.** Rotating the Cloak key protects future ciphertext; it does not help
@@ -840,18 +840,18 @@ an account question, and today nothing can answer it.
 
 **Schema.** `usage_events` gains `provider_account_id` (uuid, nullable) and
 `provider_credential_id` (uuid, nullable), written wherever `workspace_id` is
-written today (`apps/arbiter/lib/arbiter/usage/event.ex:104`). Backfill from
+written today (`apps/wardmast/lib/wardmast/usage/event.ex:104`). Backfill from
 `workspace_provider_accounts`. The backfill is exact for any period in which a
 workspace's account for that provider did not change — trivially true
 pre-migration, since accounts did not exist.
 
 **CLI.** `arb usage --by account` is one new clause in
-`Arbiter.Usage.summarize/1`'s `group_events/2`
-(`apps/arbiter/lib/arbiter/usage.ex:203`–`:210`); `--account <slug>` mirrors the
+`Wardmast.Usage.summarize/1`'s `group_events/2`
+(`apps/wardmast/lib/wardmast/usage.ex:203`–`:210`); `--account <slug>` mirrors the
 existing `--workspace` filter
-(`apps/arbiter_cli/lib/arbiter_cli/cmd/usage.ex:13`). `arb quota --account`
+(`apps/wardmast_cli/lib/wardmast_cli/cmd/usage.ex:13`). `arb quota --account`
 reports the account total via a re-keyed `Quota.provider_spend/1`
-(`apps/arbiter/lib/arbiter/quota.ex:607`) with the per-workspace breakdown under
+(`apps/wardmast/lib/wardmast/quota.ex:607`) with the per-workspace breakdown under
 it (§6).
 
 **Composition with bd-adyhvn.** The two dimensions are orthogonal and
@@ -914,7 +914,7 @@ iteration from scratch.** Once `ProviderAccount` exists, P6 iterates accounts
 (not tokens) and, for each, calls `/api/oauth/usage` with that account's
 credential; the workspace-token grouping bd-5xuneh wrote is gone and
 contributes nothing to that loop. Re-keying `OAuthUsage.fetch/1`'s 429
-cooldown (`apps/arbiter/lib/arbiter/quota/oauth_usage.ex:207`, currently
+cooldown (`apps/wardmast/lib/wardmast/quota/oauth_usage.ex:207`, currently
 keyed on `phash2(token)`) to the account id is unaffected by the deletion and
 still belongs in P6 — it closes the gap bd-3x0na3 flagged, where two distinct
 tokens on one account get two independent cooldowns for one shared
@@ -930,9 +930,9 @@ Each phase is sized to be one child ticket.
 
 | Phase | What | Depends on | Priority | Difficulty |
 |---|---|---|---|---|
-| **P0** | `mix arbiter.accounts.census` — read-only; fingerprints and key names only; emits the candidate plan (**shipped**) | — | P2 | D2 |
+| **P0** | `mix wardmast.accounts.census` — read-only; fingerprints and key names only; emits the candidate plan (**shipped**) | — | P2 | D2 |
 | **P1** | `ProviderAccount` / `ProviderCredential` / `WorkspaceProviderAccount` resources + migration. Tables only; nothing reads them (**shipped**) | P0 | P2 | D2 |
-| **P2** | Plan-driven extraction: move allowlisted keys, encrypted backup row, `mix arbiter.accounts.rollback`. Flag off; workspace blob still authoritative (**shipped**, bd-77j2if) | P1 | P2 | D3 |
+| **P2** | Plan-driven extraction: move allowlisted keys, encrypted backup row, `mix wardmast.accounts.rollback`. Flag off; workspace blob still authoritative (**shipped**, bd-77j2if) | P1 | P2 | D3 |
 | **P3** | Read-path flip behind `:provider_accounts_enabled` — `ConfigDir.oauth_token/1`, `ConfigDir.env/1`, `WorkerEnv.resolve/1` source from the account (**shipped**, bd-aiodva; see §7.5) | P2 | P2 | D3 |
 | **P4** | Destructive step (**shipped**, bd-cblemv; see §7.5) — `worker_env` removal already landed in P2; deferred the `ConfigDir` fallback deletion to P13 per operator ruling on #1947 | P3 | P2 | D2 |
 | **P5** | Re-key the three quota tables to `(provider_account_id, provider)`; per-column-group collapse (§6) (**shipped**, bd-3yokey) | P3, bd-b0zody, bd-7cvh8z | **P1** | D3 |
@@ -989,8 +989,8 @@ logged or committed.
 3. **Workspace credential census** — `mix run --no-start` with
    `Exqlite.Sqlite3.open(..., mode: :readonly)` against the live
    `~/dev/arbiter_dev.sqlite3`, decrypting `workspaces.encrypted_worker_env`
-   through `Arbiter.Vault` exactly as
-   `Arbiter.Tasks.Workspace.worker_env_map/1` does
+   through `Wardmast.Vault` exactly as
+   `Wardmast.Tasks.Workspace.worker_env_map/1` does
    (`Base.decode64!` → `Vault.decrypt!` → `non_executable_binary_to_term`).
    Printed sha256 prefixes and key names only. Result: 3 workspaces, 1 distinct
    token, `["CLAUDE_CODE_OAUTH_TOKEN"]` and nothing else in each.

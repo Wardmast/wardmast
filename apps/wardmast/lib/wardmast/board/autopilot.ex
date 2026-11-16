@@ -1,0 +1,2222 @@
+defmodule Wardmast.Board.Autopilot do
+  @moduledoc """
+  The process that actually promotes. `Wardmast.Board.Scheduler` decides *which*
+  Ready card should go next; this is the thing that goes and dispatches it.
+
+  The board's Ready column is a queue, not a staging area — the handoff's
+  "drop to dispatch" zone is deliberately not built (bd-bqyeqa). An operator
+  who has to drag every card into Running is a scheduler made of a person, and
+  a person is the one component in this system that cannot watch sixteen slots
+  at once. So the queue drains itself: on each tick the autopilot reads the
+  board, and if `Wardmast.Board.Snapshot` named a card to promote, it dispatches
+  exactly that one card.
+
+  ## One card per tick
+
+  `Scheduler.plan/1` promotes at most one card even when several slots are
+  free, and this process does not loop to catch up. Dispatch is slow and has
+  side effects — a worktree, a branch, possibly a paid agent session — and a
+  card that has just been dispatched does not appear as in-flight work until
+  its worker registers. Promoting one card per tick means the next tick reads a
+  world that already contains the previous promotion, so file-overlap and slot
+  accounting stay honest without this module having to model in-flight
+  dispatches itself.
+
+  ## Dispatch runs off the process
+
+  `Wardmast.Worker.Dispatch.dispatch/1` provisions a worktree, spawns an agent
+  subprocess and attaches a workflow machine — seconds to minutes. Running that
+  inside `handle_info/2` would make this GenServer unavailable for the whole of
+  a promotion, and the promotion is exactly what makes every open board ask it
+  a question: `Worker.init/1` broadcasts `:started` mid-dispatch, boards
+  refresh on that, and their calls would time out against a process busy doing
+  the thing they are refreshing to show.
+
+  So a promotion runs in a supervised `Task` and this process stays a
+  bookkeeper: `:dispatching` holds the one in-flight promotion, `tick/2`
+  callers are parked with `GenServer.reply/2` until the task reports back, and
+  `pause/1`, `paused?/1` and `board/2` keep answering the whole time. One
+  promotion at a time still holds — a tick that arrives mid-dispatch answers
+  `{:busy, id}` rather than starting a second one.
+
+  ## Paused by default, persisted after that (bd-pgi97m)
+
+  The autopilot starts paused unless the install opts in
+  (`config :wardmast, :board_autopilot, enabled: true`, or `paused: false` at
+  start). Auto-dispatch spends money and touches a git worktree; a fresh
+  install should not discover it by finding four agents running.
+
+  Once an operator has explicitly paused or resumed via any path
+  (`pause/2` / `resume/2` — MCP, `arb scheduler`, the REST API, or a dashboard
+  toggle), that choice is persisted to `Wardmast.Settings`
+  (`installation_settings.board_autopilot_paused`) and `init/1` reads it back
+  on the next start, so a restart resumes the install's last choice instead of
+  always coming back paused. A fresh install with nothing persisted still
+  falls back to the app-env default above. Persisting is best-effort: a write
+  failure (e.g. no DB connection, as in a bare unit test) is logged and
+  swallowed rather than blocking the in-memory pause/resume, which always
+  takes effect immediately either way.
+
+  While paused the board still renders a full plan — every Ready card reads
+  `scheduler paused` rather than a queue position, because a position implies
+  a queue that is moving.
+
+  ## Deferred resumes go first (bd-92mx1m)
+
+  A task that released its slot — parked for a human, completed, stopped — and
+  is then resumed must re-acquire one (`Wardmast.Worker.ResumeSlot`). When an
+  *automatic* resume (the boot reconciler, a Watchdog auto-resume, a
+  MergeQueue revise) finds the cap full, `Wardmast.Worker.Dispatch` neither
+  fails it nor lets it go over: it hands it here with `defer_resume/4`, and
+  this process replays it — `Dispatch.resume/2` or `resume_session/2` with the
+  caller's own options plus `slot_admitted: true` — on the first pass that
+  sees a free slot.
+
+  A deferred resume is work already in progress, so it goes **ahead of** every
+  Ready card: while one is queued, no Ready card is promoted. For the same
+  reason a pause does not hold it back — a pause stops *new* board dispatches
+  and nothing else (`Wardmast.Board.Drain`). Queued resumes drain in arrival
+  order, one per pass like a promotion; a second deferral of the same task
+  replaces the options but keeps its place. A replay that finds the task
+  already resumed, closed or gone is dropped quietly; any other failure is
+  escalated once and dropped — the queue never retries it on its own.
+
+  A resume can also be deferred for the *primary's own* worker cap
+  (`held_for: :local_capacity`, `Wardmast.Nodes.LocalCapacity`, bd-b2iigy): a
+  restart's resume sweep brings back at most the cap's worth and queues the
+  rest here. Those wait on room where they would run instead of a board slot
+  (their ticket is already In progress): the primary's cap, or a node with a
+  free slot for a resume placement may send there (`Dispatch.resume_room?/2`,
+  bd-4ic681). They replay highest ticket priority first, and show as
+  `held: local capacity` in `status/2` (`held_local_capacity`), the board and
+  `arb scheduler status`.
+
+  The queue is in memory. A restart loses it, which is the same thing the
+  restart does to everything else in flight: the boot reconciler re-resumes
+  mid-flight tasks, and the patrols re-watch open PRs.
+
+  ## The fast lane: a ticket returning from Merging (bd-741sid)
+
+  The same queue carries the runs of a ticket coming back from Merging — a CI
+  fix pass (`:fix_pass`) or a conflict pass (`:conflict`) its Watchdog asked
+  for. A Merging ticket holds no slot, so the pass must get one
+  (`Wardmast.Workflows.MergeQueue.PassAdmission`); at a full cap it is queued
+  here and replayed through its dispatcher (`FixPassDispatcher.dispatch/1` /
+  `ConflictResolver.resolve/1`) with `slot_admitted: true` the moment a slot
+  frees — ahead of every Ready ticket, exactly like a deferred resume.
+
+  ## A dispatch that keeps failing gets escalated (bd-a40f4q)
+
+  `finish_dispatch/3`'s log-and-move-on above is right for a card's *first*
+  failure — it might be transient, and the next tick re-reads a world that
+  may have changed. It stops being right once the same card keeps failing the
+  same way tick after tick: nothing distinguishes "hasn't been picked up yet"
+  from "will never dispatch until a human intervenes," and the only trace is
+  a `Logger.warning` line that this fleet's own experience says is not a
+  reliable place to notice it after the fact.
+
+  So `state.failures` tracks, per card id, the shape of its most recent
+  dispatch error and how many consecutive ticks have produced that same
+  shape. A handful of error classes — `:ambiguous_repo`, `:no_repo_configured`,
+  `:repo_not_found` — are deterministic: retrying dispatch can never change
+  the answer, so they escalate to the coordinator inbox on the very first
+  occurrence. Every other shape gets a small retry budget first, in case it
+  is transient (a quota gate, a network blip), and only escalates once that
+  budget is exhausted. Either way, escalating is a one-shot latch per
+  (card, error shape): once sent, it does not repeat on every tick — a
+  successful dispatch or a change in error shape is what re-arms it. See
+  `Wardmast.Messages.CoordinatorNotifier.dispatch_stuck/3`.
+
+  ## A quota-exhausted pre-flight failure is held, not retried every tick (bd-8lnnnt)
+
+  Historical: this held a `:quota_exhausted` `Wardmast.Worker.StopReason` that
+  `Wardmast.Worker.Dispatch.run_preflight/2`'s per-dispatch auth probe could
+  produce. bd-2jgs2h retired that probe (see
+  `Wardmast.Worker.Dispatch`'s moduledoc and `docs/quota-and-auth.md`) — `dispatch/2`
+  now only ever produces `:auth_expired` on this path, so the `retry_not_before`
+  branch below is currently unreachable from a real dispatch. It is kept
+  because the autopilot tests still feed a `:quota_exhausted` shape in by hand
+  to exercise `record_failure/3` and `promote_or_hold/3` directly, and because
+  `Wardmast.Workflows.DispatchQueue` may still produce that shape via its own
+  path (see its moduledoc). If some other producer of `:quota_exhausted`
+  reappears here, this hold still applies to it unchanged:
+
+  Because that card never leaves Ready on a dispatch failure, and the window
+  does not reset on Autopilot's 15s tick, every tick before a real quota-exhausted
+  failure resets is otherwise a wasted retry destined to fail the identical
+  way. `record_failure/3` computes a `retry_not_before` for this shape — the
+  failure's own reported reset time when known, else a bounded exponential
+  backoff — and `promote/1` honours it: the card stays the board's `promote:`
+  pick (Scheduler has no notion of "skip this one"), but Autopilot declines to
+  actually dispatch it until the hold clears, reporting `{:held, id,
+  retry_not_before}` instead. `Wardmast.Messages.CoordinatorNotifier.preflight_failed/2`
+  carries its own separate dedupe for the escalation itself, so this hold is
+  about not re-attempting, not (only) about not re-paging.
+
+  This hold only covers Autopilot's own periodic tick. It is **not** what
+  drove the bd-7qbavq incident this bug tracks: that card's retries carried
+  `skip_quota_gate: true` (a flag only `Wardmast.Workflows.DispatchQueue`'s
+  drain sets — see `DispatchQueue`'s moduledoc), landed on 5-minute
+  boundaries matching `Wardmast.Quota.CloudProbe`'s broadcast
+  interval, and produced only one run row, all of which rule out this
+  tick path. `DispatchQueue` carries the equivalent hold for the path
+  that actually produced the flood; see its `retry_not_before` handling.
+
+  ## Reactive triggers, not just a tick (bd-axgpec)
+
+  A 15s tick made a closed task or a freed slot wait up to 15s for the next
+  pass; slowing the fallback tick to 60s (configurable, `interval_ms` in
+  `config :wardmast, :board_autopilot`) makes that wait too long to accept
+  without a reactive path alongside it. So this process also subscribes to
+  the PubSub topics that mean "the plan may now be stale":
+
+    * `"tasks"` — `Wardmast.Tasks.Issue.broadcast_lifecycle/2`'s
+      `{:task_lifecycle, event, issue}`, which covers a close, a promote to
+      Ready, and a `depends_on`/`blocks`/`conflicts_with` edge add or remove
+      (`Wardmast.Tasks.Dependencies` broadcasts on the same topic for both
+      endpoints). The queue's order is priority, then the persisted `rank`
+      (bd-asxw4e), so there is no session-only ordering to miss.
+    * `"events"` (`Wardmast.Events`'s global topic) — `{:event, %{topic:
+      "worker_done" | "worker_failed"}}`, meaning a slot just freed.
+
+  Each trigger debounces (`debounce_ms`, default 300ms) rather than running
+  immediately, so a burst — several tasks closing at once — yields one pass.
+  A trigger that lands while a dispatch Task is already in flight does not
+  queue a timer; it sets a flag instead, and that one deferred pass runs the
+  moment the in-flight dispatch reports back, whatever the current debounce
+  state is.
+
+  A successful dispatch schedules an immediate follow-up pass of its own —
+  no debounce — so several Ready cards with free slots behind them drain at
+  dispatch speed rather than one per tick, matching the one-card-per-pass
+  design above. A pass that finds nothing to promote (`:idle`, `:paused`,
+  `:busy`, `:held`, or a dispatch failure with no trigger pending) does not
+  reschedule itself — only an external trigger, or a dispatch that actually
+  succeeded, ever schedules the next one. Without that asymmetry a quiet
+  board with nothing to do would still tick itself forever at debounce
+  speed.
+
+  This is a real, accepted behaviour change from the pre-bd-axgpec, tick-only
+  scheduler: with dead credentials and several Ready tasks behind free slots,
+  a burst of successful-looking dispatches (a dispatch call "succeeds" in the
+  sense of starting a worker; the worker then dies on its own auth check) can
+  now happen back-to-back, up to `slots_free` deep, before `AuthHold` opens
+  and the board-level hold takes over — instead of one attempt per 15s/60s
+  tick. The number of such attempts stays bounded by the number of free
+  slots, not unbounded, and `AuthHold`/`promote_or_hold/3` still cuts it off
+  as soon as the threshold trips; only the attempts *before* that point land
+  closer together. Suites that assert an exact tick-by-tick attempt count or
+  outcome sequence against dead credentials should start Autopilot with
+  `follow_up: false` (see `start_link/1`) to opt back into one pass per
+  `tick/2` call, matching that pre-existing assumption.
+
+  Quota holds lifting and a `retry_not_before` expiring are not PubSub
+  events — nothing broadcasts when a clock crosses a deadline — so those
+  stay on the fallback tick, which is why 60s is a compromise and not a
+  formality: a hold that clears right after a pass can wait up to a minute
+  before the tick notices. `promote_or_hold/3`'s hold logic is unchanged.
+
+  ## The admission shadow (DC6, bd-9ycsk4)
+
+  Every pass reads `scheduler_admission` (`docs/design/provider-dynamic-concurrency.md`
+  §10.1). Under `legacy`, the default, the pass is exactly as above: the board
+  is asked for nothing new and the dispatch gets today's options. Under
+  `shadow` the board also plans the scheduler walk (`Wardmast.Board.Scheduler`'s
+  `:walk`, at `board.walk`), and this process records it beside today's
+  decision and never in its place:
+
+    * the card it dispatches is today's `promote`, as under `legacy` (I2), with
+      the walk's decision riding along as `admission_shadow`, which the run
+      stores on its `routing_decision`;
+    * one `Wardmast.Board.AdmissionShadowEvent` row is written each time either
+      side's outcome changes (`Wardmast.Board.AdmissionShadow.signature/1`),
+      never once per pass.
+
+  ## Under `enforce`: the walk decides (DC8)
+
+  Under an installation in `enforce` the walk's first placement is the card
+  dispatched, and nothing goes when it places nothing (design §4.3, §4.4):
+
+    * the placement's pair rides into the dispatch as `planned: %{account_id,
+      pool, node}`, which routing, account admission (the pool's seat check)
+      and placement prefer while they still can;
+    * the **reverse shadow** rides beside it as `admission_shadow`: what
+      today's plan would have done (`AdmissionShadow.reverse_record/2`), and the
+      hold-change events are written as under `shadow`;
+    * a pool's budget that rises (`{:budget_changed, …}` on the `"board"`
+      topic) plans a pass, as a freed slot does;
+    * a resume deferred for a slot is replayed when its own pin pool has a seat
+      (`Wardmast.Worker.ResumeSlot`), not when the board's slot count frees.
+
+  An account trialling `enforce` under another installation mode (O11) has its
+  placements dispatched by the walk; every other card is today's plan's. A
+  board whose walk could not be read is today's plan's in every mode (the fail
+  safe). Switching back to `legacy` restores today's pass exactly.
+  """
+
+  use GenServer
+
+  alias Wardmast.Board.AdmissionShadow
+  alias Wardmast.Board.Drain
+  alias Wardmast.Board.Snapshot
+  alias Wardmast.Boot.ResumeGate
+  alias Wardmast.Messages.CoordinatorNotifier
+  alias Wardmast.Tasks.Issue
+  alias Wardmast.Worker.HeldResume
+  alias Wardmast.Worker.ResumeSlot
+  alias Wardmast.Workflows.MergeQueue.ConflictResolver
+  alias Wardmast.Workflows.MergeQueue.FixPassDispatcher
+
+  require Logger
+
+  # bd-c3b30g: re-read cadence for a pause state that was unreadable at boot,
+  # the read that first warns the coordinator, and the give-up bound.
+  @state_retry_ms 5_000
+  @state_retry_notify_after 3
+  @state_retry_max 60
+
+  @topic "board"
+  @tasks_topic "tasks"
+  @events_topic "events"
+  @worker_slot_events ~w(worker_done worker_failed worker_slot_released)
+  @default_interval_ms 60_000
+  @default_debounce_ms 300
+
+  # Dispatch error shapes that are deterministic — retrying can never change
+  # the outcome, so these escalate on the first failure rather than waiting
+  # out a retry budget. See `Wardmast.Worker.Dispatch.resolve_repo_for_dispatch/2`.
+  # `:capability_missing` (bd-57uzkl) is one too: the provider the dispatch
+  # would run on lacks a capability the repo requires, which only a config or
+  # account change fixes — not waiting. `:below_floor` (bd-c675ny) is the same
+  # kind: a pinned model below the repo's floor stays below it until config
+  # changes.
+  @deterministic_dispatch_errors [
+    :ambiguous_repo,
+    :no_repo_configured,
+    :repo_not_found,
+    :capability_missing,
+    :below_floor
+  ]
+
+  # Dispatch error shapes whose refusal already paged the coordinator from
+  # inside `Wardmast.Worker.Dispatch`, with its own durable dedupe — a
+  # `dispatch_stuck` page on top would be a second page for one cause.
+  # `:setup_token_missing` is the bd-80ecol setup-token hold (one page per
+  # workspace, naming the fix).
+  # `:guardrail_ineligible` (bd-atll60, G13) is the same: Dispatch posts its own
+  # `:no_eligible_model` escalation when no subject is eligible at all.
+  @dispatch_escalated_errors [:setup_token_missing, :guardrail_ineligible]
+
+  # Dispatch error shapes that clear on their own and so never page.
+  # `:account_at_capacity` (bd-8suxac): `Wardmast.Accounts.Admission` refused
+  # the card because the provider account *this ticket* routes to is full. The
+  # board plans headroom on the workspace's default provider, so it can see a
+  # free slot the ticket's own account does not have; the refusal lifts the
+  # moment a run on that account ends. Held for `@account_cap_retry_ms` rather
+  # than re-attempted on every reactive pass.
+  #
+  # `:provider_constraint` (bd-13pqcp): the ticket's own provider constraint
+  # left no eligible account with capacity when the dispatch ran. The board
+  # holds such a card itself (`Wardmast.Board.Snapshot`), so this is a stale
+  # plan; it lifts when an eligible account frees or the constraint is edited,
+  # and is held as briefly as a full account.
+  #
+  # `:repo_at_capacity` (DC9): the card's repo is at its
+  # `worker.repos.<repo>.max_concurrent`. Held, never failed, like a full account.
+  #
+  # `:no_node_capacity` (RW8): no node had a free slot for a `remote_only`
+  # workspace, or the primary's own cap (`Wardmast.Nodes.LocalCapacity`) held a
+  # local run. Held, never failed: it lifts when a slot frees or the operator
+  # raises the cap, and is held as briefly as a full account.
+  @self_clearing_dispatch_errors [
+    :account_at_capacity,
+    :provider_constraint,
+    :no_node_capacity,
+    :repo_at_capacity,
+    :quota_held,
+    :provider_paused
+  ]
+  @account_cap_retry_ms 15_000
+
+  # bd-1ggu6v: refusals that are held with their own backoff rather than retried
+  # on every pass, but are not "self clearing" in the sense above.
+  #
+  # `:sandbox_backend`: the routed provider cannot run under the workspace's
+  # sandbox backend (grok on podman). It changes only when routing or config
+  # does, so it backs off (30s doubling to 10m) and still escalates after
+  # `@dispatch_failure_retry_threshold` attempts.
+  #
+  # `:migrations_check_failed`: `count_pending` could not reach the database
+  # (`:unreachable`). Transient: retried on a 5s to 60s backoff and never
+  # counted toward "dispatch stuck".
+  @held_dispatch_errors @self_clearing_dispatch_errors ++
+                          [:sandbox_backend, :migrations_check_failed]
+  @sandbox_backend_backoff_ms 30_000
+  @sandbox_backend_backoff_max_ms 600_000
+  @migrations_backoff_ms 5_000
+  @migrations_backoff_max_ms 60_000
+
+  # A promotion in flight longer than this is reaped (bd-1ggu6v). A safety net:
+  # a dispatch parked on an image publish is bounded by the publisher's own
+  # timeout (600s), so this only fires for one that is hung outright.
+  @dispatch_timeout_ms :timer.minutes(20)
+
+  # How many consecutive same-shape failures a non-deterministic error (a
+  # quota gate, a network blip) gets before Autopilot escalates it too.
+  @dispatch_failure_retry_threshold 3
+
+  @typedoc "What one tick did."
+  @type outcome ::
+          {:ok, String.t()}
+          | {:error, term()}
+          | :idle
+          | :paused
+          | {:busy, String.t()}
+          | {:held, String.t(), DateTime.t()}
+          | {:resumed, String.t()}
+          | {:deferred, String.t()}
+
+  @doc """
+  The PubSub topic carrying `{:board_dispatched, task_id}` and
+  `{:board_scheduler, :paused | :resumed}`. Open boards subscribe here so a
+  promotion shows up without polling.
+  """
+  @spec topic() :: String.t()
+  def topic, do: @topic
+
+  @doc """
+  The PubSub topics a normally-started instance subscribes to for reactive
+  triggers: `Wardmast.Tasks.Issue.broadcast_lifecycle/2`'s `"tasks"`,
+  `Wardmast.Events`'s global `"events"` topic, and `"board"`, where
+  the provider budgets' server announces `{:budget_changed, …}` (DC8: a rise
+  plans a pass under `enforce`). Exposed so a test can assert against the real
+  value instead of hardcoding a copy that could drift.
+  """
+  @spec default_topics() :: [String.t()]
+  def default_topics, do: [@tasks_topic, @events_topic, @topic]
+
+  @doc """
+  Start the autopilot.
+
+  Options:
+
+    * `:name` — registered name; defaults to this module. Pass `nil` for an
+      anonymous instance (tests).
+    * `:paused` — initial pause state; defaults to the app env.
+    * `:interval_ms` — fallback tick period, or `:never` to only run a pass
+      when asked (a `tick/2` call or a reactive trigger).
+    * `:debounce_ms` — how long a reactive trigger waits before running a
+      pass, coalescing a burst into one; defaults to the app env (300ms).
+    * `:topics` — PubSub topics to subscribe to for reactive triggers;
+      defaults to the app env's `:topics`, else `["tasks", "events"]`. The
+      test env sets `topics: []` for the VM-global instance (bd-jw7cb0).
+      Tests can pass `[]` (no reactive
+      triggers, drive with `send/2` or `tick/2` instead) or private topic
+      names to exercise the real `Phoenix.PubSub.subscribe/2` path without
+      picking up unrelated broadcasts from other tests.
+    * `:follow_up` — whether a successful dispatch schedules an immediate
+      follow-up pass (see "Reactive triggers" above); defaults to `true`.
+      A suite that drives a fixed-count `tick/2` loop and asserts on exact
+      dispatch-attempt counts or exact tick-by-tick outcomes should pass
+      `false`, so each `tick/2` call runs exactly one pass — matching the
+      pre-bd-axgpec behaviour it is asserting against.
+    * `:snapshot` / `:dispatch` — seams for tests; default to
+      `Snapshot.load/1` and `Wardmast.Worker.Dispatch.dispatch/2`. A
+      two-argument `:dispatch` also gets the extra dispatch options (the
+      admission shadow's record); a one-argument one gets the id alone.
+    * `:admission` — seam for tests; a 0-arity function returning the
+      `scheduler_admission` mode, read on every pass. Defaults to
+      `Wardmast.Board.AdmissionShadow.mode/0`.
+    * `:record_shadow` — seam for tests; a 1-arity function that writes an
+      admission hold-change event. Defaults to
+      `Wardmast.Board.AdmissionShadow.record_event/1`.
+    * `:resume` — seam for tests; a 3-arity `(task_id, kind, opts)` that
+      replays a deferred resume. Defaults to `Dispatch.resume/2` /
+      `resume_session/2` (bd-92mx1m).
+    * `:local_room` — seam for tests; `(task_id)` or `(task_id, opts)`, whether
+      a resume deferred `held_for: :local_capacity` could start now. Defaults to
+      `Dispatch.resume_room?/2` with the resume's own options: a node with room,
+      or the primary's cap (bd-b2iigy, bd-4ic681).
+    * `:registry_settled?` — seam for tests; a 0-arity function answering
+      whether the worker registry is complete enough to plan against. Defaults
+      to `ResumeGate.open?/0 and not Drain.dispatch_pending?/0`, both of which
+      read VM-global state, so a test that runs concurrently with others (and
+      is not about that gate) overrides it.
+    * `:notify_paused` — seam for tests; a 2-arity `(actor, surface)` that
+      tells the coordinator's mailbox about a pause (bd-cl6zjn). Defaults to an
+      escalation per workspace.
+    * `:escalate` — seam for tests; defaults to `default_escalate/3`, which
+      posts through `Wardmast.Messages.CoordinatorNotifier.dispatch_stuck/3`.
+  """
+  def start_link(opts \\ []) do
+    {name, opts} = Keyword.pop(opts, :name, __MODULE__)
+    GenServer.start_link(__MODULE__, opts, if(name, do: [name: name], else: []))
+  end
+
+  @doc """
+  Run one dispatch cycle now and report what it did.
+
+  The reply waits on the dispatch task, so `timeout` has to cover a real
+  dispatch — the process itself is not blocked while you wait.
+  """
+  @spec tick(GenServer.server(), timeout()) :: outcome()
+  def tick(server \\ __MODULE__, timeout \\ 5_000), do: GenServer.call(server, :tick, timeout)
+
+  @doc """
+  The boot reconcile sweep has finished (`Wardmast.Boot.ResumeGate`): plan now.
+  A no-op when no autopilot is running.
+  """
+  @spec resumes_settled(GenServer.server()) :: :ok
+  def resumes_settled(server \\ __MODULE__) do
+    case GenServer.whereis(server) do
+      nil ->
+        :ok
+
+      pid ->
+        send(pid, :resumes_settled)
+        :ok
+    end
+  end
+
+  @doc """
+  The board as this process sees it, with `:paused` set from its own state so
+  the reasons on screen describe the scheduler that is actually running.
+  """
+  @spec board(GenServer.server(), keyword(), timeout()) :: Snapshot.t()
+  def board(server \\ __MODULE__, opts \\ [], timeout \\ 5_000),
+    do: GenServer.call(server, {:board, opts}, timeout)
+
+  @doc """
+  Stop promoting. Cards in flight keep running; the queue just stops
+  draining. Persisted so a restart comes back paused. `by` — free text
+  identifying the caller (e.g. `"mcp"`, `"api"`, `"dashboard"`) — is recorded
+  alongside the change for `status/2`, when known.
+  """
+  @typedoc """
+  Who changed the pause state: free text, or `{actor, surface}` (bd-cl6zjn),
+  which is recorded as `"actor via surface"` and audited with both parts.
+  """
+  @type actor :: String.t() | {String.t(), String.t()} | nil
+
+  @spec pause(GenServer.server(), actor()) :: :ok
+  def pause(server \\ __MODULE__, by \\ nil), do: GenServer.call(server, {:paused, true, by})
+
+  @doc """
+  Start promoting again. The next tick may dispatch. Persisted so a restart
+  comes back resumed. See `pause/2` for `by`.
+  """
+  @spec resume(GenServer.server(), actor()) :: :ok
+  def resume(server \\ __MODULE__, by \\ nil), do: GenServer.call(server, {:paused, false, by})
+
+  @spec paused?(GenServer.server(), timeout()) :: boolean()
+  def paused?(server \\ __MODULE__, timeout \\ 5_000),
+    do: GenServer.call(server, :paused?, timeout)
+
+  @doc """
+  The pause state plus when and (where known) by what it was last changed.
+  `changed_at`/`changed_by` are `nil` until the first pause/resume this
+  process has seen — including one it inherited from a persisted value at
+  boot.
+
+  `dispatching` is the id of a promotion still in flight, or `nil`. A pause
+  does not cancel one already under way — it runs to completion and starts a
+  worker — so `Wardmast.Board.Drain` counts it as live work (bd-9fgg04).
+
+  `deferred_resumes` lists the task ids waiting for a slot, in the order they
+  will be resumed (bd-92mx1m).
+  """
+  @spec status(GenServer.server(), timeout()) :: %{
+          paused?: boolean(),
+          changed_at: DateTime.t() | nil,
+          changed_by: String.t() | nil,
+          dispatching: String.t() | nil,
+          deferred_resumes: [String.t()]
+        }
+  def status(server \\ __MODULE__, timeout \\ 5_000), do: GenServer.call(server, :status, timeout)
+
+  @doc """
+  Queue an automatic resume of `task_id` until a worker slot frees
+  (bd-92mx1m). `kind` is the `Wardmast.Worker.Dispatch` function to replay —
+  `:resume` or `:resume_session` — and `opts` the options it was called with.
+  See "Deferred resumes go first" above.
+
+  `{:error, :not_running}` when there is no scheduler to take it: the caller
+  must refuse the resume rather than bypass the cap.
+  """
+  @spec defer_resume(
+          GenServer.server(),
+          String.t(),
+          :resume | :resume_session | :fix_pass | :conflict,
+          keyword()
+        ) ::
+          :ok | {:error, term()}
+  def defer_resume(server \\ __MODULE__, task_id, kind, opts)
+      when is_binary(task_id) and kind in [:resume, :resume_session, :fix_pass, :conflict] and
+             is_list(opts) do
+    case GenServer.whereis(server) do
+      nil -> {:error, :not_running}
+      _pid -> GenServer.call(server, {:defer_resume, task_id, kind, opts})
+    end
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  @doc """
+  Drop any round deferred for `task_id` (bd-4l7l2n): the ticket closed or its
+  PR merged while the round waited for a slot, so starting it would spend a
+  scarce slot on finished work. `:ok` whether or not one was queued, and when
+  no scheduler is running. A round already being replayed is not interrupted;
+  the dispatcher re-checks the ticket at start.
+  """
+  @spec cancel_deferred(GenServer.server(), String.t()) :: :ok
+  def cancel_deferred(server \\ __MODULE__, task_id) when is_binary(task_id) do
+    case GenServer.whereis(server) do
+      nil -> :ok
+      _pid -> GenServer.call(server, {:cancel_deferred, task_id})
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
+  Task ids whose deferred resume is a `:fix_pass`, like `deferred_resume_ids/1`
+  but ignoring other kinds (`:resume`, `:resume_session`, `:conflict`).
+  """
+  @spec deferred_fix_pass_ids(GenServer.server()) :: [String.t()]
+  def deferred_fix_pass_ids(server \\ __MODULE__) do
+    case GenServer.whereis(server) do
+      nil -> []
+      _pid -> server |> status(1_000) |> Map.get(:deferred_fix_passes, [])
+    end
+  catch
+    :exit, _ -> []
+  end
+
+  @doc """
+  The ids of the tickets with an automatic round (`:resume`, `:resume_session`,
+  `:fix_pass`, `:conflict`) deferred until a worker slot frees, or `[]` when
+  the scheduler is not running or does not answer. Best-effort and quick: a
+  surface that only wants to know whether a ticket is waiting must not stall
+  on a busy scheduler.
+  """
+  @spec deferred_resume_ids(GenServer.server()) :: [String.t()]
+  def deferred_resume_ids(server \\ __MODULE__) do
+    case GenServer.whereis(server) do
+      nil -> []
+      _pid -> server |> status(1_000) |> Map.get(:deferred_resumes, [])
+    end
+  catch
+    :exit, _ -> []
+  end
+
+  @doc """
+  Whether this install runs the autopilot at all. A board talking to a
+  process that isn't there should say so rather than raise.
+  """
+  @spec running?(GenServer.server()) :: boolean()
+  def running?(server \\ __MODULE__) do
+    case GenServer.whereis(server) do
+      nil -> false
+      pid -> Process.alive?(pid)
+    end
+  end
+
+  @impl true
+  def init(opts) do
+    # bd-6i7yzq: writes this process makes are attributed to it (`Wardmast.Actor`).
+    Wardmast.Actor.put(Wardmast.Actor.autopilot())
+
+    interval = Keyword.get(opts, :interval_ms, configured_interval_ms())
+    debounce = Keyword.get(opts, :debounce_ms, configured_debounce_ms())
+
+    read_status = Keyword.get_lazy(opts, :read_status, &default_read_status/0)
+    retry_ms = Keyword.get(opts, :state_retry_ms, @state_retry_ms)
+
+    {{paused?, changed_at, changed_by}, state_load} =
+      case Keyword.fetch(opts, :paused) do
+        {:ok, explicit} -> {{explicit, nil, nil}, :settled}
+        :error -> initial_paused_state(read_status)
+      end
+
+    if state_load != :settled, do: Process.send_after(self(), :reload_paused_state, retry_ms)
+
+    topics = Keyword.get_lazy(opts, :topics, &configured_topics/0)
+    Enum.each(topics, &Phoenix.PubSub.subscribe(Wardmast.PubSub, &1))
+
+    state = %{
+      paused?: paused?,
+      paused_changed_at: changed_at,
+      paused_changed_by: changed_by,
+      interval_ms: interval,
+      debounce_ms: debounce,
+      follow_up?: Keyword.get(opts, :follow_up, true),
+      snapshot: Keyword.get(opts, :snapshot, &Snapshot.load/1),
+      dispatch: Keyword.get_lazy(opts, :dispatch, fn -> default_dispatch_fun(self()) end),
+      # DC6: the `scheduler_admission` mode, read on every pass, and where a
+      # hold change under the shadow is written. `shadow_signature` is the last
+      # pass's outcome on both sides, so a row is written per change, not per pass.
+      admission: Keyword.get(opts, :admission, &AdmissionShadow.mode/0),
+      admission_seam?: Keyword.has_key?(opts, :admission),
+      # DC8 seams: the installation's own mode and a pool's account mode (O11),
+      # when a test needs them apart from `:admission`.
+      install_mode_seam: Keyword.get(opts, :install_mode),
+      pool_mode_seam: Keyword.get(opts, :pool_mode),
+      record_shadow: Keyword.get(opts, :record_shadow, &AdmissionShadow.record_event/1),
+      shadow_signature: nil,
+      resume: Keyword.get(opts, :resume, &default_resume/3),
+      local_room: Keyword.get(opts, :local_room, &default_local_room?/2),
+      # DC8: under `enforce`, whether a resume deferred for a slot has a seat on
+      # its own pool now: `(task_id, kind) -> boolean`.
+      slot_room: Keyword.get(opts, :slot_room, &default_slot_room?/2),
+      # bd-7twuru: the account a deferred resume's pool belongs to, and how many
+      # unadmitted ticks park it with an attention item.
+      resume_account: Keyword.get(opts, :resume_account, &default_resume_account/1),
+      park_after: Keyword.get(opts, :park_after, 12),
+      resume_hold_log: nil,
+      priority: Keyword.get(opts, :priority, &default_priority/1),
+      escalate: Keyword.get(opts, :escalate, &default_escalate/3),
+      now: Keyword.get(opts, :now, &DateTime.utc_now/0),
+      dispatch_timeout_ms: Keyword.get(opts, :dispatch_timeout_ms, @dispatch_timeout_ms),
+      # bd-545yem: whether a ticket has closed, for sweeping a stale promotion.
+      ticket_closed?: Keyword.get(opts, :ticket_closed?, &default_ticket_closed?/1),
+      # The one promotion in flight, if any: %{ref: ref, id: id, waiters: [from]}.
+      dispatching: nil,
+      # A reactive trigger's debounce timer, once scheduled — cleared when it
+      # fires or when a dispatch completion runs a pass immediately instead.
+      plan_timer: nil,
+      # Set when a reactive trigger lands while a dispatch is in flight, so
+      # the pass it asked for still runs once that dispatch reports back.
+      replan_after_dispatch: false,
+      # Per-card dispatch failure tracking:
+      # id => %{count:, shape:, escalated?:, retry_not_before:}.
+      # See "A dispatch that keeps failing gets escalated" above, and
+      # "A quota-exhausted pre-flight failure is held, not retried" below.
+      failures: %{},
+      # bd-dtdeff: why the last pass promoted nothing — `[%{id:, reason:}]` for
+      # every Ready card the board holds, empty when none is or a card went out.
+      holds: [],
+      # bd-92mx1m: automatic resumes waiting for a free slot, oldest first:
+      # [%{task_id:, kind:, opts:}]. See "Deferred resumes go first" above.
+      deferred_resumes: [],
+      # The persisted pause state could not be read at boot (the schema may
+      # still be migrating — Autopilot starts before `Boot.Migrator`), so
+      # `paused?` is only the safe default for now and is re-read until it can
+      # be: `:settled` or `{:retrying, failed_reads}`.
+      state_load: state_load,
+      read_status: read_status,
+      state_retry_ms: retry_ms,
+      notify_unreadable: Keyword.get(opts, :notify_unreadable, &default_notify_unreadable/1),
+      notify_paused: Keyword.get(opts, :notify_paused, &default_notify_paused/2),
+      registry_settled?: Keyword.get(opts, :registry_settled?, &registry_settled?/0)
+    }
+
+    schedule(interval)
+    {:ok, state}
+  end
+
+  @impl true
+  def handle_call(:tick, from, state) do
+    case run_pass(state) do
+      # The dispatch is running in a task now; the caller is answered when it
+      # reports back, and this process goes on serving everyone else.
+      {:started, state} -> {:noreply, park(state, from)}
+      {outcome, state} -> {:reply, outcome, state}
+    end
+  end
+
+  def handle_call({:board, opts}, _from, state) do
+    {_status, snapshot} =
+      read_board(
+        state,
+        opts
+        |> Keyword.put_new(:dispatch_holds, dispatch_holds(state))
+        |> Keyword.put_new(:resume_queued, queued_resume_ids(state))
+        |> Keyword.put_new(:local_held, local_held_ids(state))
+        |> Keyword.put_new(:idle_check, idle_check(state))
+      )
+
+    {:reply, snapshot, state}
+  end
+
+  def handle_call(:paused?, _from, state), do: {:reply, state.paused?, state}
+
+  def handle_call(:status, _from, state) do
+    {:reply,
+     %{
+       paused?: state.paused?,
+       changed_at: state.paused_changed_at,
+       changed_by: state.paused_changed_by,
+       dispatching: dispatching_id(state),
+       holds: state.holds,
+       deferred_resumes: Enum.map(state.deferred_resumes, & &1.task_id),
+       deferred_resume_details: Enum.map(state.deferred_resumes, &resume_detail(state, &1)),
+       held_local_capacity: local_held_ids(state),
+       deferred_fix_passes: for(%{kind: :fix_pass, task_id: id} <- state.deferred_resumes, do: id)
+     }, state}
+  end
+
+  def handle_call({:defer_resume, task_id, kind, opts}, _from, state) do
+    {held_for, opts} = Keyword.pop(opts, :held_for)
+    {account, opts} = Keyword.pop(opts, :waiting_account)
+    wait = if held_for == :local_capacity, do: :local_capacity, else: :slot
+
+    entry = %{
+      task_id: task_id,
+      kind: kind,
+      opts: opts,
+      wait: wait,
+      since: state.now.(),
+      account: account
+    }
+
+    deferred =
+      if Enum.any?(state.deferred_resumes, &(&1.task_id == task_id)),
+        do: Enum.map(state.deferred_resumes, &if(&1.task_id == task_id, do: entry, else: &1)),
+        else: state.deferred_resumes ++ [entry]
+
+    {:reply, :ok, request_plan(%{state | deferred_resumes: deferred})}
+  end
+
+  def handle_call({:cancel_deferred, task_id}, _from, state) do
+    {dropped, kept} = Enum.split_with(state.deferred_resumes, &(&1.task_id == task_id))
+
+    for %{kind: kind} <- dropped do
+      Logger.info("board autopilot: deferred #{kind} for #{task_id} cancelled — ticket finished")
+      HeldResume.clear(task_id)
+    end
+
+    {:reply, :ok, %{state | deferred_resumes: kept}}
+  end
+
+  def handle_call({:paused, paused?, by}, _from, state) do
+    state = sweep_stale_dispatch(state)
+
+    state =
+      if paused? != state.paused? do
+        {label, actor, surface} = actor_parts(by)
+        persist_paused(paused?, label)
+        record_change(state, paused?, actor, surface)
+        announce({:board_scheduler, if(paused?, do: :paused, else: :resumed)})
+        %{state | paused?: paused?, paused_changed_at: state.now.(), paused_changed_by: label}
+      else
+        state
+      end
+
+    # An operator's explicit choice outranks whatever the persisted row said.
+    {:reply, :ok, %{state | state_load: :settled}}
+  end
+
+  @impl true
+  def handle_info(:reload_paused_state, %{state_load: {:retrying, failed}} = state) do
+    case state.read_status.() do
+      {:ok, status} ->
+        {:noreply, adopt_persisted(state, status)}
+
+      {:error, reason} ->
+        failed = failed + 1
+
+        Logger.warning(
+          "board autopilot: persisted paused state still unreadable " <>
+            "(attempt #{failed}): #{inspect(reason)}"
+        )
+
+        if failed == @state_retry_notify_after, do: notify_unreadable(state, reason)
+
+        if failed < @state_retry_max do
+          Process.send_after(self(), :reload_paused_state, state.state_retry_ms)
+          {:noreply, %{state | state_load: {:retrying, failed}}}
+        else
+          {:noreply, %{state | state_load: :settled}}
+        end
+    end
+  end
+
+  def handle_info(:reload_paused_state, state), do: {:noreply, state}
+
+  def handle_info(:tick, state) do
+    {_outcome, state} = run_pass(state)
+    schedule(state.interval_ms)
+    {:noreply, state}
+  end
+
+  # A reactive trigger's debounce elapsed (or a dispatch completion asked for
+  # an immediate pass by sending this with no timer behind it). Either way,
+  # this is the one place a reactively-requested pass actually runs.
+  def handle_info(:resumes_settled, state), do: {:noreply, request_plan(state)}
+
+  def handle_info(:run_plan, state) do
+    {_outcome, state} = run_pass(%{state | plan_timer: nil})
+    {:noreply, state}
+  end
+
+  # A task closed, was promoted to Ready, or gained/lost a dependency edge —
+  # `Wardmast.Tasks.Issue.broadcast_lifecycle/2` and `Wardmast.Tasks.Dependencies`
+  # both broadcast here for all of these.
+  def handle_info({:task_lifecycle, _event, _issue}, state) do
+    {:noreply, request_plan(state)}
+  end
+
+  # A worker finished or failed — `Wardmast.Events.broadcast/3`'s global fan-out,
+  # meaning a slot may have just freed.
+  def handle_info({:event, %{topic: topic}}, state) when topic in @worker_slot_events do
+    {:noreply, request_plan(state)}
+  end
+
+  # bd-dtdeff: a slot can free with no worker finishing or failing — a ticket
+  # leaving In progress for Merging/Verifying (`task_state`), or a worker
+  # moving to a phase that holds no slot (`worker_phase`, which covers
+  # bd-92mx1m's park-for-a-human release a deferred resume waits on). The
+  # CI-wait release changes no phase; it has its own `worker_slot_released`
+  # event. `task_state` duplicates the `:task_lifecycle` message above (defence
+  # in depth). All are debounced like every other trigger, and
+  # a pass that finds nothing to promote does not reschedule itself.
+  def handle_info({:event, %{topic: "worker_phase"} = event}, state) do
+    if slot_releasing_phase?(event), do: {:noreply, request_plan(state)}, else: {:noreply, state}
+  end
+
+  def handle_info({:event, %{topic: "task_state", state: ticket_state}}, state)
+      when is_binary(ticket_state) and ticket_state != "active" do
+    {:noreply, request_plan(state)}
+  end
+
+  # The dispatch task's result. Everything the old synchronous path did on the
+  # way out of `dispatch/2` happens here instead — announce, log, answer the
+  # ticks that were waiting on it.
+  def handle_info({ref, result}, %{dispatching: %{ref: ref} = in_flight} = state)
+      when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    {outcome, state} = finish(state, in_flight, result)
+    reply_all(in_flight.waiters, outcome)
+    state = %{state | dispatching: nil}
+    {:noreply, after_dispatch(state, outcome)}
+  end
+
+  # The task died without reporting — it is `async_nolink`, so this is the
+  # autopilot's problem to log, not its problem to die of. The card is still
+  # Ready; the next tick reconsiders it.
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{dispatching: %{ref: ref} = in_flight} = state
+      ) do
+    Logger.warning("board autopilot: dispatch of #{in_flight.id} died: #{inspect(reason)}")
+
+    state =
+      case in_flight do
+        %{resume: _} -> finish_resume(state, in_flight.id, {:error, {:exit, reason}}) |> elem(1)
+        _ -> record_failure(state, in_flight.id, {:exit, reason})
+      end
+
+    reply_all(in_flight.waiters, {:error, {:exit, reason}})
+    state = %{state | dispatching: nil}
+    {:noreply, after_dispatch(state, {:error, {:exit, reason}})}
+  end
+
+  # DC8 (E8, design §3.6): the provider budgets' server announces each published
+  # budget change on this module's "board" topic. A rise is a freed seat: under
+  # `enforce` it plans a pass, as a worker finishing does. A fall stops nothing
+  # (no budget stops a run), and under `legacy` and `shadow` nothing reacts.
+  def handle_info({:budget_changed, _pool, from, to, _reason}, state) do
+    if budget_rise?(from, to) and admission_mode(state) == :enforce,
+      do: {:noreply, request_plan(state)},
+      else: {:noreply, state}
+  end
+
+  # bd-5fpj59: an image publish a held card waits on has settled (published or
+  # failed). Lift the hold of the cards waiting on that image and plan a pass:
+  # the dispatch either finds the image ready or reports the failure as a hold.
+  def handle_info({:image_settled, key}, state) do
+    {:noreply, state |> release_image_holds(key) |> request_plan()}
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  defp budget_rise?(from, :unlimited), do: from != :unlimited
+  defp budget_rise?(nil, to), do: is_integer(to) and to > 0
+  defp budget_rise?(from, to) when is_integer(from) and is_integer(to), do: to > from
+  defp budget_rise?(_from, _to), do: false
+
+  # ---- reactive triggers -----------------------------------------------
+
+  # A phase that holds no slot: the worker is waiting (on review, CI or a
+  # human) or finished. Mid-work phases fire constantly and free nothing.
+  @slot_releasing_phases ~w(waiting_on_you done in_review held_for_quota)
+
+  defp slot_releasing_phase?(%{phase: phase}) when phase in @slot_releasing_phases, do: true
+  defp slot_releasing_phase?(%{state: state}) when state in ["waiting", "finished"], do: true
+  defp slot_releasing_phase?(_event), do: false
+
+  # Coalesce a burst of triggers into one debounced pass. Paused: do nothing,
+  # not even schedule — a resume with nothing pending is right, since a pass
+  # runs on the next real trigger or the fallback tick anyway. Busy: don't
+  # start a timer, just make sure the in-flight dispatch's completion runs
+  # one more pass once it reports back.
+  defp resume_detail(state, entry) do
+    since = Map.get(entry, :since)
+
+    %{
+      task_id: entry.task_id,
+      kind: entry.kind,
+      wait: entry.wait,
+      age_ms: if(since, do: max(DateTime.diff(state.now.(), since, :millisecond), 0), else: 0),
+      stalled_ticks: Map.get(entry, :stalled, 0),
+      parked?: Map.get(entry, :parked?, false)
+    }
+  end
+
+  defp request_plan(%{paused?: true, deferred_resumes: []} = state), do: state
+
+  defp request_plan(%{dispatching: dispatching} = state) when not is_nil(dispatching),
+    do: %{state | replan_after_dispatch: true}
+
+  defp request_plan(%{plan_timer: nil} = state) do
+    timer = Process.send_after(self(), :run_plan, state.debounce_ms)
+    %{state | plan_timer: timer}
+  end
+
+  # A debounce timer is already pending; this trigger is already covered by
+  # the pass it will run.
+  defp request_plan(state), do: state
+
+  # `promote/1` already refuses to start a second dispatch while one is in
+  # flight and reports `{:busy, id}` instead — a pass run via a reactive
+  # trigger or the fallback tick can land in exactly that window. Treat it
+  # the same as a trigger that arrived while busy: queue one re-plan for when
+  # the in-flight dispatch completes.
+  defp run_pass(state) do
+    case state |> sweep_stale_dispatch() |> promote() do
+      {{:busy, _} = outcome, state} -> {outcome, %{state | replan_after_dispatch: true}}
+      {outcome, state} -> {outcome, state}
+    end
+  end
+
+  # After a successful dispatch, schedule an immediate follow-up pass (no
+  # debounce) so a burst of Ready cards with free slots behind them drains at
+  # dispatch speed rather than one per tick. Otherwise, only run one if a
+  # trigger landed while this dispatch was in flight — a pass that dispatched
+  # nothing must never reschedule itself, or a quiet board would tick itself
+  # forever at debounce speed.
+  defp after_dispatch(%{follow_up?: true} = state, {result, _})
+       when result in [:ok, :resumed],
+       do: trigger_immediate_pass(%{state | replan_after_dispatch: false})
+
+  # bd-814vuy: a placement refusal holds that card only — go straight on to the
+  # next candidate rather than idling the slot until some other event wakes us.
+  defp after_dispatch(state, {:error, reason}) do
+    if error_shape(reason) in @held_dispatch_errors,
+      do: trigger_immediate_pass(%{state | replan_after_dispatch: false}),
+      else: after_dispatch_replan(state)
+  end
+
+  defp after_dispatch(state, _outcome), do: after_dispatch_replan(state)
+
+  defp after_dispatch_replan(%{replan_after_dispatch: true} = state),
+    do: trigger_immediate_pass(%{state | replan_after_dispatch: false})
+
+  defp after_dispatch_replan(state), do: state
+
+  defp trigger_immediate_pass(state) do
+    state = cancel_plan_timer(state)
+    send(self(), :run_plan)
+    state
+  end
+
+  defp cancel_plan_timer(%{plan_timer: nil} = state), do: state
+
+  defp cancel_plan_timer(%{plan_timer: timer} = state) do
+    Process.cancel_timer(timer)
+    %{state | plan_timer: nil}
+  end
+
+  # ---- one cycle -----------------------------------------------------------
+
+  # A pause holds back Ready cards only — never a deferred resume (see
+  # "Deferred resumes go first").
+  defp promote(%{paused?: true, deferred_resumes: []} = state), do: {:paused, state}
+
+  # One promotion at a time. Not even the board read happens while a dispatch
+  # is in flight: the world it would read is the one the running dispatch is
+  # still changing.
+  defp promote(%{dispatching: %{id: id}} = state), do: {{:busy, id}, state}
+
+  # bd-35gvrj: a provider account's cap is read from the live worker registry,
+  # so a pass may only plan against a registry that is complete. Not complete
+  # while the boot reconciler is still re-attaching the runs the restart cut
+  # off (`Wardmast.Boot.ResumeGate`), nor while a resume or dispatch somebody
+  # else started is between stopping/provisioning and registering its worker
+  # (`Drain.dispatch_pending?/0`; e.g. `arb worker resume`, which stops the
+  # prior worker before the new one registers — the account would read one
+  # slot freer than it is). Hold, and look again shortly.
+  defp promote(state) do
+    if state.registry_settled?.() do
+      plan(state)
+    else
+      {:idle, request_plan(state)}
+    end
+  end
+
+  defp registry_settled?, do: ResumeGate.open?() and not Drain.dispatch_pending?()
+
+  defp plan(state) do
+    mode = admission_mode(state)
+
+    {read_status, snapshot} =
+      read_board(
+        state,
+        [
+          dispatch_holds: dispatch_holds(state),
+          resume_queued: queued_resume_ids(state),
+          local_held: local_held_ids(state),
+          idle_check: idle_check(state)
+        ] ++ walk_opts(mode)
+      )
+
+    state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
+
+    state =
+      shadow_safely(%{state | shadow_signature: nil}, fn ->
+        note_admission(state, mode, read_status, snapshot)
+      end)
+
+    cond do
+      state.deferred_resumes != [] ->
+        case resume_or_wait(state, read_status, snapshot, mode) do
+          {:idle, state} when read_status == :ok -> past_stalled_resumes(state, snapshot, mode)
+          other -> other
+        end
+
+      state.paused? ->
+        {:paused, state}
+
+      true ->
+        case pass_pick(state, snapshot, mode) do
+          {id, extra} -> promote_or_hold(%{state | holds: []}, id, extra)
+          nil -> {:idle, note_holds(state, snapshot, read_status, mode)}
+        end
+    end
+  end
+
+  # bd-7twuru: no deferred resume could start this pass. A resume parked on a
+  # pool with no seat (an exhausted provider) must not hold Ready cards that
+  # place on OTHER accounts, so under `enforce` the walk's first placement off
+  # every waiting resume's account goes. "Resumes first" still holds within an
+  # account: its cards wait. A local-capacity waiter, an unknown account, or a
+  # walk that does not decide keeps the old hold-everything behaviour.
+  defp past_stalled_resumes(state, snapshot, mode) do
+    slot_waiters = Enum.filter(state.deferred_resumes, &(&1.wait == :slot))
+    state = track_stalls(state, slot_waiters)
+
+    blocked =
+      slot_waiters |> Enum.map(&waiting_account(state, &1)) |> Enum.uniq()
+
+    passable? =
+      all_slot_waiters?(state, slot_waiters, blocked) and walk_decides?(state, snapshot, mode)
+
+    placements = if passable?, do: snapshot.walk.placements, else: []
+    {held, open} = Enum.split_with(placements, &(pool_account(&1.pool) in blocked))
+
+    state =
+      if not passable? or held != [], do: note_resume_hold(state, snapshot), else: state
+
+    pick =
+      if open == [],
+        do: nil,
+        else: pass_pick(state, put_in(snapshot.walk.placements, open), mode)
+
+    case pick do
+      {id, extra} -> promote_or_hold(%{state | holds: []}, id, extra)
+      nil -> waiting(state)
+    end
+  end
+
+  defp all_slot_waiters?(state, slot_waiters, blocked) do
+    not state.paused? and length(slot_waiters) == length(state.deferred_resumes) and
+      nil not in blocked
+  end
+
+  defp pool_account({account_id, _pool}), do: account_id
+  defp pool_account(_), do: nil
+
+  # The account Dispatch recorded at defer time; entries without one (older,
+  # or deferred by another caller) fall back to the implementer's account.
+  defp waiting_account(_state, %{account: id}) when is_binary(id), do: id
+  defp waiting_account(state, entry), do: resume_account(state, entry.task_id)
+
+  defp resume_account(%{resume_account: fun}, task_id) do
+    fun.(task_id)
+  rescue
+    _ -> nil
+  end
+
+  defp default_resume_account(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, %Issue{implementer_account_id: id}} when is_binary(id) ->
+        id
+
+      {:ok, %Issue{} = task} ->
+        provider =
+          Wardmast.Workers.Run.latest_authoring_provider(task.id) ||
+            Wardmast.Quota.default_provider(task.workspace_id)
+
+        case Wardmast.Accounts.Resolver.account(task.workspace_id, provider) do
+          %{id: id} -> id
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  # Count the ticks each slot waiter went unadmitted; at `park_after` escalate
+  # once, naming the pool's account, so an exhausted provider is seen.
+  defp track_stalls(state, slot_waiters) do
+    ids = Enum.map(slot_waiters, & &1.task_id)
+
+    queue =
+      Enum.map(state.deferred_resumes, fn entry ->
+        if entry.task_id in ids, do: stall(state, entry), else: entry
+      end)
+
+    %{state | deferred_resumes: queue}
+  end
+
+  defp stall(state, entry) do
+    stalled = Map.get(entry, :stalled, 0) + 1
+    entry = Map.put(entry, :stalled, stalled)
+
+    if stalled >= state.park_after and not Map.get(entry, :parked?, false) do
+      account = waiting_account(state, entry)
+
+      Logger.warning(
+        "board autopilot: deferred resume of #{entry.task_id} parked after #{stalled} ticks — " <>
+          "pool #{inspect(account)} has no seat"
+      )
+
+      state.escalate.(entry.task_id, {:deferred_resume_parked, account, stalled}, 1)
+      Map.put(entry, :parked?, true)
+    else
+      entry
+    end
+  end
+
+  @resume_hold_log_ms 60_000
+
+  # Rate-limited: one line per change of the waiting set, else once a minute.
+  defp note_resume_hold(state, snapshot) do
+    waiters = for %{wait: :slot} = e <- state.deferred_resumes, do: e
+    sig = Enum.map(waiters, & &1.task_id)
+    now = System.monotonic_time(:millisecond)
+
+    case state.resume_hold_log do
+      {^sig, at} when now - at < @resume_hold_log_ms ->
+        state
+
+      _ ->
+        if Map.get(snapshot, :ready, []) != [] do
+          for e <- waiters do
+            Logger.warning(
+              "board autopilot: holding Ready behind deferred resume #{e.task_id} " <>
+                "(pool #{inspect(waiting_account(state, e))}: no seat)"
+            )
+          end
+        end
+
+        %{state | resume_hold_log: {sig, now}}
+    end
+  end
+
+  # ---- under enforce: the walk decides (DC8) ----------------------------------
+
+  # The card this pass dispatches and the options riding with it. Under
+  # `enforce` the walk decides (`walk_pick/3`): its placement goes, its pair as
+  # `planned:` and today's decision beside it as the reverse shadow. Otherwise
+  # today's `promote` goes, with the walk's decision beside it under `shadow`.
+  defp pass_pick(state, snapshot, mode) do
+    case walk_pick(state, snapshot, mode) do
+      {:walk, %{id: id} = placement} ->
+        planned = [planned: AdmissionShadow.planned(placement)]
+
+        {id,
+         shadow_safely(planned, fn ->
+           planned ++ [admission_shadow: AdmissionShadow.reverse_record(snapshot, placement)]
+         end)}
+
+      {:walk, nil} ->
+        nil
+
+      :today ->
+        case Map.get(snapshot, :promote) do
+          id when is_binary(id) ->
+            {id, shadow_safely([], fn -> shadow_opts(state, snapshot, mode) end)}
+
+          _ ->
+            nil
+        end
+    end
+  end
+
+  # Who picks the card (design §10.1, O11). The Ready queue is install-wide, so
+  # under an installation in `enforce` the walk alone decides: its first
+  # placement goes, or nothing does. Under another installation mode with an
+  # account trialling `enforce`, a placement on that account's pool is the
+  # walk's to dispatch, and anything else is today's plan's. A board that
+  # carries no walk (its inputs could not be read) is today's plan's: the fail
+  # safe, whatever the mode.
+  defp walk_pick(state, %{walk: %{placements: placements}} = snapshot, :enforce) do
+    if install_mode(state, :enforce) == :enforce do
+      {:walk, List.first(placements)}
+    else
+      case AdmissionShadow.enforced_placement(snapshot, pool_resolver(state, :enforce)) do
+        nil -> :today
+        placement -> {:walk, placement}
+      end
+    end
+  end
+
+  defp walk_pick(_state, _snapshot, _mode), do: :today
+
+  # Whether the walk decides this pass's dispatch: an `enforce` installation
+  # with a whole walk on the board (one `walk_pick/3` would also act on).
+  defp walk_decides?(state, %{walk: %{placements: _, entries: _}}, :enforce),
+    do: install_mode(state, :enforce) == :enforce
+
+  defp walk_decides?(_state, _snapshot, _mode), do: false
+
+  # ---- the admission shadow (DC6) --------------------------------------------
+
+  # `legacy` asks the board for nothing new; `shadow` and `enforce` ask it to
+  # plan the scheduler walk beside today's plan (`Snapshot.load/1`).
+  defp walk_opts(mode), do: if(AdmissionShadow.walks?(mode), do: [admission: mode], else: [])
+
+  # O11: a pass's event is recorded under the installation's mode and a dispatch
+  # under the placed account's mode; the walk-wide `mode` only gates the walk.
+  # A test-supplied `:admission` seam is the mode for both, unless the
+  # `:install_mode` / `:pool_mode` seams name them apart.
+  defp install_mode(%{install_mode_seam: seam}, _mode) when is_atom(seam) and seam != nil,
+    do: seam
+
+  defp install_mode(%{admission_seam?: true}, mode), do: mode
+  defp install_mode(_state, _mode), do: Wardmast.Accounts.AdmissionMode.installation()
+
+  defp pool_resolver(%{pool_mode_seam: seam}, _mode) when is_function(seam, 1), do: seam
+  defp pool_resolver(%{admission_seam?: true}, mode), do: mode
+  defp pool_resolver(_state, _mode), do: Wardmast.Accounts.AdmissionMode.pool_resolver()
+
+  defp admission_mode(state) do
+    state.admission.()
+  rescue
+    _ -> :legacy
+  catch
+    :exit, _ -> :legacy
+  end
+
+  # The shadow is a record: nothing it computes may stop a pass or change a
+  # dispatch (I2). A failure is logged and the pass goes on without it.
+  defp shadow_safely(fallback, fun) do
+    fun.()
+  rescue
+    e ->
+      Logger.warning("board autopilot: admission shadow skipped: #{Exception.message(e)}")
+      fallback
+  catch
+    kind, reason ->
+      Logger.warning("board autopilot: admission shadow skipped: #{inspect({kind, reason})}")
+      fallback
+  end
+
+  # One event row per change of either side's outcome (`AdmissionShadow.signature/1`),
+  # never one per pass. An unreadable board says nothing and keeps the last
+  # signature; a board without a walk (or `legacy`) forgets it, so the next
+  # walk is recorded from a clean slate.
+  defp note_admission(state, _mode, :error, _snapshot), do: state
+
+  defp note_admission(state, mode, :ok, %{walk: %{}} = snapshot) do
+    if AdmissionShadow.walks?(mode) do
+      signature = {mode, AdmissionShadow.signature(snapshot)}
+
+      if signature != state.shadow_signature,
+        do:
+          record_shadow(
+            state,
+            AdmissionShadow.event(snapshot, install_mode(state, mode), state.now.())
+          )
+
+      %{state | shadow_signature: signature}
+    else
+      %{state | shadow_signature: nil}
+    end
+  end
+
+  defp note_admission(state, _mode, :ok, _snapshot), do: %{state | shadow_signature: nil}
+
+  defp record_shadow(state, attrs) do
+    state.record_shadow.(attrs)
+  rescue
+    e -> Logger.warning("board autopilot: admission shadow not recorded: #{inspect(e)}")
+  catch
+    :exit, reason ->
+      Logger.warning("board autopilot: admission shadow not recorded: #{inspect(reason)}")
+  end
+
+  # What rides on the dispatch: the walk's decision beside today's, as
+  # `routing_decision.admission_shadow`. Nothing under `legacy`, or without a walk.
+  defp shadow_opts(state, snapshot, mode) do
+    with true <- AdmissionShadow.walks?(mode),
+         resolver = pool_resolver(state, mode),
+         %{} = record <- AdmissionShadow.dispatch_record(snapshot, resolver, snapshot.promote) do
+      [admission_shadow: record]
+    else
+      _ -> []
+    end
+  end
+
+  # bd-dtdeff: an idle pass with Ready cards behind it was silent — no log, no
+  # status — so a board holding work for a reason read as an Autopilot that had
+  # stopped looking. Record each card's reason (the one the board shows) and log
+  # it when it changes, so a held queue is one line per change, not per tick.
+  # An unreadable board says nothing about the queue; keep the last answer.
+  defp note_holds(state, _snapshot, :error, _mode), do: state
+
+  defp note_holds(state, snapshot, :ok, mode) do
+    # DC8: when the walk decides, its reasons are why nothing went.
+    source =
+      if walk_decides?(state, snapshot, mode),
+        do: snapshot.walk.entries,
+        else: Map.get(snapshot, :ready, [])
+
+    holds =
+      source
+      |> Enum.filter(&(&1.state == :blocked))
+      |> Enum.map(&%{id: &1.id, reason: &1.reason})
+
+    if holds != state.holds and holds != [] do
+      Logger.info(
+        "board autopilot: nothing to dispatch, #{length(holds)} Ready held — " <>
+          Enum.map_join(Enum.take(holds, 5), "; ", &"#{&1.id}: #{&1.reason}")
+      )
+    end
+
+    %{state | holds: holds}
+  end
+
+  # bd-92mx1m: the oldest deferred resume takes the first free slot. Until one
+  # frees, nothing Ready is promoted either — the resumed task is already in
+  # progress and goes first. An unreadable board is not a free slot.
+  #
+  # bd-b2iigy: a resume can also be waiting on the primary's own cap
+  # (`wait: :local_capacity`, `Wardmast.Nodes.LocalCapacity`). Its ticket is
+  # already In progress, so a free board slot is neither needed nor enough: it
+  # replays when the primary has room, whatever the board says, and a resume
+  # waiting for a board slot does not queue it. Slot waiters keep their arrival
+  # order; local waiters go highest ticket priority first (then arrival), so a
+  # restart's backlog comes back P0 first, one per free local slot.
+  #
+  # DC8: under `enforce` a slot is a seat on the resume's own pin pool, which the
+  # board's slot count does not see: a slot waiter is replayed when
+  # `Wardmast.Worker.ResumeSlot` finds its pool a seat (`:slot_room`), and one
+  # whose pool is full does not hold back another whose pool has room.
+  defp resume_or_wait(%{deferred_resumes: [_ | _] = queue} = state, :ok, snapshot, mode) do
+    case next_resume(state, queue, Map.get(snapshot, :slots_free, 0), mode) do
+      nil ->
+        waiting(state)
+
+      next ->
+        rest = Enum.reject(queue, &(&1.task_id == next.task_id))
+        {:started, start_resume(%{state | deferred_resumes: rest}, next)}
+    end
+  end
+
+  defp resume_or_wait(state, _read_status, _snapshot, _mode), do: waiting(state)
+
+  defp next_resume(state, queue, slots_free, mode) do
+    slot_waiter =
+      cond do
+        mode == :enforce ->
+          Enum.find(queue, &(&1.wait == :slot and slot_room?(state, &1)))
+
+        slots_free > 0 ->
+          Enum.find(queue, &(&1.wait == :slot))
+
+        true ->
+          nil
+      end
+
+    slot_waiter || next_local_resume(state, queue)
+  end
+
+  defp slot_room?(%{slot_room: room}, %{task_id: task_id, kind: kind}) do
+    room.(task_id, kind)
+  rescue
+    _ -> false
+  end
+
+  # A CI fix or conflict pass is a follow-up under `enforce`, never held for a
+  # full pool; a resume asks `ResumeSlot` (the pin pool's seat check for an
+  # account in `enforce`, today's slot rule for one that is not). Asks only:
+  # the replay is admitted with `slot_admitted: true`.
+  defp default_slot_room?(_task_id, kind) when kind in [:fix_pass, :conflict], do: true
+
+  defp default_slot_room?(task_id, _kind) do
+    case Ash.get(Issue, task_id) do
+      {:ok, %Issue{} = task} -> match?({:ok, _}, ResumeSlot.admit(task, origin: :automatic))
+      _ -> true
+    end
+  rescue
+    _ -> true
+  end
+
+  defp next_local_resume(state, queue) do
+    queue
+    |> Enum.filter(&(&1.wait == :local_capacity and local_room?(state, &1)))
+    |> Enum.with_index()
+    |> Enum.min_by(fn {entry, index} -> {state.priority.(entry.task_id), index} end, fn -> nil end)
+    |> case do
+      {entry, _index} -> entry
+      nil -> nil
+    end
+  end
+
+  # bd-3fbj83: orphaned tickets (no run, nothing queued) hold no slot.
+  defp idle_check(state) do
+    queued = queued_resume_ids(state)
+    fn issues -> Wardmast.Tasks.IdleTickets.ids(issues, queued_ids: queued) end
+  end
+
+  defp local_held_ids(%{deferred_resumes: queue}),
+    do: for(%{wait: :local_capacity, task_id: id} <- queue, do: id)
+
+  # A test's 1-arity seam answers by ticket; the default reads the resume's own
+  # options too.
+  defp local_room?(%{local_room: room}, entry) when is_function(room, 2),
+    do: room.(entry.task_id, entry.opts)
+
+  defp local_room?(%{local_room: room}, entry), do: room.(entry.task_id)
+
+  # Whether this ticket's resume could start right now (reserves nothing;
+  # `Dispatch` admits for real). bd-4ic681: wherever placement would put it — a
+  # node with room, or the primary with room under its own cap
+  # (`Dispatch.resume_room?/2`), so a resume a node can take is not left waiting
+  # on a primary whose cap may be 0.
+  defp default_local_room?(task_id, opts) do
+    Wardmast.Worker.Dispatch.resume_room?(task_id, opts)
+  rescue
+    _ -> true
+  end
+
+  # 0 = P0, the highest. An unreadable ticket sorts as the default P2.
+  defp default_priority(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, %Issue{priority: priority}} when is_integer(priority) -> priority
+      _ -> 2
+    end
+  rescue
+    _ -> 2
+  end
+
+  defp waiting(%{paused?: true} = state), do: {:paused, state}
+  defp waiting(state), do: {:idle, state}
+
+  defp start_resume(state, %{task_id: id, kind: kind, opts: opts} = entry) do
+    fun = fn ->
+      try do
+        state.resume.(id, kind, Keyword.put(opts, :slot_admitted, true))
+      rescue
+        e -> {:error, e}
+      catch
+        :exit, reason -> {:error, {:exit, reason}}
+      end
+    end
+
+    task = spawn_dispatch(fun)
+
+    %{
+      state
+      | dispatching: %{
+          ref: task.ref,
+          pid: task.pid,
+          id: id,
+          waiters: [],
+          resume: entry,
+          started_at: state.now.()
+        }
+    }
+  end
+
+  # A quota-exhausted failure (bd-8lnnnt) is not transient the way a network
+  # blip is: every tick before the usage window resets fails the exact same
+  # way. `record_failure/3` records how long this card should sit out before
+  # the next attempt; honour that hold here rather than re-attempting (and
+  # re-escalating) every tick. As of bd-2jgs2h this shape is no longer
+  # produced by `Dispatch.dispatch/2`'s own auth guard (that guard only ever
+  # produces `:auth_expired`); see the moduledoc section above.
+  #
+  # Scheduler always names the single highest-priority Ready card, with no
+  # notion of "skip this one, try the next" (`Wardmast.Board.Scheduler.plan/1`)
+  # — so a held card does sit at the head of the queue until its hold clears,
+  # same as any other card Autopilot has not yet cleared out of `failures`.
+  # For a quota hold specifically this is the right call anyway: the window is
+  # account-wide, so any other Ready card would hit the identical exhausted
+  # quota if dispatched right now.
+  defp promote_or_hold(%{failures: failures, now: now} = state, id, extra) do
+    with %{retry_not_before: %DateTime{} = at} <- Map.get(failures, id),
+         :lt <- DateTime.compare(now.(), at) do
+      {{:held, id, at}, state}
+    else
+      _ -> {:started, start_dispatch(state, id, extra)}
+    end
+  end
+
+  # A card only leaves `state.failures` on a successful dispatch of that same
+  # card (`clear_failure/2`). One that instead gets closed, deleted, or
+  # deprioritized out of Ready would otherwise sit in the map for the life of
+  # this singleton process. Ready is small and re-read every tick, so pruning
+  # against it here is cheap and keeps the map bounded.
+  defp prune_failures(%{failures: failures} = state, %{ready: ready})
+       when map_size(failures) > 0 do
+    ready_ids = MapSet.new(ready, & &1.id)
+    %{state | failures: Map.filter(failures, fn {id, _} -> MapSet.member?(ready_ids, id) end)}
+  end
+
+  defp prune_failures(state, _snapshot), do: state
+
+  # The task, not this process, does the slow work. It never raises: the
+  # result — good, bad or thrown — comes back as a plain term so the
+  # bookkeeping in `handle_info/2` has one shape to deal with.
+  defp start_dispatch(state, id, extra) do
+    fun = fn ->
+      try do
+        call_dispatch(state.dispatch, id, extra)
+      rescue
+        e -> {:error, e}
+      catch
+        :exit, reason -> {:error, {:exit, reason}}
+      end
+    end
+
+    task = spawn_dispatch(fun)
+
+    %{
+      state
+      | dispatching: %{
+          ref: task.ref,
+          pid: task.pid,
+          id: id,
+          waiters: [],
+          started_at: state.now.()
+        }
+    }
+  end
+
+  # The dispatch seam takes the extra options (the admission shadow's record)
+  # when it has room for them; a one-argument seam gets the id alone.
+  defp call_dispatch(fun, id, extra) when is_function(fun, 2), do: fun.(id, extra)
+  defp call_dispatch(fun, id, _extra), do: fun.(id)
+
+  # Supervised when the app is up (a dispatch that crashes must not take the
+  # autopilot with it); a plain linked Task otherwise, which only happens in a
+  # bare-process test where `fun` already swallows everything.
+  defp spawn_dispatch(fun) do
+    case GenServer.whereis(Wardmast.TaskSupervisor) do
+      nil -> Task.async(fun)
+      _ -> Task.Supervisor.async_nolink(Wardmast.TaskSupervisor, fun)
+    end
+  end
+
+  defp finish(state, %{resume: _, id: id}, result), do: finish_resume(state, id, result)
+  defp finish(state, %{id: id}, result), do: finish_dispatch(state, id, result)
+
+  # The replay's outcome is final: a deferred resume is never re-queued by this
+  # process. Losing the race to another resume, or to a close, is not a
+  # failure — the task is already where the resume would have put it.
+  # bd-741sid: a replayed pass that finds its ticket already has one running
+  # (the Watchdog asked again and got a slot first) is the same kind of race,
+  # and so is one whose ticket an operator pulled out of the merge queue while
+  # it waited (`:pulled`, `Wardmast.Tasks.PullRequest.pull/1`).
+  @benign_resume_errors [
+    :worker_active,
+    :task_closed,
+    :pr_not_open,
+    :ci_not_failing,
+    :task_not_found,
+    :fix_pass_already_running,
+    :resolver_already_running,
+    :task_worker_live,
+    :pulled
+  ]
+
+  # bd-b2iigy: the primary filled up between the room check and the replay, and
+  # `Dispatch` deferred it again (it is back in the queue, keeping no place of
+  # its own). Not a resume, not a failure.
+  defp finish_resume(state, id, {:ok, %{deferred: true}}), do: {{:deferred, id}, state}
+
+  defp finish_resume(state, id, {:ok, _}) do
+    HeldResume.clear(id)
+    announce({:board_resumed, id})
+    {{:resumed, id}, state}
+  end
+
+  defp finish_resume(state, id, {:error, reason} = error) do
+    HeldResume.clear(id)
+
+    if error_shape(reason) in @benign_resume_errors do
+      Logger.info("board autopilot: deferred resume of #{id} dropped: #{inspect(reason)}")
+    else
+      Logger.warning("board autopilot: deferred resume of #{id} failed: #{inspect(reason)}")
+      state.escalate.(id, {:deferred_resume_failed, reason}, 1)
+    end
+
+    {error, state}
+  end
+
+  defp finish_resume(state, id, other), do: finish_resume(state, id, {:error, other})
+
+  defp finish_dispatch(state, id, {:ok, _}) do
+    announce({:board_dispatched, id})
+    {{:ok, id}, clear_failure(state, id)}
+  end
+
+  # A dispatch that fails is a fact about that card, not about the scheduler:
+  # log it and let the next tick re-read the world. The card is still Ready,
+  # so it is simply reconsidered — no retry bookkeeping to *decide what to
+  # dispatch next*. There is still bookkeeping to decide *whether a human
+  # needs to hear about it*: `record_failure/3` tracks the failure and, past
+  # its threshold, escalates.
+  defp finish_dispatch(state, id, {:error, reason} = error) do
+    # bd-814vuy: a placement refusal is a hold on this card, not a failure.
+    if error_shape(reason) in @held_dispatch_errors do
+      Logger.info("board autopilot: dispatch of #{id} held: #{inspect(reason)}")
+    else
+      Logger.warning("board autopilot: dispatch of #{id} failed: #{inspect(reason)}")
+    end
+
+    {error, record_failure(state, id, reason)}
+  end
+
+  defp finish_dispatch(state, id, other) do
+    Logger.warning("board autopilot: dispatch of #{id} returned #{inspect(other)}")
+    {{:error, other}, record_failure(state, id, other)}
+  end
+
+  # bd-1u15tl: the ids of the tickets with a round deferred for a slot.
+  defp queued_resume_ids(%{deferred_resumes: deferred}), do: Enum.map(deferred, & &1.task_id)
+
+  # bd-814vuy: a card whose last dispatch was refused for a placement reason
+  # (account cap, provider constraint, quota hold, paused provider …) and is
+  # still inside its retry window is a hold on *that card*. Handing the holds
+  # to the board keeps the scheduler from naming it head again, so the pass
+  # goes on to the next card another provider can take.
+  defp dispatch_holds(%{failures: failures, now: now}) do
+    at = now.()
+
+    for {id, %{retry_not_before: %DateTime{} = until} = entry} <- failures,
+        DateTime.compare(at, until) == :lt,
+        into: %{} do
+      {id, {:hold, Map.get(entry, :detail) || "dispatch refused (#{entry.shape})"}}
+    end
+  end
+
+  defp failure_detail({:account_at_capacity, %{account: account, cap: cap}}),
+    do: "#{account} at capacity (cap #{cap})"
+
+  defp failure_detail({:account_at_capacity, _}), do: "account at capacity"
+  defp failure_detail({:quota_held, _}), do: "quota held"
+  defp failure_detail({:provider_paused, provider, _}), do: "#{provider} paused"
+  defp failure_detail({:provider_constraint, _provider, phrase}), do: phrase
+  defp failure_detail({:guardrail_ineligible, _provider, phrase}), do: phrase
+  # bd-5fpj59: a hold that names its own phrase (the registry image is
+  # publishing, or could not be published) shows it as the card's hold_reason.
+  defp failure_detail({:no_node_capacity, %{image_key: _, phrase: phrase}})
+       when is_binary(phrase),
+       do: phrase
+
+  defp failure_detail({:no_node_capacity, %{image_error: _, phrase: phrase}})
+       when is_binary(phrase),
+       do: phrase
+
+  defp failure_detail({:no_node_capacity, _}), do: "no node capacity"
+  defp failure_detail({:sandbox_backend, _provider, phrase}), do: phrase
+
+  defp failure_detail({:migrations_check_failed, why}),
+    do: "migrations check failed (#{inspect(why)})"
+
+  defp failure_detail({:image_publish_failed, %{reason: r}}),
+    do: "image publish failed: #{inspect(r)}"
+
+  defp failure_detail({:repo_at_capacity, %{repo: repo, cap: cap}}),
+    do: "repo #{repo}: #{cap} of #{cap} implementer runs"
+
+  defp failure_detail({:repo_at_capacity, _}), do: "repo at capacity"
+  defp failure_detail(reason), do: "dispatch refused (#{inspect(error_shape(reason))})"
+
+  defp clear_failure(state, id), do: %{state | failures: Map.delete(state.failures, id)}
+
+  # bd-5fpj59: the publish a held card waits on, so its completion can lift the
+  # hold of exactly the cards waiting for that image.
+  defp held_image_key({:no_node_capacity, %{image_key: key}}), do: key
+  defp held_image_key(_reason), do: nil
+
+  defp release_image_holds(%{failures: failures} = state, key) do
+    released =
+      Map.new(failures, fn
+        {id, %{image_key: ^key} = entry} -> {id, %{entry | retry_not_before: nil}}
+        other -> other
+      end)
+
+    %{state | failures: released}
+  end
+
+  # Update this card's failure entry and, if it just crossed the escalation
+  # bar for the first time, fire the escalation and latch it so a card stuck
+  # failing the same way does not re-page every tick.
+  defp record_failure(state, id, reason) do
+    shape = error_shape(reason)
+    previous = Map.get(state.failures, id)
+
+    entry =
+      if previous && previous.shape == shape do
+        %{previous | count: previous.count + 1}
+      else
+        %{count: 1, shape: shape, escalated?: false, retry_not_before: nil, detail: nil}
+      end
+
+    entry = %{
+      entry
+      | retry_not_before: preflight_retry_not_before(reason, entry.count, state.now.()),
+        detail: failure_detail(reason)
+    }
+
+    entry = Map.put(entry, :image_key, held_image_key(reason))
+
+    entry =
+      if not entry.escalated? and escalate_dispatch_failure?(shape, entry.count) do
+        state.escalate.(id, reason, entry.count)
+        %{entry | escalated?: true}
+      else
+        entry
+      end
+
+    %{state | failures: Map.put(state.failures, id, entry)}
+  end
+
+  defp escalate_dispatch_failure?(shape, _count) when shape in @dispatch_escalated_errors,
+    do: false
+
+  defp escalate_dispatch_failure?(shape, _count) when shape in @self_clearing_dispatch_errors,
+    do: false
+
+  defp escalate_dispatch_failure?(:migrations_check_failed, _count), do: false
+
+  defp escalate_dispatch_failure?(shape, _count) when shape in @deterministic_dispatch_errors,
+    do: true
+
+  defp escalate_dispatch_failure?(_shape, count), do: count >= @dispatch_failure_retry_threshold
+
+  defp error_shape(%module{}), do: module
+  defp error_shape(reason) when is_tuple(reason) and tuple_size(reason) > 0, do: elem(reason, 0)
+  defp error_shape(reason), do: reason
+
+  # bd-8lnnnt: when should the *next* dispatch attempt on this card happen?
+  # Delegates to `Wardmast.Worker.PreflightHold`, the policy shared with
+  # `Wardmast.Workflows.DispatchQueue`'s held-intent drain — see that module's
+  # doc for why a single policy backs both callers.
+  # bd-8suxac: a full account is held briefly — a slot frees when any run on
+  # it ends, which no reset time predicts.
+  defp preflight_retry_not_before({:account_at_capacity, _info}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:quota_held, _task_id}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:provider_paused, _provider, _phrase}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:no_node_capacity, _info}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:repo_at_capacity, _info}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:provider_constraint, _provider, _phrase}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:guardrail_ineligible, _provider, _phrase}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:capability_missing, _provider, _phrase}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:below_floor, _provider, _phrase}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  defp preflight_retry_not_before({:sandbox_backend, _provider, _phrase}, count, now),
+    do: backoff(now, @sandbox_backend_backoff_ms, @sandbox_backend_backoff_max_ms, count)
+
+  defp preflight_retry_not_before({:migrations_check_failed, _why}, count, now),
+    do: backoff(now, @migrations_backoff_ms, @migrations_backoff_max_ms, count)
+
+  defp preflight_retry_not_before(reason, count, now),
+    do: Wardmast.Worker.PreflightHold.retry_not_before(reason, count, now)
+
+  defp backoff(now, base_ms, max_ms, count) do
+    ms = min(base_ms * Integer.pow(2, min(count - 1, 16)), max_ms)
+    DateTime.add(now, ms, :millisecond)
+  end
+
+  # Resolves the card's workspace so `CoordinatorNotifier.dispatch_stuck/3`
+  # has somewhere to post — a card with no readable Issue/workspace has
+  # nowhere to escalate to, so it is silently skipped rather than raising.
+  defp default_escalate(id, reason, attempts) do
+    case Ash.get(Issue, id) do
+      {:ok, %{workspace_id: ws_id}} when is_binary(ws_id) ->
+        CoordinatorNotifier.dispatch_stuck(%{task_id: id, workspace_id: ws_id}, reason, attempts)
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp park(%{dispatching: %{waiters: waiters} = in_flight} = state, from),
+    do: %{state | dispatching: %{in_flight | waiters: [from | waiters]}}
+
+  defp reply_all(waiters, outcome), do: Enum.each(waiters, &GenServer.reply(&1, outcome))
+
+  # The board always reports *this* process's pause state, so a caller can
+  # never render "2 ahead in queue" against a scheduler that is stopped.
+  #
+  # Tags the result so `promote/1` can tell a genuinely-empty Ready list
+  # apart from a failed read that only *looks* empty (`Snapshot.empty/0`
+  # has `ready: []` too) — pruning `state.failures` against the latter
+  # would wipe every card's retry count and escalation latch on a blip.
+  defp read_board(state, opts) do
+    {:ok, state.snapshot.(Keyword.put(opts, :paused, state.paused?))}
+  rescue
+    e ->
+      Logger.warning("board autopilot: board read failed: #{inspect(e)}")
+      {:error, Snapshot.empty()}
+  end
+
+  # No `repo:` opt on purpose: `Dispatch.dispatch/2` loads the task and binds
+  # the task's own `repo` assignment when it has one (bd-2jum8j), so passing it
+  # again from here would only duplicate that resolution — and get it wrong the
+  # moment the precedence rules change. A task with no assignment still relies
+  # on the sole-configured-repo auto-select, exactly as before.
+  # `dispatched_by` rides into the worker's meta so a drain report can name a
+  # board dispatch as one (bd-9fgg04), not just as "a dispatch". `extra` is the
+  # admission shadow's record (DC6): empty under `legacy`, so the options are
+  # exactly today's.
+  defp default_dispatch(id, extra, notify) do
+    Wardmast.Worker.Dispatch.dispatch(
+      id,
+      Keyword.merge(
+        [start_claude: true, dispatched_by: "autopilot", image_notify: notify],
+        extra
+      )
+    )
+  end
+
+  # bd-5fpj59: a board dispatch never parks the promotion slot on a registry
+  # image publish. `image_notify` makes `Dispatch` hold the card instead and tell
+  # this process when the publish settles (`{:image_settled, key}`).
+  defp default_dispatch_fun(pid) do
+    notify = image_notifier(pid)
+    fn id, extra -> default_dispatch(id, extra, notify) end
+  end
+
+  @doc false
+  @spec image_notifier(pid()) :: (term(), term() -> :ok)
+  def image_notifier(pid) do
+    fn key, _result ->
+      send(pid, {:image_settled, key})
+      :ok
+    end
+  end
+
+  # bd-92mx1m: the scheduler has just admitted this resume into a free slot,
+  # and the caller put `slot_admitted: true` on `opts` to say so.
+  defp default_resume(task_id, :resume, opts), do: Wardmast.Worker.Dispatch.resume(task_id, opts)
+
+  defp default_resume(task_id, :resume_session, opts),
+    do: Wardmast.Worker.Dispatch.resume_session(task_id, opts)
+
+  # bd-741sid: a pass for a ticket returning from Merging, replayed through its
+  # own dispatcher with the dispatcher's own args.
+  defp default_resume(_task_id, :fix_pass, opts),
+    do: FixPassDispatcher.dispatch(pass_args(opts))
+
+  defp default_resume(_task_id, :conflict, opts),
+    do: ConflictResolver.resolve(pass_args(opts))
+
+  defp pass_args(opts),
+    do:
+      opts
+      |> Keyword.get(:args, %{})
+      |> Map.put(:slot_admitted, Keyword.get(opts, :slot_admitted))
+
+  # ---- stale promotion sweep (bd-545yem) --------------------------------------
+
+  # `dispatching` pins the one-promotion-at-a-time slot, so an entry that can
+  # never complete freezes every Ready card on the board (and `Drain` reports
+  # it as a live `board_promotion`). Two such entries are recognised:
+  #
+  #   * its ticket has closed (a merge finalized it under the promotion's feet):
+  #     there is nothing left to promote or resume, so the task is killed and
+  #     the ticks parked on it are answered;
+  #   * its task process is gone but no result or `:DOWN` was ever handled:
+  #     a synthetic `:DOWN` is queued behind whatever is already in the mailbox,
+  #     so a result that really is waiting is still handled first.
+  defp sweep_stale_dispatch(%{dispatching: %{id: id} = in_flight} = state) do
+    cond do
+      state.ticket_closed?.(id) ->
+        Logger.warning("board autopilot: ticket #{id} closed mid-dispatch; releasing its slot")
+        release_dispatch(in_flight)
+        reply_all(in_flight.waiters, {:error, :ticket_closed})
+        after_dispatch(%{state | dispatching: nil}, {:error, :ticket_closed})
+
+      task_gone?(in_flight) ->
+        send(self(), {:DOWN, in_flight.ref, :process, in_flight.pid, :noproc})
+        state
+
+      dispatch_overdue?(in_flight, state) ->
+        Logger.warning(
+          "board autopilot: dispatch of #{id} exceeded #{state.dispatch_timeout_ms}ms; releasing its slot"
+        )
+
+        release_dispatch(in_flight)
+        reply_all(in_flight.waiters, {:error, :dispatch_timeout})
+        state = record_failure(state, id, :dispatch_timeout)
+        after_dispatch(%{state | dispatching: nil}, {:error, :dispatch_timeout})
+
+      true ->
+        state
+    end
+  end
+
+  defp sweep_stale_dispatch(state), do: state
+
+  defp dispatch_overdue?(%{started_at: %DateTime{} = started_at}, state) do
+    DateTime.diff(state.now.(), started_at, :millisecond) > state.dispatch_timeout_ms
+  end
+
+  defp dispatch_overdue?(_in_flight, _state), do: false
+
+  defp task_gone?(%{pid: pid}) when is_pid(pid), do: not Process.alive?(pid)
+  defp task_gone?(_in_flight), do: false
+
+  defp release_dispatch(%{ref: ref} = in_flight) do
+    Process.demonitor(ref, [:flush])
+
+    receive do
+      {^ref, _result} -> :ok
+    after
+      0 -> :ok
+    end
+
+    if is_pid(in_flight[:pid]), do: Process.exit(in_flight.pid, :kill)
+    :ok
+  end
+
+  defp default_ticket_closed?(id) do
+    match?({:ok, %Issue{state: :closed}}, Ash.get(Issue, id))
+  rescue
+    _ -> false
+  end
+
+  defp dispatching_id(%{dispatching: %{id: id}}), do: id
+  defp dispatching_id(_), do: nil
+
+  defp announce(message) do
+    Phoenix.PubSub.broadcast(Wardmast.PubSub, @topic, message)
+  rescue
+    _ -> :ok
+  end
+
+  defp schedule(:never), do: :ok
+  defp schedule(ms) when is_integer(ms) and ms > 0, do: Process.send_after(self(), :tick, ms)
+  defp schedule(_), do: :ok
+
+  # `:never` in the test env: a resumed autopilot must not dispatch a real
+  # worker behind a test's back.
+  defp configured_interval_ms do
+    :wardmast
+    |> Application.get_env(:board_autopilot, [])
+    |> Keyword.get(:interval_ms, @default_interval_ms)
+  end
+
+  # `[]` in the test env: `interval_ms: :never` alone does not stop a resumed
+  # autopilot from planning — every lifecycle broadcast would, dispatching a
+  # test's Ready fixtures from this VM-global process (bd-jw7cb0).
+  defp configured_topics do
+    :wardmast
+    |> Application.get_env(:board_autopilot, [])
+    |> Keyword.get(:topics, default_topics())
+  end
+
+  # `read_persisted_state?: false` in the test env: the app-supervised instance
+  # boots before any test owns a sandbox connection, so its boot read can only
+  # fail (or queue behind the suite's pool), and the retry loop would then log
+  # "still unreadable" every few seconds for the life of the run.
+  defp default_read_status do
+    if :wardmast
+       |> Application.get_env(:board_autopilot, [])
+       |> Keyword.get(:read_persisted_state?, true),
+       do: &Wardmast.Settings.read_board_autopilot_status/0,
+       else: fn -> {:ok, %{paused: nil, changed_at: nil, changed_by: nil}} end
+  end
+
+  defp configured_debounce_ms do
+    :wardmast
+    |> Application.get_env(:board_autopilot, [])
+    |> Keyword.get(:debounce_ms, @default_debounce_ms)
+  end
+
+  defp configured_paused? do
+    :wardmast
+    |> Application.get_env(:board_autopilot, [])
+    |> Keyword.get(:enabled, false)
+    |> Kernel.!()
+  end
+
+  # No persisted value (fresh install) falls back to the app-env default, with
+  # no recorded change — that is the config's default, not something an
+  # operator chose. A row that cannot be *read* is different: the default is
+  # unknown, and an operator may have paused the scheduler (bd-2hwm9e), so it
+  # fails closed: paused until the row can be read (bd-c3b30g — v0.2.7 booted
+  # paused over a persisted `paused = false`). Logged loudly and re-read by
+  # `:reload_paused_state`.
+  defp initial_paused_state(read_status) do
+    case read_status.() do
+      {:ok, %{paused: paused?} = status} when is_boolean(paused?) ->
+        {{paused?, status.changed_at, status.changed_by}, :settled}
+
+      {:ok, _unset} ->
+        {{configured_paused?(), nil, nil}, :settled}
+
+      {:error, reason} ->
+        Logger.warning(
+          "board autopilot: could not read the persisted paused state at boot " <>
+            "(#{inspect(reason)}); starting paused (fail closed) and retrying"
+        )
+
+        {{true, nil, nil}, {:retrying, 1}}
+    end
+  end
+
+  defp adopt_persisted(state, %{paused: paused?} = status) when is_boolean(paused?) do
+    if paused? != state.paused? do
+      Logger.warning(
+        "board autopilot: persisted paused state is now readable; " <>
+          "switching to paused=#{paused?}"
+      )
+
+      announce({:board_scheduler, if(paused?, do: :paused, else: :resumed)})
+    end
+
+    %{
+      state
+      | paused?: paused?,
+        paused_changed_at: status.changed_at,
+        paused_changed_by: status.changed_by,
+        state_load: :settled
+    }
+  end
+
+  # Nothing persisted: the read recovered, so the fail-closed boot value gives
+  # way to the config default, exactly as a first-try read would have.
+  defp adopt_persisted(state, unset),
+    do: adopt_persisted(state, Map.put(unset, :paused, configured_paused?()))
+
+  defp actor_parts({actor, surface}) when is_binary(actor) and is_binary(surface),
+    do: {"#{actor} via #{surface}", actor, surface}
+
+  defp actor_parts(by) when is_binary(by), do: {by, by, by}
+  defp actor_parts(nil), do: {nil, nil, nil}
+
+  # bd-cl6zjn: every pause/resume leaves an audit row, and a pause also lands
+  # in the coordinator's mailbox so a silent one gets noticed. Best-effort —
+  # the in-memory change must take effect whatever the database says.
+  defp record_change(state, paused?, actor, surface) do
+    case Wardmast.Settings.record_scheduler_change(paused?, actor, surface) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("board autopilot: audit write failed: #{inspect(reason)}")
+    end
+
+    if paused?, do: state.notify_paused.(actor || "unknown", surface)
+  rescue
+    e -> Logger.warning("board autopilot: audit/notice failed: #{inspect(e)}")
+  catch
+    :exit, reason ->
+      Logger.warning("board autopilot: audit/notice failed: process error #{inspect(reason)}")
+  end
+
+  defp default_notify_paused(actor, surface) do
+    {:ok, workspaces} = Ash.read(Wardmast.Tasks.Workspace)
+
+    Enum.each(workspaces, fn ws ->
+      Wardmast.Messages.Escalation.post(%{
+        kind: :scheduler_paused,
+        from_ref: "autopilot",
+        workspace_id: ws.id,
+        subject: "board scheduler paused by #{actor}",
+        body:
+          "The board scheduler was paused by #{actor}" <>
+            if(surface && surface != actor, do: " (via #{surface})", else: "") <>
+            ". It will not promote Ready cards until resumed — " <>
+            "`arb scheduler resume` if that was not intended."
+      })
+    end)
+  end
+
+  defp notify_unreadable(state, reason) do
+    state.notify_unreadable.(reason)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Coordinator-visible: a system escalation in each workspace's mailbox.
+  defp default_notify_unreadable(reason) do
+    {:ok, workspaces} = Ash.read(Wardmast.Tasks.Workspace)
+
+    Enum.each(workspaces, fn ws ->
+      Wardmast.Messages.Escalation.post(%{
+        kind: :autopilot_state_unreadable,
+        from_ref: "autopilot",
+        workspace_id: ws.id,
+        subject: "board autopilot: persisted paused state is unreadable",
+        body:
+          "The board autopilot could not read its persisted paused/running state and is " <>
+            "running on the config default (paused unless `board_autopilot.enabled`), " <>
+            "not the state an operator last set. Check `arb scheduler status` and " <>
+            "resume it if it should be running.\n\nError: #{inspect(reason)}"
+      })
+    end)
+  end
+
+  # Best-effort: the in-memory pause/resume must always take effect even if
+  # persistence fails (no DB connection, as in a bare unit test that starts
+  # its own Autopilot with no sandbox checked out).
+  defp persist_paused(paused?, by) do
+    case Wardmast.Settings.set_board_autopilot_paused(paused?, by) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("board autopilot: failed to persist paused=#{paused?}: #{inspect(reason)}")
+    end
+  rescue
+    e -> Logger.warning("board autopilot: failed to persist paused state: #{inspect(e)}")
+  catch
+    :exit, reason ->
+      Logger.warning(
+        "board autopilot: failed to persist paused state: process error #{inspect(reason)}"
+      )
+  end
+end

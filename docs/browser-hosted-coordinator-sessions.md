@@ -4,9 +4,9 @@
 **Date:** 2026-09-13
 **Task:** bd-cyxzvq · **Tracker:** github:1581
 **Author:** worker
-**Builds on:** the usage ledger's session attribution (`apps/arbiter/lib/arbiter/usage/event.ex`,
+**Builds on:** the usage ledger's session attribution (`apps/wardmast/lib/wardmast/usage/event.ex`,
 bd-adyhvn / #1596), the session-JSONL archive (`docs/session-archive.md`, bd-db0p38),
-per-agent config isolation (`Arbiter.Agents.Claude.ConfigDir`, bd-bw3466) and the
+per-agent config isolation (`Wardmast.Agents.Claude.ConfigDir`, bd-bw3466) and the
 MCP scope tiers (`docs/mcp-server-design.md`, bd-b2eqn5).
 
 > **Amendments folded in.** This spec is written against the four amendments on
@@ -87,7 +87,7 @@ schema **before** this RFC was written:
 
 - `Usage.Event.task_id` is nullable.
 - `@sources` already contains `:coordinator_session` and `:terminal_session`
-  (`apps/arbiter/lib/arbiter/usage/event.ex:66`).
+  (`apps/wardmast/lib/wardmast/usage/event.ex:66`).
 - `session_id` already exists as an attribute (`:210`).
 - `arb usage` already accepts `--by source` and `--source coordinator_session`.
 
@@ -254,7 +254,7 @@ confirmed `active` afterwards.
 
 **This whole section is now an automated test.** Phase 2 (bd-b95w36) turned
 these observations into
-`apps/arbiter/test/integration/session_restart_survival_test.exs`, negative
+`apps/wardmast/test/integration/session_restart_survival_test.exs`, negative
 control included — see §4.9.
 
 ### 4.3 Recommendation — transient systemd user unit, tmux inside it
@@ -379,31 +379,31 @@ tmux (pid …)     …/user@1000.service/app.slice/arb-session-<uuid>.scope
 ```
 
 A **sibling** under `app.slice`, exactly as §4.1 predicts. That reading is
-produced by `apps/arbiter/test/integration/session_scope_test.exs`, which is
+produced by `apps/wardmast/test/integration/session_scope_test.exs`, which is
 tagged `:live_systemd` and excluded from the default suite — run it with
 `mix test --include live_systemd`.
 
 What shipped:
 
-  * `sessions` table + `Arbiter.Sessions.Session`, field-for-field with §7.4
+  * `sessions` table + `Wardmast.Sessions.Session`, field-for-field with §7.4
     item 4. `usage_events.session_id` joins to `provider_session_id` by string,
     so the rows phase 6's ingest has been writing since bd-be804c attach to a
     session row as soon as one exists.
-  * `Arbiter.Sessions.launch/1` running §4.3's command shape verbatim, plus
+  * `Wardmast.Sessions.launch/1` running §4.3's command shape verbatim, plus
     `list/0`, `get/1`, `kill/2`. Control operations shell out through
-    `Arbiter.Sessions.Runner` (a behaviour, so tests drive a scripted
+    `Wardmast.Sessions.Runner` (a behaviour, so tests drive a scripted
     `systemctl`/`tmux`) and its one real implementation goes through
     `ReleaseEnv.cmd/3`, so the release-env scrub happens once at the scope
     boundary and is inherited by the tmux server and every pane.
-  * `Arbiter.Sessions.Adoption.sweep/1` as a primary-gated boot task — §4.6
+  * `Wardmast.Sessions.Adoption.sweep/1` as a primary-gated boot task — §4.6
     item 1. Phase 1 deliberately stops short of §4.6's "no matching row →
     kill": an unrecognised live scope is reported in `:orphans` and logged,
     never stopped, because the sweep's model of the host is by definition
     already wrong in that case. Reaping stays phase 10.
   * §10.1's self-kill refusal, enforced in `kill/2`, and the restart
-    rate-limit decision as a pure predicate (`Arbiter.Sessions.Guards`)
+    rate-limit decision as a pure predicate (`Wardmast.Sessions.Guards`)
     waiting for whichever phase adds the restart endpoint.
-  * `Arbiter.Sessions.Provider` keeps the payload provider-agnostic. Its
+  * `Wardmast.Sessions.Provider` keeps the payload provider-agnostic. Its
     Claude Code adapter launches a **shell** for now: §9.2's three interactive
     gates mean an unprovisioned `claude` would hang forever in a detached
     pane. Phase 3 swaps the payload, nothing else.
@@ -416,17 +416,17 @@ Control, and the §4.6 idle deadline / dead-man's switch.
 §4.8 measures the *mechanism* (sibling cgroup). It cannot measure the
 *consequence*, because it launches from the ExUnit BEAM's own cgroup and
 nothing ever restarts that. Phase 2 closes that gap:
-`apps/arbiter/test/integration/session_restart_survival_test.exs` brings up a
+`apps/wardmast/test/integration/session_restart_survival_test.exs` brings up a
 throwaway systemd **user service** standing in for `arbiter.service` — same
 user manager, same `KillMode` (both set it by omission, so the default
 `control-group` applies; the test reads `arbiter.service`'s own value back and
 asserts they match), no blast radius on the live coordinator — launches a
-session from inside it through the real `Arbiter.Sessions.launch/1`, and
+session from inside it through the real `Wardmast.Sessions.launch/1`, and
 restarts it for real.
 
 The launch gets *inside* the unit through the phase-1 seam: the unit's
 `ExecStart` is a small POSIX `sh` agent watching a command spool, and
-`Arbiter.Test.StandinUnit` implements `Arbiter.Sessions.Runner` by writing
+`Wardmast.Test.StandinUnit` implements `Wardmast.Sessions.Runner` by writing
 into that spool. The argv, the env and the ordering are the production code
 path; only the process that executes the argv moves into the restartable
 cgroup.
@@ -470,7 +470,7 @@ not passed. Run it with:
 scripts/session-restart-survival.sh          # --log FILE to capture output
 ```
 
-which checks the preconditions, runs the test from `apps/arbiter` (an umbrella
+which checks the preconditions, runs the test from `apps/wardmast` (an umbrella
 `mix test <path>` at the root is not scoped to one app), and re-checks
 `arbiter.service`'s state afterwards.
 
@@ -479,11 +479,11 @@ which checks the preconditions, runs the test from `apps/arbiter` (an umbrella
 §4.6's three mechanisms and §4.7's fallback path are all implemented.
 
 1. **Orphan-scope policy — kill after grace, never on first sighting
-   (`Arbiter.Sessions.OrphanReaper`).** Phase 1 deliberately stopped at
+   (`Wardmast.Sessions.OrphanReaper`).** Phase 1 deliberately stopped at
    *reporting* an orphan (§4.6 item 1's own text, above). The policy decided
    here: a periodic re-sweep of `Adoption.sweep/1` tracks each orphan's
    first-seen time in memory, and only kills one that has persisted across a
-   full grace window (default 1h, `config :arbiter, :sessions_orphan_reaper,
+   full grace window (default 1h, `config :wardmast, :sessions_orphan_reaper,
    grace_ms: …`) — never the sweep that first notices it, which is what
    protects a session mid-launch (row written, scope not yet confirmed, or
    the reverse) from being destroyed by a sweep that catches it between the
@@ -497,7 +497,7 @@ which checks the preconditions, runs the test from `apps/arbiter` (an umbrella
 
    `Adoption.sweep/1` itself is not read-only — it marks rows `:running` or
    `:ended` — so this periodic sweep is gated on
-   `Arbiter.SingleInstance.primary?()` exactly like `Adoption.sweep_on_boot/1`
+   `Wardmast.SingleInstance.primary?()` exactly like `Adoption.sweep_on_boot/1`
    is: a secondary instance must never mark the primary's live sessions
    ended on a timer. `Adoption.sweep/1` also takes a `:context` string now
    (`"adoption sweep at boot"` vs `"periodic orphan-reaper sweep"`), so a row
@@ -507,7 +507,7 @@ which checks the preconditions, runs the test from `apps/arbiter` (an umbrella
    30s launch grace (`Sessions.launch/1` writes the row before it provisions
    and starts the scope) so a sweep landing inside that window cannot end a
    row `start_scope/2` is about to mark `:running`.
-2. **Idle deadline (`Arbiter.Sessions.IdleReaper`).** A periodic sweep
+2. **Idle deadline (`Wardmast.Sessions.IdleReaper`).** A periodic sweep
    (default 15m) reaps any `:running`, non-`keep_alive` session whose newest
    of `last_client_at` / `last_turn_at` / `started_at` is older than
    `:idle_ttl_ms` (default 24h, §4.6's own suggested figure), via the same
@@ -521,15 +521,15 @@ which checks the preconditions, runs the test from `apps/arbiter` (an umbrella
    activity distinct from a client merely being attached, and without it a
    long-running unattended agent turn would look idle to the sweep. Both
    columns are stamped from production paths, not just tests:
-   `ArbiterWeb.SessionChannel` calls `Sessions.touch_client/1` on join and
+   `WardmastWeb.SessionChannel` calls `Sessions.touch_client/1` on join and
    again every 5 minutes for as long as a client stays attached (so a
    continuously-attached browser tab never goes stale), and
-   `Arbiter.Sessions.Stream` calls `Sessions.touch_turn/1` (throttled to once
+   `Wardmast.Sessions.Stream` calls `Sessions.touch_turn/1` (throttled to once
    a minute) whenever the pane actually produces output, whether or not a
    client is attached to watch it — the signal the unattended-agent case
    needs.
 3. **In-scope dead-man's switch (`watchdog.sh`, generated by
-   `Arbiter.Sessions.Provisioning`).** The only mechanism that still works if
+   `Wardmast.Sessions.Provisioning`).** The only mechanism that still works if
    arbiter never comes back at all (§4.2's measured case). `launch.sh`
    backgrounds it before `exec`ing the agent — cgroup membership is inherited
    by `fork()` and untouched by the parent shell being replaced, so it
@@ -537,8 +537,8 @@ which checks the preconditions, runs the test from `apps/arbiter` (an umbrella
    property that keeps the tmux server itself alive (§4.1). It polls (default
    60s) two independent liveness signals and only kills the pane (`tmux
    kill-session`) when **both** fail for the grace window (default 1h,
-   `config :arbiter, :sessions_deadman`): arbiter's own heartbeat file
-   (`Arbiter.Sessions.Heartbeat` touches it periodically; the watchdog reads
+   `config :wardmast, :sessions_deadman`): arbiter's own heartbeat file
+   (`Wardmast.Sessions.Heartbeat` touches it periodically; the watchdog reads
    its mtime, so it needs no connection *to* arbiter, only that one existed at
    some point) and `tmux list-clients` reporting zero attached clients. Either
    signal alone being healthy is enough to hold off — a plain `arbiter`
@@ -549,9 +549,9 @@ which checks the preconditions, runs the test from `apps/arbiter` (an umbrella
    of the script, because the script's whole point is to keep working with
    the BEAM gone entirely.
 4. **CLI fallback (`arb session list` / `arb session attach [--read-only]`,
-   `apps/arbiter_cli/lib/arbiter_cli/cmd/session.ex`).** Reads `systemctl
+   `apps/wardmast_cli/lib/wardmast_cli/cmd/session.ex`).** Reads `systemctl
    --user list-units 'arb-session-*'` and derives the tmux socket path
-   directly — no HTTP, no dependency on the `:arbiter` app, matching the
+   directly — no HTTP, no dependency on the `:wardmast` app, matching the
    RFC's own observation that `arb` itself may be unavailable in exactly the
    scenario this path exists for. `attach` hands the real terminal to `tmux`
    through a `Port.open(..., [:nouse_stdio, ...])` — the child inherits this
@@ -566,7 +566,7 @@ which checks the preconditions, runs the test from `apps/arbiter` (an umbrella
    `systemctl --user stop arbiter` first is the check to run on the live host.
    `XDG_RUNTIME_DIR` unset is a hard `die` naming the real cause (a systemd
    user session, not `/tmp`) rather than deriving a socket path the server
-   side (`Arbiter.Sessions.Naming.runtime_dir/0`) could never itself have
+   side (`Wardmast.Sessions.Naming.runtime_dir/0`) could never itself have
    produced.
 
 ## 5. Transport and protocol (research task 2)
@@ -583,7 +583,7 @@ backpressure, and — importantly — a topic keyed to the session id rather tha
 LiveView process, so a browser reload reattaches to the same session without
 re-mounting terminal state.
 
-`arbiter_web` has **no user socket today** (only `/live` and live-reload), so this
+`wardmast_web` has **no user socket today** (only `/live` and live-reload), so this
 is new but small: one `socket "/session"` entry in `endpoint.ex` plus one channel
 module.
 
@@ -654,14 +654,14 @@ The envelope above contains no provider concept, and this is the whole trick:
 Provider differences live entirely in two places outside the transport:
 
 1. **Launch spec** — argv, env, config dir, per-provider flags. A behaviour
-   (`Arbiter.Sessions.Provider`) with `launch_spec/1`, mirroring how
-   `Arbiter.MCP.AgentConfig` already fans out to per-agent writers.
+   (`Wardmast.Sessions.Provider`) with `launch_spec/1`, mirroring how
+   `Wardmast.MCP.AgentConfig` already fans out to per-agent writers.
 2. **Usage ingestion** — each CLI records usage differently. `agy`/gemini and
    codex have their own on-disk formats (`docs/session-archive.md` notes both
    exist and, unlike Claude Code, are not pruned). The behaviour gains
    `usage_source/1`; §7.6 covers the shape.
 
-`Arbiter.Usage.ClaudeSessionFile`'s moduledoc already states the precedent —
+`Wardmast.Usage.ClaudeSessionFile`'s moduledoc already states the precedent —
 "deliberately Claude-Code-specific — no multi-provider `Provider` behaviour until
 a second provider actually needs one (bd-au3xrq)". This RFC does **not** propose
 building the behaviour now. It proposes not putting provider knowledge in the
@@ -683,7 +683,7 @@ resume is keyed on session id + seq, the number has to be in the bytes:
 <<"ARB1", seq::unsigned-big-64, payload::binary>>
 ```
 
-`Arbiter.Sessions.Frame` prefixes and strips; it never looks at the payload,
+`Wardmast.Sessions.Frame` prefixes and strips; it never looks at the payload,
 which is what keeps a split `\e[1;31m` or a split `🚀` byte-exact. Both
 directions use it — a client's stdin seq is what lets the server drop stdin
 a reconnecting client re-sent, rather than typing it into the pane twice.
@@ -731,7 +731,7 @@ if (code === 1000) socket.reconnectTimer.scheduleTimeout()
 ```
 
 This was found, not reasoned about: the first run of
-`ArbiterWeb.SessionTransportSocketTest` hung at "socket closed at seq 19 (code
+`WardmastWeb.SessionTransportSocketTest` hung at "socket closed at seq 19 (code
 1000)" and never rejoined. Phase 5's hook must carry the same line, and its
 rejoin params must be a **closure** — `phoenix.js` only re-evaluates join
 params that are a function, so an object literal silently resumes from the
@@ -762,14 +762,14 @@ process's send queue, which is where a genuinely slow *network* client's bytes
 would pile up. That is the right first cut — it is the queue the reader can see
 and the one AC 4 asks about — but a socket-level bound is still unbuilt.
 
-Tested headlessly: `Arbiter.Sessions.StreamTest` and
-`ArbiterWeb.SessionChannelTest` run against a scripted PTY that appends to the
+Tested headlessly: `Wardmast.Sessions.StreamTest` and
+`WardmastWeb.SessionChannelTest` run against a scripted PTY that appends to the
 same kind of file tmux writes, so the byte path under test is the real one.
-`Arbiter.Integration.SessionTmuxTest` runs the same operations against a real
+`Wardmast.Integration.SessionTmuxTest` runs the same operations against a real
 tmux server on a scratch socket — cheap enough for the default suite, skipped
 only where tmux is absent.
 
-Tested over a real socket, too. `ArbiterWeb.SessionTransportSocketTest` stands
+Tested over a real socket, too. `WardmastWeb.SessionTransportSocketTest` stands
 the endpoint up on a real port under Bandit and drives it with
 `scripts/verify_session_transport.mjs` — the same `phoenix.js` the dashboard
 ships, run under Node's built-in `WebSocket` (no npm; §6.1). It stops the
@@ -793,7 +793,7 @@ line.
 
 ### 6.1 The constraint nobody expects: there is no npm
 
-`apps/arbiter_web/assets` has **no `package.json` and no `node_modules`**.
+`apps/wardmast_web/assets` has **no `package.json` and no `node_modules`**.
 `config/config.exs:160` runs esbuild directly over `js/app.js`, and third-party JS
 is **vendored** as source (`assets/vendor/topbar.js`, `daisyui.js`, …).
 
@@ -874,14 +874,14 @@ strip on *every* page. `/sessions/:id` no longer exists; see §6.5.
 
 | §6 item | Where it landed |
 |---|---|
-| 6.1 vendor, no npm | `apps/arbiter_web/assets/vendor/xterm/` + `assets/css/xterm.css`, imported from `app.css`. Provenance, digests and upgrade steps in that directory's `README.md`; `ArbiterWeb.TerminalAssetsTest` fails if a `package.json` appears or a version drifts |
+| 6.1 vendor, no npm | `apps/wardmast_web/assets/vendor/xterm/` + `assets/css/xterm.css`, imported from `app.css`. Provenance, digests and upgrade steps in that directory's `README.md`; `WardmastWeb.TerminalAssetsTest` fails if a `package.json` appears or a version drifts |
 | 6.2 canvas, not WebGL | `assets/js/session_terminal.mjs` loads `CanvasAddon`; the same test greps the asset tree for `addon-webgl` |
 | 6.3 interaction | copy/paste, scrollback 5000, the narrow-width floor and the fit debounce, all in `session_terminal.mjs` |
-| the hook | `.SessionTerminal`, colocated in `ArbiterWeb.SessionDockLive` — it moved there from `SessionLive` with the session dock's phase 2 (bd-9myzv8), so the terminal outlives the page the operator opened it from |
+| the hook | `.SessionTerminal`, colocated in `WardmastWeb.SessionDockLive` — it moved there from `SessionLive` with the session dock's phase 2 (bd-9myzv8), so the terminal outlives the page the operator opened it from |
 | the protocol | `assets/js/session_stream.mjs` — DOM-free on purpose (below) |
 | the fit | `assets/js/session_fit.mjs` — DOM-free, replaces `addon-fit` (bd-3r2otb) |
 | copy/paste | `assets/js/session_keys.mjs` — DOM-free (bd-3r2otb) |
-| page chrome | `ArbiterWeb.SessionIndexLive` (the index) and the dock's own window chrome in `ArbiterWeb.SessionDockLive` (everything per-session) |
+| page chrome | `WardmastWeb.SessionIndexLive` (the index) and the dock's own window chrome in `WardmastWeb.SessionDockLive` (everything per-session) |
 
 **The canvas addon pins the terminal version.** Upstream shipped
 `@xterm/xterm@6.0.0` on 2025-12-22 alongside new `addon-webgl`, `addon-search`,
@@ -900,7 +900,7 @@ can tell. Revisit when upstream ships a canvas addon for 6.x.
 that are easy to get subtly wrong — the `last_seq` rejoin closure, duplicate
 suppression on resume, binary stdin framing, the debounced resize — are exactly
 the parts a browser makes untestable. They live in `session_stream.mjs`, which
-`apps/arbiter_web/test/js/session_stream_test.mjs` drives under `node --test`
+`apps/wardmast_web/test/js/session_stream_test.mjs` drives under `node --test`
 and which `scripts/verify_session_transport.mjs` now drives over a real socket
 **instead of reimplementing the protocol a second time**. So §5.5's resume
 proof and §6's browser client are the same code, not two readings of the same
@@ -918,7 +918,7 @@ the hook schedules the reconnect itself. Without it §10.1's headline experience
 `scripts/verify_session_terminal.mjs` bundles the *real* `createSessionTerminal`
 with the esbuild binary the `esbuild` Mix package already installed and runs it
 inside a headless Chromium over the DevTools Protocol — no npm, no Playwright,
-no new dependency. `ArbiterWeb.SessionTerminalBrowserTest` runs it as part of
+no new dependency. `WardmastWeb.SessionTerminalBrowserTest` runs it as part of
 `mix test` wherever a browser is on disk, and skips loudly where one is not.
 Recorded result on the development host (Chrome for Testing 151.0.7922.34):
 
@@ -955,14 +955,14 @@ The clipboard the probe reads is multi-line for exactly this reason, and it
 counts the frames.
 
 Resume is proved separately and end-to-end by
-`ArbiterWeb.SessionTransportSocketTest`, which takes the listener *and* the
+`WardmastWeb.SessionTransportSocketTest`, which takes the listener *and* the
 reader down, keeps writing to the pipe file while both are gone, brings them
 back, and reads the tally off the browser's own engine:
 `RESULT: PASS — frames=3 bytes=55 seq=55 reconnects=1 gaps=0 duplicates=0`.
 
 Narrow widths are a two-part check because they are a two-part claim: the page
 must not scroll sideways (`#session-dock-scroller-<id>` is `overflow-x-auto`,
-asserted in `ArbiterWeb.SessionDockLiveTest`) and the pane must keep a floor
+asserted in `WardmastWeb.SessionDockLiveTest`) and the pane must keep a floor
 width wide enough
 to be a terminal (`min-w-[640px]`, measured at **89 columns** in the browser
 check above).
@@ -990,13 +990,13 @@ the metadata and the cost figure live in a dock window, keeping the page would
 mean two surfaces owning the same controls, and two surfaces that own the same
 control drift. The alternative — a route that still exists but whose controls
 have moved away — is the worst of the three. So the page was deleted along with
-`ArbiterWeb.SessionLive` and its tests; `apps/arbiter_web/lib/arbiter_web/router.ex`
+`WardmastWeb.SessionLive` and its tests; `apps/wardmast_web/lib/wardmast_web/router.ex`
 carries a comment saying why, so it does not come back by accident.
 
 | control | owner |
 |---|---|
-| the terminal, `keep_alive`, Detach, session metadata, ledger cost/tokens, the end reason | the dock window (`ArbiterWeb.SessionDockLive`) |
-| name at launch, the full history, reviewing sessions that ended long ago | `/sessions` (`ArbiterWeb.SessionIndexLive`) |
+| the terminal, `keep_alive`, Detach, session metadata, ledger cost/tokens, the end reason | the dock window (`WardmastWeb.SessionDockLive`) |
+| name at launch, the full history, reviewing sessions that ended long ago | `/sessions` (`WardmastWeb.SessionIndexLive`) |
 | Kill | **both**, deliberately — ending a session is a fleet act and a window act. One implementation: `SessionIndexLive.kill_modal/1`, rendered by both views, and both keep the confirm step |
 | launch | **both**, deliberately (phase 4, bd-cdut29) — the dock roster's **New session** control needs the same launch options without leaving the current page. One implementation: `SessionIndexLive.launch_form/1` and `launch_defaults/1`, rendered/called by both views, so `/sessions`' launch path and the dock's stay a single code path rather than two that can drift |
 
@@ -1041,7 +1041,7 @@ scrollback, drop and re-join the socket, still there, then dismiss.
 its raw PTY capture, so that is what its window shows — read-only, ANSI intact,
 through the same seam a live pane uses rather than a second renderer:
 
-    Arbiter.Sessions.TranscriptReplay.read_tail/2     the bounded tail of the file
+    Wardmast.Sessions.TranscriptReplay.read_tail/2     the bounded tail of the file
       -> SessionChannel join with mode: "transcript"  same topic, no reader started
       -> push "snapshot"                              the same event a live attach sends
       -> SessionStream repaint -> xterm               the same renderer
@@ -1053,7 +1053,7 @@ took it — the session ended longer ago than the retention window),
 `:empty`, and the window names which, links the archived session JSONL when one
 exists, and never renders a blank terminal. A transcript over the replay cap is
 shown as a tail, with "showing last N of M" and a download link to the whole
-file (`ArbiterWeb.SessionTranscriptController`, loopback-only like the socket).
+file (`WardmastWeb.SessionTranscriptController`, loopback-only like the socket).
 That controller serves both of a finished session's artefacts:
 `/sessions/:id/transcript` is the raw PTY capture this section is about, and
 `/sessions/:id/jsonl` is the phase 9 session archive, decompressed — the same
@@ -1139,7 +1139,7 @@ is real and correctly handled.
 
 The schema is already correct. Required changes are small:
 
-1. **Write rows.** New `Arbiter.Sessions.UsageIngest` creates `Usage.Event` with
+1. **Write rows.** New `Wardmast.Sessions.UsageIngest` creates `Usage.Event` with
    `source: :coordinator_session`, `session_id: <arbiter session id>`,
    `task_id: nil`. No migration needed for the discriminator — `:66` already lists
    it.
@@ -1172,7 +1172,7 @@ the HUD does not need 30 Hz.
 **Authoritative (at session end, and periodically).** Re-read the file with
 `read_totals/2` semantics — dedupe by `message.id`, honour `:since` — and write the
 reconciled row. This is the same reconcile-from-disk pattern
-`Arbiter.Usage.ClaudeSessionFile` already exists to perform for crashed workers;
+`Wardmast.Usage.ClaudeSessionFile` already exists to perform for crashed workers;
 sessions are just a longer-lived instance of the same problem.
 
 Two wrinkles the reader already anticipates:
@@ -1196,7 +1196,7 @@ arb usage --session <id>                 # the event detail view, scoped to one 
 `--by session` must show *only* session-sourced rows (`task_id` is nil for them),
 mirroring how `--by task` already "deliberately **excludes**" sessionful sources
 "rather than inventing a phantom task id"
-(`apps/arbiter_cli/lib/arbiter_cli/cmd/usage.ex:32`). Add `session` to the `--by`
+(`apps/wardmast_cli/lib/wardmast_cli/cmd/usage.ex:32`). Add `session` to the `--by`
 list at `:13` and a `session` filter alongside `source:` at `:98`.
 
 With that, the §1 table closes: the $325.78 session appears in `arb usage --by
@@ -1208,12 +1208,12 @@ Items 1–3 of §7.4 and the "authoritative" half of §7.5 are implemented and
 metering today's **CLI** coordinator, ahead of the session lifecycle, transport
 and UI phases. What shipped:
 
-  * `Arbiter.Usage.ClaudeSessionFile` parses `cost-state`, so `read_totals/2`
+  * `Wardmast.Usage.ClaudeSessionFile` parses `cost-state`, so `read_totals/2`
     now returns `cost_usd` / `model_costs` / `duration_ms` alongside the token
-    buckets. Both worker reconciliation paths (`Arbiter.Worker`'s in-process
-    fallback and `Arbiter.Workers.Reconciler`'s boot sweep) write a real dollar
+    buckets. Both worker reconciliation paths (`Wardmast.Worker`'s in-process
+    fallback and `Wardmast.Workers.Reconciler`'s boot sweep) write a real dollar
     figure instead of `nil`.
-  * `Arbiter.Sessions.UsageIngest` sweeps the directories named by
+  * `Wardmast.Sessions.UsageIngest` sweeps the directories named by
     `ARBITER_COORDINATOR_SESSION_DIRS` every 5 minutes and writes
     `source: :coordinator_session` rows. Default is empty — metering someone's
     `~/.claude` is opt-in.
@@ -1255,7 +1255,7 @@ read as a broken parser, which is worse than the gap phase 6 set out to close.
 
 The fix keeps §7.4's "reuse the CLI's number, don't recompute" rule as the
 *first* choice and adds a labelled fallback:
-`Arbiter.Usage.ClaudePricing` prices the deduped token buckets at published
+`Wardmast.Usage.ClaudePricing` prices the deduped token buckets at published
 list rates when — and only when — the file carries no `cost-state`.
 `read_totals/2` reports `cost_source: :cost_state | :estimated | nil`, and
 `cost_note_for/1` gives every writer the matching note, so a derived figure is
@@ -1286,7 +1286,7 @@ with costs.
 
 The two items §7.7 left open are done:
 
-  * **Live HUD tailer.** `Arbiter.Sessions.Stream` — the same one-reader-per-
+  * **Live HUD tailer.** `Wardmast.Sessions.Stream` — the same one-reader-per-
     session process that already fans out terminal bytes (§5.3) — gained a
     second timer (`usage_poll_interval_ms`, default ~2s) that, while at least
     one client is attached, re-reads the session's JSONL with
@@ -1299,7 +1299,7 @@ The two items §7.7 left open are done:
     — see §7.7); `estimated` is `cost_source == :estimated` — true only when
     the figure came from `ClaudePricing`'s token-based estimate, not merely
     "not a `cost-state` record" (a file with no cost at all reports
-    `cost_usd: nil`, `estimated: false`). `ArbiterWeb.SessionChannel` was
+    `cost_usd: nil`, `estimated: false`). `WardmastWeb.SessionChannel` was
     already subscribed to that topic and forwarding it (phase 4's
     placeholder), so no channel change was needed. The hook-owned status strip
     renders a running token/cost chip from it, the same way it already renders
@@ -1318,7 +1318,7 @@ The two items §7.7 left open are done:
     persists the new id) when one exists — the reader closes the gap itself,
     on the next ~2s tick, rather than going dark for the rest of the session.
 
-  * **`arb usage --by session` / `--session <id>`.** `Arbiter.Usage.summarize/1`
+  * **`arb usage --by session` / `--session <id>`.** `Wardmast.Usage.summarize/1`
     gained a `:session` grouping that mirrors `:task`'s discipline exactly:
     rows with no `session_id` are dropped rather than given a phantom group.
     `GET /api/usage/events` gained a `session_id` filter, and `arb usage
@@ -1331,7 +1331,7 @@ The two items §7.7 left open are done:
 
 ### 8.1 The two modes both already exist
 
-`Arbiter.Agents.Claude.ConfigDir` branches on `oauth_token_configured?/1`
+`Wardmast.Agents.Claude.ConfigDir` branches on `oauth_token_configured?/1`
 (`:169`), and `seed_links/1` (`:469`) implements the other side. What is new here
 is **choosing per session** and being explicit about the trade.
 
@@ -1466,7 +1466,7 @@ pre-answered — and the session still stopped twice:
 
 Both gates only fire once the first three are answered, which is why the spike
 never reached them. The MCP one is a plain omission. The bypass warning was a
-consequence of the session inheriting `Arbiter.Agents.SecurityPolicy.default/0`
+consequence of the session inheriting `Wardmast.Agents.SecurityPolicy.default/0`
 — the **headless worker's** posture, which is `bypassPermissions` because a
 `--print` run freezes on a permission prompt nobody can answer. A session has
 somebody at the keyboard, so `auto` is both the correct posture and one that
@@ -1480,9 +1480,9 @@ stream (`docs/monitoring.md`), and the deny only ever made sense for `--print`
 
 ### 9.3 MCP wiring — per-session, revocable
 
-Reuse `Arbiter.MCP.AgentConfig.Claude.write_mcp_config/2`, which writes `.mcp.json`
+Reuse `Wardmast.MCP.AgentConfig.Claude.write_mcp_config/2`, which writes `.mcp.json`
 with `"type" => "http"` pointing at the loopback MCP endpoint
-(`apps/arbiter/lib/arbiter/mcp/agent_config/claude.ex:48`). Unchanged.
+(`apps/wardmast/lib/wardmast/mcp/agent_config/claude.ex:48`). Unchanged.
 
 **It goes in the session's cwd** (`workspace/`), not at the session root. Claude
 Code auto-loads `.mcp.json` from the working directory only, and `launch.sh`
@@ -1496,7 +1496,7 @@ the session row is the natural revocation handle (killing a session revokes its
 token), and per-session tokens make MCP audit rows attributable to the same
 `session_id` the ledger uses. Mint at `--tier coordinator`, with
 `workspace_id: nil` for the cross-workspace default and a bound `workspace_id`
-for the opt-in single-workspace binding (decision 6) — `Arbiter.MCP.Scope` already
+for the opt-in single-workspace binding (decision 6) — `Wardmast.MCP.Scope` already
 models exactly this (`scope.ex:17`).
 
 `can_dispatch` (`scope.ex:20`) is already the documented recursion guardrail and
@@ -1551,7 +1551,7 @@ the seven amendments from its review, is in
 
 **Phase 14 (bd-avt4lt)** adds transcript distillation: a candidate generator,
 never a writer of the shared layer (Amendment 3.5).
-`Arbiter.Sessions.TranscriptDistillation` makes one bounded model pass over an
+`Wardmast.Sessions.TranscriptDistillation` makes one bounded model pass over an
 ended session's archived JSONL (§11). It does not read the raw PTY stream,
 because Claude Code's TUI paints with cursor positioning, so that stream strips
 down to run-together redraws. The model answers in JSON, and Arbiter renders
@@ -1564,7 +1564,7 @@ the same `memory_pending_*` review as a session's own notes.
 Scope (`max_bytes`, `from_turn`) and budget (`max_candidates`,
 `max_output_tokens`, a per-pass `max_cost_usd` that the CLI enforces as
 `--max-budget-usd`, and a rolling `daily_budget_usd` checked before any call)
-come from `config :arbiter, :transcript_distillation`. Each pass is metered on
+come from `config :wardmast, :transcript_distillation`. Each pass is metered on
 its own `usage_events` row (step `transcript_distillation`, source
 `maintenance`), not on the distilled session. The coordinator triggers a pass
 with the `memory_distill` MCP tool, whose bounds can only lower the configured
@@ -1572,17 +1572,17 @@ caps.
 
 ### 9.6 Status — phase 3 shipped (bd-aprlbb, #1684)
 
-Provisioning is wired into `Arbiter.Sessions.launch/1`: the row is written, the
+Provisioning is wired into `Wardmast.Sessions.launch/1`: the row is written, the
 scaffold is built, then the scope starts. A provisioning failure aborts the
 launch and ends the row rather than starting a pane that would hang.
 
 | §9 item | Where it landed |
 |---|---|
-| 9.1 layout | `Arbiter.Sessions.Layout` (pure paths) + `Arbiter.Sessions.Provisioning` (creation) |
-| 9.2 onboarding gates | `Arbiter.Agents.Claude.ConfigDir.Interactive` — merges into `.claude.json` rather than overwriting it, so Claude Code's own state (incl. `bridgeOauth*`) survives a re-provision |
-| 9.3 MCP | `Arbiter.MCP.Scope.mint_session/2`; `.mcp.json` written mode `0600` into the session **cwd** via the existing `AgentConfig.Claude.write_mcp_config/2` |
-| 9.4 memory | phase 3 shipped mount points only. **Phase 12** (bd-6dkpf1) fills them: `Arbiter.Sessions.Memory` mounts `memory/shared/<type>/` read-only by `metadata.type` — `user`/`feedback`/`reference` for every session, `project` filtered to the session's bound workspace, none for a cross-workspace session — reading a flat, frontmatter-tagged `*.md` source dir (`Arbiter.Config.Paths.memory_root/0`). Writes still land only in `memory/candidates/`. Promotion, staleness checking and distillation remain out of scope (§13) |
-| generated instructions | `Arbiter.Sessions.Instructions` |
+| 9.1 layout | `Wardmast.Sessions.Layout` (pure paths) + `Wardmast.Sessions.Provisioning` (creation) |
+| 9.2 onboarding gates | `Wardmast.Agents.Claude.ConfigDir.Interactive` — merges into `.claude.json` rather than overwriting it, so Claude Code's own state (incl. `bridgeOauth*`) survives a re-provision |
+| 9.3 MCP | `Wardmast.MCP.Scope.mint_session/2`; `.mcp.json` written mode `0600` into the session **cwd** via the existing `AgentConfig.Claude.write_mcp_config/2` |
+| 9.4 memory | phase 3 shipped mount points only. **Phase 12** (bd-6dkpf1) fills them: `Wardmast.Sessions.Memory` mounts `memory/shared/<type>/` read-only by `metadata.type` — `user`/`feedback`/`reference` for every session, `project` filtered to the session's bound workspace, none for a cross-workspace session — reading a flat, frontmatter-tagged `*.md` source dir (`Wardmast.Config.Paths.memory_root/0`). Writes still land only in `memory/candidates/`. Promotion, staleness checking and distillation remain out of scope (§13) |
+| generated instructions | `Wardmast.Sessions.Instructions` |
 
 Two decisions worth carrying forward:
 
@@ -1659,10 +1659,10 @@ Layered, because no single one of these is sufficient:
 2. **Worktrees, not the checkout.** Repo work happens in a git worktree created
    under the session root — the same discipline every dispatched worker follows.
 3. **Deny-write on the primary checkout.** `ConfigDir.default_settings_json/0`
-   (`:443`) already renders hardened settings from `Arbiter.Agents.Claude.Security`;
+   (`:443`) already renders hardened settings from `Wardmast.Agents.Claude.Security`;
    extend that policy with a deny rule for writes under the primary `ARB_HOME`
    checkout. Cheap, and catches the accident case. As shipped this lives in
-   `Arbiter.Agents.Claude.ConfigDir.Interactive.settings/1`, over the
+   `Wardmast.Agents.Claude.ConfigDir.Interactive.settings/1`, over the
    interactive profile rather than the worker one (§9.2.1).
 4. **Generated `CLAUDE.md` states it** (§9.1). Belt and braces — the dispatched-
    worker prompt already carries this warning and it demonstrably helps.
@@ -1709,11 +1709,11 @@ Two different artefacts, both wanted, and conflating them is a mistake:
 | Location | `<sessions_root>/<id>/transcript/<id>.raw` | archived by bd-db0p38 |
 
 **Relationship to existing artefacts.** Worker runs already produce
-`<run_id>.log` (`Arbiter.Worker.OutputLog`, rendered, tool results truncated to 40
+`<run_id>.log` (`Wardmast.Worker.OutputLog`, rendered, tool results truncated to 40
 lines) and `worker_runs.output_lines` (1000-line tail). The session raw stream is
 the analogue of the former but **untruncated**, because a coordinator session has
 no run row to summarise into. The JSONL side needs no new machinery at all:
-`Arbiter.Worker.SessionArchive` already archives session JSONLs, keyed by run id
+`Wardmast.Worker.SessionArchive` already archives session JSONLs, keyed by run id
 — it needs a session-keyed entry point, not a new archiver.
 
 **This is not optional plumbing — it is a deadline.** `docs/session-archive.md`
@@ -1744,7 +1744,7 @@ round 2, finding 1). Cutting at *any* separator byte isn't safe either: two of
 the seven patterns aren't unbroken token runs — `Bearer\s+<token>` contains a
 space, and a PEM block spans newlines by construction — so a cut at, say, the
 space inside `Bearer <token>` splits exactly the match it exists to protect
-(bd-5pelo2, round 3, finding 1). Instead `Arbiter.Sessions.Stream` cuts only at
+(bd-5pelo2, round 3, finding 1). Instead `Wardmast.Sessions.Stream` cuts only at
 a **newline**: no supported pattern except the PEM block spans one, so a
 same-line match (including `Bearer <token>`) is always wholly before the cut
 or wholly after it. The PEM block gets its own guard on top — if the
@@ -1754,21 +1754,21 @@ Both are bounded by the same hard cap so a run with no newline at all still
 drains eventually (bd-5pelo2, round 2 finding 1; round 3 finding 1).
 
 **Closed: capture now starts at session launch/adoption, not just first
-attach.** `tmux pipe-pane -O` used to be started by `Arbiter.Sessions.Stream`
+attach.** `tmux pipe-pane -O` used to be started by `Wardmast.Sessions.Stream`
 only on a browser's first attach, so a session nobody ever opened was never
 captured at all. Round 3 attempted the obvious fix (`Stream.ensure_reader/2`,
-called right after `mark_running/1` from both `Arbiter.Sessions.launch/1` and
-`Arbiter.Sessions.Adoption`) and reverted it: `Arbiter.Sessions.Stream`'s
+called right after `mark_running/1` from both `Wardmast.Sessions.launch/1` and
+`Wardmast.Sessions.Adoption`) and reverted it: `Wardmast.Sessions.Stream`'s
 config — including which `Terminal` it uses — used to be fixed by whichever
 call started the reader first, for the reader's whole life, so several
 existing tests (`StreamTurnActivityTest` among them) that launch first and
-only attach with `terminal: Arbiter.Test.ScriptedPty` afterwards broke: the
+only attach with `terminal: Wardmast.Test.ScriptedPty` afterwards broke: the
 eager start locked the reader onto the real `Terminal.Tmux`, and the later
 scripted `attach/2` talked to that already-wrong-terminal reader instead of
 configuring a new one. Round 4 removed that constraint —
 `reconfigure_if_mismatched/2` lets a reader started under one terminal be
 reopened under another, as long as nobody has attached yet — which is what
-makes it safe for `Arbiter.Sessions.start_scope/2` and `Arbiter.Sessions.Adoption`'s
+makes it safe for `Wardmast.Sessions.start_scope/2` and `Wardmast.Sessions.Adoption`'s
 reconcile loop to call `ensure_reader/2` right after `mark_running/1` again
 (bd-5pelo2 round 5 finding 1): the launch-first-attach-with-a-different-terminal
 tests above now pass because the later real `attach/2` reconfigures the eager
@@ -1783,7 +1783,7 @@ appending to it regardless of whether anything is reading) but used to not be
 true of the durable transcript: `open_stream/1` seeks to the pipe file's
 *current* size before adopting it, so whatever the pane wrote between the old
 reader dying and the new one adopting never reached `<id>.raw`.
-`Arbiter.Sessions.Transcript.write_offset/2` (a sidecar file,
+`Wardmast.Sessions.Transcript.write_offset/2` (a sidecar file,
 `<id>.raw.offset`) now persists the last pipe-file position the transcript
 capture actually reached, and `Stream.catch_up_transcript/2` replays
 `old_offset..new_base` through redaction before the reader goes live —
@@ -1823,7 +1823,7 @@ persisting past it would claim those bytes were captured when they were not
    defused by phase 4* (§5.5 item 3): `seq` is a byte offset into the pipe
    file, so a reconnect outside the in-memory ring is still served from the
    file rather than repainted. The numbers are in `config/config.exs` under
-   `Arbiter.Sessions.Stream` and are still guesses.
+   `Wardmast.Sessions.Stream` and are still guesses.
 8. **Multiple browsers on one session.** tmux supports multi-client attach and
    `resize-window` makes size explicit, but two operators on one session will
    fight over dimensions. Suggested: first client owns size, others letterbox.
@@ -1837,7 +1837,7 @@ Each phase is scoped to one child ticket.
 
 | # | Phase | Scope | Pri | Diff |
 |---|---|---|---|---|
-| 1 | **Session lifecycle core** | `sessions` table + `Arbiter.Sessions` context; launch via `systemd-run --user --scope` + tmux; adoption sweep on boot; kill. No UI. Tests assert scope/socket naming and re-adoption. | 1 | 3 |
+| 1 | **Session lifecycle core** | `sessions` table + `Wardmast.Sessions` context; launch via `systemd-run --user --scope` + tmux; adoption sweep on boot; kill. No UI. Tests assert scope/socket naming and re-adoption. | 1 | 3 |
 | 2 | **Restart-survival proof in CI** — *shipped (§4.9)* | An integration test that launches a session, restarts a stand-in unit, and asserts survival + gapless replay — the §4.2 spike as a regression test. Cheap, and protects the one property everything else assumes. | 1 | 2 |
 | 3 | **Provisioning scaffold** | `arb init`-style per-session layout (§9.1); pre-seed the three onboarding gates (§9.2); `ConfigDir` interactive variant; `.mcp.json` + per-session scope token; mode A/B selection. | 1 | 3 |
 | 4 | **Transport** — *shipped (§5.5)* | Socket + channel, full envelope (§5.2), seq ring, resume, backpressure. Tested headlessly against a scripted PTY — no browser needed. | 1 | 3 |
@@ -1850,7 +1850,7 @@ Each phase is scoped to one child ticket.
 | 11 | **Pre-launch UI** | The §9.5 option set; guardrail defaults (`can_dispatch` off). | 3 | 2 |
 | 12 | **Memory candidate space** — *shipped (§9.6)* | Type-scoped mounts + per-session candidate dir (§9.4) — scaffold only. | 2 | 2 |
 | 13 | **Memory promotion + staleness checker** | *Separate ticket.* Promotion queue (`loop_pending_list`/`loop_pending_apply` as UI precedent), `file:line` verification, quarantine-not-serve. | 3 | 4 |
-| 14 | **Transcript distillation** — *shipped (§9.4, bd-avt4lt)* | Candidate generator only, never a direct writer (Amendment 3.5): `Arbiter.Sessions.TranscriptDistillation`, triggered by the `memory_distill` MCP tool. Depends on 9 + 13. | 4 | 4 |
+| 14 | **Transcript distillation** — *shipped (§9.4, bd-avt4lt)* | Candidate generator only, never a direct writer (Amendment 3.5): `Wardmast.Sessions.TranscriptDistillation`, triggered by the `memory_distill` MCP tool. Depends on 9 + 13. | 4 | 4 |
 
 Phases 1–2 are the spine: if restart survival regresses, nothing else is worth
 having. Phases 13–14 are deliberately outside this RFC per Amendment 3's scope
@@ -1860,26 +1860,26 @@ note.
 
 | Existing code | `file:line` | Disposition | Why |
 |---|---|---|---|
-| `Usage.Event` `@sources` (incl. `:coordinator_session`) | `apps/arbiter/lib/arbiter/usage/event.ex:66` | **Reused as-is** | #1596 already added the discriminator; `:45` names this ticket as its writer. No migration. |
+| `Usage.Event` `@sources` (incl. `:coordinator_session`) | `apps/wardmast/lib/wardmast/usage/event.ex:66` | **Reused as-is** | #1596 already added the discriminator; `:45` names this ticket as its writer. No migration. |
 | `Usage.Event` `source` attribute | `…/usage/event.ex:130` | **Reused as-is** | Constraint already admits our value. |
 | `Usage.Event` `session_id` attribute | `…/usage/event.ex:210` | **Reused as-is**, + one index | Attribution key. Add `[:session_id]` index for `--by session` (§7.4). |
 | `Usage.Event` cache-token + `cost_note` attributes | `…/usage/event.ex:176`, `:180`, `:189` | **Reused as-is** | Cache-write/cache-read split already modelled — do not reinvent the pricing arithmetic (§7.4). `cost_note` carries `hasUnknownModelCost` (§12.6). |
 | `ClaudeSessionFile.locate/2` | `…/usage/claude_session_file.ex:117` | **Reused as-is** | Globs `projects/*/<sid>.jsonl` under a config dir — exactly the per-session lookup. |
 | `ClaudeSessionFile.read_totals/2` | `…/usage/claude_session_file.ex:148` | **Extended** | Dedupe-by-`message.id` and `:since` windowing are correct and load-bearing (§7.5). Extend to parse `cost-state` for `totalCostUSD`/`modelUsage` — its moduledoc's "no per-turn dollar figure" is true of `assistant` lines but **false of the file** (§7.4). Benefits worker reconciliation too. |
-| `ConfigDir.oauth_token_configured?/1` (mode A branch) | `apps/arbiter/lib/arbiter/agents/claude/config_dir.ex:169` | **Reused as-is** | Already the mode-A predicate; becomes a per-session choice rather than a global one (§8.1). |
+| `ConfigDir.oauth_token_configured?/1` (mode A branch) | `apps/wardmast/lib/wardmast/agents/claude/config_dir.ex:169` | **Reused as-is** | Already the mode-A predicate; becomes a per-session choice rather than a global one (§8.1). |
 | `ConfigDir.seed_links/2` (mode B branch) | `…/agents/claude/config_dir.ex:469` | **Reused as-is** | Copies (never symlinks) `.credentials.json` — the correct posture, and mode B is now the default (§8.2). |
 | `ConfigDir.default_settings_json/0` | `…/agents/claude/config_dir.ex:443` | **Extended** | Writes hardened `settings.json`; extend the policy with a deny-write rule for the primary checkout (§10.2). |
 | `ConfigDir.env/1` | `…/agents/claude/config_dir.ex:151` | **Reused as-is** | `CLAUDE_CONFIG_DIR` injection is exactly the isolation mode B still provides (§8.2). |
 | *(no existing analogue)* — `.claude.json` onboarding/trust seeding | — | **New** | Workers use `--print` and never hit the interactive gates; sessions block on all three (§9.2). |
-| `MCP.AgentConfig.Claude.write_mcp_config/2` (`"type" => "http"`) | `apps/arbiter/lib/arbiter/mcp/agent_config/claude.ex:48` | **Reused as-is** | Per-session `.mcp.json` is the per-spawn case with a different token (§9.3). |
-| `MCP.Scope` tiers / `can_dispatch` | `apps/arbiter/lib/arbiter/mcp/scope.ex:17`, `:20` | **Reused as-is** | Already models workspace-agnostic coordinator tokens (decision 6) and the dispatch-recursion guardrail (§10.1). |
-| `ClaudeSession.open_port/1` (`Port.open`, `--print`) | `apps/arbiter/lib/arbiter/worker/claude_session.ex:1313` | **Not reused — parallel path** | Port-based, non-interactive, BEAM-owned: no PTY (so no TUI), and BEAM-owned lifetime fails restart survival (§4.4). Worker dispatch keeps it unchanged; sessions take the systemd+tmux path. Its env-injection discipline (`:1354`) is still the reference for §10.3. |
-| `Worker.record_usage_event/3` | `apps/arbiter/lib/arbiter/worker.ex:1414` | **Pattern reused, not the code** | Parses the `--print` terminal `result` event, which an interactive session never emits. Sessions use JSONL ingest (§7.1); the ledger-write shape is the model to copy. |
+| `MCP.AgentConfig.Claude.write_mcp_config/2` (`"type" => "http"`) | `apps/wardmast/lib/wardmast/mcp/agent_config/claude.ex:48` | **Reused as-is** | Per-session `.mcp.json` is the per-spawn case with a different token (§9.3). |
+| `MCP.Scope` tiers / `can_dispatch` | `apps/wardmast/lib/wardmast/mcp/scope.ex:17`, `:20` | **Reused as-is** | Already models workspace-agnostic coordinator tokens (decision 6) and the dispatch-recursion guardrail (§10.1). |
+| `ClaudeSession.open_port/1` (`Port.open`, `--print`) | `apps/wardmast/lib/wardmast/worker/claude_session.ex:1313` | **Not reused — parallel path** | Port-based, non-interactive, BEAM-owned: no PTY (so no TUI), and BEAM-owned lifetime fails restart survival (§4.4). Worker dispatch keeps it unchanged; sessions take the systemd+tmux path. Its env-injection discipline (`:1354`) is still the reference for §10.3. |
+| `Worker.record_usage_event/3` | `apps/wardmast/lib/wardmast/worker.ex:1414` | **Pattern reused, not the code** | Parses the `--print` terminal `result` event, which an interactive session never emits. Sessions use JSONL ingest (§7.1); the ledger-write shape is the model to copy. |
 | Claude Code `cost-state` / `usage` / `bridge-session` JSONL records | `<config>/projects/<slug>/<sid>.jsonl` (samples in §7.2) | **New consumer of an existing format** | The metering substrate and the bridge-verification signal (§8.3). |
-| `Worker.SessionArchive` | `apps/arbiter/lib/arbiter/worker/session_archive.ex:181`, `:137` | **Extended** | Already archives session JSONLs incl. a subagents dir, keyed by run id; needs a session-keyed entry point (§11). |
-| `arb usage` `--by` / `--source` | `apps/arbiter_cli/lib/arbiter_cli/cmd/usage.ex:13`, `:19`, `:32` | **Extended** | `--by source` and `--source coordinator_session` already exist; add `session` (§7.6), following the documented "`--by task` excludes sessionful sources" precedent. |
-| `.LogStreamStick` colocated hook | `apps/arbiter_web/lib/arbiter_web/components/core_components/domain.ex:578` | **Pattern reused** | The repo's precedent for a hook owning scroll behaviour on live output (§6.3). |
-| esbuild config / vendored JS | `config/config.exs:160`; `apps/arbiter_web/assets/vendor/`, `js/app.js:26` | **Reused as-is** | No `package.json` exists; xterm is vendored like `topbar` (§6.1). |
+| `Worker.SessionArchive` | `apps/wardmast/lib/wardmast/worker/session_archive.ex:181`, `:137` | **Extended** | Already archives session JSONLs incl. a subagents dir, keyed by run id; needs a session-keyed entry point (§11). |
+| `arb usage` `--by` / `--source` | `apps/wardmast_cli/lib/wardmast_cli/cmd/usage.ex:13`, `:19`, `:32` | **Extended** | `--by source` and `--source coordinator_session` already exist; add `session` (§7.6), following the documented "`--by task` excludes sessionful sources" precedent. |
+| `.LogStreamStick` colocated hook | `apps/wardmast_web/lib/wardmast_web/components/core_components/domain.ex:578` | **Pattern reused** | The repo's precedent for a hook owning scroll behaviour on live output (§6.3). |
+| esbuild config / vendored JS | `config/config.exs:160`; `apps/wardmast_web/assets/vendor/`, `js/app.js:26` | **Reused as-is** | No `package.json` exists; xterm is vendored like `topbar` (§6.1). |
 | `Quota.worker_base_url/1` / metering proxy | *removed in #1605* | **Gone — deliberately not cited** | Per Amendment 4. §7.3 records why re-adding it loses to JSONL ingestion. |
 
 ## 15. Refine sessions (bd-cksar2)
@@ -1898,7 +1898,7 @@ together. Everything above still applies — this section is only the deltas.
 | Model | whatever the CLI picks | the workspace's `premium` tier model at thinking `high` (`--effort high`, or whatever the workspace's `agent.config["thinking_argv"]` remaps that level to) — never flagship, and the routing policies are never consulted |
 
 The **checkout** is the one new thing on disk, and it is deliberately the
-weakest thing that serves reading (`Arbiter.Sessions.RepoCheckout`):
+weakest thing that serves reading (`Wardmast.Sessions.RepoCheckout`):
 
   * Detached at the tip of the repo's default branch, resolved locally with
     `rev-parse` — never fetched. An interactive launch must not hang on the

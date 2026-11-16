@@ -1,0 +1,239 @@
+defmodule WardmastCli.Cmd.ResumeTest do
+  use WardmastCli.CliCase, async: false
+
+  # bd-1z7624: `arb worker resume` (and the top-level `arb resume` alias) route
+  # through the worker subcommand dispatcher to POST /api/workers/:task_id/resume.
+  # These drive the real wired path — WardmastCli.Cmd.Worker.run(["resume", ...]).
+  defp run_resume(args), do: WardmastCli.Cmd.Worker.run(["resume" | args])
+
+  describe "arb worker resume" do
+    test "missing task-id fails with usage hint" do
+      {_out, err, code} = capture(fn -> run_resume([]) end)
+      assert err =~ "worker resume requires"
+      assert code != 0
+    end
+
+    test "too many positional args fails" do
+      {_out, err, code} = capture(fn -> run_resume(["a", "b", "c"]) end)
+      assert err =~ "at most"
+      assert code != 0
+    end
+
+    test "happy path posts to /api/workers/:task_id/resume and renders text" do
+      stub_post(
+        "/api/workers/bd-1z7624/resume",
+        %{
+          "task" => %{"id" => "bd-1z7624", "title" => "resume cmd", "state" => "active"},
+          "worker" => %{"task_id" => "bd-1z7624", "pid" => "#PID<0.123.0>"},
+          "machine" => %{"id" => "mc-1", "pid" => "#PID<0.124.0>"},
+          "worktree_path" => "/wt/feature-bd-1z7624",
+          "claude_started" => true
+        }
+      )
+
+      {out, _err, code} = capture(fn -> run_resume(["bd-1z7624"]) end)
+      assert code == 0
+      assert out =~ "Resume:"
+      assert out =~ "bd-1z7624 — resume cmd"
+      assert out =~ "(reused)"
+      assert out =~ "resumed"
+    end
+
+    test "--json mode emits JSON" do
+      stub_post("/api/workers/bd-1/resume", %{
+        "task" => %{"id" => "bd-1", "title" => "t", "state" => "active"},
+        "worker" => %{"task_id" => "bd-1", "pid" => "x"},
+        "machine" => %{"id" => "m", "pid" => "y"}
+      })
+
+      {out, _err, code} = capture(fn -> run_resume(["bd-1", "--json"]) end)
+      assert code == 0
+      assert {:ok, decoded} = Jason.decode(out)
+      assert decoded["task"]["id"] == "bd-1"
+    end
+
+    test "uses a receive timeout well past the default so a slow spawn is not a client timeout" do
+      test_pid = self()
+
+      adapter = fn request ->
+        send(test_pid, {:receive_timeout, request.options[:receive_timeout]})
+        {request, Req.Response.new(status: 202, body: %{"task" => %{"id" => "bd-1"}})}
+      end
+
+      Process.put(:bd2_req_options, adapter: adapter, retry: false)
+
+      {_out, _err, code} = capture(fn -> run_resume(["bd-1", "--json"]) end)
+      assert code == 0
+      assert_received {:receive_timeout, timeout}
+      assert timeout > 60_000
+    end
+
+    test "a genuine transport timeout is still an error" do
+      Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+        Req.Test.transport_error(conn, :timeout)
+      end)
+
+      {_out, err, code} = capture(fn -> run_resume(["bd-1"]) end)
+      assert code != 0
+      assert err =~ "timed out"
+    end
+
+    test "error response propagates as die" do
+      stub_post(
+        "/api/workers/bd-x/resume",
+        %{
+          "error" => %{
+            "type" => "invalid_request",
+            "message" => "no prior Claude session recorded for this task"
+          }
+        },
+        422
+      )
+
+      {_out, err, code} = capture(fn -> run_resume(["bd-x"]) end)
+      assert code != 0
+      assert err =~ "session" || err =~ "422"
+    end
+
+    test "repo and --model forward in the request body" do
+      parent = self()
+      name = Process.get(:bd2_stub_name)
+
+      Req.Test.stub(name, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", "/api/workers/bd-9/resume"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(parent, {:body, Jason.decode!(body)})
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{
+              "task" => %{"id" => "bd-9", "title" => "t", "state" => "active"},
+              "worker" => %{"task_id" => "bd-9", "pid" => "x"},
+              "machine" => %{"id" => "m", "pid" => "y"}
+            })
+
+          _ ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{error: "unmatched"})
+        end
+      end)
+
+      {_out, _err, code} =
+        capture(fn -> run_resume(["bd-9", "my/repo", "--model", "opus"]) end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["repo"] == "my/repo"
+      assert body["model"] == "opus"
+      refute Map.has_key?(body, "force")
+    end
+
+    # bd-92mx1m: a task that released its slot, at a full cap, is refused with a
+    # 409 naming the cap and the holders; `--force` goes over it (recorded
+    # server-side).
+    test "--force forwards force: true in the request body" do
+      parent = self()
+      name = Process.get(:bd2_stub_name)
+
+      Req.Test.stub(name, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:body, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{
+          "task" => %{"id" => "bd-9", "title" => "t", "state" => "active"},
+          "worker" => %{"task_id" => "bd-9", "pid" => "x"},
+          "machine" => %{"id" => "m", "pid" => "y"}
+        })
+      end)
+
+      {_out, _err, code} = capture(fn -> run_resume(["bd-9", "--force"]) end)
+
+      assert code == 0
+      assert_receive {:body, %{"force" => true}}
+    end
+
+    # bd-a9hqfb: the quota-bypass rationale and the opt-in briefing mode reach
+    # the server, which attributes and applies them (Dispatch.Params).
+    test "--force-quota-reason and --mode forward in the request body" do
+      parent = self()
+      name = Process.get(:bd2_stub_name)
+
+      Req.Test.stub(name, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:body, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{
+          "task" => %{"id" => "bd-9", "title" => "t", "state" => "active"},
+          "worker" => %{"task_id" => "bd-9", "pid" => "x"},
+          "machine" => %{"id" => "m", "pid" => "y"}
+        })
+      end)
+
+      {_out, _err, code} =
+        capture(fn ->
+          run_resume([
+            "bd-9",
+            "--force-quota",
+            "--force-quota-reason",
+            "unblock release",
+            "--mode",
+            "briefing"
+          ])
+        end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["force_quota"] == true
+      assert body["force_quota_reason"] == "unblock release"
+      assert body["mode"] == "briefing"
+    end
+
+    test "without --mode no mode is sent, so the server default (session) applies" do
+      parent = self()
+      name = Process.get(:bd2_stub_name)
+
+      Req.Test.stub(name, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:body, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{
+          "task" => %{"id" => "bd-9", "title" => "t", "state" => "active"},
+          "worker" => %{"task_id" => "bd-9", "pid" => "x"},
+          "machine" => %{"id" => "m", "pid" => "y"}
+        })
+      end)
+
+      {_out, _err, code} = capture(fn -> run_resume(["bd-9"]) end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      refute Map.has_key?(body, "mode")
+    end
+
+    test "a full-cap refusal surfaces the server's message" do
+      stub_post(
+        "/api/workers/bd-a/resume",
+        %{
+          "error" => %{
+            "type" => "conflict",
+            "message" =>
+              "no free worker slot to resume bd-a: the concurrency cap is 1 and 1 held by bd-b.",
+            "details" => %{"cap" => 1, "holders" => ["bd-b"]}
+          }
+        },
+        409
+      )
+
+      {_out, err, code} = capture(fn -> run_resume(["bd-a"]) end)
+      assert code != 0
+      assert err =~ "cap is 1"
+      assert err =~ "bd-b"
+    end
+  end
+end

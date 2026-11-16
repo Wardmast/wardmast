@@ -1,0 +1,279 @@
+<% _ = assigns %>
+# Coordinator Operator Field Guide
+
+Hard-won operating knowledge for the coordinator seat. Generic — applies to
+any Wardmast install. Update it as you learn.
+
+Run `arb prime` at the start of every session. Deep, situational runbooks
+live in `docs/` — this guide stays short on purpose; it points there rather
+than inlining everything.
+
+**MCP first.** Every example below shows the `mcp__arbiter__*` tool call as
+the primary form, with the `arb` CLI equivalent noted alongside it as a
+fallback for when a session has no MCP connection. Where a CLI verb has no
+MCP equivalent yet, that's called out explicitly rather than left implicit.
+
+This preference is yours, not the operator's — they only have a terminal.
+If a section here is telling the operator to do something themselves rather
+than describing what you should do, give them the CLI form.
+
+---
+
+## 1. Role & Loop
+
+You coordinate; the fleet executes. Core loop:
+
+1. File a ticket with crisp acceptance criteria, difficulty, and priority
+   (`mcp__arbiter__ticket_create`; CLI: `arb ticket create`).
+2. Dispatch to a repo (`mcp__arbiter__worker_dispatch(task_id, repo,
+   provider: "claude")`; CLI: `arb ticket dispatch <id> [<repo>] --provider
+   claude`).
+3. Monitor — `mcp__arbiter__worker_list` (CLI: `arb worker list`), `arb
+   prime` (composite session briefing, CLI-only — no single MCP
+   equivalent), or a persistent event-stream monitor (`docs/monitoring.md`).
+   `arb worker show <task-id>` (full worker detail + output) has **no MCP
+   equivalent yet** — that's a real gap, not an oversight; fall back to the
+   CLI for it.
+
+   For **live** event streaming (not polling), see
+   `runbooks/arbiter-event-monitor.md` — "**the arbiter event monitor**"
+   (the `/events` tail). Distinct from this `arb prime` step and from the
+   internal `monitor` component.
+4. ReviewGate (pre-merge review gate) escalates for your judgment; decide,
+   don't rubber-stamp (`docs/reviewgate.md`).
+5. Merge and close the ticket (`mcp__arbiter__ticket_close`; CLI: `arb ticket
+   close`) — or let close-on-merge handle it.
+
+External comms (GitHub, Slack) stay in normal professional voice.
+
+## 2. Operating Pitfalls — Quick Reference
+
+The pitfalls that burn a coordinator most often. Check these first; each
+links to the runbook with the full story.
+
+- [ ] **Concurrency** — keep parallel tickets FILE-DISJOINT. Tickets that touch
+      the same file (especially a CLI verb list, command-alias map, or
+      router) **will collide at merge**. Serialize those tickets.
+- [ ] **Config** — use `mcp__arbiter__workspace_config_get` /
+      `workspace_config_set` / `workspace_config_unset` (CLI:
+      `arb config get/set/unset`) only. **Never** send partial config via
+      raw API PATCH — it replaces the whole map and **silently clobbers**
+      siblings (`repo_paths`, tracker, merge config).
+- [ ] **Deploy** — before restarting the server, check for active workers
+      (`mcp__arbiter__worker_list`; CLI: `arb worker list`). **Restarting
+      kills all in-flight workers and abandons their work.** See
+      `docs/deploy.md`.
+- [ ] **Freshness** — worktrees are cut from a freshly-fetched base branch at
+      dispatch time. A pre-dispatch `git pull` of your local checkout is
+      usually redundant; a **resumed** worktree can still sit on a stale base.
+- [ ] **Verify** — a worker can show "running" while its subprocess is dead.
+      Check the port/log, not just status. A PR marked CLEAN/MERGEABLE means
+      no merge conflict, **not** an empty diff. See `docs/worktrees-and-workers.md`.
+- [ ] **ReviewGate** — read the full implementer↔reviewer transcript before
+      deciding. Do not assume the worst on a stalled exchange; do not
+      rubber-stamp because a round ran. **Decide for yourself.**
+- [ ] **Quota vs. rate-limit** — "overloaded" at low quota usage is usually an
+      Anthropic-side capacity issue on the premium model, not your rate limit.
+      Check the quota gauge first (`mcp__arbiter__quota_get`; CLI: `arb
+      quota`). See `docs/quota-and-auth.md`.
+
+## 3. Ticket Intake — Claim & Create
+
+When taking in new tickets locally, **always set difficulty immediately
+after intake**. Both intake paths create tickets without prompting for
+difficulty, and the field defaults to unset. Difficulty drives the model
+tier and thinking budget — set it before dispatching to avoid under-scoped
+work.
+
+MCP first:
+
+```
+# Option A: Claim an existing upstream issue
+mcp__arbiter__tracker_claim(ref: "42")
+mcp__arbiter__ticket_update(id: "<id>", difficulty: <n>)
+
+# Option B: Create a new local ticket
+mcp__arbiter__ticket_create(title: "Fix widget crash on startup", description: "...")
+mcp__arbiter__ticket_update(id: "<id>", difficulty: <n>)
+```
+
+CLI fallback:
+
+```bash
+# Option A: Claim an existing upstream issue
+arb ticket claim 42
+arb ticket update <id> --difficulty <n>
+
+# Option B: Create a new local ticket
+arb ticket create "Fix widget crash on startup" --description "..."
+arb ticket update <id> --difficulty <n>
+```
+
+Difficulty scale (D0–D5):
+
+```
+D0 Trivial  — single-file, fully specified, no judgment (typo, config, doc edit)
+D1 Simple   — localized, clear approach, light reasoning; follows existing pattern
+D2 Moderate — multi-file or some design choice (default if omitted by coordinator)
+D3 Hard     — cross-cutting, non-obvious design, correctness-critical
+D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass
+D5 Flagship — a deliberate escalation, never an ordinary rating: work judged
+              worth a full quota window on the flagship model. Reach for it
+              only when D4 (premium model, max effort) has already failed or
+              is plainly inadequate. "Harder than D4" is not a reason.
+```
+
+D5 is opt-in by design — it has to be typed. One measured D4 flagship run
+consumed an entire 5h quota window in ~12 minutes for $19.62 and answered one
+of six questions before being cut off, which is why the tier now sits behind a
+level nothing rates automatically: trackers, story-point buckets and the
+autonomous loop all stop at D4.
+
+## 4. File Tickets Well
+
+- **Crisp acceptance criteria** — reference real files and line numbers.
+- **DIFFICULTY (D0–D5)** — drives the model + thinking budget routed to the
+  worker.
+- **PRIORITY (P0–P4)** — drives scheduling urgency.
+- They are **orthogonal** — a P0 can be D0 (trivial config bump); a P3 can be
+  D4 (hard architectural change). Do not conflate them.
+- Set `target_branch` when it is not the workspace default.
+
+Drop a one-line difficulty justification in the description so reviewers can
+sanity-check your call. Both `mcp__arbiter__ticket_create` and `arb ticket
+create` accept difficulty/priority inline — no follow-up update needed at
+filing time.
+
+## 5. Concurrency Discipline
+
+Parallel workers are good. **Keep concurrent tickets FILE-DISJOINT.**
+
+Tickets that touch the same file — especially the CLI verb list,
+command-alias map, or the router — **will collide at merge**. An
+auto-conflict-resolver may help, but do not rely on it. Serialize those
+tickets: `conflicts_with` as a mutex, plus a `depends_on` chain for order
+(`mcp__arbiter__dep_add`; CLI: `arb dep add`).
+
+## 6. Freshness
+
+Workers branch from the repo's base branch. Provisioning fetches from origin
+at dispatch time, so a fresh worker always starts on current upstream — a
+pre-dispatch `git pull` of your local checkout is usually redundant. A
+**resumed** worktree is the exception: it can sit on an older base. Inspect
+against the workspace's real base branch (forks vary — some are cut from
+`main`, others from `development` or a release branch); use
+`git log $(git merge-base origin/<base> HEAD)..HEAD`, not a hardcoded
+`<base>..HEAD`, so a wrong guess doesn't mask real committed work. (Plain
+`git` — no MCP equivalent, and none needed.)
+
+## 7. Config Safety
+
+Workspace config is a single JSON map stored in the database.
+
+**NEVER** send a partial config via the raw API PATCH — it replaces the whole
+map and **silently clobbers** siblings (`repo_paths`, tracker, merge config).
+
+**Use `mcp__arbiter__workspace_config_get` / `workspace_config_set` /
+`workspace_config_unset` (deep-merge) — CLI fallback: `arb config
+get/set/unset`.** Never anything else.
+
+## 8. Deploy Safely
+
+Restarting the server **kills all in-flight workers** and abandons their
+work. Before restarting or deploying:
+
+1. Check for active workers (`mcp__arbiter__worker_list`; CLI: `arb worker
+   list`).
+2. If any are running, wait for them to finish — or explicitly stop them
+   first (`mcp__arbiter__worker_stop`; CLI: `arb worker stop`).
+3. Never restart mid-flight as a shortcut.
+
+The full deploy runbook (release cut, `arb server deploy`, migration
+gotchas, verifying a deploy actually landed) is in `docs/deploy.md` — deploy
+itself is CLI/infra-only, no MCP equivalent.
+
+## 9. Trust State, But Verify
+
+- A worker can show "running" while its subprocess is dead — check the port
+  or log, not just status.
+- A PR marked CLEAN/MERGEABLE means no merge conflict, **not** an empty diff.
+  Read the real `git diff origin/<base>...<branch> --stat` before calling
+  work "empty" or "failed".
+- Close-on-merge can miss on out-of-band merges — close the ticket manually
+  if it stalls (`mcp__arbiter__ticket_close`; CLI: `arb ticket close`).
+- A server restart wipes in-memory worker registrations (idle shells vanish);
+  persisted tickets survive.
+
+More on diagnosing a stuck or misbehaving worker: `docs/worktrees-and-workers.md`.
+
+## 10. ReviewGate
+
+The pre-merge review gate. After the round cap it escalates for **your**
+judgment.
+
+Read the full implementer↔reviewer transcript before deciding. Do not assume
+the worst on a stalled exchange; do not rubber-stamp because a round ran.
+Decide for yourself. Edge cases (self-approval blocks, "empty branch"
+verdicts that aren't actually empty, gate-failed tickets with a live mergeable
+PR) are in `docs/reviewgate.md`.
+
+## 11. Watch Efficiently
+
+Run a persistent event-stream monitor instead of polling on a fixed
+interval — it wakes only on real state changes and doesn't burn tokens
+re-reading context on every tick. Setup, gotchas, and the reconnect loop are
+in `docs/monitoring.md` (the event stream itself is a raw HTTP connection,
+not an MCP tool call — token minting stays CLI-only: `arb mcp token mint`).
+
+## 12. Provider-Agnostic
+
+Never hardcode model names. Route via abstract tiers:
+
+| Tier | Use |
+|------|-----|
+| economy | Cheap, fast, simple tickets |
+| standard | Most tickets (default) |
+| premium | Hard / correctness-critical work |
+
+Plus thinking budget: `none / low / medium / high`. Resolved per adapter at
+dispatch time.
+
+**Verify CLI flags against the installed agent CLI version** — a wrong flag
+crashes the worker at launch with no useful error.
+
+Agent-CLI auth and quota gotchas (silent 401 batches, 529-vs-429 confusion)
+are in `docs/quota-and-auth.md`.
+
+## 13. Review Capability
+
+`mcp__arbiter__worker_review` (CLI: `arb worker review <task-id>`) reviews a
+PR/MR tracker-side: fetches the diff and posts findings + verdict via the
+configured tracker API. The PR author needs **no** Wardmast setup.
+
+For a review with the tracker issue's acceptance criteria in context, prefer
+a **local** ticket (`tracker_type: none`) with the criteria pasted in and
+`pr_ref` set, then review that ticket — full context, zero upstream write-back.
+Never claim a coworker's tracker issue just to get a review ticket;
+`tracker_claim` is assignment-as-claim and risks writing back to their
+upstream issue.
+
+## 14. Lanes & Merge Posture
+
+Use **separate workspaces** for separate concerns (self-dev vs. company
+repos).
+
+| Lane | `auto_merge` | Why |
+|------|-------------|-----|
+| Company / shared | OFF | A human merges |
+| Self-dev / experimental | ON | Safe to automate |
+
+One repo can merge differently from the rest of its workspace without a
+workspace of its own: `merge.repos.<repo>` overrides any `merge` key for that
+`repo_paths` repo, falling back field by field (e.g. a remote-less local repo
+in a GitHub workspace: `arb config set merge.repos.<repo>.strategy direct`).
+`arb server doctor`'s **merge routing** check flags a repo whose forge strategy
+its checkout's `origin` cannot carry.
+
+---
+
+_Generated by `arb init`. Generic — not operator-personal. Edit freely._

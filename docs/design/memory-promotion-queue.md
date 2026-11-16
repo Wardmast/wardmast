@@ -18,14 +18,14 @@ is definite.
 
 | Module | Role |
 |---|---|
-| `Arbiter.Sessions.Memory.Promotion` | The queue: list, diff, promote, reject candidates |
-| `Arbiter.Sessions.Memory.Staleness` | Verifies a memory's pointers and returns a verdict. Pure judgement: it moves nothing |
-| `Arbiter.Sessions.Memory.Checker` | Background process that runs the checks off the mount path, stores verdicts and quarantines stale memories |
-| `Arbiter.Sessions.Memory.Verdicts` | One persisted verdict per shared memory |
-| `Arbiter.Sessions.Memory.Quarantine` | Quarantine by directory move; list; restore after re-verification |
-| `Arbiter.Sessions.Memory` (phase 12) | `mount/2` serves only memories whose stored verdict allows it |
-| `Arbiter.Sessions.Memory.Frontmatter`, `.Citations` | Frontmatter edits that keep string keys and the original layout; pointer extraction |
-| `Arbiter.MCP.Tools.MemoryPending` | The six MCP tools (§6) |
+| `Wardmast.Sessions.Memory.Promotion` | The queue: list, diff, promote, reject candidates |
+| `Wardmast.Sessions.Memory.Staleness` | Verifies a memory's pointers and returns a verdict. Pure judgement: it moves nothing |
+| `Wardmast.Sessions.Memory.Checker` | Background process that runs the checks off the mount path, stores verdicts and quarantines stale memories |
+| `Wardmast.Sessions.Memory.Verdicts` | One persisted verdict per shared memory |
+| `Wardmast.Sessions.Memory.Quarantine` | Quarantine by directory move; list; restore after re-verification |
+| `Wardmast.Sessions.Memory` (phase 12) | `mount/2` serves only memories whose stored verdict allows it |
+| `Wardmast.Sessions.Memory.Frontmatter`, `.Citations` | Frontmatter edits that keep string keys and the original layout; pointer extraction |
+| `Wardmast.MCP.Tools.MemoryPending` | The six MCP tools (§6) |
 
 On disk:
 
@@ -91,13 +91,13 @@ what every future session reads. All six tools are coordinator-tier in the
 catalog, and the three writes additionally require a **plain** coordinator
 token: one used by the coordinator itself or by the operator's tooling. A
 browser-hosted session's token is coordinator-tier too
-(`Arbiter.MCP.Scope.mint_session/2`) but carries a `session_id`, and the writes
+(`Wardmast.MCP.Scope.mint_session/2`) but carries a `session_id`, and the writes
 refuse it, as they refuse worker and refine tokens (`RefinePolicy` denies all
 six tools). Session tokens may still use the three read tools.
 
 ## 3. Verification rules
 
-`Arbiter.Sessions.Memory.Staleness` extracts pointers from a memory's body and
+`Wardmast.Sessions.Memory.Staleness` extracts pointers from a memory's body and
 `description`, then checks them according to the memory's type:
 
 | Type | `file:line` | modules | ticket ids | URLs |
@@ -183,8 +183,8 @@ only if that verdict was made for the memory's exact current bytes and is not
 the checker. The cost is a window: if code changes, a memory stays served until
 the checker's next pass.
 
-`Arbiter.Sessions.Memory.Checker` runs a pass 30 s after boot and then every
-15 minutes (`config :arbiter, :memory_checker`). A pass skips a memory whose
+`Wardmast.Sessions.Memory.Checker` runs a pass 30 s after boot and then every
+15 minutes (`config :wardmast, :memory_checker`). A pass skips a memory whose
 verdict is still **current**. A verdict is current while all of these hold:
 
 - it is `ok`;
@@ -261,7 +261,7 @@ Why a move rather than a frontmatter `status:` flag:
 Worker and refine tokens can call none of them.
 
 `memory_distill` (bd-avt4lt) fills the same queue from an ended session's
-archived transcript (`Arbiter.Sessions.TranscriptDistillation`). It never
+archived transcript (`Wardmast.Sessions.TranscriptDistillation`). It never
 writes the shared layer, but it spends model budget and reads another session's
 transcript, so a session token is refused. Its bounds can lower the configured
 caps, never raise them.
@@ -305,10 +305,10 @@ The seven `memory_*` MCP operations are also reachable from the operator's shell
 `GET /api/memory/pending`, `GET /api/memory/pending/diff?id=`,
 `POST /api/memory/pending/apply|reject`, `GET /api/memory/quarantine`,
 `POST /api/memory/quarantine/restore` and `POST /api/memory/distill`. The REST
-controller is a thin adapter over the same `Arbiter.MCP.Tools.MemoryPending`
+controller is a thin adapter over the same `Wardmast.MCP.Tools.MemoryPending`
 handlers, so the two surfaces share validation and error text.
 
-Every route is `:operator` in `ArbiterWeb.ApiPolicy` (operator proof, reads
+Every route is `:operator` in `WardmastWeb.ApiPolicy` (operator proof, reads
 included): a coordinator *session* token is refused with 403, as it already is
 for the write tools over MCP. Candidate ids (`<session-id>/<file>.md`) travel as
 `id` params rather than path segments.

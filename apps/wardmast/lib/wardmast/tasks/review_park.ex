@@ -1,0 +1,277 @@
+defmodule Wardmast.Tasks.ReviewPark do
+  @moduledoc """
+  The ReviewGate park (bd-9zuvbh) — guard class C's terminal state, from design
+  #1635 §5.3.
+
+  ## Why this exists
+
+  A ReviewGate guard answers two different questions, and until P9 both were
+  answered the same way:
+
+    * *"Should this APPROVE merge?"* — must **fail closed**. bd-6r8caj (an
+      APPROVE that never revisits its own open finding) and bd-4yhv4x (an
+      APPROVE carrying a `[NOT MET]` criterion) are real, and nothing here
+      changes what gets accepted or merged.
+    * *"Should this run be marked failed?"* — must **fail open**. That half is
+      the entire $226.97: `:review_gate_inconclusive` alone ended 52 runs in 31
+      days, and all four chain-B incidents (bd-6dxit2, bd-869mmg, bd-1xss5z,
+      bd-c6tdbu) ended the same way — a failed run on work that was fine.
+
+  A park is what "fail open on liveness" looks like on the record. The work is
+  committed, the PR is open, the round is recorded honestly (`converged: false`)
+  and the work is usually one human decision away from merging — so the durable
+  run finishes `:failed` with the park as its cause, and the ticket carries a
+  named reason a human can act on: its `attention_cause` (bd-8if9zt; since
+  bd-36ytcl the only record of the park on the ticket).
+
+  Whether the branch is *pushed* is checked, never assumed: bd-2jkrqu found the
+  escalation asserting "the branch is pushed" over a branch that was not, next
+  to an offer to merge it by hand. `Wardmast.Reviews.PushState` answers that
+  question for the escalation body, and `:head_not_pushed` is the park for a
+  head that could not be put on the remote at all.
+
+  ## An attention cause, not a state
+
+  The park does **not** move the ticket out of its state. `Tasks.Claim`, the
+  board and the dependency graph keep seeing live work, and `Dispatch.resume/2`
+  can re-attach to the parked worker the moment someone acts. Contrast
+  `:verifying` (bd-9so315), which is a real state because that ticket *is*
+  finished and merged; a review-parked ticket is not finished.
+
+  ## Leaving the park
+
+  Two human actions clear it, per §5.3's "human decides" terminal:
+
+    * **re-run the review** — `clear/2`, called when a fresh ReviewGate starts
+      for the task (an `arb worker resume` / re-dispatch), and available
+      directly for a coordinator that merges by hand;
+    * **close the task** — the `:close` transition clears the cause, so an
+      abandoned park does not linger in `arb prime`.
+
+  Any other transition clears it too, like every attention cause.
+  """
+
+  require Logger
+
+  alias Wardmast.Tasks.Issue
+
+  @typedoc """
+  Why the gate parked. Each value maps one-to-one onto a §2.1 guard's terminal
+  arm, so the mail subject, `arb prime` and the task API all name the same
+  thing the `review_gate_rounds` row does.
+  """
+  @type reason ::
+          :inconclusive
+          | :reviewer_failed
+          | :reviewer_timeout
+          | :verdict_guard_exhausted
+          | :commit_gate_no_changes
+          | :commit_gate_no_changes_after_non_file_fix
+          | :commit_gate_uncommitted
+          | :commit_gate_prepush_failed
+          | :empty_diff
+          | :conflict_unresolved
+          | :empty_net_diff
+          | :head_not_pushed
+          | :needs_operator_push
+          | :resume_blocked
+          | :review_rerun
+
+  @reasons %{
+    inconclusive:
+      "the reviewer produced no parseable VERDICT line, even after a re-prompt (G5–G7)",
+    reviewer_timeout: "the reviewing pass timed out with no verdict (G3/G4)",
+    reviewer_failed:
+      "the reviewer's own session died of an infrastructure failure — credentials, " <>
+        "quota, a dead gateway — before it could produce a verdict (G3)",
+    verdict_guard_exhausted:
+      "a verdict guard refused the reviewer's APPROVE and its re-prompt budget is spent (G9–G13)",
+    commit_gate_no_changes: "a fix round left HEAD unmoved and the worktree clean (G15/G16)",
+    commit_gate_no_changes_after_non_file_fix:
+      "a fix round left HEAD unmoved twice in a row after resolving findings through a " <>
+        "non-file channel (a PR title/description/label edit, a comment) rather than a " <>
+        "code change — distinct from an idle worker (G15/G16/bd-cb7wpq)",
+    commit_gate_uncommitted:
+      "the implementer left uncommitted work and HEAD did not move, twice (G15/G16)",
+    commit_gate_prepush_failed:
+      "a fix round's worker.pre_push_checks stayed red past the send-back cap, so its " <>
+        "head was not pushed",
+    conflict_unresolved:
+      "the branch conflicts with its target and the gate's conflict-resolve pass did not clear it",
+    empty_diff: "the target branch has already absorbed
+ this branch's commits (G2)",
+    empty_net_diff:
+      "the branch has commits ahead of the target but they contribute no net change — " <>
+        "most often already-squashed commits plus a merge of the target back in (G20)",
+    head_not_pushed:
+      "the head to be reviewed is not on the remote branch the merge request points at, " <>
+        "and could not be pushed there — reviewing it would judge code the MR does not " <>
+        "carry (G18)",
+    needs_operator_push:
+      "the branch touches `.github/workflows/`, which the GitHub App credential is not " <>
+        "permitted to push (it holds no `workflows` permission, by design) — an operator " <>
+        "must push the branch",
+    resume_blocked:
+      "the Watchdog could not restart the run after its awaiting-review timeout because " <>
+        "another pass on the same task still holds the worker registry slot (W14)"
+  }
+
+  # The phrase each reason contributes to the escalation subject. These are
+  # load-bearing wording, not decoration: bd-2eyf9y gave the two commit-gate
+  # shapes distinct subjects precisely so "the implementer left work
+  # uncommitted" could not be read as "the fix round found nothing to do", and
+  # P9 must not flatten them back into one generic "parked" line.
+  @subjects %{
+    inconclusive: "review inconclusive",
+    reviewer_failed: "the reviewer's session failed",
+    reviewer_timeout: "reviewing pass timed out",
+    verdict_guard_exhausted: "a verdict guard refused the reviewer's APPROVE",
+    commit_gate_no_changes: "fix round produced no changes",
+    commit_gate_no_changes_after_non_file_fix:
+      "fix round produced no changes after resolving findings without a file change",
+    commit_gate_uncommitted: "implementer left uncommitted work",
+    commit_gate_prepush_failed: "fix round's pre-push checks are red; head not pushed",
+    conflict_unresolved: "the branch conflicts with its target and could not be resolved",
+    empty_diff: "the target branch already absorbed these commits",
+    empty_net_diff: "the branch's commits contribute no net change against the target",
+    head_not_pushed: "the branch is not pushed and could not be",
+    needs_operator_push: "the branch touches .github/workflows/ and needs an operator push",
+    resume_blocked: "auto-resume is blocked by another pass on the same task"
+  }
+
+  @doc """
+  The mail-subject phrase for `reason` — what a coordinator reads in `arb inbox`
+  before opening anything.
+  """
+  @spec subject_phrase(reason() | String.t()) :: String.t()
+  def subject_phrase(reason) when is_atom(reason),
+    do: Map.get(@subjects, reason, Atom.to_string(reason))
+
+  def subject_phrase(reason) when is_binary(reason) do
+    case existing_atom(reason) do
+      {:ok, atom} -> subject_phrase(atom)
+      :error -> reason
+    end
+  end
+
+  # Every reason `park/2` may stamp: the explained ones, plus `:review_rerun`,
+  # which a re-run review records without its own explanation line.
+  @park_reasons Map.keys(@reasons) ++ [:review_rerun]
+
+  @doc """
+  Every park reason as an atom (bd-8if9zt) — each is also an attention cause
+  on the ticket (`Wardmast.Tasks.Lifecycle.Attention`).
+  """
+  @spec park_reasons() :: [reason()]
+  def park_reasons, do: @park_reasons
+
+  @doc "Every park reason, with the one-line explanation shown to a human."
+  @spec reasons() :: %{reason() => String.t()}
+  def reasons, do: @reasons
+
+  @doc """
+  The human-readable explanation for `reason`, or a generic line for one this
+  module does not know (a new guard must still park rather than fail, so an
+  unknown reason is rendered, never rejected).
+  """
+  @spec explain(reason() | String.t()) :: String.t()
+  def explain(reason) when is_atom(reason), do: Map.get(@reasons, reason, generic(reason))
+
+  def explain(reason) when is_binary(reason) do
+    case existing_atom(reason) do
+      {:ok, atom} -> explain(atom)
+      :error -> generic(reason)
+    end
+  end
+
+  defp generic(reason), do: "the review gate reached a terminal no-verdict state (#{reason})"
+
+  # Never `String.to_atom/1` on a value that reached us from the API or the
+  # database — an unknown string renders as itself rather than growing the atom
+  # table. Answering `:error` (rather than handing the string back) is what
+  # keeps the two `is_binary` clauses above from recursing into themselves.
+  defp existing_atom(reason) do
+    {:ok, String.to_existing_atom(reason)}
+  rescue
+    ArgumentError -> :error
+  end
+
+  @doc """
+  Stamp the park on `task_id`, and report whether this call is the one that
+  claimed the episode.
+
+  The park row **is** the escalation claim (invariant I3: one escalation per
+  episode, keyed by `{task_id, mr_ref, guard, episode}`). A task already parked
+  for the same reason is the same episode, so it answers `:already_parked` and
+  the caller stays quiet; a different reason, or a park the human cleared and
+  the gate then re-reached, is a new episode and pages again. That keeps the
+  claim in one atomic-ish place rather than in a counter the worker would lose
+  on restart — the same reason `ReviewPatrol.claim_review_cap_escalation/1`
+  claims in the row rather than in memory.
+
+  `reason` must be one of `park_reasons/0`: the park is recorded as the
+  ticket's attention cause, and the cause column holds only the causes
+  `Wardmast.Tasks.Lifecycle.Attention` knows. Any other reason answers
+  `{:error, {:unknown_park_reason, reason}}`.
+
+  Best-effort by design: this runs on the worker's terminal path, and a DB
+  hiccup here must not turn a park back into a crash. Callers log and continue.
+  """
+  @spec park(String.t(), reason(), String.t() | nil) ::
+          {:ok, :claimed | :already_parked, Issue.t()} | {:error, term()}
+  def park(task_id, reason, detail \\ nil) when is_binary(task_id) and is_atom(reason) do
+    with :ok <- known_reason(reason),
+         {:ok, task} <- Ash.get(Issue, task_id) do
+      if Map.get(task, :attention_cause) == reason do
+        # Same episode: answer the claim WITHOUT re-running `:park_review`. The
+        # action stamps `attention_since` unconditionally, and re-stamping it
+        # would reset the wait clock `arb prime` sorts on (oldest first) — so a
+        # gate that re-parks for the same reason would keep resetting itself to
+        # the bottom of the list and the park most likely to have been forgotten
+        # would never surface. Nothing else about the row changes here, so
+        # there is nothing to write.
+        {:ok, :already_parked, task}
+      else
+        case Ash.update(task, %{cause: reason, detail: detail}, action: :park_review) do
+          {:ok, parked} -> {:ok, :claimed, parked}
+          {:error, _} = err -> err
+        end
+      end
+    end
+  rescue
+    e -> {:error, e}
+  end
+
+  defp known_reason(reason) do
+    if reason in @park_reasons, do: :ok, else: {:error, {:unknown_park_reason, reason}}
+  end
+
+  @doc """
+  Clear the park on `task_id`. `by` names the human action that cleared it and
+  is logged, so "who unparked this" is answerable from the journal.
+
+  A task that is not parked is a no-op success: clearing is idempotent because
+  both of its callers (a re-run review, a close) can legitimately fire twice.
+  """
+  @spec clear(String.t(), atom()) :: {:ok, Issue.t()} | {:error, term()}
+  def clear(task_id, by \\ :unspecified) when is_binary(task_id) do
+    with {:ok, task} <- Ash.get(Issue, task_id) do
+      if parked?(task) do
+        Logger.info("ReviewPark: clearing the park on #{task_id} (#{by})")
+        Ash.update(task, %{}, action: :clear_review_park)
+      else
+        {:ok, task}
+      end
+    end
+  rescue
+    e -> {:error, e}
+  end
+
+  @doc "True when `task`'s attention cause is a ReviewGate park."
+  @spec parked?(Issue.t() | map()) :: boolean()
+  def parked?(task), do: Map.get(task, :attention_cause) in @park_reasons
+
+  @doc "The park reason `task` carries (its attention cause), or `nil` when it is not parked."
+  @spec reason(Issue.t() | map()) :: reason() | nil
+  def reason(task), do: if(parked?(task), do: Map.get(task, :attention_cause))
+end

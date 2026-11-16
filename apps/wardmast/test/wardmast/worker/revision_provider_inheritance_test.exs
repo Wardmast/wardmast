@@ -1,0 +1,910 @@
+defmodule Wardmast.Worker.RevisionProviderInheritanceTest do
+  @moduledoc """
+  Tests for bd-2exkl0 / #1922:
+  ReviewGate impl/fix passes, CI fix passes, conflict resolvers, and resumes
+  must inherit the provider of the run they are revising.
+  """
+
+  use Wardmast.DataCase, async: false
+
+  import Wardmast.LifecycleFixtures, only: [put_state!: 2]
+
+  alias Wardmast.Agents
+  alias Wardmast.Agents.CredentialWatchdog
+  alias Wardmast.Messages.Message
+  alias Wardmast.Tasks.{Issue, Workspace}
+  alias Wardmast.TestSandbox
+  alias Wardmast.Worker
+  alias Wardmast.Workers.Run
+
+  require Ash.Query
+
+  defp runs_for_task(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.read!()
+  end
+
+  defp runs_for_kind(base_task_id, kind) do
+    Run
+    |> Ash.Query.filter(base_task_id == ^base_task_id and kind == ^kind)
+    |> Ash.read!()
+  end
+
+  defp write_stub(dir, name, body) do
+    path = Path.join(dir, name)
+    File.write!(path, "#!/bin/sh\n" <> body)
+    File.chmod!(path, 0o755)
+    path
+  end
+
+  defp calls(log) do
+    case File.read(log) do
+      {:ok, body} -> String.split(body, "\n", trim: true)
+      _ -> []
+    end
+  end
+
+  defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
+
+  defp seed_feature_branch(repo, branch) do
+    {_, 0} = git(["checkout", "-q", "-b", branch], repo)
+    File.write!(Path.join(repo, "feature.txt"), "worker work\n")
+    {_, 0} = git(["add", "feature.txt"], repo)
+    {_, 0} = git(["commit", "-q", "-m", "feature work"], repo)
+    {_, 0} = git(["checkout", "-q", "main"], repo)
+    :ok
+  end
+
+  defp await_exit(pid) do
+    ref = Process.monitor(pid)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
+  end
+
+  defp wait_until(fun, timeout \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(20)
+        do_wait(fun, deadline)
+    end
+  end
+
+  setup do
+    # bd-b6noq9 (#1930): this fixture is the one that lost `fp-7zn1p7`,
+    # `fp-6u0wu1`, `cr-ag13cz` and `fp-ry8klj`. It provisioned a repo, a bare
+    # `origin.git` and `worktrees/` under a single `/tmp/rev-provider-<n>`
+    # root, stubbed `agy` but not `claude` (so a Claude-resolving dispatch ran
+    # the operator's real CLI), and deleted the whole root on `on_exit` while
+    # those sessions were still working — taking the worktree, the origin and
+    # the only copy of the branch at once. `Wardmast.TestSandbox` exists so
+    # that shape cannot be written again; see its moduledoc.
+    sandbox = TestSandbox.provision!("rev-provider")
+
+    put_app_env(:wardmast, :worktree_root, sandbox.worktree_root)
+    put_app_env(:wardmast, :repo_paths, %{"test/repo" => sandbox.repo})
+
+    CredentialWatchdog.mark_recovered(Agents.Gemini)
+    CredentialWatchdog.mark_recovered(Agents.Claude)
+    _ = :sys.get_state(CredentialWatchdog)
+
+    # Registered after `provision!/1`, so it runs BEFORE the teardown that
+    # call registered (`on_exit` is LIFO). Any worker this test left running
+    # is adopted as an owner and stopped before a byte is deleted.
+    on_exit(fn ->
+      CredentialWatchdog.mark_recovered(Agents.Gemini)
+      CredentialWatchdog.mark_recovered(Agents.Claude)
+      _ = :sys.get_state(CredentialWatchdog)
+      TestSandbox.own_live_workers!(sandbox)
+    end)
+
+    %{
+      repo: sandbox.repo,
+      tmp: sandbox.root,
+      stub_dir: sandbox.bin,
+      log: sandbox.log,
+      sandbox: sandbox
+    }
+  end
+
+  describe "ReviewGate implementer provider inheritance (AC1, AC2, AC3)" do
+    test "implementer fix round inherits gemini from the main run even when workspace defaults to claude",
+         %{repo: repo, stub_dir: stub_dir, log: log} do
+      # Reviewer stub: requests changes
+      write_stub(stub_dir, "claude", """
+      echo "claude $@" >> #{log}
+      echo "VERDICT: REQUEST_CHANGES"
+      echo "- [high] feature.txt:1 needs fix"
+      echo "arb done"
+      exit 0
+      """)
+
+      # Agy stub: can be reviewer or implementer
+      write_stub(stub_dir, "agy", """
+      echo "agy $@" >> #{log}
+      # If implementer, make a commit to satisfy commit gate
+      if [ -f feature.txt ]; then
+        echo "fixed" >> feature.txt
+        git add feature.txt
+        git commit -m "implementer fix"
+      fi
+      echo "arb done"
+      exit 0
+      """)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-rev-inherit-#{System.unique_integer([:positive])}",
+          prefix: "ri",
+          config: %{
+            "agent" => %{"type" => "claude"},
+            "review_agent" => %{"type" => "claude"},
+            "review" => %{"required" => true, "rounds" => 2}
+          }
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "implementer inheritance task",
+          workspace_id: ws.id,
+          issue_type: :feature
+        })
+
+      task = put_state!(task, :active)
+
+      branch = "task-#{task.id}"
+      :ok = seed_feature_branch(repo, branch)
+
+      # Create author's main run record with provider: "gemini"
+      {:ok, _author_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          base_task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          kind: :implement,
+          role: "base",
+          provider: "gemini",
+          model: "gemini-3.8-flash-medium",
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 2,
+        worktree_path: repo,
+        review_verdict_retries: 0,
+        review_timeout_ms: 30_000
+      }
+
+      {:ok, worker_pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          meta: meta
+        )
+
+      on_exit(fn -> if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal) end)
+      :ok = Worker.advance(worker_pid, :claude)
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      # Wait for review gate to start, reviewer to request changes, and implementer to be spawned
+      impl_task_id = "#{task.id}#review#impl1"
+
+      wait_until(fn ->
+        calls(log) |> Enum.any?(&String.starts_with?(&1, "agy"))
+      end)
+
+      # Verify that agy was invoked for the implementer pass
+      call_lines = calls(log)
+
+      assert Enum.any?(call_lines, &String.starts_with?(&1, "claude")),
+             "reviewer should have run on claude"
+
+      assert Enum.any?(call_lines, &String.starts_with?(&1, "agy")),
+             "implementer should have run on agy"
+
+      # Verify run records
+      wait_until(fn ->
+        case runs_for_task(impl_task_id) do
+          [%Run{provider: p}] when not is_nil(p) -> true
+          _ -> false
+        end
+      end)
+
+      [impl_run] = runs_for_task(impl_task_id)
+      assert impl_run.provider == "gemini", "implementer pass must record provider as gemini"
+      assert impl_run.kind == :implement
+      assert impl_run.role == "impl"
+    end
+  end
+
+  describe "implementer revision spawn respects :strict write confinement (bd-1abj7u finding 2)" do
+    # The revision implementer inherits gemini from the main run (same
+    # inheritance the test above exercises), but this workspace is `:strict` —
+    # gemini/agy cannot confine writes there. The fix-round spawn must refuse,
+    # never actually invoke agy against the worktree.
+    test "a fix round whose inherited provider is gemini under :strict is refused, not spawned",
+         %{repo: repo, stub_dir: stub_dir, log: log} do
+      write_stub(stub_dir, "claude", """
+      echo "claude $@" >> #{log}
+      echo "VERDICT: REQUEST_CHANGES"
+      echo "- [high] feature.txt:1 needs fix"
+      echo "arb done"
+      exit 0
+      """)
+
+      write_stub(stub_dir, "agy", """
+      echo "agy $@" >> #{log}
+      echo "fixed" >> feature.txt
+      git add feature.txt
+      git commit -m "implementer fix"
+      echo "arb done"
+      exit 0
+      """)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-rev-strict-#{System.unique_integer([:positive])}",
+          prefix: "rs",
+          config: %{
+            "agent" => %{
+              "type" => "claude",
+              "security" => %{"permissions" => %{"mode" => "strict"}}
+            },
+            "review_agent" => %{"type" => "claude"},
+            "review" => %{"required" => true, "rounds" => 2}
+          }
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "implementer strict-refusal task",
+          workspace_id: ws.id,
+          issue_type: :feature
+        })
+
+      task = put_state!(task, :active)
+
+      branch = "task-#{task.id}"
+      :ok = seed_feature_branch(repo, branch)
+
+      # The author's main run recorded provider: "gemini" — the revision
+      # implementer would normally inherit this, but under :strict it cannot
+      # confine writes.
+      {:ok, _author_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          base_task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          kind: :implement,
+          role: "base",
+          provider: "gemini",
+          model: "gemini-3.8-flash-medium",
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 2,
+        worktree_path: repo,
+        review_verdict_retries: 0,
+        review_timeout_ms: 30_000
+      }
+
+      {:ok, worker_pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          meta: meta
+        )
+
+      on_exit(fn -> if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal) end)
+      :ok = Worker.advance(worker_pid, :claude)
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(worker_pid)) end,
+        12_000
+      )
+
+      refute Enum.any?(calls(log), &String.starts_with?(&1, "agy")),
+             "agy cannot confine writes under :strict and must never be spawned as the " <>
+               "revision implementer"
+
+      assert Worker.state(worker_pid).meta.failure_reason == :review_gate_rejected
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
+      assert escalation, "expected an escalation to the coordinator"
+      assert escalation.body =~ "cannot confine its writes to the worktree"
+      assert escalation.body =~ "gemini"
+    end
+  end
+
+  describe "Reviewer independence (AC5)" do
+    test "review_agent.type continues to govern the reviewer independently of worker's provider",
+         %{repo: repo, stub_dir: stub_dir, log: log} do
+      write_stub(stub_dir, "claude", """
+      echo "claude $@" >> #{log}
+      echo "VERDICT: APPROVE"
+      echo "arb done"
+      exit 0
+      """)
+
+      write_stub(stub_dir, "agy", """
+      echo "agy $@" >> #{log}
+      echo "arb done"
+      exit 0
+      """)
+
+      # Workspace configures worker agent: gemini, reviewer: claude
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-rev-indep-#{System.unique_integer([:positive])}",
+          prefix: "ri",
+          config: %{
+            "agent" => %{"type" => "gemini"},
+            "review_agent" => %{"type" => "claude"},
+            "review" => %{"required" => true, "rounds" => 1}
+          }
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "reviewer independence task",
+          workspace_id: ws.id,
+          issue_type: :feature
+        })
+
+      task = put_state!(task, :active)
+
+      branch = "task-#{task.id}"
+      :ok = seed_feature_branch(repo, branch)
+
+      # Main author run ran on gemini
+      {:ok, _author_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          base_task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          kind: :implement,
+          role: "base",
+          provider: "gemini",
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_verdict_retries: 0,
+        review_timeout_ms: 30_000
+      }
+
+      {:ok, worker_pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          meta: meta
+        )
+
+      on_exit(fn -> if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal) end)
+      :ok = Worker.advance(worker_pid, :claude)
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      rev_task_id = "#{task.id}#review"
+
+      wait_until(fn ->
+        calls(log) |> Enum.any?(&String.starts_with?(&1, "claude"))
+      end)
+
+      # Reviewer ran on Claude
+      call_lines = calls(log)
+
+      assert Enum.any?(call_lines, &String.starts_with?(&1, "claude")),
+             "reviewer must run on claude"
+
+      refute Enum.any?(call_lines, &String.starts_with?(&1, "agy")),
+             "agy should not have run for reviewer"
+
+      # Reviewer run record shows claude
+      wait_until(fn ->
+        case runs_for_task(rev_task_id) do
+          [%Run{provider: p}] when not is_nil(p) -> true
+          _ -> false
+        end
+      end)
+
+      [rev_run] = runs_for_task(rev_task_id)
+      assert rev_run.provider == "claude"
+      assert rev_run.kind == :review
+    end
+  end
+
+  describe "Unavailable provider fallback recorded and escalated (AC4)" do
+    test "a real implementer spawn with expired gemini credentials records provider_fallback on the run and escalates to the coordinator",
+         %{repo: repo, stub_dir: stub_dir, log: log} do
+      write_stub(stub_dir, "claude", """
+      echo "claude $@" >> #{log}
+      echo "VERDICT: REQUEST_CHANGES"
+      echo "- [high] feature.txt:1 needs fix"
+      echo "arb done"
+      exit 0
+      """)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-rev-ac4-#{System.unique_integer([:positive])}",
+          prefix: "a4",
+          config: %{
+            "agent" => %{"type" => ["gemini", "claude"]},
+            "review_agent" => %{"type" => "claude"},
+            "review" => %{"required" => true, "rounds" => 2}
+          }
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "ac4 fallback task",
+          workspace_id: ws.id,
+          issue_type: :feature
+        })
+
+      task = put_state!(task, :active)
+
+      branch = "task-#{task.id}"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, _author_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          base_task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          kind: :implement,
+          role: "base",
+          provider: "gemini",
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      CredentialWatchdog.mark_expired(Agents.Gemini, %Wardmast.Worker.StopReason{
+        category: :auth_expired,
+        summary: "credentials expired"
+      })
+
+      _ = :sys.get_state(CredentialWatchdog)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 2,
+        worktree_path: repo,
+        review_verdict_retries: 0,
+        review_timeout_ms: 30_000
+      }
+
+      {:ok, worker_pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          meta: meta
+        )
+
+      on_exit(fn -> if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal) end)
+      :ok = Worker.advance(worker_pid, :claude)
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      impl_task_id = "#{task.id}#review#impl1"
+
+      wait_until(fn ->
+        case runs_for_task(impl_task_id) do
+          [%Run{provider: p}] when not is_nil(p) -> true
+          _ -> false
+        end
+      end)
+
+      [impl_run] = runs_for_task(impl_task_id)
+
+      assert impl_run.provider == "claude",
+             "expired gemini must fall back to an available provider"
+
+      assert impl_run.provider_fallback =~ "fell back from gemini",
+             "the fallback must be recorded on the run row, not silent"
+
+      wait_until(fn ->
+        Wardmast.Messages.Message
+        |> Ash.Query.filter(
+          kind == :escalation and to_ref == "coordinator" and task_ref == ^task.id
+        )
+        |> Ash.read!()
+        |> Enum.any?(&(&1.subject =~ "provider fallback"))
+      end)
+
+      [escalation] =
+        Wardmast.Messages.Message
+        |> Ash.Query.filter(
+          kind == :escalation and to_ref == "coordinator" and task_ref == ^task.id
+        )
+        |> Ash.read!()
+        |> Enum.filter(&(&1.subject =~ "provider fallback"))
+
+      assert escalation.body =~ "gemini"
+      assert escalation.body =~ "claude"
+    end
+  end
+
+  describe "Unavailable provider fallback (AC4)" do
+    test "when original provider credentials are flagged expired, falls back to available provider with coordinator visibility",
+         %{repo: _repo, stub_dir: stub_dir, log: log} do
+      write_stub(stub_dir, "claude", """
+      echo "claude $@" >> #{log}
+      if [ -f feature.txt ]; then
+        echo "fixed by claude" >> feature.txt
+        git add feature.txt
+        git commit -m "claude fix"
+      fi
+      echo "arb done"
+      exit 0
+      """)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-rev-fallback-#{System.unique_integer([:positive])}",
+          prefix: "rf",
+          config: %{
+            "agent" => %{"type" => ["gemini", "claude"]},
+            "review" => %{"required" => true}
+          }
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "fallback task",
+          workspace_id: ws.id,
+          issue_type: :feature
+        })
+
+      # Main author run ran on gemini
+      {:ok, _author_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          base_task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          kind: :implement,
+          role: "base",
+          provider: "gemini",
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      # Flag Gemini credentials as expired
+      stop_reason = %Wardmast.Worker.StopReason{
+        category: :auth_expired,
+        summary: "credentials expired"
+      }
+
+      CredentialWatchdog.mark_expired(Agents.Gemini, stop_reason)
+      _ = :sys.get_state(CredentialWatchdog)
+
+      # Attempt resolution for revision
+      {provider, fallback_reason} = Agents.resolve_revision_provider(task.id, ws)
+
+      assert provider == :claude
+      assert fallback_reason =~ "fell back from gemini"
+      assert fallback_reason =~ "credentials flagged expired"
+    end
+
+    # Round 2 finding 3: an ad-hoc, workspace-less caller (e.g. ReviewGate's
+    # `resolve_revision/2` when `load_workspace/1` returns nil) used to only
+    # ever consider :claude as a fallback candidate, so an expired-claude
+    # original provider reported "no provider available" even when gemini
+    # was healthy. Assert the nil-workspace path searches the full
+    # [:claude, :gemini, :codex] candidate list, same as the %Workspace{} path.
+    test "with a nil workspace and an expired original provider, falls back to another healthy adapter instead of reporting none available" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-rev-fallback-nil-#{System.unique_integer([:positive])}",
+          prefix: "rn"
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "nil-workspace fallback task",
+          workspace_id: ws.id,
+          issue_type: :feature
+        })
+
+      {:ok, _author_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          base_task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          kind: :implement,
+          role: "base",
+          provider: "claude",
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      stop_reason = %Wardmast.Worker.StopReason{
+        category: :auth_expired,
+        summary: "credentials expired"
+      }
+
+      CredentialWatchdog.mark_expired(Agents.Claude, stop_reason)
+      _ = :sys.get_state(CredentialWatchdog)
+
+      {provider, fallback_reason} = Agents.resolve_revision_provider(task.id, nil)
+
+      assert provider == :gemini,
+             "nil-workspace fallback must consider gemini/codex, not just report claude as the only option"
+
+      assert fallback_reason =~ "fell back from claude"
+      refute fallback_reason =~ "no provider available"
+    end
+  end
+
+  describe "Fallback is not sticky across rounds (finding 4)" do
+    test "a round whose provider fell back does not get adopted as the new 'original' once credentials recover",
+         %{repo: _repo} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-sticky-#{System.unique_integer([:positive])}",
+          prefix: "sf",
+          config: %{"agent" => %{"type" => ["gemini", "claude"]}}
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "sticky fallback task",
+          workspace_id: ws.id,
+          issue_type: :feature
+        })
+
+      # Round 1: main author run recorded gemini as the true original.
+      {:ok, _main_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          base_task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          kind: :implement,
+          role: "base",
+          provider: "gemini",
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.add(DateTime.utc_now(), -60, :second)
+        })
+
+      # Round 1's impl pass had to fall back to claude (gemini was expired at
+      # the time) and recorded that fallback on its own run row.
+      {:ok, _impl_run_1} =
+        Ash.create(Run, %{
+          task_id: "#{task.id}#review#impl1",
+          base_task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          kind: :implement,
+          role: "impl",
+          provider: "claude",
+          provider_fallback: "fell back from gemini: credentials flagged expired",
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      # Gemini has since recovered.
+      CredentialWatchdog.mark_recovered(Agents.Gemini)
+      _ = :sys.get_state(CredentialWatchdog)
+
+      # Round 2 must inherit the TRUE original (gemini), re-announcing that
+      # round 1 fell back rather than silently treating claude as if it were
+      # always the intended provider.
+      assert Run.latest_authoring_provider(task.id) == :gemini
+
+      {provider, fallback_reason} = Agents.resolve_revision_provider(task.id, ws)
+      assert provider == :gemini
+      assert is_nil(fallback_reason)
+    end
+  end
+
+  describe "CI fix pass provider inheritance (AC2)" do
+    test "FixPassDispatcher inherits gemini from main run",
+         %{repo: repo, stub_dir: stub_dir, log: log} do
+      write_stub(stub_dir, "agy", """
+      echo "agy $@" >> #{log}
+      echo "arb done"
+      exit 0
+      """)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-fixpass-#{System.unique_integer([:positive])}",
+          prefix: "fp",
+          config: %{
+            "agent" => %{"type" => "claude"},
+            "repo_paths" => %{"test/repo" => repo}
+          }
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "fixpass task",
+          workspace_id: ws.id,
+          issue_type: :feature
+        })
+
+      branch = "task-#{task.id}"
+      :ok = seed_feature_branch(repo, branch)
+
+      # Author run used gemini
+      {:ok, _author_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          base_task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          kind: :implement,
+          role: "base",
+          provider: "gemini",
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      context = %{
+        task: task,
+        repo: "test/repo",
+        repo_path: repo,
+        branch: branch,
+        target_branch: "main",
+        workspace: ws
+      }
+
+      {:ok, %{worker_pid: pid}} = Wardmast.Workflows.MergeQueue.FixPassDispatcher.dispatch(context)
+
+      wait_until(fn ->
+        calls(log) |> Enum.any?(&String.starts_with?(&1, "agy"))
+      end)
+
+      # Ensure fix_pass run record has provider: "gemini"
+      wait_until(fn ->
+        case runs_for_kind(task.id, :fix_pass) do
+          [%Run{provider: p}] when not is_nil(p) -> true
+          _ -> false
+        end
+      end)
+
+      [fix_run] = runs_for_kind(task.id, :fix_pass)
+      assert fix_run.provider == "gemini"
+      assert fix_run.kind == :fix_pass
+
+      # bd-741sid: a pass that finishes ends its own run.
+      await_exit(pid)
+    end
+  end
+
+  describe "ConflictResolver provider inheritance (AC2)" do
+    test "ConflictResolver inherits gemini from main run",
+         %{repo: repo, stub_dir: stub_dir, log: log} do
+      write_stub(stub_dir, "agy", """
+      echo "agy $@" >> #{log}
+      echo "arb done"
+      exit 0
+      """)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-conflict-#{System.unique_integer([:positive])}",
+          prefix: "cr",
+          config: %{
+            "agent" => %{"type" => "claude"},
+            "repo_paths" => %{"test/repo" => repo}
+          }
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "conflict task",
+          workspace_id: ws.id,
+          issue_type: :feature
+        })
+
+      branch = "task-#{task.id}"
+      :ok = seed_feature_branch(repo, branch)
+
+      File.write!(Path.join(repo, "other.txt"), "other\n")
+      {_, 0} = git(["add", "other.txt"], repo)
+      {_, 0} = git(["commit", "-q", "-m", "other work"], repo)
+      {_, 0} = git(["push", "-q", "origin", "main"], repo)
+
+      # Author run used gemini
+      {:ok, _author_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          base_task_id: task.id,
+          repo: "test/repo",
+          workspace_id: ws.id,
+          kind: :implement,
+          role: "base",
+          provider: "gemini",
+          state: :finished,
+          outcome: :succeeded,
+          started_at: DateTime.utc_now()
+        })
+
+      context = %{
+        task: task,
+        repo: "test/repo",
+        repo_path: repo,
+        branch: branch,
+        target_branch: "main",
+        workspace: ws
+      }
+
+      {:ok, %{worker_pid: pid}} = Wardmast.Workflows.MergeQueue.ConflictResolver.dispatch(context)
+
+      wait_until(fn ->
+        calls(log) |> Enum.any?(&String.starts_with?(&1, "agy"))
+      end)
+
+      wait_until(fn ->
+        case runs_for_kind(task.id, :conflict) do
+          [%Run{provider: p}] when not is_nil(p) -> true
+          _ -> false
+        end
+      end)
+
+      [conflict_run] = runs_for_kind(task.id, :conflict)
+      assert conflict_run.provider == "gemini"
+      assert conflict_run.kind == :conflict
+
+      # bd-741sid: a pass that finishes ends its own run.
+      await_exit(pid)
+    end
+  end
+end

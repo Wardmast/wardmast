@@ -1,0 +1,423 @@
+defmodule Wardmast.Usage.Probe do
+  @moduledoc """
+  Ledger capture for Wardmast's one-shot agent-CLI round-trips (bd-adyhvn).
+
+  One caller spends real plan quota without ever going through
+  `Wardmast.Worker` — which is the only other path that writes `usage_events`:
+
+    * `Wardmast.Agents.Preflight` — as of bd-2jgs2h (2026-09-18), the
+      `CredentialWatchdog`'s periodic check is its only live caller; the
+      per-dispatch and per-resume auth probe was retired (see
+      `Wardmast.Worker.Dispatch`'s moduledoc and `docs/quota-and-auth.md`).
+      Task-attributed `:preflight` rows in `usage_events` predating that date
+      are historical.
+
+  (A second caller, `Wardmast.Quota.RefreshProbe` — one `claude --print "ok"`
+  per workspace whenever the quota snapshot needed refreshing — was deleted in
+  bd-atyrrq once `Wardmast.Quota.CloudProbe`'s `/api/oauth/usage` poll made a
+  billed round-trip unnecessary for that purpose. Historical `usage_events`
+  rows with `source: :probe` are its legacy.)
+
+  ## Capture path: the CLI's own `--output-format json`, not the proxy
+
+  Both probes now ask the CLI for `--output-format json` and read the `usage`
+  object out of their own stdout. The alternative — teaching the (since
+  removed, bd-7cvh8z) local Anthropic pass-through proxy to parse response
+  bodies — would have been more general (it would have covered any provider
+  traffic through the proxy) but meant buffering and parsing a **streaming
+  hot path** that every real worker's traffic flowed through, to recover
+  numbers the CLI hands us for free at the one place we already own the port.
+
+  ## Why not read the CLI's own session JSONL
+
+  A third option was proposed and preferred on the ticket: read the session
+  JSONL the CLI writes at `<config_dir>/projects/<slug>/<session-id>.jsonl`,
+  which `Wardmast.Usage.ClaudeSessionFile` already locates and parses. It is the
+  right answer for a **PTY/coordinator session** (bd-cyxzvq), where stdout is a
+  rendered TUI and the result object does not exist, and it is mechanically
+  reachable here too — `claude --session-id <uuid>` lets the caller name the
+  file in advance, so no glob race.
+
+  It is the wrong answer for *these two* callers, for one reason: **a one-shot
+  `--print` session's JSONL carries no cost figure.** `ClaudeSessionFile` does
+  read cost since bd-be804c, but only from the periodic `cost-state` record —
+  and a `--print` round-trip is over before one is ever written, so
+  `read_totals/2` comes back with `cost_usd: nil` and the note at
+  `Wardmast.Usage.ClaudeSessionFile.no_cost_note/0`. Since the whole point of this ticket is that ~$3/day
+  and ~$2/day of *spend* were invisible, and this repo has no Claude price
+  table to derive dollars from tokens (only `Wardmast.Agents.Gemini.Pricing`),
+  a JSONL-only probe would have recorded tokens and a "cost unavailable" note
+  — replacing an invisible number with an unpriced one.
+
+  The `result` object gives tokens **and** `total_cost_usd`, priced by the CLI
+  itself. So: result object for one-shot probes, session JSONL for sessions.
+
+  ## Why the result object is stripped from the classifier's view
+
+  `Wardmast.Worker.StopReason.classify/2` matches provider-error signatures by
+  substring over the probe's output — including bare `\\b401\\b` and `\\b402\\b`.
+  The CLI's structured success payload is full of integers: a probe that
+  happened to report `"input_tokens":401` would be classified `:auth_expired`
+  and, on the pre-flight path, would refuse the dispatch. So `parse/1` returns
+  the output lines **with the success payload removed**; only genuine
+  diagnostic output reaches the classifier. An `is_error: true` payload is
+  deliberately left in place — that one *is* the diagnostic.
+
+  ## Coordinator / terminal sessions (bd-cyxzvq)
+
+  A browser-hosted coordinator session or an interactive terminal session has
+  no task either, and needs no further migration: write a row with
+  `source: :coordinator_session` / `:terminal_session`, `task_id: nil`, and the
+  CLI's `session_id` — `session_id` has always been nullable and is the natural
+  key for a session's (possibly many) rows. `record/3` already accepts exactly
+  that shape.
+  """
+
+  require Logger
+
+  alias Wardmast.Accounts.Resolver
+  alias Wardmast.Agents.Codex.Stream, as: CodexStream
+  alias Wardmast.Agents.Gemini.Stream, as: GeminiStream
+  alias Wardmast.Usage.Event
+
+  @type usage :: %{
+          optional(:tokens_in) => integer() | nil,
+          optional(:tokens_out) => integer() | nil,
+          optional(:cache_creation_tokens) => integer() | nil,
+          optional(:cache_read_tokens) => integer() | nil,
+          optional(:thinking_tokens) => integer() | nil,
+          optional(:cost_usd) => float() | nil,
+          optional(:cost_note) => String.t() | nil,
+          optional(:duration_ms) => integer() | nil,
+          optional(:session_id) => String.t() | nil,
+          optional(:model) => String.t() | nil,
+          optional(:raw) => map()
+        }
+
+  # bd-96mn8i round 4 finding 2: used to hardcode Claude's own
+  # `--output-format json` flag name, so a codex/gemini row that genuinely
+  # reported nothing carried a note phrased as if it were a Claude-specific
+  # CLI-invocation mistake. Kept provider-agnostic.
+  @no_usage_note "no structured usage in probe output (the CLI returned no parseable result object)"
+
+  # Mirrors `Wardmast.Agents.Gemini.Stream`'s note verbatim (bd-481sz7):
+  # agy/Antigravity is a subscription metered by quota percentage, not a
+  # per-call priced API, so an agy probe row's cost stays nil permanently.
+  @agy_cost_unavailable_note "agy/Antigravity reports no cost: it's a subscription metered by Antigravity quota percentage, not a per-call priced API"
+
+  # bd-96mn8i round 2, finding 4: `@no_usage_note` used to fire on *any* row
+  # without a `cost_usd`, including ones that parsed real token counts —
+  # upstream gemini's `stats` has no `"models"` breakdown, so
+  # `Gemini.Pricing.cost_usd/1` returns nil on a genuine success and the row
+  # landed with real tokens next to a note claiming no usage was found at
+  # all. This note is for that case: tokens are known, the dollar figure
+  # just isn't.
+  @tokens_no_cost_note "cost unavailable: tokens were parsed but the probe reported no priceable cost figure"
+
+  @doc """
+  Split a probe's captured output into `{usage_or_nil, lines_for_the_classifier}`.
+
+  `lines` is oldest-first, exactly as `Wardmast.Agents.Preflight` collects it.
+  When one of them is the CLI's successful `result` object, its token counts
+  are extracted and that line is removed from the returned list (see the
+  moduledoc). Anything else passes through untouched.
+
+  `provider` selects which wire schema to look for (`"codex"`, `"gemini"`, or
+  `nil`/anything else for Claude's `{"type":"result"}` / agy's
+  `{"event":"result"}` shapes). Without this, `parse/1` only ever recognized
+  those two shapes — so a codex probe's `{"type":"turn.completed","usage":{…}}`
+  line was never matched at all (bd-96mn8i: confirmed live against installed
+  codex-cli 0.153.4, this is exactly what the CLI emits on success), and every
+  one of the 1,620 codex `usage_events` rows over 7 days landed with `tokens_in`
+  / `tokens_out` NULL. A gemini probe running the upstream (non-agy) `gemini`
+  binary hit a related but different bug: its `{"type":"result",...}` line
+  *was* matched, but the fallback clause read `event["usage"]` — upstream
+  gemini's token counts live under `event["stats"]` (see
+  `Wardmast.Agents.Gemini.Stream`'s documented schema) — so `usage` was always
+  computed from an empty map, i.e. all-nil, even on a genuine success.
+  """
+  @spec parse([String.t()], String.t() | nil) :: {usage() | nil, [String.t()]}
+  def parse(lines, provider \\ nil) when is_list(lines) do
+    decoder = decoder_for(provider)
+
+    Enum.reduce(lines, {nil, []}, fn line, {usage, kept} ->
+      case decoder.(line) do
+        {:ok, fields} ->
+          # A success payload is structured data, not diagnostics — extract and
+          # drop it. An error payload stays visible to the classifier.
+          {fields, kept}
+
+        {:error_with_usage, fields} ->
+          # bd-96mn8i round 2, finding 2: an error result can still report
+          # real tokens spent before it failed (e.g. a quota-exhausted agy
+          # turn) — that is known spend, not unknown, and must not be
+          # recorded as NULL. The line itself is still diagnostic (it's what
+          # tells `StopReason.classify/2` the run failed), so it stays in
+          # `kept` exactly like a plain `:error`.
+          {fields, [line | kept]}
+
+        :error ->
+          {usage, [line | kept]}
+      end
+    end)
+    |> then(fn {usage, kept} -> {usage, Enum.reverse(kept)} end)
+  end
+
+  defp decoder_for("codex"), do: &codex_result/1
+  defp decoder_for("gemini"), do: &gemini_result/1
+  defp decoder_for(_provider), do: &claude_result/1
+
+  defp claude_result(line) do
+    case decode_result(line) do
+      {:ok, event} -> {:ok, from_result(event)}
+      :error -> :error
+    end
+  end
+
+  # Only codex's *terminal* events carry (or explicitly lack) usage —
+  # everything else (thread.started, item.*, …) is display-only and must pass
+  # through untouched, exactly like a non-JSON line.
+  defp codex_result(line) do
+    with {:ok, event} <- decode_json_object(line),
+         true <- codex_terminal?(event) do
+      fields = CodexStream.usage_fields(event, nil)
+      result_with_usage(fields)
+    else
+      _ -> :error
+    end
+  end
+
+  defp codex_terminal?(%{"type" => type}) when type in ["turn.completed", "turn.failed"], do: true
+  defp codex_terminal?(_event), do: false
+
+  # Gemini's own stream parser already knows both shapes on the wire (upstream
+  # `{"type":"result",...,"stats":{...}}` and agy's
+  # `{"event":"result","result":{...,"usage":{...}}}`) and already flags
+  # `is_error` correctly for each — reuse it rather than re-deriving the same
+  # schema knowledge here and risking the two definitions drifting apart.
+  defp gemini_result(line) do
+    with {:ok, event} <- decode_json_object(line),
+         true <- gemini_terminal?(event) do
+      fields = GeminiStream.usage_fields(event, nil)
+      result_with_usage(fields)
+    else
+      _ -> :error
+    end
+  end
+
+  # Shared by `codex_result/1` and `gemini_result/1` (bd-96mn8i round 2,
+  # finding 2). A successful line yields `{:ok, fields}`. A failed line yields
+  # `:error` (usage stays nil, the whole point of this ticket) UNLESS the
+  # provider still reported *nonzero* tokens on the way to failing — an agy
+  # quota-exhaustion result reports real input/output tokens alongside
+  # `status: "ERROR"`, and that spend is known, not unknown. Such a line
+  # yields `{:error_with_usage, fields}`: the tokens are captured, and the
+  # line still reaches the classifier as diagnostic output.
+  #
+  # Checking for *nonzero* usage rather than merely present usage matters: a
+  # genuinely token-free error (e.g. rejected before any call was made, all
+  # reported buckets literally `0`) must still record nil, not a literal
+  # zero — the exact zero-vs-unknown distinction this ticket exists to fix.
+  defp result_with_usage(fields) do
+    error? = Map.get(fields, :is_error, false)
+
+    nonzero_usage? =
+      (Map.get(fields, :tokens_in) || 0) > 0 or (Map.get(fields, :tokens_out) || 0) > 0
+
+    cond do
+      not is_number(Map.get(fields, :tokens_in)) -> :error
+      error? and nonzero_usage? -> {:error_with_usage, fields}
+      error? -> :error
+      true -> {:ok, fields}
+    end
+  end
+
+  defp gemini_terminal?(%{"type" => "result"}), do: true
+  defp gemini_terminal?(%{"event" => "result", "result" => result}), do: is_map(result)
+  defp gemini_terminal?(_event), do: false
+
+  defp decode_json_object(line) when is_binary(line) do
+    trimmed = String.trim(line)
+
+    with true <- String.starts_with?(trimmed, "{"),
+         {:ok, decoded} when is_map(decoded) <- Jason.decode(trimmed) do
+      {:ok, decoded}
+    else
+      _ -> :error
+    end
+  end
+
+  @doc """
+  Insert one `usage_events` row for a probe round-trip. Best-effort: a ledger
+  hiccup never fails the probe (the caller's verdict — quota refreshed, auth
+  ok — does not depend on it).
+
+  `source` is one of `Wardmast.Usage.Event.sources/0` (in practice `:probe` or
+  `:preflight`). `usage` is `parse/1`'s first element, or `nil` when the CLI
+  returned nothing structured — in which case the row is still written, with a
+  `cost_note` explaining the absence, so the *attempt* is visible rather than
+  the spend silently vanishing.
+
+  Options: `:workspace_id`, `:task_id`, `:provider`, `:exit_status`,
+  `:duration_ms` (fallback when the payload carried none), `:model`,
+  `:session_id`, `:repo`.
+  """
+  @spec record(atom(), usage() | nil, keyword()) :: :ok | :error
+  def record(source, usage, opts \\ []) when is_atom(source) and is_list(opts) do
+    usage = usage || %{}
+    workspace_id = Keyword.get(opts, :workspace_id)
+    provider = Keyword.get(opts, :provider)
+    account_id = probe_account_id(workspace_id, provider)
+
+    attrs = %{
+      task_id: Keyword.get(opts, :task_id),
+      source: source,
+      workspace_id: workspace_id,
+      repo: Keyword.get(opts, :repo),
+      provider_account_id: account_id,
+      provider_credential_id: Resolver.credential_id(account_id),
+      # Probes are not authoring/reviewing/implementing work — `:other` is the
+      # step enum's existing escape hatch for exactly this.
+      step: :other,
+      model: Map.get(usage, :model) || Keyword.get(opts, :model),
+      provider: provider,
+      tokens_in: Map.get(usage, :tokens_in),
+      tokens_out: Map.get(usage, :tokens_out),
+      cache_creation_tokens: Map.get(usage, :cache_creation_tokens),
+      cache_read_tokens: Map.get(usage, :cache_read_tokens),
+      thinking_tokens: Map.get(usage, :thinking_tokens),
+      cost_usd: Map.get(usage, :cost_usd),
+      cost_note: Map.get(usage, :cost_note) || cost_note(usage),
+      duration_ms: Map.get(usage, :duration_ms) || Keyword.get(opts, :duration_ms),
+      exit_status: Keyword.get(opts, :exit_status),
+      session_id: Map.get(usage, :session_id) || Keyword.get(opts, :session_id),
+      occurred_at: DateTime.utc_now(),
+      raw: Map.get(usage, :raw)
+    }
+
+    case Ash.create(Event, attrs) do
+      {:ok, _row} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.debug("Usage.Probe.record/3 swallowed (#{source}): #{inspect(reason)}")
+        :error
+    end
+  rescue
+    e ->
+      Logger.debug("Usage.Probe.record/3 raised (#{source}): #{Exception.message(e)}")
+      :error
+  end
+
+  # ---- internals ---------------------------------------------------------
+
+  # P9 (§8): a probe is issued *as* a credential, so it always has an account
+  # — even the fleet-wide `CredentialWatchdog` probe, which carries no
+  # `workspace_id` at all (`Preflight.check(adapter, [])`). Try the workspace
+  # hop first (an operator may still pass `usage_workspace_id`); fall back to
+  # `Resolver.account_id_for_probe/1`'s "sole enabled account, else the
+  # shared default" rule for the common workspace-less case.
+  defp probe_account_id(workspace_id, provider) do
+    case Resolver.account_id(workspace_id, provider) do
+      id when is_binary(id) -> id
+      nil -> Resolver.account_id_for_probe(provider)
+    end
+  end
+
+  defp cost_note(usage) do
+    cond do
+      Map.get(usage, :cost_usd) ->
+        nil
+
+      is_number(Map.get(usage, :tokens_in)) or is_number(Map.get(usage, :tokens_out)) ->
+        @tokens_no_cost_note
+
+      true ->
+        @no_usage_note
+    end
+  end
+
+  # A line is a probe result payload when it decodes to either:
+  #   * Claude's `{"type": "result"}` object (not an `is_error: true` one), or
+  #   * agy's `{"event": "result", "result": {...}}` object (not a failed
+  #     `"status"`, see `Wardmast.Agents.Gemini.Stream`'s moduledoc for the
+  #     wire schema).
+  # Everything else — plain text, a JSON array, an error payload — is
+  # diagnostic output and must survive into the classifier's haystack.
+  defp decode_result(line) when is_binary(line) do
+    trimmed = String.trim(line)
+
+    with true <- String.starts_with?(trimmed, "{"),
+         {:ok, decoded} <- Jason.decode(trimmed),
+         {:ok, event} <- success_result(decoded) do
+      {:ok, event}
+    else
+      _ -> :error
+    end
+  end
+
+  defp decode_result(_), do: :error
+
+  defp success_result(%{"type" => "result"} = event) do
+    if truthy?(event["is_error"]), do: :error, else: {:ok, event}
+  end
+
+  defp success_result(%{"event" => "result", "result" => %{} = result}) do
+    if result["status"] in [nil, "SUCCESS"], do: {:ok, result}, else: :error
+  end
+
+  defp success_result(_), do: :error
+
+  defp truthy?(true), do: true
+  defp truthy?(_), do: false
+
+  # agy's `result` payload (`"usage" => {..., "thinking_tokens" => _,
+  # "cache_read_tokens" => _}`, `"duration_seconds"`, no `"model"`/cost) is
+  # distinguished from Claude's (`"total_cost_usd"`, `"duration_ms"`,
+  # `"model"`, no `thinking_tokens`/`cache_read_tokens`) by the presence of
+  # `"thinking_tokens"` — agy always reports the bucket (possibly `0`),
+  # Claude's `result` object never carries that key at all.
+  defp from_result(%{"usage" => %{} = usage} = event) when is_map_key(usage, "thinking_tokens") do
+    %{
+      tokens_in: number(usage["input_tokens"]),
+      tokens_out: number(usage["output_tokens"]),
+      cache_read_tokens: number(usage["cache_read_tokens"]),
+      thinking_tokens: number(usage["thinking_tokens"]),
+      cost_usd: nil,
+      cost_note: @agy_cost_unavailable_note,
+      duration_ms: agy_duration_ms(event["duration_seconds"]),
+      session_id: string(event["conversation_id"]),
+      raw: event
+    }
+  end
+
+  defp from_result(%{} = event) do
+    usage = event["usage"] || %{}
+
+    %{
+      tokens_in: number(usage["input_tokens"]),
+      tokens_out: number(usage["output_tokens"]),
+      cache_creation_tokens: number(usage["cache_creation_input_tokens"]),
+      cache_read_tokens: number(usage["cache_read_input_tokens"]),
+      cost_usd: float(event["total_cost_usd"]),
+      duration_ms: number(event["duration_ms"]),
+      session_id: string(event["session_id"]),
+      model: string(event["model"]),
+      raw: event
+    }
+  end
+
+  defp agy_duration_ms(seconds) when is_number(seconds), do: round(seconds * 1000)
+  defp agy_duration_ms(_), do: nil
+
+  defp number(n) when is_integer(n), do: n
+  defp number(n) when is_float(n), do: trunc(n)
+  defp number(_), do: nil
+
+  defp float(n) when is_float(n), do: n
+  defp float(n) when is_integer(n), do: n / 1
+  defp float(_), do: nil
+
+  defp string(s) when is_binary(s) and s != "", do: s
+  defp string(_), do: nil
+end

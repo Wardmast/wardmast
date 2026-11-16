@@ -1,0 +1,862 @@
+defmodule Wardmast.Nodes.CheckoutTest do
+  @moduledoc """
+  RW11 (`docs/design/remote-workers.md` §9): seed bundle -> shadow clone -> snapshot
+  bundle -> quarantine ingest -> home clone, on fixture repos with plain `git`.
+  """
+  use ExUnit.Case, async: true
+
+  import Wardmast.Test.CheckoutFixture
+
+  alias Wardmast.NodeAgent.Checkout, as: Node
+  alias Wardmast.Nodes.Checkout
+
+  @moduletag :tmp_dir
+
+  @run "r1"
+  @branch "arbiter/run"
+
+  setup %{tmp_dir: tmp} do
+    %{home: home, base: base} = home!(tmp)
+    node = Path.join(tmp, "node")
+    File.mkdir_p!(node)
+
+    ctx = %{
+      run: @run,
+      branch: @branch,
+      base: "main",
+      home: home,
+      scratch: Path.join(tmp, "scratch")
+    }
+
+    %{home: home, base: base, node: node, ctx: ctx, tmp: tmp}
+  end
+
+  # The node half: pull the seed bundle for `home`, build the shadow.
+  defp seed!(%{home: home, node: node, tmp: tmp}, have \\ []) do
+    {:ok, seed} =
+      Checkout.seed_bundle(home,
+        run: @run,
+        branch: @branch,
+        base: "main",
+        have: have,
+        dest: Path.join(tmp, "seed-#{System.unique_integer([:positive])}.bundle")
+      )
+
+    shadow = Path.join(node, "shadow")
+
+    {:ok, info} =
+      Node.seed(%{
+        store: Path.join(node, "repos/r.git"),
+        shadow: shadow,
+        bundle: seed.path,
+        run: @run,
+        branch: @branch,
+        base: "main"
+      })
+
+    %{seed: seed, shadow: shadow, info: info}
+  end
+
+  defp package!(shadow, info, tmp, opts \\ []) do
+    dest = Path.join(tmp, "up-#{System.unique_integer([:positive])}.bundle")
+
+    Node.package(
+      Map.merge(
+        %{shadow: shadow, run: @run, branch: @branch, known: info.known, dest: dest},
+        Map.new(opts)
+      )
+    )
+  end
+
+  defp edit_shadow!(shadow) do
+    git!(shadow, ["rm", "-q", "lib/gone.txt"])
+    git!(shadow, ["mv", "lib/a.txt", "lib/renamed.txt"])
+    f = Path.join(shadow, "lib/renamed.txt")
+    File.write!(f, String.replace(File.read!(f), "line 1 ", "line ONE "))
+    File.chmod!(Path.join(shadow, "bin/run.sh"), 0o644)
+    File.chmod!(Path.join(shadow, "lib/keep.txt"), 0o755)
+    File.rm!(Path.join(shadow, "link.txt"))
+    File.ln_s!("lib/renamed.txt", Path.join(shadow, "link.txt"))
+    File.write!(Path.join(shadow, "lib/new.txt"), "new\n")
+    git!(shadow, ["add", "-A"])
+    git!(shadow, ["commit", "-q", "-m", "run commit"])
+    # uncommitted + untracked work at the moment of the snapshot
+    File.write!(Path.join(shadow, "lib/new.txt"), "new, then edited and uncommitted\n")
+    File.write!(Path.join(shadow, "untracked.sh"), "#!/bin/sh\n")
+    File.chmod!(Path.join(shadow, "untracked.sh"), 0o755)
+  end
+
+  describe "the shadow's git metadata (bd-1zp3ji)" do
+    # The shadow is bind-mounted into a container that sees only its own mounts, and git
+    # resolves every path in `.git` as written. Anything host-absolute that is not
+    # mounted breaks every git command in the run.
+    test "holds no host path but the store's objects, which the run mounts", c do
+      %{shadow: shadow} = seed!(c)
+      dot_git = Path.join(shadow, ".git")
+      store = Path.join(c.node, "repos/r.git")
+
+      # a self-contained `.git` directory, not a `gitdir:` pointer into another repo
+      assert File.dir?(dot_git)
+      refute File.exists?(Path.join(dot_git, "commondir"))
+      refute File.exists?(Path.join(dot_git, "gitdir"))
+      refute File.exists?(Path.join(dot_git, "worktrees"))
+
+      # the one borrowed path is the store's objects dir: what Run binds read-only
+      assert Node.borrowed_objects(shadow) == [Path.join(store, "objects")]
+
+      assert Node.store_objects(%Wardmast.NodeAgent.Config{node_home: c.node}) ==
+               Path.join(c.node, "repos/primary.git/objects")
+
+      # and nothing else in config / HEAD names a host path
+      config = File.read!(Path.join(dot_git, "config"))
+      refute config =~ c.node
+      refute config =~ ~r/^\s*(worktree|gitdir|include|path)\s*=/m
+      assert File.read!(Path.join(dot_git, "HEAD")) =~ ~r/\Aref: refs\/heads\/[^\n]+\n\z/
+    end
+
+    test "a shadow with no alternates borrows nothing", c do
+      %{shadow: shadow} = seed!(c)
+      File.rm!(Path.join(shadow, ".git/objects/info/alternates"))
+      assert Node.borrowed_objects(shadow) == []
+    end
+  end
+
+  describe "re-seeding a shadow (a run re-placed after a pre-push nudge)" do
+    # The pre-push recipe runs in the shadow with no network, so the deps the first
+    # session fetched (git-ignored `deps/`, `_build/`) must survive the re-seed.
+    test "keeps the git-ignored build dirs, drops every other leftover", c do
+      File.write!(Path.join(c.home, ".gitignore"), "/deps/\n/_build/\n")
+      commit_all!(c.home, "ignore build dirs")
+
+      %{shadow: shadow} = seed!(c)
+      File.mkdir_p!(Path.join(shadow, "deps/foo"))
+      File.write!(Path.join(shadow, "deps/foo/mix.exs"), "deps\n")
+      File.mkdir_p!(Path.join(shadow, "_build/test"))
+      File.write!(Path.join(shadow, "_build/test/x.beam"), "beam\n")
+      File.write!(Path.join(shadow, "stray.txt"), "stray\n")
+
+      %{shadow: ^shadow} = seed!(c)
+
+      assert File.read!(Path.join(shadow, "deps/foo/mix.exs")) == "deps\n"
+      assert File.read!(Path.join(shadow, "_build/test/x.beam")) == "beam\n"
+      refute File.exists?(Path.join(shadow, "stray.txt"))
+      assert File.exists?(Path.join(shadow, ".git"))
+    end
+
+    # bd-9xcogk: what the re-checked run's container needs to build and test offline.
+    test "keeps the compiled NIF reachable: deps/, _build/ and the priv link between them", c do
+      File.write!(Path.join(c.home, ".gitignore"), "/deps/\n/_build/\n")
+      commit_all!(c.home, "ignore build dirs")
+
+      %{shadow: shadow} = seed!(c)
+      File.mkdir_p!(Path.join(shadow, "deps/lazy_html/priv"))
+      File.write!(Path.join(shadow, "deps/lazy_html/priv/lazy_html.so"), "nif\n")
+      lib = Path.join(shadow, "_build/test/lib/lazy_html")
+      File.mkdir_p!(lib)
+      File.ln_s!("../../../../deps/lazy_html/priv", Path.join(lib, "priv"))
+
+      %{shadow: ^shadow} = seed!(c)
+
+      assert File.exists?(Path.join(shadow, "deps/lazy_html/priv/lazy_html.so"))
+      assert File.exists?(Path.join(lib, "priv/lazy_html.so"))
+    end
+  end
+
+  describe "round trip" do
+    test "exec bits, symlinks, deletions, renames and uncommitted work survive", c do
+      %{shadow: shadow, info: info} = seed!(c)
+
+      # the shadow is what the primary's home was
+      assert modes(shadow) == modes(c.home)
+
+      edit_shadow!(shadow)
+      expected = modes(shadow)
+      assert {:ok, up} = package!(shadow, info, c.tmp)
+
+      assert {:ok, result} = Checkout.ingest(up.path, c.ctx)
+
+      assert modes(c.home) == expected
+      assert modes(c.home)["abs-link"] == {:symlink, "/etc/passwd"}
+      assert modes(c.home)["dangling"] == {:symlink, "nonexistent"}
+      refute File.exists?(Path.join(c.home, "lib/gone.txt"))
+
+      diff = git!(c.home, ["diff", "--raw", "-M", c.base, @branch])
+      assert diff =~ ~r/R\d+\s+lib\/a\.txt\s+lib\/renamed\.txt/
+
+      # the committed work is the branch tip; the rest reads as uncommitted
+      assert git!(c.home, ["rev-parse", @branch]) == result.head
+      status = git!(c.home, ["status", "--porcelain"])
+      assert status =~ "lib/new.txt"
+      assert status =~ "untracked.sh"
+      refute status =~ "lib/renamed.txt"
+      assert result.status_hash == :crypto.hash(:sha256, status) |> Base.encode16(case: :lower)
+    end
+
+    test "a run with no commits and no changes ingests as a no-op", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      assert {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, result} = Checkout.ingest(up.path, c.ctx)
+      assert result.head == c.base
+      assert git!(c.home, ["status", "--porcelain"]) == ""
+    end
+
+    test "the upload is thin: it needs the objects the primary already has", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      edit_shadow!(shadow)
+      {:ok, up} = package!(shadow, info, c.tmp)
+
+      empty = Path.join(c.tmp, "empty.git")
+      git!(c.tmp, ["init", "-q", "--bare", empty])
+      assert {out, code} = git(empty, ["bundle", "verify", up.path])
+      assert code != 0
+      assert out =~ "prerequisite"
+    end
+  end
+
+  describe "a repo that tracks files under an injected path (.claude/skills)" do
+    @tracked_skill ".claude/skills/repo-own/SKILL.md"
+    @collided_skill ".claude/skills/collides/SKILL.md"
+    @injected_skill ".claude/skills/injected/SKILL.md"
+
+    # The repo tracks two skills; the run's branch is at the same commit.
+    defp track_skills!(%{home: home}) do
+      git!(home, ["checkout", "-q", "main"])
+      File.mkdir_p!(Path.join(home, ".claude/skills/repo-own"))
+      File.mkdir_p!(Path.join(home, ".claude/skills/collides"))
+      File.write!(Path.join(home, @tracked_skill), "the repo's own skill\n")
+      File.write!(Path.join(home, @collided_skill), "the repo's collided skill\n")
+      commit_all!(home, "track skills")
+      git!(home, ["checkout", "-q", @branch])
+      git!(home, ["reset", "-q", "--hard", "main"])
+    end
+
+    # What `NodeAgent.Run` does after the seed: write the primary's injected tree
+    # over the shadow's, and exclude it.
+    defp inject_skills!(shadow) do
+      files = %{
+        @tracked_skill => "the repo's own skill\n",
+        @collided_skill => "the injected skill with the same name\n",
+        @injected_skill => "arbiter-injected\n"
+      }
+
+      for {path, body} <- files do
+        File.mkdir_p!(Path.dirname(Path.join(shadow, path)))
+        File.write!(Path.join(shadow, path), body)
+      end
+
+      File.write!(Path.join(shadow, ".git/info/exclude"), "/.claude/skills\n", [:append])
+      files
+    end
+
+    test "a clean run takes the tracked files back unchanged", c do
+      track_skills!(c)
+      %{shadow: shadow, info: info} = seed!(c)
+      injected = inject_skills!(shadow)
+
+      assert {:ok, up} = package!(shadow, info, c.tmp, injected: injected)
+      assert {:ok, _} = Checkout.ingest(up.path, c.ctx)
+
+      assert File.read!(Path.join(c.home, @tracked_skill)) == "the repo's own skill\n"
+      assert File.read!(Path.join(c.home, @collided_skill)) == "the repo's collided skill\n"
+      refute File.exists?(Path.join(c.home, @injected_skill))
+      assert git!(c.home, ["status", "--porcelain"]) == ""
+    end
+
+    test "a commit on the run does not drop the tracked files either", c do
+      track_skills!(c)
+      %{shadow: shadow, info: info} = seed!(c)
+      injected = inject_skills!(shadow)
+      File.write!(Path.join(shadow, "lib/new.txt"), "new\n")
+      git!(shadow, ["add", "lib/new.txt"])
+      git!(shadow, ["commit", "-q", "-m", "run commit"])
+
+      assert {:ok, up} = package!(shadow, info, c.tmp, injected: injected)
+      assert {:ok, _} = Checkout.ingest(up.path, c.ctx)
+
+      assert File.exists?(Path.join(c.home, @tracked_skill))
+      assert File.exists?(Path.join(c.home, @collided_skill))
+      refute File.exists?(Path.join(c.home, @injected_skill))
+      assert git!(c.home, ["status", "--porcelain"]) == ""
+      refute git!(c.home, ["diff", "--name-only", "main", @branch]) =~ ".claude"
+    end
+
+    test "an edit the run makes to a tracked skill is kept", c do
+      track_skills!(c)
+      %{shadow: shadow, info: info} = seed!(c)
+      injected = inject_skills!(shadow)
+      File.write!(Path.join(shadow, @tracked_skill), "edited by the run\n")
+
+      assert {:ok, up} = package!(shadow, info, c.tmp, injected: injected)
+      assert {:ok, _} = Checkout.ingest(up.path, c.ctx)
+
+      assert File.read!(Path.join(c.home, @tracked_skill)) == "edited by the run\n"
+      refute File.exists?(Path.join(c.home, @injected_skill))
+    end
+
+    test "a tracked skill the run deleted stays deleted", c do
+      track_skills!(c)
+      %{shadow: shadow, info: info} = seed!(c)
+      injected = inject_skills!(shadow)
+      File.rm!(Path.join(shadow, @tracked_skill))
+
+      assert {:ok, up} = package!(shadow, info, c.tmp, injected: injected)
+      assert {:ok, _} = Checkout.ingest(up.path, c.ctx)
+
+      refute File.exists?(Path.join(c.home, @tracked_skill))
+    end
+
+    test "even a node that is not told what was injected keeps the tracked files", c do
+      track_skills!(c)
+      %{shadow: shadow, info: info} = seed!(c)
+      inject_skills!(shadow)
+
+      assert {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, _} = Checkout.ingest(up.path, c.ctx)
+
+      assert File.exists?(Path.join(c.home, @tracked_skill))
+      refute File.exists?(Path.join(c.home, @injected_skill))
+    end
+  end
+
+  describe "seed bundle" do
+    test "is thin against `have` and falls back to full for unknown shas", c do
+      full = seed!(c)
+      assert full.seed.thin? == false
+
+      # the target has moved past what the node holds, so its tip is a ref the thin
+      # bundle still carries
+      git!(c.home, ["checkout", "-q", "main"])
+      File.write!(Path.join(c.home, "lib/newer.txt"), "newer\n")
+      _ = commit_all!(c.home, "newer")
+      git!(c.home, ["checkout", "-q", @branch])
+
+      File.write!(Path.join(c.home, "lib/more.txt"), "more\n")
+      tip = commit_all!(c.home, "more")
+
+      # the same node, which already holds the old base
+      thin = seed!(c, [c.base])
+
+      assert thin.seed.thin?
+      assert thin.seed.bytes < full.seed.bytes
+      assert thin.seed.refs["refs/heads/#{@branch}"] == tip
+
+      unknown = String.duplicate("a", 40)
+      fallback = seed!(%{c | node: Path.join(c.tmp, "node3")}, [unknown])
+      refute fallback.seed.thin?
+    end
+
+    # bd-373tce: a re-dispatched branch with no commits of its own, cut from a base
+    # that has since moved on. The node holds the newer base from an earlier run, so
+    # the branch tip is an ancestor of what it has: a thin bundle leaves the branch
+    # ref out, and the seed failed with :no_branch_in_seed.
+    test "carries the branch ref when its tip is an ancestor of what the node holds", c do
+      advance_main = fn name ->
+        git!(c.home, ["checkout", "-q", "main"])
+        File.write!(Path.join(c.home, "lib/#{name}.txt"), "#{name}\n")
+        sha = commit_all!(c.home, name)
+        git!(c.home, ["checkout", "-q", @branch])
+        sha
+      end
+
+      # An earlier run left the node holding a newer main than the branch was cut from.
+      held = advance_main.("newer")
+      _ = seed!(c)
+      advance_main.("newest")
+
+      assert %{seed: %{thin?: false, refs: refs}, info: %{head: head}} = seed!(c, [held])
+      assert refs["refs/heads/#{@branch}"] == c.base
+      assert head == c.base
+    end
+
+    # bd-15vnqm: a node that already holds the base tip (an earlier run on the same
+    # repo) is seeded thin, and git leaves a ref whose tip the `^have` prerequisites
+    # reach out of the bundle. The shadow then had `<branch>` but no `origin/<base>`,
+    # and a conflict pass could not rebase ("clone has no origin/main").
+    test "carries the base ref when the node already holds the base tip", c do
+      _ = seed!(c)
+      File.write!(Path.join(c.home, "lib/more.txt"), "more\n")
+      tip = commit_all!(c.home, "more")
+
+      assert %{seed: %{refs: refs}, shadow: shadow, info: info} = seed!(c, [c.base])
+      assert refs["refs/heads/#{@branch}"] == tip
+      assert refs["refs/heads/main"] == c.base
+      assert info.head == tip
+      assert git!(shadow, ["rev-parse", "refs/remotes/origin/main"]) == c.base
+    end
+
+    test "when the node already has every tip it still gets a usable bundle", c do
+      assert %{seed: %{thin?: false, refs: refs}} = seed!(c, [c.base])
+      assert refs["refs/heads/#{@branch}"] == c.base
+    end
+  end
+
+  # bd-4ic681: a resume's home clone holds the work its run was cut off in the middle
+  # of. The seed carries it as the run's first checkpoint, which the node restores
+  # uncommitted and the ingest's hand-off treats as what the home clone held.
+  describe "seed bundle of a home clone with uncommitted work" do
+    defp dirty_home!(home) do
+      File.write!(Path.join(home, "lib/keep.txt"), "keep, edited and not committed\n")
+      File.rm!(Path.join(home, "lib/gone.txt"))
+      File.write!(Path.join(home, "notes.txt"), "half-done\n")
+      File.chmod!(Path.join(home, "bin/run.sh"), 0o644)
+    end
+
+    test "carries it as the run's checkpoint, restored uncommitted on the node", c do
+      dirty_home!(c.home)
+      expected = modes(c.home)
+      status = git!(c.home, ["status", "--porcelain"])
+
+      %{seed: seed, shadow: shadow, info: info} = seed!(c)
+
+      checkpoint = seed.refs["refs/arbiter/checkpoint/#{@run}"]
+      assert is_binary(checkpoint)
+      assert git!(c.home, ["rev-parse", "refs/arbiter/checkpoint/#{@run}"]) == checkpoint
+      assert git!(c.home, ["rev-parse", checkpoint <> "^"]) == c.base
+
+      # the node's shadow: the branch at the tip, the work tree at the checkpoint
+      assert info.head == c.base
+      assert modes(shadow) == expected
+      assert git!(shadow, ["status", "--porcelain"]) == status
+
+      # and the home clone is left exactly as it was: work tree, index, branch
+      assert modes(c.home) == expected
+      assert git!(c.home, ["status", "--porcelain"]) == status
+      assert git!(c.home, ["diff", "--cached", "--name-only"]) == ""
+      assert git!(c.home, ["rev-parse", "HEAD"]) == c.base
+    end
+
+    test "leaves out injected config, the exclude set and the run's seeded paths", c do
+      token = "arb-mcp-token-#{System.unique_integer([:positive])}"
+
+      File.write!(
+        Path.join(c.home, ".mcp.json"),
+        ~s({"mcpServers":{"arbiter":{"headers":{"Authorization":"Bearer #{token}"}}}})
+      )
+
+      File.mkdir_p!(Path.join(c.home, "deps/dep"))
+      File.write!(Path.join(c.home, "deps/dep/mix.exs"), "dep\n")
+      File.mkdir_p!(Path.join(c.home, "priv/seeded"))
+      File.write!(Path.join(c.home, "priv/seeded/blob"), "seeded\n")
+      File.write!(Path.join(c.home, "notes.txt"), "half-done\n")
+
+      {:ok, seed} =
+        Checkout.seed_bundle(c.home,
+          run: @run,
+          branch: @branch,
+          base: "main",
+          seeded_paths: ["priv/seeded"],
+          dest: Path.join(c.tmp, "seed-filtered.bundle")
+        )
+
+      checkpoint = seed.refs["refs/arbiter/checkpoint/#{@run}"]
+      tree = git!(c.home, ["ls-tree", "-r", "--name-only", checkpoint])
+
+      assert tree =~ "notes.txt"
+      refute tree =~ ".mcp.json"
+      refute tree =~ "deps/"
+      refute tree =~ "priv/seeded"
+      refute File.read!(seed.path) =~ token
+    end
+
+    test "a clean home clone gets no checkpoint", c do
+      %{seed: seed} = seed!(c)
+
+      refute Map.has_key?(seed.refs, "refs/arbiter/checkpoint/#{@run}")
+
+      assert {_, code} =
+               git(c.home, ["rev-parse", "-q", "--verify", "refs/arbiter/checkpoint/r1"])
+
+      assert code != 0
+    end
+
+    test "a run that already has a checkpoint is seeded from it, not from the work tree", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      edit_shadow!(shadow)
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, %{snapshot: snapshot}} = Checkout.ingest(up.path, c.ctx)
+
+      %{seed: again} = seed!(%{c | node: Path.join(c.tmp, "node-again")})
+      assert again.refs["refs/arbiter/checkpoint/#{@run}"] == snapshot
+    end
+
+    test "untracked work over the cap is a veto: the run is not placed", c do
+      File.write!(Path.join(c.home, "big.bin"), :binary.copy("x", 4096))
+
+      assert {:error, {:veto, :untracked_size, _}} =
+               Checkout.seed_bundle(c.home,
+                 run: @run,
+                 branch: @branch,
+                 base: "main",
+                 max_untracked_bytes: 1024,
+                 dest: Path.join(c.tmp, "seed-big.bundle")
+               )
+    end
+
+    # A local container ran in this clone before; nothing its `.git/config` names runs
+    # on the primary while the work tree is snapshotted.
+    test "runs no hook, fsmonitor or filter the home clone's own config names", c do
+      pwned = Path.join(c.tmp, "pwned")
+      git!(c.home, ["config", "core.fsmonitor", "touch #{pwned}-fsmonitor"])
+      git!(c.home, ["config", "filter.evil.clean", "touch #{pwned}-filter; cat"])
+      File.write!(Path.join(c.home, ".gitattributes"), "* filter=evil\n")
+      hook = Path.join(c.home, ".git/hooks/post-checkout")
+      File.write!(hook, "#!/bin/sh\ntouch #{pwned}-hook\n")
+      File.chmod!(hook, 0o755)
+      dirty_home!(c.home)
+
+      %{seed: seed} = seed!(c)
+
+      assert is_binary(seed.refs["refs/arbiter/checkpoint/#{@run}"])
+      assert Path.wildcard(pwned <> "*") == []
+    end
+
+    test "the node's work comes back over the seeded checkpoint: what it deleted is gone", c do
+      dirty_home!(c.home)
+      %{shadow: shadow, info: info} = seed!(c)
+
+      File.rm!(Path.join(shadow, "notes.txt"))
+      File.write!(Path.join(shadow, "lib/new.txt"), "from the node\n")
+      git!(shadow, ["add", "lib/new.txt"])
+      git!(shadow, ["commit", "-q", "-m", "node commit"])
+      expected = modes(shadow)
+
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, %{head: head}} = Checkout.ingest(up.path, c.ctx)
+
+      assert git!(c.home, ["rev-parse", "refs/heads/#{@branch}"]) == head
+      refute File.exists?(Path.join(c.home, "notes.txt"))
+      assert modes(c.home) == expected
+    end
+  end
+
+  describe "ingest quarantine" do
+    test "executes no hooks, in the quarantine or the home clone", c do
+      marker = Path.join(c.tmp, "HOOK_RAN")
+
+      for hook <- ~w(reference-transaction post-checkout post-merge post-index-change pre-auto-gc) do
+        path = Path.join(c.home, ".git/hooks/#{hook}")
+        File.write!(path, "#!/bin/sh\necho #{hook} >> #{marker}\n")
+        File.chmod!(path, 0o755)
+      end
+
+      %{shadow: shadow, info: info} = seed!(c)
+      edit_shadow!(shadow)
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, _} = Checkout.ingest(up.path, c.ctx)
+      refute File.exists?(marker)
+    end
+
+    test "strips excluded paths from the snapshot on the primary, whatever the node excluded",
+         c do
+      %{shadow: shadow, info: info} = seed!(c)
+      # a compromised node edits its own exclude file, so the node-side filter hides nothing
+      File.write!(Path.join(shadow, ".git/info/exclude"), "")
+      File.mkdir_p!(Path.join(shadow, "deps/x"))
+      File.write!(Path.join(shadow, "deps/x/mod.ex"), "injected\n")
+      File.write!(Path.join(shadow, ".mcp.json"), ~s({"mcpServers":{}}))
+      File.mkdir_p!(Path.join(shadow, ".codex"))
+      File.write!(Path.join(shadow, ".codex/config.toml"), "x\n")
+      File.write!(Path.join(shadow, "lib/real.txt"), "real\n")
+
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, result} = Checkout.ingest(up.path, c.ctx)
+
+      assert File.exists?(Path.join(c.home, "lib/real.txt"))
+      refute File.exists?(Path.join(c.home, "deps"))
+      refute File.exists?(Path.join(c.home, ".mcp.json"))
+      refute File.exists?(Path.join(c.home, ".codex"))
+      assert Enum.sort(result.filtered) == [".codex/config.toml", ".mcp.json", "deps/x/mod.ex"]
+      # nor does the checkpoint ref keep them
+      refute git!(c.home, ["ls-tree", "-r", "--name-only", result.snapshot]) =~ "deps/x"
+    end
+
+    test "keeps a node-edited .arbiter/Containerfile while dropping other .arbiter/ files", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      File.mkdir_p!(Path.join(shadow, ".arbiter"))
+      File.write!(Path.join(shadow, ".arbiter/Containerfile"), "FROM scratch\n")
+      File.write!(Path.join(shadow, ".arbiter/INBOX"), "direction\n")
+      File.write!(Path.join(shadow, "lib/real.txt"), "real\n")
+
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, result} = Checkout.ingest(up.path, c.ctx)
+
+      assert File.read!(Path.join(c.home, ".arbiter/Containerfile")) == "FROM scratch\n"
+      refute File.exists?(Path.join(c.home, ".arbiter/INBOX"))
+      assert result.filtered == [".arbiter/INBOX"]
+    end
+
+    test "a tracked .arbiter/Containerfile the node left alone stays in the home clone (bd-g9sh0j)",
+         c do
+      git!(c.home, ["checkout", "-q", "main"])
+      File.mkdir_p!(Path.join(c.home, ".arbiter"))
+      File.write!(Path.join(c.home, ".arbiter/Containerfile"), "FROM scratch\n")
+      base = commit_all!(c.home, "tracked Containerfile")
+      git!(c.home, ["checkout", "-q", @branch])
+      git!(c.home, ["merge", "-q", "--ff-only", "main"])
+      c = %{c | base: base}
+      File.write!(Path.join(c.home, ".arbiter/INBOX"), "direction\n")
+
+      %{shadow: shadow, info: info} = seed!(c)
+      File.write!(Path.join(shadow, "lib/real.txt"), "real\n")
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, _} = Checkout.ingest(up.path, c.ctx)
+
+      assert File.read!(Path.join(c.home, ".arbiter/Containerfile")) == "FROM scratch\n"
+      refute git!(c.home, ["status", "--porcelain"]) =~ "Containerfile"
+    end
+
+    test "a path the primary's own base tracks is not stripped when unchanged", c do
+      # the base branch itself tracks `.mcp.json`
+      git!(c.home, ["checkout", "-q", "main"])
+      File.write!(Path.join(c.home, ".mcp.json"), "{}\n")
+      base = commit_all!(c.home, "tracked mcp")
+      git!(c.home, ["checkout", "-q", @branch])
+      git!(c.home, ["merge", "-q", "--ff-only", "main"])
+      c = %{c | base: base}
+      %{shadow: shadow, info: info} = seed!(c)
+      File.write!(Path.join(shadow, "lib/real.txt"), "real\n")
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, %{filtered: []}} = Checkout.ingest(up.path, c.ctx)
+      assert File.exists?(Path.join(c.home, ".mcp.json"))
+    end
+
+    test "run-specific seeded paths are stripped too", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      File.mkdir_p!(Path.join(shadow, "priv/plts"))
+      File.write!(Path.join(shadow, "priv/plts/x.plt"), "plt\n")
+      {:ok, up} = package!(shadow, info, c.tmp)
+      ctx = Map.put(c.ctx, :seeded_paths, ["priv/plts"])
+      assert {:ok, %{filtered: ["priv/plts/x.plt"]}} = Checkout.ingest(up.path, ctx)
+      refute File.exists?(Path.join(c.home, "priv/plts"))
+    end
+
+    test "rejects a tree that carries .git/config or hooks (fsck is the gate)", c do
+      for parts <- [
+            [".git", "config"],
+            [".git", "hooks", "pre-commit"],
+            ["sub", ".git", "config"]
+          ] do
+        bundle = evil_bundle!(c, parts)
+        assert {:error, {:fsck, _}} = Checkout.ingest(bundle, c.ctx)
+        # nothing landed in the home clone
+        assert git!(c.home, ["rev-parse", @branch]) == c.base
+        assert git!(c.home, ["for-each-ref", "refs/arbiter"]) == ""
+      end
+    end
+
+    test "rejects refs outside the allowlist, tags included", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      File.write!(Path.join(shadow, "f"), "x\n")
+      git!(shadow, ["add", "-A"])
+      git!(shadow, ["commit", "-q", "-m", "x"])
+      _ = info
+
+      for extra <- ["refs/heads/other", "refs/tags/sneaky", "refs/remotes/origin/evil"] do
+        git!(shadow, ["update-ref", extra, "HEAD"])
+        git!(shadow, ["update-ref", "refs/arbiter/snapshot/#{@run}", "HEAD"])
+        bundle = Path.join(c.tmp, "extra-#{String.replace(extra, "/", "_")}.bundle")
+        snap = "refs/arbiter/snapshot/#{@run}"
+        git!(shadow, ["bundle", "create", bundle, @branch, snap, extra, "^" <> c.base])
+        assert {:error, {:ref_not_allowed, ^extra}} = Checkout.ingest(bundle, c.ctx)
+      end
+    end
+
+    test "rejects a snapshot that is not a child of the run branch tip", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      File.write!(Path.join(shadow, "f"), "x\n")
+      git!(shadow, ["add", "-A"])
+      git!(shadow, ["commit", "-q", "-m", "tip"])
+      # a snapshot whose parent is an unrelated root commit
+      stray = raw_commit!(shadow, ["ok.txt"], "x\n", nil, c.tmp)
+      git!(shadow, ["update-ref", "refs/arbiter/snapshot/#{@run}", stray])
+      bundle = Path.join(c.tmp, "stray.bundle")
+
+      git!(shadow, [
+        "bundle",
+        "create",
+        bundle,
+        @branch,
+        "refs/arbiter/snapshot/#{@run}",
+        "^" <> hd(info.known)
+      ])
+
+      assert {:error, :snapshot_not_on_branch} = Checkout.ingest(bundle, c.ctx)
+    end
+
+    test "enforces the bundle size cap", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      File.write!(Path.join(shadow, "big.txt"), :crypto.strong_rand_bytes(20_000))
+      {:ok, up} = package!(shadow, info, c.tmp)
+
+      assert {:error, {:too_large, _}} =
+               Checkout.ingest(up.path, Map.put(c.ctx, :max_bytes, 5_000))
+
+      assert {:ok, _} = Checkout.ingest(up.path, Map.put(c.ctx, :max_bytes, 5_000_000))
+    end
+
+    test "enforces the object-count cap", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      for i <- 1..30, do: File.write!(Path.join(shadow, "f#{i}.txt"), "file #{i}\n")
+      {:ok, up} = package!(shadow, info, c.tmp)
+
+      assert {:error, {:too_many_objects, _}} =
+               Checkout.ingest(up.path, Map.put(c.ctx, :max_objects, 10))
+    end
+
+    test "a bundle whose prerequisites the primary lacks is refused", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      File.write!(Path.join(shadow, "f"), "x\n")
+      {:ok, up} = package!(shadow, info, c.tmp)
+      other = init_repo!(Path.join(c.tmp, "other"))
+      File.write!(Path.join(other, "unrelated"), "x\n")
+      commit_all!(other, "unrelated")
+      git!(other, ["checkout", "-q", "-b", @branch])
+      ctx = %{c.ctx | home: other}
+      assert {:error, {:prerequisites_missing, _}} = Checkout.ingest(up.path, ctx)
+    end
+  end
+
+  describe "vetoes" do
+    test "a submodule (gitlink) in the snapshot is vetoed", c do
+      %{shadow: shadow, info: info} = seed!(c)
+
+      git!(shadow, [
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        "160000,#{String.duplicate("a", 40)},vendor/dep"
+      ])
+
+      git!(shadow, ["commit", "-q", "-m", "submodule"])
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:error, {:veto, :submodule, _}} = Checkout.ingest(up.path, c.ctx)
+      assert git!(c.home, ["rev-parse", @branch]) == c.base
+    end
+
+    test ".gitmodules is vetoed", c do
+      %{shadow: shadow, info: info} = seed!(c)
+
+      File.write!(
+        Path.join(shadow, ".gitmodules"),
+        "[submodule \"x\"]\n\tpath = x\n\turl = ../x\n"
+      )
+
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:error, {:veto, :submodule, _}} = Checkout.ingest(up.path, c.ctx)
+    end
+
+    test "LFS: a filter=lfs attribute, or a pointer blob, is vetoed", c do
+      %{shadow: shadow, info: info} = seed!(c)
+
+      File.write!(
+        Path.join(shadow, ".gitattributes"),
+        "*.bin filter=lfs diff=lfs merge=lfs -text\n"
+      )
+
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:error, {:veto, :lfs, _}} = Checkout.ingest(up.path, c.ctx)
+
+      File.rm!(Path.join(shadow, ".gitattributes"))
+
+      File.write!(
+        Path.join(shadow, "big.dat"),
+        "version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 12345\n"
+      )
+
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:error, {:veto, :lfs, _}} = Checkout.ingest(up.path, c.ctx)
+    end
+
+    test "untracked files over the cap are vetoed on the node and again on the primary", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      File.write!(Path.join(shadow, "huge.bin"), :binary.copy(<<0>>, 4_000))
+
+      assert {:error, {:veto, :untracked_size, _}} =
+               package!(shadow, info, c.tmp, max_untracked_bytes: 1_000)
+
+      # a node that skips its own check is still refused by the primary
+      {:ok, up} = package!(shadow, info, c.tmp)
+      ctx = Map.put(c.ctx, :max_untracked_bytes, 1_000)
+      assert {:error, {:veto, :untracked_size, _}} = Checkout.ingest(up.path, ctx)
+      assert {:ok, _} = Checkout.ingest(up.path, Map.put(c.ctx, :max_untracked_bytes, 50_000_000))
+    end
+
+    test "Checkout.veto/2 is the placement check on a base ref", c do
+      assert :ok = Checkout.veto(c.home, "main")
+      File.write!(Path.join(c.home, ".gitattributes"), "*.bin filter=lfs\n")
+      sha = commit_all!(c.home, "lfs")
+      assert {:error, {:veto, :lfs, _}} = Checkout.veto(c.home, sha)
+    end
+  end
+
+  describe "checkpoint" do
+    test "a checkpoint is kept as a ref and can be restored into the home clone and a new shadow",
+         c do
+      %{shadow: shadow, info: info} = seed!(c)
+      edit_shadow!(shadow)
+      expected = modes(shadow)
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, %{checkpoint_ref: ref}} = Checkout.ingest(up.path, c.ctx)
+      assert ref == "refs/arbiter/checkpoint/#{@run}"
+
+      # the home clone is wiped back to the branch tip (a re-dispatch after the node was lost)
+      git!(c.home, ["reset", "--hard", "-q"])
+      git!(c.home, ["clean", "-fdq"])
+      refute File.exists?(Path.join(c.home, "untracked.sh"))
+
+      assert {:ok, _} = Checkout.restore(c.home, @run, @branch)
+      assert modes(c.home) == expected
+      assert git!(c.home, ["status", "--porcelain"]) =~ "untracked.sh"
+
+      # a fresh node is seeded from the checkpoint: same tree, same uncommitted state
+      fresh = seed!(%{c | node: Path.join(c.tmp, "node-fresh")})
+      assert modes(fresh.shadow) == expected
+      assert git!(fresh.shadow, ["status", "--porcelain"]) =~ "untracked.sh"
+    end
+
+    test "a later checkpoint drops files the earlier one added but never committed", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      edit_shadow!(shadow)
+      {:ok, up1} = package!(shadow, info, c.tmp)
+      assert {:ok, _} = Checkout.ingest(up1.path, c.ctx)
+      assert File.exists?(Path.join(c.home, "untracked.sh"))
+
+      # the agent abandons its scratch file and the uncommitted edit, then checkpoints again
+      File.rm!(Path.join(shadow, "untracked.sh"))
+      git!(shadow, ["checkout", "--", "lib/new.txt"])
+      expected = modes(shadow)
+      {:ok, up2} = package!(shadow, info, c.tmp)
+      assert {:ok, _} = Checkout.ingest(up2.path, c.ctx)
+
+      refute File.exists?(Path.join(c.home, "untracked.sh"))
+      assert modes(c.home) == expected
+      assert git!(c.home, ["status", "--porcelain"]) == ""
+    end
+
+    test "restoring over the state the checkpoint already left is idempotent", c do
+      %{shadow: shadow, info: info} = seed!(c)
+      edit_shadow!(shadow)
+      expected = modes(shadow)
+      {:ok, up} = package!(shadow, info, c.tmp)
+      assert {:ok, ingested} = Checkout.ingest(up.path, c.ctx)
+
+      assert {:ok, restored} = Checkout.restore(c.home, @run, @branch)
+      assert restored.status_hash == ingested.status_hash
+      assert modes(c.home) == expected
+    end
+  end
+
+  # -- helpers -----------------------------------------------------------------
+
+  # A bundle whose snapshot commit (child of the run tip) holds `parts` as a path.
+  defp evil_bundle!(c, parts) do
+    %{shadow: shadow, info: _} =
+      seed!(%{c | node: Path.join(c.tmp, "evil-node-#{System.unique_integer([:positive])}")})
+
+    commit = raw_commit!(shadow, parts, "[core]\n\tfsmonitor = touch /tmp/pwned\n", c.base, c.tmp)
+    git!(shadow, ["update-ref", "refs/arbiter/snapshot/#{@run}", commit])
+    bundle = Path.join(c.tmp, "evil-#{System.unique_integer([:positive])}.bundle")
+    git!(shadow, ["bundle", "create", bundle, "refs/arbiter/snapshot/#{@run}", "^" <> c.base])
+    bundle
+  end
+end

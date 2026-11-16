@@ -25,7 +25,7 @@ referenced secrets only.
 Values are resolved lazily, cached **in memory only** for
 `ARBITER_SECRET_CACHE_TTL` seconds (default 300; `0` disables the cache), never
 written to disk or logged, and added to the redaction set
-(`Arbiter.Redaction`). If a refresh fails, the last value keeps being served and a
+(`Wardmast.Redaction`). If a refresh fails, the last value keeps being served and a
 warning naming the pointer (never a value) is logged.
 
 ## 1. `credentials_ref` (trackers, mergers, agents)
@@ -56,14 +56,14 @@ AWS_REGION=eu-west-1
 * `ARBITER_CLOAK_KEY_GENERATION` is a number, not a secret, and stays inline.
   Key rotation (`docs/cloak-key-rotation.md`) works unchanged:
   `ARBITER_CLOAK_KEY_OLD_REF` points at the retired key.
-* `bin/arbiter eval` (migrations, the deploy backup) runs `runtime.exs` too, so
+* `bin/wardmast eval` (migrations, the deploy backup) runs `runtime.exs` too, so
   it needs the same ambient AWS access as the service.
 
 ## 3. `GITHUB_TOKEN`
 
 The merger/tracker default `credentials_ref: "env:GITHUB_TOKEN"` honours
 `GITHUB_TOKEN_REF`, as do the server's own direct reads (release update check,
-self-deploy, the worker CLI fetcher, the `Arbiter.GitHub` fallback). In general
+self-deploy, the worker CLI fetcher, the `Wardmast.GitHub` fallback). In general
 `env:NAME` resolves `NAME_REF` first. With `secret:` refs on the merger/tracker
 and `GITHUB_TOKEN_REF` (or no token) in the env file, `GITHUB_TOKEN` can leave the
 environment entirely.

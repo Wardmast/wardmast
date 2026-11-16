@@ -1,0 +1,61 @@
+defmodule Mix.Tasks.Wardmast.BackfillTaskStatuses do
+  @shortdoc "Close tasks that have feat() commits on main but are not yet :closed"
+  @moduledoc """
+  Walk `git log` for `feat(<task-id>)` commits on a branch and close any
+  matching tasks whose lifecycle `state` is not yet `:closed`.
+
+  This is a recovery tool for the task-status drift the cutover postmortem
+  documented: the original Dolt source-of-truth fell behind during
+  late-Phase implementation, and the importer carried stale open
+  statuses forward into Postgres.
+
+  ## Usage
+
+      mix wardmast.backfill_task_statuses              # dry-run (prints proposals)
+      mix wardmast.backfill_task_statuses --apply      # actually close tasks
+      mix wardmast.backfill_task_statuses --branch dev # use a different branch
+
+  ## What you see in dry-run
+
+  A list of tasks that would be closed, with the commit SHA and subject
+  that justified each closure. No writes happen. Review the list, then
+  re-run with `--apply` to commit the changes.
+
+  ## Release installs
+
+  This is a thin CLI wrapper over `Wardmast.Release.backfill/2`, which is
+  Mix-free and callable from a release install with no Elixir toolchain:
+
+      bin/wardmast eval 'Wardmast.Release.backfill(:task_statuses)'             # dry-run
+      bin/wardmast eval 'Wardmast.Release.backfill(:task_statuses, apply?: true)'
+
+  It starts only Ash + the Ecto repo, never the full app-boot task ("app.start"):
+  booting the full application next to a live coordinator would start a
+  second endpoint on the same port, a second Autopilot and a second set of
+  patrols against the same database.
+  """
+
+  use Mix.Task
+
+  @switches [apply: :boolean, branch: :string]
+
+  @impl Mix.Task
+  def run(argv) do
+    {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+
+    Mix.Task.run("app.config")
+
+    backfill_opts =
+      [apply?: opts[:apply] == true]
+      |> maybe_put(opts, :branch)
+
+    Wardmast.Release.backfill(:task_statuses, Keyword.put(backfill_opts, :hint, "--apply"))
+  end
+
+  defp maybe_put(acc, opts, key) do
+    case Keyword.fetch(opts, key) do
+      {:ok, val} -> Keyword.put(acc, key, val)
+      :error -> acc
+    end
+  end
+end

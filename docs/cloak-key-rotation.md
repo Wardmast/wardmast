@@ -1,9 +1,9 @@
 # Rotating `ARBITER_CLOAK_KEY`
 
-Runbook for rotating the AES-256-GCM key `Arbiter.Vault` uses to encrypt
+Runbook for rotating the AES-256-GCM key `Wardmast.Vault` uses to encrypt
 `ash_cloak`-protected columns at rest (`workspaces.encrypted_secrets`,
 `workspaces.encrypted_worker_env`, `provider_credentials.encrypted_secret`
-— see `Arbiter.Vault.Rotation` for the authoritative, generated-from-code
+— see `Wardmast.Vault.Rotation` for the authoritative, generated-from-code
 list).
 
 Use this whenever the current key is considered exposed (leaked into a
@@ -28,7 +28,7 @@ just bumps the generation by one.
 `ARBITER_CLOAK_KEY_GENERATION`. Bumping the generation without also setting
 `ARBITER_CLOAK_KEY_OLD` (or vice versa) leaves the previous generation's
 data without a matching cipher — nothing decrypts it. See
-`Arbiter.Vault`'s moduledoc for the full mechanics.
+`Wardmast.Vault`'s moduledoc for the full mechanics.
 
 ## Procedure
 
@@ -49,7 +49,7 @@ Rotating from generation N to N+1:
    ARBITER_CLOAK_KEY_GENERATION="<N+1>"
    ```
 
-   On boot, `Arbiter.Vault.init/1` now registers **two** ciphers: `:default`
+   On boot, `Wardmast.Vault.init/1` now registers **two** ciphers: `:default`
    (tag `AES.GCM.V<N+1>`, the new key — used for all new writes) and
    `:retired` (tag `AES.GCM.V<N>`, the old key — decrypt-only). Existing
    rows keep decrypting correctly; nothing needs to happen synchronously
@@ -58,7 +58,7 @@ Rotating from generation N to N+1:
 3. **Check what's outstanding** (read-only, safe to run any time):
 
    ```sh
-   mix arbiter.rotate_cloak_key --verify
+   mix wardmast.rotate_cloak_key --verify
    ```
 
 4. **Sweep** — re-encrypts every `ash_cloak` column under the new cipher.
@@ -70,7 +70,7 @@ Rotating from generation N to N+1:
    (changed concurrently)" and just need a re-run of `--sweep` to pick up.
 
    ```sh
-   mix arbiter.rotate_cloak_key --sweep
+   mix wardmast.rotate_cloak_key --sweep
    ```
 
 5. **Verify again** — must report zero rows left on the retired cipher
@@ -78,12 +78,12 @@ Rotating from generation N to N+1:
    concurrently, re-run `--sweep` until it reports none, then verify:
 
    ```sh
-   mix arbiter.rotate_cloak_key --verify
+   mix wardmast.rotate_cloak_key --verify
    ```
 
 6. **Drop the old key** — remove `ARBITER_CLOAK_KEY_OLD` from the
    environment, **leave `ARBITER_CLOAK_KEY_GENERATION` at `<N+1>`
-   permanently**, and redeploy. `Arbiter.Vault.init/1` then registers only
+   permanently**, and redeploy. `Wardmast.Vault.init/1` then registers only
    the `:default` cipher (still tag `AES.GCM.V<N+1>`, matching the now
    fully-migrated data); the retired key is no longer reachable from a
    running process. Reverting the generation here would strand the swept
@@ -99,8 +99,8 @@ Rotating from generation N to N+1:
 - Nothing here ever logs plaintext or writes it to disk — the sweep task
   prints only table/column names and row counts.
 - New resources that add a `cloak do ... end` block must be added to
-  `Arbiter.Vault.Rotation`'s `@columns` list — it is not auto-discovered, but
-  a test (`Arbiter.Vault.RotationTest` "@columns matches every ash_cloak
+  `Wardmast.Vault.Rotation`'s `@columns` list — it is not auto-discovered, but
+  a test (`Wardmast.Vault.RotationTest` "@columns matches every ash_cloak
   attribute in the app") derives the true set from the Ash domains and fails
   the suite if it drifts.
 - This rotates the *storage* key only. Rotating the underlying provider

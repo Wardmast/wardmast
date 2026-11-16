@@ -1,4 +1,4 @@
-defmodule Arbiter.Umbrella.MixProject do
+defmodule Wardmast.Umbrella.MixProject do
   use Mix.Project
 
   @version (case System.get_env("RELEASE_VERSION") do
@@ -31,7 +31,7 @@ defmodule Arbiter.Umbrella.MixProject do
   #
   # dialyxir defaults `plt_core_path`/`plt_local_path` to the *current*
   # project's build directory. In an umbrella that means `mix dialyzer` run
-  # from apps/arbiter, apps/arbiter_web and apps/arbiter_cli would each build
+  # from apps/wardmast, apps/wardmast_web and apps/wardmast_cli would each build
   # and maintain a separate copy of the same multi-minute PLT — three PLTs
   # covering an almost identical dependency tree, none of them reused. Pinning
   # both paths to a single umbrella-root directory (each child app points at
@@ -51,7 +51,7 @@ defmodule Arbiter.Umbrella.MixProject do
       plt_core_path: "priv/plts",
       plt_local_path: "priv/plts",
       # :mix and :eex are build/runtime-optional apps that lib/mix/tasks and
-      # arbiter_cli's escript templates reference; without them dialyzer
+      # wardmast_cli's escript templates reference; without them dialyzer
       # reports unknown_function for every Mix.* and EEx.* call.
       plt_add_apps: [:mix, :eex, :ex_unit],
       ignore_warnings: ".dialyzer_ignore.exs",
@@ -71,7 +71,7 @@ defmodule Arbiter.Umbrella.MixProject do
   defp releases do
     [
       arbiter: [
-        applications: [arbiter: :permanent, arbiter_web: :permanent],
+        applications: [arbiter: :permanent, wardmast_web: :permanent],
         include_executables_for: [:unix],
         version: @version,
         steps: [:assemble, &restrict_cookie/1]
@@ -131,23 +131,23 @@ defmodule Arbiter.Umbrella.MixProject do
       # run `mix setup` in all child apps
       setup: ["cmd mix setup"],
       precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"],
-      # bd-2oelme: `:arbiter`'s "test" alias runs `ecto.create`/`ecto.migrate`
-      # against the shared, pool_size: 1 sandboxed `Arbiter.Repo` (see
+      # bd-2oelme: `:wardmast`'s "test" alias runs `ecto.create`/`ecto.migrate`
+      # against the shared, pool_size: 1 sandboxed `Wardmast.Repo` (see
       # config/test.exs). `Ecto.Migrator.with_repo/3` hangs forever on its
       # connection checkout — shed only after ~45s per DBConnection's
       # queue_target/queue_interval — if ANY other umbrella child app has
       # already recursed through `Mix.Project.in_project/4` in this same VM
-      # first (reproduced with `:arbiter_release_env`, whose test suite
+      # first (reproduced with `:wardmast_release_env`, whose test suite
       # doesn't touch Ecto at all — the mere prior recursion is enough).
-      # `:arbiter` used to always run first because it sorted first
+      # `:wardmast` used to always run first because it sorted first
       # alphabetically with no in-umbrella deps forcing otherwise; adding
-      # `:arbiter_release_env` (which `:arbiter` now depends on) changed the
+      # `:wardmast_release_env` (which `:wardmast` now depends on) changed the
       # topological recursion order and put something ahead of it for the
-      # first time. Pin `:arbiter` to run first explicitly rather than rely
+      # first time. Pin `:wardmast` to run first explicitly rather than rely
       # on incidental ordering again.
       test: [
         "do --app arbiter test",
-        "do --app arbiter_cli --app arbiter_release_env --app arbiter_web test"
+        "do --app wardmast_cli --app wardmast_release_env --app wardmast_web test"
       ],
       # Static analysis + security scan. Mirrors the `mix audit` alias the
       # sibling codebases (tonic, vstim) run. Ordered cheapest-first so a

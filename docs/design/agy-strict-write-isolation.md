@@ -4,7 +4,7 @@
 **Builds on:** bd-25ivqe (PR #2070), bd-7h2cuk (live probe) ·
 **Status:** decided 2026-09-26. Follow-ups filed: bd-1abj7u, bd-5gvqgc,
 bd-8xy1mf, bd-3s82pf. **bd-1abj7u landed** (fail-closed gate). **bd-5gvqgc
-landed** (the jail, `Arbiter.Worker.Jail`, for agy under `:strict`):
+landed** (the jail, `Wardmast.Worker.Jail`, for agy under `:strict`):
 `write_confinement` answers `:os_jail` on a host that passes the probe. It
 goes a little past the recipe below: `<common>/worktrees` (with the own gitdir
 re-opened on top), the own gitdir's `commondir` and the worktree's `.git` file

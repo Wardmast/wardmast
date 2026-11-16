@@ -20,7 +20,7 @@ arb loop analyze --since 7d --json # markdown + a structured summary envelope
 ```
 
 Under the hood it hits `POST /api/loop/analyze`, which runs
-`Arbiter.Loop.Analysis.analyze/1`. (It is a POST because the pass records its
+`Wardmast.Loop.Analysis.analyze/1`. (It is a POST because the pass records its
 own `usage_events` row and `--discover` makes a model call. `GET
 /api/loop/analyze` still answers identically but is a deprecated alias,
 flagged by `Deprecation` / `Link` / `Warning` response headers.) Over MCP the
@@ -33,7 +33,7 @@ the database layer (never the worker fleet, web endpoint, or patrols, so it is
 safe on a live box):
 
 ```
-mix arbiter.loop.analyze --since 7d [--out report.md] [--no-ledger]
+mix wardmast.loop.analyze --since 7d [--out report.md] [--no-ledger]
 ```
 
 ## Hard constraint: zero writes
@@ -79,7 +79,7 @@ warrants at least the same gate.
    *"plausible code, green tests, inert at runtime."*
 
 4. **Reviewer-finding residue (corpus-integrity signal).** The category table
-   above is a four-bucket allowlist (`Arbiter.Loop.FindingBuckets`), not a
+   above is a four-bucket allowlist (`Wardmast.Loop.FindingBuckets`), not a
    classifier — a finding matching none of the buckets is not dropped, it is
    counted, cited, and reported here with the same discipline as the
    misclassification-rate section above: count, rate, distinct tasks, and a
@@ -101,7 +101,7 @@ warrants at least the same gate.
    windows. Rejected candidates are counted and listed with the discrepancy.
    Candidates are never queued, fingerprinted or counted as evidence, even
    under `--propose`; one becomes a detector only when a human merges it into
-   `Arbiter.Loop.FindingBuckets`. The call's own cost lands on its own
+   `Wardmast.Loop.FindingBuckets`. The call's own cost lands on its own
    `usage_events` row (step `loop_discovery`), and the report states its
    dollars and primary-window (7d for Claude) share in place of "no model call". Design:
    `docs/design/loop-inference-discovery-pass.md`.
@@ -111,7 +111,7 @@ warrants at least the same gate.
    one CI fix_pass, overall and by repo, by provider/model (the task's latest
    main run in the window) and by difficulty, with counts. Then every fix_pass
    run in the window, classified deterministically by
-   `Arbiter.Loop.FixPassClassifier` — no model call — into exactly one of
+   `Wardmast.Loop.FixPassClassifier` — no model call — into exactly one of
    `lint` (format/credo/dialyzer/compile warning), `flake_rerun` (no code
    change, job re-run), `test_fix`, `infra` (auth, rate limit, runner/DB, or
    the worker's own `ci_mark_external` verdict) or `unknown`. Structured
@@ -289,7 +289,7 @@ price is surfaced at the approval point rather than measured afterwards.
 ### Applying goes through the front door
 
 `apply` dispatches on `kind` to the *same public domain API a human would call*
-— `Arbiter.Skills.update_skill/2`, the workspace `:patch_config` deep-merge, an
+— `Wardmast.Skills.update_skill/2`, the workspace `:patch_config` deep-merge, an
 `Issue` update — so the queue never writes those tables directly and every
 application leaves a normal paper-trail version attributed to
 `loop:proposal:<id>`. Read a skill's or a task's history and you can see exactly
@@ -386,7 +386,7 @@ tick — block dropped, rule not landed — however well the canary arm was doin
 Autonomy never outranks a decision you made.
 
 Both outcomes are a `paper_trail` version on `Workspace` attributed to
-`loop:proposal:<id>`, and both post coordinator mail. `Arbiter.Loop.CanaryTicker`
+`loop:proposal:<id>`, and both post coordinator mail. `Wardmast.Loop.CanaryTicker`
 is what makes the revert *automatic*: it walks every workspace on a timer and
 judges any running canary. For a workspace with the flag unset it does a single
 map lookup and stops.
@@ -448,15 +448,15 @@ for a new model (`docs/design/paced-quota-routing-signals.md` §7.2).
 
 1. **Pick tasks.**
 
-       bin/arbiter eval 'Arbiter.Release.replay_candidates(difficulty: 2, limit: 10)'
+       bin/wardmast eval 'Wardmast.Release.replay_candidates(difficulty: 2, limit: 10)'
 
-   (or `mix arbiter.replay_report --candidates --difficulty 2`). A ticket with
+   (or `mix wardmast.replay_report --candidates --difficulty 2`). A ticket with
    permissions, a review-only one, or one whose merged change can't be found is
    listed with the reason it can't be replayed.
 2. **Run one in the live node.** Admission reads the budgets only the live
    node publishes:
 
-       bin/arbiter rpc 'Arbiter.Release.replay(task_id: "bd-…", account: "claude:default", model: "claude-sonnet-5-5", async: true)'
+       bin/wardmast rpc 'Wardmast.Release.replay(task_id: "bd-…", account: "claude:default", model: "claude-sonnet-5-5", async: true)'
 
    The replay is refused unless every pool it draws on (the model's and the
    scoring reviewer's) has room under `Budget.explore/2`, half its expiring
@@ -473,7 +473,7 @@ for a new model (`docs/design/paced-quota-routing-signals.md` §7.2).
    `tests: false`, `timeout_ms:` / `review_timeout_ms:`.
 3. **Read it.**
 
-       bin/arbiter eval 'Arbiter.Release.replay_report()'
+       bin/wardmast eval 'Wardmast.Release.replay_report()'
 
    It shows replays by state, the evidence per cell (provider, model,
    difficulty, type) labelled as replay evidence with its own weight, and the
@@ -509,7 +509,7 @@ fraction of reviewed tasks need a round 2.
   difficulty, not the value each attempt was dispatched at. Read
   "dispatched difficulty" in the report with that in mind.
 - **Reviewer findings that match no bucket are its own report section, not a
-  silent drop.** `Arbiter.Loop.FindingBuckets.bucket_finding/1` is a four-regex
+  silent drop.** `Wardmast.Loop.FindingBuckets.bucket_finding/1` is a four-regex
   allowlist; a finding matching none of them is counted, cited, and retained
   as residue (see "Reviewer-finding residue" above) instead of being
   discarded. **81.8% of finding units (275 of 336, over the 30-day window
@@ -522,7 +522,7 @@ fraction of reviewed tasks need a round 2.
 
 Attempt 1 at this task died of context exhaustion from unbounded reads (a
 `find /`, repo-wide greps). The pass is built so the heavy lifting happens in
-Elixir (`Arbiter.Loop.Corpus` does bounded, aggregated SQL); the operator's
+Elixir (`Wardmast.Loop.Corpus` does bounded, aggregated SQL); the operator's
 context sees only the shaped report, never the raw 28 MB corpus. When you act
 on the report, keep the same discipline: drill into named `run_id`s with
 `arb worker log` / `worker_log`, never whole-corpus reads.

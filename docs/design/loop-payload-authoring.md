@@ -130,7 +130,7 @@ operator reads first. Hence `bd-bldypb`.
 
 Re-verified today, and the module list has grown since the ticket was
 written without breaking it. Outbound `Arbiter.*` references from
-`lib/arbiter/loop.ex` + `lib/arbiter/loop/`:
+`lib/wardmast/loop.ex` + `lib/wardmast/loop/`:
 
 ```
 Agents.Routing, Agents.Routing.ByDifficulty, Boot.Migrator, Events, Mergers,
@@ -140,7 +140,7 @@ Worker.OutputLog, Worker.StopReason, Worker.Worktree
 ```
 
 No `Req` / `Finch` / `Tesla` / `:httpc` / `HTTPoison` anywhere under
-`lib/arbiter/loop`. Every addition since the ticket's verification
+`lib/wardmast/loop`. Every addition since the ticket's verification
 (`Routing`, `Events`, `PubSub`, `Worktree`, `Mergers`) is local and
 deterministic.
 
@@ -398,7 +398,7 @@ count that never accumulates.
 
 ### As shipped (bd-5w8h0r, #1474)
 
-The table lives in `Arbiter.Loop.FindingBuckets`, beside the regexes that
+The table lives in `Wardmast.Loop.FindingBuckets`, beside the regexes that
 produce the categories it keys on, with a **compile-time totality guard in
 both directions**: a bucket with no attribution row, or an attribution row
 matching no bucket, raises `CompileError`. The imperative sentence is the
@@ -408,8 +408,8 @@ Two things went differently from the sketch above, both deliberate:
 
 * **The clause is spliced at apply time, not at pass time.** A `:skill_patch`
   payload carries `"clause"` + `"clause_id"` and no `"body"`;
-  `Arbiter.Loop.Apply.Payload.skill_attrs/2` resolves it against the skill's
-  *current* body via `Arbiter.Loop.SkillClause.upsert/3`. Rendering a whole
+  `Wardmast.Loop.Apply.Payload.skill_attrs/2` resolves it against the skill's
+  *current* body via `Wardmast.Loop.SkillClause.upsert/3`. Rendering a whole
   body at pass time and applying it weeks later would silently revert any
   human edit made in between — the failure `RepoDocPatch` exists to prevent on
   a repo `CLAUDE.md`. `:skill_create` payloads do carry a full `"body"`, since
@@ -417,13 +417,13 @@ Two things went differently from the sketch above, both deliberate:
 * **The provenance comment cites the fingerprint, not the row id.** The
   pending-write id does not exist when the payload is authored — the row is
   inserted *from* the payload. `loop:proposal:<id>` still lands on the skill's
-  paper-trail version via `Arbiter.Loop.Apply.attribution/1`, so both
+  paper-trail version via `Wardmast.Loop.Apply.attribution/1`, so both
   identifiers are recoverable.
 
-The backfill is `Arbiter.Loop.PendingWriteTargetBackfill`, run from
+The backfill is `Wardmast.Loop.PendingWriteTargetBackfill`, run from
 `priv/repo/migrations/*_backfill_loop_pending_write_targets.exs`. It is plain
 SQL for the same reason `PendingWriteWorkspaceBackfill` is: under
-`bin/arbiter eval Arbiter.Release.migrate` the repo is started and Ash is not.
+`bin/wardmast eval Wardmast.Release.migrate` the repo is started and Ash is not.
 It leaves `:rejected` rows alone (a rejection is a record of a decision about
 a proposal the successor is not) and leaves a category with no attribution row
 live, counted `unresolved`, rather than guessing a target.

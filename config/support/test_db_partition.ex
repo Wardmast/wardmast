@@ -1,7 +1,7 @@
-defmodule Arbiter.TestDbPartition do
+defmodule Wardmast.TestDbPartition do
   @moduledoc false
 
-  # bd-2xvwew: concurrent `mix test` invocations (e.g. one per Arbiter worker's
+  # bd-2xvwew: concurrent `mix test` invocations (e.g. one per Wardmast worker's
   # git worktree, all on the same host) previously shared a single hardcoded
   # sqlite path (System.tmp_dir!() is host-wide, not worktree-scoped). Each
   # invocation's `mix test` alias runs `ash.setup --quiet` first, so two

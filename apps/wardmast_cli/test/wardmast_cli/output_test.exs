@@ -1,0 +1,362 @@
+defmodule WardmastCli.OutputTest do
+  use ExUnit.Case, async: true
+
+  alias WardmastCli.Output
+
+  describe "emit_json/1" do
+    test "prints the term as a single line of JSON" do
+      out = ExUnit.CaptureIO.capture_io(fn -> Output.emit_json(%{"a" => 1}) end)
+      assert String.trim(out) == Jason.encode!(%{"a" => 1})
+    end
+  end
+
+  describe "format_issue_line/1" do
+    test "formats id, state, priority, title" do
+      issue = %{"id" => "gte-006", "state" => "queued", "priority" => 2, "title" => "CLI escript"}
+      line = Output.format_issue_line(issue)
+      assert line =~ "gte-006"
+      assert line =~ "[queued]"
+      assert line =~ "P2"
+      assert line =~ "CLI escript"
+    end
+
+    test "handles missing fields gracefully" do
+      assert Output.format_issue_line(%{}) =~ "?"
+    end
+  end
+
+  describe "format_issue_detail/1" do
+    test "includes header and description sections" do
+      issue = %{
+        "id" => "gte-006",
+        "title" => "CLI",
+        "state" => "queued",
+        "priority" => 1,
+        "issue_type" => "feature",
+        "description" => "Build the thing"
+      }
+
+      out = Output.format_issue_detail(issue)
+      assert out =~ "ID:"
+      assert out =~ "gte-006"
+      assert out =~ "Title:"
+      assert out =~ "Description:"
+      assert out =~ "Build the thing"
+    end
+
+    test "names a ReviewGate waiting on CI (bd-cut6uv)" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "state" => "active",
+        "step" => "awaiting_ci",
+        "ci_wait" => %{"sha" => "a1b2c3d4e5f6a7b8", "label" => "waiting on CI a1b2c3d4e5f6"}
+      }
+
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Step:         awaiting_ci"
+      assert out =~ "Review CI:    waiting on CI a1b2c3d4e5f6"
+
+      refute Output.format_issue_detail(%{issue | "ci_wait" => nil}) =~ "Review CI:"
+    end
+
+    test "skips empty sections" do
+      issue = %{"id" => "x", "title" => "T", "state" => "queued"}
+      out = Output.format_issue_detail(issue)
+      refute out =~ "Description:"
+      refute out =~ "Notes:"
+    end
+
+    # bd-1defgu: `arb ticket show` gains a Dependencies section — the edge was
+    # only visible via `arb dep add`'s own output before.
+    test "renders a Dependencies section when the issue carries edges" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "state" => "queued",
+        "dependencies" => [
+          %{
+            "id" => "d1",
+            "from_issue_id" => "x",
+            "to_issue_id" => "y",
+            "type" => "conflicts_with",
+            "from" => %{"id" => "x", "title" => "T", "state" => "queued", "priority" => 1},
+            "to" => %{"id" => "y", "title" => "the other", "state" => "closed", "priority" => 2}
+          }
+        ]
+      }
+
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Dependencies:"
+      assert out =~ "conflicts_with"
+      assert out =~ "the other"
+      assert out =~ "[closed P2]"
+    end
+
+    test "omits the Dependencies section when there are no edges" do
+      issue = %{"id" => "x", "title" => "T", "state" => "queued", "dependencies" => []}
+      refute Output.format_issue_detail(issue) =~ "Dependencies:"
+    end
+
+    test "omits the Dependencies section when the field is absent" do
+      issue = %{"id" => "x", "title" => "T", "state" => "queued"}
+      refute Output.format_issue_detail(issue) =~ "Dependencies:"
+    end
+
+    # bd-3j4ch4 AC5: the cost estimate renders in the header, as a range with
+    # its basis, so a coarse estimate can't be mistaken for a precise one.
+    test "renders the cost estimate range, basis and sample size" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "estimate" => %{
+          "range" => [3.0, 8.0],
+          "median" => 5.0,
+          "p90" => 9.0,
+          "n" => 10,
+          "basis" => "difficulty+type",
+          "fallback_level" => 0
+        }
+      }
+
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Estimate:"
+      assert out =~ "$3.00"
+      assert out =~ "$8.00"
+      assert out =~ "median $5.00"
+      assert out =~ "p90 $9.00"
+      assert out =~ "difficulty+type"
+      assert out =~ "n=10"
+    end
+
+    test "prints the Spend block with a per-pass line each" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "spend" => %{
+          "total_usd" => 6.5,
+          "run_count" => 4,
+          "unpriced_runs" => 1,
+          "passes" => [
+            %{"kind" => "implement", "count" => 1, "usd" => 4.0, "unpriced_runs" => 0},
+            %{"kind" => "fix_pass", "count" => 2, "usd" => 2.5, "unpriced_runs" => 0},
+            %{"kind" => "review", "count" => 1, "usd" => 0.0, "unpriced_runs" => 1}
+          ]
+        }
+      }
+
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Spend:        $6.50 (1 unpriced run, not counted in $)"
+      assert out =~ "implement: 1 run, $4.00"
+      assert out =~ "fix_pass: 2 runs, $2.50"
+      assert out =~ "reviews: 1 run, $0.00 + 1 unpriced"
+    end
+
+    test "rolls follow-up spend into 'own + follow-ups = total' and lists each follow-up" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "spend" => %{
+          "total_usd" => 3.0,
+          "run_count" => 1,
+          "unpriced_runs" => 0,
+          "passes" => [%{"kind" => "implement", "count" => 1, "usd" => 3.0, "unpriced_runs" => 0}],
+          "follow_ups" => %{
+            "own_usd" => 3.0,
+            "follow_ups_usd" => 2.5,
+            "total_usd" => 5.5,
+            "items" => [
+              %{"id" => "bd-f1", "title" => "the fix", "usd" => 2.0, "depth" => 1},
+              %{"id" => "bd-f2", "title" => "ci fix", "usd" => 0.5, "depth" => 2}
+            ]
+          }
+        }
+      }
+
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Spend:        $3.00 own + $2.50 follow-ups = $5.50"
+      assert out =~ "implement: 1 run, $3.00"
+      assert out =~ "follow-up bd-f1: $2.00 — the fix"
+      assert out =~ "follow-up bd-f2: $0.50 — ci fix"
+    end
+
+    test "prints 'Spend: none recorded' when there is no usage" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "spend" => %{"total_usd" => 0.0, "run_count" => 0, "unpriced_runs" => 0, "passes" => []}
+      }
+
+      assert Output.format_issue_detail(issue) =~ "Spend:        none recorded"
+    end
+
+    test "omits the estimate line when there is no estimate" do
+      issue = %{"id" => "x", "title" => "T", "estimate" => nil}
+      refute Output.format_issue_detail(issue) =~ "Estimate:"
+    end
+
+    # bd-18vl9q: "$X spent · ~$Y-Z to go" rendered for an epic.
+    test "renders the epic cost rollup" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "epic_rollup" => %{
+          "spent" => 20.0,
+          "to_go_low" => 6.0,
+          "to_go_high" => 16.0,
+          "closed_count" => 2,
+          "dispatchable_count" => 2,
+          "blocked_count" => 1,
+          "in_flight_count" => 1,
+          "sub_epic_count" => 1,
+          "upcoming_count" => 3
+        }
+      }
+
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Rollup:"
+      assert out =~ "Rollup:       $20.00 spent"
+      assert out =~ "~$6.00–$16.00 to go"
+      assert out =~ "closed=2"
+      assert out =~ "dispatchable=2"
+      assert out =~ "blocked=1"
+      assert out =~ "in_flight=1"
+      assert out =~ "sub_epic=1"
+      assert out =~ "upcoming=3"
+    end
+
+    test "omits the cost rollup line when there is no epic rollup" do
+      issue = %{"id" => "x", "title" => "T", "epic_rollup" => nil}
+      refute Output.format_issue_detail(issue) =~ "Rollup:"
+    end
+
+    test "renders tracker label only when tracker is meaningful" do
+      issue = %{"id" => "x", "title" => "T", "tracker_type" => "jira", "tracker_ref" => "AX-1"}
+      assert Output.format_issue_detail(issue) =~ "Tracker:"
+      assert Output.format_issue_detail(issue) =~ "jira:AX-1"
+    end
+
+    test "skips tracker line when type is none or nil" do
+      assert Output.format_issue_detail(%{"id" => "x", "title" => "T", "tracker_type" => "none"})
+             |> String.contains?("Tracker:") == false
+    end
+
+    test "renders Difficulty as D<n> when set" do
+      issue = %{"id" => "x", "title" => "T", "state" => "queued", "difficulty" => 3}
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Difficulty:"
+      assert out =~ "D3"
+    end
+
+    test "omits Difficulty line when unset" do
+      issue = %{"id" => "x", "title" => "T", "state" => "queued"}
+      refute Output.format_issue_detail(issue) =~ "Difficulty:"
+
+      issue_nil = Map.put(issue, "difficulty", nil)
+      refute Output.format_issue_detail(issue_nil) =~ "Difficulty:"
+    end
+
+    test "renders the task's repo assignment, and omits the line when unassigned (bd-2jum8j)" do
+      issue = %{"id" => "x", "title" => "T", "state" => "queued", "repo" => "emricare/tonic"}
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Repo:"
+      assert out =~ "emricare/tonic"
+
+      refute Output.format_issue_detail(Map.delete(issue, "repo")) =~ "Repo:"
+      refute Output.format_issue_detail(Map.put(issue, "repo", nil)) =~ "Repo:"
+    end
+
+    # bd-7mbrlg
+    test "renders the acceptance waiver reason when present" do
+      issue = %{
+        "id" => "x",
+        "title" => "T",
+        "state" => "queued",
+        "issue_type" => "chore",
+        "acceptance_waived" => "trivial config bump"
+      }
+
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Acceptance waived:"
+      assert out =~ "trivial config bump"
+    end
+
+    test "a research ticket leads with its findings; a task keeps the standard order (bd-9s9dqz)" do
+      base = %{"id" => "x", "title" => "T", "state" => "queued", "notes" => "did the thing"}
+
+      research = Output.format_issue_detail(Map.put(base, "issue_type", "research"))
+      assert research =~ "Findings (notes)"
+
+      task = Output.format_issue_detail(Map.put(base, "issue_type", "task"))
+      refute task =~ "Findings (notes)"
+    end
+
+    test "omits the acceptance waiver line when unset" do
+      issue = %{"id" => "x", "title" => "T", "state" => "queued", "issue_type" => "task"}
+      refute Output.format_issue_detail(issue) =~ "Acceptance waived:"
+    end
+  end
+
+  describe "mode/1" do
+    test "returns :json when --json present" do
+      assert Output.mode(["foo", "--json", "bar"]) == :json
+    end
+
+    test "defaults to :text otherwise" do
+      assert Output.mode(["foo", "bar"]) == :text
+    end
+  end
+
+  describe "drop_json/1" do
+    test "removes --json flag" do
+      assert Output.drop_json(["a", "--json", "b"]) == ["a", "b"]
+    end
+
+    test "leaves args untouched when no --json" do
+      assert Output.drop_json(["a", "b"]) == ["a", "b"]
+    end
+  end
+
+  describe "on_halt/1" do
+    setup do
+      Process.put(:bd2_halt_strategy, :raise)
+      :ok
+    end
+
+    test "runs once with the exit code before a non-zero halt" do
+      test_pid = self()
+      Output.on_halt(fn code, _msg -> send(test_pid, {:halted, code}) end)
+
+      assert_raise Output.Halt, fn -> Output.halt(3) end
+      assert_received {:halted, 3}
+
+      # One-shot: a second halt does not re-run it.
+      assert_raise Output.Halt, fn -> Output.halt(3) end
+      refute_received {:halted, _}
+    end
+
+    test "does not run for a zero exit" do
+      test_pid = self()
+      Output.on_halt(fn code, _msg -> send(test_pid, {:halted, code}) end)
+
+      assert_raise Output.Halt, fn -> Output.halt(0) end
+      refute_received {:halted, _}
+    end
+
+    test "die/1 hands the hook the error message" do
+      test_pid = self()
+      Output.on_halt(fn code, msg -> send(test_pid, {:halted, code, msg}) end)
+
+      ExUnit.CaptureIO.capture_io(:stderr, fn ->
+        assert_raise Output.Halt, fn -> Output.die("it broke", "try again") end
+      end)
+
+      assert_received {:halted, 1, "it broke"}
+    end
+
+    test "a crashing hook never blocks the halt" do
+      Output.on_halt(fn _, _ -> raise "boom" end)
+      assert_raise Output.Halt, fn -> Output.halt(1) end
+    end
+  end
+end

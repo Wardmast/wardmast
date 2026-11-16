@@ -1,0 +1,385 @@
+defmodule WardmastWeb.CoreComponents.Data do
+  @moduledoc """
+  Data-display primitives: status/priority/type tags, a difficulty meter,
+  and generic list/table wrappers.
+
+  Foundation and conventions match `WardmastWeb.CoreComponents`.
+  """
+  use Phoenix.Component
+
+  @doc """
+  Renders a status as a colored badge, using the LITERAL status value
+  verbatim — never prettified or humanized. Downstream tooling and
+  operators match on the raw status atom/string (e.g. `handed_off`), so this
+  component must not reformat it.
+
+  ## Examples
+
+      <.status_chip status={:succeeded} />
+      <.status_chip status={:waiting} />
+  """
+  attr :status, :any, required: true
+  attr :class, :any, default: nil
+  attr :rest, :global
+
+  def status_chip(assigns) do
+    ~H"""
+    <span class={["badge", status_chip_class(@status), @class]} {@rest}>{@status}</span>
+    """
+  end
+
+  defp status_chip_class(status) when is_atom(status),
+    do: status_chip_class(Atom.to_string(status))
+
+  defp status_chip_class("idle"), do: "badge-ghost"
+  defp status_chip_class("running"), do: "badge-info"
+  # bd-1uu19b: a run's state (`Wardmast.Workers.RunState`) while it is live,
+  # its outcome once it has finished.
+  defp status_chip_class("starting"), do: "badge-info"
+  defp status_chip_class("working"), do: "badge-info"
+  defp status_chip_class("waiting"), do: "badge-warning"
+  defp status_chip_class("finished"), do: "badge-ghost"
+  defp status_chip_class("succeeded"), do: "badge-success"
+  # Shut down with the server — not the run failing, but not done either.
+  defp status_chip_class("interrupted"), do: "badge-warning"
+  defp status_chip_class("handed_off"), do: "badge-ghost"
+  defp status_chip_class("completed"), do: "badge-success"
+  defp status_chip_class("completed_unposted"), do: "badge-warning"
+  defp status_chip_class("failed"), do: "badge-error"
+  defp status_chip_class("open"), do: "badge-success"
+  defp status_chip_class("in_progress"), do: "badge-info"
+  defp status_chip_class("closed"), do: "badge-ghost"
+  # A ticket's lifecycle state (`Wardmast.Tasks.Lifecycle.states/0`). `closed`
+  # is shared with the clause above.
+  defp status_chip_class("backlog"), do: "badge-ghost"
+  defp status_chip_class("queued"), do: "badge-success"
+  defp status_chip_class("active"), do: "badge-info"
+  defp status_chip_class("merging"), do: "badge-info"
+  # bd-9so315: merged, but nobody has seen it run yet — the whole point of the
+  # state is that it needs a human, so it warns rather than reading as done.
+  defp status_chip_class("verifying"), do: "badge-warning"
+  defp status_chip_class("proposed"), do: "badge-warning"
+  defp status_chip_class("hypothesis"), do: "badge-ghost"
+  defp status_chip_class("applied"), do: "badge-success"
+  defp status_chip_class("rejected"), do: "badge-error"
+  defp status_chip_class("superseded"), do: "badge-neutral"
+  # Worktree state on the workspace config screen: a dirty checkout is not an
+  # error, it is the one thing an operator has to deal with before a worker can
+  # take the repo — so it warns rather than fails.
+  defp status_chip_class("clean"), do: "badge-success"
+  defp status_chip_class("dirty"), do: "badge-warning"
+  defp status_chip_class(_), do: "badge-ghost"
+
+  @doc """
+  Renders a priority (P0-P4) as a colored badge. P0/P1 are red (most
+  urgent), P2 is neutral, P3/P4 are ghost (low priority, de-emphasized).
+
+  ## Examples
+
+      <.priority_tag priority={0} />
+      <.priority_tag priority={3} />
+  """
+  attr :priority, :integer, default: nil
+  attr :class, :any, default: nil
+
+  attr :lift, :map,
+    default: nil,
+    doc:
+      "ES5: the card's epic-floor fields (`effective_priority`, `priority_via`, " <>
+        "`priority_lift`, `lift_floor`, `lift_in_flight`, `lift_cap`). Absent or with no " <>
+        "lift, the tag is exactly what it was"
+
+  attr :rest, :global
+
+  def priority_tag(assigns) do
+    assigns = assign(assigns, :lift_view, lift_view(assigns.priority, assigns.lift))
+
+    ~H"""
+    <span
+      class={["badge", priority_tag_class(@lift_view[:band] || @priority), @class]}
+      title={@lift_view[:title]}
+      aria-label={@lift_view[:title]}
+      data-lift={@lift_view[:state]}
+      {@rest}
+    >
+      {if @priority, do: "P#{@lift_view[:band] || @priority}", else: "—"}<span
+        :if={@lift_view[:state] == "applied"}
+        aria-hidden="true"
+      >↑</span>
+    </span>
+    """
+  end
+
+  # Applied: the badge shows the effective band with an arrow. Capped: the own
+  # priority with no arrow, and a title saying what is waiting (design
+  # epic-aware-scheduling §6.3).
+  defp lift_view(own, %{priority_lift: :applied, effective_priority: eff, priority_via: via})
+       when is_integer(own) and is_integer(eff),
+       do: %{band: eff, state: "applied", title: "P#{eff} via #{via} — own priority P#{own}"}
+
+  defp lift_view(own, %{priority_lift: :capped, priority_via: via} = lift) when is_integer(own),
+    do: %{
+      band: own,
+      state: "capped",
+      title:
+        "floor P#{lift[:lift_floor]} via #{via} waiting — " <>
+          "#{lift[:lift_in_flight]} of #{lift[:lift_cap]} lifted slots in progress"
+    }
+
+  defp lift_view(_own, _lift), do: %{}
+
+  defp priority_tag_class(p) when p in [0, 1], do: "badge-error"
+  defp priority_tag_class(2), do: "badge-neutral"
+  defp priority_tag_class(p) when p in [3, 4], do: "badge-ghost"
+  defp priority_tag_class(_), do: "badge-ghost"
+
+  @doc """
+  Renders a difficulty (D0-D5) as a 5-bar meter. For D{n}, exactly n bars
+  are filled — D0 fills zero bars (with a thin dashed border), D5 fills all
+  five. Only D5 tints its filled bars red; every other difficulty uses the
+  neutral fill color. `nil` renders all five bars empty with no border.
+
+  The red tint marks the flagship tier — the level that must be opted into —
+  so it follows D5 rather than staying on D4 (#1519).
+
+  ## Examples
+
+      <.difficulty_meter difficulty={0} />
+      <.difficulty_meter difficulty={5} />
+      <.difficulty_meter difficulty={nil} />
+  """
+  attr :difficulty, :integer, default: nil
+  attr :class, :any, default: nil
+
+  def difficulty_meter(assigns) do
+    filled_count =
+      if is_integer(assigns.difficulty) and assigns.difficulty in 0..5,
+        do: assigns.difficulty,
+        else: 0
+
+    assigns =
+      assign(assigns,
+        filled_count: filled_count,
+        has_d0_border: is_integer(assigns.difficulty) and assigns.difficulty == 0,
+        label: difficulty_meter_label(assigns.difficulty)
+      )
+
+    ~H"""
+    <span class={["inline-flex items-center gap-0.5", @class]} role="img" aria-label={@label}>
+      <span
+        :for={i <- 1..5}
+        class={[
+          "h-3 w-1.5 rounded-sm",
+          if(i <= @filled_count,
+            do: ["difficulty-bar-filled", difficulty_fill_class(@difficulty)],
+            else: [
+              "difficulty-bar-empty",
+              "bg-base-content/10",
+              if(@has_d0_border, do: "border border-dashed border-base-content/30")
+            ]
+          )
+        ]}
+      />
+    </span>
+    """
+  end
+
+  defp difficulty_fill_class(5), do: "bg-error"
+  defp difficulty_fill_class(_), do: "bg-primary"
+
+  defp difficulty_meter_label(nil), do: "Difficulty: not set"
+  defp difficulty_meter_label(d) when d in 0..5, do: "Difficulty D#{d}"
+  defp difficulty_meter_label(_), do: "Difficulty: not set"
+
+  @doc """
+  Renders an issue/task type as a badge, using the literal type value
+  verbatim (same rule as `status_chip/1` — no humanizing).
+
+  ## Examples
+
+      <.type_tag type={:bug_fix} />
+      <.type_tag type="spike" />
+      <.type_tag type="never invoked" dashed />
+
+  `dashed` marks an add affordance or a dead-state flag (e.g. a skill that
+  has never been invoked) rather than a real category.
+  """
+  attr :type, :any, required: true
+  attr :dashed, :boolean, default: false
+  attr :class, :any, default: nil
+  attr :rest, :global
+
+  def type_tag(assigns) do
+    ~H"""
+    <span class={["badge badge-ghost", @dashed && "border-dashed", @class]} {@rest}>{@type}</span>
+    """
+  end
+
+  @doc """
+  Renders a definition-list style key/value grid.
+
+  ## Examples
+
+      <.data_list>
+        <:item label="Priority">P1</:item>
+        <:item label="Status">running</:item>
+      </.data_list>
+  """
+  attr :class, :any, default: nil
+
+  slot :item, required: true do
+    attr :label, :string, required: true
+  end
+
+  def data_list(assigns) do
+    ~H"""
+    <dl class={["grid grid-cols-[auto_1fr] gap-x-4 gap-y-1", @class]}>
+      <%= for item <- @item do %>
+        <dt class="font-medium text-base-content/60">{item.label}</dt>
+        <dd>{render_slot(item)}</dd>
+      <% end %>
+    </dl>
+    """
+  end
+
+  @doc """
+  Renders a generic data table from a list of rows and `:col` slots.
+
+  Columns without `width` share the remaining space equally (`minmax(0,1fr)`);
+  give the one free-text column (e.g. `title`) no width so it absorbs the rest.
+  Cells truncate to a single ellipsised line by default — pass `wrap` on a
+  `:col` slot for text that should wrap instead (e.g. a detail column).
+
+  ## Examples
+
+      <.data_table id="tasks" rows={@tasks}>
+        <:col :let={task} label="task" width="84px">{task.id}</:col>
+        <:col :let={task} label="title" mono={false}>{task.title}</:col>
+        <:col :let={task} label="spend" width="60px" align="right">{task.cost}</:col>
+      </.data_table>
+  """
+  attr :id, :string, required: true
+  attr :rows, :list, required: true
+  attr :class, :any, default: nil
+
+  attr :min_width, :string,
+    default: nil,
+    doc:
+      "CSS length (e.g. \"640px\") the grid tracks can't shrink below — " <>
+        "pairs with the wrapper's overflow-x-auto so a narrow viewport scrolls " <>
+        "the table instead of collapsing a flexible column to zero width"
+
+  slot :col, required: true do
+    attr :label, :string
+    attr :width, :string, doc: ~s(CSS width, e.g. "84px" — omit for the flexible column)
+    attr :align, :string, doc: ~s(pass "right" for numeric columns; defaults left)
+    attr :mono, :boolean, doc: "defaults true — pass false for prose columns like title"
+
+    attr :wrap, :boolean,
+      doc: "defaults false (truncate + ellipsis) — pass true to wrap long text instead"
+  end
+
+  def data_table(assigns) do
+    assigns =
+      assign(assigns,
+        template_columns: Enum.map_join(assigns.col, " ", &(&1[:width] || "minmax(0,1fr)")),
+        last_index: length(assigns.rows) - 1
+      )
+
+    ~H"""
+    <div id={@id} class={["w-full overflow-x-auto", @class]} role="table">
+      <div
+        class="grid items-center gap-3 h-[30px] px-[14px] bg-[var(--arb-chrome)]"
+        style={"grid-template-columns: #{@template_columns};#{@min_width && " min-width: #{@min_width};"}"}
+        role="row"
+      >
+        <span
+          :for={col <- @col}
+          class={[
+            "text-[10.5px] uppercase tracking-[0.06em] font-[family-name:var(--font-mono)] text-[var(--text-label)]",
+            data_table_align_class(col)
+          ]}
+          role="columnheader"
+        >
+          {col[:label]}
+        </span>
+      </div>
+      <div
+        :for={{row, index} <- Enum.with_index(@rows)}
+        class={[
+          "grid items-center gap-3 min-h-[34px] px-[14px] hover:bg-[var(--arb-raised-hover)]",
+          index != @last_index && "border-b border-[var(--arb-line-soft)]"
+        ]}
+        style={"grid-template-columns: #{@template_columns};#{@min_width && " min-width: #{@min_width};"}"}
+        role="row"
+      >
+        <span
+          :for={col <- @col}
+          class={[
+            "text-[11.5px]",
+            if(col[:wrap], do: "break-words", else: "truncate"),
+            data_table_mono?(col) && "font-[family-name:var(--font-mono)] tabular-nums",
+            !data_table_mono?(col) && "text-[var(--text-body)]",
+            data_table_align_class(col)
+          ]}
+          role="cell"
+        >
+          {render_slot(col, row)}
+        </span>
+      </div>
+    </div>
+    """
+  end
+
+  defp data_table_align_class(col), do: if(col[:align] == "right", do: "text-right")
+  defp data_table_mono?(col), do: col[:mono] != false
+
+  @doc """
+  Formats a USD amount for display, with more decimal places for
+  sub-cent/sub-dollar amounts so small LLM costs don't all round to "$0.00".
+
+  ## Examples
+
+      iex> WardmastWeb.CoreComponents.Data.format_usd(nil)
+      "—"
+
+      iex> WardmastWeb.CoreComponents.Data.format_usd(0.0042)
+      "$0.004200"
+  """
+  def format_usd(nil), do: "—"
+
+  def format_usd(amount) when is_float(amount) or is_integer(amount) do
+    f = amount * 1.0
+
+    cond do
+      f == 0.0 -> "$0.00"
+      f < 0.01 -> "$#{:erlang.float_to_binary(f, decimals: 6)}"
+      f < 1.0 -> "$#{:erlang.float_to_binary(f, decimals: 4)}"
+      true -> "$#{:erlang.float_to_binary(f, decimals: 2)}"
+    end
+  end
+
+  @doc """
+  Formats a token count for compact display (`"1.2k"`, `"3.4M"`).
+
+  ## Examples
+
+      iex> WardmastWeb.CoreComponents.Data.format_tokens(nil)
+      "—"
+
+      iex> WardmastWeb.CoreComponents.Data.format_tokens(1500)
+      "1.5k"
+  """
+  def format_tokens(nil), do: "—"
+  def format_tokens(n) when n in [0, 0.0], do: "0"
+
+  def format_tokens(n) when is_integer(n) and n >= 1_000_000 do
+    "#{Float.round(n / 1_000_000, 2)}M"
+  end
+
+  def format_tokens(n) when is_integer(n) and n >= 1_000 do
+    "#{Float.round(n / 1_000, 1)}k"
+  end
+
+  def format_tokens(n) when is_integer(n), do: Integer.to_string(n)
+end

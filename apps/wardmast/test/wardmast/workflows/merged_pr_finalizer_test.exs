@@ -1,0 +1,1342 @@
+defmodule Wardmast.Workflows.MergedPRFinalizerTest do
+  use Wardmast.DataCase, async: false
+
+  import Wardmast.LifecycleFixtures
+
+  alias Wardmast.Tasks.{Issue, Workspace}
+  alias Wardmast.Workflows.MergedPRFinalizer
+
+  # A minimal real GenServer double for `Wardmast.Worker` — just enough to
+  # answer the `:snapshot` call `Worker.state/1` makes (bd-6w7j8h) and to
+  # behave like any ordinary GenServer under `GenServer.stop/1` (the `:close`
+  # action's `StopWorker` after-action calls this once the task closes). A
+  # bare `spawn`ed process handling only the raw `$gen_call` protocol doesn't
+  # understand `GenServer.stop`'s system-message handshake and hangs forever
+  # under it — a real (if trivial) GenServer avoids that entirely.
+  defmodule FakeWorker do
+    use GenServer
+
+    def start_link(task_id, snapshot) do
+      GenServer.start_link(__MODULE__, snapshot, name: Wardmast.Worker.Registry.via_tuple(task_id))
+    end
+
+    @impl true
+    def init(snapshot), do: {:ok, snapshot}
+
+    @impl true
+    def handle_call(:snapshot, _from, snapshot) do
+      {:reply, snapshot, snapshot}
+    end
+  end
+
+  @stub_name Wardmast.Mergers.Github.HTTP
+
+  setup do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "mpf-#{System.unique_integer([:positive])}",
+        prefix: "mpf#{System.unique_integer([:positive])}",
+        config: %{
+          "merge" => %{
+            "strategy" => "github",
+            "config" => %{
+              "owner" => "owner",
+              "repo" => "repo",
+              "credentials_ref" => "env:GITHUB_TOKEN"
+            }
+          }
+        }
+      })
+
+    prior = System.get_env("GITHUB_TOKEN")
+    System.put_env("GITHUB_TOKEN", "test-token-mpf")
+
+    on_exit(fn ->
+      if prior, do: System.put_env("GITHUB_TOKEN", prior), else: System.delete_env("GITHUB_TOKEN")
+    end)
+
+    {:ok, ws: ws}
+  end
+
+  defp stub(fun), do: Req.Test.stub(@stub_name, fun)
+
+  defp start_finalizer(ws, opts \\ []) do
+    name = String.to_atom("MergedPRFinalizer_#{System.unique_integer([:positive])}")
+
+    pid =
+      start_supervised!(
+        {MergedPRFinalizer,
+         Keyword.merge(
+           [
+             repo: "owner/repo",
+             workspace_id: ws.id,
+             interval_ms: 60_000,
+             name: name
+           ],
+           opts
+         )}
+      )
+
+    Req.Test.allow(@stub_name, self(), pid)
+    {pid, name}
+  end
+
+  defp create_task(ws, pr_ref, opts \\ []) do
+    create_attrs =
+      opts
+      |> Keyword.drop([:pr_ref])
+      |> Keyword.merge(title: "task with pr_ref=#{pr_ref}", workspace_id: ws.id)
+      |> Map.new()
+
+    {:ok, task} = Ash.create(Issue, create_attrs)
+    {:ok, task} = Ash.update(task, %{pr_ref: pr_ref}, action: :update)
+    task
+  end
+
+  # Modern PRPatrol follow-up: source_pr set, tracker_type: :none, no pr_ref.
+  defp create_follow_up_task(ws, source_pr_number, opts \\ []) do
+    create_attrs =
+      opts
+      |> Keyword.merge(
+        title: "PR ##{source_pr_number}: needs follow-up",
+        workspace_id: ws.id,
+        tracker_type: :none,
+        source_pr: to_string(source_pr_number)
+      )
+      |> Map.new()
+
+    {:ok, task} = Ash.create(Issue, create_attrs)
+    task
+  end
+
+  # Legacy PRPatrol follow-up: tracker_type: :github, tracker_ref = PR number,
+  # no source_pr, no pr_ref. Title and description are exactly what the
+  # pre-bd-ci2jl2 `PRPatrol.create_follow_up/4` wrote — the description names
+  # the owner/repo slug the patrol was watching.
+  defp create_legacy_follow_up_task(ws, source_pr_number, opts \\ []) do
+    {repo, opts} = Keyword.pop(opts, :against, "owner/repo")
+
+    create_attrs =
+      [
+        title: "PR ##{source_pr_number}: Fix the widget needs follow-up",
+        description: """
+        Auto-filed by PRPatrol against #{repo}.
+
+        Trigger: CI failing.
+
+        Original PR: https://github.com/#{repo}/pull/#{source_pr_number}
+        """
+      ]
+      |> Keyword.merge(opts)
+      |> Keyword.merge(
+        workspace_id: ws.id,
+        tracker_type: :github,
+        tracker_ref: to_string(source_pr_number)
+      )
+      |> Map.new()
+
+    {:ok, task} = Ash.create(Issue, create_attrs)
+    task
+  end
+
+  # Register a dummy process as the live worker for `task_id`. The finalizer's
+  # live_worker?/1 uses Wardmast.Worker.whereis/1 (a lookup in Wardmast.Worker.Registry)
+  # plus a Wardmast.Worker.state/1 snapshot (bd-6w7j8h), so this double answers
+  # the `:snapshot` GenServer.call the same way a real Worker would, reporting
+  # the given run `state` (and `outcome`, once finished). Defaults to
+  # `:working` — a genuinely active worker.
+  #
+  # Supervised by the test, `:temporary`, rather than linked with an `on_exit`
+  # `if Process.alive?(pid), do: GenServer.stop(pid)`: a task's `:close`
+  # after-action reaps the worker (see below), and the test process's exit takes
+  # a linked one down with it, so that check-then-stop raced both and failed
+  # the test in teardown with "no process".
+  defp register_live_worker(task_id, state \\ :working, outcome \\ nil) do
+    start_supervised!(%{
+      id: {FakeWorker, task_id},
+      start: {FakeWorker, :start_link, [task_id, %{state: state, outcome: outcome}]},
+      restart: :temporary
+    })
+  end
+
+  # Minimal GitHub PR GET stub — returns merged or open.
+  defp pr_get_stub(number, status) do
+    merged = status == :merged
+
+    fn conn ->
+      cond do
+        conn.request_path == "/repos/owner/repo/pulls/#{number}" ->
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(%{
+            "number" => number,
+            "merged" => merged,
+            "state" => if(merged, do: "closed", else: "open"),
+            "html_url" => "https://github.com/owner/repo/pull/#{number}"
+          })
+
+        conn.request_path == "/repos/owner/repo/pulls/#{number}/reviews" ->
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+        true ->
+          conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
+      end
+    end
+  end
+
+  describe "start_link/1" do
+    test "starts with given config", %{ws: ws} do
+      {_pid, name} = start_finalizer(ws)
+      snap = MergedPRFinalizer.state(name)
+      assert snap.repo == "owner/repo"
+      assert snap.workspace_id == ws.id
+      assert snap.ticks == 0
+    end
+  end
+
+  describe "tick/1 — no tasks" do
+    test "no open tasks with pr_ref → no-op, bumps ticks", %{ws: ws} do
+      stub(fn conn -> conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{}) end)
+
+      {_pid, name} = start_finalizer(ws)
+      assert :ok = MergedPRFinalizer.tick(name)
+      assert MergedPRFinalizer.state(name).ticks == 1
+    end
+  end
+
+  describe "tick/1 — open PR (not merged)" do
+    test "open PR → task left open", %{ws: ws} do
+      task = create_task(ws, "100")
+      stub(pr_get_stub(100, :open))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state != :closed
+    end
+  end
+
+  describe "tick/1 — merged PR" do
+    test "merged PR → task closed", %{ws: ws} do
+      task = create_task(ws, "200")
+      stub(pr_get_stub(200, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state == :closed
+    end
+
+    # bd-9so315: the finalizer is the *other* merge-close path (a PR merged
+    # outside the queue). If it honoured `verify_after_deploy` on one path and
+    # not the other, a flagged task would still silently close.
+    test "merged PR on a verify_after_deploy task → parked, not closed", %{ws: ws} do
+      task = create_task(ws, "250", verify_after_deploy: true)
+      stub(pr_get_stub(250, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state == :verifying
+      assert refreshed.closed_at == nil
+    end
+
+    # bd-3lj713: the ticket also showed zero ReviewGate rounds — the finalizer
+    # tore the gate down mid-pass. A merge outside the gate is the operator's
+    # call, but it must leave a trace that no review happened.
+    test "a reviewable ticket merged with no ReviewGate round records a review waiver",
+         %{ws: ws} do
+      task = create_task(ws, "260")
+      stub(pr_get_stub(260, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state == :closed
+      assert refreshed.notes =~ "Review waiver"
+      assert refreshed.notes =~ "no ReviewGate round"
+    end
+
+    test "a ticket that did go through a ReviewGate round gets no waiver note", %{ws: ws} do
+      task = create_task(ws, "261")
+
+      {:ok, _} =
+        Ash.create(Wardmast.ReviewGate.Round, %{
+          task_id: task.id,
+          round: 1,
+          role: :review,
+          verdict: :approve,
+          converged: true
+        })
+
+      stub(pr_get_stub(261, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state == :closed
+      refute (refreshed.notes || "") =~ "Review waiver"
+    end
+
+    test "a non-PR ticket type needs no review waiver", %{ws: ws} do
+      task = create_task(ws, "262", issue_type: :task)
+      stub(pr_get_stub(262, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      refute (refreshed.notes || "") =~ "Review waiver"
+    end
+
+    test "a parked task is not swept again on the next tick", %{ws: ws} do
+      task = create_task(ws, "251", verify_after_deploy: true)
+      # bd-842qio: only work in progress parks for verification.
+      task = put_state!(task, :merging)
+      {:ok, _} = Ash.update(task, %{}, action: :await_verification)
+
+      stub(fn _conn -> raise "adapter should not be called for parked tasks" end)
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state == :verifying
+    end
+
+    test "already-closed task is not re-processed", %{ws: ws} do
+      task = create_task(ws, "201")
+      {:ok, _} = Ash.update(task, %{}, action: :close)
+
+      stub(fn _conn -> raise "adapter should not be called for closed tasks" end)
+
+      {_pid, name} = start_finalizer(ws)
+
+      # Should not call the adapter or crash.
+      assert :ok = MergedPRFinalizer.tick(name)
+      assert MergedPRFinalizer.state(name).ticks == 1
+    end
+
+    test "task with tracker_type: :none → task closed without tracker transition", %{ws: ws} do
+      task = create_task(ws, "202", tracker_type: :none)
+      stub(pr_get_stub(202, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state == :closed
+    end
+
+    test "second tick after merge → task already closed, no double-close error", %{ws: ws} do
+      task = create_task(ws, "203")
+      stub(pr_get_stub(203, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+      # Already closed; second tick should not crash.
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state == :closed
+      assert MergedPRFinalizer.state(name).ticks == 2
+    end
+  end
+
+  describe "tick/1 — live-worker guard (bd-38l3px)" do
+    test "finalizing one merged/orphaned bead leaves an unrelated merging bead alive", %{
+      ws: ws
+    } do
+      # Bead A: an orphaned bead (no live worker) whose PR really merged — the
+      # finalizer's legitimate job: close it.
+      merged = create_task(ws, "700")
+      put_state!(merged, :merging)
+
+      # Bead B: an unrelated merging bead being actively worked. It carries a
+      # STALE pr_ref (a merged PR from a prior, reopened run) — exactly the
+      # bd-38l3px silent-loss shape. Its live worker must protect it.
+      victim = create_task(ws, "701")
+      put_state!(victim, :merging)
+      register_live_worker(victim.id)
+
+      # Both PRs report merged; only the orphaned one may be closed.
+      stub(fn conn ->
+        case Regex.run(~r{^/repos/owner/repo/pulls/(\d+)(/reviews)?$}, conn.request_path) do
+          [_, _number, "/reviews"] ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          [_, number] ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => String.to_integer(number),
+              "merged" => true,
+              "state" => "closed",
+              "html_url" => "https://github.com/owner/repo/pull/#{number}"
+            })
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
+        end
+      end)
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert Ash.get!(Issue, merged.id).state == :closed
+      # The unrelated merging bead survives the concurrent finalize.
+      assert Ash.get!(Issue, victim.id).state == :merging
+    end
+
+    test "follow-up bead with a live worker is not closed on source-PR merge", %{ws: ws} do
+      task = create_follow_up_task(ws, 702)
+      put_state!(task, :active)
+      register_live_worker(task.id)
+
+      stub(pr_get_stub(702, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert Ash.get!(Issue, task.id).state == :active
+    end
+
+    # bd-741sid: a Merging ticket has no worker — its Watchdog owns the merge
+    # and finalizes the ticket itself. The sweep stays the fallback for a PR
+    # nothing watches.
+    test "a ticket whose Watchdog is alive is left to it", %{ws: ws} do
+      task = create_task(ws, "704")
+      put_state!(task, :merging)
+      register_live_worker(task.id <> ":watchdog")
+
+      stub(pr_get_stub(704, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert Ash.get!(Issue, task.id).state == :merging
+    end
+
+    # bd-6w7j8h: complete_now/2 never stops the Worker GenServer — the process
+    # lingers, still registered, finished with outcome :succeeded until the
+    # task's `:close` action's after-action reaps it (Worker.stop, see worker.ex
+    # terminate/2). If the task never gets closed (e.g. the MergeQueue lost
+    # the item), this "done but not yet reaped" worker is exactly what
+    # MergedPRFinalizer is supposed to route around. Treating ANY registered
+    # pid as "live" — without checking whether it's still actually working —
+    # deadlocks the two safety nets against each other: the finalizer defers
+    # to "the live worker" to close the task, but the worker is only ever
+    # stopped as a side effect of the task closing.
+    test "a finished-but-not-yet-reaped worker does not block finalization", %{ws: ws} do
+      task = create_task(ws, "703")
+      put_state!(task, :merging)
+      register_live_worker(task.id, :finished, :succeeded)
+
+      stub(pr_get_stub(703, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert Ash.get!(Issue, task.id).state == :closed
+    end
+
+    # bd-2g179m: pre-verdict, the author's agent has exited and the reviewer runs
+    # in a separate ReviewGate process, so the worker is resident, `:waiting` on
+    # the review gate with no agent. A PR merged by hand in that window closes
+    # the ticket (the running gate stops via its author :DOWN monitor) instead of
+    # deferring to the parked worker forever.
+    test "a worker parked on the review gate with no agent does not block finalization", %{
+      ws: ws
+    } do
+      task = create_task(ws, "704")
+      put_state!(task, :merging)
+
+      pid = register_live_worker(task.id, :waiting)
+
+      :sys.replace_state(pid, fn snap ->
+        Map.merge(snap, %{waiting_on: :review_gate, agent_live: false})
+      end)
+
+      stub(pr_get_stub(704, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert Ash.get!(Issue, task.id).state == :closed
+    end
+
+    # bd-49r9ns AC5 (emr-cp74oe): characterization, NOT a reproduction. A ticket
+    # parked `review_gate_not_converged` (active, worker finished/failed) whose
+    # PR is then merged by hand finalizes today, so this passes on the merge-base
+    # too. emr-cp74oe's real failure could not be diagnosed from inside the repo
+    # (no run log for it); see the PR notes.
+    for {label, vad} <- [{"plain", false}, {"verify_after_deploy", true}] do
+      test "a hand-merged PR finalizes a ticket parked review_gate_not_converged (#{label})", %{
+        ws: ws
+      } do
+        task = create_task(ws, "710", verify_after_deploy: unquote(vad))
+        task = put_state!(task, :active)
+        register_live_worker(task.id, :finished, :failed)
+        {:ok, _} = Wardmast.Tasks.Attention.raise_cause(task.id, :review_gate_not_converged, "x")
+
+        stub(pr_get_stub(710, :merged))
+
+        {_pid, name} = start_finalizer(ws)
+        :ok = MergedPRFinalizer.tick(name)
+
+        expected = if unquote(vad), do: :verifying, else: :closed
+        assert Ash.get!(Issue, task.id).state == expected
+      end
+    end
+
+    test "a worker waiting on a question still protects the task", %{ws: ws} do
+      task = create_task(ws, "705")
+      put_state!(task, :merging)
+
+      pid = register_live_worker(task.id, :waiting)
+      :sys.replace_state(pid, fn snap -> Map.merge(snap, %{waiting_on: :question}) end)
+
+      stub(pr_get_stub(705, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert Ash.get!(Issue, task.id).state == :merging
+    end
+  end
+
+  describe "tick/1 — API error" do
+    test "adapter.get/1 returns error → task left open, no crash", %{ws: ws} do
+      task = create_task(ws, "300")
+
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
+      end)
+
+      {_pid, name} = start_finalizer(ws)
+      assert :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state != :closed
+    end
+
+    test "GitHub API 500 → tick bumps, does not crash", %{ws: ws} do
+      _task = create_task(ws, "301")
+
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"error" => "boom"})
+      end)
+
+      {_pid, name} = start_finalizer(ws)
+      assert :ok = MergedPRFinalizer.tick(name)
+      assert MergedPRFinalizer.state(name).ticks == 1
+    end
+  end
+
+  describe "tick/1 — multiple tasks" do
+    test "only merged tasks are closed; open task remains open", %{ws: ws} do
+      task_open = create_task(ws, "400")
+      task_merged = create_task(ws, "401")
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls/400" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 400, "merged" => false, "state" => "open"})
+
+          conn.request_path == "/repos/owner/repo/pulls/400/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.request_path == "/repos/owner/repo/pulls/401" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 401, "merged" => true, "state" => "closed"})
+
+          conn.request_path == "/repos/owner/repo/pulls/401/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, open_task} = Ash.get(Issue, task_open.id)
+      {:ok, closed_task} = Ash.get(Issue, task_merged.id)
+
+      assert open_task.state != :closed
+      assert closed_task.state == :closed
+    end
+  end
+
+  describe "periodic ticking" do
+    test "the :tick message reschedules itself", %{ws: ws} do
+      stub(fn conn -> conn |> Plug.Conn.put_status(200) |> Req.Test.json([]) end)
+
+      {_pid, name} = start_finalizer(ws, interval_ms: 50)
+      Process.sleep(250)
+
+      assert MergedPRFinalizer.state(name).ticks >= 2,
+             "expected at least 2 auto-ticks; got #{MergedPRFinalizer.state(name).ticks}"
+    end
+  end
+
+  describe "tick/1 — PRPatrol follow-ups (modern source_pr format)" do
+    test "merged source PR → follow-up task closed", %{ws: ws} do
+      task = create_follow_up_task(ws, 500)
+      stub(pr_get_stub(500, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state == :closed
+    end
+
+    test "open source PR → follow-up task stays open", %{ws: ws} do
+      task = create_follow_up_task(ws, 501)
+      stub(pr_get_stub(501, :open))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state != :closed
+    end
+
+    test "merged source PR, already-closed follow-up → no crash", %{ws: ws} do
+      task = create_follow_up_task(ws, 502)
+      {:ok, _} = Ash.update(task, %{}, action: :close)
+      stub(pr_get_stub(502, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      assert :ok = MergedPRFinalizer.tick(name)
+      assert MergedPRFinalizer.state(name).ticks == 1
+    end
+
+    test "no Sync.lifecycle / no upstream transition for tracker_type: :none", %{ws: ws} do
+      # tracker_type: :none → Sync.lifecycle is a no-op regardless, but the
+      # critical property is that finalize_follow_up never calls it at all.
+      # We verify by stubbing only the PR GET endpoint (no tracker call stub)
+      # and confirming the task is closed without error.
+      task = create_follow_up_task(ws, 503, tracker_type: :none)
+      stub(pr_get_stub(503, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state == :closed
+    end
+
+    test "pr_ref path is unaffected — existing pr_ref task still finalized normally", %{ws: ws} do
+      follow_up = create_follow_up_task(ws, 504)
+      pr_ref_task = create_task(ws, "505")
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls/504" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 504, "merged" => true, "state" => "closed"})
+
+          conn.request_path == "/repos/owner/repo/pulls/504/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.request_path == "/repos/owner/repo/pulls/505" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 505, "merged" => true, "state" => "closed"})
+
+          conn.request_path == "/repos/owner/repo/pulls/505/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, follow_up_closed} = Ash.get(Issue, follow_up.id)
+      {:ok, pr_ref_closed} = Ash.get(Issue, pr_ref_task.id)
+
+      assert follow_up_closed.state == :closed
+      assert pr_ref_closed.state == :closed
+    end
+
+    test "source_pr follow-up with pr_ref set is excluded (handled by pr_ref pass)", %{ws: ws} do
+      # When a follow-up has its own PR opened (pr_ref set), the source_pr sweep
+      # must not close it — the pr_ref pass owns finalization for these tasks.
+      task = create_follow_up_task(ws, 510)
+      {:ok, task} = Ash.update(task, %{pr_ref: "511"}, action: :update)
+
+      # Stub source PR 510 as merged but follow-up's own PR 511 as open.
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls/510" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 510, "merged" => true, "state" => "closed"})
+
+          conn.request_path == "/repos/owner/repo/pulls/510/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.request_path == "/repos/owner/repo/pulls/511" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 511, "merged" => false, "state" => "open"})
+
+          conn.request_path == "/repos/owner/repo/pulls/511/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      # pr_ref=511 is open → task stays open; source_pr sweep skipped this task
+      assert refreshed.state != :closed
+    end
+
+    test "review_only engagement with source_pr set is excluded", %{ws: ws} do
+      # ReviewPatrol engagements share the source_pr field with follow-ups but
+      # must never be closed by the MergedPRFinalizer sweep (disjointness invariant).
+      {:ok, engagement} =
+        Ash.create(Issue, %{
+          title: "review engagement for PR #512",
+          workspace_id: ws.id,
+          tracker_type: :none,
+          source_pr: "512"
+        })
+
+      {:ok, engagement} = Ash.update(engagement, %{review_only: true}, action: :update)
+
+      stub(pr_get_stub(512, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, engagement.id)
+      assert refreshed.state != :closed
+    end
+  end
+
+  describe "tick/1 — PRPatrol follow-ups (legacy tracker_ref format)" do
+    test "merged source PR → legacy follow-up task closed", %{ws: ws} do
+      task = create_legacy_follow_up_task(ws, 600)
+      stub(pr_get_stub(600, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state == :closed
+    end
+
+    test "open source PR → legacy follow-up task stays open", %{ws: ws} do
+      task = create_legacy_follow_up_task(ws, 601)
+      stub(pr_get_stub(601, :open))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state != :closed
+    end
+
+    test "404 for tracker_ref → task left open, no crash (safety net for real issue refs)", %{
+      ws: ws
+    } do
+      task = create_legacy_follow_up_task(ws, 602)
+
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
+      end)
+
+      {_pid, name} = start_finalizer(ws)
+      assert :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state != :closed
+    end
+
+    test "legacy follow-up with pr_ref set is excluded (handled by pr_ref pass)", %{ws: ws} do
+      # When a legacy follow-up has its own PR opened (pr_ref set), the
+      # legacy sweep excludes it — the pr_ref pass handles finalization.
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "PR #603: needs follow-up",
+          workspace_id: ws.id,
+          tracker_type: :github,
+          tracker_ref: "603"
+        })
+
+      {:ok, task} = Ash.update(task, %{pr_ref: "604"}, action: :update)
+
+      # Source PR 603 is merged but legacy sweep should NOT close it via
+      # tracker_ref — the pr_ref pass handles pr_ref=604.
+      # We stub 603 as merged and 604 as open to verify the legacy sweep
+      # skips tasks with pr_ref set.
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls/603" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 603, "merged" => true, "state" => "closed"})
+
+          conn.request_path == "/repos/owner/repo/pulls/603/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.request_path == "/repos/owner/repo/pulls/604" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 604, "merged" => false, "state" => "open"})
+
+          conn.request_path == "/repos/owner/repo/pulls/604/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      # pr_ref=604 is open → task stays open; legacy sweep skipped this task
+      assert refreshed.state != :closed
+    end
+  end
+
+  # bd-6dghdv: the legacy sweep used to select EVERY open github-tracked task
+  # with a tracker_ref and treat that issue number as a PR number. After the
+  # repo move to serious-alchemy/arbiter renumbered issues 1–38, each matched
+  # a merged PR of the same number in the queried repo, and 20 ordinary tasks
+  # were closed as "completed". Only a positively identified PRPatrol
+  # follow-up, filed against exactly the repo being queried, may close.
+  describe "tick/1 — ordinary tracker tasks are never legacy follow-ups (bd-6dghdv)" do
+    test "an issue-tracked task whose issue number matches a merged PR stays open", %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "Epic: browser-hosted coordinator sessions",
+          description: "An ordinary GitHub-issue-tracked task.",
+          workspace_id: ws.id,
+          tracker_type: :github,
+          tracker_ref: "3"
+        })
+
+      stub(pr_get_stub(3, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state != :closed
+    end
+
+    test "a PRPatrol-shaped title alone (no PRPatrol description) is not enough", %{ws: ws} do
+      task =
+        create_legacy_follow_up_task(ws, 610, description: "Filed by hand, not by PRPatrol.")
+
+      stub(pr_get_stub(610, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state != :closed
+    end
+
+    test "a title whose PR number differs from tracker_ref is not a legacy follow-up", %{ws: ws} do
+      task = create_legacy_follow_up_task(ws, 611, title: "PR #999: Fix it needs follow-up")
+      stub(pr_get_stub(611, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state != :closed
+    end
+
+    test "a legacy follow-up filed against another repo is not closed by this repo's merge",
+         %{ws: ws} do
+      task = create_legacy_follow_up_task(ws, 612, against: "ryanrborn/arbiter")
+      stub(pr_get_stub(612, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state != :closed
+    end
+
+    test "an ordinary task is never even looked up on the PR API", %{ws: ws} do
+      {:ok, _task} =
+        Ash.create(Issue, %{
+          title: "Ordinary task",
+          workspace_id: ws.id,
+          tracker_type: :github,
+          tracker_ref: "4"
+        })
+
+      test_pid = self()
+
+      stub(fn conn ->
+        send(test_pid, {:requested, conn.request_path})
+        conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
+      end)
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      refute_received {:requested, _}
+    end
+  end
+
+  # bd-6dghdv: the finalizer used to load its workspace once in init/1, so after
+  # the repo move changed merge.config.owner it kept querying the old repo until
+  # a server restart. It now re-reads the workspace each tick and refuses to
+  # query a repo the workspace no longer resolves to (the supervisor's
+  # `reconcile/1`, run on workspace update, starts the finalizer for the new
+  # one).
+  describe "tick/1 — workspace config is re-read every tick (bd-6dghdv)" do
+    test "after merge.config moves to another repo, the old repo is never queried", %{ws: ws} do
+      task = create_task(ws, "700")
+      {_pid, name} = start_finalizer(ws)
+
+      {:ok, _ws} =
+        Ash.update(
+          ws,
+          %{
+            config: %{
+              "merge" => %{
+                "strategy" => "github",
+                "config" => %{
+                  "owner" => "serious-alchemy",
+                  "repo" => "repo",
+                  "credentials_ref" => "env:GITHUB_TOKEN"
+                }
+              }
+            }
+          },
+          action: :update
+        )
+
+      test_pid = self()
+      merged = pr_get_stub(700, :merged)
+
+      stub(fn conn ->
+        send(test_pid, {:requested, conn.request_path})
+        merged.(conn)
+      end)
+
+      :ok = MergedPRFinalizer.tick(name)
+
+      refute_received {:requested, _}
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state != :closed
+    end
+
+    test "a workspace edit that keeps the repo takes effect without a restart", %{ws: ws} do
+      task = create_task(ws, "701")
+      {_pid, name} = start_finalizer(ws)
+
+      # Point the credential at a different env var: the finalizer must read it
+      # from the updated workspace, not the copy it had at start.
+      System.put_env("MPF_ROTATED_TOKEN", "rotated-token")
+      on_exit(fn -> System.delete_env("MPF_ROTATED_TOKEN") end)
+
+      {:ok, _ws} =
+        Ash.update(
+          ws,
+          %{
+            config: %{
+              "merge" => %{
+                "strategy" => "github",
+                "config" => %{
+                  "owner" => "owner",
+                  "repo" => "repo",
+                  "credentials_ref" => "env:MPF_ROTATED_TOKEN"
+                }
+              }
+            }
+          },
+          action: :update
+        )
+
+      test_pid = self()
+      merged = pr_get_stub(701, :merged)
+
+      stub(fn conn ->
+        send(test_pid, {:auth, Plug.Conn.get_req_header(conn, "authorization")})
+        merged.(conn)
+      end)
+
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert_received {:auth, [auth]}
+      assert auth =~ "rotated-token"
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state == :closed
+    end
+  end
+
+  # AC4 (bd-6dghdv): every close names the rule that matched and the
+  # owner/repo that was queried, so a wrong close is diagnosable from the log.
+  describe "close logging (bd-6dghdv)" do
+    import ExUnit.CaptureLog
+
+    # The suite's Logger floor is :warning, and capture_log's :level option
+    # can't lower it — raise just this module to :info for the test.
+    setup do
+      Logger.put_module_level(MergedPRFinalizer, :info)
+      on_exit(fn -> Logger.delete_module_level(MergedPRFinalizer) end)
+    end
+
+    test "a legacy follow-up close logs rule=legacy_tracker_ref and the queried repo",
+         %{ws: ws} do
+      task = create_legacy_follow_up_task(ws, 620)
+      stub(pr_get_stub(620, :merged))
+      {_pid, name} = start_finalizer(ws)
+
+      log = capture_log([level: :info], fn -> :ok = MergedPRFinalizer.tick(name) end)
+
+      assert log =~ "task=#{task.id}"
+      assert log =~ "rule=legacy_tracker_ref"
+      assert log =~ "repo=owner/repo"
+    end
+
+    test "a source_pr follow-up close logs rule=source_pr and the queried repo", %{ws: ws} do
+      task = create_follow_up_task(ws, 621)
+      stub(pr_get_stub(621, :merged))
+      {_pid, name} = start_finalizer(ws)
+
+      log = capture_log([level: :info], fn -> :ok = MergedPRFinalizer.tick(name) end)
+
+      assert log =~ "task=#{task.id}"
+      assert log =~ "rule=source_pr"
+      assert log =~ "repo=owner/repo"
+    end
+
+    test "a pr_ref close logs rule=pr_ref and the queried repo", %{ws: ws} do
+      task = create_task(ws, "622")
+      stub(pr_get_stub(622, :merged))
+      {_pid, name} = start_finalizer(ws)
+
+      log = capture_log([level: :info], fn -> :ok = MergedPRFinalizer.tick(name) end)
+
+      assert log =~ "task=#{task.id}"
+      assert log =~ "rule=pr_ref"
+      assert log =~ "repo=owner/repo"
+    end
+  end
+
+  # bd-8y1i58: this sweep is unattended periodic polling — the textbook
+  # definition of the limiter's `:background` class — but it ran untagged, so
+  # every `adapter.get/1` it issued was counted (and treated) as foreground and
+  # could never be shed. On an install with a large open backlog that alone was
+  # thousands of GitHub calls per hour with zero work in flight.
+  describe "GitHub budget classification (bd-8y1i58)" do
+    test "the sweep runs under the :background priority class", %{ws: ws} do
+      test = self()
+      create_task(ws, "700")
+
+      stub(fn conn ->
+        send(test, {:priority, Wardmast.GitHub.Limiter.current_priority()})
+        pr_get_stub(700, :open).(conn)
+      end)
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert_received {:priority, :background}
+    end
+  end
+
+  # bd-8y1i58: an unbounded fan-out is the other half of the idle floor — the
+  # sweep issued one call per open task *every* tick. The per-tick budget caps
+  # that, and the rotating cursor guarantees the tail of the backlog is still
+  # reached (a plain cap would re-check the same head forever).
+  describe "per-tick budget (bd-8y1i58)" do
+    # Records which PRs the sweep looked up. Only the PR fetch itself is
+    # counted: one `adapter.get/1` costs *two* GitHub calls (the PR, then its
+    # reviews), which is exactly why the per-tick budget matters.
+    defp record_paths(ws, opts) do
+      test = self()
+
+      stub(fn conn ->
+        if Regex.match?(~r"^/repos/owner/repo/pulls/\d+$", conn.request_path) do
+          send(test, {:path, conn.request_path})
+        end
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"number" => 1, "merged" => false, "state" => "open"})
+      end)
+
+      {_pid, name} = start_finalizer(ws, opts)
+      name
+    end
+
+    defp drain_paths(acc \\ []) do
+      receive do
+        {:path, path} -> drain_paths([path | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+
+    test "checks at most max_checks_per_tick tasks per sweep", %{ws: ws} do
+      for n <- 800..809, do: create_task(ws, to_string(n))
+
+      name = record_paths(ws, max_checks_per_tick: 3)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert length(drain_paths()) == 3
+    end
+
+    test "the cursor advances so a backlog larger than the budget is fully swept",
+         %{ws: ws} do
+      for n <- 810..814, do: create_task(ws, to_string(n))
+
+      name = record_paths(ws, max_checks_per_tick: 2)
+
+      seen =
+        Enum.flat_map(1..3, fn _ ->
+          :ok = MergedPRFinalizer.tick(name)
+          drain_paths()
+        end)
+
+      assert length(seen) == 6
+      # Three ticks of 2 cover all five tasks (and wrap onto the first again).
+      assert length(Enum.uniq(seen)) == 5
+    end
+
+    test "a budget of zero or less disables the cap (sweep everything)", %{ws: ws} do
+      for n <- 820..823, do: create_task(ws, to_string(n))
+
+      name = record_paths(ws, max_checks_per_tick: 0)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert length(drain_paths()) == 4
+    end
+  end
+
+  # bd-3lj713 / #817: emr-bg6dwa (tonic_device, MR !29) was moved to Verifying
+  # one minute after its MR opened, while the MR was still `opened`. A GitLab
+  # ref is a bare per-project iid (`!29`), and the emricare workspace has two
+  # projects. The `emricare/tonic` finalizer swept EVERY open task with a
+  # `pr_ref` — tonic_device's included — and looked `!29` up in the tonic
+  # project, where a different, long-merged MR !29 exists.
+  describe "tick/1 — multi-project GitLab workspace (bd-3lj713)" do
+    @gitlab_stub Wardmast.Mergers.Gitlab.HTTP
+
+    setup do
+      repo_a = git_repo_with_origin("git@gitlab.com:emricare/tonic.git")
+      repo_b = git_repo_with_origin("git@gitlab.com:emricare/tonic_device.git")
+
+      prior = System.get_env("GITLAB_TOKEN")
+      System.put_env("GITLAB_TOKEN", "test-token-gl")
+
+      on_exit(fn ->
+        if prior,
+          do: System.put_env("GITLAB_TOKEN", prior),
+          else: System.delete_env("GITLAB_TOKEN")
+      end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "mpf-gl-#{System.unique_integer([:positive])}",
+          prefix: "mpfgl#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "gitlab",
+              "config" => %{
+                "host" => "gitlab.com",
+                "credentials_ref" => "env:GITLAB_TOKEN",
+                "repos" => %{
+                  "tonic" => %{"project_id" => 111},
+                  "tonic_device" => %{"project_id" => 222}
+                }
+              }
+            },
+            "repo_paths" => %{"tonic" => repo_a, "tonic_device" => repo_b}
+          }
+        })
+
+      {:ok, gl_ws: ws}
+    end
+
+    defp git_repo_with_origin(remote_url) do
+      dir = Path.join(System.tmp_dir!(), "finalizer-gl-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      {_, 0} = System.cmd("git", ["-C", dir, "init", "-q"], stderr_to_stdout: true)
+
+      {_, 0} =
+        System.cmd("git", ["-C", dir, "remote", "add", "origin", remote_url],
+          stderr_to_stdout: true
+        )
+
+      on_exit(fn -> File.rm_rf(dir) end)
+      dir
+    end
+
+    # project 111 (tonic): MR !29 merged. project 222 (tonic_device): `!29` in
+    # the given state. Every request path is reported to the test so it can see
+    # which project a finalizer looked in.
+    defp gitlab_stub(tonic_device_state) do
+      test_pid = self()
+
+      Req.Test.stub(@gitlab_stub, fn conn ->
+        send(test_pid, {:gitlab_path, conn.request_path})
+
+        case conn.request_path do
+          "/api/v4/projects/111/merge_requests/29" ->
+            Req.Test.json(conn, %{"iid" => 29, "state" => "merged", "sha" => "tonic-sha"})
+
+          "/api/v4/projects/222/merge_requests/29" ->
+            Req.Test.json(conn, %{
+              "iid" => 29,
+              "state" => tonic_device_state,
+              "sha" => "a121652",
+              "merge_status" => "can_be_merged",
+              "detailed_merge_status" => "mergeable"
+            })
+
+          _ ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+        end
+      end)
+    end
+
+    defp start_gitlab_finalizer(ws, slug) do
+      {pid, name} = start_finalizer(ws, repo: slug)
+      Req.Test.allow(@gitlab_stub, self(), pid)
+      name
+    end
+
+    test "another project's merged !29 does not finalize a tonic_device task", %{gl_ws: ws} do
+      task = create_task(ws, "!29", repo: "tonic_device")
+      gitlab_stub("opened")
+
+      tonic = start_gitlab_finalizer(ws, "emricare/tonic")
+      :ok = MergedPRFinalizer.tick(tonic)
+
+      refute_received {:gitlab_path, "/api/v4/projects/111/merge_requests/29"}
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state not in [:closed, :verifying]
+      stop_supervised!(MergedPRFinalizer)
+
+      device = start_gitlab_finalizer(ws, "emricare/tonic_device")
+      :ok = MergedPRFinalizer.tick(device)
+
+      assert_received {:gitlab_path, "/api/v4/projects/222/merge_requests/29"}
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state not in [:closed, :verifying]
+    end
+
+    # #967: the finalizer's slug is a forge slug, the ticket's repo a
+    # repo_paths key — the deploy watch must bridge them.
+    test "the deploy watch runs from the finalizer: a skipped deploy job alerts", %{gl_ws: ws} do
+      config =
+        put_in(ws.config, ["merge", "repos"], %{
+          "tonic" => %{"project_id" => 111, "deploy_watch" => %{"job" => "deploy"}},
+          "tonic_device" => %{"project_id" => 222}
+        })
+
+      {:ok, ws} = Ash.update(ws, %{config: config}, action: :update)
+      task = create_task(ws, "!29", repo: "tonic")
+
+      Req.Test.stub(@gitlab_stub, fn conn ->
+        case conn.request_path do
+          "/api/v4/projects/111/merge_requests/29" ->
+            Req.Test.json(conn, %{
+              "iid" => 29,
+              "state" => "merged",
+              "sha" => "head",
+              "merge_commit_sha" => "msha"
+            })
+
+          "/api/v4/projects/111/pipelines" ->
+            Req.Test.json(conn, [
+              %{"id" => 5, "sha" => "msha", "status" => "success", "web_url" => "https://gl/p/5"}
+            ])
+
+          "/api/v4/projects/111/pipelines/5/jobs" ->
+            Req.Test.json(conn, [
+              %{"name" => "build", "status" => "skipped"},
+              %{"name" => "deploy", "status" => "skipped"}
+            ])
+
+          _ ->
+            Req.Test.json(conn, [])
+        end
+      end)
+
+      tonic = start_gitlab_finalizer(ws, "emricare/tonic")
+      :ok = MergedPRFinalizer.tick(tonic)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.merger_status["deploy_watch"]["state"] == "alerted"
+
+      assert [alert] =
+               Wardmast.Alerts.active(workspace_id: ws.id)
+               |> Enum.filter(&(&1.kind == :deploy_failing))
+
+      assert alert.detail =~ "msha"
+      assert alert.detail =~ "deploy=skipped"
+    end
+
+    test "an open MR never moves the ticket, whatever its merge-status fields say",
+         %{gl_ws: ws} do
+      task = create_task(ws, "!29", repo: "tonic_device", verify_after_deploy: true)
+      gitlab_stub("opened")
+
+      device = start_gitlab_finalizer(ws, "emricare/tonic_device")
+      :ok = MergedPRFinalizer.tick(device)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state != :verifying
+    end
+
+    test "the owning project's finalizer still finalizes once its MR is merged", %{gl_ws: ws} do
+      task = create_task(ws, "!29", repo: "tonic_device")
+      gitlab_stub("merged")
+
+      device = start_gitlab_finalizer(ws, "emricare/tonic_device")
+      :ok = MergedPRFinalizer.tick(device)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state == :closed
+    end
+
+    test "a bare ref with no resolvable repo is not guessed at in a multi-project workspace",
+         %{gl_ws: ws} do
+      task = create_task(ws, "!29", repo: "tonic")
+      {:ok, task} = Ash.update(task, %{repo: nil}, action: :update)
+      gitlab_stub("opened")
+
+      tonic = start_gitlab_finalizer(ws, "emricare/tonic")
+      :ok = MergedPRFinalizer.tick(tonic)
+
+      refute_received {:gitlab_path, _}
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      assert refreshed.state not in [:closed, :verifying]
+    end
+  end
+end

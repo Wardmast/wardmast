@@ -103,19 +103,19 @@ The Arbiter architecture defines 16 `@callback`-bearing Elixir behaviours. While
 
 The following six behaviours are designated as the intended core/Pro extension seams (module names spelled exactly as defined):
 
-1. `Arbiter.Agents.Agent` — Autonomous agent runner harness and CLI interaction.
-2. `Arbiter.Trackers.Tracker` — Issue tracker integrations (Jira, GitHub, Linear, enterprise trackers).
-3. `Arbiter.Mergers.Merger` — Merge request, forge, and merge queue strategies.
-4. `Arbiter.Sessions.Provider` — CLI command and environment configuration for coordinator tmux session panes (a companion of `Agents.Agent`, rather than a PTY/process launch provider; see [Core/Pro Extension Seams](pro-extension-seams.md) §2.4).
-5. `Arbiter.Agents.Routing.Policy` — Dynamic model and agent dispatch routing policies.
-6. `Arbiter.Quota.Gate` — Provider quota throttling, cost boundaries, and overage gating.
+1. `Wardmast.Agents.Agent` — Autonomous agent runner harness and CLI interaction.
+2. `Wardmast.Trackers.Tracker` — Issue tracker integrations (Jira, GitHub, Linear, enterprise trackers).
+3. `Wardmast.Mergers.Merger` — Merge request, forge, and merge queue strategies.
+4. `Wardmast.Sessions.Provider` — CLI command and environment configuration for coordinator tmux session panes (a companion of `Agents.Agent`, rather than a PTY/process launch provider; see [Core/Pro Extension Seams](pro-extension-seams.md) §2.4).
+5. `Wardmast.Agents.Routing.Policy` — Dynamic model and agent dispatch routing policies.
+6. `Wardmast.Quota.Gate` — Provider quota throttling, cost boundaries, and overage gating.
 
 ### Resolution Mechanism: Config-Driven Module-Swap
-The resolution mechanism for these extension points is the existing config-driven module-swap idiom (`Application.get_env/3`), as currently demonstrated in `Arbiter.Workflows.ReviewGateFixRoundDispatcher`:
+The resolution mechanism for these extension points is the existing config-driven module-swap idiom (`Application.get_env/3`), as currently demonstrated in `Wardmast.Workflows.ReviewGateFixRoundDispatcher`:
 
 ```elixir
 # Implementation resolved at runtime via application configuration, falling back to default core module
-impl = Application.get_env(:arbiter, :review_gate_fix_round_dispatcher, Arbiter.Workflows.ReviewGateFixRoundDispatcher)
+impl = Application.get_env(:wardmast, :review_gate_fix_round_dispatcher, Wardmast.Workflows.ReviewGateFixRoundDispatcher)
 ```
 
 Pro packages register advanced implementations via workspace configuration or application environment, cleanly swapping out or wrapping core behaviours without requiring core code changes.

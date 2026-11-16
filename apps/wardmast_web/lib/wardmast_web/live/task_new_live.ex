@@ -1,0 +1,638 @@
+defmodule WardmastWeb.TaskNewLive do
+  @moduledoc """
+  Standalone "Create a ticket" screen at `/tasks/new`.
+
+  Creates through `Wardmast.Tasks.Create`, the one create path REST and MCP share
+  (P-14): the `Issue` `:create` action's tracker-mirroring and id-generation
+  hooks apply identically, and so does the `Wardmast.Tasks.Dedup` check (with a
+  "Create anyway" override).
+
+  That sameness now includes where the issue lands: a new ticket's `state`
+  is `:backlog`, so a task filed here starts in the board's Backlog column exactly
+  as `arb create` and `ticket_create` do (bd-b5wyjd). The form deliberately has
+  no "file this straight into Ready" affordance — the flash names Backlog and
+  the redirect drops the operator on the detail page, where the *Move to
+  Ready* button is.
+
+  The create itself runs in `start_async/3`: both the dedup check and
+  `Issue.create`'s `CreateUpstream` hook talk to the upstream tracker over
+  the network, and a LiveView must not block its own process on that.
+  `Tasks.Create` drains the per-process `CreateUpstream` failure stash inside
+  the async function, so a tracker-mirror failure is surfaced as a warning
+  rather than silently swallowed.
+  """
+
+  use WardmastWeb, :live_view
+
+  alias Wardmast.Tasks.Create
+  alias Wardmast.Tasks.IssueRepo
+  alias Wardmast.Tasks.Workspace
+  alias Wardmast.Worker.Dispatch
+  alias WardmastWeb.TaskForm
+  alias Phoenix.LiveView.AsyncResult
+  require Logger
+
+  @impl true
+  def mount(_params, _session, socket) do
+    socket =
+      socket
+      |> assign(:form_params, %{})
+      |> assign(:field_errors, %{})
+      |> assign(:server_error, nil)
+      |> assign(:create_dup, nil)
+      |> assign(:submitting, false)
+      |> assign(:created, false)
+      |> assign(:priority_options, TaskForm.priority_options())
+      |> assign(:difficulty_options, TaskForm.difficulty_options())
+      |> assign(:issue_type_options, TaskForm.issue_type_options())
+      |> assign(:workspaces, AsyncResult.loading())
+      |> maybe_load_workspaces()
+
+    {:ok, socket}
+  end
+
+  # ---- create ----
+
+  # A submit while one is already in flight would spawn a second create.
+  @impl true
+  def handle_event("create", _params, %{assigns: %{submitting: true}} = socket) do
+    {:noreply, socket}
+  end
+
+  def handle_event("create", %{"task" => params}, socket) do
+    {:noreply, submit_create(socket, params, false)}
+  end
+
+  # "Create anyway" — the operator has seen the duplicate matches and wants the
+  # issue filed regardless (the dashboard's `--force`). Re-submits the params
+  # they already typed, which are still stashed in `:form_params`.
+  def handle_event("create_force", _params, socket) do
+    {:noreply, submit_create(socket, socket.assigns.form_params, true)}
+  end
+
+  # Keeps the footer's live `arb ticket create` preview in sync as the operator
+  # types. No validation or I/O here — that's what "create" does on submit.
+  #
+  # Editing the title clears the duplicate warning (and any stale validation
+  # errors) back to the plain editing state — otherwise an operator who sees
+  # the warning for title A, retypes to title B, and clicks "Create anyway"
+  # would force-create B with `force: true` even though B was never
+  # dedup-checked, while the alert still described A.
+  def handle_event("preview_new", %{"task" => params}, socket) do
+    prev_title = TaskForm.trimmed(socket.assigns.form_params["title"])
+    next_title = TaskForm.trimmed(params["title"])
+
+    socket = assign(socket, :form_params, params)
+
+    {:noreply,
+     if next_title != prev_title do
+       assign(socket, create_dup: nil, field_errors: %{})
+     else
+       socket
+     end}
+  end
+
+  def handle_event("retry_workspaces", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:workspaces, AsyncResult.loading(socket.assigns.workspaces))
+     |> start_async(:workspaces, &load_workspaces_task/0)}
+  end
+
+  # Validation that needs no I/O runs here, on the LiveView process; everything
+  # that touches the DB or the tracker runs in the async task.
+  defp submit_create(socket, params, force?) do
+    # Keep what was typed so a rejected submit re-renders it rather than
+    # blanking the form.
+    socket = assign(socket, :form_params, params)
+    errors = validate(params)
+
+    if errors == %{} do
+      attrs = %{
+        title: TaskForm.trimmed(params["title"]),
+        workspace_id: TaskForm.trimmed(params["workspace_id"]),
+        priority: priority_value(params),
+        difficulty: difficulty_value(params),
+        issue_type: TaskForm.trimmed(params["issue_type"]) || "feature",
+        description: TaskForm.trimmed(params["description"]),
+        acceptance: TaskForm.trimmed(params["acceptance"]),
+        repo: TaskForm.trimmed(params["repo"])
+      }
+
+      socket
+      |> assign(submitting: true, field_errors: %{}, server_error: nil, create_dup: nil)
+      |> start_async(:create, fn -> run_create(attrs, force?) end)
+    else
+      assign(socket, field_errors: errors, server_error: nil)
+    end
+  end
+
+  # Runs off the LiveView process: `Tasks.Create` drains the per-process
+  # `CreateUpstream` stash in the process that ran the create, so a
+  # tracker-mirror failure is never lost to the LiveView's (empty) slot.
+  defp run_create(attrs, force?) do
+    case Create.run(attrs, force: force?) do
+      {:ok, task, _warnings} -> {:created, task, nil}
+      {:partial, task, [failure | _]} -> {:created, task, failure}
+      {:duplicate, dup} -> {:duplicate, dup}
+      {:error, {_kind, message}} when is_binary(message) -> {:invalid, message}
+      {:error, err} -> {:invalid, TaskForm.error_message(err)}
+    end
+  end
+
+  @impl true
+  def handle_async(:create, {:ok, {:created, task, nil}}, socket) do
+    {:noreply,
+     socket
+     |> assign(submitting: false, created: true, field_errors: %{}, server_error: nil)
+     |> assign(create_dup: nil)
+     |> put_flash(:info, "Created #{task.id} in Backlog — refine it, then Move to Ready")
+     |> push_navigate(to: ~p"/tasks/#{task.id}")}
+  end
+
+  # The issue is durable but the upstream mirror failed — same condition the
+  # REST API answers with a 502. Say so instead of reporting a clean create.
+  def handle_async(:create, {:ok, {:created, task, err}}, socket) do
+    {:noreply,
+     socket
+     |> assign(submitting: false, created: true, field_errors: %{}, server_error: nil)
+     |> assign(create_dup: nil)
+     |> put_flash(
+       :error,
+       "Created #{task.id} locally, but the tracker mirror failed: " <>
+         "#{upstream_error_text(err)}. Re-link with `arb ticket update #{task.id} --tracker-ref REF`."
+     )
+     |> push_navigate(to: ~p"/tasks/#{task.id}")}
+  end
+
+  def handle_async(:create, {:ok, {:duplicate, dup}}, socket) do
+    {:noreply, assign(socket, submitting: false, create_dup: dup, field_errors: %{})}
+  end
+
+  def handle_async(:create, {:ok, {:invalid, message}}, socket) do
+    {:noreply, assign(socket, submitting: false, server_error: message)}
+  end
+
+  def handle_async(:create, {:exit, reason}, socket) do
+    {:noreply,
+     assign(socket, submitting: false, server_error: "Create crashed: #{inspect(reason)}")}
+  end
+
+  def handle_async(:workspaces, {:ok, {:ok, workspaces}}, socket) do
+    {:noreply, assign(socket, :workspaces, AsyncResult.ok(socket.assigns.workspaces, workspaces))}
+  end
+
+  def handle_async(:workspaces, {:ok, {:error, reason}}, socket) do
+    Logger.error("TaskNewLive: loading workspaces failed: #{inspect(reason)}")
+
+    {:noreply,
+     assign(
+       socket,
+       :workspaces,
+       AsyncResult.failed(socket.assigns.workspaces, describe_error(reason))
+     )}
+  end
+
+  def handle_async(:workspaces, {:exit, reason}, socket) do
+    Logger.error("TaskNewLive: loading workspaces crashed: #{inspect(reason)}")
+
+    {:noreply,
+     assign(
+       socket,
+       :workspaces,
+       AsyncResult.failed(socket.assigns.workspaces, describe_exit(reason))
+     )}
+  end
+
+  defp describe_error(%{__exception__: true} = error), do: Exception.message(error)
+  defp describe_error(reason) when is_binary(reason), do: reason
+  defp describe_error(reason), do: inspect(reason)
+
+  defp describe_exit({%{__exception__: true} = error, _stacktrace}), do: describe_error(error)
+  defp describe_exit(reason), do: describe_error(reason)
+
+  defp upstream_error_text(%{message: message}) when is_binary(message), do: message
+  defp upstream_error_text(err), do: inspect(err)
+
+  defp dup_count({:local_dup, matches}), do: length(matches)
+  defp dup_count({:tracker_dup, matches}), do: length(matches)
+  defp dup_count(_), do: 0
+
+  defp dup_matches({:local_dup, matches}), do: Enum.map(matches, &{&1.id, &1.title})
+
+  defp dup_matches({:tracker_dup, matches}),
+    do: Enum.map(matches, &{Map.get(&1, :url) || Map.get(&1, :ref) || "?", Map.get(&1, :title)})
+
+  defp dup_matches(_), do: []
+
+  # ---- validation ----
+  #
+  # Each check is independent so every problem the operator has to fix shows
+  # up under its own field in one pass, rather than dribbling out one submit
+  # at a time.
+
+  defp validate(params) do
+    %{}
+    |> validate_title(params)
+    |> validate_workspace(params)
+    |> validate_priority(params)
+    |> validate_difficulty(params)
+  end
+
+  defp validate_title(errors, params) do
+    case TaskForm.trimmed(params["title"]) do
+      nil -> Map.put(errors, :title, "Title can't be empty.")
+      _ -> errors
+    end
+  end
+
+  defp validate_workspace(errors, params) do
+    case TaskForm.trimmed(params["workspace_id"]) do
+      nil -> Map.put(errors, :workspace_id, "Pick a workspace to file this ticket in.")
+      _ -> errors
+    end
+  end
+
+  defp validate_priority(errors, params) do
+    case TaskForm.parse_int(params["priority"]) do
+      :error -> Map.put(errors, :priority, "Priority must be a number 0–4.")
+      _ -> errors
+    end
+  end
+
+  defp validate_difficulty(errors, params) do
+    case TaskForm.parse_int(params["difficulty"]) do
+      :error -> Map.put(errors, :difficulty, "Difficulty must be a number 0–4.")
+      _ -> errors
+    end
+  end
+
+  defp priority_value(params) do
+    case TaskForm.parse_int(params["priority"]) do
+      {:ok, nil} -> 2
+      {:ok, priority} -> priority
+    end
+  end
+
+  # Repo choices for the workspace currently picked in the form (bd-2jum8j).
+  # Delegated to `Dispatch.all_available_repos/1` so the form can't offer a
+  # repo whose configured path no longer resolves.
+  #
+  # bd-9dwbvt: blank no longer means "unassigned" — the create action resolves
+  # the workspace's repo for you — so the blank choice says which repo that
+  # will be, or that you have to pick one when nothing resolves.
+  defp repo_options(params, workspaces) do
+    ws_id = form_workspace_id(params, workspaces)
+
+    [{blank_repo_label(ws_id), ""}] ++ Enum.map(Dispatch.all_available_repos(ws_id), &{&1, &1})
+  end
+
+  defp form_workspace_id(params, workspaces) do
+    TaskForm.trimmed(params["workspace_id"]) ||
+      case workspaces do
+        [%{id: id} | _] -> id
+        _ -> nil
+      end
+  end
+
+  defp blank_repo_label(ws_id) do
+    case IssueRepo.resolve(ws_id, nil) do
+      {:ok, nil} -> "— unassigned —"
+      {:ok, repo} -> "— workspace default (#{repo}) —"
+      {:error, _} -> "— pick a repo —"
+    end
+  end
+
+  defp difficulty_value(params) do
+    case TaskForm.parse_int(params["difficulty"]) do
+      {:ok, difficulty} -> difficulty
+    end
+  end
+
+  # The footer's live equivalent of what's typed, as `arb ticket create` would
+  # be invoked — the only cross-reference point between the dashboard and the
+  # CLI, so the flag mapping has to be exact. `--workspace` is always shown
+  # (not just when it deviates from a default): `arb ticket`'s own default
+  # resolution (the workspace literally named "default", or the sole
+  # workspace if unambiguous — see `WardmastCli.Workspace.resolve/0`) does not
+  # match this form's default (alphabetically first), so omitting it would
+  # make the previewed command file into the wrong workspace on any
+  # multi-workspace install. `acceptance` has no `arb ticket create` flag at
+  # all — surfaced as a separate note below the command instead of silently
+  # dropped.
+  #
+  # Deviation from the reference mock (`arb ticket create "<title>" --priority
+  # 2`, unconditionally): flags whose typed value matches the server default
+  # are omitted here so the command shown is the minimal one that reproduces
+  # the create, and an empty title renders as `''` rather than `…`.
+  defp cli_preview(params, workspaces) do
+    title = TaskForm.trimmed(params["title"]) || ""
+    workspace_name = workspace_name_for(TaskForm.trimmed(params["workspace_id"]), workspaces)
+
+    ["arb ticket create", shell_quote(title)]
+    |> maybe_flag("--type", TaskForm.trimmed(params["issue_type"]), "feature")
+    |> maybe_flag("--priority", TaskForm.trimmed(params["priority"]), "2")
+    |> maybe_flag("--difficulty", TaskForm.trimmed(params["difficulty"]), nil)
+    |> maybe_flag("--repo", TaskForm.trimmed(params["repo"]), nil)
+    |> maybe_flag("--description", TaskForm.trimmed(params["description"]), nil, quote?: true)
+    |> maybe_workspace_flag(workspace_name)
+    |> Enum.join(" ")
+  end
+
+  defp workspace_name_for(nil, _workspaces), do: nil
+
+  defp workspace_name_for(id, workspaces) do
+    case Enum.find(workspaces, &(&1.id == id)) do
+      nil -> nil
+      workspace -> workspace.name
+    end
+  end
+
+  defp maybe_workspace_flag(parts, nil), do: parts
+  defp maybe_workspace_flag(parts, name), do: parts ++ ["--workspace", shell_quote(name)]
+
+  defp maybe_flag(parts, _flag, value, default, _opts \\ [])
+
+  defp maybe_flag(parts, _flag, value, default, _opts) when value == default or is_nil(value),
+    do: parts
+
+  defp maybe_flag(parts, flag, value, _default, opts) do
+    value = if opts[:quote?], do: shell_quote(value), else: value
+    parts ++ [flag, value]
+  end
+
+  # Single-quote the value POSIX-style: this string is meant to be copied
+  # straight into a shell, so `$` and backticks inside it must stay inert
+  # rather than expanding/executing on paste.
+  defp shell_quote(value) do
+    "'" <> String.replace(value, "'", "'\\''") <> "'"
+  end
+
+  defp maybe_load_workspaces(socket) do
+    if connected?(socket),
+      do: start_async(socket, :workspaces, &load_workspaces_task/0),
+      else: socket
+  end
+
+  # The task is linked to this view, so a tab closed mid-read would kill it
+  # mid-query — and a DB client that dies holding a checkout costs the pool
+  # that connection (under test, the one shared sandbox connection,
+  # bd-5scl0c). Trapping turns the view's exit into a message: the query in
+  # flight finishes, and the task goes before it starts another (bd-6mfl0s).
+  defp load_workspaces_task do
+    Process.flag(:trap_exit, true)
+    result = __MODULE__.read_workspaces()
+
+    receive do
+      {:EXIT, _view, _reason} -> exit(:shutdown)
+    after
+      0 -> result
+    end
+  end
+
+  @doc false
+  def read_workspaces do
+    Workspace
+    |> Ash.Query.sort(name: :asc)
+    |> Ash.read()
+  end
+
+  # ---- render ----
+
+  @impl true
+  def render(assigns) do
+    ~H"""
+    <Layouts.app
+      flash={@flash}
+      banner_rev={@banner_rev}
+      current_path={@current_path}
+      quotas={@quotas}
+      quota_on_exhaustion={@quota_on_exhaustion}
+      open_epic_count={@open_epic_count}
+      live={@live}
+      coordinator_inbox={@coordinator_inbox}
+      coordinator_outstanding_count={@coordinator_outstanding_count}
+      coordinator_inbox_now={@coordinator_inbox_now}
+    >
+      <div class="p-4 sm:p-6 max-w-[900px] mx-auto flex flex-col gap-4">
+        <div>
+          <h1 class="m-0 font-[600] text-[24px] leading-[1.2] tracking-[-0.025em] text-[var(--text-title)]">
+            Create a ticket
+          </h1>
+          <p class="mt-[6px] text-[12.5px] leading-[1.55] text-[var(--text-secondary)] max-w-[var(--measure-prose)]">
+            Writes through the same action the CLI and MCP tools use, so tracker mirroring and id generation apply identically. A duplicate title is advisory, not fatal.
+          </p>
+        </div>
+
+        <div
+          :if={@workspaces.loading}
+          id="task-new-workspaces-loading"
+          class="flex items-center gap-2 p-4 text-[12.5px] text-[var(--text-secondary)]"
+        >
+          <.icon name="hero-arrow-path-micro" class="size-4 shrink-0 animate-spin" />
+          Loading workspaces…
+        </div>
+
+        <div
+          :if={@workspaces.failed}
+          id="task-new-workspaces-error"
+          role="alert"
+          class="flex items-start gap-3 p-4 rounded-[var(--radius-field)] border border-solid border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[12.5px] text-[var(--arb-fail-text)]"
+        >
+          <.icon
+            name="hero-exclamation-triangle"
+            class="size-5 shrink-0 mt-0.5 text-[var(--arb-fail-text)]"
+          />
+          <div class="grow min-w-0">
+            <p class="font-medium">Could not load workspaces</p>
+            <p class="mt-1 text-[12px] opacity-90">{describe_error(@workspaces.failed)}</p>
+          </div>
+          <button
+            type="button"
+            id="task-new-workspaces-retry"
+            phx-click="retry_workspaces"
+            class={[
+              "shrink-0 px-3 h-[28px] rounded-[var(--radius-field)] cursor-pointer",
+              "border border-solid border-[var(--arb-fail-edge)] bg-[var(--surface-chrome)]",
+              "text-[12px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+            ]}
+          >
+            Retry
+          </button>
+        </div>
+
+        <p
+          :if={@workspaces.ok? and @workspaces.result == []}
+          class="text-[12.5px] text-[var(--arb-fail-text)]"
+        >
+          No workspaces exist yet — create one first at <.link
+            navigate={~p"/workspaces"}
+            class="text-[var(--text-link)] underline"
+          >/workspaces</.link>.
+        </p>
+
+        <.panel :if={@workspaces.ok? and @workspaces.result != []}>
+          <.form
+            for={%{}}
+            as={:task}
+            id="task-new-form"
+            phx-submit="create"
+            phx-change="preview_new"
+            class="grid sm:grid-cols-2 gap-x-[16px] gap-y-[14px]"
+          >
+            <div class="sm:col-span-2">
+              <WardmastWeb.CoreComponents.Forms.input
+                name="task[title]"
+                label="Title"
+                value={TaskForm.value(@form_params, "title")}
+                required
+                mono={false}
+                error={@field_errors[:title]}
+                placeholder="Short imperative summary"
+              />
+            </div>
+            <WardmastWeb.CoreComponents.Forms.select
+              name="task[workspace_id]"
+              label="Workspace"
+              options={Enum.map(@workspaces.result, &{"#{&1.name} (#{&1.prefix})", &1.id})}
+              value={TaskForm.value(@form_params, "workspace_id", List.first(@workspaces.result).id)}
+              error={@field_errors[:workspace_id]}
+            />
+            <WardmastWeb.CoreComponents.Forms.select
+              name="task[issue_type]"
+              label="Type"
+              options={@issue_type_options}
+              value={TaskForm.value(@form_params, "issue_type", "feature")}
+            />
+            <WardmastWeb.CoreComponents.Forms.select
+              name="task[priority]"
+              label="Priority"
+              options={@priority_options}
+              value={TaskForm.value(@form_params, "priority", "2")}
+              error={@field_errors[:priority]}
+            />
+            <WardmastWeb.CoreComponents.Forms.select
+              name="task[difficulty]"
+              label="Difficulty"
+              options={@difficulty_options}
+              value={TaskForm.value(@form_params, "difficulty")}
+              error={@field_errors[:difficulty]}
+            />
+            <WardmastWeb.CoreComponents.Forms.select
+              name="task[repo]"
+              label="Repo"
+              options={repo_options(@form_params, @workspaces.result)}
+              value={TaskForm.value(@form_params, "repo")}
+            />
+            <div class="sm:col-span-2">
+              <WardmastWeb.CoreComponents.Forms.textarea
+                name="task[description]"
+                label="Description (optional)"
+                value={TaskForm.value(@form_params, "description")}
+                rows={3}
+                placeholder="Context, scope, and anything a worker would otherwise have to guess."
+              />
+            </div>
+            <div class="sm:col-span-2">
+              <WardmastWeb.CoreComponents.Forms.textarea
+                name="task[acceptance]"
+                label="Acceptance (optional)"
+                value={TaskForm.value(@form_params, "acceptance")}
+                rows={2}
+                placeholder="How we'll know it's done."
+              />
+            </div>
+
+            <p :if={@server_error} class="sm:col-span-2 text-[12.5px] text-[var(--arb-fail-text)]">
+              {@server_error}
+            </p>
+
+            <%!-- Duplicate-title warning. Advisory, not fatal: the same rule
+                 the REST API answers with a 409, plus the dashboard's
+                 equivalent of `--force`. --%>
+            <div
+              :if={@create_dup}
+              id="task-new-dup"
+              role="alert"
+              class="sm:col-span-2 flex flex-col gap-2 rounded-[var(--radius-field)] border border-solid border-[var(--arb-attention-edge)] border-l-[length:var(--border-accent-width)] border-l-[color:var(--arb-attention)] bg-[var(--arb-attention-wash)] px-[13px] py-[11px]"
+            >
+              <span class="flex items-center gap-2 text-[12.5px] font-medium text-[var(--arb-text-body)]">
+                <WardmastWeb.CoreComponents.Core.icon
+                  name="hero-exclamation-triangle"
+                  size={14}
+                  color="var(--arb-attention)"
+                />
+                {dup_count(@create_dup)} tickets already have a similar title — file it anyway?
+              </span>
+              <ul class="m-0 pl-[18px] flex flex-col gap-[3px] list-disc">
+                <li
+                  :for={{ref, title} <- dup_matches(@create_dup)}
+                  class="font-[family-name:var(--font-mono)] text-[11.5px] text-[var(--text-secondary)]"
+                >
+                  <span class="text-[var(--text-link)]">{ref}</span> {title}
+                </li>
+              </ul>
+            </div>
+
+            <div class="sm:col-span-2 flex items-center gap-2 flex-wrap mt-1">
+              <WardmastWeb.CoreComponents.Core.button
+                type="submit"
+                variant="primary"
+                size="md"
+                disabled={@submitting || @created}
+              >
+                {cond do
+                  @created -> "Created"
+                  @submitting -> "Creating…"
+                  true -> "Create"
+                end}
+              </WardmastWeb.CoreComponents.Core.button>
+              <WardmastWeb.CoreComponents.Core.button
+                :if={@create_dup}
+                type="button"
+                phx-click="create_force"
+                variant="attention"
+                size="md"
+                disabled={@submitting}
+              >
+                Create anyway
+              </WardmastWeb.CoreComponents.Core.button>
+              <WardmastWeb.CoreComponents.Core.button
+                type="button"
+                phx-click={JS.navigate(~p"/")}
+                variant="ghost"
+                size="md"
+              >
+                Cancel
+              </WardmastWeb.CoreComponents.Core.button>
+            </div>
+          </.form>
+        </.panel>
+
+        <%!-- Live equivalent of what's typed, run against the CLI directly.
+             The only cross-reference point between the dashboard and
+             `arb` — the flag mapping must match `arb ticket create` exactly. --%>
+        <div
+          :if={@workspaces.ok? and @workspaces.result != []}
+          id="task-new-cli-preview"
+          class="flex items-center gap-[10px] font-[family-name:var(--font-mono)] text-[11.5px] text-[var(--text-label)]"
+        >
+          <WardmastWeb.CoreComponents.Core.icon name="hero-information-circle" size={13} />
+          Equivalent CLI:
+          <span class="text-[var(--arb-text-body)]">
+            {cli_preview(@form_params, @workspaces.result)}
+          </span>
+        </div>
+        <p
+          :if={TaskForm.trimmed(@form_params["acceptance"])}
+          class="font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-label)]"
+        >
+          Acceptance isn't set by `arb ticket create` — there's no CLI flag for it.
+        </p>
+
+        <WardmastWeb.CoreComponents.Navigation.back_link />
+      </div>
+    </Layouts.app>
+    """
+  end
+end

@@ -1,9 +1,9 @@
 #!/bin/sh
 # The `tests` step of the "arbiter" pre-push recipe (bd-8wdrql,
-# Arbiter.Worker.PrepushCheck.Recipe): run the given test files, each under its
+# Wardmast.Worker.PrepushCheck.Recipe): run the given test files, each under its
 # own umbrella app. Usage, from the repo root:
 #
-#   scripts/pre-push-tests.sh apps/arbiter/test/arbiter/foo_test.exs apps/arbiter_web/test/...
+#   scripts/pre-push-tests.sh apps/wardmast/test/wardmast/foo_test.exs apps/wardmast_web/test/...
 #
 # `mix test <path>` from the umbrella root ignores the path and runs everything,
 # so the files are grouped by `apps/<app>/` and run as `cd apps/<app> && mix test
