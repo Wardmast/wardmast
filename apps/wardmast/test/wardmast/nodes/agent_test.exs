@@ -50,7 +50,7 @@ defmodule Wardmast.Nodes.AgentTest do
     @tree %{
       "bin/wardmast" => "#!/bin/sh\n",
       "erts-14.0/bin/beam.smp" => "beam",
-      "lib/arbiter-1.0/ebin/wardmast.app" => "app",
+      "lib/wardmast-1.0/ebin/wardmast.app" => "app",
       "releases/1.0/vm.args" => "args",
       "releases/1.0/COOKIE" => "SECRET-COOKIE",
       "releases/1.0/tmp/scratch" => "scratch",
@@ -71,10 +71,10 @@ defmodule Wardmast.Nodes.AgentTest do
       assert art.version == "local-20261006000000"
       listed = names(art.path)
 
-      assert "arbiter/bin/wardmast" in listed
-      assert "arbiter/erts-14.0/bin/beam.smp" in listed
-      assert "arbiter/lib/arbiter-1.0/ebin/wardmast.app" in listed
-      assert "arbiter/releases/1.0/vm.args" in listed
+      assert "wardmast/bin/wardmast" in listed
+      assert "wardmast/erts-14.0/bin/beam.smp" in listed
+      assert "wardmast/lib/wardmast-1.0/ebin/wardmast.app" in listed
+      assert "wardmast/releases/1.0/vm.args" in listed
 
       refute Enum.any?(listed, &String.contains?(&1, "COOKIE"))
       refute Enum.any?(listed, &String.contains?(&1, "/tmp"))

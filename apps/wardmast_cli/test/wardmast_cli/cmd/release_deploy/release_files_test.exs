@@ -18,7 +18,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.ReleaseFilesTest do
       Path.join(System.tmp_dir!(), "relfiles-#{tag}-#{System.unique_integer([:positive])}")
 
     migrations_dir =
-      Path.join(dir, "lib/arbiter-#{String.trim_leading(tag, "v")}/priv/repo/migrations")
+      Path.join(dir, "lib/wardmast-#{String.trim_leading(tag, "v")}/priv/repo/migrations")
 
     File.mkdir_p!(migrations_dir)
 

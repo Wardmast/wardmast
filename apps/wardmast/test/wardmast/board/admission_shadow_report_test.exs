@@ -595,10 +595,10 @@ defmodule Wardmast.Board.AdmissionShadowReportTest do
     test "no admission, gate, dispatch, scheduler or board module reads the report" do
       lib = Path.expand("../../../lib", __DIR__)
       allowed = ~w(
-        arbiter/board/admission_shadow_report.ex
-        arbiter/board/admission_shadow_report/quota.ex
-        arbiter/quota/budget_calibration.ex
-        arbiter/release.ex
+        wardmast/board/admission_shadow_report.ex
+        wardmast/board/admission_shadow_report/quota.ex
+        wardmast/quota/budget_calibration.ex
+        wardmast/release.ex
         mix/tasks/wardmast.admission_shadow_report.ex
       )
 

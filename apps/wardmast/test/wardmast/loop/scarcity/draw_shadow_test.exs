@@ -22,17 +22,17 @@ defmodule Wardmast.Loop.Scarcity.DrawShadowTest do
   # the per-model fit: it turns it into seat weights the budget server holds, and
   # only `SeatCheck` (enforce) and the walk read those (`SeatWeightsTest` pins it).
   @allowed ~w(
-    arbiter/loop/scarcity.ex
-    arbiter/loop/scarcity/draw.ex
-    arbiter/loop/scarcity/calibration.ex
-    arbiter/release.ex
-    arbiter/quota/budget_calibration.ex
-    arbiter/quota/seat_weights.ex
+    wardmast/loop/scarcity.ex
+    wardmast/loop/scarcity/draw.ex
+    wardmast/loop/scarcity/calibration.ex
+    wardmast/release.ex
+    wardmast/quota/budget_calibration.ex
+    wardmast/quota/seat_weights.ex
     mix/tasks/wardmast.draw_calibration.ex
     mix/tasks/wardmast.budget_calibration.ex
-    arbiter/board/admission_shadow_report.ex
-    arbiter/board/admission_shadow_report/quota.ex
-    arbiter/quota/history.ex
+    wardmast/board/admission_shadow_report.ex
+    wardmast/board/admission_shadow_report/quota.ex
+    wardmast/quota/history.ex
   )
 
   test "no routing, gate, dispatch or board module consumes the calibration" do

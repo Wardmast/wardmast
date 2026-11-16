@@ -80,7 +80,7 @@ defmodule Wardmast.Nodes.LocalCapacityKindsTest do
       end
 
       pass_admission =
-        File.read!(Path.join(@lib, "arbiter/workflows/merge_queue/pass_admission.ex"))
+        File.read!(Path.join(@lib, "wardmast/workflows/merge_queue/pass_admission.ex"))
 
       assert pass_admission =~ "LocalCapacity.admit("
     end
@@ -88,7 +88,7 @@ defmodule Wardmast.Nodes.LocalCapacityKindsTest do
     test "nothing under sessions/ (coordinator PTYs) references Wardmast.Nodes" do
       offenders =
         @lib
-        |> Path.join("arbiter/sessions/**/*.ex")
+        |> Path.join("wardmast/sessions/**/*.ex")
         |> Path.wildcard()
         |> Enum.filter(&(File.read!(&1) =~ ~r/Wardmast\.Nodes|Executor/))
 

@@ -1032,7 +1032,7 @@ defmodule Wardmast.Worker.StopReasonTest do
     end
 
     # bd-6nr53z / run c88c77b0-2927-41ec-b582-6210538a43b3: the worker's own
-    # earlier tool output (grepping arbiter/github.ex, which is riddled with
+    # earlier tool output (grepping wardmast/github.ex, which is riddled with
     # "rate-limit" identifiers/comments) sat in the same tail window as the
     # terminal autocompact-thrash message. classify/2 stamped `:rate_limited`
     # instead of `:context_thrash` because the rate-limit signature was

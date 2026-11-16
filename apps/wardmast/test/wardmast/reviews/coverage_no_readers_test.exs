@@ -36,23 +36,23 @@ defmodule Wardmast.Reviews.CoverageNoReadersTest do
   #     predicate and names the `Entry` type in its own typespecs, but acts on
   #     nothing: `observe/1` returns `:ok` for every input.
   @exempt [
-    "arbiter/reviews/coverage.ex",
-    "arbiter/reviews/coverage/entry.ex",
-    "arbiter/reviews/coverage_shadow.ex",
-    "arbiter/reviews.ex"
+    "wardmast/reviews/coverage.ex",
+    "wardmast/reviews/coverage/entry.ex",
+    "wardmast/reviews/coverage_shadow.ex",
+    "wardmast/reviews.ex"
   ]
 
   @sites [
-    "arbiter/worker/review_gate.ex",
-    "arbiter/workflows/review_patrol.ex",
-    "arbiter/reviews/external_review.ex"
+    "wardmast/worker/review_gate.ex",
+    "wardmast/workflows/review_patrol.ex",
+    "wardmast/reviews/external_review.ex"
   ]
 
   # §3.4's two adopters: the shadow's callers in P3, the predicate's callers in
   # P4.
   @merge_paths [
-    "arbiter/worker/watchdog.ex",
-    "arbiter/workflows/merge_queue.ex"
+    "wardmast/worker/watchdog.ex",
+    "wardmast/workflows/merge_queue.ex"
   ]
 
   defp lib_sources do

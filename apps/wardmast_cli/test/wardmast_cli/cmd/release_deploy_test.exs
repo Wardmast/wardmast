@@ -64,7 +64,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
     # lib/<app>-<vsn>/priv/repo/migrations/*.exs.
     Enum.each(migrations, fn name ->
       path_in_tar =
-        "arbiter/lib/arbiter-#{String.trim_leading(tag, "v")}/priv/repo/migrations/#{name}.exs"
+        "wardmast/lib/wardmast-#{String.trim_leading(tag, "v")}/priv/repo/migrations/#{name}.exs"
 
       :ok = :erl_tar.add(tar, "defmodule M do end", String.to_charlist(path_in_tar), [])
     end)
@@ -229,7 +229,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       :erl_tar.add(
         tar,
         "defmodule M do end",
-        ~c"lib/arbiter-0.0.0/priv/repo/migrations/#{@m_base}.exs",
+        ~c"lib/wardmast-0.0.0/priv/repo/migrations/#{@m_base}.exs",
         []
       )
 
@@ -247,7 +247,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
     File.mkdir_p!(Path.join(dir, "bin"))
     File.write!(Path.join(dir, "bin/wardmast"), "#!/bin/sh\necho arbiter #{marker}\n")
 
-    migrations_dir = Path.join(dir, "lib/arbiter-0.0.0/priv/repo/migrations")
+    migrations_dir = Path.join(dir, "lib/wardmast-0.0.0/priv/repo/migrations")
     File.mkdir_p!(migrations_dir)
 
     Enum.each(migrations, fn name ->
@@ -264,7 +264,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
 
     if migrations != [] do
       migrations_dir =
-        Path.join(dir, "lib/arbiter-#{String.trim_leading(tag, "v")}/priv/repo/migrations")
+        Path.join(dir, "lib/wardmast-#{String.trim_leading(tag, "v")}/priv/repo/migrations")
 
       File.mkdir_p!(migrations_dir)
 

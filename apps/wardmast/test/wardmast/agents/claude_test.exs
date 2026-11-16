@@ -465,7 +465,7 @@ defmodule Wardmast.Agents.ClaudeTest do
 
   # bd-2zigo1 exported a server-env `CLAUDE_CODE_OAUTH_TOKEN` to every spawn.
   # Since the P13 flip (bd-9gqj8e) the token comes from the provider account
-  # alone (`arbiter/accounts/legacy_chain_removed_test.exs` covers that side
+  # alone (`wardmast/accounts/legacy_chain_removed_test.exs` covers that side
   # against a real database); the server env value is inert, and the pair is
   # an explicit unset so it cannot leak into the child either.
   describe "spawn_env/1 (CLAUDE_CODE_OAUTH_TOKEN, bd-2zigo1)" do

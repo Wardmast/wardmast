@@ -33,8 +33,8 @@ defmodule Wardmast.Quota.SeatsShadowTest do
   # The seats module, the scheduler walk's inputs (DC6, shadow and enforce only),
   # the capacity view (DC5, display only: it shows the live holders next to each
   # budget and decides nothing) and the seat check (DC8, enforce only).
-  @allowed ~w(arbiter/quota/seats.ex arbiter/board/walk_inputs.ex arbiter/board/capacity_view.ex
-              arbiter/accounts/seat_check.ex)
+  @allowed ~w(wardmast/quota/seats.ex wardmast/board/walk_inputs.ex wardmast/board/capacity_view.ex
+              wardmast/accounts/seat_check.ex)
 
   test "only the seats module, the walk's inputs and the capacity view name it" do
     offenders =

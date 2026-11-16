@@ -166,11 +166,11 @@ defmodule Wardmast.Quota.SeatWeightsTest do
     # inputs (shadow and enforce). Nothing that stops a run, and no gate or
     # dispatch path, names it.
     @allowed ~w(
-      arbiter/quota/seat_weights.ex
-      arbiter/quota/seats.ex
-      arbiter/quota/budget/server.ex
-      arbiter/accounts/seat_check.ex
-      arbiter/board/walk_inputs.ex
+      wardmast/quota/seat_weights.ex
+      wardmast/quota/seats.ex
+      wardmast/quota/budget/server.ex
+      wardmast/accounts/seat_check.ex
+      wardmast/board/walk_inputs.ex
     )
 
     test "only the seat check and the walk's inputs read the weights" do

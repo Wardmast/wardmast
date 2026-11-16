@@ -19,17 +19,17 @@ defmodule Wardmast.Quota.BudgetCalibrationShadowTest do
   # intervals; `QuotaSnapshot` documents the columns). `seat_weights.ex` (DC11) only
   # cites it in its moduledoc: the weights are calibrated beside it.
   @allowed ~w(
-    arbiter/quota/budget_calibration.ex
-    arbiter/quota/budget.ex
-    arbiter/quota/budget/inputs.ex
-    arbiter/quota/budget/server.ex
-    arbiter/loop/scarcity/draw.ex
-    arbiter/quota/quota_snapshot.ex
-    arbiter/release.ex
+    wardmast/quota/budget_calibration.ex
+    wardmast/quota/budget.ex
+    wardmast/quota/budget/inputs.ex
+    wardmast/quota/budget/server.ex
+    wardmast/loop/scarcity/draw.ex
+    wardmast/quota/quota_snapshot.ex
+    wardmast/release.ex
     mix/tasks/wardmast.budget_calibration.ex
-    arbiter/board/admission_shadow_report.ex
-    arbiter/board/admission_shadow_report/quota.ex
-    arbiter/quota/seat_weights.ex
+    wardmast/board/admission_shadow_report.ex
+    wardmast/board/admission_shadow_report/quota.ex
+    wardmast/quota/seat_weights.ex
   )
 
   test "no admission, gate, dispatch, scheduler or board module reads the calibration" do

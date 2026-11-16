@@ -38,11 +38,11 @@ defmodule Wardmast.Loop.ReplayIsolationTest do
   # Who may name it: the harness, its domain's resource list, and the
   # operator's entry points.
   @named_by ~w(
-    arbiter/lib/arbiter/loop/replay.ex
-    arbiter/lib/arbiter/loop/replay_run.ex
-    arbiter/lib/arbiter/loop.ex
-    arbiter/lib/arbiter/release.ex
-    arbiter/lib/mix/tasks/wardmast.replay_report.ex
+    wardmast/lib/wardmast/loop/replay.ex
+    wardmast/lib/wardmast/loop/replay_run.ex
+    wardmast/lib/wardmast/loop.ex
+    wardmast/lib/wardmast/release.ex
+    wardmast/lib/mix/tasks/wardmast.replay_report.ex
   )
 
   defp lib_files do
@@ -54,8 +54,8 @@ defmodule Wardmast.Loop.ReplayIsolationTest do
 
   defp harness_files do
     Enum.filter(lib_files(), fn path ->
-      path in ~w(arbiter/lib/arbiter/loop/replay.ex arbiter/lib/arbiter/loop/replay_run.ex) or
-        String.starts_with?(path, "arbiter/lib/arbiter/loop/replay/")
+      path in ~w(wardmast/lib/wardmast/loop/replay.ex wardmast/lib/wardmast/loop/replay_run.ex) or
+        String.starts_with?(path, "wardmast/lib/wardmast/loop/replay/")
     end)
   end
 
@@ -64,7 +64,7 @@ defmodule Wardmast.Loop.ReplayIsolationTest do
       offenders =
         lib_files()
         |> Enum.reject(
-          &(&1 in @named_by or String.starts_with?(&1, "arbiter/lib/arbiter/loop/replay/"))
+          &(&1 in @named_by or String.starts_with?(&1, "wardmast/lib/wardmast/loop/replay/"))
         )
         |> Enum.filter(&(@apps |> Path.join(&1) |> File.read!() =~ @names))
 

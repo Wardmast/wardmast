@@ -94,7 +94,7 @@ defmodule Wardmast.Agents.PreflightTest do
 
     # P13 (bd-9gqj8e): the server env is no longer a credential source — the
     # probe authenticates from the install-wide provider account credential
-    # (`arbiter/accounts/legacy_chain_removed_test.exs` drives that against a
+    # (`wardmast/accounts/legacy_chain_removed_test.exs` drives that against a
     # real database and a stub `claude`). What this file can pin without one
     # is the negative: a server-env token neither reaches `spawn_env/1` nor
     # the probe's child process.

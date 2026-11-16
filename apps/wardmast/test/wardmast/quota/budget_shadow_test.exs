@@ -51,17 +51,17 @@ defmodule Wardmast.Quota.BudgetShadowTest do
   # headroom; it gates only replays, never a dispatch, and
   # `Wardmast.Loop.ReplayIsolationTest` pins that no live path names it.
   @allowed ~w(
-    arbiter/quota/budget.ex
-    arbiter/quota/budget/server.ex
-    arbiter/quota/budget/inputs.ex
-    arbiter/quota/shadow_supervisor.ex
-    arbiter/quota/history.ex
-    arbiter/application.ex
-    arbiter/board/walk_inputs.ex
-    arbiter/board/capacity_view.ex
-    arbiter/loop/replay/admission.ex
-    arbiter/accounts/seat_check.ex
-    arbiter/quota/seat_weights.ex
+    wardmast/quota/budget.ex
+    wardmast/quota/budget/server.ex
+    wardmast/quota/budget/inputs.ex
+    wardmast/quota/shadow_supervisor.ex
+    wardmast/quota/history.ex
+    wardmast/application.ex
+    wardmast/board/walk_inputs.ex
+    wardmast/board/capacity_view.ex
+    wardmast/loop/replay/admission.ex
+    wardmast/accounts/seat_check.ex
+    wardmast/quota/seat_weights.ex
   )
 
   defp source_files(root) do
@@ -89,20 +89,20 @@ defmodule Wardmast.Quota.BudgetShadowTest do
 
   test "the admission surfaces never name the budget or its published table" do
     surfaces = ~w(
-      arbiter/accounts/admission.ex
-      arbiter/accounts/concurrency.ex
-      arbiter/accounts/slot_limit.ex
-      arbiter/quota/gate.ex
-      arbiter/board/autopilot.ex
-      arbiter/board/scheduler.ex
-      arbiter/board/snapshot.ex
-      arbiter/workflows/dispatch_queue.ex
-      arbiter/worker/dispatch.ex
-      arbiter/worker/resume_slot.ex
-      arbiter/agents/provider_routing.ex
-      arbiter/agents/reviewer_routing.ex
-      arbiter/nodes/placement.ex
-      arbiter/nodes/capacity.ex
+      wardmast/accounts/admission.ex
+      wardmast/accounts/concurrency.ex
+      wardmast/accounts/slot_limit.ex
+      wardmast/quota/gate.ex
+      wardmast/board/autopilot.ex
+      wardmast/board/scheduler.ex
+      wardmast/board/snapshot.ex
+      wardmast/workflows/dispatch_queue.ex
+      wardmast/worker/dispatch.ex
+      wardmast/worker/resume_slot.ex
+      wardmast/agents/provider_routing.ex
+      wardmast/agents/reviewer_routing.ex
+      wardmast/nodes/placement.ex
+      wardmast/nodes/capacity.ex
     )
 
     existing = for rel <- surfaces, File.exists?(Path.join(@lib, rel)), do: rel
@@ -117,14 +117,14 @@ defmodule Wardmast.Quota.BudgetShadowTest do
   end
 
   test "nothing that stops a run reads it (I8)" do
-    stoppers = Path.join(@lib, "arbiter/worker/**/*.ex") |> Path.wildcard()
+    stoppers = Path.join(@lib, "wardmast/worker/**/*.ex") |> Path.wildcard()
     assert stoppers != []
     assert Enum.filter(stoppers, &(File.read!(&1) =~ @consumers)) == []
     assert Enum.filter(stoppers, &(File.read!(&1) =~ "CapacityView")) == []
   end
 
   test "the budget reaches Pace only through the gate (I6)" do
-    source = File.read!(Path.join(@lib, "arbiter/quota/budget.ex"))
+    source = File.read!(Path.join(@lib, "wardmast/quota/budget.ex"))
     refute source =~ ~r/\bPace\./
     refute source =~ "alias Wardmast.Quota.Pace"
   end
@@ -168,11 +168,11 @@ defmodule Wardmast.Quota.BudgetShadowTest do
 
     assert callers ==
              Enum.sort(~w(
-               arbiter/accounts/admission.ex
-               arbiter/agents/provider_routing.ex
-               arbiter/agents/reviewer_routing.ex
-               arbiter/worker/dispatch.ex
-               arbiter/worker/resume_slot.ex
+               wardmast/accounts/admission.ex
+               wardmast/agents/provider_routing.ex
+               wardmast/agents/reviewer_routing.ex
+               wardmast/worker/dispatch.ex
+               wardmast/worker/resume_slot.ex
              ))
 
     for app <- ~w(wardmast_web wardmast_cli) do
@@ -191,9 +191,9 @@ defmodule Wardmast.Quota.BudgetShadowTest do
 
     # The server announces it; the Autopilot's handler only ever plans a pass
     # (`Wardmast.Board.AutopilotEnforceTest`: a fall plans nothing).
-    assert handlers == ["arbiter/board/autopilot.ex", "arbiter/quota/budget/server.ex"]
+    assert handlers == ["wardmast/board/autopilot.ex", "wardmast/quota/budget/server.ex"]
 
-    source = File.read!(Path.join(@lib, "arbiter/board/autopilot.ex"))
+    source = File.read!(Path.join(@lib, "wardmast/board/autopilot.ex"))
 
     [handler] =
       Regex.run(~r/def handle_info\(\{:budget_changed.*?\n  end\n/s, source)
