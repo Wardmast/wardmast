@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# launchd AbandonProcessGroup: a tmux server started by the job must survive
-# the job being booted out when AbandonProcessGroup=true (and, as a control,
-# be killed when it is false).
+# launchd AbandonProcessGroup: a child that stays in the job's process group
+# must survive the job being booted out when AbandonProcessGroup=true, and be
+# killed when AbandonProcessGroup=false (the control).
 set -u
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 probe_init abandon-pgroup
 
-command -v tmux >/dev/null 2>&1 || brew install tmux || inconclusive "tmux unavailable"
 uid=$(id -u)
 dir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/abandon-spike"
 mkdir -p "$dir"
 
 run_case() { # $1 = abandon (true|false); echoes survived|killed|error
-  local abandon="$1" label="dev.arbiter.spike.ab.$1.$$" sock="spike-$1-$$" domain="" d
-  local plist="$dir/$label.plist"
+  local abandon="$1" label="dev.arbiter.spike.ab.$1.$$" domain="" d
+  local plist="$dir/$label.plist" pidfile="$dir/$label.child.pid"
+  rm -f "$pidfile"
   cat >"$plist" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -22,7 +22,7 @@ run_case() { # $1 = abandon (true|false); echoes survived|killed|error
   <key>Label</key><string>$label</string>
   <key>ProgramArguments</key><array>
     <string>/bin/sh</string><string>-c</string>
-    <string>$(command -v tmux) -L $sock new-session -d 'sleep 600'; sleep 600</string></array>
+    <string>/bin/sleep 600 &lt;/dev/null &gt;/dev/null 2&gt;&amp;1 &amp; echo \$! &gt; "$pidfile"; exec /bin/sleep 600</string></array>
   <key>RunAtLoad</key><true/>
   <key>AbandonProcessGroup</key><$abandon/>
 </dict></plist>
@@ -32,12 +32,24 @@ PL
   done
   [ -n "$domain" ] || { echo error; return; }
   sleep 3
-  tmux -L "$sock" has-session >&2 2>&1 || { launchctl bootout "$domain/$label" >&2; echo error; return; }
-  launchctl bootout "$domain/$label" >&2
+  local pid=""
+  [ -s "$pidfile" ] && pid=$(tr -d '[:space:]' <"$pidfile")
+  if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    launchctl bootout "$domain/$label" >&2 2>&1 || true
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    echo error
+    return
+  fi
+  ps -o pid=,ppid=,pgid=,comm= -p "$pid" >&2 || true
+  if ! launchctl bootout "$domain/$label" >&2; then
+    kill "$pid" 2>/dev/null || true
+    echo error
+    return
+  fi
   sleep 3
-  if tmux -L "$sock" has-session >&2 2>&1; then
+  if kill -0 "$pid" 2>/dev/null; then
     echo survived
-    tmux -L "$sock" kill-server >&2
+    kill "$pid" 2>/dev/null || true
   else
     echo killed
   fi
@@ -45,12 +57,20 @@ PL
 
 abandon_true=$(run_case true)
 abandon_false=$(run_case false)
-echo "AbandonProcessGroup=true  -> tmux $abandon_true"
-echo "AbandonProcessGroup=false -> tmux $abandon_false"
+echo "AbandonProcessGroup=true  -> child $abandon_true"
+echo "AbandonProcessGroup=false -> child $abandon_false"
 
 case "$abandon_true/$abandon_false" in
-  survived/killed) pass "tmux child survives bootout only with AbandonProcessGroup=true (control was killed)" ;;
-  survived/survived) inconclusive "tmux survived in both cases (control did not die; tmux daemonises into its own session)" ;;
-  killed/*) fail "tmux child was killed on bootout even with AbandonProcessGroup=true" ;;
-  *) inconclusive "could not run launchd cases (true=$abandon_true false=$abandon_false)" ;;
+  survived/killed)
+    pass "same-pgroup child survived bootout with AbandonProcessGroup=true and was killed with false (true=$abandon_true false=$abandon_false)"
+    ;;
+  survived/survived)
+    fail "control child was not killed on bootout with AbandonProcessGroup=false (true=$abandon_true false=$abandon_false)"
+    ;;
+  killed/*)
+    fail "same-pgroup child was killed on bootout even with AbandonProcessGroup=true (true=$abandon_true false=$abandon_false)"
+    ;;
+  *)
+    fail "could not verify AbandonProcessGroup behaviour (true=$abandon_true false=$abandon_false)"
+    ;;
 esac
