@@ -17,11 +17,13 @@ defmodule Wardmast.Worker.CliFetcher.Status do
   alias Wardmast.Worker.CliFetcher
   alias Wardmast.Worker.CliFetcher.Cache
   alias Wardmast.Worker.CliFetcher.Scheduler
+  alias Wardmast.Worker.CliSet.Watcher
   alias Wardmast.Worker.Image.LocalPublished
 
   @spec build(keyword()) :: map()
   def build(opts \\ []) do
     scheduler = Keyword.get_lazy(opts, :scheduler_status, &Scheduler.status/0)
+    watcher = Keyword.get_lazy(opts, :watcher_status, &Watcher.status/0)
     manual = Settings.worker_cli_manual() || []
     latest = Map.get(scheduler, :latest, %{})
 
@@ -32,8 +34,37 @@ defmodule Wardmast.Worker.CliFetcher.Status do
         enabled: Map.get(scheduler, :enabled, false),
         checked_at: iso(Map.get(scheduler, :checked_at))
       },
+      republish: republish(watcher),
       clis: Enum.map(CliFetcher.names(), &cli(&1, latest, manual, opts))
     }
+  end
+
+  defp republish(watcher) do
+    retries =
+      for {{repo, repo_path}, entry} <- Enum.sort(Map.get(watcher, :retries, %{})) do
+        %{
+          repo: repo,
+          repo_path: repo_path,
+          ref: Map.get(entry, :ref),
+          attempts: Map.get(entry, :attempts, 0),
+          next_delay_ms: Map.get(entry, :next_delay_ms),
+          reason: Watcher.format_reason(Map.get(entry, :last_error))
+        }
+      end
+
+    failed =
+      for {{repo, repo_path}, entry} <- Enum.sort(Map.get(watcher, :failed, %{})) do
+        %{
+          repo: repo,
+          repo_path: repo_path,
+          ref: Map.get(entry, :ref),
+          attempts: Map.get(entry, :attempts, 0),
+          at: iso(Map.get(entry, :at)),
+          reason: Watcher.format_reason(Map.get(entry, :reason))
+        }
+      end
+
+    %{retries: retries, failed: failed}
   end
 
   defp cli(name, latest, manual, opts) do

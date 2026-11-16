@@ -191,6 +191,10 @@ defmodule Wardmast.Worker.Dispatch do
           machine_pid: pid(),
           driver_pid: pid() | nil,
           worktree_path: String.t() | nil,
+          # The node the run was placed on (`nil`: the primary, where the worktree is) (bd-ap53dg)
+          node_id: String.t() | nil,
+          # A resume's preserved worktree: commits on no remote (`nil`: not a resume or unreadable)
+          unpushed_commits: non_neg_integer() | nil,
           # The reviewer's throwaway checkout, if one was provisioned
           # (bd-199giy). Owned by the Driver, which tears it down when the run
           # ends — EXCEPT under `start_driver: false`, where no Driver exists
@@ -342,6 +346,8 @@ defmodule Wardmast.Worker.Dispatch do
              machine_pid: machine_pid,
              driver_pid: driver_pid,
              worktree_path: worktree_path,
+             node_id: placed_node_id(opts),
+             unpushed_commits: unpushed_count(worktree_path, opts),
              review_checkout: Keyword.get(opts, :review_checkout),
              claude_port: claude_port
            }}
@@ -3174,6 +3180,7 @@ defmodule Wardmast.Worker.Dispatch do
       no_pr?: Keyword.get(opts, :review) != true and no_private_clone?(task, opts),
       inspect?: Keyword.get(opts, :review) != true and inspect_checkout?(task, opts),
       local_work?: local_work?(task, opts, Placement.mode(workspace)),
+      unpushed?: unpushed?(task, opts, Placement.mode(workspace)),
       git_credential: Placement.git_credential(workspace, Keyword.get(opts, :repo) || task.repo),
       registry: Placement.image_registry(workspace, Keyword.get(opts, :repo) || task.repo),
       last_digest: PublishLedger.last_ref(Keyword.get(opts, :repo) || task.repo),
@@ -3213,6 +3220,44 @@ defmodule Wardmast.Worker.Dispatch do
     end
   rescue
     _ -> true
+  end
+
+  # bd-ap53dg: does the checkout this dispatch would reuse hold commits that no remote
+  # has? A node is seeded from the primary's clone and its result is pushed back over
+  # the branch the forge knows, so work that only this checkout has (the pre-push gate
+  # stayed red, the push failed, a crash before it) must run here. Unlike uncommitted
+  # work this holds for a resume too. A checkout git cannot read counts as holding
+  # commits: the safe answer is to keep it here.
+  defp unpushed?(_task, _opts, :local_only), do: false
+
+  defp unpushed?(%Issue{} = task, opts, _mode) do
+    if no_private_clone?(task, opts) do
+      false
+    else
+      path = task |> BranchNamer.derive() |> Worktree.worktree_path()
+
+      File.dir?(path) and last_run_local?(task.id) and
+        Worktree.unpushed_commits(path) != {:ok, 0}
+    end
+  rescue
+    _ -> true
+  end
+
+  # Only commits a LOCAL run left are the hazard (bd-ap53dg). Commits a node's run
+  # produced reached the home clone through the ingest/collect hand-off (bd-4ic681), and
+  # a resume placed on a node is seeded with exactly those, so a node-collected,
+  # not-yet-pushed branch is a legitimate remote resume. No run row counts as local.
+  defp last_run_local?(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc, inserted_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%Run{node_id: nil}] -> true
+      [%Run{}] -> false
+      [] -> true
+    end
   end
 
   # The spawn kind the primary's cap sees (`LocalCapacity.kinds/0`).
@@ -3649,6 +3694,19 @@ defmodule Wardmast.Worker.Dispatch do
       _ -> nil
     end
   end
+
+  # bd-ap53dg: what a resume's output says about the preserved worktree's unpushed
+  # commits (`Worktree.unpushed_commits/1`); only a resume reuses a worktree's work.
+  defp unpushed_count(worktree_path, opts) when is_binary(worktree_path) do
+    with true <- resuming?(opts),
+         {:ok, n} <- Worktree.unpushed_commits(worktree_path) do
+      n
+    else
+      _ -> nil
+    end
+  end
+
+  defp unpushed_count(_worktree_path, _opts), do: nil
 
   # DC6: the admission shadow's record (`Wardmast.Board.AdmissionShadow`, only
   # under `scheduler_admission: shadow` or `enforce`) joins the routing decision

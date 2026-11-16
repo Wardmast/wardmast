@@ -1340,6 +1340,53 @@ defmodule Wardmast.Worker.Worktree do
                            |> Enum.uniq()
 
   @doc """
+  How many commits on `HEAD` of the worktree at `path` are reachable from no
+  remote-tracking ref (bd-ap53dg): work that exists only in this checkout. A branch
+  absent from `origin` counts its own commits (those not already on `origin/<base>`);
+  a branch ahead of `origin/<branch>` counts the commits ahead; a pushed one is `0`.
+  Reads the local tracking refs (no fetch), so a stale ref can only over-count, which
+  keeps the work here. A git failure is `{:error, reason}`: callers read it as "might
+  hold work".
+  """
+  @spec unpushed_commits(path()) :: {:ok, non_neg_integer()} | {:error, error_reason()}
+  def unpushed_commits(path) when is_binary(path),
+    do: count_revs(path, ["HEAD", "--not", "--remotes"])
+
+  @doc """
+  The unpushed commits themselves (`unpushed_commits/1`'s set), newest first, as
+  `%{sha, subject}` maps capped at `limit` (bd-ap53dg: what `arb worker show` lists).
+  """
+  @spec unpushed_commit_list(path(), pos_integer()) ::
+          {:ok, [%{sha: String.t(), subject: String.t()}]} | {:error, error_reason()}
+  def unpushed_commit_list(path, limit \\ 20) when is_binary(path) do
+    with {:ok, out} <-
+           run_git(
+             [
+               "log",
+               "-n",
+               Integer.to_string(limit),
+               "--format=%h\t%s",
+               "HEAD",
+               "--not",
+               "--remotes"
+             ],
+             cd: path
+           ) do
+      commits =
+        out
+        |> String.split("\n", trim: true)
+        |> Enum.map(fn line ->
+          case String.split(line, "\t", parts: 2) do
+            [sha, subject] -> %{sha: sha, subject: subject}
+            [sha] -> %{sha: sha, subject: ""}
+          end
+        end)
+
+      {:ok, commits}
+    end
+  end
+
+  @doc """
   Return `{:ok, true}` if the worktree at `path` has any uncommitted changes
   (staged, unstaged, or untracked), else `{:ok, false}`.
 

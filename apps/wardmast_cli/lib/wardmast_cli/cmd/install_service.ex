@@ -83,9 +83,10 @@ defmodule WardmastCli.Cmd.InstallService do
   """
 
   alias WardmastCli.ArgParser
-  alias WardmastCli.Cmd.InstallService.{EnvFile, Formatter, Systemctl, Unit}
+  alias WardmastCli.Cmd.InstallService.{EnvFile, Formatter, Unit}
   alias WardmastCli.Cmd.{Restart, Start}
   alias WardmastCli.Output
+  alias WardmastCli.Supervisor
 
   @switches [system: :boolean, uninstall: :boolean, json: :boolean, force: :boolean]
 
@@ -126,10 +127,10 @@ defmodule WardmastCli.Cmd.InstallService do
     log_paths = if scope == :user, do: setup_log_dir(arbiter_home), else: nil
 
     Unit.write_unit(path, contents)
-    Systemctl.daemon_reload(scope)
-    Systemctl.enable_now(scope)
+    Supervisor.impl().daemon_reload(scope)
+    Supervisor.impl().enable_now(scope)
     if scope == :user, do: enable_logrotate_timer()
-    linger = if scope == :user, do: Systemctl.enable_linger(), else: :not_applicable
+    linger = if scope == :user, do: Supervisor.impl().enable_boot_start(), else: :not_applicable
 
     Formatter.emit_installed(mode, scope, path, arbiter_home, linger, secrets, log_paths)
   end
@@ -197,7 +198,7 @@ defmodule WardmastCli.Cmd.InstallService do
   # Enable the daily logrotate timer for user installs. Non-fatal if logrotate
   # is missing — the log file still works, just won't auto-rotate.
   defp enable_logrotate_timer do
-    case Systemctl.systemctl(:user, ["enable", "--now", Unit.logrotate_timer_name()]) do
+    case Supervisor.impl().enable_timer(Unit.logrotate_timer_name()) do
       {_out, 0} ->
         :ok
 
@@ -215,16 +216,16 @@ defmodule WardmastCli.Cmd.InstallService do
 
     # `disable --now` both stops and de-links the unit. Tolerate a non-zero
     # exit (already disabled / never installed) so uninstall is idempotent.
-    disabled? = Systemctl.disable_now(scope)
+    disabled? = Supervisor.impl().disable_now(scope)
 
     if scope == :user do
-      Systemctl.systemctl(:user, ["disable", "--now", Unit.logrotate_timer_name()])
+      Supervisor.impl().disable_timer(Unit.logrotate_timer_name())
       Unit.remove_unit(Path.join(unit_dir(:user), Unit.logrotate_timer_name()))
       Unit.remove_unit(Path.join(unit_dir(:user), @logrotate_service_name))
     end
 
     removed? = Unit.remove_unit(path)
-    Systemctl.daemon_reload(scope)
+    Supervisor.impl().daemon_reload(scope)
 
     Formatter.emit_uninstalled(mode, scope, path, disabled?, removed?)
   end

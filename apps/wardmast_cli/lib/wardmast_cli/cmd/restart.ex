@@ -42,7 +42,7 @@ defmodule WardmastCli.Cmd.Restart do
       within the timeout, or a prerequisite (project root) was missing.
   """
 
-  alias WardmastCli.{ArgParser, Client, Cmd.Doctor, Cmd.Start, Output, RunLabel}
+  alias WardmastCli.{ArgParser, Client, Cmd.Doctor, Cmd.Start, Output, RunLabel, Supervisor}
 
   @switches [json: :boolean, timeout: :integer, force: :boolean]
 
@@ -178,16 +178,15 @@ defmodule WardmastCli.Cmd.Restart do
       :managed ->
         Start.log_text("Stopping via systemd (systemctl --user stop arbiter.service)…")
 
-        case run_cmd("systemctl", ["--user", "stop", "arbiter.service"], stderr_to_stdout: true) do
-          {_out, 0} -> :ok
-          {out, code} -> {:error, "systemctl stop exited #{code}: #{String.trim(out)}"}
-        end
+        Supervisor.impl().stop_service()
 
       :unmanaged ->
         _ = stop_phoenix(api_port())
         :ok
     end
   rescue
+    # Also covers the signalling path's `lsof`/`kill` spawns, as before the
+    # Supervisor extraction.
     e in ErlangError -> {:error, "could not run systemctl: #{inspect(e.original)}"}
   end
 
@@ -225,29 +224,10 @@ defmodule WardmastCli.Cmd.Restart do
     end
   end
 
-  defp probe_systemd do
-    case run_cmd("systemctl", ["--user", "cat", "arbiter.service"], stderr_to_stdout: true) do
-      {_out, 0} ->
-        :managed
-
-      {out, code} ->
-        if Regex.match?(~r/No files found|could not be found|not-found/i, out) do
-          :not_found
-        else
-          {:unreachable, "systemctl exited #{code}: #{String.trim(out)}"}
-        end
-    end
-  rescue
-    e in ErlangError ->
-      # systemctl is not installed (macOS, minimal container): there is no
-      # systemd to be in charge. Anything else is "could not ask".
-      if e.original == :enoent,
-        do: :not_found,
-        else: {:unreachable, "could not run systemctl: #{inspect(e.original)}"}
-  end
+  defp probe_systemd, do: Supervisor.impl().service_state()
 
   defp refuse_if_unit_file_on_disk! do
-    case Enum.find(unit_dirs(), &File.exists?(Path.join(&1, "arbiter.service"))) do
+    case Enum.find(Supervisor.impl().unit_dirs(), &File.exists?(Path.join(&1, "arbiter.service"))) do
       nil ->
         :ok
 
@@ -260,27 +240,6 @@ defmodule WardmastCli.Cmd.Restart do
     end
   end
 
-  # Where `arb install-service` (and packages) put the unit. The
-  # `:bd2_unit_dirs` seam lets tests point at a scratch dir.
-  defp unit_dirs do
-    case Process.get(:bd2_unit_dirs) do
-      dirs when is_list(dirs) ->
-        dirs
-
-      _ ->
-        config_home =
-          System.get_env("XDG_CONFIG_HOME") || Path.join(System.user_home!(), ".config")
-
-        [
-          Path.join(config_home, "systemd/user"),
-          "/etc/systemd/user",
-          "/etc/systemd/system",
-          "/usr/lib/systemd/user",
-          "/usr/lib/systemd/system"
-        ]
-    end
-  end
-
   # Delegate the full stop+start cycle to systemd. Returns an action tuple.
   defp restart_via_systemd do
     Start.log_text("Restarting via systemd (systemctl --user restart arbiter.service)…")
@@ -290,24 +249,10 @@ defmodule WardmastCli.Cmd.Restart do
     # enqueue the job and watch the unit ourselves, bounded, in `await_active/2`.
     baseline_id = baseline_invocation_id(unit_info())
 
-    case run_cmd("systemctl", ["--user", "restart", "--no-block", "arbiter.service"],
-           stderr_to_stdout: true
-         ) do
-      {_out, 0} ->
-        await_active(baseline_id)
-
-      {out, code} ->
-        Output.die(
-          "systemctl --user restart arbiter.service failed (exit #{code})",
-          "Output:\n" <> String.trim_trailing(out)
-        )
+    case Supervisor.impl().restart_service() do
+      :ok -> await_active(baseline_id)
+      {:error, title, detail} -> Output.die(title, detail)
     end
-  rescue
-    e in ErlangError ->
-      Output.die(
-        "could not run systemctl: #{inspect(e.original)}",
-        "Ensure systemctl is on your PATH."
-      )
   end
 
   # Bounded wait for arbiter.service to reach ActiveState=active. If it sits
@@ -348,16 +293,7 @@ defmodule WardmastCli.Cmd.Restart do
         "running `systemctl --user daemon-reexec` and starting it again…"
     )
 
-    _ = run_cmd("systemctl", ["--user", "daemon-reexec"], stderr_to_stdout: true)
-
-    _ =
-      run_cmd("systemctl", ["--user", "start", "--no-block", "arbiter.service"],
-        stderr_to_stdout: true
-      )
-
-    :ok
-  rescue
-    e in ErlangError -> Start.log_text("recovery failed: #{inspect(e.original)}")
+    Supervisor.impl().recover_stuck_service()
   end
 
   # An absent/empty InvocationID (unit never started) gives no baseline to compare.
@@ -375,43 +311,7 @@ defmodule WardmastCli.Cmd.Restart do
 
   defp settled_state(%{state: state}, _baseline_id), do: state
 
-  # ActiveState/InvocationID/Job of arbiter.service, or nil when unreadable.
-  defp unit_info do
-    args = [
-      "--user",
-      "show",
-      "arbiter.service",
-      "-p",
-      "ActiveState",
-      "-p",
-      "InvocationID",
-      "-p",
-      "Job"
-    ]
-
-    case run_cmd("systemctl", args, stderr_to_stdout: true) do
-      {out, 0} -> parse_unit_info(out)
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  end
-
-  defp parse_unit_info(out) do
-    props =
-      for line <- String.split(out, "\n", trim: true),
-          [k, v] <- [String.split(line, "=", parts: 2)],
-          into: %{},
-          do: {k, String.trim(v)}
-
-    case props do
-      %{"ActiveState" => state} when state != "" ->
-        %{state: state, invocation_id: props["InvocationID"] || "", job: props["Job"]}
-
-      _ ->
-        nil
-    end
-  end
+  defp unit_info, do: Supervisor.impl().service_info()
 
   # ---- stop --------------------------------------------------------------
 

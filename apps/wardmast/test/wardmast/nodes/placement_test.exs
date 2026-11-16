@@ -346,6 +346,15 @@ defmodule Wardmast.Nodes.PlacementTest do
       assert Placement.eligible(Map.put(@eligible, :local_work?, false)) == :ok
     end
 
+    # bd-ap53dg: commits only the home clone has (pre-push gate red, push failed) are not on
+    # the branch a node starts from.
+    test "a run whose home clone holds unpushed commits stays local" do
+      assert {:local_only, :unpushed_commits} =
+               Placement.eligible(Map.put(@eligible, :unpushed?, true))
+
+      assert Placement.eligible(Map.put(@eligible, :unpushed?, false)) == :ok
+    end
+
     test "a local_only workspace keeps even an eligible run local" do
       assert {:local_only, :placement_local_only} =
                Placement.eligible(%{@eligible | mode: :local_only})
@@ -358,7 +367,8 @@ defmodule Wardmast.Nodes.PlacementTest do
             :not_podman,
             :no_private_clone,
             :placement_local_only,
-            :local_work
+            :local_work,
+            :unpushed_commits
           ] do
         assert is_binary(Placement.reason_phrase(reason, %{kind: :reviewer, provider: :codex}))
       end

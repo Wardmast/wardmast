@@ -26,7 +26,7 @@ defmodule WardmastCli.Cmd.Session do
   """
 
   alias Wardmast.Worker.ReleaseEnv
-  alias WardmastCli.{ArgParser, Cmd.Start, Output}
+  alias WardmastCli.{ArgParser, Output, Supervisor}
 
   @unit_prefix "arb-session-"
   @socket_prefix "session-"
@@ -61,28 +61,14 @@ defmodule WardmastCli.Cmd.Session do
   # ---- list -----------------------------------------------------------------
 
   defp list(_args, mode) do
-    case Start.run_cmd(
-           "systemctl",
-           ["--user", "list-units", @unit_prefix <> "*", "--no-legend", "--plain"],
-           stderr_to_stdout: true
-         ) do
-      {output, 0} ->
+    case Supervisor.impl().list_scopes(@unit_prefix) do
+      {:ok, output} ->
         rows = parse_units(output)
         if mode == :json, do: emit_json(rows), else: print_list(rows)
 
-      {output, status} ->
-        Output.die(
-          "systemctl exited #{status}: #{String.trim(output)}",
-          "Is a systemd --user manager running for this user? " <>
-            "(over ssh, `loginctl enable-linger $USER` may be needed.)"
-        )
+      {:error, title, detail} ->
+        Output.die(title, detail)
     end
-  rescue
-    e in ErlangError ->
-      Output.die(
-        "could not run systemctl: #{Exception.message(e)}",
-        "Is systemd installed and on PATH?"
-      )
   end
 
   defp emit_json(rows) do

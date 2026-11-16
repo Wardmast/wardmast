@@ -666,6 +666,30 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
       assert by_id(rows, "cli_versions.cli_codex").status == :warn
       assert by_id(rows, "cli_versions.cli_codex").detail =~ "not yet in the verified cache"
     end
+
+    test "warns when a CLI set republish has a persistent failure" do
+      body = %{
+        "hold" => nil,
+        "scheduler" => %{"enabled" => true, "checked_at" => "2026-10-26T03:00:00Z"},
+        "clis" => [cli(%{})],
+        "republish" => %{
+          "failed" => [
+            %{
+              "repo" => "fresh",
+              "ref" => "ghcr.io/wardmast/arbiter/fresh/worker:4efb919d29e0",
+              "reason" => "unauthorized: authentication required"
+            }
+          ]
+        }
+      }
+
+      stub_healthy([{{"get", "/api/server/cli_versions"}, {body, 200}}])
+      rows = Checks.run() |> Enum.filter(&String.starts_with?(&1.id, "cli_versions."))
+      republish = by_id(rows, "cli_versions.cli_republish_fresh")
+      assert republish.status == :warn
+      assert republish.detail =~ "ghcr.io/wardmast/arbiter/fresh/worker:4efb919d29e0"
+      assert republish.detail =~ "unauthorized"
+    end
   end
 
   describe "agy tier models (bd-7wx2lh)" do
