@@ -185,7 +185,7 @@ jobs:
     env:
       MIX_ENV: test
       # Non-secret test key for Wardmast.Vault (matches config/test.exs).
-      ARBITER_CLOAK_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      WARDMAST_CLOAK_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 
     strategy:
       fail-fast: false

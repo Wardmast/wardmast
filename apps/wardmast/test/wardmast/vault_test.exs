@@ -12,7 +12,20 @@ defmodule Wardmast.VaultTest do
     prev_gen_env = Wardmast.Env.get("WARDMAST_CLOAK_KEY_GENERATION")
     prev_cfg = Application.get_env(:wardmast, Vault)
 
+    # The legacy ARB_/ARBITER_ names are read as a fallback by Wardmast.Env;
+    # clear them so a host that still exports one can't mask the case under test.
+    legacy =
+      for base <- ["CLOAK_KEY", "CLOAK_KEY_OLD", "CLOAK_KEY_GENERATION"],
+          prefix <- ["ARB_", "ARBITER_"],
+          name = prefix <> base,
+          value = System.get_env(name),
+          do: {name, value}
+
+    Enum.each(legacy, fn {name, _} -> System.delete_env(name) end)
+
     on_exit(fn ->
+      Enum.each(legacy, fn {name, value} -> System.put_env(name, value) end)
+
       if prev_env,
         do: System.put_env("WARDMAST_CLOAK_KEY", prev_env),
         else: System.delete_env("WARDMAST_CLOAK_KEY")

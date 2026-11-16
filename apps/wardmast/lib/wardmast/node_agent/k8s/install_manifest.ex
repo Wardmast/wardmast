@@ -632,7 +632,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
       "preemptionPolicy" => "PreemptLowerPriority",
       "globalDefault" => false,
       "description" =>
-        "Wardmast node controller: losing it interrupts every run on the node, so it outranks batch work."
+        "Arbiter node controller: losing it interrupts every run on the node, so it outranks batch work."
     }
   end
 
@@ -644,7 +644,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
       "value" => -100,
       "preemptionPolicy" => "Never",
       "globalDefault" => false,
-      "description" => "Wardmast worker pods: every other workload wins a contention."
+      "description" => "Arbiter worker pods: every other workload wins a contention."
     }
   end
 
