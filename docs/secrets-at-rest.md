@@ -23,7 +23,7 @@ override the endpoint (VPC endpoints, LocalStack). The instance role needs
 referenced secrets only.
 
 Values are resolved lazily, cached **in memory only** for
-`ARBITER_SECRET_CACHE_TTL` seconds (default 300; `0` disables the cache), never
+`WARDMAST_SECRET_CACHE_TTL` seconds (default 300; `0` disables the cache), never
 written to disk or logged, and added to the redaction set
 (`Wardmast.Redaction`). If a refresh fails, the last value keeps being served and a
 warning naming the pointer (never a value) is logged.
@@ -38,13 +38,13 @@ never the value.
 
 ## 2. Boot-time secrets
 
-`ARBITER_CLOAK_KEY` (and `ARBITER_CLOAK_KEY_OLD`), `SECRET_KEY_BASE` cannot live in
+`WARDMAST_CLOAK_KEY` (and `WARDMAST_CLOAK_KEY_OLD`), `SECRET_KEY_BASE` cannot live in
 the workspace store (the first decrypts it; the second is needed to boot). Give
 each as a pointer instead of a value:
 
 ```
 # ~/.arbiter/arbiter.env — no secret values
-ARBITER_CLOAK_KEY_REF=aws-sm:prod/arbiter#cloak_key
+WARDMAST_CLOAK_KEY_REF=aws-sm:prod/arbiter#cloak_key
 SECRET_KEY_BASE_REF=aws-sm:prod/arbiter#secret_key_base
 AWS_REGION=eu-west-1
 ```
@@ -53,9 +53,9 @@ AWS_REGION=eu-west-1
   the pointer works (`arb doctor` warns while both exist).
 * A pointer that cannot be resolved **fails the boot** (`runtime.exs` / the Vault
   raise, naming the variable and the pointer), the same as a missing key.
-* `ARBITER_CLOAK_KEY_GENERATION` is a number, not a secret, and stays inline.
+* `WARDMAST_CLOAK_KEY_GENERATION` is a number, not a secret, and stays inline.
   Key rotation (`docs/cloak-key-rotation.md`) works unchanged:
-  `ARBITER_CLOAK_KEY_OLD_REF` points at the retired key.
+  `WARDMAST_CLOAK_KEY_OLD_REF` points at the retired key.
 * `bin/wardmast eval` (migrations, the deploy backup) runs `runtime.exs` too, so
   it needs the same ambient AWS access as the service.
 
@@ -87,7 +87,7 @@ enough to verify a redeploy did not change a value, not to recover it.
   pointers from the installing shell and never writes the inline value of a
   secret whose `*_REF` is set.
 * `arb doctor` has a `secrets at rest` check (security posture): `warn` while
-  `ARBITER_CLOAK_KEY` / `SECRET_KEY_BASE` is inline, while an inline value is
+  `WARDMAST_CLOAK_KEY` / `SECRET_KEY_BASE` is inline, while an inline value is
   shadowed by its pointer, or when a pointer has an unrecognised scheme.
 * Old copies of the env file (backups, snapshots, logs from older versions)
   are outside what arbiter manages; rotate the secrets they hold.

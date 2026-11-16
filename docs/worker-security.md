@@ -926,9 +926,9 @@ actually being enforced by the running adapter.
 
 A worker child used to **inherit the server's whole OS environment** (`Port.open`
 / `System.cmd` only *extend* it) and then had every linked provider account's
-credential added on top. A Claude worker could see `ARBITER_CLOAK_KEY`,
+credential added on top. A Claude worker could see `WARDMAST_CLOAK_KEY`,
 `SECRET_KEY_BASE`, `DATABASE_PATH`, `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`
-and the Codex/Gemini keys. `ARBITER_CLOAK_KEY` plus a readable
+and the Codex/Gemini keys. `WARDMAST_CLOAK_KEY` plus a readable
 `~/.arbiter/arbiter.sqlite3` decrypts every workspace secret and provider
 credential; `SECRET_KEY_BASE` is the default MCP token signing key.
 
@@ -957,7 +957,7 @@ explicitly unset) and receives only:
    `GH_TOKEN` / `GITLAB_TOKEN` comes from), the task-scoped dev-server
    `DATABASE_PATH` / `PORT` (`DevServerEnv`), and `ARB_WORKER_BEAD_ID`.
 
-**Never reaches a worker:** `ARBITER_*` (including `ARBITER_CLOAK_KEY`),
+**Never reaches a worker:** `ARBITER_*` (including `WARDMAST_CLOAK_KEY`),
 `SECRET_KEY_BASE`, `DATABASE_PATH` / `DATABASE_URL` *of the server*,
 `RELEASE_*` / `ROOTDIR` / `BINDIR`, `MIX_ENV`, `SSH_AUTH_SOCK`,
 `XDG_RUNTIME_DIR`, and anything else in `~/.arbiter/arbiter.env` that is not
@@ -1016,7 +1016,7 @@ runs as the operator's UID, so it can **read `~/.arbiter/arbiter.env` and
 `~/.arbiter/arbiter.sqlite3` directly** (and `~/.ssh`, `~/.config/gh`, the agy
 isolated `HOME`'s symlinked passthrough of `.ssh` / `.arbiter`, and
 `/proc/<server pid>/environ` of any same-UID process outside a PID namespace).
-With `ARBITER_CLOAK_KEY` in `arbiter.env` that is the same break as before, just
+With `WARDMAST_CLOAK_KEY` in `arbiter.env` that is the same break as before, just
 one `cat` away. Closing it is file-level isolation, not env hygiene: the jail
 (bd-7o08mj masks `/run`; bd-8381tk masks `arbiter.env` and the release
 cookie for jailed workers, see below; bd-3q2djr hides the rest of `~/.arbiter`
@@ -1091,7 +1091,7 @@ What the release does now (`rel/env.sh.eex`, `rel/vm.args.eex`,
   is not an option: it resolves the host name, often to a LAN address, where a
   loopback-only epmd does not answer and `rpc` would break.
 * **A per-install cookie.** `env.sh` creates `<data-home>/release.cookie`
-  (`ARB_DATA_HOME`, default `~/.arbiter`): 32 random bytes, hex-encoded, under
+  (`WARDMAST_DATA_HOME`, default `~/.arbiter`): 32 random bytes, hex-encoded, under
   `umask 077`, published atomically with `ln`. It exports that file's contents
   as `RELEASE_COOKIE` and runs `chmod 600` on it at every invocation. The
   server, `rpc`, `remote` and `stop` all read the same file, so the operator's

@@ -93,7 +93,7 @@ it (the v0.2.31 live failure, "No conversation found").
 The raw JSONL is unredacted. `Wardmast.Worker.StepSummary` warns that a second
 persistence path "is how a secret escapes redaction on one surface but not
 another", and the risk is not theoretical — a live signing key was printed into
-a coordinator transcript on 2026-07-16, and `ARBITER_CLOAK_KEY` into a subagent
+a coordinator transcript on 2026-07-16, and `WARDMAST_CLOAK_KEY` into a subagent
 transcript on 2026-09-12.
 
 **The decision is: both.** Neither control is sufficient alone.

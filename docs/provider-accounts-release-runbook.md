@@ -11,7 +11,7 @@ same things. They are thin wrappers over the functions used here.
 > migrate every install before upgrading to it.**
 
 - **The `:provider_accounts_enabled` flag is gone.** Provider accounts are
-  always on. The `ARBITER_PROVIDER_ACCOUNTS` variable is no longer read; if
+  always on. The `WARDMAST_PROVIDER_ACCOUNTS` variable is no longer read; if
   the server's environment still sets it, the boot logs a warning saying so.
   Remove it from `~/.arbiter/arbiter.env`.
 - **The legacy credential chain is deleted.** A spawn's provider credential
@@ -25,7 +25,7 @@ same things. They are thin wrappers over the functions used here.
   A spawn with no workspace in hand (the watchdog probe, a workspace-less
   review) takes the install's single enabled Claude account credential, and
   carries none if there is not exactly one.
-- **There is no switch back.** Before this release, `ARBITER_PROVIDER_ACCOUNTS=0`
+- **There is no switch back.** Before this release, `WARDMAST_PROVIDER_ACCOUNTS=0`
   returned workers to the legacy chain. Now nothing does. A workspace whose
   credential is still only in `worker_env` raises
   `Wardmast.Accounts.MissingCredentialError` on every spawn. The dispatch guard
@@ -41,7 +41,7 @@ same things. They are thin wrappers over the functions used here.
 
 1. **On the release you run now (v0.2.x),** make sure `arb server doctor`
    reports `[ ok ] provider accounts` with `on (...)`. If it reports `[fail]`,
-   or `off (ARBITER_PROVIDER_ACCOUNTS=0)`, migrate first with the procedure
+   or `off (WARDMAST_PROVIDER_ACCOUNTS=0)`, migrate first with the procedure
    below and restart.
 2. **Upgrade to this release.**
 3. **Run `arb server doctor` again.** Expect `[ ok ] provider accounts` and
@@ -81,7 +81,7 @@ holds fingerprints, not values.
 
 1. **Run a release that has `Wardmast.Release.accounts_census/1`.** Check
    which release is live with `readlink ~/.arbiter/current`.
-2. **Rotate first if you need to** (§7.6). If `ARBITER_CLOAK_KEY` or the
+2. **Rotate first if you need to** (§7.6). If `WARDMAST_CLOAK_KEY` or the
    credential itself is considered exposed, rotate the key
    ([`cloak-key-rotation.md`](cloak-key-rotation.md)) and re-issue the
    credential **before** migrating. Otherwise the migration writes fresh
@@ -93,7 +93,7 @@ holds fingerprints, not values.
    workspace environment editor.
 4. **Load the server's environment in the shell you run `eval` from.**
    `bin/wardmast eval` starts a separate VM, not the service. It needs the
-   same `ARBITER_CLOAK_KEY` (to decrypt `worker_env`), `SECRET_KEY_BASE`
+   same `WARDMAST_CLOAK_KEY` (to decrypt `worker_env`), `SECRET_KEY_BASE`
    (`config/runtime.exs` refuses to load without it) and, if you set one,
    `DATABASE_PATH`:
 
@@ -182,7 +182,7 @@ successful apply.
 There is nothing to switch on. The migration wrote backup rows, and those are
 the migration record the boot looks for. Remove from `~/.arbiter/arbiter.env`:
 
-- any `ARBITER_PROVIDER_ACCOUNTS` line. It is no longer read, and the boot
+- any `WARDMAST_PROVIDER_ACCOUNTS` line. It is no longer read, and the boot
   warns while it is there;
 - `CLAUDE_CODE_OAUTH_TOKEN`, once step 1's census has fingerprinted it. It is
   read by nothing, it makes doctor note it, and a stale credential in a
@@ -256,7 +256,7 @@ place. Once every backup is restored the install has no migration record, and
 the boot reports it as carrying legacy credentials again.
 
 **Run the previous release.** Point `~/.arbiter/current` back at the previous
-release, set `ARBITER_PROVIDER_ACCOUNTS=0` in `~/.arbiter/arbiter.env` (on
+release, set `WARDMAST_PROVIDER_ACCOUNTS=0` in `~/.arbiter/arbiter.env` (on
 that release an unset value means `auto`, which resolves a migrated install
 on), and start the server. This release adds no schema migrations, so the
 binary rollback does not need a database restore. The last resort is the

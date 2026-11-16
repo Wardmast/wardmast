@@ -11,7 +11,7 @@ Both end up running `arb server deploy --version <tag> --json`.
 
 ## What a deploy does
 
-1. **Resolve the release source.** `ARB_RELEASE_REPO` if exported; otherwise the
+1. **Resolve the release source.** `WARDMAST_RELEASE_REPO` if exported; otherwise the
    running server's own release metadata (`release_repo` on `GET /api/version`);
    otherwise the repo this `arb` was built from. The output names which
    (`Release source: acme/arbiter (from the running server's release metadata).`).
@@ -99,7 +99,7 @@ be determined).
 
       systemd-run --user --unit=arbiter-deploy-<tag> --collect \
         --property=EnvironmentFile=-<data-home>/arbiter.env \
-        --setenv=ARB_DATA_HOME=<data-home> \
+        --setenv=WARDMAST_DATA_HOME=<data-home> \
         ~/.local/bin/arb server deploy --version <tag> --json
 
   because the deploy restarts `arbiter.service`. The transient unit belongs to the
@@ -139,9 +139,9 @@ hint, but never blocks readiness or fails `arb doctor`.
 
 | Variable | Meaning |
 |---|---|
-| `ARB_RELEASE_REPO` | `owner/repo` to take releases from (optional; see above). |
+| `WARDMAST_RELEASE_REPO` | `owner/repo` to take releases from (optional; see above). |
 | `GITHUB_TOKEN` | Authenticates the Releases API / asset downloads (private repos). Never printed or logged. |
-| `ARB_DATA_HOME` | Deploy root (default `~/.arbiter`). |
+| `WARDMAST_DATA_HOME` | Deploy root (default `~/.arbiter`). |
 | `DATABASE_PATH` | The SQLite database to back up (default from `arbiter.env`, else `<data-home>/arbiter.sqlite3`). |
 | `ARB_DEPLOY_BACKUP_RETAIN` | Backups to keep (default `5`). |
 | `ARB_INSTALL_BIN` | Where the `arb` escript is installed (default `~/.local/bin/arb`); the button runs this one. |

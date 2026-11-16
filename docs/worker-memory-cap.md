@@ -54,7 +54,7 @@ probe scope is never bound.
 
 | Setting | Meaning |
 | --- | --- |
-| `ARBITER_WORKER_MEMORY_MAX` (e.g. in `~/.arbiter/arbiter.env`) | A size systemd accepts for `MemoryMax=`: `12G`, `512M`, or a percentage of physical RAM (`40%`). |
+| `WARDMAST_WORKER_MEMORY_MAX` (e.g. in `~/.arbiter/arbiter.env`) | A size systemd accepts for `MemoryMax=`: `12G`, `512M`, or a percentage of physical RAM (`40%`). |
 | `config :wardmast, :worker_memory_max, "12G"` | Same, for dev checkouts. The environment variable wins. |
 | *(unset)* | `40%` of physical RAM, per worker. |
 | `off` / `0` / `none` / `infinity` | No cap; workers spawn exactly as before. |

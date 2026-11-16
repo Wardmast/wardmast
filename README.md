@@ -174,7 +174,7 @@ To run Arbiter as a self-contained OTP release under a systemd user unit, instal
 arb install service
 ```
 
-This writes `~/.config/systemd/user/arbiter.service` (`ExecStart=~/.arbiter/current/bin/wardmast start`), enables it via `loginctl enable-linger` for machine-boot startup, and starts the release. Manage it with `systemctl --user status arbiter.service` and view logs with `journalctl --user -u arbiter.service -f`. Pass `--system` to install a system-wide unit instead (needs root). Secrets and PATH configuration live in `~/.arbiter/arbiter.env`. Uninstall with `arb install service --uninstall`. The unit sets `OOMPolicy=continue` and each worker runs in its own memory-capped scope (`ARBITER_WORKER_MEMORY_MAX`, default 40% of RAM), so one runaway worker process cannot stop the server — see [docs/worker-memory-cap.md](docs/worker-memory-cap.md), including the drop-in for a unit installed before this.
+This writes `~/.config/systemd/user/arbiter.service` (`ExecStart=~/.arbiter/current/bin/wardmast start`), enables it via `loginctl enable-linger` for machine-boot startup, and starts the release. Manage it with `systemctl --user status arbiter.service` and view logs with `journalctl --user -u arbiter.service -f`. Pass `--system` to install a system-wide unit instead (needs root). Secrets and PATH configuration live in `~/.arbiter/arbiter.env`. Uninstall with `arb install service --uninstall`. The unit sets `OOMPolicy=continue` and each worker runs in its own memory-capped scope (`WARDMAST_WORKER_MEMORY_MAX`, default 40% of RAM), so one runaway worker process cannot stop the server — see [docs/worker-memory-cap.md](docs/worker-memory-cap.md), including the drop-in for a unit installed before this.
 
 `arb install service` only writes the release-shaped unit above. There is no
 CLI command yet for a dev-mode unit (one whose `ExecStart` runs
@@ -252,7 +252,7 @@ arb server deploy --version v1.2.3
 
 This is the primary path, and the **"Update to vX.Y.Z"** button in the dashboard's update banner runs the same command. The full runbook is [docs/self-update.md](docs/self-update.md).
 
-It resolves the release repo (`ARB_RELEASE_REPO`, else the running server's own release metadata, else the repo your `arb` was built from — and says which), downloads the release tarball + checksum from GitHub Releases, verifies the SHA-256, unpacks it, takes an **integrity-checked online backup of the database** into `~/.arbiter/snapshots/` (aborting if that fails), atomically swaps `current`, restarts the service, and health-checks it. If it doesn't come back green it rolls back to the last-known-good release — and when the new release had migrations, **restores the backup first**. After a green deploy it installs the matching `arb` escript. `arb doctor` reports the last deploy (tag, time, outcome, backup path).
+It resolves the release repo (`WARDMAST_RELEASE_REPO`, else the running server's own release metadata, else the repo your `arb` was built from — and says which), downloads the release tarball + checksum from GitHub Releases, verifies the SHA-256, unpacks it, takes an **integrity-checked online backup of the database** into `~/.arbiter/snapshots/` (aborting if that fails), atomically swaps `current`, restarts the service, and health-checks it. If it doesn't come back green it rolls back to the last-known-good release — and when the new release had migrations, **restores the backup first**. After a green deploy it installs the matching `arb` escript. `arb doctor` reports the last deploy (tag, time, outcome, backup path).
 
 #### Migration ordering, and rollback across a migration
 
@@ -303,14 +303,14 @@ old release) rather than a green-wait timeout, the message says the new
 release's migrations *may* have been applied rather than claiming they were —
 a release that never booted never ran its boot migrator.
 
-### Worker jail unmask (`ARB_WORKER_JAIL_UNMASK`)
+### Worker jail unmask (`WARDMAST_WORKER_JAIL_UNMASK`)
 
 The worker jail hides credential directories such as `~/.config/glab-cli`. To
-re-expose one, set `ARB_WORKER_JAIL_UNMASK` (e.g. in `~/.arbiter/arbiter.env`)
+re-expose one, set `WARDMAST_WORKER_JAIL_UNMASK` (e.g. in `~/.arbiter/arbiter.env`)
 to colon- or comma-separated absolute paths; `~` expands against `HOME`:
 
 ```sh
-echo "ARB_WORKER_JAIL_UNMASK=~/.config/glab-cli" >> ~/.arbiter/arbiter.env
+echo "WARDMAST_WORKER_JAIL_UNMASK=~/.config/glab-cli" >> ~/.arbiter/arbiter.env
 ```
 
 Malformed (non-absolute) entries are skipped with a warning and never block
@@ -318,7 +318,7 @@ boot. Don't use `ERL_FLAGS=-arbiter worker_jail_unmask ...`: systemd strips the
 quotes and every release then refuses to boot. `arb server doctor` lists the
 unmasked paths ("worker jail unmask").
 
-### Server bind address (`ARB_BIND_ADDRESS`)
+### Server bind address (`WARDMAST_BIND_ADDRESS`)
 
 The dashboard's auth model is "a loopback peer is trusted; there is no login" —
 LiveView pages, including a terminal into every worker session, have no
@@ -331,15 +331,15 @@ prod/release, in dev and runtime config alike.
 with a permissive security group. An install that relied on that for remote
 access will stop being reachable after upgrading. Use an SSH port-forward
 instead (`ssh -L 4848:127.0.0.1:4848 <host>`), which needs no server-side
-change; or, if off-loopback really is required, set `ARB_BIND_ADDRESS`
+change; or, if off-loopback really is required, set `WARDMAST_BIND_ADDRESS`
 explicitly (below) — `arb server doctor` will keep warning about it every time
 as a reminder of the exposure.
 
-To bind elsewhere, set `ARB_BIND_ADDRESS` to any address `:inet.parse_address/1`
+To bind elsewhere, set `WARDMAST_BIND_ADDRESS` to any address `:inet.parse_address/1`
 accepts (e.g. `0.0.0.0`, `::`, a specific interface IP):
 
 ```sh
-echo "ARB_BIND_ADDRESS=0.0.0.0" >> ~/.arbiter/arbiter.env
+echo "WARDMAST_BIND_ADDRESS=0.0.0.0" >> ~/.arbiter/arbiter.env
 ```
 
 Any non-loopback value logs a boot `WARNING` naming the exposure, and
@@ -431,13 +431,13 @@ By default, `arb` talks to a local server on `http://127.0.0.1:4848` (loopback).
 - **Local loopback** (`ARB_HOST` unset or `http://127.0.0.1:4848`) needs no `ARB_TOKEN` from your own shell: `arb` mints a short-lived token over the operator socket for each invocation (bd-asawcq). The server itself no longer exempts localhost; a bare `curl` to `/api` gets 401.
 - **Remote access** requires both `ARB_HOST` and `ARB_TOKEN`, *and* the server
   must be reachable at that address in the first place — since the server now
-  binds loopback-only by default (above), that means either `ARB_BIND_ADDRESS`
+  binds loopback-only by default (above), that means either `WARDMAST_BIND_ADDRESS`
   set server-side, or reaching it through an SSH port-forward / VPN tunnel that
   terminates on `127.0.0.1` locally. The API's own token check is unaffected
   either way; only the dashboard's login-free LiveView pages are the reason to
-  prefer a tunnel over a raw `ARB_BIND_ADDRESS` override.
+  prefer a tunnel over a raw `WARDMAST_BIND_ADDRESS` override.
 
-### Encryption key (`ARBITER_CLOAK_KEY`) — required
+### Encryption key (`WARDMAST_CLOAK_KEY`) — required
 
 Arbiter encrypts workspace secrets (tracker / merger credentials) at rest using
 AES-256-GCM via [`ash_cloak`](https://hex.pm/packages/ash_cloak). **The server
@@ -445,11 +445,11 @@ refuses to start without an encryption key.** Generate a 32-byte Base64 key and
 add it to your environment before deploying:
 
 ```sh
-echo "ARBITER_CLOAK_KEY=$(openssl rand -base64 32)" >> ~/.arbiter/arbiter.env
+echo "WARDMAST_CLOAK_KEY=$(openssl rand -base64 32)" >> ~/.arbiter/arbiter.env
 # (for a non-service run, put it in the project-root .arbiter.env or export it)
 ```
 
-`arb install service` forwards `ARBITER_CLOAK_KEY` from the installing shell
+`arb install service` forwards `WARDMAST_CLOAK_KEY` from the installing shell
 into `~/.arbiter/arbiter.env` automatically if it is set. Treat this key like a
 database password: back it up and keep it stable — rotating it (re-encrypting
 existing secrets) is a separate runbook and is not yet automated. Losing it
@@ -494,7 +494,7 @@ release, which requires provider accounts:
    `--operator-credential ~/.claude/.credentials.json`), edit the resulting
    plan to merge/name the candidate account, then apply it with
    `mix wardmast.accounts.migrate --plan accounts.json`, and restart.
-3. Remove `CLAUDE_CODE_OAUTH_TOKEN` (and any `ARBITER_PROVIDER_ACCOUNTS` line)
+3. Remove `CLAUDE_CODE_OAUTH_TOKEN` (and any `WARDMAST_PROVIDER_ACCOUNTS` line)
    from `.arbiter.env` / the service unit — nothing reads them, and a stale
    credential lying around in a secrets file is its own risk.
 
@@ -672,6 +672,17 @@ As a guard, `arb` counts the other `arb` VMs running for your user (a `/proc` re
 skipped where `/proc` is unavailable). Above `ARB_FANOUT_WARN` (default 16) it warns on
 stderr; above `ARB_FANOUT_MAX` (default 64) it refuses unless you pass `--force` (or `--allow-fanout`)
 or set `ARB_ALLOW_FANOUT=1`.
+
+## Renamed: Arbiter -> Wardmast (environment variables)
+
+The OTP apps, modules, Mix tasks and release are now `Wardmast.*` (release
+binary `bin/wardmast`, tasks `mix wardmast.*`, config `config :wardmast`).
+Operator environment variables are read as `WARDMAST_*` first; for **one release**
+the old `ARB_*` / `ARBITER_*` spelling still works and logs a one-time deprecation
+warning (`WARDMAST_CLOAK_KEY` for `ARBITER_CLOAK_KEY`, `WARDMAST_DATA_HOME` for
+`ARB_DATA_HOME`, ...). The variables the server exports to workers and the `arb` CLI
+(`ARB_TOKEN`, `ARB_HOST`, `ARB_WORKSPACE`, `ARB_WORKER_BEAD_ID`, ...) and the CLI
+binary name are unchanged. Database tables and migrations are unchanged.
 
 ## Documentation
 

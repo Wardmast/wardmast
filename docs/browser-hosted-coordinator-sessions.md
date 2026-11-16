@@ -1214,7 +1214,7 @@ and UI phases. What shipped:
     fallback and `Wardmast.Workers.Reconciler`'s boot sweep) write a real dollar
     figure instead of `nil`.
   * `Wardmast.Sessions.UsageIngest` sweeps the directories named by
-    `ARBITER_COORDINATOR_SESSION_DIRS` every 5 minutes and writes
+    `WARDMAST_COORDINATOR_SESSION_DIRS` every 5 minutes and writes
     `source: :coordinator_session` rows. Default is empty — metering someone's
     `~/.claude` is opt-in.
   * `usage_events.session_id` is indexed, so §7.6's `--by session` is cheap
@@ -1241,7 +1241,7 @@ shipped separately — see §7.9.
 ### 7.8 Post-deploy corrections — what the live run found (bd-be804c, follow-up)
 
 Phase 6 shipped, the coordinator restarted with
-`ARBITER_COORDINATOR_SESSION_DIRS` set, and the first live sweep exposed two
+`WARDMAST_COORDINATOR_SESSION_DIRS` set, and the first live sweep exposed two
 defects that no fixture could have predicted. Both are fixed; both changed
 assumptions §7.4 states, so they are recorded here rather than in a commit
 message.
@@ -1688,7 +1688,7 @@ Env vars, not proxy-injected headers — the proxy is gone (§2), and it is what
 ### 10.4 Loopback only (decision 8)
 
 Bind the session socket to `127.0.0.1:4848` like the rest of the dashboard — this
-is the default (bd-1c4pg3); an operator who overrides it with `ARB_BIND_ADDRESS`
+is the default (bd-1c4pg3); an operator who overrides it with `WARDMAST_BIND_ADDRESS`
 gets a boot WARNING, since the socket has no login of its own. No new
 remote-auth scheme is designed here; off-LAN access is Remote Control (§8) or an
 SSH port-forward (`ssh -L 4848:127.0.0.1:4848 <host>`), which is why Amendment 2

@@ -742,7 +742,7 @@ only path.
 
 **What v0.2.0 shipped: the default (bd-cvvb02).** The flag no longer ships
 off. `config/config.exs` ships `:provider_accounts_enabled, :auto`, and
-`config/runtime.exs` turns an explicit `ARBITER_PROVIDER_ACCOUNTS=1/true` or
+`config/runtime.exs` turns an explicit `WARDMAST_PROVIDER_ACCOUNTS=1/true` or
 `0/false` into a boolean that always wins. `Wardmast.Boot.ProviderAccounts`
 resolves `auto` once per boot (`Wardmast.Accounts.Enablement`). It runs after
 the schema and config migrators and before the boot tasks that dispatch work.
@@ -770,12 +770,12 @@ fleet for a condition the operator fixes with the runbook's read-only census
 while the server keeps running. Until the boot has resolved `auto`,
 `Accounts.enabled?/0` answers `false`, and so does a `bin/wardmast eval` or
 `mix wardmast.accounts.*` run, since neither starts the boot children. The
-rollback for this release is unchanged: `ARBITER_PROVIDER_ACCOUNTS=0`, or a
+rollback for this release is unchanged: `WARDMAST_PROVIDER_ACCOUNTS=0`, or a
 restore of the backup rows. Leaving the variable unset is no longer a
 rollback, because `auto` resolves a migrated install on.
 
 **What P13 shipped: the flip (bd-9gqj8e).** The `:provider_accounts_enabled`
-flag is gone, along with `config/runtime.exs`'s `ARBITER_PROVIDER_ACCOUNTS`
+flag is gone, along with `config/runtime.exs`'s `WARDMAST_PROVIDER_ACCOUNTS`
 parsing and `Wardmast.Accounts.enabled?/0`. `ConfigDir.oauth_token/1` is the
 account join and nothing else: the flag-off legacy chain (workspace
 `worker_env` → server env → install-wide-unambiguous workspace token) is
@@ -788,13 +788,13 @@ read the account unconditionally, and `/providers` is never read-only.
 decides only the fresh-install `<provider>:default` joins and what doctor
 reports. An un-migrated install carrying legacy credentials is no longer held
 on the legacy chain: its boot warning and doctor `[fail]` say those workspaces
-cannot spawn. A still-set `ARBITER_PROVIDER_ACCOUNTS` draws a boot warning,
+cannot spawn. A still-set `WARDMAST_PROVIDER_ACCOUNTS` draws a boot warning,
 and `arb install service` stops copying `CLAUDE_CODE_OAUTH_TOKEN` into
 `arbiter.env`, since nothing reads it there. The only rollback is the
 previous release binary. The release notes live in
 [`provider-accounts-release-runbook.md`](provider-accounts-release-runbook.md).
 
-### 7.6 `ARBITER_CLOAK_KEY` rotation: **keep it separate, and do it first**
+### 7.6 `WARDMAST_CLOAK_KEY` rotation: **keep it separate, and do it first**
 
 The key is considered exposed (printed into a transcript, 2026-09-12). The
 question is whether a re-encryption pass should ride along with this migration.
@@ -822,7 +822,7 @@ question is whether a re-encryption pass should ride along with this migration.
 4. **But the exposure means something concrete for this work, and the order
    matters.** Rotating the Cloak key protects future ciphertext; it does not help
    a provider token that may already have been read. So the correct order is:
-   **(a) rotate `ARBITER_CLOAK_KEY`, (b) rotate the provider credential itself (a
+   **(a) rotate `WARDMAST_CLOAK_KEY`, (b) rotate the provider credential itself (a
    fresh `claude setup-token` grant), (c) then extract.** Extraction is also what
    makes (b) a one-place operation instead of three — a reason to do it *soon*,
    not a reason to fuse it with (a).
@@ -963,7 +963,7 @@ once the budget, the cap and the quota live on the same object.
   selection policy is the whole of that future feature.
 * **Changing how workers receive credentials at spawn.** They still arrive as env
   pairs; only the source moves.
-* **`ARBITER_CLOAK_KEY` rotation.** Separate ticket, sequenced *before* this work
+* **`WARDMAST_CLOAK_KEY` rotation.** Separate ticket, sequenced *before* this work
   (§7.6).
 * **Reservations (as opposed to caps) for per-workspace shares.** Needs
   cross-Conductor admission ordering that does not exist. Named in §4.3.
