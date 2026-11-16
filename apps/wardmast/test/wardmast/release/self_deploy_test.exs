@@ -70,14 +70,14 @@ defmodule Wardmast.Release.SelfDeployTest do
       assert Enum.at(args, -6) == arb
     end
 
-    test "passes ARB_DATA_HOME to the unit so a non-default home is honoured", %{
+    test "passes WARDMAST_DATA_HOME to the unit so a non-default home is honoured", %{
       home: home,
       arb: arb
     } do
       stub_cmds(arb)
       assert {:ok, _} = SelfDeploy.start("v1.2.3")
       assert_received {:cmd, "systemd-run", args, _}
-      assert "--setenv=ARB_DATA_HOME=#{home}" in args
+      assert "--setenv=WARDMAST_DATA_HOME=#{home}" in args
     end
 
     test "never puts a secret in argv or the logs", %{arb: arb} do

@@ -22,13 +22,13 @@ defmodule Wardmast.Worker.SpawnEnvSpawnTest do
   alias Wardmast.Worker.ClaudeSession
 
   @server_env %{
-    "ARBITER_CLOAK_KEY" => "leak-cloak",
+    "WARDMAST_CLOAK_KEY" => "leak-cloak",
     "SECRET_KEY_BASE" => "leak-skb",
     "DATABASE_PATH" => "/leak/live.sqlite3",
     "RELEASE_COOKIE" => "leak-cookie",
     "SSH_AUTH_SOCK" => "/leak/ssh-agent.sock",
     "DBUS_SESSION_BUS_ADDRESS" => "unix:path=/leak/nonexistent-bus",
-    "ARBITER_SESSIONS_ROOT" => "/leak/sessions",
+    "WARDMAST_SESSIONS_ROOT" => "/leak/sessions",
     "CLAUDE_CODE_OAUTH_TOKEN" => "leak-server-claude",
     "OPENAI_API_KEY" => "leak-server-openai",
     "GEMINI_API_KEY" => "leak-server-gemini",
@@ -153,8 +153,8 @@ defmodule Wardmast.Worker.SpawnEnvSpawnTest do
   end
 
   defp assert_no_server_secrets(env) do
-    for name <- ~w(ARBITER_CLOAK_KEY SECRET_KEY_BASE RELEASE_COOKIE SSH_AUTH_SOCK
-                   DBUS_SESSION_BUS_ADDRESS ARBITER_SESSIONS_ROOT) do
+    for name <- ~w(WARDMAST_CLOAK_KEY SECRET_KEY_BASE RELEASE_COOKIE SSH_AUTH_SOCK
+                   DBUS_SESSION_BUS_ADDRESS WARDMAST_SESSIONS_ROOT) do
       refute Map.has_key?(env, name), "#{name} reached the worker child"
     end
 

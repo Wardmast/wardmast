@@ -9,7 +9,7 @@ defmodule Wardmast.Tasks.ClaimTest do
   alias Wardmast.Trackers.Shortcut.Config, as: SCConfig
 
   @viewer "test-worker"
-  @env_var "ARBITER_CLAIM_TEST_TOKEN"
+  @env_var "WARDMAST_CLAIM_TEST_TOKEN"
 
   setup do
     System.put_env(@env_var, "claim-test-token")

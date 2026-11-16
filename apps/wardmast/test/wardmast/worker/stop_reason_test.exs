@@ -1256,7 +1256,7 @@ defmodule Wardmast.Worker.StopReasonTest do
       assert reason.summary =~ "memory cap exceeded"
       assert reason.summary =~ "12G"
       assert reason.summary =~ "12.0 GiB"
-      assert reason.remediation =~ "ARBITER_WORKER_MEMORY_MAX"
+      assert reason.remediation =~ "WARDMAST_WORKER_MEMORY_MAX"
       assert StopReason.label(reason) =~ "memory cap exceeded"
       assert StopReason.to_map(reason).category == :memory_cap_exceeded
     end

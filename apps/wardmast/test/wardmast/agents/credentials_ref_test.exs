@@ -3,7 +3,7 @@ defmodule Wardmast.Agents.CredentialsRefTest do
 
   alias Wardmast.Agents.CredentialsRef
 
-  @env_var "ARBITER_CREDREF_TEST_TOKEN"
+  @env_var "WARDMAST_CREDREF_TEST_TOKEN"
 
   setup do
     on_exit(fn -> System.delete_env(@env_var) end)

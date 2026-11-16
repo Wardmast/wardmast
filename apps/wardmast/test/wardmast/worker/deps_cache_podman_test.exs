@@ -9,7 +9,7 @@ defmodule Wardmast.Worker.DepsCachePodmanTest do
       cd apps/wardmast && mix test --include podman test/wardmast/worker/deps_cache_podman_test.exs
 
   The image is the first local `localhost/arbiter-dev/beam-*` one (`arb image
-  build` makes it), or `ARBITER_TEST_BEAM_IMAGE`. Containers are `arb-test-…`
+  build` makes it), or `WARDMAST_TEST_BEAM_IMAGE`. Containers are `arb-test-…`
   and removed by that exact name.
   """
   use ExUnit.Case, async: false
@@ -51,7 +51,7 @@ defmodule Wardmast.Worker.DepsCachePodmanTest do
   end
 
   defp image! do
-    case System.get_env("ARBITER_TEST_BEAM_IMAGE") do
+    case Wardmast.Env.get("WARDMAST_TEST_BEAM_IMAGE") do
       tag when is_binary(tag) and tag != "" ->
         tag
 

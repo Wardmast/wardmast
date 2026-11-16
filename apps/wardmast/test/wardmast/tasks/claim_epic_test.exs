@@ -7,7 +7,7 @@ defmodule Wardmast.Tasks.ClaimEpicTest do
 
   require Ash.Query
 
-  @env_var "ARBITER_CLAIM_EPIC_TEST_TOKEN"
+  @env_var "WARDMAST_CLAIM_EPIC_TEST_TOKEN"
   @member "member-1"
 
   setup do

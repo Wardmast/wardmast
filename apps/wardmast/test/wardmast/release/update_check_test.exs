@@ -176,7 +176,7 @@ defmodule Wardmast.Release.UpdateCheckTest do
       start_check(name, repo: nil)
 
       assert %{error: err} = UpdateCheck.check_now(name)
-      assert err =~ "ARB_RELEASE_REPO"
+      assert err =~ "WARDMAST_RELEASE_REPO"
     end
   end
 

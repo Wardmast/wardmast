@@ -4,7 +4,7 @@ defmodule Wardmast.Tasks.ClaimLinksTest do
   alias Wardmast.Tasks.{Claim, Dependencies, Issue, Workspace}
   alias Wardmast.Trackers.Shortcut.Config, as: SCConfig
 
-  @env_var "ARBITER_CLAIM_LINKS_TEST_TOKEN"
+  @env_var "WARDMAST_CLAIM_LINKS_TEST_TOKEN"
   @member "member-1"
 
   setup do

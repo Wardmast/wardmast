@@ -43,7 +43,7 @@ defmodule Wardmast.NodeAgent.Probe do
       endpoint_running: Process.whereis(WardmastWeb.Endpoint) != nil,
       secret_key_base_configured:
         Application.get_env(:wardmast_web, WardmastWeb.Endpoint)[:secret_key_base] != nil,
-      cloak_key_env_present: System.get_env("ARBITER_CLOAK_KEY") != nil,
+      cloak_key_env_present: Wardmast.Env.get("WARDMAST_CLOAK_KEY") != nil,
       started_apps: length(Application.started_applications()),
       loaded_modules: length(:code.all_loaded()),
       container_name_for: name,

@@ -8,9 +8,9 @@ cli_fixture_root =
 Application.put_env(:wardmast, :cli_set_opts, Wardmast.Worker.CliSetFixture.put(cli_fixture_root))
 System.at_exit(fn _ -> File.rm_rf(cli_fixture_root) end)
 
-System.delete_env("ARBITER_WORKTREE_ROOT")
-System.delete_env("ARBITER_OUTPUT_LOG_ROOT")
-System.delete_env("ARBITER_MEMORY_ROOT")
+System.delete_env("WARDMAST_WORKTREE_ROOT")
+System.delete_env("WARDMAST_OUTPUT_LOG_ROOT")
+System.delete_env("WARDMAST_MEMORY_ROOT")
 
 # bd-3ymdvi: `:node` tests drive the real terminal channel over a real
 # WebSocket using `scripts/verify_session_transport.mjs` — the same client the

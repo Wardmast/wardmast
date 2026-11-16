@@ -4,11 +4,11 @@ defmodule Wardmast.RuntimeJailUnmaskTest do
   @runtime Path.expand("../../../../config/runtime.exs", __DIR__)
 
   defp unmask(value, home \\ "/home/t") do
-    old = for k <- ["ARB_WORKER_JAIL_UNMASK", "HOME"], do: {k, System.get_env(k)}
+    old = for k <- ["WARDMAST_WORKER_JAIL_UNMASK", "HOME"], do: {k, System.get_env(k)}
 
     on_exit(fn -> Enum.each(old, fn {k, v} -> restore(k, v) end) end)
     restore("HOME", home)
-    restore("ARB_WORKER_JAIL_UNMASK", value)
+    restore("WARDMAST_WORKER_JAIL_UNMASK", value)
 
     @runtime
     |> Config.Reader.read!(env: :test)

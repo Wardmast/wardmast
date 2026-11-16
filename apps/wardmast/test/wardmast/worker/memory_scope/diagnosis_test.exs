@@ -9,8 +9,8 @@ defmodule Wardmast.Worker.MemoryScope.DiagnosisTest do
 
   setup do
     prev = Application.get_env(:wardmast, :worker_memory_max)
-    prev_env = System.get_env("ARBITER_WORKER_MEMORY_MAX")
-    System.delete_env("ARBITER_WORKER_MEMORY_MAX")
+    prev_env = Wardmast.Env.get("WARDMAST_WORKER_MEMORY_MAX")
+    System.delete_env("WARDMAST_WORKER_MEMORY_MAX")
     MemoryScope.reset_probe()
 
     on_exit(fn ->
@@ -18,7 +18,7 @@ defmodule Wardmast.Worker.MemoryScope.DiagnosisTest do
         do: Application.put_env(:wardmast, :worker_memory_max, prev),
         else: Application.delete_env(:wardmast, :worker_memory_max)
 
-      if prev_env, do: System.put_env("ARBITER_WORKER_MEMORY_MAX", prev_env)
+      if prev_env, do: System.put_env("WARDMAST_WORKER_MEMORY_MAX", prev_env)
       MemoryScope.reset_probe()
     end)
   end

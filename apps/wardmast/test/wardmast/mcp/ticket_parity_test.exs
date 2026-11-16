@@ -20,7 +20,7 @@ defmodule Wardmast.MCP.TicketParityTest do
   alias Wardmast.Tasks.Workspace
 
   @gh_viewer "parity-viewer"
-  @gh_env_var "ARBITER_MCP_PARITY_TOKEN"
+  @gh_env_var "WARDMAST_MCP_PARITY_TOKEN"
 
   setup do
     {:ok, ws} =

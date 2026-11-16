@@ -189,14 +189,14 @@ defmodule Wardmast.Sessions.UsageIngestTest do
       prior = Application.get_env(:wardmast, :coordinator_session_dirs)
       Application.put_env(:wardmast, :coordinator_session_dirs, [dir])
 
-      # On the dogfood host ARBITER_COORDINATOR_SESSION_DIRS is really set, and
+      # On the dogfood host WARDMAST_COORDINATOR_SESSION_DIRS is really set, and
       # it outranks the app env — without this the test sweeps the operator's
       # own ~/.claude transcripts instead of its fixture.
-      prior_env = System.get_env("ARBITER_COORDINATOR_SESSION_DIRS")
-      System.delete_env("ARBITER_COORDINATOR_SESSION_DIRS")
+      prior_env = Wardmast.Env.get("WARDMAST_COORDINATOR_SESSION_DIRS")
+      System.delete_env("WARDMAST_COORDINATOR_SESSION_DIRS")
 
       on_exit(fn ->
-        if prior_env, do: System.put_env("ARBITER_COORDINATOR_SESSION_DIRS", prior_env)
+        if prior_env, do: System.put_env("WARDMAST_COORDINATOR_SESSION_DIRS", prior_env)
 
         if prior,
           do: Application.put_env(:wardmast, :coordinator_session_dirs, prior),

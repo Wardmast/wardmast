@@ -8,7 +8,7 @@ defmodule Wardmast.NodeAgent.RuntimeConfigTest do
   use ExUnit.Case, async: false
 
   @runtime Path.expand("../../../../../config/runtime.exs", __DIR__)
-  @env_vars ~w(ARB_ROLE SECRET_KEY_BASE DATABASE_PATH ARBITER_CLOAK_KEY)
+  @env_vars ~w(ARB_ROLE SECRET_KEY_BASE DATABASE_PATH WARDMAST_CLOAK_KEY)
 
   setup do
     saved = for name <- @env_vars, do: {name, System.get_env(name)}

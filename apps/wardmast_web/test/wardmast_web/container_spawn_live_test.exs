@@ -231,7 +231,7 @@ defmodule WardmastWeb.ContainerSpawnLiveTest do
         do: assert(name in names)
 
     for name <-
-          ~w(SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR ARBITER_CLOAK_KEY SECRET_KEY_BASE),
+          ~w(SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR WARDMAST_CLOAK_KEY SECRET_KEY_BASE),
         do: refute(name in names)
 
     refute out =~ token

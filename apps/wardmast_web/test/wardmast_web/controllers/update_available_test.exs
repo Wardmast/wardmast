@@ -38,13 +38,13 @@ defmodule WardmastWeb.UpdateAvailableTest do
   end
 
   test "GET /api/version reports the release repo the install takes releases from", %{conn: conn} do
-    previous = System.get_env("ARB_RELEASE_REPO")
-    System.put_env("ARB_RELEASE_REPO", "acme/arbiter")
+    previous = Wardmast.Env.get("WARDMAST_RELEASE_REPO")
+    System.put_env("WARDMAST_RELEASE_REPO", "acme/arbiter")
 
     on_exit(fn ->
       if previous,
-        do: System.put_env("ARB_RELEASE_REPO", previous),
-        else: System.delete_env("ARB_RELEASE_REPO")
+        do: System.put_env("WARDMAST_RELEASE_REPO", previous),
+        else: System.delete_env("WARDMAST_RELEASE_REPO")
     end)
 
     body =

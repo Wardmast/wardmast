@@ -5,7 +5,7 @@ defmodule WardmastWeb.Api.TrackerControllerTest do
   alias Wardmast.Trackers.GitHub.Config
 
   @viewer "tracker-worker"
-  @env_var "ARBITER_TRACKER_CTRL_TOKEN"
+  @env_var "WARDMAST_TRACKER_CTRL_TOKEN"
 
   setup %{conn: conn} do
     System.put_env(@env_var, "tracker-test-token")

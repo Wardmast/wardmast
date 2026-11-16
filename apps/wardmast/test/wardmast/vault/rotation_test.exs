@@ -1,5 +1,5 @@
 defmodule Wardmast.Vault.RotationTest do
-  # async: false — mutates the ARBITER_CLOAK_KEY* env vars and temporarily
+  # async: false — mutates the WARDMAST_CLOAK_KEY* env vars and temporarily
   # pushes the resulting rotating cipher config onto the live, VM-global
   # Wardmast.Vault singleton to simulate a mid-rotation deploy, restoring
   # both on exit.
@@ -17,18 +17,18 @@ defmodule Wardmast.Vault.RotationTest do
     {_mod, live_default_opts} = live_config[:ciphers][:default]
     old_key = live_default_opts[:key]
 
-    prev_key_env = System.get_env("ARBITER_CLOAK_KEY")
-    prev_old_env = System.get_env("ARBITER_CLOAK_KEY_OLD")
-    prev_gen_env = System.get_env("ARBITER_CLOAK_KEY_GENERATION")
+    prev_key_env = Wardmast.Env.get("WARDMAST_CLOAK_KEY")
+    prev_old_env = Wardmast.Env.get("WARDMAST_CLOAK_KEY_OLD")
+    prev_gen_env = Wardmast.Env.get("WARDMAST_CLOAK_KEY_GENERATION")
 
     # Drive the same env vars a real rotation deploy sets, so the tags this
     # test exercises are exactly what Vault.current_tag/0 and
     # Vault.retired_tag/0 (which Wardmast.Vault.Rotation itself compares
     # against) independently compute — not hand-picked strings that happen
     # to agree with them.
-    System.put_env("ARBITER_CLOAK_KEY", Base.encode64(:crypto.strong_rand_bytes(32)))
-    System.put_env("ARBITER_CLOAK_KEY_OLD", Base.encode64(old_key))
-    System.put_env("ARBITER_CLOAK_KEY_GENERATION", "2")
+    System.put_env("WARDMAST_CLOAK_KEY", Base.encode64(:crypto.strong_rand_bytes(32)))
+    System.put_env("WARDMAST_CLOAK_KEY_OLD", Base.encode64(old_key))
+    System.put_env("WARDMAST_CLOAK_KEY_GENERATION", "2")
 
     {:ok, rotating_config} = Vault.init([])
     old_tag = Vault.retired_tag()
@@ -45,16 +45,16 @@ defmodule Wardmast.Vault.RotationTest do
       save_vault_config(live_config)
 
       if prev_key_env,
-        do: System.put_env("ARBITER_CLOAK_KEY", prev_key_env),
-        else: System.delete_env("ARBITER_CLOAK_KEY")
+        do: System.put_env("WARDMAST_CLOAK_KEY", prev_key_env),
+        else: System.delete_env("WARDMAST_CLOAK_KEY")
 
       if prev_old_env,
-        do: System.put_env("ARBITER_CLOAK_KEY_OLD", prev_old_env),
-        else: System.delete_env("ARBITER_CLOAK_KEY_OLD")
+        do: System.put_env("WARDMAST_CLOAK_KEY_OLD", prev_old_env),
+        else: System.delete_env("WARDMAST_CLOAK_KEY_OLD")
 
       if prev_gen_env,
-        do: System.put_env("ARBITER_CLOAK_KEY_GENERATION", prev_gen_env),
-        else: System.delete_env("ARBITER_CLOAK_KEY_GENERATION")
+        do: System.put_env("WARDMAST_CLOAK_KEY_GENERATION", prev_gen_env),
+        else: System.delete_env("WARDMAST_CLOAK_KEY_GENERATION")
     end)
 
     %{old_key: old_key, old_tag: old_tag, new_tag: new_tag}

@@ -18,7 +18,7 @@ defmodule Wardmast.SecretRefs.ExternalTest do
     {"AWS_CONTAINER_CREDENTIALS_FULL_URI", nil},
     {"AWS_EC2_METADATA_DISABLED", "true"},
     {"AWS_SHARED_CREDENTIALS_FILE", "/nonexistent/credentials"},
-    {"ARBITER_SECRET_CACHE_TTL", nil}
+    {"WARDMAST_SECRET_CACHE_TTL", nil}
   ]
 
   setup do
@@ -190,8 +190,8 @@ defmodule Wardmast.SecretRefs.ExternalTest do
       assert Wardmast.Redaction.redact("x cached-value y", []) == "x [REDACTED] y"
     end
 
-    test "ARBITER_SECRET_CACHE_TTL=0 disables the cache" do
-      System.put_env("ARBITER_SECRET_CACHE_TTL", "0")
+    test "WARDMAST_SECRET_CACHE_TTL=0 disables the cache" do
+      System.put_env("WARDMAST_SECRET_CACHE_TTL", "0")
       counter = :counters.new(1, [])
 
       Req.Test.stub(@stub, fn conn ->

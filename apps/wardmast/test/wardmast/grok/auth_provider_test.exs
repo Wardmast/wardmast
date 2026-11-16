@@ -38,13 +38,13 @@ defmodule Wardmast.Grok.AuthProviderTest do
   end
 
   test "an XAI_API_KEY ref replaces the broker; no provider command is set", ctx do
-    System.put_env("ARBITER_TEST_XAI_KEY", "xai-test-key")
-    on_exit(fn -> System.delete_env("ARBITER_TEST_XAI_KEY") end)
+    System.put_env("WARDMAST_TEST_XAI_KEY", "xai-test-key")
+    on_exit(fn -> System.delete_env("WARDMAST_TEST_XAI_KEY") end)
 
     assert {:ok, env} =
              AuthProvider.spawn_env(ctx.grok_home,
                arb_path: ctx.arb,
-               api_key_ref: "env:ARBITER_TEST_XAI_KEY"
+               api_key_ref: "env:WARDMAST_TEST_XAI_KEY"
              )
 
     assert {"XAI_API_KEY", "xai-test-key"} = List.keyfind(env, "XAI_API_KEY", 0)
@@ -56,10 +56,10 @@ defmodule Wardmast.Grok.AuthProviderTest do
   end
 
   test "a configured ref that does not resolve is an error, not a silent fallback", ctx do
-    assert {:error, {:api_key_unresolved, "env:ARBITER_TEST_NOPE"}} =
+    assert {:error, {:api_key_unresolved, "env:WARDMAST_TEST_NOPE"}} =
              AuthProvider.spawn_env(ctx.grok_home,
                arb_path: ctx.arb,
-               api_key_ref: "env:ARBITER_TEST_NOPE"
+               api_key_ref: "env:WARDMAST_TEST_NOPE"
              )
   end
 

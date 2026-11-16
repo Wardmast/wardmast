@@ -212,7 +212,7 @@ defmodule Wardmast.Agents.Claude.CredentialCheckTest do
           config: %{
             "agent" => %{
               "type" => "claude",
-              "config" => %{"api_keys" => ["env:ARBITER_TEST_UNSET_KEY_80ECOL"]}
+              "config" => %{"api_keys" => ["env:WARDMAST_TEST_UNSET_KEY_80ECOL"]}
             }
           }
         })

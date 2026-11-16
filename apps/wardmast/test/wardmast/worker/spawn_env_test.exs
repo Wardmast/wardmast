@@ -8,8 +8,8 @@ defmodule Wardmast.Worker.SpawnEnvTest do
   alias Wardmast.Worker.SpawnEnv
 
   @server_secrets %{
-    "ARBITER_CLOAK_KEY" => "cloak-secret",
-    "ARBITER_CLOAK_KEY_OLD" => "cloak-old",
+    "WARDMAST_CLOAK_KEY" => "cloak-secret",
+    "WARDMAST_CLOAK_KEY_OLD" => "cloak-old",
     "SECRET_KEY_BASE" => "skb-secret",
     "DATABASE_PATH" => "/srv/arbiter/live.sqlite3",
     "DATABASE_URL" => "ecto://live",
@@ -49,7 +49,7 @@ defmodule Wardmast.Worker.SpawnEnvTest do
     test "no server secret or unlisted var reaches the child" do
       env = "claude" |> then(&SpawnEnv.port_env([], &1)) |> child_env()
 
-      for name <- ~w(ARBITER_CLOAK_KEY ARBITER_CLOAK_KEY_OLD SECRET_KEY_BASE DATABASE_PATH
+      for name <- ~w(WARDMAST_CLOAK_KEY WARDMAST_CLOAK_KEY_OLD SECRET_KEY_BASE DATABASE_PATH
                      DATABASE_URL RELEASE_COOKIE SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS
                      SOME_RANDOM_OPERATOR_VAR) do
         refute Map.has_key?(env, name), "#{name} leaked into the worker env"
@@ -57,12 +57,13 @@ defmodule Wardmast.Worker.SpawnEnvTest do
     end
 
     test "no ARBITER_* or RELEASE_* var survives" do
-      System.put_env("ARBITER_SOMETHING_NEW", "1")
-      on_exit(fn -> System.delete_env("ARBITER_SOMETHING_NEW") end)
+      System.put_env("WARDMAST_SOMETHING_NEW", "1")
+      on_exit(fn -> System.delete_env("WARDMAST_SOMETHING_NEW") end)
 
       env = "codex" |> then(&SpawnEnv.port_env([], &1)) |> child_env()
 
       refute Enum.any?(Map.keys(env), &String.starts_with?(&1, "ARBITER_"))
+      refute Enum.any?(Map.keys(env), &String.starts_with?(&1, "WARDMAST_"))
       refute Enum.any?(Map.keys(env), &String.starts_with?(&1, "RELEASE_"))
     end
 
@@ -170,7 +171,7 @@ defmodule Wardmast.Worker.SpawnEnvTest do
     test "unsets everything off the allowlist with nil" do
       pairs = SpawnEnv.cmd_env([{"GH_TOKEN", "t"}], "claude")
 
-      assert {"ARBITER_CLOAK_KEY", nil} in pairs
+      assert {"WARDMAST_CLOAK_KEY", nil} in pairs
       assert {"SECRET_KEY_BASE", nil} in pairs
       assert {"GH_TOKEN", "t"} in pairs
       refute Enum.any?(pairs, fn {_, v} -> v == false end)
@@ -183,7 +184,7 @@ defmodule Wardmast.Worker.SpawnEnvTest do
         assert SpawnEnv.allowed?(name), name
       end
 
-      for name <- ~w(ARBITER_CLOAK_KEY SECRET_KEY_BASE DATABASE_PATH RELEASE_COOKIE
+      for name <- ~w(WARDMAST_CLOAK_KEY SECRET_KEY_BASE DATABASE_PATH RELEASE_COOKIE
                      SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS CLAUDE_CODE_OAUTH_TOKEN MIX_ENV) do
         refute SpawnEnv.allowed?(name), name
       end

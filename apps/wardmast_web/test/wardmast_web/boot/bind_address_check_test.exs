@@ -2,7 +2,7 @@ defmodule WardmastWeb.Boot.BindAddressCheckTest do
   @moduledoc """
   bd-1c4pg3: the dashboard's auth model is "a loopback peer is trusted;
   there is no login" (see `WardmastWeb.Loopback`). Binding off-loopback is now
-  an explicit, opt-in choice (`ARB_BIND_ADDRESS`) rather than the default, but
+  an explicit, opt-in choice (`WARDMAST_BIND_ADDRESS`) rather than the default, but
   it must still be loud about the exposure at boot.
   """
   use ExUnit.Case, async: true
@@ -27,7 +27,7 @@ defmodule WardmastWeb.Boot.BindAddressCheckTest do
 
     assert log =~ "WARNING"
     assert log =~ "no login"
-    assert log =~ "ARB_BIND_ADDRESS"
+    assert log =~ "WARDMAST_BIND_ADDRESS"
   end
 
   test "logs a clear warning for a non-loopback dual-stack bind" do

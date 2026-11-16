@@ -4,7 +4,7 @@ defmodule Wardmast.Tasks.ClaimRoutingTest do
   alias Wardmast.Tasks.{Claim, Workspace}
   alias Wardmast.Trackers.Shortcut.Config, as: SCConfig
 
-  @env_var "ARBITER_CLAIM_ROUTING_TEST_TOKEN"
+  @env_var "WARDMAST_CLAIM_ROUTING_TEST_TOKEN"
   @member "member-1"
 
   defp make_ws(claim_cfg, extra \\ %{}) do

@@ -15,7 +15,7 @@ defmodule Wardmast.Tasks.ClaimResyncTest do
   alias Wardmast.Trackers.GitHub.Config, as: GHConfig
 
   @viewer "test-worker"
-  @env_var "ARBITER_RESYNC_TEST_TOKEN"
+  @env_var "WARDMAST_RESYNC_TEST_TOKEN"
 
   setup do
     System.put_env(@env_var, "resync-test-token")

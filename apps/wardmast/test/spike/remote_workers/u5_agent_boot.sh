@@ -111,7 +111,7 @@ end
 ELIXIR
 "${env_base[@]}" ARB_ROLE=agent SPIKE_COMPILE="$work/compile.exs" "$rel/bin/wardmast" eval 'Code.eval_file(System.fetch_env!("SPIKE_COMPILE"))' 2>&1 | tail -25
 
-echo "== 3. agent boot: ARB_ROLE=agent, NO SECRET_KEY_BASE / DATABASE_PATH / ARBITER_CLOAK_KEY"
+echo "== 3. agent boot: ARB_ROLE=agent, NO SECRET_KEY_BASE / DATABASE_PATH / WARDMAST_CLOAK_KEY"
 boot agent ARB_ROLE=agent
 echo "== 4. agent boot again (warm file cache) for a second timing"
 boot agent2 ARB_ROLE=agent

@@ -2487,7 +2487,7 @@ defmodule Wardmast.MCP.ToolsTest do
 
   describe "tracker_claim/2 (github) — difficulty/repo parity with the CLI" do
     @gh_viewer "mcp-claim-worker"
-    @gh_env_var "ARBITER_MCP_CLAIM_TEST_TOKEN"
+    @gh_env_var "WARDMAST_MCP_CLAIM_TEST_TOKEN"
 
     setup do
       System.put_env(@gh_env_var, "mcp-claim-test-token")

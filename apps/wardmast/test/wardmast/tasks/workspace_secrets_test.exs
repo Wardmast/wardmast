@@ -209,7 +209,7 @@ defmodule Wardmast.Tasks.WorkspaceSecretsTest do
     test "env: refs continue to work unchanged" do
       alias Wardmast.Trackers.Shortcut.Config
 
-      System.put_env("ARBITER_SECRETS_ENV_TEST", "from_env")
+      System.put_env("WARDMAST_SECRETS_ENV_TEST", "from_env")
 
       {:ok, ws} =
         Ash.create(Workspace, %{
@@ -217,7 +217,7 @@ defmodule Wardmast.Tasks.WorkspaceSecretsTest do
           config: %{
             "tracker" => %{
               "type" => "shortcut",
-              "config" => %{"credentials_ref" => "env:ARBITER_SECRETS_ENV_TEST"}
+              "config" => %{"credentials_ref" => "env:WARDMAST_SECRETS_ENV_TEST"}
             }
           }
         })
@@ -225,7 +225,7 @@ defmodule Wardmast.Tasks.WorkspaceSecretsTest do
       Config.put_active(ws)
       assert {:ok, %{token: "from_env"}} = Config.resolve()
     after
-      System.delete_env("ARBITER_SECRETS_ENV_TEST")
+      System.delete_env("WARDMAST_SECRETS_ENV_TEST")
       Wardmast.Trackers.Shortcut.Config.clear()
     end
   end

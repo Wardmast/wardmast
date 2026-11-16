@@ -13,19 +13,19 @@ System.at_exit(fn _ -> File.rm_rf(cli_fixture_root) end)
 # probe that says "up to date"; the freshness tests override and restore it.
 Application.put_env(:wardmast, :merge_freshness_probe, fn _r, _b, _h -> {:ok, 0} end)
 
-System.delete_env("ARBITER_WORKTREE_ROOT")
-System.delete_env("ARBITER_OUTPUT_LOG_ROOT")
+System.delete_env("WARDMAST_WORKTREE_ROOT")
+System.delete_env("WARDMAST_OUTPUT_LOG_ROOT")
 # bd-aprlbb: same reason as the two above — `Wardmast.Config.Paths.resolve/3` is
-# env-first, so an exported ARBITER_SESSIONS_ROOT would beat both `config/test.exs`
+# env-first, so an exported WARDMAST_SESSIONS_ROOT would beat both `config/test.exs`
 # and `Wardmast.Test.SessionEnv`'s `put_env`, and the suite would provision real
 # session scaffolds into the operator's configured root (which SessionEnv's
 # `on_exit`, cleaning only its own tmp dir, would then never remove).
-System.delete_env("ARBITER_SESSIONS_ROOT")
+System.delete_env("WARDMAST_SESSIONS_ROOT")
 
-# bd-6dkpf1: same reason — an exported ARBITER_MEMORY_ROOT would beat both
+# bd-6dkpf1: same reason — an exported WARDMAST_MEMORY_ROOT would beat both
 # config/test.exs and SessionEnv, mounting the operator's real memory into
 # test session scaffolds.
-System.delete_env("ARBITER_MEMORY_ROOT")
+System.delete_env("WARDMAST_MEMORY_ROOT")
 
 # bd-bpt0ag: `:live_systemd` tests spawn REAL systemd user scopes and tmux
 # servers on whatever host runs them, so they are opt-in rather than part of

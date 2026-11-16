@@ -188,7 +188,7 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
       assert exit_code == 0
       assert out =~ ~r/1 warn · 0 fail/
       assert out =~ "[warn] worker temp dir"
-      assert out =~ "hint: Set ARBITER_WORKER_TMP_ROOT"
+      assert out =~ "hint: Set WARDMAST_WORKER_TMP_ROOT"
       refute out =~ "[ ok ]"
     end
 

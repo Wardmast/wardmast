@@ -26,7 +26,7 @@ defmodule WardmastWeb.EndpointConfigTest do
 
   # bd-1c4pg3: the dashboard's auth model is "a loopback peer is trusted;
   # there is no login" — default the bind address to loopback in prod/release,
-  # with ARB_BIND_ADDRESS as the explicit, operator-opted-in override.
+  # with WARDMAST_BIND_ADDRESS as the explicit, operator-opted-in override.
   describe "config/runtime.exs bind address (prod)" do
     setup do
       env = %{
@@ -49,23 +49,23 @@ defmodule WardmastWeb.EndpointConfigTest do
       get_in(config, [:wardmast_web, WardmastWeb.Endpoint, :http, :ip])
     end
 
-    test "defaults to 127.0.0.1 when ARB_BIND_ADDRESS is unset" do
-      System.delete_env("ARB_BIND_ADDRESS")
+    test "defaults to 127.0.0.1 when WARDMAST_BIND_ADDRESS is unset" do
+      System.delete_env("WARDMAST_BIND_ADDRESS")
       assert read_prod_http_ip() == {127, 0, 0, 1}
     end
 
-    test "ARB_BIND_ADDRESS overrides the bind address" do
-      System.put_env("ARB_BIND_ADDRESS", "0.0.0.0")
-      on_exit(fn -> System.delete_env("ARB_BIND_ADDRESS") end)
+    test "WARDMAST_BIND_ADDRESS overrides the bind address" do
+      System.put_env("WARDMAST_BIND_ADDRESS", "0.0.0.0")
+      on_exit(fn -> System.delete_env("WARDMAST_BIND_ADDRESS") end)
 
       assert read_prod_http_ip() == {0, 0, 0, 0}
     end
 
-    test "an invalid ARB_BIND_ADDRESS raises a clear error" do
-      System.put_env("ARB_BIND_ADDRESS", "not-an-ip")
-      on_exit(fn -> System.delete_env("ARB_BIND_ADDRESS") end)
+    test "an invalid WARDMAST_BIND_ADDRESS raises a clear error" do
+      System.put_env("WARDMAST_BIND_ADDRESS", "not-an-ip")
+      on_exit(fn -> System.delete_env("WARDMAST_BIND_ADDRESS") end)
 
-      assert_raise RuntimeError, ~r/ARB_BIND_ADDRESS is not a valid IP address/, fn ->
+      assert_raise RuntimeError, ~r/WARDMAST_BIND_ADDRESS is not a valid IP address/, fn ->
         read_prod_http_ip()
       end
     end
@@ -77,14 +77,14 @@ defmodule WardmastWeb.EndpointConfigTest do
       get_in(config, [:wardmast_web, WardmastWeb.Endpoint, :http, :ip])
     end
 
-    test "defaults to 127.0.0.1 when ARB_BIND_ADDRESS is unset" do
-      System.delete_env("ARB_BIND_ADDRESS")
+    test "defaults to 127.0.0.1 when WARDMAST_BIND_ADDRESS is unset" do
+      System.delete_env("WARDMAST_BIND_ADDRESS")
       assert read_dev_http_ip() == {127, 0, 0, 1}
     end
 
-    test "ARB_BIND_ADDRESS overrides the bind address" do
-      System.put_env("ARB_BIND_ADDRESS", "::1")
-      on_exit(fn -> System.delete_env("ARB_BIND_ADDRESS") end)
+    test "WARDMAST_BIND_ADDRESS overrides the bind address" do
+      System.put_env("WARDMAST_BIND_ADDRESS", "::1")
+      on_exit(fn -> System.delete_env("WARDMAST_BIND_ADDRESS") end)
 
       assert read_dev_http_ip() == {0, 0, 0, 0, 0, 0, 0, 1}
     end

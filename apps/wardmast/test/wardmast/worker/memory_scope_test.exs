@@ -8,16 +8,16 @@ defmodule Wardmast.Worker.MemoryScopeTest do
   alias Wardmast.Worker.MemoryScope
 
   setup do
-    prev_env = System.get_env("ARBITER_WORKER_MEMORY_MAX")
+    prev_env = Wardmast.Env.get("WARDMAST_WORKER_MEMORY_MAX")
     prev_app = Application.get_env(:wardmast, :worker_memory_max)
-    System.delete_env("ARBITER_WORKER_MEMORY_MAX")
+    System.delete_env("WARDMAST_WORKER_MEMORY_MAX")
     Application.delete_env(:wardmast, :worker_memory_max)
     MemoryScope.reset_probe()
 
     on_exit(fn ->
       if prev_env,
-        do: System.put_env("ARBITER_WORKER_MEMORY_MAX", prev_env),
-        else: System.delete_env("ARBITER_WORKER_MEMORY_MAX")
+        do: System.put_env("WARDMAST_WORKER_MEMORY_MAX", prev_env),
+        else: System.delete_env("WARDMAST_WORKER_MEMORY_MAX")
 
       if prev_app,
         do: Application.put_env(:wardmast, :worker_memory_max, prev_app),
@@ -66,20 +66,20 @@ defmodule Wardmast.Worker.MemoryScopeTest do
       Application.put_env(:wardmast, :worker_memory_max, "8G")
       assert MemoryScope.configured_max() == {:ok, "8G"}
 
-      System.put_env("ARBITER_WORKER_MEMORY_MAX", "12g")
+      System.put_env("WARDMAST_WORKER_MEMORY_MAX", "12g")
       assert MemoryScope.configured_max() == {:ok, "12G"}
     end
 
     test "off-ish values disable the cap" do
       for v <- ~w(off 0 none infinity OFF) do
-        System.put_env("ARBITER_WORKER_MEMORY_MAX", v)
+        System.put_env("WARDMAST_WORKER_MEMORY_MAX", v)
         assert MemoryScope.configured_max() == :disabled, v
       end
     end
 
     test "an invalid value falls back to the default instead of disabling" do
       for v <- ["lots", "12 gigs", "0G", "150%x", "-1"] do
-        System.put_env("ARBITER_WORKER_MEMORY_MAX", v)
+        System.put_env("WARDMAST_WORKER_MEMORY_MAX", v)
         assert MemoryScope.configured_max() == {:ok, "40%"}, v
       end
     end
@@ -87,7 +87,7 @@ defmodule Wardmast.Worker.MemoryScopeTest do
 
   describe "wrap/3" do
     test "wraps the agent in a capped, kill-on-OOM scope with the original argv last" do
-      System.put_env("ARBITER_WORKER_MEMORY_MAX", "12G")
+      System.put_env("WARDMAST_WORKER_MEMORY_MAX", "12G")
 
       {wrapped, scope} =
         MemoryScope.wrap(port_args(), "bd-abc123", probe_opts(healthy_cmd(false)))
@@ -185,7 +185,7 @@ defmodule Wardmast.Worker.MemoryScopeTest do
     end
 
     test "returns the args untouched and no scope when the cap is disabled" do
-      System.put_env("ARBITER_WORKER_MEMORY_MAX", "off")
+      System.put_env("WARDMAST_WORKER_MEMORY_MAX", "off")
       args = port_args()
 
       assert {^args, nil} = MemoryScope.wrap(args, "t", probe_opts(healthy_cmd(false)))

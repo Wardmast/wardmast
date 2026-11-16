@@ -7,7 +7,7 @@ defmodule WardmastWeb.Api.ClaimControllerTest do
 
   @viewer "ctrl-worker"
   @jira_account_id "ctrl-jira-account"
-  @env_var "ARBITER_CLAIM_CTRL_TOKEN"
+  @env_var "WARDMAST_CLAIM_CTRL_TOKEN"
 
   setup %{conn: conn} do
     System.put_env(@env_var, "ctrl-test-token")

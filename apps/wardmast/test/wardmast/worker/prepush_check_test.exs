@@ -178,11 +178,11 @@ defmodule Wardmast.Worker.PrepushCheckTest do
     end
 
     test "the sanitised env keeps server secrets out of the check", %{tmp_dir: dir} do
-      System.put_env("ARBITER_CLOAK_KEY", "super-secret")
-      on_exit(fn -> System.delete_env("ARBITER_CLOAK_KEY") end)
+      System.put_env("WARDMAST_CLOAK_KEY", "super-secret")
+      on_exit(fn -> System.delete_env("WARDMAST_CLOAK_KEY") end)
 
       assert {:failed, 1, output} =
-               run("test -z \"$ARBITER_CLOAK_KEY\" && echo clean; exit 1", dir)
+               run("test -z \"$WARDMAST_CLOAK_KEY\" && echo clean; exit 1", dir)
 
       assert output =~ "clean"
     end

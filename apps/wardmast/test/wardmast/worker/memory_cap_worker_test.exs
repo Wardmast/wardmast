@@ -65,14 +65,14 @@ defmodule Wardmast.Worker.MemoryCapWorkerTest do
 
     saved = %{
       xdg: System.get_env("XDG_RUNTIME_DIR"),
-      max: System.get_env("ARBITER_WORKER_MEMORY_MAX"),
+      max: Wardmast.Env.get("WARDMAST_WORKER_MEMORY_MAX"),
       app_max: Application.get_env(:wardmast, :worker_memory_max),
       systemd_run: Application.get_env(:wardmast, :systemd_run),
       systemctl: Application.get_env(:wardmast, :systemctl)
     }
 
     System.put_env("XDG_RUNTIME_DIR", dir)
-    System.delete_env("ARBITER_WORKER_MEMORY_MAX")
+    System.delete_env("WARDMAST_WORKER_MEMORY_MAX")
     Application.put_env(:wardmast, :worker_memory_max, "1G")
     Application.put_env(:wardmast, :systemd_run, systemd_run)
     Application.put_env(:wardmast, :systemctl, systemctl)
@@ -80,7 +80,7 @@ defmodule Wardmast.Worker.MemoryCapWorkerTest do
 
     on_exit(fn ->
       restore_env("XDG_RUNTIME_DIR", saved.xdg)
-      restore_env("ARBITER_WORKER_MEMORY_MAX", saved.max)
+      restore_env("WARDMAST_WORKER_MEMORY_MAX", saved.max)
 
       if saved.app_max,
         do: Application.put_env(:wardmast, :worker_memory_max, saved.app_max),
