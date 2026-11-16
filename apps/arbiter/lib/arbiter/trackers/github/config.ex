@@ -304,7 +304,7 @@ defmodule Arbiter.Trackers.GitHub.Config do
   defp app_repo(_raw, _owner, _repo), do: :none
 
   # The workspace's repo keys (`repo_paths`, `git_credentials.repos`,
-  # `merge.repos`, `tracker.config.repos`) whose forge target is `slug`. The
+  # `tracker.config.repos`) whose forge target is `slug`. The
   # `git_credentials` entry is keyed by the repo key (`arbiter`), not the forge
   # repo name (`wardmast/wardmast`), so a caller that only has the tracker's slug
   # (no ticket repo) maps it back through each repo's effective merge config
@@ -315,7 +315,6 @@ defmodule Arbiter.Trackers.GitHub.Config do
       [
         config["repo_paths"],
         get_in(config, ["git_credentials", "repos"]),
-        get_in(config, ["merge", "repos"]),
         get_in(config, ["tracker", "config", "repos"])
       ]
       |> Enum.flat_map(fn
