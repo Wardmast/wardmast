@@ -524,6 +524,13 @@ defmodule Arbiter.Worker.GitCredential do
     "metadata" => "read",
     "pull_requests" => "write"
   }
+  # The GitHub tracker's own token (bd-43sydg): issues and PR comments on the one
+  # tracker repo, nothing else (no contents, no actions).
+  @issue_tracker_permissions %{
+    "issues" => "write",
+    "metadata" => "read",
+    "pull_requests" => "write"
+  }
   # Scopes that no worker may ever hold. A classic PAT cannot be limited to a
   # repo at all, so any OAuth-scoped token is refused; these are the ones that do
   # the most damage if one is ever allowed through.
@@ -536,7 +543,9 @@ defmodule Arbiter.Worker.GitCredential do
   entry's own `remote` wins), `:tracker?` (also produce `tracker_token`),
   `:req_options` (merged into the forge requests; tests stub with `plug:`),
   `:host?` (the token is the host's, for its push and PR operations: a github_app
-  token then carries the pull-request and merge permissions).
+  token then carries the pull-request and merge permissions), `:tracker_only?`
+  (the token is the GitHub tracker's: a github_app token is minted for `:remote`
+  with issues:write, pull_requests:write and metadata:read only, bd-43sydg).
 
   A secret that is not in the workspace's store, a token that cannot be pinned
   to one repo, or a mint that fails is an error: the spawn is refused, never
@@ -729,8 +738,13 @@ defmodule Arbiter.Worker.GitCredential do
     end
   end
 
-  defp push_permissions(opts),
-    do: if(Keyword.get(opts, :host?, false), do: @host_permissions, else: @push_permissions)
+  defp push_permissions(opts) do
+    cond do
+      Keyword.get(opts, :tracker_only?, false) -> @issue_tracker_permissions
+      Keyword.get(opts, :host?, false) -> @host_permissions
+      true -> @push_permissions
+    end
+  end
 
   defp maybe_mint_tracker(entry, pem, repo, opts) do
     if Keyword.get(opts, :tracker?, false),
@@ -755,8 +769,13 @@ defmodule Arbiter.Worker.GitCredential do
 
   # A token is pinned to the repo the spawn's origin names (or the entry's own
   # `remote`); without one the helper could not refuse another repo.
+  # The GitHub tracker's token is pinned to the tracker's own repo, which the
+  # caller names and which may not be the entry's code repo (`:tracker_only?`).
   defp remote(entry, opts) do
-    case entry.remote || Keyword.get(opts, :remote) do
+    named = Keyword.get(opts, :remote)
+    pinned = if Keyword.get(opts, :tracker_only?, false), do: named
+
+    case pinned || entry.remote || named do
       remote when is_binary(remote) and remote != "" -> {:ok, remote}
       _ -> {:error, :git_credential_remote_unknown}
     end

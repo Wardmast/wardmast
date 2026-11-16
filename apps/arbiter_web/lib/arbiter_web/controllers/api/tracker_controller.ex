@@ -41,7 +41,13 @@ defmodule ArbiterWeb.Api.TrackerController do
     with {:ok, workspace} <- get_workspace(conn, workspace_id) do
       case Trackers.list_open(workspace) do
         {:ok, summaries} ->
-          json(conn, %{data: Enum.map(summaries, &serialize/1), supported: true})
+          json(
+            conn,
+            put_claim_filter(
+              %{data: Enum.map(summaries, &serialize/1), supported: true},
+              workspace
+            )
+          )
 
         {:error, :not_supported} ->
           json(conn, %{data: [], supported: false})
@@ -62,6 +68,15 @@ defmodule ArbiterWeb.Api.TrackerController do
   end
 
   # ---- helpers -----------------------------------------------------------
+
+  # bd-43sydg: with a GitHub App and no personal token the claim set is the claim
+  # label, not "assigned to me"; the response says so.
+  defp put_claim_filter(payload, workspace) do
+    case Trackers.claim_filter(workspace) do
+      nil -> payload
+      filter -> Map.put(payload, :filter, filter)
+    end
+  end
 
   defp build_ticket_attrs(params) do
     %{}

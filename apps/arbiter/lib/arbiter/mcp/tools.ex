@@ -644,7 +644,11 @@ defmodule Arbiter.MCP.Tools do
          {:ok, workspace} <- fetch_workspace(ws_id) do
       case Trackers.list_open(workspace) do
         {:ok, summaries} ->
-          {:ok, %{data: Enum.map(summaries, &tracker_issue_row/1), supported: true}}
+          {:ok,
+           put_claim_filter(
+             %{data: Enum.map(summaries, &tracker_issue_row/1), supported: true},
+             workspace
+           )}
 
         {:error, :not_supported} ->
           {:ok, %{data: [], supported: false}}
@@ -734,7 +738,19 @@ defmodule Arbiter.MCP.Tools do
           Claim.serialize_sync(plan, results)
         end
 
-      {:ok, Map.merge(payload, %{actions: payload.data, count: length(plan)})}
+      {:ok,
+       payload
+       |> Map.merge(%{actions: payload.data, count: length(plan)})
+       |> put_claim_filter(workspace)}
+    end
+  end
+
+  # bd-43sydg: a GitHub App has no assignee identity; when the claim set is the
+  # claim label rather than "assigned to me", the response says so (`filter`).
+  defp put_claim_filter(payload, workspace) do
+    case Trackers.claim_filter(workspace) do
+      nil -> payload
+      filter -> Map.put(payload, :filter, filter)
     end
   end
 

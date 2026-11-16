@@ -70,10 +70,12 @@ defmodule Arbiter.GitHub.Limiter do
   over-issues and starves foreground work; wrongly assuming *shared* merely
   under-issues. We **fail safe toward shared**.
 
-  The pool count is not hardcoded: if a GitHub App installation is ever adopted
-  it resolves to its own `{:account, login}` (a genuinely separate,
-  installation-scaled pool) with no redesign — but nothing here assumes that
-  today.
+  The pool count is not hardcoded. A GitHub App installation token is a
+  genuinely separate, installation-scaled pool, but `GET /user` cannot name it
+  (an installation token is refused there), so its caller states the pool: the
+  GitHub tracker gates its App-token calls with `gate_in_pool/4` and
+  `{:installation, id}` (bd-43sydg), so they are accounted to the installation's
+  budget, never the operator's account pool.
 
   ## Headroom, not accounting
 
@@ -151,7 +153,7 @@ defmodule Arbiter.GitHub.Limiter do
 
   @type priority :: :foreground | :background
   @type subsystem :: atom()
-  @type pool_id :: :shared | {:account, String.t()}
+  @type pool_id :: :shared | {:account, String.t()} | {:installation, String.t()}
   @type rate_info :: %{
           optional(:remaining) => non_neg_integer() | nil,
           optional(:limit) => non_neg_integer() | nil,
@@ -276,6 +278,25 @@ defmodule Arbiter.GitHub.Limiter do
         # Fail open — the limiter is not running; do not block GitHub traffic.
         fun.()
     end
+  end
+
+  @doc """
+  `gate/3` for a token whose pool the caller already knows — a GitHub App
+  installation token (`{:installation, id}`), whose pool `GET /user` cannot
+  resolve. The token is pinned to `pool_id` before the call is admitted, so the
+  call, its rate-limit headers and any secondary-limit trip are accounted to that
+  pool and never fall back to `:shared`.
+  """
+  @spec gate_in_pool(String.t(), pool_id(), (-> term()), GenServer.server()) :: term()
+  def gate_in_pool(token, pool_id, fun, server \\ default_server()) when is_function(fun, 0) do
+    pin_pool(token, pool_id, server)
+    gate(token, fun, server)
+  end
+
+  @doc "Pin `token` to `pool_id` (a cast, so it is ordered before this process's next call)."
+  @spec pin_pool(String.t(), pool_id(), GenServer.server()) :: :ok
+  def pin_pool(token, pool_id, server \\ default_server()) when is_binary(token) do
+    GenServer.cast(server, {:pin_pool, token, pool_id})
   end
 
   # The limiter the request seam gates through. Normally the app-wide singleton;
@@ -445,6 +466,21 @@ defmodule Arbiter.GitHub.Limiter do
       |> remember_token(token)
 
     {:noreply, put_pool(state, pool_id, pool)}
+  end
+
+  def handle_cast({:pin_pool, token, pool_id}, state) do
+    key = :erlang.phash2(token)
+    pool = get_pool(state, pool_id)
+
+    # An installation token is short-lived: the one it replaces is forgotten, so
+    # the map holds one entry per pool rather than one per mint.
+    state =
+      if is_binary(pool.token) and pool.token != token,
+        do: Map.update!(state, :token_pools, &Map.delete(&1, :erlang.phash2(pool.token))),
+        else: state
+
+    state = Map.update!(state, :token_pools, &Map.put(&1, key, pool_id))
+    {:noreply, put_pool(state, pool_id, %{pool | token: token})}
   end
 
   def handle_cast({:note_secondary, token}, state) do

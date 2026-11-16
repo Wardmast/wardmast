@@ -72,6 +72,58 @@ defmodule ArbiterWeb.Api.TrackerControllerTest do
       assert item["assignees"] == [@viewer]
     end
 
+    # bd-43sydg: a GitHub App cannot be an assignee, so with no personal token the
+    # listing is by claim label and the response says so.
+    test "a GitHub App tracker with no personal token lists by label and says so", %{conn: conn} do
+      key = :public_key.generate_key({:rsa, 2048, 65_537})
+      pem = :public_key.pem_encode([:public_key.pem_entry_encode(:RSAPrivateKey, key)])
+      mint = Arbiter.Worker.GitCredential.HTTP
+      Application.put_env(:arbiter, :host_credential_req_options, plug: {Req.Test, mint})
+      Arbiter.Worker.HostCredential.Cache.clear()
+      on_exit(fn -> Application.delete_env(:arbiter, :host_credential_req_options) end)
+
+      Req.Test.stub(mint, fn conn ->
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"token" => "ghs_app", "expires_at" => "2099-01-01T00:00:00Z"})
+      end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tracker-ctrl-app",
+          prefix: "tcap",
+          config: %{
+            "tracker" => %{
+              "type" => "github",
+              "config" => %{"owner" => "acme", "repo" => "tonic", "claim_label" => "mine"}
+            },
+            "git_credentials" => %{
+              "repos" => %{
+                "tonic" => %{
+                  "kind" => "github_app",
+                  "app_id" => "42",
+                  "installation_id" => "7",
+                  "private_key_secret" => "APP_KEY"
+                }
+              }
+            }
+          },
+          secrets: %{"APP_KEY" => pem}
+        })
+
+      stub(fn conn ->
+        assert ["Bearer ghs_app"] = Plug.Conn.get_req_header(conn, "authorization")
+        assert conn.request_path == "/repos/acme/tonic/issues"
+        assert URI.decode_query(conn.query_string)["labels"] == "mine"
+        Req.Test.json(conn, [%{"number" => 9, "title" => "Labelled", "state" => "open"}])
+      end)
+
+      body = conn |> get(~p"/api/workspaces/#{ws.id}/tracker/issues") |> json_response(200)
+      assert [%{"ref" => "9"}] = body["data"]
+      assert %{"mode" => "label", "label" => "mine", "note" => note} = body["filter"]
+      assert note =~ "mine"
+    end
+
     test "returns supported=false with empty data when tracker is none", %{conn: conn, none: ws} do
       conn = get(conn, ~p"/api/workspaces/#{ws.id}/tracker/issues")
       body = json_response(conn, 200)
