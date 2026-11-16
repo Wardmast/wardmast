@@ -397,7 +397,7 @@ defmodule Wardmast.Worker.Image.Publisher.Pipeline do
   @doc """
   Build the controller image from the retained release tarball and push it as
   `<registry>/controller:<version>` (§11): `FROM <pinned public glibc base>`,
-  unpack to `/opt/arbiter`, run as uid 10001, `ENTRYPOINT [bin/wardmast, start]`.
+  unpack to `/opt/<archive root>` (`Agent.archive_root/0`, `wardmast`), run as uid 10001, `ENTRYPOINT [bin/wardmast, start]`.
   """
   @spec publish_controller(Registry.t(), keyword()) :: {:ok, result()} | {:error, term()}
   def publish_controller(%Registry{} = cfg, opts) do
@@ -454,7 +454,7 @@ defmodule Wardmast.Worker.Image.Publisher.Pipeline do
      && useradd --uid #{@controller_uid} --gid #{@controller_uid} --create-home arbiter
     ADD release.tar.gz /opt/
     USER #{@controller_uid}
-    ENTRYPOINT ["/opt/arbiter/bin/wardmast", "start"]
+    ENTRYPOINT ["/opt/#{Agent.archive_root()}/bin/wardmast", "start"]
     """
   end
 
