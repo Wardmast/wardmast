@@ -108,7 +108,7 @@ defmodule WardmastCli.Cmd.ServerTest do
       assert code == 0
       assert out =~ "restarted" or out =~ "Wardmast"
       # The restart lifecycle was triggered, not a standalone mix migrate.
-      refute_received {:cmd, "mix", ["arbiter.migrate"]}
+      refute_received {:cmd, "mix", ["wardmast.migrate"]}
       assert_received {:cmd, "sh", ["-c", script]}
       assert script =~ "mix phx.server"
     end

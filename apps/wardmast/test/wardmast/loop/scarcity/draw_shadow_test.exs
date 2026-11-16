@@ -28,8 +28,8 @@ defmodule Wardmast.Loop.Scarcity.DrawShadowTest do
     arbiter/release.ex
     arbiter/quota/budget_calibration.ex
     arbiter/quota/seat_weights.ex
-    mix/tasks/arbiter.draw_calibration.ex
-    mix/tasks/arbiter.budget_calibration.ex
+    mix/tasks/wardmast.draw_calibration.ex
+    mix/tasks/wardmast.budget_calibration.ex
     arbiter/board/admission_shadow_report.ex
     arbiter/board/admission_shadow_report/quota.ex
     arbiter/quota/history.ex

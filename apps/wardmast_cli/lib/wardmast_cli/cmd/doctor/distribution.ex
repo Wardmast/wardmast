@@ -26,7 +26,7 @@ defmodule WardmastCli.Cmd.Doctor.Distribution do
   alias WardmastCli.Cmd.ReleaseDeploy.ReleaseFiles
 
   @name "erlang distribution is loopback-only"
-  @node_name "arbiter"
+  @node_name "wardmast"
   @default_epmd_port 4369
   @epmd_timeout_ms 1_000
 
@@ -140,7 +140,7 @@ defmodule WardmastCli.Cmd.Doctor.Distribution do
       if exposed != [],
         do: [
           "Distribution must stay on loopback: the release's env.sh sets " <>
-            "ERL_EPMD_ADDRESS=127.0.0.1 and RELEASE_NODE=arbiter@127.0.0.1, and " <>
+            "ERL_EPMD_ADDRESS=127.0.0.1 and RELEASE_NODE=wardmast@127.0.0.1, and " <>
             "vm.args pins -kernel inet_dist_use_interface {127,0,0,1}. Restart the " <>
             "server on a release that has them; an epmd started before that keeps " <>
             "its old binding until it exits (`epmd -names` lists who still uses it)."

@@ -135,7 +135,7 @@ defmodule Wardmast.Agents.Claude.CredentialCheckTest do
       assert {:missing, %{reason: :credential_not_migrated} = missing} =
                CredentialCheck.check(ws)
 
-      assert missing.fix =~ "arbiter.accounts.migrate"
+      assert missing.fix =~ "wardmast.accounts.migrate"
     end
 
     test "an account-supplied ANTHROPIC_API_KEY is a credential of the workspace's own" do

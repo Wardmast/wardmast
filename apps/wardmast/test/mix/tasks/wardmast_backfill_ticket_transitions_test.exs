@@ -3,7 +3,7 @@ defmodule Mix.Tasks.Wardmast.BackfillTicketTransitionsTest do
   # starts only Ash + the Repo — never a second full Wardmast beside a live one.
   use ExUnit.Case, async: true
 
-  @source File.read!("lib/mix/tasks/arbiter.backfill_ticket_transitions.ex")
+  @source File.read!("lib/mix/tasks/wardmast.backfill_ticket_transitions.ex")
   @run_body Regex.run(~r/def run\(argv\) do(.*?)\n  end/s, @source) |> Enum.at(1)
 
   test "does not boot the full application" do

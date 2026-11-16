@@ -26,7 +26,7 @@ defmodule Wardmast.Quota.BudgetCalibrationShadowTest do
     arbiter/loop/scarcity/draw.ex
     arbiter/quota/quota_snapshot.ex
     arbiter/release.ex
-    mix/tasks/arbiter.budget_calibration.ex
+    mix/tasks/wardmast.budget_calibration.ex
     arbiter/board/admission_shadow_report.ex
     arbiter/board/admission_shadow_report/quota.ex
     arbiter/quota/seat_weights.ex
@@ -136,6 +136,6 @@ defmodule Wardmast.Quota.BudgetCalibrationShadowTest do
 
   test "the mix task is wired to the same report" do
     assert Code.ensure_loaded?(Mix.Tasks.Wardmast.BudgetCalibration)
-    assert Mix.Task.get("arbiter.budget_calibration") == Mix.Tasks.Wardmast.BudgetCalibration
+    assert Mix.Task.get("wardmast.budget_calibration") == Mix.Tasks.Wardmast.BudgetCalibration
   end
 end

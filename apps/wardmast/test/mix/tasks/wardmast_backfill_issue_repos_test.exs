@@ -4,7 +4,7 @@ defmodule Mix.Tasks.Wardmast.BackfillIssueReposTest do
   # rather than booting the full application (bd-64ye6w).
   use ExUnit.Case, async: true
 
-  @source File.read!("lib/mix/tasks/arbiter.backfill_issue_repos.ex")
+  @source File.read!("lib/mix/tasks/wardmast.backfill_issue_repos.ex")
   @run_body Regex.run(~r/def run\(argv\) do(.*?)\n  end/s, @source) |> Enum.at(1)
 
   test "does not boot the full application" do

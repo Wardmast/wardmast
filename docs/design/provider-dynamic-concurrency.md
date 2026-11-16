@@ -1175,7 +1175,7 @@ Autopilot pass.
 ### 10.3 The report
 
 `Wardmast.Release.admission_shadow_report/0` and `mix
-arbiter.admission_shadow_report` report the following:
+wardmast.admission_shadow_report` report the following:
 
 | Section | What it shows |
 |---|---|

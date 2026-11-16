@@ -4,7 +4,7 @@ defmodule Mix.Tasks.Wardmast.BackfillGeminiUsageNoteTest do
   # (bd-96mn8i round-8 ruling).
   use ExUnit.Case, async: true
 
-  @source File.read!("lib/mix/tasks/arbiter.backfill_gemini_usage_note.ex")
+  @source File.read!("lib/mix/tasks/wardmast.backfill_gemini_usage_note.ex")
   # `run/1`'s body only — excludes the moduledoc, which quotes the forbidden
   # call by name to explain why it's absent.
   @run_body Regex.run(~r/def run\(argv\) do(.*?)\n  end/s, @source) |> Enum.at(1)

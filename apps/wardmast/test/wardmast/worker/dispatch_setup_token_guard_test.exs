@@ -202,7 +202,7 @@ defmodule Wardmast.Worker.DispatchSetupTokenGuardTest do
       t = task(ws)
 
       reason = assert_refused_untouched(t, dispatch(t))
-      assert reason.remediation =~ "arbiter.accounts.migrate"
+      assert reason.remediation =~ "wardmast.accounts.migrate"
       assert [_page] = escalations(ws)
     end
   end

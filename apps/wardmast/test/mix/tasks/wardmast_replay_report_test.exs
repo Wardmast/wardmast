@@ -4,7 +4,7 @@ defmodule Mix.Tasks.Wardmast.ReplayReportTest do
   # than booting the full application (bd-c7lx65, R15).
   use ExUnit.Case, async: true
 
-  @source File.read!("lib/mix/tasks/arbiter.replay_report.ex")
+  @source File.read!("lib/mix/tasks/wardmast.replay_report.ex")
   @run_body Regex.run(~r/def run\(argv\) do(.*?)\n  end/s, @source) |> Enum.at(1)
 
   test "does not boot the full application" do

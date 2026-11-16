@@ -478,9 +478,9 @@ defmodule Wardmast.ReleaseAccountsTest do
     end
 
     for {task, fun} <- [
-          {"arbiter.accounts.census", "accounts_census"},
-          {"arbiter.accounts.migrate", "accounts_migrate"},
-          {"arbiter.accounts.rollback", "accounts_rollback"}
+          {"wardmast.accounts.census", "accounts_census"},
+          {"wardmast.accounts.migrate", "accounts_migrate"},
+          {"wardmast.accounts.rollback", "accounts_rollback"}
         ] do
       test "mix #{task} delegates to Wardmast.Release.#{fun} and never boots the app" do
         source = File.read!("lib/mix/tasks/#{unquote(task)}.ex")

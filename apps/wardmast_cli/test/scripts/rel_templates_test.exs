@@ -37,7 +37,7 @@ defmodule WardmastCli.Scripts.RelTemplatesTest do
   defp source_env(root, env) do
     script = """
     set -e
-    RELEASE_ROOT="$1"; RELEASE_NAME=arbiter; RELEASE_VSN=0.0.0-test
+    RELEASE_ROOT="$1"; RELEASE_NAME=wardmast; RELEASE_VSN=0.0.0-test
     . "$RELEASE_ROOT/releases/$RELEASE_VSN/env.sh"
     echo "ERL_EPMD_ADDRESS=$ERL_EPMD_ADDRESS"
     echo "RELEASE_DISTRIBUTION=$RELEASE_DISTRIBUTION"
@@ -81,7 +81,7 @@ defmodule WardmastCli.Scripts.RelTemplatesTest do
 
       assert vars["ERL_EPMD_ADDRESS"] == "127.0.0.1"
       assert vars["RELEASE_DISTRIBUTION"] == "name"
-      assert vars["RELEASE_NODE"] == "arbiter@127.0.0.1"
+      assert vars["RELEASE_NODE"] == "wardmast@127.0.0.1"
 
       for var <- ~w(ERL_EPMD_ADDRESS RELEASE_DISTRIBUTION RELEASE_NODE RELEASE_COOKIE) do
         assert vars["exported:" <> var], "#{var} is not exported:\n#{out}"

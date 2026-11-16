@@ -43,7 +43,7 @@ defmodule Wardmast.Vault do
        `V<N>`, the old key, decrypt-only), so both old and new ciphertext
        keep working through the window.
     2. Run `Wardmast.Vault.Rotation.sweep!/0` (via `mix
-       arbiter.rotate_cloak_key --sweep`) to re-encrypt every row onto the
+       wardmast.rotate_cloak_key --sweep`) to re-encrypt every row onto the
        new cipher, and `verify/0` (`--verify`) to confirm zero rows remain
        tagged `V<N>`.
     3. Remove `WARDMAST_CLOAK_KEY_OLD` and redeploy — leave

@@ -72,7 +72,7 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
   end
 
   defp release_unit_contents(scope, arbiter_home) do
-    release_bin = Path.join([arbiter_home, "current", "bin", "arbiter"])
+    release_bin = Path.join([arbiter_home, "current", "bin", "wardmast"])
     wanted_by = if scope == :system, do: "multi-user.target", else: "default.target"
     ordering = unit_ordering(scope)
     log_directives = unit_log_directives(scope, arbiter_home)

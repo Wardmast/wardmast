@@ -69,7 +69,7 @@ defmodule Mix.Tasks.Wardmast.RotateCloakKey do
         end
 
       true ->
-        Mix.raise("Pass --verify or --sweep. See `mix help arbiter.rotate_cloak_key`.")
+        Mix.raise("Pass --verify or --sweep. See `mix help wardmast.rotate_cloak_key`.")
     end
   end
 

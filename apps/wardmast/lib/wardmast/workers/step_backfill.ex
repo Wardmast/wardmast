@@ -161,7 +161,7 @@ defmodule Wardmast.Workers.StepBackfill do
   end
 
   # Redaction is not opt-in. The operator entry point (`mix
-  # arbiter.backfill_run_steps`) has no flag for secret values and never will
+  # wardmast.backfill_run_steps`) has no flag for secret values and never will
   # — a summary lifted raw out of a session JSONL is exactly the "secret
   # escapes redaction on one surface but not another" failure the single
   # choke-point exists to prevent. So the default is the run's *own*

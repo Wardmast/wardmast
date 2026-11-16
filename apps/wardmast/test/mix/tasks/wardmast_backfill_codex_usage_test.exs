@@ -6,7 +6,7 @@ defmodule Mix.Tasks.Wardmast.BackfillCodexUsageTest do
   # patrol set against the same production database (bd-96mn8i round-8 ruling).
   use ExUnit.Case, async: true
 
-  @source File.read!("lib/mix/tasks/arbiter.backfill_codex_usage.ex")
+  @source File.read!("lib/mix/tasks/wardmast.backfill_codex_usage.ex")
   # `run/1`'s body only — excludes the moduledoc, which quotes the forbidden
   # call by name to explain why it's absent.
   @run_body Regex.run(~r/def run\(argv\) do(.*?)\n  end/s, @source) |> Enum.at(1)

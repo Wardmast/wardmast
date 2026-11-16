@@ -205,7 +205,7 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     "apps/wardmast/lib/wardmast/workflows/code_review.ex" => :pure_tool,
     "apps/wardmast/lib/wardmast/workflows/code_review/consumer_trace.ex" => :pure_tool,
     "apps/wardmast/lib/wardmast/workflows/merge_queue/conflict_resolver.ex" => :pure_tool,
-    "apps/wardmast/lib/mix/tasks/arbiter.import_from_dolt.ex" => :pure_tool,
+    "apps/wardmast/lib/mix/tasks/wardmast.import_from_dolt.ex" => :pure_tool,
     "apps/wardmast_web/lib/wardmast_web/application.ex" => :pure_tool,
     "apps/wardmast_cli/lib/wardmast_cli/version.ex" => :pure_tool,
     # bd-bh50vs: `stty -F /dev/tty -echo` around the hidden login-code prompt.

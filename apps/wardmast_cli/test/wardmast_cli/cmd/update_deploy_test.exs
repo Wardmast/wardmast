@@ -67,7 +67,7 @@ defmodule WardmastCli.Cmd.UpdateDeployTest do
         {"git", ["diff" | _]} ->
           {"", 0}
 
-        {"mix", ["arbiter.migrate"]} ->
+        {"mix", ["wardmast.migrate"]} ->
           {~s({"migrations_applied":#{migrations},"status":"ok"}), 0}
 
         # ---- reused restart lifecycle ----
@@ -314,7 +314,7 @@ defmodule WardmastCli.Cmd.UpdateDeployTest do
           {"git", ["diff" | _]} ->
             {"", 0}
 
-          {"mix", ["arbiter.migrate"]} ->
+          {"mix", ["wardmast.migrate"]} ->
             {~s({"migrations_applied":0,"status":"ok"}), 0}
 
           {"systemctl", ["--user", "cat", "arbiter.service"]} ->
@@ -386,7 +386,7 @@ defmodule WardmastCli.Cmd.UpdateDeployTest do
 
       # Acceptance 1: the old server is up (doctor is green before the pull),
       # so nothing opens a second SQLite writer against it.
-      refute {"mix", ["arbiter.migrate"]} in cmds
+      refute {"mix", ["wardmast.migrate"]} in cmds
 
       # Ordering is stop -> (boot migrate) -> start: the SIGTERM precedes the
       # fresh `mix phx.server`, and Boot.Migrator runs inside that boot.
@@ -450,10 +450,10 @@ defmodule WardmastCli.Cmd.UpdateDeployTest do
       assert code == 0
 
       cmds = drain_cmds()
-      assert {"mix", ["arbiter.migrate"]} in cmds
+      assert {"mix", ["wardmast.migrate"]} in cmds
 
       migrate_at =
-        Enum.find_index(cmds, fn {cmd, args} -> {cmd, args} == {"mix", ["arbiter.migrate"]} end)
+        Enum.find_index(cmds, fn {cmd, args} -> {cmd, args} == {"mix", ["wardmast.migrate"]} end)
 
       start_at =
         Enum.find_index(cmds, fn {cmd, args} ->

@@ -468,7 +468,7 @@ defmodule Wardmast.Release do
   install — which has no Mix toolchain — can run it via
   `bin/wardmast eval 'Wardmast.Release.backfill(:codex_usage)'` (dry-run) or
   `bin/wardmast eval 'Wardmast.Release.backfill(:codex_usage, apply?: true)'`.
-  The Mix tasks under `lib/mix/tasks/arbiter.backfill_*.ex` are thin CLI
+  The Mix tasks under `lib/mix/tasks/wardmast.backfill_*.ex` are thin CLI
   wrappers over these same clauses for dev/source installs.
 
   Starts only Ash + `Wardmast.Repo` (`start_release_repo!/0`), never the full

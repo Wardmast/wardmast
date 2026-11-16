@@ -551,7 +551,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
       assert exit_code == 1
       assert out =~ "[fail] repos resolved"
       assert out =~ "rig_paths"
-      assert out =~ "arbiter.migrate_rig_paths"
+      assert out =~ "wardmast.migrate_rig_paths"
     end
 
     # `/api/repos` aggregates across every workspace (plus the app-env

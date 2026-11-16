@@ -18,7 +18,7 @@ defmodule WardmastCli.Cmd.Migrate do
   def run(root) do
     Start.log_text("Running database migrations…")
 
-    case Start.run_cmd("mix", ["arbiter.migrate"], cd: root, stderr_to_stdout: true) do
+    case Start.run_cmd("mix", ["wardmast.migrate"], cd: root, stderr_to_stdout: true) do
       {output, 0} ->
         # Parse the JSON output from the mix task
         case parse_migration_output(output) do

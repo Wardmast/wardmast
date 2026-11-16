@@ -70,7 +70,7 @@ defmodule Mix.Tasks.Wardmast.Containerfile do
         :ok
 
       {:error, reason} ->
-        Mix.raise("arbiter.containerfile #{kind}: #{inspect(reason)}")
+        Mix.raise("wardmast.containerfile #{kind}: #{inspect(reason)}")
     end
   end
 

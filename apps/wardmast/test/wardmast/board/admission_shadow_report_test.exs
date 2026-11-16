@@ -588,7 +588,7 @@ defmodule Wardmast.Board.AdmissionShadowReportTest do
     test "the mix task is wired to the same report" do
       assert Code.ensure_loaded?(Mix.Tasks.Wardmast.AdmissionShadowReport)
 
-      assert Mix.Task.get("arbiter.admission_shadow_report") ==
+      assert Mix.Task.get("wardmast.admission_shadow_report") ==
                Mix.Tasks.Wardmast.AdmissionShadowReport
     end
 
@@ -599,7 +599,7 @@ defmodule Wardmast.Board.AdmissionShadowReportTest do
         arbiter/board/admission_shadow_report/quota.ex
         arbiter/quota/budget_calibration.ex
         arbiter/release.ex
-        mix/tasks/arbiter.admission_shadow_report.ex
+        mix/tasks/wardmast.admission_shadow_report.ex
       )
 
       offenders =

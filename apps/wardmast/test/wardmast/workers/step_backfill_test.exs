@@ -219,7 +219,7 @@ defmodule Wardmast.Workers.StepBackfillTest do
     end
 
     # The finding: the only operator entry point (`mix
-    # arbiter.backfill_run_steps --apply`) passes no `:redact_values`, so a
+    # wardmast.backfill_run_steps --apply`) passes no `:redact_values`, so a
     # default of `[]` persisted raw session-JSONL text into the table.
     test "redaction is not opt-in: the run's own workspace secrets scrub by default" do
       secret = "super-secret-token-value"

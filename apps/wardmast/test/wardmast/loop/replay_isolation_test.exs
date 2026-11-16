@@ -42,7 +42,7 @@ defmodule Wardmast.Loop.ReplayIsolationTest do
     arbiter/lib/arbiter/loop/replay_run.ex
     arbiter/lib/arbiter/loop.ex
     arbiter/lib/arbiter/release.ex
-    arbiter/lib/mix/tasks/arbiter.replay_report.ex
+    arbiter/lib/mix/tasks/wardmast.replay_report.ex
   )
 
   defp lib_files do

@@ -9,7 +9,7 @@ defmodule WardmastCli.Cmd.Doctor.SecretsAtRestTest do
 
   test "ok when the boot secrets are references only" do
     env = %{
-      "ARBITER_CLOAK_KEY_REF" => "aws-sm:prod/arbiter#cloak",
+      "WARDMAST_CLOAK_KEY_REF" => "aws-sm:prod/arbiter#cloak",
       "SECRET_KEY_BASE_REF" => "aws-sm:prod/arbiter#skb",
       "PATH" => "/usr/bin"
     }
@@ -30,7 +30,7 @@ defmodule WardmastCli.Cmd.Doctor.SecretsAtRestTest do
     assert result.status == :warn
     assert result.detail =~ "ARBITER_CLOAK_KEY is an inline value"
     refute inspect(result) =~ "c2VjcmV0"
-    assert result.hint =~ "ARBITER_CLOAK_KEY_REF"
+    assert result.hint =~ "WARDMAST_CLOAK_KEY_REF"
   end
 
   test "warns when an inline value is shadowed by a pointer, or a pointer is malformed" do

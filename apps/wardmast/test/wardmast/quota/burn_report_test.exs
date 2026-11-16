@@ -153,7 +153,7 @@ defmodule Wardmast.Quota.BurnReportTest do
     end
 
     test "the mix task is registered" do
-      assert Mix.Task.get("arbiter.burn_report") == Mix.Tasks.Wardmast.BurnReport
+      assert Mix.Task.get("wardmast.burn_report") == Mix.Tasks.Wardmast.BurnReport
     end
   end
 

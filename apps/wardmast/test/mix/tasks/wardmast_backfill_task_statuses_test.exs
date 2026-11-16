@@ -5,7 +5,7 @@ defmodule Mix.Tasks.Wardmast.BackfillTaskStatusesTest do
   # only Ash + the Repo.
   use ExUnit.Case, async: true
 
-  @source File.read!("lib/mix/tasks/arbiter.backfill_task_statuses.ex")
+  @source File.read!("lib/mix/tasks/wardmast.backfill_task_statuses.ex")
   @run_body Regex.run(~r/def run\(argv\) do(.*?)\n  end/s, @source) |> Enum.at(1)
 
   test "does not boot the full application" do

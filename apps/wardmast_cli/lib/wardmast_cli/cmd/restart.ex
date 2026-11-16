@@ -502,7 +502,7 @@ defmodule WardmastCli.Cmd.Restart do
   # a release marker — a dev `mix phx.server` runs on one.
   defp release_argv?(argv) do
     Enum.any?(argv, fn arg ->
-      Path.basename(arg) == "arbiter" and Path.basename(Path.dirname(arg)) == "bin"
+      Path.basename(arg) in ["wardmast", "arbiter"] and Path.basename(Path.dirname(arg)) == "bin"
     end) or
       Enum.any?(argv, &Regex.match?(~r{/releases/[^/]+/(start|start_clean|sys|vm\.args)$}, &1)) or
       embedded_mode?(argv)
