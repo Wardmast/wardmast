@@ -71,7 +71,7 @@ defmodule Wardmast.Nodes.PlacementTest do
                  Placement.eligible(%{@eligible | kind: kind, layout: :worktree})
 
         assert {:local_only, :provider_not_remote} =
-                 Placement.eligible(%{@eligible | kind: kind, provider: :agy})
+                 Placement.eligible(%{@eligible | kind: kind, provider: :grok})
       end
     end
 
@@ -85,7 +85,7 @@ defmodule Wardmast.Nodes.PlacementTest do
                Placement.eligible(%{@eligible | kind: :resume, layout: :worktree})
 
       assert {:local_only, :provider_not_remote} =
-               Placement.eligible(%{@eligible | kind: :resume, provider: :agy})
+               Placement.eligible(%{@eligible | kind: :resume, provider: :grok})
 
       assert {:local_only, :placement_local_only} =
                Placement.eligible(%{@eligible | kind: :resume, mode: :local_only})
@@ -96,14 +96,14 @@ defmodule Wardmast.Nodes.PlacementTest do
     end
 
     test "a non-Claude provider stays local" do
-      for provider <- [:agy, :gemini, :grok, nil] do
+      for provider <- [:grok, :qwen, nil] do
         assert {:local_only, :provider_not_remote} =
                  Placement.eligible(%{@eligible | provider: provider})
       end
     end
 
     test "Codex is in the remote-provider set; the node, not eligibility, gates it" do
-      assert Placement.remote_providers() == ["claude", "codex"]
+      assert Placement.remote_providers() == ["claude", "codex", "gemini"]
       assert Placement.eligible(%{@eligible | provider: :codex}) == :ok
     end
 
@@ -119,6 +119,87 @@ defmodule Wardmast.Nodes.PlacementTest do
                place([provider: :codex, mode: :remote_only], [plain, other])
 
       assert {:ok, {:node, %{name: "plain"}}} = place([], [plain])
+    end
+
+    # bd-2esasx: agy (the `gemini` adapter on `antigravity:*` accounts).
+    test "agy is a remote provider under any of its names; the node gates it" do
+      for provider <- [:gemini, "gemini", :antigravity, "antigravity", :agy] do
+        assert Placement.eligible(%{@eligible | provider: provider}) == :ok
+      end
+    end
+
+    test "agy places only on a node that advertises caps.agy" do
+      plain = row("plain", caps: %{})
+      off = row("off", caps: %{"agy" => false})
+      ready = row("ready", caps: %{"agy" => true}, live: 1)
+
+      assert {:ok, {:node, %{name: "ready"}}} =
+               place([provider: :gemini], [plain, off, ready])
+
+      # A node that is not an agy node still takes a Claude run.
+      assert {:ok, {:node, %{name: "plain"}}} = place([provider: :claude], [plain])
+      # and caps.agy alone does not make a node a Codex node.
+      assert {:ok, {:local, _}} = place([provider: :codex], [ready])
+    end
+
+    test "prefer_remote names the nodes skipped for agy, like an outdated one" do
+      rows = [row("mesaana", caps: %{}), row("oryx", caps: %{"agy" => false})]
+
+      assert {:ok, {:local, {:node_skipped, skipped}}} = place([provider: :gemini], rows)
+
+      assert skipped == [
+               %{name: "mesaana", provider: "gemini", missing: :credential},
+               %{name: "oryx", provider: "gemini", missing: :credential}
+             ]
+
+      assert Placement.skipped_phrase(skipped) ==
+               "remote skipped: agy not available on mesaana (no credential), " <>
+                 "agy not available on oryx (no credential)"
+    end
+
+    test "an agy node that is merely full is not reported as skipped" do
+      rows = [row("full", caps: %{"agy" => true}, live: 2)]
+      assert {:ok, {:local, :no_node}} = place([provider: :gemini], rows)
+    end
+
+    test "a node reports why agy is missing: no image, or no credential" do
+      rows = [
+        row("a", caps: %{"agy" => false, "agy_missing" => "image"}),
+        row("b", caps: %{"agy_missing" => "credential"})
+      ]
+
+      assert {:ok, {:local, {:node_skipped, skipped}}} = place([provider: :gemini], rows)
+
+      assert Placement.skipped_phrase(skipped) ==
+               "remote skipped: agy not available on a (no agy in the image), " <>
+                 "agy not available on b (no credential)"
+    end
+
+    test "an outdated node and an agy-less node are both named" do
+      rows = [
+        row("old", health: :outdated, agent_version: "0.2.88", server_version: "0.2.90"),
+        row("bare", caps: %{})
+      ]
+
+      assert {:ok, {:local, {:node_skipped, skipped}}} = place([provider: :gemini], rows)
+
+      assert Placement.skipped_phrase(skipped) ==
+               "remote skipped: old outdated (0.2.88 < 0.2.90), " <>
+                 "agy not available on bare (no credential)"
+    end
+
+    test "remote_only holds with the agy reason rather than a bare 'no capacity'" do
+      rows = [row("mesaana", caps: %{})]
+
+      assert {:error, {:no_node_capacity, info}} =
+               place([provider: :gemini, mode: :remote_only], rows)
+
+      assert info.message =~ "agy not available on mesaana (no credential)"
+      assert info.reason == :provider_unavailable
+    end
+
+    test "the provider-not-remote phrase now names agy too" do
+      assert Placement.reason_phrase(:provider_not_remote, %{}) =~ "Claude, Codex and agy"
     end
 
     test "a bwrap-jailed or unsandboxed layout stays local" do
@@ -142,7 +223,7 @@ defmodule Wardmast.Nodes.PlacementTest do
                Placement.eligible(%{inspect_request | layout: :linked_worktree})
 
       assert {:local_only, :provider_not_remote} =
-               Placement.eligible(%{inspect_request | provider: :agy})
+               Placement.eligible(%{inspect_request | provider: :grok})
 
       assert {:local_only, :placement_local_only} =
                Placement.eligible(%{inspect_request | mode: :local_only})
@@ -346,7 +427,7 @@ defmodule Wardmast.Nodes.PlacementTest do
         row("busy", live: 2)
       ]
 
-      assert {:ok, {:local, {:node_outdated, [skipped]}}} = place(%{}, rows)
+      assert {:ok, {:local, {:node_skipped, [skipped]}}} = place(%{}, rows)
       assert skipped == %{name: "mesaana", version: "0.2.88", server_version: "0.2.90"}
 
       assert Placement.skipped_phrase([skipped]) ==

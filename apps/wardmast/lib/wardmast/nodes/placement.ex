@@ -33,8 +33,9 @@ defmodule Wardmast.Nodes.Placement do
       redispatch after a failure BEFORE the agent started (prepare, publish, pull,
       a node refusal) is placed like a first attempt, `Dispatch.node_kind/2`,
       bd-amm00p; a retained primary worktree with work in it is `:local_work`);
-    * every provider outside `remote_providers/0` (`:provider_not_remote`; Claude and Codex are in it, Codex per node on `caps.credential_sync`; the podman backend is
-      wired for Claude and Codex only);
+    * every provider outside `remote_providers/0` (`:provider_not_remote`; Claude, Codex and agy are in it, Codex per node on `caps.credential_sync`
+      and agy per node on `caps.agy`, bd-2esasx; the podman backend is wired for Claude and Codex only,
+      so an agy run is still `:not_podman` until it has a container wrap point);
     * anything not run in a podman container (`:not_podman`: bwrap-jailed or
       unsandboxed; the jail needs the primary's filesystem and keyring);
     * a dispatch handed no checkout at all (`:no_private_clone`: `provision_worktree:
@@ -169,7 +170,12 @@ defmodule Wardmast.Nodes.Placement do
   # SI11 (§21.5): the providers with a remote credential path. Claude's travels with
   # every run; Codex's rotating login needs the node to advertise
   # `caps.credential_sync: ["codex"]` (checked per node in `candidate?/3`).
-  @remote_providers ["claude", "codex"]
+  #
+  # bd-2esasx: `gemini` (agy, the Antigravity CLI) joins, per node on `caps.agy`: the node
+  # advertises it only when its image carries agy (`arbiter.cli-providers`) AND the
+  # antigravity login reached it. A node that says nothing has neither, so it is skipped
+  # with a named reason ("agy not available on mesaana (no credential)").
+  @remote_providers ["claude", "codex", "gemini"]
 
   @doc "The providers a run may be placed remotely with (`ContainerSpawn` reads the same set)."
   @spec remote_providers() :: [String.t()]
@@ -183,9 +189,40 @@ defmodule Wardmast.Nodes.Placement do
   def credential_synced?(_row, provider) when provider in [:claude, "claude"], do: true
 
   def credential_synced?(row, provider) do
+    case provider_key(provider) do
+      "gemini" -> agy_ready?(row)
+      key -> codex_style_synced?(row, key)
+    end
+  end
+
+  defp codex_style_synced?(row, key) do
     case get_in(Map.get(row, :caps) || %{}, ["credential_sync"]) do
-      list when is_list(list) -> to_string(provider) in list
+      list when is_list(list) -> key in list
       _ -> false
+    end
+  end
+
+  # bd-2esasx: agy's names (`gemini` the adapter, `antigravity` the account provider, `agy`
+  # the CLI) are one remote provider, `gemini`; every other provider keeps its own name.
+  defp provider_key(provider) when provider in [:gemini, :antigravity, :agy], do: "gemini"
+  defp provider_key(provider) when provider in ["antigravity", "agy"], do: "gemini"
+  defp provider_key(provider), do: to_string(provider)
+
+  @doc """
+  Can `row` run agy? The node says so with `caps.agy: true`, which its controller sets
+  only when the published image lists `gemini` in `arbiter.cli-providers` and the
+  antigravity credential reached the node. Anything else (no cap, `false`, a node that
+  predates it) is "no".
+  """
+  @spec agy_ready?(map()) :: boolean()
+  def agy_ready?(row), do: get_in(Map.get(row, :caps) || %{}, ["agy"]) == true
+
+  # Why an agy-less node has none: its own report (`caps.agy_missing: "image" | "credential"`),
+  # else the credential, the part that is per-node.
+  defp agy_missing(row) do
+    case get_in(Map.get(row, :caps) || %{}, ["agy_missing"]) do
+      "image" -> :image
+      _ -> :credential
     end
   end
 
@@ -222,7 +259,7 @@ defmodule Wardmast.Nodes.Placement do
           optional(atom()) => term()
         }
   @type result ::
-          {:ok, {:local, :no_node | {:node_outdated, [map()]} | {:local_only, reason()}}}
+          {:ok, {:local, :no_node | {:node_skipped, [map()]} | {:local_only, reason()}}}
           | {:ok, {:node, map()}}
           | {:error, {:no_node_capacity, info()}}
 
@@ -313,7 +350,7 @@ defmodule Wardmast.Nodes.Placement do
   defp no_checkout?(request),
     do: Map.get(request, :no_pr?, false) and not Map.get(request, :inspect?, false)
 
-  defp remote_provider?(provider), do: to_string(provider) in @remote_providers
+  defp remote_provider?(provider), do: provider_key(provider) in @remote_providers
 
   @doc "Why a run is local-only, as a phrase for a hold message."
   @spec reason_phrase(reason(), map()) :: String.t()
@@ -326,7 +363,7 @@ defmodule Wardmast.Nodes.Placement do
     do: "provider #{provider} has no remote credential path"
 
   def reason_phrase(:provider_not_remote, _),
-    do: "only Claude and Codex have a remote credential path"
+    do: "only Claude, Codex and agy have a remote credential path"
 
   def reason_phrase(:not_podman, _),
     do: "sandbox is not podman (bwrap-jailed or unsandboxed)"
@@ -423,18 +460,20 @@ defmodule Wardmast.Nodes.Placement do
   end
 
   defp none(%{mode: :remote_only} = request, rows) do
-    case registry_mismatch(request, rows) do
-      nil -> none_allowlisted(request, rows)
-      mismatch -> {:error, {:no_node_capacity, mismatch}}
+    with nil <- registry_mismatch(request, rows),
+         nil <- provider_unavailable(request, rows) do
+      none_allowlisted(request, rows)
+    else
+      hold -> {:error, {:no_node_capacity, hold}}
     end
   end
 
   # Under `prefer_remote` the run goes local; when an online node was passed over only because
   # its agent is older than this server, that is the reason, not "no node had a free slot".
-  defp none(%{mode: :prefer_remote}, rows) do
-    case outdated_skipped(rows) do
+  defp none(%{mode: :prefer_remote} = request, rows) do
+    case outdated_skipped(rows) ++ provider_skipped(request, rows) do
       [] -> {:ok, {:local, :no_node}}
-      skipped -> {:ok, {:local, {:node_outdated, skipped}}}
+      skipped -> {:ok, {:local, {:node_skipped, skipped}}}
     end
   end
 
@@ -450,20 +489,59 @@ defmodule Wardmast.Nodes.Placement do
     end
   end
 
-  @doc """
-  The one-line account of nodes skipped as outdated, for the run's placement record, the
-  board and the hold phrase: `remote skipped: mesaana outdated (0.2.88 < 0.2.90)`.
-  """
-  @spec skipped_phrase([
-          %{name: String.t(), version: String.t() | nil, server_version: String.t() | nil}
-        ]) ::
-          String.t()
-  def skipped_phrase(skipped) do
-    "remote skipped: " <>
-      Enum.map_join(skipped, ", ", fn s ->
-        "#{s.name} outdated (#{s.version || "?"} < #{s.server_version || "?"})"
-      end)
+  # bd-2esasx: the online, healthy nodes passed over only because a gemini (agy) run needs
+  # `caps.agy` and they do not advertise it.
+  defp provider_skipped(request, rows) do
+    if provider_key(Map.get(request, :provider)) == "gemini" do
+      for row <- rows, row.state == :online, row.health == :ready, not agy_ready?(row) do
+        %{name: Map.get(row, :name) || row.id, provider: "gemini", missing: agy_missing(row)}
+      end
+    else
+      []
+    end
   end
+
+  # A `remote_only` agy run with no node that could ever take it: some online node is
+  # healthy, and none of them is an agy node. The hold names each, so the operator reads
+  # "agy not available on mesaana (no credential)" rather than a full fleet.
+  defp provider_unavailable(request, rows) do
+    skipped = provider_skipped(request, rows)
+
+    if skipped != [] and not Enum.any?(rows, &(&1.state == :online and agy_ready?(&1))) do
+      %{
+        task_id: request.task_id,
+        node: nil,
+        mode: :remote_only,
+        reason: :provider_unavailable,
+        provider: "gemini",
+        skipped: skipped,
+        nodes_known: length(rows),
+        message:
+          "held — #{skipped_phrase(skipped)}: #{request.task_id} is an agy run and " <>
+            "worker.placement is remote_only. A node takes agy once its image carries the CLI and " <>
+            "the antigravity login has reached it (`caps.agy`); run it under prefer_remote to use the primary."
+      }
+    end
+  end
+
+  @doc """
+  The one-line account of nodes skipped, for the run's placement record, the board and the
+  hold phrase: `remote skipped: mesaana outdated (0.2.88 < 0.2.90)`, or, for a node that
+  cannot run the run's provider, `remote skipped: agy not available on mesaana (no credential)`.
+  """
+  @spec skipped_phrase([map()]) :: String.t()
+  def skipped_phrase(skipped) do
+    "remote skipped: " <> Enum.map_join(skipped, ", ", &skipped_entry/1)
+  end
+
+  defp skipped_entry(%{provider: "gemini", name: name, missing: missing}),
+    do: "agy not available on #{name} (#{missing_phrase(missing)})"
+
+  defp skipped_entry(s),
+    do: "#{s.name} outdated (#{s.version || "?"} < #{s.server_version || "?"})"
+
+  defp missing_phrase(:image), do: "no agy in the image"
+  defp missing_phrase(_), do: "no credential"
 
   # The hold when the registry check is what excluded every node: some online node
   # advertises `caps.registries`, and none of those prefixes covers the request's registry.

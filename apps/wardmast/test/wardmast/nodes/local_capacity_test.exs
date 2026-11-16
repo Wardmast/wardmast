@@ -566,10 +566,10 @@ defmodule Wardmast.Nodes.LocalCapacityTest do
       {:ok, 0} = Wardmast.Nodes.set_local_max_workers(0, nil)
 
       request = %{
-        task_id: "bd-agy",
+        task_id: "bd-grok",
         workspace_id: "ws",
         kind: :implementer,
-        provider: :agy,
+        provider: :grok,
         layout: :worktree,
         mode: :prefer_remote
       }
@@ -577,7 +577,7 @@ defmodule Wardmast.Nodes.LocalCapacityTest do
       assert {:error, {:no_node_capacity, info}} = LocalCapacity.gate(request, [])
 
       assert info.phrase =~
-               "held — local capacity 0 (run is local-only: provider agy has no remote credential path)"
+               "held — local capacity 0 (run is local-only: provider grok has no remote credential path)"
     end
 
     test "remote_only with no node capacity is refused before the local cap is read" do
