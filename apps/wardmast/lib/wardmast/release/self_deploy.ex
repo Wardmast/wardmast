@@ -136,6 +136,8 @@ defmodule Wardmast.Release.SelfDeploy do
         "--collect",
         "--description=Wardmast self-update to #{tag}",
         "--property=EnvironmentFile=-" <> Path.join(home, "arbiter.env"),
+        "--setenv=WARDMAST_DATA_HOME=#{home}",
+        # The `arb` CLI (renamed in a sibling ticket) still reads ARB_DATA_HOME.
         "--setenv=ARB_DATA_HOME=#{home}",
         cli_path(),
         "server",

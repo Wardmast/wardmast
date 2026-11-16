@@ -78,6 +78,8 @@ defmodule Wardmast.Release.SelfDeployTest do
       assert {:ok, _} = SelfDeploy.start("v1.2.3")
       assert_received {:cmd, "systemd-run", args, _}
       assert "--setenv=WARDMAST_DATA_HOME=#{home}" in args
+      # The not-yet-renamed `arb` CLI reads the pre-rename name.
+      assert "--setenv=ARB_DATA_HOME=#{home}" in args
     end
 
     test "never puts a secret in argv or the logs", %{arb: arb} do
