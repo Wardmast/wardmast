@@ -3234,10 +3234,29 @@ defmodule Wardmast.Worker.Dispatch do
       false
     else
       path = task |> BranchNamer.derive() |> Worktree.worktree_path()
-      File.dir?(path) and Worktree.unpushed_commits(path) != {:ok, 0}
+
+      File.dir?(path) and last_run_local?(task.id) and
+        Worktree.unpushed_commits(path) != {:ok, 0}
     end
   rescue
     _ -> true
+  end
+
+  # Only commits a LOCAL run left are the hazard (bd-ap53dg). Commits a node's run
+  # produced reached the home clone through the ingest/collect hand-off (bd-4ic681), and
+  # a resume placed on a node is seeded with exactly those, so a node-collected,
+  # not-yet-pushed branch is a legitimate remote resume. No run row counts as local.
+  defp last_run_local?(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc, inserted_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%Run{node_id: nil}] -> true
+      [%Run{}] -> false
+      [] -> true
+    end
   end
 
   # The spawn kind the primary's cap sees (`LocalCapacity.kinds/0`).
