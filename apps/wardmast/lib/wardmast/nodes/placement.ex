@@ -47,6 +47,10 @@ defmodule Wardmast.Nodes.Placement do
       (`:local_work`: a re-dispatch of a ticket an earlier local run left
       dirty; the seed carries commits, not the work tree, and the run's snapshot
       would replace it on the way back);
+    * a dispatch whose home clone holds commits no remote has
+      (`:unpushed_commits`, bd-ap53dg: the pre-push gate stayed red, the push failed,
+      a crash before the push). A node starts from the pushed branch and the host's
+      later push would diverge from those commits, so the run stays where they are;
     * a workspace whose `worker.placement` is `local_only`
       (`:placement_local_only`);
     * a run whose container pushes with its repo's scoped git credential (a
@@ -196,6 +200,7 @@ defmodule Wardmast.Nodes.Placement do
           | :not_podman
           | :no_private_clone
           | :local_work
+          | :unpushed_commits
           | :placement_local_only
           | :scoped_git_credential
   @type request :: %{
@@ -208,6 +213,7 @@ defmodule Wardmast.Nodes.Placement do
           optional(:no_pr?) => boolean(),
           optional(:inspect?) => boolean(),
           optional(:local_work?) => boolean(),
+          optional(:unpushed?) => boolean(),
           optional(:git_credential) => GitCredential.kind() | atom() | nil,
           optional(:labels) => [String.t()],
           optional(:allowed_nodes) => [Allowlist.selector()] | nil,
@@ -261,10 +267,20 @@ defmodule Wardmast.Nodes.Placement do
       not remote_provider?(request.provider) -> {:local_only, :provider_not_remote}
       request.layout != :private_clone -> {:local_only, :not_podman}
       no_checkout?(request) -> {:local_only, :no_private_clone}
-      Map.get(request, :local_work?, false) -> {:local_only, :local_work}
+      reason = checkout_holds_work(request) -> {:local_only, reason}
       request.mode == :local_only -> {:local_only, :placement_local_only}
       carries_uncarried_credential?(request) -> {:local_only, :scoped_git_credential}
       true -> :ok
+    end
+  end
+
+  # The checkout holds work only the primary has: uncommitted changes, or (bd-ap53dg)
+  # commits no remote has.
+  defp checkout_holds_work(request) do
+    cond do
+      Map.get(request, :local_work?, false) -> :local_work
+      Map.get(request, :unpushed?, false) -> :unpushed_commits
+      true -> nil
     end
   end
 
@@ -335,6 +351,9 @@ defmodule Wardmast.Nodes.Placement do
 
   def reason_phrase(:local_work, _),
     do: "its checkout already holds uncommitted work on the primary"
+
+  def reason_phrase(:unpushed_commits, _),
+    do: "its checkout holds commits that exist on no remote, only on the primary"
 
   def reason_phrase(:placement_local_only, _), do: "workspace worker.placement is local_only"
 

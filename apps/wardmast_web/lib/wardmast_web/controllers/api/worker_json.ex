@@ -33,6 +33,9 @@ defmodule WardmastWeb.Api.WorkerJSON do
         pid: inspect(result.machine_pid)
       },
       worktree_path: Map.get(result, :worktree_path),
+      node_id: Map.get(result, :node_id),
+      node: Map.get(result, :node_id) || "local",
+      unpushed_commits: Map.get(result, :unpushed_commits),
       claude_started: not is_nil(Map.get(result, :claude_port))
     }
   end

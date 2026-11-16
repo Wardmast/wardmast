@@ -715,6 +715,9 @@ defmodule Wardmast.MCP.Tools.Worker do
       worker: %{task_id: result.task.id, pid: inspect(result.worker_pid)},
       machine: %{id: result.machine_id, pid: inspect(result.machine_pid)},
       worktree_path: result.worktree_path,
+      node_id: Map.get(result, :node_id),
+      node: Map.get(result, :node_id) || "local",
+      unpushed_commits: Map.get(result, :unpushed_commits),
       claude_started: not is_nil(result.claude_port),
       depth: depth
     }
