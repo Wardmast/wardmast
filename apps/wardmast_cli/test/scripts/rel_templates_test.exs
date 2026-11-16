@@ -200,4 +200,21 @@ defmodule WardmastCli.Scripts.RelTemplatesTest do
       refute File.exists?(Path.join(data, "release.cookie"))
     end
   end
+
+  describe "rel/overlays/bin/arbiter (one-release rename shim)" do
+    test "is executable and execs the renamed bin/wardmast with its arguments", %{tmp_dir: dir} do
+      shim = Path.join(@rel, "overlays/bin/arbiter")
+      assert (File.stat!(shim).mode &&& 0o111) != 0
+
+      bin = Path.join(dir, "bin")
+      File.mkdir_p!(bin)
+      File.cp!(shim, Path.join(bin, "arbiter"))
+      File.chmod!(Path.join(bin, "arbiter"), 0o755)
+      File.write!(Path.join(bin, "wardmast"), "#!/bin/sh\necho \"wardmast:$*\"\n")
+      File.chmod!(Path.join(bin, "wardmast"), 0o755)
+
+      assert {"wardmast:start --foo\n", 0} =
+               System.cmd(Path.join(bin, "arbiter"), ["start", "--foo"])
+    end
+  end
 end

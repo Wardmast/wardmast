@@ -25,10 +25,9 @@ defmodule Wardmast.Env do
   server, the Helm chart and install scripts — separate tickets own those.
   Renaming them here would break running workers against an older `arb`.
 
-  `config/runtime.exs` runs before application code is available in a
-  release, so it carries a small inlined copy of this precedence rule (see
-  the `env` helper at its top). `Wardmast.EnvTest` pins both to the same
-  behaviour.
+  `config/runtime.exs` calls `Wardmast.Env.get/2` directly (this app is a
+  dependency of the release, so it is available when runtime config is
+  evaluated); there is no second copy of the precedence rule.
 
   Dependency-free on purpose (lives in `:wardmast_release_env`), so the
   server and the escript can share it.
