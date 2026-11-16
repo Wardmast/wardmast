@@ -507,7 +507,12 @@ defmodule Arbiter.Worker.GitCredential do
 
   # ---- materializing ---------------------------------------------------------------
 
-  @push_permissions %{"contents" => "write", "metadata" => "read", "pull_requests" => "read"}
+  @push_permissions %{
+    "contents" => "write",
+    "metadata" => "read",
+    "pull_requests" => "read",
+    "workflows" => "write"
+  }
   @tracker_permissions %{
     "contents" => "read",
     "issues" => "write",
@@ -522,7 +527,8 @@ defmodule Arbiter.Worker.GitCredential do
     "contents" => "write",
     "issues" => "write",
     "metadata" => "read",
-    "pull_requests" => "write"
+    "pull_requests" => "write",
+    "workflows" => "write"
   }
   # Scopes that no worker may ever hold. A classic PAT cannot be limited to a
   # repo at all, so any OAuth-scoped token is refused; these are the ones that do
@@ -785,7 +791,34 @@ defmodule Arbiter.Worker.GitCredential do
 
   # ---- GitHub App ------------------------------------------------------------------
 
+  # `workflows: write` is requested wherever a token pushes, since GitHub refuses
+  # any push touching `.github/workflows/*` without it. An installation that was
+  # never granted it answers 422 "permissions requested are not granted"; retry
+  # once without it rather than failing every push, and say so loudly.
   defp mint(entry, pem, repo, permissions, opts) do
+    case do_mint(entry, pem, repo, permissions, opts) do
+      {:error, {:git_credential_mint_failed, 422, message}} = error ->
+        if Map.has_key?(permissions, "workflows") and not_granted?(message) do
+          Logger.warning(
+            "GitCredential: the GitHub App installation #{entry.installation_id} was not granted " <>
+              "`workflows: write` (#{message}); minting without it. Pushes that change " <>
+              ".github/workflows/* will be refused until the App has Workflows read & write and " <>
+              "the installation owner accepts the new permissions."
+          )
+
+          do_mint(entry, pem, repo, Map.delete(permissions, "workflows"), opts)
+        else
+          error
+        end
+
+      other ->
+        other
+    end
+  end
+
+  defp not_granted?(message), do: String.contains?(String.downcase(message), "not granted")
+
+  defp do_mint(entry, pem, repo, permissions, opts) do
     with {:ok, jwt} <- app_jwt(entry.app_id, pem) do
       base = entry.api_url || "https://api.github.com"
 

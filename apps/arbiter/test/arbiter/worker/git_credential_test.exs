@@ -390,6 +390,7 @@ defmodule Arbiter.Worker.GitCredentialTest do
       assert {:ok, _} = GitCredential.materialize(plan(ws, "tonic"), ws, [host?: true] ++ opts)
       assert_receive {:mint, host_body}
       assert host_body["permissions"]["actions"] == "write"
+      assert host_body["permissions"]["workflows"] == "write"
 
       assert {:ok, _} = GitCredential.materialize(plan(ws, "tonic"), ws, opts)
       assert_receive {:mint, worker_body}
@@ -428,7 +429,8 @@ defmodule Arbiter.Worker.GitCredentialTest do
       assert body["permissions"] == %{
                "contents" => "write",
                "metadata" => "read",
-               "pull_requests" => "read"
+               "pull_requests" => "read",
+               "workflows" => "write"
              }
 
       refute Map.has_key?(body["permissions"], "administration")
@@ -481,6 +483,67 @@ defmodule Arbiter.Worker.GitCredentialTest do
 
       assert perms["pull_requests"] == "write"
       refute Map.has_key?(perms, "administration")
+    end
+
+    test "a 422 'permissions not granted' retries once without workflows and warns", %{ws: ws} do
+      test_pid = self()
+
+      Req.Test.stub(@http, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        perms = Jason.decode!(body)["permissions"]
+        send(test_pid, {:mint, perms})
+
+        if Map.has_key?(perms, "workflows") do
+          conn
+          |> Plug.Conn.put_status(422)
+          |> Req.Test.json(%{
+            "message" => "The permissions requested are not granted to this installation."
+          })
+        else
+          conn
+          |> Plug.Conn.put_status(201)
+          |> Req.Test.json(%{"token" => "ghs_nowf", "expires_at" => "2099-01-01T00:00:00Z"})
+        end
+      end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, %Material{token: "ghs_nowf"}} =
+                   GitCredential.materialize(
+                     plan(ws, "tonic"),
+                     ws,
+                     [remote: "acme/tonic", host?: true] ++ req_options()
+                   )
+        end)
+
+      assert_receive {:mint, first}
+      assert first["workflows"] == "write"
+      assert_receive {:mint, second}
+      refute Map.has_key?(second, "workflows")
+      assert second["actions"] == "write"
+      refute_receive {:mint, _}, 50
+      assert log =~ "workflows"
+      assert log =~ "refused"
+    end
+
+    test "a second 422 is a mint failure carrying GitHub's text", %{ws: ws} do
+      Req.Test.stub(@http, fn conn ->
+        conn
+        |> Plug.Conn.put_status(422)
+        |> Req.Test.json(%{
+          "message" => "The permissions requested are not granted to this installation."
+        })
+      end)
+
+      assert {:error, {:git_credential_mint_failed, 422, msg} = reason} =
+               GitCredential.materialize(
+                 plan(ws, "tonic"),
+                 ws,
+                 [remote: "acme/tonic"] ++ req_options()
+               )
+
+      assert msg =~ "not granted"
+      assert GitCredential.format_error(reason) =~ "(422)"
     end
 
     test "a mint failure refuses the spawn", %{ws: ws} do
