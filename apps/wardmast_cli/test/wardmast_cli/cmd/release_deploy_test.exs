@@ -57,8 +57,8 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       Path.join(System.tmp_dir!(), "rel-#{tag}-#{System.unique_integer([:positive])}.tar.gz")
 
     {:ok, tar} = :erl_tar.open(String.to_charlist(path), [:write, :compressed])
-    :ok = :erl_tar.add(tar, "#!/bin/sh\necho arbiter #{tag}\n", ~c"arbiter/bin/wardmast", [])
-    :ok = :erl_tar.add(tar, "release marker", ~c"arbiter/releases/RELEASE", [])
+    :ok = :erl_tar.add(tar, "#!/bin/sh\necho arbiter #{tag}\n", ~c"wardmast/bin/wardmast", [])
+    :ok = :erl_tar.add(tar, "release marker", ~c"wardmast/releases/RELEASE", [])
 
     # Migrations land where a mix release actually packages them:
     # lib/<app>-<vsn>/priv/repo/migrations/*.exs.

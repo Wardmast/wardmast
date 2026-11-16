@@ -16,7 +16,7 @@ defmodule WardmastCli.Cmd.Doctor.SecretsAtRestTest do
 
     result = SecretsAtRest.check(env)
     assert result.status == :ok
-    assert result.detail =~ "ARBITER_CLOAK_KEY (aws-sm)"
+    assert result.detail =~ "WARDMAST_CLOAK_KEY (aws-sm)"
     assert result.detail =~ "inline: none"
   end
 
