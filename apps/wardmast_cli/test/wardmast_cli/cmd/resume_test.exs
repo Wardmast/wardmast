@@ -39,6 +39,43 @@ defmodule WardmastCli.Cmd.ResumeTest do
       assert out =~ "resumed"
     end
 
+    # bd-ap53dg: "(reused)" is only true where the run works in that worktree.
+    test "a run placed on a node names it and does not claim the worktree was reused" do
+      stub_post("/api/workers/bd-2/resume", %{
+        "task" => %{"id" => "bd-2", "title" => "t", "state" => "active"},
+        "worker" => %{"task_id" => "bd-2", "pid" => "x"},
+        "machine" => %{"id" => "m", "pid" => "y"},
+        "worktree_path" => "/wt/feature-bd-2",
+        "node_id" => "mesaana",
+        "node" => "mesaana",
+        "claude_started" => true
+      })
+
+      {out, _err, code} = capture(fn -> run_resume(["bd-2"]) end)
+      assert code == 0
+      assert out =~ "Node:     mesaana"
+      refute out =~ "(reused)"
+    end
+
+    test "a local run says so, and reports the unpushed commits it kept" do
+      stub_post("/api/workers/bd-3/resume", %{
+        "task" => %{"id" => "bd-3", "title" => "t", "state" => "active"},
+        "worker" => %{"task_id" => "bd-3", "pid" => "x"},
+        "machine" => %{"id" => "m", "pid" => "y"},
+        "worktree_path" => "/wt/feature-bd-3",
+        "node_id" => nil,
+        "node" => "local",
+        "unpushed_commits" => 15,
+        "claude_started" => true
+      })
+
+      {out, _err, code} = capture(fn -> run_resume(["bd-3"]) end)
+      assert code == 0
+      assert out =~ "Node:     local"
+      assert out =~ "(reused)"
+      assert out =~ "Unpushed: 15 commits on no remote"
+    end
+
     test "--json mode emits JSON" do
       stub_post("/api/workers/bd-1/resume", %{
         "task" => %{"id" => "bd-1", "title" => "t", "state" => "active"},
