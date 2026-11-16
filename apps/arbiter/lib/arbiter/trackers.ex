@@ -237,6 +237,23 @@ defmodule Arbiter.Trackers do
   end
 
   @doc """
+  How the workspace tracker's claim set is narrowed when it is not "assigned to
+  the workspace user" (`nil` when it is): `%{mode: :label, label:, note:}` for a
+  GitHub tracker that authenticates as an App with no personal token
+  (bd-43sydg). `tracker_list_issues`, `tracker_sync` and their REST twins put it
+  in the response so the operator can see which filter was used.
+  """
+  @spec claim_filter(Arbiter.Tasks.Workspace.t()) :: map() | nil
+  def claim_filter(%Arbiter.Tasks.Workspace{} = workspace) do
+    type = workspace_tracker_type(workspace)
+    adapter = Map.get(adapters(), type, None)
+
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :claim_filter, 0) do
+      with_workspace(type, workspace, fn -> adapter.claim_filter() end)
+    end
+  end
+
+  @doc """
   Create a new upstream issue in the workspace's configured tracker.
 
   Used by the `Issue.create` after-transaction hook so `arb create` can mirror

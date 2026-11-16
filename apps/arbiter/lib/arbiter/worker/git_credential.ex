@@ -507,7 +507,12 @@ defmodule Arbiter.Worker.GitCredential do
 
   # ---- materializing ---------------------------------------------------------------
 
-  @push_permissions %{"contents" => "write", "metadata" => "read", "pull_requests" => "read"}
+  @push_permissions %{
+    "contents" => "write",
+    "metadata" => "read",
+    "pull_requests" => "read",
+    "workflows" => "write"
+  }
   @tracker_permissions %{
     "contents" => "read",
     "issues" => "write",
@@ -520,6 +525,14 @@ defmodule Arbiter.Worker.GitCredential do
   @host_permissions %{
     "actions" => "write",
     "contents" => "write",
+    "issues" => "write",
+    "metadata" => "read",
+    "pull_requests" => "write",
+    "workflows" => "write"
+  }
+  # The GitHub tracker's own token (bd-43sydg): issues and PR comments on the one
+  # tracker repo, nothing else (no contents, no actions).
+  @issue_tracker_permissions %{
     "issues" => "write",
     "metadata" => "read",
     "pull_requests" => "write"
@@ -536,7 +549,9 @@ defmodule Arbiter.Worker.GitCredential do
   entry's own `remote` wins), `:tracker?` (also produce `tracker_token`),
   `:req_options` (merged into the forge requests; tests stub with `plug:`),
   `:host?` (the token is the host's, for its push and PR operations: a github_app
-  token then carries the pull-request and merge permissions).
+  token then carries the pull-request and merge permissions), `:tracker_only?`
+  (the token is the GitHub tracker's: a github_app token is minted for `:remote`
+  with issues:write, pull_requests:write and metadata:read only, bd-43sydg).
 
   A secret that is not in the workspace's store, a token that cannot be pinned
   to one repo, or a mint that fails is an error: the spawn is refused, never
@@ -729,8 +744,13 @@ defmodule Arbiter.Worker.GitCredential do
     end
   end
 
-  defp push_permissions(opts),
-    do: if(Keyword.get(opts, :host?, false), do: @host_permissions, else: @push_permissions)
+  defp push_permissions(opts) do
+    cond do
+      Keyword.get(opts, :tracker_only?, false) -> @issue_tracker_permissions
+      Keyword.get(opts, :host?, false) -> @host_permissions
+      true -> @push_permissions
+    end
+  end
 
   defp maybe_mint_tracker(entry, pem, repo, opts) do
     if Keyword.get(opts, :tracker?, false),
@@ -755,8 +775,13 @@ defmodule Arbiter.Worker.GitCredential do
 
   # A token is pinned to the repo the spawn's origin names (or the entry's own
   # `remote`); without one the helper could not refuse another repo.
+  # The GitHub tracker's token is pinned to the tracker's own repo, which the
+  # caller names and which may not be the entry's code repo (`:tracker_only?`).
   defp remote(entry, opts) do
-    case entry.remote || Keyword.get(opts, :remote) do
+    named = Keyword.get(opts, :remote)
+    pinned = if Keyword.get(opts, :tracker_only?, false), do: named
+
+    case pinned || entry.remote || named do
       remote when is_binary(remote) and remote != "" -> {:ok, remote}
       _ -> {:error, :git_credential_remote_unknown}
     end
@@ -785,7 +810,34 @@ defmodule Arbiter.Worker.GitCredential do
 
   # ---- GitHub App ------------------------------------------------------------------
 
+  # `workflows: write` is requested wherever a token pushes, since GitHub refuses
+  # any push touching `.github/workflows/*` without it. An installation that was
+  # never granted it answers 422 "permissions requested are not granted"; retry
+  # once without it rather than failing every push, and say so loudly.
   defp mint(entry, pem, repo, permissions, opts) do
+    case do_mint(entry, pem, repo, permissions, opts) do
+      {:error, {:git_credential_mint_failed, 422, message}} = error ->
+        if Map.has_key?(permissions, "workflows") and not_granted?(message) do
+          Logger.warning(
+            "GitCredential: the GitHub App installation #{entry.installation_id} was not granted " <>
+              "`workflows: write` (#{message}); minting without it. Pushes that change " <>
+              ".github/workflows/* will be refused until the App has Workflows read & write and " <>
+              "the installation owner accepts the new permissions."
+          )
+
+          do_mint(entry, pem, repo, Map.delete(permissions, "workflows"), opts)
+        else
+          error
+        end
+
+      other ->
+        other
+    end
+  end
+
+  defp not_granted?(message), do: String.contains?(String.downcase(message), "not granted")
+
+  defp do_mint(entry, pem, repo, permissions, opts) do
     with {:ok, jwt} <- app_jwt(entry.app_id, pem) do
       base = entry.api_url || "https://api.github.com"
 

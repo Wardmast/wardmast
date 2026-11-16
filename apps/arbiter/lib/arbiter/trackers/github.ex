@@ -37,6 +37,14 @@ defmodule Arbiter.Trackers.GitHub do
   small DSL — currently only `"env:NAME"` is supported (looks up
   `System.get_env/1`); a bare string is treated as a literal token.
 
+  A repo with a `github_app` entry in `git_credentials` is served with the App's
+  repo-restricted installation token instead, and `credentials_ref` becomes
+  optional (bd-43sydg; see `Arbiter.Trackers.GitHub.Config`). Only the *personal
+  identity* calls (`current_user/0`, the assignee query) use `credentials_ref`; an
+  App cannot be an assignee, so without one `current_user/0` is the claim label
+  (`"label:<name>"`), `list_open/1` filters on that label and `claim_filter/0`
+  says so.
+
   ## Status mapping
 
   GitHub Issues have only two native states — `open` and `closed` — so the
@@ -65,6 +73,9 @@ defmodule Arbiter.Trackers.GitHub do
   alias Arbiter.Trackers.GitHub.{Config, Error}
 
   @stub_name Arbiter.Trackers.GitHub.HTTP
+
+  # The `current_user/0` of a tracker with no personal identity (see `claim_filter/0`).
+  @label_identity "label:"
 
   # ---- Tracker behaviour ---------------------------------------------------
 
@@ -181,11 +192,35 @@ defmodule Arbiter.Trackers.GitHub do
   @impl true
   def list_open(opts) when is_list(opts) do
     with {:ok, cfg} <- Config.resolve(),
-         {:ok, login} <- resolve_assignee(opts) do
-      case fetch_assigned_open_issues(cfg, login) do
+         {:ok, filter} <- resolve_filter(cfg, opts) do
+      case fetch_open_issues(cfg, filter) do
         {:ok, issues} -> {:ok, Enum.map(issues, &summarize/1)}
         {:error, _} = err -> err
       end
+    end
+  end
+
+  @doc """
+  How `list_open/1` narrows the claim set when it is not "assigned to the
+  workspace user": `%{mode: :label, label:, note:}` when the tracker is a GitHub
+  App with no personal token (an App cannot be an assignee), else `nil`. Callers
+  put it in their response so the operator sees which filter was used.
+  """
+  @spec claim_filter() :: %{mode: :label, label: String.t(), note: String.t()} | nil
+  def claim_filter do
+    case Config.claim_label() do
+      nil ->
+        nil
+
+      label ->
+        %{
+          mode: :label,
+          label: label,
+          note:
+            "No personal GitHub token is configured (the tracker authenticates as a GitHub App, " <>
+              "which cannot be an assignee): issues are filtered by the #{inspect(label)} label " <>
+              "(tracker.config.claim_label) instead of by assignee."
+        }
     end
   end
 
@@ -314,10 +349,28 @@ defmodule Arbiter.Trackers.GitHub do
   # ---- Tracker behaviour: claim callbacks ------------------------------------
 
   @impl true
-  def current_user, do: viewer_login()
+  def current_user do
+    case Config.claim_label() do
+      nil -> viewer_login()
+      label -> {:ok, @label_identity <> label}
+    end
+  end
 
+  # Without a personal identity the claim identity is the claim label: an issue
+  # carrying it and held by no person is "assigned to me"; one a person holds is
+  # theirs. An unlabelled issue is nobody's.
   @impl true
-  def assignees(issue_map), do: assignee_logins(issue_map)
+  def assignees(issue_map) do
+    people = assignee_logins(issue_map)
+
+    case Config.claim_label() do
+      label when is_binary(label) and people == [] ->
+        if label in label_names(issue_map), do: [@label_identity <> label], else: []
+
+      _ ->
+        people
+    end
+  end
 
   @impl true
   def issue_status(%{"state" => "closed"}), do: :closed
@@ -487,7 +540,7 @@ defmodule Arbiter.Trackers.GitHub do
 
     post_comment(ref, body)
     # Ownership on the tracker is never changed unless the claim asked for it (`assign: true`).
-    if Map.get(ctx, :assign, false), do: assign_user(ref, login)
+    if Map.get(ctx, :assign, false) and not label_identity?(login), do: assign_user(ref, login)
     :ok
   end
 
@@ -520,6 +573,7 @@ defmodule Arbiter.Trackers.GitHub do
   @spec viewer_login() :: {:ok, String.t()} | {:error, Error.t()}
   def viewer_login do
     with {:ok, cfg} <- Config.resolve(),
+         {:ok, cfg} <- identity_cfg(cfg),
          {:ok, %{"login" => login}} when is_binary(login) <-
            request(cfg, :get, "/user", []) |> handle_json() do
       {:ok, login}
@@ -550,7 +604,7 @@ defmodule Arbiter.Trackers.GitHub do
   @spec list_assigned_open_issues(String.t()) :: {:ok, [map()]} | {:error, Error.t()}
   def list_assigned_open_issues(login) when is_binary(login) do
     with {:ok, cfg} <- Config.resolve() do
-      fetch_assigned_open_issues(cfg, login)
+      fetch_open_issues(cfg, {:assignee, login})
     end
   end
 
@@ -664,16 +718,21 @@ defmodule Arbiter.Trackers.GitHub do
 
   # ---- Internals: list_open / pagination ---------------------------------
 
-  # Resolve the assignee opt to a concrete GitHub login. Default (`:viewer`)
-  # asks GitHub for the token's authenticated user — keeps the caller from
-  # having to thread "who am I" through the API.
-  defp resolve_assignee(opts) do
+  # Resolve the `:assignee` opt to the issue filter. Default (`:viewer`) asks
+  # GitHub for the personal token's authenticated user — keeps the caller from
+  # having to thread "who am I" through the API. With no personal identity (a
+  # GitHub App) the filter is the claim label, whatever `:assignee` says (the
+  # label identity `current_user/0` handed out is not a login).
+  defp resolve_filter(%{claim_label: label}, _opts) when is_binary(label),
+    do: {:ok, {:label, label}}
+
+  defp resolve_filter(_cfg, opts) do
     case Keyword.get(opts, :assignee, :viewer) do
       :viewer ->
-        viewer_login()
+        with {:ok, login} <- viewer_login(), do: {:ok, {:assignee, login}}
 
       login when is_binary(login) and login != "" ->
-        {:ok, login}
+        {:ok, {:assignee, login}}
 
       other ->
         {:error,
@@ -689,12 +748,35 @@ defmodule Arbiter.Trackers.GitHub do
   # Paginated fetch: walks the Link header's rel="next" until exhausted.
   # Returns the accumulated list of issues, with PRs filtered out (GitHub's
   # /issues endpoint mixes them in).
-  defp fetch_assigned_open_issues(cfg, login) do
+  defp fetch_open_issues(cfg, filter) do
     initial_path = "/repos/#{cfg.owner}/#{cfg.repo}/issues"
-    initial_params = [assignee: login, state: "open", per_page: 100]
+    initial_params = filter_params(filter) ++ [state: "open", per_page: 100]
 
     paginate(cfg, initial_path, params: initial_params)
   end
+
+  defp filter_params({:assignee, login}), do: [assignee: login]
+  defp filter_params({:label, label}), do: [labels: label]
+
+  # The personal-identity calls (`GET /user`) use `credentials_ref`; the App's
+  # installation token cannot answer them. No personal token is no identity.
+  defp identity_cfg(%{identity_token: token} = cfg) when is_binary(token),
+    do: {:ok, %{cfg | token: token, pool: nil}}
+
+  defp identity_cfg(_cfg) do
+    {:error,
+     %Error{
+       kind: :config_missing,
+       status: nil,
+       message:
+         "GitHub tracker has no personal credentials_ref: a GitHub App has no user identity " <>
+           "(claiming uses the claim label instead)",
+       raw: nil
+     }}
+  end
+
+  defp label_identity?(login),
+    do: is_binary(login) and String.starts_with?(login, @label_identity)
 
   # Cap pages so a runaway response can't hammer the API. 50 pages × 100/page
   # = 5,000 issues, well above any human's claimable backlog.

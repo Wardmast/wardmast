@@ -108,6 +108,37 @@ defmodule Arbiter.Worker.HostCredential do
     end
   end
 
+  @doc """
+  The repo's `github_app` credential for the GitHub *tracker*
+  (`Arbiter.Trackers.GitHub.Config`, bd-43sydg): `{:ok, nil}` when the repo is not
+  a `github_app` repo (the tracker keeps `credentials_ref`), `{:ok, %{token:,
+  pool:}}`, or `{:error, reason}`.
+
+  The token is minted for `:remote` (the tracker's `owner/repo`) with
+  issues:write, pull_requests:write and metadata:read only. `pool` is the
+  installation's rate-limit pool (`{:installation, id}`), which the limiter
+  accounts the token's calls to rather than the operator's account pool.
+  """
+  @spec tracker_credential(map() | nil, String.t() | nil, keyword()) ::
+          {:ok, %{token: String.t(), pool: {:installation, String.t()}} | nil}
+          | {:error, term()}
+  def tracker_credential(workspace, repo, opts \\ []) do
+    case GitCredential.plan(workspace, repo) do
+      {:ok, %GitCredential{mode: :scoped, entry: %{kind: :github_app} = entry} = plan} ->
+        opts =
+          opts
+          |> Keyword.put_new(:req_options, req_options())
+          |> Keyword.put(:tracker_only?, true)
+
+        with {:ok, material} <- materialize(plan, workspace, opts) do
+          {:ok, %{token: material.token, pool: {:installation, entry.installation_id}}}
+        end
+
+      _ ->
+        {:ok, nil}
+    end
+  end
+
   @doc "Human text for an `{:error, reason}` from this module."
   @spec format_error(term()) :: String.t()
   def format_error(reason), do: GitCredential.format_error(reason)
@@ -137,13 +168,13 @@ defmodule Arbiter.Worker.HostCredential do
     remote = Keyword.get(opts, :remote) || GitCredential.origin_remote(opts[:worktree_path])
 
     materialize_opts =
-      [remote: remote, host?: true] ++ Keyword.take(opts, [:req_options])
+      [remote: remote, host?: true] ++ Keyword.take(opts, [:req_options, :tracker_only?])
 
     compute = fn -> GitCredential.materialize(plan, workspace, materialize_opts) end
 
     case entry.kind do
       :github_app ->
-        Cache.fetch(cache_key(entry, remote), compute)
+        Cache.fetch(cache_key(entry, remote, Keyword.get(opts, :tracker_only?, false)), compute)
 
       # Minted for this push, not memoized: it is revoked once the push window
       # closes (or the owner exits), so a cached token would go stale under a caller.
@@ -169,8 +200,13 @@ defmodule Arbiter.Worker.HostCredential do
   end
 
   # What a mint depends on: the App, its installation, the repo, and the key.
-  defp cache_key(entry, remote),
+  defp cache_key(entry, remote, false),
     do: {entry.app_id, entry.installation_id, entry.remote || remote, entry.private_key_secret}
+
+  # The tracker's token has fewer permissions and is pinned to the tracker's own
+  # repo, so it is never served from (or to) the host's push token.
+  defp cache_key(entry, remote, true),
+    do: {:tracker, entry.app_id, entry.installation_id, remote, entry.private_key_secret}
 
   defp stage(material, opts) do
     owner = Keyword.get(opts, :owner, self())

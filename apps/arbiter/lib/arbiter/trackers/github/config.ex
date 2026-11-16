@@ -55,13 +55,37 @@ defmodule Arbiter.Trackers.GitHub.Config do
   `credentials_ref` is a small DSL: `"env:NAME"` looks up `System.get_env/1`.
   A bare string (no prefix) is treated as a literal token, but this should be
   avoided outside of tests.
+
+  ## Which token (bd-43sydg)
+
+  Mirrors the merger (`Arbiter.Mergers.Github.Config`, bd-bsmkfu). When the repo
+  has a `git_credentials.repos.<repo>` entry of kind `github_app`, every tracker
+  call carries the App's installation token, minted for the tracker's own
+  `owner/repo` with issues:write, pull_requests:write and metadata:read only, and
+  the limiter accounts those calls to the installation's pool (`:pool`). The repo
+  is the one `override_repo/2` named, else the one the tracker's `owner/repo`
+  slug matches. A repo with no such entry uses `credentials_ref`, as before. A
+  `github_app` entry whose token cannot be minted is a `:config_missing` error,
+  never a fallback to `credentials_ref`.
+
+  With an App, `credentials_ref` is optional. It is only the *personal identity*
+  (`identity_token`): an App cannot be an assignee, so "issues assigned to the
+  workspace user" needs a person. When it is absent the claim set is the open
+  issues carrying `"claim_label"` (default `"arbiter"`) instead
+  (`claim_label` in the resolved config; `nil` otherwise) and the responses that
+  list or sync issues say so (`Arbiter.Trackers.GitHub.claim_filter/0`).
   """
 
   alias Arbiter.Agents.CredentialsRef
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers.GitHub.Error
+  alias Arbiter.Worker.GitCredential
+  alias Arbiter.Worker.HostCredential
 
   @pdict_key {__MODULE__, :active_workspace_config}
+  @host_key "__host_credential"
+  @repo_key "__repo"
+  @default_claim_label "arbiter"
 
   @default_base_url "https://api.github.com"
 
@@ -80,6 +104,9 @@ defmodule Arbiter.Trackers.GitHub.Config do
           owner: String.t(),
           repo: String.t(),
           token: String.t(),
+          pool: {:installation, String.t()} | nil,
+          identity_token: String.t() | nil,
+          claim_label: String.t() | nil,
           status_map: %{atom() => status_entry}
         }
 
@@ -101,7 +128,9 @@ defmodule Arbiter.Trackers.GitHub.Config do
 
     Process.put(
       @pdict_key,
-      CredentialsRef.embed_secrets(tracker_config, Workspace.secrets_map(workspace))
+      tracker_config
+      |> CredentialsRef.embed_secrets(Workspace.secrets_map(workspace))
+      |> Map.put(@host_key, workspace)
     )
 
     :ok
@@ -121,8 +150,17 @@ defmodule Arbiter.Trackers.GitHub.Config do
   `Arbiter.Trackers.ConfigOverride`.
   """
   @spec override_repo(Workspace.t() | nil, String.t() | nil) :: :ok
-  def override_repo(workspace, repo),
-    do: Arbiter.Trackers.ConfigOverride.apply(@pdict_key, workspace, repo)
+  def override_repo(workspace, repo) do
+    :ok = Arbiter.Trackers.ConfigOverride.apply(@pdict_key, workspace, repo)
+
+    # The repo whose `git_credentials` entry (a GitHub App) the token comes from.
+    with %{} = active <- Process.get(@pdict_key),
+         true <- is_binary(repo) and repo != "" do
+      Process.put(@pdict_key, Map.put(active, @repo_key, repo))
+    end
+
+    :ok
+  end
 
   @doc "Clear the per-process active config."
   @spec clear() :: :ok
@@ -138,22 +176,37 @@ defmodule Arbiter.Trackers.GitHub.Config do
   """
   @spec resolve() :: {:ok, config} | {:error, Error.t()}
   def resolve do
-    raw =
-      Process.get(@pdict_key) ||
-        Application.get_env(:arbiter, :github_tracker_default_config) ||
-        %{}
+    raw = active_raw()
 
     with {:ok, owner} <- fetch_string(raw, "owner"),
          {:ok, repo} <- fetch_string(raw, "repo"),
-         {:ok, token} <- fetch_token(raw) do
+         {:ok, credential} <- credential(raw, owner, repo) do
       {:ok,
-       %{
+       Map.merge(credential, %{
          base_url: stringy(Map.get(raw, "base_url")) || @default_base_url,
          owner: owner,
          repo: repo,
-         token: token,
          status_map: status_map(raw)
-       }}
+       })}
+    end
+  end
+
+  @doc """
+  The label that stands in for "assigned to me" when the tracker authenticates
+  as a GitHub App with no personal `credentials_ref` (see the moduledoc), or
+  `nil` when assignment is the claim identity. Does not mint a token.
+  """
+  @spec claim_label() :: String.t() | nil
+  def claim_label do
+    raw = active_raw()
+
+    with {:ok, owner} <- fetch_string(raw, "owner"),
+         {:ok, repo} <- fetch_string(raw, "repo"),
+         {:app, _repo_key} <- app_repo(raw, owner, repo),
+         {:error, _} <- fetch_token(raw) do
+      claim_label_of(raw)
+    else
+      _ -> nil
     end
   end
 
@@ -184,6 +237,79 @@ defmodule Arbiter.Trackers.GitHub.Config do
   end
 
   # ---- Internals ----------------------------------------------------------
+
+  defp active_raw do
+    Process.get(@pdict_key) ||
+      Application.get_env(:arbiter, :github_tracker_default_config) ||
+      %{}
+  end
+
+  # The token every tracker call carries, and the personal identity (if any).
+  defp credential(raw, owner, repo) do
+    case app_repo(raw, owner, repo) do
+      {:app, repo_key} ->
+        app_credential(raw, repo_key, "#{owner}/#{repo}")
+
+      :none ->
+        with {:ok, token} <- fetch_token(raw) do
+          {:ok, %{token: token, pool: nil, identity_token: token, claim_label: nil}}
+        end
+    end
+  end
+
+  defp app_credential(raw, repo_key, slug) do
+    workspace = Map.fetch!(raw, @host_key)
+
+    case HostCredential.tracker_credential(workspace, repo_key, remote: slug) do
+      {:ok, %{token: token, pool: pool}} ->
+        personal = personal_token(raw)
+
+        {:ok,
+         %{
+           token: token,
+           pool: pool,
+           identity_token: personal,
+           claim_label: if(is_nil(personal), do: claim_label_of(raw))
+         }}
+
+      {:ok, nil} ->
+        {:error, config_missing("GitHub tracker repo #{repo_key} has no GitHub App credential")}
+
+      {:error, reason} ->
+        {:error,
+         config_missing(
+           "the scoped GitHub App token for repo #{repo_key} is unavailable: " <>
+             HostCredential.format_error(reason)
+         )}
+    end
+  end
+
+  # `{:app, repo_key}` when the tracker's repo has a `github_app` entry in the
+  # workspace's `git_credentials`: the repo `override_repo/2` named, else the one
+  # the `owner/repo` slug matches. Anything else uses `credentials_ref`.
+  defp app_repo(%{@host_key => workspace} = raw, owner, repo) do
+    [Map.get(raw, @repo_key), "#{owner}/#{repo}"]
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.find_value(:none, fn candidate ->
+      match?(
+        {:ok, %GitCredential{mode: :scoped, entry: %{kind: :github_app}}},
+        GitCredential.plan(workspace, candidate)
+      ) && {:app, candidate}
+    end)
+  end
+
+  defp app_repo(_raw, _owner, _repo), do: :none
+
+  # With an App the personal token is optional: absent, unset or unresolvable, it
+  # is simply no personal identity.
+  defp personal_token(raw) do
+    case fetch_token(raw) do
+      {:ok, token} -> token
+      {:error, _} -> nil
+    end
+  end
+
+  defp claim_label_of(raw), do: label(Map.get(raw, "claim_label")) || @default_claim_label
 
   defp fetch_string(map, key) do
     case Map.get(map, key) do

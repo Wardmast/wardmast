@@ -82,11 +82,19 @@ defmodule ArbiterWeb.Api.ClaimController do
 
     with {:ok, workspace} <- get_workspace(conn, workspace_id),
          {:ok, plan} <- Claim.plan(workspace) do
-      if dry? do
-        json(conn, Claim.serialize_sync(plan, :dry))
-      else
-        {:ok, results} = Claim.apply_plan(workspace, plan)
-        json(conn, Claim.serialize_sync(plan, results))
+      payload =
+        if dry? do
+          Claim.serialize_sync(plan, :dry)
+        else
+          {:ok, results} = Claim.apply_plan(workspace, plan)
+          Claim.serialize_sync(plan, results)
+        end
+
+      # bd-43sydg: a GitHub App has no assignee identity; say when the claim set
+      # is the claim label instead.
+      case Arbiter.Trackers.claim_filter(workspace) do
+        nil -> json(conn, payload)
+        filter -> json(conn, Map.put(payload, :filter, filter))
       end
     end
   end
