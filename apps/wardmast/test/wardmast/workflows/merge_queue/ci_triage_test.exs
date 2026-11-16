@@ -77,7 +77,7 @@ defmodule Wardmast.Workflows.MergeQueue.CiTriageTest do
     end
 
     test "an infra phrase beside a failing path in the diff is not trusted as infra" do
-      summary = "Insufficient memory\napps/arbiter/lib/arbiter/worker/watchdog.ex:12 crashed"
+      summary = "Insufficient memory\napps/wardmast/lib/wardmast/worker/watchdog.ex:12 crashed"
       checks = [%{name: "test", conclusion: "failure", summary: summary, files: []}]
 
       assert CiTriage.classify(checks, @changed).class == :needs_agent

@@ -82,7 +82,7 @@ defmodule Wardmast.ReleaseTest do
       :ok =
         :peer.call(peer_pid, Application, :put_all_env, [
           [
-            arbiter: peer_arbiter_env,
+            wardmast: peer_arbiter_env,
             ash: Application.get_all_env(:ash),
             ash_sqlite: Application.get_all_env(:ash_sqlite)
           ]

@@ -96,7 +96,7 @@ defmodule Wardmast.Mergers.RoutingCheckTest do
       ws(
         %{
           "strategy" => "github",
-          "config" => %{"owner" => "Serious-Alchemy", "repo" => "Wardmast"}
+          "config" => %{"owner" => "Serious-Alchemy", "repo" => "Arbiter"}
         },
         %{"arbiter" => checkout(dir, "arbiter", "git@github.com:serious-alchemy/arbiter.git")}
       )

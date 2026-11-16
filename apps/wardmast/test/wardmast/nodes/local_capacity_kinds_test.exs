@@ -65,7 +65,7 @@ defmodule Wardmast.Nodes.LocalCapacityKindsTest do
           src = File.read!(path)
           src =~ ~r/\bWorker\.start\(|\bWorker\.start_or_reap_terminal\(/
         end)
-        |> Enum.map(&Path.relative_to(&1, Path.join(@lib, "arbiter")))
+        |> Enum.map(&Path.relative_to(&1, Path.join(@lib, "wardmast")))
         |> Enum.sort()
 
       assert sites == @gates |> Map.keys() |> Enum.sort(),
@@ -75,7 +75,7 @@ defmodule Wardmast.Nodes.LocalCapacityKindsTest do
 
     test "each site references its gate, and PassAdmission applies LocalCapacity" do
       for {file, gate} <- @gates do
-        src = File.read!(Path.join([@lib, "arbiter", file]))
+        src = File.read!(Path.join([@lib, "wardmast", file]))
         assert src =~ gate, "#{file} must go through #{gate}"
       end
 

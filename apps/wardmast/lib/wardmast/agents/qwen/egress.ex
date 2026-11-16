@@ -55,7 +55,7 @@ defmodule Wardmast.Agents.Qwen.Egress do
     | received[ ]http[ ]code[ ]403[ ]from[ ]proxy
     | connect[ ]tunnel[ ]failed,[ ]response[ ]403
     | tunnel[ ]connection[ ]failed:[ ]proxy[ ]response[ ]\(403\)
-    | x-arbiter-egress:
+    | x-wardmast-egress:
     | \bENETUNREACH\b
     | network[ ]is[ ]unreachable
     | \bEAI_AGAIN\b

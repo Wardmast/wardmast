@@ -135,7 +135,7 @@ defmodule Wardmast.Version do
   end
 
   # The source checkout is resolved at runtime from the app's own location
-  # (`_build/<env>/lib/arbiter` in a Mix build). Never reuse `@git_dir_root`
+  # (`_build/<env>/lib/wardmast` in a Mix build). Never reuse `@git_dir_root`
   # here: it is the *build machine's* path, so a release built in CI would
   # use `/__w/arbiter/arbiter` as a spawn cwd and fail with
   # "spawn: Could not cd to ..." on every call.

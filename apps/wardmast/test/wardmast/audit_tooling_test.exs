@@ -17,7 +17,7 @@ defmodule Wardmast.AuditToolingTest do
 
   @root Path.expand("../../../..", __DIR__)
 
-  @apps ~w(arbiter wardmast_web wardmast_cli)
+  @apps ~w(wardmast wardmast_web wardmast_cli)
 
   defp read!(relative), do: File.read!(Path.join(@root, relative))
 
