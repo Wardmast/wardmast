@@ -85,6 +85,8 @@ defmodule Wardmast.Workers.Serializer do
       result: Map.get(meta, :result),
       # bd-8wdrql: what the pre-push recipe ran for this run, per attempt.
       pre_push_checks: pre_push_checks(Map.get(current, :run_id)),
+      # bd-ap53dg: commits the preserved worktree holds that no remote has.
+      unpushed: Wardmast.Worker.UnpushedWork.for_task(Map.get(current, :ticket_id)),
       runs: Enum.map(runs, &recent_run/1)
     })
     |> Map.merge(LiveSpend.cost_fields(opts[:cost]))

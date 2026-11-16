@@ -385,6 +385,7 @@ defmodule WardmastCli.Cmd.Worker do
     emit_provenance(snap)
 
     emit_pre_push_checks(snap["pre_push_checks"] || [])
+    emit_unpushed(snap["unpushed"])
 
     case snap["output_lines"] || [] do
       [] ->
@@ -397,6 +398,20 @@ defmodule WardmastCli.Cmd.Worker do
 
     emit_recent_runs(snap["runs"] || [])
   end
+
+  # bd-ap53dg: commits the ticket's preserved worktree holds that no remote has.
+  defp emit_unpushed(%{"count" => count} = unpushed) when is_integer(count) and count > 0 do
+    IO.puts(
+      "\nUnpushed commits (#{count}) in #{unpushed["path"]} — on no remote, only in this worktree:"
+    )
+
+    commits = unpushed["commits"] || []
+    Enum.each(commits, fn c -> IO.puts("  #{c["sha"]}  #{c["subject"]}") end)
+
+    if count > length(commits), do: IO.puts("  … #{count - length(commits)} more")
+  end
+
+  defp emit_unpushed(_unpushed), do: :ok
 
   # bd-8wdrql: the pre-push recipe's steps for this run, per attempt; a red
   # step carries the tail of its output.
@@ -593,16 +608,42 @@ defmodule WardmastCli.Cmd.Worker do
     IO.puts("  Worker:   #{worker["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
 
-    case payload["worktree_path"] do
-      nil -> :ok
-      path -> IO.puts("  Worktree: #{path} (reused)")
-    end
+    emit_resume_placement(payload)
 
     case payload["claude_started"] do
       true -> IO.puts("  Session:  resumed")
       _ -> :ok
     end
   end
+
+  # bd-ap53dg: where the run was placed, and "(reused)" only when the worktree is the
+  # one the run works in. A run on a node works in a clone seeded from the primary's
+  # copy, which is left where it is.
+  defp emit_resume_placement(payload) do
+    node = payload["node_id"]
+    path = payload["worktree_path"]
+
+    case node || payload["node"] do
+      nil -> :ok
+      place -> IO.puts("  Node:     #{place}")
+    end
+
+    if path do
+      suffix =
+        if is_binary(node),
+          do: "(primary's copy, seeded to the node; not reused there)",
+          else: "(reused)"
+
+      IO.puts("  Worktree: #{path} #{suffix}")
+    end
+
+    emit_resume_unpushed(payload["unpushed_commits"])
+  end
+
+  defp emit_resume_unpushed(n) when is_integer(n) and n > 0,
+    do: IO.puts("  Unpushed: #{n} commit#{if n == 1, do: "", else: "s"} on no remote")
+
+  defp emit_resume_unpushed(_n), do: :ok
 
   defp emit_review(payload, :json), do: IO.puts(Jason.encode!(payload))
 
