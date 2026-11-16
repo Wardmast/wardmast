@@ -102,7 +102,7 @@ defmodule Wardmast.Nodes.LocalCapacity do
   # true` (DC8, `enforce`) holds only at 0 or on a hard derate.
   @follow_up_kinds [:redispatch, :resume]
 
-  @type reason :: {:local_only, Placement.reason()} | {:node_outdated, [map()]} | :no_node | nil
+  @type reason :: {:local_only, Placement.reason()} | {:node_skipped, [map()]} | :no_node | nil
   @type info :: %{
           required(:task_id) => String.t(),
           required(:node) => String.t(),
@@ -243,7 +243,7 @@ defmodule Wardmast.Nodes.LocalCapacity do
 
   @doc """
   `gate/2` that also says why a run stayed local: `{:ok, :local, why}`, `why` being
-  `Placement.place/2`'s (`:no_node`, `{:node_outdated, skipped}`, `{:local_only, reason}`).
+  `Placement.place/2`'s (`:no_node`, `{:node_skipped, skipped}`, `{:local_only, reason}`).
   """
   @spec gate_with_reason(Placement.request(), keyword()) ::
           {:ok, :local, term()} | {:ok, {:node, map()}} | {:error, {:no_node_capacity, map()}}
@@ -419,7 +419,7 @@ defmodule Wardmast.Nodes.LocalCapacity do
 
   defp suffix(:no_node, _provider, _kind), do: " (no node had a free slot)"
 
-  defp suffix({:node_outdated, skipped}, _provider, _kind),
+  defp suffix({:node_skipped, skipped}, _provider, _kind),
     do: " (" <> Placement.skipped_phrase(skipped) <> ")"
 
   defp suffix(_reason, _provider, _kind), do: ""

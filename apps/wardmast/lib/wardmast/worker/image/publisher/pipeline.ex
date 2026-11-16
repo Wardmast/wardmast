@@ -187,9 +187,7 @@ defmodule Wardmast.Worker.Image.Publisher.Pipeline do
       local = local_tag("cli-" <> cli.name, tag)
 
       containerfile =
-        "FROM #{from}\n" <>
-          "COPY #{Enum.map_join(cli.files, " ", & &1.name)} #{@cli_dest}\n" <>
-          if(cli == last, do: label_lines(CliSet.labels(set)), else: "")
+        cli_layer_containerfile(cli, from, if(cli == last, do: CliSet.labels(set), else: []))
 
       context = Path.join(set.dir, cli.name)
 
@@ -212,6 +210,27 @@ defmodule Wardmast.Worker.Image.Publisher.Pipeline do
         error
     end
   end
+
+  @doc """
+  One CLI layer's Containerfile: `COPY` the CLI's files onto `from`, then `labels`.
+
+  agy's layer also **runs** the binary it just copied (bd-2esasx): a published image
+  whose agy does not report the pinned version (a wrong-arch archive, a truncated copy,
+  a glibc the base lacks) fails its build instead of failing a run on a node. The check
+  needs no network and writes nothing (`HOME=/tmp`); the other CLIs stay a bare `COPY`.
+  """
+  @spec cli_layer_containerfile(CliSet.cli(), String.t(), [{String.t(), String.t()}]) ::
+          String.t()
+  def cli_layer_containerfile(cli, from, labels) do
+    "FROM #{from}\n" <>
+      "COPY #{Enum.map_join(cli.files, " ", & &1.name)} #{@cli_dest}\n" <>
+      verify_lines(cli) <> label_lines(labels)
+  end
+
+  defp verify_lines(%{name: "agy", version: version}),
+    do: ~s|RUN test "$(HOME=/tmp #{@cli_dest}agy --version)" = "#{version}"\n|
+
+  defp verify_lines(_cli), do: ""
 
   defp label_lines(labels),
     do:

@@ -10,6 +10,14 @@ defmodule Wardmast.Worker.CliFetcher do
       vendored platform build (`@openai/codex@<version>-linux-<arch>`: `codex`,
       `codex-code-mode-host`, `rg`, `bwrap`). Codex's voice host
       (`codex-resources/voice/`, tens of MB workers never run) is left out.
+    * **agy** (the Antigravity CLI, provider `gemini`; bd-2esasx) is a single
+      glibc ELF that Google publishes per version at a content-addressed bucket URL
+      with a SHA-512 in its release manifest. The pin is the constant table below
+      (`agy_release/2`), not `worker.cli.versions`: the table carries the URL and
+      the SHA-512 of that exact archive per platform, both read from the vendor's
+      own manifest and re-checked here, so a bump is a code change that someone
+      reviewed. The download is verified against that SHA-512 before a byte enters
+      the cache; the archive's `antigravity` member is cached as `agy`.
     * **arb** is pinned to the running Wardmast release's own `arb` GitHub release
       asset (`Wardmast.Version.app_version/0` at `Wardmast.Version.release_repo/0`).
 
@@ -46,7 +54,23 @@ defmodule Wardmast.Worker.CliFetcher do
   alias Wardmast.Worker.CliFetcher.Upstream
 
   @npm_clis ~w(claude codex)
-  @names @npm_clis ++ ["arb"]
+  @names @npm_clis ++ ["agy", "arb"]
+
+  # bd-2esasx. Read from the vendor's release manifest
+  # (`<auto-updater>/manifests/linux_{amd64,arm64}.json`, the one `install.sh`
+  # trusts) for 1.5.9 and checked by downloading the archive and comparing the
+  # SHA-512; the musl variants are not used (the worker base is Debian, glibc).
+  @agy_version "1.5.9"
+  @agy_releases %{
+    "1.5.9" => %{
+      "linux-x64" =>
+        {"https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.9-4515810895593472/linux-x64/cli_linux_x64.tar.gz",
+         "d01eb13ba7750eed18907f1ae8860864371e0ad9064415e8d033d22b4bd7b9b4e4c7f962058520b452d67db1c33163d9a889d55a7dffa159596ec6cd91a87b79"},
+      "linux-arm64" =>
+        {"https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.9-4515810895593472/linux-arm/cli_linux_arm64.tar.gz",
+         "16c632a09b81f598f7652bc11180861f9d2ee4408ffa161dadc83b2010de7a9cd055e97b4b46cd01903e35c0e8bf21d8262462ba7c5f168cc6dada9ac3d522c0"}
+    }
+  }
   @codex_triples %{
     "linux-x64" => "x86_64-unknown-linux-musl",
     "linux-arm64" => "aarch64-unknown-linux-musl"
@@ -64,7 +88,7 @@ defmodule Wardmast.Worker.CliFetcher do
   @spec names() :: [String.t()]
   def names, do: @names
 
-  @doc "The CLIs whose version is pinned in `worker.cli.versions` (arb follows the release)."
+  @doc "The CLIs whose version is pinned in `worker.cli.versions` (arb follows the release, agy is a code pin)."
   @spec pinned_names() :: [String.t()]
   def pinned_names, do: @npm_clis
 
@@ -79,6 +103,8 @@ defmodule Wardmast.Worker.CliFetcher do
     version = Keyword.get_lazy(opts, :arb_version, &Wardmast.Version.app_version/0)
     if Semver.stable?(version), do: version
   end
+
+  def pin("agy", _opts), do: @agy_version
 
   def pin(name, opts) when name in @npm_clis do
     pins = Keyword.get_lazy(opts, :pins, fn -> Wardmast.Settings.worker_cli_versions() || %{} end)
@@ -126,6 +152,23 @@ defmodule Wardmast.Worker.CliFetcher do
   rescue
     e in [File.Error, File.CopyError, File.RenameError] ->
       {:error, {:cache_write, Exception.message(e)}}
+  end
+
+  @doc """
+  The pinned archive of agy `version` for `opts[:platform]` (default the host's):
+  `{:ok, {url, sha512_hex}}`, or `{:error, {:no_agy_release, version, platform}}`.
+  `opts[:agy_releases]` replaces the table (a test seam).
+  """
+  @spec agy_release(String.t(), keyword()) ::
+          {:ok, {String.t(), String.t()}} | {:error, {:no_agy_release, String.t(), String.t()}}
+  def agy_release(version, opts \\ []) do
+    platform = Cache.platform(opts)
+    table = Keyword.get(opts, :agy_releases, @agy_releases)
+
+    case get_in(table, [version, platform]) do
+      {url, sha512} when is_binary(url) and is_binary(sha512) -> {:ok, {url, sha512}}
+      _ -> {:error, {:no_agy_release, version, platform}}
+    end
   end
 
   @doc """
@@ -206,6 +249,27 @@ defmodule Wardmast.Worker.CliFetcher do
     end
   end
 
+  defp do_fetch("agy", version, work, opts) do
+    tgz = Path.join(work, "agy.tar.gz")
+    dest = Path.join(work, "extract")
+
+    with {:ok, {url, sha512}} <- agy_release(version, opts),
+         :ok <- Upstream.download(url, tgz, opts),
+         sri = "sha512-" <> Base.encode64(Base.decode16!(sha512, case: :lower)),
+         :ok <- Integrity.verify_sri(tgz, sri),
+         {:ok, members} <- Tarball.extract(tgz, dest, &agy_member/1),
+         :ok <- require_main(members, "agy") do
+      Cache.put(
+        "agy",
+        version,
+        Tarball.staged_dir(dest),
+        members,
+        %{source: url, integrity: sri, main: "agy"},
+        opts
+      )
+    end
+  end
+
   defp do_fetch("arb", version, work, opts) do
     with {:ok, repo} <- release_repo(opts),
          {:ok, release} <- github_release(repo, version, opts),
@@ -232,6 +296,10 @@ defmodule Wardmast.Worker.CliFetcher do
       )
     end
   end
+
+  # The archive holds the one binary, `antigravity`; the image calls it `agy`.
+  defp agy_member("antigravity"), do: {:keep, "agy"}
+  defp agy_member(_), do: :skip
 
   defp npm_tarball(name, version, doc, work, opts, main, select) do
     dist = Map.get(doc, "dist", %{})

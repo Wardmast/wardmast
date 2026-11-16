@@ -211,6 +211,72 @@ defmodule Wardmast.Worker.CliFetcherTest do
     end
   end
 
+  describe "ensure/3 for agy (bd-2esasx)" do
+    @agy_path "/antigravity-public/antigravity-cli/1.5.9-1/linux-x64/cli_linux_x64.tar.gz"
+
+    defp agy_archive, do: Fixtures.tgz([{"antigravity", "AGY-ELF-1.5.9", 0o755}])
+
+    defp agy_opts(ctx, archive) do
+      hex = Base.encode16(:crypto.hash(:sha512, archive), case: :lower)
+
+      opts(ctx,
+        agy_releases: %{
+          "1.5.9" => %{"linux-x64" => {"https://storage.test" <> @agy_path, hex}}
+        }
+      )
+    end
+
+    test "the pin is the code's, not worker.cli.versions" do
+      assert CliFetcher.pin("agy", pins: %{}) == "1.5.9"
+      assert "agy" in CliFetcher.names()
+      refute "agy" in CliFetcher.pinned_names()
+    end
+
+    test "the real pin table covers both platforms over https from Google's bucket" do
+      for platform <- ["linux-x64", "linux-arm64"] do
+        assert {:ok, {url, sha512}} = CliFetcher.agy_release("1.5.9", platform: platform)
+        assert String.starts_with?(url, "https://storage.googleapis.com/antigravity-public/")
+        assert sha512 =~ ~r/\A[0-9a-f]{128}\z/
+      end
+    end
+
+    test "fetches the pinned archive, verifies its sha512 and caches the binary as agy", ctx do
+      archive = agy_archive()
+      Fixtures.serve(%{@agy_path => {200, "application/gzip", archive}})
+
+      assert {:ok, entry} = CliFetcher.ensure("agy", "1.5.9", agy_opts(ctx, archive))
+      assert entry.name == "agy"
+      assert entry.main == "agy"
+      assert [%{path: "agy", mode: 0o755}] = entry.files
+      assert File.read!(Cache.object_path(entry, "agy")) == "AGY-ELF-1.5.9"
+    end
+
+    test "a sha512 mismatch is refused and nothing is cached", ctx do
+      archive = agy_archive()
+      opts = agy_opts(ctx, archive)
+      tampered = Fixtures.tgz([{"antigravity", "EVIL", 0o755}])
+      Fixtures.serve(%{@agy_path => {200, "application/gzip", tampered}})
+
+      assert {:error, {:integrity_mismatch, _}} = CliFetcher.ensure("agy", "1.5.9", opts)
+      assert :error = Cache.lookup("agy", "1.5.9", opts)
+    end
+
+    test "a version with no pinned release is refused before any request", ctx do
+      assert {:error, {:no_agy_release, "1.5.8", "linux-x64"}} =
+               CliFetcher.ensure("agy", "1.5.8", opts(ctx))
+
+      assert flush_hits() == []
+    end
+
+    test "an archive without the antigravity binary is refused", ctx do
+      archive = Fixtures.tgz([{"README", "x", 0o644}])
+      Fixtures.serve(%{@agy_path => {200, "application/gzip", archive}})
+
+      assert {:error, {:missing_file, "agy"}} =
+               CliFetcher.ensure("agy", "1.5.9", agy_opts(ctx, archive))
+    end
+  end
+
   describe "cache" do
     test "a damaged object fails verification and is refetched", ctx do
       Fixtures.serve(Fixtures.claude_routes(["2.1.310"]))

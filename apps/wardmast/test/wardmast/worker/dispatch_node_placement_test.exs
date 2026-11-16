@@ -629,15 +629,26 @@ defmodule Wardmast.Worker.DispatchNodePlacementTest do
       assert info.phrase =~ "held — local capacity 0 (no node had a free slot)"
     end
 
-    test "an agy implementer is held with its provider as the reason", %{ws: ws} do
+    test "an agy implementer under podman is refused by the sandbox backend, not held as non-remote (bd-2esasx)",
+         %{ws: ws} do
       issue = ready!(ws, "agy run")
+
+      # agy is a remote provider now, but has no podman wrap point yet
+      # (`Sandbox.module(:podman, "gemini")`), so it never reaches placement's node step.
+      assert {:error, {:sandbox_backend, :agy, detail}} =
+               dispatch(issue, @podman ++ [agent_type: :agy])
+
+      assert detail =~ "not supported by sandbox.backend podman"
+      assert Ash.get!(Issue, issue.id).state == :queued
+    end
+
+    test "an agy implementer outside podman is held as local-only for its sandbox", %{ws: ws} do
+      issue = ready!(ws, "agy bwrap run")
 
       assert {:error, {:no_node_capacity, info}} = dispatch(issue, agent_type: :agy)
 
       assert info.phrase ==
-               "held — local capacity 0 (run is local-only: provider agy has no remote credential path)"
-
-      assert Ash.get!(Issue, issue.id).state == :queued
+               "held — local capacity 0 (run is local-only: sandbox is not podman (bwrap-jailed or unsandboxed))"
     end
 
     # bd-6ypj2y: a task/research ticket has no branch, but a podman Claude run of

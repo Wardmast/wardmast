@@ -21,6 +21,30 @@ defmodule Wardmast.Worker.CliSetTest do
       assert CliSet.providers(set) == ["claude", "codex"]
     end
 
+    test "agy (bd-2esasx) is the lowest layer and makes `gemini` a provider of the image", ctx do
+      opts = ctx |> root() |> CliSetFixture.put(agy: "1.5.9")
+
+      assert {:ok, set} = CliSet.resolve(opts)
+      assert Enum.map(set.clis, & &1.name) == ["agy", "codex", "claude", "arb"]
+      assert CliSet.providers(set) == ["claude", "codex", "gemini"]
+      assert {"arbiter.cli-providers", "claude,codex,gemini"} in CliSet.labels(set)
+      assert {"arbiter.cli.agy.version", "1.5.9"} in CliSet.labels(set)
+    end
+
+    test "agy not in the cache leaves `gemini` out of the providers", ctx do
+      assert {:ok, set} = ctx |> root() |> CliSetFixture.put() |> CliSet.resolve()
+      refute "gemini" in CliSet.providers(set)
+      assert CliSet.require_cli(set, "agy") == {:error, {:cli_not_cached, "agy"}}
+    end
+
+    test "provider_cli/1 maps a run's provider to the CLI that serves it" do
+      assert CliSet.provider_cli("gemini") == "agy"
+      assert CliSet.provider_cli(:gemini) == "agy"
+      assert CliSet.provider_cli("antigravity") == "agy"
+      assert CliSet.provider_cli("claude") == "claude"
+      assert CliSet.provider_cli("codex") == "codex"
+    end
+
     test "a CLI whose pin is not cached is left out, never looked up on the host", ctx do
       opts = ctx |> root() |> CliSetFixture.put(codex: nil)
 

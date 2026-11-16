@@ -3062,9 +3062,10 @@ defmodule Wardmast.Worker.Dispatch do
   end
 
   # bd-5u99ki: a `prefer_remote` run that stayed on the primary because every remote node was
-  # outdated records that in its routing decision (`recorded_decision/1`), so `worker show`,
-  # the board card and prime say why the remote capacity went unused.
-  defp put_outdated_note(opts, request, {:node_outdated, skipped}) do
+  # outdated or could not run its provider (agy without `caps.agy`, bd-2esasx) records that in
+  # its routing decision (`recorded_decision/1`), so `worker show`, the board card and prime
+  # say why the remote capacity went unused.
+  defp put_outdated_note(opts, request, {:node_skipped, skipped}) do
     note = %{
       "fell_back_to" => "primary",
       "mode" => to_string(request.mode),

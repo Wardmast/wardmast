@@ -18,9 +18,10 @@ defmodule Wardmast.Worker.CliSet do
   ## The set
 
   `resolve/1` returns the cached CLIs in **churn order**, the order the image
-  layers stack in above the seed layer (`codex`, `claude`, `arb`), each as the
-  files it puts in `/opt/arbiter/cli`:
+  layers stack in above the seed layer (`agy`, `codex`, `claude`, `arb`), each as
+  the files it puts in `/opt/arbiter/cli`:
 
+    * `agy`: `agy`, the Antigravity CLI (the `gemini` provider; bd-2esasx);
     * `codex`: every file of the vendored build (`codex`, its sibling
       executables, `rg`, `bwrap`) flat in the directory;
     * `claude`: `claude`;
@@ -61,8 +62,11 @@ defmodule Wardmast.Worker.CliSet do
   alias Wardmast.Worker.CliFetcher.Integrity
 
   # Churn order: the layer that changes least is the lowest.
-  @order ["codex", "claude", "arb"]
-  @providers ["claude", "codex"]
+  # agy (bd-2esasx) is pinned by a constant (`CliFetcher.pin("agy")`), so it changes
+  # least of all: the lowest layer.
+  @order ["agy", "codex", "claude", "arb"]
+  # CLI name => the provider (the adapter a run is dispatched with) it serves.
+  @cli_providers %{"claude" => "claude", "codex" => "codex", "agy" => "gemini"}
   @cli_dir "/opt/arbiter/cli"
   @label "arbiter"
 
@@ -350,7 +354,19 @@ defmodule Wardmast.Worker.CliSet do
   @doc "The providers whose CLI is in the set (`arbiter.cli-providers`)."
   @spec providers(t()) :: [String.t()]
   def providers(%__MODULE__{clis: clis}) do
-    for(cli <- clis, cli.name in @providers, do: cli.name) |> Enum.sort()
+    for(cli <- clis, provider = Map.get(@cli_providers, cli.name), do: provider) |> Enum.sort()
+  end
+
+  @doc """
+  The CLI that serves `provider` (`"gemini"` and `"antigravity"` run `agy`; every
+  other provider's CLI carries its own name).
+  """
+  @spec provider_cli(atom() | String.t()) :: String.t()
+  def provider_cli(provider) do
+    case to_string(provider) do
+      name when name in ["gemini", "antigravity"] -> "agy"
+      name -> name
+    end
   end
 
   @doc "The `{host path, container path}` pairs of one CLI. Needs a materialized set."
@@ -369,9 +385,11 @@ defmodule Wardmast.Worker.CliSet do
   """
   @spec mounts(t(), String.t()) :: {:ok, [{Path.t(), String.t()}]} | {:error, term()}
   def mounts(%__MODULE__{} = set, provider) do
-    case cli(set, provider) do
-      nil -> {:error, {:cli_not_cached, provider}}
-      _ -> {:ok, cli_mounts(set, provider) ++ cli_mounts(set, "arb")}
+    name = provider_cli(provider)
+
+    case cli(set, name) do
+      nil -> {:error, {:cli_not_cached, name}}
+      _ -> {:ok, cli_mounts(set, name) ++ cli_mounts(set, "arb")}
     end
   end
 
