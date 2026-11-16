@@ -264,13 +264,23 @@ defmodule Arbiter.Trackers do
   outbound create return `{:error, :not_supported}` and callers should treat
   that as "skip — local-only task".
   """
-  @spec create_for_workspace(Arbiter.Tasks.Workspace.t(), Tracker.create_attrs()) ::
+  @spec create_for_workspace(Arbiter.Tasks.Workspace.t(), Tracker.create_attrs(), keyword()) ::
           {:ok, Tracker.ref()} | {:error, :not_supported} | {:error, term()}
-  def create_for_workspace(%Arbiter.Tasks.Workspace{} = workspace, attrs) when is_map(attrs) do
+  def create_for_workspace(%Arbiter.Tasks.Workspace{} = workspace, attrs, opts \\ [])
+      when is_map(attrs) do
     type = workspace_tracker_type(workspace)
     adapter = adapter_for_workspace_type(type, workspace)
+    repo = Keyword.get(opts, :repo)
 
-    with_workspace(type, workspace, fn -> adapter.create(attrs) end)
+    with_workspace(type, workspace, fn ->
+      # The ticket's repo selects the per-repo tracker binding and the repo's
+      # `git_credentials` entry (the GitHub App token), as `prepare_with_repo/3`.
+      if is_binary(repo) and repo != "" and Code.ensure_loaded?(adapter) and
+           function_exported?(adapter, :prepare, 2),
+         do: adapter.prepare(workspace, repo: repo)
+
+      adapter.create(attrs)
+    end)
   end
 
   @doc """

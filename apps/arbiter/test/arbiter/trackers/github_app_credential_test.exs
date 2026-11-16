@@ -196,6 +196,146 @@ defmodule Arbiter.Trackers.GitHubAppCredentialTest do
     end
   end
 
+  # The App entry is keyed by the `repo_paths` key (`arbiter`), which differs from
+  # the forge repo name (`tonic`): there is no `git_credentials.repos.tonic`.
+  describe "git_credentials key differs from the forge repo name" do
+    defp keyed_credentials do
+      %{
+        "repos" => %{
+          "arbiter" => %{
+            "kind" => "github_app",
+            "app_id" => "42",
+            "installation_id" => "7",
+            "private_key_secret" => "APP_KEY"
+          }
+        }
+      }
+    end
+
+    defp keyed_workspace(pem, extra_config \\ %{}) do
+      ws = workspace(pem, personal_ref(), keyed_credentials())
+
+      config =
+        Map.merge(
+          %{
+            "repo_paths" => %{"arbiter" => "/nonexistent/arbiter"},
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "acme", "repo" => "tonic"}
+            }
+          },
+          extra_config
+        )
+
+      {:ok, ws} = Ash.update(ws, %{config: Map.merge(ws.config, config)})
+      ws
+    end
+
+    test "a SyncFields title update carries the App token (ticket repo = key)", %{pem: pem} do
+      stub_mint()
+      stub_api()
+      ws = keyed_workspace(pem)
+
+      {:ok, issue} =
+        Ash.create(Arbiter.Tasks.Issue, %{
+          title: "original",
+          tracker_type: :github,
+          tracker_ref: "42",
+          workspace_id: ws.id,
+          repo: "arbiter"
+        })
+
+      assert issue.repo == "arbiter"
+      assert {:ok, _} = Ash.update(issue, %{title: "renamed"}, action: :update)
+
+      bearer = "Bearer " <> @app_token
+      assert_received {:api, "PATCH", "/repos/acme/tonic/issues/42", ^bearer, _}
+      refute_received {:api, _, _, "Bearer " <> @personal, _}
+    end
+
+    test "the ticket's repo alone selects the App entry (no forge config to map the slug)",
+         %{pem: pem} do
+      stub_mint()
+      stub_api()
+      ws = workspace(pem, personal_ref(), keyed_credentials())
+
+      {:ok, issue} =
+        Ash.create(Arbiter.Tasks.Issue, %{
+          title: "original",
+          tracker_type: :github,
+          tracker_ref: "42",
+          workspace_id: ws.id,
+          repo: "arbiter"
+        })
+
+      assert {:ok, _} = Ash.update(issue, %{title: "renamed"}, action: :update)
+
+      bearer = "Bearer " <> @app_token
+      assert_received {:api, "PATCH", "/repos/acme/tonic/issues/42", ^bearer, _}
+      refute_received {:api, _, _, "Bearer " <> @personal, _}
+    end
+
+    test "Trackers.create_for_workspace/3 with the ticket's repo mints the App token",
+         %{pem: pem} do
+      stub_mint()
+      stub_api()
+      ws = workspace(pem, personal_ref(), keyed_credentials())
+
+      assert {:ok, "42"} = Trackers.create_for_workspace(ws, %{title: "t"}, repo: "arbiter")
+      bearer = "Bearer " <> @app_token
+      assert_received {:api, "POST", "/repos/acme/tonic/issues", ^bearer, _}
+    end
+
+    test "prepare without a repo resolves the key from the workspace forge config",
+         %{pem: pem} do
+      stub_mint()
+      stub_api()
+      GitHub.prepare(keyed_workspace(pem))
+
+      assert :ok = GitHub.update_fields("42", %{title: "x"})
+      bearer = "Bearer " <> @app_token
+      assert_received {:api, "PATCH", "/repos/acme/tonic/issues/42", ^bearer, _}
+      refute_received {:api, _, _, "Bearer " <> @personal, _}
+    end
+
+    test "a per-repo merge override naming the slug maps to that repo key", %{pem: pem} do
+      stub_mint()
+      stub_api()
+
+      ws =
+        keyed_workspace(pem, %{
+          "repo_paths" => %{"arbiter" => "/x/arbiter", "other" => "/x/other"},
+          "merge" => %{
+            "strategy" => "github",
+            "config" => %{"owner" => "someone", "repo" => "else"},
+            "repos" => %{"arbiter" => %{"config" => %{"owner" => "acme", "repo" => "tonic"}}}
+          }
+        })
+
+      GitHub.prepare(ws)
+      assert :ok = GitHub.update_fields("42", %{title: "x"})
+      bearer = "Bearer " <> @app_token
+      assert_received {:api, "PATCH", "/repos/acme/tonic/issues/42", ^bearer, _}
+    end
+
+    test "a slug no repo's forge config claims keeps credentials_ref", %{pem: pem} do
+      stub_api()
+
+      ws =
+        keyed_workspace(pem, %{
+          "merge" => %{
+            "strategy" => "github",
+            "config" => %{"owner" => "someone", "repo" => "else"}
+          }
+        })
+
+      GitHub.prepare(ws)
+      assert :ok = GitHub.update_fields("42", %{title: "x"})
+      personal = "Bearer " <> @personal
+      assert_received {:api, "PATCH", _, ^personal, _}
+    end
+  end
+
   describe "a repo without a github_app entry" do
     test "uses credentials_ref as before", %{pem: pem} do
       stub_api()

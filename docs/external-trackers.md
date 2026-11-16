@@ -18,9 +18,21 @@ When the repo's `git_credentials` entry is a `github_app`, the tracker uses the
 App's **installation token**, the same one the merger opens PRs with. It is minted
 for the tracker's own `owner/repo` and carries only Issues **write**, Pull requests
 **write** and Metadata **read** (no Contents, no Actions). It is cached for 30
-minutes and minted again after that. The repo is the one the call is about
-(`tracker.config.repos.<repo>` override), else the entry the tracker's `owner/repo`
-matches (`acme/tonic` finds `repos.tonic`).
+minutes and minted again after that. The `git_credentials` entry is found by **repo
+key** (the `repo_paths` key, e.g. `arbiter`), which need not equal the forge repo
+name. In order:
+
+1. the repo the call is about: the **ticket's repo** (`issue.repo`) wherever a
+   ticket is in hand (`Trackers.prepare_with_repo/3`), which also applies the
+   `tracker.config.repos.<repo>` override;
+2. an entry keyed by the tracker's `owner/repo` slug (`acme/tonic` finds
+   `repos.tonic`);
+3. a repo key whose forge config targets that slug: the repo's effective
+   `merge.config` `owner`/`repo` (workspace-level, deep-merged with
+   `merge.repos.<key>.config`) or a `tracker.config.repos.<key>` `owner`/`repo`.
+   So key `arbiter` with tracker slug `wardmast/wardmast` resolves the App for
+   calls that only know the workspace (claim, list, tracker context fetch).
+
 
 A personal token (`tracker.config.credentials_ref`, a.k.a. the `github_token`
 secret) is therefore **optional** for a repo with a GitHub App. Without it nothing
@@ -72,3 +84,15 @@ All of them go through `Arbiter.Trackers.GitHub.Config.resolve/0`:
 | list claimable | `list_open/1`, `list_assigned_open_issues/1` | same (filter by assignee or label) |
 | viewer identity | `viewer_login/0`, `current_user/0` | personal `credentials_ref` only; with none, the claim label |
 | assign | `assign_user/2` | same as the call site (skipped for a label identity) |
+
+### Which repo each `prepare` call resolves the credential from
+
+| Call site | Repo used |
+| --- | --- |
+| `Tasks.Issue.Changes.SyncFields` (title/description edit) | `issue.repo` |
+| `Tasks.Issue.Changes.SyncTracker` | `issue.repo` |
+| `Trackers.Sync` lifecycle (`do_lifecycle`), close (`do_close_and_verify`), `retry_lifecycle`, `sync` | `issue.repo` |
+| `Workflows.Work` (close) | `task.repo` |
+| `Workflows.MergeQueue` (MR remote link) | the queue item's repo |
+| `Tasks.Issue.Changes.CreateUpstream` (`Trackers.create_for_workspace/3`) | `issue.repo` |
+| `Tasks.Claim`, `Trackers.list_open/2`, `create_ticket_only/2`, `search_*`, tracker-context fetches (`Worker.Dispatch`, `Reviews.ExternalReview`) | no ticket yet: the slug mapping above |

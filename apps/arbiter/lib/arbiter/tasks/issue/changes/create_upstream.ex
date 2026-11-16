@@ -113,7 +113,7 @@ defmodule Arbiter.Tasks.Issue.Changes.CreateUpstream do
       workspace ->
         attrs = build_attrs(issue)
 
-        case Trackers.create_for_workspace(workspace, attrs) do
+        case Trackers.create_for_workspace(workspace, attrs, repo: issue.repo) do
           {:ok, ref} ->
             persist_ref(issue, ref)
 
