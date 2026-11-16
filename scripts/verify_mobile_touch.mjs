@@ -4,7 +4,7 @@
 // dock's close/maximize touch targets, at real phone widths in a real
 // browser.
 //
-// `ArbiterWeb.WorkerDetailLiveTest` and `ArbiterWeb.SessionDockLiveTest`
+// `WardmastWeb.WorkerDetailLiveTest` and `WardmastWeb.SessionDockLiveTest`
 // prove the markup: the pane's container carries `overflow-x-auto` and not
 // `overflow-x-hidden`, the row text is `whitespace-pre` rather than
 // `whitespace-nowrap`, and the close/max buttons carry the `max-sm:size-11`/
@@ -18,7 +18,7 @@
 //   node scripts/verify_mobile_touch.mjs --url http://localhost:4848 --task <task id>
 //
 // Output is one `CHECK <name>: PASS|FAIL — <detail>` line per claim and a
-// final `RESULT: PASS|FAIL`. `ArbiterWeb.MobileTouchBrowserTest` runs it
+// final `RESULT: PASS|FAIL`. `WardmastWeb.MobileTouchBrowserTest` runs it
 // against a Bandit listener as part of `mix test`; exit 3 means SKIP (no
 // Chromium).
 //

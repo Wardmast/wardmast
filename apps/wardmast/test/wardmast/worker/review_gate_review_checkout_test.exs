@@ -1,0 +1,1246 @@
+defmodule Wardmast.Worker.ReviewGateReviewCheckoutTest do
+  @moduledoc """
+  bd-a22hib / #2055 — the in-gate reviewer ran inside the implementer's own
+  writable worktree, with the plain workspace policy.
+
+  It saw the implementer's LOCAL state rather than what was pushed (the cause
+  bd-2jkrqu's `PushState` guard only patches), it could write to the branch it
+  was reviewing, and its test runs shared the implementer's build dir.
+
+  Each review round now provisions its own detached checkout at the head SHA
+  `origin` carries after the push gate, runs the reviewer there under the same
+  write-denied posture dispatched reviews get
+  (`Dispatch.review_security_policy/2`), records THAT SHA as the reviewed SHA,
+  and removes the checkout when the round ends. Implementer / fix-pass rounds
+  are unchanged: they still run in the implementer's worktree.
+
+  Pinned against real git repos with a real bare origin; the reviewer fixture
+  (`review_checkout_probe.sh`) logs where it actually ran.
+  """
+
+  use Wardmast.DataCase, async: false
+
+  import Wardmast.LifecycleFixtures, only: [put_state!: 2]
+
+  require Ash.Query
+
+  alias Wardmast.Agents.SecurityPolicy
+  alias Wardmast.CircuitBreaker
+  alias Wardmast.Messages.Message
+  alias Wardmast.Reviews.Coverage.Entry
+  alias Wardmast.Tasks.{Issue, Workspace}
+  alias Wardmast.Worker
+  alias Wardmast.Worker.{Dispatch, ReviewGate}
+
+  @probe Path.expand("../../fixtures/review_checkout_probe.sh", __DIR__)
+  @revise_commit Path.expand("../../fixtures/revise_commit.sh", __DIR__)
+
+  setup do
+    CircuitBreaker.reset_all()
+    on_exit(&CircuitBreaker.reset_all/0)
+
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "rg-checkout-#{System.unique_integer([:positive])}-#{:erlang.phash2(self())}"
+      )
+
+    File.mkdir_p!(tmp)
+    tmp = resolve_symlinks(tmp)
+    repo = init_repo(tmp)
+    root = Path.join(tmp, "worktrees")
+
+    put_app_env(:wardmast, :worktree_root, root)
+    put_app_env(:wardmast, :repo_paths, %{"trib/repo" => repo})
+
+    on_exit(fn -> File.rm_rf!(tmp) end)
+
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "rg-checkout-#{System.unique_integer([:positive])}",
+        prefix: "rk",
+        config: %{"review" => %{"required" => true}}
+      })
+
+    %{repo: repo, ws: ws, tmp: tmp, root: root, log: Path.join(tmp, "probe.log")}
+  end
+
+  # ---- git rig -------------------------------------------------------------
+
+  defp resolve_symlinks(path) do
+    {out, 0} = System.cmd("pwd", ["-P"], cd: path)
+    String.trim(out)
+  end
+
+  defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
+  defp git!(args, repo), do: {_, 0} = git(args, repo)
+
+  defp init_repo(dir) do
+    repo = Path.join(dir, "repo")
+    bare = Path.join(dir, "origin.git")
+    File.mkdir_p!(repo)
+    {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+    git!(["config", "user.email", "repo@example.com"], repo)
+    git!(["config", "user.name", "Repo"], repo)
+    git!(["config", "commit.gpgsign", "false"], repo)
+    File.write!(Path.join(repo, "README.md"), "seed\n")
+    git!(["add", "README.md"], repo)
+    git!(["commit", "-q", "-m", "seed"], repo)
+    {_, 0} = System.cmd("git", ["clone", "--bare", "-q", repo, bare])
+    git!(["remote", "add", "origin", bare], repo)
+    git!(["fetch", "-q", "origin"], repo)
+    repo
+  end
+
+  defp seed_feature_branch(repo, branch) do
+    git!(["checkout", "-q", "-b", branch], repo)
+    File.write!(Path.join(repo, "feature.txt"), "worker work\n")
+    git!(["add", "feature.txt"], repo)
+    git!(["commit", "-q", "-m", "feature work"], repo)
+    git!(["checkout", "-q", "main"], repo)
+    :ok
+  end
+
+  defp branch_worktree(repo, tmp, branch) do
+    wt = Path.join(tmp, "wt-#{System.unique_integer([:positive])}")
+    {_, 0} = System.cmd("git", ["worktree", "add", "-q", wt, branch], cd: repo)
+    git!(["config", "user.email", "wt@example.com"], wt)
+    git!(["config", "user.name", "WT"], wt)
+    git!(["config", "commit.gpgsign", "false"], wt)
+    wt
+  end
+
+  defp sha(repo, ref) do
+    case git(["rev-parse", ref], repo) do
+      {out, 0} -> String.trim(out)
+      _ -> nil
+    end
+  end
+
+  defp commit_in(wt, name, body) do
+    File.write!(Path.join(wt, name), body)
+    git!(["add", name], wt)
+    git!(["commit", "-q", "-m", "local #{name}"], wt)
+    sha(wt, "HEAD")
+  end
+
+  defp remote_head(repo, branch) do
+    {out, 0} = git(["ls-remote", "--heads", "origin", branch], repo)
+
+    case String.split(out) do
+      [sha | _] -> sha
+      [] -> nil
+    end
+  end
+
+  defp gate_checkouts(root), do: Path.wildcard(Path.join(root, "gate-review-*"))
+
+  defp registered_worktrees(repo) do
+    {out, 0} = git(["worktree", "list", "--porcelain"], repo)
+
+    for "worktree " <> path <- String.split(out, "\n"), do: path
+  end
+
+  # One map per reviewer pass the probe fixture logged.
+  defp probe_passes(log) do
+    case File.read(log) do
+      {:ok, body} ->
+        for line <- String.split(body, "\n", trim: true) do
+          ~r/(\w+)=(\S*)/
+          |> Regex.scan(line, capture: :all_but_first)
+          |> Map.new(fn [k, v] -> {k, v} end)
+        end
+
+      {:error, :enoent} ->
+        []
+    end
+  end
+
+  # ---- app rig -------------------------------------------------------------
+
+  defp new_task(ws) do
+    {:ok, task} =
+      Ash.create(Issue, %{title: "checkout task", workspace_id: ws.id, issue_type: :feature})
+
+    task = put_state!(task, :active)
+    task
+  end
+
+  defp start_author(task, ws, repo, branch, wt) do
+    {:ok, author} =
+      Worker.start(
+        task_id: task.id,
+        repo: "trib/repo",
+        workspace_id: ws.id,
+        meta: %{
+          branch: branch,
+          repo_path: repo,
+          worktree_path: wt,
+          target_branch: "main",
+          merge_title: "Merge #{task.id}",
+          review_required: true,
+          review_spawn: false
+        }
+      )
+
+    on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
+    :ok = Worker.advance(author, :claude)
+    send(author, {:__claude_session_done__, "arb done"})
+
+    wait_until(fn ->
+      match?(%{state: :waiting, waiting_on: :review_gate}, Worker.state(author))
+    end)
+
+    author
+  end
+
+  defp start_gate(author, task, ws, branch, wt, opts) do
+    {:ok, gate} =
+      ReviewGate.start(
+        [
+          author: author,
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo: "trib/repo",
+          worktree_path: wt,
+          branch: branch,
+          target_branch: "main",
+          timeout_ms: 20_000
+        ] ++ opts
+      )
+
+    ref = Process.monitor(gate)
+    {gate, ref}
+  end
+
+  defp await_gate_down(gate, ref, timeout \\ 30_000) do
+    assert_receive {:DOWN, ^ref, :process, ^gate, _reason}, timeout
+  end
+
+  defp escalations(ws, task) do
+    Message
+    |> Ash.Query.filter(workspace_id == ^ws.id and kind == :escalation)
+    |> Ash.read!()
+    |> Enum.filter(&(&1.task_ref == task.id))
+  end
+
+  defp coverage_rows(task_id) do
+    Entry |> Ash.Query.filter(task_id == ^task_id) |> Ash.read!()
+  end
+
+  defp wait_until(fun, timeout \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(20)
+        do_wait(fun, deadline)
+    end
+  end
+
+  # ---- AC1 / AC4 / AC5: the round's own checkout at the pushed head --------
+
+  describe "a review round (AC1, AC4, AC5)" do
+    test "runs the reviewer in a detached checkout at the remote head, stamps that SHA, " <>
+           "and removes the checkout on approval",
+         %{repo: repo, ws: ws, tmp: tmp, root: root, log: log} do
+      task = new_task(ws)
+      branch = "feature/checkout-1"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      pushed = sha(wt, "HEAD")
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      # Uncommitted scratch in the implementer's worktree: never pushed, so the
+      # reviewer must not see it. Written after the author's own commit gate,
+      # which would otherwise (rightly) refuse to hand a dirty tree to review.
+      File.write!(Path.join(wt, "dirty.txt"), "not committed\n")
+
+      {gate, ref} =
+        start_gate(author, task, ws, branch, wt,
+          command: [@probe, log, "APPROVE"],
+          pr_ref: "owner/repo#2055"
+        )
+
+      await_gate_down(gate, ref)
+
+      assert [pass] = probe_passes(log)
+
+      refute pass["cwd"] == wt, "the reviewer ran in the implementer's worktree"
+      assert String.starts_with?(pass["cwd"], root <> "/gate-review-")
+      assert pass["head"] == remote_head(repo, branch)
+      assert pass["head"] == pushed
+      assert pass["dirty"] == "no", "the implementer's uncommitted scratch leaked in"
+
+      # AC4: the reviewed SHA the merge guard reads is the one checked out.
+      task = Ash.get!(Issue, task.id)
+      assert task.last_reviewed_sha == pass["head"]
+      assert [%{head_sha: covered}] = coverage_rows(task.id)
+      assert covered == pass["head"]
+
+      # AC5: gone from disk AND from git's worktree registry.
+      refute File.exists?(pass["cwd"])
+      assert gate_checkouts(root) == []
+      refute pass["cwd"] in registered_worktrees(repo)
+
+      # AC6-adjacent: the implementer's worktree is untouched.
+      assert sha(wt, "HEAD") == pushed
+      assert File.exists?(Path.join(wt, "dirty.txt"))
+    end
+
+    test "each round gets a fresh checkout; the fix round still runs in the implementer's " <>
+           "worktree; rejection removes the round's checkout (AC5, AC6)",
+         %{repo: repo, ws: ws, tmp: tmp, root: root, log: log} do
+      task = new_task(ws)
+      branch = "feature/checkout-2"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      round1_head = sha(wt, "HEAD")
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      {gate, ref} =
+        start_gate(author, task, ws, branch, wt,
+          command: [@probe, log, "ROUND2"],
+          revise_command: [@revise_commit],
+          rounds: 2
+        )
+
+      await_gate_down(gate, ref, 60_000)
+
+      assert [r1, r2] = probe_passes(log)
+
+      # AC6: the fix pass committed in the implementer's worktree, on the branch.
+      fix_head = sha(wt, "HEAD")
+      refute fix_head == round1_head
+      assert File.read!(Path.join(wt, "guard.txt")) =~ "anchored guard"
+      assert remote_head(repo, branch) == fix_head
+
+      assert r1["head"] == round1_head
+      assert r2["head"] == fix_head
+      refute r1["cwd"] == r2["cwd"], "round 2 reused round 1's checkout"
+
+      for pass <- [r1, r2] do
+        refute pass["cwd"] == wt
+        refute File.exists?(pass["cwd"]), "round checkout #{pass["cwd"]} leaked"
+      end
+
+      assert gate_checkouts(root) == []
+      assert Ash.get!(Issue, task.id).last_reviewed_sha == fix_head
+    end
+
+    test "a reviewer killed mid-round leaks no checkout (AC5)",
+         %{repo: repo, ws: ws, tmp: tmp, root: root, log: log} do
+      task = new_task(ws)
+      branch = "feature/checkout-3"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+
+      author = start_author(task, ws, repo, branch, wt)
+
+      {gate, ref} =
+        start_gate(author, task, ws, branch, wt,
+          command: [@probe, log, "HANG"],
+          verdict_retries: 0,
+          timeout_retries: 0
+        )
+
+      wait_until(fn -> File.exists?(log <> ".pid") end, 20_000)
+      assert [pass] = probe_passes(log)
+      assert File.dir?(pass["cwd"]), "the reviewer had no checkout to leak"
+
+      pid = log |> Kernel.<>(".pid") |> File.read!() |> String.trim()
+      {_, 0} = System.cmd("kill", ["-9", pid])
+
+      await_gate_down(gate, ref)
+
+      refute File.exists?(pass["cwd"])
+      assert gate_checkouts(root) == []
+      refute pass["cwd"] in registered_worktrees(repo)
+    end
+  end
+
+  # ---- AC5: a gate that never reached terminate/2 -----------------------------
+
+  describe "the boot sweep (AC5)" do
+    test "reclaims the checkout of a gate killed outright mid-round — primary only",
+         %{repo: repo, ws: ws, tmp: tmp, root: root, log: log} do
+      task = new_task(ws)
+      branch = "feature/checkout-7"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+
+      author = start_author(task, ws, repo, branch, wt)
+      {gate, ref} = start_gate(author, task, ws, branch, wt, command: [@probe, log, "HANG"])
+
+      wait_until(fn -> File.exists?(log <> ".pid") end, 20_000)
+      assert [pass] = probe_passes(log)
+
+      # The server-restart shape: the gate dies with no terminate/2.
+      Process.exit(gate, :kill)
+      await_gate_down(gate, ref)
+      {_, _} = System.cmd("kill", ["-9", String.trim(File.read!(log <> ".pid"))])
+
+      assert File.dir?(pass["cwd"]), "nothing leaked, so the sweep is untested"
+
+      # "Before this VM started" — every leaf so far predates the new boot.
+      before = System.os_time(:second) + 5
+
+      assert [] ==
+               ReviewGate.sweep_orphaned_review_checkouts(primary?: false, before: before)
+
+      assert File.dir?(pass["cwd"])
+
+      assert [swept] = ReviewGate.sweep_orphaned_review_checkouts(primary?: true, before: before)
+      assert swept == pass["cwd"]
+      assert gate_checkouts(root) == []
+      refute pass["cwd"] in registered_worktrees(repo)
+    end
+  end
+
+  # ---- AC2: unpushed commits are never what the reviewer sees ---------------
+
+  describe "unpushed local commits (AC2)" do
+    test "the round's checkout is the remote head, not the implementer's local head",
+         %{repo: repo, tmp: tmp, root: root} do
+      branch = "feature/checkout-4"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      pushed = sha(wt, "HEAD")
+
+      local = commit_in(wt, "unpushed.txt", "local only\n")
+      refute local == pushed
+
+      state = %{worktree_path: wt, branch: branch, task_id: "rk-unit", review_checkout: nil}
+
+      assert {:ok, %{review_checkout: %{path: path, head_sha: ^pushed}} = state} =
+               ReviewGate.provision_review_checkout(state)
+
+      assert sha(path, "HEAD") == pushed
+      refute File.exists?(Path.join(path, "unpushed.txt"))
+      assert String.starts_with?(path, root)
+
+      assert %{review_checkout: nil} = ReviewGate.release_review_checkout(state)
+      refute File.exists?(path)
+    end
+
+    test "the round's checkout is seeded with the implementer's fetched and compiled deps",
+         %{repo: repo, tmp: tmp} do
+      branch = "feature/checkout-8"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+
+      # Untracked build state, as a real worker worktree carries it.
+      File.mkdir_p!(Path.join([wt, "deps", "jason"]))
+      File.write!(Path.join([wt, "deps", "jason", "mix.exs"]), "# dep\n")
+      File.mkdir_p!(Path.join([wt, "_build", "test", "lib", "jason", "ebin"]))
+
+      state = %{worktree_path: wt, branch: branch, task_id: "rk-seed", review_checkout: nil}
+
+      assert {:ok, %{review_checkout: %{path: path}} = state} =
+               ReviewGate.provision_review_checkout(state)
+
+      assert File.exists?(Path.join([path, "deps", "jason", "mix.exs"]))
+      assert File.dir?(Path.join([path, "_build", "test", "lib", "jason", "ebin"]))
+
+      ReviewGate.release_review_checkout(state)
+      refute File.exists?(path)
+    end
+
+    # bd-2jerqw: the review checkout is the sixth seed call site; the workspace's
+    # `worker.repos.<repo>.seed_paths` decides what it gets.
+    test "the round's checkout honours the workspace's worker.repos.<repo>.seed_paths",
+         %{repo: repo, tmp: tmp, ws: ws} do
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "review" => %{"required" => true},
+            "worker" => %{"repos" => %{"repo" => %{"seed_paths" => ["priv/plts"]}}}
+          }
+        })
+
+      branch = "feature/checkout-seed-paths"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+
+      File.mkdir_p!(Path.join([wt, "deps", "jason"]))
+      File.write!(Path.join([wt, "deps", "jason", "mix.exs"]), "# dep\n")
+      File.mkdir_p!(Path.join(wt, "priv/plts"))
+      File.write!(Path.join(wt, "priv/plts/core.plt"), "plt")
+
+      state = %{
+        worktree_path: wt,
+        branch: branch,
+        task_id: "rk-seed-paths",
+        review_checkout: nil,
+        workspace_id: ws.id,
+        repo: "trib/repo"
+      }
+
+      assert {:ok, %{review_checkout: %{path: path}} = state} =
+               ReviewGate.provision_review_checkout(state)
+
+      assert File.exists?(Path.join(path, "priv/plts/core.plt"))
+      refute File.exists?(Path.join(path, "deps"))
+
+      ReviewGate.release_review_checkout(state)
+    end
+
+    test "an unpushed head the gate cannot push parks before any checkout is provisioned",
+         %{repo: repo, ws: ws, tmp: tmp, root: root, log: log} do
+      task = new_task(ws)
+      branch = "feature/checkout-5"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      base = sha(wt, "HEAD")
+
+      other = Path.join(tmp, "other")
+      {_, 0} = System.cmd("git", ["clone", "-q", Path.join(tmp, "origin.git"), other])
+      git!(["config", "user.email", "o@example.com"], other)
+      git!(["config", "user.name", "O"], other)
+      git!(["config", "commit.gpgsign", "false"], other)
+      git!(["checkout", "-q", branch], other)
+      File.write!(Path.join(other, "theirs.txt"), "theirs\n")
+      git!(["add", "theirs.txt"], other)
+      git!(["commit", "-q", "-m", "theirs"], other)
+      git!(["push", "-q", "origin", branch], other)
+
+      git!(["reset", "-q", "--hard", base], wt)
+      commit_in(wt, "mine.txt", "mine\n")
+
+      author = start_author(task, ws, repo, branch, wt)
+      {gate, ref} = start_gate(author, task, ws, branch, wt, command: [@probe, log, "APPROVE"])
+      await_gate_down(gate, ref)
+
+      assert Ash.get!(Issue, task.id).attention_cause == :head_not_pushed
+      assert probe_passes(log) == [], "a reviewer ran on an unpushed head"
+      assert gate_checkouts(root) == []
+    end
+  end
+
+  # ---- AC3: one write-denied posture ------------------------------------------
+
+  describe "the reviewer's security policy (AC3)" do
+    test "denies Edit/Write/NotebookEdit through Dispatch.review_security_policy/2", %{ws: ws} do
+      checkout = %{path: "/tmp/gate-review-x", head_sha: "abc"}
+      state = %{repo: "trib/repo", review_checkout: checkout}
+
+      reviewer = ReviewGate.session_security_policy(ws, state, :reviewer)
+
+      assert reviewer ==
+               ws
+               |> SecurityPolicy.resolve(%{}, "trib/repo")
+               |> Dispatch.review_security_policy(review_checkout: checkout)
+
+      denied = reviewer.permissions.deny
+
+      for tool <- ~w(Edit Write NotebookEdit) do
+        assert tool in denied, "#{tool} is not denied to the in-gate reviewer"
+      end
+
+      # The implementer keeps the plain workspace posture.
+      assert ReviewGate.session_security_policy(ws, state, :implementer) ==
+               SecurityPolicy.resolve(ws, %{}, "trib/repo")
+    end
+  end
+
+  # ---- bd-4rvf98: a podman repo's review is not refused --------------------------
+
+  describe "a repo on sandbox.backend podman (bd-4rvf98)" do
+    defp podman_ws(extra_sandbox \\ %{}) do
+      %Workspace{
+        config: %{
+          "agent" => %{
+            "security" => %{
+              "repos" => %{
+                "trib/repo" => %{"sandbox" => Map.put(extra_sandbox, "backend", "podman")}
+              }
+            }
+          }
+        }
+      }
+    end
+
+    test "the reviewer and the revise pass spawn under the review backend, never refused" do
+      state = %{
+        repo: "trib/repo",
+        review_checkout: %{path: "/tmp/gate-review-x", head_sha: "abc"}
+      }
+
+      ws = podman_ws()
+
+      assert SecurityPolicy.sandbox_backend(SecurityPolicy.resolve(ws, %{}, "trib/repo")) ==
+               :podman
+
+      for role <- [:reviewer, :implementer] do
+        policy = ReviewGate.session_security_policy(ws, state, role)
+        assert SecurityPolicy.sandbox_backend(policy) == :bwrap, "#{role} kept podman"
+        # The backend resolves; the real argv/spawn under it is covered by the
+        # stubbed-`claude` production spawn path tests below (a bare
+        # `default_argv/2` needs a `claude` on PATH, which CI does not have).
+        assert {:ok, _} = Wardmast.Worker.Sandbox.module(policy)
+      end
+
+      # A reviewer with no round checkout is a review spawn all the same.
+      bare = ReviewGate.session_security_policy(ws, %{repo: "trib/repo"}, :reviewer)
+      assert SecurityPolicy.sandbox_backend(bare) == :bwrap
+    end
+
+    test "an explicit podman review_backend still refuses: nothing runs unjailed" do
+      state = %{
+        repo: "trib/repo",
+        review_checkout: %{path: "/tmp/gate-review-x", head_sha: "abc"}
+      }
+
+      ws = podman_ws(%{"review_backend" => "podman"})
+
+      for role <- [:reviewer, :implementer] do
+        policy = ReviewGate.session_security_policy(ws, state, role)
+        assert SecurityPolicy.sandbox_backend(policy) == :podman
+
+        assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+                 Wardmast.Worker.Sandbox.module(policy)
+
+        assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+                 Wardmast.Agents.Claude.default_argv("review", security: policy)
+      end
+    end
+  end
+
+  # ---- AC1 + AC3 through the real adapter spawn -------------------------------
+
+  describe "the production spawn path (AC1, AC3)" do
+    # Every other test here drives the fixture `command:` escape hatch, which
+    # bypasses the adapter. This one leaves `command:` unset so the reviewer is
+    # spawned exactly as in production — workspace → `Wardmast.Agents` adapter →
+    # `default_argv/2` with the resolved security policy — against a stubbed
+    # `claude` (TestSandbox stubs every agent binary) that logs where it ran and
+    # what it was told.
+    test "the real reviewer argv runs in the round's checkout with writes denied",
+         %{ws: ws} do
+      stub = """
+      log="$(dirname "$0")/../gate-spawn.log"
+      printf 'cwd=%s\\n' "$(pwd -P)" >> "$log"
+      for a in "$@"; do printf 'arg=%s\\n' "$a" >> "$log"; done
+      echo "arb done"
+      exit 0
+      """
+
+      sandbox = Wardmast.TestSandbox.provision!("rg-checkout-spawn", stub: stub)
+      put_app_env(:wardmast, :worktree_root, sandbox.worktree_root)
+      put_app_env(:wardmast, :repo_paths, %{"trib/repo" => sandbox.repo})
+
+      branch = "feature/checkout-spawn"
+      :ok = Wardmast.TestSandbox.seed_branch!(sandbox, branch)
+      wt = branch_worktree(sandbox.repo, sandbox.root, branch)
+      log = Path.join(sandbox.root, "gate-spawn.log")
+
+      task = new_task(ws)
+      author = start_author(task, ws, sandbox.repo, branch, wt)
+
+      {gate, ref} = start_gate(author, task, ws, branch, wt, verdict_retries: 0)
+      Wardmast.TestSandbox.own!(sandbox, gate)
+
+      wait_until(fn -> File.exists?(log) end, 20_000)
+      await_gate_down(gate, ref)
+
+      lines = log |> File.read!() |> String.split("\n", trim: true)
+      assert ["cwd=" <> cwd | _] = lines
+
+      refute cwd == resolve_symlinks(wt), "the reviewer spawned in the implementer's worktree"
+      assert String.starts_with?(cwd, resolve_symlinks(sandbox.worktree_root) <> "/gate-review-")
+
+      argv =
+        Enum.flat_map(lines, fn
+          "arg=" <> a -> [a]
+          _ -> []
+        end)
+
+      settings = Enum.find(argv, &(&1 =~ ~s("deny")))
+      assert settings, "no deny settings in the reviewer argv: #{inspect(argv)}"
+
+      for tool <- ~w(Edit Write NotebookEdit) do
+        assert settings =~ ~s("#{tool}"), "#{tool} not denied in #{settings}"
+      end
+
+      refute File.exists?(cwd), "the round's checkout leaked"
+    end
+  end
+
+  # ---- bd-4rvf98: the real spawn under a podman repo --------------------------------
+
+  describe "the production spawn path under sandbox.backend podman (bd-4rvf98)" do
+    defp podman_gate_ws(sandbox) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rg-podman-#{System.unique_integer([:positive])}",
+          prefix: "rp",
+          config: %{
+            "review" => %{"required" => true},
+            "agent" => %{
+              "security" => %{
+                "repos" => %{"trib/repo" => %{"sandbox" => Map.put(sandbox, "backend", "podman")}}
+              }
+            }
+          }
+        })
+
+      ws
+    end
+
+    defp spawn_stub do
+      """
+      log="$(dirname "$0")/../gate-spawn.log"
+      printf 'cwd=%s\\n' "$(pwd -P)" >> "$log"
+      echo "arb done"
+      exit 0
+      """
+    end
+
+    # bd-7ays3v: a Claude reviewer on a podman repo is no longer spawned under
+    # the review backend on the host: it is handed to the container backend, in
+    # its round's private clone. This host has no podman, so the proof here is
+    # the negative one: the spawn is refused at the container, and nothing runs
+    # unjailed. (The wrapped spawn itself is `container_spawn_test.exs`.)
+    test "the Claude reviewer goes to the container backend: with none available it is refused" do
+      put_app_env(:wardmast, :worker_container_available, false)
+      ws = podman_gate_ws(%{})
+      sandbox = Wardmast.TestSandbox.provision!("rg-podman-review", stub: spawn_stub())
+      put_app_env(:wardmast, :worktree_root, sandbox.worktree_root)
+      put_app_env(:wardmast, :repo_paths, %{"trib/repo" => sandbox.repo})
+
+      branch = "feature/podman-review"
+      :ok = Wardmast.TestSandbox.seed_branch!(sandbox, branch)
+      wt = branch_worktree(sandbox.repo, sandbox.root, branch)
+      log = Path.join(sandbox.root, "gate-spawn.log")
+
+      task = new_task(ws)
+      author = start_author(task, ws, sandbox.repo, branch, wt)
+      {gate, ref} = start_gate(author, task, ws, branch, wt, verdict_retries: 0)
+      Wardmast.TestSandbox.own!(sandbox, gate)
+      await_gate_down(gate, ref)
+
+      refute File.exists?(log), "a podman repo's reviewer ran on the host"
+      assert Ash.get!(Issue, task.id).attention_cause in [:reviewer_failed, :inconclusive]
+    end
+
+    test "an explicit podman review_backend sends the Claude reviewer to the container too" do
+      put_app_env(:wardmast, :worker_container_available, false)
+      ws = podman_gate_ws(%{"review_backend" => "podman"})
+      sandbox = Wardmast.TestSandbox.provision!("rg-podman-refuse", stub: spawn_stub())
+      put_app_env(:wardmast, :worktree_root, sandbox.worktree_root)
+      put_app_env(:wardmast, :repo_paths, %{"trib/repo" => sandbox.repo})
+
+      branch = "feature/podman-refuse"
+      :ok = Wardmast.TestSandbox.seed_branch!(sandbox, branch)
+      wt = branch_worktree(sandbox.repo, sandbox.root, branch)
+      log = Path.join(sandbox.root, "gate-spawn.log")
+
+      task = new_task(ws)
+      author = start_author(task, ws, sandbox.repo, branch, wt)
+      {gate, ref} = start_gate(author, task, ws, branch, wt, verdict_retries: 0)
+      Wardmast.TestSandbox.own!(sandbox, gate)
+      await_gate_down(gate, ref)
+
+      refute File.exists?(log), "a reviewer ran under a backend that cannot jail it"
+      assert Ash.get!(Issue, task.id).attention_cause in [:reviewer_failed, :inconclusive]
+    end
+  end
+
+  # ---- AC7: provisioning failure is loud ---------------------------------------
+
+  describe "a checkout that cannot be provisioned (AC7)" do
+    test "parks the round with the reason instead of reviewing in the implementer's worktree",
+         %{repo: repo, ws: ws, tmp: tmp, log: log} do
+      task = new_task(ws)
+      branch = "feature/checkout-6"
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+
+      # A worktree root nested under a regular file: `mkdir -p` cannot succeed.
+      blocker = Path.join(tmp, "not-a-dir")
+      File.write!(blocker, "")
+      put_app_env(:wardmast, :worktree_root, Path.join(blocker, "worktrees"))
+
+      author = start_author(task, ws, repo, branch, wt)
+      {gate, ref} = start_gate(author, task, ws, branch, wt, command: [@probe, log, "APPROVE"])
+      await_gate_down(gate, ref)
+
+      assert probe_passes(log) == [], "the reviewer ran without its own checkout"
+      assert Ash.get!(Issue, task.id).attention_cause == :reviewer_failed
+      assert Ash.get!(Issue, task.id).last_reviewed_sha == nil
+
+      wait_until(fn -> escalations(ws, task) != [] end)
+      body = Enum.map_join(escalations(ws, task), "\n", & &1.body)
+      assert body =~ "review checkout"
+      assert body =~ "enotdir"
+    end
+  end
+
+  # ---- bd-7ays3v: the reviewer's checkout and policy follow the sandbox backend ----
+
+  describe "a reviewer under the container backend (bd-7ays3v)" do
+    defp persisted_ws(sandbox) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rg-container-#{System.unique_integer([:positive])}",
+          prefix: "rc",
+          config: %{
+            "review" => %{"required" => true},
+            "agent" => %{
+              "security" => %{"repos" => %{"trib/repo" => %{"sandbox" => sandbox}}}
+            }
+          }
+        })
+
+      ws
+    end
+
+    defp pushed_branch(repo, tmp, branch) do
+      :ok = seed_feature_branch(repo, branch)
+      wt = branch_worktree(repo, tmp, branch)
+      git!(["push", "-q", "-u", "origin", branch], wt)
+      wt
+    end
+
+    defp gate_state(ws, wt, branch) do
+      %{
+        worktree_path: wt,
+        branch: branch,
+        task_id: "rc-unit",
+        workspace_id: ws.id,
+        repo: "trib/repo",
+        target_branch: "main",
+        review_checkout: nil
+      }
+    end
+
+    test "on a podman repo the round's checkout is a read-only private clone of the pushed head",
+         %{repo: repo, tmp: tmp, root: root} do
+      branch = "feature/container-1"
+      wt = pushed_branch(repo, tmp, branch)
+      ws = persisted_ws(%{"backend" => "podman"})
+
+      assert {:ok, %{review_checkout: %{path: path, head_sha: head}} = state} =
+               ReviewGate.provision_review_checkout(gate_state(ws, wt, branch))
+
+      assert Path.dirname(path) == root
+      assert Worker.PrivateClone.clone?(path)
+      assert Worker.PrivateClone.read_only?(path)
+      assert {:ok, _mounts} = Worker.PrivateClone.mounts(path)
+      assert sha(path, "HEAD") == head
+      assert File.exists?(Path.join(path, "feature.txt"))
+
+      # No way to publish from it, and the implementer's branch is never touched.
+      assert {_, code} = git(["push", "origin", "HEAD:refs/heads/hijack"], path)
+      assert code != 0
+      assert sha(wt, "HEAD") == head
+
+      assert %{review_checkout: nil} = ReviewGate.release_review_checkout(state)
+      refute File.exists?(path)
+      assert sha(repo, "refs/heads/" <> branch) == head
+    end
+
+    # The production shape: on a podman repo the implementer's `worktree_path`
+    # is itself a private clone, not a linked worktree of the main repo.
+    test "a review clone cut from the implementer's private clone borrows the MAIN repo's objects",
+         %{repo: repo} do
+      branch = "feature/container-chain"
+      :ok = seed_feature_branch(repo, branch)
+      git!(["push", "-q", "-u", "origin", branch], repo)
+      git!(["fetch", "-q", "origin"], repo)
+
+      assert {:ok, impl} = Worker.PrivateClone.attach(repo, branch, "main", false)
+      refute impl == repo
+      assert Worker.PrivateClone.main_repo(impl) == repo
+      ws = persisted_ws(%{"backend" => "podman"})
+
+      assert {:ok, %{review_checkout: %{path: path, head_sha: head}} = state} =
+               ReviewGate.provision_review_checkout(gate_state(ws, impl, branch))
+
+      assert Worker.PrivateClone.read_only?(path)
+      assert Worker.PrivateClone.main_repo(path) == repo
+      assert sha(path, "HEAD") == head
+
+      assert {:ok, mounts} = Worker.PrivateClone.mounts(path)
+      assert mounts[:objects] == Path.join(repo, ".git/objects")
+      refute String.starts_with?(mounts[:objects], impl)
+
+      alternates = File.read!(Path.join(path, ".git/objects/info/alternates"))
+      assert String.split(alternates, "\n", trim: true) == [mounts[:objects]]
+
+      # With only that one objects dir reachable (the implementer's clone gone),
+      # the whole history still reads, as it must inside the container.
+      Worker.PrivateClone.remove(impl)
+      assert {_, 0} = git(["log", "--oneline", "origin/main..HEAD"], path)
+      assert {_, 0} = git(["cat-file", "-e", "origin/main^{commit}"], path)
+      assert {_, 0} = git(["fsck", "--connectivity-only"], path)
+
+      # And ContainerSpawn's own builder accepts it: the review clone is
+      # mounted read-only, with the main repo's objects as the overlay.
+      argv =
+        Worker.Container.argv(
+          %{
+            podman: "podman",
+            image: "img",
+            name: "arb-rv",
+            worktree: path,
+            worktree_readonly: true,
+            git_dir: mounts[:git_dir],
+            objects: mounts[:objects],
+            readonly_paths: mounts[:readonly_paths]
+          },
+          ["true"]
+        )
+
+      assert Enum.any?(
+               argv,
+               &String.starts_with?(&1, mounts[:objects] <> ":" <> mounts[:objects])
+             )
+
+      assert Enum.any?(argv, &String.starts_with?(&1, path <> ":" <> path <> ":ro"))
+
+      ReviewGate.release_review_checkout(state)
+    end
+
+    test "an explicit podman review_backend gets the private clone too",
+         %{repo: repo, tmp: tmp} do
+      branch = "feature/container-2"
+      wt = pushed_branch(repo, tmp, branch)
+      ws = persisted_ws(%{"review_backend" => "podman"})
+
+      assert {:ok, %{review_checkout: %{path: path}} = state} =
+               ReviewGate.provision_review_checkout(gate_state(ws, wt, branch))
+
+      assert Worker.PrivateClone.read_only?(path)
+      ReviewGate.release_review_checkout(state)
+    end
+
+    # No-regression: a bwrap workspace is provisioned and policed exactly as before.
+    test "on a bwrap or default repo nothing changes: a detached linked worktree, the review backend",
+         %{repo: repo, tmp: tmp} do
+      branch = "feature/container-3"
+      wt = pushed_branch(repo, tmp, branch)
+
+      for sandbox <- [%{"backend" => "bwrap"}, %{}] do
+        ws = persisted_ws(sandbox)
+        state = gate_state(ws, wt, branch)
+
+        assert [prefix: "gate-review"] == ReviewGate.review_checkout_opts(state)
+
+        assert {:ok, %{review_checkout: %{path: path}} = state} =
+                 ReviewGate.provision_review_checkout(state)
+
+        refute Worker.PrivateClone.clone?(path)
+        refute Worker.PrivateClone.read_only?(path)
+
+        for provider <- [nil, :claude, :codex] do
+          policy = ReviewGate.session_security_policy(ws, state, :reviewer, provider)
+          assert SecurityPolicy.sandbox_backend(policy) == :bwrap
+          refute Worker.ContainerSpawn.podman?(policy)
+        end
+
+        ReviewGate.release_review_checkout(state)
+      end
+    end
+
+    test "the reviewer's policy is podman only for Claude and Codex in a private clone",
+         %{repo: repo, tmp: tmp} do
+      branch = "feature/container-4"
+      wt = pushed_branch(repo, tmp, branch)
+      ws = persisted_ws(%{"backend" => "podman"})
+
+      {:ok, state} = ReviewGate.provision_review_checkout(gate_state(ws, wt, branch))
+
+      podman = fn policy -> SecurityPolicy.sandbox_backend(policy) == :podman end
+
+      for provider <- [:claude, "claude", :codex, "codex"] do
+        policy = ReviewGate.session_security_policy(ws, state, :reviewer, provider)
+        assert podman.(policy), "#{provider} reviewer did not get the container"
+        # The reviewer keeps Edit/Write denied, as in the worktree.
+        assert Enum.any?(policy.permissions.deny, &(&1 =~ "Edit"))
+      end
+
+      # Any other provider, or none named: the review backend, as before.
+      for provider <- [nil, :gemini, :grok] do
+        policy = ReviewGate.session_security_policy(ws, state, :reviewer, provider)
+        refute podman.(policy), "#{inspect(provider)} reviewer got the container"
+      end
+
+      # The revise pass's implementer is not one of the three spawn kinds.
+      refute podman.(ReviewGate.session_security_policy(ws, state, :implementer, :claude))
+
+      ReviewGate.release_review_checkout(state)
+
+      # No private clone to mount (a reviewer with no round checkout): never podman.
+      bare = %{state | review_checkout: nil}
+      refute podman.(ReviewGate.session_security_policy(ws, bare, :reviewer, :claude))
+    end
+  end
+
+  # ---- bd-49l0eo: the fix round follows sandbox.backend, like the main run ----------
+
+  describe "a ReviewGate fix round under the container backend (bd-49l0eo)" do
+    defp container_ws(sandbox, extra_config \\ %{}) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rg-fix-#{System.unique_integer([:positive])}",
+          prefix: "rf",
+          config:
+            Map.merge(
+              %{
+                "review" => %{"required" => true},
+                "agent" => %{
+                  "security" => %{"repos" => %{"trib/repo" => %{"sandbox" => sandbox}}}
+                }
+              },
+              extra_config
+            )
+        })
+
+      ws
+    end
+
+    # The production shape: on a podman repo the implementer's worktree is a
+    # private clone of the main repo.
+    defp implementer_clone(repo, branch) do
+      :ok = seed_feature_branch(repo, branch)
+      git!(["push", "-q", "-u", "origin", branch], repo)
+      git!(["fetch", "-q", "origin"], repo)
+      {:ok, impl} = Worker.PrivateClone.attach(repo, branch, "main", false)
+      impl
+    end
+
+    defp fix_state(ws, wt, branch, task_id \\ "rf-unit") do
+      %{
+        worktree_path: wt,
+        branch: branch,
+        task_id: task_id,
+        workspace_id: ws.id,
+        repo: "trib/repo",
+        target_branch: "main",
+        review_checkout: nil,
+        timeout_ms: 60_000,
+        round: 1
+      }
+    end
+
+    defp podman?(policy), do: SecurityPolicy.sandbox_backend(policy) == :podman
+
+    # Stands in for the round's `Worker`: answers the `Worker.report/3` calls.
+    defp report_sink, do: spawn_link(&report_loop/0)
+
+    defp report_loop do
+      receive do
+        {:"$gen_call", from, _msg} ->
+          GenServer.reply(from, :ok)
+          report_loop()
+      end
+    end
+
+    test "the implementer keeps podman for Claude and Codex in its private clone", %{repo: repo} do
+      impl = implementer_clone(repo, "feature/fix-1")
+      ws = container_ws(%{"backend" => "podman"})
+      state = fix_state(ws, impl, "feature/fix-1")
+
+      for provider <- [:claude, "claude", :codex, "codex"] do
+        policy = ReviewGate.session_security_policy(ws, state, :implementer, provider)
+        assert podman?(policy), "#{inspect(provider)} fix round left the container"
+      end
+    end
+
+    test "a provider with no container wrap point, or none named, falls back to the review backend",
+         %{repo: repo} do
+      impl = implementer_clone(repo, "feature/fix-2")
+      ws = container_ws(%{"backend" => "podman"})
+      state = fix_state(ws, impl, "feature/fix-2")
+
+      for provider <- [nil, :gemini, :grok] do
+        policy = ReviewGate.session_security_policy(ws, state, :implementer, provider)
+        refute podman?(policy), "#{inspect(provider)} fix round got the container"
+        assert SecurityPolicy.sandbox_backend(policy) == :bwrap
+      end
+    end
+
+    test "an implementer tree that is not a private clone is never handed to a container",
+         %{repo: repo, tmp: tmp} do
+      branch = "feature/fix-3"
+      wt = pushed_branch(repo, tmp, branch)
+      ws = container_ws(%{"backend" => "podman"})
+
+      policy =
+        ReviewGate.session_security_policy(ws, fix_state(ws, wt, branch), :implementer, :claude)
+
+      refute podman?(policy)
+    end
+
+    test "bwrap and default workspaces are unchanged", %{repo: repo} do
+      impl = implementer_clone(repo, "feature/fix-4")
+
+      for sandbox <- [%{"backend" => "bwrap"}, %{}] do
+        ws = container_ws(sandbox)
+        state = fix_state(ws, impl, "feature/fix-4")
+
+        for provider <- [nil, :claude, :codex] do
+          policy = ReviewGate.session_security_policy(ws, state, :implementer, provider)
+          assert policy == ReviewGate.session_security_policy(ws, state, :implementer)
+          assert SecurityPolicy.sandbox_backend(policy) == :bwrap
+        end
+      end
+    end
+
+    test "sandbox.review_backend still governs the reviewer, bd-7ays3v aside", %{repo: repo} do
+      impl = implementer_clone(repo, "feature/fix-5")
+      ws = container_ws(%{"backend" => "podman", "review_backend" => "bwrap"})
+      state = fix_state(ws, impl, "feature/fix-5")
+
+      # No round checkout, so no private clone for the reviewer: the review backend.
+      reviewer = ReviewGate.session_security_policy(ws, state, :reviewer, :claude)
+      assert SecurityPolicy.sandbox_backend(reviewer) == :bwrap
+      assert podman?(ReviewGate.session_security_policy(ws, state, :implementer, :claude))
+    end
+
+    test "the spawn options wrap the Claude fix round in the container with the clone",
+         %{repo: repo} do
+      branch = "feature/fix-6"
+      impl = implementer_clone(repo, branch)
+      ws = container_ws(%{"backend" => "podman"})
+      task = new_task(ws)
+      state = fix_state(ws, impl, branch, task.id)
+
+      assert {:ok, opts} =
+               ReviewGate.build_session_opts(
+                 state,
+                 report_sink(),
+                 :implementer,
+                 "fix it",
+                 nil,
+                 {:claude, nil, nil}
+               )
+
+      # ClaudeSession wraps a spawn that carries a podman policy.
+      assert %SecurityPolicy{} = security = opts[:security]
+      assert podman?(security)
+      assert opts[:workspace].id == ws.id
+      assert opts[:repo] == "trib/repo"
+      assert opts[:worktree_path] == impl
+      # The ARB_TOKEN rides in for the container's `arb`.
+      assert is_binary(opts[:arb_token])
+      # No scoped credential is configured, so the host pushes after the round:
+      # the container holds no credential.
+      assert %Worker.GitCredential{mode: :not_needed} = opts[:git_credential]
+      # The argv runs the container's claude, not the host's.
+      assert Worker.ContainerSpawn.claude_path() in opts[:command]
+    end
+
+    test "a podman fix round with a scoped credential pushes itself with it", %{repo: repo} do
+      branch = "feature/fix-9"
+      impl = implementer_clone(repo, branch)
+
+      ws =
+        container_ws(%{"backend" => "podman"}, %{
+          "git_credentials" => %{
+            "repos" => %{
+              "trib/repo" => %{"kind" => "deploy_key", "key_secret" => "TRIB_DEPLOY_KEY"}
+            }
+          }
+        })
+
+      task = new_task(ws)
+      state = fix_state(ws, impl, branch, task.id)
+
+      assert {:ok, opts} =
+               ReviewGate.build_session_opts(
+                 state,
+                 report_sink(),
+                 :implementer,
+                 "fix it",
+                 nil,
+                 {:claude, nil, nil}
+               )
+
+      assert podman?(opts[:security])
+      assert opts[:worktree_path] == impl
+
+      # The G16 deploy key travels into the container (ContainerSpawn's podman
+      # secret path); the worker pushes, so the prompts do not forbid it.
+      assert %Worker.GitCredential{mode: :scoped, entry: %{kind: :deploy_key}} =
+               opts[:git_credential]
+
+      revise = ReviewGate.revise_prompt(state, "1. fix the thing")
+      nudge = ReviewGate.commit_nudge_prompt(state)
+      refute revise =~ "NO PUSH ACCESS"
+      refute nudge =~ "NO PUSH ACCESS"
+      assert nudge =~ "git push -u origin"
+    end
+
+    test "the spawn options of a bwrap fix round carry no container inputs",
+         %{repo: repo, tmp: tmp} do
+      # A bwrap round resolves the HOST's `claude`; CI has none installed, so
+      # shim one on PATH (the module is async: false, so PATH is ours).
+      stub_dir = Path.join(tmp, "stub-bin")
+      File.mkdir_p!(stub_dir)
+      stub = Path.join(stub_dir, "claude")
+      File.write!(stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
+      branch = "feature/fix-7"
+      impl = implementer_clone(repo, branch)
+      ws = container_ws(%{"backend" => "bwrap"})
+      task = new_task(ws)
+      state = fix_state(ws, impl, branch, task.id)
+
+      assert {:ok, opts} =
+               ReviewGate.build_session_opts(
+                 state,
+                 report_sink(),
+                 :implementer,
+                 "fix it",
+                 nil,
+                 {:claude, nil, nil}
+               )
+
+      refute Keyword.has_key?(opts, :security)
+      refute Keyword.has_key?(opts, :repo)
+      refute Keyword.has_key?(opts, :arb_token)
+    end
+
+    test "the fix-round prompts tell a containerised implementer with no credential not to push",
+         %{repo: repo} do
+      branch = "feature/fix-8"
+      impl = implementer_clone(repo, branch)
+
+      for {sandbox, container?} <- [{%{"backend" => "podman"}, true}, {%{}, false}] do
+        state = fix_state(container_ws(sandbox), impl, branch)
+        revise = ReviewGate.revise_prompt(state, "1. fix the thing")
+        nudge = ReviewGate.commit_nudge_prompt(state)
+
+        assert revise =~ "NO PUSH ACCESS" == container?
+        assert nudge =~ "git push -u origin" != container?
+        assert nudge =~ "NO PUSH ACCESS" == container?
+      end
+    end
+  end
+end

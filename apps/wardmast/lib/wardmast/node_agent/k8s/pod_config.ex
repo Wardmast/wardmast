@@ -1,0 +1,534 @@
+defmodule Wardmast.NodeAgent.K8s.PodConfig do
+  @moduledoc """
+  The configuration `Wardmast.NodeAgent.K8s.PodSpec.build/2` reads, as a **closed
+  schema** (`docs/design/remote-workers.md` §4.1): the operator-settable ConfigMap
+  keys plus the facts the controller itself knows per run. Anything else is
+  `{:error, {:bad_config, {:unknown_key, key}}}`.
+
+  *Not settable, ever*: the security context, volumes, service account, network,
+  host namespaces and the image. They have no key here because the builder owns
+  them; a config that names one is refused rather than ignored, so a mistaken
+  `security_context:` in a ConfigMap is a loud error and not a silent no-op.
+
+  Top-level keys are atoms (the loader, K5, converts the YAML); nested maps may
+  use atom or string keys and are normalised to strings, which is what lands in
+  the pod.
+
+  | key | |
+  |---|---|
+  | `registry` | **required**: the image prefix the admission policy allows (`registry.example/arbiter`) |
+  | `install_id`, `node_id` | **required**: the labels the reaper keys on |
+  | `owner_uid` | **required**: the controller Deployment's UID (owner reference) |
+  | `bridge_addr`, `gate_addr` | **required**: the controller Service address and the netpol-gate address (`host:port`) |
+  | `boot_nonce` | **required**: the single-use 256-bit nonce for this pod |
+  | `max_wall_s` | **required**: the run's wall budget; the pod deadline is this plus 1800 |
+  | `namespace` | default `arbiter-workers` |
+  | `worker` | `requests`, `limits`, `work_size_limit`, `tmp_size_limit`. An `ephemeral-storage` limit left unset is `work_size_limit + tmp_size_limit` (§20.2) |
+  | `services_resources` | `requests` / `limits` for the `seed`, `snapshotter` and service containers |
+  | `placement` | `node_selector`, `tolerations`, `priority_class`, `runtime_class`, `runtime_handler` (the class's handler, which the Role cannot read: `runsc*` marks a kernel sandbox, see `kernel_sandboxed?/1`), `spread` (`enabled`, `topology_keys`, `max_skew`, `when_unsatisfiable`: §20.2, a soft hostname spread by default) |
+  | `image_pull_secrets` | names; the legacy flat list, referenced by a pod whose image is under `registry` and under no `registries` prefix |
+  | `registries` | KH13 (§20.10): `[%{prefix, pull_secret}]`, the image prefixes this node can pull from (`registry.gitlab.com/vstim/`) and the **one** pull secret a pod whose image is under that prefix references (longest prefix wins; omitted = anonymous pull). `registry` stays the derived default prefix |
+  | `timeouts` | `grace_s` (pod grace), `gate_timeout_s`; the others belong to the controller |
+  | `snapshot_interval_s` | default 300 |
+  | `service_image_allowlist` | extra service image prefixes (`docker.io/pgsty/`) |
+  | `event_feed` | default `true`: the worker ships the agent's stdio as an NDJSON event feed over the pod channel, which the controller reads instead of the kubelet log (bd-1nl506); the pod is annotated `arbiter.dev/events` and the controller follows its feed. `false` leaves the kubelet log as the run's output |
+  """
+
+  alias Wardmast.NodeAgent.K8s.Quantity
+
+  @required ~w(registry install_id node_id owner_uid bridge_addr gate_addr boot_nonce max_wall_s)a
+  @optional ~w(namespace worker services_resources placement image_pull_secrets registries timeouts snapshot_interval_s service_image_allowlist event_feed)a
+
+  @dns_re ~r/\A[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\z/
+  @subdomain_re ~r/\A[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?\z/
+  @label_re ~r/\A([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)?\z/
+  @registry_re ~r/\A[a-z0-9][a-z0-9.-]*(:\d{1,5})?(\/[a-z0-9][a-z0-9._-]*)*\z/
+  @addr_re ~r/\A[A-Za-z0-9][A-Za-z0-9.-]*(:\d{1,5})?\z/
+  @nonce_re ~r/\A[A-Za-z0-9_-]{16,128}\z/
+  @uid_re ~r/\A[A-Za-z0-9-]{1,64}\z/
+  @selector_key_re ~r/\A([a-z0-9.-]+\/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?\z/
+  @prefix_re ~r/\A[a-z0-9][a-z0-9.:\/_-]*\/\z/
+
+  @resource_names ~w(cpu memory ephemeral-storage)
+  @toleration_keys ~w(key operator value effect tolerationSeconds)
+  @timeout_keys ~w(schedule_s pull_s boot_s grace_s retain_failed_s gate_timeout_s)
+  @max_wall_s 31_536_000
+
+  @defaults %{
+    namespace: "arbiter-workers",
+    worker: %{
+      "requests" => %{"cpu" => "1", "memory" => "2Gi", "ephemeral-storage" => "4Gi"},
+      "limits" => %{"cpu" => "2", "memory" => "4Gi"},
+      "work_size_limit" => "8Gi",
+      "tmp_size_limit" => "1Gi"
+    },
+    # Every figure is stated so the install's `LimitRange` defaults never fill one:
+    # cpu 4x and memory 2x the request are the `maxLimitRequestRatio` (§20.2).
+    services_resources: %{
+      "requests" => %{"cpu" => "100m", "memory" => "256Mi", "ephemeral-storage" => "128Mi"},
+      "limits" => %{"cpu" => "400m", "memory" => "512Mi", "ephemeral-storage" => "1Gi"}
+    },
+    placement: %{
+      "node_selector" => %{},
+      "tolerations" => [],
+      "priority_class" => "arbiter-worker",
+      "runtime_class" => "",
+      "runtime_handler" => "",
+      "spread" => %{
+        "enabled" => true,
+        "topology_keys" => ["kubernetes.io/hostname"],
+        "max_skew" => 1,
+        "when_unsatisfiable" => "ScheduleAnyway"
+      }
+    },
+    image_pull_secrets: [],
+    registries: [],
+    timeouts: %{"grace_s" => 120, "gate_timeout_s" => 30},
+    snapshot_interval_s: 300,
+    service_image_allowlist: [],
+    event_feed: true
+  }
+
+  @type t :: %{required(atom()) => term()}
+
+  @doc """
+  Whether the worker pods run under a `RuntimeClass` whose handler sandboxes the kernel
+  (gVisor's `runsc`, also `runsc-*` variants). `placement` is a normalized placement map.
+
+  Such a handler rejects `spec.hostUsers: false` (the sandbox is the isolation the user
+  namespace would give), so the builder omits `hostUsers` and the admission policy and the
+  Pod Security check accept that for this case only. The handler is named in config
+  (`placement.runtime_handler`) because the cluster-scoped `RuntimeClass` is not readable
+  by the controller's Role; a class with no handler named is treated as a plain runtime.
+  """
+  @spec kernel_sandboxed?(map()) :: boolean()
+  def kernel_sandboxed?(%{"runtime_class" => class, "runtime_handler" => handler})
+      when is_binary(class) and class != "" and is_binary(handler),
+      do: handler == "runsc" or String.starts_with?(handler, "runsc-")
+
+  def kernel_sandboxed?(_placement), do: false
+
+  @doc "Validate `config` (a map or keyword list) and fill the defaults."
+  @spec normalize(map() | keyword()) :: {:ok, t()} | {:error, {:bad_config, term()}}
+  def normalize(config) when is_list(config), do: config |> Map.new() |> normalize()
+
+  def normalize(config) when is_map(config) do
+    config = Map.drop(config, [:__struct__])
+
+    with :ok <- known_keys(config),
+         :ok <- required(config),
+         {:ok, registry} <- fetch(config, :registry, &registry/1),
+         {:ok, install_id} <- fetch(config, :install_id, &label/1),
+         {:ok, node_id} <- fetch(config, :node_id, &label/1),
+         {:ok, owner_uid} <- fetch(config, :owner_uid, &matching(&1, @uid_re)),
+         {:ok, bridge_addr} <- fetch(config, :bridge_addr, &matching(&1, @addr_re)),
+         {:ok, gate_addr} <- fetch(config, :gate_addr, &matching(&1, @addr_re)),
+         {:ok, boot_nonce} <- fetch(config, :boot_nonce, &matching(&1, @nonce_re)),
+         {:ok, max_wall_s} <- fetch(config, :max_wall_s, &int(&1, 1..@max_wall_s//1)),
+         {:ok, namespace} <- optional(config, :namespace, &matching(&1, @dns_re)),
+         {:ok, worker} <- optional(config, :worker, &worker/1),
+         {:ok, worker} <- storage_limit(worker),
+         {:ok, services} <- optional(config, :services_resources, &resources/1),
+         {:ok, placement} <- optional(config, :placement, &placement/1),
+         {:ok, pull} <- optional(config, :image_pull_secrets, &names/1),
+         {:ok, registries} <- optional(config, :registries, &registries/1),
+         {:ok, timeouts} <- optional(config, :timeouts, &timeouts/1),
+         {:ok, interval} <- optional(config, :snapshot_interval_s, &int(&1, 10..3600//1)),
+         {:ok, allow} <- optional(config, :service_image_allowlist, &prefixes/1),
+         {:ok, event_feed} <- optional(config, :event_feed, &flag/1) do
+      {:ok,
+       %{
+         registry: registry,
+         install_id: install_id,
+         node_id: node_id,
+         owner_uid: owner_uid,
+         bridge_addr: bridge_addr,
+         gate_addr: gate_addr,
+         boot_nonce: boot_nonce,
+         max_wall_s: max_wall_s,
+         namespace: namespace,
+         worker: worker,
+         services_resources: services,
+         placement: placement,
+         image_pull_secrets: pull,
+         registries: registries,
+         timeouts: timeouts,
+         snapshot_interval_s: interval,
+         service_image_allowlist: allow,
+         event_feed: event_feed
+       }}
+    end
+  end
+
+  def normalize(_other), do: bad({:not_a_map, :config})
+
+  @doc """
+  The image prefixes a pod built from `cfg` may use: every `registries` prefix and
+  the derived default `registry/`. The admission policy is generated from the same
+  list (`Wardmast.NodeAgent.K8s.AdmissionPolicy`), so the controller and the API
+  server agree on what may run.
+  """
+  @spec image_prefixes(t()) :: [String.t()]
+  def image_prefixes(cfg) do
+    Enum.uniq(Enum.map(cfg.registries, & &1["prefix"]) ++ [cfg.registry <> "/"])
+  end
+
+  @doc """
+  The pull secrets a pod running `ref` references: the **one** secret of the longest
+  `registries` prefix that matches (`[]` for a match with no secret: an anonymous
+  pull), the legacy flat `image_pull_secrets` for a ref under `registry` and under no
+  prefix, and `:none` when the ref is under no configured prefix at all.
+  """
+  @spec pull_secrets(t(), String.t()) :: [String.t()] | :none
+  def pull_secrets(cfg, ref) when is_binary(ref) do
+    matches = Enum.filter(cfg.registries, &String.starts_with?(ref, &1["prefix"]))
+
+    case Enum.max_by(matches, &byte_size(&1["prefix"]), fn -> nil end) do
+      %{"pull_secret" => nil} -> []
+      %{"pull_secret" => secret} -> [secret]
+      nil -> legacy_pull_secrets(cfg, ref)
+    end
+  end
+
+  defp legacy_pull_secrets(cfg, ref) do
+    if String.starts_with?(ref, cfg.registry <> "/"), do: cfg.image_pull_secrets, else: :none
+  end
+
+  # The container's ephemeral-storage limit bounds the runaway write by the container
+  # and the quota, not only by the kubelet's eviction tick (§20.2): the `work` volume
+  # plus `tmp`, unless the operator named one.
+  defp storage_limit(%{"limits" => %{"ephemeral-storage" => _}} = worker), do: {:ok, worker}
+
+  defp storage_limit(worker) do
+    with {:ok, work} <- Quantity.memory(worker["work_size_limit"], :k8s),
+         {:ok, tmp} <- Quantity.memory(worker["tmp_size_limit"], :k8s) do
+      {:ok, put_in(worker, ["limits", "ephemeral-storage"], Quantity.format_memory(work + tmp))}
+    else
+      _ -> bad({:bad_value, :worker})
+    end
+  end
+
+  # -- keys ---------------------------------------------------------------------------
+
+  defp known_keys(config) do
+    case Enum.find(Map.keys(config), &(&1 not in @required and &1 not in @optional)) do
+      nil -> :ok
+      key -> bad({:unknown_key, key})
+    end
+  end
+
+  defp required(config) do
+    case Enum.find(@required, &(not Map.has_key?(config, &1) or Map.get(config, &1) == nil)) do
+      nil -> :ok
+      key -> bad({:missing, key})
+    end
+  end
+
+  defp fetch(config, key, validate) do
+    case validate.(Map.fetch!(config, key)) do
+      {:ok, _} = ok -> ok
+      :error -> bad({:bad_value, key})
+      {:error, reason} -> bad(reason)
+    end
+  end
+
+  defp optional(config, key, validate) do
+    case Map.fetch(config, key) do
+      :error -> {:ok, Map.fetch!(@defaults, key)}
+      {:ok, nil} -> {:ok, Map.fetch!(@defaults, key)}
+      {:ok, _} -> fetch(config, key, merge_default(key, validate))
+    end
+  end
+
+  # Nested maps are merged over the defaults, so a ConfigMap that sets only
+  # `worker.limits.memory` keeps the rest.
+  defp merge_default(key, validate)
+       when key in [:worker, :services_resources, :placement, :timeouts] do
+    fn value ->
+      with {:ok, normal} <- validate.(value),
+           do: {:ok, deep_merge(Map.fetch!(@defaults, key), normal)}
+    end
+  end
+
+  defp merge_default(_key, validate), do: validate
+
+  defp deep_merge(base, over) do
+    Map.merge(base, over, fn
+      _k, %{} = a, %{} = b -> deep_merge(a, b)
+      _k, _a, b -> b
+    end)
+  end
+
+  # -- scalars --------------------------------------------------------------------------
+
+  defp flag(value) when is_boolean(value), do: {:ok, value}
+  defp flag(_value), do: :error
+
+  defp registry(value) when is_binary(value),
+    do: if(Regex.match?(@registry_re, value), do: {:ok, value}, else: :error)
+
+  defp registry(_), do: :error
+
+  defp label(value) when is_binary(value) and byte_size(value) in 1..63,
+    do: matching(value, @label_re)
+
+  defp label(_), do: :error
+
+  defp matching(value, re) when is_binary(value),
+    do: if(Regex.match?(re, value), do: {:ok, value}, else: :error)
+
+  defp matching(_, _), do: :error
+
+  defp int(value, range) when is_integer(value),
+    do: if(value in range, do: {:ok, value}, else: :error)
+
+  defp int(_, _), do: :error
+
+  defp names(list) when is_list(list) do
+    if Enum.all?(list, &(is_binary(&1) and Regex.match?(@subdomain_re, &1))),
+      do: {:ok, list},
+      else: :error
+  end
+
+  defp names(_), do: :error
+
+  defp prefixes(list) when is_list(list) do
+    if Enum.all?(list, &(is_binary(&1) and Regex.match?(@prefix_re, &1))),
+      do: {:ok, list},
+      else: {:error, {:bad_value, :service_image_allowlist}}
+  end
+
+  defp prefixes(_), do: :error
+
+  # KH13: `[%{prefix, pull_secret}]`. A prefix ends in `/` (so `ghcr.io/ryan/` never
+  # matches `ghcr.io/ryan-evil/…`), appears once, and names at most one Secret.
+  defp registries(list) when is_list(list) do
+    with {:ok, entries} <- collect(list, &registry_entry/1),
+         :ok <- unique_prefixes(entries) do
+      {:ok, entries}
+    end
+  end
+
+  defp registries(_), do: {:error, {:bad_value, :registries}}
+
+  defp collect(list, fun) do
+    Enum.reduce_while(list, {:ok, []}, fn item, {:ok, acc} ->
+      case fun.(item) do
+        {:ok, value} -> {:cont, {:ok, acc ++ [value]}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp registry_entry(%{} = entry) do
+    entry = stringify(entry)
+
+    with :ok <- only_keys(entry, ~w(prefix pull_secret), :registries),
+         {:ok, prefix} <- registry_prefix(Map.get(entry, "prefix")),
+         {:ok, secret} <- registry_secret(Map.get(entry, "pull_secret")) do
+      {:ok, %{"prefix" => prefix, "pull_secret" => secret}}
+    end
+  end
+
+  defp registry_entry(_), do: {:error, {:bad_value, :registries}}
+
+  defp registry_prefix(value) when is_binary(value) do
+    if Regex.match?(@prefix_re, value),
+      do: {:ok, value},
+      else: {:error, {:bad_value, {:registries, :prefix}}}
+  end
+
+  defp registry_prefix(_), do: {:error, {:bad_value, {:registries, :prefix}}}
+
+  defp registry_secret(value) when value in [nil, ""], do: {:ok, nil}
+
+  defp registry_secret(value) when is_binary(value) do
+    if Regex.match?(@subdomain_re, value),
+      do: {:ok, value},
+      else: {:error, {:bad_value, {:registries, :pull_secret}}}
+  end
+
+  defp registry_secret(_), do: {:error, {:bad_value, {:registries, :pull_secret}}}
+
+  defp unique_prefixes(entries) do
+    prefixes = Enum.map(entries, & &1["prefix"])
+
+    if prefixes == Enum.uniq(prefixes),
+      do: :ok,
+      else: {:error, {:bad_value, {:registries, :duplicate_prefix}}}
+  end
+
+  # -- nested ---------------------------------------------------------------------------------
+
+  defp worker(%{} = map) do
+    map = stringify(map)
+
+    with :ok <- only_keys(map, ~w(requests limits work_size_limit tmp_size_limit), :worker),
+         {:ok, res} <- resources(Map.take(map, ~w(requests limits))),
+         {:ok, work} <- size(map, "work_size_limit"),
+         {:ok, tmp} <- size(map, "tmp_size_limit") do
+      {:ok, res |> Map.merge(work) |> Map.merge(tmp)}
+    end
+  end
+
+  defp worker(_), do: :error
+
+  defp size(map, key) do
+    case Map.fetch(map, key) do
+      :error ->
+        {:ok, %{}}
+
+      {:ok, value} ->
+        if Quantity.valid?(value),
+          do: {:ok, %{key => value}},
+          else: {:error, {:bad_quantity, value}}
+    end
+  end
+
+  defp resources(%{} = map) do
+    map = stringify(map)
+
+    with :ok <- only_keys(map, ~w(requests limits), :resources),
+         {:ok, requests} <- quantities(Map.get(map, "requests", %{})),
+         {:ok, limits} <- quantities(Map.get(map, "limits", %{})) do
+      {:ok,
+       Enum.reject(%{"requests" => requests, "limits" => limits}, fn {_, v} -> v == %{} end)
+       |> Map.new()}
+    end
+  end
+
+  defp resources(_), do: :error
+
+  defp quantities(%{} = map) do
+    map = stringify(map)
+
+    with :ok <- only_keys(map, @resource_names, :resource) do
+      case Enum.find(map, fn {_k, v} -> not Quantity.valid?(v) end) do
+        nil -> {:ok, map}
+        {_k, v} -> {:error, {:bad_quantity, v}}
+      end
+    end
+  end
+
+  defp quantities(_), do: :error
+
+  defp placement(%{} = map) do
+    map = stringify(map)
+
+    with :ok <-
+           only_keys(
+             map,
+             ~w(node_selector tolerations priority_class runtime_class runtime_handler spread),
+             :placement
+           ),
+         {:ok, selector} <- node_selector(Map.get(map, "node_selector", %{})),
+         {:ok, tolerations} <- tolerations(Map.get(map, "tolerations", [])),
+         {:ok, priority} <- name_or_empty(Map.get(map, "priority_class", "arbiter-worker")),
+         {:ok, runtime} <- name_or_empty(Map.get(map, "runtime_class", "")),
+         {:ok, handler} <- name_or_empty(Map.get(map, "runtime_handler", "")),
+         {:ok, spread} <- spread(Map.get(map, "spread", %{})) do
+      {:ok,
+       %{
+         "node_selector" => selector,
+         "tolerations" => tolerations,
+         "priority_class" => priority,
+         "runtime_class" => runtime,
+         "runtime_handler" => handler
+       }
+       |> put_spread(spread)}
+    end
+  end
+
+  defp placement(_), do: :error
+
+  # Absent keys are filled from the defaults by `merge_default/2`, so only the ones
+  # given are checked (and kept) here.
+  defp put_spread(placement, spread) when spread == %{}, do: placement
+  defp put_spread(placement, spread), do: Map.put(placement, "spread", spread)
+
+  defp spread(%{} = map) do
+    map = stringify(map)
+
+    with :ok <- only_keys(map, ~w(enabled topology_keys max_skew when_unsatisfiable), :spread),
+         :ok <- all_valid(map, &spread_field/1) do
+      {:ok, map}
+    end
+  end
+
+  defp spread(_), do: {:error, {:bad_value, :spread}}
+
+  defp all_valid(map, check) do
+    case Enum.find(map, &(not check.(&1))) do
+      nil -> :ok
+      {key, _} -> {:error, {:bad_value, {:spread, key}}}
+    end
+  end
+
+  defp spread_field({"enabled", v}), do: is_boolean(v)
+  defp spread_field({"max_skew", v}), do: is_integer(v) and v >= 1
+  defp spread_field({"when_unsatisfiable", v}), do: v in ~w(ScheduleAnyway DoNotSchedule)
+
+  defp spread_field({"topology_keys", keys}) do
+    is_list(keys) and keys != [] and keys == Enum.uniq(keys) and
+      Enum.all?(keys, &(is_binary(&1) and Regex.match?(@selector_key_re, &1)))
+  end
+
+  defp node_selector(%{} = map) do
+    map = stringify(map)
+
+    if Enum.all?(map, fn {k, v} ->
+         is_binary(v) and
+           Regex.match?(~r/\A([a-z0-9.-]+\/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?\z/, k) and
+           Regex.match?(@label_re, v)
+       end),
+       do: {:ok, map},
+       else: {:error, {:bad_value, :node_selector}}
+  end
+
+  defp node_selector(_), do: {:error, {:bad_value, :node_selector}}
+
+  defp tolerations(list) when is_list(list) do
+    normal = Enum.map(list, &if(is_map(&1), do: stringify(&1), else: &1))
+
+    if Enum.all?(normal, &toleration?/1),
+      do: {:ok, normal},
+      else: {:error, {:bad_value, :tolerations}}
+  end
+
+  defp tolerations(_), do: {:error, {:bad_value, :tolerations}}
+
+  defp toleration?(%{} = t) do
+    Map.keys(t) -- @toleration_keys == [] and Enum.all?(t, &toleration_field?/1)
+  end
+
+  defp toleration?(_), do: false
+
+  defp toleration_field?({"tolerationSeconds", v}), do: is_integer(v)
+  defp toleration_field?({_k, v}), do: is_binary(v)
+
+  defp name_or_empty(""), do: {:ok, ""}
+  defp name_or_empty(value), do: matching(value, @subdomain_re)
+
+  defp timeouts(%{} = map) do
+    map = stringify(map)
+
+    with :ok <- only_keys(map, @timeout_keys, :timeouts) do
+      if Enum.all?(map, fn {_k, v} -> is_integer(v) and v >= 0 and v <= 86_400 end),
+        do: {:ok, map},
+        else: {:error, {:bad_value, :timeouts}}
+    end
+  end
+
+  defp timeouts(_), do: :error
+
+  defp only_keys(map, allowed, where) do
+    case Enum.find(Map.keys(map), &(&1 not in allowed)) do
+      nil -> :ok
+      key -> {:error, {:unknown_key, {where, key}}}
+    end
+  end
+
+  defp stringify(map), do: Map.new(map, fn {k, v} -> {to_string(k), v} end)
+
+  defp bad(reason), do: {:error, {:bad_config, reason}}
+end

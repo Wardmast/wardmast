@@ -1,0 +1,376 @@
+defmodule Wardmast.Worker.ResumeTest do
+  # bd-t9uq25: resume a session that exited mid-task without `arb done`.
+  # These cover the pure pieces — the bounded resume decision (hard cap +
+  # no-progress guard) and the `--resume` argv injection — without spawning a
+  # real Claude session.
+  use ExUnit.Case, async: true
+
+  alias Wardmast.Worker
+
+  describe "resume_decision/6 — bounded resume guards" do
+    test "resumes a clean mid-task exit on the first attempt" do
+      assert :resume = Worker.resume_decision(:exited_without_done, "sid-1", 0, 3, nil, nil)
+    end
+
+    test "resumes again when the worktree made progress between attempts" do
+      assert :resume =
+               Worker.resume_decision(:exited_without_done, "sid-2", 1, 3, "fp-old", "fp-new")
+    end
+
+    test "fails when the hard cap is reached" do
+      assert {:fail, :cap_exhausted} =
+               Worker.resume_decision(:exited_without_done, "sid", 3, 3, "a", "b")
+    end
+
+    test "fails when a resume made no progress (identical fingerprint) — loop guard" do
+      assert {:fail, :no_progress} =
+               Worker.resume_decision(:exited_without_done, "sid", 1, 3, "same", "same")
+    end
+
+    test "a segment that made tool calls but changed no files is NOT no-progress (bd-5hvl7q)" do
+      # Read files / launched a long command, committed nothing: fingerprint is
+      # identical but the segment demonstrably worked.
+      assert :resume =
+               Worker.resume_decision(:exited_without_done, "sid", 1, 3, "same", "same", 7)
+    end
+
+    test "a segment with zero tool calls and an unchanged worktree is still caught (bd-5hvl7q)" do
+      assert {:fail, :no_progress} =
+               Worker.resume_decision(:exited_without_done, "sid", 1, 3, "same", "same", 0)
+    end
+
+    test "tool-call activity never bypasses the hard cap (bd-5hvl7q)" do
+      assert {:fail, :cap_exhausted} =
+               Worker.resume_decision(:exited_without_done, "sid", 3, 3, "same", "same", 50)
+    end
+
+    test "the no-progress guard does NOT fire on the first attempt" do
+      # attempts == 0: even if fingerprints coincide, give the session one shot.
+      assert :resume = Worker.resume_decision(:exited_without_done, "sid", 0, 3, "x", "x")
+    end
+
+    test "does not resume non-resumable stop categories" do
+      for cat <- [
+            :auth_expired,
+            :credit_exhausted,
+            :rate_limited,
+            :crashed,
+            :killed,
+            :stalled,
+            :spawn_exec_failed
+          ] do
+        assert {:fail, :not_resumable_category} =
+                 Worker.resume_decision(cat, "sid", 0, 3, nil, nil)
+      end
+    end
+
+    test "does not resume without a captured session id" do
+      assert {:fail, :no_session_id} =
+               Worker.resume_decision(:exited_without_done, nil, 0, 3, nil, nil)
+    end
+
+    # bd-4g0fsh Mode A: a transient gateway 5xx / upstream timeout is recoverable
+    # — the session context is intact, so it auto-resumes just like an
+    # exit-without-done, under the same hard cap + no-progress guard.
+    test "resumes a transient gateway error (Mode A)" do
+      assert :resume = Worker.resume_decision(:gateway_error, "sid-gw", 0, 3, nil, nil)
+    end
+
+    test "a gateway error still fails once the hard cap is reached" do
+      assert {:fail, :cap_exhausted} =
+               Worker.resume_decision(:gateway_error, "sid-gw", 3, 3, "a", "b")
+    end
+
+    # bd-3hr6g2: a 5h plan usage-limit exhaustion is recoverable — the account
+    # provably has capacity again once the window resets — so it resumes under
+    # the same hard cap + no-progress guard as the other recoverable stops.
+    test "resumes a quota-exhaustion stop" do
+      assert :resume = Worker.resume_decision(:quota_exhausted, "sid-q", 0, 3, nil, nil)
+    end
+
+    test "a quota-exhaustion stop still fails once the hard cap is reached" do
+      assert {:fail, :cap_exhausted} =
+               Worker.resume_decision(:quota_exhausted, "sid-q", 3, 3, "a", "b")
+    end
+  end
+
+  describe "resume_backoff_ms/2 — bounded exponential backoff (bd-4g0fsh)" do
+    test "grows exponentially per attempt for a gateway error" do
+      # base 2s, doubling each attempt
+      assert Worker.resume_backoff_ms(:gateway_error, 0) == 2_000
+      assert Worker.resume_backoff_ms(:gateway_error, 1) == 4_000
+      assert Worker.resume_backoff_ms(:gateway_error, 2) == 8_000
+    end
+
+    test "a clean exit-without-done backs off from a shorter base" do
+      assert Worker.resume_backoff_ms(:exited_without_done, 0) == 1_000
+      assert Worker.resume_backoff_ms(:exited_without_done, 1) == 2_000
+    end
+
+    test "a gateway error always waits longer than an exit-without-done at the same attempt" do
+      for attempt <- 0..3 do
+        assert Worker.resume_backoff_ms(:gateway_error, attempt) >
+                 Worker.resume_backoff_ms(:exited_without_done, attempt)
+      end
+    end
+
+    test "is capped so the bounded budget never waits absurdly long" do
+      # A huge attempt count saturates at the 30s ceiling rather than overflowing.
+      assert Worker.resume_backoff_ms(:gateway_error, 50) == 30_000
+    end
+
+    test "falls back to a default base for any other category" do
+      assert Worker.resume_backoff_ms(:something_else, 0) == 1_000
+    end
+  end
+
+  describe "quota_resume_backoff_ms/1 — wait-for-window-reset (bd-3hr6g2)" do
+    test "waits until the reported reset time, plus a buffer" do
+      retry_after = DateTime.add(DateTime.utc_now(), 3_600, :second)
+      ms = Worker.quota_resume_backoff_ms(retry_after)
+
+      # ~1 hour, plus the fixed buffer — not the 30s exponential ceiling.
+      assert ms > 3_600_000
+      assert ms < 3_660_000
+    end
+
+    test "a reset time already in the past still waits the short buffer, not 0" do
+      retry_after = DateTime.add(DateTime.utc_now(), -60, :second)
+      assert Worker.quota_resume_backoff_ms(retry_after) == 60_000
+    end
+
+    test "no reset anywhere: bounded doubling backoff, capped" do
+      assert Worker.quota_resume_backoff_ms(nil) == :timer.hours(1)
+      assert Worker.quota_resume_backoff_ms(nil, attempt: 1) == :timer.hours(2)
+      assert Worker.quota_resume_backoff_ms(nil, attempt: 9) == :timer.hours(4)
+    end
+
+    test "waits until the account snapshot's 7d reset when the message has none (bd-2z3ogf)" do
+      at = DateTime.add(DateTime.utc_now(), :timer.hours(48), :millisecond)
+      ms = Worker.quota_resume_backoff_ms(nil, weekly_reset_at: at)
+      assert ms > :timer.hours(48)
+      assert ms < :timer.hours(48) + 120_000
+    end
+
+    test "a far-out 7d reset is clamped to the 8-day max" do
+      at = DateTime.add(DateTime.utc_now(), :timer.hours(24 * 30), :millisecond)
+      assert Worker.quota_resume_backoff_ms(nil, weekly_reset_at: at) == :timer.hours(24 * 8)
+      assert Worker.quota_wait_exceeds_max?(at)
+    end
+
+    # bd-3wgdie: unlike resume_backoff_ms/2, this path fed the wall-clock diff
+    # through unclamped — a bad/adversarial reset epoch could park a worker far
+    # longer than any real plan window. Mirror the exponential path's ceiling.
+    test "clamps an absurdly far-out reset time to the max-wait ceiling" do
+      retry_after = DateTime.add(DateTime.utc_now(), :timer.hours(24 * 30), :millisecond)
+      assert Worker.quota_resume_backoff_ms(retry_after) == :timer.hours(24 * 8)
+    end
+  end
+
+  describe "quota_unknown_reset_exhausted?/2 (bd-2z3ogf)" do
+    test "escalates after 3 attempts only when no reset is known" do
+      refute Worker.quota_unknown_reset_exhausted?(nil, 2)
+      assert Worker.quota_unknown_reset_exhausted?(nil, 3)
+      refute Worker.quota_unknown_reset_exhausted?(DateTime.utc_now(), 9)
+    end
+  end
+
+  describe "quota_wait_exceeds_max?/1 — routes absurd waits to fail instead of resume" do
+    test "false for no reset time (bounded backoff applies)" do
+      refute Worker.quota_wait_exceeds_max?(nil)
+    end
+
+    test "false for a reset time within the 7-day plan window" do
+      retry_after = DateTime.add(DateTime.utc_now(), :timer.hours(24 * 6), :millisecond)
+      refute Worker.quota_wait_exceeds_max?(retry_after)
+    end
+
+    test "true for a reset time far beyond any real plan window" do
+      retry_after = DateTime.add(DateTime.utc_now(), :timer.hours(24 * 30), :millisecond)
+      assert Worker.quota_wait_exceeds_max?(retry_after)
+    end
+  end
+
+  describe "resume_backoff_for/2 — dispatches by category (bd-3hr6g2)" do
+    test "a quota exhaustion with a reset time uses the reset-based wait, bypassing the 30s cap" do
+      retry_after = DateTime.add(DateTime.utc_now(), 7_200, :second)
+
+      reason = %Wardmast.Worker.StopReason{
+        category: :quota_exhausted,
+        summary: "s",
+        retry_after: retry_after
+      }
+
+      ms = Worker.resume_backoff_for(reason, 0)
+      assert ms > 7_200_000
+    end
+
+    test "a quota exhaustion with no reset time uses the bounded backoff" do
+      reason = %Wardmast.Worker.StopReason{
+        category: :quota_exhausted,
+        summary: "s",
+        retry_after: nil
+      }
+
+      assert Worker.resume_backoff_for(reason, 0) == :timer.hours(1)
+      assert Worker.resume_backoff_for(reason, 2) == :timer.hours(4)
+    end
+
+    test "a gateway error still uses the ordinary exponential backoff" do
+      reason = %Wardmast.Worker.StopReason{category: :gateway_error, summary: "s"}
+      assert Worker.resume_backoff_for(reason, 0) == Worker.resume_backoff_ms(:gateway_error, 0)
+    end
+  end
+
+  describe "inject_resume_argv/3 — --resume injection" do
+    test "inserts --resume <session_id> after --print and swaps the prompt" do
+      argv = [
+        "sh",
+        "-c",
+        "exec \"$@\" < /dev/null",
+        "sh",
+        "/bin/claude",
+        "--print",
+        "ORIGINAL TASK PROMPT",
+        "--output-format",
+        "stream-json",
+        "--verbose"
+      ]
+
+      {:ok, %{argv: out}} =
+        Worker.inject_resume_argv(%{argv: argv}, "sess-abc", "CONTINUE PROMPT")
+
+      idx = Enum.find_index(out, &(&1 == "--print"))
+      assert Enum.slice(out, idx, 4) == ["--print", "--resume", "sess-abc", "CONTINUE PROMPT"]
+
+      # downstream stream flags survive, original prompt is gone
+      assert "--output-format" in out and "stream-json" in out and "--verbose" in out
+      refute "ORIGINAL TASK PROMPT" in out
+    end
+
+    test "errors when there is no --print slot (custom command / fixture)" do
+      assert {:error, :no_print_slot} =
+               Worker.inject_resume_argv(%{argv: ["echo", "hi"]}, "sid", "p")
+    end
+
+    test "errors when argv is missing" do
+      assert {:error, :missing_argv} = Worker.inject_resume_argv(%{}, "sid", "p")
+    end
+
+    # bd-11abk2: a pristine dispatch argv built in stdin mode (oversized
+    # original prompt, no prompt element in argv at all — see
+    # Wardmast.Agents.Claude.build_argv/3) must still resume correctly: the
+    # leading tmpfile positional is dropped and the short resume prompt is
+    # spliced in as a normal inline (mode A) argv.
+    test "swaps a stdin-mode (large-prompt) argv down to an inline resume argv" do
+      {:ok, stdin_argv} =
+        Wardmast.Agents.Claude.build_argv(
+          "/bin/claude",
+          String.duplicate("x", 200_000),
+          ["--output-format", "stream-json", "--verbose"]
+        )
+
+      tmp = Wardmast.Agents.Claude.prompt_tmpfile(stdin_argv)
+      assert is_binary(tmp)
+
+      {:ok, %{argv: out}} =
+        Worker.inject_resume_argv(%{argv: stdin_argv}, "sess-xyz", "CONTINUE PROMPT")
+
+      idx = Enum.find_index(out, &(&1 == "--print"))
+      assert Enum.slice(out, idx, 4) == ["--print", "--resume", "sess-xyz", "CONTINUE PROMPT"]
+
+      # the tmpfile positional is gone — resumed argv is a plain inline invocation
+      refute tmp in out
+      assert "--output-format" in out and "stream-json" in out and "--verbose" in out
+
+      # the sh -c script must be swapped back to the inline (mode A) script —
+      # otherwise the rebuilt argv still runs the stdin-mode script with the
+      # `claude` binary as $1, which crashes with zero output (the exact bug
+      # this test guards against, on the resume path).
+      script = Enum.at(out, 2)
+      assert script =~ "< /dev/null"
+      refute script =~ ~s(f="$1")
+
+      File.rm(tmp)
+    end
+
+    test "inserts resume arguments for Codex and swaps the prompt" do
+      argv = [
+        "sh",
+        "-c",
+        "exec \"$@\" < /dev/null",
+        "sh",
+        "/bin/codex",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--",
+        "ORIGINAL TASK PROMPT"
+      ]
+
+      {:ok, %{argv: out}} =
+        Worker.inject_resume_argv(%{argv: argv}, "sess-abc", "CONTINUE PROMPT", "codex")
+
+      assert out == [
+               "sh",
+               "-c",
+               "exec \"$@\" < /dev/null",
+               "sh",
+               "/bin/codex",
+               "exec",
+               "resume",
+               "--json",
+               "--skip-git-repo-check",
+               "--",
+               "sess-abc",
+               "CONTINUE PROMPT"
+             ]
+    end
+
+    # bd-b7e33c: gemini/agy used to be the one provider `inject_resume_argv/4`
+    # could not rewrite at all (Wardmast.Agents.Gemini had no `splice_prompt/2`)
+    # — it fell straight to `:unsupported_provider`. Now it's driven through
+    # the same dynamic-adapter path as claude/codex.
+    test "inserts --conversation for agy and swaps the prompt" do
+      argv = [
+        "sh",
+        "-c",
+        "exec \"$@\" < /dev/null",
+        "sh",
+        "/bin/agy",
+        "-p",
+        "ORIGINAL TASK PROMPT",
+        "--model",
+        "gemini-3.1-pro",
+        "--output-format",
+        "stream-json"
+      ]
+
+      {:ok, %{argv: out}} =
+        Worker.inject_resume_argv(%{argv: argv}, "sess-abc", "CONTINUE PROMPT", "gemini")
+
+      idx = Enum.find_index(out, &(&1 == "-p"))
+      assert Enum.slice(out, idx, 2) == ["-p", "CONTINUE PROMPT"]
+      refute "ORIGINAL TASK PROMPT" in out
+      assert Enum.find_index(out, &(&1 == "--conversation")) == idx + 2
+      assert Enum.at(out, idx + 3) == "sess-abc"
+    end
+
+    test "upstream gemini CLI (no --conversation) returns an explicit error, not :unsupported_provider" do
+      argv = [
+        "sh",
+        "-c",
+        "exec \"$@\" < /dev/null",
+        "sh",
+        "/bin/gemini",
+        "-p",
+        "ORIGINAL TASK PROMPT",
+        "--model",
+        "gemini-2.5-pro"
+      ]
+
+      assert {:error, :resume_unsupported} =
+               Worker.inject_resume_argv(%{argv: argv}, "sess-abc", "CONTINUE PROMPT", "gemini")
+    end
+  end
+end

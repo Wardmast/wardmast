@@ -1,0 +1,307 @@
+defmodule Wardmast.Worker.WatchdogAutoResumeIntegrationTest do
+  @moduledoc """
+  End-to-end proof of the bd-8eheb6 auto-resume loop with the REAL
+  `Wardmast.Workflows.MergeQueue.AutoResumeDispatcher` wired into a REAL
+  `Wardmast.Worker.Watchdog` — no stub dispatcher anywhere.
+
+  `Wardmast.Worker.WatchdogTest` pins the Watchdog's *decisions* against a stub;
+  this pins the *wiring* between the three real modules a stub necessarily hides:
+
+    * Watchdog timeout -> real `AutoResumeDispatcher.resume/1` ->
+      real `Wardmast.Worker.Dispatch.resume/2` -> a real worker on the real,
+      preserved worktree carrying the re-stamped attempt counter;
+    * the give-up legs -> real `escalate_exhausted/5` -> a real `:escalation`
+      row in the coordinator's mailbox.
+
+  bd-741sid: every case starts from the state a real timeout now finds — the
+  implementer's run ended when it opened the PR, and the ticket is Merging with
+  the PR on its row. The Watchdog is keyed by the ticket, and the timeout is its
+  `{:timed_out, polls}` announcement rather than a failed run.
+  """
+  # async: false — shares the singleton Worker registry/supervisor, the named
+  # StubMerger Agent, and VM-global app env (:worktree_root / :repo_paths).
+  use Wardmast.DataCase, async: false
+
+  alias Wardmast.Messages.Message
+  alias Wardmast.Tasks.{Issue, Workspace}
+  alias Wardmast.Test.StubMerger
+  alias Wardmast.Worker
+  alias Wardmast.Worker.{Dispatch, Watchdog}
+  alias Wardmast.Workflows.MergeQueue.AutoResumeDispatcher
+
+  require Ash.Query
+
+  # A harmless stand-in for the agent subprocess. The dispatcher's documented
+  # `:claude_command` escape hatch (same one ConflictResolver/FixPassDispatcher
+  # carry) — everything else on the path is production code.
+  @fake_agent ["sleep", "2"]
+
+  setup do
+    StubMerger.reset()
+
+    tmp = Path.join(System.tmp_dir!(), "wd-autoresume-#{:erlang.unique_integer([:positive])}")
+    repo = Path.join(tmp, "source")
+    File.mkdir_p!(repo)
+
+    {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+    {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "test@example.com"])
+    {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "Test User"])
+    {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+    File.write!(Path.join(repo, "README.md"), "hello\n")
+    {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+    {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "initial"])
+
+    remote = Path.join(tmp, "remote.git")
+    {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+    {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+    {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+    worktree_root = Path.join(tmp, "worktrees")
+    File.mkdir_p!(worktree_root)
+
+    put_app_env(:wardmast, :worktree_root, worktree_root)
+    put_app_env(:wardmast, :repo_paths, %{"ar/repo" => repo})
+
+    # bd-31ylsv's shape, on this file: the resumed worker carries a real
+    # `Wardmast.Worker.Driver`, and stopping that worker (the per-test `on_exit`s
+    # below, which run *before* this one) fires the Driver's `:DOWN` handler.
+    # That handler runs `maybe_cleanup_worktree/1` — a `git worktree remove`
+    # plus a `File.rm_rf` — asynchronously, in the Driver's own process, on a
+    # path underneath `tmp`. Blanket-deleting `tmp` while that is in flight is
+    # two independent recursive deletes over overlapping paths, and it raises
+    # `** (File.Error) ... file already exists` out of this very callback (CI
+    # run 35050008350). So settle the Drivers first; production never
+    # blanket-deletes a live repo+worktree tree, so this is a test artifact, not
+    # a cleanup-path bug.
+    on_exit(fn ->
+      wait_for_drivers_settled(worktree_root)
+      File.rm_rf!(tmp)
+    end)
+
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "wd-autoresume-#{System.unique_integer([:positive])}",
+        prefix: "ar"
+      })
+
+    {:ok, ws: ws}
+  end
+
+  # Block until every live `Wardmast.Worker.Driver` holding a worktree under
+  # `root` has terminated. A Driver runs its `:DOWN` handler — cleanup included
+  # — to completion before it stops, so one that is already gone needs no wait.
+  defp wait_for_drivers_settled(root) do
+    for pid <- driver_pids_under(root) do
+      ref = Process.monitor(pid)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+      after
+        5_000 -> Process.demonitor(ref, [:flush])
+      end
+    end
+
+    :ok
+  end
+
+  defp driver_pids_under(root) do
+    Wardmast.Worker.Supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.filter(fn {_, pid, _, _} -> driver_under?(pid, root) end)
+    |> Enum.map(fn {_, pid, _, _} -> pid end)
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp driver_under?(pid, root) when is_pid(pid) do
+    case :sys.get_state(pid, 200) do
+      %{worktree_path: path} when is_binary(path) -> String.starts_with?(path, root)
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp driver_under?(_pid, _root), do: false
+
+  defp wait_until(fun, timeout \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(25)
+        do_wait(fun, deadline)
+    end
+  end
+
+  # A task with a real, dispatched worker sitting on a real provisioned
+  # worktree — the run whose worktree `Dispatch.resume/2` re-attaches to.
+  defp task_with_outpost(ws, title \\ "auto-resume e2e") do
+    {:ok, task} = Ash.create(Issue, %{title: title, workspace_id: ws.id})
+
+    {:ok, first} = Dispatch.dispatch(task.id, force: true, repo: "ar/repo", start_driver: false)
+    assert is_binary(first.worktree_path)
+
+    on_exit(fn -> if Process.alive?(first.worker_pid), do: Worker.stop(first.worker_pid) end)
+
+    {task, first}
+  end
+
+  # bd-741sid: the state an awaiting-review timeout finds a ticket in. Opening
+  # the PR ended the implementer's run — no worker stays resident — and put the
+  # ticket in Merging with the PR on its row. The run's worktree is left exactly
+  # where it was; it is what a resume re-attaches to.
+  defp pr_opened(task, first, mr_ref) do
+    :ok = Worker.stop(first.worker_pid)
+    wait_until(fn -> Worker.whereis(task.id) == nil end)
+
+    {:ok, merging} = Issue.pr_opened(task.id, mr_ref)
+    assert merging.state == :merging
+    merging
+  end
+
+  # The real Watchdog, wired to the real dispatcher, with a poll budget small
+  # enough that it times out immediately. Only the forge adapter is a stub —
+  # there is no real GitLab to poll. bd-741sid: keyed by the ticket, with no
+  # worker to pair it with; subscribed first so no announcement is missed.
+  defp start_watchdog(task_id, mr_ref, ws, opts) do
+    base = [
+      task_id: task_id,
+      mr_ref: mr_ref,
+      adapter: StubMerger,
+      workspace: ws,
+      auto_merge: true,
+      interval_ms: 10,
+      initial_delay_ms: 0,
+      max_polls: 2,
+      auto_resume_dispatcher: AutoResumeDispatcher
+    ]
+
+    :ok = Watchdog.subscribe(task_id)
+    {:ok, wpid} = Watchdog.start(Keyword.merge(base, opts))
+    on_exit(fn -> stop_quietly(wpid) end)
+    wpid
+  end
+
+  defp stop_quietly(pid) do
+    if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+    :ok
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp escalations(ws) do
+    Message
+    |> Ash.Query.filter(workspace_id == ^ws.id and kind == :escalation)
+    |> Ash.read!()
+  end
+
+  describe "the real resume leg" do
+    test "re-attaches a real worker to the preserved worktree and re-stamps the counter",
+         %{ws: ws} do
+      {task, first} = task_with_outpost(ws)
+
+      # bd-741sid: the Watchdog fails no run before resuming — the run ended
+      # when it opened the PR, and the ticket is Merging. Reproduce that so this
+      # exercises resume/1 from exactly the state it sees in production.
+      pr_opened(task, first, "!e2e-1")
+
+      assert {:ok, result} =
+               AutoResumeDispatcher.resume(%{
+                 task_id: task.id,
+                 attempt: 1,
+                 workspace_id: ws.id,
+                 mr_ref: "!e2e-1",
+                 claude_command: @fake_agent
+               })
+
+      on_exit(fn -> if Process.alive?(result.worker_pid), do: Worker.stop(result.worker_pid) end)
+
+      # A resume, not a fresh dispatch: same worktree, new worker.
+      assert result.worktree_path == first.worktree_path
+      assert result.worker_pid != first.worker_pid
+
+      snap = Worker.state(result.worker_pid)
+      assert snap.meta[:resume] == true
+
+      # The load-bearing assertion. Without this re-stamp the lane the resumed
+      # run records when it re-opens the PR (bd-741sid) would carry no count,
+      # the NEXT Watchdog episode would read 0, the cap would never bind, and a
+      # never-converging review would auto-resume forever.
+      assert snap.meta[:awaiting_review_resume_attempts] == 1
+
+      # Self-healing means silent: no coordinator page for an in-budget resume.
+      assert escalations(ws) == []
+    end
+  end
+
+  describe "the real Watchdog driving the real dispatcher" do
+    test "a spent budget escalates to the real coordinator mailbox instead of resuming",
+         %{ws: ws} do
+      {task, first} = task_with_outpost(ws, "budget spent")
+      task_id = task.id
+      pr_opened(task, first, "!e2e-2")
+
+      # 3 auto-resumes already spent against the default cap of 3. bd-741sid:
+      # the count rides the ticket's lane (`auto_resumes`), which is what the
+      # Watchdog is started with.
+      start_watchdog(task.id, "!e2e-2", ws, auto_resumes: 3)
+
+      # The timeout is still announced — the PR really did sit past its
+      # ceiling. bd-741sid: there is no run to record it on.
+      assert_receive {:watchdog, ^task_id, {:timed_out, 2}}, 5_000
+      wait_until(fn -> escalations(ws) != [] end)
+
+      # No fourth resume: no run was started on the ticket.
+      assert Worker.whereis(task.id) == nil
+
+      exhausted = Enum.find(escalations(ws), &(&1.subject =~ "auto-resume exhausted"))
+      assert exhausted, "expected an auto-resume-exhausted escalation in the coordinator inbox"
+      assert exhausted.subject =~ "after 3 attempts"
+      assert exhausted.task_ref == task.id
+      assert exhausted.to_ref == Message.coordinator_ref()
+      assert exhausted.body =~ "NOT a fresh failure"
+      assert exhausted.body =~ "!e2e-2"
+    end
+
+    test "a resume that cannot run escalates with the real reason, not a bogus exhaustion",
+         %{ws: ws} do
+      {task, first} = task_with_outpost(ws, "worktree gone")
+      task_id = task.id
+      pr_opened(task, first, "!e2e-3")
+
+      # The worktree was cleaned up out from under the task, so the real
+      # Dispatch.resume/2 has nothing to re-attach to: {:error, :no_outpost}.
+      File.rm_rf!(first.worktree_path)
+
+      start_watchdog(task.id, "!e2e-3", ws, [])
+
+      assert_receive {:watchdog, ^task_id, {:timed_out, 2}}, 5_000
+      wait_until(fn -> escalations(ws) != [] end)
+
+      failed = Enum.find(escalations(ws), &(&1.subject =~ "auto-resume FAILED"))
+
+      assert failed,
+             "expected a resume-failed escalation, got: #{inspect(Enum.map(escalations(ws), & &1.subject))}"
+
+      # Budget was still available — this must NOT read as "we tried 3 times".
+      assert failed.subject =~ "after 0 attempts"
+      assert failed.body =~ "no_outpost"
+      assert failed.body =~ "fresh dispatch is needed rather than a resume"
+      assert failed.task_ref == task.id
+    end
+  end
+end

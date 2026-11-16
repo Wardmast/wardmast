@@ -117,12 +117,12 @@ jobs:
   # A `mix test` job was added alongside this workflow and removed immediately
   # (bd-3c9ygz -> follow-up). The reason is specific and worth preserving:
   #
-  # Arbiter's merger (apps/arbiter/lib/arbiter/mergers/github.ex,
+  # Wardmast's merger (apps/wardmast/lib/wardmast/mergers/github.ex,
   # map_check_run_status/1) reads EVERY check run's conclusion on the PR head
   # SHA and reports `pipeline: :failed` if any is non-success. The Watchdog
   # turns that into `:ci_failed`, dispatches a fix-pass, and eventually parks
   # the worker. GitHub's "required check" designation is not consulted, so a
-  # merely-advisory job does not exist as far as Arbiter is concerned.
+  # merely-advisory job does not exist as far as Wardmast is concerned.
   #
   # The removed job tried to stay green with `mix test || echo "::warning::"`.
   # That does NOT work: the step swallows the exit code, but the job's
@@ -132,12 +132,12 @@ jobs:
   # succeeded only when the merger looked before CI finished.
   #
   # Restore a real, gating `mix test` job only after the pre-existing
-  # order-dependent failures on main are fixed (Arbiter.Reviews.CheckoutTest,
-  # Arbiter.Worker.RunProvenanceTest, et al). Until then tests gate locally
+  # order-dependent failures on main are fixed (Wardmast.Reviews.CheckoutTest,
+  # Wardmast.Worker.RunProvenanceTest, et al). Until then tests gate locally
   # via `mix precommit`, not in CI.
   #
-  # bd-9j4znl: those failures were root-caused to `Arbiter.DataCase` only
-  # sweeping leaked `Arbiter.Worker.Supervisor` children for `async: false`
+  # bd-9j4znl: those failures were root-caused to `Wardmast.DataCase` only
+  # sweeping leaked `Wardmast.Worker.Supervisor` children for `async: false`
   # tests. A whole family of VM-global `DynamicSupervisor`s hold long-lived,
   # per-workspace worker/workflow GenServers (Worker, Watchdog, Machine,
   # MergeQueue, PRPatrol, ReviewPatrol, MergedPRFinalizer, DispatchQueue,
@@ -155,15 +155,15 @@ jobs:
   # supervisor-driven restart against a now-torn-down sandbox connection)
   # before the sandbox owner is stopped, unconditionally for every test. A
   # second, rarer slice of the same failure class survived that fix:
-  # `Arbiter.GitHub.Limiter.start_task/2` (used by the dashboard's PR-state
+  # `Wardmast.GitHub.Limiter.start_task/2` (used by the dashboard's PR-state
   # resolver) spawned a bare, unsupervised `Task.start/1` with no name a test
   # could find and wait on, so it could still be mid-write past a test's
-  # `on_exit`. It now runs under a named `Arbiter.TaskSupervisor`, which
+  # `on_exit`. It now runs under a named `Wardmast.TaskSupervisor`, which
   # `data_case.ex` drains the same way as the other detached background
   # writers.
   #
-  # bd-4uoj4m: the umbrella ran its apps back to back in one VM (arbiter
-  # ~369s, arbiter_web ~217s, cli ~8s) and ~85-93% of that is `async: false`
+  # bd-4uoj4m: the umbrella ran its apps back to back in one VM (wardmast
+  # ~369s, wardmast_web ~217s, cli ~8s) and ~85-93% of that is `async: false`
   # time, so in-VM concurrency is no lever; separate VMs are. The suite is now
   # a matrix of per-app, `--partitions`-sharded jobs. config/test.exs already
   # suffixes the SQLite DB with MIX_TEST_PARTITION (which `mix test
@@ -172,7 +172,7 @@ jobs:
   #
   # Every `mix test` run is `cd apps/<app> && mix test --partitions N`; the
   # partitions of one app together run each of its test files exactly once.
-  # `cli` also covers arbiter_release_env (1 partition each).
+  # `cli` also covers wardmast_release_env (1 partition each).
   #
   # CHECK-RUN NAMING: the merger reads every check run, so every shard has to
   # be green anyway. The `mix test` job below aggregates the shards and keeps
@@ -184,19 +184,19 @@ jobs:
     timeout-minutes: 25
     env:
       MIX_ENV: test
-      # Non-secret test key for Arbiter.Vault (matches config/test.exs).
-      ARBITER_CLOAK_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      # Non-secret test key for Wardmast.Vault (matches config/test.exs).
+      WARDMAST_CLOAK_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { app: arbiter, partition: 1, partitions: 3 }
-          - { app: arbiter, partition: 2, partitions: 3 }
-          - { app: arbiter, partition: 3, partitions: 3 }
-          - { app: arbiter_web, partition: 1, partitions: 2 }
-          - { app: arbiter_web, partition: 2, partitions: 2 }
-          - { app: arbiter_cli, partition: 1, partitions: 1 }
+          - { app: wardmast, partition: 1, partitions: 3 }
+          - { app: wardmast, partition: 2, partitions: 3 }
+          - { app: wardmast, partition: 3, partitions: 3 }
+          - { app: wardmast_web, partition: 1, partitions: 2 }
+          - { app: wardmast_web, partition: 2, partitions: 2 }
+          - { app: wardmast_cli, partition: 1, partitions: 1 }
 
     steps:
       - uses: actions/checkout@v4
@@ -240,14 +240,14 @@ jobs:
         env:
           MIX_TEST_PARTITION: ${{ matrix.partition }}
 
-      - name: Run arbiter_release_env tests
-        if: ${{ matrix.app == 'arbiter_cli' }}
-        working-directory: apps/arbiter_release_env
+      - name: Run wardmast_release_env tests
+        if: ${{ matrix.app == 'wardmast_cli' }}
+        working-directory: apps/wardmast_release_env
         run: mix test --slowest 25
 
       # Only one shard saves, so shards do not race on the identical key.
       - name: Save deps/build cache
-        if: ${{ !cancelled() && github.event_name == 'push' && matrix.app == 'arbiter' && matrix.partition == 1 && steps.cache3.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && github.event_name == 'push' && matrix.app == 'wardmast' && matrix.partition == 1 && steps.cache3.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: |

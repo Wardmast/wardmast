@@ -10,7 +10,7 @@
 > resolved `config["conductor"]["max_concurrent"]` once at `init` and never
 > again. That module is gone — the board scheduler is now the only dispatcher,
 > and it re-reads the same config key on every snapshot load
-> (`Arbiter.Board.Snapshot.workspace_config_max/1`), so the per-workspace
+> (`Wardmast.Board.Snapshot.workspace_config_max/1`), so the per-workspace
 > concurrency cap is already fresh per tick with no reload signal needed.
 > The two remaining init-only modules (`merged_pr_finalizer`, `merge_queue`)
 > are unchanged, and so is the recommendation.
@@ -20,7 +20,7 @@
 ## Overview
 
 Workspace-scoped configuration lives in a single JSON `config` column on the
-`Arbiter.Tasks.Workspace` Ash resource and is edited at runtime through
+`Wardmast.Tasks.Workspace` Ash resource and is edited at runtime through
 `arb config set` / `workspace_config_set` (and the REST + dashboard editors).
 Several long-lived GenServers cache values derived from that config in their
 process state. When an operator changes config, how quickly does each process
@@ -36,7 +36,7 @@ actions, the three most-affected GenServers already subscribe to
 build and strictly better (near-instant, zero steady-state DB polling) than
 tuning N independent timers.
 
-Out of scope, and confirmed untouched: `Application.get_env(:arbiter, …)`
+Out of scope, and confirmed untouched: `Application.get_env(:wardmast, …)`
 reads. Those (`review_patrol_debounce_ms`,
 `dispatch_queue_dispatcher`, `provider_pool_cooldown_ms`, credential-watchdog
 config, `quota_refresh_probe`) are compile/deploy-time OTP application config,
@@ -48,7 +48,7 @@ not per-workspace DB config, and are *expected* to require a restart.
 
 "Refetch" = re-reads the `Workspace` resource / its `config` map after `init`.
 Line numbers are against the tree at the time of writing. All modules under
-`apps/arbiter/lib/arbiter/`.
+`apps/wardmast/lib/wardmast/`.
 
 | Module | Loads config at `init`? | Refetches after `init`? | Trigger / granularity | Worst-case module-level staleness |
 |---|---|---|---|---|
@@ -101,14 +101,14 @@ they already run `handle_info` loops — see "Optional convergence."
 ## The write path — a single chokepoint
 
 Every runtime config write converges on the `Workspace` resource's update
-actions (`apps/arbiter/lib/arbiter/tasks/workspace.ex`):
+actions (`apps/wardmast/lib/wardmast/tasks/workspace.ex`):
 
 | Caller | Action |
 |---|---|
 | MCP `workspace_config_set` / `_unset` (`mcp/tools.ex:290,317`) | `:patch_config` |
-| REST `PATCH /api/workspaces/:id/config` (`arbiter_web/.../workspace_controller.ex:81`) | `:patch_config` |
-| Dashboard config editor (`arbiter_web/.../workspace_detail_live.ex:167`) | `:patch_config` |
-| CLI `arb config set/unset` (`arbiter_cli`) → HTTP → the REST endpoint above | `:patch_config` |
+| REST `PATCH /api/workspaces/:id/config` (`wardmast_web/.../workspace_controller.ex:81`) | `:patch_config` |
+| Dashboard config editor (`wardmast_web/.../workspace_detail_live.ex:167`) | `:patch_config` |
+| CLI `arb config set/unset` (`wardmast_cli`) → HTTP → the REST endpoint above | `:patch_config` |
 | REST `PATCH /api/workspaces/:id` + dashboard secrets/whole-object | `:update` (whole-config replace) |
 | `skills/seeds.ex:150` | `:patch_config` |
 
@@ -118,7 +118,7 @@ direct Ash access — it rides the REST endpoint. That is the point: the
 hook on `:patch_config` and `:update` covers 100% of write paths with zero
 per-caller changes.
 
-There is already a mirror idiom to copy — `Arbiter.Messages.Message` attaches
+There is already a mirror idiom to copy — `Wardmast.Messages.Message` attaches
 an inline `after_action` change to its actions that calls a module broadcast
 helper (`message.ex:66-88, 168-186`). There is no `Ash.Notifier.PubSub`
 extension anywhere in the tree; the established convention is
@@ -155,7 +155,7 @@ It is the obvious simpler option, so it deserves a fair hearing — and it loses
 - **Zero steady-state polling** — a broadcast fires only on an actual write.
 - **One contract, one chokepoint** — new config-consumers subscribe to a known
   topic instead of each re-deriving a safe interval.
-- The infrastructure already exists (PubSub `Arbiter.PubSub`, the subscribe
+- The infrastructure already exists (PubSub `Wardmast.PubSub`, the subscribe
   seams, the `after_action` broadcast idiom), so build cost is low.
 
 ### Where periodic refetch stays
@@ -181,13 +181,13 @@ seam — so the design introduces no new timers at all.
 A **dedicated** topic, not a reuse of the coordinator `events:<ws_id>` stream.
 Rationale: config-reload is an internal server-side concern with a different
 payload contract and audience than the coordinator-facing event stream;
-coupling them would drag `Arbiter.Events`' `{:event, map}` envelope and topic
+coupling them would drag `Wardmast.Events`' `{:event, map}` envelope and topic
 filtering into an unrelated path. The 2-line subscribe cost per module is
 trivial. (The consumers subscribe to `quota:<id>` / `merge_queue:<id>`, so no
 single existing topic reaches all of them anyway.)
 
 Centralize the topic string and broadcast in a small helper module (mirroring
-`Arbiter.Events` / `Message.topic/1`), e.g. `Arbiter.Workspaces.ConfigEvents`:
+`Wardmast.Events` / `Message.topic/1`), e.g. `Wardmast.Workspaces.ConfigEvents`:
 
 ```elixir
 def topic(workspace_id) when is_binary(workspace_id),
@@ -195,7 +195,7 @@ def topic(workspace_id) when is_binary(workspace_id),
 
 def broadcast_changed(workspace_id) when is_binary(workspace_id) do
   Phoenix.PubSub.broadcast(
-    Arbiter.PubSub, topic(workspace_id), {:workspace_config_changed, workspace_id}
+    Wardmast.PubSub, topic(workspace_id), {:workspace_config_changed, workspace_id}
   )
   :ok
 rescue
@@ -225,12 +225,12 @@ Reasons:
 ### Broadcast site — `after_action` on the write actions
 
 Add one shared change module,
-`Arbiter.Tasks.Workspace.Changes.BroadcastConfigChange`, wired into
+`Wardmast.Tasks.Workspace.Changes.BroadcastConfigChange`, wired into
 `:patch_config` and `:update` (following the existing `Start*` change modules
 in `tasks/workspace/changes/`):
 
 ```elixir
-defmodule Arbiter.Tasks.Workspace.Changes.BroadcastConfigChange do
+defmodule Wardmast.Tasks.Workspace.Changes.BroadcastConfigChange do
   use Ash.Resource.Change
 
   @impl true
@@ -239,7 +239,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.BroadcastConfigChange do
     # :update shouldn't churn every subscriber).
     if Ash.Changeset.changing_attribute?(changeset, :config) do
       Ash.Changeset.after_action(changeset, fn _cs, ws ->
-        Arbiter.Workspaces.ConfigEvents.broadcast_changed(ws.id)
+        Wardmast.Workspaces.ConfigEvents.broadcast_changed(ws.id)
         {:ok, ws}
       end)
     else
@@ -261,7 +261,7 @@ end
 In `init`:
 
 ```elixir
-Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Workspaces.ConfigEvents.topic(workspace_id))
+Phoenix.PubSub.subscribe(Wardmast.PubSub, Wardmast.Workspaces.ConfigEvents.topic(workspace_id))
 ```
 
 Add one handler that **recomputes the module's cached tunables** from a fresh
@@ -319,7 +319,7 @@ core scope.
 
 Land in reviewable slices so each is independently verifiable:
 
-1. **Primitive** — `Arbiter.Workspaces.ConfigEvents` (topic + broadcast helper)
+1. **Primitive** — `Wardmast.Workspaces.ConfigEvents` (topic + broadcast helper)
    + `BroadcastConfigChange` change wired into `:patch_config` and `:update`,
    with a test asserting a broadcast fires on `arb config set` and does **not**
    fire on a name-only `:update`. No subscriber yet — pure, safe to merge.

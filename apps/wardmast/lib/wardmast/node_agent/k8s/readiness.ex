@@ -1,0 +1,564 @@
+defmodule Wardmast.NodeAgent.K8s.Readiness do
+  @moduledoc """
+  The cluster readiness block (`docs/design/remote-workers.md` k8s §9.4, ticket K13):
+  what the controller reports in `hello`/`hb` so `arb server doctor` and the nodes
+  page can say whether this cluster can take worker pods, and why not.
+
+  Every check is a map with string keys, the shape the podman readiness report uses
+  (`"id"`, `"name"`, `"status"` of `ok | warn | fail`, `"detail"`, `"hint"`), so the
+  primary stores and renders them the same way.
+
+  | id | proves | how |
+  |---|---|---|
+  | `netpol` | the CNI enforces the deny-all policies | `Canary` (see `netpol/2`) |
+  | `psa` | Pod Security `restricted` is enforced on the namespace **and** the builder's own pod passes it | two server-side dry-run creates: the worker pod as the builder emits it must be admitted, the same pod with a `privileged` container must be refused with `violates PodSecurity` |
+  | `priority_class` | the configured `priority_class` exists | the dry-run's admission verdict (`no PriorityClass with name …`); the controller's Role cannot read cluster-scoped `PriorityClass` objects, and the dry-run is the check that matches what a real pod meets |
+  | `runtime_class` | the configured `placement.runtime_class` exists (none: worker pods share the node's kernel) | the same dry run's admission verdict (`RuntimeClass … not found`), then a real short-lived pod under the class (`SandboxProbe`): a kubelet that cannot create its sandbox (runsc and `hostUsers: false`, KH1) is a failure naming the error |
+  | `quota` | a `ResourceQuota` bounds the namespace and has room for a pod | `resourcequotas` (`Quota.headroom/2`) |
+  | `registry_pull` | the kubelet can pull the worker image | the canary pod's own pull (it runs the worker image) |
+  | `clock` | the API server and this controller agree on the time to within 30 s | `Date` of `GET /version` |
+
+  A dry run stores nothing. Admission runs in a fixed order (the mutating
+  `Priority` plugin, then the validating `PodSecurity`, `ValidatingAdmissionPolicy`
+  and `ResourceQuota`), so the first rejection hides the later checks; they are then
+  reported as not evaluated rather than ok.
+  """
+
+  alias Wardmast.NodeAgent.K8s.ApiReach
+  alias Wardmast.NodeAgent.K8s.Canary
+  alias Wardmast.NodeAgent.K8s.Client
+  alias Wardmast.NodeAgent.K8s.PodConfig
+  alias Wardmast.NodeAgent.K8s.Quota
+  alias Wardmast.NodeAgent.K8s.SandboxProbe
+
+  @max_skew_s 30
+
+  @type check :: %{required(String.t()) => String.t() | nil}
+
+  @doc """
+  The six cluster checks for `config` (a `PodSpec` config) given the latest canary
+  `result` (`nil` before the first run). Options: `:image` (the worker image, a
+  digest-pinned reference under `config.registry`) and `:now_fun`.
+  """
+  @spec run(Client.t(), map() | keyword(), Canary.result() | nil, keyword()) :: [check()]
+  def run(client, config, canary, opts) do
+    now = Keyword.get(opts, :now_fun, &DateTime.utc_now/0)
+    {psa, priority, quota_msg, runtime} = admission(client, config, opts)
+
+    [
+      psa,
+      priority,
+      runtime,
+      quota(client, config, quota_msg),
+      registry_pull(canary),
+      clock(client, now)
+    ]
+  end
+
+  @doc """
+  The `netpol` check from the canary `result` (`nil`: it has not run yet). `note` is
+  appended to the detail (the monitor says when a verdict is a kept earlier one).
+  Fail closed: only `:enforced` is ok, and an `:inconclusive` run is a failure that
+  says nothing was proven.
+  """
+  @spec netpol(Canary.result() | nil, String.t() | nil) :: check()
+  def netpol(result, note \\ nil)
+
+  def netpol(nil, note) do
+    check(
+      "netpol",
+      "NetworkPolicy enforcement",
+      "fail",
+      join("the canary has not run yet; enforcement is not proven", note),
+      "The controller runs the canary at start, on every config change and every 10 minutes."
+    )
+  end
+
+  def netpol(%{outcome: :enforced} = result, note) do
+    skipped =
+      case result.skipped do
+        [] -> nil
+        names -> "not probed: #{Enum.join(names, ", ")}"
+      end
+
+    if result.bridge == :closed do
+      check(
+        "netpol",
+        "NetworkPolicy enforcement",
+        "warn",
+        join("enforced, but the bridge port did not connect from the canary", skipped, note),
+        "The worker-to-controller policy is too strict or the controller's 9443 listener is down: " <>
+          "workers would start and never reach the primary."
+      )
+    else
+      check(
+        "netpol",
+        "NetworkPolicy enforcement",
+        "ok",
+        join("enforced: only the bridge port connects from a worker-labelled pod", skipped, note),
+        nil
+      )
+    end
+  end
+
+  def netpol(%{outcome: :unenforced, open: open}, note) do
+    check(
+      "netpol",
+      "NetworkPolicy enforcement",
+      "fail",
+      join("NOT enforced: a worker-labelled pod reached #{Enum.join(open, ", ")}", note),
+      "The cluster's CNI accepts NetworkPolicy objects but does not enforce them. This node takes no " <>
+        "placements (degraded: netpol_unenforced) until the CNI enforces them or the operator sets " <>
+        "allow_unenforced_network for the node. See docs/remote-workers-k8s-runbook.md."
+    )
+  end
+
+  def netpol(%{outcome: :inconclusive, reason: reason}, note) do
+    check(
+      "netpol",
+      "NetworkPolicy enforcement",
+      "fail",
+      join("not proven: the canary could not complete (#{describe(reason)})", note),
+      "An unproven policy is treated as an unenforced one. Fix the cause (quota, image pull, " <>
+        "scheduling) and the next canary run clears it."
+    )
+  end
+
+  # -- Pod Security, PriorityClass, admission ---------------------------------------------------
+
+  defp admission(client, config, opts) do
+    case Canary.dry_run_pod(config, opts) do
+      {:ok, pod} ->
+        case classify(Client.create_pod(client, pod, dry_run: true)) do
+          :accepted ->
+            {psa_negative(client, pod), priority_ok(config), nil,
+             runtime_probed(client, config, opts)}
+
+          {:quota, msg} ->
+            {psa_negative(client, pod), priority_ok(config), msg, runtime_ok(config)}
+
+          {:pod_security, msg} ->
+            {psa_violated(msg), not_evaluated("priority_class", "PriorityClass"), nil,
+             runtime_unevaluated(config)}
+
+          {:priority, msg} ->
+            {not_evaluated("psa", "Pod Security"), priority_missing(msg), nil,
+             runtime_unevaluated(config)}
+
+          {:runtime_class, msg} ->
+            {not_evaluated("psa", "Pod Security"), priority_ok(config), nil,
+             runtime_missing(config, msg)}
+
+          {:other, msg} ->
+            {psa_unproven(msg), not_evaluated("priority_class", "PriorityClass"), nil,
+             runtime_unevaluated(config)}
+        end
+
+      {:error, reason} ->
+        {check(
+           "psa",
+           "Pod Security restricted",
+           "fail",
+           "the builder refused its own pod: #{inspect(reason)}",
+           nil
+         ), not_evaluated("priority_class", "PriorityClass"), nil, runtime_unevaluated(config)}
+    end
+  end
+
+  defp classify({:ok, _}), do: :accepted
+
+  defp classify({:error, {kind, msg}}) when kind in [:forbidden, :invalid], do: by_message(msg)
+  defp classify({:error, {:http, _status, msg}}), do: by_message(msg)
+  defp classify({:error, other}), do: {:other, inspect(other)}
+
+  defp by_message(msg) do
+    cond do
+      msg =~ "violates PodSecurity" -> {:pod_security, msg}
+      msg =~ ~r/RuntimeClass/i -> {:runtime_class, msg}
+      msg =~ ~r/PriorityClass/i -> {:priority, msg}
+      msg =~ "exceeded quota" -> {:quota, msg}
+      true -> {:other, msg}
+    end
+  end
+
+  @doc """
+  The pod the psa negative probe dry-runs: the builder's pod with a privileged worker
+  container. It must pass API validation to reach Pod Security admission, so
+  `allowPrivilegeEscalation` is true (privileged forbids false) and the capability drop is
+  removed.
+  """
+  @spec psa_probe_pod(map()) :: map()
+  def psa_probe_pod(pod) do
+    update_in(pod, ["spec", "containers"], fn [worker | rest] ->
+      sc =
+        (worker["securityContext"] || %{})
+        |> Map.put("privileged", true)
+        |> Map.put("allowPrivilegeEscalation", true)
+        |> Map.delete("capabilities")
+
+      [Map.put(worker, "securityContext", sc) | rest]
+    end)
+  end
+
+  defp psa_negative(client, pod) do
+    case classify(Client.create_pod(client, psa_probe_pod(pod), dry_run: true)) do
+      {:pod_security, _msg} ->
+        check(
+          "psa",
+          "Pod Security restricted",
+          "ok",
+          "enforced: the builder's pod is admitted and a privileged pod is refused",
+          nil
+        )
+
+      :accepted ->
+        psa_not_enforced()
+
+      {:quota, _} ->
+        psa_not_enforced()
+
+      {:priority, msg} ->
+        psa_unproven(msg)
+
+      {:other, msg} ->
+        psa_unproven("the privileged probe pod was refused by something else: #{msg}")
+    end
+  end
+
+  defp psa_not_enforced do
+    check(
+      "psa",
+      "Pod Security restricted",
+      "warn",
+      "the namespace does not enforce Pod Security restricted: a privileged pod was admitted by the dry run",
+      "kubectl label namespace <ns> pod-security.kubernetes.io/enforce=restricted " <>
+        "pod-security.kubernetes.io/enforce-version=latest (the builder's pods are written to pass it)."
+    )
+  end
+
+  defp psa_violated(msg) do
+    check(
+      "psa",
+      "Pod Security restricted",
+      "fail",
+      "the namespace's Pod Security rejects the builder's own pod: #{trim(msg)}",
+      "A controller/builder version mismatch or a stricter profile than restricted: workers cannot start."
+    )
+  end
+
+  defp psa_unproven(msg) do
+    check(
+      "psa",
+      "Pod Security restricted",
+      "warn",
+      "could not tell: the dry run was refused by #{trim(msg)}",
+      "Fix the rejection (see the message); until then Pod Security enforcement is unproven."
+    )
+  end
+
+  defp priority_ok(config) do
+    class = priority_class(config)
+
+    check(
+      "priority_class",
+      "PriorityClass",
+      "ok",
+      "#{class || "(none configured)"} accepted by the dry run",
+      nil
+    )
+  end
+
+  defp priority_missing(msg) do
+    check(
+      "priority_class",
+      "PriorityClass",
+      "fail",
+      "the configured PriorityClass does not exist: #{trim(msg)}",
+      "Create the PriorityClass of the install manifest (low value, preemptionPolicy: Never) " <>
+        "or set worker placement.priority_class to one that exists."
+    )
+  end
+
+  # -- runtime class (KH4) -------------------------------------------------------------------
+  # The RuntimeClass is cluster-scoped, which the controller's Role cannot read, so (like the
+  # PriorityClass) the dry run's admission verdict is the check. The extra "runtime_class" key
+  # names the class (nil: none), so the doctor can print the shared-kernel line.
+
+  defp runtime_ok(config) do
+    case runtime_class(config) do
+      nil ->
+        runtime_check(
+          "ok",
+          "none configured: worker pods run on the node's own kernel (runc), shared with every other pod there",
+          nil,
+          nil
+        )
+
+      class ->
+        runtime_check("ok", "#{class} accepted by the dry run", nil, class)
+    end
+  end
+
+  # KH1: a dry run never reaches the kubelet, so a class whose handler refuses the pod's
+  # sandbox passes it. With a class configured, a real short-lived pod under it is the proof.
+  defp runtime_probed(client, config, opts) do
+    case runtime_class(config) do
+      nil -> runtime_ok(config)
+      class -> client |> SandboxProbe.run(config, opts) |> runtime_verdict(class, config)
+    end
+  end
+
+  defp runtime_verdict(:started, class, _config) do
+    runtime_check(
+      "ok",
+      "#{class} accepted by the dry run, and a pod under it started its sandbox",
+      nil,
+      class
+    )
+  end
+
+  defp runtime_verdict({:sandbox_failed, msg}, class, config) do
+    runtime_check(
+      "fail",
+      "a pod under RuntimeClass #{class} could not create its sandbox: #{trim(msg)}",
+      sandbox_hint(msg, config),
+      class
+    )
+  end
+
+  defp runtime_verdict({:not_started, reason}, class, _config) do
+    runtime_check(
+      "warn",
+      "the dry run accepted #{class} but a pod under it did not start (#{describe_probe(reason)}): the sandbox is unproven",
+      "Check the RuntimeClass handler on the nodes (kubectl describe pod, events in the worker namespace).",
+      class
+    )
+  end
+
+  defp sandbox_hint(msg, config) do
+    if msg =~ "user namespaces" and not PodConfig.kernel_sandboxed?(placement(config)) do
+      "The handler does not support hostUsers: false. For gVisor (handler runsc) set worker " <>
+        "placement.runtime_handler: runsc so the pod omits hostUsers; otherwise use a handler that supports user namespaces."
+    else
+      "Fix the RuntimeClass handler on the nodes (the kubelet's message is above) or clear worker placement.runtime_class."
+    end
+  end
+
+  defp describe_probe(:timeout),
+    do: "it was still pending at the deadline and no sandbox event said why"
+
+  defp describe_probe(:image_pull), do: "the worker image could not be pulled"
+  defp describe_probe({:create_failed, reason}), do: "creating it failed: #{inspect(reason)}"
+  defp describe_probe({:bad_pod, reason}), do: "the builder refused it: #{inspect(reason)}"
+
+  defp runtime_missing(config, msg) do
+    runtime_check(
+      "fail",
+      "the configured RuntimeClass does not exist: #{trim(msg)}",
+      "Install the RuntimeClass (and its handler on the nodes) or clear worker placement.runtime_class.",
+      runtime_class(config)
+    )
+  end
+
+  defp runtime_unevaluated(config) do
+    case runtime_class(config) do
+      nil ->
+        runtime_ok(config)
+
+      class ->
+        runtime_check(
+          "warn",
+          "not evaluated: the dry-run pod was rejected before this check ran",
+          "Fix the other admission failure first.",
+          class
+        )
+    end
+  end
+
+  defp runtime_check(status, detail, hint, class),
+    do:
+      "runtime_class"
+      |> check("RuntimeClass", status, detail, hint)
+      |> Map.put("runtime_class", class)
+
+  defp runtime_class(config), do: blank_to_nil(placement(config)["runtime_class"])
+
+  defp placement(config) do
+    case PodConfig.normalize(config) do
+      {:ok, cfg} -> cfg.placement
+      _ -> %{}
+    end
+  end
+
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil(value), do: value
+
+  defp not_evaluated(id, name) do
+    check(
+      id,
+      name,
+      "warn",
+      "not evaluated: the dry-run pod was rejected before this check ran",
+      "Fix the other admission failure first."
+    )
+  end
+
+  defp priority_class(config) do
+    case PodConfig.normalize(config) do
+      {:ok, cfg} -> get_in(cfg, [:placement, "priority_class"])
+      _ -> nil
+    end
+  end
+
+  # -- quota -------------------------------------------------------------------------------
+
+  defp quota(client, config, dry_run_msg) do
+    with {:ok, cfg} <- PodConfig.normalize(config),
+         {:ok, quotas} <- Client.list_resource_quotas(client) do
+      quota_check(Quota.headroom(quotas, Quota.demand(cfg)), quotas, dry_run_msg)
+    else
+      {:error, {:bad_config, reason}} ->
+        check("quota", "ResourceQuota", "fail", "bad controller config: #{inspect(reason)}", nil)
+
+      {:error, reason} ->
+        check(
+          "quota",
+          "ResourceQuota",
+          "warn",
+          "could not read resourcequotas: #{inspect(reason)}",
+          "The controller's Role grants get/list on resourcequotas; capacity is reported as unknown."
+        )
+    end
+  end
+
+  defp quota_check(_room, [], _msg) do
+    check(
+      "quota",
+      "ResourceQuota",
+      "warn",
+      "no ResourceQuota in the namespace: nothing bounds what worker pods can request",
+      "Apply the install manifest's quota (sized for max_concurrent) before taking real runs."
+    )
+  end
+
+  defp quota_check(room, _quotas, msg) do
+    cond do
+      msg != nil or room == 0 ->
+        check(
+          "quota",
+          "ResourceQuota",
+          "warn",
+          "no room for another worker pod right now#{if msg, do: ": " <> trim(msg), else: ""}",
+          "Raise the quota or wait for runs to finish; the controller refuses assigns as no_capacity."
+        )
+
+      room == :unbounded ->
+        check(
+          "quota",
+          "ResourceQuota",
+          "warn",
+          "ResourceQuota objects exist but none bounds pods, CPU or memory requests",
+          "A quota on pods and requests.cpu/memory is what ring-fences a shared cluster."
+        )
+
+      true ->
+        check("quota", "ResourceQuota", "ok", "room for #{room} more worker pod(s)", nil)
+    end
+  end
+
+  # -- registry pull and clock ---------------------------------------------------------------
+
+  defp registry_pull(nil) do
+    check(
+      "registry_pull",
+      "Image pull",
+      "warn",
+      "the canary has not run yet; the pull is untested",
+      nil
+    )
+  end
+
+  defp registry_pull(%{pull: :ok}) do
+    check("registry_pull", "Image pull", "ok", "the kubelet pulled the worker image", nil)
+  end
+
+  defp registry_pull(%{pull: {:failed, message}}) do
+    check(
+      "registry_pull",
+      "Image pull",
+      "fail",
+      "the kubelet could not pull the worker image: #{trim(message)}",
+      "Check the registry address, the image_pull_secrets in the controller config and that the " <>
+        "primary has published the image (`arb server doctor` nodes.registry)."
+    )
+  end
+
+  defp registry_pull(%{pull: :unknown}) do
+    check(
+      "registry_pull",
+      "Image pull",
+      "warn",
+      "the pull was not observed: the canary pod did not get far enough",
+      nil
+    )
+  end
+
+  defp clock(client, now) do
+    case Client.server_time(client) do
+      {:ok, server} ->
+        skew = DateTime.diff(server, now.(), :second)
+
+        if abs(skew) <= @max_skew_s do
+          check(
+            "clock",
+            "Clock",
+            "ok",
+            "API server and controller within #{@max_skew_s}s (#{skew}s)",
+            nil
+          )
+        else
+          check(
+            "clock",
+            "Clock",
+            "warn",
+            "the API server's clock differs from the controller's by #{skew}s",
+            "Fix NTP on the cluster nodes: Lease renewals, token expiry and run deadlines depend on it."
+          )
+        end
+
+      {:error, reason} ->
+        if ApiReach.unreachable?(reason) do
+          check(
+            "clock",
+            "Clock",
+            "warn",
+            ApiReach.message(reason),
+            "Add the API server's node address to the controller-egress policy (api_cidrs); the " <>
+              "clock could not be read, not found wrong."
+          )
+        else
+          check(
+            "clock",
+            "Clock",
+            "warn",
+            "could not read the API server's clock: #{inspect(reason)}",
+            nil
+          )
+        end
+    end
+  end
+
+  # -- plumbing ------------------------------------------------------------------------------
+
+  defp check(id, name, status, detail, hint),
+    do: %{"id" => id, "name" => name, "status" => status, "detail" => detail, "hint" => hint}
+
+  defp join(first, second, third \\ nil),
+    do: [first, second, third] |> Enum.reject(&is_nil/1) |> Enum.join("; ")
+
+  defp trim(msg) when is_binary(msg), do: String.slice(msg, 0, 300)
+  defp trim(other), do: inspect(other)
+
+  defp describe(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp describe(reason), do: inspect(reason, limit: 5, printable_limit: 120)
+end

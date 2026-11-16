@@ -1,0 +1,738 @@
+defmodule Wardmast.Settings.Registry do
+  @moduledoc """
+  The single description of the install-wide settings (`Wardmast.Settings`):
+  which keys exist, their types, how a raw value is validated, and how they are
+  read and written. The `installation_config_get` / `installation_config_set`
+  MCP tools, `GET|PATCH /api/installation/config` and `arb settings` all go
+  through here, so the three surfaces cannot drift — adding a key means
+  extending `@schema` (plus the `Wardmast.Settings` getter/setter).
+
+  `nil` always means "no override"; for the list-valued keys `[]` is a real,
+  distinct value (e.g. `credential_watchdog_adapters: []` probes nothing).
+  """
+
+  alias Wardmast.Agents.CredentialWatchdog
+  alias Wardmast.Machine.Derate.Config, as: DerateConfig
+  alias Wardmast.Settings
+
+  @type key :: String.t()
+  @type error :: {:invalid, String.t()}
+
+  @schema [
+    %{
+      key: "credential_watchdog_adapters",
+      type: "agent_type_list",
+      description:
+        "Agent types the CredentialWatchdog probes; null = all, [] = none. " <>
+          "Takes effect on its next poll."
+    },
+    %{
+      key: "credential_watchdog_interval_ms",
+      type: "positive_integer",
+      description: "CredentialWatchdog poll interval (ms). Takes effect on its next poll."
+    },
+    %{
+      key: "credential_watchdog_recovery_interval_ms",
+      type: "positive_integer",
+      description:
+        "CredentialWatchdog re-probe interval (ms) while an adapter is expired. " <>
+          "Takes effect on its next poll."
+    },
+    %{
+      key: "quota_providers_shown",
+      type: "quota_provider_list",
+      description:
+        "Quota providers forced onto the status-bar quota chip and /usage; null = auto-detect."
+    },
+    %{
+      key: "quota_providers_hidden",
+      type: "quota_provider_list",
+      description:
+        "Quota providers forced off the quota surfaces (wins over shown); null = auto-detect."
+    },
+    %{
+      key: "output_offload_enabled",
+      type: "boolean",
+      description:
+        "Run the daily output-offload sweeper, which clears worker_runs.output_lines and " <>
+          "worker_run_steps.output_summary once the durable on-disk copy exists; null/false = off. " <>
+          "Takes effect on its next tick."
+    },
+    %{
+      key: "scheduling_epic_floors_enabled",
+      type: "boolean",
+      description:
+        "Kill switch for epic priority floors: false ignores every floor; null/true = floors " <>
+          "apply (a no-op until an epic has one). Takes effect on the next scheduler tick."
+    },
+    %{
+      key: "scheduling_max_lifted_in_flight",
+      type: "positive_integer",
+      description:
+        "Most in-progress tickets an epic floor may have lifted at once; past it every other " <>
+          "lifted card is ordered by its own priority. null = max(slots_total - 1, 1). " <>
+          "Takes effect on the next scheduler tick."
+    },
+    %{
+      key: "scheduling_finish_first",
+      type: "boolean",
+      description:
+        "Finish-first tiebreak inside a priority band: children of in-progress epics go first, " <>
+          "fewest open leaves first; null = on (default), false = off. Takes effect on the next scheduler tick."
+    },
+    %{
+      key: "scheduling_finish_first_max_wait_hours",
+      type: "positive_integer",
+      description:
+        "Hours a card may wait Ready and unblocked before it escapes the finish-first " <>
+          "tiebreak; null = 24. Takes effect on the next scheduler tick."
+    },
+    %{
+      key: "scheduler_admission",
+      type: "admission_mode",
+      description:
+        "Admission mode (provider-dynamic-concurrency §10): legacy (null; today's plan, gate " <>
+          "and caps), shadow (dispatch unchanged; the scheduler walk's decision is recorded " <>
+          "beside every dispatch and hold change) or enforce (operator-only; the walk and the " <>
+          "pool budgets admit — seats < min(budget, max_concurrent, share) per pool — and " <>
+          "today's decision is recorded beside each dispatch). Takes effect on the next " <>
+          "Autopilot pass.",
+      operator_only_values: ["enforce"]
+    },
+    %{
+      key: "machine.derate",
+      type: "derate_config",
+      description:
+        "The primary's self-derate thresholds (bd-6w7usy, docs/machine-derate.md), a JSON " <>
+          "object over thermal_soft_c (90), thermal_hard_c (95), thermal_delta_c (5), thermal_entry_samples (3), " <>
+          "psi_some_avg10 (25), psi_delta (10), mem_floor_gib (4), mem_delta_gib (1), " <>
+          "recover_s (180) and enabled (true); keys left out keep their default, null = all " <>
+          "defaults. Operator-only. Takes effect within ~10 s."
+    },
+    %{
+      key: "nodes.public_url",
+      type: "http_url",
+      description:
+        "The https origin a remote node dials to enroll and open its socket " <>
+          "(e.g. https://<host>.<tailnet>.ts.net); null = unset. Operator-only."
+    },
+    %{
+      key: "nodes.allow_public_endpoint",
+      type: "boolean",
+      description:
+        "Tolerate a nodes.public_url that is not a private/tailnet address (internet " <>
+          "exposure); null/false = refused. Operator-only."
+    },
+    %{
+      key: "nodes.join_token_ttl_minutes",
+      type: "join_token_ttl",
+      description:
+        "Default lifetime of a minted join token, in minutes (max 1440); null = 15. " <>
+          "Operator-only."
+    },
+    %{
+      key: "nodes.fence_after_s",
+      type: "positive_integer",
+      description:
+        "Seconds without a heartbeat ack after which a node agent stops its containers " <>
+          "(30-90); null = 60. Must stay below nodes.lost_after_s. Operator-only."
+    },
+    %{
+      key: "nodes.lost_after_s",
+      type: "positive_integer",
+      description:
+        "Seconds of silence after which the primary declares a node lost and interrupts " <>
+          "its runs; must exceed nodes.fence_after_s; null = fence + 30. Operator-only."
+    },
+    %{
+      key: "nodes.registry",
+      type: "registry_ref",
+      description:
+        "The registry the primary publishes worker, seed and controller images to, as " <>
+          "host[:port][/path] with no scheme (e.g. registry.example.com/arbiter); null = no " <>
+          "registry, nothing is pushed. Use a PRIVATE registry: the CLI layer carries real " <>
+          "claude/arb binaries. Operator-only."
+    },
+    %{
+      key: "nodes.chart_ref",
+      type: "chart_ref",
+      description:
+        "The arbiter-node Helm chart reference (oci://host/path or repo/chart) the primary " <>
+          "prints in `helm upgrade <release> <chart> ...` for a Helm-installed cluster node; " <>
+          "null = the chart the node reports. Operator-only."
+    },
+    %{
+      key: "nodes.registry_username",
+      type: "registry_user",
+      description: "Login for nodes.registry; null = anonymous push. Operator-only."
+    },
+    %{
+      key: "nodes.registry_password",
+      type: "secret",
+      description:
+        "Password or token for nodes.registry. Stored encrypted (Cloak), write-only: no " <>
+          "surface returns it, and it is handed to podman through a 0600 auth file, never " <>
+          "argv. Send it with `arb settings set nodes.registry_password -` (reads stdin). " <>
+          "Operator-only."
+    },
+    %{
+      key: "nodes.registry_insecure",
+      type: "boolean",
+      description:
+        "Push to nodes.registry over plain HTTP or with an untrusted certificate " <>
+          "(--tls-verify=false); null/false = TLS verified. Operator-only."
+    },
+    %{
+      key: "nodes.registry_public_ok",
+      type: "boolean",
+      description:
+        "Allow nodes.registry to answer anonymous reads (a public registry); null/false = " <>
+          "a registry that answers anonymously is refused. Operator-only."
+    },
+    %{
+      key: "nodes.registry.publish_timeout_ms",
+      type: "positive_integer",
+      description:
+        "Milliseconds a dispatch or CLI-set republish waits on an image publish before it " <>
+          "stops waiting (the publish keeps running); null = 1800000 (30 minutes). Operator-only."
+    },
+    %{
+      key: "nodes.registry_pull_username",
+      type: "registry_user",
+      description:
+        "Read-only login for nodes.registry that a machine node is handed for one pull of a " <>
+          "published image (with nodes.registry_pull_password), and only an unpinned node: it " <>
+          "reads every repo's images there. null = none. Operator-only."
+    },
+    %{
+      key: "nodes.registry_pull_password",
+      type: "secret",
+      description:
+        "Read-only token for nodes.registry (e.g. a GitLab deploy token with read_registry), " <>
+          "never the push password: refused when equal to nodes.registry_password. Stored " <>
+          "encrypted (Cloak), write-only; a node gets it in one assign and keeps it on tmpfs " <>
+          "for one pull. Send it with `arb settings set nodes.registry_pull_password -` " <>
+          "(reads stdin). Operator-only."
+    },
+    %{
+      key: "nodes.machine_image_source",
+      type: "machine_image_source",
+      description:
+        "auto: a machine node that can pull runs the repo's published image when the repo " <>
+          "has a registry and a pull credential that node may hold (no CLI files, no build " <>
+          "on the node); build: every machine node builds from a plan, as before. " <>
+          "null = auto (the default since SI4a). Operator-only."
+    },
+    %{
+      key: "worker.cli.versions",
+      type: "cli_versions",
+      description:
+        "The upstream CLI versions published worker images carry (SI1a, OD13), a JSON object " <>
+          "over claude and codex to a stable x.y.z, e.g. claude 2.1.310 and codex 0.164.0. " <>
+          "The daily auto-bump rewrites a pin to the newest stable upstream version unless the CLI " <>
+          "is in worker.cli.manual or worker.cli_set.hold is set; null = no pins (nothing is " <>
+          "fetched). Operator-only."
+    },
+    %{
+      key: "worker.cli.manual",
+      type: "cli_name_list",
+      description:
+        "CLIs (claude, codex) whose worker.cli.versions pin the auto-bump never touches; " <>
+          "null/[] = every pin follows upstream. Operator-only."
+    },
+    %{
+      key: "worker.cli_set.hold",
+      type: "cli_set_hold",
+      description:
+        "Freezes the published CLI set: while set, the auto-bump fetches and pins nothing " <>
+          "(the rollback for a bad CLI release); null = no hold. Operator-only."
+    },
+    %{
+      key: "worker.image.local_published",
+      type: "boolean",
+      description:
+        "Local runs take the published per-repo image from the local podman store (SI-L); " <>
+          "null/true = on (the default), false = off: local runs build locally and bind-mount " <>
+          "the CLIs, pull nothing, and the local image GC removes nothing. Takes effect on " <>
+          "the next run. Operator-only."
+    }
+  ]
+
+  @keys Enum.map(@schema, & &1.key)
+
+  # `docs/design/epic-aware-scheduling.md` §6.6: the operator alone decides how
+  # much of the fleet an epic floor may take. The `nodes.*` keys (RW3,
+  # `docs/design/remote-workers.md` §15) decide where machines that receive
+  # provider tokens may enrol from and for how long a join token lives, so a
+  # coordinator *session* must not set them either. Enforced in `put/3`, so
+  # MCP, REST and `arb settings` all refuse them for a non-operator token.
+  @operator_only ~w(scheduling_epic_floors_enabled scheduling_max_lifted_in_flight
+                    nodes.public_url nodes.allow_public_endpoint
+                    nodes.join_token_ttl_minutes nodes.fence_after_s nodes.lost_after_s
+                    machine.derate
+                    nodes.registry nodes.registry_username nodes.registry_password
+                    nodes.registry_insecure nodes.registry_public_ok nodes.chart_ref
+                    nodes.registry.publish_timeout_ms
+                    nodes.registry_pull_username nodes.registry_pull_password
+                    nodes.machine_image_source
+                    worker.cli.versions worker.cli.manual worker.cli_set.hold
+                    worker.image.local_published)
+
+  # Built at compile time from the fixed schema above, so no input ever mints an
+  # atom (some keys are dotted: `:"nodes.public_url"`).
+  # Values that are strings whatever they look like: a password of "12345" must not
+  # be unwrapped to an integer.
+  @secret_mask "********"
+  @string_types ~w(registry_ref registry_user secret chart_ref cli_set_hold machine_image_source)
+
+  @key_atoms Map.new(@keys, &{&1, String.to_atom(&1)})
+
+  @doc "Every settable key, in display order."
+  @spec keys() :: [key()]
+  def keys, do: @keys
+
+  @doc "The keys only an operator-authority caller may write (`put/3`)."
+  @spec operator_only_keys() :: [key()]
+  def operator_only_keys, do: @operator_only
+
+  @doc """
+  Key, type, description, `operator_only` and (for enum-typed keys) allowed
+  values.
+  """
+  @spec schema() :: [map()]
+  def schema do
+    Enum.map(@schema, fn entry ->
+      entry
+      |> Map.put(:allowed, allowed(entry.type))
+      |> Map.put(:operator_only, entry.key in @operator_only)
+    end)
+  end
+
+  defp allowed("agent_type_list"), do: Wardmast.Agents.valid_agent_types()
+  defp allowed("quota_provider_list"), do: Wardmast.Quota.Visibility.provider_codes()
+  defp allowed("admission_mode"), do: Settings.scheduler_admission_modes()
+  defp allowed("cli_name_list"), do: Settings.cli_names()
+  defp allowed("machine_image_source"), do: Settings.machine_image_sources()
+  defp allowed(_), do: nil
+
+  @doc """
+  Validate and normalise a raw value for `key` (`nil` clears). Stringified JSON
+  (`"[\\"claude\\"]"`, `"5"`) is unwrapped. Returns `{:error, message}` with the
+  message every surface reports.
+  """
+  @spec cast(key(), term()) :: {:ok, term()} | {:error, String.t()}
+  def cast(key, raw) when key in @keys do
+    type = Enum.find(@schema, &(&1.key == key)).type
+    do_cast(type, if(type in @string_types, do: raw, else: unwrap(raw)))
+  end
+
+  def cast(key, _raw), do: {:error, "unknown installation setting: #{key}"}
+
+  defp do_cast(_type, nil), do: {:ok, nil}
+  defp do_cast("boolean", b) when is_boolean(b), do: {:ok, b}
+  defp do_cast("boolean", _), do: {:error, "value must be true, false or null"}
+  defp do_cast("positive_integer", n) when is_integer(n) and n > 0, do: {:ok, n}
+
+  defp do_cast("positive_integer", _),
+    do: {:error, "value must be a positive integer or null"}
+
+  defp do_cast("http_url", url) when is_binary(url) do
+    case Settings.normalize_public_url(url) do
+      {:ok, normalized} ->
+        {:ok, normalized}
+
+      :error ->
+        {:error,
+         "value must be an http(s) URL with a host and no credentials, query or fragment, or null"}
+    end
+  end
+
+  defp do_cast("http_url", _),
+    do:
+      {:error,
+       "value must be an http(s) URL with a host and no credentials, query or fragment, or null"}
+
+  defp do_cast("join_token_ttl", n) when is_integer(n) and n > 0 do
+    max = Settings.max_join_token_ttl_minutes()
+
+    if n <= max,
+      do: {:ok, n},
+      else: {:error, "value must be at most #{max} minutes (24 hours) or null"}
+  end
+
+  defp do_cast("join_token_ttl", _),
+    do: {:error, "value must be a positive integer of minutes or null"}
+
+  defp do_cast("registry_ref", v) when is_binary(v) do
+    if Settings.valid_registry?(v),
+      do: {:ok, v},
+      else:
+        {:error,
+         "value must be a registry host[:port][/path] with no scheme, credentials or spaces " <>
+           "(e.g. registry.example.com/arbiter), or null"}
+  end
+
+  defp do_cast("registry_ref", _),
+    do: {:error, "value must be a registry host[:port][/path] string, or null"}
+
+  defp do_cast("chart_ref", v) when is_binary(v) do
+    if Settings.valid_chart_ref?(v),
+      do: {:ok, v},
+      else:
+        {:error,
+         "value must be a chart reference (oci://host/path or repo/chart) with no spaces, " <>
+           "credentials or shell characters, or null"}
+  end
+
+  defp do_cast("chart_ref", _),
+    do: {:error, "value must be a chart reference string, or null"}
+
+  defp do_cast("registry_user", v) when is_binary(v) do
+    if v != "" and byte_size(v) <= 256 and not String.match?(v, ~r/[\s\x00-\x1f\x7f:]/),
+      do: {:ok, v},
+      else: {:error, "value must be a registry username with no spaces or colons, or null"}
+  end
+
+  defp do_cast("registry_user", _), do: {:error, "value must be a registry username, or null"}
+
+  defp do_cast("secret", v) when is_binary(v) and v != "" and byte_size(v) <= 4096,
+    do: {:ok, v}
+
+  defp do_cast("secret", _),
+    do: {:error, "value must be a non-empty string of at most 4096 bytes, or null"}
+
+  defp do_cast("derate_config", map) when is_map(map) do
+    case DerateConfig.validate(map) do
+      {:ok, normalized} -> {:ok, normalized}
+      {:error, msg} -> {:error, msg}
+    end
+  end
+
+  defp do_cast("derate_config", _),
+    do: {:error, "value must be a JSON object of derate thresholds, or null"}
+
+  defp do_cast("cli_versions", %{} = map) do
+    if Settings.valid_cli_versions?(map),
+      do: {:ok, map},
+      else:
+        {:error,
+         "value must be a JSON object over #{Enum.join(Settings.cli_names(), ", ")} to a stable " <>
+           "x.y.z version (no prerelease), or null"}
+  end
+
+  defp do_cast("cli_versions", _),
+    do: {:error, "value must be a JSON object of CLI name to x.y.z version, or null"}
+
+  defp do_cast("cli_set_hold", v) when is_binary(v) do
+    if Settings.valid_cli_set_hold?(v),
+      do: {:ok, v},
+      else: {:error, "value must be a short token (letters, digits, . _ -), or null"}
+  end
+
+  defp do_cast("cli_set_hold", _), do: {:error, "value must be a short token string, or null"}
+
+  defp do_cast("machine_image_source", source) when is_binary(source) do
+    if source in Settings.machine_image_sources(),
+      do: {:ok, source},
+      else: {:error, "value must be auto or build, or null"}
+  end
+
+  defp do_cast("machine_image_source", _),
+    do: {:error, "value must be auto or build, or null"}
+
+  defp do_cast("admission_mode", mode) when is_binary(mode) do
+    if mode in Settings.scheduler_admission_modes(),
+      do: {:ok, mode},
+      else: {:error, "value must be legacy, shadow or enforce, or null"}
+  end
+
+  defp do_cast("admission_mode", _),
+    do: {:error, "value must be legacy, shadow or enforce, or null"}
+
+  defp do_cast("cli_name_list", list) do
+    valid = allowed("cli_name_list")
+
+    if is_list(list) and Enum.all?(list, &(is_binary(&1) and &1 in valid)),
+      do: {:ok, list},
+      else: {:error, "value must be a list of CLIs (#{Enum.join(valid, ", ")}) or null"}
+  end
+
+  defp do_cast(type, list) when type in ["agent_type_list", "quota_provider_list"] do
+    valid = allowed(type)
+
+    if is_list(list) and Enum.all?(list, &(is_binary(&1) and &1 in valid)) do
+      {:ok, list}
+    else
+      noun = if type == "agent_type_list", do: "agent types", else: "quota providers"
+      {:error, "value must be a list of #{noun} (#{Enum.join(valid, ", ")}) or null"}
+    end
+  end
+
+  defp unwrap(raw) when is_binary(raw) do
+    case Jason.decode(String.trim(raw)) do
+      {:ok, decoded}
+      when is_integer(decoded) or is_list(decoded) or is_nil(decoded) or
+             is_boolean(decoded) or is_map(decoded) ->
+        decoded
+
+      _ ->
+        raw
+    end
+  end
+
+  defp unwrap(raw), do: raw
+
+  @doc """
+  Authorize, validate, then persist. Returns the stored override (`nil` once
+  cleared). A refused or invalid value is rejected before anything is written.
+
+  `opts[:authority]` is the caller's `Wardmast.Guardrails.Authority` (default
+  `:operator`: in-process callers such as the dashboard are trusted, and every
+  untrusted entry point — REST, MCP — passes its token's authority). The
+  `operator_only_keys/0` are refused for any other authority with
+  `{:unauthorized, message}`, ahead of validation.
+  """
+  @spec put(key(), term(), keyword()) ::
+          {:ok, term()} | {:error, error() | {:unauthorized, String.t()}}
+  def put(key, raw, opts \\ []) do
+    authority = Keyword.get(opts, :authority, :operator)
+
+    with :ok <- authorize(key, authority),
+         {:ok, value} <- cast_for_put(key, raw),
+         :ok <- authorize_value(key, value, authority),
+         do: write(key, value)
+  end
+
+  defp authorize(key, authority) when key in @operator_only and authority != :operator,
+    do: {:error, {:unauthorized, "#{key} is operator-only — it needs an operator-proof token"}}
+
+  defp authorize(_key, _authority), do: :ok
+
+  # A key whose *values* split by authority (`operator_only_values`): DC6's
+  # `scheduler_admission`, where the coordinator may set `legacy` or `shadow` —
+  # the kill switch, and tightening — but only the operator may set `enforce`
+  # (provider-dynamic-concurrency §10.1, §10.4).
+  defp authorize_value(_key, _value, :operator), do: :ok
+
+  defp authorize_value(key, value, _authority) do
+    entry = Enum.find(@schema, &(&1.key == key))
+
+    if value in Map.get(entry, :operator_only_values, []),
+      do:
+        {:error,
+         {:unauthorized, "#{key} #{value} is operator-only — it needs an operator-proof token"}},
+      else: :ok
+  end
+
+  defp cast_for_put(key, raw) do
+    case cast(key, raw) do
+      {:ok, v} -> {:ok, v}
+      {:error, msg} -> {:error, {:invalid, msg}}
+    end
+  end
+
+  defp write("credential_watchdog_adapters", v),
+    do: wrap(Settings.set_credential_watchdog_adapters(v))
+
+  defp write("credential_watchdog_interval_ms", v),
+    do: wrap(Settings.set_credential_watchdog_interval_ms(v))
+
+  defp write("credential_watchdog_recovery_interval_ms", v),
+    do: wrap(Settings.set_credential_watchdog_recovery_interval_ms(v))
+
+  defp write("quota_providers_shown", v), do: wrap(Settings.set_quota_providers_shown(v))
+  defp write("quota_providers_hidden", v), do: wrap(Settings.set_quota_providers_hidden(v))
+
+  defp write("output_offload_enabled", v), do: wrap(Settings.set_output_offload_enabled(v))
+
+  defp write("scheduling_epic_floors_enabled", v),
+    do: wrap(Settings.set_scheduling_epic_floors_enabled(v))
+
+  defp write("scheduling_max_lifted_in_flight", v),
+    do: wrap(Settings.set_scheduling_max_lifted_in_flight(v))
+
+  defp write("scheduling_finish_first", v), do: wrap(Settings.set_scheduling_finish_first(v))
+
+  defp write("scheduling_finish_first_max_wait_hours", v),
+    do: wrap(Settings.set_scheduling_finish_first_max_wait_hours(v))
+
+  defp write("scheduler_admission", v), do: wrap(Settings.set_scheduler_admission(v))
+
+  defp write("machine.derate", v), do: wrap(Settings.set_machine_derate(v))
+  defp write("nodes.public_url", v), do: wrap(Settings.set_nodes_public_url(v))
+
+  defp write("nodes.allow_public_endpoint", v),
+    do: wrap(Settings.set_nodes_allow_public_endpoint(v))
+
+  defp write("nodes.join_token_ttl_minutes", v),
+    do: wrap(Settings.set_nodes_join_token_ttl_minutes(v))
+
+  defp write("nodes.fence_after_s", v), do: wrap(Settings.set_nodes_fence_after_s(v))
+  defp write("nodes.lost_after_s", v), do: wrap(Settings.set_nodes_lost_after_s(v))
+
+  defp write("nodes.chart_ref", v), do: wrap(Settings.set_nodes_chart_ref(v))
+  defp write("nodes.registry", v), do: wrap(Settings.set_nodes_registry(v))
+  defp write("nodes.registry_username", v), do: wrap(Settings.set_nodes_registry_username(v))
+  defp write("nodes.registry_password", v), do: wrap(Settings.set_nodes_registry_password(v))
+  defp write("nodes.registry_insecure", v), do: wrap(Settings.set_nodes_registry_insecure(v))
+
+  defp write("nodes.registry.publish_timeout_ms", v),
+    do: wrap(Settings.set_nodes_registry_publish_timeout_ms(v))
+
+  defp write("nodes.registry_public_ok", v), do: wrap(Settings.set_nodes_registry_public_ok(v))
+
+  defp write("nodes.registry_pull_username", v),
+    do: wrap(Settings.set_nodes_registry_pull_username(v))
+
+  defp write("nodes.registry_pull_password", v),
+    do: wrap(Settings.set_nodes_registry_pull_password(v))
+
+  defp write("nodes.machine_image_source", v),
+    do: wrap(Settings.set_nodes_machine_image_source(v))
+
+  defp write("worker.cli.versions", v), do: wrap(Settings.set_worker_cli_versions(v))
+  defp write("worker.cli.manual", v), do: wrap(Settings.set_worker_cli_manual(v))
+  defp write("worker.cli_set.hold", v), do: wrap(Settings.set_worker_cli_set_hold(v))
+
+  defp write("worker.image.local_published", v),
+    do: wrap(Settings.set_worker_image_local_published(v))
+
+  defp wrap({:ok, updated}), do: {:ok, updated}
+  defp wrap({:error, reason}), do: {:error, {:invalid, inspect(reason)}}
+
+  @doc "The raw persisted override (`nil` = none) for a key."
+  @spec override(key()) :: term()
+  def override("credential_watchdog_adapters"), do: Settings.credential_watchdog_adapters()
+  def override("credential_watchdog_interval_ms"), do: Settings.credential_watchdog_interval_ms()
+
+  def override("credential_watchdog_recovery_interval_ms"),
+    do: Settings.credential_watchdog_recovery_interval_ms()
+
+  def override("quota_providers_shown"), do: Settings.quota_providers_shown()
+  def override("quota_providers_hidden"), do: Settings.quota_providers_hidden()
+
+  def override("output_offload_enabled"), do: Settings.output_offload_enabled()
+
+  def override("scheduling_epic_floors_enabled"), do: Settings.scheduling_epic_floors_enabled()
+  def override("scheduling_max_lifted_in_flight"), do: Settings.scheduling_max_lifted_in_flight()
+  def override("scheduling_finish_first"), do: Settings.scheduling_finish_first()
+
+  def override("scheduling_finish_first_max_wait_hours"),
+    do: Settings.scheduling_finish_first_max_wait_hours()
+
+  def override("scheduler_admission"), do: Settings.scheduler_admission_override()
+
+  def override("machine.derate"), do: Settings.machine_derate()
+  def override("nodes.public_url"), do: Settings.nodes_public_url()
+  def override("nodes.allow_public_endpoint"), do: Settings.nodes_allow_public_endpoint()
+  def override("nodes.join_token_ttl_minutes"), do: Settings.nodes_join_token_ttl_override()
+  def override("nodes.fence_after_s"), do: Settings.nodes_fence_after_s()
+  def override("nodes.lost_after_s"), do: Settings.nodes_lost_after_s_override()
+
+  def override("nodes.chart_ref"), do: Settings.nodes_chart_ref()
+  def override("nodes.registry"), do: Settings.nodes_registry()
+  def override("nodes.registry_username"), do: Settings.nodes_registry_username()
+  def override("nodes.registry_insecure"), do: Settings.nodes_registry_insecure()
+
+  def override("nodes.registry.publish_timeout_ms"),
+    do: Settings.nodes_registry_publish_timeout_ms()
+
+  def override("nodes.registry_public_ok"), do: Settings.nodes_registry_public_ok()
+  def override("nodes.registry_pull_username"), do: Settings.nodes_registry_pull_username()
+  def override("nodes.machine_image_source"), do: Settings.nodes_machine_image_source()
+  def override("worker.cli.versions"), do: Settings.worker_cli_versions()
+  def override("worker.cli.manual"), do: Settings.worker_cli_manual()
+  def override("worker.cli_set.hold"), do: Settings.worker_cli_set_hold()
+  def override("worker.image.local_published"), do: Settings.worker_image_local_published()
+
+  # Write-only: a stored password reads as a mask, never as the secret or its ciphertext.
+  def override("nodes.registry_password"),
+    do: if(Settings.nodes_registry_password_set?(), do: @secret_mask)
+
+  def override("nodes.registry_pull_password"),
+    do: if(Settings.nodes_registry_pull_password_set?(), do: @secret_mask)
+
+  @doc "The value in force with no override (app env, else hardcoded); `nil` = auto-detect."
+  @spec default(key()) :: term()
+  def default("credential_watchdog_adapters"),
+    do: Enum.map(Wardmast.Agents.adapters(), fn {type, _} -> to_string(type) end)
+
+  def default("credential_watchdog_interval_ms"),
+    do: CredentialWatchdog.default_interval_ms(:interval_ms)
+
+  def default("credential_watchdog_recovery_interval_ms"),
+    do: CredentialWatchdog.default_interval_ms(:recovery_interval_ms)
+
+  def default("output_offload_enabled"), do: false
+
+  def default("scheduling_epic_floors_enabled"), do: true
+  def default("scheduling_finish_first"), do: true
+
+  def default("scheduling_finish_first_max_wait_hours"),
+    do: Settings.default_finish_first_max_wait_hours()
+
+  # nil = max(slots_total - 1, 1), which depends on the board.
+  def default("scheduling_max_lifted_in_flight"), do: nil
+
+  def default("scheduler_admission"), do: "legacy"
+
+  def default("machine.derate"), do: DerateConfig.defaults()
+  def default("nodes.public_url"), do: nil
+  def default("nodes.chart_ref"), do: nil
+  def default("nodes.registry"), do: nil
+  def default("nodes.registry_username"), do: nil
+  def default("nodes.registry_password"), do: nil
+  def default("nodes.registry_insecure"), do: false
+  def default("nodes.registry.publish_timeout_ms"), do: Settings.default_publish_timeout_ms()
+
+  def default("nodes.registry_public_ok"), do: false
+  def default("nodes.registry_pull_username"), do: nil
+  def default("nodes.registry_pull_password"), do: nil
+  def default("nodes.machine_image_source"), do: "auto"
+  def default("worker.cli.versions"), do: nil
+  def default("worker.cli.manual"), do: []
+  def default("worker.cli_set.hold"), do: nil
+  def default("worker.image.local_published"), do: true
+  def default("nodes.allow_public_endpoint"), do: false
+  def default("nodes.join_token_ttl_minutes"), do: Settings.default_join_token_ttl_minutes()
+  def default("nodes.fence_after_s"), do: Wardmast.Nodes.Liveness.default_fence_after_s()
+
+  # Follows the fence in force, so the value shown is `fence + 30` once the
+  # fence is overridden.
+  def default("nodes.lost_after_s"), do: Wardmast.Nodes.Liveness.current().lost_after_s
+
+  def default(key) when key in ["quota_providers_shown", "quota_providers_hidden"], do: nil
+
+  @doc """
+  One key as `%{key, type, description, allowed, value, override, overridden,
+  default}`: `value` is what is in force (the override, else the default),
+  `override` the raw persisted value. `nil` for an unknown key.
+  """
+  @spec describe(key()) :: map() | nil
+  def describe(key) when key in @keys do
+    entry = Enum.find(schema(), &(&1.key == key))
+    override = override(key)
+    default = default(key)
+
+    Map.merge(entry, %{
+      value: if(is_nil(override), do: default, else: override),
+      override: override,
+      overridden: not is_nil(override),
+      default: default
+    })
+  end
+
+  def describe(_key), do: nil
+
+  @doc "`describe/1` for every key."
+  @spec all() :: [map()]
+  def all, do: Enum.map(@keys, &describe/1)
+
+  @doc "`%{key_atom => override}` — what `installation_config_get` returns as `settings`."
+  @spec overrides() :: %{atom() => term()}
+  def overrides, do: Map.new(@keys, &{key_atom(&1), override(&1)})
+
+  @doc "The atom a key is reported under in `overrides/0`; dotted keys are quoted atoms."
+  @spec key_atom(key()) :: atom()
+  def key_atom(key) when key in @keys, do: Map.fetch!(@key_atoms, key)
+end

@@ -2,7 +2,7 @@
 //
 // bd-3tnoi9 — the `/settings` page in a real browser, at desktop and mobile width.
 //
-// `ArbiterWeb.SettingsLiveTest` proves the page's data and its saves.
+// `WardmastWeb.SettingsLiveTest` proves the page's data and its saves.
 // What `ConnCase` cannot show is that the page is actually laid out and usable:
 // every section drawn, nothing pushed past the viewport at 1280px or at a phone
 // width, the theme switcher really flipping `html[data-theme]`, and a save

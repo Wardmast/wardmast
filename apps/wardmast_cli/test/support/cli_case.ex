@@ -1,0 +1,210 @@
+defmodule WardmastCli.CliCase do
+  @moduledoc """
+  Test helpers for command-level testing.
+
+  Sets up:
+    * A `Req.Test` stub keyed by the test module's name
+    * `:bd2_halt_strategy = :raise` so `Output.die/halt` raises instead of
+      calling `System.halt/1`
+    * IO capture helpers that also catch `WardmastCli.Output.Halt`
+
+  Usage:
+
+      use WardmastCli.CliCase
+
+      test "show prints issue" do
+        stub_get("/api/issues/foo-123", %{"id" => "foo-123", "title" => "T"})
+        {out, _err, exit_code} = capture(fn ->
+          WardmastCli.Cmd.Show.run(["foo-123"])
+        end)
+        assert out =~ "foo-123"
+        assert exit_code == 0
+      end
+  """
+
+  use ExUnit.CaseTemplate
+
+  using do
+    quote do
+      import ExUnit.CaptureIO
+      import WardmastCli.CliCase
+
+      setup do
+        # Each test gets its own stub keyed by the test pid via the process dict.
+        Process.put(:bd2_halt_strategy, :raise)
+
+        stub_name = unique_stub_name()
+        Process.put(:bd2_stub_name, stub_name)
+
+        Process.put(:bd2_req_options,
+          plug: {Req.Test, stub_name},
+          retry: false
+        )
+
+        # The distribution check reads the host's sockets, epmd and cookie
+        # files; point it at nothing so doctor verdicts stay hermetic.
+        Process.put(:bd2_distribution_probe, proc_net: [], epmd_port: nil, cookie_paths: [])
+
+        # The secrets-at-rest check reads the host's `arbiter.env`; point it at
+        # nothing so doctor verdicts stay hermetic.
+        Process.put(:bd2_secrets_probe, :absent)
+
+        # `arb restart` refuses to signal anything when an `arbiter.service`
+        # unit file exists on disk (bd-3t973v); never read the host's unit
+        # dirs from a test.
+        Process.put(:bd2_unit_dirs, [])
+
+        # Stubbed listener pids are fake; `arb restart` reads their cmdline
+        # before signalling (bd-3t973v). Default them to a dev `mix phx.server`;
+        # tests of the refusal paths override this.
+        Process.put(:bd2_proc_cmdline, fn _pid ->
+          {:ok, ["beam.smp", "-extra", "--no-halt", "mix", "phx.server"]}
+        end)
+
+        # Never the host's real last-deploy record (`arb doctor`'s "last deploy"
+        # line reads it); tests of the record itself delete this and use
+        # ARB_DATA_HOME.
+        Process.put(:bd2_deploy_status_path, "/nonexistent/arb-test-deploy-status.json")
+
+        # Never the host's real operator socket (bd-8381tk): on the operator's
+        # machine that would mint a live coordinator token from a test run.
+        # `WardmastCli.FakeOperatorSocket.start!/1` repoints this.
+        Process.put(:bd2_operator_socket, "/nonexistent/arb-test-operator.sock")
+
+        :ok
+      end
+    end
+  end
+
+  @doc "Generate a unique stub atom name for this test process."
+  def unique_stub_name do
+    pid_str = inspect(self()) |> String.replace(["#", "<", ">", ".", " "], "")
+
+    String.to_atom(
+      "Bd2Stub_" <> pid_str <> "_" <> Integer.to_string(System.unique_integer([:positive]))
+    )
+  end
+
+  @doc """
+  Stub a GET request. Matches by exact path.
+  """
+  def stub_get(path, response_body, status \\ 200) do
+    stub_request(:get, path, response_body, status)
+  end
+
+  def stub_post(path, response_body, status \\ 201) do
+    stub_request(:post, path, response_body, status)
+  end
+
+  def stub_patch(path, response_body, status \\ 200) do
+    stub_request(:patch, path, response_body, status)
+  end
+
+  def stub_delete(path, response_body \\ "", status \\ 204) do
+    stub_request(:delete, path, response_body, status)
+  end
+
+  def stub_request(method, path, body, status) do
+    name = Process.get(:bd2_stub_name)
+    method_str = method |> to_string() |> String.upcase()
+
+    Req.Test.stub(name, fn conn ->
+      cond do
+        to_string(conn.method) != method_str ->
+          conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{error: "method mismatch"})
+
+        conn.request_path != path ->
+          conn
+          |> Plug.Conn.put_status(500)
+          |> Req.Test.json(%{error: "path mismatch: #{conn.request_path} vs #{path}"})
+
+        true ->
+          conn |> Plug.Conn.put_status(status) |> Req.Test.json(body)
+      end
+    end)
+  end
+
+  @doc """
+  Stub multiple requests, dispatched by `{method, path}`. The first matching
+  entry wins; unmatched requests return 500. Each entry can be a 2-tuple
+  `{body, status}` or a function `(conn -> conn)`.
+  """
+  def stub_routes(routes) when is_list(routes) do
+    name = Process.get(:bd2_stub_name)
+
+    Req.Test.stub(name, fn conn ->
+      key = {String.downcase(to_string(conn.method)), conn.request_path}
+
+      case Enum.find(routes, fn {k, _} -> k == key end) do
+        {_, fun} when is_function(fun, 1) ->
+          fun.(conn)
+
+        {_, {body, status}} ->
+          conn |> Plug.Conn.put_status(status) |> Req.Test.json(body)
+
+        nil ->
+          conn
+          |> Plug.Conn.put_status(500)
+          |> Req.Test.json(%{error: "unmatched: #{inspect(key)}"})
+      end
+    end)
+  end
+
+  @doc """
+  Stubs a transport error for any request matching the method+path.
+  """
+  def stub_transport_error(method, path, reason) do
+    name = Process.get(:bd2_stub_name)
+    method_str = method |> to_string() |> String.upcase()
+
+    Req.Test.stub(name, fn conn ->
+      if to_string(conn.method) == method_str and conn.request_path == path do
+        Req.Test.transport_error(conn, reason)
+      else
+        conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{error: "unmatched"})
+      end
+    end)
+  end
+
+  @doc """
+  Run `fun`, capturing stdout, stderr, and exit code. Returns
+  `{stdout, stderr, exit_code}`. `exit_code` is 0 if `fun` returned normally,
+  otherwise it's the code passed to `Output.halt/die`. `input: "…"` feeds stdin.
+  """
+  def capture(fun, opts \\ []) do
+    parent = self()
+    io_opts = if input = opts[:input], do: [input: input], else: []
+
+    stdout =
+      ExUnit.CaptureIO.capture_io(io_opts, fn ->
+        stderr =
+          ExUnit.CaptureIO.capture_io(:stderr, fn ->
+            try do
+              fun.()
+              send(parent, {:bd2_exit, 0})
+            rescue
+              e in WardmastCli.Output.Halt ->
+                send(parent, {:bd2_exit, e.code})
+            end
+          end)
+
+        send(parent, {:bd2_stderr, stderr})
+      end)
+
+    stderr =
+      receive do
+        {:bd2_stderr, s} -> s
+      after
+        100 -> ""
+      end
+
+    exit_code =
+      receive do
+        {:bd2_exit, code} -> code
+      after
+        100 -> 0
+      end
+
+    {stdout, stderr, exit_code}
+  end
+end

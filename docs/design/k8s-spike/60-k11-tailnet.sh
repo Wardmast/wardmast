@@ -32,7 +32,7 @@ test)
   (cd "$W/certs" && SPIKE_SERVER_IP="$TIP,127.0.0.1" elixir "$HERE/k4_mint.exs" "$W/certs/out" >/dev/null)
   ts b serve --tcp=8443 off >/dev/null 2>&1 || true
   ts b serve --bg --tcp 8443 tcp://127.0.0.1:19443
-  cd "$ROOT/apps/arbiter_web"
+  cd "$ROOT/apps/wardmast_web"
   SPIKE_TARGET_HOST="$TIP" SPIKE_CERTDIR="$W/certs/out" SPIKE_SOAK_SECONDS="$SECS" SPIKE_RESULTS_FILE="$W/k11-results.jsonl" \
     MIX_ENV=test ARB_TEST_MAX_CASES=2 systemd-run --user --scope -p MemoryMax=3G mix test --include spike_k8s test/spike/k11_proxy_ws_test.exs;;
 down)

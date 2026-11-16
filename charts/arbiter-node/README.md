@@ -66,7 +66,7 @@ helm install mesaana ./charts/arbiter-node -n arbiter-workers \
 
 ```sh
 scripts/helm-chart-check.sh          # helm lint --strict + helm template | kubeconform for every mode/reach
-cd apps/arbiter && mix test test/arbiter/node_agent/k8s/helm_chart_test.exs   # renders need helm on PATH
+cd apps/wardmast && mix test test/wardmast/node_agent/k8s/helm_chart_test.exs   # renders need helm on PATH
 ```
 
 `quota.hard` and `limitRange` are explicit figures for `concurrency.max=2` and the default worker size:

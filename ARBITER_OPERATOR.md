@@ -86,8 +86,8 @@ ones to know: `arb worker show <id>` ↔ `worker_show`, `arb worker list` ↔
 `coordinator_inbox`, `arb prime` (the session-start briefing; CLI only — it
 composes several reads and has no single MCP tool). Host-local verbs never call
 the server over HTTP and so have no MCP twin: `install`, `session`, `where`,
-`init`, `version`, `self-update`, `upgrade`, `help`. `ArbiterCli.Verbs` is the
-registry; `Arbiter.MCP.Catalog.all/0` is the tool list (its moduledoc table is
+`init`, `version`, `self-update`, `upgrade`, `help`. `WardmastCli.Verbs` is the
+registry; `Wardmast.MCP.Catalog.all/0` is the tool list (its moduledoc table is
 test-checked against it).
 
 ## 2. Operating Pitfalls — Quick Reference
@@ -165,12 +165,12 @@ auto-claim, the dashboard create form, and worker-filed follow-ups. Epics,
 decisions and `task`-type tickets are not exempt.
 
 Tickets filed before this are backfilled with
-`mix arbiter.backfill_issue_repos` on a dev/source install (dry-run by
+`mix wardmast.backfill_issue_repos` on a dev/source install (dry-run by
 default, `--apply` to write; re-running it is a no-op), or on a release
 install with no Mix toolchain:
 
-    bin/arbiter eval 'Arbiter.Release.backfill(:issue_repos)'             # dry-run
-    bin/arbiter eval 'Arbiter.Release.backfill(:issue_repos, apply?: true)'
+    bin/wardmast eval 'Wardmast.Release.backfill(:issue_repos)'             # dry-run
+    bin/wardmast eval 'Wardmast.Release.backfill(:issue_repos, apply?: true)'
 
 It prints, per workspace, how many rows it set and how many it left null. See
 "Data backfills on a release install" in section 8 for the other four.
@@ -294,11 +294,11 @@ start" step. It does not replace judging a real run's output.
 ### Never migrate a live server (SQLite has one writer)
 
 SQLite allows exactly one writer. **Never** run a standalone migrate against a
-running server — not `mix arbiter.migrate`, not
-`bin/arbiter eval Arbiter.Release.migrate`. It races the live writer and fails
+running server — not `mix wardmast.migrate`, not
+`bin/wardmast eval Wardmast.Release.migrate`. It races the live writer and fails
 with `queue_timeout`, or worse, half-applies while the old code is serving.
 
-Migration is a **boot** step: `Arbiter.Boot.Migrator` runs pending migrations
+Migration is a **boot** step: `Wardmast.Boot.Migrator` runs pending migrations
 synchronously, before the endpoint opens, gated on the single-instance lock. So
 every restart is also a migration run, and the ordering is always:
 
@@ -312,7 +312,7 @@ reason. The dev-mode path (`arb server deploy --git-pull`, reached only when you
 `--git-pull` — a bare `arb server deploy` never falls back to it) follows
 the same rule: it pulls, rebuilds the CLI if it changed, and restarts, letting
 `Boot.Migrator` apply the pulled migrations on boot. It runs a standalone
-`mix arbiter.migrate` only when the server is already down — no live writer to
+`mix wardmast.migrate` only when the server is already down — no live writer to
 race. If you want to migrate by hand, stop the service first
 (`systemctl --user stop arbiter.service`), then run the eval.
 
@@ -344,7 +344,7 @@ Your options, in preference order:
 1. **Fix forward** — deploy a newer release (`arb server deploy`). Almost always
    the right move.
 2. **Roll the schema back first**, then the code:
-   `bin/arbiter eval "Arbiter.Release.rollback(Arbiter.Repo, <version>)"` with
+   `bin/wardmast eval "Wardmast.Release.rollback(Wardmast.Repo, <version>)"` with
    the service stopped, then
    `arb server deploy --version <prior-tag> --force`.
 3. **Accept a mixed-schema rollback** — re-run with
@@ -372,20 +372,20 @@ forward and rolling back.
 ### Data backfills on a release install
 
 A release install (the production path, since 2026-06) has no Mix toolchain,
-so `mix arbiter.backfill_*` cannot run there — only `bin/arbiter eval` can.
-Every backfill lives in `Arbiter.Release.backfill/2`, starts only Ash + the
+so `mix wardmast.backfill_*` cannot run there — only `bin/wardmast eval` can.
+Every backfill lives in `Wardmast.Release.backfill/2`, starts only Ash + the
 repo (never a second endpoint/Autopilot/patrols next to the live server), and
 defaults to a dry run. Pass `apply?: true` to write:
 
-    bin/arbiter eval 'Arbiter.Release.backfill(:codex_usage)'
-    bin/arbiter eval 'Arbiter.Release.backfill(:gemini_usage_note)'
-    bin/arbiter eval 'Arbiter.Release.backfill(:issue_repos)'
-    bin/arbiter eval 'Arbiter.Release.backfill(:run_steps)'
-    bin/arbiter eval 'Arbiter.Release.backfill(:task_statuses, repo_path: "/path/to/arbiter")'
+    bin/wardmast eval 'Wardmast.Release.backfill(:codex_usage)'
+    bin/wardmast eval 'Wardmast.Release.backfill(:gemini_usage_note)'
+    bin/wardmast eval 'Wardmast.Release.backfill(:issue_repos)'
+    bin/wardmast eval 'Wardmast.Release.backfill(:run_steps)'
+    bin/wardmast eval 'Wardmast.Release.backfill(:task_statuses, repo_path: "/path/to/arbiter")'
 
 `:task_statuses` reads `git log`, and `:repo_path` defaults to wherever
-`bin/arbiter` was invoked from — always pass it explicitly in a release eval.
-See the `Arbiter.Release.backfill/2` moduledoc for the full option list per
+`bin/wardmast` was invoked from — always pass it explicitly in a release eval.
+See the `Wardmast.Release.backfill/2` moduledoc for the full option list per
 backfill.
 
 ### The first upgrade past v0.1.63 is not protected — snapshot the DB
@@ -646,7 +646,7 @@ Catch failures early — don't wait for them to be reported upstream.
 
 Periodically review how the loop itself is performing:
 
-    arb loop analyze --since 7d          # or: mix arbiter.loop.analyze --since 7d
+    arb loop analyze --since 7d          # or: mix wardmast.loop.analyze --since 7d
 
 This is the **manual, read-only** Stage 1 loop-analysis pass. It segments
 failures operational-vs-agent-quality by allowlist (so our own deploy restarts
@@ -675,12 +675,12 @@ else is a rendering.
 **Claude Code prunes its session store at ~21 days**, so that artifact expires
 unless Arbiter copies it. Gemini and Codex were not observed pruning. Live runs
 archive themselves; rescue pre-existing ones with
-`mix arbiter.archive_sessions --apply` (dry-run by default, idempotent).
+`mix wardmast.archive_sessions --apply` (dry-run by default, idempotent).
 Monitor coverage with the `transcript_capture_stats` MCP tool, which reports
 the rendered log and the JSONL archive as **separate** rates.
 
 **The log root is secret-bearing.** Archives are redacted on ingest through
-`Arbiter.Redaction`, but redaction only knows secrets someone marked — it
+`Wardmast.Redaction`, but redaction only knows secrets someone marked — it
 cannot catch a key a subprocess happened to print. Archives are written `0600`
 and the root `0700`. Don't sync it to shared storage or back it up with weaker
 access control than the host account. Full guide: `docs/session-archive.md`.
@@ -695,9 +695,9 @@ Every row now carries a `source` discriminator:
 
 | source | `task_id` | who writes it |
 | --- | --- | --- |
-| `task` | always set | `Arbiter.Worker` / `Dispatch` — real worker sessions |
-| `probe` | never set | **historical only** — `Arbiter.Quota.RefreshProbe` was deleted in bd-atyrrq; no longer written |
-| `preflight` | set when a ticket is being gated | `Arbiter.Agents.Preflight` — the auth check before every dispatch and resume |
+| `task` | always set | `Wardmast.Worker` / `Dispatch` — real worker sessions |
+| `probe` | never set | **historical only** — `Wardmast.Quota.RefreshProbe` was deleted in bd-atyrrq; no longer written |
+| `preflight` | set when a ticket is being gated | `Wardmast.Agents.Preflight` — the auth check before every dispatch and resume |
 | `coordinator_session` | never set | a browser-hosted coordinator session |
 | `terminal_session` | never set | an interactive terminal session |
 | `maintenance` | never set | scheduled internal passes (e.g. `arb loop analyze`) |

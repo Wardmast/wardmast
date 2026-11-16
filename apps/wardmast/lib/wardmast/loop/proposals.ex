@@ -1,0 +1,763 @@
+defmodule Wardmast.Loop.Proposals do
+  @moduledoc """
+  Turns a `%Wardmast.Loop.Report{}` into **candidate** proposals for the Stage 2
+  queue (bd-9j2g3x).
+
+  `candidates/2` is pure — it maps an already-built report onto the candidate
+  shape `Wardmast.Loop.record/2` accepts and writes nothing. `record_all/2` is
+  the shell that persists them, and it only ever runs when the caller opted in
+  with `propose?: true`, so `Wardmast.Loop.Analysis.analyze/1` keeps its
+  zero-writes guarantee by default.
+
+  ## What becomes a candidate, and what deliberately does not
+
+    * **Every reviewer-finding category** becomes a skill candidate at `:fleet`
+      scope, including the ones below the evidence bar. That is the point of
+      Stage 2: a below-bar finding is kept as a `:hypothesis` carrying its
+      incident refs instead of being discarded, so its third occurrence three
+      weeks later counts from 1 + 2 rather than from zero. The bar is
+      re-evaluated on the accumulated total by `Wardmast.Loop.record/2`, not
+      here.
+
+      Operators can also hand-author `:repo_doc_patch` candidates via
+      `arb loop propose repo-doc-patch` (see the CI lint bullet below for the
+      one this module generates).
+
+      Since bd-5w8h0r these candidates **name a target and carry their patch
+      content**, both deterministically. `Wardmast.Loop.FindingBuckets`' table
+      maps each category to a skill and to a kind — `:skill_patch` where a
+      fleet skill governs the category, `:skill_create` where none does yet —
+      and `Wardmast.Loop.SkillClause` renders the clause from the category, the
+      per-category imperative constant, the window's incident and task counts
+      and one verbatim reviewer citation. No model is involved: see
+      `docs/design/loop-payload-authoring.md` for why option (c)-then-(b) was
+      taken over asking an LLM.
+
+      A `:skill_patch` payload carries a `"clause"` and a `"clause_id"` but
+      deliberately **no `"body"`**. The clause is spliced into the skill's
+      current body at *apply* time by `Wardmast.Loop.Apply.Payload.skill_attrs/2`,
+      because a proposal can sit in the queue for weeks and a whole body
+      rendered here would silently revert whatever a human wrote in the
+      meantime. A `:skill_create` payload does carry a full `"body"` — a stub
+      preamble plus the clause — since there is no existing body to clobber.
+
+      A category with no attribution row keeps the pre-bd-5w8h0r shape: a
+      `:skill_patch` naming no target, carrying evidence only, which `Apply`
+      refuses with the gap spelled out. `FindingBuckets`' compile-time totality
+      guard means the analyser cannot reach that branch.
+
+    * **Rework difficulty misestimates** become `:difficulty_override`
+      candidates at `:task` scope (blast radius 1, so they bypass the bar) with
+      a concrete payload — `Issue.difficulty` + 1 on the named task — and a
+      rendered unified diff.
+
+    * **Rework misestimates that share a `{from_difficulty, to_difficulty,
+      repo}` cell also become one `:config_set` candidate at `:fleet` scope**
+      per cell present in the window (bd-70nblx) — the same fingerprint
+      accumulation already built for reviewer-finding categories, applied to
+      this metric class instead of designing new machinery. This is additive
+      to, never a replacement for, the per-task `:difficulty_override` rows
+      above: a cell with a single occurrence still produces only its per-task
+      override plus a below-bar `:hypothesis` cluster row that carries no
+      immediate effect. A cluster only becomes actionable once it clears the
+      same evidence bar as everything else in Stage 2 (≥3 incidents across ≥2
+      distinct tasks), at which point it escalates as a fleet-wide proposal —
+      "raise the default dispatch difficulty for this cell" — rather than
+      leaving that signal to be inferred from three isolated task rows. The
+      payload carries a `"patch"` key rendering `routing.rules.D<from>` the
+      way this workspace already routes `D<to>` (bd-53cuj6), so applying it
+      succeeds; a cell where that patch would be a no-op (workspace already
+      routes both tiers the same way) is dropped rather than emitted as a row
+      that would silently apply and change nothing.
+
+    * **A repo whose CI fix_passes are mostly lint becomes a `:repo_doc_patch`
+      candidate** (bd-cuu8n3) — the first automatic producer of that kind. The
+      report's CI section flags a repo whose `:lint` share of fix_passes
+      exceeds the workspace's `loop.ci.lint_share_threshold`
+      (`Wardmast.Loop.CiSection`); the candidate is a one-line lesson for that
+      repo's `CLAUDE.md` — "run `<check command>` before every push" — at
+      `:fleet` scope, so it accumulates lint fix_pass runs as incidents
+      against the normal evidence bar. Fingerprinted on the repo alone, so
+      every window reinforces the same row. Applying it stays human, through
+      the existing `Wardmast.Loop.Apply.RepoDoc` path.
+
+    * **`:quality_failure` misestimates do not become candidates.** The report's
+      own recommendation for them is *"investigate the agent-quality failures
+      before recommending a difficulty change — this is a cost anomaly, not a
+      rounds signal"*. Queueing a difficulty bump from a cost signal would fill
+      the queue with writes the report itself declines to recommend.
+  """
+
+  alias Wardmast.Agents.Routing.ByDifficulty
+  alias Wardmast.Agents.Routing.Competence
+  alias Wardmast.Loop
+  alias Wardmast.Loop.CompetenceProposals
+  alias Wardmast.Loop.FindingBuckets
+  alias Wardmast.Loop.Report
+  alias Wardmast.Loop.Scarcity
+  alias Wardmast.Loop.SkillClause
+  alias Wardmast.Loop.SubjectStats
+  alias Wardmast.Tasks.Issue
+  alias Wardmast.Tasks.Workspace
+
+  # `gist` is a one-liner in a table; long finding categories get elided.
+  @gist_limit 160
+
+  # Fallback for the `Issue.difficulty` ceiling if the constraint ever stops
+  # declaring a max; `max_difficulty/0` prefers the resource's own value.
+  @difficulty_ceiling 5
+
+  # The highest difficulty the LOOP may propose bumping a task to (#1519).
+  # Deliberately one below the scale's ceiling: D5 routes to the flagship
+  # model and is an operator-only escalation, never an automated suggestion.
+  @loop_bump_ceiling 4
+
+  @doc """
+  The candidate proposals implied by `report`. Pure: no writes, no I/O.
+
+  Options: `:workspace_id` (stamped on each candidate), `:origin` (defaults to
+  `"loop.analyze"`), `:workspace_config` (the workspace's `config` map, used
+  to render the `:config_set` cluster patch — resolved by the caller; this
+  function never fetches it itself), `:difficulty_cells` (`SubjectStats.sample/1`
+  tasks for the R12 difficulty feed; default none, which is the feed off),
+  `:competence_cells` (the same shape, for the R13 matrix feed; default none) and
+  `:competence_rows` (the live matrix those cells are compared with; read from
+  the installation only when there are cells).
+  """
+  @spec candidates(Report.t(), keyword()) :: [map()]
+  def candidates(%Report{} = report, opts \\ []) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+    workspace_config = Keyword.get(opts, :workspace_config)
+    origin = Keyword.get(opts, :origin, "loop.analyze")
+
+    finding_candidates(report, workspace_id, origin) ++
+      misestimate_candidates(report, workspace_id, origin) ++
+      misestimate_cluster_candidates(report, workspace_id, workspace_config, origin) ++
+      difficulty_feed_candidates(Keyword.get(opts, :difficulty_cells, []), workspace_id, origin) ++
+      competence_candidates(opts, workspace_id, origin) ++
+      ci_lint_candidates(report, workspace_id, origin)
+  end
+
+  @doc """
+  Persist every candidate implied by `report` through `Wardmast.Loop.record/2`,
+  so each one is either inserted or reinforced onto the row with the same
+  fingerprint. Returns the resulting rows.
+
+  A candidate `record/2` refuses — e.g. a `:fleet` candidate on an ambiguous
+  install with no unambiguous workspace to attribute it to (bd-3dasqm) — is
+  logged and skipped rather than aborting the pass, but is *not* silently
+  lost: it is also counted in `:dropped`, so a caller (and, via
+  `Wardmast.Loop.Analysis.analyze/1`'s `:proposals_dropped`, an operator) can
+  see that the fleet-finding stream is going missing on such an install
+  instead of only noticing the log line.
+  """
+  @spec record_all(Report.t(), keyword()) :: %{
+          rows: [Wardmast.Loop.PendingWrite.t()],
+          dropped: [%{gist: String.t() | nil, reason: term()}]
+        }
+  def record_all(%Report{} = report, opts \\ []) do
+    {record_opts, candidate_opts} = Keyword.split(opts, [:actor, :evidence_bar])
+
+    candidate_opts =
+      Keyword.put_new_lazy(candidate_opts, :workspace_config, fn ->
+        candidate_opts |> Keyword.get(:workspace_id) |> fetch_workspace_config()
+      end)
+
+    {rows, dropped} =
+      report
+      |> candidates(candidate_opts)
+      |> Enum.reduce({[], []}, fn candidate, {rows, dropped} ->
+        case Loop.record(candidate, record_opts) do
+          {:ok, row} ->
+            {[row | rows], dropped}
+
+          {:error, reason} ->
+            require Logger
+
+            Logger.warning(
+              "[loop.propose] skipped candidate #{inspect(candidate[:gist])}: #{inspect(reason)}"
+            )
+
+            {rows, [%{gist: candidate[:gist], reason: reason} | dropped]}
+        end
+      end)
+
+    %{rows: Enum.reverse(rows), dropped: Enum.reverse(dropped)}
+  end
+
+  # A `:fleet` candidate with no explicit `:workspace_id` still lands on a
+  # real workspace: `Loop.insert/3` attributes it to
+  # `Quota.default_workspace_id()`. Mirror that resolution here so the patch
+  # is rendered against the workspace the row actually applies to, not
+  # against stock defaults.
+  defp fetch_workspace_config(nil) do
+    case Wardmast.Quota.default_workspace_id() do
+      {:ok, id} -> fetch_workspace_config(id)
+      _ -> nil
+    end
+  end
+
+  defp fetch_workspace_config(workspace_id) do
+    case Ash.get(Workspace, workspace_id) do
+      {:ok, %Workspace{config: config}} -> config
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  # ---- reviewer-finding categories ----------------------------------------
+
+  defp finding_candidates(report, workspace_id, origin) do
+    by_title = Map.new(report.suggestions, &{&1.title, &1})
+    window_until = report |> Map.get(:window) |> then(&(&1 || %{})) |> Map.get(:until)
+
+    Enum.map(report.finding_categories, fn cat ->
+      suggestion = Map.get(by_title, cat.category, %{})
+      destination = Map.get(suggestion, :destination) || :skill
+
+      # The fingerprint inputs first, on their own: `Loop.fingerprint/1` reads
+      # only `{kind, target, category, difficulty, repo}`, so the digest is
+      # known before the payload is rendered — which is what lets the clause
+      # cite the finding's own stable identity.
+      identity = finding_identity(cat.category)
+
+      Map.merge(identity, %{
+        scope: :fleet,
+        gist: finding_gist(cat.category),
+        target_metric: Map.get(suggestion, :target_metric),
+        baseline: Map.get(suggestion, :baseline),
+        incident_refs: cat.run_ids,
+        task_refs: cat.tasks,
+        payload:
+          finding_payload(identity, %{
+            example: Map.get(cat, :example),
+            # The counts the *clause* cites are this window's, straight off the
+            # candidate. The row's own `evidence_count` is the union across
+            # every window that has reinforced it, and the payload is
+            # re-rendered on each reinforcement, so the clause always describes
+            # the window that last touched it — which is what the provenance
+            # comment says it is.
+            incidents: length(cat.run_ids),
+            tasks: cat.tasks,
+            destination: destination,
+            window_until: window_until
+          }),
+        diff: nil,
+        origin: origin,
+        workspace_id: workspace_id
+      })
+    end)
+  end
+
+  @doc """
+  The fingerprint identity of `category`'s proposal —
+  `%{kind:, target:, category:, difficulty:, repo:}` — resolved through the
+  `Wardmast.Loop.FindingBuckets` attribution table.
+
+  `:skill_patch` when a fleet skill governs the category, `:skill_create` when
+  none does (bd-5w8h0r). A category with no attribution row keeps the
+  pre-bd-5w8h0r shape — an unapplicable `:skill_patch` naming its gap — so this
+  stays total over hand-built and historical input; the analyser itself cannot
+  reach that branch, since the table is total over its own categories at
+  compile time.
+
+  Public alongside `finding_payload/2` so the bd-5w8h0r backfill computes the
+  successor fingerprint from the same map this pass does.
+  """
+  @spec finding_identity(String.t()) :: map()
+  def finding_identity(category) do
+    attribution = FindingBuckets.attribution(category)
+
+    %{
+      kind: (attribution && attribution.kind) || :skill_patch,
+      target: attribution && attribution.skill,
+      category: category,
+      difficulty: nil,
+      # No repo: a finding category is a fleet-wide aggregate with no
+      # attributed repo cell (see difficulty misestimates for the one place
+      # that attribution exists today).
+      repo: nil
+    }
+  end
+
+  @doc "The one-line gist of `category`'s proposal, elided to the gist limit."
+  @spec finding_gist(String.t()) :: String.t()
+  def finding_gist(category) do
+    category |> FindingBuckets.attribution() |> gist_for(category) |> elide()
+  end
+
+  defp gist_for(%{kind: :skill_patch, skill: skill}, category),
+    do: "patch skill `#{skill}`: #{category}"
+
+  defp gist_for(%{kind: :skill_create, skill: skill}, category),
+    do: "create skill `#{skill}` (no fleet skill governs this yet): #{category}"
+
+  defp gist_for(nil, category), do: "working-practice guardrail for: #{category}"
+
+  @doc """
+  The payload a finding-category row carries, rendered from its fingerprint
+  `identity` (`%{kind:, target:, category:, difficulty:, repo:}`) and one
+  window's `evidence` (`%{example:, incidents:, tasks:, destination:,
+  window_until:}`).
+
+  Public because the bd-5w8h0r backfill
+  (`Wardmast.Loop.PendingWriteTargetBackfill`) re-authors payloads for rows
+  written before the attribution table existed. A backfilled payload that
+  differed from the one this pass writes would make the next window's
+  reinforcement look like a change, so both go through here.
+  """
+  @spec finding_payload(map(), map()) :: map()
+  def finding_payload(identity, evidence) do
+    build_payload(identity, FindingBuckets.attribution(identity.category), evidence)
+  end
+
+  # An unattributed category carries evidence and nothing else: naming a target
+  # it does not have would be a guess, and `Apply` refuses the row with the gap
+  # spelled out rather than patching the wrong skill.
+  defp build_payload(identity, nil, evidence) do
+    %{
+      "category" => identity.category,
+      "example" => Map.get(evidence, :example),
+      "destination" => to_string(Map.get(evidence, :destination) || :skill)
+    }
+  end
+
+  defp build_payload(identity, attribution, evidence) do
+    clause =
+      SkillClause.render(%{
+        category: identity.category,
+        imperative: attribution.imperative,
+        example: Map.get(evidence, :example),
+        incidents: Map.get(evidence, :incidents) || 0,
+        tasks: Map.get(evidence, :tasks) || [],
+        fingerprint: Loop.fingerprint(identity),
+        window_until: Map.get(evidence, :window_until)
+      })
+
+    payload = %{
+      "category" => identity.category,
+      "example" => Map.get(evidence, :example),
+      "destination" => to_string(Map.get(evidence, :destination) || :skill),
+      "clause_id" => SkillClause.slug(identity.category),
+      "clause" => clause
+    }
+
+    case attribution.kind do
+      # No `"body"`: a patch carries only its clause, and `Apply` splices it
+      # into whatever the skill says at apply time. A whole body rendered here
+      # would be stale by the time an operator applied it, and applying it
+      # would silently revert any human edit made in between — the failure
+      # `RepoDocPatch` exists to avoid on a repo's `CLAUDE.md`.
+      :skill_patch ->
+        Map.put(payload, "skill", attribution.skill)
+
+      # A skill that does not exist has no body to splice into, so the stub is
+      # authored in full here. `Apply` forces `managed_by: :loop` on it.
+      :skill_create ->
+        payload
+        |> Map.put("name", attribution.skill)
+        |> Map.put("body", SkillClause.stub_body(attribution.skill, clause))
+    end
+  end
+
+  # ---- CI lint share → repo CLAUDE.md (bd-cuu8n3) ---------------------------
+
+  defp ci_lint_candidates(report, workspace_id, origin) do
+    ci = Map.get(report, :ci) || %{}
+    label = report |> Map.get(:window) |> then(&(&1 || %{})) |> Map.get(:label)
+
+    ci
+    |> Map.get(:lint_flags, [])
+    |> Enum.map(fn f ->
+      share = "#{f.lint} of #{f.total} (#{pct(f.share)})"
+
+      %{
+        kind: :repo_doc_patch,
+        scope: :fleet,
+        # The fingerprint inputs: the repo alone, so the command, counts and
+        # window can change without splitting the row.
+        category: "ci lint share: #{f.repo}",
+        target: nil,
+        difficulty: nil,
+        repo: f.repo,
+        gist:
+          elide(
+            "#{f.repo}: require `#{f.check_command}` before push (#{share} CI fix_passes were lint)"
+          ),
+        target_metric: "lint share of CI fix_passes on #{f.repo}",
+        baseline: "#{share}#{if label, do: " in #{label}", else: ""}",
+        incident_refs: f.run_ids,
+        task_refs: f.task_ids,
+        payload: %{
+          "lesson" => ci_lint_lesson(f),
+          "check_command" => f.check_command,
+          "check_command_source" => to_string(f.check_command_source),
+          "lint_fix_passes" => f.lint,
+          "fix_passes" => f.total,
+          "lint_share" => f.share,
+          "threshold" => f.threshold
+        },
+        diff: nil,
+        origin: origin,
+        workspace_id: f.workspace_id || workspace_id
+      }
+    end)
+  end
+
+  # One line (`RepoDocPatch.upsert/4` rejects a newline): the instruction
+  # first, the evidence after it.
+  defp ci_lint_lesson(f) do
+    "Before every push, run #{command_phrase(f)} locally and fix everything it reports — " <>
+      "#{f.lint} of #{f.total} recent CI fix-passes on #{f.repo} were lint-only " <>
+      "(format / credo / dialyzer / compile warnings) that this would have caught before CI did."
+  end
+
+  defp command_phrase(%{check_command_source: :fallback, check_command: cmd}), do: cmd
+  defp command_phrase(%{check_command: "the same checks" <> _ = cmd}), do: cmd
+  defp command_phrase(%{check_command: cmd}), do: "`#{cmd}`"
+
+  defp pct(rate) when is_number(rate), do: "#{Float.round(rate * 100, 1)}%"
+
+  # ---- difficulty misestimates --------------------------------------------
+
+  defp misestimate_candidates(report, workspace_id, origin) do
+    unit = gist_unit(report)
+
+    report.difficulty_misestimates
+    |> Enum.filter(&proposable_misestimate?/1)
+    |> Enum.map(fn m ->
+      from = m.dispatched_difficulty
+      to = from + 1
+      rec = Map.get(m, :recommendation) || %{}
+      repo = misestimate_repo(m)
+
+      %{
+        kind: :difficulty_override,
+        scope: :task,
+        category: "difficulty misestimate (rework)",
+        target: m.task_id,
+        difficulty: from,
+        repo: repo,
+        gist:
+          elide(
+            "raise difficulty on #{m.task_id}: D#{from} → D#{to} " <>
+              "(#{m.rounds} review round(s), #{draw_gist(m, unit)})"
+          ),
+        target_metric: Map.get(rec, :target_metric),
+        baseline: Map.get(rec, :baseline),
+        # A misestimate is a task-level observation, so the task is its own
+        # incident ref. Unioning on it keeps a re-run over the same window
+        # idempotent, and a recurrence at the same difficulty is one incident,
+        # not two.
+        incident_refs: [m.task_id],
+        task_refs: [m.task_id],
+        payload: %{
+          "task_id" => m.task_id,
+          "difficulty" => to,
+          "from_difficulty" => from,
+          "reason" => "rework"
+        },
+        diff: difficulty_diff(m.task_id, from, to),
+        origin: origin,
+        workspace_id: workspace_id
+      }
+    end)
+  end
+
+  # The one-line summary an operator approves on must be denominated in the same
+  # unit as the `target_metric`/`baseline` it summarises (#1463) — a gist reading
+  # "$0.10" next to a pre-registration in 5h-window share invites approving a
+  # dollar saving that the proposal never claimed to deliver.
+  #
+  # The `is_number` guard mirrors `Analysis.comparison_unit/3`: that is exactly
+  # the condition under which the recommendation itself falls back to dollars
+  # (an uncalibrated window leaves the share `nil`), so gist and baseline can
+  # never disagree about which unit they are in.
+  defp draw_gist(%{window_share: share}, {:window_share, window}) when is_number(share),
+    do: Scarcity.format_share(share, window)
+
+  defp draw_gist(m, _unit), do: "$#{fmt(Map.get(m, :cost_usd))}"
+
+  # The unit the report's scarcity frame is denominated in. A report persisted
+  # before the `window_share_5h` rename still carries the old atom (bd-c2v31s);
+  # `Scarcity.normalize_unit/1` reads it back. The window the share is of comes
+  # from the calibration, so the gist names the window actually used.
+  defp gist_unit(report) do
+    scarcity = Map.get(report, :scarcity, %{})
+
+    case Scarcity.normalize_unit(Map.get(scarcity, :unit, :cost_usd)) do
+      :window_share ->
+        case scarcity do
+          %{calibration: %{window: window}} when window in [:five_hour, :seven_day] ->
+            {:window_share, window}
+
+          _ ->
+            {:window_share, :five_hour}
+        end
+
+      _ ->
+        :cost_usd
+    end
+  end
+
+  # ---- learned competence (bd-d5rdsc, R13; design §3.3, §11) --------------
+  #
+  # `:competence_cells` is `SubjectStats.sample/1` output; with none (the feed
+  # off) this contributes nothing. The live rows default to the installation's
+  # effective matrix, read only when there are cells to compare. Proposals
+  # only: a matrix change is applied by an operator or landed by the Stage 3
+  # canary (`Wardmast.Loop.Canary`), never by this pass.
+  defp competence_candidates(opts, workspace_id, origin) do
+    case Keyword.get(opts, :competence_cells, []) do
+      [] ->
+        []
+
+      tasks ->
+        live_rows =
+          Keyword.get_lazy(opts, :competence_rows, &Competence.rows/0)
+
+        CompetenceProposals.candidates(tasks, live_rows,
+          workspace_id: workspace_id,
+          origin: origin
+        )
+    end
+  end
+
+  # ---- difficulty feed (bd-druqc1, R12; design §3.2) ----------------------
+  #
+  # Competence keys on `difficulty_at_dispatch`, so a rubric that runs a tier
+  # low is absorbed by the matrix rather than repaired. The repair is the
+  # Loop's `:difficulty_override` lane, fed by each cell's "difficulty raised"
+  # rate. `tasks` is `SubjectStats.sample/1` output; with none (the feed off)
+  # this contributes nothing. A cell proposal is a fleet-wide hypothesis whose
+  # payload names the cell and no `task_id`, so `Apply.payload_ready?/1`
+  # refuses it until an operator authors the concrete change: proposals only,
+  # nothing auto-applies.
+
+  # A cell needs the ladder's minimum sample before its rate is read, and at
+  # least this share of its tasks corrected upward.
+  @raised_rate_threshold 0.3
+
+  defp difficulty_feed_candidates([], _workspace_id, _origin), do: []
+
+  defp difficulty_feed_candidates(tasks, workspace_id, origin) do
+    tasks
+    |> Enum.group_by(&{&1.provider, &1.model, &1.difficulty, &1.issue_type})
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.flat_map(fn {cell, cell_tasks} ->
+      summary = SubjectStats.summarize(cell_tasks)
+      {_provider, _model, difficulty, _type} = cell
+
+      if difficulty < proposal_ceiling() and summary.n >= SubjectStats.min_n() and
+           summary.difficulty_raised >= @raised_rate_threshold do
+        [feed_candidate(cell, cell_tasks, summary, workspace_id, origin)]
+      else
+        []
+      end
+    end)
+  end
+
+  defp feed_candidate({provider, model, difficulty, type}, tasks, summary, workspace_id, origin) do
+    rate = summary.difficulty_raised
+    cell = "#{provider}/#{model} D#{difficulty}/#{type || "any"}"
+
+    raised =
+      tasks |> Enum.filter(& &1.difficulty_raised?) |> Enum.map(& &1.task_id) |> Enum.uniq()
+
+    %{
+      kind: :difficulty_override,
+      scope: :fleet,
+      category: "difficulty raised rate (#{cell})",
+      target: nil,
+      difficulty: difficulty,
+      repo: nil,
+      gist:
+        elide(
+          "rubric runs low for #{cell}: #{pct(rate)} of #{summary.n} tasks were raised " <>
+            "above D#{difficulty}"
+        ),
+      target_metric: "difficulty-raised rate for #{cell}",
+      baseline: pct(rate),
+      incident_refs: raised,
+      task_refs: raised,
+      payload: %{
+        "cell" => %{
+          "provider" => provider,
+          "model" => model,
+          "difficulty" => difficulty,
+          "issue_type" => type
+        },
+        "n" => summary.n,
+        "difficulty_raised_rate" => rate,
+        "reason" => "raised_rate"
+      },
+      diff: nil,
+      origin: origin,
+      workspace_id: workspace_id
+    }
+  end
+
+  # ---- difficulty-misestimate clustering (bd-70nblx) ----------------------
+  #
+  # The per-task overrides above are the slow, indirect lever: each fixes one
+  # task's baseline going forward, but three of them landing in the same
+  # (from_difficulty, to_difficulty, repo) cell in one window is the same
+  # systemic-under-provisioning signal a recurring reviewer-finding category
+  # is — so it gets the same treatment: group by cell, emit one candidate per
+  # cell, and let `Wardmast.Loop.record/2`'s existing fingerprint accumulation
+  # decide whether it has cleared the bar (this window, or across several).
+
+  defp misestimate_cluster_candidates(report, workspace_id, workspace_config, origin) do
+    report.difficulty_misestimates
+    |> Enum.filter(&proposable_misestimate?/1)
+    |> Enum.group_by(&cluster_cell/1)
+    |> Enum.flat_map(fn {{from, to, repo}, misestimates} ->
+      from_rule = effective_rule(workspace_config, from)
+      to_rule = effective_rule(workspace_config, to)
+
+      # A no-op patch (this workspace already routes `from` the same way it
+      # routes `to`) is not rejected by Apply — it deep-merges cleanly and the
+      # row is marked `:applied` having changed nothing, which is worse than a
+      # loud failure: a silent no-op that looks like progress. Drop the
+      # candidate instead of emitting one that can never do anything.
+      #
+      # `to_rule` is also `nil` when `to` is beyond `default_mapping/0`'s
+      # table (e.g. the difficulty ceiling rises past what the hardcoded
+      # mapping covers) — drop rather than crash a function documented pure.
+      if from_rule == nil or to_rule == nil or from_rule == to_rule do
+        []
+      else
+        task_ids = misestimates |> Enum.map(& &1.task_id) |> Enum.uniq()
+
+        [
+          %{
+            kind: :config_set,
+            scope: :fleet,
+            category: cluster_category(from, to, repo),
+            target: nil,
+            difficulty: from,
+            repo: repo,
+            # `routing.rules` is per-difficulty and workspace-wide — there is
+            # no per-repo routing key, so this patch moves every repo's D#{from}
+            # dispatches in the workspace, not just the ones on `repo`. The
+            # cell keeps `repo` as its fingerprint input (see `cluster_cell/1`)
+            # even though the patch itself is workspace-wide.
+            gist:
+              elide(
+                "raise default dispatch difficulty for D#{from} to D#{to}, workspace-wide " <>
+                  "(seen on #{repo || "unknown repo"}; #{length(task_ids)} task(s) this window)"
+              ),
+            target_metric: "rework rate for D#{from}/#{repo || "unknown repo"} dispatches",
+            baseline:
+              "#{length(task_ids)} misestimate(s) across #{length(task_ids)} distinct task(s)",
+            # One flagged task is one incident of this cell running hot; unioning
+            # on task_id keeps a re-run over the same window idempotent, same as
+            # the per-task candidate above.
+            incident_refs: task_ids,
+            task_refs: task_ids,
+            payload: %{
+              "cell" => %{"from_difficulty" => from, "to_difficulty" => to, "repo" => repo},
+              "task_ids" => task_ids,
+              "reason" => "rework_cluster",
+              "patch" => %{"routing" => %{"rules" => %{"D#{from}" => to_rule}}}
+            },
+            diff: nil,
+            origin: origin,
+            workspace_id: workspace_id
+          }
+        ]
+      end
+    end)
+  end
+
+  # "Route the under-provisioned tier the way this workspace already routes
+  # the tier above it" — the default mapping for `difficulty`, overridden by
+  # any workspace-config rule for that same tier. `nil` when `difficulty` has
+  # no entry in `default_mapping/0` (e.g. above the hardcoded table's range).
+  #
+  # Only `model_tier`/`thinking` are canary-legible (`Canary.validate_rule/1`
+  # rejects any other key); a workspace may pin extra keys such as `"model"`
+  # on its override (`ByDifficulty`'s moduledoc), so those are dropped rather
+  # than propagated into the emitted patch.
+  defp effective_rule(workspace_config, difficulty) do
+    case Map.fetch(ByDifficulty.default_mapping(), difficulty) do
+      {:ok, default} ->
+        override = get_in(workspace_config || %{}, ["routing", "rules", "D#{difficulty}"]) || %{}
+
+        default
+        |> Map.merge(override)
+        |> Map.take(~w(model_tier thinking))
+
+      :error ->
+        nil
+    end
+  end
+
+  defp cluster_cell(m),
+    do: {m.dispatched_difficulty, m.dispatched_difficulty + 1, misestimate_repo(m)}
+
+  defp cluster_category(from, to, repo),
+    do: "difficulty misestimate cluster: D#{from} -> D#{to} (#{repo || "unknown repo"})"
+
+  # Only the `:rework` reason names a concrete difficulty bump; a
+  # `:quality_failure` is a cost anomaly the report explicitly declines to turn
+  # into a difficulty change. A misestimate with no dispatched difficulty has
+  # nothing to increment.
+  #
+  # A task already at the loop's bump ceiling is skipped for two reasons:
+  #
+  #   * mechanically — a bump past `Issue.difficulty`'s constraint could never
+  #     apply, and being `:task`-scoped it would bypass the evidence bar and
+  #     land directly as `:proposed`, then fail its Ash validation on every
+  #     `arb loop apply all` forever: a permanently stuck queue entry; and
+  #   * by policy (#1519) — D5 routes to the flagship model, an escalation an
+  #     operator must type deliberately. The loop's own analysis is the very
+  #     thing measured to rate roughly a tier low, so it is the last thing that
+  #     should nominate a full-quota-window run. It may bump up to D4 and no
+  #     further.
+  defp proposable_misestimate?(%{reason: :rework, dispatched_difficulty: d}) when is_integer(d),
+    do: d < proposal_ceiling()
+
+  defp proposable_misestimate?(_), do: false
+
+  # The lower of the resource's own constraint (so the ceiling cannot drift
+  # away from what the apply path validates against) and the loop's policy cap.
+  defp proposal_ceiling, do: min(max_difficulty(), @loop_bump_ceiling)
+
+  defp max_difficulty do
+    case Ash.Resource.Info.attribute(Issue, :difficulty) do
+      %{constraints: constraints} when is_list(constraints) ->
+        constraints[:max] || @difficulty_ceiling
+
+      _ ->
+        @difficulty_ceiling
+    end
+  end
+
+  defp misestimate_repo(%{cell: {_difficulty, repo}}) when is_binary(repo), do: repo
+  defp misestimate_repo(_), do: nil
+
+  # A minimal unified diff so `arb loop diff <id>` shows the change before it is
+  # applied, in the same shape as any other reviewable patch.
+  defp difficulty_diff(task_id, from, to) do
+    """
+    --- a/task/#{task_id}
+    +++ b/task/#{task_id}
+    @@ Issue.difficulty @@
+    -difficulty: #{from}
+    +difficulty: #{to}
+    """
+  end
+
+  defp elide(text) when byte_size(text) <= @gist_limit, do: text
+
+  defp elide(text) do
+    text
+    |> binary_part(0, @gist_limit - 1)
+    |> Kernel.<>("…")
+  end
+
+  defp fmt(nil), do: "0.00"
+  defp fmt(n) when is_number(n), do: :erlang.float_to_binary(n * 1.0, decimals: 2)
+end

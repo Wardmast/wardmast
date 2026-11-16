@@ -1,8 +1,8 @@
 # Migrating a release install to provider accounts
 
 **Audience:** an operator running Arbiter as an OTP release
-(`~/.arbiter/current/bin/arbiter`, managed by `arbiter.service`), which has no
-Mix toolchain. On a source checkout, the `mix arbiter.accounts.*` tasks do the
+(`~/.arbiter/current/bin/wardmast`, managed by `arbiter.service`), which has no
+Mix toolchain. On a source checkout, the `mix wardmast.accounts.*` tasks do the
 same things. They are thin wrappers over the functions used here.
 
 ## Release notes: provider accounts are required (the P13 flip, bd-9gqj8e)
@@ -11,7 +11,7 @@ same things. They are thin wrappers over the functions used here.
 > migrate every install before upgrading to it.**
 
 - **The `:provider_accounts_enabled` flag is gone.** Provider accounts are
-  always on. The `ARBITER_PROVIDER_ACCOUNTS` variable is no longer read; if
+  always on. The `WARDMAST_PROVIDER_ACCOUNTS` variable is no longer read; if
   the server's environment still sets it, the boot logs a warning saying so.
   Remove it from `~/.arbiter/arbiter.env`.
 - **The legacy credential chain is deleted.** A spawn's provider credential
@@ -25,10 +25,10 @@ same things. They are thin wrappers over the functions used here.
   A spawn with no workspace in hand (the watchdog probe, a workspace-less
   review) takes the install's single enabled Claude account credential, and
   carries none if there is not exactly one.
-- **There is no switch back.** Before this release, `ARBITER_PROVIDER_ACCOUNTS=0`
+- **There is no switch back.** Before this release, `WARDMAST_PROVIDER_ACCOUNTS=0`
   returned workers to the legacy chain. Now nothing does. A workspace whose
   credential is still only in `worker_env` raises
-  `Arbiter.Accounts.MissingCredentialError` on every spawn. The dispatch guard
+  `Wardmast.Accounts.MissingCredentialError` on every spawn. The dispatch guard
   holds that workspace's Claude tickets and escalates once. The only way back
   to the legacy chain is to run the previous release binary.
 - **`arb install service` no longer copies `CLAUDE_CODE_OAUTH_TOKEN`** from the
@@ -41,7 +41,7 @@ same things. They are thin wrappers over the functions used here.
 
 1. **On the release you run now (v0.2.x),** make sure `arb server doctor`
    reports `[ ok ] provider accounts` with `on (...)`. If it reports `[fail]`,
-   or `off (ARBITER_PROVIDER_ACCOUNTS=0)`, migrate first with the procedure
+   or `off (WARDMAST_PROVIDER_ACCOUNTS=0)`, migrate first with the procedure
    below and restart.
 2. **Upgrade to this release.**
 3. **Run `arb server doctor` again.** Expect `[ ok ] provider accounts` and
@@ -54,7 +54,7 @@ way, with the server stopped for step 5.
 ## What the boot reports
 
 At every boot the server classifies the install
-(`Arbiter.Accounts.Enablement`). Accounts are on in every case; the
+(`Wardmast.Accounts.Enablement`). Accounts are on in every case; the
 classification decides only what is auto-joined and what doctor reports:
 
 | Install | Result |
@@ -79,9 +79,9 @@ holds fingerprints, not values.
 
 ## Before you start
 
-1. **Run a release that has `Arbiter.Release.accounts_census/1`.** Check
+1. **Run a release that has `Wardmast.Release.accounts_census/1`.** Check
    which release is live with `readlink ~/.arbiter/current`.
-2. **Rotate first if you need to** (§7.6). If `ARBITER_CLOAK_KEY` or the
+2. **Rotate first if you need to** (§7.6). If `WARDMAST_CLOAK_KEY` or the
    credential itself is considered exposed, rotate the key
    ([`cloak-key-rotation.md`](cloak-key-rotation.md)) and re-issue the
    credential **before** migrating. Otherwise the migration writes fresh
@@ -92,21 +92,21 @@ holds fingerprints, not values.
    invisible to it. Set it on at least one workspace first, in the dashboard's
    workspace environment editor.
 4. **Load the server's environment in the shell you run `eval` from.**
-   `bin/arbiter eval` starts a separate VM, not the service. It needs the
-   same `ARBITER_CLOAK_KEY` (to decrypt `worker_env`), `SECRET_KEY_BASE`
+   `bin/wardmast eval` starts a separate VM, not the service. It needs the
+   same `WARDMAST_CLOAK_KEY` (to decrypt `worker_env`), `SECRET_KEY_BASE`
    (`config/runtime.exs` refuses to load without it) and, if you set one,
    `DATABASE_PATH`:
 
    ```sh
    set -a; . ~/.arbiter/arbiter.env; set +a
-   ARB=~/.arbiter/current/bin/arbiter
+   ARB=~/.arbiter/current/bin/wardmast
    PLAN=~/.arbiter/accounts.json      # any absolute path, or one starting with ~
    ```
 
 Each `eval` starts only config, Ash, the Ecto repo and the Cloak vault
-(`Arbiter.Release.start_release_vault!/0`). It never starts the endpoint,
+(`Wardmast.Release.start_release_vault!/0`). It never starts the endpoint,
 Autopilot, patrols or the worker fleet, so it cannot collide with a running
-server's port or advisory lock. A refusal prints `** (Arbiter.Release.Refused)
+server's port or advisory lock. A refusal prints `** (Wardmast.Release.Refused)
 <reason>` and exits non-zero.
 
 ## Procedure
@@ -114,9 +114,9 @@ server's port or advisory lock. A refusal prints `** (Arbiter.Release.Refused)
 ### 1. Census (read-only, safe with the server running)
 
 ```sh
-$ARB eval "Arbiter.Release.accounts_census(plan: \"$PLAN\")"
+$ARB eval "Wardmast.Release.accounts_census(plan: \"$PLAN\")"
 # optionally fingerprint the operator's own Claude login as a suggestion:
-$ARB eval "Arbiter.Release.accounts_census(plan: \"$PLAN\", operator_credential: \"$HOME/.claude/.credentials.json\")"
+$ARB eval "Wardmast.Release.accounts_census(plan: \"$PLAN\", operator_credential: \"$HOME/.claude/.credentials.json\")"
 ```
 
 The census prints every workspace, which provider-credential keys it holds, and
@@ -137,7 +137,7 @@ rename is needed in that case.
 ### 3. Dry run (writes nothing, safe with the server running)
 
 ```sh
-$ARB eval "Arbiter.Release.accounts_migrate(plan: \"$PLAN\", dry_run?: true)"
+$ARB eval "Wardmast.Release.accounts_migrate(plan: \"$PLAN\", dry_run?: true)"
 ```
 
 The dry run runs every validation the real run does. It reports the accounts,
@@ -162,7 +162,7 @@ next to the database.
 ### 5. Migrate
 
 ```sh
-$ARB eval "Arbiter.Release.accounts_migrate(plan: \"$PLAN\")"
+$ARB eval "Wardmast.Release.accounts_migrate(plan: \"$PLAN\")"
 ```
 
 For each affected workspace, the migration:
@@ -182,7 +182,7 @@ successful apply.
 There is nothing to switch on. The migration wrote backup rows, and those are
 the migration record the boot looks for. Remove from `~/.arbiter/arbiter.env`:
 
-- any `ARBITER_PROVIDER_ACCOUNTS` line. It is no longer read, and the boot
+- any `WARDMAST_PROVIDER_ACCOUNTS` line. It is no longer read, and the boot
   warns while it is there;
 - `CLAUDE_CODE_OAUTH_TOKEN`, once step 1's census has fingerprinted it. It is
   read by nothing, it makes doctor note it, and a stale credential in a
@@ -203,7 +203,7 @@ systemctl --user start arbiter.service
   credential health.
 
   `arb server doctor` also runs the `account/workspace quota policy` check.
-  `Arbiter.Quota.Gate` binds `min(account, workspace)` — the account's quota
+  `Wardmast.Quota.Gate` binds `min(account, workspace)` — the account's quota
   policy is a ceiling that a workspace can tighten, never loosen. If a
   workspace's configured quota is overridden by a stricter account setting,
   adjust the account side using
@@ -221,7 +221,7 @@ systemctl --user start arbiter.service
   A hit names the workspace. Either migrate its credential (census, then
   migrate again) or roll back as described below.
 - **The undo is still available.**
-  `$ARB eval 'Arbiter.Release.accounts_rollback(list?: true)'` lists the backup
+  `$ARB eval 'Wardmast.Release.accounts_rollback(list?: true)'` lists the backup
   rows as `pending`.
 
 ## Rolling back
@@ -235,9 +235,9 @@ reads `worker_env` credentials. Stop the server and dry-run the restore first:
 
 ```sh
 systemctl --user stop arbiter.service
-$ARB eval 'Arbiter.Release.accounts_rollback(list?: true)'
-$ARB eval 'Arbiter.Release.accounts_rollback(migration_id: "<id from step 5>", dry_run?: true)'
-$ARB eval 'Arbiter.Release.accounts_rollback(migration_id: "<id from step 5>")'
+$ARB eval 'Wardmast.Release.accounts_rollback(list?: true)'
+$ARB eval 'Wardmast.Release.accounts_rollback(migration_id: "<id from step 5>", dry_run?: true)'
+$ARB eval 'Wardmast.Release.accounts_rollback(migration_id: "<id from step 5>")'
 ```
 
 The restore re-merges each backup through the same `MergeWorkerEnv` change the
@@ -256,7 +256,7 @@ place. Once every backup is restored the install has no migration record, and
 the boot reports it as carrying legacy credentials again.
 
 **Run the previous release.** Point `~/.arbiter/current` back at the previous
-release, set `ARBITER_PROVIDER_ACCOUNTS=0` in `~/.arbiter/arbiter.env` (on
+release, set `WARDMAST_PROVIDER_ACCOUNTS=0` in `~/.arbiter/arbiter.env` (on
 that release an unset value means `auto`, which resolves a migrated install
 on), and start the server. This release adds no schema migrations, so the
 binary rollback does not need a database restore. The last resort is the
@@ -264,13 +264,13 @@ database copy from step 4, restored with the server stopped.
 
 ## Source-checkout equivalents
 
-| Release (`bin/arbiter eval`)                                   | Source checkout                                        |
+| Release (`bin/wardmast eval`)                                   | Source checkout                                        |
 | -------------------------------------------------------------- | ------------------------------------------------------ |
-| `Arbiter.Release.accounts_census(plan: P)`                     | `mix arbiter.accounts.census --plan P`                 |
+| `Wardmast.Release.accounts_census(plan: P)`                     | `mix wardmast.accounts.census --plan P`                 |
 | `…accounts_census(plan: P, force?: true, operator_credential: C)` | `… --force --operator-credential C`                  |
-| `Arbiter.Release.accounts_migrate(plan: P, dry_run?: true)`    | `mix arbiter.accounts.migrate --plan P --dry-run`      |
+| `Wardmast.Release.accounts_migrate(plan: P, dry_run?: true)`    | `mix wardmast.accounts.migrate --plan P --dry-run`      |
 | `…accounts_migrate(plan: P, delete_plan?: true)`               | `… --plan P --delete-plan`                             |
-| `Arbiter.Release.accounts_rollback(list?: true)`               | `mix arbiter.accounts.rollback --list`                 |
+| `Wardmast.Release.accounts_rollback(list?: true)`               | `mix wardmast.accounts.rollback --list`                 |
 | `…accounts_rollback(migration_id: ID, dry_run?: true)`         | `… --migration-id ID --dry-run`                        |
 | `…accounts_rollback(all: true, all_keys?: true)`               | `… --all --all-keys`                                   |
 

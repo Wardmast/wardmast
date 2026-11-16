@@ -5,7 +5,7 @@
 # This is the §4.2 spike of docs/browser-hosted-coordinator-sessions.md as an
 # automated test: it starts a throwaway systemd *user* service standing in for
 # arbiter.service, launches a session from inside it through
-# Arbiter.Sessions.launch/1, restarts the stand-in for real, and asserts that
+# Wardmast.Sessions.launch/1, restarts the stand-in for real, and asserts that
 #
 #   * the arb-session-<id> scope is still active and the tmux server is the
 #     same pid it was before,
@@ -73,8 +73,8 @@ echo "arbiter.service before: ${ARBITER_BEFORE}"
 echo
 
 # `mix test <path>` at an umbrella root is not scoped to one app — it runs
-# every app's whole suite — so run it from apps/arbiter.
-cd "${REPO_ROOT}/apps/arbiter"
+# every app's whole suite — so run it from apps/wardmast.
+cd "${REPO_ROOT}/apps/wardmast"
 
 set +e
 if [ -n "$LOG" ]; then

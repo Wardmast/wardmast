@@ -3,12 +3,12 @@
 **Status:** implemented — all 13 children; child 12 (bd-36ytcl) deleted the superseded fields
 **Last updated:** 2026-09-29
 **Epic:** bd-9yqspm (refined with the operator on 2026-09-27)
-**Code:** `Arbiter.Tasks.Lifecycle` (the table), `Arbiter.Tasks.Issue` (the
-actions), `Arbiter.Tasks.Issue.Changes.Transition` (applies a transition),
-`Arbiter.Tasks.Lifecycle.View` (the projection every surface reads),
-`Arbiter.Tasks.Lifecycle.Dispatchable` (the dispatch-eligibility predicate),
-`Arbiter.Tasks.SlotGate` (the slot count), `Arbiter.Tasks.PullRequest` (the
-ticket's open PR), `Arbiter.Worker.Watchdog` (the ticket's merge watch)
+**Code:** `Wardmast.Tasks.Lifecycle` (the table), `Wardmast.Tasks.Issue` (the
+actions), `Wardmast.Tasks.Issue.Changes.Transition` (applies a transition),
+`Wardmast.Tasks.Lifecycle.View` (the projection every surface reads),
+`Wardmast.Tasks.Lifecycle.Dispatchable` (the dispatch-eligibility predicate),
+`Wardmast.Tasks.SlotGate` (the slot count), `Wardmast.Tasks.PullRequest` (the
+ticket's open PR), `Wardmast.Worker.Watchdog` (the ticket's merge watch)
 
 ---
 
@@ -298,7 +298,7 @@ remaining legacy write a transition (§2):
 
 ## Child 2 (bd-6zapbl): one projection
 
-`Lifecycle.view(ticket, ctx)` (implemented in `Arbiter.Tasks.Lifecycle.View`)
+`Lifecycle.view(ticket, ctx)` (implemented in `Wardmast.Tasks.Lifecycle.View`)
 is pure. It returns `%{state, column, step, blocked_by, attention}`, and
 everything it would otherwise have to read arrives in `ctx`: `:blocked_by`
 (the unsatisfied gating blockers), `:runs` (the ticket's worker rows),
@@ -314,7 +314,7 @@ everything it would otherwise have to read arrives in `ctx`: `:blocked_by`
 | `/epics` rollup (`EpicRollup`) | `bucket/1`, status only | the same `board_column/2`, given the child's live author workers |
 | `Issue.ready/1` (`ticket_ready`, `GET /api/issues/ready`, `arb ready`, `arb prime`) | open + no open blocker, ignoring `refined` | exactly the tickets whose column is `:ready` |
 
-`Arbiter.Board.ColumnAgreementTest` runs one ticket per state × {no worker,
+`Wardmast.Board.ColumnAgreementTest` runs one ticket per state × {no worker,
 live author, completed author row, failed author row} through the first three
 and asserts they agree.
 
@@ -339,11 +339,11 @@ the ticket.
 ### Step
 
 - In progress: `implementing | in_review | addressing_review |
-  fixing_ci | resolving_conflict`, from `Arbiter.Worker.Phase` over the runs — a
+  fixing_ci | resolving_conflict`, from `Wardmast.Worker.Phase` over the runs — a
   live subordinate round wins, and `implementing` is the default.
 - Merging: `awaiting_ci` (bd-cut6uv, bd-dc468g) is `in_review` while the
   ReviewGate holds its reviewer back until CI is green on the head: the ticket
-  carries a `ci_wait` marker (`Arbiter.Worker.ReviewCi.waiting/2`), the card
+  carries a `ci_wait` marker (`Wardmast.Worker.ReviewCi.waiting/2`), the card
   reads `waiting on CI <sha>`, it appears in Merging, and the ticket holds no
   slot (below); `behind_base` for a
   PR behind its base; `merge_blocked` for a conflict, red CI, a draft, or an
@@ -473,7 +473,7 @@ Migration `20260928000034_add_pr_state_to_issues` adds `merger_url`,
 `merger_status`, `merger_checked_at`, `merge_watch`, `review_gate_state` and
 the `pr_closed` cause (`attention_cause`, `attention_detail`,
 `attention_since` — the first cause bd-8if9zt's overlay will read).
-`Arbiter.Tasks.PullRequest` reads and writes them:
+`Wardmast.Tasks.PullRequest` reads and writes them:
 
 | the parked worker held | the ticket holds |
 |---|---|
@@ -600,7 +600,7 @@ reconciler nor the sweeper re-arms a ticket pulled out of the merge queue.
 
 ### The vocabulary
 
-`Arbiter.Workers.RunState` is the one vocabulary the worker GenServer and its
+`Wardmast.Workers.RunState` is the one vocabulary the worker GenServer and its
 `worker_runs` row share. A worker snapshot and a row both carry `kind`,
 `state` and, once `:finished`, `outcome`; neither carries a `status`.
 
@@ -628,7 +628,7 @@ resident author is still the common path (`ReviewGate.deliver_verdict/4`).
 
 ### `worker list` = `worker show`
 
-`Arbiter.Workers.Current` is the one read. `current_run/3` picks a ticket's
+`Wardmast.Workers.Current` is the one read. `current_run/3` picks a ticket's
 current run — its newest unfinished live run, else its newest registered one,
 else its newest row — and `list/1` (REST `GET /api/workers`, MCP
 `worker_list`) is that run for every ticket with a live one, while `show/2`
@@ -649,14 +649,14 @@ run; it did not fail.
 ### Typed escalation kinds
 
 Every `:escalation` message carries an `escalation_kind` from
-`Arbiter.Messages.EscalationKind`, and the `Message` resource refuses an
+`Wardmast.Messages.EscalationKind`, and the `Message` resource refuses an
 escalation without one. A kind is **ticket-scoped** (about one `task_ref`) or
 **system-scoped** (credentials, quota, budget, the circuit breaker, the loop,
 and PRPatrol's failed follow-up dispatch, whose follow-up ticket is closed at
 once so the patrol can retry).
 System kinds are typed here; their lifecycle is child 8 (bd-7gt8rm).
 
-Producers go through `Arbiter.Messages.Escalation.post/1`. A ticket-scoped
+Producers go through `Wardmast.Messages.Escalation.post/1`. A ticket-scoped
 kind is deduplicated by `(kind, ticket)`: while one is open, raising it again
 refreshes that row's subject and body, whatever its subject text says.
 `Message.last_escalation/2` is the lookup; `last_with_subject/3` is off the
@@ -682,7 +682,7 @@ bd-36ytcl dropped them; the cause is now the park's only record.
 
 `Lifecycle.view/2` fills `attention: %{owner, waiting_on, reason}` (plus the
 `cause` and `since` it came from), or nil. The table lives in
-`Arbiter.Tasks.Lifecycle.Attention`. The coordinator comes first; a row is the
+`Wardmast.Tasks.Lifecycle.Attention`. The coordinator comes first; a row is the
 operator's only when nothing in the fleet can move it.
 
 | cause | owner | waiting on |
@@ -738,7 +738,7 @@ coordinator-owned item stays unresolved past a limit.
 The owner table (child 6) is the default. The ticket stores an override —
 `attention_owner`, the `attention_owner_cause` it applies to, the
 `attention_note` that came with it and `attention_owner_since` — set by
-`Arbiter.Tasks.Attention.hand_off/3` or by a promotion, through the
+`Wardmast.Tasks.Attention.hand_off/3` or by a promotion, through the
 `:set_attention_owner` action. `Lifecycle.Attention.of/2` applies it only
 while the ticket's attention is still that cause, and adds `note` and
 `owner_since` to the attention map. The override clears with the rest of the
@@ -758,7 +758,7 @@ map (both views).
 
 ### Limits
 
-Workspace config `attention` (`Arbiter.Tasks.AttentionLimits`), read with its
+Workspace config `attention` (`Wardmast.Tasks.AttentionLimits`), read with its
 defaults filled in by `workspace_config_get`:
 
 | key | default | |
@@ -766,7 +766,7 @@ defaults filled in by `workspace_config_get`:
 | `coordinator_limit_minutes` | 240 | a coordinator-owned item unresolved this long goes to the operator |
 | `run_crashed_max_resumes` | 3 | a `run_crashed` item whose ticket was already resumed this many times out of a failed run goes to the operator |
 
-`0` turns a limit off. `Arbiter.Tasks.AttentionSweep` (every minute, primary
+`0` turns a limit off. `Wardmast.Tasks.AttentionSweep` (every minute, primary
 instance only) promotes an item past either limit with the note "coordinator
 did not resolve within 4h" / "… within 3 resume attempts". The clock runs from
 `attention_since`, or from a hand-back if later. A derived item has no stored
@@ -801,7 +801,7 @@ or handed back.
 ## Child 8 (bd-7gt8rm): system alerts
 
 A system alert is a problem with the installation rather than a ticket. It is
-its own record, `Arbiter.Alerts.SystemAlert` (table `system_alerts`), not an
+its own record, `Wardmast.Alerts.SystemAlert` (table `system_alerts`), not an
 escalation message:
 
 | field | |
@@ -816,7 +816,7 @@ escalation message:
 | `cleared_at` | when its condition cleared; nil while active |
 
 At most one row per `(kind, key)` is active, enforced by a partial unique
-index. `Arbiter.Alerts.raise_alert/1` refreshes the active row's subject,
+index. `Wardmast.Alerts.raise_alert/1` refreshes the active row's subject,
 detail and `last_raised_at` instead of adding a second; a raise after a clear
 opens a fresh episode. Opening and clearing are announced on the workspace's
 `inbox` topic as `%{kind: "alert", event: "raised" | "cleared", alert_id,
@@ -907,7 +907,7 @@ operator-only (`scripts/verify_board_attention_lane.mjs` exercises both).
 ## Child 10 (bd-6fkgvo): CLI, MCP, `arb prime` and events
 
 Every surface that is not the board reads a ticket through one reader,
-`Arbiter.Tasks.Lifecycle.Projection`. It does the reads `Lifecycle.view/2`
+`Wardmast.Tasks.Lifecycle.Projection`. It does the reads `Lifecycle.view/2`
 needs, once per call — the gating edges and the tickets they point at (a
 blocker outside the set still counts), the live runs, each Merging ticket's
 Watchdog, the clock — and `payload/1` is the one JSON shape of a view:

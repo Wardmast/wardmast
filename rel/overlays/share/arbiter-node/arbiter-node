@@ -136,7 +136,7 @@ cmd_pre_start() {
   case $from in
     '' | /* | *..*) exit 0 ;;
   esac
-  [ -x "$NODE_HOME/$from/bin/arbiter" ] || exit 0
+  [ -x "$NODE_HOME/$from/bin/wardmast" ] || [ -x "$NODE_HOME/$from/bin/arbiter" ] || exit 0  # a pre-rename release ships bin/arbiter
 
   printf 'arbiter-node: upgrade to %s never confirmed; rolling back to %s\n' "$to" "$from"
   tmp=$NODE_HOME/current.rollback.$$

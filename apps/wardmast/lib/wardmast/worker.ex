@@ -1,0 +1,11221 @@
+defmodule Wardmast.Worker do
+  @moduledoc """
+  A `Worker` is the unit of agent work in Gas Town: a supervised GenServer
+  driving a single task through a workflow (load → design → implement → verify
+  → submit).
+
+  This module is the Phase 2 skeleton — it provides the lifecycle, registry,
+  and run state FSM. The actual workflow logic ships separately as the
+  `Wardmast.Worker.Workflow` behaviour (gte-014) and the driver that walks
+  steps lives in a later phase.
+
+  ## Run state FSM (bd-1uu19b)
+
+  A worker is one run of its ticket, and speaks the one run vocabulary
+  (`Wardmast.Workers.RunState`) its durable `Wardmast.Workers.Run` row speaks:
+  a `kind`, a `state`, and once `:finished` an `outcome`.
+
+      :starting          → :working           (advance/2 — a fresh dispatch, or a
+                                              resume re-attaching to its worktree)
+      :starting          → :finished/:failed  (fail/2 — "stillborn" worker, e.g.
+                                              machine died before any step ran)
+      :finished/:failed  → :working           (advance/2 — defense-in-depth: a re-slung
+                                              failed worker is normally replaced by a
+                                              fresh one (dispatch.ex bd-d70whv), but if for
+                                              any reason the stale worker is reused,
+                                              advance resets it to :working so arb-done
+                                              is processed instead of silently ignored)
+      :working           → :waiting           (await/2 — the agent asked a question;
+                                              `waiting_on: :question`)
+      :waiting           → :working           (resume/1)
+      :working           → :waiting           (arb-done when review is required;
+                                              `waiting_on: :review_gate`)
+      :waiting (review)  → :finished/:succeeded (review_gate_verdict/2 :approve → PR opened)
+      :waiting (review)  → :finished/:failed    (review_gate_verdict/2 reject → parked)
+      :finished/:failed  → :finished/:succeeded (review_gate_verdict/2 :approve, and the
+                                              run is terminal *only* because of an earlier
+                                              ReviewGate rejection — bd-3wumco)
+      :working           → :finished/:succeeded (open_mr/5 — PR opened; the run ends)
+      :working           → :finished/:succeeded (complete/2 — normal exit)
+      :working           → :finished/:failed    (fail/2)
+      :waiting           → :finished/:failed    (fail/2)
+
+  Illegal transitions return `{:error, {:invalid_transition, from, to}}`.
+  `:interrupted` is written to the row only, by `terminate/2` on a node stop;
+  `:handed_off` is written to a prior run's row when a resume supersedes it.
+
+  ## Review gate (`waiting_on: :review_gate`)
+
+  A standing order: a worker must not merge its own work. When the worker's
+  `arb done` fires and the workspace requires review
+  (`Workspace.review_required?/1`), the worker waits on the review gate and
+  spawns an `Wardmast.Worker.ReviewGate` — which runs a **distinct** reviewer
+  worker over the diff — *instead of* calling the merger. The ReviewGate reports a
+  verdict back via `review_gate_verdict/2`: APPROVE proceeds to `do_open_mr` (the
+  same merge path), REQUEST_CHANGES (or an inconclusive review) parks the task
+  with the findings and escalates to the coordinator without merging. When review is
+  not required (the default) completion routes straight to the merger as before.
+
+  ### Late approvals reconcile a rejection (bd-3wumco)
+
+  The gate's revise loop can outlive the round that parked the author: an early
+  round requests changes, the author goes terminal with
+  `failure_reason: :review_gate_rejected`, and a later round then converges to
+  APPROVE. That approval used to arrive at a worker already finished `:failed`, be
+  refused as an invalid transition, and be discarded by the gate — leaving an
+  approved branch with green CI and no merge handoff at all.
+
+  A `{:approve, _}` verdict is therefore accepted from a failed run **when the only
+  reason the run is terminal is the review gate** (`failure_reason` is
+  `:review_gate_rejected` or `:review_gate_inconclusive`). The rejection's meta is
+  cleared, `:review_gate_reconciled_from` records what was overturned, the
+  coordinator is told its earlier escalation is superseded, and the ordinary
+  approve path runs. Any other failure reason, and any late REQUEST_CHANGES /
+  inconclusive verdict, is still refused — reconciliation only moves a task
+  forward.
+
+  ## Opening the PR ends the run (bd-741sid)
+
+  When a worker finishes its work it opens a merge request via `open_mr/5`
+  instead of completing immediately. That call resolves the workspace's merger
+  adapter (`Wardmast.Mergers.for_workspace/1`), opens the MR and records it on
+  the ticket — the ref, its clickable `merger_url` and the lane its Watchdog
+  watches it on (`Wardmast.Tasks.PullRequest`) — in the ticket's `open_pr`
+  transition, starts the ticket's `Wardmast.Worker.Watchdog` from that row, and
+  then the run is over: recorded finished and successful, and the worker
+  exits. The ticket and its Watchdog own the PR from there — the merge, a
+  red CI run, a conflict, a PR closed unmerged. No worker stays resident on an
+  open PR.
+
+  This is also the path the `arb done` marker takes in claude-driven mode: when
+  the worker knows its branch (a worktree was provisioned at dispatch time) the
+  marker triggers the same `open_mr` flow rather than closing the task
+  directly. For the default `Direct` strategy the merge (`git merge --no-ff`)
+  runs immediately, so the branch reaches the target line before the task
+  closes. A merge failure fails the worker instead of silently completing it.
+  Only an ad-hoc run with no branch completes straight from `arb done`.
+
+  ## API choice: explicit `await/2` etc. vs sentinel atoms
+
+  The spec gave us a choice between an `advance(pid, :__awaiting__)` sentinel
+  and a split API (`advance/2`, `await/2`, `resume/1`, `complete/2`,
+  `fail/2`). We picked the split API: each verb has a single meaning, the
+  state FSM lives in dispatch heads rather than in a dictionary of sentinels,
+  and the type signature is honest about what `advance/2` does (change the
+  workflow step, not change the lifecycle state).
+
+  ## Registry
+
+  Each worker registers under `Wardmast.Worker.Registry` keyed by `task_id`.
+  Use `whereis/1` to look up by task_id; most API functions accept either a
+  pid or a task_id string.
+
+  ## Supervision
+
+  Workers are started under `Wardmast.Worker.Supervisor`
+  (a `DynamicSupervisor`) with `restart: :temporary`. A crashed worker is
+  not restarted — workflow runners that crash have lost their state, so
+  resurrecting the GenServer would just confuse the orchestrator.
+  """
+
+  use GenServer
+
+  require Ash.Query
+  require Logger
+
+  alias Wardmast.Accounts.Resolver, as: AccountResolver
+  alias Wardmast.Agents.Gemini.Security, as: GeminiSecurity
+  alias Wardmast.Agents.Qwen.RetryHold
+  alias Wardmast.Quota.Gate.Snapshot, as: GateSnapshot
+  alias Wardmast.ReviewGate.MergeAuthorization
+  alias Wardmast.ReviewGate.Resolutions
+  alias Wardmast.ReviewGate.RulingResume
+  alias Wardmast.Worker.ConflictAbortFindings
+  alias Wardmast.Worker.ConflictPassOutcome
+  alias Wardmast.Worker.CoordinatorOnlyFindings
+  alias Wardmast.Worker.EvidenceIntegrity
+  alias Wardmast.Worker.OsProcess
+  alias Wardmast.Worker.PRTemplate
+  alias Wardmast.Worker.Registry, as: PRegistry
+  alias Wardmast.Worker.RepeatUnmetCriterion
+  alias Wardmast.Worker.ReviewVerification
+  alias Wardmast.Workflows.DispatchQueue
+  alias Wardmast.Workflows.ReviewGateFixRoundDispatcher, as: FixRound
+
+  @typedoc "The run's state — see `Wardmast.Workers.RunState`. Never the ticket's."
+  @type run_state :: Wardmast.Workers.RunState.state()
+
+  @typedoc "What a `:waiting` run waits on; nil in every other state."
+  @type waiting_on :: :question | :review_gate | nil
+
+  @typedoc "Current workflow step. Free-form atom; `:idle` until first advance."
+  @type step :: atom()
+
+  @typedoc "Accepted by most API functions in lieu of a bare pid."
+  @type ref :: pid() | String.t()
+
+  @typedoc "Snapshot returned by `state/1`."
+  @type snapshot :: %{
+          task_id: String.t(),
+          workspace_id: String.t() | nil,
+          repo: String.t(),
+          current_step: step(),
+          kind: Wardmast.Workers.RunState.kind(),
+          state: run_state(),
+          outcome: Wardmast.Workers.RunState.outcome() | nil,
+          waiting_on: waiting_on(),
+          started_at: DateTime.t(),
+          step_started_at: DateTime.t() | nil,
+          mr_ref: String.t() | nil,
+          merger_url: String.t() | nil,
+          run_id: String.t() | nil,
+          meta: map()
+        }
+
+  defmodule State do
+    @moduledoc false
+    defstruct [
+      :task_id,
+      # Registry name this worker is registered under. Defaults to task_id
+      # but can be overridden via the `:registry_key` start opt so multiple
+      # workers can coexist for the same task (a ReviewGate round's
+      # `<task_id>#review` id, say). `terminate/2` uses this when unregistering
+      # so we don't accidentally wipe the task's primary slot.
+      :registry_key,
+      :workspace_id,
+      :repo,
+      :current_step,
+      # bd-1uu19b: the run vocabulary (`Wardmast.Workers.RunState`). `kind` is
+      # fixed at init from the role meta; `outcome` is nil until `:finished`;
+      # `waiting_on` is nil unless `:waiting`.
+      :kind,
+      :state,
+      :outcome,
+      :waiting_on,
+      :started_at,
+      :step_started_at,
+      :meta,
+      # Opaque merge-request ref minted by the merger adapter on open_mr/5
+      # (e.g. "!42" for GitLab, "direct:<branch>|<repo>|<target>" for Direct).
+      # nil until an MR is opened.
+      :mr_ref,
+      # Human-clickable URL for mr_ref, computed once at open_mr time via the
+      # adapter's link_for/1 (some adapters resolve the URL from per-process
+      # config we only have at open time). nil when there's no MR or no web UI.
+      :merger_url,
+      # The resolved merger adapter module (Wardmast.Mergers.Direct / .Gitlab),
+      # captured at open_mr time. Internal — used to mint the Watchdog.
+      :merger_adapter,
+      # uuid of the persisted Wardmast.Workers.Run row, or nil if the create
+      # write failed (best-effort — see record_run_started/1). Subsequent
+      # status updates skip the DB write when this is nil.
+      :run_id,
+      # bd-aw2cyt: the phase last announced on the event stream, so a
+      # transition that does not change the phase does not narrate a non-event.
+      :last_phase,
+      # Map of port -> session config + accumulator. Internal — never exposed
+      # via snapshot/1; relevant fields (output_lines, exit_status) are
+      # mirrored into meta for snapshot consumers.
+      claude_sessions: %{},
+      # bd-akp9ae: every value this run's sessions were told to redact (a git
+      # token minted for the spawn, a credential the spawn env carried), kept
+      # after the session itself is gone so the archived session JSONL is
+      # scrubbed of them too. Internal — never in meta or a snapshot.
+      archive_redact: []
+    ]
+  end
+
+  # Captured stdout is mirrored verbatim into the persisted Run.output_lines
+  # column on terminal transitions. Cap at 500 lines so a runaway subprocess
+  # doesn't bloat the row to many MB.
+  #
+  # bd-6dxit2: retained at 500. This is the *persisted tail*, kept small on
+  # purpose — `worker_runs` rows are read in bulk by the dashboard and every
+  # extra line is paid for on every listing. It is deliberately NOT the source
+  # of truth for verdict parsing: `Wardmast.Worker.OutputLog` holds the full,
+  # uncapped transcript per run, and `ReviewGate.parse_verdict/3` consults it
+  # before reporting `:no_verdict`, so a verdict followed by more than 500 lines
+  # of findings still parses.
+  @max_output_lines 500
+
+  # Run states in which a subprocess exit means "the worker stopped without
+  # completing" — i.e. a stall to detect + escalate (bd-awi4nw): `:starting`,
+  # `:working`, and `:waiting` on a question. A run waiting on the review gate
+  # and a `:finished` run are excluded: there the subprocess SHOULD exit and
+  # the next stage (ReviewGate/Watchdog) owns the outcome, not the dead port.
+  # A worker re-attached to a preserved worktree via `arb resume` (bd-auma3z)
+  # is `:starting` too — a subprocess that exits before the resumed agent gets
+  # going is still a stop worth detecting.
+  # What an agent session is keyed by: a local `Port`, or the `{:remote, ref}`
+  # handle an `Wardmast.Worker.Executor` returns for a run placed on a node
+  # (docs/design/remote-workers.md §7.2). A handle gets the same three messages
+  # a port does, plus `{handle, {:outcome, _}}` just before its exit.
+  defguardp session_handle?(h)
+            when is_port(h) or (is_tuple(h) and tuple_size(h) == 2 and elem(h, 0) == :remote)
+
+  defguardp live_run?(state, waiting_on)
+            when state in [:starting, :working] or
+                   (state == :waiting and waiting_on != :review_gate)
+
+  # Grace after a subprocess exit before we classify+escalate a stop. This drains
+  # any in-flight `arb done` message that the port's exit_status raced ahead of
+  # (the done marker is enqueued while processing the data line; the exit_status
+  # message can be processed first). A normal completion flips the worker to a
+  # terminal/review state within this window, so the deferred check no-ops.
+  # Overridable for tests via `config :wardmast, :worker_exit_grace_ms`.
+  @exit_grace_ms 500
+
+  # bd-aje6fj / #1896: how long the supervisor waits for `terminate/2` when it
+  # shuts a worker down (an application stop — `systemctl restart`) before it
+  # sends `:kill`. The worker traps exits so that teardown runs at all; this
+  # bounds it. Teardown is a SIGKILL of the agent tree (sub-second), the run-row
+  # write, and a usage flush that may read the session JSONL off disk — a few
+  # seconds at the outside. Every worker spends its grace in PARALLEL (a
+  # DynamicSupervisor signals all children, then waits), so this is the cost of
+  # the whole worker tier, and it has to leave room inside `arbiter.service`'s
+  # `TimeoutStopUSec` (45s, inherited) for the rest of the tree. Past that
+  # timeout systemd's cgroup SIGKILL (SIGABRT on Fedora) wins regardless, so a
+  # longer grace would be a silent no-op.
+  @shutdown_grace_ms 15_000
+
+  # The failure_reason stamped on a run whose worker was shut down cleanly with
+  # the node. Deliberately distinct from the boot reconciler's
+  # "server restarted", which marks a run that MISSED this path.
+  @shutdown_reason "server shutdown"
+  @operator_stop :operator_stop
+
+  # How long a container may take to exit on its own after `arb done` before it
+  # is force-removed (bd-9ss153).
+  @container_exit_grace_ms 15_000
+
+  # bd-4g0fsh: backoff before an auto-resume of a recoverable stop (transient
+  # gateway 5xx, or a clean exit-0 without `arb done`). A recoverable stop is
+  # re-spawned (bounded by `:resume_cap`) rather than failed — but NOT instantly:
+  # a transient 502 from the proxy/upstream needs a beat to clear before a retry
+  # has any chance of succeeding, so an immediate respawn would just re-hit the
+  # same blip and burn an attempt. Exponential per attempt, capped, with a
+  # category-specific base — a gateway blip warrants a longer initial wait than a
+  # model that merely narrated-and-stopped (no infra to recover). attempt is the
+  # 0-based count of resumes already made for this run.
+  @resume_backoff_base_ms %{
+    gateway_error: 2_000,
+    exited_without_done: 1_000,
+    # bd-606zlr: nothing infrastructural to wait out — the session died on a
+    # notification that was never coming. Resume as promptly as the plain
+    # early-quit case.
+    async_wait_abandoned: 1_000
+  }
+  @resume_backoff_default_base_ms 1_000
+  @resume_backoff_max_ms 30_000
+
+  # Ceiling on `start_or_reap_terminal/1`'s stop of a terminal worker. Its
+  # `terminate/2` only finalizes a run row and flushes session usage, so this is
+  # generous; the point is that a wedged teardown can't block a merge-queue tick.
+  @reap_stop_timeout_ms 5_000
+
+  # bd-96mn8i (round 2): a session that ends without ever having a terminal
+  # stream event parsed — process killed/stopped mid-turn, port torn down
+  # before the CLI's own `result`/`error` event arrived, or (agy/gemini,
+  # which have no disk fallback — see `maybe_reconcile_usage_from_disk/3`)
+  # simply no on-disk source to recover from — leaves `usage` with every
+  # token field nil. That is the CORRECT "unknown" representation (never a
+  # fabricated zero), but a bare nil is indistinguishable from a provider
+  # that is *known* to report nothing (e.g. agy's own no-cost note). Stamp an
+  # explicit reason so the row reads as "we looked and found nothing" rather
+  # than looking like an unhandled gap.
+  @no_terminal_event_note "no usage captured: the session ended before any " <>
+                            "terminal usage event was observed on its stream"
+
+  # bd-96mn8i (round 3 fix): a terminal event CAN arrive and still carry no
+  # tokens — a codex `turn.failed`, an upstream gemini error `result`, or a
+  # Claude `result` with `is_error: true` and no `usage` object. Each of those
+  # sets `result_status`/`is_error` on the usage map (see
+  # `Wardmast.Agents.Codex.Stream.usage_fields/2`,
+  # `Wardmast.Agents.Gemini.Stream.usage_fields/2`, and
+  # `ClaudeSession.absorb_usage/2`'s `"result"` clause) even though `drop_nil`
+  # strips the absent token fields. Claiming "the session ended before any
+  # terminal usage event was observed" on THOSE rows is false — a terminal
+  # event was observed, it just reported a failure with no usage. Distinguish
+  # the two so the note never lies about which case produced the nil.
+  @terminal_event_no_usage_note "no usage captured: a terminal event was observed on the " <>
+                                  "stream but reported no usage (status: "
+
+  # ---- public API ---------------------------------------------------------
+
+  @doc """
+  Start a worker under the dynamic supervisor.
+
+  Required opts:
+    * `:task_id` — string, used as the default registry key.
+    * `:repo`   — string, the repo/project key the worker operates on.
+
+  Optional opts:
+    * `:workspace_id`   — string.
+    * `:meta`           — initial map of workflow-specific state.
+    * `:registry_key`   — string. Overrides the registry key (defaults to
+      `:task_id`). Fix and conflict passes no longer need one: since bd-741sid
+      they are ordinary runs of the ticket, registered under its id.
+  """
+  @spec start(keyword()) :: DynamicSupervisor.on_start_child()
+  def start(opts) when is_list(opts) do
+    case ensure_single_active_task_worker(opts) do
+      :ok ->
+        Wardmast.Worker.Supervisor
+        |> DynamicSupervisor.start_child({__MODULE__, opts})
+        |> tap(&log_worker_start(opts, &1))
+
+      {:error, _reason} = refused ->
+        refused
+    end
+  end
+
+  @doc """
+  True when a worker snapshot (or anything carrying its `:state` and
+  `:waiting_on`) is driving, or about to drive, an agent session: `:starting`
+  (registered, subprocess not spawned yet), `:working`, or `:waiting` on a
+  question the agent asked.
+
+  Everything else is either waiting on the review gate (no agent, a reviewer
+  judging its diff) or `:finished`. The distinction is what `start/1` enforces
+  the single-active-worker rule on: a run waiting on review or finished may
+  share a task with a new pass, an active one may not (bd-8tjcms).
+  """
+  @spec active?(map()) :: boolean()
+  def active?(%{state: state} = snap), do: active_state?(state, Map.get(snap, :waiting_on))
+  def active?(_), do: false
+
+  defp active_state?(state, waiting_on) when live_run?(state, waiting_on), do: true
+  defp active_state?(_state, _waiting_on), do: false
+
+  @doc """
+  True when a worker snapshot is waiting on the ReviewGate's verdict: its
+  `arb done` fired, review is required, and a distinct reviewer is judging
+  the diff (bd-1uu19b).
+  """
+  @spec awaiting_review_gate?(map() | nil) :: boolean()
+  def awaiting_review_gate?(%{state: :waiting, waiting_on: :review_gate}), do: true
+  def awaiting_review_gate?(_), do: false
+
+  @doc "True when a worker snapshot's run is `:finished`."
+  @spec finished?(map() | nil) :: boolean()
+  def finished?(%{state: :finished}), do: true
+  def finished?(_), do: false
+
+  # bd-8tjcms / #1511. A task must never have two workers driving agents at the
+  # same time. Two agents sharing one worktree and branch interleave commits and
+  # double the premium-tier spend, and the failure is silent — vs-ehjarz ran a
+  # merge-queue fix pass and a Watchdog auto-resume concurrently for ~2 minutes.
+  #
+  # This has to live HERE rather than in `Dispatch`, because the two families of
+  # caller were mutually invisible:
+  #
+  #   * `Dispatch.dispatch/2` and `.resume/2` guard via `Worker.whereis/1`, which
+  #     only resolves the *exact* task_id key — it cannot see a worker under a
+  #     sibling key of the task's exclusive family (before bd-741sid, the
+  #     merge queue's per-kind fix / conflict pass keys).
+  #   * `MergeQueue.FixPassDispatcher` and `.ConflictResolver` call
+  #     `start_or_reap_terminal/1` and only ever collide with their OWN key, so
+  #     they cannot see the primary.
+  #
+  # `start/1` is the one choke point every one of them goes through.
+  #
+  # Deliberately NOT blocked:
+  #   * a primary waiting on the review gate — subordinate passes are designed
+  #     to run alongside it (bd-8lq2g7) and the merge queue depends on it;
+  #   * a terminal primary — `Dispatch.start_worker/3` evicts it (bd-d70whv) and
+  #     `start_or_reap_terminal/1` reaps it (bd-8lq2g7);
+  #   * `ReviewGate`'s `#`-separated synthetic sessions — see
+  #     `Registry.live_exclusive_for/1`.
+  #
+  # `allow_concurrent_task_worker: true` opts out explicitly, for a caller that
+  # has already established exclusivity some other way (and for tests).
+  defp ensure_single_active_task_worker(opts) do
+    task_id = Keyword.get(opts, :task_id)
+
+    cond do
+      Keyword.get(opts, :allow_concurrent_task_worker, false) ->
+        :ok
+
+      not (is_binary(task_id) and task_id != "") ->
+        :ok
+
+      true ->
+        requested_key = resolve_registry_key(opts, task_id)
+
+        if PRegistry.exclusive_key?(requested_key, task_id) do
+          case active_sibling(task_id, requested_key) do
+            nil -> :ok
+            info -> refuse_concurrent_start(info)
+          end
+        else
+          :ok
+        end
+    end
+  end
+
+  @doc """
+  The first worker in `task_id`'s exclusive family, minus the task's own key,
+  that is still driving an agent, as `%{registry_key:, pid:, state:, ...}`,
+  or `nil`. Same probe (and same "unresponsive counts as active" rule) as the
+  single-active-worker guard in `start/1`.
+  """
+  @spec active_subordinate(String.t()) :: map() | nil
+  def active_subordinate(task_id) when is_binary(task_id), do: active_sibling(task_id, task_id)
+
+  # The first worker for `task_id` — under any key in the exclusive family
+  # except the one we are asking for — that is still driving an agent.
+  #
+  # An alive worker that does not answer `:snapshot` within the probe timeout is
+  # counted as active (`:unknown`): it is busy or wedged, not gone, and starting
+  # a second agent against it is exactly the outcome this guard exists to
+  # prevent. `arb worker stop <task-id>` is the documented way out, and the
+  # refusal message says so.
+  defp active_sibling(task_id, requested_key) do
+    workers = worker_pids()
+
+    task_id
+    |> PRegistry.live_exclusive_for()
+    |> Enum.reject(fn {key, pid} ->
+      key == requested_key or pid == self() or not MapSet.member?(workers, pid)
+    end)
+    |> Enum.find_value(fn {key, pid} ->
+      snap = safe_snapshot(pid)
+
+      if is_nil(snap) or active?(snap) do
+        %{
+          task_id: task_id,
+          registry_key: key,
+          requested_key: requested_key,
+          pid: pid,
+          # An unresponsive worker counts as active; say so rather than guess.
+          state: if(snap, do: snap.state, else: :unresponsive)
+        }
+      end
+    end)
+  end
+
+  @doc """
+  What a pass dispatcher reports when `pid` already holds ticket `task_id`'s
+  key (bd-741sid): `{same_role_error, pid}` when it is the same kind of pass
+  (`role`) still in flight from an earlier dispatch, otherwise the
+  single-active-run refusal (`{:task_worker_live, info}`, bd-8tjcms) naming the
+  run that holds the ticket. An unresponsive worker is treated as the busy pass.
+  """
+  @spec live_run_refusal(String.t(), pid(), atom(), atom()) :: term()
+  def live_run_refusal(task_id, pid, role, same_role_error) when is_pid(pid) do
+    case safe_snapshot(pid) do
+      %{state: run_state, meta: meta} ->
+        if role_from_meta(meta) == role do
+          {same_role_error, pid}
+        else
+          {:task_worker_live,
+           %{
+             task_id: task_id,
+             registry_key: task_id,
+             requested_key: task_id,
+             pid: pid,
+             state: run_state
+           }}
+        end
+
+      _ ->
+        {same_role_error, pid}
+    end
+  end
+
+  # Only actual `Wardmast.Worker` processes may be probed with `:snapshot`.
+  # `Wardmast.Worker.Registry` also holds non-worker entries under this task's
+  # `:`-separated keys — `<task_id>:watchdog` (an `Wardmast.Worker.Watchdog`,
+  # supervised elsewhere) among them — and calling `:snapshot` on one of those
+  # crashes it, which is the bd-2y0gd5 trap `list_children/0` documents. Same
+  # discriminator as `list_children/0`: a `:worker` child of
+  # `Wardmast.Worker.Supervisor` whose module is this one.
+  defp worker_pids do
+    Wardmast.Worker.Supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.flat_map(fn
+      {_id, pid, :worker, [__MODULE__]} when is_pid(pid) -> [pid]
+      _ -> []
+    end)
+    |> MapSet.new()
+  rescue
+    _ -> MapSet.new()
+  catch
+    :exit, _ -> MapSet.new()
+  end
+
+  defp refuse_concurrent_start(info) do
+    Logger.warning(
+      "Worker.start: REFUSED a second active worker for task=#{info.task_id} " <>
+        "requested_key=#{info.requested_key} — #{info.registry_key} is already " <>
+        "#{info.state} (#{inspect(info.pid)}). Stop it first (`arb worker stop " <>
+        "#{info.task_id}`) if this dispatch should supersede it. origin=#{start_origin()}"
+    )
+
+    {:error, {:task_worker_live, info}}
+  end
+
+  # bd-8tjcms acceptance 2: the vs-ehjarz post-mortem could not say *who*
+  # started each of the two runs, because nothing recorded the caller. Every
+  # worker start now leaves a breadcrumb naming the task, the registry key, the
+  # role from `:meta`, and the first stack frame outside this module.
+  #
+  # Logged from the `start_child` *outcome*, not before it (bd-2l0hzm). A key
+  # squatted by a terminal pass makes `start_or_reap_terminal/1` call `start/1`
+  # twice — once refused `:already_started`, once after the reap — and the
+  # pre-start log read as two spawns 1ms apart for a single fix pass. The
+  # refused attempt started nothing, so it leaves no breadcrumb; the reap has
+  # its own line.
+  defp log_worker_start(_opts, {:error, {:already_started, _pid}}), do: :ok
+
+  defp log_worker_start(opts, outcome) do
+    task_id = Keyword.get(opts, :task_id)
+    key = if is_binary(task_id), do: resolve_registry_key(opts, task_id), else: nil
+    role = opts |> Keyword.get(:meta, %{}) |> role_of()
+
+    detail =
+      case outcome do
+        {:ok, pid} -> "pid=#{inspect(pid)}"
+        other -> "FAILED #{inspect(other)}"
+      end
+
+    Logger.info(
+      "Worker.start: task=#{inspect(task_id)} registry_key=#{inspect(key)} " <>
+        "role=#{inspect(role)} #{detail} origin=#{start_origin()}"
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp role_of(%{} = meta), do: Map.get(meta, :role) || Map.get(meta, "role") || :main
+  defp role_of(_), do: :main
+
+  # The first stack frame outside this module — i.e. whatever asked for the
+  # worker (Dispatch, FixPassDispatcher, ConflictResolver, ReviewGate, an MCP
+  # tool, a LiveView). Rendered as `Module.fun/arity`; `"unknown"` if the stack
+  # is unavailable.
+  defp start_origin do
+    case Process.info(self(), :current_stacktrace) do
+      {:current_stacktrace, frames} ->
+        # Skip `Process.info/2` and this module's own frames; the first frame
+        # after them is the caller.
+        frames
+        |> Enum.drop_while(fn {mod, _fun, _arity, _loc} -> mod != __MODULE__ end)
+        |> Enum.drop_while(fn {mod, _fun, _arity, _loc} -> mod == __MODULE__ end)
+        |> List.first()
+        |> case do
+          {mod, fun, arity, _loc} when is_integer(arity) -> "#{inspect(mod)}.#{fun}/#{arity}"
+          {mod, fun, args, _loc} when is_list(args) -> "#{inspect(mod)}.#{fun}/#{length(args)}"
+          _ -> "unknown"
+        end
+
+      _ ->
+        "unknown"
+    end
+  end
+
+  @doc """
+  Like `start/1`, but first reaps a *terminal* worker squatting the requested
+  registry key.
+
+  bd-8lq2g7: a worker that reaches `:failed`/`:completed` is not stopped — it is
+  a `:temporary` child of `Wardmast.Worker.Supervisor` and stays alive (and
+  registered) until something calls `stop/2`; the registry entry is only dropped
+  in `terminate/2`. For the *primary* worker that is deliberate: the task's
+  `:close` after-action owns its teardown, and its post-mortem state is what
+  `arb worker show` reads. For a merge-queue *subordinate* pass it is a trap.
+  Both the Watchdog's `fix_pass_active?/1` and the merge queue treat a terminal
+  pass as "not running" and re-dispatch, but the dead pass still holds its
+  registry key (the ticket's own id since bd-741sid), so every re-dispatch returns
+  `{:error, {:already_started, pid}}` forever: the retry silently no-ops, the
+  attempt budget drains, and the task parks with nothing running — the #1204
+  symptom. Reaping here makes the "the merge queue re-dispatches automatically"
+  promise in the stop escalation actually true.
+
+  Only terminal workers are reaped; a live pass still yields
+  `{:error, {:already_started, pid}}` so callers keep refusing to open a second
+  agent session against it.
+  """
+  @spec start_or_reap_terminal(keyword()) :: DynamicSupervisor.on_start_child()
+  def start_or_reap_terminal(opts) when is_list(opts) do
+    case start(opts) do
+      {:error, {:already_started, pid}} = already_started ->
+        # Retry exactly once: a second `:already_started` means someone raced us
+        # to the key with a live worker, which is the answer the caller wants.
+        if reap_terminal(pid), do: start(opts), else: already_started
+
+      other ->
+        other
+    end
+  end
+
+  # True when `pid` is gone (or was terminal and has now been stopped), i.e. the
+  # registry key is free to re-take. Never touches a live worker.
+  defp reap_terminal(pid) when is_pid(pid) do
+    cond do
+      not Process.alive?(pid) ->
+        true
+
+      terminal?(pid) ->
+        Logger.info("Worker: reaping terminal worker #{inspect(pid)} to free its registry key")
+        stop_quietly(pid)
+
+      true ->
+        false
+    end
+  end
+
+  defp terminal?(pid) do
+    finished?(state(pid))
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp stop_quietly(pid) do
+    GenServer.stop(pid, :normal, @reap_stop_timeout_ms)
+    true
+  catch
+    # A terminate/2 that hangs or a process that died under us: either way the
+    # key is only free if the process is actually gone.
+    :exit, _ -> not Process.alive?(pid)
+  end
+
+  @doc """
+  `GenServer.start_link/3`-style entry point. Prefer `start/1` for normal use.
+  """
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts) when is_list(opts) do
+    case Keyword.fetch(opts, :task_id) do
+      {:ok, task_id} when is_binary(task_id) and task_id != "" ->
+        case Keyword.fetch(opts, :repo) do
+          {:ok, repo} when is_binary(repo) and repo != "" ->
+            registry_key = resolve_registry_key(opts, task_id)
+            GenServer.start_link(__MODULE__, opts, name: PRegistry.via_tuple(registry_key))
+
+          _ ->
+            {:error, :missing_repo}
+        end
+
+      _ ->
+        {:error, :missing_task_id}
+    end
+  end
+
+  defp resolve_registry_key(opts, task_id) do
+    case Keyword.get(opts, :registry_key) do
+      key when is_binary(key) and key != "" -> key
+      _ -> task_id
+    end
+  end
+
+  @doc """
+  Return the pid of the worker registered for `task_id`, or `nil`.
+  """
+  @spec whereis(String.t()) :: pid() | nil
+  def whereis(task_id) when is_binary(task_id), do: PRegistry.whereis(task_id)
+
+  @doc """
+  Return a list of active worker snapshots — one entry per child under
+  `Wardmast.Worker.Supervisor`. Only actually-crashed/stopped workers are
+  omitted; a live worker that is too busy or wedged to answer `:snapshot`
+  within the probe timeout is still included, flagged `meta.stale_probe: true`
+  and sourced from its registry key and latest `Wardmast.Workers.Run` row
+  instead of its in-memory state (bd-45tkhq) — the row's kind, state and
+  outcome, the same vocabulary a live snapshot speaks (bd-1uu19b).
+
+  Each entry is the same snapshot map `state/1` returns (task_id,
+  workspace_id, repo, current_step, kind, state, outcome, waiting_on,
+  started_at, step_started_at, meta), plus `:pid`.
+  """
+  @spec list_children() :: [map()]
+  def list_children do
+    registry_key_by_pid = Map.new(PRegistry.all(), fn {key, pid} -> {pid, key} end)
+
+    Wardmast.Worker.Supervisor
+    |> DynamicSupervisor.which_children()
+    |> Task.async_stream(
+      fn
+        # Only actual workers answer :snapshot. Other children of this supervisor
+        # — notably an Wardmast.Worker.ReviewGate review gate — must NOT be probed:
+        # calling :snapshot on them crashes them and strands the author. Match
+        # strictly on the Worker module. See bd-2y0gd5.
+        {_id, pid, :worker, [__MODULE__]} when is_pid(pid) ->
+          if Process.alive?(pid) do
+            case safe_snapshot(pid) do
+              %{} = snap -> [Map.put(snap, :pid, pid)]
+              _ -> degraded_snapshot(pid, Map.get(registry_key_by_pid, pid))
+            end
+          else
+            []
+          end
+
+        _ ->
+          []
+      end,
+      timeout: :infinity,
+      max_concurrency: max(System.schedulers_online() * 4, 8),
+      ordered: false
+    )
+    |> Enum.flat_map(fn
+      {:ok, entries} -> entries
+      {:exit, _reason} -> []
+    end)
+  end
+
+  # bd-45tkhq: a worker that misses the `:snapshot` probe is still `alive?` —
+  # it is busy or wedged, not gone, exactly the distinction
+  # `active_sibling/2` above already draws for the concurrent-start guard.
+  # Rather than dropping it (which is what caused the incident: a genuinely
+  # running worker read as "does not exist" by `worker_list`), fall back to
+  # its durable `Wardmast.Workers.Run` row — the same source `worker_show`
+  # falls back to for a worker that has *actually* exited
+  # (`worker_show_historical/2`) — flagged `meta.stale_probe: true` so
+  # callers can tell a confirmed-live worker from a probe timeout without
+  # losing the worker from the list entirely. The process is alive, so a row
+  # that already reads `:finished` (or no row at all) is reported `:working`:
+  # the single-active-run guard counts an unresponsive worker as active.
+  defp degraded_snapshot(_pid, nil), do: []
+
+  defp degraded_snapshot(pid, registry_key) do
+    # bd-45tkhq: a worker under a `:`-suffixed registry key keeps its
+    # `Wardmast.Workers.Run` row on the plain `task_id` (see
+    # record_run_started/1 below). Strip only a `:`-suffix so the run lookup
+    # still finds it — a review-gate `#`-id genuinely *is* the worker's own
+    # `task_id` and must not be touched.
+    task_id = registry_key |> String.split(":", parts: 2) |> List.first()
+
+    case latest_run(task_id) do
+      %Wardmast.Workers.Run{} = run ->
+        [
+          %{
+            pid: pid,
+            registry_key: registry_key,
+            task_id: run.task_id,
+            workspace_id: run.workspace_id,
+            repo: run.repo,
+            current_step: nil,
+            kind: run.kind,
+            state: degraded_state(run.state),
+            outcome: nil,
+            waiting_on: nil,
+            role: degraded_role(run.role),
+            started_at: run.started_at,
+            step_started_at: nil,
+            meta: %{stale_probe: true}
+          }
+        ]
+
+      nil ->
+        [
+          %{
+            pid: pid,
+            registry_key: registry_key,
+            task_id: task_id,
+            workspace_id: nil,
+            repo: nil,
+            current_step: nil,
+            kind: :implement,
+            state: :working,
+            outcome: nil,
+            waiting_on: nil,
+            started_at: nil,
+            step_started_at: nil,
+            meta: %{stale_probe: true}
+          }
+        ]
+    end
+  end
+
+  # bd-45tkhq / bd-aw2cyt: `Wardmast.Worker.Phase.of/2` classifies a subordinate
+  # pass (fix pass, conflict resolver, review-gate reviewer/implementer) by its
+  # top-level `:role`, matched against a fixed atom set — a degraded entry
+  # with no `:role` falls through to `author_phase/2` and gets misclassified
+  # as the task's own primary worker instead of e.g. `:fixing_ci`. `Run.role`
+  # is durably the same value (`record_run_started/1` writes
+  # `to_string_or_nil(role_from_meta(...))`), just stringified for storage;
+  # convert it back through a fixed allowlist rather than
+  # `String.to_existing_atom/1` on a DB value.
+  @known_subordinate_roles ~w(reviewer implementer fix_pass conflict_resolver)a
+
+  defp degraded_state(state) when state in [:starting, :working, :waiting], do: state
+  defp degraded_state(_finished_or_nil), do: :working
+  defp degraded_role(nil), do: nil
+
+  defp degraded_role(role) when is_binary(role) do
+    Enum.find(@known_subordinate_roles, &(Atom.to_string(&1) == role))
+  end
+
+  defp latest_run(task_id) do
+    Wardmast.Workers.Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  # bd-45tkhq: this used to give a live worker only 500ms to answer
+  # `:snapshot` before `list_children/0` treated it the same as a crashed
+  # child — dropped from `worker_list`, `arb worker list`, and `arb prime`'s
+  # active-workers section. A worker draining a burst of subprocess output
+  # (e.g. verbose `mix test` lines) can easily miss a 500ms window on its
+  # mailbox without being dead or even unusually slow; `state/1` (what
+  # `worker_show` / `worker_runs` use) has no such tight budget, which is why
+  # those correctly reported the worker as running at the same instant this
+  # reported none. Match `state/1`'s effective (default) `GenServer.call/2`
+  # timeout so a busy-but-alive worker gets the same benefit of the doubt.
+  # Any worker that still hasn't answered by then is no longer just "busy" —
+  # `degraded_snapshot/2` above is what keeps it visible past this point
+  # rather than silently vanishing.
+  defp safe_snapshot(pid) do
+    GenServer.call(pid, :snapshot, 5_000)
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  @doc """
+  Return a snapshot of the worker's state, or `nil` if no worker is
+  registered for the given task_id.
+  """
+  @spec state(ref()) :: snapshot() | nil
+  def state(pid) when is_pid(pid), do: GenServer.call(pid, :snapshot)
+
+  def state(task_id) when is_binary(task_id) do
+    case whereis(task_id) do
+      nil -> nil
+      pid -> state(pid)
+    end
+  end
+
+  @doc """
+  `state/1`, but the worker first sends `{:worker_snapshot_cut, ref}` to
+  `notify` from its own process (bd-c5m9b5). Messages between two processes
+  arrive in the order they were sent, so for a `notify` subscribed to the
+  worker's output topic every `{:worker_output, _, _}` ahead of the marker is
+  already in the returned snapshot and every one after it is not — the exact
+  seam between a seeded output buffer and the live stream, even when the
+  snapshot itself is fetched by another process.
+  """
+  @spec state(pid(), pid(), reference()) :: snapshot()
+  def state(pid, notify, ref) when is_pid(pid) and is_pid(notify) and is_reference(ref),
+    do: GenServer.call(pid, {:snapshot, {notify, ref}})
+
+  @doc """
+  Start the Watchdog for ticket `task_id` from its row alone (bd-8jixav,
+  bd-741sid). The ticket, not a parked worker, holds the PR ref and the lane
+  its Watchdog watches it on, so this needs no worker at all. See
+  `Wardmast.Worker.Watchdog.restart/1` for the return contract.
+  """
+  @spec restart_watchdog(String.t()) :: :ok | {:error, term()}
+  def restart_watchdog(task_id) when is_binary(task_id),
+    do: Wardmast.Worker.Watchdog.restart(task_id)
+
+  @doc """
+  Where the `run_tests` MCP tool runs `mix test` for task `task_id`'s run
+  (bd-57nhsi): `{:ok, %{exec:, worktree:, target:}}`, the run's own environment —
+  its podman container, or its node's agent — through the same `exec` the
+  pre-push check uses, or the worktree on the host for an unsandboxed run.
+  `exec` is a plain function, so the caller runs it in its own process and the
+  worker is never blocked for the minutes a test run takes.
+  """
+  @spec test_runner(String.t()) ::
+          {:ok, %{exec: function(), worktree: String.t(), target: String.t() | nil}}
+          | {:error, :no_worker | :no_worktree}
+  def test_runner(task_id) when is_binary(task_id) do
+    case whereis(task_id) do
+      nil -> {:error, :no_worker}
+      pid -> GenServer.call(pid, :test_runner)
+    end
+  catch
+    :exit, _ -> {:error, :no_worker}
+  end
+
+  @doc """
+  Does this worker currently own an agent subprocess that has not exited?
+
+  bd-2aslx6 (#1428): the dispatch path reuses a live worker's registration, so
+  without this question a re-dispatch opens a SECOND paid CLI session inside
+  the same `worker_run`. A session counts as live while the worker has not
+  stamped its `:exited_at` AND its port is still open — the port check keeps a
+  session whose exit was somehow never observed from blocking re-dispatch
+  forever.
+
+  `false` for an unknown task id or a worker that is gone: nothing is running,
+  so nothing is blocked.
+  """
+  @spec agent_session_live?(ref()) :: boolean()
+  def agent_session_live?(pid) when is_pid(pid) do
+    GenServer.call(pid, :agent_session_live?)
+  catch
+    :exit, _ -> false
+  end
+
+  def agent_session_live?(task_id) when is_binary(task_id) do
+    case whereis(task_id) do
+      nil -> false
+      pid -> agent_session_live?(pid)
+    end
+  end
+
+  @doc """
+  Advance the workflow step. Permitted when the run is `:starting`
+  (transitions to `:working`) or `:working` (stays `:working`).
+  """
+  @spec advance(ref(), step()) :: :ok | {:error, term()}
+  def advance(ref, step) when is_atom(step), do: call(ref, {:advance, step})
+
+  @doc """
+  Park the worker on a question — the run becomes `:waiting`
+  (`waiting_on: :question`). Only valid from `:working`.
+  """
+  @spec await(ref(), term()) :: :ok | {:error, term()}
+  def await(ref, reason \\ nil), do: call(ref, {:await, reason})
+
+  @doc """
+  Resume a worker waiting on a question. Only valid from `:waiting` on
+  `:question`.
+  """
+  @spec resume(ref()) :: :ok | {:error, term()}
+  def resume(ref), do: call(ref, :resume)
+
+  @doc false
+  # bd-4ic681: the args the FIRST open of a session runs with — `port_args` with
+  # `--resume <sid>` and the terse continue prompt spliced in when this worker was
+  # started for a session resume, exactly as `{:__claude_session_open__, ...}`
+  # splices them. A run placed on a node is assigned before its session opens
+  # (`ClaudeSession.start/1`), so the spec must carry them already.
+  @spec first_spawn_args(pid(), map()) :: map()
+  def first_spawn_args(pid, port_args) when is_pid(pid),
+    do: GenServer.call(pid, {:first_spawn_args, port_args})
+
+  @doc """
+  Give up an adoption that did not complete (bd-4p1vui,
+  `docs/design/remote-workers.md` §10.4.6 F5/F7): the run goes back to its node's
+  hold without a cancel (`Executor.Node.unadopt/2`), the Worker forgets its
+  sessions and stops, and nothing is written to the run's row, so `Nodes.Recovery`
+  collects the run as if no adoption had been tried.
+  """
+  @spec abandon_adoption(ref()) :: :ok | {:error, term()}
+  def abandon_adoption(ref), do: call(ref, :abandon_adoption)
+
+  @doc """
+  `abandon_adoption/1`, but only while this Worker is still adopting `run_id` (bd-4p1vui,
+  §10.4.6 F12): its `meta[:adopt]` names the run and no session has attached it. A Worker
+  whose session attached the run owns it and answers `{:error, :attached}`; any other,
+  `{:error, :not_adopting}`. One call, so it cannot race the session open: this is how an
+  adoption whose caller was cut off is undone.
+  """
+  @spec abandon_adoption(ref(), String.t()) :: :ok | {:error, :attached | :not_adopting}
+  def abandon_adoption(ref, run_id) when is_binary(run_id),
+    do: call(ref, {:abandon_adoption, run_id})
+
+  @doc """
+  Open a merge request for `branch`, hand it to the ticket, and end the run.
+
+  Resolves the workspace's merger adapter, calls `open/4`, records the
+  resulting `mr_ref`, its clickable `merger_url` and the Watchdog's lane on the
+  ticket (its `open_pr` transition, bd-741sid), and starts the ticket's
+  `Wardmast.Worker.Watchdog` from that row. The run is then recorded finished
+  and successful and the worker exits. Only valid from `:working`.
+
+  `opts` is a map forwarded to the adapter's `open/4` (`:target_branch`,
+  `:reviewer_ids`, `:labels`, and — for `Direct` — `:repo_path`, which defaults
+  to the worker's `meta[:worktree_path]`). It may also carry overrides
+  primarily for testing and advanced callers:
+
+    * `:adapter` — a merger module to use directly, bypassing workspace
+      resolution.
+    * `:workspace` — the `Workspace` struct (used to seed adapter config and
+      read the auto-merge flag) when `:adapter` is supplied.
+    * `:auto_merge`, `:interval_ms`, `:initial_delay_ms` — Watchdog overrides.
+
+  Returns `{:ok, mr_ref}` on success, or `{:error, reason}` (the worker stays
+  `:working`) if the adapter can't be resolved or `open/4` fails.
+  """
+  @spec open_mr(ref(), String.t(), String.t(), String.t(), map()) ::
+          {:ok, String.t()} | {:error, term()}
+  def open_mr(ref, branch, title, description \\ "", opts \\ %{})
+      when is_binary(branch) and is_binary(title) and is_binary(description) and is_map(opts) do
+    call(ref, {:open_mr, branch, title, description, opts})
+  end
+
+  @doc """
+  Mark the run finished and successful. Only valid from `:working`. The worker keeps
+  running (so callers can read the final state) but rejects further
+  transitions.
+  """
+  @spec complete(ref(), term()) :: :ok | {:error, term()}
+  def complete(ref, result \\ nil), do: call(ref, {:complete, result})
+
+  @doc """
+  Mark the run finished and failed. Valid from `:starting`, `:working`, or
+  `:waiting` on a question.
+
+  There is no slot hand-off failure any more (bd-741sid): a ticket holds its
+  slot while it is In progress, whatever its run did (bd-asxw4e), so a worker
+  never has to fail "only so an automatic round can replace it".
+  """
+  @spec fail(ref(), term()) :: :ok | {:error, term()}
+  def fail(ref, reason \\ nil), do: call(ref, {:fail, reason})
+
+  @doc """
+  End a live run `:interrupted` with a typed `Wardmast.Worker.StopReason`, consuming no resume
+  attempt and asking for no automatic resume (K12, A3: a node's `refuse{...}` — the run never
+  started, so there is nothing to resume; `Wardmast.Nodes.Refusal` holds the ticket).
+  """
+  @spec interrupt(ref(), Wardmast.Worker.StopReason.t()) :: :ok | {:error, term()}
+  def interrupt(ref, %Wardmast.Worker.StopReason{} = reason), do: call(ref, {:interrupt, reason})
+
+  @doc """
+  Park a live run on a guardrail spend cap (G19, design §3.3).
+
+  `reason` is a `StopReason.spend_cap/1`. The agent is stopped, the run finishes
+  `:failed` with the typed `:spend_cap` cause (its worktree is kept), and the
+  coordinator is paged with the addressed `worker_stopped` escalation. Valid in the
+  states `fail/2` is: a finished or review-gated run has no agent to park.
+  """
+  @spec park_spend_cap(ref(), Wardmast.Worker.StopReason.t()) :: :ok | {:error, term()}
+  def park_spend_cap(ref, %Wardmast.Worker.StopReason{category: :spend_cap} = reason),
+    do: call(ref, {:park, reason})
+
+  @doc """
+  Park a live run whose subject was suspended after a critical guardrail event
+  (G18, design §6.3). `reason` is a `StopReason.trust_suspended/1`; otherwise the
+  same as `park_spend_cap/2`: the agent is stopped, the worktree kept, the run
+  finishes `:failed` with the typed cause and the coordinator gets the addressed
+  `worker_stopped` escalation.
+  """
+  @spec park_suspended(ref(), Wardmast.Worker.StopReason.t()) :: :ok | {:error, term()}
+  def park_suspended(ref, %Wardmast.Worker.StopReason{category: :trust_suspended} = reason),
+    do: call(ref, {:park, reason})
+
+  @doc """
+  Deliver a ReviewGate (review-gate) verdict. Only valid from `:waiting` on
+  `:review_gate` — where the worker waits after its `arb done` when review is
+  required. Called by `Wardmast.Worker.ReviewGate` once the reviewer worker
+  reaches its verdict.
+
+    * `{:approve, findings}` → records the approval and proceeds to the merger
+      (`do_open_mr`); the PR opens and the run finishes `:succeeded`.
+    * `{:request_changes, findings}` → records the findings, escalates to the
+      coordinator, and finishes the run `:failed` **without** merging. The task
+      stays `:active` (the Driver leaves a failed run's task open for
+      inspection / re-dispatch).
+    * `{:no_verdict, reason}` → an inconclusive review; treated like a rejection
+      (escalate, do not merge) since the safe default is never to merge unreviewed
+      work. Since bd-9zuvbh this is a **park**, not a failed run — see below.
+    * `{:parked, reason, findings}` → guard class C's terminal state (bd-9zuvbh,
+      design #1635 §5.3). The gate reached a terminal state with no verdict it
+      could act on. Nothing merges and no APPROVE is accepted — the content half
+      of the guard is still closed. The run finishes `:failed` with the park's
+      cause in `failure_reason`, the task carries it as its `attention_cause`,
+      and the coordinator is paged exactly once for the episode.
+  """
+  @spec review_gate_verdict(
+          ref(),
+          Wardmast.Worker.ReviewGate.verdict() | {:no_verdict, String.t()}
+        ) ::
+          :ok | {:error, term()}
+  def review_gate_verdict(ref, verdict), do: call(ref, {:review_gate_verdict, verdict})
+
+  @doc """
+  Apply a ReviewGate verdict to ticket `task_id` when no author run is
+  resident (bd-741sid) — the fallback `Wardmast.Worker.ReviewGate.deliver_verdict/4`
+  takes when the author is gone. The ReviewGate reports to the ticket.
+
+  The author's context is rebuilt from the ticket — its ReviewGate round state
+  (`review_gate_state`), its repo and workspace, its latest run — over what
+  the gate knows (`ctx`: `:branch`, `:worktree_path`, `:target_branch`,
+  `:repo`, `:pr_ref`), and the verdict takes the path it takes in a resident
+  author:
+
+    * APPROVE opens (or adopts) the PR, records it on the ticket and hands it
+      to the ticket's Watchdog: the ticket goes to Merging. When the round had
+      been rejected, the rejection is overturned exactly as bd-3wumco does for
+      a resident author: the run row is rewritten finished and successful, the
+      review park is cleared, and the coordinator is told the earlier
+      escalation is superseded.
+    * REQUEST_CHANGES, an inconclusive review, or a park is recorded on the
+      ticket and escalated, and a rejection still schedules the implementer's
+      fix round.
+
+  Runs in the caller's process; nothing here needs the author's. Only an
+  In-progress ticket takes a verdict: `{:error, {:not_in_review, state}}`
+  otherwise.
+  """
+  @spec apply_review_gate_verdict_to_ticket(String.t(), term(), map()) :: :ok | {:error, term()}
+  def apply_review_gate_verdict_to_ticket(task_id, verdict, ctx \\ %{})
+      when is_binary(task_id) and is_map(ctx) do
+    with {:ok, state} <- ticket_round_state(task_id, ctx) do
+      apply_ticket_verdict(state, verdict)
+    end
+  end
+
+  @doc """
+  Put ticket `task_id` back on the merge path after the coordinator ruled that
+  its work ships without a reviewer APPROVE (`accept_as_is` / `amend`,
+  `Wardmast.ReviewGate.RulingResume`).
+
+  The same hand-off a late APPROVE takes when no author is resident
+  (`apply_review_gate_verdict_to_ticket/3`): the PR is opened or adopted and
+  handed to the ticket's Watchdog (CI wait, merge pinned to the ruled head,
+  close), or merged locally for a `direct` repo — but nothing here records a
+  reviewer approval that never happened. The park and the rejection that
+  stopped the run are overturned, and the notes say who permitted the merge.
+
+  `ruling` carries `:decision`, `:actor`, `:head_sha` and `:reasoning`. Only an
+  In-progress ticket takes it: `{:error, {:not_in_review, state}}` otherwise.
+  """
+  @spec resume_merge_after_ruling(String.t(), map()) :: :ok | {:error, term()}
+  def resume_merge_after_ruling(task_id, ruling) when is_binary(task_id) and is_map(ruling) do
+    with {:ok, %State{} = state} <- ticket_round_state(task_id, %{}) do
+      state = %State{state | meta: Map.put(state.meta, :merge_ruling, ruling)}
+      apply_ticket_verdict(state, {:approve, Map.get(ruling, :reasoning) || ""})
+    end
+  end
+
+  @doc """
+  Record an arbitrary key/value pair in the worker's `:meta` map.
+  """
+  @spec report(ref(), atom() | String.t(), term()) :: :ok | {:error, term()}
+  def report(ref, key, value), do: call(ref, {:report, key, value})
+
+  @doc """
+  Stop the worker cleanly.
+
+  `timeout` bounds the wait on `terminate/2` and defaults to `:infinity`
+  (GenServer's own default). Teardown callers that run inside a request path —
+  `Wardmast.Tasks.Issue.Changes.StopWorker`, in the `:close` action's hook
+  pipeline — pass a finite budget so a worker wedged in a slow `terminate/2`
+  cannot hang every close of its task. Route stops through here rather than
+  calling `GenServer.stop/3` directly, so teardown behaviour added to this
+  function reaches every call site.
+  """
+  @spec stop(ref(), term(), timeout()) :: :ok | {:error, :not_found}
+  def stop(ref, reason \\ :normal, timeout \\ :infinity)
+  def stop(pid, reason, timeout) when is_pid(pid), do: GenServer.stop(pid, reason, timeout)
+
+  # Stopping a task also cancels a dispatch the quota gate is holding for it
+  # (bd-6omte4) — a held ReviewGate fix round has no worker to stop, and must
+  # not start once the task was stopped. A task with only a held intent
+  # counts as found.
+  def stop(task_id, reason, timeout) when is_binary(task_id) do
+    held? = DispatchQueue.cancel(task_id, "the task was stopped")
+
+    case whereis(task_id) do
+      nil -> if held?, do: :ok, else: {:error, :not_found}
+      pid -> GenServer.stop(pid, reason, timeout)
+    end
+  end
+
+  @doc """
+  Stop the worker because an operator asked (`arb worker stop`, MCP
+  `worker_stop`, the worker detail page).
+
+  Unlike `stop/3` with `:normal` — the `arb done` -> task close teardown, which
+  records the run `:succeeded` — a killed run did not finish. It is stamped
+  `:interrupted` with failure_reason `"operator_stop"`, so run stats and Loop
+  convergence never count it as a success.
+  """
+  @spec operator_stop(ref()) :: :ok | {:error, :not_found}
+  def operator_stop(ref) do
+    # bd-98gi5m: the run records who stopped it. The actor is the caller's, so
+    actor = Wardmast.Actor.current()
+
+    if actor do
+      label = Wardmast.Actor.label(actor)
+
+      cond do
+        is_binary(ref) -> note_stopper(ref, label)
+        is_pid(ref) -> note_stopper_pid(ref, label)
+        true -> :ok
+      end
+    end
+
+    stop(ref, {:shutdown, @operator_stop})
+  end
+
+  defp note_stopper(task_id, label) do
+    case whereis(task_id) do
+      nil -> :ok
+      pid -> note_stopper_pid(pid, label)
+    end
+  end
+
+  defp note_stopper_pid(pid, label) do
+    if Process.alive?(pid), do: GenServer.call(pid, {:note_stopper, label})
+  catch
+    :exit, _ -> :ok
+  end
+
+  # ---- GenServer callbacks -----------------------------------------------
+
+  @impl true
+  def init(opts) do
+    # bd-6i7yzq: writes this process makes are attributed to it (`Wardmast.Actor`).
+    Wardmast.Actor.put(Wardmast.Actor.system("worker"))
+
+    # bd-aje6fj / #1896: without this, the supervisor's `:shutdown` exit signal
+    # on an application stop kills the worker outright and `terminate/2` — the
+    # only thing that SIGKILLs the agent tree and closes out the run row — never
+    # runs. Trapping turns every linked exit into a message; see the `:EXIT`
+    # clauses of handle_info/2 for what reaches us that way.
+    Process.flag(:trap_exit, true)
+
+    now = DateTime.utc_now()
+    task_id = Keyword.fetch!(opts, :task_id)
+    meta = Keyword.get(opts, :meta, %{})
+
+    state = %State{
+      task_id: task_id,
+      registry_key: resolve_registry_key(opts, task_id),
+      workspace_id: Keyword.get(opts, :workspace_id),
+      repo: Keyword.fetch!(opts, :repo),
+      current_step: :idle,
+      kind: Wardmast.Workers.RunState.kind_from_meta(meta),
+      state: :starting,
+      outcome: nil,
+      waiting_on: nil,
+      started_at: now,
+      step_started_at: nil,
+      meta: meta,
+      run_id: nil
+    }
+
+    # bd-aw2cyt: seed the announced phase from the boot state, so the stream
+    # carries *transitions* rather than a "worker is idle" event nobody asked
+    # for the instant a worker registers.
+    state = %State{state | last_phase: Wardmast.Worker.Phase.of(snapshot(state))}
+
+    state = record_run_started(state)
+    watch_adopter(meta)
+
+    # P8 (`docs/provider-account-design.md` §4.2): stamp this worker's dispatch
+    # context onto its own registry entry so the account concurrency ceiling
+    # has one authoritative, registry-derived count to read
+    # (`Wardmast.Accounts.Concurrency.live_count/1`). Recorded here, from inside
+    # the registered process, because the entry dies with the process — no
+    # path has to remember to decrement anything.
+    # DC4: the account and pool too, so seats can be counted per (account, pool)
+    # (`Wardmast.Quota.Seats`) from the registry alone.
+    workspace_id = effective_workspace_id(state)
+    provider = provider(meta)
+
+    PRegistry.put_dispatch(
+      state.registry_key,
+      workspace_id,
+      provider,
+      [node_id: placed_node_id(meta), repo: state.repo] ++
+        seat_stamp(workspace_id, provider, dispatch_model(meta))
+    )
+
+    broadcast_lifecycle(:started, state)
+
+    {:ok, state}
+  end
+
+  @doc """
+  Broadcast a `{:worker_lifecycle, event, snapshot}` message on the `"workers"`
+  topic. `event` is one of:
+
+    * `:started` — the worker just booted (`init/1`).
+    * `:stopped` — the worker is terminating (`terminate/2`).
+    * `:updated` — a mid-life state change worth pushing to live views, namely
+      the run opening its PR and each Watchdog poll that records a fresh
+      merger status. Lets the dashboard's merge-queue view
+      track in-flight merges without polling.
+
+  Best-effort: a PubSub failure is logged at debug and swallowed.
+  """
+  def broadcast_lifecycle(event, %State{} = state) when event in [:started, :stopped, :updated] do
+    Phoenix.PubSub.broadcast(
+      Wardmast.PubSub,
+      "workers",
+      {:worker_lifecycle, event, lifecycle_snapshot(state)}
+    )
+
+    :ok
+  rescue
+    # Silent-on-failure (PubSub registry may be down in tests), but leave
+    # breadcrumbs so a programming error in the payload isn't invisible.
+    e ->
+      Logger.debug("Worker.broadcast_lifecycle/2 swallowed: #{Exception.message(e)}")
+      :ok
+  end
+
+  # Broadcast {:worker_done, task_id} to "worker:done:<workspace_id>" so the
+  # workspace's MergeQueue (the merge queue) can pick the task up and drive it through
+  # the merge queue. A worker without a workspace_id (e.g. ad-hoc local runs)
+  # has no MergeQueue listening and so the broadcast is skipped.
+  #
+  # Review-only workers (`meta[:review_only] == true`) skip the merge queue
+  # broadcast — they don't author code, so there's nothing for the merge queue
+  # to do, and the task they're reviewing may not even belong to the fleet.
+  # The coordinator notification still fires so the dashboard / inbox feed picks
+  # up the completion.
+  #
+  # bd-6v2my2: a no-PR directive (`no_pr_type?/1`: `:task` or `:research`)
+  # skips it for the same reason. `MergeQueue.do_enqueue/2` has no issue_type awareness at all — it
+  # unconditionally computes the per-task branch, pushes it, and opens a PR for
+  # it. That's harmless for the common no-worktree `:task` (the push fails,
+  # since there's no worktree to push), but a `:task` dispatched with
+  # `provision_worktree: true` (e.g. a PRPatrol follow-up, which needs a real
+  # checkout to `gh`/`git` from without being a code deliverable of its own)
+  # DOES have a real branch to push — left unguarded, the MergeQueue would
+  # push it and open a spurious/empty PR the instant `arb done` fires, even
+  # with zero commits and even though the worker was told not to touch it.
+  defp broadcast_done(%State{workspace_id: nil}), do: :ok
+
+  defp broadcast_done(%State{workspace_id: ws_id, task_id: task_id, meta: meta} = state) do
+    # The MergeQueue message is skipped for review-only and no-PR tickets (see
+    # above); the `/events` `worker_done` event is skipped only for review-only
+    # ones. bd-6dxqkg (#372): a research/task completion must still reach the
+    # coordinator's `/events` stream and Autopilot's slot-freed trigger.
+    unless review_only?(meta) or no_pr_type?(meta) do
+      Phoenix.PubSub.broadcast(
+        Wardmast.PubSub,
+        "worker:done:" <> ws_id,
+        {:worker_done, task_id}
+      )
+    end
+
+    unless review_only?(meta) do
+      Wardmast.Events.broadcast(ws_id, "worker_done", %{
+        task_id: task_id,
+        kind: to_string(state.kind),
+        state: to_string(state.state),
+        outcome: to_string_or_nil(state.outcome),
+        phase: to_string(Wardmast.Worker.Phase.of(snapshot(state)))
+      })
+    end
+
+    # The message queue is the single source of truth for the notification
+    # feed: record a durable :notification alongside the transient broadcast.
+    # This in turn broadcasts {:new_message, _} on "messages:<ws>" via the
+    # resource's after_action hook, which the dashboard feed subscribes to.
+    Wardmast.Messages.CoordinatorNotifier.completed(snapshot(state))
+
+    :ok
+  rescue
+    # Same contract as broadcast_lifecycle/2: don't fail the caller on a
+    # PubSub hiccup, but log so a payload-construction bug isn't silent.
+    e ->
+      Logger.debug("Worker.broadcast_done/1 swallowed: #{Exception.message(e)}")
+      :ok
+  end
+
+  @doc """
+  Announce this worker's phase on the `/events` stream when it changes
+  (bd-aw2cyt).
+
+  A run's state outlives its agent, so an operator watching the stream
+  could not tell "still implementing" from "the agent exited twenty minutes
+  ago and we are waiting on CI". `worker_phase` is that distinction, and it
+  carries the run's `kind` / `state` / `outcome` + `agent_live` alongside.
+
+  Self-derived: a worker can only see its own row, so an author reports
+  `:implementing` / `:waiting_on_you` and a reviewer / implementer / fix pass
+  reports its own round. The board and the worker-list surfaces, which see the
+  whole fleet, fold a live round back into the author's card.
+
+  Returns the state with `:last_phase` updated; emits nothing when the phase
+  is unchanged.
+  """
+  @spec announce_phase(struct()) :: struct()
+  def announce_phase(%State{} = state) do
+    phase = Wardmast.Worker.Phase.of(snapshot(state))
+
+    if phase == state.last_phase do
+      state
+    else
+      broadcast_phase(state, phase)
+      %State{state | last_phase: phase}
+    end
+  end
+
+  defp broadcast_phase(%State{workspace_id: ws_id} = state, phase) when is_binary(ws_id) do
+    Wardmast.Events.broadcast(ws_id, "worker_phase", %{
+      task_id: state.task_id,
+      registry_key: state.registry_key || state.task_id,
+      role: to_string_or_nil(role_from_meta(state.meta)),
+      kind: to_string(state.kind),
+      state: to_string(state.state),
+      outcome: to_string_or_nil(state.outcome),
+      waiting_on: to_string_or_nil(state.waiting_on),
+      phase: to_string(phase),
+      phase_label: Wardmast.Worker.Phase.label(phase),
+      agent_live: session_live?(state)
+    })
+  rescue
+    e ->
+      Logger.debug("Worker.broadcast_phase/2 swallowed: #{Exception.message(e)}")
+      :ok
+  end
+
+  defp broadcast_phase(_state, _phase), do: :ok
+
+  defp to_string_or_nil(nil), do: nil
+  defp to_string_or_nil(v), do: to_string(v)
+
+  defp broadcast_worker_failed(%State{workspace_id: nil}), do: :ok
+
+  defp broadcast_worker_failed(%State{workspace_id: ws_id, task_id: task_id, meta: meta} = state) do
+    # `worker_failed` is a statement about the TASK's worker: the API event
+    # stream reports it as "the worker for <task> stopped" (`GET /events`).
+    # Only the task's own primary
+    # worker may make that statement. Review-only workers were already excluded;
+    # bd-8lq2g7 adds the subordinate passes, which run under the same task_id
+    # as the ticket's own run (see subordinate?/1).
+    unless review_only?(meta) or subordinate?(state) do
+      Wardmast.Events.broadcast(ws_id, "worker_failed", %{
+        task_id: task_id,
+        # bd-aw2cyt: additive — the event used to carry an id and nothing else.
+        kind: to_string(state.kind),
+        state: to_string(state.state),
+        outcome: to_string_or_nil(state.outcome),
+        phase: to_string(Wardmast.Worker.Phase.of(snapshot(state)))
+      })
+    end
+
+    :ok
+  end
+
+  @doc """
+  True when this worker is a merge-path **pass** rather than the run that
+  authors the ticket's change (bd-8lq2g7): the CI fix pass
+  (`Wardmast.Workflows.MergeQueue.FixPassDispatcher`, role `:fix_pass`) or the
+  conflict pass (`.ConflictResolver`, role `:conflict_resolver`).
+
+  Since bd-741sid a pass is an ordinary run on its ticket, registered under
+  the ticket id — no implementer is parked beside it any more — so it is told
+  apart by its role (a pre-bd-741sid registration under a distinct key still
+  counts). What it is for is unchanged: a pass's death must not be reported as
+  the task's worker dying, because the remedy is never "stop and resume the
+  task's worker" — the ticket's Watchdog dispatches the next pass.
+
+  Accepts either a `%State{}` or a `snapshot/1` map.
+  """
+  @spec subordinate?(map()) :: boolean()
+  def subordinate?(%{task_id: task_id, registry_key: key} = worker)
+      when is_binary(key) and is_binary(task_id),
+      do: key != task_id or pass_role?(worker)
+
+  def subordinate?(worker) when is_map(worker), do: pass_role?(worker)
+  def subordinate?(_), do: false
+
+  defp pass_role?(worker) do
+    role = Map.get(worker, :role) || role_from_meta(Map.get(worker, :meta))
+    role in [:fix_pass, :conflict_resolver]
+  end
+
+  @doc """
+  Human-readable label for a subordinate worker's role, e.g. `"fix pass"`.
+
+  Returns `nil` for the task's primary worker and for roles with no subordinate
+  label. Used to attribute escalations to the pass that actually stopped.
+  """
+  @spec subordinate_label(map()) :: String.t() | nil
+  def subordinate_label(worker_or_snapshot) do
+    if subordinate?(worker_or_snapshot) do
+      case Map.get(worker_or_snapshot, :role) ||
+             role_from_meta(Map.get(worker_or_snapshot, :meta)) do
+        :fix_pass -> "fix pass"
+        :conflict_resolver -> "conflict resolution pass"
+        role when is_atom(role) and not is_nil(role) -> to_string(role)
+        _ -> "subordinate pass"
+      end
+    end
+  end
+
+  defp role_from_meta(meta) when is_map(meta),
+    do: Map.get(meta, :role) || Map.get(meta, "role")
+
+  defp role_from_meta(_), do: nil
+
+  defp review_only?(%{review_only: true}), do: true
+  defp review_only?(%{"review_only" => true}), do: true
+  defp review_only?(_), do: false
+
+  # bd-5lc99r / bd-9s9dqz: `:task` and `:research` are non-reviewable no-PR
+  # types — no worktree, commit gate, ReviewGate or merge. Dispatch stamps the
+  # ticket's `:issue_type` into the worker meta; the completion path reads it
+  # here to skip the commit/review gates. Only `:research` additionally runs the
+  # notes gate (`findings_type?/1`); a `:task` completes on `arb done`.
+  defp no_pr_type?(meta), do: Wardmast.Tasks.Issue.no_pr_type?(meta_issue_type(meta))
+  defp findings_type?(meta), do: Wardmast.Tasks.Issue.findings_type?(meta_issue_type(meta))
+
+  defp meta_issue_type(%{issue_type: issue_type}), do: issue_type
+  defp meta_issue_type(_), do: nil
+
+  # ---- Run history (Wardmast.Workers.Run) -------------------------------
+
+  # Best-effort: create the persistent Run row for this worker. Returns the
+  # state, with :run_id populated on success. On failure (DB down, validation
+  # error, no sandbox checkout in a test) we log a warning and leave run_id
+  # nil — subsequent terminal updates will no-op cleanly.
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.3): a Worker adopting a run another
+  # Worker left to its node takes that run's row over — no new row, nothing handed off.
+  # `run_id` stays nil until the adopted session attaches (`:__claude_session_open__`), so
+  # an adoption that does not complete never writes the row.
+  defp record_run_started(%State{meta: %{adopt: %{} = adopt}} = state),
+    do: %State{state | started_at: Map.get(adopt, :started_at) || state.started_at}
+
+  defp record_run_started(%State{} = state) do
+    role_tag = role_tag_from_meta(state.meta)
+    provider = provider(state.meta) || default_run_provider(state, role_tag)
+    provider_fallback = provider_fallback_from_meta(state.meta)
+
+    attrs = %{
+      task_id: state.task_id,
+      task_title: lookup_task_title(state.task_id),
+      repo: state.repo,
+      workspace_id: effective_workspace_id(state),
+      kind: state.kind,
+      state: state.state,
+      started_at: state.started_at,
+      output_lines: [],
+      # bd-auma3z: when this worker was resumed (re-attached to a preserved
+      # worktree), link the new run to the prior one so the stopped→resumed
+      # lineage is traceable and metrics don't read it as two unrelated runs.
+      resumed_from_run_id: resumed_from_run_id(state.meta),
+      # bd-dzz6ly: the task's difficulty AT DISPATCH TIME, stamped into meta by
+      # the dispatcher before the worker starts (unlike the other provenance
+      # fields below, which are resolved after spawn and backfilled). Captured
+      # here — not read from `issues.difficulty` later — so a subsequent
+      # difficulty edit never retroactively relabels this run's provenance.
+      difficulty_at_dispatch: difficulty_at_dispatch(state.meta),
+      # bd-5fhyry: real columns for parent/role hierarchy instead of suffix-encoded
+      # task_id strings. The base_task_id is the root task (strips #review/#impl etc),
+      # and role denotes the run's purpose (base/review/impl).
+      base_task_id: Wardmast.Worker.ReviewGate.base_task_id(state.task_id),
+      role: role_tag_to_role(role_tag),
+      provider: provider,
+      provider_fallback: provider_fallback
+    }
+
+    # bd-40pzpj: what provider routing chose, and why — absent unless the
+    # workspace routes by `most_quota`.
+    attrs = Map.merge(attrs, routing_from_meta(state.meta))
+
+    case Ash.create(Wardmast.Workers.Run, attrs) do
+      {:ok, run} ->
+        hand_off_resumed_run(resumed_from_run_id(state.meta))
+        clear_attention_on_restart(state)
+        %State{state | run_id: run.id}
+
+      {:error, reason} ->
+        log_run_warning("create", state.task_id, reason)
+        state
+    end
+  rescue
+    e ->
+      log_run_warning("create", state.task_id, e)
+      state
+  end
+
+  # bd-4p1vui (§10.4.6 F12): the process adopting the run for this Worker
+  # (`meta[:adopt][:adopter]`, `Dispatch.adopt/2`'s caller), watched until a session
+  # attaches the run. One already gone is reported at once.
+  defp watch_adopter(%{adopt: %{adopter: pid}}) when is_pid(pid), do: Process.monitor(pid)
+  defp watch_adopter(_meta), do: nil
+
+  @doc """
+  Resolves the provider (e.g. `"claude"`, `"codex"`, `"gemini"`) a worker's
+  meta says it runs on, or `nil` if unknown.
+
+  Checks, in order: `meta.provider` / `meta["provider"]`, then
+  `meta.routing_config.provider` / `meta["routing_config"]["provider"]`, then
+  `meta.agent_type` / `meta["agent_type"]`. Atom and string keys/values are
+  both accepted since meta is assembled from mixed sources (spawn-time
+  routing decisions vs. synced session events).
+
+  This is the single source of truth for "what provider is this worker on" —
+  callers (board snapshot, workers index, worker detail) resolve through here
+  rather than re-deriving it, so a future adapter model only has to change
+  this one function.
+  """
+  @spec provider(map() | nil) :: String.t() | nil
+  def provider(meta) when is_map(meta) do
+    meta
+    |> find_meta_provider()
+    |> normalize_provider_string()
+  end
+
+  def provider(_), do: nil
+
+  defp find_meta_provider(meta) do
+    Enum.find_value(
+      [
+        Map.get(meta, :provider),
+        Map.get(meta, "provider"),
+        get_in(meta, [:routing_config, :provider]),
+        get_in(meta, ["routing_config", "provider"]),
+        Map.get(meta, :agent_type),
+        Map.get(meta, "agent_type")
+      ],
+      & &1
+    )
+  end
+
+  defp normalize_provider_string(p) when is_atom(p) and not is_nil(p), do: Atom.to_string(p)
+  defp normalize_provider_string(p) when is_binary(p) and p != "", do: p
+  defp normalize_provider_string(_), do: nil
+
+  defp default_run_provider(%State{task_id: task_id}, role_tag)
+       when role_tag in [:impl, :fix_pass, :conflict] and is_binary(task_id) do
+    case Wardmast.Workers.Run.latest_authoring_provider(task_id) do
+      p when is_atom(p) and not is_nil(p) -> Atom.to_string(p)
+      _ -> nil
+    end
+  end
+
+  defp default_run_provider(_state, _role_tag), do: nil
+
+  defp provider_fallback_from_meta(meta) when is_map(meta) do
+    case Map.get(meta, :provider_fallback) || Map.get(meta, "provider_fallback") do
+      fb when is_binary(fb) and fb != "" -> fb
+      _ -> nil
+    end
+  end
+
+  defp provider_fallback_from_meta(_), do: nil
+
+  defp routing_from_meta(meta) when is_map(meta),
+    do:
+      Map.take(meta, [
+        :routing_decision,
+        :provider_account_id,
+        :model_family,
+        :guardrail_decision
+      ])
+
+  defp routing_from_meta(_), do: %{}
+
+  defp resumed_from_run_id(meta) when is_map(meta),
+    do: Map.get(meta, :resumed_from_run_id) || Map.get(meta, "resumed_from_run_id")
+
+  defp resumed_from_run_id(_), do: nil
+
+  defp difficulty_at_dispatch(meta) when is_map(meta),
+    do: Map.get(meta, :difficulty_at_dispatch) || Map.get(meta, "difficulty_at_dispatch")
+
+  defp difficulty_at_dispatch(_), do: nil
+
+  # The run's `role` column (bd-5fhyry) from the worker's meta, mirroring the
+  # role tags the ReviewGate and Dispatch stamp. Finer than the run's `kind`
+  # (`Wardmast.Workers.RunState.kind_from_meta/1`): an authoring run and a
+  # revise-round implementer are both `:implement`, but `base` vs `impl` here.
+  #   * role == :reviewer  → :review  (review-gate reviewer)
+  #   * role == :implementer → :impl  (review-gate revise-round implementer)
+  #   * role == :fix_pass → :fix_pass (merge-queue CI fix pass)
+  #   * role == :conflict_resolver → :conflict (merge-queue conflict resolver)
+  #   * review_only == true → :review (coordinator-dispatched review-only worker)
+  #   * otherwise           → :main   (the authoring worker)
+  #
+  # bd-8lq2g7: the two merge-queue subordinate passes were previously recorded
+  # as :main, so a failed fix pass showed up in the task's run history — and in
+  # the loop analytics' "dispatches" count — as the authoring worker failing.
+  defp role_tag_from_meta(meta) when is_map(meta) do
+    cond do
+      Map.get(meta, :role) == :reviewer -> :review
+      Map.get(meta, :role) == :implementer -> :impl
+      Map.get(meta, :role) == :fix_pass -> :fix_pass
+      Map.get(meta, :role) == :conflict_resolver -> :conflict
+      review_only?(meta) -> :review
+      true -> :main
+    end
+  end
+
+  defp role_tag_from_meta(_), do: :main
+
+  # The role tag as stored in worker_runs.role.
+  # bd-5fhyry: replacement for suffix-encoded task_id hierarchy.
+  defp role_tag_to_role(:main), do: "base"
+  defp role_tag_to_role(:review), do: "review"
+  defp role_tag_to_role(:impl), do: "impl"
+  defp role_tag_to_role(:fix_pass), do: "fix_pass"
+  defp role_tag_to_role(:conflict), do: "conflict"
+
+  # Convert meta.role (from ReviewGate spawn context) to Usage.Event role string.
+  # Mirrors the role tag classification: reviewer → "review", implementer → "impl", etc.
+  defp role_to_usage_step(:reviewer), do: "review"
+  defp role_to_usage_step(:implementer), do: "impl"
+  defp role_to_usage_step(:fix_pass), do: "fix_pass"
+  defp role_to_usage_step(:conflict_resolver), do: "conflict"
+  defp role_to_usage_step(_), do: "base"
+
+  # Best-effort: stamp the terminal state / outcome / output / exit fields onto the
+  # Run row created at init. No-op (with a debug breadcrumb) when run_id is
+  # nil — the original create failed, so there's nothing to update and the
+  # warning was already logged at that time.
+  defp record_run_finished(%State{run_id: nil} = state) do
+    Logger.debug("Worker.record_run_finished/1 skipped (no run_id) for task=#{state.task_id}")
+
+    :ok
+  end
+
+  defp record_run_finished(%State{run_id: run_id} = state) do
+    # Extract the model from meta, checking both potential sources
+    meta = state.meta || %{}
+    model = Map.get(meta, :model)
+    provider = provider(meta)
+    provider_fallback = provider_fallback_from_meta(meta)
+
+    attrs = %{
+      state: :finished,
+      outcome: state.outcome || :failed,
+      completed_at: DateTime.utc_now(),
+      exit_code: Map.get(meta, :exit_status),
+      output_lines: capture_output_lines(state),
+      failure_reason: stringify_failure(Map.get(meta, :failure_reason))
+    }
+
+    # Only include model in the update if it's non-nil (to preserve NULL if not set)
+    attrs = if model, do: Map.put(attrs, :model, model), else: attrs
+    attrs = if provider, do: Map.put(attrs, :provider, provider), else: attrs
+
+    attrs =
+      if provider_fallback, do: Map.put(attrs, :provider_fallback, provider_fallback), else: attrs
+
+    # bd-9rdwe4: the structured terminal record (#1017 gap G5) — nil on a run
+    # whose session never reached a terminal `result` event (crashed,
+    # non-Claude provider, workflow-mode worker), same graceful degradation
+    # as every other best-effort field here.
+    attrs =
+      attrs
+      |> maybe_put(:result_subtype, Map.get(meta, :result_subtype))
+      |> maybe_put(:result_is_error, Map.get(meta, :result_is_error))
+      |> maybe_put(:result_message, Map.get(meta, :result_message))
+      |> maybe_put(:harness_version, Map.get(meta, :harness_version))
+      |> maybe_put(:image_ref, Map.get(meta, :image_ref))
+      |> maybe_put(:image_fallback, Map.get(meta, :image_fallback))
+      |> maybe_put(:cli_set, Map.get(meta, :cli_set))
+
+    # bd-apwfmy: keep StopReason's typed category, not just the prose summary
+    # it renders into `failure_reason`. Same best-effort discipline — absent
+    # on any run that did not end in a classified subprocess stop.
+    attrs = maybe_put(attrs, :stop_category, stop_category(meta))
+
+    # bd-2ddf2x: a bounded human-readable twin of `failure_reason` for the
+    # ReviewGate-rejection path, where failure_reason itself must stay the
+    # short atom-as-string other modules pattern-match on literally. Absent
+    # on any run that didn't fail via ReviewGate.
+    #
+    # bd-3wumco: a run can be written finished twice — once `:failed` for a
+    # ReviewGate rejection, then again once a later round overturns it. On that
+    # second write the row is no longer a failure, so the summary is cleared
+    # outright rather than left behind by `maybe_put/3`'s nil-skip.
+    attrs =
+      if state.outcome == :failed do
+        maybe_put(attrs, :failure_summary, Map.get(meta, :failure_summary))
+      else
+        Map.put(attrs, :failure_summary, Map.get(meta, :failure_summary))
+      end
+
+    with {:ok, run} <- Ash.get(Wardmast.Workers.Run, run_id),
+         {:ok, updated} <- Ash.update(run, attrs, action: :update) do
+      # bd-61hnbb: Parse transcript for skill invocations and update usage counters.
+      _ = parse_skill_invocations(run_id, run.workspace_id)
+      # bd-db0p38: copy the agent CLI's own session JSONL — the only
+      # full-fidelity record of this run — out of the CLI's self-pruning store
+      # (~21 days) and into the durable log root, beside `<run_id>.log`.
+      _ = archive_session_jsonl(state, updated)
+      :ok
+    else
+      {:error, reason} -> log_run_warning("update", state.task_id, reason)
+    end
+  rescue
+    e -> log_run_warning("update", state.task_id, e)
+  end
+
+  # The stop category as its plain atom name, for the `stop_category` column.
+  # Anything that isn't an atom category (an already-stringified map read back
+  # from somewhere, a malformed meta) is dropped rather than guessed at.
+  defp stop_category(meta) do
+    case Map.get(meta, :stop_reason) do
+      %{category: category} when is_atom(category) and not is_nil(category) ->
+        Atom.to_string(category)
+
+      _ ->
+        commit_gate_category(meta)
+    end
+  end
+
+  # A worker parked by the commit gate never had a subprocess `stop_reason` —
+  # the CLI exited fine, the *work* did not. The gate's own typed reason is
+  # the terminal cause, so it fills the same column, using the atom names
+  # already written into `failure_reason` (so a stored category and a prose
+  # label never disagree about what to call the same event).
+  @commit_gate_categories %{
+    uncommitted: "uncommitted_at_completion",
+    no_commits: "no_commits_at_completion",
+    secret_in_commit: "secret_in_commit",
+    prepush_failed: "prepush_check_failed"
+  }
+
+  defp commit_gate_category(meta) do
+    Map.get(@commit_gate_categories, Map.get(meta, :commit_gate_reason))
+  end
+
+  # Parse the full transcript for skill invocations and increment counters.
+  # Best-effort: a parsing error never fails the run completion.
+  defp parse_skill_invocations(run_id, workspace_id) do
+    case Wardmast.Worker.OutputLog.read_lines(run_id) do
+      {:ok, lines} ->
+        Wardmast.Skills.InvocationParser.parse_and_update(workspace_id, lines)
+
+      {:error, reason} ->
+        Logger.debug(
+          "Worker.parse_skill_invocations: failed to read transcript for #{run_id}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
+  defp capture_output_lines(%State{} = state) do
+    (state.meta || %{})
+    |> Map.get(:output_lines)
+    |> List.wrap()
+    |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+    |> Enum.take(-@max_output_lines)
+  end
+
+  # Open the durable, uncapped per-run transcript for this session. Keyed on
+  # run_id: a worker whose Run row never persisted (run_id nil) gets no
+  # durable log, since there's no row to anchor audit retrieval to. A disk
+  # error degrades to nil — the live capped path (PubSub + bounded
+  # output_lines) is unaffected either way — but bd-9wotbo found that a
+  # `Logger.warning` alone is effectively silent: a corpus with an unnoticed
+  # capture hole can't be trusted for measurement, so a real open failure
+  # also raises a coordinator escalation. See Wardmast.Worker.OutputLog.
+  defp open_output_log(%State{run_id: nil}), do: nil
+
+  defp open_output_log(%State{run_id: run_id} = state) do
+    case Wardmast.Worker.OutputLog.open(run_id) do
+      {:ok, handle} ->
+        handle
+
+      {:error, reason} ->
+        log_run_warning("output_log_open", state.task_id, reason)
+        escalate_output_log_failure(state, reason)
+        nil
+    end
+  end
+
+  # bd-9wotbo: a transcript-capture failure must be loud, not a warning nobody
+  # reads. Raises a coordinator escalation naming the run so it shows up in
+  # `arb inbox` alongside the other things that need a human's attention.
+  # Public (and `@doc false`, mirroring `resume_decision/6`) purely so this is
+  # unit-testable without spawning a real Claude session port.
+  @doc false
+  def escalate_output_log_failure(%State{} = state, reason) do
+    %State{task_id: task_id, workspace_id: workspace_id, run_id: run_id} = state
+
+    Wardmast.Messages.Escalation.post(%{
+      kind: :transcript_capture_failed,
+      from_ref: "system",
+      workspace_id: workspace_id,
+      task_ref: task_id,
+      subject: "#{task_id} — transcript capture failed for run #{run_id}",
+      body:
+        "Wardmast.Worker.OutputLog.open/1 failed for run #{run_id} (#{inspect(reason)}). " <>
+          "This run's durable transcript will be missing from the audit corpus; the " <>
+          "capped in-memory tail (worker_runs.output_lines) is unaffected. " <>
+          "Action: check disk space / permissions on the output_log_root."
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "Worker.escalate_output_log_failure/2 swallowed for task=#{state.task_id}: " <>
+          Exception.message(e)
+      )
+
+      :ok
+  end
+
+  # bd-1uu19b: the row speaks the worker's own vocabulary, so there is no
+  # divergence left to map. A run the Watchdog's review ceiling timed out
+  # (`{:awaiting_review_timeout, N}`, bd-8tjcms) and a run the ReviewGate
+  # parked (meta `park_reason`, bd-9zuvbh) both finish `:failed`; their cause
+  # stays in `failure_reason` and on the ticket.
+
+  # Keep the durable row's state in step with a non-terminal transition, so
+  # `worker list`, `worker show` and the run history read one state. Best
+  # effort, like every other run write.
+  defp record_run_state(%State{run_id: nil}), do: :ok
+
+  defp record_run_state(%State{run_id: run_id} = state) do
+    with {:ok, run} <- Ash.get(Wardmast.Workers.Run, run_id),
+         {:ok, _} <-
+           Ash.update(run, %{state: state.state, outcome: state.outcome}, action: :update) do
+      :ok
+    else
+      {:error, reason} -> log_run_warning("state", state.task_id, reason)
+    end
+  rescue
+    e -> log_run_warning("state", state.task_id, e)
+  end
+
+  # A resume that starts a new run supersedes the prior one (bd-1uu19b). A
+  # prior row the restart or a stop left unfinished is `:handed_off` now — it
+  # did not fail, a follow-up run took over. A prior row that already
+  # finished keeps its own outcome.
+  defp hand_off_resumed_run(nil), do: :ok
+
+  defp hand_off_resumed_run(run_id) do
+    case Ash.get(Wardmast.Workers.Run, run_id) do
+      {:ok, %Wardmast.Workers.Run{state: state} = run} when state != :finished ->
+        Ash.update(
+          run,
+          %{state: :finished, outcome: :handed_off, completed_at: DateTime.utc_now()},
+          action: :update
+        )
+
+        :ok
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  # bd-8if9zt: a resumed run on the ticket's own id is the ticket's run
+  # restarting — whatever its attention cause waited on (a ReviewGate park, a
+  # crash) is being worked again, so the cause is cleared and the ticket's
+  # escalations resolved (`Wardmast.Tasks.Attention.clear/2`). A reviewer or
+  # implementer round runs under a synthetic id and never clears it.
+  #
+  # bd-8nlez1: a resume out of a failed run is counted as one more attempt at
+  # it, for the `run_crashed` attempt limit (`Wardmast.Tasks.AttentionSweep`).
+  defp clear_attention_on_restart(%State{task_id: task_id, meta: meta}) do
+    prior = resumed_from_run_id(meta)
+
+    if prior != nil and is_nil(role_from_meta(meta)) and
+         Wardmast.Worker.ReviewGate.base_task_id(task_id) == task_id do
+      _ =
+        Wardmast.Tasks.Attention.clear(task_id, :run_restarted,
+          resumed_from_failure: prior_run_failed?(prior)
+        )
+    end
+
+    :ok
+  end
+
+  # bd-a6vh2x: a run that stopped on its provider's quota did not crash, so
+  # resuming it once the hold lifts is not another attempt at a crashed run.
+  defp prior_run_failed?(run_id) do
+    case Ash.get(Wardmast.Workers.Run, run_id) do
+      {:ok, %{stop_category: "quota_exhausted"}} -> false
+      {:ok, %{outcome: outcome}} -> outcome in [:failed, :interrupted]
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp stringify_failure(nil), do: nil
+  defp stringify_failure(s) when is_binary(s), do: s
+  defp stringify_failure(other), do: inspect(other)
+
+  defp lookup_task_title(task_id) do
+    case Ash.get(Wardmast.Tasks.Issue, task_id) do
+      {:ok, %{title: title}} -> title
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp log_run_warning(op, task_id, reason) do
+    Logger.warning("Worker.record_run_#{op}/1 swallowed for task=#{task_id}: #{inspect(reason)}")
+
+    :error
+  end
+
+  # ---- Usage ledger (Wardmast.Usage.Event) -------------------------------
+
+  # bd-93ru7w: reviewer/implementer workers get `workspace_id: nil` on their
+  # own State deliberately (see `Wardmast.Worker.ReviewGate.spawn_worker/5`) so their completion stays
+  # silent — no coordinator notification, no MergeQueue pickup for the synthetic
+  # id. But that same nil was leaking into the *ledger* (Usage.Event and
+  # Workers.Run rows), which made `Wardmast.Usage.summarize/1` invisible to
+  # ~20% of spend — precisely the review/rework spend this ledger exists to
+  # surface. Resolve the real workspace from the authoring task for those two
+  # write paths only; the worker's own `state.workspace_id` (read by
+  # `broadcast_done/1`, `broadcast_worker_failed/1`, and the merge-queue gate)
+  # is untouched.
+  defp effective_workspace_id(%State{workspace_id: ws}) when is_binary(ws), do: ws
+
+  defp effective_workspace_id(%State{workspace_id: nil, task_id: task_id} = state) do
+    base_id = Wardmast.Worker.ReviewGate.base_task_id(task_id)
+
+    if base_id != task_id do
+      case Ash.get(Wardmast.Tasks.Issue, base_id) do
+        {:ok, %{workspace_id: ws}} -> ws
+        _ -> nil
+      end
+    else
+      nil
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Worker.effective_workspace_id/1 swallowed for task=#{state.task_id}: #{Exception.message(e)}"
+      )
+
+      nil
+  end
+
+  # Best-effort: persist a row in the structured usage ledger when a Claude
+  # session exits. The session carries everything we need (model, tokens,
+  # cost, duration) in its `:usage` map; we shovel it into `Wardmast.Usage.Event`
+  # alongside the worker's identifying fields. A reviewer worker (spawned by
+  # the ReviewGate, meta.role == :reviewer) writes a `:review` step row, an
+  # implementer (meta.role == :implementer) a `:impl` row; everything else
+  # writes `:work`. Missing fields are fine — we record what we have rather
+  # than dropping the row.
+  # Mirrors `Wardmast.Usage.Event`'s `:refresh_snapshot` accept list — the
+  # identity fields (`task_id`, `session_id`, `step`, `base_task_id`, `role`,
+  # `source`) never change on a refresh, only the measured/known fields do.
+  @refresh_snapshot_fields [
+    :workspace_id,
+    :repo,
+    :model,
+    :provider,
+    :provider_account_id,
+    :provider_credential_id,
+    :tokens_in,
+    :tokens_out,
+    :thinking_tokens,
+    :cache_creation_tokens,
+    :cache_read_tokens,
+    :cost_usd,
+    :cost_note,
+    :duration_ms,
+    :exit_status,
+    :worker_run_id,
+    :occurred_at,
+    :raw
+  ]
+
+  # bd-28t80i round 2, finding 2: the fields that actually carry "the
+  # session's numbers" as opposed to bookkeeping metadata. A relaunch that
+  # dies before its `result` event (or the terminate backstop) reaches
+  # `record_usage_event/3` with a token-less `usage` map — see
+  # `flush_unterminated_sessions/1` and the `:cryhwk` backstop below. Blindly
+  # copying that onto an existing refreshed row would replace a complete
+  # snapshot with nils. These fields are only carried onto the refresh when
+  # the new snapshot actually has tokens.
+  @refresh_snapshot_usage_fields [
+    :tokens_in,
+    :tokens_out,
+    :thinking_tokens,
+    :cache_creation_tokens,
+    :cache_read_tokens,
+    :cost_usd,
+    :cost_note
+  ]
+
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp record_usage_event(%State{} = state, %{} = session, exit_status) do
+    usage =
+      session
+      |> Wardmast.Worker.ClaudeSession.usage_summary()
+      |> maybe_reconcile_usage_from_disk(session, state)
+      |> maybe_note_missing_usage()
+
+    role = Map.get(state.meta || %{}, :role)
+
+    step =
+      cond do
+        role == :reviewer -> :review
+        role == :implementer -> :impl
+        true -> :work
+      end
+
+    # Model: prefer the value the CLI stream reported (Claude's `init` event)
+    # over the model threaded onto the session at spawn time — the latter is the
+    # pre-resolved id we stamp for adapters (Gemini/agy) whose stream carries no
+    # model. Either way a non-Claude run lands a concrete model id.
+    model = Map.get(usage, :model) || Map.get(session, :model)
+
+    # Provider: prefer the explicitly-set provider (passed in session opts for
+    # non-Claude adapters like Gemini/agy, which have no stream-json init event
+    # to carry model/provider) over the model-name inference used for Claude.
+    provider =
+      Map.get(session, :provider) || provider_for(model)
+
+    # Duration: prefer the value from the CLI's result event (millisecond-precise)
+    # but fall back to wall-clock elapsed for adapters that don't emit one (e.g.
+    # Gemini/agy), so the row is still usable for latency analysis.
+    duration_ms =
+      Map.get(usage, :duration_ms) ||
+        wall_clock_duration_ms(Map.get(session, :started_at), Map.get(session, :exited_at))
+
+    workspace_id = effective_workspace_id(state)
+    provider_account_id = AccountResolver.account_id(workspace_id, provider)
+
+    attrs = %{
+      task_id: state.task_id,
+      workspace_id: workspace_id,
+      repo: state.repo,
+      step: step,
+      model: model,
+      provider: provider,
+      provider_account_id: provider_account_id,
+      provider_credential_id: AccountResolver.credential_id(provider_account_id),
+      tokens_in: Map.get(usage, :tokens_in),
+      tokens_out: Map.get(usage, :tokens_out),
+      thinking_tokens: Map.get(usage, :thinking_tokens),
+      cache_creation_tokens: Map.get(usage, :cache_creation_tokens),
+      cache_read_tokens: Map.get(usage, :cache_read_tokens),
+      cost_usd: Map.get(usage, :cost_usd),
+      cost_note: Map.get(usage, :cost_note),
+      duration_ms: duration_ms,
+      exit_status: exit_status,
+      worker_run_id: state.run_id,
+      session_id: Map.get(usage, :session_id),
+      occurred_at: DateTime.utc_now(),
+      raw: Map.get(usage, :raw),
+      base_task_id: Wardmast.Worker.ReviewGate.base_task_id(state.task_id),
+      role: role_to_usage_step(role)
+    }
+
+    account_plan =
+      case AccountResolver.get(provider_account_id) do
+        %{plan: plan} -> plan
+        _ -> nil
+      end
+
+    attrs = Wardmast.Agents.Grok.Stream.mark_notional_cost(attrs, account_plan)
+
+    case existing_session_event(attrs) do
+      nil ->
+        case Ash.create(Wardmast.Usage.Event, attrs) do
+          {:ok, _row} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "Worker.record_usage_event/3 swallowed for task=#{state.task_id}: #{inspect(reason)}"
+            )
+
+            :error
+        end
+
+      existing ->
+        refresh_attrs = refresh_snapshot_attrs(attrs, existing)
+
+        case Ash.update(existing, refresh_attrs, action: :refresh_snapshot) do
+          {:ok, _row} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "Worker.record_usage_event/3 refresh swallowed for task=#{state.task_id}: #{inspect(reason)}"
+            )
+
+            :error
+        end
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Worker.record_usage_event/3 raised for task=#{state.task_id}: #{Exception.message(e)}"
+      )
+
+      :error
+  end
+
+  # bd-28t80i round 3, finding 1: gate positively on the provider *shown* to
+  # re-report a running total (agy/gemini — see the bd-gjw1ze payloads quoted
+  # in the PR), not negatively on "not claude". Codex's own relaunches
+  # (`codex exec resume <thread_id>`) reuse the same `session_id` but each
+  # launch's `turn.completed` usage covers only that launch
+  # (`agents/codex/stream.ex:134-137`), so Codex must keep inserting a new
+  # row per launch exactly like Claude — refreshing in place would drop or
+  # clobber real per-launch tokens instead of accumulating them. Only widen
+  # this allowlist for a provider once its stream has been shown, from a real
+  # run, to report cumulative-since-start totals the way agy/gemini does.
+  @running_total_providers ["gemini"]
+
+  defp existing_session_event(%{session_id: session_id}) when session_id in [nil, ""], do: nil
+
+  defp existing_session_event(%{provider: provider})
+       when provider not in @running_total_providers,
+       do: nil
+
+  defp existing_session_event(%{session_id: session_id, task_id: task_id}) do
+    Wardmast.Usage.Event
+    |> Ash.Query.filter(session_id == ^session_id and task_id == ^task_id)
+    |> Ash.Query.sort(inserted_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  end
+
+  # bd-28t80i round 2, finding 2: only carry the usage fields onto a refresh
+  # when the new snapshot actually reports tokens, and only when it is at
+  # least as large as what is already stored (agy's counters are monotonic
+  # running totals, so a smaller number means this `result` is stale/partial,
+  # not a real new total). Otherwise keep the existing row's numbers exactly
+  # as they were and only refresh bookkeeping fields (exit_status,
+  # occurred_at, worker_run_id, model/provider/account identity) — this
+  # still lets a killed-before-`result` relaunch update "when this session
+  # was last touched" without erasing a real snapshot.
+  #
+  # `duration_ms` and `raw` are carved out of that bookkeeping set (round 2
+  # finding 2): a relaunch killed before its `result` event reports its OWN
+  # short wall-clock `duration_ms` (see `wall_clock_duration_ms/2` above) and
+  # a `raw` with no tokens in it. Blindly overwriting the stored row with
+  # those would shrink a real 421s cumulative duration down to a few seconds
+  # and desync `raw` from the tokens that were kept. `duration_ms` always
+  # keeps the larger of the two so it only ever grows; `raw` only moves when
+  # the usage snapshot itself does, so it always describes the tokens on the
+  # row.
+  defp refresh_snapshot_attrs(attrs, existing) do
+    non_usage_fields = @refresh_snapshot_fields -- @refresh_snapshot_usage_fields
+    bookkeeping_fields = non_usage_fields -- [:duration_ms, :raw]
+
+    bookkeeping =
+      attrs
+      |> Map.take(bookkeeping_fields)
+      |> Map.put(
+        :duration_ms,
+        max_duration_ms(Map.get(attrs, :duration_ms), existing.duration_ms)
+      )
+
+    if usage_snapshot_supersedes?(attrs, existing) do
+      bookkeeping
+      |> Map.put(:raw, Map.get(attrs, :raw))
+      |> Map.merge(Map.take(attrs, @refresh_snapshot_usage_fields))
+    else
+      bookkeeping
+    end
+  end
+
+  defp max_duration_ms(nil, existing_duration_ms), do: existing_duration_ms
+  defp max_duration_ms(new_duration_ms, nil), do: new_duration_ms
+
+  defp max_duration_ms(new_duration_ms, existing_duration_ms),
+    do: max(new_duration_ms, existing_duration_ms)
+
+  defp usage_snapshot_supersedes?(%{tokens_in: nil}, _existing), do: false
+
+  defp usage_snapshot_supersedes?(%{tokens_in: _new_tokens_in}, %{tokens_in: nil}), do: true
+
+  defp usage_snapshot_supersedes?(%{tokens_in: new_tokens_in}, %{tokens_in: existing_tokens_in}) do
+    new_tokens_in >= existing_tokens_in
+  end
+
+  # bd-cryhwk: terminate-time backstop for `record_usage_event/3`. Every
+  # session starts with `:exited_at` seeded `nil`; a session that reached
+  # `handle_exit/2` (the normal `{:exit_status, _}` path) has it stamped to a
+  # real timestamp and already had its ledger row written there — skip it
+  # here to avoid a double-write. Only a session whose port exit was never
+  # observed (`:exited_at` still `nil`) reaches `record_usage_event/3` from
+  # this path, with whatever usage the stream managed to parse before
+  # teardown (possibly none, in which case `record_usage_event/3`'s own
+  # disk-reconciliation fallback takes over).
+  defp flush_unterminated_sessions(%State{claude_sessions: sessions} = state) do
+    sessions
+    |> Enum.reject(fn {_port, session} -> not is_nil(Map.get(session, :exited_at)) end)
+    |> Enum.each(fn {_port, session} -> record_usage_event(state, session, nil) end)
+  end
+
+  # bd-au3xrq: fallback/audit path. The primary usage numbers come from the
+  # CLI's terminal `result` event on stdout. When a Claude agent is killed or
+  # crashes before that event, `usage` carries no token counts — but the CLI
+  # has been persisting every turn's usage to an on-disk session JSONL that
+  # survives the death. Reconcile the missing tokens from that file
+  # (`Wardmast.Usage.ClaudeSessionFile`, deduped by message.id). Strictly
+  # additive: we only reach for disk when stdout gave us no `tokens_in`, and
+  # only for Claude sessions. Cost comes from the file's own `cost-state`
+  # records when it has any (bd-be804c) and stays nil, with a note, when it
+  # doesn't — tokens were always the ask, dollars are the bonus.
+  defp maybe_reconcile_usage_from_disk(usage, session, %State{} = state) do
+    provider =
+      Map.get(session, :provider) ||
+        provider_for(Map.get(usage, :model) || Map.get(session, :model))
+
+    # bd-agsn2b: codex rollouts are readable too, via their own locator.
+    if provider == "codex" do
+      reconcile_codex_usage_from_disk(usage, session, state)
+    else
+      reconcile_claude_usage_from_disk(usage, session, provider, state)
+    end
+  end
+
+  defp reconcile_claude_usage_from_disk(usage, session, provider, %State{} = state) do
+    cond do
+      # Other non-Claude adapters have their own on-stream usage; nothing to read here.
+      provider not in [nil, "claude"] ->
+        usage
+
+      # Happy path already recorded tokens — never second-guess it.
+      not is_nil(Map.get(usage, :tokens_in)) ->
+        usage
+
+      true ->
+        # Strictly THIS session's id, off THIS session's `init` event. Never
+        # `meta[:session_id]`: meta is worker-global and record_usage_event/3
+        # fires once per port exit, so on a nudge relaunch (bd-ofql8k) meta can
+        # still hold the *previous* session's id — reading that file would bill
+        # this row for a session already in the ledger. If this session never
+        # got an `init`, we simply don't reconcile.
+        session_id = Map.get(usage, :session_id)
+        config_dir = Map.get(state.meta || %{}, :config_dir)
+
+        # `--resume` appends to the same <sid>.jsonl, and a nudge relaunch reuses
+        # the session too, so the file can hold turns from before this port ever
+        # opened. Bound the read to this session's own lifetime.
+        since = Map.get(session, :started_at)
+
+        case Wardmast.Usage.ClaudeSessionFile.usage_for(config_dir, session_id, since: since) do
+          {:ok, %{message_count: n} = totals} when n > 0 ->
+            Logger.info(
+              "Worker.record_usage_event: reconciled #{n} msgs of usage from on-disk " <>
+                "session JSONL for task=#{state.task_id} session=#{session_id}"
+            )
+
+            merge_disk_totals(usage, totals)
+
+          _ ->
+            # No file / not locatable / no assistant usage — keep the row as-is
+            # (nil tokens) rather than fabricating zeros. Graceful degradation.
+            usage
+        end
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Worker.maybe_reconcile_usage_from_disk/3 raised for task=#{state.task_id}: " <>
+          Exception.message(e)
+      )
+
+      usage
+  end
+
+  # Codex counterpart: a run killed before `turn.completed` has no stream
+  # usage, but the CLI's rollout under `$CODEX_HOME` carries cumulative
+  # `token_count` totals, found by thread id and windowed to this port's start
+  # (`codex exec resume` appends to the same file). Tokens only — codex is
+  # metered, so cost stays whatever the stream said.
+  defp reconcile_codex_usage_from_disk(usage, session, %State{} = state) do
+    usage
+    |> reconcile_codex_tokens_from_disk(session, state)
+    |> record_codex_quota_delta(session, state)
+  end
+
+  # G20 (bd-8yafoz): a metered Codex run has no dollar cost, so the share of
+  # the plan's rate-limit windows it burned (rollout `rate_limits`, before vs
+  # after) is its cost-equivalent. Recorded on `raw` and spelled out in
+  # `cost_note`; absent rate_limits (free tier, other backends) changes nothing.
+  defp record_codex_quota_delta(usage, session, %State{} = state) do
+    session_id = Map.get(usage, :session_id)
+    config_dir = Map.get(state.meta || %{}, :config_dir)
+
+    case Wardmast.Usage.CodexSessionFile.quota_delta_for(config_dir, session_id,
+           since: Map.get(session, :started_at)
+         ) do
+      {:ok, quota} ->
+        usage
+        |> Map.update(:raw, %{"arb_quota_delta" => stringify(quota)}, fn raw ->
+          Map.put(if(is_map(raw), do: raw, else: %{}), "arb_quota_delta", stringify(quota))
+        end)
+        |> append_quota_note(quota)
+
+      _ ->
+        usage
+    end
+  end
+
+  defp stringify(quota), do: quota |> Jason.encode!() |> Jason.decode!()
+
+  defp append_quota_note(usage, %{windows: windows}) do
+    parts =
+      for {key, label} <- [{"primary", "session"}, {"secondary", "weekly"}],
+          %{delta_percent: d} <- [windows[key]] do
+        "#{d}% of the #{label} window"
+      end
+
+    suffix = "run used " <> Enum.join(parts, ", ")
+    note = Map.get(usage, :cost_note)
+    Map.put(usage, :cost_note, if(is_binary(note), do: note <> "; " <> suffix, else: suffix))
+  end
+
+  defp reconcile_codex_tokens_from_disk(usage, session, %State{} = state) do
+    session_id = Map.get(usage, :session_id)
+    config_dir = Map.get(state.meta || %{}, :config_dir)
+
+    with true <- is_nil(Map.get(usage, :tokens_in)),
+         {:ok, totals} <-
+           Wardmast.Usage.CodexSessionFile.usage_for(config_dir, session_id,
+             since: Map.get(session, :started_at)
+           ),
+         true <- is_integer(totals.tokens_in) do
+      Logger.info(
+        "Worker.record_usage_event: reconciled codex usage from on-disk rollout " <>
+          "for task=#{state.task_id} thread=#{session_id}"
+      )
+
+      usage
+      |> Map.put(:tokens_in, totals.tokens_in)
+      |> Map.put(:tokens_out, totals.tokens_out)
+      |> Map.put(:cache_read_tokens, totals.cache_read_tokens)
+      |> Map.put(:raw, codex_reconciled_raw(Map.get(usage, :raw), totals.raw))
+    else
+      _ -> usage
+    end
+  end
+
+  defp codex_reconciled_raw(existing, info) do
+    base = if is_map(existing), do: existing, else: %{}
+
+    base
+    |> Map.put("arb_usage_source", %{"reconciled_from" => "codex_rollout"})
+    |> Map.put_new("rollout_token_info", info)
+  end
+
+  # Overlay deduped on-disk token totals onto the (token-less) usage map. Model
+  # and cost are only backfilled if the stream never reported them. `raw` is
+  # tagged so the ledger row is auditable as disk-reconciled.
+  defp merge_disk_totals(usage, totals) do
+    usage
+    |> Map.put(:tokens_in, totals.tokens_in)
+    |> Map.put(:tokens_out, totals.tokens_out)
+    |> Map.put(:cache_creation_tokens, totals.cache_creation_tokens)
+    |> Map.put(:cache_read_tokens, totals.cache_read_tokens)
+    |> maybe_put_model(totals.model)
+    |> maybe_put_cost(totals)
+    |> Map.put(:raw, reconciled_raw(Map.get(usage, :raw), totals))
+  end
+
+  # The file's `cost-state` records carry the CLI's own dollar figure
+  # (bd-be804c), summed per process segment and windowed by this session's
+  # start. Reuse it verbatim — never recompute a price locally. Claude Code
+  # 2.1.270 writes no such record, so a window without one falls back to a
+  # token-priced estimate, and either way the row names where its number came
+  # from (`ClaudeSessionFile.cost_note_for/1` — nil for the CLI's own figure).
+  defp maybe_put_cost(usage, totals) do
+    case {Map.get(usage, :cost_usd), totals.cost_usd} do
+      {existing, _} when is_number(existing) ->
+        usage
+
+      {_, cost} when is_float(cost) ->
+        usage
+        |> Map.put(:cost_usd, cost)
+        |> maybe_put_cost_note(Wardmast.Usage.ClaudeSessionFile.cost_note_for(totals))
+
+      _ ->
+        maybe_put_cost_note(usage, Wardmast.Usage.ClaudeSessionFile.no_cost_note())
+    end
+  end
+
+  # bd-2aslx6 (#1428): a ledger row carrying six-figure token counts next to a
+  # bare `cost_usd: nil` reads as a cost-capture bug every time someone audits
+  # spend. Name the reason on the row, the way the Gemini adapter already does
+  # for its own unpriceable runs, so "no cost here" is a recorded fact rather
+  # than a hole.
+  defp maybe_put_cost_note(usage, note) do
+    case Map.get(usage, :cost_note) do
+      existing when is_binary(existing) and existing != "" -> usage
+      _ -> Map.put(usage, :cost_note, note)
+    end
+  end
+
+  # bd-96mn8i (round 2): the row-level counterpart to `maybe_put_cost_note/2`
+  # above — this one fires on `:tokens_in`, not `:cost_usd`, and only when
+  # NOTHING was captured (no stream usage, no disk reconciliation, and no
+  # provider-specific note already explaining a deliberate zero/unknown, e.g.
+  # agy's `@agy_cost_unavailable_note`). Leaves a genuinely priced-but-costless
+  # row (tokens present, cost_usd nil) untouched.
+  defp maybe_note_missing_usage(usage) do
+    case Map.get(usage, :tokens_in) do
+      nil -> maybe_put_cost_note(usage, missing_usage_note(usage))
+      _ -> usage
+    end
+  end
+
+  # A terminal event was observed if the stream's own error/status clause ran
+  # — `is_error` is explicitly `true`/`false` (never absent-then-dropped, see
+  # each provider's `usage_fields/2` clause above) or `result_status`/
+  # `result_subtype` carries a value. Any of those means the CLI reported an
+  # outcome with no usage attached, which is a materially different fact from
+  # "the port closed and nothing was ever parsed".
+  defp missing_usage_note(usage) do
+    status =
+      Map.get(usage, :result_status) || Map.get(usage, :result_subtype)
+
+    observed_terminal_event? =
+      is_boolean(Map.get(usage, :is_error)) or not is_nil(status)
+
+    if observed_terminal_event? do
+      @terminal_event_no_usage_note <> "#{status || terminal_event_status_label(usage)})"
+    else
+      @no_terminal_event_note
+    end
+  end
+
+  # `status` is nil whenever the provider's own status field was absent and
+  # all we have is the boolean `is_error` flag — interpolating that boolean
+  # directly reads as a stray `true`/`false` in a column labelled "status",
+  # so spell it out instead.
+  defp terminal_event_status_label(usage) do
+    case Map.get(usage, :is_error) do
+      true -> "errored"
+      false -> "not reported"
+      nil -> "not reported"
+    end
+  end
+
+  defp maybe_put_model(usage, nil), do: usage
+
+  defp maybe_put_model(usage, model) do
+    case Map.get(usage, :model) do
+      existing when is_binary(existing) and existing != "" -> usage
+      _ -> Map.put(usage, :model, model)
+    end
+  end
+
+  defp reconciled_raw(existing, totals) do
+    base = if is_map(existing), do: existing, else: %{}
+
+    Map.put(base, "arb_usage_source", %{
+      "reconciled_from" => "session_jsonl",
+      "message_count" => totals.message_count,
+      "skipped_before_since" => totals.skipped_before_since,
+      "cost_state_count" => totals.cost_state_count
+    })
+  end
+
+  # Map a model name to a provider key. Currently every model we see is
+  # Claude — but the column is here for the day we route to other agents and
+  # the ledger needs to roll up cross-provider.
+  defp provider_for(nil), do: nil
+
+  defp provider_for(model) when is_binary(model) do
+    cond do
+      String.starts_with?(model, "claude") -> "claude"
+      String.starts_with?(model, "gemini") -> "gemini"
+      String.contains?(model, "gpt") -> "openai"
+      true -> "other"
+    end
+  end
+
+  defp provider_for(_), do: nil
+
+  defp wall_clock_duration_ms(%DateTime{} = started_at, %DateTime{} = exited_at) do
+    DateTime.diff(exited_at, started_at, :millisecond)
+  end
+
+  defp wall_clock_duration_ms(_started_at, _exited_at), do: nil
+
+  @impl true
+  def handle_call(:snapshot, _from, state), do: {:reply, snapshot(state), state}
+
+  def handle_call({:snapshot, {notify, ref}}, _from, state) do
+    send(notify, {:worker_snapshot_cut, ref})
+    {:reply, snapshot(state), state}
+  end
+
+  def handle_call(:test_runner, _from, %State{meta: meta} = state) do
+    meta = meta || %{}
+    worktree = Map.get(meta, :worktree_path)
+
+    reply =
+      if is_binary(worktree) and File.dir?(worktree) do
+        exec = test_exec(meta) || test_host_exec(meta, worktree)
+        {:ok, %{exec: exec, worktree: worktree, target: Map.get(meta, :target_branch)}}
+      else
+        {:error, :no_worktree}
+      end
+
+    {:reply, reply, state}
+  end
+
+  # bd-2aslx6: see `agent_session_live?/1`.
+  def handle_call(:agent_session_live?, _from, %State{} = state) do
+    {:reply, session_live?(state), state}
+  end
+
+  def handle_call({:note_stopper, label}, _from, %State{} = state),
+    do: {:reply, :ok, %State{state | meta: Map.put(state.meta || %{}, :stopped_by, label)}}
+
+  def handle_call({:advance, step}, _from, %State{state: run_state, outcome: outcome} = state)
+      when run_state == :starting or (run_state == :finished and outcome == :failed) do
+    new_state = %State{
+      state
+      | current_step: step,
+        state: :working,
+        outcome: nil,
+        step_started_at: DateTime.utc_now()
+    }
+
+    record_run_state(new_state)
+    {:reply, :ok, announce_phase(new_state)}
+  end
+
+  def handle_call({:advance, step}, _from, %State{state: :working} = state) do
+    new_state = %State{state | current_step: step, step_started_at: DateTime.utc_now()}
+    {:reply, :ok, new_state}
+  end
+
+  def handle_call({:advance, step}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, {:advance, step}}}, state}
+  end
+
+  def handle_call({:await, reason}, _from, %State{state: :working} = state) do
+    meta =
+      case reason do
+        nil -> state.meta
+        r -> Map.put(state.meta, :await_reason, r)
+      end
+
+    new_state = %State{state | state: :waiting, waiting_on: :question, meta: meta}
+    record_run_state(new_state)
+    Wardmast.Messages.CoordinatorNotifier.waiting(snapshot(new_state))
+    {:reply, :ok, announce_phase(new_state)}
+  end
+
+  def handle_call({:await, _reason}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, :waiting}}, state}
+  end
+
+  def handle_call(:resume, _from, %State{state: :waiting, waiting_on: :question} = state) do
+    new_state = %State{
+      state
+      | state: :working,
+        waiting_on: nil,
+        meta: Map.delete(state.meta, :await_reason)
+    }
+
+    record_run_state(new_state)
+    {:reply, :ok, announce_phase(new_state)}
+  end
+
+  def handle_call(:resume, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, :working}}, state}
+  end
+
+  def handle_call(
+        {:open_mr, branch, title, description, opts},
+        _from,
+        %State{state: :working} = state
+      ) do
+    case do_open_mr(state, branch, title, description, opts) do
+      {:ok, mr_ref, new_state} ->
+        # The run just opened its PR and finished. Push an :updated lifecycle
+        # event so the dashboard's merge-queue view picks the in-flight merge
+        # up live (the topic otherwise only fires on :started/:stopped).
+        broadcast_lifecycle(:updated, new_state)
+        {:reply, {:ok, mr_ref}, new_state}
+
+      {:error, reason, kept_state} ->
+        {:reply, {:error, reason}, kept_state}
+    end
+  end
+
+  def handle_call(
+        {:open_mr, _branch, _title, _description, _opts},
+        _from,
+        %State{state: run_state} = state
+      ) do
+    {:reply, {:error, {:invalid_transition, run_state, :open_mr}}, state}
+  end
+
+  def handle_call({:complete, result}, _from, %State{state: :working} = state) do
+    {:reply, :ok, complete_now(state, result)}
+  end
+
+  def handle_call({:complete, _result}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, :succeeded}}, state}
+  end
+
+  def handle_call(
+        {:fail, reason},
+        _from,
+        %State{state: run_state, waiting_on: waiting_on} = state
+      )
+      when live_run?(run_state, waiting_on) do
+    {:reply, :ok, fail_now(state, reason)}
+  end
+
+  def handle_call({:fail, _reason}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, :failed}}, state}
+  end
+
+  def handle_call(
+        {:interrupt, reason},
+        _from,
+        %State{state: run_state, waiting_on: waiting_on} = state
+      )
+      when live_run?(run_state, waiting_on) do
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Wardmast.Worker.StopReason.to_map(reason))
+
+    new_state =
+      %State{state | state: :finished, outcome: :interrupted, waiting_on: nil, meta: meta}
+
+    record_run_finished(new_state)
+    broadcast_lifecycle(:updated, new_state)
+    {:reply, :ok, new_state}
+  end
+
+  def handle_call({:interrupt, _reason}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, :interrupted}}, state}
+  end
+
+  def handle_call(
+        {:park, reason},
+        _from,
+        %State{state: run_state, waiting_on: waiting_on} = state
+      )
+      when live_run?(run_state, waiting_on) do
+    {:reply, :ok, park_now(state, reason)}
+  end
+
+  def handle_call({:park, reason}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, park_transition(reason)}}, state}
+  end
+
+  def handle_call(
+        {:review_gate_verdict, verdict},
+        _from,
+        %State{state: :waiting, waiting_on: :review_gate} = state
+      ) do
+    {:reply, :ok, apply_review_gate_verdict(state, verdict)}
+  end
+
+  # bd-3wumco: a ReviewGate round that converges to APPROVE *after* an earlier
+  # round already parked the author reports that approval to a worker whose run
+  # finished :failed. Refusing it there froze the task on the stale rejection:
+  # the branch had a passing re-review and green CI, but nothing ever handed it
+  # to the merger, so the MR sat open until a human merged it by hand (vstim
+  # vs-33ulbf). Reconcile forward instead — but ONLY when the rejection is the
+  # sole reason this run failed. A run that failed for any other reason (a
+  # merge conflict, a stopped subprocess) must not be resurrected by a stray
+  # verdict.
+  def handle_call(
+        {:review_gate_verdict, {:approve, _findings} = verdict},
+        _from,
+        %State{state: :finished, outcome: :failed} = state
+      ) do
+    if review_gate_failure?(state) do
+      {:reply, :ok, reconcile_review_gate_approval(state, verdict)}
+    else
+      {:reply, {:error, {:invalid_transition, :finished, :review_gate_verdict}}, state}
+    end
+  end
+
+  def handle_call({:review_gate_verdict, _verdict}, _from, %State{state: run_state} = state) do
+    {:reply, {:error, {:invalid_transition, run_state, :review_gate_verdict}}, state}
+  end
+
+  def handle_call(:abandon_adoption, _from, %State{} = state),
+    do: {:stop, :normal, :ok, give_up_adoption(state)}
+
+  # Only an adoption no session has attached yet: `meta[:adopt]` goes, and `run_id` comes,
+  # in the session open, which this process serializes with this call.
+  def handle_call(
+        {:abandon_adoption, run_id},
+        from,
+        %State{meta: %{adopt: %{run_id: run_id}}} = state
+      ),
+      do: handle_call(:abandon_adoption, from, state)
+
+  def handle_call({:abandon_adoption, run_id}, _from, %State{run_id: run_id} = state),
+    do: {:reply, {:error, :attached}, state}
+
+  def handle_call({:abandon_adoption, _run_id}, _from, state),
+    do: {:reply, {:error, :not_adopting}, state}
+
+  def handle_call({:report, key, value}, _from, %State{} = state) do
+    state = %State{state | meta: Map.put(state.meta, key, value)}
+    backfill_report(state.run_id, state.task_id, key, value)
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:first_spawn_args, port_args}, _from, %State{} = state) do
+    {spawn_args, _pristine} = resume_spawn_args(state, port_args)
+    {:reply, spawn_args, state}
+  end
+
+  # Open a Claude session port. Called by Wardmast.Worker.ClaudeSession.start/1
+  # so this process (the worker) owns the port. We stash session config keyed
+  # by the port itself so multiple concurrent sessions (future) wouldn't
+  # collide.
+  def handle_call({:__claude_session_open__, port_args, session_config}, _from, %State{} = state) do
+    # bd-4p1vui (docs/design/remote-workers.md §10.4.3): the session of a run this Worker is
+    # adopting. From here the Worker owns the run's row (its id is the node's run id); the
+    # row already says where it runs, on which session, and what it was told.
+    adopted = adopted_session(state, port_args)
+    state = take_adopted_run(state, adopted)
+
+    # bd-1z7624: a session-level resume (`arb worker resume`) seeds the worker
+    # with :resume_session_id. Inject `--resume <id>` (+ the terse continue
+    # prompt) into THIS spawn so it continues the prior Claude session, but
+    # stash the PRISTINE argv as :claude_spawn — the bd-t9uq25 auto-resume
+    # rebuilds each `--resume` from pristine args + the latest session id, so a
+    # polluted spawn would stack duplicate flags. One-shot: consumed below.
+    {spawn_args, pristine_args} = resume_spawn_args(state, port_args)
+
+    # bd-11abk2: an oversized original prompt is delivered via a temp file
+    # (Wardmast.Agents.Claude.build_argv/3); if the bd-1z7624 session-resume
+    # injection above swapped it out for the short continue prompt, that
+    # temp file is now orphaned — nothing will ever open it — so reclaim it
+    # immediately rather than leaking it until the worker exits.
+    provider = Map.get(session_config, :provider)
+    adapter = agent_adapter_for_provider(provider)
+
+    # bd-9rdwe4 (#1017 gap G5): persist the composed prompt BEFORE any
+    # tmpfile is reclaimed below — nothing recorded what an agent was told,
+    # and the oversized-prompt tmpfile is unlinked as soon as this worker no
+    # longer needs it. We already hold the raw prompt string in
+    # `session_config` (threaded in by `ClaudeSession.start/1` /
+    # `ClaudeSession.build_session_config/3`), so persistence never depends
+    # on reading it back off a temp file that might already be gone.
+    # An adopted session was told its prompt before the restart; the one built for the
+    # adoption was never sent, so it is not recorded as what the run was told.
+    persist_prompt_unless_adopted(state, session_config, adopted)
+
+    cleanup_orphaned_prompt(adapter, spawn_args, pristine_args)
+
+    # Record the session id the argv pre-assigned BEFORE the port opens, so a
+    # run that crashes before printing anything still has a resumable id.
+    state = record_preassigned_session(state, adapter, spawn_args, adopted)
+
+    {port, scope} = Wardmast.Worker.ClaudeSession.open_scoped_port(spawn_args, state.task_id)
+    # A run placed on a node consumed its handle; what is stashed for re-opens
+    # must place it again (a no-op for a local spawn).
+    pristine_args = Wardmast.Worker.ClaudeSession.strip_prepared(pristine_args)
+    now = DateTime.utc_now()
+
+    session =
+      session_config
+      |> maybe_put(
+        :remote_memory_cap,
+        Wardmast.Worker.ClaudeSession.remote_memory_cap(spawn_args)
+      )
+      |> Map.put(:port, port)
+      |> Map.put(:scope, scope)
+      |> Map.put(:prompt_tmpfile, get_prompt_tmpfile(adapter, spawn_args.argv))
+      |> Map.put(:output_lines, [])
+      |> Map.put(:line_buf, "")
+      |> Map.put(:exit_status, nil)
+      |> Map.put(:exited_at, nil)
+      |> Map.put(:started_at, now)
+      |> Map.put(:activity, "starting")
+      |> Map.put(:activity_at, now)
+      |> Map.put(:output_log, open_output_log(state))
+      |> Map.put(:run_id, state.run_id)
+      |> put_stdout_start(port, spawn_args)
+      |> seed_adopted_usage(adopted)
+
+    sessions = Map.put(state.claude_sessions, port, session)
+
+    # Mark the worker claude-driven so views can show the live activity
+    # signal (mirrored below) instead of a frozen workflow step — the
+    # claude-driven Driver never ticks the Machine. See bd-c919xj.
+    #
+    # Also stash the spawn args so the commit-gate (bd-ofql8k) can re-launch
+    # the worker with a nudge prompt when arb-done arrives with uncommitted
+    # work, without round-tripping through the workspace-aware Dispatch builder
+    # that does not know how to swap the prompt mid-session.
+    # bd-au3xrq: stash the coordinates the on-disk session archive needs.
+    # `config_dir` is the effective config root this spawn ran under: the
+    # injected CLAUDE_CONFIG_DIR for a Claude spawn, or the injected agy
+    # `$HOME` (bd-6nupvc / T9 — `Wardmast.Agents.Gemini.ConfigDir`) for a
+    # gemini spawn, else each provider's own inherited default. `cwd` is the
+    # worktree the CLI derives its project-slug from. `session_id` lands
+    # later (init event, via sync_session_meta) — together they root either
+    # `<config_dir>/projects/<slug>/<session_id>.jsonl` (Claude) or
+    # `<config_dir>/.gemini/antigravity-cli/conversations/<session_id>.db`
+    # (agy) — see `Wardmast.Worker.SessionArchive`.
+    # An adopted run keeps the config dir it ran under: its transcripts land there.
+    config_dir = session_config_dir(adopted, port_args, provider)
+
+    meta =
+      (state.meta || %{})
+      |> Map.put(:claude_session, true)
+      |> Map.put(:claude_spawn, pristine_args)
+      |> Map.delete(:resume_session_id)
+      |> Map.put(:config_dir, config_dir)
+      |> Map.put(:cwd, Map.get(port_args, :cd))
+      |> maybe_put(:provider, provider && to_string(provider))
+      |> maybe_put(:node_id, handle_node_id(port))
+      |> note_adopted(adopted)
+
+    new_state = %State{
+      state
+      | claude_sessions: sessions,
+        meta: meta,
+        archive_redact:
+          Enum.uniq(state.archive_redact ++ (Map.get(session_config, :redact_values) || []))
+    }
+
+    new_state = note_scope(new_state, scope)
+    new_state = sync_session_meta(new_state, port)
+    record_session_opened(new_state, port, adopted, {provider, config_dir, session_config})
+
+    # bd-8ikgoc: tell the registry where the run executes, so a run on a remote
+    # node stops counting against the primary's cap.
+    PRegistry.put_node(new_state.registry_key, handle_node_id(port))
+
+    # bd-aw2cyt: the agent is live now — the phase this ticket exists to make
+    # honest starts and ends at the port.
+    {:reply, {:ok, port}, announce_phase(new_state)}
+  rescue
+    e -> {:reply, {:error, {:port_open_failed, Exception.message(e)}}, state}
+  end
+
+  # A Claude argv names its session up front (`--session-id <uuid>` on a first
+  # launch, `--resume <uuid>` after). Stash it in meta (`:session_id`, plus
+  # `:preassigned_session_id` so `sync_session_meta/2` can tell it from an id
+  # learned from output) and stamp it on the run row. Other providers and
+  # adopted runs (the row already has its session) are left alone.
+  defp record_preassigned_session(%State{} = state, adapter, spawn_args, adopted) do
+    sid =
+      with Wardmast.Agents.Claude <- adapter,
+           nil <- adopted,
+           %{argv: argv} when is_list(argv) <- spawn_args do
+        Wardmast.Agents.Claude.session_id_from_argv(argv)
+      else
+        _ -> nil
+      end
+
+    if is_binary(sid) and sid != "" do
+      if state.run_id, do: backfill_run_fields(state.run_id, %{session_id: sid}, state.task_id)
+
+      meta =
+        (state.meta || %{})
+        |> Map.put(:session_id, sid)
+        |> Map.put(:preassigned_session_id, sid)
+
+      %State{state | meta: meta}
+    else
+      state
+    end
+  end
+
+  # The id the CLI reports in its stream, reconciled with the pre-assigned one.
+  # The pre-assigned id always wins (it is what `--resume` will use); a
+  # difference is logged once per worker.
+  defp reconcile_session_id(%State{meta: meta} = state, reported) do
+    case meta && Map.get(meta, :preassigned_session_id) do
+      nil ->
+        {state, reported}
+
+      pre when reported in [nil, pre] ->
+        {state, pre}
+
+      pre ->
+        if Map.get(meta, :session_id_mismatch) != reported do
+          Logger.warning(
+            "Worker: session id mismatch task=#{state.task_id} " <>
+              "pre-assigned=#{pre} reported=#{reported} — keeping the pre-assigned id"
+          )
+        end
+
+        {%State{state | meta: Map.put(meta, :session_id_mismatch, reported)}, pre}
+    end
+  end
+
+  # bd-4p1vui: the adoption this session completes, if any: this Worker was started to adopt
+  # a run (`meta[:adopt]`, from `Dispatch.adopt/2`) and the session is that run's (its
+  # handle names the same run id). A later re-open is an ordinary placement.
+  defp adopted_session(%State{meta: %{adopt: %{run_id: run_id} = adopt}}, %{
+         remote: %{prepared: {:remote, {_node, run_id, _ref}}}
+       }),
+       do: adopt
+
+  defp adopted_session(_state, _port_args), do: nil
+
+  # From the adopted session on, the Worker owns the run's row.
+  defp take_adopted_run(%State{} = state, nil), do: state
+  defp take_adopted_run(%State{} = state, %{run_id: run_id}), do: %State{state | run_id: run_id}
+
+  # bd-4p1vui: unadopt first, by node and run id, so the run is back on hold before this
+  # Worker's death reaches the node's session (owner-down would cancel a run it owned).
+  # The caller stops: with no `run_id` and no sessions, nothing is written to the row.
+  defp give_up_adoption(%State{meta: meta} = state) do
+    case Map.get(meta || %{}, :adopt) || Map.get(meta || %{}, :adopted) do
+      %{run_id: run_id, node_id: node_id} when is_binary(run_id) ->
+        Wardmast.Worker.Executor.Node.unadopt(node_id, run_id)
+
+      _ ->
+        :ok
+    end
+
+    Logger.warning("Worker: task=#{state.task_id} gave up adopting its run; its node holds it")
+    %State{state | run_id: nil, claude_sessions: %{}, state: :finished}
+  end
+
+  defp persist_prompt_unless_adopted(state, session_config, nil),
+    do: persist_composed_prompt(state, session_config)
+
+  defp persist_prompt_unless_adopted(_state, _session_config, _adopted), do: :ok
+
+  defp session_config_dir(%{config_dir: dir}, _port_args, _provider) when is_binary(dir), do: dir
+
+  defp session_config_dir(_adopted, port_args, provider),
+    do: effective_config_dir(port_args, provider)
+
+  # The run's row records where it executes (nil = the primary). An adopted row already
+  # records all of it, so nothing is written over it.
+  defp record_session_opened(%State{} = state, port, adopted, spawn) do
+    node_id = handle_node_id(port)
+    unless adopted, do: backfill_session_opened(state, port, node_id, spawn)
+    :ok
+  end
+
+  defp backfill_session_opened(%State{run_id: run_id, task_id: task_id}, port, node_id, spawn) do
+    {provider, config_dir, session_config} = spawn
+    if node_id && run_id, do: backfill_run_fields(run_id, %{node_id: node_id}, task_id)
+    backfill_session_dispatch(run_id, task_id, provider, config_dir, session_config)
+    stamp_run_node(run_id, task_id, port)
+  end
+
+  # A remote session counts its stdout from where its stream started: 0 for a placement,
+  # what the session resumed at for an adoption (`remote.stdout_start`).
+  defp put_stdout_start(session, {:remote, _}, spawn_args),
+    do: Map.put(session, :stdout_offset, get_in(spawn_args, [:remote, :stdout_start]) || 0)
+
+  defp put_stdout_start(session, _port, _spawn_args), do: session
+
+  # The stream will not repeat its `init` event: what it said then comes from the row, so
+  # usage stays on the same session id (the ledger upserts per session) and model.
+  defp seed_adopted_usage(session, nil), do: session
+
+  defp seed_adopted_usage(session, adopted) do
+    seed =
+      for key <- [:session_id, :model, :harness_version],
+          value = adopted[key],
+          not is_nil(value),
+          into: %{},
+          do: {key, value}
+
+    Map.update(session, :usage, seed, &Map.merge(seed, &1 || %{}))
+  end
+
+  defp note_adopted(meta, nil), do: meta
+
+  defp note_adopted(meta, adopted) do
+    meta
+    |> Map.delete(:adopt)
+    |> Map.put(:adopted, %{
+      run_id: adopted.run_id,
+      node_id: adopted[:node_id],
+      at: DateTime.utc_now()
+    })
+    |> maybe_put(:session_id, adopted[:session_id])
+  end
+
+  # bd-6zuoo6: every agent spawn runs in its own memory-capped systemd scope
+  # (`Wardmast.Worker.MemoryScope`). Record the scope's unit name on the run — a
+  # kernel OOM line names the victim's cgroup, and this is the only link from
+  # that name back to a task — and in the log, next to the spawn.
+  defp note_scope(%State{} = state, nil), do: state
+
+  defp note_scope(%State{} = state, %{unit: unit, max: max}) do
+    meta = state.meta || %{}
+    scopes = (Map.get(meta, :cgroup_scopes) || []) ++ [unit]
+
+    Logger.info(
+      "Worker: task=#{state.task_id} run=#{state.run_id} agent spawned in scope #{unit} " <>
+        "(MemoryMax=#{max})"
+    )
+
+    if state.run_id,
+      do: backfill_run_fields(state.run_id, %{cgroup_scopes: scopes}, state.task_id)
+
+    %State{state | meta: Map.put(meta, :cgroup_scopes, scopes)}
+  end
+
+  # bd-6zuoo6: a scope that was OOM-killed looks like any SIGKILL (exit 137)
+  # from here; systemd's `Result=oom-kill` for the scope is the only thing that
+  # tells them apart. Asked once, at exit, and only for a non-zero exit.
+  # A container on a node is capped by `podman run --memory`, and the node reads
+  # `.State.OOMKilled` after the exit (RW9): that is its `oom?`.
+  defp mark_memory_cap(%{remote_outcome: %{oom?: true}} = session, status)
+       when is_integer(status) and status != 0 do
+    max = Map.get(session, :remote_memory_cap) || "the node's memory cap"
+
+    Logger.warning(
+      "Worker: agent container on a node exceeded its memory cap (#{max}) and was OOM-killed"
+    )
+
+    Map.put(session, :memory_cap_exceeded, %{max: max, peak: nil})
+  end
+
+  defp mark_memory_cap(session, status) when is_integer(status) and status != 0 do
+    with %{} = scope <- Map.get(session, :scope),
+         {:memory_cap_exceeded, info} <- Wardmast.Worker.MemoryScope.outcome(scope) do
+      Logger.warning(
+        "Worker: agent scope #{scope.unit} exceeded its memory cap (MemoryMax=#{scope.max}) " <>
+          "and was OOM-killed"
+      )
+
+      Map.put(session, :memory_cap_exceeded, info)
+    else
+      _ -> session
+    end
+  end
+
+  defp mark_memory_cap(session, _status), do: session
+
+  # A remote run has ended for good: the node session can forget it.
+  defp release_remote({:remote, _} = handle), do: Wardmast.Worker.Executor.Node.release(handle)
+  defp release_remote(_port), do: :ok
+
+  # bd-6zm33r: the agent has exited; anything it backgrounded is still in its
+  # scope and would run on after the run ends. Stop the scope.
+  defp reap_scope(session) do
+    case Map.get(session, :scope) do
+      %{unit: unit} = scope ->
+        case Wardmast.Worker.MemoryScope.stop(scope) do
+          :ok -> :ok
+          {:error, reason} -> Logger.warning("Worker: could not stop scope #{unit}: #{reason}")
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  # `StopReason.classify/3`, except that a scope systemd OOM-killed is
+  # `:memory_cap_exceeded` regardless of what the (bare 137) exit status or the
+  # output tail suggest.
+  defp stop_reason_for(session, exit_status, output_lines) do
+    cond do
+      info = Map.get(session, :memory_cap_exceeded) ->
+        Wardmast.Worker.StopReason.memory_cap_exceeded(info, exit_status)
+
+      info = Map.get(session, :qwen_retry_hold) ->
+        RetryHold.stop_reason(info, exit_status)
+
+      true ->
+        # bd-5wm92s: the decoded `result` event rides along, so a clean end is known even
+        # when the rendered summary line is not among `output_lines`.
+        Wardmast.Worker.StopReason.classify(
+          exit_status,
+          output_lines,
+          Map.get(session, :provider),
+          result: Map.get(session, :usage)
+        )
+    end
+  end
+
+  defp backfill_report(nil, _task_id, _key, _value), do: :ok
+
+  defp backfill_report(run_id, task_id, :model, value) do
+    backfill_run_model(run_id, value, task_id)
+  end
+
+  defp backfill_report(run_id, task_id, :routing_config, %{} = value) do
+    case Map.get(value, :provider) || Map.get(value, "provider") do
+      nil -> :ok
+      prov -> backfill_run_fields(run_id, %{provider: to_string(prov)}, task_id)
+    end
+  end
+
+  defp backfill_report(run_id, task_id, :provider, value) when not is_nil(value) do
+    backfill_run_fields(run_id, %{provider: to_string(value)}, task_id)
+  end
+
+  defp backfill_report(run_id, task_id, :provider_fallback, value) when not is_nil(value) do
+    backfill_run_fields(run_id, %{provider_fallback: to_string(value)}, task_id)
+  end
+
+  defp backfill_report(run_id, task_id, :run_provenance, %{} = value) do
+    backfill_run_fields(run_id, value, task_id)
+  end
+
+  defp backfill_report(_run_id, _task_id, _key, _value), do: :ok
+
+  defp cleanup_orphaned_prompt(adapter, spawn_args, pristine_args) do
+    if spawn_args != pristine_args do
+      case get_prompt_tmpfile(adapter, pristine_args.argv) do
+        path when is_binary(path) -> File.rm(path)
+        nil -> :ok
+      end
+    end
+  end
+
+  # RW12: the row names the node the run is placed on. `Nodes.Recovery` finds a restart's
+  # remote runs by it, and the shutdown path leaves a run that has it to the node.
+  defp stamp_run_node(run_id, task_id, {:remote, {node_id, _run, _ref}}) when not is_nil(run_id),
+    do: backfill_run_fields(run_id, %{node_id: node_id}, task_id)
+
+  defp stamp_run_node(_run_id, _task_id, _port), do: :ok
+
+  defp backfill_session_dispatch(run_id, task_id, provider, config_dir, session_config) do
+    if run_id && provider do
+      backfill_run_fields(run_id, %{provider: to_string(provider)}, task_id)
+    end
+
+    if config_dir && run_id &&
+         Map.get(session_config, :provider) in [nil, "claude", "gemini", "codex"] do
+      backfill_run_fields(run_id, %{config_dir: config_dir}, task_id)
+    end
+  end
+
+  # bd-1z7624: build the spawn argv for the first session, injecting
+  # `--resume <session_id>` when this worker was started for a session-level
+  # resume. Returns `{spawn_args, pristine_args}`: `spawn_args` carries the
+  # `--resume` flag (+ the terse continue prompt) for THIS launch, `pristine_args`
+  # is the untouched argv to stash as :claude_spawn so later auto-resumes rebuild
+  # cleanly. With no resume marker — or a custom/fixture argv lacking a `--print`
+  # slot — both are the original args (no injection).
+  defp resume_spawn_args(%State{meta: meta} = state, port_args) do
+    case meta && Map.get(meta, :resume_session_id) do
+      sid when is_binary(sid) and sid != "" ->
+        {provider, _model} = respawn_routing(state)
+
+        case inject_resume_argv(
+               port_args,
+               sid,
+               manual_resume_prompt(state.task_id),
+               provider
+             ) do
+          {:ok, resumed_args} ->
+            Logger.info("Worker: bd-1z7624 session-resume task=#{state.task_id} session=#{sid}")
+
+            {resumed_args, port_args}
+
+          _ ->
+            {port_args, port_args}
+        end
+
+      _ ->
+        {port_args, port_args}
+    end
+  end
+
+  # bd-11abk2: unlink the stdin-delivery temp file (if this spawn used one —
+  # see Wardmast.Agents.Claude.build_argv/3) now that the port has exited and
+  # nothing can read it anymore. A missing/already-removed file is a no-op.
+  defp cleanup_prompt_tmpfile(session) do
+    case Map.get(session, :prompt_tmpfile) do
+      path when is_binary(path) -> File.rm(path)
+      _ -> :ok
+    end
+
+    :ok
+  end
+
+  # ---- Port message routing (Claude session I/O) -------------------------
+
+  @impl true
+  def handle_info({port, {:data, {:eol, line}}}, %State{} = state) when session_handle?(port) do
+    {:noreply, on_port_data(state, port, line, true)}
+  end
+
+  def handle_info({port, {:data, {:noeol, partial}}}, %State{} = state)
+      when session_handle?(port) do
+    {:noreply, on_port_data(state, port, partial, false)}
+  end
+
+  # A remote run's outcome (OOM, cancelled, node lost) arrives just before its
+  # exit status; it is what `mark_memory_cap/2` reads for a node run.
+  def handle_info({{:remote, _} = handle, {:outcome, outcome}}, %State{} = state) do
+    case Map.fetch(state.claude_sessions, handle) do
+      {:ok, session} ->
+        sessions =
+          Map.put(state.claude_sessions, handle, Map.put(session, :remote_outcome, outcome))
+
+        {:noreply, %State{state | claude_sessions: sessions}}
+
+      :error ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({port, {:exit_status, status}}, %State{} = state) when session_handle?(port) do
+    with {:ok, session} <- Map.fetch(state.claude_sessions, port),
+         true <- container_create_retry?(state, session, status) do
+      {:noreply, schedule_container_create_retry(state, port, session, status)}
+    else
+      _ -> handle_info({:__session_exit__, port, status}, state)
+    end
+  end
+
+  # bd-325sps: a deferred re-create of a container that libpod failed to create.
+  def handle_info({:__retry_container_create__, session}, %State{} = state) do
+    if live_run?(state.state, state.waiting_on) and not node_stopping?() do
+      {:noreply, retry_container_create(state, session)}
+    else
+      {:noreply, state}
+    end
+  end
+
+  # The port closed for any other reason: classify, record and (if need be) schedule the
+  # stop check.
+  def handle_info({:__session_exit__, port, status}, %State{} = state)
+      when session_handle?(port) do
+    case Map.fetch(state.claude_sessions, port) do
+      {:ok, session} ->
+        cleanup_prompt_tmpfile(session)
+        session = mark_memory_cap(session, status)
+        reap_scope(session)
+        release_remote(port)
+        updated = Wardmast.Worker.ClaudeSession.handle_exit(session, status)
+        sessions = Map.put(state.claude_sessions, port, updated)
+        new_state = %State{state | claude_sessions: sessions}
+        record_usage_event(new_state, updated, updated.exit_status)
+        link_guardrail_egress(new_state, updated)
+        new_state = sync_session_meta(new_state, port)
+
+        # bd-awi4nw: the port closing is the PRIMARY stop signal. If the worker
+        # is still in a live state, the worker died/stopped without completing
+        # (token exhaustion, crash, kill, flag-rejection). Don't strand the task
+        # at a silent :active — schedule a classify+escalate after a short
+        # grace so an in-flight `arb done` (which the exit_status message can
+        # race ahead of) still wins and the check no-ops on a normal completion.
+        if live_run?(new_state.state, new_state.waiting_on) do
+          Process.send_after(self(), {:__worker_stopped__, port}, exit_grace_ms())
+        end
+
+        # bd-aw2cyt: the main agent just exited. Announce the phase that
+        # follows (review, CI, the merge) — say so.
+        {:noreply, announce_phase(new_state)}
+
+      :error ->
+        {:noreply, state}
+    end
+  end
+
+  # Deferred stop check (scheduled by the exit_status handler). By now an
+  # in-flight `arb done` has been processed: if the worker moved to a
+  # terminal/review state, the exit was the expected end of a normal completion
+  # — nothing to do. Otherwise the subprocess is genuinely gone with the task
+  # unfinished: classify the cause from exit status + captured output and fail +
+  # escalate to the coordinator (bd-awi4nw).
+  #
+  # bd-1pdyov: a stop check must consider the WHOLE run, not just the one port
+  # that closed. A single task run can span multiple ClaudeSession ports — the
+  # commit-gate nudge (respawn_with_commit_nudge/2) opens a continuation session
+  # in the same worktree, and `arb resume` re-attaches a fresh one. When the
+  # primary session's port exits while a continuation is still mid-run, this
+  # check fires after the short grace and would falsely fail work the live
+  # continuation is about to finish. Two guards before failing:
+  #
+  #   1. another session is still live (its port hasn't exited) → the run isn't
+  #      over; no-op and let the live session drive the outcome.
+  #   2. the run already signalled `arb done` somewhere (primary OR continuation)
+  #      → prefer completion. Re-enter on_claude_done so the commit gate decides:
+  #      committed work routes to the ReviewGate, uncommitted work still diverts.
+  def handle_info(
+        {:__worker_stopped__, port},
+        %State{state: run_state, waiting_on: waiting_on} = state
+      )
+      when live_run?(run_state, waiting_on) do
+    case Map.fetch(state.claude_sessions, port) do
+      {:ok, session} -> {:noreply, on_agent_stopped(state, port, session)}
+      :error -> {:noreply, state}
+    end
+  end
+
+  # bd-bg87oz: the grace after a remote pass's `arb done` ran out with its container still
+  # up. The node removes it and uploads the final checkout before reporting the exit.
+  def handle_info({:__remote_pass_exit_grace__, handle}, %State{} = state) do
+    case Map.get(state.claude_sessions, handle) do
+      %{exit_status: nil} -> _ = Wardmast.Worker.Executor.Node.stop(handle)
+      _ -> :ok
+    end
+
+    {:noreply, state}
+  end
+
+  def handle_info({:__worker_stopped__, _port}, %State{} = state) do
+    # The worker completed (arb done won the race) or already failed — the
+    # subprocess exit was expected. No escalation.
+    {:noreply, state}
+  end
+
+  # bd-4g0fsh: a scheduled auto-resume of a recoverable stop fires after its
+  # backoff. Re-spawn the session in place; if the respawn can't be built (no
+  # pristine spawn args / no `--print` slot / port open failure), fall through to
+  # fail_stopped with the original session so the escalation still carries the
+  # real cause. Guarded on a live run state so a resume scheduled before a
+  # terminal transition (e.g. a late `arb done`) is dropped.
+  def handle_info(
+        {:__resume_continuation__, session_id, fingerprint, session},
+        %State{state: run_state, waiting_on: waiting_on} = state
+      )
+      when live_run?(run_state, waiting_on) do
+    # bd-aje6fj: a backoff that expires mid-shutdown must not spawn a fresh
+    # agent into a node that is going down — terminate/2 is on its way.
+    if node_stopping?() do
+      {:noreply, state}
+    else
+      case respawn_with_resume(state, session_id, fingerprint, session) do
+        {:ok, new_state} -> {:noreply, new_state}
+        {:error, _why} -> {:noreply, fail_stopped(state, session)}
+      end
+    end
+  end
+
+  def handle_info({:__resume_continuation__, _session_id, _fp, _session}, %State{} = state) do
+    # The run reached a terminal/review state during the backoff window — the
+    # scheduled resume is stale. Drop it.
+    {:noreply, state}
+  end
+
+  # bd-28c6qo: the pre-push check finished. Matched on the ref stashed in meta
+  # so a result for a run that has since been failed / stopped / re-checked is
+  # dropped instead of acted on.
+  def handle_info(
+        {:__prepush_result__, ref, ctx, result},
+        %State{state: run_state, waiting_on: waiting_on, meta: %{prepush_ref: ref}} = state
+      )
+      when live_run?(run_state, waiting_on) do
+    {:noreply, on_prepush_result(state, ctx, result)}
+  end
+
+  def handle_info({:__prepush_result__, _ref, _ctx, _result}, %State{} = state),
+    do: {:noreply, state}
+
+  def handle_info(
+        {:__claude_session_done__, _line},
+        %State{state: run_state, waiting_on: waiting_on} = state
+      )
+      when live_run?(run_state, waiting_on) do
+    # "arb done" detected. The guard accepts every live run state (:starting,
+    # :working, :waiting on a question). In claude_driven mode the worker may
+    # sit at :starting (the Machine is not ticked, so Worker.advance is never
+    # called), so accepting :starting here is intentional and critical for this
+    # signal to fire.
+    #
+    # A run waiting on the review gate is deliberately excluded: once the
+    # worker has signalled done, the review gate (ReviewGate) and then the merger
+    # / Watchdog decide completion — not a repeated "arb done" on the author's
+    # stdout. A late marker is ignored (handled by the catch-all clause below).
+    #
+    # bd-1pdyov: stamp :done_seen so a later whole-run stop check (e.g. a primary
+    # port that exits after the commit gate diverted to a continuation) can tell
+    # the run signalled done and prefer completion over a false stop failure.
+    {:noreply, on_claude_done(mark_done_seen(state))}
+  end
+
+  def handle_info({:__claude_session_done__, _line}, %State{} = state) do
+    # Already :finished / waiting on the review gate — ignore the
+    # duplicate signal for transition purposes, but still record that the marker
+    # was seen (bd-1pdyov) so the whole-run check has a complete picture.
+    {:noreply, mark_done_seen(state)}
+  end
+
+  # The ReviewGate (review gate) exited before delivering a verdict. Do NOT strand
+  # the author waiting on the review gate — treat it as an inconclusive review and
+  # escalate (no merge). Matched by the monitor ref stashed in meta. bd-2y0gd5.
+  #
+  # bd-2lfzs8 / #650: unless the node is stopping. A gate that stops itself for
+  # the shutdown (a reviewer or fix-round pass cut off by the same SIGTERM) leaves
+  # its `pass` marker for the boot sweep to re-run; the author, still alive for
+  # the moment, must not read that as "no verdict" and park the ticket `review
+  # inconclusive` / fail its run. Stay waiting: `terminate/2` is on its way and
+  # records the run `:interrupted`.
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %State{state: :waiting, waiting_on: :review_gate, meta: %{review_gate_ref: ref}} = state
+      ) do
+    if node_stopping?() do
+      Logger.info(
+        "Worker: ReviewGate for task=#{state.task_id} went down with the node " <>
+          "(#{inspect(reason)}); leaving its pass for the boot sweep"
+      )
+
+      {:noreply, state}
+    else
+      Logger.warning(
+        "Worker: ReviewGate for task=#{state.task_id} exited before a verdict " <>
+          "(#{inspect(reason)}); escalating as no_verdict"
+      )
+
+      {:noreply,
+       apply_review_gate_verdict(
+         state,
+         {:no_verdict,
+          "ReviewGate process exited before delivering a verdict (#{inspect(reason)})."}
+       )}
+    end
+  end
+
+  # bd-7xtz6w: the author's own check that its ReviewGate is still judging.
+  # See `check_review_gate/2`. A tick for any gate but the one we are waiting
+  # on — or arriving after the wait ended — is stale and dropped.
+  def handle_info(
+        {:__review_gate_liveness__, gate},
+        %State{state: :waiting, waiting_on: :review_gate, meta: %{review_gate_pid: gate}} = state
+      ) do
+    {:noreply, check_review_gate(state, gate)}
+  end
+
+  def handle_info({:__review_gate_liveness__, _gate}, state), do: {:noreply, state}
+
+  def handle_info(
+        {:__review_gate_probe__, gate, result},
+        %State{state: :waiting, waiting_on: :review_gate, meta: %{review_gate_pid: gate}} = state
+      ) do
+    {:noreply, apply_review_gate_probe(state, gate, result)}
+  end
+
+  def handle_info({:__review_gate_probe__, _gate, _result}, state), do: {:noreply, state}
+
+  # bd-cut6uv: the ReviewGate tells its author when it starts and stops holding a
+  # reviewer back for CI. While it does, no agent is live for the ticket, so the
+  # author releases its hold on the provider account (`hold_account/2`); it takes
+  # it back the moment the wait ends, and `forget_review_gate/1` does too if the
+  # gate is gone.
+  def handle_info(
+        {:__review_gate_ci_wait__, waiting?},
+        %State{state: :waiting, waiting_on: :review_gate} = state
+      )
+      when is_boolean(waiting?) do
+    hold_account(state, not waiting?)
+    if waiting?, do: announce_slot_released(state)
+    {:noreply, state}
+  end
+
+  def handle_info({:__review_gate_ci_wait__, _waiting?}, state), do: {:noreply, state}
+
+  # bd-a9zb7w: decide (and, if warranted, dispatch) the implementer fix round for
+  # a ReviewGate rejection this worker just parked on. Posted to self by
+  # `park_rejected/4` so it lands after that call's reply, with the run already
+  # finished `:failed`. Never crashes the worker: the whole decision is best-effort.
+  def handle_info({:__review_gate_fix_round__, verdict, findings}, %State{} = state) do
+    _ = maybe_dispatch_fix_round(state, verdict, findings)
+    {:noreply, state}
+  end
+
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.6 F12): the process adopting the run for
+  # this Worker went down before any session attached the run, so none ever will (only it
+  # opens that session): give the adoption up. That also stops a Worker whose start request
+  # outlived its adopter. Once a session attached the run `meta[:adopt]` is gone, and the
+  # adopter's DOWN is the one below.
+  def handle_info(
+        {:DOWN, _ref, :process, pid, _reason},
+        %State{meta: %{adopt: %{adopter: pid}}} = state
+      ),
+      do: {:stop, :normal, give_up_adoption(state)}
+
+  # Any other monitor DOWN (the ReviewGate's expected exit AFTER a verdict, or an
+  # unrelated monitor) — nothing to do.
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
+
+  # bd-741sid: the run ended with its PR open (`finish_run_after_pr_opened/1`),
+  # recorded and announced; stop. Posted to self so the verdict / `open_mr/5`
+  # caller gets its reply first. `terminate/2` sees `:completed` and leaves
+  # the run row alone.
+  def handle_info(:__run_finished__, %State{} = state), do: {:stop, :normal, state}
+
+  # bd-aje6fj: linked exits, now that the worker traps them. The parent
+  # supervisor's own exit never reaches here — `gen_server` handles it and goes
+  # straight to terminate/2. What does arrive:
+  #
+  #   * `:normal` from every port this process opened — an agent session port
+  #     after its `{:exit_status, _}` or a `Port.close/1`, and the throwaway
+  #     port behind each `System.cmd/3` (git probes, `OsProcess.kill_tree/1`'s
+  #     `kill`) — and from a finished `Task.async/1`. Untrapped, a `:normal`
+  #     exit signal was ignored; ignore it here too.
+  #   * anything else — a port that died on a driver error, a crashed linked
+  #     process. Untrapped, that killed the worker without teardown. Keep it
+  #     fatal, but stop through terminate/2 so the agent is still reaped and the
+  #     run is recorded as the crash it is. Wrapped so a linked process's own
+  #     `:shutdown` can't pass for the node shutting down.
+  def handle_info({:EXIT, _from, :normal}, %State{} = state), do: {:noreply, state}
+
+  def handle_info({:EXIT, from, reason}, %State{} = state) do
+    Logger.warning(
+      "Worker: task=#{state.task_id} linked #{inspect(from)} exited #{crash_inspect(reason)}; stopping"
+    )
+
+    {:stop, {:linked_exit, from, reason}, state}
+  end
+
+  # ---- helpers -----------------------------------------------------------
+
+  # The deferred stop check proper, for a session this worker owns.
+  defp on_agent_stopped(%State{} = state, port, session) do
+    cond do
+      # bd-aje6fj: systemd's control-group SIGTERM reaches the agent at the
+      # same moment as the BEAM, so on a restart the agent usually exits
+      # before the supervisor gets round to this worker. That is the node
+      # going down, not the run failing: don't classify, escalate or
+      # auto-resume it — terminate/2 records it `:interrupted` shortly.
+      #
+      # Deliberately ahead of run_signalled_done?/1: a run that printed `arb
+      # done` in the last exit-grace window is interrupted too, not completed.
+      # on_claude_done/1 is not safe mid-shutdown — the commit gate can
+      # respawn a nudge agent, and the review gate / merge queue it hands off
+      # to are being torn down alongside this worker — so it could be killed
+      # halfway through a hand-off. Resuming at boot just replays the `arb
+      # done`, which is harmless.
+      node_stopping?() ->
+        state
+
+      other_session_live?(state, port) ->
+        state
+
+      # RW12 (docs/design/remote-workers.md §10.3): the node the run was placed on
+      # is gone. That says nothing about the run or the agent: it is interrupted,
+      # not failed, and no resume attempt is consumed. Ahead of run_signalled_done?/1
+      # for the same reason as a node shutdown: whatever the agent printed last, its
+      # worktree on the node is not here to commit from.
+      # K12 (A5): so is a pod evicted, preempted or deleted from outside, with the same
+      # policy: interrupted, no resume attempt consumed, re-dispatched through Placement.
+      node_interrupted?(session) ->
+        interrupt_node_run(state, port, session)
+
+      signalled_done?(state, session) ->
+        on_claude_done(state)
+
+      # bd-2da6ay: a non-reviewable no-PR (`task`/`research`) worker whose subprocess
+      # exited cleanly (status 0) at wrap-up without ever printing `arb
+      # done`. Its deliverable is a findings summary in `notes`, NOT a
+      # worktree change — so a clean exit means the agent reached the end of
+      # its work and quit; it just never emitted the sentinel. Resuming
+      # (bd-t9uq25) only replays the identical clean exit, burning Opus on a
+      # loop that can never converge (observed: 3× on bd-8ggqep, ~$6.28).
+      # Finalize deterministically through the same notes gate `arb done`
+      # uses instead: populated notes complete the task; blank notes nudge
+      # up to the cap then escalate with a concrete cause. Infra failures
+      # (auth/credit/rate/killed/crashed) are NOT clean exits, so they fall
+      # through to the resume/fail_stopped path and keep their specific
+      # escalations (e.g. the credential watchdog). bd-9s9dqz: an operational
+      # `:task` has no notes gate, so its clean exit completes as an `arb done`
+      # would — the same path, minus the gate.
+      no_pr_type?(state.meta) and not review_only?(state.meta) and
+          clean_exit_without_done?(session) ->
+        finalize_task_type_stop(state)
+
+      true ->
+        # bd-t9uq25: exited without `arb done` — try to resume the session
+        # in place (bounded) before failing + discarding the worktree.
+        maybe_resume_continuation(state, session)
+    end
+  end
+
+  # `arb done` seen in the agent's message text, or — a Codex run that exited 0
+  # after echoing it through its last shell command — the sentinel never reached
+  # the message text but the run did finish. on_claude_done/1's commit gate
+  # still requires a clean tree with commits ahead, so unfinished work is
+  # nudged, not merged.
+  defp signalled_done?(state, session),
+    do:
+      run_signalled_done?(state) or
+        classify_stop(session).category == :sentinel_in_tool_output
+
+  defp node_interrupted?(session),
+    do:
+      match?(%{remote_outcome: %{node_lost?: true}}, session) or
+        match?(%{remote_outcome: %{pod_disrupted?: true}}, session) or
+        match?(%{remote_outcome: %{preempted?: true}}, session) or
+        Map.get(session, :unknown_exit_status) == true
+
+  # The run ends `:interrupted` with the typed `:node_lost` cause, exactly as a server
+  # shutdown ends one, so the resume machinery treats it as a run cut off from outside.
+  # `meta[:resume_attempts]` is not touched: the cap bounds *in-place* resumes of an
+  # agent that stopped on its own, and this one did not. The worker stays registered
+  # in its finished state (as a failed one does) until the automatic resume replaces
+  # it; the run row, not this process, is what the Driver's reap reads.
+  defp interrupt_node_run(%State{} = state, handle, session) do
+    name = node_name(handle)
+
+    case session do
+      %{remote_outcome: %{node_lost?: true}} ->
+        interrupt_for_node(
+          state,
+          Wardmast.Worker.StopReason.node_lost(name),
+          "node lost: #{name}",
+          "node #{name} lost"
+        )
+
+      %{remote_outcome: %{preempted?: true} = outcome} ->
+        detail = outcome[:disruption_detail]
+
+        interrupt_for_node(
+          state,
+          Wardmast.Worker.StopReason.preempted(name, detail),
+          "preempted: #{name}" <> if(detail in [nil, ""], do: "", else: " (#{detail})"),
+          "pod preempted on node #{name}"
+        )
+
+      _pod_disrupted ->
+        interrupt_for_node(
+          state,
+          Wardmast.Worker.StopReason.pod_disrupted(name),
+          "pod disrupted: #{name}",
+          "pod disrupted on node #{name}"
+        )
+    end
+  end
+
+  defp interrupt_for_node(%State{} = state, reason, failure_reason, log_cause) do
+    Logger.warning(
+      "Worker: task=#{state.task_id} run=#{state.run_id} interrupted — #{log_cause}; " <>
+        "no resume attempt consumed"
+    )
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, failure_reason)
+      |> Map.put(:stop_reason, Wardmast.Worker.StopReason.to_map(reason))
+
+    new_state =
+      %State{state | state: :finished, outcome: :interrupted, waiting_on: nil, meta: meta}
+
+    record_run_finished(new_state)
+    broadcast_lifecycle(:updated, new_state)
+    schedule_node_lost_resume(state.task_id)
+    new_state
+  end
+
+  # A ReviewGate pass (`<task>#review...`, bd-cgdhlu) is not a ticket there is
+  # anything to resume: its gate heard `{:worker_node_lost, id}` from the session
+  # and re-dispatches the pass itself, local or remote per placement.
+  defp schedule_node_lost_resume(task_id) do
+    if Wardmast.Worker.ReviewGate.base_task_id(task_id) == task_id,
+      do: Wardmast.Nodes.LostResume.schedule(task_id),
+      else: :ok
+  end
+
+  # bd-8ikgoc: the node dispatch placed the run on, known before any port opens.
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.10): an adopting Worker's run is
+  # already on the node that held it.
+  defp placed_node_id(%{adopt: %{node_id: id}}) when is_binary(id), do: id
+  defp placed_node_id(%{placed_node_id: id}) when is_binary(id), do: id
+  defp placed_node_id(_meta), do: nil
+
+  # The model the dispatch was routed to, before the CLI reports its own: the
+  # pool of an agy run depends on it (`ModelFamily.classify/2`).
+  defp dispatch_model(meta) when is_map(meta) do
+    case Map.get(meta, :model) || get_in(meta, [:routing_config, :model]) do
+      model when is_binary(model) and model != "" -> model
+      _ -> nil
+    end
+  end
+
+  defp dispatch_model(_meta), do: nil
+
+  # DC4: the account and pool this run seats on. A run that named no provider
+  # draws on the workspace's default one, as `Wardmast.Accounts.Concurrency` counts
+  # it. A stamp that cannot be read is no stamp (`Wardmast.Quota.Seats` resolves
+  # the same thing at read time): never a reason for a worker to die at boot.
+  defp seat_stamp(workspace_id, provider, model) do
+    code = provider || to_string(Wardmast.Quota.default_provider(workspace_id))
+
+    [
+      account_id: AccountResolver.account_id(workspace_id, code),
+      pool: Wardmast.Agents.ModelFamily.classify(code, model).pool,
+      model: model
+    ]
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  # The node a session handle executes on; nil for a local port.
+  defp handle_node_id({:remote, {node_id, _run, _ref}}), do: node_id
+  defp handle_node_id(_handle), do: nil
+
+  defp node_name({:remote, {node_id, _run, _ref}}) do
+    case Wardmast.Nodes.get_node(node_id) do
+      %{name: name} -> name
+      _ -> node_id
+    end
+  end
+
+  defp node_name(_handle), do: "unknown"
+
+  defp on_port_data(%State{} = state, port, fragment, eol?) do
+    case Map.fetch(state.claude_sessions, port) do
+      {:ok, session} ->
+        updated =
+          session
+          |> Wardmast.Worker.ClaudeSession.handle_data(fragment, eol?)
+          |> count_stdout(fragment, eol?)
+
+        updated = hold_qwen_retry_loop(state, port, session, updated)
+        sessions = Map.put(state.claude_sessions, port, updated)
+        new_state = %State{state | claude_sessions: sessions}
+        sync_session_meta(new_state, port)
+
+      :error ->
+        state
+    end
+  end
+
+  # bd-1po4s4: qwen's 429 retry loop spent its wall-time budget
+  # (`Qwen.RetryHold`). Kill the process tree once, leaving the port open so the
+  # normal exit path runs and `stop_reason_for/3` classifies it as a quota hold.
+  defp hold_qwen_retry_loop(state, port, before, current) do
+    if Map.get(current, :qwen_retry_hold) && !Map.get(before, :qwen_retry_hold) do
+      Logger.warning("Worker: task=#{state.task_id} qwen 429 retry budget spent; stopping run")
+
+      case safe_port_os_pid(port) do
+        {:ok, os_pid} -> OsProcess.kill_tree(os_pid)
+        _ -> :ok
+      end
+    end
+
+    current
+  end
+
+  # bd-4p1vui (docs/design/remote-workers.md §10.4.5): the stdout bytes a remote session has
+  # processed, counted the way the node's stream is cut (`{:eol, l}` is `l` plus its newline,
+  # `{:noeol, c}` is `c`), from where the stream started. Persisted when the Worker leaves the
+  # run to the node, so a Worker that adopts it delivers nothing twice. Local ports have none.
+  defp count_stdout(%{stdout_offset: offset} = session, fragment, eol?) when is_integer(offset),
+    do: %{session | stdout_offset: offset + byte_size(fragment) + if(eol?, do: 1, else: 0)}
+
+  defp count_stdout(session, _fragment, _eol?), do: session
+
+  # Mirror the most useful session fields (output_lines, exit_status) into the
+  # top-level meta so callers reading `Worker.state(pid).meta` see them
+  # without having to know about the internal :claude_sessions map.
+  # When there are multiple concurrent sessions this surfaces the most recent
+  # one; for now there's only ever one.
+  # Pre-existing complexity 17 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp sync_session_meta(%State{claude_sessions: sessions, meta: meta} = state, port) do
+    case Map.get(sessions, port) do
+      %{} = session ->
+        new_activity = Map.get(session, :activity)
+        old_activity = Map.get(meta, :activity)
+
+        # Extract model from multiple possible sources, in order of preference
+        session_model =
+          case Map.get(session, :usage) do
+            %{} = usage -> Map.get(usage, :model)
+            _ -> nil
+          end
+
+        model = session_model || Map.get(session, :model)
+        had_model? = not is_nil(Map.get(meta, :model))
+
+        # bd-au3xrq: the CLI's `init` event puts the session id on the usage map.
+        # Surface it into meta and stamp it onto the run the first time it lands,
+        # early in the run, so the on-disk JSONL is locatable even if the worker
+        # later dies without a clean usage row.
+        session_id =
+          case Map.get(session, :usage) do
+            %{} = usage -> Map.get(usage, :session_id)
+            _ -> nil
+          end
+
+        had_session_id? = not is_nil(Map.get(meta, :session_id))
+        {state, session_id} = reconcile_session_id(state, session_id)
+        meta = state.meta
+
+        # bd-9rdwe4: mirror the structured terminal result (#1017 gap G5) the
+        # same way model/session_id are already surfaced, so
+        # `record_run_finished/1` can stamp it onto the Run row without
+        # reaching into the session map directly.
+        usage = Map.get(session, :usage) || %{}
+
+        meta =
+          meta
+          |> Map.put(:output_lines, Enum.reverse(session.output_lines))
+          |> Map.put(:exit_status, session.exit_status)
+          |> maybe_put(:activity, new_activity)
+          |> maybe_put(:activity_at, Map.get(session, :activity_at))
+          |> maybe_put(:exited_at, session.exited_at)
+          |> maybe_put(:model, model)
+          |> maybe_put(:provider, Map.get(session, :provider))
+          |> maybe_put(:session_id, session_id)
+          # G18: the agent CLI's version — the one the stream reported, else
+          # the host binary's (`Wardmast.Agents.HarnessVersion`).
+          |> maybe_put(
+            :harness_version,
+            Map.get(usage, :harness_version) || Map.get(session, :harness_version)
+          )
+          # SI3: the image and CLI set a container or remote spawn ran in.
+          |> maybe_put(:image_ref, Map.get(session, :image_ref))
+          |> maybe_put(:image_fallback, Map.get(session, :image_fallback))
+          |> maybe_put(:cli_set, Map.get(session, :cli_set))
+          |> maybe_put(:result_subtype, Map.get(usage, :result_subtype))
+          |> maybe_put(:result_is_error, Map.get(usage, :result_is_error))
+          |> maybe_put(:result_message, Map.get(usage, :result_message))
+          # bd-25ivqe: the base command token of the most recent agy ERROR
+          # (headless-denial) tool step, stashed by
+          # `ClaudeSession.capture_steps/2` — read by `notes_gate_failure_reason/1`
+          # so a run that died because `:strict` denied a required command (e.g.
+          # `arb`) reports that concretely instead of the generic
+          # `:blank_notes_at_completion`.
+          |> maybe_put(:denied_command, Map.get(session, :denied_command))
+          # bd-7wymls: the full denied line, so the notes-gate escalation can
+          # show what was actually run and whether it was a bootstrap command.
+          |> maybe_put(:denied_command_line, Map.get(session, :denied_command_line))
+          # bd-buefg4: how many times the agy repeated-full-read detector fired.
+          |> maybe_put(
+            :reread_alerts,
+            case Wardmast.Worker.ClaudeSession.reread_alerts(session) do
+              0 -> nil
+              n -> n
+            end
+          )
+          # bd-1eb6fc: task ids from an agy `manage_task status` check whose
+          # last-known result was RUNNING — read by `on_claude_done/1` to note
+          # (not block) an `arb done` that fired while one was outstanding.
+          |> Map.put(
+            :async_tasks_running,
+            Wardmast.Worker.ClaudeSession.async_tasks_running(session)
+          )
+
+        new_state = %State{state | meta: meta}
+
+        if new_activity != old_activity do
+          broadcast_lifecycle(:updated, new_state)
+        end
+
+        if not had_session_id? and not is_nil(session_id) and not is_nil(new_state.run_id) do
+          backfill_run_fields(new_state.run_id, %{session_id: session_id}, new_state.task_id)
+        end
+
+        # Race-condition patch: if the worker already terminated (fail_now/complete_now
+        # fired) but model arrived late via a subsequent session event, write just the
+        # model column to the existing worker_runs row so it is never left NULL.
+        if not had_model? and not is_nil(model) and
+             new_state.state == :finished and
+             not is_nil(new_state.run_id) do
+          backfill_run_model(new_state.run_id, model, new_state.task_id)
+        end
+
+        new_state
+
+      _ ->
+        state
+    end
+  end
+
+  defp backfill_run_model(run_id, model, task_id) do
+    with {:ok, run} <- Ash.get(Wardmast.Workers.Run, run_id),
+         {:ok, _updated} <- Ash.update(run, %{model: model}, action: :update) do
+      :ok
+    else
+      {:error, reason} -> log_run_warning("backfill_model", task_id, reason)
+    end
+  rescue
+    e -> log_run_warning("backfill_model", task_id, e)
+  end
+
+  # bd-db0p38: archive this run's session JSONL on completion. Best-effort in
+  # the strongest sense — `SessionArchive.archive_run/2` never returns an
+  # error, and a run with no Claude session (workflow-mode, Gemini-driven) or
+  # whose file was already pruned is a logged *result*, not a failure. The
+  # redaction list is the run's own workspace secrets, resolved the same way
+  # `ClaudeSession` resolves them for the live emit path, plus every value the
+  # run's sessions redacted on that path (bd-akp9ae: a git token minted for the
+  # spawn is no workspace secret, and an agent that printed its env would
+  # otherwise leave it in the durable archive).
+  defp archive_session_jsonl(%State{} = state, run) do
+    {:ok, report} =
+      Wardmast.Worker.SessionArchive.archive_run(run,
+        redact_values:
+          Enum.uniq(
+            Wardmast.Worker.WorkerEnv.secret_values(state.task_id) ++ state.archive_redact
+          )
+      )
+
+    case report.status do
+      :ok ->
+        Logger.debug(
+          "Worker: archived session JSONL for task=#{state.task_id} run=#{run.id} " <>
+            "#{report.bytes_in}B -> #{report.bytes_out}B subagents=#{report.subagents}"
+        )
+
+      :no_session_file ->
+        Logger.warning(
+          "Worker: session JSONL already gone for task=#{state.task_id} run=#{run.id} " <>
+            "session=#{run.session_id} — nothing to archive"
+        )
+
+      _other ->
+        :ok
+    end
+
+    :ok
+  rescue
+    e -> log_run_warning("archive_session_jsonl", state.task_id, e)
+  end
+
+  # Generic best-effort field patch onto the run row: originally the on-disk
+  # session-JSONL coordinates (`session_id` / `config_dir`, bd-au3xrq), now
+  # also used for the bd-dzz6ly provenance fields reported post-spawn. Same
+  # swallow-and-log discipline as backfill_run_model — a DB hiccup must never
+  # crash the worker.
+  defp backfill_run_fields(run_id, fields, task_id) when is_map(fields) do
+    with {:ok, run} <- Ash.get(Wardmast.Workers.Run, run_id),
+         {:ok, _updated} <- Ash.update(run, fields, action: :update) do
+      :ok
+    else
+      {:error, reason} -> log_run_warning("backfill_fields", task_id, reason)
+    end
+  rescue
+    e -> log_run_warning("backfill_fields", task_id, e)
+  end
+
+  # bd-9rdwe4 (#1017 gap G5): persist the composed prompt this spawn carries,
+  # redacted through the SAME `Wardmast.Redaction.redact/2` choke-point that
+  # already protects transcripts (`Wardmast.Worker.ClaudeSession`'s
+  # `redact_line/2`), so a prompt persisted here is never a new leak surface.
+  # No-op when the spawn carried no prompt (a `:command` fixture that also
+  # skipped `:prompt` — tests) or `run_id` is nil (the Run row create failed;
+  # matches `open_output_log/1`'s same "no row to anchor to" rule).
+  defp persist_composed_prompt(%State{run_id: nil}, _session_config), do: :ok
+
+  defp persist_composed_prompt(%State{run_id: run_id, task_id: task_id}, session_config) do
+    case Map.get(session_config, :composed_prompt) do
+      prompt when is_binary(prompt) and prompt != "" ->
+        redacted =
+          Wardmast.Redaction.redact(prompt, Map.get(session_config, :redact_values) || [])
+
+        case Wardmast.Worker.PromptLog.write(run_id, redacted) do
+          :ok ->
+            backfill_run_fields(
+              run_id,
+              %{prompt_sha256: Wardmast.Worker.PromptLog.sha256(redacted)},
+              task_id
+            )
+
+          {:error, reason} ->
+            log_run_warning("persist_prompt", task_id, reason)
+        end
+
+      _ ->
+        :ok
+    end
+  rescue
+    e -> log_run_warning("persist_prompt", task_id, e)
+  end
+
+  # bd-9rdwe4: append a follow-up prompt (gate nudge, resume continue prompt)
+  # to the run's already-persisted prompt file, redacted the same way. No-op
+  # without a run_id — matches persist_composed_prompt/2's rule.
+  defp append_prompt(%State{run_id: nil}, _prompt, _session_config), do: :ok
+
+  defp append_prompt(%State{run_id: run_id, task_id: task_id}, prompt, session_config)
+       when is_binary(prompt) and prompt != "" do
+    redacted = Wardmast.Redaction.redact(prompt, Map.get(session_config, :redact_values) || [])
+
+    case Wardmast.Worker.PromptLog.append(run_id, redacted) do
+      :ok -> :ok
+      {:error, reason} -> log_run_warning("append_prompt", task_id, reason)
+    end
+  rescue
+    e -> log_run_warning("append_prompt", task_id, e)
+  end
+
+  defp append_prompt(_state, _prompt, _session_config), do: :ok
+
+  # The effective config root a spawn ran under: the value injected into this
+  # spawn's env — `CLAUDE_CONFIG_DIR` for Claude (workers isolate into
+  # `~/.cache/arbiter/worker-claude`), `HOME` for agy (bd-6nupvc / T9 — workers
+  # isolate into `~/.cache/arbiter/worker-agy`, see
+  # `Wardmast.Agents.Gemini.ConfigDir`) — else each provider's own inherited
+  # default. port_args.env is the pre-charlist binary-pair list built by
+  # `Wardmast.Worker.ClaudeSession.env_pairs/3`, which appends the caller/agent
+  # env AFTER the workspace's user-defined worker env — and the OS applies the
+  # list last-wins, the invariant `Wardmast.Worker.WorkerEnv` documents ("caller
+  # env always wins", naming CLAUDE_CONFIG_DIR as its example). So scan from the
+  # END: the first match from the front could be a workspace-level override that
+  # the child never actually runs under, which would send `locate/2` to a
+  # directory holding no session file and silently disable the fallback.
+  defp effective_config_dir(%{env: env}, provider)
+       when is_list(env) and provider in ["gemini", "qwen"] do
+    case env |> Enum.reverse() |> List.keyfind("HOME", 0) do
+      {_k, dir} when is_binary(dir) and dir != "" -> dir
+      _ -> inherited_home_dir()
+    end
+  end
+
+  # bd-agsn2b: a codex spawn's config root is its `$CODEX_HOME` (rollouts live
+  # under `<home>/sessions/...`). Same last-wins scan, then the CLI's own default.
+  defp effective_config_dir(%{env: env}, "codex") when is_list(env) do
+    case env |> Enum.reverse() |> List.keyfind("CODEX_HOME", 0) do
+      {_k, dir} when is_binary(dir) and dir != "" -> dir
+      _ -> Wardmast.Usage.CodexSessionFile.home_dir()
+    end
+  end
+
+  defp effective_config_dir(%{env: env}, _provider) when is_list(env) do
+    case env |> Enum.reverse() |> List.keyfind("CLAUDE_CONFIG_DIR", 0) do
+      {_k, dir} when is_binary(dir) and dir != "" -> dir
+      _ -> inherited_config_dir()
+    end
+  end
+
+  defp effective_config_dir(_port_args, provider) when provider in ["gemini", "qwen"],
+    do: inherited_home_dir()
+
+  defp effective_config_dir(_port_args, "codex"), do: Wardmast.Usage.CodexSessionFile.home_dir()
+  defp effective_config_dir(_port_args, _provider), do: inherited_config_dir()
+
+  defp inherited_config_dir do
+    case System.get_env("CLAUDE_CONFIG_DIR") do
+      dir when is_binary(dir) and dir != "" -> dir
+      _ -> Path.expand("~/.claude")
+    end
+  end
+
+  defp inherited_home_dir do
+    case System.get_env("HOME") do
+      dir when is_binary(dir) and dir != "" -> dir
+      _ -> System.user_home()
+    end
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # ---- terminal transitions ----------------------------------------------
+  #
+  # complete_now/2 and fail_now/2 hold the terminal side effects (DB write +
+  # broadcast/notify) in one place, shared by the public complete/2 + fail/2
+  # calls and the worker-completion (arb-done) path.
+
+  defp complete_now(%State{} = state, result) do
+    meta = if is_nil(result), do: state.meta, else: Map.put(state.meta, :result, result)
+    new_state = %State{state | state: :finished, outcome: :succeeded, waiting_on: nil, meta: meta}
+    record_run_finished(new_state)
+    notify_auth_hold_success(new_state)
+    broadcast_done(new_state)
+    new_state
+  end
+
+  defp park_transition(%Wardmast.Worker.StopReason{category: :spend_cap}), do: :park_spend_cap
+  defp park_transition(%Wardmast.Worker.StopReason{}), do: :park_suspended
+
+  # G19 / G18: `fail_now/2` for a policy park — a spend cap, or a suspended
+  # subject. Same teardown (kill the agent before the run is marked terminal, keep
+  # the worktree), but the page is the addressed `worker_stopped` escalation naming
+  # the cause rather than the generic `failed`.
+  defp park_now(%State{} = state, %Wardmast.Worker.StopReason{} = reason) do
+    state = terminate_live_sessions(state)
+    settle_pass_worktree(state)
+
+    Logger.warning(
+      "Worker: #{subordinate_label(state) || "worker"} for task=#{state.task_id} parked — " <>
+        Wardmast.Worker.StopReason.label(reason)
+    )
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Wardmast.Worker.StopReason.to_map(reason))
+
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
+    record_run_finished(new_state)
+    Wardmast.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
+    broadcast_lifecycle(:updated, new_state)
+    broadcast_worker_failed(new_state)
+    return_pass_ticket(new_state)
+    announce_phase(new_state)
+  end
+
+  # bd-bi5pn0: `Dispatch.dispatch/2` fails a just-registered `:starting` worker
+  # with a `%StopReason{}` (category `:spawn_failed`) when a post-`start_worker`
+  # step blows up. Stash the full classification in `meta[:stop_reason]`, same
+  # shape `fail_stopped/2` uses, so dashboards/tooling see a consistent
+  # structure regardless of which path failed the worker.
+  defp fail_now(%State{} = state, %Wardmast.Worker.StopReason{} = reason) do
+    # bd-7a0pi8: kill any still-live agent BEFORE marking the run terminal.
+    state = terminate_live_sessions(state)
+    settle_pass_worktree(state)
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Wardmast.Worker.StopReason.to_map(reason))
+
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
+    record_run_finished(new_state)
+    Wardmast.Messages.CoordinatorNotifier.failed(snapshot(new_state))
+    broadcast_worker_failed(new_state)
+    return_pass_ticket(new_state)
+    announce_phase(new_state)
+  end
+
+  defp fail_now(%State{} = state, reason) do
+    # bd-7a0pi8: kill any still-live agent BEFORE marking the run terminal.
+    state = terminate_live_sessions(state)
+    settle_pass_worktree(state)
+
+    meta = if is_nil(reason), do: state.meta, else: Map.put(state.meta, :failure_reason, reason)
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
+    record_run_finished(new_state)
+    Wardmast.Messages.CoordinatorNotifier.failed(snapshot(new_state))
+    broadcast_worker_failed(new_state)
+    return_pass_ticket(new_state)
+    announce_phase(new_state)
+  end
+
+  # bd-741sid: a fix or conflict pass that ends without finishing still leaves
+  # its ticket's PR open — back to Merging, so the ticket's Watchdog (restarted
+  # from the row if it is gone) decides what happens next: another bounded
+  # pass, or a park and a page.
+  defp return_pass_ticket(%State{meta: meta, task_id: task_id}) do
+    if pass?(meta), do: Wardmast.Tasks.PullRequest.back_to_merging(task_id)
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  # bd-4olwyg: a pass that ends — failed, or stopped from outside — must not leave
+  # its rebase or merge stopped part-way. A worktree left mid-rebase reads as
+  # detached (HEAD is), and that is how the incident's resume found "no
+  # preserved worktree" while the next pass's `attach` found one "on a
+  # different branch". Runs after the agent is dead, so nothing is still
+  # working in the tree. Best-effort.
+  defp settle_pass_worktree(%State{meta: meta}) do
+    if pass?(meta), do: _ = ConflictPassOutcome.settle_worktree(meta)
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  # bd-4olwyg: whether this pass delivered. Only a conflict pass has a verdict to
+  # check — its one deliverable is a push off the conflicting head — so every
+  # other run (and a fix pass) is `:resolved` here, as before.
+  defp pass_verdict(%State{meta: meta}) do
+    if role_from_meta(meta) == :conflict_resolver do
+      ConflictPassOutcome.verdict(meta)
+    else
+      :resolved
+    end
+  rescue
+    _ -> :resolved
+  end
+
+  defp unresolved_pass_meta(meta, summary) do
+    meta
+    |> Map.put(:failure_reason, {:conflict_unresolved, summary})
+    |> Map.put(:failure_summary, truncate_failure_summary(summary))
+  end
+
+  # bd-7a0pi8: a terminal failure must never leave a live agent behind. The
+  # commit-gate teardown (and the Driver's worktree reap that follows once it
+  # observes `:failed`) races the agent process otherwise: the orphaned agent
+  # keeps issuing commands in a cwd that `git worktree remove` has deleted out
+  # from under it, burning tokens and invisible to normal control until a human
+  # `worker_stop`s it. This runs INSIDE the worker's process, synchronously,
+  # before the run becomes finished `:failed` — and the Driver can only read that
+  # via a serialized `GenServer.call`, so the agent is provably dead before any
+  # worktree removal can begin. Ordering: SIGKILL the OS process → confirm exit
+  # → close the port.
+  #
+  # Erlang does NOT terminate a `:spawn_executable` port's OS process on
+  # `Port.close/1`, so the explicit SIGKILL is load-bearing, not belt-and-
+  # suspenders. Best-effort throughout: a kill hiccup must not crash teardown.
+  defp terminate_live_sessions(state, leave_to_node? \\ false)
+
+  defp terminate_live_sessions(%State{claude_sessions: sessions} = state, leave_to_node?)
+       when map_size(sessions) > 0 do
+    Enum.each(sessions, fn {port, session} ->
+      cond do
+        not is_nil(Map.get(session, :exit_status)) ->
+          :ok
+
+        # The node session monitors this Worker too and would read its death as
+        # "owner down: cancel the run". Say first that the run is left alone.
+        # bd-4p1vui: and record how far its stdout was processed, so a Worker
+        # adopting it after the restart delivers none of it twice (§10.4.5).
+        leave_to_node? and remote_handle?(port) ->
+          Wardmast.Worker.Executor.Node.abandon(port)
+          record_stdout_offset(state, session)
+
+        true ->
+          terminate_session_port(state, port)
+      end
+
+      # bd-6zm33r: `kill_tree` cannot reach what the agent backgrounded (already
+      # reparented), so stop the scope too. Idempotent if already reaped.
+      reap_scope(session)
+    end)
+
+    # bd-d2o3xb: killing the `podman` client does not reliably stop its
+    # container (design §6.4), so a container spawn is removed by name too.
+    # Idempotent, and a no-op for any other spawn. bd-dmcbos: this also removes
+    # its test-services pod, and runs with no live session too (the clause
+    # below), since a pod outlives the container (`--rm` removes only that).
+    teardown_container(state)
+  end
+
+  defp terminate_live_sessions(%State{} = state, _leave_to_node?), do: teardown_container(state)
+
+  defp remote_handle?({:remote, _}), do: true
+  defp remote_handle?(_port), do: false
+
+  defp record_stdout_offset(%State{run_id: run_id, task_id: task_id}, %{stdout_offset: offset})
+       when is_binary(run_id) and is_integer(offset),
+       do: backfill_run_fields(run_id, %{stdout_offset: offset}, task_id)
+
+  defp record_stdout_offset(_state, _session), do: :ok
+
+  # RW12 (docs/design/remote-workers.md §10.4): a run on a node does not stop with the
+  # primary. When the application is stopping, the supervisor shutting this Worker down
+  # is the primary going away, not the run ending: the node is not told to cancel it and
+  # its row is not written off as `interrupted` / "server shutdown". Both would end the
+  # run before the new primary boots, where `Nodes.Recovery` takes the work the node
+  # retains (the row names the node, `stamp_run_node/3`) and only then does the
+  # Reconciler resume the ticket. A Worker stopped for any other reason, or one whose
+  # session on the node already ended, is finalized as before.
+  defp leave_run_to_node?(reason, %State{claude_sessions: sessions}) do
+    terminate_outcome(reason) == :interrupted and reason != {:shutdown, @operator_stop} and
+      node_stopping?() and
+      Enum.any?(sessions, fn {port, session} ->
+        remote_handle?(port) and is_nil(Map.get(session, :exit_status))
+      end)
+  end
+
+  # A run on a node: ask the agent to remove the container by name. There is no
+  # local process to kill; the agent's fence stops it if the node is unreachable.
+  defp terminate_session_port(%State{}, {:remote, _} = handle),
+    do: Wardmast.Worker.Executor.Node.stop(handle)
+
+  defp terminate_session_port(%State{task_id: task_id}, port) do
+    os_pid =
+      case safe_port_os_pid(port) do
+        {:ok, pid} -> pid
+        _ -> nil
+      end
+
+    if is_integer(os_pid) do
+      # bd-bmmj4w: `OsProcess.kill_tree/1` enumerates the agent's descendants
+      # BEFORE killing it. The process actually holding the worktree open is
+      # usually not `claude` itself but what it spawned (`mix test`, `git`, ...);
+      # once the parent dies those are reparented to init and `pgrep -P` can no
+      # longer reach them, so they would outlive teardown and keep writing into a
+      # directory `CleanupWorktree` is about to remove.
+      case OsProcess.kill_tree(os_pid) do
+        [] ->
+          :ok
+
+        survivors ->
+          Logger.warning(
+            "Worker: task=#{task_id} agent os_pid(s) #{Enum.join(survivors, ",")} " <>
+              "still alive after SIGKILL during teardown"
+          )
+      end
+    end
+
+    # Close the port from its owner. A port that already closed on its own
+    # (the child exited between the exit_status check and here) has no info,
+    # so guard against the double-close ArgumentError.
+    if is_port(port) and not is_nil(Port.info(port)), do: Port.close(port)
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "Worker: task=#{task_id} terminate_session_port failed: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
+
+  defp safe_port_os_pid(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, pid} when is_integer(pid) -> {:ok, pid}
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  end
+
+  # bd-awi4nw: a stopped/dead worker detected via the closed port. Classify the
+  # stop from the exit status + captured output, fail the worker into an
+  # obviously-stalled state (not silent :active), and raise an addressed
+  # coordinator escalation naming the task + cause + remediation. Distinct from
+  # fail_now/2's generic "exit code N" notification: the StopReason carries the
+  # actionable classification (auth expiry, credit exhaustion, kill, …).
+  #
+  # bd-21bmdh: when the stop category is :auth_expired, count the death toward
+  # the provider's `Wardmast.Agents.AuthHold` streak. N consecutive deaths open
+  # the hold (which is what marks the CredentialWatchdog and refuses further
+  # dispatches); a single death is a retry — `Wardmast.Worker.AuthDeath` returns
+  # the task to Ready once the Driver sees this worker failed.
+  defp fail_stopped(%State{} = state, session) do
+    exit_status = Map.get(session, :exit_status)
+    output_lines = Enum.reverse(Map.get(session, :output_lines, []))
+
+    reason = refine_operator_wait(state, stop_reason_for(session, exit_status, output_lines))
+
+    # bd-8lq2g7: name the subordinate pass in the log line too — "worker for
+    # task=X stopped" reads as the task's own worker dying when it was a
+    # merge-queue fix pass / conflict resolver running alongside it.
+    Logger.warning(
+      "Worker: #{subordinate_label(state) || "worker"} for task=#{state.task_id} stopped — " <>
+        Wardmast.Worker.StopReason.label(reason)
+    )
+
+    if reason.category == :auth_expired do
+      notify_auth_hold(state, reason)
+    end
+
+    log_remote_stream_tail(state, session, reason)
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Wardmast.Worker.StopReason.to_map(reason))
+
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
+    record_run_finished(new_state)
+    notify_stopped(new_state, reason)
+    broadcast_lifecycle(:updated, new_state)
+    broadcast_worker_failed(new_state)
+    return_pass_ticket(new_state)
+    new_state
+  end
+
+  # #1299: a run that stopped to wait on the operator is parked on what it asked
+  # for. `worker_stopped` would record `run_crashed` over the
+  # `:permission_requested` cause the request already raised, and that cause is
+  # what tells the operator a resume cannot work until they act.
+  defp notify_stopped(%State{} = state, %{category: :awaiting_operator} = reason) do
+    case Wardmast.Tasks.Attention.raise_cause(
+           state.task_id,
+           :permission_requested,
+           reason.summary
+         ) do
+      {:ok, _} ->
+        :ok
+
+      {:error, why} ->
+        Logger.warning(
+          "Worker: task=#{state.task_id} could not park on its permission request: #{inspect(why)}"
+        )
+    end
+  end
+
+  defp notify_stopped(%State{} = state, reason),
+    do: Wardmast.Messages.CoordinatorNotifier.worker_stopped(snapshot(state), reason)
+
+  # #1299: an `:exited_without_done` whose own ticket run has permission requests
+  # pending is not an early quit: the worker asked and stopped to wait. Only the
+  # ticket's author run (not a reviewer or a fix/conflict pass) is refined.
+  defp refine_operator_wait(%State{} = state, %{category: :exited_without_done} = reason) do
+    with true <- ticket_run?(state),
+         [_ | _] = pending <- Wardmast.Tasks.Permissions.pending(%{id: state.task_id}) do
+      Wardmast.Worker.StopReason.awaiting_operator(pending)
+    else
+      _ -> reason
+    end
+  rescue
+    _ -> reason
+  end
+
+  defp refine_operator_wait(_state, reason), do: reason
+
+  # bd-5uqs30: a run on a node that exits cleanly without `arb done` is the one stop
+  # whose cause lives in its stream (a cluster canary lost the sentinel with the agent's
+  # final message in the transcript), so say how much stdout this session took and what
+  # its last lines were. Lines are the redacted ones the session already kept.
+  defp log_remote_stream_tail(
+         %State{task_id: task_id},
+         %{stdout_offset: bytes} = session,
+         %{category: :exited_without_done}
+       )
+       when is_integer(bytes) do
+    tail =
+      session
+      |> Map.get(:output_lines, [])
+      |> Enum.take(3)
+      |> Enum.reverse()
+      |> Enum.map(&String.slice(&1, 0, 200))
+
+    Logger.warning(
+      "Worker: task=#{task_id} remote stdout at exit: stdout_bytes=#{bytes} last_lines=#{inspect(tail)}"
+    )
+  end
+
+  defp log_remote_stream_tail(_state, _session, _reason), do: :ok
+
+  # Resolve the agent adapter from the worker's routing config (set by Dispatch
+  # via Worker.report/3) and record the death on the AuthHold. Best-effort —
+  # missing routing info or an unknown provider just skips the notification.
+  defp notify_auth_hold(%State{} = state, reason) do
+    case routed_adapter(state) do
+      nil -> :ok
+      adapter -> Wardmast.Agents.AuthHold.record_death(adapter, reason)
+    end
+  end
+
+  # bd-21bmdh: a completed run proved the provider's credential works, which is
+  # what makes the AuthHold's streak *consecutive* deaths.
+  defp notify_auth_hold_success(%State{} = state) do
+    case routed_adapter(state) do
+      nil -> :ok
+      adapter -> Wardmast.Agents.AuthHold.record_success(adapter)
+    end
+  end
+
+  defp routed_adapter(%State{meta: meta}) do
+    provider = meta && (Map.get(meta, :routing_config) || %{}) |> Map.get(:provider)
+
+    adapter =
+      if is_binary(provider) do
+        try do
+          Wardmast.Agents.adapters()[String.to_existing_atom(provider)]
+        rescue
+          _ -> nil
+        end
+      end
+
+    if is_atom(adapter), do: adapter
+  end
+
+  defp exit_grace_ms do
+    Application.get_env(:wardmast, :worker_exit_grace_ms, @exit_grace_ms)
+  end
+
+  @doc """
+  True once `init:stop/0` has begun — which is what the BEAM's SIGTERM handler
+  calls, before a single application is taken down. Tests can't stop the node,
+  so `config :wardmast, :worker_node_stopping_override` stands in for it.
+
+  Shared with `Wardmast.Worker.Driver` (bd-146u20), which must not fail a worker
+  over a Machine that died because the node is going down.
+  """
+  @spec node_stopping?() :: boolean()
+  def node_stopping? do
+    case Application.get_env(:wardmast, :worker_node_stopping_override) do
+      override when is_boolean(override) -> override
+      _ -> match?({:stopping, _}, :init.get_status())
+    end
+  end
+
+  # bd-1pdyov: is a Claude session OTHER than the one that just exited still
+  # running? Its port has not yet reported an exit_status. A continuation /
+  # resume session opened by the commit-gate nudge (respawn_with_commit_nudge/2)
+  # is exactly this — the primary port exits while the continuation is mid-run.
+  # While one is live the task run is not over, so a per-port stop check must
+  # not fail it.
+  defp other_session_live?(%State{claude_sessions: sessions}, exited_port) do
+    Enum.any?(sessions, fn {port, session} ->
+      port != exited_port and is_nil(Map.get(session, :exit_status))
+    end)
+  end
+
+  # bd-1pdyov: did any session in this run (primary or continuation/resume)
+  # signal `arb done`? Keys off the :done_seen flag stamped in the
+  # __claude_session_done__ handler, which fires ONLY for the assistant-scoped,
+  # word-bounded marker (claude_session.ex emits the done message exclusively for
+  # assistant text / the raw-line fallback, never for tool calls or tool
+  # results). Scanning the raw output buffer instead would re-admit the mid-task
+  # false positive the live detector guards against (a worker that cats/echoes
+  # "arb done"), so we deliberately rely on the already-scoped signal.
+  defp run_signalled_done?(%State{meta: meta}), do: Map.get(meta || %{}, :done_seen, false)
+
+  defp mark_done_seen(%State{meta: meta} = state),
+    do: %State{state | meta: Map.put(meta || %{}, :done_seen, true)}
+
+  # bd-1eb6fc: `arb done` fired while the worker's own last `manage_task
+  # status` check (synced into meta[:async_tasks_running] by
+  # ClaudeSession.track_async_tasks/2) still read a background task as
+  # RUNNING — e.g. a `mix test`/`mix precommit` agy backgrounded and never
+  # confirmed finished before answering. Deliberately does NOT block or fail
+  # the completion: Wardmast cannot tell a task the worker still depends on
+  # from one it correctly decided to abandon (a scratch `sleep` command, a
+  # speculative build it gave up on), and refusing completion on a false
+  # positive would strand a real, finished task. Record it on the run instead
+  # so it's visible without being silently treated as evidence the task
+  # actually finished.
+  defp note_tasks_running_at_done(%State{meta: meta, task_id: task_id} = state) do
+    case Map.get(meta || %{}, :async_tasks_running, []) do
+      [] ->
+        state
+
+      running ->
+        Logger.warning(
+          "Worker signalled `arb done` for task=#{task_id} while #{length(running)} " <>
+            "background task(s) were still RUNNING per its own last manage_task status " <>
+            "check: #{Enum.join(running, ", ")}"
+        )
+
+        %State{state | meta: Map.put(meta, :failure_summary, tasks_running_summary(running))}
+    end
+  end
+
+  defp tasks_running_summary(running) do
+    ("arb done signalled while background task(s) were still RUNNING per the worker's " <>
+       "own last status check: " <> Enum.join(running, ", "))
+    |> truncate_failure_summary()
+  end
+
+  # Handle the worker's "arb done" marker. Before bd-7qq81g this closed the task
+  # directly, bypassing the merger entirely — branches never reached the target
+  # line. Completion now routes through the configured merger:
+  #
+  #   * When the worker knows its branch (a worktree was provisioned) we open
+  #     the MR / run the merge via the same path open_mr/5 uses. For the default
+  #     Direct strategy this merges --no-ff into the target branch synchronously,
+  #     hands the PR to the ticket, and the ticket's Watchdog takes it from
+  #     there. A merge failure surfaces as a :failure_reason rather than
+  #     silently closing the task as done.
+  #   * With no branch (ad-hoc runs / unconfigured repo / no worktree) there is
+  #     nothing to integrate. For review_only workers this is the expected path
+  #     (coordinator-dispatched reviewers have no worktree). When the reviewer
+  #     produced an APPROVE verdict, trigger the Watchdog on the task's pr_ref so
+  #     the PR is merged automatically (bd-4ji58d). For REQUEST_CHANGES or no
+  #     parseable verdict, fail the worker so the task stays :active for a
+  #     fix-pass rather than silently closing with the PR unreviewed. Non-review
+  #     workers with no branch complete directly as before.
+  defp on_claude_done(%State{} = state) do
+    %State{meta: meta} = state
+
+    cond do
+      # bd-bg87oz: a pass on a node says `arb done` while its container is still
+      # running; its checkout reaches the home clone with the node's final upload,
+      # which precedes the exit. Wait for the exit (`on_agent_stopped/3` re-enters
+      # here) rather than push and judge a clone that is as of the last snapshot.
+      pass?(meta) and remote_session_live?(state) ->
+        wait_for_remote_pass_exit(state)
+
+      pass?(meta) and remote_checkout_failed?(state) ->
+        fail_remote_checkout(state)
+
+      pass?(meta) ->
+        finish_pass(note_tasks_running_at_done(state))
+
+      no_pr_type?(meta) and not review_only?(meta) ->
+        complete_no_pr(state)
+
+      true ->
+        state = note_tasks_running_at_done(state)
+        on_claude_done_reviewable(state, state.meta)
+    end
+  end
+
+  # bd-9s9dqz: completion of a no-PR run. `:research` owes a findings write-up,
+  # so it goes through the notes gate; `:task` is an operational action with no
+  # deliverable beyond the agent reporting it done, so it completes directly.
+  defp complete_no_pr(%State{meta: meta} = state) do
+    if findings_type?(meta) do
+      case notes_gate(state) do
+        :ok -> complete_unless_unperformed(state)
+        {:gate, kind} -> handle_notes_gate(state, kind)
+      end
+    else
+      complete_now(note_tasks_running_at_done(state), :claude_done)
+    end
+  end
+
+  # bd-8r2iat: non-blank notes pass the notes gate, but notes that say the work
+  # was NOT performed (no tools in the sandbox, "needs re-dispatch") are not
+  # findings. Park for the coordinator with the reason instead of closing
+  # completed and silently dropping the work.
+  defp complete_unless_unperformed(%State{task_id: task_id} = state) do
+    with {:ok, notes} when is_binary(notes) <- fetch_task_notes(task_id),
+         true <- Wardmast.Worker.UnperformedWork.declared?(notes) do
+      reason = Wardmast.Worker.UnperformedWork.reason(notes)
+
+      escalate_notes_gate(
+        state,
+        "bd-8r2iat: research task #{task_id} signalled `arb done` but its notes say the " <>
+          "work was not performed: #{reason}\n\nThe ticket is parked, not completed. " <>
+          "Re-dispatch it with the tools it needs (or do the work directly).",
+        "Work not performed on research directive (#{task_id})"
+      )
+
+      fail_now(state, "work not performed: #{reason}")
+    else
+      _ -> complete_now(note_tasks_running_at_done(state), :claude_done)
+    end
+  end
+
+  # bd-741sid: a CI fix pass or a conflict pass — an ordinary run on its ticket
+  # whose deliverable is a push to the PR's existing branch.
+  defp pass?(meta), do: role_from_meta(meta) in [:fix_pass, :conflict_resolver]
+
+  defp remote_session_live?(%State{claude_sessions: sessions}) do
+    Enum.any?(sessions, fn {handle, session} ->
+      remote_handle?(handle) and is_nil(Map.get(session, :exit_status))
+    end)
+  end
+
+  # The node's last upload of the run's checkout failed (it says so in its exit
+  # report): the home clone is as of an earlier snapshot, so the pass has nothing
+  # trustworthy to push or judge.
+  defp remote_checkout_failed?(%State{claude_sessions: sessions}) do
+    Enum.any?(sessions, fn {handle, session} ->
+      remote_handle?(handle) and
+        match?(%{checkout_failed?: true}, Map.get(session, :remote_outcome))
+    end)
+  end
+
+  defp fail_remote_checkout(%State{task_id: task_id} = state) do
+    Logger.warning(
+      "Worker: the node's final checkout of the pass on task=#{task_id} did not come back; " <>
+        "failing the pass instead of pushing a stale clone"
+    )
+
+    fail_now(state, :remote_checkout_failed)
+  end
+
+  # `arb done` was seen on a pass whose node run has not exited yet. The agent is on its
+  # way out; if it is not gone after the grace, ask the node to stop it, which
+  # uploads the checkout all the same.
+  defp wait_for_remote_pass_exit(%State{claude_sessions: sessions} = state) do
+    for {handle, session} <- sessions,
+        remote_handle?(handle),
+        is_nil(Map.get(session, :exit_status)) do
+      Process.send_after(self(), {:__remote_pass_exit_grace__, handle}, remote_pass_grace_ms())
+    end
+
+    state
+  end
+
+  defp remote_pass_grace_ms,
+    do: Application.get_env(:wardmast, :remote_pass_exit_grace_ms, 60_000)
+
+  # bd-741sid: the pass is done and its fix is on the PR's branch. The ticket
+  # goes back to Merging and the run ends; the ticket's Watchdog, which kept
+  # watching the PR, takes it from there. Not `complete_now/2`: that announces
+  # the ticket done and hands the PR to the MergeQueue — a second merge driver
+  # on a PR the Watchdog already owns.
+  #
+  # bd-4olwyg: a conflict pass is only finished if it delivered — see
+  # `ConflictPassOutcome.verdict/1`. One that signals done mid-rebase, or without
+  # pushing, is failed with the unresolved state named, so the Watchdog counts
+  # it as the attempt that did not work instead of reading the PR as resolved.
+  defp finish_pass(%State{meta: meta} = state) do
+    # bd-28c6qo: a CI fix pass commits locally without pushing; the pre-push check
+    # runs before the commit is pushed to origin. A green or unset check pushes and
+    # delivers the pass; a red check bounces back to the same session with the output.
+    # Conflict passes are not checked.
+    if role_from_meta(meta) == :fix_pass do
+      case begin_prepush_check(state, :fix_pass) do
+        :proceed -> push_and_deliver_fix_pass(state)
+        {:started, new_state} -> new_state
+      end
+    else
+      if host_pushes_conflict_pass?(state),
+        do: push_and_deliver_conflict_pass(state),
+        else: deliver_pass(state)
+    end
+  end
+
+  defp host_pushes_conflict_pass?(%State{meta: meta}),
+    do: role_from_meta(meta) == :conflict_resolver and Map.get(meta, :conflict_host_push) == true
+
+  # bd-19skda: a conflict pass in a podman container cannot push (no forge
+  # credential or host key), so the host force-with-lease pushes the rebased
+  # branch after `arb done`, from the clone, expecting the PR head the pass
+  # started from. A pass that ended mid-rebase is not pushed — the verdict fails
+  # it with the unmerged state named. Once G16 gives the container real
+  # credentials the pass pushes itself and this step is a harmless no-op.
+  defp push_and_deliver_conflict_pass(%State{meta: meta, task_id: task_id} = state) do
+    worktree = Map.get(meta, :worktree_path)
+    branch = Map.get(meta, :conflict_resolver_branch)
+    start_head = Map.get(meta, :conflict_start_head)
+
+    cond do
+      not (is_binary(worktree) and File.dir?(worktree) and is_binary(branch)) ->
+        deliver_pass(state)
+
+      Wardmast.Worker.Worktree.in_progress_operation(worktree) != nil ->
+        deliver_pass(state)
+
+      true ->
+        sync_back_after_run(state)
+
+        push_opts =
+          [branch: branch] ++
+            if(is_binary(start_head), do: [force_with_lease: start_head], else: []) ++
+            ci_skip_opts(meta)
+
+        with {:ok, push_opts} <- host_push_opts(state, nil, push_opts),
+             {:ok, _} <- Wardmast.Worker.Worktree.push(worktree, push_opts) do
+          record_pushed_head(worktree, task_id, branch)
+          deliver_pass(state)
+        else
+          {:error, reason} ->
+            Logger.warning(
+              "Worker: host push for conflict pass failed on task=#{task_id}: #{inspect(reason)}"
+            )
+
+            fail_now(state, {:push_failed, reason})
+        end
+    end
+  end
+
+  defp deliver_pass(%State{} = state) do
+    case pass_verdict(state) do
+      :resolved ->
+        note_ci_skipped_head(state)
+        finish_delivered_pass(state)
+
+      {:unresolved, summary} ->
+        fail_unresolved_pass(state, summary)
+    end
+  end
+
+  defp fail_unresolved_pass(%State{} = state, summary) do
+    Logger.warning(
+      "Worker: #{subordinate_label(state) || "pass"} for task=#{state.task_id} signalled done " <>
+        "but did not deliver: #{summary}"
+    )
+
+    fail_now(
+      %State{state | meta: unresolved_pass_meta(state.meta, summary)},
+      {:conflict_unresolved, summary}
+    )
+  end
+
+  defp finish_delivered_pass(%State{} = state) do
+    finished = %State{
+      state
+      | state: :finished,
+        outcome: :succeeded,
+        waiting_on: nil,
+        step_started_at: DateTime.utc_now(),
+        meta: Map.put(state.meta, :result, :pass_finished)
+    }
+
+    record_run_finished(finished)
+    notify_auth_hold_success(finished)
+
+    case Wardmast.Tasks.PullRequest.back_to_merging(state.task_id) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Worker: #{subordinate_label(state) || "pass"} for task=#{state.task_id} finished " <>
+            "but the ticket could not go back to Merging: #{inspect(reason)}"
+        )
+    end
+
+    send(self(), :__run_finished__)
+    announce_phase(finished)
+  end
+
+  defp on_claude_done_reviewable(%State{} = state, meta) do
+    # bd-b6noq9: before anything looks at the branch, check the workspace is
+    # still on disk. `commit_gate/1` gates on `File.dir?(worktree)` and fails
+    # OPEN when it is gone, so a run whose worktree was deleted mid-session
+    # used to sail past the gate into the review gate / merger and fail there
+    # as a generic "merge failed" page. Catch it here and name it.
+    case destroyed_workspace(state) do
+      nil -> on_claude_done_untampered(state, meta)
+      {kind, path} -> fail_workspace_destroyed(state, kind, path)
+    end
+  end
+
+  # bd-6t7u81: before any host-side git (the commit gate, the ReviewGate's
+  # diff, the merger) runs in the checkout, the worker's container is gone and
+  # the clone's `.git` is the one the host made. A worker that renamed it and
+  # put its own in place has the original put back and the run fails: its tree
+  # is never routed on to review or merge.
+  defp on_claude_done_untampered(%State{} = state, meta) do
+    # bd-9ss153: the agent was told `arb done` and is exiting; let the container
+    # finish so its real exit status (0) is what the port reports, not the 137
+    # of a `--time 0` SIGKILL. A container that outlives the grace is killed.
+    _ =
+      Wardmast.Worker.ContainerSpawn.stop(meta && Map.get(meta, :claude_spawn),
+        grace_ms: @container_exit_grace_ms
+      )
+
+    case Wardmast.Worker.PrivateClone.settle(meta && Map.get(meta, :worktree_path)) do
+      :ok -> on_claude_done_live_workspace(state, meta)
+      {:error, {:tampered, why}} -> fail_tampered_clone(state, why)
+    end
+  end
+
+  defp fail_tampered_clone(%State{} = state, why) do
+    path = state.meta.worktree_path
+    reason = Wardmast.Worker.StopReason.tampered_clone(path, why)
+
+    Logger.error(
+      "Worker: task=#{state.task_id} replaced the .git of #{path} (#{why}); " <>
+        "failing + escalating (bd-6t7u81)"
+    )
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Wardmast.Worker.StopReason.to_map(reason))
+
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
+    record_run_finished(new_state)
+    Wardmast.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
+    broadcast_lifecycle(:updated, new_state)
+    broadcast_worker_failed(new_state)
+    new_state
+  end
+
+  defp on_claude_done_live_workspace(%State{} = state, meta) do
+    case mergeable_branch(meta) do
+      nil ->
+        cond do
+          review_only?(meta) ->
+            route_reviewer_completion(state)
+
+          # bd-7pe74i: a reviewable code directive (bug/feature/chore/epic/
+          # decision) is dispatched WITH a per-task worktree — Dispatch only
+          # skips provisioning for `:task` types. Reaching `arb done` with no
+          # mergeable branch therefore means the worktree was never provisioned
+          # (repo mapping missing, an explicit `provision_worktree: false`, or a
+          # dispatch-time race): the worker produced nothing to integrate.
+          #
+          # Completing here is the silent-task-loss bug: complete_now/2
+          # broadcasts {:worker_done}, the workspace MergeQueue enqueues the
+          # task, and on the :direct strategy `do_enqueue` closes the task as
+          # :done on enqueue (no PR, no commit). The task reaches :closed via a
+          # worker with zero deliverable — violating the invariant that a task
+          # only closes on a real completion or an explicit close. Refuse: fail
+          # + escalate and leave the task open for re-dispatch.
+          reviewable_code_type?(meta) ->
+            fail_missing_worktree(state)
+
+          # A ReviewGate fix round has no branch of its own (the gate pushes it),
+          # but the repo's pre-push recipe still guards that push.
+          revise_round?(meta) ->
+            finish_revise_round(state)
+
+          # Ad-hoc / unconfigured runs carry no `:issue_type` in meta (they were
+          # started directly, not via Dispatch, so there was never a worktree to
+          # provision and nothing to lose). Keep the legacy direct-complete.
+          true ->
+            complete_now(state, :claude_done)
+        end
+
+      branch ->
+        # Skip commit gate for review-only workers (reviewers make no commits
+        # by design) — reviewers operate on a pre-existing branch and analyze
+        # diffs without authoring code.
+        if review_only?(meta) do
+          route_completion(state, branch)
+        else
+          # bd-ofql8k: before routing to the ReviewGate (which diffs the per-task
+          # branch's COMMITTED history) or the merger, check that the worktree is
+          # actually in a reviewable state — clean tree AND ≥1 commit ahead of the
+          # target. The repeated failure mode this guards against: the worker
+          # edits files correctly but never `git commit`s them; HEAD stays at the
+          # base branch with the work sitting uncommitted in the worktree; the
+          # reviewer diffs `base..HEAD`, sees empty, and concludes "no code
+          # exists" — sitting on the uncommitted changes and ignoring them.
+          run_commit_gate(state, branch)
+        end
+    end
+  end
+
+  # A fix round the ReviewGate launched carries where it works
+  # (`revise_worktree` / `revise_branch`), the head it started from and the
+  # workspace whose recipe applies; none of these are the `:worktree_path` /
+  # `:branch` keys that make a run mergeable.
+  defp revise_round?(meta),
+    do: is_map(meta) and is_binary(Map.get(meta, :revise_worktree))
+
+  # Run the recipe only when the round committed something to push: a rebuttal
+  # round leaves HEAD where the reviewer saw it and has nothing to check.
+  defp finish_revise_round(%State{meta: meta} = state) do
+    head = Wardmast.Worker.Worktree.head_sha(Map.get(meta, :revise_worktree))
+
+    if is_binary(head) and head != Map.get(meta, :revise_base_head) do
+      case begin_prepush_check(state, :revise) do
+        :proceed -> complete_now(state, :claude_done)
+        {:started, new_state} -> new_state
+      end
+    else
+      complete_now(state, :claude_done)
+    end
+  end
+
+  defp run_commit_gate(%State{} = state, branch) do
+    case commit_gate(state) do
+      :ok ->
+        # bd-28c6qo: the configured pre-push check runs once the tree is
+        # committed and before anything routes on to the review gate / merger
+        # (the push + PR). Unset config: straight through.
+        case begin_prepush_check(state, :main) do
+          :proceed -> proceed_after_gate(state, branch)
+          {:started, new_state} -> new_state
+        end
+
+      {:gate, reason} ->
+        handle_commit_gate(state, branch, reason)
+    end
+  end
+
+  # bd-7pe74i: a reviewable code directive that Dispatch provisions a worktree
+  # for. Dispatch stamps `:issue_type` into meta and only skips worktree
+  # provisioning for the no-PR types (see Dispatch.maybe_provision_worktree/2), so
+  # any other type is expected to carry a per-task branch by completion.
+  # An ad-hoc worker started outside Dispatch has no `:issue_type` in meta and is
+  # NOT treated as a code directive here (nothing was ever provisioned for it).
+  defp reviewable_code_type?(meta) do
+    case meta && Map.get(meta, :issue_type) do
+      nil -> false
+      type -> not Wardmast.Tasks.Issue.no_pr_type?(type)
+    end
+  end
+
+  # bd-7pe74i: the worker signalled done on a code directive but no worktree was
+  # ever provisioned, so there is no branch to integrate and no deliverable. Do
+  # NOT complete (which would broadcast {:worker_done} and let the MergeQueue
+  # close the task) — fail the worker and raise an addressed coordinator escalation,
+  # exactly like a stopped-subprocess failure. The task stays open: the Driver's
+  # :failed path leaves the task :active, and no {:worker_done} is ever
+  # broadcast, so the task is never silently closed.
+  defp fail_missing_worktree(%State{} = state) do
+    reason = %Wardmast.Worker.StopReason{
+      category: :missing_worktree,
+      summary:
+        "worker signalled `arb done` but no per-task branch/worktree was provisioned — " <>
+          "there is nothing to integrate, so the directive produced no deliverable",
+      remediation:
+        "Do NOT treat this as complete: the task is left open, NOT closed. Investigate why " <>
+          "worktree provisioning was skipped (repo mapping missing, `provision_worktree: false`, " <>
+          "or a dispatch-time race under a concurrency window), then re-dispatch the task.",
+      exit_status: nil,
+      signal: nil
+    }
+
+    Logger.warning(
+      "Worker: task=#{state.task_id} signalled done with no mergeable branch " <>
+        "(worktree never provisioned) — refusing to close; failing + escalating (bd-7pe74i)"
+    )
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Wardmast.Worker.StopReason.to_map(reason))
+
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
+    record_run_finished(new_state)
+    Wardmast.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
+    broadcast_lifecycle(:updated, new_state)
+    broadcast_worker_failed(new_state)
+    new_state
+  end
+
+  # bd-b6noq9 (#1930): a workspace that was provisioned and then deleted out
+  # from under a live run. Returns `{:worktree | :repo, path}` for the missing
+  # directory, or `nil` when the workspace is intact — or when there never was
+  # one, which is the DIFFERENT condition `fail_missing_worktree/1` reports as
+  # `:missing_worktree`. A path only counts as destroyed if meta declares it,
+  # so ad-hoc runs that never provisioned anything are untouched.
+  defp destroyed_workspace(%State{meta: meta}) do
+    meta = meta || %{}
+
+    cond do
+      missing_dir?(meta, :worktree_path) -> {:worktree, Map.get(meta, :worktree_path)}
+      missing_dir?(meta, :repo_path) -> {:repo, Map.get(meta, :repo_path)}
+      true -> nil
+    end
+  end
+
+  defp missing_dir?(meta, key) do
+    case Map.get(meta, key) do
+      path when is_binary(path) and path != "" -> not File.dir?(path)
+      _ -> false
+    end
+  end
+
+  # The run's workspace is gone. Mirror fail_missing_worktree/1: mark the
+  # worker :failed, leave the task open (no {:worker_done} broadcast, so the
+  # MergeQueue can never enqueue or close it), and raise an addressed
+  # coordinator escalation — but with the `:workspace_destroyed` category, so
+  # the condition is recognisable instead of arriving as free-text prose.
+  defp fail_workspace_destroyed(%State{} = state, kind, path) do
+    reason = Wardmast.Worker.StopReason.workspace_destroyed(kind, path)
+
+    Logger.error(
+      "Worker: task=#{state.task_id} workspace destroyed mid-run — " <>
+        "#{kind} #{path} no longer exists; failing + escalating (bd-b6noq9)"
+    )
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Wardmast.Worker.StopReason.to_map(reason))
+
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
+    record_run_finished(new_state)
+    Wardmast.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
+    broadcast_lifecycle(:updated, new_state)
+    broadcast_worker_failed(new_state)
+    new_state
+  end
+
+  defp route_completion(%State{meta: meta} = state, branch) do
+    if review_required?(state) do
+      # Standing order: don't merge unreviewed work. Wait on the review gate
+      # and let a distinct reviewer worker judge the diff first. The merge
+      # fires only on review_gate_verdict/2 :approve.
+      enter_review_gate(state, branch)
+    else
+      merge_branch(state, branch, merge_opts_from_meta(meta, %{}))
+    end
+  end
+
+  # ---- coordinator-dispatched reviewer completion (bd-4ji58d) ---------------
+
+  # For review_only workers with no branch (the coordinator-dispatch path via
+  # `worker_review` / `arb worker review`): parse the APPROVE / REQUEST_CHANGES
+  # verdict from the reviewer's captured output and act on it.
+  #
+  # APPROVE → complete the worker so the Driver closes the task. The review has
+  # already been posted to the forge by the reviewer; a coordinator-dispatched
+  # reviewer must NEVER merge the PR (bd-ddtbhb). The full ReviewGate merge
+  # path (fleet-authored work) is a separate path and is unaffected.
+  #
+  # REQUEST_CHANGES / :no_verdict → fail the worker (not complete it) so the
+  # Driver does NOT close the task. The task stays :active for the
+  # coordinator to dispatch a fix-pass. Mirrors park_rejected/4 from the full
+  # review_gate path.
+  #
+  # bd-btcyn6: when no VERDICT sentinel is found in stdout (e.g. the reviewer
+  # submitted via the adapter/CLI without printing the required sentinel), fall
+  # back to querying the merger adapter for the PR's submitted review state. This
+  # treats the adapter submission as the source of truth and avoids landing
+  # INCONCLUSIVE when the review genuinely went out.
+  #
+  # bd-6dxit2: `meta[:output_lines]` is ClaudeSession's most-recent-1000-lines
+  # buffer, not the whole transcript. A reviewer that prints its VERDICT and then
+  # produces more than 1000 further lines of findings evicts its own sentinel and
+  # the review — a real verdict with a real findings list — is discarded as
+  # INCONCLUSIVE. (That eviction is a real hazard on this path but was NOT the
+  # cause of the reported false negatives; see `ReviewGate.parse_verdict/3` for
+  # what the measurements actually showed.) So parse via `parse_verdict/3`, which
+  # re-reads the uncapped durable transcript before conceding and logs which
+  # source saw what. The adapter fallback below is unchanged and still runs when
+  # neither source has a verdict.
+  defp route_reviewer_completion(%State{} = state) do
+    output_lines = Map.get(state.meta || %{}, :output_lines, [])
+
+    {verdict, source} =
+      Wardmast.Worker.ReviewGate.parse_verdict(
+        output_lines,
+        state.run_id,
+        "review_only task=#{state.task_id}"
+      )
+
+    case verdict do
+      {:approve, findings} ->
+        route_approve_verdict(state, findings)
+
+      {:request_changes, findings} ->
+        route_request_changes_verdict(
+          state,
+          request_changes_findings(state, output_lines, source, findings)
+        )
+
+      :no_verdict ->
+        case derive_verdict_from_adapter(state) do
+          {:approve, _} ->
+            Logger.info(
+              "Worker: review_only task=#{state.task_id}: no VERDICT sentinel in stdout; " <>
+                "derived APPROVE from adapter-submitted review"
+            )
+
+            trigger_watchdog_on_approval(state)
+
+          {:request_changes, findings} ->
+            Logger.info(
+              "Worker: review_only task=#{state.task_id}: no VERDICT sentinel in stdout; " <>
+                "derived REQUEST_CHANGES from adapter-submitted review"
+            )
+
+            route_request_changes_verdict(state, adapter_findings(findings))
+
+          :no_verdict ->
+            # bd-9zuvbh: the coordinator-dispatched `worker_review` twin of the
+            # ReviewGate's own inconclusive terminal. Same shape, same reason
+            # atom (`:review_gate_inconclusive`), same truth — no verdict was
+            # produced, so nobody has found a problem with the work — so it
+            # parks rather than minting another failed run. Left un-parked it
+            # would keep producing exactly the outcome this phase is quantified
+            # on, muddying the cost accounting the park is meant to stop.
+            park_rejected(
+              state,
+              :no_verdict,
+              "Reviewer produced no parseable VERDICT line.",
+              :inconclusive
+            )
+        end
+    end
+  end
+
+  # bd-2ujj2p: pick the findings a fix round is briefed with. Findings the
+  # reviewer itself printed (severity tags or file:line) are this run's review;
+  # the PR holds every earlier round's reviews too, so it is only consulted when
+  # stdout carries no concrete findings (a review posted via a tool call leaves
+  # just narration there). Even then only the newest CHANGES_REQUESTED review is
+  # used. Last resort: whatever text `recover_findings` accepts.
+  defp request_changes_findings(%State{} = state, output_lines, source, findings) do
+    recovered =
+      Wardmast.Worker.ReviewGate.recover_findings(output_lines, state.run_id, source, findings)
+
+    with {:ok, text} <- recovered,
+         true <- concrete_findings?(text) do
+      recovered
+    else
+      _ ->
+        case adapter_request_changes_findings(state) do
+          {:ok, _} = pr_findings -> pr_findings
+          :empty -> recovered
+        end
+    end
+  end
+
+  defp concrete_findings?(text) do
+    Regex.match?(~r/\[(?:critical|high|medium|low)\]|[\w\/.-]+\.\w+:\d+/i, text)
+  end
+
+  # bd-1j5x6u: mirror ReviewGate's partial-verification guard (bd-4te55l) on the
+  # coordinator-dispatched `worker_review` path. An APPROVE that discloses
+  # `VERIFICATION: PARTIAL` is the more dangerous half of the gap — an unverified
+  # approve merges unverified code — so unlike ReviewGate's own APPROVE path
+  # (which has no such check), this path fails closed: a partially-verified
+  # APPROVE is NOT honored as an approve. It is treated as REQUEST_CHANGES (never
+  # merges) with the loud banner prepended, so the coordinator sees exactly why
+  # the reviewer's approval was not trusted and can re-dispatch a review once
+  # verification can actually complete.
+  defp route_approve_verdict(%State{} = state, findings) do
+    if ReviewVerification.partial?(findings) do
+      Logger.warning(
+        "Worker: review_only task=#{state.task_id}: reviewer returned VERDICT: APPROVE but " <>
+          "disclosed VERIFICATION: PARTIAL; not honoring the approve — treating as " <>
+          "REQUEST_CHANGES so unverified code cannot merge"
+      )
+
+      park_rejected(state, :request_changes, ReviewVerification.prepend_banner(findings))
+    else
+      trigger_watchdog_on_approval(state)
+    end
+  end
+
+  # A REQUEST_CHANGES disclosing VERIFICATION: PARTIAL still blocks the merge
+  # either way (park_rejected never merges), but the banner is prepended so the
+  # findings are clearly marked as possibly-stale before the coordinator/
+  # implementer acts on them (bd-4te55l via bd-1j5x6u).
+  defp route_request_changes_verdict(%State{} = state, :empty) do
+    # bd-2ujj2p: nothing to hand an implementer. A fix round against an empty
+    # list changes nothing and burns a round plus a park, so park for the
+    # coordinator instead (a parked outcome schedules no fix round).
+    park_rejected(
+      state,
+      :no_verdict,
+      "Reviewer returned VERDICT: REQUEST_CHANGES but listed no findings — none in its " <>
+        "output and none in the PR review. No fix round was started; read the PR and " <>
+        "relay the findings, or re-run the review.",
+      :inconclusive
+    )
+  end
+
+  defp route_request_changes_verdict(%State{} = state, {:ok, findings}),
+    do: route_request_changes_verdict(state, findings)
+
+  defp route_request_changes_verdict(%State{} = state, findings) when is_binary(findings) do
+    if ReviewVerification.partial?(findings) do
+      park_rejected(state, :request_changes, ReviewVerification.prepend_banner(findings))
+    else
+      park_rejected(state, :request_changes, findings)
+    end
+  end
+
+  # bd-btcyn6: attempt to derive the review verdict from the adapter's PR review
+  # state when the reviewer's stdout lacks the VERDICT sentinel. Queries the
+  # merger adapter for the task's pr_ref reviews; maps the forge state to the
+  # internal verdict type. Returns :no_verdict on any error or when no review
+  # is found so the caller can fall through to INCONCLUSIVE.
+  defp derive_verdict_from_adapter(%State{task_id: task_id} = state) do
+    with {:ok, pr_ref} <- fetch_task_pr_ref(task_id),
+         {:ok, adapter, _workspace} <-
+           resolve_merger(state, merge_opts_from_meta(state.meta, %{})),
+         {:ok, feedback} <- safe_list_review_feedback(adapter, pr_ref) do
+      reviews = Enum.filter(Map.get(feedback, :feedback, []), &(&1[:kind] == :review))
+
+      cond do
+        Enum.any?(reviews, &(&1[:state] == "APPROVED")) ->
+          {:approve, ""}
+
+        Map.get(feedback, :changes_requested) ->
+          # Reviews are chronological: only the newest CHANGES_REQUESTED one is
+          # the current round's; older ones were already addressed.
+          body =
+            reviews
+            |> Enum.filter(&(&1[:state] == "CHANGES_REQUESTED"))
+            |> List.last()
+            |> case do
+              nil -> ""
+              review -> Map.get(review, :body, "")
+            end
+
+          {:request_changes, body}
+
+        true ->
+          :no_verdict
+      end
+    else
+      _ -> :no_verdict
+    end
+  end
+
+  defp adapter_request_changes_findings(%State{} = state) do
+    case derive_verdict_from_adapter(state) do
+      {:request_changes, body} -> adapter_findings(body)
+      _ -> :empty
+    end
+  end
+
+  # A PR review body as `VERDICT:`-first findings, or `:empty` when it has none.
+  defp adapter_findings(body) when is_binary(body) do
+    findings = "VERDICT: REQUEST_CHANGES\n" <> body
+
+    if Wardmast.Worker.ReviewGate.findings_present?(findings),
+      do: {:ok, findings},
+      else: :empty
+  end
+
+  defp safe_list_review_feedback(adapter, pr_ref) do
+    adapter.list_review_feedback(pr_ref)
+  rescue
+    _ -> {:error, :exception}
+  catch
+    :exit, _ -> {:error, :exit}
+  end
+
+  # APPROVE path for a coordinator-dispatched review_only worker. The reviewer
+  # has already posted the forge-level review approval.
+  #
+  # For hosted-forge workspaces (GitHub/GitLab): hand the existing PR ref to
+  # the ticket and spawn a Watchdog against it. The Watchdog polls the forge
+  # and calls Worker.complete only after the PR is actually merged — preventing
+  # the Driver from closing the task before the code lands on main. (bd-4u7a1m)
+  #
+  # For :direct workspaces or when no pr_ref is recorded: complete_now so the
+  # Driver closes the task. For :direct with a pr_ref, also signal MergeQueue.
+  # (bd-ddtbhb, bd-bs3z04)
+  defp trigger_watchdog_on_approval(%State{} = state) do
+    case fetch_task_pr_ref(state.task_id) do
+      {:ok, pr_ref} ->
+        # bd-38e34o: do NOT force_merge. Whether the Watchdog actually clicks
+        # merge follows the workspace's `auto_merge` setting via the normal
+        # cond in do_start_watchdog, mirroring bd-dkwhbn's fix to
+        # apply_review_gate_verdict/2. A review_only APPROVE must never
+        # bypass a human-merge (auto_merge: false) workspace policy.
+        opts = merge_opts_from_meta(state.meta, %{via_review_gate: true})
+
+        case resolve_merger(state, opts) do
+          {:ok, adapter, workspace} ->
+            if hosted_forge_workspace?(workspace) do
+              adopt_pr_and_spawn_watchdog(state, pr_ref, adapter, workspace, opts)
+            else
+              new_state = complete_now(state, :claude_done)
+              maybe_enqueue_approved_pr(new_state)
+              new_state
+            end
+
+          {:error, _} ->
+            new_state = complete_now(state, :claude_done)
+            maybe_enqueue_approved_pr(new_state)
+            new_state
+        end
+
+      {:error, _} ->
+        complete_now(state, :claude_done)
+    end
+  end
+
+  # bd-4u7a1m: a coordinator reviewer approved on a hosted forge — hand the
+  # already-open PR to a Watchdog. Mirrors `finalize_opened_mr/5` but skips the
+  # adapter.open call since the PR already exists. The Watchdog merges it (or
+  # waits for a human, per the workspace's `auto_merge`) only once it is
+  # actually mergeable, so the task never closes ahead of the code landing.
+  #
+  # bd-741sid: the Watchdog is the ticket's, started from the row, and this
+  # reviewer's run ends here like any other run whose PR is in the Watchdog's
+  # hands. A review-only engagement's ticket stays open for ReviewPatrol
+  # (bd-cw3w9p): the PR is recorded without the Merging transition, and the
+  # Watchdog leaves the ticket open when the PR merges.
+  defp adopt_pr_and_spawn_watchdog(%State{} = state, pr_ref, adapter, _workspace, opts) do
+    merger_url = safe_link_for(adapter, pr_ref)
+    record_mr_ref_on_run(state, pr_ref, merger_url)
+
+    record_pr_ref_on_task(state, pr_ref, :engagement,
+      merger_url: merger_url,
+      merge_watch: watch_lane(state, adapter, opts)
+    )
+
+    new_state = %State{state | mr_ref: pr_ref, merger_url: merger_url, merger_adapter: adapter}
+
+    unless start_ticket_watchdog(new_state, opts) == :ok do
+      escalate_watchdog_failure(new_state)
+    end
+
+    finish_run_after_pr_opened(new_state)
+  end
+
+  # Broadcast {:worker_done, task_id} to the workspace MergeQueue when the
+  # coordinator reviewer approves a task that already has a PR open. Used for
+  # :direct workspaces where the Watchdog path is not taken. Skipped when
+  # workspace_id is nil or no pr_ref.
+  #
+  # bd-cw3w9p: also skipped for review_only tasks — they are long-lived
+  # ReviewPatrol engagements that must stay :active after the first verdict.
+  # Sending {:worker_done} here would let the MergeQueue auto-close a task that
+  # ReviewPatrol intends to keep open.
+  defp maybe_enqueue_approved_pr(%State{workspace_id: ws_id, task_id: task_id, meta: meta})
+       when is_binary(ws_id) do
+    unless review_only?(meta) do
+      with {:ok, _pr_ref} <- fetch_task_pr_ref(task_id) do
+        Phoenix.PubSub.broadcast(
+          Wardmast.PubSub,
+          "worker:done:" <> ws_id,
+          {:worker_done, task_id}
+        )
+      end
+    end
+
+    :ok
+  end
+
+  defp maybe_enqueue_approved_pr(_), do: :ok
+
+  # Load the pr_ref from the task's current DB record. Returns {:ok, pr_ref}
+  # when present, {:error, :no_pr_ref} when nil/blank, and {:error, reason}
+  # on any other failure. Best-effort: callers fall back to a plain complete.
+  defp fetch_task_pr_ref(task_id) do
+    case Ash.get(Wardmast.Tasks.Issue, task_id) do
+      {:ok, %{pr_ref: pr_ref}} when is_binary(pr_ref) and pr_ref != "" ->
+        {:ok, pr_ref}
+
+      {:ok, _} ->
+        {:error, :no_pr_ref}
+
+      {:error, _} = err ->
+        err
+    end
+  rescue
+    _ -> {:error, :exception}
+  end
+
+  # bd-ofql8k commit gate. Returns `:ok` to proceed, or `{:gate, :uncommitted |
+  # :no_commits}` to divert. We only gate when:
+  #
+  #   * a worktree is configured and exists on disk, AND
+  #   * the worktree is actually checked out on the per-task branch.
+  #
+  # The branch check exists because some test setups (notably ReviewGateTest)
+  # reuse the repo itself as the "worktree" with `worktree_path: repo` and a
+  # feature branch that was created on the repo but left checked-out elsewhere.
+  # In that case the worktree's HEAD is some other branch (usually `main`) and
+  # `git rev-list main..HEAD` is meaningless — gating on it would manufacture
+  # false `:no_commits` trips. Production worktrees provisioned via
+  # `Worktree.create/3` are always checked out on the per-task branch, so the
+  # gate fires there as intended.
+  #
+  # ad-hoc runs without a provisioned worktree (no `:worktree_path` in meta)
+  # fall through to the legacy path. git failures fail open: a transient git
+  # hiccup must not strand a real completion.
+  # Pre-existing complexity 14 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp commit_gate(%State{meta: meta}) do
+    worktree = meta && Map.get(meta, :worktree_path)
+    target = (meta && Map.get(meta, :target_branch)) || "main"
+    expected = meta && Map.get(meta, :branch)
+
+    if is_binary(worktree) and File.dir?(worktree) and
+         worktree_on_branch?(worktree, expected) do
+      case Wardmast.Worker.Worktree.completion_state(worktree, target) do
+        {:ok, :ready} ->
+          # bd-9q966y: belt-and-suspenders — even a "clean, committed" worktree
+          # must not carry injected agent-config files (.mcp.json / .gemini/ /
+          # .codex/) in its committed diff. These files contain per-spawn bearer
+          # tokens. Normally they are gitignored via .git/info/exclude (written
+          # by AgentConfig.write/3), but if that was bypassed this gate catches
+          # the slip. Fail open on git errors to avoid stranding valid completions.
+          case Wardmast.Worker.Worktree.has_injected_config_in_commits?(worktree, target) do
+            {:ok, true} -> {:gate, :secret_in_commit}
+            _ -> :ok
+          end
+
+        {:ok, :uncommitted} ->
+          {:gate, :uncommitted}
+
+        {:ok, :no_commits} ->
+          {:gate, :no_commits}
+
+        {:error, _} ->
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp proceed_after_gate(%State{} = state, branch) do
+    sync_back_after_run(state)
+    route_completion(state, branch)
+  end
+
+  # ---- bd-28c6qo: per-repo pre-push check ------------------------------------
+  #
+  # `worker.prepush_check` (`Wardmast.Worker.PrepushCheck`) runs in the worker's
+  # checkout once the commit gate is satisfied, before the run is routed on (the
+  # review gate / merger push the branch and open the PR) and, for a CI fix pass,
+  # before it reports done. The check can take many minutes (dialyzer), so it
+  # runs in a supervised task and reports back as `{:__prepush_result__, ref,
+  # ctx, result}`; the worker stays `:working` meanwhile.
+  #
+  # A red check is sent back to the SAME session with its output, under its own
+  # cap (`meta[:prepush_nudge_cap]`, default 2, counted in
+  # `:prepush_nudge_attempts`); an exhausted cap parks through
+  # `park_commit_gate/3` like any other commit-gate trip. A timeout fails open
+  # unless `prepush_check_on_timeout` says `"fail"`; an infra error (no worktree,
+  # no `timeout` binary, command not runnable) always fails open.
+  defp begin_prepush_check(%State{meta: meta} = state, ctx) do
+    with nil <- Map.get(meta || %{}, :prepush_ref),
+         %{} = spec <- prepush_spec(state, ctx) do
+      if any_session_live?(state) do
+        # Same rule as the commit-gate nudge (bd-c27m5o): never check — or send
+        # back into — a worktree whose agent is still running. When it exits,
+        # `on_agent_stopped/3` re-enters `on_claude_done/1` and we get here again.
+        Logger.info(
+          "Worker: task=#{state.task_id} pre-push check deferred; the agent is still running"
+        )
+
+        {:started, state}
+      else
+        start_prepush_task(state, ctx, spec)
+      end
+    else
+      # A check is already in flight for this run (a second done signal).
+      ref when is_reference(ref) -> {:started, state}
+      _ -> :proceed
+    end
+  end
+
+  defp prepush_spec(%State{meta: meta} = state, ctx) do
+    view = prepush_view(meta)
+    worktree = view && Map.get(view, :worktree_path)
+    branch = view && (Map.get(view, :branch) || Map.get(view, :fix_pass_branch))
+
+    runnable? =
+      is_binary(worktree) and File.dir?(worktree) and
+        (ctx in [:fix_pass, :revise] or worktree_on_branch?(worktree, branch))
+
+    if runnable? do
+      Wardmast.Worker.PrepushCheck.resolve(prepush_workspace(state, ctx), state.repo)
+    end
+  end
+
+  # A fix round's worker is registered without a workspace (its completion must
+  # stay silent), so the recipe's workspace rides in its meta.
+  defp prepush_workspace(%State{meta: meta}, :revise) do
+    case Map.get(meta, :revise_workspace_id) do
+      id when is_binary(id) -> notes_gate_workspace(%State{workspace_id: id})
+      _ -> nil
+    end
+  end
+
+  defp prepush_workspace(state, _ctx), do: notes_gate_workspace(state)
+
+  # The meta as the recipe and its send-back prompt read it: a fix round's
+  # worktree and branch under the keys a main run uses.
+  defp prepush_view(%{revise_worktree: worktree} = meta) when is_binary(worktree) do
+    meta
+    |> Map.put(:worktree_path, worktree)
+    |> Map.put(:branch, Map.get(meta, :revise_branch))
+  end
+
+  defp prepush_view(meta), do: meta
+
+  defp start_prepush_task(%State{meta: meta} = state, ctx, spec) do
+    me = self()
+    ref = make_ref()
+    worktree = Map.fetch!(prepush_view(meta), :worktree_path)
+
+    run_opts = prepush_run_opts(meta)
+
+    run = fn ->
+      send(
+        me,
+        {:__prepush_result__, ref, ctx,
+         Wardmast.Worker.PrepushCheck.run_steps(spec, worktree, run_opts)}
+      )
+    end
+
+    case Task.Supervisor.start_child(Wardmast.TaskSupervisor, run) do
+      {:ok, _pid} ->
+        Logger.info(
+          "Worker: task=#{state.task_id} running the pre-push check (#{ctx}, " <>
+            "#{length(Map.get(spec, :steps) || [])} step(s), budget #{spec.timeout_seconds}s" <>
+            "#{if Keyword.has_key?(run_opts, :exec), do: ", in the run's sandbox", else: ""})"
+        )
+
+        new_meta = meta |> Map.put(:prepush_ref, ref) |> Map.put(:prepush_spec, spec)
+        {:started, %State{state | meta: new_meta}}
+
+      other ->
+        Logger.warning(
+          "Worker: task=#{state.task_id} could not start the pre-push check " <>
+            "(#{inspect(other)}); proceeding without it"
+        )
+
+        :proceed
+    end
+  end
+
+  # bd-8wdrql: where the recipe's steps run. A podman-sandboxed run executes them
+  # in its own container (same image, mounts and home as its session, no
+  # network); any other run on the host, in the worktree. `meta[:prepush_exec]`
+  # is the test seam. The diff base of `scope: touched` steps is the task's
+  # target branch.
+  defp prepush_run_opts(meta) do
+    base = [target: Map.get(meta, :target_branch)]
+
+    case prepush_exec(meta) do
+      nil -> base
+      exec -> [{:exec, exec} | base]
+    end
+  end
+
+  defp prepush_exec(meta) do
+    case {Map.get(meta, :prepush_exec), Map.get(meta, :claude_spawn)} do
+      {fun, _} when is_function(fun, 2) -> fun
+      {_, %{remote: %{}} = port_args} -> remote_exec(port_args)
+      {_, %{sandbox: %{}} = port_args} -> sandbox_exec(port_args)
+      _ -> nil
+    end
+  end
+
+  # bd-9rrrgk: a run placed on a node has its deps, image and mounts on that node
+  # (the primary's worktree is only the ingested checkout), so the steps go to the
+  # node's agent, which runs them in a container of the run's shape. Without a node
+  # or a run id there is nothing to ask: every step is an infra error, never a run
+  # on the host (which has no deps and failed every step on bd-c1dief).
+  defp remote_exec(%{remote: %{node: node, run_id: run_id}})
+       when not is_nil(node) and is_binary(run_id) do
+    fn command, seconds ->
+      Wardmast.Worker.Executor.Node.exec(node, run_id, command, seconds)
+    end
+  end
+
+  defp remote_exec(_port_args), do: fn _command, _seconds -> {:error, :remote_run_unknown} end
+
+  # bd-57nhsi: the `run_tests` tool runs while the session's container is up, so a
+  # sandboxed local run gets a container of its own name (`run_command/3` reuses
+  # the session's and removes it afterwards, which would kill the session).
+  defp test_exec(meta) do
+    case {Map.get(meta, :prepush_exec), Map.get(meta, :claude_spawn)} do
+      {fun, _} when is_function(fun, 2) ->
+        fun
+
+      {_, %{remote: %{}}} ->
+        prepush_exec(meta)
+
+      {_, %{sandbox: %{}} = port_args} ->
+        fn command, seconds ->
+          Wardmast.Worker.ContainerSpawn.run_side_command(port_args, command, seconds)
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp test_host_exec(meta, worktree) do
+    env =
+      case Map.get(meta, :claude_spawn) do
+        %{env: env} when is_list(env) -> env
+        _ -> []
+      end
+
+    Wardmast.Worker.TestRun.host_exec(worktree, env)
+  end
+
+  defp sandbox_exec(port_args) do
+    fn command, seconds ->
+      Wardmast.Worker.ContainerSpawn.run_command(port_args, command, seconds)
+    end
+  end
+
+  # The recipe's verdict. `ctx` is where the run was headed: `:main` routes the
+  # branch on, `:fix_pass` finishes the pass. The per-step results are recorded
+  # on the run (`Wardmast.Workers.PrepushStep`, shown by `arb worker show`) and
+  # kept in meta for the send-back prompt.
+  defp on_prepush_result(%State{meta: meta} = state, ctx, %{result: result, steps: steps}) do
+    spec = Map.get(meta, :prepush_spec)
+    attempt = Map.get(meta, :prepush_nudge_attempts, 0) + 1
+    Wardmast.Workers.PrepushSteps.record(state.run_id, state.task_id, attempt, steps)
+
+    state = %State{
+      state
+      | meta: meta |> Map.delete(:prepush_ref) |> Map.put(:prepush_steps, steps)
+    }
+
+    case prepush_outcome(result, spec) do
+      :pass ->
+        continue_after_prepush(state, ctx)
+
+      {:fail, detail} ->
+        handle_prepush_failure(state, ctx, detail)
+    end
+  end
+
+  defp prepush_outcome(:ok, _spec), do: :pass
+  defp prepush_outcome({:failed, status, output}, _spec), do: {:fail, {:exit, status, output}}
+
+  defp prepush_outcome({:timeout, output}, %{on_timeout: :fail, timeout_seconds: seconds}),
+    do: {:fail, {:timeout, seconds, output}}
+
+  defp prepush_outcome({:timeout, _output}, %{timeout_seconds: seconds}) do
+    Logger.warning(
+      "Worker: the pre-push check timed out after #{seconds}s; failing open " <>
+        "(worker.prepush_check_on_timeout is \"proceed\")"
+    )
+
+    :pass
+  end
+
+  defp prepush_outcome({:error, reason}, _spec) do
+    Logger.warning("Worker: the pre-push check could not run (#{inspect(reason)}); failing open")
+    :pass
+  end
+
+  defp continue_after_prepush(%State{meta: meta} = state, :main) do
+    proceed_after_gate(state, Map.get(meta, :branch))
+  end
+
+  defp continue_after_prepush(%State{} = state, :fix_pass), do: push_and_deliver_fix_pass(state)
+  defp continue_after_prepush(%State{} = state, :revise), do: complete_now(state, :claude_done)
+
+  defp push_and_deliver_fix_pass(%State{meta: meta, task_id: task_id} = state) do
+    worktree = meta && Map.get(meta, :worktree_path)
+    branch = meta && (Map.get(meta, :branch) || Map.get(meta, :fix_pass_branch))
+
+    if is_binary(worktree) and File.dir?(worktree) do
+      sync_back_after_run(state)
+
+      push_opts =
+        [set_upstream: true] ++
+          if(is_binary(branch), do: [branch: branch], else: []) ++
+          fix_pass_lease(meta) ++ ci_skip_opts(meta)
+
+      with {:ok, push_opts} <- host_push_opts(state, nil, push_opts),
+           {:ok, _} <- Wardmast.Worker.Worktree.push(worktree, push_opts) do
+        record_pushed_head(worktree, task_id, branch)
+        deliver_pass(state)
+      else
+        {:error, reason} ->
+          Logger.warning(
+            "Worker: git push for fix_pass failed on task=#{task_id}: #{inspect(reason)}"
+          )
+
+          fail_now(state, {:push_failed, reason})
+      end
+    else
+      deliver_pass(state)
+    end
+  end
+
+  # bd-bg87oz: a fix pass placed on a node (`Wardmast.Worker.PassPlacement`) was seeded
+  # from the forge's head of its branch, and may have rewritten it (a rebase, an
+  # amend) in the shadow clone. The primary pushes it with `--force-with-lease`
+  # pinned to the head it was seeded from: its rewrite lands, and a push by anyone
+  # else since makes the lease refuse. Never a bare `--force`; a pass with no seed
+  # head pushes as before.
+  # bd-4y9dno: a pass for an MR waiting behind the merge train's head pushes
+  # with the forge's CI-skip mechanism (`Wardmast.Mergers.CiSkip`).
+  defp ci_skip_opts(meta) do
+    case Map.get(meta || %{}, :ci_skip) do
+      {kind, value} = mechanism
+      when kind in [:push_option, :commit_marker] and is_binary(value) ->
+        [ci_skip: mechanism]
+
+      _ ->
+        []
+    end
+  end
+
+  # bd-4y9dno: a delivered pass that pushed without CI leaves a head with no
+  # pipeline. The Watchdog must know, or it could merge that head unverified; it
+  # triggers the pipeline when the MR reaches the front of the merge train.
+  defp note_ci_skipped_head(%State{meta: meta, task_id: task_id}) do
+    with mechanism when not is_nil(mechanism) <- Map.get(meta || %{}, :ci_skip),
+         worktree when is_binary(worktree) <- Map.get(meta, :worktree_path),
+         branch when is_binary(branch) <-
+           Map.get(meta, :conflict_resolver_branch) || Map.get(meta, :fix_pass_branch),
+         head when is_binary(head) <-
+           Wardmast.Worker.Worktree.remote_head(worktree, branch) ||
+             Wardmast.Worker.Worktree.head_sha(worktree) do
+      Wardmast.Worker.Watchdog.note_ci_skipped_push(task_id, head)
+    else
+      _ -> :ok
+    end
+  end
+
+  defp fix_pass_lease(meta) do
+    case Map.get(meta || %{}, :fix_pass_start_head) do
+      head when is_binary(head) -> [force_with_lease: head]
+      _ -> []
+    end
+  end
+
+  defp handle_prepush_failure(%State{meta: meta} = state, ctx, detail) do
+    cap = prepush_nudge_cap(meta)
+    attempts = Map.get(meta, :prepush_nudge_attempts, 0)
+    state = %State{state | meta: Map.put(meta, :prepush_detail, detail)}
+
+    cond do
+      attempts >= cap ->
+        park_commit_gate(state, :prepush_failed, :cap_exhausted)
+
+      any_session_live?(state) ->
+        # Unreachable in practice (the check only starts with no live session),
+        # but a nudge into a live worktree is never right.
+        park_commit_gate(state, :prepush_failed, {:respawn_failed, :session_live})
+
+      true ->
+        nudge =
+          Wardmast.Worker.PrepushCheck.nudge_prompt(
+            state.task_id,
+            prepush_view(meta),
+            detail,
+            ctx
+          )
+
+        case respawn_with_nudge(state, nudge,
+               attempts_key: :prepush_nudge_attempts,
+               label: "bd-28c6qo pre-push check failed"
+             ) do
+          {:ok, new_state} -> new_state
+          {:error, why} -> park_commit_gate(state, :prepush_failed, {:respawn_failed, why})
+        end
+    end
+  end
+
+  # The send-back budget: a run's own `meta[:prepush_nudge_cap]`, else the
+  # recipe's `pre_push_max_attempts`, else 2.
+  defp prepush_nudge_cap(meta) do
+    max_attempts =
+      case Map.get(meta, :prepush_spec) do
+        %{max_attempts: n} -> n
+        _ -> nil
+      end
+
+    case Map.get(meta, :prepush_nudge_cap, max_attempts) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> 2
+    end
+  end
+
+  # bd-4wy1w1 (P5): a worker in a private clone (git layout B) committed into
+  # the clone only. Carry the branch into the main repo as soon as the run is
+  # reviewable, so everything that reads it there by name (a dispatched
+  # reviewer's checkout, the conflict resolver, the Direct merger) sees what a
+  # linked worktree would have shown. Fail-open here: `do_open_mr/5` syncs again
+  # and refuses to merge or open a PR on a failure. A no-op for a linked worktree.
+  defp sync_back_after_run(%State{meta: meta, task_id: task_id}) do
+    worktree = meta && Map.get(meta, :worktree_path)
+
+    with path when is_binary(path) <- worktree,
+         {:error, reason} <- Wardmast.Worker.Worktree.sync_back(path) do
+      Logger.warning(
+        "Worker: could not sync the private clone's branch back for task=#{task_id}: " <>
+          inspect(reason)
+      )
+    end
+
+    :ok
+  end
+
+  defp worktree_on_branch?(_path, nil), do: false
+  defp worktree_on_branch?(_path, ""), do: false
+
+  defp worktree_on_branch?(path, expected) when is_binary(expected) do
+    case Wardmast.Worker.Worktree.current_branch(path) do
+      {:ok, ^expected} -> true
+      _ -> false
+    end
+  end
+
+  # The worker signalled done but the worktree isn't in a reviewable state.
+  # First try a single bounded "send-back" nudge — relaunch the worker with a
+  # short prompt telling it exactly what's missing (commit + push, or "you
+  # printed `arb done` without making any commits") so the same mind that did
+  # the work can fix the omission. Cap is `meta[:commit_nudge_cap]`, default 1;
+  # tests pass 0 to assert the structural gate without the retry layer.
+  #
+  # If nothing usable is captured to relaunch with, OR the cap is exhausted, we
+  # fail_now WITHOUT routing to the ReviewGate: a stale, empty `base..HEAD` diff
+  # must not reach a reviewer who will report "no work" while the work is right
+  # there in the worktree.
+  # bd-9q966y: an injected agent-config file (bearer-token bearing) ended up in the
+  # committed diff — hard-fail immediately without nudging. A nudge would tell the
+  # worker to "commit+push your work", which it already did (incorrectly including
+  # the secret). Removing the secret from history requires a `git rebase --onto` or
+  # `git filter-repo` operation that the worker cannot safely self-apply; the
+  # coordinator must intervene (squash-merge + rotate if necessary).
+  defp handle_commit_gate(state, _branch, :secret_in_commit) do
+    park_commit_gate(state, :secret_in_commit, :no_retry)
+  end
+
+  defp handle_commit_gate(%State{meta: meta} = state, _branch, reason) do
+    cap = (meta && Map.get(meta, :commit_nudge_cap)) || 1
+    attempts = (meta && Map.get(meta, :commit_nudge_attempts)) || 0
+
+    if attempts >= cap do
+      park_commit_gate(state, reason, :cap_exhausted)
+    else
+      # bd-c27m5o: never launch a nudge agent into a worktree whose original
+      # agent is still running (a done signal can be a false positive, or the
+      # agent may simply still be wrapping up). The run stays live with
+      # `:done_seen` stamped; when the process exits, `on_agent_stopped/3`
+      # re-enters `on_claude_done/1` and the gate is re-evaluated against a
+      # worktree nobody is writing to.
+      if any_session_live?(state) do
+        Logger.info(
+          "Worker: task=#{state.task_id} commit gate tripped (#{reason}) but the agent " <>
+            "is still running; deferring the nudge until it exits"
+        )
+
+        state
+      else
+        case respawn_with_commit_nudge(state, reason) do
+          {:ok, new_state} ->
+            new_state
+
+          {:error, why} ->
+            park_commit_gate(state, reason, {:respawn_failed, why})
+        end
+      end
+    end
+  end
+
+  defp any_session_live?(%State{claude_sessions: sessions}) do
+    Enum.any?(sessions, fn {_port, session} -> is_nil(Map.get(session, :exit_status)) end)
+  end
+
+  # Build a nudge prompt + port_args from the stashed claude_spawn and relaunch
+  # a fresh claude session in the same worktree. The mailbox/nudge prompt is
+  # short and direct: it names the gate-trip reason and the exact action
+  # required, then asks the worker to print `arb done` again only after the
+  # commit lands.
+  #
+  # The stashed argv must be the streaming `claude` invocation built by
+  # `Wardmast.Worker.ClaudeSession.default_claude_argv/1` (a `sh -c 'exec "$@"
+  # < /dev/null' sh claude --print <prompt> ...`) for the prompt-swap to work.
+  # When the argv is a test fixture (`claude_command:` opt) we re-run the same
+  # argv so a fixture-based test exercises the gate-retry-then-fail cycle
+  # without us second-guessing what the fixture does.
+  defp respawn_with_commit_nudge(%State{} = state, reason) do
+    respawn_with_nudge(state, commit_nudge_prompt(state, reason),
+      attempts_key: :commit_nudge_attempts,
+      label: "bd-ofql8k commit gate tripped (#{reason})"
+    )
+  end
+
+  # Session config for a respawned session (gate nudge, auto-resume). Both
+  # respawns reopen a port on the ORIGINAL spawn's `:env` — secrets included —
+  # so the new session must carry the same `redact_values` or the relaunched
+  # child can echo a secret straight to the output surfaces (bd-62d3jh).
+  # ClaudeSession.build_session_config/3 owns the shape so a respawn can't drift
+  # out of sync with start/1 again.
+  #
+  # The stashed pristine argv rides along too (bd-7e8ezw): a respawn relaunches
+  # with the same `--mcp-config`, so it must hold its `init` event to the same
+  # MCP connection check the first session did.
+  defp session_config_for(%State{} = state, provider, model) do
+    Wardmast.Worker.ClaudeSession.build_session_config(
+      state.task_id,
+      "worker:" <> state.task_id,
+      [provider: provider, model: model, argv: stashed_spawn_argv(state)] ++
+        carried_redact_opts(state)
+    )
+  end
+
+  defp stashed_spawn_argv(%State{meta: %{claude_spawn: %{argv: argv}}}) when is_list(argv),
+    do: argv
+
+  defp stashed_spawn_argv(_state), do: nil
+
+  # Reuse the redaction list the prior session already resolved: every session
+  # on this worker is the same task, hence the same workspace, hence the same
+  # secret values — a fresh DB read per respawn would be pure cost. Only when no
+  # prior session carries a list (nothing spawned yet) do we omit the option and
+  # let build_session_config/3 load it.
+  defp carried_redact_opts(%State{claude_sessions: sessions}) do
+    Enum.find_value(sessions, [], fn {_port, session} ->
+      case Map.get(session, :redact_values) do
+        values when is_list(values) -> [redact_values: values]
+        _ -> nil
+      end
+    end)
+  end
+
+  # bd-325sps: `podman run` failing to *create* the container (libpod "container
+  # creation timeout", an OCI runtime create error) is host load, not the agent: it
+  # exits 126 having printed only `Error:` lines, before any agent output. Re-create
+  # the container from the stashed spawn args, a bounded number of times with a
+  # growing backoff, before letting the exit fall through to the stop path (which
+  # classifies it `:container_create_failed`, an infra failure that keeps the worktree).
+  defp container_create_retry?(%State{} = state, session, status) do
+    meta = state.meta || %{}
+
+    is_map(Map.get(meta, :claude_spawn)) and
+      Map.get(session, :exit_status) == nil and
+      (Map.get(meta, :container_create_retries) || 0) < container_create_retry_cap() and
+      live_run?(state.state, state.waiting_on) and
+      not node_stopping?() and
+      Wardmast.Worker.StopReason.container_create_failure?(
+        status,
+        Enum.reverse(Map.get(session, :output_lines, []))
+      )
+  end
+
+  defp container_create_retry_cap,
+    do: Application.get_env(:wardmast, :container_create_retries, 2)
+
+  defp container_create_backoff_ms(attempt),
+    do: Application.get_env(:wardmast, :container_create_retry_backoff_ms, 2_000) * attempt
+
+  defp schedule_container_create_retry(%State{} = state, port, session, status) do
+    attempt = (Map.get(state.meta, :container_create_retries) || 0) + 1
+    backoff = container_create_backoff_ms(attempt)
+
+    Logger.warning(
+      "Worker: container creation failed for task=#{state.task_id} (exit #{status}); " <>
+        "retrying in #{backoff}ms (attempt #{attempt}/#{container_create_retry_cap()})"
+    )
+
+    Process.send_after(
+      self(),
+      {:__retry_container_create__, Map.put(session, :exit_status, status)},
+      backoff
+    )
+
+    %State{
+      state
+      | claude_sessions: Map.delete(state.claude_sessions, port),
+        meta: Map.put(state.meta, :container_create_retries, attempt)
+    }
+  end
+
+  defp retry_container_create(%State{meta: meta} = state, failed_session) do
+    spawn_args = Map.get(meta, :claude_spawn)
+    # A creation that timed out can leave the half-made container holding its name.
+    _ = Wardmast.Worker.ContainerSpawn.stop(spawn_args, grace_ms: 0)
+
+    case safe_open_port(spawn_args, state.task_id) do
+      {:ok, port, scope} ->
+        now = DateTime.utc_now()
+
+        session =
+          failed_session
+          |> Map.put(:port, port)
+          |> Map.put(:scope, scope)
+          |> Map.put(:output_lines, [])
+          |> Map.put(:line_buf, "")
+          |> Map.put(:exit_status, nil)
+          |> Map.put(:exited_at, nil)
+          |> Map.put(:started_at, now)
+          |> Map.put(:activity, "starting")
+          |> Map.put(:activity_at, now)
+
+        sessions = Map.put(state.claude_sessions, port, session)
+        note_scope(%State{state | claude_sessions: sessions}, scope)
+
+      {:error, reason} ->
+        Logger.warning(
+          "Worker: container re-create failed for task=#{state.task_id}: #{inspect(reason)}"
+        )
+
+        fail_stopped(state, failed_session)
+    end
+  end
+
+  # Shared relaunch mechanism for the gate nudges (commit gate bd-ofql8k, notes
+  # gate bd-5lc99r). Swaps the nudge prompt into the stashed claude argv, opens
+  # a fresh port in the same cwd, and bumps the gate-specific attempt counter so
+  # the cap in the caller bounds the retry loop.
+  defp respawn_with_nudge(%State{meta: meta} = state, nudge, opts) do
+    attempts_key = Keyword.fetch!(opts, :attempts_key)
+    label = Keyword.get(opts, :label, "gate")
+    spawn_args = meta && Map.get(meta, :claude_spawn)
+
+    {provider, model} = respawn_routing(state)
+
+    with %{} = port_args <- spawn_args || :no_spawn_args,
+         {:ok, new_args} <- inject_nudge_argv(port_args, nudge, provider),
+         {:ok, port, scope} <- safe_open_port(new_args, state.task_id) do
+      next_attempts = ((meta && Map.get(meta, attempts_key)) || 0) + 1
+
+      Logger.info(
+        "Worker: #{label} for task=#{state.task_id}; " <>
+          "relaunching worker with nudge (attempt #{next_attempts})"
+      )
+
+      session_config = session_config_for(state, provider, model)
+
+      # bd-9rdwe4: a gate nudge is still telling the agent something new —
+      # append it (redacted) to the same run's prompt file rather than
+      # letting it vanish once the original prompt was already persisted at
+      # session-open.
+      append_prompt(state, nudge, session_config)
+
+      now = DateTime.utc_now()
+
+      adapter = agent_adapter_for_provider(provider)
+
+      session =
+        session_config
+        |> Map.put(:port, port)
+        |> Map.put(:scope, scope)
+        # inject_nudge_argv/3 always leaves the prompt inline (a nudge is
+        # short), so this is always nil — kept for parity with the other two
+        # open-port sites rather than a real leak risk here.
+        |> Map.put(:prompt_tmpfile, get_prompt_tmpfile(adapter, new_args.argv))
+        |> Map.put(:output_lines, [])
+        |> Map.put(:line_buf, "")
+        |> Map.put(:exit_status, nil)
+        |> Map.put(:exited_at, nil)
+        |> Map.put(:started_at, now)
+        |> Map.put(:activity, "starting")
+        |> Map.put(:activity_at, now)
+        |> Map.put(:output_log, open_output_log(state))
+        |> Map.put(:run_id, state.run_id)
+
+      new_meta =
+        meta
+        |> Map.put(attempts_key, next_attempts)
+        |> Map.put(:claude_spawn, new_args)
+
+      sessions = Map.put(state.claude_sessions, port, session)
+
+      {:ok,
+       note_scope(
+         %State{
+           state
+           | claude_sessions: sessions,
+             meta: new_meta,
+             state: :working,
+             step_started_at: DateTime.utc_now()
+         },
+         scope
+       )}
+    else
+      :no_spawn_args -> {:error, :no_spawn_args}
+      {:error, _} = err -> err
+      other -> {:error, {:unexpected, other}}
+    end
+  end
+
+  defp commit_nudge_cap(meta), do: (meta && Map.get(meta, :commit_nudge_cap)) || 1
+
+  defp safe_open_port(port_args, task_id) do
+    {port, scope} = Wardmast.Worker.ClaudeSession.open_scoped_port(port_args, task_id)
+    {:ok, port, scope}
+  rescue
+    e -> {:error, {:port_open_failed, Exception.message(e)}}
+  end
+
+  # Swap the prompt in a stashed argv via `Wardmast.Agents.Claude.splice_prompt/2`
+  # (handles both the ordinary inline-prompt shape and the bd-11abk2
+  # stdin/tmpfile shape a stashed dispatch argv may carry for an oversized
+  # original prompt). If no `--print` slot is present (test fixtures, custom
+  # commands) we accept the argv unchanged and rely on the fixture to honor a
+  # re-run; the cap then bounds how many times we try.
+  defp inject_nudge_argv(%{argv: argv} = port_args, nudge, provider) when is_list(argv) do
+    adapter = agent_adapter_for_provider(provider)
+
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :splice_prompt, 2) do
+      # `splice_prompt/2` is not a callback on Wardmast.Agents.Agent — it's a
+      # `@doc false` convention each adapter opts into (Claude, Codex, Gemini
+      # as of bd-b7e33c all define it). The `function_exported?/3` guard above
+      # is what makes the call safe for any future adapter that doesn't; a
+      # static `adapter.splice_prompt(...)` makes the compiler resolve
+      # `adapter` to every known adapter module and would emit an "undefined
+      # or private" warning for the first one that omits it, which `mix
+      # compile --warnings-as-errors` then fails on. The dynamic dispatch is
+      # the point, not an oversight.
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      case apply(adapter, :splice_prompt, [argv, [nudge]]) do
+        {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
+        {:error, :no_print_slot} -> {:ok, port_args}
+      end
+    else
+      # bd-2aslx6: no `splice_prompt/2` means we cannot rewrite this provider's
+      # argv at all, so the only thing a "relaunch" could do is re-run the
+      # ORIGINAL prompt verbatim — the whole task again, at full price, with the
+      # agent never told what it got wrong. Refuse; the caller parks and
+      # escalates with a concrete cause instead. Mirrors
+      # `inject_resume_argv/4`'s handling of the same condition.
+      {:error, :unsupported_provider}
+    end
+  end
+
+  defp inject_nudge_argv(_port_args, _nudge, _provider), do: {:error, :missing_argv}
+
+  defp commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :uncommitted) do
+    branch = (meta && Map.get(meta, :branch)) || "(your branch)"
+
+    """
+    bd-ofql8k commit gate: you printed `arb done` for task #{task_id}, but the
+    worktree on branch `#{branch}` has uncommitted changes (staged, unstaged,
+    or untracked). The review gate diffs `base..HEAD` — committed history
+    only — so without commits your work is invisible and the reviewer would
+    report "no code exists" while sitting on your edits.
+
+    Do EXACTLY this, then print `arb done` again on its own line:
+
+      1. `git status` to see what is uncommitted.
+      2. `git add -A`
+      3. `git commit -m "<a short message describing the work>"`
+      4. (`git push -u origin #{branch}` is OPTIONAL — the arbiter pushes /
+         opens the MR for you on merge.)
+
+    Do not redo the work — just commit what is already on disk. If a hunk in
+    the diff looks half-finished or wrong, finish it first, then commit.
+    """
+  end
+
+  defp commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :no_commits) do
+    branch = (meta && Map.get(meta, :branch)) || "(your branch)"
+    target = (meta && Map.get(meta, :target_branch)) || "main"
+
+    """
+    bd-ofql8k commit gate: you printed `arb done` for task #{task_id}, but
+    branch `#{branch}` has no commits ahead of `#{target}`. Either no work
+    was done, or your edits landed on a different branch. The review gate
+    cannot proceed with a zero-commit branch.
+
+    Inspect what happened:
+
+      git status
+      git log --oneline #{target}..HEAD
+      git diff #{target}..HEAD
+
+    If work IS on disk but uncommitted, commit it on `#{branch}`:
+
+      git add -A
+      git commit -m "<a short message>"
+
+    If you skipped the work, do it now and commit. Then print `arb done`
+    again on its own line.
+    """
+  end
+
+  # ---- bd-5lc99r notes gate -------------------------------------------------
+  #
+  # A `research` issue type (bd-9s9dqz; the operational `task` type skips this
+  # gate) is non-reviewable investigation work whose
+  # deliverable is a findings summary in the directive's `notes`, not a code
+  # change. The notes gate is the task-type analogue of the commit gate: it
+  # refuses to let `arb done` close the directive while `notes` is blank, and
+  # reprompts the worker to write its findings via the `ticket_update_progress`
+  # MCP tool.
+  #
+  # Returns `:ok` to proceed, or `{:gate, kind}` to divert: `:blank` (nothing in
+  # `notes`) or `:no_findings` (bd-48ycdn: `notes` holds text, but not one word of
+  # it was written by this run — a ticket with coordinator-written notes would
+  # otherwise close `completed` on a run that did no work, see
+  # `Wardmast.Worker.RunFindings`). A DB read failure fails OPEN (mirrors the
+  # commit gate's git-failure policy): a transient hiccup must not strand a real
+  # completion behind an unreadable directive.
+  defp notes_gate(%State{task_id: task_id} = state) do
+    case fetch_task_notes(task_id) do
+      {:ok, notes} when is_binary(notes) ->
+        if String.trim(notes) == "", do: {:gate, :blank}, else: findings_this_run_gate(state)
+
+      {:ok, _} ->
+        {:gate, :blank}
+
+      {:error, reason} ->
+        Logger.warning(
+          "Worker: bd-5lc99r notes gate could not read notes for task=#{task_id} " <>
+            "(#{inspect(reason)}); failing open."
+        )
+
+        :ok
+    end
+  end
+
+  defp findings_this_run_gate(%State{task_id: task_id, started_at: started_at, meta: meta}) do
+    since = Wardmast.Worker.RunFindings.window_start(started_at, resumed_from_run_id(meta))
+
+    case Wardmast.Worker.RunFindings.written?(task_id, since) do
+      true ->
+        :ok
+
+      false ->
+        {:gate, :no_findings}
+
+      {:error, reason} ->
+        Logger.warning(
+          "Worker: bd-48ycdn findings gate could not read the history of task=#{task_id} " <>
+            "(#{inspect(reason)}); failing open."
+        )
+
+        :ok
+    end
+  end
+
+  defp fetch_task_notes(task_id) do
+    case Ash.get(Wardmast.Tasks.Issue, task_id) do
+      {:ok, %{notes: notes}} -> {:ok, notes}
+      {:error, _} = err -> err
+    end
+  rescue
+    e -> {:error, e}
+  end
+
+  # The worker signalled done on a task-type directive but `notes` is still
+  # blank. Mirror the commit gate's bounded send-back: relaunch the same session
+  # with a nudge telling it to write findings to `notes`, capped by
+  # `notes_nudge_cap/1` (workspace `notes_gate.nudge_cap`, default 2 — bd-4qjl0q;
+  # tests pass `meta[:notes_nudge_cap]` 0 to assert the structural gate without
+  # the retry layer). On cap exhaustion or a respawn failure, fail the worker
+  # rather than silently close a directive with no deliverable.
+  defp handle_notes_gate(%State{meta: meta} = state, kind) do
+    cap = notes_nudge_cap(state)
+    attempts = (meta && Map.get(meta, :notes_nudge_attempts)) || 0
+
+    if attempts >= cap do
+      park_notes_gate(state, :cap_exhausted, kind)
+    else
+      case respawn_with_notes_nudge(state, kind) do
+        {:ok, new_state} -> new_state
+        {:error, why} -> park_notes_gate(state, {:respawn_failed, why}, kind)
+      end
+    end
+  end
+
+  defp respawn_with_notes_nudge(%State{} = state, kind) do
+    respawn_with_nudge(state, notes_nudge_prompt(state, kind),
+      attempts_key: :notes_nudge_attempts,
+      label: "bd-5lc99r notes gate tripped (#{notes_gate_kind_label(kind)})"
+    )
+  end
+
+  defp notes_gate_kind_label(:no_findings), do: "no findings written this run"
+  defp notes_gate_kind_label(_), do: "blank notes"
+
+  # bd-2da6ay: did the session that just closed exit cleanly (status 0) without
+  # signalling `arb done` — i.e. the agent reached the end and quit, as opposed
+  # to being killed / crashing / hitting an auth or rate-limit wall? Reuses the
+  # exact StopReason classification the resume path keys off, scoped to the one
+  # session. Only a clean exit routes a task-type worker through the notes gate;
+  # every other category stays on the resume/fail_stopped path so its specific
+  # escalation (credential watchdog, host-health) still fires.
+  defp clean_exit_without_done?(session),
+    do: classify_stop(session).category == :exited_without_done
+
+  # `StopReason.classify/3` on the session that just exited, plus the one
+  # refinement it cannot make from the output tail alone. bd-7wymls: a clean
+  # exit whose agy turn was ended by a headless permission soft-deny
+  # (`ClaudeSession.denial_ended_turn?/1`, set from agy's structured
+  # `result.denied_actions` / its own stderr notice) is `:permission_denied` —
+  # resumable with a "that was denied, carry on without it" prompt, not an
+  # ordinary early quit. A non-zero exit keeps its own classification.
+  defp classify_stop(session) do
+    exit_status = Map.get(session, :exit_status)
+    output_lines = Enum.reverse(Map.get(session, :output_lines, []))
+
+    reason = stop_reason_for(session, exit_status, output_lines)
+
+    if reason.category in [:exited_without_done, :async_wait_abandoned] and
+         Wardmast.Worker.ClaudeSession.denial_ended_turn?(session) do
+      Wardmast.Worker.StopReason.permission_denied(Map.get(session, :denied_command_line))
+    else
+      reason
+    end
+  end
+
+  # bd-2da6ay: finalize a task-type worker that exited without `arb done` by
+  # routing through the same notes gate `arb done` itself uses. on_claude_done/1
+  # for a task type either completes (notes populated — the findings exist, the
+  # missing sentinel was just a handshake glitch) or diverts to the notes gate
+  # (blank notes — nudge up to the cap, then park + escalate with a concrete
+  # cause). Either way the task finalizes deterministically rather than silently
+  # looping on resume.
+  defp finalize_task_type_stop(%State{} = state) do
+    Logger.info(
+      "Worker: bd-2da6ay task=#{state.task_id} (task type) exited cleanly without " <>
+        "`arb done`; finalizing through the notes gate instead of resuming."
+    )
+
+    on_claude_done(state)
+  end
+
+  # bd-4qjl0q: resolution order is an explicit meta override (tests / advanced
+  # callers), then the workspace's `notes_gate.nudge_cap`, then the default (2).
+  # Was a literal `1`, which turned one forgotten notes write into an operator
+  # interrupt.
+  defp notes_nudge_cap(%State{meta: meta} = state) do
+    case meta && Map.get(meta, :notes_nudge_cap) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> Wardmast.Tasks.Workspace.notes_gate_nudge_cap(notes_gate_workspace(state))
+    end
+  end
+
+  defp notes_gate_workspace(%State{workspace_id: nil}), do: nil
+
+  defp notes_gate_workspace(%State{workspace_id: workspace_id}) do
+    case Ash.get(Wardmast.Tasks.Workspace, workspace_id) do
+      {:ok, ws} -> ws
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp notes_nudge_prompt(%State{task_id: task_id}, :no_findings) do
+    """
+    bd-48ycdn findings gate: you printed `arb done` for task #{task_id}, but this is
+    a `research`-type directive whose deliverable is a findings summary written to
+    the directive's `notes` field by THIS run — and this run has not written any.
+    The notes already on the ticket were there before you started; they are not
+    your findings, and completion is blocked until you add your own.
+
+    Do EXACTLY this, then print `arb done` again on its own line:
+
+      1. Call the `ticket_update_progress` MCP tool with its `append_notes`
+         argument set to your findings / results summary for this directive
+         (Markdown is fine). If this session has NO Wardmast MCP tools, run
+         `arb ticket update #{task_id} --append-notes "<findings>"` instead.
+      2. Make it self-contained: what you investigated, what you found, and any
+         recommendation or conclusion the coordinator needs.
+
+    If you genuinely could not do the work (a tool or permission you need is
+    missing), say so in the append, naming exactly what was missing. Then print
+    `arb done`.
+    """
+  end
+
+  defp notes_nudge_prompt(%State{task_id: task_id}, _blank) do
+    """
+    bd-5lc99r notes gate: you printed `arb done` for task #{task_id}, but this is
+    a `research`-type directive whose deliverable is a findings summary written to
+    the directive's `notes` field — and `notes` is still blank. A task produces
+    no code change and no PR; the notes ARE the deliverable, so completion is
+    blocked until they exist.
+
+    Do EXACTLY this, then print `arb done` again on its own line:
+
+      1. Call the `ticket_update_progress` MCP tool with its `notes` argument set
+         to your findings / results summary for this directive (Markdown is fine).
+         If this session has NO Wardmast MCP tools, run
+         `arb ticket update #{task_id} --append-notes "<findings>"` instead.
+      2. Make it self-contained: what you investigated, what you found, and any
+         recommendation or conclusion the coordinator needs — they read it via
+         `arb show #{task_id}` and the dashboard.
+
+    Prefer the MCP tool; the `arb` CLI is only for a session without it. Then
+    print `arb done`.
+    """
+  end
+
+  # ---- bd-t9uq25: resume a session that exited mid-task without `arb done` ----
+  #
+  # The deferred stop check routes here when a worker subprocess exits, no other
+  # session is live, and the run never signalled `arb done`. Rather than failing
+  # and discarding the (preserved) worktree, re-spawn the SAME Claude session via
+  # `claude --print --resume <session_id> "<continue>"` so it picks up where it
+  # left off (verified to preserve context headlessly under --print). Bounded
+  # three ways so a stuck agent can't loop forever:
+  #   * a hard attempt cap (`:resume_cap`, default 3),
+  #   * a no-progress guard: if a resumed session exits having changed nothing in
+  #     the worktree (same fingerprint as when it started), stop and fail, and
+  #   * (bd-4g0fsh) a backoff between attempts (`resume_backoff_ms/2`): the
+  #     respawn is scheduled, not inline, so a transient blip has a beat to clear
+  #     before the retry — an instant respawn would just re-hit it.
+  # `:exited_without_done`, `:gateway_error`, and `:quota_exhausted` are
+  # auto-resumed; auth/credit/rate/crash/kill fall straight through to
+  # fail_stopped.
+  # gateway_error: the local proxy got a transient 502/503 from Anthropic; the
+  # session context is intact so a `claude --resume` picks up where it left off
+  # (bd-298jz0 investigation — Mode A from issue #512 harness safety net).
+  # quota_exhausted (bd-3hr6g2): the CLI's own plan usage limit, not a
+  # billing failure — the account provably has capacity again once the window
+  # resets, so a resume (rather than a permanent :failed) is the correct
+  # outcome. Distinct backoff: see resume_backoff_for/2.
+  # async_wait_abandoned (bd-606zlr): the pass armed a Monitor/ScheduleWakeup/
+  # backgrounded command and yielded the turn to await a notification that a
+  # non-interactive `--print` session can never deliver. The session context and
+  # the worktree are both intact — this is the *most* resumable category there
+  # is, and the resume carries corrective guidance so the retry doesn't repeat
+  # the mistake (see resume_continue_prompt/2).
+  @resumable_stop_categories [
+    :exited_without_done,
+    :gateway_error,
+    :quota_exhausted,
+    :async_wait_abandoned,
+    # bd-7wymls: headless agy ended the turn on a `:strict` soft-deny; the
+    # conversation is intact and the model only needs telling to carry on.
+    :permission_denied
+  ]
+
+  defp maybe_resume_continuation(%State{} = state, session) do
+    case destroyed_workspace(state) do
+      nil -> do_maybe_resume_continuation(state, session)
+      # bd-b6noq9: `:exited_without_done` and friends are resumable categories,
+      # but there is nothing to resume INTO — `claude --resume` would be spawned
+      # with a cwd that no longer exists ("spawn: Could not cd to ..."). Fail
+      # with the specific reason instead of burning resume attempts.
+      {kind, path} -> fail_workspace_destroyed(state, kind, path)
+    end
+  end
+
+  defp do_maybe_resume_continuation(%State{} = state, session) do
+    reason = refine_operator_wait(state, classify_stop(session))
+
+    case quota_stop_hold(state, reason) do
+      {:held, held_state} -> held_state
+      :not_held -> resume_or_fail(state, session, reason)
+    end
+  end
+
+  defp resume_or_fail(%State{meta: meta} = state, session, reason) do
+    # The pre-assigned id first: the stream may never have reported one.
+    session_id =
+      (meta && Map.get(meta, :preassigned_session_id)) ||
+        session |> Wardmast.Worker.ClaudeSession.usage_summary() |> Map.get(:session_id)
+
+    cap = resume_cap(meta)
+    attempts = (meta && Map.get(meta, :resume_attempts)) || 0
+    prev_fp = meta && Map.get(meta, :resume_fingerprint)
+    cur_fp = worktree_fingerprint(state)
+
+    weekly_reset = weekly_reset_for(state, reason)
+
+    decision =
+      with :ok <- quota_resume_guard(state, reason, weekly_reset, attempts) do
+        resume_decision(
+          reason.category,
+          session_id,
+          attempts,
+          cap,
+          prev_fp,
+          cur_fp,
+          Map.get(session, :tool_call_count, 0)
+        )
+      end
+
+    case decision do
+      :resume ->
+        # bd-4g0fsh: don't respawn inline — a transient gateway blip needs a beat
+        # to clear. Hold at :starting (a live state, but with no open port) and
+        # schedule the respawn after a bounded backoff. The session that just
+        # exited rides along so the deferred handler can fail cleanly if the
+        # respawn itself can't be built.
+        backoff = resume_backoff_for(reason, attempts, weekly_reset_at: weekly_reset)
+
+        Logger.info(
+          "Worker: bd-4g0fsh scheduling resume task=#{state.task_id} " <>
+            "(#{reason.category}, attempt #{attempts + 1}/#{cap}, backoff #{backoff}ms)"
+        )
+
+        Process.send_after(
+          self(),
+          {:__resume_continuation__, session_id, cur_fp, session},
+          backoff
+        )
+
+        %State{state | state: :starting}
+
+      {:fail, why} ->
+        if why in [:cap_exhausted, :no_progress, :quota_wait_exceeds_max, :provider_not_resumable] do
+          Logger.info(
+            "Worker: task=#{state.task_id} not resuming (#{why}, attempt " <>
+              "#{attempts}/#{cap}) — failing."
+          )
+        end
+
+        fail_unresumable(state, session, reason)
+    end
+  end
+
+  # ---- bd-a6vh2x: a provider quota stop is a hold, not a crash ----------------
+  #
+  # A ticket's own run that stopped because its provider account ran out of
+  # allowance (`StopReason` `:quota_exhausted`: agy `RESOURCE_EXHAUSTED`,
+  # Claude's session/weekly limit, grok's free-usage limit) used to park this
+  # worker — and its slot, port bookkeeping and worktree — for hours until the
+  # reset, or fail into a `run_crashed` attention that the coordinator cleared
+  # by hand with `arb worker resume`. Now the worker finishes at once and the
+  # fleet remembers what to do:
+  #
+  #   1. the account is held until the reset (`Providers.Pause.quota_hold/4`):
+  #      routing stops sending it work, and the quota surfaces list the hold;
+  #   2. the ticket is queued as a held resume (`DispatchQueue.hold_until/6`,
+  #      `quota_resume: true`), which `Dispatch.dispatch/2` replays as a
+  #      session resume in the preserved worktree once the account is free —
+  #      or earlier, on another provider, if routing can already place it;
+  #   3. neither a resume attempt nor a crash is counted, and no escalation
+  #      goes to the coordinator: the held item keeps the ticket's attention
+  #      empty (`Tasks.Lifecycle.Attention`, run fact `:held`).
+  #
+  # Anything this cannot do cleanly — a pass or reviewer, a ticket that has
+  # moved on, an unknown provider, a reset further out than any real plan
+  # window — returns `:not_held` and takes the older path unchanged.
+  @quota_stop_default_wait_ms :timer.hours(1)
+
+  defp quota_stop_hold(%State{} = state, %{category: :quota_exhausted} = reason) do
+    with true <- ticket_run?(state),
+         %Wardmast.Tasks.Issue{state: :active, workspace_id: ws_id} when is_binary(ws_id) <-
+           load_issue(state.task_id),
+         {:ok, agent_type} <- quota_stop_agent_type(state),
+         false <- quota_wait_exceeds_max?(reason.retry_after) do
+      until = quota_stop_until(ws_id, agent_type, reason)
+      {:held, hold_quota_stop(state, reason, ws_id, agent_type, until)}
+    else
+      _ -> :not_held
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Worker: task=#{state.task_id} could not hold a quota stop: #{Exception.message(e)}"
+      )
+
+      :not_held
+  catch
+    :exit, _ -> :not_held
+  end
+
+  defp quota_stop_hold(_state, _reason), do: :not_held
+
+  # The run that authors the ticket: not a fix/conflict pass, not a reviewer.
+  defp ticket_run?(%State{task_id: task_id, meta: meta}) do
+    is_nil(role_from_meta(meta)) and not review_only?(meta) and
+      Wardmast.Worker.ReviewGate.base_task_id(task_id) == task_id
+  end
+
+  defp load_issue(task_id) do
+    case Ash.get(Wardmast.Tasks.Issue, task_id) do
+      {:ok, issue} -> issue
+      _ -> nil
+    end
+  end
+
+  # The agent type (`:claude` / `:gemini` / …) the stopped run was routed to —
+  # the key the quota gate, the pauses and the dispatch queue all share.
+  defp quota_stop_agent_type(%State{} = state) do
+    {provider, _model} = respawn_routing(state)
+    atom = String.to_existing_atom(provider)
+
+    if Map.has_key?(Wardmast.Agents.adapters(), atom), do: {:ok, atom}, else: :error
+  rescue
+    ArgumentError -> :error
+  end
+
+  # The reset: the provider's own word in the stop message, else the quota
+  # probe's latest reading for the account, else a bounded default (the stop
+  # simply re-holds if the account is still dry when it lifts).
+  defp quota_stop_until(ws_id, agent_type, reason) do
+    now = DateTime.utc_now()
+
+    case reason.retry_after || probe_reset_at(ws_id, agent_type, now) do
+      %DateTime{} = at -> DateTime.add(now, quota_resume_backoff_ms(at), :millisecond)
+      nil -> DateTime.add(now, @quota_stop_default_wait_ms, :millisecond)
+    end
+  end
+
+  defp probe_reset_at(ws_id, agent_type, now) do
+    case ws_id
+         |> Wardmast.Quota.latest_for_workspace(agent_type)
+         |> GateSnapshot.normalize() do
+      %{reset_at: %DateTime{} = at} -> if DateTime.compare(at, now) == :gt, do: at
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp hold_quota_stop(%State{} = state, reason, ws_id, agent_type, until) do
+    label = DispatchQueue.provider_label(agent_type)
+
+    Logger.info(
+      "Worker: task=#{state.task_id} stopped on #{label} quota — holding the account until " <>
+        "#{DateTime.to_iso8601(until)} and queueing a resume (no crash counted)"
+    )
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Wardmast.Worker.StopReason.to_map(reason))
+      |> Map.put(:quota_hold_until, until)
+
+    new_state = %State{state | state: :finished, outcome: :failed, waiting_on: nil, meta: meta}
+    # The run row first: the queued resume records the newest run it continues.
+    record_run_finished(new_state)
+
+    unless open_quota_hold(new_state, ws_id, agent_type, until, "#{label} quota exhausted") do
+      # No hold to wait on: this is an ordinary stop after all.
+      Wardmast.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
+    end
+
+    broadcast_lifecycle(:updated, new_state)
+
+    Wardmast.Events.broadcast(ws_id, "worker_quota_held", %{
+      task_id: state.task_id,
+      provider: to_string(agent_type),
+      until: DateTime.to_iso8601(until)
+    })
+
+    new_state
+  end
+
+  # The account hold plus the queued resume; `true` only when the resume is
+  # queued (the account hold alone would strand the ticket).
+  defp open_quota_hold(%State{task_id: task_id}, ws_id, agent_type, until, phrase) do
+    account = quota_stop_account(ws_id, agent_type)
+    _ = Wardmast.Providers.Pause.quota_hold(agent_type, account, until, reason: phrase)
+
+    DispatchQueue.hold_until(
+      ws_id,
+      task_id,
+      [quota_resume: true, routing_role: :resume_session],
+      %{phrase: phrase, window: nil},
+      agent_type,
+      until
+    ) == :ok
+  end
+
+  defp quota_stop_account(ws_id, agent_type) do
+    AccountResolver.get(Wardmast.Quota.account_id(ws_id, agent_type))
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  # A quota stop parks the worker for hours before the resume, so refuse the
+  # park when it cannot pay off. bd-cwq8b0: a provider that cannot rewrite its
+  # argv for `--resume` (grok) would wait that long only to fail: fail now, the
+  # dispatch gate holds the provider and the task goes back to the queue.
+  # bd-3wgdie: a reset time past any real plan window is not worth parking for.
+  @quota_unknown_reset_max_attempts 3
+  defp quota_resume_guard(_state, %{category: category}, _weekly, _attempts)
+       when category != :quota_exhausted,
+       do: :ok
+
+  defp quota_resume_guard(state, reason, weekly_reset, attempts) do
+    reset = reason.retry_after || weekly_reset
+
+    cond do
+      not resumable_in_place?(state) ->
+        {:fail, :provider_not_resumable}
+
+      quota_wait_exceeds_max?(reset) ->
+        {:fail, :quota_wait_exceeds_max}
+
+      # bd-2z3ogf: no reset time anywhere (message nor account snapshot) — a
+      # blind backoff only gets N tries before it escalates.
+      quota_unknown_reset_exhausted?(reset, attempts) ->
+        {:fail, :quota_reset_unknown}
+
+      true ->
+        :ok
+    end
+  end
+
+  @doc false
+  @spec quota_unknown_reset_exhausted?(DateTime.t() | nil, non_neg_integer()) :: boolean()
+  def quota_unknown_reset_exhausted?(reset, attempts),
+    do: is_nil(reset) and attempts >= @quota_unknown_reset_max_attempts
+
+  # bd-2z3ogf: the 7d reset recorded in the account's latest quota snapshot,
+  # consulted only when the stop message carried no reset time of its own.
+  @doc false
+  def weekly_reset_for(%State{} = state, %{category: :quota_exhausted, retry_after: nil}) do
+    now = DateTime.utc_now()
+
+    # `effective_workspace_id/1`, not `load_issue(task_id)`: a `<task>#review`
+    # worker has neither an Issue of its own nor a workspace_id (bd-2z3ogf).
+    with ws_id when is_binary(ws_id) <- effective_workspace_id(state),
+         {:ok, agent_type} <- quota_stop_agent_type(state),
+         %{secondary_reset_at: %DateTime{} = at} <-
+           ws_id |> Wardmast.Quota.latest_for_workspace(agent_type) |> GateSnapshot.normalize(),
+         :gt <- DateTime.compare(at, now) do
+      at
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  def weekly_reset_for(_state, _reason), do: nil
+
+  # bd-cwq8b0: can this worker's provider rewrite its argv for a `--resume`?
+  # Same test `inject_resume_argv/4` applies at respawn time.
+  defp resumable_in_place?(%State{} = state) do
+    {provider, _model} = respawn_routing(state)
+    adapter = agent_adapter_for_provider(provider)
+    Code.ensure_loaded?(adapter) and function_exported?(adapter, :splice_prompt, 2)
+  end
+
+  # bd-7wymls: a task-type worker that can no longer be resumed after a
+  # denial still finalizes through the notes gate, exactly as its clean exit
+  # would have before (bd-2da6ay) — notes recorded in an earlier resumed turn
+  # still complete the directive, and blank notes still fail with the
+  # concrete "strict policy denied command" reason.
+  defp fail_unresumable(%State{} = state, session, %{category: :permission_denied}) do
+    # bd-cwe9n2: a ReviewGate reviewer that was told to wait for this worker's
+    # resume (`{:worker_denied, …}`) must hear when there won't be one.
+    _ =
+      Phoenix.PubSub.broadcast(
+        Wardmast.PubSub,
+        "worker:" <> state.task_id,
+        {:worker_resume_abandoned, state.task_id}
+      )
+
+    if no_pr_type?(state.meta) and not review_only?(state.meta),
+      do: finalize_task_type_stop(state),
+      else: fail_stopped(state, session)
+  end
+
+  defp fail_unresumable(state, session, _reason), do: fail_stopped(state, session)
+
+  # Pure resume/fail decision — isolated so the guard logic (hard cap +
+  # no-progress) is unit-testable without spawning a session. Returns `:resume`
+  # or `{:fail, why}`.
+  @doc false
+  def resume_decision(category, session_id, attempts, cap, prev_fp, cur_fp, tool_calls \\ 0) do
+    cond do
+      category not in @resumable_stop_categories -> {:fail, :not_resumable_category}
+      is_nil(session_id) -> {:fail, :no_session_id}
+      attempts >= cap -> {:fail, :cap_exhausted}
+      no_progress?(category, attempts, prev_fp, cur_fp, tool_calls) -> {:fail, :no_progress}
+      true -> :resume
+    end
+  end
+
+  # The no-progress guard reads "the resumed session changed nothing in the
+  # worktree, so it is stuck". That inference is sound for a stop whose cause is
+  # unknown — but it is exactly wrong for `:async_wait_abandoned` (bd-606zlr).
+  # A pass that dies arming an async wait is, by construction, in its
+  # *verification* phase: the code change is already on disk and the remaining
+  # work (run the suite, run the audit) legitimately writes no files. Its
+  # fingerprint is identical across the resume every single time, so the guard
+  # fired on attempt 2 and failed the worker with the correct, uncommitted fix
+  # still sitting in the worktree — the exact loss this bug is about
+  # (emr-20e8kp, runs beeaac80… then 5b372d81…). Exempt it; the hard attempt
+  # cap above still bounds the retries.
+  defp no_progress?(:async_wait_abandoned, _attempts, _prev_fp, _cur_fp, _calls), do: false
+
+  # bd-7wymls: same reasoning — a turn ended by a denial says nothing about
+  # whether the agent is stuck, and a notes-only (task-type) run legitimately
+  # never touches the worktree. The hard cap still bounds it.
+  defp no_progress?(:permission_denied, _attempts, _prev_fp, _cur_fp, _calls), do: false
+
+  # bd-5hvl7q: an unchanged fingerprint alone is not "no progress" — a segment
+  # that read files, launched a build or investigated writes nothing to the
+  # worktree yet did real work. Progress is therefore (fingerprint changed) OR
+  # (the segment issued at least one tool call). Only a segment that did
+  # neither — it exited without touching a single tool — is stuck. This does
+  # not reopen the infinite-resume loop: the hard attempt cap in
+  # resume_decision/7 is checked first and bounds every category regardless of
+  # activity; the guard only decides whether to stop *earlier* than the cap.
+  defp no_progress?(_category, attempts, prev_fp, cur_fp, tool_calls),
+    do: attempts > 0 and not is_nil(prev_fp) and cur_fp == prev_fp and tool_calls < 1
+
+  # Re-spawn Claude against the SAME session id with a continue prompt chosen by
+  # the classified stop category (bd-606zlr — a terse "keep going" for most
+  # stops, corrective guidance for an abandoned async wait), in the same
+  # worktree. Mirrors respawn_with_commit_nudge/2 but injects
+  # `--resume <session_id>` and does NOT persist the resume argv onto
+  # :claude_spawn — each resume rebuilds from the pristine spawn args + the
+  # latest session id, so we never stack multiple `--resume` flags.
+  defp respawn_with_resume(%State{meta: meta} = state, session_id, fingerprint, session) do
+    spawn_args = meta && Map.get(meta, :claude_spawn)
+
+    {provider, model} = respawn_routing(state)
+
+    prompt =
+      resume_continue_prompt(session_stop_category(session), state.task_id,
+        denied_command: Map.get(session, :denied_command_line),
+        provider: provider,
+        reviewer: (meta || %{})[:role] == :reviewer
+      )
+
+    with %{} = port_args <- spawn_args || :no_spawn_args,
+         {:ok, new_args} <- inject_resume_argv(port_args, session_id, prompt, provider),
+         {:ok, port, scope} <- safe_open_port(new_args, state.task_id) do
+      next_attempts = ((meta && Map.get(meta, :resume_attempts)) || 0) + 1
+
+      Logger.info(
+        "Worker: bd-t9uq25 resuming task=#{state.task_id} session=#{session_id} " <>
+          "(attempt #{next_attempts}/#{resume_cap(meta)})"
+      )
+
+      now = DateTime.utc_now()
+      resume_session_config = session_config_for(state, provider, model)
+
+      # bd-9rdwe4: the resume's short "keep going" continue prompt is a real
+      # follow-up instruction — append it (redacted) to the run's prompt file.
+      append_prompt(state, prompt, resume_session_config)
+
+      session =
+        resume_session_config
+        |> Map.put(:port, port)
+        |> Map.put(:scope, scope)
+        # inject_resume_argv/3 always leaves the prompt inline (the continue
+        # prompt is short), so this is always nil — see the parity note in
+        # respawn_with_nudge/3.
+        |> Map.put(
+          :prompt_tmpfile,
+          get_prompt_tmpfile(agent_adapter_for_provider(provider), new_args.argv)
+        )
+        |> Map.put(:output_lines, [])
+        |> Map.put(:line_buf, "")
+        |> Map.put(:exit_status, nil)
+        |> Map.put(:exited_at, nil)
+        |> Map.put(:started_at, now)
+        |> Map.put(:activity, "resuming")
+        |> Map.put(:activity_at, now)
+        |> Map.put(:output_log, open_output_log(state))
+        |> Map.put(:run_id, state.run_id)
+
+      new_meta =
+        (meta || %{})
+        |> Map.put(:resume_attempts, next_attempts)
+        |> Map.put(:resume_fingerprint, fingerprint)
+
+      sessions = Map.put(state.claude_sessions, port, session)
+
+      {:ok,
+       note_scope(
+         %State{
+           state
+           | claude_sessions: sessions,
+             meta: new_meta,
+             state: :working,
+             step_started_at: now
+         },
+         scope
+       )}
+    else
+      :no_spawn_args -> {:error, :no_spawn_args}
+      {:error, _} = err -> err
+      other -> {:error, {:unexpected, other}}
+    end
+  end
+
+  defp resume_cap(meta) do
+    (meta && Map.get(meta, :resume_cap)) ||
+      Application.get_env(:wardmast, :worker_resume_cap, 3)
+  end
+
+  # bd-4g0fsh: backoff (ms) before the `attempt`-th auto-resume of a recoverable
+  # stop. Pure: exponential in `attempt` (0-based), with a category-specific base
+  # and a hard ceiling so the bounded retry budget can never wait absurdly long.
+  # A gateway blip gets a longer initial wait than a clean exit-without-done,
+  # which has no infra to recover from.
+  @doc false
+  @spec resume_backoff_ms(atom(), non_neg_integer()) :: non_neg_integer()
+  def resume_backoff_ms(category, attempt) when is_integer(attempt) and attempt >= 0 do
+    base = Map.get(@resume_backoff_base_ms, category, @resume_backoff_default_base_ms)
+    min(base * Integer.pow(2, attempt), @resume_backoff_max_ms)
+  end
+
+  # bd-3hr6g2: a 5h usage-limit exhaustion is recoverable, but on an hours-long
+  # provider timer — not a network blip. Feeding it through the exponential
+  # backoff above (capped at 30s) would hammer a `--resume` every 30 seconds
+  # for hours, itself indistinguishable from abuse and certain to just re-hit
+  # the same limit. Instead wait until the CLI's own reported reset time (plus
+  # a short buffer for clock skew), falling back to the known 5h window length
+  # when no reset timestamp was parsed from the crash output.
+  @quota_reset_buffer_ms 60_000
+  # bd-2z3ogf: the 5h window is retired; with no reset time known (neither in
+  # the stop message nor the account's 7d snapshot) wait a bounded, doubling
+  # backoff and escalate after this many attempts instead of a blind 5h park.
+  @quota_unknown_reset_base_ms :timer.hours(1)
+  @quota_unknown_reset_cap_ms :timer.hours(4)
+
+  # bd-3wgdie: the module docstring covers both the 5h AND the 7-day plan
+  # limit under the same :quota_exhausted category, and a malformed/adversarial
+  # reset epoch in the crash output is otherwise unbounded — `resume_backoff_ms/2`
+  # deliberately caps at `@resume_backoff_max_ms` for the same reason. Anything
+  # past the longest real plan window (7 days) plus slack is not a wait worth
+  # holding a live worker + worktree for; `quota_wait_exceeds_max?/1` routes
+  # those to `resume_decision/6` as a fail (escalated, not silently parked), and
+  # this ceiling is a defense-in-depth clamp on top for any other caller.
+  @quota_max_wait_ms :timer.hours(24 * 8)
+
+  @doc false
+  @spec resume_backoff_for(Wardmast.Worker.StopReason.t(), non_neg_integer(), keyword()) ::
+          non_neg_integer()
+  def resume_backoff_for(reason, attempt, opts \\ [])
+
+  def resume_backoff_for(
+        %Wardmast.Worker.StopReason{category: :quota_exhausted} = reason,
+        attempt,
+        opts
+      ) do
+    quota_resume_backoff_ms(reason.retry_after, Keyword.put(opts, :attempt, attempt))
+  end
+
+  def resume_backoff_for(%Wardmast.Worker.StopReason{category: category}, attempt, _opts) do
+    resume_backoff_ms(category, attempt)
+  end
+
+  @doc false
+  @spec quota_resume_backoff_ms(DateTime.t() | nil, keyword()) :: non_neg_integer()
+  def quota_resume_backoff_ms(retry_after, opts \\ [])
+
+  # No reset in the message: prefer the account snapshot's 7d reset
+  # (`:weekly_reset_at`), clamped and checked like any parsed reset; else a
+  # bounded doubling backoff by `:attempt` (the guard escalates after N).
+  def quota_resume_backoff_ms(nil, opts) do
+    case Keyword.get(opts, :weekly_reset_at) do
+      %DateTime{} = at ->
+        if quota_wait_exceeds_max?(at),
+          do: @quota_max_wait_ms,
+          else: quota_resume_backoff_ms(at)
+
+      _ ->
+        attempt = Keyword.get(opts, :attempt, 0)
+        min(@quota_unknown_reset_base_ms * Integer.pow(2, attempt), @quota_unknown_reset_cap_ms)
+    end
+  end
+
+  def quota_resume_backoff_ms(%DateTime{} = retry_after, _opts) do
+    ms =
+      case DateTime.diff(retry_after, DateTime.utc_now(), :millisecond) do
+        ms when ms > 0 -> ms + @quota_reset_buffer_ms
+        _ -> @quota_reset_buffer_ms
+      end
+
+    min(ms, @quota_max_wait_ms)
+  end
+
+  # bd-3wgdie: true when the CLI-reported reset time is far enough out that
+  # waiting for it live (rather than failing + escalating) would park a worker
+  # and its worktree for longer than any real plan window justifies — e.g. a
+  # bad epoch parse or a 7-day-limit message misclassified with a bogus reset.
+  @doc false
+  @spec quota_wait_exceeds_max?(DateTime.t() | nil) :: boolean()
+  def quota_wait_exceeds_max?(nil), do: false
+
+  def quota_wait_exceeds_max?(%DateTime{} = retry_after) do
+    DateTime.diff(retry_after, DateTime.utc_now(), :millisecond) > @quota_max_wait_ms
+  end
+
+  # Insert `--resume <session_id>` immediately after `--print` and swap in the
+  # (short, terse) continue prompt. Delegates the actual splice to
+  # `Wardmast.Agents.Claude.splice_prompt/2`, which understands both argv
+  # shapes `Wardmast.Agents.Claude.build_argv/3` can produce: the ordinary
+  # inline prompt (replaced) and the bd-11abk2 stdin/tmpfile delivery for
+  # oversized prompts (the tmpfile positional is dropped — the resume prompt
+  # is always small, so it goes back to plain inline delivery). No `--print`
+  # slot (test fixtures / custom commands) → can't build a resume invocation,
+  # so the caller falls back to failing.
+  @doc false
+  def inject_resume_argv(port_args, session_id, prompt, provider \\ "claude")
+
+  def inject_resume_argv(%{argv: argv} = port_args, session_id, prompt, provider)
+      when is_list(argv) and is_binary(session_id) do
+    adapter = agent_adapter_for_provider(provider)
+
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :splice_prompt, 2) do
+      # Dynamic on purpose — see the note on inject_nudge_argv/3 above.
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      case apply(adapter, :splice_prompt, [argv, ["--resume", session_id, prompt]]) do
+        {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
+        {:error, _} = err -> err
+      end
+    else
+      {:error, :unsupported_provider}
+    end
+  end
+
+  def inject_resume_argv(_port_args, _session_id, _prompt, _provider), do: {:error, :missing_argv}
+
+  # bd-2aslx6 (#1428): which provider is this run actually driving?
+  #
+  # `meta[:routing_config]` is only ever reported by `Wardmast.Worker.Dispatch`.
+  # A worker spawned by the ReviewGate, the MergeQueue fix-pass dispatcher or
+  # the conflict resolver never has one, so the old
+  # `Map.get(routing_config, :provider) || "claude"` made every gate-nudge and
+  # auto-resume respawn on those paths pick the *Claude* adapter to rewrite the
+  # argv with — and stamp `provider: "claude"` on the respawned session's ledger
+  # row — no matter which CLI the run was really driving. The sessions the
+  # worker already owns know their own provider (threaded in at spawn), so fall
+  # back to the most recent one before falling back to Claude.
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp respawn_routing(%State{meta: meta} = state) do
+    routing_config = (meta && Map.get(meta, :routing_config)) || %{}
+    model = Map.get(routing_config, :model)
+
+    case Map.get(routing_config, :provider) do
+      provider when is_binary(provider) and provider != "" ->
+        {provider, model}
+
+      _ ->
+        case latest_session(state) do
+          %{} = session ->
+            {Map.get(session, :provider) || "claude", model || Map.get(session, :model)}
+
+          nil ->
+            {"claude", model}
+        end
+    end
+  end
+
+  # The most recently STARTED session this worker owns, or nil when it owns
+  # none (a respawn before any session opened can't happen — `:claude_spawn` is
+  # stashed by the same handler that records the session — but nil-safety keeps
+  # `respawn_routing/1` total).
+  defp latest_session(%State{claude_sessions: sessions}) do
+    sessions
+    |> Map.values()
+    |> Enum.filter(&is_struct(Map.get(&1, :started_at), DateTime))
+    |> Enum.max_by(&Map.get(&1, :started_at), DateTime, fn -> nil end)
+  end
+
+  defp agent_adapter_for_provider(provider) do
+    case provider do
+      "gemini" -> Wardmast.Agents.Gemini
+      "codex" -> Wardmast.Agents.Codex
+      "grok" -> Wardmast.Agents.Grok
+      "qwen" -> Wardmast.Agents.Qwen
+      _ -> Wardmast.Agents.Claude
+    end
+  end
+
+  defp get_prompt_tmpfile(adapter, argv) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :prompt_tmpfile, 1) do
+      adapter.prompt_tmpfile(argv)
+    else
+      nil
+    end
+  end
+
+  # Re-classify the session that just exited so the resume nudge can address
+  # the actual cause. Mirrors `clean_exit_without_done?/1`.
+  defp session_stop_category(session) when is_map(session),
+    do: classify_stop(session).category
+
+  defp session_stop_category(_), do: :exited_without_done
+
+  @doc """
+  The follow-up instruction sent with a `--resume`, chosen by the classified
+  stop category.
+
+  Public for the same reason as `resume_decision/6`: it is pure, and the
+  corrective wording is the actual fix for bd-606zlr, so it deserves a test
+  that does not have to spawn a session.
+  """
+  @spec resume_continue_prompt(atom(), String.t(), keyword()) :: String.t()
+  def resume_continue_prompt(category, task_id, opts \\ [])
+
+  # bd-7wymls: agy ends a headless turn on a `:strict` soft-deny, before the
+  # model can act on agy's own "Proceed without performing this action" — so
+  # the resume has to say it. Run fc54ef4a's retry (a fresh session with the
+  # notes nudge) chained `pwd && git status`, got soft-denied again, and died.
+  # Hence the explicit "don't retry / one command per call / record notes"
+  # guidance.
+  def resume_continue_prompt(:permission_denied, task_id, opts) do
+    if Keyword.get(opts, :reviewer, false),
+      do: reviewer_permission_denied_prompt(task_id, opts),
+      else: worker_permission_denied_prompt(task_id, opts)
+  end
+
+  # bd-bxwsvo: agy has no `Monitor` / `TaskOutput` / `Bash`, and on agy 1.2.12
+  # ending the turn with a background task running is the correct way to wait
+  # — the CLI keeps the session alive (up to 30m) and wakes the agent with a
+  # completion message. The only abandoned wait left is a command that outlived
+  # that cap and was killed on exit, so the correction is about the cap, and it
+  # must not reintroduce the polling loop bd-90kjvk burned a Gemini window on.
+  def resume_continue_prompt(:async_wait_abandoned, task_id, opts) do
+    if Keyword.get(opts, :provider) == "gemini" do
+      agy_async_wait_abandoned_prompt(task_id)
+    else
+      claude_async_wait_abandoned_prompt(task_id)
+    end
+  end
+
+  def resume_continue_prompt(_category, task_id, _opts) do
+    """
+    Your previous session for task #{task_id} ended before you finished — you
+    did not print `arb done`. Your work so far is preserved in this worktree.
+    Pick up exactly where you left off, complete the remaining work, and when the
+    task is fully done print `arb done` on its own line.
+    """
+  end
+
+  @doc """
+  The prompt a manual session resume (`arb worker resume`) sends: the terse
+  continue nudge, preceded by any unread coordinator direction for the task
+  (bd-kxzrk9) — a resumed session replays its old context and would otherwise
+  never look at its mailbox.
+  """
+  @spec manual_resume_prompt(String.t()) :: String.t()
+  def manual_resume_prompt(task_id) do
+    Wardmast.Worker.CoordinatorDirectives.section(task_id) <>
+      Wardmast.Worker.SendBackBrief.section(task_id) <>
+      resume_continue_prompt(:manual_resume, task_id)
+  end
+
+  defp worker_permission_denied_prompt(task_id, opts) do
+    denied =
+      case Keyword.get(opts, :denied_command) do
+        cmd when is_binary(cmd) and cmd != "" -> "Your command `#{cmd}` was"
+        _ -> "An action you attempted was"
+      end
+
+    """
+    Your previous turn for task #{task_id} was cut short. #{denied} denied by
+    this workspace's strict permission policy, and a non-interactive session
+    cannot ask for approval, so the turn ended. Your work so far is preserved.
+
+    That denial is the policy working as intended. Do NOT retry the command,
+    rephrase it, or reach the same result another way (another tool, a script,
+    `sh -c`, python, curl). Carry on without it:
+
+      1. Run one command per `run_command` call. Every part of a chained
+         command (`a && b`, `a; b`, `a | b`) must be allowed on its own, so one
+         disallowed part denies the whole line and ends your turn again.
+      2. If the task cannot be finished without the denied action, say so in
+         your findings: what you could not do, and why.
+      3. Record your findings or results in the task's `notes` with the
+         `ticket_update_progress` MCP tool (`arb` is also allowed).
+
+    Then finish the remaining work and print `arb done` on its own line.
+    """
+  end
+
+  # bd-cwe9n2: the reviewer variant. A ReviewGate reviewer's deliverable is a
+  # `VERDICT:` line, not task notes, and it must not be told to `arb done`.
+  defp reviewer_permission_denied_prompt(task_id, opts) do
+    denied =
+      case Keyword.get(opts, :denied_command) do
+        cmd when is_binary(cmd) and cmd != "" -> "Your command `#{cmd}` was"
+        _ -> "An action you attempted was"
+      end
+
+    """
+    Your previous review turn for task #{task_id} was cut short. #{denied} denied
+    by this workspace's permission policy, and a non-interactive session cannot
+    ask for approval, so the turn ended. What you have read so far is preserved.
+
+    Do NOT retry the command, rephrase it, or reach the same result another way.
+    You have the diff in your checkout: use `git diff`, `git log` and `git show`,
+    one command per `run_command` call (every part of a chained line is checked
+    on its own). Read-only tracker commands (`gh pr view`, `gh pr diff`,
+    `gh pr checks`, `glab mr view`, `glab mr diff`) are allowed; posting comments,
+    reviews or merging is not, and is not your job.
+
+    Finish the review from what you have and end with the `VERDICT:` line
+    (`VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`) on its own line, followed
+    by your findings.
+    """
+  end
+
+  defp agy_async_wait_abandoned_prompt(task_id) do
+    """
+    Your previous session for task #{task_id} ended before you finished — you
+    did not print `arb done`. Your work so far is preserved in this worktree.
+
+    It ended because a background command was still running when agy's own
+    background-wait cap ran out: agy waits at most 30 minutes after your turn
+    ends for background tasks, then kills them on exit. Ending your turn to wait
+    for a command is correct; a command that needs longer than 30 minutes is
+    not. Do this instead:
+
+      1. FIRST, commit whatever correct work is already in the worktree, before
+         running any long verification. Verification confirms work; it must
+         never be the thing that loses it.
+      2. Narrow the command so it finishes well inside 30 minutes — run the
+         specific test files you changed rather than the whole suite, or split
+         the run into parts.
+      3. Launch it with `run_command`, then end your turn. agy wakes you with a
+         system message when it finishes. Do NOT poll it with `manage_task`,
+         re-read its log, or `sleep` in a loop while it runs.
+
+    Then complete the remaining work, and when the task is fully done print
+    `arb done` on its own line.
+    """
+  end
+
+  defp claude_async_wait_abandoned_prompt(task_id) do
+    """
+    Your previous session for task #{task_id} ended before you finished — you
+    did not print `arb done`. Your work so far is preserved in this worktree.
+
+    It ended because of a specific, avoidable mistake, and you must not repeat
+    it: you armed an asynchronous wait — a `Monitor`, a `ScheduleWakeup`, or a
+    backgrounded `Bash` command — and then ended your turn to wait for the
+    notification. This session is NON-INTERACTIVE (`claude --print`). The agent
+    loop ends the instant a turn contains no tool call, so your process exited
+    right there and that notification could never be delivered. Nothing was
+    waiting to wake you up. Any uncommitted work would have been thrown away.
+
+    Recognising that the command exceeds the tool-call timeout was correct. The
+    way you waited was not. Do this instead:
+
+      1. FIRST, commit whatever correct work is already in the worktree, before
+         running any long verification. Verification confirms work; it must
+         never be the thing that loses it. A commit you later amend costs
+         nothing.
+      2. Prefer a command that fits: raise the `Bash` tool's own `timeout`
+         parameter (up to 600000 ms / 10 minutes), or narrow the command —
+         run the specific failing test files rather than the whole suite.
+      3. If a command DOES get backgrounded, drain it synchronously in the SAME
+         turn: call `TaskOutput` with `"block": true` and a generous `timeout`,
+         and keep calling it until it reports the task finished. Read its
+         output file with `Read` if you need interim progress.
+      4. NEVER use `Monitor` or `ScheduleWakeup` to wait for anything. Their
+         notifications cannot reach you here.
+      5. NEVER end a turn while a background task is still pending. A turn with
+         no tool call ends your session permanently.
+
+    Now pick up exactly where you left off, complete the remaining work, and
+    when the task is fully done print `arb done` on its own line.
+    """
+  end
+
+  # A content fingerprint of the worktree's work-in-progress: HEAD commit +
+  # tracked diff vs HEAD + the set of untracked files. The no-progress guard
+  # compares it across a resume — an identical fingerprint means the resumed
+  # session changed nothing. nil when there's no worktree on disk (the hard cap
+  # still bounds attempts).
+  defp worktree_fingerprint(%State{meta: meta}) do
+    worktree = meta && Map.get(meta, :worktree_path)
+
+    if is_binary(worktree) and File.dir?(worktree) do
+      payload =
+        [
+          git_out(worktree, ["rev-parse", "HEAD"]),
+          git_out(worktree, ["diff", "HEAD"]),
+          git_out(worktree, ["ls-files", "--others", "--exclude-standard"])
+        ]
+        |> Enum.join("\n")
+
+      :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower)
+    end
+  end
+
+  defp git_out(worktree, args) do
+    case Wardmast.Worker.PrivateClone.cmd(worktree, args, stderr_to_stdout: true) do
+      {out, 0} -> out
+      _ -> ""
+    end
+  rescue
+    _ -> ""
+  end
+
+  # Final park: record on the task, escalate to the coordinator, fail the worker.
+  # We deliberately do NOT auto-commit (per bd-ofql8k: "Prefer send-back/retry
+  # over a blind auto-commit (so half-work/junk is not committed)") — an
+  # uncommitted worktree at gate-cap is escalated for human / dispatcher
+  # judgement, not silently buried.
+  defp park_commit_gate(%State{} = state, reason, why) do
+    {failure_reason, subject} = commit_gate_failure_metadata(reason)
+    summary = commit_gate_summary(state, reason, why)
+    subject = subject <> dirty_paths_suffix(state, reason)
+
+    record_commit_gate_note(state, reason, why, summary)
+    escalate_commit_gate(state, subject, summary)
+
+    if why == :cap_exhausted,
+      do: emit_gate_cap_hit(state, :commit_gate, commit_gate_attempts_key(reason))
+
+    meta =
+      (state.meta || %{})
+      |> Map.put(:commit_gate_reason, reason)
+      |> Map.put(:commit_gate_detail, why)
+
+    fail_now(%State{state | meta: meta}, failure_reason)
+  end
+
+  # bd-4qjl0q: a gate escalating because its send-back budget ran out is a cap
+  # hit — counted on the events stream alongside the ReviewGate's round cap, so
+  # "how often does the cap fire, and what did the coordinator decide after"
+  # is answerable from `gate_cap_hit` + `gate_resolved` events.
+  defp emit_gate_cap_hit(%State{meta: meta} = state, gate, attempts_key) do
+    cap =
+      case {gate, attempts_key} do
+        {:notes_gate, _} -> notes_nudge_cap(state)
+        {:commit_gate, :prepush_nudge_attempts} -> prepush_nudge_cap(meta)
+        {:commit_gate, _} -> commit_nudge_cap(meta)
+      end
+
+    Resolutions.cap_hit(%{
+      workspace_id: state.workspace_id,
+      task_id: state.task_id,
+      gate: gate,
+      rounds: (meta && Map.get(meta, attempts_key)) || 0,
+      cap: cap
+    })
+  end
+
+  defp commit_gate_attempts_key(:prepush_failed), do: :prepush_nudge_attempts
+  defp commit_gate_attempts_key(_reason), do: :commit_nudge_attempts
+
+  defp commit_gate_failure_metadata(:uncommitted),
+    do: {:uncommitted_at_completion, "Worker signalled done with uncommitted work"}
+
+  defp commit_gate_failure_metadata(:no_commits),
+    do: {:no_commits_at_completion, "Worker signalled done with no commits on branch"}
+
+  defp commit_gate_failure_metadata(:prepush_failed),
+    do: {:prepush_check_failed, "Worker's pre-push check (worker.prepush_check) is still red"}
+
+  defp commit_gate_failure_metadata(:secret_in_commit),
+    do:
+      {:secret_in_commit,
+       "Worker committed an Wardmast-injected agent-config (bearer-token) file"}
+
+  # Pre-existing complexity 16 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp commit_gate_summary(%State{task_id: task_id, meta: meta}, reason, why) do
+    view = prepush_view(meta)
+
+    branch =
+      (view && (Map.get(view, :branch) || Map.get(view, :fix_pass_branch))) || "(unknown)"
+
+    target = (meta && Map.get(meta, :target_branch)) || "main"
+    worktree = (view && Map.get(view, :worktree_path)) || "(unknown)"
+    attempts_key = commit_gate_attempts_key(reason)
+    attempts = (meta && Map.get(meta, attempts_key)) || 0
+
+    cap =
+      if reason == :prepush_failed,
+        do: prepush_nudge_cap(meta || %{}),
+        else: commit_nudge_cap(meta)
+
+    status = commit_gate_git_status(worktree)
+
+    reason_blurb =
+      case reason do
+        :uncommitted ->
+          uncommitted_blurb(worktree, branch, target, status)
+
+        :no_commits ->
+          "branch `#{branch}` has zero commits ahead of `#{target}`. Either " <>
+            "the worker did no work, or its edits landed elsewhere."
+
+        :prepush_failed ->
+          Wardmast.Worker.PrepushCheck.failure_blurb(prepush_view(meta || %{}))
+
+        :secret_in_commit ->
+          "SECURITY: the committed diff (#{target}..HEAD on `#{branch}`) contains " <>
+            "an Wardmast-injected agent-config file (.mcp.json / .gemini/ / .codex/ / " <>
+            ".arbiter/INBOX). " <>
+            "Offending path(s): #{injected_config_paths_blurb(worktree, target)}. " <>
+            "The .mcp.json / .gemini/ / .codex/ files carry per-spawn bearer tokens and " <>
+            "must NEVER appear in VCS. " <>
+            "Incident response: (1) ensure the PR is squash-merged so the token leaves " <>
+            "history; (2) let the 24 h TTL expire — no per-token revoke exists; " <>
+            "(3) rotate SECRET_KEY_BASE only if the token's scope warrants it (nuclear: " <>
+            "kills ALL tokens)."
+      end
+
+    detail_blurb =
+      case why do
+        :no_retry ->
+          "Hard-refused without nudge — a secret-bearing file in the committed diff " <>
+            "cannot be fixed by re-running the worker."
+
+        :cap_exhausted ->
+          "Nudge cap reached: tried #{attempts}/#{cap} send-back attempt(s) and " <>
+            "the worktree is still in the failed state."
+
+        {:respawn_failed, sub} ->
+          "Could not relaunch the worker for a send-back nudge: #{inspect(sub)}."
+
+        other ->
+          "Detail: #{inspect(other)}."
+      end
+
+    """
+    bd-ofql8k commit gate tripped for task #{task_id}: #{reason_blurb}
+
+    #{detail_blurb}
+
+    Worktree: #{worktree}
+    Branch: #{branch} → #{target}
+
+    git status (--porcelain):
+    #{status}
+    """
+    |> String.trim()
+  end
+
+  # The :uncommitted reason says nothing about commits: the branch may well be
+  # ahead of the target (bd-diytcc), so the message reports the real state.
+  defp uncommitted_blurb(worktree, branch, target, status) do
+    ahead =
+      if is_binary(worktree),
+        do: Wardmast.Worker.Worktree.commits_ahead_count(worktree, target),
+        else: :unknown
+
+    lead =
+      case ahead do
+        0 ->
+          "the worktree has uncommitted changes (staged/unstaged/untracked) " <>
+            "but no commits made it onto branch `#{branch}`. The review gate " <>
+            "would diff `#{target}..HEAD`, see empty, and falsely report 'no work'."
+
+        n when is_integer(n) ->
+          "branch `#{branch}` is #{n} commit(s) ahead of `#{target}`, but the worktree " <>
+            "still has uncommitted changes (staged/unstaged/untracked), listed below. " <>
+            "The review gate diffs `#{target}..HEAD`, so they are not part of what " <>
+            "gets reviewed or pushed."
+
+        :unknown ->
+          "the worktree has uncommitted changes (staged/unstaged/untracked); whether " <>
+            "branch `#{branch}` has commits ahead of `#{target}` could not be determined."
+      end
+
+    deleted = tracked_deletion_count(status)
+
+    if deleted > 0 do
+      lead <>
+        " #{deleted} tracked file(s) deleted in the worktree (` D`/`D ` below): " <>
+        "if the worker did not delete them on purpose, they were lost outside the " <>
+        "worker's commits (restore with `git checkout -- <path>`)."
+    else
+      lead
+    end
+  end
+
+  @dirty_paths_in_subject 5
+
+  # The escalation subject names the dirty paths, so a stray Wardmast-side change
+  # (a tracked file deleted under the worker) reads differently from real
+  # uncommitted work without opening the body (bd-g9sh0j).
+  defp dirty_paths_suffix(%State{meta: meta}, :uncommitted) do
+    view = prepush_view(meta || %{})
+
+    case Map.get(view, :worktree_path) do
+      worktree when is_binary(worktree) ->
+        paths =
+          worktree
+          |> commit_gate_porcelain()
+          |> String.split("\n", trim: true)
+          |> Enum.flat_map(fn
+            <<_xy::binary-size(2), " ", path::binary>> -> [path]
+            _ -> []
+          end)
+
+        {shown, rest} = Enum.split(paths, @dirty_paths_in_subject)
+        more = if rest == [], do: "", else: ", +#{length(rest)} more"
+        if shown == [], do: "", else: ": " <> Enum.join(shown, ", ") <> more
+
+      _ ->
+        ""
+    end
+  end
+
+  defp dirty_paths_suffix(_state, _reason), do: ""
+
+  defp tracked_deletion_count(status) do
+    status
+    |> String.split("\n", trim: true)
+    # `status` is the indented `git status --porcelain` block: `  XY path`.
+    |> Enum.count(&Regex.match?(~r/^  (?:D.|.D) /, &1))
+  end
+
+  defp injected_config_paths_blurb(worktree, target) when is_binary(worktree) do
+    case Wardmast.Worker.Worktree.injected_config_paths_in_commits(worktree, target) do
+      {:ok, [_ | _] = paths} -> Enum.join(paths, ", ")
+      _ -> "(could not list them; run `git diff --name-only --diff-filter=A #{target}...HEAD`)"
+    end
+  end
+
+  defp injected_config_paths_blurb(_worktree, _target), do: "(no worktree path)"
+
+  defp commit_gate_git_status(path) when is_binary(path) do
+    case Wardmast.Worker.PrivateClone.cmd(path, ["status", "--porcelain"], stderr_to_stdout: true) do
+      {"", 0} -> "  (clean)"
+      {out, 0} -> indent(out)
+      {out, _} -> "  (could not run git status: " <> String.trim(out) <> ")"
+    end
+  rescue
+    _ -> "  (git status unavailable)"
+  end
+
+  defp commit_gate_git_status(_), do: "  (no worktree path)"
+
+  # Raw `git status --porcelain` (`XY path` lines, no indent), or "" when it
+  # cannot be read: the subject suffix parses this, not the indented summary.
+  defp commit_gate_porcelain(path) do
+    case Wardmast.Worker.PrivateClone.cmd(path, ["status", "--porcelain"], stderr_to_stdout: true) do
+      {out, 0} -> out
+      _ -> ""
+    end
+  rescue
+    _ -> ""
+  end
+
+  defp indent(text) do
+    text
+    |> String.trim_trailing()
+    |> String.split("\n")
+    |> Enum.map_join("\n", &("  " <> &1))
+  end
+
+  defp record_commit_gate_note(%State{task_id: task_id}, _reason, _why, summary) do
+    stamp = DateTime.utc_now() |> DateTime.to_iso8601()
+    block = "## Commit gate tripped (#{stamp})\n\n#{summary}"
+
+    with {:ok, task} <- Ash.get(Wardmast.Tasks.Issue, task_id) do
+      notes =
+        [task.notes, block]
+        |> Enum.reject(&(&1 in [nil, ""]))
+        |> Enum.join("\n\n")
+
+      case Ash.update(task, %{notes: notes}, action: :update) do
+        {:ok, _} -> :ok
+        {:error, reason} -> log_commit_gate_warning(task_id, reason)
+      end
+    end
+
+    :ok
+  rescue
+    e -> log_commit_gate_warning(task_id, e)
+  end
+
+  defp escalate_commit_gate(%State{workspace_id: ws_id, task_id: task_id}, subject, summary)
+       when is_binary(ws_id) do
+    Wardmast.Messages.Escalation.post(%{
+      kind: :commit_gate,
+      from_ref: task_id,
+      workspace_id: ws_id,
+      task_ref: task_id,
+      subject: "Commit gate: #{subject} (#{task_id})",
+      body: Resolutions.append_footer(summary, task_id, :commit_gate)
+    })
+
+    :ok
+  rescue
+    e -> log_commit_gate_warning(task_id, e)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate_commit_gate(_state, _subject, _summary), do: :ok
+
+  defp log_commit_gate_warning(task_id, reason) do
+    Logger.warning(
+      "Worker: commit-gate escalation swallowed for task=#{task_id}: #{inspect(reason)}"
+    )
+
+    :error
+  end
+
+  # bd-5lc99r: the notes gate could not be satisfied (nudge cap exhausted or the
+  # send-back relaunch failed). Escalate to the coordinator and fail the worker so
+  # the directive is not silently closed without its findings deliverable.
+  #
+  # Unlike the commit gate, we deliberately do NOT write the gate-trip summary
+  # into `notes` — that field IS what the gate checks, so polluting it would let
+  # a re-dispatched worker satisfy the gate without producing real findings. The
+  # escalation mail surfaces the trip to the coordinator instead.
+  defp park_notes_gate(%State{} = state, why, kind) do
+    summary = notes_gate_summary(state, why, kind)
+    escalate_notes_gate(state, summary, notes_gate_subject(state, kind))
+    if why == :cap_exhausted, do: emit_gate_cap_hit(state, :notes_gate, :notes_nudge_attempts)
+
+    meta = Map.put(state.meta || %{}, :notes_gate_detail, why)
+    fail_now(%State{state | meta: meta}, notes_gate_failure_reason(meta, kind))
+  end
+
+  defp notes_gate_subject(%State{task_id: task_id}, :no_findings),
+    do: "Notes gate: no findings written by this run of research-type directive (#{task_id})"
+
+  defp notes_gate_subject(_state, _blank), do: nil
+
+  # bd-25ivqe AC4: blank notes at `arb done` is usually a genuine missing
+  # deliverable, but under `:strict` it can also mean the worker never got to
+  # write anything — every `run_command` it tried (starting with reading its
+  # own mailbox) was auto-denied because the policy's `permissions.allow`
+  # didn't name it. `:denied_command` (synced from the session by
+  # `sync_session_meta/2`, stamped by `ClaudeSession.capture_steps/2` off an
+  # agy ERROR tool step) distinguishes the two: when present, the run failed
+  # because a required command was denied, not because the agent simply
+  # forgot to write findings — report that concretely rather than folding it
+  # into the generic `:blank_notes_at_completion` catch-all.
+  #
+  # bd-7wymls: "required" only when the denied line really is one of the
+  # worker-protocol bootstrap commands — run fc54ef4a reported "strict policy
+  # denied required command `pwd`" for a `pwd && git status` nobody requires.
+  # A meta without the full line (pre-bd-7wymls) keeps the old wording.
+  defp notes_gate_failure_reason(meta, kind) do
+    case Map.get(meta || %{}, :denied_command) do
+      cmd when is_binary(cmd) and cmd != "" ->
+        if denied_bootstrap_command?(meta),
+          do: "strict policy denied required command `#{cmd}`",
+          else: "strict policy denied command `#{cmd}`"
+
+      _ ->
+        notes_gate_blank_reason(kind)
+    end
+  end
+
+  defp notes_gate_blank_reason(:no_findings), do: :no_findings_written_this_run
+  defp notes_gate_blank_reason(_), do: :blank_notes_at_completion
+
+  defp denied_bootstrap_command?(meta) do
+    case Map.get(meta, :denied_command_line) do
+      line when is_binary(line) -> GeminiSecurity.bootstrap_command?(line)
+      _ -> true
+    end
+  end
+
+  defp notes_gate_summary(%State{task_id: task_id, meta: meta} = state, why, :no_findings) do
+    attempts = (meta && Map.get(meta, :notes_nudge_attempts)) || 0
+    cap = notes_nudge_cap(state)
+
+    detail_blurb =
+      case why do
+        :cap_exhausted ->
+          "Nudge cap reached: tried #{attempts}/#{cap} send-back attempt(s) and " <>
+            "this run still wrote nothing to `notes`."
+
+        {:respawn_failed, sub} ->
+          "Could not relaunch the worker for a send-back nudge: #{inspect(sub)}."
+
+        other ->
+          "Detail: #{inspect(other)}."
+      end
+
+    """
+    bd-48ycdn findings gate tripped for task #{task_id}: this is a `research`-type
+    directive whose deliverable is a findings summary in `notes`. `arb done` was
+    signalled, but no findings were written by this run: `notes` already held text
+    from before the run (or from someone else), and the run's own actor never
+    changed it.
+
+    #{detail_blurb}#{notes_gate_denial_blurb(meta)}
+
+    The ticket is parked, not completed. Typical causes: the run had no Wardmast MCP
+    tools or no `arb` on its PATH, or its token was refused (403, e.g. no
+    `research_read`), so it could not write. Check the run's output, fix what it
+    was missing, and re-dispatch.
+    """
+    |> String.trim()
+  end
+
+  defp notes_gate_summary(%State{task_id: task_id, meta: meta} = state, why, _blank) do
+    attempts = (meta && Map.get(meta, :notes_nudge_attempts)) || 0
+    cap = notes_nudge_cap(state)
+
+    detail_blurb =
+      case why do
+        :cap_exhausted ->
+          "Nudge cap reached: tried #{attempts}/#{cap} send-back attempt(s) and " <>
+            "`notes` is still blank."
+
+        {:respawn_failed, sub} ->
+          "Could not relaunch the worker for a send-back nudge: #{inspect(sub)}."
+
+        other ->
+          "Detail: #{inspect(other)}."
+      end
+
+    """
+    bd-5lc99r notes gate tripped for task #{task_id}: this is a `research`-type
+    directive whose deliverable is a findings summary in `notes`, but `notes`
+    is blank and `arb done` was signalled.
+
+    #{detail_blurb}#{notes_gate_denial_blurb(meta)}
+
+    The directive cannot close without its findings. Re-dispatch it and ensure
+    the worker writes its results to `notes` via the `ticket_update_progress` MCP
+    tool before completing.
+    """
+    |> String.trim()
+  end
+
+  defp notes_gate_denial_blurb(meta) do
+    meta = meta || %{}
+
+    case Map.get(meta, :denied_command) do
+      cmd when is_binary(cmd) and cmd != "" ->
+        if denied_bootstrap_command?(meta) do
+          "\n\nbd-25ivqe: this looks like a strict-policy bootstrap failure, not a " <>
+            "missing deliverable — the worker's `#{cmd}` call was auto-denied under " <>
+            ":strict permissions before it could do any work. Check the workspace's " <>
+            "`permissions.allow` for a `command(#{cmd})` rule."
+        else
+          "\n\nbd-7wymls: the worker's `#{Map.get(meta, :denied_command_line) || cmd}` " <>
+            "was denied under :strict permissions (not a worker-protocol command). " <>
+            "If the task genuinely needs it, add a `permissions.allow` rule; otherwise " <>
+            "the worker should have carried on without it."
+        end
+
+      _ ->
+        ""
+    end
+  end
+
+  defp escalate_notes_gate(%State{workspace_id: ws_id, task_id: task_id}, summary, subject)
+       when is_binary(ws_id) do
+    Wardmast.Messages.Escalation.post(%{
+      kind: :notes_gate,
+      from_ref: task_id,
+      workspace_id: ws_id,
+      task_ref: task_id,
+      subject: subject || "Notes gate: blank findings on research-type directive (#{task_id})",
+      body: Resolutions.append_footer(summary, task_id, :notes_gate)
+    })
+
+    :ok
+  rescue
+    e -> log_commit_gate_warning(task_id, e)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate_notes_gate(_state, _summary, _subject), do: :ok
+
+  # The shared "integrate this branch" path: open the MR / run the merge, or fail
+  # the worker (not silently complete it) if the adapter rejects.
+  #
+  # `opts` may carry `:via_review_gate` (default `false`). When true the Watchdog is
+  # told the gate has already approved this MR, so it merges on its first poll
+  # instead of waiting for a hosted-forge approval signal that will never come
+  # (bd-66ey1o: the ReviewGate approves in-process, it does NOT post a GitHub
+  # review).
+  defp merge_branch(%State{meta: meta} = state, branch, opts) when is_map(opts) do
+    title = pr_title_for(state.task_id, meta)
+    description = build_pr_body(state.task_id, Map.get(meta, :worktree_path))
+
+    case do_open_mr(state, branch, title, description, opts) do
+      {:ok, _mr_ref, new_state} -> new_state
+      {:error, reason, _state} -> park_merge_failure(state, branch, reason)
+    end
+  end
+
+  # The PR/MR title to open with. Formats according to the workspace's
+  # pr_title_format convention (e.g. conventional commits for acme), falling
+  # back to the internal merge_title stashed in meta when the task can't be
+  # loaded (bd-7d5smn: strip the "Merge <id>:" prefix from outbound PRs).
+  defp pr_title_for(task_id, meta) do
+    case Ash.get(Wardmast.Tasks.Issue, task_id) do
+      {:ok, task} when is_binary(task.title) and task.title != "" ->
+        case Ash.load(task, [:workspace]) do
+          {:ok, task_with_ws} ->
+            # bd-73zv62: the task's repo's `pr_title_format`.
+            Wardmast.Mergers.PRTitle.format(
+              task_with_ws,
+              Wardmast.Mergers.scope(task_with_ws.workspace, task_with_ws.repo)
+            )
+
+          _ ->
+            Wardmast.Mergers.PRTitle.format(task, nil)
+        end
+
+      _ ->
+        Map.get(meta, :merge_title) || "Merge #{task_id}"
+    end
+  rescue
+    _ -> Map.get(meta, :merge_title) || "Merge #{task_id}"
+  end
+
+  # Build the PR/MR body. Precedence (mirrors MergeQueue.pr_description_for/1,
+  # bd-53xrmi / bd-7d5smn):
+  #
+  #   1. Worker-authored pr_body stored on the task — verbatim, highest priority.
+  #   2. Repo's pull_request_template.md filled with task metadata.
+  #   3. PRTemplate.default_body/1 when no template file exists.
+  #
+  # Falls back to "" only when the task cannot be loaded at all.
+  defp build_pr_body(task_id, worktree_path) do
+    case Ash.get(Wardmast.Tasks.Issue, task_id) do
+      {:ok, task} ->
+        case task.pr_body do
+          b when is_binary(b) and b != "" ->
+            case String.trim(b) do
+              "" ->
+                fill_template_body(task, worktree_path)
+
+              _ ->
+                b
+            end
+
+          _ ->
+            fill_template_body(task, worktree_path)
+        end
+
+      _ ->
+        ""
+    end
+  rescue
+    _ -> ""
+  end
+
+  defp fill_template_body(task, worktree_path) do
+    template = is_binary(worktree_path) && PRTemplate.read(worktree_path)
+    if template, do: PRTemplate.fill(template, task), else: PRTemplate.default_body(task)
+  end
+
+  # A merge failed. The adapter has already restored the canonical tree (the
+  # Direct merger runs `git merge --abort` on conflict — see bd-1rhyla: a
+  # half-merged tree took the live server down), so main stays clean and
+  # compilable. Here we own the lifecycle side: fail the worker WITHOUT closing
+  # the task, and — for a genuine conflict — escalate to the coordinator inbox with
+  # the conflicting files so the task can be rebased / re-resolved.
+  #
+  # failure_reason stays a short term (it shares the Run.failure_reason column);
+  # the full conflict detail lives in the escalation message + task notes.
+  defp park_merge_failure(%State{} = state, branch, {:merge_conflict, detail}) do
+    record_merge_conflict_note(state, branch, detail)
+    escalate_merge_conflict(state, branch, detail)
+    fail_now(state, :merge_conflict)
+  end
+
+  defp park_merge_failure(%State{} = state, branch, reason) do
+    escalate_merge_failure(state, branch, reason)
+    fail_now(state, {:merge_failed, reason})
+  end
+
+  # Append the conflict + conflicting files to the task's notes so `arb show`
+  # and the UI carry the rebase context. Best-effort: a DB hiccup is logged,
+  # never fatal (mirrors record_review_gate_outcome/3).
+  defp record_merge_conflict_note(%State{task_id: task_id}, branch, detail) do
+    block = format_merge_conflict_note(branch, detail)
+
+    with {:ok, task} <- Ash.get(Wardmast.Tasks.Issue, task_id) do
+      notes =
+        [task.notes, block]
+        |> Enum.reject(&(&1 in [nil, ""]))
+        |> Enum.join("\n\n")
+
+      case Ash.update(task, %{notes: notes}, action: :update) do
+        {:ok, _} -> :ok
+        {:error, reason} -> log_merge_conflict_warning(task_id, reason)
+      end
+    end
+
+    :ok
+  rescue
+    e -> log_merge_conflict_warning(task_id, e)
+  end
+
+  defp format_merge_conflict_note(branch, detail) do
+    stamp = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    "## Merge conflict — aborted, needs rebase (#{stamp})\n\n#{merge_conflict_body(branch, detail)}"
+  end
+
+  # Raise an escalation to the coordinator's mailbox naming the conflicting files.
+  # Requires a workspace (messages are workspace-scoped); mirrors
+  # escalate_review_gate/3.
+  defp escalate_merge_conflict(%State{workspace_id: ws_id, task_id: task_id}, branch, detail)
+       when is_binary(ws_id) do
+    Wardmast.Messages.Escalation.post(%{
+      kind: :merge_conflict,
+      from_ref: task_id,
+      workspace_id: ws_id,
+      task_ref: task_id,
+      subject: "Merge conflict: #{task_id} aborted, needs rebase",
+      body: merge_conflict_body(branch, detail)
+    })
+
+    :ok
+  rescue
+    e -> log_merge_conflict_warning(task_id, e)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate_merge_conflict(_state, _branch, _detail), do: :ok
+
+  # A non-conflict merge failure — the forge rejected the PR open/merge, a
+  # push failed, config was missing, etc. — still leaves an approved run
+  # stranded with no PR merged (bd-8rrn9t: a 422 "already exists" on
+  # create-PR left an approved PR open+mergeable with the failure otherwise
+  # silent). Escalate to the coordinator with the branch, MR ref (if one was
+  # already opened), and error so this never strands invisibly. Mirrors
+  # escalate_merge_conflict/3.
+  defp escalate_merge_failure(
+         %State{workspace_id: ws_id, task_id: task_id} = state,
+         branch,
+         reason
+       )
+       when is_binary(ws_id) do
+    note_head_changed_since_ruling(task_id, ws_id, reason)
+
+    Wardmast.Messages.Escalation.post(%{
+      kind: :merge_failed,
+      from_ref: task_id,
+      workspace_id: ws_id,
+      task_ref: task_id,
+      subject: merge_failure_subject(task_id, reason),
+      body: merge_failure_body(state, branch, reason)
+    })
+
+    :ok
+  rescue
+    e -> log_merge_conflict_warning(task_id, e)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate_merge_failure(_state, _branch, _reason), do: :ok
+
+  # A direct merge refused because the branch moved past the head a
+  # merge-permitting ruling covered: the `review_gate` event the forge lanes get
+  # from the Watchdog (`RulingResume.head_changed/4`).
+  defp note_head_changed_since_ruling(task_id, ws_id, {:stale_reviewed_sha, _reviewed, head}) do
+    case MergeAuthorization.head_changed(task_id, head) do
+      {:changed, ruling} ->
+        RulingResume.note(task_id, ws_id, "head_changed", %{
+          head_sha: head,
+          message: "head changed since ruling: #{ruling.head_sha} -> #{head}"
+        })
+
+      :none ->
+        :ok
+    end
+  end
+
+  defp note_head_changed_since_ruling(_task_id, _ws_id, _reason), do: :ok
+
+  # bd-28l6im: an "already exists" 422 that survives the full open_with_retry
+  # budget unresolved is not an ordinary merge failure — GitHub's own error
+  # confirms a PR is sitting there for this branch, arbiter just couldn't
+  # resolve its number. Distinguish it in both subject and body so the
+  # operator doesn't read this as "the work is broken" and go looking at the
+  # diff — the branch's PR is very likely open and mergeable already.
+  defp merge_failure_subject(task_id, reason) do
+    cond do
+      match?({:stale_reviewed_sha, _, _}, reason) ->
+        {:stale_reviewed_sha, _reviewed, head} = reason
+
+        case MergeAuthorization.head_changed(task_id, head) do
+          {:changed, ruling} ->
+            "#{task_id}: head changed since ruling: #{ruling.head_sha} -> #{head}"
+
+          :none ->
+            "Merge refused: #{task_id} branch head is not the reviewed SHA"
+        end
+
+      Wardmast.Mergers.already_open_error?(reason) ->
+        "PR already exists: #{task_id} — could not auto-resolve its number"
+
+      diverged_push_error?(reason) ->
+        "Push rejected: #{task_id} branch diverged from origin"
+
+      true ->
+        "Merge failed: #{task_id} could not be opened/merged"
+    end
+  end
+
+  # bd-3doy0y: a push rejected for genuine divergence (a ReviewGate
+  # implementer round pushed to origin/<branch> while this worktree's own
+  # commit diverged from it, and the rebase attempted before push hit a real
+  # conflict) is neither a merge conflict on `main` nor a PR-open failure —
+  # it needs a distinct operator response (resolve the rebase by hand), not
+  # the generic "could not be opened/merged" text that reads as a broken PR.
+  defp diverged_push_error?({:push_failed, inner}), do: diverged_push_error?(inner)
+  defp diverged_push_error?({:diverged, _detail}), do: true
+  defp diverged_push_error?(_), do: false
+
+  # Same nesting as diverged_push_error?/1 (push_for_hosted_pr's {:push_failed,
+  # reason} gets re-wrapped by do_open_mr's {:push_failed, push_reason}) — walk
+  # it to reach the {:diverged, detail} payload regardless of wrap depth.
+  defp diverged_detail({:push_failed, inner}), do: diverged_detail(inner)
+  defp diverged_detail({:diverged, detail}), do: detail
+
+  defp merge_failure_body(%State{mr_ref: mr_ref} = state, branch, reason) do
+    ref_line = if is_binary(mr_ref) and mr_ref != "", do: "PR/MR ref: #{mr_ref}\n", else: ""
+
+    cond do
+      match?({:stale_reviewed_sha, _, _}, reason) ->
+        {:stale_reviewed_sha, reviewed, head} = reason
+
+        stale_reviewed_body(state, branch, reviewed, head)
+
+      Wardmast.Mergers.already_open_error?(reason) ->
+        """
+        The forge reports a pull request already exists for branch #{branch}, \
+        but arbiter could not resolve its number after retrying — this is \
+        NOT necessarily a work failure. The branch's PR is very likely open \
+        and mergeable already; find it on the forge and merge it by hand, \
+        then close this task.
+        #{ref_line}
+        Forge error: #{inspect(reason)}
+        """
+
+      diverged_push_error?(reason) ->
+        detail = diverged_detail(reason)
+        files = Map.get(detail, :files, [])
+
+        file_list =
+          if files == [],
+            do: "",
+            else: "\nConflicting files:\n" <> Enum.map_join(files, "\n", &("  - " <> &1))
+
+        """
+        Push of branch #{branch} to origin was rejected because it has \
+        genuinely diverged — NOT a conflict on the target branch. A \
+        ReviewGate implementer round likely pushed a commit to \
+        origin/#{branch} directly; this worker's own worktree also has a \
+        commit the remote doesn't have, and rebasing this worktree's commit \
+        onto the remote tip hit a real conflict. The work is very likely \
+        complete and approved but stranded — do NOT force-push (it would \
+        destroy the implementer round's commit). Resolve by hand: rebase \
+        this branch onto origin/#{branch}, resolve the conflict, and push.
+        #{ref_line}#{file_list}
+        """
+
+      true ->
+        """
+        Merge of branch #{branch} failed and was NOT completed. The task is parked \
+        failed (not closed) — any PR/MR already opened for this branch may be \
+        approved and mergeable but stranded, and needs manual attention.
+        #{ref_line}
+        Error: #{inspect(reason)}
+        """
+    end
+  end
+
+  defp stale_reviewed_body(state, branch, reviewed, head) do
+    case MergeAuthorization.head_changed(state.task_id, head) do
+      {:changed, ruling} ->
+        """
+        Head changed since ruling: #{ruling.head_sha} -> #{head}. You ruled \
+        `#{ruling.decision}` on #{ruling.head_sha}; branch #{branch} now points at \
+        #{head}, which that ruling does not cover, so the direct merge was refused \
+        and nothing was merged. Review the current head and, if it should ship, \
+        record the ruling again against it (`review_gate_resolve #{state.task_id}`): \
+        the merge then resumes by itself.
+        """
+
+      :none ->
+        """
+        Branch #{branch} no longer points at the commit the reviewer approved \
+        (reviewed #{short_sha(reviewed)}, branch head #{short_sha(head)}), so \
+        the direct merge was refused: integrating it would ship commits no \
+        reviewer saw. Nothing was merged. Re-run the review on the current \
+        head (or record an explicit accept_as_is for it) and merge again.
+        """
+    end
+  end
+
+  defp log_merge_conflict_warning(task_id, reason) do
+    Logger.warning(
+      "Worker merge-conflict escalation swallowed for task=#{task_id}: #{inspect(reason)}"
+    )
+
+    :error
+  end
+
+  defp merge_conflict_body(branch, detail) do
+    files = Map.get(detail, :files, [])
+
+    file_list =
+      case files do
+        [] -> "  (none reported)"
+        _ -> Enum.map_join(files, "\n", &("  - " <> &1))
+      end
+
+    """
+    Auto-merge of branch #{branch} into the target conflicted and was aborted.
+    The canonical working tree was restored (git merge --abort) — main is \
+    unchanged and compilable; the task was NOT merged or closed. It is parked \
+    for rebase / re-resolution.
+
+    Conflicting files:
+    #{file_list}
+    """
+  end
+
+  defp mergeable_branch(meta) do
+    case meta && Map.get(meta, :branch) do
+      branch when is_binary(branch) and branch != "" -> branch
+      _ -> nil
+    end
+  end
+
+  # Pull merge-adapter overrides out of the worker's meta so the
+  # review_gate-approve path can route through a test stub adapter without going
+  # through workspace config. Tests set these via `meta:` at worker start;
+  # production callers leave them nil and rely on workspace resolution.
+  defp merge_opts_from_meta(meta, base) when is_map(base) do
+    meta = meta || %{}
+
+    base
+    |> maybe_put_meta(:adapter, Map.get(meta, :merger_adapter_override))
+    |> maybe_put_meta(:workspace, Map.get(meta, :merger_workspace_override))
+    |> maybe_put_meta(:interval_ms, Map.get(meta, :watchdog_interval_ms))
+    |> maybe_put_meta(:initial_delay_ms, Map.get(meta, :watchdog_initial_delay_ms))
+    |> maybe_put_meta(:max_polls, Map.get(meta, :watchdog_max_polls))
+    |> maybe_put_meta(
+      :auto_resume_dispatcher,
+      Map.get(meta, :watchdog_auto_resume_dispatcher)
+    )
+  end
+
+  defp maybe_put_meta(map, _key, nil), do: map
+  defp maybe_put_meta(map, key, value), do: Map.put(map, key, value)
+
+  # ---- review gate (ReviewGate) --------------------------------------------
+
+  # Resolve whether this worker's workspace requires a review gate. An explicit
+  # meta override (`:review_required`) wins — used by tests and advanced callers;
+  # otherwise read the workspace config (default false). A worker with no
+  # workspace can't resolve config, so it never gates.
+  defp review_required?(%State{meta: meta} = state) do
+    case meta && Map.get(meta, :review_required) do
+      flag when is_boolean(flag) ->
+        flag
+
+      _ ->
+        case state.workspace_id && Ash.get(Wardmast.Tasks.Workspace, state.workspace_id) do
+          {:ok, ws} -> Wardmast.Tasks.Workspace.review_required?(ws)
+          _ -> false
+        end
+    end
+  rescue
+    _ -> false
+  end
+
+  # Resolve the revise-and-rediscuss round cap for the ReviewGate.
+  #
+  # Resolution order:
+  #   1. An explicit meta `:review_rounds` override (tests / advanced callers).
+  #   2. `min(difficulty_default, workspace_cap)` — the difficulty-derived default
+  #      (bd-a5k6wb) optionally tightened by `config["review_gate"]["max_rounds"]`.
+  #   3. Falls back to `nil` to let the ReviewGate apply its built-in D2 default.
+  #
+  # The task's difficulty drives the default; the workspace cap can only tighten
+  # it (min), never loosen it beyond the difficulty-appropriate ceiling.
+  defp resolve_review_rounds(%State{meta: meta} = state) do
+    case meta && Map.get(meta, :review_rounds) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> review_rounds_for(state.task_id, state.workspace_id)
+    end
+  end
+
+  @doc """
+  The revise-loop cap for a ticket's ReviewGate: its difficulty's default,
+  capped by the workspace's `review_gate.max_rounds`. `nil` when it cannot be
+  read (the gate then uses its own default).
+  """
+  @spec review_rounds_for(String.t(), String.t() | nil) :: pos_integer() | nil
+  def review_rounds_for(task_id, workspace_id) do
+    difficulty_default =
+      Wardmast.Worker.ReviewGate.rounds_for_difficulty(task_difficulty(task_id))
+
+    case workspace_id && Ash.get(Wardmast.Tasks.Workspace, workspace_id) do
+      {:ok, ws} ->
+        case Wardmast.Tasks.Workspace.review_gate_max_rounds(ws) do
+          nil -> difficulty_default
+          cap -> min(difficulty_default, cap)
+        end
+
+      _ ->
+        difficulty_default
+    end
+  rescue
+    _ -> nil
+  end
+
+  # An explicit meta `:review_timeout_ms` override for the ReviewGate per-pass
+  # timeout (ms), or `nil`.
+  #
+  # bd-216r3e: the workspace `config["review_gate"]["timeout_ms"]` lookup used to
+  # live here, resolved once at gate spawn and then held in the gate's state for
+  # its whole lifetime — so a timeout raised while the gate was running never
+  # reached it (only `worker stop` + `worker resume` applied the new value). The
+  # config read now belongs to `ReviewGate.resolve_timeout_ms/2`, which runs once
+  # per pass. Only the explicit override is stamped here, because an override IS
+  # meant to pin the value for the gate's lifetime.
+  defp review_timeout_override(%State{meta: meta}) do
+    case meta && Map.get(meta, :review_timeout_ms) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  # Load the task's difficulty integer (0..5) from the DB. Returns nil on any
+  # error so the ReviewGate falls back to its D2 default rather than crashing.
+  defp task_difficulty(task_id) when is_binary(task_id) do
+    case Ash.get(Wardmast.Tasks.Issue, task_id) do
+      {:ok, %Wardmast.Tasks.Issue{difficulty: d}} -> d
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp task_difficulty(_), do: nil
+
+  # Wait on the review gate and spawn the reviewer. The branch + merge title
+  # are stashed in meta so review_gate_verdict/2 can fire the same merge path on
+  # approval without re-deriving them.
+  defp enter_review_gate(%State{} = state, branch) do
+    meta = Map.put(state.meta || %{}, :review_gate_branch, branch)
+
+    # bd-129xh4: when a hosted merger is configured (github/gitlab), open the PR
+    # BEFORE the reviewer runs so it can review the real PR (`gh pr diff <n>`)
+    # rather than a bare branch. The open is idempotent — the merge still runs
+    # on APPROVE through the unchanged merge_branch path, which adopts this same
+    # PR. A failure (or the local :direct strategy) falls back to branch-diff
+    # review rather than blocking it; the reviewer's prompt drops the PR hint.
+    meta =
+      case maybe_open_pr_for_review(%State{state | meta: meta}, branch) do
+        {:ok, pr_ref} -> Map.put(meta, :review_pr_ref, pr_ref)
+        _ -> meta
+      end
+
+    # bd-741sid: the round state is the ticket's, so a verdict can still be
+    # applied to it when no author is resident any more.
+    record_review_gate(state, %{
+      branch: branch,
+      pr_ref: Map.get(meta, :review_pr_ref),
+      worktree_path: Map.get(meta, :worktree_path),
+      repo_path: Map.get(meta, :repo_path),
+      target_branch: Map.get(meta, :target_branch),
+      repo: state.repo,
+      verdict: nil,
+      park_reason: nil,
+      reconciled_from: nil,
+      # bd-cut6uv: a fresh gate has not waited on CI yet; a marker left by a gate
+      # that died mid-wait must not outlive it.
+      ci_wait: nil,
+      # bd-2yt0d2: likewise a pass marker a dead gate left behind.
+      pass: nil,
+      merge_opts: persistable_merge_opts(meta)
+    })
+
+    # bd-aw2cyt: the author's agent has already exited by now, so this wait is
+    # exactly the `:implementing` -> `:in_review` transition the `worker_phase`
+    # topic exists to report. Announce it before the gate spawns.
+    parked =
+      announce_phase(%State{
+        state
+        | state: :waiting,
+          waiting_on: :review_gate,
+          step_started_at: DateTime.utc_now(),
+          meta: meta
+      })
+
+    record_run_state(parked)
+
+    case spawn_review_gate(parked, branch) do
+      # Stash the monitor ref so a ReviewGate that dies before reporting can't
+      # silently strand us waiting on the review gate (see the :DOWN handler).
+      #
+      # bd-7xtz6w: the pid too, and a liveness check of our own. The monitor
+      # alone was not enough in bd-45tkhq — the gate died and the author
+      # stayed waiting for 3+ hours — and a gate that is alive but has
+      # nothing in flight never sends a `:DOWN` at all.
+      {:ok, ref, gate} ->
+        schedule_review_gate_liveness(parked, gate)
+
+        meta =
+          parked.meta
+          |> Map.put(:review_gate_ref, ref)
+          |> Map.put(:review_gate_pid, gate)
+
+        %State{parked | meta: meta}
+
+      # Tests drive review_gate_verdict/2 directly (review_spawn: false).
+      :skip ->
+        parked
+
+      # The ReviewGate couldn't start — don't park unreviewed work forever; treat
+      # it as an inconclusive review and escalate (no merge). bd-2y0gd5.
+      :error ->
+        apply_review_gate_verdict(
+          parked,
+          {:no_verdict, "ReviewGate failed to start; merge blocked pending review."}
+        )
+    end
+  end
+
+  # Spawn the ReviewGate (which runs the distinct reviewer worker). The
+  # `:review_spawn` meta flag (default true) lets tests hold the worker waiting
+  # on the review gate and drive review_gate_verdict/2 directly, in isolation from a
+  # live reviewer subprocess. `:review_command` is the reviewer argv test escape
+  # hatch (forwarded to the ReviewGate → ClaudeSession), mirroring dispatch's
+  # `:claude_command`.
+  # Spawn the ReviewGate and MONITOR it. Returns {:ok, monitor_ref, pid} so the author
+  # can detect a ReviewGate that dies before reporting, :skip when review_spawn is
+  # off (tests drive review_gate_verdict/2 directly), or :error when it can't start.
+  defp spawn_review_gate(%State{meta: meta} = state, branch) do
+    if Map.get(meta, :review_spawn, true) do
+      opts =
+        [
+          author: self(),
+          task_id: state.task_id,
+          workspace_id: state.workspace_id,
+          repo: state.repo,
+          worktree_path: Map.get(meta, :worktree_path),
+          branch: branch,
+          target_branch: Map.get(meta, :target_branch, "main")
+        ]
+        |> maybe_opt(:command, Map.get(meta, :review_command))
+        |> maybe_opt(:command_provider, Map.get(meta, :review_command_provider))
+        |> maybe_opt(:revise_command, Map.get(meta, :revise_command))
+        |> maybe_opt(:timeout_ms, review_timeout_override(state))
+        |> maybe_opt(:verdict_retries, Map.get(meta, :review_verdict_retries))
+        |> maybe_opt(:timeout_retries, Map.get(meta, :review_timeout_retries))
+        |> maybe_opt(:rounds, resolve_review_rounds(state))
+        |> maybe_opt(:pr_ref, Map.get(meta, :review_pr_ref))
+        # bd-cut6uv: test escape hatches over CI-gated review (see
+        # `Wardmast.Worker.ReviewCi`); unset in production, where the workspace's
+        # `review.require_ci_green` decides.
+        |> maybe_opt(:ci_gate, Map.get(meta, :review_ci_gate))
+        |> maybe_opt(:ci_adapter, Map.get(meta, :review_ci_adapter))
+        |> maybe_opt(:ci_poll_ms, Map.get(meta, :review_ci_poll_ms))
+        |> maybe_opt(:ci_max_polls, Map.get(meta, :review_ci_max_polls))
+        # bd-6d3h8m: the fresh gate a fix round attaches restarts its own
+        # round numbering at 1, so it needs to know which fix-round attempt it
+        # is to tag its `Wardmast.ReviewGate.Round` rows distinguishably —
+        # otherwise `review_gate_rounds_list` reads two interleaved 1..N
+        # sequences as if they were one.
+        |> maybe_opt(:fix_round_attempt, Map.get(meta, :review_gate_fix_round_attempts))
+
+      case Wardmast.Worker.ReviewGate.start(opts) do
+        {:ok, pid} ->
+          # bd-9zuvbh: a fresh gate IS the "re-run the review" human action that
+          # resolves a class-C park. Clear it here rather than when the new
+          # verdict lands, so `arb prime` stops showing a park the moment
+          # somebody is actually acting on it.
+          Wardmast.Tasks.ReviewPark.clear(state.task_id, :review_rerun)
+
+          {:ok, Process.monitor(pid), pid}
+
+        {:error, reason} ->
+          Logger.warning(
+            "Worker: failed to start ReviewGate for task=#{state.task_id}: #{inspect(reason)}"
+          )
+
+          :error
+      end
+    else
+      :skip
+    end
+  end
+
+  # ---- review-gate liveness (bd-7xtz6w) -----------------------------------
+  #
+  # The gate's per-pass timeout is a timer the gate sends ITSELF, so it only
+  # protects a gate that is alive, responsive, and has a pass armed. bd-45tkhq
+  # hit the gap: the gate crashed between passes, its `:DOWN` was never acted
+  # on, and the author sat waiting on the review gate for 3+ hours with nothing
+  # in flight and nothing left that would ever time out. So the author checks
+  # for itself, every `review_gate_liveness_ms` (default 60s):
+  #
+  #   * gate gone             → the same inconclusive park a `:DOWN` gives;
+  #   * gate alive, reviewing → nothing to do; its own timers own the pass;
+  #   * gate alive but with no pass in flight, or not answering at all (wedged
+  #     inside a callback) for longer than one pass's budget
+  #     (`review_gate.timeout_ms`, or `review_gate_stall_ms`) → the gate is
+  #     stopped and the run parks `:reviewer_timeout`.
+  #
+  # Either park finishes the run and leaves the branch, its commits and every
+  # recorded round in place; `arb worker resume <task>` then re-runs the review
+  # with a fresh gate (`Wardmast.Tasks.ReviewPark`).
+  @review_gate_liveness_ms 60_000
+  @review_gate_probe_timeout_ms 5_000
+
+  defp schedule_review_gate_liveness(%State{meta: meta}, gate) do
+    interval =
+      case Map.get(meta || %{}, :review_gate_liveness_ms) do
+        n when is_integer(n) and n > 0 ->
+          n
+
+        _ ->
+          Application.get_env(:wardmast, :review_gate_liveness_ms, @review_gate_liveness_ms)
+      end
+
+    Process.send_after(self(), {:__review_gate_liveness__, gate}, interval)
+  end
+
+  defp check_review_gate(%State{} = state, gate) do
+    cond do
+      Process.alive?(gate) ->
+        probe_review_gate(state, gate)
+        state
+
+      # bd-2lfzs8: a gate gone because the node is stopping is the boot sweep's
+      # to re-arm, not a lost verdict (see the `:DOWN` handler).
+      node_stopping?() ->
+        state
+
+      true ->
+        Logger.warning(
+          "Worker: ReviewGate for task=#{state.task_id} is gone but its exit was never " <>
+            "handled; the liveness check is escalating it as no_verdict (bd-7xtz6w)"
+        )
+
+        state
+        |> forget_review_gate()
+        |> apply_review_gate_verdict(
+          {:no_verdict,
+           "The ReviewGate process exited before delivering a verdict; the author's " <>
+             "liveness check found it gone. Nothing was merged. Re-run the review with " <>
+             "`arb worker resume #{state.task_id}`."}
+        )
+    end
+  end
+
+  # Ask the gate what it is doing WITHOUT blocking this process: a wedged gate
+  # would otherwise wedge its author too. The answer comes back as
+  # `{:__review_gate_probe__, gate, snapshot | :unresponsive}`.
+  defp probe_review_gate(%State{meta: meta}, gate) do
+    author = self()
+
+    timeout =
+      case Map.get(meta || %{}, :review_gate_liveness_ms) do
+        n when is_integer(n) and n > 0 -> min(@review_gate_probe_timeout_ms, max(n, 250))
+        _ -> @review_gate_probe_timeout_ms
+      end
+
+    spawn(fn ->
+      result =
+        try do
+          GenServer.call(gate, :snapshot, timeout)
+        catch
+          :exit, _ -> :unresponsive
+        end
+
+      send(author, {:__review_gate_probe__, gate, result})
+    end)
+  end
+
+  defp apply_review_gate_probe(%State{} = state, gate, %{reviewer_alive: true}) do
+    schedule_review_gate_liveness(state, gate)
+    %State{state | meta: Map.delete(state.meta, :review_gate_stalled_since)}
+  end
+
+  # bd-cut6uv: a gate holding its reviewer back until CI reports has nothing in
+  # flight by design — its own poll budget bounds the wait, so it is not stalled.
+  defp apply_review_gate_probe(%State{} = state, gate, %{phase: :awaiting_ci}) do
+    schedule_review_gate_liveness(state, gate)
+    %State{state | meta: Map.delete(state.meta, :review_gate_stalled_since)}
+  end
+
+  defp apply_review_gate_probe(%State{meta: meta} = state, gate, result) do
+    now = System.monotonic_time(:millisecond)
+    since = Map.get(meta, :review_gate_stalled_since) || now
+    limit = review_gate_stall_ms(state)
+
+    if now - since >= limit do
+      stall_out_review_gate(state, gate, result, limit)
+    else
+      schedule_review_gate_liveness(state, gate)
+      %State{state | meta: Map.put(meta, :review_gate_stalled_since, since)}
+    end
+  end
+
+  defp review_gate_stall_ms(%State{meta: meta} = state) do
+    case Map.get(meta || %{}, :review_gate_stall_ms) do
+      n when is_integer(n) and n > 0 ->
+        n
+
+      _ ->
+        Wardmast.Worker.ReviewGate.resolve_timeout_ms(
+          state.workspace_id,
+          review_timeout_override(state)
+        )
+    end
+  end
+
+  defp stall_out_review_gate(%State{} = state, gate, result, limit) do
+    what =
+      if result == :unresponsive,
+        do: "has not answered",
+        else: "has had no reviewer or implementer pass in flight"
+
+    minutes = Float.round(limit / 60_000, 1)
+
+    Logger.warning(
+      "Worker: ReviewGate for task=#{state.task_id} #{what} for #{limit}ms (one pass's " <>
+        "budget); stopping it and parking the run as reviewer_timeout (bd-7xtz6w)"
+    )
+
+    state = forget_review_gate(state)
+    Process.exit(gate, :kill)
+
+    apply_review_gate_verdict(
+      state,
+      {:parked, :reviewer_timeout,
+       "The ReviewGate #{what} for #{minutes} min — longer than one pass's budget " <>
+         "(`review_gate.timeout_ms`) — so its own pass timeout could never fire. The gate " <>
+         "was stopped. Nothing was merged; the branch, its commits and every recorded " <>
+         "review round are preserved. Re-run the review with " <>
+         "`arb worker resume #{state.task_id}`."}
+    )
+  end
+
+  # Drop the monitor (flushing any `:DOWN` already queued) so the verdict the
+  # liveness check applies is the only one.
+  defp forget_review_gate(%State{meta: meta} = state) do
+    case Map.get(meta, :review_gate_ref) do
+      ref when is_reference(ref) -> Process.demonitor(ref, [:flush])
+      _ -> :ok
+    end
+
+    hold_account(state, true)
+
+    %State{state | meta: Map.drop(meta, [:review_gate_ref, :review_gate_stalled_since])}
+  end
+
+  # bd-dtdeff: releasing the account hold changes only the registry's `released`
+  # flag — the phase stays `in_review` — so nothing else tells the Autopilot a
+  # provider slot just opened. Say so, so it re-plans now instead of at the tick.
+  defp announce_slot_released(%State{} = state) do
+    Wardmast.Events.broadcast(effective_workspace_id(state), "worker_slot_released", %{
+      task_id: state.task_id
+    })
+  end
+
+  # Count this worker on its provider account (`hold?: true`, the normal state)
+  # or release it (`false`) — bd-cut6uv. Rewrites the dispatch context `init/1`
+  # stamped; only the registered process can, which is why the gate asks its
+  # author rather than doing it.
+  defp hold_account(%State{} = state, hold?) do
+    PRegistry.put_dispatch(
+      state.registry_key,
+      effective_workspace_id(state),
+      provider(state.meta),
+      released: not hold?
+    )
+  end
+
+  # Apply a ReviewGate verdict to a run waiting on the review gate.
+  defp apply_review_gate_verdict(%State{} = state, {:approve, findings}) do
+    record_approve_or_ruling(state, findings)
+    branch = Map.get(state.meta, :review_gate_branch) || mergeable_branch(state.meta)
+    # Tell the Watchdog the gate approved this MR. Without via_review_gate,
+    # hosted-forge adapters (Github) wait forever for a PR-level approval the ReviewGate never posts (bd-66ey1o) — a
+    # non-terminal poll is treated as approved on the first poll regardless.
+    # Whether the Watchdog then actually clicks merge is NOT forced here — it
+    # follows the workspace's `auto_merge` setting via the normal cond in
+    # do_start_watchdog. bd-ddtbhb's `force_merge: true` unconditionally
+    # merged fleet-authored work even when the workspace has auto_merge:
+    # false, bypassing a human-merge policy for hosted-forge targets
+    # (bd-dkwhbn). auto_merge: true workspaces are unaffected.
+    merge_branch(
+      state,
+      branch,
+      merge_opts_from_meta(state.meta, %{via_review_gate: true})
+    )
+  end
+
+  defp apply_review_gate_verdict(%State{} = state, {:request_changes, findings}) do
+    park_rejected(state, :request_changes, findings)
+  end
+
+  # bd-9zuvbh / P9 — guard class C (design #1635 §5.3). The gate reached a
+  # terminal state without a reviewer verdict it could act on: no parseable
+  # VERDICT after the re-prompt, a reviewing-pass timeout, a verdict guard whose
+  # re-prompt budget is spent, a no-op fix round after an approval-gap
+  # rejection. None of those is evidence the WORK failed, and recording them as
+  # a plain failed run with no named cause is what made
+  # `:review_gate_inconclusive` alone cost 52 runs / $226.97 in 31 days on work
+  # that was fine.
+  #
+  # Content stays fail-closed — nothing here merges, and the guard's refusal to
+  # accept the APPROVE stands. Only liveness opens: the task parks with a named
+  # reason (its `attention_cause`) and the coordinator is paged once for the
+  # episode. The run itself finishes `:failed` (bd-1uu19b); the cause is the
+  # ticket's.
+  defp apply_review_gate_verdict(%State{} = state, {:parked, reason, findings}) do
+    park_rejected(state, park_verdict_for(reason), findings, reason)
+  end
+
+  # A `:no_verdict` verdict is the same class-C terminal reached by a gate that
+  # does not name its reason (an older gate, or the ReviewGate process dying
+  # before it reported). It parks too: AC1 admits no ReviewGate outcome that
+  # fails a run on a no-verdict result.
+  defp apply_review_gate_verdict(%State{} = state, {:no_verdict, findings}) do
+    park_rejected(state, :no_verdict, findings, :inconclusive)
+  end
+
+  defp apply_review_gate_verdict(%State{} = state, :no_verdict) do
+    park_rejected(
+      state,
+      :no_verdict,
+      "Reviewer produced no parseable VERDICT line.",
+      :inconclusive
+    )
+  end
+
+  # A merge-permitting ruling (`resume_merge_after_ruling/2`) rides the approve
+  # path but is not an approval: the note names the coordinator's decision and
+  # the round state says `ruled`, so nothing downstream reads it as a reviewer
+  # APPROVE (`MergeAuthorization` reads `Round` rows, which this never writes).
+  defp record_approve_or_ruling(%State{meta: meta} = state, findings) do
+    case Map.get(meta, :merge_ruling) do
+      %{} = ruling ->
+        record_ruling_note(state, ruling)
+        record_review_gate(state, %{verdict: "ruled", ruling: to_string(ruling.decision)})
+
+      _ ->
+        record_review_gate_outcome(state, :approve, findings)
+        record_review_gate(state, %{verdict: :approve})
+    end
+  end
+
+  defp record_ruling_note(%State{task_id: task_id}, ruling) do
+    block =
+      "ReviewGate: merge permitted by #{ruling.decision} ruling " <>
+        "(#{ruling[:actor] || "coordinator"}, #{DateTime.to_iso8601(DateTime.utc_now())}) " <>
+        "on head #{ruling[:head_sha] || "n/a"} — merge path resumed"
+
+    with {:ok, task} <- Ash.get(Wardmast.Tasks.Issue, task_id) do
+      notes = [task.notes, block] |> Enum.reject(&(&1 in [nil, ""])) |> Enum.join("\n\n")
+      Ash.update(task, %{notes: notes}, action: :update)
+    end
+
+    :ok
+  rescue
+    e -> log_review_gate_warning(task_id, e)
+  end
+
+  # What the parked outcome is RECORDED as. The park finishes the run and sets
+  # the task's flag; it deliberately does not rewrite the gate's own verdict
+  # bookkeeping, because `meta.failure_reason` is still pattern-matched
+  # literally by Loop.FailureClassifier / Loop.Corpus.rejected?/1 / Loop.Analysis
+  # and the round rows must keep saying what the gate actually decided. A guard
+  # that refused an APPROVE, and an already-absorbed branch, both record the
+  # REQUEST_CHANGES shape they record today; everything else is inconclusive.
+  defp park_verdict_for(reason)
+       when reason in [:verdict_guard_exhausted, :empty_diff, :empty_net_diff],
+       do: :request_changes
+
+  defp park_verdict_for(_reason), do: :no_verdict
+
+  # Reject path: record findings, escalate to the coordinator, and finish the run
+  # :failed WITHOUT merging. failure_reason stays a short atom (still pattern-
+  # matched literally by Loop.FailureClassifier / Loop.Corpus.rejected?/1 /
+  # Loop.Analysis — do not change its content); the full findings live in meta
+  # + the escalation message + `Wardmast.ReviewGate.Round` (queryable via
+  # review_gate_rounds_list) — task notes only get a short summary line
+  # (bd-dp7hiw). bd-2ddf2x adds `failure_summary`, a bounded human-readable
+  # twin (VERDICT line + top finding) so `worker_runs` alone answers "why did
+  # this fail" without a second review_gate_rounds_list call.
+  # `park_reason` (bd-9zuvbh) is nil for an ordinary rejection — a reviewer that
+  # really did request changes, on either the ReviewGate or the
+  # coordinator-dispatched `worker_review` path — and a `Wardmast.Tasks.ReviewPark`
+  # reason atom for a class-C terminal, including `worker_review`'s own
+  # no-verdict arm.
+  # The two differ in exactly three places, all of them below: which escalation
+  # goes out, whether the task carries a park flag, and whether another fix
+  # round is dispatched.
+  defp park_rejected(state, verdict, findings, park_reason \\ nil)
+
+  defp park_rejected(%State{} = state, verdict, findings, park_reason) do
+    record_review_gate_outcome(state, verdict, findings, park_reason)
+
+    if park_reason do
+      park_review_gate(state, park_reason, findings)
+    else
+      escalate_review_gate(state, verdict, findings)
+    end
+
+    meta =
+      state.meta
+      |> Map.put(:review_gate_verdict, verdict)
+      |> Map.put(:review_gate_findings, findings)
+      |> Map.put(:failure_summary, review_gate_failure_summary(verdict, findings))
+      |> put_park_reason(park_reason)
+
+    # bd-741sid: no slot hand-off. The ticket stays In progress between
+    # rounds, which is what holds its slot (bd-asxw4e), and the fix round's
+    # resume of an In-progress ticket passes `ResumeSlot` uncapped.
+    failed = fail_now(%State{state | meta: meta}, fail_reason_for(verdict))
+
+    # bd-741sid: the round state is the ticket's, so the verdict can be read —
+    # and a later round's approval applied — with no author resident.
+    record_review_gate(failed, %{
+      verdict: verdict,
+      park_reason: park_reason,
+      findings_digest: FixRound.findings_digest(findings),
+      fix_round_attempts: fix_round_attempts(failed)
+    })
+
+    # bd-a9zb7w: the rejection is recorded and paged — now schedule the
+    # implementer. Deferred to a self-message rather than run inline because the
+    # dispatch is `Dispatch.resume/2`, which refuses a task whose worker is not
+    # yet finished and then stops that worker: inline it would read our own
+    # pre-reply review-gate wait and deadlock stopping ourselves. By the time
+    # this message is handled the caller's reply has been sent and the run is
+    # finished `:failed`.
+    #
+    # bd-9zuvbh: a PARKED outcome schedules nothing. The gate has already spent
+    # its rounds; the whole point of the park is that a human decides next, and
+    # bd-c6tdbu is precisely the shape where the extra fix round found nothing
+    # to fix and cost a run. Class D's "never re-dispatch an identical round".
+    if is_nil(park_reason), do: send(self(), {:__review_gate_fix_round__, verdict, findings})
+
+    failed
+  end
+
+  defp put_park_reason(meta, nil), do: Map.delete(meta, :park_reason)
+  defp put_park_reason(meta, reason), do: Map.put(meta, :park_reason, reason)
+
+  # bd-741sid: merge `changes` into the ticket's ReviewGate round state
+  # (`Wardmast.Tasks.PullRequest.record_review_gate/2`). Best-effort — the gate's
+  # own bookkeeping never fails a verdict — and only for a ticket's own run: a
+  # review-only reviewer or a ReviewGate session has no round of its own.
+  defp record_review_gate(%State{task_id: task_id, meta: meta}, changes) do
+    if review_only?(meta) or String.contains?(task_id, "#") do
+      :ok
+    else
+      case Wardmast.Tasks.PullRequest.record_review_gate(task_id, changes) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.debug(
+            "Worker: review-gate state write failed for task=#{task_id}: #{inspect(reason)}"
+          )
+
+          :ok
+      end
+    end
+  rescue
+    e ->
+      Logger.debug(
+        "Worker: review-gate state write raised for task=#{task_id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
+
+  defp fail_reason_for(:no_verdict), do: :review_gate_inconclusive
+  defp fail_reason_for(_), do: :review_gate_rejected
+
+  # The two terminal reasons `park_rejected/4` can stamp. A run parked for one of
+  # these is terminal *only* because of the review gate — so a later round of the
+  # same gate is entitled to overturn it (bd-3wumco).
+  @review_gate_failure_reasons [:review_gate_rejected, :review_gate_inconclusive]
+
+  defp review_gate_failure?(%State{meta: meta}),
+    do: Map.get(meta, :failure_reason) in @review_gate_failure_reasons
+
+  # ---- bd-a9zb7w: the implementer fix round -------------------------------
+  #
+  # The rejection half of the ReviewGate cycle used to end here: run recorded
+  # `:failed` / `:review_gate_rejected`, coordinator paged, worker parked, and
+  # nothing scheduled the implementer that would address the findings. Every one
+  # of the seven observed occurrences was cleared by a human `worker_resume`
+  # that took immediately — the implementer was never enqueued, not enqueued and
+  # never drained. This re-dispatches it automatically, under a bound.
+  #
+  # Only a `:request_changes` verdict qualifies. `:no_verdict`
+  # (`:review_gate_inconclusive`) means the reviewer produced nothing actionable;
+  # a fix round against an empty finding set is not a fix round, so that path is
+  # left exactly as it was.
+  defp maybe_dispatch_fix_round(%State{} = state, :request_changes, findings) do
+    dispatcher = fix_round_dispatcher(state)
+    attempts = fix_round_attempts(state)
+    cap = resolve_max_fix_rounds(state)
+    digest = FixRound.findings_digest(findings)
+
+    cond do
+      cap <= 0 ->
+        # Turned off for this workspace: the rejection escalation
+        # (`escalate_review_gate/3`) already went out, so stay silent rather than
+        # paging twice about the same verdict.
+        raise_not_converged(state)
+
+      # bd-1u15tl: the gate's own "branch conflicts with its target, merge
+      # aborted" rejection is not a code finding, and a sibling ticket merging
+      # into the same files must not spend the author's fix-round budget. It
+      # gets a conflict round on its own, separately bounded count.
+      ConflictAbortFindings.escalation?(findings) ->
+        conflict_round(dispatcher, state, findings, attempts)
+
+      # bd-80talz: the reviewer says the work fabricated or falsified its
+      # evidence. A fix round would put that back to the same provider; a
+      # human has to judge it (the reviewer can be wrong about provenance
+      # too). Keyed on the gate's marker only: the gate already ran the rule
+      # on the reviewer's own findings, and the cap payload it sends
+      # otherwise carries the implementer's replies and the whole diff.
+      EvidenceIntegrity.escalation?(findings) ->
+        record_fabricated_evidence_event(state)
+        give_up_fix_round(dispatcher, state, attempts, :fabricated_evidence)
+
+      # bd-6d3h8m: every `[NOT MET]` criterion in this round is one the
+      # reviewer already says needs coordinator/operator action, not another
+      # implementer round (e.g. a criterion only verifiable post-deploy). A
+      # fix round can't make progress on something the reviewer already said
+      # it can't fix — on bd-28t80i this ran 4 implementer passes against the
+      # same "needs deploy" AC3 gap before escalating anyway.
+      #
+      # bd-hrhkzj: likewise a criterion `[NOT MET]` on two consecutive rounds;
+      # the gate already parked it for the coordinator.
+      reason = coordinator_park_reason(findings) ->
+        give_up_fix_round(dispatcher, state, attempts, reason)
+
+      attempts >= cap ->
+        give_up_fix_round(dispatcher, state, attempts, :budget_exhausted)
+
+      attempts > 0 and Map.get(state.meta, :review_gate_findings_digest) == digest ->
+        # The last fix round was dispatched against these exact findings and the
+        # reviewer raised them again verbatim. Another identical round would
+        # spend the rest of the budget to reach this same escalation later.
+        give_up_fix_round(dispatcher, state, attempts, :not_converging)
+
+      true ->
+        start_fix_round(dispatcher, state, findings, digest, attempts + 1)
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Worker: fix-round decision failed for task=#{state.task_id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
+
+  defp maybe_dispatch_fix_round(%State{}, _verdict, _findings), do: :ok
+
+  defp coordinator_park_reason(findings) do
+    cond do
+      CoordinatorOnlyFindings.escalation?(findings) -> :needs_coordinator
+      RepeatUnmetCriterion.escalation?(findings) -> :repeat_unmet_criterion
+      true -> nil
+    end
+  end
+
+  # The dispatch itself must not run in this process: `Dispatch.resume/2` stops
+  # the task's lingering `:failed` worker — us — as its first act. Hand it to the
+  # app-wide Task.Supervisor so the stop lands on a worker that is no longer
+  # mid-callback, and so a slow resume (repo resolution, worktree, agent spawn)
+  # doesn't block this worker's teardown.
+  defp start_fix_round(dispatcher, %State{} = state, findings, digest, attempt, opts \\ []) do
+    conflict? = Keyword.get(opts, :conflict, false)
+
+    args =
+      %{
+        task_id: state.task_id,
+        workspace_id: state.workspace_id,
+        attempt: attempt,
+        verdict: :request_changes,
+        findings: findings,
+        findings_digest: digest
+      }
+      |> maybe_arg(:claude_command, Map.get(state.meta, :fix_round_command))
+      |> then(
+        &if(conflict?,
+          do: &1 |> Map.put(:conflict, true) |> maybe_arg(:target_branch, opts[:target_branch]),
+          else: &1
+        )
+      )
+
+    task_id = state.task_id
+    workspace_id = state.workspace_id
+    # A conflict round did not count (bd-1u15tl): `attempt` is the unchanged
+    # number of fix rounds already run.
+    prior_attempts = if conflict?, do: attempt, else: attempt - 1
+
+    run = fn ->
+      case dispatcher.dispatch(args) do
+        {:ok, _result} ->
+          :ok
+
+        # bd-6omte4: the quota gate held the round — it is queued in the
+        # workspace's DispatchQueue and resumes, same round and findings, when
+        # the provider has headroom. Not a failure to dispatch.
+        {:error, {:quota_held, _}} ->
+          hold = held_fix_round(workspace_id, task_id, attempt)
+
+          Logger.info(
+            "Worker: ReviewGate fix round #{attempt} for task=#{task_id} is held for quota " <>
+              "on #{hold.provider || "its provider"} (#{hold.reason}); it resumes when the " <>
+              "quota gate lets it through"
+          )
+
+          dispatcher.escalate_exhausted(
+            task_id,
+            workspace_id,
+            prior_attempts,
+            {:quota_held, hold}
+          )
+
+        {:error, reason} ->
+          Logger.warning(
+            "Worker: ReviewGate fix round #{attempt} could not be dispatched for " <>
+              "task=#{task_id}: #{inspect(reason)}"
+          )
+
+          dispatcher.escalate_exhausted(
+            task_id,
+            workspace_id,
+            prior_attempts,
+            {:dispatch_failed, reason}
+          )
+      end
+    end
+
+    case Task.Supervisor.start_child(Wardmast.TaskSupervisor, run) do
+      {:ok, _pid} ->
+        :started
+
+      other ->
+        Logger.warning(
+          "Worker: could not start the ReviewGate fix-round task for " <>
+            "task=#{task_id}: #{inspect(other)}"
+        )
+
+        :ok
+    end
+  end
+
+  # bd-1u15tl: re-attach the author to integrate the target branch. The round
+  # carries the fix-round count and findings digest through unchanged, so it
+  # spends none of `max_fix_rounds` and cannot read as "not converging" against
+  # the findings a real fix round was dispatched for. What bounds it is
+  # `ConflictAbortFindings.max_rounds/0`, counted from the gate's recorded rounds
+  # (the one being handled included).
+  #
+  # bd-6sosvl: two things keep it from looping on a round that cannot succeed. The
+  # host puts the CURRENT `origin/<target>` into the author's checkout first (a
+  # podman container cannot fetch it), and gives up with the real reason when it
+  # cannot. And a rejection at the very head the previous one was made at means
+  # that round committed nothing; the gate escalates instead of repeating it.
+  defp conflict_round(dispatcher, %State{} = state, findings, attempts) do
+    target = Map.get(state.meta, :target_branch) || "main"
+
+    cond do
+      ConflictAbortFindings.rejected_rounds(state.task_id) > ConflictAbortFindings.max_rounds() ->
+        give_up_fix_round(dispatcher, state, attempts, :conflict_rounds_exhausted)
+
+      ConflictAbortFindings.no_progress?(state.task_id) ->
+        give_up_fix_round(dispatcher, state, attempts, :conflict_no_progress)
+
+      true ->
+        case provision_conflict_target(state, target) do
+          :ok ->
+            digest = Map.get(state.meta, :review_gate_findings_digest)
+
+            start_fix_round(dispatcher, state, findings, digest, attempts,
+              conflict: true,
+              target_branch: target
+            )
+
+          {:error, {:no_target_ref, _detail} = reason} ->
+            give_up_fix_round(dispatcher, state, attempts, reason)
+        end
+    end
+  end
+
+  # No checkout to provision (an ad-hoc run with no worktree): nothing to fetch
+  # into, the round's own re-attach cuts what it needs.
+  defp provision_conflict_target(%State{meta: meta}, target) do
+    case Map.get(meta, :worktree_path) do
+      path when is_binary(path) ->
+        case Wardmast.Worker.Worktree.provision_target(path, target) do
+          {:ok, _sha} -> :ok
+          {:error, _} = error -> error
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  # What the quota gate recorded when it held the round: its provider and the
+  # gate's own reason. A queue that can't be read leaves both unknown rather
+  # than failing the page.
+  defp held_fix_round(workspace_id, task_id, attempt) do
+    case DispatchQueue.held_item(workspace_id, task_id) do
+      nil ->
+        %{attempt: attempt, provider: nil, reason: "quota", held_since: nil}
+
+      item ->
+        held = DispatchQueue.describe(item)
+
+        %{
+          attempt: attempt,
+          provider: held.provider,
+          reason: held.reason,
+          held_since: held.held_since
+        }
+    end
+  end
+
+  # G17 (design §6.1): fabricated or falsified evidence is a critical guardrail
+  # event on the author's run. The run that made the evidence up is this one;
+  # the reviewer's is not the subject.
+  defp record_fabricated_evidence_event(%State{run_id: run_id} = state) when is_binary(run_id) do
+    {provider, model} = respawn_routing(state)
+
+    Wardmast.Guardrails.Events.record(%{
+      run_id: run_id,
+      task_id: state.task_id,
+      provider: provider,
+      model: model,
+      kind: :fabricated_evidence,
+      severity: :critical,
+      source: :evidence_integrity,
+      detail: "reviewer flagged fabricated or falsified evidence"
+    })
+  end
+
+  defp record_fabricated_evidence_event(%State{}), do: :ok
+
+  # G17: fold this run's `egress_events` into guardrail events when a session
+  # exits (idempotent, so a resumed run just adds what is new).
+  defp link_guardrail_egress(%State{run_id: run_id}, %{} = session) when is_binary(run_id) do
+    usage = Wardmast.Worker.ClaudeSession.usage_summary(session)
+
+    Wardmast.Guardrails.Events.link_egress(run_id,
+      provider: Map.get(session, :provider) || "claude",
+      model: Map.get(usage, :model) || Map.get(session, :model)
+    )
+  end
+
+  defp link_guardrail_egress(%State{}, _session), do: :ok
+
+  defp give_up_fix_round(dispatcher, %State{} = state, attempts, reason) do
+    Logger.info(
+      "Worker: not dispatching a ReviewGate fix round for task=#{state.task_id} " <>
+        "after #{attempts} round(s): #{inspect(reason)}"
+    )
+
+    _ = dispatcher.escalate_exhausted(state.task_id, state.workspace_id, attempts, reason)
+
+    # A tuple reason (`{:no_target_ref, _}`) is an infrastructure failure a
+    # resume can clear; only the gate's own atoms mean it will not converge.
+    if is_atom(reason), do: raise_not_converged(state), else: :ok
+  end
+
+  # bd-2j64q6: the gate gave up without converging, so the ticket waits on a
+  # gate decision (amend or waive the criterion, or send it back). Left
+  # unrecorded, its failed run read as `run_crashed` / `resume` — the wrong
+  # remedy, with the finding hidden. The detail is the run's `failure_summary`
+  # (the verdict line and top finding). Best-effort, like the escalation.
+  defp raise_not_converged(%State{task_id: task_id, meta: meta}) do
+    _ =
+      Wardmast.Tasks.Attention.raise_cause(
+        task_id,
+        :review_gate_not_converged,
+        Map.get(meta, :failure_summary)
+      )
+
+    :ok
+  end
+
+  # Swappable per worker (`meta[:fix_round_dispatcher]`) and per environment
+  # (`FixRound.impl/0`, which the test config points at a recording stub so the
+  # suite never spawns a real agent).
+  defp fix_round_dispatcher(%State{meta: meta}) do
+    case Map.get(meta, :fix_round_dispatcher) do
+      mod when is_atom(mod) and not is_nil(mod) -> mod
+      _ -> FixRound.impl()
+    end
+  end
+
+  # How many fix rounds have already run for this task. Re-stamped onto each
+  # resumed worker by `Wardmast.Worker.Dispatch` — a fresh worker per round means
+  # the counter has to ride the meta or the cap would never bind.
+  defp fix_round_attempts(%State{meta: meta}) do
+    case Map.get(meta, :review_gate_fix_round_attempts) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> 0
+    end
+  end
+
+  # Resolution order: an explicit meta override (tests / advanced callers), the
+  # workspace's `review_gate.max_fix_rounds`, then the built-in default.
+  defp resolve_max_fix_rounds(%State{meta: meta} = state) do
+    case Map.get(meta, :review_gate_max_fix_rounds) do
+      n when is_integer(n) and n >= 0 ->
+        n
+
+      _ ->
+        workspace_max_fix_rounds(state) || FixRound.default_max_fix_rounds()
+    end
+  end
+
+  defp workspace_max_fix_rounds(%State{workspace_id: nil}), do: nil
+
+  defp workspace_max_fix_rounds(%State{workspace_id: workspace_id}) do
+    case Ash.get(Wardmast.Tasks.Workspace, workspace_id) do
+      {:ok, ws} -> Wardmast.Tasks.Workspace.review_gate_max_fix_rounds(ws)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  # Undo a ReviewGate rejection that a later round overturned, then run the
+  # ordinary approve path. The stale `failure_reason` / `failure_summary` are
+  # dropped from meta here so any later terminal write starts clean, but meta
+  # alone is not enough: only the merge paths that finish terminally (the Direct
+  # merger completing inside `merge_branch/3`) reach `record_run_finished/1` and
+  # rewrite the durable row. On a hosted forge, `merge_branch/3` ->
+  # `do_open_mr/5` -> `finalize_opened_mr/5` used to leave the author resident
+  # and only record the PR ref — so without the explicit write-back below, the
+  # `worker_runs` row would keep reading `:failed` / `:review_gate_rejected` for
+  # the entire (possibly indefinite, on an `auto_merge: false` workspace) life of
+  # the open MR. That is exactly the surface `worker_show`'s historical fallback,
+  # `Loop.Corpus.rejected?/1` and `Loop.Analysis` read, so an overturned
+  # rejection would still be counted and displayed as a real one.
+  #
+  # `:review_gate_reconciled_from` is left behind deliberately: "this task merged
+  # after being parked as rejected" is exactly the shape an operator reading
+  # `worker show` needs to see, and without it the reversal is invisible.
+  defp reconcile_review_gate_approval(%State{} = state, {:approve, findings} = verdict) do
+    prior = Map.get(state.meta, :failure_reason)
+
+    Logger.info(
+      "Worker: ReviewGate approved task=#{state.task_id} after it was parked " <>
+        "#{inspect(prior)}; reconciling the run forward and resuming the merge handoff"
+    )
+
+    # bd-9zuvbh: a later round approving is the third way out of a class-C park,
+    # and the only one the fleet takes by itself. Drop the flag here or an
+    # approved, merged task keeps showing up in `arb prime`'s parked list.
+    Wardmast.Tasks.ReviewPark.clear(state.task_id, :review_approved)
+
+    # The rejection's own meta (`review_gate_verdict` / `review_gate_findings`,
+    # written by park_rejected/4) is overwritten rather than dropped: the gate
+    # still has a verdict on record for this task, it is just the approving one
+    # now. Leaving the old pair in place made `worker show` read as a rejection
+    # on a task that had merged.
+    meta =
+      state.meta
+      |> Map.drop([:failure_reason, :failure_summary, :stop_reason, :park_reason])
+      |> Map.put(:review_gate_verdict, :approve)
+      |> Map.put(:review_gate_findings, findings)
+      |> Map.put(:review_gate_reconciled_from, prior)
+
+    record_review_gate(state, %{reconciled_from: prior})
+
+    merged =
+      apply_review_gate_verdict(
+        announce_phase(%State{
+          state
+          | state: :waiting,
+            outcome: nil,
+            waiting_on: :review_gate,
+            meta: meta
+        }),
+        verdict
+      )
+
+    clear_run_rejection_if_parked(merged)
+
+    # A ruling is announced by `RulingResume`, which knows the decision and the
+    # head; "reconciled to APPROVE" would be false.
+    if not Map.has_key?(state.meta, :merge_ruling),
+      do: notify_review_gate_reconciled(merged, prior)
+
+    merged
+  end
+
+  # ---- bd-741sid: a verdict applied to the ticket ---------------------------
+  #
+  # See `apply_review_gate_verdict_to_ticket/3`. A `%State{}` rebuilt from the
+  # ticket stands in for the author that is gone; the verdict then runs the same
+  # code a resident author runs, in the caller's process. Two of that code's
+  # hand-offs are posts to the author's own mailbox — the end of the run after
+  # the PR opens, and the fix-round decision after a rejection — so they are
+  # taken back out of the caller's mailbox and carried out here.
+
+  defp apply_ticket_verdict(%State{} = state, {:approve, _findings} = verdict) do
+    Logger.info(
+      "Worker: ReviewGate APPROVE for task=#{state.task_id} with no author resident; " <>
+        "applying it to the ticket"
+    )
+
+    applied =
+      if review_gate_failure?(state),
+        do: reconcile_review_gate_approval(state, verdict),
+        else: apply_review_gate_verdict(state, verdict)
+
+    drain_run_finished()
+
+    case applied do
+      %State{outcome: :failed, meta: meta} -> {:error, Map.get(meta, :failure_reason)}
+      _ -> :ok
+    end
+  end
+
+  defp apply_ticket_verdict(%State{} = state, verdict) do
+    Logger.info(
+      "Worker: ReviewGate verdict #{inspect(elem_or(verdict))} for task=#{state.task_id} " <>
+        "with no author resident; recording it on the ticket"
+    )
+
+    failed = apply_review_gate_verdict(state, verdict)
+    drain_run_finished()
+
+    receive do
+      {:__review_gate_fix_round__, round_verdict, findings} ->
+        _ = maybe_dispatch_fix_round(failed, round_verdict, findings)
+        :ok
+    after
+      0 -> :ok
+    end
+  end
+
+  defp elem_or(verdict) when is_tuple(verdict), do: elem(verdict, 0)
+  defp elem_or(verdict), do: verdict
+
+  defp drain_run_finished do
+    receive do
+      :__run_finished__ -> :ok
+    after
+      0 -> :ok
+    end
+  end
+
+  defp ticket_round_state(task_id, ctx) do
+    with {:ok, issue} <- Ash.get(Wardmast.Tasks.Issue, task_id),
+         :ok <- takes_verdict(issue) do
+      round = issue.review_gate_state || %{}
+      run = latest_main_run(task_id)
+
+      {:ok,
+       %State{
+         task_id: task_id,
+         registry_key: task_id,
+         workspace_id: issue.workspace_id,
+         repo:
+           Map.get(ctx, :repo) || Map.get(round, "repo") || (run && run.repo) || issue.repo ||
+             "unknown",
+         current_step: :review_gate,
+         kind: :implement,
+         state: :waiting,
+         waiting_on: :review_gate,
+         started_at: DateTime.utc_now(),
+         meta: round_meta(issue, round, ctx),
+         run_id: run && run.id
+       }}
+    end
+  end
+
+  defp takes_verdict(%{state: :active}), do: :ok
+  defp takes_verdict(%{state: state}), do: {:error, {:not_in_review, state}}
+
+  # The meta a resident author would have carried into its verdict.
+  defp round_meta(issue, round, ctx) do
+    branch = Map.get(ctx, :branch) || Map.get(round, "branch")
+    worktree = Map.get(ctx, :worktree_path) || Map.get(round, "worktree_path")
+
+    %{
+      branch: branch,
+      review_gate_branch: branch,
+      review_pr_ref: Map.get(round, "pr_ref") || Map.get(ctx, :pr_ref) || issue.pr_ref,
+      worktree_path: worktree,
+      repo_path: Map.get(round, "repo_path") || worktree,
+      target_branch: Map.get(ctx, :target_branch) || Map.get(round, "target_branch") || "main",
+      issue_type: issue.issue_type,
+      review_required: true,
+      review_spawn: false,
+      review_gate_fix_round_attempts: Map.get(round, "fix_round_attempts"),
+      review_gate_findings_digest: Map.get(round, "findings_digest")
+    }
+    |> put_round_failure(Map.get(round, "verdict"))
+    |> Map.merge(restored_merge_opts(Map.get(round, "merge_opts") || %{}))
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  # The round's last recorded verdict, as the `failure_reason` a resident
+  # author would still be carrying (`fail_reason_for/1`) — which is what lets a
+  # later APPROVE overturn it (bd-3wumco).
+  defp put_round_failure(meta, "request_changes"),
+    do: Map.put(meta, :failure_reason, :review_gate_rejected)
+
+  defp put_round_failure(meta, "no_verdict"),
+    do: Map.put(meta, :failure_reason, :review_gate_inconclusive)
+
+  defp put_round_failure(meta, _verdict), do: meta
+
+  # The merge options the author was dispatched with (`persistable_merge_opts/1`).
+  defp restored_merge_opts(opts) do
+    %{
+      merger_adapter_override: restored_module(Map.get(opts, "adapter"), :open, 4),
+      merger_workspace_override: restored_workspace(Map.get(opts, "workspace_id")),
+      watchdog_interval_ms: Map.get(opts, "interval_ms"),
+      watchdog_initial_delay_ms: Map.get(opts, "initial_delay_ms"),
+      watchdog_max_polls: Map.get(opts, "max_polls"),
+      watchdog_auto_resume_dispatcher:
+        restored_module(Map.get(opts, "auto_resume_dispatcher"), :resume, 1)
+    }
+  end
+
+  defp restored_module("Elixir." <> _ = name, fun, arity) do
+    module = name |> Wardmast.LegacyModuleName.normalize() |> String.to_existing_atom()
+    if Code.ensure_loaded?(module) and function_exported?(module, fun, arity), do: module
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp restored_module(_name, _fun, _arity), do: nil
+
+  defp restored_workspace(id) when is_binary(id) do
+    case Ash.get(Wardmast.Tasks.Workspace, id) do
+      {:ok, ws} -> ws
+      _ -> nil
+    end
+  end
+
+  defp restored_workspace(_), do: nil
+
+  # The merge options worth keeping on the ticket's round state, so a verdict
+  # applied without the author merges the way the author would have. Only
+  # explicit overrides (tests, advanced callers) — production resolves the
+  # merger from the workspace. Modules by name, the workspace by id.
+  defp persistable_merge_opts(meta) do
+    workspace = Map.get(meta, :merger_workspace_override)
+
+    %{
+      adapter: module_name(Map.get(meta, :merger_adapter_override)),
+      workspace_id: if(is_struct(workspace), do: Map.get(workspace, :id)),
+      interval_ms: Map.get(meta, :watchdog_interval_ms),
+      initial_delay_ms: Map.get(meta, :watchdog_initial_delay_ms),
+      max_polls: Map.get(meta, :watchdog_max_polls),
+      auto_resume_dispatcher: module_name(Map.get(meta, :watchdog_auto_resume_dispatcher))
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp module_name(module) when is_atom(module) and not is_nil(module),
+    do: Atom.to_string(module)
+
+  defp module_name(_), do: nil
+
+  defp latest_main_run(task_id) do
+    Wardmast.Workers.Run
+    |> Ash.Query.filter(task_id == ^task_id and kind == :implement)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  rescue
+    _ -> nil
+  end
+
+  # Write the reconciliation through to the durable `worker_runs` row when the
+  # approve path left the run unfinished. A finished run (`:succeeded` once the
+  # PR opened, or `:failed` from a merge that then conflicted) is left alone —
+  # `record_run_finished/1` has already written the row and its outcome is the
+  # accurate one.
+  #
+  # `completed_at` is nulled along with the failure columns: it was stamped by
+  # the rejection's terminal write and a run that is live again has not
+  # finished. Every column is in the `:update` accept list.
+  defp clear_run_rejection_if_parked(%State{run_id: nil}), do: :ok
+
+  defp clear_run_rejection_if_parked(%State{state: :finished}), do: :ok
+
+  defp clear_run_rejection_if_parked(%State{run_id: run_id, task_id: task_id} = state) do
+    attrs = %{
+      state: state.state,
+      outcome: nil,
+      failure_reason: nil,
+      failure_summary: nil,
+      completed_at: nil
+    }
+
+    with {:ok, run} <- Ash.get(Wardmast.Workers.Run, run_id),
+         {:ok, _updated} <- Ash.update(run, attrs, action: :update) do
+      :ok
+    else
+      {:error, reason} -> log_run_warning("reconcile", task_id, reason)
+    end
+  rescue
+    e -> log_run_warning("reconcile", task_id, e)
+  end
+
+  # Tell the coordinator the earlier escalation is void. `escalate_review_gate/3`
+  # already paged it when the round rejected; without this the mailbox keeps only
+  # the rejection and the reversal has to be rediscovered from round rows. Sent
+  # AFTER the approve path has run so the note reports where the task actually
+  # landed — a reconciliation whose merge then conflicted must not claim the
+  # handoff succeeded.
+  defp notify_review_gate_reconciled(%State{workspace_id: ws_id} = state, prior)
+       when is_binary(ws_id) do
+    task_id = state.task_id
+    subject = "ReviewGate: #{task_id} reconciled to APPROVE (was #{inspect(prior)})"
+
+    Wardmast.Messages.Message.send_mail(%{
+      kind: :info,
+      to_ref: Wardmast.Messages.Message.coordinator_ref(),
+      from_ref: task_id,
+      workspace_id: ws_id,
+      task_ref: task_id,
+      subject: subject,
+      body:
+        "A later ReviewGate round approved this work after an earlier round parked it as " <>
+          "#{inspect(prior)}. The run was reconciled forward and the merge handoff resumed; " <>
+          "the earlier escalation for this task is superseded. " <>
+          "The run is now #{Wardmast.Workers.RunState.label(state.state, state.outcome)}."
+    })
+
+    Wardmast.Events.broadcast(ws_id, "review_gate", %{task_id: task_id, message: subject})
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "Worker.notify_review_gate_reconciled swallowed for task=#{state.task_id}: #{inspect(e)}"
+      )
+
+      :error
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp notify_review_gate_reconciled(_state, _prior), do: :ok
+
+  @max_failure_summary_chars 280
+
+  # A short, bounded human-readable line for the `failure_summary` column:
+  # the reviewer's VERDICT line plus the first substantive finding, truncated.
+  # `findings` is the reviewer's raw text (VERDICT line first, per
+  # `ReviewGate.findings_from/2`) for :request_changes/:no_verdict-with-text,
+  # or a plain synthesized string (e.g. "no parseable VERDICT line") when the
+  # reviewer produced nothing usable.
+  # Pre-existing complexity 12 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp review_gate_failure_summary(verdict, findings) when is_binary(findings) do
+    {verdict_line, body} =
+      case String.split(findings, "\n", parts: 2) do
+        [first, rest] -> {String.trim(first), rest}
+        [first] -> {String.trim(first), ""}
+      end
+
+    norm_line = Wardmast.Worker.ReviewGate.normalize_verdict_line(verdict_line)
+
+    {verdict_line, body} =
+      cond do
+        not Regex.match?(~r/^VERDICT:/i, norm_line) ->
+          {review_gate_verdict_label(verdict), findings}
+
+        # park_rejected only ever calls this with verdict :request_changes/:no_verdict,
+        # so a reviewer-authored "VERDICT: APPROVE" line here means the approve was NOT
+        # honored (route_approve_verdict's partial-verification fail-closed path, worker.ex
+        # ~2409). Don't let a rejected run's summary open with "APPROVE" — that reads as a
+        # contradiction in `arb worker runs` output.
+        Regex.match?(~r/^VERDICT:\s*APPROVE(?:[*_]+|\b)/i, norm_line) ->
+          {"#{review_gate_verdict_label(verdict)} (reviewer said \"#{verdict_line}\", not honored)",
+           body}
+
+        true ->
+          {verdict_line, body}
+      end
+
+    top_finding =
+      body
+      |> String.split("\n")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(fn line ->
+        line == "" or
+          line == "CRITERIA:" or
+          Regex.match?(~r/\barb done\b/, line) or
+          Regex.match?(~r/^\s*⚙/, line) or
+          Regex.match?(~r/^\s*⚠️/, line) or
+          Regex.match?(~r/^\s*VERIFICATION:\s*(FULL|PARTIAL)\b/i, line) or
+          ReviewVerification.criteria_line?(line)
+      end)
+      |> List.first()
+
+    [verdict_line, top_finding]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join(" — ")
+    |> truncate_failure_summary()
+  end
+
+  defp review_gate_failure_summary(verdict, _findings),
+    do: truncate_failure_summary(review_gate_verdict_label(verdict))
+
+  defp review_gate_verdict_label(:no_verdict), do: "VERDICT: INCONCLUSIVE (no parseable verdict)"
+  defp review_gate_verdict_label(_), do: "VERDICT: REQUEST_CHANGES"
+
+  defp truncate_failure_summary(text) do
+    if String.length(text) > @max_failure_summary_chars do
+      String.slice(text, 0, @max_failure_summary_chars - 1) <> "…"
+    else
+      text
+    end
+  end
+
+  # Append a short verdict summary line to the task's notes so it surfaces in
+  # `arb show` / the UI. Best-effort: a DB hiccup is logged, never fatal.
+  defp record_review_gate_outcome(state, verdict, findings, park_reason \\ nil)
+
+  defp record_review_gate_outcome(
+         %State{task_id: task_id, meta: meta},
+         verdict,
+         findings,
+         park_reason
+       ) do
+    rounds = Map.get(meta || %{}, :review_gate_rounds)
+
+    block =
+      format_review_gate_note(verdict, findings, rounds, park_reason, task_id) <>
+        reviewer_family_note(task_id)
+
+    with {:ok, task} <- Ash.get(Wardmast.Tasks.Issue, task_id) do
+      notes =
+        [task.notes, block]
+        |> Enum.reject(&(&1 in [nil, ""]))
+        |> Enum.join("\n\n")
+
+      case Ash.update(task, %{notes: notes}, action: :update) do
+        {:ok, _} -> :ok
+        {:error, reason} -> log_review_gate_warning(task_id, reason)
+      end
+    end
+
+    :ok
+  rescue
+    e -> log_review_gate_warning(task_id, e)
+  end
+
+  # bd-dp7hiw: a short summary line, NOT the full findings/transcript text.
+  # The structured detail (findings, per-round verdicts, cost, convergence)
+  # already lives in `Wardmast.ReviewGate.Round` and is queryable in full via
+  # the `review_gate_rounds_list` MCP tool — duplicating it into `notes` on
+  # every round made the field grow unbounded across resumes.
+  #
+  # `:no_verdict` is the one case that does NOT always get a `Round` row: a
+  # malformed/re-prompted pass that never reaches a genuine outcome is
+  # deliberately not persisted there (see `Wardmast.ReviewGate.Round`'s
+  # moduledoc), so pointing at `review_gate_rounds_list` for it can resolve to
+  # nothing. Point at the coordinator escalation mail instead, which is
+  # always sent alongside a non-approve verdict (`escalate_review_gate/3`).
+  # bd-cb7wpq: a commit-gate-family park (`park_reason` below) is reached only
+  # after a round genuinely returned REQUEST_CHANGES — the fix round that
+  # followed just had nothing new to show for it. Labeling that "INCONCLUSIVE
+  # (no verdict)" reads as if the reviewer never said anything, when a real
+  # verdict is sitting one `review_gate_rounds_list` call away. `verdict`/
+  # `meta.failure_reason` themselves stay untouched
+  # (`park_verdict_for/1`'s `:no_verdict` — Loop.FailureClassifier and friends
+  # still key off that literal atom); only this human-readable note changes.
+  @commit_gate_park_reasons [
+    :commit_gate_no_changes,
+    :commit_gate_uncommitted,
+    :commit_gate_no_changes_after_non_file_fix
+  ]
+
+  # "findings resolved" is true ONLY for the non-file-fix park: that's the one
+  # case where the implementer actually addressed every finding (through a PR
+  # title/description/label edit, a comment) and the fix round just had no
+  # file diff to show for it. The other two reasons in
+  # `@commit_gate_park_reasons` are the idle-worker / uncommitted-work shapes
+  # the gate exists to catch — claiming their findings were resolved would be
+  # false, so they fall through to the generic clause below, which reports the
+  # last round's REAL verdict instead of a hardcoded one.
+  defp format_review_gate_note(
+         :no_verdict,
+         findings,
+         rounds,
+         :commit_gate_no_changes_after_non_file_fix = park_reason,
+         _task_id
+       ) do
+    header =
+      "ReviewGate verdict: REQUEST_CHANGES (findings resolved; parked pending re-review — " <>
+        "#{Wardmast.Tasks.ReviewPark.subject_phrase(park_reason)})"
+
+    build_review_gate_note(
+      header,
+      "see the coordinator escalation mail for details",
+      findings,
+      rounds
+    )
+  end
+
+  defp format_review_gate_note(:no_verdict, findings, rounds, park_reason, task_id)
+       when park_reason in @commit_gate_park_reasons do
+    verdict_phrase =
+      case last_review_gate_verdict(task_id) do
+        :approve -> "APPROVE (a guard refused it)"
+        :request_changes -> "REQUEST_CHANGES"
+        _ -> "INCONCLUSIVE (no verdict)"
+      end
+
+    header =
+      "ReviewGate verdict: #{verdict_phrase} (parked pending human review — " <>
+        "#{Wardmast.Tasks.ReviewPark.subject_phrase(park_reason)})"
+
+    build_review_gate_note(
+      header,
+      "see the coordinator escalation mail for details",
+      findings,
+      rounds
+    )
+  end
+
+  defp format_review_gate_note(verdict, findings, rounds, _park_reason, _task_id) do
+    {header, pointer} =
+      case verdict do
+        :approve ->
+          {"ReviewGate verdict: APPROVE", "see review_gate_rounds_list for full findings"}
+
+        :request_changes ->
+          {"ReviewGate verdict: REQUEST_CHANGES", "see review_gate_rounds_list for full findings"}
+
+        :no_verdict ->
+          {"ReviewGate verdict: INCONCLUSIVE (no verdict)",
+           "see the coordinator escalation mail for details"}
+      end
+
+    build_review_gate_note(header, pointer, findings, rounds)
+  end
+
+  # bd-a1ke2c: under `review_agent.cross_family`, name which model family
+  # reviewed which — and flag a same-family fallback loudly, with its reason,
+  # so it never reads like an ordinary review. Read off the latest `:review`
+  # round that recorded a family; "" when cross-family review never ran.
+  defp reviewer_family_note(task_id) when is_binary(task_id) do
+    require Ash.Query
+
+    Wardmast.ReviewGate.Round
+    |> Ash.Query.filter(task_id == ^task_id and role == :review and not is_nil(reviewer_family))
+    |> Ash.Query.sort(inserted_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [round] ->
+        fallback =
+          if round.same_family_fallback,
+            do: " — SAME-FAMILY FALLBACK: #{round.same_family_fallback_reason}",
+            else: ""
+
+        " — reviewer: #{round.reviewer_family} (#{round.reviewer_provider || "unknown"}) · " <>
+          "implementer: #{round.implementer_family || "unknown"}#{fallback}"
+
+      [] ->
+        ""
+    end
+  rescue
+    _ -> ""
+  end
+
+  defp reviewer_family_note(_task_id), do: ""
+
+  # Best-effort lookup of the most recent `:review` round's verdict for a
+  # commit-gate park note — the durable record of what the reviewer actually
+  # said, rather than assuming REQUEST_CHANGES for every park reason. Nil (and
+  # therefore the generic INCONCLUSIVE fallback above) on any DB hiccup or a
+  # task with no recorded review rounds.
+  defp last_review_gate_verdict(task_id) when is_binary(task_id) do
+    require Ash.Query
+
+    Wardmast.ReviewGate.Round
+    |> Ash.Query.filter(task_id == ^task_id and role == :review)
+    |> Ash.Query.sort(round: :desc, inserted_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%{verdict: verdict} | _] -> verdict
+      [] -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp last_review_gate_verdict(_task_id), do: nil
+
+  defp build_review_gate_note(header, pointer, findings, rounds) do
+    stamp = DateTime.utc_now() |> DateTime.to_iso8601()
+    rounds_line = if rounds, do: " — rounds: #{rounds}", else: ""
+
+    # bd-1j5x6u: the reviewer disclosed VERIFICATION: PARTIAL, so this verdict
+    # was issued without full test/build verification. That must stay visible
+    # even in the short summary line — losing it here would let an unverified
+    # verdict blend in with a normal one on `arb show` / the UI.
+    warning_line =
+      if ReviewVerification.partial?(findings),
+        do: " — #{ReviewVerification.banner_text()}",
+        else: ""
+
+    "#{header} (#{stamp})#{rounds_line} — #{pointer}#{warning_line}"
+  end
+
+  # On a non-approve verdict, raise an escalation to the coordinator's mailbox with
+  # the reviewer's findings. Requires a workspace (messages are workspace-scoped).
+  defp escalate_review_gate(%State{workspace_id: ws_id, task_id: task_id}, verdict, findings)
+       when is_binary(ws_id) do
+    subject = review_gate_escalation_subject(verdict, findings, task_id)
+
+    Wardmast.Messages.Escalation.post(%{
+      kind: :review_gate_findings,
+      from_ref: task_id,
+      workspace_id: ws_id,
+      task_ref: task_id,
+      subject: subject,
+      body: Resolutions.append_footer(findings, task_id, :review_gate)
+    })
+
+    Wardmast.Events.broadcast(ws_id, "review_gate", %{task_id: task_id, message: subject})
+
+    :ok
+  rescue
+    e -> log_review_gate_warning(task_id, e)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate_review_gate(_state, _verdict, _findings), do: :ok
+
+  # ---- bd-9zuvbh: guard class C's terminal state ---------------------------
+  #
+  # Park the task, then page the coordinator ONCE for the episode. The park row
+  # is the claim (invariant I3): `ReviewPark.park/2` answers `:already_parked`
+  # when the same reason is already on file, so a gate that re-reports the same
+  # terminal — a retried report, a reconciled worker that parks again — pages
+  # nothing. A DIFFERENT reason, or a park a human cleared and the gate then
+  # re-reached, is a new episode and does page.
+  #
+  # Never raises: this is the worker's terminal path and a mail/DB failure must
+  # leave the park attempt behind rather than crash the teardown.
+  defp park_review_gate(%State{task_id: task_id} = state, reason, findings) do
+    case Wardmast.Tasks.ReviewPark.park(task_id, reason, park_detail(reason, findings)) do
+      {:ok, :claimed, _issue} ->
+        escalate_review_park(state, reason, findings)
+
+      {:ok, :already_parked, _issue} ->
+        Logger.info(
+          "Worker: ReviewGate park for task=#{task_id} (#{reason}) is already claimed; " <>
+            "not paging the coordinator again"
+        )
+
+        :ok
+
+      {:error, err} ->
+        # The park could not be written — page anyway. A silent terminal is the
+        # failure mode this whole phase exists to remove, so an unrecorded park
+        # must still reach a human.
+        Logger.warning(
+          "Worker: could not park task=#{task_id} for ReviewGate reason #{inspect(reason)}: " <>
+            "#{inspect(err)}"
+        )
+
+        escalate_review_park(state, reason, findings)
+    end
+  end
+
+  # bd-bkqpp3: a refused APPROVE names the finding(s) that blocked it.
+  defp park_detail(:verdict_guard_exhausted, findings),
+    do: Wardmast.Worker.ReviewFindings.blocked_summary(findings)
+
+  defp park_detail(_reason, _findings), do: nil
+
+  # The single page a parked episode is entitled to. It names the reason, says
+  # in plain words that the run was NOT failed and the work is intact, and lists
+  # the three things a human can actually do — the remediation chain-B's four
+  # incidents never got.
+  #
+  # Routed through the shared circuit breaker (bd-5jr49o / #1638) rather than
+  # straight to `send_mail/1`: the park claim above already bounds this to one
+  # page per episode, and the breaker is the backstop for the case where the
+  # claim itself is the thing misbehaving.
+  defp escalate_review_park(
+         %State{workspace_id: ws_id, task_id: task_id} = state,
+         reason,
+         findings
+       )
+       when is_binary(ws_id) do
+    subject = "ReviewGate parked #{task_id} — #{Wardmast.Tasks.ReviewPark.subject_phrase(reason)}"
+
+    Wardmast.CircuitBreaker.guard(
+      :coordinator_escalation,
+      [task_id, subject],
+      [
+        workspace_id: ws_id,
+        task_ref: task_id,
+        detail:
+          "A ReviewGate park re-paged past its bound. The park row is supposed to " <>
+            "claim the episode exactly once — if this trips, the claim is not holding."
+      ],
+      fn ->
+        Wardmast.Messages.Escalation.post(%{
+          kind: :review_parked,
+          from_ref: task_id,
+          workspace_id: ws_id,
+          task_ref: task_id,
+          subject: subject,
+          body: review_park_body(state, reason, findings)
+        })
+
+        Wardmast.Events.broadcast(ws_id, "review_gate", %{task_id: task_id, message: subject})
+        :ok
+      end
+    )
+
+    :ok
+  rescue
+    e -> log_review_gate_warning(task_id, e)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate_review_park(_state, _reason, _findings), do: :ok
+
+  defp review_park_body(%State{task_id: task_id} = state, reason, findings) do
+    push_state = park_push_state(state)
+
+    """
+    The review gate for #{task_id} reached a terminal state with no verdict it
+    could act on: #{Wardmast.Tasks.ReviewPark.explain(reason)}.
+
+    The run was NOT failed. The work is committed and #{park_push_line(push_state)}
+    The run is recorded `review_parked` and the task is parked with reason
+    `#{reason}`. Nothing was merged and no APPROVE was accepted — the content
+    side of the guard is still closed.
+
+    A human decides what happens next. Any one of these clears the park:
+
+      * re-run the review (`arb worker resume #{task_id}`) — the gate starts
+        fresh and the park clears on its own;
+      * #{park_merge_advice(state, push_state)}
+      * reject it (`arb ticket close #{task_id}`), which also clears the park.
+
+    Full round history: `review_gate_rounds_list` for #{task_id}.
+
+    ---
+
+    #{findings}
+    """
+  end
+
+  # bd-2jkrqu: the park escalation used to ASSERT "the branch is pushed" and
+  # then offer "merge it by hand, if the diff is fine". On vs-5l45oz both
+  # sentences were wrong together: the fix round's commit never left the
+  # worktree, so a human following the advice would have merged the UNFIXED
+  # commit the MR still held. The push state is now read out of git, and the
+  # merge-by-hand option is withheld when the PR head is not the reviewed head.
+  defp park_push_state(%State{meta: meta}) do
+    Wardmast.Reviews.PushState.inspect_branch(
+      meta && Map.get(meta, :worktree_path),
+      mergeable_branch(meta)
+    )
+  end
+
+  defp park_push_line(push_state) do
+    case Wardmast.Reviews.PushState.verdict(push_state) do
+      :unknown ->
+        "the push state of the branch could not be checked from here " <>
+          "(#{Wardmast.Reviews.PushState.describe(push_state)})."
+
+      _ ->
+        Wardmast.Reviews.PushState.describe(push_state)
+    end
+  end
+
+  # The bullet that offers — or withholds — a hand merge. Withheld whenever the
+  # commit a human would merge is not the commit that was reviewed: either the
+  # branch is provably unpushed, or the reviewed SHA on file differs from the
+  # remote head. The `:diverged` arm comes first because "push it" is wrong
+  # advice there (bd-2jkrqu review round 1, finding 2).
+  defp park_merge_advice(%State{task_id: task_id} = state, push_state) do
+    alias Wardmast.Reviews.PushState
+
+    branch = mergeable_branch(state.meta) || "the branch"
+
+    cond do
+      # A diverged branch is the state that PRODUCES the `:head_not_pushed`
+      # park (`PushState.push_once/4` refuses to force-push it), so it is the
+      # likeliest reader of this bullet — and a plain `git push` is exactly
+      # what will be rejected for it. Give it the same reconcile wording the
+      # ReviewGate's own findings body uses, so the two texts in one
+      # escalation don't contradict each other.
+      push_state.status == :diverged ->
+        "**Do NOT merge by hand yet** — #{PushState.describe(push_state)} " <>
+          "The merge request holds a different commit than the one that was reviewed, " <>
+          "and a plain push will be rejected. Reconcile `#{branch}` with " <>
+          "`#{push_state.remote}/#{branch}` first (rebase or merge — never force-push, " <>
+          "the remote may carry another worker's commits), push, confirm the diff, " <>
+          "then merge;"
+
+      PushState.verdict(push_state) == :unpushed ->
+        "**Do NOT merge by hand yet** — #{PushState.describe(push_state)} " <>
+          "The merge request holds a different commit than the one that was reviewed. " <>
+          "Push `#{branch}` first, confirm the diff, then merge;"
+
+      reviewed_head_differs?(task_id, push_state) ->
+        "**Do NOT merge by hand without checking the diff** — the reviewed commit " <>
+          "(#{short_sha(last_reviewed_sha(task_id))}) is not the head of `#{branch}` " <>
+          "(#{short_sha(push_state.remote_head)}); they describe different code;"
+
+      PushState.verdict(push_state) == :unknown ->
+        "merge it by hand ONLY after confirming the PR head is the commit that was " <>
+          "reviewed — the push state of `#{branch}` could not be checked from here;"
+
+      true ->
+        "merge it by hand, if the diff is fine and only the gate's bookkeeping was not;"
+    end
+  end
+
+  defp reviewed_head_differs?(task_id, %{remote_head: remote}) when is_binary(remote) do
+    case last_reviewed_sha(task_id) do
+      sha when is_binary(sha) and sha != "" -> sha != remote
+      _ -> false
+    end
+  end
+
+  defp reviewed_head_differs?(_task_id, _push_state), do: false
+
+  defp last_reviewed_sha(task_id) do
+    case Ash.get(Wardmast.Tasks.Issue, task_id) do
+      {:ok, task} -> Map.get(task, :last_reviewed_sha)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp short_sha(nil), do: "(unknown)"
+  defp short_sha(sha) when is_binary(sha), do: String.slice(sha, 0, 12)
+
+  # bd-2eyf9y: a `:no_verdict` escalation is either the generic "reviewer
+  # produced nothing actionable" case or one of the ReviewGate revise-round
+  # commit-gate escalations (`Wardmast.Worker.ReviewGate.escalate_commit_gate/2`)
+  # — both report the same `{:no_verdict, message}` shape (so they file as
+  # `:review_gate_inconclusive` and never trigger `maybe_dispatch_fix_round/3`),
+  # but must page the coordinator with a subject that says which happened
+  # instead of a generic "inconclusive". Detected by the message's leading
+  # sentence rather than a new verdict shape.
+  defp review_gate_escalation_subject(:no_verdict, findings, task_id) do
+    cond do
+      String.starts_with?(findings, Wardmast.Worker.ReviewGate.commit_gate_uncommitted_marker()) ->
+        "ReviewGate: implementer left uncommitted work for #{task_id}"
+
+      String.starts_with?(findings, Wardmast.Worker.ReviewGate.commit_gate_no_changes_marker()) ->
+        "ReviewGate: fix round produced no changes for #{task_id}"
+
+      true ->
+        "ReviewGate: review inconclusive for #{task_id}"
+    end
+  end
+
+  defp review_gate_escalation_subject(_verdict, _findings, task_id),
+    do: "ReviewGate: changes requested for #{task_id}"
+
+  defp log_review_gate_warning(task_id, reason) do
+    Logger.warning(
+      "Worker.record_review_gate_outcome swallowed for task=#{task_id}: #{inspect(reason)}"
+    )
+
+    :error
+  end
+
+  # bd-akp9ae: what a crash report and `:sys.get_status/1` print of a Worker: its
+  # state, the last message, the reason. The state holds every value its sessions were
+  # told to redact (a git token minted for a spawn, the provider token, the workspace's
+  # secrets), so each is masked wherever it appears in any of them
+  # (`Wardmast.Worker.StateRedaction`; the state's own `inspect/2` masks them too, for
+  # the stacktrace's arguments, which do not pass through here).
+  @impl true
+  def format_status(status) do
+    secrets =
+      Enum.uniq(
+        Wardmast.Worker.StateRedaction.secrets(Map.get(status, :state)) ++
+          opening_secrets(Map.get(status, :message))
+      )
+
+    Map.new(status, fn
+      {key, value} when key in [:state, :message, :reason, :log, :queue] ->
+        {key, Wardmast.Worker.StateRedaction.mask(value, secrets)}
+
+      pair ->
+        pair
+    end)
+  end
+
+  # A session being opened carries its own list, not yet in the state.
+  defp opening_secrets({:__claude_session_open__, _port_args, %{redact_values: values}})
+       when is_list(values),
+       do: values
+
+  defp opening_secrets(_message), do: []
+
+  @impl true
+  def terminate(reason, %State{} = state) do
+    # bd-bmmj4w: kill any still-live agent FIRST, on every teardown path — not
+    # just the failure path (`fail_now/2`). Erlang does not reap a
+    # `:spawn_executable` port's OS process when its owner dies, so without
+    # this the `claude` process (and whatever it is blocked on — a `mix test`
+    # child, say) survives `GenServer.stop/1` with its cwd still inside the
+    # task's worktree. That is exactly the bd-801xs5 loss: `:close` stops the
+    # fix-pass worker, the registry empties, `CleanupWorktree`'s drain
+    # sees nobody home, and `git worktree remove` deletes the directory out
+    # from under a test run that is still writing to it. Doing the kill here
+    # makes "StopWorker returned" actually imply "the agent is dead", which is
+    # what lets the registry drain serve as a sound proxy for the worktree
+    # being unowned. Synchronous and bounded (see terminate_session_port/2).
+    state = terminate_live_sessions(state, leave_run_to_node?(reason, state))
+
+    # Finalize the run row before we tear down. This is the normal-path
+    # bookkeeping the boot reconciler (bd-6k8519) was silently masking: the
+    # real worker-completion path is `arb done` -> task closes -> the task
+    # `:close` after-action StopWorker calls `Worker.stop` -> terminate/2
+    # from a live state (:starting/:working/:waiting). Nothing on that path
+    # ever marks the row finished, so it stayed :working until the next
+    # server boot. See finalize_run_on_terminate/2.
+    unless leave_run_to_node?(reason, state), do: finalize_run_on_terminate(reason, state)
+
+    # bd-4olwyg: a pass stopped while live leaves no worktree mid-rebase, and
+    # hands its slot back — `finish_pass`/`fail_now` send the ticket back to
+    # Merging, but a stop from outside never reached either, so the ticket sat
+    # In progress with no run, holding the incident's only slot. Not on a node
+    # shutdown: that run is `:interrupted`, and the boot sweep owns it.
+    settle_stopped_pass(reason, state)
+
+    # bd-cryhwk: if the worker is torn down (StopWorker after a task closes,
+    # a kill, a crash) while a Claude session's port `:exit_status` message
+    # never got processed — the coordinator's close can race ahead of the
+    # child process actually exiting — `record_usage_event/3` never fires for
+    # that session and its spend silently vanishes from the ledger (no zero
+    # row, no row at all). Sweep every still-open session here as a backstop:
+    # `handle_exit/2` already stamps `exited_at` on the normal path, so this
+    # only touches sessions whose exit was never observed, and
+    # `record_usage_event/3` itself falls back to the on-disk session JSONL
+    # (`maybe_reconcile_usage_from_disk/3`) when the stream's own `result`
+    # event didn't land either — so even a session killed before printing
+    # cost still leaves a row (tokens, no dollar figure) instead of nothing.
+    flush_unterminated_sessions(state)
+
+    # Explicitly unregister so callers that ask `whereis/1` immediately after
+    # `GenServer.stop/1` see `nil` deterministically. Registry's own
+    # monitor-based cleanup runs asynchronously and was the source of a flaky
+    # test where `whereis/1` returned the dead pid briefly after stop.
+    # Use the registry_key the worker actually registered under — defaults
+    # to task_id but the merge queue's conflict-resolver overrides it so its
+    # teardown doesn't accidentally unregister the original work worker.
+    PRegistry.unregister(state.registry_key || state.task_id)
+    broadcast_lifecycle(:stopped, state)
+    :ok
+  end
+
+  # On termination, guarantee the worker_runs row is closed out.
+  #
+  #   * `:finished` — the row was already stamped by complete_now/2 or
+  #     fail_now/2 (the explicit complete/fail paths). Don't double-write.
+  #   * any live state (:starting/:working/:waiting) — the worker is being
+  #     torn down without an explicit terminal transition. What that means
+  #     depends on WHY (bd-aje6fj):
+  #       - `:normal` — a deliberate `Worker.stop/3` (the normal `arb done` ->
+  #         task :close -> StopWorker teardown). Treat the termination as
+  #         success and stamp the row finished/:succeeded + completed_at so
+  #         `arb worker show` reflects the finished run immediately.
+  #       - `:shutdown` / `{:shutdown, _}` — the supervisor shut it down, i.e.
+  #         the node is stopping. The run did not fail and did not finish on
+  #         its own: stamp finished/:interrupted with failure_reason "server
+  #         shutdown". The task is left :active for the boot-time resume
+  #         sweep.
+  #       - anything else — the worker crashed (a raise in a callback, or a
+  #         linked process dying). Stamp finished/:failed with the crash
+  #         reason, not :succeeded.
+  defp finalize_run_on_terminate(_reason, %State{state: :finished}), do: :ok
+
+  defp finalize_run_on_terminate(reason, %State{} = state) do
+    finished = %State{state | state: :finished, waiting_on: nil}
+
+    case terminate_outcome(reason) do
+      # bd-4olwyg: a live conflict pass stopped from outside (the incident's
+      # Watchdog stopped one 19 s in, mid-rebase) is only a success if it
+      # delivered; otherwise it is failed with the unresolved state named.
+      :completed ->
+        case pass_verdict(state) do
+          :resolved ->
+            record_run_finished(%State{finished | outcome: :succeeded})
+
+          {:unresolved, summary} ->
+            record_run_finished(%State{
+              finished
+              | outcome: :failed,
+                meta: unresolved_pass_meta(state.meta, summary)
+            })
+        end
+
+      # bd-98gi5m: a deliberate operator stop is neither a crash nor a shutdown.
+      :interrupted when reason == {:shutdown, @operator_stop} ->
+        record_run_finished(%State{
+          finished
+          | outcome: :stopped,
+            meta: Map.put(state.meta, :failure_reason, stopped_reason(state.meta))
+        })
+
+      :interrupted ->
+        record_run_finished(%State{
+          finished
+          | outcome: :interrupted,
+            meta: Map.put(state.meta, :failure_reason, interrupted_reason(reason))
+        })
+
+      :crashed ->
+        record_run_finished(%State{
+          finished
+          | outcome: :failed,
+            meta: Map.put(state.meta, :failure_reason, "worker crashed: #{crash_inspect(reason)}")
+        })
+    end
+  end
+
+  # A crash reason can carry a whole state or stacktrace. Bounded so the stamp
+  # stays under Run.failure_reason's 2000-char max_length — an over-long value
+  # fails validation, the row is left :working, and the reconciler later
+  # misreports the crash as "server restarted".
+  defp crash_inspect(reason) do
+    reason
+    |> inspect(limit: 20, printable_limit: 200)
+    |> String.slice(0, 1_500)
+  end
+
+  defp settle_stopped_pass(_reason, %State{state: :finished}), do: :ok
+
+  defp settle_stopped_pass(reason, %State{} = state) do
+    if (terminate_outcome(reason) != :interrupted or reason == {:shutdown, @operator_stop}) and
+         pass?(state.meta) do
+      settle_pass_worktree(state)
+      return_pass_ticket(state)
+    end
+
+    :ok
+  end
+
+  defp stopped_reason(meta) do
+    case Map.get(meta || %{}, :stopped_by) do
+      nil -> Atom.to_string(@operator_stop)
+      by -> "#{@operator_stop} by #{by}"
+    end
+  end
+
+  defp interrupted_reason(_), do: @shutdown_reason
+
+  defp terminate_outcome(:normal), do: :completed
+  defp terminate_outcome(:shutdown), do: :interrupted
+  defp terminate_outcome({:shutdown, _}), do: :interrupted
+  defp terminate_outcome(_), do: :crashed
+
+  # ---- child_spec --------------------------------------------------------
+
+  @doc """
+  How long the supervisor gives a worker's `terminate/2` on shutdown before
+  killing it. See `@shutdown_grace_ms`.
+  """
+  @spec shutdown_grace_ms() :: pos_integer()
+  def shutdown_grace_ms, do: @shutdown_grace_ms
+
+  @doc false
+  def child_spec(opts) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [opts]},
+      restart: :temporary,
+      # bd-aje6fj: explicit, not the 5s default — the budget terminate/2 gets on
+      # an application stop. Honoured only because init/1 traps exits.
+      shutdown: @shutdown_grace_ms,
+      type: :worker
+    }
+  end
+
+  # ---- internals ---------------------------------------------------------
+
+  defp call(pid, msg) when is_pid(pid), do: GenServer.call(pid, msg)
+
+  defp call(task_id, msg) when is_binary(task_id) do
+    case whereis(task_id) do
+      nil -> {:error, :not_found}
+      pid -> GenServer.call(pid, msg)
+    end
+  end
+
+  # The one definition of "this worker owns an agent subprocess right now".
+  # Read by `agent_session_live?/1` (the re-dispatch guard) and stamped onto
+  # every snapshot as `:agent_live` (bd-aw2cyt), so slot accounting and the
+  # phase model cannot disagree with the guard about what is running.
+  defp session_live?(%State{claude_sessions: sessions}) do
+    Enum.any?(sessions, fn {port, session} ->
+      is_nil(Map.get(session, :exited_at)) and handle_live?(port)
+    end)
+  end
+
+  defp handle_live?(port) when is_port(port), do: Port.info(port) != nil
+  defp handle_live?({:remote, _} = handle), do: Wardmast.Worker.Executor.Node.live?(handle)
+  defp handle_live?(_), do: false
+
+  defp snapshot(%State{} = s) do
+    %{
+      task_id: s.task_id,
+      # bd-8lq2g7: `registry_key` + `role` are what make two rows for one
+      # `task_id` legible. Consumers (worker_list, the escalation notifier)
+      # branch on subordinate?/1, which reads the role (bd-741sid: a pass
+      # registers under the ticket id, so the key alone no longer tells).
+      registry_key: s.registry_key || s.task_id,
+      role: role_from_meta(s.meta),
+      workspace_id: s.workspace_id,
+      repo: s.repo,
+      current_step: s.current_step,
+      # bd-1uu19b: the run vocabulary, the same fields the run's row carries.
+      kind: s.kind,
+      state: s.state,
+      outcome: s.outcome,
+      waiting_on: s.waiting_on,
+      # bd-aw2cyt: a slot is a live agent, not a live record. Stamped here so
+      # every surface that already reads a snapshot — the board, `arb worker
+      # list`, the MCP tools, the worker lifecycle broadcast — gets the answer
+      # without a second call into this process.
+      agent_live: session_live?(s),
+      started_at: s.started_at,
+      step_started_at: s.step_started_at,
+      mr_ref: s.mr_ref,
+      merger_url: s.merger_url,
+      # The run's `Wardmast.Workers.Run` row (nil if its create failed).
+      run_id: s.run_id,
+      meta: s.meta
+    }
+  end
+
+  # The lifecycle broadcast goes to every open dashboard tab, and `output_lines`
+  # (up to 1000 lines) is the bulk of `meta`. No subscriber reads it — the
+  # transcript has its own `:worker_output` stream and the run row.
+  defp lifecycle_snapshot(%State{} = s) do
+    snap = snapshot(s)
+    %{snap | meta: Map.delete(snap.meta || %{}, :output_lines)}
+  end
+
+  # ---- merge-request review internals ------------------------------------
+
+  # Resolve the merger, open the MR / run the merge, hand the PR to the ticket,
+  # and spawn the Watchdog. Returns `{:ok, mr_ref, new_state}` on success or
+  # `{:error, reason, unchanged_state}` on failure.
+  #
+  # Shared by the explicit open_mr/5 API (handle_call) and the worker
+  # completion path (the arb-done handler) so the branch is always integrated
+  # through the same code, regardless of how completion was triggered. For the
+  # default Direct strategy this performs the local `git merge --no-ff`
+  # synchronously; the Watchdog then completes the worker on its first poll.
+  defp do_open_mr(%State{} = state, branch, title, description, opts) do
+    case resolve_merger(state, opts) do
+      {:ok, adapter, workspace} ->
+        Wardmast.Mergers.prepare_with_repo(workspace, state.repo)
+        open_opts = state |> build_open_opts(opts) |> put_reviewed_sha(adapter, state)
+
+        # bd-13thk9: push the worktree branch to origin BEFORE asking a hosted
+        # forge (GitHub/GitLab) to open a PR. GitHub returns 422 "field head
+        # invalid" when the PR head ref does not exist remotely. A push failure
+        # is surfaced loudly rather than proceeding to a doomed PR-open. Always
+        # push even when we already know the PR ref below — a revise-and-
+        # discuss round may have added commits since the pre-review open that
+        # the PR (and its CI) needs to see.
+        case publish_branch(state, workspace, opts) do
+          {:error, reason} ->
+            {:error, reason, state}
+
+          :ok ->
+            case known_pr_ref_for_branch(state, branch) do
+              {:ok, mr_ref} ->
+                finalize_opened_mr(state, adapter, workspace, opts, mr_ref)
+
+              :none ->
+                retry_opts = open_retry_opts(state)
+
+                # Pre-existing nesting 4 — baselined when bd-4x2yhq first
+                # wired Credo up. Thresholds stay at the tool's own default so new
+                # code is held to it; see the note in .credo.exs.
+                # credo:disable-for-next-line Credo.Check.Refactor.Nesting
+                case safe_open(adapter, branch, title, description, open_opts, retry_opts) do
+                  {:ok, mr_ref} ->
+                    finalize_opened_mr(state, adapter, workspace, opts, mr_ref)
+
+                  {:error, reason} ->
+                    Logger.warning(
+                      "Worker.open_mr: adapter open failed for task=#{state.task_id}: #{inspect(reason)}"
+                    )
+
+                    {:error, reason, state}
+                end
+            end
+        end
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
+  # bd-28l6im: when `enter_review_gate` already opened a real PR for this exact
+  # branch before the reviewer ran (bd-129xh4, `maybe_open_pr_for_review`),
+  # APPROVE's `do_open_mr` must adopt that ref directly instead of racing a
+  # second `adapter.open/4` call against it. That second call is exactly what
+  # produced three finalize-422 false-failures in one afternoon (bd-8cn795,
+  # bd-7opdaf, bd-2wilou): GitHub's PR-listing endpoint can transiently miss a
+  # PR it just accepted, and `Mergers.open_with_retry/5` (bd-636thc) only
+  # retries the whole `open/4` call — that retry budget is not always enough
+  # to outlast the miss window. Skipping the second call removes the race
+  # entirely rather than out-waiting it.
+  #
+  # Returns `{:ok, mr_ref}` only when the branch matches the one the pre-review
+  # open recorded — a mismatched branch (should not happen in practice, but
+  # would mean adopting the wrong PR) falls through to a fresh `open/4` call.
+  defp known_pr_ref_for_branch(%State{meta: meta}, branch) when is_binary(branch) do
+    meta = meta || %{}
+
+    with ^branch <- Map.get(meta, :review_gate_branch),
+         pr_ref when is_binary(pr_ref) and pr_ref != "" <- Map.get(meta, :review_pr_ref) do
+      {:ok, pr_ref}
+    else
+      _ -> :none
+    end
+  end
+
+  defp known_pr_ref_for_branch(_state, _branch), do: :none
+
+  # Shared success continuation for `do_open_mr`: record the PR on the ticket,
+  # sync the tracker, hand the PR to the ticket's Watchdog, and end the run.
+  # Used whether `mr_ref` came from a fresh `adapter.open/4` call or was
+  # adopted directly via `known_pr_ref_for_branch/2`.
+  #
+  # bd-741sid: the ticket, not this worker, owns the PR from here. Its row gets
+  # the ref, the URL and the lane the Watchdog watches it on (so the Watchdog
+  # can be restarted from the row alone), the Watchdog is started keyed by the
+  # ticket id, and the run ends — no worker stays resident for a Merging ticket.
+  defp finalize_opened_mr(%State{} = state, adapter, _workspace, opts, mr_ref) do
+    merger_url = safe_link_for(adapter, mr_ref)
+
+    # bd-7b46wd: persist the PR/MR ref onto the task so the workspace
+    # MergeQueue ADOPTS this PR (instead of opening a duplicate) when it
+    # later receives the {:worker_done, task_id} broadcast. Without
+    # this the MergeQueue's existing_mr_ref/1 is always nil, it falls
+    # through to open_mr_for/3, fails opening a second PR on the
+    # already-merged branch, and the task is never auto-closed.
+    #
+    # bd-842qio: this is the ticket's `open_pr` transition (active → merging),
+    # written together with the ref.
+    record_pr_ref_on_task(state, mr_ref, :opened,
+      merger_url: merger_url,
+      merge_watch: watch_lane(state, adapter, opts)
+    )
+
+    if Map.has_key?(state.meta || %{}, :review_gate_branch),
+      do: record_review_gate(state, %{pr_ref: mr_ref})
+
+    record_mr_ref_on_run(state, mr_ref, merger_url)
+    sync_tracker_pr_opened(state, mr_ref, merger_url)
+
+    new_state = %State{
+      state
+      | mr_ref: mr_ref,
+        merger_url: merger_url,
+        merger_adapter: adapter,
+        meta:
+          state.meta
+          |> Map.put(:mr_ref, mr_ref)
+          |> Map.put(:merger_url, merger_url)
+    }
+
+    # The PR already exists on the forge: a Watchdog that will not start must
+    # not lose it. The ticket is Merging with the PR on its row, so the boot
+    # reconciler or `arb queue restart-watchdog` can watch it again; the
+    # coordinator is paged so it does not sit unwatched until then.
+    unless start_ticket_watchdog(new_state, opts) == :ok do
+      escalate_watchdog_failure(new_state)
+    end
+
+    {:ok, mr_ref, finish_run_after_pr_opened(new_state)}
+  end
+
+  # bd-741sid: the implementer's run is over once its PR is open. Record it
+  # finished and successful, then stop (`:__run_finished__`): the ticket and
+  # its Watchdog own the PR from here. Deliberately NOT `complete_now/2`, which
+  # announces the *ticket* done — the MergeQueue's `{:worker_done}`, the
+  # coordinator's "completed" notification — and that is the merge's to say
+  # (`Wardmast.Tasks.PullRequest.merged/2`). The Driver leaves a `:pr_opened`
+  # completion alone for the same reason.
+  defp finish_run_after_pr_opened(%State{} = state) do
+    finished = %State{
+      state
+      | state: :finished,
+        outcome: :succeeded,
+        waiting_on: nil,
+        step_started_at: DateTime.utc_now(),
+        meta: Map.put(state.meta, :result, :pr_opened)
+    }
+
+    record_run_finished(finished)
+    notify_auth_hold_success(finished)
+    send(self(), :__run_finished__)
+    announce_phase(finished)
+  end
+
+  # bd-129xh4: open the PR for `branch` BEFORE the reviewer runs, WITHOUT
+  # merging or starting the Watchdog, so the ReviewGate's reviewer reviews a
+  # real PR (`gh pr diff <n>`) instead of a bare branch. Only fires for a
+  # hosted-forge merger (github/gitlab); the local :direct strategy has no
+  # remote PR — its `open` performs the merge — so it is skipped and the
+  # reviewer falls back to the branch diff. Returns `{:ok, pr_ref}` when a PR
+  # was opened, or `:none` when no hosted merger is configured / the open failed
+  # (the caller proceeds with branch-diff review either way). The merge still
+  # happens later, on APPROVE, through the unchanged merge_branch path — its
+  # adapter.open is idempotent and adopts the PR opened here.
+  defp maybe_open_pr_for_review(%State{} = state, branch)
+       when is_binary(branch) and branch != "" do
+    opts = merge_opts_from_meta(state.meta, %{})
+
+    case resolve_merger(state, opts) do
+      {:ok, adapter, workspace} ->
+        if hosted_forge_merger?(workspace, opts) do
+          open_pr_without_merge(state, adapter, workspace, branch, opts)
+        else
+          :none
+        end
+
+      {:error, _reason} ->
+        :none
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Worker: pre-review PR open raised for task=#{state.task_id}: #{Exception.message(e)}"
+      )
+
+      :none
+  end
+
+  defp maybe_open_pr_for_review(_state, _branch), do: :none
+
+  # A hosted forge (github/gitlab) has a real remote PR worth opening ahead of
+  # review; the local :direct strategy does not. An explicit `:adapter` override
+  # (tests) is treated as hosted so the pre-review open path can be exercised.
+  defp hosted_forge_merger?(workspace, opts) do
+    cond do
+      Map.get(opts, :adapter) ->
+        true
+
+      match?(%Wardmast.Tasks.Workspace{}, workspace) ->
+        Wardmast.Tasks.Workspace.merger_strategy(workspace) in [:github, :gitlab]
+
+      true ->
+        false
+    end
+  end
+
+  # True when workspace is a real Workspace struct with a hosted-forge strategy
+  # (GitHub or GitLab). Unlike hosted_forge_merger?/2 this does NOT treat a
+  # test-injected :adapter override as hosted — it checks only the workspace
+  # strategy, so :direct workspaces with a stub adapter remain :direct.
+  defp hosted_forge_workspace?(%Wardmast.Tasks.Workspace{} = ws),
+    do: Wardmast.Tasks.Workspace.merger_strategy(ws) in [:github, :gitlab]
+
+  defp hosted_forge_workspace?(_), do: false
+
+  # bd-13thk9: push the worktree branch to `origin` before opening a PR on a
+  # hosted forge. GitHub/GitLab return 422 "field head invalid" when the head
+  # ref does not exist remotely. The Direct strategy merges locally, so it does
+  # not need the branch on origin and is skipped.
+  #
+  # Returns `:ok` when the push succeeds (or is not needed), and
+  # `{:error, {:push_failed, reason}}` when it fails, so callers can surface the
+  # failure loudly rather than proceeding to a doomed PR-open.
+  # The branch the merger reads: pushed to the forge for a hosted PR, and, for a
+  # private clone (git layout B, bd-4wy1w1), synced back into the main repo,
+  # where the Direct merger (and GitLab's open) look it up by name. After the
+  # push, so a reconcile-before-push rebase is what the main repo gets.
+  # Either failure is refused loudly: a push failure would 422 the PR open, and
+  # a failed sync-back would merge or open a stale branch.
+  defp publish_branch(%State{meta: meta, task_id: task_id} = state, workspace, opts) do
+    case push_for_hosted_pr(state, workspace, opts) do
+      :ok ->
+        sync_back_branch(meta && Map.get(meta, :worktree_path), task_id)
+
+      {:error, push_reason} ->
+        Logger.warning(
+          "Worker.open_mr: push failed before PR open for task=#{task_id}: " <>
+            "#{inspect(push_reason)} — aborting (would 422)"
+        )
+
+        {:error, {:push_failed, push_reason}}
+    end
+  end
+
+  defp sync_back_branch(path, task_id) when is_binary(path) do
+    case Wardmast.Worker.Worktree.sync_back(path) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Worker.open_mr: the private clone's branch could not be synced back for " <>
+            "task=#{task_id}: #{inspect(reason)} — not opening or merging a stale branch"
+        )
+
+        {:error, {:sync_back_failed, reason}}
+    end
+  end
+
+  defp sync_back_branch(_no_worktree, _task_id), do: :ok
+
+  defp push_for_hosted_pr(%State{meta: meta, task_id: task_id} = state, workspace, opts) do
+    worktree = meta && Map.get(meta, :worktree_path)
+
+    cond do
+      not hosted_forge_merger?(workspace, opts) ->
+        # Direct strategy: `open/4` runs `git merge --no-ff` locally.
+        # No remote branch required.
+        :ok
+
+      not (is_binary(worktree) and File.dir?(worktree)) ->
+        # No local worktree to push from (e.g. coordinator-dispatched ad-hoc run
+        # or test without a provisioned worktree). Log so the operator knows
+        # why the PR-open may fail if the branch is missing on origin.
+        Logger.info(
+          "Worker: push_for_hosted_pr skipped for task=#{task_id} (no worktree on disk); " <>
+            "PR-open may fail if branch is not on origin"
+        )
+
+        :ok
+
+      true ->
+        Logger.info(
+          "Worker: pushing worktree branch to origin before PR open for task=#{task_id}"
+        )
+
+        with {:ok, push_opts} <- plan_hosted_push(worktree, task_id),
+             {:ok, push_opts} <- host_push_opts(state, workspace, push_opts),
+             {:ok, _} <- Wardmast.Worker.Worktree.push(worktree, push_opts) do
+          record_pushed_head(worktree, task_id)
+        else
+          {:error, reason} ->
+            Logger.warning(
+              "Worker: git push to origin failed for task=#{task_id}: #{inspect(reason)}"
+            )
+
+            {:error, {:push_failed, reason}}
+        end
+    end
+  end
+
+  # bd-4axlg0: a podman run (main, fix round or conflict pass) cannot push, and
+  # may have rebased its own branch; the rewritten history is "diverged" from
+  # the remote branch it replaces. When the remote holds nothing the rewrite
+  # loses (`PushState.rewrite_lease/3`), deliver it as a push with
+  # `--force-with-lease` pinned to the remote head just observed. Reconciling
+  # first (below) would rebase the rewrite back onto the very commits it
+  # replaced and fail on "previously applied" ones. Any other shape goes the
+  # ordinary way: reconcile, then a plain push. Never a bare `--force`.
+  #
+  # bd-6ao60c: the lease clearance is the remote head Wardmast last pushed or
+  # observed for this branch (`RemoteHead`), recorded on the ticket so a run that
+  # resumed on another backend (a cluster pass interrupted, then a local
+  # `implement`) still has it. Without it only a clean, patch-equivalent rebase
+  # is cleared, and one whose commits differ (main's `mix format` changed their
+  # context) was refused as diverged.
+  defp plan_hosted_push(worktree, task_id) do
+    with {:ok, branch} <- Wardmast.Worker.Worktree.current_branch(worktree) do
+      expected = Wardmast.Reviews.RemoteHead.recorded(task_id, branch)
+
+      case Wardmast.Reviews.PushState.rewrite_plan(worktree, branch, expected_remote: expected) do
+        {:rewrite, lease_sha} ->
+          Logger.info(
+            "Worker: `#{branch}` was rewritten locally; pushing with --force-with-lease " <>
+              "pinned to #{String.slice(lease_sha, 0, 12)} for task=#{task_id}"
+          )
+
+          {:ok, [set_upstream: true, force_with_lease: lease_sha]}
+
+        :none ->
+          with :ok <- reconcile_before_push(worktree, task_id), do: {:ok, [set_upstream: true]}
+      end
+    end
+  end
+
+  # bd-6ao60c: what the push just landed is the remote head Wardmast now holds for
+  # the branch; the next run's lease (`plan_hosted_push/2`) pins to it.
+  # Only recorded while the worktree is on the pushed branch, so HEAD is what landed.
+  defp record_pushed_head(worktree, task_id, pushed_branch \\ nil) do
+    with {:ok, branch} <- Wardmast.Worker.Worktree.current_branch(worktree),
+         true <- is_nil(pushed_branch) or pushed_branch == branch,
+         head when is_binary(head) <- Wardmast.Worker.Worktree.head_sha(worktree) do
+      Wardmast.Reviews.RemoteHead.record(task_id, branch, head)
+    end
+
+    :ok
+  end
+
+  # bd-bsmkfu: the host pushes a podman run's branch (its container holds no
+  # credential), and must not do it on the operator's ssh/gh credentials when the
+  # repo has a scoped one (`git_credentials.repos.<repo>`: a deploy key, token or
+  # GitHub App). `HostCredential.for_repo/3` yields that credential's env for the
+  # push (`[]` for a legacy_operator or unconfigured repo, so those push as
+  # before); a scoped credential that cannot be built refuses the push rather
+  # than falling back to the operator's. A remote-node run's branch is pushed by
+  # this same host after its `arb done`, so it goes through here too.
+  defp host_push_opts(%State{} = state, workspace, push_opts) do
+    workspace = workspace || host_push_workspace(state)
+    worktree = state.meta && Map.get(state.meta, :worktree_path)
+
+    case Wardmast.Worker.HostCredential.for_repo(workspace, state.repo, worktree_path: worktree) do
+      {:ok, credential} ->
+        {:ok, push_opts ++ [env: Wardmast.Worker.HostCredential.push_env(credential)]}
+
+      {:error, reason} ->
+        {:error, {:git_credential, Wardmast.Worker.HostCredential.format_error(reason)}}
+    end
+  end
+
+  defp host_push_workspace(%State{workspace_id: id}) when is_binary(id) do
+    case Ash.get(Wardmast.Tasks.Workspace, id) do
+      {:ok, workspace} -> workspace
+      _ -> nil
+    end
+  end
+
+  defp host_push_workspace(_state), do: nil
+
+  # bd-3doy0y: a ReviewGate implementer round pushes its fix commit straight
+  # to `origin/<branch>`; this worktree's local ref never sees it. If this
+  # worker later committed its own work (e.g. amending the merge title)
+  # before this push, the branches have genuinely diverged — a plain push is
+  # rejected non-fast-forward. Reconcile by rebasing this worktree's own
+  # commits onto the remote tip so the implementer's work is never dropped
+  # and never force-pushed over. On a real rebase conflict, refuse to push
+  # (tagged :diverged so the escalation names divergence specifically rather
+  # than a generic "could not be opened/merged").
+  defp reconcile_before_push(worktree, task_id) do
+    with {:ok, branch} <- Wardmast.Worker.Worktree.current_branch(worktree) do
+      case Wardmast.Worker.Worktree.rebase_onto_origin(worktree, branch) do
+        {:ok, _} ->
+          :ok
+
+        {:error, {:diverged_conflict, detail}} ->
+          Logger.warning(
+            "Worker: branch `#{branch}` diverged from origin and could not be rebased " <>
+              "cleanly for task=#{task_id}: #{inspect(detail)}"
+          )
+
+          {:error, {:diverged, detail}}
+
+        {:error, reason} ->
+          # origin missing / fetch failed — fail open and let the push
+          # attempt itself surface the real error (mirrors sync_from_origin
+          # call sites' fail-open posture).
+          Logger.warning(
+            "Worker: reconcile-before-push failed open for task=#{task_id}: #{inspect(reason)}"
+          )
+
+          :ok
+      end
+    end
+  end
+
+  # Open the PR via the adapter and record it on the task, but do NOT park the
+  # worker or start the Watchdog — that all happens later on APPROVE. Records
+  # pr_ref so the MergeQueue adopts this PR rather than opening a duplicate.
+  defp open_pr_without_merge(%State{} = state, adapter, workspace, branch, opts) do
+    Wardmast.Mergers.prepare_with_repo(workspace, state.repo)
+    title = pr_title_for(state.task_id, state.meta)
+    description = build_pr_body(state.task_id, Map.get(state.meta, :worktree_path))
+    open_opts = build_open_opts(state, opts)
+
+    # bd-13thk9: push before the pre-review PR open too. A failure falls back
+    # gracefully (branch-diff review) so the review gate still runs; but it is
+    # logged at warning so the operator can diagnose why the reviewer saw a
+    # branch diff instead of the real PR.
+    case push_for_hosted_pr(state, workspace, opts) do
+      {:error, push_reason} ->
+        Logger.warning(
+          "Worker: push failed before pre-review PR open for task=#{state.task_id}: " <>
+            "#{inspect(push_reason)} — falling back to branch-diff review"
+        )
+
+        :none
+
+      :ok ->
+        case safe_open(adapter, branch, title, description, open_opts, open_retry_opts(state)) do
+          {:ok, mr_ref} ->
+            merger_url = safe_link_for(adapter, mr_ref)
+            record_pr_ref_on_task(state, mr_ref)
+            record_mr_ref_on_run(state, mr_ref, merger_url)
+            sync_tracker_pr_opened(state, mr_ref, merger_url)
+            {:ok, mr_ref}
+
+          {:error, reason} ->
+            Logger.warning(
+              "Worker: pre-review PR open failed for task=#{state.task_id}: #{inspect(reason)} " <>
+                "— falling back to branch-diff review"
+            )
+
+            :none
+        end
+    end
+  end
+
+  # Resolve {adapter, workspace} for an open_mr/5 call. An explicit `:adapter`
+  # in opts wins (test/advanced override); otherwise resolve from the worker's
+  # workspace, narrowed to the run's repo (bd-73zv62): the workspace handed
+  # back is `Wardmast.Mergers.scope/2`'d, so every downstream reader
+  # (`hosted_forge_merger?/2`, `prepare_with_repo/2`, the Watchdog's opts) sees
+  # the repo's effective merge block, and a `merge.repos.<repo>` override on
+  # `direct` merges locally even when the workspace merges via a forge.
+  defp resolve_merger(%State{} = state, opts) do
+    cond do
+      adapter = Map.get(opts, :adapter) ->
+        {:ok, adapter, Wardmast.Mergers.scope(Map.get(opts, :workspace), state.repo)}
+
+      is_binary(state.workspace_id) ->
+        case Ash.get(Wardmast.Tasks.Workspace, state.workspace_id) do
+          {:ok, ws} ->
+            ws = Wardmast.Mergers.scope(ws, state.repo)
+            {:ok, Wardmast.Mergers.for_workspace(ws), ws}
+
+          _ ->
+            {:error, :workspace_not_found}
+        end
+
+      true ->
+        {:error, :no_workspace}
+    end
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  end
+
+  # Build the opts map handed to the adapter's open/4. Carries the task-domain
+  # keys and, when the caller didn't supply them, defaults from the worker's
+  # meta:
+  #
+  #   * :repo_path — the repo path (local checkout where the target branch
+  #     lives) the Direct adapter runs `git merge --no-ff` inside. Seeded into
+  #     meta at dispatch time; falls back to the worktree path for older callers.
+  #   * :target_branch — the base branch the worktree was cut from.
+  defp build_open_opts(%State{meta: meta}, opts) do
+    meta = meta || %{}
+
+    opts
+    |> Map.take([:target_branch, :reviewer_ids, :labels, :repo_path])
+    |> maybe_default(:repo_path, Map.get(meta, :repo_path) || Map.get(meta, :worktree_path))
+    |> maybe_default(:target_branch, Map.get(meta, :target_branch))
+  end
+
+  # bd-9ahwai: the local `Direct` merge integrates the branch ref by name, so it
+  # carries the approved SHA and refuses a branch that moved past it. Forge
+  # adapters have their own head guard (`expected_sha` on `merge/2`).
+  defp put_reviewed_sha(open_opts, Wardmast.Mergers.Direct, %State{task_id: task_id}) do
+    case last_reviewed_sha(task_id) do
+      sha when is_binary(sha) and sha != "" -> Map.put(open_opts, :reviewed_sha, sha)
+      _ -> open_opts
+    end
+  end
+
+  defp put_reviewed_sha(open_opts, _adapter, _state), do: open_opts
+
+  defp maybe_default(map, _key, nil), do: map
+  defp maybe_default(map, key, value), do: Map.put_new(map, key, value)
+
+  # An explicit meta `:open_retry_opts` (tests only — keeps the "already
+  # exists" retry-exhaustion path fast to exercise instead of waiting out the
+  # real multi-second production backoff) overrides `Mergers.open_with_retry/6`'s
+  # defaults; production callers leave this unset.
+  defp open_retry_opts(%State{meta: meta}) do
+    case meta && Map.get(meta, :open_retry_opts) do
+      opts when is_list(opts) -> opts
+      _ -> []
+    end
+  end
+
+  # bd-636thc: routes through Mergers.open_with_retry/6 rather than calling
+  # adapter.open/4 directly, so a transient "already exists" 422 (the
+  # adapter's own single-shot adoption lookup missing a PR that genuinely
+  # exists — e.g. right after this same run's own pre-review PR-open,
+  # bd-129xh4) gets one more chance to adopt instead of failing the run.
+  defp safe_open(adapter, branch, title, description, open_opts, retry_opts) do
+    Wardmast.Mergers.open_with_retry(adapter, branch, title, description, open_opts, retry_opts)
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  # link_for/1 is best-effort: some adapters resolve the URL from per-process
+  # config (already seeded via Mergers.prepare/1 above). A failure or empty
+  # string just means "no clickable link" — store nil rather than "".
+  defp safe_link_for(adapter, mr_ref) do
+    case adapter.link_for(mr_ref) do
+      url when is_binary(url) and url != "" -> url
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  # Persist the opened MR/PR ref onto the task's `pr_ref` (bd-7b46wd). This is
+  # the single signal the workspace MergeQueue reads (`existing_mr_ref/1`) to
+  # ADOPT an already-open PR rather than open a duplicate. Mirrors
+  # `Wardmast.Workflows.MergeQueue.maybe_record_mr_ref/2`. Best-effort: a DB
+  # hiccup logs at debug and never fails the open.
+  #
+  # `moment` is `:opened` from `finalize_opened_mr/5` — the ticket's `open_pr`
+  # transition — `:pre_review` from the open ahead of the ReviewGate
+  # (bd-129xh4), which leaves the ticket where it is (the review still owns
+  # it), and `:engagement` for a review-only engagement's PR, whose ticket
+  # never enters Merging (bd-cw3w9p). `opts` rides along on the same write
+  # (bd-741sid): `:merger_url` and the Watchdog's `:merge_watch` lane.
+  defp record_pr_ref_on_task(state, mr_ref, moment \\ :pre_review, opts \\ [])
+
+  defp record_pr_ref_on_task(%State{task_id: task_id}, mr_ref, moment, opts)
+       when is_binary(mr_ref) and mr_ref != "" do
+    case write_pr_ref(task_id, mr_ref, moment, opts) do
+      {:ok, _updated} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.debug(
+          "Worker.open_mr: failed to record pr_ref=#{mr_ref} for task=#{task_id}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  rescue
+    e ->
+      Logger.debug(
+        "Worker.open_mr: pr_ref record raised for task=#{task_id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
+
+  defp record_pr_ref_on_task(_state, _mr_ref, _moment, _opts), do: :ok
+
+  # bd-842qio: the PR-opened path is the `open_pr` transition (active →
+  # merging) — see `Issue.pr_opened/3`.
+  defp write_pr_ref(task_id, mr_ref, :opened, opts),
+    do: Wardmast.Tasks.Issue.pr_opened(task_id, mr_ref, opts)
+
+  defp write_pr_ref(task_id, mr_ref, _moment, opts),
+    do: Wardmast.Tasks.Issue.pr_opened(task_id, mr_ref, Keyword.put(opts, :transition, false))
+
+  # Persist the opened/adopted MR ref onto *this run's* durable Workers.Run
+  # row (bd-6h4ia3), alongside record_pr_ref_on_task's write to the task's
+  # single pr_ref. The task's pr_ref is overwritten by whatever MR is current;
+  # this per-run column is what lets the task detail page show every distinct
+  # MR a task's worker-run history ever opened, not just the latest one.
+  # Best-effort, mirroring the other Run writes in this module (run_id nil or
+  # a DB hiccup just skips).
+  defp record_mr_ref_on_run(%State{run_id: nil}, _mr_ref, _merger_url), do: :ok
+
+  defp record_mr_ref_on_run(%State{run_id: run_id, task_id: task_id}, mr_ref, merger_url)
+       when is_binary(mr_ref) and mr_ref != "" do
+    with {:ok, run} <- Ash.get(Wardmast.Workers.Run, run_id),
+         {:ok, _updated} <-
+           Ash.update(run, %{mr_ref: mr_ref, merger_url: merger_url}, action: :update) do
+      :ok
+    else
+      {:error, reason} -> log_run_warning("mr_ref", task_id, reason)
+    end
+  rescue
+    e -> log_run_warning("mr_ref", task_id, e)
+  end
+
+  defp record_mr_ref_on_run(_state, _mr_ref, _merger_url), do: :ok
+
+  # PR-open: drive the task's external tracker forward (e.g. Jira AX ->
+  # In Code Review) and attach the PR as a comment + remote link. The original
+  # incident (AX-17911) opened a PR but never transitioned the ticket and left
+  # 0 comments / no remote-link; this fires that hook. Best-effort and
+  # loud-on-failure inside `Wardmast.Trackers.Sync` — a missing/unreadable task
+  # here just skips. (bd-c4cfuv)
+  defp sync_tracker_pr_opened(%State{task_id: task_id}, mr_ref, merger_url) do
+    with {:ok, task} <- Ash.get(Wardmast.Tasks.Issue, task_id) do
+      Wardmast.Trackers.Sync.lifecycle(task, :pr_opened,
+        pr_url: merger_url,
+        pr_title: "PR #{mr_ref} (#{task_id})"
+      )
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.debug(
+        "Worker.open_mr: PR-open tracker sync raised for task=#{task_id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
+
+  # bd-741sid: the lane the ticket's Watchdog watches the PR on, recorded on the
+  # ticket with the ref (`merge_watch`) so a Watchdog started from the row
+  # alone — now, after a crash, after a reboot — watches it exactly as this run
+  # would have. `Wardmast.Tasks.PullRequest.watch_opts/1` reads it back.
+  #
+  # The `:via_review_gate` opt records that the gate has already approved this
+  # MR; it short-circuits hosted-forge approval polling (meaning a). It does
+  # NOT implicitly force auto_merge — that is opt-in via `:force_merge`
+  # (meaning b), which no caller sets unconditionally anymore: whether an
+  # approved MR is actually merged falls through to the workspace's
+  # `auto_merge` setting, read when the Watchdog starts, unless a caller has an
+  # explicit reason to override it (bd-ddtbhb, bd-dkwhbn).
+  #
+  # `:local_head_sha` (bd-ch9pmk / #1614) is the branch head this worker holds
+  # locally. Every caller reaches here just after `push_for_hosted_pr/3` put
+  # exactly this commit on origin, so it is the head the PR is *about* to
+  # report — and on a ReviewGate lane it is the commit the gate's APPROVE
+  # stamped. The merge guard uses it to tell "the forge has not seen my push
+  # yet" apart from "somebody pushed a commit nobody reviewed".
+  #
+  # `:auto_resumes` carries the auto-resume count the Dispatch re-stamped onto
+  # this run (bd-8eheb6), so the budget binds across the Watchdogs a
+  # review-timeout loop mints.
+  defp watch_lane(%State{} = state, adapter, opts) do
+    Wardmast.Tasks.PullRequest.lane(
+      adapter: adapter,
+      repo: state.repo,
+      via_review_gate: Map.get(opts, :via_review_gate, false),
+      force_merge: Map.get(opts, :force_merge),
+      auto_merge: Map.get(opts, :auto_merge),
+      local_head_sha: local_head_sha(state),
+      interval_ms: Map.get(opts, :interval_ms),
+      initial_delay_ms: Map.get(opts, :initial_delay_ms),
+      max_polls: Map.get(opts, :max_polls),
+      auto_resume_dispatcher: Map.get(opts, :auto_resume_dispatcher),
+      auto_resumes: Map.get(state.meta || %{}, :awaiting_review_resume_attempts),
+      review_only: if(review_only?(state.meta || %{}), do: true)
+    )
+  end
+
+  # The worktree's own HEAD, or nil when this worker has no worktree on disk
+  # (a coordinator-dispatched ad-hoc run, or a test without a provisioned one).
+  defp local_head_sha(%State{meta: meta}) do
+    case meta && Map.get(meta, :worktree_path) do
+      path when is_binary(path) -> Wardmast.Worker.Worktree.head_sha(path)
+      _ -> nil
+    end
+  end
+
+  # bd-741sid: start the ticket's Watchdog from the row this worker just wrote.
+  # Test escape hatch: `:watchdog_start_error` in opts simulates a Watchdog
+  # startup failure without needing a real error condition, mirroring
+  # `:review_spawn` for the ReviewGate. Production callers never set it.
+  defp start_ticket_watchdog(%State{} = state, opts) do
+    if Map.get(opts, :watchdog_start_error) do
+      :error
+    else
+      case Wardmast.Worker.Watchdog.watch(state.task_id) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "Worker.open_mr: failed to start the Watchdog for task=#{state.task_id}: " <>
+              inspect(reason)
+          )
+
+          :error
+      end
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Worker.open_mr: Watchdog startup raised for task=#{state.task_id}: #{Exception.message(e)}"
+      )
+
+      :error
+  catch
+    :exit, reason ->
+      Logger.warning(
+        "Worker.open_mr: Watchdog startup exit for task=#{state.task_id}: #{inspect(reason)}"
+      )
+
+      :error
+  end
+
+  # An MR was opened but the Watchdog failed to start. The PR is real and is on
+  # the ticket's row (bd-741sid), so nothing is lost — but nothing is watching
+  # it either, so the coordinator is escalated rather than the PR hanging
+  # unwatched until the next reboot's reconciler.
+  defp escalate_watchdog_failure(%State{
+         workspace_id: ws_id,
+         task_id: task_id,
+         mr_ref: mr_ref,
+         merger_url: merger_url
+       })
+       when is_binary(ws_id) do
+    mr_info =
+      case merger_url do
+        url when is_binary(url) and url != "" -> "#{mr_ref} (#{url})"
+        _ -> to_string(mr_ref)
+      end
+
+    Logger.warning(
+      "Worker.open_mr: Watchdog failed to start for task=#{task_id} — MR #{mr_ref} orphaned; escalating"
+    )
+
+    Wardmast.Messages.Escalation.post(%{
+      kind: :watchdog_startup_failed,
+      from_ref: task_id,
+      workspace_id: ws_id,
+      task_ref: task_id,
+      subject: "Watchdog startup failed: #{task_id} MR orphaned",
+      body:
+        "The Watchdog process failed to start after MR #{mr_info} was opened for task #{task_id}. " <>
+          "The MR exists on the forge and on the ticket, but no Watchdog is watching it. " <>
+          "Start one from the ticket with `arb queue restart-watchdog #{task_id}` " <>
+          "(the boot reconciler also does this for every Merging ticket)."
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "Worker: Watchdog-failure escalation swallowed for task=#{task_id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate_watchdog_failure(_state), do: :ok
+
+  defp maybe_opt(opts, _key, nil), do: opts
+  defp maybe_opt(opts, key, value), do: Keyword.put(opts, key, value)
+
+  # `maybe_opt/3`'s map twin, for the dispatcher arg maps.
+  defp maybe_arg(args, _key, nil), do: args
+  defp maybe_arg(args, key, value), do: Map.put(args, key, value)
+
+  defp teardown_container(%State{meta: meta} = state) do
+    Wardmast.Worker.ContainerSpawn.teardown(meta && Map.get(meta, :claude_spawn))
+    state
+  end
+end

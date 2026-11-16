@@ -1,0 +1,178 @@
+defmodule Wardmast.Worker.ContainerCreateRetryTest do
+  @moduledoc """
+  bd-325sps: `podman run` exiting 126 with only a libpod creation error (the agent
+  never started) is retried a bounded number of times with a backoff, then fails
+  the run as `:container_create_failed` rather than `:crashed`. A stub command
+  stands in for the podman client: it fails creation until a counter file says
+  otherwise.
+  """
+
+  use Wardmast.DataCase, async: false
+
+  import Wardmast.LifecycleFixtures, only: [put_state!: 2]
+
+  alias Wardmast.Tasks.{Issue, Workspace}
+  alias Wardmast.Worker
+  alias Wardmast.Worker.ClaudeSession
+
+  @libpod_error "Error: container creation timeout: internal libpod error"
+
+  setup do
+    prev_backoff = Application.get_env(:wardmast, :container_create_retry_backoff_ms)
+    prev_cap = Application.get_env(:wardmast, :container_create_retries)
+    Application.put_env(:wardmast, :container_create_retry_backoff_ms, 10)
+    Application.put_env(:wardmast, :container_create_retries, 2)
+
+    on_exit(fn ->
+      restore(:container_create_retry_backoff_ms, prev_backoff)
+      restore(:container_create_retries, prev_cap)
+    end)
+
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "ccr-ws-#{System.unique_integer([:positive])}",
+        prefix: "cc"
+      })
+
+    {:ok, task} =
+      Ash.create(Issue, %{title: "container create", workspace_id: ws.id, issue_type: :research})
+
+    task = put_state!(task, :active)
+
+    {:ok, pid} =
+      Worker.start(
+        task_id: task.id,
+        repo: "unknown",
+        workspace_id: ws.id,
+        meta: %{issue_type: :research, review_spawn: false, notes_nudge_cap: 1}
+      )
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    :ok = Worker.advance(pid, :claude)
+
+    # unique_integer repeats across VM restarts, so clear any counter left by an earlier run.
+    counter = Path.join(System.tmp_dir!(), "ccr-#{System.unique_integer([:positive])}")
+    File.rm(counter)
+    on_exit(fn -> File.rm(counter) && File.rm(counter <> ".tmp") end)
+
+    %{pid: pid, counter: counter}
+  end
+
+  defp restore(key, nil), do: Application.delete_env(:wardmast, key)
+  defp restore(key, value), do: Application.put_env(:wardmast, key, value)
+
+  # Fails creation (exit 126) for the first `failures` invocations, then "runs the agent".
+  defp stub(counter, failures) do
+    script = """
+    n=$(cat '#{counter}' 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo $n > '#{counter}.tmp' && mv '#{counter}.tmp' '#{counter}'
+    if [ $n -le #{failures} ]; then echo '#{@libpod_error}'; exit 126; fi
+    echo 'agent ran'
+    exit #{"${AGENT_EXIT:-0}"}
+    """
+
+    ["sh", "-c", script]
+  end
+
+  defp start_session!(pid, command) do
+    {:ok, _port} =
+      ClaudeSession.start(owner: pid, worktree_path: System.tmp_dir!(), command: command)
+
+    :ok
+  end
+
+  # An empty, partial or missing counter read means "not yet", so wait_until keeps polling.
+  defp attempts(counter) do
+    with {:ok, body} <- File.read(counter),
+         {n, ""} <- body |> String.trim() |> Integer.parse() do
+      n
+    else
+      _ -> 0
+    end
+  end
+
+  defp wait_until(fun, timeout \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    Stream.repeatedly(fn ->
+      cond do
+        fun.() -> :ok
+        System.monotonic_time(:millisecond) > deadline -> :timeout
+        true -> Process.sleep(15) && :again
+      end
+    end)
+    |> Enum.find(&(&1 != :again))
+    |> case do
+      :ok -> :ok
+      :timeout -> flunk("condition not met within timeout")
+    end
+  end
+
+  test "a creation failure is retried and a later success proceeds normally", %{
+    pid: pid,
+    counter: counter
+  } do
+    start_session!(pid, stub(counter, 1))
+
+    # Attempt 1 fails creation, attempt 2 runs the agent, which exits 0 without `arb done`.
+    wait_until(fn -> File.exists?(counter) and attempts(counter) >= 2 end)
+    wait_until(fn -> match?(%{state: :finished}, Worker.state(pid)) end)
+
+    snap = Worker.state(pid)
+    assert snap.meta[:container_create_retries] == 1
+
+    refute snap.meta[:stop_reason] &&
+             snap.meta.stop_reason[:category] == "container_create_failed"
+
+    # The agent that ran then exits 0 without `arb done`, so the notes gate may nudge-respawn
+    # it; what matters is that creation was retried exactly once.
+    assert attempts(counter) >= 2
+  end
+
+  test "persistent creation failure fails the run as an infra failure after the cap", %{
+    pid: pid,
+    counter: counter
+  } do
+    start_session!(pid, stub(counter, 100))
+
+    wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
+
+    snap = Worker.state(pid)
+    # The original spawn plus two retries, then no more.
+    assert attempts(counter) == 3
+    assert snap.meta[:container_create_retries] == 2
+    assert snap.meta.stop_reason.category == :container_create_failed
+    assert snap.meta.failure_reason =~ "container creation failed"
+    refute snap.meta.failure_reason =~ "crashed"
+  end
+
+  test "attempts/1 treats an empty or non-integer counter as not yet reached", %{counter: counter} do
+    assert attempts(counter) == 0
+    File.write!(counter, "")
+    assert attempts(counter) == 0
+    File.write!(counter, "x")
+    assert attempts(counter) == 0
+    File.write!(counter, "2\n")
+    assert attempts(counter) == 2
+  end
+
+  test "an agent exit after a successful start is not retried", %{pid: pid, counter: counter} do
+    # Creation succeeds first time; the agent then exits 126 after writing real output.
+    script = """
+    echo 1 > '#{counter}.tmp' && mv '#{counter}.tmp' '#{counter}'
+    echo 'agent did some work'
+    echo '#{@libpod_error}'
+    exit 126
+    """
+
+    start_session!(pid, ["sh", "-c", script])
+
+    wait_until(fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end)
+
+    snap = Worker.state(pid)
+    assert attempts(counter) == 1
+    refute Map.has_key?(snap.meta, :container_create_retries)
+    assert snap.meta.stop_reason.category == :crashed
+  end
+end

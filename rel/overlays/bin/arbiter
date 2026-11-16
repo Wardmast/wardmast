@@ -1,0 +1,6 @@
+#!/bin/sh
+# One-release compatibility shim (bd-42q5vm): the release was renamed
+# arbiter -> wardmast. Pre-rename systemd units (ExecStart=.../current/bin/arbiter
+# start) and pre-rename node agents (NodeAgent.Upgrade) still invoke bin/arbiter.
+# Remove once no install predates the rename.
+exec "$(dirname "$0")/wardmast" "$@"

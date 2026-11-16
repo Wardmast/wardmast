@@ -1,11 +1,11 @@
 # The loop's unit of scarcity
 
 **Status:** decided, implemented (#1463 / epic #1011 Amendment E).
-**Owner module:** `Arbiter.Loop.Scarcity`.
+**Owner module:** `Wardmast.Loop.Scarcity`.
 
 ## The problem this settles
 
-Stage 1 of `Arbiter.Loop` was denominated end-to-end in imputed dollars. The
+Stage 1 of `Wardmast.Loop` was denominated end-to-end in imputed dollars. The
 corpus joined `usage_events` for a per-run `cost_usd`; `(difficulty, repo)` cell
 comparisons ranked tasks by spend; the difficulty-misestimate cohort test
 required a task to exceed its cell median *on cost*; and proposals pre-registered
@@ -50,7 +50,7 @@ window", "7d calibration", "mean 7d share").
 
 ### Which window: the provider's primary one
 
-`Scarcity.primary_window/1` asks `Arbiter.Quota.Gate.Snapshot` which window the
+`Scarcity.primary_window/1` asks `Wardmast.Quota.Gate.Snapshot` which window the
 provider actually gates on:
 
 | snapshot | window | staleness predicate | window start |
@@ -74,7 +74,7 @@ never a window that was not the one in play.
 Observed utilization cannot be attributed per run, and this is a hard property of
 the schema rather than a gap to be filled later:
 
-`Arbiter.Quota.AnthropicQuota` is a **latest-only cache** — one row per
+`Wardmast.Quota.AnthropicQuota` is a **latest-only cache** — one row per
 `{workspace_id, provider}`, overwritten in place by an upsert, and its moduledoc
 says so ("a cache of the latest reading, not a time series"). A 7-day corpus has
 no historical utilization series to join against. There is exactly one
@@ -117,8 +117,8 @@ reading from a window that has already reset places `window_start` in the past
 while its utilization describes a window that has since rolled several
 times — capacity would come out inflated by roughly the number of elapsed
 windows, and every share deflated by the same factor, while the frame still
-claimed `:calibrated`. `Arbiter.Loop.Corpus` therefore runs the snapshot through
-`Arbiter.Quota.Gate.stale?/1` for a 5h calibration — the same predicate the
+claimed `:calibrated`. `Wardmast.Loop.Corpus` therefore runs the snapshot through
+`Wardmast.Quota.Gate.stale?/1` for a 5h calibration — the same predicate the
 dispatch gate fails open on for its **primary** (5h) window (`reset_5h_at`
 elapsed, or `captured_at` older than the staleness threshold) — or through the
 gate's long-window counterpart, `Gate.long_window_stale?/1` (bd-b7umwj), for a
@@ -137,7 +137,7 @@ the asymmetry runs one way.
 The part that is fixable is fixed: both the per-run numerator (`tokens_by_run/2`)
 and the calibration's observed draw are read **fleet-wide**, with no
 `workspace_id` filter. That matters because some `usage_events` rows legitimately
-carry a `nil` `workspace_id` (`Arbiter.Usage.WorkspaceBackfill`), and because
+carry a `nil` `workspace_id` (`Wardmast.Usage.WorkspaceBackfill`), and because
 runs from other workspaces still draw on the same account windows. Scoping one
 side but not the other would under-count `observed` and inflate every share by
 the reciprocal of the coverage ratio — enough to push shares past 100% of a
@@ -189,7 +189,7 @@ calibration window, or a `0.0` utilization reading each yield
 (`:no_snapshot` / `:stale_snapshot` / `:no_utilization` / `:no_observed_tokens`),
 `window_share` of `nil` on every row, and an explicit "**uncalibrated**" line
 in the report naming which absence it was. This is
-the same discipline `Arbiter.Loop.Corpus` already applies to `transcript_reads`:
+the same discipline `Wardmast.Loop.Corpus` already applies to `transcript_reads`:
 a blind window must not read as a clean one.
 
 ## Decision 2 — dollars are retained as a secondary metric
@@ -198,7 +198,7 @@ Dollar cost is still the right unit under metered API billing, so it is
 **ranked, not removed**. Both figures are computed and reported in every window;
 `billing_mode` decides which leads.
 
-`Arbiter.Loop.Scarcity.billing_mode/2` resolves it at analysis time rather than
+`Wardmast.Loop.Scarcity.billing_mode/2` resolves it at analysis time rather than
 assuming, in three steps:
 
 1. **Configured.** `loop.billing_mode` in workspace config — `"subscription"` or
@@ -215,11 +215,11 @@ The verdict *and its source* are rendered in the report, so "subscription
 
 ## What actually changed in the analyser
 
-* **Corpus** (`Arbiter.Loop.Corpus`) — each row gains `weighted_tokens` and
+* **Corpus** (`Wardmast.Loop.Corpus`) — each row gains `weighted_tokens` and
   `window_share`; `meta.scarcity` carries the unit, the secondary unit, the
   billing-mode verdict, and the calibration. Two bounded grouped queries, in
   keeping with the module's read discipline.
-* **Objective function** (`Arbiter.Loop.Analysis`) — the difficulty-misestimate
+* **Objective function** (`Wardmast.Loop.Analysis`) — the difficulty-misestimate
   cohort test compares on the binding unit. Under subscription billing a task
   that is *cheaper in dollars* than its cell peers but eats more of the primary window
   is now flagged; under the old comparison it was invisible. The comparison falls
@@ -230,7 +230,7 @@ The verdict *and its source* are rendered in the report, so "subscription
   alongside `mean_cost_usd`.
 * **Pre-registered proposal metric** — the `:rework` misestimate is the
   misestimate that becomes a real `:difficulty_override` `PendingWrite`
-  (`Arbiter.Loop.Proposals`), carrying the recommendation's `target_metric` /
+  (`Wardmast.Loop.Proposals`), carrying the recommendation's `target_metric` /
   `baseline` pair as its pre-registration. Under subscription billing that pair is
   now quota-denominated: *"<window>-window share to converge for `<task>`"* (e.g. `7d-window share…`), with a
   baseline of *"12.3% of one 7d window across 2 attempt(s), vs. a 4.1% cell
@@ -240,7 +240,7 @@ The verdict *and its source* are rendered in the report, so "subscription
 * **Report** — a "Unit of scarcity" section precedes every number denominated in
   it.
 
-`Arbiter.Loop.PendingWrite.context_cost_tokens` needed no change: Amendment D
+`Wardmast.Loop.PendingWrite.context_cost_tokens` needed no change: Amendment D
 already priced a fleet-wide prompt addition in **tokens**, which is the quota
 unit, not dollars. It is the one place the loop was already denominated
 correctly.
@@ -273,7 +273,7 @@ draw expressed in *each pool's own window units*, and per model. With the
 append-only `quota_snapshots` history (R2, bd-3qfc81) there is a series of
 readings to fit.
 
-`Arbiter.Loop.Scarcity.Draw` builds one equation per interval between two
+`Wardmast.Loop.Scarcity.Draw` builds one equation per interval between two
 captures of an (account, pool, window):
 
 ```
@@ -284,7 +284,7 @@ utilization delta = Σ_models c_model × weighted_tokens_model + b × hours
 same account and pool inside `(anchor, capture]`. `c_model` is the **window share
 per weighted token**. `b` absorbs traffic the ledger never sees (the coverage
 caveat above), so it doesn't inflate the per-model coefficients.
-`Arbiter.Loop.Scarcity.Calibration` solves it by non-negative least squares
+`Wardmast.Loop.Scarcity.Calibration` solves it by non-negative least squares
 (Lawson–Hanson), because every unknown is a draw.
 
 * **Intervals** coalesce captures closer than 30 min (5h window) or 4 h (others),
@@ -298,6 +298,6 @@ caveat above), so it doesn't inflate the per-model coefficients.
   each is fitted separately; `Draw.lookup/5` answers with the best-supported fit
   unless `:account_id` is given.
 * **Shadow only.** Nothing on a routing or gate path calls it (a test pins
-  that). Read it with `mix arbiter.draw_calibration`, or
-  `bin/arbiter eval 'Arbiter.Release.draw_calibration()'` on a release install.
+  that). Read it with `mix wardmast.draw_calibration`, or
+  `bin/wardmast eval 'Wardmast.Release.draw_calibration()'` on a release install.
   `Scarcity.draw_share/5` is the seam R11 (window-share `δ`) will read.

@@ -1,0 +1,167 @@
+defmodule Wardmast.Sessions.NoPtyHandleTest do
+  @moduledoc """
+  Acceptance criterion 3 (bd-bpt0ag): **no Elixir process holds the PTY.**
+
+  This is the property the whole design rests on (RFC §4.1/§4.3/§4.4). A
+  BEAM-owned PTY master — `Port.open`, `:erlexec`, a NIF — closes when the BEAM
+  exits, the slave gets `SIGHUP`, and the session dies: a coordinator that
+  restarts arbiter would kill itself mid-restart. Restart survival is supposed
+  to be true *by construction* here, because there is no supervision link to
+  sever at all.
+
+  "By construction" is only true as long as nobody adds a port later, so it is
+  asserted rather than trusted: the session path may spawn **only** through the
+  synchronous, injectable command runner, which returns before it hands control
+  back.
+
+  This is the grep AC 3 asks for, expressed as a test so it runs in CI.
+  """
+  use ExUnit.Case, async: true
+
+  @repo_root Path.expand("../../../../..", __DIR__)
+
+  # Every source file in the session lifecycle path.
+  @session_path [
+    "apps/wardmast/lib/wardmast/sessions.ex",
+    "apps/wardmast/lib/wardmast/sessions/**/*.ex"
+  ]
+
+  # Primitives that hand the BEAM a long-lived handle on a child process.
+  @pty_owning_primitives [
+    "Port.open",
+    ":erlang.open_port",
+    "open_port(",
+    ":erlexec",
+    "spawn_executable",
+    "ExPTY",
+    "MuonTrap"
+  ]
+
+  defp session_sources do
+    @session_path
+    |> Enum.flat_map(&Path.wildcard(Path.join(@repo_root, &1)))
+    |> Enum.uniq()
+    |> Enum.map(fn abs ->
+      {Path.relative_to(abs, @repo_root), File.read!(abs)}
+    end)
+  end
+
+  # Code only: whole-line `#` comments and heredoc bodies (`@moduledoc`,
+  # `@doc`) are prose. The session path's own docs discuss `Port.open` at
+  # length — explaining why it is *not* used is the opposite of using it.
+  defp code_lines(source) do
+    source
+    |> String.split("\n")
+    |> Enum.with_index(1)
+    |> Enum.reject(fn {line, _n} -> String.starts_with?(String.trim_leading(line), "#") end)
+    |> Enum.reduce({[], false}, fn {line, n}, {kept, in_heredoc?} ->
+      delimiters = length(String.split(line, ~s("""))) - 1
+      now_in? = if rem(delimiters, 2) == 1, do: not in_heredoc?, else: in_heredoc?
+      keep? = not in_heredoc? and delimiters == 0
+
+      {if(keep?, do: [{line, n} | kept], else: kept), now_in?}
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+  end
+
+  test "the session path exists and is being scanned" do
+    files = Enum.map(session_sources(), &elem(&1, 0))
+
+    assert "apps/wardmast/lib/wardmast/sessions.ex" in files
+    assert "apps/wardmast/lib/wardmast/sessions/runner/host.ex" in files
+    assert "apps/wardmast/lib/wardmast/sessions/adoption.ex" in files
+  end
+
+  test "nothing in the session path opens a port on tmux or the agent" do
+    offenders =
+      for {rel, source} <- session_sources(),
+          {line, n} <- code_lines(source),
+          primitive <- @pty_owning_primitives,
+          String.contains?(line, primitive),
+          do: "#{rel}:#{n}: #{primitive}"
+
+    assert offenders == [],
+           """
+           The session path must hold NO long-lived handle on the PTY (RFC
+           §4.1/§4.4, AC 3). A BEAM-owned port dies with the BEAM, takes the
+           tmux server's stdio with it, and defeats restart survival — which is
+           the entire reason sessions live in a sibling systemd scope.
+
+           Shell out through `Wardmast.Sessions.Runner` instead: it runs the
+           command, collects its output, and returns.
+
+           #{Enum.join(offenders, "\n")}
+           """
+  end
+
+  # The one deliberate exception to "every session-path spawn goes through the
+  # runner" (bd-1lszsc). `Wardmast.Sessions.RepoCheckout` shells out to `git` to
+  # build and remove a refine session's read-only grounding worktree. That is
+  # not the session *lifecycle* path this guard exists for: it spawns no PTY,
+  # holds no handle, and every call returns before the function does — the
+  # property AC 3 is actually about. It is also why it cannot go through the
+  # runner: the runner is the injectable seam every session test stubs, and a
+  # stubbed `git` would mean the checkout tests assert against a worktree that
+  # was never created.
+  #
+  # The exemption is kept as narrow as it can be: this file, and only literal
+  # `System.cmd("git", ...)` calls — never a shell, never a variable command.
+  #
+  # The memory staleness checker (bd-19qve3) is exempt on the same terms.
+  # `Wardmast.Sessions.Memory.Staleness` reads committed trees with
+  # `git cat-file` / `git grep` to verify a memory's citations, and it runs only
+  # in the background `Wardmast.Sessions.Memory.Checker` and in an explicit
+  # promotion/restore call. It never runs during a session launch: amendment 3
+  # of its design moved verification off the mount path, and
+  # `Wardmast.Sessions.Memory.mount/2` only reads stored verdicts. It spawns no
+  # PTY and holds no handle. Its tests verify against real fixture
+  # repositories, which a stubbed runner would replace.
+  @non_runner_spawn_sites %{
+    "apps/wardmast/lib/wardmast/sessions/repo_checkout.ex" => ~s|System.cmd("git",|,
+    "apps/wardmast/lib/wardmast/sessions/memory/staleness.ex" => ~s|System.cmd("git",|
+  }
+
+  test "the only spawn in the session path is the synchronous runner" do
+    spawns =
+      for {rel, source} <- session_sources(),
+          {line, n} <- code_lines(source),
+          String.contains?(line, "System.cmd(") or String.contains?(line, "System.shell(") or
+            String.contains?(line, "ReleaseEnv.cmd(") or String.contains?(line, ":os.cmd("),
+          do: {rel, n, String.trim(line)}
+
+    {exempt, runner_spawns} =
+      Enum.split_with(spawns, fn {rel, _n, _line} ->
+        Map.has_key?(@non_runner_spawn_sites, rel)
+      end)
+
+    # One site, in the runner, and it is the release-env-scrubbed helper
+    # (bd-2oelme) rather than a raw `System.cmd/3`.
+    assert Enum.map(runner_spawns, &elem(&1, 0)) |> Enum.uniq() ==
+             ["apps/wardmast/lib/wardmast/sessions/runner/host.ex"],
+           "session-path spawn sites outside the runner: #{inspect(runner_spawns)}"
+
+    assert Enum.all?(runner_spawns, fn {_rel, _n, line} ->
+             String.contains?(line, "ReleaseEnv.cmd(")
+           end),
+           "every session spawn must go through ReleaseEnv (AC 6): #{inspect(runner_spawns)}"
+
+    # The exemption does not become a hole: an exempt file may only spawn the
+    # one literal command it was exempted for.
+    assert Enum.all?(exempt, fn {rel, _n, line} ->
+             String.contains?(line, Map.fetch!(@non_runner_spawn_sites, rel))
+           end),
+           "an exempt session-path file spawned something other than what it is " <>
+             "exempt for: #{inspect(exempt)}"
+  end
+
+  test "the runner is documented as synchronous and returns the exit status" do
+    assert {:ok, source} =
+             File.read(Path.join(@repo_root, "apps/wardmast/lib/wardmast/sessions/runner.ex"))
+
+    # The behaviour's contract is a returned {output, status} tuple — i.e. the
+    # call has already finished when it returns, so nothing is retained.
+    assert source =~ "@callback run("
+    assert source =~ "non_neg_integer()"
+  end
+end

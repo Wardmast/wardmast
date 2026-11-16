@@ -1,0 +1,1308 @@
+defmodule Wardmast.Trackers.GitHubTest do
+  use ExUnit.Case, async: false
+
+  alias Wardmast.Trackers.GitHub
+  alias Wardmast.Trackers.GitHub.{Config, Error}
+
+  @owner "ryanrborn"
+  @repo "arbiter"
+  @ref "42"
+  @env_var "GTE_GITHUB_TRACKER_TEST_TOKEN"
+
+  setup do
+    System.put_env(@env_var, "test-github-token")
+
+    Config.put_active(%{
+      "owner" => @owner,
+      "repo" => @repo,
+      "credentials_ref" => "env:#{@env_var}"
+    })
+
+    on_exit(fn ->
+      Config.clear()
+      System.delete_env(@env_var)
+    end)
+
+    :ok
+  end
+
+  defp stub(fun), do: Req.Test.stub(Wardmast.Trackers.GitHub.HTTP, fun)
+
+  defp issue_path, do: "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
+
+  describe "fetch/1" do
+    test "200: returns the parsed issue map and sends Bearer auth" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == issue_path()
+        assert ["Bearer test-github-token"] = Plug.Conn.get_req_header(conn, "authorization")
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"number" => 42, "title" => "Fix the thing", "state" => "open"})
+      end)
+
+      assert {:ok, %{"number" => 42, "title" => "Fix the thing"}} = GitHub.fetch(@ref)
+    end
+
+    test "404: returns {:error, %Error{kind: :not_found}}" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(404)
+        |> Req.Test.json(%{"message" => "Not Found"})
+      end)
+
+      assert {:error, %Error{kind: :not_found, status: 404, message: "Not Found"}} =
+               GitHub.fetch(@ref)
+    end
+
+    test "401: returns {:error, %Error{kind: :unauthenticated}}" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(401)
+        |> Req.Test.json(%{"message" => "Bad credentials"})
+      end)
+
+      assert {:error, %Error{kind: :unauthenticated, status: 401}} = GitHub.fetch(@ref)
+    end
+
+    test "403 secondary/abuse rate limit classifies as :rate_limited even with a full x-ratelimit-remaining (bd-1wplms)" do
+      # GitHub's SECONDARY (burst/concurrency) limit returns the same "API rate
+      # limit exceeded" 403 wording as the primary quota limit, but does NOT
+      # touch the primary quota — x-ratelimit-remaining stays full. A
+      # remaining-gated check would never classify this as retryable; the
+      # classification must key off the response body, not a quota gauge.
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("x-ratelimit-remaining", "4999")
+        |> Plug.Conn.put_resp_header("x-ratelimit-limit", "5000")
+        |> Plug.Conn.put_status(403)
+        |> Req.Test.json(%{
+          "message" =>
+            "API rate limit exceeded for user ID 238055253. If you reach out to GitHub " <>
+              "Support for help, please include the request ID and timestamp."
+        })
+      end)
+
+      assert {:error, %Error{kind: :rate_limited, status: 403}} = GitHub.fetch(@ref)
+    end
+
+    test "503: returns {:error, %Error{kind: :server_error}}" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(503)
+        |> Req.Test.json(%{"message" => "down"})
+      end)
+
+      assert {:error, %Error{kind: :server_error, status: 503}} = GitHub.fetch(@ref)
+    end
+
+    test "missing config returns {:error, %Error{kind: :config_missing}}" do
+      Config.clear()
+
+      assert {:error, %Error{kind: :config_missing}} = GitHub.fetch(@ref)
+    end
+
+    test "missing env token returns {:error, %Error{kind: :config_missing}}" do
+      System.delete_env(@env_var)
+
+      assert {:error, %Error{kind: :config_missing}} = GitHub.fetch(@ref)
+    end
+  end
+
+  # The tracker and merger adapters used to each parse GitHub's rate-limit
+  # headers themselves; both now share `Wardmast.Http.RateLimit`. These mirror
+  # the merger's retry_after_ms tests so the tracker's half of that parity is
+  # pinned too.
+  describe "retry_after_ms on a rate-limited fetch" do
+    defp rate_limited(headers) do
+      stub(fn conn ->
+        conn =
+          Enum.reduce(headers, conn, fn {k, v}, acc ->
+            Plug.Conn.put_resp_header(acc, k, v)
+          end)
+
+        conn
+        |> Plug.Conn.put_status(429)
+        |> Req.Test.json(%{"message" => "API rate limit exceeded"})
+      end)
+
+      GitHub.fetch(@ref)
+    end
+
+    test "is populated from the Retry-After header (seconds -> ms)" do
+      assert {:error, %Error{kind: :rate_limited, retry_after_ms: 5_000}} =
+               rate_limited([{"retry-after", "5"}])
+    end
+
+    test "falls back to x-ratelimit-reset (epoch seconds -> ms until then)" do
+      reset = System.os_time(:second) + 30
+
+      assert {:error, %Error{kind: :rate_limited, retry_after_ms: ms}} =
+               rate_limited([{"x-ratelimit-reset", to_string(reset)}])
+
+      assert is_integer(ms) and ms > 20_000 and ms <= 30_000
+    end
+
+    test "is nil when neither header is present" do
+      assert {:error, %Error{kind: :rate_limited, retry_after_ms: nil}} = rate_limited([])
+    end
+
+    # bd-1r2kkg: the tracker's old copy accepted a negative Retry-After and
+    # handed the caller a negative backoff. The shared helper (the merger's
+    # stricter guard) rejects it and falls through to x-ratelimit-reset.
+    test "a negative Retry-After is ignored in favor of x-ratelimit-reset" do
+      reset = System.os_time(:second) + 30
+
+      assert {:error, %Error{kind: :rate_limited, retry_after_ms: ms}} =
+               rate_limited([{"retry-after", "-5"}, {"x-ratelimit-reset", to_string(reset)}])
+
+      assert is_integer(ms) and ms > 20_000 and ms <= 30_000
+    end
+  end
+
+  describe "transition/2" do
+    test "to :closed PATCHes state=closed and strips managed labels, keeping others" do
+      stub(fn conn ->
+        case conn.method do
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => 42,
+              "state" => "open",
+              "labels" => [%{"name" => "in progress"}, %{"name" => "bug"}]
+            })
+
+          "PATCH" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            assert decoded["state"] == "closed"
+            # "in progress" (managed) stripped; "bug" (unrelated) preserved; no
+            # closed-status label by default.
+            assert decoded["labels"] == ["bug"]
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 42, "state" => "closed"})
+        end
+      end)
+
+      assert :ok = GitHub.transition(@ref, :closed)
+    end
+
+    test "to :in_progress keeps the issue open and adds the in-progress label" do
+      stub(fn conn ->
+        case conn.method do
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => 42,
+              "state" => "open",
+              "labels" => [%{"name" => "bug"}]
+            })
+
+          "PATCH" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            assert decoded["state"] == "open"
+            assert Enum.sort(decoded["labels"]) == ["bug", "in progress"]
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 42})
+        end
+      end)
+
+      assert :ok = GitHub.transition(@ref, :in_progress)
+    end
+
+    test "to :open re-opens and removes a lingering in-progress label" do
+      stub(fn conn ->
+        case conn.method do
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => 42,
+              "state" => "closed",
+              "labels" => [%{"name" => "in progress"}]
+            })
+
+          "PATCH" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            assert decoded["state"] == "open"
+            assert decoded["labels"] == []
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 42, "state" => "open"})
+        end
+      end)
+
+      assert :ok = GitHub.transition(@ref, :open)
+    end
+
+    test "honours a workspace status_map override" do
+      Config.put_active(%{
+        "owner" => @owner,
+        "repo" => @repo,
+        "credentials_ref" => "env:#{@env_var}",
+        "status_map" => %{
+          "in_progress" => %{"state" => "open", "label" => "wip"},
+          "closed" => %{"state" => "closed", "label" => "shipped"}
+        }
+      })
+
+      stub(fn conn ->
+        case conn.method do
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => 42,
+              "state" => "open",
+              "labels" => [%{"name" => "wip"}]
+            })
+
+          "PATCH" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            assert decoded["state"] == "closed"
+            # "wip" (managed in_progress label) stripped, "shipped" added.
+            assert decoded["labels"] == ["shipped"]
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 42})
+        end
+      end)
+
+      assert :ok = GitHub.transition(@ref, :closed)
+    end
+
+    test "propagates a fetch failure without PATCHing" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+
+        conn
+        |> Plug.Conn.put_status(404)
+        |> Req.Test.json(%{"message" => "Not Found"})
+      end)
+
+      assert {:error, %Error{kind: :not_found}} = GitHub.transition(@ref, :closed)
+    end
+
+    test "to :closed is a no-op when the issue is already closed (idempotent)" do
+      stub(fn conn ->
+        case conn.method do
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => 42,
+              "state" => "closed",
+              "labels" => [%{"name" => "bug"}]
+            })
+
+          "PATCH" ->
+            flunk("must not PATCH when issue is already closed")
+        end
+      end)
+
+      assert :ok = GitHub.transition(@ref, :closed)
+    end
+
+    test "to :in_progress is a no-op when already open with the in-progress label" do
+      stub(fn conn ->
+        case conn.method do
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => 42,
+              "state" => "open",
+              "labels" => [%{"name" => "in progress"}, %{"name" => "bug"}]
+            })
+
+          "PATCH" ->
+            flunk("must not PATCH when issue is already in the target state")
+        end
+      end)
+
+      assert :ok = GitHub.transition(@ref, :in_progress)
+    end
+  end
+
+  describe "update_fields/2" do
+    test "translates title -> title and description -> body, PATCHes the issue" do
+      stub(fn conn ->
+        assert conn.method == "PATCH"
+        assert conn.request_path == issue_path()
+
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["title"] == "New title"
+        assert decoded["body"] == "New body"
+        refute Map.has_key?(decoded, "description")
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"number" => 42})
+      end)
+
+      assert :ok = GitHub.update_fields(@ref, %{title: "New title", description: "New body"})
+    end
+
+    test "drops unknown fields" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(body) == %{"title" => "Only this"}
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"number" => 42})
+      end)
+
+      assert :ok = GitHub.update_fields(@ref, %{title: "Only this", bogus_field: "ignored"})
+    end
+
+    test "422: returns validation_failed" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(422)
+        |> Req.Test.json(%{"message" => "Validation Failed"})
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 422}} =
+               GitHub.update_fields(@ref, %{title: "x"})
+    end
+  end
+
+  describe "link_for/1" do
+    test "builds the github.com issue URL from the active owner/repo" do
+      assert GitHub.link_for(@ref) == "https://github.com/#{@owner}/#{@repo}/issues/#{@ref}"
+    end
+
+    test "falls back to a placeholder slug when no workspace is active" do
+      Config.clear()
+      assert GitHub.link_for("7") == "https://github.com/owner/repo/issues/7"
+    end
+  end
+
+  describe "parse_ref/1" do
+    test "accepts the \"github:\" prefix" do
+      assert GitHub.parse_ref("github:42") == {:ok, "42"}
+    end
+
+    test "accepts the \"gh-\" prefix" do
+      assert GitHub.parse_ref("gh-42") == {:ok, "42"}
+    end
+
+    test "accepts the \"#\" prefix" do
+      assert GitHub.parse_ref("#42") == {:ok, "42"}
+    end
+
+    test "accepts a bare integer string" do
+      assert GitHub.parse_ref("42") == {:ok, "42"}
+    end
+
+    test "extracts the number from a full github.com issue URL" do
+      url = "https://github.com/ryanrborn/arbiter/issues/42"
+      assert GitHub.parse_ref(url) == {:ok, "42"}
+    end
+
+    test "returns :error for unrecognised strings" do
+      assert GitHub.parse_ref("not a ref") == :error
+      assert GitHub.parse_ref("") == :error
+      assert GitHub.parse_ref("gh-abc") == :error
+      assert GitHub.parse_ref("github:0") == :error
+    end
+
+    test "returns :error for non-string input" do
+      assert GitHub.parse_ref(nil) == :error
+      assert GitHub.parse_ref(42) == :error
+    end
+  end
+
+  describe "list_transitions/1" do
+    test "validates the ref and returns the configured tracker statuses" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == issue_path()
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"number" => 42, "state" => "open"})
+      end)
+
+      assert {:ok, atoms} = GitHub.list_transitions(@ref)
+      assert Enum.sort(atoms) == [:closed, :in_progress, :open]
+    end
+
+    test "propagates a fetch failure" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(404)
+        |> Req.Test.json(%{"message" => "Not Found"})
+      end)
+
+      assert {:error, %Error{kind: :not_found}} = GitHub.list_transitions(@ref)
+    end
+  end
+
+  describe "Trackers integration" do
+    test "Trackers.for_type(:github) resolves to this adapter (no raise)" do
+      assert Wardmast.Trackers.for_type(:github) == GitHub
+    end
+  end
+
+  describe "list_open/1" do
+    test "fetches /user for viewer login, then assigned open issues, returns normalized summaries" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => "me"})
+
+          {"GET", "/repos/" <> _ = path} ->
+            # The /issues list endpoint, not a specific issue.
+            assert String.ends_with?(path, "/issues")
+            assert URI.decode_query(conn.query_string)["assignee"] == "me"
+            assert URI.decode_query(conn.query_string)["state"] == "open"
+
+            Req.Test.json(conn, [
+              %{
+                "number" => 42,
+                "title" => "First",
+                "state" => "open",
+                "html_url" => "https://github.com/x/y/issues/42",
+                "assignees" => [%{"login" => "me"}]
+              },
+              %{
+                "number" => 43,
+                "title" => "Second",
+                "state" => "open",
+                "html_url" => "https://github.com/x/y/issues/43",
+                "labels" => [%{"name" => "in progress"}],
+                "assignees" => [%{"login" => "me"}]
+              }
+            ])
+        end
+      end)
+
+      assert {:ok, [first, second]} = GitHub.list_open([])
+
+      assert first.ref == "42"
+      assert first.title == "First"
+      assert first.url == "https://github.com/x/y/issues/42"
+      assert first.status == :open
+      assert first.assignees == ["me"]
+      assert is_map(first.raw)
+
+      assert second.ref == "43"
+      assert second.status == :in_progress
+    end
+
+    test "filters out pull requests (they share the /issues endpoint)" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => "me"})
+
+          {"GET", _} ->
+            Req.Test.json(conn, [
+              %{"number" => 42, "title" => "An issue", "state" => "open"},
+              %{
+                "number" => 43,
+                "title" => "A PR",
+                "state" => "open",
+                "pull_request" => %{"url" => "..."}
+              }
+            ])
+        end
+      end)
+
+      assert {:ok, [only]} = GitHub.list_open([])
+      assert only.ref == "42"
+    end
+
+    test "follows the Link rel=\"next\" header across pages" do
+      {:ok, agent} = Agent.start_link(fn -> 0 end)
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => "me"})
+
+          {"GET", _} ->
+            page = Agent.get_and_update(agent, fn n -> {n, n + 1} end)
+
+            case page do
+              0 ->
+                # Use a relative URL in the Link header; what matters is the
+                # path + query, both of which our parser handles.
+                conn
+                |> Plug.Conn.put_resp_header(
+                  "link",
+                  ~s(</repos/#{@owner}/#{@repo}/issues?page=2>; rel="next")
+                )
+                |> Plug.Conn.put_status(200)
+                |> Req.Test.json([%{"number" => 1, "title" => "p1", "state" => "open"}])
+
+              1 ->
+                Req.Test.json(conn, [%{"number" => 2, "title" => "p2", "state" => "open"}])
+            end
+        end
+      end)
+
+      assert {:ok, [a, b]} = GitHub.list_open([])
+      assert a.ref == "1"
+      assert b.ref == "2"
+    end
+
+    test "accepts an explicit assignee login (skips the viewer lookup)" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            flunk("should not look up /user when assignee is explicit")
+
+          {"GET", _} ->
+            assert URI.decode_query(conn.query_string)["assignee"] == "other"
+            Req.Test.json(conn, [])
+        end
+      end)
+
+      assert {:ok, []} = GitHub.list_open(assignee: "other")
+    end
+
+    test "propagates a missing-config error" do
+      Config.clear()
+      assert {:error, %Error{kind: :config_missing}} = GitHub.list_open([])
+    end
+
+    test "propagates an HTTP error from the issues endpoint" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => "me"})
+
+          {"GET", _} ->
+            conn
+            |> Plug.Conn.put_status(401)
+            |> Req.Test.json(%{"message" => "Bad credentials"})
+        end
+      end)
+
+      assert {:error, %Error{kind: :unauthenticated}} = GitHub.list_open([])
+    end
+  end
+
+  describe "create/1" do
+    test "POSTs the body and returns the new issue number as a bare string ref" do
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/repos/#{@owner}/#{@repo}/issues"
+        assert ["Bearer test-github-token"] = Plug.Conn.get_req_header(conn, "authorization")
+
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["title"] == "Wire the thing"
+        assert decoded["body"] == "Markdown description"
+        # No assignee / no initial-status-label by default for :open status.
+        refute Map.has_key?(decoded, "assignees")
+        refute Map.has_key?(decoded, "labels")
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{
+          "number" => 99,
+          "title" => "Wire the thing",
+          "html_url" => "https://github.com/#{@owner}/#{@repo}/issues/99"
+        })
+      end)
+
+      assert {:ok, "99"} =
+               GitHub.create(%{title: "Wire the thing", description: "Markdown description"})
+    end
+
+    test "drops a blank description, ignores an assignee input, and propagates the in_progress label" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["title"] == "tagged"
+        refute Map.has_key?(decoded, "body")
+        refute Map.has_key?(decoded, "assignees")
+        assert decoded["labels"] == ["in progress"]
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 100})
+      end)
+
+      assert {:ok, "100"} =
+               GitHub.create(%{
+                 title: "tagged",
+                 description: "",
+                 assignee: "alice",
+                 status: :in_progress
+               })
+    end
+
+    test "422 from GitHub surfaces validation_failed without writing back a ref" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(422)
+        |> Req.Test.json(%{"message" => "Validation Failed"})
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 422, message: "Validation Failed"}} =
+               GitHub.create(%{title: "boom"})
+    end
+
+    test "blank title is rejected before any HTTP call" do
+      stub(fn _conn ->
+        flunk("must not POST when title is blank")
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, message: msg}} =
+               GitHub.create(%{title: ""})
+
+      assert msg =~ "title"
+    end
+
+    test "missing config returns config_missing" do
+      Config.clear()
+
+      assert {:error, %Error{kind: :config_missing}} = GitHub.create(%{title: "anything"})
+    end
+
+    test "honours a workspace status_map override for the initial label" do
+      Config.put_active(%{
+        "owner" => @owner,
+        "repo" => @repo,
+        "credentials_ref" => "env:#{@env_var}",
+        "status_map" => %{
+          "open" => %{"state" => "open", "label" => "todo"}
+        }
+      })
+
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["labels"] == ["todo"]
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 101})
+      end)
+
+      assert {:ok, "101"} = GitHub.create(%{title: "with-label", status: :open})
+    end
+
+    test "maps :priority to a 'priority: N' label in the outbound request body" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["title"] == "urgent work"
+        assert "priority: 1" in decoded["labels"]
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 200})
+      end)
+
+      assert {:ok, "200"} = GitHub.create(%{title: "urgent work", priority: 1})
+    end
+
+    test "maps :issue_type to a 'type: T' label in the outbound request body" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["title"] == "bug report"
+        assert "type: bug" in decoded["labels"]
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 201})
+      end)
+
+      assert {:ok, "201"} = GitHub.create(%{title: "bug report", issue_type: "bug"})
+    end
+
+    test "merges priority, type, and status labels in a single 'labels' field" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        labels = decoded["labels"]
+        assert "in progress" in labels
+        assert "priority: 2" in labels
+        assert "type: feature" in labels
+        # All three present and no duplicates.
+        assert length(labels) == 3
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 202})
+      end)
+
+      assert {:ok, "202"} =
+               GitHub.create(%{
+                 title: "combined",
+                 status: :in_progress,
+                 priority: 2,
+                 issue_type: "feature"
+               })
+    end
+  end
+
+  describe "with_workspace/2" do
+    test "scopes config to the block and restores afterwards" do
+      Config.clear()
+
+      result =
+        GitHub.with_workspace(
+          %{"owner" => "octo", "repo" => "widget", "credentials_ref" => "env:#{@env_var}"},
+          fn -> GitHub.link_for("7") end
+        )
+
+      assert result == "https://github.com/octo/widget/issues/7"
+      # After the block, config is cleared.
+      assert {:error, %Error{kind: :config_missing}} = GitHub.fetch("1")
+    end
+  end
+
+  describe "search_by_title/1" do
+    test "returns matching issues (exact, case-insensitive match)" do
+      stub(fn conn ->
+        assert conn.request_path == "/search/issues"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "total_count" => 2,
+          "items" => [
+            %{
+              "number" => 42,
+              "title" => "Fix the Thing",
+              "html_url" => "https://github.com/#{@owner}/#{@repo}/issues/42",
+              "state" => "open"
+            },
+            %{
+              "number" => 43,
+              "title" => "Fix the Thing and more",
+              "html_url" => "https://github.com/#{@owner}/#{@repo}/issues/43",
+              "state" => "open"
+            }
+          ]
+        })
+      end)
+
+      assert {:ok, [%{ref: "42", title: "Fix the Thing", url: url}]} =
+               GitHub.search_by_title("fix the thing")
+
+      assert url =~ "issues/42"
+    end
+
+    test "returns empty list when no exact match" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "total_count" => 1,
+          "items" => [
+            %{
+              "number" => 10,
+              "title" => "Something else entirely",
+              "html_url" => "https://github.com/#{@owner}/#{@repo}/issues/10",
+              "state" => "open"
+            }
+          ]
+        })
+      end)
+
+      assert {:ok, []} = GitHub.search_by_title("My Title")
+    end
+
+    test "filters out pull requests from results" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "total_count" => 2,
+          "items" => [
+            %{
+              "number" => 55,
+              "title" => "a pr title",
+              "html_url" => "https://github.com/#{@owner}/#{@repo}/pull/55",
+              "state" => "open",
+              "pull_request" => %{"url" => "..."}
+            },
+            %{
+              "number" => 56,
+              "title" => "a pr title",
+              "html_url" => "https://github.com/#{@owner}/#{@repo}/issues/56",
+              "state" => "open"
+            }
+          ]
+        })
+      end)
+
+      assert {:ok, [%{ref: "56"}]} = GitHub.search_by_title("a pr title")
+    end
+
+    test "returns empty list when search API returns no items key" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"total_count" => 0})
+      end)
+
+      assert {:ok, []} = GitHub.search_by_title("anything")
+    end
+
+    test "returns error on API failure" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(422)
+        |> Req.Test.json(%{"message" => "Validation Failed"})
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 422}} =
+               GitHub.search_by_title("bad query")
+    end
+
+    test "missing config returns {:error, %Error{kind: :config_missing}}" do
+      Config.clear()
+
+      assert {:error, %Error{kind: :config_missing}} = GitHub.search_by_title("test")
+    end
+  end
+
+  describe "add_remote_link/3" do
+    test "POSTs a comment with the PR link when no prior comment exists" do
+      url = "https://github.com/#{@owner}/#{@repo}/pull/123"
+      title = "PR 123 (task bd-12345)"
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", _} ->
+            Req.Test.json(conn, [])
+
+          {"POST", _} ->
+            assert conn.request_path == "#{issue_path()}/comments"
+
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            assert String.contains?(decoded["body"], url)
+            assert String.contains?(decoded["body"], title)
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"id" => 1, "body" => decoded["body"]})
+        end
+      end)
+
+      assert :ok = GitHub.add_remote_link(@ref, url, title)
+    end
+
+    test "skips posting when a comment with the same URL already exists (idempotent)" do
+      url = "https://github.com/#{@owner}/#{@repo}/pull/123"
+      title = "PR 123 (task bd-12345)"
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", _} ->
+            Req.Test.json(conn, [
+              %{"id" => 1, "body" => "**Remote Link:** [PR 123 (task bd-12345)](#{url})"}
+            ])
+
+          {"POST", _} ->
+            flunk("must not POST when comment with this URL already exists")
+        end
+      end)
+
+      assert :ok = GitHub.add_remote_link(@ref, url, title)
+    end
+
+    test "returns :ok even if comment list fetch fails (graceful degradation)" do
+      url = "https://github.com/#{@owner}/#{@repo}/pull/123"
+      title = "PR 123"
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", _} ->
+            conn
+            |> Plug.Conn.put_status(500)
+            |> Req.Test.json(%{"message" => "server error"})
+
+          {"POST", _} ->
+            assert conn.request_path == "#{issue_path()}/comments"
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"id" => 1})
+        end
+      end)
+
+      assert :ok = GitHub.add_remote_link(@ref, url, title)
+    end
+
+    test "returns error when comment post fails" do
+      url = "https://github.com/#{@owner}/#{@repo}/pull/123"
+      title = "PR 123"
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", _} ->
+            Req.Test.json(conn, [])
+
+          {"POST", _} ->
+            conn
+            |> Plug.Conn.put_status(403)
+            |> Req.Test.json(%{"message" => "Forbidden"})
+        end
+      end)
+
+      assert {:error, %Error{kind: :forbidden, status: 403}} =
+               GitHub.add_remote_link(@ref, url, title)
+    end
+
+    test "returns error when config is missing" do
+      Config.clear()
+
+      url = "https://github.com/owner/repo/pull/123"
+      title = "PR 123"
+
+      assert {:error, %Error{kind: :config_missing}} =
+               GitHub.add_remote_link(@ref, url, title)
+    end
+  end
+
+  describe "check_prior_claim/1" do
+    test "returns :ok when no comments contain the ownership marker" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/repos/#{@owner}/#{@repo}/issues/#{@ref}/comments"
+
+        Req.Test.json(conn, [
+          %{"id" => 1, "body" => "Just a regular comment"},
+          %{"id" => 2, "body" => "Another comment"}
+        ])
+      end)
+
+      assert :ok = GitHub.check_prior_claim(@ref)
+    end
+
+    test "returns {:error, {:already_claimed, body}} when ownership marker found" do
+      marker_body = "Claimed as bd-abc123 by my-ws (mw). Wardmast installation: some-host."
+
+      stub(fn conn ->
+        Req.Test.json(conn, [
+          %{"id" => 1, "body" => "Normal comment"},
+          %{"id" => 2, "body" => marker_body}
+        ])
+      end)
+
+      assert {:error, {:already_claimed, ^marker_body}} = GitHub.check_prior_claim(@ref)
+    end
+
+    test "returns :ok when comments endpoint errors (non-fatal)" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(500)
+        |> Req.Test.json(%{"message" => "Internal error"})
+      end)
+
+      assert :ok = GitHub.check_prior_claim(@ref)
+    end
+
+    test "returns :ok when comments list is empty" do
+      stub(fn conn ->
+        Req.Test.json(conn, [])
+      end)
+
+      assert :ok = GitHub.check_prior_claim(@ref)
+    end
+  end
+
+  describe "signal_claim/3" do
+    test "posts ownership comment and assigns the user" do
+      calls = Agent.start_link(fn -> [] end) |> elem(1)
+
+      stub(fn conn ->
+        Agent.update(calls, &[{conn.method, conn.request_path} | &1])
+
+        case {conn.method, conn.request_path} do
+          {"POST", "/repos/" <> _ = path}
+          when binary_part(path, byte_size(path) - 8, 8) == "comments" ->
+            {:ok, raw, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(raw)
+            assert decoded["body"] =~ "bd-abc123"
+            assert decoded["body"] =~ "my-ws"
+            assert decoded["body"] =~ "Wardmast installation:"
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"id" => 99})
+
+          {"POST", "/repos/" <> _ = path}
+          when binary_part(path, byte_size(path) - 9, 9) == "assignees" ->
+            {:ok, raw, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(raw)
+            assert "gh-login-999" in decoded["assignees"]
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"assignees" => [%{"login" => "gh-login-999"}]})
+        end
+      end)
+
+      context = %{
+        task_id: "bd-abc123",
+        workspace_name: "my-ws",
+        workspace_prefix: "mw",
+        current_user: "gh-login-999",
+        host: "arbiter.local",
+        assign: true
+      }
+
+      assert :ok = GitHub.signal_claim(@ref, "bd-abc123", context)
+
+      recorded = Agent.get(calls, & &1) |> Enum.reverse()
+      assert {"POST", "/repos/#{@owner}/#{@repo}/issues/#{@ref}/comments"} in recorded
+      assert {"POST", "/repos/#{@owner}/#{@repo}/issues/#{@ref}/assignees"} in recorded
+
+      Agent.stop(calls)
+    end
+
+    test "returns :ok even when comment POST fails" do
+      stub(fn conn ->
+        case conn.request_path do
+          path when binary_part(path, byte_size(path) - 8, 8) == "comments" ->
+            conn
+            |> Plug.Conn.put_status(500)
+            |> Req.Test.json(%{"message" => "error"})
+
+          _ ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"assignees" => []})
+        end
+      end)
+
+      context = %{
+        task_id: "bd-abc123",
+        workspace_name: "ws",
+        workspace_prefix: "w",
+        current_user: "gh-login-999",
+        host: "arbiter.local"
+      }
+
+      assert :ok = GitHub.signal_claim(@ref, "bd-abc123", context)
+    end
+
+    test "returns :ok even when assignees POST fails (e.g. collaborator access denied)" do
+      stub(fn conn ->
+        case conn.request_path do
+          path when binary_part(path, byte_size(path) - 8, 8) == "comments" ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"id" => 99})
+
+          _ ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{"message" => "Validation Failed"})
+        end
+      end)
+
+      context = %{
+        task_id: "bd-abc123",
+        workspace_name: "ws",
+        workspace_prefix: "w",
+        current_user: "gh-login-999",
+        host: "arbiter.local"
+      }
+
+      assert :ok = GitHub.signal_claim(@ref, "bd-abc123", context)
+    end
+  end
+
+  describe "add_comment/2" do
+    test "POSTs Markdown body to the issue comments endpoint and returns :ok" do
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/repos/#{@owner}/#{@repo}/issues/#{@ref}/comments"
+
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert %{"body" => "Hello from Wardmast"} = Jason.decode!(body)
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"id" => 1, "body" => "Hello from Wardmast"})
+      end)
+
+      assert :ok = GitHub.add_comment(@ref, "Hello from Wardmast")
+    end
+
+    test "returns {:error, %Error{}} on HTTP error" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(422)
+        |> Req.Test.json(%{"message" => "Validation Failed"})
+      end)
+
+      assert {:error, %Error{kind: :validation_failed}} = GitHub.add_comment(@ref, "body")
+    end
+
+    test "returns {:error, %Error{kind: :config_missing}} when config is absent" do
+      Config.clear()
+      assert {:error, %Error{kind: :config_missing}} = GitHub.add_comment(@ref, "body")
+    end
+  end
+
+  # ---- extract_priority/1 ----------------------------------------------------
+
+  describe "extract_priority/1" do
+    test "parses 'priority: 0' label as P0 — 0 is the highest priority" do
+      issue = %{"labels" => [%{"name" => "priority: 0"}]}
+      assert {:ok, 0} = GitHub.extract_priority(issue)
+    end
+
+    test "parses 'priority: 4' label as P4 — 4 is the lowest priority" do
+      issue = %{"labels" => [%{"name" => "priority: 4"}]}
+      assert {:ok, 4} = GitHub.extract_priority(issue)
+    end
+
+    test "round-trips with create/1 label format — 'priority: N'" do
+      # create/1 emits "priority: N" labels; extract_priority/1 parses the same format
+      for n <- 0..4 do
+        issue = %{"labels" => [%{"name" => "priority: #{n}"}]}
+        assert {:ok, ^n} = GitHub.extract_priority(issue)
+      end
+    end
+
+    test "returns nil when no priority label is present" do
+      issue = %{"labels" => [%{"name" => "bug"}, %{"name" => "enhancement"}]}
+      assert nil == GitHub.extract_priority(issue)
+    end
+
+    test "returns nil for out-of-range values" do
+      assert nil == GitHub.extract_priority(%{"labels" => [%{"name" => "priority: 5"}]})
+      assert nil == GitHub.extract_priority(%{"labels" => [%{"name" => "priority: -1"}]})
+    end
+
+    test "returns nil when labels key is absent" do
+      assert nil == GitHub.extract_priority(%{})
+    end
+  end
+
+  # ---- extract_difficulty/1 --------------------------------------------------
+
+  describe "extract_difficulty/1" do
+    test "parses 'difficulty: 0' label as D0 — 0 is trivial" do
+      issue = %{"labels" => [%{"name" => "difficulty: 0"}]}
+      assert {:ok, 0} = GitHub.extract_difficulty(issue)
+    end
+
+    test "parses 'difficulty: 4' label as D4 — 4 is extreme" do
+      issue = %{"labels" => [%{"name" => "difficulty: 4"}]}
+      assert {:ok, 4} = GitHub.extract_difficulty(issue)
+    end
+
+    test "parses 'difficulty: 5' label as D5 — the opt-in flagship tier" do
+      # #1519: a human hand-adding `difficulty: 5` is exactly the deliberate
+      # escalation D5 exists for; the old `n <= 4` cap silently dropped it.
+      issue = %{"labels" => [%{"name" => "difficulty: 5"}]}
+      assert {:ok, 5} = GitHub.extract_difficulty(issue)
+    end
+
+    test "returns nil for out-of-range difficulty values" do
+      assert nil == GitHub.extract_difficulty(%{"labels" => [%{"name" => "difficulty: 6"}]})
+      assert nil == GitHub.extract_difficulty(%{"labels" => [%{"name" => "difficulty: -1"}]})
+    end
+
+    test "returns nil when no difficulty label is present" do
+      issue = %{"labels" => [%{"name" => "priority: 1"}]}
+      assert nil == GitHub.extract_difficulty(issue)
+    end
+
+    test "returns nil when labels key is absent" do
+      assert nil == GitHub.extract_difficulty(%{})
+    end
+  end
+
+  # ---- extract_issue_type/1 --------------------------------------------------
+
+  describe "extract_issue_type/1" do
+    test "maps the bare 'bug' label to :bug" do
+      assert {:ok, :bug} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "bug"}]})
+    end
+
+    test "maps 'enhancement' to :feature" do
+      assert {:ok, :feature} =
+               GitHub.extract_issue_type(%{"labels" => [%{"name" => "enhancement"}]})
+    end
+
+    test "maps 'chore' to :chore" do
+      assert {:ok, :chore} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "chore"}]})
+    end
+
+    test "maps 'epic' to :epic" do
+      assert {:ok, :epic} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "epic"}]})
+    end
+
+    test "a bare 'task' label does NOT map to :task (falls through to the :feature default)" do
+      assert nil == GitHub.extract_issue_type(%{"labels" => [%{"name" => "task"}]})
+    end
+
+    test "the explicit round-trip 'type: task' label DOES map to :task" do
+      assert {:ok, :task} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "type: task"}]})
+    end
+
+    test "'research' maps only from the explicit round-trip label, never a bare one" do
+      assert nil == GitHub.extract_issue_type(%{"labels" => [%{"name" => "research"}]})
+
+      assert {:ok, :research} =
+               GitHub.extract_issue_type(%{"labels" => [%{"name" => "type: research"}]})
+    end
+
+    test "parses the round-trip 'type: bug' label written by GitHub.create/1" do
+      assert {:ok, :bug} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "type: bug"}]})
+    end
+
+    test "is case-insensitive" do
+      assert {:ok, :bug} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "Bug"}]})
+    end
+
+    test "is case-insensitive for the 'type: X' prefix" do
+      assert {:ok, :bug} = GitHub.extract_issue_type(%{"labels" => [%{"name" => "Type: Bug"}]})
+    end
+
+    test "returns nil for an unmapped label" do
+      assert nil == GitHub.extract_issue_type(%{"labels" => [%{"name" => "wontfix"}]})
+    end
+
+    test "returns nil when no labels are present" do
+      assert nil == GitHub.extract_issue_type(%{})
+      assert nil == GitHub.extract_issue_type(%{"labels" => []})
+    end
+
+    test "picks the first mappable label when several are present" do
+      issue = %{"labels" => [%{"name" => "wontfix"}, %{"name" => "bug"}, %{"name" => "chore"}]}
+      assert {:ok, :bug} = GitHub.extract_issue_type(issue)
+    end
+
+    test "an explicit 'type: X' label wins over a conflicting bare label regardless of order" do
+      issue = %{"labels" => [%{"name" => "bug"}, %{"name" => "type: task"}]}
+      assert {:ok, :task} = GitHub.extract_issue_type(issue)
+    end
+
+    test "a bare 'task' label does not block a later mappable bare label" do
+      issue = %{"labels" => [%{"name" => "task"}, %{"name" => "bug"}]}
+      assert {:ok, :bug} = GitHub.extract_issue_type(issue)
+    end
+  end
+end

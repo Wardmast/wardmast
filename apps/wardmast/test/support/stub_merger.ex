@@ -1,0 +1,671 @@
+defmodule Wardmast.Test.StubMerger do
+  @moduledoc """
+  In-memory `Wardmast.Mergers.Merger` adapter for tests.
+
+  Backed by a single named `Agent` so it can be observed from a different
+  process than the one that configured it — the `Wardmast.Worker.Watchdog`
+  polls from its own process, so a process-dictionary stub wouldn't do.
+
+  Usage:
+
+      StubMerger.reset()
+      StubMerger.queue_get("!1", [%{status: :open, approved: false}, %{status: :merged}])
+
+  Each `get/1` pops the next queued result for that ref; once the queue is
+  drained the last result repeats. A queued entry may also be an
+  `{:error, reason}` tuple, which `get/1` returns verbatim — that is how a test
+  injects a transport failure (e.g. a `:network` "socket closed"). `merge/2` records the call (assert via
+  `merge_count/1`, and on the `expected_sha` it was guarded with via
+  `last_merge/0`). `open/4` records its args (assert via `last_open/0`) and
+  returns the ref from `next_open_ref/0` (default `"!stub"`).
+  """
+
+  @behaviour Wardmast.Mergers.Merger
+
+  @name __MODULE__.Store
+
+  # ---- test-facing API ----------------------------------------------------
+
+  def reset do
+    ensure_started()
+
+    Agent.update(@name, fn _ ->
+      %{
+        gets: %{},
+        merges: %{},
+        last_merge: nil,
+        open_ref: "!stub",
+        opens: [],
+        review_feedbacks: %{},
+        review_threads: %{},
+        update_branches: %{},
+        update_branch_result: :ok,
+        failing_checks: %{},
+        ci_reruns: [],
+        rerun_result: :default,
+        merge_result: :ok,
+        inline_comments: [],
+        submitted_reviews: [],
+        get_counts: %{},
+        diffs: %{},
+        diff_errors: %{},
+        diff_calls: [],
+        ancestors: %{},
+        ancestor_calls: []
+      }
+    end)
+
+    :ok
+  end
+
+  @doc "How many times `get/1` has been called for `ref` (bd-bspakl: pins the poll rate)."
+  def get_count(ref) do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s.get_counts, ref, 0) end)
+  end
+
+  @doc "All inline comments posted via post_inline_comment/3 (newest first)."
+  def inline_comments do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :inline_comments, []) end)
+  end
+
+  @doc "All reviews submitted via submit_review/4 (newest first)."
+  def submitted_reviews do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :submitted_reviews, []) end)
+  end
+
+  @doc """
+  Queue the sequence of `get/1` result maps returned for `ref`. An entry may be
+  a 0-arity function, called each time it is reached, returning a result map or
+  `{:error, reason}`.
+  """
+  def queue_get(ref, results) when is_list(results) do
+    ensure_started()
+    Agent.update(@name, fn s -> put_in(s, [:gets, ref], results) end)
+    :ok
+  end
+
+  @doc "Set the ref that the next `open/4` returns."
+  def next_open_ref(ref) when is_binary(ref) do
+    ensure_started()
+    Agent.update(@name, fn s -> %{s | open_ref: ref} end)
+    :ok
+  end
+
+  @doc "How many times `merge/2` was called for `ref`."
+  def merge_count(ref) do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s.merges, ref, 0) end)
+  end
+
+  @doc """
+  The most recent `merge/2` call as `{ref, expected_sha}`, or nil.
+
+  `expected_sha` is the reviewed-SHA guard the caller merged under
+  (bd-dxgris) — `nil` means the merge was deliberately unguarded.
+  """
+  def last_merge do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :last_merge) end)
+  end
+
+  @doc "The args of the most recent `open/4` call, or nil."
+  def last_open do
+    ensure_started()
+    Agent.get(@name, fn s -> List.first(s.opens) end)
+  end
+
+  @doc "Set the `list_review_feedback/1` result for `ref`."
+  def set_review_feedback(ref, feedback) when is_map(feedback) do
+    ensure_started()
+    Agent.update(@name, fn s -> put_in(s, [:review_feedbacks, ref], feedback) end)
+    :ok
+  end
+
+  @doc "Set the `list_open_review_threads/1` result list for `ref`."
+  def set_review_threads(ref, threads) when is_list(threads) do
+    ensure_started()
+    Agent.update(@name, fn s -> put_in(s, [:review_threads, ref], threads) end)
+    :ok
+  end
+
+  @doc "How many times `update_branch/1` was called for `ref`."
+  def update_branch_count(ref) do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s.update_branches, ref, 0) end)
+  end
+
+  @doc "Set the result `update_branch/1` returns (`:ok` or `{:error, term}`)."
+  def set_update_branch_result(result) do
+    ensure_started()
+    Agent.update(@name, fn s -> %{s | update_branch_result: result} end)
+    :ok
+  end
+
+  @doc """
+  Set the result `merge/2` returns (`:ok` or `{:error, term}`). A 2-arity
+  function is called with `(ref, expected_sha)` on each merge, outside the
+  store, and its return is the merge's — so a test can play the forge and land
+  a real merge commit (bd-6dyva0).
+  """
+  def set_merge_result(result) do
+    ensure_started()
+    Agent.update(@name, fn s -> %{s | merge_result: result} end)
+    :ok
+  end
+
+  @doc "Every `merge/2` call as `{ref, expected_sha}`, oldest first."
+  def merges_in_order do
+    ensure_started()
+    Agent.get(@name, fn s -> s |> Map.get(:merge_log, []) |> Enum.reverse() end)
+  end
+
+  @doc "Set the `failing_check_logs/1` result list for `ref`."
+  def set_failing_checks(ref, checks) when is_list(checks) do
+    ensure_started()
+    Agent.update(@name, fn s -> put_in(s, [:failing_checks, ref], checks) end)
+    :ok
+  end
+
+  # ---- Merger behaviour ---------------------------------------------------
+
+  @impl true
+  def open(branch, title, description, opts) do
+    ensure_started()
+
+    Agent.update(@name, fn s ->
+      %{
+        s
+        | opens: [%{branch: branch, title: title, description: description, opts: opts} | s.opens]
+      }
+    end)
+
+    ref = Agent.get(@name, & &1.open_ref)
+    {:ok, ref}
+  end
+
+  @impl true
+  def get(ref) do
+    ensure_started()
+
+    defaults = %{
+      status: :open,
+      approved: false,
+      ci_clean: false,
+      conflicting: false,
+      changes_requested: false,
+      latest_review_id: nil,
+      pipeline: nil
+    }
+
+    result =
+      Agent.get_and_update(@name, fn s ->
+        s = update_in(s, [:get_counts, ref], &((&1 || 0) + 1))
+
+        case Map.get(s.gets, ref, []) do
+          [only] -> {only, s}
+          [head | rest] -> {head, put_in(s, [:gets, ref], rest)}
+          [] -> {%{}, s}
+        end
+      end)
+
+    # A queued 0-arity function is called each time it is reached, so a test
+    # can answer from live state (e.g. the real tip of a bare origin branch)
+    # instead of a head it had to know up front (bd-cut6uv).
+    result = if is_function(result, 0), do: result.(), else: result
+
+    # A queued `{:error, reason}` is returned verbatim, so a case can drive the
+    # transport failures the real adapter surfaces (`%Mergers.Github.Error{kind:
+    # :network}` — the "socket closed" bd-985tkl saw 22 times in three hours)
+    # rather than only happy-path result maps.
+    case result do
+      {:error, _reason} = err -> err
+      %{} = attrs -> {:ok, Map.merge(defaults, attrs)}
+    end
+  end
+
+  @impl true
+  def merge(ref, expected_sha) do
+    ensure_started()
+
+    result =
+      Agent.get_and_update(@name, fn s ->
+        s = update_in(s, [:merges, ref], &((&1 || 0) + 1))
+        s = Map.put(s, :last_merge, {ref, expected_sha})
+        s = Map.update(s, :merge_log, [{ref, expected_sha}], &[{ref, expected_sha} | &1])
+        {s.merge_result, s}
+      end)
+
+    if is_function(result, 2), do: result.(ref, expected_sha), else: result
+  end
+
+  # The context-taking variant production callers go through
+  # (`Mergers.update_branch/4`): record what the caller passed, then behave
+  # exactly like `update_branch/1`.
+  @impl true
+  def update_branch(ref, ctx) do
+    ensure_started()
+    Agent.update(@name, fn s -> Map.update(s, :update_contexts, [ctx], &[ctx | &1]) end)
+    update_branch(ref)
+  end
+
+  @doc "The `ctx` maps `update_branch/2` was called with, newest first."
+  def update_contexts do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :update_contexts, []) end)
+  end
+
+  @impl true
+  def update_branch(ref) do
+    ensure_started()
+
+    Agent.get_and_update(@name, fn s ->
+      s = update_in(s, [:update_branches, ref], &((&1 || 0) + 1))
+      {s.update_branch_result, s}
+    end)
+  end
+
+  @impl true
+  def failing_check_logs(ref) do
+    ensure_started()
+    checks = Agent.get(@name, fn s -> Map.get(s.failing_checks, ref, []) end)
+    {:ok, checks}
+  end
+
+  @doc """
+  Set the `unrun_pipeline/1` answer for `ref`: a map for "the head's pipeline
+  failed with no jobs" (what the forge refused it for), absent for the usual `nil`.
+  """
+  def set_unrun_pipeline(ref, info) when is_map(info) do
+    ensure_started()
+    Agent.update(@name, fn s -> put_in(s, [Access.key(:unrun_pipelines, %{}), ref], info) end)
+    :ok
+  end
+
+  @impl true
+  def unrun_pipeline(ref) do
+    ensure_started()
+    {:ok, Agent.get(@name, fn s -> s |> Map.get(:unrun_pipelines, %{}) |> Map.get(ref) end)}
+  end
+
+  # ---- CI-skip / trigger (bd-4y9dno) ---------------------------------------
+
+  @doc "The mechanism `ci_skip_mechanism/1` reports (default `nil`: the stub does not skip CI)."
+  def set_ci_skip_mechanism(mechanism) do
+    ensure_started()
+    Agent.update(@name, &Map.put(&1, :ci_skip_mechanism, mechanism))
+  end
+
+  @doc "All `trigger_pipeline/2` calls, newest first."
+  def pipeline_triggers do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :pipeline_triggers, []) end)
+  end
+
+  @doc "Force `trigger_pipeline/2` to return this result instead of `{:ok, _}`."
+  def set_trigger_result(result) do
+    ensure_started()
+    Agent.update(@name, &Map.put(&1, :trigger_result, result))
+  end
+
+  @impl true
+  def ci_skip_mechanism(_opts) do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :ci_skip_mechanism) end)
+  end
+
+  @impl true
+  def trigger_pipeline(ref, opts) do
+    ensure_started()
+
+    Agent.get_and_update(@name, fn s ->
+      s = Map.update(s, :pipeline_triggers, [{ref, opts}], &[{ref, opts} | &1])
+      {Map.get(s, :trigger_result, {:ok, %{mode: :stub_trigger, run_id: 1}}), s}
+    end)
+  end
+
+  @doc "All `rerun_ci/2` calls, newest first (bd-5mzzww)."
+  def ci_reruns do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :ci_reruns, []) end)
+  end
+
+  @doc "Force `rerun_ci/2` to return this result instead of the default {:ok, _}."
+  def set_rerun_result(result) do
+    ensure_started()
+    Agent.update(@name, fn s -> Map.put(s, :rerun_result, result) end)
+    :ok
+  end
+
+  @impl true
+  def rerun_ci(ref, opts) do
+    ensure_started()
+
+    Agent.get_and_update(@name, fn s ->
+      s = Map.update(s, :ci_reruns, [{ref, opts}], &[{ref, opts} | &1])
+
+      {result, s} =
+        case Map.get(s, :rerun_queue, []) do
+          [next | rest] -> {next, Map.put(s, :rerun_queue, rest)}
+          [] -> {default_rerun_result(s, opts), s}
+        end
+
+      {result, s}
+    end)
+  end
+
+  defp default_rerun_result(s, opts) do
+    case Map.get(s, :rerun_result, :default) do
+      :default -> {:ok, %{mode: Map.get(opts, :mode) || :auto, run_id: 1, workflow: "CI"}}
+      other -> other
+    end
+  end
+
+  @doc "Queue one-shot `rerun_ci/2` results, consumed in order before `set_rerun_result/1`."
+  def queue_rerun_results(results) when is_list(results) do
+    ensure_started()
+    Agent.update(@name, fn s -> Map.put(s, :rerun_queue, results) end)
+    :ok
+  end
+
+  @impl true
+  def close(_ref), do: :ok
+
+  @impl true
+  def add_comment(_ref, _body), do: :ok
+
+  @impl true
+  def request_review(_ref, _reviewers), do: :ok
+
+  @impl true
+  def link_for(ref), do: "https://stub.example/mr/" <> ref
+
+  @doc """
+  Set the `get_diff/2` result for `ref` at compare head `head`.
+
+  `head` is the `:head` key of the compare range the caller asks for; `nil`
+  registers the whole-MR diff (the no-range call). bd-6bg54c needs this so a
+  test can give the reviewed commit and a later head either the SAME net diff
+  (a merge from the base branch) or different ones (authored content).
+  """
+  def set_diff(ref, head, diff) when is_binary(ref) and is_binary(diff) do
+    ensure_started()
+    Agent.update(@name, fn s -> put_in(s, [:diffs, {ref, head}], diff) end)
+    :ok
+  end
+
+  @doc """
+  Register the answer `ancestor?/3` gives for one `{ancestor, descendant}` pair.
+
+  `result` is whatever the probe should return — `{:ok, true}`, `{:ok, false}`
+  or an `{:error, reason}` (bd-df3zlo / #1736: a probe that cannot answer is
+  not a probe that answers "no"). An unregistered pair answers `{:ok, false}`,
+  which is what "nothing is an ancestor of anything" looks like.
+  """
+  def set_ancestor(ref, {ancestor, descendant}, result) when is_binary(ref) do
+    ensure_started()
+    Agent.update(@name, fn s -> put_in(s, [:ancestors, {ref, ancestor, descendant}], result) end)
+    :ok
+  end
+
+  @doc "Every `ancestor?/3` call as `{ref, ancestor, descendant}`, oldest first."
+  def ancestor_calls do
+    ensure_started()
+    Agent.get(@name, fn s -> Enum.reverse(Map.get(s, :ancestor_calls, [])) end)
+  end
+
+  @impl true
+  def ancestor?(ref, ancestor, descendant) do
+    ensure_started()
+
+    Agent.get_and_update(@name, fn s ->
+      call = {ref, ancestor, descendant}
+      s = Map.update(s, :ancestor_calls, [call], &[call | &1])
+      {Map.get(Map.get(s, :ancestors, %{}), call, {:ok, false}), s}
+    end)
+  end
+
+  @doc """
+  Make every `get_diff/2` call for `ref` return `{:error, reason}` — the
+  compare-API outage shape (bd-wjpxok: GitLab's 403
+  `insufficient_granular_scope`). Takes precedence over `set_diff/3`.
+  """
+  def set_diff_error(ref, reason) when is_binary(ref) do
+    ensure_started()
+    Agent.update(@name, fn s -> put_in(s, [:diff_errors, ref], reason) end)
+    :ok
+  end
+
+  @doc "Every `get_diff/2` call as `{ref, base, head}`, oldest first."
+  def diff_calls do
+    ensure_started()
+    Agent.get(@name, fn s -> Enum.reverse(Map.get(s, :diff_calls, [])) end)
+  end
+
+  @impl true
+  def get_diff(ref, opts) do
+    ensure_started()
+    opts = if is_map(opts), do: opts, else: %{}
+    base = Map.get(opts, :base) || Map.get(opts, "base")
+    head = Map.get(opts, :head) || Map.get(opts, "head")
+
+    Agent.get_and_update(@name, fn s ->
+      s = Map.update(s, :diff_calls, [{ref, base, head}], &[{ref, base, head} | &1])
+      default = "diff --git a/STUB b/STUB\n+unregistered get_diff for #{inspect({ref, head})}\n"
+
+      case Map.fetch(Map.get(s, :diff_errors, %{}), ref) do
+        {:ok, reason} -> {{:error, reason}, s}
+        :error -> {{:ok, Map.get(Map.get(s, :diffs, %{}), {ref, head}, default)}, s}
+      end
+    end)
+  end
+
+  @impl true
+  def post_inline_comment(ref, finding, opts) do
+    ensure_started()
+
+    Agent.update(@name, fn s ->
+      update_in(s, [:inline_comments], fn cs ->
+        [%{ref: ref, finding: finding, opts: opts} | cs || []]
+      end)
+    end)
+
+    {:ok, %{id: 1}}
+  end
+
+  @impl true
+  def submit_review(ref, verdict, body, opts) do
+    ensure_started()
+
+    Agent.update(@name, fn s ->
+      update_in(s, [:submitted_reviews], fn rs ->
+        [%{ref: ref, verdict: verdict, body: body, opts: opts} | rs || []]
+      end)
+    end)
+
+    {:ok, %{}}
+  end
+
+  @impl true
+  def list_review_feedback(ref) do
+    ensure_started()
+    default = %{changes_requested: false, latest_review_id: nil, feedback: []}
+    result = Agent.get(@name, fn s -> Map.get(s.review_feedbacks, ref, default) end)
+    {:ok, result}
+  end
+
+  @impl true
+  def list_open_review_threads(ref) do
+    ensure_started()
+    threads = Agent.get(@name, fn s -> Map.get(s.review_threads, ref, []) end)
+    {:ok, threads}
+  end
+
+  @impl true
+  def reply_to_review_comment(_ref, _comment_id, _body, _opts), do: {:ok, %{}}
+
+  @doc """
+  Set what `branch_pipeline/3` answers (default `{:ok, nil}`: no pipeline known,
+  so nothing holds). A 0-arity function is called each time, to answer from
+  live state.
+  """
+  def set_branch_pipeline(result) do
+    ensure_started()
+    Agent.update(@name, fn s -> Map.put(s, :branch_pipeline, result) end)
+    :ok
+  end
+
+  @doc "The `{ref, branch}` pairs `branch_pipeline/3` was asked about, newest first."
+  def branch_pipeline_calls do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :branch_pipeline_calls, []) end)
+  end
+
+  @impl true
+  def branch_pipeline(ref, branch, _opts) do
+    ensure_started()
+
+    answer =
+      Agent.get_and_update(@name, fn s ->
+        s = Map.update(s, :branch_pipeline_calls, [{ref, branch}], &[{ref, branch} | &1])
+        {Map.get(s, :branch_pipeline, {:ok, nil}), s}
+      end)
+
+    if is_function(answer, 0), do: answer.(), else: answer
+  end
+
+  # ---- speculative merge-train cars (bd-6dyva0) ------------------------------
+
+  @doc """
+  Set what `ref_pipeline/3` reports for the car at `sha`: a GitLab status word
+  (default `"running"`; `"failed"` carries one failed `test` job), `:none` for
+  no pipeline yet, a full pipeline map, or `{:error, reason}`.
+  """
+  def set_car_status(sha, status) when is_binary(sha) do
+    ensure_started()
+
+    Agent.update(@name, fn s ->
+      Map.update(s, :car_statuses, %{sha => status}, &Map.put(&1, sha, status))
+    end)
+
+    :ok
+  end
+
+  @doc "Every `run_ref_pipeline/3` call as `%{ref, sha, id, opts}`, oldest first."
+  def car_runs do
+    ensure_started()
+    Agent.get(@name, fn s -> s |> Map.get(:car_runs, []) |> Enum.reverse() end)
+  end
+
+  @doc "Every `cancel_ref_pipeline/3` call's car map, oldest first."
+  def car_cancels do
+    ensure_started()
+    Agent.get(@name, fn s -> s |> Map.get(:car_cancels, []) |> Enum.reverse() end)
+  end
+
+  @doc "Override what `run_ref_pipeline/3` returns (e.g. a refused pipeline)."
+  def set_run_ref_result(result) do
+    ensure_started()
+    Agent.update(@name, &Map.put(&1, :run_ref_result, result))
+    :ok
+  end
+
+  @impl true
+  def ref_push_options, do: []
+
+  @impl true
+  def run_ref_pipeline(_mr_ref, %{ref: ref, sha: sha}, opts) do
+    ensure_started()
+
+    Agent.get_and_update(@name, fn s ->
+      id = length(Map.get(s, :car_runs, [])) + 1
+
+      s =
+        Map.update(
+          s,
+          :car_runs,
+          [%{ref: ref, sha: sha, id: id, opts: opts}],
+          &[%{ref: ref, sha: sha, id: id, opts: opts} | &1]
+        )
+
+      result =
+        Map.get(s, :run_ref_result) ||
+          {:ok,
+           %{id: id, sha: sha, status: "created", url: "https://stub.example/pipelines/#{id}"}}
+
+      {result, s}
+    end)
+  end
+
+  @impl true
+  def ref_pipeline(_mr_ref, %{sha: sha} = car, _opts) do
+    ensure_started()
+
+    case Agent.get(@name, fn s -> s |> Map.get(:car_statuses, %{}) |> Map.get(sha, "running") end) do
+      :none ->
+        {:ok, nil}
+
+      {:error, _} = error ->
+        error
+
+      %{} = pipeline ->
+        {:ok, pipeline}
+
+      status when is_binary(status) ->
+        {:ok,
+         %{
+           id: Map.get(car, :pipeline),
+           sha: sha,
+           status: status,
+           url: "https://stub.example/pipelines/#{Map.get(car, :pipeline)}",
+           jobs: if(status == "failed", do: [%{name: "test", stage: "test", status: "failed"}])
+         }}
+    end
+  end
+
+  @impl true
+  def cancel_ref_pipeline(_mr_ref, car, _opts) do
+    ensure_started()
+    Agent.update(@name, fn s -> Map.update(s, :car_cancels, [car], &[car | &1]) end)
+    :ok
+  end
+
+  # ---- internals ----------------------------------------------------------
+
+  defp ensure_started do
+    case Process.whereis(@name) do
+      nil ->
+        case Agent.start(
+               fn ->
+                 %{
+                   gets: %{},
+                   merges: %{},
+                   last_merge: nil,
+                   open_ref: "!stub",
+                   opens: [],
+                   review_feedbacks: %{},
+                   review_threads: %{},
+                   update_branches: %{},
+                   update_branch_result: :ok,
+                   failing_checks: %{},
+                   merge_result: :ok,
+                   inline_comments: [],
+                   submitted_reviews: [],
+                   get_counts: %{},
+                   diffs: %{},
+                   diff_calls: []
+                 }
+               end,
+               name: @name
+             ) do
+          {:ok, _} -> :ok
+          {:error, {:already_started, _}} -> :ok
+        end
+
+      _pid ->
+        :ok
+    end
+  end
+end

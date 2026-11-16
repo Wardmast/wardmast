@@ -18,7 +18,7 @@ Environment=ARB_ROLE=agent
 Environment=ARB_DATA_HOME=%h/.arbiter-node
 Environment=RELEASE_NODE=arbiter_node@127.0.0.1
 ExecStartPre=%h/.arbiter-node/bin/arbiter-node pre-start
-ExecStart=%h/.arbiter-node/current/bin/arbiter start
+ExecStart=%h/.arbiter-node/current/bin/wardmast start
 Restart=always
 RestartSec=3
 

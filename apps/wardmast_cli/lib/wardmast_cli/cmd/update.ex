@@ -1,0 +1,550 @@
+defmodule WardmastCli.Cmd.Update do
+  @moduledoc """
+  `arb update` wears two hats, chosen by whether you name an issue.
+
+  ## Deploy mode — `arb update [--timeout SECONDS] [--json]`
+
+  With **no issue id**, `arb update` deploys freshly-merged work: it
+  `git pull --ff-only`s the integration branch (`main`) in the Wardmast
+  checkout, then runs an explicit deploy sequence: migrations → CLI escript
+  rebuild (if changed) → Phoenix restart. One verb for the contributor +
+  coordinator to ship merged work.
+
+  Steps:
+
+    1. **Locate the checkout** — the Wardmast project root (same resolution as
+       `arb start`/`arb restart`: `ARB_HOME`, the escript's umbrella, or a
+       walk up for `compose.yml`).
+    2. **Refuse to clobber work.** Abort if the working tree is dirty, or if
+       `HEAD` isn't on the integration branch — deploying is a fast-forward of
+       `main`, never a merge or a branch switch under a running server.
+    3. **`git pull --ff-only`.** A non-fast-forward (diverged history) makes
+       git itself abort; we surface its message rather than force anything.
+    4. **Report the short log** of the commits that arrived
+       (`git log --oneline old..new`). If nothing arrived, say "already up to
+       date" and exit — there's no new code to load.
+    5. **Apply database migrations — never against a live server.** SQLite has a
+       single writer, so a standalone `mix wardmast.migrate` run while the old
+       server is still serving contends with it and fails with `queue_timeout`
+       (bd-bksulf). When the server is reachable we skip the standalone step
+       entirely: the restart in step 7 boots `Boot.Migrator`, which applies
+       pending migrations synchronously before the endpoint opens, so the
+       ordering is always stop -> migrate -> serve. Only when the server is
+       already down (nothing holding the writer) do we run `mix wardmast.migrate`
+       here and report how many migrations it applied.
+    6. **Rebuild and install the CLI escript** if `apps/wardmast_cli` changed
+       in the pulled commits. Detects changes via `git diff --name-only`, builds
+       via `mix escript.build`, and installs to `~/.local/bin/arb`, making it
+       executable. Skips rebuild if the CLI didn't change.
+    7. **Restart Phoenix** via `WardmastCli.Cmd.Restart.perform/2` to load the
+       freshly-pulled code. Also re-runs the boot reconciler.
+
+  ## Issue-edit mode — `arb update <id> [field flags]`
+
+  With an **issue id**, `arb update` patches that issue's fields:
+
+      arb update <id> [--title t] [--description d] [--priority N] [--difficulty N]
+                      [--type T] [--auto-close | --no-auto-close]
+                      [--acceptance a | --acceptance-file PATH]
+                      [--notes text | --append-notes text]
+                      [--qa-notes text] [--deployment-notes text]
+                      [--pr-body text] [--pr-ref REF] [--repo owner/name]
+                      [--target-branch NAME]
+                      [--tracker-type T] [--tracker-ref REF]
+                      [--tracker-context-type T] [--tracker-context-ref REF]
+                      [--verify-after-deploy | --no-verify-after-deploy]
+                      [--require-provider P | --exclude-provider P |
+                       --clear-provider-constraint]
+                      [--permission P] [--remove-permission P]
+                      [--resume-review] [--json]
+
+  Every flag maps one-to-one onto a field MCP `ticket_update` and
+  `PATCH /api/issues/:id` accept (P-08). **An empty string clears a field**:
+  `--tracker-ref ""`, `--description ""`, `--notes ""`. A bare `--description ""`
+  is a valid update on its own.
+
+  `--tracker-ref REF` links the ticket to an upstream tracker issue by hand —
+  the recovery step the server names when its upstream create fails
+  (`arb ticket update <id> --tracker-ref REF`). `--tracker-type` says which
+  tracker (`github`, `jira`, `none`, …); `--tracker-context-type` /
+  `--tracker-context-ref` set the read-only parent-ticket context a child
+  carries (#1973). `--target-branch` / `--pr-ref` set the PR's base branch and
+  an already-open PR's reference. `--type` is one of
+  `task | research | bug | feature | epic | chore | decision`.
+  `--auto-close` / `--no-auto-close` set whether the ticket closes itself once
+  all its `parent_of` children are closed.
+
+  Intentionally **not** exposed here (internal engagement state, written by
+  ReviewPatrol / PRPatrol / the transition actions, never by a person):
+  `review_only`, `last_reviewed_sha`, `last_seen_comment_id`, `review_automation`,
+  `last_reviewed_at`, `posted_findings`, `settled_threads`, `review_count`,
+  `review_cap_escalated`, `last_verdict`, `last_verdict_sha`,
+  `pr_opened_notified_ref`, `pr_opened_transitioned_ref`, `circuit_breaker_*`
+  (use `--resume-review`) and `skills`. `state`, `rank`, `close_reason` and
+  `source_pr` move only through their own verbs.
+
+  `--assignee` is deprecated (bd-1ozks5): Wardmast is a local single-user app
+  and no longer tracks an assignee locally, so the flag is accepted and
+  ignored with a stderr warning rather than rejected outright — for one
+  release, so an existing script that still passes it doesn't break.
+
+  There is no `--status`: a ticket's lifecycle `state` only moves through its
+  transitions (`arb ticket promote` / `demote` / `close` / `reopen`), so the
+  flag is refused with that pointer rather than silently dropped.
+
+  `--acceptance` sets the acceptance criteria field, which guides the worker
+  in implementing and testing the change. `--acceptance-file PATH` reads it from
+  a file (`-` for stdin) instead; pass one or the other.
+
+  `--qa-notes` / `--deployment-notes` set the gated completion-notes fields
+  a worker produces for tracker-backed work (QA Testing Notes / Deployment
+  Notes on the Jira ticket). They overwrite the field (unlike `--append-notes`).
+
+  `--repo` assigns the task to a repo (a configured `repo_paths` key). Every
+  dispatch of the task then binds that repo, so a multi-repo workspace no longer
+  needs `repo` passed per dispatch. An explicit `arb dispatch <id> <repo>` still
+  overrides it for that one run.
+
+  `--pr-body` sets the worker-authored PR/MR description the MergeQueue opens
+  the task's single canonical PR with (Summary / Test plan / References). It
+  overwrites the field.
+
+  `--verify-after-deploy` / `--no-verify-after-deploy` (bd-9so315) flags the
+  task as one whose only execution context is the long-lived server. When set,
+  merging the task's PR moves it to `verifying` instead of closing
+  it, and the coordinator restarts and observes the new path before recording
+  the result with `arb ticket verify`.
+
+  `--require-provider <p>` / `--exclude-provider <p>` (bd-13pqcp) constrain where
+  the ticket's implementer may run — only those providers, or anything but those
+  (repeatable, comma lists; `claude`, `gemini`, `codex`, `agy` = `gemini`) — and
+  `--clear-provider-constraint` drops it. A ticket carries one of the two. Every
+  dispatch path honours it (Autopilot, routing, failover, resume, fix and
+  conflict passes); with no allowed provider free the ticket is held, never run
+  on an excluded one. The reviewer is not constrained. Coordinator/operator only.
+
+  `--permission <p>` / `--remove-permission <p>` (bd-54m4vv) add or drop one of
+  the permissions the ticket declares (`network:<host>[:<port>]`, `tracker_write`,
+  `secrets:<name>`, `prod_read`, `prod_ssh`, `phi_data`, `research_read`; repeatable, comma lists).
+  The server folds them into the stored list. A permission whose workspace
+  binding says `grant_by: operator` (default `prod_ssh`) is only `requested`
+  until the operator grants it; removing `phi_data` is operator-only.
+  Coordinator/operator only.
+
+  `--resume-review` clears a ReviewPatrol engagement's per-engagement circuit
+  breaker (bd-1atwts), letting the engagement post again after a coordinator
+  has adjudicated a review loop. It calls the typed
+  `POST /api/issues/:id/resume_review` operation (P-14) — `PATCH /api/issues`
+  no longer accepts raw `circuit_breaker_*` writes. It's a resume-only switch:
+  it never sets the flag, only clears it. Given alongside field flags, the
+  fields are patched first, then the breaker is resumed.
+
+  `--append-notes` appends the given string to the existing `notes` field
+  (separated by a blank line). The append happens **on the server**, in one
+  statement against the row as it is when written (P-08, D-T-19), so it never
+  loses a worker's concurrent `ticket_update_progress` notes write. It cannot be
+  combined with `--notes`, which replaces the field.
+
+  ## Why one verb
+
+  The two modes never collide: editing an issue *requires* an id, so any
+  invocation with a positional argument is an edit, and a bare `arb update`
+  (which previously just errored "requires a ticket id") becomes the deploy.
+
+  ## Bulk edit — `arb ticket update <id> <id> ... [flags]` / `--stdin`
+
+  Several ids (or `--stdin`, one id per line; at most 200) apply the same field
+  flags to each (`PATCH /api/issues`), one line per id (`ok` | `refused` |
+  `not_found`); `--json` prints the per-id list and the exit code is 1 if any id
+  failed. `--append-notes` works in bulk; `--notes` REPLACES every id's notes and
+  is refused unless `--confirm-replace-notes` is also given. `--resume-review`
+  is single-id only.
+
+  ## Exit codes
+
+    * `0` — issue patched, or deploy succeeded (or was already up to date).
+    * `1` — a bad invocation, an API error, a dirty/diverged checkout, or
+      Phoenix not coming back green after the restart.
+  """
+
+  alias WardmastCli.{AcceptanceFlags, ArgParser, Bulk}
+  alias WardmastCli.{Client, Cmd.Doctor, Cmd.Migrate, Cmd.Restart, Cmd.Start, Output}
+  alias WardmastCli.Cmd.Update.{Formatter, Git}
+  alias WardmastCli.{PermissionFlags, ProviderConstraintFlags}
+
+  # The branch `arb update` fast-forwards. Matches the repo's integration
+  # branch (`main`); a deploy is always a pull of merged work into it.
+  @integration_branch "main"
+
+  # Forwarded to the restart's green-wait. Mirrors `arb restart`'s default;
+  # a cold `mix phx.server` may recompile, so it's generous.
+  @default_timeout_s 60
+
+  @edit_switches [
+    lint: :boolean,
+    priority: :integer,
+    difficulty: :string,
+    append_notes: :string,
+    notes: :string,
+    qa_notes: :string,
+    deployment_notes: :string,
+    pr_body: :string,
+    description: :string,
+    title: :string,
+    assignee: :string,
+    repo: :string,
+    resume_review: :boolean,
+    verify_after_deploy: :boolean,
+    # P-08 (D-T-11): the fields MCP `ticket_update` / REST PATCH already accept.
+    tracker_ref: :string,
+    tracker_type: :string,
+    tracker_context_type: :string,
+    tracker_context_ref: :string,
+    target_branch: :string,
+    type: :string,
+    pr_ref: :string,
+    auto_close: :boolean,
+    stdin: :boolean,
+    confirm_replace_notes: :boolean,
+    json: :boolean
+  ]
+
+  # bd-13pqcp: `--require-provider` / `--exclude-provider` / `--clear-provider-constraint`.
+  @all_edit_switches @edit_switches ++
+                       AcceptanceFlags.switches() ++
+                       ProviderConstraintFlags.switches() ++ PermissionFlags.switches()
+
+  @doc "Every edit switch `arb ticket update` takes (read by the field-exposure guard test)."
+  @spec edit_switches() :: keyword()
+  def edit_switches, do: @all_edit_switches
+
+  @deploy_switches [json: :boolean, timeout: :integer, force: :boolean]
+
+  def run(argv) do
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
+    else
+      if deploy_invocation?(argv) do
+        deploy(argv)
+      else
+        edit_issue(argv)
+      end
+    end
+  end
+
+  @doc "Deploy mode (no issue id). Used by `arb server deploy`."
+  @spec deploy([String.t()]) :: :ok | no_return()
+  def deploy(argv) do
+    if Output.help?(argv), do: IO.puts(@moduledoc), else: do_deploy(argv)
+  end
+
+  @doc "Issue-edit mode (requires a ticket id). Used by `arb ticket update <id>`."
+  @spec edit_issue([String.t()]) :: :ok | no_return()
+  def edit_issue(argv) do
+    if Output.help?(argv), do: IO.puts(@moduledoc), else: do_edit_issue(argv)
+  end
+
+  # A bare verb, or one whose first token is a flag, is a deploy. The moment a
+  # positional appears (the ticket id) it's an edit — see the moduledoc.
+  defp deploy_invocation?([]), do: true
+  defp deploy_invocation?([first | _]), do: String.starts_with?(first, "-")
+
+  # ---- deploy mode -------------------------------------------------------
+
+  # Pre-existing complexity 11 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp do_deploy(argv) do
+    {opts, _rest, mode} =
+      ArgParser.parse_strict!(argv, "arb update",
+        strict: @deploy_switches,
+        hint: fn flag ->
+          "To deploy, run `arb update` with no ticket id. To edit a ticket, " <>
+            "name it: `arb update <id> #{flag} …`."
+        end
+      )
+
+    timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
+    force = opts[:force] || false
+
+    root =
+      case Start.project_root() do
+        {:ok, dir} ->
+          dir
+
+        :error ->
+          Output.die(
+            "could not locate the Wardmast project root (no compose.yml found)",
+            "Set ARB_HOME to your Wardmast checkout, or run `arb update` from inside it."
+          )
+      end
+
+    Git.ensure_on_integration_branch(root, @integration_branch)
+    Git.ensure_clean_tree(root)
+    Restart.guard_worker_session!()
+    Restart.guard_active_workers!(force)
+
+    before_sha = Git.head_sha(root)
+    Git.pull(root, @integration_branch)
+    after_sha = Git.head_sha(root)
+
+    if before_sha == after_sha do
+      Formatter.emit_up_to_date(mode, @integration_branch)
+    else
+      commits = Git.short_log(root, before_sha, after_sha)
+      Start.log_text("Pulled #{length(commits)} new commit(s); deploying…")
+
+      # Migrations, ordered so they never run against a live server.
+      #
+      # SQLite takes a single writer. `mix wardmast.migrate` opens its own
+      # connection, so running it here while the old server is still serving
+      # races the live writer and dies with `queue_timeout` — the exact failure
+      # `arb server migrate` already sidesteps, and the one the release deploy
+      # path was fixed for in bd-bksulf. When the server is up we defer to the
+      # restart below: `Boot.Migrator` is the first supervised child and applies
+      # pending migrations synchronously before the endpoint opens, so the new
+      # code never serves an unmigrated schema. Only a server that is already
+      # down (no competing connection) gets the standalone migrate.
+      migrations_applied =
+        if Doctor.reachable?() do
+          Start.log_text(
+            "Server is running — not migrating against it. The restart below applies " <>
+              "pending migrations on boot (Boot.Migrator), before the endpoint opens."
+          )
+
+          :on_boot
+        else
+          case Migrate.run(root) do
+            {:ok, count} -> count
+            {:error, err} -> Output.die("Database migration failed", err)
+          end
+        end
+
+      # Check if CLI changed and rebuild/install if needed
+      cli_changed =
+        root
+        |> Git.files_in_diff(before_sha, after_sha)
+        |> Enum.any?(&String.starts_with?(&1, "apps/wardmast_cli"))
+
+      cli_built =
+        if cli_changed do
+          Git.build_and_install_cli(root)
+          true
+        else
+          false
+        end
+
+      # Finally restart Phoenix to load the new code
+      case Restart.perform(root, timeout_ms) do
+        {:ok, actions, was_running} ->
+          Formatter.emit_deployed(mode, %{
+            branch: @integration_branch,
+            before_sha: before_sha,
+            after_sha: after_sha,
+            commits: commits,
+            actions: actions,
+            was_running: was_running,
+            migrations_applied: migrations_applied,
+            cli_built: cli_built
+          })
+
+        {:down, actions, _was_running} ->
+          Restart.emit_down(mode, actions)
+
+        {:timeout, actions, _was_running} ->
+          Formatter.emit_deploy_timeout(mode, %{
+            branch: @integration_branch,
+            before_sha: before_sha,
+            after_sha: after_sha,
+            commits: commits,
+            actions: actions,
+            timeout_ms: timeout_ms,
+            migrations_applied: migrations_applied,
+            cli_built: cli_built
+          })
+      end
+    end
+  end
+
+  # ---- issue-edit mode ---------------------------------------------------
+
+  # Pre-existing complexity 10 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp do_edit_issue(argv) do
+    refuse_status_flag!(argv)
+
+    {opts, rest, mode} =
+      ArgParser.parse(argv, command: "arb ticket update", switches: @all_edit_switches)
+
+    opts = ArgParser.coerce_difficulty(opts)
+
+    bulk? = Bulk.bulk?(rest, opts)
+
+    ids =
+      if bulk?,
+        do: Bulk.collect_ids(rest, opts, "update"),
+        else: single_id!(rest)
+
+    acceptance = AcceptanceFlags.resolve!(opts)
+
+    warn_deprecated_assignee(opts[:assignee], mode)
+
+    payload =
+      %{}
+      |> put_if("priority", opts[:priority])
+      |> put_if("difficulty", opts[:difficulty])
+      |> put_if("notes", opts[:notes])
+      |> put_if("acceptance", acceptance)
+      |> put_if("qa_notes", opts[:qa_notes])
+      |> put_if("deployment_notes", opts[:deployment_notes])
+      |> put_if("no_lint", if(opts[:lint] == false, do: true))
+      |> put_if("pr_body", opts[:pr_body])
+      |> put_if("description", opts[:description])
+      |> put_if("title", opts[:title])
+      |> put_if("repo", opts[:repo])
+      |> put_if("tracker_ref", opts[:tracker_ref])
+      |> put_if("tracker_type", opts[:tracker_type])
+      |> put_if("tracker_context_type", opts[:tracker_context_type])
+      |> put_if("tracker_context_ref", opts[:tracker_context_ref])
+      |> put_if("target_branch", opts[:target_branch])
+      |> put_if("issue_type", opts[:type])
+      |> put_if("pr_ref", opts[:pr_ref])
+      # P-08 (D-T-19): the server appends atomically — no GET, no client concat.
+      |> put_if("append_notes", opts[:append_notes])
+      |> put_bool_if("auto_close", opts[:auto_close])
+      |> put_bool_if("verify_after_deploy", opts[:verify_after_deploy])
+      |> Map.merge(ProviderConstraintFlags.payload(opts))
+      |> Map.merge(PermissionFlags.update_payload(opts))
+
+    resume? = opts[:resume_review] == true
+
+    if map_size(payload) == 0 and not resume? and is_nil(opts[:assignee]) do
+      Output.die(
+        "update requires at least one field flag (e.g. --priority, --append-notes, --resume-review)"
+      )
+    end
+
+    if bulk?,
+      do: bulk_update(ids, payload, opts, mode),
+      else: edit_one(hd(ids), payload, opts, mode)
+  end
+
+  # bd-cvyx6j: one patch to several ids — `PATCH /api/issues {ids, patch}`.
+  # `--notes` replaces on every id, so it needs `--confirm-replace-notes`.
+  defp bulk_update(ids, payload, opts, mode) do
+    cond do
+      opts[:resume_review] ->
+        Output.die("--resume-review is not available on a bulk update; run it per ticket")
+
+      map_size(payload) == 0 ->
+        Output.die("update requires at least one field flag (e.g. --priority, --append-notes)")
+
+      Map.has_key?(payload, "notes") and opts[:confirm_replace_notes] != true ->
+        Output.die(
+          "--notes would REPLACE the notes of #{length(ids)} tickets",
+          "Use --append-notes, or add --confirm-replace-notes to replace them all."
+        )
+
+      true ->
+        body = %{"ids" => ids, "patch" => payload}
+
+        body =
+          if opts[:confirm_replace_notes],
+            do: Map.put(body, "confirm_replace_notes", true),
+            else: body
+
+        case Client.patch("/api/issues", body) do
+          {:ok, response} -> Bulk.emit(response, mode)
+          {:error, err} -> Output.die(err)
+        end
+    end
+  end
+
+  defp single_id!(rest) do
+    case rest do
+      [id] -> [id]
+      [] -> Output.die("update requires a ticket id")
+      _ -> Output.die("update takes exactly one positional argument: the ticket id")
+    end
+  end
+
+  defp edit_one(id, payload, opts, mode) do
+    resume? = opts[:resume_review] == true
+
+    patched = if map_size(payload) > 0, do: patch!(id, payload)
+    resumed = if resume?, do: resume_review!(id)
+
+    case resumed || patched do
+      nil ->
+        # bd-1ozks5: only a deprecated --assignee was given — nothing to
+        # write, but that isn't a failure. Report the task back unchanged.
+        case Client.get("/api/issues/" <> id) do
+          {:ok, issue} -> Output.emit_issue(issue, mode)
+          {:error, err} -> Output.die(err)
+        end
+
+      issue ->
+        print_lint_warnings(issue, mode)
+        Output.emit_issue(issue, mode)
+    end
+  end
+
+  defp print_lint_warnings(issue, :text) do
+    for warning <- issue["warnings"] || [], do: IO.puts(:stderr, "arb: warning: #{warning}")
+    :ok
+  end
+
+  defp print_lint_warnings(_issue, _mode), do: :ok
+
+  defp patch!(id, payload) do
+    case Client.patch("/api/issues/" <> id, payload) do
+      {:ok, issue} -> issue
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp resume_review!(id) do
+    case Client.post("/api/issues/" <> id <> "/resume_review", %{}) do
+      {:ok, issue} -> issue
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  # `--verify-after-deploy` / `--no-verify-after-deploy` — `put_if/3` can't be
+  # reused here: `false` is a meaningful value (clear the flag), not "absent".
+  defp put_bool_if(map, _key, nil), do: map
+  defp put_bool_if(map, key, value) when is_boolean(value), do: Map.put(map, key, value)
+
+  # P-08 (D-T-18): `""` is a value, not "absent" — the server clears the field.
+  defp put_if(map, _key, nil), do: map
+  defp put_if(map, key, value), do: Map.put(map, key, value)
+
+  # bd-1ozks5: the local assignee field is gone — accept and ignore
+  # `--assignee` for one release rather than breaking an existing script.
+  # bd-36ytcl: the legacy `status` is gone and `:update` never moves the
+  # lifecycle `state`. Refuse the old flag with the verbs that do, rather than
+  # let the non-strict parse drop it and fail on "no field flag".
+  defp refuse_status_flag!(argv) do
+    if Enum.any?(argv, &(&1 == "--status" or String.starts_with?(&1, "--status="))) do
+      Output.die(
+        "--status was removed: a ticket's state moves only through its transitions",
+        "Use `arb ticket promote`, `demote`, `close` or `reopen <id>`."
+      )
+    end
+  end
+
+  defp warn_deprecated_assignee(nil, _mode), do: :ok
+
+  defp warn_deprecated_assignee(_value, :text) do
+    IO.puts(
+      :stderr,
+      "arb: warning: --assignee is deprecated and ignored — Wardmast is a local " <>
+        "single-user app and no longer tracks an assignee locally (bd-1ozks5)."
+    )
+  end
+
+  defp warn_deprecated_assignee(_value, _mode), do: :ok
+end

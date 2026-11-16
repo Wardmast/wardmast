@@ -1,7 +1,7 @@
 # Worker toolchain: the repo's pinned Elixir/OTP, never the host's
 
-**Task:** bd-3fnqi8 (GitHub #962) · **Code:** `Arbiter.Worker.Toolchain`,
-`Arbiter.Worker.Image`
+**Task:** bd-3fnqi8 (GitHub #962) · **Code:** `Wardmast.Worker.Toolchain`,
+`Wardmast.Worker.Image`
 
 A worker for a repo runs on the Elixir/Erlang **that repo pins**, on every node
 type. The host's own `/usr/local/bin/elixir` is never a source. This exists
@@ -56,10 +56,10 @@ already use the image's toolchain.
 2. Look for `<root>/elixir/<version>/bin/elixir` and `<root>/erlang/<version>/bin/erl`
    under the install roots: mise's `installs` dir (`$MISE_DATA_DIR`, default
    `~/.local/share/mise/installs`), then asdf's (`$ASDF_DATA_DIR`, default
-   `~/.asdf/installs`). Override with `config :arbiter, :worker_toolchain_roots`.
+   `~/.asdf/installs`). Override with `config :wardmast, :worker_toolchain_roots`.
 3. Missing: `mise install erlang@… elixir@…` on the server host (single-flight,
    30-minute bound, by explicit tool name so no config needs trusting). Disable
-   with `config :arbiter, worker_toolchain_provision: false`.
+   with `config :wardmast, worker_toolchain_provision: false`.
 4. Prefix `PATH` with the install `bin` dirs, then run `elixir --version` on that
    `PATH`; it must report the pinned Elixir and OTP major.
 
@@ -80,7 +80,7 @@ applies: CI is the backstop, but nothing is run on the wrong runtime).
 On the image path, an unsupported `elixir`/`erlang` pin and a Containerfile/pin
 mismatch fail `Image.plan/3` instead of silently building the configured default
 toolchain. A repo with **no** `.tool-versions` and no Containerfile still gets
-`config :arbiter, :worker_image_default_toolchain`; pin your repo to avoid that.
+`config :wardmast, :worker_image_default_toolchain`; pin your repo to avoid that.
 
 ## How a runtime upgrade propagates
 
@@ -100,7 +100,7 @@ publisher's job.
 
 ## Tests
 
-* `apps/arbiter/test/arbiter/worker/toolchain_test.exs`: parsing, selection,
+* `apps/wardmast/test/wardmast/worker/toolchain_test.exs`: parsing, selection,
   provisioning, every fail-closed case, Containerfile agreement.
 * `claude_session_test.exs`, `prepush_check_test.exs`, `test_run_test.exs`: the
   three host call sites (pinned `PATH` first; unavailable runs nothing).

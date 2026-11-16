@@ -1,0 +1,1325 @@
+defmodule Wardmast.Worker.PromptBuilderTest do
+  use Wardmast.DataCase, async: true
+
+  alias Wardmast.Tasks.Issue
+  alias Wardmast.Worker.PromptBuilder
+
+  # bd-8u5uaw: golden-output tests pinning the exact prompt text for fixed
+  # inputs. These moved byte-for-byte from `Wardmast.Worker.Dispatch` — the
+  # point of this file is to catch any future accidental drift in the
+  # generated prompt, not to re-describe every branch (that coverage already
+  # lives in dispatch_test.exs against `Dispatch.prompt_for_task/2`, which now
+  # delegates here).
+
+  defp task(overrides) do
+    struct!(
+      %Issue{
+        id: "bd-golden1",
+        title: "Fix the null guard",
+        description: "The parser crashes on empty input.",
+        acceptance: "Empty input returns {:error, :empty} instead of raising.",
+        issue_type: :bug,
+        tracker_type: :none,
+        tracker_ref: nil,
+        pr_ref: nil,
+        source_pr: nil
+      },
+      overrides
+    )
+  end
+
+  describe "PERMISSIONS block (G14, bd-ld8qde)" do
+    alias Wardmast.Guardrails.Projection
+
+    test "a guarded spawn's work prompt carries it" do
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt",
+          projection: %{
+            Projection.sealed()
+            | granted: ["tracker_write"],
+              claims: ["tracker_write"]
+          }
+        )
+
+      assert prompt =~ "PERMISSIONS"
+      assert prompt =~ "tracker_write"
+    end
+
+    test "a task-type (no-PR) prompt carries it too" do
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{issue_type: :task}),
+          worktree_path: "/tmp/wt",
+          projection: Projection.sealed()
+        )
+
+      assert prompt =~ "PERMISSIONS"
+    end
+
+    test "an unguarded or absent projection leaves the prompt byte-identical" do
+      plain = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")
+
+      assert PromptBuilder.prompt_for_task(task(%{}),
+               worktree_path: "/tmp/wt",
+               projection: Projection.unguarded()
+             ) == plain
+
+      refute plain =~ "PERMISSIONS"
+    end
+  end
+
+  test "work prompt is byte-identical for fixed inputs" do
+    prompt =
+      PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-golden")
+
+    assert prompt == """
+           You are a worker working autonomously on task bd-golden1.
+
+           Title: Fix the null guard
+
+           Description:
+           The parser crashes on empty input.
+
+           Acceptance:
+           Empty input returns {:error, :empty} instead of raising.
+
+           Your current directory is a fresh git worktree on a per-task branch.
+
+           FILESYSTEM ISOLATION — Your worktree is at:
+
+               /tmp/wt-golden
+
+           You MUST only write files inside this directory. Do NOT use absolute
+           paths that point outside it — especially not to the main repo checkout
+           (e.g. $HOME/dev/arbiter/...). Writing to the main repo corrupts
+           Phoenix hot-reload and cascades to kill every other running worker.
+           Always use relative paths or paths rooted at /tmp/wt-golden.
+
+           TEMP FILES — Wardmast gave this run its own scratch directory, exported as
+           $TMPDIR (also $TMP and $TEMP) and removed when the run ends. Put every
+           temporary file or directory there (`mktemp` already honors it). Do NOT
+           invent `/tmp/<name>` directories: /tmp is RAM-backed and nothing cleans
+           them up.
+
+
+           PROCESS DISCIPLINE — if you start a local server or any other long-running
+           process to verify your work (e.g. booting a dev server to check a page in
+           a browser), you are responsible for stopping ONLY that exact process.
+           NEVER use `pkill`, `killall`, `fuser -k`, or any other name/pattern-based
+           kill — process command lines are visible across the whole host, not just
+           your worktree, and a pattern that matches your own instance can just as
+           easily match the coordinator's own server or another worker's, taking
+           them down too. Capture the exact PID when you start the process (e.g.
+           `some_server & SERVER_PID=$!`) and stop only that PID (`kill $SERVER_PID`).
+           If you cannot reliably track that PID across your own tool calls, do not
+           start the process at all — rely on the automated test suite instead of
+           live/manual verification.
+
+           READ DISCIPLINE — avoid whole-file reads of large modules: they refill
+           the context window faster than autocompact can shed it and can abort your
+           session mid-task ("Autocompact is thrashing"). Prefer grep/symbol search
+           to locate the relevant span first, then read a bounded offset+limit range
+           rather than the entire file. For a large `gh`/API command's output, pipe
+           it to a file and read bounded slices rather than dumping it whole into
+           context.
+
+           FORGE CLIs — a containerized (podman) worker has `arb` on PATH but
+           deliberately no `gh`/`glab` and no forge token; if `command -v gh` finds
+           nothing, use the arbiter MCP tools (`ticket_show`, `ci_*`, ...) instead of
+           retrying the CLI.
+
+           RUNNING TESTS — use the `run_tests` MCP tool instead of `mix test` in the
+           shell. It runs your tests in this run's own environment (same container,
+           deps and `_build`) and returns only the pass/fail counts plus each failing
+           test's header, assertion and a few stacktrace frames, so compile output and
+           passing-test noise do not ride in your context for the rest of the session.
+           Pass `paths` (test files, optionally `file.exs:LINE`, or directories) or
+           `changed: true` for the tests mapped from what you changed. The result
+           carries `full_log`, the path of the complete output; read that only if the
+           summary is not enough. Fall back to a raw `mix test` only for a flag the tool
+           lacks, and then pipe it through `tail` or `grep` rather than letting the
+           whole run into context.
+
+           EVIDENCE INTEGRITY — never fabricate evidence, citations, screenshots or
+           artifacts. A screenshot must be a real capture of the real app, a source
+           or licence citation must name where the thing actually came from, and a
+           test result must be output you actually saw. If an acceptance criterion
+           cannot be met (screenshots are not possible headlessly, an official asset
+           cannot be found), report that AC as unmet: say so in the PR body and your
+           notes, and leave it unmet or flagged for the reviewer and coordinator. An
+           honest "not met" is always acceptable. A mockup presented as a screenshot,
+           or a citation you did not verify, is not. Never change a true statement to
+           satisfy a reviewer: if a finding is wrong, rebut it with the evidence.
+
+           NO PUBLIC UPLOADS — never upload repo content, logs, images or anything
+           else to a public or anonymous file or paste host (catbox.moe, litterbox,
+           0x0.st, transfer.sh, file.io, pastebin and the like), never create a gist,
+           and never post test or throwaway comments on issues or PRs. Uploads there
+           are public, often permanent, and outside the operator's control.
+
+           Work the task to completion: load context, design, implement, test,
+           commit on this branch, and push it.
+
+           Do NOT open a pull request yourself (no `gh pr create` / `glab mr
+           create`). The MergeQueue opens the single canonical PR for this task, on
+           the correct base branch, using the body you author in the next step.
+           Opening your own PR creates a duplicate on the wrong base.
+
+           POST-MERGE VERIFICATION — if your diff's only execution context is the
+           long-lived server, flag it. That means anything a green test suite cannot
+           prove is live: env/config plumbing that has to reach a spawned worker,
+           a `doctor`/health probe, a capture or ingest path, code whose first real
+           run is inside the running Phoenix process. Set the flag by calling the
+           `ticket_update_progress` MCP tool with `verify_after_deploy: true`, and say
+           in your `notes` what to look at after a restart and what a working result
+           looks like.
+
+           The task then parks at `awaiting verification` on merge instead of closing,
+           and the coordinator restarts and observes it once before it closes. If your
+           change genuinely runs under test — a pure function, a LiveView with
+           assertions, a migration — leave it alone; the flag costs a human round trip
+           and is not free.
+
+           ACCEPTANCE CRITERIA YOU CANNOT VERIFY IN THE WORKTREE — if a criterion can
+           only be checked after merge/deploy or with access you lack (prod, a
+           main-branch pipeline, forge settings, operator registrations), do not fake
+           it and do not block on it. Say so in the PR body (a "Not verifiable
+           pre-merge" note naming the criterion and why) and suggest moving it to
+           `deployment_notes`. Do the rest of the task.
+
+           Author the PR description and persist it on the task — the MergeQueue opens
+           the PR with this exact body, so write it as the PR writeup, not a restatement
+           of the ticket. Do this AFTER the work is implemented and tested, so it
+           reflects what actually changed:
+
+             * **Summary** — what changed and why, in a few sentences.
+             * **Test plan** — the checks you ran, with checked boxes for what passed.
+             * **References** — the task id (bd-golden1) and any linked ticket/PRs.
+             * **Not verifiable pre-merge** (only if applicable) — any acceptance
+               criterion you could not verify in the worktree, with the reason, and a
+               suggestion to move it to `deployment_notes`.
+
+           If the repo has a PR template (`.github/pull_request_template.md`), FILL it
+           rather than discard it. Persist the finished body verbatim by calling the
+           `ticket_update_progress` MCP tool with its `pr_body` argument set to the full
+           PR body (Markdown). Use the MCP tool, which is available in this session —
+           do NOT shell out to the `arb` CLI for this.
+
+           Do this before printing `arb done`.
+
+           Coordination: direction from the coordinator and flags from sibling workers
+           arrive as `.arbiter/INBOX` in your working directory; do not run `arb inbox`.
+           Between major steps, check for it using `[ -f .arbiter/INBOX ] && cat .arbiter/INBOX`
+           (this does NOT error when the file is absent — the normal case). If it exists, read
+           it, act on any coordinator instructions it contains, then delete the file to
+           acknowledge receipt. Treat it as a real-time message from the coordinator — it
+           takes precedence over your current task if it redirects you. To leave a flag
+           for another worker, use `arb message <their-task-id> <text>`.
+
+           CRITICAL — continuation discipline: NEVER end a response with only a plan
+           or a statement of the next step (for example, announcing that you will now
+           write a test instead of writing it). After ANY check (mailbox /
+           `.arbiter/INBOX` / git status), immediately continue with the next
+           concrete tool call in the same turn. Your session is non-interactive: a
+           turn that contains no tool call ENDS the session. The only correct way to
+           finish is to print `arb done` once the work is complete — if you are about
+           to stop without having printed `arb done`, keep working.
+
+           *** ASYNC TOOLS: THIS SESSION IS HEADLESS AND NON-INTERACTIVE: ending your
+           turn ends the session outright, and no notification can ever reach you
+           afterward — not from `Monitor`, not `ScheduleWakeup`, not a backgrounded
+           shell job. The process that would receive it no longer exists. If you
+           background a long command (`mix test`, `mix precommit`, `dialyzer`, or
+           similar) and end your turn to "wait" for it, the run ends on the spot, the
+           command is killed with it, and any uncommitted work is lost. So:
+
+             * COMMIT correct work BEFORE running any long verification. Verification
+               confirms work; it must never be the thing that loses it.
+             * Run `mix test`, `mix precommit`, `dialyzer`, and any other long
+               verification command in the FOREGROUND, in the same tool call, and
+               wait for it to finish before your turn ends. Raise the `Bash` tool's
+               own `timeout` parameter (up to 600000 ms / 10 minutes) if the default
+               is too short, or narrow the command — the specific failing test
+               files, not the whole suite.
+             * NEVER background a verification command and end your turn expecting to
+               be woken up later. NEVER call `Monitor` or `ScheduleWakeup` to wait for
+               one. There is no "later" in a headless session.
+
+           You MUST read every command's full output before you print `arb done` —
+           the work is incomplete until every tool you launched has
+           finished and you have read its result.
+
+           When you are completely done, print the line:
+
+               arb done
+
+           on a line by itself, exactly. The worker watches your stdout and
+           will mark the task complete when it sees that marker.
+           """
+  end
+
+  describe "host-pushed (container) runs (bd-dh1gg1)" do
+    test "a host-pushes run is told not to push, fresh or resumed" do
+      for extra <- [[], [resume_context: "## Resuming prior work\n\n"]] do
+        prompt =
+          PromptBuilder.prompt_for_task(
+            task(%{}),
+            [sandbox_backend: :podman, host_pushes?: true] ++ extra
+          )
+
+        assert prompt =~ "commit on this branch."
+        assert prompt =~ "NO PUSH ACCESS"
+        refute prompt =~ "and push it."
+      end
+    end
+
+    test "the PR-review and PRPatrol follow-up prompts do not send a host-pushes worker to push" do
+      review = PromptBuilder.prompt_for_task(task(%{pr_ref: "7"}), host_pushes?: true)
+      assert review =~ "Wardmast pushes it; do NOT push"
+      refute review =~ "push commits to the existing branch"
+
+      follow =
+        PromptBuilder.prompt_for_task(
+          task(%{issue_type: :research, source_pr: "42"}),
+          host_pushes?: true
+        )
+
+      assert follow =~ "do NOT `git push`"
+      refute follow =~ "+ push (`git push`)"
+
+      plain = PromptBuilder.prompt_for_task(task(%{pr_ref: "7"}), [])
+      assert plain =~ "push commits to the existing branch"
+    end
+
+    test "without the flag the worker still pushes itself" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), [])
+
+      assert prompt =~ "commit on this branch, and push it."
+      refute prompt =~ "Do NOT push"
+    end
+  end
+
+  describe "no-PR type prompts (bd-9s9dqz)" do
+    test "research asks for findings and names the notes gate" do
+      prompt = PromptBuilder.prompt_for_task(task(%{issue_type: :research}), [])
+
+      assert prompt =~ "This is a `research`-type directive"
+      assert prompt =~ "Write your findings to the directive's `notes` field"
+      assert prompt =~ "A notes gate enforces this"
+      refute prompt =~ "operational action"
+    end
+
+    test "task asks for the action and a short outcome note, with no notes gate" do
+      prompt = PromptBuilder.prompt_for_task(task(%{issue_type: :task}), [])
+
+      assert prompt =~ "This is a `task`-type directive"
+      assert prompt =~ "Carry out the operational action the directive describes"
+      assert prompt =~ "Record a short outcome note"
+      assert prompt =~ "there is no notes gate"
+      refute prompt =~ "Write your findings"
+      refute prompt =~ "A notes gate enforces this"
+    end
+
+    test "both no-PR bodies forbid code work and differ from each other" do
+      research = PromptBuilder.prompt_for_task(task(%{issue_type: :research}), [])
+      action = PromptBuilder.prompt_for_task(task(%{issue_type: :task}), [])
+
+      assert action =~ "do NOT edit, commit or push code"
+      assert research =~ "NO branch or pull request"
+      assert action =~ "NO branch or pull request"
+      refute research == action
+    end
+
+    test "a research follow-up keeps the PRPatrol source_pr guidance" do
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{issue_type: :research, source_pr: "42"}), [])
+
+      assert prompt =~ "gh pr checkout 42"
+    end
+  end
+
+  test "research-type prompt is byte-identical for fixed inputs" do
+    prompt = PromptBuilder.prompt_for_task(task(%{issue_type: :research}), [])
+
+    assert prompt == """
+           You are a worker working autonomously on task bd-golden1.
+
+           Title: Fix the null guard
+
+           Description:
+           The parser crashes on empty input.
+
+           Acceptance:
+           Empty input returns {:error, :empty} instead of raising.
+
+           This is a `research`-type directive: it has NO branch or pull request of its
+           own, and none will be opened for it.
+
+           No worktree is provisioned by default — you are not expected to edit a repo.
+           If the work genuinely requires inspecting code you may read files, but do
+           not author a branch or open a PR.
+
+
+           PROCESS DISCIPLINE — if you start a local server or any other long-running
+           process to verify your work (e.g. booting a dev server to check a page in
+           a browser), you are responsible for stopping ONLY that exact process.
+           NEVER use `pkill`, `killall`, `fuser -k`, or any other name/pattern-based
+           kill — process command lines are visible across the whole host, not just
+           your worktree, and a pattern that matches your own instance can just as
+           easily match the coordinator's own server or another worker's, taking
+           them down too. Capture the exact PID when you start the process (e.g.
+           `some_server & SERVER_PID=$!`) and stop only that PID (`kill $SERVER_PID`).
+           If you cannot reliably track that PID across your own tool calls, do not
+           start the process at all — rely on the automated test suite instead of
+           live/manual verification.
+
+           READ DISCIPLINE — avoid whole-file reads of large modules: they refill
+           the context window faster than autocompact can shed it and can abort your
+           session mid-task ("Autocompact is thrashing"). Prefer grep/symbol search
+           to locate the relevant span first, then read a bounded offset+limit range
+           rather than the entire file. For a large `gh`/API command's output, pipe
+           it to a file and read bounded slices rather than dumping it whole into
+           context.
+
+           FORGE CLIs — a containerized (podman) worker has `arb` on PATH but
+           deliberately no `gh`/`glab` and no forge token; if `command -v gh` finds
+           nothing, use the arbiter MCP tools (`ticket_show`, `ci_*`, ...) instead of
+           retrying the CLI.
+
+           EVIDENCE INTEGRITY — never fabricate evidence, citations, screenshots or
+           artifacts. A screenshot must be a real capture of the real app, a source
+           or licence citation must name where the thing actually came from, and a
+           test result must be output you actually saw. If an acceptance criterion
+           cannot be met (screenshots are not possible headlessly, an official asset
+           cannot be found), report that AC as unmet: say so in the PR body and your
+           notes, and leave it unmet or flagged for the reviewer and coordinator. An
+           honest "not met" is always acceptable. A mockup presented as a screenshot,
+           or a citation you did not verify, is not. Never change a true statement to
+           satisfy a reviewer: if a finding is wrong, rebut it with the evidence.
+
+           NO PUBLIC UPLOADS — never upload repo content, logs, images or anything
+           else to a public or anonymous file or paste host (catbox.moe, litterbox,
+           0x0.st, transfer.sh, file.io, pastebin and the like), never create a gist,
+           and never post test or throwaway comments on issues or PRs. Uploads there
+           are public, often permanent, and outside the operator's control.
+
+           Your job:
+             1. Do the investigation the directive describes.
+             2. Write your findings to the directive's `notes` field by calling the
+                `ticket_update_progress` MCP tool with its `notes` argument (Markdown is
+                fine). Make it self-contained: what you investigated, what you found,
+                and any recommendation or conclusion the coordinator needs — they read it
+                via `arb show bd-golden1` and the dashboard.
+
+           A notes gate enforces this: if you print `arb done` while `notes` is still
+           blank, you will be reprompted to write your findings before the directive
+           can close. Do NOT shell out to the `arb` CLI for the notes — use the
+           `ticket_update_progress` MCP tool.
+
+           FILING CHILD TICKETS — if you file follow-up tickets (`ticket_create` /
+           `arb ticket create`):
+             * `acceptance` is only what the implementer can do and the reviewer can
+               verify from the diff, the worktree, the tests and the MR's own CI
+               (example: "test X covers Y").
+             * `deployment_notes` is what can only be checked after merge or deploy, or
+               by someone with access the worker lacks: prod or live observation, timing
+               on a main/default-branch pipeline, forge settings, operator registrations,
+               "seen working on a real failing pipeline". NEVER put those in `acceptance`
+               — ReviewGate parks a ticket whose unmet criteria need coordinator action.
+             * Set `issue_type` to the work type of the CHILD, not the parent's:
+               `chore`/`bug`/`feature` for code changes; `task` only for research with
+               no diff (a `task` worker refuses to edit code and closes with no MR).
+             * Set `difficulty`, and list `depends_on` tickets in the description.
+
+           Coordination: at the start of each step, check your mailbox by running
+
+               arb inbox bd-golden1
+
+           This shows any direction from the coordinator or flags from sibling workers and
+           marks them read. To leave a flag for another worker, use
+           `arb message <their-task-id> <text>`.
+
+           Between major steps, also check for `.arbiter/INBOX` in your working
+           directory. If it exists, read it, act on any coordinator instructions it
+           contains, then delete the file to acknowledge receipt.
+
+           *** ASYNC TOOLS: THIS SESSION IS HEADLESS AND NON-INTERACTIVE: ending your
+           turn ends the session outright, and no notification can ever reach you
+           afterward — not from `Monitor`, not `ScheduleWakeup`, not a backgrounded
+           shell job. The process that would receive it no longer exists. If you
+           background a long command (`mix test`, `mix precommit`, `dialyzer`, or
+           similar) and end your turn to "wait" for it, the run ends on the spot, the
+           command is killed with it, and any uncommitted work is lost. So:
+
+             * COMMIT correct work BEFORE running any long verification. Verification
+               confirms work; it must never be the thing that loses it.
+             * Run `mix test`, `mix precommit`, `dialyzer`, and any other long
+               verification command in the FOREGROUND, in the same tool call, and
+               wait for it to finish before your turn ends. Raise the `Bash` tool's
+               own `timeout` parameter (up to 600000 ms / 10 minutes) if the default
+               is too short, or narrow the command — the specific failing test
+               files, not the whole suite.
+             * NEVER background a verification command and end your turn expecting to
+               be woken up later. NEVER call `Monitor` or `ScheduleWakeup` to wait for
+               one. There is no "later" in a headless session.
+
+           You MUST read every command's full output before you print `arb done`.
+
+           When you are completely done — findings written to `notes` — print the line:
+
+               arb done
+
+           on a line by itself, exactly. The worker watches your stdout and will mark
+           the task complete when it sees that marker.
+           """
+  end
+
+  test "review prompt directs the reviewer to the read-only forge token (bd-1vhect)" do
+    prompt = PromptBuilder.prompt_for_task(task(%{}), review: true)
+
+    assert prompt =~ "PRIVATE-TOKEN: $GITLAB_TOKEN"
+    assert prompt =~ "glab mr view"
+    assert prompt =~ "Never print or log the token"
+  end
+
+  test "review prompt is byte-identical for fixed inputs" do
+    prompt = PromptBuilder.prompt_for_task(task(%{}), review: true)
+
+    assert prompt == """
+           You are a reviewer worker. Review the pull/merge request linked to task
+           bd-golden1 and post a verdict. You are not the author; do not modify the
+           branch.
+
+           Title: Fix the null guard
+
+           Description:
+           The parser crashes on empty input.
+
+           Acceptance:
+           Empty input returns {:error, :empty} instead of raising.
+
+           Your current directory is the repo's local checkout. There is
+           no per-task branch and no worktree was provisioned — this is a review-only
+           directive.
+
+           PROCESS DISCIPLINE — if you start a local server or any other long-running
+           process to verify your work (e.g. booting a dev server to check a page in
+           a browser), you are responsible for stopping ONLY that exact process.
+           NEVER use `pkill`, `killall`, `fuser -k`, or any other name/pattern-based
+           kill — process command lines are visible across the whole host, not just
+           your worktree, and a pattern that matches your own instance can just as
+           easily match the coordinator's own server or another worker's, taking
+           them down too. Capture the exact PID when you start the process (e.g.
+           `some_server & SERVER_PID=$!`) and stop only that PID (`kill $SERVER_PID`).
+           If you cannot reliably track that PID across your own tool calls, do not
+           start the process at all — rely on the automated test suite instead of
+           live/manual verification.
+
+           READ DISCIPLINE — avoid whole-file reads of large modules: they refill
+           the context window faster than autocompact can shed it and can abort your
+           session mid-task ("Autocompact is thrashing"). Prefer grep/symbol search
+           to locate the relevant span first, then read a bounded offset+limit range
+           rather than the entire file. For a large `gh`/API command's output, pipe
+           it to a file and read bounded slices rather than dumping it whole into
+           context.
+
+           FORGE CLIs — a containerized (podman) worker has `arb` on PATH but
+           deliberately no `gh`/`glab` and no forge token; if `command -v gh` finds
+           nothing, use the arbiter MCP tools (`ticket_show`, `ci_*`, ...) instead of
+           retrying the CLI.
+
+           Reading the PR/MR itself (description, linked acceptance, pipelines) — this
+           refines the FORGE CLIs note above for reviewers: do NOT
+           browse the web or call the forge API anonymously — private projects answer
+           404. Use `gh pr view <ref>` / `glab mr view <ref>` (add `--comments` for
+           notes). If `GITLAB_TOKEN` is set in your environment, it is a read-only
+           token for this project: with no `glab` on PATH, call the API with it, e.g.
+           `curl -s -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "https://$GITLAB_HOST/api/v4/projects/<url-encoded group/project>/merge_requests/<iid>"`
+           (`/pipelines`, `/notes` likewise). Never print or log the token.
+
+           Steps:
+             1. Read the PR/MR diff via the configured tracker's CLI (`gh pr diff
+                <ref>` for GitHub, `glab mr diff <ref>` for GitLab, `git diff` for
+                the Direct local strategy). Do not check out the branch.
+             2. Identify real correctness, security, or contract issues against the
+                task's intent. Skip style nits.
+             3. Post inline comments for each finding through the same tracker CLI.
+             4. Post a single review-level verdict — `approve` or `request_changes`
+                — with a one-paragraph summary.
+
+           Forbidden:
+             * Do NOT push code.
+             * Do NOT merge or close the PR/MR.
+             * Do NOT modify any branch, including the PR's head.
+
+           FABRICATED EVIDENCE — if the work fabricates or falsifies evidence (a
+           mockup presented as a screenshot, a citation to a source the thing did not
+           come from, test output that was never produced), start that finding with
+           `[FABRICATED-EVIDENCE]` and include evidence the coordinator can check: the URL you
+           fetched, the command you ran and what it printed, a hash or byte
+           comparison. That finding sends the task to the coordinator instead of
+           another fix round, so be sure first. Compare against the actual source
+           before you call a provenance claim false; appearance alone is not enough.
+
+           *** ASYNC TOOLS: THIS SESSION IS HEADLESS AND NON-INTERACTIVE: ending your
+           turn ends the session outright, and no notification can ever reach you
+           afterward — not from `Monitor`, not `ScheduleWakeup`, not a backgrounded
+           shell job. The process that would receive it no longer exists. If you
+           background a long command (`mix test`, `mix precommit`, `dialyzer`, or
+           similar) and end your turn to "wait" for it, the run ends on the spot, the
+           command is killed with it, and any uncommitted work is lost. So:
+
+             * Run `mix test`, `mix precommit`, `dialyzer`, and any other long
+               verification command in the FOREGROUND, in the same tool call, and
+               wait for it to finish before your turn ends. Raise the `Bash` tool's
+               own `timeout` parameter (up to 600000 ms / 10 minutes) if the default
+               is too short, or narrow the command — the specific failing test
+               files, not the whole suite.
+             * NEVER background a verification command and end your turn expecting to
+               be woken up later. NEVER call `Monitor` or `ScheduleWakeup` to wait for
+               one. There is no "later" in a headless session.
+
+           You MUST read every command's full output before you print `arb done`.
+
+           #{Wardmast.Worker.ReviewVerification.anti_stale_reflag_block()}
+           After you post the review to the tracker, print your conclusion on its
+           own line, EXACTLY one of:
+
+               VERDICT: APPROVE
+               VERDICT: REQUEST_CHANGES
+
+           If you REQUEST_CHANGES you MUST have posted an ENUMERATED list of concrete
+           findings through the tracker CLI — each with a severity, a location, and a
+           suggested fix. A REQUEST_CHANGES verdict that names no findings is invalid.
+
+           #{Wardmast.Worker.ReviewVerification.disclosure_block()}
+           Then print, on a line by itself:
+
+               arb done
+           """
+  end
+
+  test "review prompt is byte-identical when a review checkout was provisioned (bd-199giy)" do
+    prompt =
+      PromptBuilder.prompt_for_task(task(%{}),
+        review: true,
+        review_checkout: %{
+          path: "/tmp/arbiter-worktrees/review-abc123def456-1",
+          branch: "bugfix/bd-golden1-fix-null-guard",
+          head_sha: "abc123def456",
+          base_branch: "main"
+        }
+      )
+
+    assert prompt == """
+           You are a reviewer worker. Review the pull/merge request linked to task
+           bd-golden1 and post a verdict. You are not the author; do not modify the
+           branch.
+
+           Title: Fix the null guard
+
+           Description:
+           The parser crashes on empty input.
+
+           Acceptance:
+           Empty input returns {:error, :empty} instead of raising.
+
+           Your current directory (/tmp/arbiter-worktrees/review-abc123def456-1) is a
+           throwaway git worktree checked out DETACHED at `bugfix/bd-golden1-fix-null-guard`
+           head abc123def456 — the exact commit under review. It is yours alone and is
+           destroyed when this review ends. Read, Grep, Glob and Bash work here; Edit,
+           Write and NotebookEdit are denied, so you cannot modify the code you are
+           reviewing and cannot advance the branch.
+
+           Use it: open the real files at the reviewed commit, grep for call sites the
+           diff never shows, and run the tests against the actual tree. The diff is your
+           entry point, not the limit of what you can check. Report findings only on
+           code the diff actually touches — anything the checkout surfaces outside the
+           diff belongs in your summary prose, not as an inline comment.
+
+           PROCESS DISCIPLINE — if you start a local server or any other long-running
+           process to verify your work (e.g. booting a dev server to check a page in
+           a browser), you are responsible for stopping ONLY that exact process.
+           NEVER use `pkill`, `killall`, `fuser -k`, or any other name/pattern-based
+           kill — process command lines are visible across the whole host, not just
+           your worktree, and a pattern that matches your own instance can just as
+           easily match the coordinator's own server or another worker's, taking
+           them down too. Capture the exact PID when you start the process (e.g.
+           `some_server & SERVER_PID=$!`) and stop only that PID (`kill $SERVER_PID`).
+           If you cannot reliably track that PID across your own tool calls, do not
+           start the process at all — rely on the automated test suite instead of
+           live/manual verification.
+
+           READ DISCIPLINE — avoid whole-file reads of large modules: they refill
+           the context window faster than autocompact can shed it and can abort your
+           session mid-task ("Autocompact is thrashing"). Prefer grep/symbol search
+           to locate the relevant span first, then read a bounded offset+limit range
+           rather than the entire file. For a large `gh`/API command's output, pipe
+           it to a file and read bounded slices rather than dumping it whole into
+           context.
+
+           FORGE CLIs — a containerized (podman) worker has `arb` on PATH but
+           deliberately no `gh`/`glab` and no forge token; if `command -v gh` finds
+           nothing, use the arbiter MCP tools (`ticket_show`, `ci_*`, ...) instead of
+           retrying the CLI.
+
+           Reading the PR/MR itself (description, linked acceptance, pipelines) — this
+           refines the FORGE CLIs note above for reviewers: do NOT
+           browse the web or call the forge API anonymously — private projects answer
+           404. Use `gh pr view <ref>` / `glab mr view <ref>` (add `--comments` for
+           notes). If `GITLAB_TOKEN` is set in your environment, it is a read-only
+           token for this project: with no `glab` on PATH, call the API with it, e.g.
+           `curl -s -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "https://$GITLAB_HOST/api/v4/projects/<url-encoded group/project>/merge_requests/<iid>"`
+           (`/pipelines`, `/notes` likewise). Never print or log the token.
+
+           Steps:
+             1. Read the diff under review with `git diff origin/main...HEAD` in this
+                worktree (the tracker CLI — `gh pr diff <ref>` for GitHub, `glab mr
+                diff <ref>` for GitLab — is the fallback if that base ref is
+                unavailable). The commit under review is ALREADY checked out here; do
+                not check out or create any other branch.
+             2. Identify real correctness, security, or contract issues against the
+                task's intent. Skip style nits.
+             3. Post inline comments for each finding through the same tracker CLI.
+             4. Post a single review-level verdict — `approve` or `request_changes`
+                — with a one-paragraph summary.
+
+           Forbidden:
+             * Do NOT push code.
+             * Do NOT merge or close the PR/MR.
+             * Do NOT modify any branch, including the PR's head.
+
+           FABRICATED EVIDENCE — if the work fabricates or falsifies evidence (a
+           mockup presented as a screenshot, a citation to a source the thing did not
+           come from, test output that was never produced), start that finding with
+           `[FABRICATED-EVIDENCE]` and include evidence the coordinator can check: the URL you
+           fetched, the command you ran and what it printed, a hash or byte
+           comparison. That finding sends the task to the coordinator instead of
+           another fix round, so be sure first. Compare against the actual source
+           before you call a provenance claim false; appearance alone is not enough.
+
+           *** ASYNC TOOLS: THIS SESSION IS HEADLESS AND NON-INTERACTIVE: ending your
+           turn ends the session outright, and no notification can ever reach you
+           afterward — not from `Monitor`, not `ScheduleWakeup`, not a backgrounded
+           shell job. The process that would receive it no longer exists. If you
+           background a long command (`mix test`, `mix precommit`, `dialyzer`, or
+           similar) and end your turn to "wait" for it, the run ends on the spot, the
+           command is killed with it, and any uncommitted work is lost. So:
+
+             * Run `mix test`, `mix precommit`, `dialyzer`, and any other long
+               verification command in the FOREGROUND, in the same tool call, and
+               wait for it to finish before your turn ends. Raise the `Bash` tool's
+               own `timeout` parameter (up to 600000 ms / 10 minutes) if the default
+               is too short, or narrow the command — the specific failing test
+               files, not the whole suite.
+             * NEVER background a verification command and end your turn expecting to
+               be woken up later. NEVER call `Monitor` or `ScheduleWakeup` to wait for
+               one. There is no "later" in a headless session.
+
+           You MUST read every command's full output before you print `arb done`.
+
+           #{Wardmast.Worker.ReviewVerification.anti_stale_reflag_block()}
+           After you post the review to the tracker, print your conclusion on its
+           own line, EXACTLY one of:
+
+               VERDICT: APPROVE
+               VERDICT: REQUEST_CHANGES
+
+           If you REQUEST_CHANGES you MUST have posted an ENUMERATED list of concrete
+           findings through the tracker CLI — each with a severity, a location, and a
+           suggested fix. A REQUEST_CHANGES verdict that names no findings is invalid.
+
+           #{Wardmast.Worker.ReviewVerification.disclosure_block()}
+           Then print, on a line by itself:
+
+               arb done
+           """
+  end
+
+  test "review checkout with no known base branch falls back to the tracker CLI for the diff" do
+    prompt =
+      PromptBuilder.prompt_for_task(task(%{}),
+        review: true,
+        review_checkout: %{
+          path: "/tmp/wt-review",
+          branch: "bugfix/bd-golden1",
+          head_sha: "abc123def456",
+          base_branch: nil
+        }
+      )
+
+    assert prompt =~ "throwaway git worktree checked out DETACHED"
+
+    assert prompt =~
+             "  1. Read the diff under review via the configured tracker's CLI (`gh pr\n" <>
+               "     diff <ref>` for GitHub, `glab mr diff <ref>` for GitLab)."
+
+    refute prompt =~ "git diff origin/"
+  end
+
+  test "prompt_for_task/2 delegates through Dispatch identically" do
+    t = task(%{})
+
+    assert PromptBuilder.prompt_for_task(t, worktree_path: "/tmp/wt-x") ==
+             Wardmast.Worker.Dispatch.prompt_for_task(t, worktree_path: "/tmp/wt-x")
+
+    assert PromptBuilder.conflict_resolve_briefing(t, "feature/x", "main") ==
+             Wardmast.Worker.Dispatch.conflict_resolve_briefing(t, "feature/x", "main")
+  end
+
+  describe "conflict_resolve_briefing/4 host git (bd-19skda)" do
+    test "default briefing tells the worker to fetch and force-push itself" do
+      prompt = PromptBuilder.conflict_resolve_briefing(task(%{}), "feature/x", "main")
+
+      assert prompt =~ "git fetch origin main"
+      assert prompt =~ "git push --force-with-lease origin feature/x"
+      refute prompt =~ "NO FETCH OR PUSH ACCESS"
+    end
+
+    test "a containerized pass is told the host fetches before and pushes after" do
+      prompt =
+        PromptBuilder.conflict_resolve_briefing(task(%{}), "feature/x", "main", host_git: true)
+
+      assert prompt =~ "NO FETCH OR PUSH ACCESS"
+      assert prompt =~ "Host key verification failed"
+      assert prompt =~ "origin/main"
+      refute prompt =~ "git push --force-with-lease"
+      refute prompt =~ "git fetch origin main"
+      assert prompt =~ "arb done"
+    end
+  end
+
+  describe "conflict_resolve_briefing/4 CI skip (bd-4y9dno)" do
+    test "a pass for a waiting merge-train MR is told how to push without CI" do
+      push =
+        PromptBuilder.conflict_resolve_briefing(task(%{}), "feature/x", "main",
+          ci_skip: {:push_option, "ci.skip"}
+        )
+
+      assert push =~ "git push -o ci.skip"
+
+      marker =
+        PromptBuilder.conflict_resolve_briefing(task(%{}), "feature/x", "main",
+          ci_skip: {:commit_marker, "[skip ci]"}
+        )
+
+      assert marker =~ "[skip ci]"
+    end
+
+    test "no mechanism, or a host push (which adds it itself), adds nothing" do
+      plain = PromptBuilder.conflict_resolve_briefing(task(%{}), "feature/x", "main")
+      refute plain =~ "SKIP CI"
+
+      host =
+        PromptBuilder.conflict_resolve_briefing(task(%{}), "feature/x", "main",
+          host_git: true,
+          ci_skip: {:push_option, "ci.skip"}
+        )
+
+      refute host =~ "SKIP CI"
+    end
+  end
+
+  # bd-9so315: the worker is the only party that can see its own diff, so the
+  # work prompt has to tell it when to raise the flag.
+  describe "post-merge verification doctrine" do
+    test "the work prompt tells the worker when to set verify_after_deploy" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), [])
+
+      assert prompt =~ "verify_after_deploy"
+      assert prompt =~ "ticket_update_progress"
+      assert prompt =~ "long-lived server"
+    end
+
+    test "an already-flagged task is told it will park for verification" do
+      prompt = PromptBuilder.prompt_for_task(task(%{verify_after_deploy: true}), [])
+
+      assert prompt =~ "awaiting verification"
+    end
+  end
+
+  # bd-8ssxap: a task reopened by `ticket_verify failed` was redispatched with no
+  # mention of the recorded evidence — the worker had no way to know its prior
+  # (already-merged) attempt didn't actually fix the bug, and just re-submitted
+  # the same work.
+  describe "merged-fix-failed verification section (bd-8ssxap)" do
+    test "surfaces verification_evidence prominently when the prior verdict was :failed" do
+      prompt =
+        PromptBuilder.prompt_for_task(
+          task(%{
+            verification_outcome: :failed,
+            verification_evidence: "after restart, capture_source still reads headers"
+          }),
+          []
+        )
+
+      assert prompt =~ "after restart, capture_source still reads headers"
+      assert prompt =~ "MERGED FIX FAILED IN PRODUCTION"
+    end
+
+    test "omits the section when there is no recorded verdict" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), [])
+
+      refute prompt =~ "MERGED FIX FAILED IN PRODUCTION"
+    end
+
+    test "omits the section when the recorded verdict was :observed (task closed cleanly)" do
+      prompt =
+        PromptBuilder.prompt_for_task(
+          task(%{verification_outcome: :observed, verification_evidence: "worked fine"}),
+          []
+        )
+
+      refute prompt =~ "MERGED FIX FAILED IN PRODUCTION"
+    end
+  end
+
+  describe "workflow-file push note for a GitHub App credential" do
+    test "a github_app credential tells the worker .github/workflows/ changes need an operator push" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), git_credential_kind: :github_app)
+
+      assert prompt =~ ".github/workflows/"
+      assert prompt =~ "operator will push the branch"
+    end
+
+    test "other credential kinds and no credential carry no such note" do
+      for opts <- [
+            [git_credential_kind: :deploy_key],
+            [git_credential_kind: :token],
+            [git_credential_kind: :gitlab_project_token],
+            [git_credential_kind: nil],
+            []
+          ] do
+        refute PromptBuilder.prompt_for_task(task(%{}), opts) =~ "operator will push the branch"
+      end
+    end
+  end
+
+  describe "podman push-access block (bd-capkj9)" do
+    test "a podman work prompt says the host pushes and a failed push is not a reason to withhold arb done" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), sandbox_backend: :podman)
+
+      assert prompt =~ "NO PUSH ACCESS"
+      assert prompt =~ "host pushes"
+      assert prompt =~ "not a reason to withhold `arb done`"
+    end
+
+    test "a podman work prompt does not tell the worker to push" do
+      refute PromptBuilder.prompt_for_task(task(%{}), sandbox_backend: :podman) =~ "and push it"
+    end
+
+    test "bwrap and default work prompts carry no such block" do
+      for opts <- [[sandbox_backend: :bwrap], []] do
+        assert PromptBuilder.prompt_for_task(task(%{}), opts) =~
+                 "commit on this branch, and push it."
+
+        refute PromptBuilder.prompt_for_task(task(%{}), opts) =~ "NO PUSH ACCESS"
+      end
+    end
+  end
+
+  describe "agy file-reading rule (bd-buefg4)" do
+    test "the gemini work prompt tells agy not to re-read, to use line ranges and to search first" do
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt-gemini",
+          adapter: Wardmast.Agents.Gemini
+        )
+
+      assert prompt =~ "READING FILES"
+      assert prompt =~ "Do NOT re-read a file"
+      assert prompt =~ "StartLine"
+      assert prompt =~ "Search first"
+      # still ahead of the completion protocol
+      assert :binary.match(prompt, "READING FILES") <
+               :binary.match(prompt, "When you are completely done")
+    end
+
+    test "the claude work prompt does not carry it" do
+      for adapter <- [Wardmast.Agents.Claude, Wardmast.Agents.Codex] do
+        prompt =
+          PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt", adapter: adapter)
+
+        refute prompt =~ "READING FILES"
+      end
+    end
+  end
+
+  describe "adapter-aware async tools prompt (bd-937r5u)" do
+    test "gemini worker prompt contains no Claude tools and never instructs polling" do
+      work_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt-gemini",
+          adapter: Wardmast.Agents.Gemini
+        )
+
+      # Acceptance criterion 2: no Claude tool references or Bash timeout instructions
+      refute work_prompt =~ "Monitor"
+      refute work_prompt =~ "ScheduleWakeup"
+      refute work_prompt =~ "TaskOutput"
+      refute work_prompt =~ "Bash"
+      refute work_prompt =~ "timeout parameter"
+      assert work_prompt =~ "WaitMsBeforeAsync"
+      refute work_prompt =~ "Blocking"
+
+      # bd-bxwsvo: agy 1.2.12 wakes the agent with a completion system message
+      # after the turn ends, so the work prompt says to end the turn and wait
+      # for it — the old "keep calling `manage_task status`" loop is gone.
+      refute work_prompt =~ ~r/keep calling `manage_task status`/
+      assert work_prompt =~ "end your turn"
+      assert work_prompt =~ "finished with result"
+      assert work_prompt =~ ~r/Do NOT poll/
+      assert work_prompt =~ "COMMIT correct work BEFORE"
+
+      # task prompt
+      task_prompt =
+        PromptBuilder.prompt_for_task(task(%{issue_type: :research}),
+          adapter: Wardmast.Agents.Gemini
+        )
+
+      refute task_prompt =~ "Monitor"
+      assert task_prompt =~ "finished with result"
+
+      # review prompt
+      review_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          review: true,
+          adapter: Wardmast.Agents.Gemini
+        )
+
+      refute review_prompt =~ "Monitor"
+      refute review_prompt =~ "COMMIT correct work BEFORE"
+      assert review_prompt =~ "finished with result"
+    end
+
+    test "codex worker prompt contains Codex synchronous execution instruction" do
+      work_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt-codex",
+          adapter: Wardmast.Agents.Codex
+        )
+
+      assert work_prompt =~ "Codex `exec` executes commands synchronously"
+      assert work_prompt =~ "Do not print `arb done` until"
+      refute work_prompt =~ "Monitor"
+
+      review_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          review: true,
+          adapter: Wardmast.Agents.Codex
+        )
+
+      assert review_prompt =~ "Codex `exec` executes commands synchronously"
+      assert review_prompt =~ "Do not print `arb done` until"
+      refute review_prompt =~ "Monitor"
+    end
+
+    # Routing the block through the adapter must not quietly drop the
+    # provider-agnostic guidance codex used to get from the hard-coded Claude
+    # text: "commit before you verify" is about not losing work to a killed
+    # session, which is true on every CLI.
+    test "codex work prompt keeps the commit-before-verify guidance and the coda" do
+      work_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt-codex",
+          adapter: Wardmast.Agents.Codex
+        )
+
+      assert work_prompt =~ "COMMIT correct work BEFORE running any long verification"
+      assert work_prompt =~ "the work is incomplete until every tool you launched has"
+
+      # ...but a reviewer, which cannot push, must not be told to commit.
+      review_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          review: true,
+          adapter: Wardmast.Agents.Codex
+        )
+
+      refute review_prompt =~ "COMMIT correct work BEFORE"
+    end
+
+    test "claude prompt remains unchanged with explicit or default adapter" do
+      default_prompt =
+        PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-claude")
+
+      claude_prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt-claude",
+          adapter: Wardmast.Agents.Claude
+        )
+
+      assert default_prompt == claude_prompt
+      assert claude_prompt =~ "Monitor"
+      assert claude_prompt =~ "ScheduleWakeup"
+      assert claude_prompt =~ "Bash"
+      assert claude_prompt =~ "`timeout` parameter"
+    end
+  end
+
+  # bd-80talz: an agy worker passed a mockup off as screenshots, hosted it on
+  # files.catbox.moe, made a public gist on the operator's account and swapped
+  # a true citation for an unverified one. Every provider's authoring prompt
+  # now says not to, and every review prompt says how to report it.
+  describe "evidence integrity and public uploads (bd-80talz)" do
+    @adapters [Wardmast.Agents.Claude, Wardmast.Agents.Gemini, Wardmast.Agents.Codex]
+
+    defp assert_integrity_rules(prompt) do
+      assert prompt =~ "never fabricate evidence, citations, screenshots or\nartifacts"
+      assert prompt =~ "report that AC as unmet"
+      assert prompt =~ "never upload repo content, logs, images or anything"
+      assert prompt =~ "public or anonymous file or paste host"
+      assert prompt =~ "catbox.moe"
+      assert prompt =~ "never create a gist"
+    end
+
+    for adapter <- @adapters do
+      test "the #{inspect(adapter)} work prompt carries the rules" do
+        unquote(adapter)
+        |> then(&PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt", adapter: &1))
+        |> assert_integrity_rules()
+      end
+
+      test "the #{inspect(adapter)} task prompt carries the rules" do
+        unquote(adapter)
+        |> then(&PromptBuilder.prompt_for_task(task(%{issue_type: :task}), adapter: &1))
+        |> assert_integrity_rules()
+      end
+
+      test "the #{inspect(adapter)} review prompt says how to report fabricated evidence" do
+        prompt =
+          PromptBuilder.prompt_for_task(task(%{}), review: true, adapter: unquote(adapter))
+
+        assert prompt =~ "[FABRICATED-EVIDENCE]"
+        assert prompt =~ "evidence the coordinator can check"
+      end
+    end
+
+    test "the text is the shared block, not a per-prompt copy" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")
+      assert prompt =~ Wardmast.Worker.EvidenceIntegrity.worker_block()
+
+      review = PromptBuilder.prompt_for_task(task(%{}), review: true)
+      assert review =~ Wardmast.Worker.EvidenceIntegrity.reviewer_block()
+    end
+  end
+
+  # A session with no Wardmast MCP tools (agy with no isolated $HOME, a failed
+  # config write) is handed the `arb` CLI fallback instead of a tool it lacks
+  # plus a ban on the CLI — that combination deadlocked the notes gate.
+  describe "no Wardmast MCP tools (mcp_tools?: false)" do
+    test "work prompt persists the PR body and flag through the arb CLI" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), mcp_tools?: false)
+
+      assert prompt =~ "arb ticket update bd-golden1 --pr-body"
+      assert prompt =~ "arb ticket update bd-golden1 --verify-after-deploy"
+      refute prompt =~ "MCP tool with its `pr_body`"
+      refute prompt =~ "do NOT shell out to the `arb` CLI"
+    end
+
+    test "research prompt records findings through the arb CLI" do
+      prompt = PromptBuilder.prompt_for_task(task(%{issue_type: :research}), mcp_tools?: false)
+
+      assert prompt =~ "arb ticket update bd-golden1 --append-notes"
+      refute prompt =~ "Do NOT shell out to the `arb` CLI"
+    end
+
+    test "task prompt records the outcome through the arb CLI" do
+      prompt = PromptBuilder.prompt_for_task(task(%{issue_type: :task}), mcp_tools?: false)
+
+      assert prompt =~ "arb ticket update bd-golden1 --append-notes"
+      refute prompt =~ "Do NOT shell out to the `arb` CLI"
+    end
+
+    test "sessions with MCP tools (default or true) are unchanged" do
+      default = PromptBuilder.prompt_for_task(task(%{}), [])
+      assert default == PromptBuilder.prompt_for_task(task(%{}), mcp_tools?: true)
+      assert default =~ "do NOT shell out to the `arb` CLI"
+      refute default =~ "arb ticket update"
+    end
+  end
+
+  describe "unread coordinator direction (bd-kxzrk9)" do
+    alias Wardmast.Messages.Message
+
+    defp send_to(task_id, attrs) do
+      {:ok, m} =
+        Ash.create(
+          Message,
+          Map.merge(
+            %{
+              kind: :info,
+              from_ref: "coordinator",
+              to_ref: task_id,
+              subject: "fix",
+              body: "COORDINATOR-DIRECTIVE-BODY",
+              workspace_id: "ws-directives"
+            },
+            attrs
+          )
+        )
+
+      m
+    end
+
+    test "a fresh dispatch prompt carries the unread coordinator message in full" do
+      send_to("bd-golden1", %{})
+
+      prompt = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-golden")
+      assert prompt =~ "UNREAD COORDINATOR DIRECTION for bd-golden1"
+      assert prompt =~ "COORDINATOR-DIRECTIVE-BODY"
+    end
+
+    test "a directive sent via `arb message send` (from_ref cli) is injected" do
+      send_to("bd-golden1", %{from_ref: "cli", kind: :info})
+
+      prompt = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-golden")
+      assert prompt =~ "COORDINATOR-DIRECTIVE-BODY"
+    end
+
+    test "a resume prompt (resume_context set) carries it too" do
+      send_to("bd-golden1", %{})
+
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt-golden",
+          resume_context: "RESUMING work on task bd-golden1\n"
+        )
+
+      assert prompt =~ "COORDINATOR-DIRECTIVE-BODY"
+      assert prompt =~ "RESUMING work on task bd-golden1"
+    end
+
+    test "a no-PR task prompt carries it" do
+      send_to("bd-golden1", %{})
+
+      prompt = PromptBuilder.prompt_for_task(task(%{issue_type: :research}), [])
+      assert prompt =~ "COORDINATOR-DIRECTIVE-BODY"
+    end
+
+    test "the manual session-resume prompt carries it ahead of the continue nudge" do
+      send_to("bd-golden1", %{})
+
+      prompt = Wardmast.Worker.manual_resume_prompt("bd-golden1")
+      assert prompt =~ "COORDINATOR-DIRECTIVE-BODY"
+      assert prompt =~ "ended before you finished"
+    end
+
+    test "read, other-task and non-coordinator mail is not injected" do
+      m = send_to("bd-golden1", %{body: "ALREADY-READ"})
+      {:ok, _} = Message.mark_read(m)
+      send_to("bd-other", %{body: "FOR-SOMEONE-ELSE"})
+      send_to("bd-golden1", %{from_ref: "bd-sibling", kind: :flag, body: "FROM-A-PEER"})
+
+      prompt = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-golden")
+      refute prompt =~ "ALREADY-READ"
+      refute prompt =~ "FOR-SOMEONE-ELSE"
+      refute prompt =~ "FROM-A-PEER"
+      refute prompt =~ "UNREAD COORDINATOR DIRECTION"
+    end
+
+    test "sending the prompt does not mark the message read" do
+      m = send_to("bd-golden1", %{})
+      _ = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt-golden")
+      assert Ash.get!(Message, m.id).read_at == nil
+    end
+  end
+
+  describe "commit-gate diet (bd-g926uj)" do
+    test "the work prompt lists the gate's steps and bans full precommit when a gate is configured" do
+      steps = [
+        %{cmd: "mix format --check-formatted", scope: :all},
+        %{cmd: "mix credo --strict {credo_files}", scope: :touched}
+      ]
+
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt", prepush_steps: steps)
+
+      assert prompt =~ "`mix format --check-formatted`"
+      assert prompt =~ "Do NOT run them"
+      assert prompt =~ "do NOT run the full `mix precommit`"
+      assert prompt =~ "tests mapped"
+      assert PromptBuilder.commit_gate_section(steps, false, "HINT-X") =~ "HINT-X"
+      assert PromptBuilder.commit_gate_section(steps, true, nil) =~ "`run_tests` tool"
+      refute prompt =~ "apps/<app>"
+    end
+
+    test "no gate wording when no pre-push recipe is configured" do
+      for opts <- [[worktree_path: "/tmp/wt"], [worktree_path: "/tmp/wt", prepush_steps: []]] do
+        prompt = PromptBuilder.prompt_for_task(task(%{}), opts)
+        refute prompt =~ "Do NOT run them"
+        refute prompt =~ "VERIFICATION — when you print"
+      end
+    end
+
+    test "with a worktree the per-step `arb inbox` instruction is gone but the file is read" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")
+
+      refute prompt =~ "running\n\n    arb inbox"
+      assert prompt =~ "do not run `arb inbox`"
+      assert prompt =~ "[ -f .arbiter/INBOX ] && cat .arbiter/INBOX"
+    end
+
+    test "without a worktree there is no file delivery, so `arb inbox` stays" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), [])
+
+      assert prompt =~ "arb inbox bd-golden1"
+    end
+  end
+
+  describe "RUNNING TESTS steering (bd-57nhsi)" do
+    test "an authoring prompt steers the worker to run_tests over raw mix test" do
+      prompt = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")
+
+      assert prompt =~ "RUNNING TESTS"
+      assert prompt =~ "`run_tests`"
+      assert prompt =~ "full_log"
+    end
+
+    test "a session without the MCP server is not pointed at a tool it lacks" do
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt", mcp_tools?: false)
+
+      refute prompt =~ "RUNNING TESTS"
+    end
+
+    # bd-5wm92s: a cluster pod's node agent cannot `exec` a side command, so `run_tests`
+    # answers `:unsupported` there; the prompt must not steer the worker to it.
+    test "a run on a cluster pod is not pointed at run_tests, in either section" do
+      steps = [%{cmd: "mix format --check-formatted", scope: :all}]
+
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{}),
+          worktree_path: "/tmp/wt",
+          prepush_steps: steps,
+          test_tool?: false
+        )
+
+      refute prompt =~ "`run_tests`"
+      assert prompt =~ "mix test"
+      assert prompt =~ "tail"
+      # the completion path is still spelled out
+      assert prompt =~ "arb done"
+    end
+
+    test "a pod prompt says to run mix test directly; other placements are unchanged" do
+      pod = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt", test_tool?: false)
+      assert pod =~ "mix test <files>"
+      refute pod =~ "run_tests"
+
+      plain = PromptBuilder.prompt_for_task(task(%{}), worktree_path: "/tmp/wt")
+      assert plain =~ "`run_tests`"
+      refute plain =~ "mix test <files>"
+    end
+
+    test "test_tool_for_node?/1 treats an atom or string cluster kind as a pod" do
+      refute PromptBuilder.test_tool_for_node?(%{kind: :cluster})
+      refute PromptBuilder.test_tool_for_node?(%{kind: "cluster"})
+      assert PromptBuilder.test_tool_for_node?(%{kind: :machine})
+      assert PromptBuilder.test_tool_for_node?(nil)
+    end
+
+    test "the section is exposed for the other authoring prompts" do
+      assert PromptBuilder.test_tool_section() =~ "`run_tests`"
+    end
+  end
+end

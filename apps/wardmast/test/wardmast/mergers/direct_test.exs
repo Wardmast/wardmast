@@ -1,0 +1,413 @@
+defmodule Wardmast.Mergers.DirectTest do
+  use ExUnit.Case, async: true
+
+  alias Wardmast.Mergers.Direct
+
+  describe "open/4 against a real git repo" do
+    @tag :tmp_dir
+    test "merges the feature branch into target with a --no-ff merge commit", %{tmp_dir: dir} do
+      build_repo(dir)
+
+      assert {:ok, ref} =
+               Direct.open("feature/x", "Merge feature/x", "", %{
+                 repo_path: dir,
+                 target_branch: "main"
+               })
+
+      # The ref encodes branch, repo path, and target branch.
+      assert ref == "direct:feature/x|#{dir}|main"
+
+      # The feature branch's file is now present on main.
+      assert File.exists?(Path.join(dir, "feature.txt"))
+
+      # HEAD is on main, and the tip is a merge commit (two parents) thanks to --no-ff.
+      assert {"main\n", 0} = git(dir, ["rev-parse", "--abbrev-ref", "HEAD"])
+      assert {parents, 0} = git(dir, ["rev-list", "--parents", "-n", "1", "HEAD"])
+      assert length(String.split(String.trim(parents), " ")) == 3
+
+      # The merge commit carries the title we passed as the message.
+      assert {subject, 0} = git(dir, ["log", "-1", "--pretty=%s"])
+      assert String.trim(subject) == "Merge feature/x"
+
+      # The merge commit was pushed: origin/main points at the same commit as local main.
+      assert {local_sha, 0} = git(dir, ["rev-parse", "main"])
+      assert {remote_sha, 0} = git(dir, ["rev-parse", "origin/main"])
+      assert String.trim(local_sha) == String.trim(remote_sha)
+    end
+
+    @tag :tmp_dir
+    test "defaults target_branch to main when omitted", %{tmp_dir: dir} do
+      build_repo(dir)
+      # Move off main so we can prove open/4 checks main back out itself.
+      assert {_, 0} = git(dir, ["checkout", "feature/x"])
+
+      assert {:ok, ref} = Direct.open("feature/x", "", "", %{repo_path: dir})
+      assert ref == "direct:feature/x|#{dir}|main"
+
+      assert {"main\n", 0} = git(dir, ["rev-parse", "--abbrev-ref", "HEAD"])
+      assert File.exists?(Path.join(dir, "feature.txt"))
+
+      # The merge commit was pushed to origin.
+      assert {local_sha, 0} = git(dir, ["rev-parse", "main"])
+      assert {remote_sha, 0} = git(dir, ["rev-parse", "origin/main"])
+      assert String.trim(local_sha) == String.trim(remote_sha)
+    end
+
+    @tag :tmp_dir
+    test "returns an error when the branch does not exist", %{tmp_dir: dir} do
+      build_repo(dir)
+
+      assert {:error, {:git_failed, _msg}} =
+               Direct.open("nope/missing", "", "", %{repo_path: dir, target_branch: "main"})
+    end
+
+    test "returns {:error, :no_repo_path} when repo_path is absent" do
+      assert {:error, :no_repo_path} = Direct.open("feature/x", "", "", %{target_branch: "main"})
+    end
+  end
+
+  # bd-9ahwai: the branch the merger integrates must be the reviewed SHA.
+  describe "open/4 reviewed-SHA guard (bd-9ahwai)" do
+    @tag :tmp_dir
+    test "merges when the branch head is the reviewed SHA", %{tmp_dir: dir} do
+      build_repo(dir)
+      reviewed = rev_parse(dir, "feature/x")
+
+      assert {:ok, _ref} =
+               Direct.open("feature/x", "Merge feature/x", "", %{
+                 repo_path: dir,
+                 target_branch: "main",
+                 reviewed_sha: reviewed
+               })
+
+      assert File.exists?(Path.join(dir, "feature.txt"))
+    end
+
+    @tag :tmp_dir
+    test "refuses an amend-only change after review (same tree, new SHA)", %{tmp_dir: dir} do
+      build_repo(dir)
+      reviewed = rev_parse(dir, "feature/x")
+      main_before = rev_parse(dir, "main")
+
+      {_, 0} = git(dir, ["checkout", "-q", "feature/x"])
+      {_, 0} = git(dir, ["commit", "-q", "--amend", "-m", "add feature (amended message)"])
+      {_, 0} = git(dir, ["checkout", "-q", "main"])
+      amended = rev_parse(dir, "feature/x")
+      refute amended == reviewed
+
+      assert {:error, {:stale_reviewed_sha, ^reviewed, ^amended}} =
+               Direct.open("feature/x", "", "", %{
+                 repo_path: dir,
+                 target_branch: "main",
+                 reviewed_sha: reviewed
+               })
+
+      # Nothing was merged.
+      assert rev_parse(dir, "main") == main_before
+      refute File.exists?(Path.join(dir, "feature.txt"))
+    end
+
+    @tag :tmp_dir
+    test "refuses a file-changing commit added after review", %{tmp_dir: dir} do
+      build_repo(dir)
+      reviewed = rev_parse(dir, "feature/x")
+
+      {_, 0} = git(dir, ["checkout", "-q", "feature/x"])
+      File.write!(Path.join(dir, "extra.txt"), "unreviewed\n")
+      {_, 0} = git(dir, ["add", "extra.txt"])
+      {_, 0} = git(dir, ["commit", "-q", "-m", "unreviewed change"])
+      {_, 0} = git(dir, ["checkout", "-q", "main"])
+      head = rev_parse(dir, "feature/x")
+
+      assert {:error, {:stale_reviewed_sha, ^reviewed, ^head}} =
+               Direct.open("feature/x", "", "", %{
+                 repo_path: dir,
+                 target_branch: "main",
+                 reviewed_sha: reviewed
+               })
+
+      refute File.exists?(Path.join(dir, "extra.txt"))
+    end
+  end
+
+  # bd-73zv62: a remote-less repo (e.g. a local infra checkout) merged via a
+  # per-repo `merge.repos.<repo>.strategy = "direct"` override. There is
+  # nowhere to push, so the push is skipped rather than failing a merge that
+  # already landed locally.
+  describe "open/4 on a repo with no git remote (bd-73zv62)" do
+    @tag :tmp_dir
+    test "merges locally and succeeds, skipping the push", %{tmp_dir: dir} do
+      build_local_repo(dir)
+      assert {"", 0} = git(dir, ["remote"])
+
+      assert {:ok, ref} =
+               Direct.open("feature/x", "Merge feature/x", "", %{
+                 repo_path: dir,
+                 target_branch: "main"
+               })
+
+      assert ref == "direct:feature/x|#{dir}|main"
+      assert File.exists?(Path.join(dir, "feature.txt"))
+      assert {parents, 0} = git(dir, ["rev-list", "--parents", "-n", "1", "main"])
+      assert length(String.split(String.trim(parents), " ")) == 3
+    end
+
+    @tag :tmp_dir
+    test "a repo whose only remote is not `origin` also skips the push", %{tmp_dir: dir} do
+      build_local_repo(dir)
+      remote = Path.join(dir, "upstream.git")
+      File.mkdir_p!(remote)
+      {_, 0} = git(remote, ["init", "--bare", "-q"])
+      {_, 0} = git(dir, ["remote", "add", "upstream", remote])
+
+      assert {:ok, _ref} =
+               Direct.open("feature/x", "", "", %{repo_path: dir, target_branch: "main"})
+
+      assert File.exists?(Path.join(dir, "feature.txt"))
+    end
+
+    @tag :tmp_dir
+    test "a failing push to a real origin is still an error", %{tmp_dir: dir} do
+      build_local_repo(dir)
+      {_, 0} = git(dir, ["remote", "add", "origin", Path.join(dir, "does-not-exist.git")])
+
+      assert {:error, {:git_failed, _}} =
+               Direct.open("feature/x", "", "", %{repo_path: dir, target_branch: "main"})
+    end
+  end
+
+  describe "open/4 on a conflicting merge (bd-1rhyla)" do
+    # A conflicting auto-merge once left the canonical tree half-merged and
+    # uncompilable, wedging the live server. open/4 MUST abort the merge so the
+    # tree stays clean + compilable, and report the conflicting files.
+    @tag :tmp_dir
+    test "aborts the merge, leaves main clean + unchanged, and names the conflicting files",
+         %{tmp_dir: dir} do
+      build_conflict_repo(dir)
+
+      # Tip of main before the attempted merge — must be unchanged afterward.
+      {head_before, 0} = git(dir, ["rev-parse", "HEAD"])
+
+      assert {:error, {:merge_conflict, detail}} =
+               Direct.open("feature/conflict", "Merge feature/conflict", "", %{
+                 repo_path: dir,
+                 target_branch: "main"
+               })
+
+      assert detail.branch == "feature/conflict"
+      assert "shared.txt" in detail.files
+      assert is_binary(detail.output)
+
+      # The merge was aborted: HEAD is still main, at the same commit, and the
+      # working tree is clean (no conflict markers, no unmerged paths) — the
+      # canonical checkout the live server compiles from is intact.
+      assert {"main\n", 0} = git(dir, ["rev-parse", "--abbrev-ref", "HEAD"])
+      assert {^head_before, 0} = git(dir, ["rev-parse", "HEAD"])
+      assert {"", 0} = git(dir, ["status", "--porcelain"])
+      assert {"", 0} = git(dir, ["diff", "--name-only", "--diff-filter=U"])
+      refute File.read!(Path.join(dir, "shared.txt")) =~ "<<<<<<<"
+    end
+  end
+
+  describe "update_branch/1 — local rebase-forward" do
+    @tag :tmp_dir
+    test "rebases the working branch onto the updated base", %{tmp_dir: dir} do
+      build_repo_for_update(dir)
+
+      # Advance main past the branch's fork point.
+      File.write!(Path.join(dir, "main_advance.txt"), "advanced\n")
+      {_, 0} = git(dir, ["add", "main_advance.txt"])
+      {_, 0} = git(dir, ["commit", "-q", "-m", "advance main"])
+
+      # Now feature/update is behind main. Rebase it forward.
+      mr_ref = "direct:feature/update|#{dir}|main"
+      assert :ok = Direct.update_branch(mr_ref)
+
+      # HEAD is now on the feature branch with the base commit in its history.
+      assert {"feature/update\n", 0} = git(dir, ["rev-parse", "--abbrev-ref", "HEAD"])
+
+      # The rebased branch includes the advance commit.
+      assert {log, 0} = git(dir, ["log", "--oneline", "feature/update"])
+      assert log =~ "advance main"
+    end
+
+    @tag :tmp_dir
+    test "returns {:error, {:rebase_conflict, ...}} on conflict and leaves tree clean",
+         %{tmp_dir: dir} do
+      build_conflict_repo_for_update(dir)
+
+      mr_ref = "direct:feature/conflict|#{dir}|main"
+      assert {:error, {:rebase_conflict, detail}} = Direct.update_branch(mr_ref)
+
+      assert detail.branch == "feature/conflict"
+      assert detail.base == "main"
+      assert "shared.txt" in detail.files
+      assert is_binary(detail.output)
+
+      # Tree is clean after abort — no conflict markers, no unmerged paths.
+      assert {"", 0} = git(dir, ["diff", "--name-only", "--diff-filter=U"])
+      assert {"", 0} = git(dir, ["status", "--porcelain"])
+    end
+
+    test "returns {:error, :no_repo_path} for a ref without encoded repo path" do
+      assert {:error, :no_repo_path} = Direct.update_branch("direct:feature/x")
+    end
+  end
+
+  describe "no-op / constant callbacks" do
+    test "get/1 always reports :merged" do
+      assert Direct.get("direct:anything") == {:ok, %{status: :merged}}
+    end
+
+    test "merge/2, close/1, add_comment/2, request_review/2 are :ok no-ops" do
+      assert Direct.merge("direct:x", nil) == :ok
+      assert Direct.close("direct:x") == :ok
+      assert Direct.add_comment("direct:x", "hello") == :ok
+      assert Direct.request_review("direct:x", [1, 2]) == :ok
+    end
+
+    test "link_for/1 returns an empty string" do
+      assert Direct.link_for("direct:x") == ""
+    end
+  end
+
+  test "module declares the Merger behaviour" do
+    behaviours =
+      Direct.module_info(:attributes) |> Keyword.get_values(:behaviour) |> List.flatten()
+
+    assert Wardmast.Mergers.Merger in behaviours
+  end
+
+  # ---- helpers ----
+
+  # Builds a repo with `main` (one commit) and a `feature/x` branch that adds
+  # feature.txt on top of it. Leaves HEAD on main. Sets up a bare "origin"
+  # remote so open/4 can push the merged target branch.
+  defp rev_parse(dir, ref) do
+    {sha, 0} = git(dir, ["rev-parse", ref])
+    String.trim(sha)
+  end
+
+  defp build_repo(dir) do
+    remote = Path.join(dir, "origin.git")
+    File.mkdir_p!(remote)
+    {_, 0} = git(remote, ["init", "--bare", "-q"])
+
+    {_, 0} = git(dir, ["init", "-q"])
+    {_, 0} = git(dir, ["config", "user.email", "worker@example.test"])
+    {_, 0} = git(dir, ["config", "user.name", "Worker"])
+    {_, 0} = git(dir, ["config", "commit.gpgsign", "false"])
+
+    File.write!(Path.join(dir, "base.txt"), "base\n")
+    {_, 0} = git(dir, ["add", "base.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "init"])
+    # Normalize the default branch name across git versions.
+    {_, 0} = git(dir, ["branch", "-M", "main"])
+
+    {_, 0} = git(dir, ["checkout", "-q", "-b", "feature/x"])
+    File.write!(Path.join(dir, "feature.txt"), "feature\n")
+    {_, 0} = git(dir, ["add", "feature.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "add feature"])
+
+    {_, 0} = git(dir, ["checkout", "-q", "main"])
+
+    {_, 0} = git(dir, ["remote", "add", "origin", remote])
+    {_, 0} = git(dir, ["push", "-q", "-u", "origin", "main"])
+    {_, 0} = git(dir, ["push", "-q", "origin", "feature/x"])
+  end
+
+  # `build_repo/1` without the bare origin: a local-only checkout.
+  defp build_local_repo(dir) do
+    {_, 0} = git(dir, ["init", "-q"])
+    {_, 0} = git(dir, ["config", "user.email", "worker@example.test"])
+    {_, 0} = git(dir, ["config", "user.name", "Worker"])
+    {_, 0} = git(dir, ["config", "commit.gpgsign", "false"])
+
+    File.write!(Path.join(dir, "base.txt"), "base\n")
+    {_, 0} = git(dir, ["add", "base.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "init"])
+    {_, 0} = git(dir, ["branch", "-M", "main"])
+
+    {_, 0} = git(dir, ["checkout", "-q", "-b", "feature/x"])
+    File.write!(Path.join(dir, "feature.txt"), "feature\n")
+    {_, 0} = git(dir, ["add", "feature.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "add feature"])
+
+    {_, 0} = git(dir, ["checkout", "-q", "main"])
+  end
+
+  # Builds a repo for update_branch/1 tests. HEAD is on main; feature/update
+  # branches off the initial commit and adds feature_update.txt. After this
+  # helper returns the caller can advance main to create a "behind" situation.
+  defp build_repo_for_update(dir) do
+    {_, 0} = git(dir, ["init", "-q"])
+    {_, 0} = git(dir, ["config", "user.email", "worker@example.test"])
+    {_, 0} = git(dir, ["config", "user.name", "Worker"])
+    {_, 0} = git(dir, ["config", "commit.gpgsign", "false"])
+
+    File.write!(Path.join(dir, "base.txt"), "base\n")
+    {_, 0} = git(dir, ["add", "base.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "init"])
+    {_, 0} = git(dir, ["branch", "-M", "main"])
+
+    {_, 0} = git(dir, ["checkout", "-q", "-b", "feature/update"])
+    File.write!(Path.join(dir, "feature_update.txt"), "feature update\n")
+    {_, 0} = git(dir, ["add", "feature_update.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "add feature update"])
+
+    {_, 0} = git(dir, ["checkout", "-q", "main"])
+  end
+
+  # Builds a repo where `feature/conflict` and `main` both modify the same line
+  # of shared.txt, so a rebase of feature/conflict onto main conflicts.
+  # Leaves HEAD on main after adding main's conflicting commit.
+  defp build_conflict_repo_for_update(dir) do
+    {_, 0} = git(dir, ["init", "-q"])
+    {_, 0} = git(dir, ["config", "user.email", "worker@example.test"])
+    {_, 0} = git(dir, ["config", "user.name", "Worker"])
+    {_, 0} = git(dir, ["config", "commit.gpgsign", "false"])
+
+    File.write!(Path.join(dir, "shared.txt"), "original\n")
+    {_, 0} = git(dir, ["add", "shared.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "init"])
+    {_, 0} = git(dir, ["branch", "-M", "main"])
+
+    {_, 0} = git(dir, ["checkout", "-q", "-b", "feature/conflict"])
+    File.write!(Path.join(dir, "shared.txt"), "from feature\n")
+    {_, 0} = git(dir, ["add", "shared.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "feature change"])
+
+    {_, 0} = git(dir, ["checkout", "-q", "main"])
+    File.write!(Path.join(dir, "shared.txt"), "from main\n")
+    {_, 0} = git(dir, ["add", "shared.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "main change"])
+  end
+
+  # Builds a repo where `main` and `feature/conflict` both modify the same line
+  # of shared.txt, so a `--no-ff` merge conflicts. Leaves HEAD on main.
+  defp build_conflict_repo(dir) do
+    {_, 0} = git(dir, ["init", "-q"])
+    {_, 0} = git(dir, ["config", "user.email", "worker@example.test"])
+    {_, 0} = git(dir, ["config", "user.name", "Worker"])
+    {_, 0} = git(dir, ["config", "commit.gpgsign", "false"])
+
+    File.write!(Path.join(dir, "shared.txt"), "original\n")
+    {_, 0} = git(dir, ["add", "shared.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "init"])
+    {_, 0} = git(dir, ["branch", "-M", "main"])
+
+    # Diverging change on the feature branch.
+    {_, 0} = git(dir, ["checkout", "-q", "-b", "feature/conflict"])
+    File.write!(Path.join(dir, "shared.txt"), "from feature\n")
+    {_, 0} = git(dir, ["add", "shared.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "feature change"])
+
+    # Conflicting change on main.
+    {_, 0} = git(dir, ["checkout", "-q", "main"])
+    File.write!(Path.join(dir, "shared.txt"), "from main\n")
+    {_, 0} = git(dir, ["add", "shared.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "main change"])
+  end
+
+  defp git(dir, args), do: System.cmd("git", args, stderr_to_stdout: true, cd: dir)
+end

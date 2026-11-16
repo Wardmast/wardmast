@@ -1,0 +1,268 @@
+defmodule Wardmast.Config.Paths do
+  @moduledoc """
+  Single resolver for the on-disk roots that must never bake in a
+  developer's home directory: `worktree_root/0`
+  (`Wardmast.Worker.Worktree`, `Wardmast.Reviews.Checkout`),
+  `output_log_root/0` (`Wardmast.Worker.OutputLog`) and `sessions_root/0`
+  (`Wardmast.Sessions.Layout`) — plus `primary_checkout/0`, the live source
+  tree those roots must stay outside of (RFC §10.2).
+
+  A release doesn't load `config/dev.exs`, so a plain
+  `Application.get_env(:wardmast, :worktree_root, "/some/other/box/arbiter-worktrees")`
+  fallback bakes one developer's home directory into every release.
+  Resolution order, checked fresh on every call (no caching, so
+  `WARDMAST_*` env vars take effect immediately — note this also means an
+  `WARDMAST_*` var exported in a shell outranks any test's own
+  `Application.put_env/3`):
+
+    1. environment variable (`WARDMAST_WORKTREE_ROOT` / `WARDMAST_OUTPUT_LOG_ROOT`)
+    2. application config (`config :wardmast, :worktree_root, ...`) — set by
+       `config/dev.exs`, `config/test.exs`, or a test's own
+       `Application.put_env/3`
+    3. `$HOME`-relative default, expanded at call time
+  """
+
+  @spec worktree_root() :: String.t()
+  def worktree_root do
+    resolve("WARDMAST_WORKTREE_ROOT", :worktree_root, "~/dev/arbiter-worktrees")
+  end
+
+  @spec output_log_root() :: String.t()
+  def output_log_root do
+    resolve("WARDMAST_OUTPUT_LOG_ROOT", :output_log_root, "~/dev/arbiter-worker-logs")
+  end
+
+  @doc """
+  Root holding the per-session provisioning scaffolds (RFC §9.1,
+  `<sessions_root>/<session-id>/…`).
+
+  Deliberately a sibling of the worktree root and **never** inside the primary
+  checkout: §10.2 layer 1 is "scaffold, never point at a checkout", and a
+  default that nested session working directories under the live source tree
+  would hand Phoenix hot-reload a directory full of agent scratch files.
+  `Wardmast.Sessions.Layout.outside_primary_checkout?/1` asserts the property
+  rather than trusting this default.
+  """
+  @spec sessions_root() :: String.t()
+  def sessions_root do
+    resolve("WARDMAST_SESSIONS_ROOT", :sessions_root, "~/dev/arbiter-sessions")
+  end
+
+  @doc """
+  Root holding one dedicated CLI config dir per provider account
+  (`<accounts_root>/<provider>-<slug>/`), the dir a dashboard login runs its
+  CLI against (`Wardmast.Accounts.LoginRunner`, bd-c99hys). Credentials land
+  here by the CLI's own hand and are referenced, never copied.
+  """
+  @spec accounts_root() :: String.t()
+  def accounts_root do
+    resolve("WARDMAST_ACCOUNTS_ROOT", :accounts_root, "~/.arbiter/accounts")
+  end
+
+  @doc """
+  Root holding the worker-image state (`Wardmast.Worker.Image.Pins`: the
+  base-image digest pins and the last weekly refresh, bd-9r5jdt).
+  """
+  @spec image_root() :: String.t()
+  def image_root do
+    resolve("WARDMAST_IMAGE_ROOT", :image_root, "~/.arbiter/images")
+  end
+
+  @doc """
+  Root for **disposable sandbox scaffolding** whose lifetime is owned by a
+  run, not by a cleaner (bd-b6noq9, #1930).
+
+  Deliberately NOT `System.tmp_dir!()`. On the dogfood host `/tmp` is a
+  `tmpfs` swept by `systemd-tmpfiles` (`q /tmp 1777 root root 10d`, daily
+  timer), so anything provisioned there is on a clock that nothing in Wardmast
+  controls and is lost outright on reboot. A sandbox that holds the only copy
+  of a branch — a worktree plus its bare origin — must not live somewhere an
+  external janitor can reach it while the run that owns it is still alive.
+
+  Under `$HOME/.cache` rather than `$HOME` proper so an operator wiping their
+  cache is doing something they mean to do, and so it is disk-backed (a
+  `tmpfs` root means a sandbox competes with RAM and vanishes on reboot).
+  """
+  @spec scratch_root() :: String.t()
+  def scratch_root do
+    resolve("WARDMAST_SCRATCH_ROOT", :scratch_root, "~/.cache/arbiter/scratch")
+  end
+
+  @doc """
+  Short directory for **Unix-domain socket** files (bd-gegc00, #663).
+
+  `sockaddr_un.sun_path` is 108 bytes (104 on macOS/BSD), and a worker's
+  `HOME`/`TMPDIR` (and so `scratch_root/0`) can already be ~90 bytes deep, so
+  a socket under either fails with `:socket_path_too_long`. Every socket the
+  egress proxy, bridges, ssh-agent and their tests create lives under this
+  root instead.
+
+  Resolution: `WARDMAST_SOCKET_ROOT`, then `config :wardmast, :socket_root`,
+  then `/tmp/arb-<8 hex>` where the hex is a hash of `scratch_root/0` (so two
+  installs, or a sandbox with its own scratch root, never share a directory).
+  Callers create it (`File.mkdir_p/1` + `chmod 0o700`).
+  """
+  @spec socket_root() :: String.t()
+  def socket_root do
+    Wardmast.Env.get("WARDMAST_SOCKET_ROOT") ||
+      Application.get_env(:wardmast, :socket_root) ||
+      default_socket_root()
+  end
+
+  defp default_socket_root do
+    tag =
+      :sha256
+      |> :crypto.hash(scratch_root())
+      |> binary_part(0, 4)
+      |> Base.encode16(case: :lower)
+
+    "/tmp/arb-" <> tag
+  end
+
+  @doc """
+  Root holding one per-run `TMPDIR` for each worker/agent child
+  (`Wardmast.Worker.RunTmp`). Disk-backed under the scratch root, never `/tmp`
+  (tmpfs, i.e. RAM, on the dogfood host).
+  """
+  @spec worker_tmp_root() :: String.t()
+  def worker_tmp_root do
+    resolve("WARDMAST_WORKER_TMP_ROOT", :worker_tmp_root, Path.join(scratch_root(), "worker-tmp"))
+  end
+
+  @doc """
+  Root holding the shared memory layers a coordinator session mounts
+  read-only (RFC §9.4, `Wardmast.Sessions.Memory`).
+
+  Points at a flat directory of frontmatter-tagged `*.md` files — the
+  frontmatter convention documented on `Wardmast.Sessions.Memory` (a
+  `metadata.type` key, and for `project` a `metadata.workspace_id` key). This
+  is not the layout `arb init` produces today (`memory/MEMORY.md` has no such
+  frontmatter); an operator wanting real memory mounted into sessions must
+  point `WARDMAST_MEMORY_ROOT` at a directory laid out this way. The default is
+  an empty directory that just happens not to exist yet, which
+  `Wardmast.Sessions.Memory` treats as "no memories" rather than an error.
+  """
+  @spec memory_root() :: String.t()
+  def memory_root do
+    resolve("WARDMAST_MEMORY_ROOT", :memory_root, "~/.arbiter/memory")
+  end
+
+  @doc """
+  The **primary checkout** — the source tree the live server runs from, and the
+  thing RFC §10.2 exists to keep sessions out of.
+
+  Resolution mirrors `scripts/build-local-release.sh` and
+  `WardmastCli.Cmd.Start.project_root/0` so all three agree on what "the live
+  checkout" means:
+
+    1. `ARB_PRIMARY_CHECKOUT` — the explicit override, same as the script's.
+    2. `config :wardmast, :primary_checkout` — explicit configuration.
+    3. `ARB_HOME` — how the server is started.
+    4. `~/.config/arbiter/home` — recorded by `arb install-service`.
+    5. `~/dev/arbiter`.
+
+  Note the order differs from `worktree_root/0` and friends above, which put
+  their environment variable first. `ARB_HOME` is **ambient**, not an override:
+  it is exported into every process the server spawns (including every worker
+  and every test run started from a checkout), so treating it the way those
+  roots treat their dedicated `WARDMAST_*` vars would mean an explicit
+  configuration could never win. `ARB_PRIMARY_CHECKOUT` is the dedicated
+  override and keeps its place at the top.
+
+  Returns `nil` when nothing resolves (no `HOME`), which callers must treat as
+  "the guard is inactive" rather than "there is no checkout" — an unresolved
+  checkout is exactly the case `build-local-release.sh` warns loudly about.
+  `Wardmast.Sessions.Layout.outside_primary_checkout?/2` reads it that way.
+  """
+  @spec primary_checkout() :: String.t() | nil
+  def primary_checkout do
+    env("ARB_PRIMARY_CHECKOUT") || configured_checkout() || env("ARB_HOME") ||
+      recorded_home() || home_relative("dev/arbiter")
+  end
+
+  defp configured_checkout do
+    case Application.get_env(:wardmast, :primary_checkout) do
+      value when is_binary(value) and value != "" -> Path.expand(value)
+      _ -> nil
+    end
+  end
+
+  defp env(name) do
+    case System.get_env(name) do
+      value when is_binary(value) and value != "" -> Path.expand(value)
+      _ -> nil
+    end
+  end
+
+  defp recorded_home do
+    with path when is_binary(path) <- home_relative(".config/arbiter/home"),
+         {:ok, contents} <- File.read(path),
+         trimmed when trimmed != "" <- String.trim(contents) do
+      Path.expand(trimmed)
+    else
+      _ -> nil
+    end
+  end
+
+  defp home_relative(rest) do
+    case System.get_env("HOME") do
+      home when is_binary(home) and home != "" -> Path.join(home, rest)
+      _ -> nil
+    end
+  end
+
+  @doc """
+  Directories holding Claude Code session JSONLs that belong to the
+  **coordinator**, swept by `Wardmast.Sessions.UsageIngest` (bd-be804c).
+
+  Each entry is a `<config_dir>/projects/<project-slug>` directory — i.e. the
+  directory the `<session-id>.jsonl` files live in, not the config dir above
+  them. On the dogfood host that is
+  `~/.claude/projects/-home-ryan-dev-admiral`.
+
+  Same resolution order as the roots above, except the **default is `[]`**:
+  metering someone's `~/.claude` is opt-in. A wrong guess here would either
+  silently meter nothing or, worse, bill an unrelated project's sessions to
+  the fleet, so an install that wants coordinator metering names its
+  directories explicitly.
+
+  `WARDMAST_COORDINATOR_SESSION_DIRS` takes a `:`- or `,`-separated list;
+  application config takes a list or a single string. Blank entries are
+  dropped (an empty segment would otherwise expand to the cwd) and `~` is
+  expanded.
+  """
+  @spec coordinator_session_dirs() :: [String.t()]
+  def coordinator_session_dirs do
+    raw =
+      Wardmast.Env.get("WARDMAST_COORDINATOR_SESSION_DIRS") ||
+        Application.get_env(:wardmast, :coordinator_session_dirs) ||
+        []
+
+    raw
+    |> List.wrap()
+    |> Enum.flat_map(&String.split(&1, [":", ","]))
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.map(&Path.expand/1)
+    |> Enum.uniq()
+  end
+
+  defp resolve(env_var, config_key, default) do
+    Wardmast.Env.get(env_var) ||
+      Application.get_env(:wardmast, config_key) ||
+      expand_default(default, env_var)
+  end
+
+  defp expand_default("/" <> _ = absolute, _env_var), do: absolute
+
+  defp expand_default("~/" <> rest, env_var) do
+    case System.get_env("HOME") do
+      nil ->
+        raise "cannot resolve default path \"~/#{rest}\": HOME is unset — set #{env_var} " <>
+                "(or the corresponding :wardmast application config) explicitly"
+
+      home ->
+        Path.join(home, rest)
+    end
+  end
+end

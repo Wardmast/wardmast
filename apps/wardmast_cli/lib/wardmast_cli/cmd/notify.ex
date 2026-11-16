@@ -1,0 +1,61 @@
+defmodule WardmastCli.Cmd.Notify do
+  @moduledoc """
+  `arb notify [--limit N]` — show the N most recent notifications (default 20).
+
+  Read-only: notifications are broadcast events (worker completion, progress
+  milestones, system events) and are never "consumed". This is the CLI window
+  onto the same feed the dashboard renders live.
+
+  Flags:
+    --limit N   number of notifications to show (default 20)
+    --json      emit JSON instead of human-readable text
+  """
+
+  alias WardmastCli.{ArgParser, Client, Output, Workspace}
+
+  @default_limit 20
+
+  def run(argv) do
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
+    else
+      {opts, _rest, mode} =
+        ArgParser.parse(argv, command: "arb message notify", strict: [limit: :integer])
+
+      limit = opts[:limit] || @default_limit
+
+      params = [kind: "notification", limit: limit] ++ workspace_params()
+
+      case Client.get("/api/messages", params) do
+        {:ok, %{"data" => list}} -> emit(list, mode)
+        {:ok, _} -> emit([], mode)
+        {:error, err} -> Output.die(err)
+      end
+    end
+  end
+
+  defp workspace_params do
+    case Workspace.selected_id() do
+      nil -> []
+      id -> [workspace: id]
+    end
+  end
+
+  # ---- render ----
+
+  defp emit(notifications, :json), do: IO.puts(Jason.encode!(%{"data" => notifications}))
+
+  defp emit([], :text), do: IO.puts("(no notifications)")
+
+  defp emit(notifications, :text) do
+    IO.puts("Recent notifications (#{length(notifications)}):")
+
+    Enum.each(notifications, fn n ->
+      ts = n["inserted_at"] || ""
+      from = n["from_ref"]
+      subject = n["subject"] || n["body"]
+      from_label = if from, do: " #{from}", else: ""
+      IO.puts("  #{ts}#{from_label}  #{subject}")
+    end)
+  end
+end

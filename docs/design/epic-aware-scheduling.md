@@ -21,7 +21,7 @@ proposed 2026-10-01. ES1–ES4 are implemented (the §4 order key, the lift cap 
    gets a nullable `floor_priority` (P1–P3). A ticket's effective priority is
    `min(own, every floor on its parent_of ancestors)`. It does **not** reuse
    the epic's `priority`, because that column is non-null with default P2
-   (`apps/arbiter/lib/arbiter/tasks/issue.ex:1174-1180`). Every one of the 40
+   (`apps/wardmast/lib/wardmast/tasks/issue.ex:1174-1180`). Every one of the 40
    epics already carries a priority nobody chose as a floor, so reusing it
    would change today's order on day one. With no floor set, the order is
    exactly today's. See [§6.2](#62-an-unset-floor-changes-nothing).
@@ -50,7 +50,7 @@ proposed 2026-10-01. ES1–ES4 are implemented (the §4 order key, the lift cap 
    slot. See [§3](#3-the-options).
 7. **Config is install-wide, plus one field per epic.** There is one
    Autopilot and one Ready queue across every workspace
-   (`apps/arbiter/lib/arbiter/board/snapshot.ex:337-344`), so the keys that
+   (`apps/wardmast/lib/wardmast/board/snapshot.ex:337-344`), so the keys that
    shape the order live in installation settings. See [§6.6](#66-config).
 8. **The evidence says ordering is only part of the fix.** Tail children do
    wait longer in Ready than head children (median 2.8h vs 0.3h, p90 31h vs
@@ -67,18 +67,18 @@ proposed 2026-10-01. ES1–ES4 are implemented (the §4 order key, the lift cap 
 
 | What | Where | Today |
 |---|---|---|
-| The order | `Scheduler.order/1`, `order_key/1` (`apps/arbiter/lib/arbiter/board/scheduler.ex:197-206`) | `{priority, rank, created_at}`, ascending. A missing key sorts last |
+| The order | `Scheduler.order/1`, `order_key/1` (`apps/wardmast/lib/wardmast/board/scheduler.ex:197-206`) | `{priority, rank, created_at}`, ascending. A missing key sorts last |
 | The queue | `Scheduler.plan/1` (`scheduler.ex:160-186`), `step/3` (`:212-233`) | Walks the ordered Ready cards. Only the head carries a board-wide hold (`:no_slot`, `{:quota, _}`). A card's own hold is skipped without advancing the queue position. Pause holds every card |
-| The holds | `Lifecycle.dispatchable/2` (`apps/arbiter/lib/arbiter/tasks/lifecycle/dispatchable.ex:79-85`), `@type hold` (`:58-65`), `board_hold/1` (`:136-142`) | Column, then conflicts, then file overlap, then paused / quota / no slot |
-| Who dispatches | `Autopilot.plan/1` (`apps/arbiter/lib/arbiter/board/autopilot.ex:742-752`) | Dispatches `snapshot.promote`, one card per pass, with a follow-up pass after each success. Deferred resumes go first |
+| The holds | `Lifecycle.dispatchable/2` (`apps/wardmast/lib/wardmast/tasks/lifecycle/dispatchable.ex:79-85`), `@type hold` (`:58-65`), `board_hold/1` (`:136-142`) | Column, then conflicts, then file overlap, then paused / quota / no slot |
+| Who dispatches | `Autopilot.plan/1` (`apps/wardmast/lib/wardmast/board/autopilot.ex:742-752`) | Dispatches `snapshot.promote`, one card per pass, with a follow-up pass after each success. Deferred resumes go first |
 | The board | `Snapshot.derive/1` (`snapshot.ex:226-255`) | Ready rows are `plan.entries`. Backlog and Blocked use the same `Scheduler.order/1` (`:912-935`). Epics are kept off every column (`:205-208`) and appear only as the `↳` parent chip (`parent_refs/2`, `:1312-1355`) |
 | The scope | `Snapshot.load/1` (`snapshot.ex:332-380`) | Issues and edges are read **unscoped**: one queue across every workspace. Slots and the quota hold come from the default workspace |
 | Slots | `effective_max_concurrent/3` (`snapshot.ex:491-527`), `slots_free` (`:224-225`) | `min(workspace conductor.max_concurrent, system max, account headroom)`. Live: `default` has 4, the installation's system max is 3, so 3 slots. A slot is a ticket in `:active` |
-| Quota-held intents | `DispatchQueue.queue_order_key/1` (`apps/arbiter/lib/arbiter/workflows/dispatch_queue.ex:1163-1165`), `priority_of/1` | `{priority, opened_at}`; since ES4 `priority` is the effective one (`Arbiter.Tasks.EffectivePriority`), read when the intent is held |
-| Model tier | `Routing.ByPriority` (`apps/arbiter/lib/arbiter/agents/routing/by_priority.ex:44-62`) | `routing.rules."P<n>"` by `task.priority` |
-| The card badge | `priority_tag/1` (`apps/arbiter_web/lib/arbiter_web/components/core_components/data.ex:85-96`), used at `domain.ex:333` from `board_live.ex:1393` | `P<n>`. P0–P1 use `badge-error`, P2 `badge-neutral`, P3–P4 `badge-ghost` |
+| Quota-held intents | `DispatchQueue.queue_order_key/1` (`apps/wardmast/lib/wardmast/workflows/dispatch_queue.ex:1163-1165`), `priority_of/1` | `{priority, opened_at}`; since ES4 `priority` is the effective one (`Wardmast.Tasks.EffectivePriority`), read when the intent is held |
+| Model tier | `Routing.ByPriority` (`apps/wardmast/lib/wardmast/agents/routing/by_priority.ex:44-62`) | `routing.rules."P<n>"` by `task.priority` |
+| The card badge | `priority_tag/1` (`apps/wardmast_web/lib/wardmast_web/components/core_components/data.ex:85-96`), used at `domain.ex:333` from `board_live.ex:1393` | `P<n>`. P0–P1 use `badge-error`, P2 `badge-neutral`, P3–P4 `badge-ghost` |
 | Manual order | `board_live.ex` moduledoc (`:37-45`), `reorder/4` (`:424-435`); `Tasks.Rank.move/2` | A drag rewrites `rank`. A drop into another band changes `priority` first. `set_rank` has run 34 times (`issues_versions`) |
-| Epics | `@non_dispatchable_types ~w(epic)a` (`issue.ex:109`); children by `:parent_of` (`apps/arbiter/lib/arbiter/tasks/dependency.ex:20-24`); `EpicRollup.children_of/1` is one level (`apps/arbiter/lib/arbiter/tasks/epic_rollup.ex:177-183`) | **Nothing reads an epic's priority for scheduling.** Rank is per workspace, assigned on create and on promote (`RankOnPromote`), so inside a band, promotion order is dispatch order |
+| Epics | `@non_dispatchable_types ~w(epic)a` (`issue.ex:109`); children by `:parent_of` (`apps/wardmast/lib/wardmast/tasks/dependency.ex:20-24`); `EpicRollup.children_of/1` is one level (`apps/wardmast/lib/wardmast/tasks/epic_rollup.ex:177-183`) | **Nothing reads an epic's priority for scheduling.** Rank is per workspace, assigned on create and on promote (`RankOnPromote`), so inside a band, promotion order is dispatch order |
 
 Nested epics exist (bd-dqvv90 Login relay and bd-gfob09 routing signals are
 both children of bd-9dr65f). No child has more than one `parent_of` parent
@@ -340,7 +340,7 @@ everywhere, because no drag has pinned anything before ES6 ships.
 - **Ancestors.** Walk `parent_of` edges upward, breadth-first, with a
   visited set and a depth cap of 8. `parent_of` cycles are not prevented on
   insert (`add/4`'s cycle guard doesn't police `parent_of`;
-  `apps/arbiter/lib/arbiter/tasks/dependencies.ex:276-281`), so the guard is
+  `apps/wardmast/lib/wardmast/tasks/dependencies.ex:276-281`), so the guard is
   required. Non-epic parents are walked through but carry no floor.
 - **Floor.** `floor_priority` on an ancestor with `issue_type: :epic`, from
   1 to 3, or nil.
@@ -582,7 +582,7 @@ pointer to this table.
   does.
 - **Account caps are unchanged.** Routing runs after ordering. An account at
   `account_headroom` 0 is dropped as `at_capacity`
-  (`apps/arbiter/lib/arbiter/agents/provider_routing.ex:693-696`) whatever
+  (`apps/wardmast/lib/wardmast/agents/provider_routing.ex:693-696`) whatever
   the card's priority.
 - **The hold list is unchanged in phases 1 and 2.** `Lifecycle.dispatchable/2`
   gets no new hold. A capped lift is a reorder, not a hold, so it never sits
@@ -600,8 +600,8 @@ pointer to this table.
 The queue is install-wide (§1), so every key that shapes the order must be
 comparable across every card. A per-workspace knob would make the key
 inconsistent between two cards in the same queue. So the knobs are
-installation settings, on `Arbiter.Settings.Installation` and in the
-`Settings.Registry` schema (`apps/arbiter/lib/arbiter/settings/registry.ex:21-60`).
+installation settings, on `Wardmast.Settings.Installation` and in the
+`Settings.Registry` schema (`apps/wardmast/lib/wardmast/settings/registry.ex:21-60`).
 That makes them visible through MCP `installation_config_*`, `arb settings`
 and the Global Settings page (#200).
 
@@ -666,13 +666,13 @@ When `scheduling_epic_wip_limit = N`:
 
 | # | Title | D | Depends on | Phase |
 |---|---|---|---|---|
-| ES1 | `Arbiter.Tasks.EpicFloor`: a pure resolver from issues plus `parent_of` pairs to, per ticket, `{own, effective, via, lifted?}`, the nearest epic, open leaves and in-progress. Breadth-first ancestors, visited set, depth 8. Property tests: effective ≤ own; no floors means effective == own; order-invariant over edge order; a cycle terminates | 2 | — | 1 |
+| ES1 | `Wardmast.Tasks.EpicFloor`: a pure resolver from issues plus `parent_of` pairs to, per ticket, `{own, effective, via, lifted?}`, the nearest epic, open leaves and in-progress. Breadth-first ancestors, visited set, depth 8. Property tests: effective ≤ own; no floors means effective == own; order-invariant over edge order; a cycle terminates | 2 | — | 1 |
 | ES2 | `floor_priority` on `Issue`: migration (nullable, nil backfill), constraint 1..3, epic-only validation, the `:set_floor` action (operator and coordinator; workers refused), paper trail, `arb epic floor`, the MCP tool, REST, and the epic page control with the "epic priority (display only)" label | 2 | — | 1 |
 | ES3 | The order key: `Scheduler.order/1` takes the §4 key. `Snapshot` feeds `EpicFloor` from the issues and edges it already loads, plus Ready-since from `ticket_transitions`. `queue_card/1` carries `effective_priority`, `priority_via`, `priority_lift`, `finish_class` and `open_leaves`. The lift cap. The installation settings and registry keys (§6.6) with validation. Backlog and Blocked share the key. Tests: no floors plus finish-first off sorts identically to today on a fixture board; §5's examples as fixtures | 3 | ES1, ES2 | 1 |
 | ES4 | Effective priority beyond the board: `DispatchQueue.priority_of/1` via `EpicFloor`; `effective_priority`, `priority_via` and `priority_lift` on MCP `ticket_show`, `arb ticket show --json` and REST `GET /api/issues/:id`; `arb ready`, `arb prime`, `GET /api/issues/ready` and `/lifecycle` sort by the §4 key | 2 | ES1, ES2 | 1 |
 | ES5 | Board and task-page UI: the `P1↑` badge with its title and aria-label, the chip's `· floor P1` suffix, the capped wording, the task page's "scheduled as" line and the epic mini-board header. LiveView tests by element id | 2 | ES3 | 1 |
 | ES6 | Manual order under the new key: `rank_pinned` (set by a drag, cleared by demote, close, reopen and promote), pinned-first in a band, and refusing a drop below the floor with the flash | 2 | ES3 | 1 |
-| ES7 | The readout: port `measure_epic_waits.py` into Reports as an "epic Ready wait: head vs tail" panel. Fold it into bd-59x0gb (Reports: attention / wait time) if that is still open; otherwise make it a standalone `mix arbiter.epic_waits`. Re-run 14 days after ES3 is enabled, and include parentless P1/P2 p90 Ready wait as the guard metric | 2 | ES3 | 1 |
+| ES7 | The readout: port `measure_epic_waits.py` into Reports as an "epic Ready wait: head vs tail" panel. Fold it into bd-59x0gb (Reports: attention / wait time) if that is still open; otherwise make it a standalone `mix wardmast.epic_waits`. Re-run 14 days after ES3 is enabled, and include parentless P1/P2 p90 Ready wait as the guard metric | 2 | ES3 | 1 |
 | ES8 | The backlog tail: `ready_to_promote` on the epic rollup and chip, plus a daily coordinator digest of unblocked Backlog leaves older than 24h for floored or in-progress epics. No auto-promotion | 2 | ES1 | 2 |
 | ES9 | Turn finish-first on by default, if ES7 shows tail Ready wait fell and parentless P1/P2 p90 Ready wait rose by no more than 25% | 1 | ES7 | 2 |
 | ES10 | The epic WIP limit (§8): `scheduling_epic_wip_limit`, the `{:epic_wip, ids}` hold in `Lifecycle.dispatchable/2`, admission and release, the P0 exemption, the phrase, off by default | 3 | ES3, ES7 | 3 |

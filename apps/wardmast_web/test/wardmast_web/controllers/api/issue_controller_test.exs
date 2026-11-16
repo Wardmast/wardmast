@@ -1,0 +1,1620 @@
+defmodule WardmastWeb.Api.IssueControllerTest do
+  use WardmastWeb.ConnCase, async: false
+
+  import Wardmast.LifecycleFixtures
+
+  alias Wardmast.Tasks.{Dependency, Issue, Workspace}
+
+  setup %{conn: conn} do
+    {:ok, ws} = Ash.create(Workspace, %{name: "api-test-ws", prefix: "api"})
+    {:ok, conn: put_req_header(conn, "accept", "application/json"), ws: ws}
+  end
+
+  describe "POST /api/issues" do
+    # #1973: `arb create --parent` sends the parent along, so a child of a
+    # tracker-linked parent stays local with the parent's ticket as context
+    # instead of minting its own upstream ticket.
+    test "parent_id naming a tracker-linked parent defaults the child to context-only", %{
+      conn: conn
+    } do
+      Req.Test.stub(Wardmast.Trackers.Jira.HTTP, fn _ -> flunk("must not call Jira") end)
+
+      {:ok, jira_ws} =
+        Ash.create(Workspace, %{
+          name: "api-jira-ws",
+          prefix: "apj",
+          config: %{"tracker" => %{"type" => "jira"}}
+        })
+
+      {:ok, parent} =
+        Ash.create(Issue, %{
+          title: "tracked story",
+          workspace_id: jira_ws.id,
+          tracker_type: :jira,
+          tracker_ref: "VR-19083"
+        })
+
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "a slice",
+          workspace_id: jira_ws.id,
+          parent_id: parent.id
+        })
+
+      assert %{"id" => id, "tracker_type" => "none"} = json_response(conn, 201)
+
+      child = Ash.get!(Issue, id)
+      assert child.tracker_ref == nil
+      assert child.tracker_context_type == :jira
+      assert child.tracker_context_ref == "VR-19083"
+    end
+
+    test "creates issue with valid attrs", %{conn: conn, ws: ws} do
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "first",
+          workspace_id: ws.id,
+          priority: 1,
+          issue_type: "bug"
+        })
+
+      assert %{
+               "id" => id,
+               "title" => "first",
+               "state" => "backlog",
+               "priority" => 1,
+               "issue_type" => "bug",
+               "workspace_id" => ws_id
+             } = json_response(conn, 201)
+
+      assert String.starts_with?(id, "api-")
+      assert ws_id == ws.id
+    end
+
+    # bd-7mbrlg
+    test "warns (non-blocking) when a gated type is created with no acceptance criteria", %{
+      conn: conn,
+      ws: ws
+    } do
+      conn =
+        post(conn, ~p"/api/issues", %{title: "no ACs", workspace_id: ws.id, issue_type: "bug"})
+
+      body = json_response(conn, 201)
+      assert [warning] = body["warnings"]
+      assert warning =~ "acceptance criteria"
+    end
+
+    test "no warning when acceptance criteria are given", %{conn: conn, ws: ws} do
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "has ACs",
+          workspace_id: ws.id,
+          issue_type: "bug",
+          acceptance: "- it works"
+        })
+
+      body = json_response(conn, 201)
+      refute Map.has_key?(body, "warnings")
+    end
+
+    test "no warning for exempt types (task/decision/epic) with no acceptance criteria", %{
+      conn: conn,
+      ws: ws
+    } do
+      conn =
+        post(conn, ~p"/api/issues", %{title: "a task", workspace_id: ws.id, issue_type: "task"})
+
+      body = json_response(conn, 201)
+      refute Map.has_key?(body, "warnings")
+    end
+
+    # bd-1ozks5: the local assignee field is gone, but an existing coordinator
+    # script/prompt may still pass it — accept and ignore, with a warning,
+    # rather than failing the create.
+    test "accepts and ignores a deprecated `assignee` param, with a warning", %{
+      conn: conn,
+      ws: ws
+    } do
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "still has assignee",
+          workspace_id: ws.id,
+          issue_type: "task",
+          assignee: "alice"
+        })
+
+      body = json_response(conn, 201)
+      refute Map.has_key?(body, "assignee")
+      assert [warning] = body["warnings"]
+      assert warning =~ "assignee"
+    end
+
+    test "accepts and persists `difficulty` (0..5)", %{conn: conn, ws: ws} do
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "d3-feature",
+          workspace_id: ws.id,
+          difficulty: 3
+        })
+
+      assert %{"id" => id, "difficulty" => 3} = json_response(conn, 201)
+
+      conn = get(conn, ~p"/api/issues/#{id}")
+      assert %{"difficulty" => 3} = json_response(conn, 200)
+    end
+
+    test "accepts `difficulty: 5` at the new ceiling (#1519)", %{conn: conn, ws: ws} do
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "d5-flagship",
+          workspace_id: ws.id,
+          difficulty: 5
+        })
+
+      assert %{"id" => id, "difficulty" => 5} = json_response(conn, 201)
+
+      conn = get(conn, ~p"/api/issues/#{id}")
+      assert %{"difficulty" => 5} = json_response(conn, 200)
+    end
+
+    test "accepts, persists, and renders `repo` (bd-2jum8j)", %{conn: conn, ws: ws} do
+      conn =
+        post(conn, ~p"/api/issues", %{title: "assigned", workspace_id: ws.id, repo: "org/tonic"})
+
+      assert %{"id" => id, "repo" => "org/tonic"} = json_response(conn, 201)
+      assert Ash.get!(Issue, id).repo == "org/tonic"
+
+      conn = patch(conn, ~p"/api/issues/#{id}", %{repo: "org/tonic_device"})
+      assert %{"repo" => "org/tonic_device"} = json_response(conn, 200)
+      assert Ash.get!(Issue, id).repo == "org/tonic_device"
+    end
+
+    test "leaves difficulty nil when omitted", %{conn: conn, ws: ws} do
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "no-difficulty",
+          workspace_id: ws.id
+        })
+
+      assert %{"difficulty" => nil} = json_response(conn, 201)
+    end
+
+    test "returns 422 with validation_error on missing title", %{conn: conn, ws: ws} do
+      conn = post(conn, ~p"/api/issues", %{workspace_id: ws.id})
+
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+
+    test "returns 502 when upstream-create fails (task body + structured error)",
+         %{conn: conn} do
+      env_var = "GTE_CONTROLLER_OUTBOUND_TEST_TOKEN"
+      System.put_env(env_var, "tok")
+      on_exit(fn -> System.delete_env(env_var) end)
+
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "ctrl-gh",
+          prefix: "gh",
+          config: %{
+            "tracker" => %{
+              "type" => "github",
+              "config" => %{
+                "owner" => "o",
+                "repo" => "r",
+                "credentials_ref" => "env:#{env_var}"
+              }
+            }
+          }
+        })
+
+      Req.Test.stub(Wardmast.Trackers.GitHub.HTTP, fn conn ->
+        conn
+        |> Plug.Conn.put_status(500)
+        |> Req.Test.json(%{"message" => "upstream down"})
+      end)
+
+      conn = post(conn, ~p"/api/issues", %{title: "half", workspace_id: gh_ws.id})
+
+      body = json_response(conn, 502)
+
+      assert %{
+               "issue" => %{"id" => task_id, "title" => "half"},
+               "error" => %{
+                 "type" => "upstream_create_failed",
+                 "message" => msg,
+                 "details" => %{"task_id" => task_id, "tracker_type" => "github"}
+               }
+             } = body
+
+      assert is_binary(task_id)
+      assert msg =~ "upstream github create failed"
+    end
+
+    test "returns 409 when an open task with the same title exists", %{conn: conn, ws: ws} do
+      {:ok, _existing} = Ash.create(Issue, %{title: "Duplicate Title", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/issues", %{title: "Duplicate Title", workspace_id: ws.id})
+
+      body = json_response(conn, 409)
+
+      assert %{
+               "error" => %{
+                 "type" => "duplicate_task",
+                 "message" => msg,
+                 "details" => %{"matches" => [%{"title" => "Duplicate Title"} = match]}
+               }
+             } = body
+
+      # A match names the ticket's lifecycle state, never the removed status.
+      assert match["state"] == "backlog"
+      refute Map.has_key?(match, "status")
+
+      assert msg =~ "--force"
+    end
+
+    test "dedup is case-insensitive and trims whitespace", %{conn: conn, ws: ws} do
+      {:ok, _existing} = Ash.create(Issue, %{title: "Foo Bar", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/issues", %{title: "  foo bar  ", workspace_id: ws.id})
+
+      assert %{"error" => %{"type" => "duplicate_task"}} = json_response(conn, 409)
+    end
+
+    test "no dedup for tasks in a different workspace", %{conn: conn, ws: ws} do
+      {:ok, ws2} = Ash.create(Workspace, %{name: "other-dedup", prefix: "oth2"})
+      {:ok, _existing} = Ash.create(Issue, %{title: "Unique Title", workspace_id: ws2.id})
+
+      conn = post(conn, ~p"/api/issues", %{title: "Unique Title", workspace_id: ws.id})
+
+      assert json_response(conn, 201)
+    end
+
+    test "no dedup when the matching task is closed", %{conn: conn, ws: ws} do
+      {:ok, existing} = Ash.create(Issue, %{title: "Closed Task", workspace_id: ws.id})
+      {:ok, _} = Ash.update(existing, %{}, action: :close)
+
+      conn = post(conn, ~p"/api/issues", %{title: "Closed Task", workspace_id: ws.id})
+
+      assert json_response(conn, 201)
+    end
+
+    test "--force bypasses the local dedup check", %{conn: conn, ws: ws} do
+      {:ok, _existing} = Ash.create(Issue, %{title: "Forced Title", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/issues", %{title: "Forced Title", workspace_id: ws.id, force: true})
+
+      assert json_response(conn, 201)
+    end
+
+    test "returns 409 when GitHub has an open issue with the same title", %{conn: conn} do
+      env_var = "GTE_TRACKER_DEDUP_TEST_TOKEN"
+      System.put_env(env_var, "tok")
+      on_exit(fn -> System.delete_env(env_var) end)
+
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "dedup-gh",
+          prefix: "ddp",
+          config: %{
+            "tracker" => %{
+              "type" => "github",
+              "config" => %{
+                "owner" => "o",
+                "repo" => "r",
+                "credentials_ref" => "env:#{env_var}"
+              }
+            }
+          }
+        })
+
+      Req.Test.stub(Wardmast.Trackers.GitHub.HTTP, fn conn ->
+        cond do
+          conn.request_path == "/search/issues" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "total_count" => 1,
+              "items" => [
+                %{
+                  "number" => 99,
+                  "title" => "tracker dup",
+                  "html_url" => "https://github.com/o/r/issues/99",
+                  "state" => "open"
+                }
+              ]
+            })
+
+          true ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"number" => 100})
+        end
+      end)
+
+      conn = post(conn, ~p"/api/issues", %{title: "tracker dup", workspace_id: gh_ws.id})
+
+      body = json_response(conn, 409)
+
+      assert %{
+               "error" => %{
+                 "type" => "duplicate_tracker_issue",
+                 "message" => msg,
+                 "details" => %{"matches" => [%{"ref" => "99", "url" => url}]}
+               }
+             } = body
+
+      assert msg =~ "--force"
+      assert url =~ "issues/99"
+    end
+
+    test "--force bypasses the tracker dedup check", %{conn: conn} do
+      env_var = "GTE_TRACKER_DEDUP_FORCE_TEST_TOKEN"
+      System.put_env(env_var, "tok")
+      on_exit(fn -> System.delete_env(env_var) end)
+
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "dedup-gh-force",
+          prefix: "ddf",
+          config: %{
+            "tracker" => %{
+              "type" => "github",
+              "config" => %{
+                "owner" => "o",
+                "repo" => "r",
+                "credentials_ref" => "env:#{env_var}"
+              }
+            }
+          }
+        })
+
+      Req.Test.stub(Wardmast.Trackers.GitHub.HTTP, fn conn ->
+        cond do
+          conn.request_path == "/search/issues" ->
+            Req.Test.json(conn, %{
+              "total_count" => 1,
+              "items" => [
+                %{
+                  "number" => 99,
+                  "title" => "forced dup",
+                  "html_url" => "https://github.com/o/r/issues/99",
+                  "state" => "open"
+                }
+              ]
+            })
+
+          true ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"number" => 101})
+        end
+      end)
+
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "forced dup",
+          workspace_id: gh_ws.id,
+          force: true
+        })
+
+      assert json_response(conn, 201)
+    end
+
+    test "tracker search error is silently ignored (does not block create)", %{conn: conn} do
+      env_var = "GTE_TRACKER_DEDUP_ERR_TEST_TOKEN"
+      System.put_env(env_var, "tok")
+      on_exit(fn -> System.delete_env(env_var) end)
+
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "dedup-gh-err",
+          prefix: "dde",
+          config: %{
+            "tracker" => %{
+              "type" => "github",
+              "config" => %{
+                "owner" => "o",
+                "repo" => "r",
+                "credentials_ref" => "env:#{env_var}"
+              }
+            }
+          }
+        })
+
+      Req.Test.stub(Wardmast.Trackers.GitHub.HTTP, fn conn ->
+        cond do
+          conn.request_path == "/search/issues" ->
+            conn
+            |> Plug.Conn.put_status(500)
+            |> Req.Test.json(%{"message" => "search down"})
+
+          true ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"number" => 102})
+        end
+      end)
+
+      conn = post(conn, ~p"/api/issues", %{title: "search error task", workspace_id: gh_ws.id})
+
+      assert json_response(conn, 201)
+    end
+  end
+
+  # bd-9dwbvt: `arb ticket create` / `arb create` post here, so this is the CLI's
+  # slice of "every issue carries a repo".
+  describe "POST /api/issues — repo resolution (bd-9dwbvt)" do
+    defp repo_ws!(config) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "api-repo-#{System.unique_integer([:positive])}",
+          prefix: "apr",
+          config: config
+        })
+
+      ws
+    end
+
+    test "auto-fills the workspace's only repo", %{conn: conn} do
+      ws = repo_ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic"}})
+
+      conn = post(conn, ~p"/api/issues", %{title: "sole", workspace_id: ws.id})
+
+      assert %{"id" => id, "repo" => "tonic"} = json_response(conn, 201)
+      assert Ash.get!(Issue, id).repo == "tonic"
+    end
+
+    test "falls back to the workspace default_repo", %{conn: conn} do
+      ws =
+        repo_ws!(%{
+          "repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"},
+          "default_repo" => "tonic_device"
+        })
+
+      conn = post(conn, ~p"/api/issues", %{title: "defaulted", workspace_id: ws.id})
+
+      assert %{"repo" => "tonic_device"} = json_response(conn, 201)
+    end
+
+    test "422s with the configured keys when nothing resolves", %{conn: conn} do
+      ws =
+        repo_ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic", "tonic_device" => "/srv/device"}})
+
+      conn = post(conn, ~p"/api/issues", %{title: "ambiguous", workspace_id: ws.id})
+
+      assert %{"error" => %{"type" => "validation_error"} = error} = json_response(conn, 422)
+      assert inspect(error) =~ "tonic_device"
+    end
+
+    test "422s on a repo that is not a configured repo_paths key", %{conn: conn} do
+      ws = repo_ws!(%{"repo_paths" => %{"tonic" => "/srv/tonic"}})
+
+      conn = post(conn, ~p"/api/issues", %{title: "typo", workspace_id: ws.id, repo: "tonc"})
+
+      assert %{"error" => %{"type" => "validation_error"} = error} = json_response(conn, 422)
+      assert inspect(error) =~ "tonc"
+    end
+  end
+
+  describe "GET /api/issues/:id" do
+    test "returns the issue as a bare object", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "show me", workspace_id: ws.id})
+
+      conn = get(conn, ~p"/api/issues/#{issue.id}")
+
+      body = json_response(conn, 200)
+      assert body["id"] == issue.id
+      assert body["title"] == "show me"
+      assert body["state"] == "backlog"
+    end
+
+    # bd-36ytcl: `state` is the ticket's one lifecycle field — the legacy
+    # `status` / `refined` and the old ReviewGate park columns are gone from
+    # the JSON, not rendered as nulls.
+    test "carries no legacy status, refined or review-park fields", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "no legacy", workspace_id: ws.id})
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      for key <- ~w(status refined review_park_reason review_parked_at) do
+        refute Map.has_key?(body, key), key
+      end
+    end
+
+    # bd-842qio: the stored lifecycle state — what `arb ticket show --json`
+    # prints.
+    test "carries the lifecycle state, close_reason and rank", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "show my state", workspace_id: ws.id})
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+      assert body["state"] == "backlog"
+      assert Map.has_key?(body, "close_reason") and body["close_reason"] == nil
+      assert body["rank"] == issue.rank
+
+      {:ok, _} = Ash.update(issue, %{close_reason: :duplicate}, action: :close)
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert {body["state"], body["close_reason"]} == {"closed", "duplicate"}
+    end
+
+    # bd-741sid: the ticket owns its open PR — the ref, its URL, the forge's
+    # last answer and when it was read — and the pr_closed cause.
+    test "carries the ticket's PR state and its attention cause", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "show my PR", workspace_id: ws.id})
+      put_state!(issue, :active)
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      for key <-
+            ~w(merger_url merger_status merger_checked_at attention_cause attention_detail attention_since) do
+        assert Map.has_key?(body, key) and body[key] == nil, key
+      end
+
+      {:ok, _} = Issue.pr_opened(issue.id, "#7", merger_url: "https://forge.test/pull/7")
+
+      :ok =
+        Wardmast.Tasks.PullRequest.record_merger_status(issue.id, %{
+          status: :open,
+          pipeline: :running
+        })
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert %{
+               "state" => "merging",
+               "pr_ref" => "#7",
+               "merger_url" => "https://forge.test/pull/7",
+               "merger_status" => %{"status" => "open", "pipeline" => "running"}
+             } = body
+
+      assert is_binary(body["merger_checked_at"])
+
+      {:ok, _} = Issue.pr_closed(issue.id, "#7")
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert %{"state" => "active", "attention_cause" => "pr_closed"} = body
+      assert body["attention_detail"] =~ "#7"
+      assert is_binary(body["attention_since"])
+    end
+
+    test "returns 404 for missing issue", %{conn: conn} do
+      conn = get(conn, ~p"/api/issues/api-doesnotexist")
+      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
+
+    # bd-1defgu: `arb ticket show` was write-only for dependency edges — you
+    # could `arb dep add` one onto this task and never see it again short of
+    # opening the DB.
+    test "includes the issue's dependency edges", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "show me", workspace_id: ws.id})
+      {:ok, other} = Ash.create(Issue, %{title: "the other one", workspace_id: ws.id})
+
+      {:ok, dep} =
+        Wardmast.Tasks.Dependencies.add(issue.id, other.id, :conflicts_with)
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert [row] = body["dependencies"]
+      assert row["id"] == dep.id
+      assert row["type"] == "conflicts_with"
+      assert row["to"]["id"] == other.id
+      assert row["to"]["title"] == "the other one"
+    end
+
+    test "dependencies is an empty list when the issue has no edges", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "lonely", workspace_id: ws.id})
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert body["dependencies"] == []
+    end
+
+    # bd-3j4ch4 AC5: `arb ticket show` renders the cost estimate, and this is
+    # where it gets the numbers from.
+    test "carries the cost estimate when the ledger has enough history", %{conn: conn, ws: ws} do
+      for cost <- Enum.map(1..10, &(&1 * 1.0)) do
+        {:ok, past} =
+          Ash.create(Issue, %{
+            title: "history",
+            workspace_id: ws.id,
+            difficulty: 2,
+            issue_type: :feature
+          })
+
+        {:ok, closed} = Ash.update(past, %{close_upstream: false}, action: :close)
+
+        {:ok, _ev} =
+          Ash.create(Wardmast.Usage.Event, %{
+            task_id: closed.id,
+            base_task_id: closed.id,
+            role: "base",
+            source: :task,
+            step: :work,
+            workspace_id: ws.id,
+            cost_usd: cost,
+            occurred_at: DateTime.utc_now()
+          })
+      end
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "size me",
+          workspace_id: ws.id,
+          difficulty: 2,
+          issue_type: :feature
+        })
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert body["estimate"]["range"] == [3.0, 8.0]
+      assert body["estimate"]["median"] == 5.0
+      assert body["estimate"]["p90"] == 9.0
+      assert body["estimate"]["n"] == 10
+      assert body["estimate"]["basis"] == "difficulty+type"
+      assert body["estimate"]["fallback_level"] == 0
+    end
+
+    test "estimate is null when the ledger is empty", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "no history", workspace_id: ws.id})
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert Map.has_key?(body, "estimate")
+      assert body["estimate"] == nil
+    end
+
+    # bd-18vl9q AC3: `arb ticket show` renders the epic cost rollup for an
+    # `:epic` issue.
+    test "carries the epic cost rollup for an epic", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "an epic", workspace_id: ws.id, issue_type: :epic})
+
+      {:ok, child} =
+        Ash.create(Issue, %{title: "a child", workspace_id: ws.id, issue_type: :task})
+
+      {:ok, closed} = Ash.update(child, %{close_upstream: false}, action: :close)
+
+      {:ok, _ev} =
+        Ash.create(Wardmast.Usage.Event, %{
+          task_id: closed.id,
+          base_task_id: closed.id,
+          role: "base",
+          source: :task,
+          step: :work,
+          workspace_id: ws.id,
+          cost_usd: 4.25,
+          occurred_at: DateTime.utc_now()
+        })
+
+      {:ok, _} = Wardmast.Tasks.Dependencies.add(epic.id, closed.id, :parent_of)
+
+      body = conn |> get(~p"/api/issues/#{epic.id}") |> json_response(200)
+
+      assert body["epic_rollup"]["spent"] == 4.25
+      assert body["epic_rollup"]["closed_count"] == 1
+    end
+
+    test "epic_rollup is null for a non-epic issue", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "not an epic", workspace_id: ws.id})
+
+      body = conn |> get(~p"/api/issues/#{issue.id}") |> json_response(200)
+
+      assert Map.has_key?(body, "epic_rollup")
+      assert body["epic_rollup"] == nil
+    end
+  end
+
+  describe "GET /api/issues" do
+    test "lists all issues wrapped in data", %{conn: conn, ws: ws} do
+      {:ok, _i1} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, _i2} = Ash.create(Issue, %{title: "b", workspace_id: ws.id})
+
+      conn = get(conn, ~p"/api/issues")
+      assert %{"data" => list} = json_response(conn, 200)
+      assert length(list) == 2
+    end
+
+    test "filters by state", %{conn: conn, ws: ws} do
+      {:ok, backlog} = Ash.create(Issue, %{title: "still backlog", workspace_id: ws.id})
+      {:ok, queued} = Ash.create(Issue, %{title: "queued", workspace_id: ws.id})
+      queued = put_state!(queued, :queued)
+      {:ok, will_close} = Ash.create(Issue, %{title: "to close", workspace_id: ws.id})
+      {:ok, _closed} = Ash.update(will_close, %{}, action: :close)
+
+      list = conn |> get(~p"/api/issues?state=queued") |> json_response(200) |> Map.fetch!("data")
+      assert Enum.map(list, & &1["id"]) == [queued.id]
+
+      list =
+        conn |> get(~p"/api/issues?state=backlog") |> json_response(200) |> Map.fetch!("data")
+
+      assert Enum.map(list, & &1["id"]) == [backlog.id]
+    end
+
+    # bd-36ytcl: the legacy `status` filter is gone — it is no longer a
+    # filter field at all, so it narrows nothing.
+    test "ignores the removed status filter", %{conn: conn, ws: ws} do
+      {:ok, _a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ws.id})
+      {:ok, _} = Ash.update(b, %{}, action: :close)
+
+      conn = get(conn, ~p"/api/issues?status=open")
+      assert %{"data" => list} = json_response(conn, 200)
+      assert length(list) == 2
+    end
+
+    test "filters by workspace_id", %{conn: conn, ws: ws} do
+      {:ok, ws2} = Ash.create(Workspace, %{name: "other", prefix: "oth"})
+      {:ok, mine} = Ash.create(Issue, %{title: "mine", workspace_id: ws.id})
+      {:ok, _other} = Ash.create(Issue, %{title: "other", workspace_id: ws2.id})
+
+      conn = get(conn, ~p"/api/issues?workspace_id=#{ws.id}")
+      assert %{"data" => list} = json_response(conn, 200)
+      assert Enum.all?(list, &(&1["workspace_id"] == ws.id))
+      assert Enum.any?(list, &(&1["id"] == mine.id))
+    end
+
+    test "returns 400 for an unknown state value", %{conn: conn} do
+      conn = get(conn, ~p"/api/issues?state=zzzzz_not_an_atom_zzzzz")
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    end
+
+    # An existing atom that is not a lifecycle state is still refused, not
+    # passed through into the query.
+    test "returns 400 for a state that is an atom but not a lifecycle state", %{conn: conn} do
+      conn = get(conn, ~p"/api/issues?state=open")
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    end
+  end
+
+  describe "PATCH /api/issues/:id" do
+    test "updates allowed fields", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "before", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{issue.id}", %{title: "after", priority: 0})
+
+      body = json_response(conn, 200)
+      assert body["title"] == "after"
+      assert body["priority"] == 0
+    end
+
+    test "ignores workspace_id (immutable post-create)", %{conn: conn, ws: ws} do
+      {:ok, ws2} = Ash.create(Workspace, %{name: "other", prefix: "oth"})
+      {:ok, issue} = Ash.create(Issue, %{title: "stay-put", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{issue.id}", %{title: "renamed", workspace_id: ws2.id})
+
+      body = json_response(conn, 200)
+      assert body["workspace_id"] == ws.id
+    end
+
+    test "returns 404 on missing", %{conn: conn} do
+      conn = patch(conn, ~p"/api/issues/api-nope", %{title: "x"})
+      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
+
+    # bd-36ytcl: lifecycle moves go through the named transition endpoints;
+    # an update carrying the removed `status` is refused and moves nothing.
+    test "refuses a status change", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "stay backlog", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{issue.id}", %{status: "in_progress"})
+
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+      assert Ash.get!(Issue, issue.id).state == :backlog
+    end
+
+    test "persists and serializes pr_body (bd-53xrmi)", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "needs a body", workspace_id: ws.id})
+
+      conn =
+        patch(conn, ~p"/api/issues/#{issue.id}", %{
+          pr_body: "## Summary\nWorker-authored writeup."
+        })
+
+      body = json_response(conn, 200)
+      assert body["pr_body"] == "## Summary\nWorker-authored writeup."
+
+      assert Ash.get!(Issue, issue.id).pr_body == "## Summary\nWorker-authored writeup."
+    end
+
+    # bd-1ozks5: accept and ignore a deprecated `assignee` on update too.
+    test "accepts and ignores a deprecated `assignee` param, with a warning", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, issue} = Ash.create(Issue, %{title: "before", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{issue.id}", %{title: "after", assignee: "bob"})
+
+      body = json_response(conn, 200)
+      assert body["title"] == "after"
+      refute Map.has_key?(body, "assignee")
+      assert [warning] = body["warnings"]
+      assert warning =~ "assignee"
+    end
+  end
+
+  # P-14 (D-T-5/6/34): the coordinator write surface is an explicit allow-list;
+  # ReviewPatrol / breaker / `pr_opened_*` state, `skills` and the audit label
+  # `change_origin` are never mass-assignable over REST.
+  describe "REST write allow-list (P-14)" do
+    setup %{ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "guarded", workspace_id: ws.id})
+      %{issue: issue}
+    end
+
+    for {field, value} <- [
+          {"circuit_breaker_tripped", true},
+          {"circuit_breaker_reason", "forged"},
+          {"circuit_breaker_sha", "abc"},
+          {"last_verdict", "approve"},
+          {"last_verdict_sha", "abc"},
+          {"review_count", 3},
+          {"review_cap_escalated", true},
+          {"pr_opened_notified_ref", "#7"},
+          {"pr_opened_transitioned_ref", "#7"},
+          {"review_only", true},
+          {"posted_findings", %{}},
+          {"skills", %{"opt_out" => true}},
+          {"change_origin", "loop:proposal:forged"}
+        ] do
+      test "PATCH refuses #{field} with 422 and writes nothing", %{conn: conn, issue: issue} do
+        conn =
+          patch(conn, ~p"/api/issues/#{issue.id}", %{
+            "title" => "renamed",
+            unquote(field) => unquote(Macro.escape(value))
+          })
+
+        assert %{"error" => %{"type" => "validation_error", "message" => msg}} =
+                 json_response(conn, 422)
+
+        assert msg =~ unquote(field)
+        assert Ash.get!(Issue, issue.id).title == "guarded"
+      end
+    end
+
+    test "POST refuses ReviewPatrol seed fields and skills with 422", %{conn: conn, ws: ws} do
+      for {field, value} <- [{"last_verdict", "approve"}, {"review_only", true}, {"skills", %{}}] do
+        conn =
+          post(conn, ~p"/api/issues", %{
+            "title" => "seeded-#{field}",
+            "workspace_id" => ws.id,
+            field => value
+          })
+
+        assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+      end
+    end
+
+    test "PATCH still takes the user-facing fields", %{conn: conn, issue: issue} do
+      conn =
+        patch(conn, ~p"/api/issues/#{issue.id}", %{
+          "title" => "ok",
+          "acceptance" => "ac",
+          "pr_ref" => "#9",
+          "tracker_context_type" => "github",
+          "tracker_context_ref" => "12"
+        })
+
+      assert %{"title" => "ok", "pr_ref" => "#9"} = json_response(conn, 200)
+    end
+
+    test "a key Ash does not know is still the existing 422 (unknown-key behaviour)", %{
+      conn: conn,
+      issue: issue
+    } do
+      conn = patch(conn, ~p"/api/issues/#{issue.id}", %{"no_such_field" => "x"})
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+  end
+
+  describe "POST /api/issues/:id/resume_review (P-14)" do
+    test "clears a tripped breaker and watermarks the clear sha", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "tripped", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.update(issue, %{
+          circuit_breaker_tripped: true,
+          circuit_breaker_reason: "loop",
+          circuit_breaker_sha: "deadbeef"
+        })
+
+      conn = post(conn, ~p"/api/issues/#{issue.id}/resume_review", %{})
+
+      assert %{"id" => id} = json_response(conn, 200)
+      assert id == issue.id
+
+      reloaded = Ash.get!(Issue, issue.id)
+      refute reloaded.circuit_breaker_tripped
+      assert reloaded.circuit_breaker_reason == nil
+      assert reloaded.circuit_breaker_cleared_sha == "deadbeef"
+    end
+
+    test "is idempotent on an untripped ticket", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "calm", workspace_id: ws.id})
+      conn = post(conn, ~p"/api/issues/#{issue.id}/resume_review", %{})
+      assert json_response(conn, 200)
+    end
+
+    test "404s for an unknown ticket", %{conn: conn} do
+      conn = post(conn, ~p"/api/issues/bd-nope00/resume_review", %{})
+      assert json_response(conn, 404)
+    end
+
+    test "is refused for a worker-tier token", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
+      token = Wardmast.MCP.Scope.mint_worker(task)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> post(~p"/api/issues/#{task.id}/resume_review", %{})
+
+      assert json_response(conn, 403)
+    end
+  end
+
+  describe "POST /api/issues — parent_id and deps edges (P-14, D-T-10)" do
+    test "parent_id attaches the parent_of edge server-side", %{conn: conn, ws: ws} do
+      {:ok, parent} = Ash.create(Issue, %{title: "p", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/issues", %{
+          "title" => "child",
+          "workspace_id" => ws.id,
+          "parent_id" => parent.id
+        })
+
+      assert %{"id" => child_id} = json_response(conn, 201)
+
+      assert {:ok, [%{edge: %{type: :parent_of, from_issue_id: from}}]} =
+               Wardmast.Tasks.Dependencies.list(issue_id: child_id)
+
+      assert from == parent.id
+    end
+
+    test "deps attach blocks edges", %{conn: conn, ws: ws} do
+      {:ok, dep} = Ash.create(Issue, %{title: "d", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/issues", %{
+          "title" => "blocked child",
+          "workspace_id" => ws.id,
+          "deps" => [dep.id]
+        })
+
+      assert %{"id" => child_id} = json_response(conn, 201)
+
+      assert {:ok, [%{edge: %{type: :blocks, from_issue_id: from}}]} =
+               Wardmast.Tasks.Dependencies.list(issue_id: child_id)
+
+      assert from == dep.id
+    end
+
+    test "fixes attach fixes edges from the new ticket", %{conn: conn, ws: ws} do
+      {:ok, orig} = Ash.create(Issue, %{title: "orig", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/issues", %{
+          "title" => "follow-up",
+          "workspace_id" => ws.id,
+          "fixes" => [orig.id]
+        })
+
+      assert %{"id" => child_id} = json_response(conn, 201)
+
+      assert {:ok, [%{edge: %{type: :fixes, from_issue_id: ^child_id, to_issue_id: to}}]} =
+               Wardmast.Tasks.Dependencies.list(issue_id: child_id)
+
+      assert to == orig.id
+    end
+
+    test "an unknown parent refuses the whole create (nothing is filed)", %{conn: conn, ws: ws} do
+      conn =
+        post(conn, ~p"/api/issues", %{
+          "title" => "orphaned",
+          "workspace_id" => ws.id,
+          "parent_id" => "api-nope00"
+        })
+
+      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+      assert [] = Wardmast.Tasks.Dedup.local_matches("orphaned", ws.id)
+    end
+  end
+
+  describe "POST /api/issues/:id/close" do
+    test "closes an open issue", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "close me", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/issues/#{issue.id}/close", %{reason: "done"})
+
+      body = json_response(conn, 200)
+      assert body["state"] == "closed"
+      refute is_nil(body["closed_at"])
+    end
+
+    test "returns 422 closing an already-closed issue", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "x", workspace_id: ws.id})
+      {:ok, closed} = Ash.update(issue, %{}, action: :close)
+
+      conn = post(conn, ~p"/api/issues/#{closed.id}/close")
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+  end
+
+  describe "POST /api/issues/:id/reopen" do
+    test "reopens a closed issue", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "reopen me", workspace_id: ws.id})
+      {:ok, closed} = Ash.update(issue, %{}, action: :close)
+
+      conn = post(conn, ~p"/api/issues/#{closed.id}/reopen")
+
+      body = json_response(conn, 200)
+      assert body["state"] == "queued"
+      assert is_nil(body["closed_at"])
+    end
+
+    test "returns 422 reopening an already-open issue", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "x", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/issues/#{issue.id}/reopen")
+
+      assert %{"error" => %{"type" => "validation_error", "details" => %{"errors" => errors}}} =
+               json_response(conn, 422)
+
+      # The refusal names the lifecycle field the CLI keys on.
+      assert Enum.any?(errors, &(&1["field"] == "state"))
+    end
+  end
+
+  describe "POST /api/issues/:id/promote" do
+    test "promotes a task from Backlog to Ready", %{conn: conn, ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "promote me", workspace_id: ws.id, acceptance: "- works"})
+
+      assert issue.state == :backlog
+
+      conn = post(conn, ~p"/api/issues/#{issue.id}/promote")
+
+      body = json_response(conn, 200)
+      assert body["state"] == "queued"
+    end
+
+    test "promoting an already-queued task is a no-op success", %{conn: conn, ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "x", workspace_id: ws.id, acceptance: "- works"})
+
+      {:ok, queued} = Ash.update(issue, %{}, action: :promote_to_ready)
+      assert queued.state == :queued
+
+      conn = post(conn, ~p"/api/issues/#{queued.id}/promote")
+
+      body = json_response(conn, 200)
+      assert body["state"] == "queued"
+    end
+
+    # bd-7mbrlg
+    test "refuses a bug/feature/chore with no acceptance criteria and no waiver", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "no ACs", workspace_id: ws.id, issue_type: :bug})
+
+      conn = post(conn, ~p"/api/issues/#{issue.id}/promote")
+
+      body = json_response(conn, 422)
+      assert body["error"]["type"] == "validation_error"
+      assert body["error"]["message"] =~ "acceptance criteria"
+    end
+
+    test "an acceptance_waived reason allows promotion and is persisted", %{conn: conn, ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "waived", workspace_id: ws.id, issue_type: :chore})
+
+      conn =
+        post(conn, ~p"/api/issues/#{issue.id}/promote", %{
+          "acceptance_waived" => "trivial config bump"
+        })
+
+      body = json_response(conn, 200)
+      assert body["state"] == "queued"
+      assert body["acceptance_waived"] == "trivial config bump"
+    end
+
+    test "task/decision/epic promote fine with no acceptance criteria (exempt)", %{
+      conn: conn,
+      ws: ws
+    } do
+      for type <- [:task, :decision, :epic] do
+        {:ok, issue} =
+          Ash.create(Issue, %{title: "exempt #{type}", workspace_id: ws.id, issue_type: type})
+
+        conn = post(conn, ~p"/api/issues/#{issue.id}/promote")
+        assert json_response(conn, 200)["state"] == "queued"
+      end
+    end
+  end
+
+  describe "POST /api/issues/:id/demote" do
+    test "demotes a task from Ready to Backlog", %{conn: conn, ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "demote me", workspace_id: ws.id, acceptance: "- works"})
+
+      {:ok, queued} = Ash.update(issue, %{}, action: :promote_to_ready)
+      assert queued.state == :queued
+
+      conn = post(conn, ~p"/api/issues/#{queued.id}/demote")
+
+      body = json_response(conn, 200)
+      assert body["state"] == "backlog"
+    end
+
+    test "demoting an already-backlog task is a no-op success", %{conn: conn, ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "x", workspace_id: ws.id})
+
+      assert issue.state == :backlog
+
+      conn = post(conn, ~p"/api/issues/#{issue.id}/demote")
+
+      body = json_response(conn, 200)
+      assert body["state"] == "backlog"
+    end
+  end
+
+  describe "PATCH /api/issues/:id/floor" do
+    # ES2 (bd-3e7inj): the REST surface of `:set_floor`.
+    test "sets a floor on an epic and reports it on the ticket", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+
+      conn = patch(conn, ~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => 1})
+
+      assert %{"floor_priority" => 1, "priority" => priority} = json_response(conn, 200)
+      assert priority == epic.priority
+      assert Ash.get!(Issue, epic.id).floor_priority == 1
+    end
+
+    test "accepts P-notation and clears with null or none", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+
+      assert %{"floor_priority" => 3} =
+               conn
+               |> patch(~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => "P3"})
+               |> json_response(200)
+
+      assert %{"floor_priority" => nil} =
+               conn
+               |> patch(~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => nil})
+               |> json_response(200)
+
+      assert Ash.get!(Issue, epic.id).floor_priority == nil
+
+      {:ok, _} = Ash.update(epic, %{floor_priority: 2}, action: :set_floor)
+
+      assert %{"floor_priority" => nil} =
+               conn
+               |> patch(~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => "none"})
+               |> json_response(200)
+    end
+
+    test "rejects a floor on a non-epic", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{task.id}/floor", %{"floor_priority" => 1})
+
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+      assert Ash.get!(Issue, task.id).floor_priority == nil
+    end
+
+    test "rejects P0, P4 and junk", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+
+      for bad <- [0, 4, "P0", "banana", 1.5] do
+        conn = patch(conn, ~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => bad})
+        assert json_response(conn, 400)["error"]["type"] == "invalid_request"
+      end
+
+      assert Ash.get!(Issue, epic.id).floor_priority == nil
+    end
+
+    test "requires the floor_priority key", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+
+      conn = patch(conn, ~p"/api/issues/#{epic.id}/floor", %{})
+      assert json_response(conn, 400)["error"]["type"] == "invalid_request"
+    end
+
+    test "404s for an unknown ticket", %{conn: conn} do
+      conn = patch(conn, ~p"/api/issues/bd-nope00/floor", %{"floor_priority" => 1})
+      assert json_response(conn, 404)
+    end
+
+    test "is refused for a worker-tier token", %{conn: conn, ws: ws} do
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+      {:ok, task} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
+      token = Wardmast.MCP.Scope.mint_worker(task)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> patch(~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => 1})
+
+      assert json_response(conn, 403)
+      assert Ash.get!(Issue, epic.id).floor_priority == nil
+    end
+
+    test "a change is in the paper trail", %{conn: conn, ws: ws} do
+      require Ash.Query
+      {:ok, epic} = Ash.create(Issue, %{title: "e", workspace_id: ws.id, issue_type: :epic})
+      patch(conn, ~p"/api/issues/#{epic.id}/floor", %{"floor_priority" => 2})
+
+      assert [%{changes: %{"floor_priority" => 2}}] =
+               Issue.Version
+               |> Ash.Query.filter(
+                 version_source_id == ^epic.id and version_action_name == :set_floor
+               )
+               |> Ash.read!()
+    end
+  end
+
+  describe "POST /api/issues/:id/sync_upstream_close" do
+    test "refuses a ticket that is not closed", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "open", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/issues/#{issue.id}/sync_upstream_close")
+
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+
+    test "a closed ticket with no tracker link succeeds without a state change", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, issue} = Ash.create(Issue, %{title: "x", workspace_id: ws.id})
+      {:ok, closed} = Ash.update(issue, %{}, action: :close)
+
+      conn = post(conn, ~p"/api/issues/#{closed.id}/sync_upstream_close")
+
+      body = json_response(conn, 200)
+      assert body["state"] == "closed"
+    end
+
+    test "404s an unknown ticket", %{conn: conn} do
+      conn = post(conn, ~p"/api/issues/bd-nope/sync_upstream_close")
+      assert json_response(conn, 404)
+    end
+  end
+
+  describe "PATCH /api/issues/:id/rank pinned (P-15)" do
+    test "pinned: false alone unpins without moving", %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, pinned} = Wardmast.Tasks.Rank.move(a, %{position: :top, pinned: true})
+      assert pinned.rank_pinned
+
+      conn = patch(conn, ~p"/api/issues/#{a.id}/rank", %{"pinned" => false})
+
+      body = json_response(conn, 200)
+      assert body["rank_pinned"] == false
+      assert body["rank"] == pinned.rank
+    end
+
+    test "a move with pinned: true pins", %{conn: conn, ws: ws} do
+      {:ok, _a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{b.id}/rank", %{"top" => true, "pinned" => true})
+
+      assert json_response(conn, 200)["rank_pinned"] == true
+    end
+  end
+
+  describe "PATCH /api/issues/:id/rank" do
+    test "top moves a ticket ahead of every other ticket in the workspace", %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, _b} = Ash.create(Issue, %{title: "b", workspace_id: ws.id})
+      {:ok, c} = Ash.create(Issue, %{title: "c", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{c.id}/rank", %{"top" => true})
+
+      body = json_response(conn, 200)
+      assert body["rank"] < a.rank
+    end
+
+    test "before_id places a ticket immediately ahead of the target", %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ws.id})
+      {:ok, c} = Ash.create(Issue, %{title: "c", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{c.id}/rank", %{"before_id" => b.id})
+
+      body = json_response(conn, 200)
+      assert a.rank < body["rank"]
+      assert body["rank"] < b.rank
+    end
+
+    test "never changes priority", %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id, priority: 3})
+      {:ok, _b} = Ash.create(Issue, %{title: "b", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{a.id}/rank", %{"bottom" => true})
+
+      body = json_response(conn, 200)
+      assert body["priority"] == 3
+    end
+
+    test "rejects a before_id target in a different workspace", %{conn: conn, ws: ws} do
+      {:ok, other_ws} =
+        Ash.create(Workspace, %{
+          name: "rank-other-#{System.unique_integer([:positive])}",
+          prefix: "rko"
+        })
+
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, other} = Ash.create(Issue, %{title: "other", workspace_id: other_ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{a.id}/rank", %{"before_id" => other.id})
+
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+
+    test "rejects a body with no rank arguments", %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{a.id}/rank", %{})
+
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    end
+
+    test "rejects a body with more than one rank argument", %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, b} = Ash.create(Issue, %{title: "b", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{a.id}/rank", %{"top" => true, "before_id" => b.id})
+
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+
+      # Unmoved.
+      assert Ash.get!(Issue, a.id).rank == a.rank
+    end
+
+    test "rejects a before_id target that is the ticket itself", %{conn: conn, ws: ws} do
+      {:ok, a} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+
+      conn = patch(conn, ~p"/api/issues/#{a.id}/rank", %{"before_id" => a.id})
+
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+  end
+
+  # bd-9so315 — post-merge verification over REST (the `arb` CLI's transport).
+  describe "append_notes over REST (P-08, D-T-19)" do
+    test "PATCH appends to notes server-side", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "n", workspace_id: ws.id, notes: "first"})
+
+      conn1 = patch(conn, ~p"/api/issues/#{issue.id}", %{append_notes: "second"})
+      assert json_response(conn1, 200)["notes"] == "first\n\nsecond"
+    end
+
+    test "an append never clobbers a write that landed after the caller's read", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, issue} = Ash.create(Issue, %{title: "n", workspace_id: ws.id})
+      stale = Ash.get!(Issue, issue.id)
+
+      # A worker's progress write lands between the caller's GET and its PATCH.
+      {:ok, _} = Ash.update(stale, %{notes: "from-worker"}, action: :update)
+
+      conn1 = patch(conn, ~p"/api/issues/#{issue.id}", %{append_notes: "from-cli"})
+      assert json_response(conn1, 200)["notes"] == "from-worker\n\nfrom-cli"
+    end
+
+    test "append_notes together with notes is a 422", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "n", workspace_id: ws.id})
+
+      conn1 = patch(conn, ~p"/api/issues/#{issue.id}", %{notes: "a", append_notes: "b"})
+      assert json_response(conn1, 422)
+    end
+
+    test "an empty string clears a text field", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "n", workspace_id: ws.id, tracker_ref: "X-1"})
+
+      conn1 = patch(conn, ~p"/api/issues/#{issue.id}", %{tracker_ref: ""})
+      assert json_response(conn1, 200)["tracker_ref"] == nil
+    end
+  end
+
+  describe "verify_after_deploy over REST" do
+    test "create + patch set the flag and it is rendered", %{conn: conn, ws: ws} do
+      conn1 =
+        post(conn, ~p"/api/issues", %{
+          title: "flagged",
+          workspace_id: ws.id,
+          verify_after_deploy: true
+        })
+
+      body = json_response(conn1, 201)
+      assert body["verify_after_deploy"] == true
+
+      conn2 = patch(conn, ~p"/api/issues/#{body["id"]}", %{verify_after_deploy: false})
+      assert json_response(conn2, 200)["verify_after_deploy"] == false
+    end
+  end
+
+  describe "POST /api/issues/:id/verify" do
+    setup %{ws: ws} do
+      {:ok, issue} =
+        Ash.create(Issue, %{title: "park me", workspace_id: ws.id, verify_after_deploy: true})
+
+      # bd-842qio: only work in progress parks for verification.
+      {:ok, awaiting: put_state!(issue, :verifying)}
+    end
+
+    test "observed closes the task and persists the evidence", %{conn: conn, awaiting: task} do
+      conn =
+        post(conn, ~p"/api/issues/#{task.id}/verify", %{
+          outcome: "observed",
+          evidence: "restarted; new capture_source path fires"
+        })
+
+      body = json_response(conn, 200)
+      assert body["state"] == "closed"
+      assert body["verification_outcome"] == "observed"
+      assert body["verification_evidence"] == "restarted; new capture_source path fires"
+    end
+
+    test "failed reopens the task and persists the evidence", %{conn: conn, awaiting: task} do
+      conn =
+        post(conn, ~p"/api/issues/#{task.id}/verify", %{
+          outcome: "failed",
+          evidence: "doctor still green with zero repos"
+        })
+
+      body = json_response(conn, 200)
+      assert body["state"] == "queued"
+      assert body["verification_outcome"] == "failed"
+      assert body["verification_evidence"] == "doctor still green with zero repos"
+    end
+
+    test "a task that is not awaiting verification is rejected", %{conn: conn, ws: ws} do
+      {:ok, other} = Ash.create(Issue, %{title: "not parked", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/issues/#{other.id}/verify", %{outcome: "observed", evidence: "x"})
+
+      assert %{"error" => %{"type" => "conflict"}} = json_response(conn, 409)
+    end
+
+    test "blank evidence is rejected", %{conn: conn, awaiting: task} do
+      conn = post(conn, ~p"/api/issues/#{task.id}/verify", %{outcome: "observed", evidence: "  "})
+      assert json_response(conn, 422)
+    end
+  end
+
+  describe "GET /api/issues/ready" do
+    test "returns only queued issues with no open blockers", %{conn: conn, ws: ws} do
+      # bd-6zapbl: the Ready column — queued tickets, never Backlog ones.
+      queued = fn title ->
+        {:ok, issue} = Ash.create(Issue, %{title: title, workspace_id: ws.id})
+
+        {:ok, issue} =
+          Ash.update(issue, %{acceptance_waived: "fixture"}, action: :promote_to_ready)
+
+        issue
+      end
+
+      blocker = queued.("blocker")
+      blocked = queued.("blocked")
+      free = queued.("free")
+      {:ok, backlog} = Ash.create(Issue, %{title: "backlog", workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{
+          from_issue_id: blocked.id,
+          to_issue_id: blocker.id,
+          type: :depends_on
+        })
+
+      conn = get(conn, ~p"/api/issues/ready")
+      assert %{"data" => list} = json_response(conn, 200)
+      ids = Enum.map(list, & &1["id"])
+
+      # blocker has no incoming gating deps from itself, it's ready;
+      # blocked is gated by an open issue, NOT ready.
+      assert blocker.id in ids
+      assert free.id in ids
+      refute blocked.id in ids
+      refute backlog.id in ids
+    end
+  end
+
+  # bd-9zuvbh — the ReviewGate park has to be visible to a human, or class C's
+  # terminal state is just a quieter way of losing the work. bd-36ytcl: the
+  # park IS the ticket's attention cause now, so it rides on every ticket
+  # object (the dedicated `review_parked` route is gone).
+  describe "a ReviewGate park over REST" do
+    test "shows as the ticket's attention cause, with when it parked", %{conn: conn, ws: ws} do
+      {:ok, parked} = Ash.create(Issue, %{title: "parked", workspace_id: ws.id})
+      {:ok, :claimed, _} = Wardmast.Tasks.ReviewPark.park(parked.id, :inconclusive)
+
+      body = conn |> get(~p"/api/issues/#{parked.id}") |> json_response(200)
+
+      assert body["attention_cause"] == "inconclusive"
+      assert is_binary(body["attention_since"])
+      refute Map.has_key?(body, "review_park_reason")
+    end
+
+    test "the removed review_parked route no longer lists parks", %{conn: conn, ws: ws} do
+      {:ok, parked} = Ash.create(Issue, %{title: "parked", workspace_id: ws.id})
+      {:ok, :claimed, _} = Wardmast.Tasks.ReviewPark.park(parked.id, :reviewer_timeout)
+
+      # Falls through to `GET /api/issues/:id` with a non-existent id.
+      conn = get(conn, "/api/issues/review_parked")
+      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
+  end
+
+  # bd-13pqcp: the per-ticket provider constraint over REST.
+  describe "provider_constraint" do
+    test "POST /api/issues sets it, canonicalized, and PATCH changes and clears it", %{
+      conn: conn,
+      ws: ws
+    } do
+      created =
+        conn
+        |> post(~p"/api/issues", %{
+          title: "no agy here",
+          workspace_id: ws.id,
+          provider_constraint: %{exclude: ["agy"]}
+        })
+        |> json_response(201)
+
+      assert created["provider_constraint"] == %{"exclude" => ["gemini"]}
+
+      patched =
+        conn
+        |> patch(~p"/api/issues/#{created["id"]}", %{provider_constraint: %{require: "claude"}})
+        |> json_response(200)
+
+      assert patched["provider_constraint"] == %{"require" => ["claude"]}
+
+      cleared =
+        conn
+        |> patch(~p"/api/issues/#{created["id"]}", %{provider_constraint: %{}})
+        |> json_response(200)
+
+      assert cleared["provider_constraint"] == nil
+
+      shown = conn |> get(~p"/api/issues/#{created["id"]}") |> json_response(200)
+      assert shown["provider_constraint"] == nil
+    end
+
+    test "an unknown provider, or both keys, is a validation error", %{conn: conn, ws: ws} do
+      for constraint <- [
+            %{require: ["nope"]},
+            %{require: ["claude"], exclude: ["codex"]},
+            %{prefer: ["claude"]}
+          ] do
+        conn =
+          post(conn, ~p"/api/issues", %{
+            title: "bad constraint",
+            workspace_id: ws.id,
+            provider_constraint: constraint
+          })
+
+        assert json_response(conn, 422), inspect(constraint)
+      end
+    end
+
+    test "an unconstrained ticket reports null", %{conn: conn, ws: ws} do
+      created =
+        conn
+        |> post(~p"/api/issues", %{title: "plain", workspace_id: ws.id})
+        |> json_response(201)
+
+      assert Map.has_key?(created, "provider_constraint")
+      assert created["provider_constraint"] == nil
+    end
+  end
+end

@@ -1,0 +1,128 @@
+defmodule Wardmast.Doctor.Scope do
+  @moduledoc """
+  What this install uses, for `arb server doctor`'s applicability (bd-7pnat1,
+  `GET /api/server/doctor_scope`).
+
+  The doctor reports a check only when it can matter here: grok's login when a
+  workspace routes to grok, the agy jail when agy is configured and not paused,
+  podman readiness when a workspace's sandbox or review backend is podman, the
+  egress jail when a workspace enforces an egress allowlist. The CLI cannot
+  derive those from `GET /api/workspaces` alone (an attached account, a repo
+  override and a provider pause all count), so the server answers them from the
+  same readers the dispatch path uses:
+
+    * `providers` — per adapter type (`claude`, `codex`, `gemini` = agy,
+      `grok`): `in_use` (some workspace's implementer or reviewer set, per
+      `Wardmast.Accounts.ProviderSettings.effective/2`, names it; grok also when
+      `Wardmast.Agents.GrokRouting.in_use?/1`), the workspaces that use it, and
+      `paused` (a provider-wide or account-level pause,
+      `Wardmast.Providers.Pause.blocking/2`) with its `pause_reason`.
+    * `podman_in_use` — a workspace, or a repo override, resolves
+      `agent.security.sandbox.backend` or `agent.security.sandbox.review_backend` to podman.
+    * `egress_enforced` — a workspace or repo override resolves a non-`open`
+      egress.
+  """
+
+  alias Wardmast.Accounts.ProviderSettings
+  alias Wardmast.Agents.GrokRouting
+  alias Wardmast.Agents.SecurityPolicy
+  alias Wardmast.Nodes.Allowlist
+  alias Wardmast.Nodes.Placement
+  alias Wardmast.Providers.Pause
+  alias Wardmast.Tasks.Workspace
+
+  @providers ~w(claude codex gemini grok)
+
+  @doc "The scope report. Option `:workspaces` overrides the read (tests)."
+  @spec report(keyword()) :: map()
+  def report(opts \\ []) do
+    workspaces = Keyword.get_lazy(opts, :workspaces, fn -> Ash.read!(Workspace) end)
+    policies = Enum.flat_map(workspaces, &policies/1)
+
+    %{
+      providers: Map.new(@providers, &{&1, provider(&1, workspaces)}),
+      podman_in_use: Enum.any?(policies, &podman?/1),
+      egress_enforced: Enum.any?(policies, &(SecurityPolicy.egress(&1) != :open)),
+      placement_nodes: placement_nodes(workspaces, opts)
+    }
+  end
+
+  # bd-d7tb2d: each workspace's effective node set — `worker.placement` and
+  # `worker.placement_nodes` (`Wardmast.Nodes.Allowlist`) applied to the enrolled nodes.
+  defp placement_nodes(workspaces, opts) do
+    rows = Keyword.get_lazy(opts, :nodes, &Wardmast.Nodes.Overview.node_rows/0)
+    rows = Enum.reject(rows, &(Map.get(&1, :kind) == :local or Map.get(&1, :state) == :revoked))
+
+    for ws <- workspaces do
+      mode = Placement.mode(ws)
+      allowed = Allowlist.selectors(ws)
+
+      nodes =
+        if mode == :local_only,
+          do: [],
+          else:
+            rows
+            |> Enum.filter(&Allowlist.allows?(allowed, &1))
+            |> Enum.map(&(Map.get(&1, :name) || &1.id))
+            |> Enum.sort()
+
+      %{
+        workspace: ws.name,
+        mode: to_string(mode),
+        allowlist: allowed && Allowlist.describe(allowed),
+        nodes: nodes
+      }
+    end
+  end
+
+  defp provider(type, workspaces) do
+    using = for ws <- workspaces, uses?(ws, type), do: ws.name
+
+    pause = pause(type, workspaces, using)
+
+    %{
+      in_use: using != [],
+      workspaces: using,
+      paused: pause != nil,
+      pause_reason: pause && (pause.reason || "no reason given")
+    }
+  end
+
+  # A provider-wide pause, else the pause on the account every using workspace
+  # meters the provider under (`grok:default` is account-scoped). A provider
+  # still spawnable from one workspace is not paused.
+  defp pause(type, workspaces, using) do
+    Pause.for_provider(type) ||
+      case for(ws <- workspaces, ws.name in using, do: Pause.blocking(type, ws.id)) do
+        [] -> nil
+        pauses -> if Enum.all?(pauses, & &1), do: hd(pauses)
+      end
+  end
+
+  defp uses?(ws, type) do
+    candidate_types(ws) |> Enum.member?(type) or (type == "grok" and GrokRouting.in_use?(ws))
+  end
+
+  defp candidate_types(ws) do
+    for role <- ProviderSettings.roles(),
+        c <- ProviderSettings.effective(ws, role).candidates,
+        do: c.agent_type
+  end
+
+  # The workspace's own resolved policy plus one per `agent.security.repos`
+  # override: a repo can pick podman or an allowlist while the workspace
+  # default does not.
+  defp policies(ws) do
+    repos =
+      case get_in(ws.config || %{}, ["agent", "security", "repos"]) do
+        repos when is_map(repos) -> Map.keys(repos)
+        _ -> []
+      end
+
+    [SecurityPolicy.resolve(ws) | Enum.map(repos, &SecurityPolicy.resolve(ws, %{}, &1))]
+  end
+
+  defp podman?(policy) do
+    :podman in [SecurityPolicy.sandbox_backend(policy), SecurityPolicy.review_backend(policy)]
+  end
+end

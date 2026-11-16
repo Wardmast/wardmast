@@ -1,12 +1,12 @@
 # Augmenting the paced quota strategy with price, competence, failure cost and priority: decision
 
 **Task:** bd-9ck2a7 (decision, GitHub #17) · **Epic:** bd-9dr65f · **Builds
-on:** the paced gate (`Arbiter.Quota.Pace`, `Arbiter.Quota.Gate`; bd-2daof2,
-bd-clzkvp), most-quota routing (`Arbiter.Quota.Headroom`,
-`Arbiter.Agents.ProviderRouting`; bd-40pzpj), cross-family review
-(`Arbiter.Agents.ReviewerRouting`; bd-a1ke2c), the Loop's Stage 3 canary
-(`Arbiter.Loop.Canary`; bd-6edc0u) and its unit of scarcity
-(`Arbiter.Loop.Scarcity`; bd-69gk52, [loop-scarcity-unit](../loop-scarcity-unit.md))
+on:** the paced gate (`Wardmast.Quota.Pace`, `Wardmast.Quota.Gate`; bd-2daof2,
+bd-clzkvp), most-quota routing (`Wardmast.Quota.Headroom`,
+`Wardmast.Agents.ProviderRouting`; bd-40pzpj), cross-family review
+(`Wardmast.Agents.ReviewerRouting`; bd-a1ke2c), the Loop's Stage 3 canary
+(`Wardmast.Loop.Canary`; bd-6edc0u) and its unit of scarcity
+(`Wardmast.Loop.Scarcity`; bd-69gk52, [loop-scarcity-unit](../loop-scarcity-unit.md))
 · **Reconciles with:** [guardrail profiles](guardrail-profiles.md) (bd-8apkz6,
 epic bd-1e80nw) · **Status:** proposed 2026-10-01. Nothing here is
 implemented. The ticket plan is in [§11](#11-phased-plan-and-ticket-breakdown).
@@ -18,7 +18,7 @@ feasibility from the gate to a free seat once `enforce` is on. See its §8.
 ## Decision
 
 1. **The paced gate stays the base layer and the only feasibility test.** A
-   pool is feasible for a dispatch exactly when `Arbiter.Quota.Gate` would let
+   pool is feasible for a dispatch exactly when `Wardmast.Quota.Gate` would let
    that dispatch through today. Every new quantity reads the paced line through
    `Gate.pace/6`, and so through `Pace.evaluate/4`. Nothing re-derives a
    ceiling. There is no second router: every addition is one more step in the
@@ -103,18 +103,18 @@ model that competes with the gate.
 
 | Mechanism | Where | What it decides | What this design adds |
 |---|---|---|---|
-| Pace verdict | `Pace.evaluate/4` (`apps/arbiter/lib/arbiter/quota/pace.ex:72-87`), `side_ceiling/2` (`:123-128`) | Per window: the ceiling now (paced `max(floor, elapsed)` or flat, composed `min(account, workspace)`) and the verdict `:ok` / `:approaching` / `:holding` / `:sampling` | One side shape for the P0 exemption (§4.2) |
-| Gate | `Gate.pace/6` (`apps/arbiter/lib/arbiter/quota/gate.ex:582-595`), `pace_thresholds/2` (`:626-635`), `side/2` (`:637-650`), `gating_window/3` (`:1010-1022`) with its rules (`:1032-1045`), `Throttle.check/4` (`apps/arbiter/lib/arbiter/quota/gate/throttle.ex:31`) | Allow or hold | A `:priority` option (§4.2) |
-| Headroom | `Headroom.binding/3` (`apps/arbiter/lib/arbiter/quota/headroom.ex:60-76`) | The binding window's `ceiling − used` | `windows/3`, every trusted window's headroom (§2.3) |
-| Implementer routing | `ProviderRouting` (`apps/arbiter/lib/arbiter/agents/provider_routing.ex`): `check/2` (`:615-633`), `check_quota/2` (`:718-729`), `rank/1` (`:734-741`), pin and fallback (`:379-428`) | Candidates, drop reasons, rank by headroom, the pin | Capability and floor checks; ranking by score (§8) |
-| Reviewer routing | `ReviewerRouting` (`apps/arbiter/lib/arbiter/agents/reviewer_routing.ex`): `check/2` (`:457-476`), `check_quota/2` (`:536-547`), `rank/1` (`:554-561`), the family rule (`:184-231`) | The reviewer, cross-family | A capability check; ranking by price; a projection the implementer's score reads (§3.4) |
-| Routing policy | `Routing.choose/3` (`apps/arbiter/lib/arbiter/agents/routing.ex:50-53`); `ByDifficulty.choose/3` (`apps/arbiter/lib/arbiter/agents/routing/by_difficulty.ex:132-138`) and its canary overlay (`:145-152`) | Model tier and thinking | The policy floor and the blast-radius clamp (§6.4) |
-| Dispatch | `Dispatch.maybe_route/3` (`apps/arbiter/lib/arbiter/worker/dispatch.ex:1271-1294`), `unroute/1` (`:1305-1312`), `apply_quota_gate/5` (`:1523-1566`), the spawn's model override (`:2724-2729`) | Where routing and the gate run | Carry the chosen model; the deferred hold |
-| Hold queue | `DispatchQueue.hold/5` (`apps/arbiter/lib/arbiter/workflows/dispatch_queue.ex:203-212`); drains on `quota_updated` and the 5h reset timer (`:505-511`) | Held intents, drained priority-first | `not_before` on an item (§4.3) |
-| Board | `Board.Snapshot.quota_hold/2` (`apps/arbiter/lib/arbiter/board/snapshot.ex:631-641`), per-ticket holds (`:686-708`) | The Autopilot hold | A priority-aware hold for exempt work (§4.2) |
-| Stage 3 canary | `Loop.Canary` (`apps/arbiter/lib/arbiter/loop/canary.ex`): `arm/2` (`:303-310`), `overlay/3` (`:322-330`); `Loop.Canary.Metrics.collect/2` (`apps/arbiter/lib/arbiter/loop/canary/metrics.ex:51`) | 50/50 arms by task-id hash, first-pass convergence, auto-revert | Canaries on matrix rows (R13) |
-| Unit of scarcity | `Loop.Scarcity`: `weights/0` (`apps/arbiter/lib/arbiter/loop/scarcity.ex:143`), `calibrate/3` (`:181`), `window_share/2` (`:220`) | A run's share of the Claude 5h window | Calibration per pool, window and model (R3) |
-| Cost estimator | `Usage.Estimate` (`apps/arbiter/lib/arbiter/usage/estimate.ex`): n ≥ 10 per rung (`:77`), 30-day half-life (`:76`) | A cost range per task | The fallback-ladder discipline for competence (§3.2) |
+| Pace verdict | `Pace.evaluate/4` (`apps/wardmast/lib/wardmast/quota/pace.ex:72-87`), `side_ceiling/2` (`:123-128`) | Per window: the ceiling now (paced `max(floor, elapsed)` or flat, composed `min(account, workspace)`) and the verdict `:ok` / `:approaching` / `:holding` / `:sampling` | One side shape for the P0 exemption (§4.2) |
+| Gate | `Gate.pace/6` (`apps/wardmast/lib/wardmast/quota/gate.ex:582-595`), `pace_thresholds/2` (`:626-635`), `side/2` (`:637-650`), `gating_window/3` (`:1010-1022`) with its rules (`:1032-1045`), `Throttle.check/4` (`apps/wardmast/lib/wardmast/quota/gate/throttle.ex:31`) | Allow or hold | A `:priority` option (§4.2) |
+| Headroom | `Headroom.binding/3` (`apps/wardmast/lib/wardmast/quota/headroom.ex:60-76`) | The binding window's `ceiling − used` | `windows/3`, every trusted window's headroom (§2.3) |
+| Implementer routing | `ProviderRouting` (`apps/wardmast/lib/wardmast/agents/provider_routing.ex`): `check/2` (`:615-633`), `check_quota/2` (`:718-729`), `rank/1` (`:734-741`), pin and fallback (`:379-428`) | Candidates, drop reasons, rank by headroom, the pin | Capability and floor checks; ranking by score (§8) |
+| Reviewer routing | `ReviewerRouting` (`apps/wardmast/lib/wardmast/agents/reviewer_routing.ex`): `check/2` (`:457-476`), `check_quota/2` (`:536-547`), `rank/1` (`:554-561`), the family rule (`:184-231`) | The reviewer, cross-family | A capability check; ranking by price; a projection the implementer's score reads (§3.4) |
+| Routing policy | `Routing.choose/3` (`apps/wardmast/lib/wardmast/agents/routing.ex:50-53`); `ByDifficulty.choose/3` (`apps/wardmast/lib/wardmast/agents/routing/by_difficulty.ex:132-138`) and its canary overlay (`:145-152`) | Model tier and thinking | The policy floor and the blast-radius clamp (§6.4) |
+| Dispatch | `Dispatch.maybe_route/3` (`apps/wardmast/lib/wardmast/worker/dispatch.ex:1271-1294`), `unroute/1` (`:1305-1312`), `apply_quota_gate/5` (`:1523-1566`), the spawn's model override (`:2724-2729`) | Where routing and the gate run | Carry the chosen model; the deferred hold |
+| Hold queue | `DispatchQueue.hold/5` (`apps/wardmast/lib/wardmast/workflows/dispatch_queue.ex:203-212`); drains on `quota_updated` and the 5h reset timer (`:505-511`) | Held intents, drained priority-first | `not_before` on an item (§4.3) |
+| Board | `Board.Snapshot.quota_hold/2` (`apps/wardmast/lib/wardmast/board/snapshot.ex:631-641`), per-ticket holds (`:686-708`) | The Autopilot hold | A priority-aware hold for exempt work (§4.2) |
+| Stage 3 canary | `Loop.Canary` (`apps/wardmast/lib/wardmast/loop/canary.ex`): `arm/2` (`:303-310`), `overlay/3` (`:322-330`); `Loop.Canary.Metrics.collect/2` (`apps/wardmast/lib/wardmast/loop/canary/metrics.ex:51`) | 50/50 arms by task-id hash, first-pass convergence, auto-revert | Canaries on matrix rows (R13) |
+| Unit of scarcity | `Loop.Scarcity`: `weights/0` (`apps/wardmast/lib/wardmast/loop/scarcity.ex:143`), `calibrate/3` (`:181`), `window_share/2` (`:220`) | A run's share of the Claude 5h window | Calibration per pool, window and model (R3) |
+| Cost estimator | `Usage.Estimate` (`apps/wardmast/lib/wardmast/usage/estimate.ex`): n ≥ 10 per rung (`:77`), 30-day half-life (`:76`) | A cost range per task | The fallback-ladder discipline for competence (§3.2) |
 
 ### 1.2 One definition of the line
 
@@ -267,7 +267,7 @@ All of it exists today. Phase 1 adds no instrumentation.
 
 | Measure | Definition | Records |
 |---|---|---|
-| Round-1 approve rate (`q`) | Among tasks with a ReviewGate round, the share whose first `role = 'review'` round has `converged = 1`. This is the **same definition** `Loop.Canary.Metrics` uses (`apps/arbiter/lib/arbiter/loop/canary/metrics.ex:124-144`) and the guardrail design's "clean run" uses (guardrail-profiles §6.2) | `review_gate_rounds` |
+| Round-1 approve rate (`q`) | Among tasks with a ReviewGate round, the share whose first `role = 'review'` round has `converged = 1`. This is the **same definition** `Loop.Canary.Metrics` uses (`apps/wardmast/lib/wardmast/loop/canary/metrics.ex:124-144`) and the guardrail design's "clean run" uses (guardrail-profiles §6.2) | `review_gate_rounds` |
 | Review rounds per task (`R`) | The number of `role = 'review'` rounds, across all attempts | `review_gate_rounds` |
 | Fix passes per task (`F`) | The number of `role = 'impl'` rounds, the ReviewGate implementer rounds. CI fix passes (`worker_runs.kind = 'fix_pass'`) are counted separately | `review_gate_rounds`, `worker_runs` |
 | Attempts per task (`A`) | Base implement runs (`kind = 'implement'`, `role = 'base'`): 1 plus the re-dispatches | `worker_runs` |
@@ -594,7 +594,7 @@ exemption stops; it is then clamped to each paced side's flat ceiling.
 The effective value is `min(account, workspace)`, where an absent workspace
 value means "the account's" and `"none"` means no exemption. That's the P7
 tighten-only rule, with one deliberate difference from `Gate.strictest/2`
-(`apps/arbiter/lib/arbiter/quota/gate.ex:682-685`). There, a workspace value
+(`apps/wardmast/lib/wardmast/quota/gate.ex:682-685`). There, a workspace value
 applies when the account sets none. Here, the account must grant the
 exemption: an account without the setting exempts nothing, whatever the
 workspace says. The account values are validated in
@@ -616,7 +616,7 @@ existing `quota_gate_bypass` event. The record comes from
 trusted window.
 
 **The board.** Per-ticket holds (`ticket_quota_holds/3`,
-`apps/arbiter/lib/arbiter/board/snapshot.ex:686-708`) evaluate each card with its
+`apps/wardmast/lib/wardmast/board/snapshot.ex:686-708`) evaluate each card with its
 own task, so a P0 card reads as dispatchable. The board-wide `quota_hold/2`
 (`:631-641`) evaluates with no task, so it would keep Autopilot from promoting
 that card. R7 makes it priority-aware per card: with routing on, each card's
@@ -657,7 +657,7 @@ formula.
 
 - The router returns a third outcome, `{:defer, until, decision}`.
 - Dispatch holds the intent with `DispatchQueue.hold/5`
-  (`apps/arbiter/lib/arbiter/workflows/dispatch_queue.ex:203-212`). The reason
+  (`apps/wardmast/lib/wardmast/workflows/dispatch_queue.ex:203-212`). The reason
   is `%{kind: :deferred, until: reset_at, pool: π*, phrase: "deferred until
   claude 5h resets at 17:40Z (P3)"}`.
 - The queue stores `not_before` on the item and arms a timer for it, as it
@@ -717,9 +717,9 @@ A pool is an (account, bucket group) pair. agy has two pools,
 Both pieces needed to price a pool already exist:
 
 - `Snapshot.normalize(quota, model: m)`
-  (`apps/arbiter/lib/arbiter/quota/gate/snapshot.ex:111`) projects the group
+  (`apps/wardmast/lib/wardmast/quota/gate/snapshot.ex:111`) projects the group
   that model `m` draws on onto the gate's primary and secondary windows.
-- `ModelFamily.classify/2` (`apps/arbiter/lib/arbiter/agents/model_family.ex:75-88`)
+- `ModelFamily.classify/2` (`apps/wardmast/lib/wardmast/agents/model_family.ex:75-88`)
   names the same pool for routing, using the same prefix rule: `claude-*` and
   `gpt-*` are the Claude/GPT pool, and anything else is the Gemini pool.
 
@@ -734,7 +734,7 @@ What's missing is a candidate for each pool.
   new `ModelFamily.models_for_tier/3` returns the list, and `model_for_tier/3`
   keeps returning the first entry.
 - **Expansion.** `ProviderRouting.entry/3`
-  (`apps/arbiter/lib/arbiter/agents/provider_routing.ex:586-598`) becomes
+  (`apps/wardmast/lib/wardmast/agents/provider_routing.ex:586-598`) becomes
   `entries/3`, with one entry per listed model for the policy's tier. With
   `routing.scoring.allow_upgrade: n`, it also adds the models of up to `n`
   tiers above the policy's. It **never goes below the policy's tier** (§6.4).
@@ -742,7 +742,7 @@ What's missing is a candidate for each pool.
   feasibility (`gate.check` with `model:`), headroom (`Headroom` with
   `model:`), and the competence cell (provider, model).
 - **Carrying the choice.** The selection gains `:model`. `Dispatch.maybe_route/3`
-  (`apps/arbiter/lib/arbiter/worker/dispatch.ex:1271-1294`) puts it in
+  (`apps/wardmast/lib/wardmast/worker/dispatch.ex:1271-1294`) puts it in
   `opts[:model]`, which the spawn already applies last (`apply_model_override`,
   `:2729`). `unroute/1` (`:1305-1312`) strips it when routing set it, as it
   strips `:routed_agent_type`, so a held intent routes afresh on replay.
@@ -763,7 +763,7 @@ At filing time (2026-09-21 03:27Z), with the paced weekly floor of 0.20:
 | agy Claude/GPT, weekly | 0.122 | 09-24 01:27Z | 0.583 | 0.583 | 0.461 | `:ok` |
 
 A D1 ticket routes to `economy`, which agy's built-in map
-(`apps/arbiter/lib/arbiter/agents/gemini/config.ex:46-51`) resolves to
+(`apps/wardmast/lib/wardmast/agents/gemini/config.ex:46-51`) resolves to
 `gemini-3.8-flash-low`. That's the Gemini pool, which was 4.3 points *ahead*
 of pace, while the Claude/GPT pool sat 46 points under its line. This is the
 filing's Insight 2 in `Pace` terms: 23.8% left with two days to go was the
@@ -823,8 +823,8 @@ the matrix are what stop an upgrade from looking free.
 
 ### 6.1 Order
 
-`ProviderRouting.check/2` (`apps/arbiter/lib/arbiter/agents/provider_routing.ex:615-633`)
-and `ReviewerRouting.check/2` (`apps/arbiter/lib/arbiter/agents/reviewer_routing.ex:457-476`)
+`ProviderRouting.check/2` (`apps/wardmast/lib/wardmast/agents/provider_routing.ex:615-633`)
+and `ReviewerRouting.check/2` (`apps/wardmast/lib/wardmast/agents/reviewer_routing.ex:457-476`)
 run their drop reasons in order and stop at the first. The new checks go after
 the existing availability checks and **before** `check_quota`. Quota is never
 evaluated for an ineligible candidate, and nothing is weighed until the
@@ -915,7 +915,7 @@ There are two floors. Both clamp the tier the router may choose.
    changes to production data. It's **operator-owned and outside the Loop's
    reach**. No canary, proposal or matrix update may lower it.
    `ByDifficulty.merged_rule/3`
-   (`apps/arbiter/lib/arbiter/agents/routing/by_difficulty.ex:145-152`) applies
+   (`apps/wardmast/lib/wardmast/agents/routing/by_difficulty.ex:145-152`) applies
    it after `Canary.overlay/3`, so a canaried rule is clamped too. Such a
    dispatch didn't get the canaried rule, so it's recorded as clamped and
    `Canary.Metrics` leaves it out of the canary arm (R8).
@@ -937,7 +937,7 @@ floor: a subject's tier and `max_difficulty`, and permissions for prod reach.
 This floor is the *capability* half: how strong the model must be, not how far
 it's trusted.
 
-**As built (R8, bd-c675ny).** `Arbiter.Agents.Floors` holds both floors.
+**As built (R8, bd-c675ny).** `Wardmast.Agents.Floors` holds both floors.
 
 - The repo floor is `routing.floors.repos.<repo>.min_model_tier`, on the ladder
   `economy < standard < premium < flagship`. `Routing.choose/3` clamps the
@@ -1029,27 +1029,27 @@ the price of expiring quota is close to zero by construction.
 
 | # | Where | Today | Change | Switch |
 |---|---|---|---|---|
-| E1 | `Pace.side_ceiling/2` (`apps/arbiter/lib/arbiter/quota/pace.ex:123-128`); `t:side/0` (`:47`); `t:t/0`'s `mode` (`:58`) | Paced and flat sides | `{:paced_exempt, floor, flat, cap}` resolves to `{max(max(floor, elapsed), cap), :exempt}`, with `cap = min(exempt_cap, flat)` | Exemption (§4.2) |
-| E2 | `Gate.side/2` (`apps/arbiter/lib/arbiter/quota/gate.ex:637-650`), `pace_thresholds/2` (`:626-635`), `pace/6` (`:582-595`), `gating_window/3` (`:1010-1022`) | No priority | A `:priority` option; an exempt side when the resolved `pace_exempt_priority` covers the task | Exemption |
+| E1 | `Pace.side_ceiling/2` (`apps/wardmast/lib/wardmast/quota/pace.ex:123-128`); `t:side/0` (`:47`); `t:t/0`'s `mode` (`:58`) | Paced and flat sides | `{:paced_exempt, floor, flat, cap}` resolves to `{max(max(floor, elapsed), cap), :exempt}`, with `cap = min(exempt_cap, flat)` | Exemption (§4.2) |
+| E2 | `Gate.side/2` (`apps/wardmast/lib/wardmast/quota/gate.ex:637-650`), `pace_thresholds/2` (`:626-635`), `pace/6` (`:582-595`), `gating_window/3` (`:1010-1022`) | No priority | A `:priority` option; an exempt side when the resolved `pace_exempt_priority` covers the task | Exemption |
 | E3 | `Gate.validate_quota_config/1` (`gate.ex:361-370`), and the workspace config validator | — | Validate `pace_exempt_priority` and the per-window exempt caps | Exemption |
-| E4 | `Throttle.check/4` (`apps/arbiter/lib/arbiter/quota/gate/throttle.ex:31`) | Ignores the task | Passes `task.priority` | Exemption |
-| E5 | `Headroom` (`apps/arbiter/lib/arbiter/quota/headroom.ex:60-102`) | `binding/3` | Add `windows/3`: every trusted window, through the same `Gate.pace/6` path. A `:priority` option | Price |
-| E6 | New `Arbiter.Quota.Price` | — | Pure: the price from `Headroom.windows/3` and a draw, and the what-if reset price for deferral | Price, defer |
-| E7 | `ProviderRouting.entry/3` and `predicted_model/3` (`apps/arbiter/lib/arbiter/agents/provider_routing.ex:586-613`) | One model per account | `entries/3`, over `models_for_tier` and `allow_upgrade` | Model choice |
+| E4 | `Throttle.check/4` (`apps/wardmast/lib/wardmast/quota/gate/throttle.ex:31`) | Ignores the task | Passes `task.priority` | Exemption |
+| E5 | `Headroom` (`apps/wardmast/lib/wardmast/quota/headroom.ex:60-102`) | `binding/3` | Add `windows/3`: every trusted window, through the same `Gate.pace/6` path. A `:priority` option | Price |
+| E6 | New `Wardmast.Quota.Price` | — | Pure: the price from `Headroom.windows/3` and a draw, and the what-if reset price for deferral | Price, defer |
+| E7 | `ProviderRouting.entry/3` and `predicted_model/3` (`apps/wardmast/lib/wardmast/agents/provider_routing.ex:586-613`) | One model per account | `entries/3`, over `models_for_tier` and `allow_upgrade` | Model choice |
 | E8 | `ProviderRouting.check/2` (`:615-633`) | Eight checks | `check_capability` and `check_floor` before `check_quota`, with G13's `check_guardrails` beside them | Capability gates, floors |
-| E9 | `ProviderRouting.rank/1` (`:734-741`) | Sort by headroom | `rank/2`, calling `Arbiter.Agents.Routing.Score.rank/2` under `scored` with `enforce`; today's sort otherwise | Scoring |
+| E9 | `ProviderRouting.rank/1` (`:734-741`) | Sort by headroom | `rank/2`, calling `Wardmast.Agents.Routing.Score.rank/2` under `scored` with `enforce`; today's sort otherwise | Scoring |
 | E10 | `ProviderRouting.context/3` (`:556-574`) | Tier, quota function, gate | Add the priority, scoring config, matrix and reviewer projection | Scoring |
 | E11 | `ProviderRouting.candidate_record/1` (`:765-782`), `put_chosen/3` (`:502-519`) | Headroom fields | Add `price`, `expected_runs`, `cell` (key, rung, n), `time_h`, `score`, `shadow`, `pace_exempt` and `deferred_until` | Additive only |
 | E12 | `ProviderRouting.select/4` (`:244-256`), `choose/5` (`:379-390`) | `{:ok, _}` or `{:legacy, _}` | A third outcome, `{:defer, until, decision}`, for fresh `:main` dispatches only. The selection gains `:model` | Defer, model choice |
-| E13 | `ReviewerRouting.check/2` (`apps/arbiter/lib/arbiter/agents/reviewer_routing.ex:457-476`), `rank/1` (`:554-561`), `context/3` (`:365-383`) | Rank by headroom | `check_capability`; `rank/2` by price; an `:implementer_family` option for a no-pin projection | Scoring |
+| E13 | `ReviewerRouting.check/2` (`apps/wardmast/lib/wardmast/agents/reviewer_routing.ex:457-476`), `rank/1` (`:554-561`), `context/3` (`:365-383`) | Rank by headroom | `check_capability`; `rank/2` by price; an `:implementer_family` option for a no-pin projection | Scoring |
 | E14 | `ReviewerRouting`'s `@fallback_triggers` (`:106-107`) | — | Add `capability_missing` | Capability gates |
-| E15 | `ByDifficulty.merged_rule/3` (`apps/arbiter/lib/arbiter/agents/routing/by_difficulty.ex:145-152`) | Applies the canary overlay | Clamps to the blast-radius floor after the overlay | Floors |
-| E16 | `Dispatch.maybe_route/3` (`apps/arbiter/lib/arbiter/worker/dispatch.ex:1271-1294`), `unroute/1` (`:1305-1312`) | Sets `:agent_type` | Also sets `:model`; turns `:defer` into `DispatchQueue.hold/5`; `unroute/1` strips routing's `:model` | Model choice, defer |
+| E15 | `ByDifficulty.merged_rule/3` (`apps/wardmast/lib/wardmast/agents/routing/by_difficulty.ex:145-152`) | Applies the canary overlay | Clamps to the blast-radius floor after the overlay | Floors |
+| E16 | `Dispatch.maybe_route/3` (`apps/wardmast/lib/wardmast/worker/dispatch.ex:1271-1294`), `unroute/1` (`:1305-1312`) | Sets `:agent_type` | Also sets `:model`; turns `:defer` into `DispatchQueue.hold/5`; `unroute/1` strips routing's `:model` | Model choice, defer |
 | E17 | `Dispatch`'s legacy path (`no_candidate`) | Dispatches on the pre-routing provider | Applies the capability check, and G13's, on the legacy and explicit paths | Capability gates |
-| E18 | `DispatchQueue` (`apps/arbiter/lib/arbiter/workflows/dispatch_queue.ex:203-212`, `:505-511`) | Drains on quota updates and resets | `not_before` on items, and a timer per deferral | Defer |
-| E19 | `Board.Snapshot.quota_hold/2` (`apps/arbiter/lib/arbiter/board/snapshot.ex:631-641`) | Task-less | Priority-aware for exempt work | Exemption |
-| E20 | `ModelFamily.model_for_tier/3` (`apps/arbiter/lib/arbiter/agents/model_family.ex:105`) | One model id | Add `models_for_tier/3` for list values | Model choice |
-| E21 | New `Arbiter.Agents.Routing.Score`, `Arbiter.Agents.Routing.Competence` and `Arbiter.Agents.CapabilityMatrix` | — | The pure scorer; the cell lookup with the ladder; the matrix of competence and capability rows | Scoring, capability gates |
+| E18 | `DispatchQueue` (`apps/wardmast/lib/wardmast/workflows/dispatch_queue.ex:203-212`, `:505-511`) | Drains on quota updates and resets | `not_before` on items, and a timer per deferral | Defer |
+| E19 | `Board.Snapshot.quota_hold/2` (`apps/wardmast/lib/wardmast/board/snapshot.ex:631-641`) | Task-less | Priority-aware for exempt work | Exemption |
+| E20 | `ModelFamily.model_for_tier/3` (`apps/wardmast/lib/wardmast/agents/model_family.ex:105`) | One model id | Add `models_for_tier/3` for list values | Model choice |
+| E21 | New `Wardmast.Agents.Routing.Score`, `Wardmast.Agents.Routing.Competence` and `Wardmast.Agents.CapabilityMatrix` | — | The pure scorer; the cell lookup with the ladder; the matrix of competence and capability rows | Scoring, capability gates |
 | E22 | `ProviderRouting.valid_selections/0` (`:137`) | `failover`, `most_quota` | Add `scored` | Scoring |
 
 These don't change: `Pace.evaluate/4`'s composition and verdicts;
@@ -1190,26 +1190,26 @@ candidate path is built from the candidate rows alone, and its output is only
 written into the record; `order/2` never lets it near the returned order. The
 live and candidate rows come from one installation read per evaluation.
 
-**The report** (`Arbiter.Release.shadow_report/0`) splits by mode, each line
+**The report** (`Wardmast.Release.shadow_report/0`) splits by mode, each line
 labelled by live and shadowed policy, then adds a "candidate matrix vs live"
 section: decisions, comparable, agreement rate, and the `(difficulty,
 issue_type)` cells where the two pick differently, worst first.
 
 **The weekly reseed**, run by the coordinator:
 
-1. `Arbiter.Release.seed_competence_matrix(target: :candidate, from: …, until: …)`
+1. `Wardmast.Release.seed_competence_matrix(target: :candidate, from: …, until: …)`
    — writes the candidate (the default window is the fixed R6 baseline, so pass
    a rolling one). The live matrix is untouched.
 2. Let it collect decisions, then read
-   `bin/arbiter eval 'Arbiter.Release.shadow_report()'`: the live-vs-headroom
+   `bin/wardmast eval 'Wardmast.Release.shadow_report()'`: the live-vs-headroom
    line says whether `enforce` is still worth it; the candidate section says
    how much the new matrix would change and where.
-3. `Arbiter.Release.promote_candidate_matrix()` makes it live (the old live is
-   kept), or `Arbiter.Release.discard_candidate_matrix()` drops it.
-   `Arbiter.Release.rollback_competence_matrix()` swaps the previous matrix
+3. `Wardmast.Release.promote_candidate_matrix()` makes it live (the old live is
+   kept), or `Wardmast.Release.discard_candidate_matrix()` drops it.
+   `Wardmast.Release.rollback_competence_matrix()` swaps the previous matrix
    back (and again, forward).
 
-`mix arbiter.generate_competence_matrix --candidate` is the Mix equivalent of
+`mix wardmast.generate_competence_matrix --candidate` is the Mix equivalent of
 step 1.
 
 **Cost.** The extra ranking is one more `Competence.estimate/4` per surviving
@@ -1266,8 +1266,8 @@ Phase 0 runs alongside phase 1. It measures; it doesn't route.
   matrix supplies them through `ProviderRouting`'s `:estimate_fun` seam, so today
   the price is `1/h` and the order is `most_quota`'s. Reviewer routing is
   untouched (a price-only reorder there changes nothing until R6's projection).
-  The report: `mix arbiter.routing_shadow_report`, or
-  `bin/arbiter eval 'Arbiter.Release.shadow_report()'` on a release.
+  The report: `mix wardmast.routing_shadow_report`, or
+  `bin/wardmast eval 'Wardmast.Release.shadow_report()'` on a release.
 - **R9 as built (bd-3go56q).** `ModelFamily.models_for_tier/3` returns a tier's
   ordered `tier_models` list (a string is a one-element list; `model_for_tier/3`
   and every adapter read its head). `ProviderRouting` expands each attached
@@ -1351,9 +1351,9 @@ Phase 0 runs alongside phase 1. It measures; it doesn't route.
   as abandoned, and its checkout removed, by the next one.
   `Loop.Replay.Evidence` summarises scored replays per
   cell as `source: "replay"` with a weight (0.5 by default; O10). It runs in the
-  live node, which publishes the budgets (`bin/arbiter rpc
-  'Arbiter.Release.replay(…, async: true)'`); `Arbiter.Release.replay_report/1`,
-  `replay_candidates/1` and `mix arbiter.replay_report` read it.
+  live node, which publishes the budgets (`bin/wardmast rpc
+  'Wardmast.Release.replay(…, async: true)'`); `Wardmast.Release.replay_report/1`,
+  `replay_candidates/1` and `mix wardmast.replay_report` read it.
   `Loop.ReplayIsolationTest` pins that nothing live names it and that it calls no
   merge, forge, tracker, dispatch or matrix path; with one eligible account,
   routing, the gate and the seats are unchanged while replays are recorded or

@@ -48,13 +48,13 @@ pattern match hit the worker's own session tree, or another worker's processes.
       mix format --check-formatted                                  # or `mix format` to fix
       MIX_ENV=test mix compile --warnings-as-errors
       MIX_ENV=test mix credo --strict <the changed files under lib/ or apps/*/lib/>
-      cd apps/arbiter && mix test test/arbiter/review_coverage_design_test.exs test/arbiter/mcp/catalog_doc_drift_test.exs   # doc citations + catalog drift
+      cd apps/wardmast && mix test test/wardmast/review_coverage_design_test.exs test/wardmast/mcp/catalog_doc_drift_test.exs   # doc citations + catalog drift
       scripts/pre-push-tests.sh <the test files for the modules you changed>               # groups by app
 
   Edit a file a design doc cites by `path:line` (`docs/review-coverage-and-guard-policy.md`)? Move the citation with it; that doc test is the most common CI failure. Full `mix precommit && mix audit` (dialyzer, sobelow, the whole suite) is CI's job, or yours when you are running unsandboxed.
 - Use the already included and available `:req` (`Req`) library for HTTP requests, **avoid** `:httpoison`, `:tesla`, and `:httpc`. Req is included by default and is the preferred HTTP client for Phoenix apps
 
-- **CLI ↔ MCP parity.** Every coordinator-facing `arb` verb has an MCP twin: `arb worker show <id>` ↔ `worker_show`, `arb worker list` ↔ `worker_list`, `arb ticket show` ↔ `ticket_show`, `arb attention` ↔ `coordinator_inbox`. `arb prime` (session-start briefing) is CLI only. Host-local verbs never call the server over HTTP and have no MCP twin: `install`, `session`, `where`, `init`, `version`, `self-update`, `upgrade`, `help`. `ArbiterCli.Verbs` is the verb registry; `Arbiter.MCP.Catalog.all/0` is the tool list (its moduledoc table is test-checked).
+- **CLI ↔ MCP parity.** Every coordinator-facing `arb` verb has an MCP twin: `arb worker show <id>` ↔ `worker_show`, `arb worker list` ↔ `worker_list`, `arb ticket show` ↔ `ticket_show`, `arb attention` ↔ `coordinator_inbox`. `arb prime` (session-start briefing) is CLI only. Host-local verbs never call the server over HTTP and have no MCP twin: `install`, `session`, `where`, `init`, `version`, `self-update`, `upgrade`, `help`. `WardmastCli.Verbs` is the verb registry; `Wardmast.MCP.Catalog.all/0` is the tool list (its moduledoc table is test-checked).
 
 ### Phoenix v1.8 guidelines
 
@@ -140,20 +140,20 @@ custom classes must fully style the input
 
 - Read the docs and options before using tasks (by using `mix help task_name`)
 - **Testing in this umbrella repo:**
-  - This is an umbrella repository (`apps/arbiter`, `apps/arbiter_web`, `apps/arbiter_cli`, `apps/arbiter_release_env`).
-  - **Never pass a file path to `mix test` from the umbrella root** (e.g. `mix test apps/arbiter/test/...` or `mix test test/...`), because Mix will ignore the path filter and run the entire ~8,900-test suite across all child apps.
+  - This is an umbrella repository (`apps/wardmast`, `apps/wardmast_web`, `apps/wardmast_cli`, `apps/wardmast_release_env`).
+  - **Never pass a file path to `mix test` from the umbrella root** (e.g. `mix test apps/wardmast/test/...` or `mix test test/...`), because Mix will ignore the path filter and run the entire ~8,900-test suite across all child apps.
   - **To run a single test file:** change into the app's directory first:
     ```bash
     cd apps/<app> && mix test test/<path>_test.exs
     ```
-    Add `:<line>` to target a single test (e.g. `cd apps/arbiter && mix test test/arbiter/accounts/enablement_test.exs:10`).
+    Add `:<line>` to target a single test (e.g. `cd apps/wardmast && mix test test/wardmast/accounts/enablement_test.exs:10`).
   - **Async concurrency (`ARB_TEST_MAX_CASES`):** every app's `test_helper.exs` passes `max_cases:` to `ExUnit.start/1` via `scripts/test_max_cases.exs`. `ARB_TEST_MAX_CASES=N` sets it (a non-integer or `< 1` warns and falls back). Unset, a worker session (`ARB_WORKER_BEAD_ID` present) gets `max(2, div(schedulers_online, 4))`; developer and CI runs keep ExUnit's default (2x schedulers). Lower it further if the box is swapping with several workers running.
   - **To re-run failures:** run `mix test --failed` inside the specific app directory (`cd apps/<app> && mix test --failed`).
   - **App responsibilities:**
-    - `apps/arbiter`: Core domain, database/Ecto schemas, background workers, and business logic.
-    - `apps/arbiter_web`: Phoenix web endpoint, LiveView interfaces, controllers, and channels.
-    - `apps/arbiter_cli`: Command-line interface (`arb` escript).
-    - `apps/arbiter_release_env`: Runtime release environment configuration.
+    - `apps/wardmast`: Core domain, database/Ecto schemas, background workers, and business logic.
+    - `apps/wardmast_web`: Phoenix web endpoint, LiveView interfaces, controllers, and channels.
+    - `apps/wardmast_cli`: Command-line interface (`arb` escript).
+    - `apps/wardmast_release_env`: Runtime release environment configuration.
   - **Full-suite and precommit commands:**
     - Run `mix precommit` and `mix audit` from the **umbrella repo root**.
     - Note that the full test suite runs thousands of tests and takes ~5–10 minutes; do **not** run the full suite as your first check when iterating on specific changes. Use the single-file recipe above.

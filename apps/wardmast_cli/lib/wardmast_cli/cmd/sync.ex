@@ -1,0 +1,142 @@
+defmodule WardmastCli.Cmd.Sync do
+  @moduledoc """
+  `arb sync [--dry] [--json]` — reconcile GitHub issues assigned to the
+  workspace user against tasks linked by `tracker_ref`. Two directions:
+
+    * issue assigned + open + no task → create a linked task (as `claim`).
+    * open task whose issue is closed upstream, or is now assigned to someone
+      else → close the task. An issue that is merely *unassigned* is left
+      alone (bd-83ojwi) — unassigned is a resting state, not abandonment.
+
+  Flags:
+    --dry    Print the plan without applying it.
+    --json   Emit JSON instead of human-readable text.
+
+    * closed task whose close never reached the tracker → reported as `drift`
+      (report-only); each names its remedy, `arb ticket sync-upstream-close <id>`.
+
+  No-ops cleanly when the workspace's tracker isn't GitHub.
+  """
+
+  alias WardmastCli.{ArgParser, Client, Output, Workspace}
+
+  @switches [dry: :boolean, json: :boolean]
+
+  @drift_remedy "arb ticket sync-upstream-close"
+
+  def run(argv) do
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
+    else
+      {opts, _rest, _mode} =
+        ArgParser.parse(argv, command: "arb ticket sync", switches: @switches)
+
+      mode = if opts[:json], do: :json, else: :text
+      dry? = opts[:dry] || false
+
+      workspace_id = Workspace.id_or_halt()
+
+      request =
+        if dry? do
+          Client.get("/api/workspaces/#{workspace_id}/sync/plan")
+        else
+          Client.post("/api/workspaces/#{workspace_id}/sync", %{})
+        end
+
+      case request do
+        {:ok, payload} -> emit(payload, dry?, mode)
+        {:error, err} -> Output.die(err)
+      end
+    end
+  end
+
+  defp emit(payload, _dry?, :json), do: IO.puts(Jason.encode!(payload))
+
+  defp emit(payload, dry?, :text) do
+    actions = payload["data"] || []
+    results = payload["results"] || []
+
+    case {actions, results} do
+      {[], _} ->
+        IO.puts(if dry?, do: "Sync plan: (no actions)", else: "Sync: nothing to do.")
+
+      {_, _} ->
+        header = if dry?, do: "Sync plan (#{length(actions)} action(s)):", else: "Sync:"
+        IO.puts(header)
+
+        if dry? or results == [] do
+          Enum.each(actions, &print_action/1)
+        else
+          Enum.each(results, &print_result/1)
+        end
+    end
+  end
+
+  defp print_action(%{"action" => "create", "ref" => ref, "title" => title}) do
+    IO.puts("  + create task for #{format_ref(ref)}: #{title}")
+  end
+
+  defp print_action(%{"action" => "close", "task_id" => id, "reason" => reason}) do
+    IO.puts("  - close #{id}: #{reason}")
+  end
+
+  defp print_action(%{"action" => "drift", "task_id" => id, "reason" => reason}) do
+    IO.puts("  ! drift #{id}: #{reason}")
+    IO.puts("      fix: #{@drift_remedy} #{id}")
+  end
+
+  defp print_action(%{"action" => "resync", "task_id" => id} = action) do
+    IO.puts("  ~ resync #{id}: #{describe_resync(action)}")
+  end
+
+  defp print_action(other), do: IO.puts("  ? #{inspect(other)}")
+
+  # What a tracker re-sync pulled onto a ticket, and what it left alone.
+  defp describe_resync(decision) do
+    applied = decision |> Map.get("applied", %{}) |> Map.keys() |> Enum.sort()
+
+    [
+      applied != [] && "pulled #{Enum.join(applied, ", ")}",
+      decision["mid_flight"] not in [nil, []] &&
+        "held back (in flight) #{Enum.join(decision["mid_flight"], ", ")}",
+      decision["divergent"] not in [nil, []] &&
+        "divergent (local wins) #{Enum.join(decision["divergent"], ", ")}",
+      decision["closed_upstream"] == true && "story closed upstream (flagged, not closed)"
+    ]
+    |> Enum.filter(& &1)
+    |> case do
+      [] -> "recorded the tracker's current values"
+      parts -> Enum.join(parts, "; ")
+    end
+  end
+
+  # GitHub issue refs are bare numbers and read naturally with a `#` prefix
+  # (`#43`); other trackers (Jira `AX-1234`, Shortcut ids) carry their own
+  # prefix, so print them as-is.
+  defp format_ref(ref) when is_binary(ref) do
+    if Regex.match?(~r/^\d+$/, ref), do: "##{ref}", else: ref
+  end
+
+  defp print_result(%{"outcome" => "created", "task" => task}) do
+    IO.puts("  + created #{task["id"]} (#{task["tracker_type"]}:#{task["tracker_ref"]})")
+  end
+
+  defp print_result(%{"outcome" => "closed", "task" => task}) do
+    IO.puts("  - closed #{task["id"]}")
+  end
+
+  defp print_result(%{"outcome" => "drifted", "task" => task}) do
+    IO.puts("  ! drift #{task["id"]}: closed locally but still open upstream")
+    IO.puts("      fix: #{@drift_remedy} #{task["id"]}")
+  end
+
+  defp print_result(%{"outcome" => "resynced", "task" => task} = result) do
+    IO.puts("  ~ resynced #{task["id"]}: #{describe_resync(result["resync"] || %{})}")
+  end
+
+  defp print_result(%{"outcome" => "error", "action" => action, "reason" => reason}) do
+    IO.puts("  ! error on #{inspect(action)}: #{reason}")
+  end
+
+  defp print_result(other), do: IO.puts("  ? #{inspect(other)}")
+end

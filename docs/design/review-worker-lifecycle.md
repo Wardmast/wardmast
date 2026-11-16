@@ -70,7 +70,7 @@ A report-only first-pass review persists its proposed comments on the
 `ExternalReview` record (`mode: :report_only`, `greenlight_status: :pending`) and
 mails them to `to_ref: "admiral"`. The coordinator posts the approved subset with
 the `review_greenlight` MCP tool (backed by
-`Arbiter.Reviews.ExternalReview.greenlight/1`):
+`Wardmast.Reviews.ExternalReview.greenlight/1`):
 
 ```
 review_greenlight record_id=<id> select=all        # post every proposed comment
@@ -90,8 +90,8 @@ with `post_verdict`). The record's `greenlight_status` flips to `:posted` (or
 ### 1. Engagement creation
 
 `arb review --pr <url>` (or the `worker_review` MCP tool) calls
-`Arbiter.Workflows.CodeReview` in `:adapter` mode, posts findings and a
-verdict, then creates the review engagement via `Arbiter.Worker.Dispatch`. The
+`Wardmast.Workflows.CodeReview` in `:adapter` mode, posts findings and a
+verdict, then creates the review engagement via `Wardmast.Worker.Dispatch`. The
 task is marked `review_only: true`; the `review_automation` policy is inherited
 from the workspace config (`auto_authors` list) or the caller's explicit flag.
 
@@ -146,7 +146,7 @@ reviewers and from the fleet itself are ignored.
 
 The automation mode governs the response:
 
-- **`:auto`** — dispatches `Arbiter.Workflows.ReviewReply` (task F) to compose
+- **`:auto`** — dispatches `Wardmast.Workflows.ReviewReply` (task F) to compose
   and post a threaded reply. The reply is anchored to the specific comment in the
   original review thread, not a new PR comment.
 - **`:report_only` / `:flag`** — posts NOTHING to the PR. Raises exactly one
@@ -196,11 +196,11 @@ tick
 ## Supervisor & Registration
 
 ReviewPatrol is started per `(workspace_id, repo)` pair by
-`Arbiter.Workflows.ReviewPatrolSupervisor` (a `DynamicSupervisor`). It uses its
-own registry (`Arbiter.Workflows.ReviewPatrolRegistry`) — separate from
+`Wardmast.Workflows.ReviewPatrolSupervisor` (a `DynamicSupervisor`). It uses its
+own registry (`Wardmast.Workflows.ReviewPatrolRegistry`) — separate from
 PRPatrol's — so the two patrol families never share a namespace.
 
-Auto-start at boot is gated by `:arbiter, :auto_start_refineries` (same flag as
+Auto-start at boot is gated by `:wardmast, :auto_start_refineries` (same flag as
 PRPatrol and MergeQueue). Auto-start is disabled in `test`, enabled everywhere
 else.
 
@@ -222,7 +222,7 @@ To set the patrol interval (default: 60 s), set the `:review_patrol_interval_ms`
 application env before boot — for example in `config/runtime.exs`:
 
 ```elixir
-config :arbiter, review_patrol_interval_ms: 120_000   # 2 minutes
+config :wardmast, review_patrol_interval_ms: 120_000   # 2 minutes
 ```
 
 Or pass it as a release environment variable if your deployment uses

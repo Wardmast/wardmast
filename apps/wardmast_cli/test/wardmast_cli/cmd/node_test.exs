@@ -1,0 +1,1189 @@
+defmodule WardmastCli.Cmd.NodeTest do
+  @moduledoc """
+  `arb node add|list|show|set|events` (RW4) and `drain|undrain|revoke|remove|upgrade`
+  plus the per-node caps, `local` included (RW7), `docs/design/remote-workers.md` §5.6, §14.
+  """
+  use WardmastCli.CliCase, async: true
+
+  alias WardmastCli.Cmd.Node
+
+  @token "arbj_" <> String.duplicate("a", 52)
+  @one_liner "curl --proto '=https' --tlsv1.2 -fsSL https://primary.ts.net/nodes/join | ARB_JOIN_MODE=token bash"
+
+  @minted %{
+    "token" => @token,
+    "one_liner" => @one_liner,
+    "public_url" => "https://primary.ts.net",
+    "join_token" => %{
+      "id" => "jt-1",
+      "name" => "box-1",
+      "expires_at" => "2026-10-06T12:15:00Z"
+    }
+  }
+
+  @node %{
+    "id" => "01a0-node",
+    "name" => "box-1",
+    "status" => "active",
+    "labels" => ["zone=a"],
+    "max_workers" => 2,
+    "credential_prefix" => "abcd1234",
+    "enrolled_at" => "2026-10-06T12:00:00Z",
+    "last_seen_at" => nil
+  }
+
+  # Capture the request the command sent, then answer.
+  defp capture_request(method, path, status, body) do
+    test = self()
+    method = method |> to_string() |> String.upcase()
+
+    Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+      {:ok, raw, conn} = Plug.Conn.read_body(conn)
+      send(test, {:request, conn.method, conn.request_path, raw})
+      assert conn.method == method
+      assert conn.request_path == path
+      conn |> Plug.Conn.put_status(status) |> Req.Test.json(body)
+    end)
+  end
+
+  defp tty(value), do: Process.put(:bd2_stdout_tty, value)
+
+  describe "add" do
+    test "prints the one-liner and, separately, the token (to a terminal)" do
+      tty(true)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @minted)
+
+      {out, _err, 0} = capture(fn -> Node.run(["add", "--name", "box-1"]) end)
+
+      lines = String.split(out, "\n")
+      liner = Enum.find_index(lines, &(&1 == "  " <> @one_liner))
+      token = Enum.find_index(lines, &(&1 == "  " <> @token))
+      assert liner && token && liner < token, "one-liner then token, on separate lines"
+      refute @one_liner =~ @token
+      assert out =~ "expires 2026-10-06T12:15:00Z"
+      assert out =~ "shown once"
+
+      assert_receive {:request, "POST", "/api/nodes/join-tokens", raw}
+      assert Jason.decode!(raw) == %{"name" => "box-1"}
+    end
+
+    test "sends labels, max-workers and the ttl in seconds" do
+      tty(true)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @minted)
+
+      {_out, _err, 0} =
+        capture(fn ->
+          Node.run([
+            "add",
+            "--label",
+            "zone=a",
+            "--label",
+            "gpu=no",
+            "--max-workers",
+            "3",
+            "--ttl",
+            "2h"
+          ])
+        end)
+
+      assert_receive {:request, "POST", _, raw}
+
+      assert Jason.decode!(raw) == %{
+               "labels" => ["zone=a", "gpu=no"],
+               "max_workers" => 3,
+               "ttl_seconds" => 7200
+             }
+    end
+
+    test "ttl accepts s, m, h and refuses nonsense before minting anything" do
+      tty(true)
+
+      for bad <- ["abc", "0m", "-5m", "15x"] do
+        {_out, err, code} = capture(fn -> Node.run(["add", "--ttl", bad]) end)
+        assert code != 0
+        assert err =~ "ttl"
+      end
+
+      refute_received {:request, _, _, _}
+    end
+
+    test "off a terminal it refuses to print the token, before minting one" do
+      tty(false)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @minted)
+
+      {out, err, code} = capture(fn -> Node.run(["add"]) end)
+
+      assert code != 0
+      assert err =~ "--token-file"
+      refute out =~ @token
+      refute err =~ @token
+      refute_received {:request, _, _, _}
+    end
+
+    test "--token-file writes the token (0600) and prints only the file's path" do
+      tty(false)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @minted)
+      path = Path.join(System.tmp_dir!(), "arb-node-token-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm(path) end)
+
+      {out, _err, 0} = capture(fn -> Node.run(["add", "--token-file", path]) end)
+
+      assert File.read!(path) |> String.trim() == @token
+      assert {:ok, %File.Stat{mode: mode}} = File.stat(path)
+      assert Bitwise.band(mode, 0o777) == 0o600
+      refute out =~ @token
+      assert out =~ path
+      assert out =~ @one_liner
+      assert out =~ "| ARB_JOIN_TOKEN_FILE=#{path} bash"
+    end
+
+    test "--token-file refuses to overwrite a file" do
+      tty(false)
+      path = Path.join(System.tmp_dir!(), "arb-node-token-#{System.unique_integer([:positive])}")
+      File.write!(path, "keep me")
+      on_exit(fn -> File.rm(path) end)
+
+      {_out, err, code} = capture(fn -> Node.run(["add", "--token-file", path]) end)
+      assert code != 0
+      assert err =~ "already exists"
+      assert File.read!(path) == "keep me"
+      refute_received {:request, _, _, _}
+    end
+
+    test "--json carries the one-liner and expiry, and the token only to a terminal" do
+      tty(true)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @minted)
+      {out, _err, 0} = capture(fn -> Node.run(["add", "--json"]) end)
+      body = Jason.decode!(out)
+      assert body["one_liner"] == @one_liner
+      assert body["token"] == @token
+
+      tty(false)
+      {out, _err, code} = capture(fn -> Node.run(["add", "--json"]) end)
+      assert code != 0
+      refute out =~ @token
+    end
+
+    test "an API error is reported" do
+      tty(true)
+
+      capture_request(:post, "/api/nodes/join-tokens", 422, %{
+        "error" => %{"type" => "validation_error", "message" => "nodes.public_url is not set"}
+      })
+
+      {_out, err, code} = capture(fn -> Node.run(["add"]) end)
+      assert code != 0
+      assert err =~ "nodes.public_url"
+    end
+  end
+
+  describe "add --kind cluster" do
+    @manifest_url "https://primary.ts.net/nodes/join/k8s.yaml?name=mesaana-k3s&namespace=ci-workers&max=3"
+    @apply ~s|kubectl apply -f <(curl -fsSL "#{@manifest_url}")|
+    @secret "read -rs T && printf %s \"$T\" | kubectl -n ci-workers create secret generic arbiter-join --from-file=token=/dev/stdin"
+    @yaml "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ci-workers\n"
+
+    @cluster_minted %{
+      "token" => @token,
+      "public_url" => "https://primary.ts.net",
+      "join_token" => %{
+        "id" => "jt-2",
+        "name" => "mesaana-k3s",
+        "kind" => "cluster",
+        "expires_at" => "2026-10-06T12:15:00Z"
+      },
+      "cluster" => %{
+        "manifest_url" => @manifest_url,
+        "apply_command" => @apply,
+        "secret_command" => @secret,
+        "namespace" => "ci-workers",
+        "image" => "registry.example/arbiter/controller:0.2.43",
+        "node_name" => "mesaana-k3s"
+      }
+    }
+
+    @cluster_argv ~w(add --kind cluster --name mesaana-k3s --namespace ci-workers --max-workers 3)
+
+    test "sends the egress allowlist flags (primary CIDRs, proxy URL and CIDRs)" do
+      tty(true)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @cluster_minted)
+
+      {_out, _err, 0} =
+        capture(fn ->
+          Node.run(
+            @cluster_argv ++
+              ~w(--reach proxy --proxy-url http://proxy:3128 --proxy-cidrs 10.9.0.5/32) ++
+              ~w(--primary-cidrs 100.64.0.10/32)
+          )
+        end)
+
+      assert_receive {:request, "POST", "/api/nodes/join-tokens", raw}
+      body = Jason.decode!(raw)
+      assert body["reach"] == "proxy"
+      assert body["proxy_url"] == "http://proxy:3128"
+      assert body["proxy_cidrs"] == "10.9.0.5/32"
+      assert body["primary_cidrs"] == "100.64.0.10/32"
+    end
+
+    test "--registries is sent and each registry's pull-Secret command is printed (KH13)" do
+      tty(true)
+
+      pull =
+        "read -r U && read -rs P && printf '{...}' \"$U\" \"$P\" | kubectl create secret generic gitlab-vstim"
+
+      minted =
+        put_in(@cluster_minted, ["cluster", "pull_secret_commands"], [
+          %{
+            "registry" => "registry.gitlab.com/vstim/",
+            "secret" => "gitlab-vstim",
+            "command" => pull
+          }
+        ])
+
+      capture_request(:post, "/api/nodes/join-tokens", 201, minted)
+
+      {out, _err, 0} =
+        capture(fn ->
+          Node.run(@cluster_argv ++ ~w(--registries registry.gitlab.com/vstim/=gitlab-vstim))
+        end)
+
+      assert_receive {:request, "POST", "/api/nodes/join-tokens", raw}
+      assert Jason.decode!(raw)["registries"] == "registry.gitlab.com/vstim/=gitlab-vstim"
+      assert ("  " <> pull) in String.split(out, "\n")
+      assert out =~ "# registry.gitlab.com/vstim/"
+    end
+
+    test "sends --api-cidrs: the API server's node address for post-DNAT CNIs (k3s)" do
+      tty(true)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @cluster_minted)
+
+      {_out, _err, 0} =
+        capture(fn ->
+          Node.run(@cluster_argv ++ ~w(--api-cidrs 192.168.5.10/32,192.168.5.11/32))
+        end)
+
+      assert_receive {:request, "POST", "/api/nodes/join-tokens", raw}
+      assert Jason.decode!(raw)["api_cidrs"] == "192.168.5.10/32,192.168.5.11/32"
+    end
+
+    test "sends the cluster form and prints the apply command, the join-Secret command and the token" do
+      tty(true)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @cluster_minted)
+
+      {out, _err, 0} =
+        capture(fn ->
+          Node.run(
+            @cluster_argv ++
+              ~w(--cpu 500m --memory 1Gi --node-selector pool=arb --pull-secret regcred) ++
+              ~w(--reach tailscale --admission policy --self-upgrade off --ttl 30m)
+          )
+        end)
+
+      assert_receive {:request, "POST", "/api/nodes/join-tokens", raw}
+
+      assert Jason.decode!(raw) == %{
+               "kind" => "cluster",
+               "name" => "mesaana-k3s",
+               "namespace" => "ci-workers",
+               "max_workers" => 3,
+               "cpu" => "500m",
+               "memory" => "1Gi",
+               "node_selector" => "pool=arb",
+               "pull_secret" => "regcred",
+               "reach" => "tailscale",
+               "admission" => "policy",
+               "self_upgrade" => "off",
+               "ttl_seconds" => 1800
+             }
+
+      lines = String.split(out, "\n")
+      assert ("  " <> @apply) in lines
+      assert ("  " <> @secret) in lines
+      assert ("  " <> @token) in lines
+      refute out =~ "ARB_JOIN"
+      refute @apply =~ @token
+      refute @secret =~ @token
+      assert out =~ "expires 2026-10-06T12:15:00Z"
+    end
+
+    test "-o fetches the manifests from the primary into the file, which holds no token" do
+      tty(true)
+      test = self()
+
+      Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+        send(test, {:request, conn.method, conn.request_path})
+
+        case conn.request_path do
+          "/api/nodes/join-tokens" ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(@cluster_minted)
+
+          "/nodes/join/k8s.yaml" ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/yaml")
+            |> Plug.Conn.send_resp(200, @yaml)
+        end
+      end)
+
+      path =
+        Path.join(System.tmp_dir!(), "arb-manifests-#{System.unique_integer([:positive])}.yaml")
+
+      on_exit(fn -> File.rm(path) end)
+
+      {out, _err, 0} = capture(fn -> Node.run(@cluster_argv ++ ["-o", path]) end)
+
+      assert File.read!(path) == @yaml
+      refute File.read!(path) =~ @token
+      assert out =~ "kubectl apply -f #{path}"
+      assert out =~ @secret
+      assert_receive {:request, "GET", "/nodes/join/k8s.yaml"}
+    end
+
+    test "-o refuses to overwrite a file, before minting a token" do
+      tty(true)
+
+      path =
+        Path.join(System.tmp_dir!(), "arb-manifests-#{System.unique_integer([:positive])}.yaml")
+
+      File.write!(path, "keep")
+      on_exit(fn -> File.rm(path) end)
+
+      {_out, err, code} = capture(fn -> Node.run(@cluster_argv ++ ["-o", path]) end)
+      assert code != 0
+      assert err =~ "already exists"
+      assert File.read!(path) == "keep"
+      refute_received {:request, _, _, _}
+    end
+
+    test "--token-file keeps the token off the screen and the Secret command reads that file" do
+      tty(false)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @cluster_minted)
+      path = Path.join(System.tmp_dir!(), "arb-node-token-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm(path) end)
+
+      {out, _err, 0} = capture(fn -> Node.run(@cluster_argv ++ ["--token-file", path]) end)
+
+      assert File.read!(path) |> String.trim() == @token
+      refute out =~ @token
+
+      assert out =~
+               "kubectl -n ci-workers create secret generic arbiter-join --from-file=token=#{path}"
+
+      assert out =~ @apply
+    end
+
+    test "off a terminal it refuses to print the token, before minting one" do
+      tty(false)
+      {out, _err, code} = capture(fn -> Node.run(@cluster_argv) end)
+      assert code != 0
+      refute out =~ @token
+      refute_received {:request, _, _, _}
+    end
+
+    test "--json carries the cluster block and the token only to a terminal" do
+      tty(true)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @cluster_minted)
+      {out, _err, 0} = capture(fn -> Node.run(@cluster_argv ++ ["--json"]) end)
+
+      decoded = Jason.decode!(out)
+      assert decoded["cluster"]["manifest_url"] == @manifest_url
+      assert decoded["cluster"]["secret_command"] == @secret
+      assert decoded["token"] == @token
+    end
+
+    @values_url "https://primary.ts.net/nodes/join/values.yaml?name=mesaana-k3s&namespace=ci-workers&max=3"
+    @namespace_cmd "kubectl create namespace ci-workers && kubectl label namespace ci-workers pod-security.kubernetes.io/enforce=restricted"
+    @helm_install ~s(curl -fsSL "#{@values_url}" | helm install mesaana-k3s oci://ghcr.io/acme/charts/arbiter-node --version 0.2.43 --namespace ci-workers -f -)
+    @values_yaml "mode: all\nnode:\n  name: mesaana-k3s\n"
+
+    @helm_minted update_in(@cluster_minted, ["cluster"], fn cluster ->
+                   Map.merge(cluster, %{
+                     "registry_set" => true,
+                     "helm" => %{
+                       "chart_ref" => "oci://ghcr.io/acme/charts/arbiter-node",
+                       "chart_version" => "0.2.43",
+                       "release" => "mesaana-k3s",
+                       "values_url" => @values_url,
+                       "namespace_command" => @namespace_cmd,
+                       "secret_command" => @secret,
+                       "install_command" => @helm_install
+                     }
+                   })
+                 end)
+
+    defp stub_values(minted) do
+      test = self()
+
+      Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+        send(test, {:request, conn.method, conn.request_path})
+
+        case conn.request_path do
+          "/api/nodes/join-tokens" ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(minted)
+
+          "/nodes/join/values.yaml" ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/yaml")
+            |> Plug.Conn.send_resp(200, @values_yaml)
+        end
+      end)
+    end
+
+    defp tmp_path(prefix),
+      do: Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
+
+    test "--format helm prints the namespace, Secret, token and install commands (KH9)" do
+      tty(true)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @helm_minted)
+
+      {out, _err, 0} = capture(fn -> Node.run(@cluster_argv ++ ~w(--format helm)) end)
+
+      # `format` is a local choice: the primary is not asked for it.
+      assert_receive {:request, "POST", "/api/nodes/join-tokens", raw}
+      refute Map.has_key?(Jason.decode!(raw), "format")
+
+      lines = String.split(out, "\n")
+      assert ("  " <> @namespace_cmd) in lines
+      assert ("  " <> @secret) in lines
+      assert ("  " <> @helm_install) in lines
+      assert ("  " <> @token) in lines
+      refute out =~ "kubectl apply"
+      refute @helm_install =~ @token
+    end
+
+    test "--format helm -o saves the values and installs from the file" do
+      tty(true)
+      stub_values(@helm_minted)
+      path = tmp_path("arb-values")
+      on_exit(fn -> File.rm(path) end)
+
+      {out, _err, 0} =
+        capture(fn -> Node.run(@cluster_argv ++ ["--format", "helm", "-o", path]) end)
+
+      assert File.read!(path) == @values_yaml
+      refute File.read!(path) =~ @token
+
+      assert out =~
+               "helm install mesaana-k3s oci://ghcr.io/acme/charts/arbiter-node --version 0.2.43 " <>
+                 "--namespace ci-workers -f #{path}"
+
+      assert_receive {:request, "GET", "/nodes/join/values.yaml"}
+    end
+
+    test "--format values prints only the values file to stdout; the token goes to --token-file" do
+      tty(false)
+      stub_values(@helm_minted)
+      token_path = tmp_path("arb-node-token")
+      on_exit(fn -> File.rm(token_path) end)
+
+      {out, _err, 0} =
+        capture(fn ->
+          Node.run(@cluster_argv ++ ["--format", "values", "--token-file", token_path])
+        end)
+
+      assert out == @values_yaml
+      assert File.read!(token_path) |> String.trim() == @token
+      assert_receive {:request, "GET", "/nodes/join/values.yaml"}
+    end
+
+    test "--format values with nowhere to put the token or the values is refused before minting" do
+      tty(true)
+      {_out, err, code} = capture(fn -> Node.run(@cluster_argv ++ ~w(--format values)) end)
+      assert code != 0
+      assert err =~ "--format values"
+      refute_received {:request, _, _, _}
+    end
+
+    test "an unknown --format is refused before minting; --format needs --kind cluster" do
+      tty(true)
+      {_out, err, code} = capture(fn -> Node.run(@cluster_argv ++ ~w(--format yaml)) end)
+      assert code != 0
+      assert err =~ "--format"
+      refute_received {:request, _, _, _}
+
+      {_out, err, code} = capture(fn -> Node.run(~w(add --name box --format helm)) end)
+      assert code != 0
+      assert err =~ "--kind cluster"
+    end
+
+    test "without nodes.registry the default falls back to Helm: no manifest URL to apply" do
+      tty(true)
+
+      no_manifests =
+        update_in(@helm_minted, ["cluster"], fn c ->
+          Map.merge(c, %{"registry_set" => false, "manifest_url" => nil, "apply_command" => nil})
+        end)
+
+      capture_request(:post, "/api/nodes/join-tokens", 201, no_manifests)
+      {out, _err, 0} = capture(fn -> Node.run(@cluster_argv) end)
+
+      assert out =~ @helm_install
+      refute out =~ "kubectl apply"
+    end
+
+    test "--json carries the Helm block" do
+      tty(true)
+      capture_request(:post, "/api/nodes/join-tokens", 201, @helm_minted)
+      {out, _err, 0} = capture(fn -> Node.run(@cluster_argv ++ ~w(--format helm --json)) end)
+
+      assert Jason.decode!(out)["cluster"]["helm"]["install_command"] == @helm_install
+    end
+
+    test "a cluster node needs --name, and --kind must be machine or cluster, before anything is minted" do
+      tty(true)
+      {_out, err, code} = capture(fn -> Node.run(~w(add --kind cluster)) end)
+      assert code != 0
+      assert err =~ "--name"
+
+      {_out, err, code} = capture(fn -> Node.run(~w(add --kind mainframe --name x)) end)
+      assert code != 0
+      assert err =~ "--kind"
+      refute_received {:request, _, _, _}
+    end
+
+    test "cluster-only flags are refused on a machine" do
+      tty(true)
+      {_out, err, code} = capture(fn -> Node.run(~w(add --namespace foo)) end)
+      assert code != 0
+      assert err =~ "--kind cluster"
+    end
+
+    test "an API refusal (no registry) is reported" do
+      tty(true)
+
+      capture_request(:post, "/api/nodes/join-tokens", 422, %{
+        "error" => %{"type" => "validation_error", "message" => "nodes.registry is not set"}
+      })
+
+      {_out, err, code} = capture(fn -> Node.run(@cluster_argv) end)
+      assert code != 0
+      assert err =~ "nodes.registry"
+    end
+  end
+
+  @local %{
+    "id" => "local",
+    "name" => "local",
+    "kind" => "local",
+    "state" => "online",
+    "live" => 1,
+    "max" => 3,
+    "suggested" => 3,
+    "override" => nil,
+    "ceiling" => nil
+  }
+
+  @live_node Map.merge(@node, %{
+               "state" => "online",
+               "health" => "ready",
+               "agent_version" => "1.2.3",
+               "live" => 1,
+               "max" => 2,
+               "suggested" => 4,
+               "override" => 2,
+               "ceiling" => 3,
+               "last_heartbeat_at" => nil
+             })
+
+  describe "list" do
+    test "shows the local row first, then name, state, caps, labels and last seen" do
+      stub_get("/api/nodes", %{
+        "nodes" => [Map.put(@live_node, "contributes", 2)],
+        "local" => @local,
+        "total" => 5,
+        "warnings" => []
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+
+      [header, first, second | _] = String.split(out, "\n")
+      assert header =~ "NAME" and header =~ "SUGGESTED" and header =~ "OVERRIDE"
+      assert first =~ "local" and first =~ "1/3"
+      assert second =~ "box-1" and second =~ "online" and second =~ "1/2"
+      assert out =~ "zone=a"
+      assert out =~ "VERSION"
+      assert out =~ "1.2.3"
+      assert out =~ "never"
+      assert out =~ "capacity 5 = local 3 + box-1 2"
+      refute out =~ "conductor.max_concurrent"
+      refute out =~ "idle"
+    end
+
+    test "a pending upgrade shows next to the version until it is applied (bd-5v5od0)" do
+      stub_get("/api/nodes", %{
+        "nodes" => [Map.put(@live_node, "upgrade_pending_to", "v0.2.49")],
+        "local" => @local,
+        "total" => 5,
+        "warnings" => []
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+      assert out =~ "1.2.3 -> v0.2.49 (pending)"
+    end
+
+    test "shows offered vs max, temperature, memory pressure and the derate reason (bd-6w7usy)" do
+      hot =
+        Map.merge(@live_node, %{
+          "contributes" => 1,
+          "offered" => 1,
+          "derate" => "hard",
+          "derate_reason" => "thermal 96 °C",
+          "temp_c" => 96.4,
+          "psi" => %{"some_avg10" => 12.5}
+        })
+
+      cool = Map.merge(@local, %{"offered" => 3, "derate" => "none", "temp_c" => 61.0})
+
+      stub_get("/api/nodes", %{"nodes" => [hot], "local" => cool, "total" => 4, "warnings" => []})
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+
+      [header, local_line, node_line, derate_line | _] = String.split(out, "\n")
+      assert header =~ "OFFERED" and header =~ "TEMP" and header =~ "PSI"
+      assert local_line =~ "61°C"
+      assert node_line =~ "box-1" and node_line =~ "96°C" and node_line =~ "12.5%"
+      assert derate_line =~ "hard" and derate_line =~ "thermal 96 °C" and derate_line =~ "1 of 2"
+      refute local_line =~ "derate"
+    end
+
+    test "remote rows show TEMP and PSI for string-valued or nested readings" do
+      a = Map.merge(@live_node, %{"temp_c" => "79.79", "psi" => %{"some_avg10" => "3.25"}})
+
+      b =
+        Map.merge(@live_node, %{
+          "name" => "box-2",
+          "temp_c" => 79.79,
+          "psi" => %{"some" => %{"avg10" => 0}}
+        })
+
+      stub_get("/api/nodes", %{
+        "nodes" => [a, b],
+        "local" => Map.merge(@local, %{"temp_c" => 86.0, "psi" => %{"some_avg10" => 0.0}}),
+        "total" => 5,
+        "warnings" => []
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+      [_header, local_line, a_line, b_line | _] = String.split(out, "\n")
+      assert local_line =~ "86°C" and local_line =~ "0.0%"
+      assert a_line =~ "80°C" and a_line =~ "3.3%"
+      assert b_line =~ "box-2" and b_line =~ "80°C" and b_line =~ "0.0%"
+    end
+
+    test "a node that reports no sensing shows dashes, not zeros" do
+      stub_get("/api/nodes", %{
+        "nodes" => [Map.put(@live_node, "contributes", 2)],
+        "local" => @local,
+        "total" => 5,
+        "warnings" => []
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+      [_header, _local, node_line | _] = String.split(out, "\n")
+      assert node_line =~ "box-1"
+      refute node_line =~ "0°C"
+    end
+
+    test "prints the DC1 migration's advisory under the capacity line" do
+      stub_get("/api/nodes", %{
+        "nodes" => [Map.put(@live_node, "contributes", 2)],
+        "local" => @local,
+        "total" => 5,
+        "warnings" => [],
+        "local_cap_advisory" => "conductor_system_max_concurrent (6) was removed: x"
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+      assert out =~ "note: conductor_system_max_concurrent (6) was removed: x"
+    end
+
+    test "lists a node that adds nothing as not counted" do
+      stub_get("/api/nodes", %{
+        "nodes" => [Map.merge(@live_node, %{"contributes" => 0, "state" => "draining"})],
+        "local" => @local,
+        "total" => 3,
+        "warnings" => []
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+      assert out =~ "capacity 3 = local 3 (not counted: box-1 draining)"
+    end
+
+    test "prints the warnings" do
+      stub_get("/api/nodes", %{
+        "nodes" => [],
+        "local" => %{@local | "max" => 0, "override" => 0},
+        "total" => 0,
+        "warnings" => ["local_cap_zero"]
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+      assert out =~ "local cap is 0"
+      assert out =~ "wait"
+    end
+
+    test "with only the primary it says there are no remote nodes" do
+      stub_get("/api/nodes", %{"nodes" => [], "local" => @local, "total" => 3})
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+      assert out =~ "local"
+      assert out =~ "No remote nodes"
+      assert out =~ "arb node add"
+    end
+
+    test "an older server's list (no local row) still renders" do
+      stub_get("/api/nodes", %{"nodes" => [@node]})
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+
+      assert out =~ "box-1"
+      assert out =~ "active"
+    end
+
+    test "says so when there are none" do
+      stub_get("/api/nodes", %{"nodes" => []})
+      {out, _err, 0} = capture(fn -> Node.run(["list"]) end)
+      assert out =~ "No nodes"
+      assert out =~ "arb node add"
+    end
+
+    test "--json" do
+      stub_get("/api/nodes", %{"nodes" => [@node]})
+      {out, _err, 0} = capture(fn -> Node.run(["list", "--json"]) end)
+      assert [%{"name" => "box-1"}] = Jason.decode!(out)["nodes"]
+    end
+  end
+
+  describe "show" do
+    test "show names a refused upgrade instead of pending (bd-4kvxun)" do
+      stub_get("/api/nodes/box-1", %{
+        "node" => Map.put(@node, "upgrade_refused", "needs operator (helm)")
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["show", "box-1"]) end)
+      assert out =~ "upgrade refused: needs operator (helm)"
+      refute out =~ "pending"
+    end
+
+    test "prints the node's details" do
+      stub_get("/api/nodes/box-1", %{"node" => @node})
+      {out, _err, 0} = capture(fn -> Node.run(["show", "box-1"]) end)
+
+      assert out =~ "box-1"
+      assert out =~ "01a0-node"
+      assert out =~ "abcd1234"
+      assert out =~ "max workers: 2"
+    end
+
+    test "an outdated cluster node shows the exact command that moves it (K9)" do
+      cmd =
+        "kubectl -n ci-workers set image deployment/arbiter-controller " <>
+          "controller=r.example/arbiter/controller:0.2.43"
+
+      node =
+        Map.merge(@node, %{
+          "kind" => "cluster",
+          "health" => "outdated",
+          "k8s_version" => "v1.36.5+k3s1",
+          "upgrade_command" => cmd,
+          "self_upgrade" => false
+        })
+
+      stub_get("/api/nodes/box-1", %{"node" => node})
+      {out, _err, 0} = capture(fn -> Node.run(["show", "box-1"]) end)
+
+      assert out =~ "kind:          cluster"
+      assert out =~ "Kubernetes:    v1.36.5+k3s1"
+      assert out =~ "outdated"
+      assert ("  " <> cmd) in String.split(out, "\n")
+    end
+
+    test "a cluster node that upgrades itself is told so instead of given a command" do
+      node =
+        Map.merge(@node, %{
+          "kind" => "cluster",
+          "health" => "outdated",
+          "self_upgrade" => true,
+          "upgrade_command" => nil,
+          "image" => "r.example/arbiter/controller:0.2.43"
+        })
+
+      stub_get("/api/nodes/box-1", %{"node" => node})
+      {out, _err, 0} = capture(fn -> Node.run(["show", "box-1"]) end)
+      assert out =~ "upgrades itself"
+      refute out =~ "kubectl"
+    end
+
+    test "shows the cap's sources, the ceiling that wins, and the workspace pin" do
+      node =
+        Map.merge(@node, %{
+          "max" => 2,
+          "suggested" => 4,
+          "override" => 8,
+          "ceiling" => 2,
+          "cap_source" => "ceiling",
+          "workspace_ids" => ["ws-a"]
+        })
+
+      stub_get("/api/nodes/box-1", %{"node" => node})
+      {out, _err, 0} = capture(fn -> Node.run(["show", "box-1"]) end)
+
+      assert out =~ "max workers: 2 (suggested 4, override 8, ceiling 2 — the ceiling wins)"
+      assert out =~ "pinned to:     ws-a"
+    end
+
+    test "needs a name or id" do
+      {_out, err, code} = capture(fn -> Node.run(["show"]) end)
+      assert code != 0
+      assert err =~ "node name or id"
+    end
+
+    test "an unknown node is an error" do
+      stub_get(
+        "/api/nodes/ghost",
+        %{"error" => %{"type" => "not_found", "message" => "nope"}},
+        404
+      )
+
+      {_out, err, code} = capture(fn -> Node.run(["show", "ghost"]) end)
+      assert code != 0
+      assert err =~ "nope"
+    end
+  end
+
+  describe "set" do
+    test "patches labels and max-workers" do
+      capture_request(:patch, "/api/nodes/box-1", 200, %{"node" => %{@node | "max_workers" => 5}})
+
+      {out, _err, 0} =
+        capture(fn ->
+          Node.run(["set", "box-1", "--label", "zone=b", "--max-workers", "5"])
+        end)
+
+      assert_receive {:request, "PATCH", "/api/nodes/box-1", raw}
+      assert Jason.decode!(raw) == %{"labels" => ["zone=b"], "max_workers" => 5}
+      assert out =~ "Updated box-1"
+    end
+
+    test "--max-workers none clears the cap; --name renames" do
+      capture_request(:patch, "/api/nodes/box-1", 200, %{"node" => @node})
+
+      {_out, _err, 0} =
+        capture(fn -> Node.run(["set", "box-1", "--max-workers", "none", "--name", "box-2"]) end)
+
+      assert_receive {:request, "PATCH", _, raw}
+      assert Jason.decode!(raw) == %{"max_workers" => nil, "name" => "box-2"}
+    end
+
+    test "--workspace pins the node to workspaces; `--workspace none` clears the pin" do
+      capture_request(:patch, "/api/nodes/box-1", 200, %{"node" => @node})
+
+      {_out, _err, 0} =
+        capture(fn ->
+          Node.run(["set", "box-1", "--workspace", "ws-a", "--workspace", "ws-b"])
+        end)
+
+      assert_receive {:request, "PATCH", _, raw}
+      assert Jason.decode!(raw) == %{"workspace_ids" => ["ws-a", "ws-b"]}
+
+      {_out, _err, 0} = capture(fn -> Node.run(["set", "box-1", "--workspace", "none"]) end)
+      assert_receive {:request, "PATCH", _, raw}
+      assert Jason.decode!(raw) == %{"workspace_ids" => []}
+    end
+
+    test "--allow-unenforced-network / --no-allow-unenforced-network set the A7 override" do
+      capture_request(:patch, "/api/nodes/box-1", 200, %{"node" => @node})
+
+      {_out, _err, 0} =
+        capture(fn -> Node.run(["set", "box-1", "--allow-unenforced-network"]) end)
+
+      assert_receive {:request, "PATCH", _, raw}
+      assert Jason.decode!(raw) == %{"allow_unenforced_network" => true}
+
+      {_out, _err, 0} =
+        capture(fn -> Node.run(["set", "box-1", "--no-allow-unenforced-network"]) end)
+
+      assert_receive {:request, "PATCH", _, raw}
+      assert Jason.decode!(raw) == %{"allow_unenforced_network" => false}
+    end
+
+    test "--json prints the raw response instead of the text summary" do
+      capture_request(:patch, "/api/nodes/box-1", 200, %{"node" => @node})
+
+      {out, _err, 0} =
+        capture(fn -> Node.run(["set", "box-1", "--max-workers", "3", "--json"]) end)
+
+      assert %{"node" => _} = Jason.decode!(String.trim(out))
+      refute out =~ "Updated"
+    end
+
+    test "with nothing to change it says so and sends nothing" do
+      {_out, err, code} = capture(fn -> Node.run(["set", "box-1"]) end)
+      assert code != 0
+      assert err =~ "nothing to set"
+      refute_received {:request, _, _, _}
+    end
+  end
+
+  describe "set local" do
+    test "sets the primary's cap, 0 included" do
+      capture_request(:patch, "/api/nodes/local", 200, %{"node" => @local})
+
+      {out, _err, 0} = capture(fn -> Node.run(["set", "local", "--max-workers", "0"]) end)
+
+      assert_receive {:request, "PATCH", "/api/nodes/local", raw}
+      assert Jason.decode!(raw) == %{"max_workers" => 0}
+      assert out =~ "Updated local"
+    end
+
+    test "none clears the override" do
+      capture_request(:patch, "/api/nodes/local", 200, %{"node" => @local})
+      {_out, _err, 0} = capture(fn -> Node.run(["set", "local", "--max-workers", "none"]) end)
+      assert_receive {:request, "PATCH", _, raw}
+      assert Jason.decode!(raw) == %{"max_workers" => nil}
+    end
+
+    test "local takes no other field, and a node's cap cannot be 0" do
+      {_out, err, code} = capture(fn -> Node.run(["set", "local", "--name", "x"]) end)
+      assert code != 0
+      assert err =~ "local"
+
+      {_out, err, code} = capture(fn -> Node.run(["set", "box-1", "--max-workers", "0"]) end)
+      assert code != 0
+      assert err =~ "positive"
+      refute_received {:request, _, _, _}
+    end
+  end
+
+  describe "lifecycle verbs" do
+    for {verb, past} <- [
+          {"drain", "Draining"},
+          {"undrain", "Undrained"},
+          {"revoke", "Revoked"},
+          {"upgrade", "Upgrade requested for"}
+        ] do
+      test "#{verb} posts to the node and says so" do
+        capture_request(:post, "/api/nodes/box-1/#{unquote(verb)}", 200, %{
+          "node" => @node,
+          "upgrading_to" => "v9"
+        })
+
+        {out, _err, 0} = capture(fn -> Node.run([unquote(verb), "box-1"]) end)
+
+        assert_receive {:request, "POST", "/api/nodes/box-1/" <> unquote(verb), _}
+        assert out =~ unquote(past)
+        assert out =~ "box-1"
+      end
+    end
+
+    test "remove deletes the node" do
+      capture_request(:delete, "/api/nodes/box-1", 200, %{"removed" => "box-1"})
+
+      {out, _err, 0} = capture(fn -> Node.run(["remove", "box-1"]) end)
+
+      assert_receive {:request, "DELETE", "/api/nodes/box-1", _}
+      assert out =~ "Removed box-1"
+    end
+
+    test "a refusal is reported with the server's message and a non-zero exit" do
+      Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+        conn
+        |> Plug.Conn.put_status(409)
+        |> Req.Test.json(%{
+          "error" => %{"type" => "conflict", "message" => "revoke the node before removing it"}
+        })
+      end)
+
+      {_out, err, code} = capture(fn -> Node.run(["remove", "box-1"]) end)
+      assert code != 0
+      assert err =~ "revoke the node before removing it"
+    end
+
+    test "each needs a node" do
+      for verb <- ["drain", "undrain", "revoke", "remove", "upgrade"] do
+        {_out, err, code} = capture(fn -> Node.run([verb]) end)
+        assert code != 0
+        assert err =~ "node name or id"
+      end
+    end
+
+    test "a node named by an id with odd characters is path-escaped" do
+      capture_request(:post, "/api/nodes/a%2Fb/drain", 200, %{"node" => @node})
+      {_out, _err, 0} = capture(fn -> Node.run(["drain", "a/b"]) end)
+      assert_receive {:request, "POST", _, _}
+    end
+  end
+
+  describe "events" do
+    test "lists the audit trail" do
+      stub_get("/api/nodes/box-1/events", %{
+        "events" => [
+          %{
+            "kind" => "enrolled",
+            "actor" => "node:box-1",
+            "at" => "2026-10-06T12:00:00Z",
+            "detail" => %{},
+            "remote_addr_hint" => "100.64.0.9"
+          },
+          %{
+            "kind" => "updated",
+            "actor" => "operator:cli",
+            "at" => "2026-10-06T12:05:00Z",
+            "detail" => %{"changes" => %{"max_workers" => 2}},
+            "remote_addr_hint" => nil
+          }
+        ]
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["events", "box-1"]) end)
+      assert out =~ "enrolled"
+      assert out =~ "node:box-1"
+      assert out =~ "100.64.0.9"
+      assert out =~ "updated"
+      assert out =~ "max_workers"
+    end
+  end
+
+  describe "pairing (device code)" do
+    @pairing %{
+      "id" => "019a-req",
+      "code" => "K7QM-2X9D",
+      "state" => "pending",
+      "hostname" => "laptop",
+      "peer" => "100.64.0.7",
+      "name" => nil,
+      "labels" => [],
+      "max_workers" => nil,
+      "expires_at" => "2026-10-08T12:10:00Z"
+    }
+
+    # Route by "METHOD path"; every request is also sent to the test process.
+    defp stub_pairing_routes(routes) do
+      test = self()
+
+      Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(test, {:request, conn.method, conn.request_path, raw})
+        {status, body} = Map.fetch!(routes, conn.method <> " " <> conn.request_path)
+        conn |> Plug.Conn.put_status(status) |> Req.Test.json(body)
+      end)
+    end
+
+    @list {200, %{"pairings" => [@pairing]}}
+    @approved {200, %{"pairing" => %{@pairing | "state" => "approved"}}}
+
+    test "pending lists each request with its code, hostname and source address" do
+      stub_pairing_routes(%{"GET /api/nodes/pairings" => @list})
+
+      {out, _err, 0} = capture(fn -> Node.run(["pending"]) end)
+      assert out =~ "K7QM-2X9D"
+      assert out =~ "laptop"
+      assert out =~ "100.64.0.7"
+    end
+
+    test "pending with none says so" do
+      stub_pairing_routes(%{"GET /api/nodes/pairings" => {200, %{"pairings" => []}}})
+      {out, _err, 0} = capture(fn -> Node.run(["pending"]) end)
+      assert out =~ "No pending pairing requests"
+    end
+
+    test "approve shows the requesting host and address, asks, then approves" do
+      stub_pairing_routes(%{
+        "GET /api/nodes/pairings" => @list,
+        "POST /api/nodes/pairings/019a-req/approve" => @approved
+      })
+
+      {out, _err, 0} =
+        capture(
+          fn -> Node.run(["approve", "k7qm2x9d", "--name", "gpu-1", "--max-workers", "2"]) end,
+          input: "y\n"
+        )
+
+      assert out =~ "laptop"
+      assert out =~ "100.64.0.7"
+      assert out =~ "Approve"
+      assert out =~ "Approved"
+
+      assert_received {:request, "POST", "/api/nodes/pairings/019a-req/approve", raw}
+      assert Jason.decode!(raw) == %{"name" => "gpu-1", "max_workers" => 2}
+    end
+
+    test "approve aborts, sending nothing, unless the operator says yes" do
+      stub_pairing_routes(%{"GET /api/nodes/pairings" => @list})
+
+      {out, _err, 0} = capture(fn -> Node.run(["approve", "K7QM-2X9D"]) end, input: "n\n")
+      assert out =~ "aborted"
+      refute_received {:request, "POST", _, _}
+    end
+
+    test "approve --yes skips the question" do
+      stub_pairing_routes(%{
+        "GET /api/nodes/pairings" => @list,
+        "POST /api/nodes/pairings/019a-req/approve" => @approved
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["approve", "K7QM-2X9D", "--yes"]) end)
+      assert out =~ "Approved"
+      assert_received {:request, "POST", "/api/nodes/pairings/019a-req/approve", _}
+    end
+
+    test "approve --json needs --yes and prints the pairing" do
+      stub_pairing_routes(%{
+        "GET /api/nodes/pairings" => @list,
+        "POST /api/nodes/pairings/019a-req/approve" => @approved
+      })
+
+      {_out, err, code} = capture(fn -> Node.run(["approve", "K7QM-2X9D", "--json"]) end)
+      assert code != 0
+      assert err =~ "--yes"
+
+      {out, _err, 0} = capture(fn -> Node.run(["approve", "K7QM-2X9D", "--yes", "--json"]) end)
+      assert %{"pairing" => %{"state" => "approved"}} = Jason.decode!(out)
+    end
+
+    test "approve of an unknown or malformed code is an error and approves nothing" do
+      stub_pairing_routes(%{"GET /api/nodes/pairings" => @list})
+
+      for code <- ["ZZZZ-ZZZZ", "nope"] do
+        {_out, err, status} = capture(fn -> Node.run(["approve", code, "--yes"]) end)
+        assert status != 0
+        assert err =~ "arb node pending"
+      end
+
+      refute_received {:request, "POST", _, _}
+    end
+
+    test "approve needs a code" do
+      {_out, err, code} = capture(fn -> Node.run(["approve"]) end)
+      assert code != 0
+      assert err =~ "code"
+    end
+
+    test "deny posts to the request and says so" do
+      stub_pairing_routes(%{
+        "GET /api/nodes/pairings" => @list,
+        "POST /api/nodes/pairings/019a-req/deny" =>
+          {200, %{"pairing" => %{@pairing | "state" => "denied"}}}
+      })
+
+      {out, _err, 0} = capture(fn -> Node.run(["deny", "K7QM-2X9D"]) end)
+      assert out =~ "Denied"
+      assert_received {:request, "POST", "/api/nodes/pairings/019a-req/deny", _}
+    end
+
+    test "the help documents pairing" do
+      {out, _err, 0} = capture(fn -> Node.run(["--help"]) end)
+      assert out =~ "arb node approve"
+      assert out =~ "arb node pending"
+      assert out =~ "arb node deny"
+    end
+  end
+
+  test "an unknown subcommand is a usage error" do
+    {_out, err, code} = capture(fn -> Node.run(["frobnicate"]) end)
+    assert code == 2
+    assert err =~ "unknown node subcommand"
+  end
+
+  test "--help prints usage" do
+    {out, _err, 0} = capture(fn -> Node.run(["--help"]) end)
+    assert out =~ "arb node add"
+  end
+end

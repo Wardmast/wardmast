@@ -1,0 +1,554 @@
+defmodule Wardmast.Worker.ContainerSpawnCodexTest do
+  @moduledoc """
+  bd-50d5j6 (P8): Codex under `sandbox.backend: podman`.
+
+  Host-side and argv-level, like `ContainerSpawnTest` (which covers Claude):
+  `ContainerSpawn.prepare/1` and `wrap_port/1` with `provider: "codex"` against
+  a real private clone and a stand-in egress run. The real-container half is
+  `container_spawn_codex_podman_test.exs` (`@moduletag :podman`).
+  """
+  # async: false: Application env and the shared AuthSync reaper.
+  use ExUnit.Case, async: false
+
+  @moduletag :capture_log
+
+  alias Wardmast.Agents.SecurityPolicy
+  alias Wardmast.Test.GitFixture
+  alias Wardmast.Worker.CliSetFixture
+  alias Wardmast.Worker.ContainerSpawn
+  alias Wardmast.Worker.PrivateClone
+
+  @branch "feature/bd-p8-codex"
+  @image "localhost/arb-test/codex:1"
+
+  defp auth(refresh, last_refresh) do
+    Jason.encode!(%{
+      "auth_mode" => "chatgpt",
+      "OPENAI_API_KEY" => nil,
+      "tokens" => %{
+        "id_token" => "id",
+        "access_token" => "access-" <> refresh,
+        "refresh_token" => refresh,
+        "account_id" => "acct"
+      },
+      "last_refresh" => last_refresh
+    })
+  end
+
+  setup do
+    ctx = GitFixture.forge_and_checkout(%{"README.md" => "readme\n"})
+    {:ok, clone} = PrivateClone.create(ctx.checkout, @branch, "main")
+
+    dir = Path.join(ctx.root, "scratch")
+    File.mkdir_p!(dir)
+
+    proxy = Path.join(dir, "proxy.sock")
+    bridge = Path.join(dir, "arb.sock")
+    File.write!(proxy, "")
+    File.write!(bridge, "")
+
+    # The operator's codex home: a ChatGPT login, a config with a personal
+    # profile and their history, none of which may reach the container.
+    source_home = Path.join(dir, "operator-codex")
+    File.mkdir_p!(source_home)
+    File.write!(Path.join(source_home, "auth.json"), auth("rt-0", "2026-10-01T00:00:00Z"))
+    File.write!(Path.join(source_home, "config.toml"), ~s(model = "personal"\n))
+    File.write!(Path.join(source_home, "state_5.sqlite"), "history")
+
+    # The CLIs come from the pinned upstream cache (SI1a), never a host install.
+    cli_opts = CliSetFixture.put(Path.join(dir, "cli"))
+    native = CliSetFixture.host_path(cli_opts, "codex", "codex")
+    host = CliSetFixture.host_path(cli_opts, "codex", "codex-code-mode-host")
+    rg = CliSetFixture.host_path(cli_opts, "codex", "rg")
+    bwrap = CliSetFixture.host_path(cli_opts, "codex", "bwrap")
+    arb = CliSetFixture.host_path(cli_opts, "arb", "arb.escript")
+
+    tmp_dir = Path.join(dir, "run-tmp")
+    File.mkdir_p!(tmp_dir)
+
+    for {key, value} <- [
+          worker_container_available: true,
+          worker_container_network_available: true,
+          worker_container_image: nil
+        ] do
+      previous = Application.get_env(:wardmast, key)
+      Application.put_env(:wardmast, key, value)
+
+      on_exit(fn ->
+        if previous == nil,
+          do: Application.delete_env(:wardmast, key),
+          else: Application.put_env(:wardmast, key, previous)
+      end)
+    end
+
+    proxy_port = free_port()
+    arb_port = Stream.repeatedly(&free_port/0) |> Enum.find(&(&1 != proxy_port))
+    test_pid = self()
+
+    egress = fn opts ->
+      send(test_pid, {:egress, opts})
+      {:ok, [proxy_socket: proxy, proxy_port: proxy_port, bridges: [{arb_port, bridge}]], "rtest"}
+    end
+
+    base_opts =
+      [
+        provider: "codex",
+        policy: podman_policy(),
+        worktree_path: clone,
+        owner: self(),
+        task_id: "bd-p8test",
+        arb_token: "arb-secret-token",
+        tmp_dir: tmp_dir,
+        image: @image,
+        podman: "/usr/bin/podman",
+        codex_source_home: source_home,
+        egress: egress
+      ] ++ cli_opts
+
+    Map.merge(ctx, %{
+      clone: clone,
+      dir: dir,
+      proxy: proxy,
+      source_home: source_home,
+      source_auth: Path.join(source_home, "auth.json"),
+      native: native,
+      host: host,
+      rg: rg,
+      bwrap: bwrap,
+      arb: arb,
+      tmp_dir: tmp_dir,
+      opts: base_opts
+    })
+  end
+
+  defp podman_policy do
+    SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}})
+  end
+
+  defp port_args(ctx, request, env \\ []) do
+    %{
+      exec: "/bin/sh",
+      argv: [
+        "sh",
+        "-c",
+        ~s(exec "$@" < /dev/null),
+        "sh",
+        ContainerSpawn.provider_path("codex"),
+        "exec",
+        "the prompt"
+      ],
+      cd: ctx.clone,
+      env: ContainerSpawn.apply_env(env, request),
+      sandbox: request
+    }
+  end
+
+  defp mounts(argv), do: for(["-v", spec] <- Enum.chunk_every(argv, 2, 1), do: spec)
+
+  describe "forge credential (bd-1vhect)" do
+    setup do
+      Application.put_env(:wardmast, :worker_container_runner, fn _cmd, _args, _opts ->
+        {"", 0}
+      end)
+
+      on_exit(fn -> Application.delete_env(:wardmast, :worker_container_runner) end)
+      :ok
+    end
+
+    # The Claude reviewer's container gets the project token as these two env
+    # secrets (container_spawn_test.exs, "a scoped git credential"); a codex
+    # container is handed exactly the same pair, nothing broader.
+    test "a codex container receives the same scoped secrets as a Claude one", ctx do
+      material = %Wardmast.Worker.GitCredential.Material{
+        kind: :gitlab_project_token,
+        token: "glpat-scoped",
+        host: "gitlab.example.com",
+        remote: "acme/tonic"
+      }
+
+      claude_opts = Keyword.merge(ctx.opts, provider: "claude")
+
+      claude_secrets = secret_shape(claude_opts, material)
+      codex_secrets = secret_shape(ctx.opts, material)
+
+      assert codex_secrets == claude_secrets
+      assert Enum.sort(codex_secrets) == [{:env, "ARB_GIT_TOKEN"}, {:env, "GITLAB_TOKEN"}]
+    end
+
+    # bd-1vhect: the reviewer's token is read-only (GitCredential.plan/3 with
+    # role: :reviewer), so a reviewer container of either provider carries
+    # GITLAB_TOKEN alone: no ARB_GIT_TOKEN, no git push helper.
+    test "a reviewer container of either provider gets only the read-only GITLAB_TOKEN", ctx do
+      material = %Wardmast.Worker.GitCredential.Material{
+        kind: :gitlab_project_token,
+        token: "glpat-readonly",
+        read_only: true,
+        host: "gitlab.example.com",
+        remote: "acme/tonic"
+      }
+
+      claude_opts = Keyword.merge(ctx.opts, provider: "claude")
+
+      assert secret_shape(ctx.opts, material) == [{:env, "GITLAB_TOKEN"}]
+      assert secret_shape(claude_opts, material) == [{:env, "GITLAB_TOKEN"}]
+    end
+
+    defp secret_shape(opts, material) do
+      case ContainerSpawn.prepare([git_material: material] ++ opts) do
+        {:ok, request} -> for s <- request.git_secrets, do: {s.type, s.target}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
+  describe "prepare/1 for codex" do
+    test "mounts the native binary (not the node launcher), rg, bwrap and arb", ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+
+      assert {ctx.native, "/opt/arbiter/cli/codex"} in request.cli_mounts
+      assert {ctx.rg, "/opt/arbiter/cli/rg"} in request.cli_mounts
+      assert {ctx.bwrap, "/opt/arbiter/cli/bwrap"} in request.cli_mounts
+      # The sibling the CLI spawns by path beside itself.
+      assert {ctx.host, "/opt/arbiter/cli/codex-code-mode-host"} in request.cli_mounts
+      assert {ctx.arb, "/opt/arbiter/cli/arb.escript"} in request.cli_mounts
+      assert List.keymember?(request.cli_mounts, "/opt/arbiter/cli/arb", 1)
+      refute Enum.any?(request.cli_mounts, &(elem(&1, 1) == "/opt/arbiter/cli/claude"))
+      refute Enum.any?(request.cli_mounts, &String.ends_with?(elem(&1, 0), "codex.js"))
+    end
+
+    test "refuses when the cache has no codex, whatever codex is installed on the host", ctx do
+      opts =
+        Keyword.merge(
+          ctx.opts,
+          CliSetFixture.put(Path.join(ctx.dir, "no-codex"), codex: nil) ++
+            [codex_path: ctx.native, find_executable: fn _ -> ctx.native end]
+        )
+
+      assert {:error, {:cli_not_cached, "codex"}} = ContainerSpawn.prepare(opts)
+    end
+
+    test "gives the run its own CODEX_HOME holding a COPY of auth.json", ctx do
+      assert {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+
+      assert request.provider == "codex"
+      assert request.config_dir == Path.join(ctx.tmp_dir, "codex-home")
+      assert request.home == Path.join(ctx.tmp_dir, "home")
+
+      run_auth = Path.join(request.config_dir, "auth.json")
+      assert {:ok, %File.Stat{type: :regular}} = File.lstat(run_auth)
+      assert File.read!(run_auth) == File.read!(ctx.source_auth)
+      refute run_auth == ctx.source_auth
+
+      # None of the operator's config or history, and no claude config dir.
+      refute File.exists?(Path.join(request.config_dir, "state_5.sqlite"))
+      refute File.read!(Path.join(request.config_dir, "config.toml")) =~ "personal"
+      assert File.regular?(Path.join(request.config_dir, "rules/arbiter.rules"))
+      refute File.exists?(Path.join(ctx.tmp_dir, "claude-config"))
+    end
+
+    test "starts the egress run with the OpenAI hosts as its infra, not Anthropic's", ctx do
+      assert {:ok, _} = ContainerSpawn.prepare(ctx.opts)
+      assert_received {:egress, egress_opts}
+
+      infra = Keyword.fetch!(egress_opts, :infra)
+      assert "chatgpt.com:443" in infra
+      assert "api.openai.com:443" in infra
+      refute "api.anthropic.com:443" in infra
+    end
+
+    test "a claude prepare still uses the Anthropic infra", ctx do
+      opts = Keyword.merge(ctx.opts, provider: "claude")
+      assert {:ok, request} = ContainerSpawn.prepare(opts)
+      assert_received {:egress, egress_opts}
+      assert "api.anthropic.com:443" in Keyword.fetch!(egress_opts, :infra)
+      assert request.config_dir == Path.join(ctx.tmp_dir, "claude-config")
+    end
+  end
+
+  # bd-4k07ke: a Codex ReviewGate reviewer on a podman repo runs in the same
+  # container as a Claude one, so it gets the repo's test services env
+  # (`DATABASE_URL`) and nothing else beyond what the container always carries.
+  describe "test services env for a codex reviewer" do
+    setup do
+      previous = Application.get_env(:wardmast, :worker_test_services)
+
+      Application.put_env(:wardmast, :worker_test_services, %{
+        "pgrepo" => [{:postgres, version: 16, database: "pgrepo_test"}]
+      })
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:wardmast, :worker_test_services, previous),
+          else: Application.delete_env(:wardmast, :worker_test_services)
+      end)
+
+      :ok
+    end
+
+    test "carries the services' variables and adds no other variable", ctx do
+      runner = fn _cmd, _args, _opts -> {"", 0} end
+      opts = [{:services_opts, [runner: runner]} | ctx.opts]
+
+      {:ok, plain} = ContainerSpawn.prepare(Keyword.put(opts, :repo, "arbiter"))
+      {:ok, with_db} = ContainerSpawn.prepare(Keyword.put(opts, :repo, "pgrepo"))
+
+      assert {"DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:5432/pgrepo_test"} in with_db.env
+
+      extra = Enum.map(with_db.env, &elem(&1, 0)) -- Enum.map(plain.env, &elem(&1, 0))
+      # Only the throwaway Postgres service's own connection variables.
+      assert Enum.sort(extra) == ~w(DATABASE_URL PGHOST PGPASSWORD PGPORT PGUSER)
+    end
+  end
+
+  describe "apply_env/2" do
+    test "points CODEX_HOME at the run's home, replacing any other", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+
+      env = ContainerSpawn.apply_env([{"CODEX_HOME", "/operators/home"}, {"X", "1"}], request)
+
+      assert {"CODEX_HOME", request.config_dir} in env
+      assert Enum.count(env, &(elem(&1, 0) == "CODEX_HOME")) == 1
+      assert {"X", "1"} in env
+      refute Enum.any?(env, &(elem(&1, 0) == "CLAUDE_CONFIG_DIR"))
+    end
+  end
+
+  # bd-83gbsh (GitHub #1040): the v0.2.84 reviewer crashed in 14s with codex
+  # 0.164.0's "Refusing to create helper binaries under temporary dir" and then
+  # "Failed to read config file …/codex-home/config.toml". The run's TMPDIR was
+  # the run dir, which holds `codex-home`, so the CLI judged its own home to be
+  # temp space. The container's TMPDIR must not contain CODEX_HOME.
+  describe "CODEX_HOME vs the container's TMPDIR (bd-83gbsh)" do
+    @tmp_names ~w(TMPDIR TMP TEMP)
+
+    defp run_env(tmp_dir),
+      do: [{"HOME", "/h"}] ++ Enum.map(@tmp_names, &{&1, tmp_dir})
+
+    defp inside?(path, dir), do: path == dir or String.starts_with?(path, dir <> "/")
+
+    test "no temp variable names a directory that holds CODEX_HOME", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      env = ContainerSpawn.apply_env(run_env(ctx.tmp_dir), request)
+
+      {"CODEX_HOME", home} = List.keyfind(env, "CODEX_HOME", 0)
+
+      for name <- @tmp_names do
+        {^name, tmp} = List.keyfind(env, name, 0)
+        refute inside?(home, tmp), "#{name}=#{tmp} contains CODEX_HOME=#{home}"
+      end
+    end
+
+    test "the temp dir is still disk-backed, inside the writable run dir and created", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      env = ContainerSpawn.apply_env(run_env(ctx.tmp_dir), request)
+
+      {"TMPDIR", tmp} = List.keyfind(env, "TMPDIR", 0)
+      assert inside?(tmp, ctx.tmp_dir)
+      assert tmp != ctx.tmp_dir
+      assert File.dir?(tmp)
+      assert ctx.tmp_dir in request.writable_paths
+      assert Enum.all?(@tmp_names, &(List.keyfind(env, &1, 0) == {&1, tmp}))
+    end
+
+    test "a claude container keeps the run dir as its TMPDIR", ctx do
+      {:ok, request} = ContainerSpawn.prepare(Keyword.merge(ctx.opts, provider: "claude"))
+      env = ContainerSpawn.apply_env(run_env(ctx.tmp_dir), request)
+
+      for name <- @tmp_names, do: assert({name, ctx.tmp_dir} in env)
+    end
+
+    test "a codex env with no temp variable gains none", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      env = ContainerSpawn.apply_env([{"X", "1"}], request)
+
+      refute Enum.any?(env, &(elem(&1, 0) in @tmp_names))
+    end
+  end
+
+  # The spawn side of the read: `--userns=keep-id` with no other identity flag, so
+  # the process runs as the host uid and owns the 0600 files the primary wrote,
+  # *provided the image records no USER*. An image that does (a repo-custom image
+  # before bd-83gbsh: `USER root`) overrides keep-id and runs as uid 0, which
+  # `--cap-drop=all` leaves unable to read them. That half is pinned in
+  # `image_test.exs` ("a repo Containerfile with no USER ...") and run against real
+  # podman in `image_podman_test.exs`.
+  describe "CODEX_HOME is readable by the container user (bd-83gbsh)" do
+    test "config.toml is owned by the uid keep-id maps in, mode 0600, in a mounted dir", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      assert {:ok, %{argv: argv}} = ContainerSpawn.wrap_port(port_args(ctx, request))
+
+      assert "--userns=keep-id" in argv
+      refute Enum.any?(argv, &(&1 == "--user" or String.starts_with?(&1, "--user=")))
+
+      # CODEX_HOME's parent is a read-write mount, with no relabel needed
+      # (SELinux labels are disabled by the bridge sockets).
+      assert "label=disable" in argv
+      assert "#{ctx.tmp_dir}:#{ctx.tmp_dir}:rw" in mounts(argv)
+
+      config = Path.join(request.config_dir, "config.toml")
+      {:ok, %File.Stat{uid: uid, mode: mode}} = File.stat(config)
+      {:ok, %File.Stat{uid: own_uid}} = File.stat("/proc/self")
+      assert uid == own_uid
+      assert Bitwise.band(mode, 0o400) == 0o400
+
+      {:ok, %File.Stat{mode: dir_mode}} = File.stat(request.config_dir)
+      assert Bitwise.band(dir_mode, 0o500) == 0o500
+    end
+  end
+
+  describe "wrap_port/1 for codex" do
+    test "the real auth.json (and the operator's home) is never bind-mounted", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      assert {:ok, %{argv: argv}} = ContainerSpawn.wrap_port(port_args(ctx, request))
+
+      specs = mounts(argv)
+      refute Enum.any?(specs, &String.contains?(&1, ctx.source_home))
+      refute Enum.any?(argv, &String.contains?(&1, ctx.source_home))
+
+      # The run's home arrives through the run temp dir, and CODEX_HOME names it.
+      assert "#{ctx.tmp_dir}:#{ctx.tmp_dir}:rw" in specs
+      assert has_inherit?(argv, "CODEX_HOME")
+      assert "--network=none" in argv
+      assert "label=disable" in argv
+    end
+
+    test "the codex CLI mounts are read-only at the PATH dir", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      assert {:ok, %{argv: argv}} = ContainerSpawn.wrap_port(port_args(ctx, request))
+
+      assert "#{ctx.native}:/opt/arbiter/cli/codex:ro" in mounts(argv)
+      assert "#{ctx.rg}:/opt/arbiter/cli/rg:ro" in mounts(argv)
+      assert "#{ctx.bwrap}:/opt/arbiter/cli/bwrap:ro" in mounts(argv)
+    end
+
+    test "tokens travel as -e NAME with the value in the client env, never on argv", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+
+      env = [{"ARBITER_MCP_TOKEN", "mcp-secret"}, {"OPENAI_API_KEY", "sk-secret"}]
+      assert {:ok, wrapped} = ContainerSpawn.wrap_port(port_args(ctx, request, env))
+
+      assert has_inherit?(wrapped.argv, "ARBITER_MCP_TOKEN")
+      assert has_inherit?(wrapped.argv, "OPENAI_API_KEY")
+      assert {"ARBITER_MCP_TOKEN", "mcp-secret"} in wrapped.env
+      refute Enum.any?(wrapped.argv, &String.contains?(&1, "mcp-secret"))
+      refute Enum.any?(wrapped.argv, &String.contains?(&1, "sk-secret"))
+    end
+
+    test "TMPDIR reaches the container as the writable temp subdir, not dropped", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      env = ContainerSpawn.apply_env(Wardmast.Worker.RunTmp.env_pairs(ctx.tmp_dir), request)
+
+      assert {:ok, wrapped} = ContainerSpawn.wrap_port(port_args(ctx, request, env))
+
+      {"TMPDIR", tmp} = List.keyfind(wrapped.env, "TMPDIR", 0)
+      assert tmp == Path.join(ctx.tmp_dir, "tmp")
+      assert has_inherit?(wrapped.argv, "TMPDIR")
+      assert "#{ctx.tmp_dir}:#{ctx.tmp_dir}:rw" in mounts(wrapped.argv)
+    end
+
+    test "ARB_HOST and the proxy are set, so the -c MCP url and arb work unchanged", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      env = Map.new(request.env)
+      assert env["ARB_HOST"] =~ ~r{^http://127\.0\.0\.1:\d+$}
+      assert env["HTTPS_PROXY"] =~ ~r{^http://127\.0\.0\.1:\d+$}
+    end
+  end
+
+  describe "refresh-token rotation (AC2)" do
+    defp rotate(request, refresh, last_refresh),
+      do: File.write!(Path.join(request.config_dir, "auth.json"), auth(refresh, last_refresh))
+
+    defp source_token(ctx),
+      do:
+        ctx.source_auth |> File.read!() |> Jason.decode!() |> get_in(["tokens", "refresh_token"])
+
+    test "teardown/1 persists a token the CLI rotated into the real login", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      rotate(request, "rt-1", "2026-10-02T00:00:00Z")
+      assert source_token(ctx) == "rt-0"
+
+      assert :ok = ContainerSpawn.teardown(%{sandbox: request})
+
+      assert source_token(ctx) == "rt-1"
+    end
+
+    test "re-opening the port (nudge, auto-resume) persists it too", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      rotate(request, "rt-1", "2026-10-02T00:00:00Z")
+
+      assert {:ok, _} = ContainerSpawn.wrap_port(port_args(ctx, request))
+
+      assert source_token(ctx) == "rt-1"
+    end
+
+    test "a re-opened run picks up a token a sibling run rotated meanwhile", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      File.write!(ctx.source_auth, auth("rt-9", "2026-10-09T00:00:00Z"))
+
+      assert {:ok, _} = ContainerSpawn.wrap_port(port_args(ctx, request))
+
+      run = request.config_dir |> Path.join("auth.json") |> File.read!() |> Jason.decode!()
+      assert run["tokens"]["refresh_token"] == "rt-9"
+    end
+
+    test "an older rotation never overwrites a newer login", ctx do
+      {:ok, request} = ContainerSpawn.prepare(ctx.opts)
+      File.write!(ctx.source_auth, auth("rt-9", "2026-10-09T00:00:00Z"))
+      rotate(request, "rt-1", "2026-10-02T00:00:00Z")
+
+      assert :ok = ContainerSpawn.teardown(%{sandbox: request})
+
+      assert source_token(ctx) == "rt-9"
+    end
+
+    test "the owning worker dying (no teardown at all) still persists it", ctx do
+      owner = spawn(fn -> receive do: (:never -> :ok) end)
+      opts = Keyword.put(ctx.opts, :owner, owner)
+      {:ok, request} = ContainerSpawn.prepare(opts)
+      rotate(request, "rt-1", "2026-10-02T00:00:00Z")
+
+      ref = Process.monitor(owner)
+      Process.exit(owner, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^owner, :killed}
+      _ = :sys.get_state(Wardmast.Agents.Codex.AuthSync.Reaper)
+
+      assert source_token(ctx) == "rt-1"
+    end
+
+    test "the run-tmp reaper flushes the rotation before it deletes the run dir", ctx do
+      owner = spawn(fn -> receive do: (:never -> :ok) end)
+      {:ok, request} = ContainerSpawn.prepare(Keyword.put(ctx.opts, :owner, owner))
+      rotate(request, "rt-1", "2026-10-02T00:00:00Z")
+
+      # The run-tmp reaper owns (and deletes) the dir the copy lives in.
+      previous = Application.get_env(:wardmast, :worker_tmp_root)
+      Application.put_env(:wardmast, :worker_tmp_root, ctx.dir)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:wardmast, :worker_tmp_root, previous),
+          else: Application.delete_env(:wardmast, :worker_tmp_root)
+      end)
+
+      :ok = Wardmast.Worker.RunTmp.Reaper.track(owner, ctx.tmp_dir)
+      ref = Process.monitor(owner)
+      Process.exit(owner, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^owner, :killed}
+      _ = :sys.get_state(Wardmast.Worker.RunTmp.Reaper)
+      _ = :sys.get_state(Wardmast.Agents.Codex.AuthSync.Reaper)
+
+      refute File.exists?(ctx.tmp_dir)
+      assert source_token(ctx) == "rt-1"
+    end
+  end
+
+  defp free_port do
+    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
+    {:ok, port} = :inet.port(socket)
+    :gen_tcp.close(socket)
+    port
+  end
+
+  defp has_inherit?(argv, name),
+    do: Enum.chunk_every(argv, 2, 1) |> Enum.any?(&(&1 == ["-e", name]))
+end

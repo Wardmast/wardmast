@@ -21,7 +21,7 @@ isn't already cured by the two cheaper levers we have not yet pulled:**
 2. **Multi-key rotation inside the Claude adapter** for rate-limit relief, with
    no harness work at all.
 
-Both are reversible and measurable through the existing `Arbiter.Usage.Event`
+Both are reversible and measurable through the existing `Wardmast.Usage.Event`
 ledger. A multi-vendor adapter, by contrast, is ~3–5 days per harness *plus*
 ongoing maintenance against an upstream CLI we don't control, *plus* the very
 real risk that a weaker agent's higher review-gate rejection rate eats the cost
@@ -47,11 +47,11 @@ without committing to it.
 
 ## 2. What ships today
 
-`Arbiter.Worker.ClaudeSession` is the only worker harness. Its surface is:
+`Wardmast.Worker.ClaudeSession` is the only worker harness. Its surface is:
 
 - **Spawn:** `Port.open/2` on `claude --print <prompt> --output-format stream-json --verbose`,
   wrapped in `sh -c 'exec "$@" < /dev/null'` so the child's stdin closes cleanly.
-- **Owner:** the parent `Arbiter.Worker` GenServer.
+- **Owner:** the parent `Wardmast.Worker` GenServer.
 - **Stream:** per-line JSON events (`system/init`, `assistant`, `user`/tool_result,
   `result`). The session module parses these into display lines and pushes to
   PubSub topic `worker:<task_id>`.
@@ -60,11 +60,11 @@ without committing to it.
   can't false-complete.
 - **Usage capture:** `ClaudeSession.absorb_usage/2` parses `init.model` and
   `result.usage`/`result.total_cost_usd` into a payload that the worker writes
-  to `Arbiter.Usage.Event` on session exit. The Event row already has a
+  to `Wardmast.Usage.Event` on session exit. The Event row already has a
   `provider` column ("claude" today) — the schema is pre-shaped for non-Claude
   agents.
 
-The `Dispatch.maybe_start_agent/4` call in `apps/arbiter/lib/arbiter/worker/dispatch.ex`
+The `Dispatch.maybe_start_agent/4` call in `apps/wardmast/lib/wardmast/worker/dispatch.ex`
 is the one site where Claude is named. The review gate spawns its own
 `ClaudeSession` for the reviewer pass — second site.
 
@@ -89,21 +89,21 @@ is not the cheapest path to the cost win.
 We already have two pluggable-adapter pairs in the codebase that share a shape
 worth copying:
 
-- `Arbiter.Trackers.Tracker` behaviour + `Arbiter.Trackers` dispatcher + per-workspace
+- `Wardmast.Trackers.Tracker` behaviour + `Wardmast.Trackers` dispatcher + per-workspace
   `config["tracker"]["type"]` + per-process `Adapter.Config.put_active/1` seed.
-- `Arbiter.Mergers.Merger` behaviour + `Arbiter.Mergers` dispatcher + per-workspace
+- `Wardmast.Mergers.Merger` behaviour + `Wardmast.Mergers` dispatcher + per-workspace
   `config["merge"]["strategy"]` + same per-process seed.
 
 The proposal copies that shape verbatim. New names:
 
 | Layer | Module | Mirror of |
 |---|---|---|
-| Behaviour | `Arbiter.Agents.Agent` | `Arbiter.Trackers.Tracker` |
-| Dispatcher | `Arbiter.Agents` | `Arbiter.Trackers` |
-| Adapter (MVP) | `Arbiter.Agents.Claude` | `Arbiter.Trackers.Jira` |
-| Adapter config | `Arbiter.Agents.Claude.Config` | `Arbiter.Trackers.Jira.Config` |
+| Behaviour | `Wardmast.Agents.Agent` | `Wardmast.Trackers.Tracker` |
+| Dispatcher | `Wardmast.Agents` | `Wardmast.Trackers` |
+| Adapter (MVP) | `Wardmast.Agents.Claude` | `Wardmast.Trackers.Jira` |
+| Adapter config | `Wardmast.Agents.Claude.Config` | `Wardmast.Trackers.Jira.Config` |
 
-### 4.1 `Arbiter.Agents.Agent` behaviour
+### 4.1 `Wardmast.Agents.Agent` behaviour
 
 The contract is intentionally narrow. The worker is the port owner; the
 adapter only *produces argv*, *parses events*, *recognizes completion*, and
@@ -112,14 +112,14 @@ broadcast, line-cap buffering, durable log append) stays in the worker /
 session module.
 
 ```elixir
-defmodule Arbiter.Agents.Agent do
+defmodule Wardmast.Agents.Agent do
   @typedoc "Opaque per-session state the adapter threads through event parsing."
   @type session_state :: map()
 
   @typedoc "A normalized display-line: text plus whether it should arm the done sentinel."
   @type display_line :: {text :: String.t(), arm_done? :: boolean()}
 
-  @typedoc "Structured usage attrs ready for Arbiter.Usage.Event.create/1."
+  @typedoc "Structured usage attrs ready for Wardmast.Usage.Event.create/1."
   @type usage_attrs :: map() | nil
 
   @doc "Argv to spawn for `prompt`. Adapter may bake in model / streaming flags."
@@ -150,12 +150,12 @@ existing Tracker behaviour*: agents don't need `fetch/transition/update_fields/
 link_for` because the worker process is the source of truth — there's nothing
 to fetch back.
 
-### 4.2 `Arbiter.Agents` dispatcher
+### 4.2 `Wardmast.Agents` dispatcher
 
 ```elixir
-defmodule Arbiter.Agents do
+defmodule Wardmast.Agents do
   @adapters %{
-    claude: Arbiter.Agents.Claude
+    claude: Wardmast.Agents.Claude
     # :codex, :aider, :gemini wired up only when their adapters ship
   }
 
@@ -212,8 +212,8 @@ no surprises for existing workspaces.
 
 The `agent` block also carries a `security` sub-object — the normalized,
 provider-agnostic worker permission + sandbox posture (`mode`, `allow`,
-`deny`, `sandbox`). It is resolved by `Arbiter.Agents.SecurityPolicy` and
-mapped per-adapter (`Arbiter.Agents.Claude.Security`). See
+`deny`, `sandbox`). It is resolved by `Wardmast.Agents.SecurityPolicy` and
+mapped per-adapter (`Wardmast.Agents.Claude.Security`). See
 `docs/worker-security.md` (bd-9u10op) for the full shape and the safe
 defaults; it is omitted here to keep this section focused on routing.
 
@@ -228,7 +228,7 @@ Routing is a *function from task + workspace + ledger → agent config*. It's
 small enough to live as its own behaviour:
 
 ```elixir
-defmodule Arbiter.Agents.Routing.Policy do
+defmodule Wardmast.Agents.Routing.Policy do
   @callback choose(task :: Issue.t(), workspace :: Workspace.t(), ledger_snapshot :: map()) ::
               %{type: atom(), config: map()}
 end
@@ -454,7 +454,7 @@ Each phase is independently shippable and reversible.
 
 ### Phase B — `Agent` behaviour + Claude adapter (2–3 days)
 
-- Introduce `Arbiter.Agents.Agent`, `Arbiter.Agents`, `Arbiter.Agents.Claude`.
+- Introduce `Wardmast.Agents.Agent`, `Wardmast.Agents`, `Wardmast.Agents.Claude`.
 - Lift `ClaudeSession`'s parsing into the `Claude` adapter, leaving the port-
   owner + buffering + PubSub plumbing in a renamed `AgentSession` module.
 - `Dispatch.maybe_start_claude` → `Dispatch.maybe_start_agent`; flag rename with
@@ -497,7 +497,7 @@ Only meaningful once there are two adapters in flight.
   sentinel; same `arb done` completion sentinel. Adapters that don't speak this
   protocol natively must be prompt-engineered to do so — same way we prompt-
   engineer Claude today.
-- **Does not change `Arbiter.Usage.Event`.** The schema is already provider-
+- **Does not change `Wardmast.Usage.Event`.** The schema is already provider-
   neutral. Adapters just fill in `provider` and the structured fields they
   have. Missing fields → `nil` (already supported).
 - **Does not introduce a queue or a scheduler.** Routing is a synchronous
@@ -550,10 +550,10 @@ we can decide a usage-parse strategy rather than guessing.
 
 ### What ships in bd-guegdl
 
-* `provider: "gemini"` rows now land in `Arbiter.Usage.Event` with a concrete
+* `provider: "gemini"` rows now land in `Wardmast.Usage.Event` with a concrete
   **model id** and a **wall-clock duration**. The model is resolved at dispatch
   time via the new optional `Agent.resolved_model/1` callback
-  (`Arbiter.Agents.Gemini.resolved_model/1`) and threaded onto the session
+  (`Wardmast.Agents.Gemini.resolved_model/1`) and threaded onto the session
   (`ClaudeSession` `:provider` / `:model` opts), because the Gemini CLI emits no
   model the worker can read mid-stream on the current spawn path (`agy -p` /
   `gemini -p`, no `--output-format`).
@@ -598,10 +598,10 @@ Token usage + a *derived* cost now land on Gemini ledger rows. Three pieces:
    `provider + model + duration` with `nil` tokens/cost, exactly as before.
 2. **The session parser learned Gemini's schema.** `ClaudeSession` dispatches
    on the session's `provider`: `"gemini"` events route to
-   `Arbiter.Agents.Gemini.Stream` (usage capture + display formatting +
+   `Wardmast.Agents.Gemini.Stream` (usage capture + display formatting +
    live-activity), keeping Gemini's schema out of the Claude parser. Only
    assistant message *text* opts into `arb done` detection.
-3. **A price table derives cost.** `Arbiter.Agents.Gemini.Pricing` holds
+3. **A price table derives cost.** `Wardmast.Agents.Gemini.Pricing` holds
    per-model input/output/cached rates and computes `cost_usd` from the token
    counts (the CLI emits no dollar figure). Unknown models yield `nil` cost
    rather than a fabricated figure.
@@ -630,5 +630,5 @@ cache-creation analogue). Cost is priced per-model from `stats.models`.
 Gemini's thinking/tool tokens are folded into `total_tokens` but not broken out
 by stream-json, so billable output is approximated as
 `max(output_tokens, total_tokens - input_tokens)` to recover thinking cost (see
-`Arbiter.Agents.Gemini.Pricing` for the documented caveats, incl. the
+`Wardmast.Agents.Gemini.Pricing` for the documented caveats, incl. the
 un-modelled >200k long-context premium).

@@ -12,7 +12,7 @@ worker.
 
 Linux only, best-effort, sampled every 10 s and smoothed (an exponentially
 weighted average, weight 0.4 on the newest sample) so one spike does not flap
-capacity. Code: `Arbiter.Machine.Sensors`, `Arbiter.Machine.Monitor`.
+capacity. Code: `Wardmast.Machine.Sensors`, `Wardmast.Machine.Monitor`.
 
 | reading | source |
 |---|---|
@@ -25,7 +25,7 @@ Linux) is **unknown**, and **unknown never derates**.
 
 ## The rule
 
-`Arbiter.Machine.Derate` (pure; `Derate.evaluate/4`) maps the readings, the
+`Wardmast.Machine.Derate` (pure; `Derate.evaluate/4`) maps the readings, the
 machine's cap and live count, the thresholds and the prior state to a level and
 the slots `offered` (always ≤ the cap):
 
@@ -91,7 +91,7 @@ Restart the agent (`systemctl --user restart arbiter-node`) to apply.
   suggestion, bounded by the owner's ceiling): `Derate.apply_level/3` →
   `min(cap, live)` while derated. A heartbeat that stops naming a derate (an
   older agent, a stopped monitor) reads as no derate.
-* **Primary.** `Arbiter.Nodes.LocalCapacity.cap/0` returns `offered`, `derate`,
+* **Primary.** `Wardmast.Nodes.LocalCapacity.cap/0` returns `offered`, `derate`,
   `derate_reason` and `temp_c` next to the cap; `LocalCapacity.admit/3` holds
   per the table above.
 * **Hard machine-level layer.** `offered` replaces the static cap in

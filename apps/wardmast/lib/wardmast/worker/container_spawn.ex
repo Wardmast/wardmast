@@ -1,0 +1,2049 @@
+defmodule Wardmast.Worker.ContainerSpawn do
+  @moduledoc """
+  Claude and Codex under the podman sandbox backend (bd-d2o3xb, P7, and
+  bd-50d5j6, P8 of `docs/design/podman-worker-containers.md`): the wrap point
+  between a dispatch's `ClaudeSession` spawn and `Wardmast.Worker.Container`.
+
+  `sandbox.backend: podman` (`Wardmast.Agents.SecurityPolicy`) makes a worker's
+  `claude --print` or `codex exec` run inside a rootless container (`:provider`,
+  default `"claude"`; see "Codex" below). The bwrap jail is
+  untouched: `ClaudeSession` only calls in here for a spawn that carries a
+  podman policy.
+
+  ## Two steps
+
+    * `prepare/1` runs once per worker, on the host, from
+      `ClaudeSession.start/1`: it checks the host can run the backend, finds the
+      private clone's mount set (`Wardmast.Worker.PrivateClone.mounts/1`), the
+      image (`Wardmast.Worker.Image.ensure/3`), starts the run's egress proxy and
+      Wardmast bridge (`Wardmast.Worker.Egress.JailRun`, the same one agy's jail
+      uses), creates the per-run home and config dir, and returns a **request**
+      map that rides in the spawn's `port_args` under `:sandbox`. Any failure is
+      an `{:error, reason}`: a podman spawn never degrades to an unsandboxed one.
+    * `wrap_port/1` runs at every port open (the first spawn, a commit-gate
+      nudge, an auto-resume: they all stash the same `port_args`), turns the
+      inner `sh -c 'exec claude --print …'` argv into a `podman run` argv, and
+      moves the secrets out of argv.
+
+  ## What the container gets
+
+  Only what is named here is visible; the host's `~/.ssh`, keyring, install DB
+  and every sibling worktree are not mounted, so there is nothing to mask.
+
+    * the private clone at its own path, its `.git` and the read-only guards
+      (`PrivateClone.mounts/1`), the main repo's `objects/` as an overlay;
+    * a **per-run** `HOME` and `CLAUDE_CONFIG_DIR` under the run's temp dir
+      (removed with the worker), the config dir seeded with the install's
+      generated `settings.json` and `CLAUDE.md` and **never** with a credential
+      file, nor with another run's session history;
+    * the host's `claude` and `arb` binaries, read-only, at `/opt/arbiter/cli`
+      (on the image's `PATH`), and an oversized prompt's temp file, read-only;
+    * the run's proxy socket and Wardmast bridge socket, read-only, with a
+      `socat` per socket inside the container (`Wardmast.Worker.Jail`'s own
+      script) listening on loopback: `HTTPS_PROXY` names the proxy, and
+      `127.0.0.1:<arbiter port>` is Wardmast, so the `.mcp.json` URL and `arb`
+      work unchanged. The container is `--network=none`; the sockets are its
+      only exit, and the proxy runs in learn mode (`Egress`).
+
+  ## Codex (P8, bd-50d5j6)
+
+  `provider: "codex"` differs from Claude in four places, the rest is shared:
+
+    * **`CODEX_HOME`** is per run, under the run's temp dir
+      (`ConfigDir.seed_run_home/2`: generated `config.toml`, `AGENTS.md`, the
+      execpolicy deny rules, and a *copy* of the operator's `auth.json`). The
+      operator's home, and the real `auth.json`, are never mounted: the host
+      side copies the file in before the container exists. The container's
+      `TMPDIR`/`TMP`/`TEMP` is `<run dir>/tmp`, not the run dir: codex refuses
+      to start its helpers when `CODEX_HOME` is under the temp dir
+      (bd-83gbsh, #1040; `apply_env/2`).
+    * **Refresh-token rotation.** The CLI refreshing its ChatGPT token rotates
+      the refresh token in the copy only, which would leave the real login
+      holding a retired one. `Wardmast.Agents.Codex.AuthSync` carries it back
+      (newest `last_refresh` wins, atomic, never an older token over a newer one)
+      at every port re-open, at `teardown/1`, and when the owning worker dies by
+      any means (`AuthSync.Reaper`, flushed by `RunTmp.Reaper` before it removes
+      the directory). A re-opened run also takes a newer login a sibling rotated.
+    * **The CLI** is the vendored static binary from the pinned upstream release
+      (`Wardmast.Worker.CliSet`; a container has no node), mounted with its `rg`
+      and `bwrap` so the CLI's own helpers resolve on the image's `PATH`.
+    * **Egress infra** is the OpenAI hosts (`chatgpt.com`, `api.openai.com`,
+      `auth.openai.com`) rather than Anthropic's.
+
+  MCP needs nothing new: the adapter passes it as `-c mcp_servers.…` overrides
+  (bd-avq0wb) naming `Wardmast.MCP.server_url/0` and the bearer in
+  `ARBITER_MCP_TOKEN`, which reach the container as `-e NAME` and the Wardmast
+  bridge on the same loopback port.
+
+  ## Environment
+
+  Nothing is inherited. The container's environment is the spawn's explicit
+  pairs (`ClaudeSession`'s `env_pairs/4` minus its unsets: the worker token,
+  `ARB_TOKEN`, `ARB_WORKER_BEAD_ID`, the workspace's `worker_env`, `TMPDIR`) plus
+  the proxy variables, `ARB_HOST` and `GIT_SSH_COMMAND`. Every value reaches
+  the container as `-e NAME` with the value in the `podman` client's own
+  environment, so `ps` never shows a token; the few names that would change how
+  the client itself runs (`PATH`, `HOME`, `XDG_*`, …) are passed as literals.
+
+  ## Test services (P10, bd-dmcbos)
+
+  A repo with a service definition (`Wardmast.Worker.TestServices`: tonic gets
+  Postgres 15 plus an S3 store; vstim has none) gets a **pod** instead of a
+  bare container. `prepare/1` starts it last, with the services ready, and the
+  request carries `:pod` and the worker's `DATABASE_URL` and friends. The worker
+  container joins the pod (`--pod`, no `--network`/`--userns` of its own: the pod
+  is `--network none --userns keep-id`), so the services are on its `127.0.0.1`
+  and nothing of the host's loopback is. Services are optional and per repo; a
+  repo with none runs exactly as before.
+
+  ## Teardown
+
+  The container is named per worker (`arb-<task>-<hash>`), run with `--rm` and
+  `--init`. `teardown/1` removes it by that name when the worker kills its
+  sessions, because killing the `podman` client is not a reliable stop
+  (`Container`, "Teardown by name"), and removes the pod with it. `--rm` does
+  not remove a pod, so `TestServices.Reaper` also removes it when the owning
+  worker process dies by any means.
+
+  ## Which spawns are covered (bd-7ays3v)
+
+  The task worker, a ReviewGate **reviewer** (Claude, in its round's read-only
+  private clone, `PrivateClone.create_review/3`) and the merge queue's CI
+  **fix pass** and **conflict pass** (Claude, in the pass's private clone). Each
+  passes `sandbox_wrap: true` to `Claude.default_argv/2` and hands
+  `session_opts/3` to `ClaudeSession`, which is what wraps it.
+
+  ## Not covered
+
+  A ReviewGate fix round's implementer and a `review: true` dispatch still call
+  `Claude.default_argv/2` without `sandbox_wrap: true` and are refused under
+  `podman`, as they were before this existed. So is a spawn whose cwd is not a
+  private clone (a reviewer with no round checkout, which falls back to
+  `sandbox.review_backend`, or a task-type dispatch with no worktree), and any
+  provider but Claude and Codex: a reviewer or pass routed to one of those runs
+  under `sandbox.review_backend` or is refused. The container's memory is not
+  bounded by `MemoryScope`: it is not in the server's cgroup, but nothing caps
+  it either.
+  """
+
+  alias Wardmast.Agents.Claude.ConfigDir
+  alias Wardmast.Agents.Codex.AuthSync
+  alias Wardmast.Agents.Codex.ConfigDir, as: CodexConfigDir
+  alias Wardmast.Agents.SecurityPolicy
+  alias Wardmast.Guardrails.Projection
+  alias Wardmast.Mergers
+  alias Wardmast.Nodes.Checkout, as: NodeCheckout
+  alias Wardmast.Nodes.Files
+  alias Wardmast.Nodes.Placement
+  alias Wardmast.Worker.CliSet
+  alias Wardmast.Worker.Container
+  alias Wardmast.Worker.DepsCache
+  alias Wardmast.Worker.DepsSeedWatch
+  alias Wardmast.Worker.Egress.JailRun
+  alias Wardmast.Worker.GateEnv
+  alias Wardmast.Worker.GitCredential
+  alias Wardmast.Worker.Image
+  alias Wardmast.Worker.Image.LocalPublished
+  alias Wardmast.Worker.Image.Publisher
+  alias Wardmast.Worker.Image.Registry, as: ImageRegistry
+  alias Wardmast.Worker.Image.RepoConfig
+  alias Wardmast.Worker.Image.Source, as: ImageSource
+  alias Wardmast.Worker.Jail
+  alias Wardmast.Worker.PrivateClone
+  alias Wardmast.Worker.ResearchGrant
+  alias Wardmast.Worker.Sandbox
+  alias Wardmast.Worker.SeedPaths
+  alias Wardmast.Worker.SessionHistory
+  alias Wardmast.Worker.TestServices
+  alias Wardmast.Worker.Withholding
+  alias Wardmast.Worker.WorkerEnv
+  alias Wardmast.Worker.Worktree
+
+  require Logger
+
+  @cli_dir "/opt/arbiter/cli"
+
+  # bd-6ircwr: a `research_read` run's read-only transcript snapshot, under its own tmp dir.
+  @research_dir "research-transcripts"
+
+  # The model API and the hosts the CLI is known to talk to on its own. The
+  # proxy runs in learn mode: these are the baseline an enforcing proxy would
+  # start from, and anything else the run reaches is logged to `egress_events`.
+  @egress_infra %{
+    "claude" => ["api.anthropic.com:443"],
+    "codex" => ["chatgpt.com:443", "api.openai.com:443", "auth.openai.com:443"]
+  }
+
+  # Names whose value changes how the `podman` client itself runs. They are
+  # passed as `-e NAME=value`, never through the client's environment.
+  # run_command/3: how long past the step timeout the client may linger before the
+  # container is removed under it.
+  @run_command_grace_s 15
+
+  @client_names ~w(PATH HOME USER LOGNAME SHELL LD_LIBRARY_PATH LD_PRELOAD
+                   HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
+                   http_proxy https_proxy all_proxy no_proxy)
+  @temp_names ~w(TMPDIR TMP TEMP)
+  @client_prefixes ["XDG_", "CONTAINERS_", "DOCKER_", "PODMAN_", "DBUS_"]
+
+  @type request :: %{
+          required(:name) => String.t(),
+          required(:provider) => String.t(),
+          required(:image) => String.t(),
+          required(:image_ref) => String.t() | nil,
+          optional(:image_fallback) => String.t() | nil,
+          required(:cli_set) => String.t() | nil,
+          required(:harness_version) => String.t() | nil,
+          required(:podman) => String.t() | nil,
+          required(:mounts) => keyword(),
+          required(:home) => String.t(),
+          required(:config_dir) => String.t(),
+          required(:writable_paths) => [String.t()],
+          required(:cli_mounts) => [{String.t(), String.t()}],
+          required(:prompt_paths) => [String.t()],
+          required(:network) => keyword(),
+          required(:env) => [{String.t(), String.t()}],
+          optional(:codex_auth) => {Path.t(), Path.t()} | nil,
+          optional(:temp_dir) => Path.t() | nil,
+          optional(:pod) => String.t() | nil,
+          optional(:deps_cache) => map() | nil,
+          optional(:git_secrets) => [map()]
+        }
+
+  @doc "The path of the `claude` binary inside the container."
+  @spec claude_path() :: String.t()
+  def claude_path, do: @cli_dir <> "/claude"
+
+  @doc "The path of `provider`'s CLI inside the container."
+  @spec provider_path(String.t() | atom()) :: String.t()
+  def provider_path(provider), do: @cli_dir <> "/" <> provider_name(provider)
+
+  defp provider_name(provider) when provider in [:codex, "codex"], do: "codex"
+  defp provider_name(_provider), do: "claude"
+
+  @doc "Whether `policy` asks for the podman backend."
+  @spec podman?(term()) :: boolean()
+  def podman?(%SecurityPolicy{} = policy), do: SecurityPolicy.sandbox_backend(policy) == :podman
+  def podman?(_), do: false
+
+  @doc """
+  The inputs `ClaudeSession.start/1` needs to wrap a spawn under `policy`
+  (`:security`, `:workspace`, plus `extra`, e.g. `:repo`): none for any policy
+  that is not podman, so a bwrap or unsandboxed spawn is unchanged. Every spawn
+  site that can run in a container builds its session opts through here
+  (the task worker, ReviewGate's reviewer, the merge queue's fix and conflict
+  passes).
+  """
+  @spec session_opts(term(), term(), keyword()) :: keyword()
+  def session_opts(policy, workspace, extra \\ []) do
+    if podman?(policy),
+      do: [security: policy, workspace: workspace] ++ extra,
+      else: []
+  end
+
+  @doc """
+  The policy a merge-queue pass (CI fix pass, conflict pass) runs in a container
+  under, or `nil` when it does not (bd-7ays3v). The pass resolves the workspace's
+  posture scoped to `repo` exactly as the task worker does
+  (`SecurityPolicy.resolve/3`), so the egress decisions and `egress_events` match
+  the implementer's; it runs in the container when that is podman and the
+  provider is Claude. For anything else the pass spawns as it always did.
+  """
+  @spec pass_policy(term(), String.t() | nil, atom() | String.t()) ::
+          SecurityPolicy.t() | nil
+  def pass_policy(workspace, repo, provider) do
+    policy = SecurityPolicy.resolve(workspace, %{}, repo)
+    if podman?(policy) and provider in [:claude, "claude"], do: policy
+  end
+
+  @doc """
+  The adapter opts a pass adds when `policy` (from `pass_policy/3`) is set:
+  the policy, and the promise to hand the spawn to `ClaudeSession` with it.
+  """
+  @spec pass_agent_opts(SecurityPolicy.t() | nil) :: keyword()
+  def pass_agent_opts(nil), do: []
+  def pass_agent_opts(%SecurityPolicy{} = policy), do: [security: policy, sandbox_wrap: true]
+
+  # -- prepare ------------------------------------------------------------------
+
+  @doc """
+  The host-side half. Options:
+
+    * `:policy` (required), `:worktree_path` (required, a private clone),
+      `:owner` (the worker pid the egress run lives and dies with), `:task_id`,
+      `:arb_token`, `:tmp_dir` (the run's temp dir; required), `:workspace`,
+      `:repo`, `:argv` (the inner argv, for an oversized prompt's temp file),
+      `:provider` (`"claude"` default, or `"codex"`);
+    * `:image` (a ready tag; else `config :wardmast, :worker_container_image`,
+      else the repo's default-branch image from `Image.ensure/3`);
+    * `:podman`; the CLIs are `Wardmast.Worker.CliSet`'s (pinned upstream releases
+      from SI1a's cache, never a host install; its options select the cache),
+      `:codex_source_home` (the operator's codex home the login is copied from;
+      default `Codex.ConfigDir.source_home/0`), `:egress`
+      (`(opts -> {:ok, network, run_id} | {:error, reason})`, default
+      `JailRun.start/1`).
+  """
+  @spec prepare(keyword()) :: {:ok, request()} | {:error, term()}
+  def prepare(opts) when is_list(opts) do
+    policy = Keyword.fetch!(opts, :policy)
+    provider = provider_name(Keyword.get(opts, :provider))
+
+    with :ok <- container_backend(policy, provider),
+         :ok <- host_ready(),
+         :ok <- no_ssh_agent(Keyword.get(opts, :projection)),
+         {:ok, worktree} <- fetch_worktree(opts),
+         {:ok, mounts} <- clone_mounts(worktree),
+         {:ok, tmp_dir} <- fetch_tmp_dir(opts),
+         {:ok, research_dir} <- stage_research(opts, tmp_dir),
+         name = container_name(opts),
+         {:ok, image, source} <- fetch_image(opts, worktree, provider, name),
+         {:ok, set, cli_mounts} <- local_cli(source, provider, opts),
+         {:ok, home, config_dir, codex_auth} <- run_dirs(provider, tmp_dir, policy, opts),
+         {:ok, temp_dir} <- container_temp_dir(provider, tmp_dir),
+         # Before the egress run starts: a cold seed takes minutes.
+         deps_cache = seed_deps(opts, worktree, image, home),
+         {:ok, network, spec} <- start_egress(provider, opts, policy, worktree),
+         {:ok, services} <- start_services(opts, name),
+         {:ok, git_secrets} <- create_git_secrets(opts, name, tmp_dir, services) do
+      track_codex_auth(opts, codex_auth)
+
+      {:ok,
+       %{
+         name: name,
+         provider: provider,
+         image: image,
+         image_ref: image,
+         image_fallback: fallback_of(source),
+         cli_set: set.set8,
+         harness_version: cli_version(set, provider),
+         podman: Keyword.get(opts, :podman),
+         mounts: with_research_mount(mounts, research_dir),
+         home: home,
+         config_dir: config_dir,
+         writable_paths: Enum.uniq([tmp_dir | Map.get(policy.sandbox, :writable_paths, [])]),
+         cli_mounts: cli_mounts,
+         prompt_paths: prompt_paths(Keyword.get(opts, :argv)),
+         network: network,
+         env:
+           container_env(spec, Keyword.get(opts, :git_material)) ++
+             GitCredential.container_env(Keyword.get(opts, :git_material)) ++
+             if(services, do: services.env, else: []) ++ research_env(research_dir),
+         git_secrets: git_secrets,
+         pod: services && services.pod,
+         deps_cache: deps_cache,
+         codex_auth: codex_auth,
+         temp_dir: temp_dir
+       }}
+    end
+  end
+
+  # bd-6ircwr: a `research_read` run (`:research_transcripts`, the workspace id)
+  # gets a snapshot of its own workspace's transcripts, staged under the run's
+  # tmp dir and bound read-only. A snapshot that cannot be made refuses the spawn:
+  # the run was promised it, and the alternative is a research run that quietly
+  # studies nothing. `:research_stager` is the test seam.
+  defp stage_research(opts, tmp_dir) do
+    case Keyword.get(opts, :research_transcripts) do
+      workspace_id when is_binary(workspace_id) and workspace_id != "" ->
+        stager = Keyword.get(opts, :research_stager, &ResearchGrant.stage_transcripts/3)
+
+        case stager.(workspace_id, Path.join(tmp_dir, @research_dir), []) do
+          {:ok, %{dir: dir}} -> {:ok, dir}
+          {:error, reason} -> {:error, {:research_transcripts_unavailable, reason}}
+        end
+
+      _ ->
+        {:ok, nil}
+    end
+  end
+
+  defp with_research_mount(mounts, nil), do: mounts
+
+  defp with_research_mount(mounts, dir),
+    do: Keyword.update(mounts, :readonly_paths, [dir], &(&1 ++ [dir]))
+
+  defp research_env(nil), do: []
+  defp research_env(dir), do: [{"ARBITER_TRANSCRIPTS_DIR", dir}]
+
+  # bd-9cygoo (G16): the scoped git credential travels as `podman run --secret`s,
+  # created here on the host (value through a 0600 file, never argv) and removed
+  # at `teardown/1`, when the owning worker exits, and by `Container.reap_git_secrets/1`
+  # at boot. The request keeps the names and targets only, never a value.
+  defp create_git_secrets(opts, name, tmp_dir, services) do
+    secrets = GitCredential.podman_secrets(Keyword.get(opts, :git_material), name)
+
+    if secrets == [] do
+      {:ok, []}
+    else
+      container_opts = Keyword.take(opts, [:podman, :runner])
+      uid = host_uid()
+
+      result =
+        Enum.reduce_while(secrets, :ok, fn secret, :ok ->
+          case Container.create_secret(secret, [dir: tmp_dir] ++ container_opts) do
+            :ok -> {:cont, :ok}
+            {:error, reason} -> {:halt, {:error, {:git_credential_secret_failed, reason}}}
+          end
+        end)
+
+      names = Enum.map(secrets, & &1.name)
+
+      case result do
+        :ok ->
+          track_git_secrets(Keyword.get(opts, :owner), names, container_opts)
+
+          {:ok,
+           Enum.map(secrets, fn secret ->
+             secret |> Map.delete(:value) |> Map.put(:uid, uid)
+           end)}
+
+        {:error, _} = error ->
+          Enum.each(names, &Container.remove_secret(&1, container_opts))
+          if services, do: TestServices.teardown(services.pod)
+          error
+      end
+    end
+  end
+
+  # The uid the container maps to itself (`--userns=keep-id`): this process's.
+  defp host_uid do
+    case File.stat("/proc/self") do
+      {:ok, %File.Stat{uid: uid}} -> uid
+      _ -> 0
+    end
+  end
+
+  # A worker killed without its `teardown/1` must not leave a deploy key in
+  # podman's secret store.
+  defp track_git_secrets(owner, names, container_opts) when is_pid(owner) do
+    {:ok, _pid} =
+      Task.start(fn ->
+        ref = Process.monitor(owner)
+
+        receive do
+          {:DOWN, ^ref, :process, _, _} ->
+            Enum.each(names, &Container.remove_secret(&1, container_opts))
+        end
+      end)
+
+    :ok
+  end
+
+  defp track_git_secrets(_owner, _names, _container_opts), do: :ok
+
+  defp container_backend(policy, provider) do
+    case Sandbox.module(policy, provider) do
+      {:ok, Container} -> :ok
+      {:ok, other} -> {:error, {:not_a_container_backend, other}}
+      {:error, _} = refusal -> refusal
+    end
+  end
+
+  defp host_ready do
+    with :ok <- wrap_status(Container.status(), :podman_unavailable),
+         do: wrap_status(Container.network_status(), :podman_network_unavailable)
+  end
+
+  defp wrap_status(:ok, _tag), do: :ok
+  defp wrap_status({:error, reason}, tag), do: {:error, {tag, reason}}
+
+  defp fetch_worktree(opts) do
+    case Keyword.get(opts, :worktree_path) do
+      path when is_binary(path) and path != "" -> {:ok, Path.expand(path)}
+      _ -> {:error, :no_worktree}
+    end
+  end
+
+  # A container is only ever handed the layout `PrivateClone.create/3` built; a
+  # linked worktree (layout A) or a shared checkout is refused, never mounted.
+  defp clone_mounts(worktree) do
+    case PrivateClone.mounts(worktree) do
+      {:ok, mounts} -> {:ok, mounts}
+      {:error, reason} -> {:error, {:not_a_private_clone, worktree, reason}}
+    end
+  end
+
+  defp fetch_tmp_dir(opts) do
+    case Keyword.get(opts, :tmp_dir) do
+      dir when is_binary(dir) and dir != "" -> {:ok, dir}
+      _ -> {:error, :no_run_tmp_dir}
+    end
+  end
+
+  # `{:ok, image, source}`: `source` is how the image was chosen, for `local_cli/3` and
+  # the run's provenance: `:explicit` (a tag the caller or config named), `:published`
+  # (SI-L: the repo's published digest, from the local podman store), `:build` (the
+  # local build) or `{:fallback, reason}` (the build, because the published image could
+  # not be had).
+  defp fetch_image(opts, worktree, provider, name) do
+    case Keyword.get(opts, :image) || Application.get_env(:wardmast, :worker_container_image) do
+      tag when is_binary(tag) and tag != "" -> {:ok, tag, :explicit}
+      _ -> published_or_build(opts, worktree, provider, name)
+    end
+  end
+
+  # SI-L (bd-4cq0qt, OD11): a local run takes the published per-repo image every node
+  # takes, served from the local podman store, and falls back to the local build only
+  # when it cannot be had (`Image.LocalPublished`). Nothing here can strand a run.
+  defp published_or_build(opts, worktree, provider, name) do
+    case local_published(opts, provider, name) do
+      {:published, %{ref: ref}} -> {:ok, ref, :published}
+      {:fallback, reason} -> build_image(opts, worktree, {:fallback, reason})
+      {:build, nil} -> build_image(opts, worktree, :build)
+    end
+  end
+
+  defp local_published(opts, provider, name) do
+    local = Keyword.get(opts, :local_image, [])
+
+    with true <- LocalPublished.enabled?(local) || {:build, nil},
+         {:ok, set} <- CliSet.resolve(opts) do
+      LocalPublished.resolve(
+        [
+          workspace: Keyword.get(opts, :workspace),
+          repo: Keyword.get(opts, :repo),
+          run: name,
+          owner: Keyword.get(opts, :owner),
+          provider: provider,
+          expect_cli_set: set.set8
+        ] ++ local
+      )
+    else
+      # An unresolvable CLI set is `resolve_cli/2`'s error to report, as it always was.
+      _ -> {:build, nil}
+    end
+  end
+
+  defp build_image(opts, worktree, source) do
+    repo_path = PrivateClone.main_repo(worktree)
+    base = Mergers.base_branch(Keyword.get(opts, :workspace), Keyword.get(opts, :repo)) || "main"
+    build = Keyword.get(opts, :local_build, &Image.ensure/2)
+
+    with true <- is_binary(repo_path) or {:error, {:not_a_private_clone, worktree}},
+         {:ok, %{tag: tag}} <- build.(repo_path, base) do
+      {:ok, tag, source}
+    else
+      {:error, reason} -> {:error, {:image_unavailable, reason}}
+    end
+  end
+
+  # The published image carries its CLIs as layers: nothing is bind-mounted, and the
+  # set is resolved only for the run's provenance. Every other source mounts the cache.
+  defp local_cli(:published, _provider, opts) do
+    with {:ok, set} <- CliSet.resolve(opts), do: {:ok, set, []}
+  end
+
+  defp local_cli(_source, provider, opts), do: resolve_cli(provider, opts)
+
+  defp fallback_of({:fallback, reason}), do: reason
+  defp fallback_of(_source), do: nil
+
+  # The clone's `deps/` and `_build/` come from the cache seeded inside this
+  # image (`DepsCache`, bd-1wm14e), not from the host's own `_build`, which is
+  # ABI-bound to the host's libc and OTP. Best-effort: a cache that cannot be
+  # seeded (offline, no lockfile, a non-Mix repo) leaves the worker to fetch and
+  # compile for itself, as it would without the cache. `nil` means no cache.
+  defp seed_deps(opts, worktree, image, home) do
+    seed =
+      case Keyword.get(
+             opts,
+             :deps_cache,
+             Application.get_env(:wardmast, :worker_deps_cache, true)
+           ) do
+        enabled when enabled in [false, nil] ->
+          nil
+
+        true ->
+          seed_env =
+            Image.RepoConfig.resolve(
+              Keyword.get(opts, :workspace),
+              Keyword.get(opts, :repo)
+            ).seed_env
+
+          fn worktree, image ->
+            DepsCache.seed_worktree(
+              worktree,
+              image,
+              [home: home, seed_env: seed_env] ++ Keyword.take(opts, [:workspace, :repo, :podman])
+            )
+          end
+
+        fun when is_function(fun, 2) ->
+          fun
+      end
+
+    with seed when is_function(seed) <- seed,
+         {:ok, summary} <- seed.(worktree, image) do
+      DepsSeedWatch.succeeded(seed_repo(opts), image)
+      summary
+    else
+      nil ->
+        nil
+
+      {:error, :no_lockfile} ->
+        nil
+
+      {:error, reason} ->
+        DepsSeedWatch.failed(seed_repo(opts), image, reason,
+          workspace_id: workspace_id(Keyword.get(opts, :workspace))
+        )
+
+        nil
+    end
+  end
+
+  defp seed_repo(opts), do: opts |> Keyword.get(:repo) |> repo_label()
+  defp repo_label(repo) when is_binary(repo), do: repo
+  defp repo_label(nil), do: nil
+  defp repo_label(repo), do: inspect(repo)
+
+  defp workspace_id(%{id: id}) when is_binary(id), do: id
+  defp workspace_id(_), do: nil
+
+  # The test services (`Wardmast.Worker.TestServices`, P10) start last: nothing
+  # after them can fail, so a refused prepare never leaves a pod behind. A repo
+  # with no definition gets none and the container is exactly what it was.
+  defp start_services(opts, name) do
+    service_opts = Keyword.get(opts, :services_opts, [])
+
+    with {:ok, services} <- services_for(opts),
+         {:ok, started} <-
+           TestServices.start(
+             Keyword.merge(service_opts, name: name, services: services, podman: opts[:podman])
+           ) do
+      if started, do: track_pod(opts, started.pod, service_opts)
+      {:ok, started}
+    else
+      {:error, reason} -> {:error, {:test_services_unavailable, reason}}
+    end
+  end
+
+  defp services_for(opts) do
+    case Keyword.fetch(opts, :services) do
+      {:ok, specs} -> TestServices.resolve(specs)
+      :error -> TestServices.for_repo(Keyword.get(opts, :repo))
+    end
+  end
+
+  # The pod outlives the worker container (`--rm` removes only that), so the
+  # owner's death, however it comes, removes it.
+  defp track_pod(opts, pod, service_opts) do
+    case Keyword.get(opts, :owner) do
+      owner when is_pid(owner) -> TestServices.Reaper.track(owner, pod, service_opts)
+      _ -> :ok
+    end
+  end
+
+  # The provider CLI and `arb` come from `Wardmast.Worker.CliSet`: the verified,
+  # pinned upstream releases in SI1a's cache, never a CLI installed on this
+  # host (SI1). The same set feeds the remote file shelf (`remote_cli/2`) and
+  # the published image's CLI layers, so a local run and a remote one run the
+  # same bytes. The provider CLI is mandatory; a set without `arb` still gets
+  # a worker, minus the CLI.
+  @doc false
+  @spec cli_mounts(String.t(), keyword()) :: {:ok, [{String.t(), String.t()}]} | {:error, term()}
+  def cli_mounts(provider, opts) do
+    with {:ok, _set, mounts} <- resolve_cli(provider, opts), do: {:ok, mounts}
+  end
+
+  defp resolve_cli(provider, opts) do
+    with {:ok, set} <- CliSet.resolve(opts),
+         :ok <- require_cached(set, provider, opts),
+         {:ok, set} <- CliSet.materialize(set) do
+      unless CliSet.cli(set, "arb"),
+        do: Logger.warning("ContainerSpawn: no cached `arb`; the container has no arb CLI")
+
+      with {:ok, mounts} <- CliSet.mounts(set, provider), do: {:ok, set, mounts}
+    end
+  end
+
+  # SI3: the provider CLI's version as the image's `arbiter.cli.<name>.version`
+  # label carries it (the label is `CliSet.labels/1` of this very set).
+  defp cli_version(set, provider) do
+    label = "arbiter.cli.#{provider}.version"
+    Enum.find_value(CliSet.labels(set), fn {key, value} -> key == label && value end)
+  end
+
+  # A registry node's digest-pinned ref, else the tag the node builds or pulls.
+  defp image_ref(%{ref: ref}) when is_binary(ref), do: ref
+  defp image_ref(%{tag: tag}) when is_binary(tag), do: tag
+  defp image_ref(_), do: nil
+
+  @doc """
+  SI3: what a prepared spawn (`prepare/1`'s or `prepare_remote/1`'s request)
+  ran in: `%{image_ref, cli_set, harness_version, image_fallback}`, the version read
+  from the image's `arbiter.cli.<provider>.version` label. `image_fallback` (SI-L) is
+  why a local run built its image instead of taking the published one, else `nil`.
+  """
+  @spec provenance(map()) :: %{
+          image_ref: String.t() | nil,
+          cli_set: String.t() | nil,
+          harness_version: String.t() | nil,
+          image_fallback: String.t() | nil
+        }
+  def provenance(request),
+    do:
+      Map.new(
+        [:image_ref, :cli_set, :harness_version, :image_fallback],
+        &{&1, Map.get(request, &1)}
+      )
+
+  # An empty or unpinned cache is an install state, not a bug: say what it is and
+  # how to fill it, beside the `{:cli_not_cached, provider}` the caller gets.
+  defp require_cached(set, provider, opts) do
+    with {:error, _} = error <- CliSet.require_cli(set, provider) do
+      Logger.error("ContainerSpawn: " <> CliSet.not_cached_message(provider, opts))
+      error
+    end
+  end
+
+  defp prompt_paths(argv) when is_list(argv) do
+    case Wardmast.Agents.Claude.prompt_tmpfile(argv) do
+      path when is_binary(path) -> [path]
+      _ -> []
+    end
+  end
+
+  defp prompt_paths(_), do: []
+
+  # The proxy and the Wardmast bridge come from the same `Egress` run agy's jail
+  # uses (`JailRun`, learn mode): one per worker, reused by every later spawn.
+  # The in-container `socat` is `Jail`'s own listener script.
+  defp start_egress(provider, opts, policy, worktree) do
+    start = Keyword.get(opts, :egress, &JailRun.start/1)
+    projection = projection(opts)
+
+    start_opts = [
+      owner: Keyword.get(opts, :owner),
+      task_id: Keyword.get(opts, :task_id),
+      arb_token: Keyword.get(opts, :arb_token),
+      safe_defaults_exclude: policy.permissions.safe_defaults_exclude,
+      worktree: worktree,
+      infra: Map.fetch!(@egress_infra, provider),
+      tunnels: SecurityPolicy.egress_tunnels(policy) ++ projection.tunnels,
+      grants: Withholding.grants(Keyword.get(opts, :task_id), projection)
+    ]
+
+    with {:ok, network, _run_id} <- start.(start_opts),
+         {:ok, spec} <- Jail.network_spec(Keyword.put(network, :socat, "socat")) do
+      {:ok, network, spec}
+    else
+      {:error, reason} -> {:error, {:egress_unavailable, reason}}
+    end
+  end
+
+  # bd-ld8qde (G14): what the ticket's declared permissions project into this
+  # run's proxy (grants) and fixed bridges (tunnels). No projection (a caller
+  # that predates it) is an unguarded one.
+  defp projection(opts) do
+    case Keyword.get(opts, :projection) do
+      %Projection{} = projection -> projection
+      _ -> Projection.unguarded()
+    end
+  end
+
+  # `prod_ssh` hands the worker a key through a per-worker ssh-agent socket bound
+  # into a jail. A confined container cannot connect() to a host socket (only the
+  # egress bridges are made reachable), so under podman the spawn is refused
+  # rather than run without the agent it was promised.
+  defp no_ssh_agent(%Projection{ssh: ssh}) when not is_nil(ssh),
+    do: {:error, {:prod_ssh_unsupported, :podman}}
+
+  defp no_ssh_agent(_), do: :ok
+
+  # A deploy key is named by `GIT_SSH_COMMAND` too, so the proxy `ProxyCommand` is
+  # composed onto it (`Jail.ssh_command/2`) and `GitCredential.container_env/1` leaves
+  # that variable alone.
+  defp container_env(spec, material),
+    do: Jail.network_env(spec) ++ Jail.ssh_command(ssh_base(material), spec) ++ arb_host()
+
+  defp ssh_base(%GitCredential.Material{kind: :deploy_key}),
+    do: GitCredential.ssh_command(GitCredential.podman_key_path())
+
+  defp ssh_base(_), do: nil
+
+  # `arb` reads `ARB_HOST` (a base URL); the bridge listens on the same loopback
+  # port the server does, so the default `http://127.0.0.1:4848` is only right
+  # when the server is on 4848.
+  defp arb_host do
+    case URI.parse(Wardmast.MCP.server_url()) do
+      %URI{port: port} when is_integer(port) -> [{"ARB_HOST", "http://127.0.0.1:#{port}"}]
+      _ -> []
+    end
+  end
+
+  # A per-run HOME and config dir (`CLAUDE_CONFIG_DIR`, or `CODEX_HOME` for
+  # Codex). Claude's is seeded with the install's generated settings and worker
+  # memory, and nothing else: no `.credentials.json`, none of the install-wide
+  # dir's session history. Codex's holds a copy of the login
+  # (`ConfigDir.seed_run_home/2`).
+  defp run_dirs("claude", tmp_dir, _policy, opts) do
+    home = Path.join(tmp_dir, "home")
+    config_dir = Path.join(tmp_dir, "claude-config")
+
+    with :ok <- File.mkdir_p(home),
+         :ok <- File.mkdir_p(config_dir) do
+      seed_config(config_dir, Keyword.get(opts, :workspace))
+      seed_session(config_dir, opts)
+      {:ok, home, config_dir, nil}
+    else
+      {:error, reason} -> {:error, {:run_dirs_failed, reason}}
+    end
+  end
+
+  defp run_dirs("codex", tmp_dir, policy, opts) do
+    home = Path.join(tmp_dir, "home")
+    codex_home = Path.join(tmp_dir, "codex-home")
+    seed_opts = [security: policy] ++ source_home_opt(opts)
+
+    with :ok <- File.mkdir_p(home),
+         {:ok, %{auth: auth}} <- CodexConfigDir.seed_run_home(codex_home, seed_opts) do
+      {:ok, home, codex_home, auth}
+    else
+      {:error, reason} -> {:error, {:run_dirs_failed, reason}}
+    end
+  end
+
+  # A Codex container's `TMPDIR` is a subdirectory of the run dir, not the run
+  # dir itself. The CLI (0.164.0) refuses to create its helper binaries when
+  # `CODEX_HOME` is under the temp dir, and `CODEX_HOME` is `<run dir>/codex-home`:
+  # with `TMPDIR` the run dir it warns "Refusing to create helper binaries"
+  # (bd-83gbsh, #1040). That is only a warning; the fatal "config.toml Permission
+  # denied" was the image running as uid 0 (`Wardmast.Worker.Image.with_hex_layer/1`).
+  # Still disk-backed and inside the run's writable mount, so still removed with
+  # the run. Claude has no such guard and keeps the run dir.
+  defp container_temp_dir("codex", tmp_dir) do
+    temp_dir = Path.join(tmp_dir, "tmp")
+
+    case File.mkdir_p(temp_dir) do
+      :ok -> {:ok, temp_dir}
+      {:error, reason} -> {:error, {:run_dirs_failed, reason}}
+    end
+  end
+
+  defp container_temp_dir(_provider, _tmp_dir), do: {:ok, nil}
+
+  defp source_home_opt(opts) do
+    case Keyword.get(opts, :codex_source_home) do
+      dir when is_binary(dir) and dir != "" -> [source_home: dir]
+      _ -> []
+    end
+  end
+
+  # The sync outlives the call stack: `AuthSync.Reaper` persists a rotation when
+  # the owning worker dies, however it does.
+  defp track_codex_auth(opts, {source, run}) do
+    case Keyword.get(opts, :owner) do
+      owner when is_pid(owner) -> AuthSync.Reaper.track(owner, source, run)
+      _ -> :ok
+    end
+  end
+
+  defp track_codex_auth(_opts, nil), do: :ok
+
+  # bd-atsde3: a `--resume <sid>` argv needs that session's JSONL in THIS run's
+  # config dir, which starts empty. Copy in that one session's history; when it
+  # is gone the CLI says so and the stop is classified `:session_not_found`.
+  defp seed_session(config_dir, opts),
+    do: seed_resume(config_dir, Keyword.get(opts, :argv), Keyword.get(opts, :worktree_path))
+
+  # `Worker` splices `--resume <sid>` into the argv when the port opens, after
+  # `prepare/1` ran with the pristine argv (bd-9qazat), so `wrap_port/1` seeds
+  # again with the final one. Seeding is idempotent.
+  defp seed_resume(config_dir, argv, cwd) do
+    with sid when is_binary(sid) <- SessionHistory.resume_session_id(argv),
+         cwd when is_binary(cwd) <- cwd,
+         {:error, reason} <- SessionHistory.seed(config_dir, cwd, sid) do
+      Logger.warning("ContainerSpawn: cannot carry session #{sid} over: #{inspect(reason)}")
+    end
+
+    :ok
+  end
+
+  defp seed_config(config_dir, workspace) do
+    with {:ok, source} <- ConfigDir.ensure(workspace) do
+      for file <- ["settings.json", "CLAUDE.md"], File.regular?(Path.join(source, file)) do
+        File.cp(Path.join(source, file), Path.join(config_dir, file))
+      end
+    end
+
+    :ok
+  end
+
+  # The one builder of a run's container/pod name: a DNS-1123 label (lowercase
+  # alphanumerics and `-`, <= 63 chars, alphanumeric at both ends), so it is valid
+  # as a podman container name and as a k8s pod name. Synthetic run ids
+  # (`<ticket>#review`, `#r2`, `#impl1`, `#v1`, `#t1`) carry characters a pod name
+  # refuses; the random hash keeps names unique after truncation.
+  @doc false
+  @spec container_name(keyword()) :: String.t()
+  def container_name(opts) do
+    slug =
+      opts
+      |> Keyword.get(:task_id, "run")
+      |> to_string()
+      |> String.downcase()
+      |> String.replace(~r/[^a-z0-9-]/, "-")
+      |> String.slice(0, 30)
+      |> String.trim("-")
+      |> case do
+        "" -> "run"
+        slug -> slug
+      end
+
+    hash =
+      :crypto.hash(:sha256, :erlang.term_to_binary({Keyword.get(opts, :owner), make_ref()}))
+      |> Base.encode16(case: :lower)
+      |> binary_part(0, 8)
+
+    Container.name_for("#{slug}-#{hash}")
+  end
+
+  # -- the spawn env --------------------------------------------------------------
+
+  @doc """
+  `env` (a spawn's `port_args.env`) with the provider's config dir variable
+  (`CLAUDE_CONFIG_DIR`, or `CODEX_HOME` for Codex) pointed at the run's own dir,
+  so the host side (session archive, usage reconcile) and the container agree on
+  where the transcript lives.
+  """
+  @spec apply_env([{String.t(), String.t() | false}], request()) :: [
+          {String.t(), String.t() | false}
+        ]
+  def apply_env(env, %{config_dir: config_dir} = request) do
+    name = config_env_name(request)
+    env = Enum.reject(env, &(elem(&1, 0) == name)) ++ [{name, config_dir}]
+
+    case request do
+      %{temp_dir: temp_dir} when is_binary(temp_dir) ->
+        for {k, v} <- env, do: {k, if(k in @temp_names and is_binary(v), do: temp_dir, else: v)}
+
+      _ ->
+        env
+    end
+  end
+
+  defp config_env_name(%{provider: "codex"}), do: "CODEX_HOME"
+  defp config_env_name(_request), do: "CLAUDE_CONFIG_DIR"
+
+  # -- a run placed on a node (RW9) ----------------------------------------------------
+
+  @doc """
+  The primary half of a **remote** spawn (`docs/design/remote-workers.md` §7.1):
+  what `prepare/1` does that has to happen on the primary, and nothing that has
+  to happen on the node. Options are `prepare/1`'s plus `:node` (the placed
+  node's row: `:id`, and `:capacity` for the memory cap).
+
+  It starts the run's egress proxy and bridges (the policy never leaves the
+  primary), resolves the image **plan** instead of building it, publishes the
+  provider CLI and `arb` on the primary's file shelf (`Wardmast.Nodes.Files`) and
+  reads the config files and prompt a node cannot reach. The node builds the
+  image, fetches the files, makes the run's directories and starts the
+  container itself. The returned request rides in `port_args.remote`; each open
+  turns it into a spec with `remote_spec/3`.
+
+  A run whose container pushes for itself (a ReviewGate fix round on a scoped
+  repo) hands its `:git_material` along (bd-akp9ae): only a GitHub App's
+  short-lived installation token may go (`GitCredential.remote_delivery/1`; any
+  other kind refuses the spawn). The token rides in the spec's `secrets`, which
+  the node writes to the run's tmpfs file and removes when the container exits,
+  is cancelled or is reaped; the helper config that uses it is ordinary env. The
+  token is revoked when the owning worker exits, however it exits
+  (`GitCredential.revoke_when_down/3`), so a copy taken off the node is dead
+  after the run.
+  """
+  @spec prepare_remote(keyword()) :: {:ok, map()} | {:error, term()}
+  def prepare_remote(opts) when is_list(opts) do
+    policy = Keyword.fetch!(opts, :policy)
+    provider = provider_name(Keyword.get(opts, :provider))
+    node = Keyword.fetch!(opts, :node)
+    material = Keyword.get(opts, :git_material)
+
+    with :ok <- remote_provider(provider),
+         :ok <- container_backend(policy, provider),
+         {:ok, git} <- GitCredential.remote_delivery(material),
+         {:ok, worktree} <- fetch_worktree(opts),
+         {:ok, tmp_dir} <- fetch_tmp_dir(opts),
+         {:ok, image} <- remote_image(opts, worktree, node),
+         {:ok, set, cli} <- remote_cli(provider, image, opts),
+         {:ok, services} <- remote_services(opts),
+         {:ok, home, config_dir} <- remote_dirs(tmp_dir),
+         {:ok, checkout} <- remote_checkout(opts, worktree, config_dir),
+         {:ok, worktree_files, worktree_secrets} <- worktree_files(worktree),
+         {:ok, network, spec} <- start_egress(provider, opts, policy, worktree) do
+      name = container_name(opts)
+      :ok = GitCredential.revoke_when_down(Keyword.get(opts, :owner), material, [])
+      image = pulled_set(image, set)
+
+      {:ok,
+       %{
+         node_id: node.id,
+         node_kind: node_kind(node),
+         name: name,
+         provider: provider,
+         image: image,
+         image_ref: image_ref(image),
+         cli_set: Map.get(image, :cli_set) || set.set8,
+         harness_version: cli_version(set, provider),
+         worktree: worktree,
+         checkout: checkout,
+         worktree_files: worktree_files,
+         worktree_secrets: worktree_secrets,
+         git_secrets: git.secrets,
+         withheld: GitCredential.withheld_values(remote_workspace(opts)),
+         home: home,
+         config_dir: config_dir,
+         config_files: config_files(Keyword.get(opts, :workspace)),
+         tmp_dir: tmp_dir,
+         cli: cli,
+         prompt_paths: prompt_paths(Keyword.get(opts, :argv)),
+         network: network,
+         env: container_env(spec, nil) ++ git.env ++ services.env,
+         services: services.presets,
+         limits: remote_limits(node),
+         task_id: Keyword.get(opts, :task_id)
+       }}
+    end
+  end
+
+  # SI4: the CLI set a pulled image must carry (`arbiter.cli-set`, checked by the node):
+  # the publish result's, else (a publisher that reported none) the set it was built from.
+  defp pulled_set(%{pull: _} = image, set), do: Map.put_new(image, :cli_set, set.set8)
+  defp pulled_set(image, _set), do: image
+
+  # The workspace whose `git_credentials` say what a node must never be sent: the
+  # spawn's own, else its task's.
+  defp remote_workspace(opts) do
+    Keyword.get(opts, :workspace) || WorkerEnv.workspace_for(Keyword.get(opts, :task_id))
+  rescue
+    _ -> nil
+  end
+
+  # RW11 (`docs/design/remote-workers.md` §9): a worktree that is a private clone
+  # (the home clone of a remote run) is synced to the node as a shadow clone and
+  # back as bundles. The placement veto runs here, so a repo with submodules or LFS
+  # is refused as a placement error rather than by the agent mid-seed. A worktree
+  # that is not a private clone has nothing to sync and is placed as before.
+  @doc false
+  @spec remote_checkout(keyword(), Path.t(), Path.t()) :: {:ok, map() | nil} | {:error, term()}
+  def remote_checkout(opts, worktree, config_dir) do
+    case PrivateClone.branch(worktree) do
+      branch when is_binary(branch) ->
+        base = checkout_base(opts)
+
+        case NodeCheckout.veto(worktree, branch) do
+          :ok ->
+            {:ok,
+             %{
+               home: worktree,
+               branch: branch,
+               base: base,
+               seeded_paths: Worktree.seeded_paths(worktree),
+               config_dir: config_dir,
+               read_only?: PrivateClone.read_only?(worktree)
+             }}
+
+          {:error, reason} ->
+            {:error, {:checkout_vetoed, reason}}
+        end
+
+      _ ->
+        {:ok, nil}
+    end
+  end
+
+  # The ref the node is seeded with as `origin/<base>` and the ingest allows back.
+  # A pass that merges into a target of its own (a per-task or per-repo
+  # `target_branch`, bd-bg87oz) names it as `:base_branch`: seeding the workspace's
+  # `merge.base` instead would hand the node a target it never rebases onto.
+  defp checkout_base(opts) do
+    case Keyword.get(opts, :base_branch) do
+      base when is_binary(base) and base != "" ->
+        base
+
+      _ ->
+        Mergers.base_branch(Keyword.get(opts, :workspace), Keyword.get(opts, :repo)) || "main"
+    end
+  end
+
+  # The remote-provider set is Placement.remote_providers/0 (SI11).
+  defp remote_provider(provider) do
+    if provider in Placement.remote_providers(),
+      do: :ok,
+      else: {:error, {:provider_not_remote, provider}}
+  end
+
+  defp remote_image(opts, worktree, node) do
+    case explicit_image(opts) do
+      tag when is_binary(tag) ->
+        registry_image(%{tag: tag, plan: nil}, node, %{}, opts)
+
+      nil ->
+        case PrivateClone.main_repo(worktree) do
+          repo_path when is_binary(repo_path) -> plan_image(opts, repo_path, node)
+          _ -> {:error, {:image_unavailable, {:not_a_private_clone, worktree}}}
+        end
+    end
+  end
+
+  defp explicit_image(opts) do
+    case Keyword.get(opts, :image) || Application.get_env(:wardmast, :worker_container_image) do
+      tag when is_binary(tag) and tag != "" -> tag
+      _ -> nil
+    end
+  end
+
+  defp plan_image(opts, repo_path, node) do
+    workspace = Keyword.get(opts, :workspace)
+    repo = Keyword.get(opts, :repo)
+    base = Mergers.base_branch(workspace, repo) || "main"
+    image = RepoConfig.resolve(workspace, repo)
+
+    with :ok <- prebuilt_node(image, repo, node, %{workspace: workspace, repo: repo}, opts),
+         {:ok, source_opts} <- source_opts(image, workspace, repo),
+         {:ok, plan} <- Image.plan(repo_path, base, source_opts ++ Keyword.get(opts, :plan, [])) do
+      plan_context(plan, workspace, repo, repo_path, base, node, opts)
+    else
+      {:error, reason} -> {:error, {:image_unavailable, reason}}
+    end
+  end
+
+  # A prebuilt image is overlaid and pushed by the primary: only a node that runs the
+  # published image can run it, a cluster or (SI4) a machine node that pulls it. A
+  # node that builds its own image has nothing to pull it from.
+  defp prebuilt_node(%{source: :prebuilt}, repo, node, ctx, opts) do
+    if node_source(node, ctx, opts) == :build,
+      do: {:error, {:prebuilt_needs_registry, repo}},
+      else: :ok
+  end
+
+  defp prebuilt_node(_image, _repo, _node, _ctx, _opts), do: :ok
+
+  # `Image.plan/3`'s source options; `prebuilt` also needs the repo's image
+  # settings and the registry login that reads its `ref` (KH14).
+  defp source_opts(%{source: :prebuilt} = image, workspace, repo) do
+    case ImageRegistry.resolve(workspace, repo) do
+      {:ok, cfg} -> {:ok, prebuilt_opts(image, workspace, repo) ++ [registry: cfg]}
+      :unset -> {:ok, prebuilt_opts(image, workspace, repo)}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp source_opts(image, _workspace, _repo), do: {:ok, [source: image.source]}
+
+  defp prebuilt_opts(image, workspace, repo),
+    do: [
+      source: :prebuilt,
+      image: image,
+      repo_name: repo,
+      secret_values: workspace_secret_values(workspace)
+    ]
+
+  # The values the workspace hands a worker (SI12: none may sit in a prebuilt image).
+  defp workspace_secret_values(%Wardmast.Tasks.Workspace{} = workspace) do
+    workspace |> WorkerEnv.resolve_workspace("prebuilt-image-scan") |> elem(1)
+  rescue
+    _ -> []
+  end
+
+  defp workspace_secret_values(_), do: []
+
+  defp plan_context(plan, workspace, repo, repo_path, base, node, opts) do
+    ctx = %{
+      repo: repo,
+      workspace: workspace,
+      repo_path: repo_path,
+      base: base,
+      seed_paths: SeedPaths.resolve(workspace, repo)
+    }
+
+    registry_image(%{tag: plan.tag, plan: plan}, node, ctx, opts)
+  end
+
+  @doc """
+  Publish the run image for a node **before** the run is committed to it
+  (`Worker.Dispatch`). `:ok` for a run whose node builds its own image (nothing to
+  publish); for a run that takes the published image (a cluster, or SI4's machine
+  node that pulls: `Wardmast.Worker.Image.Source.choose/3`) the same
+  `registry_image/4` the spawn will call, so its single-flight cache makes the
+  spawn's own call instant. `{:error, {:image_unavailable, reason}}` is what
+  `Publisher.fallback/2` maps to local or a hold. Options are `prepare_remote/1`'s
+  `:image`, `:workspace`, `:repo`, `:publish`, `:plan` (extra `Image.plan/3`
+  options) and `:image_source` (`Image.Source.choose/3`'s options; tests).
+  """
+  @spec preflight_image(String.t() | nil, map(), keyword()) :: :ok | {:error, term()}
+  def preflight_image(repo_path, node, opts) do
+    explicit = explicit_image(opts)
+
+    source =
+      if is_binary(explicit),
+        do: source_for(%{tag: explicit, plan: nil}, node, %{}, opts),
+        else:
+          node_source(
+            node,
+            %{workspace: Keyword.get(opts, :workspace), repo: Keyword.get(opts, :repo)},
+            opts
+          )
+
+    cond do
+      source == :build ->
+        prebuilt_preflight(opts)
+
+      is_binary(explicit) ->
+        with {:ok, _} <- registry_image(%{tag: explicit, plan: nil}, node, %{}, opts), do: :ok
+
+      is_binary(repo_path) ->
+        with {:ok, _} <- plan_image(opts, repo_path, node), do: :ok
+
+      true ->
+        {:error, {:image_unavailable, :no_repo}}
+    end
+  end
+
+  # A repo that sources a prebuilt image cannot run on a node with no registry.
+  defp prebuilt_preflight(opts) do
+    repo = Keyword.get(opts, :repo)
+
+    with nil <- explicit_image(opts),
+         %{source: :prebuilt} <- RepoConfig.resolve(Keyword.get(opts, :workspace), repo) do
+      {:error, {:image_unavailable, {:prebuilt_needs_registry, repo}}}
+    else
+      _ -> :ok
+    end
+  end
+
+  @doc false
+  # A2 (`docs/design/remote-workers.md` §11): a node that advertises
+  # `caps.image = "registry"` never receives a build plan. The primary publishes
+  # the image (`Image.Publisher.ensure_ready/2`: bounded wait, single flight) and
+  # the spec carries its digest-pinned `ref`. A publish that times out or fails
+  # is `image_unavailable`, the same refusal a node would give; `Publisher.fallback/2`
+  # is the placement policy for it.
+  #
+  # SI4 (§21.2.1, §21.4): which image a run takes is chosen per run
+  # (`Image.Source.choose/3`), not read off `caps.image` alone. A machine node that
+  # pulls gets the same pinned `ref`, plus the image's CLI set and the read credential
+  # it may hold (`:pull`, `PullCredential`); the spec carries no `cli` mount
+  # (`remote_cli/3`). Any other node, and an install with no registry, keep the plan
+  # exactly as before.
+  def registry_image(image, node, ctx, opts) do
+    case source_for(image, node, ctx, opts) do
+      :build ->
+        {:ok, image}
+
+      source ->
+        case publish_image(image, ctx, Keyword.get(opts, :publish, [])) do
+          {:ok, %{ref: ref} = published} ->
+            with :ok <- provider_in_image(published, Keyword.get(opts, :provider)),
+                 do: {:ok, published_image(image, ref, published, source)}
+
+          # bd-5fpj59: `publish: [wait: false]` — the publish is running, not failed.
+          {:pending, key} ->
+            {:error, {:image_pending, key}}
+
+          :disabled ->
+            {:error, {:image_unavailable, :no_registry}}
+
+          {:error, reason} ->
+            {:error, {:image_unavailable, reason}}
+        end
+    end
+  end
+
+  # SI11 (§21.5): the image's `arbiter.cli-providers` label (the published `providers`)
+  # says which providers can run in it. A run whose provider is missing is refused here,
+  # before it is committed to a node. A publish that reports no providers (an older
+  # publisher, a stub) is not judged.
+  defp provider_in_image(%{providers: providers}, provider)
+       when is_list(providers) and not is_nil(provider) do
+    name = provider_name(provider)
+
+    if name in providers,
+      do: :ok,
+      else: {:error, {:image_unavailable, {:provider_not_in_image, name, providers}}}
+  end
+
+  defp provider_in_image(_published, _provider), do: :ok
+
+  # An explicit `:image` has no plan to publish: a cluster still asks for it (and is
+  # refused for it), a machine node keeps taking it as a tag it holds.
+  defp source_for(%{plan: nil}, node, _ctx, _opts),
+    do: if(ImageSource.registry_only?(node), do: :registry, else: :build)
+
+  defp source_for(_image, node, ctx, opts), do: node_source(node, ctx, opts)
+
+  defp node_source(node, ctx, opts),
+    do: ImageSource.choose(node, ctx, Keyword.get(opts, :image_source, []))
+
+  defp published_image(image, ref, _published, :registry),
+    do: image |> Map.put(:plan, nil) |> Map.put(:ref, ref)
+
+  defp published_image(image, ref, published, {:pull, pull}) do
+    image
+    |> Map.put(:plan, nil)
+    |> Map.put(:ref, ref)
+    |> Map.put(:pull, pull)
+    |> then(fn image ->
+      case Map.get(published, :cli_set) do
+        set when is_binary(set) -> Map.put(image, :cli_set, set)
+        _ -> image
+      end
+    end)
+  end
+
+  # `:stub` replaces the publisher in tests.
+  defp publish_image(image, ctx, opts) do
+    case Keyword.fetch(opts, :stub) do
+      {:ok, stub} -> stub.(ctx)
+      :error -> publish_planned(image, ctx, opts)
+    end
+  end
+
+  defp publish_planned(%{plan: nil}, _ctx, _opts), do: {:error, :no_plan_to_publish}
+
+  defp publish_planned(%{plan: plan}, ctx, opts),
+    do: Publisher.ensure_ready(Map.put(ctx, :plan, plan), opts)
+
+  # SI4 (§21.2.1): a run that takes the published image (a digest-pinned `ref`) has its
+  # CLIs as image layers, so nothing is shelved and the spec carries no `cli` mount. The
+  # set is still resolved, for the run's provenance (SI3).
+  defp remote_cli(provider, %{ref: ref}, opts) when is_binary(ref) do
+    with {:ok, set, _mounts} <- resolve_cli(provider, opts), do: {:ok, set, []}
+  end
+
+  # `[{sha256, name, container path}]`: the node fetches by hash.
+  defp remote_cli(provider, _image, opts) do
+    with {:ok, set, mounts} <- resolve_cli(provider, opts),
+         {:ok, files} <- publish_cli(mounts) do
+      {:ok, set, files}
+    end
+  end
+
+  defp publish_cli(mounts) do
+    Enum.reduce_while(mounts, {:ok, []}, fn {host, dest}, {:ok, acc} ->
+      case Files.publish(host) do
+        {:ok, sha} -> {:cont, {:ok, acc ++ [{sha, Path.basename(dest), dest}]}}
+        {:error, reason} -> {:halt, {:error, {:cli_unavailable, reason}}}
+      end
+    end)
+  end
+
+  # Presets only cross the wire (`Wardmast.NodeAgent.RunSpec`); a custom service
+  # definition cannot be placed remotely.
+  defp remote_services(opts) do
+    configured = Application.get_env(:wardmast, :worker_test_services, %{})
+
+    terms =
+      case Keyword.fetch(opts, :services) do
+        {:ok, specs} ->
+          specs
+
+        :error ->
+          Map.get(Map.merge(TestServices.defaults(), configured), Keyword.get(opts, :repo), [])
+      end
+
+    with {:ok, presets} <- presets(terms),
+         {:ok, resolved} <- TestServices.resolve(terms) do
+      {:ok, %{presets: presets, env: TestServices.worker_env(resolved)}}
+    else
+      {:error, reason} -> {:error, {:test_services_unavailable, reason}}
+    end
+  end
+
+  defp presets(terms) do
+    Enum.reduce_while(terms, {:ok, []}, fn
+      :postgres, {:ok, acc} -> {:cont, {:ok, acc ++ [%{"preset" => "postgres"}]}}
+      :s3, {:ok, acc} -> {:cont, {:ok, acc ++ [%{"preset" => "s3"}]}}
+      {:postgres, o}, {:ok, acc} when is_list(o) -> {:cont, {:ok, acc ++ [postgres_preset(o)]}}
+      {:s3, o}, {:ok, acc} when is_list(o) -> {:cont, {:ok, acc ++ [s3_preset(o)]}}
+      other, _ -> {:halt, {:error, {:custom_service_not_remote, inspect(other, limit: 3)}}}
+    end)
+  end
+
+  defp postgres_preset(opts),
+    do:
+      Map.merge(
+        %{"preset" => "postgres"},
+        Map.new(Keyword.take(opts, [:version, :database]), fn {k, v} -> {Atom.to_string(k), v} end)
+      )
+
+  defp s3_preset(opts),
+    do:
+      Map.merge(
+        %{"preset" => "s3"},
+        Map.new(Keyword.take(opts, [:image]), fn {k, v} -> {Atom.to_string(k), v} end)
+      )
+
+  # The container-side paths equal the primary's (path transparency): the clone
+  # slug `claude --resume` keys its session store on is the same on both sides.
+  # The directories exist here too, so the transcript the node uploads has a
+  # place to land.
+  defp remote_dirs(tmp_dir) do
+    home = Path.join(tmp_dir, "home")
+    config_dir = Path.join(tmp_dir, "claude-config")
+
+    with :ok <- File.mkdir_p(home),
+         :ok <- File.mkdir_p(config_dir) do
+      {:ok, home, config_dir}
+    else
+      {:error, reason} -> {:error, {:run_dirs_failed, reason}}
+    end
+  end
+
+  # bd-8y8ztm: the agent config `Worker.Dispatch` injects into the worktree is
+  # untracked (git-excluded), so the checkout's git bundle cannot carry it, yet
+  # the claude argv names it by its primary path (`--mcp-config <worktree>/.mcp.json`)
+  # and the container sees the shadow clone at that same path. These are the
+  # files the node writes into the shadow after seeding it: `.mcp.json` and the
+  # materialized skills tree.
+  #
+  # The `.mcp.json` carries the run's scope token in a bearer header. A secret
+  # never rests on the node's disk (§11), so the file ships with the token
+  # replaced by a `${ARBITER_MCP_TOKEN}` reference, which Claude expands from its
+  # environment (even in a `--mcp-config` file), and the token itself rides in
+  # the spec's `secrets`. Returns `{:ok, %{relative_path => bytes}, %{name => token}}`.
+  @mcp_token_env "ARBITER_MCP_TOKEN"
+  @skills_dir ".claude/skills"
+  @max_skill_files 200
+
+  @doc false
+  @spec worktree_files(String.t()) ::
+          {:ok, %{String.t() => binary()}, %{String.t() => String.t()}} | {:error, term()}
+  def worktree_files(worktree) when is_binary(worktree) do
+    with {:ok, mcp, secrets} <- mcp_file(worktree),
+         {:ok, skills} <- skill_files(worktree) do
+      {:ok, Map.merge(mcp, skills), secrets}
+    end
+  end
+
+  defp mcp_file(worktree) do
+    name = Wardmast.MCP.AgentConfig.Claude.filename()
+    path = Path.join(worktree, name)
+
+    with true <- regular_file?(path),
+         {:ok, body} <- File.read(path),
+         {:ok, %{} = config} <- Jason.decode(body) do
+      {config, secrets} = redact_bearer_tokens(config)
+      {:ok, %{name => Jason.encode!(config, pretty: true)}, secrets}
+    else
+      false -> {:ok, %{}, %{}}
+      {:error, reason} -> {:error, {:mcp_config_unreadable, path, reason}}
+      _ -> {:error, {:mcp_config_unreadable, path, :not_an_object}}
+    end
+  end
+
+  defp redact_bearer_tokens(%{"mcpServers" => %{} = servers} = config) do
+    {servers, secrets} =
+      servers
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.with_index()
+      |> Enum.map_reduce(%{}, fn {{server, entry}, index}, secrets ->
+        var = if index == 0, do: @mcp_token_env, else: "#{@mcp_token_env}_#{index}"
+
+        case entry do
+          %{"headers" => %{"Authorization" => "Bearer " <> token} = headers}
+          when token != "" ->
+            if String.starts_with?(token, "$") do
+              {{server, entry}, secrets}
+            else
+              headers = Map.put(headers, "Authorization", "Bearer ${#{var}}")
+              {{server, %{entry | "headers" => headers}}, Map.put(secrets, var, token)}
+            end
+
+          _ ->
+            {{server, entry}, secrets}
+        end
+      end)
+
+    {%{config | "mcpServers" => Map.new(servers)}, secrets}
+  end
+
+  defp redact_bearer_tokens(config), do: {config, %{}}
+
+  defp skill_files(worktree) do
+    root = Path.join(worktree, @skills_dir)
+
+    case File.lstat(root) do
+      {:ok, %File.Stat{type: :directory}} -> read_skill_files(worktree, walk_files(root))
+      _ -> {:ok, %{}}
+    end
+  end
+
+  defp read_skill_files(_worktree, paths) when length(paths) > @max_skill_files,
+    do: {:error, {:too_many_skill_files, length(paths)}}
+
+  defp read_skill_files(worktree, paths) do
+    Enum.reduce_while(Enum.sort(paths), {:ok, %{}}, fn path, {:ok, acc} ->
+      case File.read(path) do
+        {:ok, body} -> {:cont, {:ok, Map.put(acc, Path.relative_to(path, worktree), body)}}
+        {:error, reason} -> {:halt, {:error, {:skill_unreadable, path, reason}}}
+      end
+    end)
+  end
+
+  # Regular files only: a symlink is never followed out of the tree.
+  defp walk_files(dir) do
+    dir
+    |> File.ls!()
+    |> Enum.flat_map(fn entry ->
+      path = Path.join(dir, entry)
+
+      case File.lstat(path) do
+        {:ok, %File.Stat{type: :directory}} -> walk_files(path)
+        {:ok, %File.Stat{type: :regular}} -> [path]
+        _ -> []
+      end
+    end)
+  end
+
+  defp regular_file?(path), do: match?({:ok, %File.Stat{type: :regular}}, File.lstat(path))
+
+  defp config_files(workspace) do
+    case ConfigDir.ensure(workspace) do
+      {:ok, source} ->
+        for file <- ["settings.json", "CLAUDE.md"],
+            path = Path.join(source, file),
+            File.regular?(path),
+            {:ok, body} <- [File.read(path)],
+            into: %{},
+            do: {file, body}
+
+      _ ->
+        %{}
+    end
+  end
+
+  # A share of the node's memory for one worker (`docs/design/remote-workers.md`
+  # §7.4: a percentage of the node's `MemTotal`, 40 % by default). Nothing known,
+  # nothing asked: the agent then applies no memory cap of its own choosing.
+  @memory_share 0.4
+
+  defp remote_limits(node) do
+    share = Application.get_env(:wardmast, :remote_worker_memory_share, @memory_share)
+
+    case node |> Map.get(:capacity, %{}) |> then(&(&1 || %{})) |> Map.get("mem_total") do
+      total when is_integer(total) and total > 0 ->
+        %{"memory" => "#{max(div(round(total * share), 1_048_576), 256)}m"}
+
+      _ ->
+        %{}
+    end
+  end
+
+  @doc """
+  The declarative spec (string keys, JSON-safe) for one open of a remote spawn:
+  `request` from `prepare_remote/1`, the spawn's `port_args` (its argv and env)
+  and the `run_id` the node knows the run by. The secret half of the env
+  (everything the local path would pass as `-e NAME`) goes in `"secrets"`, never
+  in `"env"`.
+
+  An argv that resumes a Claude session (`--resume <sid>`, bd-4ic681) needs that
+  session's JSONL in the run's config dir on the node, at the slug of the run's
+  cwd (the primary's worktree path: path transparency). It is seeded, redacted,
+  into the run's config dir here (`SessionHistory.seed_redacted/4`), where the
+  node's own transcript uploads land, and the `config_dir` mount names it
+  (`"session"`: path, bytes, sha256) for the node to fetch over HTTPS
+  (`GET /nodes/runs/:run/session`, authorized by `checkout_context/2`).
+  """
+  @spec remote_spec(map(), map(), String.t()) :: {:ok, map()} | {:error, term()}
+  def remote_spec(request, %{argv: [_ | _] = argv} = port_args, run_id) when is_binary(run_id) do
+    # The prompt files this argv names: a session resume's first open runs a terse
+    # inline continue prompt, and the file of the prompt it replaced may be gone by a
+    # later re-open.
+    with {:ok, jail} <- Jail.network_spec(Keyword.put(request.network, :socat, "socat")),
+         {:ok, prompts} <- prompt_mounts(prompt_paths(argv)) do
+      {secret, literal} =
+        port_args
+        |> env_pairs(request)
+        |> withhold(Map.get(request, :withheld, []), request.task_id)
+        |> split_env()
+
+      worktree_files = Map.get(request, :worktree_files, %{})
+      worktree_secrets = Map.get(request, :worktree_secrets, %{})
+      git_secrets = Map.get(request, :git_secrets, %{})
+      session = remote_session(request, port_args)
+
+      {:ok,
+       %{
+         "version" => 1,
+         "run" => run_id,
+         "task" => request.task_id && to_string(request.task_id),
+         "name" => request.name,
+         "install" => Wardmast.Nodes.InstallId.get(),
+         "image" => image_json(request.image, request),
+         "cwd" => request.worktree,
+         "mounts" =>
+           [
+             put_worktree_files(
+               %{"kind" => "worktree", "path" => request.worktree},
+               worktree_files
+             ),
+             %{"kind" => "home", "path" => request.home},
+             put_session(
+               %{
+                 "kind" => "config_dir",
+                 "path" => request.config_dir,
+                 "files" => Map.new(request.config_files, fn {k, v} -> {k, Base.encode64(v)} end)
+               },
+               session
+             ),
+             %{"kind" => "tmp", "path" => request.tmp_dir}
+           ] ++
+             Enum.map(request.cli, fn {sha, name, dest} ->
+               %{"kind" => "cli", "name" => name, "sha256" => sha, "path" => dest}
+             end) ++ prompts,
+         "bridges" => bridges(request.network),
+         "env" => Map.new(literal),
+         "secrets" =>
+           secret |> Map.new() |> Map.merge(worktree_secrets) |> Map.merge(git_secrets),
+         "limits" => request.limits,
+         "network" => "none",
+         "services" => request.services,
+         "command" => remote_network_command(request, jail, argv)
+       }
+       |> put_checkout(request.checkout)
+       |> put_pull_auth(request.image)}
+    end
+  end
+
+  # bd-akp9ae: a long-lived git credential (`GitCredential.withheld_values/1`) never
+  # leaves the primary, even when the workspace also exposes it as a worker env var:
+  # the var is not sent, and the log names it, never its value. A worker never needs
+  # one: the host pushes for it, or it is handed a short-lived token.
+  @min_withheld_match 16
+
+  defp withhold(pairs, [], _task_id), do: pairs
+
+  defp withhold(pairs, withheld, task_id) do
+    {dropped, kept} =
+      Enum.split_with(pairs, fn {_name, value} -> withheld_value?(value, withheld) end)
+
+    if dropped != [] do
+      Logger.warning(
+        "ContainerSpawn: not sending #{Enum.map_join(dropped, ", ", &elem(&1, 0))} to the " <>
+          "node for #{task_id}: it carries a git credential that stays on the primary"
+      )
+    end
+
+    kept
+  end
+
+  defp withheld_value?(value, withheld) when is_binary(value) do
+    Enum.any?(withheld, fn secret ->
+      value == secret or
+        (byte_size(secret) >= @min_withheld_match and String.contains?(value, secret))
+    end)
+  end
+
+  defp withheld_value?(_value, _withheld), do: false
+
+  # bd-4ic681: the session a `--resume` argv continues, seeded for the node. Only a
+  # Claude run with a checkout context can fetch it; a session nobody holds is left
+  # to the CLI to report ("No conversation found"), as a local run's is.
+  defp remote_session(%{provider: "claude", checkout: %{}} = request, %{argv: argv} = port_args) do
+    with sid when is_binary(sid) <- SessionHistory.resume_session_id(argv),
+         {:ok, secrets} <- transcript_secrets(request, port_args),
+         {:ok, seeded} <-
+           SessionHistory.seed_redacted(request.config_dir, request.worktree, sid, secrets) do
+      seeded
+    else
+      nil ->
+        nil
+
+      {:error, reason} ->
+        Logger.warning(
+          "ContainerSpawn: cannot carry session #{SessionHistory.resume_session_id(argv)} " <>
+            "to the node: #{inspect(reason)}"
+        )
+
+        nil
+    end
+  end
+
+  defp remote_session(_request, _port_args), do: nil
+
+  # What a transcript leaving the primary must not carry: the workspace's secrets and
+  # every provider account's credential (`WorkerEnv.secret_values/1`), the
+  # credentials this spawn carries, and the run's MCP token. A list that cannot be
+  # read means no seed, never an unredacted one.
+  @credential_env ~w(CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY ARB_TOKEN)
+
+  defp transcript_secrets(request, port_args) do
+    spawn_env =
+      for {name, value} <- Map.get(port_args, :env, []),
+          name in @credential_env,
+          is_binary(value),
+          do: value
+
+    own_env = for name <- @credential_env, value = System.get_env(name), do: value
+
+    {:ok,
+     WorkerEnv.secret_values(request.task_id) ++
+       spawn_env ++ own_env ++ Map.values(Map.get(request, :worktree_secrets, %{}))}
+  rescue
+    e -> {:error, {:secrets_unreadable, Exception.message(e)}}
+  end
+
+  defp put_session(mount, nil), do: mount
+
+  defp put_session(mount, %{path: path, bytes: bytes, sha256: sha}),
+    do: Map.put(mount, "session", %{"path" => path, "bytes" => bytes, "sha256" => sha})
+
+  @doc """
+  The checkout context the node's `GET`s and `PUT`s for this run are authorized
+  against (`Wardmast.Nodes.Session.checkout_context/2`): `request.checkout`, plus
+  the session transcript `spec` seeded for it (`:session`, a path relative to the
+  checkout's `config_dir`, or nil). `nil` for a run with no checkout.
+  """
+  @spec checkout_context(map(), map()) :: map() | nil
+  def checkout_context(%{checkout: %{} = checkout}, spec) do
+    session =
+      Enum.find_value(spec["mounts"] || [], fn
+        %{"kind" => "config_dir", "session" => %{"path" => path}} -> path
+        _ -> nil
+      end)
+
+    Map.put(checkout, :session, session)
+  end
+
+  def checkout_context(_request, _spec), do: nil
+
+  defp put_worktree_files(mount, files) when map_size(files) == 0, do: mount
+
+  defp put_worktree_files(mount, files),
+    do: Map.put(mount, "files", Map.new(files, fn {k, v} -> {k, Base.encode64(v)} end))
+
+  defp put_checkout(spec, nil), do: spec
+
+  # A reviewer's read-only clone (bd-cgdhlu) is seeded like any checkout but never
+  # collected: it writes nothing back, so the agent mirrors only the transcripts.
+  defp put_checkout(spec, %{branch: branch, base: base} = checkout) do
+    body = %{"branch" => branch, "base" => base}
+
+    body =
+      if Map.get(checkout, :read_only?, false), do: Map.put(body, "read_only", true), else: body
+
+    Map.put(spec, "checkout", body)
+  end
+
+  defp prompt_mounts(paths) do
+    Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, acc} ->
+      case File.read(path) do
+        {:ok, body} ->
+          {:cont,
+           {:ok, acc ++ [%{"kind" => "prompt", "path" => path, "content" => Base.encode64(body)}]}}
+
+        {:error, reason} ->
+          {:halt, {:error, {:prompt_unreadable, path, reason}}}
+      end
+    end)
+  end
+
+  # Named as `Jail.bridge_names/1` names the listeners, so a cluster pod's command and
+  # the leaves minted for the spec agree.
+  defp bridges(network) do
+    bridges = network[:bridges] || []
+    paths = [network[:proxy_socket] | Enum.map(bridges, &elem(&1, 1))]
+
+    Enum.zip_with(Jail.bridge_names(%{bridges: bridges}), paths, fn name, path ->
+      %{"name" => name, "path" => path}
+    end)
+  end
+
+  # bd-8tg3uv: a cluster node's pod has none of the primary's Unix sockets, so its
+  # listeners dial the controller's bridge address (`Jail.pod_network_command/2`). A
+  # machine node's agent keeps the primary's socket paths, which the plain command uses.
+  # `Overview.node_row/2` carries the kind as an atom (`:cluster` / `:machine`); the request
+  # carries it as a string so `remote_network_command/3` matches one form.
+  @doc false
+  @spec node_kind(map()) :: String.t() | nil
+  def node_kind(node) do
+    case Map.get(node, :kind) do
+      nil -> nil
+      kind -> to_string(kind)
+    end
+  end
+
+  defp remote_network_command(%{node_kind: "cluster"}, jail, argv),
+    do: Jail.pod_network_command(jail, argv)
+
+  defp remote_network_command(_request, jail, argv), do: Jail.network_command(jail, argv)
+
+  # A2: a registry node gets the digest-pinned `ref` the primary pushed.
+  # SI4: a machine node that pulls it also gets what it checks the image's labels
+  # against (the CLI set, the run's provider) and, for a registry the operator marked
+  # insecure, `--tls-verify=false`.
+  defp image_json(image, request) do
+    base = %{"tag" => image.tag, "plan" => plan_json(image.plan)}
+    base = if is_binary(Map.get(image, :ref)), do: Map.put(base, "ref", image.ref), else: base
+
+    case Map.get(image, :pull) do
+      %{} = pull ->
+        base
+        |> put_string("cli_set", Map.get(image, :cli_set))
+        |> put_string("provider", Map.get(request, :provider))
+        |> then(
+          &if(Map.get(pull, :insecure?) == true, do: Map.put(&1, "insecure", true), else: &1)
+        )
+
+      _ ->
+        base
+    end
+  end
+
+  defp put_string(map, key, value) when is_binary(value), do: Map.put(map, key, value)
+  defp put_string(map, _key, _value), do: map
+
+  # SI4 (§21.4): the read credential for this one pull, allowlisted and never logged
+  # (`Wardmast.NodeAgent.PullAuth` prints only its registry). An anonymous pull has none.
+  defp put_pull_auth(spec, %{pull: %{auth: %Wardmast.NodeAgent.PullAuth{} = auth}}),
+    do: Map.put(spec, "pull_auth", auth)
+
+  defp put_pull_auth(spec, _image), do: spec
+
+  defp plan_json(nil), do: nil
+
+  defp plan_json(plan) do
+    %{
+      "tag" => plan.tag,
+      "name" => plan.name,
+      "hash" => plan.hash,
+      "containerfile" => plan.containerfile,
+      "build_args" => Enum.map(plan.build_args, fn {k, v} -> [k, v] end),
+      "base" =>
+        Map.new(
+          ~w(tag name hash containerfile)a,
+          &{Atom.to_string(&1), Map.fetch!(plan.base, &1)}
+        )
+    }
+  end
+
+  # -- wrap ----------------------------------------------------------------------
+
+  @doc """
+  The port-open half: `port_args` with `:sandbox` becomes the `podman run`
+  invocation, else it is returned as it is.
+
+  The result's `:env` is only the values `-e NAME` takes from the client's
+  environment: the unsets the spawn env carries (`SpawnEnv`) are for a child
+  that inherits, and the client must keep `XDG_RUNTIME_DIR` to find its rootless
+  runtime.
+  """
+  @spec wrap_port(map()) :: {:ok, map()} | {:error, term()}
+  def wrap_port(%{sandbox: %{} = request, argv: [_ | _] = argv} = port_args) do
+    sync_codex_auth(request, :reopen)
+
+    if request.provider == "claude",
+      do: seed_resume(request.config_dir, argv, request.mounts[:worktree])
+
+    wrap_argv(port_args)
+  end
+
+  def wrap_port(%{sandbox: _}), do: {:error, :empty_command}
+  def wrap_port(port_args), do: {:ok, port_args}
+
+  # The `podman run` invocation alone, without the session-only side effects of
+  # `wrap_port/1` (codex auth reopen, resume seeding).
+  defp wrap_argv(port_args, offline? \\ false)
+
+  defp wrap_argv(%{sandbox: %{} = request, argv: [_ | _] = argv} = port_args, offline?) do
+    with {:ok, spec} <- network_spec(request, offline?),
+         {:ok, [podman | args]} <-
+           Container.wrap(Jail.network_command(spec, argv), opts(request, port_args, offline?)) do
+      {:ok,
+       %{
+         port_args
+         | exec: podman,
+           argv: [podman | args],
+           env: inherit_pairs(port_args, request, offline?)
+       }}
+    end
+  end
+
+  # The pre-push gate's container has no egress: no bridge to wait for, so a proxy
+  # socket that is already gone cannot refuse it (bd-9xcogk).
+  defp network_spec(_request, true), do: {:ok, nil}
+
+  defp network_spec(request, false),
+    do: Jail.network_spec(Keyword.put(request.network, :socat, "socat"))
+
+  @doc """
+  Run `command` (`sh -c`) to completion in the run's own container: the spawn's
+  `port_args` with the agent's argv swapped for the command, so it gets the same
+  image, mounts, home, environment and (absent) network as the session had
+  (bd-8wdrql, the pre-push recipe). Returns `{output, exit_status}` — 124 when
+  `timeout_s` (plus a grace) elapsed — or `{:error, reason}` when the wrap was
+  refused. The container is removed by name afterwards, whatever happened.
+
+  The container is offline (bd-9xcogk): the agent's egress bridge is not mounted and
+  its proxy variables are not set, since that proxy belongs to the agent's run and may
+  be gone by now. The deps and `_build` it needs are in the worktree already.
+  """
+  @spec run_command(map(), String.t(), pos_integer()) ::
+          {String.t(), non_neg_integer()} | {:error, term()}
+  def run_command(%{sandbox: %{name: name}} = port_args, command, timeout_s)
+      when is_binary(command) and is_integer(timeout_s) do
+    with {:ok, %{argv: [podman | args], env: env}} <- gate_argv(port_args, command) do
+      try do
+        Container.cmd([], podman, args,
+          env: env,
+          stderr_to_stdout: true,
+          timeout: (timeout_s + @run_command_grace_s) * 1000
+        )
+      after
+        Container.teardown(name)
+      end
+    end
+  end
+
+  def run_command(_port_args, _command, _timeout_s), do: {:error, :not_sandboxed}
+
+  # The `podman run` argv and client env `run_command/3` runs `command` with.
+  @doc false
+  @spec gate_argv(map(), String.t()) :: {:ok, map()} | {:error, term()}
+  def gate_argv(%{sandbox: %{}} = port_args, command) when is_binary(command),
+    do: wrap_argv(%{port_args | argv: ["sh", "-c", command]}, true)
+
+  @doc """
+  Like `run_command/3`, for a command run *while the session's container is
+  still up* (the `run_tests` tool, bd-57nhsi): the container gets a name of its
+  own (`<session name>-x<hex>`), so it neither collides with the live agent
+  container nor is the one removed afterwards, and the session-only side effects
+  of `wrap_port/1` (codex auth reopen, resume seeding) are skipped.
+  """
+  @spec run_side_command(map(), String.t(), pos_integer()) ::
+          {String.t(), non_neg_integer()} | {:error, term()}
+  def run_side_command(%{sandbox: %{name: name} = request} = port_args, command, timeout_s)
+      when is_binary(name) and is_binary(command) and is_integer(timeout_s) do
+    side_name = side_name(name)
+    inner = %{port_args | argv: ["sh", "-c", command], sandbox: %{request | name: side_name}}
+
+    with {:ok, %{argv: [podman | args], env: env}} <- wrap_argv(inner) do
+      try do
+        Container.cmd([], podman, args,
+          env: env,
+          stderr_to_stdout: true,
+          timeout: (timeout_s + @run_command_grace_s) * 1000
+        )
+      after
+        Container.teardown(side_name)
+      end
+    end
+  end
+
+  def run_side_command(_port_args, _command, _timeout_s), do: {:error, :not_sandboxed}
+
+  defp side_name(base) do
+    suffix = :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
+    String.slice(base, 0, 64 - 11) <> "-x" <> suffix
+  end
+
+  defp opts(request, port_args, offline?) do
+    {inherit, literal} = split_env(env_pairs(port_args, request, offline?))
+
+    base = [
+      worktree: request.mounts[:worktree],
+      git_dir: request.mounts[:git_dir],
+      objects: request.mounts[:objects],
+      readonly_paths: request.mounts[:readonly_paths] ++ request.prompt_paths,
+      image: request.image,
+      name: request.name,
+      home: request.home,
+      writable_paths: request.writable_paths,
+      bridges: bridges(request, offline?),
+      cli_mounts: request.cli_mounts,
+      env: literal,
+      podman_secrets: Map.get(request, :git_secrets, []),
+      inherit_env: Enum.map(inherit, &elem(&1, 0))
+    ]
+
+    base = if request[:pod], do: [{:pod, request.pod} | base], else: base
+    if request.podman, do: [{:podman, request.podman} | base], else: base
+  end
+
+  defp bridges(_request, true), do: []
+
+  defp bridges(request, false),
+    do: [request.network[:proxy_socket] | Enum.map(request.network[:bridges], &elem(&1, 1))]
+
+  # The explicit pairs of the spawn plus the container's own. An offline (gate)
+  # container carries none of the egress proxy's.
+  defp env_pairs(port_args, request, offline? \\ false) do
+    set = for {name, value} <- Map.get(port_args, :env, []), is_binary(value), do: {name, value}
+    pairs = Map.to_list(Map.new(set ++ request.env))
+    if offline?, do: GateEnv.drop_proxy(pairs), else: pairs
+  end
+
+  defp inherit_pairs(port_args, request, offline?),
+    do: port_args |> env_pairs(request, offline?) |> split_env() |> elem(0)
+
+  defp split_env(pairs), do: Enum.split_with(pairs, fn {name, _} -> not client_name?(name) end)
+
+  defp client_name?(name),
+    do: name in @client_names or Enum.any?(@client_prefixes, &String.starts_with?(name, &1))
+
+  # Carry a rotated login back to the operator's. On a re-open the previous
+  # container has exited (the port is only opened again after it did), so the
+  # copy is quiescent; the run then takes a newer login a sibling rotated.
+  defp sync_codex_auth(%{codex_auth: {source, run}}, when_) do
+    AuthSync.sync(source, run)
+    if when_ == :reopen, do: AuthSync.pull(source, run)
+    :ok
+  end
+
+  defp sync_codex_auth(_request, _when), do: :ok
+
+  # -- teardown --------------------------------------------------------------------
+
+  @doc """
+  Remove the container of `port_args` (a spawn's args, or `nil`) by name, and
+  the test-services pod it ran in, if any (`TestServices.stop/2`).
+  """
+  @spec teardown(map() | nil) :: :ok
+  def teardown(%{sandbox: %{name: name} = request}) when is_binary(name) do
+    Container.teardown(name)
+    remove_git_secrets(request)
+    reclaim_clone(request)
+    sync_codex_auth(request, :final)
+    TestServices.teardown(request[:pod])
+  end
+
+  def teardown(_), do: :ok
+
+  defp remove_git_secrets(request) do
+    for %{name: secret} <- Map.get(request, :git_secrets, []),
+        do: Container.remove_secret(secret, podman: request.podman)
+
+    :ok
+  end
+
+  @doc """
+  Remove just the container of `port_args` (a spawn's args, or `nil`), so
+  nothing of the worker's is left running in its clone. `teardown/1` is this
+  plus the pod, the auth sync and the clone check.
+
+  `opts` takes `:grace_ms`: how long a container that is still finishing may
+  take to exit on its own before it is force-removed (see `Container.stop/2`).
+  """
+  @spec stop(map() | nil, keyword()) :: :ok
+  def stop(port_args, opts \\ [])
+
+  def stop(%{sandbox: %{name: name}}, opts) when is_binary(name) do
+    case Container.stop(name, opts) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("container stop of #{name} failed: #{inspect(reason)}")
+    end
+
+    :ok
+  end
+
+  def stop(_, _opts), do: :ok
+
+  # With the container gone, whatever it left at the clone's `.git` is checked
+  # before any host-side git runs there again (bd-6t7u81): the `.git` mount
+  # stops a rename while it ran, this covers a layout without one.
+  defp reclaim_clone(%{mounts: %{worktree: worktree}}) when is_binary(worktree),
+    do: _ = PrivateClone.reclaim(worktree)
+
+  defp reclaim_clone(_request), do: :ok
+end

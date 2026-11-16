@@ -1,0 +1,26 @@
+defmodule Wardmast.Workers do
+  @moduledoc """
+  Ash domain for durable worker run history.
+
+  An active worker is an ephemeral GenServer — once it stops, its state is
+  gone. `Wardmast.Workers.Run` is the persistent record of what happened: who
+  worked which task, with what output, and how it ended. It survives node
+  restarts and powers the "Completed Workers" view.
+
+  See `Wardmast.Workers.Run` for the schema. The worker GenServer writes
+  through this domain on init (state `:starting`), on each state change, and
+  when the run finishes (`:finished` with an outcome — see
+  `Wardmast.Workers.RunState`); writes are best-effort and never crash the
+  worker.
+  """
+
+  use Ash.Domain
+
+  resources do
+    resource Wardmast.Workers.Run
+    resource Wardmast.Workers.RunStep
+    resource Wardmast.Workers.PrepushStep
+    resource Wardmast.Worker.Egress.Event
+    resource Wardmast.Guardrails.Event
+  end
+end

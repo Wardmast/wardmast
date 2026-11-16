@@ -1,0 +1,1028 @@
+defmodule Wardmast.Worker.ReviewOnlyWatchdogTest do
+  @moduledoc """
+  Regression tests for bd-4ji58d, bd-btcyn6, bd-ddtbhb, bd-bs3z04, and
+  bd-4u7a1m.
+
+  When a coordinator dispatches a reviewer via `worker_review` / `arb worker
+  review`, the resulting worker is tagged `review_only: true` and has no
+  branch/worktree.
+
+  After bd-4u7a1m (hosted-forge Watchdog path):
+
+    * APPROVE on a hosted-forge workspace (GitHub/GitLab) with a pr_ref →
+      the ticket's Watchdog is started against the existing PR and drives the
+      merge. The task must NOT reach :closed while the PR is still open.
+      bd-741sid: the reviewer's run ends there — the Watchdog is the ticket's,
+      not the worker's — and a review-only engagement stays open after the
+      merge (bd-cw3w9p).
+    * APPROVE on a :direct workspace (no hosted forge) → reviewer completes
+      normally, Driver closes the task, MergeQueue receives the signal and
+      closes the task without calling the forge merge API (bd-ddtbhb, bd-bs3z04).
+    * REQUEST_CHANGES → reviewer worker fails (not completes) so the Driver
+      does NOT close the task; it stays :active for a fix-pass.
+    * No verdict → same as REQUEST_CHANGES (fail, task stays :active).
+    * pr_ref absent → complete directly; Driver closes task.
+
+  The full ReviewGate merge path (fleet-authored work: enter_review_gate →
+  merge_branch) is a separate path. As of bd-dkwhbn it no longer forces a
+  merge — it passes `via_review_gate: true` only, so the Watchdog's merge
+  decision follows the workspace's `auto_merge` setting like any other lane.
+  This module's `trigger_watchdog_on_approval` path (coordinator-dispatched
+  review_only workers) mirrors that fix as of bd-38e34o: it also passes only
+  `via_review_gate: true`, so a review_only APPROVE never bypasses a
+  human-merge (`auto_merge: false`) workspace policy.
+
+  bd-btcyn6 regression: a reviewer that submits the review verdict via the
+  tracker CLI (`gh pr review`) and also emits the required `VERDICT:` sentinel
+  before `arb done` must land in a clean terminal state — not failed/INCONCLUSIVE.
+  The review prompt was updated to require the sentinel; these tests cover the
+  adapter-submitted-verdict completion path.
+  """
+
+  # async: false — shares the singleton Worker registry/supervisor + the
+  # named StubMerger Agent.
+  use Wardmast.DataCase, async: false
+
+  import Wardmast.LifecycleFixtures, only: [put_state!: 2]
+
+  alias Wardmast.Tasks.{Issue, Workspace}
+  alias Wardmast.Messages.Message
+  alias Wardmast.Worker
+  alias Wardmast.Worker.Watchdog
+  alias Wardmast.Test.{StubAutoResumeDispatcher, StubMerger}
+
+  require Ash.Query
+
+  setup do
+    StubMerger.reset()
+    StubAutoResumeDispatcher.reset()
+    :ok
+  end
+
+  defp wait_until(fun, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(10)
+        do_wait(fun, deadline)
+    end
+  end
+
+  defp new_workspace do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "reviewer-ws-#{System.unique_integer([:positive])}",
+        prefix: "rv",
+        config: %{}
+      })
+
+    ws
+  end
+
+  # A workspace with GitHub strategy and auto_merge enabled — triggers the
+  # bd-4u7a1m hosted-forge Watchdog path in trigger_watchdog_on_approval.
+  defp new_github_workspace do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "gh-ws-#{System.unique_integer([:positive])}",
+        prefix: "gh",
+        config: %{"merge" => %{"strategy" => "github", "auto_merge" => true}}
+      })
+
+    ws
+  end
+
+  # bd-38e34o: a GitHub workspace with a human-merge policy (auto_merge: false).
+  # A review_only reviewer APPROVE must never bypass this policy.
+  defp new_github_workspace_no_auto_merge do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "gh-human-ws-#{System.unique_integer([:positive])}",
+        prefix: "ghh",
+        config: %{"merge" => %{"strategy" => "github", "auto_merge" => false}}
+      })
+
+    ws
+  end
+
+  defp new_task(ws, opts \\ %{}) do
+    {:ok, task} =
+      Ash.create(Issue, Map.merge(%{title: "review-only task", workspace_id: ws.id}, opts))
+
+    task = put_state!(task, :active)
+    task
+  end
+
+  # Start a review_only worker with no branch (coordinator-dispatch path).
+  # `output_lines` is injected directly into meta to simulate what the reviewer
+  # worker would have printed before "arb done" — avoids spawning a real
+  # subprocess or going through ClaudeSession.
+  defp start_reviewer(task, output_lines, extra_meta \\ %{}) do
+    meta =
+      Map.merge(
+        %{
+          review_only: true,
+          output_lines: output_lines,
+          merger_adapter_override: StubMerger,
+          merger_workspace_override: nil,
+          # Park the Watchdog far in the future so it doesn't auto-poll during
+          # status assertions. Tests that want to see the merge drive the
+          # Watchdog manually via StubMerger.
+          watchdog_initial_delay_ms: 5_000_000,
+          watchdog_interval_ms: 5_000_000
+        },
+        extra_meta
+      )
+
+    {:ok, pid} =
+      Worker.start(task_id: task.id, repo: "rv/repo", workspace_id: task.workspace_id, meta: meta)
+
+    :ok = Worker.advance(pid, :claude)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    # bd-741sid: an APPROVE hands the PR to the ticket's Watchdog, which
+    # outlives the reviewer's run.
+    on_exit(fn -> stop_watchdog(task.id) end)
+    pid
+  end
+
+  defp stop_watchdog(task_id) do
+    case Watchdog.whereis(task_id) do
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal)
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  # ---- APPROVE path ----------------------------------------------------------
+
+  describe "APPROVE verdict" do
+    test "completes the worker when the task has a pr_ref (reviewer never merges)" do
+      # bd-ddtbhb: a coordinator-dispatched reviewer that APPROVEs must NOT
+      # start a merging Watchdog, even when a pr_ref is recorded on the task.
+      # The review was already posted to the forge; merging is the author's job.
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-42"}, action: :update)
+
+      pid =
+        start_reviewer(task, [
+          "reviewing the diff...",
+          "VERDICT: APPROVE",
+          "looks good, ship it"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end)
+
+      assert Worker.state(pid).outcome == :succeeded
+      # No merge must have been attempted.
+      assert StubMerger.merge_count("pr-42") == 0
+    end
+
+    test "completes the worker and does not merge even when Watchdog would fire" do
+      # bd-ddtbhb: even with permissive Watchdog timing, APPROVE on a
+      # coordinator-dispatched reviewer completes immediately without parking
+      # at :awaiting_review or starting the Watchdog at all.
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-99"}, action: :update)
+
+      pid =
+        start_reviewer(task, ["VERDICT: APPROVE", "great work"], %{
+          watchdog_initial_delay_ms: 0,
+          watchdog_interval_ms: 50
+        })
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end, 3_000)
+
+      assert Worker.state(pid).outcome == :succeeded
+      assert StubMerger.merge_count("pr-99") == 0
+    end
+
+    test "completes normally when the task has no pr_ref" do
+      ws = new_workspace()
+      task = new_task(ws)
+
+      pid = start_reviewer(task, ["VERDICT: APPROVE", "reviewed"])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end)
+
+      assert Worker.state(pid).outcome == :succeeded
+    end
+  end
+
+  # ---- REQUEST_CHANGES path --------------------------------------------------
+
+  describe "REQUEST_CHANGES verdict" do
+    test "fails the worker (not completes) so the task stays :active" do
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-77"}, action: :update)
+
+      pid =
+        start_reviewer(task, [
+          "VERDICT: REQUEST_CHANGES",
+          "- [high] lib/foo.ex:12 missing guard"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
+
+      snap = Worker.state(pid)
+      assert snap.outcome == :failed
+      # The PR must NOT have been merged.
+      assert StubMerger.merge_count("pr-77") == 0
+    end
+
+    test "escalates findings to the Coordinator mailbox" do
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-77"}, action: :update)
+
+      pid =
+        start_reviewer(task, [
+          "VERDICT: REQUEST_CHANGES",
+          "- [high] lib/foo.ex:12 missing nil guard"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
+
+      # An escalation message should have been posted to the Coordinator mailbox.
+      messages = Message.inbox("admiral", workspace_id: ws.id)
+
+      assert Enum.any?(messages, fn m ->
+               m.kind == :escalation and m.directive_ref == task.id
+             end),
+             "expected a Coordinator escalation for task #{task.id}"
+    end
+  end
+
+  # ---- bd-1j5x6u: VERIFICATION: PARTIAL disclosure on the coordinator-dispatched
+  # path (bd-4te55l's High finding, never actually fixed on this path) ---------
+
+  describe "VERIFICATION: PARTIAL disclosure (bd-1j5x6u)" do
+    test "APPROVE disclosing VERIFICATION: PARTIAL is NOT honored: treated as REQUEST_CHANGES, never merges" do
+      # The dangerous half of the original gap: an unverified APPROVE must not
+      # merge unverified code. Mirrors the safe fail-closed default.
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-810"}, action: :update)
+
+      pid =
+        start_reviewer(task, [
+          "VERDICT: APPROVE",
+          "looks good, but I gave up waiting on mix test",
+          "VERIFICATION: PARTIAL — abandoned mix test wait"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
+
+      assert Worker.state(pid).outcome == :failed
+      assert StubMerger.merge_count("pr-810") == 0
+
+      {:ok, updated_task} = Ash.get(Issue, task.id)
+      assert String.contains?(updated_task.notes || "", "ISSUED WITHOUT FULL VERIFICATION")
+    end
+
+    test "APPROVE disclosing VERIFICATION: FULL still completes normally (no false positive)" do
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-811"}, action: :update)
+
+      pid =
+        start_reviewer(task, [
+          "VERDICT: APPROVE",
+          "looks good",
+          "VERIFICATION: FULL"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end)
+
+      assert Worker.state(pid).outcome == :succeeded
+      assert StubMerger.merge_count("pr-811") == 0
+    end
+
+    test "REQUEST_CHANGES disclosing VERIFICATION: PARTIAL fails as before, findings carry the warning banner" do
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-812"}, action: :update)
+
+      pid =
+        start_reviewer(task, [
+          "VERDICT: REQUEST_CHANGES",
+          "- [high] lib/foo.ex:12 missing guard",
+          "VERIFICATION: PARTIAL — abandoned mix test wait"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
+
+      assert Worker.state(pid).outcome == :failed
+      assert StubMerger.merge_count("pr-812") == 0
+
+      {:ok, updated_task} = Ash.get(Issue, task.id)
+      assert String.contains?(updated_task.notes || "", "ISSUED WITHOUT FULL VERIFICATION")
+    end
+
+    test "REQUEST_CHANGES disclosing VERIFICATION: FULL carries no warning banner" do
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-813"}, action: :update)
+
+      pid =
+        start_reviewer(task, [
+          "VERDICT: REQUEST_CHANGES",
+          "- [high] lib/foo.ex:12 missing guard",
+          "VERIFICATION: FULL"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
+
+      {:ok, updated_task} = Ash.get(Issue, task.id)
+      refute String.contains?(updated_task.notes || "", "ISSUED WITHOUT FULL VERIFICATION")
+    end
+  end
+
+  # ---- no-verdict path -------------------------------------------------------
+
+  describe "no parseable verdict" do
+    test "fails the worker when the reviewer emits no VERDICT line" do
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-55"}, action: :update)
+
+      pid = start_reviewer(task, ["some output but no verdict line"])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
+
+      assert Worker.state(pid).outcome == :failed
+      assert StubMerger.merge_count("pr-55") == 0
+    end
+
+    # bd-9zuvbh / P9, round 1 review finding 5. The FSM status above stays
+    # `:failed` (`Dispatch.resume/2` re-attaches from it), but the DURABLE
+    # record must not be another `:review_gate_inconclusive` failed run: this is
+    # the coordinator-dispatched twin of the ReviewGate's inconclusive terminal,
+    # and no verdict means nobody has found a problem with the work.
+    test "parks the run and the task instead of recording another failed run" do
+      ws = new_workspace()
+      task = new_task(ws)
+
+      pid = start_reviewer(task, ["some output but no verdict line"])
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
+
+      run =
+        Wardmast.Workers.Run
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.read!()
+        |> List.first()
+
+      assert run.outcome == :failed
+
+      {:ok, parked} = Ash.get(Issue, task.id)
+      assert parked.attention_cause == :inconclusive
+      assert parked.state == :active
+
+      assert [escalation] =
+               "admiral"
+               |> Message.inbox(workspace_id: ws.id)
+               |> Enum.filter(&(&1.directive_ref == task.id and &1.kind == :escalation))
+
+      assert escalation.subject =~ "parked"
+    end
+
+    # bd-6dxit2: `meta[:output_lines]` is capped at 1000 lines by ClaudeSession,
+    # so a reviewer that prints VERDICT: and then keeps producing findings loses
+    # its own sentinel to eviction and gets reported INCONCLUSIVE with a
+    # complete review in hand. The durable per-run transcript is uncapped —
+    # parse it before conceding.
+    test "recovers a verdict the 1000-line in-memory cap evicted, from the durable transcript" do
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-56"}, action: :update)
+
+      prev_root = Application.get_env(:wardmast, :output_log_root)
+      root = Path.join(System.tmp_dir!(), "rv-tail-#{System.unique_integer([:positive])}")
+      Application.put_env(:wardmast, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev_root do
+          Application.put_env(:wardmast, :output_log_root, prev_root)
+        else
+          Application.delete_env(:wardmast, :output_log_root)
+        end
+      end)
+
+      head = for i <- 1..40, do: "reviewing hunk #{i}..."
+      tail = for i <- 1..1_200, do: "- [MEDIUM] finding #{i}: file_#{i}.ex:#{i}"
+      full = head ++ ["VERDICT: REQUEST_CHANGES", "Findings follow."] ++ tail ++ ["arb done"]
+
+      # Exactly what ClaudeSession's cap leaves behind: the sentinel is gone.
+      capped = Enum.take(full, -1_000)
+      refute Enum.any?(capped, &(&1 =~ ~r/^VERDICT:/))
+
+      pid = start_reviewer(task, capped)
+
+      # The worker's own run row is what keys the transcript on disk.
+      run_id = wait_for_run_id(task.id)
+      {:ok, handle} = Wardmast.Worker.OutputLog.open(run_id)
+      Enum.each(full, &Wardmast.Worker.OutputLog.append(handle, &1))
+      :ok = Wardmast.Worker.OutputLog.close(handle)
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
+
+      state = Worker.state(pid)
+
+      # REQUEST_CHANGES, not INCONCLUSIVE — and the findings the reviewer
+      # actually wrote, not a "produced no parseable VERDICT line" placeholder.
+      assert state.meta.failure_reason == :review_gate_rejected
+      assert state.meta.review_gate_findings =~ "VERDICT: REQUEST_CHANGES"
+      assert state.meta.review_gate_findings =~ "finding 1200:"
+      assert StubMerger.merge_count("pr-56") == 0
+    end
+  end
+
+  defp wait_for_run_id(task_id) do
+    wait_until(fn -> latest_run_id(task_id) != nil end, 4_000)
+    latest_run_id(task_id)
+  end
+
+  defp latest_run_id(task_id) do
+    Wardmast.Workers.Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+    |> case do
+      nil -> nil
+      run -> run.id
+    end
+  end
+
+  # ---- non-review_only guard -------------------------------------------------
+
+  describe "non-review_only worker with no branch" do
+    test "still completes normally (existing behaviour is unchanged)" do
+      ws = new_workspace()
+      task = new_task(ws)
+
+      # No review_only flag, no branch — should complete as before.
+      meta = %{output_lines: ["VERDICT: APPROVE", "some work done"]}
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "rv/repo", workspace_id: ws.id, meta: meta)
+
+      :ok = Worker.advance(pid, :claude)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end)
+
+      assert Worker.state(pid).outcome == :succeeded
+    end
+  end
+
+  # ---- bd-btcyn6 regression: adapter-submitted verdict completion path ------
+
+  describe "adapter-submitted verdict (bd-btcyn6)" do
+    test "APPROVE after posting gh pr review completes cleanly (not failed/INCONCLUSIVE)" do
+      # Regression for bd-btcyn6 + bd-ddtbhb: a reviewer that posts the GitHub
+      # review via `gh pr review --approve` AND emits the required `VERDICT:
+      # APPROVE` sentinel must finish :succeeded, NOT :failed or INCONCLUSIVE.
+      # (Previously expected :awaiting_review; after bd-ddtbhb the reviewer
+      # completes directly without parking — it must not merge.)
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-200"}, action: :update)
+
+      pid =
+        start_reviewer(task, [
+          "Reviewed PR #200 — all changes look good.",
+          "Posted review via: gh pr review 200 --approve --body 'LGTM'",
+          "VERDICT: APPROVE",
+          "arb done"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end)
+
+      assert Worker.state(pid).outcome == :succeeded
+      assert StubMerger.merge_count("pr-200") == 0
+    end
+
+    test "REQUEST_CHANGES after posting gh pr review fails the worker (not INCONCLUSIVE)" do
+      # Regression for bd-btcyn6: a reviewer that posts CHANGES_REQUESTED via
+      # `gh pr review --request-changes` AND emits `VERDICT: REQUEST_CHANGES`
+      # must fail the worker (leaving the task :active for a fix-pass),
+      # NOT land as INCONCLUSIVE. Previously it landed INCONCLUSIVE because no
+      # VERDICT: sentinel was present in stdout.
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-201"}, action: :update)
+
+      pid =
+        start_reviewer(task, [
+          "Found issues in PR #201:",
+          "- [error] lib/foo.ex:10 nil guard missing",
+          "Posted review via: gh pr review 201 --request-changes --body 'see comments'",
+          "VERDICT: REQUEST_CHANGES",
+          "- [error] lib/foo.ex:10 nil guard missing"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
+
+      snap = Worker.state(pid)
+      assert snap.outcome == :failed
+      assert StubMerger.merge_count("pr-201") == 0
+
+      # The task should NOT have landed as INCONCLUSIVE — it should have
+      # recorded the actual REQUEST_CHANGES verdict.
+      assert {:ok, updated_task} = Ash.get(Wardmast.Tasks.Issue, task.id)
+      refute String.contains?(updated_task.notes || "", "INCONCLUSIVE")
+      assert String.contains?(updated_task.notes || "", "REQUEST_CHANGES")
+    end
+  end
+
+  # ---- bd-cw3w9p: review_only tasks are long-lived engagements (ReviewPatrol) ----
+  # bd-do82bt fixed a bug where the Driver never closed review tasks at all.
+  # bd-cw3w9p changes the intended behavior: review_only tasks must NOT
+  # auto-close after their first verdict — they stay :active so ReviewPatrol
+  # can keep engaging on subsequent commits. The Driver exits without closing.
+
+  describe "review_only task stays :active after verdict (bd-cw3w9p)" do
+    test "APPROVE + no pr_ref: Driver exits without closing the task (long-lived engagement)" do
+      # bd-cw3w9p: review_only tasks are long-lived ReviewPatrol engagements.
+      # The Driver must NOT close the task when the worker completes — task stays
+      # :active so ReviewPatrol can re-dispatch on the next commit.
+      ws = new_workspace()
+      task = new_task(ws)
+
+      worker_pid = start_reviewer(task, ["VERDICT: APPROVE", "looks good"])
+
+      {:ok, driver_pid} =
+        Wardmast.Worker.Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: "dummy-#{task.id}",
+          machine_pid: self(),
+          claude_driven: true,
+          interval_ms: 5,
+          max_ticks: 200
+        )
+
+      on_exit(fn -> if Process.alive?(driver_pid), do: GenServer.stop(driver_pid, :normal) end)
+
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      # Driver exits normally (its job is done) but must NOT close the task.
+      ref = Process.monitor(driver_pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 3_000
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.state == :active
+    end
+
+    test "REQUEST_CHANGES: Driver leaves the task :active for a fix-pass" do
+      # Regression for bd-do82bt: REQUEST_CHANGES fails the worker (not completes),
+      # so the Driver exits without closing the task. The task must stay :active
+      # so a fix-pass can be dispatched.
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-50"}, action: :update)
+
+      worker_pid =
+        start_reviewer(task, [
+          "VERDICT: REQUEST_CHANGES",
+          "- [high] lib/foo.ex:5 missing guard"
+        ])
+
+      {:ok, driver_pid} =
+        Wardmast.Worker.Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: "dummy-#{task.id}",
+          machine_pid: self(),
+          claude_driven: true,
+          interval_ms: 5,
+          max_ticks: 200
+        )
+
+      on_exit(fn -> if Process.alive?(driver_pid), do: GenServer.stop(driver_pid, :normal) end)
+
+      # Monitor before triggering the transition so the :DOWN message carries
+      # the real exit reason — the driver can exit before a post-hoc monitor
+      # is set up, which reports a false :noproc instead of :normal.
+      ref = Process.monitor(driver_pid)
+
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      # Wait for the worker to fail.
+      wait_until(fn -> Worker.state(worker_pid).outcome == :failed end)
+
+      # Driver should exit after seeing :failed.
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 3_000
+
+      # Task must remain :active for the fix-pass.
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.state == :active
+    end
+  end
+
+  # ---- bd-btcyn6 fallback: adapter-derived verdict when VERDICT sentinel missing ----
+
+  describe "adapter-derived verdict fallback (bd-btcyn6)" do
+    test "APPROVE derived from adapter review when stdout has no VERDICT sentinel" do
+      # Belt-and-suspenders for bd-btcyn6 + bd-ddtbhb: if the reviewer posts
+      # `gh pr review --approve` but omits the VERDICT sentinel, the completion
+      # path falls back to querying the adapter's PR review state and derives
+      # APPROVE — then completes without merging (not INCONCLUSIVE, not
+      # :awaiting_review).
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-300"}, action: :update)
+
+      StubMerger.set_review_feedback("pr-300", %{
+        changes_requested: false,
+        latest_review_id: 42,
+        feedback: [%{kind: :review, state: "APPROVED", body: "LGTM", author: "bot"}]
+      })
+
+      # Stdout has no VERDICT sentinel — only the gh pr review output.
+      pid =
+        start_reviewer(task, [
+          "Reviewed PR #300.",
+          "Posted review via: gh pr review 300 --approve --body 'LGTM'"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end)
+
+      assert Worker.state(pid).outcome == :succeeded
+      assert StubMerger.merge_count("pr-300") == 0
+    end
+
+    test "REQUEST_CHANGES derived from adapter review when stdout has no VERDICT sentinel" do
+      # Belt-and-suspenders for bd-btcyn6: if the reviewer posts
+      # `gh pr review --request-changes` but omits the VERDICT sentinel,
+      # the fallback derives REQUEST_CHANGES from the adapter and fails the
+      # worker correctly — not INCONCLUSIVE.
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-301"}, action: :update)
+
+      StubMerger.set_review_feedback("pr-301", %{
+        changes_requested: true,
+        latest_review_id: 43,
+        feedback: [
+          %{kind: :review, state: "CHANGES_REQUESTED", body: "nil guard missing", author: "bot"}
+        ]
+      })
+
+      pid =
+        start_reviewer(task, [
+          "Found issues in PR #301.",
+          "Posted review via: gh pr review 301 --request-changes --body 'see comments'"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
+
+      snap = Worker.state(pid)
+      assert snap.outcome == :failed
+      assert StubMerger.merge_count("pr-301") == 0
+
+      assert {:ok, updated_task} = Ash.get(Wardmast.Tasks.Issue, task.id)
+      refute String.contains?(updated_task.notes || "", "INCONCLUSIVE")
+      assert String.contains?(updated_task.notes || "", "REQUEST_CHANGES")
+    end
+
+    test "still lands INCONCLUSIVE when stdout has no VERDICT and adapter has no review" do
+      # When the reviewer never posted a review at all (no VERDICT sentinel,
+      # no adapter review), INCONCLUSIVE is the correct outcome.
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-302"}, action: :update)
+
+      # StubMerger returns empty feedback by default — no reviews submitted.
+      pid = start_reviewer(task, ["Starting review of PR #302..."])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :failed end)
+
+      snap = Worker.state(pid)
+      assert snap.outcome == :failed
+      assert StubMerger.merge_count("pr-302") == 0
+    end
+  end
+
+  # ---- bd-ddtbhb / bd-bs3z04 / bd-cw3w9p: coordinator reviewer with pr_ref ----
+  # bd-bs3z04 established that APPROVE with a pr_ref signals MergeQueue for direct
+  # workspaces. bd-cw3w9p supersedes that auto-close path: review_only tasks are
+  # long-lived engagements and must NOT be closed by the MergeQueue signal either.
+  # The forge merge count still stays 0 (bd-ddtbhb guarantee holds).
+
+  describe "APPROVE + pr_ref: task stays open, PR not merged by forge (bd-ddtbhb, bd-cw3w9p)" do
+    test "APPROVE with pr_ref: task stays :active, PR not merged (direct workspace)" do
+      # bd-cw3w9p: review_only tasks are long-lived ReviewPatrol engagements.
+      # After an APPROVE verdict, neither the Driver nor the MergeQueue should
+      # close the task. The forge merge count stays 0 (bd-ddtbhb still holds).
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-400"}, action: :update)
+
+      worker_pid = start_reviewer(task, ["VERDICT: APPROVE", "LGTM"])
+
+      {:ok, driver_pid} =
+        Wardmast.Worker.Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: "dummy-#{task.id}",
+          machine_pid: self(),
+          claude_driven: true,
+          interval_ms: 5,
+          max_ticks: 200
+        )
+
+      on_exit(fn -> if Process.alive?(driver_pid), do: GenServer.stop(driver_pid, :normal) end)
+
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      # Driver exits normally but must NOT close the task.
+      ref = Process.monitor(driver_pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 3_000
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.state == :active
+
+      # :direct strategy never calls the forge merge API.
+      assert StubMerger.merge_count("pr-400") == 0
+    end
+  end
+
+  # ---- bd-4u7a1m regression: hosted-forge Watchdog path ----------------------
+  #
+  # APPROVE on a GitHub/GitLab workspace with a pr_ref must NOT call complete_now
+  # immediately. Instead a Watchdog polls the forge and merges the PR, and the
+  # task only finishes after the merge lands — preventing the premature close
+  # that left bd-3u1au5 closed with PR #591 open. bd-741sid: that Watchdog is the
+  # ticket's; the reviewer's run ends once it has the PR, without announcing the
+  # ticket done. The tickets here are review-only engagements, stamped on the row
+  # as a review dispatch does.
+
+  describe "APPROVE on hosted-forge workspace spawns Watchdog (bd-4u7a1m)" do
+    test "the reviewer's run ends with the PR in the ticket Watchdog's hands, NOT announced done" do
+      # Regression for bd-4u7a1m. The previous implementation called complete_now
+      # before signaling MergeQueue, racing the Driver to close the task. Verify
+      # the run hands the PR to the Watchdog without the done signal, and the
+      # task stays open while the Watchdog polls.
+      ws = new_github_workspace()
+      task = new_task(ws, %{review_only: true})
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-501"}, action: :update)
+      :ok = Phoenix.PubSub.subscribe(Wardmast.PubSub, "worker:done:" <> ws.id)
+
+      pid =
+        start_reviewer(task, ["VERDICT: APPROVE", "LGTM"], %{
+          merger_workspace_override: ws,
+          # Large delays so the Watchdog does not fire during this assertion.
+          watchdog_initial_delay_ms: 5_000_000,
+          watchdog_interval_ms: 5_000_000
+        })
+
+      ref = Process.monitor(pid)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert Watchdog.alive?(task.id)
+      refute_received {:worker_done, _}
+
+      # Task must NOT be :closed while the PR is still open.
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.state == :active
+      assert reloaded.pr_ref == "pr-501"
+    end
+
+    test "the ticket's Watchdog merges the PR, the Driver exits, and the engagement stays open (bd-cw3w9p)" do
+      # bd-cw3w9p: review_only tasks are long-lived engagements. Even after the
+      # Watchdog drives the PR merge, nothing may close the task — it stays
+      # :active for ReviewPatrol to manage. The Watchdog still drives the
+      # actual merge (bd-4u7a1m guarantee holds).
+      ws = new_github_workspace()
+      task = new_task(ws, %{review_only: true})
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-500"}, action: :update)
+      :ok = Watchdog.subscribe(task.id)
+
+      # StubMerger.get default: {status: :open, approved: false} — Watchdog sees
+      # :pending → effective_outcome(via_review_gate: true) → :approved →
+      # workspace auto_merge: true → StubMerger.merge("pr-500") → :ok → merged.
+      worker_pid =
+        start_reviewer(task, ["VERDICT: APPROVE", "LGTM"], %{
+          merger_workspace_override: ws,
+          watchdog_initial_delay_ms: 0,
+          watchdog_interval_ms: 50
+        })
+
+      {:ok, driver_pid} =
+        Wardmast.Worker.Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: "dummy-#{task.id}",
+          machine_pid: self(),
+          claude_driven: true,
+          interval_ms: 5,
+          max_ticks: 400
+        )
+
+      on_exit(fn -> if Process.alive?(driver_pid), do: GenServer.stop(driver_pid, :normal) end)
+
+      # Monitor before sending so we never miss the :DOWN.
+      ref = Process.monitor(driver_pid)
+
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      # The Driver exits with the reviewer's run; the Watchdog must drive a
+      # merge. Task stays :active.
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 5_000
+      task_id = task.id
+      assert_receive {:watchdog, ^task_id, {:merged, "pr-500"}}, 5_000
+
+      assert StubMerger.merge_count("pr-500") >= 1
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.state == :active
+    end
+
+    # bd-dxgris / #1493 — the reviewed-SHA baseline is loaded from the TASK row
+    # on lanes that carry an external-review engagement (`review_only`), where
+    # ReviewPatrol is what keeps `last_reviewed_sha` advanced. The Watchdog is
+    # not handed it in opts on this path, so this covers the DB load that
+    # `load_recorded_reviewed_sha/1` performs once per approval episode.
+    test "refuses to merge a head that advanced past the task's recorded last_reviewed_sha" do
+      ws = new_github_workspace()
+      task = new_task(ws)
+
+      {:ok, task} =
+        Ash.update(task, %{pr_ref: "pr-510", last_reviewed_sha: "sha-reviewed"}, action: :update)
+
+      # The branch was pushed to after the review was recorded.
+      StubMerger.queue_get("pr-510", [%{status: :open, approved: true, head_sha: "sha-pushed"}])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          worker_pid =
+            start_reviewer(task, ["VERDICT: APPROVE", "LGTM"], %{
+              merger_workspace_override: ws,
+              watchdog_initial_delay_ms: 0,
+              watchdog_interval_ms: 25,
+              watchdog_auto_resume_dispatcher: StubAutoResumeDispatcher
+            })
+
+          send(worker_pid, {:__claude_session_done__, "arb done"})
+
+          # bd-6bg54c: the stale head is now TERMINAL for the merge loop — the
+          # Watchdog routes the new head back for a review round exactly once
+          # instead of re-attempting the refused merge every poll, so waiting
+          # on a third `get/1` would hang. Wait on the routing decision itself.
+          wait_until(fn -> StubAutoResumeDispatcher.resume_count() == 1 end, 3_000)
+        end)
+
+      assert StubMerger.merge_count("pr-510") == 0,
+             "the Watchdog merged past the engagement's recorded reviewed SHA"
+
+      assert log =~ "branch advanced past the reviewed commit"
+    end
+
+    test "auto_merge:false workspace: APPROVE parks the Watchdog but does NOT merge (bd-38e34o)" do
+      # Regression for bd-38e34o, mirroring bd-dkwhbn: trigger_watchdog_on_approval
+      # (the coordinator-dispatched review_only APPROVE path) must not force a
+      # merge via `force_merge: true`. On a human-merge (auto_merge: false)
+      # hosted-forge workspace, the Watchdog must park the PR open, not merge it.
+      ws = new_github_workspace_no_auto_merge()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-600"}, action: :update)
+
+      worker_pid =
+        start_reviewer(task, ["VERDICT: APPROVE", "LGTM"], %{
+          merger_workspace_override: ws,
+          watchdog_initial_delay_ms: 0,
+          watchdog_interval_ms: 50
+        })
+
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      # Give the Watchdog a few polling cycles to (incorrectly) merge, if it
+      # were going to.
+      Process.sleep(300)
+
+      assert StubMerger.merge_count("pr-600") == 0
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.state == :active
+
+      if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal)
+    end
+
+    test "auto_merge:false workspace: APPROVE escalates the parked PR to the coordinator inbox (bd-b4pwxa)" do
+      # Regression for bd-b4pwxa: an approved PR on a human-merge
+      # (auto_merge: false) lane must not park *silently*. The Watchdog parks it
+      # (does not merge) AND pages the coordinator inbox once that it is ready for
+      # a manual merge decision — so the coordinator learns of it immediately
+      # instead of having to poll `arb worker list` to discover it.
+      ws = new_github_workspace_no_auto_merge()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-700"}, action: :update)
+
+      worker_pid =
+        start_reviewer(task, ["VERDICT: APPROVE", "LGTM"], %{
+          merger_workspace_override: ws,
+          watchdog_initial_delay_ms: 0,
+          watchdog_interval_ms: 50
+        })
+
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      # The Watchdog must write an addressed escalation to the coordinator inbox.
+      wait_until(
+        fn ->
+          Enum.any?(Message.inbox("admiral", workspace_id: ws.id), fn m ->
+            m.kind == :escalation and m.directive_ref == task.id and
+              m.subject =~ "awaiting manual merge"
+          end)
+        end,
+        3_000
+      )
+
+      # It parks (never merges) and the escalation is debounced to exactly one
+      # despite the Watchdog polling many times over the window.
+      Process.sleep(250)
+      assert StubMerger.merge_count("pr-700") == 0
+
+      matching =
+        Enum.filter(Message.inbox("admiral", workspace_id: ws.id), fn m ->
+          m.directive_ref == task.id and m.subject =~ "awaiting manual merge"
+        end)
+
+      assert length(matching) == 1
+
+      if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal)
+    end
+
+    test "no Watchdog spawned and complete_now used when task has no pr_ref (github workspace)" do
+      # Even on a GitHub workspace, when no pr_ref is recorded there is nothing
+      # to merge — complete directly. Task stays :active (bd-cw3w9p).
+      ws = new_github_workspace()
+      task = new_task(ws)
+
+      pid =
+        start_reviewer(task, ["VERDICT: APPROVE", "reviewed"], %{
+          merger_workspace_override: ws
+        })
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).outcome == :succeeded end)
+
+      assert Worker.state(pid).outcome == :succeeded
+    end
+  end
+end

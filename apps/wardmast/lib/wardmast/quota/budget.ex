@@ -1,0 +1,908 @@
+defmodule Wardmast.Quota.Budget do
+  @moduledoc """
+  The provider concurrency budget (bd-6c8g4t, DC3 of
+  `docs/design/provider-dynamic-concurrency.md` §3): how many *seats* a
+  provider pool can sustain for the next horizon, as an integer plus a reason.
+
+  This module is **pure**. `compute/1` takes one pool's quota snapshot, the
+  seats in flight, the draw per seat-hour and the commitment horizon, and
+  returns a `t:t/0`; `hysteresis/3` and `publish/3` turn a stream of those into
+  the published budget (§3.7). `Wardmast.Quota.Budget.Server` owns the clock,
+  the ETS table and the `budget_changed` event.
+
+  ## Who reads it
+
+  Under `scheduler_admission: enforce` it decides admission (DC8): the one
+  admission-path reader is `Wardmast.Accounts.SeatCheck`, the per-pool seat check
+  `Wardmast.Accounts.Admission`, `Wardmast.Worker.ResumeSlot` and routing ask.
+  The scheduler walk (DC6, `Wardmast.Board.WalkInputs`) reads it under `shadow`
+  and `enforce`, and the displays (DC5) read it to show it. Under `legacy`
+  nothing on an admission, gate or dispatch path reads it (I1, I2);
+  `Wardmast.Quota.BudgetShadowTest` pins the readers structurally. The budget
+  stops nothing that runs: it is read only by admission, the walk and the
+  display (I8).
+
+  ## The function (§3.3)
+
+  For each trusted window `w` of the pool, with `ρ = max(ρ, ρ_min)` (I11):
+
+      u_now = u + (S·ρ + b)·lag
+      t_r ≥ H:  n_w = (line(now + H) − u_now − b·H) / (ρ·H)
+      t_r < H:  n_w = min(n_before, n_after)
+        n_before = (line(reset) − u_now − b·t_r) / (ρ·t_r)
+        n_after  = (line′(H − t_r) − b·(H − t_r)) / (ρ·(H − t_r))
+
+  `raw` is the smallest `n_w`; the budget is `clamp(floor(raw), 0, ceiling)`
+  after hysteresis. `line(t)` and `line′(x)` come from `Wardmast.Quota.Gate`
+  (`pace/6` with a `now:` what-if, and `fresh_pace/5`), never from `Pace`
+  directly (I6). `ρ` is never below `ρ_min = prior / 4`, so every `n` is
+  finite (I11).
+
+  ## The first-seat rule (§3.10, bd-22w64f)
+
+  `floor(raw)` can be 0 for a small pool that still has headroom below its line:
+  one seat for the whole horizon costs more than the headroom. Worse, an idle
+  window's clock does not start until first use (Codex's 5h session and the agy
+  windows report `reset = capture + window length` while idle), so the line
+  does not climb while there is no seat, and with no seat there is no use. So:
+
+  > A pool with no seats in use whose usage is below its line on every trusted
+  > window gets a budget of at least 1, whatever `raw` says.
+
+  "Below its line" is `used_now < line_now` on each trusted window; a window at
+  or above its line, even when another window has headroom, gives no seat. The
+  rule is applied in `compute/1` (through `finalize/2`, so `exempt_budget`
+  follows and never falls below `budget`) and again through `publish/3`: it
+  skips the hysteresis dwell on a rise and lands a fall on 1, not 0. `raw` and
+  the binding window stay as computed, and `reason` says the rule applied and
+  shows the raw figure. Hard zeros (paused, provider refusing, quota stop,
+  unavailable), a `max_concurrent` or share of 0 and a pool with no trusted
+  reading are untouched, and a pool with a seat in use (`seats > 0`) is
+  computed as before. Once the seat is taken the next recompute no longer
+  applies the rule and the pool is full; the seat is never taken away (I8). The
+  overshoot is accepted: one run can use a large share of a small window, and
+  the provider's own limit still applies. The gate's `used >= line` hold is a
+  separate check and is unchanged.
+
+  ## Inputs (`compute/1`)
+
+    * `:quota` — a quota row or a `Wardmast.Quota.Gate.Snapshot`; `nil` for no
+      reading. `:model` is forwarded to `Snapshot.normalize/2` (the agy pools).
+    * `:account` / `:workspace` — the policy pair `Gate.pace/6` composes
+      `min(account, workspace)` over. The account's `max_concurrent` is the
+      ceiling (with `:share`).
+    * `:pool`, `:now`, `:seats` (live), `:horizon` hours (clamped to [1, 4]).
+    * `:rates` — `%{window_label => resolution}`, a `BudgetCalibration.resolve/3`
+      result (or just `%{rho: ρ}`). A window with none uses the prior.
+    * `:background` — `b`, a number or `%{window_label => number}`; 0 by default.
+    * `:hard` — `:paused | :quota_stop | :unavailable`, the hard zeros the quota
+      row cannot tell us about (§3.5).
+    * `:previous` — `%{budget: n, trusted_at: dt}`, for the no-reading rule.
+    * `:metered?` — `false` for a provider with no quota source at all.
+  """
+
+  alias Wardmast.Accounts.ProviderAccount
+  alias Wardmast.Agents.ModelFamily
+  alias Wardmast.Quota.BudgetCalibration
+  alias Wardmast.Quota.BurnGovernor
+  alias Wardmast.Quota.Gate
+  alias Wardmast.Quota.Gate.Snapshot
+
+  # Hysteresis (§3.7): a rise must clear one seat plus this margin, twice, a
+  # minute apart.
+  @theta 0.25
+  @dwell_seconds 60
+
+  # With no trusted reading the last published budget stands this long (§3.5):
+  # the OAuth poll's longest 429 cooldown.
+  @no_reading_seconds 2 * 3600
+
+  @default_horizon 2.0
+  @horizon_range {1.0, 4.0}
+
+  # The window lengths a prior assumes for a window with no fixed length
+  # (Codex `session`, agy `used`): the gate treats those as flat.
+  @fallback_seconds %{primary: 5 * 3600, long: 7 * 86_400}
+
+  @hard_bindings [:provider_refusing, :weekly_warning, :paused, :quota_stop, :unavailable]
+  @unhysteresised [:no_reading, :unmetered | @hard_bindings]
+
+  @type binding ::
+          :ceiling
+          | {:window, String.t()}
+          | :provider_refusing
+          | :weekly_warning
+          | :paused
+          | :quota_stop
+          | :unavailable
+          | :no_reading
+          | :unmetered
+          | :error
+
+  @type hysteresis :: %{
+          budget: non_neg_integer() | nil,
+          pending: %{raw: float(), since: DateTime.t()} | nil
+        }
+
+  @type t :: %__MODULE__{
+          account: String.t() | nil,
+          pool: String.t() | nil,
+          scope: String.t() | nil,
+          policy_workspace: String.t() | nil,
+          budget: non_neg_integer() | :unlimited,
+          raw: float() | nil,
+          exempt_raw: float() | nil,
+          exempt_budget: non_neg_integer() | nil,
+          seats: non_neg_integer(),
+          free: non_neg_integer() | :unlimited,
+          binding: binding(),
+          quota_binding: String.t() | nil,
+          reason: String.t(),
+          windows: [map()],
+          ceiling: %{max_concurrent: pos_integer() | nil, share: pos_integer() | nil},
+          horizon: float(),
+          computed_at: DateTime.t(),
+          published_at: DateTime.t() | nil,
+          pending_rise: %{raw: float(), since: DateTime.t()} | nil,
+          first_seat?: boolean()
+        }
+
+  defstruct account: nil,
+            pool: nil,
+            scope: nil,
+            policy_workspace: nil,
+            budget: 0,
+            raw: nil,
+            exempt_raw: nil,
+            exempt_budget: nil,
+            seats: 0,
+            free: 0,
+            binding: :no_reading,
+            quota_binding: nil,
+            reason: "",
+            windows: [],
+            ceiling: %{max_concurrent: nil, share: nil},
+            horizon: @default_horizon,
+            computed_at: nil,
+            published_at: nil,
+            pending_rise: nil,
+            first_seat?: false
+
+  # ---- JSON (DC5) -------------------------------------------------------------
+
+  @doc """
+  A JSON-safe rendering of a published budget (DC5, bd-2c2a4g; §9): the one
+  shape `arb scheduler status`, `scheduler_status`, `quota_get` and the board's
+  popups share, so the surfaces cannot drift. The integer and `reason` come
+  first; `windows` carries every number behind them.
+
+  `binding` is a string: a hard zero or `ceiling` by its name, a quota window
+  as `window:<label>`. `:unlimited` is the string `"unlimited"`.
+  """
+  @spec to_json(t()) :: map()
+  def to_json(%__MODULE__{} = b) do
+    %{
+      account: b.account,
+      pool: b.pool,
+      scope: b.scope,
+      policy_workspace: b.policy_workspace,
+      budget: json_value(b.budget),
+      raw: b.raw,
+      exempt_budget: b.exempt_budget,
+      seats: b.seats,
+      free: json_value(b.free),
+      binding: binding_text(b.binding),
+      quota_binding: b.quota_binding,
+      reason: b.reason,
+      windows: Enum.map(b.windows, &json_value/1),
+      ceiling: b.ceiling,
+      horizon_h: b.horizon,
+      computed_at: b.computed_at,
+      published_at: b.published_at,
+      pending_rise: b.pending_rise
+    }
+  end
+
+  @doc "A binding as the text every surface shows: `ceiling`, `paused`, `window:5h`."
+  @spec binding_text(binding()) :: String.t()
+  def binding_text({:window, label}), do: "window:#{label}"
+  def binding_text(binding) when is_atom(binding), do: Atom.to_string(binding)
+  def binding_text(other), do: inspect(other)
+
+  defp json_value(value) when value in [nil, true, false], do: value
+  defp json_value(value) when is_atom(value), do: Atom.to_string(value)
+  defp json_value(%DateTime{} = value), do: value
+  defp json_value(%{} = map), do: Map.new(map, fn {k, v} -> {k, json_value(v)} end)
+  defp json_value(list) when is_list(list), do: Enum.map(list, &json_value/1)
+  defp json_value(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> json_value()
+  defp json_value(value), do: value
+
+  # ---- compute (pure) -------------------------------------------------------
+
+  @doc """
+  The budget of one pool, before hysteresis. See the moduledoc for the options.
+  """
+  @spec compute(keyword() | map()) :: t()
+  def compute(opts) do
+    opts = Map.new(opts)
+    account = Map.get(opts, :account)
+    workspace = Map.get(opts, :workspace)
+    snapshot = Snapshot.normalize(Map.get(opts, :quota), model: Map.get(opts, :model))
+    ctx = context(opts, account, workspace)
+
+    base = %__MODULE__{
+      account: Map.get(opts, :account_id) || account_id(account),
+      pool: Map.get(opts, :pool),
+      scope: Map.get(opts, :scope),
+      policy_workspace: workspace_id(workspace),
+      seats: ctx.seats,
+      windows: eval_windows(snapshot, ctx),
+      ceiling: ceiling(account, Map.get(opts, :share)),
+      horizon: ctx.horizon,
+      computed_at: ctx.now
+    }
+
+    decide(base, opts, snapshot, ctx)
+  end
+
+  defp context(opts, account, workspace) do
+    %{
+      policy: {account, workspace},
+      account: account,
+      now: Map.get_lazy(opts, :now, &DateTime.utc_now/0),
+      seats: max(Map.get(opts, :seats) || 0, 0),
+      horizon: clamp_horizon(Map.get(opts, :horizon)),
+      rates: Map.get(opts, :rates) || %{},
+      background: Map.get(opts, :background) || 0.0,
+      zero_ceiling?: zero_ceiling?(account, Map.get(opts, :share)),
+      priority: nil
+    }
+  end
+
+  defp decide(base, opts, snapshot, ctx) do
+    exempt = Gate.pace_exempt_priority(ctx.policy)
+
+    cond do
+      zero = hard_zero(opts, snapshot, ctx.policy, ctx.now) ->
+        hard(base, zero, exempt, snapshot)
+
+      snapshot == nil and Map.get(opts, :metered?, true) == false ->
+        unmetered(base)
+
+      true ->
+        case trusted(base.windows) do
+          [] -> no_reading(base, Map.get(opts, :previous), ctx.now)
+          trusted -> quota(base, trusted, ctx, snapshot, exempt)
+        end
+    end
+  end
+
+  defp quota(base, trusted, ctx, snapshot, exempt) do
+    {binding, raw} = Enum.min_by(Enum.map(trusted, &{&1.window, &1.n}), &elem(&1, 1))
+
+    exempt_raw =
+      if exempt do
+        ctx = %{ctx | priority: exempt}
+
+        snapshot
+        |> eval_windows(ctx)
+        |> trusted()
+        |> Enum.map(& &1.n)
+        |> Enum.min(fn -> nil end)
+      end
+
+    finalize(
+      %{
+        base
+        | raw: raw,
+          exempt_raw: exempt_raw,
+          quota_binding: binding,
+          first_seat?: first_seat?(trusted, ctx)
+      },
+      max(floor(raw), 0)
+    )
+  end
+
+  # The first-seat rule (§3.10): a pool with no seat in use, below its line on
+  # every trusted window, gets at least one seat whatever `raw` says. An idle
+  # window's clock does not start until first use, so its line does not climb
+  # while the pool has no seat; without this the pool would wait on a rise that
+  # never comes. A ceiling of 0 wins, and so does any window at or above its line.
+  defp first_seat?(trusted, ctx) do
+    ctx.seats == 0 and not ctx.zero_ceiling? and Enum.all?(trusted, &below_line?/1)
+  end
+
+  defp below_line?(%{used_now: used, line_now: line}) when is_number(used) and is_number(line),
+    do: used < line
+
+  defp below_line?(_), do: false
+
+  defp hard(base, binding, exempt, snapshot) do
+    %{
+      base
+      | budget: 0,
+        free: 0,
+        binding: binding,
+        exempt_budget: if(exempt, do: 0),
+        reason: hard_reason(binding, snapshot)
+    }
+  end
+
+  defp unmetered(base) do
+    ceil = ceiling_value(base.ceiling)
+    budget = ceil || :unlimited
+
+    %{
+      base
+      | budget: budget,
+        free: free(budget, base.seats),
+        binding: :unmetered,
+        reason: "no quota source; " <> if(ceil, do: "ceiling #{ceil}", else: "unlimited")
+    }
+  end
+
+  # §3.5: no trusted reading at all. The last published budget stands for up to
+  # 2 h (bounded by the ceiling); after that the ceiling, or 1.
+  defp no_reading(base, previous, now) do
+    ceil = ceiling_value(base.ceiling)
+
+    {budget, text} =
+      case previous do
+        %{budget: held, trusted_at: %DateTime{} = at} when is_integer(held) ->
+          if DateTime.diff(now, at) < @no_reading_seconds,
+            do: {min(held, ceil || held), "holding the last budget #{held}"},
+            else: {ceil || 1, "reading lost over 2h ago"}
+
+        _ ->
+          {ceil || 1, "no reading yet"}
+      end
+
+    %{
+      base
+      | budget: budget,
+        free: free(budget, base.seats),
+        binding: :no_reading,
+        reason: "no trusted quota reading (#{text})"
+    }
+  end
+
+  # The quota-derived budget for a given hysteresis output `qb`, under the
+  # struct's ceiling (the ceiling is applied after hysteresis, §3.8).
+  defp finalize(%__MODULE__{} = b, qb) do
+    ceil = ceiling_value(b.ceiling)
+    lifted? = b.first_seat? and qb < 1
+    qb = if lifted?, do: 1, else: qb
+    budget = if ceil, do: min(qb, ceil), else: qb
+
+    exempt =
+      b.exempt_raw &&
+        b.exempt_raw |> floor() |> max(0) |> cap(ceil) |> max(budget)
+
+    binding = if ceil && qb > ceil, do: :ceiling, else: {:window, b.quota_binding}
+
+    %{
+      b
+      | budget: budget,
+        free: free(budget, b.seats),
+        exempt_budget: exempt,
+        binding: binding,
+        reason: quota_reason(b, qb, ceil, lifted?)
+    }
+  end
+
+  defp cap(n, nil), do: n
+  defp cap(n, ceil), do: min(n, ceil)
+
+  defp free(:unlimited, _seats), do: :unlimited
+  defp free(budget, seats), do: max(budget - seats, 0)
+
+  defp trusted(windows), do: Enum.filter(windows, &(&1.status == :ok))
+
+  # ---- hard zeros (§3.5) ----------------------------------------------------
+
+  defp hard_zero(opts, snapshot, policy, now) do
+    case Map.get(opts, :hard) do
+      hard when hard in [:paused, :quota_stop, :unavailable] ->
+        hard
+
+      _ ->
+        case Gate.hard_stop(snapshot, policy, now: now) do
+          %{signal: :warning} -> :weekly_warning
+          %{} -> :provider_refusing
+          nil -> nil
+        end
+    end
+  end
+
+  defp hard_reason(:provider_refusing, snapshot),
+    do: "provider is refusing requests" <> status_note(snapshot)
+
+  defp hard_reason(:weekly_warning, _),
+    do: "long window at allowed_warning (weekly_warning_policy: hold)"
+
+  defp hard_reason(:paused, _), do: "provider paused"
+  defp hard_reason(:quota_stop, _), do: "quota-stop hold"
+  defp hard_reason(:unavailable, _), do: "provider unavailable (auth expired or circuit broken)"
+
+  defp status_note(%Snapshot{status: status}) when status not in [nil, "allowed"],
+    do: " (#{status})"
+
+  defp status_note(%Snapshot{secondary_status: status}) when status not in [nil, "allowed"],
+    do: " (#{status})"
+
+  defp status_note(%Snapshot{scoped: [_ | _] = scoped}) do
+    case Enum.find(scoped, &(&1.status not in [nil, "allowed"])) do
+      %{label: label, status: status} -> " (#{label} #{status})"
+      nil -> ""
+    end
+  end
+
+  defp status_note(_), do: ""
+
+  # ---- windows --------------------------------------------------------------
+
+  defp eval_windows(nil, _ctx), do: []
+
+  defp eval_windows(%Snapshot{} = s, ctx) do
+    primary = %{
+      side: :primary,
+      label: s.window_label,
+      used: s.utilization,
+      reset_at: s.reset_at,
+      stale?: Gate.stale?(s, ctx.now)
+    }
+
+    # The base long window, then each scoped one the snapshot carries for the
+    # card's model (bd-e0b7so): nested windows of the same pool, sized and
+    # lined like the base one, so the budget is the `min` over them.
+    [base | scoped] =
+      for view <- Snapshot.long_views(s) do
+        %{
+          side: :long,
+          label: view.secondary_window_label,
+          used: view.secondary_utilization,
+          reset_at: view.secondary_reset_at,
+          stale?: Gate.long_window_stale?(view, ctx.now)
+        }
+      end
+
+    (if(s.window_label, do: [primary], else: []) ++
+       if(s.secondary_window_label, do: [base], else: []) ++ scoped)
+    |> Enum.map(&eval_window(&1, s, ctx))
+    |> Kernel.++(burn_windows(base, s, ctx))
+  end
+
+  # The rolling-24h burn governor (bd-cklotu, `Wardmast.Quota.BurnGovernor`),
+  # under `daily_burn_cap_mode: enforce` only: a `24h` entry whose line is the
+  # flat cap and whose draw is the long window's own `ρ`. There is no reset
+  # (it is a rolling window), so `n = (cap − u_now − b·H) / (ρ·H)`. The exempt
+  # evaluation (`ctx.priority` set) leaves it out: the P0 exemption lifts it.
+  defp burn_windows(_long, _s, %{priority: priority}) when priority != nil, do: []
+
+  defp burn_windows(%{label: label} = long, s, ctx) when is_binary(label) do
+    case BurnGovernor.window(s, ctx.policy, ctx.now) do
+      %{used: burn, cap: cap} -> [burn_entry(long, burn, cap, s, ctx)]
+      nil -> []
+    end
+  end
+
+  defp burn_windows(_long, _s, _ctx), do: []
+
+  defp burn_entry(long, burn, cap, snapshot, ctx) do
+    seconds = Gate.window_seconds(long.label, ctx.account)
+    %{rho: rho, b: b} = entry = base_entry(long, seconds, ctx)
+    h = ctx.horizon
+    u_now = burn + (ctx.seats * rho + b) * lag_hours(snapshot, ctx.now)
+
+    %{
+      entry
+      | window: "24h",
+        used: burn * 1.0,
+        used_now: u_now,
+        line_now: cap,
+        line_at_h: cap,
+        n: (cap - u_now - b * h) / (rho * h)
+    }
+  end
+
+  defp eval_window(w, snapshot, ctx) do
+    seconds = Gate.window_seconds(w.label, ctx.account)
+    entry = base_entry(w, seconds, ctx)
+
+    # `and`, not `&&`: a window with no `reset_at` (an Antigravity bucket, Codex's
+    # `session`) must give `false`, never `nil` — the `cond` below applies `and`.
+    reset_passed? =
+      match?(%DateTime{}, w.reset_at) and DateTime.compare(w.reset_at, ctx.now) != :gt
+
+    cond do
+      not is_number(w.used) -> %{entry | status: :no_reading}
+      reset_passed? and is_integer(seconds) -> fresh_window(entry, w, seconds, ctx)
+      reset_passed? -> %{entry | status: :stale}
+      w.stale? -> %{entry | status: :stale}
+      true -> capacity(entry, w, w.used, w.reset_at, lag_hours(snapshot, ctx.now), ctx)
+    end
+  end
+
+  # The not-yet-evaluated entry of window `w`: its rate (`ρ`, from the window's
+  # own label), background and the empty readings.
+  defp base_entry(w, seconds, ctx) do
+    rate = rate(w, seconds, ctx)
+    b = background(ctx.background, w.label)
+
+    %{
+      window: w.label,
+      side: w.side,
+      status: :ok,
+      used: if(is_number(w.used), do: w.used * 1.0),
+      rho: rate.rho,
+      rho_source: rate.source,
+      rho_min: rate.floor,
+      raw_rho: rate.raw_rho,
+      floored?: rate.floored?,
+      passed_over: rate.passed_over,
+      b: b,
+      horizon_h: ctx.horizon,
+      fresh?: false,
+      used_now: nil,
+      line_now: nil,
+      line_at_h: nil,
+      line_at_reset: nil,
+      reset_in_h: nil,
+      n: nil,
+      n_before: nil,
+      n_after: nil,
+      expiring: nil
+    }
+  end
+
+  # A window whose reset has passed is the fresh window: u = 0 at the reset
+  # plus the draw projected since (§3.5).
+  defp fresh_window(entry, w, seconds, ctx) do
+    passed = DateTime.diff(ctx.now, w.reset_at)
+    windows_elapsed = div(passed, seconds) + 1
+    next_reset = DateTime.add(w.reset_at, windows_elapsed * seconds, :second)
+    last_reset = DateTime.add(next_reset, -seconds, :second)
+    lag = DateTime.diff(ctx.now, last_reset, :millisecond) / 3_600_000
+
+    capacity(%{entry | fresh?: true}, w, 0.0, next_reset, lag, ctx)
+  end
+
+  defp capacity(entry, w, used, reset_at, lag, ctx) do
+    %{rho: rho, b: b} = entry
+    h = ctx.horizon
+    u_now = used + (ctx.seats * rho + b) * lag
+    line = fn t -> line(ctx, w, used, reset_at, t) end
+    t_r = reset_at && DateTime.diff(reset_at, ctx.now, :millisecond) / 3_600_000
+    horizon_end = hours_after(ctx.now, h)
+
+    {n, n_before, n_after} =
+      if t_r == nil or t_r >= h do
+        {(line.(horizon_end) - u_now - b * h) / (rho * h), nil, nil}
+      else
+        before = (line.(reset_at) - u_now - b * t_r) / (rho * t_r)
+        x = h - t_r
+        fresh = fresh_line(ctx, w, reset_at, hours_after(reset_at, x))
+        after_reset = (fresh - b * x) / (rho * x)
+        {min(before, after_reset), before, after_reset}
+      end
+
+    line_at_reset = reset_at && line.(reset_at)
+
+    %{
+      entry
+      | used_now: u_now,
+        line_now: line.(ctx.now),
+        line_at_h: line.(horizon_end),
+        line_at_reset: line_at_reset,
+        reset_in_h: t_r,
+        n: n,
+        n_before: n_before,
+        n_after: n_after,
+        expiring: t_r && max(0.0, line_at_reset - (u_now + (ctx.seats * rho + b) * t_r))
+    }
+  end
+
+  # The one definition of the line: the gate's own, read at time `t`.
+  defp line(ctx, w, used, reset_at, t) do
+    ctx.policy
+    |> Gate.pace(w.side, w.label, used, reset_at, pace_opts(ctx, t))
+    |> Map.fetch!(:ceiling)
+  end
+
+  defp fresh_line(ctx, w, reset_at, t) do
+    ctx.policy
+    |> Gate.fresh_pace(w.side, w.label, reset_at, pace_opts(ctx, t))
+    |> Map.fetch!(:ceiling)
+  end
+
+  defp pace_opts(%{priority: nil}, t), do: [now: t]
+  defp pace_opts(%{priority: p}, t), do: [now: t, priority: p]
+
+  defp hours_after(%DateTime{} = at, hours),
+    do: DateTime.add(at, round(hours * 3_600_000), :millisecond)
+
+  defp lag_hours(%Snapshot{captured_at: %DateTime{} = at}, now),
+    do: max(DateTime.diff(now, at, :millisecond), 0) / 3_600_000
+
+  defp lag_hours(_snapshot, _now), do: 0.0
+
+  defp background(b, _label) when is_number(b), do: max(b * 1.0, 0.0)
+
+  defp background(%{} = by_window, label),
+    do:
+      background(
+        Map.get(by_window, label) || Map.get(by_window, Gate.base_label(label), 0.0),
+        label
+      )
+
+  defp background(_, _label), do: 0.0
+
+  # ρ for one window: the resolved rung's value, else the prior; never below
+  # the floor ρ_min = prior / 4 (I11), whatever it is handed.
+  defp rate(w, seconds, ctx) do
+    max_concurrent = match?(%ProviderAccount{}, ctx.account) && ctx.account.max_concurrent
+    seconds = seconds || Map.fetch!(@fallback_seconds, w.side)
+    prior = BudgetCalibration.prior(seconds, max_concurrent || nil)
+    floor = BudgetCalibration.rho_floor(prior)
+    # A scoped window ("7d (Fable)") has no fit of its own: the long window's.
+    given = Map.get(ctx.rates, w.label) || Map.get(ctx.rates, Gate.base_label(w.label)) || %{}
+    asked = number_or(given[:rho], prior)
+    fitted = number_or(given[:raw_rho], asked)
+
+    %{
+      rho: max(asked, floor),
+      floor: floor,
+      source: source(given),
+      raw_rho: fitted,
+      floored?: fitted < floor,
+      passed_over: given[:passed_over] || []
+    }
+  end
+
+  defp source(%{rung: 0}), do: :fit
+  defp source(%{rung: 1}), do: :peer
+  defp source(%{rung: 2}), do: :prior
+  defp source(%{rho: _}), do: :given
+  defp source(_), do: :prior
+
+  defp number_or(n, _default) when is_number(n), do: n * 1.0
+  defp number_or(_, default), do: default
+
+  # ---- ceiling --------------------------------------------------------------
+
+  defp ceiling(account, share) do
+    mc =
+      case account do
+        %ProviderAccount{max_concurrent: n} when is_integer(n) and n > 0 -> n
+        _ -> nil
+      end
+
+    %{max_concurrent: mc, share: if(is_integer(share) and share > 0, do: share)}
+  end
+
+  defp ceiling_value(%{max_concurrent: mc, share: share}) do
+    case Enum.reject([mc, share], &is_nil/1) do
+      [] -> nil
+      set -> Enum.min(set)
+    end
+  end
+
+  # An explicit 0 is a ceiling that admits nothing; `ceiling/2` leaves it out of
+  # the budget's own ceiling (it only names positive ones), so the first-seat
+  # rule reads it here.
+  defp zero_ceiling?(account, share) do
+    match?(%ProviderAccount{max_concurrent: 0}, account) or share == 0
+  end
+
+  defp clamp_horizon(h) when is_number(h) do
+    {lo, hi} = @horizon_range
+    (h * 1.0) |> max(lo) |> min(hi)
+  end
+
+  defp clamp_horizon(_), do: @default_horizon
+
+  defp account_id(%ProviderAccount{id: id}), do: id
+  defp account_id(_), do: nil
+
+  defp workspace_id(%{id: id}), do: id
+  defp workspace_id(_), do: nil
+
+  # ---- the reason (§3.8) ----------------------------------------------------
+
+  defp quota_reason(%__MODULE__{} = b, qb, ceil, lifted?) do
+    detail = binding_detail(b)
+
+    cond do
+      lifted? ->
+        "first-seat rule: no seat in use and under the line on every window, " <>
+          "so 1 seat (raw #{fmt(b.raw)}): #{detail}"
+
+      ceil && qb > ceil ->
+        "ceiling #{ceiling_name(b.ceiling)} #{ceil} (quota allows #{qb}: #{detail})"
+
+      true ->
+        "quota allows #{qb}: #{detail}"
+    end
+  end
+
+  defp ceiling_name(%{max_concurrent: mc, share: share}),
+    do: if(mc && (share == nil or mc <= share), do: "max_concurrent", else: "share")
+
+  defp binding_detail(%__MODULE__{} = b) do
+    w = Enum.find(b.windows, &(&1.window == b.quota_binding and &1.status == :ok))
+
+    reset =
+      if w.n_before,
+        do:
+          ", reset in #{fmt(w.reset_in_h)}h (#{fmt(w.n_before)} before, #{fmt(w.n_after)} after)",
+        else: ""
+
+    "#{w.window} binds, #{fmt(w.used)} used, line #{fmt(w.line_now)} now and " <>
+      "#{fmt(w.line_at_h)} in #{trim(w.horizon_h)}h#{reset}, #{rate_note(w)}"
+  end
+
+  defp rate_note(%{floored?: true} = w),
+    do: "#{pct(w.rho)}/seat-h floor; fit #{pct(w.raw_rho)}"
+
+  defp rate_note(%{rho_source: :prior, passed_over: [_ | _] = passed} = w),
+    do: "#{pct(w.rho)}/seat-h prior; own fit #{passed |> own_fit_note()}"
+
+  defp rate_note(%{rho_source: :prior} = w), do: "#{pct(w.rho)}/seat-h prior"
+  defp rate_note(%{rho_source: :peer} = w), do: "#{pct(w.rho)}/seat-h from other accounts"
+  defp rate_note(w), do: "#{pct(w.rho)}/seat-h"
+
+  defp own_fit_note(passed) do
+    case Enum.find(passed, &match?({0, _}, &1)) do
+      {0, {:not_distinguishable_from_zero, _t}} -> "not distinguishable from 0"
+      {0, why} -> "#{why}"
+      _ -> "not used"
+    end
+  end
+
+  defp fmt(n) when is_number(n), do: :erlang.float_to_binary(n * 1.0, decimals: 2)
+  defp fmt(_), do: "-"
+  defp pct(n), do: :erlang.float_to_binary(n * 100, decimals: 1) <> "%"
+  defp trim(h), do: h |> Float.round(1) |> to_string() |> String.replace_suffix(".0", "")
+
+  # ---- hysteresis (§3.7) ----------------------------------------------------
+
+  @doc "The empty hysteresis state: nothing published yet."
+  @spec new_hysteresis() :: hysteresis()
+  def new_hysteresis, do: %{budget: nil, pending: nil}
+
+  @doc """
+  One step of the published quota budget `B` following `raw` (§3.7):
+
+    * a fall is taken at once: `floor(raw) < B` sets `B := max(floor(raw), 0)`;
+    * a rise needs `raw ≥ B + 1 + θ` (θ = #{@theta}) on two recomputes at least
+      #{@dwell_seconds} s apart, then `B := floor(raw − θ)`; a recompute back
+      under the margin forgets the pending rise;
+    * the first reading publishes its floor.
+
+  `B ≤ floor(raw)` always holds, and `raw` inside `[B, B + 1.25)` changes nothing.
+  """
+  @spec hysteresis(hysteresis(), float(), DateTime.t()) :: hysteresis()
+  def hysteresis(%{budget: nil}, raw, _now), do: %{budget: max(floor(raw), 0), pending: nil}
+
+  def hysteresis(%{budget: b} = state, raw, now) do
+    cond do
+      floor(raw) < b ->
+        %{budget: max(floor(raw), 0), pending: nil}
+
+      raw >= b + 1 + @theta ->
+        rise(state, raw, now)
+
+      true ->
+        %{state | pending: nil}
+    end
+  end
+
+  defp rise(%{pending: %{since: since}} = state, raw, now) do
+    if DateTime.diff(now, since) >= @dwell_seconds,
+      do: %{budget: floor(raw - @theta), pending: nil},
+      else: %{state | pending: %{since: since, raw: raw}}
+  end
+
+  defp rise(state, raw, now), do: %{state | pending: %{since: now, raw: raw}}
+
+  @doc """
+  Publish a computed budget through hysteresis: `{published, next_state}`. A
+  hard zero, a lost reading and an unmetered pool are not noise and skip
+  hysteresis in both directions (§3.5): they publish as computed and reset
+  the state, so recovery takes the first reading's floor. The first-seat rule
+  (§3.10) is not swallowed here either: an idle pool under its line publishes
+  at least 1 at once, with no dwell, and the state follows what is published.
+  """
+  @spec publish(t(), hysteresis(), DateTime.t()) :: {t(), hysteresis()}
+  def publish(%__MODULE__{binding: binding} = computed, _state, now)
+      when binding in @unhysteresised,
+      do: {%{computed | published_at: now}, new_hysteresis()}
+
+  def publish(%__MODULE__{raw: raw} = computed, state, now) do
+    next = hysteresis(state, raw, now)
+    published = finalize(computed, next.budget)
+    state = first_seat_state(computed, next)
+
+    {%{published | published_at: now, pending_rise: state.pending}, state}
+  end
+
+  # The first-seat rule is not noise: it skips the dwell on a rise and lands a
+  # fall on 1 rather than 0, and the state follows what is published.
+  defp first_seat_state(%__MODULE__{first_seat?: true}, %{budget: b}) when b < 1,
+    do: %{budget: 1, pending: nil}
+
+  defp first_seat_state(_computed, next), do: next
+
+  # ---- helpers for readers --------------------------------------------------
+
+  @doc """
+  Expiring headroom of window `label` (§8): what would reset unused at the
+  current seats, `max(0, line(reset) − (u_now + (S·ρ + b)·t_r))`, as a share of
+  the window. `0.0` for a window with no reset or not evaluated.
+  """
+  @spec expiring(t(), String.t()) :: float()
+  def expiring(%__MODULE__{windows: windows}, label) do
+    case Enum.find(windows, &(&1.window == label and &1.status == :ok)) do
+      %{expiring: e} when is_number(e) -> e
+      _ -> 0.0
+    end
+  end
+
+  @doc """
+  The exploration budget (§8), in seats: half of the smallest window's expiring
+  headroom, `floor(min_w expiring(w) / (2·ρ·H))`, with the same floored `ρ` as
+  the budget. `0` when the pool is at a hard zero or has no reset to expire at.
+  Exploration seats count against the budget like any other seat.
+  """
+  @spec explore(t(), keyword()) :: non_neg_integer()
+  def explore(budget, opts \\ [])
+  def explore(%__MODULE__{binding: binding}, _opts) when binding in @hard_bindings, do: 0
+
+  def explore(%__MODULE__{windows: windows, horizon: h}, _opts) do
+    windows
+    |> Enum.filter(&(&1.status == :ok and is_number(&1.expiring)))
+    |> Enum.map(&(&1.expiring / (2 * &1.rho * h)))
+    |> case do
+      [] -> 0
+      shares -> shares |> Enum.min() |> floor() |> max(0)
+    end
+  end
+
+  @doc """
+  The budgets that hold a card on `model` (bd-e0b7so): the pool's own (`scope`
+  `nil`) and every scoped variant whose scope covers `model` — a `nil` model
+  takes all of them (the worst of all), `:unscoped` none. A scoped variant is
+  the same pool's budget for the card's nested window, not another pool: take
+  the `lowest/1` of what this returns.
+  """
+  @spec applicable([t()], String.t() | atom() | nil) :: [t()]
+  def applicable(budgets, model) do
+    Enum.filter(budgets, fn
+      %__MODULE__{scope: nil} ->
+        true
+
+      %__MODULE__{} when model == :unscoped ->
+        false
+
+      %__MODULE__{} when is_nil(model) ->
+        true
+
+      %__MODULE__{scope: scope} when is_binary(model) ->
+        ModelFamily.scope_matches?(scope, model)
+
+      _ ->
+        false
+    end)
+  end
+
+  @doc """
+  The lowest budget among a card's candidate pools: what a card whose predicted
+  model is `nil` takes (§3.1). `nil` for none.
+  """
+  @spec lowest([t()]) :: t() | nil
+  def lowest([]), do: nil
+  def lowest(budgets), do: Enum.min_by(budgets, &rank/1)
+
+  defp rank(%__MODULE__{budget: :unlimited}), do: :infinity
+  defp rank(%__MODULE__{budget: n}), do: n
+end

@@ -25,7 +25,7 @@
 // Output is one `CHECK <name>: PASS|FAIL — <detail>` line per claim, a
 // `SESSION <id>` line naming the session it launched (so a caller can assert
 // against the server side of it), and a final `RESULT: PASS|FAIL`.
-// `ArbiterWeb.SessionPageBrowserTest` runs it against a Bandit listener as
+// `WardmastWeb.SessionPageBrowserTest` runs it against a Bandit listener as
 // part of `mix test`; the coordinator runs it against the live host for the
 // post-merge criterion.
 //

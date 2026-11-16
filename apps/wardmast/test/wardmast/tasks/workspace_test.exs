@@ -1,0 +1,2141 @@
+defmodule Wardmast.Tasks.WorkspaceTest do
+  use Wardmast.DataCase, async: false
+
+  alias Wardmast.Tasks.Workspace
+
+  require Ash.Query
+
+  describe "create/2" do
+    test "succeeds with minimal valid attrs (name only); config defaults to empty map" do
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "minimal"})
+      assert ws.name == "minimal"
+      assert ws.config == %{}
+      assert is_binary(ws.id)
+    end
+
+    test "prefix defaults to \"ar\" when not specified" do
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "prefix-default"})
+      assert ws.prefix == "ar"
+    end
+
+    test "succeeds with tracker config and ignores a legacy vernacular key" do
+      # Forward-safe: an existing workspace may still carry a `"vernacular"`
+      # config key. It is no longer validated — it is accepted and stored as-is
+      # (the substitution layer that read it has been removed).
+      config = %{
+        "vernacular" => %{"coordinator" => "Admiral"},
+        "tracker" => %{
+          "type" => "jira",
+          "config" => %{
+            "host" => "acme.atlassian.net",
+            "project_key" => "AX",
+            "credentials_ref" => "env:JIRA_TOKEN"
+          }
+        }
+      }
+
+      assert {:ok, ws} =
+               Ash.create(Workspace, %{
+                 name: "apex",
+                 description: "tracker-backed workspace",
+                 config: config
+               })
+
+      assert ws.config["tracker"]["type"] == "jira"
+      assert ws.config["tracker"]["config"]["project_key"] == "AX"
+      # The legacy key is preserved untouched, not rejected.
+      assert ws.config["vernacular"]["coordinator"] == "Admiral"
+    end
+
+    test "fails when tracker.type is not in the enum" do
+      config = %{"tracker" => %{"type" => "asana"}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "bad-tracker", config: config})
+
+      assert err |> Exception.message() |> String.contains?("tracker.type must be one of")
+    end
+
+    test "fails when tracker is not a map" do
+      config = %{"tracker" => "jira"}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "non-map-tracker", config: config})
+
+      assert err |> Exception.message() |> String.contains?("tracker must be a map")
+    end
+
+    test "fails when tracker.config is not a map" do
+      config = %{"tracker" => %{"type" => "jira", "config" => "not-a-map"}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "bad-tracker-cfg", config: config})
+
+      assert err |> Exception.message() |> String.contains?("tracker.config must be a map")
+    end
+
+    test "fails when name is missing" do
+      assert {:error, %Ash.Error.Invalid{}} = Ash.create(Workspace, %{})
+    end
+
+    test "fails when name is too long" do
+      long_name = String.duplicate("a", 101)
+      assert {:error, %Ash.Error.Invalid{}} = Ash.create(Workspace, %{name: long_name})
+    end
+
+    test "accepts the :none tracker type" do
+      config = %{"tracker" => %{"type" => "none"}}
+      assert {:ok, _ws} = Ash.create(Workspace, %{name: "no-tracker", config: config})
+    end
+
+    test "allows unknown top-level config keys (forward compat)" do
+      config = %{"future_feature" => %{"x" => 1}}
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "fwd-compat", config: config})
+      assert ws.config["future_feature"] == %{"x" => 1}
+    end
+
+    # DC1 (docs/design/provider-dynamic-concurrency.md §10.6)
+    test "refuses the removed conductor key, even empty, naming what replaced it" do
+      for conductor <- [%{"max_concurrent" => 4}, %{}] do
+        assert {:error, %Ash.Error.Invalid{} = error} =
+                 Ash.create(Workspace, %{name: "conductor", config: %{"conductor" => conductor}})
+
+        message = Exception.message(error)
+        assert message =~ "conductor.max_concurrent was removed (bd-8qdviv)"
+        assert message =~ "arb node set"
+        assert message =~ "worker.repos.<repo>.max_concurrent"
+      end
+    end
+
+    test "patch_config of the removed conductor key says it was removed, not 'unknown'" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "conductor-patch"})
+
+      for force <- [false, true] do
+        assert {:error, error} =
+                 Ash.update(
+                   ws,
+                   %{patch: %{"conductor" => %{"max_concurrent" => 4}}, force: force},
+                   action: :patch_config
+                 )
+
+        message = Exception.message(error)
+        assert message =~ "conductor.max_concurrent was removed"
+        refute message =~ "unknown top-level"
+      end
+    end
+
+    test "conductor is no longer a known top-level key" do
+      refute "conductor" in Wardmast.Tasks.Workspace.ConfigSchema.known_top_level_keys()
+    end
+
+    test "succeeds with a valid merge.strategy" do
+      config = %{"merge" => %{"strategy" => "direct"}}
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "direct-merge", config: config})
+      assert ws.config["merge"]["strategy"] == "direct"
+    end
+
+    test "succeeds with the github merge.strategy and its config block" do
+      config = %{
+        "merge" => %{
+          "strategy" => "github",
+          "config" => %{
+            "owner" => "octo",
+            "repo" => "widget",
+            "credentials_ref" => "env:GITHUB_TOKEN"
+          }
+        }
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "github-merge", config: config})
+      assert ws.config["merge"]["strategy"] == "github"
+    end
+
+    test "fails when merge.strategy is not in the enum" do
+      config = %{"merge" => %{"strategy" => "bogus"}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "bad-merge", config: config})
+
+      assert err |> Exception.message() |> String.contains?("merge.strategy must be one of")
+    end
+
+    # bd-73zv62: the per-repo merge override.
+    test "accepts a merge.repos per-repo override" do
+      config = %{
+        "merge" => %{
+          "strategy" => "github",
+          "repos" => %{
+            "mesaana" => %{"strategy" => "direct"},
+            "svc" => %{"config" => %{"repo" => "svc"}, "watchdog_max_polls" => "infinity"}
+          }
+        }
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "per-repo-merge", config: config})
+      assert ws.config["merge"]["repos"]["mesaana"]["strategy"] == "direct"
+    end
+
+    test "fails when a merge.repos override names an unknown strategy" do
+      config = %{"merge" => %{"repos" => %{"mesaana" => %{"strategy" => "bogus"}}}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "bad-repo-merge", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("merge.repos.mesaana.strategy must be one of")
+    end
+
+    test "fails when merge.repos or an entry is not a map, or an entry nests repos" do
+      for {merge, message} <- [
+            {%{"repos" => ["mesaana"]}, "merge.repos must be a map"},
+            {%{"repos" => %{"mesaana" => "direct"}}, "merge.repos.mesaana must be a map"},
+            {%{"repos" => %{"m" => %{"repos" => %{}}}}, "merge.repos.m cannot nest"},
+            {%{"repos" => %{"m" => %{"watchdog_max_polls" => 0}}},
+             "merge.repos.m.watchdog_max_polls must be a positive integer"}
+          ] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "bad-repos-#{System.unique_integer([:positive])}",
+                   config: %{"merge" => merge}
+                 })
+
+        assert err |> Exception.message() |> String.contains?(message), message
+      end
+    end
+
+    # bd-6dyva0: the speculative merge train.
+    test "accepts merge.train, workspace-wide and per repo" do
+      config = %{
+        "merge" => %{
+          "train" => %{"depth" => 3, "workflow" => "train.yml"},
+          "repos" => %{"vstim" => %{"train" => %{"depth" => "4", "ref_prefix" => "trains/"}}}
+        }
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "train-depth", config: config})
+      assert ws.config["merge"]["train"]["depth"] == 3
+    end
+
+    test "fails when merge.train is not a map or its depth is not a positive integer" do
+      for {merge, message} <- [
+            {%{"train" => 3}, "merge.train must be a map"},
+            {%{"train" => %{"depth" => 0}}, "merge.train.depth must be a positive integer"},
+            {%{"train" => %{"depth" => "two"}}, "merge.train.depth must be a positive integer"},
+            {%{"repos" => %{"m" => %{"train" => %{"depth" => -1}}}},
+             "merge.repos.m.train.depth must be a positive integer"},
+            {%{"train" => %{"ref_prefix" => ""}},
+             "merge.train.ref_prefix must be a non-empty string"}
+          ] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "bad-train-#{System.unique_integer([:positive])}",
+                   config: %{"merge" => merge}
+                 })
+
+        assert err |> Exception.message() |> String.contains?(message), message
+      end
+    end
+
+    test "fails when merge is not a map" do
+      config = %{"merge" => "direct"}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "non-map-merge", config: config})
+
+      assert err |> Exception.message() |> String.contains?("merge must be a map")
+    end
+
+    test "accepts agent.type as a single valid string" do
+      config = %{"agent" => %{"type" => "claude"}}
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "agent-single", config: config})
+      assert ws.config["agent"]["type"] == "claude"
+    end
+
+    test "accepts agent.type as a list of valid strings (multi-provider pool)" do
+      config = %{"agent" => %{"type" => ["claude", "gemini"]}}
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "agent-pool", config: config})
+      assert ws.config["agent"]["type"] == ["claude", "gemini"]
+    end
+
+    test "accepts agent.type / review_agent.type set to codex" do
+      config = %{
+        "agent" => %{"type" => "codex"},
+        "review_agent" => %{"type" => ["codex", "claude"]}
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "agent-codex", config: config})
+      assert ws.config["agent"]["type"] == "codex"
+      assert ws.config["review_agent"]["type"] == ["codex", "claude"]
+    end
+
+    test "accepts agent.type as a single-element list" do
+      config = %{"agent" => %{"type" => ["gemini"]}}
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "agent-singleton-list", config: config})
+      assert ws.config["agent"]["type"] == ["gemini"]
+    end
+
+    test "rejects agent.type as an empty list" do
+      config = %{"agent" => %{"type" => []}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "agent-empty-list", config: config})
+
+      assert err |> Exception.message() |> String.contains?("agent.type list must not be empty")
+    end
+
+    test "rejects agent.type list with invalid entries" do
+      config = %{"agent" => %{"type" => ["claude", "robots"]}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "agent-bad-list", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("agent.type list contains invalid types")
+    end
+
+    test "rejects agent.type as a non-string non-list" do
+      config = %{"agent" => %{"type" => 42}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "agent-int-type", config: config})
+
+      assert err |> Exception.message() |> String.contains?("agent.type must be a string or list")
+    end
+
+    test "accepts provider-scoped agent.config.<provider>.tier_models" do
+      config = %{
+        "agent" => %{
+          "type" => ["claude", "gemini"],
+          "config" => %{"gemini" => %{"tier_models" => %{"standard" => "gemini-3.1-pro-high"}}}
+        }
+      }
+
+      assert {:ok, _ws} = Ash.create(Workspace, %{name: "tier-scoped-ok", config: config})
+    end
+
+    test "rejects tier_models scoped under an unknown provider key" do
+      config = %{
+        "agent" => %{
+          "config" => %{
+            "antigravity" => %{"tier_models" => %{"standard" => "gemini-3.1-pro-high"}}
+          }
+        }
+      }
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "tier-bad-provider", config: config})
+
+      msg = Exception.message(err)
+      assert msg =~ "agent.config.antigravity"
+      assert msg =~ "not a known provider"
+    end
+
+    test "rejects an unknown tier, empty model, or non-map in a provider-scoped tier_models" do
+      bad_tier = %{"agent" => %{"config" => %{"gemini" => %{"tier_models" => %{"mega" => "x"}}}}}
+
+      bad_model = %{
+        "agent" => %{"config" => %{"gemini" => %{"tier_models" => %{"standard" => ""}}}}
+      }
+
+      not_map = %{"review_agent" => %{"config" => %{"claude" => %{"tier_models" => "opus"}}}}
+
+      assert {:error, err1} = Ash.create(Workspace, %{name: "tier-bad-tier", config: bad_tier})
+      assert Exception.message(err1) =~ "agent.config.gemini.tier_models: unknown tier"
+
+      assert {:error, err2} = Ash.create(Workspace, %{name: "tier-bad-model", config: bad_model})
+      assert Exception.message(err2) =~ "agent.config.gemini.tier_models.standard"
+
+      assert {:error, err3} = Ash.create(Workspace, %{name: "tier-not-map", config: not_map})
+      assert Exception.message(err3) =~ "review_agent.config.claude.tier_models must be a map"
+    end
+  end
+
+  describe "update/2" do
+    test "can update name + config; validation runs on update" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "renamable"})
+
+      assert {:ok, updated} =
+               Ash.update(ws, %{
+                 name: "renamed",
+                 config: %{"tracker" => %{"type" => "linear"}}
+               })
+
+      assert updated.name == "renamed"
+      assert updated.config["tracker"]["type"] == "linear"
+    end
+
+    test "update rejects invalid tracker.type" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "to-be-broken"})
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Ash.update(ws, %{config: %{"tracker" => %{"type" => "bogus"}}})
+    end
+  end
+
+  describe "patch_config/2" do
+    test "refuses an unknown top-level key and names the canonical path" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "unknown-root"})
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.update(ws, %{patch: %{"sandbox" => %{"backend" => "podman"}}},
+                 action: :patch_config
+               )
+
+      msg = Exception.message(err)
+      assert msg =~ "agent.security.sandbox.backend"
+      assert Ash.get!(Workspace, ws.id).config == %{}
+    end
+
+    test "an unknown top-level key without a suggestion is refused, force overrides" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "unknown-root-force"})
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Ash.update(ws, %{patch: %{"bogus_key" => 1}}, action: :patch_config)
+
+      assert {:ok, updated} =
+               Ash.update(ws, %{patch: %{"bogus_key" => 1}, force: true}, action: :patch_config)
+
+      assert updated.config["bogus_key"] == 1
+    end
+
+    test "git_credentials.repos.<repo> is settable without force; an invalid block is refused" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "git-creds-patch"})
+
+      good = %{
+        "git_credentials" => %{
+          "repos" => %{"tonic" => %{"kind" => "deploy_key", "key_secret" => "TONIC_KEY"}}
+        }
+      }
+
+      assert {:ok, updated} = Ash.update(ws, %{patch: good}, action: :patch_config)
+      assert updated.config["git_credentials"]["repos"]["tonic"]["kind"] == "deploy_key"
+
+      bad = %{"git_credentials" => %{"repos" => %{"tonic" => %{"kind" => "bogus"}}}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.update(updated, %{patch: bad}, action: :patch_config)
+
+      refute Exception.message(err) =~ "unknown top-level"
+      assert Exception.message(err) =~ "git_credentials.repos.tonic.kind"
+    end
+
+    test "a stored unknown key does not block an unrelated patch" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "legacy-unknown", config: %{"legacy" => 1}})
+
+      assert {:ok, updated} =
+               Ash.update(ws, %{patch: %{"merge" => %{"auto_merge" => true}}},
+                 action: :patch_config
+               )
+
+      assert updated.config["legacy"] == 1
+    end
+
+    test "deep-merges a patch without clobbering sibling keys" do
+      initial = %{
+        "tracker" => %{"type" => "github", "config" => %{"owner" => "acme"}},
+        "repo_paths" => %{"arbiter" => "/srv/arbiter"},
+        "merge" => %{
+          "strategy" => "github",
+          "config" => %{"owner" => "acme", "repo" => "arbiter"}
+        }
+      }
+
+      {:ok, ws} = Ash.create(Workspace, %{name: "deep-merge", config: initial})
+
+      {:ok, updated} =
+        Ash.update(ws, %{patch: %{"merge" => %{"auto_merge" => true}}}, action: :patch_config)
+
+      # The auto_merge leaf was set...
+      assert updated.config["merge"]["auto_merge"] == true
+      # ...and every other sibling survived (this is the original footgun).
+      assert updated.config["merge"]["strategy"] == "github"
+      assert updated.config["merge"]["config"]["owner"] == "acme"
+      assert updated.config["merge"]["config"]["repo"] == "arbiter"
+      assert updated.config["tracker"]["type"] == "github"
+      assert updated.config["repo_paths"]["arbiter"] == "/srv/arbiter"
+    end
+
+    test "merges into a nil/empty existing config" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "empty-cfg"})
+      assert ws.config == %{}
+
+      {:ok, updated} =
+        Ash.update(ws, %{patch: %{"tracker" => %{"type" => "none"}}}, action: :patch_config)
+
+      assert updated.config["tracker"]["type"] == "none"
+    end
+
+    test "unset_paths removes a dotted leaf without touching siblings" do
+      initial = %{
+        "tracker" => %{
+          "type" => "jira",
+          "config" => %{"host" => "h.example", "project_key" => "AX"}
+        }
+      }
+
+      {:ok, ws} = Ash.create(Workspace, %{name: "unset-leaf", config: initial})
+
+      {:ok, updated} =
+        Ash.update(ws, %{unset_paths: ["tracker.config.host"]}, action: :patch_config)
+
+      refute Map.has_key?(updated.config["tracker"]["config"], "host")
+      assert updated.config["tracker"]["config"]["project_key"] == "AX"
+      assert updated.config["tracker"]["type"] == "jira"
+    end
+
+    test "unset of an absent path is a no-op" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "unset-absent", config: %{"foo" => 1}})
+
+      {:ok, updated} =
+        Ash.update(ws, %{unset_paths: ["nonexistent.key"]}, action: :patch_config)
+
+      assert updated.config == %{"foo" => 1}
+    end
+
+    test "runs ValidateConfig on the merged result (rejects invalid tracker.type)" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "validates"})
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.update(ws, %{patch: %{"tracker" => %{"type" => "asana"}}},
+                 action: :patch_config
+               )
+
+      assert err |> Exception.message() |> String.contains?("tracker.type must be one of")
+    end
+
+    test "patch + unset can be combined in one call" do
+      initial = %{"skills" => %{"b" => 1, "c" => 2}, "d" => 3}
+      {:ok, ws} = Ash.create(Workspace, %{name: "combo", config: initial})
+
+      {:ok, updated} =
+        Ash.update(
+          ws,
+          %{patch: %{"skills" => %{"e" => 4}}, unset_paths: ["skills.b"]},
+          action: :patch_config
+        )
+
+      assert updated.config == %{"skills" => %{"c" => 2, "e" => 4}, "d" => 3}
+    end
+
+    test "lists replace (not append) — matches deep_merge contract" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{name: "list-replace", config: %{"standing_orders" => [1, 2, 3]}})
+
+      {:ok, updated} =
+        Ash.update(ws, %{patch: %{"standing_orders" => [9]}}, action: :patch_config)
+
+      assert updated.config["standing_orders"] == [9]
+    end
+  end
+
+  describe "valid_tracker_types/0" do
+    test "returns the canonical set" do
+      assert Workspace.valid_tracker_types() == ~w(none jira shortcut linear github gitlab)
+    end
+  end
+
+  # #1973
+  describe "tracker_child_policy/1" do
+    test "defaults to :context_only when unset" do
+      assert Workspace.tracker_child_policy(%Workspace{config: %{}}) == :context_only
+      assert Workspace.tracker_child_policy(nil) == :context_only
+    end
+
+    test "reads each accepted value as an atom" do
+      for {policy, atom} <- [
+            {"context_only", :context_only},
+            {"inherit_parent", :inherit_parent},
+            {"mint", :mint}
+          ] do
+        ws = %Workspace{config: %{"tracker" => %{"child_policy" => policy}}}
+        assert Workspace.tracker_child_policy(ws) == atom
+      end
+    end
+
+    test "config validation accepts each value and rejects anything else" do
+      for policy <- Workspace.valid_tracker_child_policies() do
+        config = %{"tracker" => %{"type" => "jira", "child_policy" => policy}}
+        assert {:ok, _} = Ash.create(Workspace, %{name: "cp-#{policy}", config: config})
+      end
+
+      config = %{"tracker" => %{"type" => "jira", "child_policy" => "mnit"}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "cp-typo", config: config})
+
+      assert err |> Exception.message() |> String.contains?("tracker.child_policy must be one of")
+    end
+  end
+
+  describe "valid_merger_strategies/0" do
+    test "includes direct, gitlab, and github" do
+      assert Workspace.valid_merger_strategies() == ~w(direct gitlab github)
+    end
+  end
+
+  describe "merger_strategy/1" do
+    test "reads config[merge][strategy] as an atom" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ms-direct",
+          config: %{"merge" => %{"strategy" => "direct"}}
+        })
+
+      assert Workspace.merger_strategy(ws) == :direct
+    end
+
+    test "resolves :github" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ms-github",
+          config: %{"merge" => %{"strategy" => "github"}}
+        })
+
+      assert Workspace.merger_strategy(ws) == :github
+    end
+
+    test "defaults to :direct when unset" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "ms-default"})
+      assert Workspace.merger_strategy(ws) == :direct
+    end
+  end
+
+  describe "auto_merge?/1" do
+    test "true when config[merge][auto_merge] is boolean true" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "am-true",
+          config: %{"merge" => %{"strategy" => "gitlab", "auto_merge" => true}}
+        })
+
+      assert Workspace.auto_merge?(ws) == true
+    end
+
+    test "true when stored as the string \"true\" (JSON round-trip)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "am-str",
+          config: %{"merge" => %{"auto_merge" => "true"}}
+        })
+
+      assert Workspace.auto_merge?(ws) == true
+    end
+
+    test "defaults to false when unset or falsey" do
+      {:ok, unset} = Ash.create(Workspace, %{name: "am-unset"})
+      assert Workspace.auto_merge?(unset) == false
+
+      {:ok, off} =
+        Ash.create(Workspace, %{
+          name: "am-off",
+          config: %{"merge" => %{"auto_merge" => false}}
+        })
+
+      assert Workspace.auto_merge?(off) == false
+    end
+  end
+
+  describe "watchdog_max_polls/1" do
+    test "returns integer when set as integer" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "wmp-int",
+          config: %{"merge" => %{"watchdog_max_polls" => 1440}}
+        })
+
+      assert Workspace.watchdog_max_polls(ws) == 1440
+    end
+
+    test "returns integer when set as string (JSON round-trip)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "wmp-str",
+          config: %{"merge" => %{"watchdog_max_polls" => "720"}}
+        })
+
+      assert Workspace.watchdog_max_polls(ws) == 720
+    end
+
+    test "returns :infinity when set to the string \"infinity\"" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "wmp-inf",
+          config: %{"merge" => %{"watchdog_max_polls" => "infinity"}}
+        })
+
+      assert Workspace.watchdog_max_polls(ws) == :infinity
+    end
+
+    test "returns nil when unset" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "wmp-unset"})
+      assert Workspace.watchdog_max_polls(ws) == nil
+    end
+
+    test "validate_config rejects invalid watchdog_max_polls" do
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "wmp-bad",
+                 config: %{"merge" => %{"watchdog_max_polls" => -5}}
+               })
+
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "wmp-bad2",
+                 config: %{"merge" => %{"watchdog_max_polls" => "not-a-number"}}
+               })
+    end
+  end
+
+  describe "review_gate_max_rounds/1" do
+    test "returns integer when set as integer" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tmr-int",
+          config: %{"review_gate" => %{"max_rounds" => 3}}
+        })
+
+      assert Workspace.review_gate_max_rounds(ws) == 3
+    end
+
+    test "returns integer when set as string (JSON round-trip)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tmr-str",
+          config: %{"review_gate" => %{"max_rounds" => "2"}}
+        })
+
+      assert Workspace.review_gate_max_rounds(ws) == 2
+    end
+
+    test "returns nil when unset" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "tmr-unset"})
+      assert Workspace.review_gate_max_rounds(ws) == nil
+    end
+
+    test "validate_config rejects non-positive max_rounds" do
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "tmr-bad",
+                 config: %{"review_gate" => %{"max_rounds" => 0}}
+               })
+
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "tmr-bad2",
+                 config: %{"review_gate" => %{"max_rounds" => "not-a-number"}}
+               })
+    end
+
+    test "validate_config rejects review_gate as a non-map" do
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "tmr-bad3",
+                 config: %{"review_gate" => "invalid"}
+               })
+    end
+  end
+
+  describe "review_gate_timeout_ms/1" do
+    test "returns integer when set as integer" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tmt-int",
+          config: %{"review_gate" => %{"timeout_ms" => 1_800_000}}
+        })
+
+      assert Workspace.review_gate_timeout_ms(ws) == 1_800_000
+    end
+
+    test "returns integer when set as string (JSON round-trip)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tmt-str",
+          config: %{"review_gate" => %{"timeout_ms" => "900000"}}
+        })
+
+      assert Workspace.review_gate_timeout_ms(ws) == 900_000
+    end
+
+    test "returns nil when unset" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "tmt-unset"})
+      assert Workspace.review_gate_timeout_ms(ws) == nil
+    end
+
+    test "validate_config rejects non-positive / malformed timeout_ms" do
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "tmt-bad",
+                 config: %{"review_gate" => %{"timeout_ms" => 0}}
+               })
+
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "tmt-bad2",
+                 config: %{"review_gate" => %{"timeout_ms" => "soon"}}
+               })
+    end
+  end
+
+  # DC9 (docs/design/provider-dynamic-concurrency.md §5.2)
+  describe "worker.repos.<repo>.max_concurrent validation (bd-7oy77e)" do
+    test "accepts a positive integer, and leaves it unset by default" do
+      assert {:ok, ws} =
+               Ash.create(Workspace, %{
+                 name: "rc-ok-#{System.unique_integer([:positive])}",
+                 config: %{"worker" => %{"repos" => %{"vstim" => %{"max_concurrent" => 2}}}}
+               })
+
+      assert get_in(ws.config, ["worker", "repos", "vstim", "max_concurrent"]) == 2
+
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "rc-ok-unset-#{System.unique_integer([:positive])}",
+                 config: %{"worker" => %{"repos" => %{"vstim" => %{"seed_paths" => []}}}}
+               })
+    end
+
+    test "rejects zero, negatives, floats, strings and booleans, naming the key" do
+      for bad <- [0, -1, 1.5, "2", true] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "rc-bad-#{System.unique_integer([:positive])}",
+                   config: %{"worker" => %{"repos" => %{"vstim" => %{"max_concurrent" => bad}}}}
+                 })
+
+        assert Exception.message(err) =~
+                 "worker.repos.vstim.max_concurrent must be a positive integer"
+      end
+    end
+  end
+
+  # #1126
+  describe "worker.repos.<repo>.ci_backpressure validation (#1126)" do
+    defp bp_ws(block) do
+      Ash.create(Workspace, %{
+        name: "bp-#{System.unique_integer([:positive])}",
+        config: %{"worker" => %{"repos" => %{"vstim" => %{"ci_backpressure" => block}}}}
+      })
+    end
+
+    test "accepts either threshold or both" do
+      assert {:ok, _} = bp_ws(%{"max_pending" => 4})
+      assert {:ok, _} = bp_ws(%{"max_oldest_pending_min" => 90})
+      assert {:ok, ws} = bp_ws(%{"max_pending" => 4, "max_oldest_pending_min" => 90})
+
+      assert get_in(ws.config, ["worker", "repos", "vstim", "ci_backpressure", "max_pending"]) ==
+               4
+    end
+
+    test "rejects a non-positive or non-integer threshold, naming the key" do
+      for bad <- [0, -1, 1.5, "4", true] do
+        assert {:error, %Ash.Error.Invalid{} = err} = bp_ws(%{"max_pending" => bad})
+
+        assert Exception.message(err) =~
+                 "worker.repos.vstim.ci_backpressure.max_pending must be a positive integer"
+
+        assert {:error, %Ash.Error.Invalid{} = err} = bp_ws(%{"max_oldest_pending_min" => bad})
+
+        assert Exception.message(err) =~
+                 "worker.repos.vstim.ci_backpressure.max_oldest_pending_min must be a positive integer"
+      end
+    end
+
+    test "rejects an unknown key and a non-map block" do
+      assert {:error, err} = bp_ws(%{"max_pendng" => 4})
+      assert Exception.message(err) =~ "worker.repos.vstim.ci_backpressure has unknown key"
+
+      assert {:error, err} = bp_ws("on")
+      assert Exception.message(err) =~ "worker.repos.vstim.ci_backpressure must be a map"
+    end
+  end
+
+  # KH11 (bd-cexq4j, docs/design/remote-workers.md §20.9)
+  describe "worker.repos.<repo>.image validation (bd-cexq4j)" do
+    defp image_ws(image, level \\ :repo) do
+      worker =
+        case level do
+          :repo -> %{"repos" => %{"vstim" => %{"image" => image}}}
+          :workspace -> %{"image" => image}
+        end
+
+      Ash.create(Workspace, %{
+        name: "img-#{System.unique_integer([:positive])}",
+        config: %{"worker" => worker}
+      })
+    end
+
+    test "accepts source/ref/registry/credentials_ref/seed per repo, the rest workspace-wide" do
+      image = %{
+        "source" => "prebuilt",
+        "ref" => "registry.gitlab.com/vstim/app/arbiter-worker:main",
+        "registry" => "registry.gitlab.com/vstim/app/arbiter",
+        "credentials_ref" => "secret:GITLAB_REGISTRY",
+        "seed" => "image"
+      }
+
+      assert {:ok, ws} = image_ws(image)
+      assert get_in(ws.config, ["worker", "repos", "vstim", "image"]) == image
+
+      assert {:ok, _} = image_ws(Map.drop(image, ["source", "ref"]), :workspace)
+
+      assert {:ok, _} =
+               image_ws(%{
+                 "source" => "containerfile",
+                 "registry" => "ghcr.io/ryan/arbiter-worker"
+               })
+
+      assert {:ok, _} = image_ws(%{})
+    end
+
+    test "rejects an unknown source, seed, key or a non-map, naming the key" do
+      for {bad, message} <- [
+            {%{"source" => "dockerfile"}, "worker.repos.vstim.image.source must be one of"},
+            {%{"seed" => "cache"}, "worker.repos.vstim.image.seed must be one of"},
+            {%{"nope" => 1}, "worker.repos.vstim.image has unknown key nope"},
+            {"x", "worker.repos.vstim.image must be a map"}
+          ] do
+        assert {:error, %Ash.Error.Invalid{} = err} = image_ws(bad)
+        assert Exception.message(err) =~ message
+      end
+
+      assert {:error, %Ash.Error.Invalid{} = err} = image_ws(%{"source" => "x"}, :workspace)
+      assert Exception.message(err) =~ "worker.image.source must be one of"
+    end
+
+    test "registry must be a host[:port][/path] with no scheme or credentials" do
+      for bad <- ["https://ghcr.io/x", "user:pw@ghcr.io", "has space", "", 3] do
+        assert {:error, %Ash.Error.Invalid{} = err} = image_ws(%{"registry" => bad})
+        assert Exception.message(err) =~ "worker.repos.vstim.image.registry must be a registry"
+      end
+    end
+
+    test "credentials_ref must be a secret: reference" do
+      for bad <- ["env:TOKEN", "literal-token", "secret:", 3] do
+        assert {:error, %Ash.Error.Invalid{} = err} = image_ws(%{"credentials_ref" => bad})
+
+        assert Exception.message(err) =~
+                 ~s(worker.repos.vstim.image.credentials_ref must be "secret:<key>")
+      end
+    end
+
+    # SI4 (docs/design/remote-workers.md §21.4): the read credential a machine node is
+    # handed for one pull, next to the push credential and never the same secret.
+    test "pull_credentials_ref is a secret: reference, per repo or workspace-wide" do
+      assert {:ok, ws} = image_ws(%{"pull_credentials_ref" => "secret:VSTIM_PULL"})
+
+      assert get_in(ws.config, ["worker", "repos", "vstim", "image", "pull_credentials_ref"]) ==
+               "secret:VSTIM_PULL"
+
+      assert {:ok, _} = image_ws(%{"pull_credentials_ref" => "secret:WS_PULL"}, :workspace)
+
+      for bad <- ["env:TOKEN", "literal-token", "secret:", "secret:a b", 3] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 image_ws(%{"pull_credentials_ref" => bad})
+
+        assert Exception.message(err) =~
+                 ~s(worker.repos.vstim.image.pull_credentials_ref must be "secret:<key>")
+      end
+    end
+
+    test "pull_credentials_ref may not name the push credential's secret" do
+      for level <- [:repo, :workspace] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 image_ws(
+                   %{
+                     "credentials_ref" => "secret:REGISTRY",
+                     "pull_credentials_ref" => "secret:REGISTRY"
+                   },
+                   level
+                 )
+
+        assert Exception.message(err) =~ "pull_credentials_ref must name a different secret"
+      end
+
+      assert {:ok, _} =
+               image_ws(%{
+                 "credentials_ref" => "secret:REGISTRY_PUSH",
+                 "pull_credentials_ref" => "secret:REGISTRY_PULL"
+               })
+    end
+
+    test "public_ok is a boolean" do
+      assert {:ok, _} = image_ws(%{"public_ok" => true})
+
+      for bad <- ["yes", 1, nil] do
+        assert {:error, %Ash.Error.Invalid{} = err} = image_ws(%{"public_ok" => bad})
+
+        assert Exception.message(err) =~
+                 "worker.repos.vstim.image.public_ok must be true or false"
+      end
+    end
+
+    test "ref is per repo, required for prebuilt and refused for any other source" do
+      assert {:error, %Ash.Error.Invalid{} = err} = image_ws(%{"source" => "prebuilt"})
+      assert Exception.message(err) =~ "worker.repos.vstim.image.ref is required"
+
+      for source <- ["auto", "containerfile", "generated"] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 image_ws(%{"source" => source, "ref" => "ghcr.io/x/y:main"})
+
+        assert Exception.message(err) =~ "worker.repos.vstim.image.ref is only for source"
+      end
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               image_ws(%{"source" => "prebuilt", "ref" => "has space"})
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               image_ws(%{"source" => "prebuilt", "ref" => "ghcr.io/x/y:main"}, :workspace)
+
+      assert Exception.message(err) =~ "worker.image.ref is per repo"
+    end
+  end
+
+  describe "worker.seed_paths validation (bd-2jerqw)" do
+    test "accepts a list of strings workspace-wide and per repo" do
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "sp-ok-#{System.unique_integer([:positive])}",
+                 config: %{
+                   "worker" => %{
+                     "seed_paths" => ["deps"],
+                     "repos" => %{"arbiter" => %{"seed_paths" => ["deps", "priv/plts"]}}
+                   }
+                 }
+               })
+
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "sp-ok-empty-#{System.unique_integer([:positive])}",
+                 config: %{"worker" => %{"seed_paths" => []}}
+               })
+    end
+
+    test "worker.placement_nodes accepts a list of selector strings, rejects anything else" do
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "pn-ok-#{System.unique_integer([:positive])}",
+                 config: %{"worker" => %{"placement_nodes" => ["kind:machine", "name:mesaana"]}}
+               })
+
+      for bad <- ["mesaana", [1], [""], %{"a" => 1}, ["kind:gpu"]] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "pn-bad-#{System.unique_integer([:positive])}",
+                   config: %{"worker" => %{"placement_nodes" => bad}}
+                 })
+
+        assert Exception.message(err) =~ "worker.placement_nodes"
+      end
+    end
+
+    test "rejects anything else, naming the key" do
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "sp-bad1",
+                 config: %{"worker" => %{"seed_paths" => "deps"}}
+               })
+
+      assert Exception.message(err) =~ "worker.seed_paths must be a list of strings"
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "sp-bad2",
+                 config: %{
+                   "worker" => %{"repos" => %{"arbiter" => %{"seed_paths" => ["deps", 1]}}}
+                 }
+               })
+
+      assert Exception.message(err) =~ "worker.repos.arbiter.seed_paths must be a list of strings"
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Ash.create(Workspace, %{name: "sp-bad3", config: %{"worker" => "x"}})
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Ash.create(Workspace, %{
+                 name: "sp-bad4",
+                 config: %{"worker" => %{"repos" => %{"arbiter" => "x"}}}
+               })
+    end
+  end
+
+  describe "worker.prepush_check validation (bd-28c6qo)" do
+    test "accepts a command, timeout and on_timeout workspace-wide and per repo" do
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "pp-ok-#{System.unique_integer([:positive])}",
+                 config: %{
+                   "worker" => %{
+                     "prepush_check" => "make lint",
+                     "prepush_check_timeout_seconds" => 600,
+                     "repos" => %{
+                       "arbiter" => %{
+                         "prepush_check" => "mix precommit && mix audit",
+                         "prepush_check_timeout_seconds" => 1800,
+                         "prepush_check_on_timeout" => "fail"
+                       }
+                     }
+                   }
+                 }
+               })
+    end
+
+    # RW8 (bd-3igo6h): `worker.placement`, the node placement mode.
+    test "accepts worker.placement local_only, prefer_remote and remote_only" do
+      for mode <- ~w(local_only prefer_remote remote_only) do
+        assert {:ok, _} =
+                 Ash.create(Workspace, %{
+                   name: "pl-ok-#{System.unique_integer([:positive])}",
+                   config: %{"worker" => %{"placement" => mode}}
+                 })
+      end
+    end
+
+    test "rejects any other worker.placement value, naming the key" do
+      for bad <- ["everywhere", "remote", 3, nil, ["local_only"]] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "pl-bad-#{System.unique_integer([:positive])}",
+                   config: %{"worker" => %{"placement" => bad}}
+                 })
+
+        assert Exception.message(err) =~
+                 ~s(worker.placement must be "local_only", "prefer_remote" or "remote_only")
+      end
+    end
+
+    test "rejects anything else, naming the key" do
+      for {label, block} <- [
+            {"worker.prepush_check must be a non-empty string", %{"prepush_check" => ["x"]}},
+            {"worker.prepush_check must be a non-empty string", %{"prepush_check" => " "}},
+            {"worker.prepush_check_timeout_seconds must be a positive integer",
+             %{"prepush_check_timeout_seconds" => 0}},
+            {"worker.prepush_check_timeout_seconds must be a positive integer",
+             %{"prepush_check_timeout_seconds" => "600"}},
+            {~s(worker.prepush_check_on_timeout must be "proceed" or "fail"),
+             %{"prepush_check_on_timeout" => "explode"}}
+          ] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "pp-bad-#{System.unique_integer([:positive])}",
+                   config: %{"worker" => block}
+                 })
+
+        assert Exception.message(err) =~ label
+      end
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "pp-bad-repo",
+                 config: %{
+                   "worker" => %{"repos" => %{"arbiter" => %{"prepush_check" => 5}}}
+                 }
+               })
+
+      assert Exception.message(err) =~
+               "worker.repos.arbiter.prepush_check must be a non-empty string"
+    end
+  end
+
+  describe "worker.visual_baselines validation (bd-9obzu9)" do
+    @visual %{"job" => "visual", "baseline_dir" => "e2e/__snapshots__"}
+
+    test "accepts the block workspace-wide and per repo" do
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "vb-ok-#{System.unique_integer([:positive])}",
+                 config: %{
+                   "worker" => %{
+                     "visual_baselines" => @visual,
+                     "repos" => %{
+                       "tonic" => %{
+                         "visual_baselines" =>
+                           Map.merge(@visual, %{
+                             "ignore_paths" => ["docs/**"],
+                             "max_snapshots" => 9
+                           })
+                       }
+                     }
+                   }
+                 }
+               })
+    end
+
+    test "rejects a malformed block, naming the key" do
+      for {label, block} <- [
+            {"worker.visual_baselines.job", %{"baseline_dir" => "e2e"}},
+            {"worker.visual_baselines.baseline_dir", %{"job" => "visual"}},
+            {"worker.visual_baselines.baseline_dir", Map.put(@visual, "baseline_dir", "../x")},
+            {"worker.visual_baselines.max_snapshots", Map.put(@visual, "max_snapshots", 0)},
+            {"worker.visual_baselines must be a map", "visual"}
+          ] do
+        assert {:error, err} =
+                 Ash.create(Workspace, %{
+                   name: "vb-bad-#{System.unique_integer([:positive])}",
+                   config: %{"worker" => %{"visual_baselines" => block}}
+                 })
+
+        assert Exception.message(err) =~ label
+      end
+    end
+
+    test "the per-repo block is checked too" do
+      assert {:error, err} =
+               Ash.create(Workspace, %{
+                 name: "vb-bad-repo-#{System.unique_integer([:positive])}",
+                 config: %{
+                   "worker" => %{
+                     "repos" => %{"tonic" => %{"visual_baselines" => %{"job" => "visual"}}}
+                   }
+                 }
+               })
+
+      assert Exception.message(err) =~ "worker.repos.tonic.visual_baselines.baseline_dir"
+    end
+  end
+
+  describe "worker.pre_push_checks validation (bd-8wdrql)" do
+    test "accepts the preset, a step list, budget and attempts — workspace-wide and per repo" do
+      step = %{"name" => "fmt", "cmd" => "mix format --check-formatted", "timeout_s" => 60}
+
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "ppc-ok-#{System.unique_integer([:positive])}",
+                 config: %{
+                   "worker" => %{
+                     "pre_push_checks" => [Map.put(step, "scope", "touched")],
+                     "pre_push_budget_seconds" => 120,
+                     "pre_push_max_attempts" => 3,
+                     "repos" => %{
+                       "arbiter" => %{"pre_push_checks" => "arbiter"},
+                       "other" => %{"pre_push_checks" => [step]}
+                     }
+                   }
+                 }
+               })
+    end
+
+    test "rejects malformed recipes, naming the key" do
+      for {label, block} <- [
+            {~s(worker.pre_push_checks must be "arbiter" or a list of steps),
+             %{"pre_push_checks" => "mix test"}},
+            {~s(worker.pre_push_checks must be "arbiter" or a list of steps),
+             %{"pre_push_checks" => %{"cmd" => "true"}}},
+            {"worker.pre_push_checks[0] must be a map with a non-empty cmd",
+             %{"pre_push_checks" => ["true"]}},
+            {"worker.pre_push_checks[1] must be a map with a non-empty cmd",
+             %{"pre_push_checks" => [%{"cmd" => "true"}, %{"cmd" => " "}]}},
+            {"worker.pre_push_checks[0].timeout_s must be a positive integer",
+             %{"pre_push_checks" => [%{"cmd" => "true", "timeout_s" => 0}]}},
+            {~s(worker.pre_push_checks[0].scope must be "all" or "touched"),
+             %{"pre_push_checks" => [%{"cmd" => "true", "scope" => "some"}]}},
+            {"worker.pre_push_budget_seconds must be a positive integer",
+             %{"pre_push_budget_seconds" => 0}},
+            {"worker.pre_push_max_attempts must be a non-negative integer",
+             %{"pre_push_max_attempts" => -1}}
+          ] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "ppc-bad-#{System.unique_integer([:positive])}",
+                   config: %{"worker" => block}
+                 })
+
+        assert Exception.message(err) =~ label
+      end
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "ppc-bad-repo",
+                 config: %{"worker" => %{"repos" => %{"arbiter" => %{"pre_push_checks" => 5}}}}
+               })
+
+      assert Exception.message(err) =~
+               ~s(worker.repos.arbiter.pre_push_checks must be "arbiter" or a list of steps)
+    end
+  end
+
+  describe "review.defer_post_merge_criteria validation (bd-49r9ns)" do
+    test "accepts booleans workspace-wide and per repo, rejects anything else" do
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "dpm-ok-#{System.unique_integer([:positive])}",
+                 config: %{
+                   "review" => %{
+                     "defer_post_merge_criteria" => false,
+                     "repos" => %{"mesaana" => %{"defer_post_merge_criteria" => true}}
+                   }
+                 }
+               })
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "dpm-bad1",
+                 config: %{"review" => %{"defer_post_merge_criteria" => "yes"}}
+               })
+
+      assert Exception.message(err) =~ "review.defer_post_merge_criteria must be true or false"
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "dpm-bad2",
+                 config: %{
+                   "review" => %{"repos" => %{"mesaana" => %{"defer_post_merge_criteria" => 1}}}
+                 }
+               })
+
+      assert Exception.message(err) =~ "review.repos.mesaana.defer_post_merge_criteria"
+    end
+  end
+
+  describe "review.require_ci_green validation (bd-cut6uv)" do
+    test "accepts booleans and their JSON strings, workspace-wide and per repo" do
+      for value <- [true, false, "true", "false"] do
+        assert {:ok, _} =
+                 Ash.create(Workspace, %{
+                   name: "rcg-ok-#{System.unique_integer([:positive])}",
+                   config: %{
+                     "review" => %{
+                       "require_ci_green" => value,
+                       "repos" => %{"mesaana" => %{"require_ci_green" => value}}
+                     }
+                   }
+                 })
+      end
+    end
+
+    test "rejects anything else, naming the key" do
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "rcg-bad1",
+                 config: %{"review" => %{"require_ci_green" => "yes"}}
+               })
+
+      assert Exception.message(err) =~ "review.require_ci_green must be true or false"
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "rcg-bad2",
+                 config: %{"review" => %{"repos" => %{"mesaana" => %{"require_ci_green" => 1}}}}
+               })
+
+      assert Exception.message(err) =~ "review.repos.mesaana.require_ci_green"
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Ash.create(Workspace, %{
+                 name: "rcg-bad3",
+                 config: %{"review" => %{"repos" => "mesaana"}}
+               })
+    end
+  end
+
+  describe "review pre-review sync thresholds validation (bd-8slhrb)" do
+    test "accepts non-negative integers, workspace-wide and per repo" do
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "rsync-ok",
+                 config: %{
+                   "review" => %{
+                     "max_commits_behind" => 50,
+                     "max_hours_behind" => "24",
+                     "repos" => %{"mesaana" => %{"max_commits_behind" => 0}}
+                   }
+                 }
+               })
+    end
+
+    test "rejects a negative or non-numeric value, naming the key" do
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "rsync-bad1",
+                 config: %{"review" => %{"max_commits_behind" => -1}}
+               })
+
+      assert Exception.message(err) =~ "review.max_commits_behind"
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "rsync-bad2",
+                 config: %{"review" => %{"repos" => %{"mesaana" => %{"max_hours_behind" => "x"}}}}
+               })
+
+      assert Exception.message(err) =~ "review.repos.mesaana.max_hours_behind"
+    end
+  end
+
+  describe "agent.security.sandbox egress validation (bd-5yydxh)" do
+    defp security_config(sandbox, repo_sandbox \\ nil) do
+      security = %{"sandbox" => sandbox}
+
+      security =
+        if repo_sandbox,
+          do: Map.put(security, "repos", %{"tonic" => %{"sandbox" => repo_sandbox}}),
+          else: security
+
+      %{"agent" => %{"security" => security}}
+    end
+
+    test "accepts each egress level and well-formed allow_hosts, workspace-wide and per repo" do
+      for level <- ["open", "allowlist", "none"] do
+        assert {:ok, _} =
+                 Ash.create(Workspace, %{
+                   name: "eg-ok-#{System.unique_integer([:positive])}",
+                   config:
+                     security_config(
+                       %{"egress" => level, "allow_hosts" => ["repo.hex.pm:443", "*.hex.pm:443"]},
+                       %{"egress" => level, "allow_hosts" => ["db.internal:5432"]}
+                     )
+                 })
+      end
+    end
+
+    test "rejects an unknown egress level, naming the key and the valid levels" do
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "eg-bad1",
+                 config: security_config(%{"egress" => "alowlist"})
+               })
+
+      message = Exception.message(err)
+      assert message =~ "agent.security.sandbox.egress must be one of"
+      assert message =~ "open, allowlist, none"
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "eg-bad2",
+                 config: security_config(%{}, %{"egress" => 3})
+               })
+
+      assert Exception.message(err) =~ "agent.security.repos.tonic.sandbox.egress"
+    end
+
+    test "accepts each sandbox.backend, workspace-wide and per repo" do
+      for backend <- ["bwrap", "podman"] do
+        assert {:ok, _} =
+                 Ash.create(Workspace, %{
+                   name: "be-ok-#{System.unique_integer([:positive])}",
+                   config: security_config(%{"backend" => backend}, %{"backend" => backend})
+                 })
+      end
+    end
+
+    test "rejects an unknown sandbox.backend, naming the key and the valid backends" do
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "be-bad1",
+                 config: security_config(%{"backend" => "docker"})
+               })
+
+      message = Exception.message(err)
+      assert message =~ "agent.security.sandbox.backend must be one of"
+      assert message =~ "bwrap, podman"
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "be-bad2",
+                 config: security_config(%{}, %{"backend" => 3})
+               })
+
+      assert Exception.message(err) =~ "agent.security.repos.tonic.sandbox.backend"
+    end
+
+    test "accepts each sandbox.review_backend, workspace-wide and per repo" do
+      for backend <- ["bwrap", "podman"] do
+        assert {:ok, _} =
+                 Ash.create(Workspace, %{
+                   name: "rbe-ok-#{System.unique_integer([:positive])}",
+                   config:
+                     security_config(%{"review_backend" => backend}, %{
+                       "review_backend" => backend
+                     })
+                 })
+      end
+    end
+
+    test "rejects an unknown sandbox.review_backend, naming the key and the valid backends" do
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "rbe-bad1",
+                 config: security_config(%{"review_backend" => "docker"})
+               })
+
+      message = Exception.message(err)
+      assert message =~ "agent.security.sandbox.review_backend must be one of"
+      assert message =~ "bwrap, podman"
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "rbe-bad2",
+                 config: security_config(%{}, %{"review_backend" => 3})
+               })
+
+      assert Exception.message(err) =~ "agent.security.repos.tonic.sandbox.review_backend"
+    end
+
+    test "rejects malformed allow_hosts, naming the offending entry" do
+      for bad <- [["no-port"], ["bad host:443"], ["*:443"], [7], "repo.hex.pm:443"] do
+        assert {:error, %Ash.Error.Invalid{} = err} =
+                 Ash.create(Workspace, %{
+                   name: "eg-bad-hosts",
+                   config: security_config(%{"allow_hosts" => bad})
+                 })
+
+        assert Exception.message(err) =~ "agent.security.sandbox.allow_hosts"
+      end
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "eg-bad-repo-hosts",
+                 config: security_config(%{}, %{"allow_hosts" => ["no-port"]})
+               })
+
+      assert Exception.message(err) =~ "agent.security.repos.tonic.sandbox.allow_hosts"
+    end
+
+    test "an update that sets a bad level is refused" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "eg-upd",
+          config: security_config(%{"egress" => "allowlist"})
+        })
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Ash.update(ws, %{config: security_config(%{"egress" => "everything"})})
+    end
+  end
+
+  describe "review_gate_max_fix_rounds/1 (bd-a9zb7w)" do
+    test "returns integer when set as integer" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tmfr-int",
+          config: %{"review_gate" => %{"max_fix_rounds" => 3}}
+        })
+
+      assert Workspace.review_gate_max_fix_rounds(ws) == 3
+    end
+
+    test "returns integer when set as string (JSON round-trip)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tmfr-str",
+          config: %{"review_gate" => %{"max_fix_rounds" => "2"}}
+        })
+
+      assert Workspace.review_gate_max_fix_rounds(ws) == 2
+    end
+
+    # 0 is the documented off switch, not a malformed value — it must survive
+    # both validation and the reader, or an operator cannot turn the auto fix
+    # round off.
+    test "accepts and returns 0" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tmfr-zero",
+          config: %{"review_gate" => %{"max_fix_rounds" => 0}}
+        })
+
+      assert Workspace.review_gate_max_fix_rounds(ws) == 0
+    end
+
+    test "returns nil when unset (the built-in default applies)" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "tmfr-unset"})
+      assert Workspace.review_gate_max_fix_rounds(ws) == nil
+    end
+
+    test "validate_config rejects negative / malformed max_fix_rounds" do
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "tmfr-bad",
+                 config: %{"review_gate" => %{"max_fix_rounds" => -1}}
+               })
+
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "tmfr-bad2",
+                 config: %{"review_gate" => %{"max_fix_rounds" => "lots"}}
+               })
+    end
+  end
+
+  describe "notes_gate_nudge_cap/1 (bd-4qjl0q)" do
+    test "defaults to 2 when unset or for no workspace" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "ngnc-unset"})
+      assert Workspace.notes_gate_nudge_cap(ws) == 2
+      assert Workspace.notes_gate_nudge_cap(nil) == 2
+    end
+
+    test "reads an integer, its JSON string form, and 0" do
+      for {value, expected} <- [{3, 3}, {"1", 1}, {0, 0}] do
+        {:ok, ws} =
+          Ash.create(Workspace, %{
+            name: "ngnc-#{System.unique_integer([:positive])}",
+            config: %{"notes_gate" => %{"nudge_cap" => value}}
+          })
+
+        assert Workspace.notes_gate_nudge_cap(ws) == expected
+      end
+    end
+
+    test "validate_config rejects a negative / malformed nudge_cap or a non-map block" do
+      for config <- [
+            %{"notes_gate" => %{"nudge_cap" => -1}},
+            %{"notes_gate" => %{"nudge_cap" => "lots"}},
+            %{"notes_gate" => 2}
+          ] do
+        assert {:error, _} =
+                 Ash.create(Workspace, %{
+                   name: "ngnc-bad-#{System.unique_integer([:positive])}",
+                   config: config
+                 })
+      end
+    end
+  end
+
+  describe "review_automation config validation" do
+    test "accepts a valid review_automation block with default and auto_authors" do
+      config = %{
+        "review_automation" => %{
+          "default" => "flag",
+          "auto_authors" => ["alice", "bob"]
+        }
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "ra-valid1", config: config})
+      assert ws.config["review_automation"]["default"] == "flag"
+    end
+
+    test "accepts review_automation with default auto" do
+      config = %{"review_automation" => %{"default" => "auto"}}
+      assert {:ok, _ws} = Ash.create(Workspace, %{name: "ra-valid2", config: config})
+    end
+
+    test "accepts review_automation with empty auto_authors list" do
+      config = %{"review_automation" => %{"default" => "flag", "auto_authors" => []}}
+      assert {:ok, _ws} = Ash.create(Workspace, %{name: "ra-valid3", config: config})
+    end
+
+    test "rejects review_automation.default with invalid value" do
+      config = %{"review_automation" => %{"default" => "always"}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "ra-bad1", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("review_automation.default must be one of")
+    end
+
+    test "rejects review_automation.auto_authors when not a list" do
+      config = %{"review_automation" => %{"auto_authors" => "alice"}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "ra-bad2", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("review_automation.auto_authors must be a list")
+    end
+
+    test "rejects review_automation.auto_authors containing non-strings" do
+      config = %{"review_automation" => %{"auto_authors" => ["alice", 42]}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "ra-bad3", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("review_automation.auto_authors must be a list")
+    end
+
+    test "rejects review_automation when it is not a map" do
+      config = %{"review_automation" => "auto"}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "ra-bad4", config: config})
+      assert err |> Exception.message() |> String.contains?("review_automation must be a map")
+    end
+
+    test "accepts review_patrol.repos.<repo>.doc_paths_are_code as a boolean or glob list (bd-6zlfq6)" do
+      for {value, n} <- Enum.with_index([true, false, ["openspec/**", "docs/*.md"]]) do
+        config = %{
+          "review_patrol" => %{
+            "our_login" => "bot",
+            "repos" => %{"verus-specs" => %{"doc_paths_are_code" => value}}
+          }
+        }
+
+        assert {:ok, ws} = Ash.create(Workspace, %{name: "rp-dpc-ok#{n}", config: config})
+        assert ws.config["review_patrol"]["repos"]["verus-specs"]["doc_paths_are_code"] == value
+      end
+    end
+
+    test "rejects invalid review_patrol.repos config (bd-6zlfq6)" do
+      bad = [
+        {%{"repos" => %{"r" => %{"doc_paths_are_code" => "yes"}}}, "doc_paths_are_code must be"},
+        {%{"repos" => %{"r" => %{"doc_paths_are_code" => []}}}, "doc_paths_are_code must be"},
+        {%{"repos" => %{"r" => %{"doc_paths_are_code" => [1]}}}, "doc_paths_are_code must be"},
+        {%{"repos" => %{"r" => "true"}}, "review_patrol.repos.r must be a map"},
+        {%{"repos" => ["r"]}, "review_patrol.repos must be a map"}
+      ]
+
+      for {{block, expected}, n} <- Enum.with_index(bad) do
+        assert {:error, err} =
+                 Ash.create(Workspace, %{
+                   name: "rp-dpc-bad#{n}",
+                   config: %{"review_patrol" => block}
+                 })
+
+        assert err |> Exception.message() |> String.contains?(expected)
+      end
+    end
+
+    test "rejects review_patrol when it is not a map (bd-6zlfq6)" do
+      assert {:error, err} =
+               Ash.create(Workspace, %{name: "rp-dpc-bad-top", config: %{"review_patrol" => "x"}})
+
+      assert err |> Exception.message() |> String.contains?("review_patrol must be a map")
+    end
+
+    test "accepts review_automation.repo_overrides with valid values" do
+      config = %{
+        "review_automation" => %{
+          "default" => "flag",
+          "auto_authors" => ["alice"],
+          "repo_overrides" => %{"atlas" => "flag", "fast_lane" => "auto"}
+        }
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "ra-or-valid1", config: config})
+      assert ws.config["review_automation"]["repo_overrides"]["atlas"] == "flag"
+    end
+
+    test "accepts empty review_automation.repo_overrides map" do
+      config = %{"review_automation" => %{"repo_overrides" => %{}}}
+      assert {:ok, _ws} = Ash.create(Workspace, %{name: "ra-or-valid2", config: config})
+    end
+
+    test "accepts report_only / propose modes for default and repo_overrides (bd-36qzgx)" do
+      config = %{
+        "review_automation" => %{
+          "default" => "report_only",
+          "repo_overrides" => %{
+            "atlas" => "report_only",
+            "apex-infrastructure" => "propose",
+            "fast_lane" => "auto"
+          }
+        }
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "ra-or-report-only", config: config})
+      assert ws.config["review_automation"]["default"] == "report_only"
+      assert ws.config["review_automation"]["repo_overrides"]["atlas"] == "report_only"
+    end
+
+    test "rejects review_automation.repo_overrides with invalid mode value" do
+      config = %{"review_automation" => %{"repo_overrides" => %{"atlas" => "always"}}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "ra-or-bad1", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("review_automation.repo_overrides values must each be")
+    end
+
+    test "rejects review_automation.repo_overrides when not a map" do
+      config = %{"review_automation" => %{"repo_overrides" => ["atlas"]}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "ra-or-bad2", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("review_automation.repo_overrides must be a map")
+    end
+  end
+
+  # bd-cuu8n3: the loop analyser's CI section reads `loop.ci`.
+  describe "config validation: loop.ci" do
+    test "accepts a threshold, a sample floor and check commands" do
+      config = %{
+        "loop" => %{
+          "ci" => %{
+            "lint_share_threshold" => 0.4,
+            "min_fix_passes" => 5,
+            "check_commands" => %{"arbiter" => "mix precommit && mix audit"},
+            "flake_recurrence_threshold" => 4
+          }
+        }
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "loop-ci-1", config: config})
+
+      assert Wardmast.Loop.ci_config(ws) == %{
+               lint_share_threshold: 0.4,
+               min_fix_passes: 5,
+               check_commands: %{"arbiter" => "mix precommit && mix audit"},
+               flake_recurrence_threshold: 4
+             }
+    end
+
+    test "rejects a threshold outside (0, 1]" do
+      config = %{"loop" => %{"ci" => %{"lint_share_threshold" => 1.5}}}
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-ci-2", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("loop.ci.lint_share_threshold must be a number in (0, 1]")
+    end
+
+    test "rejects a non-positive sample floor" do
+      config = %{"loop" => %{"ci" => %{"min_fix_passes" => 0}}}
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-ci-3", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("loop.ci.min_fix_passes must be a positive integer")
+    end
+
+    test "rejects check_commands that are not a repo => string map" do
+      config = %{"loop" => %{"ci" => %{"check_commands" => %{"arbiter" => 1}}}}
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-ci-4", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("loop.ci.check_commands must map repo names to command strings")
+    end
+
+    test "rejects loop.ci when it is not a map" do
+      config = %{"loop" => %{"ci" => true}}
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-ci-5", config: config})
+      assert err |> Exception.message() |> String.contains?("loop.ci must be a map")
+    end
+
+    test "rejects a non-positive flake recurrence threshold (bd-6vullc)" do
+      config = %{"loop" => %{"ci" => %{"flake_recurrence_threshold" => 0}}}
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-ci-6", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("loop.ci.flake_recurrence_threshold must be a positive integer")
+    end
+  end
+
+  # bd-9j2g3x: the loop-engineering evidence bar is workspace-configurable, with
+  # the documented 3-incidents / 2-distinct-tasks bar as the default.
+  describe "config validation: loop.evidence_bar" do
+    test "accepts an override of either threshold" do
+      config = %{"loop" => %{"evidence_bar" => %{"min_incidents" => 4}}}
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "loop-bar-1", config: config})
+      assert Wardmast.Loop.evidence_bar(ws) == %{min_incidents: 4, min_distinct_tasks: 2}
+    end
+
+    test "falls back to the documented bar when the key is absent" do
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "loop-bar-2", config: %{}})
+      assert Wardmast.Loop.evidence_bar(ws) == Wardmast.Loop.default_evidence_bar()
+      assert Wardmast.Loop.default_evidence_bar() == %{min_incidents: 3, min_distinct_tasks: 2}
+    end
+
+    test "rejects a non-positive threshold" do
+      config = %{"loop" => %{"evidence_bar" => %{"min_distinct_tasks" => 0}}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-bar-3", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?(
+               "loop.evidence_bar.min_distinct_tasks must be a positive integer"
+             )
+    end
+
+    test "rejects loop.evidence_bar when it is not a map" do
+      config = %{"loop" => %{"evidence_bar" => 3}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-bar-4", config: config})
+      assert err |> Exception.message() |> String.contains?("loop.evidence_bar must be a map")
+    end
+
+    test "rejects loop when it is not a map" do
+      assert {:error, err} =
+               Ash.create(Workspace, %{name: "loop-bar-5", config: %{"loop" => "on"}})
+
+      assert err |> Exception.message() |> String.contains?("loop must be a map")
+    end
+  end
+
+  # bd-6edc0u: the Stage 3 autonomy opt-in. A typo here must not silently read
+  # as "off" (nobody would notice) or, worse, as "on" — so the flag is
+  # validated as a strict boolean at the config boundary.
+  describe "config validation: loop.autonomous_routing_enabled" do
+    test "accepts a boolean and defaults to off when absent" do
+      assert {:ok, on} =
+               Ash.create(Workspace, %{
+                 name: "loop-auto-1",
+                 config: %{"loop" => %{"autonomous_routing_enabled" => true}}
+               })
+
+      assert Wardmast.Loop.Canary.enabled?(on)
+
+      assert {:ok, off} = Ash.create(Workspace, %{name: "loop-auto-2", config: %{}})
+      refute Wardmast.Loop.Canary.enabled?(off)
+    end
+
+    test "rejects a stringly-typed flag" do
+      config = %{"loop" => %{"autonomous_routing_enabled" => "true"}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-auto-3", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("loop.autonomous_routing_enabled must be true or false")
+    end
+
+    test "rejects a non-map canary block" do
+      config = %{"loop" => %{"canary" => "running"}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-auto-4", config: config})
+      assert err |> Exception.message() |> String.contains?("loop.canary must be a map")
+    end
+
+    test "loop.canary_auto_promote must be a boolean" do
+      assert {:ok, _} =
+               Ash.create(Workspace, %{
+                 name: "loop-auto-bool-ok",
+                 config: %{"loop" => %{"canary_auto_promote" => false}}
+               })
+
+      assert {:error, err} =
+               Ash.create(Workspace, %{
+                 name: "loop-auto-bool-bad",
+                 config: %{"loop" => %{"canary_auto_promote" => "no"}}
+               })
+
+      assert err |> Exception.message() |> String.contains?("loop.canary_auto_promote")
+    end
+
+    test "rejects a canary sample size below the Stage 3 floor" do
+      config = %{"loop" => %{"canary_min_dispatches" => 5}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "loop-auto-5", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("loop.canary_min_dispatches must be an integer >= 20")
+    end
+
+    # The tolerance *is* the auto-revert threshold. A value the canary silently
+    # clamps is the one config mistake that could mask the regression this
+    # whole stage exists to catch, so it is rejected rather than corrected.
+    test "rejects a regression tolerance that is not a fraction in 0..0.5" do
+      for bad <- ["0.05", -0.1, 0.9, 1] do
+        config = %{"loop" => %{"canary_regression_tolerance" => bad}}
+        name = "loop-auto-tol-#{:erlang.phash2(bad)}"
+
+        assert {:error, err} = Ash.create(Workspace, %{name: name, config: config}),
+               "#{inspect(bad)} must not be accepted as a revert threshold"
+
+        assert err
+               |> Exception.message()
+               |> String.contains?("loop.canary_regression_tolerance must be a number")
+      end
+    end
+
+    test "accepts a regression tolerance the canary will honour verbatim" do
+      config = %{"loop" => %{"canary_regression_tolerance" => 0.05}}
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "loop-auto-tol-ok", config: config})
+      assert get_in(ws.config, ["loop", "canary_regression_tolerance"]) == 0.05
+    end
+
+    test "rejects a canary deadline outside 1..90 days" do
+      for bad <- [0, -1, 365, "14", 14.0] do
+        config = %{"loop" => %{"canary_max_age_days" => bad}}
+        name = "loop-auto-age-#{:erlang.phash2(bad)}"
+
+        assert {:error, err} = Ash.create(Workspace, %{name: name, config: config}),
+               "#{inspect(bad)} must not be accepted as a canary deadline"
+
+        assert err
+               |> Exception.message()
+               |> String.contains?("loop.canary_max_age_days must be an integer between 1 and 90")
+      end
+    end
+
+    test "accepts a canary deadline inside the range" do
+      config = %{"loop" => %{"canary_max_age_days" => 7}}
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "loop-auto-age-ok", config: config})
+      assert get_in(ws.config, ["loop", "canary_max_age_days"]) == 7
+    end
+
+    test "the deep-merge patch_config surface honours the override" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "loop-bar-6", config: %{"merge" => %{}}})
+
+      {:ok, patched} =
+        Ash.update(ws, %{patch: %{"loop" => %{"evidence_bar" => %{"min_incidents" => 5}}}},
+          action: :patch_config
+        )
+
+      # Deep merge, not overwrite: the unrelated key survives.
+      assert Map.has_key?(patched.config, "merge")
+      assert Wardmast.Loop.evidence_bar(patched).min_incidents == 5
+    end
+  end
+
+  describe "watch_pipeline?/1" do
+    test "true when config[merge][watch_pipeline] is boolean true" do
+      ws = %Workspace{config: %{"merge" => %{"watch_pipeline" => true}}}
+      assert Workspace.watch_pipeline?(ws) == true
+    end
+
+    test "true when stored as the string \"true\" (JSON round-trip)" do
+      ws = %Workspace{config: %{"merge" => %{"watch_pipeline" => "true"}}}
+      assert Workspace.watch_pipeline?(ws) == true
+    end
+
+    test "defaults to false when unset or falsey" do
+      assert Workspace.watch_pipeline?(%Workspace{config: %{}}) == false
+      assert Workspace.watch_pipeline?(%Workspace{config: %{"merge" => %{}}}) == false
+
+      assert Workspace.watch_pipeline?(%Workspace{
+               config: %{"merge" => %{"watch_pipeline" => false}}
+             }) == false
+    end
+  end
+
+  describe "pr_patrol_resolve_bot_threads?/1" do
+    test "defaults to true when unset" do
+      assert Workspace.pr_patrol_resolve_bot_threads?(%Workspace{config: %{}}) == true
+
+      assert Workspace.pr_patrol_resolve_bot_threads?(%Workspace{
+               config: %{"pr_patrol" => %{}}
+             }) == true
+    end
+
+    test "false when explicitly set to false (bool or string)" do
+      assert Workspace.pr_patrol_resolve_bot_threads?(%Workspace{
+               config: %{"pr_patrol" => %{"resolve_bot_threads" => false}}
+             }) == false
+
+      assert Workspace.pr_patrol_resolve_bot_threads?(%Workspace{
+               config: %{"pr_patrol" => %{"resolve_bot_threads" => "false"}}
+             }) == false
+    end
+
+    test "true when explicitly set to true" do
+      assert Workspace.pr_patrol_resolve_bot_threads?(%Workspace{
+               config: %{"pr_patrol" => %{"resolve_bot_threads" => true}}
+             }) == true
+    end
+  end
+
+  describe "pr_patrol_resolve_human_threads?/1" do
+    test "defaults to false when unset" do
+      assert Workspace.pr_patrol_resolve_human_threads?(%Workspace{config: %{}}) == false
+
+      assert Workspace.pr_patrol_resolve_human_threads?(%Workspace{
+               config: %{"pr_patrol" => %{}}
+             }) == false
+    end
+
+    test "true when explicitly set to true (bool or string)" do
+      assert Workspace.pr_patrol_resolve_human_threads?(%Workspace{
+               config: %{"pr_patrol" => %{"resolve_human_threads" => true}}
+             }) == true
+
+      assert Workspace.pr_patrol_resolve_human_threads?(%Workspace{
+               config: %{"pr_patrol" => %{"resolve_human_threads" => "true"}}
+             }) == true
+    end
+
+    test "false when explicitly set to false" do
+      assert Workspace.pr_patrol_resolve_human_threads?(%Workspace{
+               config: %{"pr_patrol" => %{"resolve_human_threads" => false}}
+             }) == false
+    end
+  end
+
+  describe "pr_patrol_our_login/1 (bd-45x4yo)" do
+    test "nil when neither pr_patrol nor review_patrol our_login is set" do
+      assert Workspace.pr_patrol_our_login(%Workspace{config: %{}}) == nil
+      assert Workspace.pr_patrol_our_login(%Workspace{config: %{"pr_patrol" => %{}}}) == nil
+    end
+
+    test "reads config[pr_patrol][our_login] when set" do
+      assert Workspace.pr_patrol_our_login(%Workspace{
+               config: %{"pr_patrol" => %{"our_login" => "arbiter-bot"}}
+             }) == "arbiter-bot"
+    end
+
+    test "falls back to config[review_patrol][our_login] when pr_patrol's is unset" do
+      assert Workspace.pr_patrol_our_login(%Workspace{
+               config: %{"review_patrol" => %{"our_login" => "arbiter-bot"}}
+             }) == "arbiter-bot"
+    end
+
+    test "an explicit pr_patrol our_login overrides the review_patrol fallback" do
+      assert Workspace.pr_patrol_our_login(%Workspace{
+               config: %{
+                 "pr_patrol" => %{"our_login" => "pr-bot"},
+                 "review_patrol" => %{"our_login" => "review-bot"}
+               }
+             }) == "pr-bot"
+    end
+
+    test "blank pr_patrol our_login falls back to review_patrol's" do
+      assert Workspace.pr_patrol_our_login(%Workspace{
+               config: %{
+                 "pr_patrol" => %{"our_login" => "  "},
+                 "review_patrol" => %{"our_login" => "review-bot"}
+               }
+             }) == "review-bot"
+    end
+  end
+
+  describe "paper_trail version history (bd-9j6is7)" do
+    test "each create/update/patch_config produces a version row" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "versioned", prefix: "ve"})
+      {:ok, ws} = Ash.update(ws, %{description: "now described"})
+
+      {:ok, _} =
+        Ash.update(ws, %{patch: %{"standing_orders" => "be careful"}}, action: :patch_config)
+
+      versions =
+        Workspace.Version
+        |> Ash.Query.filter(version_source_id == ^ws.id)
+        |> Ash.read!()
+
+      assert length(versions) == 3
+    end
+
+    test "config is snapshotted and the actor is recorded on each version" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "actor-ws", prefix: "ac", actor: "cli"})
+
+      {:ok, _} =
+        Ash.update(ws, %{patch: %{"standing_orders" => "v1"}, actor: "coordinator"},
+          action: :patch_config
+        )
+
+      versions =
+        Workspace.Version
+        |> Ash.Query.filter(version_source_id == ^ws.id)
+        |> Ash.Query.sort(version_inserted_at: :asc)
+        |> Ash.read!()
+
+      assert Enum.map(versions, & &1.actor) == ["cli", "coordinator"]
+      # The config snapshot on the latest version carries the standing order.
+      assert List.last(versions).config["standing_orders"] == "v1"
+    end
+
+    test "encrypted secrets never appear in a version's change diff" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{name: "sec-ws", prefix: "se", secrets: %{"TOKEN" => "hunter2"}})
+
+      version =
+        Workspace.Version
+        |> Ash.Query.filter(version_source_id == ^ws.id)
+        |> Ash.read!()
+        |> List.first()
+
+      refute inspect(version.changes) =~ "hunter2"
+      # Action inputs are not stored on workspace versions (they carry secrets).
+      refute Map.has_key?(version, :version_action_inputs)
+    end
+  end
+end

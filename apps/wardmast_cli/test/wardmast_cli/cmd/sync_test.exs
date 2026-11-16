@@ -1,0 +1,126 @@
+defmodule WardmastCli.Cmd.SyncTest do
+  use WardmastCli.CliCase, async: true
+
+  alias WardmastCli.Cmd.Sync
+
+  @workspace_lookup {{"get", "/api/workspaces"},
+                     {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]},
+                      200}}
+
+  test "--dry GETs the plan and prints it" do
+    stub_routes([
+      @workspace_lookup,
+      {{"get", "/api/workspaces/ws-1/sync/plan"},
+       {%{
+          "data" => [
+            %{"action" => "create", "ref" => "43", "title" => "Wire it up"},
+            %{"action" => "close", "task_id" => "bd-old", "reason" => "tracker closed"}
+          ]
+        }, 200}}
+    ])
+
+    {out, _err, code} = capture(fn -> Sync.run(["--dry"]) end)
+    assert code == 0
+    assert out =~ "Sync plan"
+    assert out =~ "create task for #43"
+    assert out =~ "close bd-old"
+  end
+
+  test "default mode POSTs and prints results" do
+    stub_routes([
+      @workspace_lookup,
+      {{"post", "/api/workspaces/ws-1/sync"},
+       {%{
+          "data" => [%{"action" => "create", "ref" => "43", "title" => "X"}],
+          "results" => [
+            %{
+              "outcome" => "created",
+              "task" => %{"id" => "bd-new", "tracker_type" => "github", "tracker_ref" => "43"}
+            }
+          ],
+          "applied" => true
+        }, 200}}
+    ])
+
+    {out, _err, code} = capture(fn -> Sync.run([]) end)
+    assert code == 0
+    assert out =~ "Sync:"
+    assert out =~ "created bd-new"
+  end
+
+  test "empty plan prints friendly message" do
+    stub_routes([
+      @workspace_lookup,
+      {{"post", "/api/workspaces/ws-1/sync"}, {%{"data" => [], "applied" => true}, 200}}
+    ])
+
+    {out, _err, code} = capture(fn -> Sync.run([]) end)
+    assert code == 0
+    assert out =~ "nothing to do"
+  end
+
+  test "--json mode emits JSON" do
+    stub_routes([
+      @workspace_lookup,
+      {{"get", "/api/workspaces/ws-1/sync/plan"}, {%{"data" => []}, 200}}
+    ])
+
+    {out, _err, code} = capture(fn -> Sync.run(["--dry", "--json"]) end)
+    assert code == 0
+    assert {:ok, _} = Jason.decode(String.trim(out))
+  end
+
+  test "a drift entry names the sync-upstream-close verb (plan and applied)" do
+    stub_routes([
+      @workspace_lookup,
+      {{"get", "/api/workspaces/ws-1/sync/plan"},
+       {%{"data" => [%{"action" => "drift", "task_id" => "bd-d", "reason" => "still open"}]}, 200}},
+      {{"post", "/api/workspaces/ws-1/sync"},
+       {%{
+          "data" => [%{"action" => "drift", "task_id" => "bd-d", "reason" => "still open"}],
+          "results" => [%{"outcome" => "drifted", "task" => %{"id" => "bd-d"}}],
+          "applied" => true
+        }, 200}}
+    ])
+
+    {out, _err, 0} = capture(fn -> Sync.run(["--dry"]) end)
+    assert out =~ "drift bd-d"
+    assert out =~ "arb ticket sync-upstream-close bd-d"
+
+    {out, _err, 0} = capture(fn -> Sync.run([]) end)
+    assert out =~ "arb ticket sync-upstream-close bd-d"
+  end
+
+  test "a resync entry says what was pulled, held back, divergent or flagged" do
+    resync = %{
+      "action" => "resync",
+      "task_id" => "bd-r",
+      "applied" => %{"title" => "New"},
+      "mid_flight" => ["priority"],
+      "divergent" => ["description"],
+      "closed_upstream" => true
+    }
+
+    stub_routes([
+      @workspace_lookup,
+      {{"get", "/api/workspaces/ws-1/sync/plan"}, {%{"data" => [resync]}, 200}},
+      {{"post", "/api/workspaces/ws-1/sync"},
+       {%{
+          "data" => [resync],
+          "results" => [
+            %{"outcome" => "resynced", "task" => %{"id" => "bd-r"}, "resync" => resync}
+          ],
+          "applied" => true
+        }, 200}}
+    ])
+
+    {out, _err, 0} = capture(fn -> Sync.run(["--dry"]) end)
+    assert out =~ "resync bd-r: pulled title"
+    assert out =~ "held back (in flight) priority"
+    assert out =~ "divergent (local wins) description"
+    assert out =~ "flagged, not closed"
+
+    {out, _err, 0} = capture(fn -> Sync.run([]) end)
+    assert out =~ "resynced bd-r: pulled title"
+  end
+end
