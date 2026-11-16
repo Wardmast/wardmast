@@ -378,6 +378,24 @@ A ticket's `tracker_write` permission projects a token env var (the binding's
   binding a fine-grained token scoped to the one repo. The check fails closed: if
   GitHub cannot be reached, or answers anything but 2xx, the dispatch is refused.
 
+## The GitHub issue tracker (bd-43sydg)
+
+The GitHub *tracker* adapter (issue create, field sync, lifecycle transitions,
+close, claim, listing) resolves its token the way the merger does. For a repo whose
+entry is a `github_app` it calls the API with an installation token minted for the
+tracker's own `owner/repo` with Issues **write**, Pull requests **write** and
+Metadata **read** only. It is not the push token and not the worker's
+`tracker_write` token above.
+
+**`github_token` (the tracker's `credentials_ref`) is optional with a GitHub App.**
+Set it only if you want a personal identity: an App cannot be an assignee, so with
+no personal token "issues assigned to the workspace user" becomes "open issues
+carrying `tracker.config.claim_label`" (default `arbiter`), and the list/sync
+responses say so. A repo with no `github_app` entry keeps `credentials_ref`, which
+is then required. A token that cannot be minted is an error, never a fallback to
+the personal token. See `docs/external-trackers.md` for the details and the call
+sites.
+
 ## The host's push and PR operations (bd-bsmkfu)
 
 A podman run holds no git credential: the **host** pushes the collected branch

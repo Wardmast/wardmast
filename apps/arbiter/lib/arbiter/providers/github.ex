@@ -77,10 +77,18 @@ defmodule Arbiter.Providers.Github do
       headers: headers(cfg.token),
       errors: error_spec(error_module),
       stub: {:github_http_stub, Keyword.fetch!(opts, :stub_name)},
-      gate: fn fun -> Limiter.gate(cfg.token, fun) end,
+      gate: gate_fun(cfg),
       retry: retry_opts(Keyword.get(opts, :retry))
     )
   end
+
+  # A config that names the rate-limit pool its token draws from (`:pool`, an App
+  # installation, bd-43sydg) is gated in that pool; any other token resolves its
+  # owning account.
+  defp gate_fun(%{pool: pool} = cfg) when not is_nil(pool),
+    do: fn fun -> Limiter.gate_in_pool(cfg.token, pool, fun) end
+
+  defp gate_fun(cfg), do: fn fun -> Limiter.gate(cfg.token, fun) end
 
   @doc """
   `Arbiter.Http.Client.paginate/4`'s `:next_page` for GitHub: walks the RFC

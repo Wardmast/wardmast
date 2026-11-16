@@ -181,13 +181,22 @@ deploy unless the operator has asked for that trade. Enable with:
 The limiter **fails open**: if it is not running, the request seam lets traffic
 through untouched — it is a protection layer, not a correctness gate.
 
-## Adopting a GitHub App later
+## GitHub App installations (bd-43sydg)
 
-Nothing here hardcodes the pool count. If a GitHub App installation is adopted,
-its credential resolves to its own `{:account, login}` pool with its own
-(larger, installation-scaled) budget, and the limiter models it as a genuinely
-separate pool with no redesign — while today's single-pool reality stays
-correct.
+Nothing here hardcodes the pool count. A GitHub App installation token is a
+genuinely separate, installation-scaled pool, but `GET /user` is refused for an
+installation token, so the limiter could not name its pool and would have
+accounted the App's calls to `:shared` (the operator's account pool). The caller
+therefore states it: a request made with a repo's `github_app` installation token
+(the GitHub tracker, `Arbiter.Trackers.GitHub`, when the repo has a `github_app`
+entry in `git_credentials`) is gated with `Limiter.gate_in_pool/4` and the pool
+`{:installation, installation_id}`. The token is pinned to that pool before the
+call is admitted, so its calls, rate-limit headers and secondary-limit trips all
+land in the installation's budget; `Limiter.stats/0` shows it under
+`{:installation, "7"}` and the periodic line reports it like any other pool. A
+re-minted token replaces the pinned one, so the pin table holds one entry per
+installation. The merger's App calls (PR open, comment, merge) are not yet gated
+this way and still resolve like any other token.
 
 ## Related
 

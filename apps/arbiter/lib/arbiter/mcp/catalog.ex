@@ -2311,7 +2311,9 @@ defmodule Arbiter.MCP.Catalog do
         "List the open tracker issues assigned to the workspace user (`arb ticket list --tracker`, " <>
           "`GET /api/workspaces/:id/tracker/issues`) — the `ref`s `tracker_claim` takes. Returns " <>
           "`{data: [{ref, title, url, status, assignees}], supported}`; `supported: false` (no rows) " <>
-          "means the tracker has no backlog listing, not an error.",
+          "means the tracker has no backlog listing, not an error. A GitHub tracker running as a GitHub " <>
+          "App with no personal token cannot filter by assignee: it lists issues carrying " <>
+          "`tracker.config.claim_label` instead and says so in a `filter` entry.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.tracker_list_issues/2
     },
@@ -2357,7 +2359,8 @@ defmodule Arbiter.MCP.Catalog do
           "their ticket still open. `dry: true` returns the plan without acting. No-ops cleanly when the " <>
           "tracker does not support reconciliation. Returns the REST shape — `data` (the planned " <>
           "actions; a `create` carries `url`), `applied` and, once applied, `results` — plus " <>
-          "`actions` (= `data`) and `count`.",
+          "`actions` (= `data`) and `count`; a GitHub App tracker with no personal token adds a " <>
+          "`filter` entry naming the claim label that replaced \"assigned to me\".",
       input_schema: %{
         "type" => "object",
         "properties" => %{
