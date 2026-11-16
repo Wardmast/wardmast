@@ -582,24 +582,30 @@ defmodule Arbiter.Worker.CliSet.Watcher do
   defp from_result(_), do: nil
 
   defp from_entry(entry, opts) do
-    ctx = Map.get(entry, :ctx) || %{}
-    entry_ref = Map.get(entry, :ref)
+    case Map.get(entry, :ref) do
+      ref when is_binary(ref) and ref != "" -> ref
+      _ -> from_entry_ctx(Map.get(entry, :ctx) || %{}, opts)
+    end
+  end
 
-    cond do
-      is_binary(entry_ref) and entry_ref != "" ->
-        entry_ref
-
-      match?({:ok, _}, Registry.resolve(Map.get(ctx, :workspace), Map.get(ctx, :repo), opts)) ->
-        {:ok, cfg} = Registry.resolve(Map.get(ctx, :workspace), Map.get(ctx, :repo), opts)
-        tag = get_in(ctx, [:plan, :hash]) || get_in(ctx, [:plan, :tag])
+  defp from_entry_ctx(ctx, opts) do
+    case Registry.resolve(Map.get(ctx, :workspace), Map.get(ctx, :repo), opts) do
+      {:ok, cfg} ->
         base = Registry.repository(cfg, Pipeline.worker_repository(ctx))
-        if is_binary(tag) and tag != "", do: base <> ":" <> tag, else: base
+        append_tag(base, get_in(ctx, [:plan, :hash]) || get_in(ctx, [:plan, :tag]))
 
-      is_binary(get_in(ctx, [:plan, :tag])) ->
-        get_in(ctx, [:plan, :tag])
+      _ ->
+        plan_tag_or_repo(ctx)
+    end
+  end
 
-      true ->
-        Pipeline.worker_repository(ctx)
+  defp append_tag(base, tag) when is_binary(tag) and tag != "", do: base <> ":" <> tag
+  defp append_tag(base, _), do: base
+
+  defp plan_tag_or_repo(ctx) do
+    case get_in(ctx, [:plan, :tag]) do
+      tag when is_binary(tag) -> tag
+      _ -> Pipeline.worker_repository(ctx)
     end
   end
 
