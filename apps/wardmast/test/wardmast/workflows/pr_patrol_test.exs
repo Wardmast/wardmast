@@ -1011,10 +1011,19 @@ defmodule Wardmast.Workflows.PRPatrolTest do
 
       {_pid, name} = start_patrol(ws, interval_ms: 50)
 
-      # Wait long enough for at least 2 fires (first at ~50ms, second at ~100ms)
-      Process.sleep(250)
+      # At least 2 fires (first at ~50ms, second at ~100ms); poll rather than sleep a
+      # fixed 250 ms, which a slow runner can spend on one tick.
+      deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(1_000)
 
-      assert PRPatrol.state(name).ticks >= 2,
+      wait_for_ticks = fn wait ->
+        cond do
+          PRPatrol.state(name).ticks >= 2 -> :ok
+          System.monotonic_time(:millisecond) > deadline -> :timeout
+          true -> Process.sleep(10) && wait.(wait)
+        end
+      end
+
+      assert wait_for_ticks.(wait_for_ticks) == :ok,
              "expected at least 2 auto-ticks; got #{PRPatrol.state(name).ticks}"
     end
 
