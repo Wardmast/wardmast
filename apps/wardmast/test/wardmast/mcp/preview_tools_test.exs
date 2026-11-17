@@ -91,7 +91,9 @@ defmodule Wardmast.MCP.PreviewToolsTest do
     assert {:ok, %{preview: %{port: ^port}}} =
              Tools.preview_list(scope, %{"task_id" => issue.id})
 
-    assert {:ok, %{content: log, offset: off}} = Tools.preview_logs(scope, %{"task_id" => issue.id})
+    assert {:ok, %{content: log, offset: off}} =
+             Tools.preview_logs(scope, %{"task_id" => issue.id})
+
     assert log =~ "listening on #{port}"
 
     assert {:ok, %{content: "", offset: ^off}} =

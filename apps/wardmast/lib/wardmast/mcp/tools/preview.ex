@@ -21,7 +21,8 @@ defmodule Wardmast.MCP.Tools.Preview do
   def preview_start(%Scope{} = scope, args) do
     with {:ok, task_id} <- Tools.resolve_task_id(scope, args, "task_id"),
          {:ok, _task} <- Tools.fetch_task(scope, args, task_id),
-         {:ok, row} <- run(Preview.start(task_id, repo_opts(args) ++ [wait: truthy(args["wait"])])) do
+         {:ok, row} <-
+           run(Preview.start(task_id, repo_opts(args) ++ [wait: truthy(args["wait"])])) do
       {:ok, %{preview: render(row)}}
     end
   end
@@ -54,7 +55,9 @@ defmodule Wardmast.MCP.Tools.Preview do
 
         _ ->
           opts = if ws_id, do: [workspace_id: ws_id], else: []
-          {:ok, %{previews: Enum.map(Preview.list(opts), &Preview.serialize/1), workspace_id: ws_id}}
+
+          {:ok,
+           %{previews: Enum.map(Preview.list(opts), &Preview.serialize/1), workspace_id: ws_id}}
       end
     end
   end
