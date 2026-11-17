@@ -171,7 +171,7 @@ defmodule WardmastCli.Cmd.Prime do
   end
 
   defp gather_workspaces do
-    ws_target = System.get_env("ARB_WORKSPACE")
+    ws_target = Wardmast.Env.get("WARDMAST_WORKSPACE")
 
     if is_binary(ws_target) and ws_target != "" do
       case WardmastCli.Workspace.resolve(ws_target) do

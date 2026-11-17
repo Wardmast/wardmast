@@ -1,17 +1,17 @@
 defmodule WardmastCli.Cmd.Create do
   @moduledoc """
-  `arb create <title> [--description ...] [--acceptance ... | --acceptance-file PATH]
-                       [--notes ...] [--qa-notes ...] [--deployment-notes ...]
-                       [--priority N] [--difficulty N] [--type T]
-                       [--deps|--depends-on id1,id2] [--blocks id1,id2] [--fixes id1,id2] [--labels a,b]
-                       [--tracker-ref REF] [--tracker-type T]
-                       [--tracker-context-type T] [--tracker-context-ref REF]
-                       [--no-tracker] [--target-branch NAME] [--repo owner/name]
-                       [--parent <parent-id>] [--auto-close] [--verify-after-deploy]
-                       [--require-provider P | --exclude-provider P] [--permission P]
-                       [--force] [--ticket-only|--no-task|--unclaimed] [--local-only] [--json]`
+  `ward ticket create <title> [--description ...] [--acceptance ... | --acceptance-file PATH]
+                              [--notes ...] [--qa-notes ...] [--deployment-notes ...]
+                              [--priority N] [--difficulty N] [--type T]
+                              [--deps|--depends-on id1,id2] [--blocks id1,id2] [--fixes id1,id2] [--labels a,b]
+                              [--tracker-ref REF] [--tracker-type T]
+                              [--tracker-context-type T] [--tracker-context-ref REF]
+                              [--no-tracker] [--target-branch NAME] [--repo owner/name]
+                              [--parent <parent-id>] [--auto-close] [--verify-after-deploy]
+                              [--require-provider P | --exclude-provider P] [--permission P]
+                              [--force] [--ticket-only|--no-task|--unclaimed] [--local-only] [--json]`
 
-  `arb ticket create --from-file <batch.json|batch.yaml|-> [--promote] [--force] [--json]`
+  `ward ticket create --from-file <batch.json|batch.yaml|-> [--promote] [--force] [--json]`
   (or `--stdin`) files a whole ticket graph atomically — see "Batch create" below.
 
   Creates a new issue in the resolved workspace (see `WardmastCli.Workspace`).
@@ -47,7 +47,7 @@ defmodule WardmastCli.Cmd.Create do
   `last_reviewed_sha`, `last_seen_comment_id`, `review_automation`,
   `posted_findings`, `last_verdict`, `last_verdict_sha`), `skills`, and
   `tracker_child_policy` (a workspace config). `workspace_id` comes from
-  `-w` / `ARB_WORKSPACE`, not a flag.
+  `-w` / `WARDMAST_WORKSPACE` (or `ARB_WORKSPACE`), not a flag.
 
   ## --difficulty N (0..5 / D0..D5)
 
@@ -107,11 +107,11 @@ defmodule WardmastCli.Cmd.Create do
   set, you never have to pass it. In a multi-repo workspace with no
   `default_repo`, creation is **refused** with an error listing the
   configured repo keys — pass one of them, or set `default_repo` on the
-  workspace (`arb config set default_repo <key> [--workspace W]`). A `--repo` that
+  workspace (`ward config set default_repo <key> [--workspace W]`). A `--repo` that
   is not a configured key is rejected outright rather than persisted for
   dispatch to fail on later.
 
-  An explicit `arb dispatch <id> <repo>` still overrides the issue's repo for
+  An explicit `ward dispatch <id> <repo>` still overrides the issue's repo for
   that one run.
 
   `--parent <parent-id>` attaches the new issue as a child of an existing parent
@@ -143,7 +143,7 @@ defmodule WardmastCli.Cmd.Create do
       the action argument.
     * `--ticket-only` / `--no-task` / `--unclaimed` — create ONLY the upstream
       tracker ticket, with NO local task. The ticket sits unclaimed on the
-      shared tracker; anyone can pick it up via `arb claim <ref>`. The workspace
+      shared tracker; anyone can pick it up via `ward ticket claim <ref>`. The workspace
       must have a tracker configured. Mutually exclusive with `--no-tracker` /
       `--local-only` (opposite intent).
       Honored: `--title`, `--description`, `--priority`, `--type`.
@@ -162,7 +162,7 @@ defmodule WardmastCli.Cmd.Create do
 
   `--fixes id1,id2` marks the new ticket as a follow-up that fixes each listed
   ticket (`<new_id> fixes <id>`, same transaction). Its spend then rolls up into
-  the fixed ticket's `Spend:` line in `arb ticket show`.
+  the fixed ticket's `Spend:` line in `ward ticket show`.
 
   ## Batch create (`--from-file` / `--stdin`)
 
@@ -192,7 +192,7 @@ defmodule WardmastCli.Cmd.Create do
 
   A failure (unknown ref, cycle, bad repo, duplicate title without `force: true`
   on that ticket, ...) files nothing and the error names the offending ticket
-  (`tickets[i]`). On success `arb` prints the `ref -> id` map. `--promote` (or
+  (`tickets[i]`). On success `ward` prints the `ref -> id` map. `--promote` (or
   `promote: true` in the file) promotes every created ticket after all the edges
   exist and prints the per-id result (exit 1 if any promote was refused; the batch
   itself stays filed). `--force` skips the duplicate-title check for every ticket.
@@ -207,7 +207,7 @@ defmodule WardmastCli.Cmd.Create do
   its edges. An unknown or cross-workspace endpoint therefore refuses the whole
   create with nothing filed. Only a race (an endpoint deleted between the check
   and the write) can leave a ticket without an edge, and then — like a failed
-  tracker mirror — the ticket exists: arb exits non-zero, and with `--json` it
+  tracker mirror — the ticket exists: `ward` exits non-zero, and with `--json` it
   still prints `{"id": "<created id>", "created": true, "error": {...}}` so a
   script can recover the id rather than file the ticket again.
 
@@ -224,7 +224,7 @@ defmodule WardmastCli.Cmd.Create do
   token is refused.
 
   `--clear-provider-constraint` and `--remove-permission` are parsed (they are
-  shared with `arb ticket update`) but are no-ops on a new ticket.
+  shared with `ward ticket update`) but are no-ops on a new ticket.
 
   `--labels` is accepted for interface parity with `bd` but the current Issue
   resource has no `labels` field; the value is reported back in a warning

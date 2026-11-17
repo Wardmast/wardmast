@@ -1,51 +1,51 @@
 defmodule WardmastCli.Cmd.Issue do
   @moduledoc """
-  `arb ticket <verb>` — the ticket resource. `arb issue <verb>` is a
+  `ward ticket <verb>` — the ticket resource. `ward issue <verb>` is a
   deprecated alias: it runs the same verb and prints a one-line note on stderr.
 
-      arb ticket list     [--state ...] [--type ...] [--priority ...]
-                          [--labels ...] [--tracker]
-      arb ticket show     <id>
-      arb ticket create   <title> [--description ...] [--priority ...]
-                          [--type ...] [--deps id1,id2] [--labels a,b]
-                          [--parent <parent-id>] [--auto-close]
-                          [--repo <repo_paths key>]
-                          [--acceptance a | --acceptance-file PATH]
-                          [--notes t] [--qa-notes t] [--deployment-notes t]
-                          [--tracker-ref R] [--tracker-type T]
-                          [--tracker-context-type T] [--tracker-context-ref R]
-      arb ticket create   --from-file <batch.json|batch.yaml|-> [--promote] [--force]
-                          (a whole ticket graph, atomically; refs, depends_on, blocks)
-      arb ticket update   <id> [--title ...] [--priority N] [--difficulty N] [--type T]
-                          [--description d] [--notes t | --append-notes t]
-                          [--acceptance a | --acceptance-file PATH]
-                          [--qa-notes text] [--deployment-notes text]
-                          [--pr-body text] [--pr-ref R] [--target-branch B]
-                          [--tracker-ref R] [--tracker-type T]
-                          [--tracker-context-type T] [--tracker-context-ref R]
-                          [--auto-close | --no-auto-close]
-                          ("" clears a field)
-      arb ticket close    <id> [--reason ...] [--no-upstream]
-      arb ticket reopen   <id>
-      arb ticket promote  <id> [<id> ...] [--stdin] [--waive REASON]
-      arb ticket demote   <id> [<id> ...] [--stdin]
-      arb ticket rank     <id> [<id> ...] [--stdin] --top | --bottom | --before <id> | --after <id> [--pin | --unpin]
-      arb ticket rank     <id> --pin | --unpin
-      arb ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
-      arb ticket resolve  <id> --accept-as-is|--amend|--send-back|--reject "<why>"
-                          [--gate g] [--round N] [--fix-round-attempt N]
-                          (alias: arb review resolve — bd-4qjl0q)
-      arb ticket permit   <id> <permission> [--deny] [--reason "<why>"]
-      arb ticket handoff  <id> --note "<what the operator has to do>"
-      arb ticket handback <id> [--note "<what changed>"]
-      arb ticket claim    <issue#> [--force] [--repo <repo>]
-      arb ticket claim    (--epic <id> | --query <q>) [--yes] [--force] [--repo <repo>]
-      arb ticket sync     [--dry]
-      arb ticket sync-upstream-close <id>
-      arb ticket ready
-      arb ticket dispatch <id> [<repo>] [--provider claude|gemini|codex|grok | --no-agent]
-                          [--model <name>] [--force] [--over-cap]
-                          [--force-quota [--force-quota-reason <why>]]
+      ward ticket list     [--state ...] [--type ...] [--priority ...]
+                           [--labels ...] [--tracker]
+      ward ticket show     <id>
+      ward ticket create   <title> [--description ...] [--priority ...]
+                           [--type ...] [--deps id1,id2] [--labels a,b]
+                           [--parent <parent-id>] [--auto-close]
+                           [--repo <repo_paths key>]
+                           [--acceptance a | --acceptance-file PATH]
+                           [--notes t] [--qa-notes t] [--deployment-notes t]
+                           [--tracker-ref R] [--tracker-type T]
+                           [--tracker-context-type T] [--tracker-context-ref R]
+      ward ticket create   --from-file <batch.json|batch.yaml|-> [--promote] [--force]
+                           (a whole ticket graph, atomically; refs, depends_on, blocks)
+      ward ticket update   <id> [--title ...] [--priority N] [--difficulty N] [--type T]
+                           [--description d] [--notes t | --append-notes t]
+                           [--acceptance a | --acceptance-file PATH]
+                           [--qa-notes text] [--deployment-notes text]
+                           [--pr-body text] [--pr-ref R] [--target-branch B]
+                           [--tracker-ref R] [--tracker-type T]
+                           [--tracker-context-type T] [--tracker-context-ref R]
+                           [--auto-close | --no-auto-close]
+                           ("" clears a field)
+      ward ticket close    <id> [--reason ...] [--no-upstream]
+      ward ticket reopen   <id>
+      ward ticket promote  <id> [<id> ...] [--stdin] [--waive REASON]
+      ward ticket demote   <id> [<id> ...] [--stdin]
+      ward ticket rank     <id> [<id> ...] [--stdin] --top | --bottom | --before <id> | --after <id> [--pin | --unpin]
+      ward ticket rank     <id> --pin | --unpin
+      ward ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
+      ward ticket resolve  <id> --accept-as-is|--amend|--send-back|--reject "<why>"
+                           [--gate g] [--round N] [--fix-round-attempt N]
+                           (alias: ward review resolve — bd-4qjl0q)
+      ward ticket permit   <id> <permission> [--deny] [--reason "<why>"]
+      ward ticket handoff  <id> --note "<what the operator has to do>"
+      ward ticket handback <id> [--note "<what changed>"]
+      ward ticket claim    <issue#> [--force] [--repo <repo>]
+      ward ticket claim    (--epic <id> | --query <q>) [--yes] [--force] [--repo <repo>]
+      ward ticket sync     [--dry]
+      ward ticket sync-upstream-close <id>
+      ward ticket ready
+      ward ticket dispatch <id> [<repo>] [--provider claude|gemini|codex|grok | --no-agent]
+                           [--model <name>] [--force] [--over-cap]
+                           [--force-quota [--force-quota-reason <why>]]
   """
 
   alias WardmastCli.Cmd
@@ -68,6 +68,7 @@ defmodule WardmastCli.Cmd.Issue do
           rest
 
         {name, rest} ->
+          System.put_env("WARDMAST_WORKSPACE", name)
           System.put_env("ARB_WORKSPACE", name)
           rest
       end

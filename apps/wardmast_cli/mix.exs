@@ -60,7 +60,7 @@ defmodule WardmastCli.MixProject do
   defp extra_applications(:test), do: [:plug]
   defp extra_applications(_), do: []
 
-  # Escript build config: produces `arb` binary that runs `WardmastCli.Main.main/1`.
+  # Escript build config: produces `ward` binary that runs `WardmastCli.Main.main/1`.
   #
   # bd-59m96o: the comment line (`%% arb-otp=29`) records the Erlang/OTP release
   # the escript is compiled on. A BEAM file loads only on that release or a
@@ -71,7 +71,7 @@ defmodule WardmastCli.MixProject do
   defp escript do
     [
       main_module: WardmastCli.Main,
-      name: "arb",
+      name: "ward",
       app: nil,
       comment: "arb-otp=#{System.otp_release()}"
     ]

@@ -8,7 +8,18 @@ defmodule WardmastCli.EscriptStampTest do
   """
   use ExUnit.Case, async: true
 
-  test "the escript's comment line carries the release it is compiled on" do
+  test "the escript is named `ward` and its comment line carries the release it is compiled on" do
+    assert Mix.Project.config()[:escript][:name] == "ward"
     assert Mix.Project.config()[:escript][:comment] == "arb-otp=#{System.otp_release()}"
+  end
+
+  test "the release workflow builds and publishes `ward` plus `ward.sha256`" do
+    workflow_path = Path.expand("../../../../.github/workflows/release.yml", __DIR__)
+    workflow = File.read!(workflow_path)
+
+    assert workflow =~ "sha256sum apps/wardmast_cli/ward > ward.sha256"
+    assert workflow =~ "apps/wardmast_cli/ward"
+    assert workflow =~ "ward.sha256"
+    refute workflow =~ "sha256sum apps/wardmast_cli/arb"
   end
 end

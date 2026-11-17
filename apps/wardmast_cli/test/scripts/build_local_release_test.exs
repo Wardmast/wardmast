@@ -241,7 +241,7 @@ defmodule WardmastCli.Scripts.BuildLocalReleaseTest do
     temp_tag = "v999.999.#{unique_id}"
     repo_root = Path.expand("../../../../", __DIR__)
     wardmast_cli_dir = Path.join(repo_root, "apps/wardmast_cli")
-    escript_path = Path.join(wardmast_cli_dir, "arb")
+    escript_path = Path.join(wardmast_cli_dir, "ward")
 
     try do
       # Clean up any stale test tags from previous runs (both v99.99 and v999.999 patterns).

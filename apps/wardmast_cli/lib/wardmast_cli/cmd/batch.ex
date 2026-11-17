@@ -68,7 +68,7 @@ defmodule WardmastCli.Cmd.Batch do
 
   defp execute(text, continue?) do
     inherited = inherited_state()
-    ws_env = System.get_env("ARB_WORKSPACE")
+    ws_env = {System.get_env("WARDMAST_WORKSPACE"), System.get_env("ARB_WORKSPACE")}
 
     text
     |> String.split(["\r\n", "\n"])
@@ -110,8 +110,15 @@ defmodule WardmastCli.Cmd.Batch do
   defp inherited_key?(k) when is_atom(k), do: String.starts_with?(Atom.to_string(k), "bd2_")
   defp inherited_key?(_), do: false
 
-  defp restore_env(nil), do: System.delete_env("ARB_WORKSPACE")
-  defp restore_env(v), do: System.put_env("ARB_WORKSPACE", v)
+  defp restore_env({wm_v, arb_v}) do
+    if wm_v,
+      do: System.put_env("WARDMAST_WORKSPACE", wm_v),
+      else: System.delete_env("WARDMAST_WORKSPACE")
+
+    if arb_v,
+      do: System.put_env("ARB_WORKSPACE", arb_v),
+      else: System.delete_env("ARB_WORKSPACE")
+  end
 
   defp run_line(argv, inherited) do
     Task.async(fn -> run_isolated(argv, inherited) end) |> Task.await(:infinity)
@@ -224,8 +231,8 @@ defmodule WardmastCli.Cmd.Batch do
   def split_line(line) do
     case tokenize(String.to_charlist(line), [], nil, []) do
       {:ok, []} -> :skip
-      {:ok, ["arb" | []]} -> :skip
-      {:ok, ["arb" | argv]} -> {:ok, argv}
+      {:ok, [prefix | []]} when prefix in ["ward", "wm", "arb"] -> :skip
+      {:ok, [prefix | argv]} when prefix in ["ward", "wm", "arb"] -> {:ok, argv}
       {:ok, argv} -> {:ok, argv}
       {:error, _} = err -> err
     end

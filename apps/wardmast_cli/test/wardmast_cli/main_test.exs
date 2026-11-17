@@ -99,10 +99,11 @@ defmodule WardmastCli.MainTest do
       assert err =~ "ticket requires a subcommand"
     end
 
-    test "arb ticket --help documents the ticket grammar" do
+    test "ward ticket --help documents the ticket grammar" do
       {out, _err, code} = capture(fn -> Main.main(["ticket", "--help"]) end)
       assert code == 0
-      assert out =~ "arb ticket list"
+      assert out =~ "ward ticket list"
+      refute out =~ "ward issue list"
       refute out =~ "arb issue list"
     end
   end

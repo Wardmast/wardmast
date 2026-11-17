@@ -171,7 +171,7 @@ jobs:
           RELEASE_VERSION: ${{ steps.tag.outputs.name }}
           MIX_ENV: prod
 
-      - name: Build arb escript
+      - name: Build ward escript
         run: |
           cd apps/wardmast_cli && MIX_ENV=prod mix escript.build
         env:
@@ -184,7 +184,7 @@ jobs:
           TARBALL="arbiter-${TAG}-linux.tar.gz"
           tar -czf "${TARBALL}" -C _build/prod/rel/wardmast .
           sha256sum "${TARBALL}" > "${TARBALL}.sha256"
-          sha256sum apps/wardmast_cli/arb > arb.sha256
+          sha256sum apps/wardmast_cli/ward > ward.sha256
           # One migration name per line: lets a running server tell, before an
           # operator clicks "Update", whether the release carries migrations it
           # has not applied (Wardmast.Release.UpdateCheck).
@@ -244,8 +244,8 @@ jobs:
             ${{ env.TARBALL }}
             ${{ env.TARBALL }}.sha256
             ${{ env.MANIFEST }}
-            apps/wardmast_cli/arb
-            arb.sha256
+            apps/wardmast_cli/ward
+            ward.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

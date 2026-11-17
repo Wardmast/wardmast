@@ -6,9 +6,10 @@ defmodule WardmastCli.Client do
 
   Configuration:
 
-    * `ARB_HOST` env var overrides the base URL (default `http://127.0.0.1:4848`)
+    * `WARDMAST_HOST` env var (falling back to `ARB_HOST`) overrides the base
+      URL (default `http://127.0.0.1:4848`)
     * `ARB_TOKEN` env var sets a Bearer token for authentication. Required for
-      remote access (ARB_HOST pointing to a different server). A dispatched
+      remote access (`WARDMAST_HOST` / `ARB_HOST` pointing to a different server). A dispatched
       worker's environment carries its own worker-tier token here.
     * With no `ARB_TOKEN` and no session, against this machine's server, the
       client mints a coordinator token over the operator socket
@@ -77,7 +78,7 @@ defmodule WardmastCli.Client do
 
   @spec base_url() :: String.t()
   def base_url do
-    System.get_env("ARB_HOST", @default_base)
+    Wardmast.Env.get("WARDMAST_HOST", @default_base)
   end
 
   @doc """
@@ -443,7 +444,7 @@ defmodule WardmastCli.Client do
          %Error{
            kind: :transport,
            message: "could not resolve host for #{url}",
-           hint: "Check that ARB_HOST is set correctly."
+           hint: "Check that WARDMAST_HOST is set correctly."
          }}
 
       {:error, %{__exception__: true} = e} ->

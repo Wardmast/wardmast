@@ -684,9 +684,9 @@ defmodule WardmastCli.Cmd.Account do
     end
   end
 
-  # `-w` / ARB_WORKSPACE stands in for the leading positional (D-A-17).
+  # `-w` / WARDMAST_WORKSPACE (falling back to ARB_WORKSPACE) stands in for the leading positional (D-A-17).
   defp selected_workspace!(usage) do
-    case System.get_env("ARB_WORKSPACE") do
+    case Wardmast.Env.get("WARDMAST_WORKSPACE") do
       ws when is_binary(ws) and ws != "" -> ws
       _ -> Output.die(usage)
     end

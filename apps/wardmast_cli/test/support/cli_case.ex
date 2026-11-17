@@ -71,6 +71,18 @@ defmodule WardmastCli.CliCase do
         # `WardmastCli.FakeOperatorSocket.start!/1` repoints this.
         Process.put(:bd2_operator_socket, "/nonexistent/arb-test-operator.sock")
 
+        saved_env =
+          for k <- ~w(WARDMAST_WORKSPACE ARB_WORKSPACE ARBITER_WORKSPACE WARDMAST_HOST ARB_HOST ARBITER_HOST),
+              do: {k, System.get_env(k)}
+
+        on_exit(fn ->
+          for {k, v} <- saved_env do
+            if v, do: System.put_env(k, v), else: System.delete_env(k)
+          end
+
+          Wardmast.Env.reset_warnings()
+        end)
+
         :ok
       end
     end

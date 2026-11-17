@@ -1,251 +1,253 @@
 defmodule WardmastCli.Main do
   @moduledoc """
-  Escript entry point. The CLI uses an `arb <resource> <verb>` grammar:
+  Escript entry point. The CLI uses a `ward <resource> <verb>` grammar (`wm` is
+  a shorthand symlink; `arb` is a one-release deprecated shim that execs `ward`):
   the first token names a resource (or a flat meta command), the second the
   action on it.
 
   ## Resources
 
-      arb ticket list     [--state ...] [--type ...] [--priority ...] [--labels ...] [--tracker]
-      arb ticket show     <id>
-      arb ticket create   <title> [--description ...] [--priority ...] [--type ...]
-                                  [--acceptance a | --acceptance-file PATH]
-                                  [--notes t] [--qa-notes t] [--deployment-notes t]
-                                  [--deps id1,id2] [--labels a,b] [--parent <parent-id>]
-                                  [--auto-close] [--tracker-ref R] [--tracker-type T]
-                                  [--tracker-context-type T] [--tracker-context-ref R]
-                                  [--require-provider p | --exclude-provider p]
-                                  [--depends-on id1,id2] [--blocks id1,id2]
-      arb ticket create   --from-file <batch.json|batch.yaml|-> [--promote] [--force]   (atomic graph)
-      arb ticket update   <id> [--title ...] [--priority N] [--difficulty N] [--type T]
-                                  [--description d] [--notes t | --append-notes t]
-                                  [--acceptance a | --acceptance-file PATH]
-                                  [--qa-notes text] [--deployment-notes text]
-                                  [--pr-body text] [--pr-ref R] [--target-branch B]
-                                  [--tracker-ref R] [--tracker-type T]
-                                  [--tracker-context-type T] [--tracker-context-ref R]
-                                  [--auto-close | --no-auto-close]
-                                  [--require-provider p | --exclude-provider p |
-                                   --clear-provider-constraint]
-                                  [--permission p] [--remove-permission p]
-                                  ("" clears a field; `arb ticket update --help` lists all)
-      arb ticket close    <id> [--reason ...] [--no-upstream]
-      arb ticket reopen   <id>
-      arb attention       [--owner coordinator|operator] [--workspace <id|name>]
-                                  the open attention queue (tickets needing someone)
-      arb verify          <id> --observed "<evidence>" | --failed "<evidence>"   (== arb ticket verify)
-      arb ticket permit   <id> <permission> [--deny] [--reason "<why>"]
-                                  grant or deny a permission a worker asked for (operator-only
-                                  bindings need operator proof; a network: grant is live)
-      arb ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
-                                  record the post-merge restart-and-observe result
-                                  for a ticket in state verifying
-      arb ticket resolve  <id> --accept-as-is|--amend|--send-back|--reject "<reasoning>"
-                                  [--gate review_gate|notes_gate|commit_gate] [--round N]
-                                  [--fix-round-attempt N]
-                                  record your answer to a gate escalation — what the
-                                  coordinator decided and why (bd-4qjl0q)
-      arb ticket claim    <ref> [--force] [--repo <repo>]
-      arb ticket sync     [--dry]
-      arb ticket ready
-      arb ticket dispatch <id> [<repo>] [--provider claude|gemini|codex|grok | --no-agent]
-                          [--model <name>] [--force] [--over-cap]
-                          [--force-quota [--force-quota-reason <why>]]
-                                  (== arb dispatch; --with-claude/--with-gemini are deprecated aliases)
+      ward ticket list     [--state ...] [--type ...] [--priority ...] [--labels ...] [--tracker]
+      ward ticket show     <id>
+      ward ticket create   <title> [--description ...] [--priority ...] [--type ...]
+                                   [--acceptance a | --acceptance-file PATH]
+                                   [--notes t] [--qa-notes t] [--deployment-notes t]
+                                   [--deps id1,id2] [--labels a,b] [--parent <parent-id>]
+                                   [--auto-close] [--tracker-ref R] [--tracker-type T]
+                                   [--tracker-context-type T] [--tracker-context-ref R]
+                                   [--require-provider p | --exclude-provider p]
+                                   [--depends-on id1,id2] [--blocks id1,id2]
+      ward ticket create   --from-file <batch.json|batch.yaml|-> [--promote] [--force]   (atomic graph)
+      ward ticket update   <id> [--title ...] [--priority N] [--difficulty N] [--type T]
+                                   [--description d] [--notes t | --append-notes t]
+                                   [--acceptance a | --acceptance-file PATH]
+                                   [--qa-notes text] [--deployment-notes text]
+                                   [--pr-body text] [--pr-ref R] [--target-branch B]
+                                   [--tracker-ref R] [--tracker-type T]
+                                   [--tracker-context-type T] [--tracker-context-ref R]
+                                   [--auto-close | --no-auto-close]
+                                   [--require-provider p | --exclude-provider p |
+                                    --clear-provider-constraint]
+                                   [--permission p] [--remove-permission p]
+                                   ("" clears a field; `ward ticket update --help` lists all)
+      ward ticket close    <id> [--reason ...] [--no-upstream]
+      ward ticket reopen   <id>
+      ward attention       [--owner coordinator|operator] [--workspace <id|name>]
+                                   the open attention queue (tickets needing someone)
+      ward verify          <id> --observed "<evidence>" | --failed "<evidence>"   (== ward ticket verify)
+      ward ticket permit   <id> <permission> [--deny] [--reason "<why>"]
+                                   grant or deny a permission a worker asked for (operator-only
+                                   bindings need operator proof; a network: grant is live)
+      ward ticket verify   <id> --observed "<evidence>" | --failed "<evidence>"
+                                   record the post-merge restart-and-observe result
+                                   for a ticket in state verifying
+      ward ticket resolve  <id> --accept-as-is|--amend|--send-back|--reject "<reasoning>"
+                                   [--gate review_gate|notes_gate|commit_gate] [--round N]
+                                   [--fix-round-attempt N]
+                                   record your answer to a gate escalation — what the
+                                   coordinator decided and why (bd-4qjl0q)
+      ward ticket claim    <ref> [--force] [--repo <repo>]
+      ward ticket sync     [--dry]
+      ward ticket ready
+      ward ticket dispatch <id> [<repo>] [--provider claude|gemini|codex|grok | --no-agent]
+                           [--model <name>] [--force] [--over-cap]
+                           [--force-quota [--force-quota-reason <why>]]
+                                   (== ward dispatch; --with-claude/--with-gemini are deprecated aliases)
 
-                                  `arb issue …` is a deprecated alias for `arb ticket …`:
-                                  it still runs, and prints a one-line note on stderr.
+                                   `ward issue …` is a deprecated alias for `ward ticket …`:
+                                   it still runs, and prints a one-line note on stderr.
 
-      arb epic floor      <id> P1|P2|P3|none
-                                  set or clear an epic's priority floor: its children
-                                  are scheduled as min(own priority, floor). Operator
-                                  and coordinator only; P0 is never a floor.
+      ward epic floor      <id> P1|P2|P3|none
+                                   set or clear an epic's priority floor: its children
+                                   are scheduled as min(own priority, floor). Operator
+                                   and coordinator only; P0 is never a floor.
 
-      arb worker list
-      arb worker show     <task-id>
-      arb worker runs     [<task-id>] [--kind K] [--state S] [--outcome O] [--before ISO] [--limit N]
-      arb worker runs     --run <run-id> | <task-id> --corpus
-      arb worker log      <task-id> [--run <run-id>] [--tail N]
-      arb worker prompt   <task-id> [--run <run-id>]
-      arb worker stop     <task-id>
-      arb worker resume   <task-id> [<repo> | --repo <repo>] [--model <name>] [--force]
-                          [--force-quota [--force-quota-reason <why>]] [--mode session|briefing]
-      arb worker review   <task-id> [--repo <repo>] [--model <name>] [--force] [--automation <mode>]
-                          [--force-quota [--force-quota-reason <why>]]
-      arb queue retry-auto-resolve <task-id>
-      arb queue restart-watchdog   <task-id>
-      arb queue rerun-ci           <task-id> [--mode <mode>] [--workflow <w>] [--input k=v]
-      arb queue mark-ci-external   <task-id> <note...>
-      arb review          <task-id> | --pr <url|number> [--report-only] [--force] [--follow-up|--no-follow-up]
-                          [--scope diff|repo] [--automation <mode>] [--repo <repo>]
-                          [--tracker-context-ref <ref> [--tracker-context-type <t>]]
-      arb review list     [--status running|completed|failed] [--since <ts>] [--limit <n>]
-      arb review show     <record-id>              proposed comments, numbered
-      arb review transcript <record-id> [--tail <n>] [--no-prompt]
-      arb review rounds   <task-id> [--limit <n>]  ReviewGate rounds + outcome
-      arb review greenlight <record-id> [--select all|none|0,2] [--no-post-verdict]
-      arb review resolve  <task-id> --amend "<reasoning>"   (== arb ticket resolve)
+      ward worker list
+      ward worker show     <task-id>
+      ward worker runs     [<task-id>] [--kind K] [--state S] [--outcome O] [--before ISO] [--limit N]
+      ward worker runs     --run <run-id> | <task-id> --corpus
+      ward worker log      <task-id> [--run <run-id>] [--tail N]
+      ward worker prompt   <task-id> [--run <run-id>]
+      ward worker stop     <task-id>
+      ward worker resume   <task-id> [<repo> | --repo <repo>] [--model <name>] [--force]
+                           [--force-quota [--force-quota-reason <why>]] [--mode session|briefing]
+      ward worker review   <task-id> [--repo <repo>] [--model <name>] [--force] [--automation <mode>]
+                           [--force-quota [--force-quota-reason <why>]]
+      ward queue retry-auto-resolve <task-id>
+      ward queue restart-watchdog   <task-id>
+      ward queue rerun-ci           <task-id> [--mode <mode>] [--workflow <w>] [--input k=v]
+      ward queue mark-ci-external   <task-id> <note...>
+      ward review          <task-id> | --pr <url|number> [--report-only] [--force] [--follow-up|--no-follow-up]
+                           [--scope diff|repo] [--automation <mode>] [--repo <repo>]
+                           [--tracker-context-ref <ref> [--tracker-context-type <t>]]
+      ward review list     [--status running|completed|failed] [--since <ts>] [--limit <n>]
+      ward review show     <record-id>              proposed comments, numbered
+      ward review transcript <record-id> [--tail <n>] [--no-prompt]
+      ward review rounds   <task-id> [--limit <n>]  ReviewGate rounds + outcome
+      ward review greenlight <record-id> [--select all|none|0,2] [--no-post-verdict]
+      ward review resolve  <task-id> --amend "<reasoning>"   (== ward ticket resolve)
 
-      arb repo list
-      arb repo show       <name>
+      ward repo list
+      ward repo show       <name>
 
-      arb skill list
-      arb skill show      <id|name>
-      arb skill create    <name> [--body ... | --body-file PATH | -] [--metadata JSON]
-      arb skill update    <id|name> [--name NEW] [--body ... | --body-file PATH | -]
-                                  [--metadata JSON]
-      arb skill delete    <id|name> [--force]
+      ward skill list
+      ward skill show      <id|name>
+      ward skill create    <name> [--body ... | --body-file PATH | -] [--metadata JSON]
+      ward skill update    <id|name> [--name NEW] [--body ... | --body-file PATH | -]
+                                   [--metadata JSON]
+      ward skill delete    <id|name> [--force]
 
-      arb account list                              [--provider p] [--include-merged] [--include-deleted]
-      arb account show    <ref>                      (uuid, provider:slug, or bare slug)
-      arb account create  <provider> <slug>          [--label ...] [--plan ...] [--max-concurrent N]
-                          [--disable] [--provider-account-ref ID] [--provider-org-ref ID] [quota flags]
-      arb account set     <ref>                      [--label ...] [--plan ...] [--enable|--disable]
-                          [--max-concurrent N|none] [--budget-split queue|fair] [--admission legacy|shadow|enforce|inherit] [--threshold-mode flat|paced]
-                          [--throttle-threshold F]
-                          [--weekly-threshold F] [--paced-floor F] [--weekly-paced-floor F]
-                          [--pace-curve plateau|ramp] [--daily-burn-cap F|none] [--daily-burn-cap-mode shadow|enforce] [--weekly-warning-policy ignore|hold] [--window-seconds LABEL=SECONDS]
-                          [--pace-exempt-priority 0..4|none] [--pace-exempt-threshold F]
-                          [--weekly-pace-exempt-threshold F] [--unset QUOTA_KEY]
-      arb account attach  <workspace> <provider> <ref> [--share N] [--weight N]
-      arb account detach  <workspace> <ref>
-      arb account rotate  <ref> --kind k --env-var V (--secret S | --secret-file PATH | -)
-      arb account merge   <from-ref> --into <into-ref>
+      ward account list                              [--provider p] [--include-merged] [--include-deleted]
+      ward account show    <ref>                      (uuid, provider:slug, or bare slug)
+      ward account create  <provider> <slug>          [--label ...] [--plan ...] [--max-concurrent N]
+                           [--disable] [--provider-account-ref ID] [--provider-org-ref ID] [quota flags]
+      ward account set     <ref>                      [--label ...] [--plan ...] [--enable|--disable]
+                           [--max-concurrent N|none] [--budget-split queue|fair] [--admission legacy|shadow|enforce|inherit] [--threshold-mode flat|paced]
+                           [--throttle-threshold F]
+                           [--weekly-threshold F] [--paced-floor F] [--weekly-paced-floor F]
+                           [--pace-curve plateau|ramp] [--daily-burn-cap F|none] [--daily-burn-cap-mode shadow|enforce] [--weekly-warning-policy ignore|hold] [--window-seconds LABEL=SECONDS]
+                           [--pace-exempt-priority 0..4|none] [--pace-exempt-threshold F]
+                           [--weekly-pace-exempt-threshold F] [--unset QUOTA_KEY]
+      ward account attach  <workspace> <provider> <ref> [--share N] [--weight N]
+      ward account detach  <workspace> <ref>
+      ward account rotate  <ref> --kind k --env-var V (--secret S | --secret-file PATH | -)
+      ward account merge   <from-ref> --into <into-ref>
 
-      arb dep add         <from> <type> <to>
-      arb dep add         --stdin   (JSON edges or `<from> <type> <to>` lines; per-edge results)
-      arb dep remove      <from> <to>
+      ward dep add         <from> <type> <to>
+      ward dep add         --stdin   (JSON edges or `<from> <type> <to>` lines; per-edge results)
+      ward dep remove      <from> <to>
 
-      arb config get      [dotted.key] [--workspace W] [--json]
-      arb config set      <dotted.key> <value> [--workspace W] [--force]
-      arb config unset    <dotted.key> [--workspace W] [--force]
+      ward config get      [dotted.key] [--workspace W] [--json]
+      ward config set      <dotted.key> <value> [--workspace W] [--force]
+      ward config unset    <dotted.key> [--workspace W] [--force]
 
-      arb server start    [--timeout SECONDS] [--json]
-      arb server restart  [--timeout SECONDS] [--json]
-      arb server deploy   [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]
-                          deploy from a GitHub Release (add --git-pull for the
-                          legacy git-pull deploy).
-      arb server migrate  [--json]
-      arb server doctor   [--json]
-      arb server version  [--json]
+      ward server start    [--timeout SECONDS] [--json]
+      ward server restart  [--timeout SECONDS] [--json]
+      ward server deploy   [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]
+                           deploy from a GitHub Release (add --git-pull for the
+                           legacy git-pull deploy).
+      ward server migrate  [--json]
+      ward server doctor   [--json]
+      ward server version  [--json]
 
-      arb batch           [--file PATH] [--continue-on-error]
-                                  run many arb commands in ONE VM: one command per line from
-                                  stdin or --file, one JSON result per line. The CLI analogue
-                                  of the bulk API/MCP verbs; use it instead of shell loops.
+      ward batch           [--file PATH] [--continue-on-error]
+                                   run many ward commands in ONE VM: one command per line from
+                                   stdin or --file, one JSON result per line. The CLI analogue
+                                   of the bulk API/MCP verbs; use it instead of shell loops.
 
-      arb dashboard login [--json]   print a one-time browser login link
+      ward dashboard login [--json]   print a one-time browser login link
 
-      arb workspace list
-      arb workspace show  <id>
+      ward workspace list
+      ward workspace show  <id>
 
-      arb message inbox   [--all | read <id> | clear | <task-id>]
-      arb message send    <recipient> <body> [--subject ...] [--task bd-x] [--kind ...]
-                                  (--directive is a deprecated alias for --task)
-      arb message notify  [--limit N]
+      ward message inbox   [--all | read <id> | clear | <task-id>]
+      ward message send    <recipient> <body> [--subject ...] [--task bd-x] [--kind ...]
+                                   (--directive is a deprecated alias for --task)
+      ward message notify  [--limit N]
 
-      arb usage show      [--by day|task|epic|workspace|repo|model|step|provider]
-                                  [--since 7d|24h|<iso>] [--workspace <id>] [--limit N]
-      arb usage events    [--task <task-id>] [--workspace <id>] [--step work|review]
-                                  [--since ...] [--limit N]
+      ward usage show      [--by day|task|epic|workspace|repo|model|step|provider]
+                                   [--since 7d|24h|<iso>] [--workspace <id>] [--limit N]
+      ward usage events    [--task <task-id>] [--workspace <id>] [--step work|review]
+                                   [--since ...] [--limit N]
 
-      arb loop analyze    [--since 7d|24h|<iso>] [--until <iso>] [--limit N]
-                                  [--workspace <id>] [--propose] [--discover] [--difficulty-feed] [--competence-feed] [--json]
-      arb loop pending    [--state proposed|hypothesis|...] [--kind ...]
-                                  [--workspace <id>] [--limit N] [--json]
-      arb loop diff       <id>
-      arb loop apply      <id> | all [--state proposed]
-      arb loop reject     <id> [--reason "..."]
+      ward loop analyze    [--since 7d|24h|<iso>] [--until <iso>] [--limit N]
+                                   [--workspace <id>] [--propose] [--discover] [--difficulty-feed] [--competence-feed] [--json]
+      ward loop pending    [--state proposed|hypothesis|...] [--kind ...]
+                                   [--workspace <id>] [--limit N] [--json]
+      ward loop diff       <id>
+      ward loop apply      <id> | all [--state proposed]
+      ward loop reject     <id> [--reason "..."]
 
-      arb trust show      [<provider/model>] [--json]   tiers, records, recent events, proposals
-      arb trust promote   <provider/model> --to <tier> --reason "..."
-                                  operator only: mints proof over the operator socket
-      arb trust confirm   <provider/model>              let an automatic suspension stand
-      arb trust dismiss   <provider/model> --reason "..."   a false positive: the tier returns
+      ward trust show      [<provider/model>] [--json]   tiers, records, recent events, proposals
+      ward trust promote   <provider/model> --to <tier> --reason "..."
+                                   operator only: mints proof over the operator socket
+      ward trust confirm   <provider/model>              let an automatic suspension stand
+      ward trust dismiss   <provider/model> --reason "..."   a false positive: the tier returns
 
-      arb settings get    [key] [--json]          install-wide settings (not workspace config)
-      arb settings set    <key> <value>
-      arb settings unset  <key>
-      arb settings schema [--json]
+      ward settings get    [key] [--json]          install-wide settings (not workspace config)
+      ward settings set    <key> <value>
+      ward settings unset  <key>
+      ward settings schema [--json]
 
-      arb scheduler pause|resume|status
-      arb scheduler wait  [--timeout SECS] [--interval SECS]
-      arb node add     [--name N] [--label k=v ...] [--max-workers N] [--ttl 15m] [--token-file PATH]
-                       mint a join token: prints the one-liner for the new node and,
-                       separately, the token (terminal or --token-file only)
-      arb node list|show <name|id>|events <name|id>
-      arb node set <name|id> [--name N] [--label k=v ...] [--max-workers N|none]
-                   [--workspace ID ...] [--allow-unenforced-network | --no-allow-unenforced-network]
+      ward scheduler pause|resume|status
+      ward scheduler wait  [--timeout SECS] [--interval SECS]
+      ward node add     [--name N] [--label k=v ...] [--max-workers N] [--ttl 15m] [--token-file PATH]
+                        mint a join token: prints the one-liner for the new node and,
+                        separately, the token (terminal or --token-file only)
+      ward node list|show <name|id>|events <name|id>
+      ward node set <name|id> [--name N] [--label k=v ...] [--max-workers N|none]
+                    [--workspace ID ...] [--allow-unenforced-network | --no-allow-unenforced-network]
 
-      arb provider pause <provider|account-ref> [--reason TEXT] [--stop-running]
-      arb provider resume <provider|account-ref>
-      arb provider list
+      ward provider pause <provider|account-ref> [--reason TEXT] [--stop-running]
+      ward provider resume <provider|account-ref>
+      ward provider list
 
-      arb quota           [--workspace <id|name>] [--json]
+      ward quota           [--workspace <id|name>] [--json]
 
-      arb preflip-gate    [--json]
-                                  §6.3's coverage-shadow rollout gate: may
-                                  `merge.coverage_enabled` be flipped?
+      ward preflip-gate    [--json]
+                                   §6.3's coverage-shadow rollout gate: may
+                                   `merge.coverage_enabled` be flipped?
 
-      arb memory pending  [--state pending|rejected] [--json]   shared-memory promotion queue (operator only)
-      arb memory diff     <id>
-      arb memory apply    <id> [--overwrite]
-      arb memory reject   <id> --reason "..."
-      arb memory quarantine
-      arb memory restore  <name> [--reanchor]
-      arb memory distill  <session-id> [--max-bytes N] [--from-turn N] [--max-candidates N]
-                                  [--max-cost-usd X]
+      ward memory pending  [--state pending|rejected] [--json]   shared-memory promotion queue (operator only)
+      ward memory diff     <id>
+      ward memory apply    <id> [--overwrite]
+      ward memory reject   <id> --reason "..."
+      ward memory quarantine
+      ward memory restore  <name> [--reanchor]
+      ward memory distill  <session-id> [--max-bytes N] [--from-turn N] [--max-candidates N]
+                                   [--max-cost-usd X]
 
-      arb alert list      [--workspace <id|name>] [--kind <k>] [--json]
-      arb breaker list    [--workspace <id|name>] [--kind <k>] [--open] [--json]
-      arb breaker reset   <signature> | --all [--kind <k>] [--json]
+      ward alert list      [--workspace <id|name>] [--kind <k>] [--json]
+      ward breaker list    [--workspace <id|name>] [--kind <k>] [--open] [--json]
+      ward breaker reset   <signature> | --all [--kind <k>] [--json]
 
-      arb grok-token                          a grok worker's GROK_AUTH_PROVIDER_COMMAND:
-                                  prints {"access_token","expires_in"} from the server
+      ward grok-token                          a grok worker's GROK_AUTH_PROVIDER_COMMAND:
+                                   prints {"access_token","expires_in"} from the server
 
-      arb image list      [--json]            worker images (podman backend) + base digest pins
-      arb image build     <repo> [--workspace <id|name>] [--json]
-                                  build <repo>'s image from its DEFAULT BRANCH
-      arb image refresh   [--json]            re-pin base images now, then prune
-      arb image prune     [--json]
+      ward image list      [--json]            worker images (podman backend) + base digest pins
+      ward image build     <repo> [--workspace <id|name>] [--json]
+                                   build <repo>'s image from its DEFAULT BRANCH
+      ward image refresh   [--json]            re-pin base images now, then prune
+      ward image prune     [--json]
 
-      arb install cli     [--json]
-      arb install service [--system] [--uninstall] [--json]
+      ward install cli     [--json]
+      ward install service [--system] [--uninstall] [--json]
 
-      arb mcp token mint  --tier coordinator [--workspace <id>] [--ttl <seconds>] [--json]
-      arb mcp token verify <token> [--json]
+      ward mcp token mint  --tier coordinator [--workspace <id>] [--ttl <seconds>] [--json]
+      ward mcp token verify <token> [--json]
 
-      arb session list                        works with the server stopped (§4.7):
-                                               reads systemd + tmux directly, never HTTP
-      arb session attach <id> [--read-only]
+      ward session list                        works with the server stopped (§4.7):
+                                                reads systemd + tmux directly, never HTTP
+      ward session attach <id> [--read-only]
 
   ## Meta commands (no resource)
 
-      arb prime                Mission briefing — run at the start of a session
-      arb where                Resolve the active workspace / paths
-      arb init [path] [--force]
-      arb self-update          [--version vX.Y.Z] [--json] [--force]
-                               download and atomically replace ~/.local/bin/arb
-                               from the latest GitHub Release (or --version).
-                               alias: arb upgrade
-      arb version
-      arb help
+      ward prime                Mission briefing — run at the start of a session
+      ward where                Resolve the active workspace / paths
+      ward init [path] [--force]
+      ward self-update          [--version vX.Y.Z] [--json] [--force]
+                                download and atomically replace ~/.local/bin/ward
+                                (plus the wm symlink and arb shim) from the latest
+                                GitHub Release (or --version).
+                                alias: ward upgrade
+      ward version
+      ward help
 
   ## Global flags
 
       --json               Emit machine-readable JSON (default is human-readable text)
-      -w, --workspace <n>  Target workspace by name or id; overrides ARB_WORKSPACE
+      -w, --workspace <n>  Target workspace by name or id; overrides WARDMAST_WORKSPACE
       -h, --help           Show usage
       --allow-fanout, --force
-                           Override the refusal when too many `arb` VMs already run
+                           Override the refusal when too many `ward` VMs already run
 
   ## Env
 
-      ARB_HOST       Phoenix base URL (default http://127.0.0.1:4848)
+      WARDMAST_HOST       Phoenix base URL (default http://127.0.0.1:4848; falls back to ARB_HOST)
       ARB_FANOUT_WARN / ARB_FANOUT_MAX
-                     Fan-out guard thresholds (default 16 / 64 other running `arb` VMs);
-                     ARB_ALLOW_FANOUT=1 lifts the refusal
-      ARB_WORKSPACE  Workspace name or id (unset: "default", else the sole workspace); overridden by -w / --workspace
+                          Fan-out guard thresholds (default 16 / 64 other running `ward` VMs);
+                          ARB_ALLOW_FANOUT=1 lifts the refusal
+      WARDMAST_WORKSPACE  Workspace name or id (unset: "default", else the sole workspace; falls back to ARB_WORKSPACE); overridden by -w / --workspace
   """
 
   def main(argv) do
