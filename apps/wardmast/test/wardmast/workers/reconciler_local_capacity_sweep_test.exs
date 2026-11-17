@@ -32,6 +32,15 @@ defmodule Wardmast.Workers.ReconcilerLocalCapacitySweepTest do
     defdelegate restarted_ids(lists), to: Wardmast.Workers.Reconciler
     defdelegate reconcile_open_pr_tasks(opts), to: Wardmast.Workers.Reconciler
 
+    # Never a real process (bd-568ib9): `ps` finds nothing, `kill` signals nothing.
+    def sweep_worker_process_groups(opts) do
+      no_process = [ps: fn _pid -> {"", 1} end, kill: fn _args -> {"", 1} end]
+
+      Wardmast.Workers.Reconciler.sweep_worker_process_groups(
+        Keyword.put(opts, :process_group_opts, no_process)
+      )
+    end
+
     def sweep_worker_scopes(opts) do
       scope_opts = [systemctl: "systemctl-stub", cmd: fn _bin, _args, _opts -> {"", 0} end]
       Wardmast.Workers.Reconciler.sweep_worker_scopes(Keyword.put(opts, :scope_opts, scope_opts))

@@ -18,9 +18,12 @@ defmodule Wardmast.Worker.OsProcess do
   Everything here is best-effort: a kill hiccup must never crash teardown, and
   a host without `pgrep` degrades to killing the root process alone.
 
-  The BEAM shares its process group with the port's children, so a group kill
-  is not an option — the descendants have to be enumerated and signalled
-  individually.
+  A port child does not share the BEAM's process group: `erl_child_setup`
+  calls `setsid()` for every one, so it leads its own session and group. A
+  worker's agent is therefore also killed as a whole group
+  (`Wardmast.Worker.ProcessGroup`, bd-568ib9), which reaches what was
+  reparented out of this walk's reach. The walk still covers descendants that
+  left the group (their own `setsid`) and callers that recorded no group.
 
   Reading a port's own OS pid deliberately stays with each caller: routing
   `Port.info(port, :os_pid)` through here instead costs `Wardmast.Worker` a
