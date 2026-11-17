@@ -525,6 +525,11 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
       pruned,
       extras
     )
+
+    # The report is out and the status file is final: only now is it safe to
+    # replace the `arb` file this process may be running from.
+    _ = SelfUpdate.flush_pending_shim()
+    :ok
   end
 
   # Install the `arb` escript for the same tag, so the CLI and the server it

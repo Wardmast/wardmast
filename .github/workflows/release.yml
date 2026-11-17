@@ -269,7 +269,7 @@ jobs:
   #
   # Differences from `build`, each deliberate:
   #   - no container: macOS has no ubi8 baseline; portability is instead the
-  #     MACOSX_DEPLOYMENT_TARGET pin plus scripts/check-release-dylibs.sh
+  #     MACOSX_DEPLOYMENT_TARGET pin plus scripts/check-release-macho-libs.sh
   #     (system / relative dylibs only — the static OpenSSL guard).
   #   - OTP comes from scripts/build-release-otp.sh (darwin64-arm64-cc), cached
   #     under $HOME/otp (/opt is not writable on the runner) with its own key.
@@ -387,6 +387,28 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.tag.outputs.name }}
 
+      - name: Ad-hoc codesign Mach-O files and verify
+        # arm64 macOS refuses to run unsigned code. Sign every Mach-O file
+        # (ad hoc, no identity) after the release is assembled and before it is
+        # archived, then verify each signature.
+        run: |
+          REL="_build/prod/rel/wardmast"
+          signed=0
+          while IFS= read -r -d '' f; do
+            case "$(head -c 4 "$f" | od -An -tx1 | tr -d ' \n')" in
+              cffaedfe | feedfacf | cefaedfe | feedface | cafebabe | bebafeca) ;;
+              *) continue ;;
+            esac
+            codesign --force -s - "$f"
+            codesign --verify --strict "$f"
+            signed=$((signed + 1))
+          done < <(find "${REL}" -type f -print0)
+          if [ "${signed}" -eq 0 ]; then
+            echo "error: no Mach-O files found to sign under ${REL}" >&2
+            exit 1
+          fi
+          echo "signed and verified ${signed} Mach-O file(s)"
+
       - name: Package and checksum release
         run: |
           TAG="${{ steps.tag.outputs.name }}"
@@ -412,7 +434,7 @@ jobs:
         # The macOS analogue of the ubi8 shared-lib guard: a Homebrew dylib in
         # any Mach-O file fails the release here, naming file and library.
         run: |
-          bash scripts/check-release-dylibs.sh "${TARBALL}"
+          bash scripts/check-release-macho-libs.sh "${TARBALL}"
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
