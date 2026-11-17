@@ -94,7 +94,7 @@ defmodule WardmastCli.Supervisor do
   @doc "Shell command an operator runs to follow the service's logs, echoed in output."
   @callback logs_cmd(scope()) :: String.t()
 
-  @doc "Name of the service manager, for operator-facing messages (`\"systemd\"`, `\"launchd\"`)."
+  @doc ~S|Name of the service manager, for operator-facing messages (`"systemd"`, `"launchd"`).|
   @callback manager_name() :: String.t()
 
   @doc "Shell command an operator runs to restart the service."
