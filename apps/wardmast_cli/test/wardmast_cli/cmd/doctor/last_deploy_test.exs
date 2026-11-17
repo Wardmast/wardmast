@@ -54,6 +54,7 @@ defmodule WardmastCli.Cmd.Doctor.LastDeployTest do
     assert hint =~ "deploy-status.json"
   end
 
+  @tag :linux
   test "a deploy still running is ok; a dead one reads as interrupted" do
     Status.start("v2.0.0", %{})
     assert %{status: :ok, detail: running} = Checks.check_last_deploy()

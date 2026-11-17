@@ -12,6 +12,9 @@ defmodule Wardmast.MCP.OperatorSocketTest do
   """
   use ExUnit.Case, async: true
 
+  # Linux-only: fails on a macOS-like host (no /proc, GNU `timeout`, `setsid`, ...); excluded on darwin by test_helper.exs.
+  @moduletag :linux
+
   @moduletag :capture_log
 
   alias Wardmast.MCP.OperatorSocket

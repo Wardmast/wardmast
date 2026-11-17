@@ -123,6 +123,7 @@ defmodule Wardmast.WorkerShutdownTest do
       assert Worker.whereis(task_id) == nil
     end
 
+    @tag :linux
     test "SIGKILLs the live agent and its descendants" do
       sup = start_sup!()
       {pid, task_id} = start_worker!(sup)

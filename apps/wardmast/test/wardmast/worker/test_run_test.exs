@@ -58,6 +58,7 @@ defmodule Wardmast.Worker.TestRunTest do
   defp calls(ctx), do: ctx.calls |> File.read!() |> String.split("\n", trim: true)
 
   describe "host_exec/2 toolchain (bd-3fnqi8)" do
+    @tag :linux
     test "a pinned toolchain that cannot be provided runs nothing", %{tmp_dir: dir} do
       File.write!(Path.join(dir, ".tool-versions"), "elixir 1.20.4-otp-29\n")
       Application.put_env(:wardmast, :worker_toolchain_roots, [Path.join(dir, "empty")])
@@ -75,6 +76,7 @@ defmodule Wardmast.Worker.TestRunTest do
       refute File.exists?(marker)
     end
 
+    @tag :linux
     test "an unpinned worktree runs as before", %{tmp_dir: dir} do
       assert {"hi\n", 0} = TestRun.host_exec(dir, []).("echo hi", 5)
     end

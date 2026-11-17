@@ -122,6 +122,7 @@ defmodule Wardmast.Agents.PreflightProbeTest do
   # Hazard B. `Port.close/1` does not kill a `:spawn_executable` child; the
   # timed-out agy probe outlived the watchdog by 72 seconds, still burning quota.
   describe "a timed-out probe leaves no surviving child (Hazard B)" do
+    @tag :linux
     test "the spawned process and its descendants are gone after the watchdog fires" do
       parent_file = tmp_path("parent.pid")
       child_file = tmp_path("child.pid")

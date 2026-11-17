@@ -373,6 +373,7 @@ defmodule Wardmast.Worker.ContainerSpawnCodexTest do
   # `image_test.exs` ("a repo Containerfile with no USER ...") and run against real
   # podman in `image_podman_test.exs`.
   describe "CODEX_HOME is readable by the container user (bd-83gbsh)" do
+    @tag :linux
     test "config.toml is owned by the uid keep-id maps in, mode 0600, in a mounted dir", ctx do
       {:ok, request} = ContainerSpawn.prepare(ctx.opts)
       assert {:ok, %{argv: argv}} = ContainerSpawn.wrap_port(port_args(ctx, request))

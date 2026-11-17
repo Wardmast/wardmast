@@ -116,6 +116,7 @@ defmodule WardmastWeb.Api.ReleaseDeployControllerTest do
       refute_received {:cmd, "systemd-run", _}
     end
 
+    @tag :linux
     test "a second trigger while a deploy is running is refused (409)", %{home: home} do
       now = DateTime.utc_now() |> DateTime.to_iso8601()
 

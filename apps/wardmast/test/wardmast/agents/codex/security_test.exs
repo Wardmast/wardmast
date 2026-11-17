@@ -178,6 +178,7 @@ defmodule Wardmast.Agents.Codex.SecurityTest do
       out |> Jason.decode!() |> Map.get("decision")
     end
 
+    @tag :linux
     test "forbids what the rules name and leaves the rest alone", ctx do
       if ctx.codex do
         for cmd <- [

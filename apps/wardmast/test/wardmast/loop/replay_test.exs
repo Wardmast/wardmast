@@ -381,6 +381,7 @@ defmodule Wardmast.Loop.ReplayTest do
                run.admission
     end
 
+    @tag :linux
     test "a replay that misses the criteria does not converge, and overlaps less", ctx do
       implement = fn spec ->
         commit!(spec.dir, %{"lib/other.ex" => "defmodule Other do\nend\n"}, "something else")
@@ -546,6 +547,7 @@ defmodule Wardmast.Loop.ReplayTest do
   end
 
   describe "the repo's tests run the replayed model's code, so only ever in a container" do
+    @tag :linux
     test "in its container, through the runner: the recipe, in the replay's checkout, at the base",
          ctx do
       assert {:ok, run} = replay(ctx, layout: :private_clone)

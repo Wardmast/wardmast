@@ -7,6 +7,9 @@ defmodule Wardmast.Quota.GrantRefresherTest do
   """
   use Wardmast.DataCase, async: false
 
+  # Linux-only: fails on a macOS-like host (no /proc, GNU `timeout`, `setsid`, ...); excluded on darwin by test_helper.exs.
+  @moduletag :linux
+
   alias Wardmast.Messages.Message
   alias Wardmast.Quota.GrantRefresher
   alias Wardmast.Tasks.Workspace
