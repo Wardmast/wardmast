@@ -63,7 +63,8 @@ defmodule WardmastWeb.CssTokensTest do
 
     assert dark_attr_block =~ "--arb-canvas: oklch(16.5% 0.014 258)"
     assert dark_attr_block =~ "--arb-text-primary: oklch(96% 0.006 258)"
-    assert dark_attr_block =~ "--arb-live: oklch(84% 0.19 130)"
+    assert dark_attr_block =~ "--wm-accent: oklch(84% 0.19 130)"
+    assert dark_attr_block =~ "--arb-live: var(--wm-accent)"
 
     # ...and under a guarded prefers-color-scheme fallback, so "system" theme
     # actually follows the OS/browser preference (an explicit light choice
