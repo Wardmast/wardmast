@@ -243,6 +243,10 @@ defmodule WardmastWeb.Api.ServerController do
   # `arb server doctor` can report a check as n/a instead of probing it.
   def doctor_scope(conn, _params), do: json(conn, Wardmast.Doctor.Scope.report())
 
+  # The server's OS, worker PATH and tool lookups, so the doctor judges the
+  # server host rather than the machine the CLI happens to run on.
+  def platform(conn, _params), do: json(conn, Wardmast.Doctor.Platform.report())
+
   # bd-8t4yui: the end-to-end canary spawn, and its cached result for this boot.
   def spawn_canary(conn, _params) do
     case Wardmast.Doctor.SpawnCanary.run() do
