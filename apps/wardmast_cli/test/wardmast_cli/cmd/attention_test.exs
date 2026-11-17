@@ -68,6 +68,6 @@ defmodule WardmastCli.Cmd.AttentionTest do
     {_out, err, code} = capture(fn -> Attention.run(["--bogus"]) end)
 
     assert code == 1
-    assert err =~ "unknown option --bogus for arb attention"
+    assert err =~ "unknown option --bogus for ward attention"
   end
 end

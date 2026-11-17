@@ -143,7 +143,7 @@ defmodule WardmastCli.Cmd.Review do
 
       true ->
         {sub, argv} = split_subcommand(argv)
-        {opts, rest, _mode} = ArgParser.parse(argv, command: "arb review", switches: @switches)
+        {opts, rest, _mode} = ArgParser.parse(argv, command: "ward review", switches: @switches)
         mode = if opts[:json], do: :json, else: :text
         dispatch(sub, opts, rest, mode)
     end

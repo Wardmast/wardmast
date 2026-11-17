@@ -16,7 +16,7 @@ defmodule WardmastCli.Cmd.Show do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {_opts, rest, mode} = ArgParser.parse(argv, command: "arb ticket show", switches: [])
+      {_opts, rest, mode} = ArgParser.parse(argv, command: "ward ticket show", switches: [])
 
       case rest do
         [id] -> show(id, mode)

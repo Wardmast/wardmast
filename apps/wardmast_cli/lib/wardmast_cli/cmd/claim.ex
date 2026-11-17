@@ -72,7 +72,7 @@ defmodule WardmastCli.Cmd.Claim do
       IO.puts(@moduledoc)
     else
       {opts, rest, _mode} =
-        ArgParser.parse(argv, command: "arb ticket claim", switches: @switches)
+        ArgParser.parse(argv, command: "ward ticket claim", switches: @switches)
 
       opts = ArgParser.coerce_difficulty(opts)
       mode = if opts[:json], do: :json, else: :text

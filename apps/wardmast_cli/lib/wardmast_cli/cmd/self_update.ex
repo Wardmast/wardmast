@@ -60,7 +60,7 @@ defmodule WardmastCli.Cmd.SelfUpdate do
   end
 
   defp do_self_update(argv) do
-    {opts, _rest, mode} = ArgParser.parse(argv, command: "arb self-update", strict: @switches)
+    {opts, _rest, mode} = ArgParser.parse(argv, command: "ward self-update", strict: @switches)
     force = opts[:force] || false
 
     try do
@@ -475,7 +475,11 @@ defmodule WardmastCli.Cmd.SelfUpdate do
   defp emit_updated(:text, tag, prior_version) do
     install = install_path()
     IO.puts("")
-    IO.puts("Updated ward to #{tag}" <> if(prior_version, do: " (was #{prior_version})", else: ""))
+
+    IO.puts(
+      "Updated ward to #{tag}" <> if(prior_version, do: " (was #{prior_version})", else: "")
+    )
+
     IO.puts("Installed at #{install}")
     IO.puts("")
     IO.puts("Run `ward version` to confirm the new version is active.")

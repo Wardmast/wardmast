@@ -32,7 +32,7 @@ defmodule WardmastCli.Cmd.Verify do
       IO.puts(@moduledoc)
     else
       {opts, rest, _mode} =
-        ArgParser.parse(argv, command: "arb ticket verify", switches: @switches)
+        ArgParser.parse(argv, command: "ward ticket verify", switches: @switches)
 
       mode = if opts[:json], do: :json, else: :text
 

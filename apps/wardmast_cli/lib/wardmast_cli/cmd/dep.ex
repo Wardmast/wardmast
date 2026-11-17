@@ -66,7 +66,7 @@ defmodule WardmastCli.Cmd.Dep do
     else
       {opts, rest, mode} =
         ArgParser.parse(argv,
-          command: "arb dep",
+          command: "ward dep",
           switches: [type: :string, workspace: :string, json: :boolean, stdin: :boolean]
         )
 

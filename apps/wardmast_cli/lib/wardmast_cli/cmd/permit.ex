@@ -31,7 +31,7 @@ defmodule WardmastCli.Cmd.Permit do
 
   defp do_run(argv) do
     {opts, rest, _mode} =
-      ArgParser.parse(argv, command: "arb ticket permit", switches: @switches)
+      ArgParser.parse(argv, command: "ward ticket permit", switches: @switches)
 
     mode = if opts[:json], do: :json, else: :text
     {id, permission} = parse_positionals(rest)

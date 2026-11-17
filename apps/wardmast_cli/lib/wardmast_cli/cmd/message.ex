@@ -52,7 +52,7 @@ defmodule WardmastCli.Cmd.Message do
   defp send(argv) do
     {opts, positional, mode} =
       ArgParser.parse(argv,
-        command: "arb message send",
+        command: "ward message send",
         strict: [subject: :string, task: :string, directive: :string, kind: :string]
       )
 

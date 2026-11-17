@@ -101,7 +101,7 @@ defmodule WardmastCli.Cmd.Worker do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {flags, rest, mode} = ArgParser.parse(argv, command: "arb worker", switches: @switches)
+      {flags, rest, mode} = ArgParser.parse(argv, command: "ward worker", switches: @switches)
 
       case rest do
         ["list" | _] ->

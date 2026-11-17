@@ -62,7 +62,7 @@ defmodule WardmastCli.Cmd.Resolve do
       IO.puts(@moduledoc)
     else
       {opts, rest, _mode} =
-        ArgParser.parse(argv, command: "arb ticket resolve", switches: @switches)
+        ArgParser.parse(argv, command: "ward ticket resolve", switches: @switches)
 
       mode = if opts[:json], do: :json, else: :text
 

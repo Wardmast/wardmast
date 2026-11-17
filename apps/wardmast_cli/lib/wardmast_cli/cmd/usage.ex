@@ -130,7 +130,7 @@ defmodule WardmastCli.Cmd.Usage do
   defp summarize(argv, mode) do
     {opts, _rest, _mode} =
       ArgParser.parse(argv,
-        command: "arb usage show",
+        command: "ward usage show",
         switches: [
           by: :string,
           since: :string,
@@ -164,7 +164,7 @@ defmodule WardmastCli.Cmd.Usage do
   defp events(argv, mode) do
     {opts, _rest, _mode} =
       ArgParser.parse(argv,
-        command: "arb usage events",
+        command: "ward usage events",
         switches: [
           task: :string,
           workspace: :string,
@@ -203,7 +203,11 @@ defmodule WardmastCli.Cmd.Usage do
   # before deciding which subcommand to run.
   defp session_flag(argv) do
     {opts, _rest, _mode} =
-      ArgParser.parse(argv, passthrough: true, command: "arb usage", switches: [session: :string])
+      ArgParser.parse(argv,
+        passthrough: true,
+        command: "ward usage",
+        switches: [session: :string]
+      )
 
     Keyword.get(opts, :session)
   end
@@ -211,7 +215,7 @@ defmodule WardmastCli.Cmd.Usage do
   defp session_detail(session_id, argv, mode) do
     {opts, _rest, _mode} =
       ArgParser.parse(argv,
-        command: "arb usage events",
+        command: "ward usage events",
         switches: [
           session: :string,
           workspace: :string,
@@ -248,7 +252,7 @@ defmodule WardmastCli.Cmd.Usage do
   defp calibration(argv, mode) do
     {opts, _rest, _mode} =
       ArgParser.parse(argv,
-        command: "arb usage",
+        command: "ward usage",
         switches: [calibration: :boolean, workspace: :string, window_days: :integer],
         aliases: [w: :workspace]
       )

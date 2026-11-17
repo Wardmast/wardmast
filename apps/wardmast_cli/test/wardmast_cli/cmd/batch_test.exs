@@ -136,7 +136,7 @@ defmodule WardmastCli.Cmd.BatchTest do
     test "unknown flag is rejected" do
       {_out, err, code} = capture(fn -> Batch.run(["--bogus-flag"]) end, input: "")
       assert code == 1
-      assert err =~ "unknown option --bogus-flag for arb batch"
+      assert err =~ "unknown option --bogus-flag for ward batch"
     end
   end
 end

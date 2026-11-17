@@ -17,7 +17,7 @@ defmodule WardmastCli.Cmd.Reopen do
       IO.puts(@moduledoc)
     else
       {opts, rest, _mode} =
-        ArgParser.parse(argv, command: "arb ticket reopen", switches: @switches)
+        ArgParser.parse(argv, command: "ward ticket reopen", switches: @switches)
 
       mode = if opts[:json], do: :json, else: :text
 

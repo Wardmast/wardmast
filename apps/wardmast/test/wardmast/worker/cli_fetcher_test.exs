@@ -191,6 +191,13 @@ defmodule Wardmast.Worker.CliFetcherTest do
       assert {:ok, "0.164.0"} = CliFetcher.latest("codex", opts(ctx))
     end
 
+    test "a pre-rename release tag that only carries the `arb` asset still fetches", ctx do
+      Fixtures.serve(Fixtures.arb_routes("1.2.3", asset: "arb"))
+
+      assert {:ok, entry} = CliFetcher.ensure("arb", "1.2.3", opts(ctx))
+      assert File.read!(Cache.object_path(entry, "arb")) == Fixtures.arb_bytes("1.2.3")
+    end
+
     test "arb has no upstream latest: it follows the running release", ctx do
       assert {:error, {:no_upstream_latest, "arb"}} = CliFetcher.latest("arb", opts(ctx))
     end

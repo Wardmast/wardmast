@@ -80,7 +80,7 @@ defmodule WardmastCli.Cmd.Config do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, mode} = ArgParser.parse(argv, command: "arb config", switches: @switches)
+      {opts, rest, mode} = ArgParser.parse(argv, command: "ward config", switches: @switches)
       workspace_opt = opts[:workspace]
       force = opts[:force] || false
 

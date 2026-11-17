@@ -134,7 +134,7 @@ defmodule WardmastCli.Cmd.Workspace do
   defp print_help, do: IO.puts(@moduledoc)
 
   defp list(argv) do
-    {_opts, _rest, mode} = ArgParser.parse(argv, command: "arb workspace list", switches: [])
+    {_opts, _rest, mode} = ArgParser.parse(argv, command: "ward workspace list", switches: [])
 
     case Client.get("/api/workspaces") do
       {:ok, %{"data" => list}} -> emit_list(list, mode)
@@ -144,7 +144,7 @@ defmodule WardmastCli.Cmd.Workspace do
   end
 
   defp show(argv) do
-    {_opts, rest, mode} = ArgParser.parse(argv, command: "arb workspace show", switches: [])
+    {_opts, rest, mode} = ArgParser.parse(argv, command: "ward workspace show", switches: [])
 
     id =
       case rest do
@@ -175,7 +175,7 @@ defmodule WardmastCli.Cmd.Workspace do
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp create(argv) do
     {opts, rest, mode} =
-      ArgParser.parse(argv, command: "arb workspace create", switches: @switches)
+      ArgParser.parse(argv, command: "ward workspace create", switches: @switches)
 
     name =
       case rest do
@@ -229,7 +229,7 @@ defmodule WardmastCli.Cmd.Workspace do
 
   defp update(argv) do
     {opts, rest, mode} =
-      ArgParser.parse(argv, command: "arb workspace update", switches: @switches)
+      ArgParser.parse(argv, command: "ward workspace update", switches: @switches)
 
     body =
       %{}

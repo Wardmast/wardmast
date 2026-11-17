@@ -153,7 +153,7 @@ defmodule WardmastCli.WorkspaceFlagPlumbingTest do
   test "queue -w is rejected, not dropped" do
     {_out, err, code} = run(["queue", "rerun-ci", "bd-1", "-w", "acme"])
     assert code == 1
-    assert err =~ "unknown option -w for arb queue"
+    assert err =~ "unknown option -w for ward queue"
   end
 
   test "node set --workspace is the node's own pin switch, not the global selector" do
@@ -173,7 +173,7 @@ defmodule WardmastCli.WorkspaceFlagPlumbingTest do
   test "node list -w is still rejected" do
     {_out, err, code} = run(["node", "list", "-w", "acme"])
     assert code == 1
-    assert err =~ "unknown option -w for arb node"
+    assert err =~ "unknown option -w for ward node"
   end
 
   test "worker list -w" do

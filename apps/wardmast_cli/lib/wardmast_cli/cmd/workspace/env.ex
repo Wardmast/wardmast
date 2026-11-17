@@ -23,7 +23,7 @@ defmodule WardmastCli.Cmd.Workspace.Env do
   def run(argv, opts) do
     {parsed, rest, mode} =
       ArgParser.parse(argv,
-        command: "arb workspace env",
+        command: "ward workspace env",
         switches: Keyword.fetch!(opts, :switches) ++ [file: :string, secret: :boolean]
       )
 

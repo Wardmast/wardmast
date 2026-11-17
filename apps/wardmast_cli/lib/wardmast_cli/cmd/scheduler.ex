@@ -39,7 +39,7 @@ defmodule WardmastCli.Cmd.Scheduler do
         [verb | rest] when verb in ["pause", "resume", "status"] ->
           {_opts, _rest, mode} =
             ArgParser.parse(rest ++ json_flag(argv),
-              command: "arb scheduler #{verb}",
+              command: "ward scheduler #{verb}",
               switches: []
             )
 
@@ -116,7 +116,7 @@ defmodule WardmastCli.Cmd.Scheduler do
 
   defp wait(argv, mode) do
     {opts, _rest, _mode} =
-      ArgParser.parse_strict!(argv, "arb scheduler wait",
+      ArgParser.parse_strict!(argv, "ward scheduler wait",
         strict: [timeout: :integer, interval: :integer]
       )
 

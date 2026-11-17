@@ -20,7 +20,7 @@ defmodule WardmastCli.Cmd.Notify do
       IO.puts(@moduledoc)
     else
       {opts, _rest, mode} =
-        ArgParser.parse(argv, command: "arb message notify", strict: [limit: :integer])
+        ArgParser.parse(argv, command: "ward message notify", strict: [limit: :integer])
 
       limit = opts[:limit] || @default_limit
 

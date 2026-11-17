@@ -49,7 +49,7 @@ defmodule WardmastCli.Cmd.Settings do
       IO.puts(@moduledoc)
     else
       {opts, rest, mode} =
-        ArgParser.parse(argv, command: "arb settings", switches: [file: :string])
+        ArgParser.parse(argv, command: "ward settings", switches: [file: :string])
 
       case rest do
         ["get" | args] -> get(args, mode)

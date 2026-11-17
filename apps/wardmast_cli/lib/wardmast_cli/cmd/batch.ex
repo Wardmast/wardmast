@@ -43,7 +43,7 @@ defmodule WardmastCli.Cmd.Batch do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, _mode} = ArgParser.parse(argv, command: "arb batch", switches: @switches)
+      {opts, rest, _mode} = ArgParser.parse(argv, command: "ward batch", switches: @switches)
       if rest != [], do: Output.die("unexpected argument for arb batch: #{Enum.join(rest, " ")}")
 
       text = read_input(opts[:file])

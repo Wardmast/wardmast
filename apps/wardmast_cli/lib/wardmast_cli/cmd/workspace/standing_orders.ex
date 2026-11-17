@@ -17,7 +17,7 @@ defmodule WardmastCli.Cmd.Workspace.StandingOrders do
   def run(argv, opts) do
     {parsed, rest, mode} =
       ArgParser.parse(argv,
-        command: "arb workspace standing-order",
+        command: "ward workspace standing-order",
         switches: Keyword.fetch!(opts, :switches)
       )
 

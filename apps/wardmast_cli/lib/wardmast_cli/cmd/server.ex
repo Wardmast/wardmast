@@ -141,7 +141,7 @@ defmodule WardmastCli.Cmd.Server do
       IO.puts(@moduledoc)
     else
       {opts, _rest, _mode} =
-        ArgParser.parse(argv, command: "arb server migrate", switches: @migrate_switches)
+        ArgParser.parse(argv, command: "ward server migrate", switches: @migrate_switches)
 
       mode = Output.mode(argv)
       timeout_ms = max(1, opts[:timeout] || @default_migrate_timeout_s) * 1000

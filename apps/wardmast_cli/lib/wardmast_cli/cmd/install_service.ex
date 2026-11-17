@@ -95,7 +95,7 @@ defmodule WardmastCli.Cmd.InstallService do
   def run(argv) do
     ArgParser.unless_help(argv, @moduledoc, fn ->
       {opts, _rest, mode} =
-        ArgParser.parse(argv, command: "arb install service", switches: @switches)
+        ArgParser.parse(argv, command: "ward install service", switches: @switches)
 
       scope = if opts[:system], do: :system, else: :user
       force = opts[:force] || false

@@ -41,7 +41,7 @@ defmodule WardmastCli.Cmd.Breaker do
     else
       {opts, rest, mode} =
         ArgParser.parse(argv,
-          command: "arb breaker",
+          command: "ward breaker",
           switches: [
             workspace: :string,
             kind: :string,

@@ -95,7 +95,7 @@ defmodule WardmastCli.Cmd.Prime do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {_opts, _rest, mode} = ArgParser.parse(argv, command: "arb prime", switches: [])
+      {_opts, _rest, mode} = ArgParser.parse(argv, command: "ward prime", switches: [])
       sections = gather()
 
       case mode do

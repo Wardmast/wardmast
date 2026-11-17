@@ -71,7 +71,7 @@ defmodule WardmastCli.Cmd.Restart do
       IO.puts(@moduledoc)
     else
       {opts, _rest, _mode} =
-        ArgParser.parse(argv, command: "arb server restart", switches: @switches)
+        ArgParser.parse(argv, command: "ward server restart", switches: @switches)
 
       mode = if opts[:json], do: :json, else: :text
       timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000

@@ -14,7 +14,7 @@ defmodule WardmastCli.Cmd.Version do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {_opts, _rest, mode} = ArgParser.parse(argv, command: "arb version", switches: [])
+      {_opts, _rest, mode} = ArgParser.parse(argv, command: "ward version", switches: [])
       cli_info = cli_version()
       server_result = fetch_server_version()
 

@@ -72,7 +72,8 @@ defmodule WardmastCli.CliCase do
         Process.put(:bd2_operator_socket, "/nonexistent/arb-test-operator.sock")
 
         saved_env =
-          for k <- ~w(WARDMAST_WORKSPACE ARB_WORKSPACE ARBITER_WORKSPACE WARDMAST_HOST ARB_HOST ARBITER_HOST),
+          for k <-
+                ~w(WARDMAST_WORKSPACE ARB_WORKSPACE ARBITER_WORKSPACE WARDMAST_HOST ARB_HOST ARBITER_HOST),
               do: {k, System.get_env(k)}
 
         on_exit(fn ->

@@ -79,7 +79,7 @@ defmodule WardmastCli.Cmd.Inbox do
     else
       {opts, rest, mode} =
         ArgParser.parse(argv,
-          command: "arb message inbox",
+          command: "ward message inbox",
           switches: [
             all: :boolean,
             outstanding: :boolean,

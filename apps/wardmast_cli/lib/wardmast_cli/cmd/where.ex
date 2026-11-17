@@ -10,7 +10,7 @@ defmodule WardmastCli.Cmd.Where do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {_opts, _rest, mode} = ArgParser.parse(argv, command: "arb where", switches: [])
+      {_opts, _rest, mode} = ArgParser.parse(argv, command: "ward where", switches: [])
       base = Client.base_url()
       bd2_ws_env = Wardmast.Env.get("WARDMAST_WORKSPACE")
 

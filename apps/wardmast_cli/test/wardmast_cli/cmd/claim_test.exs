@@ -325,6 +325,6 @@ defmodule WardmastCli.Cmd.ClaimTest do
   test "an unknown flag exits 1 naming the flag and does not swallow the ref" do
     {_out, err, code} = capture(fn -> Claim.run(["--acceptance", "43"]) end)
     assert code == 1
-    assert err =~ "unknown option --acceptance for arb ticket claim"
+    assert err =~ "unknown option --acceptance for ward ticket claim"
   end
 end

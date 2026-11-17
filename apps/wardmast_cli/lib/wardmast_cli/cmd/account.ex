@@ -257,7 +257,7 @@ defmodule WardmastCli.Cmd.Account do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, _mode} = ArgParser.parse(argv, command: "arb account", switches: @switches)
+      {opts, rest, _mode} = ArgParser.parse(argv, command: "ward account", switches: @switches)
       mode = if opts[:json], do: :json, else: :text
 
       case rest do

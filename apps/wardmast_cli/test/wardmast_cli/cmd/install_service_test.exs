@@ -625,7 +625,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       {_out, err, code} = capture(fn -> InstallService.run(["--uninstal"]) end)
 
       assert code == 1
-      assert err =~ "unknown option --uninstal for arb install service"
+      assert err =~ "unknown option --uninstal for ward install service"
     end
   end
 end

@@ -283,20 +283,20 @@ defmodule WardmastCli.Main do
 
     case argv do
       [] ->
-        reject_flag!(flag, "arb")
+        reject_flag!(flag, "ward")
         usage_and_exit(0)
 
       ["help" | rest] ->
-        reject_flag!(flag, "arb help")
+        reject_flag!(flag, "ward help")
         help(rest)
 
       [h] when h in ["-h", "--help"] ->
-        reject_flag!(flag, "arb help")
+        reject_flag!(flag, "ward help")
         usage_and_exit(0)
 
       [v] when v in ["-v", "--version"] ->
-        reject_flag!(flag, "arb version")
-        IO.puts("arb #{WardmastCli.Version.app_version()}")
+        reject_flag!(flag, "ward version")
+        IO.puts("ward #{WardmastCli.Version.app_version()}")
 
       [cmd | rest] ->
         dispatch(cmd, rest, flag, workspace)
@@ -360,17 +360,21 @@ defmodule WardmastCli.Main do
           _ -> :ok
         end
 
-        IO.puts(:stderr, "arb: note: `arb #{cmd}` is now `arb #{new_form}` — running it for you.")
+        IO.puts(
+          :stderr,
+          "ward: note: `ward #{cmd}` is now `ward #{new_form}` — running it for you."
+        )
+
         dispatch_known(canonical, new_args, flag, ws_val)
 
       :none ->
-        IO.puts(:stderr, "arb: unknown command: #{cmd}")
+        IO.puts(:stderr, "ward: unknown command: #{cmd}")
 
         if suggestions != [] do
           IO.puts(:stderr, "Did you mean: #{Enum.join(suggestions, ", ")}?")
         end
 
-        IO.puts(:stderr, "Run `arb help` for usage.")
+        IO.puts(:stderr, "Run `ward help` for usage.")
         WardmastCli.Output.halt(2)
     end
   end
@@ -406,7 +410,12 @@ defmodule WardmastCli.Main do
     {:ok, entry} = WardmastCli.Verbs.fetch("issue")
     check_workspace_guard!(entry, flag, ws_val)
     WardmastCli.Workspace.put_selected(ws_val)
-    IO.puts(:stderr, "arb: note: `arb issue` is deprecated; use `arb ticket` (same subcommands).")
+
+    IO.puts(
+      :stderr,
+      "ward: note: `ward issue` is deprecated; use `ward ticket` (same subcommands)."
+    )
+
     run_entry(entry, args)
   end
 
@@ -420,11 +429,11 @@ defmodule WardmastCli.Main do
   defp check_workspace_guard!(entry, flag, ws_val) do
     cond do
       flag != nil and entry.workspace == :none ->
-        WardmastCli.Output.die("unknown option #{flag_label(flag)} for arb #{entry.name}")
+        WardmastCli.Output.die("unknown option #{flag_label(flag)} for ward #{entry.name}")
 
       flag != nil and is_nil(ws_val) ->
         WardmastCli.Output.die(
-          "option #{flag_label(flag)} for arb #{entry.name} requires a value"
+          "option #{flag_label(flag)} for ward #{entry.name} requires a value"
         )
 
       true ->

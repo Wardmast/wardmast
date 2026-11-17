@@ -232,22 +232,28 @@ defmodule Wardmast.Worker.CliFetcher.Fixtures do
   def arb_routes(version, opts \\ []) do
     bytes = Keyword.get(opts, :bytes, arb_bytes(version))
     sha = Keyword.get(opts, :sha256, sha256(arb_bytes(version)))
+    # The release asset is `ward` since the CLI rename; `asset: "arb"` models a
+    # pre-rename tag.
+    name = Keyword.get(opts, :asset, "ward")
 
     release = %{
       "tag_name" => "v#{version}",
       "assets" => [
-        %{"name" => "arb", "browser_download_url" => "https://github.test/dl/#{version}/arb"},
         %{
-          "name" => "arb.sha256",
-          "browser_download_url" => "https://github.test/dl/#{version}/arb.sha256"
+          "name" => name,
+          "browser_download_url" => "https://github.test/dl/#{version}/#{name}"
+        },
+        %{
+          "name" => name <> ".sha256",
+          "browser_download_url" => "https://github.test/dl/#{version}/#{name}.sha256"
         }
       ]
     }
 
     %{
       "/repos/acme/arbiter/releases/tags/v#{version}" => json(release),
-      "/dl/#{version}/arb" => {200, "application/octet-stream", bytes},
-      "/dl/#{version}/arb.sha256" => {200, "text/plain", "#{sha}  arb\n"}
+      "/dl/#{version}/#{name}" => {200, "application/octet-stream", bytes},
+      "/dl/#{version}/#{name}.sha256" => {200, "text/plain", "#{sha}  #{name}\n"}
     }
   end
 end

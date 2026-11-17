@@ -71,7 +71,7 @@ defmodule WardmastCli.Cmd.Doctor do
     ArgParser.unless_help(argv, @moduledoc, fn ->
       {opts, _rest, mode} =
         ArgParser.parse(argv,
-          command: "arb server doctor",
+          command: "ward server doctor",
           switches: [
             all: :boolean,
             verbose: :boolean,

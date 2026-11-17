@@ -64,7 +64,7 @@ defmodule WardmastCli.Cmd.Quota do
     else
       {opts, _rest, mode} =
         ArgParser.parse(argv,
-          command: "arb quota",
+          command: "ward quota",
           switches: [workspace: :string, account: :string],
           aliases: [w: :workspace, a: :account]
         )

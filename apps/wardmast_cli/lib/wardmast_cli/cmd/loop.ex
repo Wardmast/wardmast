@@ -154,7 +154,7 @@ defmodule WardmastCli.Cmd.Loop do
           pending(tail, mode)
 
         ["diff", id | tail] ->
-          _ = ArgParser.parse(tail, command: "arb loop diff", switches: [])
+          _ = ArgParser.parse(tail, command: "ward loop diff", switches: [])
           diff(id, mode)
 
         ["diff" | _] ->
@@ -164,7 +164,7 @@ defmodule WardmastCli.Cmd.Loop do
           apply_all(tail, mode)
 
         ["apply", id | tail] ->
-          _ = ArgParser.parse(tail, command: "arb loop apply", switches: [])
+          _ = ArgParser.parse(tail, command: "ward loop apply", switches: [])
           apply_one(id, mode)
 
         ["apply" | _] ->
@@ -192,7 +192,7 @@ defmodule WardmastCli.Cmd.Loop do
   defp analyze(argv, mode) do
     {opts, _rest, _mode} =
       ArgParser.parse(argv,
-        command: "arb loop analyze",
+        command: "ward loop analyze",
         switches: [
           since: :string,
           until: :string,
@@ -245,7 +245,7 @@ defmodule WardmastCli.Cmd.Loop do
   defp propose_repo_doc_patch(argv, mode) do
     {opts, _rest, _mode} =
       ArgParser.parse(argv,
-        command: "arb loop propose",
+        command: "ward loop propose",
         switches: [repo: :string, lesson: :string, category: :string, workspace: :string],
         aliases: [r: :repo, l: :lesson, w: :workspace]
       )
@@ -269,7 +269,7 @@ defmodule WardmastCli.Cmd.Loop do
   defp propose_routing(argv, mode) do
     {opts, _rest, _mode} =
       ArgParser.parse(argv,
-        command: "arb loop propose",
+        command: "ward loop propose",
         switches: [
           workspace: :string,
           difficulty: :string,
@@ -300,7 +300,7 @@ defmodule WardmastCli.Cmd.Loop do
   defp canary_status(argv, mode) do
     {opts, _rest, _mode} =
       ArgParser.parse(argv,
-        command: "arb loop canary",
+        command: "ward loop canary",
         switches: [workspace: :string],
         aliases: [w: :workspace]
       )
@@ -389,7 +389,7 @@ defmodule WardmastCli.Cmd.Loop do
   defp pending(argv, mode) do
     {opts, _rest, _mode} =
       ArgParser.parse(argv,
-        command: "arb loop pending",
+        command: "ward loop pending",
         switches: [state: :string, kind: :string, workspace: :string, limit: :integer],
         aliases: [l: :limit, w: :workspace]
       )
@@ -509,7 +509,7 @@ defmodule WardmastCli.Cmd.Loop do
   defp apply_all(argv, mode) do
     {opts, _rest, _mode} =
       ArgParser.parse(argv,
-        command: "arb loop apply",
+        command: "ward loop apply",
         switches: [state: :string, workspace: :string, limit: :integer],
         aliases: [l: :limit, w: :workspace]
       )
@@ -599,7 +599,7 @@ defmodule WardmastCli.Cmd.Loop do
 
   defp reject(id, argv, mode) do
     {opts, _rest, _mode} =
-      ArgParser.parse(argv, command: "arb loop reject", switches: [reason: :string])
+      ArgParser.parse(argv, command: "ward loop reject", switches: [reason: :string])
 
     body = maybe_put_map(%{}, "reason", Keyword.get(opts, :reason))
 

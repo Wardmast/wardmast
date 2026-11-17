@@ -32,7 +32,7 @@ defmodule WardmastCli.Cmd.Provider do
           resume(rest, Output.mode(argv))
 
         ["list" | rest] ->
-          _ = ArgParser.parse(rest, command: "arb provider list", switches: [])
+          _ = ArgParser.parse(rest, command: "ward provider list", switches: [])
           list(Output.mode(argv))
 
         _ ->
@@ -45,7 +45,7 @@ defmodule WardmastCli.Cmd.Provider do
 
   defp pause(argv, mode) do
     {opts, rest, _} =
-      ArgParser.parse_strict!(argv, "arb provider pause",
+      ArgParser.parse_strict!(argv, "ward provider pause",
         strict: [reason: :string, stop_running: :boolean]
       )
 
@@ -76,7 +76,7 @@ defmodule WardmastCli.Cmd.Provider do
   end
 
   defp resume(argv, mode) do
-    {_opts, rest, _} = ArgParser.parse_strict!(argv, "arb provider resume", strict: [])
+    {_opts, rest, _} = ArgParser.parse_strict!(argv, "ward provider resume", strict: [])
     ref = ref!(rest, "resume")
 
     case Client.post("/api/providers/resume", %{"ref" => ref}) do

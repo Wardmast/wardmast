@@ -303,7 +303,7 @@ defmodule WardmastCli.Cmd.Create do
       IO.puts(@moduledoc)
     else
       {opts, rest, mode} =
-        ArgParser.parse(argv, command: "arb ticket create", strict: @all_switches)
+        ArgParser.parse(argv, command: "ward ticket create", strict: @all_switches)
 
       opts = ArgParser.coerce_difficulty(opts)
 
@@ -387,11 +387,11 @@ defmodule WardmastCli.Cmd.Create do
     IO.puts("  #{t["ref"] || "-"} -> #{t["id"]}  (#{t["state"]})  #{t["title"]}")
 
     for w <- t["warnings"] || [] do
-      IO.puts(:stderr, "arb: warning: #{t["id"]}: #{w}")
+      IO.puts(:stderr, "ward: warning: #{t["id"]}: #{w}")
     end
 
     for f <- t["failures"] || [] do
-      IO.puts(:stderr, "arb: warning: #{t["id"]}: #{f["message"]}")
+      IO.puts(:stderr, "ward: warning: #{t["id"]}: #{f["message"]}")
     end
   end
 
@@ -443,7 +443,7 @@ defmodule WardmastCli.Cmd.Create do
     if ignored != [] and mode == :text do
       IO.puts(
         :stderr,
-        "arb: warning: --ticket-only ignores #{Enum.join(ignored, ", ")} (no local task is created)."
+        "ward: warning: --ticket-only ignores #{Enum.join(ignored, ", ")} (no local task is created)."
       )
     end
 
@@ -506,7 +506,7 @@ defmodule WardmastCli.Cmd.Create do
     if opts[:labels] && mode == :text do
       IO.puts(
         :stderr,
-        "arb: warning: --labels is accepted for interface parity but the ticket resource has no labels field (ignored)."
+        "ward: warning: --labels is accepted for interface parity but the ticket resource has no labels field (ignored)."
       )
     end
 
@@ -559,7 +559,7 @@ defmodule WardmastCli.Cmd.Create do
   # or an explicit waiver.
   defp print_acceptance_warnings(issue, :text) do
     for warning <- issue["warnings"] || [] do
-      IO.puts(:stderr, "arb: warning: #{warning}")
+      IO.puts(:stderr, "ward: warning: #{warning}")
     end
   end
 
@@ -572,7 +572,7 @@ defmodule WardmastCli.Cmd.Create do
   defp warn_deprecated_assignee(_value, :text) do
     IO.puts(
       :stderr,
-      "arb: warning: --assignee is deprecated and ignored — Wardmast is a local " <>
+      "ward: warning: --assignee is deprecated and ignored — Wardmast is a local " <>
         "single-user app and no longer tracks an assignee locally (bd-1ozks5)."
     )
   end

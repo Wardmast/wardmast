@@ -218,7 +218,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp do_deploy(argv) do
-    {opts, _rest, mode} = ArgParser.parse_strict!(argv, "arb server deploy", strict: @switches)
+    {opts, _rest, mode} = ArgParser.parse_strict!(argv, "ward server deploy", strict: @switches)
     timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
     force = opts[:force] || false
 

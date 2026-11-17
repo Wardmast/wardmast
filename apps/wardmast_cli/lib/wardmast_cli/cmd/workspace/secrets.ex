@@ -19,7 +19,7 @@ defmodule WardmastCli.Cmd.Workspace.Secrets do
   def run(argv, opts) do
     {parsed, rest, mode} =
       ArgParser.parse(argv,
-        command: "arb workspace secret",
+        command: "ward workspace secret",
         switches: Keyword.fetch!(opts, :switches) ++ [file: :string]
       )
 
