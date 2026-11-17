@@ -819,15 +819,30 @@ defmodule Wardmast.Agents.GeminiTest do
     end
   end
 
+  # PATH is pinned to a stub `agy` (never run), so nothing here depends on the host's
+  # CLIs: the refusal needs an agy on the host to refuse (with neither CLI installed, as
+  # on a CI runner, the host path stops at `:executable_not_found` first).
   describe "backend: podman with the container wrap point (bd-b2t0kw)" do
     setup do
       base =
         Path.join(System.tmp_dir!(), "gemini-podman-wrap-#{System.unique_integer([:positive])}")
 
+      bin = Path.join(base, "bin")
       worktree = Path.join(base, "wt")
+      File.mkdir_p!(bin)
       File.mkdir_p!(worktree)
-      on_exit(fn -> File.rm_rf!(base) end)
-      {:ok, worktree: worktree}
+      File.write!(Path.join(bin, "agy"), "#!/bin/sh\nexit 0\n")
+      File.chmod!(Path.join(bin, "agy"), 0o755)
+
+      old_path = System.get_env("PATH")
+      System.put_env("PATH", bin)
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(base)
+      end)
+
+      {:ok, worktree: worktree, bin: bin}
     end
 
     defp podman(mode),
@@ -842,11 +857,15 @@ defmodule Wardmast.Agents.GeminiTest do
     # keyring check (agy signs in with the service-account key there), whatever the host
     # has on its PATH.
     test "sandbox_wrap: the container's agy, no bwrap, no keyring, in every mode", %{
-      worktree: worktree
+      worktree: worktree,
+      bin: bin
     } do
       Application.put_env(:wardmast, :worker_gemini_keyring_available, false)
 
-      for mode <- [:strict, :bypass, :auto] do
+      # A host with an agy of its own (the stub), and a host with neither CLI.
+      for path <- [bin, "/nonexistent-dir-for-test"], mode <- [:strict, :bypass, :auto] do
+        System.put_env("PATH", path)
+
         assert {:ok,
                 [
                   "sh",
@@ -869,6 +888,8 @@ defmodule Wardmast.Agents.GeminiTest do
     end
 
     test "without sandbox_wrap the podman policy is still refused", %{worktree: worktree} do
+      assert {:ok, {:agy, _}} = Gemini.resolve_executable()
+
       assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
                default_argv("p", security: podman(:bypass), worktree_path: worktree)
     end
