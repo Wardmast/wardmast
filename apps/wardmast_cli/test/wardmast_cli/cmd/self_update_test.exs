@@ -335,4 +335,72 @@ defmodule WardmastCli.Cmd.SelfUpdateTest do
       assert err =~ "ward.sha256"
     end
   end
+
+  describe "install_links when arb is the running escript" do
+    test "defers the shim until flush_pending_shim/0", %{tmp: tmp, install_path: ward} do
+      arb = Path.join(tmp, "arb")
+      File.write!(arb, "ORIGINAL ESCRIPT")
+      Process.put(:arb_running_script_override, arb)
+      on_exit(fn -> Process.delete(:arb_running_script_override) end)
+
+      assert :ok = SelfUpdate.install_links(ward)
+      # The running file is untouched until the caller is done.
+      assert File.read!(arb) == "ORIGINAL ESCRIPT"
+      assert File.exists?(arb <> ".new")
+
+      assert :ok = SelfUpdate.flush_pending_shim()
+      assert File.read!(arb) =~ "#!/bin/sh"
+      refute File.exists?(arb <> ".new")
+      assert :ok = SelfUpdate.flush_pending_shim()
+    end
+
+    test "`self-update` run from arb installs the shim before returning", %{
+      tmp: tmp,
+      install_path: ward
+    } do
+      arb = Path.join(tmp, "arb")
+      File.write!(arb, "ORIGINAL ESCRIPT")
+      Process.put(:arb_running_script_override, arb)
+      on_exit(fn -> Process.delete(:arb_running_script_override) end)
+
+      ward_bytes = "#!/usr/bin/env escript\n% fake ward #{@vsn}\n"
+      stub_release(@vsn, ward_bytes, "#{sha256_hex(ward_bytes)}  ward\n")
+      File.write!(ward, "old ward binary")
+
+      {_out, _err, 0} = capture(fn -> SelfUpdate.run([]) end)
+
+      assert File.read!(arb) =~ "#!/bin/sh"
+      refute File.exists?(arb <> ".new")
+    end
+
+    test "detects the running script through a symlinked directory", %{
+      tmp: tmp,
+      install_path: ward
+    } do
+      real = Path.join(tmp, "real")
+      File.mkdir_p!(real)
+      File.write!(Path.join(real, "arb"), "ORIGINAL ESCRIPT")
+      File.ln_s!(real, Path.join(tmp, "linkdir"))
+      # Running via the symlinked dir; install target resolves via the real dir.
+      Process.put(:arb_running_script_override, Path.join([tmp, "linkdir", "arb"]))
+      on_exit(fn -> Process.delete(:arb_running_script_override) end)
+
+      real_ward = Path.join(real, "ward")
+      assert :ok = SelfUpdate.install_links(real_ward)
+      assert File.read!(Path.join(real, "arb")) == "ORIGINAL ESCRIPT"
+      assert File.exists?(Path.join(real, "arb.new"))
+      _ = ward
+    end
+
+    test "writes the shim immediately when arb is not the running script", %{
+      tmp: tmp,
+      install_path: ward
+    } do
+      Process.put(:arb_running_script_override, Path.join(tmp, "other"))
+      on_exit(fn -> Process.delete(:arb_running_script_override) end)
+
+      assert :ok = SelfUpdate.install_links(ward)
+      assert File.read!(Path.join(tmp, "arb")) =~ "#!/bin/sh"
+    end
+  end
 end

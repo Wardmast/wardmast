@@ -125,6 +125,17 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.StatusTest do
       assert line =~ "database restored"
     end
 
+    test "a running deploy whose process is alive is not interrupted (no /proc needed)" do
+      fresh = DateTime.utc_now() |> DateTime.to_iso8601()
+
+      refute Status.describe(%{
+               "state" => "running",
+               "tag" => "v2",
+               "pid" => System.pid(),
+               "updated_at" => fresh
+             }) =~ "interrupted"
+    end
+
     test "a running deploy whose process is gone reads as interrupted" do
       stale = DateTime.utc_now() |> DateTime.add(-3600) |> DateTime.to_iso8601()
 

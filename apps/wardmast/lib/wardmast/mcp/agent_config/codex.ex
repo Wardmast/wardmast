@@ -48,7 +48,7 @@ defmodule Wardmast.MCP.AgentConfig.Codex do
 
   @behaviour Wardmast.MCP.AgentConfig
 
-  alias Wardmast.Worker.ReleaseEnv
+  alias Wardmast.Worker.Timeout
 
   @dirname ".codex"
   @filename "config.toml"
@@ -249,9 +249,11 @@ defmodule Wardmast.MCP.AgentConfig.Codex do
   # not reliably terminate the CLI process. GNU timeout kills the actual CLI
   # when the deadline expires, including a SIGKILL fallback for ignored TERM.
   defp mcp_list(exe, args, worktree, env, timeout_ms) do
-    ReleaseEnv.cmd(
-      "timeout",
-      ["--kill-after=1s", "#{timeout_ms / 1_000}s", exe | args],
+    Timeout.cmd(
+      exe,
+      args,
+      max(1, ceil(timeout_ms / 1_000)),
+      kill_after: 1,
       cd: worktree,
       env: env,
       stderr_to_stdout: false
