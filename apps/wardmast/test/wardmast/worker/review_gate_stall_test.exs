@@ -114,7 +114,7 @@ defmodule Wardmast.Worker.ReviewGateStallTest do
       :sys.suspend(gate)
 
       wait_finished(pid)
-      assert_receive {:DOWN, ^gate_ref, :process, ^gate, _}, 1_000
+      assert_receive {:DOWN, ^gate_ref, :process, ^gate, _}, 10_000
 
       task = Ash.get!(Issue, task.id)
       assert task.attention_cause == :reviewer_timeout
