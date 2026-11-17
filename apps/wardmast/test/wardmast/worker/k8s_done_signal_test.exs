@@ -30,6 +30,7 @@ defmodule Wardmast.Worker.K8sDoneSignalTest do
       end
     end)
 
+    :ok = Phoenix.PubSub.subscribe(Wardmast.PubSub, "workers")
     task_id = "bd-k8sdone-#{System.unique_integer([:positive])}"
     {:ok, pid} = Worker.start(task_id: task_id, repo: "r")
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
@@ -92,11 +93,31 @@ defmodule Wardmast.Worker.K8sDoneSignalTest do
     send(pid, {@handle, {:exit_status, status}})
   end
 
-  # Past the exit grace, with everything sent so far handled.
-  defp settled(pid) do
-    Process.sleep(400)
+  # Past the exit grace, with everything sent so far handled: the Worker is `:finished`.
+  # The grace timer starts only once the Worker has *handled* the exit message, and a
+  # slow runner can take a while to get through a thousand bridge lines first, so a
+  # fixed sleep races it (macOS smoke: state still live after 400ms). Sync on the
+  # state change instead: each pass drains the mailbox, then waits for the next
+  # lifecycle broadcast (or a short tick, for a transition that does not broadcast).
+  defp settled(pid, attempts \\ 400) do
     _ = :sys.get_state(pid)
-    Worker.state(pid)
+
+    case Worker.state(pid) do
+      %{state: :finished} = snap ->
+        snap
+
+      snap when attempts <= 1 ->
+        flunk("Worker never finished; last state: #{inspect(snap.state)}")
+
+      _ ->
+        receive do
+          {:worker_lifecycle, _event, _snapshot} -> :ok
+        after
+          25 -> :ok
+        end
+
+        settled(pid, attempts - 1)
+    end
   end
 
   describe "a run on a node" do
