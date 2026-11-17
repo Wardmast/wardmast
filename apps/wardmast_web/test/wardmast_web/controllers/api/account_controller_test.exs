@@ -713,6 +713,86 @@ defmodule WardmastWeb.Api.AccountControllerTest do
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
     end
 
+    # bd-b2t0kw: the body `arb account rotate <ref> --kind service_account --secret-file
+    # key.json` sends (asserted on the wire in `WardmastCli.Cmd.AccountTest`).
+    test "a service-account key is stored encrypted, filed under GOOGLE_APPLICATION_CREDENTIALS, never echoed",
+         %{conn: conn} do
+      account = create_account!(%{provider: :antigravity, slug: "agy-sa-rest"})
+
+      key =
+        Jason.encode!(%{
+          "type" => "service_account",
+          "project_id" => "arb-agy-rest",
+          "private_key_id" => "feedfacefeedface",
+          "private_key" =>
+            "-----BEGIN PRIVATE KEY-----\nMIIEvRESTfake\n-----END PRIVATE KEY-----\n",
+          "client_email" => "arb-agy@arb-agy-rest.iam.gserviceaccount.com"
+        })
+
+      log =
+        capture_log([level: :debug], fn ->
+          conn =
+            post(conn, ~p"/api/accounts/agy-sa-rest/rotate", %{
+              "kind" => "service_account",
+              "env_var" => "GOOGLE_APPLICATION_CREDENTIALS",
+              "secret" => key
+            })
+
+          body = json_response(conn, 201)
+          assert body["kind"] == "service_account"
+          assert body["env_var"] == "GOOGLE_APPLICATION_CREDENTIALS"
+          refute inspect(body) =~ "PRIVATE KEY"
+          refute inspect(body) =~ "feedfacefeedface"
+        end)
+
+      refute log =~ "PRIVATE KEY"
+      refute log =~ "MIIEvRESTfake"
+
+      [credential] =
+        Wardmast.Accounts.ProviderCredential
+        |> Ash.read!()
+        |> Enum.filter(&(&1.provider_account_id == account.id))
+
+      assert credential.kind == :service_account
+      assert Wardmast.Accounts.ProviderCredential.secret(credential) == key
+      refute credential.encrypted_secret =~ "PRIVATE KEY"
+      refute Base.decode64!(credential.encrypted_secret) =~ "PRIVATE KEY"
+    end
+
+    test "a malformed service-account key is a 400 naming what is wrong, not the key", %{
+      conn: conn
+    } do
+      _account = create_account!(%{provider: :antigravity, slug: "agy-sa-bad-rest"})
+
+      conn =
+        post(conn, ~p"/api/accounts/agy-sa-bad-rest/rotate", %{
+          "kind" => "service_account",
+          "secret" =>
+            Jason.encode!(%{"type" => "authorized_user", "refresh_token" => "rt-secret"})
+        })
+
+      assert %{"error" => %{"type" => "invalid_request", "message" => message}} =
+               json_response(conn, 400)
+
+      assert message =~ "service_account"
+      refute message =~ "rt-secret"
+    end
+
+    test "a service-account key on a non-antigravity account is a 400", %{conn: conn} do
+      _account = create_account!(%{provider: :claude, slug: "claude-sa-rest"})
+
+      conn =
+        post(conn, ~p"/api/accounts/claude-sa-rest/rotate", %{
+          "kind" => "service_account",
+          "secret" => "{}"
+        })
+
+      assert %{"error" => %{"type" => "invalid_request", "message" => message}} =
+               json_response(conn, 400)
+
+      assert message =~ "antigravity"
+    end
+
     test "scopes round-trip through the string-keyed params the CLI sends", %{conn: conn} do
       _account = create_account!(%{provider: :claude, slug: "rotate-scopes"})
 

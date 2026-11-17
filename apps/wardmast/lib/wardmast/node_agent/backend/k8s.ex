@@ -15,8 +15,11 @@ defmodule Wardmast.NodeAgent.Backend.K8s do
       as `inventory.runs`, nothing retained, the readiness checks and `k8s_version`. No
       cpu/memory facts: the cluster's schedulable room is the scheduler's business (K§4.2).
     * `hb` carries the per-run state (`pending | starting | running | terminating`), the
-      `capacity`, `degraded` and the readiness checks. With no controller to ask, it says
-      only its `seq`, which leaves the primary's view as it was rather than clearing it.
+      `capacity`, `degraded`, the readiness checks and `caps.agy` (bd-b2t0kw: the sum of
+      "a published image carries agy" and "the primary holds agy's service-account key",
+      `Wardmast.NodeAgent.K8s.AgyFacts`, which can change while connected). With no
+      controller to ask, it says only its `seq`, which leaves the primary's view as it was
+      rather than clearing it.
     * `assign` is the controller's admission and pod; its refusal
       (`{:refuse, reason, detail}`) goes back as `run.refused` unchanged.
     * `cancel` deletes the pod at once; `quiesce` (the primary does not know the run) and
@@ -36,6 +39,7 @@ defmodule Wardmast.NodeAgent.Backend.K8s do
   @behaviour Wardmast.NodeAgent.Backend
 
   alias Wardmast.NodeAgent.Config
+  alias Wardmast.NodeAgent.K8s.AgyFacts
   alias Wardmast.NodeAgent.K8s.Controller
   alias Wardmast.NodeAgent.PodChannel
 
@@ -121,17 +125,19 @@ defmodule Wardmast.NodeAgent.Backend.K8s do
       "proto" => Config.proto(),
       "kind" => "cluster",
       "arch" => to_string(:erlang.system_info(:system_architecture)),
-      "caps" => %{
-        "backend" => "k8s",
-        "image" => "registry",
-        "limits" => "pod",
-        "bridge_streams" => "mux",
-        "upgrade" => "image",
-        "self_upgrade" => Map.get(cluster, :self_upgrade?, false) == true,
-        "namespace" => Map.get(cluster, :namespace),
-        "install" => install_caps(cluster),
-        "registries" => Map.get(report, :registries, [])
-      },
+      "caps" =>
+        %{
+          "backend" => "k8s",
+          "image" => "registry",
+          "limits" => "pod",
+          "bridge_streams" => "mux",
+          "upgrade" => "image",
+          "self_upgrade" => Map.get(cluster, :self_upgrade?, false) == true,
+          "namespace" => Map.get(cluster, :namespace),
+          "install" => install_caps(cluster),
+          "registries" => Map.get(report, :registries, [])
+        }
+        |> Map.merge(agy_caps(cluster)),
       "capacity" => report.capacity,
       "degraded" => report.degraded,
       "inventory" => %{"runs" => report.runs, "retained" => []},
@@ -140,6 +146,9 @@ defmodule Wardmast.NodeAgent.Backend.K8s do
     |> put_present("k8s_version", Map.get(cluster, :k8s_version))
   end
 
+  # bd-b2t0kw: `caps.agy`/`caps.agy_missing` from the primary's latest facts, else the boot's.
+  defp agy_caps(cluster), do: cluster |> Map.get(:agy) |> AgyFacts.get() |> AgyFacts.caps()
+
   # KH8: `caps.install{method,release,chart}`; a cluster with no word on it is a manifest install.
   defp install_caps(cluster) do
     install = Map.get(cluster, :install) || %{method: "manifest"}
@@ -147,13 +156,15 @@ defmodule Wardmast.NodeAgent.Backend.K8s do
   end
 
   @impl true
-  def heartbeat(%Config{}, seq) do
+  def heartbeat(%Config{} = config, seq) do
     with_report(%{"seq" => seq}, fn report ->
       %{
         "seq" => seq,
         "runs" => report.runs,
         "capacity" => report.capacity,
-        "degraded" => report.degraded
+        "degraded" => report.degraded,
+        # bd-b2t0kw: the one capability that can change while connected.
+        "caps" => agy_caps(config.cluster || %{})
       }
       |> put_present("readiness", report.readiness)
       |> put_present("upgrade", refused_upgrade())

@@ -63,8 +63,10 @@ defmodule Wardmast.Agents.ProviderRouting do
       chose; checked ahead of quota, like `capability_missing`;
     * `sandbox_backend` — the workspace's resolved `sandbox.backend` has no
       wrap point for the provider (`Wardmast.Worker.Sandbox.module/2`; podman
-      runs claude and codex only), so a spawn would be refused. Checked ahead
-      of the account checks so no slot or attention item is burnt on it;
+      runs claude, codex and agy), or agy under podman whose workspace holds no
+      Google Cloud service-account key (`backend_refusal/3`, bd-b2t0kw), so a
+      spawn would be refused. Checked ahead of the account checks so no slot or
+      attention item is burnt on it;
     * `paused` — the account or its provider is paused (`Wardmast.Providers.Pause`,
       `arb provider pause`), with the operator's reason as the detail;
     * `quota_held` — the workspace's `Wardmast.Quota.Gate` would hold a
@@ -131,6 +133,7 @@ defmodule Wardmast.Agents.ProviderRouting do
 
   alias Wardmast.Accounts.AdmissionMode
   alias Wardmast.Accounts.Concurrency
+  alias Wardmast.Accounts.Credentials
   alias Wardmast.Accounts.ProviderAccount
   alias Wardmast.Accounts.ProviderSettings
   alias Wardmast.Accounts.SeatCheck
@@ -827,19 +830,58 @@ defmodule Wardmast.Agents.ProviderRouting do
   @doc """
   Why the policy's sandbox backend cannot run `provider`, or `nil` when it can
   (or no policy is known). Same text as the routing drop detail.
+
+  `workspace` (a `Workspace` or its id) is the workspace whose **task implementer** is
+  being placed (bd-b2t0kw). agy has a podman wrap point for that spawn only, and it
+  signs in there with the workspace's Google Cloud service-account key: so agy under
+  podman is runnable exactly when the workspace's antigravity account holds one
+  (`Credentials.workspace_service_account?/1`). Without a workspace in hand (a fix,
+  conflict or ReviewGate pass, which has no agy container path) agy under podman is
+  refused, as it always was.
   """
-  @spec backend_refusal(SecurityPolicy.t() | nil, atom() | String.t()) :: String.t() | nil
-  def backend_refusal(%SecurityPolicy{} = policy, provider) do
+  @spec backend_refusal(
+          SecurityPolicy.t() | nil,
+          atom() | String.t(),
+          Workspace.t() | String.t() | nil
+        ) ::
+          String.t() | nil
+  def backend_refusal(policy, provider, workspace \\ nil)
+
+  def backend_refusal(%SecurityPolicy{} = policy, provider, workspace) do
     case Sandbox.module(policy, provider) do
       {:error, {:sandbox_backend_unavailable, backend, _}} ->
         "#{provider}: not supported by sandbox.backend #{backend}"
 
       _ ->
-        nil
+        agy_container_refusal(policy, provider, workspace)
     end
   end
 
-  def backend_refusal(_policy, _provider), do: nil
+  def backend_refusal(_policy, _provider, _workspace), do: nil
+
+  defp agy_container_refusal(policy, provider, workspace) do
+    cond do
+      not agy_provider?(provider) or SecurityPolicy.sandbox_backend(policy) != :podman ->
+        nil
+
+      is_nil(workspace) ->
+        "#{provider}: not supported by sandbox.backend podman"
+
+      Credentials.workspace_service_account?(workspace_id(workspace)) ->
+        nil
+
+      true ->
+        "#{provider}: not supported by sandbox.backend podman without a service-account key " <>
+          "on the workspace's antigravity account (`ward account rotate <account> --kind " <>
+          "service_account --secret-file key.json`)"
+    end
+  end
+
+  defp agy_provider?(provider), do: to_string(provider) in ~w(gemini antigravity agy)
+
+  defp workspace_id(%Workspace{id: id}), do: id
+  defp workspace_id(id) when is_binary(id), do: id
+  defp workspace_id(_), do: nil
 
   defp task_id_of(%Issue{id: id}), do: id
   defp task_id_of(id) when is_binary(id), do: id
@@ -1208,14 +1250,18 @@ defmodule Wardmast.Agents.ProviderRouting do
   end
 
   # A provider the workspace's sandbox backend cannot run is refused at spawn
-  # (`sandbox_backend_unavailable`); never route to it.
-  defp check_sandbox_backend(%{agent_type: type} = entry, %{security: %SecurityPolicy{} = policy}) do
-    case Sandbox.module(policy, type) do
-      {:ok, _} ->
-        {:ok, entry}
+  # (`sandbox_backend_unavailable`); never route to it. The task implementer (`:main`,
+  # `:resume`) is the spawn agy's container wrap point serves, so its workspace's
+  # service-account key is asked about (bd-b2t0kw); any other role's is not.
+  defp check_sandbox_backend(
+         %{agent_type: type} = entry,
+         %{security: %SecurityPolicy{} = policy} = ctx
+       ) do
+    workspace = if Map.get(ctx, :role, :main) in [:main, :resume], do: Map.get(ctx, :ws)
 
-      {:error, {:sandbox_backend_unavailable, backend, _}} ->
-        {:drop, "sandbox_backend", "#{type}: not supported by sandbox.backend #{backend}"}
+    case backend_refusal(policy, type, workspace) do
+      nil -> {:ok, entry}
+      detail -> {:drop, "sandbox_backend", detail}
     end
   end
 

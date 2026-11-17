@@ -32,7 +32,8 @@ defmodule Wardmast.NodeAgent.Runs do
   """
   @spec assign(map(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def assign(spec, opts) do
-    with {:ok, %RunSpec{} = validated} <- RunSpec.validate(spec) do
+    with {:ok, %RunSpec{} = validated} <- RunSpec.validate(spec),
+         :ok <- machine_deliverable(validated) do
       case DynamicSupervisor.start_child(@supervisor, {Run, {validated, opts}}) do
         {:ok, _pid} -> {:ok, validated.run}
         {:error, {:already_started, _pid}} -> {:error, :already_running}
@@ -40,6 +41,14 @@ defmodule Wardmast.NodeAgent.Runs do
       end
     end
   end
+
+  # bd-b2t0kw: `secret_files` reach a cluster pod's memory volume through `/boot`; a
+  # machine node has no layout for them yet, so it refuses the run rather than start it
+  # without its credential. (Placement sends agy, their only user, to `caps.agy` nodes.)
+  defp machine_deliverable(%RunSpec{secret_files: files}) when map_size(files) > 0,
+    do: {:error, {:refused, {:unsupported, "secret_files"}}}
+
+  defp machine_deliverable(%RunSpec{}), do: :ok
 
   @doc "Every run's `Run.info/1`: what `hello` and `hb` report."
   @spec inventory() :: [map()]

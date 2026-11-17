@@ -61,17 +61,19 @@ defmodule Wardmast.Worker.SandboxTest do
     end
 
     # bd-d2o3xb (P7), bd-50d5j6 (P8): Claude and Codex have a podman wrap point.
-    test "module/2 resolves podman for claude and codex only" do
-      for provider <- [:claude, "claude", :codex, "codex"] do
+    # bd-b2t0kw: agy (`gemini`, account provider `antigravity`) has the container wrap
+    # point too; grok still has none.
+    test "module/2 resolves podman for claude, codex and agy only" do
+      for provider <- [:claude, "claude", :codex, "codex", :gemini, "gemini", :antigravity] do
         assert Sandbox.module(:podman, provider) == {:ok, Wardmast.Worker.Container}
         assert Sandbox.module(policy(:podman), provider) == {:ok, Wardmast.Worker.Container}
       end
 
-      for provider <- [:gemini, "gemini"] do
+      for provider <- [:grok, "grok", :qwen] do
         assert {:error, {:sandbox_backend_unavailable, :podman, message}} =
                  Sandbox.module(policy(:podman), provider)
 
-        assert message =~ "claude and codex only"
+        assert message =~ "claude, codex and agy only"
       end
     end
 

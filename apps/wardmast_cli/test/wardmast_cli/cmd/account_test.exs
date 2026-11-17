@@ -957,6 +957,86 @@ defmodule WardmastCli.Cmd.AccountTest do
     assert secret == Path.expand("relative/quota-claude")
   end
 
+  # bd-b2t0kw: the operator registers agy's Google Cloud service-account key from the
+  # JSON file `gcloud iam service-accounts keys create` wrote. The server stores it
+  # encrypted (`WardmastWeb.Api.AccountControllerTest`, the same body).
+  @tag :tmp_dir
+  test "account rotate --kind service_account sends the key file under GOOGLE_APPLICATION_CREDENTIALS and never prints it",
+       %{tmp_dir: tmp_dir} do
+    parent = self()
+
+    key =
+      Jason.encode!(%{
+        "type" => "service_account",
+        "project_id" => "arb-agy",
+        "private_key" => "-----BEGIN PRIVATE KEY-----\nMIIEvCLIfake\n-----END PRIVATE KEY-----\n",
+        "client_email" => "arb-agy@arb-agy.iam.gserviceaccount.com"
+      })
+
+    path = Path.join(tmp_dir, "key.json")
+    File.write!(path, key <> "\n")
+
+    stub_routes([
+      {{"post", "/api/accounts/antigravity:workers/rotate"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted_body, Jason.decode!(body)})
+
+         conn
+         |> Plug.Conn.put_status(201)
+         |> Req.Test.json(%{
+           "id" => "cred-sa",
+           "kind" => "service_account",
+           "env_var" => "GOOGLE_APPLICATION_CREDENTIALS",
+           "fingerprint" => "0a1b2c3d4e5f",
+           "active" => true
+         })
+       end}
+    ])
+
+    {out, err, exit_code} =
+      capture(fn ->
+        Account.run([
+          "rotate",
+          "antigravity:workers",
+          "--kind",
+          "service_account",
+          "--secret-file",
+          path
+        ])
+      end)
+
+    assert exit_code == 0
+    assert out =~ "rotated service_account credential (fingerprint=0a1b2c3d4e5f)"
+    refute out <> err =~ "PRIVATE KEY"
+    refute out <> err =~ "MIIEvCLIfake"
+
+    assert_received {:posted_body,
+                     %{
+                       "kind" => "service_account",
+                       "env_var" => "GOOGLE_APPLICATION_CREDENTIALS",
+                       "secret" => ^key
+                     }}
+  end
+
+  test "account rotate --kind service_account refuses a key on the command line" do
+    {_out, err, exit_code} =
+      capture(fn ->
+        Account.run([
+          "rotate",
+          "antigravity:workers",
+          "--kind",
+          "service_account",
+          "--secret",
+          ~s({"type":"service_account","private_key":"sk-argv"})
+        ])
+      end)
+
+    assert exit_code != 0
+    assert err =~ "--secret-file"
+    refute err =~ "sk-argv"
+  end
+
   test "account rotate requires a secret source" do
     {_out, err, exit_code} =
       capture(fn ->

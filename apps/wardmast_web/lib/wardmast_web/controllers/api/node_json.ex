@@ -123,8 +123,17 @@ defmodule WardmastWeb.Api.NodeJSON do
     |> Map.put(:max_workers, row.override)
     |> Map.put(:self_upgrade, Map.get(row, :self_upgrade?, false))
     |> Map.put(:registries, get_in(row, [:caps, "registries"]) || [])
+    |> Map.put(:agy, agy(row))
     |> Map.put(:image_source, Source.node_source(row))
     |> put_constrained(row)
+  end
+
+  # bd-b2t0kw: whether the node runs agy (`caps.agy`), and the half it lacks otherwise
+  # (`caps.agy_missing`: "image" or "credential"; nil when it never said).
+  defp agy(row) do
+    ready? = Wardmast.Nodes.Placement.agy_ready?(row)
+    missing = get_in(row, [:caps, "agy_missing"])
+    %{ready: ready?, missing: if(ready?, do: nil, else: missing)}
   end
 
   # A3: `hb.capacity.constrained`, for cluster nodes (the `local` row has none).

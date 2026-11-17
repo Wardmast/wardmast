@@ -278,6 +278,43 @@ defmodule WardmastWeb.Api.NodeControllerTest do
              } = Jason.decode!(raw)["registry"]
     end
 
+    # bd-b2t0kw: what the coordinator checks after a deploy: does the cluster node run
+    # agy, and if not, which half (the image or the service-account key) is missing.
+    test "each node says whether it runs agy, and what it lacks when it does not" do
+      node = enroll!("agy-node")
+
+      hello = %{
+        "agent_version" => Wardmast.Version.app_version(),
+        "proto" => 1,
+        "kind" => "cluster",
+        "caps" => %{"backend" => "k8s", "agy" => false, "agy_missing" => "credential"},
+        "capacity" => %{"ceiling" => 2},
+        "runs" => []
+      }
+
+      channel = spawn(fn -> Process.sleep(:infinity) end)
+
+      {:ok, %{pid: pid}} =
+        Wardmast.Nodes.Registry.attach(node, channel, hello, tick_ms: :infinity)
+
+      on_exit(fn ->
+        Wardmast.ProcessTeardown.stop_child(Wardmast.Nodes.SessionSupervisor, pid)
+        Process.exit(channel, :kill)
+      end)
+
+      row = fn ->
+        get(operator_conn(), "/api/nodes")
+        |> json_response(200)
+        |> Map.fetch!("nodes")
+        |> Enum.find(&(&1["name"] == "agy-node"))
+      end
+
+      assert row.()["agy"] == %{"ready" => false, "missing" => "credential"}
+
+      {:ok, _} = Wardmast.Nodes.Session.heartbeat(pid, %{"seq" => 1, "caps" => %{"agy" => true}})
+      assert row.()["agy"] == %{"ready" => true, "missing" => nil}
+    end
+
     test "a public endpoint is reported as such" do
       {:ok, _} = Wardmast.Settings.set_nodes_public_url("https://arbiter.example.com")
       assert json_response(get(operator_conn(), "/api/nodes"), 200)["exposure"] == "public"

@@ -63,6 +63,7 @@ defmodule Wardmast.Worker.Dispatch do
   """
 
   alias Wardmast.Accounts.Admission
+  alias Wardmast.Accounts.Credentials
   alias Wardmast.Accounts.SeatCheck
   alias Wardmast.Agents
   alias Wardmast.Agents.CapabilityMatrix
@@ -1121,6 +1122,7 @@ defmodule Wardmast.Worker.Dispatch do
       backend =
         Placement.local_backend(%{
           provider: provider,
+          agy_credential?: agy_credential?(workspace, provider),
           existing_layout: existing_checkout_layout(task, opts),
           local_backend: workspace |> dispatch_policy(opts) |> SecurityPolicy.local_backend()
         })
@@ -2214,10 +2216,12 @@ defmodule Wardmast.Worker.Dispatch do
     with %SecurityPolicy{} <- policy,
          nil <- caller_override(opts),
          provider = quota_gate_provider(task, workspace, opts),
-         detail when is_binary(detail) <- ProviderRouting.backend_refusal(policy, provider),
+         detail when is_binary(detail) <-
+           ProviderRouting.backend_refusal(policy, provider, workspace),
          constraint = ProviderConstraint.from(task),
          pool = ProviderConstraint.filter(constraint, Agents.agent_pool(workspace)),
-         allowed = Enum.filter(pool, &is_nil(ProviderRouting.backend_refusal(policy, &1))),
+         allowed =
+           Enum.filter(pool, &is_nil(ProviderRouting.backend_refusal(policy, &1, workspace))),
          alt when not is_nil(alt) <- ProviderPool.pick(allowed) do
       opts
       |> Keyword.put(:agent_type, alt)
@@ -2239,20 +2243,38 @@ defmodule Wardmast.Worker.Dispatch do
     with false <- Keyword.get(opts, :review, false) == true,
          %SecurityPolicy{} <- policy,
          provider = quota_gate_provider(task, workspace, opts),
-         detail when is_binary(detail) <- ProviderRouting.backend_refusal(policy, provider),
-         false <- auto_keeps_local_bwrap?(policy, provider) do
+         detail when is_binary(detail) <-
+           ProviderRouting.backend_refusal(policy, provider, workspace),
+         false <- auto_keeps_local_bwrap?(policy, provider, workspace) do
       {:error, {:sandbox_backend, provider, "held — " <> detail}}
     else
       _ -> :ok
     end
   end
 
-  # Under `sandbox.backend: auto` a provider with no podman wrap point (agy) is
-  # not refused for an unplaced `local_backend: podman`: placement keeps it
-  # local on bwrap (the routing decision says "no container wrap point").
-  defp auto_keeps_local_bwrap?(policy, provider) do
-    SecurityPolicy.auto?(policy) and match?({:error, _}, Sandbox.module(:podman, provider))
+  # Under `sandbox.backend: auto` a run that cannot go in a container (a provider with
+  # no podman wrap point, agy without the workspace's service-account key) is not
+  # refused for an unplaced `local_backend: podman`: placement keeps it local on bwrap
+  # (the routing decision says why).
+  defp auto_keeps_local_bwrap?(policy, provider, workspace) do
+    SecurityPolicy.auto?(policy) and
+      not Placement.container_capable?(%{
+        provider: provider,
+        agy_credential?: agy_credential?(workspace, provider)
+      })
   end
+
+  # bd-b2t0kw: does an agy run of this workspace have the service-account key its
+  # container signs in with? Asked only for agy; any other provider needs none.
+  defp agy_credential?(workspace, provider) do
+    if to_string(provider) in ~w(gemini antigravity agy),
+      do: Credentials.workspace_service_account?(workspace_id_of(workspace)),
+      else: false
+  end
+
+  # Every caller hands it `load_workspace/1`'s answer: a workspace, or `nil`.
+  defp workspace_id_of(%{id: id}) when is_binary(id), do: id
+  defp workspace_id_of(_), do: nil
 
   # bd-13pqcp: a workspace not routed by quota still picks its implementer from
   # the `agent.type` pool (`Routing.choose/3`'s ProviderPool.pick), which knows
@@ -3155,7 +3177,11 @@ defmodule Wardmast.Worker.Dispatch do
   defp ensure_auto_provider(workspace, request, opts) do
     case Keyword.get(opts, :auto_placed) do
       :private_clone ->
-        case ProviderRouting.backend_refusal(dispatch_policy(workspace, opts), request.provider) do
+        case ProviderRouting.backend_refusal(
+               dispatch_policy(workspace, opts),
+               request.provider,
+               workspace
+             ) do
           nil -> :ok
           detail -> {:error, {:sandbox_backend, request.provider, "held — " <> detail}}
         end
@@ -3303,7 +3329,8 @@ defmodule Wardmast.Worker.Dispatch do
       registry: Placement.image_registry(workspace, Keyword.get(opts, :repo) || task.repo),
       last_digest: PublishLedger.last_ref(Keyword.get(opts, :repo) || task.repo),
       mode: Placement.mode(workspace),
-      allowed_nodes: Wardmast.Nodes.Allowlist.selectors(workspace)
+      allowed_nodes: Wardmast.Nodes.Allowlist.selectors(workspace),
+      agy_credential?: agy_credential?(workspace, quota_gate_provider(task, workspace, opts))
     }
   end
 

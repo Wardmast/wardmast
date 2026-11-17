@@ -85,6 +85,37 @@ defmodule Wardmast.Worker.DispatchAutoBackendTest do
 
   defp full_node, do: node_row(live: 2)
 
+  # bd-b2t0kw: the workspace's antigravity account with a Google Cloud service-account key.
+  defp sa_key!(ws) do
+    account =
+      Ash.create!(Wardmast.Accounts.ProviderAccount, %{
+        provider: :antigravity,
+        slug: "auto-agy-#{System.unique_integer([:positive])}"
+      })
+
+    Ash.create!(Wardmast.Accounts.WorkspaceProviderAccount, %{
+      workspace_id: ws.id,
+      provider: :antigravity,
+      provider_account_id: account.id
+    })
+
+    key =
+      Jason.encode!(%{
+        "type" => "service_account",
+        "project_id" => "arb-auto",
+        "private_key" => "-----BEGIN PRIVATE KEY-----\nMIIEvAUTO\n-----END PRIVATE KEY-----\n",
+        "client_email" => "arb@arb-auto.iam.gserviceaccount.com"
+      })
+
+    {:ok, _} =
+      Wardmast.Accounts.rotate_credential(account.id, %{
+        "kind" => "service_account",
+        "secret" => key
+      })
+
+    ws
+  end
+
   # The agent spawn, captured: the node the run went to and the policy it was handed.
   defp capture_spawn do
     test = self()
@@ -198,7 +229,41 @@ defmodule Wardmast.Worker.DispatchAutoBackendTest do
       assert GitLayout.existing(checkout_path(issue)) == :linked_worktree
 
       assert %{"placement" => %{"sandbox_backend" => phrase}} = decision(issue)
-      assert phrase =~ "no container wrap point -> local bwrap"
+      assert phrase =~ "no service-account key -> local bwrap"
+      stop(issue, pid)
+    end
+
+    # bd-b2t0kw: with the workspace's service-account key, agy has a container, so an
+    # auto run goes to a node that advertises `caps.agy`, as podman on a private clone.
+    test "(d3) an agy run whose workspace holds a service-account key goes to an agy node as podman" do
+      ws = workspace!("prefer_remote")
+      sa_key!(ws)
+      issue = ready!(ws, "auto agy with key")
+
+      agy_node = node_row(caps: %{"agy" => true})
+
+      assert {:ok, %{worker_pid: pid}} =
+               dispatch(issue, [agy_node], agent_type: :gemini)
+
+      assert_receive {:spawned, %{id: "n-auto"}, policy}
+      assert SecurityPolicy.sandbox_backend(policy) == :podman
+      assert GitLayout.existing(checkout_path(issue)) == :private_clone
+
+      assert %{"placement" => %{"sandbox_backend" => "auto: mesaana had a free slot -> podman"}} =
+               decision(issue)
+
+      stop(issue, pid)
+    end
+
+    test "(d4) an agy run with a key but no agy node stays local on its local backend" do
+      ws = workspace!("prefer_remote")
+      sa_key!(ws)
+      issue = ready!(ws, "auto agy no agy node")
+
+      assert {:ok, %{worker_pid: pid}} = dispatch(issue, [node_row()], agent_type: :gemini)
+      assert_receive {:spawned, nil, nil}
+      assert GitLayout.existing(checkout_path(issue)) == :linked_worktree
+      assert decision(issue)["placement"]["sandbox_backend"] =~ "agy not available on mesaana"
       stop(issue, pid)
     end
 
@@ -212,7 +277,7 @@ defmodule Wardmast.Worker.DispatchAutoBackendTest do
       assert Placement.reservations() == []
       assert GitLayout.existing(checkout_path(issue)) == :linked_worktree
       assert %{"placement" => %{"sandbox_backend" => phrase}} = decision(issue)
-      assert phrase =~ "no container wrap point -> local bwrap"
+      assert phrase =~ "no service-account key -> local bwrap"
       stop(issue, pid)
     end
 

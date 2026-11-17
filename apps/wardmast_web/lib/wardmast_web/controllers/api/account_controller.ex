@@ -218,6 +218,23 @@ defmodule WardmastWeb.Api.AccountController do
         "no readable Claude grant at that path (#{reason}); log the config dir in first " <>
           "with `CLAUDE_CONFIG_DIR=<dir> claude auth login`"}}
 
+  # bd-b2t0kw: the reason names what is wrong with the key, never a value of it.
+  defp friendly({:error, {:invalid_service_account_key, reason}}),
+    do:
+      {:error,
+       {:invalid_request,
+        "not a Google Cloud service_account JSON key: " <>
+          Wardmast.Accounts.ServiceAccountKey.describe(reason) <>
+          ". Download it with `gcloud iam service-accounts keys create` (see " <>
+          "docs/agy-service-account-runbook.md)"}}
+
+  defp friendly({:error, {:kind_not_supported, :service_account, provider}}),
+    do:
+      {:error,
+       {:invalid_request,
+        "a service_account key is an antigravity account's credential (agy signs in with " <>
+          "it); this account belongs to #{provider}"}}
+
   defp friendly({:error, {:provider_mismatch, provider}}),
     do: {:error, {:invalid_request, "account belongs to provider #{provider}, not the one given"}}
 

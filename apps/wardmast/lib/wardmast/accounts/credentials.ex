@@ -68,11 +68,70 @@ defmodule Wardmast.Accounts.Credentials do
     workspace_id
     |> account_ids(provider)
     |> active_credentials()
-    |> Enum.reject(&quota_grant?/1)
+    |> Enum.reject(&not_an_env_value?/1)
     |> Enum.flat_map(&pair/1)
   end
 
   def workspace_pairs(_, _provider), do: []
+
+  @doc """
+  The Google Cloud service-account key (the JSON text) of the workspace's enabled
+  `antigravity` account (bd-b2t0kw), or `:none`. What an agy container spawn writes to
+  the key file `GOOGLE_APPLICATION_CREDENTIALS` names; never an env value, so
+  `workspace_pairs/2` leaves the kind out. The newest active row wins mid-rotation, as
+  in `account_oauth_usage_token/1`.
+  """
+  @spec workspace_service_account(String.t() | nil) :: {:ok, String.t()} | :none
+  def workspace_service_account(workspace_id)
+      when is_binary(workspace_id) and workspace_id != "" do
+    workspace_id
+    |> account_ids(:antigravity)
+    |> active_credentials()
+    |> Enum.filter(&service_account?/1)
+    |> Enum.max_by(& &1.created_at, DateTime, fn -> nil end)
+    |> case do
+      nil -> :none
+      credential -> credential |> pair() |> extract_secret()
+    end
+  end
+
+  def workspace_service_account(_), do: :none
+
+  @doc "Whether `workspace_service_account/1` has a key for the workspace."
+  @spec workspace_service_account?(String.t() | nil) :: boolean()
+  def workspace_service_account?(workspace_id),
+    do: match?({:ok, _}, workspace_service_account(workspace_id))
+
+  @doc """
+  Whether any run could be handed a service-account key: an enabled `antigravity`
+  account attached to at least one workspace holds an active one. Names nothing and
+  decrypts nothing; what a cluster controller is told before it advertises `caps.agy`
+  (`Wardmast.Nodes.ClusterInstall.controller_facts/1`).
+  """
+  @spec service_account_configured?() :: boolean()
+  def service_account_configured? do
+    WorkspaceProviderAccount
+    |> Ash.Query.filter(provider == :antigravity)
+    |> Ash.Query.load(:provider_account)
+    |> Ash.read()
+    |> case do
+      {:ok, links} ->
+        links
+        |> Enum.flat_map(fn
+          %WorkspaceProviderAccount{provider_account: %ProviderAccount{enabled: true, id: id}} ->
+            [id]
+
+          _ ->
+            []
+        end)
+        |> Enum.uniq()
+        |> active_credentials()
+        |> Enum.any?(&service_account?/1)
+
+      {:error, _error} ->
+        false
+    end
+  end
 
   @doc """
   The workspace's active credential for `env_var` (e.g.
@@ -208,6 +267,12 @@ defmodule Wardmast.Accounts.Credentials do
   # poller alone — never a credential a spawn carries.
   defp quota_grant?(%ProviderCredential{kind: kind}), do: kind == :cli_credentials_path
 
+  # bd-b2t0kw: a `:service_account` row is a key file's content, which a spawn gets as a
+  # file (`workspace_service_account/1`), never as the value of an env var.
+  defp service_account?(%ProviderCredential{kind: kind}), do: kind == :service_account
+
+  defp not_an_env_value?(credential), do: quota_grant?(credential) or service_account?(credential)
+
   defp enabled_account?(account_id) do
     case Ash.get(ProviderAccount, account_id) do
       {:ok, %ProviderAccount{enabled: true}} -> true
@@ -235,7 +300,7 @@ defmodule Wardmast.Accounts.Credentials do
     secrets =
       all_enabled_account_ids()
       |> active_credentials()
-      |> Enum.reject(&quota_grant?/1)
+      |> Enum.reject(&not_an_env_value?/1)
       |> Enum.filter(&(&1.env_var == env_var))
       |> Enum.flat_map(&pair/1)
       |> Enum.map(fn {_var, secret} -> secret end)

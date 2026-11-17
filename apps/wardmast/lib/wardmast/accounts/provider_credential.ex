@@ -92,9 +92,16 @@ defmodule Wardmast.Accounts.ProviderCredential do
     attribute :kind, :atom do
       allow_nil? false
       public? true
-      constraints one_of: [:oauth_token, :api_key, :cli_credentials_file, :cli_credentials_path]
 
-      description "The credential shape: oauth_token / api_key / cli_credentials_file / cli_credentials_path (bd-b632tz: the secret is a `.credentials.json` *location*, never a token)."
+      constraints one_of: [
+                    :oauth_token,
+                    :api_key,
+                    :cli_credentials_file,
+                    :cli_credentials_path,
+                    :service_account
+                  ]
+
+      description "The credential shape: oauth_token / api_key / cli_credentials_file / cli_credentials_path (bd-b632tz: the secret is a `.credentials.json` *location*, never a token) / service_account (bd-b2t0kw: an antigravity account's Google Cloud service-account JSON key, delivered to agy as a file, never as an env value)."
     end
 
     attribute :env_var, :string do

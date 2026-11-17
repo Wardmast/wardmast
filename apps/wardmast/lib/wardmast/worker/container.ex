@@ -614,7 +614,9 @@ defmodule Wardmast.Worker.Container do
 
   def teardown(_), do: :ok
 
-  @git_secret_re ~r/\A(arb-[a-zA-Z0-9_.-]+)-git-(?:key|token|api-token)\z/
+  # bd-b2t0kw: agy's service-account key (`<container>-agy-adc`) is a run secret of the
+  # same lifetime, so the same reaper removes it.
+  @git_secret_re ~r/\A(arb-[a-zA-Z0-9_.-]+)-(?:git-(?:key|token|api-token)|agy-adc)\z/
 
   @doc """
   Creates the podman secret `secret` (`%{name:, value:, ...}`; bd-9cygoo). The
@@ -669,9 +671,9 @@ defmodule Wardmast.Worker.Container do
 
   @doc """
   Removes the git-credential secrets (`<container>-git-key`, `<container>-git-token`,
-  `<container>-git-api-token`)
-  whose container no longer exists: what a crashed server leaves behind. Returns
-  the names removed.
+  `<container>-git-api-token`) and agy's service-account key (`<container>-agy-adc`,
+  bd-b2t0kw) whose container no longer exists: what a crashed server leaves behind.
+  Returns the names removed.
   """
   @spec reap_git_secrets(keyword()) :: [String.t()]
   def reap_git_secrets(opts \\ []) do

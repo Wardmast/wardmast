@@ -148,6 +148,81 @@ defmodule Wardmast.NodeAgent.K8s.PodRuntimeTest do
     end
   end
 
+  # bd-b2t0kw: agy's file credentials. The key and the MCP config (a bearer agy reads
+  # literally) stay on the memory volume for the run's life, 0600; the config dir holds
+  # only a link to the MCP config, where agy looks for it.
+  @agy_key ~s({"type":"service_account","private_key":"-----BEGIN PRIVATE KEY-----\\nMIIEvPOD\\n"})
+  @agy_mcp ~s({"mcpServers":{"wardmast":{"headers":{"Authorization":"Bearer mcp-pod-token"}}}})
+
+  describe "secret files (bd-b2t0kw)" do
+    @describetag spec: %{
+                   "mounts" => [
+                     %{"kind" => "worktree", "path" => "/work/tree"},
+                     %{"kind" => "home", "path" => "/work/home"},
+                     %{
+                       "kind" => "config_dir",
+                       "path" => "/work/home/.gemini",
+                       "files" => %{"GEMINI.md" => Base.encode64("# worker")}
+                     }
+                   ],
+                   "secret_files" => %{
+                     "agy-adc.json" => %{"content" => Base.encode64(@agy_key)},
+                     "agy-mcp.json" => %{
+                       "content" => Base.encode64(@agy_mcp),
+                       "link" => "config/mcp_config.json"
+                     }
+                   }
+                 }
+
+    # Linux-only: the pod init-container scripts (priv/k8s_pod) use GNU coreutils flags and only run in the Linux worker image
+    @tag :linux
+    test "stay on the run volume, 0600; the config dir gets only a link to the MCP config", ctx do
+      assert {out, 0} = sh("seed", ctx.env)
+      refute out =~ "PRIVATE KEY"
+      refute out =~ "mcp-pod-token"
+
+      creds = Path.join(ctx.dirs.run, "creds")
+      assert File.read!(Path.join(creds, "agy-adc.json")) == @agy_key
+      assert File.read!(Path.join(creds, "agy-mcp.json")) == @agy_mcp
+
+      for name <- ~w(agy-adc.json agy-mcp.json) do
+        assert {:ok, %File.Stat{mode: mode}} = File.stat(Path.join(creds, name))
+        assert Bitwise.band(mode, 0o777) == 0o600
+      end
+
+      assert {:ok, %File.Stat{mode: dir_mode}} = File.stat(creds)
+      assert Bitwise.band(dir_mode, 0o777) == 0o700
+
+      link = Path.join(ctx.dirs.work, "claude-config/config/mcp_config.json")
+      assert {:ok, %File.Stat{type: :symlink}} = File.lstat(link)
+      assert File.read_link!(link) == Path.join(creds, "agy-mcp.json")
+      assert File.read!(link) == @agy_mcp
+      assert File.read!(Path.join(ctx.dirs.work, "claude-config/GEMINI.md")) == "# worker"
+
+      # Nothing secret on the work volume: neither the tree, the home nor the config dir
+      # holds a file with it (the link above holds a path).
+      for {path, :regular} <- walk(ctx.dirs.work) do
+        refute File.read!(path) =~ "PRIVATE KEY", path
+        refute File.read!(path) =~ "mcp-pod-token", path
+      end
+
+      refute File.exists?(Path.join(ctx.dirs.run, "boot"))
+    end
+  end
+
+  defp walk(dir) do
+    case File.lstat(dir) do
+      {:ok, %File.Stat{type: :directory}} ->
+        dir |> File.ls!() |> Enum.flat_map(&walk(Path.join(dir, &1)))
+
+      {:ok, %File.Stat{type: type}} ->
+        [{dir, type}]
+
+      _ ->
+        []
+    end
+  end
+
   # The shape `ContainerSpawn.remote_spec/3` gives a resume's `config_dir` mount (its
   # contract test runs the real builder through `RunSpec` and `PodSpec`): the path is
   # under the slug of the run's worktree, as Claude Code names it.

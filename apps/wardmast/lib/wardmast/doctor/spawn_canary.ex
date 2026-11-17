@@ -52,13 +52,15 @@ defmodule Wardmast.Doctor.SpawnCanary do
   canary's temp dir, a private clone of it as the worktree, then the same
   `ContainerSpawn.prepare/1` (egress run, image, mounts) and `podman run` a
   dispatch uses, with `--version` as the command. The container, clone, scratch
-  repo and egress run are removed afterwards. A provider with no container wrap
-  point (agy, grok: `Sandbox.module/2` refuses them under podman, so a dispatch
-  never spawns them there) is canaried through the bwrap path instead, and the
+  repo and egress run are removed afterwards. A provider podman cannot run for the
+  workspace (grok, which has no container wrap point; agy without the workspace's
+  service-account key, bd-b2t0kw: `ProviderRouting.backend_refusal/3` refuses them, so a
+  dispatch never spawns them there) is canaried through the bwrap path instead, and the
   result's detail says so.
   """
 
   alias Wardmast.Agents
+  alias Wardmast.Agents.ProviderRouting
   alias Wardmast.Agents.SecurityPolicy
   alias Wardmast.Doctor.Scope
   alias Wardmast.MCP
@@ -72,7 +74,6 @@ defmodule Wardmast.Doctor.SpawnCanary do
   alias Wardmast.Worker.OsProcess
   alias Wardmast.Worker.PrivateClone
   alias Wardmast.Worker.RunTmp
-  alias Wardmast.Worker.Sandbox
   alias Wardmast.Worker.SpawnEnv
   alias Wardmast.Worker.WorkerEnv
 
@@ -270,11 +271,12 @@ defmodule Wardmast.Doctor.SpawnCanary do
     mode =
       cond do
         not ContainerSpawn.podman?(policy) -> :plain
-        match?({:ok, _}, Sandbox.module(policy, adapter_type)) -> :podman
+        is_nil(ProviderRouting.backend_refusal(policy, adapter_type, workspace)) -> :podman
         true -> :bwrap_fallback
       end
 
-    # A provider with no container wrap point (agy, grok) is never spawned under
+    # A provider podman cannot run here (grok, which has no container wrap point; agy
+    # without the workspace's service-account key, bd-b2t0kw) is never spawned under
     # podman by a dispatch either; its canary goes through the bwrap path.
     policy = if mode == :bwrap_fallback, do: bwrap_policy(policy), else: policy
 

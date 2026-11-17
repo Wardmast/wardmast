@@ -1570,6 +1570,7 @@ defmodule Wardmast.Nodes.Session do
     state =
       state
       |> heartbeat_degraded(payload)
+      |> heartbeat_caps(payload)
       |> heartbeat_readiness(payload)
       |> heartbeat_registries(payload)
       |> heartbeat_images(payload)
@@ -1648,6 +1649,21 @@ defmodule Wardmast.Nodes.Session do
     do: put_info(state, :degraded, degraded(word))
 
   defp heartbeat_degraded(state, _payload), do: state
+
+  # bd-b2t0kw: a cluster controller re-reports `caps.agy` in its `hb` (an agy image got
+  # published, a service-account key was registered or retired while it stayed connected).
+  # Only those two keys, and only well-formed values, are taken; every other capability is
+  # the hello's, and a machine node never advertises agy.
+  defp heartbeat_caps(%{info: %{kind: "cluster"}} = state, %{"caps" => %{"agy" => true}}),
+    do: %{state | caps: state.caps |> Map.delete("agy_missing") |> Map.put("agy", true)}
+
+  defp heartbeat_caps(%{info: %{kind: "cluster"}} = state, %{
+         "caps" => %{"agy" => false, "agy_missing" => missing}
+       })
+       when missing in ["image", "credential"],
+       do: %{state | caps: Map.merge(state.caps, %{"agy" => false, "agy_missing" => missing})}
+
+  defp heartbeat_caps(state, _payload), do: state
 
   # SI4a (§21.4): the agent's `hb` carries `registries`, `%{host => "reachable" | "unreachable"}`
   # for the hosts `hello_ok.registries` named. Display data and a placement input, so only
