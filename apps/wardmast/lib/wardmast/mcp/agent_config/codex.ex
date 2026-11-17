@@ -7,15 +7,15 @@ defmodule Wardmast.MCP.AgentConfig.Codex do
   scope token in a bearer header. The token can be provided in two ways:
 
   1. **Inline in config.toml** (default):
-      [mcp_servers.arbiter]
+      [mcp_servers.wardmast]
       url = "http://127.0.0.1:4848/mcp"
 
-      [mcp_servers.arbiter.http_headers]
+      [mcp_servers.wardmast.http_headers]
       Authorization = "Bearer <scope-token>"
 
   2. **Via environment variable** (if `bearer_token_env_var` is specified;
      what Wardmast's dispatch uses, so the token stays off disk):
-      [mcp_servers.arbiter]
+      [mcp_servers.wardmast]
       url = "http://127.0.0.1:4848/mcp"
       bearer_token_env_var = "ARBITER_MCP_TOKEN"
 
@@ -70,7 +70,7 @@ defmodule Wardmast.MCP.AgentConfig.Codex do
 
   Requires `:mcp_url`, plus `:scope_token` unless `:bearer_token_env_var` is
   given. Optional:
-  - `:server_name` — defaults to `"arbiter"`.
+  - `:server_name` — defaults to `"wardmast"`.
   - `:bearer_token_env_var` — if set, uses Codex's env-var expansion
     instead of embedding the token inline. E.g., `bearer_token_env_var: "ARBITER_MCP_TOKEN"`
     will write `bearer_token_env_var = "ARBITER_MCP_TOKEN"` (Codex expands it at runtime).
@@ -79,7 +79,7 @@ defmodule Wardmast.MCP.AgentConfig.Codex do
   @spec config_toml(keyword()) :: String.t()
   def config_toml(opts) do
     url = Keyword.fetch!(opts, :mcp_url)
-    name = Keyword.get(opts, :server_name, "arbiter")
+    name = Keyword.get(opts, :server_name, "wardmast")
     env_var = Keyword.get(opts, :bearer_token_env_var)
 
     if env_var do
@@ -180,7 +180,7 @@ defmodule Wardmast.MCP.AgentConfig.Codex do
   """
   @spec verify_config_loaded(list(), keyword()) :: :ok | {:error, atom()}
   def verify_config_loaded(servers, opts \\ []) when is_list(servers) do
-    server_name = Keyword.get(opts, :server_name, "arbiter")
+    server_name = Keyword.get(opts, :server_name, "wardmast")
 
     case Enum.find(servers, &(is_map(&1) and &1["name"] == server_name)) do
       nil ->
@@ -229,7 +229,7 @@ defmodule Wardmast.MCP.AgentConfig.Codex do
            ),
          {:ok, servers} when is_list(servers) <- Jason.decode(out),
          :ok <- verify_config_loaded(servers, opts) do
-      check_env_var_set(servers, env, Keyword.get(opts, :server_name, "arbiter"))
+      check_env_var_set(servers, env, Keyword.get(opts, :server_name, "wardmast"))
     else
       {:error, _} = err ->
         err

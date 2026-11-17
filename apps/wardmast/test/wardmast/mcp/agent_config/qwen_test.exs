@@ -8,7 +8,7 @@ defmodule Wardmast.MCP.AgentConfig.QwenTest do
   alias Wardmast.MCP.AgentConfig
   alias Wardmast.MCP.AgentConfig.Qwen
 
-  @opts [mcp_url: "http://127.0.0.1:4848/mcp", scope_token: "tok-123", server_name: "arbiter"]
+  @opts [mcp_url: "http://127.0.0.1:4848/mcp", scope_token: "tok-123"]
 
   setup do
     base =
@@ -29,11 +29,11 @@ defmodule Wardmast.MCP.AgentConfig.QwenTest do
     assert AgentConfig.adapter_for("qwen") == Qwen
   end
 
-  test "settings hold only the arbiter server with httpUrl and a Bearer header" do
+  test "settings hold only the wardmast server with httpUrl and a Bearer header" do
     assert %{"mcpServers" => servers} = Qwen.settings(@opts)
-    assert Map.keys(servers) == ["arbiter"]
+    assert Map.keys(servers) == ["wardmast"]
 
-    assert servers["arbiter"] == %{
+    assert servers["wardmast"] == %{
              "httpUrl" => "http://127.0.0.1:4848/mcp",
              "headers" => %{"Authorization" => "Bearer tok-123"}
            }
@@ -44,15 +44,15 @@ defmodule Wardmast.MCP.AgentConfig.QwenTest do
     settings: settings
   } do
     assert :ok = Qwen.write_mcp_config(wt, @opts)
-    assert %{"mcpServers" => %{"arbiter" => _}} = Jason.decode!(File.read!(settings))
+    assert %{"mcpServers" => %{"wardmast" => _}} = Jason.decode!(File.read!(settings))
     assert File.ls!(wt) == []
     assert Bitwise.band(File.stat!(settings).mode, 0o077) == 0
   end
 
   test "a repo .mcp.json server is excluded by the allow-list flags, not spawned", %{base: base} do
     flags = Qwen.flags()
-    assert ["--allowed-mcp-server-names", "arbiter"] = Enum.take(flags, 2)
-    assert ["--allowed-tools", "mcp__arbiter"] = Enum.drop(flags, 2)
+    assert ["--allowed-mcp-server-names", "wardmast"] = Enum.take(flags, 2)
+    assert ["--allowed-tools", "mcp__wardmast"] = Enum.drop(flags, 2)
 
     bin = Path.join(base, "bin")
     File.mkdir_p!(bin)
@@ -65,7 +65,7 @@ defmodule Wardmast.MCP.AgentConfig.QwenTest do
     {:ok, argv} = Wardmast.Agents.Qwen.default_argv("hi", [])
 
     assert Enum.join(argv, " ") =~
-             "--allowed-mcp-server-names arbiter --allowed-tools mcp__arbiter"
+             "--allowed-mcp-server-names wardmast --allowed-tools mcp__wardmast"
   end
 
   test "regenerates idempotently, dropping planted servers", %{wt: wt, settings: settings} do

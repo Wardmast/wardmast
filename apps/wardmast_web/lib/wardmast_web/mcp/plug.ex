@@ -26,7 +26,7 @@ defmodule WardmastWeb.MCP.Plug do
 
     * Claude Code — `"type": "http"` in `.mcp.json` (**never** `"type": "sse"`).
     * Gemini CLI — `httpUrl`.
-    * Codex CLI — `[mcp_servers.arbiter] url`.
+    * Codex CLI — `[mcp_servers.wardmast] url`.
     * Antigravity / `agy` — its streamable-HTTP (`url`) server entry.
 
   That is what every MCP config Wardmast generates already writes — see

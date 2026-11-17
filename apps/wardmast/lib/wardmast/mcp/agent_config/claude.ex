@@ -8,7 +8,7 @@ defmodule Wardmast.MCP.AgentConfig.Claude do
 
       {
         "mcpServers": {
-          "arbiter": {
+          "wardmast": {
             "type": "http",
             "url": "http://127.0.0.1:4848/mcp",
             "headers": { "Authorization": "Bearer <scope-token>" }
@@ -34,13 +34,13 @@ defmodule Wardmast.MCP.AgentConfig.Claude do
 
   @doc """
   The `.mcp.json` content as a (string-keyed) map. Exposed for tests / inspection.
-  Requires `:mcp_url` and `:scope_token`; `:server_name` defaults to `"arbiter"`.
+  Requires `:mcp_url` and `:scope_token`; `:server_name` defaults to `"wardmast"`.
   """
   @spec config_map(keyword()) :: map()
   def config_map(opts) do
     url = Keyword.fetch!(opts, :mcp_url)
     token = Keyword.fetch!(opts, :scope_token)
-    name = Keyword.get(opts, :server_name, "arbiter")
+    name = Keyword.get(opts, :server_name, "wardmast")
 
     %{
       "mcpServers" => %{

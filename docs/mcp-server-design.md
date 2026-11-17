@@ -131,7 +131,7 @@ pointed at the streamable-HTTP entry instead; every such client supports one.
 
 Every MCP config Arbiter generates already uses **Streamable HTTP**:
 `Wardmast.MCP.AgentConfig.Claude` writes `"type": "http"`, `.Gemini` writes
-`httpUrl`, `.Codex` writes `[mcp_servers.arbiter] url`, and the `arb init`
+`httpUrl`, `.Codex` writes `[mcp_servers.wardmast] url`, and the `arb init`
 template (`apps/wardmast_cli/priv/templates/mcp_json.eex`) writes `"type":
 "http"`. Operators should use `"type": "http"` too. The GET stream is
 coordinator-tier, so a worker token gets `401` on it and workspace isolation
@@ -401,7 +401,7 @@ token:
 | **Claude Code** (Phase 1) | `.mcp.json` in the worktree (or `--mcp-config <file>`) | `{"mcpServers":{"arbiter":{"type":"http","url":"…/mcp","headers":{"Authorization":"Bearer <token>"}}}}` |
 | **Gemini CLI** — upstream `gemini` only (Phase 3; the `gemini_cli` provider was dropped in bd-ac53wz — this only applies to the Gemini adapter's fallback when `agy` is not on `PATH`) | `.gemini/settings.json` or `gemini mcp add` | bonus: Gemini's `includeTools`/`excludeTools` allowlist (most-restrictive-wins) is a clean secondary per-worker scoping hook |
 | **`agy`** (Antigravity fork of the Gemini CLI) | **nowhere in the worktree** — `$HOME/.gemini/config/mcp_config.json` or `$HOME/.gemini/config/plugins/<name>/mcp_config.json` only | **unsupported (bd-m8geh4):** agy does *not* read `.gemini/settings.json`, nor any worktree-local `.agents/plugins/**` path (probed live, agy v1.2.5 — see `Wardmast.MCP.AgentConfig.Gemini`'s moduledoc). Since `Wardmast.Agents.Gemini.resolve_executable/0` prefers `agy` over `gemini`, an Antigravity host gets `{:error, :unsupported}` and a loud dispatch-time log instead of a dead config file. Its schema differs too: `serverUrl` / `enabledTools`, not `httpUrl` / `includeTools` (`Gemini.agy_config_map/1`). Per-spawn injection needs a per-worker `$HOME` (agy exposes no config-dir env var) — tracked separately as the config-isolation spike |
-| **Codex** (Phase 3) | `.codex/config.toml` (`[mcp_servers.arbiter]`) | **caveat:** Codex MCP support is newer and has reports of silent connect failures — verify the session with a `/mcp`-equivalent check rather than trusting the spawn |
+| **Codex** (Phase 3) | `.codex/config.toml` (`[mcp_servers.wardmast]`) | **caveat:** Codex MCP support is newer and has reports of silent connect failures — verify the session with a `/mcp`-equivalent check rather than trusting the spawn |
 
 ### 5.1 Where it cuts in the spawn path
 

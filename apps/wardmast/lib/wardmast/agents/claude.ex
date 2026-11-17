@@ -624,7 +624,7 @@ defmodule Wardmast.Agents.Claude do
 
   # bd-7e8ezw: name the spawn's injected `.mcp.json` explicitly. Claude Code
   # applies the MAIN checkout's `.claude/settings.local.json` to every git
-  # worktree of the repo, and a `disabledMcpjsonServers: ["arbiter"]` there
+  # worktree of the repo, and a `disabledMcpjsonServers: ["wardmast"]` there
   # silently drops the worktree's auto-loaded `.mcp.json` — the operator
   # declining the server for their own interactive session cut every worker
   # off from Wardmast's MCP tools. `--mcp-config` servers are not subject to
