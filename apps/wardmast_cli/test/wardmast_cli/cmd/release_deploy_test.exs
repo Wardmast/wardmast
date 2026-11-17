@@ -1996,6 +1996,29 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       assert File.exists?(Path.join(home, "bin/arb"))
     end
 
+    test "running as the `arb` escript the shim replaces: deploy still reports, finishes, then swaps arb",
+         %{home: home} do
+      arb = Path.join(home, "bin/arb")
+      File.mkdir_p!(Path.dirname(arb))
+      File.write!(arb, "ORIGINAL ESCRIPT BYTES")
+      Process.put(:arb_running_script_override, arb)
+      on_exit(fn -> Process.delete(:arb_running_script_override) end)
+
+      {tarball, sha} = release_tarball_with_sha(@vsn)
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--json"]) end)
+
+      assert code == 0
+      assert {:ok, payload} = Jason.decode(String.trim(out))
+      assert payload["deployed"] == true
+      assert %{"updated" => true} = payload["cli_update"]
+      assert ReleaseDeploy.Status.read()["state"] == "succeeded"
+      assert File.read!(arb) =~ "#!/bin/sh"
+      refute File.exists?(arb <> ".new")
+    end
+
     test "text output says the CLI was updated", %{home: home} do
       {tarball, sha} = release_tarball_with_sha(@vsn)
       stub_release(@vsn, tarball, sha)

@@ -72,6 +72,9 @@ defmodule WardmastCli.Cmd.SelfUpdate do
         {:already_current, _} -> emit_already_current(mode, tag)
         {:updated, prior} -> emit_updated(mode, tag, prior)
       end
+
+      _ = flush_pending_shim()
+      :ok
     catch
       {:self_update_failed, msg, nil} -> Output.die(msg)
       {:self_update_failed, msg, hint} -> Output.die(msg, hint)
@@ -393,13 +396,19 @@ defmodule WardmastCli.Cmd.SelfUpdate do
     is_binary(running) and same_file?(Path.expand(running), Path.expand(path))
   end
 
-  defp same_file?(a, b), do: a == b or real_path(a) == real_path(b)
+  # Same path, or the same inode on the same device (follows every symlink,
+  # including symlinked directories).
+  defp same_file?(a, b) do
+    a == b or
+      case {File.stat(a), File.stat(b)} do
+        {{:ok, %{inode: i, major_device: d, minor_device: m}},
+         {:ok, %{inode: i, major_device: d, minor_device: m}}}
+        when i != 0 ->
+          true
 
-  defp real_path(path) do
-    case :file.read_link_all(String.to_charlist(path)) do
-      {:ok, target} -> Path.expand(to_string(target), Path.dirname(path))
-      _ -> path
-    end
+        _ ->
+          false
+      end
   end
 
   @doc """
