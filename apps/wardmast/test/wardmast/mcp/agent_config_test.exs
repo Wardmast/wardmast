@@ -14,7 +14,7 @@ defmodule Wardmast.MCP.AgentConfigTest do
 
       assert %{
                "mcpServers" => %{
-                 "arbiter" => %{
+                 "wardmast" => %{
                    "type" => "http",
                    "url" => "http://127.0.0.1:4848/mcp",
                    "headers" => %{"Authorization" => "Bearer tok-123"}
@@ -36,7 +36,7 @@ defmodule Wardmast.MCP.AgentConfigTest do
 
       assert %{
                "mcpServers" => %{
-                 "arbiter" => %{
+                 "wardmast" => %{
                    "httpUrl" => "http://127.0.0.1:4848/mcp",
                    "headers" => %{"Authorization" => "Bearer tok-g1"}
                  }
@@ -46,7 +46,7 @@ defmodule Wardmast.MCP.AgentConfigTest do
 
     test "includes the worker-tier includeTools allowlist by default" do
       config = Gemini.config_map(mcp_url: "u", scope_token: "t")
-      tools = config["mcpServers"]["arbiter"]["includeTools"]
+      tools = config["mcpServers"]["wardmast"]["includeTools"]
 
       assert is_list(tools)
       assert "ticket_show" in tools
@@ -89,14 +89,14 @@ defmodule Wardmast.MCP.AgentConfigTest do
 
     test "omits includeTools when include_tools: nil (coordinator scope)" do
       config = Gemini.config_map(mcp_url: "u", scope_token: "t", include_tools: nil)
-      refute Map.has_key?(config["mcpServers"]["arbiter"], "includeTools")
+      refute Map.has_key?(config["mcpServers"]["wardmast"], "includeTools")
     end
 
     test "accepts a custom include_tools list" do
       config =
         Gemini.config_map(mcp_url: "u", scope_token: "t", include_tools: ["ticket_show"])
 
-      assert config["mcpServers"]["arbiter"]["includeTools"] == ["ticket_show"]
+      assert config["mcpServers"]["wardmast"]["includeTools"] == ["ticket_show"]
     end
 
     test "honours a custom server_name" do
@@ -109,13 +109,13 @@ defmodule Wardmast.MCP.AgentConfigTest do
     test "produces a valid TOML with mcp_servers section using http_headers (G3)" do
       toml = Codex.config_toml(mcp_url: "http://127.0.0.1:4848/mcp", scope_token: "tok-c1")
 
-      assert toml =~ "[mcp_servers.arbiter]"
+      assert toml =~ "[mcp_servers.wardmast]"
       assert toml =~ ~s(url = "http://127.0.0.1:4848/mcp")
       # codex 0.153.4 reads http_headers, not headers (G3 gap analysis)
-      assert toml =~ "[mcp_servers.arbiter.http_headers]"
+      assert toml =~ "[mcp_servers.wardmast.http_headers]"
       assert toml =~ ~s(Authorization = "Bearer tok-c1")
       # Must not have the old schema that codex ignores
-      refute toml =~ "[mcp_servers.arbiter.headers]"
+      refute toml =~ "[mcp_servers.wardmast.headers]"
     end
 
     test "honours a custom server_name" do
@@ -133,9 +133,9 @@ defmodule Wardmast.MCP.AgentConfigTest do
           bearer_token_env_var: "ARBITER_MCP_TOKEN"
         )
 
-      assert toml =~ "[mcp_servers.arbiter]"
+      assert toml =~ "[mcp_servers.wardmast]"
       # When bearer_token_env_var is set, Codex uses its own key expansion, not http_headers
-      refute toml =~ "[mcp_servers.arbiter.http_headers]"
+      refute toml =~ "[mcp_servers.wardmast.http_headers]"
       refute toml =~ "http_headers"
       # The token is NOT inlined; instead, Codex's bearer_token_env_var expansion is used
       refute toml =~ "Bearer tok-c1-envvar"
@@ -191,14 +191,14 @@ defmodule Wardmast.MCP.AgentConfigTest do
 
       assert %{
                "mcpServers" => %{
-                 "arbiter" => %{
+                 "wardmast" => %{
                    "serverUrl" => "http://127.0.0.1:4848/mcp",
                    "headers" => %{"Authorization" => "Bearer tok-agy"}
                  }
                }
              } = config
 
-      server = config["mcpServers"]["arbiter"]
+      server = config["mcpServers"]["wardmast"]
 
       # agy names the client-side allowlist `enabledTools`; the upstream gemini
       # CLI names it `includeTools`. Neither accepts the other's key.
@@ -250,7 +250,7 @@ defmodule Wardmast.MCP.AgentConfigTest do
 
     test "agy_config_map/1 omits enabledTools for coordinator scope" do
       config = Gemini.agy_config_map(mcp_url: "u", scope_token: "t", include_tools: nil)
-      refute Map.has_key?(config["mcpServers"]["arbiter"], "enabledTools")
+      refute Map.has_key?(config["mcpServers"]["wardmast"], "enabledTools")
     end
   end
 
@@ -268,15 +268,14 @@ defmodule Wardmast.MCP.AgentConfigTest do
       assert :ok =
                AgentConfig.write(:claude, dir,
                  mcp_url: "http://127.0.0.1:4848/mcp",
-                 scope_token: token,
-                 server_name: "arbiter"
+                 scope_token: token
                )
 
       path = Path.join(dir, ".mcp.json")
       assert File.exists?(path)
 
       decoded = path |> File.read!() |> Jason.decode!()
-      "Bearer " <> embedded = decoded["mcpServers"]["arbiter"]["headers"]["Authorization"]
+      "Bearer " <> embedded = decoded["mcpServers"]["wardmast"]["headers"]["Authorization"]
 
       assert {:ok, scope} = Scope.from_token(embedded)
       assert scope.tier == :worker
@@ -298,7 +297,7 @@ defmodule Wardmast.MCP.AgentConfigTest do
       assert File.exists?(path)
 
       decoded = path |> File.read!() |> Jason.decode!()
-      server = decoded["mcpServers"]["arbiter"]
+      server = decoded["mcpServers"]["wardmast"]
 
       assert server["httpUrl"] == "http://127.0.0.1:4848/mcp"
       "Bearer " <> embedded = server["headers"]["Authorization"]
@@ -322,10 +321,10 @@ defmodule Wardmast.MCP.AgentConfigTest do
       assert File.exists?(path)
 
       content = File.read!(path)
-      assert content =~ "[mcp_servers.arbiter]"
+      assert content =~ "[mcp_servers.wardmast]"
       assert content =~ "http://127.0.0.1:4848/mcp"
       # codex 0.153.4 reads http_headers, not headers (G3)
-      assert content =~ "[mcp_servers.arbiter.http_headers]"
+      assert content =~ "[mcp_servers.wardmast.http_headers]"
       assert content =~ "Bearer "
     end
 
@@ -371,7 +370,7 @@ defmodule Wardmast.MCP.AgentConfigTest do
 
     [
       %{
-        "name" => "arbiter",
+        "name" => "wardmast",
         "enabled" => true,
         "disabled_reason" => nil,
         "transport" => transport,
