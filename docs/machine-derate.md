@@ -62,15 +62,15 @@ steps down to soft (then none) one window at a time.
 JSON object holding only the keys you want to change; it is re-read every
 sample, so a change applies within ~10 s with no restart:
 
-    arb settings set machine.derate '{"thermal_soft_c": 85, "thermal_hard_c": 92}'
-    arb settings set machine.derate '{"enabled": false}'      # off for the primary
-    arb settings set machine.derate null                      # back to the defaults
+    ward settings set machine.derate '{"thermal_soft_c": 85, "thermal_hard_c": 92}'
+    ward settings set machine.derate '{"enabled": false}'      # off for the primary
+    ward settings set machine.derate null                      # back to the defaults
 
 An unknown key or an invalid value is refused rather than ignored, so a typo
 cannot silently leave the guard off.
 
 **A node** — environment variables on the node agent (in
-`~/.config/arbiter-node/agent.env`, the unit's `EnvironmentFile`), read at boot; a malformed value keeps the
+`~/.config/wardmast-node/agent.env`, the unit's `EnvironmentFile`), read at boot; a malformed value keeps the
 default:
 
 | variable | key |
@@ -103,10 +103,10 @@ Restart the agent (`systemctl --user restart wardmast-node`) to apply.
 
 ## Where to see it
 
-* `arb scheduler status` / `scheduler_status` / `GET /api/scheduler/status`:
+* `ward scheduler status` / `scheduler_status` / `GET /api/scheduler/status`:
   `machines[]` carry `cap`, `offered`, `live`, `free`, `temp_c`, `psi`,
   `derate` and `derate_reason`.
-* `arb node list` / `GET /api/nodes`: `OFFERED`, `TEMP` and `PSI` columns, and a
+* `ward node list` / `GET /api/nodes`: `OFFERED`, `TEMP` and `PSI` columns, and a
   `↳ hard derate: thermal 96 °C — offering 2 of 4` line under a derated row.
 * The dashboard: the machine chips in the capacity strip (`box 2/2 of 6`, red
   for hard, amber for soft; the popup says why) and the nodes page.
@@ -119,7 +119,7 @@ Restart the agent (`systemctl --user restart wardmast-node`) to apply.
 Entering a **hard** derate raises the `machine_derate` system alert (keyed by the
 machine name; `local` is the primary); leaving it clears it. Both are announced
 on the `inbox` event topic, so the coordinator mailbox and stream get them and
-`arb alert list --kind machine_derate` shows it while it lasts. A soft derate
+`ward alert list --kind machine_derate` shows it while it lasts. A soft derate
 raises nothing. See `docs/design/ticket-lifecycle.md` (Child 8).
 
 ## Not sensed / limits

@@ -1,8 +1,8 @@
 # Loop version-awareness — design options
 
 Research task `bd-7shbxy` (#1222). **No implementation.** This is the
-design-options writeup the task asks for: what `arb loop analyze` should do
-with arbiter's own version, given that every release changes the generative
+design-options writeup the task asks for: what `ward loop analyze` should do
+with wardmast's own version, given that every release changes the generative
 process behind the corpus it reads.
 
 Everything in [What I verified](#what-i-verified) was checked against the
@@ -309,10 +309,10 @@ because no in-window build changed how rounds are counted for *them*
 specifically — which is a claim the [Q5](#q5--can-a-releases-changelog-inform-the-pass)
 mapping makes checkable rather than assumed.
 
-Add `--allow-mixed-build` to `arb loop analyze --propose` as the operator escape
+Add `--allow-mixed-build` to `ward loop analyze --propose` as the operator escape
 hatch — the generative path, i.e. the flag on `analyze` (`cmd/loop.ex:19`, routed
 to `POST /api/loop/propose` at `cmd/loop.ex:141-147`), not the separate
-`arb loop propose repo-doc-patch` verb (`cmd/loop.ex:82-86`), which is an
+`ward loop propose repo-doc-patch` verb (`cmd/loop.ex:82-86`), which is an
 operator-authored lesson and never runs the analysis pass.
 The operator is in the loop by design; the job here is to make them see it, not
 to make the decision for them.
@@ -366,7 +366,7 @@ bucketing, and a design that claims it can is overselling. What version
 awareness *can* do about it is part (b).
 
 **(b) Render the build composition of the refs wherever a human decides.** On
-the escalation post, on `arb loop pending`, on the LiveView detail. The
+the escalation post, on `ward loop pending`, on the LiveView detail. The
 operator sees:
 
 ```
@@ -386,7 +386,7 @@ that happened to be quiet across one build. Keep the sticky state a human act.
 **On staleness:** a hypothesis with zero refs from the last N builds is stale
 rather than wrong. Do **not** add a state for it — `:superseded` means
 replaced, and a sixth state is more machinery than the problem warrants. Expose
-it as a derived filter (`arb loop pending --stale`) for a periodic human sweep.
+it as a derived filter (`ward loop pending --stale`) for a periodic human sweep.
 
 **The cost of (a) and (b)** is that evidence refs must resolve to a build, and
 [finding 5](#5-incident_refs-is-a-heterogeneous-key-space) says they do not
@@ -481,7 +481,7 @@ Cheapest-first, with the dependency order that actually holds.
 | **1** | `arbiter_version` + `arbiter_sha` on `worker_runs`, stamped at `record_run_started/1`; version/sha into `record_pass_cost/1`'s `raw` map | one migration, ~20 lines | everything |
 | **2** | Header composition line + entirely-predates warning + **per-cell `builds` column** + cross-build caveat note + `builds` in the JSON summary | read-only, no behaviour change | the diagnostic |
 | **3** | `Wardmast.Loop.Comparability` + narrow `--propose` downgrade for cost-justified mixed-build candidates + `--allow-mixed-build` | small, declarative | Q3 |
-| **4** | Ref normalisation (`run:` / `task:`) + promotion liveness condition + build composition on escalation / `arb loop pending` | the largest piece | Q4 |
+| **4** | Ref normalisation (`run:` / `task:`) + promotion liveness condition + build composition on escalation / `ward loop pending` | the largest piece | Q4 |
 | **5** | Standing constraint: outcome measurement stays concurrent-arm | a doc paragraph + a moduledoc note | Q6 |
 
 **Recommendation: build rungs 1 and 2, then stop and re-run the pass over a

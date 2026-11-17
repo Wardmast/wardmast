@@ -8,7 +8,7 @@ bd-37d191, 2026-10-06). Scope: REST + CLI. Node-tier endpoints (`/node/*`,
 the server host as the operator's Unix user. Loopback therefore proves only
 "same host". What separates the operator from a session is **operator proof**:
 a coordinator token minted over `Wardmast.MCP.OperatorSocket`, which checks the
-peer's kernel credentials and refuses any process Arbiter spawned
+peer's kernel credentials and refuses any process Wardmast spawned
 (`Scope.operator?/1`; see `docs/worker-security.md`). A plain coordinator token
 (`ARB_TOKEN`, a session's own) is *not* operator proof.
 
@@ -16,15 +16,15 @@ peer's kernel credentials and refuses any process Arbiter spawned
 
 | Surface | Decision |
 |---|---|
-| `POST /api/dashboard/login_tokens` (D-A-18) | **Operator proof required** (`ApiPolicy` `:operator`). A dashboard login is an operator grant; a coordinator session must not be able to mint one. `arb dashboard login` mints a 5-minute coordinator token over the operator socket and sends *that* (never `ARB_TOKEN`); if the socket is unreachable it fails rather than fall back. Remote `ARB_HOST`: run it over `ssh <host> arb dashboard login`. |
+| `POST /api/dashboard/login_tokens` (D-A-18) | **Operator proof required** (`ApiPolicy` `:operator`). A dashboard login is an operator grant; a coordinator session must not be able to mint one. `ward dashboard login` mints a 5-minute coordinator token over the operator socket and sends *that* (never `ARB_TOKEN`); if the socket is unreachable it fails rather than fall back. Remote `ARB_HOST`: run it over `ssh <host> ward dashboard login`. |
 | `POST /api/grok/token` (grok-token note) | Coordinator tokens unchanged. A **worker** token is honoured only while its task exists and lies in the workspace the token names (403 otherwise). It remains an installation-wide credential, as the grok login is one per installation. |
 | `POST /api/mcp/tokens/verify` (D-M-14/15) | A coordinator may decode any token; every other tier only **its own** (the presented token must equal the caller's bearer; 403 otherwise). No decoding of another principal's token. Minting is unchanged: REST when the caller holds a token (capped at the caller's authority), the operator socket otherwise. |
-| `?token=` (D-M-22) | Accepted **only on `/mcp` and `/events`**: MCP clients and the `arb init` `curl -N` event loop cannot set a header (`EventController.authenticate/2` falls back to `?token=` after `Authorization: Bearer`). `/api/*` takes `Authorization: Bearer` only. Phoenix's `:filter_parameters` (`token`) keeps the value out of request logs; `plug_test.exs` pins that for `/mcp` by asserting the endpoint's `Parameters:` line shows `[FILTERED]`, and `event_controller_test.exs` does the same for `/events`. |
+| `?token=` (D-M-22) | Accepted **only on `/mcp` and `/events`**: MCP clients and the `ward init` `curl -N` event loop cannot set a header (`EventController.authenticate/2` falls back to `?token=` after `Authorization: Bearer`). `/api/*` takes `Authorization: Bearer` only. Phoenix's `:filter_parameters` (`token`) keeps the value out of request logs; `plug_test.exs` pins that for `/mcp` by asserting the endpoint's `Parameters:` line shows `[FILTERED]`, and `event_controller_test.exs` does the same for `/events`. |
 | Secrets on argv (D-C-36) | `workspace secret set <key> --file PATH \| -`, `account rotate --secret-file PATH \| -`, `mcp token verify --file PATH \| -` read the value without exposing it to `ps`/shell history. The argv forms (`set <key> <value>`, `--secret VALUE`, `verify <token>`) still work and print a warning on stderr (never the value). A literal value of `-` can no longer be set via `workspace secret set <key> -` (it now means stdin); use `--file`. |
 
 ## Not changed (and why)
 
-* `arb mcp token mint`'s dual route (REST vs socket by environment) keeps its
+* `ward mcp token mint`'s dual route (REST vs socket by environment) keeps its
   documented behaviour; the REST route already caps the minted token at the
   caller's authority (`McpController.mint_token/2`).
 * The dashboard UI's own login-start path (the browser flow in D-A-18) is not

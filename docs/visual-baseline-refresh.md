@@ -6,7 +6,7 @@ Several UI branches change the same pages, so every merge to main makes the othe
 branches' Playwright reference images stale and their `visual` job fails. Fixing it is
 mechanical — download the job's `*-actual.png` files, copy them over the baselines,
 commit, push — and used to cost an agent round each time. With
-`worker.repos.<repo>.visual_baselines` set, Arbiter does it itself, in the case where
+`worker.repos.<repo>.visual_baselines` set, Wardmast does it itself, in the case where
 that is provably safe, and in no other.
 
 ## What happens
@@ -33,7 +33,7 @@ the head's CI is red (`:ci_failed`) it calls `Wardmast.Worker.VisualBaselines.re
 3. **Every actual image maps to exactly one existing baseline** (`VisualBaselines.Archive`).
    A snapshot with no baseline (a new test), two baselines of the same name, two actuals
    for one snapshot, more than `max_snapshots`, or nothing that differs → no refresh.
-4. In a throwaway checkout of the branch (never the shared checkout) Arbiter overwrites
+4. In a throwaway checkout of the branch (never the shared checkout) Wardmast overwrites
    **only those baseline files**, verifies git staged exactly that set, commits
    `Refresh visual baselines after syncing main (auto)` and pushes — a plain,
    non-forced push with the repo's host credential (`HostCredential`). A branch that moved

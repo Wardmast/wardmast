@@ -21,7 +21,7 @@
 
 Workspace-scoped configuration lives in a single JSON `config` column on the
 `Wardmast.Tasks.Workspace` Ash resource and is edited at runtime through
-`arb config set` / `workspace_config_set` (and the REST + dashboard editors).
+`ward config set` / `workspace_config_set` (and the REST + dashboard editors).
 Several long-lived GenServers cache values derived from that config in their
 process state. When an operator changes config, how quickly does each process
 notice — and are there processes that never notice until they restart?
@@ -108,7 +108,7 @@ actions (`apps/wardmast/lib/wardmast/tasks/workspace.ex`):
 | MCP `workspace_config_set` / `_unset` (`mcp/tools.ex:290,317`) | `:patch_config` |
 | REST `PATCH /api/workspaces/:id/config` (`wardmast_web/.../workspace_controller.ex:81`) | `:patch_config` |
 | Dashboard config editor (`wardmast_web/.../workspace_detail_live.ex:167`) | `:patch_config` |
-| CLI `arb config set/unset` (`wardmast_cli`) → HTTP → the REST endpoint above | `:patch_config` |
+| CLI `ward config set/unset` (`wardmast_cli`) → HTTP → the REST endpoint above | `:patch_config` |
 | REST `PATCH /api/workspaces/:id` + dashboard secrets/whole-object | `:update` (whole-config replace) |
 | `skills/seeds.ex:150` | `:patch_config` |
 
@@ -321,7 +321,7 @@ Land in reviewable slices so each is independently verifiable:
 
 1. **Primitive** — `Wardmast.Workspaces.ConfigEvents` (topic + broadcast helper)
    + `BroadcastConfigChange` change wired into `:patch_config` and `:update`,
-   with a test asserting a broadcast fires on `arb config set` and does **not**
+   with a test asserting a broadcast fires on `ward config set` and does **not**
    fire on a name-only `:update`. No subscriber yet — pure, safe to merge.
 2. **merged_pr_finalizer** and **merge_queue** — subscribe +
    `reload_workspace_config/1`. Test: change the merger adapter, assert it

@@ -75,11 +75,11 @@ including reading the new scope's `memory.max` back, because a manager without
 the controller accepts `MemoryMax=` and silently ignores it. If the probe fails
 the worker is spawned uncapped, one warning is logged
 (`MemoryScope: per-worker memory cap unavailable — …`), and the probe is retried
-after five minutes. `arb doctor` reports the same state.
+after five minutes. `ward doctor` reports the same state.
 
 ## 2. `OOMPolicy=continue` on the service
 
-`arb install service` now writes `OOMPolicy=continue` into the unit's `[Service]`
+`ward install service` now writes `OOMPolicy=continue` into the unit's `[Service]`
 section. systemd's default, `stop`, stops the whole service when the kernel
 OOM-kills *any* process in its cgroup; `continue` leaves the survivors running
 (and if the server's own BEAM is the one killed, `Restart=on-failure` still
@@ -88,7 +88,7 @@ cgroup — the cap protects against workers, this protects against everything el
 
 ### An already-installed unit is host config
 
-Re-running `arb install service` rewrites the unit and picks the line up. If you
+Re-running `ward install service` rewrites the unit and picks the line up. If you
 would rather not regenerate it, add a drop-in:
 
 ```sh
@@ -121,14 +121,14 @@ so:
 
 ```sh
 journalctl -k --since '1 hour ago' | grep -i 'oom'          # → …/arb-run-<task>-<hex>.scope
-sqlite3 ~/.wardmast/arbiter.sqlite3 \
+sqlite3 ~/.wardmast/wardmast.sqlite3 \
   "select task_id, id, stop_category from worker_runs where cgroup_scopes like '%arb-run-<task>-<hex>%'"
 ```
 
 Runs that predate the column, or ran with the cap off or unavailable, have a
 NULL `cgroup_scopes`.
 
-## 4. `arb doctor`
+## 4. `ward doctor`
 
 The **worker memory cap** check asks the server which systemd unit it runs in,
 that unit's `OOMPolicy`, and whether the cap is in force. It warns when
@@ -143,7 +143,7 @@ policy to judge and reports ok.
 
 ## Reproducing by hand
 
-Without Arbiter, on any host that can run the scope:
+Without Wardmast, on any host that can run the scope:
 
 ```sh
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
@@ -155,7 +155,7 @@ systemctl --user show arb-demo.scope -p Result,MemoryPeak,ActiveState
 systemctl --user reset-failed arb-demo.scope
 ```
 
-The end-to-end proof inside Arbiter is the opt-in `:live_systemd` test:
+The end-to-end proof inside Wardmast is the opt-in `:live_systemd` test:
 
 ```sh
 XDG_RUNTIME_DIR=/run/user/$(id -u) \

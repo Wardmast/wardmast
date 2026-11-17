@@ -1,7 +1,7 @@
 # Session-JSONL archive (bd-db0p38)
 
 Every run's agent CLI writes a complete, structured record of itself to disk.
-Arbiter reads that file — for token reconciliation
+Wardmast reads that file — for token reconciliation
 (`Wardmast.Usage.ClaudeSessionFile`) and for retroactive step rows
 (`Wardmast.Workers.StepBackfill`) — and, until this change, never kept a copy.
 The CLI prunes it. This document covers what is archived, where, what it is
@@ -9,7 +9,7 @@ allowed to contain, and what an operator must do about that.
 
 ## What was being lost
 
-Everything else Arbiter persists about a run is a *rendering* of it:
+Everything else Wardmast persists about a run is a *rendering* of it:
 
 | Surface | What survives |
 |---|---|
@@ -60,7 +60,7 @@ two neighbours, so anything that can already fetch a run's transcript needs
 nothing new. Read it back with `Wardmast.Worker.SessionArchive.read/1`, or
 `zcat` it.
 
-**Yes, things outside Arbiter should read this.** It is the intended input for
+**Yes, things outside Wardmast should read this.** It is the intended input for
 transcript distillation (bd-cyxzvq AMENDMENT 3) and the only structured record
 of an interactive PTY session, where stdout is a repainted TUI. The path
 convention above is the contract; treat `<run_id>.jsonl.gz` as stable.
@@ -197,7 +197,7 @@ split on `config_dir` so this cannot recur.
 ### What about `--resume`, then?
 
 It is still real: `Wardmast.Worker.Dispatch.resume_session/2` re-spawns with
-`--resume <sid>` and the CLI appends to the same `<sid>.jsonl`, while Arbiter
+`--resume <sid>` and the CLI appends to the same `<sid>.jsonl`, while Wardmast
 opens a new `Run` row. The token reader and the step backfill each *window*
 that file by timestamp, because attributing another run's tokens or tool calls
 is a correctness bug.
@@ -225,8 +225,8 @@ module's `@moduledoc`.
 with the setting unset, never sweeps. The operator switch is the installation
 setting `output_offload_enabled`, read on every tick, so it needs no restart:
 
-    arb settings set output_offload_enabled true     # on  (also: /settings)
-    arb settings unset output_offload_enabled        # back to off
+    ward settings set output_offload_enabled true     # on  (also: /settings)
+    ward settings unset output_offload_enabled        # back to off
 
 The coordinator can do the same with the MCP tool `installation_config_set`
 (`key: "output_offload_enabled"`, `value: true`, or `null` to unset).

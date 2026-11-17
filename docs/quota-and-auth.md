@@ -92,9 +92,9 @@ Only a positive signal clears an open hold:
 - **The watchdog's recovery signal.** Any `CredentialWatchdog` recovery
   (its periodic probe passing, or `mark_recovered/2`) forwards to
   `AuthHold.recovered/2`.
-- **An operator.** `arb breaker reset --auth-hold claude` (or MCP
+- **An operator.** `ward breaker reset --auth-hold claude` (or MCP
   `breaker_reset` with `provider`, or `POST /api/breakers/reset` with
-  `provider`). `arb breaker list` / `breaker_list` show every hold under
+  `provider`). `ward breaker list` / `breaker_list` show every hold under
   `auth_holds`.
 
 An automatic recovery leaves the provider on *probation*: the next auth
@@ -144,13 +144,13 @@ already refused a valid `--provider gemini` dispatch once, with a diagnosis
 that was factually wrong: *"agent produced no output within the watchdog
 window (possible hang)."* Nothing had hung. The probe authenticated, made 21
 model calls and answered in 102s — against a hard-coded 30s watchdog, and with
-the child left running for another 72s after Arbiter gave up on it. Two
+the child left running for another 72s after Wardmast gave up on it. Two
 earlier probes the same day finished in 16s and 17s. The gate was a coin flip.
 
 The cause was that a one-word prompt is not a cheap round-trip to an agentic
 CLI: the gemini probe ran a full turn, tools enabled, `toolPermission:
 always-proceed`, rooted in whatever directory the BEAM was in (on this host,
-the live checkout Phoenix hot-reloads from), carrying an Arbiter-worker
+the live checkout Phoenix hot-reloads from), carrying an Wardmast-worker
 `GEMINI.md`. It read `ping` as a task.
 
 The probe is now bounded on five axes:
@@ -192,10 +192,10 @@ did in fact arrive — that branch keyed on `exit_status == nil` alone.
 Bounding the probe surfaced a second, sharper defect. Measured live on
 2026-09-18 with the bounded argv above: agy answered `ping` with a **14-step
 agentic turn** — 7 `run_command` calls, ~71K input tokens, 31.9s — because the
-Arbiter-worker `GEMINI.md` in its isolated `$HOME` tells it it is a worker with
-a task. One of those commands was `arb prime`. The backlog it printed contained
+Wardmast-worker `GEMINI.md` in its isolated `$HOME` tells it it is a worker with
+a task. One of those commands was `ward prime`. The backlog it printed contained
 a task titled *"Auth pre-flight P2: free expiry signals for codex and agy —
-generalise the 401-shaped detection"*, and Arbiter's line-scraping classifier
+generalise the 401-shaped detection"*, and Wardmast's line-scraping classifier
 read that text as proof its own credentials had expired. On a probe that
 authenticated fine and exited 0.
 
@@ -308,7 +308,7 @@ killed afterwards.
   worker sessions is a separate, larger change.
 * **A live CLI check.** The wire format above follows the Claude Agent SDK
   control protocol as described in the t3code research; it is exercised here
-  only against a stub. Verify on the arbiter host after deploy (see the PR's
+  only against a stub. Verify on the wardmast host after deploy (see the PR's
   "Not verifiable pre-merge" note).
 
 ## Which providers the dashboard shows (bd-i2gwwn)
@@ -346,7 +346,7 @@ a popover line) rather than disappearing. With nothing shown, the chip is
 gone and `/usage` says "No providers configured" with a link to the default
 workspace's Providers section.
 
-`GET /api/quota`, `arb quota` and the `quota_get` MCP tool are the raw view:
+`GET /api/quota`, `ward quota` and the `quota_get` MCP tool are the raw view:
 none of this applies to them, and they still report every captured provider.
 
 ### The chip
@@ -426,10 +426,10 @@ left the ticket waiting on the coordinator. Now `Wardmast.Worker`:
    `Wardmast.Providers.Pause` entry (`kind: quota`, `until`). Every router that
    honours a pause (`ProviderRouting`, `ReviewerRouting`, `ProviderPool`,
    `Dispatch`'s pause gate) routes round it with no further wiring; it lifts
-   itself at `until`, and `arb provider resume` lifts it early. An operator pause
+   itself at `until`, and `ward provider resume` lifts it early. An operator pause
    on the same target is never displaced or shortened.
 2. **Queues a held resume** in the workspace's `DispatchQueue` (`quota_resume:
-   true`, `retry_not_before` = the reset). It shows in `arb quota` → Held
+   true`, `retry_not_before` = the reset). It shows in `ward quota` → Held
    dispatches and as "held — quota" on the board.
 3. **Counts nothing and tells nobody**: no `worker_stopped` escalation, no
    `run_crashed` attention (the held item keeps the ticket's attention empty),
@@ -456,8 +456,8 @@ carry a **dollar spend cap**, paced over its window the way the % thresholds
 are.
 
 ```
-arb account set claude:api --spend-cap 20 --spend-window week --spend-mode paced
-arb account set claude:api --spend-cap none        # clear it
+ward account set claude:api --spend-cap 20 --spend-window week --spend-mode paced
+ward account set claude:api --spend-cap none        # clear it
 ```
 
 (`account_set` over MCP, `PATCH /api/accounts/:ref` and the Providers edit form
@@ -512,8 +512,8 @@ or `spend pace: $12.00 of $10.00 allowed by now (...)`. It wakes at the window
 reset (flat) or the moment the paced line reaches the spend (paced), and the
 drain re-checks the cap before it replays. Routing treats a capped-out account
 as `quota_held` for a fresh implementer, so a ticket goes to another account when
-one has room. The same reason shows in `arb account show`, `arb quota` /
-`quota_get` (`spend_caps`), `arb scheduler status` (the board-wide hold) and the
+one has room. The same reason shows in `ward account show`, `ward quota` /
+`quota_get` (`spend_caps`), `ward scheduler status` (the board-wide hold) and the
 Providers page.
 
 **Paging.** `Wardmast.Quota.SpendWatch` raises an operator system alert
@@ -596,7 +596,7 @@ Anthropic's `limits[]` can carry `kind: "weekly_scoped"` entries, one per model
   other models. The dispatch gate resolves the card's model for an account that
   reports a scoped window; an unresolvable model reads the worst of all.
 - **Unknown scopes.** A scope that matches no known Claude model is logged once
-  and shown in `arb quota` (`scoped`, `matched: false`), and gated, on every
+  and shown in `ward quota` (`scoped`, `matched: false`), and gated, on every
   model, only when Anthropic marks it `is_active`.
 
 The scheduler walk (`Board.WalkInputs`) still plans against the pool-level
@@ -620,9 +620,9 @@ at 2.5h and 82% at four. It is lower than the plateau line early in the window
 late in it. At floor `0` the two curves are the same line, which is why the
 dollar spend cap (always floor 0) is unaffected.
 
-Set it per account (`arb account set <ref> --pace-curve ramp`, the account form
+Set it per account (`ward account set <ref> --pace-curve ramp`, the account form
 on the Providers page, or `account_set` with `quota_config.pace_curve`) or per
-workspace (`arb config set quota.pace_curve ramp --workspace <ws>`). The account
+workspace (`ward config set quota.pace_curve ramp --workspace <ws>`). The account
 and the workspace each carry their own curve and floors; the gate takes
 `min(account, workspace)` of the two lines **at the moment of the check**, so
 the side that binds can change through the window. A window with no known length
@@ -631,7 +631,7 @@ or reset still falls back to its flat ceiling under either curve.
 The P0 pace exemption lifts whichever line is in force:
 `exempt ceiling = max(line, min(exempt_cap, flat))`.
 
-Roll back by unsetting the key (`arb account set <ref> --unset pace_curve`).
+Roll back by unsetting the key (`ward account set <ref> --unset pace_curve`).
 
 ## The optional rolling-24h burn governor (`daily_burn_cap`, bd-cklotu)
 
@@ -654,10 +654,10 @@ reading never holds anything.
 | `daily_burn_cap` | account `quota_config`, workspace `quota` | fraction in (0, 1] of the 7d window allowed per rolling 24 h; unset = off. A workspace can only tighten: `min(account, workspace)` |
 | `daily_burn_cap_mode` | same | `shadow` (default) or `enforce`; either side saying `enforce` enforces |
 
-Set it per account (`arb account set <ref> --daily-burn-cap 0.25 --daily-burn-cap-mode
+Set it per account (`ward account set <ref> --daily-burn-cap 0.25 --daily-burn-cap-mode
 enforce`, the Providers page, `account_set` with `quota_config.daily_burn_cap*`) or per
-workspace (`arb config set quota.daily_burn_cap 0.2 --workspace <ws>`, or the workspace
-policy form). `arb account set <ref> --daily-burn-cap none` turns it off.
+workspace (`ward config set quota.daily_burn_cap 0.2 --workspace <ws>`, or the workspace
+policy form). `ward account set <ref> --daily-burn-cap none` turns it off.
 
 - **`shadow`** holds nothing. The "would have held" record is the **Burn governor**
   section of the admission shadow report (`mix wardmast.admission_shadow_report`),
@@ -678,5 +678,5 @@ policy form). `arb account set <ref> --daily-burn-cap none` turns it off.
 prints the p50 / p90 / p99 of the historical rolling-24h burn per account, and, with a
 cap, how many readings it would have held and when the first was. A cap near p99
 trims only the worst bursts; one near p50 would hold on an ordinary day. The report is
-read-only. `arb quota --account <ref>` shows the cap, its mode and the current
+read-only. `ward quota --account <ref>` shows the cap, its mode and the current
 `burn_24h`. Roll back by unsetting the key (`--unset daily_burn_cap`).

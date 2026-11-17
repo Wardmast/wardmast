@@ -111,7 +111,7 @@ Rotating from generation N to N+1:
 
 `WARDMAST_CLOAK_KEY` and `WARDMAST_CLOAK_KEY_OLD` can be given as secret-manager
 pointers (`WARDMAST_CLOAK_KEY_REF`, `WARDMAST_CLOAK_KEY_OLD_REF`, e.g.
-`aws-sm:prod/arbiter#cloak_key`), so the env file holds no key material. The
+`aws-sm:prod/wardmast#cloak_key`), so the env file holds no key material. The
 rotation steps are the same — update the secret behind each pointer instead of
 the env file — and `WARDMAST_CLOAK_KEY_GENERATION` stays an inline number. See
 `docs/secrets-at-rest.md`.

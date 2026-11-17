@@ -20,7 +20,7 @@ Three answers up front, because they are the ones that decide whether this
 works:
 
 1. **Account identity is operator-asserted, never derived from the credential.**
-   A spike run for this RFC (§2.1) established that the credential Arbiter
+   A spike run for this RFC (§2.1) established that the credential Wardmast
    actually injects into workers — the workspace `sk-ant-oat01-…`
    `CLAUDE_CODE_OAUTH_TOKEN` — **cannot be asked who it belongs to**:
    `/api/oauth/profile` and `/api/oauth/validate` both return
@@ -96,7 +96,7 @@ Two conclusions, and they point in opposite directions:
 * **A provider-reported account identity exists** — `account.uuid` /
   `organization.uuid`, stable across token rotation, and it is exactly what the
   Claude Code CLI caches into `~/.claude.json`'s `oauthAccount` block.
-* **The credential Arbiter injects into workers cannot obtain it.** The
+* **The credential Wardmast injects into workers cannot obtain it.** The
   long-lived `sk-ant-oat01-…` grant minted by `claude setup-token` is
   inference-scoped. Every endpoint that would name its account rejects it.
 
@@ -178,7 +178,7 @@ That is a real risk with operator-asserted identity, so it gets a real,
 transactional operation rather than a manual SQL session:
 
 ```
-arb account merge <from-slug> --into <into-slug>
+ward account merge <from-slug> --into <into-slug>
 ```
 
 What happens to the historical rows:
@@ -214,7 +214,7 @@ would discard the one fact a split needs.
 |---|---|---|
 | `id` | uuid, pk | locally minted; the identity of record (§2.4) |
 | `provider` | string | `claude` / `codex` / `antigravity` — the codes `Wardmast.Quota.provider_code/1` already speaks. P1 shipped the Google CLI as `gemini_cli`; that upstream Gemini CLI provider was **dropped** in bd-ac53wz (see "Removed: `gemini_cli`" below) |
-| `slug` | string | operator handle, unique per provider — `arb quota --account personal-max` |
+| `slug` | string | operator handle, unique per provider — `ward quota --account personal-max` |
 | `label` | string | display name |
 | `plan` | string, nullable | `max_5x` / `max_20x` / `pro` / `team` — operator-stated, or from `claudeAiOauth.rateLimitTier` / the profile when known |
 | `provider_account_ref` | string, nullable | `account.uuid` when obtainable (§2.4) |
@@ -224,7 +224,7 @@ would discard the one fact a split needs.
 | `max_concurrent` | integer, nullable | **the account ceiling** (§4). `nil` = no account ceiling; that is the migration default and reproduces today's behaviour exactly |
 | `quota_config` | map | account-scoped gate settings: `throttle_threshold`, `weekly_threshold`, `weekly_warning_policy`, overage opt-in |
 | `enabled?` | boolean | an account can be parked without deleting it |
-| `merged_into_id` | uuid, nullable | set by `arb account merge` (§2.5) |
+| `merged_into_id` | uuid, nullable | set by `ward account merge` (§2.5) |
 | `inserted_at` / `updated_at` | timestamps | |
 
 Identity: `identity :provider_slug, [:provider, :slug]`.
@@ -244,7 +244,7 @@ entirely:
   `loadCodeAssist` / `retrieveUserQuota` call — the source of the recurring
   "Gemini CLI project id not available; reconnect the CLI …" line), its
   `CloudProbe` refresh, its `GoogleQuota` rows and the REST / MCP `gemini`
-  key are gone, and `arb quota` has no Gemini CLI section.
+  key are gone, and `ward quota` has no Gemini CLI section.
   `Quota.provider_code("gemini")` is `"antigravity"` when agy is on `PATH`
   and `nil` otherwise.
 * `GEMINI_API_KEY` / `GOOGLE_GENAI_API_KEY` left the Census credential
@@ -255,7 +255,7 @@ entirely:
   `cloud_code_quotas` rows. `down` is a no-op.
 * **History is kept verbatim.** `usage_events` is untouched: `provider` is a
   free string, so a historical `"gemini_cli"` row still rolls up under its own
-  label in `arb usage --by provider`, and a `provider_account_id` naming a
+  label in `ward usage --by provider`, and a `provider_account_id` naming a
   removed account still groups under its raw id in `--by provider_account`
   (the `/usage` page shows the raw id for any deleted account).
 
@@ -417,7 +417,7 @@ account_headroom(a, ws) =
 > **As shipped (bd-1kr3qf, parity P-16).** `Wardmast.Accounts.Fields` is the one
 > list of what an operator can set on an account — field, type, validation,
 > whether `null` clears it, and who may set it. `POST /api/accounts`,
-> `PATCH /api/accounts/:ref`, `arb account create|set`, the Providers Edit form
+> `PATCH /api/accounts/:ref`, `ward account create|set`, the Providers Edit form
 > and the MCP `account_set` tool all read it, so a bad `quota_config` is the same
 > 422 on create and PATCH and no key is editable on one surface only.
 >
@@ -425,10 +425,10 @@ account_headroom(a, ws) =
 > `throttle_threshold`, `weekly_threshold`, `paced_floor`, `weekly_paced_floor`,
 > `weekly_warning_policy`, `window_seconds` (written as a whole label => seconds
 > table), `pace_exempt_priority` (`none` = off, as on the workspace side),
-> `pace_exempt_threshold` and `weekly_pace_exempt_threshold`. `arb account set`
+> `pace_exempt_threshold` and `weekly_pace_exempt_threshold`. `ward account set`
 > has a flag per key and `--unset KEY` to clear one. An edit is a single write
 > (`Accounts.edit_account/2`): a failure leaves the account untouched.
-> `DELETE /api/accounts/:ref/attach/:workspace_id` / `arb account detach` remove
+> `DELETE /api/accounts/:ref/attach/:workspace_id` / `ward account detach` remove
 > one workspace's link, and attaching a `grok` account is refused on every surface
 > (grok is routed by the workspace's own setting). Credentials, rotation and login
 > are not in the registry and not on MCP.
@@ -436,15 +436,15 @@ account_headroom(a, ws) =
 ### 4.3 "vstim may use at most 2 of my 4 slots"
 
 ```
-arb account set personal-max --max-concurrent 4
-arb account attach vstim claude personal-max --share 2
+ward account set personal-max --max-concurrent 4
+ward account attach vstim claude personal-max --share 2
 ```
 
 > **As shipped (P8, bd-1k6pgv).** The share's write surface is P11's
-> `arb account attach`, not a second workspace-side verb — P11 already owned
+> `ward account attach`, not a second workspace-side verb — P11 already owned
 > the `workspace_provider_accounts` row, and two commands writing one column
 > is how a config surface starts disagreeing with itself. P8 added
-> `arb account set <ref> --max-concurrent N|none` and the semantics below;
+> `ward account set <ref> --max-concurrent N|none` and the semantics below;
 > the ceiling and the share are read by
 > `Wardmast.Accounts.Concurrency.account_headroom/2`.
 
@@ -456,7 +456,7 @@ first-come-first-served between Conductors, which is exactly the policy
 `system_max` already has today, so this introduces no new fairness regression —
 but it is a real property and it is stated here rather than discovered later. An
 operator who wants a *guarantee* rather than a cap wants a reservation, which
-needs cross-Conductor admission ordering Arbiter does not have; that is named as
+needs cross-Conductor admission ordering Wardmast does not have; that is named as
 future work in §10, not designed here.
 
 ### 4.4 Migration default: the ceiling is opt-in, the hold is not
@@ -469,7 +469,7 @@ setting.
 So: **migrate `provider_accounts.max_concurrent` to `nil`** (no account ceiling,
 today's behaviour bit-for-bit) and have the migration print one advisory line —
 "account `personal-max` is referenced by 3 workspaces whose caps total 12
-concurrent workers; consider `arb account set personal-max --max-concurrent N`".
+concurrent workers; consider `ward account set personal-max --max-concurrent N`".
 The operator opts in with a number they chose.
 
 The **quota hold becomes account-wide immediately**, with no opt-in. The
@@ -514,8 +514,8 @@ workspace-scoped. `splits` = part moves, part stays.
 | 25 | `Quota.capture_oauth_usage/2` | `apps/wardmast/lib/wardmast/quota.ex:513` | `workspace_id` | **moves** | one call per account per cycle |
 | 26 | `Quota.provider_spend/1` | `apps/wardmast/lib/wardmast/quota.ex:607` | `workspace_id` | **splits** | account total is the headline; workspace breakdown stays available |
 | 27 | `Quota.default_workspace_id/0`, `default_workspace_on_exhaustion/0` | `apps/wardmast/lib/wardmast/quota.ex:702`, `:728` | workspace | **stays** | workspace routing, not metering |
-| 28 | `arb quota` | `apps/wardmast_cli/lib/wardmast_cli/cmd/quota.ex:28`, output at `:96` | `--workspace` | **splits** | gains `--account`; §8 |
-| 29 | `arb usage` | `apps/wardmast_cli/lib/wardmast_cli/cmd/usage.ex:13` | `--by …`, `--workspace` | **splits** | gains `--by account`, `--account`; §8 |
+| 28 | `ward quota` | `apps/wardmast_cli/lib/wardmast_cli/cmd/quota.ex:28`, output at `:96` | `--workspace` | **splits** | gains `--account`; §8 |
+| 29 | `ward usage` | `apps/wardmast_cli/lib/wardmast_cli/cmd/usage.ex:13` | `--by …`, `--workspace` | **splits** | gains `--by account`, `--account`; §8 |
 | 30 | Web quota/usage surfaces | `apps/wardmast_web/lib/wardmast_web/controllers/api/quota_controller.ex`, `apps/wardmast_web/lib/wardmast_web/live/usage_live.ex`, `apps/wardmast_web/lib/wardmast_web/live/workspace_detail_live.ex` | workspace | **splits** | workspace detail keeps a workspace view that names its account |
 | 31 | `MergeWorkerEnv` change | `apps/wardmast/lib/wardmast/tasks/workspace/changes/merge_worker_env.ex` | workspace | **splits** | reused verbatim by the migration to remove moved keys (§7.3) |
 
@@ -547,7 +547,7 @@ group:** header columns from the row with the newest `captured_at`, oauth column
 from the row with the newest `oauth_captured_at`. `codex_quotas` and
 `cloud_code_quotas` have a single writer and need no such care.
 
-**How `arb quota` output changes.** Today the header is
+**How `ward quota` output changes.** Today the header is
 `Anthropic quota (workspace <uuid>)`
 (`apps/wardmast_cli/lib/wardmast_cli/cmd/quota.ex:96`), printed three times with the
 same numbers if you ask three times. After:
@@ -579,7 +579,7 @@ shared `default` account minted per provider. One account per provider, never
 one per workspace — minting per workspace would reproduce exactly the
 duplication this phase removes. A minted account carries no
 `provider_credentials`, so it supplies nothing to any spawn; the link it
-writes is metering identity only, and `arb account attach` / `merge` (§2.5,
+writes is metering identity only, and `ward account attach` / `merge` (§2.5,
 P11) is the correction when the guess is wrong.
 
 ---
@@ -754,7 +754,7 @@ the schema and config migrators and before the boot tasks that dispatch work.
   exists → **off**. A legacy credential is an allowlisted (§7.3) key in some
   workspace's `worker_env` that no account supplies to it, or a
   `CLAUDE_CODE_OAUTH_TOKEN` in the server environment. The boot logs a warning
-  naming the sources, and `arb server doctor` fails (`GET
+  naming the sources, and `ward server doctor` fails (`GET
   /api/server/provider_accounts`) and points at
   `docs/provider-accounts-release-runbook.md`.
 * **Fresh.** Neither of the above → **on**. Each workspace is joined to
@@ -789,7 +789,7 @@ decides only the fresh-install `<provider>:default` joins and what doctor
 reports. An un-migrated install carrying legacy credentials is no longer held
 on the legacy chain: its boot warning and doctor `[fail]` say those workspaces
 cannot spawn. A still-set `WARDMAST_PROVIDER_ACCOUNTS` draws a boot warning,
-and `arb install service` stops copying `CLAUDE_CODE_OAUTH_TOKEN` into
+and `ward install service` stops copying `CLAUDE_CODE_OAUTH_TOKEN` into
 `wardmast.env`, since nothing reads it there. The only rollback is the
 previous release binary. The release notes live in
 [`provider-accounts-release-runbook.md`](provider-accounts-release-runbook.md).
@@ -845,11 +845,11 @@ written today (`apps/wardmast/lib/wardmast/usage/event.ex:104`). Backfill from
 workspace's account for that provider did not change — trivially true
 pre-migration, since accounts did not exist.
 
-**CLI.** `arb usage --by account` is one new clause in
+**CLI.** `ward usage --by account` is one new clause in
 `Wardmast.Usage.summarize/1`'s `group_events/2`
 (`apps/wardmast/lib/wardmast/usage.ex:203`–`:210`); `--account <slug>` mirrors the
 existing `--workspace` filter
-(`apps/wardmast_cli/lib/wardmast_cli/cmd/usage.ex:13`). `arb quota --account`
+(`apps/wardmast_cli/lib/wardmast_cli/cmd/usage.ex:13`). `ward quota --account`
 reports the account total via a re-keyed `Quota.provider_spend/1`
 (`apps/wardmast/lib/wardmast/quota.ex:607`) with the per-workspace breakdown under
 it (§6).
@@ -868,7 +868,7 @@ The seam, stated concretely so bd-adyhvn can document it:
   `provider_account_id` should be **non-null for `source: probe | preflight`**
   even while `workspace_id` and `task_id` are null. That is the falsifiable
   statement of the seam.
-* Consequence for rollups: `arb usage --by account` must **include** probe rows,
+* Consequence for rollups: `ward usage --by account` must **include** probe rows,
   or it under-reports the plan — which is exactly the bias bd-adyhvn measured
   (unmetered probes consume window percentage without contributing ledger
   dollars, understating `$ per 1%`).
@@ -940,8 +940,8 @@ Each phase is sized to be one child ticket.
 | **P7** | Account-wide quota hold: account-keyed quota hold; thresholds `min(account, workspace)` (**shipped**; `Workflows.QuotaGate` was historical, removed with Conductor in #1965) | P5 | **P1** | D3 |
 | **P8** | Account concurrency ceiling + per-workspace share; registry-derived live count; `Board.Snapshot` folds it in (**shipped**, bd-1k6pgv) | P7 | P2 | D3 |
 | **P9** | `usage_events.provider_account_id` + `provider_credential_id` + backfill (**shipped**) | bd-adyhvn, P2 | P2 | D2 |
-| **P10** | `arb usage --by account` / `--account`; `arb quota --account`; JSON + LiveView surfaces (**shipped**, bd-icwk2k) | P9, P5 | P3 | D2 |
-| **P11** | `arb account` CLI: list / show / create / attach / rotate / **merge** (§2.5) (**shipped**, bd-8zvh5a) | P2 | P2 | D2 |
+| **P10** | `ward usage --by account` / `--account`; `ward quota --account`; JSON + LiveView surfaces (**shipped**, bd-icwk2k) | P9, P5 | P3 | D2 |
+| **P11** | `ward account` CLI: list / show / create / attach / rotate / **merge** (§2.5) (**shipped**, bd-8zvh5a) | P2 | P2 | D2 |
 | **P12** | Docs + moduledocs: retire the "quota is per workspace" mental model | P10 | P3 | D1 |
 | **P13** | "Flip" phase: delete `ConfigDir.oauth_token/1`'s flag-off legacy chain (the server-env and install-wide-unambiguous fallbacks kept verbatim at `config_dir.ex:263-265`; the flag-on floor was already removed in P4); remove `:provider_accounts_enabled` and hard-code the account join as the only path (deferred from P4, bd-cblemv, per operator ruling on #1947 — see §7.5) (**shipped**, bd-9gqj8e) | P4 | P2 | D2 |
 

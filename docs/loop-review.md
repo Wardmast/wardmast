@@ -15,8 +15,8 @@ decision of 2026-07-28, *"manual first at first, later it will be automated."*
 Run it:
 
 ```
-arb loop analyze --since 7d        # weekly is a sensible cadence
-arb loop analyze --since 7d --json # markdown + a structured summary envelope
+ward loop analyze --since 7d        # weekly is a sensible cadence
+ward loop analyze --since 7d --json # markdown + a structured summary envelope
 ```
 
 Under the hood it hits `POST /api/loop/analyze`, which runs
@@ -54,7 +54,7 @@ warrants at least the same gate.
 1. **Failure segmentation (allowlist, not heuristic).** Failures are split into
    *operational* (server restarts, rate-limits, auth, merge/CI infra — routed
    to ops, **excluded** from prompt-shaping) and *agent-quality*
-   (`:review_gate_rejected`, never signalled `arb done`, uncommitted/no-commits
+   (`:review_gate_rejected`, never signalled `ward done`, uncommitted/no-commits
    at completion, secret-in-commit, and **context exhaustion**). `server
    restarted` is the modal failure by ~4×; a naive `status = failed` pass would
    spend its whole budget on our own deploy restarts. Only agent-quality
@@ -89,7 +89,7 @@ warrants at least the same gate.
    reviewers found.
 
    **`--discover` (opt-in, bd-4f6opo — discovery Stage 1).** Off by default;
-   without it `arb loop analyze` makes no model call and its output is
+   without it `ward loop analyze` makes no model call and its output is
    unchanged. With it, the pass makes **one** model call over this residue —
    at most 300 units, newest-first, each truncated to 400 characters, read
    from the `review_gate_rounds.findings` column (never a transcript) — and
@@ -135,7 +135,7 @@ warrants at least the same gate.
    repo's red lint-job names (`mix precommit (compile, deps, format)` →
    `mix precommit`). The proposal accumulates lint fix_pass runs as
    incidents against the normal evidence bar, and applying it stays a human
-   `arb loop apply`.
+   `ward loop apply`.
 
 6. **Difficulty misestimates**, segmented by `(difficulty, repo)` cell — tasks
    where the dispatched difficulty under-provisioned the actual cost/rounds.
@@ -173,11 +173,11 @@ the pass with `--propose` and every suggestion it implies is persisted as a
 reviewable **`PendingWrite`** row — a queued write, never an applied one.
 
 ```
-arb loop analyze --since 7d --propose    # analyze, then queue what it implies
-arb loop pending                         # the live queue (hypothesis + proposed)
-arb loop diff <id>                       # gist, evidence, and the full unified diff
-arb loop apply <id>                      # or: arb loop apply all --state proposed
-arb loop reject <id> --reason "handled in CLAUDE.md instead"
+ward loop analyze --since 7d --propose    # analyze, then queue what it implies
+ward loop pending                         # the live queue (hypothesis + proposed)
+ward loop diff <id>                       # gist, evidence, and the full unified diff
+ward loop apply <id>                      # or: ward loop apply all --state proposed
+ward loop reject <id> --reason "handled in CLAUDE.md instead"
 ```
 
 Without `--propose` the pass is **byte-identical to Stage 1** — the zero-writes
@@ -191,11 +191,11 @@ list, the full diff in the detail pane) and over MCP as `loop_pending_list` /
 **coordinator-tier only**, so a worker can never apply a fleet-wide change.
 
 One kind is never applied through this queue. A `trust_promotion` (G18) proposes
-raising a subject's guardrail tier, which loosens security. `arb loop apply`,
+raising a subject's guardrail tier, which loosens security. `ward loop apply`,
 `loop_pending_apply`, the REST apply route and the dashboard refuse it at any
-authority, and `arb loop apply all` skips it with a note. It is listed as
-`(operator-only)`, and `arb loop reject` still declines it. Only the operator
-applies it, with `arb trust promote` and operator proof (see
+authority, and `ward loop apply all` skips it with a note. It is listed as
+`(operator-only)`, and `ward loop reject` still declines it. Only the operator
+applies it, with `ward trust promote` and operator proof (see
 [worker-security.md](worker-security.md), *Earned trust*).
 
 Every live row — `fleet`-scoped included — carries a real `workspace_id`
@@ -208,14 +208,14 @@ genuinely spans more than one workspace — an install where that attribution
 is ambiguous (several workspaces, none named `default`) has the row refused
 outright (`{:error, :ambiguous_workspace}`) rather than written with a null
 FK. A `:task` candidate raised with no workspace of its own (the same
-`arb loop analyze --propose` path) is attributed via its target task's own
+`ward loop analyze --propose` path) is attributed via its target task's own
 workspace, falling back to the installation default when the task cannot be
 resolved; it is refused on the same ambiguous-install terms as a `:fleet`
 candidate when neither resolves. A workspace-bound caller (dashboard, MCP,
-`arb loop pending`) only ever sees rows in its own workspace, so the same
+`ward loop pending`) only ever sees rows in its own workspace, so the same
 finding does not read as N findings across N workspaces.
 
-A refused candidate is **not silently lost**: `arb loop analyze --propose`
+A refused candidate is **not silently lost**: `ward loop analyze --propose`
 still logs it, but it is also counted in the response's `proposals_dropped`
 list (gist + refusal reason), rendered under "Dropped candidates" in the
 text output. On an install with several workspaces and none named `default`,
@@ -242,14 +242,14 @@ that row in place:
   escalation to the coordinator mailbox (guarded by `escalated_at`).
 - A `task`-scoped proposal **bypasses** the bar entirely — blast radius 1 is the
   per-task override the discipline above already prescribes.
-- Applying is never automatic, at any evidence level. `arb loop apply` on a
+- Applying is never automatic, at any evidence level. `ward loop apply` on a
   `hypothesis` refuses and names what the row still needs.
 
 The bar is configurable per workspace, through the deep-merge config surface:
 
 ```
-arb config set loop.evidence_bar.min_incidents 4
-arb config set loop.evidence_bar.min_distinct_tasks 3
+ward config set loop.evidence_bar.min_incidents 4
+ward config set loop.evidence_bar.min_distinct_tasks 3
 ```
 
 Absent keys fall back to the documented `3` / `2`.
@@ -274,8 +274,8 @@ proposal would add if applied.
   tokenizer call: it runs inside the analysis pass, which stays free of network
   I/O and LLM calls.
 
-The figure is shown in `arb loop pending` (a `+120ctx` / `free` column), in
-`arb loop diff`, over MCP, and on the dashboard next to the evidence counts — so
+The figure is shown in `ward loop pending` (a `+120ctx` / `free` column), in
+`ward loop diff`, over MCP, and on the dashboard next to the evidence counts — so
 a fleet-wide prompt addition cannot be approved without its standing price in the
 same glance as the case for paying it. Reinforcement re-estimates it from the
 current gist rather than leaving it stale at the first window's figure.
@@ -312,7 +312,7 @@ target skill refuses to apply and says so.
 
 ## Autonomous routing-tier adjustment (Stage 3, `bd-6edc0u`) — opt-in, default off
 
-Stage 3 lets Arbiter apply **one** narrow class of queued proposal without a
+Stage 3 lets Wardmast apply **one** narrow class of queued proposal without a
 human: a routing-tier adjustment — a single `D<n>` tier's `model_tier` /
 `thinking`. Nothing else. Skill bodies and `standing_orders` are prose that
 bloats every future prompt and can contradict itself; a routing rule is
@@ -321,7 +321,7 @@ whole reason it goes first, and alone.
 
 It is off everywhere until an operator sets, per workspace:
 
-    arb config set loop.autonomous_routing_enabled true --workspace <id>
+    ward config set loop.autonomous_routing_enabled true --workspace <id>
 
 With the flag unset — the default on every workspace including `default` —
 routing, the queue, and the config are byte-for-byte what they were before
@@ -393,15 +393,15 @@ map lookup and stops.
 
 ### Running a canary by hand, and deciding the outcome yourself
 
-The autonomous path above waits for `arb loop analyze --propose` to produce a
+The autonomous path above waits for `ward loop analyze --propose` to produce a
 routing candidate and then promotes the winner on its own. To test a specific
 routing change and keep the final call, use the operator flow:
 
 1. **Start.** Opt the workspace in, and turn autopromotion off:
 
-       arb config set loop.autonomous_routing_enabled true --workspace default
-       arb config set loop.canary_auto_promote false --workspace default
-       arb loop propose routing --workspace default --difficulty 3 \
+       ward config set loop.autonomous_routing_enabled true --workspace default
+       ward config set loop.canary_auto_promote false --workspace default
+       ward loop propose routing --workspace default --difficulty 3 \
            --model-tier standard --thinking high
 
    (MCP: `loop_propose_routing`.) This writes an operator-authored
@@ -413,22 +413,22 @@ routing change and keep the final call, use the operator flow:
    behaviour described above); only the literal `false` changes anything.
 2. **Status.** At any time:
 
-       arb loop canary status --workspace default
+       ward loop canary status --workspace default
 
    (MCP: `loop_canary_status`.) Prints the proposal id and age, when it
    expires, how many more canary-arm dispatches it needs before a verdict is
    possible, the verdict *if judged now*, and for each arm the dispatches,
    tasks, reviewed tasks, first-pass convergence, review rounds, cost and cost
    per round. With no canary running it says why (flag unset, nothing queued).
-3. **Kill switch.** `arb config unset loop.autonomous_routing_enabled
+3. **Kill switch.** `ward config unset loop.autonomous_routing_enabled
    --workspace default` drops the `loop.canary` block on the next tick and the
    overlay stops on the very next dispatch. It is terminal, not a pause.
 4. **Decide.** With `canary_auto_promote: false`, a passing verdict writes
    nothing to `routing.rules`. The coordinator is mailed the per-arm stats
    **once**, the canary keeps measuring, and the proposal stays `proposed`:
 
-       arb loop apply <id>     # land routing.rules.D3 workspace-wide
-       arb loop reject <id>    # drop it
+       ward loop apply <id>     # land routing.rules.D3 workspace-wide
+       ward loop reject <id>    # drop it
 
    Either decision ends the canary on the next tick (`abandoned`). A *revert*
    verdict — canary convergence below control beyond the tolerance — is still
@@ -525,7 +525,7 @@ Attempt 1 at this task died of context exhaustion from unbounded reads (a
 Elixir (`Wardmast.Loop.Corpus` does bounded, aggregated SQL); the operator's
 context sees only the shaped report, never the raw 28 MB corpus. When you act
 on the report, keep the same discipline: drill into named `run_id`s with
-`arb worker log` / `worker_log`, never whole-corpus reads.
+`ward worker log` / `worker_log`, never whole-corpus reads.
 
 ### Transcript read bound (bd-3ozmaj / #1159)
 
@@ -533,7 +533,7 @@ A failed run's `terminal_lines` — what `FailureClassifier` sees — is the uni
 of two bounded reads, not a raw transcript read:
 
 - the last 40 lines (`OutputLog.tail_lines/2`) — the terminal signal
-  (autocompact thrash, `claude session error`, final `arb done`).
+  (autocompact thrash, `claude session error`, final `ward done`).
 - every line matching a narrow infra fingerprint (`OutputLog.scan_for/2`,
   patterns from `FailureClassifier.infra_fingerprints/0` —
   `Phoenix.Ecto.PendingMigrationError`, `DBConnection.ConnectionError`).
@@ -545,7 +545,7 @@ earlier in a long run (240–2500+ lines, agent kept going after the crash) was
 never seen and stayed `unclassified` — verified against the live corpus on
 2026-08-09. The fix keeps the tail read for everything else and adds a
 full-scan pass restricted to this narrow, unambiguous fingerprint list — safe
-because these strings can only come from Arbiter's own infrastructure, so a
+because these strings can only come from Wardmast's own infrastructure, so a
 whole-file scan carries no false-positive risk, and the corpus is small
 (tens of files, single-digit MB). This scan is per-failed-run and its cost
 is included in the pass's own `duration_ms` usage-event row.

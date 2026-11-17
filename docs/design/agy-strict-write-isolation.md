@@ -13,11 +13,11 @@ git command at a fake git dir; `--new-session` is added; toolchain caches are
 per-worker `HEX_HOME`/`MIX_HOME`/`XDG_CACHE_HOME` under the agy `$HOME`.
 Accepted gaps, documented in `docs/worker-security.md`: shared network,
 unrestricted reads, writable main `.git` (sibling refs), `git config --local`
-EBUSY, unprotected submodule git dirs. **bd-8xy1mf landed** (`arb server
+EBUSY, unprotected submodule git dirs. **bd-8xy1mf landed** (`ward server
 doctor` runs `Jail.status/0`'s real probe and distinguishes bwrap missing,
 `user.max_user_namespaces = 0`, and Ubuntu's
 `kernel.apparmor_restrict_unprivileged_userns = 1` via `Jail.explain/1`, each
-with its fix; surfaced in `arb prime`'s security block too) — the dev EC2's
+with its fix; surfaced in `ward prime`'s security block too) — the dev EC2's
 own `user.max_user_namespaces` reading is still pending the post-deploy
 two-host verification the task carries. Still open: bd-3s82pf (every mode,
 read-only reviews).
@@ -37,7 +37,7 @@ bubblewrap**, and **fail closed until then**:
    the git common dir and the worker's own agy `$HOME` are writable. Once a
    host passes the jail self-test, agy becomes `:strict`-eligible there.
    This is option 2.
-3. **Then (bd-8xy1mf):** `arb server doctor` runs the jail self-test and
+3. **Then (bd-8xy1mf):** `ward server doctor` runs the jail self-test and
    explains why a host can't jail. The same check runs on the laptop and on
    the RHEL 8 dev EC2.
 4. **After soak (bd-3s82pf):** extend the jail to agy's `:bypass`/`:auto`
@@ -56,7 +56,7 @@ The finding (bd-25ivqe, re-confirmed below): agy's native `write_to_file`
 ignores every `write_file(...)` deny, `disabledTools`, and `--sandbox`.
 agy has no setting that confines it, so any fix inside agy's own settings
 is off the table. That leaves three places to enforce the boundary: the
-vendor, the kernel, or Arbiter's dispatch.
+vendor, the kernel, or Wardmast's dispatch.
 
 | Option | Prevents the escape? | Cost | Risk | Verdict |
 |---|---|---|---|---|
@@ -120,7 +120,7 @@ In this worktree, with the git common dir bound read-write and
 | write to `.git/hooks/pre-commit` | **denied**, read-only file system |
 | `git config --local` | **denied**, `Device or resource busy` (git renames a lockfile over the bind-mounted file) |
 | `mix compile` (writes `_build` in the worktree) | ok, exit 0 |
-| `curl http://localhost:4848/api/version` (arb, MCP) | 200 |
+| `curl http://localhost:4848/api/version` (ward, MCP) | 200 |
 | write to `$HOME`, or to the main checkout `~/dev/arbiter` | **denied**, read-only file system |
 | write to `/tmp` | ok, but in a private tmpfs: nothing appeared in the host `/tmp` |
 | `ps -e` with `--unshare-pid` | 5 processes: only the jail's own |
@@ -166,7 +166,7 @@ Starting recipe for bd-5gvqgc:
   disappears with the jail. As a side effect this also ends cross-worker
   `/tmp` collisions, e.g. the test DB under `System.tmp_dir!/0`.
 * **`--unshare-pid` + `--die-with-parent`.** Killing the `bwrap` process
-  that Arbiter spawned takes down agy *and* anything agy backgrounded
+  that Wardmast spawned takes down agy *and* anything agy backgrounded
   (`run_command` goes async), which is tighter teardown than today.
 * **Toolchain caches.** `~/.hex`, `~/.mix`, `~/.cache/rebar3` and similar
   are read-only in the jail. `mix compile` doesn't need them, but a
@@ -182,7 +182,7 @@ Starting recipe for bd-5gvqgc:
 
 **What the jail does not do** (accepted, and documented in bd-5gvqgc):
 
-* The network stays shared, because `arb`, MCP and `git push` need it.
+* The network stays shared, because `ward`, MCP and `git push` need it.
   `sandbox.network: false` is still only the tool-level deny.
 * Reads are not restricted. Later, `--tmpfs` over `~/.ssh` and cloud
   credential dirs could make `:no_secret_reads` an OS guarantee too.

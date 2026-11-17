@@ -1222,10 +1222,10 @@ all of it database reads) under the test sandbox.
 
 | Override | Today | Under this design |
 |---|---|---|
-| A dispatch-time provider (`arb dispatch --provider`, or a caller's `agent_type`) | Wins, and is recorded as `override` (`ProviderRouting.override/4`) | Unchanged. The score is recorded alongside, as headroom is today |
+| A dispatch-time provider (`ward dispatch --provider`, or a caller's `agent_type`) | Wins, and is recorded as `override` (`ProviderRouting.override/4`) | Unchanged. The score is recorded alongside, as headroom is today |
 | An explicit model (`--model`, or `opts[:model]`) | Applied last at spawn (`dispatch.ex:2729`) | Unchanged. It beats a routed model, and routing doesn't expand candidates for it |
 | The implementer pin and the reviewer-family pin | Reused while available | Unchanged. Scoring applies only to a first choice and to a fallback |
-| A pause (`arb provider pause`) | Drops the candidate as `paused` | Unchanged, and checked ahead of every new check |
+| A pause (`ward provider pause`) | Drops the candidate as `paused` | Unchanged, and checked ahead of every new check |
 | The quota-gate bypass (`skip_quota_gate`, MCP `force_quota`) | Skips the gate, and is audited | Unchanged. It skips deferral too |
 | `routing.rules` | The policy | Unchanged. It is the policy floor |
 | `routing.provider_selection` | The switch | `most_quota` (or `failover`) is the kill switch, and takes effect on the next dispatch |
@@ -1290,11 +1290,11 @@ Phase 0 runs alongside phase 1. It measures; it doesn't route.
   [provider-dynamic-concurrency](provider-dynamic-concurrency.md) §8, the seat
   accounting that supersedes this reservation half belongs to DC3/DC4.
 - **R13 as built (bd-d5rdsc).** `Loop.CompetenceProposals` runs the R6 generator
-  over `SubjectStats.sample/1` (opt-in: `arb loop analyze --competence-feed`, the
+  over `SubjectStats.sample/1` (opt-in: `ward loop analyze --competence-feed`, the
   `competence_feed` request/MCP param) and queues one `:competence_matrix`
   `PendingWrite` per difficulty, holding only the rows that move the live matrix
   (no cell-level live row, or `author_runs` / `review_runs` off by 20% or the
-  round-1 approve rate off by 0.1). An operator's `arb loop apply` merges the rows
+  round-1 approve rate off by 0.1). An operator's `ward loop apply` merges the rows
   into the live matrix (`Settings.merge_competence_rows/1`; the replaced matrix is
   kept as the previous one). The Stage 3 canary (`Loop.Canary`) takes the same
   rows as a `kind: "matrix"` block in `loop.canary`: eligible at D0–D2 only, rows
@@ -1336,7 +1336,7 @@ Phase 0 runs alongside phase 1. It measures; it doesn't route.
   (`Loop.Replay.CliRunner`: the adapter's argv under the workspace's policy and
   guardrail floor, at the thinking level a dispatch would use,
   `ClaudeSession.port_args/6`, a deadline), with only the account's credential
-  and fences on `arb`, `gh`/`glab` and git in its env. Host git runs in the
+  and fences on `ward`, `gh`/`glab` and git in its env. Host git runs in the
   checkout only while it is as the harness left it (the sandbox's sealed config;
   the clone's `verify/1` and `arbiter.*` markers), else the replay fails, and a
   clone goes with `PrivateClone.discard/2`, which syncs nothing back. The score
@@ -1456,7 +1456,7 @@ The filing's own open questions, and where they stand:
 ## Appendix A: how the numbers were produced
 
 The queries read the install database read-only, opening
-`~/.wardmast/arbiter.sqlite3` with `mode=ro` on 2026-10-01. The window is
+`~/.wardmast/wardmast.sqlite3` with `mode=ro` on 2026-10-01. The window is
 fixed, so a re-run gives the same figures: tasks whose first attempt started
 in `[2026-08-24T00:00Z, 2026-10-01T12:00Z)`, and only events before the
 cutoff. The one exception is "difficulty raised", which reads the current

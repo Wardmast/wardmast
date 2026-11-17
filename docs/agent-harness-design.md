@@ -56,7 +56,7 @@ without committing to it.
   `result`). The session module parses these into display lines and pushes to
   PubSub topic `worker:<task_id>`.
 - **Completion sentinel:** a regex `~r/\barb done\b/` matched only against
-  assistant text (not tool output) — so a worker that greps for "arb done"
+  assistant text (not tool output) — so a worker that greps for "ward done"
   can't false-complete.
 - **Usage capture:** `ClaudeSession.absorb_usage/2` parses `init.model` and
   `result.usage`/`result.total_cost_usd` into a payload that the worker writes
@@ -284,7 +284,7 @@ resolved at spawn time:
     configurable per-workspace via `agent.config["tier_models"]` /
     `["thinking_argv"]`, optionally scoped under the `"gemini"`
     `ProviderConfig` namespace. To send only agy's `standard` to pro while
-    Claude's stays Sonnet: `arb config set agent.config.gemini.tier_models.standard gemini-3.1-pro-high`
+    Claude's stays Sonnet: `ward config set agent.config.gemini.tier_models.standard gemini-3.1-pro-high`
     (the `gemini` key scopes both `agy` and `gemini`; workspace validation
     rejects `tier_models` under an unknown provider key such as
     `antigravity`, an unknown tier, or an empty model, and
@@ -382,7 +382,7 @@ binds) and doesn't address resilience (Anthropic outages take the whole system
 down).
 
 **Cost:** ~1–2 days end-to-end, including a workspace migration and a CLI flag
-on `arb dispatch`.
+on `ward dispatch`.
 
 ### 5.2 Multi-key / multi-account rotation, inside the Claude adapter
 
@@ -440,7 +440,7 @@ Each phase is independently shippable and reversible.
   `workspace.config["agent"]["model"]` (introduce the `"agent"` sub-object now
   even though there's no adapter machinery yet — same shape stays valid in
   Phase B). **Landed alongside Phase B's `Agents.Claude.default_argv/2`.**
-- `arb dispatch --model <name>` as the one-shot override. **Threaded through
+- `ward dispatch --model <name>` as the one-shot override. **Threaded through
   CLI → `/api/workers/dispatch` → `Dispatch.dispatch/2` → `apply_model_override/2`,
   wins over both the workspace default and any routing rule.**
 - The review gate reads `review_agent.model` similarly. Default unset means "use the
@@ -450,7 +450,7 @@ Each phase is independently shippable and reversible.
   implementer (revise) spawns route through `Routing.choose/3` so a revise
   round honors the same policy the initial dispatch did.**
 - `Usage.Event.model` already records the actual model in use, so the A/B
-  measurement falls out for free — query via `arb usage --by model`.
+  measurement falls out for free — query via `ward usage --by model`.
 
 ### Phase B — `Agent` behaviour + Claude adapter (2–3 days)
 
@@ -494,7 +494,7 @@ Only meaningful once there are two adapters in flight.
 ## 8. What this design does NOT do
 
 - **Does not change the review gate protocol.** Same `VERDICT: APPROVE | REQUEST_CHANGES`
-  sentinel; same `arb done` completion sentinel. Adapters that don't speak this
+  sentinel; same `ward done` completion sentinel. Adapters that don't speak this
   protocol natively must be prompt-engineered to do so — same way we prompt-
   engineer Claude today.
 - **Does not change `Wardmast.Usage.Event`.** The schema is already provider-
@@ -535,7 +535,7 @@ Measure first.
 
 The single most useful thing this work unlocks is **legibility of cost**:
 once a workspace can route P0 to Opus and P4 to Haiku and have those choices
-show up cleanly in `arb usage`, we'll see the shape of the worker spend and the
+show up cleanly in `ward usage`, we'll see the shape of the worker spend and the
 multi-vendor question will answer itself.
 
 ## 11. Gemini usage scraping — findings (bd-guegdl)
@@ -577,7 +577,7 @@ Token fields use Gemini's `usageMetadata` naming, **not** Claude's:
 
 Crucially, **the Gemini CLI emits no per-session dollar cost** — there is no
 analogue to Claude's `result.total_cost_usd`. Cost must be *derived* from token
-counts × a per-model price table, which Arbiter does not currently have for any
+counts × a per-model price table, which Wardmast does not currently have for any
 provider (Claude's cost comes straight from the CLI).
 
 > Note: live capture against the installed CLI was blocked by an
@@ -600,7 +600,7 @@ Token usage + a *derived* cost now land on Gemini ledger rows. Three pieces:
    on the session's `provider`: `"gemini"` events route to
    `Wardmast.Agents.Gemini.Stream` (usage capture + display formatting +
    live-activity), keeping Gemini's schema out of the Claude parser. Only
-   assistant message *text* opts into `arb done` detection.
+   assistant message *text* opts into `ward done` detection.
 3. **A price table derives cost.** `Wardmast.Agents.Gemini.Pricing` holds
    per-model input/output/cached rates and computes `cost_usd` from the token
    counts (the CLI emits no dollar figure). Unknown models yield `nil` cost

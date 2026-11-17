@@ -78,7 +78,7 @@ Notes:
 
 ## 2. Register the key with Wardmast
 
-(`ward` is the CLI; `arb` still works as a deprecated alias for one release.)
+(`ward` is the CLI; `ward` still works as a deprecated alias for one release.)
 
 The key belongs to an `antigravity` provider account. Use the account your workspaces
 already route agy through, or create one:

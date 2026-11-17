@@ -1,6 +1,6 @@
 # Remote workers on Kubernetes: readiness, canary and rollout runbook
 
-How to tell whether a Kubernetes cluster can take Arbiter worker pods, what to do
+How to tell whether a Kubernetes cluster can take Wardmast worker pods, what to do
 when it says no, how the end-to-end suite is run, and the checklist for rolling the
 operator's k3s out as a **test bed**. The design is
 [`design/remote-workers.md`](design/remote-workers.md) §16 (section numbers below
@@ -67,8 +67,8 @@ hides the later ones; they are then reported "not evaluated", not ok.
 ## 2. Reading it
 
 ```sh
-arb server doctor            # the "nodes" section: one row per readiness check
-arb node show <name>         # the node row: degraded, k8s_version, capacity
+ward server doctor            # the "nodes" section: one row per readiness check
+ward node show <name>         # the node row: degraded, k8s_version, capacity
 ```
 
 For each cluster node the doctor prints `node <name>` (state, heartbeat, versions) and
@@ -80,7 +80,7 @@ of the nodes section: it never fails the doctor or blocks a deploy, but a
 `NetworkPolicy enforcement` warning means **no work is being placed on that node**.
 A cluster node that has reported no readiness block says so
 (`cluster <name>: readiness`); a controller older than the server does not send one,
-`arb node upgrade <name>` fixes that.
+`ward node upgrade <name>` fixes that.
 
 The node's readiness block is also in `GET /api/nodes` as `readiness`, next to
 `degraded`.
@@ -107,7 +107,7 @@ If you only see `reached gate`, the seed gate (k8s §9.1) timed out: the API ser
 Service address stayed reachable for the whole gate timeout, which is the same finding.
 
 After a fix the next canary run (at most 10 minutes, or edit the ConfigMap to trigger
-one) clears the flag. **`allow_unenforced_network`** (`arb node set <name>
+one) clears the flag. **`allow_unenforced_network`** (`ward node set <name>
 --allow-unenforced-network`) places work on a node anyway. It is a statement that
 untrusted code on that node may reach the cluster network, and it is recorded in the
 node's audit events. Use it only on a cluster you would trust with the code anyway.
@@ -138,11 +138,11 @@ not `netpol_unenforced`.
 Any `psa` check that is not ok makes the node `degraded: psa_unenforced` (KH4): no work is
 placed on it until the namespace is labelled, or the operator sets the same audited
 `allow_unenforced_network` override used for `netpol_unenforced`
-(`arb node update <node> --allow-unenforced-network`).
+(`ward node update <node> --allow-unenforced-network`).
 
 ### `RuntimeClass`
 
-With no `placement.runtime_class` the row is ok and `arb server doctor` prints a
+With no `placement.runtime_class` the row is ok and `ward server doctor` prints a
 `shared kernel` line: worker pods share the node's kernel with every other pod. A configured
 class the cluster lacks is a `fail` (`RuntimeClass … not found`).
 
@@ -177,7 +177,7 @@ anything else they keep `hostUsers: false`. For the admission policy, install wi
   it (the run is `interrupted`/`placement_refused`, the ticket re-queued, no resume attempt
   used) when the controller does not acknowledge the assignment within 120 s
   (`unacknowledged`), reconnects without it (`placement_lost`), or leaves the pod `Pending`
-  for 300 s (`unschedulable`, with the scheduler's message). `arb worker show <task>` names the
+  for 300 s (`unschedulable`, with the scheduler's message). `ward worker show <task>` names the
   cause. Tune with `config :wardmast, :node_placement, ack_timeout_ms:, pending_timeout_ms:,
   stalled_cooldown_ms:`. The failed-over node is ranked last for `stalled_cooldown_ms` (300 s).
 * A worker pod the scheduler preempts reports `preempted` (with the scheduler's message),
@@ -187,7 +187,7 @@ anything else they keep `hostUsers: false`. For the admission policy, install wi
   `no_capacity` until one finishes.
 * Image pull: the kubelet message is in the detail. Check `nodes.registry`, the
   `image_pull_secrets` in the controller ConfigMap, and that the primary has published
-  the image (`arb server doctor`, `nodes.registry`).
+  the image (`ward server doctor`, `nodes.registry`).
 * Clock: fix NTP on the cluster nodes. Lease renewals, token expiry and run deadlines
   depend on it.
 
@@ -200,12 +200,12 @@ stalled on several of them. Where the doctor has no dedicated row, the check is 
 
 | prerequisite | why | confirm with |
 |---|---|---|
-| `nodes.public_url` set to an address the cluster can reach (`arb settings set nodes.public_url https://…`) | pods and the controller call back to the primary here | doctor row `nodes.public_url reachable` (ok = the URL answers `/nodes/ping`) |
-| `nodes.registry` set to a registry **the primary can push to** (`arb settings set nodes.registry …`). GHCR was not pushable in K16b; use one whose credentials the primary holds | the primary publishes the worker/controller image there; the kubelet then pulls it | doctor: `identity` is `:no_registry` while unset, and `registry_pull` (section 1) fails with the kubelet's message if the image was never pushed. Manual: `podman login <registry>` as the Arbiter user and push a test tag |
-| the release `current` symlink exists and points at the running release | image builds and self-update read the release through it | no doctor row. Manual: `readlink -f <releases>/current` matches the version `arb version` reports |
+| `nodes.public_url` set to an address the cluster can reach (`ward settings set nodes.public_url https://…`) | pods and the controller call back to the primary here | doctor row `nodes.public_url reachable` (ok = the URL answers `/nodes/ping`) |
+| `nodes.registry` set to a registry **the primary can push to** (`ward settings set nodes.registry …`). GHCR was not pushable in K16b; use one whose credentials the primary holds | the primary publishes the worker/controller image there; the kubelet then pulls it | doctor: `identity` is `:no_registry` while unset, and `registry_pull` (section 1) fails with the kubelet's message if the image was never pushed. Manual: `podman login <registry>` as the Wardmast user and push a test tag |
+| the release `current` symlink exists and points at the running release | image builds and self-update read the release through it | no doctor row. Manual: `readlink -f <releases>/current` matches the version `ward version` reports |
 | the **podman sandbox backend** on the workspace (`agent.security.sandbox.backend: podman`) | the worker image is built and run through rootless podman | doctor row `podman sandbox readiness`; it only runs when a workspace uses podman and otherwise reports that none does |
-| `worker.placement: remote_only` for a canary (`arb config set worker.placement remote_only`) | a canary must not silently fall back to running locally; with no capacity the card is held, not failed | no doctor row. Manual: `arb config get worker.placement`; a held card says no node has capacity |
-| the `claude` CLI on the primary's `PATH`, as the server's own environment sees it (e.g. its systemd unit) | the primary runs Claude for the canary | no doctor row. Manual: `command -v claude` in the server's environment; `arb release deploy` also warns when `claude` is not found on PATH |
+| `worker.placement: remote_only` for a canary (`ward config set worker.placement remote_only`) | a canary must not silently fall back to running locally; with no capacity the card is held, not failed | no doctor row. Manual: `ward config get worker.placement`; a held card says no node has capacity |
+| the `claude` CLI on the primary's `PATH`, as the server's own environment sees it (e.g. its systemd unit) | the primary runs Claude for the canary | no doctor row. Manual: `command -v claude` in the server's environment; `ward release deploy` also warns when `claude` is not found on PATH |
 
 Design k8s §13 calls the operator's k3s a sensible **test bed** and not yet a
 production target for sensitive workspaces: one server (`mesanna`) and one worker
@@ -253,23 +253,23 @@ it". Each step has a pass criterion; stop at the first that fails.
    `api_cidrs`, which **adds to** the ClusterIP and never replaces it, so the same
    manifest works under pre-DNAT CNIs too. Find them with
    `kubectl get endpoints kubernetes -o jsonpath='{.subsets[*].addresses[*].ip}'`, then
-   render with `arb node add --kind cluster --api-cidrs <ip>/32,...` (the dashboard's Add
+   render with `ward node add --kind cluster --api-cidrs <ip>/32,...` (the dashboard's Add
    node form has the same "API server CIDRs" field). **Pass:** `kubectl -n wardmast-workers
    get networkpolicy controller-egress -o yaml` lists both `10.43.0.1/32` and the node IP.
 6. **Placement: spread, do not pin.** Leave `placement.node_selector` empty and add no
    taints or tolerations: workers spread across every schedulable node (the default
    `topologySpreadConstraints` on `kubernetes.io/hostname`, `ScheduleAnyway`). No node is
-   dedicated to Arbiter. Make the worker image pullable from every node that may run a
+   dedicated to Wardmast. Make the worker image pullable from every node that may run a
    pod (a registry the nodes reach, plus `registries[].pullSecret` if it is private, see
    §4a); do not pre-pull it on one machine. A node that is a poor fit (a Wi-Fi link, the CI
    runner) is excluded by a node selector or `nodeAffinity` the operator chooses
    deliberately, never by default. **Pass:** the ConfigMap loads (no `bad_config`
    degradation) and a first worker pod schedules (`kubectl -n wardmast-workers get pods -o wide`).
 7. **Install the controller** from the primary ("Add node", kind `cluster`, or
-   `arb node add --kind cluster`), with `max_concurrent: 2`. The cluster is not on the
+   `ward node add --kind cluster`), with `max_concurrent: 2`. The cluster is not on the
    tailnet, so use the install's reachability path A (a tagged tailscale auth key).
-   **Pass:** the node shows `online` in `arb node list`.
-8. **The canary passes.** `arb server doctor`. **Pass, all of:**
+   **Pass:** the node shows `online` in `ward node list`.
+8. **The canary passes.** `ward server doctor`. **Pass, all of:**
    `cluster <name>: NetworkPolicy enforcement` is `ok` (not `kept`, not `bridge … did
    not connect`), `Pod Security restricted` ok (enforced), `PriorityClass` ok,
    `ResourceQuota` ok with room, `Image pull` ok, `Clock` ok, and there is **no**
@@ -285,11 +285,11 @@ it". Each step has a pass criterion; stop at the first that fails.
 10. **Placement stays `local_only` for sensitive workspaces.** The `worker.placement`
     default is `local_only`; opt a workspace in deliberately, and only non-sensitive
     ones, for the test bed. Start with one workspace and `max_concurrent: 2`.
-11. **Watch the first runs.** `arb node show <name>`, the doctor, and `kubectl -n
+11. **Watch the first runs.** `ward node show <name>`, the doctor, and `kubectl -n
     wardmast-workers get pods`. Check the canary again after the first run finishes and
     again after 10 minutes.
 
-**Back-out:** `arb node drain <name>` then `arb node revoke <name>`, then delete the
+**Back-out:** `ward node drain <name>` then `ward node revoke <name>`, then delete the
 install (§4a for a Helm install; for the raw manifests delete the namespace
 `wardmast-workers`, which removes the controller, its Secrets and any worker pod) and the
 cluster-scoped `wardmast-worker` PriorityClass. Nothing else in the cluster was changed by
@@ -299,7 +299,7 @@ this checklist.
 
 The chart (`charts/wardmast-node/README.md`) replaces the raw manifests
 (`GET /nodes/join/k8s.yaml`), which remain the fallback for clusters without Helm. The
-dashboard's "Add node" Helm tab and `arb node add --kind cluster --format helm|values`
+dashboard's "Add node" Helm tab and `ward node add --kind cluster --format helm|values`
 print the commands below with this node's values (`GET /nodes/join/values.yaml`).
 
 **Admin split.** Two roles, selected by the chart's `mode`:
@@ -343,7 +343,7 @@ and `ARB_K8S_SELF_UPGRADE=false`. The node reports the exact command, of the for
 Upgrade the `-bootstrap` release too when the guardrails changed. A config-only upgrade
 does not roll the pod: the controller re-reads `controller.yaml` every 30 s.
 
-**Uninstall.** `arb node drain <name>`, `arb node revoke <name>`, then `helm uninstall
+**Uninstall.** `ward node drain <name>`, `ward node revoke <name>`, then `helm uninstall
 <node> -n wardmast-workers` (and `<node>-bootstrap` if split). Helm leaves the Secrets you
 created, the namespace, and a PriorityClass another install still uses (set
 `placement.priorityClass.create=false` and `controller.priorityClass.create=false` on every
@@ -375,7 +375,7 @@ The first real enrollment (mesaana k3s, 2026-10-26) hit these (the last was foun
    Fix: the chart and raw manifest now set `TS_KUBE_SECRET=""` on the controller's
    sidecar (bd-5qclzf). Upgrade the chart.
 2. **`{:registries, :duplicate_prefix}`.** Symptom: the controller logs `config ...
-   rejected` every 30s and the canary reports `{:config, :no_config}`. Cause: `arb node
+   rejected` every 30s and the canary reports `{:config, :no_config}`. Cause: `ward node
    add --registries` repeated the prefix of `nodes.registry`. Fix: bd-308jwo; on older
    builds, do not repeat the `nodes.registry` prefix in `--registries`.
 3. **Canary `{:no_image, :not_published}` on a fresh install.** The primary publishes
@@ -481,7 +481,7 @@ kubelet port. A target that cannot be named is `skipped`, shown in the detail
 
 ## 7. The controller's boot (K14), and when it does not come up
 
-The controller is the Arbiter release with `ARB_ROLE=agent` and
+The controller is the Wardmast release with `ARB_ROLE=agent` and
 `ARB_AGENT_BACKEND=k8s`, as the rendered Deployment runs it. Before it can label, build
 or watch a pod it has to learn who it is, so its boot (`Wardmast.NodeAgent.K8s.Boot`)
 does, on every start:
@@ -501,20 +501,20 @@ does, on every start:
    Lease, the readiness monitor and run table, the self-upgrader and the connection.
 
 A step that fails does not crash-loop the pod: the boot logs why, records it, and tries
-again (1 s doubling to 30 s). What it records is in `/tmp/arbiter-node/status.json`
+again (1 s doubling to 30 s). What it records is in `/tmp/wardmast-node/status.json`
 (`kubectl -n wardmast-workers exec deploy/wardmast-controller -- cat
-/tmp/arbiter-node/status.json`, or the log): `state: booting`, `boot_step` and
+/tmp/wardmast-node/status.json`, or the log): `state: booting`, `boot_step` and
 `last_error` until the controller is up, then the connection's own states (`ready`
 once the primary has said `hello_ok`).
 
 | `boot_step` / log | Meaning | Do |
 |---|---|---|
 | `credential`: no node credential and no join token | first boot, the join Secret is not there yet | create it with the command "Add node" printed (`read -rs T && printf %s "$T" \| kubectl -n wardmast-workers create secret generic wardmast-join --from-file=token=/dev/stdin`). The boot re-reads the file on every try; if the kubelet has not refreshed the optional mount after a few minutes, `kubectl -n wardmast-workers rollout restart deployment/wardmast-controller` |
-| `credential`: the primary refused the join token (401) | spent, expired (15 min) or mistyped | mint a new one (`arb node add --kind cluster`), replace the Secret |
+| `credential`: the primary refused the join token (401) | spent, expired (15 min) or mistyped | mint a new one (`ward node add --kind cluster`), replace the Secret |
 | `credential` (or `identity`): cannot reach the Kubernetes API server (`econnrefused`) | the `controller-egress` policy does not allow the API server's address as the CNI sees it; on k3s's kube-router that is the node IP:6443, not the ClusterIP | `kubectl get endpoints kubernetes`, then re-render with `--api-cidrs <ip>/32` (step 5 of §4) and re-apply the bootstrap part. A controller that is already up reports the same cause on its `Clock` check |
 | `store_credential` | enrolled, but the Secret could not be written (Role, placeholder missing) | fix the Role / re-apply the node manifest; the boot keeps the credential in memory and stores it on the next try, so **do not restart the pod** (the token is spent) |
 | `primary_facts`: 401 | the node was revoked or deleted on the primary | enrol again: empty `wardmast-node-credential`, new join Secret |
-| `identity`: `:no_registry` | `nodes.registry` is not set on the primary | `arb settings set nodes.registry …` |
+| `identity`: `:no_registry` | `nodes.registry` is not set on the primary | `ward settings set nodes.registry …` |
 | `identity`: `{:deployment, …}` / `{:service, …}` | the node manifest's Deployment or Service is missing or renamed | re-apply the node manifest |
 | `start`: `{:pod_channel_ca, …}` | the CA Secret holds something that is not a valid CA | delete its data (the pods' identities are lost either way) |
 
@@ -522,7 +522,7 @@ Environment the boot reads (all set by the rendered Deployment): `ARB_PRIMARY_UR
 `ARB_NODE_URL`), `ARB_NODE_NAME`, `ARB_K8S_SELF_UPGRADE`, `ARB_NODE_PROXY` (the tailscale
 sidecar; it carries the WebSocket and every HTTP call to the primary), and the
 Kubernetes-provided `KUBERNETES_SERVICE_HOST`/`_PORT` and `HOSTNAME`. Optional:
-`ARB_NODE_HOME` (default `/tmp/arbiter-node`, the pod's one writable directory) and
+`ARB_NODE_HOME` (default `/tmp/wardmast-node`, the pod's one writable directory) and
 `ARB_K8S_MAX_WALL_S` (default 86 400: a pod's `activeDeadlineSeconds` is this plus 30
 minutes, the backstop for a pod whose controller is gone).
 
@@ -530,4 +530,4 @@ minutes, the backstop for a pod whose controller is gone).
 release; with `ARB_K8S_SELF_UPGRADE=true` (the manifest's default) and no run live the
 controller patches its own Deployment and `Recreate` replaces it. The status file's
 `upgrade` block says `waiting_for_idle`, `patched`, `disabled` (patch it yourself with the
-`kubectl set image` command `arb node show` prints) or `failed` with the error.
+`kubectl set image` command `ward node show` prints) or `failed` with the error.

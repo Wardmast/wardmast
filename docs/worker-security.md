@@ -15,7 +15,7 @@ only by convention.
 
 On 2026-06-03 that posture bit us: with an empty deny and no sandbox, a
 stack-lifecycle worker's `git merge` wedged the live server. There was no
-Arbiter-level way to say "a worker in this domain may do X but not Y, and is
+Wardmast-level way to say "a worker in this domain may do X but not Y, and is
 isolated to its worktree."
 
 This change makes the posture **explicit, configurable, and
@@ -148,8 +148,8 @@ chain it stays excluded; nothing can re-add it back except removing the
 exclusion. The old `permissions.safe_defaults: []` key (a literal, replacing
 list) is **inert** — it is still accepted so existing configs keep parsing,
 but its value has no effect on the resolved deny set, which is always
-`safe_default_categories() -- safe_defaults_exclude`. `arb server doctor` and
-`arb prime` flag any workspace whose resolved policy is missing a current
+`safe_default_categories() -- safe_defaults_exclude`. `ward server doctor` and
+`ward prime` flag any workspace whose resolved policy is missing a current
 default category, naming which ones. **Effective floor caveat:** the isolated
 `CLAUDE_CONFIG_DIR/settings.json` is generated once from the install-default
 policy (which includes every safe-default category) and Claude unions deny
@@ -175,7 +175,7 @@ another Responses-API backend is covered the same.
 
 Probed against codex-cli 0.153.4 with a mock Responses server (no quota): under
 `--dangerously-bypass-approvals-and-sandbox`, `git push --force origin main`
-and `cd /tmp && git push --force …` were rejected with `Arbiter deny:
+and `cd /tmp && git push --force …` were rejected with `Wardmast deny:
 no_force_push` and the push did not happen; `git push origin main` ran.
 
 What it does not cover, and what to use instead:
@@ -406,7 +406,7 @@ there is a hardening, not a promise dispatch made. `:strict` still refuses
 `:bypass`/`:auto` case (`nil` when the jail applies, or the CLI/policy makes
 the whole question moot); it is surfaced per-workspace as
 `security_posture.write_jail_warning` on the workspace API and as the
-`arb server doctor` check "agy write jail". The full doctor **self-test**
+`ward server doctor` check "agy write jail". The full doctor **self-test**
 (does `bwrap` actually work on *this* host) is bd-8xy1mf — the warning here
 only reports what `write_confinement`'s own probe already found while
 building this spawn's argv.
@@ -452,7 +452,7 @@ building this spawn's argv.
   answer, so the binary alone proves nothing. The result is cached until
   restart. A host that fails keeps agy out of `:strict` (the fail-closed gate,
   bd-1abj7u) and runs agy unjailed everywhere else (`write_jail_warning`
-  names why); a real `arb server doctor` self-test that runs the probe
+  names why); a real `ward server doctor` self-test that runs the probe
   itself is bd-8xy1mf.
 
 **Open escape, not accepted** (found 2026-09-30 by bd-8apkz6; the fix is
@@ -475,11 +475,11 @@ each reached by an in-namespace `socat` on loopback:
 | In the jail | Goes to |
 |---|---|
 | `127.0.0.1:3128` (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`) | the run's filtering CONNECT proxy (`Wardmast.Worker.Egress`) |
-| `127.0.0.1:<Arbiter port>` (4848 by default) | Arbiter's endpoint, so `arb` and the MCP URL are unchanged |
+| `127.0.0.1:<Wardmast port>` (4848 by default) | Wardmast's endpoint, so `ward` and the MCP URL are unchanged |
 | `127.0.0.1:<port>` per fixed tunnel | one fixed `host:port` |
 | `ssh` (git over SSH) | `GIT_SSH_COMMAND` carries `-o 'ProxyCommand socat - PROXY:127.0.0.1:%h:%p,proxyport=3128'`, so the proxy sees `github.com:22` |
 
-`NO_PROXY=127.0.0.1,localhost,::1` keeps loopback URLs (the Arbiter bridge,
+`NO_PROXY=127.0.0.1,localhost,::1` keeps loopback URLs (the Wardmast bridge,
 a test server in the namespace) off the proxy. The proxy's baseline is the
 adapter's infra hosts plus the host of each git remote in the worktree.
 
@@ -491,7 +491,7 @@ own `lo`. List it per workspace (or per repo) as
 destination, on the host side, through a `t<n>` socket. The destination is
 fixed by operator config, not by the agent, and the layers union like
 `writable_paths`. Malformed entries are dropped. A local port that collides
-with the proxy (3128) or Arbiter bridge fails the spawn (`duplicate_bridge_port`).
+with the proxy (3128) or Wardmast bridge fails the spawn (`duplicate_bridge_port`).
 
 **Egress levels** (bd-5yydxh). `sandbox.egress` is `open` (the default: no host
 filtering, nothing changes for a workspace that does not opt in), `allowlist`
@@ -500,7 +500,7 @@ or `none`. `sandbox.allow_hosts` is the operator-written baseline (exact
 
 | Class | Contents | Reachable at |
 |---|---|---|
-| infra | the adapter's API hosts, Arbiter, the ticket's git remote | `none`, `allowlist` |
+| infra | the adapter's API hosts, Wardmast, the ticket's git remote | `none`, `allowlist` |
 | toolchain | package registries (`repo.hex.pm`, `registry.npmjs.org`, …) among `allow_hosts` | `none`, `allowlist` |
 | extras | every other `allow_hosts` entry | `allowlist` |
 | ticket grants | a ticket's `network:` grants | `allowlist` |
@@ -514,7 +514,7 @@ The effective level is `egress` in the workspace `security_posture` (and in
 each `repos.<repo>` entry, and in MCP `workspace_show`). The policy half only:
 the proxy and the jail's network mode are what enforce it.
 
-`arb server doctor` has an **egress jail** check: `bwrap --unshare-net` and
+`ward server doctor` has an **egress jail** check: `bwrap --unshare-net` and
 `socat` present, a proxy listener up, and against a loopback stand-in (no
 internet) one allow and one deny. When it fails, the hint names the missing
 package or the sysctl, as `Jail.explain/1` does.
@@ -531,7 +531,7 @@ network mode off.
 not a hostile kernel exploit):
 
 * The network is shared **on a host without network mode** (no `socat`, or
-  no network namespaces; `arb server doctor` fails "agy jail network" there).
+  no network namespaces; `ward server doctor` fails "agy jail network" there).
   Where network mode works (below) the jail has no shared network at all.
   `sandbox.network: false` is still only the tool-level deny. The
   enforcement design is
@@ -549,11 +549,11 @@ not a hostile kernel exploit):
 * Submodule git dirs (`<common>/modules/*`) are not protected.
 * Tools that hard-code `$HOME/.cache` instead of honouring `XDG_CACHE_HOME`
   reach the operator's cache entries through the agy HOME's passthrough
-  symlinks, which are read-only in the jail (for example Arbiter's own test
+  symlinks, which are read-only in the jail (for example Wardmast's own test
   config, which puts its scratch root under `$HOME/.cache/arbiter/scratch`).
   Use `sandbox.writable_paths` for those.
 * Nothing can be handed between the host and the worker through `/tmp`.
-* The agy HOME is writable from inside the jail and Arbiter writes into it on
+* The agy HOME is writable from inside the jail and Wardmast writes into it on
   the host at the next spawn. `ConfigDir` removes a symlink planted where one
   of its own directories or files goes rather than follow it, and the
   toolchain dirs get the same treatment.
@@ -603,7 +603,7 @@ or with network egress cut — adds a `"repos"` map under `agent.security`, keye
 by the same repo name used in `config["repo_paths"]`. The repo block is layered
 over the workspace-wide posture for that repo only; every other repo resolves
 the workspace-wide default unchanged. No new config surface — it's the same
-generic `config` JSON (`arb config set` / `workspace_config_set`).
+generic `config` JSON (`ward config set` / `workspace_config_set`).
 
 ```json
 {
@@ -712,7 +712,7 @@ lands in: one directory per worktree under `~/.cache/arbiter/worker-agy/`,
 seeded on every spawn with
 
 * the **generated** `settings.json` (never the operator's),
-* an Arbiter-owned, persona-forbidding `GEMINI.md`,
+* an Wardmast-owned, persona-forbidding `GEMINI.md`,
 * `.gemini/config/mcp_config.json` when the dispatch has an MCP scope token, and
 * symlink passthrough for everything else in the operator's `$HOME` *except*
   `.gemini`, `.agents` and `.antigravity` — the three trees agy reads its
@@ -756,10 +756,10 @@ throwaway `$HOME`:
   `rm ./inside.txt` came back `permission check failed for unsandboxed ...` and
   the file survived. This is why `security_enforced?/0` can answer `true`.
 * **`toolPermission: "strict"` is a dead end for headless use (bd-25ivqe).**
-  This was the original mapping for Arbiter's `:strict` mode, and it looked
+  This was the original mapping for Wardmast's `:strict` mode, and it looked
   right in review and in unit tests that only asserted on the generated
   settings document — but live, `permissions.allow` is never consulted under
-  agy's own `"strict"` value in headless/print mode. A bare `command(arb)`, a
+  agy's own `"strict"` value in headless/print mode. A bare `command(ward)`, a
   wildcard `command(*)`, and even the literal full command string all still
   came back auto-denied. Only `always-proceed` (`--dangerously-skip-permissions`)
   let anything through. `apps/wardmast/test/fixtures/agy_run_command_denied.json`
@@ -867,7 +867,7 @@ Under `:strict`, `Gemini.Security.allow_rules/2` adds:
   them). This is the same set the jail binds writable. The worker's agy
   `$HOME` is also writable in the jail, but it is not allowed here, and its
   `.gemini/antigravity-cli` settings directory is denied outright.
-* The commands a worker needs on top of the bootstrap set (`arb`, `git
+* The commands a worker needs on top of the bootstrap set (`ward`, `git
   status`/`diff`/`log`, `pwd`): `git add`, `commit`, `rev-parse`, `show`,
   `branch`, `checkout`, `switch`, `restore`, `rm`, `mv`, `fetch`, `pull`,
   `push`, `rebase`, `reset`, `stash`, `merge-base`, `ls-files`, `grep`,
@@ -882,7 +882,7 @@ future agy change), the jail answers `read-only file system`
 (`Wardmast.Worker.JailTest`). On 2026-09-29, agy 1.2.13 was probe-verified under
 `:strict` (bd-9xiwu1 / chore-68), confirming that writes outside the worktree
 and denied tool calls are correctly blocked. On 2026-09-30: on v0.2.2, agy under
-`:strict` made Arbiter MCP calls (bd-cy4ls6) and an agy review reached a verdict
+`:strict` made Wardmast MCP calls (bd-cy4ls6) and an agy review reached a verdict
 (bd-cwe9n2). `:auto` and `:bypass` do not get
 the working set: `always-proceed` never consults `allow`.
 
@@ -911,7 +911,7 @@ behaviour contract requires any adapter to:
 **Current status:** `Claude` enforces the policy unconditionally
 (`security_enforced? = true`). `Gemini` enforces it when — and only when — the
 CLI on `PATH` is `agy` *and* worker config isolation is on, since without an
-Arbiter-owned `$HOME` there is nowhere to put the generated settings document;
+Wardmast-owned `$HOME` there is nowhere to put the generated settings document;
 it answers `false` otherwise, including for the upstream `gemini` CLI, which has
 no allow/deny mechanism at all. (The upstream Gemini CLI *provider* —
 `gemini_cli` accounts, quota and the Providers page entry — was dropped in
@@ -929,7 +929,7 @@ A worker child used to **inherit the server's whole OS environment** (`Port.open
 credential added on top. A Claude worker could see `WARDMAST_CLOAK_KEY`,
 `SECRET_KEY_BASE`, `DATABASE_PATH`, `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`
 and the Codex/Gemini keys. `WARDMAST_CLOAK_KEY` plus a readable
-`~/.wardmast/arbiter.sqlite3` decrypts every workspace secret and provider
+`~/.wardmast/wardmast.sqlite3` decrypts every workspace secret and provider
 credential; `SECRET_KEY_BASE` is the default MCP token signing key.
 
 `Wardmast.Worker.SpawnEnv` is now the single builder. The child starts from an
@@ -949,7 +949,7 @@ explicitly unset) and receives only:
    `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM`); TLS/egress
    (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE`,
    `REQUESTS_CA_BUNDLE`, `HTTP(S)_PROXY`, `ALL_PROXY`, `NO_PROXY` and their
-   lowercase forms); and the `arb` CLI's non-secret endpoints (`ARB_HOST`,
+   lowercase forms); and the `ward` CLI's non-secret endpoints (`ARB_HOST`,
    `ARB_WORKSPACE`). Adding a name needs a reason in the `@exact` comment.
 2. **The caller's explicit pairs**: the adapter's `spawn_env/1` (its own
    provider's credential, the isolated `HOME` / `CLAUDE_CONFIG_DIR`), the
@@ -1004,7 +1004,7 @@ quota probes (`CloudCode` agy usage, `GrantRefresher`).
   An install that exported any of these in `~/.wardmast/wardmast.env` and relied
   on workers picking them up loses that behaviour silently: `ANTHROPIC_BASE_URL`,
   `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CONFIG_DIR` (when
-  worker config isolation is off; with isolation on, Arbiter sets its own),
+  worker config isolation is off; with isolation on, Wardmast sets its own),
   `CODEX_HOME`, and `XDG_RUNTIME_DIR`. To keep one, set it per workspace in
   `worker_env` — that is now the only route, and it applies to every provider's
   worker in that workspace.
@@ -1013,7 +1013,7 @@ quota probes (`CloudCode` agy usage, `GrantRefresher`).
 
 Environment scrubbing removes the secrets handed over *for free*. A worker still
 runs as the operator's UID, so it can **read `~/.wardmast/wardmast.env` and
-`~/.wardmast/arbiter.sqlite3` directly** (and `~/.ssh`, `~/.config/gh`, the agy
+`~/.wardmast/wardmast.sqlite3` directly** (and `~/.ssh`, `~/.config/gh`, the agy
 isolated `HOME`'s symlinked passthrough of `.ssh` / `.arbiter`, and
 `/proc/<server pid>/environ` of any same-UID process outside a PID namespace).
 With `WARDMAST_CLOAK_KEY` in `wardmast.env` that is the same break as before, just
@@ -1035,7 +1035,7 @@ is shadowed with `/dev/null`, and only paths that exist on the host are listed
 | Class | Hidden |
 |---|---|
 | Credential dirs | `~/.claude`, `~/.codex`, `~/.gemini`, `~/.config/gh`, `~/.config/gcloud`, `~/.ssh`, `~/.aws`, `~/.kube`, `~/.docker`; files `~/.netrc`, `~/.pgpass`, `~/.git-credentials` |
-| The install | the data dir (`~/.wardmast`: `arbiter.sqlite3` and its WAL, `accounts.json`, releases), the configured DB path and its `-wal`/`-shm`/`-journal` when it lives elsewhere, the accounts and sessions roots |
+| The install | the data dir (`~/.wardmast`: `wardmast.sqlite3` and its WAL, `accounts.json`, releases), the configured DB path and its `-wal`/`-shm`/`-journal` when it lives elsewhere, the accounts and sessions roots |
 | Other workers | the durable output-log root, the worktree root (the worker's own worktree is bound back), the agy HOME root (other workers' `mcp_config.json` scope tokens; the own HOME is bound back), the Claude worker config dir (`.credentials.json`) |
 | Other workspaces | every workspace's `repo_paths` entry except the repo the worker's own worktree belongs to |
 
@@ -1064,7 +1064,7 @@ Not hidden: everything else under `$HOME` (a denylist, not an allowlist: the
 and any repo toolchain), and the per-worker `TMPDIR` root, which the jail
 binds writable as a whole.
 
-`arb server doctor` gains **agy jail hidden reads**: `Jail.reads_probe/0`
+`ward server doctor` gains **agy jail hidden reads**: `Jail.reads_probe/0`
 runs a real jail with the live hide set and fails if the install DB, a
 credential dir, the log root, another worker's worktree or another
 workspace's repo can be read from inside
@@ -1107,11 +1107,11 @@ What the release does now (`rel/env.sh.eex`, `rel/vm.args.eex`,
   bundled `releases/COOKIE` and `wardmast.env`, bd-8381tk) after every writable
   bind. The jail shares the host network, so without this a jailed worker
   could read the cookie and reach epmd over loopback. The jail's escape probe,
-  which runs behind `arb doctor`'s "agy jail escape" check, now fails if the
+  which runs behind `ward doctor`'s "agy jail escape" check, now fails if the
   cookie reads back non-empty. `RELEASE_COOKIE` is not in the worker env
   allowlist (bd-7r0qrj), and the jail's own PID namespace keeps
   `/proc/<server>/environ` out of reach.
-* **`arb doctor` checks it.** The "erlang distribution is loopback-only" check
+* **`ward doctor` checks it.** The "erlang distribution is loopback-only" check
   (`WardmastCli.Cmd.Doctor.Distribution`) reads `/proc/net/tcp{,6}` for
   listeners on epmd's port and on the `arbiter` node's port, which it gets from
   epmd's `NAMES` reply. It also stats `<data-home>/release.cookie` and
@@ -1144,7 +1144,7 @@ service's cgroup and is restarted with it. Doctor reports one that wasn't.
 
 ## Where the posture is surfaced
 
-* **`arb prime`** — a `security:` block in the active-workspace section (mode,
+* **`ward prime`** — a `security:` block in the active-workspace section (mode,
   sandbox, deny counts).
 * **Dashboard** — a per-worker permission-mode badge on the active workers
   list (ghost for `auto`, warning for `strict`, error for `bypass`).
@@ -1172,7 +1172,7 @@ workspace opts in"); the operator tightens them with that app env when ready.
 `config :wardmast, :guardrail_subject_rules` for a release or a test). Both are
 operator-owned. **No rules means guardrails are off**: `effective/4` is `nil`,
 `floor/2` of `nil` is the identity, and nothing changes. A workspace `guardrails`
-block with no rules behind it is inert; `arb doctor` flags it.
+block with no rules behind it is inert; `ward doctor` flags it.
 
 **The workspace `guardrails` block** (validated by `ValidateConfig`; unknown keys
 are refused) holds per-subject *caps* (`subjects`, `repos.<repo>.subjects`),
@@ -1210,7 +1210,7 @@ propagates it. The same rule covers the `guardrail_subjects` rows
 (`Wardmast.Guardrails.Subjects.put/3`): the coordinator may demote, narrow a scope,
 tighten an override and pin; it may not promote, widen or unpin.
 
-**Doctor.** `arb doctor` prints a "guardrail profiles" check (`GET
+**Doctor.** `ward doctor` prints a "guardrail profiles" check (`GET
 /api/server/guardrails`, `Wardmast.Guardrails.Report`): each workspace's attached
 subjects with their effective tier, and a non-fatal FAIL for an inert block, an
 unmatched or out-of-scope subject, a tier its adapter cannot enforce on this host,
@@ -1282,11 +1282,11 @@ container cannot reach a host socket): it never runs on the operator's agent.
     about the run, and records no `guardrail_events` row. Routing eligibility and
     `guardrail_decision` on runs are G13 (below).
   * `ticket_permission_grant` (MCP, coordinator tier), `POST
-    /api/issues/:id/permission` and `arb ticket permit <id> <perm> [--deny
+    /api/issues/:id/permission` and `ward ticket permit <id> <perm> [--deny
     --reason …]` (G15b) answer a request through `Tasks.PermissionDecision`. The
     authority is the token's (`Guardrails.Authority.from_scope/1`) checked against
     the binding's `grant_by`: an operator-only binding needs operator proof, so it
-    is refused over MCP and to a coordinator token, and decided with `arb ticket
+    is refused over MCP and to a coordinator token, and decided with `ward ticket
     permit` from the operator's own shell. A grant or denial writes `granted` /
     `denied` to `permission_events` with the actor (and the reason). A denial
     needs a reason and is delivered to the worker's inbox; the request's attention
@@ -1302,13 +1302,13 @@ container cannot reach a host socket): it never runs on the operator's agent.
     permissions afresh, so the grant arrives with the resumed run. Re-routing when
     the pinned subject becomes ineligible is G15c.
 
-`arb server doctor` (guardrails report) flags a binding that names a secret the
+`ward server doctor` (guardrails report) flags a binding that names a secret the
 workspace does not have (`binding_secret_missing`).
 
-## Research read access to Arbiter's own data (`research_read`, bd-6ircwr)
+## Research read access to Wardmast's own data (`research_read`, bd-6ircwr)
 
-A research run that studies Arbiter itself (run history, logs, usage, review rounds,
-transcripts) is refused by the worker tier: `arb worker runs|log|show` and `arb usage`
+A research run that studies Wardmast itself (run history, logs, usage, review rounds,
+transcripts) is refused by the worker tier: `ward worker runs|log|show` and `ward usage`
 are coordinator-only routes, and the transcript archive is hidden from the sandbox.
 `research_read` is a ticket permission (G12 vocabulary, no argument, never optional) that
 opens a **read-only** window for one run. There is no new token tier: the grant rides the
@@ -1320,7 +1320,7 @@ worker token's `permissions` claim.
 | Workspace opt-in | **Off by default.** The workspace must bind it: `guardrails.bindings.research_read` (any map; `grant_by: operator` keeps it pending until the operator grants it). No binding, no claim, no mount | `ResearchGrant.resolve/3` |
 | Role | A reviewer is never given it (§5.4) | `ResearchGrant.resolve/3` |
 | API | The claim opens only the `:research_read` routes in `ApiPolicy`, all `GET`: `/api/workers` (index, show, log, run_log_list, history, history/:id), `/api/usage`, `/api/usage/events`, `/api/review_gate_rounds`. The controllers confine a workspace-bound token to **its own workspace** (another's data is a 404, naming another workspace a 403). Prompts, calibration, external reviews and every mutating route stay coordinator-only | `ApiPolicy`, the controllers |
-| Transcripts | Under `sandbox.backend: podman` the run's tmp dir gets `research-transcripts/`: a **copy** (mode `0444`) of the most recent transcripts of its workspace, plus an `index.tsv` (run id, task id, kind, start), bound read-only and announced as `ARBITER_TRANSCRIPTS_DIR`. It is a copy because the archive is keyed by run id with no workspace in the path (mounting it would expose every workspace), and a hard link would let a write reach the original. It lives and dies with the run. Other backends, and any run placed on a node, keep `arb worker log` as the way in (see *On a node* below) | `ResearchGrant.stage_transcripts/3`, `ContainerSpawn.prepare/1` |
+| Transcripts | Under `sandbox.backend: podman` the run's tmp dir gets `research-transcripts/`: a **copy** (mode `0444`) of the most recent transcripts of its workspace, plus an `index.tsv` (run id, task id, kind, start), bound read-only and announced as `ARBITER_TRANSCRIPTS_DIR`. It is a copy because the archive is keyed by run id with no workspace in the path (mounting it would expose every workspace), and a hard link would let a write reach the original. It lives and dies with the run. Other backends, and any run placed on a node, keep `ward worker log` as the way in (see *On a node* below) | `ResearchGrant.stage_transcripts/3`, `ContainerSpawn.prepare/1` |
 | Audit | Each dispatch that grants it appends a `granted` `permission_events` row (source `system`); each request a granted token makes is logged (`research_read: <task> (workspace <id>) GET <path>`). A grant that is declared but withheld is logged with its reason | `ResearchGrant.audit/3`, `ApiAuth` |
 
 ### On a node (`worker.placement: prefer_remote`, cluster nodes) (bd-1fkwj9)
@@ -1329,9 +1329,9 @@ Workers run on the cluster, so `research_read` has to work there. It does, and t
 transcripts are **never sent to the node**:
 
 - **API half.** The claim rides the run's worker token (`ARB_TOKEN`), which a node run
-  gets like a local one, and the `arb` bridge is a byte relay to the primary's endpoint
+  gets like a local one, and the `ward` bridge is a byte relay to the primary's endpoint
   that authenticates as the run's token (`BridgeIdentity`). So the `:research_read`
-  `GET` routes work from a pod exactly as they do locally, a write (`arb worker stop`,
+  `GET` routes work from a pod exactly as they do locally, a write (`ward worker stop`,
   `POST /api/workers/:task/stop`) is a 403 under the claim, and a ticket without the
   permission, or a reviewer, has no claim and gets the coordinator-only 403.
 - **Transcripts.** A node run is not handed the `research-transcripts/` snapshot (no
@@ -1502,7 +1502,7 @@ Whatever proof is chosen has to separate two processes with the same uid.
 
 | Option | Why not (alone) |
 |---|---|
-| Operator secret in a 0600 file that the CLI reads | Same uid, so the worker reads it too. The jail doesn't restrict reads, and Claude workers are unjailed. A `Read` deny rule is permission-layer only (`python -c open(...)` walks past it). Worse, `arb mcp token mint` run *inside* a worker would read the file automatically. |
+| Operator secret in a 0600 file that the CLI reads | Same uid, so the worker reads it too. The jail doesn't restrict reads, and Claude workers are unjailed. A `Read` deny rule is permission-layer only (`python -c open(...)` walks past it). Worse, `ward mcp token mint` run *inside* a worker would read the file automatically. |
 | One-time pairing token | Has to be stored somewhere the operator's later commands can read, which is the same-uid problem again. Also adds a setup step to every install. |
 | Unix socket with an `SO_PEERCRED` **uid** check | The uid is identical for the operator and every worker, so on its own it proves nothing. |
 | **Unix socket + `SO_PEERCRED` pid + where that process came from** | **Chosen.** See below. |
@@ -1510,7 +1510,7 @@ Whatever proof is chosen has to separate two processes with the same uid.
 ### The mechanism
 
 What *does* differ between the operator and a worker is where the process
-came from. Everything Arbiter runs is started by the server's own BEAM:
+came from. Everything Wardmast runs is started by the server's own BEAM:
 `beam.smp` → `erl_child_setup` → the agent CLI → its shell → the tools it
 runs. The operator's terminal or ssh session is not. Under systemd,
 everything the server starts also inherits its service cgroup
@@ -1532,7 +1532,7 @@ requires all of:
    run from a terminal shares that terminal's scope, so the check is skipped
    there, and a dev server's worker that double-forks gets past checks 2
    and 3 (see the same-UID limits below);
-4. **not inside an Arbiter session's scope.** Coordinator, refine and login
+4. **not inside an Wardmast session's scope.** Coordinator, refine and login
    sessions are launched as
    `systemd-run --user --scope --unit=arb-session-<id> … tmux new-session -d`
    (`Wardmast.Sessions.launch_argv/2`). The tmux server daemonizes, so its
@@ -1547,7 +1547,7 @@ Anything unreadable fails closed. No secret is exchanged: running from the
 operator's own shell *is* the proof. The request line is read before any
 reply, and every mint and refusal is logged with the peer pid.
 
-Socket path, shared by the server and `arb`:
+Socket path, shared by the server and `ward`:
 `/run/user/<uid>/arbiter/operator-<port>.sock`, or
 `~/.wardmast/run/operator-<port>.sock` on a host without a per-user runtime
 dir. `<port>` is the HTTP port, so a dev server and the release don't
@@ -1563,13 +1563,13 @@ one.
 | Caller | Path | Result |
 |---|---|---|
 | Anonymous loopback `POST /api/mcp/tokens` (any worker's `curl`) | HTTP | **401, no token, any tier** (403 from bd-8381tk until bd-asawcq moved the refusal into `ApiAuth`). Anonymous minting is removed outright rather than kept at a read-only tier: no caller needed it. |
-| Operator: `arb mcp token mint`, `arb init` (no `ARB_TOKEN`) | operator socket | coordinator token (may narrow via `workspace_id`, `can_dispatch`, `ttl`) |
-| Operator on another machine | `ssh <host> arb mcp token mint` (socket on the server host), or `ARB_TOKEN` + HTTP | as above |
-| Holder of a token (`ARB_TOKEN`, a session's own `arb`) | bearer HTTP | capped at the caller's authority (bd-5b5hq7). Worker and refine callers get 403. |
+| Operator: `ward mcp token mint`, `ward init` (no `ARB_TOKEN`) | operator socket | coordinator token (may narrow via `workspace_id`, `can_dispatch`, `ttl`) |
+| Operator on another machine | `ssh <host> ward mcp token mint` (socket on the server host), or `ARB_TOKEN` + HTTP | as above |
+| Holder of a token (`ARB_TOKEN`, a session's own `ward`) | bearer HTTP | capped at the caller's authority (bd-5b5hq7). Worker and refine callers get 403. |
 | Workers and reviewers | minted by the server at dispatch (`Scope.mint_worker`) | unchanged, never self-served |
-| Arbiter coordinator/refine sessions | minted by the server at provisioning (`Scope.mint_session` / `mint_refine`) | unchanged |
-| `arb mcp token mint` (or a raw socket client) run inside a worker | operator socket | refused: `spawned_by_arbiter`, or `in_arbiter_cgroup` for a double-forked orphan (release / systemd unit only; on a dev server an orphan passes) |
-| `arb mcp token mint` (or a raw socket client, with `ARB_SESSION_ID`/`ARB_TOKEN` cleared) run inside an Arbiter session | operator socket | refused: `in_session_scope` |
+| Wardmast coordinator/refine sessions | minted by the server at provisioning (`Scope.mint_session` / `mint_refine`) | unchanged |
+| `ward mcp token mint` (or a raw socket client) run inside a worker | operator socket | refused: `spawned_by_arbiter`, or `in_arbiter_cgroup` for a double-forked orphan (release / systemd unit only; on a dev server an orphan passes) |
+| `ward mcp token mint` (or a raw socket client, with `ARB_SESSION_ID`/`ARB_TOKEN` cleared) run inside an Wardmast session | operator socket | refused: `in_session_scope` |
 
 ### What the jail adds
 
@@ -1594,14 +1594,14 @@ socket isn't reachable at all:
 
 These checks ran from a real worker of the live release. The listener was
 the real `OperatorSocket` running this branch's code, with its policy's
-server pid set to the live Arbiter BEAM. The client was the real `arb`
+server pid set to the live Wardmast BEAM. The client was the real `ward`
 escript built from this branch:
 
 * **This worker's shell** (descendant of the live server BEAM): refused,
   `spawned_by_arbiter`.
 * **The same shell after a `setsid -f` double fork** (parent is now
   `systemd --user`): refused, `in_arbiter_cgroup`.
-* **Inside the real `Jail.argv`**: `arb` gets `enoent` for the socket,
+* **Inside the real `Jail.argv`**: `ward` gets `enoent` for the socket,
   `systemd-run --user` can't reach a bus, and both secret files read
   `Permission denied`.
 * **A daemonized process inside a real `arb-session-*` scope**, the
@@ -1622,7 +1622,7 @@ escript built from this branch:
   socket, can't leave the cgroup through the bus, and can't read the signing
   key or the cookie.
 * **Unjailed workers (Claude today): a guardrail against the paths an agent
-  actually takes**: `arb mcp token mint`, `curl` to the HTTP route, a script
+  actually takes**: `ward mcp token mint`, `curl` to the HTTP route, a script
   that connects to the socket, a backgrounded or double-forked child. They
   are **not** a hard boundary. A same-uid process with full host access can
   still escape on purpose: run itself as a transient unit with
@@ -1635,7 +1635,7 @@ escript built from this branch:
   separate Unix user.
 * **The operator versus a coordinator session they started themselves** (a
   Claude Code session in their own terminal) is not separated. That session
-  is operator-delegated. Arbiter-provisioned sessions are separated by
+  is operator-delegated. Wardmast-provisioned sessions are separated by
   check 4: their processes run in an `arb-session-<id>.scope`, and the
   socket refuses that scope. Sessions are unjailed, so this is the same kind
   of guardrail as for unjailed workers: a session process that re-launches
@@ -1646,9 +1646,9 @@ escript built from this branch:
   reparented to `systemd --user` in the terminal's own scope, so it passes
   checks 2 and 3. Run the release as `wardmast.service` for the full check.
 
-### The jailed worker's Arbiter bridge is the worker (bd-c1qq7l, G9)
+### The jailed worker's Wardmast bridge is the worker (bd-c1qq7l, G9)
 
-A jailed agy worker reaches Arbiter through `<run>.arb.sock`, a byte bridge to
+A jailed agy worker reaches Wardmast through `<run>.arb.sock`, a byte bridge to
 the server's loopback port. By address that is anonymous loopback, so the
 bridge's identity is recorded out of band instead:
 
@@ -1692,13 +1692,13 @@ page carries, and the pages are refused.
 * Existing `.mcp.json` files keep working. Tokens that were already minted
   are still validly signed until they expire (30 days by default) or the
   signing key rotates.
-* To refresh an `arb init` checkout's token, run `arb init --force` in that
-  checkout **from your own shell**, or mint with `arb mcp token mint --json`
+* To refresh an `ward init` checkout's token, run `ward init --force` in that
+  checkout **from your own shell**, or mint with `ward mcp token mint --json`
   and replace the `Authorization: Bearer …` value in `.mcp.json`. An
-  `arb init` run from inside a worker or session now writes the
+  `ward init` run from inside a worker or session now writes the
   `REPLACE_WITH_COORDINATOR_TOKEN` placeholder instead of a real token.
 * Scripts that minted with a bare `curl -X POST /api/mcp/tokens` must switch
-  to `arb mcp token mint --json | jq -r .token`, run on the server host.
+  to `ward mcp token mint --json | jq -r .token`, run on the server host.
 * Tokens may already have been minted by workers through the old anonymous
   route, so rotate the signing key once after deploying. This invalidates
   every outstanding token:
@@ -1707,9 +1707,9 @@ page carries, and the pages are refused.
      `config :wardmast, Wardmast.MCP, secret:` is set, rotate that instead;
      it takes precedence for token signing.
   2. `systemctl --user restart wardmast`.
-  3. Re-mint every coordinator token (`arb mcp token mint`, `arb init
+  3. Re-mint every coordinator token (`ward mcp token mint`, `ward init
      --force`) and update each `.mcp.json` and `ARB_TOKEN`. Running
-     Arbiter sessions hold tokens signed with the old key, so restart them.
+     Wardmast sessions hold tokens signed with the old key, so restart them.
      Workers get fresh tokens at their next dispatch.
 
 ## Bearer tokens on every `/api` route (bd-asawcq)
@@ -1748,26 +1748,26 @@ the request had got past auth.
 
   | Route | Why it stays anonymous |
   |---|---|
-  | `GET /api/version` | Version and build sha. `arb server deploy`/`arb update` poll it across a restart, and `arb doctor` compares it before any token exists. |
-  | `GET /api/server/migrations` | Pending-migration count only. Deploy readiness and `arb doctor` read it the same way. |
+  | `GET /api/version` | Version and build sha. `ward server deploy`/`ward update` poll it across a restart, and `ward doctor` compares it before any token exists. |
+  | `GET /api/server/migrations` | Pending-migration count only. Deploy readiness and `ward doctor` read it the same way. |
 
   Every other route, the other `/api/server/*` health reads included, needs a
   token: they name credential paths, accounts and repos.
-* **`arb` always sends a token.** `WardmastCli.Client` uses `ARB_TOKEN` when
-  set. Inside an Arbiter session it uses the session's own token
+* **`ward` always sends a token.** `WardmastCli.Client` uses `ARB_TOKEN` when
+  set. Inside an Wardmast session it uses the session's own token
   (bd-5b5hq7). Otherwise, against this machine's server, it mints a
   one-hour coordinator token over the operator socket on its first request
   and reuses it for the rest of the invocation, re-minting once if it
   expires mid-run. The token lives only in that process's memory, never on
-  disk where a same-user worker could read it. Every `arb` verb keeps
+  disk where a same-user worker could read it. Every `ward` verb keeps
   working from the operator's own shell with no setup. If the socket
   refuses, which it does for a worker or a session without its own token,
   the request goes out without a token and the 401's hint says why.
 * **Workers carry their own token.** Every agent spawn that works a task
   (dispatch, CI fix pass, conflict resolver, ReviewGate's revise-round
   implementer) gets the task's worker-tier token as `ARB_TOKEN`. It is the
-  same token as its `.mcp.json`, so its `arb inbox`, `arb message` and
-  `arb ticket update` authenticate as that one task. A ReviewGate reviewer
+  same token as its `.mcp.json`, so its `ward inbox`, `ward message` and
+  `ward ticket update` authenticate as that one task. A ReviewGate reviewer
   gets none: it only reads the diff and prints a verdict. The server's own
   `ARB_TOKEN`, if the operator exported one, is never inherited
   (`Wardmast.Worker.SpawnEnv`).
@@ -1775,7 +1775,7 @@ the request had got past auth.
   LiveView socket and calls the domain in-process, so it sends no bearer
   token and needs none. `/events` and `/mcp` already did their own token
   checks.
-* **`arb doctor` checks it.** The "anonymous /api access refused" check
+* **`ward doctor` checks it.** The "anonymous /api access refused" check
   sends two probes with no token: `PATCH /api/workspaces/<nonexistent>/config`
   with `{}`, and `GET /api/issues`. Neither changes anything, even on a
   server that lets them through. Anything but 401/403 fails the check and
@@ -1792,15 +1792,15 @@ The same-UID limits from bd-8381tk apply unchanged. A worker that escapes
 its spawn tree on purpose (a transient `systemd-run --user` unit) can still
 mint over the operator socket, and an unjailed one can read
 `~/.wardmast/wardmast.env` and sign its own token. What is gone is the
-zero-effort path: a worker's `curl`, or its own `arb` with `ARB_TOKEN`
+zero-effort path: a worker's `curl`, or its own `ward` with `ARB_TOKEN`
 unset, is no longer coordinator-equivalent.
 
 ### Migration
 
 * Scripts that `curl` `/api` without a token must send
-  `Authorization: Bearer $(arb mcp token mint --json | jq -r .token)`, run on
+  `Authorization: Bearer $(ward mcp token mint --json | jq -r .token)`, run on
   the server host.
-* An `arb` older than this release still works from the operator's shell
+* An `ward` older than this release still works from the operator's shell
   only with `ARB_TOKEN` set. Upgrade it alongside the server.
 
 ## Related: the durable log root is secret-bearing
@@ -1830,11 +1830,11 @@ it is given is scoped the same way. No worker is given a token with `gist` or
 | Doctor | `git_credential_unconfigured` (a repo whose pushes would be refused) and `git_credential_secret_missing` | `Guardrails.Report` |
 
 **Honest limits.** Unsandboxed Claude/Codex still run as the operator's uid, so
-scoping stops Arbiter *handing over* the operator's credential but cannot stop
+scoping stops Wardmast *handing over* the operator's credential but cannot stop
 a same-uid process from reading `~/.ssh` (see "Residual risk: same UID"); the
 bwrap jail and podman close that. A remote-node podman run that needs a scoped
 credential is refused. The forge enforces the one-repo scope of a key or token;
-Arbiter's tests cover the mint request, the helper's path pinning and every
+Wardmast's tests cover the mint request, the helper's path pinning and every
 delivery path, not GitHub itself.
 
 ## Guardrail event capture (bd-8r392h, G17)
@@ -1848,7 +1848,7 @@ best-effort and idempotent per `(run_id, fingerprint)`; it never fails a run.
 | Capture | Where | Kind (severity) |
 |---|---|---|
 | Claude `result.permission_denials`; agy tool step that ends `ERROR` with "permission check failed" | `ClaudeSession.capture_guardrail_events/2`, classified by `Guardrails.Scan.denial/2` | `public_upload_attempt` (critical) for a public upload host; `permission_denial` (major) for a safe-default category, else (minor) |
-| Executed tool inputs: Claude/grok `tool_use`, codex `item.completed`, agy's ACTIVE step | `Guardrails.Scan.tool_input/2` | `hidden_channel_attempt` (critical): `systemd-run`, `busctl`, `secret-tool`, `dbus-send`, `gdbus`, `gh auth token`. `credential_read` (major): a reader command or file tool aimed at `~/.ssh`, `~/.aws`, `arbiter.sqlite3`, … |
+| Executed tool inputs: Claude/grok `tool_use`, codex `item.completed`, agy's ACTIVE step | `Guardrails.Scan.tool_input/2` | `hidden_channel_attempt` (critical): `systemd-run`, `busctl`, `secret-tool`, `dbus-send`, `gdbus`, `gh auth token`. `credential_read` (major): a reader command or file tool aimed at `~/.ssh`, `~/.aws`, `wardmast.sqlite3`, … |
 | `egress_events` | `Events.link_egress/2`, at session exit | `public_upload_attempt` (critical); `unrequested_egress` (major) for a denial at a host:port the run never `requested` through `permission_events` |
 | `EvidenceIntegrity` escalation | `Worker.maybe_dispatch_fix_round/3` | `fabricated_evidence` (critical) |
 | Worker attempt to write ticket `permissions`, `guardrails.*` / `permissions` config, grant a permission, or mint a token | `Catalog.call/3` (MCP) and `ApiAuth` (REST, incl. the worker bridge) via `Guardrails.SelfGrant` | `self_grant_attempt` (critical), recorded whether or not the call is refused |
@@ -1896,18 +1896,18 @@ cutover (when the `trust_records` migration ran) count against a subject but
 never trigger an action, so a deploy suspends nobody for the past. Each page goes
 to the workspace of the run behind it (the install default only as a fallback).
 
-The coordinator decides on a suspension: `arb trust confirm <subject>` (the
-subject's rule drops to `quarantine`) or `arb trust dismiss <subject> --reason
+The coordinator decides on a suspension: `ward trust confirm <subject>` (the
+subject's rule drops to `quarantine`) or `ward trust dismiss <subject> --reason
 "..."` (a false positive: the overlay ends and the tier it never changed
 returns). Dismissal cannot raise a tier.
 
 **Promotion is operator-only (§6.4).** When every §6.3 threshold holds, the Loop
 emits a `trust_promotion` PendingWrite. Its evidence is the clean run ids, it is
 attributed to the workspace of its newest clean run, and the coordinator is told.
-The proposal is superseded when the subject stops being eligible. `arb loop
+The proposal is superseded when the subject stops being eligible. `ward loop
 apply`, MCP `loop_pending_apply`, `POST /api/loop/pending/:id/apply` and the
 `/loop` dashboard all refuse it at any authority (`Loop.inapplicable_reason/1`).
-Only `arb trust promote <subject> --to <tier> --reason "..."` applies it. That
+Only `ward trust promote <subject> --to <tier> --reason "..."` applies it. That
 command mints a short-lived token over the operator socket (operator proof,
 above), never `ARB_TOKEN`, and calls `POST /api/trust/promote` (ApiPolicy
 `:operator`). `Loop.Trust.promote/4` checks the authority again, writes the
@@ -1918,10 +1918,10 @@ proposals, never demotions.
 
 | | CLI | REST | MCP (coordinator) | Dashboard |
 |---|---|---|---|---|
-| Show | `arb trust show [<subject>]` | `GET /api/trust[?subject=]` | `trust_show` | `/trust` |
-| Confirm a suspension | `arb trust confirm` | `POST /api/trust/confirm` | `trust_confirm` | shows the command |
-| Dismiss a suspension | `arb trust dismiss --reason` | `POST /api/trust/dismiss` | `trust_dismiss` | shows the command |
-| Promote | `arb trust promote --to --reason` | `POST /api/trust/promote` (operator proof) | **none, at any tier** | shows the command |
+| Show | `ward trust show [<subject>]` | `GET /api/trust[?subject=]` | `trust_show` | `/trust` |
+| Confirm a suspension | `ward trust confirm` | `POST /api/trust/confirm` | `trust_confirm` | shows the command |
+| Dismiss a suspension | `ward trust dismiss --reason` | `POST /api/trust/dismiss` | `trust_dismiss` | shows the command |
+| Promote | `ward trust promote --to --reason` | `POST /api/trust/promote` (operator proof) | **none, at any tier** | shows the command |
 
 All four render the same `Wardmast.Loop.Trust.View` maps. The `/trust` dashboard
 reloads on every change (`Loop.Trust.pubsub_topic/0`). It is a view: it offers no

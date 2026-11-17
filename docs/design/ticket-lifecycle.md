@@ -190,7 +190,7 @@ The children run mostly in series: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 �
 | 7 | bd-8nlez1 | coordinator-first ownership, hand-off, escalation limits, computed coordinator queue |
 | 8 | bd-7gt8rm | system alerts that aren't tied to a ticket and clear with their condition |
 | 9 | bd-79w1fs | seven-column board, Needs-attention swimlane, drag-to-rank |
-| 10 | bd-6fkgvo | CLI / MCP / `arb prime` / events / seed skills on the new vocabulary |
+| 10 | bd-6fkgvo | CLI / MCP / `ward prime` / events / seed skills on the new vocabulary |
 | 11 | bd-4jojpw | issue → ticket in user-facing surfaces, with one-release aliases |
 | 13 | bd-9s9dqz | the no-PR type split: `research` vs `task` |
 | 12 | bd-36ytcl | delete the superseded fields, statuses and classifiers |
@@ -252,7 +252,7 @@ It left no null state and no rank out of creation order.
 
 | caller | transition |
 |---|---|
-| `:promote_to_ready` / `:return_to_backlog` (the legacy doors: `arb promote`/`demote`, MCP, the task page) | `promote` / `demote`, idempotent as before |
+| `:promote_to_ready` / `:return_to_backlog` (the legacy doors: `ward promote`/`demote`, MCP, the task page) | `promote` / `demote`, idempotent as before |
 | `Worker.Dispatch.transition_to_in_progress/2` via `Issue.start_work/2` | `start` |
 | `Worker.finalize_opened_mr/5`, and the `MergeQueue` opening or adopting a PR, via `Issue.pr_opened/3` | `open_pr` if the ticket is `active`, with the ref (and, since bd-741sid, its URL and lane) in the same write |
 | `MergeQueue.PassAdmission`, admitting a fix or conflict pass into a slot (bd-741sid) | `return_to_work` if the ticket is `merging` (`Issue.back_to_work/1`), the moment the pass is admitted |
@@ -264,7 +264,7 @@ It left no null state and no rank out of creation order.
 
 The `task_state` event and the PubSub `"tasks"` message carry `state` and
 `close_reason` beside `status`, and so do `GET /api/issues/:id` (so
-`arb ticket show --json`) and MCP `ticket_show` in its full view.
+`ward ticket show --json`) and MCP `ticket_show` in its full view.
 
 ### The overlap (ended in bd-36ytcl)
 
@@ -276,7 +276,7 @@ remaining legacy write a transition (§2):
   `close_reason` and `rank` outright. But a few writers still set `status`
   directly, for moves the table has no transition for: a requeue (in_progress
   → open, from `Worker.AuthDeath` and the board's drag back to Ready), an
-  operator's status edit (`arb update --status`, MCP `ticket_update`, the task
+  operator's status edit (`ward update --status`, MCP `ticket_update`, the task
   page), and `:return_to_backlog` on an in-progress ticket whose worker
   already stopped (bd-2098). `Changes.FollowLegacyStatus` re-derives `state`
   from the row by the backfill rule, so the two never disagree. It is the only
@@ -312,7 +312,7 @@ everything it would otherwise have to read arrives in `ctx`: `:blocked_by`
 | board (`Board.Snapshot.derive/1`) | worker-first card builders, `queueable?` | `Lifecycle.board_column/2` per ticket; each builder only builds for its own column |
 | epic mini-board (`Snapshot.classify_columns/3`) | `column_for/3` | the same `board_column/2` |
 | `/epics` rollup (`EpicRollup`) | `bucket/1`, status only | the same `board_column/2`, given the child's live author workers |
-| `Issue.ready/1` (`ticket_ready`, `GET /api/issues/ready`, `arb ready`, `arb prime`) | open + no open blocker, ignoring `refined` | exactly the tickets whose column is `:ready` |
+| `Issue.ready/1` (`ticket_ready`, `GET /api/issues/ready`, `ward ready`, `ward prime`) | open + no open blocker, ignoring `refined` | exactly the tickets whose column is `:ready` |
 
 `Wardmast.Board.ColumnAgreementTest` runs one ticket per state × {no worker,
 live author, completed author row, failed author row} through the first three
@@ -392,7 +392,7 @@ releases its slot but stays In progress until the follow-up decides its column.)
 This replaces the operator's 2026-09-21 rule "another slot doesn't open until
 the issue occupying it is merged" (confirmed 2026-09-27). The board header's
 `slots_used`, `scheduler_status` (`Board.Drain.status/1`: `slots_used`,
-`slot_holders`; `arb scheduler status` prints them) and `ResumeSlot` all read
+`slot_holders`; `ward scheduler status` prints them) and `ResumeSlot` all read
 this one count. `conductor_slot_basis` then only changed `agents live`, and
 child 12 removed it.
 
@@ -443,7 +443,7 @@ Every hold is an input; one the caller does not pass is not asked about.
   | caller | Backlog / Blocked | In progress / Merging / Verifying | Closed |
   |---|---|---|---|
   | Autopilot (`dispatched_by: "autopilot"`) | refused `task_not_ready` | refused `task_not_ready` | refused |
-  | manual (`arb dispatch`, MCP `worker_dispatch`, REST, the task page) | refused `not_dispatchable` with the reason, unless `force` | passes (a re-dispatch) — except Merging, refused `task_awaiting_review` (bd-741sid) | refused |
+  | manual (`ward dispatch`, MCP `worker_dispatch`, REST, the task page) | refused `not_dispatchable` with the reason, unless `force` | passes (a re-dispatch) — except Merging, refused `task_awaiting_review` (bd-741sid) | refused |
   | resume, review | passes | passes — except a review of a Merging ticket, refused `task_awaiting_review` | refused |
 
   A forced dispatch of a Backlog or Blocked ticket writes a `dispatch_forced`
@@ -484,7 +484,7 @@ the `pr_closed` cause (`attention_cause`, `attention_detail`,
 | `meta.awaiting_review_resume_attempts` | `merge_watch.auto_resumes` |
 | the ReviewGate round in `meta` | `review_gate_state` |
 
-`GET /api/issues/:id` (so `arb ticket show --json`) and MCP `ticket_show` (full)
+`GET /api/issues/:id` (so `ward ticket show --json`) and MCP `ticket_show` (full)
 carry `merger_url`, `merger_status`, `merger_checked_at` and the attention
 fields.
 
@@ -495,7 +495,7 @@ write, starts the ticket's Watchdog from the row, marks its run finished and
 successful (`result: :pr_opened`) and exits. It does not announce the ticket
 done — the merge does. The Driver leaves a `:pr_opened` completion alone and
 never cleans up a Merging ticket's worktree. A Watchdog that will not start
-pages the coordinator; the PR is on the row, so `arb queue restart-watchdog`
+pages the coordinator; the PR is on the row, so `ward queue restart-watchdog`
 or the next boot watches it.
 
 A review-only coordinator reviewer that approves an existing PR records it
@@ -511,7 +511,7 @@ from the sweeper. `stop/1` takes the PR off the merge path, for a resume
 `PullRequest.pull/1`: it stops the Watchdog, drops the pending merge and
 records `merge_watch.pulled_at`. Every automatic restart honours the mark
 (`restart/2` refuses it with `:pulled`: the reconciler, the sweeper, a
-finished pass). An operator's restart (the worker page, `arb queue
+finished pass). An operator's restart (the worker page, `ward queue
 restart-watchdog`, MCP `queue_restart_watchdog`) passes `clear_pull: true`
 and puts the ticket back in the queue, and so does a run that re-opens the PR
 with a fresh lane. A pass is not admitted on a pulled ticket.
@@ -531,7 +531,7 @@ worker, and announces its outcomes on `Watchdog.subscribe/1`:
 A PR opened before this change has no lane. `watch_opts/1` then uses the
 workspace's adapter and puts the PR on the ReviewGate's lane when the gate's
 approval stamp (`last_reviewed_sha`) is on the row — without it a restarted
-Watchdog would wait on a forge approval an Arbiter-authored PR never gets.
+Watchdog would wait on a forge approval an Wardmast-authored PR never gets.
 
 ### Fix and conflict passes are ordinary runs, with a fast lane
 
@@ -636,7 +636,7 @@ else its newest row — and `list/1` (REST `GET /api/workers`, MCP
 labelled with its kind. A row is read into the same view as a live snapshot,
 so there is no history fallback with a vocabulary of its own. A reviewer's run
 is reported under its ticket's id and workspace (`run_task_id` keeps its own
-`#review` id), which is what puts it in `arb prime`'s active workers.
+`#review` id), which is what puts it in `ward prime`'s active workers.
 
 ### After a restart
 
@@ -660,7 +660,7 @@ Producers go through `Wardmast.Messages.Escalation.post/1`. A ticket-scoped
 kind is deduplicated by `(kind, ticket)`: while one is open, raising it again
 refreshes that row's subject and body, whatever its subject text says.
 `Message.last_escalation/2` is the lookup; `last_with_subject/3` is off the
-escalation path. `:agent_raised` (sent by hand through `arb message`, MCP
+escalation path. `:agent_raised` (sent by hand through `ward message`, MCP
 `message_send` or `POST /api/messages`) and `:legacy` (the backfill) are
 ticket-scoped but never deduplicated.
 
@@ -746,10 +746,10 @@ attention (a transition, a run restart, a cleared park), and raising a
 different cause drops it.
 
 - **Hand-off.** MCP `ticket_handoff(id, note)`, `POST /api/issues/:id/handoff`,
-  `arb ticket handoff <id> --note …`. The note is required; the ticket must have
+  `ward ticket handoff <id> --note …`. The note is required; the ticket must have
   attention now, not already the operator's.
 - **Hand-back.** MCP `ticket_handback(id, note?)`, `POST /api/issues/:id/handback`,
-  `arb ticket handback <id>`, and the *Hand back to coordinator* button on the
+  `ward ticket handback <id>`, and the *Hand back to coordinator* button on the
   task page's attention strip. The coordinator gets a fresh clock and a fresh
   attempt budget.
 
@@ -837,7 +837,7 @@ hook where its condition is seen healthy again.
 | `overage_alert` | workspace and provider | `DispatchQueue` on a threshold crossing | the windowed spend is back under the threshold, the threshold is raised or removed (the queue re-reads it on each record), or the gate allows a dispatch on that provider outside overage |
 | `budget_exceeded` | task | `Usage.BudgetPatrol`, every sweep while over | the sweep finds the task no longer over its p90 (the estimate moved) or no longer open; a failed sweep clears nothing |
 | `machine_derate` | machine name (`local` for the primary) | `Machine.Alerting` (bd-6w7usy), when a machine enters a **hard** thermal derate (its own sensing: the primary's monitor, or a node's heartbeat) | the machine leaves hard derate after its readings stay clear for the recovery window; a soft derate raises nothing. Workspace-scoped like every alert: it goes on the oldest workspace. See `docs/machine-derate.md` |
-| `git_credential_refused` | workspace and repo | `GitCredential.materialize/3` (issue #1270), on every refusal of the repo's `gitlab_bot_token` by the dispatch guard (a spawn, fix round or push), so one alert replaces a per-ticket "spawn failed" | the guard passes for the repo (`arb server doctor` runs the same check) |
+| `git_credential_refused` | workspace and repo | `GitCredential.materialize/3` (issue #1270), on every refusal of the repo's `gitlab_bot_token` by the dispatch guard (a spawn, fix round or push), so one alert replaces a per-ticket "spawn failed" | the guard passes for the repo (`ward server doctor` runs the same check) |
 | `deploy_failing` | workspace and repo | `Workflows.DeployWatch` (#967), coordinator-owned, when a merge's post-merge deploy job is skipped/failed/canceled/missing or undeployed past `deploy_watch.timeout_minutes` | no undeployed merge remains for the repo. See `docs/deploy-watch.md` |
 
 `credential_restored` no longer posts a "restored" message: the clear is the
@@ -904,7 +904,7 @@ operator-only (`scripts/verify_board_attention_lane.mjs` exercises both).
 
 ---
 
-## Child 10 (bd-6fkgvo): CLI, MCP, `arb prime` and events
+## Child 10 (bd-6fkgvo): CLI, MCP, `ward prime` and events
 
 Every surface that is not the board reads a ticket through one reader,
 `Wardmast.Tasks.Lifecycle.Projection`. It does the reads `Lifecycle.view/2`
@@ -916,13 +916,13 @@ Watchdog, the clock — and `payload/1` is the one JSON shape of a view:
 | surface | reads |
 |---|---|
 | `GET /api/issues/lifecycle?workspace_id=` | `Projection.open/2`: every open, non-epic ticket, projected, in dispatch order |
-| `GET /api/issues/:id` (so `arb ticket show`) | `Projection.view/2`, plus `current_run` (`Workers.Current`, kind/state/outcome/phase) |
+| `GET /api/issues/:id` (so `ward ticket show`) | `Projection.view/2`, plus `current_run` (`Workers.Current`, kind/state/outcome/phase) |
 | MCP `ticket_show` | the payload, plus `close_reason`, on both views |
 | MCP `ticket_list` | new `state` and `column` filters; each row carries the payload |
 | MCP `ticket_ready` | `Projection.open/2`, column `:ready` only, dispatch order |
 | `task_state` event | `column` and `attention`, beside `state` and `close_reason` (the legacy `status` rode along for one release, until bd-36ytcl) |
 
-### `arb prime`
+### `ward prime`
 
 Per workspace, after the standing orders: **Needs attention**, **In progress**
 (with step), **Merging** (with step and PR), **Verifying** (with the age of the
@@ -972,7 +972,7 @@ The legacy writes the overlap allowed are now transitions (§2):
 | `Ash.update(t, %{status: :in_progress})` from Backlog (a forced dispatch) | `start` (`Issue.start_work/2`) |
 | `status: :open` on an in-progress ticket (`Worker.AuthDeath`) | `requeue` |
 | `:return_to_backlog` resetting a stopped in-progress ticket | `demote` from `active` / `merging` |
-| an operator's status edit (`arb ticket update --status`, MCP `ticket_update`, the task page) | removed — the named transitions are the only moves |
+| an operator's status edit (`ward ticket update --status`, MCP `ticket_update`, the task page) | removed — the named transitions are the only moves |
 
 `:update` accepts none of `state`, `close_reason` or `rank`. The legacy status
 FSM guard is gone: the transition table refuses every illegal move, and
@@ -1001,7 +1001,7 @@ ticket shows through its attention like any other.
 - The `task_state` event's legacy `status`, and every other ticket `status` /
   `refined` field on the API, MCP and CLI: `GET /api/issues` filters by
   `state`, `ticket_list` drops its deprecated `status` filter, and
-  `arb ticket list` takes `--state`.
+  `ward ticket list` takes `--state`.
 
-The `task_*` MCP aliases and the `arb issue` alias from child 11 stay; they go
+The `task_*` MCP aliases and the `ward issue` alias from child 11 stay; they go
 in a separate follow-up once coordinators have migrated.

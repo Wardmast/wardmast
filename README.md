@@ -1,6 +1,8 @@
-# Arbiter
+# Wardmast
 
-**Arbiter** is an AI-driven ticket tracker and autonomous coding agent harness. It coordinates work across your projects through a CLI (`arb`), MCP tools for a coordinator agent, and a LiveView dashboard. Tasks are tracked as **tickets**, dispatched to **worker** agents for autonomous execution in isolated git worktrees, and merged through a **ReviewGate** and **merge queue** for code quality and safety.
+> Wardmast was formerly called Arbiter. Releases published under the old name remain under Apache-2.0.
+
+**Wardmast** is an AI-driven ticket tracker and autonomous coding agent harness. It coordinates work across your projects through a CLI (`ward`), MCP tools for a coordinator agent, and a LiveView dashboard. Tasks are tracked as **tickets**, dispatched to **worker** agents for autonomous execution in isolated git worktrees, and merged through a **ReviewGate** and **merge queue** for code quality and safety.
 
 ## Prerequisites
 
@@ -22,23 +24,23 @@
   the build compiles with `--warnings-as-errors`, and its type warnings are
   part of that gate.
 
-Arbiter's datastore is **SQLite** — no database server or Docker is required.
+Wardmast's datastore is **SQLite** — no database server or Docker is required.
 
 ## Install (development)
 
 ```sh
 # 1. Clone
-git clone <repo-url> arbiter
-cd arbiter
+git clone https://github.com/wardmast/wardmast.git
+cd wardmast
 
 # 2. Install dependencies, run migrations, seed the default workspace
 mix setup
 
-# 3. Build and install the arb CLI onto your PATH
-arb install cli
+# 3. Build and install the ward CLI onto your PATH
+ward install cli
 ```
 
-`arb install cli` builds the CLI escript from `apps/wardmast_cli` and installs
+`ward install cli` builds the CLI escript from `apps/wardmast_cli` and installs
 it to `~/.local/bin/arb`. If `~/.local/bin` isn't in your PATH yet, add this
 to your shell profile (`.bashrc`, `.zshrc`, etc.) and restart your terminal:
 
@@ -46,7 +48,7 @@ to your shell profile (`.bashrc`, `.zshrc`, etc.) and restart your terminal:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Since `arb install cli` itself depends on `arb` already being on your PATH the
+Since `ward install cli` itself depends on `ward` already being on your PATH the
 very first time, bootstrap it once by hand:
 
 ```sh
@@ -54,7 +56,7 @@ cd apps/wardmast_cli && mix escript.build && cd ../..
 mkdir -p ~/.local/bin && cp apps/wardmast_cli/ward ~/.local/bin/
 ```
 
-Re-run `arb install cli` any time you pull changes to `apps/wardmast_cli`.
+Re-run `ward install cli` any time you pull changes to `apps/wardmast_cli`.
 
 ## Architecture
 
@@ -62,7 +64,7 @@ Re-run `arb install cli` any time you pull changes to `apps/wardmast_cli`.
 
 **Repos** — registered git repositories. Workers check out code on repos to work on tickets.
 
-**Tickets** — tasks to be worked (formerly *issues*; `arb issue` and the `task_*` MCP tools remain as deprecated aliases for one release). Can be tracked in an external system (Jira, GitHub, Linear) or managed locally. A ticket moves through one lifecycle state: backlog → queued (Ready) → active (In progress) → merging → verifying → closed.
+**Tickets** — tasks to be worked (formerly *issues*; `ward issue` and the `task_*` MCP tools remain as deprecated aliases for one release). Can be tracked in an external system (Jira, GitHub, Linear) or managed locally. A ticket moves through one lifecycle state: backlog → queued (Ready) → active (In progress) → merging → verifying → closed.
 
 **Workers** — autonomous agents spawned via Claude Code (or future adapters) to work a ticket. Each worker receives a ticket, works it in an isolated git worktree, and reports completion with a PR or notes. Their full transcript is retained for audit and learning.
 
@@ -74,17 +76,17 @@ Re-run `arb install cli` any time you pull changes to `apps/wardmast_cli`.
 
 **Watchdog** — polls a merge request's fate for a worker parked at `:awaiting_review` and drives the worker to its terminal state (merged, closed/rejected, or auto-merged).
 
-**Escalation mailbox** — the coordinator's inbox for anything that needs a human or coordinator ruling (e.g. a ReviewGate escalation, a worker failure). Read it via `arb message inbox` or the `inbox_check` / `notify_list` MCP tools.
+**Escalation mailbox** — the coordinator's inbox for anything that needs a human or coordinator ruling (e.g. a ReviewGate escalation, a worker failure). Read it via `ward message inbox` or the `inbox_check` / `notify_list` MCP tools.
 
 **`/events`** — a server-push event stream (`GET /events`) for the coordinator: newline-delimited JSON, one event per line, for topics like `inbox`, `review_gate`, `worker_failed`, `worker_done`, and (opt-in) `task_state` / `external_review`. Every event carries a `"cursor"`; pass `since=<cursor|timestamp>` to replay what was missed since a disconnect before rejoining the live stream (see `WardmastWeb.Api.EventController` moduledoc).
 
 ## Coordinating via MCP
 
-The primary integration path for a coordinator agent (e.g. a dedicated Claude Code session) is the `arbiter` MCP server, which exposes tools like `ticket_show`, `ticket_create`, `ticket_list`, `worker_dispatch`, `worker_resume`, `worker_review`, `worker_list`, `worker_log`, `inbox_check`, `message_send`, `notify_list`, `workspace_show`, `workspace_config_get/set`, `quota_get`, `run_log_list`, `transcript_capture_stats`, and `usage_summarize`, plus whole tool categories beyond one-off ticket dispatch:
+The primary integration path for a coordinator agent (e.g. a dedicated Claude Code session) is the `wardmast` MCP server, which exposes tools like `ticket_show`, `ticket_create`, `ticket_list`, `worker_dispatch`, `worker_resume`, `worker_review`, `worker_list`, `worker_log`, `inbox_check`, `message_send`, `notify_list`, `workspace_show`, `workspace_config_get/set`, `quota_get`, `run_log_list`, `transcript_capture_stats`, and `usage_summarize`, plus whole tool categories beyond one-off ticket dispatch:
 
 - **Skills** — `skill_list`/`skill_get`/`skill_create`/`skill_update`/`skill_delete` for managing reusable skill content.
-- **Dependencies + scheduler** — `dep_add`/`dep_remove`/`dep_list` to wire tickets together with `depends_on`/`blocks`/`conflicts_with` edges, and `scheduler_pause`/`scheduler_resume`/`scheduler_status` to control the board scheduler (Autopilot) that auto-dispatches Ready cards in edge order. A pause stops new board dispatches only — fix passes, conflict resolvers and review rounds already under way keep running — so `scheduler_status` reports a drain state (`running` / `draining` with what is in flight / `quiescent`, the only safe restart point); `arb scheduler pause && arb scheduler wait` blocks until it is safe to restart. Chains of tickets run by declaring the edges, not by building a separate graph object.
-- **Gate escalations** — `review_gate_rounds_list` shows a ticket's ReviewGate rounds, plus the coordinator's recorded answer and an `outcome` (`converged` / `resolved` / `not_converged`); `review_gate_resolve` (CLI: `arb review resolve <ticket> --amend "<reasoning>"`) records that answer — `accept_as_is` / `amend` / `send_back` / `reject`, with reasoning, actor and timestamp — when a gate escalates on its round or send-back cap, so an override of a reviewer's standing finding is on record rather than only in a commit message. The merge path reads it: a PR whose latest reviewer verdict is not APPROVE merges only when an `accept_as_is` / `amend` covers its head; `send_back` means another review round follows the implementer's completion and never permits a merge by itself. Cap hits and resolutions are the opt-in `gate_cap_hit` / `gate_resolved` event topics.
+- **Dependencies + scheduler** — `dep_add`/`dep_remove`/`dep_list` to wire tickets together with `depends_on`/`blocks`/`conflicts_with` edges, and `scheduler_pause`/`scheduler_resume`/`scheduler_status` to control the board scheduler (Autopilot) that auto-dispatches Ready cards in edge order. A pause stops new board dispatches only — fix passes, conflict resolvers and review rounds already under way keep running — so `scheduler_status` reports a drain state (`running` / `draining` with what is in flight / `quiescent`, the only safe restart point); `ward scheduler pause && ward scheduler wait` blocks until it is safe to restart. Chains of tickets run by declaring the edges, not by building a separate graph object.
+- **Gate escalations** — `review_gate_rounds_list` shows a ticket's ReviewGate rounds, plus the coordinator's recorded answer and an `outcome` (`converged` / `resolved` / `not_converged`); `review_gate_resolve` (CLI: `ward review resolve <ticket> --amend "<reasoning>"`) records that answer — `accept_as_is` / `amend` / `send_back` / `reject`, with reasoning, actor and timestamp — when a gate escalates on its round or send-back cap, so an override of a reviewer's standing finding is on record rather than only in a commit message. The merge path reads it: a PR whose latest reviewer verdict is not APPROVE merges only when an `accept_as_is` / `amend` covers its head; `send_back` means another review round follows the implementer's completion and never permits a merge by itself. Cap hits and resolutions are the opt-in `gate_cap_hit` / `gate_resolved` event topics.
 - **ExternalReview** — `external_review_list`, `external_review_show`, `external_review_transcript`, `review_greenlight` for inspecting and unblocking worktree-backed external code review. `external_review_transcript` is `worker_log`'s counterpart for a review: the prompt it was given, the raw transcript its reviewer emitted, and every tool call paired with its result — keyed on the review record id, since an external review is not ticket-linked.
 
 See `apps/wardmast/lib/wardmast/mcp/catalog.ex` for the full, current catalog and which tier (worker vs. coordinator) can call each tool.
@@ -93,7 +95,7 @@ To mint a token for a coordinator to use, run this on the server host from
 your own shell:
 
 ```sh
-arb mcp token mint --tier coordinator
+ward mcp token mint --tier coordinator
 ```
 
 It proves you are the operator over the server's local operator socket. The
@@ -109,7 +111,7 @@ CLI) or a plain `url` (Codex CLI), and pass the token as
 ```json
 {
   "mcpServers": {
-    "arbiter": {
+    "wardmast": {
       "type": "http",
       "url": "http://127.0.0.1:4848/mcp",
       "headers": { "Authorization": "Bearer <coordinator-token>" }
@@ -122,7 +124,7 @@ Streamable HTTP is the **only** transport `/mcp` serves. The deprecated HTTP+SSE
 transport (2024-11-05, Claude Code's `"type": "sse"`) is not served: a client
 configured that way POSTs `initialize` and then waits for the reply on the SSE
 stream, which never arrives, so it times out and reports the server as down. Use
-`"type": "http"` — which is what `arb init` and worker dispatch write. The
+`"type": "http"` — which is what `ward init` and worker dispatch write. The
 `GET /mcp` SSE stream still exists, but only as Streamable HTTP's server →
 client channel (server-initiated messages and keepalives); it requires a
 coordinator token.
@@ -132,7 +134,7 @@ coordinator token.
 ### 1. Start the server
 
 ```sh
-arb server start
+ward server start
 ```
 
 The dashboard is at **http://127.0.0.1:4848**.
@@ -143,25 +145,25 @@ Visit the dashboard's **Workspace** page and configure:
 - **Repos** (projects to work in)
 - Worker/agent settings — model tier map, per-thinking-level args, provider overrides, and credentials (`agent.config.*`)
 - Security policy (`agent.security.*`)
-- Rate-limit throttling (`quota.*`). Worker concurrency is bounded per machine (`arb node set`), per provider account (`max_concurrent`) and, optionally, per repo (`worker.repos.<repo>.max_concurrent`); `conductor.max_concurrent` was removed
-- Optionally **CI backpressure** per repo (`worker.repos.<repo>.ci_backpressure: {max_pending, max_oldest_pending_min}`): while the forge's queue of MR pipelines waiting for a runner is over a threshold, no new implement run starts for that repo (`held — CI saturated (6 pending, oldest 42m)`); fix passes, review rounds, merges and P0 tickets are not held. It lifts when the queue drains, a failed forge poll holds nothing, and `arb scheduler status` / `arb prime` show it
+- Rate-limit throttling (`quota.*`). Worker concurrency is bounded per machine (`ward node set`), per provider account (`max_concurrent`) and, optionally, per repo (`worker.repos.<repo>.max_concurrent`); `conductor.max_concurrent` was removed
+- Optionally **CI backpressure** per repo (`worker.repos.<repo>.ci_backpressure: {max_pending, max_oldest_pending_min}`): while the forge's queue of MR pipelines waiting for a runner is over a threshold, no new implement run starts for that repo (`held — CI saturated (6 pending, oldest 42m)`); fix passes, review rounds, merges and P0 tickets are not held. It lifts when the queue drains, a failed forge poll holds nothing, and `ward scheduler status` / `ward prime` show it
 - Optionally a **tracker** (Jira, GitHub, Linear) and merge strategy
 
-Or edit `config/dev.exs` directly and restart the server, or use `arb config set`.
+Or edit `config/dev.exs` directly and restart the server, or use `ward config set`.
 
 ### 3. Dispatch your first ticket
 
 Create and dispatch a ticket via the dashboard or CLI:
 
 ```sh
-arb ticket create "Fix typo in README"
-arb ticket dispatch <id> my-project
+ward ticket create "Fix typo in README"
+ward ticket dispatch <id> my-project
 ```
 
 Watch the worker in the dashboard, or tail the transcript:
 
 ```sh
-arb worker log <task-id>
+ward worker log <task-id>
 ```
 
 Once complete, the merge queue picks it up (if configured) or you can merge manually via the dashboard.
@@ -170,15 +172,15 @@ Once complete, the merge queue picks it up (if configured) or you can merge manu
 
 > **Upgrading an install made before the rename** (`~/.arbiter`, `arbiter.service`)? Run `scripts/migrate-from-arbiter.sh` once — see [docs/migrate-from-arbiter.md](docs/migrate-from-arbiter.md).
 
-To run Arbiter as a self-contained OTP release under a systemd user unit, install and enable it with:
+To run Wardmast as a self-contained OTP release under a systemd user unit, install and enable it with:
 
 ```sh
-arb install service
+ward install service
 ```
 
-This writes `~/.config/systemd/user/wardmast.service` (`ExecStart=~/.wardmast/current/bin/wardmast start`), enables it via `loginctl enable-linger` for machine-boot startup, and starts the release. Manage it with `systemctl --user status wardmast.service` and view logs with `journalctl --user -u wardmast.service -f`. Pass `--system` to install a system-wide unit instead (needs root). Secrets and PATH configuration live in `~/.wardmast/wardmast.env`. Uninstall with `arb install service --uninstall`. The unit sets `OOMPolicy=continue` and each worker runs in its own memory-capped scope (`WARDMAST_WORKER_MEMORY_MAX`, default 40% of RAM), so one runaway worker process cannot stop the server — see [docs/worker-memory-cap.md](docs/worker-memory-cap.md), including the drop-in for a unit installed before this.
+This writes `~/.config/systemd/user/wardmast.service` (`ExecStart=~/.wardmast/current/bin/wardmast start`), enables it via `loginctl enable-linger` for machine-boot startup, and starts the release. Manage it with `systemctl --user status wardmast.service` and view logs with `journalctl --user -u wardmast.service -f`. Pass `--system` to install a system-wide unit instead (needs root). Secrets and PATH configuration live in `~/.wardmast/wardmast.env`. Uninstall with `ward install service --uninstall`. The unit sets `OOMPolicy=continue` and each worker runs in its own memory-capped scope (`WARDMAST_WORKER_MEMORY_MAX`, default 40% of RAM), so one runaway worker process cannot stop the server — see [docs/worker-memory-cap.md](docs/worker-memory-cap.md), including the drop-in for a unit installed before this.
 
-`arb install service` only writes the release-shaped unit above. There is no
+`ward install service` only writes the release-shaped unit above. There is no
 CLI command yet for a dev-mode unit (one whose `ExecStart` runs
 `mix phx.server` instead of a release binary) — on a source checkout you hand-write
 that unit file yourself; see [Deploying: pick the path for your install
@@ -186,7 +188,7 @@ shape](#deploying-pick-the-path-for-your-install-shape) below.
 
 ### Deploying: pick the path for your install shape
 
-Arbiter supports two install shapes, and the deploy command differs between
+Wardmast supports two install shapes, and the deploy command differs between
 them:
 
 - **Source checkout (dev mode)** — a git clone with `mix phx.server` run
@@ -195,10 +197,10 @@ them:
   the "Install (development)" section above sets things up, and how this
   repo's own coordinator instance runs today — the releases strategy is
   scoped but not yet built. A source checkout deploys with an explicit
-  `arb server deploy --git-pull`; a bare `arb server deploy` is always the
+  `ward server deploy --git-pull`; a bare `ward server deploy` is always the
   release path and never falls back to it.
 - **OTP release install** — a built release artifact unpacked under
-  `~/.wardmast/releases/<tag>/`, installed via `arb install service`. No
+  `~/.wardmast/releases/<tag>/`, installed via `ward install service`. No
   source checkout or Elixir/Mix toolchain on the box.
 
 If you're on a source checkout, use the sequence below. If you have a release
@@ -209,11 +211,11 @@ artifact installed, skip to [OTP-release installs](#production-deploys-otp-relea
 ```sh
 git fetch origin main
 git diff --name-only HEAD origin/main -- mix.lock   # non-empty → deps changed; see note below
-arb server deploy --git-pull
-arb server doctor     # confirm CLI and server report the same version
+ward server deploy --git-pull
+ward server doctor     # confirm CLI and server report the same version
 ```
 
-`arb server deploy --git-pull` does the pull → rebuild → restart → migrate
+`ward server deploy --git-pull` does the pull → rebuild → restart → migrate
 sequence for you: `git pull --ff-only` on `main`, rebuild and install the CLI
 escript if `apps/wardmast_cli` changed, then restart Phoenix — via
 `systemctl --user restart wardmast` when the systemd unit is present, a plain
@@ -228,33 +230,33 @@ It also does **not** run `mix deps.get` for you. If the pre-check above
 printed a `mix.lock` line, the pulled tree needs new deps that the restart
 will not have — running `mix deps.get` *before* the pull is a no-op, since
 `git fetch` doesn't move `HEAD` and the old lockfile is still checked out.
-Instead, either run `mix deps.get && arb server restart` immediately *after*
+Instead, either run `mix deps.get && ward server restart` immediately *after*
 the deploy, or skip `--git-pull` and do the whole thing manually: `git pull
 --ff-only origin main` → `mix deps.get` → `(cd apps/wardmast_cli && mix
-escript.build && cp arb ~/.local/bin/arb)` if `apps/wardmast_cli` changed →
-`arb server restart` → `arb server doctor`. The manual form is the safer
+escript.build && cp ward ~/.local/bin/arb)` if `apps/wardmast_cli` changed →
+`ward server restart` → `ward server doctor`. The manual form is the safer
 choice when deps changed, since it never restarts against unfetched deps.
 
-`--git-pull` is the only way to reach this path. A bare `arb server deploy` is
+`--git-pull` is the only way to reach this path. A bare `ward server deploy` is
 always the release path (below) and never falls back to a `git pull`, whatever
 the environment says.
 
 #### Production deploys: OTP-release installs
 
 This subsection only applies once you have a built release artifact
-installed (`arb install service`, or manually under
+installed (`ward install service`, or manually under
 `~/.wardmast/releases/<tag>/`) — **not** to a source checkout; use
 [the sequence above](#source-checkout-dev-mode) for that. `~/.wardmast/current`
 is symlinked atomically to the active release. Deploy a specific version (or
 `latest`) with:
 
 ```sh
-arb server deploy --version v1.2.3
+ward server deploy --version v1.2.3
 ```
 
 This is the primary path, and the **"Update to vX.Y.Z"** button in the dashboard's update banner runs the same command. The full runbook is [docs/self-update.md](docs/self-update.md).
 
-It resolves the release repo (`WARDMAST_RELEASE_REPO`, else the running server's own release metadata, else the repo your `arb` was built from — and says which), downloads the release tarball + checksum from GitHub Releases, verifies the SHA-256, unpacks it, takes an **integrity-checked online backup of the database** into `~/.wardmast/snapshots/` (aborting if that fails), atomically swaps `current`, restarts the service, and health-checks it. If it doesn't come back green it rolls back to the last-known-good release — and when the new release had migrations, **restores the backup first**. After a green deploy it installs the matching `arb` escript. `arb doctor` reports the last deploy (tag, time, outcome, backup path).
+It resolves the release repo (`WARDMAST_RELEASE_REPO`, else the running server's own release metadata, else the repo your `ward` was built from — and says which), downloads the release tarball + checksum from GitHub Releases, verifies the SHA-256, unpacks it, takes an **integrity-checked online backup of the database** into `~/.wardmast/snapshots/` (aborting if that fails), atomically swaps `current`, restarts the service, and health-checks it. If it doesn't come back green it rolls back to the last-known-good release — and when the new release had migrations, **restores the backup first**. After a green deploy it installs the matching `ward` escript. `ward doctor` reports the last deploy (tag, time, outcome, backup path).
 
 #### Migration ordering, and rollback across a migration
 
@@ -268,9 +270,9 @@ lock so only one node ever migrates. The real ordering is therefore:
 
     stop the old server  →  new release boots  →  migrate  →  serve
 
-— one writer at every instant, and the same path `arb server restart`,
-`arb server migrate` and dev `mix phx.server` already take. The dev-mode
-fallback (`arb server deploy --git-pull`) obeys the same ordering: with the
+— one writer at every instant, and the same path `ward server restart`,
+`ward server migrate` and dev `mix phx.server` already take. The dev-mode
+fallback (`ward server deploy --git-pull`) obeys the same ordering: with the
 server up it pulls and restarts, and the pulled migrations are applied by that
 boot; it only migrates standalone when the server is already down.
 
@@ -287,12 +289,12 @@ release adds any:
   new release, names the crossed migrations, and exits non-zero with the
   operator's options (fix forward, or roll the schema back first with
   `bin/wardmast eval "Wardmast.Release.rollback(Wardmast.Repo, <version>)"` and then
-  `arb server deploy --version <prior> --force`);
+  `ward server deploy --version <prior> --force`);
 - `--allow-cross-migration-rollback` overrides the refusal, rolling back anyway
   with a loud warning that the prior release is now on a newer schema.
 
 A deploy that adds no migrations keeps the automatic rollback unchanged — but
-only when detection actually worked. Because an arbiter release always ships
+only when detection actually worked. Because an wardmast release always ships
 migrations, an *empty* migration set from the new release tree means the globs
 no longer match the packaging layout, not that the deploy is migration-free.
 That case fails closed: the deploy warns up-front, refuses the automatic
@@ -317,7 +319,7 @@ echo "WARDMAST_WORKER_JAIL_UNMASK=~/.config/glab-cli" >> ~/.wardmast/wardmast.en
 
 Malformed (non-absolute) entries are skipped with a warning and never block
 boot. Don't use `ERL_FLAGS=-arbiter worker_jail_unmask ...`: systemd strips the
-quotes and every release then refuses to boot. `arb server doctor` lists the
+quotes and every release then refuses to boot. `ward server doctor` lists the
 unmasked paths ("worker jail unmask").
 
 ### Server bind address (`WARDMAST_BIND_ADDRESS`)
@@ -334,7 +336,7 @@ with a permissive security group. An install that relied on that for remote
 access will stop being reachable after upgrading. Use an SSH port-forward
 instead (`ssh -L 4848:127.0.0.1:4848 <host>`), which needs no server-side
 change; or, if off-loopback really is required, set `WARDMAST_BIND_ADDRESS`
-explicitly (below) — `arb server doctor` will keep warning about it every time
+explicitly (below) — `ward server doctor` will keep warning about it every time
 as a reminder of the exposure.
 
 To bind elsewhere, set `WARDMAST_BIND_ADDRESS` to any address `:inet.parse_address/1`
@@ -345,9 +347,9 @@ echo "WARDMAST_BIND_ADDRESS=0.0.0.0" >> ~/.wardmast/wardmast.env
 ```
 
 Any non-loopback value logs a boot `WARNING` naming the exposure, and
-`arb server doctor` reports a `[warn]` check pointing back here.
+`ward server doctor` reports a `[warn]` check pointing back here.
 
-### Reading `arb server doctor`
+### Reading `ward server doctor`
 
 Every check has one of four severities:
 
@@ -358,7 +360,7 @@ Every check has one of four severities:
 | `fail` | broken now: server unreachable, migrations pending, CLI/server version mismatch, no workspace or repo, an enabled provider's credential unusable, an open `/api`, a `:strict` workspace the host cannot jail, a podman backend the host cannot run | **1** |
 | `n/a` | does not apply to this install, so it is not probed: a provider no workspace uses (or that is paused), podman when no workspace uses it, the egress jail when no workspace enforces an allowlist, no nodes enrolled | 0 |
 
-`arb server doctor --json` lists **every** check (n/a included) with `id`, `group`
+`ward server doctor --json` lists **every** check (n/a included) with `id`, `group`
 and `severity`, plus `result` (`ok`/`warn`/`fail`), `exit_code` and `summary`;
 `ok` is false exactly when the exit code is 1, so a script can use either. The
 default output is the header, the summary line and the warn/fail checks only;
@@ -367,7 +369,7 @@ default output is the header, the summary line and the warn/fail checks only;
 security posture. Which providers and sandbox backends an install uses comes
 from `GET /api/server/doctor_scope`; when that cannot be read, nothing is hidden.
 
-#### The spawn canary (`arb server doctor --spawn`)
+#### The spawn canary (`ward server doctor --spawn`)
 
 The static checks cannot prove the thing that matters after a deploy: that a
 worker can actually spawn and reach its agent (on 2026-10-04 a release deployed
@@ -389,33 +391,33 @@ doctor exit 1. A provider no workspace uses, or that is paused, is `n/a` and is 
 spawned; one whose workspace uses the podman backend is `n/a` too (a canary has no
 worktree to mount: see the podman readiness check).
 
-- `arb server doctor --spawn` runs a fresh canary and prints its rows.
-- A plain `arb server doctor` runs it **automatically the first time after the
+- `ward server doctor --spawn` runs a fresh canary and prints its rows.
+- A plain `ward server doctor` runs it **automatically the first time after the
   server boots** (so the first doctor after a deploy proves the new build spawns),
   keeps that result for the rest of the boot, and re-runs it while it is failing so
-  a fix shows up at once. `arb server deploy`'s final report does the same.
-- The readiness polls (`arb start`, `restart`, `server deploy`'s green-wait) do not
+  a fix shows up at once. `ward server deploy`'s final report does the same.
+- The readiness polls (`ward start`, `restart`, `server deploy`'s green-wait) do not
   spawn agents; a spawn failure is a `fail` in the report but does not trigger the
   deploy's auto-rollback.
 - One canary runs at a time: a concurrent call is a 409 (reported as a `warn`). The
   endpoint is coordinator tier; a worker token is refused.
 
-### Remote `arb` — access Arbiter over VPN
+### Remote `ward` — access Wardmast over VPN
 
-By default, `arb` talks to a local server on `http://127.0.0.1:4848` (loopback). To point `arb` at a remote Arbiter server:
+By default, `ward` talks to a local server on `http://127.0.0.1:4848` (loopback). To point `ward` at a remote Wardmast server:
 
 1. **Set `ARB_HOST`** to your server's URL over VPN:
 
    ```sh
-   export ARB_HOST="http://arbiter.internal.example.com"
-   # or export ARB_HOST="https://arbiter.example.com" for HTTPS
+   export ARB_HOST="http://wardmast.internal.example.com"
+   # or export ARB_HOST="https://wardmast.example.com" for HTTPS
    ```
 
 2. **Mint a token** on the server, in a shell on the server host (for
-   example `ssh <host> arb mcp token mint --tier coordinator`):
+   example `ssh <host> ward mcp token mint --tier coordinator`):
 
    ```sh
-   arb mcp token mint --tier coordinator
+   ward mcp token mint --tier coordinator
    ```
 
 3. **Export the token** on the client:
@@ -427,10 +429,10 @@ By default, `arb` talks to a local server on `http://127.0.0.1:4848` (loopback).
 4. **Verify the connection**:
 
    ```sh
-   arb prime
+   ward prime
    ```
 
-- **Local loopback** (`ARB_HOST` unset or `http://127.0.0.1:4848`) needs no `ARB_TOKEN` from your own shell: `arb` mints a short-lived token over the operator socket for each invocation (bd-asawcq). The server itself no longer exempts localhost; a bare `curl` to `/api` gets 401.
+- **Local loopback** (`ARB_HOST` unset or `http://127.0.0.1:4848`) needs no `ARB_TOKEN` from your own shell: `ward` mints a short-lived token over the operator socket for each invocation (bd-asawcq). The server itself no longer exempts localhost; a bare `curl` to `/api` gets 401.
 - **Remote access** requires both `ARB_HOST` and `ARB_TOKEN`, *and* the server
   must be reachable at that address in the first place — since the server now
   binds loopback-only by default (above), that means either `WARDMAST_BIND_ADDRESS`
@@ -441,7 +443,7 @@ By default, `arb` talks to a local server on `http://127.0.0.1:4848` (loopback).
 
 ### Encryption key (`WARDMAST_CLOAK_KEY`) — required
 
-Arbiter encrypts workspace secrets (tracker / merger credentials) at rest using
+Wardmast encrypts workspace secrets (tracker / merger credentials) at rest using
 AES-256-GCM via [`ash_cloak`](https://hex.pm/packages/ash_cloak). **The server
 refuses to start without an encryption key.** Generate a 32-byte Base64 key and
 add it to your environment before deploying:
@@ -451,7 +453,7 @@ echo "WARDMAST_CLOAK_KEY=$(openssl rand -base64 32)" >> ~/.wardmast/wardmast.env
 # (for a non-service run, put it in the project-root .wardmast.env or export it)
 ```
 
-`arb install service` forwards `WARDMAST_CLOAK_KEY` from the installing shell
+`ward install service` forwards `WARDMAST_CLOAK_KEY` from the installing shell
 into `~/.wardmast/wardmast.env` automatically if it is set. Treat this key like a
 database password: back it up and keep it stable — rotating it (re-encrypting
 existing secrets) is a separate runbook and is not yet automated. Losing it
@@ -462,12 +464,12 @@ makes existing encrypted secrets unrecoverable.
 Real worker spawns and the `CredentialWatchdog`'s health probe both authenticate
 the `claude` CLI via `Wardmast.Agents.Claude.spawn_env/1`, and a Claude worker
 needs a credential of its own: a setup token (`claude setup-token`) or an
-`ANTHROPIC_API_KEY`. Arbiter **never** copies your own
+`ANTHROPIC_API_KEY`. Wardmast **never** copies your own
 `~/.claude/.credentials.json` into a worker — Claude rotates that login's refresh
 token on every refresh, so a second holder locks one of you out. A Claude
 dispatch for a workspace with no credential is refused and held (its tickets stay
 Ready), the coordinator gets one escalation naming the fix, and
-`arb server doctor`'s "claude worker credentials" check lists every such
+`ward server doctor`'s "claude worker credentials" check lists every such
 workspace. The supported path is
 **provider accounts** — a `provider_accounts` row, joined to a workspace via
 `workspace_provider_accounts`, holding an active `provider_credentials` row for
@@ -484,7 +486,7 @@ never leak into a worker.
 **Migrating an install that still keeps its token in `worker_env` or
 `.wardmast.env`:** `mix wardmast.accounts.census` only ever sees credentials
 already stored in a workspace's `worker_env` (`docs/provider-account-design.md`
-§7.1) — it has no visibility into the arbiter server's own process
+§7.1) — it has no visibility into the wardmast server's own process
 environment, so a token that has only ever lived in `.wardmast.env` will not
 appear in the census output at all. Migrate **before** upgrading to the P13
 release, which requires provider accounts:
@@ -509,18 +511,18 @@ P13 release notes, and the rollback.
 
 #### Account-model path
 
-You can also manage provider accounts directly via the `arb account` CLI
+You can also manage provider accounts directly via the `ward account` CLI
 instead of (or alongside) the census/migrate flow above:
 
 ```sh
 # Create or reference a provider account
-arb account create claude my_account
+ward account create claude my_account
 
 # Attach it to a workspace
-arb account attach <workspace> claude my_account
+ward account attach <workspace> claude my_account
 
 # Install or rotate the credential
-arb account rotate claude:my_account --kind oauth_token --env-var CLAUDE_CODE_OAUTH_TOKEN --secret <your-long-ttl-token>
+ward account rotate claude:my_account --kind oauth_token --env-var CLAUDE_CODE_OAUTH_TOKEN --secret <your-long-ttl-token>
 ```
 
 This path is particularly useful if you have **multiple Claude credentials**
@@ -532,7 +534,7 @@ tokens across workspaces or relying on install-wide environment fallbacks.
 **Precedence when both are set:** a spawn can end up with both
 `CLAUDE_CODE_OAUTH_TOKEN` (the account's) and `ANTHROPIC_API_KEY` (workspace
 `credentials_ref`/`api_keys` rotation) in its environment at once. Which one
-the `claude` CLI honours is decided by the CLI itself, not by Arbiter — if it
+the `claude` CLI honours is decided by the CLI itself, not by Wardmast — if it
 prefers the OAuth token, a workspace that deliberately configured its own key
 would silently authenticate against the account credential instead. If a
 workspace's `ANTHROPIC_API_KEY` must win, verify the CLI's actual precedence
@@ -560,14 +562,14 @@ needs no server-side env var and no restart:
 
 ```sh
 # 1. store the encrypted secret on the workspace
-arb workspace secret set tracker_token sct_rw_...
+ward workspace secret set tracker_token sct_rw_...
 
 # 2. point the tracker config at it
-arb config set tracker.config.credentials_ref secret:tracker_token
+ward config set tracker.config.credentials_ref secret:tracker_token
 
 # inspect / remove (values are never shown — only key names)
-arb workspace secret ls
-arb workspace secret rm tracker_token
+ward workspace secret ls
+ward workspace secret rm tracker_token
 ```
 
 Existing `env:` refs keep working unchanged, so you can migrate one workspace at
@@ -575,7 +577,7 @@ a time. Secret **values** are never returned by the API or CLI — only the key
 names are listed.
 
 Env vars injected into every worker's subprocess are managed the same way
-(`arb workspace env ls|set|rm`; `--secret` encrypts and redacts the value, and
+(`ward workspace env ls|set|rm`; `--secret` encrypts and redacts the value, and
 the value comes from `-` (stdin) or `--file` so it stays off `ps`). `ls` shows
 names and secret flags only; revealing a value is browser-only.
 
@@ -588,13 +590,13 @@ working directory with persistent memory and a notes folder.
 
 ```sh
 mkdir ~/coordinator && cd ~/coordinator
-arb init         # initializes the current directory
+ward init         # initializes the current directory
 ```
 
 Or pass a path to initialize elsewhere:
 
 ```sh
-arb init ~/my-coordinator
+ward init ~/my-coordinator
 cd ~/my-coordinator
 ```
 
@@ -605,7 +607,7 @@ claude
 ```
 
 The coordinator session will check whether the server is running, start it if
-needed, orient itself with `arb prime`, and be ready to coordinate your work.
+needed, orient itself with `ward prime`, and be ready to coordinate your work.
 
 ## Adding repos (projects)
 
@@ -622,8 +624,8 @@ After editing `config/dev.exs`, restart the server for changes to take effect.
 
 ## CLI Reference
 
-The CLI uses an `arb <resource> <verb>` grammar: `arb [resource] verb [args]`.
-Run `arb help` (or `arb --help`) for the exhaustive, always-current usage text
+The CLI uses an `ward <resource> <verb>` grammar: `ward [resource] verb [args]`.
+Run `ward help` (or `ward --help`) for the exhaustive, always-current usage text
 (`apps/wardmast_cli/lib/wardmast_cli/main.ex`); the table below covers the
 commands you'll reach for most.
 
@@ -631,32 +633,32 @@ commands you'll reach for most.
 
 | Command | Purpose |
 |---------|---------|
-| `arb prime` | Mission briefing — run at session start to check workspace status |
-| `arb ticket list` | List tickets in the workspace |
-| `arb ticket show <id>` | View a ticket's details and history |
-| `arb ticket create <title>` | Create a new ticket |
-| `arb ticket dispatch <id> [repo]` | Dispatch a worker to work on a ticket |
-| `arb worker list` | List running and completed workers |
-| `arb worker log <task-id>` | Read a worker's full transcript (durable) |
-| `arb worker review <task-id>` | Dispatch a review-only worker against a ticket |
-| `arb message inbox` | Read (and mark read) the coordinator's escalation mailbox |
-| `arb server start` | Boot the stack (no-op if already up) |
-| `arb server deploy [--version vX.Y.Z]` | Deploy an OTP release from GitHub Releases: pre-swap DB backup, auto-rollback on failure (restoring the backup when it migrated), then installs the matching `arb` — see [docs/self-update.md](docs/self-update.md) |
-| `arb server deploy --git-pull` | Source-checkout deploy: `git pull --ff-only`, rebuild the CLI if changed, restart (see [Deploying](#deploying-pick-the-path-for-your-install-shape)) |
-| `arb server doctor [--all\|-v] [--spawn] [--json]` | Health-check the install: a header, one summary line (`27 ok · 1 warn · 0 fail`) and only the `warn`/`fail` checks with their hints. `--all` lists every check grouped (core, auth & providers, sandboxes, security posture), with `n/a` for the ones that do not apply here. `--spawn` runs the end-to-end canary spawn per enabled provider (also run automatically once per server boot). Exit 1 only on `fail`; `--json` carries every check with its severity — see [Reading `arb server doctor`](#reading-arb-server-doctor) |
-| `arb config get/set [workspace]` | Read/edit workspace configuration (tracker, merger, etc.) |
-| `arb mcp token mint --tier coordinator` | Mint an MCP token for a coordinator session |
-| `arb batch [--file PATH] [--continue-on-error]` | Run many `arb` commands in one VM (see below) |
+| `ward prime` | Mission briefing — run at session start to check workspace status |
+| `ward ticket list` | List tickets in the workspace |
+| `ward ticket show <id>` | View a ticket's details and history |
+| `ward ticket create <title>` | Create a new ticket |
+| `ward ticket dispatch <id> [repo]` | Dispatch a worker to work on a ticket |
+| `ward worker list` | List running and completed workers |
+| `ward worker log <task-id>` | Read a worker's full transcript (durable) |
+| `ward worker review <task-id>` | Dispatch a review-only worker against a ticket |
+| `ward message inbox` | Read (and mark read) the coordinator's escalation mailbox |
+| `ward server start` | Boot the stack (no-op if already up) |
+| `ward server deploy [--version vX.Y.Z]` | Deploy an OTP release from GitHub Releases: pre-swap DB backup, auto-rollback on failure (restoring the backup when it migrated), then installs the matching `ward` — see [docs/self-update.md](docs/self-update.md) |
+| `ward server deploy --git-pull` | Source-checkout deploy: `git pull --ff-only`, rebuild the CLI if changed, restart (see [Deploying](#deploying-pick-the-path-for-your-install-shape)) |
+| `ward server doctor [--all\|-v] [--spawn] [--json]` | Health-check the install: a header, one summary line (`27 ok · 1 warn · 0 fail`) and only the `warn`/`fail` checks with their hints. `--all` lists every check grouped (core, auth & providers, sandboxes, security posture), with `n/a` for the ones that do not apply here. `--spawn` runs the end-to-end canary spawn per enabled provider (also run automatically once per server boot). Exit 1 only on `fail`; `--json` carries every check with its severity — see [Reading `ward server doctor`](#reading-arb-server-doctor) |
+| `ward config get/set [workspace]` | Read/edit workspace configuration (tracker, merger, etc.) |
+| `ward mcp token mint --tier coordinator` | Mint an MCP token for a coordinator session |
+| `ward batch [--file PATH] [--continue-on-error]` | Run many `ward` commands in one VM (see below) |
 
 All commands accept `--help` and `--json` for structured output. Pre-`<resource> <verb>`
-flat commands from earlier CLI versions (`arb list`, `arb start`, `arb doctor`, …) still
-run — they print a one-line note pointing at the new form. (`arb dispatch <id>` is a
-permanent top-level shortcut for `arb ticket dispatch <id>`, not a legacy alias.)
+flat commands from earlier CLI versions (`ward list`, `ward start`, `ward doctor`, …) still
+run — they print a one-line note pointing at the new form. (`ward dispatch <id>` is a
+permanent top-level shortcut for `ward ticket dispatch <id>`, not a legacy alias.)
 
-### Many commands: `arb batch`, not a shell loop
+### Many commands: `ward batch`, not a shell loop
 
-Each `arb` invocation boots a full BEAM (~42 MB), so looping over `arb` in a shell
-is slow, and a backgrounded loop can exhaust RAM. `arb batch` reads one `arb` command
+Each `ward` invocation boots a full BEAM (~42 MB), so looping over `ward` in a shell
+is slow, and a backgrounded loop can exhaust RAM. `ward batch` reads one `ward` command
 per line from stdin or `--file` (shell-like quoting, `#` comments), runs them
 sequentially in a single VM over one HTTP client, and prints one JSON object per line:
 `{"line": 2, "argv": [...], "exit": 0, "output": {...}}` (`"error"` instead of
@@ -664,25 +666,25 @@ sequentially in a single VM over one HTTP client, and prints one JSON object per
 exits non-zero if any line failed. Interactive or long-lived commands (`watch`,
 `worker log -f`, `server start|restart|deploy`, nested `batch`, …) are refused per line.
 
-    printf 'ticket show bd-1\nticket show bd-2\n' | arb batch --continue-on-error
+    printf 'ticket show bd-1\nticket show bd-2\n' | ward batch --continue-on-error
 
-`arb batch` is the CLI analogue of the bulk API/MCP verbs, which take a list of
+`ward batch` is the CLI analogue of the bulk API/MCP verbs, which take a list of
 operations in one call; API and MCP clients already issue many operations per
 connection. (Coalescing runs of same-verb lines into one bulk call is not done yet.)
 
-As a guard, `arb` counts the other `arb` VMs running for your user (a `/proc` read; it is
+As a guard, `ward` counts the other `ward` VMs running for your user (a `/proc` read; it is
 skipped where `/proc` is unavailable). Above `ARB_FANOUT_WARN` (default 16) it warns on
 stderr; above `ARB_FANOUT_MAX` (default 64) it refuses unless you pass `--force` (or `--allow-fanout`)
 or set `ARB_ALLOW_FANOUT=1`.
 
-## Renamed: Arbiter -> Wardmast (environment variables)
+## Renamed: Wardmast -> Wardmast (environment variables)
 
 The OTP apps, modules, Mix tasks and release are now `Wardmast.*` (release
 binary `bin/wardmast`, tasks `mix wardmast.*`, config `config :wardmast`).
 Operator environment variables are read as `WARDMAST_*` first; for **one release**
 the old `ARB_*` / `ARBITER_*` spelling still works and logs a one-time deprecation
 warning (`WARDMAST_CLOAK_KEY` for `ARBITER_CLOAK_KEY`, `WARDMAST_DATA_HOME` for
-`ARB_DATA_HOME`, ...). The variables the server exports to workers and the `arb` CLI
+`ARB_DATA_HOME`, ...). The variables the server exports to workers and the `ward` CLI
 (`ARB_TOKEN`, `ARB_HOST`, `ARB_WORKSPACE`, `ARB_WORKER_BEAD_ID`, ...) and the CLI
 binary name are unchanged. Database tables and migrations are unchanged.
 
@@ -709,16 +711,16 @@ for how to report it privately.
 
 ## License
 
-Arbiter is licensed under the [Functional Source License, Version 1.1, ALv2 Future
+Wardmast is licensed under the [Functional Source License, Version 1.1, ALv2 Future
 License (FSL-1.1-ALv2)](LICENSE). The source is public and free to use, modify and
 self-host for any permitted purpose; the license does not allow offering it as a
 competing commercial product or service. Each release automatically converts to
 the Apache License, Version 2.0 on the second anniversary of the date it was made
-available. Releases published before the relicensing remain under Apache-2.0.
+available. Releases published before the relicensing (all versions released as Arbiter) remain under Apache-2.0.
 Third-party
 dependencies and their licenses are listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
-Arbiter follows an open-core model: future commercially-licensed components ship
+Wardmast follows an open-core model: future commercially-licensed components ship
 as separate packages and are not covered by this repository's license. See
 [Licensing Model & Open-Core Architecture](docs/licensing-model.md) for details.
 

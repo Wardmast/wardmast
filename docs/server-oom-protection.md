@@ -1,16 +1,16 @@
 # Protecting wardmast.service from the OOM killer (bd-66anxj, GitHub #720)
 
-Incident 2026-10-10: ~680 concurrent `arb` processes flooded the server, which
+Incident 2026-10-10: ~680 concurrent `ward` processes flooded the server, which
 grew to 6.5 GB (DB pool checkouts > 15 s) and was SIGKILLed by the kernel OOM
 killer as the largest process, interrupting four live runs. Two changes:
 
 ## 1. The unit prefers other victims
 
-`arb install service` writes, in `[Service]`:
+`ward install service` writes, in `[Service]`:
 
 | Scope | Directives |
 |-------|------------|
-| system (`sudo arb install service --system`) | `OOMScoreAdjust=-500`, `ManagedOOMPreference=avoid` |
+| system (`sudo ward install service --system`) | `OOMScoreAdjust=-500`, `ManagedOOMPreference=avoid` |
 | user (default) | `ManagedOOMPreference=avoid` |
 
 `OOMScoreAdjust` is not written for user units: lowering `oom_score_adj` below
@@ -21,7 +21,7 @@ concurrency below. If you want the kernel-level bias on a user install, grant it
 once as root with a drop-in on the system manager instead of the user unit.
 Workers run in their own `arb-run` scopes and are unaffected.
 
-**Existing installs:** re-run `arb install service` (it rewrites the unit and
+**Existing installs:** re-run `ward install service` (it rewrites the unit and
 reloads), or add a one-time drop-in with `systemctl --user edit wardmast.service`:
 
 ```ini
@@ -38,6 +38,6 @@ ManagedOOMPreference=avoid
 `503 busy` with `Retry-After: 1` rather than queuing and growing the heap.
 
 - Default 128; set `WARDMAST_API_MAX_CONCURRENCY=N` in `wardmast.env` (`0` disables).
-- The `arb` CLI retries 429/503-with-`Retry-After` up to 3 times (exponential
+- The `ward` CLI retries 429/503-with-`Retry-After` up to 3 times (exponential
   backoff from the server's `Retry-After`), then fails with
   "server is busy … gave up after 4 attempts".

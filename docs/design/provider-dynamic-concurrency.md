@@ -112,7 +112,7 @@ implemented. The ticket plan is in [§12](#12-phased-plan-and-ticket-breakdown).
       only *lower* that account's concurrency.
 
     See [§10](#10-shadow-comparison-and-migration).
-11. **The board and `arb scheduler status` show each pool's budget and why,**
+11. **The board and `ward scheduler status` show each pool's budget and why,**
     plus each machine's free slots. A held card's badge names the layer that
     holds it. See [§9](#9-observability).
 
@@ -182,7 +182,7 @@ Three more problems sit in the same path:
 | Follow-ups | Routed by `ProviderRouting.implementer_provider/4`. A ReviewGate fix round goes through `ReviewGateFixRoundDispatcher.dispatch/1` to `Dispatch.resume/2` (`apps/wardmast/lib/wardmast/workflows/review_gate_fix_round_dispatcher.ex:217`, `:241`). CI fix and conflict passes go through `PassAdmission`, then `Worker.start_or_reap_terminal/1`. Reviewers go through `ReviewerRouting`'s `check_quota/2` (`apps/wardmast/lib/wardmast/agents/reviewer_routing.ex:868`) | Counted, never refused by a cap. The quota gate can hold a fix round (bd-6omte4) and drops a held reviewer pool to its fallback. CI fix and conflict passes don't pass the quota gate |
 
 Autopilot's plan is the only thing that enforces the board's slot cap. A fresh
-`arb dispatch`, or MCP `worker_dispatch`, checks only the account cap and the
+`ward dispatch`, or MCP `worker_dispatch`, checks only the account cap and the
 node cap.
 
 ### 1.2 Six mechanisms that each answer "how many"
@@ -204,7 +204,7 @@ measured in tickets (`snapshot.ex:825-827`).
 
 Read through the worker's own MCP tools (`quota_get` at 01:40:27Z,
 `workspace_show`). Worker-tier tokens can't read accounts or nodes
-(`arb account list` and `arb node list` are refused), so the account cap comes
+(`ward account list` and `ward node list` are refused), so the account cap comes
 from the filing.
 
 | Item | Value |
@@ -221,7 +221,7 @@ from the filing.
 
 | # | Layer | Bounds | Counts | Default | Config |
 |---|---|---|---|---|---|
-| 1 | **Node** | Machine CPU and memory | Live runs on the machine, plus reservations | Each machine's cap. The primary's default becomes its hardware suggestion | `arb node set <node> --max-workers N` |
+| 1 | **Node** | Machine CPU and memory | Live runs on the machine, plus reservations | Each machine's cap. The primary's default becomes its hardware suggestion | `ward node set <node> --max-workers N` |
 | 2 | **Provider pool** | Quota pace | Seats on the pool (§3.2) | The dynamic budget, under the account's optional ceiling | `max_concurrent` (ceiling), `quota_config` |
 | 3 | **Repo** | CI runners, merge churn and conflict passes, shared test services | Implementer runs in the repo | Unset: no cap | `worker.repos.<repo>.max_concurrent` |
 | 4 | **Workspace** | Fairness between workspaces on one account | The workspace's seats on the pool | Off: queue order decides | `budget_split: fair` on the account, `weight` on the link. `share` is an optional ceiling |
@@ -500,7 +500,7 @@ admission reads the weights (I1, I2); `δ` in the price is unchanged.
 |---|---|---|
 | The provider refuses requests (gate rules 1 and 2, `gate.ex:1220-1244`) | 0 | `:provider_refusing` |
 | `weekly_warning_policy: hold` with the long window at `allowed_warning` (rule 5) | 0 | `:weekly_warning` |
-| Operator pause (`arb provider pause`) | 0 | `:paused` |
+| Operator pause (`ward provider pause`) | 0 | `:paused` |
 | A quota-stop hold (bd-a6vh2x, `Pause.quota_hold/4`, `apps/wardmast/lib/wardmast/providers/pause.ex:184`) | 0 until it expires | `:quota_stop` |
 | Auth expired, or the circuit is broken | 0 | `:unavailable`. These are routing drops already; the budget mirrors them so the board can explain them |
 | A stale primary window (`Gate.stale?/2`) | The window is skipped, as the gate skips it. One exception: a window whose `reset_at` has passed is evaluated as the fresh window, with `u = 0` at the reset plus the projected draw since then | `:stale` on that window |
@@ -652,7 +652,7 @@ trusted window gets a budget of at least 1, whatever `raw` says.
 - **Output.** `raw` and the binding window are as computed. `reason` says the
   first-seat rule applied and shows the raw figure, for example `first-seat rule:
   no seat in use and under the line on every window, so 1 seat (raw 0.60): 5h
-  binds, …`, so a budget of 1 above `raw` reads correctly in `arb quota`,
+  binds, …`, so a budget of 1 above `raw` reads correctly in `ward quota`,
   `quota_get` and the dashboard.
 - **Once the seat is taken** (`seats > 0`) the next recompute computes as before,
   the pool is full (`free` is 0), and the running seat is never stopped (I8). When
@@ -794,7 +794,7 @@ These surfaces go:
 | Workspace | `Workspace.max_concurrent/1` (`workspace.ex:709-735`); `ValidateConfig.validate_conductor/2` (`apps/wardmast/lib/wardmast/tasks/workspace/changes/validate_config.ex:72-73`, `:160`, `:1256-1288`) |
 | Explainer | `CapacityExplainer`'s `:ceiling` and `:workspace` limit keys and change hints (`apps/wardmast/lib/wardmast/board/capacity_explainer.ex:116-120`, `:236-241`) |
 | Doctor | "node capacity vs conductor.max_concurrent" (`apps/wardmast_cli/lib/wardmast_cli/cmd/doctor/checks.ex:2000-2020`) |
-| CLI | `arb node list`'s `ceiling_line` and the `ceiling_below_total` warning (`apps/wardmast_cli/lib/wardmast_cli/cmd/node.ex:455-475`) |
+| CLI | `ward node list`'s `ceiling_line` and the `ceiling_below_total` warning (`apps/wardmast_cli/lib/wardmast_cli/cmd/node.ex:455-475`) |
 | Web | The `/nodes` ceiling warning and footer (`apps/wardmast_web/lib/wardmast_web/live/nodes_live.ex:605-608`); the Settings page's "Max concurrent workers" row (`apps/wardmast_web/lib/wardmast_web/live/settings_live.ex:39`, `:220-227`) |
 | MCP | `installation_config_*`'s key and description (`apps/wardmast/lib/wardmast/mcp/catalog.ex:2280-2350`; `apps/wardmast/lib/wardmast/mcp/tools/workspace.ex:357`) |
 | Docs | README.md:135; `docs/remote-workers-runbook.md:199`; `docs/pro-extension-seams.md:232`; `docs/design/workspace-config-reload.md:40`; remote-workers §13 (RW14 bullet); provider-account-design §4.1 |
@@ -803,7 +803,7 @@ These surfaces go:
 `effective_max_concurrent`. It moves to the pin pool's seat check (§7).
 
 **The primary's default cap becomes its hardware suggestion, enforced.**
-- **As built (DC1, bd-74mtmp).** `LocalCapacity.cap/0` is `%{cap:, source: :override | :suggestion}` and is always enforced; `LocalCapacity.suggestion/0` reads the hardware once per boot (`NodeAgent.Protocol.local_hardware/0`), and `config :wardmast, :local_hardware` pins it for tests. The `installation_settings` migration `20261010120000_drop_conductor_system_max_concurrent` keeps the advisory line in a new `local_cap_advisory` column, which `GET /api/nodes` returns and `arb server doctor` and `arb node list` show until the operator sets the local cap (`arb node set local`); the workspace migration is `20261010120100_remove_conductor_from_workspace_configs`.
+- **As built (DC1, bd-74mtmp).** `LocalCapacity.cap/0` is `%{cap:, source: :override | :suggestion}` and is always enforced; `LocalCapacity.suggestion/0` reads the hardware once per boot (`NodeAgent.Protocol.local_hardware/0`), and `config :wardmast, :local_hardware` pins it for tests. The `installation_settings` migration `20261010120000_drop_conductor_system_max_concurrent` keeps the advisory line in a new `local_cap_advisory` column, which `GET /api/nodes` returns and `ward server doctor` and `ward node list` show until the operator sets the local cap (`ward node set local`); the workspace migration is `20261010120100_remove_conductor_from_workspace_configs`.
 - **Today.** `LocalCapacity.cap/0` defaults to `system_max_concurrent/0`, which
   is 16 and not enforced (`local_capacity.ex:102-110`).
 - **After DC1.** It's `nodes.local_max_workers` when set. Otherwise it's
@@ -853,7 +853,7 @@ becomes the only machine bound.
   `scheduler_admission: enforce`**: under `legacy` and `shadow` it reads no
   count (I1, I2).
 - The display is `CapacityView.status/1`'s `repos`, shown by the board's
-  capacity popups, `arb scheduler status` and `scheduler_status`.
+  capacity popups, `ward scheduler status` and `scheduler_status`.
 
 **What it bounds.** The cap limits how many tickets in one repo are being
 written at once, and that bounds:
@@ -871,7 +871,7 @@ pipeline in flight should count.
 | | |
 |---|---|
 | Switch | `budget_split` on the account: `queue` (the default; the ES3 order alone decides, as today) or `fair`. Set by the operator or the coordinator. It reorders, and never loosens a limit |
-| Weight | `weight` on the workspace link (`workspace_provider_accounts`): a positive integer, default 1. `arb account attach <ws> <provider> <account> --weight N` |
+| Weight | `weight` on the workspace link (`workspace_provider_accounts`): a positive integer, default 1. `ward account attach <ws> <provider> <account> --weight N` |
 | Entitlement | `e_w(π) = budget(π) × weight_w / Σ weight` over the workspaces with *demand* on `π`: seats on `π`, or an eligible Ready card that can use `π` this pass |
 | Rule in the walk | A card from workspace `w` is skipped for pool `π` when all of these hold: `w` holds at least `e_w(π)` seats; another workspace `v` holds fewer than `e_v(π)`; and `v` has an eligible Ready card for `π` in the **same effective band**. The card may still be placed on another pool |
 | Exempt | Own-P0 cards are never skipped for fair share |
@@ -879,9 +879,9 @@ pipeline in flight should count.
 | Preemption | None. Running work keeps its seats, and fairness converges as tickets finish |
 
 **As built (DC10, bd-ag5nlo).** `budget_split` is a `provider_accounts` column
-(`queue` | `fair`, default `queue`, set with `arb account set <ref>
+(`queue` | `fair`, default `queue`, set with `ward account set <ref>
 --budget-split fair` or `account_set`); `weight` is a `workspace_provider_accounts`
-column (positive integer, default 1, `arb account attach … --weight N`). The
+column (positive integer, default 1, `ward account attach … --weight N`). The
 arithmetic is `Wardmast.Board.FairShare`; `WalkInputs` puts a `fair` map
 (`seats`, `weights`, `labels`) on a fair account's pools and the walk applies
 the skip rule in `pick_pair` (a skipped card may still take another pool; its
@@ -891,7 +891,7 @@ read lazily: a card's candidates for other workspaces are asked only when the
 card's workspace already holds its smallest possible share and another workspace
 has a seat or a Ready card. The share is shown in `CapacityView`'s `fair_share`
 rows (at full demand, over the workspaces linked or seated), the capacity popups
-and `arb scheduler status`. Like the rest of the walk it decides nothing until
+and `ward scheduler status`. Like the rest of the walk it decides nothing until
 DC8 (I1/I2). O4 stays open: the default is `queue`.
 
 **What this guarantees.** A workspace with a P1 waiting gets its share of the
@@ -914,7 +914,7 @@ changes.
 
 | Number | Becomes | Migration |
 |---|---|---|
-| Account `max_concurrent` | An **optional ceiling** over the budget: `limit = min(budget, max_concurrent, share)`. Not the primary control. Label: "Concurrency ceiling (optional): the quota budget decides; this only caps it" | Kept as is, like RW14 kept the conductor value. `claude:default`'s 3 stays, so enforcing can only lower that account. The operator clears it with `arb account set <ref> --max-concurrent none` once the report earns it, and after setting node and repo caps, because the 3 was also guarding the machine and CI |
+| Account `max_concurrent` | An **optional ceiling** over the budget: `limit = min(budget, max_concurrent, share)`. Not the primary control. Label: "Concurrency ceiling (optional): the quota budget decides; this only caps it" | Kept as is, like RW14 kept the conductor value. `claude:default`'s 3 stays, so enforcing can only lower that account. The operator clears it with `ward account set <ref> --max-concurrent none` once the report earns it, and after setting node and repo caps, because the 3 was also guarding the machine and CI |
 | Link `share` | An optional per-workspace hard ceiling, unchanged | Kept |
 | Link `weight` (new) | The fair-share weight (§5.3) | New, default 1. Has no effect until `budget_split: fair` |
 | Install `conductor_system_max_concurrent` | **Deleted** | §10.6 |
@@ -936,7 +936,7 @@ changes.
 | `ResumeSlot` (bd-92mx1m) | An automatic resume must fit under `effective_max_concurrent` | An automatic resume into `:active` needs a free seat on its pin pool and a machine slot. Otherwise it's deferred as today (`Autopilot.defer_resume`). An operator resume can force it |
 | `DispatchQueue` | Holds quota-held fresh intents, and drains on `quota_updated` and resets | In `enforce`, fresh intents aren't quota-held: they wait in Ready with a layer reason. The queue keeps guardrail, pause, quota-stop and hard-rule follow-up holds. `slot_free?/2` (`dispatch_queue.ex:685`) becomes the seat check |
 | R5 and R6 routing | Feasibility is `gate.check`; rank is headroom or `J` | Feasibility is a free seat. The rank among a card's open pools is unchanged (`failover`, `most_quota`, `scored`). A pool the budget admits while it's a little past its line has `h ≤ 0`, so it ranks after every priced pool, as an unknown headroom does today |
-| Manual dispatch | `arb dispatch` checks the account and node caps only | Also checks seats (via `Admission`) and the repo cap. `--over-cap` overrides as today, and is recorded |
+| Manual dispatch | `ward dispatch` checks the account and node caps only | Also checks seats (via `Admission`) and the repo cap. `--over-cap` overrides as today, and is recorded |
 
 ## 8. The R-series: keep, fold in, or drop
 
@@ -1005,7 +1005,7 @@ Its detail names the layer:
 Planned cards read "next" and "starting". `CapacityExplainer` gains the pool,
 node, repo and fair-share lines, and loses `:ceiling` and `:workspace`.
 
-**`arb scheduler status`.** `Drain.to_json/1`
+**`ward scheduler status`.** `Drain.to_json/1`
 (`apps/wardmast/lib/wardmast/board/drain.ex:275-289`) and the text renderer
 (`apps/wardmast_cli/lib/wardmast_cli/cmd/scheduler.ex:95-110`) gain:
 - `admission` (the mode, with the shadow agreement since the switch);
@@ -1035,7 +1035,7 @@ Slots used: 3 (bd-…, bd-…, bd-…)
 ```
 
 **Elsewhere.**
-- `quota_get` and `arb quota` gain a `budget` block per account.
+- `quota_get` and `ward quota` gain a `budget` block per account.
 - A dispatch's `routing_decision` gains `budget: %{pool, budget, seats, binding,
   raw}` and the `planned` pair.
 - `budget_changed` events keep a short per-pool ring buffer for the popup's
@@ -1081,13 +1081,13 @@ The mode is the installation setting `scheduler_admission`. It's install-wide
 because the Ready queue is (epic-aware §6.6).
 
 **Per-account override (O11).** An account may carry its own `admission`
-(`arb account set <ref> --admission legacy|shadow|enforce|inherit`, MCP
+(`ward account set <ref> --admission legacy|shadow|enforce|inherit`, MCP
 `account_set`); unset it follows the install key. The budget is per
 `(account, pool)`, so one account can trial `enforce` while another stays in
 `shadow`. Dispatch gates (the repo cap) use the mode of the account the run
 routes to; the walk is planned whenever the install key or any override is
 `shadow` or `enforce` (`Wardmast.Accounts.AdmissionMode.walk_mode/0`). Node-layer
-caps are always enforced. `arb scheduler status`, `quota_get` and the board
+caps are always enforced. `ward scheduler status`, `quota_get` and the board
 show each pool's effective mode and whether it came from the account or the
 installation.
 
@@ -1115,7 +1115,7 @@ Autopilot pass.
 
 **As built (DC6, bd-9ycsk4).**
 - **The key.** `scheduler_admission` is an installation setting
-  (`Settings.Registry`, so `arb settings`, `installation_config_*` and
+  (`Settings.Registry`, so `ward settings`, `installation_config_*` and
   `/api/installation/config` carry it). Null means `legacy`. A coordinator may
   set `legacy` or `shadow`; `enforce` is operator-only (the registry's
   `operator_only_values`). Until DC8 wires it, `enforce` dispatches and records
@@ -1251,7 +1251,7 @@ nothing in the budget path.
   seat check under the existing per-account `:global.trans`; the reservation is
   seated on the checked pool, `force` still goes over (recorded), and a full
   pool is `{:account_at_capacity, info}` with the seat check in `info.seat`.
-  `arb dispatch` and MCP `worker_dispatch` reach it like every other caller.
+  `ward dispatch` and MCP `worker_dispatch` reach it like every other caller.
 - **The gate (E9, E10).** `Gate.gating_window/3` takes `pace: false`: the hard
   rules (1, 2, 5) only. Every dispatch under `enforce` asks the gate that way.
   A hard rule on a *fresh* dispatch is that pool's hard zero: it is refused
@@ -1308,7 +1308,7 @@ nothing in the budget path.
   walk that ranks a ticket's pin first; the DC7 report does not yet split the
   reverse records (`policy: "enforce"`) from the shadow ones, nor record O7's
   bursts of re-admitted follow-ups past the budget; and O7's threshold is app
-  config, not yet an `arb settings` key.
+  config, not yet an `ward settings` key.
 
 ### 10.5 Rollout order
 
@@ -1335,11 +1335,11 @@ nothing in the budget path.
   copies `K` into `nodes_local_max_workers`. It's the same machine and the same
   number, now enforced at the node layer.
 - **Set to `K`, in any case:** it logs one advisory line, which
-  `arb server doctor` also shows once:
+  `ward server doctor` also shows once:
 
    > conductor_system_max_concurrent (K) was removed: the install's
    > concurrency is the sum of its machines' caps. To keep K on this machine:
-   > `arb node set local --max-workers K`.
+   > `ward node set local --max-workers K`.
 
 App env `:conductor_system_max_concurrent` is no longer read. If it's set, boot
 logs a one-time warning.
@@ -1349,7 +1349,7 @@ logs a one-time warning.
 each value it removed. Afterwards the validator refuses `conductor` with:
 
 > conductor.max_concurrent was removed (bd-8qdviv): bound a machine with
-> `arb node set`, a provider with the account's `max_concurrent`, a workspace's
+> `ward node set`, a provider with the account's `max_concurrent`, a workspace's
 > use of an account with `--share`, or a repo with
 > `worker.repos.<repo>.max_concurrent`.
 
@@ -1397,7 +1397,7 @@ the exempt budget, and I11's three fits.
 | DC2 | Seat-hour calibration: `seats` and `budget` columns on `quota_snapshots`; the NNLS fit `Δu = ρ·seat_hours + b·hours` per (account, pool, window), reusing `Scarcity.Calibration.fit/2`, which gains a standard error per coefficient; `H` from `ticket_transitions`; the fallback ladder, with its confidence-bound test and the `ρ` floor (§3.4); `mix wardmast.budget_calibration` and `Wardmast.Release.budget_calibration/0`. Shadow only | 3 | — | 0 |
 | DC3 | `Wardmast.Quota.Budget`, the pure function (§3.3), with the `ρ` floor (I11), the hard zeros, the exempt budget and `expiring`/`explore`. The `now:` what-if on `Gate.pace/6`. `Budget.Server`: triggers, hysteresis, ETS, `budget_changed`. Nothing on an admission path reads it (a test pins that) | 3 | — (uses priors until DC2) | 1 |
 | DC4 | Seats: per-pool occupancy (§3.2), with the pin seat for tickets In progress, cross-pool sub-workers and reservations. The registry stamps `account_id` and `pool`. Today's count is kept under `legacy` and `shadow` | 3 | — | 1 |
-| DC5 | Observability: the capacity strip and popups, the per-card layer reasons, the `CapacityExplainer` lines, `arb scheduler status` and `scheduler_status` budgets, machines and repos, the `quota_get` budget. Labelled "shadow" until `enforce` | 3 | DC3 | 1 |
+| DC5 | Observability: the capacity strip and popups, the per-card layer reasons, the `CapacityExplainer` lines, `ward scheduler status` and `scheduler_status` budgets, machines and repos, the `quota_get` budget. Labelled "shadow" until `enforce` | 3 | DC3 | 1 |
 | DC6 | The walk: `Scheduler.plan/1` with capacity sets, pairs, skip-not-stop and multi-placement; `scheduler_admission` (legacy, shadow, enforce); `admission_shadow` on dispatch and on hold changes; `wait_cause` on plan entries. Ships at `legacy` | 4 | DC3, DC4 | 1 |
 | DC7 | The admission shadow report (§10.3) | 2 | DC6 | 1 |
 | DC8 | `enforce`: `Admission` checks `seats < min(budget, max_concurrent, share)` per pool; fresh dispatches skip the gate's pace rules; follow-ups use `pace: false`; `DispatchQueue` drops fresh quota holds; the planned pair rides into dispatch; the reverse shadow; `ResumeSlot` uses the seat check. Needs the operator's OK (§10.4) | 4 | DC6, DC7 | 2 |

@@ -74,7 +74,7 @@ document**. Nothing here is a fresh measurement.
 | The refresh token rotates; copying the operator's token into per-run homes risks orphaning their login | ticket, worker-security.md | Recorded |
 | `env -i` does not hide the keyring: agy finds `/run/user/$UID/bus` by default, so a "no keyring" test must mask it (`bwrap --tmpfs /run/user`) | ticket | Recorded; applies to every test in [§8](#8-gates-and-unknowns) |
 | agy has no `login` subcommand, a full-screen TUI, and `--gemini_dir` did not isolate it (it reused the operator's real identity) | `LoginRecipes` moduledoc (bd-82yxz2) | Recorded |
-| `ANTIGRAVITY_API_KEY` is a placeholder; Antigravity stores no token Arbiter can read, so its quota cannot be observed from the token | `Accounts.Census`, `Quota.CloudCode` | Recorded |
+| `ANTIGRAVITY_API_KEY` is a placeholder; Antigravity stores no token Wardmast can read, so its quota cannot be observed from the token | `Accounts.Census`, `Quota.CloudCode` | Recorded |
 | **Which keyring library and collection agy uses (label, attribute schema, "login" collection or "default")** | | **Unknown** |
 | **Whether agy runs against a private `gnome-keyring-daemon` with an empty-password collection, with no PAM/unlock prompt** | | **Unknown; the central spike, [A1](#9-proposed-tickets)** |
 | **Whether a headless first login is possible at all** (OAuth redirect, device code, paste-a-code) | | **Unknown** |
@@ -112,7 +112,7 @@ ticket A9), but it is not the target.
 
 ## 2. Worker identity
 
-An **identity** is a Google account used only by Arbiter workers.
+An **identity** is a Google account used only by Wardmast workers.
 
 * **Model.** An `antigravity` `ProviderAccount` (provider already exists in the
   schema, `provider_account.ex`) plus one `ProviderCredential` of a new kind,
@@ -120,7 +120,7 @@ An **identity** is a Google account used only by Arbiter workers.
   and `max_concurrent: 1`. Workspaces link to it through the existing
   `WorkspaceProviderAccount`, so pinning, quota routing, enablement and the
   admission checks work unchanged.
-* **Volume naming.** `arb-agy-identity-<account-id>`, created by Arbiter, never
+* **Volume naming.** `arb-agy-identity-<account-id>`, created by Wardmast, never
   by a worker. Contents: the keyring directory only
   (`~/.local/share/keyrings` as agy sees it), plus whatever agy writes beside
   its credential that it needs to start (to be listed by A1).
@@ -138,7 +138,7 @@ An **identity** is a Google account used only by Arbiter workers.
 be relayed. So the seed is a **one-time, interactive, operator-run** step, not
 something the login relay can drive:
 
-    arb agy identity login <account>      # proposed (A4)
+    ward agy identity login <account>      # proposed (A4)
 
 which runs the *same image and same keyring setup a worker gets*, with the
 identity volume mounted read-write and a TTY (`podman run -it`), starts the
@@ -155,7 +155,7 @@ printing any credential, and records `seeded_at` on the credential row.
 ## 3. Container shape for agy
 
 Reuses P3/P7/P8: `Container.argv/2`, `ContainerSpawn.prepare/1`/`wrap_port/1`,
-the image lifecycle, the egress proxy and Arbiter bridges, the per-run private
+the image lifecycle, the egress proxy and Wardmast bridges, the per-run private
 clone. What is agy-specific:
 
 | Item | Design |
@@ -163,7 +163,7 @@ clone. What is agy-specific:
 | Routing | `Sandbox.module(:podman, provider)` accepts `gemini` only when the workspace's agy account is an identity account; otherwise it stays the refusal it is today. **Fix first**: `ContainerSpawn.provider_name/1` ends in a catch-all `provider_name(_) -> "claude"`, so adding a provider by widening `Sandbox` alone would silently spawn Claude's mounts for agy. A2 makes it an exhaustive match that raises |
 | The CLI | The host's `agy` mounted read-only at `/opt/arbiter/cli/agy`, like Claude's and Codex's, if it is a self-contained binary; if it is a launcher with a runtime dependency, resolve the real binary as `codex_mounts/1` does. Unknown until A1 |
 | Keyring in the container | The image gains `dbus` and `gnome-keyring` (or the smallest Secret Service provider A1 shows agy accepts). The container entrypoint is a small wrapper: start a private `dbus-daemon --session --fork`, start the keyring daemon unlocked with an empty password against the identity volume, export `DBUS_SESSION_BUS_ADDRESS` for the child, `exec` agy. The bus is a unix socket **inside the container's own tmpfs**: no host path, no SELinux label change |
-| `HOME` and settings | Per run, as for Codex: `Gemini.ConfigDir` already builds an Arbiter-owned `$HOME` with generated `settings.json`, `mcp_config.json` and the posture; for a container spawn the dir is seeded under the run's temp dir and mounted rw, and the identity volume is mounted at the keyring path only. The host's symlinked passthrough (`.ssh`, `.gitconfig`) is skipped, as for Claude |
+| `HOME` and settings | Per run, as for Codex: `Gemini.ConfigDir` already builds an Wardmast-owned `$HOME` with generated `settings.json`, `mcp_config.json` and the posture; for a container spawn the dir is seeded under the run's temp dir and mounted rw, and the identity volume is mounted at the keyring path only. The host's symlinked passthrough (`.ssh`, `.gitconfig`) is skipped, as for Claude |
 | Env | `SpawnEnv` allowlist for `gemini` stays `[]` for credentials in the identity path (no `GEMINI_API_KEY`); the `DBUS_SESSION_BUS_ADDRESS` exception is bwrap-only |
 | Egress | `@egress_infra["gemini"]` gets agy's infra hosts. They are **unknown**; A1 runs a learn-mode pass and records them. Until then the container runs the proxy in learn mode only |
 | Write jail | `--read-only` plus the explicit mount set gives `write_confinement/1 -> :os_jail` the same way as Claude, so `:strict` eligibility (agy-strict-write-isolation) is carried by the container. The `jetski:` denial notices are agy's own and are unchanged |
@@ -199,15 +199,15 @@ clone. What is agy-specific:
 |---|---|
 | What can the worker read? | The identity's refresh token (it is in the volume agy uses), as Claude's worker reads its token env. Blast radius is the dedicated account only, which is the point of an identity. The operator's keyring, `gh` token and ssh agent are not reachable |
 | Can it exfiltrate it? | Only through the egress proxy; the allowlist limits that exactly as for Claude/Codex tokens |
-| Can a worker corrupt it? | Yes: it can delete or overwrite the keyring. Effect: that identity needs a re-login (`arb agy identity login`). It cannot touch another identity or the operator. The auth probe ([§8](#8-gates-and-unknowns)) catches it before the next dispatch |
-| Backups and logs | The volume is credential material. `arb` must never print its contents or `podman volume inspect` output into logs; the doctor check reports name, size and `seeded_at` only |
+| Can a worker corrupt it? | Yes: it can delete or overwrite the keyring. Effect: that identity needs a re-login (`ward agy identity login`). It cannot touch another identity or the operator. The auth probe ([§8](#8-gates-and-unknowns)) catches it before the next dispatch |
+| Backups and logs | The volume is credential material. `ward` must never print its contents or `podman volume inspect` output into logs; the doctor check reports name, size and `seeded_at` only |
 
 ### 4.3 Alternatives considered
 
 | Option | Verdict |
 |---|---|
 | **API key (`GEMINI_API_KEY`) via `podman run --secret type=env`** | Best on paper: no keyring, no daemon, no rotation, no proxy, no single-writer problem; `Gemini.spawn_env/1` and the `SpawnEnv` allowlist already carry the variable. **Unmeasured**: spike C was declined, so it is not known that agy 1.2.16 honours it (the adapter's use of it dates from the upstream Gemini CLI that was dropped in bd-ac53wz), nor how its billing and quota differ. Antigravity's quota is observed through the account's own login (`Quota.CloudCode`); an API-key worker is probably billed per token and probably invisible to quota routing (both unverified), in which case the router would route blind. **Kept as ticket A8**: if the operator supplies a key and a probe passes, it replaces §4.1 for that account with a `ProviderCredential` of kind `api_key` and a branch in `ContainerSpawn`. Everything else in this document still applies |
-| **Host-side broker holding the refresh token and handing out access tokens** | Rejected. agy 1.2.16 ignores file seeds, so there is no injection point for a short-lived token. The alternative, header injection in the egress proxy, needs TLS interception of Google traffic. Arbiter would also have to impersonate agy's OAuth client. Re-open only if agy gains a documented token-injection input |
+| **Host-side broker holding the refresh token and handing out access tokens** | Rejected. agy 1.2.16 ignores file seeds, so there is no injection point for a short-lived token. The alternative, header injection in the egress proxy, needs TLS interception of Google traffic. Wardmast would also have to impersonate agy's OAuth client. Re-open only if agy gains a documented token-injection input |
 | **Copy the operator's token into per-run homes** | Rejected by bd-6dpjw7 (orphans the operator's login). Also what `Codex.AuthSync` exists to repair, at real complexity |
 | **Per-run container reading the operator's keyring through a host proxy (Option 0)** | Fallback only; see [§1](#1-why-agy-stays-on-bwrap-today-and-what-a-container-changes) |
 | **Keyring daemon on the host, one per identity, socket shared into workers** | This is the sidecar in [§5](#5-single-writer-refresh); a scale-up of the chosen model, not an alternative to it |
@@ -244,7 +244,7 @@ directory and each worker container mounts that socket (this is the same
 `label=disable` bridge pattern §9 Q1 already accepted). All workers then share
 one daemon, so there is one writer. It does **not** by itself prevent two agy
 *processes* both refreshing the same token. It needs either a refresh window
-(Arbiter forces a refresh when the access token is near expiry, before
+(Wardmast forces a refresh when the access token is near expiry, before
 releasing the run) or proof that Google's retired-token grace window covers the
 overlap. Both depend on the unknown "rotates every refresh?" fact, so the
 sidecar is deliberately **not** in the first ticket set. A10 is the measurement
@@ -276,7 +276,7 @@ host bus proves nothing. Every ticket below that has such a test says so.
 | Step | What | Exit criterion |
 |---|---|---|
 | **R1: opt-in** | `sandbox.backend: podman` becomes legal for a workspace whose agy account is an identity account (A2, A3, A5, A6). Everything else still resolves to the refusal. bwrap stays the default and the only path for non-identity accounts | The A1 findings are recorded; one real agy ticket runs end to end in a container (auth, MCP call, `:strict` write denial, egress through the proxy), evidence attached, not mocked |
-| **R2: default** | New workspaces with an agy identity default to podman. `arb server doctor` reports bwrap-agy as deprecated. Review passes for agy get a container path (A7) | Two weeks of agy tickets on podman with no auth-class stop reasons (`:auth_expired`) that a re-login did not fix, and the single-writer slot never observed wedged |
+| **R2: default** | New workspaces with an agy identity default to podman. `ward server doctor` reports bwrap-agy as deprecated. Review passes for agy get a container path (A7) | Two weeks of agy tickets on podman with no auth-class stop reasons (`:auth_expired`) that a re-login did not fix, and the single-writer slot never observed wedged |
 | **R3: delete** | Remove `Gemini.jail_agy/5`, the keyring proxy wrapper (`maybe_keyring_proxy/2`, `keyring_proxy/1`, `dbus_proxy/0`, `keyring_usable?/0`, `session_bus_reachable?/0`), `ConfigDir.keyring_available?/1`/`keyring_reachable?/1`, the `SpawnEnv` bus exception and the doctor's keyring-proxy check | No workspace is on bwrap for agy. `Jail` stays: Codex review passes and non-Claude passes still use it (`pass_policy/3`), and the bwrap backend remains selectable for them |
 
 If the operator never supplies an identity, R1 cannot start and the answer
@@ -325,7 +325,7 @@ own login; do not run two agy processes against the operator's real keyring
 while measuring rotation.
 
 Out of scope here: quota observability for an identity (the Antigravity token is
-not readable by Arbiter, `Quota.CloudCode`), and the terms-of-service question
+not readable by Wardmast, `Quota.CloudCode`), and the terms-of-service question
 in [§2](#2-worker-identity).
 
 ## 9. Proposed tickets
@@ -336,11 +336,11 @@ blocked on A1 passing gate 2.**
 
 | # | Title | D | Depends on | Acceptance (summary) |
 |---|---|---|---|---|
-| **A0** | **Operator decision: dedicated Google account (and optionally a Gemini API key) for an Arbiter worker identity.** Decision ticket for the operator, with the terms-of-service point in §2 spelled out | 1 | none | Account supplied and recorded as a `decision`, or declined with "agy stays on bwrap; close A1 to A8, keep A9 open" |
+| **A0** | **Operator decision: dedicated Google account (and optionally a Gemini API key) for an Wardmast worker identity.** Decision ticket for the operator, with the terms-of-service point in §2 spelled out | 1 | none | Account supplied and recorded as a `decision`, or declined with "agy stays on bwrap; close A1 to A8, keep A9 open" |
 | **A1** | **Spike: agy against a container-local Secret Service.** In a `podman run -it` with a named volume, private `dbus-daemon` plus `gnome-keyring-daemon --unlock` (empty password): complete a first login, run `agy -p` headless, restart the container and run again, force and observe a token refresh, then delete the volume and confirm a clear auth failure. Run learn-mode egress and record hosts. Test "no keyring" with `/run/user` masked. Record the keyring schema, native-binary type, per-identity state beyond the keyring, and whether rotation happens on every refresh and its grace window. Output: a findings appendix here | 3 | A0 | Each unknown in §8 answered or marked unanswerable, with commands and redacted output; gate 2 stated pass/fail |
 | **A2** | **Route `gemini` to the container backend for identity accounts.** `Sandbox.module(:podman, "gemini")` resolves to `Container` only for an identity account, else the existing refusal. Make `ContainerSpawn.provider_name/1` exhaustive (it currently falls through to `"claude"`). `provider_mounts("gemini", …)` for the agy binary. `@egress_infra["gemini"]` from A1 | 3 | A1 | A test that a `gemini` spawn under podman with a non-identity account is the refusal, and that an unknown provider raises instead of becoming Claude. `mix precommit` clean |
 | **A3** | **Image: keyring entrypoint.** Add the Secret Service provider and `dbus` to the base image, the wrapper script (private bus, unlocked keyring, exec agy), image-hash inputs updated. The wrapper must exit non-zero with a clear message, not hang, if the keyring does not come up | 3 | A1 | Image builds; a container test starts the wrapper and gets a bus; failure modes (no volume, bad perms) exit within a bounded time. Podman-tagged tests are excluded from the default run as the others are |
-| **A4** | **`ProviderAccount` identity kind and `arb agy identity login/status/revoke`.** New credential kind `identity_volume` (name only, never a secret), `seeded_at`, volume lifecycle, the interactive login command from §2.1, `status` that reports size and `seeded_at` and never contents, `revoke` that deletes the volume. Docs in `docs/worker-security.md` | 3 | A1, A3 | Round trip against the test account: login, status, a worker run, revoke. CLI and API tests. No credential in any log or response |
+| **A4** | **`ProviderAccount` identity kind and `ward agy identity login/status/revoke`.** New credential kind `identity_volume` (name only, never a secret), `seeded_at`, volume lifecycle, the interactive login command from §2.1, `status` that reports size and `seeded_at` and never contents, `revoke` that deletes the volume. Docs in `docs/worker-security.md` | 3 | A1, A3 | Round trip against the test account: login, status, a worker run, revoke. CLI and API tests. No credential in any log or response |
 | **A5** | **Spawn path: mount the identity volume, own the lease.** `ContainerSpawn` for gemini: mount the volume at the keyring path (`:Z`), seed the per-run HOME via `Gemini.ConfigDir` for a container spawn (skip the passthrough symlinks), set no credential env. Enforce `max_concurrent: 1` on identity accounts at creation. Teardown removes the container before the slot is freed | 4 | A2, A3, A4 | The kill-the-worker test in §5. A second dispatch on the same identity waits. Live run: agy ticket end to end in a container (auth, an MCP call, a denied out-of-worktree write under `:strict`, egress through the proxy), real output attached |
 | **A6** | **Preflight and doctor for identity accounts.** `Gemini.auth_probe/1` for an identity account checks the volume and `seeded_at` and runs no host-bus check; a doctor check lists podman readiness plus the identity volumes. Tests mask `/run/user` | 2 | A4 | Unit tests for each branch; the no-keyring test passes with `/run/user` masked |
 | **A7** | **agy review and fix passes on the container backend.** Extend `pass_policy/3` so agy passes use the container when the account is an identity (they hold a slot, so they serialise with the implementer on `max_concurrent: 1`: decide and document whether a review may wait) | 3 | A5 | Review and fix-pass tests; a documented decision on slot contention |

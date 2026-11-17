@@ -5,7 +5,7 @@ and its one dispatch-eligibility predicate ([ticket lifecycle](ticket-lifecycle.
 §1–2; bd-asxw4e, bd-79w1fs), `ticket_transitions` (bd-5gkqdr, bd-d8fi92) ·
 **Reconciles with:** [paced quota routing signals](paced-quota-routing-signals.md)
 (bd-9ck2a7, epic bd-gfob09; R5, R7 bd-6bxv7h, R10 bd-3jshn8) · **Status:**
-proposed 2026-10-01. ES1–ES4 are implemented (the §4 order key, the lift cap and the §6.6 settings except `scheduling_epic_wip_limit`, which ships with ES10; and ES4's read surfaces: `effective_priority`/`priority_via`/`priority_lift` on `ticket_show` and `GET /api/issues/:id`, and the §4 order on `GET /api/issues/ready` and `/lifecycle`, so `arb ready`, `arb prime` and `ticket_ready` too); the rest is not. The ticket plan is in
+proposed 2026-10-01. ES1–ES4 are implemented (the §4 order key, the lift cap and the §6.6 settings except `scheduling_epic_wip_limit`, which ships with ES10; and ES4's read surfaces: `effective_priority`/`priority_via`/`priority_lift` on `ticket_show` and `GET /api/issues/:id`, and the §4 order on `GET /api/issues/ready` and `/lifecycle`, so `ward ready`, `ward prime` and `ticket_ready` too); the rest is not. The ticket plan is in
 [§9](#9-phased-ticket-breakdown). The measurements are reproducible with
 [`epic-aware-scheduling/measure_epic_waits.py`](epic-aware-scheduling/measure_epic_waits.py)
 ([Appendix A](#appendix-a-method)).
@@ -88,7 +88,7 @@ chore) also have `parent_of` children.
 ## 2. Evidence
 
 All numbers come from a read-only snapshot of the live database
-(`~/.wardmast/arbiter.sqlite3`, taken 2026-10-01T23:07:33Z), from the `bd`
+(`~/.wardmast/wardmast.sqlite3`, taken 2026-10-01T23:07:33Z), from the `bd`
 workspace unless a line says otherwise. The script prints every table. The
 method and its caveats are in [Appendix A](#appendix-a-method).
 
@@ -495,9 +495,9 @@ historical children it would have lifted. So:
 - **A new nullable `floor_priority` on `Issue`**, constrained to 1..3 and
   valid only on `issue_type: :epic`. Every existing row backfills to nil.
   `nil` means no floor and no lift, so the order is exactly today's.
-- **Set only by a dedicated action** (`:set_floor`), through `arb epic floor
+- **Set only by a dedicated action** (`:set_floor`), through `ward epic floor
   <id> P1|none`, an MCP tool, the REST API and a control on the epic's page.
-  An ordinary priority change on an epic (a board drag, `arb update <id>
+  An ordinary priority change on an epic (a board drag, `ward update <id>
   --priority N`) never sets a floor. The operator and the coordinator may set
   it. A worker token may not, consistent with workers not changing priority.
 - **The epic's own `priority`** keeps its current meaning, which is the
@@ -532,14 +532,14 @@ historical children it would have lifted. So:
 - **The epic page** has a "Floor: none / P1 / P2 / P3" control.
 - **The epic's mini-board** header shows "floor P1 · 3 lifted, 2 in progress".
 
-**In the text and data surfaces** (`arb ticket show --json`, MCP
+**In the text and data surfaces** (`ward ticket show --json`, MCP
 `ticket_show`, REST `GET /api/issues/:id`):
 
 - `priority` stays the own priority, so nothing that reads it changes
   meaning.
 - They add `effective_priority`, `priority_via` (epic id or null) and
   `priority_lift` (`"applied" | "capped" | null`).
-- The listings that show dispatch order (`arb ready`, `arb prime`,
+- The listings that show dispatch order (`ward ready`, `ward prime`,
   `GET /api/issues/ready`, `GET /api/issues/lifecycle`) sort by the §4 key.
 
 **Drag semantics:**
@@ -602,7 +602,7 @@ comparable across every card. A per-workspace knob would make the key
 inconsistent between two cards in the same queue. So the knobs are
 installation settings, on `Wardmast.Settings.Installation` and in the
 `Settings.Registry` schema (`apps/wardmast/lib/wardmast/settings/registry.ex:21-60`).
-That makes them visible through MCP `installation_config_*`, `arb settings`
+That makes them visible through MCP `installation_config_*`, `ward settings`
 and the Global Settings page (#200).
 
 | Key | Default | Meaning | Who sets it |
@@ -656,7 +656,7 @@ When `scheduling_epic_wip_limit = N`:
   bd-c active". It is a card-own hold, so `Scheduler.plan/1` skips it and the
   slot goes to the next eligible card, often parentless work.
 - **Exemptions.** Parentless tickets and own-P0 children are never held. A
-  forced manual dispatch (`arb dispatch --force`) passes, as for every
+  forced manual dispatch (`ward dispatch --force`) passes, as for every
   scheduler hold.
 - **Starting value.** N = 3, given six to seven concurrently started epics
   today (§2.5). Turn it on only if ES7's readout shows tail Ready wait still
@@ -667,9 +667,9 @@ When `scheduling_epic_wip_limit = N`:
 | # | Title | D | Depends on | Phase |
 |---|---|---|---|---|
 | ES1 | `Wardmast.Tasks.EpicFloor`: a pure resolver from issues plus `parent_of` pairs to, per ticket, `{own, effective, via, lifted?}`, the nearest epic, open leaves and in-progress. Breadth-first ancestors, visited set, depth 8. Property tests: effective ≤ own; no floors means effective == own; order-invariant over edge order; a cycle terminates | 2 | — | 1 |
-| ES2 | `floor_priority` on `Issue`: migration (nullable, nil backfill), constraint 1..3, epic-only validation, the `:set_floor` action (operator and coordinator; workers refused), paper trail, `arb epic floor`, the MCP tool, REST, and the epic page control with the "epic priority (display only)" label | 2 | — | 1 |
+| ES2 | `floor_priority` on `Issue`: migration (nullable, nil backfill), constraint 1..3, epic-only validation, the `:set_floor` action (operator and coordinator; workers refused), paper trail, `ward epic floor`, the MCP tool, REST, and the epic page control with the "epic priority (display only)" label | 2 | — | 1 |
 | ES3 | The order key: `Scheduler.order/1` takes the §4 key. `Snapshot` feeds `EpicFloor` from the issues and edges it already loads, plus Ready-since from `ticket_transitions`. `queue_card/1` carries `effective_priority`, `priority_via`, `priority_lift`, `finish_class` and `open_leaves`. The lift cap. The installation settings and registry keys (§6.6) with validation. Backlog and Blocked share the key. Tests: no floors plus finish-first off sorts identically to today on a fixture board; §5's examples as fixtures | 3 | ES1, ES2 | 1 |
-| ES4 | Effective priority beyond the board: `DispatchQueue.priority_of/1` via `EpicFloor`; `effective_priority`, `priority_via` and `priority_lift` on MCP `ticket_show`, `arb ticket show --json` and REST `GET /api/issues/:id`; `arb ready`, `arb prime`, `GET /api/issues/ready` and `/lifecycle` sort by the §4 key | 2 | ES1, ES2 | 1 |
+| ES4 | Effective priority beyond the board: `DispatchQueue.priority_of/1` via `EpicFloor`; `effective_priority`, `priority_via` and `priority_lift` on MCP `ticket_show`, `ward ticket show --json` and REST `GET /api/issues/:id`; `ward ready`, `ward prime`, `GET /api/issues/ready` and `/lifecycle` sort by the §4 key | 2 | ES1, ES2 | 1 |
 | ES5 | Board and task-page UI: the `P1↑` badge with its title and aria-label, the chip's `· floor P1` suffix, the capped wording, the task page's "scheduled as" line and the epic mini-board header. LiveView tests by element id | 2 | ES3 | 1 |
 | ES6 | Manual order under the new key: `rank_pinned` (set by a drag, cleared by demote, close, reopen and promote), pinned-first in a band, and refusing a drop below the floor with the flash | 2 | ES3 | 1 |
 | ES7 | The readout: port `measure_epic_waits.py` into Reports as an "epic Ready wait: head vs tail" panel. Fold it into bd-59x0gb (Reports: attention / wait time) if that is still open; otherwise make it a standalone `mix wardmast.epic_waits`. Re-run 14 days after ES3 is enabled, and include parentless P1/P2 p90 Ready wait as the guard metric | 2 | ES3 | 1 |
@@ -709,7 +709,7 @@ When `scheduling_epic_wip_limit = N`:
 
 ## Appendix A: method
 
-- **Source.** A `sqlite3` `backup()` copy of `~/.wardmast/arbiter.sqlite3`,
+- **Source.** A `sqlite3` `backup()` copy of `~/.wardmast/wardmast.sqlite3`,
   taken 2026-10-01T23:07:33Z and read with `mode=ro`. Reproduce with
   `python3 docs/design/epic-aware-scheduling/measure_epic_waits.py <db>
   --as-of 2026-10-01T23:07:33Z`. Against the live file, later numbers will

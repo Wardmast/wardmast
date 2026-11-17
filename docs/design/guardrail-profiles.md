@@ -37,9 +37,9 @@ here is implemented. The ticket plan is in
    keys and sockets aren't mounted, and hosts aren't reachable. A worker that
    needs more asks through a new MCP tool. It never grants itself anything.
    See [§5](#5-ticket-declared-permissions).
-3. **The kernel enforces egress; Arbiter decides it.** Each worker runs in
+3. **The kernel enforces egress; Wardmast decides it.** Each worker runs in
    bubblewrap's `--unshare-net`, a network namespace with only loopback. The
-   only way out is a per-worker Unix socket to an Arbiter-owned filtering
+   only way out is a per-worker Unix socket to an Wardmast-owned filtering
    CONNECT proxy. The proxy allows or denies by host:port and logs every
    decision.
    - Probed end to end on the Fedora laptop.
@@ -85,7 +85,7 @@ side effects of other config. The live configuration, read on 2026-09-30:
 |---|---|---|
 | emricare stays on Claude, because tonic handles PHI | `agent.type: ["claude"]` on emricare. The claude, antigravity and codex accounts are all attached there with no role positions, so both roles fall back to `agent.type` | Nothing per ticket. If agy were ever added to `agent.type`, or given a role position, it would get tonic tickets too |
 | vstim gets no agy, because workers there can reach the prod DB and broker credentials | `agent.type: ["claude"]` on vstim, with the same all-nil role positions | Nothing stops a *Claude* worker from reaching prod either. vs-adx9r7's worker ran read-only SQL on prod over SSH on 09-29, and the ticket's "investigate prod read-only" constraint was prose |
-| agy works only on low-sensitivity arbiter tickets | Coordinator judgment at dispatch. The default workspace has `agent.type: ["claude", "gemini"]` with `provider_selection: most_quota` | Nothing. `most_quota` routes any default-workspace ticket to agy when agy has the most headroom |
+| agy works only on low-sensitivity wardmast tickets | Coordinator judgment at dispatch. The default workspace has `agent.type: ["claude", "gemini"]` with `provider_selection: most_quota` | Nothing. `most_quota` routes any default-workspace ticket to agy when agy has the most headroom |
 
 Incidents this design has to answer:
 
@@ -123,7 +123,7 @@ Egress and reach were probed on the Fedora 44 laptop (kernel 7.2.7, SELinux
 enforcing, bubblewrap 0.12.0, `user.max_user_namespaces = 126539`). All
 scratch state was under a private `/tmp/bd8apkz6`. No agent CLI was run, and
 the live coordinator was not touched: a stand-in HTTP server played
-Arbiter's endpoint. The scripts and raw output are in
+Wardmast's endpoint. The scripts and raw output are in
 [Appendix A](#appendix-a-probes).
 
 ### 2.1 The jail can be escaped through the systemd user manager
@@ -202,7 +202,7 @@ as well.
 
 **Consequences.**
 - **The vault key.** `ARBITER_CLOAK_KEY` is the ash_cloak vault key. Reads
-  are unrestricted, so any worker can open `~/.wardmast/arbiter.sqlite3` and
+  are unrestricted, so any worker can open `~/.wardmast/wardmast.sqlite3` and
   decrypt every workspace secret and provider credential.
 - **Token forgery.** `SECRET_KEY_BASE` is the default MCP token-signing key
   (`apps/wardmast/lib/wardmast/mcp.ex:203-216`: `secret/0` falls back to the
@@ -340,7 +340,7 @@ ordered `quarantine < probation < trusted < privileged`.
 - **`egress`.** `open | allowlist | none`, a ceiling that composes as most
   restrictive (§4.4).
   - `none` still permits the *infra* hosts the worker protocol needs (the
-    agent CLI's own API, Arbiter and the git remote) and the workspace's
+    agent CLI's own API, Wardmast and the git remote) and the workspace's
     *toolchain* registries.
   - Anything other than `open` needs the egress jail. A host that fails its
     self-test makes the subject ineligible there. The drop reason is
@@ -411,14 +411,14 @@ the same "the workspace may only tighten" rule the quota policy uses
 
 ### 4.1 Requirements
 
-- **Fail closed.** No route out exists except the one Arbiter controls, for
+- **Fail closed.** No route out exists except the one Wardmast controls, for
   every process in the worker, whether native tools, shells, or children
   those spawn.
 - **Host:port granularity**, per worker. Ticket grants are per ticket, so
   policy must be per run.
-- **An audit trail in Arbiter's DB**, feeding the trust record (§6).
+- **An audit trail in Wardmast's DB**, feeding the trust record (§6).
 - **The agent keeps its infrastructure.** The CLI still reaches its model
-  API, Arbiter (`arb` and MCP) and the git remote.
+  API, Wardmast (`ward` and MCP) and the git remote.
 - **No TLS interception.**
 - **Both targets.** It must work on the Fedora laptop and the RHEL 8 dev EC2.
 
@@ -432,12 +432,12 @@ kernel settings were not read.**
 | Option | Enforces for every process? | Cost | Fedora laptop | RHEL 8 dev EC2 | Verdict |
 |---|---|---|---|---|---|
 | **E1. Permission-layer host rules** (extend today's `WebFetch(domain:…)` / `Bash(curl *host*)` / agy `read_url` denies into allowlists) | **No.** `python -c`, git, ssh, package managers and flag reordering all get past it. agy's `command()` is a literal prefix and can't match hosts. Codex has no rules at all | Config only | Same as today | Same | **Keep as the second fence** and for readable denials. It is not the boundary |
-| **E2. bwrap `--unshare-net` + an Arbiter filtering CONNECT proxy on per-worker Unix sockets + in-namespace `socat` bridges** | **Yes, once G1 hides the host sockets (§2.1).** The namespace has only `lo`. The only exit is the proxy, and DNS is resolved host-side (probed, §4.3) | Three D3 tickets for agy (G5, G6, G9); G7 and G8 extend it to Claude and Codex. At run time: one `socat` per bridge, **4.2 MB RSS** each (measured), plus a listener per run in the BEAM. A fresh HTTPS connection took a median **~49 ms direct vs ~70 ms proxied** (6 samples each, noisy; the probe proxy was Python). That is negligible next to model-API turns | **Works end to end**: bubblewrap 0.12.0, socat 1.8.1.1 | **Userland present:**<br>- bubblewrap **0.4.0** (BaseOS) runs the same recipe, including `--unshare-net` and the §2.1 tmpfs mounts; the el8 binary was run on the laptop kernel.<br>- socat **1.7.4.1** (AppStream) has the `tcp-listen`, `unix-connect`, `unix-listen` and `proxy` addresses; installation on the EC2 was not checked.<br><br>**Unverified:** the EC2's userns and netns sysctls (bd-8xy1mf's two-host check is still pending). If the self-test fails there, subjects that need egress are ineligible on that host | **Chosen** |
-| **E3. Vendor-native sandboxes** (Claude Code's own sandbox, Codex `workspace-write`, agy `--sandbox`) | **No, not uniformly:**<br>- **Claude.** Claude Code 2.1.285 ships a bwrap `--unshare-net` sandbox with HTTP and SOCKS bridge sockets and a filtering proxy. Its strings include `sandbox.network.httpProxyPort`, `allowUnixSockets`, `allowManagedDomainsOnly` and "Linux HTTP bridge socket". It sandboxes the commands Claude runs, not the CLI process itself, so the CLI's own traffic (the model API, and any in-process fetches) stays outside. This is from binary strings and wasn't run.<br>- **Codex.** Network is on/off only (`apps/wardmast/lib/wardmast/agents/codex.ex:421-432`).<br>- **agy.** `--sandbox` disables its allowlist gate (bd-25ivqe) | Per-vendor config with three semantics to keep in sync. There's no per-worker identity or audit in Arbiter. Nesting it inside Arbiter's jail is untested; the binary's `enableWeakerNestedSandbox` setting suggests nested use needs a weaker mode | Claude's needs bwrap + socat, which are present | Same packages as E2 | **Rejected** as the boundary. It is the same architecture as E2, but per vendor and partial |
+| **E2. bwrap `--unshare-net` + an Wardmast filtering CONNECT proxy on per-worker Unix sockets + in-namespace `socat` bridges** | **Yes, once G1 hides the host sockets (§2.1).** The namespace has only `lo`. The only exit is the proxy, and DNS is resolved host-side (probed, §4.3) | Three D3 tickets for agy (G5, G6, G9); G7 and G8 extend it to Claude and Codex. At run time: one `socat` per bridge, **4.2 MB RSS** each (measured), plus a listener per run in the BEAM. A fresh HTTPS connection took a median **~49 ms direct vs ~70 ms proxied** (6 samples each, noisy; the probe proxy was Python). That is negligible next to model-API turns | **Works end to end**: bubblewrap 0.12.0, socat 1.8.1.1 | **Userland present:**<br>- bubblewrap **0.4.0** (BaseOS) runs the same recipe, including `--unshare-net` and the §2.1 tmpfs mounts; the el8 binary was run on the laptop kernel.<br>- socat **1.7.4.1** (AppStream) has the `tcp-listen`, `unix-connect`, `unix-listen` and `proxy` addresses; installation on the EC2 was not checked.<br><br>**Unverified:** the EC2's userns and netns sysctls (bd-8xy1mf's two-host check is still pending). If the self-test fails there, subjects that need egress are ineligible on that host | **Chosen** |
+| **E3. Vendor-native sandboxes** (Claude Code's own sandbox, Codex `workspace-write`, agy `--sandbox`) | **No, not uniformly:**<br>- **Claude.** Claude Code 2.1.285 ships a bwrap `--unshare-net` sandbox with HTTP and SOCKS bridge sockets and a filtering proxy. Its strings include `sandbox.network.httpProxyPort`, `allowUnixSockets`, `allowManagedDomainsOnly` and "Linux HTTP bridge socket". It sandboxes the commands Claude runs, not the CLI process itself, so the CLI's own traffic (the model API, and any in-process fetches) stays outside. This is from binary strings and wasn't run.<br>- **Codex.** Network is on/off only (`apps/wardmast/lib/wardmast/agents/codex.ex:421-432`).<br>- **agy.** `--sandbox` disables its allowlist gate (bd-25ivqe) | Per-vendor config with three semantics to keep in sync. There's no per-worker identity or audit in Wardmast. Nesting it inside Wardmast's jail is untested; the binary's `enableWeakerNestedSandbox` setting suggests nested use needs a weaker mode | Claude's needs bwrap + socat, which are present | Same packages as E2 | **Rejected** as the boundary. It is the same architecture as E2, but per vendor and partial |
 | **E4. Host firewall per worker cgroup or UID** (nftables `socket cgroupv2` / `meta skuid` + DNS-derived IP sets) | For TCP and UDP by **IP only**. CDN-fronted hosts (github.com, model APIs) share and rotate IPs, and there is no hostname in the audit trail | Needs root to install rules and a privileged helper for per-worker changes. Each worker also needs its own systemd scope | nftables 1.1.6, cgroup v2 (`cgroup2fs`): feasible **with root** | nftables 1.0.4 (BaseOS). But "RHEL 8 mounts `cgroups-v1` by default" ([Red Hat, RHEL 8 kernel guide](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/8/html/managing_monitoring_and_updating_the_kernel/using-cgroups-v2-to-control-distribution-of-cpu-time-for-applications_managing-monitoring-and-updating-the-kernel)). `socket cgroupv2` needs `systemd.unified_cgroup_hierarchy=1` and a reboot. UID matching needs a second Unix user, which bd-ca7xko rejected because it breaks keyring auth | **Rejected** |
 | **E5. User-mode networking into the namespace** (pasta or slirp4netns) **+ nftables inside the namespace** | Only if the rules are installed before capabilities drop, and it's IP-level again | The tool differs per host. General outbound is the default, so missing rules fail open | pasta (passt 2026-07-28) installed; slirp4netns not installed | slirp4netns 1.2.3 (AppStream, container-tools); **pasta not packaged** | **Rejected** |
 | **E6. Rootless container per worker** (podman, network none + proxy) | Yes (same model as E2) | An image per toolchain, the keyring passed into the container, UID mapping on binds. Heavier start-up | podman installed | container-tools module: slirp4netns 1.2.3 present; podman itself not queried | **Rejected**, as in bd-ca7xko (2''): it duplicates what bwrap does with one binary. **Revisited 2026-10-02** in [podman-worker-containers.md](podman-worker-containers.md) (bd-jk49nc), which proposes it as a second backend for Claude and Codex |
-| **E7. TLS-intercepting proxy** (URL-level rules, e.g. allow PR comments but not gists) | Yes, at URL level | A CA injected into every client (Bun, Go, curl, git, hex). Breaks pinning. Tokens pass in cleartext through Arbiter | squid not installed | squid 4.15 (AppStream) | **Rejected.** Action-level scoping comes from scoped credentials instead (§5.5) |
+| **E7. TLS-intercepting proxy** (URL-level rules, e.g. allow PR comments but not gists) | Yes, at URL level | A CA injected into every client (Bun, Go, curl, git, hex). Breaks pinning. Tokens pass in cleartext through Wardmast | squid not installed | squid 4.15 (AppStream) | **Rejected.** Action-level scoping comes from scoped credentials instead (§5.5) |
 | **E8. DNS-only filtering** | **No.** Direct IPs bypass it, and so does the resolved leak in §2.2 | Low | — | — | **Rejected** |
 
 ### 4.3 Evidence for E2
@@ -469,11 +469,11 @@ run covered each one. The allowlist was `example.com:443` and
 
 ```
  host                                     │ worker jail: bwrap --unshare-net --unshare-pid ...
- Arbiter BEAM                             │   (/run/user/$UID, /run/dbus, /run/systemd/resolve hidden)
+ Wardmast BEAM                             │   (/run/user/$UID, /run/dbus, /run/systemd/resolve hidden)
   ├─ egress proxy  <run>.proxy.sock ◄─────┼── socat 127.0.0.1:3128 ◄── HTTPS_PROXY/HTTP_PROXY/ALL_PROXY:
   │    CONNECT host:port → policy(run)    │                              agent CLI, git (https), gh, hex, curl
   │    allow → dial; deny → 403; log      │   ssh: ProxyCommand 'socat - PROXY:127.0.0.1:%h:%p,proxyport=3128'
-  ├─ worker bridge <run>.arb.sock ◄───────┼── socat 127.0.0.1:4848 ◄── arb, MCP (URLs unchanged)
+  ├─ worker bridge <run>.arb.sock ◄───────┼── socat 127.0.0.1:4848 ◄── ward, MCP (URLs unchanged)
   │    every request = this worker scope  │
   └─ tunnels <run>.t<n>.sock → host:port ◄┼── socat 127.0.0.1:<n>  ◄── fixed destinations: a prod read replica,
                                           │                              a host-loopback test DB, ...
@@ -486,7 +486,7 @@ run covered each one. The allowlist was `example.com:443` and
 
   | Class | Contents | Allowed at `egress` |
   |---|---|---|
-  | infra | The adapter's own API hosts (new callback `egress_infra/1`, list recorded by the G4 spike), Arbiter (by bridge, never by host) and the ticket's git remote host:port | `none`, `allowlist` |
+  | infra | The adapter's own API hosts (new callback `egress_infra/1`, list recorded by the G4 spike), Wardmast (by bridge, never by host) and the ticket's git remote host:port | `none`, `allowlist` |
   | toolchain | Registries the repo's build needs (`repo.hex.pm`, `builds.hex.pm`, …), from the workspace/repo baseline | `none`, `allowlist` |
   | extras | Other workspace/repo baseline hosts | `allowlist` |
   | ticket grants | `network:` entries and the hosts of any declared permission's binding (§5) | `allowlist` |
@@ -501,7 +501,7 @@ run covered each one. The allowlist was `example.com:443` and
   resolves inside. The resolver sockets are hidden (§2.2).
 - **Identity comes from the socket.** The socket a request arrives on
   identifies the run, and through it the task, subject and grants. The
-  Arbiter bridge authenticates everything arriving on it as that worker's
+  Wardmast bridge authenticates everything arriving on it as that worker's
   MCP scope, so it is never anonymous loopback (G9). That closes §2.5's
   self-grant path for jailed workers: `POST /api/mcp/tokens` through a
   worker bridge can't mint above worker scope.
@@ -512,7 +512,7 @@ run covered each one. The allowlist was `example.com:443` and
   it, and so does each workspace's first days on `allowlist`, to catch
   missing toolchain hosts.
 - **It fails closed.** If the proxy is down, a worker's egress fails. If
-  Arbiter itself restarts, jailed workers already die with it: `bwrap
+  Wardmast itself restarts, jailed workers already die with it: `bwrap
   --die-with-parent` ties the jail to the port that spawned it. So the proxy
   adds no new failure domain for them.
 - **Loopback services.** A test suite that needs a host-loopback Postgres
@@ -596,7 +596,7 @@ the posture shows it.
    for `tonic_device`, makes every emricare tonic ticket carry `phi_data`
    without anyone remembering to add it.
 2. **The filer, by hand:**
-   - the CLI: `arb ticket create --permission prod_read --permission network:api.tradovate.com`;
+   - the CLI: `ward ticket create --permission prod_read --permission network:api.tradovate.com`;
    - REST;
    - MCP `ticket_create`/`ticket_update`, coordinator tier only.
 
@@ -676,7 +676,7 @@ worktree is bound read-only, as agy's reviews already are.
      it, or stops and reports the affected AC as unmet. That is the same
      honest-outcome rule as `EvidenceIntegrity.worker_block/0`.
 3. **The decision.** The grant action is `ticket_permission_grant` (MCP,
-   coordinator tier) or `arb ticket permit`. It is checked against
+   coordinator tier) or `ward ticket permit`. It is checked against
    `grant_by`. A denial is sent to the worker's inbox with its reason.
 4. **Effect:**
    - `network:` grants apply **live**: the proxy re-reads grants on the next
@@ -716,7 +716,7 @@ hard ceiling. It applies only to quota lines and **never** to eligibility.
 | Egress attempt, or permission-layer attempt, at a public upload/paste host | Proxy (new, G5).<br>- **agy, today:** a tool step that fails with "permission check failed" is recognised in-session. That covers explicit denies and `:strict` auto-denials (`permission_denial?/1`, `apps/wardmast/lib/wardmast/worker/claude_session.ex:1157-1160`), and the error step is kept in `worker_run_steps`. Nothing turns it into a per-run event yet (G17). `result.denied_actions` (`:977-983`) only flags a soft-deny that ended the turn.<br>- **Claude:** `permission_denials` is not parsed today (G17) | **critical** |
 | Fabricated or falsified evidence finding | `EvidenceIntegrity` (exists) | **critical** |
 | Reaching for an escape or a token: executed commands such as `systemd-run`, `busctl`, `secret-tool` or `gh auth token` | A scan of *executed* tool inputs in the run transcript (new, G17): shell commands and agy `run_command` calls, not prose. After G1 these calls fail, but trying is the signal | **critical** |
-| Reading credential dirs or the install DB (`~/.ssh`, `~/.aws`, `arbiter.sqlite3`, …) | Same scan | major |
+| Reading credential dirs or the install DB (`~/.ssh`, `~/.aws`, `wardmast.sqlite3`, …) | Same scan | major |
 | Attempted self-grant: a write to `permissions` or `guardrails.*`, or a token mint through the worker bridge | API audit on the bridge (new, G9/G17) | **critical** |
 | Egress denial for a host the run never asked about in a `permission_request` | Proxy plus `permission_events` | major |
 | Permission-layer denial of a safe-default category (force push, `rm -rf`, `gh gist create`, …) | agy: recognised in-session today but not aggregated. Claude: not parsed. Both are covered by G17 | major |
@@ -775,13 +775,13 @@ tightening is always safe. The coordinator may:
 It may not promote, and it may not raise a binding's `grant_by` authority or
 a workspace cap.
 
-"Operator-only" needs an authority Arbiter doesn't have yet. MCP has worker,
+"Operator-only" needs an authority Wardmast doesn't have yet. MCP has worker,
 coordinator and refine tiers (`apps/wardmast/lib/wardmast/mcp/scope.ex:81`), and the coordinator can
 already rewrite `agent.security` through `workspace_config_set`. This design
 proposes:
 
 - no MCP tool, at any tier, can promote, raise authority or loosen a cap;
-- `arb trust promote <subject> --to <tier> --reason …` requires **operator
+- `ward trust promote <subject> --to <tier> --reason …` requires **operator
   proof** and records `actor: operator`;
 - the coordinator's standing orders forbid it.
 
@@ -813,9 +813,9 @@ Yes, the Loop can compute it, reusing the existing substrate:
     version;
   - applies automatic suspensions and demotions;
   - emits a new `PendingWrite` kind, `trust_promotion`. Its evidence is the
-    run ids. It is marked **operator-only**: `arb loop apply` and MCP
-    `loop_pending_apply` refuse it, and `arb trust promote` applies it.
-- **Visibility.** `arb trust show [subject]` and a dashboard view show each
+    run ids. It is marked **operator-only**: `ward loop apply` and MCP
+    `loop_pending_apply` refuse it, and `ward trust promote` applies it.
+- **Visibility.** `ward trust show [subject]` and a dashboard view show each
   subject's tier, record, recent events and pending proposal.
 
 Promotion isn't a canary. You can't "canary" prod access. Trust grows only
@@ -888,7 +888,7 @@ proj    = Guardrails.projection(ticket.permissions, role, profile, bindings)   #
 
 ### 7.3 Doctor and posture
 
-`arb server doctor` checks are `ok`/`fail`, with non-fatal fails used for
+`ward server doctor` checks are `ok`/`fail`, with non-fatal fails used for
 advisories (`apps/wardmast_cli/lib/wardmast_cli/cmd/doctor/checks.ex:10-22`). The proposed new checks are below.
 These are check *definitions*, not captured output:
 
@@ -908,7 +908,7 @@ These are check *definitions*, not captured output:
 
 MCP is thinner than REST today; this brings it level.
 
-A worker's `arb prime` shows its own granted permissions. The task page
+A worker's `ward prime` shows its own granted permissions. The task page
 shows `permissions` with their provenance, plus each run's
 `guardrail_decision`.
 
@@ -953,21 +953,21 @@ before it. Each ticket's type is one of:
 | **Phase 1: egress** | | | | |
 | G4 | Spike: run claude, agy and codex behind `--unshare-net` plus the proxy in learn mode, on the laptop and on the RHEL 8 EC2. Record the infra host set per CLI, whether proxy env is honoured (Bun, agy, Rust), keyring and auth behaviour, and each workspace's loopback test dependencies. Needs operator-approved quota | 2 | G1 | net (spike) |
 | G5 | `Wardmast.Worker.Egress`: host-side filtering CONNECT proxy on per-run Unix sockets. Host:port policy with live grants, the public-upload hard deny, an `egress_events` table and migration, learn and enforce modes | 3 | — | net |
-| G6 | agy jail network mode: `--unshare-net`, in-namespace socat bridges (proxy, Arbiter, fixed-destination tunnels), proxy env, git-over-SSH `ProxyCommand` in the jail's `GIT_SSH_COMMAND` | 3 | G1, G4, G5 | jail + net |
-| G7 | Claude under the jail, for the first time, with network mode. Covers the `CLAUDE_CONFIG_DIR` bind, token env, and the MCP and `arb` bridges | 3 | G6 | jail + net |
+| G6 | agy jail network mode: `--unshare-net`, in-namespace socat bridges (proxy, Wardmast, fixed-destination tunnels), proxy env, git-over-SSH `ProxyCommand` in the jail's `GIT_SSH_COMMAND` | 3 | G1, G4, G5 | jail + net |
+| G7 | Claude under the jail, for the first time, with network mode. Covers the `CLAUDE_CONFIG_DIR` bind, token env, and the MCP and `ward` bridges | 3 | G6 | jail + net |
 | G8 | Codex under the jail with network mode. Fold into bd-99emmd or run as its sibling | 3 | G6, bd-99emmd | jail + net |
-| G9 | Arbiter bridge identity: every request arriving through a worker bridge is that worker's scope and never anonymous loopback. Token minting is refused through a bridge. bd-8381tk (filed, P1) removes anonymous coordinator minting for everyone; this ticket covers only the jailed worker's bridge | 3 | G6, bd-8381tk | net |
+| G9 | Wardmast bridge identity: every request arriving through a worker bridge is that worker's scope and never anonymous loopback. Token minting is refused through a bridge. bd-8381tk (filed, P1) removes anonymous coordinator minting for everyone; this ticket covers only the jailed worker's bridge | 3 | G6, bd-8381tk | net |
 | G10 | `SecurityPolicy` `sandbox.egress` (`open`/`allowlist`/`none`) and `sandbox.allow_hosts`, with their layering. Posture fields and the doctor "egress jail" self-test against a local stand-in | 2 | G5, G6 | config + net |
 | **Phase 2: profiles and ticket permissions** | | | | |
 | G11 | **Implemented (bd-anwb0u); see [worker-security](../worker-security.md#guardrail-profiles-tiers-the-floor-and-who-may-loosen-bd-anwb0u-g11).** `Wardmast.Guardrails`: tier bundles (code plus app env), the `guardrail_subjects` table, the workspace `guardrails` block with `ValidateConfig`, pure `effective/3` and `floor/2` wired after `SecurityPolicy.resolve/3`, and `egress_confinement/1`. Loosening edits to `guardrails.*` and `agent.security` become operator-only; the coordinator keeps tighten-only edits. Doctor checks | 3 | G10 | config |
 | G12 | Ticket `permissions` field, the `permission_events` table, `ResolvePermissions` defaults at creation, and surfaces (CLI `--permission`, REST, MCP coordinator-only). `grant_by` authority. Refine suggests but never grants | 3 | G11 | schema |
 | G13 | **Implemented (bd-atll60); see [worker-security](../worker-security.md#routing-eligibility-from-guardrails-bd-atll60-g13).** Routing eligibility:<br>- `check_guardrails` in `ProviderRouting` and `ReviewerRouting`, plus `guardrail_ineligible` as a fallback trigger<br>- the profile `review` knobs<br>- a hard gate on explicit and legacy (`agent.type` failover) dispatch paths<br>- the DispatchQueue guardrail hold, the `{:guardrail, _}` card hold, and the `:no_eligible_model` attention cause<br>- `guardrail_decision` on runs | 3 | G11, G12 | routing |
 | G14 | **Implemented (bd-ld8qde); see [worker-security](../worker-security.md#dispatch-time-withholding-undeclared-means-withheld-bd-ld8qde-g14).** Dispatch-time withholding: project grants into env, jail mounts (a per-worker `ssh-agent` for `prod_ssh`), proxy allowlist and MCP claims. Adds the worker prompt PERMISSIONS block | 3 | G2, G3, G7, G12 | env + jail + net |
-| G15 | Mid-run requests: the `permission_request` MCP tool, the `:permission_requested` attention cause, `ticket_permission_grant` and `arb ticket permit` with authority checks, live network grants, and re-route when the pin becomes ineligible | 3 | G13, G14 | routing + schema |
+| G15 | Mid-run requests: the `permission_request` MCP tool, the `:permission_requested` attention cause, `ticket_permission_grant` and `ward ticket permit` with authority checks, live network grants, and re-route when the pin becomes ineligible | 3 | G13, G14 | routing + schema |
 | G16 | Scoped git and tracker credentials: a per-repo deploy key (or repo-scoped GitHub App token through a credential helper) replaces the operator's agent for pushes, and a repo-scoped tracker token for `tracker_write`. No worker ever gets `gist` or `delete_repo` | 3 | G14 | env + jail |
 | **Phase 3: earned trust** | | | | |
 | G17 | **Implemented (bd-8r392h); see [worker-security](../worker-security.md#guardrail-event-capture-bd-8r392h-g17).** Guardrail event capture: parse Claude `permission_denials`, turn agy's in-session permission-check failures into per-run events, link `egress_events`, add a transcript tool-input scan for hidden-channel attempts, and record fabricated-evidence and self-grant events, all in `guardrail_events` | 2 | G5, G9 | loop + schema |
-| G18 | `Loop.SubjectStats` (shared with bd-9ck2a7) and `Loop.Trust`: records, automatic suspension and demotion with coordinator confirm or dismiss, the operator-only `trust_promotion` PendingWrite kind, `arb trust show` / `arb trust promote` (bd-8381tk's operator proof, with TTY confirmation as the fallback; refused over MCP), and a dashboard view | 3 | G11, G17, bd-8381tk | loop |
+| G18 | `Loop.SubjectStats` (shared with bd-9ck2a7) and `Loop.Trust`: records, automatic suspension and demotion with coordinator confirm or dismiss, the operator-only `trust_promotion` PendingWrite kind, `ward trust show` / `ward trust promote` (bd-8381tk's operator proof, with TTY confirmation as the fallback; refused over MCP), and a dashboard view | 3 | G11, G17, bd-8381tk | loop |
 | G19 | **Implemented (bd-c5kggd); see [worker-security](../worker-security.md#per-tier-spend-caps-bd-c5kggd-g19).** Per-tier spend caps: token and wall-clock caps that park and escalate for `quarantine`/`probation`, and BudgetPatrol paging for higher tiers. Calibrated from the ledger | 2 | G11 | routing |
 | **Phase 4: operator configuration** (actions, not worker tickets) | | | | |
 | G20 | Assign the initial tiers (§3.1 proposal) and declare account data agreements. Write the vstim bindings (`prod_read`, `prod_ssh`, broker `secrets:`) and the emricare tonic `phi_data` defaults. Opt workspaces into `egress: allowlist` after a learn-mode week. Only then attach agy for non-prod vstim tickets | — | G13, G14, G10 | operator |
@@ -1003,7 +1003,7 @@ before it. Each ticket's type is one of:
    operator from the coordinator, for example with a WebAuthn-confirmed
    dashboard action?
 2. **PHI agreements.** Which accounts may hold `phi_data` is a compliance
-   decision for the operator, outside Arbiter. The design only records it.
+   decision for the operator, outside Wardmast. The design only records it.
 3. **Infra host sets per CLI,** and whether agy's and Codex's own HTTP stacks
    honour `HTTPS_PROXY` (G4). The claude binary carries Bun's proxy-env
    handling (`HTTPS_PROXY`, `NO_PROXY` strings in 2.1.285). That is not a
@@ -1027,11 +1027,11 @@ before it. Each ticket's type is one of:
 ## Appendix A: probes
 
 Everything ran as the operator's user on the laptop, under
-`/tmp/bd8apkz6`. No agent CLI was run, and the live Arbiter endpoint was not
+`/tmp/bd8apkz6`. No agent CLI was run, and the live Wardmast endpoint was not
 contacted. `egress_proxy.py` is a ~40-line Python asyncio CONNECT proxy on a
 Unix socket with an in-code allowlist of `{("example.com", 443),
 ("github.com", 22)}`. It logs `ALLOW`/`DENY host:port socket=<path>`. A
-`python3 -m http.server` on a random loopback port stood in for Arbiter,
+`python3 -m http.server` on a random loopback port stood in for Wardmast,
 reached through a host-side `socat UNIX-LISTEN:…arbiter.sock,fork
 TCP:127.0.0.1:<port>`.
 

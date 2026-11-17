@@ -10,7 +10,7 @@ same pattern as vs-3mitja → bd-6tsseu.
 ## Problem
 
 External reviews (`worker_review(pr:)` / the `external_review` MCP tool /
-`arb review --pr`) run against PRs that are **not** arbiter tasks — no task
+`ward review --pr`) run against PRs that are **not** wardmast tasks — no task
 card, no board column. Today the only way to observe one happen is the live
 `GET /events?subscribe=external_review` stream (`docs/monitoring.md`); once
 an event scrolls past, it's gone. There is no page that shows external

@@ -12,11 +12,11 @@ MCP work reuses both seams.
 ## TL;DR
 
 Stand up **`Wardmast.MCP`**, a single in-process Model Context Protocol server
-that exposes Arbiter's domain operations (tasks, convoys, dependencies,
+that exposes Wardmast's domain operations (tasks, convoys, dependencies,
 messages, workers, workspace) as schema-backed MCP tools, and connect agent
 sessions to it. Capability is a **scope token** presented at connection time,
-not a code fork. This replaces the model's current route back into Arbiter —
-constructing `arb …` CLI invocations and parsing `--json` — with validated tool
+not a code fork. This replaces the model's current route back into Wardmast —
+constructing `ward …` CLI invocations and parsing `--json` — with validated tool
 calls and structured returns, and it is agent-agnostic because Claude Code,
 Gemini CLI, and Codex all speak MCP.
 
@@ -31,9 +31,9 @@ codebase actually is today:
 
 2. **Scope tiers: `worker` and `coordinator`.** The issue proposed themed
    names (*Mayor* for the broad tier, now retired in favor of `coordinator`).
-   There is **no Mayor agent** in Arbiter today — that is a future possibility,
+   There is **no Mayor agent** in Wardmast today — that is a future possibility,
    now called "autonomous coordinator agent". The broad-capability client today
-   is the **human operator** driving `arb` + the LiveView dashboard, plus
+   is the **human operator** driving `ward` + the LiveView dashboard, plus
    internal GenServers (merge queue / watchdog, review gate). The spec keeps the
    two-tier capability model the issue asks for, but names the broad tier
    `coordinator` and is honest that its first consumer is the operator's own
@@ -48,12 +48,12 @@ the Gemini and Codex config adapters.
 
 The issue's framing is GT-era. Two corrections matter for the design:
 
-- **The current structured route is the `arb` CLI, not `bd2`.** A worker's only
-  structured path back into Arbiter today is shelling out to the **`arb`
+- **The current structured route is the `ward` CLI, not `bd2`.** A worker's only
+  structured path back into Wardmast today is shelling out to the **`ward`
   escript**, which talks to the Phoenix REST API at `http://127.0.0.1:4848`
   (`apps/wardmast_cli/lib/wardmast_cli/client.ex`, base URL + `ARB_HOST`). The
-  work prompt literally instructs the agent to run `arb inbox <task>`,
-  `arb message <task> <text>`, and `arb ticket update <task> --qa-notes …`
+  work prompt literally instructs the agent to run `ward inbox <task>`,
+  `ward message <task> <text>`, and `ward ticket update <task> --qa-notes …`
   (`apps/wardmast/lib/wardmast/worker/dispatch.ex`, `base_work_prompt/1`). The model
   constructs those argv strings and parses `--json`; the tool surface is
   discoverable only via `--help`. (`bd2` in this repo is just a test-seam prefix
@@ -61,7 +61,7 @@ The issue's framing is GT-era. Two corrections matter for the design:
 
 - **There is no autonomous coordinator agent session (the themed name *Mayor*,
   now retired).** No agent process mutates state "all session long". Coordination
-  is operator-driven (`arb` + dashboard) plus internal GenServers. So the
+  is operator-driven (`ward` + dashboard) plus internal GenServers. So the
   broad-scope MCP client is, at first, the operator's own tooling — not an
   autonomous agent.
 
@@ -129,9 +129,9 @@ already came back on its POST, so it blocks to its 30s ceiling and reports
 (Claude Code `"type": "sse"`, Antigravity / `agy` in its SSE mode) must be
 pointed at the streamable-HTTP entry instead; every such client supports one.
 
-Every MCP config Arbiter generates already uses **Streamable HTTP**:
+Every MCP config Wardmast generates already uses **Streamable HTTP**:
 `Wardmast.MCP.AgentConfig.Claude` writes `"type": "http"`, `.Gemini` writes
-`httpUrl`, `.Codex` writes `[mcp_servers.wardmast] url`, and the `arb init`
+`httpUrl`, `.Codex` writes `[mcp_servers.wardmast] url`, and the `ward init`
 template (`apps/wardmast_cli/priv/templates/mcp_json.eex`) writes `"type":
 "http"`. Operators should use `"type": "http"` too. The GET stream is
 coordinator-tier, so a worker token gets `401` on it and workspace isolation
@@ -141,7 +141,7 @@ Note that `/.well-known/oauth-protected-resource` (and `/.../mcp`) must stay
 **unrouted**: an unauthenticated `/mcp` is a bare `401`, which makes MCP clients
 probe that path for OAuth discovery. A `404` tells them there is no OAuth and
 they fall back to the configured token; anything else (e.g. the MCP plug's
-`405`) strands them in the OAuth branch. Arbiter uses a scope token, not OAuth.
+`405`) strands them in the OAuth branch. Wardmast uses a scope token, not OAuth.
 
 ### 2.2 Build vs. buy the protocol layer
 
@@ -164,7 +164,7 @@ they are the durable design.
 ## 3. Tool catalog
 
 Tools are named `<resource>_<verb>` and map onto existing Ash actions / domain
-functions (the same ones the REST controllers and `arb` subcommands already
+functions (the same ones the REST controllers and `ward` subcommands already
 call). Each tool declares a JSON Schema for its inputs; returns are structured
 JSON. `R` = readable, `W` = writable.
 
@@ -220,19 +220,19 @@ Notes:
 - **`ticket_update_progress` is the worker's only write.** It is a narrowed
   alias over `Issue.:update` that accepts *only* `notes`, `qa_notes`,
   `deployment_notes` for the worker's **own** bound task — the structured
-  replacement for today's `arb ticket update <id> --qa-notes …` step the work
-  prompt requires before `arb done`. A worker cannot flip status, reprioritize,
+  replacement for today's `ward ticket update <id> --qa-notes …` step the work
+  prompt requires before `ward done`. A worker cannot flip status, reprioritize,
   or touch another task through it.
-- **`arb done` stays a stdout sentinel, not a tool.** Completion detection is a
+- **`ward done` stays a stdout sentinel, not a tool.** Completion detection is a
   regex on the agent's stdout (`Worker.ClaudeSession`, `~r/\barb done\b/` against
-  assistant text only). It is not an Arbiter API call and does not become an MCP
+  assistant text only). It is not an Wardmast API call and does not become an MCP
   tool — the agent still prints the line.
 
 ### 3.1 Explicitly out of scope (and why)
 
 The MCP server is the **agent-facing** surface: the structured domain
 operations an agent or coordinator legitimately performs from inside its loop.
-A large fraction of the `arb` CLI is **not** that — it is the *operator-on-the-
+A large fraction of the `ward` CLI is **not** that — it is the *operator-on-the-
 box* surface — and is deliberately **not** exposed as MCP tools. Omitting them
 is a design decision, not an oversight:
 
@@ -251,7 +251,7 @@ is a design decision, not an oversight:
 - **Auth bootstrap — `mcp token mint` / `mcp token verify`.** A token tool
   cannot live behind the token it issues: minting is the step that *grants* MCP
   access, so it must run from the trusted operator context (the dispatch path mints
-  per-spawn; `arb mcp token` mints for operator tooling), never as a call an
+  per-spawn; `ward mcp token` mints for operator tooling), never as a call an
   already-connected — and therefore already-scoped — client can make. Exposing
   it would let any coordinator token mint a broader one, collapsing the scope
   model.
@@ -260,7 +260,7 @@ is a design decision, not an oversight:
   clobbers all of it for every future dispatch. This is operator-only. If a
   future autonomous coordinator genuinely needs it, it should be gated behind a
   **new strict `operator` tier** (not `coordinator`), reusing the before/after
-  diff that `arb config set` already enforces — not bolted onto the existing
+  diff that `ward config set` already enforces — not bolted onto the existing
   tiers.
 - **Aggregate UX — `prime`.** A convenience command that bundles several reads
   into one human-oriented briefing. Reconstructable from the granular read tools
@@ -271,7 +271,7 @@ is a design decision, not an oversight:
 The throughline: MCP carries **domain** operations, gated by scope. **Host,
 lifecycle, auth-bootstrap, and config-mutation** operations are operator
 concerns — they either cannot safely live behind the server's own token, or
-have a blast radius that does not belong to an agent. They stay on the `arb`
+have a blast radius that does not belong to an agent. They stay on the `ward`
 CLI, reached by an operator with shell access to the box.
 
 ## 4. Scope tokens, not code paths
@@ -388,7 +388,7 @@ The tools are written once; only the spawn-time config file differs. This rides
 the **existing** worker-spawn seam — no new spawn path.
 
 A small behaviour `Wardmast.MCP.AgentConfig` with one callback per agent type
-emits the right config pointing at the same Arbiter MCP URL with the right scope
+emits the right config pointing at the same Wardmast MCP URL with the right scope
 token:
 
 ```elixir
@@ -398,7 +398,7 @@ token:
 
 | Agent | Where it lands | Shape |
 |---|---|---|
-| **Claude Code** (Phase 1) | `.mcp.json` in the worktree (or `--mcp-config <file>`) | `{"mcpServers":{"arbiter":{"type":"http","url":"…/mcp","headers":{"Authorization":"Bearer <token>"}}}}` |
+| **Claude Code** (Phase 1) | `.mcp.json` in the worktree (or `--mcp-config <file>`) | `{"mcpServers":{"wardmast":{"type":"http","url":"…/mcp","headers":{"Authorization":"Bearer <token>"}}}}` |
 | **Gemini CLI** — upstream `gemini` only (Phase 3; the `gemini_cli` provider was dropped in bd-ac53wz — this only applies to the Gemini adapter's fallback when `agy` is not on `PATH`) | `.gemini/settings.json` or `gemini mcp add` | bonus: Gemini's `includeTools`/`excludeTools` allowlist (most-restrictive-wins) is a clean secondary per-worker scoping hook |
 | **`agy`** (Antigravity fork of the Gemini CLI) | **nowhere in the worktree** — `$HOME/.gemini/config/mcp_config.json` or `$HOME/.gemini/config/plugins/<name>/mcp_config.json` only | **unsupported (bd-m8geh4):** agy does *not* read `.gemini/settings.json`, nor any worktree-local `.agents/plugins/**` path (probed live, agy v1.2.5 — see `Wardmast.MCP.AgentConfig.Gemini`'s moduledoc). Since `Wardmast.Agents.Gemini.resolve_executable/0` prefers `agy` over `gemini`, an Antigravity host gets `{:error, :unsupported}` and a loud dispatch-time log instead of a dead config file. Its schema differs too: `serverUrl` / `enabledTools`, not `httpUrl` / `includeTools` (`Gemini.agy_config_map/1`). Per-spawn injection needs a per-worker `$HOME` (agy exposes no config-dir env var) — tracked separately as the config-isolation spike |
 | **Codex** (Phase 3) | `.codex/config.toml` (`[mcp_servers.wardmast]`) | **caveat:** Codex MCP support is newer and has reports of silent connect failures — verify the session with a `/mcp`-equivalent check rather than trusting the spawn |
@@ -427,25 +427,25 @@ cosmetic quirk: Claude Code's `/mcp` dialog shows header-bearer HTTP servers as
 "not authenticated" even when the token works — the auth indicator only tracks
 OAuth state. The connection and tool calls still authenticate.
 
-## 6. Overlap with the `arb` CLI (the guardrail the issue raises)
+## 6. Overlap with the `ward` CLI (the guardrail the issue raises)
 
-If a session can call MCP tools **and** shell out to `arb`, there are two routes
+If a session can call MCP tools **and** shell out to `ward`, there are two routes
 to the same mutation and the model will sometimes pick the worse one. Decision
 for the first cut:
 
-- **MCP supplements `arb` for workers; it does not yet replace it.** A worker
-  still needs Bash for git, tests, and `arb done` (the stdout sentinel). We add
+- **MCP supplements `ward` for workers; it does not yet replace it.** A worker
+  still needs Bash for git, tests, and `ward done` (the stdout sentinel). We add
   MCP tools for the structured ops (`ticket_show`, `inbox_check`,
   `ticket_update_progress`, `message_send`) and **steer the generated `CLAUDE.md`
-  / work prompt toward the tools** for those ops, while leaving `arb` available.
+  / work prompt toward the tools** for those ops, while leaving `ward` available.
   We do not exclude Bash (it's load-bearing for the actual work).
-- **Re-evaluate replacing `arb` for coordinator-scope clients** once an
+- **Re-evaluate replacing `ward` for coordinator-scope clients** once an
   autonomous coordinator agent exists — that session mutates state all session
   long and is the strongest case for tools-only. Until then the operator's
-  `arb`/dashboard is the coordinator and needs no change.
+  `ward`/dashboard is the coordinator and needs no change.
 
 This keeps Phase 1 additive and reversible: if the tools underperform, the
-prompt steering is a one-line revert and `arb` is untouched.
+prompt steering is a one-line revert and `ward` is untouched.
 
 ## 7. What this design reuses vs. adds
 
@@ -455,7 +455,7 @@ Reuses, unchanged:
   call. No new domain code, no new source of truth.
 - **Spawn path.** Token minted in `Dispatch`; config written at the existing
   `ConfigDir`/argv seam; same per-dispatch resolution shape as security policy.
-- **Completion + review protocol.** `arb done` stays a stdout sentinel; review
+- **Completion + review protocol.** `ward done` stays a stdout sentinel; review
   gate `VERDICT:` unchanged. MCP is a side channel for structured reads/writes,
   not a replacement for the lifecycle.
 - **Usage ledger.** No change; `Wardmast.Usage.Event` already provider-neutral.
@@ -490,7 +490,7 @@ Each phase is independently shippable.
   `tracker_sync`), `workspace_list`, `usage_summarize`.
 - Dispatch-recursion guardrail (`can_dispatch` + depth) on every worker-dispatch
   tool (`worker_dispatch` / `worker_resume` / `worker_review`).
-- Wire the operator's coordinator-scope client; evaluate retiring `arb` shell-out
+- Wire the operator's coordinator-scope client; evaluate retiring `ward` shell-out
   for it.
 
 ### Phase 3 — Gemini + Codex adapters

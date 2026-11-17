@@ -343,7 +343,7 @@ Disposition of the §4.1 `Application.get_env/3` sites:
 | `:sessions_runner`, `:sessions_terminal` | Test-only (`Terminal` is "uncertain", §1 row 11; revisit only with a hosted tier). |
 | `:github_limiter_server` | Swaps a registered process name, not a behaviour. |
 
-Not done here, and still open for their own tickets: the hard-coded `case` seeding in `Agents.prepare/2`, `Trackers.prepare/2` and `Mergers.prepare/1` (§7 item 5; an external adapter needing per-process config is not seeded), the persisted-atom `one_of` on `Issue.tracker_type` and `Session.provider` (§7 item 3), `Quota`'s `@provider_codes`, and the `arb workspace create` client-side `--tracker-type`/`--merger-strategy` allow-lists in `wardmast_cli`, which cannot read the server's registry.
+Not done here, and still open for their own tickets: the hard-coded `case` seeding in `Agents.prepare/2`, `Trackers.prepare/2` and `Mergers.prepare/1` (§7 item 5; an external adapter needing per-process config is not seeded), the persisted-atom `one_of` on `Issue.tracker_type` and `Session.provider` (§7 item 3), `Quota`'s `@provider_codes`, and the `ward workspace create` client-side `--tracker-type`/`--merger-strategy` allow-lists in `wardmast_cli`, which cannot read the server's registry.
 
 ---
 

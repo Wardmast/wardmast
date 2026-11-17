@@ -22,7 +22,7 @@ against scratch clones under `/tmp`. The ticket plan is in
 2. **Not before the target host passes the doctor check.** Everything below
    was measured on the Fedora 44 laptop (podman 5.8.7, crun, netavark, pasta,
    SELinux enforcing). This installation has no EC2 access (operator,
-   2026-10-02), so the former "check the EC2" gate is now **`arb server
+   2026-10-02), so the former "check the EC2" gate is now **`ward server
    doctor` on the target host**: its `podman sandbox readiness` check
    (`Wardmast.Worker.PodmanReadiness`, P1) reports each prerequisite with a hint
    per failure. A RHEL 8 host would run podman 4.9.4 with slirp4netns,
@@ -32,8 +32,8 @@ against scratch clones under `/tmp`. The ticket plan is in
    If the check fails on a host, that host stays on bwrap for G7 and G8.
 3. **Per-repo dev images: yes, but keyed by toolchain, not by repo.** One
    shared base image (OS, git, build tools, `procps`, `socat`, the provider
-   CLIs and `arb`), plus a thin toolchain layer per distinct `(Erlang, Elixir,
-   Node)` tuple. Arbiter and vstim today want the same tuple, so they share an
+   CLIs and `ward`), plus a thin toolchain layer per distinct `(Erlang, Elixir,
+   Node)` tuple. Wardmast and vstim today want the same tuple, so they share an
    image; tonic wants a different one. A repo maps to an image through its
    `.arbiter/Containerfile` (toolchain only, built from the default branch,
    never from a worker's branch). Mise-at-start and a fat image are worse
@@ -59,7 +59,7 @@ against scratch clones under `/tmp`. The ticket plan is in
    compile, `mix test`) matched bwrap within run-to-run variation
    ([§6](#6-measurements)).
 6. **What it does not fix:** SELinux makes host-owned sockets unreachable
-   from `container_t`, so the Arbiter and proxy bridges need
+   from `container_t`, so the Wardmast and proxy bridges need
    `--security-opt label=disable`, which drops the SELinux half of the
    isolation (the user namespace, capability drop and mount namespace
    remain). That trade-off is the main open question
@@ -116,9 +116,9 @@ problem was one write-escape in one provider. Three things have changed:
 
 | Option | Shape | For | Against | Verdict |
 |---|---|---|---|---|
-| **A. One image per repo** | `arbiter-dev/arbiter`, `.../vstim`, `.../tonic`, ... | Simple mental model; each repo owns its file | Arbiter and vstim want the same Erlang 28.2 and Elixir 1.19.4, so two identical builds. The CLIs and OS layer are duplicated and drift apart. Three of five repos are not BEAM repos at all (see 2.3) | **Close, but wrong unit** |
+| **A. One image per repo** | `arbiter-dev/arbiter`, `.../vstim`, `.../tonic`, ... | Simple mental model; each repo owns its file | Wardmast and vstim want the same Erlang 28.2 and Elixir 1.19.4, so two identical builds. The CLIs and OS layer are duplicated and drift apart. Three of five repos are not BEAM repos at all (see 2.3) | **Close, but wrong unit** |
 | **B. Shared base + toolchain layer per distinct tuple** | `base` (OS, git, procps, socat, CLIs) → `beam-1.19.4-28.2`, `beam-1.17.3-27.1.2`, `nix`, `kube` | One CLI/OS surface to patch; identical toolchains built once; layers cache | Needs a mapping from repo to tuple (a config line) | **Chosen** |
-| **C. Shared base + mise installs from `.tool-versions` at container start** | One image; the worker pays the install each run | No image per toolchain to track | Only tonic has a `.tool-versions`. Arbiter and vstim take versions from the *global* `~/.config/mise/config.toml` (elixir 1.19.4, erlang 28.2) and Arbiter's CI pins OTP 28.5, so three sources disagree already. Installing Erlang at start is minutes per run unless precompiled (not measured). Needs network at start, which `--network=none` forbids | Rejected |
+| **C. Shared base + mise installs from `.tool-versions` at container start** | One image; the worker pays the install each run | No image per toolchain to track | Only tonic has a `.tool-versions`. Wardmast and vstim take versions from the *global* `~/.config/mise/config.toml` (elixir 1.19.4, erlang 28.2) and Wardmast's CI pins OTP 28.5, so three sources disagree already. Installing Erlang at start is minutes per run unless precompiled (not measured). Needs network at start, which `--network=none` forbids | Rejected |
 | **D. One fat image with every runtime** | Everything, all versions | One build | ~GBs; one CVE rebuilds all; every worker gets every tool (reach the profile design wants to withhold, G14) | Rejected |
 
 Measured sizes (Debian 12 `hexpm/elixir` base, `build-essential`, `git`,
@@ -132,12 +132,12 @@ Split it by who can be trusted with the content:
 
 | Concern | Lives in | Why |
 |---|---|---|
-| Toolchain: base image reference, `apt` packages, runtime versions | **The repo**: `.arbiter/Containerfile` (optional; Arbiter ships a default generated from the repo's pin file) | It versions with the code that needs it and is reviewed in the same PR as a version bump |
-| Everything that decides **reach**: mounts, network policy, which secrets, env, the tier | **Arbiter config** (workspace and profile layers, G11) | Repo content is worker-writable. A worker on a branch can edit the file |
-| Which provider CLIs are present | **Arbiter**: a base-image layer or a read-only versioned CLI dir | `claude` shipped three versions in four days (2.1.285 to 2.1.287); baking it into every per-repo layer forces rebuilds |
+| Toolchain: base image reference, `apt` packages, runtime versions | **The repo**: `.arbiter/Containerfile` (optional; Wardmast ships a default generated from the repo's pin file) | It versions with the code that needs it and is reviewed in the same PR as a version bump |
+| Everything that decides **reach**: mounts, network policy, which secrets, env, the tier | **Wardmast config** (workspace and profile layers, G11) | Repo content is worker-writable. A worker on a branch can edit the file |
+| Which provider CLIs are present | **Wardmast**: a base-image layer or a read-only versioned CLI dir | `claude` shipped three versions in four days (2.1.285 to 2.1.287); baking it into every per-repo layer forces rebuilds |
 
 **Rule:** an image is built only from the **default branch's** copy of
-`.arbiter/Containerfile`, by Arbiter, never from a worker's branch. A worker
+`.arbiter/Containerfile`, by Wardmast, never from a worker's branch. A worker
 that edits the file changes nothing until a human merges it. The build itself
 runs unprivileged and with the network, so it is a supply-chain surface
 (`hexpm/elixir` and the apt mirrors); pin the base by digest, as tonic already
@@ -162,10 +162,10 @@ Read from the repos on the laptop on 2026-10-02.
 CLIs the base image needs: `claude` (a 244 MB dynamically linked bun binary;
 ran on glibc 2.36 without change), `codex`, `agy`, `grok` (no adapter exists:
 only a disabled login recipe in `accounts/login_recipes.ex`), `gh`, `glab`
-and `arb`. `arb` is an **escript**, so it needs an Erlang/OTP at least as new
+and `ward`. `ward` is an **escript**, so it needs an Erlang/OTP at least as new
 as the one that compiled it, which a repo's own Erlang need not be (emricare
 tonic pins OTP 27; the `kube` and `nix` images have none). The base image
-therefore carries an Erlang for arb alone ([§4.3](#43-arb-in-a-worker-container-bd-59m96o)).
+therefore carries an Erlang for ward alone ([§4.3](#43-arb-in-a-worker-container-bd-59m96o)).
 
 ### 2.4 Build, rebuild and versioning, laptop and EC2
 
@@ -201,7 +201,7 @@ read with `git cat-file`, never a worktree) and builds it from an **empty
 context**. Two layers: `localhost/arbiter-dev/base:<hash>` (Debian trixie,
 `git`, `procps`, `socat`, `build-essential`, an empty `/opt/arbiter/cli` on
 `PATH` for a versioned read-only provider-CLI mount, and since bd-59m96o the
-Erlang/OTP arb runs on at `/opt/arbiter/otp`, off `PATH`) and
+Erlang/OTP ward runs on at `/opt/arbiter/otp`, off `PATH`) and
 `localhost/arbiter-dev/<name>:<hash>` (`FROM ${ARBITER_BASE}`). Every external
 `FROM` is rewritten to `ref@sha256:…` through a pin store
 (`~/.wardmast/images/pins.json`); an unpinnable `FROM` refuses the build. The
@@ -211,7 +211,7 @@ names one), so the base's Debian release must be at least as new as that
 image's: bookworm's glibc 2.36 fails `beam.smp` (found by the opt-in
 `image_podman_test.exs`). `Image.Builder` is the single flight per tag; the
 `Refresher` re-resolves the pins weekly and prunes (newest two per name; `rmi`
-is never forced). `arb image list|build|refresh|prune`. Not done here: eager
+is never forced). `ward image list|build|refresh|prune`. Not done here: eager
 rebuild after a refresh (images rebuild on next use), the provider CLIs
 themselves (P7 mounts them), and dispatch calling `Image.ensure/3` (P7).
 
@@ -252,7 +252,7 @@ inside rootless containers in each.
 | `<main>/.git/objects` → same absolute path | **ro, `:O`** | Overlay mount: readable with no SELinux relabel of the main checkout, writes (there are none, git writes to the private store) land in a throwaway upper layer |
 | per-run HOME | rw | A fresh directory; holds `.mix`, `.hex`, caches, the provider config dir |
 | per-run deps cache copy | rw | Seeded from the image-keyed cache ([§3.3](#33-deps-and-build-caches)); lives inside the checkout (`deps/`, `_build/`) |
-| per-run bridge dir | rw | One unix socket per bridge (proxy, Arbiter) from `Egress.JailRun`; `:z`-free thanks to `label=disable` ([§5.3](#53-selinux-and-the-bridge-sockets)) |
+| per-run bridge dir | rw | One unix socket per bridge (proxy, Wardmast) from `Egress.JailRun`; `:z`-free thanks to `label=disable` ([§5.3](#53-selinux-and-the-bridge-sockets)) |
 | deploy key | ro (`--secret`) | Only when the ticket declares a push grant (G16) |
 
 Not mounted, so not visible: `~/.ssh`, `~/.wardmast` (the install DB, cookie,
@@ -260,7 +260,7 @@ Not mounted, so not visible: `~/.ssh`, `~/.wardmast` (the install DB, cookie,
 resolver socket, the main checkout's working files, other worktrees, other
 workspaces' repos, and the host environment. This is what G3 lists as masks.
 
-**What layout B costs Arbiter.** Arbiter creates worktrees with `git worktree
+**What layout B costs Wardmast.** Wardmast creates worktrees with `git worktree
 add` (`worktree.ex:100`, `:283`, `:586`) and cleans with `worktree remove` and
 `prune` (`:611`, `:639`, `:1058`); `Reviews.Checkout` and `Sessions.RepoCheckout`
 add detached worktrees too. A worker branch in layout B is **not** known to the
@@ -405,7 +405,7 @@ All measured with SELinux **enforcing**.
 | `:O` (overlay) | **No relabel**, reads work, writes are discarded. Verified on a fresh, never-labelled bare repo: label unchanged afterwards | **Use for the shared read-only objects** |
 | `--security-opt label=disable` | The container runs unconfined by SELinux; no relabel needed anywhere | Needed for host unix sockets ([§5.3](#53-selinux-and-the-bridge-sockets)) |
 
-Host effect of `:Z`: the host's own unconfined processes (Arbiter, git, the
+Host effect of `:Z`: the host's own unconfined processes (Wardmast, git, the
 sweeper) read and delete `container_file_t` files without trouble, so cleanup
 works. Two workers with different MCS pairs cannot read each other's
 directories, which is a feature.
@@ -417,11 +417,11 @@ Source for current behavior: `agents/*.ex`, `worker/spawn_env.ex`,
 
 | Provider | Today | Needs in a container | Measured here |
 |---|---|---|---|
-| **Claude** | `claude --print …`, env from `SpawnEnv` (empty by default, allowlist). `CLAUDE_CONFIG_DIR` is an Arbiter-owned dir seeded with `settings.json` and `CLAUDE.md`. Auth is `CLAUDE_CODE_OAUTH_TOKEN` from the provider account. **Not jailed** | The binary in the image, a per-run `CLAUDE_CONFIG_DIR`, the token as an inherited env var (`-e NAME`, no value on argv, so `ps` shows nothing), `.mcp.json` in the checkout | **Ran end to end.** A completely empty `CLAUDE_CONFIG_DIR` with only the token worked for `claude -p` |
-| **Codex** | `codex exec …`; Arbiter **never sets `CODEX_HOME`**, so a non-review worker reads the operator's `~/.codex/auth.json` directly. Jailed only for reviews, with the network shared | A per-run `CODEX_HOME` seeded with a copy of the ChatGPT login (`auth.json`) | **Built (P8, [§4.2](#42-codex-under-podman-p8))**, started in a container against the real login ([Appendix F](#appendix-f-p8-codex-live-run-bd-50d5j6)). The risk it handles: a copied ChatGPT refresh token rotates, so a copy that refreshed leaves the real file holding a retired token (the same shape as the Claude CLI rotating a seeded `.credentials.json` regardless of the token env, observed earlier) |
+| **Claude** | `claude --print …`, env from `SpawnEnv` (empty by default, allowlist). `CLAUDE_CONFIG_DIR` is an Wardmast-owned dir seeded with `settings.json` and `CLAUDE.md`. Auth is `CLAUDE_CODE_OAUTH_TOKEN` from the provider account. **Not jailed** | The binary in the image, a per-run `CLAUDE_CONFIG_DIR`, the token as an inherited env var (`-e NAME`, no value on argv, so `ps` shows nothing), `.mcp.json` in the checkout | **Ran end to end.** A completely empty `CLAUDE_CONFIG_DIR` with only the token worked for `claude -p` |
+| **Codex** | `codex exec …`; Wardmast **never sets `CODEX_HOME`**, so a non-review worker reads the operator's `~/.codex/auth.json` directly. Jailed only for reviews, with the network shared | A per-run `CODEX_HOME` seeded with a copy of the ChatGPT login (`auth.json`) | **Built (P8, [§4.2](#42-codex-under-podman-p8))**, started in a container against the real login ([Appendix F](#appendix-f-p8-codex-live-run-bd-50d5j6)). The risk it handles: a copied ChatGPT refresh token rotates, so a copy that refreshed leaves the real file holding a retired token (the same shape as the Claude CLI rotating a seeded `.credentials.json` regardless of the token env, observed earlier) |
 | **agy** | Jailed under bwrap, auth through the freedesktop Secret Service over a filtered D-Bus (`xdg-dbus-proxy`); fails loudly at preflight when no keyring is reachable (file-seeded fallback removed in bd-8btihu) | Either a D-Bus proxy socket mounted in (SELinux blocks `connectto` unless `label=disable`) or a dedicated headless credential mechanism (bd-6dpjw7) | Not run; **guardrail-profiles open question 5 answered (no, bd-6dpjw7).** `xdg-dbus-proxy` is not packaged on RHEL 8. Recommend leaving agy on bwrap |
 | **grok** | **No adapter.** Only a disabled login recipe (`GROK_HOME`, `auth.json`) | A per-run `GROK_HOME` when an adapter exists. Memory records that grok deletes `auth.json` after a rejected refresh | Not applicable |
-| **MCP and `arb` to Arbiter** | URL `http://127.0.0.1:4848/mcp`, `Authorization: Bearer <worker token>` in `.mcp.json`; the same token is `ARB_TOKEN`; `ARB_HOST` defaults to `127.0.0.1:4848` | A bridge to the host's loopback ([§5](#5-network)) | Verified: with host loopback mapped in, `GET /api/version` → **200** and `GET /api/issues/bd-jk49nc` without a token → **401**, so bd-asawcq holds from inside a container |
+| **MCP and `ward` to Wardmast** | URL `http://127.0.0.1:4848/mcp`, `Authorization: Bearer <worker token>` in `.mcp.json`; the same token is `ARB_TOKEN`; `ARB_HOST` defaults to `127.0.0.1:4848` | A bridge to the host's loopback ([§5](#5-network)) | Verified: with host loopback mapped in, `GET /api/version` → **200** and `GET /api/issues/bd-jk49nc` without a token → **401**, so bd-asawcq holds from inside a container |
 | **`git push`** | `SSH_AUTH_SOCK` is dropped by `SpawnEnv`; pushes use key files in `~/.ssh` or `GH_TOKEN`/`GITLAB_TOKEN` from workspace `worker_env`. The agy jail forwards `GIT_SSH_COMMAND` with a shadow ssh config | A key or token the container is *given*. There is no `~/.ssh` | See below |
 
 ### 4.1 Claude under podman (P7)
@@ -451,9 +451,9 @@ against real podman):
 |---|---|
 | The checkout, its `.git` and read-only guards, the main repo's `objects/` | `PrivateClone.mounts/1` |
 | `CLAUDE_CONFIG_DIR`, `HOME`, `TMPDIR` | per run, under the run's temp dir; the config dir holds only the generated `settings.json` and `CLAUDE.md`, never a credential file or another run's history |
-| `claude` and `arb` | the host's binaries, resolved through symlinks, bound read-only at `/opt/arbiter/cli` (on the image's `PATH`). `arb` there is a launcher and the host's escript sits beside it as `arb.escript`; the launcher runs it on the base image's own Erlang for arb ([§4.3](#43-arb-in-a-worker-container-bd-59m96o)), so the repo's Erlang need not match |
+| `claude` and `ward` | the host's binaries, resolved through symlinks, bound read-only at `/opt/arbiter/cli` (on the image's `PATH`). `ward` there is a launcher and the host's escript sits beside it as `arb.escript`; the launcher runs it on the base image's own Erlang for ward ([§4.3](#43-arb-in-a-worker-container-bd-59m96o)), so the repo's Erlang need not match |
 | Token env | the spawn's explicit pairs only, each as `-e NAME` with the value in the `podman` client's environment: nothing on argv. `PATH`, `HOME`, `XDG_*` and the proxy variables are literals |
-| Proxy and Arbiter | the run's two sockets bound read-only, and `Jail`'s own `socat` script inside the container on `127.0.0.1`: `HTTPS_PROXY`, `ARB_HOST` and the `.mcp.json` URL work unchanged; `--network=none`, so those sockets are the only exit |
+| Proxy and Wardmast | the run's two sockets bound read-only, and `Jail`'s own `socat` script inside the container on `127.0.0.1`: `HTTPS_PROXY`, `ARB_HOST` and the `.mcp.json` URL work unchanged; `--network=none`, so those sockets are the only exit |
 
 Claude and Codex ([§4.2](#42-codex-under-podman-p8)) have a wrap point.
 `Sandbox.module/1` still refuses `:podman` (so agy cannot run unsandboxed under
@@ -571,14 +571,14 @@ token T0 where the first one's refresh retires T0 server-side; the second then
 fails its own refresh. A re-opened run picks up T1 through `pull`, a run that is
 mid-turn does not.
 
-### 4.3 `arb` in a worker container (bd-59m96o)
+### 4.3 `ward` in a worker container (bd-59m96o)
 
-`arb` is an escript compiled by the host's Erlang/OTP, and a BEAM file loads
+`ward` is an escript compiled by the host's Erlang/OTP, and a BEAM file loads
 only on the release that compiled it or a newer one. The OTP 28 and 29 builds
 die on emricare tonic's OTP 27 (`beam/beam_load.c(150): Error loading module
 nil_escript: corrupt atom table`, then `undefined function nil_escript:main/1`),
-and an image with no Erlang cannot run arb at all. A worker without arb still
-has the MCP tools, but not `arb message`, `arb inbox` and the rest of the CLI.
+and an image with no Erlang cannot run ward at all. A worker without ward still
+has the MCP tools, but not `ward message`, `ward inbox` and the rest of the CLI.
 
 * **The stamp.** `mix escript.build` writes the release into the escript's
   comment line: `%% arb-otp=29` (`apps/wardmast_cli/mix.exs`).
@@ -588,8 +588,8 @@ has the MCP tools, but not `arb message`, `arb inbox` and the rest of the CLI.
   every `FROM`, multi-arch, Debian trixie like the base) to
   `/opt/arbiter/otp`, off `PATH`, minus sources, headers and docs (173 MB to
   120 MB for OTP 29), and records the release as `LABEL arbiter.arb-otp`
-  (`Image.base_containerfile/1`). The release is the host arb's stamp, else the
-  server's own OTP (`ArbCli.runtime_otp/1`), so a new arb release is a new base
+  (`Image.base_containerfile/1`). The release is the host ward's stamp, else the
+  server's own OTP (`ArbCli.runtime_otp/1`), so a new ward release is a new base
   tag and the images rebuild on next use. A repo's toolchain is untouched: the
   toolchain layer copies `/usr/local` only.
 * **The launcher.** `ContainerSpawn.cli_mounts/2` binds `ArbCli.launcher/1`
@@ -599,11 +599,11 @@ has the MCP tools, but not `arb message`, `arb inbox` and the rest of the CLI.
   at least the stamp's; else on the image's own `escript` when its `erl` is new
   enough; else it exits 69 naming both releases. Remote nodes (the file shelf)
   and pushed images (the CLI layer) take the same two files.
-* **The doctor.** `arb server doctor`'s podman row carries an `arb in worker
-  containers` check (`PodmanReadiness`, probe `:arb`): a warning for no arb on
-  the host, an arb from an older Arbiter with no stamp, or a configured
+* **The doctor.** `ward server doctor`'s podman row carries an `ward in worker
+  containers` check (`PodmanReadiness`, probe `:ward`): a warning for no ward on
+  the host, an ward from an older Wardmast with no stamp, or a configured
   `:worker_container_image` whose `arbiter.arb-otp` label is missing or older
-  than arb's release. The spawn gate and a node's readiness do not run it.
+  than ward's release. The spawn gate and a node's readiness do not run it.
 
 Checked against real images in [Appendix G](#appendix-g-arb-on-an-otp-27-image-bd-59m96o).
 
@@ -613,21 +613,21 @@ Checked against real images in [Appendix G](#appendix-g-arb-on-an-otp-27-image-b
 
 | Design | Mechanism | Result in the probe | Verdict |
 |---|---|---|---|
-| **N1. `--network=none` + proxy socket** | The container has only `lo`. A host unix socket (Arbiter's filtering CONNECT proxy, G5) is mounted in; `socat` inside listens on `127.0.0.1:3128` and forwards to it; `HTTPS_PROXY` points there | Direct `curl` to the model API: **fails** (000). Via the bridge: allowed host **404** (reached the API), denied host **000** and the proxy logged `ALLOW api.anthropic.com` / `DENY catbox.moe`. `/proc/net/dev` shows only `lo` | **Chosen.** Identical to G5/G6; independent of pasta and slirp4netns, so it works on RHEL 8 |
-| **N2. pasta or slirp4netns + an egress allowlist** | User-mode networking with outbound open, rules added inside | `--network=pasta`: `api.anthropic.com` reachable (404), host loopback and gateway **not** reachable by default. `--network=pasta:--map-host-loopback,<ip>` makes Arbiter reachable, **but maps every host loopback service**: Arbiter (4848) and **epmd (4369)** were both reachable | **Rejected.** Fail-open by default, IP-level rules, mapping exposes all loopback services, `pasta` is not packaged on RHEL 8, `slirp4netns` is not installed on the laptop |
+| **N1. `--network=none` + proxy socket** | The container has only `lo`. A host unix socket (Wardmast's filtering CONNECT proxy, G5) is mounted in; `socat` inside listens on `127.0.0.1:3128` and forwards to it; `HTTPS_PROXY` points there | Direct `curl` to the model API: **fails** (000). Via the bridge: allowed host **404** (reached the API), denied host **000** and the proxy logged `ALLOW api.anthropic.com` / `DENY catbox.moe`. `/proc/net/dev` shows only `lo` | **Chosen.** Identical to G5/G6; independent of pasta and slirp4netns, so it works on RHEL 8 |
+| **N2. pasta or slirp4netns + an egress allowlist** | User-mode networking with outbound open, rules added inside | `--network=pasta`: `api.anthropic.com` reachable (404), host loopback and gateway **not** reachable by default. `--network=pasta:--map-host-loopback,<ip>` makes Wardmast reachable, **but maps every host loopback service**: Wardmast (4848) and **epmd (4369)** were both reachable | **Rejected.** Fail-open by default, IP-level rules, mapping exposes all loopback services, `pasta` is not packaged on RHEL 8, `slirp4netns` is not installed on the laptop |
 
 N1 is the same security model as guardrail-profiles §4.2 E2 with a
 different kernel primitive: both give the process a namespace with `lo` only,
-and the only exit is a socket Arbiter owns. `Egress.JailRun` already produces
-the proxy socket and the `arb` bridge socket for bwrap; for podman the same
+and the only exit is a socket Wardmast owns. `Egress.JailRun` already produces
+the proxy socket and the `ward` bridge socket for bwrap; for podman the same
 sockets are mounted into the container, and the `socat` wrapper runs in the
 container instead of under bwrap. G5, G9, G10 and G17 do not change.
 
-### 5.2 Reaching Arbiter
+### 5.2 Reaching Wardmast
 
 With N1, `127.0.0.1:4848` inside the container is the bridge listener; the
 socat in the container forwards it to a per-run unix socket that
-`Egress.JailRun` already creates (`arb` bridge), and Arbiter terminates it as
+`Egress.JailRun` already creates (`ward` bridge), and Wardmast terminates it as
 that worker's identity. Anonymous loopback is not available (bd-asawcq),
 so the worker presents its own bearer token from `.mcp.json` and
 `ARB_TOKEN`. `host.containers.internal` is not used.
@@ -677,7 +677,7 @@ and other workers throughout, so differences under about 10 percent are noise.
 | **Cold: first `keep-id` run of a never-run image** | n/a | **5.9 s** (the 777 MB image), **3.5 s** (a fresh derived image). Podman chowns the image layers for the UID mapping once per image id. The same image run without `keep-id`: 0.20 s |
 | Image build, apt layer + users | n/a | 66 s first, 49 s with the base cached; base pull 5.3 s |
 
-### 6.2 Toolchain stages (Arbiter, `MIX_ENV=test`, `test/wardmast/tasks`, 1,013 tests)
+### 6.2 Toolchain stages (Wardmast, `MIX_ENV=test`, `test/wardmast/tasks`, 1,013 tests)
 
 The bwrap column is the **real `Wardmast.Worker.Jail.wrap/2` argv** (fresh
 clone, fresh per-worker HOME, per-worker `HEX_HOME`/`MIX_HOME`). The podman
@@ -747,7 +747,7 @@ relies on.) So the backend must name every container (`--name arb-<run>`), run w
 `--init` and `--rm`, and the watchdog and `StopWorker` must use `podman kill`
 or `podman rm -f` by name.
 
-## 7. Fit with Arbiter
+## 7. Fit with Wardmast
 
 ### 7.1 Can it slot into `Wardmast.Worker.Jail`?
 
@@ -787,7 +787,7 @@ needed for it, but they do stay for agy.
 | **bd-7r0qrj** (G2) | Worker env allowlist | closed | Unchanged for bwrap and for unjailed providers. For containers the env is **only what is passed with `-e`** |
 | **bd-3q2djr** (G3) | Hide sensitive read paths | backlog | **Shrinks to agy-on-bwrap only.** For containers there is nothing to hide: only the mounts exist. Keep it small and do it for agy; the doctor "cannot read the install DB" self-test is reused as a container probe |
 | **bd-cfktou** (G6) | agy network mode | verifying | **Remains** (agy on bwrap). Its `Egress.JailRun` sockets and in-namespace `socat` bridge are reused as-is by the container backend, so G6 is on the critical path of this plan, not obsoleted by it |
-| **bd-d2o3xb** (G7) | Claude under the jail | backlog | **Re-scoped: Claude under the podman backend** (P7). Same goals (config-dir bind, token env, MCP and `arb` bridges), different primitive. Do not build bwrap masks for Claude |
+| **bd-d2o3xb** (G7) | Claude under the jail | backlog | **Re-scoped: Claude under the podman backend** (P7). Same goals (config-dir bind, token env, MCP and `ward` bridges), different primitive. Do not build bwrap masks for Claude |
 | **bd-50d5j6** (G8) | Codex under the jail | verifying | **Done as Codex under podman** (P8, [§4.2](#42-codex-under-podman-p8)), folded with bd-99emmd as the original ticket suggested. Adds a per-run `CODEX_HOME` and the refresh-token write-back |
 | **bd-ld8qde** (G14) | Dispatch-time withholding | backlog | **Shrinks, and inverts.** Withholding is the default; G14 becomes "add exactly the declared grants" (extra `-e`, `--secret`, a proxy allowlist entry). The "hide what is undeclared" half disappears for containers. D4 → D3 |
 | **bd-9cygoo** (G16) | Scoped git and tracker credentials | backlog | **Remains and becomes enforceable.** Without `~/.ssh` or an agent in the container, the deploy key is the only push credential. Deliver it with `--secret`, not an agent socket (SELinux, and an agent holds every key). The operator still has to create the per-repo deploy keys or the GitHub App |
@@ -805,13 +805,13 @@ difficulty.
 | **P1** | **Spike/doctor: rootless podman readiness.** Re-scoped 2026-10-02 (no EC2 access): laptop go/no-go ([Appendix C](#appendix-c-p1-laptop-results-and-gono-go-bd-46xndf)) plus the portable `podman sandbox readiness` doctor check (`/etc/subuid`, `user.max_user_namespaces`, SELinux mode, cgroup version, podman version and storage driver, `label=disable` socket-bridge self-test). **Done (bd-46xndf).** The gate for any other host is that check | 2 | none |
 | P2 | `agent.security.sandbox.backend: bwrap \| podman` key in `SecurityPolicy` (layering by most-restrictive), plus the `Wardmast.Worker.Sandbox` behaviour with `Jail` as the first implementation. No behavior change by default | 3 | none |
 | P3 | **Done (bd-bu4ye2).** `Wardmast.Worker.Container`: a pure argv builder like `Jail.argv/2` (`--name`, `--init`, `--rm`, `--userns=keep-id`, `--read-only`, `--cap-drop=all`, `no-new-privileges`, tmpfs, explicit `-e NAME` allowlist, mounts, label policy), a doctor probe and teardown by name | 3 | P1, P2 |
-| P4 | **Done (bd-9r5jdt, `Wardmast.Worker.Image`).** Image lifecycle: `.arbiter/Containerfile` or a generated default, content-hash tags, single-flight lazy build from the **default branch**, weekly base refresh, prune, `arb image list/build`. Provider CLIs in the base image or a versioned read-only CLI dir | 3 | P3 |
+| P4 | **Done (bd-9r5jdt, `Wardmast.Worker.Image`).** Image lifecycle: `.arbiter/Containerfile` or a generated default, content-hash tags, single-flight lazy build from the **default branch**, weekly base refresh, prune, `ward image list/build`. Provider CLIs in the base image or a versioned read-only CLI dir | 3 | P3 |
 | P5 | **Done (bd-4wy1w1, `Wardmast.Worker.PrivateClone`).** Git layout B: private `--shared` clone with read-only `:O` alternates, sync-back into the main repo, a pinned base ref against gc, cleanup and sweeper changes, ReviewGate and MergeQueue reads. **The riskiest item.** Re-estimated D3 after the reading day (§3.2) | 4 | P3 |
 | P6 | **Done (bd-1wm14e, `Wardmast.Worker.DepsCache`).** Image-keyed deps cache: seed job inside the image, per-worker `cp --reflink` copy, key `(lockfile hash, image tag)`. Extend bd-5tncmq | 3 | P4 |
-| P7 | **Done (bd-d2o3xb, `Wardmast.Worker.ContainerSpawn`).** Claude under the container backend (replaces G7 bd-d2o3xb): config dir, token env, `.mcp.json`, `arb`, proxy and Arbiter bridges via G5's sockets, wrap point in `ClaudeSession`. See [§4.1](#41-claude-under-podman-p7) | 3 | P3, P5, G5 |
+| P7 | **Done (bd-d2o3xb, `Wardmast.Worker.ContainerSpawn`).** Claude under the container backend (replaces G7 bd-d2o3xb): config dir, token env, `.mcp.json`, `ward`, proxy and Wardmast bridges via G5's sockets, wrap point in `ClaudeSession`. See [§4.1](#41-claude-under-podman-p7) | 3 | P3, P5, G5 |
 | P8 | **Done (bd-50d5j6, `ContainerSpawn` `provider: "codex"`, `Codex.AuthSync`).** Codex under the container backend (replaces G8 bd-50d5j6, with bd-99emmd): per-run `CODEX_HOME`, refresh-token rotation handling. See [§4.2](#42-codex-under-podman-p8) and [Appendix F](#appendix-f-p8-codex-live-run-bd-50d5j6) | 3 | P7 |
 | P9 | Deploy-key delivery as `--secret` (the body of G16 bd-9cygoo and the per-run-agent part of G14) | 3 | P7 |
-| P10 | **Done (bd-dmcbos, `Wardmast.Worker.TestServices`).** Test services: a per-worker pod with a Postgres sidecar on the pod's `lo` for vstim and tonic (Postgres 15/16, plus an S3 store for tonic). Optional; arbiter needs none. See [Appendix E](#appendix-e-p10-test-services-probes-bd-dmcbos) | 3 | P7 |
+| P10 | **Done (bd-dmcbos, `Wardmast.Worker.TestServices`).** Test services: a per-worker pod with a Postgres sidecar on the pod's `lo` for vstim and tonic (Postgres 15/16, plus an S3 store for tonic). Optional; wardmast needs none. See [Appendix E](#appendix-e-p10-test-services-probes-bd-dmcbos) | 3 | P7 |
 | P11 | Re-plan the six tickets in [§7.2](#72-what-happens-to-each-guardrail-ticket): re-scope G7 and G8, shrink G3 and G14, annotate G6 and G16 | 1 | this decision |
 
 **What to do first.** P1 and P2 are independent and cheap, and P1 decides
@@ -880,7 +880,7 @@ Everything ran 2026-10-02 on the Fedora laptop under `/tmp/jk49`
 | Same with `label=disable` | works |
 | `--network=none` + `socat` bridge to a stand-in CONNECT proxy | allowed host 404 (reached), denied host 000, direct 000, only `lo` |
 | `--network=pasta` | open egress; host loopback/gateway not reachable |
-| `--network=pasta:--map-host-loopback,<ip>` | Arbiter (4848) and **epmd (4369)** both reachable; unauthenticated `/api/issues/…` → 401 |
+| `--network=pasta:--map-host-loopback,<ip>` | Wardmast (4848) and **epmd (4369)** both reachable; unauthenticated `/api/issues/…` → 401 |
 | `slirp4netns` | not installed on the laptop |
 | Image without `procps` | `TeardownTest` fails (`System.cmd("pgrep")` → `:enoent`) |
 | First `keep-id` run of a new image id | 3.5 to 5.9 s once |
@@ -892,7 +892,7 @@ Per-image sizes and build times are in §2.1 and §6.1.
 
 ## Appendix B: expected RHEL 8 differences
 
-What `arb server doctor` (`podman sandbox readiness`) should be expected to say
+What `ward server doctor` (`podman sandbox readiness`) should be expected to say
 on a RHEL 8 host with `container-tools:rhel8` (podman 4.9.4), versus the laptop.
 None of this is measured; it is the prediction the check exists to confirm.
 
@@ -913,7 +913,7 @@ None of this is measured; it is the prediction the check exists to confirm.
 Run 2026-10-03 on the Fedora 44 laptop (podman 5.8.7), scratch dir under `/tmp`,
 images `debian:12`. Probes ran by hand and through
 `Wardmast.Worker.PodmanReadiness.diagnose/0` (`MIX_ENV=test mix run --no-start`).
-**Not run:** a full dispatch through the real Arbiter spawn path; there is no
+**Not run:** a full dispatch through the real Wardmast spawn path; there is no
 container backend yet (P3), so "the real spawn path" is the doctor probe plus
 the equivalent `podman run` argv (`--userns=keep-id --init --rm`).
 
@@ -969,7 +969,7 @@ container joins with `--pod`.
 | Probe | Result |
 |---|---|
 | Worker container in the pod, `psql "$DATABASE_URL"`: DDL, inserts, a read | works; `current_database()` is `vstim_test`; the container's only interface is `lo`, its uid is the host's |
-| A TCP listener on the host's `127.0.0.1` (the control connects from the host) | `nc -z` from the worker: **unreachable**. Checked by hand as well: with the host's Arbiter on 4848 and epmd on 4369 both listening, neither was reachable from a pod member |
+| A TCP listener on the host's `127.0.0.1` (the control connects from the host) | `nc -z` from the worker: **unreachable**. Checked by hand as well: with the host's Wardmast on 4848 and epmd on 4369 both listening, neither was reachable from a pod member |
 | The pod's Postgres from the host (`127.0.0.1:5432`) | `econnrefused`: nothing is published |
 | tonic's pod | Postgres 15 and silo (`/minio/health/ready` over `127.0.0.1:9000`) both answer the worker |
 | Bridge socket, pod member, `label=disable` | `psql -h <dir>` to a host unix listener connects; default label: `Permission denied`. §5.3 holds inside a pod |
@@ -994,15 +994,15 @@ Run 2026-10-05 on the Fedora 44 laptop (podman 5.8.7, SELinux enforcing, codex-c
       mix test --include podman --include live_codex test/wardmast/worker/container_spawn_codex_podman_test.exs
 
 It goes through the production path (`ContainerSpawn.prepare/1`, the real
-`Egress.JailRun` proxy and Arbiter bridge, `Codex.default_argv/2` and
+`Egress.JailRun` proxy and Wardmast bridge, `Codex.default_argv/2` and
 `spawn_env/1`, `wrap_port/1`, a real `podman run`) with the operator's real
 `~/.codex/auth.json` as the login to copy. A stand-in MCP server
-(`Wardmast.Test.StubMcpServer`, one `ping` tool) plays Arbiter's `/mcp`.
+(`Wardmast.Test.StubMcpServer`, one `ping` tool) plays Wardmast's `/mcp`.
 
 | Check | Result |
 |---|---|
 | `codex login status` in the container | `Logged in using ChatGPT`, from the per-run copy; `CODEX_HOME` is the run's dir; **no `mountinfo` line names the operator's codex home** |
-| MCP over `-c` and the Arbiter bridge | the stub received `initialize` and `tools/list` with `Authorization: Bearer <the worker token>`: the CLI connected from inside `--network=none` through the bridge socket |
+| MCP over `-c` and the Wardmast bridge | the stub received `initialize` and `tools/list` with `Authorization: Bearer <the worker token>`: the CLI connected from inside `--network=none` through the bridge socket |
 | Egress | the proxy (learn mode) saw `chatgpt.com` and two `*.oaiusercontent.com` hosts and nothing else; the container has no other route |
 | Model turn | **Not completed.** The ChatGPT account on this host was over its usage limit (`You've hit your usage limit … try again at Oct 16th, 2026`), returned by the API through the proxy. So `tools/call` and a successful turn were **not** exercised live; the request that reached the API proves the login and the egress, and the MCP connection was made before the turn |
 | Refresh-token rotation | **Not exercised live**: no refresh was due (`auth.json` was byte-identical after the run). Rotation is covered by `auth_sync_test.exs`, `auth_sync_reaper_test.exs` and `container_spawn_codex_test.exs` against files, not against OpenAI |
@@ -1014,28 +1014,28 @@ A hand probe in the same container flags showed `bwrap --ro-bind / / true` exiti
 the CLI's own `:auto` sandbox was **not** run live. `socat` logs one `waitpid` warning.
 
 
-## Appendix G: arb on an OTP 27 image (bd-59m96o)
+## Appendix G: ward on an OTP 27 image (bd-59m96o)
 
 **The check, on a host with podman.** The opt-in test builds the real base and
 an Elixir 1.17.3 / OTP 27 toolchain image (tonic's `.tool-versions`), mounts an
-escript compiled by the test VM's OTP the way a dispatch mounts arb, and runs
+escript compiled by the test VM's OTP the way a dispatch mounts ward, and runs
 it with `Container.run/2`:
 
     cd apps/wardmast && mix test --include podman test/wardmast/worker/arb_runtime_podman_test.exs
 
 It asserts that the image's `erl` is still OTP 27, that the image's own
-`escript` still fails to load the fixture (`corrupt atom table`), that `arb`
+`escript` still fails to load the fixture (`corrupt atom table`), that `ward`
 runs it on the base's runtime, and that a base-only image with no Erlang runs
-`arb` too. By hand, after a deploy: `arb image build <tonic repo>`, then
+`ward` too. By hand, after a deploy: `ward image build <tonic repo>`, then
 
     podman run --rm --pull=never \
       -v ~/.wardmast/images/cli/arb-launcher-<hash>:/opt/arbiter/cli/arb:ro \
       -v ~/.local/bin/arb:/opt/arbiter/cli/arb.escript:ro \
-      <the tag it printed> arb version
+      <the tag it printed> ward version
 
 where the launcher file is the one the first podman spawn wrote (`ls
-~/.wardmast/images/cli`). Expect the CLI block of `arb version`, not
-`corrupt atom table`. `arb server doctor` lists no `arb in worker containers`
+~/.wardmast/images/cli`). Expect the CLI block of `ward version`, not
+`corrupt atom table`. `ward server doctor` lists no `ward in worker containers`
 warning on its podman sandbox row (`GET /api/server/podman_sandbox` shows the
 check itself, `ok`).
 
@@ -1048,7 +1048,7 @@ the way the generated Containerfiles build it: the amd64 layers of
 fetched from Docker Hub; `/usr/local/lib/erlang` of the first went to
 `/opt/arbiter/otp` and through the prune `RUN` taken verbatim from
 `Image.base_containerfile/1` (173 MB to 120 MB); `/usr/local` of the second
-was the toolchain; the launcher and a `MIX_ENV=prod mix escript.build` arb from
+was the toolchain; the launcher and a `MIX_ENV=prod mix escript.build` ward from
 this branch (line 2: `%% arb-otp=29`) were the cli mounts. Those three were
 bind-mounted at their real paths in a private user and mount namespace of the
 worker container itself, whose OS is the trixie worker base, with only the
@@ -1058,11 +1058,11 @@ image's `PATH` (`env -i`):
 |---|---|---|
 | tonic's (OTP 27 toolchain, new base) | `erl … otp_release` | `27` (27.3.4.18), Elixir 1.17.3 |
 | same | `escript /opt/arbiter/cli/arb.escript version` | `Error loading module nil_escript: corrupt atom table`, `undefined function nil_escript:main/1`: the bug, still there for the image's own Erlang |
-| same | `arb version` | the CLI block, exit 0 |
-| no Erlang (`/usr/local` empty) | `arb version` | the CLI block, exit 0 |
-| OTP 27, no runtime (old base or custom image) | `arb version` | exit 69: `arb: cannot start: this arb was built on Erlang/OTP 29 and an older release cannot load it; the image's own Erlang is OTP 27 and it has no runtime for arb at /opt/arbiter/otp: it is not built on Arbiter's current worker base image (FROM ${ARBITER_BASE}).` |
-| no runtime, no Erlang | `arb version` | exit 69, `the image's own Erlang is missing` |
-| no runtime, OTP 29 toolchain | `arb version` | the CLI block, exit 0 (runs on the image's own Erlang) |
+| same | `ward version` | the CLI block, exit 0 |
+| no Erlang (`/usr/local` empty) | `ward version` | the CLI block, exit 0 |
+| OTP 27, no runtime (old base or custom image) | `ward version` | exit 69: `ward: cannot start: this ward was built on Erlang/OTP 29 and an older release cannot load it; the image's own Erlang is OTP 27 and it has no runtime for ward at /opt/arbiter/otp: it is not built on Wardmast's current worker base image (FROM ${ARBITER_BASE}).` |
+| no runtime, no Erlang | `ward version` | exit 69, `the image's own Erlang is missing` |
+| no runtime, OTP 29 toolchain | `ward version` | the CLI block, exit 0 (runs on the image's own Erlang) |
 
 The real OTP 27.1.2 the ticket names (a `builds.hex.pm` build) was checked the
 same way in ExUnit:

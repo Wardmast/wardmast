@@ -84,7 +84,7 @@ authoring admits no model at all.
 
 ## What I measured
 
-Live install, 2026-09-04, via `arb loop pending --json` and `arb workspace
+Live install, 2026-09-04, via `ward loop pending --json` and `ward workspace
 list --json`.
 
 ### The queue
@@ -110,18 +110,18 @@ so a payload gap aborts before anything is written. Re-checked after: both
 still `:proposed`.
 
 ```
-$ arb loop apply 019fed75-0d73-75b2-970a-4c797a5a3251     # skill_patch
-arb: error: this proposal names no target skill: the loop does not yet map a
+$ ward loop apply 019fed75-0d73-75b2-970a-4c797a5a3251     # skill_patch
+ward: error: this proposal names no target skill: the loop does not yet map a
 finding category to a skill (Stage 3 work), so the skill patch must be
 authored by hand — reject this row once you have
       details: {"code":"unmapped"}
 
-$ arb loop apply 01a059a3-afc3-7e15-b2a2-aa754655bb73     # config_set
-arb: error: payload is missing a non-empty "patch" map
+$ ward loop apply 01a059a3-afc3-7e15-b2a2-aa754655bb73     # config_set
+ward: error: payload is missing a non-empty "patch" map
       details: {"code":"unmapped"}
 ```
 
-`arb loop diff` on the same skill_patch row ends with
+`ward loop diff` on the same skill_patch row ends with
 `(no diff — this proposal carries a payload, not a patch)`. The queue is
 honest about the gap at every surface except the listing, which is the one an
 operator reads first. Hence `bd-bldypb`.
@@ -129,7 +129,7 @@ operator reads first. Hence `bd-bldypb`.
 ### The `Loop` determinism guarantee still holds
 
 Re-verified today, and the module list has grown since the ticket was
-written without breaking it. Outbound `Arbiter.*` references from
+written without breaking it. Outbound `Wardmast.*` references from
 `lib/wardmast/loop.ex` + `lib/wardmast/loop/`:
 
 ```
@@ -216,7 +216,7 @@ beside it, are unreachable from the analyser. Zero rows in the queue's entire
 history confirm it.
 
 The one live `:repo_doc_patch` path is the operator-invoked
-`arb loop propose repo-doc-patch --repo … --lesson …`
+`ward loop propose repo-doc-patch --repo … --lesson …`
 (`Loop.propose_repo_doc_patch/1`, `loop.ex`), which supplies both repo and
 prose by hand. It is not payload-less; it is not automatic; it is working as
 designed.
@@ -519,7 +519,7 @@ The reasoning:
   a table lookup, and which additionally gate the shipped-but-unreachable
   canary. Interim suppression would be undone by the very next PR.
 * **The rows are not misleading.** Both apply paths fail with an accurate,
-  specific message that names the gap as a gap, and `arb loop diff` says
+  specific message that names the gap as a gap, and `ward loop diff` says
   `(no diff — this proposal carries a payload, not a patch)`. Nothing here is
   a trap; it is an unlabelled listing.
 
@@ -527,7 +527,7 @@ The reasoning:
 inapplicable items is a queue operators stop reading"* is right about the
 symptom and wrong about the cause: the cost is not that the rows exist, it is
 that an operator cannot tell which rows are actionable without pressing apply
-on each. So label them. `arb loop pending` and `loop_pending_list` should
+on each. So label them. `ward loop pending` and `loop_pending_list` should
 compute whether a row's payload would satisfy its kind's `Apply` preconditions
 and mark it — `needs authoring` beside the state — without running any side
 effect. Cheap, evidence-preserving, and useful permanently rather than as an
@@ -625,7 +625,7 @@ rather than incidental.
    migration.
 
 3. **`bd-bldypb` (#1475) — mark rows that cannot apply as written.**
-   The replacement for (d). `arb loop pending` and `loop_pending_list` compute
+   The replacement for (d). `ward loop pending` and `loop_pending_list` compute
    each row's applicability from its payload against its kind's `Apply`
    preconditions — no side effect, no state change — and surface it in the
    listing. Independent; can land first, and stays useful after 1 and 2.

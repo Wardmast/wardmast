@@ -4,16 +4,16 @@ grok's OIDC `refresh_token` **rotates on every refresh**, and grok **deletes
 `auth.json`** when a refresh is permanently refused. Giving each worker a copy of
 the operator's `auth.json` would therefore race: the first copy to refresh
 invalidates the operator's token and every other copy (the bd-6umoh9 problem),
-and each loser then deletes its own file. Arbiter never copies it.
+and each loser then deletes its own file. Wardmast never copies it.
 
 ## Shape
 
 ```
-worker jail                              Arbiter server
+worker jail                              Wardmast server
 -----------                              --------------
 grok ── GROK_AUTH_PROVIDER_COMMAND ──►   POST /api/grok/token   (worker ARB_TOKEN)
         <GROK_HOME>/arbiter-grok-token         │
-        └─ exec arb grok-token                 ▼
+        └─ exec ward grok-token                 ▼
                                       Wardmast.Grok.CredentialBroker   ← the only
                                                │                        refresher
                                                ▼
@@ -37,7 +37,7 @@ grok ── GROK_AUTH_PROVIDER_COMMAND ──►   POST /api/grok/token   (worke
   writes the file.
 * **Per worker**: a generated wrapper script under the worker's own `GROK_HOME`
   (not `/tmp`: the jail mounts a private `--tmpfs /tmp`) that `exec`s
-  `arb grok-token`. grok runs it for its first token, ~5 minutes before expiry
+  `ward grok-token`. grok runs it for its first token, ~5 minutes before expiry
   and on a 401 (with `GROK_AUTH_EXPIRED=1`). The reply is exactly
   `{"access_token", "expires_in"}`. See `Wardmast.Grok.AuthProvider.spawn_env/2`.
 * **A cold `GROK_HOME` is hydrated first** (bd-8rvkqd). Measured on grok 1.0.25:
@@ -88,14 +88,14 @@ calling the issuer again. While a hold is open the broker polls the canonical fi
 needed (dispatch is gated, so none would come), once the file
 holds a different login (re-run the login from the dashboard, or
 `grok login --device-code` on the host when no grok account exists), or with
-`arb breaker reset --auth-hold grok`.
+`ward breaker reset --auth-hold grok`.
 
 A grok worker that dies "Not signed in" at spawn opens the grok `AuthHold` on
 its **first** death (other providers need two): the credential is one shared
 login, so one death is conclusive. While it is open `routing.grok` stops
 selecting grok (`Wardmast.Agents.GrokRouting.route?/3`), so the ticket
 `AuthDeath` reopens goes to the next eligible provider. Clear it with
-`arb breaker reset --auth-hold grok` after fixing the login.
+`ward breaker reset --auth-hold grok` after fixing the login.
 
 The hold's identity is the module `Wardmast.Agents.adapters()[:grok]`, else
 `Wardmast.Agents.Grok`; the adapter must register under that name.
@@ -112,8 +112,8 @@ grok is registered as an agent type (`grok`) and a provider-account provider, bu
 it is **off by default**: free tier only, about 500K tokens per rolling 24 h
 (cached tokens counted), so a small task costs roughly an eighth of a day.
 
-    arb config set routing.grok.enabled true          # default false
-    arb config set routing.grok.difficulties '[1]'    # default [1]
+    ward config set routing.grok.enabled true          # default false
+    ward config set routing.grok.difficulties '[1]'    # default [1]
 
 Under the `by_difficulty` routing policy an enabled workspace sends only D1
 tickets to grok; every other difficulty keeps the workspace's own agent.
@@ -125,7 +125,7 @@ Override `routing.grok.difficulties` to widen the set, or pin `agent.type:
   device URL and code are shown on the page). That dir's `auth.json` is the
   canonical credential the broker refreshes (see above), so a relay login is
   all that is needed.
-- **Doctor.** `arb server doctor` prints a `grok auth` line from
+- **Doctor.** `ward server doctor` prints a `grok auth` line from
   `GET /api/server/grok_auth`: silent-ok when no workspace uses grok, else the
   file the broker reads and its access-token expiry, with `logged in`;
   `expired` (ok only because the broker's last refresh worked); or `[fail]` for

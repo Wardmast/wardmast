@@ -51,7 +51,7 @@ account's: see `docs/github-request-budget.md`.
 
 ### Claiming without a personal identity
 
-"Issues assigned to the workspace user" (`tracker_list_issues`, `arb ticket list
+"Issues assigned to the workspace user" (`tracker_list_issues`, `ward ticket list
 --tracker`, the `tracker_sync` auto-claim, `tracker_claim`'s assignment check) needs
 a person: a GitHub App cannot be an assignee. So:
 
@@ -68,7 +68,7 @@ The list and sync responses say so: `tracker_list_issues` and `tracker_sync` (an
 their REST twins) carry `filter: {mode: "label", label: "<name>", note: "..."}`
 when the label stands in for the assignee, and no `filter` key otherwise.
 
-    arb config set tracker.config.claim_label arbiter
+    ward config set tracker.config.claim_label arbiter
 
 ### Call sites
 

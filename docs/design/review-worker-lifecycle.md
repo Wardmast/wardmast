@@ -8,7 +8,7 @@
 
 ## Overview
 
-When Arbiter reviews a colleague's PR (`arb review --pr <url>`), it creates a
+When Wardmast reviews a colleague's PR (`ward review --pr <url>`), it creates a
 **review engagement**: an `Issue` with `review_only: true` and `source_pr` set.
 Unlike normal implementation tasks, review engagements have a long lifecycle
 that does not end after the first verdict. **ReviewPatrol** owns that lifecycle
@@ -89,7 +89,7 @@ with `post_verdict`). The record's `greenlight_status` flips to `:posted` (or
 
 ### 1. Engagement creation
 
-`arb review --pr <url>` (or the `worker_review` MCP tool) calls
+`ward review --pr <url>` (or the `worker_review` MCP tool) calls
 `Wardmast.Workflows.CodeReview` in `:adapter` mode, posts findings and a
 verdict, then creates the review engagement via `Wardmast.Worker.Dispatch`. The
 task is marked `review_only: true`; the `review_automation` policy is inherited
@@ -229,7 +229,7 @@ Or pass it as a release environment variable if your deployment uses
 `Config.Provider`. The value is read once at `ReviewPatrolSupervisor` init, so
 a server restart is required for the change to take effect.
 
-> **Note:** `arb config set` writes to the workspace config (runtime deep-merge)
+> **Note:** `ward config set` writes to the workspace config (runtime deep-merge)
 > and is **not** read by the patrol interval logic. Use the application env above.
 
 ### Configuring the fleet login (author-reply handling)
@@ -238,7 +238,7 @@ Author-reply detection uses the fleet's own GitHub login to identify threads we
 participated in. Set it via:
 
 ```bash
-arb config set review_patrol.our_login "your-bot-account"
+ward config set review_patrol.our_login "your-bot-account"
 ```
 
 Without this, author-reply handling is conservatively skipped.
@@ -263,14 +263,14 @@ self-approve guard.
 
 ```bash
 # Authors who get automatic re-reviews and threaded replies (auto: review + post)
-arb config set review_automation.auto_authors '["alice","bob"]'
+ward config set review_automation.auto_authors '["alice","bob"]'
 
 # Default stance for authors NOT in the list: "auto" | "report_only" | "flag" | "off" (default: "flag")
-arb config set review_automation.default "report_only"
+ward config set review_automation.default "report_only"
 
 # Hard-gate specific repos regardless of author — infra is review-and-report-only,
 # and a repo the fleet must never touch is a hard "off"
-arb config set review_automation.repo_overrides '{"atlas": "report_only", "apex-infrastructure": "report_only", "apex_audio": "off"}'
+ward config set review_automation.repo_overrides '{"atlas": "report_only", "apex-infrastructure": "report_only", "apex_audio": "off"}'
 ```
 
 Authors in `auto_authors` get `:auto` mode (automatic re-reviews and threaded
@@ -304,7 +304,7 @@ by alice resolves to `:auto` (reviewed and posted).
 To override the debounce window (default 5 min):
 
 ```bash
-arb config set review_patrol.debounce_ms 300000   # 5 minutes (default)
+ward config set review_patrol.debounce_ms 300000   # 5 minutes (default)
 ```
 
 ### How flag-mode escalations surface
@@ -312,7 +312,7 @@ arb config set review_patrol.debounce_ms 300000   # 5 minutes (default)
 When `review_automation` is `:flag`, ReviewPatrol never posts to the PR. Instead:
 
 - **New relevant commits** → a mailbox message (kind: `:flag`, `to_ref`:
-  engagement id) appears in the coordinator mailbox under `arb inbox`.
+  engagement id) appears in the coordinator mailbox under `ward inbox`.
   It names the PR, the new head SHA, and notes that no re-review was posted.
 - **Author reply on our thread** → a mailbox message (kind: `:escalation`,
   `to_ref`: `"admiral"`) lands in the coordinator inbox. It includes the PR link,
@@ -324,11 +324,11 @@ flag/escalation and the cursor advances so subsequent ticks are no-ops.
 To read escalations:
 
 ```bash
-arb inbox                     # all unread messages, including escalations
-arb message inbox <task-id>   # messages for a specific engagement
+ward inbox                     # all unread messages, including escalations
+ward message inbox <task-id>   # messages for a specific engagement
 ```
 
-After reading, decide whether to trigger a manual re-review (`arb review --pr
+After reading, decide whether to trigger a manual re-review (`ward review --pr
 <url>`) or post a direct reply on the PR. There is no automated command to
 switch an engagement from `:flag` to `:auto` mid-flight; update
 `auto_authors` and re-dispatch a new review if needed.

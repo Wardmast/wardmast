@@ -1,8 +1,8 @@
 # Secrets at rest: keeping secret values off the host's disk
 
-By default every secret arbiter needs ends up as plaintext in the systemd
+By default every secret wardmast needs ends up as plaintext in the systemd
 `EnvironmentFile` (`~/.wardmast/wardmast.env`), and a host secret scanner flags that
-file and every copy of it. Arbiter can instead hold **pointers** to a secret
+file and every copy of it. Wardmast can instead hold **pointers** to a secret
 manager and fetch the value into memory when it needs it.
 
 ## Reference forms
@@ -33,7 +33,7 @@ warning naming the pointer (never a value) is logged.
 Anywhere `env:` / `secret:` work, the forms above work:
 
 Set the workspace's `credentials_ref` (tracker, merger or agent config) to e.g.
-`aws-sm:prod/arbiter#github_token`. `workspace_config_get` returns the pointer,
+`aws-sm:prod/wardmast#github_token`. `workspace_config_get` returns the pointer,
 never the value.
 
 ## 2. Boot-time secrets
@@ -44,13 +44,13 @@ each as a pointer instead of a value:
 
 ```
 # ~/.wardmast/wardmast.env — no secret values
-WARDMAST_CLOAK_KEY_REF=aws-sm:prod/arbiter#cloak_key
-SECRET_KEY_BASE_REF=aws-sm:prod/arbiter#secret_key_base
+WARDMAST_CLOAK_KEY_REF=aws-sm:prod/wardmast#cloak_key
+SECRET_KEY_BASE_REF=aws-sm:prod/wardmast#secret_key_base
 AWS_REGION=eu-west-1
 ```
 
 * A `<NAME>_REF` **wins** over an inline `<NAME>`; remove the inline value once
-  the pointer works (`arb doctor` warns while both exist).
+  the pointer works (`ward doctor` warns while both exist).
 * A pointer that cannot be resolved **fails the boot** (`runtime.exs` / the Vault
   raise, naming the variable and the pointer), the same as a missing key.
 * `WARDMAST_CLOAK_KEY_GENERATION` is a number, not a secret, and stays inline.
@@ -68,26 +68,26 @@ self-deploy, the worker CLI fetcher, the `Wardmast.GitHub` fallback). In general
 and `GITHUB_TOKEN_REF` (or no token) in the env file, `GITHUB_TOKEN` can leave the
 environment entirely.
 
-The `arb` CLI's own `GITHUB_TOKEN` reads (`arb self-update`, `arb server deploy`)
+The `ward` CLI's own `GITHUB_TOKEN` reads (`ward self-update`, `ward server deploy`)
 are optional — they only authenticate the public Releases API request to raise
 the rate limit — and read the token from the invoking shell, not from the env
 file. They do not resolve `*_REF`.
 
 ## 4. Deploy snapshots
 
-`arb server deploy` never copies `wardmast.env`. Each database snapshot gets a
+`ward server deploy` never copies `wardmast.env`. Each database snapshot gets a
 sidecar `<snapshot>.env-fingerprint.json` listing every env key with the first 8
 hex characters of the SHA-256 of its value (for a `*_REF` key, of the pointer),
 enough to verify a redeploy did not change a value, not to recover it.
 
 ## Checking the posture
 
-* `arb install-service` prints `at rest: inline: …; references: …` for the env
+* `ward install-service` prints `at rest: inline: …; references: …` for the env
   file it just wrote (and `secrets_at_rest` in `--json`). It forwards `*_REF`
   pointers from the installing shell and never writes the inline value of a
   secret whose `*_REF` is set.
-* `arb doctor` has a `secrets at rest` check (security posture): `warn` while
+* `ward doctor` has a `secrets at rest` check (security posture): `warn` while
   `WARDMAST_CLOAK_KEY` / `SECRET_KEY_BASE` is inline, while an inline value is
   shadowed by its pointer, or when a pointer has an unrecognised scheme.
 * Old copies of the env file (backups, snapshots, logs from older versions)
-  are outside what arbiter manages; rotate the secrets they hold.
+  are outside what wardmast manages; rotate the secrets they hold.

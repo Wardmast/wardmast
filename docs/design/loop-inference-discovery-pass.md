@@ -62,7 +62,7 @@ asks; the interaction is recorded in [§8](#8-interaction-with-bd-4xc69o-and-bd-
 ## What I measured
 
 Measured 2026-09-04 against the live installation (`localhost:4848`) with
-`arb loop analyze --since 30d --json`, `arb loop pending --json`, and
+`ward loop analyze --since 30d --json`, `ward loop pending --json`, and
 `scripts/measure_loop_finding_residue.sh` (added by this ticket; method below).
 
 ### Corpus volume — not thin
@@ -311,8 +311,8 @@ is #1011's Stage 1 discipline applied to an unproven capability, and it is
 what lets the first iteration sidestep tensions 1 and 2 entirely.
 
 Stage 1 must additionally be **opt-in and off by default** — an
-`arb loop analyze --discover` flag, in the same shape as the existing
-`--propose`, so that the default `arb loop analyze` remains byte-identical,
+`ward loop analyze --discover` flag, in the same shape as the existing
+`--propose`, so that the default `ward loop analyze` remains byte-identical,
 deterministic, and free.
 
 Stage 2 is authorised only after an operator has read Stage 1's report section

@@ -1,14 +1,14 @@
 # Remote workers runbook
 
-How to add a second machine to an Arbiter install so it runs workers, and how to
+How to add a second machine to an Wardmast install so it runs workers, and how to
 operate and debug it. The design is [`design/remote-workers.md`](design/remote-workers.md)
 (section numbers below refer to it); this page is the procedure.
 
-**What a node is.** The same Arbiter release the primary runs, started with
+**What a node is.** The same Wardmast release the primary runs, started with
 `ARB_ROLE=agent` as a *user* systemd unit by a join script. It holds one secret (a
 node credential), no database, and no forge access. It dials **out** to the primary
 over one WebSocket, builds hardened rootless `podman` containers from run specs the
-primary sends, and tunnels each container's egress proxy, MCP and `arb` sockets back
+primary sends, and tunnels each container's egress proxy, MCP and `ward` sockets back
 over that WebSocket. Checkouts travel as git bundles; the primary ingests them
 through a quarantine repo. Only the podman-backed Claude task worker runs remotely.
 
@@ -40,24 +40,24 @@ nothing inbound is opened on either machine.
 
    Do **not** use `tailscale funnel` or any public tunnel: public exposure is refused by
    default (doctor warns on a non-private `nodes.public_url`).
-3. **Tell Arbiter its public URL** (the join script and the nodes' config embed it):
+3. **Tell Wardmast its public URL** (the join script and the nodes' config embed it):
 
    ```sh
-   arb settings set nodes.public_url https://<primary>.<tailnet>.ts.net
+   ward settings set nodes.public_url https://<primary>.<tailnet>.ts.net
    ```
 
 4. **ACL tags (recommended).** Tag the primary `tag:arbiter-primary` and each node
-   `tag:arbiter-node`, and let nodes reach the primary on 443 and nothing else:
+   `tag:wardmast-node`, and let nodes reach the primary on 443 and nothing else:
 
    ```jsonc
    // tailnet policy file
    "tagOwners": {
      "tag:arbiter-primary": ["autogroup:admin"],
-     "tag:arbiter-node":    ["autogroup:admin"]
+     "tag:wardmast-node":    ["autogroup:admin"]
    },
    "acls": [
      // your existing rules, plus:
-     {"action": "accept", "src": ["tag:arbiter-node"], "dst": ["tag:arbiter-primary:443"]}
+     {"action": "accept", "src": ["tag:wardmast-node"], "dst": ["tag:arbiter-primary:443"]}
    ]
    ```
 
@@ -65,7 +65,7 @@ nothing inbound is opened on either machine.
    else: no forge access (pushes go through the primary's egress proxy). Nothing needs
    to reach *into* a node.
 5. **Check it from the node** before joining: `curl https://<primary>.<tailnet>.ts.net/nodes/ping`
-   must print `pong`. From the primary, `arb doctor` has a `nodes.public_url reachable`
+   must print `pong`. From the primary, `ward doctor` has a `nodes.public_url reachable`
    line doing the same probe.
 
 Other private overlays (Headscale, a WireGuard mesh behind a TLS reverse proxy) work if
@@ -144,10 +144,10 @@ agent dies at logout and every run on the node is lost with it.
 ## 3. Join a node
 
 On the **primary**, mint a single-use token (default TTL 15 min, `--ttl` up to 24 h).
-This needs the operator's own `arb` token, not a coordinator session's:
+This needs the operator's own `ward` token, not a coordinator session's:
 
 ```sh
-arb node add --name build-1 --label gpu=no --max-workers 2
+ward node add --name build-1 --label gpu=no --max-workers 2
 ```
 
 It prints the join command (which carries no secret) and, on a terminal only, the token
@@ -167,21 +167,21 @@ shell history). For unattended installs use `ARB_JOIN_TOKEN_FILE=/path` (mode 06
 
 The script runs the prerequisite checks, exchanges the token at `POST /nodes/enroll`,
 downloads the agent tarball with the new credential and verifies its sha256, unpacks it to
-`~/.arbiter-node/releases/<version>/` (atomic `current` symlink), writes
-`~/.config/arbiter-node/{agent.env,credential}` and
-`~/.config/systemd/user/arbiter-node.service`, and starts the unit. The credential
+`~/.wardmast-node/releases/<version>/` (atomic `current` symlink), writes
+`~/.config/wardmast-node/{agent.env,credential}` and
+`~/.config/systemd/user/wardmast-node.service`, and starts the unit. The credential
 (`arbn_…`, 0600) is the only secret at rest on the node.
 
 Confirm on the primary:
 
 ```sh
-arb node list          # state online, health ready, agent version == server version
-arb node show build-1
-arb node events build-1   # token_minted, enrolled, connected
-arb doctor             # the "nodes" section
+ward node list          # state online, health ready, agent version == server version
+ward node show build-1
+ward node events build-1   # token_minted, enrolled, connected
+ward doctor             # the "nodes" section
 ```
 
-On the node: `~/.arbiter-node/bin/arbiter-node status | logs | leave`.
+On the node: `~/.wardmast-node/bin/wardmast-node status | logs | leave`.
 
 A real second node has been enrolled this way: `ryan-oryx-pro`, reached over the Vstim
 tailnet through `tailscale serve`, agent 0.2.23, health `ready`, `max_workers` 1
@@ -195,7 +195,7 @@ Needs `nodes.public_url` and `nodes.registry` (the controller image is
 click **Add node → Kubernetes cluster** on the Nodes page, or:
 
 ```sh
-arb node add --kind cluster --name mesaana-k3s --namespace wardmast-workers --max-workers 2 \
+ward node add --kind cluster --name mesaana-k3s --namespace wardmast-workers --max-workers 2 \
   --primary-cidrs 100.64.0.10/32 \
   [--reach tailscale|proxy] [--admission policy] [--self-upgrade on|off] -o manifests.yaml
 ```
@@ -214,28 +214,28 @@ Both print the same three steps: apply the manifests with a cluster-admin kubeco
 diff them freely), create the join Secret with the token read from the terminal
 (`read -rs T && printf %s "$T" | kubectl -n wardmast-workers create secret generic wardmast-join
 --from-file=token=/dev/stdin`), and wait for the node to connect. With `--reach tailscale` also
-create the `wardmast-tailscale` Secret (`authkey`: ephemeral, pre-authorised, `tag:arbiter-node`).
+create the `wardmast-tailscale` Secret (`authkey`: ephemeral, pre-authorised, `tag:wardmast-node`).
 The join Secret is spent after first boot: delete it.
 
 A cluster node that is `outdated` after a server deploy upgrades itself when its Role allows it
-(`--self-upgrade on`, the default). Otherwise `arb node show <name>` and the node's page print
+(`--self-upgrade on`, the default). Otherwise `ward node show <name>` and the node's page print
 the exact `kubectl -n NS set image deployment/wardmast-controller controller=IMAGE` to run.
 
 ### Pin and size the node
 
 ```sh
-arb node set build-1 --max-workers 2            # your override of the node's suggestion
-arb node set build-1 --workspace <workspace-id> # only these workspaces run here (repeatable)
-arb node set local --max-workers 2              # the primary's own cap; 0 = nodes do the work
+ward node set build-1 --max-workers 2            # your override of the node's suggestion
+ward node set build-1 --workspace <workspace-id> # only these workspaces run here (repeatable)
+ward node set local --max-workers 2              # the primary's own cap; 0 = nodes do the work
 ```
 
-`arb node list` shows `local + Σ remote caps`, which is the capacity the board plans to; there is
+`ward node list` shows `local + Σ remote caps`, which is the capacity the board plans to; there is
 no install-wide cap above it (the old `conductor.max_concurrent` was removed). The primary's own
 cap defaults to its hardware suggestion (`min(cpus/2, 0.8 × MemTotal / 4 GiB)`, at least 1) and is
-enforced; `arb node set local --max-workers N` overrides it.
+enforced; `ward node set local --max-workers N` overrides it.
 
 Each machine also derates itself under thermal or memory pressure: it stops offering new slots
-(never killing a running worker) and `arb node list` shows `OFFERED` against `MAX`, the CPU
+(never killing a running worker) and `ward node list` shows `OFFERED` against `MAX`, the CPU
 temperature and the reason. Defaults (soft 90 °C, hard 95 °C, memory PSI 25 %, a 4 GiB
 `MemAvailable` floor) and how to tune them per machine: [machine-derate.md](machine-derate.md).
 
@@ -244,9 +244,9 @@ temperature and the reason. Defaults (soft 90 °C, hard 95 °C, memory PSI 25 %,
 Nothing runs remotely until a workspace opts in:
 
 ```sh
-arb config set worker.placement prefer_remote   # a node with headroom, else local
-arb config set worker.placement remote_only     # never local; a card with no capacity is held, not failed
-arb config set worker.placement local_only      # the default
+ward config set worker.placement prefer_remote   # a node with headroom, else local
+ward config set worker.placement remote_only     # never local; a card with no capacity is held, not failed
+ward config set worker.placement local_only      # the default
 ```
 
 `prefer_remote` is the safe first step. Only a fresh implementer run of a Claude task in
@@ -261,12 +261,12 @@ A run is only eligible for placement when its workspace resolves the podman sand
 backend. The key lives under `agent.security`, so write the full path:
 
 ```sh
-arb config set agent.security.sandbox.backend podman
-arb config set agent.security.sandbox.review_backend bwrap   # optional; reviews stay local
+ward config set agent.security.sandbox.backend podman
+ward config set agent.security.sandbox.review_backend bwrap   # optional; reviews stay local
 ```
 
-A bare `sandbox.backend` is not a config key: `arb config set` (and REST and MCP) refuse
-it and name the full path (pass `--force` only to store a key on purpose). `arb server
+A bare `sandbox.backend` is not a config key: `ward config set` (and REST and MCP) refuse
+it and name the full path (pass `--force` only to store a key on purpose). `ward server
 doctor` reports "no workspace runs podman on this machine" until the full path is set.
 
 ### Let capacity pick the backend: `auto`
@@ -275,9 +275,9 @@ doctor` reports "no workspace runs podman on this machine" until the full path i
 never reaches a node. `auto` lets placement decide first and the backend follow:
 
 ```sh
-arb config set agent.security.sandbox.backend auto
-arb config set agent.security.sandbox.local_backend bwrap    # what runs on this machine (default)
-arb config set worker.placement prefer_local                 # this machine first, a node when it is full
+ward config set agent.security.sandbox.backend auto
+ward config set agent.security.sandbox.local_backend bwrap    # what runs on this machine (default)
+ward config set worker.placement prefer_local                 # this machine first, a node when it is full
 ```
 
 A run placed on a node is podman on a private clone; a run placed on this machine uses
@@ -287,26 +287,26 @@ local on bwrap. `prefer_remote` tries a node first, `prefer_local` this machine 
 slot (the hold names both). A ticket's checkout keeps its layout: a linked worktree resumes
 locally, a private clone resumes as one. A repo can pin `podman` over a workspace `auto`
 but cannot set `bwrap` back. Each run's `routing_decision.placement.sandbox_backend` says
-which it got and why (`arb worker show <task>`).
+which it got and why (`ward worker show <task>`).
 
 ## 4. Drain, revoke, upgrade, remove
 
 | Goal | Command | Effect |
 |---|---|---|
-| Take a node out of rotation, let runs finish | `arb node drain <name>` | no new placement; stays connected; `undrain` reverses it |
-| Cut a node off now | `arb node revoke <name>` | credential hash cleared, socket closed at once, its runs end `interrupted` (*node lost*) and auto-resume elsewhere; the node can never reconnect with that credential |
-| Delete a revoked node's row | `arb node remove <name>` | only for a revoked node; history stays in `arb node events` |
-| Move a node to the primary's version | `arb node upgrade <name>` | the agent downloads, verifies and swaps `current` when idle, then restarts under systemd |
-| Stop the agent from the node side | `arbiter-node leave`, then `arb node revoke <name>` | |
+| Take a node out of rotation, let runs finish | `ward node drain <name>` | no new placement; stays connected; `undrain` reverses it |
+| Cut a node off now | `ward node revoke <name>` | credential hash cleared, socket closed at once, its runs end `interrupted` (*node lost*) and auto-resume elsewhere; the node can never reconnect with that credential |
+| Delete a revoked node's row | `ward node remove <name>` | only for a revoked node; history stays in `ward node events` |
+| Move a node to the primary's version | `ward node upgrade <name>` | the agent downloads, verifies and swaps `current` when idle, then restarts under systemd |
+| Stop the agent from the node side | `wardmast-node leave`, then `ward node revoke <name>` | |
 
-**Upgrade** is normally automatic. After `arb server deploy` the nodes reconnect, are told
+**Upgrade** is normally automatic. After `ward server deploy` the nodes reconnect, are told
 the new version and become `outdated`; an `outdated` node takes **no new runs**, so it
 drains itself, upgrades when idle and rejoins as `ready`. The new agent confirms on its
 first `hello_ok`; if it never confirms within 3 minutes the previous release is restored.
 `nodes.allow_skew` (default off) lets mismatched nodes keep working through a bad deploy.
-Check `arb node list` after every deploy: agent version must equal the server's.
+Check `ward node list` after every deploy: agent version must equal the server's.
 
-**Rotate or replace a credential:** revoke, `arb node remove`, and re-run the join with a
+**Rotate or replace a credential:** revoke, `ward node remove`, and re-run the join with a
 new token (a re-run on the same host repairs the install).
 
 ## 5. A primary restart
@@ -337,7 +337,7 @@ Deploys and crashes restart the primary. What happens to a run on a node (§10.4
      agent that advertises `caps.run_adopt`;
    * otherwise **collects** it, as before: the agent **quiesces** it (stops the container,
      bundles the shadow clone and the transcripts, and retains them under
-     `~/.arbiter-node/runs/<run>/retained/`), the primary pulls that work through the
+     `~/.wardmast-node/runs/<run>/retained/`), the primary pulls that work through the
      quarantine into the home clone, and only then does the normal reconcile resume the
      run from it. The resume is placed like a dispatch (bd-4ic681): under
      `prefer_remote` or `remote_only` it may run on a node, seeded with the collected
@@ -361,15 +361,15 @@ Deploys and crashes restart the primary. What happens to a run on a node (§10.4
    touched. Until then it takes disk but no slot.
 
 What good looks like:
-* `arb node events <name>` shows `disconnected` then `connected`.
+* `ward node events <name>` shows `disconnected` then `connected`.
 * An adopted run: the primary log has `Nodes.Recovery: run <id> (<task>) adopted by a new
-  Worker` and `Boot: node recovery: 1 adopted`; `arb worker show <task>` names the same run
+  Worker` and `Boot: node recovery: 1 adopted`; `ward worker show <task>` names the same run
   id as before the restart; the node shows no `retained` event for it; and its output
   goes on.
 * A collected run: the run's history shows the resume, and the commits made before the
-  restart are present. `arb worker show <task>` names the node the resume was placed on,
+  restart are present. `ward worker show <task>` names the node the resume was placed on,
   if any.
-* `arb worker resume <task>` asked while a node still has the ticket's run (the first
+* `ward worker resume <task>` asked while a node still has the ticket's run (the first
   minute or so after a restart) answers 409 `held — run <run> of <task> is still on node
   <name> (held); it is adopted or collected first`. Nothing is stopped; once the run is
   collected the resume can be asked again. If the run was adopted, a resume is refused
@@ -380,7 +380,7 @@ What good looks like:
 `apps/wardmast_web/test/node_agent/remote_workers_e2e_test.exs` runs the whole feature with
 nothing stubbed: a real `ARB_ROLE=agent` OS process configured by the `agent.env` the real
 join script wrote, a Bandit-served endpoint, real rootless podman containers, the real
-egress proxy and `arb` bridge, a real git bundle through the quarantine, and a primary
+egress proxy and `ward` bridge, a real git bundle through the quarantine, and a primary
 restart. It covers join → hello → placement → run → bridged egress → bundle ingest →
 restart → recovery (adoption of a live run by a new Worker, and the collect fallback), plus
 drain and revoke.
@@ -400,8 +400,8 @@ it started and removes only containers it named.
 
 ## 7. Troubleshooting
 
-Start with `arb node list`, `arb node events <name>`, `arb doctor`, and on the node
-`~/.arbiter-node/bin/arbiter-node logs` (`journalctl --user -u arbiter-node.service`).
+Start with `ward node list`, `ward node events <name>`, `ward doctor`, and on the node
+`~/.wardmast-node/bin/wardmast-node logs` (`journalctl --user -u wardmast-node.service`).
 
 | Symptom | Cause / fix |
 |---|---|
@@ -409,34 +409,34 @@ Start with `arb node list`, `arb node events <name>`, `arb doctor`, and on the n
 | `[FAIL] linger is off … could not be enabled` | `sudo loginctl enable-linger <user>` |
 | `[FAIL] XDG_RUNTIME_DIR is not set` / `systemctl --user cannot reach your user manager` | you are in a `su`/`sudo` shell; log in with ssh or a console |
 | `[FAIL] /etc/subuid grants 0 ids` | `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 <user>` |
-| `[FAIL] no answer from …/nodes/ping` | tailnet down, ACL blocks `tag:arbiter-node → tag:arbiter-primary:443`, `tailscale serve` not running, or `nodes.public_url` wrong |
+| `[FAIL] no answer from …/nodes/ping` | tailnet down, ACL blocks `tag:wardmast-node → tag:arbiter-primary:443`, `tailscale serve` not running, or `nodes.public_url` wrong |
 | enrol: `401` | token unknown, expired (15 min) or already used; mint a new one |
-| enrol: `409` | name taken; pick another `ARB_NODE_NAME` or `arb node remove` the old (revoked) one |
+| enrol: `409` | name taken; pick another `ARB_NODE_NAME` or `ward node remove` the old (revoked) one |
 | enrol: `429` | rate limited (10/min globally, 5 failures/10 min per source); wait |
-| enrol: `503` | the primary has no agent tarball to serve; run `arb server deploy` |
-| Unit is up but `arb node list` shows it `offline` | `agent.env` URL wrong, credential revoked, or clock/TLS trouble; read the agent log |
-| Node `outdated` / `incompatible` / `ahead` | agent and primary versions differ; it upgrades itself when idle, or `arb node upgrade <name>`; `incompatible` means re-run the join script |
-| Node `ready` but nothing lands on it | `worker.placement` is still `local_only`; the node is pinned to other workspaces (`arb node set … --workspace`); drained; cap 0; `conductor.max_concurrent` reached; or the run is ineligible. The reason is in the dispatch log (`worker.placement is local_only`, `no node has capacity …`) |
+| enrol: `503` | the primary has no agent tarball to serve; run `ward server deploy` |
+| Unit is up but `ward node list` shows it `offline` | `agent.env` URL wrong, credential revoked, or clock/TLS trouble; read the agent log |
+| Node `outdated` / `incompatible` / `ahead` | agent and primary versions differ; it upgrades itself when idle, or `ward node upgrade <name>`; `incompatible` means re-run the join script |
+| Node `ready` but nothing lands on it | `worker.placement` is still `local_only`; the node is pinned to other workspaces (`ward node set … --workspace`); drained; cap 0; `conductor.max_concurrent` reached; or the run is ineligible. The reason is in the dispatch log (`worker.placement is local_only`, `no node has capacity …`) |
 | Card held: *no node has capacity* | `remote_only` with no node able to take it; add capacity, or switch to `prefer_remote` |
-| Run ends `interrupted` *node lost: <name>* | no heartbeat for `lost_after` (90 s default); it resumes by itself. Check the node's power, network and `arb node events` for `fenced`/`node_lost` |
+| Run ends `interrupted` *node lost: <name>* | no heartbeat for `lost_after` (90 s default); it resumes by itself. Check the node's power, network and `ward node events` for `fenced`/`node_lost` |
 | Runs fail on the node with `memory_not_delegated` | the `memory` controller is not delegated to the user, see §2 |
 | Run dies about a second in with `MCP config file not found: <primary worktree>/.mcp.json` | fixed in the release after v0.2.24 (bd-8y8ztm): the injected `.mcp.json` and `.claude/skills/` are untracked, so the git bundle never carried them. They now ride in the spec (`worktree` mount `files`), written into the shadow clone; the scope token travels as the secret `ARBITER_MCP_TOKEN`, never in the file on the node |
-| Container cannot reach anything | by design it is network-less; egress goes through the bridge. If the bridge is down, `arb node events` shows `disconnected`; policy denials show in the run's egress events |
+| Container cannot reach anything | by design it is network-less; egress goes through the bridge. If the bridge is down, `ward node events` shows `disconnected`; policy denials show in the run's egress events |
 | After a restart a run did not recover | the node did not reconnect within 60 s, or the home clone was missing; the run is resumed from whatever the home clone holds ("server restarted") or stamped `node_lost` |
 | After a restart a run was collected, not adopted | the primary log says why: `Nodes.Recovery: adopting run … failed (…); collecting it instead`, or a debug line for a run that was never a candidate. Common causes: the restart outlasted `restart_grace` (180 s), so the container was stopped; the container had exited; the adoption overran its deadline (`:adopt_timeout`, for example a slow image publication); the agent predates `caps.run_adopt` (upgrade it); the run was a reviewer or a CI or conflict pass (only a ticket's own implement run is adopted); or `:node_run_adoption` is `false`. Nothing is lost: the collect lands the work in the home clone |
-| Leftover `arb-…` containers or `~/.arbiter-node/runs/*` | the primary sends the live set on every `hello` and every 10 min; containers outside it are removed, run directories after 24 h. The agent never reaps on its own |
-| `arb node add` refuses to print the token | stdout is not a terminal; use `--token-file` |
+| Leftover `arb-…` containers or `~/.wardmast-node/runs/*` | the primary sends the live set on every `hello` and every 10 min; containers outside it are removed, run directories after 24 h. The agent never reaps on its own |
+| `ward node add` refuses to print the token | stdout is not a terminal; use `--token-file` |
 
-Escalate with the output of `arb node show <name> --json`, `arb node events <name>`, the
+Escalate with the output of `ward node show <name> --json`, `ward node events <name>`, the
 agent log, and the primary log around the same time.
 
 ## 8. Real-node acceptance checklist
 
 After a release carrying the remote-workers work is deployed, on a real second node:
 
-1. `arb node upgrade <name>`; `arb node list` shows it online with the server's version.
+1. `ward node upgrade <name>`; `ward node list` shows it online with the server's version.
 2. Re-run the check-only join (§2) on the node and record the results.
-3. Pin the node to one workspace (`arb node set <name> --workspace <id>`), then turn on
+3. Pin the node to one workspace (`ward node set <name> --workspace <id>`), then turn on
    `worker.placement: prefer_remote` for that workspace.
 4. Dispatch one small ticket. Confirm it was placed on the node (`worker_runs.node_id`),
    that `egress_events` exist for the run, that its commits land on the primary, and that

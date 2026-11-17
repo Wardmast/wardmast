@@ -1,6 +1,6 @@
 # Migrating a release install to provider accounts
 
-**Audience:** an operator running Arbiter as an OTP release
+**Audience:** an operator running Wardmast as an OTP release
 (`~/.wardmast/current/bin/wardmast`, managed by `wardmast.service`), which has no
 Mix toolchain. On a source checkout, the `mix wardmast.accounts.*` tasks do the
 same things. They are thin wrappers over the functions used here.
@@ -31,7 +31,7 @@ same things. They are thin wrappers over the functions used here.
   `Wardmast.Accounts.MissingCredentialError` on every spawn. The dispatch guard
   holds that workspace's Claude tickets and escalates once. The only way back
   to the legacy chain is to run the previous release binary.
-- **`arb install service` no longer copies `CLAUDE_CODE_OAUTH_TOKEN`** from the
+- **`ward install service` no longer copies `CLAUDE_CODE_OAUTH_TOKEN`** from the
   installing shell into `wardmast.env`. Nothing would read it.
 - **`/providers` is never read-only.** The "Accounts not enabled on this
   install" banner is gone.
@@ -39,12 +39,12 @@ same things. They are thin wrappers over the functions used here.
 
 ### Upgrade order
 
-1. **On the release you run now (v0.2.x),** make sure `arb server doctor`
+1. **On the release you run now (v0.2.x),** make sure `ward server doctor`
    reports `[ ok ] provider accounts` with `on (...)`. If it reports `[fail]`,
    or `off (WARDMAST_PROVIDER_ACCOUNTS=0)`, migrate first with the procedure
    below and restart.
 2. **Upgrade to this release.**
-3. **Run `arb server doctor` again.** Expect `[ ok ] provider accounts` and
+3. **Run `ward server doctor` again.** Expect `[ ok ] provider accounts` and
    `[ ok ] claude worker credentials`.
 
 If you upgrade an install that was not migrated, its workspaces cannot spawn
@@ -59,9 +59,9 @@ classification decides only what is auto-joined and what doctor reports:
 
 | Install | Result |
 | ------- | ------ |
-| **Fresh**: no workspace `worker_env` carries a provider credential, and there is no `CLAUDE_CODE_OAUTH_TOKEN` in the server's environment | Every workspace, and each one created later, is joined to `<provider>:default`. Add the credential with `arb account rotate claude:default ...`; `arb server doctor` names the exact command. |
+| **Fresh**: no workspace `worker_env` carries a provider credential, and there is no `CLAUDE_CODE_OAUTH_TOKEN` in the server's environment | Every workspace, and each one created later, is joined to `<provider>:default`. Add the credential with `ward account rotate claude:default ...`; `ward server doctor` names the exact command. |
 | **Already migrated**: at least one migration backup row that has not been rolled back | Nothing is joined automatically. Doctor reports `on (migrated)`. |
-| **Legacy credentials, not migrated**: a workspace `worker_env` or the server environment still carries a provider credential, and there is no migration record | The boot logs a warning naming them, and `arb server doctor` reports `[fail] provider accounts`. Nothing reads those credentials: the named workspaces cannot spawn. Follow this page to migrate. |
+| **Legacy credentials, not migrated**: a workspace `worker_env` or the server environment still carries a provider credential, and there is no migration record | The boot logs a warning naming them, and `ward server doctor` reports `[fail] provider accounts`. Nothing reads those credentials: the named workspaces cannot spawn. Follow this page to migrate. |
 
 To move such an install onto accounts, move each workspace's credential into
 a provider account. This is the P2 migration in
@@ -150,7 +150,7 @@ census with `force?: true`, and repeat. Nothing has been written.
 ```sh
 systemctl --user stop wardmast.service
 mkdir -p ~/.wardmast/pre-accounts-backup
-cp -p ~/.wardmast/arbiter.sqlite3* ~/.wardmast/pre-accounts-backup/   # or your DATABASE_PATH
+cp -p ~/.wardmast/wardmast.sqlite3* ~/.wardmast/pre-accounts-backup/   # or your DATABASE_PATH
 ```
 
 Stop the server because the migration removes the key from `worker_env`, and
@@ -196,19 +196,19 @@ systemctl --user start wardmast.service
 
 ### 8. Verify
 
-- **The install is migrated.** `arb server doctor` reports
+- **The install is migrated.** `ward server doctor` reports
   `[ ok ] provider accounts` with `on (migrated)`. The boot log has a
   `Provider accounts: migrated` line and no warning naming a workspace.
   The dashboard's `/providers` page lists the migrated accounts with their
   credential health.
 
-  `arb server doctor` also runs the `account/workspace quota policy` check.
+  `ward server doctor` also runs the `account/workspace quota policy` check.
   `Wardmast.Quota.Gate` binds `min(account, workspace)` — the account's quota
   policy is a ceiling that a workspace can tighten, never loosen. If a
   workspace's configured quota is overridden by a stricter account setting,
   adjust the account side using
-  `arb account set <ref> --threshold-mode … / --weekly-threshold …`.
-- **The rows are there.** `arb account list` shows each account from the
+  `ward account set <ref> --threshold-mode … / --weekly-threshold …`.
+- **The rows are there.** `ward account list` shows each account from the
   plan.
 - **Workers get their credential from the account.** Dispatch a task in each
   migrated workspace. It should run normally, and the log should show no

@@ -7,17 +7,17 @@ and §9 (G16). Mechanism: `Wardmast.Worker.GitCredential`.
 
 ## What you (the operator) have to create
 
-Arbiter cannot create these for you. For each repo workers push to, pick one:
+Wardmast cannot create these for you. For each repo workers push to, pick one:
 
-| Kind | You create | You register in Arbiter |
+| Kind | You create | You register in Wardmast |
 |---|---|---|
 | `deploy_key` | An SSH keypair (`ssh-keygen -t ed25519 -N '' -f key`), added as a **deploy key with write access** on that one repo (GitHub: Settings → Deploy keys → Allow write access; GitLab: Repository settings → Deploy keys → Grant write permissions). One key per repo: both forges refuse to reuse a key across repos. | The **private** key as a workspace secret |
 | `github_app` | A GitHub App with *Repository permissions*: Contents **read & write**, Pull requests **read & write**, Issues **read & write**, Actions **read & write** (CI re-runs), Workflows **read & write** (pushes that change `.github/workflows/*`), Metadata read (nothing under *Account* permissions, no *Administration*). Install it on the repos only (not "all repositories"). After you edit an App's permissions, the org/installation owner must accept them on the installation (GitHub: Settings → Installed GitHub Apps → Review request); until then minting returns `422 The permissions requested are not granted to this installation`. If only Workflows is missing, the mint retries without it and logs a warning, but pushes that change `.github/workflows/*` are refused. Note the App id, the installation id (the number in the installation's URL) and generate a private key (`.pem`). | The `.pem` as a workspace secret, plus the two ids |
-| `gitlab_project_token` | A **parent** GitLab personal access token (scope `api`) of a Maintainer or Owner of the one project, ideally a dedicated service-account user. Arbiter mints the token a worker holds from it, per run (see "GitLab" below). | The parent token as a workspace secret |
+| `gitlab_project_token` | A **parent** GitLab personal access token (scope `api`) of a Maintainer or Owner of the one project, ideally a dedicated service-account user. Wardmast mints the token a worker holds from it, per run (see "GitLab" below). | The parent token as a workspace secret |
 | `gitlab_bot_token` | **GitLab Free tier** (project access tokens need Premium). A dedicated **bot user** (identity-verified on GitLab.com: pipelines run as the pushing user, see below), Developer on the target projects and nothing else, and a personal access token for it (`read_api` + `read_repository` + `write_repository`, with an expiry). Weaker than `gitlab_project_token`: see "GitLab Free tier" below. | The bot's PAT as a workspace secret |
 | `token` | A **fine-grained** GitHub personal access token limited to the one repo (Contents + Pull requests + Issues read/write), or a GitLab **project** access token (role Developer, scopes `api`/`write_repository`). A **classic** GitHub PAT is refused: it reaches every repo its owner does. | The token as a workspace secret |
 
-A GitHub App is the most useful kind on GitHub: Arbiter mints a fresh installation token
+A GitHub App is the most useful kind on GitHub: Wardmast mints a fresh installation token
 per dispatch, restricted (`repositories`) to the ticket's repo with only the
 permissions a worker needs, and a second, narrower one for `tracker_write`. A
 deploy key has no API access, so the tracker token comes from the `tracker_write`
@@ -28,12 +28,12 @@ binding (below). `gitlab_project_token` is the GitLab counterpart; `gitlab_bot_t
 Secrets go in the workspace's encrypted store; the config names them.
 
 ```sh
-arb workspace secret set TONIC_DEPLOY_KEY --file tonic-deploy-key
-arb workspace secret set ARBITER_APP_KEY  --file arbiter-app.private-key.pem
+ward workspace secret set TONIC_DEPLOY_KEY --file tonic-deploy-key
+ward workspace secret set ARBITER_APP_KEY  --file arbiter-app.private-key.pem
 ```
 
 (`--file` or stdin keeps the key out of `ps`.) Then put the block in the
-workspace `config` (`arb workspace config`, or the dashboard):
+workspace `config` (`ward workspace config`, or the dashboard):
 
 ```json
 "git_credentials": {
@@ -60,7 +60,7 @@ instance, `https://git.example.com/api/v4`, default `https://<host>/api/v4`),
 `expires_in_days` (`gitlab_project_token` only: 1 to 7, default 2). `gitlab_bot_token` takes `secret` (required), `projects` and `expires_at` (below).
 The config is validated on write; a typo is refused rather than read as "unset".
 
-## When Arbiter refuses to dispatch
+## When Wardmast refuses to dispatch
 
 A spawn that can push (an implementer: first dispatch, revise round, CI fix pass,
 conflict pass that is not pushed by the host) is **refused** when its repo has no
@@ -76,13 +76,13 @@ This applies to **every** workspace, with or without a `git_credentials` block a
 on a guarded or unguarded install: there is no implicit fallback to the operator's
 credential. **Upgrading therefore stops dispatching pushing workers** for any
 workspace that has not registered a credential or set `legacy_operator: true`;
-`arb server doctor` lists them first. Reviewers never need push and are never
+`ward server doctor` lists them first. Reviewers never need push and are never
 refused.
 
 `legacy_operator: true` (workspace-wide, or on one repo, where `false` overrides
 the workspace) is the explicit opt-in to the old behaviour: the worker runs as it
 always did, with whatever `~/.ssh` and `GH_TOKEN` it can reach. Use it per repo
-while you roll credentials out. `arb server doctor` lists every repo that would
+while you roll credentials out. `ward server doctor` lists every repo that would
 be refused (`git_credential_unconfigured`) and every credential naming a secret
 the workspace does not have (`git_credential_secret_missing`).
 
@@ -112,7 +112,7 @@ and fails, whatever the token could have reached. Prompts are off
 
 ## GitLab: `gitlab_project_token` (bd-3llb3y)
 
-GitLab has no installation token to mint from a key, so Arbiter builds the same thing
+GitLab has no installation token to mint from a key, so Wardmast builds the same thing
 from GitLab's **project access tokens**:
 
 * **Mint.** At each spawn the primary calls `POST /projects/:id/access_tokens` with the
@@ -128,7 +128,7 @@ from GitLab's **project access tokens**:
   (pipelines, jobs, job logs, artifacts, merge requests and their notes). It has no API
   write access, so it **cannot approve or merge** a merge request, open or edit one, or
   change settings (that needs `api`). It cannot reach another project: a project access
-  token is bound to its project. Arbiter checks the reply, and a token granted more scopes
+  token is bound to its project. Wardmast checks the reply, and a token granted more scopes
   or a higher role than asked for is revoked at once and the spawn refused.
 * **Delivery.** As the `token` kind does locally: `ARB_GIT_TOKEN` and the path-pinned git
   credential helper, with `git@<host>:` and `ssh://git@<host>/` remotes rewritten to https
@@ -139,7 +139,7 @@ from GitLab's **project access tokens**:
   per-run tmpfs file. Because the token is also the worker's API access, this is the one
   scoped kind that every podman run holds in its container (implementer, resume, CI fix pass,
   conflict pass, fix round), not only a fix round. The host still pushes the branch after
-  `arb done`, with a token it mints for that push and revokes ten minutes later (or when
+  `ward done`, with a token it mints for that push and revokes ten minutes later (or when
   its caller exits).
 * **Revoke.** `DELETE /projects/:id/access_tokens/:token_id`, authenticated by the parent,
   when the run's worker exits however it exits. This is armed when the token is minted, so it
@@ -149,7 +149,7 @@ from GitLab's **project access tokens**:
   podman secret or run-spec value is built from it, `withheld_values/1` drops an env var that
   carries it from a remote run, the output scrubber masks it, and `inspect/1` of the
   credential hides it. Its reach is whatever its owner can do: use a **dedicated
-  service-account user** that is Maintainer on only the projects Arbiter works on.
+  service-account user** that is Maintainer on only the projects Wardmast works on.
 * **Placement.** The kind is remote-carryable (`Placement.remote_git_credential_kinds/0`):
   `prefer_remote` places the run on a node and `remote_only` does not hold it.
 
@@ -158,7 +158,7 @@ Mechanisms considered:
 | Mechanism | Verdict |
 |---|---|
 | **Project access token**, minted and revoked through the API from a primary-only parent PAT | **Chosen.** Bound to one project, scopes and role set per token, revocable, serves both push and API. |
-| CI job token (`CI_JOB_TOKEN`) | Rejected: exists only inside a CI job, so Arbiter cannot mint one for a worker, and its rights are narrow and set by the instance. |
+| CI job token (`CI_JOB_TOKEN`) | Rejected: exists only inside a CI job, so Wardmast cannot mint one for a worker, and its rights are narrow and set by the instance. |
 | OAuth application with scoped tokens | Rejected: a token belongs to a *user*, so it reaches every project that user can; it cannot be limited to one project, and it needs an app registration and an authorization flow per run. |
 
 GitLab tiers (docs.gitlab.com, read 2026-10-16): project access tokens need **Premium or
@@ -179,13 +179,13 @@ Maintainers (GitLab's default), and the parent's owner no higher than needed.
    create a personal access token for it with scope **`api`** and an expiry you will renew.
    When it lapses, minting fails and dispatches are refused (not run on the operator's
    credential).
-2. `arb workspace secret set GITLAB_PARENT_PAT --file parent-pat`.
+2. `ward workspace secret set GITLAB_PARENT_PAT --file parent-pat`.
 3. In the workspace `config`, give each repo
    `{"kind": "gitlab_project_token", "parent_token_secret": "GITLAB_PARENT_PAT"}` (add `host`
    or `api_url` for self-managed, and `remote` if the checkout's `origin` is not the GitLab
    path). A repo's own entry wins over the workspace's `legacy_operator`, so move one repo at
    a time, leave the workspace flag `true` until the last is done, then set it `false`.
-4. `arb server doctor` should list no `git_credential_secret_missing` for the repo. Dispatch a
+4. `ward server doctor` should list no `git_credential_secret_missing` for the repo. Dispatch a
    small ticket and check: the branch is pushed, the run could read its pipeline (the
    `PRIVATE-TOKEN: $GITLAB_TOKEN` call above answers 200), and *Settings → Access tokens* on the
    project shows an `arbiter-run-*` token while the run lives and none after.
@@ -209,14 +209,14 @@ kinds. It is an explicit opt-in and it is **weaker**; read "Compared with
 
 ### Setting it up
 
-1. Create a **dedicated GitLab user** for Arbiter (a normal user account, not your own).
+1. Create a **dedicated GitLab user** for Wardmast (a normal user account, not your own).
    Add it as **Developer**, and nothing else, on exactly the projects workers push to
    (for example `vstim`, `tonic`, `tonic_device`). It must be a member of **no other**
-   project or group: Arbiter refuses the spawn if it is.
+   project or group: Wardmast refuses the spawn if it is.
 2. Sign in as the bot (or use an admin to impersonate it) and create a **personal access
    token** with scopes **`read_api`, `read_repository`, `write_repository`** and an
    **expiry**. Never `api`, never `sudo`. A fine-grained token limited to those projects works too (see below).
-3. `arb workspace secret set GITLAB_BOT_PAT --file bot-pat`.
+3. `ward workspace secret set GITLAB_BOT_PAT --file bot-pat`.
 4. In the workspace `config`, per repo:
 
    ```json
@@ -237,9 +237,9 @@ kinds. It is an explicit opt-in and it is **weaker**; read "Compared with
    `owner/repo` paths the bot may reach, and `expires_at` (`YYYY-MM-DD`) is your
    record of the PAT's expiry. Entries that share a `secret` and `host` widen each other's
    allowed projects (their `remote` and `projects`), so you list a project once.
-5. `arb server doctor` shows the token's expiry and warns once it is 14 days away, and names each repo the token cannot reach (below).
+5. `ward server doctor` shows the token's expiry and warns once it is 14 days away, and names each repo the token cannot reach (below).
 
-### What Arbiter checks at every dispatch
+### What Wardmast checks at every dispatch
 
 The PAT is static, so the check runs before **every** delivery (a spawn, and the host's
 push), with the token itself, and fails closed (an unreachable or unreadable answer is a
@@ -262,7 +262,7 @@ operator's credential instead.
 ### The bot user must pass identity verification (bd-7eve8a)
 
 **On GitLab.com a pipeline runs as the user who pushed.** A `gitlab_bot_token` bot
-user is that user for every branch Arbiter pushes, so GitLab judges the *bot* when it
+user is that user for every branch Wardmast pushes, so GitLab judges the *bot* when it
 decides whether to run CI. A GitLab.com account that has not passed
 [identity verification](https://docs.gitlab.com/security/identity_verification/) (email, and
 for riskier accounts a phone number or a credit card) is refused CI: every pipeline its
@@ -274,11 +274,11 @@ jobs list. So **verify the bot account on GitLab.com (sign in as it and complete
 prompts) before enabling `gitlab_bot_token`**, and check that a pipeline from one of its
 pushes actually runs jobs.
 
-**Arbiter cannot see this in advance.** The dispatch guard and `arb server doctor`
+**Wardmast cannot see this in advance.** The dispatch guard and `ward server doctor`
 check scopes, expiry and membership, and no GitLab API call exposes a user's identity
 verification state to the token (`GET /user` returns `confirmed_at` and
 `two_factor_enabled`, not a verification status; the Users API documents no such field,
-and GitLab's identity-verification page documents no API for it), so Arbiter adds no
+and GitLab's identity-verification page documents no API for it), so Wardmast adds no
 heuristic for it. It is found after the fact, from the first pipeline:
 
 * A failed pipeline with **no jobs** is not a code failure. The Watchdog and the
@@ -296,12 +296,12 @@ heuristic for it. It is found after the fact, from the first pipeline:
 A GitLab **fine-grained** personal access token (beta in 18.10, generally available in
 19.2, any tier) lists its own resources, so it is the better choice when the bot's
 group membership is wider than the projects workers push to (the real bot is Maintainer
-on a whole group but its token is limited to a few projects). Arbiter recognises one by
+on a whole group but its token is limited to a few projects). Wardmast recognises one by
 the `granular_scopes` list that `GET /personal_access_tokens/self` returns instead of
 `scopes` (present from GitLab 19.5). For such a token **its resource list, not the bot's
 membership, is the boundary**; the classic-PAT checks above are unchanged.
 
-At every dispatch Arbiter then requires:
+At every dispatch Wardmast then requires:
 
 * **Resources are a project list.** Every `granular_scopes` entry must be
   `access: "selected_memberships"` naming one `project_id`. A group entry (every project in
@@ -326,7 +326,7 @@ At every dispatch Arbiter then requires:
 If the API cannot say what the token reaches (an error, a missing field, an unexpected
 shape), the spawn is refused; nothing is delivered on a guess.
 
-### `arb server doctor`: repos the token cannot reach
+### `ward server doctor`: repos the token cannot reach
 
 For each `gitlab_bot_token` entry with a `remote`, doctor asks what the entry's token
 reaches (the bot's memberships for a classic PAT, the token's own resources for a
@@ -352,7 +352,7 @@ mint or revoke.
 | GitLab tier | Premium / Ultimate on GitLab.com (any tier self-managed) | Any, including Free |
 | Token a worker holds | Minted per run, revoked when the run ends | The one long-lived PAT |
 | Valid on a node | For the run (and until `expires_at`, default 2 days, if the revoke fails) | **Until the PAT's expiry** (up to a year) |
-| Limited to the project by | Construction: a project access token cannot reach another project | **Membership**, which Arbiter checks but GitLab does not enforce for Arbiter |
+| Limited to the project by | Construction: a project access token cannot reach another project | **Membership**, which Wardmast checks but GitLab does not enforce for Wardmast |
 | Parent credential | A Maintainer's `api` PAT, which never leaves the primary | None: the delivered PAT is the credential |
 | A leaked copy | Dead after the run | Usable until you revoke it or it expires |
 
@@ -360,7 +360,7 @@ Choose it only when the minted kind is unavailable. A copy of the PAT taken from
 transcript) can read the API and push to the Developer-pushable branches of the bot's projects
 until you revoke it in GitLab (bot user → Access tokens). Keep the bot's membership minimal,
 the expiry short (renew on a schedule: when it lapses, dispatches are refused), and your
-default branches protected as above. Arbiter's guard narrows the bot to the configured
+default branches protected as above. Wardmast's guard narrows the bot to the configured
 projects; it cannot stop someone adding the bot to a project *after* a dispatch (the next
 dispatch refuses it).
 
@@ -401,7 +401,7 @@ slug. See `docs/external-trackers.md` for the details and the call sites.
 ## The host's push and PR operations (bd-bsmkfu)
 
 A podman run holds no git credential: the **host** pushes the collected branch
-after `arb done` (also a fix round's or conflict pass's rewritten branch, and the
+after `ward done` (also a fix round's or conflict pass's rewritten branch, and the
 review gate's pre-review push) and opens, comments on and merges the PR. With a
 scoped entry for the repo the host does all of that with it, not with the
 operator's ssh/gh credentials (`Wardmast.Worker.HostCredential`):
@@ -425,7 +425,7 @@ operator's ssh/gh credentials (`Wardmast.Worker.HostCredential`):
   credential for a repo that has a scoped entry.
 * Repos on `legacy_operator`, or with no entry, behave as before.
 * **Remote-node runs.** The node runs the agent in a shadow clone; the branch comes
-  back to the primary, which pushes it after `arb done` through the same code, so
+  back to the primary, which pushes it after `ward done` through the same code, so
   those pushes use the scoped env too, and the PR is opened by the App. The node
   itself never needs a credential for an implementer, resume, fix pass or conflict
   pass, which is why they are placed on a node whatever the repo's credential kind
@@ -449,10 +449,10 @@ on enrolled nodes like any other:
   pushes the branch the run brings back and opens the PR with the repo's credential
   (above), so a GitHub App repo's PR is authored by the App.
 * **ReviewGate fix round** on a `github_app` repo: placed on a node, carrying only the
-  installation token Arbiter minted on the primary for that round. The token is
+  installation token Wardmast minted on the primary for that round. The token is
   restricted to the one repo (`repositories`) with a worker's push permissions, and
   lasts at most an hour. It travels in the run spec's `secrets`; the node writes it to
-  a `0600` file on tmpfs (`$XDG_RUNTIME_DIR/arbiter-node/<run>/secrets.env`), the
+  a `0600` file on tmpfs (`$XDG_RUNTIME_DIR/wardmast-node/<run>/secrets.env`), the
   container's wrapper sources it, and the file is removed when the container exits
   (success or failure), when the run is cancelled or quiesced, when the agent stops,
   and by the node's reaper. It is never on argv, in `podman`'s persisted config or on
@@ -476,14 +476,14 @@ on enrolled nodes like any other:
   workers as a `worker_env` var, that var is held back from a remote run (the
   primary logs its name, never its value).
 
-To check a node after a run: `ls "$XDG_RUNTIME_DIR/arbiter-node"` on the node holds a
-directory only while a run is live, and `podman secret ls` lists no Arbiter git secret
+To check a node after a run: `ls "$XDG_RUNTIME_DIR/wardmast-node"` on the node holds a
+directory only while a run is live, and `podman secret ls` lists no Wardmast git secret
 (remote runs use the tmpfs file, not podman secrets).
 
 ## Limits, said plainly
 
 * **Unsandboxed Claude and Codex run as the operator's uid.** Scoping stops
-  Arbiter handing them the operator's credential; it cannot stop a same-uid
+  Wardmast handing them the operator's credential; it cannot stop a same-uid
   process from reading `~/.ssh` itself (see `docs/worker-security.md`, "Residual
   risk: same UID"). The bwrap jail (agy) and podman remove that reach; the deploy
   key's file is `0600` in a `0700` directory but is readable by any same-uid
@@ -493,11 +493,11 @@ directory only while a run is live, and `podman secret ls` lists no Arbiter git 
 * On a remote node only a GitHub App's, a GitLab project token (both minted per run; see
   "Remote nodes" above) or the opted-in GitLab bot PAT is ever carried; a fix round on a deploy-key or static-token repo
   stays on the primary.
-* A GitLab project token lives until its `expires_at` date (default two days) when Arbiter
+* A GitLab project token lives until its `expires_at` date (default two days) when Wardmast
   cannot revoke it: the revoke is armed in the server process, so a server that dies mid-run
   leaves the token to expire, as does a parent PAT that has been revoked or has lapsed. Set
   `expires_in_days: 1` for the shortest life GitLab allows.
-* Arbiter's tests stub the GitLab API (`Req.Test`). They cover the mint request (project,
+* Wardmast's tests stub the GitLab API (`Req.Test`). They cover the mint request (project,
   scopes, role, expiry), the refusal of an over-granted token, the revokes, delivery and
   placement, not GitLab itself. The first run on a real project shows that the parent's role
   may mint a Developer token and that the push and the API read work.
@@ -516,10 +516,10 @@ directory only while a run is live, and `podman secret ls` lists no Arbiter git 
   on the node with the run's directory until the node's reaper takes it (24 h). By
   then it is dead: the token is revoked when the round's worker exits, and expires
   within the hour.
-* The scope of a `token` is as good as the token you created: Arbiter checks it is
+* The scope of a `token` is as good as the token you created: Wardmast checks it is
   not a classic PAT, not that you restricted it to one repo.
 * Enforcement of "a push to a different repo fails" is two layers: the forge (a
   deploy key / App token / fine-grained token reaches one repo) and, for tokens,
-  the helper above. The forge-side layer is the one you configure; Arbiter's tests
+  the helper above. The forge-side layer is the one you configure; Wardmast's tests
   cover the helper and the mint request (`repositories`, permissions) but cannot
   exercise GitHub itself.
