@@ -77,6 +77,7 @@ jobs:
 
       - name: Compile (warnings as errors)
         run: mix compile --warnings-as-errors
+        timeout-minutes: 40
 
       - name: Save deps/build cache
         if: ${{ success() && steps.cache.outputs.cache-hit != 'true' }}
@@ -151,12 +152,14 @@ jobs:
           done
 
       - name: Run tests (everything not tagged :linux)
+        timeout-minutes: 80
         working-directory: apps/${{ matrix.app }}
         run: mix test --partitions ${{ matrix.partitions }} --slowest 25
         env:
           MIX_TEST_PARTITION: ${{ matrix.partition }}
 
       - name: Run wardmast_release_env tests
+        timeout-minutes: 10
         if: ${{ matrix.app == 'wardmast_cli' }}
         working-directory: apps/wardmast_release_env
         run: mix test --slowest 25
@@ -173,6 +176,8 @@ jobs:
       # acquired ("not acquired by Runner") or a superseded queued run, not a
       # test failure (bd-79hkc6). Only a real failure turns the gate red; a
       # cancelled group is surfaced as a warning so it stays visible.
+      # Step-level timeout-minutes (below the job limits) make a hung or slow
+      # step fail rather than cancel the job, so timeouts still go red.
       - name: Require compile and every shard green (cancelled is neutral)
         env:
           COMPILE: ${{ needs.compile.result }}
