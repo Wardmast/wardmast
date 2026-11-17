@@ -6,6 +6,11 @@ import Config
 # than in apps/wardmast and apps/wardmast_web, and recompile ash (607 files)
 # and friends every time a run alternates between the apps, which blew the
 # pre-push `tests` step's budget. The overrides below win over the root's.
+#
+# WARNING: `mix escript.build` embeds this config tree in the shipped `ward`
+# escript (release builds use MIX_ENV=prod), so everything in the root
+# config/config.exs and config/prod.exs ends up in the CLI binary. Keep the
+# root compile-time config free of secrets; put them in runtime.exs.
 import_config "../../../config/config.exs"
 
 # Configure Elixir's Logger
