@@ -1109,17 +1109,18 @@ defmodule Wardmast.Worker.Dispatch do
       provider: provider,
       workspace_id: task.workspace_id,
       follow_up: resume_follow_up?(task, opts, provider)
-    ] ++ auto_backend_opt(task, opts)
+    ] ++ auto_backend_opt(task, opts, provider)
   end
 
   # bd-56z2wz: a resume held at the primary's cap under `sandbox.backend: auto` names the
   # backend it would run there, like a fresh run's hold does.
-  defp auto_backend_opt(%Issue{} = task, opts) do
+  defp auto_backend_opt(%Issue{} = task, opts, provider) do
     workspace = load_workspace(task)
 
     if auto_backend?(workspace, opts) do
       backend =
         Placement.local_backend(%{
+          provider: provider,
           existing_layout: existing_checkout_layout(task, opts),
           local_backend: workspace |> dispatch_policy(opts) |> SecurityPolicy.local_backend()
         })
@@ -2238,11 +2239,19 @@ defmodule Wardmast.Worker.Dispatch do
     with false <- Keyword.get(opts, :review, false) == true,
          %SecurityPolicy{} <- policy,
          provider = quota_gate_provider(task, workspace, opts),
-         detail when is_binary(detail) <- ProviderRouting.backend_refusal(policy, provider) do
+         detail when is_binary(detail) <- ProviderRouting.backend_refusal(policy, provider),
+         false <- auto_keeps_local_bwrap?(policy, provider) do
       {:error, {:sandbox_backend, provider, "held — " <> detail}}
     else
       _ -> :ok
     end
+  end
+
+  # Under `sandbox.backend: auto` a provider with no podman wrap point (agy) is
+  # not refused for an unplaced `local_backend: podman`: placement keeps it
+  # local on bwrap (the routing decision says "no container wrap point").
+  defp auto_keeps_local_bwrap?(policy, provider) do
+    SecurityPolicy.auto?(policy) and match?({:error, _}, Sandbox.module(:podman, provider))
   end
 
   # bd-13pqcp: a workspace not routed by quota still picks its implementer from
@@ -3125,7 +3134,7 @@ defmodule Wardmast.Worker.Dispatch do
     where =
       case outcome do
         {:node, _} -> :node
-        {:local, _} -> request.existing_layout || :local
+        {:local, _} -> request.existing_layout || local_where(request)
       end
 
     opts =
@@ -3137,6 +3146,9 @@ defmodule Wardmast.Worker.Dispatch do
   end
 
   defp place_backend(result, _workspace, _request, _outcome), do: result
+
+  defp local_where(request),
+    do: if(Placement.local_backend(request) == :bwrap, do: :linked_worktree, else: :local)
 
   # The only way an `auto` run can be refused for its provider: its checkout is already a
   # private clone and the provider has no container wrap point, so neither side can run it.

@@ -202,6 +202,20 @@ defmodule Wardmast.Worker.DispatchAutoBackendTest do
       stop(issue, pid)
     end
 
+    test "(d2) an agy run under auto + local_backend podman stays local on bwrap, not refused" do
+      issue = ready!(workspace!("prefer_remote"), "auto agy local podman")
+      opts = [security: %{"sandbox" => %{"backend" => "auto", "local_backend" => "podman"}}]
+
+      assert {:ok, %{worker_pid: pid}} =
+               dispatch(issue, [node_row()], [agent_type: :gemini, start_claude: false] ++ opts)
+
+      assert Placement.reservations() == []
+      assert GitLayout.existing(checkout_path(issue)) == :linked_worktree
+      assert %{"placement" => %{"sandbox_backend" => phrase}} = decision(issue)
+      assert phrase =~ "no container wrap point -> local bwrap"
+      stop(issue, pid)
+    end
+
     test "worker.placement local_only keeps auto on the primary, bwrap" do
       issue = ready!(workspace!("local_only"), "auto local only")
 

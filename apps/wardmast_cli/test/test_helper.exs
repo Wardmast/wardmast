@@ -1,3 +1,13 @@
+# bd-datu4q: macOS host tuning (TMPDIR realpath, wider assert_receive_timeout). Must
+# run before anything calls System.tmp_dir!/0. A no-op on Linux; see the script.
+host_tuning =
+  "../../../scripts/test_host_tuning.exs"
+  |> Path.expand(__DIR__)
+  |> Code.eval_file()
+  |> elem(0)
+
+host_tuning.normalize_tmpdir.(System.get_env(), :os.type())
+
 System.delete_env("ARBITER_WORKTREE_ROOT")
 System.delete_env("ARBITER_OUTPUT_LOG_ROOT")
 System.delete_env("ARBITER_MEMORY_ROOT")
@@ -27,7 +37,10 @@ linux_exclude =
   |> elem(0)
   |> then(& &1.(System.get_env(), :os.type()))
 
-ExUnit.start([exclude: [:escript_build] ++ linux_exclude] ++ max_cases_opts)
+ExUnit.start(
+  [exclude: [:escript_build] ++ linux_exclude] ++
+    host_tuning.ex_unit_opts.(System.get_env(), :os.type()) ++ max_cases_opts
+)
 
 # Make sure :req's transitive apps (finch, mint, etc.) are started for tests
 # that hit the Req.Test plug adapter.

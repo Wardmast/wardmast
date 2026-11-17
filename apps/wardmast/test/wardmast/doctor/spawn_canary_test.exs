@@ -510,6 +510,8 @@ defmodule Wardmast.Doctor.SpawnCanaryTest do
       assert File.ls!(tmp_root) == []
     end
 
+    # Linux-only: the memory-cap scope is a systemd-run cgroup scope; systemd/cgroups exist only on Linux
+    @tag :linux
     test "runs the agent in its own memory scope and stops it afterwards" do
       sandbox = provision!()
       workspace!(["claude"])

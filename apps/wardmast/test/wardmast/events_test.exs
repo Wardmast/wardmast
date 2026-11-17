@@ -115,7 +115,9 @@ defmodule Wardmast.EventsTest do
     end
 
     test "a since timestamp before any events replays everything after it", %{ws: ws} do
-      before = DateTime.utc_now()
+      # A second of margin: `occurred_at` is stamped by a different clock read than
+      # `before`, and equal-instant events do not count as "after".
+      before = DateTime.add(DateTime.utc_now(), -1, :second)
       Events.broadcast(ws.id, "worker_done", %{task_id: "bd-ts"})
 
       %{events: replayed} = Events.replay(ws.id, ["worker_done"], {:timestamp, before})

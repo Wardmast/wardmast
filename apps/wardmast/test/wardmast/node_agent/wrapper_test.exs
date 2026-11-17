@@ -228,6 +228,8 @@ defmodule Wardmast.NodeAgent.WrapperTest do
       )
     end
 
+    # Linux-only: the unit's ExecStartPre wrapper uses GNU `mv -T`; it only runs under a Linux systemd unit
+    @tag :linux
     test "an upgrade never confirmed after three minutes is rolled back", ctx do
       pending(ctx, 400)
       {out, 0} = run(ctx, ["pre-start"])
