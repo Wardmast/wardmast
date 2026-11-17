@@ -83,14 +83,27 @@ helm release name (`helm list -n NS`), VERSION a release containing this change.
     Afterwards remove stragglers:
         kubectl -n NS delete pods -l arbiter.dev/install
 
- 2. Copy the node credential to its new name (the controller's Role is name-scoped):
-        kubectl -n NS get secret arbiter-node-credential -o json \
-          | jq '.metadata |= {name: "wardmast-node-credential"} | .metadata.namespace = "NS"' \
-          | kubectl apply -f -
-    Same for the CA Secret and the join/tailscale Secrets you created by hand
-    (`arbiter-controller-ca` -> `wardmast-controller-ca`, `arbiter-join` -> `wardmast-join`,
-    `arbiter-tailscale` -> `wardmast-tailscale`; or point values `join.existingSecret` /
-    `reach.tailscale.authKeySecret` at the old names).
+ 2. Copy the node credential to its new name (the controller's Role is name-scoped). The
+    copy MUST carry Helm's ownership metadata, or step 4 fails with "exists and cannot be
+    imported into the current release: invalid ownership metadata" -- after step 3 has
+    already deleted the old controller. `data` is kept; uid/resourceVersion are dropped:
+        copy_secret() {   # copy_secret OLD NEW
+          kubectl -n NS get secret "$1" -o json \
+            | jq --arg new "$2" --arg rel REL --arg ns NS \
+                '.metadata = {name: $new, namespace: $ns,
+                   labels: {"app.kubernetes.io/managed-by": "Helm"},
+                   annotations: {"meta.helm.sh/release-name": $rel,
+                                 "meta.helm.sh/release-namespace": $ns}}' \
+            | kubectl apply -f -
+        }
+        copy_secret arbiter-node-credential wardmast-node-credential
+        copy_secret arbiter-controller-ca   wardmast-controller-ca
+    Same for the join/tailscale Secrets you created by hand, if any (`arbiter-join` ->
+    `wardmast-join`, `arbiter-tailscale` -> `wardmast-tailscale`; or point values
+    `join.existingSecret` / `reach.tailscale.authKeySecret` at the old names, in which case
+    no copy is needed for those). Check the copies kept their data before step 3:
+        kubectl -n NS get secret wardmast-node-credential wardmast-controller-ca \
+          -o jsonpath='{range .items[*]}{.metadata.name}{" keys="}{.data}{"\n"}{end}'
 
  3. The Deployment's selector label changed and selectors are immutable, so remove the
     old controller Deployment first (it is stateless; the credential lives in the Secret):

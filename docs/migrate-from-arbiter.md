@@ -44,8 +44,16 @@ active, when the data home's pid file names a live server, or when both `~/.arbi
 A system-wide unit (`/etc/systemd/system/arbiter.service`) is reported, not migrated
 (the script never uses sudo): stop and disable it, then `ward install service --system`.
 
-Rollback before you start the new unit: `rm ~/.arbiter` (the symlink), `mv ~/.wardmast
-~/.arbiter`, restore `*.pre-wardmast` unit files and `wardmast.env.pre-migrate`.
+Rollback before you start the new unit:
+
+```sh
+rm ~/.arbiter                                   # the compat symlink
+mv ~/.wardmast ~/.arbiter
+ln -sfn ~/.arbiter/releases/<vN> ~/.arbiter/current   # `current` was repointed at ~/.wardmast/...
+cp ~/.arbiter/wardmast.env.pre-migrate ~/.arbiter/arbiter.env   # the env file goes back under its old name
+# rename ~/.arbiter/log/wardmast.log* back to arbiter.log*
+# restore each *.pre-wardmast unit file under ~/.config/systemd/user/ to its original name
+```
 
 ## A cluster install (helm)
 
@@ -53,7 +61,7 @@ The chart is now `wardmast-node`, the controller image `ghcr.io/<owner>/wardmast
 the worker base image `ghcr.io/<owner>/wardmast-worker-base`, every Kubernetes object
 `wardmast-*` and pod labels `wardmast.dev/*`; a new install defaults to the
 `wardmast-workers` namespace. Upgrading an existing `arbiter-node` release is a
-manual sequence (copy the credential Secret, delete the old Deployment, upgrade, verify)
+manual sequence (copy the credential Secrets with Helm ownership metadata, delete the old Deployment, upgrade, verify)
 because object names and the Deployment selector changed:
 
 ```sh
