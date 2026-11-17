@@ -14,11 +14,13 @@ defmodule Wardmast.NodeAgent.K8s.Identity do
   | `own_pod` | `HOSTNAME`, the pod's name: the Lease holder, and never swept |
   | `max_wall_s` | `ARB_K8S_MAX_WALL_S`, default #{86_400} (a day): a pod's `activeDeadlineSeconds` is this plus 30 minutes, the backstop for a pod whose controller is gone |
 
-  The primary also names `canary_image`, the image the NetworkPolicy canary runs
-  (`Wardmast.Nodes.ClusterInstall.controller_facts/1`).
+  The primary also names `canary_image`, the image the NetworkPolicy canary runs, and
+  `agy`, the two halves of `caps.agy` (`Wardmast.NodeAgent.K8s.AgyFacts`), both from
+  `Wardmast.Nodes.ClusterInstall.controller_facts/1`.
   """
 
   alias Wardmast.NodeAgent.Config
+  alias Wardmast.NodeAgent.K8s.AgyFacts
   alias Wardmast.NodeAgent.K8s.Client
 
   @deployment "wardmast-controller"
@@ -29,7 +31,8 @@ defmodule Wardmast.NodeAgent.K8s.Identity do
   @type facts :: %{
           install_id: String.t(),
           registry: String.t() | nil,
-          canary_image: String.t() | nil
+          canary_image: String.t() | nil,
+          agy: AgyFacts.facts()
         }
 
   @doc "The primary's facts for this controller (`GET /nodes/cluster`)."
