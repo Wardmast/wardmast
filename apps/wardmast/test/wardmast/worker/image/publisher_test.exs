@@ -900,11 +900,19 @@ defmodule Wardmast.Worker.Image.PublisherTest do
          %{opts: opts, ctx: ctx} do
       test = self()
 
+      first_push = :atomics.new(1, [])
+
       slow =
         runner(test, %{
           "push" => fn args ->
-            send(test, {:push_blocked, self()})
-            receive do: (:release -> :ok)
+            # Only the FIRST push parks on :release. Later pushes in the same flight
+            # must not park: a fixed-window drain of {:push_blocked, _} would race
+            # a push that arrives after the window and leave the flight hung.
+            if :atomics.add_get(first_push, 1, 1) == 1 do
+              send(test, {:push_blocked, self()})
+              receive do: (:release -> :ok)
+            end
+
             remote = List.last(args)
             File.write!(flag(args, "--digestfile"), "sha256:" <> digest_for(remote))
             {"", 0}
@@ -919,8 +927,6 @@ defmodule Wardmast.Worker.Image.PublisherTest do
       # A second caller joins the same flight instead of starting another one.
       second = Task.async(fn -> Publisher.ensure_ready(ctx, [{:timeout_ms, 5_000} | opts]) end)
       send(blocked, :release)
-      # The toolchain push is released; later pushes in the flight block likewise.
-      release_all()
 
       assert {:ok, %{ref: ref}} = Task.await(second, 5_000)
       assert Wardmast.Worker.Image.Registry.digest_pinned?(ref)
@@ -938,11 +944,19 @@ defmodule Wardmast.Worker.Image.PublisherTest do
          %{opts: opts, ctx: ctx} do
       test = self()
 
+      first_push = :atomics.new(1, [])
+
       slow =
         runner(test, %{
           "push" => fn args ->
-            send(test, {:push_blocked, self()})
-            receive do: (:release -> :ok)
+            # Only the FIRST push parks on :release. Later pushes in the same flight
+            # must not park: a fixed-window drain of {:push_blocked, _} would race
+            # a push that arrives after the window and leave the flight hung.
+            if :atomics.add_get(first_push, 1, 1) == 1 do
+              send(test, {:push_blocked, self()})
+              receive do: (:release -> :ok)
+            end
+
             remote = List.last(args)
             File.write!(flag(args, "--digestfile"), "sha256:" <> digest_for(remote))
             {"", 0}
@@ -962,7 +976,6 @@ defmodule Wardmast.Worker.Image.PublisherTest do
       assert {:pending, ^key} = Publisher.ensure_ready(ctx, nowait)
 
       send(blocked, :release)
-      release_all()
 
       assert_receive {:settled, ^key, {:ok, %{ref: ref}}}, 5_000
       assert_receive {:settled, ^key, {:ok, %{ref: ^ref}}}, 5_000
@@ -1179,16 +1192,6 @@ defmodule Wardmast.Worker.Image.PublisherTest do
       assert {:ok, _} = Publisher.ensure_ready(%{ctx | seed_paths: ["deps", "priv/plts"]}, opts)
       status = Publisher.status(Keyword.put(opts, :probe, fn _ -> :ok end))
       assert status.seed_excluded == ["priv/plts"]
-    end
-  end
-
-  defp release_all do
-    receive do
-      {:push_blocked, pid} ->
-        send(pid, :release)
-        release_all()
-    after
-      200 -> :ok
     end
   end
 end

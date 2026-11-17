@@ -77,6 +77,12 @@ defmodule Wardmast.Worker.RunTmpLifecycleTest do
     assert String.starts_with?(tmpdir, Path.join(root, "tmp") <> "/")
     assert File.dir?(tmpdir)
 
+    # The script writes `out` BEFORE `touch $TMPDIR/x`. Removing the dir while
+    # that touch is still pending lets the child recreate an entry between
+    # force_rm_rf's ls and rmdir, so rmdir fails (:eexist) and the dir is never
+    # removed. Wait until the child has finished writing.
+    wait_for_file(Path.join(tmpdir, "x"))
+
     # read-only content must not block removal
     File.mkdir_p!(Path.join(tmpdir, "ro"))
     File.write!(Path.join(tmpdir, "ro/f"), "x")
