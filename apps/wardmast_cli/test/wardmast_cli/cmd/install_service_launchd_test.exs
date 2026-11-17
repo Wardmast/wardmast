@@ -124,13 +124,32 @@ defmodule WardmastCli.Cmd.InstallServiceLaunchdTest do
       assert err =~ "launchctl bootstrap"
     end
 
-    test "a release install (not a dev checkout) is refused for now", %{root: root} do
+    test "a release install (not a dev checkout) writes a release plist and bootstraps", %{
+      root: root,
+      arbiter_home: home,
+      agents: agents
+    } do
       File.rm_rf!(Path.join(root, "apps"))
+      File.rm!(Path.join(root, "mix.exs"))
       record_cmds()
+      plist = Path.join(agents, "com.wardmast.server.plist")
 
-      assert {_, err, 1} = capture(fn -> InstallService.run([]) end)
-      assert err =~ "dev"
-      refute Enum.any?(cmds(), fn {c, _} -> c == "launchctl" end)
+      {_out, _err, code} = capture(fn -> InstallService.run([]) end)
+
+      assert code == 0
+      xml = File.read!(plist)
+      assert xml =~ "<string>#{home}/launchd-run.sh</string>"
+      assert xml =~ "<key>WorkingDirectory</key>\n  <string>#{home}</string>"
+      refute xml =~ root
+
+      wrapper = File.read!(Path.join(home, "launchd-run.sh"))
+      assert wrapper =~ "exec '#{home}/current/bin/wardmast' start"
+      refute wrapper =~ ".run-server.sh"
+      refute File.exists?(Path.join(root, ".run-server.sh"))
+
+      cmds = cmds()
+      assert {"launchctl", ["bootstrap", "gui/501", plist]} in cmds
+      refute Enum.any?(cmds, fn {c, _} -> c in ["systemctl", "loginctl"] end)
     end
 
     test "--system is refused" do

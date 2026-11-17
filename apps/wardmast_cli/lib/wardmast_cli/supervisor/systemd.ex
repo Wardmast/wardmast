@@ -254,6 +254,25 @@ defmodule WardmastCli.Supervisor.Systemd do
 
   def logs_cmd(:system), do: "journalctl -u #{Unit.unit_name()} -f"
 
+  # ---- operator hints (restart / deploy reports) ----------------------------
+
+  @impl true
+  def manager_name, do: "systemd"
+
+  @impl true
+  def restart_cmd, do: "systemctl --user restart #{@unit}"
+
+  @impl true
+  def start_cmd, do: "systemctl --user start #{@unit}"
+
+  @impl true
+  def stop_cmd, do: "systemctl --user stop #{@unit}"
+
+  @impl true
+  def recover_cmds do
+    ["systemctl --user daemon-reexec", start_cmd(), "systemctl --user status #{@unit}"]
+  end
+
   # ---- internals ------------------------------------------------------------
 
   defp systemctl(scope, args) do

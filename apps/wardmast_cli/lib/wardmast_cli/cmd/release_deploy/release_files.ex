@@ -25,8 +25,8 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.ReleaseFiles do
   @spec current_link() :: String.t()
   def current_link, do: Path.join(data_home(), "current")
 
-  # `Restart.perform/2` only uses `root` for its non-systemd `mix phx.server`
-  # fallback; in the release world the systemd unit owns the process, so the
+  # `Restart.perform/2` only uses `root` for its non-service-manager `mix phx.server`
+  # fallback; in the release world the systemd unit / launchd job owns the process, so the
   # current symlink dir is a fine, always-present value to pass.
   @spec restart_root(String.t()) :: String.t()
   def restart_root(current_link), do: current_link
