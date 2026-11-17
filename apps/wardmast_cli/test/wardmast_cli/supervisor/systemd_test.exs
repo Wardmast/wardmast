@@ -14,7 +14,10 @@ defmodule WardmastCli.Supervisor.SystemdTest do
     end)
   end
 
-  test "the default supervisor implementation is Systemd" do
+  test "systemd is the backend for non-darwin hosts and the pinned test backend" do
+    # Host-independent: `impl/0` follows `:os.type/0` on a real host, and the
+    # test helper pins Systemd so these suites behave the same on macOS.
+    assert Supervisor.impl_for({:unix, :linux}) == Systemd
     assert Supervisor.impl() == Systemd
   end
 

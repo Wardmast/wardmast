@@ -24,6 +24,14 @@ System.delete_env("ARBITER_HOST")
 # live coordinator's server from a worker (bd-asawcq).
 Application.put_env(:wardmast_cli, :forbid_real_cmds, true)
 
+# bd-6vdoaa: `WardmastCli.Supervisor.impl/0` picks launchd on darwin, systemd
+# elsewhere. The systemd-path suites (install_service, restart, release_deploy,
+# update_deploy, session, server, supervisor/systemd) are pure unit tests over a
+# stubbed `systemctl`, so pin the backend they test explicitly instead of letting
+# the host OS choose; otherwise they fail on the macOS smoke job. The launchd
+# suites (`*_launchd_test.exs`) swap this per test and restore it afterwards.
+Application.put_env(:wardmast_cli, :supervisor, WardmastCli.Supervisor.Systemd)
+
 # bd-90vo7y: ARB_TEST_MAX_CASES / worker-default cap on async cases.
 max_cases_opts =
   "../../../scripts/test_max_cases.exs"
