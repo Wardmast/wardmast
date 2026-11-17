@@ -1238,7 +1238,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
         }
 
       {:ok, %{"stale" => stale}} when is_list(stale) ->
-        leaves = stale |> Enum.map(&Map.get(&1, "leaf")) |> Enum.join(", ")
+        leaves = Enum.map_join(stale, ", ", &Map.get(&1, "leaf"))
 
         %Result{
           name: "private clone records",
