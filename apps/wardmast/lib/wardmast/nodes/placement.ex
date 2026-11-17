@@ -411,19 +411,29 @@ defmodule Wardmast.Nodes.Placement do
   The backend an `auto` run gets once placement has said where it goes: `:podman` on a
   node, else the primary's: an existing private clone stays a container, an existing
   linked worktree stays bwrap-shaped, anything else is the request's `local_backend`
-  (`:bwrap` by default). The pure counterpart of `SecurityPolicy.concretize/2`.
+  (`:bwrap` by default). A fresh run whose `:provider` has no container wrap point (agy)
+  is always `:bwrap`; so pass `:provider`, a missing one counts as having none. The pure
+  counterpart of `SecurityPolicy.concretize/2`.
   """
   @spec local_backend(%{
           optional(:existing_layout) => :linked_worktree | :private_clone | nil,
           optional(:local_backend) => :bwrap | :podman,
+          optional(:provider) => atom() | String.t() | nil,
           optional(atom()) => term()
         }) :: :bwrap | :podman
   def local_backend(request) do
     case existing_layout(request) do
       :private_clone -> :podman
       :linked_worktree -> :bwrap
-      _ -> Map.get(request, :local_backend) || :bwrap
+      _ -> fresh_local_backend(request)
     end
+  end
+
+  # A provider with no container wrap point (agy) stays on bwrap whatever `local_backend` says.
+  defp fresh_local_backend(request) do
+    if container_provider?(Map.get(request, :provider)),
+      do: Map.get(request, :local_backend) || :bwrap,
+      else: :bwrap
   end
 
   @doc """
