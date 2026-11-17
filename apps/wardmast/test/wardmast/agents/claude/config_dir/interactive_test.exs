@@ -323,7 +323,8 @@ defmodule Wardmast.Agents.Claude.ConfigDir.InteractiveTest do
     test "pre-approves it in .claude.json's project entry too", %{config: config, tmp: tmp} do
       cwd = Path.join(tmp, "workspace")
 
-      assert :ok = Interactive.ensure(config, cwd: cwd, source_dir: nil, mcp_servers: ["wardmast"])
+      assert :ok =
+               Interactive.ensure(config, cwd: cwd, source_dir: nil, mcp_servers: ["wardmast"])
 
       assert claude_json!(config)["projects"][cwd]["enabledMcpjsonServers"] == ["wardmast"]
     end
