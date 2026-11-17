@@ -50,7 +50,7 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
   # the explicit act of classifying it as release-env-safe.
   @pure_tool_commands ~w(
     git gh glab
-    cp diff kill pgrep lsof ss
+    cp diff kill pgrep lsof ss ps
     systemctl loginctl
     stty
     dolt kubectl
@@ -143,6 +143,10 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # bd-4wy1w1: git only (init / config / update-ref / checkout / fetch) to
     # build, pin, sync back and reap a git-layout-B private clone. Deps seeding
     # (`mix deps.get`) goes through `Worktree.ensure_deps_fetched/1`.
+    # bd-82gzu5: portable `ps` liveness/cmdline probes replacing /proc reads.
+    "apps/wardmast/lib/wardmast/release/deploy_status.ex" => :pure_tool,
+    "apps/wardmast/lib/wardmast/worker/test_services.ex" => :pure_tool,
+    "apps/wardmast_cli/lib/wardmast_cli/cmd/release_deploy/status.ex" => :pure_tool,
     "apps/wardmast/lib/wardmast/worker/private_clone.ex" => :pure_tool,
     "apps/wardmast/lib/wardmast/worker/prepush_check/touched.ex" => :pure_tool,
     # bd-9obzu9: visual-baseline refresh: git only (clone / log / diff / commit / push)
