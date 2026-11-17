@@ -944,7 +944,14 @@ defmodule Wardmast.UsageTest do
       assert run.config_dir == real
 
       # And that really is where the child ran — the workspace value lost.
-      lines = Worker.state(pid).meta.output_lines
+      # The line is read off the child's stdout asynchronously; a slow runner has not
+      # always collected it by the time the run row is visible.
+      lines =
+        wait_until(fn ->
+          lines = Worker.state(pid).meta.output_lines
+          if "CFG=#{real}" in lines, do: lines
+        end)
+
       assert "CFG=#{real}" in lines
     end
 

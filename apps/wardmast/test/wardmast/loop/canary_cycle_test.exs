@@ -482,7 +482,10 @@ defmodule Wardmast.Loop.CanaryCycleTest do
       refute get_in(reverted.config, ["routing", "rules", "D2"]),
              "an unattended revert must not leave the canaried rule behind"
 
-      assert Ash.get!(PendingWrite, ctx.proposal.id).state == :rejected
+      # The config is cleared first and the proposal rejected a moment later, in the
+      # same tick; a slow runner can read between the two.
+      assert eventually(fn -> Ash.get!(PendingWrite, ctx.proposal.id).state == :rejected end),
+             "the reverted proposal must end up :rejected"
     end
   end
 

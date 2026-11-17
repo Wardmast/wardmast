@@ -98,7 +98,7 @@ else
   echo "warning: could not resolve the primary checkout (tried ARB_PRIMARY_CHECKOUT, ARB_HOME, $CONFIGURED_HOME_FILE, $HOME/dev/arbiter) — the live-checkout guard is inactive." >&2
 fi
 
-echo "Building in $CLONE_PATH…"
+echo "Building in ${CLONE_PATH}…"
 cd "$CLONE_PATH"
 
 git fetch origin main

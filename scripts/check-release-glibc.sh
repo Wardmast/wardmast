@@ -147,7 +147,7 @@ for p in "${PATHS[@]}"; do
         fi
         dest="$TMP_ROOT/$(printf '%s' "$p" | tr '/' '_')"
         mkdir -p "$dest"
-        echo "Unpacking $p…"
+        echo "Unpacking ${p}…"
         tar -xzf "$p" -C "$dest" 2>/dev/null || tar -xf "$p" -C "$dest"
         ROOTS+=("$dest")
         LABELS+=("$p")
