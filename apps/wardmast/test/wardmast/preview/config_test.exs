@@ -37,7 +37,8 @@ defmodule Wardmast.Preview.ConfigTest do
             {%{"port_env" => "1BAD"}, "p.port_env must be an environment variable name"},
             {%{"env" => "A=B"}, "p.env must be a map of strings"},
             {%{"env" => %{"A" => 1}}, "p.env.A must be a string"},
-            {%{"env" => %{"a-b" => "x"}}, "p.env key \"a-b\" is not a valid environment variable name"},
+            {%{"env" => %{"a-b" => "x"}},
+             "p.env key \"a-b\" is not a valid environment variable name"},
             {%{"ready_path" => "health"}, "p.ready_path must start with /"},
             {%{"ready_timeout" => 0}, "p.ready_timeout must be a positive integer"},
             {%{"ready_timeout" => 99_999}, "p.ready_timeout must be at most 3600"},
@@ -45,7 +46,8 @@ defmodule Wardmast.Preview.ConfigTest do
             {%{"port_range" => "abc"}, "p.port_range must be"},
             {%{"port_range" => "31999-31000"}, "p.port_range must be"},
             {%{"port_range" => "80-90"}, "p.port_range must lie within 1024-65535"},
-            {%{"port_range" => "25000-31000"}, "overlaps the worker dev-server range 20000-29999"},
+            {%{"port_range" => "25000-31000"},
+             "overlaps the worker dev-server range 20000-29999"},
             {%{"command" => "run {{prot}}"}, "p.command uses unknown placeholder {{prot}}"},
             {%{"env" => %{"A" => "{{nope}}"}}, "p.env.A uses unknown placeholder {{nope}}"}
           ] do

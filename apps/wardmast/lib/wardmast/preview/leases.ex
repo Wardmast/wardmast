@@ -33,7 +33,8 @@ defmodule Wardmast.Preview.Leases do
   """
   @spec acquire(map(), {pos_integer(), pos_integer()}, keyword()) ::
           {:ok, Lease.t()}
-          | {:error, :range_exhausted | :range_overlaps_worker_ports | {:already_leased, Lease.t()}}
+          | {:error,
+             :range_exhausted | :range_overlaps_worker_ports | {:already_leased, Lease.t()}}
   def acquire(%{repo: repo, task_id: task_id} = attrs, {lo, hi} = range, opts \\ []) do
     {wlo, whi} = Config.worker_range()
     existing = get(repo, task_id)
@@ -66,7 +67,10 @@ defmodule Wardmast.Preview.Leases do
           )
         )
 
-      case row |> Ecto.Changeset.change() |> Ecto.Changeset.unique_constraint(:port) |> Repo.insert() do
+      case row
+           |> Ecto.Changeset.change()
+           |> Ecto.Changeset.unique_constraint(:port)
+           |> Repo.insert() do
         {:ok, lease} -> {:ok, lease}
         {:error, _lost_the_race} -> take_first(attrs, rest, probe)
       end
@@ -111,7 +115,7 @@ defmodule Wardmast.Preview.Leases do
   @doc "True when nothing is listening on `port` at 127.0.0.1."
   @spec port_free?(non_neg_integer()) :: boolean()
   def port_free?(port) do
-    case :gen_tcp.listen(port, [:binary, ip: {127, 0, 0, 1}, reuseaddr: false, active: false]) do
+    case :gen_tcp.listen(port, [:binary, ip: {127, 0, 0, 1}, reuseaddr: true, active: false]) do
       {:ok, socket} ->
         :gen_tcp.close(socket)
         true

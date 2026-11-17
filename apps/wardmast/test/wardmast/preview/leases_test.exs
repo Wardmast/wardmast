@@ -8,7 +8,11 @@ defmodule Wardmast.Preview.LeasesTest do
   @range {31_000, 31_009}
 
   defp acquire(repo, task_id, opts \\ []) do
-    Leases.acquire(%{repo: repo, task_id: task_id}, @range, Keyword.put_new(opts, :probe, fn _ -> true end))
+    Leases.acquire(
+      %{repo: repo, task_id: task_id},
+      @range,
+      Keyword.put_new(opts, :probe, fn _ -> true end)
+    )
   end
 
   test "two previews of one repo and previews of different repos get distinct ports in range" do
@@ -37,7 +41,9 @@ defmodule Wardmast.Preview.LeasesTest do
 
   test "an out-of-range overlap with the worker range is refused outright" do
     assert {:error, :range_overlaps_worker_ports} =
-             Leases.acquire(%{repo: "app", task_id: "bd-1"}, {29_990, 30_010}, probe: fn _ -> true end)
+             Leases.acquire(%{repo: "app", task_id: "bd-1"}, {29_990, 30_010},
+               probe: fn _ -> true end
+             )
   end
 
   test "skips ports that fail the free probe" do

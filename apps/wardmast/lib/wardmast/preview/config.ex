@@ -169,7 +169,9 @@ defmodule Wardmast.Preview.Config do
     |> Enum.map(fn [_, name] -> name end)
     |> Enum.reject(&(&1 in @placeholders))
     |> Enum.uniq()
-    |> Enum.map(&"#{label} uses unknown placeholder {{#{&1}}} (known: #{Enum.join(@placeholders, ", ")})")
+    |> Enum.map(
+      &"#{label} uses unknown placeholder {{#{&1}}} (known: #{Enum.join(@placeholders, ", ")})"
+    )
   end
 
   defp parse_range([lo, hi]) when is_integer(lo) and is_integer(hi) and lo <= hi,
