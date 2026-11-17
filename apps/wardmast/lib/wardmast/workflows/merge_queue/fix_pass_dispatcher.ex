@@ -688,8 +688,7 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassDispatcher do
   defp node_opts(node, context), do: [node: node, base_branch: context.target_branch]
 
   # bd-56z2wz: the checkout the pass runs in, whose layout `sandbox.backend: auto` keeps.
-  defp checkout_path(%{branch: branch}) when is_binary(branch), do: Worktree.worktree_path(branch)
-  defp checkout_path(_context), do: nil
+  defp checkout_path(%{branch: branch}), do: Worktree.worktree_path(branch)
 
   defp container_opts(context, provider) do
     case ContainerSpawn.pass_policy(

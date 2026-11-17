@@ -278,7 +278,8 @@ defmodule Wardmast.Nodes.Placement do
           optional(atom()) => term()
         }
   @type result ::
-          {:ok, {:local, :no_node | {:node_skipped, [map()]} | {:local_only, reason()}}}
+          {:ok,
+           {:local, :no_node | :prefer_local | {:node_skipped, [map()]} | {:local_only, reason()}}}
           | {:ok, {:node, map()}}
           | {:error, {:no_node_capacity, info()}}
 
@@ -412,7 +413,11 @@ defmodule Wardmast.Nodes.Placement do
   linked worktree stays bwrap-shaped, anything else is the request's `local_backend`
   (`:bwrap` by default). The pure counterpart of `SecurityPolicy.concretize/2`.
   """
-  @spec local_backend(request()) :: :bwrap | :podman
+  @spec local_backend(%{
+          optional(:existing_layout) => :linked_worktree | :private_clone | nil,
+          optional(:local_backend) => :bwrap | :podman,
+          optional(atom()) => term()
+        }) :: :bwrap | :podman
   def local_backend(request) do
     case existing_layout(request) do
       :private_clone -> :podman
