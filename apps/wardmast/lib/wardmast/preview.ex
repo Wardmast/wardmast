@@ -486,26 +486,27 @@ defmodule Wardmast.Preview do
   end
 
   defp sweep_reason(%Lease{} = row, now) do
-    cond do
-      Runner.whereis(row.repo, row.task_id) == nil and past_launch_grace?(row, now) ->
-        :orphaned
-
-      Runner.whereis(row.repo, row.task_id) == nil ->
-        nil
-
-      ticket_done?(row.task_id) ->
-        "the ticket is closed or merged"
-
-      (row.checkout_kind == "worktree" and row.checkout_path) && not File.dir?(row.checkout_path) ->
-        "its worktree was removed"
-
-      idle?(row, now) ->
-        "idle too long"
-
-      true ->
-        nil
+    if Runner.whereis(row.repo, row.task_id) do
+      live_reason(row, now)
+    else
+      if past_launch_grace?(row, now), do: :orphaned
     end
   end
+
+  defp live_reason(%Lease{} = row, now) do
+    cond do
+      ticket_done?(row.task_id) -> "the ticket is closed or merged"
+      worktree_removed?(row) -> "its worktree was removed"
+      idle?(row, now) -> "idle too long"
+      true -> nil
+    end
+  end
+
+  defp worktree_removed?(%Lease{checkout_kind: "worktree", checkout_path: path})
+       when is_binary(path),
+       do: not File.dir?(path)
+
+  defp worktree_removed?(_row), do: false
 
   # A row exists from the moment the port is leased, before its Runner starts
   # (the checkout is built in between). Only a row with no Runner well past that

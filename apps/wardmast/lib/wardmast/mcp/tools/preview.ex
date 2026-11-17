@@ -12,6 +12,7 @@ defmodule Wardmast.MCP.Tools.Preview do
 
   alias Wardmast.MCP.Scope
   alias Wardmast.MCP.Tools
+  alias Wardmast.Params
   alias Wardmast.Preview
 
   @failed_tail_lines 40
@@ -21,8 +22,8 @@ defmodule Wardmast.MCP.Tools.Preview do
   def preview_start(%Scope{} = scope, args) do
     with {:ok, task_id} <- Tools.resolve_task_id(scope, args, "task_id"),
          {:ok, _task} <- Tools.fetch_task(scope, args, task_id),
-         {:ok, row} <-
-           run(Preview.start(task_id, repo_opts(args) ++ [wait: truthy(args["wait"])])) do
+         {:ok, wait?} <- Params.fetch_bool(args, "wait", false),
+         {:ok, row} <- run(Preview.start(task_id, repo_opts(args) ++ [wait: wait?])) do
       {:ok, %{preview: render(row)}}
     end
   end
@@ -45,19 +46,22 @@ defmodule Wardmast.MCP.Tools.Preview do
   def preview_list(%Scope{} = scope, args) do
     with {:ok, ws_id} <- Tools.authorized_workspace(scope, args) do
       case args["task_id"] do
-        id when is_binary(id) and id != "" ->
-          with {:ok, _task} <- Tools.fetch_task(scope, args, id) do
-            case Preview.get(id, repo_opts(args)) do
-              nil -> {:error, {:not_found, "no preview for task #{id}"}}
-              row -> {:ok, %{preview: render(row), workspace_id: ws_id}}
-            end
-          end
+        id when is_binary(id) and id != "" -> show_one(scope, args, id, ws_id)
+        _ -> {:ok, %{previews: list_all(ws_id), workspace_id: ws_id}}
+      end
+    end
+  end
 
-        _ ->
-          opts = if ws_id, do: [workspace_id: ws_id], else: []
+  defp list_all(ws_id) do
+    opts = if ws_id, do: [workspace_id: ws_id], else: []
+    Enum.map(Preview.list(opts), &Preview.serialize/1)
+  end
 
-          {:ok,
-           %{previews: Enum.map(Preview.list(opts), &Preview.serialize/1), workspace_id: ws_id}}
+  defp show_one(scope, args, id, ws_id) do
+    with {:ok, _task} <- Tools.fetch_task(scope, args, id) do
+      case Preview.get(id, repo_opts(args)) do
+        nil -> {:error, {:not_found, "no preview for task #{id}"}}
+        row -> {:ok, %{preview: render(row), workspace_id: ws_id}}
       end
     end
   end
@@ -99,8 +103,10 @@ defmodule Wardmast.MCP.Tools.Preview do
   defp repo_opts(%{"repo" => repo}) when is_binary(repo) and repo != "", do: [repo: repo]
   defp repo_opts(_), do: []
 
-  defp truthy(v), do: v in [true, "true"]
-
-  defp pos_int(n) when is_integer(n) and n >= 0, do: n
-  defp pos_int(_), do: nil
+  defp pos_int(raw) do
+    case Params.integer(raw) do
+      {:ok, n} when n >= 0 -> n
+      _ -> nil
+    end
+  end
 end
