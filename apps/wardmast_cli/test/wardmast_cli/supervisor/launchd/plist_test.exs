@@ -75,6 +75,48 @@ defmodule WardmastCli.Supervisor.Launchd.PlistTest do
     end
   end
 
+  describe "release mode (no :root)" do
+    @release_opts [arbiter_home: "/Users/me/.wardmast", env: [{"WARDMAST_HOST", "http://h"}]]
+
+    test "plist runs the same wrapper from the data home, not a checkout" do
+      xml = Plist.plist(@release_opts)
+
+      assert xml =~ "<string>/Users/me/.wardmast/launchd-run.sh</string>"
+      assert xml =~ "<key>WorkingDirectory</key>\n  <string>/Users/me/.wardmast</string>"
+      assert xml =~ "<key>WARDMAST_HOST</key>\n    <string>http://h</string>"
+      refute xml =~ "ARB_HOME"
+      assert xml =~ "<key>RunAtLoad</key>\n  <true/>"
+    end
+
+    test "wrapper loads wardmast.env then execs current/bin/wardmast start" do
+      script = Plist.wrapper_script(@release_opts)
+
+      assert script =~ "env_file='/Users/me/.wardmast/wardmast.env'"
+      assert script =~ "cd '/Users/me/.wardmast'"
+      assert script =~ "exec '/Users/me/.wardmast/current/bin/wardmast' start"
+      refute script =~ ".run-server.sh"
+    end
+
+    test "the exec target resolves through the current symlink on every start" do
+      tmp = Path.join(System.tmp_dir!(), "arb-plist-rel-#{System.unique_integer([:positive])}")
+      home = Path.join(tmp, "home")
+      out = Path.join(tmp, "out.txt")
+      rel = Path.join([home, "releases", "v1", "bin"])
+      File.mkdir_p!(rel)
+      on_exit(fn -> File.rm_rf(tmp) end)
+
+      File.write!(Path.join(rel, "wardmast"), ~s(#!/bin/sh\necho "$1 $SECRET" > '#{out}'\n))
+      File.chmod!(Path.join(rel, "wardmast"), 0o755)
+      File.ln_s!(Path.join(home, "releases/v1"), Path.join(home, "current"))
+      File.write!(Path.join(home, "wardmast.env"), "SECRET=s3cret\n")
+
+      wrapper = Path.join(home, "launchd-run.sh")
+      File.write!(wrapper, Plist.wrapper_script(arbiter_home: home))
+      assert {_out, 0} = System.cmd("/bin/sh", [wrapper], stderr_to_stdout: true)
+      assert File.read!(out) == "start s3cret\n"
+    end
+  end
+
   defp wrapper_dirs do
     tmp = Path.join(System.tmp_dir!(), "arb-plist-wrap-#{System.unique_integer([:positive])}")
     root = Path.join(tmp, "checkout")

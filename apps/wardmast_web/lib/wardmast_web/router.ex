@@ -415,6 +415,7 @@ defmodule WardmastWeb.Router do
     get("/server/cli_versions", ServerController, :cli_versions)
     get("/server/tmux", ServerController, :tmux)
     get("/server/doctor_scope", ServerController, :doctor_scope)
+    get("/server/platform", ServerController, :platform)
     get("/server/spawn_canary", ServerController, :spawn_canary_report)
     post("/server/spawn_canary", ServerController, :spawn_canary)
     get("/server/worker_tmp", ServerController, :worker_tmp)
@@ -471,6 +472,13 @@ defmodule WardmastWeb.Router do
     # Shared circuit breaker (bd-5jr49o): inspect and re-arm
     get("/breakers", BreakerController, :index)
     post("/breakers/reset", BreakerController, :reset)
+
+    # App previews: run a ticket's checkout as a live app (`ward preview ...`)
+    get("/previews", PreviewController, :index)
+    post("/previews", PreviewController, :create)
+    get("/previews/:task_id", PreviewController, :show)
+    get("/previews/:task_id/logs", PreviewController, :logs)
+    post("/previews/:task_id/stop", PreviewController, :stop)
 
     # Grok credential broker (bd-9p4lx9): the worker's GROK_AUTH_PROVIDER_COMMAND
     # (`arb grok-token`) asks for a short-lived access token here

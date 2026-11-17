@@ -6,7 +6,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   """
 
   alias WardmastCli.{Client, OperatorSocket, SchedulerState, Workspace}
-  alias WardmastCli.Cmd.Doctor.{Distribution, Scope, SecretsAtRest}
+  alias WardmastCli.Cmd.Doctor.{Darwin, Distribution, Scope, SecretsAtRest}
   alias WardmastCli.Cmd.Start
 
   defmodule Result do
@@ -127,10 +127,24 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   @spec run(keyword()) :: [Result.t()]
   def run(opts \\ []) do
     scope = Scope.fetch()
+    platform = if Keyword.has_key?(opts, :os), do: %{}, else: fetch_platform()
+
+    # The platform is the *server's* (WARDMAST_HOST may be remote); `opts[:os]`
+    # is only the test override.
+    darwin? =
+      case Keyword.fetch(opts, :os) do
+        {:ok, os} -> Darwin.darwin?(os)
+        :error -> platform["os"] == "darwin"
+      end
 
     registry(opts)
     |> Enum.flat_map(fn {id, group, parent, applies_when, check} ->
-      case Scope.applies?(scope, applies_when) do
+      applicability =
+        if darwin? and id in Darwin.linux_only_ids(),
+          do: {:no, Darwin.na_reason()},
+          else: Scope.applies?(scope, applies_when)
+
+      case applicability do
         :yes ->
           check.(scope) |> List.wrap() |> tag(id, group, parent)
 
@@ -138,7 +152,22 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
           [%Result{name: na_name(id), status: :na, detail: reason} |> tag_one(id, group, parent)]
       end
     end)
+    |> Kernel.++(if darwin?, do: Darwin.checks(darwin_opts(opts, platform)), else: [])
     |> Enum.sort_by(&group_rank(&1.group))
+  end
+
+  # An older server without the endpoint, or an error, is "not darwin".
+  defp fetch_platform do
+    case Client.get("/api/server/platform") do
+      {:ok, %{} = body} -> body
+      _ -> %{}
+    end
+  end
+
+  defp darwin_opts(opts, platform) do
+    Keyword.get_lazy(opts, :darwin, fn ->
+      [path: platform["path"] || "", tools: platform["tools"] || %{}]
+    end)
   end
 
   @group_order [:core, :auth, :sandboxes, :security]
@@ -165,7 +194,9 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     "agy_jail_keyring" => "agy jail keyring proxy",
     "agy_ssh_transport" => "agy ssh transport",
     "egress_jail" => "egress jail",
-    "podman_sandbox" => "podman sandbox readiness"
+    "podman_sandbox" => "podman sandbox readiness",
+    "worker_memory" => "worker memory cap",
+    "worker_jail_unmask" => "worker jail unmask"
   }
   defp na_name(id), do: Map.fetch!(@na_names, id)
 

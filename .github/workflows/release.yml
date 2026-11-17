@@ -256,6 +256,197 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # macOS arm64 release (bd-6uq02m, epic "Arbiter on macOS"): the same OTP
+  # release as `build`, compiled natively on Apple Silicon and published as
+  # arbiter-<tag>-darwin-arm64.tar.gz (+ .sha256) onto the GitHub Release the
+  # Linux job created.
+  #
+  # It `needs: build` so the release already exists (two jobs racing to create
+  # it would fail one of them), and nothing needs *it*: publish-oci depends on
+  # `build` only, so a broken macOS build can never hold back the Linux
+  # tarball, the controller image or the chart. It does turn the run red, which
+  # is the signal to fix it before the next tag.
+  #
+  # Differences from `build`, each deliberate:
+  #   - no container: macOS has no ubi8 baseline; portability is instead the
+  #     MACOSX_DEPLOYMENT_TARGET pin plus scripts/check-release-macho-libs.sh
+  #     (system / relative dylibs only — the static OpenSSL guard).
+  #   - OTP comes from scripts/build-release-otp.sh (darwin64-arm64-cc), cached
+  #     under $HOME/otp (/opt is not writable on the runner) with its own key.
+  #   - rustup ships on the runner image, so the pinned toolchain is selected
+  #     with it rather than piped from sh.rustup.rs. The mdex NIF is still
+  #     built from source (FORCE_BUILD_ALL) so it honours the deployment target
+  #     instead of whatever target upstream's prebuilt artifact was made for.
+  #   - tarball hygiene: COPYFILE_DISABLE stops bsdtar writing AppleDouble
+  #     `._*` entries, and the systemd unit overlay is dropped (launchd is the
+  #     macOS service manager).
+  #   - no escript, migration manifest, container inputs: `build` publishes
+  #     those once; they are platform-independent.
+  build-macos:
+    name: Build OTP Release (macOS arm64)
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    permissions:
+      contents: write
+
+    env:
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+      ELIXIR_ERL_OPTIONS: "+fnu"
+      MIX_ENV: prod
+      ARB_BUILD_RELEASE_REPO: ${{ github.repository }}
+      # Lowest macOS the tarball runs on. Read by clang (OpenSSL, OTP) and rustc
+      # (the mdex NIF); scripts/build-release-otp.sh defaults to the same value.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      RUSTLER_PRECOMPILED_FORCE_BUILD_ALL: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore Erlang/OTP build cache
+        id: otp-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/otp
+          key: otp-static-openssl-macos15-arm64-${{ hashFiles('scripts/build-release-otp.sh') }}
+
+      - name: Build Erlang/OTP 29 with static OpenSSL
+        if: steps.otp-cache.outputs.cache-hit != 'true'
+        run: |
+          bash scripts/build-release-otp.sh --prefix "${HOME}/otp"
+
+      - name: Put Erlang/OTP on PATH
+        run: |
+          echo "${HOME}/otp/bin" >> "$GITHUB_PATH"
+          "${HOME}/otp/bin/erl" -noshell -eval 'ok = crypto:start(), io:format("~p~n", [crypto:info_lib()]), halt().'
+
+      - name: Install Elixir 1.20
+        run: |
+          ELIXIR_VERSION="1.20.4"
+          OTP_MAJOR="29"
+          curl -fsSL "https://repo.hex.pm/builds/elixir/v${ELIXIR_VERSION}-otp-${OTP_MAJOR}.zip" -o "${RUNNER_TEMP}/elixir.zip"
+          mkdir -p "${HOME}/elixir"
+          unzip -q "${RUNNER_TEMP}/elixir.zip" -d "${HOME}/elixir"
+          echo "${HOME}/elixir/bin" >> "$GITHUB_PATH"
+
+      - name: Select the pinned Rust toolchain
+        # Keep RUST_VERSION in step with the `build` job's Install Rust
+        # toolchain step (and at or above the rust-version in
+        # deps/mdex_native/native/mdex_native_nif/Cargo.toml). The runner image
+        # carries rustup; install it only if a future image drops it.
+        run: |
+          RUST_VERSION="1.91.0"
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+            echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="${HOME}/.cargo/bin:${PATH}"
+          fi
+          rustup toolchain install "${RUST_VERSION}" --profile minimal
+          rustup default "${RUST_VERSION}"
+          cargo --version
+          rustc --version
+
+      - name: Bootstrap Hex and Rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Determine tag name
+        id: tag
+        run: |
+          TAG="${{ needs.build.outputs.tag }}"
+          echo "name=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Get production dependencies
+        run: |
+          MIX_ENV=prod mix deps.get --only prod
+
+      - name: Install asset build tools
+        run: |
+          MIX_ENV=prod mix cmd --app wardmast_web mix assets.setup
+        env:
+          RELEASE_VERSION: ${{ steps.tag.outputs.name }}
+
+      - name: Compile (prod)
+        run: |
+          MIX_ENV=prod mix compile
+        env:
+          RELEASE_VERSION: ${{ steps.tag.outputs.name }}
+
+      - name: Build and digest web assets
+        run: |
+          MIX_ENV=prod mix cmd --app wardmast_web mix assets.deploy
+
+      - name: Build OTP release
+        run: |
+          MIX_ENV=prod mix release wardmast
+        env:
+          RELEASE_VERSION: ${{ steps.tag.outputs.name }}
+
+      - name: Ad-hoc codesign Mach-O files and verify
+        # arm64 macOS refuses to run unsigned code. Sign every Mach-O file
+        # (ad hoc, no identity) after the release is assembled and before it is
+        # archived, then verify each signature.
+        run: |
+          REL="_build/prod/rel/wardmast"
+          signed=0
+          while IFS= read -r -d '' f; do
+            case "$(head -c 4 "$f" | od -An -tx1 | tr -d ' \n')" in
+              cffaedfe | feedfacf | cefaedfe | feedface | cafebabe | bebafeca) ;;
+              *) continue ;;
+            esac
+            codesign --force -s - "$f"
+            codesign --verify --strict "$f"
+            signed=$((signed + 1))
+          done < <(find "${REL}" -type f -print0)
+          if [ "${signed}" -eq 0 ]; then
+            echo "error: no Mach-O files found to sign under ${REL}" >&2
+            exit 1
+          fi
+          echo "signed and verified ${signed} Mach-O file(s)"
+
+      - name: Package and checksum release
+        run: |
+          TAG="${{ steps.tag.outputs.name }}"
+          TARBALL="arbiter-${TAG}-darwin-arm64.tar.gz"
+          REL="_build/prod/rel/wardmast"
+          # No systemd on macOS: drop the node agent's user unit overlay.
+          rm -f "${REL}/share/arbiter-node/arbiter-node.service"
+          # Strip extended attributes (quarantine / provenance) so they are not
+          # archived, and keep bsdtar from emitting AppleDouble `._*` files.
+          xattr -cr "${REL}"
+          COPYFILE_DISABLE=1 tar -czf "${TARBALL}" -C "${REL}" .
+          shasum -a 256 "${TARBALL}" > "${TARBALL}.sha256"
+          echo "TARBALL=${TARBALL}" >> "$GITHUB_ENV"
+
+      - name: Check tarball hygiene
+        run: |
+          if tar -tzf "${TARBALL}" | grep -E '(^|/)(\._[^/]*|\.DS_Store|[^/]*\.service)$'; then
+            echo "error: ${TARBALL} contains AppleDouble / .DS_Store / systemd files (listed above)" >&2
+            exit 1
+          fi
+
+      - name: Check shipped binaries only link system libraries
+        # The macOS analogue of the ubi8 shared-lib guard: a Homebrew dylib in
+        # any Mach-O file fails the release here, naming file and library.
+        run: |
+          bash scripts/check-release-macho-libs.sh "${TARBALL}"
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.tag }}
+          name: "Wardmast ${{ needs.build.outputs.tag }}"
+          files: |
+            ${{ env.TARBALL }}
+            ${{ env.TARBALL }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   publish-oci:
     name: Publish controller image, chart and worker base to GHCR
     # KH7 (OD6): the controller image, the wardmast-node chart and the worker base are

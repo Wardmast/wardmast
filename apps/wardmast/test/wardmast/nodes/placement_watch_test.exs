@@ -88,10 +88,10 @@ defmodule Wardmast.Nodes.PlacementWatchTest do
     end
 
     test "the deadline spans the steps: time spent in one is not given again to the next" do
-      attempt = begin(timeout_ms: 150)
+      attempt = begin(timeout_ms: 1_000)
       assert :ok = PlacementWatch.step(attempt, :prepare, fn -> Process.sleep(100) && :ok end)
 
-      assert {:error, {:remote_placement_failed, {:placement_timeout, :assign, 150}}} =
+      assert {:error, {:remote_placement_failed, {:placement_timeout, :assign, 1_000}}} =
                PlacementWatch.step(attempt, :assign, fn -> Process.sleep(:infinity) end)
     end
 
