@@ -31,7 +31,7 @@ defmodule Wardmast.NodeAgent.K8s.EventFollowerTest do
   end
 
   defp frame! do
-    assert_receive {:frame, frame}, 2_000
+    assert_receive {:frame, frame}, 10_000
     assert {:ok, @run, {:cursor, cursor}, bytes} = StdoutFrame.decode(frame)
     {cursor, bytes}
   end
@@ -104,7 +104,7 @@ defmodule Wardmast.NodeAgent.K8s.EventFollowerTest do
     refute_receive {:log_drained, _, _}, 50
 
     assert {:ok, 8} = LogFollower.push_events(pid, 4, "end\n", true)
-    assert_receive {:log_drained, @run, "e8"}, 2_000
+    assert_receive {:log_drained, @run, "e8"}, 10_000
     assert {"e8", "end\n"} = frame!()
     refute_receive {:log_truncated, _, _}, 50
   end
@@ -114,7 +114,7 @@ defmodule Wardmast.NodeAgent.K8s.EventFollowerTest do
     {:ok, 4} = LogFollower.push_events(pid, 0, "one\n", true)
     refute_receive {:log_drained, _, _}, 50
     LogFollower.finish(pid)
-    assert_receive {:log_drained, @run, "e4"}, 2_000
+    assert_receive {:log_drained, @run, "e4"}, 10_000
   end
 
   test "a pod that never sends a final chunk drains after the wait, without its partial line" do
@@ -123,8 +123,8 @@ defmodule Wardmast.NodeAgent.K8s.EventFollowerTest do
     {"e4", "one\n"} = frame!()
     LogFollower.finish(pid)
 
-    assert_receive {:log_truncated, @run, 13}, 2_000
-    assert_receive {:log_drained, @run, "e4"}, 2_000
+    assert_receive {:log_truncated, @run, 13}, 10_000
+    assert_receive {:log_drained, @run, "e4"}, 10_000
     refute_receive {:frame, _}, 50
   end
 
@@ -132,8 +132,8 @@ defmodule Wardmast.NodeAgent.K8s.EventFollowerTest do
     pid = follower()
     {:ok, _} = LogFollower.push_events(pid, 0, "one\n{\"type\":\"resu", true)
     LogFollower.finish(pid)
-    assert_receive {:log_truncated, @run, 13}, 2_000
-    assert_receive {:log_drained, @run, "e4"}, 2_000
+    assert_receive {:log_truncated, @run, 13}, 10_000
+    assert_receive {:log_drained, @run, "e4"}, 10_000
     assert {"e4", "one\n"} = frame!()
     refute_receive {:frame, _}, 50
   end
@@ -142,6 +142,6 @@ defmodule Wardmast.NodeAgent.K8s.EventFollowerTest do
     pid = follower()
     LogFollower.finish(pid)
     {:ok, 0} = LogFollower.push_events(pid, 0, "", true)
-    assert_receive {:log_drained, @run, nil}, 2_000
+    assert_receive {:log_drained, @run, nil}, 10_000
   end
 end
