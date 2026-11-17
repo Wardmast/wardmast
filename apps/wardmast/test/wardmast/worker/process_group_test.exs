@@ -45,7 +45,8 @@ defmodule Wardmast.Worker.ProcessGroupTest do
 
   defp kill_pid(pid), do: System.cmd("kill", ["-KILL", "#{pid}"], stderr_to_stdout: true)
 
-  defp alive?(pid), do: match?({_, 0}, System.cmd("kill", ["-0", "#{pid}"], stderr_to_stdout: true))
+  defp alive?(pid),
+    do: match?({_, 0}, System.cmd("kill", ["-0", "#{pid}"], stderr_to_stdout: true))
 
   defp line(port, timeout \\ 5_000) do
     receive do
@@ -293,10 +294,11 @@ defmodule Wardmast.Worker.ProcessGroupTest do
     end
 
     test "the warden reaps what the agent left behind once the agent exits" do
-      wrapped = ProcessGroup.wrap(sh_args("(sleep 60 >/dev/null 2>&1 & echo $!); exit 0"),
-        enabled: true,
-        warden_interval_s: 0.1
-      )
+      wrapped =
+        ProcessGroup.wrap(sh_args("(sleep 60 >/dev/null 2>&1 & echo $!); exit 0"),
+          enabled: true,
+          warden_interval_s: 0.1
+        )
 
       {port, _os_pid} = open_wrapped(wrapped)
       orphan = int_line(port)
