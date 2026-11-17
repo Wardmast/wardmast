@@ -313,35 +313,28 @@ defmodule Wardmast.Nodes.Placement do
   @spec eligible(request()) :: :ok | {:local_only, reason()}
   def eligible(request) do
     cond do
-      request.kind not in @remote_kinds ->
-        {:local_only, :follow_up}
+      request.kind not in @remote_kinds -> {:local_only, :follow_up}
+      not remote_provider?(request.provider) -> {:local_only, :provider_not_remote}
+      reason = backend_blocks(request) -> {:local_only, reason}
+      no_checkout?(request) -> {:local_only, :no_private_clone}
+      reason = checkout_holds_work(request) -> {:local_only, reason}
+      request.mode == :local_only -> {:local_only, :placement_local_only}
+      carries_uncarried_credential?(request) -> {:local_only, :scoped_git_credential}
+      true -> :ok
+    end
+  end
 
-      not remote_provider?(request.provider) ->
-        {:local_only, :provider_not_remote}
-
-      auto?(request) and not container_provider?(request.provider) ->
-        {:local_only, :provider_no_container}
-
-      auto?(request) and existing_layout(request) == :linked_worktree ->
-        {:local_only, :existing_linked_worktree}
-
-      not auto?(request) and request.layout != :private_clone ->
-        {:local_only, :not_podman}
-
-      no_checkout?(request) ->
-        {:local_only, :no_private_clone}
-
-      reason = checkout_holds_work(request) ->
-        {:local_only, reason}
-
-      request.mode == :local_only ->
-        {:local_only, :placement_local_only}
-
-      carries_uncarried_credential?(request) ->
-        {:local_only, :scoped_git_credential}
-
-      true ->
-        :ok
+  # What the sandbox backend says about a node. Only a podman run on a private clone may go
+  # to one (`:not_podman` otherwise). Under `sandbox.backend: auto` (bd-56z2wz) the backend
+  # is not fixed yet, so the question is whether the run *can* be podman: its provider has a
+  # container wrap point, and its checkout, if it already exists, is not a linked worktree.
+  defp backend_blocks(request) do
+    cond do
+      not auto?(request) and request.layout != :private_clone -> :not_podman
+      not auto?(request) -> nil
+      not container_provider?(request.provider) -> :provider_no_container
+      existing_layout(request) == :linked_worktree -> :existing_linked_worktree
+      true -> nil
     end
   end
 
