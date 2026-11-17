@@ -558,5 +558,14 @@ defmodule Wardmast.Worker.TestServices do
 
   defp pod_server_alive?(%{"Labels" => %{@label => pid}}, alive?), do: alive?.(pid)
 
-  defp os_alive?(pid), do: pid == System.pid() or File.exists?("/proc/#{pid}")
+  # Portable (no /proc): `ps -p` exits 0 iff the pid exists, whatever its owner.
+  defp os_alive?(pid) when is_binary(pid) do
+    pid == System.pid() or
+      (String.match?(pid, ~r/^\d+$/) and
+         match?({_, 0}, System.cmd("ps", ["-p", pid, "-o", "pid="], stderr_to_stdout: true)))
+  rescue
+    ErlangError -> false
+  end
+
+  defp os_alive?(_), do: false
 end

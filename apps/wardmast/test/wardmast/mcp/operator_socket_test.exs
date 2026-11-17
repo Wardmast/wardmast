@@ -186,6 +186,6 @@ defmodule Wardmast.MCP.OperatorSocketTest do
 
     assert log =~ path
     assert log =~ "#{byte_size(path)} bytes"
-    assert log =~ "limit of 107"
+    assert log =~ "limit of 103"
   end
 end
