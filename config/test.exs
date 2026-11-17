@@ -191,6 +191,7 @@ config :wardmast, :worker_tmp_root, Path.join(scratch_root, "worker-tmp-test")
 # launcher that `ContainerSpawn.cli_mounts/2` writes) never lands in the
 # developer's own `~/.wardmast/images`.
 config :wardmast, :image_root, Path.join(scratch_root, "images-test")
+config :wardmast, :preview_root, Path.join(scratch_root, "previews-test")
 config :wardmast, :run_tmp_sweeper, enabled: false
 config :wardmast, :test_services_reaper, enabled: false
 

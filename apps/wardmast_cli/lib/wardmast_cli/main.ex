@@ -201,6 +201,14 @@ defmodule WardmastCli.Main do
       ward breaker list    [--workspace <id|name>] [--kind <k>] [--open] [--json]
       ward breaker reset   <signature> | --all [--kind <k>] [--json]
 
+      ward preview start   <ticket> [--repo R] [--no-wait] [--timeout SECS]
+                                   run the ticket's checkout as a live app on its own
+                                   port (worker.repos.<repo>.preview); prints the URL
+      ward preview stop    <ticket> [--repo R]
+      ward preview list    [--workspace <id|name>] [--json]
+      ward preview show    <ticket> [--repo R] [--json]
+      ward preview logs    <ticket> [-f] [--lines N] [--repo R]
+
       ward grok-token                          a grok worker's GROK_AUTH_PROVIDER_COMMAND:
                                    prints {"access_token","expires_in"} from the server
 
@@ -258,6 +266,10 @@ defmodule WardmastCli.Main do
     {allow_fanout?, argv} = take_allow_fanout(argv)
     if argv != [], do: WardmastCli.FanOut.enforce!(allow_fanout?)
     run(argv)
+    # Backstop: install any `arb` shim a command staged because `arb` was the
+    # running escript, so no `install_links/1` caller can forget to.
+    _ = WardmastCli.Cmd.SelfUpdate.flush_pending_shim()
+    :ok
   end
 
   # `--allow-fanout` is stripped everywhere. `--force` also lifts the refusal; it is

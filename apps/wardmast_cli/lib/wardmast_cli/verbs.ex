@@ -181,6 +181,11 @@ defmodule WardmastCli.Verbs do
      ]},
     {"breaker", Module.concat(@cmd, Breaker),
      [workspace: :resolve, probes: [["list"], ["reset", "sig"]]]},
+    {"preview", Module.concat(@cmd, Preview),
+     [
+       workspace: :resolve,
+       probes: [["start", "bd-1"], ["stop", "bd-1"], ["list"], ["show", "bd-1"], ["logs", "bd-1"]]
+     ]},
     {"image", Module.concat(@cmd, Image),
      [workspace: :resolve, probes: [["list"], ["build", "r"], ["refresh"], ["prune"]]]},
     {"install", Module.concat(@cmd, Install),

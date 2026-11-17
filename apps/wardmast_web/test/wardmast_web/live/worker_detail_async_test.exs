@@ -338,6 +338,15 @@ defmodule WardmastWeb.WorkerDetailAsyncTest do
       refute has_element?(view, "#worker-fallback-resume-btn")
 
       send(loader, :release)
+
+      # The page's preview panel reads the task too (off the LiveView process),
+      # so a second read may be blocked; let it through as well.
+      receive do
+        {:loading_task, other} -> send(other, :release)
+      after
+        500 -> :ok
+      end
+
       render_async(view)
 
       refute has_element?(view, "#worker-details-loading")

@@ -1996,6 +1996,29 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       assert File.exists?(Path.join(home, "bin/arb"))
     end
 
+    test "running as the `arb` escript the shim replaces: deploy still reports, finishes, then swaps arb",
+         %{home: home} do
+      arb = Path.join(home, "bin/arb")
+      File.mkdir_p!(Path.dirname(arb))
+      File.write!(arb, "ORIGINAL ESCRIPT BYTES")
+      Process.put(:arb_running_script_override, arb)
+      on_exit(fn -> Process.delete(:arb_running_script_override) end)
+
+      {tarball, sha} = release_tarball_with_sha(@vsn)
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--json"]) end)
+
+      assert code == 0
+      assert {:ok, payload} = Jason.decode(String.trim(out))
+      assert payload["deployed"] == true
+      assert %{"updated" => true} = payload["cli_update"]
+      assert ReleaseDeploy.Status.read()["state"] == "succeeded"
+      assert File.read!(arb) =~ "#!/bin/sh"
+      refute File.exists?(arb <> ".new")
+    end
+
     test "text output says the CLI was updated", %{home: home} do
       {tarball, sha} = release_tarball_with_sha(@vsn)
       stub_release(@vsn, tarball, sha)
@@ -2072,24 +2095,62 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
 
   describe "host check" do
     test "refuses on a non-Linux host before downloading or writing anything", %{home: home} do
-      Process.put(:bd2_host_platform, {:darwin, "arm64"})
+      Process.put(:bd2_host_platform, {:darwin, "x86_64"})
 
       {_out, err, code} = capture(fn -> ReleaseDeploy.run([]) end)
 
       assert code == 1
-      assert err =~ "darwin/arm64"
+      assert err =~ "darwin/x86_64"
       assert err =~ "hosts the server"
       refute File.exists?(Path.join(home, "releases"))
       refute File.exists?(Path.join(home, "deploy-status.json"))
     end
 
     test "--this-host does not waive the platform check" do
-      Process.put(:bd2_host_platform, {:darwin, "arm64"})
+      Process.put(:bd2_host_platform, {:darwin, "x86_64"})
 
       {_out, err, code} = capture(fn -> ReleaseDeploy.run(["--this-host"]) end)
 
       assert code == 1
-      assert err =~ "darwin/arm64"
+      assert err =~ "darwin/x86_64"
+    end
+
+    test "accepts darwin/arm64" do
+      Process.put(:bd2_host_platform, {:darwin, "arm64"})
+      assert :ok = WardmastCli.Cmd.ReleaseDeploy.HostCheck.check(this_host: true)
+    end
+
+    test "parse_platform normalises real system_architecture triplets" do
+      alias WardmastCli.Cmd.ReleaseDeploy.HostCheck
+
+      assert HostCheck.parse_platform({:unix, :darwin}, ~c"aarch64-apple-darwin23.4.0") ==
+               {:darwin, "arm64"}
+
+      assert HostCheck.parse_platform({:unix, :linux}, ~c"x86_64-pc-linux-gnu") ==
+               {:linux, "x86_64"}
+
+      assert HostCheck.parse_platform({:unix, :linux}, ~c"aarch64-unknown-linux-gnu") ==
+               {:linux, "aarch64"}
+    end
+
+    test "darwin/aarch64 form is accepted and gets the darwin asset" do
+      alias WardmastCli.Cmd.ReleaseDeploy.{Github, HostCheck}
+      Process.put(:bd2_host_platform, {:darwin, "aarch64"})
+      assert :ok = HostCheck.check(this_host: true)
+      assert Github.asset_name("v1") == "arbiter-v1-darwin-arm64.tar.gz"
+      assert Github.asset_name("v1", {:darwin, "aarch64"}) == "arbiter-v1-darwin-arm64.tar.gz"
+    end
+
+    test "asset_name is platform-aware; Linux name unchanged" do
+      alias WardmastCli.Cmd.ReleaseDeploy.Github
+      assert Github.asset_name("v1", {:linux, "x86_64"}) == "arbiter-v1-linux.tar.gz"
+      assert Github.asset_name("v1", {:linux, "aarch64"}) == "arbiter-v1-linux.tar.gz"
+      assert Github.asset_name("v1", {:darwin, "arm64"}) == "arbiter-v1-darwin-arm64.tar.gz"
+
+      Process.put(:bd2_host_platform, {:darwin, "arm64"})
+      assert Github.asset_name("v1") == "arbiter-v1-darwin-arm64.tar.gz"
+      Process.put(:bd2_host_platform, {:linux, "x86_64"})
+      assert Github.asset_name("v1") == "arbiter-v1-linux.tar.gz"
     end
 
     test "refuses with no install when ARB_HOST is non-loopback", %{home: home} do

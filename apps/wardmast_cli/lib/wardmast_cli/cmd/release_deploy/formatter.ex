@@ -4,7 +4,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.Formatter do
   deployed, timed-out rollback, and post-restart version-mismatch rollback.
   """
 
-  alias WardmastCli.{Client, Cmd.Doctor, Cmd.Start, Output}
+  alias WardmastCli.{Client, Cmd.Doctor, Cmd.Start, Output, Supervisor}
   alias WardmastCli.Cmd.ReleaseDeploy.{OutdatedNodes, ReleaseFiles}
 
   def emit_already_current(:json, tag) do
@@ -326,7 +326,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.Formatter do
     corrupt it, so nothing was changed and `current` still points at #{tag}.
     #{bullets(crossed)}
 
-    Stop the service yourself (`systemctl --user stop wardmast.service`), restore the backup \
+    Stop the service yourself (`#{Supervisor.impl().stop_cmd()}`), restore the backup \
     recorded above over the database, then `arb server deploy --version #{prior_tag} --force`.\
     """
   end
