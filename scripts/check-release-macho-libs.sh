@@ -14,7 +14,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/check-release-dylibs.sh <path>...
+Usage: scripts/check-release-macho-libs.sh <path>...
 
   <path>  An assembled release directory, an OTP install root, or a release
           tarball (.tar.gz / .tgz / .tar). May be repeated.
@@ -104,7 +104,7 @@ for path in "${PATHS[@]}"; do
   if [ -d "$path" ]; then
     scan_dir "$path"
   elif [ -f "$path" ]; then
-    if [ -z "$TMP_ROOT" ]; then TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/check-dylibs.XXXXXX"); fi
+    if [ -z "$TMP_ROOT" ]; then TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/check-macho-libs.XXXXXX"); fi
     dest="$TMP_ROOT/$(basename "$path").d"
     mkdir -p "$dest"
     tar -xf "$path" -C "$dest"
