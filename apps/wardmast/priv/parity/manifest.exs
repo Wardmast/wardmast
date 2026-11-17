@@ -789,6 +789,48 @@
       divergences: ["D-A-12"]
     },
     %{
+      id: "previews/start_a_preview",
+      title: "Start an app preview of a ticket's checkout",
+      mcp: ["preview_start"],
+      cli: ["arb preview start"],
+      rest: ["POST /api/previews"],
+      status: :full,
+      note: "The CLI starts without `wait` and polls `GET /api/previews/:task_id` until the preview is running or failed; MCP and REST take `wait`."
+    },
+    %{
+      id: "previews/stop_a_preview",
+      title: "Stop an app preview",
+      mcp: ["preview_stop"],
+      cli: ["arb preview stop"],
+      rest: ["POST /api/previews/:task_id/stop"],
+      status: :full
+    },
+    %{
+      id: "previews/list_previews",
+      title: "List app previews",
+      mcp: ["preview_list"],
+      cli: ["arb preview list"],
+      rest: ["GET /api/previews"],
+      status: :full
+    },
+    %{
+      id: "previews/show_one_preview",
+      title: "Show one ticket's app preview",
+      mcp: ["preview_list"],
+      cli: ["arb preview show"],
+      rest: ["GET /api/previews/:task_id"],
+      status: :full,
+      note: "MCP reads it through `preview_list` with `task_id`."
+    },
+    %{
+      id: "previews/read_a_preview_log",
+      title: "Read an app preview's log",
+      mcp: ["preview_logs"],
+      cli: ["arb preview logs"],
+      rest: ["GET /api/previews/:task_id/logs"],
+      status: :full
+    },
+    %{
       id: "accounts/list_accounts",
       title: "List accounts",
       mcp: ["account_list"],
@@ -1991,7 +2033,7 @@
       title: "Host posture diagnostics (17): bind_address, agy_write_jail, agy_models, egress_jail, guardrails, claude_credentials, grok_auth, provider_accounts, merge_routing, tmux, worker_tmp, podman_sandbox, worker_memory, dashboard_auth, doctor_scope, spawn_canary, cli_versions",
       mcp: nil,
       cli: ["arb server doctor"],
-      rest: ["GET /api/server/bind_address", "GET /api/server/agy_write_jail", "GET /api/server/agy_models", "GET /api/server/egress_jail", "GET /api/server/guardrails", "GET /api/server/merge_routing", "GET /api/server/podman_sandbox", "GET /api/server/tmux", "GET /api/server/worker_memory", "GET /api/server/worker_tmp", "GET /api/server/worker_jail_unmask", "GET /api/server/dashboard_auth", "GET /api/server/doctor_scope", "GET /api/server/spawn_canary", "POST /api/server/spawn_canary", "GET /api/server/cli_versions"],
+      rest: ["GET /api/server/bind_address", "GET /api/server/agy_write_jail", "GET /api/server/agy_models", "GET /api/server/egress_jail", "GET /api/server/guardrails", "GET /api/server/merge_routing", "GET /api/server/podman_sandbox", "GET /api/server/tmux", "GET /api/server/worker_memory", "GET /api/server/worker_tmp", "GET /api/server/worker_jail_unmask", "GET /api/server/dashboard_auth", "GET /api/server/doctor_scope", "GET /api/server/spawn_canary", "POST /api/server/spawn_canary", "GET /api/server/cli_versions", "GET /api/server/platform"],
       status: :partial,
       absent: %{
         mcp: {:intentional, "Host paths, credential-gap and jail posture are operator-host facts an LLM cannot act on; `scheduler_status`/`alert_list`/`breaker_list` cover runtime health."}

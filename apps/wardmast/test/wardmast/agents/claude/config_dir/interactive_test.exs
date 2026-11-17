@@ -226,6 +226,61 @@ defmodule Wardmast.Agents.Claude.ConfigDir.InteractiveTest do
 
       refute File.exists?(Path.join(config, ".credentials.json"))
     end
+
+    test "mode B on macOS with a Keychain-only login warns and seeds nothing", %{
+      config: config,
+      source: source,
+      tmp: tmp
+    } do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :ok =
+                   Interactive.ensure(config,
+                     cwd: Path.join(tmp, "workspace"),
+                     source_dir: source,
+                     auth_mode: :seeded_credentials,
+                     os: {:unix, :darwin}
+                   )
+        end)
+
+      assert log =~ "Keychain"
+      assert log =~ "mode B"
+      refute File.exists?(Path.join(config, ".credentials.json"))
+    end
+
+    test "mode B on Linux does not warn", %{config: config, source: source, tmp: tmp} do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :ok =
+                   Interactive.ensure(config,
+                     cwd: Path.join(tmp, "workspace"),
+                     source_dir: source,
+                     auth_mode: :seeded_credentials,
+                     os: {:unix, :linux}
+                   )
+        end)
+
+      refute log =~ "Keychain"
+    end
+
+    test "mode A on macOS does not warn (a setup token needs no stored login)", %{
+      config: config,
+      source: source,
+      tmp: tmp
+    } do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :ok =
+                   Interactive.ensure(config,
+                     cwd: Path.join(tmp, "workspace"),
+                     source_dir: source,
+                     auth_mode: :oauth_token,
+                     os: {:unix, :darwin}
+                   )
+        end)
+
+      refute log =~ "Keychain"
+    end
   end
 
   describe "Remote Control eligibility cache (bd-cdretj)" do

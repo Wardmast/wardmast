@@ -27,6 +27,7 @@ defmodule Wardmast.Agents.Gemini do
   @behaviour Wardmast.Agents.Agent
 
   alias Wardmast.Agents.ArgvGuard
+  alias Wardmast.Agents.CredentialStore
   alias Wardmast.Agents.Gemini.Config
   alias Wardmast.Agents.Gemini.ConfigDir
   alias Wardmast.Agents.Gemini.ModelCatalog
@@ -233,6 +234,7 @@ defmodule Wardmast.Agents.Gemini do
   @stdin_stub "The full task instructions are provided on stdin. Follow them exactly."
 
   @no_keyring_message "agy needs a keyring (D-Bus) or its own login on this host"
+  @no_keychain_message "agy needs the macOS Keychain (the `security` CLI) or its own login on this host"
 
   @impl true
   def done_sentinel, do: @done_regex
@@ -303,16 +305,14 @@ defmodule Wardmast.Agents.Gemini do
     case resolve_executable() do
       {:ok, {:agy, _exec}} ->
         if ConfigDir.keyring_reachable?(opts) do
+          _ = CredentialStore.warn(:agy, Keyword.take(opts, [:os]))
           :skipped
         else
           {:error,
            %StopReason{
              category: :auth_expired,
-             summary: @no_keyring_message,
-             remediation:
-               "agy authenticates via the freedesktop Secret Service over D-Bus. Ensure a " <>
-                 "keyring daemon (e.g. gnome-keyring) and D-Bus session bus are running, or " <>
-                 "sign in directly with `agy` on this host."
+             summary: no_keyring_message(opts),
+             remediation: no_keyring_remediation(opts)
            }}
         end
 
@@ -819,7 +819,26 @@ defmodule Wardmast.Agents.Gemini do
         do: ConfigDir.keyring_available?(opts),
         else: ConfigDir.keyring_reachable?(opts)
 
-    if ok?, do: :ok, else: {:error, {:no_keyring, @no_keyring_message}}
+    if ok?, do: :ok, else: {:error, {:no_keyring, no_keyring_message(opts)}}
+  end
+
+  defp no_keyring_message(opts),
+    do:
+      if(CredentialStore.secret_service?(opts),
+        do: @no_keyring_message,
+        else: @no_keychain_message
+      )
+
+  defp no_keyring_remediation(opts) do
+    if CredentialStore.secret_service?(opts) do
+      "agy authenticates via the freedesktop Secret Service over D-Bus. Ensure a " <>
+        "keyring daemon (e.g. gnome-keyring) and D-Bus session bus are running, or " <>
+        "sign in directly with `agy` on this host."
+    else
+      "agy authenticates via the macOS login Keychain. Ensure the `security` CLI is on " <>
+        "PATH and sign in with `agy` on this Mac, from a session where the login " <>
+        "keychain is unlocked."
+    end
   end
 
   # bd-9cygoo (G16): a deploy key for the ticket's repo, staged on the host and

@@ -12,8 +12,9 @@ defmodule Wardmast.Boot.ReconcileSweep do
        from its home clone. A resume that provisioned before the work was recovered
        would start from a stale clone, and could race a container that is still
        running.
-    2. the `Workers.Reconciler` sweeps (orphans, shutdown casualties, worker
-       scopes, CI waits, review passes, open PRs, resumable tasks).
+    2. the `Workers.Reconciler` sweeps (the process groups orphaned runs left
+       running, orphans, shutdown casualties, worker scopes, CI waits, review
+       passes, open PRs, resumable tasks).
 
   A recovery that fails, raises or exceeds its budget never stops the sweep: the
   runs degrade to their last checkpoint and the Reconciler carries on. The one
@@ -47,8 +48,12 @@ defmodule Wardmast.Boot.ReconcileSweep do
     # A run on a node that Recovery has not settled stays Recovery's: its row is not
     # interrupted and its ticket is not resumed from a home clone that lacks the work.
     owned = owned_by_recovery(recover(recovery, primary?), primary?)
+    owned_ids = Enum.map(owned, & &1.id)
 
-    reconciler.reconcile_orphaned_runs(primary?: primary?, skip_run_ids: Enum.map(owned, & &1.id))
+    # bd-568ib9: an agent the stop left running is killed while its run's row still
+    # says the run was live, and before anything is resumed into its worktree.
+    reconciler.sweep_worker_process_groups(primary?: primary?, skip_run_ids: owned_ids)
+    reconciler.reconcile_orphaned_runs(primary?: primary?, skip_run_ids: owned_ids)
     reconciler.reconcile_shutdown_casualties(primary?: primary?)
     reconciler.sweep_worker_scopes(primary?: primary?)
     # bd-2gc809 / bd-2yt0d2: a CI wait or a ReviewGate pass the stop cut

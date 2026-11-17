@@ -151,6 +151,28 @@ defmodule Wardmast.Workers.RunTest do
       assert updated.session_id == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
       assert updated.config_dir == "/tmp/cfg"
     end
+
+    # bd-568ib9: the agent's process group, for the post-exit reap and the boot
+    # sweep (`Wardmast.Worker.ProcessGroup`).
+    test "records the agent's pid, process group and start time" do
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: "bd-pgroup",
+          repo: "arbiter",
+          state: :working,
+          started_at: DateTime.utc_now()
+        })
+
+      assert {run.os_pid, run.os_pgid, run.os_started_at} == {nil, nil, nil}
+
+      {:ok, updated} =
+        Ash.update(run, %{os_pid: 4242, os_pgid: 4242, os_started_at: ~U[2026-11-07 09:05:03Z]})
+
+      reloaded = Ash.get!(Run, updated.id)
+      assert reloaded.os_pid == 4242
+      assert reloaded.os_pgid == 4242
+      assert reloaded.os_started_at == ~U[2026-11-07 09:05:03Z]
+    end
   end
 
   describe "kinds/0" do

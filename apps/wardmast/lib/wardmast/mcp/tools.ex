@@ -1919,6 +1919,10 @@ defmodule Wardmast.MCP.Tools do
 
   defdelegate breaker_list(scope, args), to: Wardmast.MCP.Tools.Breaker
   defdelegate breaker_reset(scope, args), to: Wardmast.MCP.Tools.Breaker
+  defdelegate preview_start(scope, args), to: Wardmast.MCP.Tools.Preview
+  defdelegate preview_stop(scope, args), to: Wardmast.MCP.Tools.Preview
+  defdelegate preview_list(scope, args), to: Wardmast.MCP.Tools.Preview
+  defdelegate preview_logs(scope, args), to: Wardmast.MCP.Tools.Preview
 
   defdelegate trust_show(scope, args), to: Wardmast.MCP.Tools.Trust
   defdelegate trust_confirm(scope, args), to: Wardmast.MCP.Tools.Trust

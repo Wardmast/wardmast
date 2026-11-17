@@ -93,6 +93,7 @@ defmodule Wardmast.Agents.Gemini.ConfigDir do
   working-but-un-isolated worker beats a broken one.
   """
 
+  alias Wardmast.Agents.CredentialStore
   alias Wardmast.Agents.Gemini.Security
   alias Wardmast.Agents.SecurityPolicy
 
@@ -268,7 +269,9 @@ defmodule Wardmast.Agents.Gemini.ConfigDir do
   def mcp_config_path, do: @mcp_config_path
 
   @doc """
-  Whether a freedesktop Secret Service is reachable for this OS user.
+  Whether agy's credential store is reachable for this OS user: a freedesktop
+  Secret Service on Linux, the login Keychain on macOS
+  (`Wardmast.Agents.CredentialStore`).
 
   When it is, agy's live credential lives in the keyring — which `$HOME`
   redirection does not touch. Supports `:keyring` in `opts` and
@@ -283,7 +286,7 @@ defmodule Wardmast.Agents.Gemini.ConfigDir do
       :error ->
         case Application.fetch_env(:wardmast, :worker_gemini_keyring_available) do
           {:ok, val} -> val
-          :error -> Wardmast.Worker.Jail.keyring_usable?()
+          :error -> CredentialStore.available?(:agy, opts)
         end
     end
   end
@@ -299,7 +302,7 @@ defmodule Wardmast.Agents.Gemini.ConfigDir do
     keyring_available?(opts) or
       (not Keyword.has_key?(opts, :keyring) and
          Application.fetch_env(:wardmast, :worker_gemini_keyring_available) == :error and
-         Wardmast.Worker.Jail.session_bus_reachable?())
+         CredentialStore.secret_service?(opts) and Wardmast.Worker.Jail.session_bus_reachable?())
   end
 
   @doc "The worker memory written into the isolated HOME's `.gemini/GEMINI.md`."

@@ -115,9 +115,10 @@ defmodule WardmastCli.Cmd.Restart do
   the API was reachable before the bounce. Shared with `arb update`, which runs
   a `git pull` first and then reuses this to load the freshly-merged code.
 
-  When the `wardmast.service` systemd user unit is present, delegates the
-  restart to `systemctl --user restart` instead of the SIGTERM/start dance so
-  systemd remains the authoritative process supervisor.
+  When the service manager (`Supervisor.impl/0`: the systemd user unit, or the
+  launchd LaunchAgent on macOS) manages the server, delegates the restart to it
+  instead of the SIGTERM/start dance so it remains the authoritative process
+  supervisor.
   """
   @spec perform(String.t(), non_neg_integer()) :: {:ok | :timeout | :down, list(), boolean()}
   def perform(root, timeout_ms) do
@@ -145,18 +146,19 @@ defmodule WardmastCli.Cmd.Restart do
 
   @doc """
   The "server is DOWN" report for a `{:down, actions, _}` result of `perform/2`:
-  what systemd said and the exact commands to bring the server back.
+  what the service manager said and the exact commands to bring the server back.
   """
   @spec down_message(tuple() | nil) :: String.t()
   def down_message({:systemd_restart, :down, state}) do
+    sup = Supervisor.impl()
+
     """
-    server is DOWN after restart: wardmast.service is #{state || "not active"} after \
-    #{@service_wait_s}s (a systemd start job can wedge in `waiting`; a daemon-reexec was tried once).
+    server is DOWN after restart: #{service_label()} is #{state || "not active"} after \
+    #{@service_wait_s}s (a #{sup.manager_name()} start job can wedge in `waiting`; \
+    one recovery attempt was made).
 
     Recover:
-      systemctl --user daemon-reexec
-      systemctl --user start wardmast.service
-      systemctl --user status wardmast.service
+    #{Enum.map_join(sup.recover_cmds(), "\n", &("  " <> &1))}
     If it will not start, roll back by re-pointing `current` at the previous release \
     (ln -sfn <releases>/<previous-tag> <releases>/current) and starting it again.\
     """
@@ -176,7 +178,8 @@ defmodule WardmastCli.Cmd.Restart do
   def stop(_root) do
     case systemd_state() do
       :managed ->
-        Start.log_text("Stopping via systemd (systemctl --user stop wardmast.service)…")
+        sup = Supervisor.impl()
+        Start.log_text("Stopping via #{sup.manager_name()} (#{sup.stop_cmd()})…")
 
         Supervisor.impl().stop_service()
 
@@ -187,7 +190,8 @@ defmodule WardmastCli.Cmd.Restart do
   rescue
     # Also covers the signalling path's `lsof`/`kill` spawns, as before the
     # Supervisor extraction.
-    e in ErlangError -> {:error, "could not run systemctl: #{inspect(e.original)}"}
+    e in ErlangError ->
+      {:error, "could not run #{Supervisor.impl().manager_name()}'s CLI: #{inspect(e.original)}"}
   end
 
   # bd-3t973v: the non-systemd path SIGTERMs whatever listens on the API port,
@@ -215,11 +219,12 @@ defmodule WardmastCli.Cmd.Restart do
 
       {:unreachable, why} ->
         Output.die(
-          "could not reach systemd to find out whether wardmast.service is installed (#{why})",
+          "could not reach #{Supervisor.impl().manager_name()} to find out whether " <>
+            "#{service_label()} is installed (#{why})",
           "Refusing to fall back to signalling whatever listens on the API port: if " <>
-            "wardmast.service manages the server, that kills the live release.\n" <>
-            "Run `arb restart` from a normal login shell (XDG_RUNTIME_DIR / D-Bus set), " <>
-            "or `systemctl --user restart wardmast.service` directly."
+            "#{service_label()} manages the server, that kills the live release.\n" <>
+            "Run `arb restart` from a normal login shell (XDG_RUNTIME_DIR / D-Bus set on Linux), " <>
+            "or `#{Supervisor.impl().restart_cmd()}` directly."
         )
     end
   end
@@ -238,16 +243,18 @@ defmodule WardmastCli.Cmd.Restart do
 
       dir ->
         Output.die(
-          "#{Path.join(dir, unit_file)} exists, but systemctl does not manage it from here",
+          "#{Path.join(dir, unit_file)} exists, but #{Supervisor.impl().manager_name()} " <>
+            "does not manage it from here",
           "Refusing to signal whatever listens on the API port: the unit owns the server. " <>
-            "Use `systemctl --user restart wardmast.service` from a login shell."
+            "Use `#{Supervisor.impl().restart_cmd()}` from a login shell."
         )
     end
   end
 
   # Delegate the full stop+start cycle to systemd. Returns an action tuple.
   defp restart_via_systemd do
-    Start.log_text("Restarting via systemd (systemctl --user restart wardmast.service)…")
+    sup = Supervisor.impl()
+    Start.log_text("Restarting via #{sup.manager_name()} (#{sup.restart_cmd()})…")
 
     # `--no-block`: a plain `restart` waits for the start job and hangs for as
     # long as systemd leaves that job in `waiting` (the 2026-10-11 outage). We
@@ -294,8 +301,8 @@ defmodule WardmastCli.Cmd.Restart do
 
   defp recover_stuck_start(state) do
     Start.log_text(
-      "wardmast.service is still #{state} after #{@service_stuck_s}s (start job stuck?); " <>
-        "running `systemctl --user daemon-reexec` and starting it again…"
+      "#{service_label()} is still #{state} after #{@service_stuck_s}s (start job stuck?); " <>
+        "running #{Enum.map_join(Supervisor.impl().recover_cmds(), " → ", &"`#{&1}`")}…"
     )
 
     Supervisor.impl().recover_stuck_service()
@@ -317,6 +324,9 @@ defmodule WardmastCli.Cmd.Restart do
   defp settled_state(%{state: state}, _baseline_id), do: state
 
   defp unit_info, do: Supervisor.impl().service_info()
+
+  # The unit as an operator knows it (`wardmast.service`, `com.wardmast.server.plist`).
+  defp service_label, do: Supervisor.impl().unit_file_name()
 
   # ---- stop --------------------------------------------------------------
 
@@ -383,7 +393,7 @@ defmodule WardmastCli.Cmd.Restart do
         Output.die(
           "refusing to signal what listens on port #{port}: cannot prove it is a dev `mix phx.server`",
           detail <>
-            "\nA release (`bin/wardmast`) is restarted with `systemctl --user restart wardmast.service` " <>
+            "\nA release (`bin/wardmast`) is restarted with `#{Supervisor.impl().restart_cmd()}` " <>
             "or `arb release deploy`, never by signalling it. Nothing was signalled."
         )
     end
@@ -739,7 +749,8 @@ defmodule WardmastCli.Cmd.Restart do
   defp stop_summary(actions) do
     cond do
       List.keyfind(actions, :systemd_restart, 0) ->
-        "Restarted via systemd (systemctl --user restart wardmast.service).\n"
+        sup = Supervisor.impl()
+        "Restarted via #{sup.manager_name()} (#{sup.restart_cmd()}).\n"
 
       match?({:phoenix_stop, :not_running, _}, List.keyfind(actions, :phoenix_stop, 0)) ->
         "No running server found — started a fresh one.\n"

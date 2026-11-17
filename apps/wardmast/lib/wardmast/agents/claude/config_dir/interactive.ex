@@ -68,6 +68,7 @@ defmodule Wardmast.Agents.Claude.ConfigDir.Interactive do
 
   alias Wardmast.Agents.Claude.ConfigDir
   alias Wardmast.Agents.Claude.Security
+  alias Wardmast.Agents.CredentialStore
   alias Wardmast.Agents.SecurityPolicy
 
   require Logger
@@ -330,8 +331,16 @@ defmodule Wardmast.Agents.Claude.ConfigDir.Interactive do
   defp seed_auth(dir, opts) do
     case Keyword.get(opts, :auth_mode, :seeded_credentials) do
       :oauth_token -> ConfigDir.remove_credentials(dir)
-      _ -> ConfigDir.seed_credentials(dir, source_dir(opts))
+      _ -> seed_mode_b(dir, opts)
     end
+  end
+
+  # macOS keeps Claude's grant in the Keychain, which there is nothing to copy
+  # from — say so instead of seeding an empty dir (`CredentialStore`).
+  defp seed_mode_b(dir, opts) do
+    source = source_dir(opts)
+    CredentialStore.warn(:claude, [source_dir: source] ++ Keyword.take(opts, [:os]))
+    ConfigDir.seed_credentials(dir, source)
   end
 
   defp source_dir(opts) do

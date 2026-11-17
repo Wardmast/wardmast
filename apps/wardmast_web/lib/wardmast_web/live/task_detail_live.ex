@@ -63,6 +63,8 @@ defmodule WardmastWeb.TaskDetailLive do
 
   use WardmastWeb, :live_view
 
+  on_mount {WardmastWeb.PreviewHook, :ticket}
+
   alias Wardmast.Agents
   alias Wardmast.Board.Snapshot
   alias Wardmast.Mergers
@@ -2729,6 +2731,13 @@ defmodule WardmastWeb.TaskDetailLive do
                 retry_value="refine_session"
                 what="the refine session"
                 state={@load_state.refine_session}
+                class="order-3"
+              />
+              <WardmastWeb.PreviewPanel.preview_panel
+                :if={@preview}
+                preview={@preview}
+                busy={@preview_busy}
+                error={@preview_error}
                 class="order-3"
               />
               <.panel
