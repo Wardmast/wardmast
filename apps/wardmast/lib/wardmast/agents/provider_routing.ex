@@ -872,7 +872,7 @@ defmodule Wardmast.Agents.ProviderRouting do
 
       true ->
         "#{provider}: not supported by sandbox.backend podman without a service-account key " <>
-          "on the workspace's antigravity account (`arb account rotate <account> --kind " <>
+          "on the workspace's antigravity account (`ward account rotate <account> --kind " <>
           "service_account --secret-file key.json`)"
     end
   end

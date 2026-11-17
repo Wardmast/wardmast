@@ -479,7 +479,7 @@ defmodule Wardmast.Worker.ContainerSpawn do
 
   @agy_credential_missing "agy in a container signs in with a Google Cloud service-account " <>
                             "key, and this workspace's antigravity account has none. Register " <>
-                            "one with `arb account rotate <antigravity account> --kind " <>
+                            "one with `ward account rotate <antigravity account> --kind " <>
                             "service_account --secret-file key.json` " <>
                             "(docs/agy-service-account-runbook.md), or run agy on " <>
                             "sandbox.backend bwrap."

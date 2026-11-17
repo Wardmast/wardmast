@@ -78,20 +78,22 @@ Notes:
 
 ## 2. Register the key with Wardmast
 
+(`ward` is the CLI; `arb` still works as a deprecated alias for one release.)
+
 The key belongs to an `antigravity` provider account. Use the account your workspaces
 already route agy through, or create one:
 
 ```sh
-arb account list --provider antigravity
-arb account create antigravity workers --label "agy service account"   # if needed
-arb account attach <workspace> antigravity antigravity:workers         # if needed
+ward account list --provider antigravity
+ward account create antigravity workers --label "agy service account"   # if needed
+ward account attach <workspace> antigravity antigravity:workers         # if needed
 ```
 
 Then store the key. Pass the file, or `-` to read it from stdin; the command refuses a
 key on the command line, where `ps` and the shell history would keep it:
 
 ```sh
-arb account rotate antigravity:workers --kind service_account --secret-file ./wardmast-agy-key.json
+ward account rotate antigravity:workers --kind service_account --secret-file ./wardmast-agy-key.json
 # rotated service_account credential (fingerprint=...)
 rm ./wardmast-agy-key.json
 ```
@@ -107,7 +109,7 @@ What the server does with it:
   **file**: the key itself is never put in a worker's environment.
 
 Rotating is the same command with the new file. To take the key out of service, park the
-account (`arb account set antigravity:workers --disable`) or delete it, and delete the key
+account (`ward account set antigravity:workers --disable`) or delete it, and delete the key
 in Google Cloud (`gcloud iam service-accounts keys delete <key-id> --iam-account="$SA"`).
 
 ## 3. What a worker gets
@@ -126,11 +128,11 @@ on the memory volume beside the key and is linked into the config dir.
 
 ## 4. Check it
 
-* `arb account show antigravity:workers` lists a `service_account` credential (kind and
+* `ward account show antigravity:workers` lists a `service_account` credential (kind and
   fingerprint only).
 * A workspace on `sandbox.backend: podman` with an agy pool is no longer held with
   "gemini: not supported by sandbox.backend podman".
-* `GET /api/nodes` (what `arb node list` reads): each node has
+* `GET /api/nodes` (what `ward node list` reads): each node has
   `"agy": {"ready": true, "missing": null}` once it advertises `caps.agy`. Otherwise
   `missing` says which half it lacks (`caps.agy_missing`):
   * `image`: no published worker image carries agy yet (`arbiter.cli-providers` lacks

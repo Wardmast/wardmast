@@ -297,7 +297,7 @@ defmodule Wardmast.Worker.ContainerSpawnAgyTest do
     assert {:error, {:agy_credential_missing, message}} =
              ContainerSpawn.prepare([workspace: ws] ++ ctx.opts)
 
-    assert message =~ "arb account rotate"
+    assert message =~ "ward account rotate"
     assert message =~ "--kind service_account"
     refute_received {:secret_created, _, _}
   end
