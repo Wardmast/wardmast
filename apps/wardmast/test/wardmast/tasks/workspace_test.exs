@@ -1101,7 +1101,7 @@ defmodule Wardmast.Tasks.WorkspaceTest do
                  })
 
         assert Exception.message(err) =~
-                 ~s(worker.placement must be "local_only", "prefer_remote" or "remote_only")
+                 ~s(worker.placement must be "local_only", "prefer_remote", "prefer_local" or "remote_only")
       end
     end
 

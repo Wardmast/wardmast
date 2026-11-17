@@ -323,7 +323,7 @@ defmodule Wardmast.Workflows.MergeQueue.ConflictResolver do
         context.workspace,
         context.repo,
         provider,
-        Worktree.worktree_path(context.branch)
+        checkout_path(context)
       ) != nil
 
   # bd-19skda: the container cannot `git fetch`, so the host refreshes the main
@@ -787,12 +787,16 @@ defmodule Wardmast.Workflows.MergeQueue.ConflictResolver do
   defp node_opts(nil, _context), do: []
   defp node_opts(node, context), do: [node: node, base_branch: context.target_branch]
 
+  # bd-56z2wz: the checkout the pass runs in, whose layout `sandbox.backend: auto` keeps.
+  defp checkout_path(%{branch: branch}) when is_binary(branch), do: Worktree.worktree_path(branch)
+  defp checkout_path(_context), do: nil
+
   defp container_opts(context, provider) do
     case ContainerSpawn.pass_policy(
            context.workspace,
            context.repo,
            provider,
-           Worktree.worktree_path(context.branch)
+           checkout_path(context)
          ) do
       nil -> []
       policy -> ContainerSpawn.session_opts(policy, context.workspace, repo: context.repo)
