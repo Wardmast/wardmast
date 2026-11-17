@@ -23,7 +23,9 @@ defmodule Wardmast.Workers.Reconciler do
   shutdown", itself.
   Only a run that missed that — a hard crash of the node, a teardown that
   overran `Wardmast.Worker.shutdown_grace_ms/0` and was killed, systemd's stop
-  timeout firing first — is still live when this sweep sees it.
+  timeout firing first — is still live when this sweep sees it. Its agent may
+  be too: `sweep_worker_process_groups/1` kills the process group such a run
+  recorded first, while the row still says the run was live (bd-568ib9).
 
   ## What the boot sweeps restart (bd-2yt0d2)
 
