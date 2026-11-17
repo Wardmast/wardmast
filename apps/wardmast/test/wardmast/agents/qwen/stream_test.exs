@@ -12,7 +12,7 @@ defmodule Wardmast.Agents.Qwen.StreamTest do
       assert QStream.tool_name("replace") == "Edit"
       assert QStream.tool_name("list_directory") == "LS"
       assert QStream.tool_name("grep_search") == "Grep"
-      assert QStream.tool_name("mcp__arbiter__ticket_show") == "mcp__arbiter__ticket_show"
+      assert QStream.tool_name("mcp__wardmast__ticket_show") == "mcp__wardmast__ticket_show"
     end
   end
 

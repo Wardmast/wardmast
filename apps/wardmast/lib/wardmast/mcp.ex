@@ -29,7 +29,7 @@ defmodule Wardmast.MCP do
         max_age: 86_400,            # coordinator token TTL in seconds (default 24h)
         worker_max_age: 14_400,     # worker token TTL in seconds (default 4h)
         max_depth: 3,               # dispatch-recursion depth cap (Phase 2 guardrail)
-        server_name: "arbiter"      # the mcpServers key in .mcp.json
+        server_name: "wardmast"      # the mcpServers key in .mcp.json
 
   All keys are optional; the defaults below stand in for a vanilla install.
 
@@ -68,7 +68,7 @@ defmodule Wardmast.MCP do
   @default_max_age 86_400
   @default_worker_max_age 14_400
   @default_max_depth 3
-  @default_server_name "arbiter"
+  @default_server_name "wardmast"
   @default_port 4848
   @default_sse_keepalive_ms 15_000
   @default_sse_max_lifetime_ms :infinity

@@ -338,7 +338,7 @@ defmodule Wardmast.Sessions.ProvisioningTest do
       session = launch!()
 
       config = session.id |> Layout.mcp_config_path() |> File.read!() |> Jason.decode!()
-      server = config["mcpServers"]["arbiter"]
+      server = config["mcpServers"]["wardmast"]
 
       assert server["type"] == "http"
       assert "Bearer " <> token = server["headers"]["Authorization"]
@@ -653,7 +653,7 @@ defmodule Wardmast.Sessions.ProvisioningTest do
       session = launch!()
 
       config = session.id |> Layout.mcp_config_path() |> File.read!() |> Jason.decode!()
-      "Bearer " <> token = config["mcpServers"]["arbiter"]["headers"]["Authorization"]
+      "Bearer " <> token = config["mcpServers"]["wardmast"]["headers"]["Authorization"]
 
       refute session.id |> Layout.instructions_path() |> File.read!() |> String.contains?(token)
     end

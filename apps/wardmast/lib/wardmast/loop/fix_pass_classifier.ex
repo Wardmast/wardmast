@@ -322,7 +322,7 @@ defmodule Wardmast.Loop.FixPassClassifier do
   defp rerun?(%{name: name} = step) when name in @shell_tools, do: input(step) =~ @rerun_cmd_re
   defp rerun?(step), do: tool?(step, "ci_rerun")
 
-  # An MCP tool call, directly (`mcp__arbiter__ci_rerun`) or through agy's
+  # An MCP tool call, directly (`mcp__wardmast__ci_rerun`) or through agy's
   # generic `call_mcp_tool` wrapper, which names the tool in its input.
   defp tool?(%{name: "call_mcp_tool"} = step, tool), do: String.contains?(input(step), tool)
   defp tool?(%{name: name}, tool) when is_binary(name), do: String.ends_with?(name, tool)

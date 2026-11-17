@@ -248,7 +248,7 @@ defmodule Wardmast.Worker.RunStepsTest do
         codex_item("item.completed", %{
           "id" => "i4",
           "type" => "mcp_tool_call",
-          "server" => "arbiter",
+          "server" => "wardmast",
           "tool" => "ci_rerun",
           "arguments" => %{"run" => 1},
           "status" => "completed",
@@ -259,7 +259,7 @@ defmodule Wardmast.Worker.RunStepsTest do
 
       assert [fc, mcp, ws] = steps_for(task_id)
       assert {fc.name, fc.input_summary} == {"apply_patch", "lib/a.ex"}
-      assert {mcp.name, mcp.output_summary} == {"mcp__arbiter__ci_rerun", "queued"}
+      assert {mcp.name, mcp.output_summary} == {"mcp__wardmast__ci_rerun", "queued"}
       assert {ws.name, ws.input_summary} == {"web_search", "elixir"}
     end
 

@@ -36,13 +36,13 @@ theories before you've actually read the quota gauge.
 
 **Anthropic is the only provider the quota gauge covers today.** If this
 workspace also runs Gemini (or another provider) workers,
-`mcp__arbiter__quota_get` tells you nothing about their usage or rate-limit
+`mcp__wardmast__quota_get` tells you nothing about their usage or rate-limit
 state — you're flying blind for those until a provider-specific quota
 tracker exists. This is a known gap, under active exploration; don't assume
 "gauge looks fine" means a non-Claude provider is fine too.
 
 ```
-mcp__arbiter__quota_get()
+mcp__wardmast__quota_get()
 ```
 
 CLI fallback: `arb quota`.
@@ -65,6 +65,6 @@ If the board's Ready column has cards but nothing is being dispatched and the
 scheduler is not paused, that's usually **quota-held, not a scheduler bug** —
 the board throttles itself around ~85% 5h utilization (the card reads
 `blocked — quota ...`) and resumes automatically at the window reset. Verify
-with `mcp__arbiter__quota_get` (CLI: `arb quota`) before concluding
+with `mcp__wardmast__quota_get` (CLI: `arb quota`) before concluding
 something's stuck. Don't force-dispatch when the gauge shows `rejected` —
 you'll only collect 429s.

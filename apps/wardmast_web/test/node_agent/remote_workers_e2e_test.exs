@@ -772,7 +772,7 @@ defmodule WardmastWeb.NodeAgent.RemoteWorkersE2ETest do
         AgentConfig.Claude.write_mcp_config(ctx.repo,
           mcp_url: "http://127.0.0.1:#{ctx.api_port}/mcp",
           scope_token: token,
-          server_name: "arbiter"
+          server_name: "wardmast"
         )
 
       File.mkdir_p!(Path.join(ctx.repo, ".claude/skills/tdd"))

@@ -32,7 +32,7 @@ broken local record and recreate.
 
 ## `tracker_sync` is reconciliation, not a push
 
-`mcp__arbiter__tracker_sync` (CLI: `arb ticket sync`) claims
+`mcp__wardmast__tracker_sync` (CLI: `arb ticket sync`) claims
 assigned-but-untracked issues and closes orphaned ones. It does **not** push
 field updates or force a status transition on the tracker side — don't
 reach for it expecting a field-push or re-transition; use the
