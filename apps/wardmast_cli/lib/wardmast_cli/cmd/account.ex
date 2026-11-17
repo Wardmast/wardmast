@@ -144,6 +144,17 @@ defmodule WardmastCli.Cmd.Account do
                                      token each poll and has the CLI refresh
                                      it. --env-var defaults to
                                      CLAUDE_CONFIG_DIR.
+      arb account rotate <ref> --kind service_account --secret-file KEY.json
+                                     (or - for stdin; never --secret)
+                                     An antigravity account's Google Cloud
+                                     service-account JSON key (bd-b2t0kw):
+                                     what agy signs in with in a container or
+                                     a cluster pod (AGY_ADC_AUTH). Stored
+                                     encrypted; a worker gets it as a file
+                                     that GOOGLE_APPLICATION_CREDENTIALS
+                                     names (the default --env-var), never as
+                                     a value. See
+                                     docs/agy-service-account-runbook.md.
       arb account merge  <from-ref> --into <into-ref>
                                      Re-points usage_events, provider_credentials
                                      and workspace_provider_accounts from
@@ -766,12 +777,27 @@ defmodule WardmastCli.Cmd.Account do
   # default env var and is sent as an absolute path: the server's cwd is not
   # the caller's.
   defp default_env_var("cli_credentials_path"), do: "CLAUDE_CONFIG_DIR"
+  # bd-b2t0kw: where agy finds the key file the container spawn writes.
+  defp default_env_var("service_account"), do: "GOOGLE_APPLICATION_CREDENTIALS"
   defp default_env_var(_kind), do: Output.die("account rotate requires --env-var")
 
   defp resolve_secret!("cli_credentials_path", opts, _args) do
     case opts[:secret] do
       path when is_binary(path) and path != "" -> Path.expand(path)
       _ -> Output.die("account rotate --kind cli_credentials_path requires --secret DIR")
+    end
+  end
+
+  # A key file is a private key: from the file or stdin only, never argv, which `ps`
+  # and the shell history would keep.
+  defp resolve_secret!("service_account", opts, args) do
+    if is_binary(opts[:secret]) do
+      Output.die(
+        "account rotate --kind service_account takes the key file, never the key itself: " <>
+          "pass --secret-file <key.json> or - (stdin)"
+      )
+    else
+      resolve_secret!(opts, args)
     end
   end
 

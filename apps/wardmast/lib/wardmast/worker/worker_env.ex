@@ -35,6 +35,7 @@ defmodule Wardmast.Worker.WorkerEnv do
   alias Wardmast.Accounts.Census
   alias Wardmast.Accounts.Credentials
   alias Wardmast.Accounts.MissingCredentialError
+  alias Wardmast.Accounts.ServiceAccountKey
   alias Wardmast.Guardrails
   alias Wardmast.Guardrails.Projection
   alias Wardmast.Tasks.Issue
@@ -197,7 +198,17 @@ defmodule Wardmast.Worker.WorkerEnv do
 
     {plain_pairs ++ spawn_account_pairs(ws, all_account_pairs, opts),
      drop_credential_secrets(secrets, credential_pairs) ++
-       Enum.map(all_account_pairs, fn {_var, secret} -> secret end)}
+       Enum.map(all_account_pairs, fn {_var, secret} -> secret end) ++
+       service_account_secrets(ws)}
+  end
+
+  # bd-b2t0kw: an agy service-account key reaches the worker as a file, not as one of the
+  # pairs above, and is scrubbed from its output all the same.
+  defp service_account_secrets(%Workspace{id: id}) do
+    case Credentials.workspace_service_account(id) do
+      {:ok, json} -> ServiceAccountKey.secret_values(json)
+      :none -> []
+    end
   end
 
   defp spawn_account_pairs(%Workspace{} = ws, all_account_pairs, opts) do

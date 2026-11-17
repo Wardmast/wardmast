@@ -42,6 +42,7 @@ defmodule Wardmast.Accounts do
     Merge,
     ProviderAccount,
     ProviderCredential,
+    ServiceAccountKey,
     WorkspaceProviderAccount
   }
 
@@ -440,6 +441,15 @@ defmodule Wardmast.Accounts do
   reason}}` otherwise), and `env_var` defaults to `CLAUDE_CONFIG_DIR`. The
   grant's tokens are never read into the row; see
   `Wardmast.Quota.GrantFile`.
+
+  `kind: :service_account` (bd-b2t0kw) is an `antigravity` account's Google Cloud
+  service-account JSON key, what agy signs in with under `AGY_ADC_AUTH`
+  (`Wardmast.Accounts.ServiceAccountKey`). `secret` is the key file's content,
+  stored encrypted like every other kind; a malformed key is
+  `{:error, {:invalid_service_account_key, reason}}` and another provider's account
+  `{:error, {:kind_not_supported, :service_account, provider}}`. `env_var` defaults
+  to `GOOGLE_APPLICATION_CREDENTIALS`, where a worker finds the key *file*: the row
+  is never projected into a spawn env as a value.
   """
   @spec rotate_credential(String.t(), map()) :: {:ok, ProviderCredential.t()} | {:error, term()}
   def rotate_credential(account_ref, attrs) when is_map(attrs) do
@@ -448,6 +458,7 @@ defmodule Wardmast.Accounts do
          {:ok, raw_secret} <- fetch_required(attrs, :secret),
          {:ok, raw_kind} <- fetch_required(attrs, :kind),
          {:ok, kind} <- parse_kind(raw_kind),
+         :ok <- ensure_kind_supported(kind, account),
          {:ok, secret} <- normalize_secret(kind, raw_secret),
          {:ok, env_var} <- fetch_env_var(kind, attrs) do
       Wardmast.Repo.transaction(fn ->
@@ -471,7 +482,13 @@ defmodule Wardmast.Accounts do
     end
   end
 
-  @credential_kinds ~w(oauth_token api_key cli_credentials_file cli_credentials_path)
+  @credential_kinds ~w(oauth_token api_key cli_credentials_file cli_credentials_path service_account)
+
+  # bd-b2t0kw: the env var a `:service_account` row is filed under. It names where agy
+  # finds the key *file*; the row is never projected into a spawn env as a value
+  # (`Wardmast.Accounts.Credentials` skips the kind), the container spawn writes the key
+  # to a file and points this variable at it.
+  @service_account_env_var "GOOGLE_APPLICATION_CREDENTIALS"
 
   # The env var a `:cli_credentials_path` row is filed under. It names what
   # the path is for — the `claude` CLI's config dir — but the row is never
@@ -510,7 +527,13 @@ defmodule Wardmast.Accounts do
 
   defp parse_kind(kind)
        when is_atom(kind) and
-              kind in [:oauth_token, :api_key, :cli_credentials_file, :cli_credentials_path],
+              kind in [
+                :oauth_token,
+                :api_key,
+                :cli_credentials_file,
+                :cli_credentials_path,
+                :service_account
+              ],
        do: {:ok, kind}
 
   defp parse_kind(kind) when kind in @credential_kinds, do: {:ok, String.to_existing_atom(kind)}
@@ -523,12 +546,31 @@ defmodule Wardmast.Accounts do
     end
   end
 
+  defp normalize_secret(:service_account, json), do: ServiceAccountKey.validate(json)
+
   defp normalize_secret(_kind, secret), do: {:ok, secret}
+
+  # A service-account key is what agy signs in with (`AGY_ADC_AUTH`); no other
+  # provider's CLI reads one, so a key on another account would be a credential no
+  # worker could use.
+  defp ensure_kind_supported(:service_account, %{provider: :antigravity}), do: :ok
+
+  defp ensure_kind_supported(:service_account, %{provider: provider}),
+    do: {:error, {:kind_not_supported, :service_account, provider}}
+
+  defp ensure_kind_supported(_kind, _account), do: :ok
 
   defp fetch_env_var(:cli_credentials_path, attrs) do
     case fetch_required(attrs, :env_var) do
       {:ok, env_var} when is_binary(env_var) and env_var != "" -> {:ok, env_var}
       _missing_or_blank -> {:ok, @grant_path_env_var}
+    end
+  end
+
+  defp fetch_env_var(:service_account, attrs) do
+    case fetch_required(attrs, :env_var) do
+      {:ok, env_var} when is_binary(env_var) and env_var != "" -> {:ok, env_var}
+      _missing_or_blank -> {:ok, @service_account_env_var}
     end
   end
 

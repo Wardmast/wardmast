@@ -86,6 +86,45 @@ defmodule Wardmast.Worker.WorkerEnvTest do
       assert WorkerEnv.secret_values("does-not-exist") == []
       assert WorkerEnv.secret_values(nil) == []
     end
+
+    # bd-b2t0kw: an antigravity service-account key reaches a worker as a file, never as
+    # an env pair, so it is not in `pairs/1`; it must still be scrubbed from the output.
+    test "carries the workspace's agy service-account key, though no env pair does" do
+      ws = workspace_with_env(%{})
+      private_key = "-----BEGIN PRIVATE KEY-----\nMIIEvfake\n-----END PRIVATE KEY-----\n"
+
+      key =
+        Jason.encode!(%{
+          "type" => "service_account",
+          "project_id" => "arb-agy-test",
+          "private_key_id" => "abc123def456",
+          "private_key" => private_key,
+          "client_email" => "arb-agy@arb-agy-test.iam.gserviceaccount.com"
+        })
+
+      account =
+        Ash.create!(Wardmast.Accounts.ProviderAccount, %{provider: :antigravity, slug: "we-sa"})
+
+      Ash.create!(Wardmast.Accounts.WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :antigravity,
+        provider_account_id: account.id
+      })
+
+      {:ok, _} =
+        Wardmast.Accounts.rotate_credential(account.id, %{
+          "kind" => "service_account",
+          "secret" => key
+        })
+
+      task = task_in(ws)
+      values = WorkerEnv.secret_values(task.id)
+
+      assert key in values
+      assert private_key in values
+      assert "abc123def456" in values
+      assert WorkerEnv.pairs(task.id) == []
+    end
   end
 
   describe "resolve/1 observability" do
