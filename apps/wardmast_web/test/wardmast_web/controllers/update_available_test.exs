@@ -244,6 +244,7 @@ defmodule WardmastWeb.UpdateAvailableTest do
       assert confirm =~ "could not be determined"
     end
 
+    @tag :linux
     test "no button while a deploy is running, but the progress is shown", %{
       conn: conn,
       home: home

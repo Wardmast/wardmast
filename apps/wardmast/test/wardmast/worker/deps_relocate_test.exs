@@ -6,6 +6,9 @@ defmodule Wardmast.Worker.DepsRelocateTest do
   """
   use ExUnit.Case, async: true
 
+  # Linux-only: fails on a macOS-like host (no /proc, GNU `timeout`, `setsid`, ...); excluded on darwin by test_helper.exs.
+  @moduletag :linux
+
   alias Wardmast.Worker.DepsRelocate
   alias Wardmast.Worker.Worktree
 

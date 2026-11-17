@@ -1,0 +1,173 @@
+# macOS smoke (bd-cblu5p, epic bd-aafll7 "Arbiter on macOS"): compiles the
+# umbrella with warnings as errors on Apple Silicon and runs the portable test
+# subset, i.e. everything NOT tagged `:linux`.
+#
+# WHY IT DOES NOT RUN ON PULL REQUESTS. Wardmast's merger reads every check
+# run's conclusion on the PR head SHA and treats any non-success as a failed
+# pipeline (see the NOTE in ci.yml). A new, not-yet-proven macOS job would
+# therefore gate every merge on runner-image drift and macOS-only flakes. It
+# runs on `push` to main (so a macOS regression is caught right after it lands)
+# and on demand: Actions -> "macOS smoke" -> Run workflow, pick the branch.
+#
+# THE `:linux` TAG. Tests that need a Linux-only facility (/proc, GNU `timeout`,
+# `setsid`, a real bwrap/systemd, ELF tooling) are tagged `:linux`. Each app's
+# test/test_helper.exs excludes that tag on darwin via
+# scripts/test_exclude_linux.exs, so no flag is needed here. To reproduce this
+# job's subset on Linux: `WARDMAST_TEST_EXCLUDE_LINUX=1 mix test`.
+# New test that fails here and not on Linux? Tag it `@tag :linux` (or
+# `@moduletag :linux`) with a one-line reason; do not delete it.
+#
+# RUNNER. macos-15 (Apple Silicon): GitHub retired the macos-14 image (bd-4l2gra
+# made the same move for macos-spike.yml).
+name: macOS smoke
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+env:
+  OTP_VERSION: "29.1.1"
+  ELIXIR_VERSION: "1.20.4"
+  MIX_ENV: test
+  # Non-secret test key for Wardmast.Vault (matches config/test.exs).
+  WARDMAST_CLOAK_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+
+jobs:
+  # Deps + a warnings-as-errors compile of every app, including test/support
+  # (MIX_ENV=test). Saves the deps/_build cache the shards below restore.
+  compile:
+    name: macOS compile (warnings as errors)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Restore deps/build cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-${{ runner.arch }}-otp${{ env.OTP_VERSION }}-elixir${{ env.ELIXIR_VERSION }}-macos-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-otp${{ env.OTP_VERSION }}-elixir${{ env.ELIXIR_VERSION }}-macos-
+
+      - name: Install hex/rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Save deps/build cache
+        if: ${{ success() && steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-${{ runner.arch }}-otp${{ env.OTP_VERSION }}-elixir${{ env.ELIXIR_VERSION }}-macos-${{ hashFiles('**/mix.lock') }}
+
+  # The non-:linux subset, sharded per app like ci.yml's test-shard (the wardmast
+  # suite is ~8 min per third on a 12-core Linux box, so a 3-core runner needs
+  # the same split). Each `mix test` runs in its own VM, so the per-partition
+  # SQLite files do not collide.
+  test-shard:
+    name: macOS test (${{ matrix.app }} ${{ matrix.partition }}/${{ matrix.partitions }})
+    runs-on: macos-15
+    timeout-minutes: 60
+    needs: compile
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { app: wardmast, partition: 1, partitions: 3 }
+          - { app: wardmast, partition: 2, partitions: 3 }
+          - { app: wardmast, partition: 3, partitions: 3 }
+          - { app: wardmast_web, partition: 1, partitions: 2 }
+          - { app: wardmast_web, partition: 2, partitions: 2 }
+          - { app: wardmast_cli, partition: 1, partitions: 1 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Restore deps/build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-${{ runner.arch }}-otp${{ env.OTP_VERSION }}-elixir${{ env.ELIXIR_VERSION }}-macos-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-otp${{ env.OTP_VERSION }}-elixir${{ env.ELIXIR_VERSION }}-macos-
+
+      - name: Install hex/rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      # Reports what the host can and cannot do, so a red shard is easy to read:
+      # the subset is whatever is NOT tagged :linux on THIS runner image.
+      - name: Host facts
+        run: |
+          uname -a
+          sw_vers
+          for b in git tmux python3 node timeout setsid bwrap systemctl podman; do
+            printf '%-10s %s\n' "$b" "$(command -v "$b" || echo '-')"
+          done
+
+      - name: Run tests (everything not tagged :linux)
+        working-directory: apps/${{ matrix.app }}
+        run: mix test --partitions ${{ matrix.partitions }} --slowest 25
+        env:
+          MIX_TEST_PARTITION: ${{ matrix.partition }}
+
+      - name: Run wardmast_release_env tests
+        if: ${{ matrix.app == 'wardmast_cli' }}
+        working-directory: apps/wardmast_release_env
+        run: mix test --slowest 25
+
+  # Single aggregate check: one name to look at for the whole macOS run.
+  macos-smoke:
+    name: macOS smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [compile, test-shard]
+    if: ${{ always() }}
+    steps:
+      - name: Require compile and every shard green
+        env:
+          COMPILE: ${{ needs.compile.result }}
+          SHARDS: ${{ needs.test-shard.result }}
+        run: |
+          echo "compile: $COMPILE"
+          echo "test-shard: $SHARDS"
+          [ "$COMPILE" = "success" ] && [ "$SHARDS" = "success" ]

@@ -4,6 +4,9 @@ defmodule Wardmast.Quota.CloudCodeTest do
   # is gone with the `gemini_cli` provider (bd-ac53wz).
   use ExUnit.Case, async: true
 
+  # Linux-only: fails on a macOS-like host (no /proc, GNU `timeout`, `setsid`, ...); excluded on darwin by test_helper.exs.
+  @moduletag :linux
+
   alias Wardmast.Quota.CloudCode
 
   # Stub `agy_usage_probe` so tests never shell out to a real `agy` binary

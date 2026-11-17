@@ -19,6 +19,9 @@ defmodule Wardmast.Sessions.WatchdogScriptTest do
   """
   use Wardmast.DataCase, async: false
 
+  # Linux-only: fails on a macOS-like host (no /proc, GNU `timeout`, `setsid`, ...); excluded on darwin by test_helper.exs.
+  @moduletag :linux
+
   alias Wardmast.Sessions
   alias Wardmast.Sessions.Layout
   alias Wardmast.Test.SessionRunnerStub

@@ -9,6 +9,9 @@ defmodule Wardmast.Worker.PrepushCheck.StepsTest do
   # with the same dance in PrepushCheckTest if both run concurrently.
   use ExUnit.Case, async: false
 
+  # Linux-only: fails on a macOS-like host (no /proc, GNU `timeout`, `setsid`, ...); excluded on darwin by test_helper.exs.
+  @moduletag :linux
+
   alias Wardmast.Worker.PrepushCheck
 
   defp ws(worker), do: %{config: %{"worker" => worker}}

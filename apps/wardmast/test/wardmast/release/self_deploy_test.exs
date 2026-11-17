@@ -139,6 +139,7 @@ defmodule Wardmast.Release.SelfDeployTest do
       refute_received {:cmd, "systemd-run", _, _}
     end
 
+    @tag :linux
     test "refuses while the deploy's own status says it is running", %{home: home, arb: arb} do
       stub_cmds(arb)
       now = DateTime.utc_now() |> DateTime.to_iso8601()
@@ -234,6 +235,7 @@ defmodule Wardmast.Release.SelfDeployTest do
       assert DeployStatus.read() == nil
     end
 
+    @tag :linux
     test "running?/1 is false for a dead pid and for finished states" do
       refute DeployStatus.running?(%{"state" => "succeeded"})
       refute DeployStatus.running?(%{"state" => "running", "pid" => "999999999"})

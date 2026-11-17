@@ -97,6 +97,7 @@ defmodule Wardmast.Agents.Gemini.ModelCatalogTest do
       {:ok, stub: Path.join(tmp, "agy")}
     end
 
+    @tag :linux
     test "runs `agy models` and parses its output", %{stub: stub} do
       File.write!(stub, "#!/bin/sh\n[ \"$1\" = models ] || exit 2\ncat <<'OUT'\n#{@listing}OUT\n")
       File.chmod!(stub, 0o755)

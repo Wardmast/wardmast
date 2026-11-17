@@ -148,6 +148,7 @@ defmodule Wardmast.MCP.OperatorProofTest do
                Path.join(OperatorProof.socket_dir(), "operator-4848.sock")
     end
 
+    @tag :linux
     test "the default dir is the per-user runtime dir when the host has one" do
       {:ok, %{uid: uid}} = File.stat("/proc/self")
       runtime = "/run/user/#{uid}"
@@ -159,6 +160,7 @@ defmodule Wardmast.MCP.OperatorProofTest do
   end
 
   describe "real processes (this VM plays the server)" do
+    @tag :linux
     test "a child process of this VM is refused" do
       port =
         Port.open({:spawn_executable, System.find_executable("sleep")}, [:binary, args: ["30"]])
@@ -170,6 +172,7 @@ defmodule Wardmast.MCP.OperatorProofTest do
                OperatorProof.authorize(%{pid: child, uid: own_uid(), gid: 0}, server_cgroup: nil)
     end
 
+    @tag :linux
     test "a process outside this VM's tree passes the ancestry check" do
       # This test process's own OS parent is outside the VM, so it stands in
       # for the operator's shell when the "server" is this VM.

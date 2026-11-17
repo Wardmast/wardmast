@@ -17,7 +17,17 @@ max_cases_opts =
   |> elem(0)
   |> then(& &1.(System.get_env()))
 
-ExUnit.start([exclude: [:escript_build]] ++ max_cases_opts)
+# bd-cblu5p: `:linux` tests need a Linux-only facility (/proc, GNU `timeout`,
+# `setsid`, a real bwrap/systemd, ELF tooling). They are excluded on darwin (the
+# macOS CI smoke job) and wherever WARDMAST_TEST_EXCLUDE_LINUX=1 is set.
+linux_exclude =
+  "../../../scripts/test_exclude_linux.exs"
+  |> Path.expand(__DIR__)
+  |> Code.eval_file()
+  |> elem(0)
+  |> then(& &1.(System.get_env(), :os.type()))
+
+ExUnit.start([exclude: [:escript_build] ++ linux_exclude] ++ max_cases_opts)
 
 # Make sure :req's transitive apps (finch, mint, etc.) are started for tests
 # that hit the Req.Test plug adapter.

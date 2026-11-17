@@ -102,6 +102,7 @@ defmodule WardmastWeb.DashboardUpdateControllerTest do
     refute_received {:cmd, "systemd-run", _}
   end
 
+  @tag :linux
   test "a deploy already running is refused with a notice", %{home: home} do
     start_checker("v99.0.0", "0.2.0")
 

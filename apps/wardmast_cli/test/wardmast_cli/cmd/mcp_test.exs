@@ -128,6 +128,7 @@ defmodule WardmastCli.Cmd.McpTest do
       assert OperatorSocket.path() == "/somewhere/op.sock"
     end
 
+    @tag :linux
     test "defaults to the per-user runtime dir the server uses" do
       Process.delete(:bd2_operator_socket)
       {:ok, %{uid: uid}} = File.stat("/proc/self")

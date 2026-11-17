@@ -10,6 +10,7 @@ defmodule WardmastWeb.SessionTranscriptControllerTest do
   agent transcript.
   """
   use WardmastWeb.ConnCase, async: false
+  @moduletag :tmux
 
   alias Wardmast.Sessions
   alias Wardmast.Sessions.Transcript

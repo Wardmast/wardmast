@@ -84,6 +84,16 @@ systemd_user_reason =
 # cluster and refuses anything else:
 #
 #     ARB_K8S_E2E=1 mix test --include k8s test/k8s
+# bd-cblu5p: `:linux` tests need a Linux-only facility (/proc, GNU `timeout`,
+# `setsid`, a real bwrap/systemd, ELF tooling). They are excluded on darwin (the
+# macOS CI smoke job) and wherever WARDMAST_TEST_EXCLUDE_LINUX=1 is set.
+linux_exclude =
+  "../../../scripts/test_exclude_linux.exs"
+  |> Path.expand(__DIR__)
+  |> Code.eval_file()
+  |> elem(0)
+  |> then(& &1.(System.get_env(), :os.type()))
+
 # bd-90vo7y: ARB_TEST_MAX_CASES / worker-default cap on async cases.
 max_cases_opts =
   "../../../scripts/test_max_cases.exs"
@@ -105,7 +115,7 @@ ExUnit.start(
         :spike_rw,
         :k8s
       ] ++
-        tmux_exclude ++ qwen_exclude
+        tmux_exclude ++ qwen_exclude ++ linux_exclude
   ] ++
     max_cases_opts
 )

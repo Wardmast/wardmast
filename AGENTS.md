@@ -149,6 +149,7 @@ custom classes must fully style the input
     Add `:<line>` to target a single test (e.g. `cd apps/wardmast && mix test test/wardmast/accounts/enablement_test.exs:10`).
   - **Async concurrency (`ARB_TEST_MAX_CASES`):** every app's `test_helper.exs` passes `max_cases:` to `ExUnit.start/1` via `scripts/test_max_cases.exs`. `ARB_TEST_MAX_CASES=N` sets it (a non-integer or `< 1` warns and falls back). Unset, a worker session (`ARB_WORKER_BEAD_ID` present) gets `max(2, div(schedulers_online, 4))`; developer and CI runs keep ExUnit's default (2x schedulers). Lower it further if the box is swapping with several workers running.
   - **To re-run failures:** run `mix test --failed` inside the specific app directory (`cd apps/<app> && mix test --failed`).
+  - **Linux-only tests (`:linux`):** a test that needs `/proc`, GNU `timeout`, `setsid`, a real bwrap/systemd or ELF tooling gets `@tag :linux` (or `@moduletag :linux`) plus a one-line reason. Each app's `test_helper.exs` excludes it on darwin via `scripts/test_exclude_linux.exs`; `WARDMAST_TEST_EXCLUDE_LINUX=1` reproduces the macOS subset on Linux. `.github/workflows/macos.yml` (macos-15; push to main + manual, never on PRs) compiles with `--warnings-as-errors` and runs that subset.
   - **App responsibilities:**
     - `apps/wardmast`: Core domain, database/Ecto schemas, background workers, and business logic.
     - `apps/wardmast_web`: Phoenix web endpoint, LiveView interfaces, controllers, and channels.

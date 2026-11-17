@@ -410,6 +410,7 @@ defmodule Wardmast.MCP.AgentConfigTest do
 
   describe "Codex.check_worker_config/2" do
     @tag :tmp_dir
+    @tag :linux
     test "runs codex mcp list --json in the worktree and checks the env var", %{tmp_dir: tmp} do
       json =
         Jason.encode!(codex_list(%{"bearer_token_env_var" => "ARBITER_MCP_TOKEN"}))
@@ -429,6 +430,7 @@ defmodule Wardmast.MCP.AgentConfigTest do
     end
 
     @tag :tmp_dir
+    @tag :linux
     test "surfaces a non-array / failing codex", %{tmp_dir: tmp} do
       exe = Path.join(tmp, "codex")
       File.write!(exe, "#!/bin/sh\nexit 3\n")
@@ -439,6 +441,7 @@ defmodule Wardmast.MCP.AgentConfigTest do
     end
 
     @tag :tmp_dir
+    @tag :linux
     test "times out a stalled codex command", %{tmp_dir: tmp} do
       exe = Path.join(tmp, "codex")
       pid_file = Path.join(tmp, "codex.pid")

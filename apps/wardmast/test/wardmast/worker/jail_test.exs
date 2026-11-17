@@ -309,6 +309,7 @@ defmodule Wardmast.Worker.JailTest do
       end
     end
 
+    @tag :linux
     test "the default masks resolve the uid at runtime and only name existing paths" do
       {:ok, %{uid: uid}} = File.stat("/proc/self")
       masks = Jail.mask_paths()
@@ -348,6 +349,7 @@ defmodule Wardmast.Worker.JailTest do
       assert dir in Jail.mask_paths()
     end
 
+    @tag :linux
     test "a path under another mask is not masked twice (bd-8381tk)" do
       {:ok, %{uid: uid}} = File.stat("/proc/self")
       runtime = "/run/user/#{uid}"

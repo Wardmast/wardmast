@@ -107,6 +107,7 @@ defmodule Wardmast.Worker.PrepushCheckReviseRoundTest do
     end
   end
 
+  @tag :linux
   test "a red recipe fails the round and records the step results", %{repo: repo} do
     ws = workspace("echo 'credo: alias warning'; exit 2")
     {path, base} = fix_round_worktree(repo, "bd-rv/red")
@@ -121,6 +122,7 @@ defmodule Wardmast.Worker.PrepushCheckReviseRoundTest do
     assert out =~ "alias warning"
   end
 
+  @tag :linux
   test "a green recipe lets the round complete", %{repo: repo} do
     ws = workspace("echo ok")
     {path, base} = fix_round_worktree(repo, "bd-rv/green")
