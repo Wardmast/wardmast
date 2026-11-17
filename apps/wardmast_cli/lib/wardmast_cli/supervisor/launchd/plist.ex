@@ -20,9 +20,12 @@ defmodule WardmastCli.Supervisor.Launchd.Plist do
     * `ThrottleInterval = 10` — `RestartSec=10`.
     * `StandardOutPath`/`StandardErrorPath` — the same `log/wardmast.log` the
       user unit appends to.
-    * `AbandonProcessGroup = false` (explicit) — phase 1: when the service
-      stops, launchd also kills everything left in its process group. Workers
-      do not yet survive a server restart on macOS.
+    * `AbandonProcessGroup = true` — when the service stops, launchd does *not*
+      kill what is left in its process group. Detached tmux sessions
+      (`Wardmast.Sessions.Runner.Darwin`, MAC P3-1) must outlive a server
+      restart, and the P2-1 containment (each worker leads its own group,
+      reaped by the server's own shutdown and the boot-time orphan sweep) is
+      what now owns worker cleanup, so launchd no longer has to.
   """
 
   @label "com.wardmast.server"
@@ -100,7 +103,7 @@ defmodule WardmastCli.Supervisor.Launchd.Plist do
       <key>ThrottleInterval</key>
       <integer>#{@throttle_s}</integer>
       <key>AbandonProcessGroup</key>
-      <false/>
+      <true/>
       <key>StandardOutPath</key>
       <string>#{esc(log)}</string>
       <key>StandardErrorPath</key>

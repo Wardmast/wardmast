@@ -183,8 +183,58 @@ defmodule WardmastCli.Supervisor.LaunchdTest do
   end
 
   describe "list_scopes/1" do
-    test "there are no arb-session scopes on launchd" do
+    setup do
+      root = Path.join(System.tmp_dir!(), "arb-ls-1347")
+      prior = System.get_env("WARDMAST_SOCKET_ROOT")
+      System.put_env("WARDMAST_SOCKET_ROOT", root)
+      File.mkdir_p!(Path.join(root, "sessions"))
+
+      on_exit(fn ->
+        if prior,
+          do: System.put_env("WARDMAST_SOCKET_ROOT", prior),
+          else: System.delete_env("WARDMAST_SOCKET_ROOT")
+
+        File.rm_rf(root)
+      end)
+
+      {:ok, sessions: Path.join(root, "sessions")}
+    end
+
+    test "no pidfiles, no scopes" do
       assert Launchd.list_scopes("arb-session-") == {:ok, ""}
+    end
+
+    test "a pidfile whose pid is a live tmux is listed in systemctl's column shape", %{
+      sessions: dir
+    } do
+      File.write!(Path.join(dir, "session-aaa.pid"), "4242\n/x/session-aaa.sock\n")
+      File.write!(Path.join(dir, "session-bbb.pid"), "4343\n/x/session-bbb.sock\n")
+
+      stub(fn
+        "ps", ["-p", "4242" | _], _ -> {"tmux\n", 0}
+        "ps", ["-p", "4343" | _], _ -> {"", 1}
+      end)
+
+      assert {:ok, out} = Launchd.list_scopes("arb-session-")
+      assert [unit, "loaded", "active", "running" | _] = String.split(out)
+      assert unit == "arb-session-aaa.scope"
+      refute out =~ "bbb"
+    end
+
+    test "a recycled pid (not tmux) is not a session", %{sessions: dir} do
+      File.write!(Path.join(dir, "session-aaa.pid"), "4242\n/x/session-aaa.sock\n")
+      stub(fn "ps", _, _ -> {"Safari\n", 0} end)
+
+      assert Launchd.list_scopes("arb-session-") == {:ok, ""}
+    end
+
+    test "ps failing is an error, not an empty list", %{sessions: dir} do
+      File.write!(Path.join(dir, "session-aaa.pid"), "4242\n/x/session-aaa.sock\n")
+      stub(fn "ps", _, _ -> {"ps: boom\n", 71} end)
+
+      assert {:error, title, detail} = Launchd.list_scopes("arb-session-")
+      assert title =~ "ps"
+      assert detail =~ "boom"
     end
   end
 

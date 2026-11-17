@@ -46,8 +46,8 @@ defmodule WardmastCli.Supervisor.Launchd.PlistTest do
       assert xml =~ "<key>ThrottleInterval</key>\n  <integer>10</integer>"
     end
 
-    test "phase 1 does not abandon the process group" do
-      assert Plist.plist(@opts) =~ "<key>AbandonProcessGroup</key>\n  <false/>"
+    test "abandons the process group so detached sessions survive a restart (P3-1)" do
+      assert Plist.plist(@opts) =~ "<key>AbandonProcessGroup</key>\n  <true/>"
     end
 
     test "stdout and stderr go to ~/.wardmast/log/wardmast.log" do

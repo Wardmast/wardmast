@@ -13,9 +13,12 @@ defmodule Wardmast.Sessions.Heartbeat do
   process to be alive to be *read* — only to have been *written*, at some
   point in the past, by an instance that was.
 
-  Inert wherever `XDG_RUNTIME_DIR` is unset (no systemd user session, e.g. a
-  bare container or the test suite) — there is nowhere to put the file and
-  nothing to watch it in that case anyway.
+  Inert wherever there is no runtime dir — `XDG_RUNTIME_DIR` unset on Linux (no
+  systemd user session, e.g. a bare container or the test suite): there is
+  nowhere to put the file and nothing to watch it in that case anyway. On macOS
+  there is no `XDG_RUNTIME_DIR` by design, and the file lives in the same short
+  private socket dir as the sessions (`Wardmast.Sessions.Naming`), where the
+  generated `watchdog.sh` already reads its mtime with BSD `stat -f %m`.
 
   ## Configuration
 
@@ -46,7 +49,7 @@ defmodule Wardmast.Sessions.Heartbeat do
   def touch do
     case Naming.heartbeat_path() do
       {:ok, path} ->
-        with :ok <- File.mkdir_p(Path.dirname(path)),
+        with {:ok, _dir} <- Naming.ensure_socket_dir(),
              :ok <- File.write(path, DateTime.to_iso8601(DateTime.utc_now())) do
           :ok
         else
