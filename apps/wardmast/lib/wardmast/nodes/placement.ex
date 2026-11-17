@@ -64,7 +64,14 @@ defmodule Wardmast.Nodes.Placement do
       runs: the request's `:git_credential` (`git_credential/2`) does not keep it
       here.
 
-  The discriminator for "podman" is `GitLayout.for_policy/1`'s `:private_clone`,
+  Under `sandbox.backend: auto` (bd-56z2wz) the discriminator is not the policy: the
+  request says `auto?: true` and placement picks the backend. A node is podman on a
+  private clone; the primary is `sandbox.local_backend` on the checkout the ticket already
+  has (`existing_layout`). Two more reasons stay local: `:provider_no_container` (agy has
+  no container wrap point) and `:existing_linked_worktree`. `prefer_local` (this machine
+  first, a node when it has no slot) is decided by `LocalCapacity.gate_with_reason/2`.
+
+  Otherwise the discriminator for "podman" is `GitLayout.for_policy/1`'s `:private_clone`,
   which `SecurityPolicy` merges most-restrictive-wins, so nothing a workspace,
   repo or ticket sets can loosen a run into remote.
 
@@ -72,7 +79,7 @@ defmodule Wardmast.Nodes.Placement do
 
   `worker.placement` on the workspace: `local_only` (the **default**, and what
   any unreadable value means), `prefer_remote` (a node with headroom, else
-  local) and `remote_only` (never local: `{:no_node_capacity, info}` and the
+  local), `prefer_local` (the primary while it has a slot, else a node) and `remote_only` (never local: `{:no_node_capacity, info}` and the
   card is held, not failed).
 
   ## Candidates

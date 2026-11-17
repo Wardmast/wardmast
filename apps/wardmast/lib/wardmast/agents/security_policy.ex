@@ -103,6 +103,15 @@ defmodule Wardmast.Agents.SecurityPolicy do
   resolve and refused on write by
   `Wardmast.Tasks.Workspace.Changes.ValidateConfig`.
 
+  `:auto` (bd-56z2wz) leaves the backend to placement: a run placed on a cluster node is
+  `:podman` on a private clone, a run placed on the primary is `sandbox.local_backend`
+  (`:bwrap` or `:podman`, default `:bwrap`), and a ticket's existing checkout keeps its
+  layout. It ranks between `:bwrap` and `:podman` in `valid_sandbox_backends/0`, so a repo
+  can pin `:podman` over a workspace `:auto` but cannot loosen it to `:bwrap`.
+  `sandbox_backend/1` reads an unplaced `:auto` as its local backend;
+  `configured_backend/1` is the raw value and `concretize/2` fixes it once placed.
+  `review_backend` and `local_backend` never take `:auto`.
+
   ### `sandbox.review_backend` (bd-4rvf98)
 
   The backend for the spawns that are **not** a task worker's own implement

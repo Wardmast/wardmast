@@ -267,7 +267,27 @@ arb config set agent.security.sandbox.review_backend bwrap   # optional; reviews
 
 A bare `sandbox.backend` is not a config key: `arb config set` (and REST and MCP) refuse
 it and name the full path (pass `--force` only to store a key on purpose). `arb server
-doctor` reports "no workspace uses the podman sandbox backend" until the full path is set.
+doctor` reports "no workspace runs podman on this machine" until the full path is set.
+
+### Let capacity pick the backend: `auto`
+
+`podman` puts every run in a container, local ones too, and agy cannot run in one; `bwrap`
+never reaches a node. `auto` lets placement decide first and the backend follow:
+
+```sh
+arb config set agent.security.sandbox.backend auto
+arb config set agent.security.sandbox.local_backend bwrap    # what runs on this machine (default)
+arb config set worker.placement prefer_local                 # this machine first, a node when it is full
+```
+
+A run placed on a node is podman on a private clone; a run placed on this machine uses
+`local_backend` (bwrap by default). A provider with no container wrap point (agy) stays
+local on bwrap. `prefer_remote` tries a node first, `prefer_local` this machine first,
+`remote_only` and `local_only` pick one side; a card is held only when neither side has a
+slot (the hold names both). A ticket's checkout keeps its layout: a linked worktree resumes
+locally, a private clone resumes as one. A repo can pin `podman` over a workspace `auto`
+but cannot set `bwrap` back. Each run's `routing_decision.placement.sandbox_backend` says
+which it got and why (`arb worker show <task>`).
 
 ## 4. Drain, revoke, upgrade, remove
 
