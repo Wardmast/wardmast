@@ -1448,6 +1448,57 @@ defmodule Wardmast.Worker.JailTest do
       assert wait_until(fn -> pids_in_ns(ns) == [] end),
              "processes survived in the jail's pid namespace: #{inspect(pids_in_ns(ns))}"
     end
+
+    # bd-568ib9: the jailed agent leads a session of its own (`--new-session`), so it is
+    # not in the process group the worker records and kills once the agent exits
+    # (`Wardmast.Worker.ProcessGroup`), and that kill cannot reach what it leaves
+    # running. Nothing has to: the jail's pid namespace ends with the agent
+    # (`--unshare-pid --die-with-parent`), whatever is still in it.
+    test "when the jailed agent exits, nothing it left running survives it", %{base: base} do
+      ready = Path.join(base, "ready")
+      go = Path.join(base, "go")
+
+      # Two leftovers off the agent's stdio, one in a session of its own, bounded so a
+      # regression cannot leak them for long. The agent exits once `go` exists.
+      stub = """
+      sleep 30 </dev/null >/dev/null 2>&1 &
+      setsid sleep 30 </dev/null >/dev/null 2>&1 &
+      echo up > "$READY"
+      while [ ! -e "$GO" ]; do sleep 0.05; done
+      exit 0
+      """
+
+      {:ok, [bwrap | args]} = Jail.wrap(["sh", "-c", stub], worktree: base)
+
+      port =
+        Port.open({:spawn_executable, bwrap}, [
+          :binary,
+          :exit_status,
+          :stderr_to_stdout,
+          args: args,
+          env: [{~c"READY", String.to_charlist(ready)}, {~c"GO", String.to_charlist(go)}]
+        ])
+
+      {:os_pid, outer} = Port.info(port, :os_pid)
+      assert wait_until(fn -> File.exists?(ready) end), "jailed agent never came up"
+
+      [inner | _] = OsProcess.descendants(outer)
+      {:ok, ns} = File.read_link("/proc/#{inner}/ns/pid")
+      refute ns == elem(File.read_link("/proc/self/ns/pid"), 1)
+
+      # Taken while the namespace is alive (its id is only reused once it is gone):
+      # bwrap's init, the agent and both leftovers, each as pid + start time.
+      jailed = ns |> pids_in_ns() |> Enum.map(&{&1, start_ticks(&1)})
+      assert length(jailed) >= 4
+
+      # The agent exits on its own; nothing on this side signals anything.
+      File.write!(go, "")
+
+      assert wait_until(fn -> not Enum.any?(jailed, &running?/1) end),
+             "outlived the jailed agent: #{inspect(Enum.filter(jailed, &running?/1))}"
+
+      assert_receive {^port, {:exit_status, 0}}, 5_000
+    end
   end
 
   describe "real bwrap: escape vectors (bd-7o08mj)" do
@@ -1594,6 +1645,24 @@ defmodule Wardmast.Worker.JailTest do
     |> Enum.filter(fn pid ->
       pid =~ ~r/^\d+$/ and File.read_link("/proc/#{pid}/ns/pid") == {:ok, ns}
     end)
+  end
+
+  # `/proc/<pid>/stat` after the `(comm)`: state, then starttime 19 fields on.
+  defp stat_fields(pid) do
+    case File.read("/proc/#{pid}/stat") do
+      {:ok, stat} -> stat |> String.split(") ") |> List.last() |> String.split()
+      {:error, _} -> []
+    end
+  end
+
+  defp start_ticks(pid), do: Enum.at(stat_fields(pid), 19)
+
+  # Still the process that was recorded, and not a zombie waiting to be reaped.
+  defp running?({pid, ticks}) do
+    case stat_fields(pid) do
+      [state | _] = fields -> state != "Z" and Enum.at(fields, 19) == ticks
+      [] -> false
+    end
   end
 
   # External OS processes give no message to wait on; poll with a bound.
