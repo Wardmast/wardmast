@@ -302,7 +302,7 @@ defmodule Wardmast.Agents.Gemini.ConfigDir do
     keyring_available?(opts) or
       (not Keyword.has_key?(opts, :keyring) and
          Application.fetch_env(:wardmast, :worker_gemini_keyring_available) == :error and
-         CredentialStore.secret_service?() and Wardmast.Worker.Jail.session_bus_reachable?())
+         CredentialStore.secret_service?(opts) and Wardmast.Worker.Jail.session_bus_reachable?())
   end
 
   @doc "The worker memory written into the isolated HOME's `.gemini/GEMINI.md`."
