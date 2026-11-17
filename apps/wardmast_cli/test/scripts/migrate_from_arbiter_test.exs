@@ -58,6 +58,7 @@ defmodule WardmastCli.Scripts.MigrateFromArbiterTest do
         exit $?
         ;;
     esac
+    if [ -f "$HOME/fail-systemctl" ]; then exit 1; fi
     exit 0
     """)
 
@@ -239,6 +240,20 @@ defmodule WardmastCli.Scripts.MigrateFromArbiterTest do
       refute calls =~ "start wardmast.service"
       refute calls =~ "restart"
       assert out =~ "systemctl --user start wardmast.service"
+    end
+
+    test "a systemctl that rejects daemon-reload/enable does not abort the migration", %{
+      home: home
+    } do
+      legacy_install!(home)
+      File.write!(Path.join(home, "fail-systemctl"), "")
+
+      {out, code} = run(home)
+      assert code == 0, out
+      assert File.exists?(Path.join(home, ".config/systemd/user/wardmast.service"))
+      assert File.exists?(Path.join(home, ".wardmast/wardmast.env"))
+      assert out =~ "run these yourself first"
+      assert out =~ "systemctl --user daemon-reload"
     end
 
     test "moves the recorded checkout path", %{home: home} do

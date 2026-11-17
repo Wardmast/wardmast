@@ -358,6 +358,7 @@ rewrite_in_place() {
 
 UNITS_TOUCHED=0
 OLD_ENABLED=0
+SYSTEMD_TODO=""
 
 # transform_unit <old-file> <new-file>: write <new-file> from <old-file>, unless it exists.
 transform_unit() {
@@ -429,10 +430,15 @@ migrate_units() {
   fi
 
   if [ "$DRY_RUN" != 1 ] && [ "$UNITS_TOUCHED" = 1 ] && [ "$have_systemctl" = 1 ]; then
-    systemctl --user daemon-reload
+    if ! systemctl --user daemon-reload; then
+      SYSTEMD_TODO="systemctl --user daemon-reload"
+    fi
     if [ -f "$UNITS/wardmast.service" ] && [ "$OLD_ENABLED" = 1 ]; then
-      systemctl --user enable wardmast.service >/dev/null 2>&1 || true
-      note "enabled wardmast.service (not started)"
+      if systemctl --user enable wardmast.service >/dev/null 2>&1; then
+        note "enabled wardmast.service (not started)"
+      else
+        SYSTEMD_TODO="${SYSTEMD_TODO:+$SYSTEMD_TODO; }systemctl --user enable wardmast.service"
+      fi
     fi
     if [ "$timer_was_there" = 1 ] && [ -f "$UNITS/wardmast-logrotate.timer" ]; then
       systemctl --user enable --now wardmast-logrotate.timer >/dev/null 2>&1 || true
@@ -525,6 +531,10 @@ fi
 
 say ""
 say "Migration complete. Next:"
+if [ -n "$SYSTEMD_TODO" ]; then
+  say "systemd did not accept every call; run these yourself first:"
+  say "  $SYSTEMD_TODO"
+fi
 say "  systemctl --user start wardmast.service"
 say "  ward doctor"
 say "Update shell profiles / scripts that export ARB_DATA_HOME, ARB_PRIMARY_CHECKOUT or point at ~/.arbiter."
