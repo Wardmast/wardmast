@@ -23,6 +23,11 @@ defmodule Wardmast.Doctor.PlatformTest do
 
   test "linux: the PATH is unchanged" do
     report = Platform.report(os: {:unix, :linux}, path: "/usr/bin", find: fn _, _ -> nil end)
-    assert report == %{os: "linux", path: "/usr/bin", tools: Map.new(~w(gtimeout claude gh glab mise), &{&1, nil})}
+
+    assert report == %{
+             os: "linux",
+             path: "/usr/bin",
+             tools: Map.new(~w(gtimeout claude gh glab mise), &{&1, nil})
+           }
   end
 end

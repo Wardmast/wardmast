@@ -17,7 +17,8 @@ defmodule WardmastCli.Cmd.Doctor.DarwinTest do
     test "all tools on the server's PATH are ok" do
       results = Darwin.checks(darwin_opts())
 
-      for id <- ~w(darwin_gtimeout darwin_homebrew_path darwin_claude darwin_gh darwin_glab darwin_mise) do
+      for id <-
+            ~w(darwin_gtimeout darwin_homebrew_path darwin_claude darwin_gh darwin_glab darwin_mise) do
         assert %{status: :ok} = by_id(results, id)
       end
     end
@@ -100,7 +101,10 @@ defmodule WardmastCli.Cmd.Doctor.DarwinTest do
     end
 
     test "a linux server is not treated as darwin whatever the CLI host is" do
-      stub_routes([{{"get", "/api/server/platform"}, {%{"os" => "linux", "path" => "/usr/bin", "tools" => %{}}, 200}}])
+      stub_routes([
+        {{"get", "/api/server/platform"},
+         {%{"os" => "linux", "path" => "/usr/bin", "tools" => %{}}, 200}}
+      ])
 
       results = Checks.run(spawn: :skip)
 
