@@ -310,6 +310,21 @@ defmodule Wardmast.Worker.TestServicesTest do
   describe "reap_orphans/1" do
     defp pods_json(pods), do: {Jason.encode!(pods), 0}
 
+    test "default liveness check uses ps, not /proc: live pid kept, dead pid reaped" do
+      list = [
+        %{"Name" => "arb-live-pod", "Labels" => %{"arbiter.test-services" => "#{System.pid()}"}},
+        %{"Name" => "arb-dead-pod", "Labels" => %{"arbiter.test-services" => "999999999"}}
+      ]
+
+      run =
+        runner(fn
+          ["pod", "ps" | _] -> pods_json(list)
+          _ -> {"", 0}
+        end)
+
+      assert ["arb-dead-pod"] = TestServices.reap_orphans(runner: run)
+    end
+
     test "removes only labelled pods whose server is gone" do
       list = [
         %{"Name" => "arb-a-1-pod", "Labels" => %{"arbiter.test-services" => "111"}},
