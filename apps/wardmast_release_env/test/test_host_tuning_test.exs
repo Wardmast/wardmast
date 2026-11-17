@@ -43,7 +43,8 @@ defmodule WardmastReleaseEnv.TestHostTuningTest do
         File.rm_rf(base)
       end)
 
-      {:ok, real: File.cd!(real, fn -> File.cwd!() end), link: link, normalize: tuning.normalize_tmpdir}
+      {:ok,
+       real: File.cd!(real, fn -> File.cwd!() end), link: link, normalize: tuning.normalize_tmpdir}
     end
 
     test "on darwin $TMPDIR becomes its real path (the /var -> /private/var symlink)", ctx do
