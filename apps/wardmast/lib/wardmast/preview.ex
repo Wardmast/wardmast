@@ -353,6 +353,57 @@ defmodule Wardmast.Preview do
     content |> String.split("\n") |> Enum.take(-(n + 1)) |> Enum.join("\n")
   end
 
+  @doc """
+  A caller-facing `{kind, message}` for an error `start/2`, `stop/2` and friends
+  return, in the vocabulary REST (`FallbackController`) and MCP share.
+  """
+  @spec error(term()) :: {atom(), String.t()}
+  def error(:ticket_not_found), do: {:not_found, "ticket not found"}
+  def error(:workspace_not_found), do: {:not_found, "the ticket's workspace was not found"}
+  def error(:not_found), do: {:not_found, "no preview for that ticket"}
+
+  def error(:no_repo),
+    do: {:invalid_request, "the ticket has no repo; pass `repo`"}
+
+  def error({:not_configured, repo}) do
+    {:invalid_request,
+     "repo #{repo} has no preview configured: set worker.repos.#{repo}.preview.command " <>
+       "(docs/app-preview.md)"}
+  end
+
+  def error({:invalid_config, errors}),
+    do: {:invalid, "preview config is invalid: " <> Enum.join(errors, "; ")}
+
+  def error({:no_repo_path, repo}),
+    do: {:invalid_request, "repo #{repo} has no checkout path configured in repo_paths"}
+
+  def error(:no_repo_path), do: {:invalid_request, "the repo has no checkout path configured"}
+
+  def error({:no_checkout, branch}) do
+    {:not_found,
+     "no checkout to preview: the ticket has none on this machine and branch #{branch} " <>
+       "is not pushed to origin"}
+  end
+
+  def error(:range_exhausted),
+    do:
+      {:conflict, "every port in the preview range is in use; stop a preview or widen port_range"}
+
+  def error(:range_overlaps_worker_ports),
+    do: {:invalid, "the preview port_range overlaps the worker dev-server range 20000-29999"}
+
+  def error({:git, msg}), do: {:server_error, "git failed preparing the checkout: " <> msg}
+  def error(other), do: {:server_error, "preview failed: " <> inspect(other)}
+
+  @doc "The workspace a ticket belongs to (for authorisation), or nil."
+  @spec ticket_workspace_id(String.t()) :: String.t() | nil
+  def ticket_workspace_id(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, %Issue{workspace_id: ws}} -> ws
+      _ -> nil
+    end
+  end
+
   @doc "A JSON-ready map for a preview row."
   @spec serialize(Lease.t()) :: map()
   def serialize(%Lease{} = l) do
