@@ -358,6 +358,8 @@ defmodule Wardmast.Worker.CliSet.Watcher do
   end
 
   defp invoke_publish(%{ctx: ctx}, fallback_ref, publish, opts) do
+    ctx = hydrate(ctx)
+
     case check_reachability(ctx, opts) do
       :ok ->
         try do
@@ -370,6 +372,20 @@ defmodule Wardmast.Worker.CliSet.Watcher do
         {:error, {:registry_unreachable, fallback_ref, reason}}
     end
   end
+
+  # The ledger keeps a workspace as its id (no module structs on disk); re-read it now.
+  defp hydrate(%{workspace: %{}} = ctx), do: ctx
+
+  defp hydrate(%{workspace_id: id} = ctx) when is_binary(id) do
+    case Wardmast.Accounts.get_workspace(id) do
+      {:ok, workspace} -> Map.put(ctx, :workspace, workspace)
+      _ -> ctx
+    end
+  rescue
+    _ -> ctx
+  end
+
+  defp hydrate(ctx), do: ctx
 
   defp check_reachability(ctx, opts) do
     cond do
@@ -589,6 +605,8 @@ defmodule Wardmast.Worker.CliSet.Watcher do
   end
 
   defp from_entry_ctx(ctx, opts) do
+    ctx = hydrate(ctx)
+
     case Registry.resolve(Map.get(ctx, :workspace), Map.get(ctx, :repo), opts) do
       {:ok, cfg} ->
         base = Registry.repository(cfg, Pipeline.worker_repository(ctx))
