@@ -87,11 +87,20 @@ when the process at `os_pid` is still alive, still leads its group, and started
 within 5 seconds of `os_started_at` (Linux derives the start time from the boot
 time, which can move by a second or so). A pid the OS has given to another
 process since, after a reboot for instance, fails that check and is left alone.
+
+Nor does it kill an agent whose parent is still an `erl_child_setup` (the
+helper every BEAM forks its port programs through). That helper exits as soon
+as its BEAM dies, so an agent a crash left behind has been reparented; one
+still parented by an `erl_child_setup` belongs to a server that is running. This
+is what keeps a server booted against a **copy** of another install's database
+from killing that install's live workers.
+
 The server log says what it did:
 
 ```
 [warning] ProcessGroup: killed orphaned worker process group 4242 (task bd-xxxxxx, run <uuid>)
 [info] ProcessGroup: pid 4242 (task bd-xxxxxx, run <uuid>) now belongs to another process; left alone
+[warning] ProcessGroup: process group 4242 (task bd-xxxxxx, run <uuid>) belongs to a running server (its leader's parent is an erl_child_setup); left alone
 ```
 
 ## Limits
