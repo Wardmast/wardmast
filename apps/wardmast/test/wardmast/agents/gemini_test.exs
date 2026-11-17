@@ -2016,6 +2016,33 @@ defmodule Wardmast.Agents.GeminiTest do
       assert reason.summary == "agy needs a keyring (D-Bus) or its own login on this host"
     end
 
+    test "agy on macOS: Keychain via the security CLI counts as a keyring (no D-Bus needed)",
+         %{tmp: tmp} do
+      _agy = stub_exec(tmp, "agy")
+      Application.delete_env(:wardmast, :worker_gemini_keyring_available)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :skipped = Gemini.auth_probe(os: {:unix, :darwin}, security_cli: true)
+        end)
+
+      # Arbiter cannot read the Keychain: the probe says so rather than staying silent.
+      assert log =~ "Keychain"
+    end
+
+    test "agy on macOS: no security CLI fails with a Keychain-specific message", %{tmp: tmp} do
+      _agy = stub_exec(tmp, "agy")
+      Application.delete_env(:wardmast, :worker_gemini_keyring_available)
+
+      assert {:error, %Wardmast.Worker.StopReason{} = reason} =
+               Gemini.auth_probe(os: {:unix, :darwin}, security_cli: false)
+
+      assert reason.category == :auth_expired
+      assert reason.summary =~ "Keychain"
+      refute reason.summary =~ "D-Bus"
+      refute reason.remediation =~ "gnome-keyring"
+    end
+
     test "agy: Preflight.check/2 fails loudly when keyring is unavailable", %{tmp: tmp} do
       _agy = stub_exec(tmp, "agy")
 
