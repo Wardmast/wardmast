@@ -293,7 +293,9 @@ defmodule WardmastWeb.Api.NodeControllerTest do
       }
 
       channel = spawn(fn -> Process.sleep(:infinity) end)
-      {:ok, %{pid: pid}} = Wardmast.Nodes.Registry.attach(node, channel, hello, tick_ms: :infinity)
+
+      {:ok, %{pid: pid}} =
+        Wardmast.Nodes.Registry.attach(node, channel, hello, tick_ms: :infinity)
 
       on_exit(fn ->
         Wardmast.ProcessTeardown.stop_child(Wardmast.Nodes.SessionSupervisor, pid)
