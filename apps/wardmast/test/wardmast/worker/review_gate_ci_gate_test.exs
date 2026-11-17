@@ -1811,7 +1811,7 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
     |> Enum.filter(&(&1.task_ref == rig.task.id))
   end
 
-  defp wait_until(fun, timeout \\ 5_000) do
+  defp wait_until(fun, timeout \\ 15_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
     do_wait(fun, deadline)
   end

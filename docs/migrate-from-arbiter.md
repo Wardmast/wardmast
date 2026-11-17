@@ -71,3 +71,17 @@ scripts/migrate-from-arbiter.sh --helm-notes
 An existing install keeps its namespace (a namespace cannot be renamed; the chart does
 not hard-code one). The tailscale ACL tag `tag:arbiter-node` is unchanged — it lives in
 your tailnet policy.
+
+## Upgrading v0.4.x -> v0.5+ with `arb server deploy`
+
+Releases before the fix for #1425 could crash at the very end of
+`arb server deploy` when run from the `arb` escript: the CLI self-update
+replaced `~/.local/bin/arb` with the deprecation shim while that file was still
+running. The server side is fine (swapped, restarted, health-checked), but
+`deploy-status.json` stays at `running` / `updating cli`, and
+`ward server doctor` warns `deploy of vX was interrupted ... updating cli`.
+
+If you hit that: run `ward server doctor` and ignore the "interrupted ...
+updating cli" warning when the server is otherwise healthy, or re-run the
+deploy with `ward server deploy --version <tag>`. Newer CLIs defer the shim
+until the deploy report and final status are written.

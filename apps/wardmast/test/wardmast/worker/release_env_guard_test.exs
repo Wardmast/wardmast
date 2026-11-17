@@ -50,7 +50,7 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
   # the explicit act of classifying it as release-env-safe.
   @pure_tool_commands ~w(
     git gh glab
-    cp diff kill pgrep lsof ss
+    cp diff kill pgrep lsof ss ps
     systemctl loginctl
     stty
     dolt kubectl
@@ -103,8 +103,9 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # transient unit (and `systemctl` to see whether one is running), via
     # `ReleaseEnv.cmd/3`.
     "apps/wardmast/lib/wardmast/release/self_deploy.ex" => :scrubbed,
-    # bd-6mo6be: worker-side `codex mcp list --json` check, via `ReleaseEnv.cmd/3`.
-    "apps/wardmast/lib/wardmast/mcp/agent_config/codex.ex" => :scrubbed,
+    # bd-6mo6be: worker-side `codex mcp list --json` check now runs through the
+    # portable `Worker.Timeout` helper, which spawns via `ReleaseEnv.cmd/3`.
+    "apps/wardmast/lib/wardmast/worker/timeout.ex" => :scrubbed,
     # bd-7i9pxn (G18): the host agent CLI's `--version` (the harness version a run
     # records), via `ReleaseEnv.cmd/3`.
     "apps/wardmast/lib/wardmast/agents/harness_version.ex" => :scrubbed,
@@ -116,13 +117,8 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     "apps/wardmast/lib/wardmast/workflows/code_review/checks.ex" => :scrubbed,
     "apps/wardmast/lib/wardmast/workflows/review_reply.ex" => :scrubbed,
     "apps/wardmast/lib/wardmast/quota/cloud_code.ex" => :scrubbed,
-    # bd-7wx2lh: runs `agy models` via `ReleaseEnv.cmd/3` to cache the models agy serves.
-    "apps/wardmast/lib/wardmast/agents/gemini/model_catalog.ex" => :scrubbed,
     # bd-b632tz: runs the `claude` CLI to refresh the quota poller's grant.
     "apps/wardmast/lib/wardmast/quota/grant_refresher.ex" => :scrubbed,
-    # bd-4f6opo: runs the `claude` CLI for the opt-in `arb loop analyze
-    # --discover` model pass, via `ReleaseEnv.cmd/3`.
-    "apps/wardmast/lib/wardmast/loop/discovery/claude_invoker.ex" => :scrubbed,
     # bd-bpt0ag: the single spawn point for coordinator sessions. It runs
     # `systemd-run` / `tmux` / `systemctl`, and the tmux server it starts goes
     # on to host an agent CLI and whatever that CLI runs — so the scrub has to
@@ -143,6 +139,10 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # bd-4wy1w1: git only (init / config / update-ref / checkout / fetch) to
     # build, pin, sync back and reap a git-layout-B private clone. Deps seeding
     # (`mix deps.get`) goes through `Worktree.ensure_deps_fetched/1`.
+    # bd-82gzu5: portable `ps` liveness/cmdline probes replacing /proc reads.
+    "apps/wardmast/lib/wardmast/release/deploy_status.ex" => :pure_tool,
+    "apps/wardmast/lib/wardmast/worker/test_services.ex" => :pure_tool,
+    "apps/wardmast_cli/lib/wardmast_cli/cmd/release_deploy/status.ex" => :pure_tool,
     "apps/wardmast/lib/wardmast/worker/private_clone.ex" => :pure_tool,
     "apps/wardmast/lib/wardmast/worker/prepush_check/touched.ex" => :pure_tool,
     # bd-9obzu9: visual-baseline refresh: git only (clone / log / diff / commit / push)
@@ -168,11 +168,6 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # through `ReleaseEnv.cmd/3` (the probe runs only `printf` and `cat` in it).
     # The agent itself is still opened by `ClaudeSession.open_port/1`.
     "apps/wardmast/lib/wardmast/worker/memory_scope.ex" => :scrubbed,
-    # bd-28c6qo: the per-repo pre-push check (`sh -c <command>` under `timeout`)
-    # via `ReleaseEnv.cmd/3`, with the sanitised `SpawnEnv` env.
-    "apps/wardmast/lib/wardmast/worker/prepush_check.ex" => :scrubbed,
-    # bd-57nhsi: the run_tests tool's host exec (`sh -c` under `timeout`), same shape.
-    "apps/wardmast/lib/wardmast/worker/test_run.ex" => :scrubbed,
     # bd-3fnqi8: `mise install` and `elixir --version` for the repo-pinned host
     # toolchain, both through `ReleaseEnv.cmd/3`.
     "apps/wardmast/lib/wardmast/worker/toolchain.ex" => :scrubbed,
