@@ -2272,8 +2272,8 @@ defmodule Wardmast.Worker.Dispatch do
       else: false
   end
 
+  # Every caller hands it `load_workspace/1`'s answer: a workspace, or `nil`.
   defp workspace_id_of(%{id: id}) when is_binary(id), do: id
-  defp workspace_id_of(id) when is_binary(id), do: id
   defp workspace_id_of(_), do: nil
 
   # bd-13pqcp: a workspace not routed by quota still picks its implementer from
