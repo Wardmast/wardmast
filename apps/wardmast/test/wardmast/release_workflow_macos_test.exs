@@ -50,7 +50,9 @@ defmodule Wardmast.ReleaseWorkflowMacosTest do
     assert text =~ "check-release-macho-libs.sh"
   end
 
-  test "build-macos ad-hoc signs and verifies before packaging, with no glibc guard", %{jobs: jobs} do
+  test "build-macos ad-hoc signs and verifies before packaging, with no glibc guard", %{
+    jobs: jobs
+  } do
     steps = jobs["build-macos"]["steps"]
     names = Enum.map(steps, & &1["name"])
     sign = Enum.find_index(steps, &((&1["run"] || "") =~ "codesign --force -s -"))
