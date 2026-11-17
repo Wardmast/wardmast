@@ -117,7 +117,7 @@ in Google Cloud (`gcloud iam service-accounts keys delete <key-id> --iam-account
 | Where agy runs | The key | The env |
 |---|---|---|
 | A container on the primary (`sandbox.backend: podman`, or `auto` with `local_backend: podman`) | a `podman run --secret`, mounted read-only for the container user at `/run/secrets/agy-adc.json`; created from a 0600 file that is deleted at once, removed with the container and by the boot reaper | `AGY_ADC_AUTH=true`, `GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/agy-adc.json` |
-| A cluster pod | the run spec's `secret_files`: the primary's `assign` → the controller's memory → the pod's `/boot` tar → `/run/arb/creds/agy-adc.json` on the pod's memory volume (0600) for the run's life. Never a Kubernetes object, never the pod spec | `AGY_ADC_AUTH=true`, `GOOGLE_APPLICATION_CREDENTIALS=/run/arb/creds/agy-adc.json` |
+| A cluster pod | the run spec's `secret_files`: the primary's `assign` → the controller's memory → the pod's `/boot` tar → `/run/arb/creds/agy-adc.json` (a literal code path, not renamed) on the pod's memory volume (0600) for the run's life. Never a Kubernetes object, never the pod spec | `AGY_ADC_AUTH=true`, `GOOGLE_APPLICATION_CREDENTIALS=/run/arb/creds/agy-adc.json` |
 | The primary under bwrap (any workspace without a key) | none: agy uses the keyring login, as before | unchanged |
 
 The container also gets its own `$HOME`, seeded with the generated permission posture
