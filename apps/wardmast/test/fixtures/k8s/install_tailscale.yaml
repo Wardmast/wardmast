@@ -16,7 +16,7 @@ metadata:
 
 ---
 apiVersion: scheduling.k8s.io/v1
-description: 'Arbiter worker pods: every other workload wins a contention.'
+description: 'Wardmast worker pods: every other workload wins a contention.'
 globalDefault: false
 kind: PriorityClass
 metadata:
@@ -26,7 +26,7 @@ value: -100
 
 ---
 apiVersion: scheduling.k8s.io/v1
-description: 'Arbiter node controller: losing it interrupts every run on the node, so it outranks batch work.'
+description: 'Wardmast node controller: losing it interrupts every run on the node, so it outranks batch work.'
 globalDefault: false
 kind: PriorityClass
 metadata:

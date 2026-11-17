@@ -1,4 +1,4 @@
-# wardmast-node: one Arbiter cluster node. docs/design/remote-workers.md §20.5-§20.7.
+# wardmast-node: one Wardmast cluster node. docs/design/remote-workers.md §20.5-§20.7.
 #
 # Unknown keys are an install error (values.schema.json), so a typo is not a silent default.
 # Nothing here carries a secret: the join token comes from a pre-created Secret, the

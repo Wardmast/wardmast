@@ -168,6 +168,8 @@ Once complete, the merge queue picks it up (if configured) or you can merge manu
 
 ### Running as a systemd service
 
+> **Upgrading an install made before the rename** (`~/.arbiter`, `arbiter.service`)? Run `scripts/migrate-from-arbiter.sh` once — see [docs/migrate-from-arbiter.md](docs/migrate-from-arbiter.md).
+
 To run Arbiter as a self-contained OTP release under a systemd user unit, install and enable it with:
 
 ```sh

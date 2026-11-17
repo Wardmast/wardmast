@@ -1,7 +1,7 @@
 {{- /*
 The optional ValidatingAdmissionPolicy of docs/design/remote-workers.md §7: with it a
 compromised controller can only create pods shaped like the ones the builder makes. The
-CEL is Arbiter.NodeAgent.K8s.AdmissionPolicy.validations/2, verbatim (the chart-vs-raw
+CEL is Wardmast.NodeAgent.K8s.AdmissionPolicy.validations/2, verbatim (the chart-vs-raw
 parity test, KH6, keeps the two from drifting). Cluster-scoped, Kubernetes >= 1.30, and
 one per namespace: it matches on the controller's service-account name.
 */ -}}

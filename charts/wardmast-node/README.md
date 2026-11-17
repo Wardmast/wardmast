@@ -1,6 +1,6 @@
 # wardmast-node
 
-One Arbiter cluster node as a Helm chart (`docs/design/remote-workers.md` §20.5-§20.7). The raw
+One Wardmast cluster node as a Helm chart (`docs/design/remote-workers.md` §20.5-§20.7). The raw
 manifests (`GET /nodes/join/k8s.yaml`) remain the fallback for clusters without Helm.
 `GET /nodes/join/values.yaml?name=...` on the primary returns this chart's values for a node
 (quota and LimitRange sized for its `max`, the primary's URL, no secret); the dashboard's

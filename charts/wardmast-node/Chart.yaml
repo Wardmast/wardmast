@@ -1,7 +1,7 @@
 apiVersion: v2
 name: wardmast-node
 description: >-
-  An Arbiter cluster node: the controller Deployment and its RBAC (mode node), the
+  An Wardmast cluster node: the controller Deployment and its RBAC (mode node), the
   namespace guardrails around it (mode bootstrap), or both (mode all, the default).
 type: application
 # The release workflow stamps `version` and `appVersion` with the release being cut
@@ -15,6 +15,6 @@ home: https://github.com/wardmast/wardmast
 sources:
   - https://github.com/wardmast/wardmast
 keywords:
-  - arbiter
+  - wardmast
   - worker
   - node

@@ -29,6 +29,39 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
       assert chart["kubeVersion"] =~ ">="
     end
 
+    # bd-4jzgwa: the chart and the controller image are `wardmast-*`. The only `arbiter` left
+    # is the tailnet ACL tag (it lives in the operator's tailnet policy, not here), an
+    # example hostname/registry in values, and the worker image's runtime-contract label.
+    test "no object, label, image or helper still carries the pre-rename arbiter name" do
+      allowed = [
+        "tag:arbiter-node",
+        "arbiter.example",
+        "example.test/arbiter",
+        "arbiter.containerfile"
+      ]
+
+      leftovers =
+        @chart
+        |> Path.join("**/*")
+        |> Path.wildcard(match_dot: true)
+        |> Enum.filter(&File.regular?/1)
+        |> Enum.flat_map(fn file ->
+          file
+          |> File.read!()
+          |> String.split("\n")
+          |> Enum.with_index(1)
+          |> Enum.reject(fn {line, _} -> not (line =~ ~r/arbiter/i) end)
+          |> Enum.reject(fn {line, _} -> Enum.any?(allowed, &String.contains?(line, &1)) end)
+          |> Enum.map(fn {line, n} -> "#{Path.relative_to(file, @chart)}:#{n}: #{line}" end)
+        end)
+
+      assert leftovers == []
+
+      values = YamlElixir.read_from_file!(Path.join(@chart, "values.yaml"))
+      assert values["image"]["repository"] == "ghcr.io/wardmast/wardmast-controller"
+      assert values["chartRef"] == "oci://ghcr.io/wardmast/charts/wardmast-node"
+    end
+
     test "values.schema.json rejects unknown keys at every object level" do
       schema = @chart |> Path.join("values.schema.json") |> File.read!() |> Jason.decode!()
       assert open_objects(schema, "$") == []

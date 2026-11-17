@@ -1,5 +1,5 @@
 {{- if include "wardmast-node.bootstrap" . }}
-Arbiter node guardrails installed in namespace {{ .Release.Namespace }}:
+Wardmast node guardrails installed in namespace {{ .Release.Namespace }}:
 PriorityClass, ResourceQuota, LimitRange and the four NetworkPolicies.
 {{- if eq .Values.mode "bootstrap" }}
 
@@ -9,7 +9,7 @@ Now have a namespace admin install the controller into the same namespace:
 {{- end }}
 {{- if include "wardmast-node.node" . }}
 
-Arbiter node {{ include "wardmast-node.nodeName" . }}: controller installed in namespace {{ .Release.Namespace }}.
+Wardmast node {{ include "wardmast-node.nodeName" . }}: controller installed in namespace {{ .Release.Namespace }}.
 
 ONE RELEASE PER NAMESPACE: every object name is fixed. The node name is the release name
 ({{ .Release.Name }}) unless node.name is set.

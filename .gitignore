@@ -76,3 +76,7 @@ accounts.json
 # Default output dir for scripts/build-local-release.sh — drops a multi-tens-
 # of-MB release tarball + escript per run in whatever clone it's pointed at.
 .local-release/
+
+# Pre-rename spelling of the checkout env file (scripts/migrate-from-arbiter.sh renames it).
+.arbiter.env
+.arbiter.env.backup
