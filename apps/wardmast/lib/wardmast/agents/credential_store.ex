@@ -35,6 +35,8 @@ defmodule Wardmast.Agents.CredentialStore do
   testable on any host.
   """
 
+  alias Wardmast.Agents.Claude.ConfigDir, as: ClaudeConfigDir
+
   require Logger
 
   @type agent :: :claude | :agy
@@ -125,7 +127,7 @@ defmodule Wardmast.Agents.CredentialStore do
   defp security_cli?, do: System.find_executable("security") != nil
 
   defp source_dir(opts) do
-    Keyword.get_lazy(opts, :source_dir, &Wardmast.Agents.Claude.ConfigDir.source_dir/0)
+    Keyword.get_lazy(opts, :source_dir, &ClaudeConfigDir.source_dir/0)
   end
 
   defp credentials_file?(nil), do: false
