@@ -56,7 +56,8 @@ defmodule Wardmast.NodeAgent.K8s.Identity do
          %{
            install_id: install,
            registry: string(body["registry"]),
-           canary_image: string(body["canary_image"])
+           canary_image: string(body["canary_image"]),
+           agy: agy(body["agy"])
          }}
 
       {:ok, %Req.Response{status: status, body: body}} ->
@@ -135,6 +136,11 @@ defmodule Wardmast.NodeAgent.K8s.Identity do
       _ -> @default_max_wall_s
     end
   end
+
+  # bd-b2t0kw: the two halves of `caps.agy` (`Wardmast.Nodes.ClusterInstall.controller_facts/1`).
+  # A primary that predates them, or anything but a literal `true`, is "no".
+  defp agy(%{} = agy), do: %{image: agy["image"] == true, credential: agy["credential"] == true}
+  defp agy(_), do: %{image: false, credential: false}
 
   defp string(value) when is_binary(value) and value != "", do: value
   defp string(_), do: nil

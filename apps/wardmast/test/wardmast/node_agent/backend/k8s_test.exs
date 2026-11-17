@@ -9,6 +9,7 @@ defmodule Wardmast.NodeAgent.Backend.K8sTest do
 
   alias Wardmast.NodeAgent.Backend
   alias Wardmast.NodeAgent.Config
+  alias Wardmast.NodeAgent.K8s.AgyFacts
   alias Wardmast.NodeAgent.K8s.Client
   alias Wardmast.NodeAgent.K8s.ConfigLoader
   alias Wardmast.NodeAgent.K8s.Controller
@@ -163,7 +164,10 @@ defmodule Wardmast.NodeAgent.Backend.K8sTest do
                "self_upgrade" => true,
                "namespace" => "wardmast-workers",
                "install" => %{"method" => "manifest"},
-               "registries" => ["#{Fx.registry()}/"]
+               "registries" => ["#{Fx.registry()}/"],
+               # bd-b2t0kw: no word from the primary yet, so no agy
+               "agy" => false,
+               "agy_missing" => "image"
              }
 
       assert %{"ceiling" => 2, "pending" => 1, "running" => 0} = hello["capacity"]
@@ -174,6 +178,56 @@ defmodule Wardmast.NodeAgent.Backend.K8sTest do
 
       # The JSON the channel will carry: string keys all the way down.
       assert hello == hello |> Jason.encode!() |> Jason.decode!()
+    end
+
+    # bd-b2t0kw: `caps.agy` is the sum of the image half (a published worker image lists
+    # `gemini`) and the credential half (the primary holds a service-account key it hands
+    # this node's agy pods through `/boot`), as the primary's facts report them
+    # (`AgyFacts`, refreshed with the canary image). Anything less names what is missing.
+    test "hello advertises caps.agy only when both the image and the credential hold", env do
+      on_exit(fn -> AgyFacts.put(nil) end)
+
+      for {facts, caps} <- [
+            {%{image: true, credential: true}, %{"agy" => true}},
+            {%{image: true, credential: false}, %{"agy" => false, "agy_missing" => "credential"}},
+            {%{image: false, credential: true}, %{"agy" => false, "agy_missing" => "image"}},
+            {%{image: false, credential: false}, %{"agy" => false, "agy_missing" => "image"}},
+            {nil, %{"agy" => false, "agy_missing" => "image"}}
+          ] do
+        AgyFacts.put(facts)
+        hello = Backend.K8s.hello(env.config, Backend.K8s.readiness())
+
+        assert Map.take(hello["caps"], ["agy", "agy_missing"]) == caps,
+               "facts #{inspect(facts)} gave #{inspect(hello["caps"])}"
+      end
+    end
+
+    test "the boot's facts stand until a fresher answer arrives", env do
+      on_exit(fn -> AgyFacts.put(nil) end)
+      AgyFacts.put(nil)
+
+      cluster = Map.put(env.config.cluster, :agy, %{image: true, credential: true})
+      hello = Backend.K8s.hello(%{env.config | cluster: cluster}, Backend.K8s.readiness())
+      assert hello["caps"]["agy"] == true
+
+      AgyFacts.put(%{image: true, credential: false})
+      hello = Backend.K8s.hello(%{env.config | cluster: cluster}, Backend.K8s.readiness())
+      assert hello["caps"]["agy_missing"] == "credential"
+    end
+
+    test "a heartbeat carries caps.agy, so a change reaches the primary without a reconnect",
+         env do
+      on_exit(fn -> AgyFacts.put(nil) end)
+
+      AgyFacts.put(%{image: true, credential: false})
+
+      assert Backend.K8s.heartbeat(env.config, 4)["caps"] == %{
+               "agy" => false,
+               "agy_missing" => "credential"
+             }
+
+      AgyFacts.put(%{image: true, credential: true})
+      assert Backend.K8s.heartbeat(env.config, 5)["caps"] == %{"agy" => true}
     end
 
     test "a helm install reports its release and chart in caps.install", env do

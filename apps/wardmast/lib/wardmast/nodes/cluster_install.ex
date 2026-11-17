@@ -19,10 +19,12 @@ defmodule Wardmast.Nodes.ClusterInstall do
   shell history and `ps`.
   """
 
+  alias Wardmast.Accounts.Credentials
   alias Wardmast.NodeAgent.K8s.InstallManifest
   alias Wardmast.Nodes.Agent
   alias Wardmast.Nodes.InstallId
   alias Wardmast.Settings
+  alias Wardmast.Worker.Image.PublishLedger
   alias Wardmast.Worker.Image.Publisher
 
   @form_keys ~w(name namespace max cpu memory node_selector pull_secret registries reach admission self_upgrade api_cidrs cluster_cidrs primary_cidrs proxy_url proxy_cidrs)
@@ -150,22 +152,35 @@ defmodule Wardmast.Nodes.ClusterInstall do
       `registry`), `nil` while neither exists. The controller image is always the fallback
       because the primary publishes it at every boot, before any run needs a worker image,
       so a fresh install does not wait on a remote run to prove its network policy.
+    * `agy` — `%{image: boolean, credential: boolean}` (bd-b2t0kw), what the controller
+      sums into `caps.agy`: `image` when a repo's newest published worker image lists
+      `gemini` in `arbiter.cli-providers` (`PublishLedger.images/1`), `credential` when an
+      enabled antigravity account attached to a workspace holds a service-account key
+      (`Credentials.service_account_configured?/0`), which the primary then hands each
+      agy pod through `/boot`. Booleans only: no key, account or workspace is named.
 
-  Options: `:published` (the publisher's list, a seam for tests).
+  Options: `:published` (the publisher's list) and `:images` (the publish ledger's
+  per-repo newest images), seams for tests.
   """
   @spec controller_facts(keyword()) :: %{
           install_id: String.t(),
           registry: String.t() | nil,
-          canary_image: String.t() | nil
+          canary_image: String.t() | nil,
+          agy: %{image: boolean(), credential: boolean()}
         }
   def controller_facts(opts \\ []) do
     registry = Settings.nodes_registry()
     published = Keyword.get_lazy(opts, :published, &Publisher.published/0)
+    images = Keyword.get_lazy(opts, :images, &PublishLedger.images/0)
 
     %{
       install_id: InstallId.get(),
       registry: registry,
-      canary_image: canary_image(published, registry)
+      canary_image: canary_image(published, registry),
+      agy: %{
+        image: Enum.any?(images, &("gemini" in (Map.get(&1, :providers) || []))),
+        credential: Credentials.service_account_configured?()
+      }
     }
   end
 

@@ -216,6 +216,68 @@ defmodule Wardmast.Nodes.ClusterInstallTest do
                @controller
     end
 
+    # bd-b2t0kw: what a cluster controller needs before it advertises `caps.agy`: a
+    # published worker image that carries agy (`arbiter.cli-providers` has `gemini`) and
+    # a service-account key the primary can hand its agy pods. Booleans, never a value.
+    test "agy: no published image with agy and no key, by default" do
+      assert ClusterInstall.controller_facts(published: [], images: []).agy ==
+               %{image: false, credential: false}
+    end
+
+    test "agy: the image half is a repo's newest publish listing gemini" do
+      images = [
+        %{repo: "a", ref: @worker, providers: ["claude", "codex"]},
+        %{repo: "b", ref: @worker, providers: ["claude", "gemini"]}
+      ]
+
+      assert ClusterInstall.controller_facts(published: [], images: images).agy.image
+      refute ClusterInstall.controller_facts(published: [], images: [hd(images)]).agy.image
+      # a publish recorded before providers were kept says nothing
+      refute ClusterInstall.controller_facts(
+               published: [],
+               images: [%{repo: "c", providers: nil}]
+             ).agy.image
+    end
+
+    test "agy: the credential half is a service-account key an attached antigravity account holds" do
+      refute ClusterInstall.controller_facts(published: [], images: []).agy.credential
+
+      ws = Ash.create!(Wardmast.Tasks.Workspace, %{name: "facts-agy-ws"})
+
+      account =
+        Ash.create!(Wardmast.Accounts.ProviderAccount, %{
+          provider: :antigravity,
+          slug: "facts-agy"
+        })
+
+      Ash.create!(Wardmast.Accounts.WorkspaceProviderAccount, %{
+        workspace_id: ws.id,
+        provider: :antigravity,
+        provider_account_id: account.id
+      })
+
+      key =
+        Jason.encode!(%{
+          "type" => "service_account",
+          "project_id" => "p",
+          "private_key" => "-----BEGIN PRIVATE KEY-----\nMIIEvFACTS\n-----END PRIVATE KEY-----\n",
+          "client_email" => "a@p.iam.gserviceaccount.com"
+        })
+
+      {:ok, _} =
+        Wardmast.Accounts.rotate_credential(account.id, %{
+          "kind" => "service_account",
+          "secret" => key
+        })
+
+      facts = ClusterInstall.controller_facts(published: [], images: [])
+      assert facts.agy.credential
+      refute inspect(facts) =~ "PRIVATE KEY"
+
+      assert facts |> Jason.encode!() |> Jason.decode!() |> Map.fetch!("agy") ==
+               %{"image" => false, "credential" => true}
+    end
+
     test "an image published under another registry is not offered" do
       {:ok, _} = Settings.set_nodes_registry("registry.example.test/moved")
       published = [%{kind: :worker, ref: @worker}, %{kind: :controller, ref: @controller}]

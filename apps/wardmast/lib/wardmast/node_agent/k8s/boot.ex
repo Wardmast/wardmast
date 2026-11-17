@@ -50,6 +50,7 @@ defmodule Wardmast.NodeAgent.K8s.Boot do
   alias Wardmast.NodeAgent.Backoff
   alias Wardmast.NodeAgent.Bridge
   alias Wardmast.NodeAgent.Config
+  alias Wardmast.NodeAgent.K8s.AgyFacts
   alias Wardmast.NodeAgent.K8s.ApiReach
   alias Wardmast.NodeAgent.K8s.Client
   alias Wardmast.NodeAgent.K8s.Credential
@@ -143,6 +144,10 @@ defmodule Wardmast.NodeAgent.K8s.Boot do
            ),
          {:ok, facts} <- step(:primary_facts, Identity.primary_facts(config)),
          {:ok, identity} <- step(:identity, Identity.resolve(client, config, facts, env: env)) do
+      # bd-b2t0kw: what `caps.agy` is summed from, from boot on (refreshed with the canary's image).
+      AgyFacts.put(facts.agy)
+      config = %{config | cluster: Map.put(config.cluster || %{}, :agy, facts.agy)}
+
       {:ok,
        [
          config: config,
@@ -274,10 +279,14 @@ defmodule Wardmast.NodeAgent.K8s.Boot do
   defp put_env(map, _key, _value), do: map
 
   # Asked on every canary run: the primary may publish a worker image after this boot.
-  # The image named at boot is the fallback while the primary cannot be asked.
+  # The image named at boot is the fallback while the primary cannot be asked. The same
+  # answer refreshes the agy facts (bd-b2t0kw), which the next heartbeat reports.
   defp canary_image(config, at_boot) do
     fn ->
-      case Identity.primary_facts(config) do
+      facts = Identity.primary_facts(config)
+      with {:ok, %{agy: agy}} <- facts, do: AgyFacts.put(agy)
+
+      case facts do
         {:ok, %{canary_image: image}} when is_binary(image) -> {:ok, image}
         _other when is_binary(at_boot) -> {:ok, at_boot}
         {:ok, _} -> {:error, :not_published}

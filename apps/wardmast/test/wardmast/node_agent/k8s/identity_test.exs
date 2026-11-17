@@ -77,10 +77,25 @@ defmodule Wardmast.NodeAgent.K8s.IdentityTest do
       assert facts == %{
                install_id: "q2w3e4r5t6y7u8i9",
                registry: "registry.example.test/arbiter",
-               canary_image: @facts["canary_image"]
+               canary_image: @facts["canary_image"],
+               # an older primary says nothing about agy: neither half holds
+               agy: %{image: false, credential: false}
              }
 
       assert_received {:asked, "GET", "/nodes/cluster", ["Bearer " <> @credential]}
+    end
+
+    # bd-b2t0kw: the two halves of `caps.agy`, as the primary reports them.
+    test "reads the agy facts; anything but true is false" do
+      for {agy, expected} <- [
+            {%{"image" => true, "credential" => true}, %{image: true, credential: true}},
+            {%{"image" => true, "credential" => false}, %{image: true, credential: false}},
+            {%{"image" => "yes", "credential" => 1}, %{image: false, credential: false}},
+            {"garbage", %{image: false, credential: false}}
+          ] do
+        assert {:ok, %{agy: ^expected}} =
+                 Identity.primary_facts(config(primary(200, Map.put(@facts, "agy", agy))))
+      end
     end
 
     test "a refusal names the status and the primary's message" do

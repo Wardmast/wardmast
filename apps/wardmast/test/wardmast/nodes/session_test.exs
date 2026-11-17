@@ -1217,6 +1217,53 @@ defmodule Wardmast.Nodes.SessionTest do
     })
   end
 
+  # bd-b2t0kw: `caps.agy` can change while a cluster controller stays connected (an agy
+  # image got published, a service-account key was registered or retired), so its
+  # heartbeat re-reports it. Only those two keys are taken; every other cap is the hello's.
+  describe "caps.agy from a cluster heartbeat (bd-b2t0kw)" do
+    test "a cluster heartbeat replaces caps.agy and caps.agy_missing, nothing else", %{
+      node: node,
+      clock: c
+    } do
+      caps = %{"backend" => "k8s", "agy" => false, "agy_missing" => "credential"}
+      {:ok, %{pid: pid}} = attach(node, c, self(), hello(%{"kind" => "cluster", "caps" => caps}))
+      assert Session.snapshot(pid).caps["agy_missing"] == "credential"
+
+      {:ok, _} =
+        Session.heartbeat(pid, %{
+          "seq" => 1,
+          "caps" => %{"agy" => true, "backend" => "podman", "image" => "build"}
+        })
+
+      assert Session.snapshot(pid).caps == %{"backend" => "k8s", "agy" => true}
+
+      {:ok, _} =
+        Session.heartbeat(pid, %{
+          "seq" => 2,
+          "caps" => %{"agy" => false, "agy_missing" => "image"}
+        })
+
+      assert Session.snapshot(pid).caps == %{
+               "backend" => "k8s",
+               "agy" => false,
+               "agy_missing" => "image"
+             }
+
+      # malformed values are not taken; a heartbeat without caps changes nothing
+      {:ok, _} =
+        Session.heartbeat(pid, %{"seq" => 3, "caps" => %{"agy" => "yes", "agy_missing" => "x"}})
+
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 4})
+      assert Session.snapshot(pid).caps["agy_missing"] == "image"
+    end
+
+    test "a machine node's heartbeat cannot claim agy", %{node: node, clock: c} do
+      {:ok, %{pid: pid}} = attach(node, c)
+      {:ok, _} = Session.heartbeat(pid, %{"seq" => 1, "caps" => %{"agy" => true}})
+      refute Map.has_key?(Session.snapshot(pid).caps, "agy")
+    end
+  end
+
   describe "SI4a: the pull path's readiness and refusals" do
     @ref "registry.example.com/arb/repo@sha256:abc"
 
