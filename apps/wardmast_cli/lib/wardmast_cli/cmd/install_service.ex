@@ -3,6 +3,10 @@ defmodule WardmastCli.Cmd.InstallService do
   `arb install-service [--system] [--uninstall] [--json]` — install a systemd
   unit so the Wardmast stack comes up automatically at machine boot.
 
+  On macOS the same command installs a per-user launchd LaunchAgent instead
+  (`Cmd.InstallService.Launchd`; dev-mode checkout only, no `--system`);
+  everything below about systemd and `systemctl` describes the Linux path.
+
   Two modes, chosen automatically from the resolved project root (the same
   root `arb start` resolves via `ARB_HOME` / the recorded home / a directory
   walk):
@@ -84,6 +88,7 @@ defmodule WardmastCli.Cmd.InstallService do
 
   alias WardmastCli.ArgParser
   alias WardmastCli.Cmd.InstallService.{EnvFile, Formatter, Unit}
+  alias WardmastCli.Cmd.InstallService.Launchd, as: LaunchdInstall
   alias WardmastCli.Cmd.{Restart, Start}
   alias WardmastCli.Output
   alias WardmastCli.Supervisor
@@ -100,12 +105,19 @@ defmodule WardmastCli.Cmd.InstallService do
       scope = if opts[:system], do: :system, else: :user
       force = opts[:force] || false
 
-      if opts[:uninstall] do
-        uninstall(scope, mode)
-      else
-        Restart.guard_worker_session!()
-        Restart.guard_active_workers!(force)
-        install(scope, mode)
+      launchd? = Supervisor.impl() == Supervisor.Launchd
+
+      cond do
+        opts[:uninstall] && launchd? ->
+          LaunchdInstall.uninstall(scope, mode)
+
+        opts[:uninstall] ->
+          uninstall(scope, mode)
+
+        true ->
+          Restart.guard_worker_session!()
+          Restart.guard_active_workers!(force)
+          if launchd?, do: LaunchdInstall.install(scope, mode), else: install(scope, mode)
       end
     end)
   end

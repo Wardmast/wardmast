@@ -258,6 +258,10 @@ defmodule WardmastCli.Main do
     {allow_fanout?, argv} = take_allow_fanout(argv)
     if argv != [], do: WardmastCli.FanOut.enforce!(allow_fanout?)
     run(argv)
+    # Backstop: install any `arb` shim a command staged because `arb` was the
+    # running escript, so no `install_links/1` caller can forget to.
+    _ = WardmastCli.Cmd.SelfUpdate.flush_pending_shim()
+    :ok
   end
 
   # `--allow-fanout` is stripped everywhere. `--force` also lifts the refusal; it is

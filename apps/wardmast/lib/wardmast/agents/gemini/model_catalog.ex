@@ -29,8 +29,8 @@ defmodule Wardmast.Agents.Gemini.ModelCatalog do
   and the clock with `now:`.
   """
 
-  alias Wardmast.Worker.ReleaseEnv
   alias Wardmast.Worker.SpawnEnv
+  alias Wardmast.Worker.Timeout
 
   require Logger
 
@@ -230,14 +230,16 @@ defmodule Wardmast.Agents.Gemini.ModelCatalog do
 
     try do
       {_, status} =
-        ReleaseEnv.cmd(
+        Timeout.cmd(
           "/bin/sh",
           [
             "-c",
-            ~s(exec timeout -k 1 #{timeout_s} "$0" models >"$1" 2>/dev/null </dev/null),
+            ~s(exec "$0" models >"$1" 2>/dev/null </dev/null),
             path,
             out
           ],
+          timeout_s,
+          kill_after: 1,
           env: SpawnEnv.cmd_env([], "gemini")
         )
 

@@ -28,8 +28,8 @@ defmodule Wardmast.Loop.Discovery.ClaudeInvoker do
   """
 
   alias Wardmast.Agents.Claude.ConfigDir
-  alias Wardmast.Worker.ReleaseEnv
   alias Wardmast.Worker.SpawnEnv
+  alias Wardmast.Worker.Timeout
 
   @default_timeout_s 300
 
@@ -67,7 +67,11 @@ defmodule Wardmast.Loop.Discovery.ClaudeInvoker do
       extras = ConfigDir.env(Keyword.get(opts, :workspace_id)) ++ extra_env(opts)
       env = SpawnEnv.cmd_env(extras, "claude")
 
-      case ReleaseEnv.cmd("sh", ["-c", shell], env: env, cd: dir, stderr_to_stdout: true) do
+      case Timeout.cmd("sh", ["-c", shell], timeout_s(),
+             env: env,
+             cd: dir,
+             stderr_to_stdout: true
+           ) do
         {output, 0} ->
           parse_stream(output)
 
@@ -86,12 +90,7 @@ defmodule Wardmast.Loop.Discovery.ClaudeInvoker do
   end
 
   defp argv(path, opts) do
-    cmd = [path | args(opts)]
-
-    case System.find_executable("timeout") do
-      nil -> cmd
-      t -> [t, Integer.to_string(timeout_s()) | cmd]
-    end
+    [path | args(opts)]
   end
 
   @doc "The CLI arguments for one call, after the executable (see the moduledoc's opts)."

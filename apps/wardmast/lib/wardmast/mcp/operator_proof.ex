@@ -164,9 +164,9 @@ defmodule Wardmast.MCP.OperatorProof do
     end
   end
 
-  @doc "Longest usable Unix domain socket path in bytes (`sun_path` is 108 including the NUL)."
+  @doc "Longest usable Unix domain socket path in bytes: macOS `sun_path` is 104 including the NUL (103 usable), Linux 108 (107); the smaller keeps one limit valid on both."
   @spec max_socket_path_bytes() :: pos_integer()
-  def max_socket_path_bytes, do: 107
+  def max_socket_path_bytes, do: 103
 
   defp default_dir do
     runtime = own_uid() && "/run/user/#{own_uid()}"

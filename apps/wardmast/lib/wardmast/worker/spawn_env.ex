@@ -65,6 +65,7 @@ defmodule Wardmast.Worker.SpawnEnv do
       dev server cannot touch the live database or port.
   """
 
+  alias Wardmast.Agents.CredentialStore
   alias Wardmast.Agents.Gemini.ConfigDir, as: GeminiConfigDir
   alias Wardmast.Worker.ReleaseEnv
 
@@ -221,7 +222,9 @@ defmodule Wardmast.Worker.SpawnEnv do
   defp bus_names("gemini"), do: if(bus_reachable?(), do: ["DBUS_SESSION_BUS_ADDRESS"], else: [])
   defp bus_names(_), do: []
 
-  defp bus_reachable?, do: GeminiConfigDir.keyring_available?()
+  # A macOS Keychain is not reached over D-Bus: never pass the bus through for it.
+  defp bus_reachable?,
+    do: CredentialStore.secret_service?() and GeminiConfigDir.keyring_available?()
 
   defp normalize_provider(nil), do: "claude"
   defp normalize_provider(provider) when is_atom(provider), do: Atom.to_string(provider)

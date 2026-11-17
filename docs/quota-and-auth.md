@@ -680,3 +680,25 @@ cap, how many readings it would have held and when the first was. A cap near p99
 trims only the worst bursts; one near p50 would hold on an ordinary day. The report is
 read-only. `arb quota --account <ref>` shows the cap, its mode and the current
 `burn_24h`. Roll back by unsetting the key (`--unset daily_burn_cap`).
+
+## Credential stores on macOS (MAC P4-5)
+
+`Wardmast.Agents.CredentialStore` classifies where each CLI keeps its login:
+
+| CLI    | Linux                                  | macOS                                              |
+| ------ | -------------------------------------- | -------------------------------------------------- |
+| Claude | `<config dir>/.credentials.json`       | login Keychain (a `.credentials.json` on disk wins) |
+| agy    | freedesktop Secret Service over D-Bus  | login Keychain (`security` CLI must be on `PATH`)  |
+
+Arbiter never reads the Keychain. Consequences, each logged as a
+`[credential-store]` warning rather than failing silently:
+
+- **Claude mode B** (`seeded_credentials`) copies `.credentials.json`; with a
+  Keychain-only login there is nothing to copy and the session opens
+  signed-out. Use mode A (`claude setup-token`) on a Mac.
+- **agy** needs no D-Bus on macOS: the keyring check passes when `security` is
+  present, and the D-Bus passthrough is never opened for it. A locked login
+  keychain (SSH/launchd session) still ends in an interactive prompt.
+
+The Keychain service name and the missing-file behaviour are external CLI
+behaviour not verified on a Mac from this repo (tests use stubs via `:os`).

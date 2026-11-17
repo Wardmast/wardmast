@@ -697,6 +697,13 @@ defmodule WardmastCli.Cmd.RestartTest do
       refute_received {:cmd, "kill", _}
     end
 
+    test "parse_ps_command/1 turns `ps -o command=` output into argv" do
+      assert {:ok, ["beam.smp", "-extra", "mix", "phx.server"]} =
+               Restart.parse_ps_command("beam.smp -extra mix phx.server\n")
+
+      assert {:error, :empty} = Restart.parse_ps_command("  \n")
+    end
+
     test "systemctl not installed and no unit file falls back to the dev path" do
       stub_systemctl(fn -> raise ErlangError, original: :enoent end)
 

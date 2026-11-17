@@ -6,8 +6,9 @@ defmodule WardmastCli.Supervisor do
   "is the server's unit managed here, stop/restart it, how is it doing, set it
   up at boot". On Linux that is systemd (`systemctl`/`loginctl`); no other
   call site may shell out to those tools directly. Everything goes through the
-  module returned by `impl/0`, so a second backend (launchd on macOS) is a new
-  module implementing this behaviour, not an edit to every command.
+  module returned by `impl/0`, so a new backend (launchd on macOS is
+  `WardmastCli.Supervisor.Launchd`) is a module implementing this behaviour,
+  not an edit to every command.
 
   Callbacks return data, not process exits: the one place a failure message is
   worded is the backend that knows what the tool is called. Callers decide
@@ -42,6 +43,9 @@ defmodule WardmastCli.Supervisor do
 
   @doc "Directories where the unit file may live (for the fail-closed on-disk check)."
   @callback unit_dirs() :: [Path.t()]
+
+  @doc "File name of the unit/plist inside `c:unit_dirs/0` (for the same on-disk check)."
+  @callback unit_file_name() :: String.t()
 
   @doc "Stop the service. `{:error, message}` when the manager refused or is missing."
   @callback stop_service() :: :ok | {:error, String.t()}
@@ -90,7 +94,15 @@ defmodule WardmastCli.Supervisor do
   @doc "Shell command an operator runs to follow the service's logs, echoed in output."
   @callback logs_cmd(scope()) :: String.t()
 
-  @doc "The backend module for this host. Always systemd until another backend lands."
+  @doc """
+  The backend module for this host: launchd on macOS, systemd everywhere else.
+  `config :wardmast_cli, :supervisor` overrides the choice.
+  """
   @spec impl() :: module()
-  def impl, do: Application.get_env(:wardmast_cli, :supervisor, WardmastCli.Supervisor.Systemd)
+  def impl, do: Application.get_env(:wardmast_cli, :supervisor) || impl_for(:os.type())
+
+  @doc "The backend for an `:os.type/0` value."
+  @spec impl_for({atom(), atom()}) :: module()
+  def impl_for({:unix, :darwin}), do: WardmastCli.Supervisor.Launchd
+  def impl_for(_os), do: WardmastCli.Supervisor.Systemd
 end
