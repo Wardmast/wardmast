@@ -11,7 +11,7 @@ defmodule Wardmast.ReviewGate.Resolutions do
   require Ash.Query
   require Logger
 
-  alias Wardmast.ReviewGate.{Resolution, Round, RulingResume}
+  alias Wardmast.ReviewGate.{MergeAuthorization, Resolution, Round, RulingResume}
   alias Wardmast.Tasks.Issue
 
   @type error :: {:invalid, String.t()} | {:not_found, String.t()}
@@ -51,7 +51,9 @@ defmodule Wardmast.ReviewGate.Resolutions do
          {:ok, reasoning} <- required_string(attrs, :reasoning),
          {:ok, round} <- optional_int(attrs, :round, 1),
          {:ok, fix_round_attempt} <- optional_int(attrs, :fix_round_attempt, 0),
-         {:ok, task} <- fetch_task(task_id) do
+         {:ok, task} <- fetch_task(task_id),
+         head = head_sha(fetch(attrs, :head_sha), task),
+         :ok <- confirm_merge(attrs, opts, gate, decision, task, head) do
       {round, fix_round_attempt} = link_round(gate, task.id, round, fix_round_attempt)
 
       Resolution
@@ -64,7 +66,7 @@ defmodule Wardmast.ReviewGate.Resolutions do
         actor: actor(fetch(attrs, :actor)),
         round: round,
         fix_round_attempt: fix_round_attempt,
-        head_sha: head_sha(fetch(attrs, :head_sha), task)
+        head_sha: head
       })
       |> Ash.create()
       |> case do
@@ -209,6 +211,37 @@ defmodule Wardmast.ReviewGate.Resolutions do
     }
   end
 
+  # bd-dhrb7j (#1435): `amend` reads as "one more pass with new ACs", but it is a
+  # permit to merge the head — on a round the gate did not approve that merges the
+  # findings unaddressed (bd-a933es). The operator-facing callers (REST, MCP, so
+  # the CLI) pass `require_confirm_merge: true`: the amend is then refused with
+  # the explicit wording until `confirm_merge` is set. Internal writers
+  # (`RulingResume.carry_forward/4`) do not ask.
+  defp confirm_merge(attrs, opts, :review_gate, :amend, task, head) do
+    round = MergeAuthorization.unapproved_round(task.id)
+
+    cond do
+      Keyword.get(opts, :require_confirm_merge) != true -> :ok
+      is_nil(round) -> :ok
+      truthy?(fetch(attrs, :confirm_merge)) -> :ok
+      true -> {:error, {:invalid, amend_refusal(task, round, head)}}
+    end
+  end
+
+  defp confirm_merge(_attrs, _opts, _gate, _decision, _task, _head), do: :ok
+
+  defp amend_refusal(task, round, head) do
+    verdict = round.verdict |> to_string() |> String.upcase()
+
+    "amend permits merging #{head || "the ticket's head"} without a reviewer APPROVE: " <>
+      "#{task.id}'s latest reviewer round (round #{round.round}) is #{verdict} and its " <>
+      "findings stay unaddressed on that head. amend does NOT dispatch another review or fix " <>
+      "pass. To return the work to the implementer for another pass, record --send-back " <>
+      "(MCP decision `send_back`) instead; to ship that head as it stands, repeat the amend " <>
+      "with --confirm-merge (MCP `confirm_merge: true`)."
+  end
+
+  defp truthy?(v), do: v in [true, "true", "1", 1]
   # ---- helpers --------------------------------------------------------------
 
   defp answers_latest?(_resolution, nil), do: true

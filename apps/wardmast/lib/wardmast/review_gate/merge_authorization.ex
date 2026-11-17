@@ -162,6 +162,24 @@ defmodule Wardmast.ReviewGate.MergeAuthorization do
 
   def approved?(_task_id), do: false
 
+  @doc """
+  The ticket's latest reviewer round when it did not approve (REQUEST_CHANGES, a
+  timed-out pass), else nil: the round whose findings a merge-permitting ruling
+  would leave standing. Fails to nil on a read error.
+  """
+  @spec unapproved_round(String.t() | nil) :: Round.t() | nil
+  def unapproved_round(task_id) when is_binary(task_id) do
+    case latest_review(task_id) do
+      nil -> nil
+      %{verdict: :approve} -> nil
+      latest -> latest
+    end
+  rescue
+    _ -> nil
+  end
+
+  def unapproved_round(_task_id), do: nil
+
   @doc "`standing_ruling/1`, when it covers `head` (see the moduledoc), else nil."
   @spec ruling_covering(String.t() | nil, String.t() | nil) :: Resolution.t() | nil
   def ruling_covering(task_id, head) do
