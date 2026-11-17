@@ -12,6 +12,8 @@ defmodule WardmastWeb.WorkerIndexLive do
 
   use WardmastWeb, :live_view
 
+  on_mount {WardmastWeb.PreviewHook, :list}
+
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Worker
   alias Wardmast.Workers.RunNode
@@ -216,6 +218,8 @@ defmodule WardmastWeb.WorkerIndexLive do
           />
           <Feedback.live_badge live={@live} />
         </div>
+
+        <WardmastWeb.PreviewPanel.preview_list previews={@previews} />
 
         <Navigation.filter_tabs
           tabs={@filters}

@@ -375,6 +375,20 @@ defmodule Wardmast.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_seed_paths(block, label)
     |> validate_prepush_check(block, label)
     |> validate_pre_push_recipe(block, label)
+    |> validate_preview(block, label)
+  end
+
+  # App preview (`Wardmast.Preview.Config`), at either level.
+  defp validate_preview(changeset, block, label) do
+    case Map.fetch(block, "preview") do
+      :error ->
+        changeset
+
+      {:ok, preview} ->
+        preview
+        |> Wardmast.Preview.Config.validate("#{label}.preview")
+        |> Enum.reduce(changeset, &Changeset.add_error(&2, field: :config, message: &1))
+    end
   end
 
   # bd-28c6qo: `prepush_check` (+ `_timeout_seconds`, `_on_timeout`), at either

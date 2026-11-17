@@ -675,10 +675,32 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                         max_snapshots    default 50
                       Set under worker.repos.<repo>.visual_baselines (merged over a
                       workspace-level worker.visual_baselines). Unset: off.
+      preview         map — start a ticket's checkout as a running app, on a port
+                      Wardmast allocates, to see what a worktree is doing
+                      (`arb preview start <ticket>`, the dashboard Preview
+                      button; docs/app-preview.md). Set under
+                      worker.repos.<repo>.preview, merged over a workspace-level
+                      worker.preview. Unset: no preview for the repo.
+                        command            required: the startup script, run from the
+                                           checkout root (`mix phx.server`, `bin/dev`)
+                        setup              run once per preview checkout before the
+                                           first start (`mix deps.get && mix ecto.setup`)
+                        port_env           variable set to the port (default "PORT")
+                        env                map of extra variables
+                        ready_path         path probed before the URL is reported
+                                           (default "/"; any HTTP answer below 500)
+                        ready_timeout      seconds to wait for it (default 60, max 3600)
+                        port_range         "lo-hi" or [lo, hi] (default 31000-31999);
+                                           ports come from here only, one lease per
+                                           preview, never the server's own port or the
+                                           worker dev-server range 20000-29999
+                        idle_ttl_seconds   stop a preview untouched this long (default 7200)
+                      command, setup and env values may use {{port}}, {{task_id}},
+                      {{checkout}} and {{host}} (127.0.0.1).
       repos           map, repo name -> {seed_paths, image, prepush_check,
                       prepush_check_timeout_seconds, prepush_check_on_timeout,
                       pre_push_checks, pre_push_budget_seconds,
-                      pre_push_max_attempts, visual_baselines, max_concurrent,
+                      pre_push_max_attempts, visual_baselines, preview, max_concurrent,
                       ci_backpressure},
                       deep-merged over the workspace-level value (per-repo wins)
                       max_concurrent (per repo only) is a positive integer, unset

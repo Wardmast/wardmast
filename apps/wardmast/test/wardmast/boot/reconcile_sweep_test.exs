@@ -17,6 +17,7 @@ defmodule Wardmast.Boot.ReconcileSweepTest do
 
   defmodule RecordingReconciler do
     @moduledoc false
+    def sweep_worker_process_groups(_), do: note(:groups)
     def reconcile_orphaned_runs(_), do: note(:orphans)
     def reconcile_shutdown_casualties(_), do: note(:casualties)
     def sweep_worker_scopes(_), do: note(:scopes)
@@ -35,6 +36,27 @@ defmodule Wardmast.Boot.ReconcileSweepTest do
 
   # The real Reconciler, with its resume swapped for a message: what the sweep does to
   # rows and tickets is real, only the dispatch is not.
+  # bd-568ib9: the real process-group sweep and orphan sweep; every later step
+  # only notes that it ran.
+  defmodule GroupSweepReconciler do
+    @moduledoc false
+    defdelegate sweep_worker_process_groups(opts), to: Wardmast.Workers.Reconciler
+    defdelegate reconcile_orphaned_runs(opts), to: Wardmast.Workers.Reconciler
+    def reconcile_shutdown_casualties(_), do: note(:casualties)
+    def sweep_worker_scopes(_), do: note(:scopes)
+    def reconcile_ci_waits(_), do: note(:ci_waits)
+    def reconcile_review_passes(_), do: note(:passes)
+    def reconcile_held_resumes(_), do: note(:held_resumes)
+    def restarted_ids(_), do: []
+    def reconcile_open_pr_tasks(_), do: note(:open_prs)
+    def reconcile_resumable_tasks(_), do: note(:resume)
+
+    defp note(step) do
+      send(Application.fetch_env!(:wardmast, :sweep_test_pid), {:step, step})
+      {:ok, 0}
+    end
+  end
+
   defmodule ResumeCountingReconciler do
     @moduledoc false
     defdelegate reconcile_orphaned_runs(opts), to: Wardmast.Workers.Reconciler
@@ -44,6 +66,16 @@ defmodule Wardmast.Boot.ReconcileSweepTest do
     defdelegate reconcile_held_resumes(opts), to: Wardmast.Workers.Reconciler
     defdelegate restarted_ids(lists), to: Wardmast.Workers.Reconciler
     defdelegate reconcile_open_pr_tasks(opts), to: Wardmast.Workers.Reconciler
+
+    # Never a real process: the rows these tests write record no group, but a
+    # stray one must not let the sweep signal anything on the host.
+    def sweep_worker_process_groups(opts) do
+      no_process = [ps: fn _pid -> {"", 1} end, kill: fn _args -> {"", 1} end]
+
+      Wardmast.Workers.Reconciler.sweep_worker_process_groups(
+        Keyword.put(opts, :process_group_opts, no_process)
+      )
+    end
 
     # Never the real systemd user manager: the sweep would `systemctl --user stop`
     # every live `arb-run-*` scope on the host (bd-8h3h3z). Same sweep, `:cmd` stubbed.
@@ -66,7 +98,10 @@ defmodule Wardmast.Boot.ReconcileSweepTest do
     end
   end
 
-  @reconcile_steps ~w(orphans casualties scopes ci_waits passes held_resumes open_prs resume)a
+  # bd-568ib9: the process groups a crash left running are killed first, while
+  # their rows still say which runs were live, and before anything is resumed
+  # into those worktrees.
+  @reconcile_steps ~w(groups orphans casualties scopes ci_waits passes held_resumes open_prs resume)a
 
   setup do
     Application.put_env(:wardmast, :sweep_test_pid, self())
@@ -283,6 +318,38 @@ defmodule Wardmast.Boot.ReconcileSweepTest do
       assert {:ok, 0} = Reconciler.reconcile_orphaned_runs(primary?: true, skip_run_ids: [run.id])
       assert %{state: :working} = Ash.get!(Run, run.id)
     end
+  end
+
+  # bd-568ib9 (MAC P2-1): the boot path end to end — an agent a crash left
+  # running (reparented, leading its own group, a child in it) is killed by the
+  # boot sweep before its run is written off as "server restarted".
+  test "an agent a crash left running is killed before its run is written off" do
+    {leader, child} = Wardmast.Test.OrphanedAgent.spawn!()
+    group = Wardmast.Worker.ProcessGroup.describe(leader)
+
+    run =
+      Ash.create!(Run, %{
+        task_id: "bd-crashed-#{System.unique_integer([:positive])}",
+        repo: "arbiter",
+        workspace_id: "ws-boot",
+        state: :working,
+        started_at: DateTime.utc_now(),
+        output_lines: [],
+        os_pid: group.pid,
+        os_pgid: group.pgid,
+        os_started_at: group.started_at
+      })
+
+    ReconcileSweep.run(
+      primary?: true,
+      reconciler: GroupSweepReconciler,
+      recovery: fn _ -> {:ok, %{}} end
+    )
+
+    assert Wardmast.Test.OrphanedAgent.gone?(leader)
+    assert Wardmast.Test.OrphanedAgent.gone?(child)
+    assert %{state: :finished, outcome: :interrupted} = Ash.get!(Run, run.id)
+    assert ResumeGate.open?()
   end
 
   test "a non-primary instance skips recovery as it skips the Reconciler" do
