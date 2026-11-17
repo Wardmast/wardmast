@@ -165,7 +165,7 @@ only a disabled login recipe in `accounts/login_recipes.ex`), `gh`, `glab`
 and `ward`. `ward` is an **escript**, so it needs an Erlang/OTP at least as new
 as the one that compiled it, which a repo's own Erlang need not be (emricare
 tonic pins OTP 27; the `kube` and `nix` images have none). The base image
-therefore carries an Erlang for ward alone ([§4.3](#43-arb-in-a-worker-container-bd-59m96o)).
+therefore carries an Erlang for ward alone ([§4.3](#43-ward-in-a-worker-container-bd-59m96o)).
 
 ### 2.4 Build, rebuild and versioning, laptop and EC2
 
@@ -451,7 +451,7 @@ against real podman):
 |---|---|
 | The checkout, its `.git` and read-only guards, the main repo's `objects/` | `PrivateClone.mounts/1` |
 | `CLAUDE_CONFIG_DIR`, `HOME`, `TMPDIR` | per run, under the run's temp dir; the config dir holds only the generated `settings.json` and `CLAUDE.md`, never a credential file or another run's history |
-| `claude` and `ward` | the host's binaries, resolved through symlinks, bound read-only at `/opt/arbiter/cli` (on the image's `PATH`). `ward` there is a launcher and the host's escript sits beside it as `arb.escript`; the launcher runs it on the base image's own Erlang for ward ([§4.3](#43-arb-in-a-worker-container-bd-59m96o)), so the repo's Erlang need not match |
+| `claude` and `ward` | the host's binaries, resolved through symlinks, bound read-only at `/opt/arbiter/cli` (on the image's `PATH`). `ward` there is a launcher and the host's escript sits beside it as `ward.escript`; the launcher runs it on the base image's own Erlang for ward ([§4.3](#43-ward-in-a-worker-container-bd-59m96o)), so the repo's Erlang need not match |
 | Token env | the spawn's explicit pairs only, each as `-e NAME` with the value in the `podman` client's environment: nothing on argv. `PATH`, `HOME`, `XDG_*` and the proxy variables are literals |
 | Proxy and Wardmast | the run's two sockets bound read-only, and `Jail`'s own `socat` script inside the container on `127.0.0.1`: `HTTPS_PROXY`, `ARB_HOST` and the `.mcp.json` URL work unchanged; `--network=none`, so those sockets are the only exit |
 
@@ -594,8 +594,8 @@ has the MCP tools, but not `ward message`, `ward inbox` and the rest of the CLI.
   toolchain layer copies `/usr/local` only.
 * **The launcher.** `ContainerSpawn.cli_mounts/2` binds `ArbCli.launcher/1`
   (a POSIX `sh` script, written once under `<image root>/cli`, named by its
-  content) as `/opt/arbiter/cli/arb` and the host's escript beside it as
-  `arb.escript`. It runs the escript on `/opt/arbiter/otp` when that release is
+  content) as `/opt/arbiter/cli/ward` and the host's escript beside it as
+  `ward.escript`. It runs the escript on `/opt/arbiter/otp` when that release is
   at least the stamp's; else on the image's own `escript` when its `erl` is new
   enough; else it exits 69 naming both releases. Remote nodes (the file shelf)
   and pushed images (the CLI layer) take the same two files.
@@ -605,7 +605,7 @@ has the MCP tools, but not `ward message`, `ward inbox` and the rest of the CLI.
   `:worker_container_image` whose `arbiter.arb-otp` label is missing or older
   than ward's release. The spawn gate and a node's readiness do not run it.
 
-Checked against real images in [Appendix G](#appendix-g-arb-on-an-otp-27-image-bd-59m96o).
+Checked against real images in [Appendix G](#appendix-g-ward-on-an-otp-27-image-bd-59m96o).
 
 ## 5. Network
 
@@ -1029,8 +1029,8 @@ runs it on the base's runtime, and that a base-only image with no Erlang runs
 `ward` too. By hand, after a deploy: `ward image build <tonic repo>`, then
 
     podman run --rm --pull=never \
-      -v ~/.wardmast/images/cli/arb-launcher-<hash>:/opt/arbiter/cli/arb:ro \
-      -v ~/.local/bin/arb:/opt/arbiter/cli/arb.escript:ro \
+      -v ~/.wardmast/images/cli/ward-launcher-<hash>:/opt/arbiter/cli/ward:ro \
+      -v ~/.local/bin/ward:/opt/arbiter/cli/ward.escript:ro \
       <the tag it printed> ward version
 
 where the launcher file is the one the first podman spawn wrote (`ls
@@ -1057,7 +1057,7 @@ image's `PATH` (`env -i`):
 | Image | Command | Result |
 |---|---|---|
 | tonic's (OTP 27 toolchain, new base) | `erl … otp_release` | `27` (27.3.4.18), Elixir 1.17.3 |
-| same | `escript /opt/arbiter/cli/arb.escript version` | `Error loading module nil_escript: corrupt atom table`, `undefined function nil_escript:main/1`: the bug, still there for the image's own Erlang |
+| same | `escript /opt/arbiter/cli/ward.escript version` | `Error loading module nil_escript: corrupt atom table`, `undefined function nil_escript:main/1`: the bug, still there for the image's own Erlang |
 | same | `ward version` | the CLI block, exit 0 |
 | no Erlang (`/usr/local` empty) | `ward version` | the CLI block, exit 0 |
 | OTP 27, no runtime (old base or custom image) | `ward version` | exit 69: `ward: cannot start: this ward was built on Erlang/OTP 29 and an older release cannot load it; the image's own Erlang is OTP 27 and it has no runtime for ward at /opt/arbiter/otp: it is not built on Wardmast's current worker base image (FROM ${ARBITER_BASE}).` |

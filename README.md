@@ -41,7 +41,7 @@ ward install cli
 ```
 
 `ward install cli` builds the CLI escript from `apps/wardmast_cli` and installs
-it to `~/.local/bin/arb`. If `~/.local/bin` isn't in your PATH yet, add this
+it to `~/.local/bin/ward`. If `~/.local/bin` isn't in your PATH yet, add this
 to your shell profile (`.bashrc`, `.zshrc`, etc.) and restart your terminal:
 
 ```sh
@@ -233,7 +233,7 @@ will not have — running `mix deps.get` *before* the pull is a no-op, since
 Instead, either run `mix deps.get && ward server restart` immediately *after*
 the deploy, or skip `--git-pull` and do the whole thing manually: `git pull
 --ff-only origin main` → `mix deps.get` → `(cd apps/wardmast_cli && mix
-escript.build && cp ward ~/.local/bin/arb)` if `apps/wardmast_cli` changed →
+escript.build && cp ward ~/.local/bin/ward)` if `apps/wardmast_cli` changed →
 `ward server restart` → `ward server doctor`. The manual form is the safer
 choice when deps changed, since it never restarts against unfetched deps.
 
@@ -318,7 +318,7 @@ echo "WARDMAST_WORKER_JAIL_UNMASK=~/.config/glab-cli" >> ~/.wardmast/wardmast.en
 ```
 
 Malformed (non-absolute) entries are skipped with a warning and never block
-boot. Don't use `ERL_FLAGS=-arbiter worker_jail_unmask ...`: systemd strips the
+boot. Don't use `ERL_FLAGS=-wardmast worker_jail_unmask ...`: systemd strips the
 quotes and every release then refuses to boot. `ward server doctor` lists the
 unmasked paths ("worker jail unmask").
 
@@ -645,7 +645,7 @@ commands you'll reach for most.
 | `ward server start` | Boot the stack (no-op if already up) |
 | `ward server deploy [--version vX.Y.Z]` | Deploy an OTP release from GitHub Releases: pre-swap DB backup, auto-rollback on failure (restoring the backup when it migrated), then installs the matching `ward` — see [docs/self-update.md](docs/self-update.md) |
 | `ward server deploy --git-pull` | Source-checkout deploy: `git pull --ff-only`, rebuild the CLI if changed, restart (see [Deploying](#deploying-pick-the-path-for-your-install-shape)) |
-| `ward server doctor [--all\|-v] [--spawn] [--json]` | Health-check the install: a header, one summary line (`27 ok · 1 warn · 0 fail`) and only the `warn`/`fail` checks with their hints. `--all` lists every check grouped (core, auth & providers, sandboxes, security posture), with `n/a` for the ones that do not apply here. `--spawn` runs the end-to-end canary spawn per enabled provider (also run automatically once per server boot). Exit 1 only on `fail`; `--json` carries every check with its severity — see [Reading `ward server doctor`](#reading-arb-server-doctor) |
+| `ward server doctor [--all\|-v] [--spawn] [--json]` | Health-check the install: a header, one summary line (`27 ok · 1 warn · 0 fail`) and only the `warn`/`fail` checks with their hints. `--all` lists every check grouped (core, auth & providers, sandboxes, security posture), with `n/a` for the ones that do not apply here. `--spawn` runs the end-to-end canary spawn per enabled provider (also run automatically once per server boot). Exit 1 only on `fail`; `--json` carries every check with its severity — see [Reading `ward server doctor`](#reading-ward-server-doctor) |
 | `ward config get/set [workspace]` | Read/edit workspace configuration (tracker, merger, etc.) |
 | `ward mcp token mint --tier coordinator` | Mint an MCP token for a coordinator session |
 | `ward batch [--file PATH] [--continue-on-error]` | Run many `ward` commands in one VM (see below) |
