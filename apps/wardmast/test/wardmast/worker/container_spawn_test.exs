@@ -787,6 +787,7 @@ defmodule Wardmast.Worker.ContainerSpawnTest do
       assert env["NO_PROXY"]
       assert env["GIT_SSH_COMMAND"] =~ "ProxyCommand socat"
       assert env["ARB_HOST"] =~ ~r{^http://127\.0\.0\.1:\d+$}
+      assert env["WARDMAST_HOST"] == env["ARB_HOST"]
     end
 
     test "seeds the clone's deps from the image-keyed cache for the resolved image", ctx do

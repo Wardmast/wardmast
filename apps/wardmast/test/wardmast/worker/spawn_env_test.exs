@@ -180,7 +180,7 @@ defmodule Wardmast.Worker.SpawnEnvTest do
 
   describe "allowed?/1" do
     test "covers the documented basics and rejects secrets" do
-      for name <- ~w(PATH HOME LANG LC_ALL TERM TMPDIR MIX_HOME HEX_HOME ARB_HOST) do
+      for name <- ~w(PATH HOME LANG LC_ALL TERM TMPDIR MIX_HOME HEX_HOME ARB_HOST WARDMAST_HOST WARDMAST_WORKSPACE) do
         assert SpawnEnv.allowed?(name), name
       end
 

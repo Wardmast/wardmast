@@ -85,7 +85,7 @@ defmodule WardmastCli.Workspace do
       nil ->
         {:error,
          "no workspace named #{inspect(target)}. " <>
-           "Set WARDMAST_WORKSPACE or create one with `arb workspace create`."}
+           "Set WARDMAST_WORKSPACE or create one with `ward workspace create`."}
 
       ws ->
         {:ok, ws}
@@ -97,7 +97,7 @@ defmodule WardmastCli.Workspace do
   # no ambiguity to warn about. Only error when the choice is genuinely
   # ambiguous (multiple workspaces, none named "default").
   defp resolve_from_list([], nil) do
-    {:error, "no workspaces found. Create one with `arb workspace create`."}
+    {:error, "no workspaces found. Create one with `ward workspace create`."}
   end
 
   defp resolve_from_list(list, nil) do
