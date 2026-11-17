@@ -23,7 +23,7 @@ Common causes:
 
 ## The `repo` argument on dispatch
 
-`mcp__arbiter__worker_dispatch(task_id, repo, provider)` (CLI: `arb ticket
+`mcp__wardmast__worker_dispatch(task_id, repo, provider)` (CLI: `arb ticket
 dispatch <id> [<repo>]`) — `repo` is optional in both forms, but a
 **multi-repo workspace with no default** needs it explicit. Omit it there
 and you get a generic "internal server error" with
@@ -32,7 +32,7 @@ more than one configured repo, always pass `repo` explicitly.
 
 ## Worker resume is not fully reliable
 
-`mcp__arbiter__worker_resume` (CLI: `arb worker resume`) re-attaches a fresh
+`mcp__wardmast__worker_resume` (CLI: `arb worker resume`) re-attaches a fresh
 session to the preserved worktree, which is usually right, but has
 historically been unreliable at actually driving a resumed session all the
 way to completion. Watch a resumed worker rather than assuming it'll finish

@@ -1189,7 +1189,7 @@ defmodule Wardmast.Worker.ContainerSpawnTest do
         Wardmast.MCP.AgentConfig.Claude.write_mcp_config(ctx.clone,
           mcp_url: "http://127.0.0.1:4848/mcp",
           scope_token: "scope-token",
-          server_name: "arbiter"
+          server_name: "wardmast"
         )
 
       mcp_config = Path.join(ctx.clone, Wardmast.MCP.AgentConfig.Claude.filename())

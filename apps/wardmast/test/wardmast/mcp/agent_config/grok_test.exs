@@ -8,7 +8,7 @@ defmodule Wardmast.MCP.AgentConfig.GrokTest do
   alias Wardmast.MCP.AgentConfig
   alias Wardmast.MCP.AgentConfig.Grok
 
-  @opts [mcp_url: "http://127.0.0.1:4848/mcp", scope_token: "tok-123", server_name: "arbiter"]
+  @opts [mcp_url: "http://127.0.0.1:4848/mcp", scope_token: "tok-123"]
 
   setup do
     base =
@@ -39,7 +39,7 @@ defmodule Wardmast.MCP.AgentConfig.GrokTest do
 
   test "config_toml/1 uses grok's url + headers inline table" do
     toml = Grok.config_toml(@opts)
-    assert toml =~ "[mcp_servers.arbiter]"
+    assert toml =~ "[mcp_servers.wardmast]"
     assert toml =~ ~s(url = "http://127.0.0.1:4848/mcp")
     assert toml =~ ~s(headers = { "Authorization" = "Bearer tok-123" })
   end
@@ -68,9 +68,9 @@ defmodule Wardmast.MCP.AgentConfig.GrokTest do
     File.mkdir_p!(Path.dirname(config))
 
     File.write!(config, """
-    [mcp_servers.arbiter]
+    [mcp_servers.wardmast]
     url = "http://old"
-    mcp_servers.arbiter.url = "http://dotted"
+    mcp_servers.wardmast.url = "http://dotted"
     """)
 
     assert :ok = Grok.write_mcp_config(wt, @opts)
@@ -79,7 +79,7 @@ defmodule Wardmast.MCP.AgentConfig.GrokTest do
 
     refute out =~ "http://old"
     refute out =~ "dotted"
-    assert length(String.split(out, "[mcp_servers.arbiter]")) == 2
+    assert length(String.split(out, "[mcp_servers.wardmast]")) == 2
   end
 
   test "a planted symlink is replaced, never followed", %{wt: wt, config: config} do

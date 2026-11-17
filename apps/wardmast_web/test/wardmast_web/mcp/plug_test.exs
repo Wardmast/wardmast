@@ -49,7 +49,7 @@ defmodule WardmastWeb.MCP.PlugTest do
 
       assert %{"result" => result, "id" => 1, "jsonrpc" => "2.0"} = json_response(conn, 200)
       assert result["protocolVersion"] == "2025-06-18"
-      assert result["serverInfo"]["name"] == "arbiter"
+      assert result["serverInfo"]["name"] == "wardmast"
       assert is_map(result["capabilities"]["tools"])
     end
 

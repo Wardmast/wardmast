@@ -425,7 +425,7 @@ defmodule Wardmast.Agents.Codex.StreamTest do
 
       mcp = %{
         "type" => "item.started",
-        "item" => %{"type" => "mcp_tool_call", "server" => "arbiter", "tool" => "ticket_show"}
+        "item" => %{"type" => "mcp_tool_call", "server" => "wardmast", "tool" => "ticket_show"}
       }
 
       assert [{line, false}] = Stream.format_event(mcp)

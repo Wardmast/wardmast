@@ -300,7 +300,7 @@ defmodule Wardmast.Agents.ClaudeTest do
     # -- bd-7e8ezw: the injected MCP config is passed explicitly ------------
     #
     # Claude Code applies the MAIN checkout's `.claude/settings.local.json` to
-    # every git worktree of the repo, and a `disabledMcpjsonServers: ["arbiter"]`
+    # every git worktree of the repo, and a `disabledMcpjsonServers: ["wardmast"]`
     # there silently drops the worktree's `.mcp.json`. `--mcp-config` servers
     # are not subject to that list, so the spawn names the file explicitly.
 

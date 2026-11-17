@@ -17,7 +17,7 @@ defmodule Wardmast.MCPTest do
     end
 
     test "server_name and server_version have sane defaults" do
-      assert MCP.server_name() == "arbiter"
+      assert MCP.server_name() == "wardmast"
       assert is_binary(MCP.server_version())
     end
   end

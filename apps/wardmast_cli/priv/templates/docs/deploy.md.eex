@@ -37,7 +37,7 @@ a dev checkout that looks stale.
 
 **Always check for running workers before a restart** — a restart abandons
 in-flight work. Idle shells are safe to lose. Guard the restart on
-`mcp__arbiter__worker_list` (CLI fallback: `arb worker list`) showing
+`mcp__wardmast__worker_list` (CLI fallback: `arb worker list`) showing
 nothing running.
 
 ## Logs
@@ -96,7 +96,7 @@ merge live within minutes instead of waiting for a tag + CI run:
 
 **Always check for running workers before a restart or deploy** — a restart
 abandons in-flight work. Idle shells are safe to lose. Guard the deploy on
-`mcp__arbiter__worker_list` (CLI fallback: `arb worker list`) showing
+`mcp__wardmast__worker_list` (CLI fallback: `arb worker list`) showing
 nothing running. Deploy itself has no MCP equivalent — it's an infra-level
 action, CLI/`systemctl` only.
 

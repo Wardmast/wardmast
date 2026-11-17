@@ -53,7 +53,7 @@ defmodule WardmastWeb.MCP.TransportTest do
       body = json_response(init, 200)
       assert body["id"] == 1
       assert body["result"]["protocolVersion"] == "2025-06-18"
-      assert body["result"]["serverInfo"]["name"] == "arbiter"
+      assert body["result"]["serverInfo"]["name"] == "wardmast"
       assert [session_id] = get_resp_header(init, "mcp-session-id")
 
       # The client now opens its server → client stream with the negotiated id,

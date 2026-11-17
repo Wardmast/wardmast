@@ -187,13 +187,13 @@ defmodule Wardmast.Loop.FixPassClassifierTest do
     end
 
     test "a ci_rerun tool call or a CLI job re-run is a rerun" do
-      assert FPC.step_signals([step("mcp__arbiter__ci_rerun", "{\"mode\":\"auto\"}")]).rerun?
+      assert FPC.step_signals([step("mcp__wardmast__ci_rerun", "{\"mode\":\"auto\"}")]).rerun?
       assert FPC.step_signals([step("Bash", "gh run rerun 123 --failed")]).rerun?
       assert FPC.step_signals([step("Bash", "glab ci retry 456")]).rerun?
     end
 
     test "ci_mark_external is recorded" do
-      assert FPC.step_signals([step("mcp__arbiter__ci_mark_external", "{\"note\":\"x\"}")]).marked_external?
+      assert FPC.step_signals([step("mcp__wardmast__ci_mark_external", "{\"note\":\"x\"}")]).marked_external?
     end
   end
 

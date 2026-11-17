@@ -290,7 +290,7 @@ defmodule Wardmast.Agents.Gemini.ConfigDirTest do
 
   describe "write_mcp_config/2" do
     test "lands at <home>/.gemini/config/mcp_config.json in agy's own schema", %{worktree: wt} do
-      config = %{"mcpServers" => %{"arbiter" => %{"serverUrl" => "http://x/mcp"}}}
+      config = %{"mcpServers" => %{"wardmast" => %{"serverUrl" => "http://x/mcp"}}}
 
       assert {:ok, path} = ConfigDir.write_mcp_config(config, worktree: wt)
       assert path == Path.join(ConfigDir.path(worktree: wt), ".gemini/config/mcp_config.json")
