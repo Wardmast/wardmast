@@ -158,6 +158,7 @@ defmodule Wardmast.Board.WalkInputs do
     * `local_only`, or a run no node may take — the primary only;
     * `prefer_remote` — unconstrained nodes, then the primary, then constrained
       nodes (a run whose only nodes are constrained goes local first);
+    * `prefer_local` — the primary, then unconstrained nodes, then constrained ones;
     * `remote_only` — unconstrained nodes, then constrained ones, never the
       primary.
   """
@@ -181,6 +182,7 @@ defmodule Wardmast.Board.WalkInputs do
 
     case mode do
       :prefer_remote -> [free, [@local], constrained]
+      :prefer_local -> [[@local], free, constrained]
       :remote_only -> [free, constrained]
     end
     |> Enum.reject(&(&1 == []))
@@ -673,6 +675,7 @@ defmodule Wardmast.Board.WalkInputs do
       kind: :implementer,
       provider: provider,
       layout: layout(ws, issue),
+      auto?: auto?(ws, issue),
       mode: mode,
       no_pr?: no_pr?,
       # The inspect checkout is what a task/research dispatch gets by default
@@ -696,7 +699,22 @@ defmodule Wardmast.Board.WalkInputs do
         _ -> nil
       end
 
-    ws |> SecurityPolicy.resolve(%{}, repo) |> GitLayout.for_policy()
+    policy = SecurityPolicy.resolve(ws, %{}, repo)
+
+    # bd-56z2wz: under `sandbox.backend: auto` a node would run the card as podman on a
+    # private clone, so that is the layout planning asks about; `Placement.eligible/1`
+    # keeps the providers and the checkouts that must stay local on the primary.
+    if SecurityPolicy.auto?(policy), do: :private_clone, else: GitLayout.for_policy(policy)
+  end
+
+  defp auto?(ws, issue) do
+    repo =
+      case Map.get(issue, :repo) do
+        repo when is_binary(repo) and repo != "" -> repo
+        _ -> nil
+      end
+
+    ws |> SecurityPolicy.resolve(%{}, repo) |> SecurityPolicy.auto?()
   end
 
   # ---- reads ----------------------------------------------------------------

@@ -166,7 +166,10 @@ defmodule Wardmast.Worker.DispatchAutoBackendTest do
       assert_receive {:spawned, nil, policy}
       assert SecurityPolicy.sandbox_backend(policy) == :podman
       assert GitLayout.existing(checkout_path(issue)) == :private_clone
-      assert decision(issue)["placement"]["sandbox_backend"] == "auto: no node slot -> local podman"
+
+      assert decision(issue)["placement"]["sandbox_backend"] ==
+               "auto: no node slot -> local podman"
+
       stop(issue, pid)
     end
 
@@ -319,7 +322,11 @@ defmodule Wardmast.Worker.DispatchAutoBackendTest do
       {:ok, path} = Worktree.create(sandbox.repo, branch, "main", layout: :private_clone)
 
       assert {:error, {:sandbox_backend, _provider, "held — " <> detail}} =
-               dispatch(issue, [full_node()], [agent_type: :gemini, start_claude: false] ++ resume_opts())
+               dispatch(
+                 issue,
+                 [full_node()],
+                 [agent_type: :gemini, start_claude: false] ++ resume_opts()
+               )
 
       assert detail =~ "podman"
       assert GitLayout.existing(path) == :private_clone

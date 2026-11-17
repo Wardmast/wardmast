@@ -1165,7 +1165,10 @@ defmodule Wardmast.Tasks.Workspace.Changes.ValidateConfig do
   # `backend` may be `auto` (bd-56z2wz); `review_backend` and `local_backend` name a
   # concrete sandbox, so they may not.
   defp valid_backends("backend"), do: Wardmast.Agents.SecurityPolicy.valid_sandbox_backends()
-  defp valid_backends("review_backend"), do: Wardmast.Agents.SecurityPolicy.valid_review_backends()
+
+  defp valid_backends("review_backend"),
+    do: Wardmast.Agents.SecurityPolicy.valid_review_backends()
+
   defp valid_backends("local_backend"), do: Wardmast.Agents.SecurityPolicy.valid_local_backends()
 
   defp validate_allow_hosts(changeset, nil, _label), do: changeset

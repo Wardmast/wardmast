@@ -135,7 +135,7 @@ defmodule Wardmast.Nodes.LocalCapacityKindsTest do
                      :reviewer
                    ],
                  provider <- [:claude, :codex, :gemini],
-                 mode <- [:prefer_remote, :remote_only],
+                 mode <- [:prefer_local, :prefer_remote, :remote_only],
                  do: {kind, provider, :private_clone, false, mode}
                )
     end

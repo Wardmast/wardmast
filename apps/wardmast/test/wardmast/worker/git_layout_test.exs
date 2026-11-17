@@ -60,4 +60,63 @@ defmodule Wardmast.Worker.GitLayoutTest do
       assert GitLayout.for_workspace(ws(%{}), "tonic") == :linked_worktree
     end
   end
+
+  # bd-56z2wz: `sandbox.backend: auto` has no layout until placement (or an existing
+  # checkout) says, so an unplaced auto policy is the primary's local layout.
+  describe "sandbox.backend auto (bd-56z2wz)" do
+    @auto %{"sandbox" => %{"backend" => "auto"}}
+
+    @tag :tmp_dir
+    test "existing/1 reads the layout already on disk", %{tmp_dir: dir} do
+      linked = Path.join(dir, "linked")
+      clone = Path.join(dir, "clone")
+      stub = Path.join(dir, "stub")
+      File.mkdir_p!(linked)
+      File.write!(Path.join(linked, ".git"), "gitdir: /elsewhere/.git/worktrees/x\n")
+      File.mkdir_p!(Path.join(clone, ".git"))
+      File.mkdir_p!(Path.join(stub, ".arbiter"))
+
+      assert GitLayout.existing(linked) == :linked_worktree
+      assert GitLayout.existing(clone) == :private_clone
+      assert GitLayout.existing(stub) == nil
+      assert GitLayout.existing(Path.join(dir, "missing")) == nil
+      assert GitLayout.existing(nil) == nil
+    end
+
+    test "an unplaced auto policy is the local layout, a configured podman local backend a clone" do
+      assert GitLayout.for_workspace(ws(@auto)) == :linked_worktree
+
+      podman_local = %{"sandbox" => %{"backend" => "auto", "local_backend" => "podman"}}
+      assert GitLayout.for_workspace(ws(podman_local)) == :private_clone
+    end
+
+    @tag :tmp_dir
+    test "for_checkout/3 keeps the layout of the checkout that exists", %{tmp_dir: dir} do
+      linked = Path.join(dir, "linked")
+      clone = Path.join(dir, "clone")
+      File.mkdir_p!(linked)
+      File.write!(Path.join(linked, ".git"), "gitdir: /elsewhere\n")
+      File.mkdir_p!(Path.join(clone, ".git"))
+
+      # a linked worktree stays one even when the local backend is a container
+      podman_local = ws(%{"sandbox" => %{"backend" => "auto", "local_backend" => "podman"}})
+      assert GitLayout.for_checkout(podman_local, nil, linked) == :linked_worktree
+      assert GitLayout.for_checkout(ws(@auto), nil, clone) == :private_clone
+      assert GitLayout.for_checkout(ws(@auto), nil, Path.join(dir, "none")) == :linked_worktree
+
+      # a configured backend never reads the disk
+      assert GitLayout.for_checkout(ws(@podman), nil, linked) == :private_clone
+      assert GitLayout.for_checkout(ws(%{}), nil, clone) == :linked_worktree
+    end
+
+    @tag :tmp_dir
+    test "concretize/2 fixes the policy to the checkout's backend", %{tmp_dir: dir} do
+      clone = Path.join(dir, "clone")
+      File.mkdir_p!(Path.join(clone, ".git"))
+      policy = SecurityPolicy.resolve(ws(@auto))
+
+      assert GitLayout.concretize(policy, clone).sandbox.backend == :podman
+      assert GitLayout.concretize(policy, nil).sandbox.backend == :bwrap
+    end
+  end
 end

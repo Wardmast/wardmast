@@ -394,7 +394,9 @@ defmodule Wardmast.Agents.SecurityPolicyTest do
     end
 
     test "review_backend never accepts auto" do
-      p = SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"review_backend" => "auto"}})
+      p =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"review_backend" => "auto"}})
+
       assert SecurityPolicy.review_backend(p) == :bwrap
     end
 
@@ -410,7 +412,9 @@ defmodule Wardmast.Agents.SecurityPolicyTest do
     end
 
     test "local_backend is most-restrictive-wins and ignores unknown values" do
-      p = SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"local_backend" => "podman"}})
+      p =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"local_backend" => "podman"}})
+
       assert p.sandbox.local_backend == :podman
       p = SecurityPolicy.merge(p, %{"sandbox" => %{"local_backend" => "bwrap"}})
       assert p.sandbox.local_backend == :podman

@@ -785,7 +785,11 @@ defmodule Wardmast.Agents.SecurityPolicy do
           raw |> get(:allow_hosts) |> list_of_strings() |> Enum.filter(&valid_allow_host?/1)
         ),
       backend:
-        merge_backend(Map.get(base, :backend, :bwrap), get(raw, :backend), @valid_sandbox_backends),
+        merge_backend(
+          Map.get(base, :backend, :bwrap),
+          get(raw, :backend),
+          @valid_sandbox_backends
+        ),
       review_backend:
         merge_backend(
           Map.get(base, :review_backend, :bwrap),

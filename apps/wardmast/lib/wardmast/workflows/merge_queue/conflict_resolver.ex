@@ -318,12 +318,13 @@ defmodule Wardmast.Workflows.MergeQueue.ConflictResolver do
   """
   @spec host_git?(map(), atom() | String.t()) :: boolean()
   def host_git?(context, provider),
-    do: ContainerSpawn.pass_policy(
-      context.workspace,
-      context.repo,
-      provider,
-      Worktree.worktree_path(context.branch)
-    ) != nil
+    do:
+      ContainerSpawn.pass_policy(
+        context.workspace,
+        context.repo,
+        provider,
+        Worktree.worktree_path(context.branch)
+      ) != nil
 
   # bd-19skda: the container cannot `git fetch`, so the host refreshes the main
   # repo's `origin/<target>` before the clone is cut or re-attached
@@ -788,11 +789,11 @@ defmodule Wardmast.Workflows.MergeQueue.ConflictResolver do
 
   defp container_opts(context, provider) do
     case ContainerSpawn.pass_policy(
-      context.workspace,
-      context.repo,
-      provider,
-      Worktree.worktree_path(context.branch)
-    ) do
+           context.workspace,
+           context.repo,
+           provider,
+           Worktree.worktree_path(context.branch)
+         ) do
       nil -> []
       policy -> ContainerSpawn.session_opts(policy, context.workspace, repo: context.repo)
     end

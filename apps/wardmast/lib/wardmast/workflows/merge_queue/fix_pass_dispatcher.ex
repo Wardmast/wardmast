@@ -672,12 +672,15 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassDispatcher do
   # bd-7rxy1c: a pass in a podman container holds no credential; the host
   # pushes for it (`Worker.push_and_deliver_fix_pass/1`).
   defp container_pass?(context, provider),
-    do: not is_nil(ContainerSpawn.pass_policy(
-      context.workspace,
-      context.repo,
-      provider,
-      Worktree.worktree_path(context.branch)
-    ))
+    do:
+      not is_nil(
+        ContainerSpawn.pass_policy(
+          context.workspace,
+          context.repo,
+          provider,
+          Worktree.worktree_path(context.branch)
+        )
+      )
 
   # bd-bg87oz: `ClaudeSession` hands the run to `Executor.Node` when the opts name a `:node`.
   # The pass's resolved target rides along: the node is seeded with `origin/<target>`.
@@ -686,11 +689,11 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassDispatcher do
 
   defp container_opts(context, provider) do
     case ContainerSpawn.pass_policy(
-      context.workspace,
-      context.repo,
-      provider,
-      Worktree.worktree_path(context.branch)
-    ) do
+           context.workspace,
+           context.repo,
+           provider,
+           Worktree.worktree_path(context.branch)
+         ) do
       nil -> []
       policy -> ContainerSpawn.session_opts(policy, context.workspace, repo: context.repo)
     end

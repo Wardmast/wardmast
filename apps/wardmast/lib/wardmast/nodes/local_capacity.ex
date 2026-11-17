@@ -408,6 +408,7 @@ defmodule Wardmast.Nodes.LocalCapacity do
   defp refuse(task_id, kind, cap, holders, opts) do
     phrase =
       phrase(cap, holders, Keyword.get(opts, :reason), Keyword.get(opts, :provider), kind, opts)
+
     phrase = derate_phrase(opts) || phrase
 
     info = %{
@@ -453,7 +454,10 @@ defmodule Wardmast.Nodes.LocalCapacity do
     do: "run is local-only: #{Placement.reason_phrase(why, %{provider: provider, kind: kind})}"
 
   defp auto_cause(:no_node, _provider, _kind), do: "no node had a free slot"
-  defp auto_cause({:node_skipped, skipped}, _provider, _kind), do: Placement.skipped_phrase(skipped)
+
+  defp auto_cause({:node_skipped, skipped}, _provider, _kind),
+    do: Placement.skipped_phrase(skipped)
+
   defp auto_cause(:prefer_local, _provider, _kind), do: "worker.placement is prefer_local"
   defp auto_cause(_reason, _provider, _kind), do: "no node"
 

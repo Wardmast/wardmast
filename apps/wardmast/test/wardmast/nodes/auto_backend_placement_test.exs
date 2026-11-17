@@ -42,7 +42,8 @@ defmodule Wardmast.Nodes.AutoBackendPlacementTest do
     )
   end
 
-  defp gate(req, nodes), do: LocalCapacity.gate_with_reason(req, nodes: nodes, remote_available?: true)
+  defp gate(req, nodes),
+    do: LocalCapacity.gate_with_reason(req, nodes: nodes, remote_available?: true)
 
   setup do
     on_exit(fn -> Wardmast.Settings.set_nodes_local_max_workers(nil) end)
@@ -58,7 +59,8 @@ defmodule Wardmast.Nodes.AutoBackendPlacementTest do
 
     test "agy has no container wrap point, so it stays local: never refused, never a node" do
       for provider <- [:gemini, "gemini", :antigravity] do
-        assert {:local_only, :provider_no_container} = Placement.eligible(request(provider: provider))
+        assert {:local_only, :provider_no_container} =
+                 Placement.eligible(request(provider: provider))
       end
 
       assert Placement.reason_phrase(:provider_no_container, %{provider: :gemini}) =~
@@ -202,10 +204,16 @@ defmodule Wardmast.Nodes.AutoBackendPlacementTest do
       assert Placement.backend_phrase(request(), {:local, :prefer_local}) ==
                "auto: prefer_local, the primary had a free slot -> local bwrap"
 
-      assert Placement.backend_phrase(request(), {:local, {:local_only, :existing_linked_worktree}}) =~
+      assert Placement.backend_phrase(
+               request(),
+               {:local, {:local_only, :existing_linked_worktree}}
+             ) =~
                "auto: its checkout is already a linked worktree on the primary -> local bwrap"
 
-      assert Placement.backend_phrase(request(provider: :gemini), {:local, {:local_only, :provider_no_container}}) =~
+      assert Placement.backend_phrase(
+               request(provider: :gemini),
+               {:local, {:local_only, :provider_no_container}}
+             ) =~
                "no container wrap point -> local bwrap"
     end
 
