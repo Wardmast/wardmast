@@ -22,7 +22,7 @@ defmodule Wardmast.NodeAgent.K8s.PodConfig do
   | `bridge_addr`, `gate_addr` | **required**: the controller Service address and the netpol-gate address (`host:port`) |
   | `boot_nonce` | **required**: the single-use 256-bit nonce for this pod |
   | `max_wall_s` | **required**: the run's wall budget; the pod deadline is this plus 1800 |
-  | `namespace` | default `arbiter-workers` |
+  | `namespace` | default `wardmast-workers` |
   | `worker` | `requests`, `limits`, `work_size_limit`, `tmp_size_limit`. An `ephemeral-storage` limit left unset is `work_size_limit + tmp_size_limit` (§20.2) |
   | `services_resources` | `requests` / `limits` for the `seed`, `snapshotter` and service containers |
   | `placement` | `node_selector`, `tolerations`, `priority_class`, `runtime_class`, `runtime_handler` (the class's handler, which the Role cannot read: `runsc*` marks a kernel sandbox, see `kernel_sandboxed?/1`), `spread` (`enabled`, `topology_keys`, `max_skew`, `when_unsatisfiable`: §20.2, a soft hostname spread by default) |
@@ -31,7 +31,7 @@ defmodule Wardmast.NodeAgent.K8s.PodConfig do
   | `timeouts` | `grace_s` (pod grace), `gate_timeout_s`; the others belong to the controller |
   | `snapshot_interval_s` | default 300 |
   | `service_image_allowlist` | extra service image prefixes (`docker.io/pgsty/`) |
-  | `event_feed` | default `true`: the worker ships the agent's stdio as an NDJSON event feed over the pod channel, which the controller reads instead of the kubelet log (bd-1nl506); the pod is annotated `arbiter.dev/events` and the controller follows its feed. `false` leaves the kubelet log as the run's output |
+  | `event_feed` | default `true`: the worker ships the agent's stdio as an NDJSON event feed over the pod channel, which the controller reads instead of the kubelet log (bd-1nl506); the pod is annotated `wardmast.dev/events` and the controller follows its feed. `false` leaves the kubelet log as the run's output |
   """
 
   alias Wardmast.NodeAgent.K8s.Quantity
@@ -55,7 +55,7 @@ defmodule Wardmast.NodeAgent.K8s.PodConfig do
   @max_wall_s 31_536_000
 
   @defaults %{
-    namespace: "arbiter-workers",
+    namespace: "wardmast-workers",
     worker: %{
       "requests" => %{"cpu" => "1", "memory" => "2Gi", "ephemeral-storage" => "4Gi"},
       "limits" => %{"cpu" => "2", "memory" => "4Gi"},
@@ -71,7 +71,7 @@ defmodule Wardmast.NodeAgent.K8s.PodConfig do
     placement: %{
       "node_selector" => %{},
       "tolerations" => [],
-      "priority_class" => "arbiter-worker",
+      "priority_class" => "wardmast-worker",
       "runtime_class" => "",
       "runtime_handler" => "",
       "spread" => %{
@@ -423,7 +423,7 @@ defmodule Wardmast.NodeAgent.K8s.PodConfig do
            ),
          {:ok, selector} <- node_selector(Map.get(map, "node_selector", %{})),
          {:ok, tolerations} <- tolerations(Map.get(map, "tolerations", [])),
-         {:ok, priority} <- name_or_empty(Map.get(map, "priority_class", "arbiter-worker")),
+         {:ok, priority} <- name_or_empty(Map.get(map, "priority_class", "wardmast-worker")),
          {:ok, runtime} <- name_or_empty(Map.get(map, "runtime_class", "")),
          {:ok, handler} <- name_or_empty(Map.get(map, "runtime_handler", "")),
          {:ok, spread} <- spread(Map.get(map, "spread", %{})) do

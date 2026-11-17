@@ -11,7 +11,7 @@ defmodule Wardmast.MCP.OperatorProofTest do
 
   @uid 1000
   @server 500
-  @service "/user.slice/user-1000.slice/user@1000.service/app.slice/arbiter.service"
+  @service "/user.slice/user-1000.slice/user@1000.service/app.slice/wardmast.service"
   @session "/user.slice/user-1000.slice/user@1000.service/app.slice/arb-session-0197abc.scope"
   @terminal "/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.gnome.Terminal.slice/vte-spawn-1.scope"
 
@@ -129,8 +129,8 @@ defmodule Wardmast.MCP.OperatorProofTest do
     end
 
     test "cgroup v1 falls back to the name=systemd hierarchy" do
-      v1 = "12:pids:/user.slice\n1:name=systemd:/system.slice/arbiter.service\n0::/\n"
-      assert OperatorProof.dedicated_cgroup(v1) == "/system.slice/arbiter.service"
+      v1 = "12:pids:/user.slice\n1:name=systemd:/system.slice/wardmast.service\n0::/\n"
+      assert OperatorProof.dedicated_cgroup(v1) == "/system.slice/wardmast.service"
     end
   end
 

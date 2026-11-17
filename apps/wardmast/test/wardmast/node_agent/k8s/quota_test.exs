@@ -10,7 +10,7 @@ defmodule Wardmast.NodeAgent.K8s.QuotaTest do
   # The design's §4.3 quota for max_concurrent 2.
   defp quota(hard, used \\ %{}) do
     %{
-      "metadata" => %{"name" => "arbiter-workers"},
+      "metadata" => %{"name" => "wardmast-workers"},
       "spec" => %{"hard" => hard},
       "status" => %{"hard" => hard, "used" => used}
     }

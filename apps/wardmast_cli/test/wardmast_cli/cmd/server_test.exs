@@ -86,8 +86,8 @@ defmodule WardmastCli.Cmd.ServerTest do
 
         case {cmd, args} do
           # No systemd unit installed — fall back to the SIGTERM+sh path.
-          {"systemctl", ["--user", "cat", "arbiter.service"]} ->
-            {"No files found for arbiter.service.\n", 1}
+          {"systemctl", ["--user", "cat", "wardmast.service"]} ->
+            {"No files found for wardmast.service.\n", 1}
 
           # Nothing listening on the port (already down).
           {"lsof", _} ->
@@ -116,8 +116,8 @@ defmodule WardmastCli.Cmd.ServerTest do
     test "--json emits restarted: true" do
       Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
         case {cmd, args} do
-          {"systemctl", ["--user", "cat", "arbiter.service"]} ->
-            {"No files found for arbiter.service.\n", 1}
+          {"systemctl", ["--user", "cat", "wardmast.service"]} ->
+            {"No files found for wardmast.service.\n", 1}
 
           {"lsof", _} ->
             {"", 1}
@@ -164,8 +164,8 @@ defmodule WardmastCli.Cmd.ServerTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
         case {cmd, args} do
-          {"systemctl", ["--user", "cat", "arbiter.service"]} ->
-            {"No files found for arbiter.service.\n", 1}
+          {"systemctl", ["--user", "cat", "wardmast.service"]} ->
+            {"No files found for wardmast.service.\n", 1}
 
           {"lsof", _} ->
             {"", 1}
@@ -228,8 +228,8 @@ defmodule WardmastCli.Cmd.ServerTest do
           {"git", ["diff" | _]} ->
             {"", 0}
 
-          {"systemctl", ["--user", "cat", "arbiter.service"]} ->
-            {"No files found for arbiter.service.\n", 1}
+          {"systemctl", ["--user", "cat", "wardmast.service"]} ->
+            {"No files found for wardmast.service.\n", 1}
 
           {"lsof", _} ->
             {"", 1}

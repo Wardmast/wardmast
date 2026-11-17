@@ -270,13 +270,13 @@ jobs:
           echo "test-shard result: $RESULT"
           [ "$RESULT" = "success" ]
 
-  # The arbiter-node Helm chart (bd-2u4lpp, docs/design/remote-workers.md §20.5):
+  # The wardmast-node Helm chart (bd-2u4lpp, docs/design/remote-workers.md §20.5):
   # `helm lint --strict`, `helm template` for every mode and reach variant piped through
   # kubeconform, and the renders the schema must refuse. No Elixir toolchain needed.
   # helm_chart_test.exs also renders the chart wherever `helm` is on PATH (the test shards use
   # the runner image's); where it is absent those tests skip and this job is the gate.
   helm-chart:
-    name: helm lint + kubeconform (charts/arbiter-node)
+    name: helm lint + kubeconform (charts/wardmast-node)
     runs-on: ubuntu-latest
     env:
       HELM_VERSION: v3.17.3

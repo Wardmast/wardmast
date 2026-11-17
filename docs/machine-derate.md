@@ -81,7 +81,7 @@ default:
 | `ARB_NODE_MEM_FLOOR_GIB`, `ARB_NODE_MEM_DELTA_GIB` | `mem_floor_gib`, `mem_delta_gib` |
 | `ARB_NODE_DERATE_RECOVER_S` | `recover_s` |
 
-Restart the agent (`systemctl --user restart arbiter-node`) to apply.
+Restart the agent (`systemctl --user restart wardmast-node`) to apply.
 
 ## How it reaches the scheduler
 

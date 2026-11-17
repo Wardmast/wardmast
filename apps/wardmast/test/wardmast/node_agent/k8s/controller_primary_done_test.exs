@@ -22,7 +22,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerPrimaryDoneTest do
   @moduletag :tmp_dir
 
   @t0 ~U[2026-10-10 12:00:00Z]
-  @labels %{"arbiter.dev/install" => "inst-1", "arbiter.dev/node" => "node-1"}
+  @labels %{"wardmast.dev/install" => "inst-1", "wardmast.dev/node" => "node-1"}
   @scheduled %{"type" => "PodScheduled", "status" => "True"}
 
   setup %{tmp_dir: dir} do
@@ -81,7 +81,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerPrimaryDoneTest do
            owner_uid: "0b6c1d7e-8f35-4a58-9c1f-3d2f1b1c1a11",
            bridge_addr: "10.43.98.199",
            gate_addr: "10.43.0.1:443",
-           own_pod: "arbiter-controller-7d9f-abc",
+           own_pod: "wardmast-controller-7d9f-abc",
            max_wall_s: 3600
          },
          sink: self(),
@@ -416,7 +416,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerPrimaryDoneTest do
     test "the pod's pod is annotated for the feed and its follower is the event one", env do
       %{run: run} = events_run(env)
       pod = FakeK8sApi.handle(env.api, {:get, pod_name(1)})
-      assert pod["metadata"]["annotations"]["arbiter.dev/events"] == "1"
+      assert pod["metadata"]["annotations"]["wardmast.dev/events"] == "1"
       assert run == run_id(1)
     end
 

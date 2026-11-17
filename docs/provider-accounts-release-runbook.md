@@ -1,7 +1,7 @@
 # Migrating a release install to provider accounts
 
 **Audience:** an operator running Arbiter as an OTP release
-(`~/.arbiter/current/bin/wardmast`, managed by `arbiter.service`), which has no
+(`~/.wardmast/current/bin/wardmast`, managed by `wardmast.service`), which has no
 Mix toolchain. On a source checkout, the `mix wardmast.accounts.*` tasks do the
 same things. They are thin wrappers over the functions used here.
 
@@ -13,7 +13,7 @@ same things. They are thin wrappers over the functions used here.
 - **The `:provider_accounts_enabled` flag is gone.** Provider accounts are
   always on. The `WARDMAST_PROVIDER_ACCOUNTS` variable is no longer read; if
   the server's environment still sets it, the boot logs a warning saying so.
-  Remove it from `~/.arbiter/arbiter.env`.
+  Remove it from `~/.wardmast/wardmast.env`.
 - **The legacy credential chain is deleted.** A spawn's provider credential
   comes from its workspace's provider account and nowhere else. That covers
   every spawn path: workers, the `CredentialWatchdog` probe, the quota poll,
@@ -32,7 +32,7 @@ same things. They are thin wrappers over the functions used here.
   holds that workspace's Claude tickets and escalates once. The only way back
   to the legacy chain is to run the previous release binary.
 - **`arb install service` no longer copies `CLAUDE_CODE_OAUTH_TOKEN`** from the
-  installing shell into `arbiter.env`. Nothing would read it.
+  installing shell into `wardmast.env`. Nothing would read it.
 - **`/providers` is never read-only.** The "Accounts not enabled on this
   install" banner is gone.
 - **No schema migrations.**
@@ -80,7 +80,7 @@ holds fingerprints, not values.
 ## Before you start
 
 1. **Run a release that has `Wardmast.Release.accounts_census/1`.** Check
-   which release is live with `readlink ~/.arbiter/current`.
+   which release is live with `readlink ~/.wardmast/current`.
 2. **Rotate first if you need to** (§7.6). If `WARDMAST_CLOAK_KEY` or the
    credential itself is considered exposed, rotate the key
    ([`cloak-key-rotation.md`](cloak-key-rotation.md)) and re-issue the
@@ -88,7 +88,7 @@ holds fingerprints, not values.
    ciphertext under a key you are about to retire.
 3. **Put server-env-only tokens into a workspace.** The census only sees
    credentials stored in a workspace's `worker_env`. A
-   `CLAUDE_CODE_OAUTH_TOKEN` that only lives in `~/.arbiter/arbiter.env` is
+   `CLAUDE_CODE_OAUTH_TOKEN` that only lives in `~/.wardmast/wardmast.env` is
    invisible to it. Set it on at least one workspace first, in the dashboard's
    workspace environment editor.
 4. **Load the server's environment in the shell you run `eval` from.**
@@ -98,9 +98,9 @@ holds fingerprints, not values.
    `DATABASE_PATH`:
 
    ```sh
-   set -a; . ~/.arbiter/arbiter.env; set +a
-   ARB=~/.arbiter/current/bin/wardmast
-   PLAN=~/.arbiter/accounts.json      # any absolute path, or one starting with ~
+   set -a; . ~/.wardmast/wardmast.env; set +a
+   ARB=~/.wardmast/current/bin/wardmast
+   PLAN=~/.wardmast/accounts.json      # any absolute path, or one starting with ~
    ```
 
 Each `eval` starts only config, Ash, the Ecto repo and the Cloak vault
@@ -148,9 +148,9 @@ census with `force?: true`, and repeat. Nothing has been written.
 ### 4. Stop the server and back up the database
 
 ```sh
-systemctl --user stop arbiter.service
-mkdir -p ~/.arbiter/pre-accounts-backup
-cp -p ~/.arbiter/arbiter.sqlite3* ~/.arbiter/pre-accounts-backup/   # or your DATABASE_PATH
+systemctl --user stop wardmast.service
+mkdir -p ~/.wardmast/pre-accounts-backup
+cp -p ~/.wardmast/arbiter.sqlite3* ~/.wardmast/pre-accounts-backup/   # or your DATABASE_PATH
 ```
 
 Stop the server because the migration removes the key from `worker_env`, and
@@ -180,7 +180,7 @@ successful apply.
 ### 6. Clean up the server environment
 
 There is nothing to switch on. The migration wrote backup rows, and those are
-the migration record the boot looks for. Remove from `~/.arbiter/arbiter.env`:
+the migration record the boot looks for. Remove from `~/.wardmast/wardmast.env`:
 
 - any `WARDMAST_PROVIDER_ACCOUNTS` line. It is no longer read, and the boot
   warns while it is there;
@@ -191,7 +191,7 @@ the migration record the boot looks for. Remove from `~/.arbiter/arbiter.env`:
 ### 7. Start the server
 
 ```sh
-systemctl --user start arbiter.service
+systemctl --user start wardmast.service
 ```
 
 ### 8. Verify
@@ -215,7 +215,7 @@ systemctl --user start arbiter.service
   `MissingCredentialError`:
 
   ```sh
-  journalctl --user-unit arbiter.service --since "10 min ago" | grep -i MissingCredentialError
+  journalctl --user-unit wardmast.service --since "10 min ago" | grep -i MissingCredentialError
   ```
 
   A hit names the workspace. Either migrate its credential (census, then
@@ -234,7 +234,7 @@ with running the previous release binary, since nothing on this release
 reads `worker_env` credentials. Stop the server and dry-run the restore first:
 
 ```sh
-systemctl --user stop arbiter.service
+systemctl --user stop wardmast.service
 $ARB eval 'Wardmast.Release.accounts_rollback(list?: true)'
 $ARB eval 'Wardmast.Release.accounts_rollback(migration_id: "<id from step 5>", dry_run?: true)'
 $ARB eval 'Wardmast.Release.accounts_rollback(migration_id: "<id from step 5>")'
@@ -255,8 +255,8 @@ The rollback leaves the `provider_accounts` / `provider_credentials` rows in
 place. Once every backup is restored the install has no migration record, and
 the boot reports it as carrying legacy credentials again.
 
-**Run the previous release.** Point `~/.arbiter/current` back at the previous
-release, set `WARDMAST_PROVIDER_ACCOUNTS=0` in `~/.arbiter/arbiter.env` (on
+**Run the previous release.** Point `~/.wardmast/current` back at the previous
+release, set `WARDMAST_PROVIDER_ACCOUNTS=0` in `~/.wardmast/wardmast.env` (on
 that release an unset value means `auto`, which resolves a migrated install
 on), and start the server. This release adds no schema migrations, so the
 binary rollback does not need a database restore. The last resort is the

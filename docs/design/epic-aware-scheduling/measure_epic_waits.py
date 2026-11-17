@@ -5,7 +5,7 @@ Read-only. Opens the database with SQLite's `mode=ro` URI, so it cannot
 write to the live file. To freeze the numbers, snapshot first with
 sqlite3's backup() and point the script at the copy:
 
-    python3 measure_epic_waits.py ~/.arbiter/arbiter.sqlite3 \
+    python3 measure_epic_waits.py ~/.wardmast/arbiter.sqlite3 \
         --as-of 2026-10-01T23:07:33Z --workspace bd
 
 Prints every table the design doc quotes in section 2:

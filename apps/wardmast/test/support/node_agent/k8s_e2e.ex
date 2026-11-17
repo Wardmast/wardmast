@@ -161,7 +161,7 @@ defmodule Wardmast.Test.K8sE2E do
 
   @doc """
   Create `arb-e2e-<random>` with Pod Security `restricted` enforced, a ResourceQuota, a
-  PriorityClass, a stand-in controller (a Deployment named `arbiter-controller` with
+  PriorityClass, a stand-in controller (a Deployment named `wardmast-controller` with
   `socat` listeners on 9443, 9444 and 9445, and its Service) and, with `policies: true`
   (the default), the four NetworkPolicies of the bootstrap manifest. Registers the
   cleanup with ExUnit. Returns `%{namespace:, priority_class:, controller_ip:,
@@ -185,7 +185,7 @@ defmodule Wardmast.Test.K8sE2E do
       ns,
       "rollout",
       "status",
-      "deployment/arbiter-controller",
+      "deployment/wardmast-controller",
       "--timeout=180s"
     ])
 
@@ -193,9 +193,9 @@ defmodule Wardmast.Test.K8sE2E do
       namespace: ns,
       priority_class: priority,
       service_ip:
-        jsonpath(env, ["-n", ns, "get", "service", "arbiter-controller"], ".spec.clusterIP"),
+        jsonpath(env, ["-n", ns, "get", "service", "wardmast-controller"], ".spec.clusterIP"),
       controller_uid:
-        jsonpath(env, ["-n", ns, "get", "deployment", "arbiter-controller"], ".metadata.uid"),
+        jsonpath(env, ["-n", ns, "get", "deployment", "wardmast-controller"], ".metadata.uid"),
       controller_ip:
         jsonpath(
           env,
@@ -277,15 +277,15 @@ defmodule Wardmast.Test.K8sE2E do
       )
 
     wanted_node = [
-      {"ServiceAccount", "arbiter-worker"},
-      {"ServiceAccount", "arbiter-controller"},
-      {"ConfigMap", "arbiter-ca"},
-      {"Service", "arbiter-controller"}
+      {"ServiceAccount", "wardmast-worker"},
+      {"ServiceAccount", "wardmast-controller"},
+      {"ConfigMap", "wardmast-ca"},
+      {"Service", "wardmast-controller"}
     ]
 
     bootstrap =
       Enum.flat_map(bootstrap, fn
-        %{"kind" => "PriorityClass", "metadata" => %{"name" => "arbiter-worker"}} = doc ->
+        %{"kind" => "PriorityClass", "metadata" => %{"name" => "wardmast-worker"}} = doc ->
           [put_in(doc, ["metadata", "name"], priority)]
 
         # The stand-in controller sets no class, so the controller's own is not made.
@@ -311,17 +311,17 @@ defmodule Wardmast.Test.K8sE2E do
   # canary's `controller_port` probe), and nothing else.
   defp controller_deployment(ns) do
     labels = %{
-      "app.kubernetes.io/name" => "arbiter-controller",
+      "app.kubernetes.io/name" => "wardmast-controller",
       "app.kubernetes.io/component" => "controller"
     }
 
     %{
       "apiVersion" => "apps/v1",
       "kind" => "Deployment",
-      "metadata" => %{"name" => "arbiter-controller", "namespace" => ns},
+      "metadata" => %{"name" => "wardmast-controller", "namespace" => ns},
       "spec" => %{
         "replicas" => 1,
-        "selector" => %{"matchLabels" => %{"app.kubernetes.io/name" => "arbiter-controller"}},
+        "selector" => %{"matchLabels" => %{"app.kubernetes.io/name" => "wardmast-controller"}},
         "template" => %{
           "metadata" => %{"labels" => labels},
           "spec" => %{
@@ -404,13 +404,13 @@ defmodule Wardmast.Test.K8sE2E do
   # Resolved at runtime (tests run with the app directory, `apps/wardmast`, as cwd): a
   # `__DIR__` literal would bake the build machine's checkout path into a module that
   # spawns processes, which `Wardmast.VersionTest` forbids.
-  @doc "The `charts/arbiter-node` directory."
+  @doc "The `charts/wardmast-node` directory."
   @spec chart_path() :: String.t()
-  def chart_path, do: Path.expand("../../charts/arbiter-node", File.cwd!())
+  def chart_path, do: Path.expand("../../charts/wardmast-node", File.cwd!())
 
   @doc """
   Like `namespace!/2`, but the namespace-level objects come from **installing the
-  `charts/arbiter-node` chart** (`mode=all`, release `e2e`) instead of from
+  `charts/wardmast-node` chart** (`mode=all`, release `e2e`) instead of from
   `InstallManifest`: PriorityClass, ResourceQuota, LimitRange, the four NetworkPolicies,
   ServiceAccounts, Role, ConfigMaps, Lease, Service and the controller Deployment.
 
@@ -475,9 +475,9 @@ defmodule Wardmast.Test.K8sE2E do
       namespace: ns,
       priority_class: priority,
       service_ip:
-        jsonpath(env, ["-n", ns, "get", "service", "arbiter-controller"], ".spec.clusterIP"),
+        jsonpath(env, ["-n", ns, "get", "service", "wardmast-controller"], ".spec.clusterIP"),
       controller_uid:
-        jsonpath(env, ["-n", ns, "get", "deployment", "arbiter-controller"], ".metadata.uid"),
+        jsonpath(env, ["-n", ns, "get", "deployment", "wardmast-controller"], ".metadata.uid"),
       controller_ip: running_controller_ip!(env, ns)
     }
   end
@@ -503,7 +503,7 @@ defmodule Wardmast.Test.K8sE2E do
         running_controller_ip!(env, ns, attempts - 1)
 
       true ->
-        raise "no Running arbiter-controller pod in #{ns} after 60s"
+        raise "no Running wardmast-controller pod in #{ns} after 60s"
     end
   end
 
@@ -542,7 +542,7 @@ defmodule Wardmast.Test.K8sE2E do
       ns,
       "patch",
       "deployment",
-      "arbiter-controller",
+      "wardmast-controller",
       "--type=json",
       "-p",
       patch
@@ -553,7 +553,7 @@ defmodule Wardmast.Test.K8sE2E do
       ns,
       "rollout",
       "status",
-      "deployment/arbiter-controller",
+      "deployment/wardmast-controller",
       "--timeout=180s"
     ])
   end

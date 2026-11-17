@@ -326,7 +326,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.Formatter do
     corrupt it, so nothing was changed and `current` still points at #{tag}.
     #{bullets(crossed)}
 
-    Stop the service yourself (`systemctl --user stop arbiter.service`), restore the backup \
+    Stop the service yourself (`systemctl --user stop wardmast.service`), restore the backup \
     recorded above over the database, then `arb server deploy --version #{prior_tag} --force`.\
     """
   end

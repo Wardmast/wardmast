@@ -7,7 +7,7 @@
 only. The ticket plan is in [§9](#9-proposed-child-tickets).
 
 All counts below were read **read-only** from the live install DB
-(`~/.arbiter/arbiter.sqlite3`, schema through migration `20260930130000`) on
+(`~/.wardmast/arbiter.sqlite3`, schema through migration `20260930130000`) on
 2026-10-01, and the source claims were checked against `main` at `80fad014`.
 The history-replay numbers in §3 come from a **throw-away prototype** (a
 scratch Python script over a `mode=ro` connection, not committed). It proves

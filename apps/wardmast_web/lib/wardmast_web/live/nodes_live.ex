@@ -1542,9 +1542,9 @@ defmodule WardmastWeb.NodesLive do
             name="namespace"
             id="add-node-namespace"
             label="Namespace"
-            hint="default arbiter-workers"
+            hint="default wardmast-workers"
             value={@add.form["namespace"].value}
-            placeholder="arbiter-workers"
+            placeholder="wardmast-workers"
           />
           <Forms.input
             name="max_workers"

@@ -54,7 +54,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
        **Atomically swap** the `<data-home>/current` symlink to the new release
        (symlink-then-rename, so readers never observe a missing/partial link).
     6. **Restart + health-check.** Bounce the service (via systemd when the
-       `arbiter.service` user unit is present) and poll `arb doctor` until
+       `wardmast.service` user unit is present) and poll `arb doctor` until
        green. Migrations run *here*, inside the new release's own boot — see
        "Migration ordering" below.
     7. **Auto-rollback on failure.** If the stack does not come back green
@@ -146,7 +146,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
 
   ## Layout
 
-  All deploy state lives under a data home (default `~/.arbiter`, override with
+  All deploy state lives under a data home (default `~/.wardmast`, override with
   `ARB_DATA_HOME`):
 
       <data-home>/
@@ -166,7 +166,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
     * `DATABASE_PATH` / `ARB_DEPLOY_BACKUP_RETAIN` — the database to back up,
       and how many snapshots to keep.
     * `GITHUB_TOKEN` — optional; authenticates the Releases API request.
-    * `ARB_DATA_HOME` — deploy root (default `~/.arbiter`).
+    * `ARB_DATA_HOME` — deploy root (default `~/.wardmast`).
     * `ARB_GITHUB_API` — Releases API base (default `https://api.github.com`).
 
   ## Exit codes
@@ -377,7 +377,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
       Status.phase("downloading")
       populate.(target_dir)
 
-      # Refresh the PATH in arbiter.env from the deploying shell before
+      # Refresh the PATH in wardmast.env from the deploying shell before
       # restarting the service. The EnvironmentFile= directive loads this file,
       # so any stale or test-corrupted PATH= line here would break every worker
       # spawn after the restart. Writing now ensures the service always boots
@@ -568,7 +568,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
         prior ->
           "\n\nExact rollback (re-point `current` at the previous release, then start):\n" <>
             "  ln -sfn #{prior} #{ctx.current_link}\n" <>
-            "  systemctl --user start arbiter.service" <> crossed_restore_note(ctx)
+            "  systemctl --user start wardmast.service" <> crossed_restore_note(ctx)
       end
 
     skipped =
@@ -941,21 +941,21 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
 
   # ---- env refresh --------------------------------------------------------
 
-  # Write the deploying shell's PATH into arbiter.env so the restarted service
+  # Write the deploying shell's PATH into wardmast.env so the restarted service
   # inherits a working PATH (one that finds claude, arb, mise shims, etc.).
   # Idempotent: uses the same read/merge/write logic as `arb install service`.
   defp refresh_env_path do
     home = ReleaseFiles.data_home()
 
     case InstallService.capture_path(home) do
-      :written -> log("Refreshed PATH in #{home}/arbiter.env.")
+      :written -> log("Refreshed PATH in #{home}/wardmast.env.")
       :skipped -> :ok
     end
   end
 
   # Verify that `claude` is resolvable after the deploy.  The check runs against
   # the PATH visible to the deploy process — the same PATH that was just written
-  # into arbiter.env — so a missing claude is caught before callers block on a
+  # into wardmast.env — so a missing claude is caught before callers block on a
   # failing dispatch.
   defp preflight_claude_path do
     case System.find_executable("claude") do

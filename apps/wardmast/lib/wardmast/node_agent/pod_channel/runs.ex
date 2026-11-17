@@ -25,7 +25,7 @@ defmodule Wardmast.NodeAgent.PodChannel.Runs do
     * `channel_record/2` and `adopt/3` carry a run across a controller restart (K15): the table
     is in memory, so a new controller starts with none, while the pod keeps running with the
     leaves `/boot` gave it. The record is what the controller writes on the pod
-    (`arbiter.dev/channel`, an annotation) at `assign`: the bridge names, the SHA-256
+    (`wardmast.dev/channel`, an annotation) at `assign`: the bridge names, the SHA-256
     fingerprint of each leaf and the deadline. All public: no key, no secret, no nonce.
     `adopt/3` rebuilds the entry from it; `authorize/4` then holds the adopted run to the
     same rules (a certificate whose fingerprint is the minted leaf's, a name from the record,

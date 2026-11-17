@@ -72,8 +72,8 @@ defmodule WardmastCli.Cmd.UpdateDeployTest do
 
         # ---- reused restart lifecycle ----
         # Simulate no systemd service installed — restart falls back to sh.
-        {"systemctl", ["--user", "cat", "arbiter.service"]} ->
-          {"No files found for arbiter.service.\n", 1}
+        {"systemctl", ["--user", "cat", "wardmast.service"]} ->
+          {"No files found for wardmast.service.\n", 1}
 
         {"lsof", _} ->
           if Process.get(:terminated), do: {"", 1}, else: {"4242\n", 0}
@@ -317,8 +317,8 @@ defmodule WardmastCli.Cmd.UpdateDeployTest do
           {"mix", ["wardmast.migrate"]} ->
             {~s({"migrations_applied":0,"status":"ok"}), 0}
 
-          {"systemctl", ["--user", "cat", "arbiter.service"]} ->
-            {"No files found for arbiter.service.\n", 1}
+          {"systemctl", ["--user", "cat", "wardmast.service"]} ->
+            {"No files found for wardmast.service.\n", 1}
 
           {"lsof", _} ->
             if Process.get(:terminated), do: {"", 1}, else: {"7\n", 0}

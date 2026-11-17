@@ -106,24 +106,24 @@ defmodule WardmastWeb.RemoteClusterTest do
   # What the install's manifests leave in the namespace (K9): the placeholders the
   # controller fills, its Service, Deployment and Lease, and a ResourceQuota.
   defp cluster! do
-    cluster = FakeK8sApi.start!(namespace: "arbiter-workers")
+    cluster = FakeK8sApi.start!(namespace: "wardmast-workers")
     FakeK8sApi.enforce_psa(cluster.api)
     api = cluster.api
     FakeK8sApi.set_clock(api, DateTime.utc_now())
 
-    for name <- ~w(arbiter-node-credential arbiter-controller-ca),
+    for name <- ~w(wardmast-node-credential wardmast-controller-ca),
         do: FakeK8sApi.put_secret(api, %{"metadata" => %{"name" => name}, "type" => "Opaque"})
 
-    FakeK8sApi.put_config_map(api, %{"metadata" => %{"name" => "arbiter-ca"}})
+    FakeK8sApi.put_config_map(api, %{"metadata" => %{"name" => "wardmast-ca"}})
 
     FakeK8sApi.put_service(api, %{
-      "metadata" => %{"name" => "arbiter-controller"},
+      "metadata" => %{"name" => "wardmast-controller"},
       "spec" => %{"clusterIP" => "127.0.0.1"}
     })
 
     FakeK8sApi.put_deployment(api, %{
       "metadata" => %{
-        "name" => "arbiter-controller",
+        "name" => "wardmast-controller",
         "uid" => "5f0c2a1e-1111-4222-8333-444455556666"
       },
       "spec" => %{
@@ -137,13 +137,13 @@ defmodule WardmastWeb.RemoteClusterTest do
       }
     })
 
-    FakeK8sApi.put_lease(api, %{"metadata" => %{"name" => "arbiter-controller"}, "spec" => %{}})
+    FakeK8sApi.put_lease(api, %{"metadata" => %{"name" => "wardmast-controller"}, "spec" => %{}})
     put_quota(api, %{})
 
     # The kubelet's part: a canary pod runs to completion with every probe closed but the
     # bridge; a worker pod stays as created (unscheduled) until a test moves it.
     FakeK8sApi.on_create(api, fn pod ->
-      if get_in(pod, ["metadata", "labels", "arbiter.dev/canary"]),
+      if get_in(pod, ["metadata", "labels", "wardmast.dev/canary"]),
         do:
           {Map.put(pod, "status", %{"phase" => "Succeeded"}),
            String.split(@all_closed, "\n", trim: true)},
@@ -157,7 +157,7 @@ defmodule WardmastWeb.RemoteClusterTest do
     hard = %{"pods" => "8", "requests.cpu" => "16", "requests.memory" => "64Gi"}
 
     FakeK8sApi.put_quota(api, %{
-      "metadata" => %{"name" => "arbiter-workers"},
+      "metadata" => %{"name" => "wardmast-workers"},
       "spec" => %{"hard" => hard},
       "status" => %{"hard" => hard, "used" => used}
     })
@@ -180,7 +180,7 @@ defmodule WardmastWeb.RemoteClusterTest do
            "ARB_K8S_SELF_UPGRADE" => "true",
            "KUBERNETES_SERVICE_HOST" => "10.43.0.1",
            "KUBERNETES_SERVICE_PORT" => "443",
-           "HOSTNAME" => "arbiter-controller-6d9c7-x2b4q"
+           "HOSTNAME" => "wardmast-controller-6d9c7-x2b4q"
          },
          app_config: [],
          node_home: ctx.home,
@@ -239,7 +239,7 @@ defmodule WardmastWeb.RemoteClusterTest do
       assert node.name == "k3s-e2e"
 
       # The credential lives in the cluster's Secret, and it is the one the node uses.
-      stored = FakeK8sApi.secret(ctx.api, "arbiter-node-credential")["data"]["credential"]
+      stored = FakeK8sApi.secret(ctx.api, "wardmast-node-credential")["data"]["credential"]
       assert "arbn_" <> _ = credential = Base.decode64!(stored)
       assert String.starts_with?(credential, "arbn_#{node_id}.")
 
@@ -253,7 +253,7 @@ defmodule WardmastWeb.RemoteClusterTest do
                "limits" => "pod",
                "upgrade" => "image",
                "self_upgrade" => true,
-               "namespace" => "arbiter-workers"
+               "namespace" => "wardmast-workers"
              } = snapshot.caps
 
       # The ConfigMap's max_concurrent is the node's ceiling, hence its effective cap.
@@ -546,7 +546,7 @@ defmodule WardmastWeb.RemoteClusterTest do
 
       wait_until(fn ->
         containers =
-          FakeK8sApi.deployment(ctx.api, "arbiter-controller")["spec"]["template"]["spec"][
+          FakeK8sApi.deployment(ctx.api, "wardmast-controller")["spec"]["template"]["spec"][
             "containers"
           ]
 

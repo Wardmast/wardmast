@@ -177,14 +177,14 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
 
       case {cmd, args} do
         # systemd unit present → restart delegates to systemctl.
-        {"systemctl", ["--user", "cat", "arbiter.service"]} ->
-          if systemd?, do: {"", 0}, else: {"Unit arbiter.service could not be found.", 1}
+        {"systemctl", ["--user", "cat", "wardmast.service"]} ->
+          if systemd?, do: {"", 0}, else: {"Unit wardmast.service could not be found.", 1}
 
-        {"systemctl", ["--user", "restart", "--no-block", "arbiter.service"]} ->
+        {"systemctl", ["--user", "restart", "--no-block", "wardmast.service"]} ->
           on_restart.()
           {"", 0}
 
-        {"systemctl", ["--user", "show", "arbiter.service" | _]} ->
+        {"systemctl", ["--user", "show", "wardmast.service" | _]} ->
           case Keyword.get(opts, :active_state) do
             nil -> {"", 0}
             state -> {"ActiveState=#{state}\n", 0}
@@ -319,7 +319,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       # Migrations are the new release's boot-time job (Wardmast.Boot.Migrator),
       # never a pre-swap eval against the still-running old server.
       refute_received {:cmd, _bin, ["eval", "Wardmast.Release.migrate"]}
-      assert_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "arbiter.service"]}
+      assert_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "wardmast.service"]}
     end
 
     test "exits 1 with the DOWN report and skips the CLI install when the unit stays down",
@@ -422,7 +422,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       assert out =~ "Already on release #{@vsn}"
       # Never touched migrate or restart.
       refute_received {:cmd, _bin, ["eval", "Wardmast.Release.migrate"]}
-      refute_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "arbiter.service"]}
+      refute_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "wardmast.service"]}
     end
   end
 
@@ -449,7 +449,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       assert File.exists?(Path.join(link_target, "bin/wardmast"))
 
       # Shares the install machinery with the GitHub flow — no separate swap.
-      assert_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "arbiter.service"]}
+      assert_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "wardmast.service"]}
     end
 
     test "retains a local tarball too, so a node can fetch exactly what was deployed (RW4)",
@@ -620,7 +620,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       # Nothing was migrated, swapped, or restarted.
       refute File.exists?(Path.join(home, "current"))
       refute_received {:cmd, _bin, ["eval", "Wardmast.Release.migrate"]}
-      refute_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "arbiter.service"]}
+      refute_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "wardmast.service"]}
     end
   end
 
@@ -778,7 +778,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       # current still points at the new release — nothing was rolled back.
       assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
       assert Path.basename(link_target) == @vsn
-      assert_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "arbiter.service"]}
+      assert_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "wardmast.service"]}
     end
 
     test "a prior release exists (planned-downtime deploy, e.g. a DB move): still does not roll back",
@@ -1017,7 +1017,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
                match?(["eval", "Wardmast.Release.migrate"], args)
              end)
 
-      assert {"systemctl", ["--user", "restart", "--no-block", "arbiter.service"]} in cmds
+      assert {"systemctl", ["--user", "restart", "--no-block", "wardmast.service"]} in cmds
     end
 
     test "non-systemd path orders stop → start with no migrate in between", %{home: home} do
@@ -1412,8 +1412,8 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
 
   # ---- PATH refresh -------------------------------------------------------
 
-  describe "PATH refresh in arbiter.env" do
-    test "deploy writes the deploying shell's PATH into arbiter.env", %{home: home} do
+  describe "PATH refresh in wardmast.env" do
+    test "deploy writes the deploying shell's PATH into wardmast.env", %{home: home} do
       tarball = release_tarball(@vsn)
       sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
       stub_release(@vsn, tarball, sha)
@@ -1430,18 +1430,18 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
 
       assert code == 0
 
-      env_file = Path.join(home, "arbiter.env")
+      env_file = Path.join(home, "wardmast.env")
       assert File.exists?(env_file)
       contents = File.read!(env_file)
       assert contents =~ "PATH=/deploy/shell/bin:/usr/bin"
     end
 
-    test "deploy overwrites a stale PATH in arbiter.env with the deploying shell's PATH", %{
+    test "deploy overwrites a stale PATH in wardmast.env with the deploying shell's PATH", %{
       home: home
     } do
-      # Pre-seed a corrupted arbiter.env (simulating test pollution or a
+      # Pre-seed a corrupted wardmast.env (simulating test pollution or a
       # previous bad deploy).
-      env_file = Path.join(home, "arbiter.env")
+      env_file = Path.join(home, "wardmast.env")
       File.write!(env_file, "GITHUB_TOKEN=tok\nPATH=/second/path:/usr/bin\n")
 
       tarball = release_tarball(@vsn)
@@ -1571,7 +1571,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       assert {:ok, payload} = Jason.decode(String.trim(out))
       path = payload["backup"]["path"]
       assert Path.dirname(path) == Path.join(home, "snapshots")
-      assert Path.basename(path) =~ ~r/\Aarbiter-pre-#{@vsn}-\d{8}T\d{6}Z\.sqlite3\z/
+      assert Path.basename(path) =~ ~r/\Awardmast-pre-#{@vsn}-\d{8}T\d{6}Z\.sqlite3\z/
       assert File.read!(path) == @magic <> "live-data"
       assert payload["backup"]["bytes"] == byte_size(@magic <> "live-data")
 
@@ -1596,7 +1596,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
 
       {out, _err, 0} = capture(fn -> ReleaseDeploy.run([]) end)
       assert out =~ "Database backup:"
-      assert out =~ "snapshots/arbiter-pre-#{@vsn}-"
+      assert out =~ "snapshots/wardmast-pre-#{@vsn}-"
     end
 
     test "no database yet (a fresh host) skips the backup and says so", %{home: home} do
@@ -1631,7 +1631,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       # Nothing swapped, nothing restarted, the database untouched.
       assert {:ok, link} = File.read_link(Path.join(home, "current"))
       assert link == prior
-      refute_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "arbiter.service"]}
+      refute_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "wardmast.service"]}
       assert read_db(home) == @magic <> "live-data"
 
       assert %{"state" => "failed", "tag" => @vsn, "message" => msg} = Status.read()
@@ -1660,7 +1660,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       assert read_db(home) == @magic <> "v0.0.2-data"
 
       # …but nothing was deleted: the migrated one is kept aside, named in the output.
-      [failed] = Path.wildcard(Path.join(home, "snapshots/arbiter-failed-#{@vsn}-*.sqlite3"))
+      [failed] = Path.wildcard(Path.join(home, "snapshots/wardmast-failed-#{@vsn}-*.sqlite3"))
       assert File.read!(failed) == @magic <> "migrated-by-new-release"
       assert out =~ failed
 
@@ -1672,12 +1672,12 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
 
       # Order: stop (database safe to touch) → restore → swap/restart.
       cmds = drain_cmds()
-      assert Enum.member?(cmds, {"systemctl", ["--user", "stop", "arbiter.service"]})
+      assert Enum.member?(cmds, {"systemctl", ["--user", "stop", "wardmast.service"]})
 
       restarts =
         Enum.filter(
           cmds,
-          &(&1 == {"systemctl", ["--user", "restart", "--no-block", "arbiter.service"]})
+          &(&1 == {"systemctl", ["--user", "restart", "--no-block", "wardmast.service"]})
         )
 
       assert length(restarts) == 2
@@ -1705,8 +1705,8 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       assert payload["rollback_refused"] == false
       assert payload["restored_database"] == true
       assert payload["crossed_migrations"] == [@m_new]
-      assert payload["backup_path"] =~ "arbiter-pre-#{@vsn}-"
-      assert payload["failed_database_path"] =~ "arbiter-failed-#{@vsn}-"
+      assert payload["backup_path"] =~ "wardmast-pre-#{@vsn}-"
+      assert payload["failed_database_path"] =~ "wardmast-failed-#{@vsn}-"
     end
 
     test "a failed release that adds no migrations rolls back WITHOUT touching the database",
@@ -1726,7 +1726,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       refute out =~ "Restored the database"
       # Restoring would throw those writes away for no schema benefit.
       assert read_db(home) == @magic <> "written-while-new-release-ran"
-      refute_received {:ran, "systemctl", ["--user", "stop", "arbiter.service"]}
+      refute_received {:ran, "systemctl", ["--user", "stop", "wardmast.service"]}
       assert %{"state" => "rolled_back", "restored_database" => false} = Status.read()
     end
 
@@ -1766,7 +1766,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
 
       assert out =~ "Refused to roll back"
       assert read_db(home) == @magic <> "old-release-still-writing"
-      refute_received {:ran, "systemctl", ["--user", "stop", "arbiter.service"]}
+      refute_received {:ran, "systemctl", ["--user", "stop", "wardmast.service"]}
     end
 
     test "a stop that fails leaves the database alone and refuses", %{home: home} do
@@ -1779,7 +1779,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       base = Process.get(:bd2_cmd_runner)
 
       Process.put(:bd2_cmd_runner, fn cmd, args, opts ->
-        if {cmd, args} == {"systemctl", ["--user", "stop", "arbiter.service"]},
+        if {cmd, args} == {"systemctl", ["--user", "stop", "wardmast.service"]},
           do: {"Failed to stop", 1},
           else: base.(cmd, args, opts)
       end)
@@ -1803,7 +1803,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       for i <- 1..4,
           do:
             File.write!(
-              Path.join(snapshots, "arbiter-pre-v0.0.#{i}-2026010#{i}T000000Z.sqlite3"),
+              Path.join(snapshots, "wardmast-pre-v0.0.#{i}-2026010#{i}T000000Z.sqlite3"),
               @magic
             )
 
@@ -1819,7 +1819,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       # snapshots themselves, and check no sidecar outlives its snapshot.
       names = Enum.filter(files, &String.ends_with?(&1, ".sqlite3"))
       assert length(names) == 2
-      assert Enum.any?(names, &String.contains?(&1, "arbiter-pre-#{@vsn}-"))
+      assert Enum.any?(names, &String.contains?(&1, "wardmast-pre-#{@vsn}-"))
 
       for sidecar <- files -- names do
         assert String.replace_suffix(sidecar, ".env-fingerprint.json", "") in names
@@ -1964,7 +1964,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
         end
       end)
 
-      File.write!(Path.join(home, "arbiter.env"), "GITHUB_TOKEN=#{@token}\n")
+      File.write!(Path.join(home, "wardmast.env"), "GITHUB_TOKEN=#{@token}\n")
 
       {printed, 1} = everything_printed(fn -> ReleaseDeploy.run([]) end)
 

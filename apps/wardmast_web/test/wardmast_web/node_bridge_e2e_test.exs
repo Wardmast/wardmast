@@ -117,7 +117,7 @@ defmodule WardmastWeb.NodeBridgeE2ETest do
        ip: {127, 0, 0, 1},
        bridge_port: 0,
        boot_port: 0,
-       server_names: ["arbiter-controller", "localhost"],
+       server_names: ["wardmast-controller", "localhost"],
        server_ips: [{127, 0, 0, 1}]}
     )
 

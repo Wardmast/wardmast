@@ -1,15 +1,15 @@
-{{- if include "arbiter-node.node" . }}
+{{- if include "wardmast-node.node" . }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: arbiter-controller
+  name: wardmast-controller
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "arbiter-node.labels" . | nindent 4 }}
+    {{- include "wardmast-node.labels" . | nindent 4 }}
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/name: arbiter-controller
+    app.kubernetes.io/name: wardmast-controller
   ports:
     - name: bridge
       port: 9443

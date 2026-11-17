@@ -869,7 +869,7 @@ defmodule Wardmast.Tasks.WorkspaceTest do
     test "accepts source/ref/registry/credentials_ref/seed per repo, the rest workspace-wide" do
       image = %{
         "source" => "prebuilt",
-        "ref" => "registry.gitlab.com/vstim/app/arbiter-worker:main",
+        "ref" => "registry.gitlab.com/vstim/app/wardmast-worker:main",
         "registry" => "registry.gitlab.com/vstim/app/arbiter",
         "credentials_ref" => "secret:GITLAB_REGISTRY",
         "seed" => "image"
@@ -883,7 +883,7 @@ defmodule Wardmast.Tasks.WorkspaceTest do
       assert {:ok, _} =
                image_ws(%{
                  "source" => "containerfile",
-                 "registry" => "ghcr.io/ryan/arbiter-worker"
+                 "registry" => "ghcr.io/ryan/wardmast-worker"
                })
 
       assert {:ok, _} = image_ws(%{})

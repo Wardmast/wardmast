@@ -84,9 +84,9 @@ defmodule WardmastWeb.Api.ReleaseDeployControllerTest do
 
       body = json_response(post(operator_conn(), "/api/release/deploy", %{}), 202)
 
-      assert %{"tag" => "v99.0.0", "unit" => "arbiter-deploy-v99.0.0"} = body
+      assert %{"tag" => "v99.0.0", "unit" => "wardmast-deploy-v99.0.0"} = body
       assert_received {:cmd, "systemd-run", args}
-      assert "--unit=arbiter-deploy-v99.0.0" in args
+      assert "--unit=wardmast-deploy-v99.0.0" in args
       assert Enum.take(args, -5) == ["server", "deploy", "--version", "v99.0.0", "--json"]
     end
 

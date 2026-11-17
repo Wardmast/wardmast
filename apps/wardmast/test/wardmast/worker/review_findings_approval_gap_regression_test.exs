@@ -15,13 +15,13 @@ defmodule Wardmast.Worker.ReviewFindingsApprovalGapRegressionTest do
   tolerance. On bd-6d3h8m's round-1 review, item 3's three explanatory
   sub-bullets were split into three extra, severity-less (so fail-closed
   BLOCKING) findings; one of them (a bullet reading "The real round-3 reviews
-  … read-only from `~/.arbiter/arbiter.sqlite3`") cited a path no code
+  … read-only from `~/.wardmast/arbiter.sqlite3`") cited a path no code
   revision could ever "touch", tripping `approval_gap/3`'s mechanical
   `unproven?` backstop even though the round-2 reviewer had genuinely
   dispositioned everything real. The fix restricts `@item` to strict column 0.
 
   These fixtures are the real `review_gate_rounds.findings` text for both
-  incidents, read from the live DB (`~/.arbiter/arbiter.sqlite3`,
+  incidents, read from the live DB (`~/.wardmast/arbiter.sqlite3`,
   `review_gate_rounds` where `task_id` is `bd-6d3h8m` / `bd-9inpfa`).
   """
 

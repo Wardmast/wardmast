@@ -1,6 +1,6 @@
 defmodule WardmastCli.Cmd.InstallService.Unit do
   @moduledoc """
-  Builds and writes the `arbiter.service` systemd unit content for
+  Builds and writes the `wardmast.service` systemd unit content for
   `arb install-service`, and the `.run-server.sh` launcher a dev-mode
   checkout's unit execs into.
   """
@@ -9,8 +9,8 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
 
   @run_server_script_name ".run-server.sh"
 
-  @unit_name "arbiter.service"
-  @logrotate_timer_name "arbiter-logrotate.timer"
+  @unit_name "wardmast.service"
+  @logrotate_timer_name "wardmast-logrotate.timer"
 
   @doc "The systemd unit file name, shared across install/uninstall/status/logs."
   @spec unit_name() :: String.t()
@@ -21,15 +21,15 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
   def logrotate_timer_name, do: @logrotate_timer_name
 
   @doc """
-  The arbiter data home directory. Defaults to `~/.arbiter`; tests override
+  The arbiter data home directory. Defaults to `~/.wardmast`; tests override
   via the `:bd2_arbiter_home` process-dict seam so they write to a tmp dir
-  rather than the real `~/.arbiter/arbiter.env`.
+  rather than the real `~/.wardmast/wardmast.env`.
   """
   @spec arbiter_home_path() :: String.t()
   def arbiter_home_path do
     case Process.get(:bd2_arbiter_home) do
       dir when is_binary(dir) -> dir
-      _ -> Path.join(System.user_home!(), ".arbiter")
+      _ -> Path.join(System.user_home!(), ".wardmast")
     end
   end
 
@@ -80,12 +80,12 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
     """
     [Unit]
     Description=Wardmast stack (Postgres + Phoenix)
-    Documentation=https://github.com/ryanrborn/arbiter
+    Documentation=https://github.com/wardmast/wardmast
     #{ordering}
     [Service]
     Type=exec
     WorkingDirectory=#{arbiter_home}
-    EnvironmentFile=-#{Path.join(arbiter_home, "arbiter.env")}
+    EnvironmentFile=-#{Path.join(arbiter_home, "wardmast.env")}
     #{release_environment_lines()}
     #{log_directives}ExecStart=#{release_bin} start
     Restart=on-failure
@@ -97,7 +97,7 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
   end
 
   # Dev-mode unit: same shape as the release unit (Type=exec, EnvironmentFile
-  # still `arbiter_home/arbiter.env` so captured secrets/PATH keep working
+  # still `arbiter_home/wardmast.env` so captured secrets/PATH keep working
   # unchanged), but ExecStart runs the source checkout via `.run-server.sh`
   # instead of the release binary, WorkingDirectory is the checkout root (not
   # arbiter_home), and ARB_HOME is forwarded so any subprocess resolves the
@@ -115,12 +115,12 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
     """
     [Unit]
     Description=Wardmast stack (Postgres + Phoenix) [dev-mode source checkout]
-    Documentation=https://github.com/ryanrborn/arbiter
+    Documentation=https://github.com/wardmast/wardmast
     #{ordering}
     [Service]
     Type=exec
     WorkingDirectory=#{root}
-    EnvironmentFile=-#{Path.join(arbiter_home, "arbiter.env")}
+    EnvironmentFile=-#{Path.join(arbiter_home, "wardmast.env")}
     Environment=ARB_HOME=#{root}
     #{release_environment_lines()}
     #{log_directives}ExecStart=/bin/sh #{run_server_sh}
@@ -168,7 +168,7 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
   # readable without sudo or systemd-journal membership. System installs keep
   # journald (they have root and /var/log/journal is typically persistent).
   defp unit_log_directives(:user, arbiter_home) do
-    log_file = Path.join([arbiter_home, "log", "arbiter.log"])
+    log_file = Path.join([arbiter_home, "log", "wardmast.log"])
     "StandardOutput=append:#{log_file}\nStandardError=append:#{log_file}\n"
   end
 
@@ -183,7 +183,7 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
   prefers `root/.run-server.sh` whenever it exists, falling back to an
   inline launcher otherwise. So it must stand on its own as a valid
   launcher for `arb start`/`arb restart` too, not just as an `ExecStart=`
-  target — including sourcing `.arbiter.env` itself (see below).
+  target — including sourcing `.wardmast.env` itself (see below).
   """
   @spec ensure_run_server_script(String.t()) :: :ok
   def ensure_run_server_script(root) do
@@ -204,10 +204,10 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
   end
 
   # `EnvironmentFile=` covers the captured secrets/PATH (see EnvFile) when run
-  # under systemd, but not the checkout's own `.arbiter.env` (holds
+  # under systemd, but not the checkout's own `.wardmast.env` (holds
   # SECRET_KEY_BASE, DATABASE_PATH, ARBITER_CLOAK_KEY — see .gitignore) — and
   # this script also runs standalone from `arb start` with no EnvironmentFile
-  # at all. So it sources `.arbiter.env` itself, same as the hand-written
+  # at all. So it sources `.wardmast.env` itself, same as the hand-written
   # launcher it's modeled on. Every hop uses `exec` (process-image
   # replacement, not fork) so the PID systemd tracks becomes, via mix's own
   # launcher doing the same, the actual BEAM VM PID.
@@ -216,9 +216,9 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
     #!/bin/sh
     set -e
     cd "$(dirname "$0")"
-    if [ -f .arbiter.env ]; then
+    if [ -f .wardmast.env ]; then
       set -a
-      . ./.arbiter.env
+      . ./.wardmast.env
       set +a
     fi
     exec mix phx.server

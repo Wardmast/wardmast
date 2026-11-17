@@ -7,7 +7,7 @@ defmodule Wardmast.NodeAgent.K8s.PodConfigTest do
 
   test "defaults are the design's §4.1 values" do
     assert {:ok, cfg} = PodConfig.normalize(config(%{}))
-    assert cfg.namespace == "arbiter-workers"
+    assert cfg.namespace == "wardmast-workers"
     # the container limit bounds the runaway write: work + tmp (KH2, §20.2)
     assert cfg.worker["limits"] == %{
              "cpu" => "2",
@@ -23,7 +23,7 @@ defmodule Wardmast.NodeAgent.K8s.PodConfigTest do
 
     assert cfg.worker["work_size_limit"] == "8Gi"
     assert cfg.worker["tmp_size_limit"] == "1Gi"
-    assert cfg.placement["priority_class"] == "arbiter-worker"
+    assert cfg.placement["priority_class"] == "wardmast-worker"
     assert cfg.timeouts["grace_s"] == 120
     assert cfg.snapshot_interval_s == 300
   end

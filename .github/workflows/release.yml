@@ -258,7 +258,7 @@ jobs:
 
   publish-oci:
     name: Publish controller image, chart and worker base to GHCR
-    # KH7 (OD6): the controller image, the arbiter-node chart and the worker base are
+    # KH7 (OD6): the controller image, the wardmast-node chart and the worker base are
     # public artefacts of a tagged release. Optional cosign signing is behind the
     # `sign` dispatch input or the repository variable RELEASE_COSIGN=true; it is never
     # a gate. Operator checks after the first release: the package visibility on the
@@ -291,10 +291,10 @@ jobs:
           # leading v: the chart's image tag defaults to its appVersion.
           VERSION="${TAG#v}"
           {
-            echo "CONTROLLER=ghcr.io/${OWNER}/arbiter-controller"
-            echo "WORKER_BASE=ghcr.io/${OWNER}/arbiter-worker-base"
+            echo "CONTROLLER=ghcr.io/${OWNER}/wardmast-controller"
+            echo "WORKER_BASE=ghcr.io/${OWNER}/wardmast-worker-base"
             echo "CHARTS=oci://ghcr.io/${OWNER}/charts"
-            echo "CHART_REPO=ghcr.io/${OWNER}/charts/arbiter-node"
+            echo "CHART_REPO=ghcr.io/${OWNER}/charts/wardmast-node"
             echo "VERSION=${VERSION}"
             echo "BASE_HASH=$(tr -d '[:space:]' < dist/worker-base.hash)"
             echo "BASE_IMAGE=$(grep -m1 '^FROM ' dist/Containerfile.controller | cut -d' ' -f2)"
@@ -367,9 +367,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          helm package charts/arbiter-node --version "${VERSION}" --app-version "${VERSION}" --destination dist
+          helm package charts/wardmast-node --version "${VERSION}" --app-version "${VERSION}" --destination dist
           echo "${GH_TOKEN}" | helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
-          helm push "dist/arbiter-node-${VERSION}.tgz" "${CHARTS}" 2>&1 | tee "${RUNNER_TEMP}/helm-push.log"
+          helm push "dist/wardmast-node-${VERSION}.tgz" "${CHARTS}" 2>&1 | tee "${RUNNER_TEMP}/helm-push.log"
           DIGEST="$(sed -n 's/^Digest: //p' "${RUNNER_TEMP}/helm-push.log")"
           test -n "${DIGEST}" || { echo "helm push printed no digest" >&2; exit 1; }
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
@@ -394,7 +394,7 @@ jobs:
             echo "### GHCR artefacts for ${TAG}"
             echo "- controller: \`${CONTROLLER}:${VERSION}@${{ steps.controller.outputs.digest }}\`"
             echo "- worker base: \`${WORKER_BASE}:${BASE_HASH}@${{ steps.base.outputs.digest }}\`"
-            echo "- chart: \`${CHARTS}/arbiter-node:${VERSION}@${{ steps.chart.outputs.digest }}\`"
+            echo "- chart: \`${CHARTS}/wardmast-node:${VERSION}@${{ steps.chart.outputs.digest }}\`"
             echo "- cosign: ${SIGN}"
             echo
             echo "First release only: check the three packages are public (Package settings, Change visibility)."

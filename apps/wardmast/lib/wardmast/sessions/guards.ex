@@ -93,7 +93,7 @@ defmodule Wardmast.Sessions.Guards do
 
     if in_window >= limit do
       message =
-        "refusing to restart arbiter: #{in_window} restart(s) already requested from this " <>
+        "refusing to restart wardmast: #{in_window} restart(s) already requested from this " <>
           "session in the last #{window}s, limit is #{limit} (§10.1 restart recursion)"
 
       Logger.warning(message)

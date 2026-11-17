@@ -5,7 +5,7 @@ defmodule Wardmast.Worker.MemoryScope.Diagnosis do
   when one of its processes is OOM-killed?
 
   The question the incident turned on is the second one. With the default
-  `OOMPolicy=stop`, the kernel killing *any* process in `arbiter.service`'s
+  `OOMPolicy=stop`, the kernel killing *any* process in `wardmast.service`'s
   cgroup made systemd stop the whole service. The cap (`Wardmast.Worker.MemoryScope`)
   moves every worker out of that cgroup; `OOMPolicy=continue` is the backstop for
   whatever still lives in it.
@@ -46,7 +46,7 @@ defmodule Wardmast.Worker.MemoryScope.Diagnosis do
 
   @doc """
   The service unit this VM runs in, from its cgroup path:
-  `%{name: "arbiter.service", manager: :user | :system}`, or `nil` when it is not
+  `%{name: "wardmast.service", manager: :user | :system}`, or `nil` when it is not
   a systemd service (a shell-launched `mix phx.server`, a container).
   """
   @spec service_unit(keyword()) :: %{name: String.t(), manager: :user | :system} | nil
@@ -96,8 +96,8 @@ defmodule Wardmast.Worker.MemoryScope.Diagnosis do
     end)
   end
 
-  # The innermost *.service component: `…/app.slice/arbiter.service` (and, if a
-  # unit ever nests a sub-cgroup, `…/arbiter.service/worker`). The user manager
+  # The innermost *.service component: `…/app.slice/wardmast.service` (and, if a
+  # unit ever nests a sub-cgroup, `…/wardmast.service/worker`). The user manager
   # (`user@1000.service`) is a service too, but never the answer: a process that
   # sits directly in it is not Wardmast's unit.
   defp service_name(path) do

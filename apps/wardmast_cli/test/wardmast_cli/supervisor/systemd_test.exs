@@ -22,11 +22,11 @@ defmodule WardmastCli.Supervisor.SystemdTest do
     test "exit 0 is :managed" do
       stub(fn _, _, _ -> {"", 0} end)
       assert Systemd.service_state() == :managed
-      assert_received {:cmd, "systemctl", ["--user", "cat", "arbiter.service"]}
+      assert_received {:cmd, "systemctl", ["--user", "cat", "wardmast.service"]}
     end
 
     test "a not-found message is :not_found" do
-      stub(fn _, _, _ -> {"No files found for arbiter.service.", 1} end)
+      stub(fn _, _, _ -> {"No files found for wardmast.service.", 1} end)
       assert Systemd.service_state() == :not_found
     end
 
@@ -47,7 +47,7 @@ defmodule WardmastCli.Supervisor.SystemdTest do
     test "ok on exit 0, error text otherwise" do
       stub(fn _, _, _ -> {"", 0} end)
       assert Systemd.stop_service() == :ok
-      assert_received {:cmd, "systemctl", ["--user", "stop", "arbiter.service"]}
+      assert_received {:cmd, "systemctl", ["--user", "stop", "wardmast.service"]}
 
       stub(fn _, _, _ -> {"boom\n", 5} end)
       assert Systemd.stop_service() == {:error, "systemctl stop exited 5: boom"}
@@ -63,13 +63,14 @@ defmodule WardmastCli.Supervisor.SystemdTest do
     test "enqueues a non-blocking restart" do
       stub(fn _, _, _ -> {"", 0} end)
       assert Systemd.restart_service() == :ok
-      assert_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "arbiter.service"]}
+      assert_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "wardmast.service"]}
     end
 
     test "failure carries the die title and detail" do
       stub(fn _, _, _ -> {"nope\n", 1} end)
 
-      assert {:error, "systemctl --user restart arbiter.service failed (exit 1)", "Output:\nnope"} =
+      assert {:error, "systemctl --user restart wardmast.service failed (exit 1)",
+              "Output:\nnope"} =
                Systemd.restart_service()
     end
 
@@ -90,7 +91,7 @@ defmodule WardmastCli.Supervisor.SystemdTest do
                        [
                          "--user",
                          "show",
-                         "arbiter.service",
+                         "wardmast.service",
                          "-p",
                          "ActiveState",
                          "-p",
@@ -112,7 +113,7 @@ defmodule WardmastCli.Supervisor.SystemdTest do
     stub(fn _, _, _ -> {"", 0} end)
     assert Systemd.recover_stuck_service() == :ok
     assert_received {:cmd, "systemctl", ["--user", "daemon-reexec"]}
-    assert_received {:cmd, "systemctl", ["--user", "start", "--no-block", "arbiter.service"]}
+    assert_received {:cmd, "systemctl", ["--user", "start", "--no-block", "wardmast.service"]}
   end
 
   test "list_scopes/1 lists user units matching the prefix" do
@@ -150,9 +151,9 @@ defmodule WardmastCli.Supervisor.SystemdTest do
     end
 
     test "status_cmd/logs_cmd are scope-aware" do
-      assert Systemd.status_cmd(:user) == "systemctl --user status arbiter.service"
-      assert Systemd.status_cmd(:system) == "systemctl status arbiter.service"
-      assert Systemd.logs_cmd(:system) == "journalctl -u arbiter.service -f"
+      assert Systemd.status_cmd(:user) == "systemctl --user status wardmast.service"
+      assert Systemd.status_cmd(:system) == "systemctl status wardmast.service"
+      assert Systemd.logs_cmd(:system) == "journalctl -u wardmast.service -f"
       assert "tail -f " <> _ = Systemd.logs_cmd(:user)
     end
   end

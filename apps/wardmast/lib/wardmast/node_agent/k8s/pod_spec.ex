@@ -69,12 +69,12 @@ defmodule Wardmast.NodeAgent.K8s.PodSpec do
   alias Wardmast.Worker.TestServices
 
   @uid 10_001
-  @service_account "arbiter-worker"
-  @owner_name "arbiter-controller"
-  @ca_configmap "arbiter-ca"
+  @service_account "wardmast-worker"
+  @owner_name "wardmast-controller"
+  @ca_configmap "wardmast-ca"
   @seed_root "/arb/work"
   @run_dir "/run/arb"
-  @events_annotation "arbiter.dev/events"
+  @events_annotation "wardmast.dev/events"
   @ca_dir "/etc/arb/ca"
   @service_tmpfs_size "256Mi"
   @run_size "64Mi"
@@ -241,18 +241,18 @@ defmodule Wardmast.NodeAgent.K8s.PodSpec do
 
   defp labels(spec, cfg) do
     with :ok <- install(spec.install, cfg),
-         {:ok, run} <- label_value("arbiter.dev/run", spec.run),
+         {:ok, run} <- label_value("wardmast.dev/run", spec.run),
          {:ok, task} <- task_label(spec.task),
          {:ok, extra} <- extra_labels(spec.labels) do
       controller =
         %{
-          "app.kubernetes.io/name" => "arbiter-worker",
+          "app.kubernetes.io/name" => "wardmast-worker",
           "app.kubernetes.io/component" => "worker",
-          "arbiter.dev/install" => cfg.install_id,
-          "arbiter.dev/node" => cfg.node_id,
-          "arbiter.dev/run" => run
+          "wardmast.dev/install" => cfg.install_id,
+          "wardmast.dev/node" => cfg.node_id,
+          "wardmast.dev/run" => run
         }
-        |> then(&if(task, do: Map.put(&1, "arbiter.dev/task", task), else: &1))
+        |> then(&if(task, do: Map.put(&1, "wardmast.dev/task", task), else: &1))
 
       {:ok, Map.merge(extra, controller)}
     end
@@ -274,13 +274,13 @@ defmodule Wardmast.NodeAgent.K8s.PodSpec do
   defp task_label(nil), do: {:ok, nil}
 
   defp task_label(task) when is_binary(task) do
-    case label_value("arbiter.dev/task", task) do
+    case label_value("wardmast.dev/task", task) do
       {:ok, _} = ok -> ok
-      _ -> label_value("arbiter.dev/task", safe_label(task))
+      _ -> label_value("wardmast.dev/task", safe_label(task))
     end
   end
 
-  defp task_label(_), do: bad_spec({:bad_label, "arbiter.dev/task"})
+  defp task_label(_), do: bad_spec({:bad_label, "wardmast.dev/task"})
 
   defp safe_label(value) do
     value
@@ -292,7 +292,7 @@ defmodule Wardmast.NodeAgent.K8s.PodSpec do
   end
 
   defp annotations(%{task: task, labels: labels}) when is_binary(task) do
-    if labels["arbiter.dev/task"] == task, do: %{}, else: %{"arbiter.dev/task" => task}
+    if labels["wardmast.dev/task"] == task, do: %{}, else: %{"wardmast.dev/task" => task}
   end
 
   defp annotations(_run), do: %{}
@@ -671,7 +671,8 @@ defmodule Wardmast.NodeAgent.K8s.PodSpec do
 
     if spread["enabled"] do
       selector = %{
-        "matchLabels" => Map.take(run.labels, ["app.kubernetes.io/component", "arbiter.dev/node"])
+        "matchLabels" =>
+          Map.take(run.labels, ["app.kubernetes.io/component", "wardmast.dev/node"])
       }
 
       for key <- spread["topology_keys"] do

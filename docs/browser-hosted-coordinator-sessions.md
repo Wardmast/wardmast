@@ -28,7 +28,7 @@ Three empirical results drive the design (§4.2, §8.2, §7.2 for full commands 
 observations):
 
 1. **Restart survival is a cgroup problem, not a process-parentage problem.**
-   `arbiter.service` sets no `KillMode`, so systemd's default `control-group`
+   `wardmast.service` sets no `KillMode`, so systemd's default `control-group`
    applies and kills *everything in the unit's cgroup* on restart — double-forking
    does not escape it. Measured: a tmux server spawned as a plain child of a
    stand-in service **died** on `systemctl --user restart`; an identical one
@@ -115,7 +115,7 @@ anyway and rejects it on those grounds.
 ## 3. Architecture
 
 ```
-  browser (xterm.js)                    BEAM — arbiter.service
+  browser (xterm.js)                    BEAM — wardmast.service
  ┌──────────────────────┐             ┌──────────────────────────────────┐
  │ SessionDockLive      │  Phoenix    │ SessionRegistry  (Registry)      │
  │  ├ xterm + canvas    │◄─ Channel ─►│ SessionAttach    (GenServer/sess)│
@@ -144,7 +144,7 @@ HUD into the dock, which is the sticky `SessionDockLive` present on every page �
 see §6.5. The channel below it is unchanged.
 
 The load-bearing property is the **restart boundary**: everything below it lives
-in a cgroup that is a *sibling* of `arbiter.service`, so `systemctl --user restart
+in a cgroup that is a *sibling* of `wardmast.service`, so `systemctl --user restart
 arbiter` cannot reach it. Arbiter holds no handle to the PTY that matters — on
 reboot it re-discovers sessions by listing scope units and tmux sockets.
 
@@ -156,7 +156,7 @@ The instinct is "a PTY owned by the supervision tree dies with the BEAM, so
 double-fork it away". That instinct is **wrong on this host**, and the spike was
 worth running precisely because it disproves the obvious answer.
 
-`arbiter.service` is `Type=exec` and sets **no `KillMode`**, so the systemd default
+`wardmast.service` is `Type=exec` and sets **no `KillMode`**, so the systemd default
 `KillMode=control-group` applies. On restart systemd signals *every process in the
 unit's cgroup*. Reparenting to PID 1 does not move a process out of a cgroup —
 cgroup membership is inherited across `fork()` and preserved across `setsid()`.
@@ -168,7 +168,7 @@ session means: in its own unit.
 ### 4.2 Spike — commands run and what was observed
 
 Run 2026-09-13 against a throwaway transient unit standing in for
-`arbiter.service` (same user manager, same default `KillMode`, no blast radius on
+`wardmast.service` (same user manager, same default `KillMode`, no blast radius on
 the live coordinator). Predictions were recorded before running.
 
 **Setup** — one stand-in service spawning two PTYs, one each way:
@@ -249,7 +249,7 @@ tmux still serving: coord: 1 windows
 The session outlives arbiter indefinitely. See §4.6.
 
 Teardown was by exact unit and socket name (`systemctl --user stop <unit>`,
-`tmux -S <sock> kill-server`); `systemctl --user is-active arbiter.service`
+`tmux -S <sock> kill-server`); `systemctl --user is-active wardmast.service`
 confirmed `active` afterwards.
 
 **This whole section is now an automated test.** Phase 2 (bd-b95w36) turned
@@ -291,7 +291,7 @@ is no supervision link to sever.
 
 | Alternative | Why it loses |
 |---|---|
-| **In-BEAM PTY (`:erlexec`, `expty`)** | Fatal on the hard requirement. The PTY master is a BEAM-owned fd; when the BEAM exits the master closes, the slave gets `SIGHUP`, and the session dies. A coordinator that restarts arbiter would kill itself mid-restart — the exact scenario decision 1 forbids, and one that has occurred twice in one day in practice. `:erlexec`'s OS-level middleman does not help: it is spawned by the BEAM, lives in `arbiter.service`'s cgroup, and §4.2 shows that cgroup is cleared on restart. Also: neither is in `mix.lock`, both add a NIF/port-driver dependency, and `expty` would put a C NIF in the path of the operator's primary interface. |
+| **In-BEAM PTY (`:erlexec`, `expty`)** | Fatal on the hard requirement. The PTY master is a BEAM-owned fd; when the BEAM exits the master closes, the slave gets `SIGHUP`, and the session dies. A coordinator that restarts arbiter would kill itself mid-restart — the exact scenario decision 1 forbids, and one that has occurred twice in one day in practice. `:erlexec`'s OS-level middleman does not help: it is spawned by the BEAM, lives in `wardmast.service`'s cgroup, and §4.2 shows that cgroup is cleared on restart. Also: neither is in `mix.lock`, both add a NIF/port-driver dependency, and `expty` would put a C NIF in the path of the operator's primary interface. |
 | **Detachable multiplexer that is *not* in its own unit** (`tmux`/`dtach`/`abduco` spawned as a plain child) | This is variant A, and it was **measured dead** (§4.2). It is the intuitive answer and it is wrong. Worth stating loudly because "tmux detaches, so it survives" is exactly the reasoning a reviewer would accept without testing. `dtach`/`abduco` additionally are not installed. |
 | **A separate long-lived daemon** (one `arbiter-ptyd` unit hosting all sessions) | Survives restarts, but re-creates every problem tmux already solved — PTY allocation, scrollback ring, resize, multi-client attach, a wire protocol — as new code on the critical path of the operator's primary interface. It also makes the blast radius *worse*: one daemon crash takes down every session, whereas one scope per session is independently faulty. Its only real advantage (a stable supervision point) is obtainable by enumerating scope units. |
 | **A per-session `.service` file written to `~/.config/systemd/user/`** | Works, and is close to the recommendation, but persists state on disk that must be garbage-collected, requires `daemon-reload` per session, and survives reboot in a way that resurrects dead sessions. `--scope` is transient: it exists exactly as long as the processes in it. |
@@ -371,10 +371,10 @@ Third door, for when the operator is off the LAN entirely: Remote Control (§8).
 ### 4.8 Status — phase 1 shipped (bd-bpt0ag, #1682)
 
 The session lifecycle core is implemented and the §4.1 mechanism is now
-measured from inside `arbiter.service` itself, not just from a stand-in:
+measured from inside `wardmast.service` itself, not just from a stand-in:
 
 ```
-spawner (BEAM)   …/user@1000.service/app.slice/arbiter.service
+spawner (BEAM)   …/user@1000.service/app.slice/wardmast.service
 tmux (pid …)     …/user@1000.service/app.slice/arb-session-<uuid>.scope
 ```
 
@@ -417,9 +417,9 @@ Control, and the §4.6 idle deadline / dead-man's switch.
 *consequence*, because it launches from the ExUnit BEAM's own cgroup and
 nothing ever restarts that. Phase 2 closes that gap:
 `apps/wardmast/test/integration/session_restart_survival_test.exs` brings up a
-throwaway systemd **user service** standing in for `arbiter.service` — same
+throwaway systemd **user service** standing in for `wardmast.service` — same
 user manager, same `KillMode` (both set it by omission, so the default
-`control-group` applies; the test reads `arbiter.service`'s own value back and
+`control-group` applies; the test reads `wardmast.service`'s own value back and
 asserts they match), no blast radius on the live coordinator — launches a
 session from inside it through the real `Wardmast.Sessions.launch/1`, and
 restarts it for real.
@@ -472,7 +472,7 @@ scripts/session-restart-survival.sh          # --log FILE to capture output
 
 which checks the preconditions, runs the test from `apps/wardmast` (an umbrella
 `mix test <path>` at the root is not scoped to one app), and re-checks
-`arbiter.service`'s state afterwards.
+`wardmast.service`'s state afterwards.
 
 ### 4.10 Status — phase 10 shipped: orphan reaping + CLI fallback (bd-3qkbch)
 
@@ -718,7 +718,7 @@ having an opinion.
 
 **5. The client must reconnect on a *clean* close — phase 5 needs this line.**
 `phoenix.js` deliberately does not reconnect after WebSocket close code `1000`
-(normal closure), and a graceful `systemctl --user restart arbiter` produces
+(normal closure), and a graceful `systemctl --user restart wardmast` produces
 exactly that: Bandit closes every socket with 1000 on shutdown before the BEAM
 exits. For a terminal client that is the wrong reading. The session *outlives*
 the server by design (§4.3), so a clean server close means "back shortly", not
@@ -786,7 +786,7 @@ RESULT: PASS — frames=3 bytes=55 seq=55 reconnects=1 gaps=0 duplicates=0
 ```
 
 That script is also the instrument for AC 8 on the live host: point it at a
-real session, `systemctl --user restart arbiter`, and read the same summary
+real session, `systemctl --user restart wardmast`, and read the same summary
 line.
 
 ## 6. Frontend (research task 3)
@@ -907,11 +907,11 @@ proof and §6's browser client are the same code, not two readings of the same
 spec.
 
 **One phoenix.js trap, carried over from phase 4.** A graceful
-`systemctl --user restart arbiter` closes every WebSocket with code `1000`, and
+`systemctl --user restart wardmast` closes every WebSocket with code `1000`, and
 phoenix.js deliberately does not reconnect after a normal closure. For a
 session that outlives the server by design (§4.3) that is the wrong reading, so
 the hook schedules the reconnect itself. Without it §10.1's headline experience
-— restart arbiter, the terminal comes back — silently does not happen.
+— restart wardmast, the terminal comes back — silently does not happen.
 
 #### What was verified, and how
 
@@ -1629,7 +1629,7 @@ This is not hypothetical: the coordinator restarted arbiter twice on 2026-09-11
 after merging core-app fixes.
 
 The recommendation **converts this from fatal to routine**. Because the PTY is in
-a sibling cgroup (§4.1), `systemctl --user restart arbiter` from inside a session
+a sibling cgroup (§4.1), `systemctl --user restart wardmast` from inside a session
 no longer kills that session. It drops the browser's channel; the session keeps
 running; the client reconnects with `last_seq` and resumes (§5.3). The operator
 sees a brief "reconnecting" state, not a dead terminal.

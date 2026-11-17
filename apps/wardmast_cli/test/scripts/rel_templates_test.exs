@@ -108,13 +108,13 @@ defmodule WardmastCli.Scripts.RelTemplatesTest do
       assert vars["RELEASE_NODE"] == "other@127.0.0.1"
     end
 
-    test "creates a random per-install cookie at ~/.arbiter/release.cookie, mode 0600", %{
+    test "creates a random per-install cookie at ~/.wardmast/release.cookie, mode 0600", %{
       tmp_dir: dir
     } do
       home = Path.join(dir, "home")
       {vars, _out, 0} = source_env(release_root!(dir), %{"HOME" => home})
 
-      cookie_file = Path.join(home, ".arbiter/release.cookie")
+      cookie_file = Path.join(home, ".wardmast/release.cookie")
       assert File.read!(cookie_file) == vars["RELEASE_COOKIE"]
       assert vars["RELEASE_COOKIE"] =~ ~r/\A[0-9a-f]{64}\z/
       assert mode(cookie_file) == 0o600
@@ -147,7 +147,7 @@ defmodule WardmastCli.Scripts.RelTemplatesTest do
 
     test "an existing cookie loosened to 0644 is kept but chmod'ed back to 0600", %{tmp_dir: dir} do
       home = Path.join(dir, "home")
-      cookie_file = Path.join(home, ".arbiter/release.cookie")
+      cookie_file = Path.join(home, ".wardmast/release.cookie")
       File.mkdir_p!(Path.dirname(cookie_file))
       File.write!(cookie_file, "operatorcookie")
       File.chmod!(cookie_file, 0o644)
@@ -168,7 +168,7 @@ defmodule WardmastCli.Scripts.RelTemplatesTest do
         })
 
       assert File.read!(Path.join(data, "release.cookie")) == vars["RELEASE_COOKIE"]
-      refute File.exists?(Path.join(dir, "home/.arbiter/release.cookie"))
+      refute File.exists?(Path.join(dir, "home/.wardmast/release.cookie"))
     end
 
     test "an explicit RELEASE_COOKIE wins and no cookie file is written", %{tmp_dir: dir} do
@@ -178,7 +178,7 @@ defmodule WardmastCli.Scripts.RelTemplatesTest do
         source_env(release_root!(dir), %{"HOME" => home, "RELEASE_COOKIE" => "explicit"})
 
       assert vars["RELEASE_COOKIE"] == "explicit"
-      refute File.exists?(Path.join(home, ".arbiter/release.cookie"))
+      refute File.exists?(Path.join(home, ".wardmast/release.cookie"))
     end
 
     test "an unwritable data home falls back to a throwaway cookie, never the bundled one", %{

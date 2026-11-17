@@ -356,7 +356,7 @@ defmodule Wardmast.Settings.Installation do
       public? true
       allow_nil? true
 
-      description "nodes.chart_ref: the arbiter-node Helm chart reference shown in `helm upgrade` (KH8); nil = the chart the node reports."
+      description "nodes.chart_ref: the wardmast-node Helm chart reference shown in `helm upgrade` (KH8); nil = the chart the node reports."
     end
 
     attribute :nodes_registry_username, :string do

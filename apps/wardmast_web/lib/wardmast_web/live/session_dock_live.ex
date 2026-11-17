@@ -1152,7 +1152,7 @@ defmodule WardmastWeb.SessionDockLive do
 
       // The states the hook paints into the window's status strip.
       // "reconnecting" is the one that matters: it is what an operator sees
-      // across a `systemctl --user restart arbiter` (RFC 10.1), and it has to
+      // across a `systemctl --user restart wardmast` (RFC 10.1), and it has to
       // say "hold on" rather than look like a dead page.
       const LABELS = {
         connecting: "connecting…",

@@ -198,7 +198,7 @@ defmodule Wardmast.Sessions.AgySessionTest do
 
     test "the session HOME carries a generated agy posture trusting the cwd and denying the checkout" do
       session = launch!()
-      # Resolved, not the sandbox's value: an inherited ARB_PRIMARY_CHECKOUT
+      # Resolved, not the sandbox's value: an inherited WARDMAST_PRIMARY_CHECKOUT
       # outranks app config in `Paths`, and provisioning reads the same thing.
       checkout = Wardmast.Config.Paths.primary_checkout()
 

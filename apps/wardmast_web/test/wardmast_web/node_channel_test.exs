@@ -21,7 +21,7 @@ defmodule WardmastWeb.NodeChannelTest do
 
   setup %{tmp_dir: home} do
     # An outdated hello looks up the release to upgrade to: keep it on a fixture
-    # tree, never the operator's real `~/.arbiter`.
+    # tree, never the operator's real `~/.wardmast`.
     WardmastWeb.NodeFixtures.use_data_home!(home)
     # The skew verdict compares against the primary's version, which `git
     # describe` makes ambient (a tagless CI clone is 0.0.0): pin it.

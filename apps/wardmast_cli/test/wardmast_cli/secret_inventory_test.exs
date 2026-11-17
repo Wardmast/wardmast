@@ -65,7 +65,7 @@ defmodule WardmastCli.SecretInventoryTest do
 
   @tag :tmp_dir
   test "env_from_file/1 parses KEY=VALUE lines, quotes and export", %{tmp_dir: dir} do
-    path = Path.join(dir, "arbiter.env")
+    path = Path.join(dir, "wardmast.env")
     File.write!(path, "# c\nexport A=\"x y\"\nB='z'\nC=plain\nnot a line\n")
     assert SecretInventory.env_from_file(path) == %{"A" => "x y", "B" => "z", "C" => "plain"}
     assert SecretInventory.env_from_file(Path.join(dir, "missing")) == %{}

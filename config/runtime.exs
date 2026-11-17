@@ -51,13 +51,13 @@ agent? =
 # Single source of truth for the SQLite DB path. Applies to all environments
 # (dev, prod) except test, which sets its own tmp path in config/test.exs.
 #
-# Default: ~/.arbiter/arbiter.sqlite3 (the canonical post-cutover location).
+# Default: ~/.wardmast/arbiter.sqlite3 (the canonical post-cutover location).
 # Until T7 (DB-copy cutover) completes, set DATABASE_PATH to point at the
 # live database so the server never boots against an empty file.
 if config_env() != :test and not agent? do
   database_path =
     System.get_env("DATABASE_PATH") ||
-      Path.expand("~/.arbiter/arbiter.sqlite3")
+      Path.expand("~/.wardmast/arbiter.sqlite3")
 
   config :wardmast, Wardmast.Repo,
     database: database_path,
@@ -153,7 +153,7 @@ if config_env() == :dev and not agent? do
       raise """
       environment variable SECRET_KEY_BASE is missing (set SECRET_KEY_BASE, or SECRET_KEY_BASE_REF to a secret-manager pointer).
 
-      Generate one with `mix phx.gen.secret` and add it to .arbiter.env:
+      Generate one with `mix phx.gen.secret` and add it to .wardmast.env:
         SECRET_KEY_BASE=<generated-value>
       """
 

@@ -1,6 +1,6 @@
 defmodule Wardmast.NodeAgent.K8s.ControllerConfig do
   @moduledoc """
-  The operator's `arbiter-controller-config` ConfigMap as a **closed schema**
+  The operator's `wardmast-controller-config` ConfigMap as a **closed schema**
   (`docs/design/remote-workers.md` K§4.1): `controller.yaml` text (or its decoded
   map) in, a validated config out. Pure; `Wardmast.NodeAgent.K8s.ConfigLoader` owns
   the file, the polling and the keep-the-last-good rule.

@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "arbiter-node values",
+  "title": "wardmast-node values",
   "description": "Unknown keys are rejected at every level: a typo is an install error, not a silent default. Nothing here carries a secret.",
   "type": "object",
   "additionalProperties": false,

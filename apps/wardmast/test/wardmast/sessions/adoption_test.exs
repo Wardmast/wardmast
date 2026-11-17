@@ -4,7 +4,7 @@ defmodule Wardmast.Sessions.AdoptionTest do
   criterion 4.
 
   The sweep is the *only* thing that reconnects Wardmast to sessions after
-  `systemctl --user restart arbiter`, because nothing in the BEAM holds a
+  `systemctl --user restart wardmast`, because nothing in the BEAM holds a
   handle to them. Its three obligations:
 
     1. re-adopt rows whose scope (or tmux socket) is still live;

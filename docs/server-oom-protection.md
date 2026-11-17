@@ -1,4 +1,4 @@
-# Protecting arbiter.service from the OOM killer (bd-66anxj, GitHub #720)
+# Protecting wardmast.service from the OOM killer (bd-66anxj, GitHub #720)
 
 Incident 2026-10-10: ~680 concurrent `arb` processes flooded the server, which
 grew to 6.5 GB (DB pool checkouts > 15 s) and was SIGKILLed by the kernel OOM
@@ -22,14 +22,14 @@ once as root with a drop-in on the system manager instead of the user unit.
 Workers run in their own `arb-run` scopes and are unaffected.
 
 **Existing installs:** re-run `arb install service` (it rewrites the unit and
-reloads), or add a one-time drop-in with `systemctl --user edit arbiter.service`:
+reloads), or add a one-time drop-in with `systemctl --user edit wardmast.service`:
 
 ```ini
 [Service]
 ManagedOOMPreference=avoid
 ```
 
-(system install: `sudo systemctl edit arbiter.service` and also add `OOMScoreAdjust=-500`), then restart.
+(system install: `sudo systemctl edit wardmast.service` and also add `OOMScoreAdjust=-500`), then restart.
 
 ## 2. `/api` concurrency is bounded
 
@@ -37,7 +37,7 @@ ManagedOOMPreference=avoid
 `GET /api/events` SSE stream is exempt). Over the cap a request gets an immediate
 `503 busy` with `Retry-After: 1` rather than queuing and growing the heap.
 
-- Default 128; set `WARDMAST_API_MAX_CONCURRENCY=N` in `arbiter.env` (`0` disables).
+- Default 128; set `WARDMAST_API_MAX_CONCURRENCY=N` in `wardmast.env` (`0` disables).
 - The `arb` CLI retries 429/503-with-`Retry-After` up to 3 times (exponential
   backoff from the server's `Retry-After`), then fails with
   "server is busy … gave up after 4 attempts".

@@ -413,7 +413,7 @@ building this spawn's argv.
 
 * **Writable:** the worktree, the git common dir (commits need its objects and
   refs), the worker's own agy `$HOME`, and any `sandbox.writable_paths`.
-  Everything else, including the rest of the operator's `$HOME`, `~/.arbiter`
+  Everything else, including the rest of the operator's `$HOME`, `~/.wardmast`
   and the main checkout, is read-only: a write fails with `EROFS`
   (`read-only file system`), whichever tool makes it.
 * **Read-only on top**, after every writable bind so no `writable_paths` entry
@@ -929,7 +929,7 @@ A worker child used to **inherit the server's whole OS environment** (`Port.open
 credential added on top. A Claude worker could see `WARDMAST_CLOAK_KEY`,
 `SECRET_KEY_BASE`, `DATABASE_PATH`, `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`
 and the Codex/Gemini keys. `WARDMAST_CLOAK_KEY` plus a readable
-`~/.arbiter/arbiter.sqlite3` decrypts every workspace secret and provider
+`~/.wardmast/arbiter.sqlite3` decrypts every workspace secret and provider
 credential; `SECRET_KEY_BASE` is the default MCP token signing key.
 
 `Wardmast.Worker.SpawnEnv` is now the single builder. The child starts from an
@@ -960,7 +960,7 @@ explicitly unset) and receives only:
 **Never reaches a worker:** `ARBITER_*` (including `WARDMAST_CLOAK_KEY`),
 `SECRET_KEY_BASE`, `DATABASE_PATH` / `DATABASE_URL` *of the server*,
 `RELEASE_*` / `ROOTDIR` / `BINDIR`, `MIX_ENV`, `SSH_AUTH_SOCK`,
-`XDG_RUNTIME_DIR`, and anything else in `~/.arbiter/arbiter.env` that is not
+`XDG_RUNTIME_DIR`, and anything else in `~/.wardmast/wardmast.env` that is not
 listed above. (`DATABASE_PATH` is still *set* in a worker, but to a per-task
 throwaway sqlite file under the temp dir so a worker-started `mix phx.server`
 cannot open the live database; it is never the server's value.)
@@ -1001,7 +1001,7 @@ quota probes (`CloudCode` agy usage, `GrantRefresher`).
   agy worker is unauthenticated. No other provider receives it.
 * **`MIX_ENV` is not inherited**; a worker's `mix` picks its own.
 * **Agent-CLI config vars set in the server's env are no longer inherited.**
-  An install that exported any of these in `~/.arbiter/arbiter.env` and relied
+  An install that exported any of these in `~/.wardmast/wardmast.env` and relied
   on workers picking them up loses that behaviour silently: `ANTHROPIC_BASE_URL`,
   `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CONFIG_DIR` (when
   worker config isolation is off; with isolation on, Arbiter sets its own),
@@ -1012,14 +1012,14 @@ quota probes (`CloudCode` agy usage, `GrantRefresher`).
 ### Residual risk: same UID, same filesystem
 
 Environment scrubbing removes the secrets handed over *for free*. A worker still
-runs as the operator's UID, so it can **read `~/.arbiter/arbiter.env` and
-`~/.arbiter/arbiter.sqlite3` directly** (and `~/.ssh`, `~/.config/gh`, the agy
+runs as the operator's UID, so it can **read `~/.wardmast/wardmast.env` and
+`~/.wardmast/arbiter.sqlite3` directly** (and `~/.ssh`, `~/.config/gh`, the agy
 isolated `HOME`'s symlinked passthrough of `.ssh` / `.arbiter`, and
 `/proc/<server pid>/environ` of any same-UID process outside a PID namespace).
-With `WARDMAST_CLOAK_KEY` in `arbiter.env` that is the same break as before, just
+With `WARDMAST_CLOAK_KEY` in `wardmast.env` that is the same break as before, just
 one `cat` away. Closing it is file-level isolation, not env hygiene: the jail
-(bd-7o08mj masks `/run`; bd-8381tk masks `arbiter.env` and the release
-cookie for jailed workers, see below; bd-3q2djr hides the rest of `~/.arbiter`
+(bd-7o08mj masks `/run`; bd-8381tk masks `wardmast.env` and the release
+cookie for jailed workers, see below; bd-3q2djr hides the rest of `~/.wardmast`
 and the credential dirs from an agy worker, see "Hidden read paths" below)
 and the guardrail-profile work (bd-8apkz6). Until then treat any worker with shell
 access as able to reach everything the operator's account can read.
@@ -1035,7 +1035,7 @@ is shadowed with `/dev/null`, and only paths that exist on the host are listed
 | Class | Hidden |
 |---|---|
 | Credential dirs | `~/.claude`, `~/.codex`, `~/.gemini`, `~/.config/gh`, `~/.config/gcloud`, `~/.ssh`, `~/.aws`, `~/.kube`, `~/.docker`; files `~/.netrc`, `~/.pgpass`, `~/.git-credentials` |
-| The install | the data dir (`~/.arbiter`: `arbiter.sqlite3` and its WAL, `accounts.json`, releases), the configured DB path and its `-wal`/`-shm`/`-journal` when it lives elsewhere, the accounts and sessions roots |
+| The install | the data dir (`~/.wardmast`: `arbiter.sqlite3` and its WAL, `accounts.json`, releases), the configured DB path and its `-wal`/`-shm`/`-journal` when it lives elsewhere, the accounts and sessions roots |
 | Other workers | the durable output-log root, the worktree root (the worker's own worktree is bound back), the agy HOME root (other workers' `mcp_config.json` scope tokens; the own HOME is bound back), the Claude worker config dir (`.credentials.json`) |
 | Other workspaces | every workspace's `repo_paths` entry except the repo the worker's own worktree belongs to |
 
@@ -1053,7 +1053,7 @@ symlinks (`.ssh`, `.arbiter`, `.config`) resolve into the masks.
   holds no secret there), so `gh pr view` / `diff` / `checks` keep working. If
   `hosts.yml` holds a plaintext token the dir stays hidden and `gh` needs
   `GH_TOKEN`/`GITHUB_TOKEN` in the workspace's `worker_env`.
-- Coordinator-side data under `~/.arbiter` is gone from their view.
+- Coordinator-side data under `~/.wardmast` is gone from their view.
 
 `config :wardmast, :worker_jail_unmask, ["~/.config/gh/hosts.yml"]` is the
 escape hatch: an entry equal to a hidden path unhides it; an entry beneath
@@ -1073,7 +1073,7 @@ workspace's repo can be read from inside
 ## The server's Erlang distribution (bd-51m9ba, GitHub #156)
 
 The release keeps Erlang distribution on so the operator can still run
-`~/.arbiter/current/bin/wardmast rpc '…'` / `remote` (e.g. to disable a
+`~/.wardmast/current/bin/wardmast rpc '…'` / `remote` (e.g. to disable a
 provider account). Distribution is a code-execution channel: anyone who
 holds the cookie and can reach epmd and the node's listener runs arbitrary
 code in the server, with no MCP token or scope check in the way. Before this
@@ -1091,7 +1091,7 @@ What the release does now (`rel/env.sh.eex`, `rel/vm.args.eex`,
   is not an option: it resolves the host name, often to a LAN address, where a
   loopback-only epmd does not answer and `rpc` would break.
 * **A per-install cookie.** `env.sh` creates `<data-home>/release.cookie`
-  (`WARDMAST_DATA_HOME`, default `~/.arbiter`): 32 random bytes, hex-encoded, under
+  (`WARDMAST_DATA_HOME`, default `~/.wardmast`): 32 random bytes, hex-encoded, under
   `umask 077`, published atomically with `ln`. It exports that file's contents
   as `RELEASE_COOKIE` and runs `chmod 600` on it at every invocation. The
   server, `rpc`, `remote` and `stop` all read the same file, so the operator's
@@ -1104,7 +1104,7 @@ What the release does now (`rel/env.sh.eex`, `rel/vm.args.eex`,
   uses it any more.
 * **The agy jail shadows the cookie.** `Wardmast.Worker.Jail.secret_files/0`
   binds `/dev/null` over `<data-home>/release.cookie` (alongside the
-  bundled `releases/COOKIE` and `arbiter.env`, bd-8381tk) after every writable
+  bundled `releases/COOKIE` and `wardmast.env`, bd-8381tk) after every writable
   bind. The jail shares the host network, so without this a jailed worker
   could read the cookie and reach epmd over loopback. The jail's escape probe,
   which runs behind `arb doctor`'s "agy jail escape" check, now fails if the
@@ -1127,7 +1127,7 @@ service's cgroup and is restarted with it. Doctor reports one that wasn't.
 
 * **An unjailed same-UID worker can still get in.** Claude workers are not
   jailed today. They run as the operator's UID, so they can `cat` the 0600
-  `~/.arbiter/release.cookie` or read `RELEASE_COOKIE` from
+  `~/.wardmast/release.cookie` or read `RELEASE_COOKIE` from
   `/proc/<server pid>/environ`, then run `bin/wardmast rpc` over loopback. File
   modes and loopback binding do nothing against the same UID. Closing this
   needs worker read-masking: G3, hiding sensitive read paths
@@ -1514,7 +1514,7 @@ came from. Everything Arbiter runs is started by the server's own BEAM:
 `beam.smp` → `erl_child_setup` → the agent CLI → its shell → the tools it
 runs. The operator's terminal or ssh session is not. Under systemd,
 everything the server starts also inherits its service cgroup
-(`…/app.slice/arbiter.service`). The operator's shell lives in a terminal
+(`…/app.slice/wardmast.service`). The operator's shell lives in a terminal
 scope or an ssh `session-N.scope`.
 
 `Wardmast.MCP.OperatorSocket` listens on a Unix domain socket (only when the
@@ -1538,7 +1538,7 @@ requires all of:
    (`Wardmast.Sessions.launch_argv/2`). The tmux server daemonizes, so its
    processes descend from `systemd --user`, not the server, and their
    cgroup `…/app.slice/arb-session-<id>.scope` is a *sibling* of
-   `arbiter.service`. Checks 2 and 3 both miss them by design (that is how
+   `wardmast.service`. Checks 2 and 3 both miss them by design (that is how
    sessions survive a server restart). So a peer whose cgroup path has any
    segment starting with `arb-session-` (`Wardmast.Sessions.Naming.unit_prefix/0`)
    is refused, `in_session_scope`. This check runs on dev servers too.
@@ -1549,7 +1549,7 @@ reply, and every mint and refusal is logged with the peer pid.
 
 Socket path, shared by the server and `arb`:
 `/run/user/<uid>/arbiter/operator-<port>.sock`, or
-`~/.arbiter/run/operator-<port>.sock` on a host without a per-user runtime
+`~/.wardmast/run/operator-<port>.sock` on a host without a per-user runtime
 dir. `<port>` is the HTTP port, so a dev server and the release don't
 collide. `ARB_OPERATOR_SOCKET` overrides the path on both sides. Keep an
 override **outside** every worker-writable path: the jail's writable binds
@@ -1581,9 +1581,9 @@ socket isn't reachable at all:
   the fallback or override directory, because a socket on a read-only bind is
   still connectable.
 * `systemd-run --user` fails (the bus is masked), so a jailed worker can't
-  leave `arbiter.service` either.
+  leave `wardmast.service` either.
 * `Jail.secret_files/0` binds `/dev/null` over the files that would skip
-  the proof entirely: `~/.arbiter/arbiter.env` (it holds `SECRET_KEY_BASE`,
+  the proof entirely: `~/.wardmast/wardmast.env` (it holds `SECRET_KEY_BASE`,
   the MCP signing key, so a reader could sign their own coordinator token)
   and the Erlang distribution cookies, `<data-home>/release.cookie` (the
   per-install one, bd-51m9ba) and `$RELEASE_ROOT/releases/COOKIE` (the
@@ -1629,7 +1629,7 @@ escript built from this branch:
   `systemd-run --user` (the last demo above is exactly that), move itself to
   another cgroup under the user's delegated subtree, `ptrace` the operator's
   shell (`kernel.yama.ptrace_scope` was 0 on the host this was verified on), or read
-  `~/.arbiter/arbiter.env` directly and sign its own token. Closing that
+  `~/.wardmast/wardmast.env` directly and sign its own token. Closing that
   takes the OS jail for Claude workers (G7 in
   [design/guardrail-profiles.md](design/guardrail-profiles.md)), or a
   separate Unix user.
@@ -1644,7 +1644,7 @@ escript built from this branch:
   applies when the server runs as a `.service` unit. A worker of a dev
   server (`mix phx.server` from a terminal) that runs `setsid -f` ends up
   reparented to `systemd --user` in the terminal's own scope, so it passes
-  checks 2 and 3. Run the release as `arbiter.service` for the full check.
+  checks 2 and 3. Run the release as `wardmast.service` for the full check.
 
 ### The jailed worker's Arbiter bridge is the worker (bd-c1qq7l, G9)
 
@@ -1703,10 +1703,10 @@ page carries, and the pages are refused.
   route, so rotate the signing key once after deploying. This invalidates
   every outstanding token:
   1. Generate a new key (`openssl rand -base64 64 | tr -d '\n'`) and replace
-     `SECRET_KEY_BASE` in `~/.arbiter/arbiter.env`. If
+     `SECRET_KEY_BASE` in `~/.wardmast/wardmast.env`. If
      `config :wardmast, Wardmast.MCP, secret:` is set, rotate that instead;
      it takes precedence for token signing.
-  2. `systemctl --user restart arbiter`.
+  2. `systemctl --user restart wardmast`.
   3. Re-mint every coordinator token (`arb mcp token mint`, `arb init
      --force`) and update each `.mcp.json` and `ARB_TOKEN`. Running
      Arbiter sessions hold tokens signed with the old key, so restart them.
@@ -1791,7 +1791,7 @@ checks.
 The same-UID limits from bd-8381tk apply unchanged. A worker that escapes
 its spawn tree on purpose (a transient `systemd-run --user` unit) can still
 mint over the operator socket, and an unjailed one can read
-`~/.arbiter/arbiter.env` and sign its own token. What is gone is the
+`~/.wardmast/wardmast.env` and sign its own token. What is gone is the
 zero-effort path: a worker's `curl`, or its own `arb` with `ARB_TOKEN`
 unset, is no longer coordinator-equivalent.
 

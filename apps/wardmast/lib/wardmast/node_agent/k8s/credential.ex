@@ -3,14 +3,14 @@ defmodule Wardmast.NodeAgent.K8s.Credential do
   A cluster controller's node credential (`docs/design/remote-workers.md` K§2.4 step 1,
   K§12; ticket K14). The `arbn_<id>.<secret>` credential is the only standing secret a
   cluster node holds for the primary, and it lives in exactly one place: the Secret
-  `arbiter-node-credential` (key `credential`), which only the controller's Role may
+  `wardmast-node-credential` (key `credential`), which only the controller's Role may
   `get`/`update`. It is never written to the controller's disk, an env var or a log.
 
   `obtain/2` is what the boot does:
 
     1. **Later boots** read the Secret and use what is there.
     2. **The first boot** finds the install's empty placeholder, reads the operator's join
-       token (`/etc/arb/join/token`, the optional `arbiter-join` Secret), redeems it at
+       token (`/etc/arb/join/token`, the optional `wardmast-join` Secret), redeems it at
        `POST /nodes/enroll` (`kind: cluster`, the node name, `k8s_version`, `proto`,
        `agent_version`) and writes the answer to the Secret. The join Secret is then spent;
        the operator may delete it (the controller deliberately has no verb for that).
@@ -29,7 +29,7 @@ defmodule Wardmast.NodeAgent.K8s.Credential do
   alias Wardmast.NodeAgent.Config
   alias Wardmast.NodeAgent.K8s.Client
 
-  @secret "arbiter-node-credential"
+  @secret "wardmast-node-credential"
   @key "credential"
   @token_file "/etc/arb/join/token"
   @credential_re ~r/\Aarbn_[^.\s]+\.\S+\z/

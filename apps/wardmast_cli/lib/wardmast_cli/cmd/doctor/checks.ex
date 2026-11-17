@@ -357,7 +357,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
             if cli_behind?(cli_vsn, cli_sha, server_vsn, server_sha) do
               "The `arb` CLI is older than the server — rebuild and reinstall the `arb` CLI (e.g. `arb install-cli`)."
             else
-              "The server's compiled version is stale — restart the server via your process manager (e.g. `systemctl --user restart arbiter`)."
+              "The server's compiled version is stale — restart the server via your process manager (e.g. `systemctl --user restart wardmast`)."
             end
           else
             "Run `arb self-update --version v#{server_vsn}` to install the CLI matching the server."
@@ -827,7 +827,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   # bd-3q2djr (G3): `--ro-bind / /` lets a jailed worker read every credential
   # the operator can. `Jail.diagnose_reads/0` (the payload's `reads` key) runs
   # a real jail with the live hide set and checks that the install DB,
-  # `~/.arbiter`, the credential dirs, the durable log root, another worker's
+  # `~/.wardmast`, the credential dirs, the durable log root, another worker's
   # worktree and another workspace's repo cannot be read from inside. A
   # reachable path is a FAIL (non-blocking, like the escape check).
   defp check_agy_jail_reads do
@@ -1479,7 +1479,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
 
   defp memory_hint(body) do
     policy_hint =
-      "Add a drop-in: `systemctl --user edit arbiter.service` with " <>
+      "Add a drop-in: `systemctl --user edit wardmast.service` with " <>
         "`[Service]` / `OOMPolicy=continue`, then `systemctl --user daemon-reload` " <>
         "(or re-run `arb install service`, which now writes it). See docs/worker-memory-cap.md."
 
@@ -2414,7 +2414,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       "Runs for #{image["repo"]} cannot get an image until this clears. Check " <>
         "worker.repos.#{image["repo"]}.image.ref and credentials_ref (`arb workspace config`); " <>
         "the image must be built by the repo's CI from the default branch, FROM " <>
-        "ghcr.io/<owner>/arbiter-worker-base, with the label arbiter.runtime-contract=1."
+        "ghcr.io/<owner>/wardmast-worker-base, with the label arbiter.runtime-contract=1."
     )
   end
 
@@ -2617,7 +2617,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       "cluster #{node}: readiness",
       :warn,
       "no readiness report yet: the controller has not sent its first hello with one",
-      "Check the controller pod (`kubectl -n arbiter-workers logs deploy/arbiter-controller`); " <>
+      "Check the controller pod (`kubectl -n wardmast-workers logs deploy/wardmast-controller`); " <>
         "a controller older than this server does not report readiness. Run `arb node upgrade #{node}`."
     )
   end

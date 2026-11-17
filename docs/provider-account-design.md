@@ -790,7 +790,7 @@ reports. An un-migrated install carrying legacy credentials is no longer held
 on the legacy chain: its boot warning and doctor `[fail]` say those workspaces
 cannot spawn. A still-set `WARDMAST_PROVIDER_ACCOUNTS` draws a boot warning,
 and `arb install service` stops copying `CLAUDE_CODE_OAUTH_TOKEN` into
-`arbiter.env`, since nothing reads it there. The only rollback is the
+`wardmast.env`, since nothing reads it there. The only rollback is the
 previous release binary. The release notes live in
 [`provider-accounts-release-runbook.md`](provider-accounts-release-runbook.md).
 

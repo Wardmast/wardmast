@@ -5,7 +5,7 @@ defmodule Wardmast.NodeAgent.K8s.Lease do
   two controllers sharing one credential. `Recreate` handles the ordinary restart;
   the Lease handles the partition.
 
-  The install pre-creates the Lease `arbiter-controller` and the Role grants
+  The install pre-creates the Lease `wardmast-controller` and the Role grants
   `get`/`update` on that one name, so this never creates. Each cycle (`tick/1`):
 
     1. `GET` the Lease.
@@ -30,7 +30,7 @@ defmodule Wardmast.NodeAgent.K8s.Lease do
   controller does not wait out the duration.
 
   Options: `:client`, `:identity` (required; the pod name), `:lease_name` (default
-  `arbiter-controller`), `:interval_ms` (default 10 000, the first cycle at start; `nil`
+  `wardmast-controller`), `:interval_ms` (default 10 000, the first cycle at start; `nil`
   for none, tests call `tick/1`), `:lease_duration_ms` (default 30 000), `:renew_deadline_ms`
   (default 20 000), `:clock` (a `fun() -> ms`, monotonic; tests drive it), `:notify`,
   `:name`.
@@ -42,7 +42,7 @@ defmodule Wardmast.NodeAgent.K8s.Lease do
 
   require Logger
 
-  @default_lease "arbiter-controller"
+  @default_lease "wardmast-controller"
   @default_interval_ms 10_000
   @default_duration_ms 30_000
   @default_deadline_ms 20_000

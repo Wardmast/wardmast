@@ -60,8 +60,8 @@ defmodule Mix.Tasks.Wardmast.Accounts.Migrate do
   A thin wrapper over `Wardmast.Release.accounts_migrate/1`, which a release
   install (no Mix toolchain) runs directly:
 
-      bin/wardmast eval 'Wardmast.Release.accounts_migrate(plan: "/home/me/.arbiter/accounts.json", dry_run?: true)'
-      bin/wardmast eval 'Wardmast.Release.accounts_migrate(plan: "/home/me/.arbiter/accounts.json")'
+      bin/wardmast eval 'Wardmast.Release.accounts_migrate(plan: "/home/me/.wardmast/accounts.json", dry_run?: true)'
+      bin/wardmast eval 'Wardmast.Release.accounts_migrate(plan: "/home/me/.wardmast/accounts.json")'
 
   See `docs/provider-accounts-release-runbook.md` for the full procedure,
   including setting the flag.

@@ -13,7 +13,7 @@ new source and restarting the running process in place.
 3. **Deps, if the pull added any:** `mix deps.get` (safe to run even when
    nothing changed; skip only if you know deps didn't move).
 4. **Restart the server:**
-   - Systemd-wrapped: `systemctl --user restart arbiter`.
+   - Systemd-wrapped: `systemctl --user restart wardmast`.
    - Bare: kill the running `mix phx.server` process and re-run
      `mix phx.server &`.
 5. **Rebuild and reinstall the CLI:**
@@ -42,14 +42,14 @@ nothing running.
 
 ## Logs
 
-Systemd-wrapped: `journalctl --user-unit arbiter.service -f` — not
+Systemd-wrapped: `journalctl --user-unit wardmast.service -f` — not
 `--user -u`, which reads an empty user-journal namespace. Bare: whatever
 terminal/log redirection `mix phx.server &` was started with.
 <% else %><% _ = assigns %>
 # Runbook: Deploy
 
 Wardmast runs as a **systemd user service** from a prebuilt **OTP release** at
-`~/.arbiter/current` (or `$ARB_DATA_HOME`). The box doesn't need a Mix/Elixir
+`~/.wardmast/current` (or `$ARB_DATA_HOME`). The box doesn't need a Mix/Elixir
 toolchain to *run* it — only to build a release from source.
 
 ## Deploy a new version
@@ -80,7 +80,7 @@ merge live within minutes instead of waiting for a tag + CI run:
        TARBALL=/path/to/arbiter-local-<sha>-<timestamp>-linux.tar.gz
        ESCRIPT=/path/to/arb-local-<sha>-<timestamp>
 
-   It refuses to run against the primary checkout (`$ARB_PRIMARY_CHECKOUT`,
+   It refuses to run against the primary checkout (`$WARDMAST_PRIMARY_CHECKOUT`,
    default `~/dev/arbiter`) or a worktree of it — a prod compile in place
    there would race dev-mode hot reload and worker worktree seeding.
 
@@ -104,7 +104,7 @@ action, CLI/`systemctl` only.
 
 If code merged that adds a migration and the server hasn't restarted, every
 API/MCP/events request may start returning 500 (`PendingMigrationError`). Fix
-is a plain restart (`systemctl --user restart arbiter`) — the boot sequence
+is a plain restart (`systemctl --user restart wardmast`) — the boot sequence
 applies pending migrations itself. Do **not** run `arb server migrate`
 against a live server; it can race the SQLite writer.
 
@@ -123,7 +123,7 @@ it, but **save and restore `PATH`** around it — some env files carry a `PATH`
 line that clobbers `arb`/`gh` on the invoking shell:
 
 ```bash
-OLD="$PATH"; set -a; . ~/.arbiter/arbiter.env; set +a; export PATH="$OLD"
+OLD="$PATH"; set -a; . ~/.wardmast/wardmast.env; set +a; export PATH="$OLD"
 export GITHUB_TOKEN="$(gh auth token)"
 arb server deploy --version vX.Y.Z
 ```
@@ -134,7 +134,7 @@ Don't trust the reported version string alone — a stale or wrong string here
 is a known category of bug, so `arb doctor`'s version check can cry wolf even
 when the deploy succeeded. Confirm with:
 
-- `readlink ~/.arbiter/current` → points at `releases/vX.Y.Z`
+- `readlink ~/.wardmast/current` → points at `releases/vX.Y.Z`
 - `systemctl --user status arbiter` → `active (running)`, fresh process
 - `GET /api/version` → `built_at` matches the fresh CI build timestamp —
   this proves the running binary is the new artifact regardless of what the
@@ -148,11 +148,11 @@ reconnect.
 
 ## Logs and restart-only
 
-- Logs: `journalctl --user-unit arbiter.service -f` — not `--user -u`, which
+- Logs: `journalctl --user-unit wardmast.service -f` — not `--user -u`, which
   reads an empty user-journal namespace. Needs persistent journald and the
   invoking user in the `systemd-journal` group (a new login session picks up
   the group).
-- Restart only, no version change: `systemctl --user restart arbiter`.
+- Restart only, no version change: `systemctl --user restart wardmast`.
 - `arb server restart` may hard-depend on `lsof`, which isn't present on
   every host, and can leave the port dark if it's missing — prefer
   `arb server deploy` or a direct `systemctl` restart if that happens.
@@ -160,7 +160,7 @@ reconnect.
 ## First-time systemd setup
 
 If this machine has never run the service before: `arb install-service`
-writes `~/.config/systemd/user/arbiter.service`, enables `loginctl
+writes `~/.config/systemd/user/wardmast.service`, enables `loginctl
 enable-linger` so it starts at boot before any login, and starts it. Pass
 `--system` to install a machine-wide unit under `/etc/systemd/system`
 instead (needs root).

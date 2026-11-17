@@ -272,7 +272,7 @@ defmodule Wardmast.Worker do
   # write, and a usage flush that may read the session JSONL off disk — a few
   # seconds at the outside. Every worker spends its grace in PARALLEL (a
   # DynamicSupervisor signals all children, then waits), so this is the cost of
-  # the whole worker tier, and it has to leave room inside `arbiter.service`'s
+  # the whole worker tier, and it has to leave room inside `wardmast.service`'s
   # `TimeoutStopUSec` (45s, inherited) for the rest of the tree. Past that
   # timeout systemd's cgroup SIGKILL (SIGABRT on Fedora) wins regardless, so a
   # longer grace would be a silent no-op.

@@ -71,7 +71,7 @@ defmodule Wardmast.NodeAgent.PodChannel.Listeners do
     identity =
       Cert.server(
         ca,
-        Keyword.get(opts, :server_names, ["arbiter-controller"]),
+        Keyword.get(opts, :server_names, ["wardmast-controller"]),
         Keyword.get(opts, :server_ips, []),
         DateTime.add(now, -@skew_s),
         DateTime.add(now, state.ttl_s)

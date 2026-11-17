@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 //
 // bd-3ymdvi, acceptance criterion 8 — the post-merge, coordinator-owned check
-// that a terminal client survives `systemctl --user restart arbiter` with no
+// that a terminal client survives `systemctl --user restart wardmast` with no
 // lost and no duplicated output. Also bd-c76fu9 (phase 5) criterion 3, which
 // asks the same question of the *browser* terminal.
 //
@@ -17,7 +17,7 @@
 //
 // Then, in another shell:
 //
-//   systemctl --user restart arbiter
+//   systemctl --user restart wardmast
 //
 // A working result is the final line:
 //

@@ -8,7 +8,7 @@ defmodule Wardmast.NodeAgent.K8s.ReadinessTest do
   @now ~U[2026-10-10 12:00:00Z]
 
   setup do
-    cluster = FakeK8sApi.start!(namespace: "arbiter-workers")
+    cluster = FakeK8sApi.start!(namespace: "wardmast-workers")
     FakeK8sApi.set_clock(cluster.api, @now)
     FakeK8sApi.enforce_psa(cluster.api)
     FakeK8sApi.put_quota(cluster.api, quota())
@@ -26,7 +26,7 @@ defmodule Wardmast.NodeAgent.K8s.ReadinessTest do
     }
 
     %{
-      "metadata" => %{"name" => "arbiter-workers"},
+      "metadata" => %{"name" => "wardmast-workers"},
       "spec" => %{"hard" => hard},
       "status" => %{"hard" => hard, "used" => used}
     }
@@ -83,7 +83,7 @@ defmodule Wardmast.NodeAgent.K8s.ReadinessTest do
     end
 
     test "a namespace that accepts a privileged pod does not enforce restricted" do
-      cluster = FakeK8sApi.start!(namespace: "arbiter-workers")
+      cluster = FakeK8sApi.start!(namespace: "wardmast-workers")
       FakeK8sApi.set_clock(cluster.api, @now)
       FakeK8sApi.put_quota(cluster.api, quota())
 
@@ -114,7 +114,7 @@ defmodule Wardmast.NodeAgent.K8s.ReadinessTest do
         api,
         :create,
         {403,
-         ~s(ValidatingAdmissionPolicy 'arbiter-worker-pods' with binding 'b' denied request: no hostPath)}
+         ~s(ValidatingAdmissionPolicy 'wardmast-worker-pods' with binding 'b' denied request: no hostPath)}
       )
 
       checks = run(client)
@@ -296,19 +296,19 @@ defmodule Wardmast.NodeAgent.K8s.ReadinessTest do
       FakeK8sApi.fail_next(
         api,
         :create,
-        {403, ~s(pods "x" is forbidden: no PriorityClass with name arbiter-worker was found)}
+        {403, ~s(pods "x" is forbidden: no PriorityClass with name wardmast-worker was found)}
       )
 
       check = run(client)["priority_class"]
       assert check["status"] == "fail"
-      assert check["detail"] =~ "arbiter-worker"
+      assert check["detail"] =~ "wardmast-worker"
       assert check["hint"] =~ "PriorityClass"
     end
   end
 
   describe "quota" do
     test "no ResourceQuota in the namespace is a warning" do
-      cluster = FakeK8sApi.start!(namespace: "arbiter-workers")
+      cluster = FakeK8sApi.start!(namespace: "wardmast-workers")
       FakeK8sApi.set_clock(cluster.api, @now)
 
       check = run(cluster.client)["quota"]

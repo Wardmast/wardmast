@@ -160,7 +160,7 @@ defmodule Wardmast.Vault do
 
         Wardmast encrypts workspace secrets at rest and refuses to start without
         an encryption key. Generate one and add it to your environment
-        (.arbiter.env or ~/.arbiter/arbiter.env):
+        (.wardmast.env or ~/.wardmast/wardmast.env):
 
             WARDMAST_CLOAK_KEY="$(openssl rand -base64 32)"
 

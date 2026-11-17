@@ -8,7 +8,7 @@ defmodule Wardmast.Worker.SpawnEnv do
   `Port.open`'s `{:env, pairs}` and `System.cmd/3`'s `:env` **extend** the BEAM's
   own OS environment. The server's environment holds its master secrets
   (`WARDMAST_CLOAK_KEY`, `SECRET_KEY_BASE`, `DATABASE_PATH`, everything in
-  `~/.arbiter/arbiter.env`) and operator session handles (`SSH_AUTH_SOCK`,
+  `~/.wardmast/wardmast.env`) and operator session handles (`SSH_AUTH_SOCK`,
   `DBUS_SESSION_BUS_ADDRESS`), so an inherit-and-denylist scheme handed every
   one of them to every worker. This module inverts it: the child starts from an
   empty environment and receives **only**

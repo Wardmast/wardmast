@@ -4,7 +4,7 @@
 #
 # This is the §4.2 spike of docs/browser-hosted-coordinator-sessions.md as an
 # automated test: it starts a throwaway systemd *user* service standing in for
-# arbiter.service, launches a session from inside it through
+# wardmast.service, launches a session from inside it through
 # Wardmast.Sessions.launch/1, restarts the stand-in for real, and asserts that
 #
 #   * the arb-session-<id> scope is still active and the tmux server is the
@@ -23,8 +23,8 @@
 #
 # SAFETY: nothing here — or in the test — ever matches a process by name.
 # Every unit, scope and tmux socket it touches is an exact name derived from a
-# fresh unique id, and the live coordinator's own `arbiter.service` is never
-# addressed. The script verifies afterwards that arbiter.service is still in
+# fresh unique id, and the live coordinator's own `wardmast.service` is never
+# addressed. The script verifies afterwards that wardmast.service is still in
 # the state it found it in.
 
 set -euo pipefail
@@ -66,10 +66,10 @@ fi
 
 # Recorded before and checked after: this script must be incapable of
 # disturbing the live coordinator.
-ARBITER_BEFORE="$(systemctl --user is-active arbiter.service 2>&1 || true)"
+ARBITER_BEFORE="$(systemctl --user is-active wardmast.service 2>&1 || true)"
 
 echo "systemd user instance: ok"
-echo "arbiter.service before: ${ARBITER_BEFORE}"
+echo "wardmast.service before: ${ARBITER_BEFORE}"
 echo
 
 # `mix test <path>` at an umbrella root is not scoped to one app — it runs
@@ -86,12 +86,12 @@ else
 fi
 set -e
 
-ARBITER_AFTER="$(systemctl --user is-active arbiter.service 2>&1 || true)"
+ARBITER_AFTER="$(systemctl --user is-active wardmast.service 2>&1 || true)"
 echo
-echo "arbiter.service after:  ${ARBITER_AFTER}"
+echo "wardmast.service after:  ${ARBITER_AFTER}"
 
 if [ "$ARBITER_BEFORE" != "$ARBITER_AFTER" ]; then
-  echo "WARNING: arbiter.service changed state during this run " \
+  echo "WARNING: wardmast.service changed state during this run " \
     "(${ARBITER_BEFORE} -> ${ARBITER_AFTER}). That is not something this test does; " \
     "check what else was running." >&2
 fi

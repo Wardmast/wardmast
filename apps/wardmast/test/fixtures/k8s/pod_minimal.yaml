@@ -3,20 +3,20 @@ apiVersion: v1
 kind: Pod
 metadata:
   annotations:
-    arbiter.dev/events: '1'
+    wardmast.dev/events: '1'
   labels:
     app.kubernetes.io/component: worker
-    app.kubernetes.io/name: arbiter-worker
-    arbiter.dev/install: inst-1
-    arbiter.dev/node: node-1
-    arbiter.dev/run: run-0123456789abcdef
-    arbiter.dev/task: bd-1nfuq5
+    app.kubernetes.io/name: wardmast-worker
+    wardmast.dev/install: inst-1
+    wardmast.dev/node: node-1
+    wardmast.dev/run: run-0123456789abcdef
+    wardmast.dev/task: bd-1nfuq5
   name: arb-run-0123456789ab
-  namespace: arbiter-workers
+  namespace: wardmast-workers
   ownerReferences:
     - apiVersion: apps/v1
       kind: Deployment
-      name: arbiter-controller
+      name: wardmast-controller
       uid: '0b6c1d7e-8f35-4a58-9c1f-3d2f1b1c1a11'
 spec:
   activeDeadlineSeconds: 5400
@@ -373,7 +373,7 @@ spec:
         - mountPath: /etc/arb/ca
           name: ca
           readOnly: true
-  priorityClassName: arbiter-worker
+  priorityClassName: wardmast-worker
   restartPolicy: Never
   securityContext:
     fsGroup: 10001
@@ -383,13 +383,13 @@ spec:
     runAsUser: 10001
     seccompProfile:
       type: RuntimeDefault
-  serviceAccountName: arbiter-worker
+  serviceAccountName: wardmast-worker
   terminationGracePeriodSeconds: 120
   topologySpreadConstraints:
     - labelSelector:
         matchLabels:
           app.kubernetes.io/component: worker
-          arbiter.dev/node: node-1
+          wardmast.dev/node: node-1
       maxSkew: 1
       nodeAffinityPolicy: Honor
       nodeTaintsPolicy: Honor
@@ -408,5 +408,5 @@ spec:
         sizeLimit: 64Mi
       name: run
     - configMap:
-        name: arbiter-ca
+        name: wardmast-ca
       name: ca

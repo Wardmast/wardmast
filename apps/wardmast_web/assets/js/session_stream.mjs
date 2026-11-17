@@ -403,7 +403,7 @@ export class SessionStream {
     this._setStatus("reconnecting")
 
     // phoenix.js deliberately does not reconnect after a 1000 (normal
-    // closure), and a graceful `systemctl --user restart arbiter` produces
+    // closure), and a graceful `systemctl --user restart wardmast` produces
     // exactly that — Bandit closes every WebSocket with 1000 before the BEAM
     // exits. For a session that outlives the server by design (§4.3) that is
     // the wrong reading: a clean server close means "back shortly", not "stop

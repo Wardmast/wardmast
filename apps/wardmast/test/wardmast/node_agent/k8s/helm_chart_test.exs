@@ -1,6 +1,6 @@
 defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
   @moduledoc """
-  KH5 (bd-2u4lpp): the hand-written `charts/arbiter-node` Helm chart
+  KH5 (bd-2u4lpp): the hand-written `charts/wardmast-node` Helm chart
   (`docs/design/remote-workers.md` §20.5-§20.7, OD5 / OD9).
 
   The static tests read the chart's files and need nothing installed. The `:helm`
@@ -13,7 +13,7 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
 
   alias Wardmast.NodeAgent.K8s.{ControllerConfig, InstallManifest}
 
-  @chart Path.expand("../../../../../../charts/arbiter-node", __DIR__)
+  @chart Path.expand("../../../../../../charts/wardmast-node", __DIR__)
   @helm System.find_executable("helm")
 
   @direct [
@@ -24,9 +24,42 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
   describe "chart files" do
     test "Chart.yaml names the chart and pins a minimum Kubernetes version" do
       chart = YamlElixir.read_from_file!(Path.join(@chart, "Chart.yaml"))
-      assert chart["name"] == "arbiter-node"
+      assert chart["name"] == "wardmast-node"
       assert chart["apiVersion"] == "v2"
       assert chart["kubeVersion"] =~ ">="
+    end
+
+    # bd-4jzgwa: the chart and the controller image are `wardmast-*`. The only `arbiter` left
+    # is the tailnet ACL tag (it lives in the operator's tailnet policy, not here), an
+    # example hostname/registry in values, and the worker image's runtime-contract label.
+    test "no object, label, image or helper still carries the pre-rename arbiter name" do
+      allowed = [
+        "tag:arbiter-node",
+        "arbiter.example",
+        "example.test/arbiter",
+        "arbiter.containerfile"
+      ]
+
+      leftovers =
+        @chart
+        |> Path.join("**/*")
+        |> Path.wildcard(match_dot: true)
+        |> Enum.filter(&File.regular?/1)
+        |> Enum.flat_map(fn file ->
+          file
+          |> File.read!()
+          |> String.split("\n")
+          |> Enum.with_index(1)
+          |> Enum.reject(fn {line, _} -> not (line =~ ~r/arbiter/i) end)
+          |> Enum.reject(fn {line, _} -> Enum.any?(allowed, &String.contains?(line, &1)) end)
+          |> Enum.map(fn {line, n} -> "#{Path.relative_to(file, @chart)}:#{n}: #{line}" end)
+        end)
+
+      assert leftovers == []
+
+      values = YamlElixir.read_from_file!(Path.join(@chart, "values.yaml"))
+      assert values["image"]["repository"] == "ghcr.io/wardmast/wardmast-controller"
+      assert values["chartRef"] == "oci://ghcr.io/wardmast/charts/wardmast-node"
     end
 
     test "values.schema.json rejects unknown keys at every object level" do
@@ -71,7 +104,7 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
     test "the controller defaults to its own PriorityClass, above the workers'" do
       values = YamlElixir.read_from_file!(Path.join(@chart, "values.yaml"))
 
-      assert values["controller"]["priorityClassName"] == "arbiter-controller"
+      assert values["controller"]["priorityClassName"] == "wardmast-controller"
 
       assert values["controller"]["priorityClassName"] !=
                values["placement"]["priorityClass"]["name"]
@@ -135,7 +168,7 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
       docs =
         render!(@direct ++ ["placement.runtimeClassName=gvisor", "runtimeClass.handler=runsc"])
 
-      config = find!(docs, "ConfigMap", "arbiter-controller-config")
+      config = find!(docs, "ConfigMap", "wardmast-controller-config")
       assert {:ok, parsed} = ControllerConfig.parse(config["data"]["controller.yaml"])
       assert parsed.placement["runtime_class"] == "gvisor"
       assert parsed.placement["runtime_handler"] == "runsc"
@@ -146,7 +179,7 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
         find!(
           render!(@direct ++ ["workers.eventFeed=false"]),
           "ConfigMap",
-          "arbiter-controller-config"
+          "wardmast-controller-config"
         )
 
       assert config["data"]["controller.yaml"] =~ ~r/^event_feed: false$/m
@@ -158,13 +191,13 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
         find!(
           render!(@direct ++ ["workers.eventFeed=true"]),
           "ConfigMap",
-          "arbiter-controller-config"
+          "wardmast-controller-config"
         )
 
       assert {:ok, %{event_feed: true}} =
                ControllerConfig.parse(config["data"]["controller.yaml"])
 
-      config = find!(render!(@direct), "ConfigMap", "arbiter-controller-config")
+      config = find!(render!(@direct), "ConfigMap", "wardmast-controller-config")
       refute config["data"]["controller.yaml"] =~ "event_feed"
       assert {:ok, parsed} = ControllerConfig.parse(config["data"]["controller.yaml"])
       refute Map.has_key?(parsed, :event_feed)
@@ -177,16 +210,16 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
 
     test "the controller gets its own PriorityClass by default, the Deployment uses it" do
       docs = render!(@direct)
-      worker = find!(docs, "PriorityClass", "arbiter-worker")
-      controller = find!(docs, "PriorityClass", "arbiter-controller")
+      worker = find!(docs, "PriorityClass", "wardmast-worker")
+      controller = find!(docs, "PriorityClass", "wardmast-controller")
 
       assert controller["value"] > worker["value"]
       assert controller["value"] == 1000
       assert controller["preemptionPolicy"] == "PreemptLowerPriority"
       assert worker["preemptionPolicy"] == "Never"
 
-      deployment = find!(docs, "Deployment", "arbiter-controller")
-      assert deployment["spec"]["template"]["spec"]["priorityClassName"] == "arbiter-controller"
+      deployment = find!(docs, "Deployment", "wardmast-controller")
+      assert deployment["spec"]["template"]["spec"]["priorityClassName"] == "wardmast-controller"
     end
 
     test "controller.priorityClass* values override the name, value and policy" do
@@ -203,21 +236,21 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
       controller = find!(docs, "PriorityClass", "arbiter-ctl")
       assert controller["value"] == 5000
       assert controller["preemptionPolicy"] == "Never"
-      refute Enum.any?(docs, &(identity(&1) == {"PriorityClass", "arbiter-controller"}))
+      refute Enum.any?(docs, &(identity(&1) == {"PriorityClass", "wardmast-controller"}))
 
-      deployment = find!(docs, "Deployment", "arbiter-controller")
+      deployment = find!(docs, "Deployment", "wardmast-controller")
       assert deployment["spec"]["template"]["spec"]["priorityClassName"] == "arbiter-ctl"
     end
 
     test "create=false names the class without rendering it; an empty name sets none" do
       docs = render!(@direct ++ ["controller.priorityClass.create=false"])
-      refute Enum.any?(docs, &(identity(&1) == {"PriorityClass", "arbiter-controller"}))
+      refute Enum.any?(docs, &(identity(&1) == {"PriorityClass", "wardmast-controller"}))
 
-      deployment = find!(docs, "Deployment", "arbiter-controller")
-      assert deployment["spec"]["template"]["spec"]["priorityClassName"] == "arbiter-controller"
+      deployment = find!(docs, "Deployment", "wardmast-controller")
+      assert deployment["spec"]["template"]["spec"]["priorityClassName"] == "wardmast-controller"
 
       docs = render!(@direct ++ ["controller.priorityClassName="])
-      deployment = find!(docs, "Deployment", "arbiter-controller")
+      deployment = find!(docs, "Deployment", "wardmast-controller")
       refute Map.has_key?(deployment["spec"]["template"]["spec"], "priorityClassName")
       assert length(Enum.filter(docs, &(&1["kind"] == "PriorityClass"))) == 1
     end
@@ -234,7 +267,7 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
         for %{"kind" => "PriorityClass"} = doc <- render!(@direct ++ ["mode=bootstrap"]),
             do: doc["metadata"]["name"]
 
-      assert Enum.sort(names) == ["arbiter-controller", "arbiter-worker"]
+      assert Enum.sort(names) == ["wardmast-controller", "wardmast-worker"]
     end
 
     test "mode node holds no guardrail and mode bootstrap no controller" do
@@ -254,22 +287,22 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
 
     test "the Role never grants patch and the Deployment says Helm owns the upgrade" do
       docs = render!(@direct, release: "mesaana")
-      role = find!(docs, "Role", "arbiter-controller")
+      role = find!(docs, "Role", "wardmast-controller")
       verbs = role["rules"] |> Enum.flat_map(& &1["verbs"])
       refute "patch" in verbs
 
-      env = controller_env(find!(docs, "Deployment", "arbiter-controller"))
+      env = controller_env(find!(docs, "Deployment", "wardmast-controller"))
       assert env["ARB_K8S_SELF_UPGRADE"] == "false"
       assert env["ARB_INSTALL_METHOD"] == "helm"
       assert env["ARB_HELM_RELEASE"] == "mesaana"
       assert env["ARB_NODE_NAME"] == "mesaana"
       assert env["ARB_PRIMARY_URL"] == "https://arbiter.example.test"
-      assert env["ARB_CHART_REF"] =~ "arbiter-node"
+      assert env["ARB_CHART_REF"] =~ "wardmast-node"
     end
 
     test "the controller ConfigMap parses through the controller's own closed schema" do
       docs = render!(@direct ++ ["concurrency.max=3", "placement.nodeSelector.pool=ci"])
-      config = find!(docs, "ConfigMap", "arbiter-controller-config")
+      config = find!(docs, "ConfigMap", "wardmast-controller-config")
 
       assert {:ok, parsed} = ControllerConfig.parse(config["data"]["controller.yaml"])
       assert parsed.max_concurrent == 3
@@ -288,7 +321,7 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
             ]
         )
 
-      config = find!(docs, "ConfigMap", "arbiter-controller-config")
+      config = find!(docs, "ConfigMap", "wardmast-controller-config")
       assert {:ok, parsed} = ControllerConfig.parse(config["data"]["controller.yaml"])
 
       assert parsed.registries == [
@@ -300,13 +333,13 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
     end
 
     test "the join token is only rendered for --set-file, and no other Secret has data" do
-      refute Enum.any?(render!(@direct), &(identity(&1) == {"Secret", "arbiter-join"}))
+      refute Enum.any?(render!(@direct), &(identity(&1) == {"Secret", "wardmast-join"}))
 
       docs = render!(@direct ++ ["join.token=abc123"])
-      assert %{"stringData" => %{"token" => "abc123"}} = find!(docs, "Secret", "arbiter-join")
+      assert %{"stringData" => %{"token" => "abc123"}} = find!(docs, "Secret", "wardmast-join")
 
       for %{"kind" => "Secret", "metadata" => %{"name" => name}} = secret <- docs,
-          name != "arbiter-join" do
+          name != "wardmast-join" do
         refute Map.has_key?(secret, "data") or Map.has_key?(secret, "stringData")
       end
     end
@@ -318,7 +351,7 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
           "reach.mode=tailscale"
         ])
 
-      deployment = find!(docs, "Deployment", "arbiter-controller")
+      deployment = find!(docs, "Deployment", "wardmast-controller")
       containers = deployment["spec"]["template"]["spec"]["containers"]
       assert Enum.map(containers, & &1["name"]) == ["controller", "tailscale"]
       assert Enum.at(containers, 1)["image"] =~ ~r/@sha256:[0-9a-f]{64}$/
@@ -371,7 +404,7 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
             ["admissionPolicy.enabled=true", "registries[0].prefix=registry.example.test/arbiter"]
         )
 
-      policy = find!(docs, "ValidatingAdmissionPolicy", "arbiter-worker-pods")
+      policy = find!(docs, "ValidatingAdmissionPolicy", "wardmast-worker-pods")
       assert length(policy["spec"]["validations"]) == 7
       assert inspect(policy) =~ "registry.example.test/arbiter/"
       assert "ValidatingAdmissionPolicyBinding" in kinds(docs)
@@ -394,7 +427,7 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartTest do
 
     case System.cmd(
            @helm,
-           ["template", release, @chart, "--namespace", "arbiter-workers"] ++ args,
+           ["template", release, @chart, "--namespace", "wardmast-workers"] ++ args,
            stderr_to_stdout: true
          ) do
       {out, 0} -> {:ok, out}

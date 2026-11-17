@@ -8,7 +8,7 @@ defmodule Wardmast.NodeAgent.K8s.InformerTest do
   alias Wardmast.NodeAgent.K8s.Informer
   alias Wardmast.Test.FakeK8sApi
 
-  @labels %{"arbiter.dev/install" => "inst-1", "arbiter.dev/node" => "node-1"}
+  @labels %{"wardmast.dev/install" => "inst-1", "wardmast.dev/node" => "node-1"}
 
   defp pod(name, phase \\ "Pending", labels \\ @labels) do
     %{"metadata" => %{"name" => name, "labels" => labels}, "status" => %{"phase" => phase}}
@@ -67,12 +67,12 @@ defmodule Wardmast.NodeAgent.K8s.InformerTest do
 
   test "only pods matching the selector are seen", ctx do
     FakeK8sApi.put_pod(ctx.api, pod("mine"))
-    FakeK8sApi.put_pod(ctx.api, pod("theirs", "Pending", %{"arbiter.dev/install" => "other"}))
+    FakeK8sApi.put_pod(ctx.api, pod("theirs", "Pending", %{"wardmast.dev/install" => "other"}))
     informer = start_informer(ctx)
 
     assert collect(informer, 1) == [{:added, "mine", "Pending"}]
     FakeK8sApi.await_watchers(ctx.api, 1)
-    FakeK8sApi.put_pod(ctx.api, pod("theirs", "Running", %{"arbiter.dev/install" => "other"}))
+    FakeK8sApi.put_pod(ctx.api, pod("theirs", "Running", %{"wardmast.dev/install" => "other"}))
     FakeK8sApi.put_pod(ctx.api, pod("mine", "Running"))
     assert collect(informer, 1) == [{:modified, "mine", "Running"}]
   end

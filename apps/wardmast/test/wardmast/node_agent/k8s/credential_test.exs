@@ -1,7 +1,7 @@
 defmodule Wardmast.NodeAgent.K8s.CredentialTest do
   @moduledoc """
   A cluster controller's node credential (`docs/design/remote-workers.md` K§2.4 step 1,
-  K§12; ticket K14): read from the Secret `arbiter-node-credential` on every boot but the
+  K§12; ticket K14): read from the Secret `wardmast-node-credential` on every boot but the
   first, which redeems the operator's join token at `POST /nodes/enroll` and writes the
   answer to that Secret. The primary here is a Req plug; the cluster is the fake API.
   """
@@ -16,10 +16,10 @@ defmodule Wardmast.NodeAgent.K8s.CredentialTest do
   @credential "arbn_0199e3a1-node." <> String.duplicate("s", 52)
 
   setup %{tmp_dir: dir} do
-    env = FakeK8sApi.start!(namespace: "arbiter-workers")
+    env = FakeK8sApi.start!(namespace: "wardmast-workers")
 
     FakeK8sApi.put_secret(env.api, %{
-      "metadata" => %{"name" => "arbiter-node-credential", "namespace" => "arbiter-workers"},
+      "metadata" => %{"name" => "wardmast-node-credential", "namespace" => "wardmast-workers"},
       "type" => "Opaque"
     })
 
@@ -53,7 +53,7 @@ defmodule Wardmast.NodeAgent.K8s.CredentialTest do
   end
 
   defp stored(env) do
-    case FakeK8sApi.secret(env.api, "arbiter-node-credential")["data"] do
+    case FakeK8sApi.secret(env.api, "wardmast-node-credential")["data"] do
       %{"credential" => value} -> Base.decode64!(value)
       _ -> nil
     end
@@ -61,7 +61,7 @@ defmodule Wardmast.NodeAgent.K8s.CredentialTest do
 
   test "a stored credential is used; nothing is enrolled", env do
     FakeK8sApi.put_secret(env.api, %{
-      "metadata" => %{"name" => "arbiter-node-credential"},
+      "metadata" => %{"name" => "wardmast-node-credential"},
       "data" => %{"credential" => Base.encode64(@credential <> "\n")}
     })
 
@@ -91,7 +91,7 @@ defmodule Wardmast.NodeAgent.K8s.CredentialTest do
 
     assert stored(env) == @credential
     # The Secret holds the credential and nothing else; the token is never written.
-    assert Map.keys(FakeK8sApi.secret(env.api, "arbiter-node-credential")["data"]) ==
+    assert Map.keys(FakeK8sApi.secret(env.api, "wardmast-node-credential")["data"]) ==
              ["credential"]
   end
 
@@ -139,7 +139,7 @@ defmodule Wardmast.NodeAgent.K8s.CredentialTest do
 
   test "a stored value that is not a node credential is an error, not a re-enrolment", env do
     FakeK8sApi.put_secret(env.api, %{
-      "metadata" => %{"name" => "arbiter-node-credential"},
+      "metadata" => %{"name" => "wardmast-node-credential"},
       "data" => %{"credential" => Base.encode64("garbage")}
     })
 
@@ -159,7 +159,7 @@ defmodule Wardmast.NodeAgent.K8s.CredentialTest do
 
   test "store never replaces a different credential already in the Secret", env do
     FakeK8sApi.put_secret(env.api, %{
-      "metadata" => %{"name" => "arbiter-node-credential"},
+      "metadata" => %{"name" => "wardmast-node-credential"},
       "data" => %{"credential" => Base.encode64("arbn_other.secret")}
     })
 

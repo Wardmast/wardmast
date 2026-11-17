@@ -537,7 +537,7 @@ defmodule WardmastWeb.NodesLiveTest do
       assert text_of(view, "#helm-namespace-command") =~ "kubectl create namespace ci-workers"
 
       assert text_of(view, "#helm-secret-command") =~
-               "-n ci-workers create secret generic arbiter-join"
+               "-n ci-workers create secret generic wardmast-join"
 
       install = text_of(view, "#helm-install-command")
       token = text_of(view, "#join-token")
@@ -600,7 +600,7 @@ defmodule WardmastWeb.NodesLiveTest do
 
       assert secret_command ==
                "read -rs T && printf %s \"$T\" | kubectl -n ci-workers create secret generic " <>
-                 "arbiter-join --from-file=token=/dev/stdin"
+                 "wardmast-join --from-file=token=/dev/stdin"
 
       assert token =~ ~r/\Aarbj_/
       refute apply_command =~ token
@@ -708,7 +708,7 @@ defmodule WardmastWeb.NodesLiveTest do
       assert render(view) =~ "outdated"
 
       assert text_of(view, "#upgrade-command") ==
-               "kubectl -n ci-workers set image deployment/arbiter-controller " <>
+               "kubectl -n ci-workers set image deployment/wardmast-controller " <>
                  "controller=#{@registry}/controller:v9.9.9"
 
       assert has_element?(view, "#copy-upgrade-command")
@@ -725,7 +725,7 @@ defmodule WardmastWeb.NodesLiveTest do
         cluster_node!("helm", %{
           "self_upgrade" => false,
           "namespace" => "ci-workers",
-          "install" => %{"method" => "helm", "release" => "arbiter-node"}
+          "install" => %{"method" => "helm", "release" => "wardmast-node"}
         })
 
       {:ok, view, _} = live(conn, ~p"/nodes")
@@ -733,7 +733,7 @@ defmodule WardmastWeb.NodesLiveTest do
 
       assert has_element?(view, "#upgrade-operator-command")
       assert has_element?(view, "#copy-upgrade-operator-command")
-      assert text_of(view, "#upgrade-operator-command") =~ "helm upgrade arbiter-node"
+      assert text_of(view, "#upgrade-operator-command") =~ "helm upgrade wardmast-node"
       assert text_of(view, "#upgrade-operator-command") =~ "--set image.tag=v9.9.9"
       assert Nodes.get_node(node.id).upgrade_pending_to == nil
     end

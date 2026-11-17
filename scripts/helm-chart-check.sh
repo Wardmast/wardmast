@@ -1,6 +1,6 @@
 #!/bin/sh
 # CI's `helm-chart` job (bd-2u4lpp, docs/design/remote-workers.md §20.5): lint the
-# arbiter-node chart, render it for every mode and reach variant, and validate each
+# wardmast-node chart, render it for every mode and reach variant, and validate each
 # render against the Kubernetes OpenAPI schemas with kubeconform. Needs `helm` and
 # `kubeconform` on PATH; run it from anywhere:
 #
@@ -9,9 +9,9 @@
 # KUBE_VERSION picks the schema set (the chart's kubeVersion floor is 1.30).
 set -eu
 
-chart="$(cd "$(dirname "$0")/.." && pwd)/charts/arbiter-node"
+chart="$(cd "$(dirname "$0")/.." && pwd)/charts/wardmast-node"
 kube_version="${KUBE_VERSION:-1.31.0}"
-ns=arbiter-workers
+ns=wardmast-workers
 direct="--set primary.url=https://arbiter.example.test --set networkPolicy.controllerEgress.primaryCIDRs={100.64.0.10/32,100.64.0.11/32}"
 
 command -v helm >/dev/null || { echo "helm-chart-check: helm not on PATH" >&2; exit 2; }
@@ -38,7 +38,7 @@ check "reach tailscale" --set primary.url=https://arbiter.example.test --set rea
 check "reach proxy" --set primary.url=https://arbiter.example.test --set reach.mode=proxy \
   --set reach.proxy.url=http://proxy.example.test:3128 --set 'reach.proxy.cidrs={10.9.0.5/32}'
 check "admission policy" $direct --set admissionPolicy.enabled=true \
-  --set 'registries[0].prefix=registry.example.test/arbiter' --set 'registries[0].pullSecret=arbiter-registry'
+  --set 'registries[0].prefix=registry.example.test/arbiter' --set 'registries[0].pullSecret=wardmast-registry'
 check "controller priority class override" $direct --set controller.priorityClassName=arbiter-ctl \
   --set controller.priorityClass.value=5000 --set controller.priorityClass.preemptionPolicy=Never
 check "controller priority class not created, none named" $direct \

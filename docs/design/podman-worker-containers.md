@@ -204,7 +204,7 @@ context**. Two layers: `localhost/arbiter-dev/base:<hash>` (Debian trixie,
 Erlang/OTP arb runs on at `/opt/arbiter/otp`, off `PATH`) and
 `localhost/arbiter-dev/<name>:<hash>` (`FROM ${ARBITER_BASE}`). Every external
 `FROM` is rewritten to `ref@sha256:…` through a pin store
-(`~/.arbiter/images/pins.json`); an unpinnable `FROM` refuses the build. The
+(`~/.wardmast/images/pins.json`); an unpinnable `FROM` refuses the build. The
 default toolchain Containerfile copies `/usr/local` out of
 `library/elixir:<v>-otp-<major>-slim` (and `library/node` when `.tool-versions`
 names one), so the base's Debian release must be at least as new as that
@@ -255,8 +255,8 @@ inside rootless containers in each.
 | per-run bridge dir | rw | One unix socket per bridge (proxy, Arbiter) from `Egress.JailRun`; `:z`-free thanks to `label=disable` ([§5.3](#53-selinux-and-the-bridge-sockets)) |
 | deploy key | ro (`--secret`) | Only when the ticket declares a push grant (G16) |
 
-Not mounted, so not visible: `~/.ssh`, `~/.arbiter` (the install DB, cookie,
-`arbiter.env`), `/run/user/$UID` (the D-Bus and keyring sockets), the
+Not mounted, so not visible: `~/.ssh`, `~/.wardmast` (the install DB, cookie,
+`wardmast.env`), `/run/user/$UID` (the D-Bus and keyring sockets), the
 resolver socket, the main checkout's working files, other worktrees, other
 workspaces' repos, and the host environment. This is what G3 lists as masks.
 
@@ -865,7 +865,7 @@ worktree registration, because the D4 estimate rests on that.
 
 Everything ran 2026-10-02 on the Fedora laptop under `/tmp/jk49`
 (scratch clones of this branch, stand-in bare repos; the live checkout and
-`~/.arbiter` were never mounted or relabelled). Findings in one place:
+`~/.wardmast` were never mounted or relabelled). Findings in one place:
 
 | Probe | Result |
 |---|---|
@@ -1029,12 +1029,12 @@ runs it on the base's runtime, and that a base-only image with no Erlang runs
 `arb` too. By hand, after a deploy: `arb image build <tonic repo>`, then
 
     podman run --rm --pull=never \
-      -v ~/.arbiter/images/cli/arb-launcher-<hash>:/opt/arbiter/cli/arb:ro \
+      -v ~/.wardmast/images/cli/arb-launcher-<hash>:/opt/arbiter/cli/arb:ro \
       -v ~/.local/bin/arb:/opt/arbiter/cli/arb.escript:ro \
       <the tag it printed> arb version
 
 where the launcher file is the one the first podman spawn wrote (`ls
-~/.arbiter/images/cli`). Expect the CLI block of `arb version`, not
+~/.wardmast/images/cli`). Expect the CLI block of `arb version`, not
 `corrupt atom table`. `arb server doctor` lists no `arb in worker containers`
 warning on its podman sandbox row (`GET /api/server/podman_sandbox` shows the
 check itself, `ok`).

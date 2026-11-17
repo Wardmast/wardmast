@@ -1,7 +1,7 @@
 defmodule WardmastCli.Cmd.Doctor.SecretsAtRest do
   @moduledoc """
   `arb doctor`'s "secrets at rest" check: which of arbiter's secrets sit inline in
-  the service's `EnvironmentFile` (`<data-home>/arbiter.env`) and which are
+  the service's `EnvironmentFile` (`<data-home>/wardmast.env`) and which are
   references to an external secret manager (`NAME_REF=aws-sm:…`).
 
   An inline `ARBITER_CLOAK_KEY` or `WARDMAST_CLOAK_KEY` or `SECRET_KEY_BASE` is the finding a host
@@ -28,7 +28,7 @@ defmodule WardmastCli.Cmd.Doctor.SecretsAtRest do
   def check(:absent), do: na()
 
   def check(:live) do
-    path = Path.join(ReleaseFiles.data_home(), "arbiter.env")
+    path = Path.join(ReleaseFiles.data_home(), "wardmast.env")
     if File.regular?(path), do: check(SecretInventory.env_from_file(path)), else: na()
   end
 
@@ -55,7 +55,7 @@ defmodule WardmastCli.Cmd.Doctor.SecretsAtRest do
           status: :warn,
           detail: Enum.join(problems, "; ") <> " (" <> summary <> ")",
           hint:
-            "Keep secret values out of arbiter.env: set e.g. WARDMAST_CLOAK_KEY_REF=aws-sm:<id>#<key> " <>
+            "Keep secret values out of wardmast.env: set e.g. WARDMAST_CLOAK_KEY_REF=aws-sm:<id>#<key> " <>
               "(also SECRET_KEY_BASE_REF, GITHUB_TOKEN_REF; aws-ssm:/file: work too) and remove the inline " <>
               "value. See docs/secrets-at-rest.md.",
           meta: %{secrets: report(entries)}
@@ -67,7 +67,7 @@ defmodule WardmastCli.Cmd.Doctor.SecretsAtRest do
     %Result{
       name: @name,
       status: :na,
-      detail: "no service env file (<data-home>/arbiter.env) on this host"
+      detail: "no service env file (<data-home>/wardmast.env) on this host"
     }
   end
 

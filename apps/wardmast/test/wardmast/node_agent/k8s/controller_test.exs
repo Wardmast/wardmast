@@ -17,7 +17,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerTest do
   @moduletag :tmp_dir
 
   @t0 ~U[2026-10-10 12:00:00Z]
-  @labels %{"arbiter.dev/install" => "inst-1", "arbiter.dev/node" => "node-1"}
+  @labels %{"wardmast.dev/install" => "inst-1", "wardmast.dev/node" => "node-1"}
 
   @config """
   max_concurrent: 2
@@ -87,7 +87,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerTest do
                owner_uid: "0b6c1d7e-8f35-4a58-9c1f-3d2f1b1c1a11",
                bridge_addr: "10.43.98.199",
                gate_addr: "10.43.0.1:443",
-               own_pod: "arbiter-controller-7d9f-abc",
+               own_pod: "wardmast-controller-7d9f-abc",
                max_wall_s: 3600
              },
              sink: self(),
@@ -144,7 +144,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerTest do
     updated = FakeK8sApi.put_pod(env.api, Map.put(pod, "status", status))
 
     Process.put(
-      {:rv, updated["metadata"]["labels"]["arbiter.dev/run"]},
+      {:rv, updated["metadata"]["labels"]["wardmast.dev/run"]},
       updated["metadata"]["resourceVersion"]
     )
 
@@ -243,11 +243,11 @@ defmodule Wardmast.NodeAgent.K8s.ControllerTest do
       pod = Jason.decode!(create.body)
 
       assert pod["metadata"]["name"] == pod_name(1)
-      assert pod["metadata"]["labels"]["arbiter.dev/install"] == "inst-1"
-      assert pod["metadata"]["labels"]["arbiter.dev/node"] == "node-1"
-      assert pod["metadata"]["labels"]["arbiter.dev/run"] == run
+      assert pod["metadata"]["labels"]["wardmast.dev/install"] == "inst-1"
+      assert pod["metadata"]["labels"]["wardmast.dev/node"] == "node-1"
+      assert pod["metadata"]["labels"]["wardmast.dev/run"] == run
 
-      assert [%{"kind" => "Deployment", "name" => "arbiter-controller"}] =
+      assert [%{"kind" => "Deployment", "name" => "wardmast-controller"}] =
                pod["metadata"]["ownerReferences"]
 
       assert pod["spec"]["activeDeadlineSeconds"] == 3600 + 1800
@@ -402,7 +402,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerTest do
       FakeK8sApi.fail_next(
         env.api,
         :create,
-        {403, "pods \"x\" is forbidden: exceeded quota: arbiter-workers"}
+        {403, "pods \"x\" is forbidden: exceeded quota: wardmast-workers"}
       )
 
       assert {:error, {:refuse, :no_capacity, _}} = Controller.assign(controller, wire(1))
@@ -811,7 +811,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerTest do
       })
     end
 
-    defp run_labels(run), do: Map.put(@labels, "arbiter.dev/run", run)
+    defp run_labels(run), do: Map.put(@labels, "wardmast.dev/run", run)
 
     test "deletes our pods outside the live set, with the pod's grace and its uid", env do
       put_labelled(env, "orphan-pod", run_labels("run-orphan"))
@@ -833,21 +833,21 @@ defmodule Wardmast.NodeAgent.K8s.ControllerTest do
 
     test "never a pod missing any of the three labels, never its own pod", env do
       put_labelled(env, "no-run-label", @labels)
-      put_labelled(env, "arbiter-controller-7d9f-abc", run_labels("run-own"))
+      put_labelled(env, "wardmast-controller-7d9f-abc", run_labels("run-own"))
       controller = start_controller(env)
       observed("run-own", :running)
 
       assert %{pods: []} = Controller.reap(controller, %{install: "inst-1", live_set: []})
       assert deletes(env) == []
       assert stored_pod(env, "no-run-label")
-      assert stored_pod(env, "arbiter-controller-7d9f-abc")
+      assert stored_pod(env, "wardmast-controller-7d9f-abc")
     end
 
     test "another install's pods are out of reach even if the primary asks", env do
       put_labelled(env, "foreign", %{
-        "arbiter.dev/install" => "inst-2",
-        "arbiter.dev/node" => "node-1",
-        "arbiter.dev/run" => "run-foreign"
+        "wardmast.dev/install" => "inst-2",
+        "wardmast.dev/node" => "node-1",
+        "wardmast.dev/run" => "run-foreign"
       })
 
       controller = start_controller(env)
@@ -936,7 +936,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerTest do
       FakeK8sApi.put_lease(env.api, %{
         "apiVersion" => "coordination.k8s.io/v1",
         "kind" => "Lease",
-        "metadata" => %{"name" => "arbiter-controller", "namespace" => "arb"},
+        "metadata" => %{"name" => "wardmast-controller", "namespace" => "arb"},
         "spec" => %{"leaseDurationSeconds" => 30}
       })
 
@@ -960,7 +960,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerTest do
       FakeK8sApi.put_lease(env.api, %{
         "apiVersion" => "coordination.k8s.io/v1",
         "kind" => "Lease",
-        "metadata" => %{"name" => "arbiter-controller", "namespace" => "arb"},
+        "metadata" => %{"name" => "wardmast-controller", "namespace" => "arb"},
         "spec" => %{
           "holderIdentity" => "pod-b",
           "renewTime" => "2026-10-10T12:30:00.000000Z",

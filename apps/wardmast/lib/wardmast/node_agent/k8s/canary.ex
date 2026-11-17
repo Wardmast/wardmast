@@ -17,8 +17,8 @@ defmodule Wardmast.NodeAgent.K8s.Canary do
   reference, priority class and node placement, and passes the same Pod Security
   `restricted` checker. Then only what a canary must differ in is changed:
 
-    * **no run label** (`arbiter.dev/canary: <id>` instead): the controller's
-      adoption and the sweeper key on `arbiter.dev/run`, so the canary is never
+    * **no run label** (`wardmast.dev/canary: <id>` instead): the controller's
+      adoption and the sweeper key on `wardmast.dev/run`, so the canary is never
       adopted as a run, never counted against capacity, never reaped by a `reap`;
     * the `seed` init container runs `PodScripts.gate/0` only (K1-A3): a fresh pod
       is unfiltered for a fraction of a second until the CNI programs it, so the
@@ -229,8 +229,8 @@ defmodule Wardmast.NodeAgent.K8s.Canary do
     pod
     |> update_in(["metadata", "labels"], fn labels ->
       labels
-      |> Map.drop(["arbiter.dev/run", "arbiter.dev/task"])
-      |> Map.put("arbiter.dev/canary", id)
+      |> Map.drop(["wardmast.dev/run", "wardmast.dev/task"])
+      |> Map.put("wardmast.dev/canary", id)
     end)
     |> update_in(["spec"], fn spec ->
       spec

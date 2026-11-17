@@ -1,8 +1,8 @@
 defmodule Wardmast.NodeAgent.PodChannel.CAStore.SecretTest do
   @moduledoc """
   The cluster's CA store (`docs/design/remote-workers.md` §16 K§2.4 step 2, K§12, ticket
-  K14): the CA key and certificate in the Secret `arbiter-controller-ca`, the public
-  certificate alone in the ConfigMap `arbiter-ca` the worker pods mount. Against the fake
+  K14): the CA key and certificate in the Secret `wardmast-controller-ca`, the public
+  certificate alone in the ConfigMap `wardmast-ca` the worker pods mount. Against the fake
   API server: the install's placeholders exist, the store only ever updates them.
   """
   use ExUnit.Case, async: true
@@ -11,19 +11,19 @@ defmodule Wardmast.NodeAgent.PodChannel.CAStore.SecretTest do
   alias Wardmast.NodeAgent.PodChannel.CAStore.Secret, as: SecretStore
   alias Wardmast.Test.FakeK8sApi
 
-  @secret "arbiter-controller-ca"
-  @config_map "arbiter-ca"
+  @secret "wardmast-controller-ca"
+  @config_map "wardmast-ca"
 
   setup do
-    env = FakeK8sApi.start!(namespace: "arbiter-workers")
+    env = FakeK8sApi.start!(namespace: "wardmast-workers")
 
     FakeK8sApi.put_secret(env.api, %{
-      "metadata" => %{"name" => @secret, "namespace" => "arbiter-workers"},
+      "metadata" => %{"name" => @secret, "namespace" => "wardmast-workers"},
       "type" => "Opaque"
     })
 
     FakeK8sApi.put_config_map(env.api, %{
-      "metadata" => %{"name" => @config_map, "namespace" => "arbiter-workers"}
+      "metadata" => %{"name" => @config_map, "namespace" => "wardmast-workers"}
     })
 
     Map.put(env, :store, {SecretStore, env.client})
@@ -122,7 +122,7 @@ defmodule Wardmast.NodeAgent.PodChannel.CAStore.SecretTest do
   end
 
   test "a missing placeholder Secret is an error: the store never creates one" do
-    env = FakeK8sApi.start!(namespace: "arbiter-workers")
+    env = FakeK8sApi.start!(namespace: "wardmast-workers")
 
     assert {:error, {:ca_load_failed, :not_found}} =
              CA.load_or_create({SecretStore, env.client})

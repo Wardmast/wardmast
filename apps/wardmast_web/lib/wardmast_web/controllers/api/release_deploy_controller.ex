@@ -5,7 +5,7 @@ defmodule WardmastWeb.Api.ReleaseDeployController do
   anonymous callers are refused before this runs.
 
     * `POST /api/release/deploy` — launch `arb server deploy --version <tag>
-      --json` in its own `arbiter-deploy-<tag>` systemd user unit
+      --json` in its own `wardmast-deploy-<tag>` systemd user unit
       (`Wardmast.Release.SelfDeploy`), outside this BEAM, because the deploy
       restarts it. Body `{"version": "vX.Y.Z"}`, or empty for the latest
       release when `update_available`. `202` with the unit; `409` when a deploy

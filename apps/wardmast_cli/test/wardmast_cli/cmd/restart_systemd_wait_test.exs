@@ -22,10 +22,10 @@ defmodule WardmastCli.Cmd.RestartSystemdWaitTest do
       send(test_pid, {:cmd, cmd, args})
 
       case {cmd, args} do
-        {"systemctl", ["--user", "cat", "arbiter.service"]} ->
+        {"systemctl", ["--user", "cat", "wardmast.service"]} ->
           {"", 0}
 
-        {"systemctl", ["--user", "show", "arbiter.service" | _]} ->
+        {"systemctl", ["--user", "show", "wardmast.service" | _]} ->
           state =
             Agent.get_and_update(agent, fn
               [last] -> {last, [last]}
@@ -59,7 +59,7 @@ defmodule WardmastCli.Cmd.RestartSystemdWaitTest do
     assert {:ok, [{:systemd_restart, :ok, nil}], _} = Restart.perform("/tmp/x", 5_000)
 
     cmds = cmds()
-    assert {"systemctl", ["--user", "restart", "--no-block", "arbiter.service"]} in cmds
+    assert {"systemctl", ["--user", "restart", "--no-block", "wardmast.service"]} in cmds
     refute {"systemctl", ["--user", "daemon-reexec"]} in cmds
   end
 
@@ -71,7 +71,7 @@ defmodule WardmastCli.Cmd.RestartSystemdWaitTest do
 
     cmds = cmds()
     assert Enum.count(cmds, &(&1 == {"systemctl", ["--user", "daemon-reexec"]})) == 1
-    assert {"systemctl", ["--user", "start", "--no-block", "arbiter.service"]} in cmds
+    assert {"systemctl", ["--user", "start", "--no-block", "wardmast.service"]} in cmds
   end
 
   test "stays down: perform reports :down and does not loop forever" do
@@ -84,7 +84,7 @@ defmodule WardmastCli.Cmd.RestartSystemdWaitTest do
 
     assert Enum.count(
              cmds,
-             &(&1 == {"systemctl", ["--user", "start", "--no-block", "arbiter.service"]})
+             &(&1 == {"systemctl", ["--user", "start", "--no-block", "wardmast.service"]})
            ) == 1
   end
 
@@ -110,7 +110,7 @@ defmodule WardmastCli.Cmd.RestartSystemdWaitTest do
     msg = Restart.down_message({:systemd_restart, :down, "inactive"})
     assert msg =~ "server is DOWN"
     assert msg =~ "systemctl --user daemon-reexec"
-    assert msg =~ "systemctl --user start arbiter.service"
+    assert msg =~ "systemctl --user start wardmast.service"
     assert msg =~ "current"
   end
 end

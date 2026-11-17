@@ -114,12 +114,12 @@ defmodule Wardmast.Worker.MemoryScopeTest do
         MemoryScope.wrap(
           port_args(),
           "t",
-          Keyword.put(probe_opts(healthy_cmd(false)), :service_unit, "arbiter.service")
+          Keyword.put(probe_opts(healthy_cmd(false)), :service_unit, "wardmast.service")
         )
 
       assert [_argv0 | args] = wrapped.argv
-      assert "BindsTo=arbiter.service" in args
-      assert "After=arbiter.service" in args
+      assert "BindsTo=wardmast.service" in args
+      assert "After=wardmast.service" in args
 
       # The agent argv is still the tail, after the properties.
       assert List.last(args) == "cost $5 and ${HOME}"
@@ -140,7 +140,7 @@ defmodule Wardmast.Worker.MemoryScopeTest do
         healthy_cmd(false).(bin, args, opts)
       end
 
-      opts = Keyword.put(probe_opts(cmd), :service_unit, "arbiter.service")
+      opts = Keyword.put(probe_opts(cmd), :service_unit, "wardmast.service")
       assert {_, %{}} = MemoryScope.wrap(port_args(), "t", opts)
 
       assert_received {:probe_args, args}

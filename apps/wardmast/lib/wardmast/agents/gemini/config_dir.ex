@@ -43,7 +43,7 @@ defmodule Wardmast.Agents.Gemini.ConfigDir do
 
   A worker still has to `git commit`, `gh`, `mix test` and `arb` — which need
   `.gitconfig`, `.ssh`, `.config/gh`, `.local`, `.cache/mix`, `.hex`, `.mix`,
-  `.arbiter`. Copying all of that per worker is a cold-cache tax on every spawn
+  `.wardmast`. Copying all of that per worker is a cold-cache tax on every spawn
   and (for `.ssh`) would scatter copies of the operator's private keys across
   `~/.cache`. Symlinks keep exactly one copy of each and make this change
   *strictly* no worse than the status quo for everything except `.gemini`,

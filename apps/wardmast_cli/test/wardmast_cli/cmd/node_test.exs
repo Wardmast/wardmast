@@ -180,7 +180,7 @@ defmodule WardmastCli.Cmd.NodeTest do
   describe "add --kind cluster" do
     @manifest_url "https://primary.ts.net/nodes/join/k8s.yaml?name=mesaana-k3s&namespace=ci-workers&max=3"
     @apply ~s|kubectl apply -f <(curl -fsSL "#{@manifest_url}")|
-    @secret "read -rs T && printf %s \"$T\" | kubectl -n ci-workers create secret generic arbiter-join --from-file=token=/dev/stdin"
+    @secret "read -rs T && printf %s \"$T\" | kubectl -n ci-workers create secret generic wardmast-join --from-file=token=/dev/stdin"
     @yaml "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ci-workers\n"
 
     @cluster_minted %{
@@ -366,7 +366,7 @@ defmodule WardmastCli.Cmd.NodeTest do
       refute out =~ @token
 
       assert out =~
-               "kubectl -n ci-workers create secret generic arbiter-join --from-file=token=#{path}"
+               "kubectl -n ci-workers create secret generic wardmast-join --from-file=token=#{path}"
 
       assert out =~ @apply
     end
@@ -392,14 +392,14 @@ defmodule WardmastCli.Cmd.NodeTest do
 
     @values_url "https://primary.ts.net/nodes/join/values.yaml?name=mesaana-k3s&namespace=ci-workers&max=3"
     @namespace_cmd "kubectl create namespace ci-workers && kubectl label namespace ci-workers pod-security.kubernetes.io/enforce=restricted"
-    @helm_install ~s(curl -fsSL "#{@values_url}" | helm install mesaana-k3s oci://ghcr.io/acme/charts/arbiter-node --version 0.2.43 --namespace ci-workers -f -)
+    @helm_install ~s(curl -fsSL "#{@values_url}" | helm install mesaana-k3s oci://ghcr.io/acme/charts/wardmast-node --version 0.2.43 --namespace ci-workers -f -)
     @values_yaml "mode: all\nnode:\n  name: mesaana-k3s\n"
 
     @helm_minted update_in(@cluster_minted, ["cluster"], fn cluster ->
                    Map.merge(cluster, %{
                      "registry_set" => true,
                      "helm" => %{
-                       "chart_ref" => "oci://ghcr.io/acme/charts/arbiter-node",
+                       "chart_ref" => "oci://ghcr.io/acme/charts/wardmast-node",
                        "chart_version" => "0.2.43",
                        "release" => "mesaana-k3s",
                        "values_url" => @values_url,
@@ -463,7 +463,7 @@ defmodule WardmastCli.Cmd.NodeTest do
       refute File.read!(path) =~ @token
 
       assert out =~
-               "helm install mesaana-k3s oci://ghcr.io/acme/charts/arbiter-node --version 0.2.43 " <>
+               "helm install mesaana-k3s oci://ghcr.io/acme/charts/wardmast-node --version 0.2.43 " <>
                  "--namespace ci-workers -f #{path}"
 
       assert_receive {:request, "GET", "/nodes/join/values.yaml"}
@@ -774,7 +774,7 @@ defmodule WardmastCli.Cmd.NodeTest do
 
     test "an outdated cluster node shows the exact command that moves it (K9)" do
       cmd =
-        "kubectl -n ci-workers set image deployment/arbiter-controller " <>
+        "kubectl -n ci-workers set image deployment/wardmast-controller " <>
           "controller=r.example/arbiter/controller:0.2.43"
 
       node =
