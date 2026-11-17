@@ -8,6 +8,17 @@ bd-6dpjw7 (credential spike, closed 2026-10-03), bd-8btihu (file-seeded fallback
 removed) · **Status:** proposed 2026-10-09. Nothing here is implemented; no
 production code changed. The ticket plan is in [§9](#9-proposed-tickets).
 
+> **Superseded for the credential (bd-b2t0kw, 2026-11-17).** The operator chose a Google
+> Cloud **service-account key** (Application Default Credentials, `AGY_ADC_AUTH`) over the
+> identity-volume keyring below: it needs no keyring, no headless login and no
+> single-writer lease, since a key does not rotate on use. That is the §4.3 API-key
+> branch in a service-account shape: a `ProviderCredential` of kind `service_account`,
+> delivered as a `podman run --secret` locally and through `/boot` to a cluster pod. What
+> shipped, and what agy 1.5.9 was measured to do with the key, is in
+> `docs/design/remote-workers.md` §21.5 ("Shipped (bd-b2t0kw)") and the operator's
+> `docs/agy-service-account-runbook.md`. The identity-volume design stays here as the
+> record of the alternative.
+
 ## Decision
 
 1. **The credential model of record is a dedicated worker identity**: one
