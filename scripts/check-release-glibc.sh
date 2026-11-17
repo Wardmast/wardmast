@@ -55,6 +55,14 @@ Examples:
 USAGE
 }
 
+# macOS binaries are Mach-O and have no glibc: the guard does not apply there
+# (the darwin release uses scripts/check-release-macho-libs.sh). $ARB_UNAME_S
+# overrides `uname -s` for tests.
+if [ "${ARB_UNAME_S:-$(uname -s)}" = "Darwin" ]; then
+  echo "skipping glibc guard on Darwin (Mach-O binaries have no glibc requirement)"
+  exit 0
+fi
+
 BASELINE="$DEFAULT_BASELINE"
 PATHS=()
 

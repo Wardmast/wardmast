@@ -288,6 +288,7 @@ defmodule WardmastWeb.ApiPolicy do
     {:get, "/api/server/worker_memory"} => :coordinator,
     {:get, "/api/server/dashboard_auth"} => :coordinator,
     {:get, "/api/server/doctor_scope"} => :coordinator,
+    {:get, "/api/server/platform"} => :coordinator,
     {:get, "/api/server/private_clone_records"} => :coordinator,
     {:post, "/api/server/private_clone_records/retire"} => :coordinator,
     {:get, "/api/server/spawn_canary"} => :coordinator,

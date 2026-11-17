@@ -59,6 +59,19 @@ defmodule WardmastCli.Scripts.CheckReleaseGlibcTest do
     dir
   end
 
+  describe "darwin" do
+    test "is skipped on macOS (Mach-O has no glibc)" do
+      {out, status} =
+        System.cmd("bash", [@script, "/nonexistent"],
+          stderr_to_stdout: true,
+          env: [{"ARB_UNAME_S", "Darwin"}]
+        )
+
+      assert status == 0
+      assert out =~ "skipping"
+    end
+  end
+
   describe "script contract" do
     test "exists and is executable" do
       assert File.exists?(@script)

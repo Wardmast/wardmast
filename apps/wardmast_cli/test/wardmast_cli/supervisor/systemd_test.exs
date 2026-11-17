@@ -150,6 +150,19 @@ defmodule WardmastCli.Supervisor.SystemdTest do
       assert_received {:cmd, "systemctl", ["--user", "disable", "--now", "t.timer"]}
     end
 
+    test "operator command hints name systemctl (used in restart/deploy reports)" do
+      assert Systemd.manager_name() == "systemd"
+      assert Systemd.restart_cmd() == "systemctl --user restart wardmast.service"
+      assert Systemd.start_cmd() == "systemctl --user start wardmast.service"
+      assert Systemd.stop_cmd() == "systemctl --user stop wardmast.service"
+
+      assert Systemd.recover_cmds() == [
+               "systemctl --user daemon-reexec",
+               "systemctl --user start wardmast.service",
+               "systemctl --user status wardmast.service"
+             ]
+    end
+
     test "status_cmd/logs_cmd are scope-aware" do
       assert Systemd.status_cmd(:user) == "systemctl --user status wardmast.service"
       assert Systemd.status_cmd(:system) == "systemctl status wardmast.service"

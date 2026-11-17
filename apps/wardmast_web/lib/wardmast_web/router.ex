@@ -415,6 +415,7 @@ defmodule WardmastWeb.Router do
     get("/server/cli_versions", ServerController, :cli_versions)
     get("/server/tmux", ServerController, :tmux)
     get("/server/doctor_scope", ServerController, :doctor_scope)
+    get("/server/platform", ServerController, :platform)
     get("/server/spawn_canary", ServerController, :spawn_canary_report)
     post("/server/spawn_canary", ServerController, :spawn_canary)
     get("/server/worker_tmp", ServerController, :worker_tmp)
