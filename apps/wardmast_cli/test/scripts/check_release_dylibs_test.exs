@@ -64,7 +64,10 @@ defmodule WardmastCli.Scripts.CheckReleaseDylibsTest do
 
   defp run(dir, path) do
     System.cmd("bash", [@script, path],
-      env: [{"OTOOL", stub_otool!(dir)}],
+      # TMPDIR is pinned to the test's own dir: the script extracts tarballs
+      # under `mktemp -d "$TMPDIR/..."`, and an inherited TMPDIR may not exist
+      # or be writable (e.g. a sandboxed worker's scratch dir).
+      env: [{"OTOOL", stub_otool!(dir)}, {"TMPDIR", dir}],
       stderr_to_stdout: true
     )
   end
