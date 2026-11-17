@@ -611,7 +611,7 @@ defmodule Wardmast.Worker.JailTest do
 
   describe "release cookie mask (bd-51m9ba)" do
     test "each secret file is shadowed read-only by /dev/null, after the root bind" do
-      cookie = "/h/.arbiter/release.cookie"
+      cookie = "/h/.wardmast/release.cookie"
 
       argv =
         Jail.argv(%{bwrap: "bwrap", worktree: "/w", mask_paths: [], secret_files: [cookie]}, [
