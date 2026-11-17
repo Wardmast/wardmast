@@ -58,7 +58,7 @@ defmodule WardmastCli.Cmd.Doctor do
     * security posture — bind address, anonymous `/api` refused, dashboard
       login, Erlang distribution loopback-only with an owner-only cookie,
       secrets at rest (which of the cloak key, `SECRET_KEY_BASE` and provider
-      tokens are inline in `arbiter.env` and which are `*_REF` pointers to a
+      tokens are inline in `wardmast.env` and which are `*_REF` pointers to a
       secret manager; a `warn` while a boot secret is inline), workspace
       safe-default categories, guardrail profiles.
   """

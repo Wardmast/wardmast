@@ -1456,7 +1456,7 @@ The filing's own open questions, and where they stand:
 ## Appendix A: how the numbers were produced
 
 The queries read the install database read-only, opening
-`~/.arbiter/arbiter.sqlite3` with `mode=ro` on 2026-10-01. The window is
+`~/.wardmast/arbiter.sqlite3` with `mode=ro` on 2026-10-01. The window is
 fixed, so a re-run gives the same figures: tasks whose first attempt started
 in `[2026-08-24T00:00Z, 2026-10-01T12:00Z)`, and only events before the
 cutoff. The one exception is "difficulty raised", which reads the current

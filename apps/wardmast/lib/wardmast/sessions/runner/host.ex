@@ -3,7 +3,7 @@ defmodule Wardmast.Sessions.Runner.Host do
   The real `Wardmast.Sessions.Runner`: `Wardmast.Worker.ReleaseEnv.cmd/3`.
 
   Not a bare `System.cmd/3`, because the commands here start a tmux server
-  which starts an agent CLI. Under the systemd OTP release `arbiter.service`
+  which starts an agent CLI. Under the systemd OTP release `wardmast.service`
   exports `ROOTDIR` / `BINDIR` / `RELEASE_*`, every child inherits them, and
   anything that then boots a BEAM (`mix`, `elixir`, `arb`) resolves the
   release's ERTS instead of the pinned toolchain and dies with

@@ -1,6 +1,6 @@
 defmodule WardmastCli.Cmd.InstallService.EnvFile do
   @moduledoc """
-  Reads and writes `<arbiter_home>/arbiter.env`: secret + `PATH` capture for
+  Reads and writes `<arbiter_home>/wardmast.env`: secret + `PATH` capture for
   `arb install-service`, and the idempotent key/value merge that lets a
   managed key be rewritten in place without disturbing sibling keys or
   comments already in the file.
@@ -8,7 +8,7 @@ defmodule WardmastCli.Cmd.InstallService.EnvFile do
 
   alias WardmastCli.Output
 
-  # Keys forwarded from the installing shell into `.arbiter.env` so the
+  # Keys forwarded from the installing shell into `.wardmast.env` so the
   # detached, login-less service can still reach GitHub and the model
   # providers. Only keys actually set (and non-empty) in the current
   # environment are written. `CLAUDE_CODE_OAUTH_TOKEN` is deliberately absent:
@@ -47,14 +47,14 @@ defmodule WardmastCli.Cmd.InstallService.EnvFile do
 
   @doc """
   Forward any of `@captured_secrets` (and `@captured_refs` pointers) set in the current environment into
-  `<arbiter_home>/arbiter.env`, preserving any keys already present. Returns
+  `<arbiter_home>/wardmast.env`, preserving any keys already present. Returns
   `{:written, path, keys}` listing the keys captured, or `{:none, path}` when
   the environment carries none of them.
   """
   @spec capture_secrets(String.t()) ::
           {:written, String.t(), [String.t()]} | {:none, String.t()}
   def capture_secrets(arbiter_home) do
-    path = Path.join(arbiter_home, "arbiter.env")
+    path = Path.join(arbiter_home, "wardmast.env")
 
     refs = captured_pairs(@captured_refs)
     referenced = MapSet.new(refs, fn {k, _} -> k end)
@@ -87,7 +87,7 @@ defmodule WardmastCli.Cmd.InstallService.EnvFile do
   end
 
   @doc """
-  Capture the installing shell's PATH into `<arbiter_home>/arbiter.env` so
+  Capture the installing shell's PATH into `<arbiter_home>/wardmast.env` so
   the login-less systemd service can find agent CLIs (e.g. `claude` in
   ~/.local/bin, mise shims) that live outside the stripped system PATH.
   Uses the same idempotent merge as `capture_secrets/1`.
@@ -98,7 +98,7 @@ defmodule WardmastCli.Cmd.InstallService.EnvFile do
   def capture_path(arbiter_home) do
     case System.get_env("PATH") do
       v when is_binary(v) and v != "" ->
-        env_path = Path.join(arbiter_home, "arbiter.env")
+        env_path = Path.join(arbiter_home, "wardmast.env")
         merged = env_path |> read_env_entries() |> merge_env_entries([{"PATH", v}])
         write_env_file(env_path, render_env_entries(merged))
         :written
@@ -108,7 +108,7 @@ defmodule WardmastCli.Cmd.InstallService.EnvFile do
     end
   end
 
-  # Read `.arbiter.env` into an ordered list of entries: `{:kv, key, value}`
+  # Read `.wardmast.env` into an ordered list of entries: `{:kv, key, value}`
   # for `KEY=value` lines and `{:raw, line}` for everything else (comments,
   # blanks). Keeping the raw lines lets us round-trip the file without
   # clobbering the user's own keys or formatting. Missing file → empty.
@@ -174,7 +174,7 @@ defmodule WardmastCli.Cmd.InstallService.EnvFile do
     body <> "\n"
   end
 
-  # `.arbiter.env` holds secrets, so it's written 0600 (owner read/write only)
+  # `.wardmast.env` holds secrets, so it's written 0600 (owner read/write only)
   # on every write — both at creation and when tightening an existing file.
   defp write_env_file(path, body) do
     path |> Path.dirname() |> File.mkdir_p!()

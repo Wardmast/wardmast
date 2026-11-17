@@ -22,13 +22,13 @@ defmodule Wardmast.NodeAgent.K8s.AdmissionPolicy do
   builder always emits both.
   """
 
-  @controller "arbiter-controller"
+  @controller "wardmast-controller"
 
   @type validation :: %{name: String.t(), expression: String.t(), message: String.t()}
 
   @doc "The service-account user the policy applies to."
   @spec controller_username(String.t()) :: String.t()
-  def controller_username(namespace \\ "arbiter-workers"),
+  def controller_username(namespace \\ "wardmast-workers"),
     do: "system:serviceaccount:#{namespace}:#{@controller}"
 
   @doc "`variables`: `all` is every container, init containers included, tolerating a pod with none."
@@ -45,7 +45,7 @@ defmodule Wardmast.NodeAgent.K8s.AdmissionPolicy do
 
   @doc "`matchConditions`: the policy only judges requests from the controller."
   @spec match_conditions(String.t()) :: [%{name: String.t(), expression: String.t()}]
-  def match_conditions(namespace \\ "arbiter-workers") do
+  def match_conditions(namespace \\ "wardmast-workers") do
     [
       %{
         name: "from-controller",
@@ -75,9 +75,9 @@ defmodule Wardmast.NodeAgent.K8s.AdmissionPolicy do
     [
       %{
         name: "service-account",
-        message: "pods run as arbiter-worker with no token",
+        message: "pods run as wardmast-worker with no token",
         expression:
-          "object.spec.serviceAccountName == 'arbiter-worker' && object.spec.automountServiceAccountToken == false"
+          "object.spec.serviceAccountName == 'wardmast-worker' && object.spec.automountServiceAccountToken == false"
       },
       %{
         name: "host-namespaces",
@@ -87,9 +87,9 @@ defmodule Wardmast.NodeAgent.K8s.AdmissionPolicy do
       },
       %{
         name: "volumes",
-        message: "only emptyDir and the arbiter-ca ConfigMap: no Secret, hostPath or PVC",
+        message: "only emptyDir and the wardmast-ca ConfigMap: no Secret, hostPath or PVC",
         expression:
-          "object.spec.volumes.all(v, has(v.emptyDir) || (has(v.configMap) && v.configMap.name == 'arbiter-ca'))"
+          "object.spec.volumes.all(v, has(v.emptyDir) || (has(v.configMap) && v.configMap.name == 'wardmast-ca'))"
       },
       %{
         name: "container-hardening",
@@ -128,7 +128,7 @@ defmodule Wardmast.NodeAgent.K8s.AdmissionPolicy do
 
   @doc """
   The policy and its binding as two string-keyed manifests. Options: `registry:`
-  (required), `namespace:` (default `arbiter-workers`), `image_prefixes:`,
+  (required), `namespace:` (default `wardmast-workers`), `image_prefixes:`,
   `sandbox_classes:` (see `validations/3`) and `registries:` (KH13, §20.10: every further
   registry prefix, each ending in `/`, a pod's images may come from: the same list the
   controller's `PodConfig` accepts, so the API server and the pod builder agree on what may run).
@@ -136,7 +136,7 @@ defmodule Wardmast.NodeAgent.K8s.AdmissionPolicy do
   @spec manifests(keyword()) :: [map()]
   def manifests(opts) do
     registry = Keyword.fetch!(opts, :registry)
-    namespace = Keyword.get(opts, :namespace, "arbiter-workers")
+    namespace = Keyword.get(opts, :namespace, "wardmast-workers")
     sandbox_classes = Keyword.get(opts, :sandbox_classes, [])
 
     prefixes =
@@ -146,7 +146,7 @@ defmodule Wardmast.NodeAgent.K8s.AdmissionPolicy do
       %{
         "apiVersion" => "admissionregistration.k8s.io/v1",
         "kind" => "ValidatingAdmissionPolicy",
-        "metadata" => %{"name" => "arbiter-worker-pods"},
+        "metadata" => %{"name" => "wardmast-worker-pods"},
         "spec" => %{
           "failurePolicy" => "Fail",
           "matchConstraints" => %{
@@ -176,9 +176,9 @@ defmodule Wardmast.NodeAgent.K8s.AdmissionPolicy do
       %{
         "apiVersion" => "admissionregistration.k8s.io/v1",
         "kind" => "ValidatingAdmissionPolicyBinding",
-        "metadata" => %{"name" => "arbiter-worker-pods"},
+        "metadata" => %{"name" => "wardmast-worker-pods"},
         "spec" => %{
-          "policyName" => "arbiter-worker-pods",
+          "policyName" => "wardmast-worker-pods",
           "validationActions" => ["Deny"],
           "matchResources" => %{
             "namespaceSelector" => %{

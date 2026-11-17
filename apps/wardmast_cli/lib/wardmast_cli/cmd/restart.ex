@@ -11,7 +11,7 @@ defmodule WardmastCli.Cmd.Restart do
 
   What it does:
 
-    1. **Stop the running server.** If the `arbiter.service` user unit is
+    1. **Stop the running server.** If the `wardmast.service` user unit is
        present, delegate to `systemctl --user restart`. Otherwise find the OS
        process listening on the API port (derived from `ARB_HOST`) via `lsof`
        and send it `SIGTERM` for a clean BEAM shutdown. If the port hasn't
@@ -19,7 +19,7 @@ defmodule WardmastCli.Cmd.Restart do
 
        The signalling path **fails closed** (bd-3t973v): it aborts if systemd
        cannot be asked about the unit (no bus, unexpected error) or an
-       `arbiter.service` file exists on disk, and it only signals a pid whose
+       `wardmast.service` file exists on disk, and it only signals a pid whose
        `/proc/<pid>/cmdline` proves a dev `mix phx.server` — never a release
        BEAM (`bin/wardmast`, `releases/<vsn>/start`), an unrelated process, or
        one whose cmdline can't be read.
@@ -115,7 +115,7 @@ defmodule WardmastCli.Cmd.Restart do
   the API was reachable before the bounce. Shared with `arb update`, which runs
   a `git pull` first and then reuses this to load the freshly-merged code.
 
-  When the `arbiter.service` systemd user unit is present, delegates the
+  When the `wardmast.service` systemd user unit is present, delegates the
   restart to `systemctl --user restart` instead of the SIGTERM/start dance so
   systemd remains the authoritative process supervisor.
   """
@@ -150,13 +150,13 @@ defmodule WardmastCli.Cmd.Restart do
   @spec down_message(tuple() | nil) :: String.t()
   def down_message({:systemd_restart, :down, state}) do
     """
-    server is DOWN after restart: arbiter.service is #{state || "not active"} after \
+    server is DOWN after restart: wardmast.service is #{state || "not active"} after \
     #{@service_wait_s}s (a systemd start job can wedge in `waiting`; a daemon-reexec was tried once).
 
     Recover:
       systemctl --user daemon-reexec
-      systemctl --user start arbiter.service
-      systemctl --user status arbiter.service
+      systemctl --user start wardmast.service
+      systemctl --user status wardmast.service
     If it will not start, roll back by re-pointing `current` at the previous release \
     (ln -sfn <releases>/<previous-tag> <releases>/current) and starting it again.\
     """
@@ -176,7 +176,7 @@ defmodule WardmastCli.Cmd.Restart do
   def stop(_root) do
     case systemd_state() do
       :managed ->
-        Start.log_text("Stopping via systemd (systemctl --user stop arbiter.service)…")
+        Start.log_text("Stopping via systemd (systemctl --user stop wardmast.service)…")
 
         Supervisor.impl().stop_service()
 
@@ -198,7 +198,7 @@ defmodule WardmastCli.Cmd.Restart do
   #
   #   * `:managed`   — `systemctl --user cat` exit 0: the unit exists.
   #   * `:unmanaged` — systemctl says the unit does not exist (or systemctl is
-  #     not installed at all) AND no `arbiter.service` file is on disk.
+  #     not installed at all) AND no `wardmast.service` file is on disk.
   #   * anything else (bus unreachable, odd exit, unexpected error, or a unit
   #     file on disk that systemctl denies) aborts via `Output.die/2`.
   #
@@ -215,11 +215,11 @@ defmodule WardmastCli.Cmd.Restart do
 
       {:unreachable, why} ->
         Output.die(
-          "could not reach systemd to find out whether arbiter.service is installed (#{why})",
+          "could not reach systemd to find out whether wardmast.service is installed (#{why})",
           "Refusing to fall back to signalling whatever listens on the API port: if " <>
-            "arbiter.service manages the server, that kills the live release.\n" <>
+            "wardmast.service manages the server, that kills the live release.\n" <>
             "Run `arb restart` from a normal login shell (XDG_RUNTIME_DIR / D-Bus set), " <>
-            "or `systemctl --user restart arbiter.service` directly."
+            "or `systemctl --user restart wardmast.service` directly."
         )
     end
   end
@@ -227,22 +227,22 @@ defmodule WardmastCli.Cmd.Restart do
   defp probe_systemd, do: Supervisor.impl().service_state()
 
   defp refuse_if_unit_file_on_disk! do
-    case Enum.find(Supervisor.impl().unit_dirs(), &File.exists?(Path.join(&1, "arbiter.service"))) do
+    case Enum.find(Supervisor.impl().unit_dirs(), &File.exists?(Path.join(&1, "wardmast.service"))) do
       nil ->
         :ok
 
       dir ->
         Output.die(
-          "#{Path.join(dir, "arbiter.service")} exists, but systemctl does not manage it from here",
+          "#{Path.join(dir, "wardmast.service")} exists, but systemctl does not manage it from here",
           "Refusing to signal whatever listens on the API port: the unit owns the server. " <>
-            "Use `systemctl --user restart arbiter.service` from a login shell."
+            "Use `systemctl --user restart wardmast.service` from a login shell."
         )
     end
   end
 
   # Delegate the full stop+start cycle to systemd. Returns an action tuple.
   defp restart_via_systemd do
-    Start.log_text("Restarting via systemd (systemctl --user restart arbiter.service)…")
+    Start.log_text("Restarting via systemd (systemctl --user restart wardmast.service)…")
 
     # `--no-block`: a plain `restart` waits for the start job and hangs for as
     # long as systemd leaves that job in `waiting` (the 2026-10-11 outage). We
@@ -255,7 +255,7 @@ defmodule WardmastCli.Cmd.Restart do
     end
   end
 
-  # Bounded wait for arbiter.service to reach ActiveState=active. If it sits
+  # Bounded wait for wardmast.service to reach ActiveState=active. If it sits
   # inactive/failed past `@service_stuck_s` (a start job wedged in `waiting`),
   # try `daemon-reexec` + one more start, logged. Returns the action tuple:
   # `:ok`, `:recovered` (needed the reexec), or `:down` with the last state.
@@ -289,7 +289,7 @@ defmodule WardmastCli.Cmd.Restart do
 
   defp recover_stuck_start(state) do
     Start.log_text(
-      "arbiter.service is still #{state} after #{@service_stuck_s}s (start job stuck?); " <>
+      "wardmast.service is still #{state} after #{@service_stuck_s}s (start job stuck?); " <>
         "running `systemctl --user daemon-reexec` and starting it again…"
     )
 
@@ -378,7 +378,7 @@ defmodule WardmastCli.Cmd.Restart do
         Output.die(
           "refusing to signal what listens on port #{port}: cannot prove it is a dev `mix phx.server`",
           detail <>
-            "\nA release (`bin/wardmast`) is restarted with `systemctl --user restart arbiter.service` " <>
+            "\nA release (`bin/wardmast`) is restarted with `systemctl --user restart wardmast.service` " <>
             "or `arb release deploy`, never by signalling it. Nothing was signalled."
         )
     end
@@ -719,7 +719,7 @@ defmodule WardmastCli.Cmd.Restart do
   defp stop_summary(actions) do
     cond do
       List.keyfind(actions, :systemd_restart, 0) ->
-        "Restarted via systemd (systemctl --user restart arbiter.service).\n"
+        "Restarted via systemd (systemctl --user restart wardmast.service).\n"
 
       match?({:phoenix_stop, :not_running, _}, List.keyfind(actions, :phoenix_stop, 0)) ->
         "No running server found — started a fresh one.\n"

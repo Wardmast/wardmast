@@ -212,13 +212,13 @@ defmodule Wardmast.Sessions.Naming do
     "heartbeat-" <> key
   end
 
-  # Same resolution as the deploy data home (`:data_dir`, `WARDMAST_DATA_HOME`, `~/.arbiter`),
+  # Same resolution as the deploy data home (`:data_dir`, `WARDMAST_DATA_HOME`, `~/.wardmast`),
   # kept local: sessions/ must not depend on the node layer.
   defp data_home do
     case {Application.fetch_env(:wardmast, :data_dir), Wardmast.Env.get("WARDMAST_DATA_HOME")} do
       {{:ok, dir}, _} when is_binary(dir) -> Path.expand(dir)
       {_, dir} when is_binary(dir) and dir != "" -> Path.expand(dir)
-      _ -> Path.join(System.user_home!(), ".arbiter")
+      _ -> Path.join(System.user_home!(), ".wardmast")
     end
   end
 

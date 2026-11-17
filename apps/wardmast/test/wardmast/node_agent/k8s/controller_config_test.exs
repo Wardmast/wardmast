@@ -6,7 +6,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerConfigTest do
 
   @full """
   max_concurrent: 3
-  namespace: arbiter-workers
+  namespace: wardmast-workers
   worker:
     requests: {cpu: "1", memory: 2Gi, ephemeral-storage: 4Gi}
     limits: {cpu: "2", memory: 4Gi}
@@ -16,7 +16,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerConfigTest do
   placement:
     node_selector: {kubernetes.io/hostname: mesanna}
     tolerations: []
-    priority_class: arbiter-worker
+    priority_class: wardmast-worker
     runtime_class: ""
   image_pull_secrets: [gitlab-registry]
   timeouts: {schedule_s: 30, pull_s: 600, boot_s: 120, grace_s: 90, retain_failed_s: 300}
@@ -27,7 +27,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerConfigTest do
     test "the design's example file loads" do
       assert {:ok, cfg} = ControllerConfig.parse(@full)
       assert cfg.max_concurrent == 3
-      assert cfg.namespace == "arbiter-workers"
+      assert cfg.namespace == "wardmast-workers"
       assert cfg.timeouts["schedule_s"] == 30
       assert cfg.timeouts["grace_s"] == 90
       assert cfg.image_pull_secrets == ["gitlab-registry"]
@@ -159,7 +159,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerConfigTest do
       }
 
       pod = ControllerConfig.pod_config(cfg, facts)
-      assert pod.namespace == "arbiter-workers"
+      assert pod.namespace == "wardmast-workers"
       assert pod.install_id == "inst-1"
       refute Map.has_key?(pod, :max_concurrent)
       assert {:ok, _} = PodConfig.normalize(pod)

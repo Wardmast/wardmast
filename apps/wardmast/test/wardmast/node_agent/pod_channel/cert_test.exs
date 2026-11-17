@@ -66,10 +66,10 @@ defmodule Wardmast.NodeAgent.PodChannel.CertTest do
     nb: nb,
     na: na
   } do
-    server = Cert.server(ca, ["arbiter-controller"], [{10, 43, 98, 199}], nb, na)
+    server = Cert.server(ca, ["wardmast-controller"], [{10, 43, 98, 199}], nb, na)
 
     assert {:ok, _} = :public_key.pkix_path_validation(ca.der, [server.der], [])
-    assert :public_key.pkix_verify_hostname(server.der, [{:dns_id, ~c"arbiter-controller"}])
+    assert :public_key.pkix_verify_hostname(server.der, [{:dns_id, ~c"wardmast-controller"}])
     assert :public_key.pkix_verify_hostname(server.der, [{:ip, {10, 43, 98, 199}}])
     refute :public_key.pkix_verify_hostname(server.der, [{:dns_id, ~c"evil.example"}])
   end

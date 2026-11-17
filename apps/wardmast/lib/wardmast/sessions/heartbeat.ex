@@ -7,7 +7,7 @@ defmodule Wardmast.Sessions.Heartbeat do
   `watchdog.sh`) needs to answer "is arbiter still around?" without ever
   connecting *to* arbiter — the whole point is that it must keep working if
   arbiter never comes back at all (§4.2's measured case: `systemctl --user
-  stop arbiter.service` and the scope keeps serving indefinitely). A file
+  stop wardmast.service` and the scope keeps serving indefinitely). A file
   whose mtime this process refreshes periodically, and which simply goes
   stale when this process is gone, needs no network, no auth and no arbiter
   process to be alive to be *read* — only to have been *written*, at some

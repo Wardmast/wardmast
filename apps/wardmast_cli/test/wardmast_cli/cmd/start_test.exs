@@ -110,7 +110,7 @@ defmodule WardmastCli.Cmd.StartTest do
       assert compile_n < phoenix_n
     end
 
-    test "script sources .arbiter.env with set -a so all vars are exported" do
+    test "script sources .wardmast.env with set -a so all vars are exported" do
       stub_transport_error(:get, "/api/workspaces", :econnrefused)
       Process.put(:bd2_sleep, fn _ms -> :ok end)
 
@@ -127,7 +127,7 @@ defmodule WardmastCli.Cmd.StartTest do
       assert code == 0
       assert_received {:cmd, "sh", ["-c", script]}
       # Shell-level conditional so it's always present in the script string.
-      assert script =~ ".arbiter.env"
+      assert script =~ ".wardmast.env"
       assert script =~ "set -a"
       assert script =~ "mix phx.server"
     end

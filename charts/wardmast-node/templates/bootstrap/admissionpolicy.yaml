@@ -5,7 +5,7 @@ CEL is Arbiter.NodeAgent.K8s.AdmissionPolicy.validations/2, verbatim (the chart-
 parity test, KH6, keeps the two from drifting). Cluster-scoped, Kubernetes >= 1.30, and
 one per namespace: it matches on the controller's service-account name.
 */ -}}
-{{- if and (include "arbiter-node.bootstrap" .) .Values.admissionPolicy.enabled }}
+{{- if and (include "wardmast-node.bootstrap" .) .Values.admissionPolicy.enabled }}
 {{- $images := list }}
 {{- range (required "admissionPolicy.enabled needs registries[] (the worker image allow-list)" .Values.registries) }}
 {{- $images = append $images (printf "c.image.startsWith('%s/')" (trimSuffix "/" .prefix)) }}
@@ -14,9 +14,9 @@ one per namespace: it matches on the controller's service-account name.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: arbiter-worker-pods
+  name: wardmast-worker-pods
   labels:
-    {{- include "arbiter-node.labels" . | nindent 4 }}
+    {{- include "wardmast-node.labels" . | nindent 4 }}
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -32,17 +32,17 @@ spec:
   matchConditions:
     - name: from-controller
       expression: |-
-        request.userInfo.username == 'system:serviceaccount:{{ .Release.Namespace }}:arbiter-controller'
+        request.userInfo.username == 'system:serviceaccount:{{ .Release.Namespace }}:wardmast-controller'
   validations:
-    - message: pods run as arbiter-worker with no token
+    - message: pods run as wardmast-worker with no token
       expression: |-
-        object.spec.serviceAccountName == 'arbiter-worker' && object.spec.automountServiceAccountToken == false
+        object.spec.serviceAccountName == 'wardmast-worker' && object.spec.automountServiceAccountToken == false
     - message: no host namespaces
       expression: |-
         !has(object.spec.hostNetwork) && !has(object.spec.hostPID) && !has(object.spec.hostIPC)
-    - message: "only emptyDir and the arbiter-ca ConfigMap: no Secret, hostPath or PVC"
+    - message: "only emptyDir and the wardmast-ca ConfigMap: no Secret, hostPath or PVC"
       expression: |-
-        object.spec.volumes.all(v, has(v.emptyDir) || (has(v.configMap) && v.configMap.name == 'arbiter-ca'))
+        object.spec.volumes.all(v, has(v.emptyDir) || (has(v.configMap) && v.configMap.name == 'wardmast-ca'))
     - message: every container is hardened
       expression: |-
         (object.spec.containers + object.spec.initContainers).all(c, has(c.securityContext) && c.securityContext.allowPrivilegeEscalation == false && c.securityContext.capabilities.drop == ['ALL'] && c.securityContext.readOnlyRootFilesystem == true)
@@ -59,11 +59,11 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: arbiter-worker-pods
+  name: wardmast-worker-pods
   labels:
-    {{- include "arbiter-node.labels" . | nindent 4 }}
+    {{- include "wardmast-node.labels" . | nindent 4 }}
 spec:
-  policyName: arbiter-worker-pods
+  policyName: wardmast-worker-pods
   validationActions: ["Deny"]
   matchResources:
     namespaceSelector:

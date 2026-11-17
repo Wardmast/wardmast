@@ -154,7 +154,7 @@ is a `warn`.
 
 **gVisor (`runsc`).** runsc refuses `hostUsers: false` (`RuntimeClass handler "runsc" does
 not support user namespaces`): its sandbox replaces the user namespace. Name the handler in
-`arbiter-controller-config` next to the class:
+`wardmast-controller-config` next to the class:
 
     placement:
       runtime_class: gvisor
@@ -169,8 +169,8 @@ anything else they keep `hostUsers: false`. For the admission policy, install wi
 
 * PriorityClass: create the one in the install manifest (`value: -100`,
   `preemptionPolicy: Never`) or set `placement.priority_class` in
-  `arbiter-controller-config` to one that exists. The controller Deployment has its own,
-  `arbiter-controller` (also in the install manifest); upgrading an older node needs that
+  `wardmast-controller-config` to one that exists. The controller Deployment has its own,
+  `wardmast-controller` (also in the install manifest); upgrading an older node needs that
   class to exist first (`helm upgrade` the bootstrap release, or apply the manifest's
   `PriorityClass` documents), or the Deployment's new pod is refused.
 * A placement that never reaches a live pod is no longer left "placing": the primary holds
@@ -218,7 +218,7 @@ it". Each step has a pass criterion; stop at the first that fails.
 
 0. **Go-ahead.** The operator says, in this ticket or to the coordinator, that the k3s
    may be touched and by whom. Without it, stop here. Use a dedicated namespace
-   (`arbiter-workers`) and the kubeconfig context the operator names; never `kubectl
+   (`wardmast-workers`) and the kubeconfig context the operator names; never `kubectl
    --all-namespaces` anything.
 1. **Prove NetworkPolicy enforcement on the real cluster, standalone.** Run
    `docs/design/k8s-spike/k2-operator-check.sh` (read it first: it touches two
@@ -228,21 +228,21 @@ it". Each step has a pass criterion; stop at the first that fails.
    rollout's first step precisely because enforcement has never been exercised there.
 2. **Namespace with Pod Security `restricted`.** Apply the install manifest's namespace
    with `pod-security.kubernetes.io/enforce: restricted`. **Pass:** `kubectl get ns
-   arbiter-workers --show-labels` shows it, and a deliberately privileged test pod is
+   wardmast-workers --show-labels` shows it, and a deliberately privileged test pod is
    refused (the doctor's `Pod Security restricted` row does this for you later).
 3. **ResourceQuota.** Apply the quota for `max_concurrent: 2` (the install manifest's
    §4.3 block: pods 4, requests 3 CPU / 6 GiB, limits 6 CPU / 10 GiB). **Pass:**
-   `kubectl -n arbiter-workers describe resourcequota` lists it. This is what keeps
+   `kubectl -n wardmast-workers describe resourcequota` lists it. This is what keeps
    workers from starving vstim prod and CI.
-4. **Low priority.** Create the PriorityClass `arbiter-worker` with `value: -100` and
-   `preemptionPolicy: Never`. **Pass:** `kubectl get priorityclass arbiter-worker`
+4. **Low priority.** Create the PriorityClass `wardmast-worker` with `value: -100` and
+   `preemptionPolicy: Never`. **Pass:** `kubectl get priorityclass wardmast-worker`
    shows `-100`. Workers must never preempt anything else. Also create the controller's
-   own class `arbiter-controller` (`value: 1000`, `preemptionPolicy: PreemptLowerPriority`),
+   own class `wardmast-controller` (`value: 1000`, `preemptionPolicy: PreemptLowerPriority`),
    which the controller Deployment references: the controller must **not** share the
    workers' `-100`, or a busy cluster (CI pods at priority 0) preempts it first, the node
    counts as lost and every run on it is interrupted (mesaana, 2026-10-29). `PreemptLowerPriority`
    lets a rescheduled controller make room on a full cluster; set `Never` if it must not
-   evict anything. **Pass:** `kubectl get priorityclass arbiter-controller` shows `1000`.
+   evict anything. **Pass:** `kubectl get priorityclass wardmast-controller` shows `1000`.
 5. **NetworkPolicies.** Apply `default-deny`, `worker-to-controller`,
    `controller-ingress-from-workers` and `controller-egress` from the install manifest
    (fill the `controller-egress` addresses: the API node IP, the `kubernetes` ClusterIP).
@@ -254,7 +254,7 @@ it". Each step has a pass criterion; stop at the first that fails.
    manifest works under pre-DNAT CNIs too. Find them with
    `kubectl get endpoints kubernetes -o jsonpath='{.subsets[*].addresses[*].ip}'`, then
    render with `arb node add --kind cluster --api-cidrs <ip>/32,...` (the dashboard's Add
-   node form has the same "API server CIDRs" field). **Pass:** `kubectl -n arbiter-workers
+   node form has the same "API server CIDRs" field). **Pass:** `kubectl -n wardmast-workers
    get networkpolicy controller-egress -o yaml` lists both `10.43.0.1/32` and the node IP.
 6. **Placement: spread, do not pin.** Leave `placement.node_selector` empty and add no
    taints or tolerations: workers spread across every schedulable node (the default
@@ -264,7 +264,7 @@ it". Each step has a pass criterion; stop at the first that fails.
    §4a); do not pre-pull it on one machine. A node that is a poor fit (a Wi-Fi link, the CI
    runner) is excluded by a node selector or `nodeAffinity` the operator chooses
    deliberately, never by default. **Pass:** the ConfigMap loads (no `bad_config`
-   degradation) and a first worker pod schedules (`kubectl -n arbiter-workers get pods -o wide`).
+   degradation) and a first worker pod schedules (`kubectl -n wardmast-workers get pods -o wide`).
 7. **Install the controller** from the primary ("Add node", kind `cluster`, or
    `arb node add --kind cluster`), with `max_concurrent: 2`. The cluster is not on the
    tailnet, so use the install's reachability path A (a tagged tailscale auth key).
@@ -286,18 +286,18 @@ it". Each step has a pass criterion; stop at the first that fails.
     default is `local_only`; opt a workspace in deliberately, and only non-sensitive
     ones, for the test bed. Start with one workspace and `max_concurrent: 2`.
 11. **Watch the first runs.** `arb node show <name>`, the doctor, and `kubectl -n
-    arbiter-workers get pods`. Check the canary again after the first run finishes and
+    wardmast-workers get pods`. Check the canary again after the first run finishes and
     again after 10 minutes.
 
 **Back-out:** `arb node drain <name>` then `arb node revoke <name>`, then delete the
 install (§4a for a Helm install; for the raw manifests delete the namespace
-`arbiter-workers`, which removes the controller, its Secrets and any worker pod) and the
-cluster-scoped `arbiter-worker` PriorityClass. Nothing else in the cluster was changed by
+`wardmast-workers`, which removes the controller, its Secrets and any worker pod) and the
+cluster-scoped `wardmast-worker` PriorityClass. Nothing else in the cluster was changed by
 this checklist.
 
-### 4a. Installing with Helm (`charts/arbiter-node`)
+### 4a. Installing with Helm (`charts/wardmast-node`)
 
-The chart (`charts/arbiter-node/README.md`) replaces the raw manifests
+The chart (`charts/wardmast-node/README.md`) replaces the raw manifests
 (`GET /nodes/join/k8s.yaml`), which remain the fallback for clusters without Helm. The
 dashboard's "Add node" Helm tab and `arb node add --kind cluster --format helm|values`
 print the commands below with this node's values (`GET /nodes/join/values.yaml`).
@@ -306,13 +306,13 @@ print the commands below with this node's values (`GET /nodes/join/values.yaml`)
 
 | who | does | release |
 |---|---|---|
-| cluster-admin, once | creates the namespace with Pod Security `restricted` labels; installs the guardrails (PriorityClass, ResourceQuota, LimitRange, NetworkPolicies, optional RuntimeClass / admission policy) | `helm install <node>-bootstrap charts/arbiter-node -n arbiter-workers --set mode=bootstrap ...` |
-| namespace admin | creates the join Secret and installs the controller (ServiceAccounts, Role, RoleBinding, config, Lease, Service, Deployment) | `helm install <node> charts/arbiter-node -n arbiter-workers --set mode=node ...` |
+| cluster-admin, once | creates the namespace with Pod Security `restricted` labels; installs the guardrails (PriorityClass, ResourceQuota, LimitRange, NetworkPolicies, optional RuntimeClass / admission policy) | `helm install <node>-bootstrap charts/wardmast-node -n wardmast-workers --set mode=bootstrap ...` |
+| namespace admin | creates the join Secret and installs the controller (ServiceAccounts, Role, RoleBinding, config, Lease, Service, Deployment) | `helm install <node> charts/wardmast-node -n wardmast-workers --set mode=node ...` |
 | one cluster-admin | both in one release | `mode=all` (the default); the release name is the node name |
 
 The chart never templates the Namespace (Helm stores its release record there), so the
-cluster-admin creates and labels it first: `kubectl create namespace arbiter-workers`, then
-`kubectl label namespace arbiter-workers pod-security.kubernetes.io/enforce=restricted
+cluster-admin creates and labels it first: `kubectl create namespace wardmast-workers`, then
+`kubectl label namespace wardmast-workers pod-security.kubernetes.io/enforce=restricted
 pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/audit=restricted
 pod-security.kubernetes.io/warn=restricted`. One release per namespace; object names are
 fixed. `values.schema.json` rejects unknown keys, a `direct` install without `primaryCIDRs`
@@ -323,12 +323,12 @@ namespace, and Helm 4.3 adopts it, so `helm uninstall` would delete the namespac
 worker pods with it. Test your chart commands on both Helm 3 and 4.
 
 **Join token.** Never in values, argv or shell history:
-`read -rs T && printf %s "$T" | kubectl -n arbiter-workers create secret generic arbiter-join --from-file=token=/dev/stdin`.
+`read -rs T && printf %s "$T" | kubectl -n wardmast-workers create secret generic wardmast-join --from-file=token=/dev/stdin`.
 The token is single-use and expires in 15 minutes. `--set-file join.token=` is the
 automation fallback only: the token then lands in Helm's release record.
 
-**Install.** `helm install <node> oci://ghcr.io/wardmast/charts/arbiter-node -n
-arbiter-workers -f values.yaml`, with the values the primary prints. On k3s add the API
+**Install.** `helm install <node> oci://ghcr.io/wardmast/charts/wardmast-node -n
+wardmast-workers -f values.yaml`, with the values the primary prints. On k3s add the API
 server's endpoint address(es) to `networkPolicy.apiServerCIDRs` (step 5). Take them from
 `kubectl get endpoints kubernetes` (`.subsets[].addresses[].ip`), not from `kubectl get
 nodes`: on a multi-node cluster the first node is not necessarily the API server, and
@@ -338,13 +338,13 @@ before the node shows `online`. Then steps 7-8.
 
 **Upgrade.** Helm owns the controller image: the Role has no write verb on the Deployment
 and `ARB_K8S_SELF_UPGRADE=false`. The node reports the exact command, of the form
-`helm upgrade <release> <chartRef> --version <v> -n arbiter-workers --reset-then-reuse-values`.
+`helm upgrade <release> <chartRef> --version <v> -n wardmast-workers --reset-then-reuse-values`.
 `--reset-then-reuse-values` is upgrade-only; it does not belong in an install command.
 Upgrade the `-bootstrap` release too when the guardrails changed. A config-only upgrade
 does not roll the pod: the controller re-reads `controller.yaml` every 30 s.
 
 **Uninstall.** `arb node drain <name>`, `arb node revoke <name>`, then `helm uninstall
-<node> -n arbiter-workers` (and `<node>-bootstrap` if split). Helm leaves the Secrets you
+<node> -n wardmast-workers` (and `<node>-bootstrap` if split). Helm leaves the Secrets you
 created, the namespace, and a PriorityClass another install still uses (set
 `placement.priorityClass.create=false` and `controller.priorityClass.create=false` on every
 install after the first on a cluster).
@@ -359,7 +359,7 @@ existing objects into a release is possible but optional.
 * Controller image from a private registry or mirror: create a `docker-registry` Secret in
   the namespace and set `imagePullSecrets: [<name>]`, with `image.repository` (and
   `image.digest`, which wins over the tag) pointing at the mirror. The default, public
-  GHCR (`ghcr.io/wardmast/arbiter-controller`), needs none.
+  GHCR (`ghcr.io/wardmast/wardmast-controller`), needs none.
 * Worker image registries: one `registries[]` entry per registry, `prefix:
   registry.example.test/arbiter` and `pullSecret: <name>`. The prefix is the admission
   policy's allow-list (`admissionPolicy.enabled`, Kubernetes 1.30+, requires
@@ -434,7 +434,7 @@ kube-router specifically (use the rollout's step 1 for that), or the agent-to-pr
 connection.
 
 **The chart, on the same cluster (KH6).** `test/k8s/chart_install_e2e_test.exs` `helm install`s
-`charts/arbiter-node` (`mode=all`) into an `arb-e2e-<random>` namespace labelled Pod Security
+`charts/wardmast-node` (`mode=all`) into an `arb-e2e-<random>` namespace labelled Pod Security
 `restricted`, then runs the canary and every readiness check against what the chart made, so the
 guardrails under test are the chart's (`K8sE2E.chart_namespace!/2`), not `InstallManifest`'s.
 It additionally needs `helm` on `PATH` (it runs `helm` with `--kubeconfig <that file>` only, and
@@ -486,9 +486,9 @@ The controller is the Arbiter release with `ARB_ROLE=agent` and
 or watch a pod it has to learn who it is, so its boot (`Wardmast.NodeAgent.K8s.Boot`)
 does, on every start:
 
-1. the in-cluster API client (the `arbiter-controller` service account);
-2. the node credential: read from the Secret `arbiter-node-credential`, or, on the first
-   boot, the join token from `/etc/arb/join/token` (the `arbiter-join` Secret) redeemed
+1. the in-cluster API client (the `wardmast-controller` service account);
+2. the node credential: read from the Secret `wardmast-node-credential`, or, on the first
+   boot, the join token from `/etc/arb/join/token` (the `wardmast-join` Secret) redeemed
    at `POST /nodes/enroll` and written to that Secret. The join Secret is then spent and
    may be deleted;
 3. `GET /nodes/cluster` on the primary (with the credential): the install id the pods
@@ -496,24 +496,24 @@ does, on every start:
    published since the primary started, else the controller image);
 4. its own Deployment's uid (the pods' owner), its Service's `clusterIP` (what pods dial)
    and the API server's Service address (what the per-pod netpol gate must not reach);
-5. then the controller: the pod channel (its CA in `arbiter-controller-ca`, the public
-   certificate in the ConfigMap `arbiter-ca`), the config loader, the pod informer, the
+5. then the controller: the pod channel (its CA in `wardmast-controller-ca`, the public
+   certificate in the ConfigMap `wardmast-ca`), the config loader, the pod informer, the
    Lease, the readiness monitor and run table, the self-upgrader and the connection.
 
 A step that fails does not crash-loop the pod: the boot logs why, records it, and tries
 again (1 s doubling to 30 s). What it records is in `/tmp/arbiter-node/status.json`
-(`kubectl -n arbiter-workers exec deploy/arbiter-controller -- cat
+(`kubectl -n wardmast-workers exec deploy/wardmast-controller -- cat
 /tmp/arbiter-node/status.json`, or the log): `state: booting`, `boot_step` and
 `last_error` until the controller is up, then the connection's own states (`ready`
 once the primary has said `hello_ok`).
 
 | `boot_step` / log | Meaning | Do |
 |---|---|---|
-| `credential`: no node credential and no join token | first boot, the join Secret is not there yet | create it with the command "Add node" printed (`read -rs T && printf %s "$T" \| kubectl -n arbiter-workers create secret generic arbiter-join --from-file=token=/dev/stdin`). The boot re-reads the file on every try; if the kubelet has not refreshed the optional mount after a few minutes, `kubectl -n arbiter-workers rollout restart deployment/arbiter-controller` |
+| `credential`: no node credential and no join token | first boot, the join Secret is not there yet | create it with the command "Add node" printed (`read -rs T && printf %s "$T" \| kubectl -n wardmast-workers create secret generic wardmast-join --from-file=token=/dev/stdin`). The boot re-reads the file on every try; if the kubelet has not refreshed the optional mount after a few minutes, `kubectl -n wardmast-workers rollout restart deployment/wardmast-controller` |
 | `credential`: the primary refused the join token (401) | spent, expired (15 min) or mistyped | mint a new one (`arb node add --kind cluster`), replace the Secret |
 | `credential` (or `identity`): cannot reach the Kubernetes API server (`econnrefused`) | the `controller-egress` policy does not allow the API server's address as the CNI sees it; on k3s's kube-router that is the node IP:6443, not the ClusterIP | `kubectl get endpoints kubernetes`, then re-render with `--api-cidrs <ip>/32` (step 5 of §4) and re-apply the bootstrap part. A controller that is already up reports the same cause on its `Clock` check |
 | `store_credential` | enrolled, but the Secret could not be written (Role, placeholder missing) | fix the Role / re-apply the node manifest; the boot keeps the credential in memory and stores it on the next try, so **do not restart the pod** (the token is spent) |
-| `primary_facts`: 401 | the node was revoked or deleted on the primary | enrol again: empty `arbiter-node-credential`, new join Secret |
+| `primary_facts`: 401 | the node was revoked or deleted on the primary | enrol again: empty `wardmast-node-credential`, new join Secret |
 | `identity`: `:no_registry` | `nodes.registry` is not set on the primary | `arb settings set nodes.registry …` |
 | `identity`: `{:deployment, …}` / `{:service, …}` | the node manifest's Deployment or Service is missing or renamed | re-apply the node manifest |
 | `start`: `{:pod_channel_ca, …}` | the CA Secret holds something that is not a valid CA | delete its data (the pods' identities are lost either way) |

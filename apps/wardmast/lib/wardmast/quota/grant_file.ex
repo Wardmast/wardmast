@@ -2,7 +2,7 @@ defmodule Wardmast.Quota.GrantFile do
   @moduledoc """
   Reads the quota poller's **dedicated Claude OAuth grant** (bd-b632tz): a
   `.credentials.json` a `claude` CLI login wrote into its own
-  `CLAUDE_CONFIG_DIR` (conventionally `~/.arbiter/quota-claude`), which an
+  `CLAUDE_CONFIG_DIR` (conventionally `~/.wardmast/quota-claude`), which an
   account references by path through a `:cli_credentials_path`
   `Wardmast.Accounts.ProviderCredential`.
 

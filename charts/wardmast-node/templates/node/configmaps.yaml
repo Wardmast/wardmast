@@ -4,9 +4,9 @@ and refuses an unknown key. Only what the operator set is emitted; the controlle
 the rest. There is deliberately no checksum annotation on the Deployment: a config-only
 `helm upgrade` must not roll the pod.
 */ -}}
-{{- if include "arbiter-node.node" . }}
+{{- if include "wardmast-node.node" . }}
 {{- $w := .Values.workers }}
-{{- $worker := dict "requests" (include "arbiter-node.quantities" $w.requests | fromYaml) "limits" (include "arbiter-node.quantities" $w.limits | fromYaml) }}
+{{- $worker := dict "requests" (include "wardmast-node.quantities" $w.requests | fromYaml) "limits" (include "wardmast-node.quantities" $w.limits | fromYaml) }}
 {{- if $w.workSizeLimit }}{{ $_ := set $worker "work_size_limit" (toString $w.workSizeLimit) }}{{ end }}
 {{- if $w.tmpSizeLimit }}{{ $_ := set $worker "tmp_size_limit" (toString $w.tmpSizeLimit) }}{{ end }}
 {{- $p := .Values.placement }}
@@ -18,7 +18,7 @@ the rest. There is deliberately no checksum annotation on the Deployment: a conf
 {{- if $w.servicesResources }}
 {{- $res := dict }}
 {{- range $kind := list "requests" "limits" }}
-{{- if hasKey $w.servicesResources $kind }}{{ $_ := set $res $kind (include "arbiter-node.quantities" (get $w.servicesResources $kind) | fromYaml) }}{{ end }}
+{{- if hasKey $w.servicesResources $kind }}{{ $_ := set $res $kind (include "wardmast-node.quantities" (get $w.servicesResources $kind) | fromYaml) }}{{ end }}
 {{- end }}
 {{- $_ := set $config "services_resources" $res }}
 {{- end }}
@@ -37,10 +37,10 @@ the rest. There is deliberately no checksum annotation on the Deployment: a conf
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: arbiter-controller-config
+  name: wardmast-controller-config
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "arbiter-node.labels" . | nindent 4 }}
+    {{- include "wardmast-node.labels" . | nindent 4 }}
 data:
   controller.yaml: |
     {{- toYaml $config | nindent 4 }}
@@ -49,8 +49,8 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: arbiter-ca
+  name: wardmast-ca
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "arbiter-node.labels" . | nindent 4 }}
+    {{- include "wardmast-node.labels" . | nindent 4 }}
 {{- end }}

@@ -52,7 +52,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
 
       assert spec.primary_cidrs == ["100.64.0.10/32"]
       assert spec.node_name == "mesaana-k3s"
-      assert spec.namespace == "arbiter-workers"
+      assert spec.namespace == "wardmast-workers"
       assert spec.max_concurrent == 2
       assert spec.reach == :direct
       assert spec.admission == false
@@ -211,7 +211,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
       assert labels["pod-security.kubernetes.io/audit"] == "restricted"
       assert labels["pod-security.kubernetes.io/warn"] == "restricted"
 
-      pc = find(docs, "PriorityClass", "arbiter-worker")
+      pc = find(docs, "PriorityClass", "wardmast-worker")
       assert pc["value"] == -100
       assert pc["preemptionPolicy"] == "Never"
     end
@@ -220,16 +220,16 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
     # interrupts every run on the node, so a busy cluster must not evict it first.
     test "the controller has its own PriorityClass, above the workers' and above batch CI" do
       docs = render!(%{"name" => "n"})
-      worker = find(docs, "PriorityClass", "arbiter-worker")
-      controller = find(docs, "PriorityClass", "arbiter-controller")
+      worker = find(docs, "PriorityClass", "wardmast-worker")
+      controller = find(docs, "PriorityClass", "wardmast-controller")
 
       assert controller["value"] > worker["value"]
       assert controller["value"] > 0
       assert controller["preemptionPolicy"] == "PreemptLowerPriority"
       assert controller["globalDefault"] == false
 
-      deployment = find(docs, "Deployment", "arbiter-controller")
-      assert deployment["spec"]["template"]["spec"]["priorityClassName"] == "arbiter-controller"
+      deployment = find(docs, "Deployment", "wardmast-controller")
+      assert deployment["spec"]["template"]["spec"]["priorityClassName"] == "wardmast-controller"
     end
 
     test "the quota is derived from max_concurrent and the per-pod figures" do
@@ -407,7 +407,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
 
     test "the Role is namespaced, names its resources, and has no exec/attach/portforward" do
       role = find(render!(%{"name" => "n"}), "Role")
-      assert role["metadata"]["namespace"] == "arbiter-workers"
+      assert role["metadata"]["namespace"] == "wardmast-workers"
       resources = role["rules"] |> Enum.flat_map(& &1["resources"])
 
       refute Enum.any?(
@@ -421,7 +421,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
              )
 
       secrets = Enum.find(role["rules"], &("secrets" in &1["resources"]))
-      assert secrets["resourceNames"] == ["arbiter-node-credential", "arbiter-controller-ca"]
+      assert secrets["resourceNames"] == ["wardmast-node-credential", "wardmast-controller-ca"]
       assert secrets["verbs"] == ["get", "update"]
     end
 
@@ -438,7 +438,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
         find(
           render!(%{"name" => "n", "runtime_class" => "gvisor", "runtime_handler" => "runsc"}),
           "ConfigMap",
-          "arbiter-controller-config"
+          "wardmast-controller-config"
         )
 
       assert {:ok, config} = ControllerConfig.parse(cm["data"]["controller.yaml"])
@@ -501,11 +501,11 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
     end
 
     test "the worker service account is powerless and token-less" do
-      sa = find(render!(%{"name" => "n"}), "ServiceAccount", "arbiter-worker")
+      sa = find(render!(%{"name" => "n"}), "ServiceAccount", "wardmast-worker")
       assert sa["automountServiceAccountToken"] == false
       docs = render!(%{"name" => "n"})
       binding = find(docs, "RoleBinding")
-      assert [%{"name" => "arbiter-controller"}] = binding["subjects"]
+      assert [%{"name" => "wardmast-controller"}] = binding["subjects"]
     end
 
     test "the controller ConfigMap round-trips through the controller's own loader" do
@@ -520,12 +520,12 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
             "pull_secret" => "regcred"
           }),
           "ConfigMap",
-          "arbiter-controller-config"
+          "wardmast-controller-config"
         )
 
       assert {:ok, config} = ControllerConfig.parse(cm["data"]["controller.yaml"])
       assert config.max_concurrent == 3
-      assert config.namespace == "arbiter-workers"
+      assert config.namespace == "wardmast-workers"
       assert config.image_pull_secrets == ["regcred"]
       assert config.worker["requests"]["cpu"] == "500m"
       assert config.worker["requests"]["memory"] == "1Gi"
@@ -540,7 +540,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
       }
 
       docs = render!(params)
-      cm = find(docs, "ConfigMap", "arbiter-controller-config")
+      cm = find(docs, "ConfigMap", "wardmast-controller-config")
       assert {:ok, config} = ControllerConfig.parse(cm["data"]["controller.yaml"])
 
       assert config.registries == [
@@ -558,7 +558,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
     end
 
     test "no registries leaves the ConfigMap and the policy as they were (KH13)" do
-      cm = find(render!(%{"name" => "n"}), "ConfigMap", "arbiter-controller-config")
+      cm = find(render!(%{"name" => "n"}), "ConfigMap", "wardmast-controller-config")
       refute cm["data"]["controller.yaml"] =~ "registries"
     end
 
@@ -577,13 +577,13 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
     test "the CA ConfigMap and the credential Secrets are empty placeholders" do
       docs = render!(%{"name" => "n"})
 
-      for name <- ~w(arbiter-node-credential arbiter-controller-ca) do
+      for name <- ~w(wardmast-node-credential wardmast-controller-ca) do
         secret = find(docs, "Secret", name)
         refute Map.has_key?(secret, "data")
         refute Map.has_key?(secret, "stringData")
       end
 
-      ca = find(docs, "ConfigMap", "arbiter-ca")
+      ca = find(docs, "ConfigMap", "wardmast-ca")
       refute Map.has_key?(ca, "data")
     end
 
@@ -598,7 +598,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
       assert env["ARB_NODE_NAME"] == "mesaana-k3s"
 
       join = Enum.find(spec["volumes"], &(&1["name"] == "join"))
-      assert join["secret"] == %{"secretName" => "arbiter-join", "optional" => true}
+      assert join["secret"] == %{"secretName" => "wardmast-join", "optional" => true}
       assert Enum.any?(controller["volumeMounts"], &(&1["mountPath"] == "/etc/arb/join"))
       assert Enum.any?(controller["volumeMounts"], &(&1["mountPath"] == "/etc/arb/config"))
     end
@@ -620,7 +620,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
       assert Enum.map(d["spec"]["template"]["spec"]["containers"], & &1["name"]) ==
                ["controller", "tailscale"]
 
-      refute find(docs, "Secret", "arbiter-tailscale")
+      refute find(docs, "Secret", "wardmast-tailscale")
     end
 
     test "admission=policy adds the ValidatingAdmissionPolicy and its binding to bootstrap" do
@@ -650,7 +650,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
       policy = find(docs, "ValidatingAdmissionPolicy")
 
       assert hd(policy["spec"]["matchConditions"])["expression"] =~
-               "system:serviceaccount:ci-workers:arbiter-controller"
+               "system:serviceaccount:ci-workers:wardmast-controller"
     end
   end
 
@@ -666,7 +666,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
       docs = render!(%{"name" => "n"})
       assert [rule] = deployment_rules(docs)
       assert rule["apiGroups"] == ["apps"]
-      assert rule["resourceNames"] == ["arbiter-controller"]
+      assert rule["resourceNames"] == ["wardmast-controller"]
       assert rule["verbs"] == ["get", "patch"]
 
       env =
@@ -681,7 +681,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
       docs = render!(%{"name" => "n", "self_upgrade" => "off"})
       assert [rule] = deployment_rules(docs)
       assert rule["verbs"] == ["get"]
-      assert rule["resourceNames"] == ["arbiter-controller"]
+      assert rule["resourceNames"] == ["wardmast-controller"]
 
       env =
         find(docs, "Deployment")["spec"]["template"]["spec"]["containers"]
@@ -717,7 +717,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
         refute text =~ ~r/BEGIN CERTIFICATE/
         refute text =~ ~r/tskey-/
         refute json =~ ~s("stringData")
-        refute json =~ ~s("kind":"Secret","metadata":{"name":"arbiter-join")
+        refute json =~ ~s("kind":"Secret","metadata":{"name":"wardmast-join")
         # A Secret in the render is a placeholder: it has no payload of any kind.
         for doc <- YamlElixir.read_all_from_string!(text), doc["kind"] == "Secret" do
           assert Map.keys(doc) -- ~w(apiVersion kind metadata type) == [],
@@ -800,11 +800,11 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
   end
 
   describe "values/2 (KH9: GET /nodes/join/values.yaml)" do
-    @chart_schema Path.expand("../../../../../../charts/arbiter-node/values.schema.json", __DIR__)
+    @chart_schema Path.expand("../../../../../../charts/wardmast-node/values.schema.json", __DIR__)
     @values_server [
       primary_url: "https://arbiter.tail1234.ts.net",
       registry: "registry.example.test/arbiter",
-      chart_ref: "oci://ghcr.io/acme/charts/arbiter-node"
+      chart_ref: "oci://ghcr.io/acme/charts/wardmast-node"
     ]
 
     defp values!(params, server \\ @values_server) do
@@ -819,7 +819,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
       assert values["node"] == %{"name" => "mesaana"}
       assert values["primary"] == %{"url" => "https://arbiter.tail1234.ts.net"}
       assert values["concurrency"] == %{"max" => 2}
-      assert values["chartRef"] == "oci://ghcr.io/acme/charts/arbiter-node"
+      assert values["chartRef"] == "oci://ghcr.io/acme/charts/wardmast-node"
       assert values["reach"] == %{"mode" => "direct"}
 
       assert values["networkPolicy"]["controllerEgress"]["primaryCIDRs"] ==

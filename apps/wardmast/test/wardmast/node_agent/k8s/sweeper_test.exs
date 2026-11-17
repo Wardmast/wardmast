@@ -3,7 +3,7 @@ defmodule Wardmast.NodeAgent.K8s.SweeperTest do
 
   alias Wardmast.NodeAgent.K8s.Sweeper
 
-  @labels %{"arbiter.dev/install" => "inst-1", "arbiter.dev/node" => "node-1"}
+  @labels %{"wardmast.dev/install" => "inst-1", "wardmast.dev/node" => "node-1"}
 
   defp pod(name, labels, extra \\ %{}) do
     %{
@@ -13,12 +13,12 @@ defmodule Wardmast.NodeAgent.K8s.SweeperTest do
   end
 
   defp run_pod(run, extra_labels \\ %{}, meta \\ %{}),
-    do: pod("pod-#{run}", Map.merge(@labels, Map.put(extra_labels, "arbiter.dev/run", run)), meta)
+    do: pod("pod-#{run}", Map.merge(@labels, Map.put(extra_labels, "wardmast.dev/run", run)), meta)
 
   defp select(pods, overrides \\ []) do
     opts =
       Keyword.merge(
-        [install: "inst-1", node: "node-1", live_set: [], own_pod: "arbiter-controller-abc"],
+        [install: "inst-1", node: "node-1", live_set: [], own_pod: "wardmast-controller-abc"],
         overrides
       )
 
@@ -35,36 +35,36 @@ defmodule Wardmast.NodeAgent.K8s.SweeperTest do
   end
 
   test "a pod missing any one of the three labels is never selected" do
-    base = Map.put(@labels, "arbiter.dev/run", "r1")
+    base = Map.put(@labels, "wardmast.dev/run", "r1")
 
     for missing <- Map.keys(base) do
       assert select([pod("p", Map.delete(base, missing))]) == []
     end
 
     assert select([pod("p", %{})]) == []
-    assert select([pod("p", %{"arbiter.dev/run" => "r1"})]) == []
+    assert select([pod("p", %{"wardmast.dev/run" => "r1"})]) == []
   end
 
   test "an empty run label is not a run" do
-    assert select([pod("p", Map.put(@labels, "arbiter.dev/run", ""))]) == []
+    assert select([pod("p", Map.put(@labels, "wardmast.dev/run", ""))]) == []
   end
 
   test "another install's or another node's pods are never selected" do
     other_install =
-      pod("a", %{@labels | "arbiter.dev/install" => "inst-2"} |> Map.put("arbiter.dev/run", "r1"))
+      pod("a", %{@labels | "wardmast.dev/install" => "inst-2"} |> Map.put("wardmast.dev/run", "r1"))
 
     other_node =
-      pod("b", %{@labels | "arbiter.dev/node" => "node-2"} |> Map.put("arbiter.dev/run", "r2"))
+      pod("b", %{@labels | "wardmast.dev/node" => "node-2"} |> Map.put("wardmast.dev/run", "r2"))
 
     assert select([other_install, other_node]) == []
   end
 
   test "never its own pod, by name or by uid, even if it were mislabelled" do
     own_by_name =
-      pod("arbiter-controller-abc", Map.put(@labels, "arbiter.dev/run", "r1"))
+      pod("wardmast-controller-abc", Map.put(@labels, "wardmast.dev/run", "r1"))
 
     own_by_uid =
-      pod("other-name", Map.put(@labels, "arbiter.dev/run", "r2"), %{"uid" => "own-uid"})
+      pod("other-name", Map.put(@labels, "wardmast.dev/run", "r2"), %{"uid" => "own-uid"})
 
     assert select([own_by_name, own_by_uid], own_uid: "own-uid") == []
   end

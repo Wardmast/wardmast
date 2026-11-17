@@ -41,7 +41,7 @@ defmodule Wardmast.NodeAgent.K8s.Controller do
 
   ## The run's output and its end (K15)
 
-    * **`stdout`, from the event feed (bd-1nl506).** A pod annotated `arbiter.dev/events`
+    * **`stdout`, from the event feed (bd-1nl506).** A pod annotated `wardmast.dev/events`
       (every pod this controller builds, unless `:event_feed` is `false`) ships the agent's
       stdout and stderr as NDJSON, teed by its entry wrapper and POSTed in byte-offset chunks
       to the pod channel's `/events` (`Wardmast.NodeAgent.PodChannel.PodPlug`), which hands
@@ -75,7 +75,7 @@ defmodule Wardmast.NodeAgent.K8s.Controller do
       is not waited for.
     * **Adoption restores the pod channel.** The pod channel's run table is in memory, so a
       restarted controller starts without the leaves of the pods it adopts. Each pod carries
-      the public record (`arbiter.dev/channel`, `PodChannel.Runs.channel_record/2`) written
+      the public record (`wardmast.dev/channel`, `PodChannel.Runs.channel_record/2`) written
       at `assign`, and adopting a live pod rebuilds its entry from it
       (`PodChannel.Runs.adopt/3`); its bridges work again once its IP is bound. A pod
       without a record (made before K15), or whose record is refused, is still adopted and
@@ -126,10 +126,10 @@ defmodule Wardmast.NodeAgent.K8s.Controller do
 
   require Logger
 
-  @install_label "arbiter.dev/install"
-  @node_label "arbiter.dev/node"
-  @run_label "arbiter.dev/run"
-  @channel_annotation "arbiter.dev/channel"
+  @install_label "wardmast.dev/install"
+  @node_label "wardmast.dev/node"
+  @run_label "wardmast.dev/run"
+  @channel_annotation "wardmast.dev/channel"
   @deadline_slack_s 1800
   @default_tick_ms 5_000
   @default_protect_s 60
@@ -994,7 +994,7 @@ defmodule Wardmast.NodeAgent.K8s.Controller do
   # A pod carrying the annotation ships its output as an event feed (bd-1nl506); one made
   # before that (or with `event_feed: false`) is read from its log, as before.
   defp events_pod?(%{last_pod: pod}) when is_map(pod),
-    do: get_in(pod, ["metadata", "annotations", "arbiter.dev/events"]) == "1"
+    do: get_in(pod, ["metadata", "annotations", "wardmast.dev/events"]) == "1"
 
   defp events_pod?(_entry), do: false
 

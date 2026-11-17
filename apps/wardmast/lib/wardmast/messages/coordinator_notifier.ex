@@ -2088,7 +2088,7 @@ defmodule Wardmast.Messages.CoordinatorNotifier do
   # merge the running server's boot time says anything about. No repo is treated
   # as own (legacy single-repo case). Otherwise the repo's mapped checkout
   # (`LocalCompare.repo_path/2`) must equal `Paths.primary_checkout/0`
-  # (`ARB_PRIMARY_CHECKOUT` / configured checkout); an unmapped repo falls back
+  # (`WARDMAST_PRIMARY_CHECKOUT` / configured checkout); an unmapped repo falls back
   # to matching the checkout's directory name.
   defp own_repo?(_ws_id, repo) when not is_binary(repo) or repo == "", do: true
 

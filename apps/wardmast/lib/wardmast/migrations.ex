@@ -6,7 +6,7 @@ defmodule Wardmast.Migrations do
   work when the schema is about to change.
 
   `arb server doctor` reads pending state through the running server's HTTP
-  API. In the documented `systemctl --user restart arbiter` deploy flow, boot
+  API. In the documented `systemctl --user restart wardmast` deploy flow, boot
   applies migrations before the server accepts traffic, so that check will
   rarely observe a non-zero count in that flow. It still has real value in
   dev (`mix phx.server` does not auto-migrate). The dispatch-side gate here is

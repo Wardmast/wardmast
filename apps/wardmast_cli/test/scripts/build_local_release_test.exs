@@ -86,7 +86,7 @@ defmodule WardmastCli.Scripts.BuildLocalReleaseTest do
 
     on_exit(fn -> File.rm_rf(primary) end)
 
-    {out, code} = run([primary], [{"ARB_PRIMARY_CHECKOUT", primary}])
+    {out, code} = run([primary], [{"WARDMAST_PRIMARY_CHECKOUT", primary}])
 
     assert code == 1
     assert out =~ "refusing to build from the primary checkout"
@@ -100,9 +100,9 @@ defmodule WardmastCli.Scripts.BuildLocalReleaseTest do
 
     on_exit(fn -> File.rm_rf(primary) end)
 
-    # No ARB_PRIMARY_CHECKOUT set — the guard must still fire off of ARB_HOME,
+    # No WARDMAST_PRIMARY_CHECKOUT set — the guard must still fire off of ARB_HOME,
     # the var the server itself is actually configured with.
-    {out, code} = run([primary], [{"ARB_PRIMARY_CHECKOUT", nil}, {"ARB_HOME", primary}])
+    {out, code} = run([primary], [{"WARDMAST_PRIMARY_CHECKOUT", nil}, {"ARB_HOME", primary}])
 
     assert code == 1
     assert out =~ "refusing to build from the primary checkout"
@@ -121,7 +121,7 @@ defmodule WardmastCli.Scripts.BuildLocalReleaseTest do
     {_, 0} =
       System.cmd("git", ["worktree", "add", "-b", "wt-branch", worktree, "HEAD"], cd: primary)
 
-    {out, code} = run([worktree], [{"ARB_PRIMARY_CHECKOUT", primary}])
+    {out, code} = run([worktree], [{"WARDMAST_PRIMARY_CHECKOUT", primary}])
 
     assert code == 1
     assert out =~ "refusing to build from the primary checkout"
@@ -141,7 +141,7 @@ defmodule WardmastCli.Scripts.BuildLocalReleaseTest do
     on_exit(fn -> File.rm_rf(primary) end)
     on_exit(fn -> File.rm_rf(separate) end)
 
-    {out, code} = run([separate], [{"ARB_PRIMARY_CHECKOUT", primary}])
+    {out, code} = run([separate], [{"WARDMAST_PRIMARY_CHECKOUT", primary}])
 
     refute out =~ "refusing to build from the primary checkout"
     # No `origin` remote in this throwaway repo, so it fails past the guard —
@@ -167,7 +167,7 @@ defmodule WardmastCli.Scripts.BuildLocalReleaseTest do
     # Run the script which extracts GLIBC baseline — should not fail with SIGPIPE (141).
     # It will fail later on git fetch, but we're testing that GLIBC extraction doesn't abort
     # the script before that point.
-    {out, code} = run([separate], [{"ARB_PRIMARY_CHECKOUT", primary}])
+    {out, code} = run([separate], [{"WARDMAST_PRIMARY_CHECKOUT", primary}])
 
     # Code should not be 141 (SIGPIPE). It will fail on git fetch (code != 0),
     # but not with SIGPIPE in the GLIBC extraction step.

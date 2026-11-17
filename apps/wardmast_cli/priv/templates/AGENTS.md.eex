@@ -43,14 +43,14 @@ before assuming the bare-process instructions below.
 
 **If systemd-wrapped** (a `systemctl --user status arbiter` unit exists whose
 `ExecStart` is `arb start` / `arb server start`, not a release binary): treat
-it like the prod path — restart with `systemctl --user restart arbiter`,
-tail logs with `journalctl --user-unit arbiter.service -f` (not `--user -u`,
+it like the prod path — restart with `systemctl --user restart wardmast`,
+tail logs with `journalctl --user-unit wardmast.service -f` (not `--user -u`,
 which reads an empty namespace). `arb start` / `arb server start` no-ops if
 the server is already up, otherwise spawns `mix phx.server` detached and
 polls `arb doctor` until green — don't hand-manage the process yourself.
 
 `arb install-service` currently only generates the **prod** unit — its
-`ExecStart` points at the OTP release binary under `~/.arbiter/current`,
+`ExecStart` points at the OTP release binary under `~/.wardmast/current`,
 which doesn't exist in a source checkout. If this dev install was never
 wired up for systemd, don't run `arb install-service` expecting a working
 dev unit; write one by hand instead, pointing `ExecStart` at `arb start`
@@ -73,17 +73,17 @@ Either way, restarting **kills every in-flight worker** — check
 `docs/deploy.md`.
 <% else %>
 Wardmast runs as a **systemd user service** from a prebuilt OTP release —
-`~/.arbiter/current/bin/wardmast start` under `systemctl --user`.
+`~/.wardmast/current/bin/wardmast start` under `systemctl --user`.
 
 If `arb doctor` reports the server is down:
 
-    systemctl --user restart arbiter
+    systemctl --user restart wardmast
 
 If the service was never installed on this machine, set it up once with
 `arb install-service` (installs the unit, enables lingering so it survives
 logout, and starts it).
 
-Logs: `journalctl --user-unit arbiter.service -f` — not `--user -u`, which
+Logs: `journalctl --user-unit wardmast.service -f` — not `--user -u`, which
 reads an empty namespace.
 
 Restarting **kills every in-flight worker**. Check `arb worker list` first.

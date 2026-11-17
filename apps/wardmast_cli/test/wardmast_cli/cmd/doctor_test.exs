@@ -1883,7 +1883,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
     end
 
     test "grok auth: an expired token the broker cannot refresh fails, naming the path and expiry" do
-      path = "/home/op/.arbiter/accounts/grok-default/auth.json"
+      path = "/home/op/.wardmast/accounts/grok-default/auth.json"
 
       stub_routes(
         base_routes() ++
@@ -2082,7 +2082,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
           "available" => true,
           "cap" => "40%",
           "unavailable_reason" => nil,
-          "service_unit" => "arbiter.service",
+          "service_unit" => "wardmast.service",
           "service_manager" => "user",
           "oom_policy" => "continue",
           "memory_max" => "infinity"
@@ -2113,7 +2113,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
       result = memory_result(memory_body(%{"oom_policy" => nil}))
 
       assert result.status == :warn
-      assert result.detail =~ "could not read OOMPolicy for arbiter.service"
+      assert result.detail =~ "could not read OOMPolicy for wardmast.service"
       refute result.detail =~ "OOMPolicy=stop"
       refute result.blocks_readiness
     end

@@ -10,7 +10,7 @@ defmodule Wardmast.Repo do
     db_path = Keyword.get(config, :database, "")
 
     # Guard: a 0-byte file at the DB path means the path was created as an
-    # empty placeholder (e.g. ~/.arbiter/arbiter.sqlite3 before T7 cutover).
+    # empty placeholder (e.g. ~/.wardmast/arbiter.sqlite3 before T7 cutover).
     # Booting against it would silently wipe all data. Fail loudly instead.
     if db_path != "" and File.exists?(db_path) and File.stat!(db_path).size == 0 do
       raise """

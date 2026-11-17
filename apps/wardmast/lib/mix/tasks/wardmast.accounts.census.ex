@@ -46,7 +46,7 @@ defmodule Mix.Tasks.Wardmast.Accounts.Census do
   A thin wrapper over `Wardmast.Release.accounts_census/1`, which a release
   install (no Mix toolchain) runs directly:
 
-      bin/wardmast eval 'Wardmast.Release.accounts_census(plan: "/home/me/.arbiter/accounts.json")'
+      bin/wardmast eval 'Wardmast.Release.accounts_census(plan: "/home/me/.wardmast/accounts.json")'
 
   See `docs/provider-accounts-release-runbook.md` for the full procedure.
   """

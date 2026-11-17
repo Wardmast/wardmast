@@ -6,7 +6,7 @@
 # namespace with distribution off, a scratch HOME and no DATABASE_PATH, so it
 # cannot touch the live install, epmd, ports or ~/.arbiter.
 #
-#   u5_agent_boot.sh [release-dir]        (default: ~/.arbiter/current)
+#   u5_agent_boot.sh [release-dir]        (default: ~/.wardmast/current)
 #
 # Prototype only: the role gate is applied by patching the copied release's
 # runtime.exs and recompiling the two Application modules from the tag's source

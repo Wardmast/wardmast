@@ -6,7 +6,7 @@ defmodule Wardmast.Worker.MemoryScope do
 
   Incident 2026-10-03: one worker's child BEAM (a `mix test` in a worktree)
   grew to 17.5 GB, the kernel OOM-killer picked it, and because every worker
-  lived in the *server's* cgroup (`arbiter.service`, `OOMPolicy=stop`,
+  lived in the *server's* cgroup (`wardmast.service`, `OOMPolicy=stop`,
   `MemoryMax=infinity`) systemd stopped the **whole service**: every in-flight
   run died and the coordinator's MCP connection dropped.
 

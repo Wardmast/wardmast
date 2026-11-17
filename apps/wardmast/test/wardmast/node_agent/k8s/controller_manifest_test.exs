@@ -25,7 +25,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerManifestTest do
   describe "deployment/1 priority (bd-bmecet)" do
     test "runs under its own PriorityClass, not the workers' preemptible one" do
       {:ok, d} = ControllerManifest.deployment(@opts)
-      assert d["spec"]["template"]["spec"]["priorityClassName"] == "arbiter-controller"
+      assert d["spec"]["template"]["spec"]["priorityClassName"] == "wardmast-controller"
     end
   end
 
@@ -88,7 +88,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerManifestTest do
       assert env["TS_KUBE_SECRET"] == %{"name" => "TS_KUBE_SECRET", "value" => ""}
       assert env["TS_OUTBOUND_HTTP_PROXY_LISTEN"]["value"] == "127.0.0.1:1055"
       assert env["TS_EXTRA_ARGS"]["value"] =~ "--advertise-tags=tag:arbiter-node"
-      assert env["TS_AUTHKEY"]["valueFrom"]["secretKeyRef"]["name"] == "arbiter-tailscale"
+      assert env["TS_AUTHKEY"]["valueFrom"]["secretKeyRef"]["name"] == "wardmast-tailscale"
     end
 
     test "needs no NET_ADMIN and no /dev/net/tun", %{d: d, ts: ts, spec: spec} do

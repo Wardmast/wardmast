@@ -599,7 +599,7 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                                          generated toolchain image), "containerfile"
                                          (insist on it), "generated" (ignore it) or
                                          "prebuilt" (an image the repo's CI builds,
-                                         FROM ghcr.io/<owner>/arbiter-worker-base,
+                                         FROM ghcr.io/<owner>/wardmast-worker-base,
                                          labelled arbiter.runtime-contract=1; needs
                                          ref; the primary resolves it to a digest,
                                          refuses one whose

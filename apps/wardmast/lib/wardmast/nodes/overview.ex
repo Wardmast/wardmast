@@ -54,7 +54,7 @@ defmodule Wardmast.Nodes.Overview do
   alias Wardmast.Settings
   alias Wardmast.Workers.{Run, RunState}
 
-  @default_helm_release "arbiter-node"
+  @default_helm_release "wardmast-node"
 
   @type row :: map()
 

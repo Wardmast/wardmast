@@ -8,13 +8,13 @@ defmodule WardmastCli.Cmd.InstallService do
   walk):
 
     * **Release install (default)** — when the root is not a source checkout,
-      `ExecStart` is `~/.arbiter/current/bin/wardmast start`, the
+      `ExecStart` is `~/.wardmast/current/bin/wardmast start`, the
       self-contained OTP release.
     * **Dev-mode source checkout** — when the root looks like an Wardmast
       source checkout (`mix.exs` + `apps/`, the same heuristic
       `Cmd.Start.umbrella_root?/1` uses), `ExecStart` instead runs
       `<root>/.run-server.sh`, a small `exec`-chain launcher that `cd`s to
-      the checkout, sources the checkout's own `.arbiter.env` (for
+      the checkout, sources the checkout's own `.wardmast.env` (for
       `SECRET_KEY_BASE`, `DATABASE_PATH`, and similar dev-only settings that
       `EnvironmentFile=` below doesn't carry), and `exec`s `mix phx.server`
       directly — so systemd tracks the real BEAM process instead of a
@@ -33,18 +33,18 @@ defmodule WardmastCli.Cmd.InstallService do
 
   ## Scope
 
-    * **User (default)** — written to `~/.config/systemd/user/arbiter.service`
+    * **User (default)** — written to `~/.config/systemd/user/wardmast.service`
       and managed with `systemctl --user`. Installs run without root. Because a
       user manager normally exits at logout, the command also runs
       `loginctl enable-linger` so the service starts at *boot*, before any
       login.
-    * **System (`--system`)** — written to `/etc/systemd/system/arbiter.service`
+    * **System (`--system`)** — written to `/etc/systemd/system/wardmast.service`
       and managed with plain `systemctl`. Writing there and reloading the
       system manager need root, so run with `sudo` if you aren't already.
 
   ## What it writes
 
-  The unit references `EnvironmentFile=~/.arbiter/arbiter.env` (created and
+  The unit references `EnvironmentFile=~/.wardmast/wardmast.env` (created and
   managed by this command) for secrets and optional overrides — in both
   modes, so a dev-mode checkout's `mix`/`elixir` (found via the captured
   `PATH`) resolve the same way whether started by hand or by systemd. In
@@ -59,7 +59,7 @@ defmodule WardmastCli.Cmd.InstallService do
   A boot-time service starts with no interactive shell, so the API keys you
   normally export (`GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …) are
   not visible to it. To bridge that gap, install captures any of those keys that
-  are set in the *installing* shell and writes them to `~/.arbiter/arbiter.env`
+  are set in the *installing* shell and writes them to `~/.wardmast/wardmast.env`
   (the same file `EnvironmentFile=` points at). Existing entries are preserved —
   a managed key already present is updated in place, sibling keys and comments
   are left untouched — and the file is locked to `0600` since it holds secrets.
@@ -90,7 +90,7 @@ defmodule WardmastCli.Cmd.InstallService do
 
   @switches [system: :boolean, uninstall: :boolean, json: :boolean, force: :boolean]
 
-  @logrotate_service_name "arbiter-logrotate.service"
+  @logrotate_service_name "wardmast-logrotate.service"
 
   def run(argv) do
     ArgParser.unless_help(argv, @moduledoc, fn ->
@@ -135,7 +135,7 @@ defmodule WardmastCli.Cmd.InstallService do
     Formatter.emit_installed(mode, scope, path, arbiter_home, linger, secrets, log_paths)
   end
 
-  # Create ~/.arbiter/log/, write a logrotate config, and install a user-scoped
+  # Create ~/.wardmast/log/, write a logrotate config, and install a user-scoped
   # systemd service + daily timer so rotation runs automatically without cron or
   # manual intervention. Uses copytruncate so the running service's open file
   # descriptor keeps working without a restart.
@@ -143,7 +143,7 @@ defmodule WardmastCli.Cmd.InstallService do
     log_dir = Path.join(arbiter_home, "log")
     File.mkdir_p!(log_dir)
 
-    log_file = Path.join(log_dir, "arbiter.log")
+    log_file = Path.join(log_dir, "wardmast.log")
     state_file = Path.join(log_dir, "logrotate.state")
     config_path = Path.join(log_dir, "logrotate.conf")
 
@@ -161,7 +161,7 @@ defmodule WardmastCli.Cmd.InstallService do
     File.write!(config_path, config)
 
     # Write logrotate service + timer units so daemon-reload picks them up in
-    # the same cycle as the main arbiter.service unit.
+    # the same cycle as the main wardmast.service unit.
     svc_path = Path.join(unit_dir(:user), @logrotate_service_name)
     timer_path = Path.join(unit_dir(:user), Unit.logrotate_timer_name())
     Unit.write_unit(svc_path, logrotate_service_contents(config_path, state_file))
@@ -240,7 +240,7 @@ defmodule WardmastCli.Cmd.InstallService do
   defdelegate capture_secrets(arbiter_home), to: EnvFile
 
   @doc """
-  Capture the installing shell's PATH into `<arbiter_home>/arbiter.env`.
+  Capture the installing shell's PATH into `<arbiter_home>/wardmast.env`.
   Called from `arb install service` and from `arb server deploy`.
   """
   @spec capture_path(String.t()) :: :written | :skipped

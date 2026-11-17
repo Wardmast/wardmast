@@ -25,9 +25,9 @@ Usage: scripts/build-local-release.sh <clone-path> [output-dir]
                  origin/main. Refuses to run if this resolves to the same
                  repository as the primary checkout — including a worktree
                  of it. The primary checkout is resolved the same way the
-                 server itself resolves it: $ARB_PRIMARY_CHECKOUT override,
+                 server itself resolves it: $WARDMAST_PRIMARY_CHECKOUT override,
                  else $ARB_HOME, else the path recorded by
-                 `arb install-service` at ~/.config/arbiter/home, else
+                 `arb install-service` at ~/.config/wardmast/home, else
                  ~/dev/arbiter.
   [output-dir]   Where to write the release tarball and `arb` escript.
                  Default: <clone-path>/.local-release
@@ -67,12 +67,14 @@ fi
 
 # Resolve "the primary checkout" the same way the server itself does
 # (WardmastCli.Cmd.Start): ARB_HOME override, else the path recorded by
-# `arb install-service` at ~/.config/arbiter/home, else ~/dev/arbiter.
-# ARB_PRIMARY_CHECKOUT remains available as an explicit override for callers
+# `arb install-service` at ~/.config/wardmast/home, else ~/dev/arbiter.
+# WARDMAST_PRIMARY_CHECKOUT remains available as an explicit override for callers
 # who know better than all of the above.
-CONFIGURED_HOME_FILE="$HOME/.config/arbiter/home"
-if [ -n "${ARB_PRIMARY_CHECKOUT:-}" ]; then
-  PRIMARY_CHECKOUT_INPUT="$ARB_PRIMARY_CHECKOUT"
+CONFIGURED_HOME_FILE="$HOME/.config/wardmast/home"
+# One-release fallback for the pre-rename spelling of the override.
+WARDMAST_PRIMARY_CHECKOUT="${WARDMAST_PRIMARY_CHECKOUT:-${ARB_PRIMARY_CHECKOUT:-}}"
+if [ -n "${WARDMAST_PRIMARY_CHECKOUT:-}" ]; then
+  PRIMARY_CHECKOUT_INPUT="$WARDMAST_PRIMARY_CHECKOUT"
 elif [ -n "${ARB_HOME:-}" ]; then
   PRIMARY_CHECKOUT_INPUT="$ARB_HOME"
 elif [ -r "$CONFIGURED_HOME_FILE" ]; then
@@ -95,7 +97,7 @@ if [ -d "$PRIMARY_CHECKOUT_INPUT" ] &&
     exit 1
   fi
 else
-  echo "warning: could not resolve the primary checkout (tried ARB_PRIMARY_CHECKOUT, ARB_HOME, $CONFIGURED_HOME_FILE, $HOME/dev/arbiter) — the live-checkout guard is inactive." >&2
+  echo "warning: could not resolve the primary checkout (tried WARDMAST_PRIMARY_CHECKOUT, ARB_HOME, $CONFIGURED_HOME_FILE, $HOME/dev/arbiter) — the live-checkout guard is inactive." >&2
 fi
 
 echo "Building in ${CLONE_PATH}…"

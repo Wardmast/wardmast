@@ -2,14 +2,14 @@ defmodule Wardmast.NodeAgent.K8s.Identity do
   @moduledoc """
   What a cluster controller must know about itself before it can label, build or watch a
   pod (ticket K14): the `Wardmast.NodeAgent.K8s.Controller`'s `:identity`, which is also
-  every pod's `arbiter.dev/*` labels and the facts `Wardmast.NodeAgent.K8s.PodSpec` needs.
+  every pod's `wardmast.dev/*` labels and the facts `Wardmast.NodeAgent.K8s.PodSpec` needs.
 
   | fact | from |
   |---|---|
   | `install_id`, `registry` | the primary, `GET /nodes/cluster` with the node credential (`primary_facts/1`); asked again on every boot, so a changed `nodes.registry` reaches the controller at its next restart |
   | `node_id` | the credential (`arbn_<id>.…`) |
-  | `owner_uid` | the controller's own Deployment (`get deployments/arbiter-controller`): pods are owned by it, so uninstalling removes them (K§3.6) |
-  | `bridge_addr` | the controller Service's `clusterIP` (`get services/arbiter-controller`): what pods dial, and what the pod channel's server certificate names |
+  | `owner_uid` | the controller's own Deployment (`get deployments/wardmast-controller`): pods are owned by it, so uninstalling removes them (K§3.6) |
+  | `bridge_addr` | the controller Service's `clusterIP` (`get services/wardmast-controller`): what pods dial, and what the pod channel's server certificate names |
   | `gate_addr` | `KUBERNETES_SERVICE_HOST:KUBERNETES_SERVICE_PORT`, the API server's Service: an address no worker may reach, which the per-pod netpol gate dials until it is refused |
   | `own_pod` | `HOSTNAME`, the pod's name: the Lease holder, and never swept |
   | `max_wall_s` | `ARB_K8S_MAX_WALL_S`, default #{86_400} (a day): a pod's `activeDeadlineSeconds` is this plus 30 minutes, the backstop for a pod whose controller is gone |
@@ -21,8 +21,8 @@ defmodule Wardmast.NodeAgent.K8s.Identity do
   alias Wardmast.NodeAgent.Config
   alias Wardmast.NodeAgent.K8s.Client
 
-  @deployment "arbiter-controller"
-  @service "arbiter-controller"
+  @deployment "wardmast-controller"
+  @service "wardmast-controller"
   @default_max_wall_s 86_400
   @max_wall_s 31_536_000
 

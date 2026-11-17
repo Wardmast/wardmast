@@ -2709,7 +2709,7 @@ defmodule Wardmast.Worker.ClaudeSession do
   # bd-bzsqbu: also prepend a task-scoped DATABASE_PATH override so a worker
   # that starts its own `mix phx.server` for manual verification writes into
   # a throwaway sqlite file instead of silently inheriting the coordinator's
-  # own DATABASE_PATH — the same file the live `arbiter.service` uses.
+  # own DATABASE_PATH — the same file the live `wardmast.service` uses.
   #
   # `worker_env` is the workspace's user-defined vars (bd-62d3jh), resolved by
   # the caller so one workspace load serves both it and the session's

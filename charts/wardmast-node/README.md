@@ -1,4 +1,4 @@
-# arbiter-node
+# wardmast-node
 
 One Arbiter cluster node as a Helm chart (`docs/design/remote-workers.md` §20.5-§20.7). The raw
 manifests (`GET /nodes/join/k8s.yaml`) remain the fallback for clusters without Helm.
@@ -9,16 +9,16 @@ commands that use it.
 
 ```sh
 # 1. cluster-admin, once: the namespace and its Pod Security labels (the chart does not template it)
-kubectl create namespace arbiter-workers
-kubectl label namespace arbiter-workers \
+kubectl create namespace wardmast-workers
+kubectl label namespace wardmast-workers \
   pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest \
   pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted
 
 # 2. the join token, read from your terminal (never argv, history or Helm's release record)
-read -rs T && printf %s "$T" | kubectl -n arbiter-workers create secret generic arbiter-join --from-file=token=/dev/stdin
+read -rs T && printf %s "$T" | kubectl -n wardmast-workers create secret generic wardmast-join --from-file=token=/dev/stdin
 
 # 3. install; the release name is the node name
-helm install mesaana ./charts/arbiter-node -n arbiter-workers \
+helm install mesaana ./charts/wardmast-node -n wardmast-workers \
   --set primary.url=https://arbiter.example.ts.net \
   --set 'networkPolicy.controllerEgress.primaryCIDRs={100.64.0.10/32}'
 ```
@@ -36,11 +36,11 @@ helm install mesaana ./charts/arbiter-node -n arbiter-workers \
 
 ## Rules the chart keeps
 
-- **Object names are fixed** (`arbiter-controller`, `arbiter-worker`, ...): the Role's `resourceNames`, the
+- **Object names are fixed** (`wardmast-controller`, `wardmast-worker`, ...): the Role's `resourceNames`, the
   Service, the Lease, every worker pod's ownerReference and the NetworkPolicy selectors name them. One
   release per namespace.
 - **The controller has its own PriorityClass** (`controller.priorityClassName`, default
-  `arbiter-controller`, `value: 1000`, `PreemptLowerPriority`), above the workers' `-100`
+  `wardmast-controller`, `value: 1000`, `PreemptLowerPriority`), above the workers' `-100`
   (`placement.priorityClass`, `Never`). Losing the controller interrupts every run on the node, so a
   contended cluster must not evict it first. The chart refuses a controller value that does not exceed the
   workers'. Set `controller.priorityClassName=""` for no class, `controller.priorityClass.preemptionPolicy=Never`
@@ -79,9 +79,9 @@ Every tagged release (`.github/workflows/release.yml`, job `publish-oci`) publis
 
 | Artefact | Reference |
 |---|---|
-| controller image | `ghcr.io/<owner>/arbiter-controller:<version>` (also `:v<version>`) |
-| this chart | `oci://ghcr.io/<owner>/charts/arbiter-node` at `--version <version>` (`appVersion` is the same) |
-| worker base | `ghcr.io/<owner>/arbiter-worker-base:<hash>`, the content hash a primary tags the same base with |
+| controller image | `ghcr.io/<owner>/wardmast-controller:<version>` (also `:v<version>`) |
+| this chart | `oci://ghcr.io/<owner>/charts/wardmast-node` at `--version <version>` (`appVersion` is the same) |
+| worker base | `ghcr.io/<owner>/wardmast-worker-base:<hash>`, the content hash a primary tags the same base with |
 
 The controller image and the worker base are built from the Containerfiles the primary generates
 (`mix arbiter.containerfile controller|worker-base --pin`), so CI and the primary cannot drift.
@@ -89,7 +89,7 @@ The controller image and the worker base are built from the Containerfiles the p
 **Signing** is optional: set the repository variable `RELEASE_COSIGN=true`, or run the workflow by hand
 with `sign` ticked. Verify with
 
-    cosign verify ghcr.io/<owner>/arbiter-controller@<digest> \
+    cosign verify ghcr.io/<owner>/wardmast-controller@<digest> \
       --certificate-oidc-issuer https://token.actions.githubusercontent.com \
       --certificate-identity-regexp '^https://github.com/<owner>/<repo>/\.github/workflows/release\.yml@'
 

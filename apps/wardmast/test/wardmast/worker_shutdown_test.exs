@@ -100,7 +100,7 @@ defmodule Wardmast.WorkerShutdownTest do
 
       assert spec.shutdown == Worker.shutdown_grace_ms()
       assert is_integer(spec.shutdown)
-      # arbiter.service inherits TimeoutStopUSec=45s; the grace is spent in
+      # wardmast.service inherits TimeoutStopUSec=45s; the grace is spent in
       # parallel for every worker, and the rest of the tree needs the remainder.
       assert spec.shutdown <= 20_000
     end

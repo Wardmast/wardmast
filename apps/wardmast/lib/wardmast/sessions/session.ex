@@ -8,7 +8,7 @@ defmodule Wardmast.Sessions.Session do
   holding a tmux server holding the agent's PTY (§4.3). Wardmast keeps no port,
   pid or fd — see `Wardmast.Sessions` — so this table plus the two derived
   names in `Wardmast.Sessions.Naming` are the *whole* of what survives a
-  `systemctl --user restart arbiter`, and the boot-time adoption sweep
+  `systemctl --user restart wardmast`, and the boot-time adoption sweep
   (`Wardmast.Sessions.Adoption`) reconciles them against what systemd and tmux
   still have running.
 

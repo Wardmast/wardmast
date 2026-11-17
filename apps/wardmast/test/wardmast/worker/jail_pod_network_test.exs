@@ -35,7 +35,7 @@ defmodule Wardmast.Worker.JailPodNetworkTest do
     assert script =~ "/run/arb/tls/$2.crt"
     assert script =~ "/run/arb/tls/$2.key"
     assert script =~ "cafile=/etc/arb/ca/ca.crt"
-    assert script =~ "commonname=arbiter-controller"
+    assert script =~ "commonname=wardmast-controller"
     assert script =~ "verify=1"
     assert script =~ "backlog=1024"
 

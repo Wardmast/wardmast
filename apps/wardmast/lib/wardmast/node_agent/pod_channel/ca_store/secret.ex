@@ -4,9 +4,9 @@ defmodule Wardmast.NodeAgent.PodChannel.CAStore.Secret do
   §16 K§2.4 step 2, K§12; ticket K14). The argument is the controller's
   `Wardmast.NodeAgent.K8s.Client`:
 
-    * the CA certificate and private key live in the Secret `arbiter-controller-ca`
+    * the CA certificate and private key live in the Secret `wardmast-controller-ca`
       (keys `ca.crt`, `ca.key`), readable only by the controller's Role;
-    * the public certificate alone is published to the ConfigMap `arbiter-ca` (key
+    * the public certificate alone is published to the ConfigMap `wardmast-ca` (key
       `ca.crt`), which every worker pod mounts at `/etc/arb/ca`.
 
   The install renders both as empty placeholders, and the Role grants `get`/`update` on
@@ -21,8 +21,8 @@ defmodule Wardmast.NodeAgent.PodChannel.CAStore.Secret do
 
   alias Wardmast.NodeAgent.K8s.Client
 
-  @secret "arbiter-controller-ca"
-  @config_map "arbiter-ca"
+  @secret "wardmast-controller-ca"
+  @config_map "wardmast-ca"
   @cert "ca.crt"
   @key "ca.key"
 

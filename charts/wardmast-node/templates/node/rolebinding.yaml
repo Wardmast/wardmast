@@ -1,17 +1,17 @@
-{{- if include "arbiter-node.node" . }}
+{{- if include "wardmast-node.node" . }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: arbiter-controller
+  name: wardmast-controller
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "arbiter-node.labels" . | nindent 4 }}
+    {{- include "wardmast-node.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: arbiter-controller
+  name: wardmast-controller
 subjects:
   - kind: ServiceAccount
-    name: arbiter-controller
+    name: wardmast-controller
     namespace: {{ .Release.Namespace }}
 {{- end }}

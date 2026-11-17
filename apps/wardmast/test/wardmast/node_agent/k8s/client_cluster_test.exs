@@ -10,7 +10,7 @@ defmodule Wardmast.NodeAgent.K8s.ClientClusterTest do
     {:ok, FakeK8sApi.start!()}
   end
 
-  defp lease(name \\ "arbiter-controller") do
+  defp lease(name \\ "wardmast-controller") do
     %{
       "apiVersion" => "coordination.k8s.io/v1",
       "kind" => "Lease",
@@ -22,11 +22,11 @@ defmodule Wardmast.NodeAgent.K8s.ClientClusterTest do
   describe "list_resource_quotas/1" do
     test "returns the namespace's quotas", %{api: api, client: client} do
       FakeK8sApi.put_quota(api, %{
-        "metadata" => %{"name" => "arbiter-workers"},
+        "metadata" => %{"name" => "wardmast-workers"},
         "spec" => %{"hard" => %{"pods" => "4"}}
       })
 
-      assert {:ok, [%{"metadata" => %{"name" => "arbiter-workers"}}]} =
+      assert {:ok, [%{"metadata" => %{"name" => "wardmast-workers"}}]} =
                Client.list_resource_quotas(client)
 
       assert [%{method: "GET", path: "/api/v1/namespaces/arb/resourcequotas"}] =
@@ -49,15 +49,15 @@ defmodule Wardmast.NodeAgent.K8s.ClientClusterTest do
     test "reads the pre-created lease", %{api: api, client: client} do
       FakeK8sApi.put_lease(api, lease())
 
-      assert {:ok, %{"metadata" => %{"name" => "arbiter-controller"}}} =
-               Client.get_lease(client, "arbiter-controller")
+      assert {:ok, %{"metadata" => %{"name" => "wardmast-controller"}}} =
+               Client.get_lease(client, "wardmast-controller")
 
-      assert [%{path: "/apis/coordination.k8s.io/v1/namespaces/arb/leases/arbiter-controller"}] =
+      assert [%{path: "/apis/coordination.k8s.io/v1/namespaces/arb/leases/wardmast-controller"}] =
                FakeK8sApi.requests(api)
     end
 
     test "a missing lease is :not_found", %{client: client} do
-      assert {:error, :not_found} = Client.get_lease(client, "arbiter-controller")
+      assert {:error, :not_found} = Client.get_lease(client, "wardmast-controller")
     end
 
     test "update PUTs the whole object and returns the new resourceVersion", %{
@@ -65,13 +65,13 @@ defmodule Wardmast.NodeAgent.K8s.ClientClusterTest do
       client: client
     } do
       FakeK8sApi.put_lease(api, lease())
-      {:ok, held} = Client.get_lease(client, "arbiter-controller")
+      {:ok, held} = Client.get_lease(client, "wardmast-controller")
       held = put_in(held, ["spec", "holderIdentity"], "pod-a")
 
       assert {:ok, updated} = Client.update_lease(client, held)
       assert updated["spec"]["holderIdentity"] == "pod-a"
       assert updated["metadata"]["resourceVersion"] != held["metadata"]["resourceVersion"]
-      assert FakeK8sApi.lease(api, "arbiter-controller")["spec"]["holderIdentity"] == "pod-a"
+      assert FakeK8sApi.lease(api, "wardmast-controller")["spec"]["holderIdentity"] == "pod-a"
     end
 
     test "a stale resourceVersion is :conflict (someone else renewed)", %{
@@ -79,7 +79,7 @@ defmodule Wardmast.NodeAgent.K8s.ClientClusterTest do
       client: client
     } do
       FakeK8sApi.put_lease(api, lease())
-      {:ok, held} = Client.get_lease(client, "arbiter-controller")
+      {:ok, held} = Client.get_lease(client, "wardmast-controller")
       FakeK8sApi.put_lease(api, lease())
 
       assert {:error, :conflict} = Client.update_lease(client, held)

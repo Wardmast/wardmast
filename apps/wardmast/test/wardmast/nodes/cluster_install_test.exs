@@ -28,7 +28,7 @@ defmodule Wardmast.Nodes.ClusterInstallTest do
 
     assert plan.secret_command ==
              "read -rs T && printf %s \"$T\" | kubectl -n ci-workers create secret generic " <>
-               "arbiter-join --from-file=token=/dev/stdin"
+               "wardmast-join --from-file=token=/dev/stdin"
 
     assert plan.image == "registry.example.test/arbiter/controller:0.2.43"
     assert plan.namespace == "ci-workers"
@@ -119,7 +119,7 @@ defmodule Wardmast.Nodes.ClusterInstallTest do
     test "the Helm install: namespace, join Secret, and the values piped into helm install" do
       assert {:ok, %{helm: helm}} = ClusterInstall.plan(@params, version: "v0.2.43")
 
-      assert helm.chart_ref == "oci://ghcr.io/wardmast/charts/arbiter-node"
+      assert helm.chart_ref == "oci://ghcr.io/wardmast/charts/wardmast-node"
       assert helm.chart_version == "0.2.43"
       assert helm.release == "mesaana-k3s"
 
@@ -129,19 +129,19 @@ defmodule Wardmast.Nodes.ClusterInstallTest do
 
       assert helm.namespace_command =~ "kubectl create namespace ci-workers"
       assert helm.namespace_command =~ "pod-security.kubernetes.io/enforce=restricted"
-      assert helm.secret_command =~ "-n ci-workers create secret generic arbiter-join"
+      assert helm.secret_command =~ "-n ci-workers create secret generic wardmast-join"
 
       assert helm.install_command ==
                ~s(curl -fsSL "#{helm.values_url}" | helm install mesaana-k3s ) <>
-                 "oci://ghcr.io/wardmast/charts/arbiter-node --version 0.2.43 " <>
+                 "oci://ghcr.io/wardmast/charts/wardmast-node --version 0.2.43 " <>
                  "--namespace ci-workers -f -"
     end
 
     test "nodes.chart_ref wins over the default chart" do
-      {:ok, _} = Settings.set_nodes_chart_ref("oci://registry.example.test/charts/arbiter-node")
+      {:ok, _} = Settings.set_nodes_chart_ref("oci://registry.example.test/charts/wardmast-node")
       assert {:ok, %{helm: helm}} = ClusterInstall.plan(@params, version: "1")
-      assert helm.chart_ref == "oci://registry.example.test/charts/arbiter-node"
-      assert helm.install_command =~ "oci://registry.example.test/charts/arbiter-node"
+      assert helm.chart_ref == "oci://registry.example.test/charts/wardmast-node"
+      assert helm.install_command =~ "oci://registry.example.test/charts/wardmast-node"
     end
 
     test "no nodes.registry: Helm still plans, the raw manifests are unavailable" do
@@ -181,10 +181,10 @@ defmodule Wardmast.Nodes.ClusterInstallTest do
 
   test "set_image_command/2 names the controller's own Deployment and container" do
     assert ClusterInstall.set_image_command(
-             "arbiter-workers",
+             "wardmast-workers",
              "r.example/arbiter/controller:0.2.43"
            ) ==
-             "kubectl -n arbiter-workers set image deployment/arbiter-controller " <>
+             "kubectl -n wardmast-workers set image deployment/wardmast-controller " <>
                "controller=r.example/arbiter/controller:0.2.43"
   end
 

@@ -22,7 +22,7 @@ defmodule Wardmast.MCP.OperatorProof do
        started, and is refused. The server itself is refused too.
     3. **Not inside the server's service cgroup.** When the server runs as a
        systemd unit (its cgroup ends in `.service`, like the release's
-       `arbiter.service`), every process it spawns inherits that cgroup. That
+       `wardmast.service`), every process it spawns inherits that cgroup. That
        includes a double-forked orphan that has been reparented to
        `systemd --user` and so escaped check 2. A peer in that cgroup, or
        below it, is refused. A dev server run from a terminal shares the
@@ -33,7 +33,7 @@ defmodule Wardmast.MCP.OperatorProof do
        `systemd-run --user --scope --unit=arb-session-<id>` running a tmux
        server that daemonizes. Their processes therefore descend from
        `systemd --user`, not the server, and sit in a sibling cgroup of
-       `arbiter.service`, so checks 2 and 3 both miss them. A peer whose
+       `wardmast.service`, so checks 2 and 3 both miss them. A peer whose
        cgroup path has a segment starting with
        `Wardmast.Sessions.Naming.unit_prefix/0` is refused. This check runs
        whether or not the server has a service cgroup (dev servers launch
@@ -47,7 +47,7 @@ defmodule Wardmast.MCP.OperatorProof do
   A jailed worker (agy under `Wardmast.Worker.Jail`) cannot reach the socket
   at all: its directory sits under `/run/user/<uid>`, which the jail blanks,
   and the jail masks the fallback directory too. It also can't escape
-  `arbiter.service` through `systemd-run --user`, because the session bus is
+  `wardmast.service` through `systemd-run --user`, because the session bus is
   masked. An **unjailed** worker (Claude today) is refused on the paths it
   would actually take: `arb mcp token mint`, `curl` to the HTTP route, a
   script that connects to the socket. But it runs as the operator with full
@@ -139,7 +139,7 @@ defmodule Wardmast.MCP.OperatorProof do
   @doc """
   Directory the operator socket lives in: `/run/user/<uid>/arbiter` when the
   host has a per-user runtime dir (systemd hosts; the agy jail blanks it),
-  else `<data_dir>/run` (`~/.arbiter/run`, which `Wardmast.Worker.Jail`
+  else `<data_dir>/run` (`~/.wardmast/run`, which `Wardmast.Worker.Jail`
   masks explicitly). `ARB_OPERATOR_SOCKET` overrides the whole path, see
   `socket_path/1`.
 
@@ -174,7 +174,7 @@ defmodule Wardmast.MCP.OperatorProof do
     if runtime && File.dir?(runtime) do
       Path.join(runtime, "arbiter")
     else
-      Path.join(Application.get_env(:wardmast, :data_dir, Path.expand("~/.arbiter")), "run")
+      Path.join(Application.get_env(:wardmast, :data_dir, Path.expand("~/.wardmast")), "run")
     end
   end
 

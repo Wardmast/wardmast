@@ -22,7 +22,7 @@ defmodule WardmastCli.Cmd.Start do
 
     1. `ARB_HOME` — explicit override.
     2. The umbrella inferred from the running escript's path (build-tree only).
-    3. The path recorded by `arb install-service` at `~/.config/arbiter/home`.
+    3. The path recorded by `arb install-service` at `~/.config/wardmast/home`.
     4. A walk up from the current directory looking for `mix.exs`.
 
   If none resolve, the command errors with a hint to set `ARB_HOME`.
@@ -157,7 +157,7 @@ defmodule WardmastCli.Cmd.Start do
      properly-set-up dev machine.
 
   2. **Inline fallback** — when `.run-server.sh` is absent, run
-     `mix phx.server` directly from `root` (via `cd: root`). If `.arbiter.env`
+     `mix phx.server` directly from `root` (via `cd: root`). If `.wardmast.env`
      exists in `root` it is sourced first (via `set -a` so every assignment is
      automatically exported) to carry secrets into Phoenix's environment.
   """
@@ -173,9 +173,9 @@ defmodule WardmastCli.Cmd.Start do
         {"nohup sh '#{run_server_sh}' > '#{log}' 2>&1 < /dev/null &", [stderr_to_stdout: true]}
       else
         log_text("Starting Phoenix (mix phx.server)… logging to #{log}")
-        # Source .arbiter.env if present so secrets reach Phoenix's env.
+        # Source .wardmast.env if present so secrets reach Phoenix's env.
         script =
-          "if [ -f .arbiter.env ]; then set -a; . ./.arbiter.env; set +a; fi; " <>
+          "if [ -f .wardmast.env ]; then set -a; . ./.wardmast.env; set +a; fi; " <>
             "nohup mix phx.server > '#{log}' 2>&1 < /dev/null &"
 
         {script, [cd: root, stderr_to_stdout: true]}
@@ -299,7 +299,7 @@ defmodule WardmastCli.Cmd.Start do
        with an on-PATH escript install).
     2. The umbrella inferred from the running escript's path (build-tree only:
        path ends with `/apps/wardmast_cli/arb` and that file exists).
-    3. The path recorded by `arb install-service` at `~/.config/arbiter/home`
+    3. The path recorded by `arb install-service` at `~/.config/wardmast/home`
        (written on first install so commands work from any cwd after that;
        validated as an umbrella root on each read so stale CI paths are skipped).
     4. A walk up from the current directory looking for an umbrella root
@@ -351,7 +351,7 @@ defmodule WardmastCli.Cmd.Start do
   @doc false
   @spec recorded_home_path() :: String.t()
   def recorded_home_path do
-    Path.join([System.user_home!(), ".config", "arbiter", "home"])
+    Path.join([System.user_home!(), ".config", "wardmast", "home"])
   end
 
   # Read back the home path written by `record_home/1`. Returns the expanded

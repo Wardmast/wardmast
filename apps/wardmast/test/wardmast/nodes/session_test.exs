@@ -10,7 +10,7 @@ defmodule Wardmast.Nodes.SessionTest do
   @moduletag :tmp_dir
 
   # An outdated hello looks up the release to upgrade to (`Nodes.Agent`); keep
-  # that off the operator's real `~/.arbiter`.
+  # that off the operator's real `~/.wardmast`.
   setup %{tmp_dir: home} do
     # The skew verdict compares against the primary's version, which `git
     # describe` makes ambient (a tagless CI clone is 0.0.0): pin it.

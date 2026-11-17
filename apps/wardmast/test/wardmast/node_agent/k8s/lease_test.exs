@@ -4,7 +4,7 @@ defmodule Wardmast.NodeAgent.K8s.LeaseTest do
   alias Wardmast.NodeAgent.K8s.Lease
   alias Wardmast.Test.FakeK8sApi
 
-  @name "arbiter-controller"
+  @name "wardmast-controller"
 
   setup do
     env = FakeK8sApi.start!()

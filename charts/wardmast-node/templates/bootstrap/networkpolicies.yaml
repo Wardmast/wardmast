@@ -4,9 +4,9 @@ them: a node whose policies are not enforced is degraded, never silently open.
 Workers get no DNS and one destination (the controller); the controller gets the API
 server, DNS and exactly one more destination chosen by reach.mode.
 */ -}}
-{{- if include "arbiter-node.bootstrap" . }}
+{{- if include "wardmast-node.bootstrap" . }}
 {{- $ns := .Release.Namespace }}
-{{- $labels := include "arbiter-node.labels" . }}
+{{- $labels := include "wardmast-node.labels" . }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -112,7 +112,7 @@ spec:
         {{- end }}
       ports:
         - protocol: TCP
-          port: {{ include "arbiter-node.urlPort" (required "primary.url is required" .Values.primary.url) }}
+          port: {{ include "wardmast-node.urlPort" (required "primary.url is required" .Values.primary.url) }}
     {{- else if eq .Values.reach.mode "proxy" }}
     - to:
         {{- range (required "reach.proxy.cidrs is required for reach.mode=proxy" .Values.reach.proxy.cidrs) }}
@@ -121,7 +121,7 @@ spec:
         {{- end }}
       ports:
         - protocol: TCP
-          port: {{ include "arbiter-node.urlPort" (required "reach.proxy.url is required for reach.mode=proxy" .Values.reach.proxy.url) }}
+          port: {{ include "wardmast-node.urlPort" (required "reach.proxy.url is required for reach.mode=proxy" .Values.reach.proxy.url) }}
     {{- else }}
     {{- /* The tailnet control plane and DERP relays have no stable addresses. */}}
     - to:

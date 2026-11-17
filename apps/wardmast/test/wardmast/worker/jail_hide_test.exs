@@ -1,7 +1,7 @@
 defmodule Wardmast.Worker.JailHideTest do
   @moduledoc """
   bd-3q2djr (G3): the agy jail hides sensitive read paths — credential dirs,
-  the install DB and `~/.arbiter`, the durable log root, other workspaces'
+  the install DB and `~/.wardmast`, the durable log root, other workspaces'
   repos and the worktree root — behind `--tmpfs` / `/dev/null`.
 
   The path-class tests are pure (a fake operator home under a scratch dir).
@@ -36,7 +36,7 @@ defmodule Wardmast.Worker.JailHideTest do
   # sibling worktree under the worktree root, and an own + a foreign repo.
   defp fixture!(base) do
     home = Path.join(base, "home")
-    data = Path.join(home, ".arbiter")
+    data = Path.join(home, ".wardmast")
     wt_root = Path.join(base, "worktrees")
     log_root = Path.join(base, "logs")
     own_repo = Path.join(base, "repos/own")
@@ -50,7 +50,7 @@ defmodule Wardmast.Worker.JailHideTest do
           ".ssh",
           ".aws",
           ".gemini",
-          ".arbiter/accounts",
+          ".wardmast/accounts",
           ".cache/arbiter/worker-claude",
           ".cache/arbiter/worker-agy/sibling"
         ] do
@@ -74,8 +74,8 @@ defmodule Wardmast.Worker.JailHideTest do
       ".ssh/config",
       ".aws/credentials",
       ".gemini/oauth_creds.json",
-      ".arbiter/arbiter.sqlite3",
-      ".arbiter/accounts.json",
+      ".wardmast/arbiter.sqlite3",
+      ".wardmast/accounts.json",
       ".netrc",
       ".git-credentials",
       ".cache/arbiter/worker-claude/.credentials.json",
@@ -128,7 +128,7 @@ defmodule Wardmast.Worker.JailHideTest do
 
       # `.grok` holds the canonical grok refresh token (bd-9p4lx9): the broker is
       # its only reader, so a jailed worker must not see it under `--ro-bind / /`.
-      for d <- [".claude", ".codex", ".grok", ".config/gh", ".ssh", ".aws", ".gemini", ".arbiter"] do
+      for d <- [".claude", ".codex", ".grok", ".config/gh", ".ssh", ".aws", ".gemini", ".wardmast"] do
         assert Path.join(h, d) in dirs, "#{d} not masked"
       end
 
@@ -189,8 +189,8 @@ defmodule Wardmast.Worker.JailHideTest do
 
     test "files and dirs under a masked dir are not listed twice", %{fx: fx} do
       %{dirs: dirs, files: files} = Hide.paths(fx.opts)
-      refute Path.join(fx.home, ".arbiter/accounts") in dirs
-      refute Path.join(fx.home, ".arbiter/arbiter.sqlite3") in files
+      refute Path.join(fx.home, ".wardmast/accounts") in dirs
+      refute Path.join(fx.home, ".wardmast/arbiter.sqlite3") in files
     end
 
     test "a database outside the data dir is masked as a file with its sidecars", %{
@@ -411,14 +411,14 @@ defmodule Wardmast.Worker.JailHideTest do
       refute out =~ "SECRET"
     end
 
-    test "the install DB, accounts and ~/.arbiter read back empty", %{fx: fx} do
+    test "the install DB, accounts and ~/.wardmast read back empty", %{fx: fx} do
       h = fx.home
 
       out =
         reads(fx, [
-          Path.join(h, ".arbiter/arbiter.sqlite3"),
-          Path.join(h, ".arbiter/accounts.json"),
-          Path.join(h, ".arbiter")
+          Path.join(h, ".wardmast/arbiter.sqlite3"),
+          Path.join(h, ".wardmast/accounts.json"),
+          Path.join(h, ".wardmast")
         ])
 
       refute out =~ "SECRET"
@@ -486,15 +486,15 @@ defmodule Wardmast.Worker.JailHideTest do
     end
 
     test "the agy HOME's symlink passthrough resolves into the masks", %{fx: fx} do
-      # The isolated agy HOME symlinks the operator's .ssh/.arbiter/.config.
+      # The isolated agy HOME symlinks the operator's .ssh/.wardmast/.config.
       File.mkdir_p!(fx.agy_home)
-      File.ln_s!(Path.join(fx.home, ".arbiter"), Path.join(fx.agy_home, ".arbiter"))
+      File.ln_s!(Path.join(fx.home, ".wardmast"), Path.join(fx.agy_home, ".wardmast"))
       File.ln_s!(Path.join(fx.home, ".config"), Path.join(fx.agy_home, ".config"))
 
       out =
         jailed(
           fx,
-          ~s(cat "$HOME/.arbiter/arbiter.sqlite3" "$HOME/.config/gh/hosts.yml" 2>/dev/null; echo end)
+          ~s(cat "$HOME/.wardmast/arbiter.sqlite3" "$HOME/.config/gh/hosts.yml" 2>/dev/null; echo end)
         )
 
       refute out =~ "SECRET"

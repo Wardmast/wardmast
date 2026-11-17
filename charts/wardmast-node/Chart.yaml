@@ -1,5 +1,5 @@
 apiVersion: v2
-name: arbiter-node
+name: wardmast-node
 description: >-
   An Arbiter cluster node: the controller Deployment and its RBAC (mode node), the
   namespace guardrails around it (mode bootstrap), or both (mode all, the default).

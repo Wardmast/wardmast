@@ -110,7 +110,7 @@ defmodule Wardmast.Nodes.ClusterUpgradeTest do
     @helm %{
       "self_upgrade" => false,
       "namespace" => "ci-workers",
-      "install" => %{"method" => "helm", "release" => "arbiter-node"}
+      "install" => %{"method" => "helm", "release" => "wardmast-node"}
     }
 
     test "Nodes.upgrade queues nothing and says it needs the operator" do
@@ -214,15 +214,15 @@ defmodule Wardmast.Nodes.ClusterUpgradeTest do
       assert row.image == @image
 
       assert row.upgrade_command ==
-               "kubectl -n ci-workers set image deployment/arbiter-controller controller=#{@image}"
+               "kubectl -n ci-workers set image deployment/wardmast-controller controller=#{@image}"
     end
 
-    test "the namespace defaults to arbiter-workers" do
+    test "the namespace defaults to wardmast-workers" do
       node = enroll!("k3s", "cluster")
       attach!(node, hello())
 
       assert row(node).upgrade_command ==
-               "kubectl -n arbiter-workers set image deployment/arbiter-controller controller=#{@image}"
+               "kubectl -n wardmast-workers set image deployment/wardmast-controller controller=#{@image}"
     end
 
     test "a node that patches itself shows no command: it is on its way" do
@@ -244,8 +244,8 @@ defmodule Wardmast.Nodes.ClusterUpgradeTest do
           "namespace" => "ci-workers",
           "install" => %{
             "method" => "helm",
-            "release" => "arbiter-node",
-            "chart" => "oci://ghcr.io/acme/charts/arbiter-node"
+            "release" => "wardmast-node",
+            "chart" => "oci://ghcr.io/acme/charts/wardmast-node"
           }
         })
       )
@@ -255,12 +255,12 @@ defmodule Wardmast.Nodes.ClusterUpgradeTest do
       assert row.install_method == "helm"
 
       assert row.upgrade_command ==
-               "helm upgrade arbiter-node oci://ghcr.io/acme/charts/arbiter-node " <>
+               "helm upgrade wardmast-node oci://ghcr.io/acme/charts/wardmast-node " <>
                  "--version 9.9.9 -n ci-workers --reset-then-reuse-values --set image.tag=v9.9.9 --wait"
     end
 
     test "nodes.chart_ref wins over the chart the node reports" do
-      {:ok, _} = Settings.set_nodes_chart_ref("oci://registry.example.test/charts/arbiter-node")
+      {:ok, _} = Settings.set_nodes_chart_ref("oci://registry.example.test/charts/wardmast-node")
       on_exit(fn -> {:ok, _} = Settings.set_nodes_chart_ref(nil) end)
 
       node = enroll!("k3s", "cluster")
@@ -273,7 +273,7 @@ defmodule Wardmast.Nodes.ClusterUpgradeTest do
       )
 
       assert row(node).upgrade_command =~
-               "helm upgrade r1 oci://registry.example.test/charts/arbiter-node --version 9.9.9"
+               "helm upgrade r1 oci://registry.example.test/charts/wardmast-node --version 9.9.9"
     end
 
     test "a helm install is never told it is on its way, whatever self_upgrade says" do

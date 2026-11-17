@@ -1,10 +1,10 @@
-# arbiter-node: one Arbiter cluster node. docs/design/remote-workers.md §20.5-§20.7.
+# wardmast-node: one Arbiter cluster node. docs/design/remote-workers.md §20.5-§20.7.
 #
 # Unknown keys are an install error (values.schema.json), so a typo is not a silent default.
 # Nothing here carries a secret: the join token comes from a pre-created Secret, the
 # tailscale auth key and every pull secret are referenced by NAME.
 #
-# Object names are fixed (arbiter-controller, arbiter-worker, ...): the Role's
+# Object names are fixed (wardmast-controller, wardmast-worker, ...): the Role's
 # resourceNames, the Service, the Lease, every worker pod's ownerReference and the
 # NetworkPolicy selectors all name them. So: ONE RELEASE PER NAMESPACE, and the release
 # name is the node name (unless node.name is set).
@@ -29,7 +29,7 @@ primary:
 
 # The controller image. Tag defaults to the chart's appVersion, which is the release.
 image:
-  repository: ghcr.io/wardmast/arbiter-controller
+  repository: ghcr.io/wardmast/wardmast-controller
   tag: ""
   # A digest (sha256:...) wins over the tag.
   digest: ""
@@ -40,12 +40,12 @@ imagePullSecrets: []
 # Reported to the primary, which prints the exact `helm upgrade` command for this node
 # (ARB_CHART_REF). Helm owns the controller Deployment: the controller cannot repoint its
 # own image (the Role has no write verb on the Deployment, ARB_K8S_SELF_UPGRADE=false).
-chartRef: oci://ghcr.io/wardmast/charts/arbiter-node
+chartRef: oci://ghcr.io/wardmast/charts/wardmast-node
 
 join:
   # The one-shot join token Secret (key: token), made with
-  #   read -rs T && printf %s "$T" | kubectl -n NS create secret generic arbiter-join --from-file=token=/dev/stdin
-  existingSecret: arbiter-join
+  #   read -rs T && printf %s "$T" | kubectl -n NS create secret generic wardmast-join --from-file=token=/dev/stdin
+  existingSecret: wardmast-join
   # Automation fallback ONLY, and only via `--set-file join.token=./token`: the rendered
   # Secret, token included, is stored in Helm's release record until the release is
   # deleted. The token is single-use and expires in 15 minutes. Never `--set join.token=`.
@@ -71,7 +71,7 @@ controller:
   # the cluster: a second install sets priorityClass.create=false. In mode=node the class
   # must already exist (bootstrap creates it): upgrade the guardrails first, or the
   # Deployment's pod is refused with "no PriorityClass with name ... was found".
-  priorityClassName: arbiter-controller
+  priorityClassName: wardmast-controller
   priorityClass:
     create: true
     value: 1000
@@ -118,7 +118,7 @@ placement:
     # PriorityClass is cluster-scoped and shared by every install on the cluster: a second
     # install must set create=false (Helm will not adopt an object another release owns).
     create: true
-    name: arbiter-worker
+    name: wardmast-worker
     value: -100
 
 # Renders the cluster-scoped RuntimeClass object only (the runtime itself, e.g. runsc,
@@ -152,7 +152,7 @@ reach:
   mode: direct
   tailscale:
     # Secret with key `authkey`: ephemeral, pre-authorised, tagged tag:arbiter-node.
-    authKeySecret: arbiter-tailscale
+    authKeySecret: wardmast-tailscale
     image:
       repository: ghcr.io/tailscale/tailscale
       tag: v1.104.1
@@ -174,7 +174,7 @@ admissionPolicy:
 # repo's runs on a node that covers the repo's registry.
 registries: []
 # - prefix: registry.example.test/arbiter
-#   pullSecret: arbiter-registry
+#   pullSecret: wardmast-registry
 
 # The cluster-admin's ceiling for the namespace, sized for concurrency.max=2 with the
 # default worker size (the figures InstallManifest derives). Helm has no quantity

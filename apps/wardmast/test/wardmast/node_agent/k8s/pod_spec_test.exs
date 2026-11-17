@@ -552,11 +552,11 @@ defmodule Wardmast.NodeAgent.K8s.PodSpecTest do
       pod = build!()
       spec = pod["spec"]
 
-      assert spec["serviceAccountName"] == "arbiter-worker"
+      assert spec["serviceAccountName"] == "wardmast-worker"
       assert spec["automountServiceAccountToken"] == false
       assert spec["enableServiceLinks"] == false
       assert spec["restartPolicy"] == "Never"
-      assert spec["priorityClassName"] == "arbiter-worker"
+      assert spec["priorityClassName"] == "wardmast-worker"
       assert spec["activeDeadlineSeconds"] == 3600 + 1800
       assert spec["terminationGracePeriodSeconds"] == 120
       for k <- ~w(hostNetwork hostPID hostIPC shareProcessNamespace), do: refute(spec[k] == true)
@@ -564,11 +564,11 @@ defmodule Wardmast.NodeAgent.K8s.PodSpecTest do
       refute inspect(pod) =~ "hostPort"
     end
 
-    test "no volume other than emptyDir and the arbiter-ca ConfigMap" do
+    test "no volume other than emptyDir and the wardmast-ca ConfigMap" do
       pod = build!(run_spec(%{"services" => [%{"preset" => "postgres"}]}))
 
       for v <- pod["spec"]["volumes"] do
-        assert Map.has_key?(v, "emptyDir") or v["configMap"] == %{"name" => "arbiter-ca"},
+        assert Map.has_key?(v, "emptyDir") or v["configMap"] == %{"name" => "wardmast-ca"},
                v["name"]
       end
     end
@@ -586,22 +586,22 @@ defmodule Wardmast.NodeAgent.K8s.PodSpecTest do
       meta = pod["metadata"]
 
       assert meta["name"] == "arb-run-0123456789ab"
-      assert meta["namespace"] == "arbiter-workers"
+      assert meta["namespace"] == "wardmast-workers"
 
       assert meta["labels"] == %{
-               "app.kubernetes.io/name" => "arbiter-worker",
+               "app.kubernetes.io/name" => "wardmast-worker",
                "app.kubernetes.io/component" => "worker",
-               "arbiter.dev/install" => "inst-1",
-               "arbiter.dev/node" => "node-1",
-               "arbiter.dev/run" => "run-0123456789abcdef",
-               "arbiter.dev/task" => "bd-1nfuq5"
+               "wardmast.dev/install" => "inst-1",
+               "wardmast.dev/node" => "node-1",
+               "wardmast.dev/run" => "run-0123456789abcdef",
+               "wardmast.dev/task" => "bd-1nfuq5"
              }
 
       assert [
                %{
                  "apiVersion" => "apps/v1",
                  "kind" => "Deployment",
-                 "name" => "arbiter-controller",
+                 "name" => "wardmast-controller",
                  "uid" => uid
                }
              ] =
@@ -614,17 +614,17 @@ defmodule Wardmast.NodeAgent.K8s.PodSpecTest do
       pod = build!(%{run_spec() | task: "bd-1hoo7j#review"})
       meta = pod["metadata"]
 
-      assert meta["labels"]["arbiter.dev/task"] == "bd-1hoo7j_review"
-      assert meta["annotations"]["arbiter.dev/task"] == "bd-1hoo7j#review"
+      assert meta["labels"]["wardmast.dev/task"] == "bd-1hoo7j_review"
+      assert meta["annotations"]["wardmast.dev/task"] == "bd-1hoo7j#review"
     end
 
     test "a task that is already a valid label gets no task annotation" do
-      refute Map.has_key?(build!()["metadata"]["annotations"], "arbiter.dev/task")
+      refute Map.has_key?(build!()["metadata"]["annotations"], "wardmast.dev/task")
     end
 
     test "the pod is annotated as an event-feed pod and its worker told so (bd-1nl506)" do
       pod = build!()
-      assert pod["metadata"]["annotations"]["arbiter.dev/events"] == "1"
+      assert pod["metadata"]["annotations"]["wardmast.dev/events"] == "1"
       env = container(pod, "worker")["env"]
       assert %{"name" => "ARB_EVENTS", "value" => "1"} in env
     end
@@ -653,13 +653,13 @@ defmodule Wardmast.NodeAgent.K8s.PodSpecTest do
         assert {:error, {:bad_spec, {:bad_name, _}}} = PodSpec.build(bad, config())
       end
 
-      assert {:error, {:bad_spec, {:bad_label, "arbiter.dev/run"}}} =
+      assert {:error, {:bad_spec, {:bad_label, "wardmast.dev/run"}}} =
                PodSpec.build(%{base | run: String.duplicate("a", 64)}, config())
     end
 
     test "extra labels from the spec cannot overwrite the controller's" do
-      pod = build!(%{run_spec() | labels: %{"arbiter.dev/run" => "other", "extra" => "1"}})
-      assert pod["metadata"]["labels"]["arbiter.dev/run"] == "run-0123456789abcdef"
+      pod = build!(%{run_spec() | labels: %{"wardmast.dev/run" => "other", "extra" => "1"}})
+      assert pod["metadata"]["labels"]["wardmast.dev/run"] == "run-0123456789abcdef"
     end
   end
 
@@ -995,7 +995,7 @@ defmodule Wardmast.NodeAgent.K8s.PodSpecTest do
             tolerations: [
               %{key: "dedicated", operator: "Equal", value: "arbiter", effect: "NoSchedule"}
             ],
-            priority_class: "arbiter-worker",
+            priority_class: "wardmast-worker",
             runtime_class: "gvisor"
           },
           image_pull_secrets: ["gitlab-registry"]
@@ -1030,7 +1030,7 @@ defmodule Wardmast.NodeAgent.K8s.PodSpecTest do
                "labelSelector" => %{
                  "matchLabels" => %{
                    "app.kubernetes.io/component" => "worker",
-                   "arbiter.dev/node" => "node-1"
+                   "wardmast.dev/node" => "node-1"
                  }
                }
              }

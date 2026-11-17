@@ -4,7 +4,7 @@ defmodule Wardmast.Integration.SessionRestartSurvivalTest do
   `docs/browser-hosted-coordinator-sessions.md`, §13 row 2).
 
   **This protects the one property everything else in the RFC assumes:** a
-  coordinator session survives `systemctl --user restart arbiter`. If it does
+  coordinator session survives `systemctl --user restart wardmast`. If it does
   not, the browser transport, the usage ingest and the whole "the coordinator
   can restart itself" story are built on sand — and the failure is *silent*
   until an operator restarts arbiter and loses their session.
@@ -13,7 +13,7 @@ defmodule Wardmast.Integration.SessionRestartSurvivalTest do
   (the scope is a sibling cgroup). It cannot prove the **consequence**,
   because it launches from the ExUnit BEAM's own cgroup and nothing restarts
   that. So this test brings up a throwaway systemd user service standing in
-  for `arbiter.service` — same user manager, same default `KillMode`, no blast
+  for `wardmast.service` — same user manager, same default `KillMode`, no blast
   radius on the live coordinator — launches a session from inside it through
   the real `Wardmast.Sessions.launch/1`, and restarts it for real.
 
@@ -106,7 +106,7 @@ defmodule Wardmast.Integration.SessionRestartSurvivalTest do
 
     assert session.status == :running
 
-    # ---- the stand-in really is arbiter.service's shape --------------------
+    # ---- the stand-in really is wardmast.service's shape --------------------
 
     kill_mode = StandinUnit.kill_mode(standin)
 
@@ -115,16 +115,16 @@ defmodule Wardmast.Integration.SessionRestartSurvivalTest do
              "signal its whole cgroup and the negative control would be meaningless"
 
     # Measured against the real thing where it is loaded on this host, so
-    # "same KillMode as arbiter.service" is not an assumption.
-    case StandinUnit.kill_mode("arbiter.service") do
+    # "same KillMode as wardmast.service" is not an assumption.
+    case StandinUnit.kill_mode("wardmast.service") do
       "" ->
         IO.puts(
-          "[bd-b95w36] arbiter.service is not loaded here; KillMode compared to the default"
+          "[bd-b95w36] wardmast.service is not loaded here; KillMode compared to the default"
         )
 
       arbiter_kill_mode ->
         assert arbiter_kill_mode == kill_mode,
-               "arbiter.service has KillMode=#{arbiter_kill_mode} but the stand-in has " <>
+               "wardmast.service has KillMode=#{arbiter_kill_mode} but the stand-in has " <>
                  "KillMode=#{kill_mode} — the stand-in no longer stands in for it"
     end
 

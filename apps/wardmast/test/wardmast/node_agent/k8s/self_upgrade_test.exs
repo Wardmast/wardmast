@@ -15,12 +15,12 @@ defmodule Wardmast.NodeAgent.K8s.SelfUpgradeTest do
   @spec_new %{"version" => "0.2.43", "image" => @new}
 
   setup do
-    env = FakeK8sApi.start!(namespace: "arbiter-workers")
+    env = FakeK8sApi.start!(namespace: "wardmast-workers")
 
     FakeK8sApi.put_deployment(env.api, %{
       "apiVersion" => "apps/v1",
       "kind" => "Deployment",
-      "metadata" => %{"name" => "arbiter-controller", "namespace" => "arbiter-workers"},
+      "metadata" => %{"name" => "wardmast-controller", "namespace" => "wardmast-workers"},
       "spec" => %{
         "template" => %{
           "spec" => %{
@@ -38,7 +38,7 @@ defmodule Wardmast.NodeAgent.K8s.SelfUpgradeTest do
 
   defp images(api) do
     api
-    |> FakeK8sApi.deployment("arbiter-controller")
+    |> FakeK8sApi.deployment("wardmast-controller")
     |> get_in(["spec", "template", "spec", "containers"])
     |> Map.new(&{&1["name"], &1["image"]})
   end
@@ -58,9 +58,9 @@ defmodule Wardmast.NodeAgent.K8s.SelfUpgradeTest do
       paths = for r <- FakeK8sApi.requests(api), do: {r.method, r.path}
 
       assert paths == [
-               {"GET", "/apis/apps/v1/namespaces/arbiter-workers/deployments/arbiter-controller"},
+               {"GET", "/apis/apps/v1/namespaces/wardmast-workers/deployments/wardmast-controller"},
                {"PATCH",
-                "/apis/apps/v1/namespaces/arbiter-workers/deployments/arbiter-controller"}
+                "/apis/apps/v1/namespaces/wardmast-workers/deployments/wardmast-controller"}
              ]
 
       [patch] = patches(api)
@@ -90,7 +90,7 @@ defmodule Wardmast.NodeAgent.K8s.SelfUpgradeTest do
 
       assert Enum.all?(
                FakeK8sApi.requests(api),
-               &(&1.path =~ "/namespaces/arbiter-workers/deployments/arbiter-controller")
+               &(&1.path =~ "/namespaces/wardmast-workers/deployments/wardmast-controller")
              )
 
       assert images(api)["tailscale"] == "ghcr.io/tailscale/tailscale:stable"
@@ -125,7 +125,7 @@ defmodule Wardmast.NodeAgent.K8s.SelfUpgradeTest do
       FakeK8sApi.fail_next(
         api,
         :deployment_patch,
-        {403, "deployments.apps \"arbiter-controller\" is forbidden"}
+        {403, "deployments.apps \"wardmast-controller\" is forbidden"}
       )
 
       assert {:error, {:forbidden, message}} = SelfUpgrade.run(client, @spec_new, enabled?: true)

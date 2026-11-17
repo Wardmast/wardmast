@@ -371,7 +371,7 @@ defmodule Wardmast.Worker.JailTest do
     end
 
     test "the server's secret files are hidden behind /dev/null (bd-8381tk)" do
-      secret = "/h/.arbiter/arbiter.env"
+      secret = "/h/.arbiter/wardmast.env"
 
       argv =
         Jail.argv(
@@ -394,7 +394,7 @@ defmodule Wardmast.Worker.JailTest do
     test "secret_files/0 names the server env file and the release cookie that exist" do
       dir = Path.join(System.tmp_dir!(), "jail-secrets-#{System.pid()}")
       File.mkdir_p!(Path.join(dir, "releases"))
-      File.write!(Path.join(dir, "arbiter.env"), "SECRET_KEY_BASE=x\n")
+      File.write!(Path.join(dir, "wardmast.env"), "SECRET_KEY_BASE=x\n")
       File.write!(Path.join([dir, "releases", "COOKIE"]), "cookie")
       old_dir = Application.fetch_env(:wardmast, :data_dir)
       old_root = System.get_env("RELEASE_ROOT")
@@ -415,9 +415,9 @@ defmodule Wardmast.Worker.JailTest do
       end)
 
       assert Enum.sort(Jail.secret_files()) ==
-               Enum.sort([Path.join(dir, "arbiter.env"), Path.join([dir, "releases", "COOKIE"])])
+               Enum.sort([Path.join(dir, "wardmast.env"), Path.join([dir, "releases", "COOKIE"])])
 
-      File.rm!(Path.join(dir, "arbiter.env"))
+      File.rm!(Path.join(dir, "wardmast.env"))
       assert Jail.secret_files() == [Path.join([dir, "releases", "COOKIE"])]
     end
 
@@ -644,12 +644,12 @@ defmodule Wardmast.Worker.JailTest do
         end
       end)
 
-      File.write!(Path.join(base, "arbiter.env"), "SECRET_KEY_BASE=x\n")
+      File.write!(Path.join(base, "wardmast.env"), "SECRET_KEY_BASE=x\n")
       cookie = Path.join(base, "release.cookie")
       File.write!(cookie, "secret")
 
       assert cookie in Jail.secret_files()
-      assert Path.join(base, "arbiter.env") in Jail.secret_files()
+      assert Path.join(base, "wardmast.env") in Jail.secret_files()
     end
   end
 

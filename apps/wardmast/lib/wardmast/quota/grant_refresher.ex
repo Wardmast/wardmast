@@ -7,7 +7,7 @@ defmodule Wardmast.Quota.GrantRefresher do
   `claudeAiOauth.accessToken` — the account's setup token is locked out
   (`docs/oauth-usage-ratelimit.md`). That access token lasts ~8h, and only the
   `claude` CLI refreshes it. So the operator logs in once into a config dir of
-  its own (`CLAUDE_CONFIG_DIR=~/.arbiter/quota-claude claude auth login` — an
+  its own (`CLAUDE_CONFIG_DIR=~/.wardmast/quota-claude claude auth login` — an
   independent grant with its own refresh token, so its rotation never touches
   the operator's `~/.claude` session), references it from the account with a
   `:cli_credentials_path` credential, and this process has the CLI refresh it

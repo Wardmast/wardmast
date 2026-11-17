@@ -1,7 +1,7 @@
 defmodule Wardmast.NodeAgent.K8s.ConfigLoader do
   @moduledoc """
   Keeps the controller's operator config current
-  (`docs/design/remote-workers.md` K§4.1): the ConfigMap `arbiter-controller-config`
+  (`docs/design/remote-workers.md` K§4.1): the ConfigMap `wardmast-controller-config`
   is mounted at `/etc/arb/config/controller.yaml` and re-read every 30 s (the kubelet
   propagates an edit within about a minute; reading a file needs no RBAC).
 

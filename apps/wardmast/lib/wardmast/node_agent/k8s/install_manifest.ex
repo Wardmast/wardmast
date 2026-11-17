@@ -13,8 +13,8 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
       `?admission=policy`, the `ValidatingAdmissionPolicy` and its binding
       (`Wardmast.NodeAgent.K8s.AdmissionPolicy`).
     * **node** (namespace-scoped): both `ServiceAccount`s, the `Role` and `RoleBinding`
-      of K§7, the empty `arbiter-node-credential` / `arbiter-controller-ca` Secrets
-      and `arbiter-ca` ConfigMap the controller fills in, the controller's config
+      of K§7, the empty `wardmast-node-credential` / `wardmast-controller-ca` Secrets
+      and `wardmast-ca` ConfigMap the controller fills in, the controller's config
       `ConfigMap`, the `Lease`, the `Service` and the `Deployment`
       (`Wardmast.NodeAgent.K8s.ControllerManifest`, with the tailscale sidecar when
       `?reach=tailscale`, or pointed at the operator's HTTP proxy with `?reach=proxy`).
@@ -58,7 +58,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
 
   alias Wardmast.Nodes
 
-  @default_namespace "arbiter-workers"
+  @default_namespace "wardmast-workers"
   @default_max 2
   @max_limit 64
   @default_cpu "1"
@@ -399,12 +399,12 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
           [quota(spec), limit_range(spec)] ++
           network_policies(spec, server) ++ admission(spec, server),
       node: [
-        service_account("arbiter-controller", spec.namespace, true),
-        service_account("arbiter-worker", spec.namespace, false),
+        service_account("wardmast-controller", spec.namespace, true),
+        service_account("wardmast-worker", spec.namespace, false),
         role(spec),
         role_binding(spec),
-        placeholder_secret("arbiter-node-credential", spec.namespace),
-        placeholder_secret("arbiter-controller-ca", spec.namespace),
+        placeholder_secret("wardmast-node-credential", spec.namespace),
+        placeholder_secret("wardmast-controller-ca", spec.namespace),
         config_map(spec),
         ca_config_map(spec.namespace),
         lease(spec.namespace),
@@ -453,7 +453,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
         ]
 
   @doc """
-  The `arbiter-node` chart's values for `spec` (`charts/arbiter-node/values.yaml`), as a
+  The `wardmast-node` chart's values for `spec` (`charts/wardmast-node/values.yaml`), as a
   string-keyed map holding only what differs from the chart's defaults and no secret. The
   quota and LimitRange figures are the ones `render/2` computes, so `helm install` and
   `kubectl apply` bound a namespace identically, whatever `max`, `cpu` and `memory` are.
@@ -504,8 +504,8 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
       {:ok,
        """
        # Wardmast cluster node #{spec.node_name} -- chart values rendered by the primary for
-       # the arbiter-node Helm chart. This file contains no secret. Install into namespace
-       # #{spec.namespace} after creating the namespace and the arbiter-join Secret.
+       # the wardmast-node Helm chart. This file contains no secret. Install into namespace
+       # #{spec.namespace} after creating the namespace and the wardmast-join Secret.
        """ <> strip_document_marker(Ymlr.document!(values))}
     end
   end
@@ -597,7 +597,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
     # Wardmast cluster node #{spec.node_name} -- rendered by the primary. This file contains no
     # secret: no join token, no node credential, no CA key. Create the join Secret
     # separately (the token is read from your terminal):
-    #   read -rs T && printf %s "$T" | kubectl -n #{spec.namespace} create secret generic arbiter-join --from-file=token=/dev/stdin
+    #   read -rs T && printf %s "$T" | kubectl -n #{spec.namespace} create secret generic wardmast-join --from-file=token=/dev/stdin
     # bootstrap (cluster-admin, once) comes first, then node.
     """
   end
@@ -640,7 +640,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
     %{
       "apiVersion" => "scheduling.k8s.io/v1",
       "kind" => "PriorityClass",
-      "metadata" => %{"name" => "arbiter-worker"},
+      "metadata" => %{"name" => "wardmast-worker"},
       "value" => -100,
       "preemptionPolicy" => "Never",
       "globalDefault" => false,
@@ -683,7 +683,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
     %{
       "apiVersion" => "v1",
       "kind" => "ResourceQuota",
-      "metadata" => %{"name" => "arbiter-workers", "namespace" => spec.namespace},
+      "metadata" => %{"name" => "wardmast-workers", "namespace" => spec.namespace},
       "spec" => %{"hard" => hard}
     }
   end
@@ -740,7 +740,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
     %{
       "apiVersion" => "v1",
       "kind" => "LimitRange",
-      "metadata" => %{"name" => "arbiter-workers", "namespace" => spec.namespace},
+      "metadata" => %{"name" => "wardmast-workers", "namespace" => spec.namespace},
       "spec" => %{
         "limits" => [
           %{
@@ -903,20 +903,20 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
     %{
       "apiVersion" => "rbac.authorization.k8s.io/v1",
       "kind" => "Role",
-      "metadata" => %{"name" => "arbiter-controller", "namespace" => spec.namespace},
+      "metadata" => %{"name" => "wardmast-controller", "namespace" => spec.namespace},
       "rules" => [
         rule([""], ["pods"], ["create", "get", "list", "watch", "delete"]),
         rule([""], ["pods/log"], ["get"]),
         rule([""], ["events"], ["get", "list"]),
         rule([""], ["resourcequotas"], ["get", "list", "watch"]),
-        rule([""], ["services"], ["get"], ["arbiter-controller"]),
+        rule([""], ["services"], ["get"], ["wardmast-controller"]),
         rule([""], ["secrets"], ["get", "update"], [
-          "arbiter-node-credential",
-          "arbiter-controller-ca"
+          "wardmast-node-credential",
+          "wardmast-controller-ca"
         ]),
-        rule([""], ["configmaps"], ["get", "update"], ["arbiter-ca"]),
-        rule(["coordination.k8s.io"], ["leases"], ["get", "update"], ["arbiter-controller"]),
-        rule(["apps"], ["deployments"], deployment_verbs, ["arbiter-controller"])
+        rule([""], ["configmaps"], ["get", "update"], ["wardmast-ca"]),
+        rule(["coordination.k8s.io"], ["leases"], ["get", "update"], ["wardmast-controller"]),
+        rule(["apps"], ["deployments"], deployment_verbs, ["wardmast-controller"])
       ]
     }
   end
@@ -930,16 +930,16 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
     %{
       "apiVersion" => "rbac.authorization.k8s.io/v1",
       "kind" => "RoleBinding",
-      "metadata" => %{"name" => "arbiter-controller", "namespace" => spec.namespace},
+      "metadata" => %{"name" => "wardmast-controller", "namespace" => spec.namespace},
       "roleRef" => %{
         "apiGroup" => "rbac.authorization.k8s.io",
         "kind" => "Role",
-        "name" => "arbiter-controller"
+        "name" => "wardmast-controller"
       },
       "subjects" => [
         %{
           "kind" => "ServiceAccount",
-          "name" => "arbiter-controller",
+          "name" => "wardmast-controller",
           "namespace" => spec.namespace
         }
       ]
@@ -961,7 +961,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
     %{
       "apiVersion" => "v1",
       "kind" => "ConfigMap",
-      "metadata" => %{"name" => "arbiter-ca", "namespace" => namespace}
+      "metadata" => %{"name" => "wardmast-ca", "namespace" => namespace}
     }
   end
 
@@ -969,7 +969,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
     %{
       "apiVersion" => "v1",
       "kind" => "ConfigMap",
-      "metadata" => %{"name" => "arbiter-controller-config", "namespace" => spec.namespace},
+      "metadata" => %{"name" => "wardmast-controller-config", "namespace" => spec.namespace},
       "data" => %{"controller.yaml" => Ymlr.document!(config(spec)) |> strip_document_marker()}
     }
   end
@@ -1024,7 +1024,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
     %{
       "apiVersion" => "coordination.k8s.io/v1",
       "kind" => "Lease",
-      "metadata" => %{"name" => "arbiter-controller", "namespace" => namespace},
+      "metadata" => %{"name" => "wardmast-controller", "namespace" => namespace},
       "spec" => %{}
     }
   end
@@ -1033,10 +1033,10 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
     %{
       "apiVersion" => "v1",
       "kind" => "Service",
-      "metadata" => %{"name" => "arbiter-controller", "namespace" => namespace},
+      "metadata" => %{"name" => "wardmast-controller", "namespace" => namespace},
       "spec" => %{
         "type" => "ClusterIP",
-        "selector" => %{"app.kubernetes.io/name" => "arbiter-controller"},
+        "selector" => %{"app.kubernetes.io/name" => "wardmast-controller"},
         "ports" => [
           %{"name" => "bridge", "port" => 9443, "targetPort" => 9443, "protocol" => "TCP"},
           %{"name" => "boot", "port" => 9444, "targetPort" => 9444, "protocol" => "TCP"}

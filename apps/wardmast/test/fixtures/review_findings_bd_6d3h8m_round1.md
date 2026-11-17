@@ -76,14 +76,14 @@ VERIFICATION: FULL
 … (16 more lines)
 ⏵ Bash(python3 -c "
 import sqlite3
-c=sqlite3.connect('file:'+__import__('os').path.expanduser('~/.arbiter/arbiter.sqlite3')+'?mode=ro',uri=True)
+c=sqlite3.connect('file:'+__import__('os').path.expanduser('~/.wardmast/arbiter.sqlite3')+'?mode=ro',uri=True)
 for r in c.execute(\"select round,role,verdict,substr(findings…)
 ⏴ tool result
 (1, 'review', 'request_changes', "VERDICT: REQUEST_CHANGES\nCRITERIA:\n- [NOT MET] 1. Why one agy session emits more than one row, with evidence from a real agy stream or session file — the PR says a respawn resumed the same agy conversation, but its evidence is only the two DB rows already quoted in the task. It cites no agy stream, CLI log or conversation db from bd-gjw1ze, and no worker-run or respawn record showing a second launch happened.\n- [NOT MET] 2. One agy session's total reflects the session once, and the readers agree — the write-once choice is stated, but the refresh overwrites unconditionally. The live DB has agy/gemini pairs where the later row for the same session has NULL tokens: bd-2exkl0 session 83f1659d, 10:21:50Z; bd-42rnnq session 1051ae2d, 21:30:20Z. Under this diff, that row would replace the full snapshot and the session would record no tokens at all.\n- [NOT MET] 3. Checked against a fresh agy dis") 
 ----
 (2, 'review', 'request_changes', 'VERDICT: REQUEST_CHANGES\nCRITERIA:\n- [NOT MET] 1. The PR explains why one agy session writes more than one row, with evidence from a real agy stream or session file — the new evidence is the `worker_runs` row: one `worker_run_id` shared by both `usage_events` rows. That is still ledger data, and it only shows that two port exits happened in one run. The criterion asks for evidence from the agy stream or session file, and none is cited: no agy CLI log, no conversation db, and no raw `result` payloads.\n- [MET] 2. One agy session is counted once, and the readers agree with the choice — the fix is a single row per `(task_id, session_id)`, refreshed in place (`worker.ex:1877-1905`, `usage/event.ex:151-187`). A snapshot with no tokens or smaller counts only updates bookkeeping fields (`worker.ex:1946-1962`). The readers are unchanged because they sum rows, and now there is one row per session.') 
 ----
-(3, 'review', 'request_changes', "VERDICT: REQUEST_CHANGES\nCRITERIA:\n- [MET] 1. The PR says why one agy session writes more than one row, using evidence from a real agy stream — the test's doc comment (`apps/wardmast/test/wardmast/worker/usage_ledger_terminate_test.exs:270-296`) quotes both verbatim agy `result` payloads for conversation `7fea938d`. `num_turns` goes 1→2, `duration_seconds` is 384.78 then 421.18 (both counted from session start), and `input_tokens`/`cache_read_tokens` are running totals. I read the live DB (`~/.arbiter/arbiter.sqlite3`, read-only) and confirmed those `raw` values match the stored payloads byte for byte. The PR body still gives the older `worker_runs` explanation (see finding 2), but the stream evidence is in the PR's diff.\n- [MET] 2. One agy session is counted once, and the readers agree — each `(task_id, session_id)` gets one row, refreshed in place (`worker.ex` refresh path and `usage/eve") 
+(3, 'review', 'request_changes', "VERDICT: REQUEST_CHANGES\nCRITERIA:\n- [MET] 1. The PR says why one agy session writes more than one row, using evidence from a real agy stream — the test's doc comment (`apps/wardmast/test/wardmast/worker/usage_ledger_terminate_test.exs:270-296`) quotes both verbatim agy `result` payloads for conversation `7fea938d`. `num_turns` goes 1→2, `duration_seconds` is 384.78 then 421.18 (both counted from session start), and `input_tokens`/`cache_read_tokens` are running totals. I read the live DB (`~/.wardmast/arbiter.sqlite3`, read-only) and confirmed those `raw` values match the stored payloads byte for byte. The PR body still gives the older `worker_runs` explanation (see finding 2), but the stream evidence is in the PR's diff.\n- [MET] 2. One agy session is counted once, and the readers agree — each `(task_id, session_id)` gets one row, refreshed in place (`worker.ex` refresh path and `usage/eve") 
 ----
 (1, 'review', 'request_changes', 'VERDICT: REQUEST_CHANGES\nCRITERIA:\n- [MET] AC1: why one agy session emits more than one row, with evidence from a real run — the PR body quotes the verbatim `usage_events.raw` `result` payloads for session `7fea938d` from the live install. `num_turns` goes 1→2, `duration_seconds` is counted from session start both times, and the counters grow rather than reset. So agy\'s `result.usage` is a running total, re-reported when the worker relaunches the session with the same `session_id`.\n- [NOT MET] AC3: verified against a fresh agy dispatch — the PR says outright that this was not done ("AC3 — not verified against a fresh live agy dispatch … by design") and defers it to `verify_after_deploy`. The only "after" number comes from replaying bd-gjw1ze\'s payloads through a test, not from a new dispatch. A declared deferral counts as not met.\n- [MET] AC2: the session\'s total is counted once, and the') 
 ----
@@ -213,7 +213,7 @@ ARBITER_OUTPUT_LOG_ROOT=/home/ryan/dev/arbiter-worker-logs
 ARBITER_CLOAK_KEY=R9pgIPZh6PozftIJl0D/hBaK600PDkGROl5KQsqCvY
 ARB_RELEASE_REPO=ryanrborn/arbiter
 HOME=/home/ryan
-ARB_PRIMARY_CHECKOUT=/home/ryan/dev/arbiter
+WARDMAST_PRIMARY_CHECKOUT=/home/ryan/dev/arbiter
 ARB_WORKSPACE=default
 CLAUDE_CONFIG_DIR=/home/ryan/.cache/arbiter/worker-claude
 ARBITER_WORKTREE_ROOT=/home/ryan/dev/arbiter-worktrees
@@ -244,7 +244,7 @@ Findings:
    - **Fix:** sort on `fix_round_attempt: :desc, round: :desc, inserted_at: :desc`.
 3. **[Low] `apps/wardmast/test/fixtures/review_findings_bd_28t80i_round3.md:1-8` — the fixture is not taken from bd-28t80i's actual round-3 text.**
    - The file is named after that round, but it describes an invented "deploy banner" feature. The test moduledoc and the PR body openly say it is a reconstruction, so this is not fabricated evidence.
-   - The real round-3 reviews (`review_gate_rounds` for bd-28t80i, read-only from `~/.arbiter/arbiter.sqlite3`) mark AC1 and AC2 `[MET]` and AC3 `[NOT MET]`: "there is still no fresh agy dispatch and no before/after `arb usage --by task` numbers…".
+   - The real round-3 reviews (`review_gate_rounds` for bd-28t80i, read-only from `~/.wardmast/arbiter.sqlite3`) mark AC1 and AC2 `[MET]` and AC3 `[NOT MET]`: "there is still no fresh agy dispatch and no before/after `arb usage --by task` numbers…".
    - **Fix:** base the fixture on that real text (trimmed), with the `[NEEDS-COORDINATOR]` tag added to the AC3 line. The test then shows the parser handles real reviewer wording (`- [NOT MET] AC3: …`, followed by a numbered findings list).
 VERIFICATION: FULL
 arb done

@@ -2,14 +2,14 @@
 K§7, namespaced only. The Deployment is get-only: Helm owns the controller's image (§20.7),
 so a compromised controller cannot repoint it. Do not add a write verb here.
 */ -}}
-{{- if include "arbiter-node.node" . }}
+{{- if include "wardmast-node.node" . }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: arbiter-controller
+  name: wardmast-controller
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "arbiter-node.labels" . | nindent 4 }}
+    {{- include "wardmast-node.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
     resources: [pods]
@@ -25,22 +25,22 @@ rules:
     verbs: [get, list, watch]
   - apiGroups: [""]
     resources: [services]
-    resourceNames: [arbiter-controller]
+    resourceNames: [wardmast-controller]
     verbs: [get]
   - apiGroups: [""]
     resources: [secrets]
-    resourceNames: [arbiter-node-credential, arbiter-controller-ca]
+    resourceNames: [wardmast-node-credential, wardmast-controller-ca]
     verbs: [get, update]
   - apiGroups: [""]
     resources: [configmaps]
-    resourceNames: [arbiter-ca]
+    resourceNames: [wardmast-ca]
     verbs: [get, update]
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
-    resourceNames: [arbiter-controller]
+    resourceNames: [wardmast-controller]
     verbs: [get, update]
   - apiGroups: [apps]
     resources: [deployments]
-    resourceNames: [arbiter-controller]
+    resourceNames: [wardmast-controller]
     verbs: [get]
 {{- end }}

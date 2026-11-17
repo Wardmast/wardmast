@@ -314,12 +314,12 @@ the same rule: it pulls, rebuilds the CLI if it changed, and restarts, letting
 `Boot.Migrator` apply the pulled migrations on boot. It runs a standalone
 `mix wardmast.migrate` only when the server is already down — no live writer to
 race. If you want to migrate by hand, stop the service first
-(`systemctl --user stop arbiter.service`), then run the eval.
+(`systemctl --user stop wardmast.service`), then run the eval.
 
 ### Rollback across a migration
 
 Before the swap, `arb server deploy` takes an integrity-checked **online
-database backup** (`~/.arbiter/snapshots/arbiter-pre-<tag>-<utc>.sqlite3`) and
+database backup** (`~/.wardmast/snapshots/arbiter-pre-<tag>-<utc>.sqlite3`) and
 aborts if the check fails. When a release that added migrations boots but does
 not come back green, the rollback **stops the service, restores that backup
 (keeping the database the failed release left behind as
@@ -414,7 +414,7 @@ new `sessions`, `review_coverage`, `provider_accounts` and
 So, for that one upgrade only:
 
 1. **Snapshot the SQLite DB first** — with the service stopped, copy
-   `~/.arbiter/arbiter.sqlite3*` (including `-wal`/`-shm`) somewhere safe, or
+   `~/.wardmast/arbiter.sqlite3*` (including `-wal`/`-shm`) somewhere safe, or
    use `sqlite3 <db> ".backup <path>"`.
 2. Deploy. If the health check fails and it rolls back, assume the schema
    moved: either fix forward to a release that boots, or restore the snapshot

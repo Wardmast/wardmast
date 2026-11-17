@@ -256,7 +256,7 @@ defmodule Wardmast.Worker.Jail do
       GitHub App, deploy key), so the hide set binds back no operator ssh identity and
       no `gh` login. Implied by `:git_ssh_key`.
     * `:hide_reads` — also hide the sensitive read paths of `Wardmast.Worker.Jail.Hide`
-      (credential dirs, the install DB and `~/.arbiter`, the output-log root,
+      (credential dirs, the install DB and `~/.wardmast`, the output-log root,
       every other worktree, other workspaces' repos) behind `--tmpfs` and
       `/dev/null` (bd-3q2djr). Off by default: the agy caller turns it on;
       Codex's reviewer jail needs `~/.codex`.
@@ -682,7 +682,7 @@ defmodule Wardmast.Worker.Jail do
   pids=; ports=
   while [ "$1" != "--" ]; do
     "$socat" "TCP-LISTEN:$1,bind=127.0.0.1,fork,reuseaddr,backlog=1024" \
-      "OPENSSL:$addr,cert=/run/arb/tls/$2.crt,key=/run/arb/tls/$2.key,cafile=/etc/arb/ca/ca.crt,commonname=arbiter-controller,verify=1" &
+      "OPENSSL:$addr,cert=/run/arb/tls/$2.crt,key=/run/arb/tls/$2.key,cafile=/etc/arb/ca/ca.crt,commonname=wardmast-controller,verify=1" &
     pids="$pids $!"; ports="$ports $1"; shift 2
   done
   shift
@@ -747,7 +747,7 @@ defmodule Wardmast.Worker.Jail do
   Also masked: the operator socket's directory
   (`Wardmast.MCP.OperatorProof.socket_dir/0`, bd-8381tk). Its default home is
   under `/run/user/<uid>`, which is already covered. Its fallback
-  (`~/.arbiter/run`) or an `ARB_OPERATOR_SOCKET` override is not, and a Unix
+  (`~/.wardmast/run`) or an `ARB_OPERATOR_SOCKET` override is not, and a Unix
   socket on a read-only bind is still connectable. A path under another mask
   is dropped, because the parent's tmpfs already hides it.
 
@@ -793,12 +793,12 @@ defmodule Wardmast.Worker.Jail do
   otherwise, and each of these lets a worker skip the operator proof
   entirely:
 
-    * `<data_dir>/arbiter.env`, the release's `EnvironmentFile`. It carries
+    * `<data_dir>/wardmast.env`, the release's `EnvironmentFile`. It carries
       `SECRET_KEY_BASE`, the MCP token signing key, so a worker that reads it
       can sign its own coordinator token.
     * `<data-home>/release.cookie`, the per-install Erlang distribution
       cookie the release's `env.sh` creates (the data home is the `:data_dir`
-      app env when set, else `WARDMAST_DATA_HOME`, default `~/.arbiter`). The jail
+      app env when set, else `WARDMAST_DATA_HOME`, default `~/.wardmast`). The jail
       shares the host's network, so with the cookie a worker could reach
       epmd on loopback and `bin/wardmast rpc` straight into the server.
     * `$RELEASE_ROOT/releases/COOKIE`, the build-time cookie, for a release
@@ -810,7 +810,7 @@ defmodule Wardmast.Worker.Jail do
   """
   @spec secret_files() :: [String.t()]
   def secret_files do
-    data_dir = Application.get_env(:wardmast, :data_dir, Path.expand("~/.arbiter"))
+    data_dir = Application.get_env(:wardmast, :data_dir, Path.expand("~/.wardmast"))
 
     release_cookie =
       case System.get_env("RELEASE_ROOT") do
@@ -818,7 +818,7 @@ defmodule Wardmast.Worker.Jail do
         _ -> nil
       end
 
-    [Path.join(data_dir, "arbiter.env"), release_cookie]
+    [Path.join(data_dir, "wardmast.env"), release_cookie]
     |> Enum.filter(&(is_binary(&1) and File.regular?(&1)))
     |> Enum.concat(secret_files(release_data_home()))
     |> Enum.map(&Path.expand/1)
@@ -843,7 +843,7 @@ defmodule Wardmast.Worker.Jail do
           System.user_home()} do
       {{:ok, dir}, _, _} when is_binary(dir) -> Path.expand(dir)
       {_, dir, _} when is_binary(dir) and dir != "" -> Path.expand(dir)
-      {_, _, home} when is_binary(home) -> Path.join(home, ".arbiter")
+      {_, _, home} when is_binary(home) -> Path.join(home, ".wardmast")
       _ -> nil
     end
   end
@@ -1907,7 +1907,7 @@ defmodule Wardmast.Worker.Jail do
   @doc """
   Run the hidden-reads check for real (uncached), inside this module's own
   jail argv with the live hide set (bd-3q2djr, G3): every credential dir, the
-  install DB and `~/.arbiter`, the output-log root, another worker's
+  install DB and `~/.wardmast`, the output-log root, another worker's
   worktree and another workspace's repo that exists on this host must be
   absent or empty inside the jail. `:ok` when none is readable;
   `{:error, {:reads_reachable, [path]}}` otherwise. A path class that does

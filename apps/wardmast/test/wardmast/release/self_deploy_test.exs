@@ -35,7 +35,7 @@ defmodule Wardmast.Release.SelfDeployTest do
   defp stub_cmds(arb, opts \\ []) do
     test_pid = self()
     active = Keyword.get(opts, :active_units, "")
-    run = Keyword.get(opts, :systemd_run, {"Running as unit: arbiter-deploy-v1.2.3.service\n", 0})
+    run = Keyword.get(opts, :systemd_run, {"Running as unit: wardmast-deploy-v1.2.3.service\n", 0})
     list = Keyword.get(opts, :list, {active, 0})
 
     fun = fn cmd, args, run_opts ->
@@ -54,17 +54,17 @@ defmodule Wardmast.Release.SelfDeployTest do
     test "launches the deploy in its own transient systemd user unit", %{home: home, arb: arb} do
       stub_cmds(arb)
 
-      assert {:ok, %{unit: "arbiter-deploy-v1.2.3", tag: "v1.2.3"}} = SelfDeploy.start("v1.2.3")
+      assert {:ok, %{unit: "wardmast-deploy-v1.2.3", tag: "v1.2.3"}} = SelfDeploy.start("v1.2.3")
 
       assert_received {:cmd, "systemd-run", args, _opts}
 
       assert "--user" in args
-      assert "--unit=arbiter-deploy-v1.2.3" in args
+      assert "--unit=wardmast-deploy-v1.2.3" in args
       # Detached from the server's own cgroup, so the restart it causes can't kill it.
       assert "--collect" in args
       # The service's environment (GITHUB_TOKEN, DATABASE_PATH, PATH) comes from
       # the file, never from argv.
-      assert ("--property=EnvironmentFile=-" <> Path.join(home, "arbiter.env")) in args
+      assert ("--property=EnvironmentFile=-" <> Path.join(home, "wardmast.env")) in args
 
       assert Enum.take(args, -5) == ["server", "deploy", "--version", "v1.2.3", "--json"]
       assert Enum.at(args, -6) == arb
@@ -133,7 +133,7 @@ defmodule Wardmast.Release.SelfDeployTest do
     end
 
     test "refuses a second deploy while a deploy unit is active", %{arb: arb} do
-      stub_cmds(arb, active_units: "arbiter-deploy-v1.2.2.service loaded active running x\n")
+      stub_cmds(arb, active_units: "wardmast-deploy-v1.2.2.service loaded active running x\n")
 
       assert {:error, :already_running} = SelfDeploy.start("v1.2.3")
       refute_received {:cmd, "systemd-run", _, _}
@@ -172,7 +172,7 @@ defmodule Wardmast.Release.SelfDeployTest do
     test "systemd-run losing the unit-name race reads as already running", %{arb: arb} do
       stub_cmds(arb,
         systemd_run:
-          {"Failed to start transient service unit: Unit arbiter-deploy-v1.2.3.service was already loaded or has a fragment file.\n",
+          {"Failed to start transient service unit: Unit wardmast-deploy-v1.2.3.service was already loaded or has a fragment file.\n",
            1}
       )
 

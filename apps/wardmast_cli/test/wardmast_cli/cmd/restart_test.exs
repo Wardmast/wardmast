@@ -45,7 +45,7 @@ defmodule WardmastCli.Cmd.RestartTest do
 
       case cmd do
         "systemctl" ->
-          {"No files found for arbiter.service.\n", 1}
+          {"No files found for wardmast.service.\n", 1}
 
         "lsof" ->
           if Process.get(:terminated), do: {"", 1}, else: {Enum.join(pids, "\n") <> "\n", 0}
@@ -120,7 +120,7 @@ defmodule WardmastCli.Cmd.RestartTest do
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
           "systemctl" ->
-            {"No files found for arbiter.service.\n", 1}
+            {"No files found for wardmast.service.\n", 1}
 
           # No listener on the port.
           "lsof" ->
@@ -162,7 +162,7 @@ defmodule WardmastCli.Cmd.RestartTest do
 
         case {cmd, args} do
           {"systemctl", _} ->
-            {"No files found for arbiter.service.\n", 1}
+            {"No files found for wardmast.service.\n", 1}
 
           {"kill", ["-KILL" | _]} ->
             Process.put(:killed, true)
@@ -203,7 +203,7 @@ defmodule WardmastCli.Cmd.RestartTest do
 
         case cmd do
           "systemctl" ->
-            {"No files found for arbiter.service.\n", 1}
+            {"No files found for wardmast.service.\n", 1}
 
           "lsof" ->
             raise ErlangError, original: :enoent
@@ -245,7 +245,7 @@ defmodule WardmastCli.Cmd.RestartTest do
 
         case cmd do
           "systemctl" ->
-            {"No files found for arbiter.service.\n", 1}
+            {"No files found for wardmast.service.\n", 1}
 
           "lsof" ->
             raise ErlangError, original: :enoent
@@ -285,7 +285,7 @@ defmodule WardmastCli.Cmd.RestartTest do
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
           "systemctl" ->
-            {"No files found for arbiter.service.\n", 1}
+            {"No files found for wardmast.service.\n", 1}
 
           "lsof" ->
             raise ErlangError, original: :enoent
@@ -323,7 +323,7 @@ defmodule WardmastCli.Cmd.RestartTest do
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
           "systemctl" ->
-            {"No files found for arbiter.service.\n", 1}
+            {"No files found for wardmast.service.\n", 1}
 
           "lsof" ->
             if Process.get(:terminated), do: {"", 1}, else: {"7\n", 0}
@@ -401,7 +401,7 @@ defmodule WardmastCli.Cmd.RestartTest do
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
           "systemctl" ->
-            {"No files found for arbiter.service.\n", 1}
+            {"No files found for wardmast.service.\n", 1}
 
           "lsof" ->
             {"", 1}
@@ -430,7 +430,7 @@ defmodule WardmastCli.Cmd.RestartTest do
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
           "systemctl" ->
-            {"No files found for arbiter.service.\n", 1}
+            {"No files found for wardmast.service.\n", 1}
 
           "lsof" ->
             {"", 1}
@@ -456,7 +456,7 @@ defmodule WardmastCli.Cmd.RestartTest do
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
           "systemctl" ->
-            {"No files found for arbiter.service.\n", 1}
+            {"No files found for wardmast.service.\n", 1}
 
           "lsof" ->
             {"", 1}
@@ -491,7 +491,7 @@ defmodule WardmastCli.Cmd.RestartTest do
 
         case cmd do
           "systemctl" ->
-            {"No files found for arbiter.service.\n", 1}
+            {"No files found for wardmast.service.\n", 1}
 
           "lsof" ->
             {"", 1}
@@ -530,7 +530,7 @@ defmodule WardmastCli.Cmd.RestartTest do
 
         case cmd do
           "systemctl" ->
-            {"No files found for arbiter.service.\n", 1}
+            {"No files found for wardmast.service.\n", 1}
 
           "lsof" ->
             {"", 1}
@@ -575,7 +575,7 @@ defmodule WardmastCli.Cmd.RestartTest do
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
           "systemctl" ->
-            {"No files found for arbiter.service.\n", 1}
+            {"No files found for wardmast.service.\n", 1}
 
           "lsof" ->
             {"", 1}
@@ -683,16 +683,16 @@ defmodule WardmastCli.Cmd.RestartTest do
     end
 
     @tag :tmp_dir
-    test "an arbiter.service unit file on disk refuses even when systemctl says not found",
+    test "an wardmast.service unit file on disk refuses even when systemctl says not found",
          %{tmp_dir: tmp} do
-      File.write!(Path.join(tmp, "arbiter.service"), "[Service]\n")
+      File.write!(Path.join(tmp, "wardmast.service"), "[Service]\n")
       Process.put(:bd2_unit_dirs, [tmp])
-      stub_systemctl(fn -> {"No files found for arbiter.service.\n", 1} end)
+      stub_systemctl(fn -> {"No files found for wardmast.service.\n", 1} end)
 
       {_out, err, code} = capture(fn -> Restart.run([]) end)
 
       assert code == 1
-      assert err =~ "arbiter.service"
+      assert err =~ "wardmast.service"
       refute_received {:cmd, "lsof", _}
       refute_received {:cmd, "kill", _}
     end
@@ -723,10 +723,10 @@ defmodule WardmastCli.Cmd.RestartTest do
     end
 
     @release_cmdline [
-      "/home/u/.arbiter/releases/v0.2.6/erts-16.4/bin/beam.smp",
+      "/home/u/.wardmast/releases/v0.2.6/erts-16.4/bin/beam.smp",
       "--",
       "-root",
-      "/home/u/.arbiter/releases/v0.2.6",
+      "/home/u/.wardmast/releases/v0.2.6",
       "-noshell",
       "-s",
       "elixir",
@@ -736,9 +736,9 @@ defmodule WardmastCli.Cmd.RestartTest do
       "-name",
       "arbiter@127.0.0.1",
       "-config",
-      "/home/u/.arbiter/releases/v0.2.6/releases/0.2.6/sys",
+      "/home/u/.wardmast/releases/v0.2.6/releases/0.2.6/sys",
       "-boot",
-      "/home/u/.arbiter/releases/v0.2.6/releases/0.2.6/start",
+      "/home/u/.wardmast/releases/v0.2.6/releases/0.2.6/start",
       "-extra",
       "--no-halt"
     ]
@@ -757,7 +757,7 @@ defmodule WardmastCli.Cmd.RestartTest do
 
     test "bin/wardmast launched with phx.server in its args is still refused" do
       Process.put(:bd2_proc_cmdline, fn _ ->
-        {:ok, ["/home/u/.arbiter/current/bin/wardmast", "eval", "phx.server"]}
+        {:ok, ["/home/u/.wardmast/current/bin/wardmast", "eval", "phx.server"]}
       end)
 
       {_out, err, code} = capture(fn -> Restart.run([]) end)

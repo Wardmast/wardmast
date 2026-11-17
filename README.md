@@ -174,7 +174,7 @@ To run Arbiter as a self-contained OTP release under a systemd user unit, instal
 arb install service
 ```
 
-This writes `~/.config/systemd/user/arbiter.service` (`ExecStart=~/.arbiter/current/bin/wardmast start`), enables it via `loginctl enable-linger` for machine-boot startup, and starts the release. Manage it with `systemctl --user status arbiter.service` and view logs with `journalctl --user -u arbiter.service -f`. Pass `--system` to install a system-wide unit instead (needs root). Secrets and PATH configuration live in `~/.arbiter/arbiter.env`. Uninstall with `arb install service --uninstall`. The unit sets `OOMPolicy=continue` and each worker runs in its own memory-capped scope (`WARDMAST_WORKER_MEMORY_MAX`, default 40% of RAM), so one runaway worker process cannot stop the server — see [docs/worker-memory-cap.md](docs/worker-memory-cap.md), including the drop-in for a unit installed before this.
+This writes `~/.config/systemd/user/wardmast.service` (`ExecStart=~/.wardmast/current/bin/wardmast start`), enables it via `loginctl enable-linger` for machine-boot startup, and starts the release. Manage it with `systemctl --user status wardmast.service` and view logs with `journalctl --user -u wardmast.service -f`. Pass `--system` to install a system-wide unit instead (needs root). Secrets and PATH configuration live in `~/.wardmast/wardmast.env`. Uninstall with `arb install service --uninstall`. The unit sets `OOMPolicy=continue` and each worker runs in its own memory-capped scope (`WARDMAST_WORKER_MEMORY_MAX`, default 40% of RAM), so one runaway worker process cannot stop the server — see [docs/worker-memory-cap.md](docs/worker-memory-cap.md), including the drop-in for a unit installed before this.
 
 `arb install service` only writes the release-shaped unit above. There is no
 CLI command yet for a dev-mode unit (one whose `ExecStart` runs
@@ -196,7 +196,7 @@ them:
   `arb server deploy --git-pull`; a bare `arb server deploy` is always the
   release path and never falls back to it.
 - **OTP release install** — a built release artifact unpacked under
-  `~/.arbiter/releases/<tag>/`, installed via `arb install service`. No
+  `~/.wardmast/releases/<tag>/`, installed via `arb install service`. No
   source checkout or Elixir/Mix toolchain on the box.
 
 If you're on a source checkout, use the sequence below. If you have a release
@@ -214,7 +214,7 @@ arb server doctor     # confirm CLI and server report the same version
 `arb server deploy --git-pull` does the pull → rebuild → restart → migrate
 sequence for you: `git pull --ff-only` on `main`, rebuild and install the CLI
 escript if `apps/wardmast_cli` changed, then restart Phoenix — via
-`systemctl --user restart arbiter` when the systemd unit is present, a plain
+`systemctl --user restart wardmast` when the systemd unit is present, a plain
 process bounce otherwise. The restart's boot sequence (`Boot.Migrator`)
 applies any pending migrations before the endpoint opens, so migrations are
 never run against the live server. **Do not `git pull` by hand first** — the
@@ -241,8 +241,8 @@ the environment says.
 
 This subsection only applies once you have a built release artifact
 installed (`arb install service`, or manually under
-`~/.arbiter/releases/<tag>/`) — **not** to a source checkout; use
-[the sequence above](#source-checkout-dev-mode) for that. `~/.arbiter/current`
+`~/.wardmast/releases/<tag>/`) — **not** to a source checkout; use
+[the sequence above](#source-checkout-dev-mode) for that. `~/.wardmast/current`
 is symlinked atomically to the active release. Deploy a specific version (or
 `latest`) with:
 
@@ -252,7 +252,7 @@ arb server deploy --version v1.2.3
 
 This is the primary path, and the **"Update to vX.Y.Z"** button in the dashboard's update banner runs the same command. The full runbook is [docs/self-update.md](docs/self-update.md).
 
-It resolves the release repo (`WARDMAST_RELEASE_REPO`, else the running server's own release metadata, else the repo your `arb` was built from — and says which), downloads the release tarball + checksum from GitHub Releases, verifies the SHA-256, unpacks it, takes an **integrity-checked online backup of the database** into `~/.arbiter/snapshots/` (aborting if that fails), atomically swaps `current`, restarts the service, and health-checks it. If it doesn't come back green it rolls back to the last-known-good release — and when the new release had migrations, **restores the backup first**. After a green deploy it installs the matching `arb` escript. `arb doctor` reports the last deploy (tag, time, outcome, backup path).
+It resolves the release repo (`WARDMAST_RELEASE_REPO`, else the running server's own release metadata, else the repo your `arb` was built from — and says which), downloads the release tarball + checksum from GitHub Releases, verifies the SHA-256, unpacks it, takes an **integrity-checked online backup of the database** into `~/.wardmast/snapshots/` (aborting if that fails), atomically swaps `current`, restarts the service, and health-checks it. If it doesn't come back green it rolls back to the last-known-good release — and when the new release had migrations, **restores the backup first**. After a green deploy it installs the matching `arb` escript. `arb doctor` reports the last deploy (tag, time, outcome, backup path).
 
 #### Migration ordering, and rollback across a migration
 
@@ -306,11 +306,11 @@ a release that never booted never ran its boot migrator.
 ### Worker jail unmask (`WARDMAST_WORKER_JAIL_UNMASK`)
 
 The worker jail hides credential directories such as `~/.config/glab-cli`. To
-re-expose one, set `WARDMAST_WORKER_JAIL_UNMASK` (e.g. in `~/.arbiter/arbiter.env`)
+re-expose one, set `WARDMAST_WORKER_JAIL_UNMASK` (e.g. in `~/.wardmast/wardmast.env`)
 to colon- or comma-separated absolute paths; `~` expands against `HOME`:
 
 ```sh
-echo "WARDMAST_WORKER_JAIL_UNMASK=~/.config/glab-cli" >> ~/.arbiter/arbiter.env
+echo "WARDMAST_WORKER_JAIL_UNMASK=~/.config/glab-cli" >> ~/.wardmast/wardmast.env
 ```
 
 Malformed (non-absolute) entries are skipped with a warning and never block
@@ -339,7 +339,7 @@ To bind elsewhere, set `WARDMAST_BIND_ADDRESS` to any address `:inet.parse_addre
 accepts (e.g. `0.0.0.0`, `::`, a specific interface IP):
 
 ```sh
-echo "WARDMAST_BIND_ADDRESS=0.0.0.0" >> ~/.arbiter/arbiter.env
+echo "WARDMAST_BIND_ADDRESS=0.0.0.0" >> ~/.wardmast/wardmast.env
 ```
 
 Any non-loopback value logs a boot `WARNING` naming the exposure, and
@@ -445,12 +445,12 @@ refuses to start without an encryption key.** Generate a 32-byte Base64 key and
 add it to your environment before deploying:
 
 ```sh
-echo "WARDMAST_CLOAK_KEY=$(openssl rand -base64 32)" >> ~/.arbiter/arbiter.env
-# (for a non-service run, put it in the project-root .arbiter.env or export it)
+echo "WARDMAST_CLOAK_KEY=$(openssl rand -base64 32)" >> ~/.wardmast/wardmast.env
+# (for a non-service run, put it in the project-root .wardmast.env or export it)
 ```
 
 `arb install service` forwards `WARDMAST_CLOAK_KEY` from the installing shell
-into `~/.arbiter/arbiter.env` automatically if it is set. Treat this key like a
+into `~/.wardmast/wardmast.env` automatically if it is set. Treat this key like a
 database password: back it up and keep it stable — rotating it (re-encrypting
 existing secrets) is a separate runbook and is not yet automated. Losing it
 makes existing encrypted secrets unrecoverable.
@@ -473,17 +473,17 @@ workspace. The supported path is
 P13 flip it is the only one. A spawn with a workspace takes its account's
 credential; a workspace-less spawn such as the Watchdog probe takes the
 install's single enabled Claude account credential. A token in a workspace's
-`worker_env` or in the server's own environment (`.arbiter.env`) is **not**
+`worker_env` or in the server's own environment (`.wardmast.env`) is **not**
 read. `spawn_env/1` exports the token under its own literal name (never
 remapped to `ANTHROPIC_API_KEY` — the two are not interchangeable to the CLI),
 and emits an explicit unset when there is none, so a server-env value can
 never leak into a worker.
 
 **Migrating an install that still keeps its token in `worker_env` or
-`.arbiter.env`:** `mix wardmast.accounts.census` only ever sees credentials
+`.wardmast.env`:** `mix wardmast.accounts.census` only ever sees credentials
 already stored in a workspace's `worker_env` (`docs/provider-account-design.md`
 §7.1) — it has no visibility into the arbiter server's own process
-environment, so a token that has only ever lived in `.arbiter.env` will not
+environment, so a token that has only ever lived in `.wardmast.env` will not
 appear in the census output at all. Migrate **before** upgrading to the P13
 release, which requires provider accounts:
 
@@ -495,7 +495,7 @@ release, which requires provider accounts:
    plan to merge/name the candidate account, then apply it with
    `mix wardmast.accounts.migrate --plan accounts.json`, and restart.
 3. Remove `CLAUDE_CODE_OAUTH_TOKEN` (and any `WARDMAST_PROVIDER_ACCOUNTS` line)
-   from `.arbiter.env` / the service unit — nothing reads them, and a stale
+   from `.wardmast.env` / the service unit — nothing reads them, and a stale
    credential lying around in a secrets file is its own risk.
 
 On a **release install** (no Mix), the same census, migrate and rollback steps

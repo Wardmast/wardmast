@@ -189,7 +189,7 @@ config :wardmast, :worktree_root, Path.join(scratch_root, "worktrees-test")
 config :wardmast, :worker_tmp_root, Path.join(scratch_root, "worker-tmp-test")
 # bd-59m96o: worker-image state (base-image pins, the container's `arb`
 # launcher that `ContainerSpawn.cli_mounts/2` writes) never lands in the
-# developer's own `~/.arbiter/images`.
+# developer's own `~/.wardmast/images`.
 config :wardmast, :image_root, Path.join(scratch_root, "images-test")
 config :wardmast, :run_tmp_sweeper, enabled: false
 config :wardmast, :test_services_reaper, enabled: false
@@ -451,7 +451,7 @@ config :wardmast,
        Path.join(System.tmp_dir!(), "arbiter-test-sessions-root")
 
 # Per-account login config dirs (bd-c99hys): under tmp, never the operator's
-# real `~/.arbiter/accounts`.
+# real `~/.wardmast/accounts`.
 config :wardmast,
        :accounts_root,
        Path.join(System.tmp_dir!(), "arbiter-test-accounts-root")

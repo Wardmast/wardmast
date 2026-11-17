@@ -8,7 +8,7 @@ defmodule Wardmast.SingleInstance do
      within the same Erlang VM from both thinking they're primary. This covers
      duplicate `iex -S mix` or test scenarios.
   2. **Cross-process layer**: a PID-file in the data directory
-     (`~/.arbiter/arbiter.pid`) prevents two separate OS processes from both
+     (`~/.wardmast/wardmast.pid`) prevents two separate OS processes from both
      claiming primary. A stale file (left by a crash) is detected by checking
      whether the recorded OS PID is still alive.
 
@@ -34,7 +34,7 @@ defmodule Wardmast.SingleInstance do
 
   require Logger
 
-  @lock_file_name "arbiter.pid"
+  @lock_file_name "wardmast.pid"
   @ets_table :arbiter_single_instance_locks
 
   @doc """
@@ -191,7 +191,7 @@ defmodule Wardmast.SingleInstance do
         Path.join(System.tmp_dir!(), "arbiter_lock_#{key}.pid")
 
       true ->
-        data_dir = Application.get_env(:wardmast, :data_dir, Path.expand("~/.arbiter"))
+        data_dir = Application.get_env(:wardmast, :data_dir, Path.expand("~/.wardmast"))
         Path.join(data_dir, @lock_file_name)
     end
   end

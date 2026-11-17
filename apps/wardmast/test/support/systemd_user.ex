@@ -82,7 +82,7 @@ defmodule Wardmast.Test.SystemdUser do
     NOT RUN: restart survival (bd-b95w36, tag :#{@tag}) — #{why}
 
     `mix test` passing does NOT mean a coordinator session survives
-    `systemctl --user restart arbiter`. That property is proven only by
+    `systemctl --user restart wardmast`. That property is proven only by
     apps/wardmast/test/integration/session_restart_survival_test.exs, which
     needs a systemd user instance and is excluded from the default suite.
 

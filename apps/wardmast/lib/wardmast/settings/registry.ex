@@ -157,7 +157,7 @@ defmodule Wardmast.Settings.Registry do
       key: "nodes.chart_ref",
       type: "chart_ref",
       description:
-        "The arbiter-node Helm chart reference (oci://host/path or repo/chart) the primary " <>
+        "The wardmast-node Helm chart reference (oci://host/path or repo/chart) the primary " <>
           "prints in `helm upgrade <release> <chart> ...` for a Helm-installed cluster node; " <>
           "null = the chart the node reports. Operator-only."
     },

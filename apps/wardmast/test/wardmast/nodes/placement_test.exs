@@ -847,7 +847,7 @@ defmodule Wardmast.Nodes.PlacementTest do
                place(%{mode: :remote_only, registry: "registry.gitlab.com/vstim"}, rows)
 
       assert {:ok, {:node, %{name: "a"}}} =
-               place(%{mode: :remote_only, registry: "ghcr.io/ryan/arbiter-worker"}, rows)
+               place(%{mode: :remote_only, registry: "ghcr.io/ryan/wardmast-worker"}, rows)
     end
 
     test "a prefix does not cover a sibling that merely shares its leading characters" do

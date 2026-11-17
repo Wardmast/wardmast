@@ -312,7 +312,7 @@ defmodule WardmastCli.Cmd.InitTest do
 
       # Prod-only content must not leak into the dev runbook.
       refute deploy =~ "arb server deploy --version"
-      refute deploy =~ "~/.arbiter/current"
+      refute deploy =~ "~/.wardmast/current"
     end
 
     test "docs/deploy.md without --dev is unchanged prod release runbook" do
@@ -324,7 +324,7 @@ defmodule WardmastCli.Cmd.InitTest do
 
       assert deploy =~ "OTP release"
       assert deploy =~ "arb server deploy --version"
-      assert deploy =~ "~/.arbiter/current"
+      assert deploy =~ "~/.wardmast/current"
       refute deploy =~ "mix escript.build"
     end
   end

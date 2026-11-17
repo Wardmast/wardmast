@@ -195,7 +195,7 @@ Needs `nodes.public_url` and `nodes.registry` (the controller image is
 click **Add node → Kubernetes cluster** on the Nodes page, or:
 
 ```sh
-arb node add --kind cluster --name mesaana-k3s --namespace arbiter-workers --max-workers 2 \
+arb node add --kind cluster --name mesaana-k3s --namespace wardmast-workers --max-workers 2 \
   --primary-cidrs 100.64.0.10/32 \
   [--reach tailscale|proxy] [--admission policy] [--self-upgrade on|off] -o manifests.yaml
 ```
@@ -212,14 +212,14 @@ pod and degrades the node (`netpol_unenforced`) if it connects.
 Both print the same three steps: apply the manifests with a cluster-admin kubeconfig
 (`kubectl apply -f manifests.yaml`; they contain no token, credential or key, so keep or
 diff them freely), create the join Secret with the token read from the terminal
-(`read -rs T && printf %s "$T" | kubectl -n arbiter-workers create secret generic arbiter-join
+(`read -rs T && printf %s "$T" | kubectl -n wardmast-workers create secret generic wardmast-join
 --from-file=token=/dev/stdin`), and wait for the node to connect. With `--reach tailscale` also
-create the `arbiter-tailscale` Secret (`authkey`: ephemeral, pre-authorised, `tag:arbiter-node`).
+create the `wardmast-tailscale` Secret (`authkey`: ephemeral, pre-authorised, `tag:arbiter-node`).
 The join Secret is spent after first boot: delete it.
 
 A cluster node that is `outdated` after a server deploy upgrades itself when its Role allows it
 (`--self-upgrade on`, the default). Otherwise `arb node show <name>` and the node's page print
-the exact `kubectl -n NS set image deployment/arbiter-controller controller=IMAGE` to run.
+the exact `kubectl -n NS set image deployment/wardmast-controller controller=IMAGE` to run.
 
 ### Pin and size the node
 
@@ -441,7 +441,7 @@ After a release carrying the remote-workers work is deployed, on a real second n
 4. Dispatch one small ticket. Confirm it was placed on the node (`worker_runs.node_id`),
    that `egress_events` exist for the run, that its commits land on the primary, and that
    the PR/review flow completes.
-5. During a remote run, `systemctl --user restart arbiter` on the primary. The run should
+5. During a remote run, `systemctl --user restart wardmast` on the primary. The run should
    be **adopted** (bd-4p1vui): the same run id and container go on, with `adopted` in the
    boot log. Otherwise it is collected and resumed, or ends `interrupted` (*node lost*) and
    resumes. Record which, with the reason the log gives.

@@ -13,7 +13,7 @@ defmodule Wardmast.Worker.Image.Prebuilt do
        answer is cached for #{div(300_000, 60_000)} minutes (`:cache_ttl_ms`).
     2. **Runtime contract.** The image must carry the label
        `arbiter.runtime-contract=1`: it was built `FROM
-       ghcr.io/<owner>/arbiter-worker-base:<hash>` and so has `tini`, `socat`,
+       ghcr.io/<owner>/wardmast-worker-base:<hash>` and so has `tini`, `socat`,
        uid 10001 and the rest of what the pod runtime needs. A missing item is
        `{:contract_mismatch, "<what is missing>"}`.
     3. **Revision on the default branch.** The label
@@ -186,7 +186,7 @@ defmodule Wardmast.Worker.Image.Prebuilt do
         {:error,
          {:contract_mismatch,
           "label #{@contract_label}=#{@contract_version} is missing (build the image " <>
-            "FROM ghcr.io/<owner>/arbiter-worker-base and set it)"}}
+            "FROM ghcr.io/<owner>/wardmast-worker-base and set it)"}}
 
       other ->
         {:error,

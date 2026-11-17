@@ -108,7 +108,7 @@ defmodule WardmastCli.Scripts.RelTemplatesTest do
       assert vars["RELEASE_NODE"] == "other@127.0.0.1"
     end
 
-    test "creates a random per-install cookie at ~/.arbiter/release.cookie, mode 0600", %{
+    test "creates a random per-install cookie at ~/.wardmast/release.cookie, mode 0600", %{
       tmp_dir: dir
     } do
       home = Path.join(dir, "home")

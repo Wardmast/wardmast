@@ -88,7 +88,7 @@ chore) also have `parent_of` children.
 ## 2. Evidence
 
 All numbers come from a read-only snapshot of the live database
-(`~/.arbiter/arbiter.sqlite3`, taken 2026-10-01T23:07:33Z), from the `bd`
+(`~/.wardmast/arbiter.sqlite3`, taken 2026-10-01T23:07:33Z), from the `bd`
 workspace unless a line says otherwise. The script prints every table. The
 method and its caveats are in [Appendix A](#appendix-a-method).
 
@@ -709,7 +709,7 @@ When `scheduling_epic_wip_limit = N`:
 
 ## Appendix A: method
 
-- **Source.** A `sqlite3` `backup()` copy of `~/.arbiter/arbiter.sqlite3`,
+- **Source.** A `sqlite3` `backup()` copy of `~/.wardmast/arbiter.sqlite3`,
   taken 2026-10-01T23:07:33Z and read with `mode=ro`. Reproduce with
   `python3 docs/design/epic-aware-scheduling/measure_epic_waits.py <db>
   --as-of 2026-10-01T23:07:33Z`. Against the live file, later numbers will

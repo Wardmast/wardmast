@@ -1,6 +1,6 @@
 defmodule Wardmast.Test.StandinUnit do
   @moduledoc """
-  A throwaway systemd **user service** that stands in for `arbiter.service`,
+  A throwaway systemd **user service** that stands in for `wardmast.service`,
   and an `Wardmast.Sessions.Runner` that launches sessions *from inside it*
   (bd-b95w36; RFC §4.2's spike, turned into a harness).
 
@@ -34,12 +34,12 @@ defmodule Wardmast.Test.StandinUnit do
   demand. Everything `Wardmast.Sessions` does — the argv, the env, the ordering
   — is the real code path; only the *process* that executes the argv moves.
 
-  ## Same `KillMode` as `arbiter.service`
+  ## Same `KillMode` as `wardmast.service`
 
-  Set by **omission**, which is exactly how `arbiter.service` gets it: neither
+  Set by **omission**, which is exactly how `wardmast.service` gets it: neither
   unit specifies `KillMode`, so systemd's default `control-group` applies and
   a restart signals the whole cgroup. `kill_mode/1` reads it back, and the
-  test asserts it against `arbiter.service`'s own value where that unit is
+  test asserts it against `wardmast.service`'s own value where that unit is
   loaded, so "same `KillMode`" is measured rather than assumed.
 
   ## Teardown discipline
@@ -326,7 +326,7 @@ defmodule Wardmast.Test.StandinUnit do
   defp agent_script do
     ~S"""
     #!/bin/sh
-    # Stand-in for arbiter.service (bd-b95w36). Two jobs:
+    # Stand-in for wardmast.service (bd-b95w36). Two jobs:
     #   1. start the §4.2 negative control ONCE — a tmux server as a plain
     #      child of this unit, so it shares this unit's cgroup and a restart
     #      is expected to kill it;

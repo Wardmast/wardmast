@@ -2,7 +2,7 @@
 
 Incident 2026-10-03 (GitHub #265): a worker's child BEAM (a `mix test` in a
 worktree) grew to 17.5 GB. The kernel OOM-killer picked it, and because every
-worker lived in the server's own cgroup (`arbiter.service`, `OOMPolicy=stop`,
+worker lived in the server's own cgroup (`wardmast.service`, `OOMPolicy=stop`,
 `MemoryMax=infinity`) systemd stopped the **whole service** — every in-flight run
 died and the coordinator's MCP connection dropped. It happened twice in ten
 minutes.
@@ -54,7 +54,7 @@ probe scope is never bound.
 
 | Setting | Meaning |
 | --- | --- |
-| `WARDMAST_WORKER_MEMORY_MAX` (e.g. in `~/.arbiter/arbiter.env`) | A size systemd accepts for `MemoryMax=`: `12G`, `512M`, or a percentage of physical RAM (`40%`). |
+| `WARDMAST_WORKER_MEMORY_MAX` (e.g. in `~/.wardmast/wardmast.env`) | A size systemd accepts for `MemoryMax=`: `12G`, `512M`, or a percentage of physical RAM (`40%`). |
 | `config :wardmast, :worker_memory_max, "12G"` | Same, for dev checkouts. The environment variable wins. |
 | *(unset)* | `40%` of physical RAM, per worker. |
 | `off` / `0` / `none` / `infinity` | No cap; workers spawn exactly as before. |
@@ -92,7 +92,7 @@ Re-running `arb install service` rewrites the unit and picks the line up. If you
 would rather not regenerate it, add a drop-in:
 
 ```sh
-systemctl --user edit arbiter.service
+systemctl --user edit wardmast.service
 ```
 
 ```ini
@@ -104,7 +104,7 @@ then `systemctl --user daemon-reload`. (A system-wide install: drop `--user`.)
 The change takes effect for the running service on its next restart; verify with
 
 ```sh
-systemctl --user show arbiter.service -p OOMPolicy
+systemctl --user show wardmast.service -p OOMPolicy
 ```
 
 ## 3. Attributing an OOM to a task
@@ -121,7 +121,7 @@ so:
 
 ```sh
 journalctl -k --since '1 hour ago' | grep -i 'oom'          # → …/arb-run-<task>-<hex>.scope
-sqlite3 ~/.arbiter/arbiter.sqlite3 \
+sqlite3 ~/.wardmast/arbiter.sqlite3 \
   "select task_id, id, stop_category from worker_runs where cgroup_scopes like '%arb-run-<task>-<hex>%'"
 ```
 

@@ -17,7 +17,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       Path.join(System.tmp_dir!(), "arb-units-#{System.unique_integer([:positive])}")
 
     # Redirect arbiter_home to a temp dir so capture_path / capture_secrets
-    # never write to the real ~/.arbiter/arbiter.env. Without this seam, tests
+    # never write to the real ~/.wardmast/wardmast.env. Without this seam, tests
     # that set PATH to a test value (e.g. "/second/path:/usr/bin") would
     # corrupt the production env file, breaking worker spawns after the next
     # `arb server deploy` triggers a systemd restart.
@@ -66,7 +66,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
 
       assert code == 0
 
-      unit = Path.join(dir, "arbiter.service")
+      unit = Path.join(dir, "wardmast.service")
       assert File.exists?(unit)
 
       contents = File.read!(unit)
@@ -75,19 +75,19 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       refute contents =~ "RemainAfterExit"
       assert contents =~ "WantedBy=default.target"
       assert contents =~ "WorkingDirectory=#{arbiter_home}"
-      assert contents =~ "EnvironmentFile=-#{arbiter_home}/arbiter.env"
+      assert contents =~ "EnvironmentFile=-#{arbiter_home}/wardmast.env"
       # Release is self-contained — no MIX_HOME needed in the unit.
       refute contents =~ "Environment=MIX_HOME="
 
       # Orchestration, in the user manager, in order.
       assert_received {:cmd, "systemctl", ["--user", "daemon-reload"]}
-      assert_received {:cmd, "systemctl", ["--user", "enable", "--now", "arbiter.service"]}
+      assert_received {:cmd, "systemctl", ["--user", "enable", "--now", "wardmast.service"]}
       assert_received {:cmd, "loginctl", ["enable-linger" | _]}
 
       # Guidance: unit path + how to check status/logs + linger.
       assert out =~ unit
-      assert out =~ "systemctl --user status arbiter.service"
-      assert out =~ "tail -f #{Path.join([arbiter_home, "log", "arbiter.log"])}"
+      assert out =~ "systemctl --user status wardmast.service"
+      assert out =~ "tail -f #{Path.join([arbiter_home, "log", "wardmast.log"])}"
       assert out =~ "linger"
     end
 
@@ -101,7 +101,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       assert payload["action"] == "install"
       assert payload["scope"] == "user"
       assert payload["ok"] == true
-      assert payload["unit_path"] == Path.join(dir, "arbiter.service")
+      assert payload["unit_path"] == Path.join(dir, "wardmast.service")
     end
 
     test "unit routes stdout/stderr to a file so logs survive reboots and need no journald group",
@@ -111,8 +111,8 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       {_out, _err, code} = capture(fn -> InstallService.run([]) end)
 
       assert code == 0
-      contents = File.read!(Path.join(dir, "arbiter.service"))
-      expected_log = Path.join([arbiter_home, "log", "arbiter.log"])
+      contents = File.read!(Path.join(dir, "wardmast.service"))
+      expected_log = Path.join([arbiter_home, "log", "wardmast.log"])
       assert contents =~ "StandardOutput=append:#{expected_log}"
       assert contents =~ "StandardError=append:#{expected_log}"
     end
@@ -129,7 +129,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       logrotate_conf = Path.join(log_dir, "logrotate.conf")
       assert File.exists?(logrotate_conf)
       conf_contents = File.read!(logrotate_conf)
-      assert conf_contents =~ "arbiter.log"
+      assert conf_contents =~ "wardmast.log"
       assert conf_contents =~ "copytruncate"
       assert conf_contents =~ "rotate 7"
     end
@@ -140,7 +140,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       {out, _err, code} = capture(fn -> InstallService.run([]) end)
 
       assert code == 0
-      assert out =~ Path.join([arbiter_home, "log", "arbiter.log"])
+      assert out =~ Path.join([arbiter_home, "log", "wardmast.log"])
       assert out =~ "logrotate"
     end
 
@@ -154,7 +154,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       assert c2 == 0
     end
 
-    test "writes PATH from the installing shell into arbiter.env so the service finds agent CLIs",
+    test "writes PATH from the installing shell into wardmast.env so the service finds agent CLIs",
          %{arbiter_home: arbiter_home} do
       record_cmds()
 
@@ -169,13 +169,13 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
 
       assert code == 0
 
-      env_file = Path.join(arbiter_home, "arbiter.env")
+      env_file = Path.join(arbiter_home, "wardmast.env")
       assert File.exists?(env_file)
       env_contents = File.read!(env_file)
       assert env_contents =~ "PATH=/custom/bin:/usr/bin"
     end
 
-    test "PATH in arbiter.env is updated on re-install (idempotent)", %{
+    test "PATH in wardmast.env is updated on re-install (idempotent)", %{
       arbiter_home: arbiter_home
     } do
       record_cmds()
@@ -197,7 +197,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       assert c1 == 0
       assert c2 == 0
 
-      env_file = Path.join(arbiter_home, "arbiter.env")
+      env_file = Path.join(arbiter_home, "wardmast.env")
       env_contents = File.read!(env_file)
       # The latest PATH wins; the old one is gone.
       assert env_contents =~ "PATH=/second/path:/usr/bin"
@@ -207,7 +207,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
 
   # P13 (bd-9gqj8e): a server-env CLAUDE_CODE_OAUTH_TOKEN is read by nothing
   # since the legacy credential chain was deleted — workers authenticate from
-  # their provider account — and one left in arbiter.env makes the boot
+  # their provider account — and one left in wardmast.env makes the boot
   # classify a fresh install as carrying legacy credentials. So install no
   # longer forwards it; the other captured secrets are unchanged.
   describe "EnvFile.capture_secrets/1" do
@@ -313,16 +313,16 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
 
       assert code == 0
 
-      contents = File.read!(Path.join(dir, "arbiter.service"))
+      contents = File.read!(Path.join(dir, "wardmast.service"))
       assert contents =~ "WantedBy=multi-user.target"
       assert contents =~ "After=network-online.target docker.service"
 
       # No `--user`, and no linger for a system unit.
       assert_received {:cmd, "systemctl", ["daemon-reload"]}
-      assert_received {:cmd, "systemctl", ["enable", "--now", "arbiter.service"]}
+      assert_received {:cmd, "systemctl", ["enable", "--now", "wardmast.service"]}
       refute_received {:cmd, "loginctl", _}
 
-      assert out =~ "systemctl status arbiter.service"
+      assert out =~ "systemctl status wardmast.service"
     end
   end
 
@@ -330,7 +330,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
     test "disables, removes the unit, and reloads", %{unit_dir: dir} do
       # Pre-seed an installed unit.
       File.mkdir_p!(dir)
-      unit = Path.join(dir, "arbiter.service")
+      unit = Path.join(dir, "wardmast.service")
       File.write!(unit, "[Service]\n")
 
       record_cmds()
@@ -340,7 +340,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       assert code == 0
       refute File.exists?(unit)
 
-      assert_received {:cmd, "systemctl", ["--user", "disable", "--now", "arbiter.service"]}
+      assert_received {:cmd, "systemctl", ["--user", "disable", "--now", "wardmast.service"]}
       assert_received {:cmd, "systemctl", ["--user", "daemon-reload"]}
 
       assert out =~ "Uninstalled"
@@ -353,7 +353,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
         send(test_pid, {:cmd, cmd, args})
 
-        if args == ["--user", "disable", "--now", "arbiter.service"],
+        if args == ["--user", "disable", "--now", "wardmast.service"],
           do: {"not loaded", 1},
           else: {"", 0}
       end)
@@ -361,7 +361,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       {out, _err, code} = capture(fn -> InstallService.run(["--uninstall"]) end)
 
       assert code == 0
-      refute File.exists?(Path.join(dir, "arbiter.service"))
+      refute File.exists?(Path.join(dir, "wardmast.service"))
       assert out =~ "was not enabled"
     end
   end
@@ -393,34 +393,34 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       {out, _err, code} = capture(fn -> InstallService.run([]) end)
 
       assert code == 0
-      assert File.exists?(Path.join(dir, "arbiter.service"))
+      assert File.exists?(Path.join(dir, "wardmast.service"))
       assert out =~ "could not enable linger"
     end
   end
 
   describe "unit_contents/3 (release mode — root is not a source checkout)" do
     test "user units omit docker ordering (can't cross the manager boundary)" do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
+      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
       refute contents =~ "docker.service"
       assert contents =~ "WantedBy=default.target"
-      assert contents =~ "EnvironmentFile=-/home/user/.arbiter/arbiter.env"
+      assert contents =~ "EnvironmentFile=-/home/user/.wardmast/wardmast.env"
     end
 
     test "uses the release binary as ExecStart" do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
-      assert contents =~ "ExecStart=/home/user/.arbiter/current/bin/wardmast start"
+      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
+      assert contents =~ "ExecStart=/home/user/.wardmast/current/bin/wardmast start"
       assert contents =~ "Type=exec"
       refute contents =~ "RemainAfterExit"
     end
 
     test "does not bake MIX_HOME or PATH directly into the unit (PATH goes in EnvironmentFile instead)" do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
+      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
       refute contents =~ "MIX_HOME"
       refute contents =~ ~r/Environment=PATH=/
     end
 
     test "includes Restart=on-failure and RestartSec so systemd auto-retries" do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
+      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
       assert contents =~ "Restart=on-failure"
       assert contents =~ "RestartSec=10"
     end
@@ -428,7 +428,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
     test "sets OOMPolicy=continue so one OOM-killed worker process cannot stop the service (bd-6zuoo6)" do
       for scope <- [:user, :system] do
         contents =
-          InstallService.unit_contents(scope, "/home/user/.arbiter", "/home/user/.arbiter")
+          InstallService.unit_contents(scope, "/home/user/.wardmast", "/home/user/.wardmast")
 
         # In [Service], before [Install] — a directive in the wrong section is
         # silently ignored by systemd.
@@ -439,7 +439,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
     end
 
     test "protects the server from the OOM killer (bd-66anxj)" do
-      user = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
+      user = InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
       system = InstallService.unit_contents(:system, "/etc/arbiter", "/etc/arbiter")
 
       assert user =~ "\nManagedOOMPreference=avoid\n"
@@ -451,21 +451,21 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
     end
 
     test "user unit routes output to a file so logs survive reboots without journald group" do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
-      assert contents =~ "StandardOutput=append:/home/user/.arbiter/log/arbiter.log"
-      assert contents =~ "StandardError=append:/home/user/.arbiter/log/arbiter.log"
+      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
+      assert contents =~ "StandardOutput=append:/home/user/.wardmast/log/wardmast.log"
+      assert contents =~ "StandardError=append:/home/user/.wardmast/log/wardmast.log"
     end
 
     test "system unit omits file-based log directives (journald is fine with root)" do
       contents =
-        InstallService.unit_contents(:system, "/home/user/.arbiter", "/home/user/.arbiter")
+        InstallService.unit_contents(:system, "/home/user/.wardmast", "/home/user/.wardmast")
 
       refute contents =~ "StandardOutput="
       refute contents =~ "StandardError="
     end
 
     test "a root with no mix.exs/apps is release mode even if it happens to share a path prefix" do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
+      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
       refute contents =~ ".run-server.sh"
     end
 
@@ -492,24 +492,24 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
     end
 
     test "points ExecStart at the dev-mode launcher instead of the release binary", %{root: root} do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", root)
+      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", root)
       assert contents =~ "ExecStart=/bin/sh #{root}/.run-server.sh"
       refute contents =~ "current/bin/wardmast start"
       assert contents =~ "Type=exec"
     end
 
     test "keeps WorkingDirectory at the checkout root, not the arbiter data home", %{root: root} do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", root)
+      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", root)
       assert contents =~ "WorkingDirectory=#{root}"
     end
 
     test "still uses the arbiter_home EnvironmentFile for captured secrets/PATH", %{root: root} do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", root)
-      assert contents =~ "EnvironmentFile=-/home/user/.arbiter/arbiter.env"
+      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", root)
+      assert contents =~ "EnvironmentFile=-/home/user/.wardmast/wardmast.env"
     end
 
     test "forwards ARB_HOME=root so subprocesses resolve the same checkout", %{root: root} do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", root)
+      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", root)
       assert contents =~ "Environment=ARB_HOME=#{root}"
     end
 
@@ -517,28 +517,28 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
          %{
            root: root
          } do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", root)
+      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", root)
       assert contents =~ "TimeoutStartSec=900"
     end
 
     test "sets OOMPolicy=continue in the [Service] section, same as release mode", %{root: root} do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", root)
+      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", root)
       [service_section, _install] = String.split(contents, "[Install]")
       assert service_section =~ "\nOOMPolicy=continue\n"
     end
 
     test "keeps Restart=on-failure and file-based logging, same as release mode", %{root: root} do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", root)
+      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", root)
       assert contents =~ "Restart=on-failure"
       assert contents =~ "RestartSec=10"
-      assert contents =~ "StandardOutput=append:/home/user/.arbiter/log/arbiter.log"
+      assert contents =~ "StandardOutput=append:/home/user/.wardmast/log/wardmast.log"
     end
 
     test "system scope keeps docker ordering and drops file-based logging, same as release mode",
          %{
            root: root
          } do
-      contents = InstallService.unit_contents(:system, "/home/user/.arbiter", root)
+      contents = InstallService.unit_contents(:system, "/home/user/.wardmast", root)
       assert contents =~ "After=network-online.target docker.service"
       assert contents =~ "WantedBy=multi-user.target"
       refute contents =~ "StandardOutput="
@@ -569,11 +569,11 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       assert File.exists?(script)
       assert File.read!(script) =~ "exec mix phx.server"
 
-      unit_contents = File.read!(Path.join(dir, "arbiter.service"))
+      unit_contents = File.read!(Path.join(dir, "wardmast.service"))
       assert unit_contents =~ "ExecStart=/bin/sh #{script}"
     end
 
-    test "generated .run-server.sh sources the checkout's .arbiter.env before exec", %{
+    test "generated .run-server.sh sources the checkout's .wardmast.env before exec", %{
       root: root
     } do
       record_cmds()
@@ -583,10 +583,10 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       assert code == 0
 
       script_body = File.read!(Path.join(root, ".run-server.sh"))
-      assert script_body =~ ~s(. ./.arbiter.env)
+      assert script_body =~ ~s(. ./.wardmast.env)
 
-      # Must source .arbiter.env *before* exec-ing mix, not after.
-      source_index = :binary.match(script_body, ".arbiter.env") |> elem(0)
+      # Must source .wardmast.env *before* exec-ing mix, not after.
+      source_index = :binary.match(script_body, ".wardmast.env") |> elem(0)
       exec_index = :binary.match(script_body, "exec mix phx.server") |> elem(0)
       assert source_index < exec_index
     end
@@ -614,7 +614,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       assert c1 == 0
       assert c2 == 0
 
-      contents = File.read!(Path.join(dir, "arbiter.service"))
+      contents = File.read!(Path.join(dir, "wardmast.service"))
       assert contents =~ ".run-server.sh"
       refute contents =~ "current/bin/wardmast start"
     end

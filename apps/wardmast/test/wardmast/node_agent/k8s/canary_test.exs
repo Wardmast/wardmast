@@ -37,14 +37,14 @@ defmodule Wardmast.NodeAgent.K8s.CanaryTest do
       labels = pod!()["metadata"]["labels"]
 
       assert labels["app.kubernetes.io/component"] == "worker"
-      assert labels["app.kubernetes.io/name"] == "arbiter-worker"
-      assert labels["arbiter.dev/install"] == "inst-1"
-      assert labels["arbiter.dev/node"] == "node-1"
-      assert labels["arbiter.dev/canary"] == "c0ffee1234"
+      assert labels["app.kubernetes.io/name"] == "wardmast-worker"
+      assert labels["wardmast.dev/install"] == "inst-1"
+      assert labels["wardmast.dev/node"] == "node-1"
+      assert labels["wardmast.dev/canary"] == "c0ffee1234"
       # No run label: the controller's adoption and the sweeper key on it, so the canary
       # is never adopted as a run nor counted against capacity.
-      refute Map.has_key?(labels, "arbiter.dev/run")
-      refute Map.has_key?(labels, "arbiter.dev/task")
+      refute Map.has_key?(labels, "wardmast.dev/run")
+      refute Map.has_key?(labels, "wardmast.dev/task")
     end
 
     test "is built by the worker builder: same service account, security context, owner" do
@@ -118,7 +118,7 @@ defmodule Wardmast.NodeAgent.K8s.CanaryTest do
 
     test "reads the controller's own addresses and the cluster DNS Service", %{tmp_dir: dir} do
       resolv = Path.join(dir, "resolv.conf")
-      File.write!(resolv, "search arbiter-workers.svc.cluster.local\nnameserver 10.43.0.10\n")
+      File.write!(resolv, "search wardmast-workers.svc.cluster.local\nnameserver 10.43.0.10\n")
 
       env = %{
         "KUBERNETES_SERVICE_HOST" => "10.43.0.1",
@@ -266,7 +266,7 @@ defmodule Wardmast.NodeAgent.K8s.CanaryTest do
   end
 
   setup do
-    {:ok, FakeK8sApi.start!(namespace: "arbiter-workers")}
+    {:ok, FakeK8sApi.start!(namespace: "wardmast-workers")}
   end
 
   describe "run/3" do
@@ -348,7 +348,7 @@ defmodule Wardmast.NodeAgent.K8s.CanaryTest do
       client: client,
       api: api
     } do
-      FakeK8sApi.fail_next(api, :create, {403, "exceeded quota: arbiter-workers"})
+      FakeK8sApi.fail_next(api, :create, {403, "exceeded quota: wardmast-workers"})
 
       assert %{outcome: :inconclusive, reason: {:create_failed, {:forbidden, msg}}} =
                Canary.run(client, Fx.config(), opts())

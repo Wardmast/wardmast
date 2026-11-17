@@ -27,9 +27,9 @@ defmodule Wardmast.Nodes.ClusterInstall do
 
   @form_keys ~w(name namespace max cpu memory node_selector pull_secret registries reach admission self_upgrade api_cidrs cluster_cidrs primary_cidrs proxy_url proxy_cidrs)
 
-  @default_chart "oci://ghcr.io/wardmast/charts/arbiter-node"
+  @default_chart "oci://ghcr.io/wardmast/charts/wardmast-node"
   # Where release CI publishes the controller image (`.github/workflows/release.yml`).
-  @default_controller_image "ghcr.io/wardmast/arbiter-controller"
+  @default_controller_image "ghcr.io/wardmast/wardmast-controller"
 
   @type helm_command :: %{values_url: String.t(), install_command: String.t()}
 
@@ -142,7 +142,7 @@ defmodule Wardmast.Nodes.ClusterInstall do
   What a cluster controller asks for at every boot (`GET /nodes/cluster`, K14), before it
   can label, build or watch a pod:
 
-    * `install_id` — `Wardmast.Nodes.InstallId`: the `arbiter.dev/install` label of every
+    * `install_id` — `Wardmast.Nodes.InstallId`: the `wardmast.dev/install` label of every
       pod, and what a run spec's `install` and a `reap{install}` must match;
     * `registry` — `nodes.registry`: the prefix the pod builder pins every image under;
     * `canary_image` — the image the NetworkPolicy canary runs: the worker image published
@@ -283,7 +283,7 @@ defmodule Wardmast.Nodes.ClusterInstall do
       |> String.slice(0, 40)
       |> String.trim("-")
 
-    if name == "", do: "arbiter-node", else: name
+    if name == "", do: "wardmast-node", else: name
   end
 
   @doc """
@@ -333,7 +333,7 @@ defmodule Wardmast.Nodes.ClusterInstall do
   @spec secret_command(String.t()) :: String.t()
   def secret_command(namespace) do
     "read -rs T && printf %s \"$T\" | kubectl -n #{namespace} create secret generic " <>
-      "arbiter-join --from-file=token=/dev/stdin"
+      "wardmast-join --from-file=token=/dev/stdin"
   end
 
   @doc """
@@ -378,9 +378,9 @@ defmodule Wardmast.Nodes.ClusterInstall do
 
   @doc """
   The one command that moves an `outdated` cluster node to `image` by hand: its Deployment
-  is `arbiter-controller` and its container `controller` (`ControllerManifest`).
+  is `wardmast-controller` and its container `controller` (`ControllerManifest`).
   """
   @spec set_image_command(String.t(), String.t()) :: String.t()
   def set_image_command(namespace, image),
-    do: "kubectl -n #{namespace} set image deployment/arbiter-controller controller=#{image}"
+    do: "kubectl -n #{namespace} set image deployment/wardmast-controller controller=#{image}"
 end

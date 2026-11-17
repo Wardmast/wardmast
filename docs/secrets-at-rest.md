@@ -1,7 +1,7 @@
 # Secrets at rest: keeping secret values off the host's disk
 
 By default every secret arbiter needs ends up as plaintext in the systemd
-`EnvironmentFile` (`~/.arbiter/arbiter.env`), and a host secret scanner flags that
+`EnvironmentFile` (`~/.wardmast/wardmast.env`), and a host secret scanner flags that
 file and every copy of it. Arbiter can instead hold **pointers** to a secret
 manager and fetch the value into memory when it needs it.
 
@@ -43,7 +43,7 @@ the workspace store (the first decrypts it; the second is needed to boot). Give
 each as a pointer instead of a value:
 
 ```
-# ~/.arbiter/arbiter.env — no secret values
+# ~/.wardmast/wardmast.env — no secret values
 WARDMAST_CLOAK_KEY_REF=aws-sm:prod/arbiter#cloak_key
 SECRET_KEY_BASE_REF=aws-sm:prod/arbiter#secret_key_base
 AWS_REGION=eu-west-1
@@ -75,7 +75,7 @@ file. They do not resolve `*_REF`.
 
 ## 4. Deploy snapshots
 
-`arb server deploy` never copies `arbiter.env`. Each database snapshot gets a
+`arb server deploy` never copies `wardmast.env`. Each database snapshot gets a
 sidecar `<snapshot>.env-fingerprint.json` listing every env key with the first 8
 hex characters of the SHA-256 of its value (for a `*_REF` key, of the pointer),
 enough to verify a redeploy did not change a value, not to recover it.
