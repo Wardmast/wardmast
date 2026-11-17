@@ -1,8 +1,8 @@
 defmodule Wardmast.Worker.ContainerSpawn do
   @moduledoc """
-  Claude and Codex under the podman sandbox backend (bd-d2o3xb, P7, and
-  bd-50d5j6, P8 of `docs/design/podman-worker-containers.md`): the wrap point
-  between a dispatch's `ClaudeSession` spawn and `Wardmast.Worker.Container`.
+  Claude, Codex and agy under the podman sandbox backend (bd-d2o3xb, P7, and
+  bd-50d5j6, P8 of `docs/design/podman-worker-containers.md`; agy bd-b2t0kw): the
+  wrap point between a dispatch's `ClaudeSession` spawn and `Wardmast.Worker.Container`.
 
   `sandbox.backend: podman` (`Wardmast.Agents.SecurityPolicy`) makes a worker's
   `claude --print` or `codex exec` run inside a rootless container (`:provider`,
@@ -70,6 +70,29 @@ defmodule Wardmast.Worker.ContainerSpawn do
     * **Egress infra** is the OpenAI hosts (`chatgpt.com`, `api.openai.com`,
       `auth.openai.com`) rather than Anthropic's.
 
+  ## agy (bd-b2t0kw)
+
+  `provider: "gemini"` runs the pinned agy (`/opt/arbiter/cli/agy`). A container has
+  no keyring, so agy signs in with the workspace's Google Cloud service-account key
+  (Application Default Credentials; `Wardmast.Accounts.Credentials.workspace_service_account/1`,
+  registered with `arb account rotate <ref> --kind service_account`): a workspace without
+  one is `{:error, {:agy_credential_missing, message}}` before anything starts.
+
+    * **`$HOME` is the config dir.** agy reads everything from `$HOME`, so the per-run
+      HOME is seeded as `Gemini.ConfigDir` seeds a host spawn's (the generated
+      `settings.json` from the spawn's policy, the worker `GEMINI.md`) without the
+      operator passthrough, plus the run's MCP config copied 0600 from the host's
+      per-worktree agy HOME, where dispatch wrote it.
+    * **The key is a `podman run --secret`** (the deploy key's path): created from a
+      0600 file deleted at once, mounted read-only for the container user at
+      `/run/secrets/agy-adc.json`, removed with the container and by the boot reaper.
+      The env says only `AGY_ADC_AUTH=true` and `GOOGLE_APPLICATION_CREDENTIALS` (its
+      path); the key is never on argv, in the request or in a log.
+    * **On a node** (`prepare_remote/1`) the key and the MCP config ride the run spec's
+      `secret_files` to the pod's memory volume (`/run/arb/creds`), and the config dir
+      is `$HOME/.gemini`.
+    * **Egress infra** is the Google hosts an ADC run reaches.
+
   MCP needs nothing new: the adapter passes it as `-c mcp_servers.…` overrides
   (bd-avq0wb) naming `Wardmast.MCP.server_url/0` and the bearer in
   `ARBITER_MCP_TOKEN`, which reach the container as `-e NAME` and the Wardmast
@@ -120,8 +143,8 @@ defmodule Wardmast.Worker.ContainerSpawn do
   `podman`, as they were before this existed. So is a spawn whose cwd is not a
   private clone (a reviewer with no round checkout, which falls back to
   `sandbox.review_backend`, or a task-type dispatch with no worktree), and any
-  provider but Claude and Codex: a reviewer or pass routed to one of those runs
-  under `sandbox.review_backend` or is refused. The container's memory is not
+  provider but Claude, Codex and agy (agy for the task implementer only): a reviewer
+  or pass routed to one of those runs under `sandbox.review_backend` or is refused. The container's memory is not
   bounded by `MemoryScope`: it is not in the server's cgroup, but nothing caps
   it either.
   """

@@ -10,6 +10,18 @@ defmodule Wardmast.Agents.Gemini do
   `Wardmast.Agents.Gemini.ConfigDir` (the isolated `$HOME` that document lands
   in, injected by `spawn_env/1`); the upstream `gemini` branch has no analogue
   of either (bd-7s29yq).
+
+  ## Podman backend (bd-b2t0kw)
+
+  Under `sandbox.backend: podman`, with `sandbox_wrap: true` (the caller hands the
+  spawn to `ClaudeSession`, which wraps it), the argv names the container's pinned
+  agy (`ContainerSpawn.provider_path("gemini")`) and nothing host-side applies: no
+  bwrap jail (the container is the jail, so `write_confinement/1` and
+  `egress_confinement/1` answer `:os_jail`), no keyring check (agy signs in there
+  with the workspace's Google Cloud service-account key, `AGY_ADC_AUTH`), and
+  `spawn_env/1` carries neither the host's agy HOME nor a Gemini API key:
+  `Wardmast.Worker.ContainerSpawn` seeds the container's HOME and mounts the key.
+  Without `sandbox_wrap` a podman policy is refused, as before.
   """
 
   @behaviour Wardmast.Agents.Agent
