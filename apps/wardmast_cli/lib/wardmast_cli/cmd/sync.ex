@@ -29,7 +29,7 @@ defmodule WardmastCli.Cmd.Sync do
       IO.puts(@moduledoc)
     else
       {opts, _rest, _mode} =
-        ArgParser.parse(argv, command: "arb ticket sync", switches: @switches)
+        ArgParser.parse(argv, command: "ward ticket sync", switches: @switches)
 
       mode = if opts[:json], do: :json, else: :text
       dry? = opts[:dry] || false

@@ -84,7 +84,7 @@ defmodule WardmastCli.Cmd.Dispatch do
       IO.puts(@moduledoc)
     else
       {opts, rest, _mode} =
-        ArgParser.parse(argv, command: "arb ticket dispatch", switches: @switches)
+        ArgParser.parse(argv, command: "ward ticket dispatch", switches: @switches)
 
       mode = if opts[:json], do: :json, else: :text
       model = opts[:model]

@@ -273,8 +273,7 @@ defmodule Wardmast.Worker.CliFetcher do
   defp do_fetch("arb", version, work, opts) do
     with {:ok, repo} <- release_repo(opts),
          {:ok, release} <- github_release(repo, version, opts),
-         {:ok, arb_url} <- asset(release, "arb"),
-         {:ok, sha_url} <- asset(release, "arb.sha256"),
+         {:ok, {arb_url, sha_url}} <- cli_assets(release),
          headers = Upstream.github_headers(),
          bin = Path.join(work, "arb"),
          sidecar = Path.join(work, "arb.sha256"),
@@ -294,6 +293,22 @@ defmodule Wardmast.Worker.CliFetcher do
         %{source: arb_url, integrity: "sha256-" <> hex, main: "arb"},
         opts
       )
+    end
+  end
+
+  # The CLI escript is published as `ward` (+ `ward.sha256`) since the rename;
+  # pre-rename release tags carry `arb` (+ `arb.sha256`). Either way the staged
+  # file keeps the cache name `arb` the worker image and cache layout expect.
+  defp cli_assets(release) do
+    case {asset(release, "ward"), asset(release, "ward.sha256")} do
+      {{:ok, bin}, {:ok, sha}} ->
+        {:ok, {bin, sha}}
+
+      _ ->
+        with {:ok, bin} <- asset(release, "arb"),
+             {:ok, sha} <- asset(release, "arb.sha256") do
+          {:ok, {bin, sha}}
+        end
     end
   end
 

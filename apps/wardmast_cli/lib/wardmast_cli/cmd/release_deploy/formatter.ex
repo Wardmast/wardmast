@@ -439,12 +439,12 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.Formatter do
 
     case extras[:cli_update] do
       %{updated: true, version: v, previous_version: prior} ->
-        IO.puts("Updated arb to #{v}" <> if(prior, do: " (was #{prior})", else: ""))
+        IO.puts("Updated ward to #{v}" <> if(prior, do: " (was #{prior})", else: ""))
 
       %{error: err} ->
         IO.puts(
-          "warning: the server is deployed, but arb itself was not updated: #{err}\n" <>
-            "         run `arb self-update` to match it."
+          "warning: the server is deployed, but ward itself was not updated: #{err}\n" <>
+            "         run `ward self-update` to match it."
         )
 
       _ ->

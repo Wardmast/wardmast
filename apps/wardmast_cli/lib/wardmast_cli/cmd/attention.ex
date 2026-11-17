@@ -25,7 +25,7 @@ defmodule WardmastCli.Cmd.Attention do
     else
       {opts, rest, mode} =
         ArgParser.parse(argv,
-          command: "arb attention",
+          command: "ward attention",
           switches: [owner: :string, workspace: :string]
         )
 

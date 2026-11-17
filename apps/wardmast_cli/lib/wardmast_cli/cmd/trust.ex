@@ -56,7 +56,7 @@ defmodule WardmastCli.Cmd.Trust do
   # ---- show ---------------------------------------------------------------------
 
   defp show(argv, mode) do
-    {_opts, rest, _mode} = ArgParser.parse(argv, command: "arb trust show", switches: [])
+    {_opts, rest, _mode} = ArgParser.parse(argv, command: "ward trust show", switches: [])
 
     case rest do
       [] -> list(mode)
@@ -256,7 +256,7 @@ defmodule WardmastCli.Cmd.Trust do
   defp promote(argv, mode) do
     {opts, rest, _mode} =
       ArgParser.parse(argv,
-        command: "arb trust promote",
+        command: "ward trust promote",
         switches: [to: :string, reason: :string]
       )
 
@@ -281,7 +281,7 @@ defmodule WardmastCli.Cmd.Trust do
   # ---- confirm / dismiss (the coordinator's own token) ------------------------------
 
   defp confirm(argv, mode) do
-    {_opts, rest, _mode} = ArgParser.parse(argv, command: "arb trust confirm", switches: [])
+    {_opts, rest, _mode} = ArgParser.parse(argv, command: "ward trust confirm", switches: [])
 
     case rest do
       [subject] ->
@@ -299,7 +299,7 @@ defmodule WardmastCli.Cmd.Trust do
 
   defp dismiss(argv, mode) do
     {opts, rest, _mode} =
-      ArgParser.parse(argv, command: "arb trust dismiss", switches: [reason: :string])
+      ArgParser.parse(argv, command: "ward trust dismiss", switches: [reason: :string])
 
     case {rest, opts[:reason]} do
       {[subject], reason} when is_binary(reason) and reason != "" ->

@@ -31,7 +31,7 @@ defmodule WardmastCli.MainTest do
   end
 
   describe "arb ticket, and arb issue as its deprecated alias (bd-4jojpw)" do
-    @deprecation "arb: note: `arb issue` is deprecated; use `arb ticket` (same subcommands).\n"
+    @deprecation "ward: note: `ward issue` is deprecated; use `ward ticket` (same subcommands).\n"
 
     # Every request answers 200 with a small record, so each verb gets as far
     # down its real path as a generic body allows — and a raise is recorded
@@ -99,10 +99,11 @@ defmodule WardmastCli.MainTest do
       assert err =~ "ticket requires a subcommand"
     end
 
-    test "arb ticket --help documents the ticket grammar" do
+    test "ward ticket --help documents the ticket grammar" do
       {out, _err, code} = capture(fn -> Main.main(["ticket", "--help"]) end)
       assert code == 0
-      assert out =~ "arb ticket list"
+      assert out =~ "ward ticket list"
+      refute out =~ "ward issue list"
       refute out =~ "arb issue list"
     end
   end
@@ -217,7 +218,7 @@ defmodule WardmastCli.MainTest do
       {out, err, code} = capture(fn -> Main.main(["list"]) end)
       assert code == 0
       assert out =~ "bd-1"
-      assert err =~ "`arb list` is now `arb ticket list`"
+      assert err =~ "`ward list` is now `ward ticket list`"
     end
 
     test "arb update with no id redirects to server deploy" do
@@ -226,7 +227,7 @@ defmodule WardmastCli.MainTest do
       # would run fails, so it never touches this checkout's git for real.
       Process.put(:bd2_cmd_runner, fn _cmd, _args, _opts -> {"stubbed", 1} end)
       {_out, err, _code} = capture(fn -> Main.main(["update"]) end)
-      assert err =~ "`arb update` is now `arb server deploy`"
+      assert err =~ "`ward update` is now `ward server deploy`"
     end
   end
 

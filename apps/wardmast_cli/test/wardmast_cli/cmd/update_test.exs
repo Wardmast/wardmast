@@ -341,7 +341,7 @@ defmodule WardmastCli.Cmd.UpdateTest do
   test "an unknown flag on the edit path exits 1 naming the flag" do
     {_out, err, exit_code} = capture(fn -> Update.run(["bd-001", "--nope", "x"]) end)
     assert exit_code == 1
-    assert err =~ "unknown option --nope for arb ticket update"
+    assert err =~ "unknown option --nope for ward ticket update"
   end
 
   # ---- P-08: flag parity with MCP / REST ----------------------------------

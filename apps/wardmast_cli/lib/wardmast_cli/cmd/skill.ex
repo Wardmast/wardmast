@@ -59,7 +59,7 @@ defmodule WardmastCli.Cmd.Skill do
       IO.puts(@moduledoc)
     else
       {opts, rest, _mode} =
-        ArgParser.parse(argv, command: "arb skill", switches: @switches)
+        ArgParser.parse(argv, command: "ward skill", switches: @switches)
 
       mode = if opts[:json], do: :json, else: :text
 

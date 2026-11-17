@@ -5,7 +5,7 @@ defmodule WardmastCli.Cmd.Workspace do
 
       arb workspace list                       all workspaces (name, prefix, id)
       arb workspace show <id>                  one workspace's detail incl. config
-      arb workspace create <name>              create a new workspace
+      ward workspace create <name>              create a new workspace
         [--prefix bd] [--tracker-type none] [--merger-strategy direct]
         [--description "..."]
 
@@ -134,7 +134,7 @@ defmodule WardmastCli.Cmd.Workspace do
   defp print_help, do: IO.puts(@moduledoc)
 
   defp list(argv) do
-    {_opts, _rest, mode} = ArgParser.parse(argv, command: "arb workspace list", switches: [])
+    {_opts, _rest, mode} = ArgParser.parse(argv, command: "ward workspace list", switches: [])
 
     case Client.get("/api/workspaces") do
       {:ok, %{"data" => list}} -> emit_list(list, mode)
@@ -144,7 +144,7 @@ defmodule WardmastCli.Cmd.Workspace do
   end
 
   defp show(argv) do
-    {_opts, rest, mode} = ArgParser.parse(argv, command: "arb workspace show", switches: [])
+    {_opts, rest, mode} = ArgParser.parse(argv, command: "ward workspace show", switches: [])
 
     id =
       case rest do
@@ -175,12 +175,12 @@ defmodule WardmastCli.Cmd.Workspace do
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp create(argv) do
     {opts, rest, mode} =
-      ArgParser.parse(argv, command: "arb workspace create", switches: @switches)
+      ArgParser.parse(argv, command: "ward workspace create", switches: @switches)
 
     name =
       case rest do
         [name] -> name
-        [] -> Output.die("workspace create requires a name", "arb workspace create <name>")
+        [] -> Output.die("workspace create requires a name", "ward workspace create <name>")
         _ -> Output.die("workspace create takes exactly one positional argument: the name")
       end
 
@@ -229,7 +229,7 @@ defmodule WardmastCli.Cmd.Workspace do
 
   defp update(argv) do
     {opts, rest, mode} =
-      ArgParser.parse(argv, command: "arb workspace update", switches: @switches)
+      ArgParser.parse(argv, command: "ward workspace update", switches: @switches)
 
     body =
       %{}

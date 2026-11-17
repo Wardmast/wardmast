@@ -2,7 +2,7 @@ defmodule WardmastCli.StrictnessTest do
   @moduledoc """
   The CLI parsing contract (bd-cqw11s), driven from the `WardmastCli.Verbs`
   registry: every verb, at every probe argv it declares, must exit 1 with
-  `unknown option --x for arb <verb>` when handed an unknown flag — and must
+  `unknown option --x for ward <verb>` when handed an unknown flag — and must
   not swallow the token after the flag or reach the network first.
 
   A verb added to the registry without `:probes` fails here, so a command
@@ -80,7 +80,7 @@ defmodule WardmastCli.StrictnessTest do
 
         assert code == 1, "#{label}: expected exit 1, got #{code}; stderr: #{err}"
 
-        assert err =~ "unknown option #{flag} for arb",
+        assert err =~ "unknown option #{flag} for ward",
                "#{label}: stderr did not name the unknown flag: #{err}"
       end
     end
@@ -90,7 +90,7 @@ defmodule WardmastCli.StrictnessTest do
     for flag <- ["-w", "--workspace"] do
       {_out, err, code} = capture(fn -> Main.main(["ticket", "list", flag]) end)
       assert code == 1
-      assert err =~ "option #{flag} for arb ticket requires a value"
+      assert err =~ "option #{flag} for ward ticket requires a value"
     end
   end
 
@@ -98,7 +98,7 @@ defmodule WardmastCli.StrictnessTest do
     for argv <- [["server", "start", "-w", "foo"], ["-w", "foo", "server", "start"]] do
       {_out, err, code} = capture(fn -> Main.main(argv) end)
       assert code == 1
-      assert err =~ "unknown option -w for arb server"
+      assert err =~ "unknown option -w for ward server"
     end
   end
 
@@ -127,7 +127,7 @@ defmodule WardmastCli.StrictnessTest do
 
       assert code == 1, "#{label}: expected exit 1, got #{code}; stderr: #{err}"
 
-      assert err =~ "unknown option #{@bogus} for arb",
+      assert err =~ "unknown option #{@bogus} for ward",
              "#{label}: stderr did not name the unknown flag: #{err}"
     end
   end
@@ -136,14 +136,14 @@ defmodule WardmastCli.StrictnessTest do
     {_out, err, code} = capture(fn -> Main.main(["ticket", "show", "--bogus-flag", "bd-1"]) end)
 
     assert code == 1
-    assert err =~ "unknown option --bogus-flag for arb ticket show"
+    assert err =~ "unknown option --bogus-flag for ward ticket show"
   end
 
   test "the error line names the verb the user typed" do
     {_out, err, code} = capture(fn -> Main.main(["ticket", "list", "--nope"]) end)
 
     assert code == 1
-    assert err =~ "unknown option --nope for arb ticket list"
+    assert err =~ "unknown option --nope for ward ticket list"
   end
 
   test "the free-text verbs are the declared opt-outs and keep dashes in the text" do

@@ -162,7 +162,7 @@ defmodule WardmastCli.Cmd.Init do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, _mode} = ArgParser.parse(argv, command: "arb init", switches: @switches)
+      {opts, rest, _mode} = ArgParser.parse(argv, command: "ward init", switches: @switches)
       mode = if opts[:json], do: :json, else: :text
       force = opts[:force] || false
       dev_mode = opts[:dev] || false
@@ -391,13 +391,14 @@ defmodule WardmastCli.Cmd.Init do
     _, _ -> nil
   end
 
-  # The escript is built as `<umbrella>/apps/wardmast_cli/arb`. When run from
+  # The escript is built as `<umbrella>/apps/wardmast_cli/ward`. When run from
   # the build tree we can recover the umbrella root; an installed-on-PATH copy
   # tells us nothing useful, so we decline rather than guess.
   # File.exists? guards against false positives when `arb` is a short PATH name
   # invoked from a directory whose path ends with `/apps/wardmast_cli`.
   defp derive_umbrella(path) do
-    if String.ends_with?(path, "/apps/wardmast_cli/arb") and File.exists?(path) do
+    if (String.ends_with?(path, "/apps/wardmast_cli/ward") or
+          String.ends_with?(path, "/apps/wardmast_cli/arb")) and File.exists?(path) do
       path |> Path.dirname() |> Path.dirname() |> Path.dirname()
     end
   end

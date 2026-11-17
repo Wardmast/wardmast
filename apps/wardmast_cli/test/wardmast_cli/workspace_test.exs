@@ -53,16 +53,58 @@ defmodule WardmastCli.WorkspaceTest do
 
   describe "resolve/0" do
     setup do
-      prev = System.get_env("ARB_WORKSPACE")
+      prev_wm = System.get_env("WARDMAST_WORKSPACE")
+      prev_arb = System.get_env("ARB_WORKSPACE")
+      System.delete_env("WARDMAST_WORKSPACE")
       System.delete_env("ARB_WORKSPACE")
+      Wardmast.Env.reset_warnings()
 
       on_exit(fn ->
-        if prev,
-          do: System.put_env("ARB_WORKSPACE", prev),
+        if prev_wm,
+          do: System.put_env("WARDMAST_WORKSPACE", prev_wm),
+          else: System.delete_env("WARDMAST_WORKSPACE")
+
+        if prev_arb,
+          do: System.put_env("ARB_WORKSPACE", prev_arb),
           else: System.delete_env("ARB_WORKSPACE")
+
+        Wardmast.Env.reset_warnings()
       end)
 
       :ok
+    end
+
+    test "honors WARDMAST_WORKSPACE and prefers it over ARB_WORKSPACE" do
+      System.put_env("WARDMAST_WORKSPACE", "acme")
+      System.put_env("ARB_WORKSPACE", "default")
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [
+              %{"id" => "ws-default", "name" => "default", "prefix" => "bd"},
+              %{"id" => "ws-acme", "name" => "acme", "prefix" => "ax"}
+            ]
+          }, 200}}
+      ])
+
+      assert {:ok, %{"name" => "acme"}} = Workspace.resolve()
+    end
+
+    test "falls back to ARB_WORKSPACE when WARDMAST_WORKSPACE is unset" do
+      System.put_env("ARB_WORKSPACE", "acme")
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [
+              %{"id" => "ws-default", "name" => "default", "prefix" => "bd"},
+              %{"id" => "ws-acme", "name" => "acme", "prefix" => "ax"}
+            ]
+          }, 200}}
+      ])
+
+      assert {:ok, %{"name" => "acme"}} = Workspace.resolve()
     end
 
     test "falls back to the sole workspace when none is named \"default\"" do
@@ -96,7 +138,7 @@ defmodule WardmastCli.WorkspaceTest do
       assert {:error, msg} = Workspace.resolve()
       refute msg =~ "ARB_WORKSPACE"
       assert msg =~ "no workspaces found"
-      assert msg =~ "arb workspace create"
+      assert msg =~ "ward workspace create"
     end
 
     test "errors when ambiguous: multiple workspaces, none named \"default\"" do
@@ -124,7 +166,7 @@ defmodule WardmastCli.WorkspaceTest do
 
       assert {:error, msg} = Workspace.resolve()
       assert msg =~ "nonexistent"
-      assert msg =~ "arb workspace create"
+      assert msg =~ "ward workspace create"
     end
 
     test "resolve/1 accepts explicit target by id or name and ignores ARB_WORKSPACE" do

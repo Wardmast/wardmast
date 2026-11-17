@@ -226,13 +226,14 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
   end
 
   # Optional `Environment=` pass-throughs. The OTP release is self-contained
-  # (no MIX_HOME or PATH needed). ARB_HOST and ARB_WORKSPACE are forwarded
-  # when set so the running node picks up the same coordinator and workspace as
-  # the installing shell; secrets live in the EnvironmentFile instead.
+  # (no MIX_HOME or PATH needed). WARDMAST_HOST and WARDMAST_WORKSPACE (falling
+  # back to ARB_HOST / ARB_WORKSPACE) are forwarded when set so the running node
+  # picks up the same coordinator and workspace as the installing shell; secrets
+  # live in the EnvironmentFile instead.
   defp release_environment_lines do
     [
-      {"ARB_HOST", System.get_env("ARB_HOST")},
-      {"ARB_WORKSPACE", System.get_env("ARB_WORKSPACE")}
+      {"WARDMAST_HOST", Wardmast.Env.get("WARDMAST_HOST")},
+      {"WARDMAST_WORKSPACE", Wardmast.Env.get("WARDMAST_WORKSPACE")}
     ]
     |> Enum.reject(fn {_k, v} -> v in [nil, ""] end)
     |> Enum.map_join("\n", fn {k, v} -> "Environment=#{k}=#{v}" end)

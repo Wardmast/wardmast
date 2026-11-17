@@ -775,13 +775,17 @@ defmodule Wardmast.Worker.ContainerSpawn do
 
   defp ssh_base(_), do: nil
 
-  # `arb` reads `ARB_HOST` (a base URL); the bridge listens on the same loopback
+  # `ward` reads `WARDMAST_HOST` (a base URL); the bridge listens on the same loopback
   # port the server does, so the default `http://127.0.0.1:4848` is only right
   # when the server is on 4848.
   defp arb_host do
     case URI.parse(Wardmast.MCP.server_url()) do
-      %URI{port: port} when is_integer(port) -> [{"ARB_HOST", "http://127.0.0.1:#{port}"}]
-      _ -> []
+      %URI{port: port} when is_integer(port) ->
+        url = "http://127.0.0.1:#{port}"
+        [{"WARDMAST_HOST", url}, {"ARB_HOST", url}]
+
+      _ ->
+        []
     end
   end
 

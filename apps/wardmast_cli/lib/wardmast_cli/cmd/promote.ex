@@ -33,7 +33,7 @@ defmodule WardmastCli.Cmd.Promote do
 
   defp do_run(argv) do
     {opts, rest, _mode} =
-      ArgParser.parse(argv, command: "arb ticket promote", switches: @switches)
+      ArgParser.parse(argv, command: "ward ticket promote", switches: @switches)
 
     mode = if opts[:json], do: :json, else: :text
     body = waive_body(opts[:waive])

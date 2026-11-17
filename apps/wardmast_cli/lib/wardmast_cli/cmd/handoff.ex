@@ -28,7 +28,7 @@ defmodule WardmastCli.Cmd.Handoff do
     verb = if to == :operator, do: "handoff", else: "handback"
 
     {opts, rest, _mode} =
-      ArgParser.parse(argv, command: "arb ticket #{verb}", switches: @switches)
+      ArgParser.parse(argv, command: "ward ticket #{verb}", switches: @switches)
 
     mode = if opts[:json], do: :json, else: :text
     id = parse_id(rest, verb)

@@ -43,15 +43,15 @@ defmodule WardmastCli.Cmd.InstallCliTest do
       System.put_env("ARB_HOME", fake_root)
 
       # Redirect the install destination into the temp checkout so the test never
-      # touches the operator's real ~/.local/bin/arb. System.user_home!/0 is fixed
+      # touches the operator's real ~/.local/bin/ward. System.user_home!/0 is fixed
       # at VM start and ignores a runtime HOME change, so override the install path
-      # explicitly via ARB_INSTALL_BIN (honored by InstallCli).
-      install_path = Path.join(fake_root, ".local/bin/arb")
-      System.put_env("ARB_INSTALL_BIN", install_path)
-      on_exit(fn -> System.delete_env("ARB_INSTALL_BIN") end)
+      # explicitly via WARDMAST_INSTALL_BIN (honored by InstallCli).
+      install_path = Path.join(fake_root, ".local/bin/ward")
+      System.put_env("WARDMAST_INSTALL_BIN", install_path)
+      on_exit(fn -> System.delete_env("WARDMAST_INSTALL_BIN") end)
 
       # Write a fake escript so the copy step has a source file.
-      escript_path = Path.join(cli_dir, "arb")
+      escript_path = Path.join(cli_dir, "ward")
 
       Process.put(:bd2_cmd_runner, fn _cmd, _args, _opts ->
         File.write!(escript_path, "fake escript")
@@ -62,6 +62,8 @@ defmodule WardmastCli.Cmd.InstallCliTest do
 
       assert code == 0
       assert out =~ install_path
+      assert {:ok, "ward"} = File.read_link(Path.join(fake_root, ".local/bin/wm"))
+      assert File.exists?(Path.join(fake_root, ".local/bin/arb"))
     end
   end
 

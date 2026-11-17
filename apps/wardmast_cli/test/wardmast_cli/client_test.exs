@@ -76,15 +76,36 @@ defmodule WardmastCli.ClientTest do
   end
 
   describe "base_url/0" do
+    setup do
+      for k <- ~w(WARDMAST_HOST ARB_HOST ARBITER_HOST), do: System.delete_env(k)
+      Wardmast.Env.reset_warnings()
+
+      on_exit(fn ->
+        for k <- ~w(WARDMAST_HOST ARB_HOST ARBITER_HOST), do: System.delete_env(k)
+        Wardmast.Env.reset_warnings()
+      end)
+
+      :ok
+    end
+
     test "defaults to localhost:4848" do
-      System.delete_env("ARB_HOST")
       assert Client.base_url() == "http://127.0.0.1:4848"
     end
 
-    test "honors ARB_HOST" do
+    test "honors WARDMAST_HOST" do
+      System.put_env("WARDMAST_HOST", "http://wardmast.test:9999")
+      assert Client.base_url() == "http://wardmast.test:9999"
+    end
+
+    test "falls back to ARB_HOST when WARDMAST_HOST is unset" do
       System.put_env("ARB_HOST", "http://example.test:9999")
       assert Client.base_url() == "http://example.test:9999"
-      System.delete_env("ARB_HOST")
+    end
+
+    test "WARDMAST_HOST wins over ARB_HOST when both are set" do
+      System.put_env("WARDMAST_HOST", "http://wardmast.test:9999")
+      System.put_env("ARB_HOST", "http://legacy.test:8888")
+      assert Client.base_url() == "http://wardmast.test:9999"
     end
   end
 

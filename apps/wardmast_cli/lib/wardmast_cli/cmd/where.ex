@@ -10,9 +10,9 @@ defmodule WardmastCli.Cmd.Where do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {_opts, _rest, mode} = ArgParser.parse(argv, command: "arb where", switches: [])
+      {_opts, _rest, mode} = ArgParser.parse(argv, command: "ward where", switches: [])
       base = Client.base_url()
-      bd2_ws_env = System.get_env("ARB_WORKSPACE")
+      bd2_ws_env = Wardmast.Env.get("WARDMAST_WORKSPACE")
 
       resolved =
         case Workspace.resolve() do
@@ -36,7 +36,7 @@ defmodule WardmastCli.Cmd.Where do
           IO.puts("api host:        #{base}")
 
           IO.puts(
-            "ARB_WORKSPACE:   #{bd2_ws_env || "(unset — using \"default\", else the sole workspace)"}"
+            "WARDMAST_WORKSPACE: #{bd2_ws_env || "(unset — using \"default\", else the sole workspace)"}"
           )
 
           case resolved do

@@ -90,7 +90,7 @@ defmodule WardmastCli.Cmd.AlertTest do
       {_out, err, code} = capture(fn -> Alert.run(["list", "--bogus"]) end)
 
       assert code == 1
-      assert err =~ "unknown option --bogus for arb alert"
+      assert err =~ "unknown option --bogus for ward alert"
     end
 
     test "an unknown subcommand exits 2" do

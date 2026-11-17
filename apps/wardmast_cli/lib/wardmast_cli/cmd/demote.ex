@@ -27,7 +27,9 @@ defmodule WardmastCli.Cmd.Demote do
   end
 
   defp do_run(argv) do
-    {opts, rest, _mode} = ArgParser.parse(argv, command: "arb ticket demote", switches: @switches)
+    {opts, rest, _mode} =
+      ArgParser.parse(argv, command: "ward ticket demote", switches: @switches)
+
     mode = if opts[:json], do: :json, else: :text
 
     if Bulk.bulk?(rest, opts),

@@ -143,7 +143,7 @@ defmodule WardmastCli.Cmd.Review do
 
       true ->
         {sub, argv} = split_subcommand(argv)
-        {opts, rest, _mode} = ArgParser.parse(argv, command: "arb review", switches: @switches)
+        {opts, rest, _mode} = ArgParser.parse(argv, command: "ward review", switches: @switches)
         mode = if opts[:json], do: :json, else: :text
         dispatch(sub, opts, rest, mode)
     end
@@ -183,10 +183,10 @@ defmodule WardmastCli.Cmd.Review do
   defp one_arg!([], sub, what), do: Output.die("review #{sub} requires: #{what}")
   defp one_arg!(_, sub, what), do: Output.die("review #{sub} takes a single argument: #{what}")
 
-  # The workspace `-w`/`--workspace`/ARB_WORKSPACE names, as the server resolves
-  # it (id or name). `nil` when none was named.
+  # The workspace `-w`/`--workspace`/WARDMAST_WORKSPACE (or ARB_WORKSPACE) names,
+  # as the server resolves it (id or name). `nil` when none was named.
   defp workspace_ref(opts) do
-    case opts[:workspace] || System.get_env("ARB_WORKSPACE") do
+    case opts[:workspace] || Wardmast.Env.get("WARDMAST_WORKSPACE") do
       ref when is_binary(ref) and ref != "" -> ref
       _ -> nil
     end

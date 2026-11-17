@@ -12,7 +12,12 @@ System.delete_env("ARBITER_WORKTREE_ROOT")
 System.delete_env("ARBITER_OUTPUT_LOG_ROOT")
 System.delete_env("ARBITER_MEMORY_ROOT")
 System.delete_env("ARB_TOKEN")
+System.delete_env("WARDMAST_WORKSPACE")
 System.delete_env("ARB_WORKSPACE")
+System.delete_env("ARBITER_WORKSPACE")
+System.delete_env("WARDMAST_HOST")
+System.delete_env("ARB_HOST")
+System.delete_env("ARBITER_HOST")
 
 # Never let a test exec `mix`, `systemctl`, `lsof` or `kill` for real through
 # `WardmastCli.Cmd.Start.run_cmd/3`: an unstubbed restart test once killed the

@@ -5,7 +5,7 @@ defmodule WardmastCli.Cmd.Update.Git do
   escript when it changed.
   """
 
-  alias WardmastCli.Cmd.Start
+  alias WardmastCli.Cmd.{SelfUpdate, Start}
   alias WardmastCli.Output
 
   @spec ensure_on_integration_branch(String.t(), String.t()) :: :ok | no_return()
@@ -136,18 +136,19 @@ defmodule WardmastCli.Cmd.Update.Git do
 
     case Start.run_cmd("mix", ["escript.build"], cd: cli_dir, stderr_to_stdout: true) do
       {_out, 0} ->
-        escript_path = Path.join(cli_dir, "arb")
-        install_path = Path.join(System.user_home!(), ".local/bin/arb")
+        escript_path = Path.join(cli_dir, "ward")
+        install_path = SelfUpdate.install_path()
 
         # Ensure ~/.local/bin exists
         install_dir = Path.dirname(install_path)
         File.mkdir_p!(install_dir)
 
-        # Copy the escript to ~/.local/bin/arb
+        # Copy the escript to ~/.local/bin/ward
         case File.copy(escript_path, install_path) do
           {:ok, _} ->
-            # Make it executable
+            # Make it executable and install the wm/arb links alongside it.
             File.chmod!(install_path, 0o755)
+            :ok = SelfUpdate.install_links(install_path)
             Start.log_text("Installed CLI escript to #{install_path}")
             :ok
 

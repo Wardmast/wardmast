@@ -178,14 +178,14 @@ defmodule WardmastCli.Cmd.McpTest do
       {_out, err, code} = capture(fn -> Mcp.run(["token", "mint", "--tir", "coordinator"]) end)
 
       assert code == 1
-      assert err =~ "unknown option --tir for arb mcp token mint"
+      assert err =~ "unknown option --tir for ward mcp token mint"
     end
 
     test "verify rejects an unknown flag rather than skipping dash-words" do
       {_out, err, code} = capture(fn -> Mcp.run(["token", "verify", "--bogus", "tok"]) end)
 
       assert code == 1
-      assert err =~ "unknown option --bogus for arb mcp token verify"
+      assert err =~ "unknown option --bogus for ward mcp token verify"
     end
   end
 end

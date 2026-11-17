@@ -50,7 +50,7 @@ defmodule WardmastCli.Cmd.Rank do
   end
 
   defp do_run(argv) do
-    {opts, rest, _mode} = ArgParser.parse(argv, command: "arb ticket rank", switches: @switches)
+    {opts, rest, _mode} = ArgParser.parse(argv, command: "ward ticket rank", switches: @switches)
     mode = if opts[:json], do: :json, else: :text
     body = rank_body(opts)
 

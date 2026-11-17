@@ -317,14 +317,14 @@ defmodule WardmastCli.Cmd.BreakerTest do
         capture(fn -> WardmastCli.Cmd.Breaker.run(["reset", "--bogus", "value"]) end)
 
       assert code == 1
-      assert err =~ "unknown option --bogus for arb breaker"
+      assert err =~ "unknown option --bogus for ward breaker"
     end
 
     test "list rejects an unknown flag" do
       {_out, err, code} = capture(fn -> WardmastCli.Cmd.Breaker.run(["list", "--opne"]) end)
 
       assert code == 1
-      assert err =~ "unknown option --opne for arb breaker"
+      assert err =~ "unknown option --opne for ward breaker"
     end
   end
 

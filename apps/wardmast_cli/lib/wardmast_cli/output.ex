@@ -556,12 +556,12 @@ defmodule WardmastCli.Output do
   """
   @spec die(String.t() | Client.Error.t()) :: no_return()
   def die(msg) when is_binary(msg) do
-    IO.puts(:stderr, "arb: error: " <> msg)
+    IO.puts(:stderr, "ward: error: " <> msg)
     do_halt(1, msg)
   end
 
   def die(%Client.Error{} = err) do
-    IO.puts(:stderr, "arb: error: " <> err.message)
+    IO.puts(:stderr, "ward: error: " <> err.message)
 
     if err.hint do
       IO.puts(:stderr, "       hint: " <> err.hint)
@@ -586,13 +586,13 @@ defmodule WardmastCli.Output do
   """
   @spec die_as(Client.Error.t(), String.t()) :: no_return()
   def die_as(%Client.Error{} = err, msg) when is_binary(msg) do
-    IO.puts(:stderr, "arb: error: " <> msg)
+    IO.puts(:stderr, "ward: error: " <> msg)
     do_halt(exit_code_for(err), msg)
   end
 
   @spec die(String.t(), String.t()) :: no_return()
   def die(msg, hint) do
-    IO.puts(:stderr, "arb: error: " <> msg)
+    IO.puts(:stderr, "ward: error: " <> msg)
     IO.puts(:stderr, "       hint: " <> hint)
     do_halt(1, msg)
   end

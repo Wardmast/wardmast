@@ -23,7 +23,7 @@ defmodule WardmastCli.Cmd.Epic do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {_opts, rest, mode} = ArgParser.parse(argv, command: "arb epic", switches: [])
+      {_opts, rest, mode} = ArgParser.parse(argv, command: "ward epic", switches: [])
 
       case rest do
         ["floor" | rest] -> floor(rest, mode)

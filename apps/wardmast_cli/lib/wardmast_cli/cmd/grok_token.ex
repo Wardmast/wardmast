@@ -24,7 +24,7 @@ defmodule WardmastCli.Cmd.GrokToken do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      _ = ArgParser.parse(argv, command: "arb grok-token", switches: [])
+      _ = ArgParser.parse(argv, command: "ward grok-token", switches: [])
       force? = System.get_env("GROK_AUTH_EXPIRED") == "1"
 
       case Client.post("/api/grok/token", %{force: force?}) do
