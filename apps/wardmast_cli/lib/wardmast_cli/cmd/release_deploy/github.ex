@@ -5,7 +5,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.Github do
   downloading + verifying them.
   """
 
-  alias WardmastCli.{Output, ReleaseRepo}
+  alias WardmastCli.{Cmd.ReleaseDeploy.HostCheck, Output, ReleaseRepo}
 
   @default_github_api "https://api.github.com"
 
@@ -110,8 +110,11 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.Github do
     end)
   end
 
-  @spec asset_name(String.t()) :: String.t()
-  def asset_name(tag), do: "arbiter-#{tag}-linux.tar.gz"
+  # The Linux name is unchanged so older `arb` binaries keep finding it.
+  @spec asset_name(String.t(), {atom(), String.t()}) :: String.t()
+  def asset_name(tag, platform \\ HostCheck.platform())
+  def asset_name(tag, {:darwin, "arm64"}), do: "arbiter-#{tag}-darwin-arm64.tar.gz"
+  def asset_name(tag, _platform), do: "arbiter-#{tag}-linux.tar.gz"
 
   @spec download_binary(String.t()) :: binary()
   def download_binary(url) do

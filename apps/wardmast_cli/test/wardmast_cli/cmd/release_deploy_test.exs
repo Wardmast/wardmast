@@ -2072,24 +2072,41 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
 
   describe "host check" do
     test "refuses on a non-Linux host before downloading or writing anything", %{home: home} do
-      Process.put(:bd2_host_platform, {:darwin, "arm64"})
+      Process.put(:bd2_host_platform, {:darwin, "x86_64"})
 
       {_out, err, code} = capture(fn -> ReleaseDeploy.run([]) end)
 
       assert code == 1
-      assert err =~ "darwin/arm64"
+      assert err =~ "darwin/x86_64"
       assert err =~ "hosts the server"
       refute File.exists?(Path.join(home, "releases"))
       refute File.exists?(Path.join(home, "deploy-status.json"))
     end
 
     test "--this-host does not waive the platform check" do
-      Process.put(:bd2_host_platform, {:darwin, "arm64"})
+      Process.put(:bd2_host_platform, {:darwin, "x86_64"})
 
       {_out, err, code} = capture(fn -> ReleaseDeploy.run(["--this-host"]) end)
 
       assert code == 1
-      assert err =~ "darwin/arm64"
+      assert err =~ "darwin/x86_64"
+    end
+
+    test "accepts darwin/arm64" do
+      Process.put(:bd2_host_platform, {:darwin, "arm64"})
+      assert :ok = WardmastCli.Cmd.ReleaseDeploy.HostCheck.check(this_host: true)
+    end
+
+    test "asset_name is platform-aware; Linux name unchanged" do
+      alias WardmastCli.Cmd.ReleaseDeploy.Github
+      assert Github.asset_name("v1", {:linux, "x86_64"}) == "arbiter-v1-linux.tar.gz"
+      assert Github.asset_name("v1", {:linux, "aarch64"}) == "arbiter-v1-linux.tar.gz"
+      assert Github.asset_name("v1", {:darwin, "arm64"}) == "arbiter-v1-darwin-arm64.tar.gz"
+
+      Process.put(:bd2_host_platform, {:darwin, "arm64"})
+      assert Github.asset_name("v1") == "arbiter-v1-darwin-arm64.tar.gz"
+      Process.put(:bd2_host_platform, {:linux, "x86_64"})
+      assert Github.asset_name("v1") == "arbiter-v1-linux.tar.gz"
     end
 
     test "refuses with no install when ARB_HOST is non-loopback", %{home: home} do
