@@ -8,6 +8,7 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
   alias WardmastCli.Output
   alias WardmastCli.SecretInventory
   alias WardmastCli.Supervisor
+  alias WardmastCli.Supervisor.Launchd.Plist
 
   def emit_installed(:json, scope, path, root, linger, secrets, log_paths) do
     {env_path, captured} =
@@ -78,6 +79,60 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
     IO.puts(
       "Remove it with `arb install-service#{if scope == :system, do: " --system", else: ""} --uninstall`."
     )
+  end
+
+  def emit_installed_launchd(:json, path, secrets) do
+    {env_path, captured} =
+      case secrets do
+        {:written, p, keys} -> {p, keys}
+        {:none, p} -> {p, []}
+      end
+
+    Output.emit_json(%{
+      action: "install",
+      scope: "user",
+      unit: Plist.label(),
+      unit_path: path,
+      env_file: env_path,
+      secrets_captured: captured,
+      secrets_at_rest: at_rest_report(env_path),
+      status_cmd: Supervisor.impl().status_cmd(:user),
+      logs_cmd: Supervisor.impl().logs_cmd(:user),
+      base_url: Client.base_url(),
+      ok: true
+    })
+  end
+
+  def emit_installed_launchd(:text, path, secrets) do
+    IO.puts("Installed #{Plist.label()} (LaunchAgent, user scope).")
+    IO.puts("  plist:  #{path}")
+    IO.puts("  starts: #{Client.base_url()} at login")
+    IO.puts(secrets_note(secrets))
+    IO.puts(at_rest_note(elem(secrets, 1)))
+    IO.puts("")
+    IO.puts("Check it with:")
+    IO.puts("  #{Supervisor.impl().status_cmd(:user)}")
+    IO.puts("  #{Supervisor.impl().logs_cmd(:user)}")
+    IO.puts("")
+    IO.puts("Remove it with `arb install service --uninstall`.")
+  end
+
+  def emit_uninstalled_launchd(:json, path, disabled?, removed?) do
+    Output.emit_json(%{
+      action: "uninstall",
+      scope: "user",
+      unit: Plist.label(),
+      unit_path: path,
+      disabled: disabled?,
+      removed: removed?,
+      ok: true
+    })
+  end
+
+  def emit_uninstalled_launchd(:text, path, disabled?, removed?) do
+    IO.puts("Uninstalled #{Plist.label()} (LaunchAgent, user scope).")
+    IO.puts("  unloaded: #{if disabled?, do: "yes", else: "was not loaded"}")
+    IO.puts("  removed:  #{if removed?, do: path, else: "no plist at #{path}"}")
   end
 
   def emit_uninstalled(:json, scope, path, disabled?, removed?) do
