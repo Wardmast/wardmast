@@ -357,13 +357,71 @@ defmodule WardmastCli.Cmd.SelfUpdate do
          :ok <- File.rename(wm_tmp, wm_path),
          :ok <- File.write(arb_tmp, arb_shim(target_name)),
          :ok <- File.chmod(arb_tmp, 0o755),
-         :ok <- File.rename(arb_tmp, arb_path) do
+         :ok <- place_arb_shim(arb_tmp, arb_path) do
       :ok
     else
       {:error, reason} ->
         _ = File.rm(wm_tmp)
         _ = File.rm(arb_tmp)
         {:error, reason}
+    end
+  end
+
+  # An escript lazily loads modules from its own file, so renaming the shim over
+  # the `arb` file that is currently running makes the next module load read
+  # shell text and abort the VM. When the target is the running script, leave
+  # the staged `.new` file and record it; `flush_pending_shim/0` renames it in
+  # once the caller has finished (report printed, status written).
+  defp place_arb_shim(arb_tmp, arb_path) do
+    if running_script?(arb_path) do
+      Process.put(:arb_pending_shim, {arb_tmp, arb_path})
+      :ok
+    else
+      File.rename(arb_tmp, arb_path)
+    end
+  end
+
+  defp running_script?(path) do
+    running =
+      Process.get(:arb_running_script_override) ||
+        try do
+          to_string(:escript.script_name())
+        catch
+          _, _ -> nil
+        end
+
+    is_binary(running) and same_file?(Path.expand(running), Path.expand(path))
+  end
+
+  defp same_file?(a, b), do: a == b or real_path(a) == real_path(b)
+
+  defp real_path(path) do
+    case :file.read_link_all(String.to_charlist(path)) do
+      {:ok, target} -> Path.expand(to_string(target), Path.dirname(path))
+      _ -> path
+    end
+  end
+
+  @doc """
+  Rename a deferred `arb` shim into place (see `install_links/1`). Call it as the
+  last thing a command does, after its output is written. No-op when nothing
+  was deferred.
+  """
+  @spec flush_pending_shim() :: :ok | {:error, term()}
+  def flush_pending_shim do
+    case Process.delete(:arb_pending_shim) do
+      {tmp, dest} ->
+        case File.rename(tmp, dest) do
+          :ok ->
+            :ok
+
+          {:error, _} = err ->
+            _ = File.rm(tmp)
+            err
+        end
+
+      nil ->
+        :ok
     end
   end
 

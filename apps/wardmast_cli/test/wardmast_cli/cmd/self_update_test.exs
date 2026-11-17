@@ -335,4 +335,34 @@ defmodule WardmastCli.Cmd.SelfUpdateTest do
       assert err =~ "ward.sha256"
     end
   end
+
+  describe "install_links when arb is the running escript" do
+    test "defers the shim until flush_pending_shim/0", %{tmp: tmp, install_path: ward} do
+      arb = Path.join(tmp, "arb")
+      File.write!(arb, "ORIGINAL ESCRIPT")
+      Process.put(:arb_running_script_override, arb)
+      on_exit(fn -> Process.delete(:arb_running_script_override) end)
+
+      assert :ok = SelfUpdate.install_links(ward)
+      # The running file is untouched until the caller is done.
+      assert File.read!(arb) == "ORIGINAL ESCRIPT"
+      assert File.exists?(arb <> ".new")
+
+      assert :ok = SelfUpdate.flush_pending_shim()
+      assert File.read!(arb) =~ "#!/bin/sh"
+      refute File.exists?(arb <> ".new")
+      assert :ok = SelfUpdate.flush_pending_shim()
+    end
+
+    test "writes the shim immediately when arb is not the running script", %{
+      tmp: tmp,
+      install_path: ward
+    } do
+      Process.put(:arb_running_script_override, Path.join(tmp, "other"))
+      on_exit(fn -> Process.delete(:arb_running_script_override) end)
+
+      assert :ok = SelfUpdate.install_links(ward)
+      assert File.read!(Path.join(tmp, "arb")) =~ "#!/bin/sh"
+    end
+  end
 end
