@@ -127,7 +127,15 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   @spec run(keyword()) :: [Result.t()]
   def run(opts \\ []) do
     scope = Scope.fetch()
-    darwin? = opts |> Keyword.get_lazy(:os, &:os.type/0) |> Darwin.darwin?()
+    platform = if Keyword.has_key?(opts, :os), do: %{}, else: fetch_platform()
+
+    # The platform is the *server's* (WARDMAST_HOST may be remote); `opts[:os]`
+    # is only the test override.
+    darwin? =
+      case Keyword.fetch(opts, :os) do
+        {:ok, os} -> Darwin.darwin?(os)
+        :error -> platform["os"] == "darwin"
+      end
 
     registry(opts)
     |> Enum.flat_map(fn {id, group, parent, applies_when, check} ->
@@ -144,8 +152,22 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
           [%Result{name: na_name(id), status: :na, detail: reason} |> tag_one(id, group, parent)]
       end
     end)
-    |> Kernel.++(if darwin?, do: Darwin.checks(opts[:darwin] || []), else: [])
+    |> Kernel.++(if darwin?, do: Darwin.checks(darwin_opts(opts, platform)), else: [])
     |> Enum.sort_by(&group_rank(&1.group))
+  end
+
+  # An older server without the endpoint, or an error, is "not darwin".
+  defp fetch_platform do
+    case Client.get("/api/server/platform") do
+      {:ok, %{} = body} -> body
+      _ -> %{}
+    end
+  end
+
+  defp darwin_opts(opts, platform) do
+    Keyword.get_lazy(opts, :darwin, fn ->
+      [path: platform["path"] || "", tools: platform["tools"] || %{}]
+    end)
   end
 
   @group_order [:core, :auth, :sandboxes, :security]

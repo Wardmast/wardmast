@@ -3,9 +3,12 @@ defmodule WardmastCli.Cmd.Doctor.Darwin do
   The macOS-only `arb server doctor` checks, and the list of Linux-only checks
   that are `n/a` there (bd-6tif6q §1.3, §6).
 
-  Every tool is looked up on the *captured* PATH (the one the server hands its
-  workers, with the Homebrew dirs appended), not the doctor's own ambient one,
-  because that is the PATH a worker actually sees.
+  The tool lookups and the PATH come from the *server*
+  (`GET /api/server/platform`, `Wardmast.Doctor.Platform`): the PATH it hands its
+  workers, with the Homebrew dirs appended, and where each tool resolves on it.
+  They are never read from the doctor's own shell, which can differ from a
+  launchd-started server's. tmux is not checked here; the server-side `tmux`
+  check covers it.
 
   macOS has no bwrap, podman, cgroup, systemd linger or kernel OOM policy, so
   those checks report `n/a`. It also has no OS-level write jail or egress
@@ -38,24 +41,16 @@ defmodule WardmastCli.Cmd.Doctor.Darwin do
   def darwin?(_), do: false
 
   @doc """
-  The darwin checks. Options: `:path` (the captured PATH; default the ambient
-  `PATH`) and `:find` (`(name, path -> String.t() | nil)`, for tests).
+  The darwin checks. Options: `:path` (the server's captured PATH) and `:tools`
+  (`%{name => resolved path | nil}`, as the server reports them).
   """
   @spec checks(keyword()) :: [Result.t()]
   def checks(opts \\ []) do
-    path = Keyword.get_lazy(opts, :path, fn -> System.get_env("PATH") || "" end)
-    find = Keyword.get(opts, :find, &find_executable/2)
-    found = fn name -> find.(name, path) end
+    path = Keyword.get(opts, :path, "")
+    tools = Keyword.get(opts, :tools, %{})
+    found = fn name -> Map.get(tools, name) end
 
     [
-      tool(
-        "darwin_tmux",
-        "tmux",
-        found.("tmux"),
-        :warn,
-        "the dashboard login relay needs it",
-        "brew install tmux"
-      ),
       tool(
         "darwin_gtimeout",
         "gtimeout",
@@ -87,21 +82,6 @@ defmodule WardmastCli.Cmd.Doctor.Darwin do
       egress()
     ]
     |> Enum.map(&%{&1 | group: :sandboxes})
-  end
-
-  defp find_executable(name, path) do
-    # System.find_executable/1 reads the ambient PATH; resolve against ours.
-    path
-    |> String.split(":", trim: true)
-    |> Enum.map(&Path.join(&1, name))
-    |> Enum.find(&executable?/1)
-  end
-
-  defp executable?(file) do
-    case File.stat(file) do
-      {:ok, %File.Stat{type: :regular, mode: mode}} -> Bitwise.band(mode, 0o111) != 0
-      _ -> false
-    end
   end
 
   defp tool(id, name, found, missing_status, why, fix) do
