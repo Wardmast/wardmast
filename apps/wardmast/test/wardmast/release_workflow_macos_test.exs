@@ -47,7 +47,18 @@ defmodule Wardmast.ReleaseWorkflowMacosTest do
     refute text =~ "sha256sum"
     # No systemd unit in a macOS tarball.
     assert text =~ "arbiter-node.service"
-    assert text =~ "check-release-dylibs.sh"
+    assert text =~ "check-release-macho-libs.sh"
+  end
+
+  test "build-macos ad-hoc signs and verifies before packaging, with no glibc guard", %{jobs: jobs} do
+    steps = jobs["build-macos"]["steps"]
+    names = Enum.map(steps, & &1["name"])
+    sign = Enum.find_index(steps, &((&1["run"] || "") =~ "codesign --force -s -"))
+    package = Enum.find_index(names, &(&1 == "Package and checksum release"))
+
+    assert sign != nil and sign < package
+    assert Enum.at(steps, sign)["run"] =~ "codesign --verify"
+    refute run_text(jobs["build-macos"]) =~ "check-release-glibc.sh"
   end
 
   test "build-macos publishes tarball and checksum to the release", %{jobs: jobs} do

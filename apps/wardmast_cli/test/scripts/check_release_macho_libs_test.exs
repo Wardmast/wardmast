@@ -1,6 +1,6 @@
-defmodule WardmastCli.Scripts.CheckReleaseDylibsTest do
+defmodule WardmastCli.Scripts.CheckReleaseMachoLibsTest do
   @moduledoc """
-  Coverage for `scripts/check-release-dylibs.sh`, the macOS counterpart of the
+  Coverage for `scripts/check-release-macho-libs.sh`, the macOS counterpart of the
   ELF guard: every Mach-O file in the release may only link system libraries
   (`/usr/lib`, `/System/Library`) or paths relative to itself. A Homebrew
   `/opt/homebrew/.../libcrypto.dylib` dependency would not exist on a user's
@@ -8,7 +8,7 @@ defmodule WardmastCli.Scripts.CheckReleaseDylibsTest do
   """
   use ExUnit.Case, async: true
 
-  @script Path.expand("../../../../scripts/check-release-dylibs.sh", __DIR__)
+  @script Path.expand("../../../../scripts/check-release-macho-libs.sh", __DIR__)
   # 64-bit little-endian Mach-O magic.
   @macho <<0xCF, 0xFA, 0xED, 0xFE, 0, 0, 0, 0>>
 
