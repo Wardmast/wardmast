@@ -24,8 +24,8 @@ defmodule Wardmast.Nodes.ClusterInstall do
   alias Wardmast.Nodes.Agent
   alias Wardmast.Nodes.InstallId
   alias Wardmast.Settings
-  alias Wardmast.Worker.Image.PublishLedger
   alias Wardmast.Worker.Image.Publisher
+  alias Wardmast.Worker.Image.PublishLedger
 
   @form_keys ~w(name namespace max cpu memory node_selector pull_secret registries reach admission self_upgrade api_cidrs cluster_cidrs primary_cidrs proxy_url proxy_cidrs)
 

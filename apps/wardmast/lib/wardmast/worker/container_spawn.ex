@@ -1532,9 +1532,8 @@ defmodule Wardmast.Worker.ContainerSpawn do
     home = Path.join(tmp_dir, "home")
     config_dir = Path.join(home, ".gemini")
 
-    with :ok <- File.mkdir_p(config_dir) do
-      {:ok, home, config_dir}
-    else
+    case File.mkdir_p(config_dir) do
+      :ok -> {:ok, home, config_dir}
       {:error, reason} -> {:error, {:run_dirs_failed, reason}}
     end
   end
