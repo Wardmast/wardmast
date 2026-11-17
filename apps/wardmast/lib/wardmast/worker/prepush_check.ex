@@ -97,9 +97,9 @@ defmodule Wardmast.Worker.PrepushCheck do
   alias Wardmast.Worker.GateEnv
   alias Wardmast.Worker.PrepushCheck.Recipe
   alias Wardmast.Worker.PrepushCheck.Touched
-  alias Wardmast.Worker.ReleaseEnv
   alias Wardmast.Worker.RunTmp
   alias Wardmast.Worker.SpawnEnv
+  alias Wardmast.Worker.Timeout
   alias Wardmast.Worker.Toolchain
 
   @kill_after_seconds 10
@@ -182,36 +182,27 @@ defmodule Wardmast.Worker.PrepushCheck do
   end
 
   defp host_executor(worktree) do
-    case System.find_executable("timeout") do
-      nil ->
-        {:error, :no_timeout_binary}
+    tmp =
+      case RunTmp.create("prepush") do
+        {:ok, dir} -> dir
+        {:error, _} -> nil
+      end
 
-      timeout_bin ->
-        tmp =
-          case RunTmp.create("prepush") do
-            {:ok, dir} -> dir
-            {:error, _} -> nil
-          end
+    env = SpawnEnv.cmd_env(RunTmp.env_pairs(tmp) ++ GateEnv.host_unsets(), nil)
 
-        env = SpawnEnv.cmd_env(RunTmp.env_pairs(tmp) ++ GateEnv.host_unsets(), nil)
-
-        exec = fn command, seconds ->
-          args = [
-            "--kill-after=#{@kill_after_seconds}",
-            Integer.to_string(seconds),
-            "sh",
-            "-c",
-            command
-          ]
-
-          # bd-3fnqi8: the repo-pinned Elixir/Erlang first on PATH, or no run at all.
-          with {:ok, env} <- Toolchain.env(worktree, env) do
-            ReleaseEnv.cmd(timeout_bin, args, cd: worktree, env: env, stderr_to_stdout: true)
-          end
-        end
-
-        {:ok, exec, fn -> RunTmp.remove(tmp) end}
+    exec = fn command, seconds ->
+      # bd-3fnqi8: the repo-pinned Elixir/Erlang first on PATH, or no run at all.
+      with {:ok, env} <- Toolchain.env(worktree, env) do
+        Timeout.cmd("sh", ["-c", command], seconds,
+          kill_after: @kill_after_seconds,
+          cd: worktree,
+          env: env,
+          stderr_to_stdout: true
+        )
+      end
     end
+
+    {:ok, exec, fn -> RunTmp.remove(tmp) end}
   end
 
   defp run_all(spec, worktree, exec, opts) do

@@ -36,9 +36,9 @@ defmodule Wardmast.Worker.TestRun do
   """
 
   alias Wardmast.Worker.PrepushCheck.Touched
-  alias Wardmast.Worker.ReleaseEnv
   alias Wardmast.Worker.SpawnEnv
   alias Wardmast.Worker.TestReport
+  alias Wardmast.Worker.Timeout
   alias Wardmast.Worker.Toolchain
 
   @default_timeout_s 600
@@ -122,23 +122,14 @@ defmodule Wardmast.Worker.TestRun do
     cmd_env = SpawnEnv.cmd_env(tmp_pairs, nil)
 
     fn command, seconds ->
-      case System.find_executable("timeout") do
-        nil ->
-          {:error, :no_timeout_binary}
-
-        timeout_bin ->
-          args = [
-            "--kill-after=#{@kill_after_s}",
-            Integer.to_string(seconds),
-            "sh",
-            "-c",
-            command
-          ]
-
-          # bd-3fnqi8: the repo-pinned Elixir/Erlang first on PATH, or no run at all.
-          with {:ok, env} <- Toolchain.env(worktree, cmd_env) do
-            ReleaseEnv.cmd(timeout_bin, args, cd: worktree, env: env, stderr_to_stdout: true)
-          end
+      # bd-3fnqi8: the repo-pinned Elixir/Erlang first on PATH, or no run at all.
+      with {:ok, env} <- Toolchain.env(worktree, cmd_env) do
+        Timeout.cmd("sh", ["-c", command], seconds,
+          kill_after: @kill_after_s,
+          cd: worktree,
+          env: env,
+          stderr_to_stdout: true
+        )
       end
     end
   end
