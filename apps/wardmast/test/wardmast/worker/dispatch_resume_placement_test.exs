@@ -198,6 +198,103 @@ defmodule Wardmast.Worker.DispatchResumePlacementTest do
     end
   end
 
+  # bd-ap53dg: a node starts from what the primary seeds it with, and a run's pushed
+  # branch is what every later pass trusts. A preserved worktree holding commits that
+  # exist on no remote (the pre-push gate stayed red, the push failed, a crash before
+  # the push) is the only copy of that work: the resume stays on the primary, where it
+  # is, and says so, instead of starting elsewhere "as if" the work were there.
+  describe "a preserved worktree holding unpushed commits" do
+    defp git!(path, args) do
+      {out, 0} =
+        System.cmd("git", ["-c", "user.name=t", "-c", "user.email=t@example.test"] ++ args,
+          cd: path,
+          stderr_to_stdout: true
+        )
+
+      out
+    end
+
+    defp commit!(path, file) do
+      File.write!(Path.join(path, file), "work\n")
+      git!(path, ["add", file])
+      git!(path, ["commit", "-m", "work #{file}"])
+    end
+
+    test "a briefing resume stays on the primary (the branch is absent on origin)" do
+      %{task: task, first: first} = parked!(workspace!("prefer_remote"))
+      commit!(first.worktree_path, "one.txt")
+      commit!(first.worktree_path, "two.txt")
+
+      assert {:ok, %{worker_pid: pid} = result} = Dispatch.resume(task.id, resume_opts([]))
+
+      assert_receive {:spawned, nil}
+      refute_received {:spawned, _}
+      assert registry_node(pid) == nil
+      assert result.node_id == nil
+      assert result.unpushed_commits == 2
+
+      assert %{count: 2, commits: [%{subject: "work two.txt"}, _]} =
+               Wardmast.Worker.UnpushedWork.for_task(task.id)
+
+      assert Placement.reservations() == []
+    end
+
+    test "a session resume stays on the primary" do
+      %{task: task, first: first} = parked!(workspace!("prefer_remote"))
+      commit!(first.worktree_path, "one.txt")
+
+      assert {:ok, %{worker_pid: pid}} = Dispatch.resume_session(task.id, resume_opts([]))
+
+      assert_receive {:spawned, nil}
+      assert registry_node(pid) == nil
+    end
+
+    test "so does an automatic resume; a remote_only workspace's is held by the primary's cap" do
+      %{task: task, first: first} = parked!(workspace!("prefer_remote"))
+      commit!(first.worktree_path, "one.txt")
+
+      assert {:ok, %{worker_pid: pid}} =
+               Dispatch.resume_session(task.id, resume_opts(resume_origin: :automatic))
+
+      assert_receive {:spawned, nil}
+      assert registry_node(pid) == nil
+
+      %{task: held, first: held_first} = parked!(workspace!("remote_only"), "remote only")
+      commit!(held_first.worktree_path, "one.txt")
+
+      # The primary's cap (1, held by the first resume) is the gate now: the refusal says
+      # why the run is not going to a node, and nothing was spawned remotely.
+      assert {:error, {:no_node_capacity, info}} = Dispatch.resume(held.id, resume_opts([]))
+      assert info.reason == {:local_only, :unpushed_commits}
+      assert info.phrase =~ "exist on no remote"
+      refute_received {:spawned, _}
+    end
+
+    test "ahead of origin/<branch> counts too, and once pushed the resume is placed" do
+      %{task: task, first: first} = parked!(workspace!("prefer_remote"))
+      path = first.worktree_path
+      commit!(path, "one.txt")
+      git!(path, ["push", "origin", "HEAD"])
+      commit!(path, "two.txt")
+
+      assert {:ok, 1} = Wardmast.Worker.Worktree.unpushed_commits(path)
+      assert {:ok, %{worker_pid: pid}} = Dispatch.resume(task.id, resume_opts([]))
+      assert_receive {:spawned, nil}
+      assert registry_node(pid) == nil
+
+      git!(path, ["push", "origin", "HEAD"])
+      assert {:ok, 0} = Wardmast.Worker.Worktree.unpushed_commits(path)
+      :ok = Worker.fail(pid, :review_gate_rejected)
+
+      assert {:ok, %{worker_pid: pid2} = result} = Dispatch.resume(task.id, resume_opts([]))
+      assert_receive {:spawned, %{id: "n-resume"}}
+      assert registry_node(pid2) == "n-resume"
+      assert result.node_id == "n-resume"
+      assert result.unpushed_commits == 0
+      assert Wardmast.Worker.UnpushedWork.for_task(task.id) == nil
+    end
+  end
+
   describe "worker.placement: local_only (the default)" do
     test "a resume stays on the primary" do
       %{task: task} = parked!(workspace!("local_only"))

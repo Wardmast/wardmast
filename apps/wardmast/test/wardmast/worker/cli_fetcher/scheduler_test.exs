@@ -18,14 +18,26 @@ defmodule Wardmast.Worker.CliFetcher.SchedulerTest do
       Settings.set_worker_cli_set_hold(nil)
     end)
 
+    # agy (bd-2esasx) is a code pin with its own archive URL and SHA-512.
+    agy_archive = Fixtures.tgz([{"antigravity", "AGY-ELF", 0o755}])
+    agy_path = "/antigravity-public/agy/cli_linux_x64.tar.gz"
+
     fetch_opts =
       Fixtures.base_opts(Path.join(ctx.tmp_dir, "cli-cache"),
         work_dir: ctx.tmp_dir,
-        arb_version: "1.2.3"
+        arb_version: "1.2.3",
+        agy_releases: %{
+          "1.5.9" => %{
+            "linux-x64" =>
+              {"https://storage.test" <> agy_path,
+               Base.encode16(:crypto.hash(:sha512, agy_archive), case: :lower)}
+          }
+        }
       )
 
     routes =
       Fixtures.claude_routes(["2.1.308", "2.1.310"])
+      |> Map.put(agy_path, {200, "application/gzip", agy_archive})
       |> Map.merge(Fixtures.codex_routes(["0.164.0"]))
       |> Map.merge(Fixtures.arb_routes("1.2.3"))
 
@@ -58,9 +70,14 @@ defmodule Wardmast.Worker.CliFetcher.SchedulerTest do
     report = Scheduler.run_now(pid)
     assert report.bump["claude"] == {:bumped, "2.1.308", "2.1.310"}
     assert report.bump["codex"] == {:current, "0.164.0"}
-    assert report.ensured == %{"claude" => :ok, "codex" => :ok, "arb" => :ok}
+    assert report.ensured == %{"claude" => :ok, "codex" => :ok, "agy" => :ok, "arb" => :ok}
 
-    for {name, version} <- [{"claude", "2.1.310"}, {"codex", "0.164.0"}, {"arb", "1.2.3"}] do
+    for {name, version} <- [
+          {"claude", "2.1.310"},
+          {"codex", "0.164.0"},
+          {"agy", "1.5.9"},
+          {"arb", "1.2.3"}
+        ] do
       assert {:ok, _} = Cache.lookup(name, version, ctx.fetch_opts)
     end
 
@@ -81,9 +98,19 @@ defmodule Wardmast.Worker.CliFetcher.SchedulerTest do
     assert_receive {:DOWN, ^ref, :process, ^task, _}, 5_000
     _ = :sys.get_state(pid)
 
-    assert Scheduler.status(pid).ensured == %{"claude" => :ok, "codex" => :ok, "arb" => :ok}
+    assert Scheduler.status(pid).ensured == %{
+             "claude" => :ok,
+             "codex" => :ok,
+             "agy" => :ok,
+             "arb" => :ok
+           }
 
-    for {name, version} <- [{"claude", "2.1.308"}, {"codex", "0.164.0"}, {"arb", "1.2.3"}] do
+    for {name, version} <- [
+          {"claude", "2.1.308"},
+          {"codex", "0.164.0"},
+          {"agy", "1.5.9"},
+          {"arb", "1.2.3"}
+        ] do
       assert {:ok, _} = Cache.lookup(name, version, ctx.fetch_opts)
     end
 

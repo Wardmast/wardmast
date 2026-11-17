@@ -1019,10 +1019,32 @@ defmodule Wardmast.Worker.Image.PublisherTest do
       assert cf =~ ~r/^FROM docker\.io\/library\/debian:trixie-slim@sha256:d{64}$/m
       assert cf =~ "ADD release.tar.gz /opt/"
       assert cf =~ "USER 10001"
-      assert cf =~ ~s(ENTRYPOINT ["/opt/arbiter/bin/wardmast", "start"])
+      assert cf =~ ~s(ENTRYPOINT ["/opt/wardmast/bin/wardmast", "start"])
       # K14: the NetworkPolicy canary falls back to this image before any worker image is
       # published, and its probes (and the netpol gate) need `socat` and `sh`.
       assert cf =~ ~r/apt-get install [^\n]*\bsocat\b/
+    end
+
+    @tag :tmp_dir
+    test "ENTRYPOINT exists in the real release tarball once ADDed to /opt/",
+         %{tmp_dir: home} do
+      dir = Path.join([home, "releases", "local-1"])
+      File.mkdir_p!(Path.join(dir, "bin"))
+      File.write!(Path.join(dir, "bin/wardmast"), "#!/bin/sh\n")
+      File.ln_s!(dir, Path.join(home, "current"))
+      assert {:ok, art} = Wardmast.Nodes.Agent.artifact(home)
+
+      {:ok, entries} = :erl_tar.table(to_charlist(art.path), [:compressed])
+      listed = Enum.map(entries, &to_string/1)
+
+      [_, entrypoint] =
+        Regex.run(
+          ~r/^ENTRYPOINT \["([^"]+)"/m,
+          Wardmast.Worker.Image.Publisher.Pipeline.controller_containerfile()
+        )
+
+      assert String.starts_with?(entrypoint, "/opt/")
+      assert Path.relative_to(entrypoint, "/opt") in listed
     end
 
     test "no retained release is an error, not a crash", %{opts: opts} do

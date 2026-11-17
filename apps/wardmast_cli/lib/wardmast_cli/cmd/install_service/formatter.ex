@@ -4,9 +4,10 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
   """
 
   alias WardmastCli.Client
-  alias WardmastCli.Cmd.InstallService.{Systemctl, Unit}
+  alias WardmastCli.Cmd.InstallService.Unit
   alias WardmastCli.Output
   alias WardmastCli.SecretInventory
+  alias WardmastCli.Supervisor
 
   def emit_installed(:json, scope, path, root, linger, secrets, log_paths) do
     {env_path, captured} =
@@ -25,8 +26,8 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
       env_file: env_path,
       secrets_captured: captured,
       secrets_at_rest: at_rest_report(env_path),
-      status_cmd: Systemctl.status_cmd(scope),
-      logs_cmd: Systemctl.logs_cmd(scope),
+      status_cmd: Supervisor.impl().status_cmd(scope),
+      logs_cmd: Supervisor.impl().logs_cmd(scope),
       base_url: Client.base_url(),
       ok: true
     }
@@ -56,8 +57,8 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
     IO.puts("")
     IO.puts(linger_note(scope, linger))
     IO.puts("Check it with:")
-    IO.puts("  #{Systemctl.status_cmd(scope)}")
-    IO.puts("  #{Systemctl.logs_cmd(scope)}")
+    IO.puts("  #{Supervisor.impl().status_cmd(scope)}")
+    IO.puts("  #{Supervisor.impl().logs_cmd(scope)}")
 
     if log_paths do
       {config_path, state_file} = log_paths

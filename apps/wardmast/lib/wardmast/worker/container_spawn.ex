@@ -216,9 +216,14 @@ defmodule Wardmast.Worker.ContainerSpawn do
 
   @doc "The path of `provider`'s CLI inside the container."
   @spec provider_path(String.t() | atom()) :: String.t()
-  def provider_path(provider), do: @cli_dir <> "/" <> provider_name(provider)
+  def provider_path(provider), do: @cli_dir <> "/" <> CliSet.provider_cli(provider_name(provider))
 
   defp provider_name(provider) when provider in [:codex, "codex"], do: "codex"
+  # bd-2esasx: agy's provider is `gemini`; it is named here so the image-label preflight
+  # and `Sandbox.module/2` see it rather than a `claude` it is not.
+  defp provider_name(provider) when provider in [:gemini, "gemini", :antigravity, "antigravity"],
+    do: "gemini"
+
   defp provider_name(_provider), do: "claude"
 
   @doc "Whether `policy` asks for the podman backend."
@@ -660,7 +665,7 @@ defmodule Wardmast.Worker.ContainerSpawn do
   # SI3: the provider CLI's version as the image's `arbiter.cli.<name>.version`
   # label carries it (the label is `CliSet.labels/1` of this very set).
   defp cli_version(set, provider) do
-    label = "arbiter.cli.#{provider}.version"
+    label = "arbiter.cli.#{CliSet.provider_cli(provider)}.version"
     Enum.find_value(CliSet.labels(set), fn {key, value} -> key == label && value end)
   end
 
@@ -691,8 +696,10 @@ defmodule Wardmast.Worker.ContainerSpawn do
   # An empty or unpinned cache is an install state, not a bug: say what it is and
   # how to fill it, beside the `{:cli_not_cached, provider}` the caller gets.
   defp require_cached(set, provider, opts) do
-    with {:error, _} = error <- CliSet.require_cli(set, provider) do
-      Logger.error("ContainerSpawn: " <> CliSet.not_cached_message(provider, opts))
+    cli = CliSet.provider_cli(provider)
+
+    with {:error, _} = error <- CliSet.require_cli(set, cli) do
+      Logger.error("ContainerSpawn: " <> CliSet.not_cached_message(cli, opts))
       error
     end
   end

@@ -82,6 +82,48 @@ defmodule WardmastCli.Cmd.WorkerTest do
       refute out =~ "Pre-push"
     end
 
+    # bd-ap53dg: the commits a preserved worktree holds that no remote has.
+    test "lists the unpushed commits of the ticket's preserved worktree" do
+      stub_get("/api/workers/bd-unp", %{
+        "task_id" => "bd-unp",
+        "kind" => "implement",
+        "state" => "failed",
+        "current_step" => "implement",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "output_lines" => [],
+        "unpushed" => %{
+          "path" => "/wt/chore-1368",
+          "count" => 3,
+          "commits" => [
+            %{"sha" => "abc1234", "subject" => "rename modules"},
+            %{"sha" => "def5678", "subject" => "rename apps"}
+          ]
+        }
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["show", "bd-unp"]) end)
+      assert out =~ "Unpushed commits (3) in /wt/chore-1368"
+      assert out =~ "abc1234  rename modules"
+      assert out =~ "… 1 more"
+    end
+
+    test "says nothing about unpushed commits when there are none" do
+      stub_get("/api/workers/bd-none", %{
+        "task_id" => "bd-none",
+        "kind" => "implement",
+        "state" => "working",
+        "current_step" => "implement",
+        "repo" => "test/repo",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "output_lines" => [],
+        "unpushed" => nil
+      })
+
+      {out, _err, 0} = capture(fn -> Worker.run(["show", "bd-none"]) end)
+      refute out =~ "Unpushed"
+    end
+
     test "shows the image, CLI set and harness version a container run ran in (SI3)" do
       stub_get("/api/workers/bd-prov", %{
         "task_id" => "bd-prov",
