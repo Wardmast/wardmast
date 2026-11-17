@@ -14,6 +14,9 @@ defmodule WardmastWeb.PreviewHook do
       preview, kept live; handles `"preview_stop"` with a `task_id` value.
       Render with `WardmastWeb.PreviewPanel.preview_list/1`.
 
+  The state is read once the socket is connected (the first, static render
+  shows nothing), and re-read on every preview change.
+
   Starting runs off the LiveView process (a checkout can take seconds), then
   reports back; the row's own transitions (starting → running / failed) arrive
   over `Wardmast.Preview.topic/0`.
@@ -33,7 +36,7 @@ defmodule WardmastWeb.PreviewHook do
       |> assign(:preview_task_id, task_id)
       |> assign(:preview_busy, false)
       |> assign(:preview_error, nil)
-      |> assign(:preview, load(task_id))
+      |> assign(:preview, if(connected?(socket), do: load(task_id)))
       |> attach_hook(:preview_events, :handle_event, &ticket_event/3)
       |> attach_hook(:preview_info, :handle_info, &ticket_info/2)
 
@@ -45,7 +48,7 @@ defmodule WardmastWeb.PreviewHook do
 
     socket =
       socket
-      |> assign(:previews, Preview.list())
+      |> assign(:previews, if(connected?(socket), do: Preview.list(), else: []))
       |> attach_hook(:preview_list_events, :handle_event, &list_event/3)
       |> attach_hook(:preview_list_info, :handle_info, &list_info/2)
 
