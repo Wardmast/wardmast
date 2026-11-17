@@ -7,7 +7,9 @@
 #
 # `mix test <path>` from the umbrella root ignores the path and runs everything,
 # so the files are grouped by `apps/<app>/` and run as `cd apps/<app> && mix test
-# <paths relative to the app>`. No arguments (nothing mapped from the diff) is a
+# <paths relative to the app>`. Every app shares the umbrella `_build`, and must also
+# share the root config tree (apps/wardmast_cli/config imports it): a differing
+# compile-env makes Mix rebuild ash et al. on each app switch (bd-2n4k1a). No arguments (nothing mapped from the diff) is a
 # green no-op. Exits non-zero if any app's run failed, after running them all.
 set -u
 
