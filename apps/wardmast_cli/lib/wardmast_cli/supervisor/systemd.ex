@@ -62,6 +62,9 @@ defmodule WardmastCli.Supervisor.Systemd do
   end
 
   @impl true
+  def unit_file_name, do: @unit
+
+  @impl true
   def stop_service do
     case run_cmd("systemctl", ["--user", "stop", @unit], stderr_to_stdout: true) do
       {_out, 0} -> :ok
