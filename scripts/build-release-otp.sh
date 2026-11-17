@@ -21,6 +21,12 @@
 # `scripts/check-release-shared-libs.sh` is what enforces the outcome on the
 # packaged tarball; this script runs the same check against the OTP it
 # installs, so a regression fails here, closest to its cause.
+#
+# macOS (bd-6uq02m): the same recipe runs on an Apple Silicon runner for the
+# darwin-arm64 tarball. Differences: OpenSSL's `darwin64-arm64-cc` target, a
+# pinned MACOSX_DEPLOYMENT_TARGET, `shasum` for `sha256sum`, and
+# `scripts/check-release-dylibs.sh` (otool) for the readelf-based guard.
+# glibc does not apply there.
 set -euo pipefail
 
 # Keep OTP_VERSION in step with the OTP line used in CI (.github/workflows/ci.yml).
@@ -45,14 +51,24 @@ Usage: scripts/build-release-otp.sh [--prefix DIR] [--src-cache DIR]
   --print-versions Print "OTP_VERSION=... OPENSSL_VERSION=..." and exit — used
                    as the CI cache key.
 
-Needs a C/C++ toolchain, make, perl (with IPC::Cmd), ncurses-devel and curl.
+  --print-config   Print the platform-derived build settings
+                   (OPENSSL_TARGET, DEPLOYMENT_TARGET, SHA256_TOOL), one
+                   KEY=value per line, and exit. ARB_OTP_UNAME_S /
+                   ARB_OTP_UNAME_M override `uname -s` / `uname -m` (tests).
+
+Needs a C/C++ toolchain, make, perl (with IPC::Cmd), ncurses-devel and curl
+(on macOS: the Xcode command line tools, perl and curl).
 On success `DIR/bin/erl` is a working OTP whose crypto NIF needs no
 libcrypto from the host.
+
+macOS only: MACOSX_DEPLOYMENT_TARGET overrides the default minimum macOS
+version OTP and OpenSSL are built for.
 USAGE
 }
 
 PREFIX="/opt/otp"
 SRC_CACHE=""
+PRINT_CONFIG=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -63,6 +79,10 @@ while [ $# -gt 0 ]; do
     --print-versions)
       echo "OTP_VERSION=${OTP_VERSION} OPENSSL_VERSION=${OPENSSL_VERSION}"
       exit 0
+      ;;
+    --print-config)
+      PRINT_CONFIG=1
+      shift
       ;;
     --prefix)
       PREFIX="${2:?--prefix needs a directory}"
@@ -79,6 +99,41 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+# Platform. ARB_OTP_UNAME_* exist so tests can exercise both branches anywhere.
+UNAME_S="${ARB_OTP_UNAME_S:-$(uname -s)}"
+UNAME_M="${ARB_OTP_UNAME_M:-$(uname -m)}"
+# Lowest macOS the published darwin tarball runs on. Exported below so that
+# clang (OpenSSL, OTP) and rustc (the mdex NIF) all agree on it.
+DEFAULT_DEPLOYMENT_TARGET="13.0"
+DEPLOYMENT_TARGET=""
+
+case "${UNAME_S}/${UNAME_M}" in
+  Linux/x86_64)
+    OPENSSL_TARGET="linux-x86_64"
+    SHA256_TOOL="sha256sum"
+    ;;
+  Darwin/arm64)
+    OPENSSL_TARGET="darwin64-arm64-cc"
+    SHA256_TOOL="shasum -a 256"
+    DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-$DEFAULT_DEPLOYMENT_TARGET}"
+    ;;
+  *)
+    echo "error: unsupported platform: ${UNAME_S}/${UNAME_M} (supported: Linux/x86_64, Darwin/arm64)" >&2
+    exit 1
+    ;;
+esac
+
+if [ "$PRINT_CONFIG" -eq 1 ]; then
+  echo "OPENSSL_TARGET=${OPENSSL_TARGET}"
+  echo "DEPLOYMENT_TARGET=${DEPLOYMENT_TARGET}"
+  echo "SHA256_TOOL=${SHA256_TOOL}"
+  exit 0
+fi
+
+if [ -n "$DEPLOYMENT_TARGET" ]; then
+  export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
+fi
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 JOBS=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
@@ -101,7 +156,9 @@ fetch() {
     mv "$dest.part" "$dest"
   fi
 
-  if ! echo "$sha  $dest" | sha256sum -c --quiet - >&2; then
+  # Both sha256sum and `shasum -a 256` verify "<hash>  <file>" lines via -c.
+  # shellcheck disable=SC2086 # SHA256_TOOL is a command plus fixed arguments
+  if ! echo "$sha  $dest" | $SHA256_TOOL -c - >&2; then
     echo "error: checksum mismatch for $name (expected $sha)" >&2
     exit 1
   fi
@@ -131,7 +188,7 @@ tar -xzf "$ssl_tarball" -C "$WORK_DIR"
   #            file is ignored, so point it somewhere hosts don't populate.
   #            Erlang's ssl verifies peers via public_key:cacerts_get/0, not
   #            through this directory.
-  ./Configure linux-x86_64 \
+  ./Configure "$OPENSSL_TARGET" \
     --prefix="$SSL_PREFIX" \
     --libdir=lib \
     --openssldir=/usr/local/ssl \
@@ -166,5 +223,8 @@ echo "==> Verifying ${PREFIX}"
   io:format("crypto OK, linked against ~s~n", [Lib]),
   halt().'
 
-# The same NEEDED-allowlist check the release tarball goes through.
-bash "$SCRIPT_DIR/check-release-shared-libs.sh" "$PREFIX/lib/erlang"
+# The same linked-library allowlist check the release tarball goes through.
+case "$UNAME_S" in
+  Darwin) bash "$SCRIPT_DIR/check-release-dylibs.sh" "$PREFIX/lib/erlang" ;;
+  *) bash "$SCRIPT_DIR/check-release-shared-libs.sh" "$PREFIX/lib/erlang" ;;
+esac
