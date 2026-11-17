@@ -227,16 +227,18 @@ defmodule WardmastCli.Cmd.Restart do
   defp probe_systemd, do: Supervisor.impl().service_state()
 
   defp refuse_if_unit_file_on_disk! do
+    unit_file = Supervisor.impl().unit_file_name()
+
     case Enum.find(
            Supervisor.impl().unit_dirs(),
-           &File.exists?(Path.join(&1, "wardmast.service"))
+           &File.exists?(Path.join(&1, unit_file))
          ) do
       nil ->
         :ok
 
       dir ->
         Output.die(
-          "#{Path.join(dir, "wardmast.service")} exists, but systemctl does not manage it from here",
+          "#{Path.join(dir, unit_file)} exists, but systemctl does not manage it from here",
           "Refusing to signal whatever listens on the API port: the unit owns the server. " <>
             "Use `systemctl --user restart wardmast.service` from a login shell."
         )
