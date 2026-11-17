@@ -4,8 +4,9 @@ defmodule WardmastCli.Supervisor.Launchd do
   one of only two modules in the CLI that spawn a service-manager executable
   (here `launchctl`).
 
-  Phase 1 manages one per-user LaunchAgent (`com.wardmast.server`, in the
-  `gui/<uid>` domain) that runs a dev checkout via an env-sourcing wrapper
+  It manages one per-user LaunchAgent (`com.wardmast.server`, in the
+  `gui/<uid>` domain) that runs a dev checkout or a release install
+  (`<data-home>/current/bin/wardmast start`) via an env-sourcing wrapper
   (see `Launchd.Plist`). It sits under the same restart/health state machine
   as systemd, with these mappings:
 
@@ -176,10 +177,13 @@ defmodule WardmastCli.Supervisor.Launchd do
   # ---- install / uninstall (arb install service) -----------------------------
 
   @doc """
-  Write the wrapper script and the plist for a dev checkout at `root`.
-  Returns the plist path. Both are regenerated on every install.
+  Write the wrapper script and the plist: for a dev checkout at `root`, or —
+  with `root` `nil` — for a release install under `arbiter_home`. Returns the
+  plist path. Both are regenerated on every install.
   """
-  @spec write_service_files(root :: Path.t(), arbiter_home :: Path.t(), [{String.t(), String.t()}]) ::
+  @spec write_service_files(root :: Path.t() | nil, arbiter_home :: Path.t(), [
+          {String.t(), String.t()}
+        ]) ::
           Path.t()
   def write_service_files(root, arbiter_home, env) do
     opts = [root: root, arbiter_home: arbiter_home, env: env]
@@ -253,6 +257,33 @@ defmodule WardmastCli.Supervisor.Launchd do
 
   @impl true
   def logs_cmd(_scope), do: "tail -f #{Plist.log_path(Unit.arbiter_home_path())}"
+
+  # ---- operator hints (restart / deploy reports) ----------------------------
+
+  @impl true
+  def manager_name, do: "launchd"
+
+  @impl true
+  def restart_cmd, do: "launchctl kickstart -k #{shell_target()}"
+
+  @impl true
+  def start_cmd, do: "launchctl kickstart #{shell_target()}"
+
+  @impl true
+  def stop_cmd, do: "launchctl bootout #{shell_target()}"
+
+  # `bootout` first (it fails harmlessly when nothing is loaded), then load the
+  # plist again, which starts the job.
+  @impl true
+  def recover_cmds do
+    [
+      stop_cmd(),
+      "launchctl bootstrap gui/$(id -u) #{plist_path()}",
+      status_cmd(:user)
+    ]
+  end
+
+  defp shell_target, do: "gui/$(id -u)/#{Plist.label()}"
 
   # ---- internals ------------------------------------------------------------
 

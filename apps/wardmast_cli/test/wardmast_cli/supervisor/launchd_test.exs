@@ -237,6 +237,25 @@ defmodule WardmastCli.Supervisor.LaunchdTest do
       assert code != 0
     end
 
+    test "operator command hints name launchctl, never systemctl" do
+      target = "gui/$(id -u)/com.wardmast.server"
+      assert Launchd.manager_name() == "launchd"
+      assert Launchd.restart_cmd() == "launchctl kickstart -k #{target}"
+      assert Launchd.start_cmd() == "launchctl kickstart #{target}"
+      assert Launchd.stop_cmd() == "launchctl bootout #{target}"
+
+      recover = Launchd.recover_cmds()
+      assert Enum.any?(recover, &(&1 =~ ~r/^launchctl bootout /))
+
+      assert Enum.any?(
+               recover,
+               &(&1 =~ ~r/^launchctl bootstrap gui\/\$\(id -u\) .*com\.wardmast\.server\.plist$/)
+             )
+
+      assert Launchd.status_cmd(:user) in recover
+      refute Enum.any?(recover, &(&1 =~ "systemctl"))
+    end
+
     test "status_cmd and logs_cmd name launchctl and the log file" do
       assert Launchd.status_cmd(:user) == "launchctl print gui/$(id -u)/com.wardmast.server"
       assert Launchd.logs_cmd(:user) =~ ~r{^tail -f .*/log/wardmast\.log$}

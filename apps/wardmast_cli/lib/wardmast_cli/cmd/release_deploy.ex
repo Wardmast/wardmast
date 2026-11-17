@@ -53,8 +53,8 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
        before the swap; a failure aborts the deploy with nothing changed.
        **Atomically swap** the `<data-home>/current` symlink to the new release
        (symlink-then-rename, so readers never observe a missing/partial link).
-    6. **Restart + health-check.** Bounce the service (via systemd when the
-       `wardmast.service` user unit is present) and poll `arb doctor` until
+    6. **Restart + health-check.** Bounce the service (via the `Supervisor` backend: systemd when the
+       `wardmast.service` user unit is present, launchd on macOS) and poll `arb doctor` until
        green. Migrations run *here*, inside the new release's own boot — see
        "Migration ordering" below.
     7. **Auto-rollback on failure.** If the stack does not come back green
@@ -156,7 +156,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
           v0.0.2/bin/wardmast
           …
 
-  The systemd unit is expected to exec `<data-home>/current/bin/wardmast start`,
+  The systemd unit / launchd plist is expected to exec `<data-home>/current/bin/wardmast start`,
   so swapping the symlink + restarting is all that's needed to change versions.
 
   ## Configuration
@@ -192,7 +192,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
     Status
   }
 
-  alias WardmastCli.{Cmd.SelfUpdate, Output, ReleaseRepo}
+  alias WardmastCli.{Cmd.SelfUpdate, Output, ReleaseRepo, Supervisor}
 
   @default_timeout_s 60
 
@@ -568,7 +568,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
         prior ->
           "\n\nExact rollback (re-point `current` at the previous release, then start):\n" <>
             "  ln -sfn #{prior} #{ctx.current_link}\n" <>
-            "  systemctl --user start wardmast.service" <> crossed_restore_note(ctx)
+            "  #{Supervisor.impl().start_cmd()}" <> crossed_restore_note(ctx)
       end
 
     skipped =

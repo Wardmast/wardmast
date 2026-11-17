@@ -94,6 +94,24 @@ defmodule WardmastCli.Supervisor do
   @doc "Shell command an operator runs to follow the service's logs, echoed in output."
   @callback logs_cmd(scope()) :: String.t()
 
+  @doc "Name of the service manager, for operator-facing messages (`\"systemd\"`, `\"launchd\"`)."
+  @callback manager_name() :: String.t()
+
+  @doc "Shell command an operator runs to restart the service."
+  @callback restart_cmd() :: String.t()
+
+  @doc "Shell command an operator runs to start the (stopped) service."
+  @callback start_cmd() :: String.t()
+
+  @doc "Shell command an operator runs to stop the service."
+  @callback stop_cmd() :: String.t()
+
+  @doc """
+  Shell commands, in order, an operator runs to recover a service whose start
+  never ran (the \"server is DOWN\" report).
+  """
+  @callback recover_cmds() :: [String.t()]
+
   @doc """
   The backend module for this host: launchd on macOS, systemd everywhere else.
   `config :wardmast_cli, :supervisor` overrides the choice.
