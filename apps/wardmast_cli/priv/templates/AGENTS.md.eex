@@ -24,7 +24,7 @@ source of truth for how this install wants you to operate.
 ## Prefer MCP over the CLI
 
 If your session has Wardmast's MCP server connected (`.mcp.json`, written by
-`arb init`), use the `mcp__arbiter__*` tools instead of shelling out to `arb`.
+`arb init`), use the `mcp__wardmast__*` tools instead of shelling out to `arb`.
 Same operations, no subprocess/parsing overhead. Fall back to the CLI only
 when a tool you need isn't exposed over MCP yet — the commands table below
 lists the MCP tool for each verb, and calls out the few that have none.
@@ -141,7 +141,7 @@ for the handful of verbs with no MCP equivalent yet (marked **—**).
 | `arb quota` | `quota_get` | Current Anthropic rate-limit/quota state |
 | `arb where` | `workspace_show` | Show which workspace is active |
 
-All `mcp__arbiter__*` tool names above are shown without their prefix for
+All `mcp__wardmast__*` tool names above are shown without their prefix for
 readability. All CLI commands accept `--json` for machine-readable output.
 The CLI talks to Phoenix at `<%= @host %>` by default (override with
 `ARB_HOST`).

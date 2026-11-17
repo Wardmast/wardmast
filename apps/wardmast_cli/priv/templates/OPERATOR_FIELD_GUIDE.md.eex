@@ -8,7 +8,7 @@ Run `arb prime` at the start of every session. Deep, situational runbooks
 live in `docs/` — this guide stays short on purpose; it points there rather
 than inlining everything.
 
-**MCP first.** Every example below shows the `mcp__arbiter__*` tool call as
+**MCP first.** Every example below shows the `mcp__wardmast__*` tool call as
 the primary form, with the `arb` CLI equivalent noted alongside it as a
 fallback for when a session has no MCP connection. Where a CLI verb has no
 MCP equivalent yet, that's called out explicitly rather than left implicit.
@@ -24,11 +24,11 @@ than describing what you should do, give them the CLI form.
 You coordinate; the fleet executes. Core loop:
 
 1. File a ticket with crisp acceptance criteria, difficulty, and priority
-   (`mcp__arbiter__ticket_create`; CLI: `arb ticket create`).
-2. Dispatch to a repo (`mcp__arbiter__worker_dispatch(task_id, repo,
+   (`mcp__wardmast__ticket_create`; CLI: `arb ticket create`).
+2. Dispatch to a repo (`mcp__wardmast__worker_dispatch(task_id, repo,
    provider: "claude")`; CLI: `arb ticket dispatch <id> [<repo>] --provider
    claude`).
-3. Monitor — `mcp__arbiter__worker_list` (CLI: `arb worker list`), `arb
+3. Monitor — `mcp__wardmast__worker_list` (CLI: `arb worker list`), `arb
    prime` (composite session briefing, CLI-only — no single MCP
    equivalent), or a persistent event-stream monitor (`docs/monitoring.md`).
    `arb worker show <task-id>` (full worker detail + output) has **no MCP
@@ -41,7 +41,7 @@ You coordinate; the fleet executes. Core loop:
    internal `monitor` component.
 4. ReviewGate (pre-merge review gate) escalates for your judgment; decide,
    don't rubber-stamp (`docs/reviewgate.md`).
-5. Merge and close the ticket (`mcp__arbiter__ticket_close`; CLI: `arb ticket
+5. Merge and close the ticket (`mcp__wardmast__ticket_close`; CLI: `arb ticket
    close`) — or let close-on-merge handle it.
 
 External comms (GitHub, Slack) stay in normal professional voice.
@@ -54,13 +54,13 @@ links to the runbook with the full story.
 - [ ] **Concurrency** — keep parallel tickets FILE-DISJOINT. Tickets that touch
       the same file (especially a CLI verb list, command-alias map, or
       router) **will collide at merge**. Serialize those tickets.
-- [ ] **Config** — use `mcp__arbiter__workspace_config_get` /
+- [ ] **Config** — use `mcp__wardmast__workspace_config_get` /
       `workspace_config_set` / `workspace_config_unset` (CLI:
       `arb config get/set/unset`) only. **Never** send partial config via
       raw API PATCH — it replaces the whole map and **silently clobbers**
       siblings (`repo_paths`, tracker, merge config).
 - [ ] **Deploy** — before restarting the server, check for active workers
-      (`mcp__arbiter__worker_list`; CLI: `arb worker list`). **Restarting
+      (`mcp__wardmast__worker_list`; CLI: `arb worker list`). **Restarting
       kills all in-flight workers and abandons their work.** See
       `docs/deploy.md`.
 - [ ] **Freshness** — worktrees are cut from a freshly-fetched base branch at
@@ -74,7 +74,7 @@ links to the runbook with the full story.
       rubber-stamp because a round ran. **Decide for yourself.**
 - [ ] **Quota vs. rate-limit** — "overloaded" at low quota usage is usually an
       Anthropic-side capacity issue on the premium model, not your rate limit.
-      Check the quota gauge first (`mcp__arbiter__quota_get`; CLI: `arb
+      Check the quota gauge first (`mcp__wardmast__quota_get`; CLI: `arb
       quota`). See `docs/quota-and-auth.md`.
 
 ## 3. Ticket Intake — Claim & Create
@@ -89,12 +89,12 @@ MCP first:
 
 ```
 # Option A: Claim an existing upstream issue
-mcp__arbiter__tracker_claim(ref: "42")
-mcp__arbiter__ticket_update(id: "<id>", difficulty: <n>)
+mcp__wardmast__tracker_claim(ref: "42")
+mcp__wardmast__ticket_update(id: "<id>", difficulty: <n>)
 
 # Option B: Create a new local ticket
-mcp__arbiter__ticket_create(title: "Fix widget crash on startup", description: "...")
-mcp__arbiter__ticket_update(id: "<id>", difficulty: <n>)
+mcp__wardmast__ticket_create(title: "Fix widget crash on startup", description: "...")
+mcp__wardmast__ticket_update(id: "<id>", difficulty: <n>)
 ```
 
 CLI fallback:
@@ -140,7 +140,7 @@ autonomous loop all stop at D4.
 - Set `target_branch` when it is not the workspace default.
 
 Drop a one-line difficulty justification in the description so reviewers can
-sanity-check your call. Both `mcp__arbiter__ticket_create` and `arb ticket
+sanity-check your call. Both `mcp__wardmast__ticket_create` and `arb ticket
 create` accept difficulty/priority inline — no follow-up update needed at
 filing time.
 
@@ -152,7 +152,7 @@ Tickets that touch the same file — especially the CLI verb list,
 command-alias map, or the router — **will collide at merge**. An
 auto-conflict-resolver may help, but do not rely on it. Serialize those
 tickets: `conflicts_with` as a mutex, plus a `depends_on` chain for order
-(`mcp__arbiter__dep_add`; CLI: `arb dep add`).
+(`mcp__wardmast__dep_add`; CLI: `arb dep add`).
 
 ## 6. Freshness
 
@@ -173,7 +173,7 @@ Workspace config is a single JSON map stored in the database.
 **NEVER** send a partial config via the raw API PATCH — it replaces the whole
 map and **silently clobbers** siblings (`repo_paths`, tracker, merge config).
 
-**Use `mcp__arbiter__workspace_config_get` / `workspace_config_set` /
+**Use `mcp__wardmast__workspace_config_get` / `workspace_config_set` /
 `workspace_config_unset` (deep-merge) — CLI fallback: `arb config
 get/set/unset`.** Never anything else.
 
@@ -182,10 +182,10 @@ get/set/unset`.** Never anything else.
 Restarting the server **kills all in-flight workers** and abandons their
 work. Before restarting or deploying:
 
-1. Check for active workers (`mcp__arbiter__worker_list`; CLI: `arb worker
+1. Check for active workers (`mcp__wardmast__worker_list`; CLI: `arb worker
    list`).
 2. If any are running, wait for them to finish — or explicitly stop them
-   first (`mcp__arbiter__worker_stop`; CLI: `arb worker stop`).
+   first (`mcp__wardmast__worker_stop`; CLI: `arb worker stop`).
 3. Never restart mid-flight as a shortcut.
 
 The full deploy runbook (release cut, `arb server deploy`, migration
@@ -200,7 +200,7 @@ itself is CLI/infra-only, no MCP equivalent.
   Read the real `git diff origin/<base>...<branch> --stat` before calling
   work "empty" or "failed".
 - Close-on-merge can miss on out-of-band merges — close the ticket manually
-  if it stalls (`mcp__arbiter__ticket_close`; CLI: `arb ticket close`).
+  if it stalls (`mcp__wardmast__ticket_close`; CLI: `arb ticket close`).
 - A server restart wipes in-memory worker registrations (idle shells vanish);
   persisted tickets survive.
 
@@ -246,7 +246,7 @@ are in `docs/quota-and-auth.md`.
 
 ## 13. Review Capability
 
-`mcp__arbiter__worker_review` (CLI: `arb worker review <task-id>`) reviews a
+`mcp__wardmast__worker_review` (CLI: `arb worker review <task-id>`) reviews a
 PR/MR tracker-side: fetches the diff and posts findings + verdict via the
 configured tracker API. The PR author needs **no** Wardmast setup.
 

@@ -266,4 +266,39 @@ defmodule Wardmast.Worker.SpawnEnvTest do
       assert Enum.sort(@ambient) -- SpawnEnv.credential_names() == []
     end
   end
+
+  describe "darwin_baseline_path/3" do
+    import ExUnit.CaptureLog
+
+    @darwin {:unix, :darwin}
+
+    test "appends missing baseline dirs on darwin" do
+      assert {"/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin:/Users/me/.local/bin", missing} =
+               SpawnEnv.darwin_baseline_path("/usr/bin:/bin", @darwin, "/Users/me")
+
+      assert missing == ["/opt/homebrew/bin", "/usr/local/bin", "/Users/me/.local/bin"]
+    end
+
+    test "leaves present dirs alone" do
+      path = "/usr/local/bin:/opt/homebrew/bin:/Users/me/.local/bin"
+      assert {^path, []} = SpawnEnv.darwin_baseline_path(path, @darwin, "/Users/me")
+    end
+
+    test "is a no-op on linux" do
+      assert {"/usr/bin", []} = SpawnEnv.darwin_baseline_path("/usr/bin", {:unix, :linux}, "/h")
+    end
+
+    @tag capture_log: false
+    test "port_env/2 warns when it appends on darwin" do
+      log =
+        capture_log(fn ->
+          pairs = SpawnEnv.port_env([{"PATH", "/usr/bin"}], "claude", @darwin)
+
+          assert {"PATH", "/usr/bin:/opt/homebrew/bin:/usr/local/bin" <> _} =
+                   List.keyfind(pairs, "PATH", 0)
+        end)
+
+      assert log =~ "darwin baseline"
+    end
+  end
 end

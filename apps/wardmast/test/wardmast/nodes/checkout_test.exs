@@ -430,7 +430,7 @@ defmodule Wardmast.Nodes.CheckoutTest do
 
       File.write!(
         Path.join(c.home, ".mcp.json"),
-        ~s({"mcpServers":{"arbiter":{"headers":{"Authorization":"Bearer #{token}"}}}})
+        ~s({"mcpServers":{"wardmast":{"headers":{"Authorization":"Bearer #{token}"}}}})
       )
 
       File.mkdir_p!(Path.join(c.home, "deps/dep"))

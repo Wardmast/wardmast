@@ -11,7 +11,7 @@ defmodule Wardmast.MCP.AgentConfig.Grok do
 
   Remote servers use grok's `url` + `headers` inline table:
 
-      [mcp_servers.arbiter]
+      [mcp_servers.wardmast]
       url = "http://127.0.0.1:4848/mcp"
       headers = { "Authorization" = "Bearer <scope-token>" }
 
@@ -59,13 +59,13 @@ defmodule Wardmast.MCP.AgentConfig.Grok do
 
   @doc """
   The `[mcp_servers.<name>]` table as a string. Requires `:mcp_url` and
-  `:scope_token`; `:server_name` defaults to `"arbiter"`.
+  `:scope_token`; `:server_name` defaults to `"wardmast"`.
   """
   @spec config_toml(keyword()) :: String.t()
   def config_toml(opts) do
     url = Keyword.fetch!(opts, :mcp_url)
     token = Keyword.fetch!(opts, :scope_token)
-    name = Keyword.get(opts, :server_name, "arbiter")
+    name = Keyword.get(opts, :server_name, "wardmast")
 
     """
     [mcp_servers.#{name}]

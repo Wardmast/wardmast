@@ -27,7 +27,7 @@ defmodule Wardmast.Agents.Grok.StreamTest do
     end
 
     test "leaves unknown (MCP) tool names alone" do
-      assert Stream.tool_name("mcp__arbiter__ticket_show") == "mcp__arbiter__ticket_show"
+      assert Stream.tool_name("mcp__wardmast__ticket_show") == "mcp__wardmast__ticket_show"
     end
   end
 

@@ -336,7 +336,7 @@ defmodule Wardmast.Worker.ContainerSpawnRemoteSpecTest do
         AgentConfig.Claude.write_mcp_config(worktree,
           mcp_url: "http://127.0.0.1:4848/mcp",
           scope_token: "scope-token-xyz",
-          server_name: "arbiter"
+          server_name: "wardmast"
         )
 
       worktree
@@ -352,7 +352,7 @@ defmodule Wardmast.Worker.ContainerSpawnRemoteSpecTest do
       assert secrets == %{"ARBITER_MCP_TOKEN" => "scope-token-xyz"}
       refute files[".mcp.json"] =~ "scope-token-xyz"
 
-      assert %{"mcpServers" => %{"arbiter" => %{"headers" => %{"Authorization" => auth}}}} =
+      assert %{"mcpServers" => %{"wardmast" => %{"headers" => %{"Authorization" => auth}}}} =
                Jason.decode!(files[".mcp.json"])
 
       assert auth == "Bearer ${ARBITER_MCP_TOKEN}"

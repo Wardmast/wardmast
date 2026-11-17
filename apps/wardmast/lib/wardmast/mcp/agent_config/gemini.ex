@@ -38,10 +38,10 @@ defmodule Wardmast.MCP.AgentConfig.Gemini do
       python3 -m http.server --bind 127.0.0.1 47821 &   # or any request logger
 
       # 2. the candidate worktree-local path, with the manifest agy documents
-      mkdir -p .agents/plugins/arbiter
-      echo '{"name":"arbiter"}' > .agents/plugins/arbiter/plugin.json
-      cat > .agents/plugins/arbiter/mcp_config.json <<'JSON'
-      {"mcpServers":{"arbiter":{"serverUrl":"http://127.0.0.1:47821/mcp",
+      mkdir -p .agents/plugins/wardmast
+      echo '{"name":"wardmast"}' > .agents/plugins/wardmast/plugin.json
+      cat > .agents/plugins/wardmast/mcp_config.json <<'JSON'
+      {"mcpServers":{"wardmast":{"serverUrl":"http://127.0.0.1:47821/mcp",
         "headers":{"Authorization":"Bearer probe"},"enabledTools":["probe_ping"]}}}
       JSON
 
@@ -50,7 +50,7 @@ defmodule Wardmast.MCP.AgentConfig.Gemini do
 
   Results:
 
-    * `.agents/plugins/arbiter/mcp_config.json` (+ `plugin.json`) — **zero**
+    * `.agents/plugins/wardmast/mcp_config.json` (+ `plugin.json`) — **zero**
       requests reached the endpoint; agy reported no such tool.
     * adding an `.agents/plugins.json` manifest (`{"entries":[{"path":
       ".agents/plugins"}]}`), the documented explicit-registration escape
@@ -93,14 +93,14 @@ defmodule Wardmast.MCP.AgentConfig.Gemini do
   Upstream `gemini` (`<worktree>/.gemini/settings.json`) — `httpUrl`,
   `includeTools`:
 
-      {"mcpServers": {"arbiter": {
+      {"mcpServers": {"wardmast": {
         "httpUrl": "http://127.0.0.1:4848/mcp",
         "headers": {"Authorization": "Bearer <scope-token>"},
         "includeTools": ["ticket_show", ...]}}}
 
   `agy` (`mcp_config.json`) — `serverUrl`, `enabledTools`:
 
-      {"mcpServers": {"arbiter": {
+      {"mcpServers": {"wardmast": {
         "serverUrl": "http://127.0.0.1:4848/mcp",
         "headers": {"Authorization": "Bearer <scope-token>"},
         "enabledTools": ["ticket_show", ...]}}}
@@ -211,7 +211,7 @@ defmodule Wardmast.MCP.AgentConfig.Gemini do
   (string-keyed) map. Exposed for tests / inspection.
 
   Requires `:mcp_url` and `:scope_token`. Optional:
-  - `:server_name` — defaults to `"arbiter"`.
+  - `:server_name` — defaults to `"wardmast"`.
   - `:include_tools` — a list of tool names to allowlist, or `:worker` (the
     default) to use the built-in worker-tier list, or `nil` to omit the key
     entirely (coordinator scope where all tools are permitted).
@@ -272,7 +272,7 @@ defmodule Wardmast.MCP.AgentConfig.Gemini do
   defp server_map(opts, url_key, tools_key) do
     url = Keyword.fetch!(opts, :mcp_url)
     token = Keyword.fetch!(opts, :scope_token)
-    name = Keyword.get(opts, :server_name, "arbiter")
+    name = Keyword.get(opts, :server_name, "wardmast")
 
     server =
       %{

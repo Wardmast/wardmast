@@ -12,7 +12,7 @@ defmodule Wardmast.Worker.MCPConfigSpawnTest do
       (its 4h worker lease long expired).
     * Claude Code applies the *main checkout's* `.claude/settings.local.json`
       to every git worktree of the repo. A `disabledMcpjsonServers:
-      ["arbiter"]` there drops the worktree's auto-loaded `.mcp.json` without
+      ["wardmast"]` there drops the worktree's auto-loaded `.mcp.json` without
       a word, which hit every worker in that workspace. Servers passed with
       `--mcp-config` are not subject to that list.
 
@@ -211,14 +211,14 @@ defmodule Wardmast.Worker.MCPConfigSpawnTest do
   end
 
   defp assert_valid_worker_token!(config_path, task_id) do
-    %{"mcpServers" => %{"arbiter" => %{"headers" => %{"Authorization" => "Bearer " <> token}}}} =
+    %{"mcpServers" => %{"wardmast" => %{"headers" => %{"Authorization" => "Bearer " <> token}}}} =
       config_path |> File.read!() |> Jason.decode!()
 
     assert {:ok, %Scope{tier: :worker, task_id: ^task_id}} = Scope.from_token(token)
   end
 
   defp assert_mcp_token!(config_path, token) do
-    %{"mcpServers" => %{"arbiter" => %{"headers" => %{"Authorization" => "Bearer " <> written}}}} =
+    %{"mcpServers" => %{"wardmast" => %{"headers" => %{"Authorization" => "Bearer " <> written}}}} =
       config_path |> File.read!() |> Jason.decode!()
 
     assert written == token

@@ -314,18 +314,19 @@ defmodule Wardmast.Agents.Claude.ConfigDir.InteractiveTest do
                Interactive.ensure(config,
                  cwd: Path.join(tmp, "workspace"),
                  source_dir: nil,
-                 mcp_servers: ["arbiter"]
+                 mcp_servers: ["wardmast"]
                )
 
-      assert settings!(config)["enabledMcpjsonServers"] == ["arbiter"]
+      assert settings!(config)["enabledMcpjsonServers"] == ["wardmast"]
     end
 
     test "pre-approves it in .claude.json's project entry too", %{config: config, tmp: tmp} do
       cwd = Path.join(tmp, "workspace")
 
-      assert :ok = Interactive.ensure(config, cwd: cwd, source_dir: nil, mcp_servers: ["arbiter"])
+      assert :ok =
+               Interactive.ensure(config, cwd: cwd, source_dir: nil, mcp_servers: ["wardmast"])
 
-      assert claude_json!(config)["projects"][cwd]["enabledMcpjsonServers"] == ["arbiter"]
+      assert claude_json!(config)["projects"][cwd]["enabledMcpjsonServers"] == ["wardmast"]
     end
 
     test "omits the pre-approval entirely when the session has no MCP server", %{
@@ -408,7 +409,7 @@ defmodule Wardmast.Agents.Claude.ConfigDir.InteractiveTest do
                Interactive.ensure(config,
                  cwd: Path.join(tmp, "workspace"),
                  source_dir: nil,
-                 mcp_servers: ["arbiter"]
+                 mcp_servers: ["wardmast"]
                )
 
       settings = settings!(config)

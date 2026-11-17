@@ -146,7 +146,7 @@ defmodule Wardmast.NodeAgent.RunTest do
     test "the injected agent config is written into the worktree mount before the container starts",
          %{opts: opts, home: home, stub: stub} do
       body =
-        ~s({"mcpServers":{"arbiter":{"headers":{"Authorization":"Bearer ${ARBITER_MCP_TOKEN}"}}}})
+        ~s({"mcpServers":{"wardmast":{"headers":{"Authorization":"Bearer ${ARBITER_MCP_TOKEN}"}}}})
 
       spec =
         spec("rwf", %{

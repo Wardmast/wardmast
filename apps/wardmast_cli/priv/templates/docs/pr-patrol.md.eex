@@ -16,7 +16,7 @@ follow-up tickets and idle shells the first time, not a slow trickle.
 ## Scope it to specific authors
 
 `pr_patrol.author_logins` limits patrol to listed authors' PRs; leaving it
-unset patrols everyone's. Set it with `mcp__arbiter__workspace_config_set`
+unset patrols everyone's. Set it with `mcp__wardmast__workspace_config_set`
 (CLI: `arb config set`) — never a raw API PATCH — see the Config Safety
 pitfall in the field guide.
 
