@@ -406,6 +406,8 @@ defmodule WardmastWeb.Router do
     get("/server/agy_models", ServerController, :agy_models)
     get("/server/egress_jail", ServerController, :egress_jail)
     get("/server/guardrails", ServerController, :guardrails)
+    get("/server/private_clone_records", ServerController, :private_clone_records)
+    post("/server/private_clone_records/retire", ServerController, :retire_private_clone_records)
     get("/server/claude_credentials", ServerController, :claude_credentials)
     get("/server/grok_auth", ServerController, :grok_auth)
     get("/server/provider_accounts", ServerController, :provider_accounts)

@@ -106,6 +106,7 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
       {{"get", "/api/server/guardrails"}, {%{"active" => false, "issues" => []}, 200}},
       {{"get", "/api/server/tmux"}, {%{"available" => true, "version" => "3.4"}, 200}},
       {{"get", "/api/server/podman_sandbox"}, {%{"installed" => false}, 200}},
+      {{"get", "/api/server/private_clone_records"}, {%{"stale" => []}, 200}},
       {{"get", "/api/server/worker_tmp"}, {%{"root" => "/var/tmp/arb"}, 200}},
       {{"get", "/api/server/worker_jail_unmask"}, {%{"paths" => []}, 200}},
       {{"get", "/api/server/worker_memory"},
@@ -346,6 +347,7 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
       {"/api/server/guardrails", "guardrails"},
       {"/api/server/tmux", "tmux"},
       {"/api/server/podman_sandbox", "podman_sandbox"},
+      {"/api/server/private_clone_records", "private_clone_records"},
       {"/api/server/worker_tmp", "worker_tmp"},
       {"/api/server/worker_memory", "worker_memory"},
       {"/api/server/claude_credentials", "claude_worker_credentials"},
@@ -371,6 +373,21 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
         assert result.status == :warn
         assert result.detail =~ "could not check"
       end
+    end
+
+    test "private_clone_records warns, naming the stale leaves, and is ok when none" do
+      stub_healthy([
+        {{"get", "/api/server/private_clone_records"},
+         {%{"stale" => [%{"leaf" => "bugfix-728", "reason" => "directory missing"}]}, 200}}
+      ])
+
+      result = Checks.run() |> by_id("private_clone_records")
+      assert result.status == :warn
+      assert result.detail =~ "bugfix-728"
+      assert result.hint =~ "--retire-stale-clones"
+
+      stub_healthy([])
+      assert (Checks.run() |> by_id("private_clone_records")).status == :ok
     end
 
     test "a transport error is a warn too" do
@@ -766,7 +783,7 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
       last_deploy migrations bind_address anonymous_api dashboard_auth
       erlang_distribution secrets_at_rest restart_safety safe_default_categories agy_write_jail
       agy_jail_escape agy_jail_reads agy_jail_network agy_jail_keyring egress_jail
-      guardrails agy_ssh_transport tmux podman_sandbox worker_tmp socket_paths worker_jail_unmask worker_memory
+      guardrails agy_ssh_transport tmux podman_sandbox private_clone_records worker_tmp socket_paths worker_jail_unmask worker_memory
       claude_worker_credentials grok_auth agy_models provider_accounts quota_policy
       merge_routing nodes pr_patrol
     )

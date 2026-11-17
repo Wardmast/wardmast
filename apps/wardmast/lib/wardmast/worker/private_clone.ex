@@ -262,9 +262,15 @@ defmodule Wardmast.Worker.PrivateClone do
     path = Worktree.worktree_path(branch)
 
     cond do
-      not File.exists?(path) -> provision.(path)
-      clone?(path) -> reuse(path, branch, provision)
-      true -> {:error, {:layout_mismatch, path}}
+      not File.exists?(path) ->
+        :ok = drop_stale_records(path)
+        provision.(path)
+
+      clone?(path) ->
+        reuse(path, branch, provision)
+
+      true ->
+        {:error, {:layout_mismatch, path}}
     end
   end
 
@@ -884,6 +890,11 @@ defmodule Wardmast.Worker.PrivateClone do
     end
   end
 
+  @stale_why "stale clone record: this leaf is on the private-clone ledger from an earlier " <>
+               "private clone, but its .git is the linked-worktree file the primary created " <>
+               "(nothing was replaced); retire the stale record with `arb doctor --fix` or " <>
+               "`PrivateClone.retire_stale/2`"
+
   @doc """
   `verify/1` for a git about to run in `path`, when `path` is a checkout leaf
   of the worktree root (a private clone, or something posing as one). A `.git`
@@ -911,9 +922,11 @@ defmodule Wardmast.Worker.PrivateClone do
           end
 
         :regular ->
-          if ledgered?(path),
-            do: tampered(".git is a file, and this checkout is a private clone"),
-            else: linked_gitdir(path)
+          cond do
+            stale_record?(path) -> tampered(@stale_why)
+            ledgered?(path) -> tampered(".git is a file, and this checkout is a private clone")
+            true -> linked_gitdir(path)
+          end
 
         other ->
           tampered(".git is a #{other}, not a directory or a worktree file")
@@ -958,7 +971,13 @@ defmodule Wardmast.Worker.PrivateClone do
   """
   @spec settle(term()) :: :ok | {:error, {:tampered, String.t()}}
   def settle(path) when is_binary(path) do
-    if checkout_leaf?(path) and not linked_worktree?(path), do: reclaim(path), else: :ok
+    cond do
+      not checkout_leaf?(path) -> :ok
+      linked_worktree?(path) -> :ok
+      # A stale ledger entry, not a swap: leave the (correct) `.git` file alone.
+      stale_record?(path) -> tampered(@stale_why)
+      true -> reclaim(path)
+    end
   end
 
   def settle(_), do: :ok
@@ -1026,6 +1045,25 @@ defmodule Wardmast.Worker.PrivateClone do
     do: Path.dirname(Path.expand(path)) == Path.expand(Wardmast.Config.Paths.worktree_root())
 
   defp tampered(why), do: {:error, {:tampered, why}}
+
+  # A ledgered leaf whose `.git` file names the primary's own
+  # `.git/worktrees/<name>` admin dir: an ordinary linked worktree provisioned
+  # over a private clone's leftover records, not a worker's replacement (a
+  # replacement names a repo the worker built elsewhere).
+  defp stale_record?(path) do
+    with true <- ledgered?(path),
+         {:ok, repo} <- File.read(ledger_file(path)),
+         {:ok, "gitdir:" <> rest} <- File.read(Path.join(path, ".git")),
+         target = rest |> String.trim() |> Path.expand(Path.expand(path)),
+         "worktrees" <- target |> Path.dirname() |> Path.basename(),
+         true <-
+           target |> Path.dirname() |> Path.dirname() ==
+             Path.join(Path.expand(String.trim(repo)), ".git") do
+      File.dir?(target)
+    else
+      _ -> false
+    end
+  end
 
   defp check_dot_git_dir(dot_git) do
     case File.lstat(dot_git) do
@@ -1289,9 +1327,136 @@ defmodule Wardmast.Worker.PrivateClone do
     :ok
   end
 
-  # -- the sweeper ----------------------------------------------------------------------
-
   @orphan_min_age_ms 60 * 60_000
+
+  # -- stale ledger / identity records ------------------------------------------------------
+
+  @doc """
+  Drop the ledger entry and identity record for the leaf at `path` when it no
+  longer holds a private clone (no `.git` directory): a clone moved aside by
+  hand never ran the clean-up that drops them, and a later linked worktree at
+  the same leaf would read as a swapped clone. A leaf with a `.git` directory
+  (a live clone) is left alone. `repo` (optional) is the main repo whose
+  identity record to drop as well as the ledgered one. Returns `:ok`.
+  """
+  @spec drop_stale_records(path(), path() | nil) :: :ok
+  def drop_stale_records(path, repo \\ nil) when is_binary(path) do
+    case File.lstat(Path.join(path, ".git")) do
+      {:ok, %File.Stat{type: :directory}} ->
+        :ok
+
+      _ ->
+        leaf = Path.basename(Path.expand(path))
+
+        repos =
+          [ledger_repo(ledger_file(path)), repo]
+          |> Enum.filter(&is_binary/1)
+          |> Enum.uniq()
+
+        _ = File.rm(ledger_file(path))
+        Enum.each(repos, &unpin(&1, leaf))
+        :ok
+    end
+  end
+
+  defp ledger_repo(file) do
+    case File.read(file) do
+      {:ok, content} -> content |> String.trim() |> then(&if(&1 == "", do: nil, else: &1))
+      _ -> nil
+    end
+  end
+
+  @doc """
+  Private-clone records that no clone backs: a ledger entry (beside `root`) or
+  an identity record (in a main repo) whose leaf under `root` is missing or
+  has no `.git` directory. Each is `%{leaf, repo, ledger?, identity?, reason}`.
+  Options: `:min_age_ms` (default one hour, on the record's mtime, sparing a
+  clone mid-creation), `:repos` (extra main repos to scan for identity records;
+  default the ledgered ones and `main_repos/1`).
+  """
+  @spec stale_records(path(), keyword()) :: [map()]
+  def stale_records(root, opts \\ []) when is_binary(root) do
+    cutoff =
+      System.os_time(:second) - div(Keyword.get(opts, :min_age_ms, @orphan_min_age_ms), 1000)
+
+    ledger_dir = Path.expand(root) <> ".private-clones"
+
+    ledgered =
+      for leaf <- ls(ledger_dir),
+          repo = ledger_repo(Path.join(ledger_dir, leaf)),
+          do: {leaf, repo, Path.join(ledger_dir, leaf)}
+
+    repos =
+      (Enum.map(ledgered, &elem(&1, 1)) ++ Keyword.get(opts, :repos, []) ++ main_repos(root))
+      |> Enum.map(&Path.expand/1)
+      |> Enum.filter(&File.dir?/1)
+      |> Enum.uniq()
+
+    identities =
+      for repo <- repos,
+          leaf <- repo |> identity_file("x") |> Path.dirname() |> ls(),
+          do: {leaf, repo, identity_file(repo, leaf)}
+
+    (Enum.map(ledgered, &{:ledger, &1}) ++ Enum.map(identities, &{:identity, &1}))
+    |> Enum.group_by(fn {_kind, {leaf, _repo, _file}} -> leaf end)
+    |> Enum.sort()
+    |> Enum.flat_map(fn {leaf, entries} -> stale_entry(root, leaf, entries, cutoff) end)
+  end
+
+  defp stale_entry(root, leaf, entries, cutoff) do
+    files = for {_kind, {_leaf, _repo, file}} <- entries, do: file
+    {_kind, {_leaf, repo, _file}} = hd(entries)
+
+    old? =
+      Enum.all?(files, fn file ->
+        match?({:ok, %File.Stat{mtime: m}} when m <= cutoff, File.stat(file, time: :posix))
+      end)
+
+    with true <- old?,
+         reason when is_binary(reason) <- unbacked(Path.join(root, leaf)) do
+      [
+        %{
+          leaf: leaf,
+          repo: repo,
+          ledger?: Enum.any?(entries, &match?({:ledger, _}, &1)),
+          identity?: Enum.any?(entries, &match?({:identity, _}, &1)),
+          reason: reason
+        }
+      ]
+    else
+      _ -> []
+    end
+  end
+
+  defp unbacked(path) do
+    case File.lstat(Path.join(path, ".git")) do
+      {:ok, %File.Stat{type: :directory}} -> nil
+      {:ok, %File.Stat{type: type}} -> "no .git directory (.git is a #{type})"
+      {:error, _} -> if File.exists?(path), do: "no .git directory", else: "directory missing"
+    end
+  end
+
+  defp ls(dir) do
+    case File.ls(dir) do
+      {:ok, names} -> Enum.sort(names)
+      {:error, _} -> []
+    end
+  end
+
+  @doc "Retire what `stale_records/2` reports (same options); returns the records retired."
+  @spec retire_stale(path(), keyword()) :: [map()]
+  def retire_stale(root, opts \\ []) when is_binary(root) do
+    records = stale_records(root, opts)
+
+    for rec <- records do
+      _ = File.rm(Path.join(Path.expand(root) <> ".private-clones", rec.leaf))
+      unpin(rec.repo, rec.leaf)
+    end
+
+    records
+  end
+
+  # -- the sweeper ----------------------------------------------------------------------
 
   @doc """
   Private clones under `root` that can never be used again: the main repo

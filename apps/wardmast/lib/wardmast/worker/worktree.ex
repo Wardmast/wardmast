@@ -265,6 +265,8 @@ defmodule Wardmast.Worker.Worktree do
   end
 
   defp create_linked_checked(repo_path, branch_name, base_branch, seed_paths, path, local_base?) do
+    :ok = PrivateClone.drop_stale_records(path, repo_path)
+
     result =
       if File.dir?(path) do
         case checked_out_branch(path) do
@@ -916,6 +918,8 @@ defmodule Wardmast.Worker.Worktree do
   end
 
   defp attach_linked_checked(repo_path, branch_name, seed_paths, path) do
+    :ok = PrivateClone.drop_stale_records(path, repo_path)
+
     if File.dir?(path) do
       case checked_out_branch(path) do
         {:ok, ^branch_name} ->

@@ -38,6 +38,8 @@ defmodule WardmastCli.Cmd.Doctor do
   automatically the first time after the server boots (so the first doctor
   after a deploy proves the new build spawns) and reuses that result until the
   next boot, re-running it while it is failing so a fix shows up at once.
+  `--retire-stale-clones` first drops private-clone ledger entries and identity
+  records no clone backs (the `private_clone_records` check lists them; bd-1h0zhg).
   `--spawn` forces a fresh canary and prints its rows whatever their severity.
   A failed spawn is a `fail`, so the doctor exits 1. The readiness polls of
   `arb start`/`restart`/`server deploy` do not run it.
@@ -70,9 +72,16 @@ defmodule WardmastCli.Cmd.Doctor do
       {opts, _rest, mode} =
         ArgParser.parse(argv,
           command: "arb server doctor",
-          switches: [all: :boolean, verbose: :boolean, spawn: :boolean],
+          switches: [
+            all: :boolean,
+            verbose: :boolean,
+            spawn: :boolean,
+            retire_stale_clones: :boolean
+          ],
           aliases: [v: :verbose]
         )
+
+      if opts[:retire_stale_clones] == true, do: retire_stale_clones()
 
       results = checks(spawn: if(opts[:spawn] == true, do: :force, else: :auto))
 
@@ -89,6 +98,18 @@ defmodule WardmastCli.Cmd.Doctor do
 
       if Formatter.overall(results) == :fail, do: Output.halt(1)
     end)
+  end
+
+  # bd-1h0zhg: drop private-clone ledger entries / identity records no clone backs.
+  defp retire_stale_clones do
+    case WardmastCli.Client.post("/api/server/private_clone_records/retire", %{}) do
+      {:ok, %{"retired" => retired}} ->
+        IO.puts("Retired #{length(retired)} stale private-clone record(s)")
+        Enum.each(retired, &IO.puts("  #{&1["leaf"]}: #{&1["reason"]}"))
+
+      other ->
+        IO.puts(:stderr, "could not retire stale private-clone records: #{inspect(other)}")
+    end
   end
 
   @doc """
