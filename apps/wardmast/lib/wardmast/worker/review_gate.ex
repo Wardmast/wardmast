@@ -2995,6 +2995,9 @@ defmodule Wardmast.Worker.ReviewGate do
       # as `sandbox.backend: podman` wraps a private clone only and a gate pass
       # under it elsewhere was refused (bd-4rvf98).
       :implementer ->
+        # bd-56z2wz: under `sandbox.backend: auto` the round runs where the checkout lives
+        policy = GitLayout.concretize(policy, Map.get(state, :worktree_path))
+
         if fix_round_container?(policy, state, provider),
           do: policy,
           else: SecurityPolicy.for_review_spawn(policy)
@@ -7794,7 +7797,10 @@ defmodule Wardmast.Worker.ReviewGate do
   end
 
   defp fix_round_layout(state, ws, provider) do
-    policy = SecurityPolicy.resolve(ws, %{}, Map.get(state, :repo))
+    policy =
+      ws
+      |> SecurityPolicy.resolve(%{}, Map.get(state, :repo))
+      |> GitLayout.concretize(Map.get(state, :worktree_path))
 
     if fix_round_container?(policy, state, provider),
       do: GitLayout.for_policy(policy),

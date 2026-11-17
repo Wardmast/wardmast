@@ -267,7 +267,8 @@ defmodule Wardmast.Workflows.MergeQueue.ConflictResolver do
       task_id: task.id,
       kind: :conflict_pass,
       provider: provider,
-      layout: GitLayout.for_workspace(workspace, context.repo),
+      layout:
+        GitLayout.for_checkout(workspace, context.repo, Worktree.worktree_path(context.branch)),
       workspace: workspace,
       workspace_id: task.workspace_id,
       clone_path: Worktree.worktree_path(context.branch),
@@ -317,7 +318,12 @@ defmodule Wardmast.Workflows.MergeQueue.ConflictResolver do
   """
   @spec host_git?(map(), atom() | String.t()) :: boolean()
   def host_git?(context, provider),
-    do: ContainerSpawn.pass_policy(context.workspace, context.repo, provider) != nil
+    do: ContainerSpawn.pass_policy(
+      context.workspace,
+      context.repo,
+      provider,
+      Worktree.worktree_path(context.branch)
+    ) != nil
 
   # bd-19skda: the container cannot `git fetch`, so the host refreshes the main
   # repo's `origin/<target>` before the clone is cut or re-attached
@@ -604,7 +610,12 @@ defmodule Wardmast.Workflows.MergeQueue.ConflictResolver do
   # bd-4wy1w1: in the git layout its sandbox needs — a private clone under a
   # container backend (`Wardmast.Worker.GitLayout`).
   defp create_worktree(%{repo_path: repo_path, branch: branch} = context, node) do
-    layout = GitLayout.for_workspace(context.workspace, context.repo)
+    layout =
+      GitLayout.for_checkout(
+        context.workspace,
+        context.repo,
+        Worktree.worktree_path(branch)
+      )
 
     # The home clone of a run placed on a node is thin (no deps seeding): the node's
     # shadow clone is what the container works in.
@@ -776,7 +787,12 @@ defmodule Wardmast.Workflows.MergeQueue.ConflictResolver do
   defp node_opts(node, context), do: [node: node, base_branch: context.target_branch]
 
   defp container_opts(context, provider) do
-    case ContainerSpawn.pass_policy(context.workspace, context.repo, provider) do
+    case ContainerSpawn.pass_policy(
+      context.workspace,
+      context.repo,
+      provider,
+      Worktree.worktree_path(context.branch)
+    ) do
       nil -> []
       policy -> ContainerSpawn.session_opts(policy, context.workspace, repo: context.repo)
     end

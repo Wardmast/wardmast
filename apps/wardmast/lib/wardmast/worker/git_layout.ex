@@ -53,6 +53,25 @@ defmodule Wardmast.Worker.GitLayout do
   def existing(_path), do: nil
 
   @doc """
+  `policy`, with an `auto` backend (bd-56z2wz) fixed to what the checkout at `path` already
+  is: a private clone is a container, a linked worktree is bwrap, no checkout yet the
+  `local_backend`. A pass that works in an existing checkout (a merge-queue fix or conflict
+  pass, a ReviewGate fix round) runs where that checkout lives, so it never changes the
+  layout at the dir. Any other policy is returned unchanged.
+  """
+  @spec concretize(SecurityPolicy.t(), Path.t() | nil) :: SecurityPolicy.t()
+  def concretize(%SecurityPolicy{} = policy, path),
+    do: SecurityPolicy.concretize(policy, existing(path) || :local)
+
+  @doc """
+  `for_workspace/3` for a pass in the existing checkout at `path`: under `auto` the layout
+  that checkout already has.
+  """
+  @spec for_checkout(term(), String.t() | nil, Path.t() | nil) :: t()
+  def for_checkout(workspace, repo, path),
+    do: workspace |> SecurityPolicy.resolve(%{}, repo) |> concretize(path) |> for_policy()
+
+  @doc """
   The layout a ReviewGate reviewer's checkout gets under `policy` (bd-7ays3v):
   `:private_clone` when the review may run in a container
   (`SecurityPolicy.review_container?/1`: `sandbox.backend` or
