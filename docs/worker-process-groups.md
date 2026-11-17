@@ -42,6 +42,11 @@ $ ps -o pid,pgid,args -p "$(pgrep -d, -g 4242)"
 
 (`pgrep -l` shows the warden's short name, `wardmast-group-` on Linux.)
 
+Under systemd the warden is forked before `systemd-run` moves the agent into its
+memory scope, so it stays in the server's own cgroup: `systemctl --user status
+wardmast.service` lists one `wardmast-group-warden` per running agent, while
+the agent and what it starts are in the run's `arb-run-…` scope.
+
 The warden holds no file descriptors of the agent's (its stdio is `/dev/null`),
 checks once a second whether the agent is still alive and, once it is not,
 SIGKILLs the whole group, itself included. That way:
