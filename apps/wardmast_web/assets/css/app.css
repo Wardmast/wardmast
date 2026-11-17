@@ -125,8 +125,10 @@
   --arb-text-ghost: oklch(62% 0.012 258);
 
   /* --- state hues (light) --- */
-  --arb-live: oklch(58% 0.16 130);
-  --arb-live-ink: oklch(100% 0 0);
+  --wm-accent: oklch(58% 0.16 130);
+  --wm-accent-ink: oklch(100% 0 0);
+  --arb-live: var(--wm-accent);
+  --arb-live-ink: var(--wm-accent-ink);
   --arb-live-wash: oklch(58% 0.16 130 / 0.12);
   --arb-live-edge: oklch(58% 0.16 130 / 0.35);
 
@@ -497,8 +499,10 @@ html:not([data-nav-rail="pinned"]) .nav-rail [phx-click="toggle-nav-pin"] > span
     --arb-text-faint: oklch(54% 0.014 258);
     --arb-text-ghost: oklch(46% 0.014 258);
 
-    --arb-live: oklch(84% 0.19 130);
-    --arb-live-ink: oklch(20% 0.05 130);
+    --wm-accent: oklch(84% 0.19 130);
+    --wm-accent-ink: oklch(20% 0.05 130);
+    --arb-live: var(--wm-accent);
+    --arb-live-ink: var(--wm-accent-ink);
     --arb-live-wash: oklch(84% 0.19 130 / 0.14);
     --arb-live-edge: oklch(84% 0.19 130 / 0.3);
 
@@ -554,8 +558,10 @@ html:not([data-nav-rail="pinned"]) .nav-rail [phx-click="toggle-nav-pin"] > span
   --arb-text-faint: oklch(54% 0.014 258);
   --arb-text-ghost: oklch(46% 0.014 258);
 
-  --arb-live: oklch(84% 0.19 130);
-  --arb-live-ink: oklch(20% 0.05 130);
+  --wm-accent: oklch(84% 0.19 130);
+  --wm-accent-ink: oklch(20% 0.05 130);
+  --arb-live: var(--wm-accent);
+  --arb-live-ink: var(--wm-accent-ink);
   --arb-live-wash: oklch(84% 0.19 130 / 0.14);
   --arb-live-edge: oklch(84% 0.19 130 / 0.3);
 

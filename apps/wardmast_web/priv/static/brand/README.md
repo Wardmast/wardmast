@@ -18,7 +18,10 @@ is the source for `.icns`/`.ico` bundling.
 
 Colours: ground `#0e1116`, accent `#a3e635`, ink `#f1f3f5`; light-mode
 wordmark uses `#4d7c0f` / `#1f2430`. They mirror the dashboard's
-`--color-primary` and base tokens in `apps/wardmast_web/assets/css/app.css`.
+`--wm-accent` / `--wm-accent-ink` brand tokens in
+`apps/wardmast_web/assets/css/app.css` (light and dark), which feed
+`--arb-live`, the dashboard's accent. The maskable and apple-touch PNGs scale
+the mark to 80% so it sits inside the maskable safe zone.
 
 ## Regenerating rasters
 

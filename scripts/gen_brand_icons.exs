@@ -28,7 +28,7 @@ defmodule BrandIcons do
       write("#{@out}/brand/png/wardmast-mark-#{s}.png", png(s, 8))
     end
 
-    # maskable / apple-touch: full-bleed square tile, mark inside the safe zone
+    # maskable / apple-touch: full-bleed square tile (radius 0), mark scaled to 80% so it stays inside the maskable safe zone
     write("#{@out}/brand/png/wardmast-mark-maskable-512.png", png(512, 0))
     write("#{@out}/brand/png/wardmast-apple-touch-180.png", png(180, 0))
     write("#{@out}/images/apple-touch-icon.png", png(180, 0))
@@ -55,6 +55,10 @@ defmodule BrandIcons do
     along >= -ext and along <= len + ext and across <= hw
   end
 
+  # full-bleed tiles (radius 0) shrink the mark to 80% around the centre
+  defp scale(v, 0), do: 32 + (v - 32) / 0.8
+  defp scale(v, _r), do: v
+
   defp in_tile?(_x, _y, 0), do: true
 
   defp in_tile?(x, y, r) do
@@ -79,8 +83,8 @@ defmodule BrandIcons do
     {sr, sg, sb, sa} =
       for sy <- 0..(@ss - 1), sx <- 0..(@ss - 1), reduce: {0, 0, 0, 0} do
         {ar, ag, ab, aa} ->
-          x = (ix + (sx + 0.5) / @ss) * 64 / size
-          y = (iy + (sy + 0.5) / @ss) * 64 / size
+          x = scale((ix + (sx + 0.5) / @ss) * 64 / size, r)
+          y = scale((iy + (sy + 0.5) / @ss) * 64 / size, r)
           {cr, cg, cb, ca} = sample(x, y, r)
           {ar + cr * ca, ag + cg * ca, ab + cb * ca, aa + ca}
       end
