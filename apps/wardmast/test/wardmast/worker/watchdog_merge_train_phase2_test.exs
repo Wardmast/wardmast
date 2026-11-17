@@ -133,6 +133,22 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
     wpid
   end
 
+  # A Watchdog that already knows `id`'s head was pushed with CI skipped when it
+  # makes its first poll. `watch/3` polls at once (`initial_delay_ms: 0`), so a
+  # test that started it and *then* called `note_ci_skipped_push/2` raced that
+  # first poll: when the poll won, it saw a neutral-pipeline head it had not yet
+  # been told was CI-skipped, merged it, and the trigger the test waits for never
+  # happened. Production orders these the same way this does: the pass reports
+  # the skipped head before it finishes, ahead of any poll that acts on it. So
+  # park the first poll, deliver the note (a call, so it has landed on return),
+  # then poll.
+  defp watch_ci_skipped(id, ws, opts \\ []) do
+    wpid = watch(id, ws, Keyword.put(opts, :initial_delay_ms, 600_000))
+    :ok = Watchdog.note_ci_skipped_push(id, id <> "0")
+    send(wpid, :poll)
+    wpid
+  end
+
   defp diffs(id) do
     StubMerger.set_diff(mr(id), id <> "0", @reviewed_diff)
     StubMerger.set_diff(mr(id), id <> "1", @merge_from_main_diff)
@@ -352,8 +368,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       freshness(%{"a0" => 0})
       diffs("a")
       StubMerger.queue_get(mr("a"), [skipped("a0")])
-      a = watch("a", ws)
-      :ok = Watchdog.note_ci_skipped_push("a", "a0")
+      a = watch_ci_skipped("a", ws)
 
       wait_until(fn -> length(StubMerger.pipeline_triggers()) == 1 end)
       after_polls(a, 4)
@@ -376,8 +391,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       freshness(%{"a0" => 0})
       diffs("a")
       StubMerger.queue_get(mr("a"), [skipped("a0")])
-      a = watch("a", ws)
-      :ok = Watchdog.note_ci_skipped_push("a", "a0")
+      a = watch_ci_skipped("a", ws)
 
       wait_until(fn -> StubMerger.pipeline_triggers() != [] end)
       after_polls(a, 6)
@@ -392,8 +406,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       _a = seat_head(ws)
       diffs("b")
       StubMerger.queue_get(mr("b"), [skipped("b0")])
-      b = watch("b", ws, conflict_probe: probe_fn(log, "b", :clean))
-      :ok = Watchdog.note_ci_skipped_push("b", "b0")
+      b = watch_ci_skipped("b", ws, conflict_probe: probe_fn(log, "b", :clean))
 
       wait_until(fn -> role(b) == {:wait, "a"} end)
       after_polls(b, 4)
@@ -439,8 +452,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       freshness(%{"a0" => 0})
       diffs("a")
       StubMerger.queue_get(mr("a"), [skipped("a0")])
-      a = watch("a", ws)
-      :ok = Watchdog.note_ci_skipped_push("a", "a0")
+      a = watch_ci_skipped("a", ws)
 
       wait_until(fn -> length(StubMerger.pipeline_triggers()) >= 3 end)
       wait_until(fn -> :sys.get_state(a).park_reason == :no_pipeline end)
