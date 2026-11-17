@@ -74,6 +74,7 @@ defmodule Wardmast.Quota.GrantRefresher do
   alias Wardmast.Quota.GrantFile
   alias Wardmast.Worker.ReleaseEnv
   alias Wardmast.Worker.SpawnEnv
+  alias Wardmast.Worker.Timeout
 
   @default_interval_ms 60_000
   @default_refresh_window_ms 4 * 60_000
@@ -357,7 +358,7 @@ defmodule Wardmast.Quota.GrantRefresher do
               "/bin/sh",
               [
                 "-c",
-                ~s(exec timeout -k 5 #{timeout_s} "$0" "$@" >/dev/null 2>&1 </dev/null),
+                ~s(exec #{Timeout.shell_prefix(timeout_s, kill_after: 5)}"$0" "$@" >/dev/null 2>&1 </dev/null),
                 exe | @cli_args
               ],
               cd: cwd,

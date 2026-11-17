@@ -227,16 +227,18 @@ defmodule WardmastCli.Cmd.Restart do
   defp probe_systemd, do: Supervisor.impl().service_state()
 
   defp refuse_if_unit_file_on_disk! do
+    unit_file = Supervisor.impl().unit_file_name()
+
     case Enum.find(
            Supervisor.impl().unit_dirs(),
-           &File.exists?(Path.join(&1, "wardmast.service"))
+           &File.exists?(Path.join(&1, unit_file))
          ) do
       nil ->
         :ok
 
       dir ->
         Output.die(
-          "#{Path.join(dir, "wardmast.service")} exists, but systemctl does not manage it from here",
+          "#{Path.join(dir, unit_file)} exists, but systemctl does not manage it from here",
           "Refusing to signal whatever listens on the API port: the unit owns the server. " <>
             "Use `systemctl --user restart wardmast.service` from a login shell."
         )
@@ -442,7 +444,8 @@ defmodule WardmastCli.Cmd.Restart do
   defp describe_verdict(:unknown), do: "not a `mix phx.server` process"
   defp describe_verdict({:unreadable, r}), do: "cmdline unreadable (#{inspect(r)})"
 
-  # /proc/<pid>/cmdline is NUL-separated argv. The `:bd2_proc_cmdline` seam
+  # Portable (no /proc): `ps -o command=` prints the command line space-joined, enough for
+  # the token/regex classifier. The `:bd2_proc_cmdline` seam
   # lets tests supply fake pids' argv.
   defp proc_cmdline(pid) do
     case Process.get(:bd2_proc_cmdline) do
@@ -450,12 +453,26 @@ defmodule WardmastCli.Cmd.Restart do
         fun.(pid)
 
       _ ->
-        case File.read("/proc/#{pid}/cmdline") do
-          {:ok, ""} -> {:error, :empty}
-          {:ok, raw} -> {:ok, String.split(raw, <<0>>, trim: true)}
-          {:error, _} = err -> err
-        end
+        ps_command(pid)
     end
+  end
+
+  @doc false
+  @spec parse_ps_command(String.t()) :: {:ok, [String.t()]} | {:error, :empty}
+  def parse_ps_command(out) do
+    case String.split(out) do
+      [] -> {:error, :empty}
+      argv -> {:ok, argv}
+    end
+  end
+
+  defp ps_command(pid) do
+    case run_cmd("ps", ["-p", to_string(pid), "-o", "command="], stderr_to_stdout: true) do
+      {out, 0} -> parse_ps_command(out)
+      {_out, _} -> {:error, :enoent}
+    end
+  rescue
+    ErlangError -> {:error, :enoent}
   end
 
   # Pids of processes LISTENing on `port`. Tries lsof first; if lsof is absent
