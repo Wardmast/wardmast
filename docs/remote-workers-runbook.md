@@ -46,18 +46,18 @@ nothing inbound is opened on either machine.
    ward settings set nodes.public_url https://<primary>.<tailnet>.ts.net
    ```
 
-4. **ACL tags (recommended).** Tag the primary `tag:arbiter-primary` and each node
+4. **ACL tags (recommended).** Tag the primary `tag:wardmast-primary` and each node
    `tag:wardmast-node`, and let nodes reach the primary on 443 and nothing else:
 
    ```jsonc
    // tailnet policy file
    "tagOwners": {
-     "tag:arbiter-primary": ["autogroup:admin"],
+     "tag:wardmast-primary": ["autogroup:admin"],
      "tag:wardmast-node":    ["autogroup:admin"]
    },
    "acls": [
      // your existing rules, plus:
-     {"action": "accept", "src": ["tag:wardmast-node"], "dst": ["tag:arbiter-primary:443"]}
+     {"action": "accept", "src": ["tag:wardmast-node"], "dst": ["tag:wardmast-primary:443"]}
    ]
    ```
 
@@ -409,7 +409,7 @@ Start with `ward node list`, `ward node events <name>`, `ward doctor`, and on th
 | `[FAIL] linger is off … could not be enabled` | `sudo loginctl enable-linger <user>` |
 | `[FAIL] XDG_RUNTIME_DIR is not set` / `systemctl --user cannot reach your user manager` | you are in a `su`/`sudo` shell; log in with ssh or a console |
 | `[FAIL] /etc/subuid grants 0 ids` | `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 <user>` |
-| `[FAIL] no answer from …/nodes/ping` | tailnet down, ACL blocks `tag:wardmast-node → tag:arbiter-primary:443`, `tailscale serve` not running, or `nodes.public_url` wrong |
+| `[FAIL] no answer from …/nodes/ping` | tailnet down, ACL blocks `tag:wardmast-node → tag:wardmast-primary:443`, `tailscale serve` not running, or `nodes.public_url` wrong |
 | enrol: `401` | token unknown, expired (15 min) or already used; mint a new one |
 | enrol: `409` | name taken; pick another `ARB_NODE_NAME` or `ward node remove` the old (revoked) one |
 | enrol: `429` | rate limited (10/min globally, 5 failures/10 min per source); wait |

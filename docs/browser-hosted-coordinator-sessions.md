@@ -145,7 +145,7 @@ see §6.5. The channel below it is unchanged.
 
 The load-bearing property is the **restart boundary**: everything below it lives
 in a cgroup that is a *sibling* of `wardmast.service`, so `systemctl --user restart
-arbiter` cannot reach it. Wardmast holds no handle to the PTY that matters — on
+wardmast` cannot reach it. Wardmast holds no handle to the PTY that matters — on
 reboot it re-discovers sessions by listing scope units and tmux sockets.
 
 ## 4. The PTY harness (research task 1)
@@ -231,7 +231,7 @@ the client has a genuine TTY):
 ```sh
 tmux -S $SOCK attach -t coord      # attached_clients: 0 -> 1, client renders live ticks
 tmux -S $SOCK detach-client -s coord                      # 1 -> 0
-systemctl --user restart <stand-in-arbiter>               # PTY pid SURVIVED
+systemctl --user restart <stand-in-wardmast>               # PTY pid SURVIVED
 tmux -S $SOCK attach -t coord      # 0 -> 1, client renders live ticks 32,33,34
 ```
 
@@ -563,7 +563,7 @@ which checks the preconditions, runs the test from `apps/wardmast` (an umbrella
    'arb-session-*' --no-legend` and `tmux -S $XDG_RUNTIME_DIR/wardmast/session-
    <id>.sock attach [-r] -t coord` are the raw commands underneath it, and
    verifying `ward session attach <id>` behaves the same with
-   `systemctl --user stop arbiter` first is the check to run on the live host.
+   `systemctl --user stop wardmast` first is the check to run on the live host.
    `XDG_RUNTIME_DIR` unset is a hard `die` naming the real cause (a systemd
    user session, not `/tmp`) rather than deriving a socket path the server
    side (`Wardmast.Sessions.Naming.runtime_dir/0`) could never itself have
@@ -1461,7 +1461,7 @@ pre-answered — and the session still stopped twice:
 
 | Gate | Key | Where |
 |---|---|---|
-| "New MCP server found in this project: arbiter" | `enabledMcpjsonServers: ["arbiter"]` | `<config>/settings.json` **and** `<config>/.claude.json` `projects.<cwd>` |
+| "New MCP server found in this project: wardmast" | `enabledMcpjsonServers: ["wardmast"]` | `<config>/settings.json` **and** `<config>/.claude.json` `projects.<cwd>` |
 | "WARNING: Claude Code running in Bypass Permissions mode" | *none* — the session runs in `auto` mode instead | `<config>/settings.json` `permissions.defaultMode` |
 
 Both gates only fire once the first three are answered, which is why the spike
