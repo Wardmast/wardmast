@@ -57,14 +57,33 @@ defmodule Wardmast.Nodes.AutoBackendPlacementTest do
       assert Placement.eligible(request(provider: :codex)) == :ok
     end
 
-    test "agy has no container wrap point, so it stays local: never refused, never a node" do
+    # bd-b2t0kw: agy's container signs in with the workspace's service-account key (it has
+    # no keyring); a workspace without one keeps agy local, on bwrap, never refused.
+    test "agy without the workspace's service-account key stays local: never refused, never a node" do
       for provider <- [:gemini, "gemini", :antigravity] do
-        assert {:local_only, :provider_no_container} =
+        assert {:local_only, :no_agy_credential} =
                  Placement.eligible(request(provider: provider))
+
+        assert {:local_only, :no_agy_credential} =
+                 Placement.eligible(request(provider: provider, agy_credential?: false))
       end
 
-      assert Placement.reason_phrase(:provider_no_container, %{provider: :gemini}) =~
-               "no container wrap point"
+      assert Placement.reason_phrase(:no_agy_credential, %{provider: :gemini}) =~
+               "service-account key"
+
+      assert Placement.local_backend(request(provider: :gemini, local_backend: :podman)) == :bwrap
+    end
+
+    test "agy with the workspace's service-account key has a container: a node candidate" do
+      req = request(provider: :gemini, agy_credential?: true)
+      assert Placement.eligible(req) == :ok
+      assert Placement.container_capable?(req)
+      refute Placement.container_capable?(request(provider: :gemini))
+      assert Placement.container_capable?(request(provider: :claude))
+      refute Placement.container_capable?(request(provider: :grok))
+
+      assert Placement.local_backend(%{req | local_backend: :podman}) == :podman
+      assert Placement.local_backend(req) == :bwrap
     end
 
     test "a ticket with a preserved linked worktree stays local, on its original layout" do
@@ -111,9 +130,9 @@ defmodule Wardmast.Nodes.AutoBackendPlacementTest do
       assert info.phrase =~ "local bwrap has no slot"
     end
 
-    test "(d) an agy run is local on bwrap and is not held for the backend" do
+    test "(d) an agy run without a key is local on bwrap and is not held for the backend" do
       req = request(provider: :gemini)
-      assert {:ok, :local, {:local_only, :provider_no_container}} = gate(req, [cnode("mesaana")])
+      assert {:ok, :local, {:local_only, :no_agy_credential}} = gate(req, [cnode("mesaana")])
       Placement.release(req.task_id)
     end
 
@@ -121,7 +140,7 @@ defmodule Wardmast.Nodes.AutoBackendPlacementTest do
       {:ok, 0} = Wardmast.Nodes.set_local_max_workers(0, nil)
       assert {:error, {:no_node_capacity, info}} = gate(request(provider: :gemini), [cnode("m")])
       assert info.phrase =~ "agy" or info.phrase =~ "gemini"
-      assert info.phrase =~ "no container wrap point"
+      assert info.phrase =~ "service-account key"
       assert info.phrase =~ "local bwrap has no slot"
     end
 
@@ -212,6 +231,12 @@ defmodule Wardmast.Nodes.AutoBackendPlacementTest do
 
       assert Placement.backend_phrase(
                request(provider: :gemini),
+               {:local, {:local_only, :no_agy_credential}}
+             ) =~
+               "service-account key -> local bwrap"
+
+      assert Placement.backend_phrase(
+               request(provider: :grok),
                {:local, {:local_only, :provider_no_container}}
              ) =~
                "no container wrap point -> local bwrap"

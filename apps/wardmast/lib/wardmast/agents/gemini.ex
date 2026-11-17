@@ -21,6 +21,7 @@ defmodule Wardmast.Agents.Gemini do
   alias Wardmast.Agents.Gemini.Security
   alias Wardmast.Agents.SecurityPolicy
   alias Wardmast.Guardrails.Projection
+  alias Wardmast.Worker.ContainerSpawn
   alias Wardmast.Worker.Egress.JailRun
   alias Wardmast.Worker.GitCredential
   alias Wardmast.Worker.Jail
@@ -114,11 +115,17 @@ defmodule Wardmast.Agents.Gemini do
   """
   @impl true
   def write_confinement(%SecurityPolicy{} = policy) do
-    with {:ok, {:agy, _}} <- resolve_executable(),
-         :ok <- jail_blocker(policy) do
+    if podman_agy?(policy) do
+      # bd-b2t0kw: the container (`--read-only` plus the explicit mount set) confines
+      # writes to the private clone and the run's own dirs, whatever agy's CLI does.
       :os_jail
     else
-      _ -> :none
+      with {:ok, {:agy, _}} <- resolve_executable(),
+           :ok <- jail_blocker(policy) do
+        :os_jail
+      else
+        _ -> :none
+      end
     end
   end
 
@@ -130,10 +137,29 @@ defmodule Wardmast.Agents.Gemini do
   """
   @impl true
   def egress_confinement(%SecurityPolicy{} = policy) do
-    if write_confinement(policy) == :os_jail and Sandbox.network_status(policy) == :ok,
-      do: :os_jail,
-      else: :none
+    cond do
+      # The container is `--network=none` with the egress proxy as its only route.
+      podman_agy?(policy) ->
+        with {:ok, sandbox} <- Sandbox.module(policy, :gemini),
+             :ok <- sandbox.network_status() do
+          :os_jail
+        else
+          _ -> :none
+        end
+
+      write_confinement(policy) == :os_jail and Sandbox.network_status(policy) == :ok ->
+        :os_jail
+
+      true ->
+        :none
+    end
   end
+
+  # bd-b2t0kw: a podman policy runs agy in the container (`ContainerSpawn`, through
+  # `ClaudeSession`), which needs the workspace's service-account key; a podman spawn
+  # never runs on the host's bwrap jail.
+  defp podman_agy?(policy),
+    do: ContainerSpawn.podman?(policy) and match?({:ok, _}, Sandbox.module(policy, :gemini))
 
   @doc """
   Why this host can't jail an agy spawn under `policy`, for `arb server
@@ -147,7 +173,8 @@ defmodule Wardmast.Agents.Gemini do
   """
   @impl true
   def write_jail_warning(%SecurityPolicy{} = policy) do
-    with {:ok, {:agy, _}} <- resolve_executable(),
+    with false <- podman_agy?(policy),
+         {:ok, {:agy, _}} <- resolve_executable(),
          true <- jail_eligible?(policy),
          {:error, reason} <- jail_blocker(policy) do
       "agy write jail unavailable (#{jail_blocker_message(reason)}) — " <>
@@ -200,6 +227,31 @@ defmodule Wardmast.Agents.Gemini do
 
   @impl true
   def default_argv(prompt, opts \\ []) when is_binary(prompt) do
+    policy = security_policy(opts)
+
+    if container_wrap?(policy, opts),
+      do: container_argv(prompt, opts, policy),
+      else: host_argv(prompt, opts)
+  end
+
+  # bd-b2t0kw: the caller hands the spawn to `ClaudeSession`, which wraps it in the
+  # container (`ContainerSpawn`, provider `gemini`). The argv names the container's
+  # pinned agy, and nothing host-side applies: no bwrap jail (the container is the
+  # jail), no keyring (agy signs in with the workspace's service-account key there),
+  # no egress run of the adapter's own (the container's is `ContainerSpawn`'s).
+  defp container_wrap?(policy, opts),
+    do: ContainerSpawn.podman?(policy) and Keyword.get(opts, :sandbox_wrap, false) == true
+
+  defp container_argv(prompt, opts, policy) do
+    with {:ok, _sandbox} <- Sandbox.module(policy, :gemini) do
+      oversize? = byte_size(prompt) > ArgvGuard.max_arg_strlen()
+      exec = ContainerSpawn.provider_path("gemini")
+      inner = build_argv(:agy, exec, if(oversize?, do: @stdin_stub, else: prompt), opts, policy)
+      wrap_delivery(inner, prompt, oversize?)
+    end
+  end
+
+  defp host_argv(prompt, opts) do
     case resolve_executable() do
       {:ok, {type, exec}} ->
         policy = security_policy(opts)
@@ -331,7 +383,14 @@ defmodule Wardmast.Agents.Gemini do
   """
   @impl true
   def spawn_env(opts \\ []) do
-    api_key_env(opts) ++ thinking_env(opts) ++ home_env(opts)
+    if container_wrap?(security_policy(opts), opts) do
+      # bd-b2t0kw: the container's HOME and its credential (the service-account key, as
+      # a file) are `ContainerSpawn`'s; neither the host's per-worktree agy HOME nor a
+      # Gemini API key belongs in its env.
+      thinking_env(opts)
+    else
+      api_key_env(opts) ++ thinking_env(opts) ++ home_env(opts)
+    end
   end
 
   # Only the agy fork reads its config from $HOME; the upstream gemini CLI

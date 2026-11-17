@@ -3007,11 +3007,14 @@ defmodule Wardmast.Worker.ReviewGate do
   # bd-49l0eo: whether a fix round keeps the workspace's podman backend: `policy`
   # is podman, the implementer's worktree is the private clone a container is
   # handed (`ContainerSpawn.prepare/1` refuses anything else), and the provider
-  # has a container wrap point.
+  # has a container wrap point. agy's (bd-b2t0kw) serves the task implementer only: a
+  # pass is never routed to agy under podman (`ProviderRouting.backend_refusal/3` with
+  # no workspace), so an agy fix round runs on the review backend, as it always did.
   defp fix_round_container?(policy, state, provider) do
     ContainerSpawn.podman?(policy) and not is_nil(provider) and
       PrivateClone.clone?(Map.get(state, :worktree_path)) and
-      match?({:ok, _}, Sandbox.module(policy, provider))
+      match?({:ok, _}, Sandbox.module(policy, provider)) and
+      to_string(provider) not in ~w(gemini antigravity agy)
   end
 
   # bd-49l0eo: whether the host pushes a fix round's branch. A container fix round

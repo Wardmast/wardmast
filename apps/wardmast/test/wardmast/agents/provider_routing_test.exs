@@ -135,6 +135,24 @@ defmodule Wardmast.Agents.ProviderRoutingTest do
     pid
   end
 
+  defp sa_key!(account) do
+    key =
+      Jason.encode!(%{
+        "type" => "service_account",
+        "project_id" => "arb-routing",
+        "private_key" => "-----BEGIN PRIVATE KEY-----\nMIIEvROUTING\n-----END PRIVATE KEY-----\n",
+        "client_email" => "arb@arb-routing.iam.gserviceaccount.com"
+      })
+
+    {:ok, _} =
+      Wardmast.Accounts.rotate_credential(account.id, %{
+        "kind" => "service_account",
+        "secret" => key
+      })
+
+    account
+  end
+
   defp slugs(entries), do: Enum.map(entries, & &1["account_slug"])
   defp reasons(decision), do: Map.new(decision["dropped"], &{&1["account_slug"], &1["reason"]})
 
@@ -387,6 +405,42 @@ defmodule Wardmast.Agents.ProviderRoutingTest do
       bwrap = SecurityPolicy.resolve(nil, %{})
       relaxed = ProviderRouting.evaluate(ws, task!(ws), opts([], security: bwrap))
       assert agy.slug in slugs(relaxed["candidates"])
+    end
+
+    # bd-b2t0kw: agy's podman wrap point signs in with the workspace's Google Cloud
+    # service-account key, so the implementer's routing keeps an agy account under podman
+    # exactly when its workspace holds one.
+    test "under sandbox.backend podman an agy account whose workspace holds a service-account key stays",
+         %{ws: ws} do
+      agy = account!(:antigravity, "with-key")
+      allow!(ws, agy, 1)
+      sa_key!(agy)
+
+      podman = SecurityPolicy.resolve(nil, %{"sandbox" => %{"backend" => "podman"}})
+      decision = ProviderRouting.evaluate(ws, task!(ws), opts([], security: podman))
+
+      assert agy.slug in slugs(decision["candidates"])
+      refute reasons(decision)[agy.slug] == "sandbox_backend"
+    end
+
+    test "backend_refusal/3 lets agy run under podman only with the workspace's key", %{ws: ws} do
+      podman = SecurityPolicy.resolve(nil, %{"sandbox" => %{"backend" => "podman"}})
+      agy = account!(:antigravity, "refusal-key")
+      allow!(ws, agy, 1)
+
+      missing = ProviderRouting.backend_refusal(podman, :gemini, ws)
+      assert missing =~ "gemini: not supported by sandbox.backend podman"
+      assert missing =~ "service-account key"
+
+      sa_key!(agy)
+      assert is_nil(ProviderRouting.backend_refusal(podman, :gemini, ws))
+      assert is_nil(ProviderRouting.backend_refusal(podman, :gemini, ws.id))
+
+      # No workspace in hand (a pass, which has no agy container path): refused as before.
+      assert ProviderRouting.backend_refusal(podman, :gemini) ==
+               "gemini: not supported by sandbox.backend podman"
+
+      assert is_nil(ProviderRouting.backend_refusal(podman, :claude, ws))
     end
 
     test "backend_refusal/2 names the backend for gemini under podman, nil under bwrap" do

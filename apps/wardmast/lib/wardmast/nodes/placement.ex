@@ -34,8 +34,9 @@ defmodule Wardmast.Nodes.Placement do
       a node refusal) is placed like a first attempt, `Dispatch.node_kind/2`,
       bd-amm00p; a retained primary worktree with work in it is `:local_work`);
     * every provider outside `remote_providers/0` (`:provider_not_remote`; Claude, Codex and agy are in it, Codex per node on `caps.credential_sync`
-      and agy per node on `caps.agy`, bd-2esasx; the podman backend is wired for Claude and Codex only,
-      so an agy run is still `:not_podman` until it has a container wrap point);
+      and agy per node on `caps.agy`, bd-2esasx; agy's container wrap point needs the
+      workspace's service-account key, bd-b2t0kw, so an agy run of a workspace without one
+      stays local, `:no_agy_credential` under `auto`);
     * anything not run in a podman container (`:not_podman`: bwrap-jailed or
       unsandboxed; the jail needs the primary's filesystem and keyring);
     * a dispatch handed no checkout at all (`:no_private_clone`: `provision_worktree:
@@ -67,8 +68,10 @@ defmodule Wardmast.Nodes.Placement do
   Under `sandbox.backend: auto` (bd-56z2wz) the discriminator is not the policy: the
   request says `auto?: true` and placement picks the backend. A node is podman on a
   private clone; the primary is `sandbox.local_backend` on the checkout the ticket already
-  has (`existing_layout`). Two more reasons stay local: `:provider_no_container` (agy has
-  no container wrap point) and `:existing_linked_worktree`. `prefer_local` (this machine
+  has (`existing_layout`). Three more reasons stay local: `:provider_no_container` (a
+  provider with no container wrap point), `:no_agy_credential` (agy, whose container signs
+  in with the workspace's Google Cloud service-account key, and the workspace has none:
+  `agy_credential?` on the request, bd-b2t0kw) and `:existing_linked_worktree`. `prefer_local` (this machine
   first, a node when it has no slot) is decided by `LocalCapacity.gate_with_reason/2`.
 
   Otherwise the discriminator for "podman" is `GitLayout.for_policy/1`'s `:private_clone`,
@@ -249,6 +252,7 @@ defmodule Wardmast.Nodes.Placement do
           | :placement_local_only
           | :scoped_git_credential
           | :provider_no_container
+          | :no_agy_credential
           | :existing_linked_worktree
   @type request :: %{
           required(:task_id) => String.t(),
@@ -268,7 +272,8 @@ defmodule Wardmast.Nodes.Placement do
           optional(:labels) => [String.t()],
           optional(:allowed_nodes) => [Allowlist.selector()] | nil,
           optional(:registry) => String.t() | nil,
-          optional(:last_digest) => String.t() | nil
+          optional(:last_digest) => String.t() | nil,
+          optional(:agy_credential?) => boolean()
         }
   @type info :: %{
           required(:task_id) => String.t(),
@@ -334,6 +339,7 @@ defmodule Wardmast.Nodes.Placement do
       not auto?(request) and request.layout != :private_clone -> :not_podman
       not auto?(request) -> nil
       not container_provider?(request.provider) -> :provider_no_container
+      not container_capable?(request) -> :no_agy_credential
       existing_layout(request) == :linked_worktree -> :existing_linked_worktree
       true -> nil
     end
@@ -404,8 +410,23 @@ defmodule Wardmast.Nodes.Placement do
   defp existing_layout(request), do: Map.get(request, :existing_layout)
 
   # A provider with a podman wrap point (`Sandbox.module(:podman, provider)`): the only
-  # ones that can run on a node, or in a container at all. agy has none today.
+  # ones that can run on a node, or in a container at all.
   defp container_provider?(provider), do: match?({:ok, _}, Sandbox.module(:podman, provider))
+
+  @doc """
+  Can this run go in a container (on a node, or on the primary under `local_backend:
+  podman`)? Its provider needs a podman wrap point, and agy (bd-b2t0kw) also needs the
+  workspace's Google Cloud service-account key, since a container has no keyring: the
+  request says so with `agy_credential?: true` (`Dispatch` reads
+  `Credentials.workspace_service_account?/1`). Absent counts as no key.
+  """
+  @spec container_capable?(map()) :: boolean()
+  def container_capable?(request) do
+    provider = Map.get(request, :provider)
+
+    container_provider?(provider) and
+      (provider_key(provider) != "gemini" or Map.get(request, :agy_credential?, false) == true)
+  end
 
   @doc """
   The backend an `auto` run gets once placement has said where it goes: `:podman` on a
@@ -429,9 +450,10 @@ defmodule Wardmast.Nodes.Placement do
     end
   end
 
-  # A provider with no container wrap point (agy) stays on bwrap whatever `local_backend` says.
+  # A run that cannot go in a container (a provider with no wrap point, agy without its
+  # service-account key) stays on bwrap whatever `local_backend` says.
   defp fresh_local_backend(request) do
-    if container_provider?(Map.get(request, :provider)),
+    if container_capable?(request),
       do: Map.get(request, :local_backend) || :bwrap,
       else: :bwrap
   end
@@ -492,6 +514,10 @@ defmodule Wardmast.Nodes.Placement do
     do: "provider #{provider_label(provider)} has no container wrap point"
 
   def reason_phrase(:provider_no_container, _), do: "provider has no container wrap point"
+
+  def reason_phrase(:no_agy_credential, _),
+    do:
+      "agy cannot run in a container: the workspace's antigravity account has no service-account key"
 
   def reason_phrase(:existing_linked_worktree, _),
     do: "its checkout is already a linked worktree on the primary"

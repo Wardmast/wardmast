@@ -126,9 +126,11 @@ defmodule Wardmast.Worker.ContainerSpawn do
   it either.
   """
 
+  alias Wardmast.Accounts.Credentials
   alias Wardmast.Agents.Claude.ConfigDir
   alias Wardmast.Agents.Codex.AuthSync
   alias Wardmast.Agents.Codex.ConfigDir, as: CodexConfigDir
+  alias Wardmast.Agents.Gemini.ConfigDir, as: GeminiConfigDir
   alias Wardmast.Agents.SecurityPolicy
   alias Wardmast.Guardrails.Projection
   alias Wardmast.Mergers
@@ -169,10 +171,27 @@ defmodule Wardmast.Worker.ContainerSpawn do
   # The model API and the hosts the CLI is known to talk to on its own. The
   # proxy runs in learn mode: these are the baseline an enforcing proxy would
   # start from, and anything else the run reaches is logged to `egress_events`.
+  #
+  # agy (bd-b2t0kw): the CONNECTs agy 1.5.9 made signing in with a service-account key
+  # (`AGY_ADC_AUTH`; an offline probe through a logging proxy): the token exchange, the
+  # userinfo read, Vertex AI at the default `global` location and its telemetry; plus the
+  # feature-flag host the bwrap jail's learn-mode run recorded (`Gemini`'s baseline).
   @egress_infra %{
     "claude" => ["api.anthropic.com:443"],
-    "codex" => ["chatgpt.com:443", "api.openai.com:443", "auth.openai.com:443"]
+    "codex" => ["chatgpt.com:443", "api.openai.com:443", "auth.openai.com:443"],
+    "gemini" => [
+      "oauth2.googleapis.com:443",
+      "www.googleapis.com:443",
+      "aiplatform.googleapis.com:443",
+      "play.googleapis.com:443",
+      "antigravity-unleash.goog:443"
+    ]
   }
+
+  # bd-b2t0kw: where the service-account key is mounted (`podman run --secret`, owned by
+  # the container user, mode 0400) and the env that points agy at it.
+  @agy_key_target "agy-adc.json"
+  @agy_key_path "/run/secrets/" <> @agy_key_target
 
   # Names whose value changes how the `podman` client itself runs. They are
   # passed as `-e NAME=value`, never through the client's environment.
@@ -305,6 +324,7 @@ defmodule Wardmast.Worker.ContainerSpawn do
          {:ok, worktree} <- fetch_worktree(opts),
          {:ok, mounts} <- clone_mounts(worktree),
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
+         {:ok, agy_key} <- agy_credential(provider, opts),
          {:ok, research_dir} <- stage_research(opts, tmp_dir),
          name = container_name(opts),
          {:ok, image, source} <- fetch_image(opts, worktree, provider, name),
@@ -315,7 +335,7 @@ defmodule Wardmast.Worker.ContainerSpawn do
          deps_cache = seed_deps(opts, worktree, image, home),
          {:ok, network, spec} <- start_egress(provider, opts, policy, worktree),
          {:ok, services} <- start_services(opts, name),
-         {:ok, git_secrets} <- create_git_secrets(opts, name, tmp_dir, services) do
+         {:ok, git_secrets} <- create_git_secrets(opts, name, tmp_dir, services, agy_key) do
       track_codex_auth(opts, codex_auth)
 
       {:ok,
@@ -338,7 +358,8 @@ defmodule Wardmast.Worker.ContainerSpawn do
          env:
            container_env(spec, Keyword.get(opts, :git_material)) ++
              GitCredential.container_env(Keyword.get(opts, :git_material)) ++
-             if(services, do: services.env, else: []) ++ research_env(research_dir),
+             if(services, do: services.env, else: []) ++
+             research_env(research_dir) ++ agy_env(agy_key),
          git_secrets: git_secrets,
          pod: services && services.pod,
          deps_cache: deps_cache,
@@ -380,8 +401,10 @@ defmodule Wardmast.Worker.ContainerSpawn do
   # created here on the host (value through a 0600 file, never argv) and removed
   # at `teardown/1`, when the owning worker exits, and by `Container.reap_git_secrets/1`
   # at boot. The request keeps the names and targets only, never a value.
-  defp create_git_secrets(opts, name, tmp_dir, services) do
-    secrets = GitCredential.podman_secrets(Keyword.get(opts, :git_material), name)
+  defp create_git_secrets(opts, name, tmp_dir, services, agy_key) do
+    secrets =
+      GitCredential.podman_secrets(Keyword.get(opts, :git_material), name) ++
+        agy_secrets(agy_key, name)
 
     if secrets == [] do
       {:ok, []}
@@ -415,6 +438,44 @@ defmodule Wardmast.Worker.ContainerSpawn do
       end
     end
   end
+
+  # bd-b2t0kw: agy's Google Cloud service-account key rides the same `--secret` path as
+  # a deploy key: created from a 0600 file that is deleted at once, mounted read-only
+  # for the container user, removed with the container (and by the boot reaper).
+  defp agy_secrets(nil, _name), do: []
+
+  defp agy_secrets(key, name) when is_binary(key),
+    do: [%{name: name <> "-agy-adc", type: :mount, target: @agy_key_target, value: key}]
+
+  # The key's path and the switch that makes agy sign in with it (Application Default
+  # Credentials). Neither is a secret; the key itself is never in the env.
+  defp agy_env(nil), do: []
+
+  defp agy_env(key) when is_binary(key),
+    do: [{"AGY_ADC_AUTH", "true"}, {"GOOGLE_APPLICATION_CREDENTIALS", @agy_key_path}]
+
+  @agy_credential_missing "agy in a container signs in with a Google Cloud service-account " <>
+                            "key, and this workspace's antigravity account has none. Register " <>
+                            "one with `arb account rotate <antigravity account> --kind " <>
+                            "service_account --secret-file key.json` " <>
+                            "(docs/agy-service-account-runbook.md), or run agy on " <>
+                            "sandbox.backend bwrap."
+
+  # agy in a container has no keyring and no operator login to fall back on: its only
+  # way in is the workspace's service-account key (`Credentials.workspace_service_account/1`).
+  # Checked before anything is started, so a missing key starts nothing.
+  defp agy_credential("gemini", opts) do
+    case Credentials.workspace_service_account(workspace_id(Keyword.get(opts, :workspace))) do
+      {:ok, key} -> {:ok, key}
+      :none -> {:error, {:agy_credential_missing, @agy_credential_missing}}
+    end
+  end
+
+  defp agy_credential(_provider, _opts), do: {:ok, nil}
+
+  @doc "What `prepare/1` answers for an agy spawn whose workspace holds no service-account key."
+  @spec agy_credential_missing_message() :: String.t()
+  def agy_credential_missing_message, do: @agy_credential_missing
 
   # The uid the container maps to itself (`--userns=keep-id`): this process's.
   defp host_uid do
@@ -821,6 +882,48 @@ defmodule Wardmast.Worker.ContainerSpawn do
     end
   end
 
+  # bd-b2t0kw: agy's configuration root is its `$HOME` (it has no config-dir variable),
+  # so the per-run HOME is also the run's config dir. Seeded as `Gemini.ConfigDir` seeds a
+  # host spawn's, from the spawn's own policy, minus the passthrough of the operator's
+  # HOME (`.ssh`, `.gitconfig`, ...: the container mounts none of it), plus the run's MCP
+  # config, which dispatch wrote into the host's per-worktree agy HOME (0600: a bearer).
+  defp run_dirs("gemini", tmp_dir, policy, opts) do
+    home = Path.join(tmp_dir, "home")
+    worktree = Keyword.get(opts, :worktree_path)
+
+    with :ok <- File.mkdir_p(home),
+         :ok <-
+           GeminiConfigDir.seed(home,
+             security: policy,
+             worktree: worktree,
+             source_home: nil,
+             boundary: tmp_dir
+           ),
+         :ok <- copy_agy_mcp_config(worktree, home) do
+      {:ok, home, home, nil}
+    else
+      {:error, reason} -> {:error, {:run_dirs_failed, reason}}
+    end
+  end
+
+  defp copy_agy_mcp_config(worktree, home) do
+    source =
+      Path.join(GeminiConfigDir.path(worktree: worktree), GeminiConfigDir.mcp_config_path())
+
+    with {:ok, %File.Stat{type: :regular}} <- File.lstat(source),
+         {:ok, body} <- File.read(source),
+         {:ok, %{} = config} <- Jason.decode(body),
+         {:ok, _path} <- GeminiConfigDir.write_mcp_config_into(home, config) do
+      :ok
+    else
+      # No MCP scope for this spawn (or isolation off): agy runs without MCP, as on the host.
+      {:error, :enoent} -> :ok
+      {:ok, %File.Stat{}} -> {:error, {:mcp_config_unreadable, source, :not_a_regular_file}}
+      {:ok, _not_a_map} -> {:error, {:mcp_config_unreadable, source, :not_an_object}}
+      {:error, reason} -> {:error, {:mcp_config_unreadable, source, reason}}
+    end
+  end
+
   # A Codex container's `TMPDIR` is a subdirectory of the run dir, not the run
   # dir itself. The CLI (0.164.0) refuses to create its helper binaries when
   # `CODEX_HOME` is under the temp dir, and `CODEX_HOME` is `<run dir>/codex-home`:
@@ -941,6 +1044,8 @@ defmodule Wardmast.Worker.ContainerSpawn do
   end
 
   defp config_env_name(%{provider: "codex"}), do: "CODEX_HOME"
+  # agy reads everything from `$HOME` (bd-b2t0kw).
+  defp config_env_name(%{provider: "gemini"}), do: "HOME"
   defp config_env_name(_request), do: "CLAUDE_CONFIG_DIR"
 
   # -- a run placed on a node (RW9) ----------------------------------------------------

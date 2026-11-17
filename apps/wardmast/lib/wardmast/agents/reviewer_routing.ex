@@ -815,18 +815,27 @@ defmodule Wardmast.Agents.ReviewerRouting do
     end
   end
 
-  # Reviewers spawn under `sandbox.review_backend`, not `sandbox.backend`.
+  # Reviewers spawn under `sandbox.review_backend`, not `sandbox.backend`. agy's podman
+  # wrap point serves the task implementer only (bd-b2t0kw): an agy reviewer has no
+  # container path, so it is dropped under podman as before.
   defp check_sandbox_backend(%{type: type} = entry, ctx) do
     policy = SecurityPolicy.for_review_spawn(ctx.security)
 
     case Sandbox.module(policy, type) do
       {:ok, _} ->
-        {:ok, entry}
+        if agy_under_podman?(policy, type),
+          do: {:drop, "sandbox_backend", "#{type} unsupported by podman"},
+          else: {:ok, entry}
 
       {:error, {:sandbox_backend_unavailable, backend, _}} ->
         {:drop, "sandbox_backend", "#{type} unsupported by #{backend}"}
     end
   end
+
+  defp agy_under_podman?(policy, type),
+    do:
+      to_string(type) in ~w(gemini antigravity agy) and
+        SecurityPolicy.sandbox_backend(policy) == :podman
 
   defp check_account(%{account: %ProviderAccount{enabled: false}}, _ctx),
     do: {:drop, "disabled", nil}

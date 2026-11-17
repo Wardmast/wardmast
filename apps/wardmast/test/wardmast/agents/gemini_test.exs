@@ -203,12 +203,25 @@ defmodule Wardmast.Agents.GeminiTest do
       assert Gemini.write_jail_warning(policy(:bypass, %{enabled: false})) == nil
     end
 
-    test "write_confinement/1 is :none and the warning says dispatch is refused under podman" do
-      podman = policy(:bypass, %{backend: :podman})
+    # bd-b2t0kw: under podman agy runs in the container (`ContainerSpawn`), which confines
+    # its writes to the private clone and its network to the egress proxy, in every mode.
+    test "under podman the container confines agy's writes and egress; nothing to warn about" do
+      prev = Application.get_env(:wardmast, :worker_container_network_available)
+      Application.put_env(:wardmast, :worker_container_network_available, true)
 
-      assert Gemini.write_confinement(podman) == :none
-      assert Gemini.write_jail_warning(podman) =~ "podman"
-      assert Gemini.write_jail_warning(podman) =~ "refused in every mode"
+      on_exit(fn ->
+        if prev == nil,
+          do: Application.delete_env(:wardmast, :worker_container_network_available),
+          else: Application.put_env(:wardmast, :worker_container_network_available, prev)
+      end)
+
+      for mode <- [:strict, :bypass, :auto] do
+        podman = policy(mode, %{backend: :podman})
+        assert Gemini.write_confinement(podman) == :os_jail
+        assert Gemini.egress_confinement(podman) == :os_jail
+        assert Gemini.write_jail_warning(podman) == nil
+      end
+
       # Unchanged for the default backend.
       assert Gemini.write_confinement(policy(:strict)) == :os_jail
     end
@@ -803,6 +816,81 @@ defmodule Wardmast.Agents.GeminiTest do
                  security: policy(:bypass, %{backend: :podman}),
                  worktree_path: worktree
                )
+    end
+  end
+
+  describe "backend: podman with the container wrap point (bd-b2t0kw)" do
+    setup do
+      base =
+        Path.join(System.tmp_dir!(), "gemini-podman-wrap-#{System.unique_integer([:positive])}")
+
+      worktree = Path.join(base, "wt")
+      File.mkdir_p!(worktree)
+      on_exit(fn -> File.rm_rf!(base) end)
+      {:ok, worktree: worktree}
+    end
+
+    defp podman(mode),
+      do:
+        SecurityPolicy.merge(SecurityPolicy.base(), %{
+          permissions: %{mode: mode},
+          sandbox: %{backend: :podman}
+        })
+
+    # A caller that hands the spawn to the container (`sandbox_wrap: true`, as dispatch
+    # does) gets the container's agy: no bwrap jail (the container is the jail) and no
+    # keyring check (agy signs in with the service-account key there), whatever the host
+    # has on its PATH.
+    test "sandbox_wrap: the container's agy, no bwrap, no keyring, in every mode", %{
+      worktree: worktree
+    } do
+      Application.put_env(:wardmast, :worker_gemini_keyring_available, false)
+
+      for mode <- [:strict, :bypass, :auto] do
+        assert {:ok,
+                [
+                  "sh",
+                  "-c",
+                  ~s(exec "$@" < /dev/null),
+                  "sh",
+                  "/opt/arbiter/cli/agy",
+                  "-p",
+                  "p" | flags
+                ]} =
+                 default_argv("p",
+                   security: podman(mode),
+                   worktree_path: worktree,
+                   sandbox_wrap: true
+                 )
+
+        refute Enum.any?(flags, &String.contains?(&1, "bwrap"))
+        assert "--output-format" in flags
+      end
+    end
+
+    test "without sandbox_wrap the podman policy is still refused", %{worktree: worktree} do
+      assert {:error, {:sandbox_backend_unavailable, :podman, _}} =
+               default_argv("p", security: podman(:bypass), worktree_path: worktree)
+    end
+
+    # The container's HOME and credential are `ContainerSpawn`'s: the host's per-worktree
+    # agy HOME and any Gemini API key stay out of the container's env.
+    test "spawn_env/1 hands the container neither the host's agy HOME nor an API key", %{
+      worktree: worktree
+    } do
+      env =
+        Gemini.spawn_env(
+          security: podman(:bypass),
+          worktree_path: worktree,
+          sandbox_wrap: true,
+          api_key: "gemini-api-key",
+          thinking: "high"
+        )
+
+      refute List.keymember?(env, "HOME", 0)
+      refute List.keymember?(env, "GEMINI_API_KEY", 0)
+      refute List.keymember?(env, "GOOGLE_GENAI_API_KEY", 0)
+      assert {"GEMINI_THINKING_LEVEL", "high"} in env
     end
   end
 
