@@ -50,11 +50,7 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
   # the explicit act of classifying it as release-env-safe.
   @pure_tool_commands ~w(
     git gh glab
-<<<<<<< HEAD
-    cp diff kill pgrep ps lsof ss
-=======
     cp diff kill pgrep lsof ss ps
->>>>>>> origin/main
     systemctl loginctl
     stty
     dolt kubectl
