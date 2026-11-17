@@ -38,4 +38,21 @@ defmodule Wardmast.Worker.PortableCpTest do
     assert {_, 0} = System.cmd("cp", argv, stderr_to_stdout: true)
     assert File.read!(Path.join(dir, "dst/f")) == "x"
   end
+
+  test "the darwin argv carries no GNU-only flag and really seeds the tree" do
+    dir = Path.join(System.tmp_dir!(), "portable-cp-bsd-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.join(dir, "src/nested"))
+    File.write!(Path.join(dir, "src/nested/f"), "payload")
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    argv =
+      PortableCp.args(
+        ["-a", "--reflink=auto", Path.join(dir, "src"), Path.join(dir, "dst")],
+        {:unix, :darwin}
+      )
+
+    refute Enum.any?(argv, &String.starts_with?(&1, "--"))
+    assert {_, 0} = System.cmd("cp", argv, stderr_to_stdout: true)
+    assert File.read!(Path.join(dir, "dst/nested/f")) == "payload"
+  end
 end
