@@ -82,7 +82,7 @@ defmodule WardmastWeb.CoreComponents.BrandmarkTest do
       html = render_component(&brandmark/1, form: "wordmark", size: 160, tone: "accent")
 
       refute html =~ "<img"
-      assert html =~ ">arbiter<"
+      assert html =~ ">wardmast<"
       assert html =~ ~s(d="M38 7 H28 V41 H38")
       assert html =~ ~s(d="M162 7 H172 V41 H162")
     end
@@ -102,21 +102,21 @@ defmodule WardmastWeb.CoreComponents.BrandmarkTest do
     test "is always lowercase" do
       html = render_component(&brandmark/1, form: "wordmark", size: 160, tone: "accent")
 
-      assert html =~ ">arbiter<"
+      assert html =~ ">wardmast<"
       refute html =~ ">Wardmast<"
     end
 
     test "falls back to icon-only below the 120px minimum width" do
       html = render_component(&brandmark/1, form: "wordmark", size: 100, tone: "accent")
 
-      refute html =~ ">arbiter<"
+      refute html =~ ">wardmast<"
       assert html =~ ~s(viewBox="0 0 64 64")
     end
 
     test "renders the word (not the icon fallback) between the 120px minimum and the 140px stroke breakpoint" do
       html = render_component(&brandmark/1, form: "wordmark", size: 130, tone: "accent")
 
-      assert html =~ ">arbiter<"
+      assert html =~ ">wardmast<"
       assert html =~ ~s(stroke-width="5")
     end
 
@@ -131,13 +131,13 @@ defmodule WardmastWeb.CoreComponents.BrandmarkTest do
 
       assert html =~ ~s(rx="8")
       assert html =~ "var(--arb-live)"
-      assert html =~ ">arbiter<"
+      assert html =~ ">wardmast<"
     end
 
     test "mono tone renders the word at full opacity" do
       html = render_component(&brandmark/1, form: "wordmark", size: 160, tone: "mono")
 
-      assert html =~ ">arbiter<"
+      assert html =~ ">wardmast<"
       refute html =~ "opacity: 0.5"
     end
   end

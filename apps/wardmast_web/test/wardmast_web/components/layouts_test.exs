@@ -126,7 +126,7 @@ defmodule WardmastWeb.LayoutsTest do
     test "renders the accent wordmark brandmark, not the retired <img> logo" do
       html = render_app()
 
-      assert html =~ "arbiter"
+      assert html =~ "wardmast"
       refute html =~ "<img"
     end
   end
@@ -151,7 +151,7 @@ defmodule WardmastWeb.LayoutsTest do
       bar = status_bar(render_app(%{quotas: [quota, Wardmast.Quota.blank_view("codex")]}))
 
       assert bar |> LazyHTML.query("svg, [aria-label]") |> Enum.count() > 0
-      assert bar |> LazyHTML.text() =~ "arbiter"
+      assert bar |> LazyHTML.text() =~ "wardmast"
       assert bar |> LazyHTML.query("#appshell-live") |> Enum.count() == 1
       assert bar |> LazyHTML.query("#coordinator-inbox-trigger") |> Enum.count() == 1
       assert bar |> LazyHTML.query("[data-phx-theme], #theme-toggle") |> Enum.count() == 0
