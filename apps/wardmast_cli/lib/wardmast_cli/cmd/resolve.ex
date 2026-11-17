@@ -20,6 +20,11 @@ defmodule WardmastCli.Cmd.Resolve do
 
       --gate <g>     review_gate (default) | notes_gate | commit_gate
       --round <n>    the ReviewGate round this answers (default: the latest)
+      --confirm-merge
+                     required for --amend while the latest reviewer round did not
+                     approve: that amend PERMITS MERGING the head with the findings
+                     unaddressed and dispatches no further pass (use --send-back for
+                     one). Without it the server refuses and names the head.
       --fix-round-attempt <n>
                      which fix-round attempt that round belongs to — `round`
                      restarts at 1 each attempt, so this disambiguates it
@@ -54,6 +59,7 @@ defmodule WardmastCli.Cmd.Resolve do
     gate: :string,
     round: :integer,
     fix_round_attempt: :integer,
+    confirm_merge: :boolean,
     json: :boolean
   ]
 
@@ -80,6 +86,7 @@ defmodule WardmastCli.Cmd.Resolve do
         |> put_opt("gate", opts[:gate])
         |> put_opt("round", opts[:round])
         |> put_opt("fix_round_attempt", opts[:fix_round_attempt])
+        |> put_opt("confirm_merge", opts[:confirm_merge])
 
       case Client.post("/api/issues/" <> id <> "/resolve", body) do
         {:ok, resolution} -> emit(resolution, mode)
@@ -123,6 +130,15 @@ defmodule WardmastCli.Cmd.Resolve do
     )
 
     IO.puts("  #{resolution["reasoning"]}")
+
+    if resolution["decision"] in ["accept_as_is", "amend"] and resolution["gate"] == "review_gate" do
+      head = resolution["head_sha"] || "the ticket's head"
+
+      IO.puts(
+        "  This permits merging #{head} without a reviewer APPROVE and dispatches no further " <>
+          "pass. To return the work to the implementer instead, record --send-back."
+      )
+    end
   end
 
   defp usage_hint do

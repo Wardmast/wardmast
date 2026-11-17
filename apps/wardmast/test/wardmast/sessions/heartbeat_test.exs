@@ -49,6 +49,30 @@ defmodule Wardmast.Sessions.HeartbeatTest do
     refute File.exists?(a)
   end
 
+  @tag :tmp_dir
+  test "on macOS (no XDG_RUNTIME_DIR) the heartbeat lands in the private short socket dir", %{
+    tmp_dir: tmp
+  } do
+    Application.delete_env(:wardmast, :sessions_runtime_dir)
+    xdg = System.get_env("XDG_RUNTIME_DIR")
+    System.delete_env("XDG_RUNTIME_DIR")
+    System.put_env("WARDMAST_SOCKET_ROOT", Path.join(tmp, "arb"))
+    Application.put_env(:wardmast, :sessions_os, :darwin)
+
+    on_exit(fn ->
+      if xdg, do: System.put_env("XDG_RUNTIME_DIR", xdg)
+      System.delete_env("WARDMAST_SOCKET_ROOT")
+      Application.delete_env(:wardmast, :sessions_os)
+    end)
+
+    assert {:ok, path} = Naming.heartbeat_path()
+    assert Path.dirname(path) == Path.join([tmp, "arb", "sessions"])
+
+    assert :ok = Heartbeat.touch()
+    assert File.regular?(path)
+    assert Bitwise.band(File.stat!(Path.dirname(path)).mode, 0o077) == 0
+  end
+
   test "the runtime dir honors XDG_RUNTIME_DIR when no override is set" do
     Application.delete_env(:wardmast, :sessions_runtime_dir)
     xdg = System.get_env("XDG_RUNTIME_DIR")

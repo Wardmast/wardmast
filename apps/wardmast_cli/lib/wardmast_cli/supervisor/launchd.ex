@@ -31,6 +31,7 @@ defmodule WardmastCli.Supervisor.Launchd do
   alias WardmastCli.Cmd.InstallService.Unit
   alias WardmastCli.Cmd.Start
   alias WardmastCli.Output
+  alias WardmastCli.SessionSockets
   alias WardmastCli.Supervisor.Launchd.Plist
 
   @not_loaded ~r/Could not find service|No such process|not find specified service/i
@@ -169,10 +170,43 @@ defmodule WardmastCli.Supervisor.Launchd do
 
   # ---- session scopes (arb session list) -------------------------------------
 
-  # `arb-session-*` are transient systemd scopes; launchd has none, so the
-  # listing is empty rather than an error.
+  # launchd has no transient scopes: a macOS coordinator session is a detached
+  # tmux server recorded in a pidfile (`Wardmast.Sessions.Runner.Darwin`, MAC
+  # P3-1). Rendered in `systemctl list-units` columns so `arb session list`
+  # parses both the same way. A pid that is not (or no longer) a tmux is a
+  # stale pidfile; `ps` itself failing is an error, never "no sessions".
   @impl true
-  def list_scopes(_prefix), do: {:ok, ""}
+  def list_scopes(prefix) do
+    SessionSockets.pidfiles()
+    |> Enum.sort()
+    |> Enum.reduce_while({:ok, []}, fn {id, pid}, {:ok, acc} ->
+      case tmux_alive(pid) do
+        :alive ->
+          {:cont,
+           {:ok, ["#{prefix}#{id}.scope loaded active running tmux server pid #{pid}\n" | acc]}}
+
+        :dead ->
+          {:cont, {:ok, acc}}
+
+        {:error, detail} ->
+          {:halt, {:error, "ps failed while listing sessions", detail}}
+      end
+    end)
+    |> case do
+      {:ok, lines} -> {:ok, lines |> Enum.reverse() |> Enum.join()}
+      error -> error
+    end
+  end
+
+  defp tmux_alive(pid) do
+    case run_cmd("ps", ["-p", Integer.to_string(pid), "-o", "comm="], stderr_to_stdout: true) do
+      {out, 0} -> if String.contains?(out, "tmux"), do: :alive, else: :dead
+      {_out, 1} -> :dead
+      {out, code} -> {:error, "ps exited #{code}: #{String.trim(out)}"}
+    end
+  rescue
+    e in ErlangError -> {:error, "could not run ps: #{inspect(e.original)}"}
+  end
 
   # ---- install / uninstall (arb install service) -----------------------------
 

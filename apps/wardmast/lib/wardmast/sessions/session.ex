@@ -218,6 +218,14 @@ defmodule Wardmast.Sessions.Session do
                 "cannot place the tmux socket: XDG_RUNTIME_DIR is unset, so this process " <>
                   "is not inside a systemd user session and cannot host a session scope"
             )
+
+          {:error, {:socket_path_too_long, path, max}} ->
+            Ash.Changeset.add_error(changeset,
+              field: :tmux_socket,
+              message:
+                "cannot place the tmux socket: #{path} is #{byte_size(path)} bytes, past the " <>
+                  "#{max}-byte Unix-socket limit; set WARDMAST_SOCKET_ROOT to a shorter directory"
+            )
         end
       end
     end

@@ -2070,6 +2070,10 @@ defmodule Wardmast.MCP.Catalog do
           "of the head they were recorded against). send_back means ANOTHER REVIEW ROUND FOLLOWS " <>
           "the implementer's next completion — it never authorises a merge, and a PR whose " <>
           "latest reviewer verdict is not APPROVE stays unmerged until that round approves. " <>
+          "An amend on a round that did not approve is refused unless `confirm_merge: true`: " <>
+          "it permits merging that head with the findings unaddressed and dispatches no pass " <>
+          "(use send_back for one). A later send_back/reject revokes an earlier amend's " <>
+          "permission and takes the ticket off the merge path. " <>
           "CLI: `arb review resolve <ticket> --amend \"<reasoning>\"`.",
       input_schema: %{
         "type" => "object",
@@ -2109,6 +2113,14 @@ defmodule Wardmast.MCP.Catalog do
           "fix_round_attempt" => %{
             "type" => "integer",
             "description" => "The fix-round pass `round` belongs to (default 0 with `round`)."
+          },
+          "confirm_merge" => %{
+            "type" => "boolean",
+            "description" =>
+              "Required to record an `amend` while the ticket's latest reviewer round did not " <>
+                "approve: that amend PERMITS MERGING the head with the findings unaddressed " <>
+                "and dispatches no further pass. Without it the amend is refused, naming the " <>
+                "head. To get another pass use `send_back` instead."
           },
           "head_sha" => %{
             "type" => "string",

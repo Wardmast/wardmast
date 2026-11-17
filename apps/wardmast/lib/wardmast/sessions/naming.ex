@@ -22,12 +22,36 @@ defmodule Wardmast.Sessions.Naming do
   `systemctl` prints it, and unit-name matching in the sweep is a string
   compare. `unit_arg/1` drops it again for `systemd-run --unit=`, matching the
   RFC §4.3 command shape literally.
+
+  ## macOS (bd-a1pnnv, MAC P3-1)
+
+  There is no systemd, so no scope: `Wardmast.Sessions.Runner.Darwin` stands a
+  **pidfile** (`session-<id>.pid`, beside the socket) in for the scope unit.
+  The unit *name* is kept as the session's stable handle — the row, the
+  adoption sweep and `arb session list` all still speak `arb-session-<id>.scope`
+  — and the Darwin runner answers `systemctl`-shaped questions about it from
+  the pidfile + tmux.
+
+  macOS also has no `XDG_RUNTIME_DIR`, and `$TMPDIR` (`/var/folders/xx/…/T/`)
+  is so deep that `<TMPDIR>/arbiter/session-<uuid>.sock` overflows the 104-byte
+  `sun_path` limit. The darwin socket dir is therefore
+  `Wardmast.Config.Paths.socket_root/0` (`/tmp/arb-<hash>`) plus `/sessions`,
+  and `socket_path/1` refuses — with
+  `{:error, {:socket_path_too_long, path, max}}` — a path that would not fit,
+  rather than letting `tmux` fail with an opaque "File name too long" at launch.
   """
 
   @unit_prefix "arb-session-"
   @socket_prefix "session-"
   @tmux_session "coord"
   @pipe_suffix ".out"
+  @pid_suffix ".pid"
+
+  # `sockaddr_un.sun_path` is 104 bytes on macOS/BSD (108 on Linux), NUL included.
+  @darwin_sun_path 104
+
+  @type socket_error ::
+          :no_runtime_dir | {:socket_path_too_long, String.t(), pos_integer()}
 
   @doc """
   The prefix every session scope unit's name starts with. Also how
@@ -72,11 +96,40 @@ defmodule Wardmast.Sessions.Naming do
   which is the correct lifetime for a socket whose session cannot outlive the
   user manager anyway.
   """
-  @spec socket_path(String.t()) :: {:ok, String.t()} | {:error, :no_runtime_dir}
+  @spec socket_path(String.t()) :: {:ok, String.t()} | {:error, socket_error()}
   def socket_path(id) when is_binary(id) do
-    case socket_dir() do
-      {:ok, dir} -> {:ok, Path.join(dir, @socket_prefix <> id <> ".sock")}
-      error -> error
+    with {:ok, dir} <- socket_dir() do
+      check_socket_length(Path.join(dir, @socket_prefix <> id <> ".sock"))
+    end
+  end
+
+  @doc """
+  The host OS family as sessions see it: `config :wardmast, :sessions_os` (a
+  test seam), else `:os.type/0`'s second element (`:darwin`, `:linux`, …).
+  """
+  @spec os() :: atom()
+  def os do
+    Application.get_env(:wardmast, :sessions_os) || elem(:os.type(), 1)
+  end
+
+  @doc """
+  Longest usable Unix-socket path on this host, or `nil` where it is not
+  enforced here. Only darwin is checked: its limit (104 with the NUL, so 103)
+  is what the macOS port had to design around, and the darwin socket dir is
+  ours to keep short.
+  """
+  @spec max_socket_bytes() :: pos_integer() | nil
+  def max_socket_bytes do
+    if os() == :darwin, do: @darwin_sun_path - 1, else: nil
+  end
+
+  defp check_socket_length(path) do
+    case max_socket_bytes() do
+      max when is_integer(max) and byte_size(path) > max ->
+        {:error, {:socket_path_too_long, path, max}}
+
+      _ ->
+        {:ok, path}
     end
   end
 
@@ -88,11 +141,10 @@ defmodule Wardmast.Sessions.Naming do
   (one tmux server) per login session, so ending one cannot take another's
   server down with its systemd scope.
   """
-  @spec login_socket_path(String.t(), String.t()) :: {:ok, String.t()} | {:error, :no_runtime_dir}
+  @spec login_socket_path(String.t(), String.t()) :: {:ok, String.t()} | {:error, socket_error()}
   def login_socket_path(id, account) when is_binary(id) and is_binary(account) do
-    case socket_dir() do
-      {:ok, dir} -> {:ok, Path.join(dir, login_name(account, id) <> ".sock")}
-      error -> error
+    with {:ok, dir} <- socket_dir() do
+      check_socket_length(Path.join(dir, login_name(account, id) <> ".sock"))
     end
   end
 
@@ -115,8 +167,42 @@ defmodule Wardmast.Sessions.Naming do
   @spec socket_dir() :: {:ok, String.t()} | {:error, :no_runtime_dir}
   def socket_dir do
     case runtime_dir() do
+      {:xdg, dir} -> {:ok, Path.join(dir, "arbiter")}
+      {:short, dir} -> {:ok, dir}
       nil -> {:error, :no_runtime_dir}
-      dir -> {:ok, Path.join(dir, "arbiter")}
+    end
+  end
+
+  @doc """
+  Create the socket dir if needed and return it. On macOS the dir lives in
+  world-writable `/tmp`, so it (and its `arb-<hash>` parent) is made `0700`:
+  a tmux socket there must not be reachable by other users.
+  """
+  @spec ensure_socket_dir() ::
+          {:ok, String.t()}
+          | {:error, :no_runtime_dir | {:socket_dir_unavailable, String.t(), term()}}
+  def ensure_socket_dir do
+    with {:ok, dir} <- socket_dir(),
+         :ok <- mkdir_private(dir, match?({:short, _}, runtime_dir())) do
+      {:ok, dir}
+    end
+  end
+
+  defp mkdir_private(dir, private?) do
+    dirs = if private?, do: [Path.dirname(dir), dir], else: []
+
+    with :ok <- File.mkdir_p(dir),
+         :ok <- Enum.reduce_while(dirs, :ok, &chmod_step/2) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:socket_dir_unavailable, dir, reason}}
+    end
+  end
+
+  defp chmod_step(d, :ok) do
+    case File.chmod(d, 0o700) do
+      :ok -> {:cont, :ok}
+      error -> {:halt, error}
     end
   end
 
@@ -165,6 +251,47 @@ defmodule Wardmast.Sessions.Naming do
     case socket_dir() do
       {:ok, dir} -> {:ok, Path.join(dir, heartbeat_basename())}
       error -> error
+    end
+  end
+
+  @doc """
+  Absolute path of the session's **pidfile** — macOS only (see the moduledoc).
+
+  Two lines: the tmux server's pid, then the socket path. Written by
+  `Wardmast.Sessions.Runner.Darwin` once the server is up; it is the darwin
+  stand-in for "is the scope unit active" and is what lets a `stop` find the
+  socket again without the session row.
+  """
+  @spec pid_path(String.t()) :: {:ok, String.t()} | {:error, :no_runtime_dir}
+  def pid_path(id) when is_binary(id) do
+    case socket_dir() do
+      {:ok, dir} -> {:ok, Path.join(dir, pid_basename(id))}
+      error -> error
+    end
+  end
+
+  @doc "The pidfile's name, without a directory."
+  @spec pid_basename(String.t()) :: String.t()
+  def pid_basename(id) when is_binary(id), do: @socket_prefix <> id <> @pid_suffix
+
+  @doc "Glob matching every session pidfile on this host."
+  @spec pid_glob() :: {:ok, String.t()} | {:error, :no_runtime_dir}
+  def pid_glob do
+    case socket_dir() do
+      {:ok, dir} -> {:ok, Path.join(dir, @socket_prefix <> "*" <> @pid_suffix)}
+      error -> error
+    end
+  end
+
+  @doc "The session id a pidfile path belongs to, or `nil`."
+  @spec session_id_from_pidfile(String.t()) :: String.t() | nil
+  def session_id_from_pidfile(path) when is_binary(path) do
+    with @socket_prefix <> rest <- Path.basename(path),
+         true <- String.ends_with?(rest, @pid_suffix),
+         id when id != "" <- String.trim_trailing(rest, @pid_suffix) do
+      id
+    else
+      _ -> nil
     end
   end
 
@@ -226,7 +353,19 @@ defmodule Wardmast.Sessions.Naming do
   # environment a session can launch in (`systemd-run --user` needs the user
   # manager anyway). Config override exists so a test can point the socket dir
   # at a tmp_dir without exporting a var into the whole VM.
+  #
+  # macOS has no `XDG_RUNTIME_DIR` (and no systemd user session to want it), so
+  # there the socket dir falls back to the short `/tmp/arb-<hash>/sessions`.
   defp runtime_dir do
-    Application.get_env(:wardmast, :sessions_runtime_dir) || System.get_env("XDG_RUNTIME_DIR")
+    case Application.get_env(:wardmast, :sessions_runtime_dir) ||
+           System.get_env("XDG_RUNTIME_DIR") do
+      dir when is_binary(dir) and dir != "" ->
+        {:xdg, dir}
+
+      _ ->
+        if os() == :darwin,
+          do: {:short, Path.join(Wardmast.Config.Paths.socket_root(), "sessions")},
+          else: nil
+    end
   end
 end

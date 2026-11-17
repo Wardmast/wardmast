@@ -71,7 +71,9 @@ defmodule Wardmast.Worker.SpawnEnvTest do
       System.put_env("LC_TEST_MARKER", "C")
       on_exit(fn -> System.delete_env("LC_TEST_MARKER") end)
 
-      env = "claude" |> then(&SpawnEnv.port_env([], &1)) |> child_env()
+      # Pin the OS: on darwin port_env appends the Homebrew baseline dirs to PATH
+      # (covered below), so "inherited untouched" is the non-darwin contract.
+      env = "claude" |> then(&SpawnEnv.port_env([], &1, {:unix, :linux})) |> child_env()
 
       assert env["PATH"] == System.get_env("PATH")
       assert env["HOME"] == System.get_env("HOME")

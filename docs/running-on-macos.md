@@ -55,11 +55,11 @@ Re-run `arb install service` after changing `PATH` or secrets to refresh
 
 | Area | macOS dev mode | Linux |
 | --- | --- | --- |
-| Terminal sessions (`arb-session-*` scopes) | **Not available.** It is a systemd concept; no launchd equivalent in phase 1. | Supported |
+| Terminal sessions (`arb-session-*`) | **Supported, without a scope.** Each session is a detached tmux server (`Wardmast.Sessions.Runner.Darwin`) in `/tmp/arb-<hash>/sessions` (short, `0700`: macOS's 104-byte socket limit rules out `$TMPDIR`), tracked by a pidfile plus `tmux has-session`. They survive a server restart (`AbandonProcessGroup = true`) and are re-adopted at boot. A stop is `tmux kill-server` + `SIGTERM`, not a cgroup kill, so a deliberately `nohup`-ed grandchild can outlive it. `arb session list` / `attach` work with the server down. | Supported (systemd scope) |
 | Worker sandbox | **None.** Workers run unconfined as your user. | bwrap sandbox |
 | Per-worker memory cap | **None.** There is no cgroup equivalent, so a runaway worker is not capped. | systemd cgroup limits |
 | `:strict` isolation mode | **Unavailable**, because it depends on the sandbox. | Available |
-| Workers surviving a server restart | **No.** The agent runs with `AbandonProcessGroup = false`, so stopping the service kills the process group, workers included. | Supported |
+| Workers surviving a server restart | **No.** The plist sets `AbandonProcessGroup = true` (so detached terminal sessions survive), which means launchd no longer kills the group; the server's own shutdown and the boot-time orphan sweep reap each worker's process group instead. Re-run `arb install service` to refresh an older plist that still says `false`. | Supported |
 | Start before login | **No.** A LaunchAgent starts at login. | `loginctl enable-linger` |
 | Log rotation timers | Not installed. | logrotate timers |
 | System scope (`--system`) | Refused. | Supported |

@@ -341,9 +341,11 @@ defmodule Wardmast.MCP.Tools do
          {:ok, _reasoning} <- require_string(args, "reasoning"),
          {:ok, resolution} <-
            args
-           |> Map.take(~w(task_id decision reasoning gate round fix_round_attempt head_sha))
+           |> Map.take(
+             ~w(task_id decision reasoning gate round fix_round_attempt head_sha confirm_merge)
+           )
            |> Map.put("actor", Wardmast.Params.actor_label(scope) || "coordinator")
-           |> Resolutions.record() do
+           |> Resolutions.record(require_confirm_merge: true) do
       {:ok, %{resolution: Resolutions.serialize(resolution)}}
     end
   rescue

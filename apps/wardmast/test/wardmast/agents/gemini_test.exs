@@ -8,6 +8,10 @@ defmodule Wardmast.Agents.GeminiTest do
   alias Wardmast.Guardrails.Projection
   alias Wardmast.Worker.Jail
 
+  # Pins the D-Bus (Secret Service) message paths so they hold on a darwin host,
+  # where the keyring message is the Keychain one instead (bd-6vdoaa).
+  @linux {:unix, :linux}
+
   # A jailed spawn needs the worker pid its egress run is bound to (bd-cfktou);
   # the test process stands in for it unless a test names another.
   defp default_argv(prompt, opts),
@@ -526,7 +530,11 @@ defmodule Wardmast.Agents.GeminiTest do
       Application.put_env(:wardmast, :worker_gemini_keyring_available, false)
 
       assert {:error, {:no_keyring, "agy needs a keyring (D-Bus) or its own login on this host"}} =
-               default_argv("p", security: policy(:bypass), worktree_path: worktree)
+               default_argv("p",
+                 security: policy(:bypass),
+                 worktree_path: worktree,
+                 os: @linux
+               )
     end
 
     test "unjailed agy with no session bus at all is refused at spawn", %{worktree: worktree} do
@@ -1999,7 +2007,7 @@ defmodule Wardmast.Agents.GeminiTest do
       _agy = stub_exec(tmp, "agy")
 
       assert {:error, %Wardmast.Worker.StopReason{} = reason} =
-               Gemini.auth_probe(keyring: false)
+               Gemini.auth_probe(keyring: false, os: @linux)
 
       assert reason.category == :auth_expired
       assert reason.summary == "agy needs a keyring (D-Bus) or its own login on this host"
@@ -2011,7 +2019,7 @@ defmodule Wardmast.Agents.GeminiTest do
       _agy = stub_exec(tmp, "agy")
       Application.put_env(:wardmast, :worker_gemini_keyring_available, false)
 
-      assert {:error, %Wardmast.Worker.StopReason{} = reason} = Gemini.auth_probe([])
+      assert {:error, %Wardmast.Worker.StopReason{} = reason} = Gemini.auth_probe(os: @linux)
       assert reason.category == :auth_expired
       assert reason.summary == "agy needs a keyring (D-Bus) or its own login on this host"
     end
@@ -2047,7 +2055,7 @@ defmodule Wardmast.Agents.GeminiTest do
       _agy = stub_exec(tmp, "agy")
 
       assert {:error, %Wardmast.Worker.StopReason{} = reason} =
-               Wardmast.Agents.Preflight.check(Gemini, keyring: false)
+               Wardmast.Agents.Preflight.check(Gemini, keyring: false, os: @linux)
 
       assert reason.category == :auth_expired
       assert reason.summary == "agy needs a keyring (D-Bus) or its own login on this host"
@@ -2072,19 +2080,19 @@ defmodule Wardmast.Agents.GeminiTest do
         end
       end)
 
-      assert :skipped = Gemini.auth_probe([])
+      assert :skipped = Gemini.auth_probe(os: @linux)
     end
 
     test "upstream gemini: returns :skipped regardless of keyring status", %{tmp: tmp} do
       _gemini = stub_exec(tmp, "gemini")
 
-      assert :skipped = Gemini.auth_probe(keyring: false)
+      assert :skipped = Gemini.auth_probe(keyring: false, os: @linux)
     end
 
     test "returns {:error, :crashed} when neither CLI is on PATH" do
       System.put_env("PATH", "/nonexistent-dir-for-test")
 
-      assert {:error, %Wardmast.Worker.StopReason{} = reason} = Gemini.auth_probe([])
+      assert {:error, %Wardmast.Worker.StopReason{} = reason} = Gemini.auth_probe(os: @linux)
       assert reason.category == :crashed
       assert reason.summary =~ "not found on PATH"
     end
