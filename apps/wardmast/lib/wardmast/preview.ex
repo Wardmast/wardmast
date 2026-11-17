@@ -404,6 +404,36 @@ defmodule Wardmast.Preview do
     end
   end
 
+  @doc """
+  What the dashboard shows for a ticket: `%{repo, configured?, row, log_tail}`.
+  `configured?` is whether the ticket's repo has a usable preview config;
+  `row` the preview's row (nil when none); `log_tail` the end of the log of a
+  failed one. Does not touch the preview's idle clock.
+  """
+  @spec overview(String.t()) :: map()
+  def overview(task_id) when is_binary(task_id) do
+    {repo, configured?} =
+      with {:ok, %Issue{repo: repo, workspace_id: ws_id}} when is_binary(repo) <-
+             Ash.get(Issue, task_id),
+           {:ok, %Workspace{} = ws} <- Ash.get(Workspace, ws_id) do
+        {repo, match?({:ok, _}, Config.resolve(ws, repo))}
+      else
+        _ -> {nil, false}
+      end
+
+    row = task_id |> rows([]) |> List.first()
+
+    log_tail =
+      with %Lease{status: "failed"} <- row,
+           {:ok, %{content: tail}} <- logs(task_id, repo: row.repo, lines: 25) do
+        tail
+      else
+        _ -> nil
+      end
+
+    %{repo: (row && row.repo) || repo, configured?: configured?, row: row, log_tail: log_tail}
+  end
+
   @doc "A JSON-ready map for a preview row."
   @spec serialize(Lease.t()) :: map()
   def serialize(%Lease{} = l) do
