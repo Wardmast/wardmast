@@ -443,7 +443,12 @@ defmodule Wardmast.PreviewTest do
 
       {:ok, _} = Leases.update(lease, %{status: "running"})
 
-      assert [{"bd-orphan", "orphaned"}] = Preview.sweep()
+      # still inside the launch window (its Runner may be about to start): left alone
+      assert Preview.sweep() == []
+
+      later = DateTime.add(DateTime.utc_now(), 300, :second)
+      assert [{"bd-orphan", "orphaned"}] = Preview.sweep(later)
+
       row = Leases.get("app", "bd-orphan")
       assert row.status == "failed"
       assert row.port == nil

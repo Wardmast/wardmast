@@ -459,7 +459,8 @@ defmodule Wardmast.Preview do
   @doc """
   One pass over every live preview, stopping the ones that should not run:
 
-    * the preview process is gone (a server restart orphaned the row) — marked failed;
+    * the preview process is gone for over two minutes (a server restart
+      orphaned the row) — marked failed;
     * its ticket is closed or merged (`verifying`/`closed`) or no longer exists;
     * it runs in the ticket's own worktree and that worktree was removed;
     * it has not been touched for the repo's `idle_ttl_seconds`.
@@ -486,8 +487,11 @@ defmodule Wardmast.Preview do
 
   defp sweep_reason(%Lease{} = row, now) do
     cond do
-      Runner.whereis(row.repo, row.task_id) == nil ->
+      Runner.whereis(row.repo, row.task_id) == nil and past_launch_grace?(row, now) ->
         :orphaned
+
+      Runner.whereis(row.repo, row.task_id) == nil ->
+        nil
 
       ticket_done?(row.task_id) ->
         "the ticket is closed or merged"
@@ -502,6 +506,16 @@ defmodule Wardmast.Preview do
         nil
     end
   end
+
+  # A row exists from the moment the port is leased, before its Runner starts
+  # (the checkout is built in between). Only a row with no Runner well past that
+  # window is an orphan of a dead VM.
+  @launch_grace_s 120
+
+  defp past_launch_grace?(%Lease{started_at: nil}, _now), do: true
+
+  defp past_launch_grace?(%Lease{started_at: at}, now),
+    do: DateTime.diff(now, at, :second) >= @launch_grace_s
 
   defp ticket_done?(task_id) do
     case Ash.get(Issue, task_id) do

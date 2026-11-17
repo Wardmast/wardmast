@@ -67,12 +67,22 @@ defmodule Wardmast.Preview.Leases do
           )
         )
 
-      case row
-           |> Ecto.Changeset.change()
-           |> Ecto.Changeset.unique_constraint(:port)
-           |> Repo.insert() do
-        {:ok, lease} -> {:ok, lease}
-        {:error, _lost_the_race} -> take_first(attrs, rest, probe)
+      changeset =
+        row
+        |> Ecto.Changeset.change()
+        |> Ecto.Changeset.unique_constraint(:port)
+        |> Ecto.Changeset.unique_constraint([:repo, :task_id])
+
+      case Repo.insert(changeset) do
+        {:ok, lease} ->
+          {:ok, lease}
+
+        {:error, %Ecto.Changeset{errors: errors}} ->
+          # Another acquirer took this port: try the next. Another acquirer took
+          # this (repo, task_id): that preview is theirs.
+          if Keyword.has_key?(errors, :port),
+            do: take_first(attrs, rest, probe),
+            else: {:error, {:already_leased, get(attrs.repo, attrs.task_id)}}
       end
     else
       take_first(attrs, rest, probe)
