@@ -843,11 +843,11 @@ defmodule WardmastWeb.Api.IssueController do
   def resolve(conn, %{"id" => id} = params) do
     attrs =
       params
-      |> Map.take(~w(decision reasoning gate round fix_round_attempt head_sha))
+      |> Map.take(~w(decision reasoning gate round fix_round_attempt head_sha confirm_merge))
       |> Map.put("actor", Params.actor_label(conn.assigns[:mcp_scope]) || "coordinator")
       |> Map.put("task_id", id)
 
-    case Wardmast.ReviewGate.Resolutions.record(attrs) do
+    case Wardmast.ReviewGate.Resolutions.record(attrs, require_confirm_merge: true) do
       {:ok, resolution} ->
         conn
         |> put_status(:created)
