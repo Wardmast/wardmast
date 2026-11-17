@@ -13,6 +13,8 @@ defmodule Wardmast.Worker.Image.PublishLedger do
   `nil`).
   """
 
+  require Logger
+
   alias Wardmast.Config.Paths
 
   @type entry :: %{key: term(), ctx: map(), at: DateTime.t(), ref: String.t() | nil}
@@ -56,7 +58,7 @@ defmodule Wardmast.Worker.Image.PublishLedger do
 
           entry = %{
             key: key,
-            ctx: ctx,
+            ctx: plain_ctx(ctx),
             at: at,
             ref: Keyword.get(opts, :ref),
             image: Keyword.get(opts, :image)
@@ -151,11 +153,120 @@ defmodule Wardmast.Worker.Image.PublishLedger do
   end
 
   defp read(file) do
-    with {:ok, bin} <- File.read(file),
-         %{} = entries <- safe_decode(bin) do
-      entries
+    case File.read(file) do
+      {:ok, bin} -> decode(bin, file)
+      {:error, :enoent} -> %{}
+      {:error, reason} -> warn_unreadable(file, reason)
+    end
+  end
+
+  defp decode(bin, file) do
+    case safe_decode(bin) do
+      %{} = entries ->
+        clean(entries)
+
+      _ ->
+        # An entry written before the Arbiter -> Wardmast rename names `Arbiter.*`
+        # modules, atoms that no longer exist, so the safe decode refuses it. Rewrite
+        # those atoms to their current names and try once more.
+        with rewritten when rewritten != bin <- rewrite_legacy_atoms(bin),
+             %{} = entries <- safe_decode(rewritten) do
+          clean(entries)
+        else
+          _ -> warn_unreadable(file, :undecodable)
+        end
+    end
+  end
+
+  defp warn_unreadable(file, reason) do
+    Logger.warning(
+      "publish ledger #{file} could not be read (#{inspect(reason)}); treating it as empty"
+    )
+
+    %{}
+  end
+
+  # Drop what cannot be a ledger entry, and swap any module struct in an entry's ctx for
+  # plain data (a legacy entry's `:workspace` becomes its `:workspace_id`).
+  defp clean(entries) do
+    entries
+    |> Enum.flat_map(fn
+      {key, %{at: %DateTime{}, ctx: ctx} = entry} when is_map(ctx) ->
+        [{key, %{entry | ctx: plain_ctx(ctx)}}]
+
+      {key, _} ->
+        Logger.warning("publish ledger: skipping unreadable entry #{inspect(key)}")
+        []
+    end)
+    |> Map.new()
+  end
+
+  @doc false
+  # The ctx as stored: no module structs. The workspace is kept as its id and re-read at
+  # use time (`Watcher`), so a renamed or reshaped schema cannot strand the entry.
+  @spec plain_ctx(map()) :: map()
+  def plain_ctx(ctx) do
+    {workspace, ctx} = Map.pop(ctx, :workspace)
+
+    ctx =
+      case workspace_id(workspace) do
+        nil -> ctx
+        id -> Map.put_new(ctx, :workspace_id, id)
+      end
+
+    plain(ctx)
+  end
+
+  defp workspace_id(%{id: id}) when is_binary(id), do: id
+  defp workspace_id(_), do: nil
+
+  defp plain(%_{} = struct) do
+    case struct do
+      %DateTime{} -> struct
+      %NaiveDateTime{} -> struct
+      %Date{} -> struct
+      %Time{} -> struct
+      _ -> struct |> Map.from_struct() |> plain()
+    end
+  end
+
+  defp plain(%{} = map), do: Map.new(map, fn {k, v} -> {k, plain(v)} end)
+  defp plain(list) when is_list(list), do: Enum.map(list, &plain/1)
+
+  defp plain(tuple) when is_tuple(tuple),
+    do: tuple |> Tuple.to_list() |> plain() |> List.to_tuple()
+
+  defp plain(other), do: other
+
+  # Rewrite each `Elixir.Arbiter[Web].…` atom in the external term format to its
+  # `Wardmast` name (`Wardmast.LegacyModuleName`), fixing the atom's length prefix.
+  # ATOM_UTF8_EXT is `118, len::16`; SMALL_ATOM_UTF8_EXT is `119, len::8`.
+  defp rewrite_legacy_atoms(bin) do
+    ~r/(?:\x76([\x00-\xff]{2})|\x77([\x00-\xff]))Elixir\.Arbiter(?:Web)?\./s
+    |> Regex.scan(bin, return: :index)
+    |> Enum.reverse()
+    |> Enum.reduce(bin, fn [{start, _len} | _], acc -> rewrite_atom_at(acc, start) end)
+  end
+
+  defp rewrite_atom_at(bin, start) do
+    {tag, name_start, len} =
+      case binary_part(bin, start, 3) do
+        <<118, l::16>> -> {118, start + 3, l}
+        <<119, l::8, _>> -> {119, start + 2, l}
+      end
+
+    if name_start + len <= byte_size(bin) do
+      name = binary_part(bin, name_start, len)
+      new = Wardmast.LegacyModuleName.normalize(name)
+      head = binary_part(bin, 0, start)
+      tail = binary_part(bin, name_start + len, byte_size(bin) - name_start - len)
+      new_len = byte_size(new)
+
+      if new_len < 256 and tag == 119,
+        do: <<head::binary, 119, new_len::8, new::binary, tail::binary>>,
+        else: <<head::binary, 118, new_len::16, new::binary, tail::binary>>
     else
-      _ -> %{}
+      bin
     end
   end
 
