@@ -4,9 +4,9 @@ defmodule WardmastCli.Supervisor.Launchd.Plist do
   the LaunchAgent property list and the shell wrapper it runs.
 
   launchd has no `EnvironmentFile=`, so the plist does not exec the server
-  directly. It runs `<arbiter_home>/launchd-run.sh`, which sources
+  directly. It runs `<arbiter_home>/launchd-run.sh`, which loads
   `<arbiter_home>/wardmast.env` (captured secrets and `PATH`, written by
-  `arb install service`) and then execs the checkout's `.run-server.sh`
+  `arb install service`; read as literal `KEY=value` lines) and then execs the checkout's `.run-server.sh`
   (which in turn sources the checkout's own `.wardmast.env`). Every hop is an
   `exec`, so the PID launchd tracks is the BEAM.
 
@@ -101,8 +101,9 @@ defmodule WardmastCli.Supervisor.Launchd.Plist do
   end
 
   @doc """
-  The wrapper `ProgramArguments` runs: source `wardmast.env` (if present) with
-  allexport, `cd` to the checkout, `exec` its `.run-server.sh`.
+  The wrapper `ProgramArguments` runs: export each `KEY=value` line of
+  `wardmast.env` (if present) literally — it is a systemd-style file, not shell
+  syntax — then `cd` to the checkout and `exec` its `.run-server.sh`.
   """
   @spec wrapper_script(keyword()) :: String.t()
   def wrapper_script(opts) do
@@ -115,10 +116,22 @@ defmodule WardmastCli.Supervisor.Launchd.Plist do
     # EnvironmentFile=, so load the captured secrets/PATH here, then hand over
     # to the checkout's launcher. Regenerated on every install.
     set -e
-    if [ -f #{env_file} ]; then
-      set -a
-      . #{env_file}
-      set +a
+    # wardmast.env is written for systemd's EnvironmentFile= (bare KEY=value,
+    # no quoting), not for the shell: dot-sourcing it would split a PATH with
+    # a space and expand $ or backticks. Export each line literally instead.
+    env_file=#{env_file}
+    if [ -f "$env_file" ]; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          ''|'#'*) ;;
+          [A-Za-z_]*=*)
+            case "${line%%=*}" in
+              *[!A-Za-z0-9_]*) ;;
+              *) export "$line" ;;
+            esac
+            ;;
+        esac
+      done < "$env_file"
     fi
     cd #{sq(root)}
     exec /bin/sh #{sq(Path.join(root, ".run-server.sh"))}

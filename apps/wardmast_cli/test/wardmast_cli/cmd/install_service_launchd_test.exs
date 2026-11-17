@@ -91,6 +91,11 @@ defmodule WardmastCli.Cmd.InstallServiceLaunchdTest do
       cmds = cmds()
       assert {"launchctl", ["bootstrap", "gui/501", plist]} in cmds
       assert {"launchctl", ["enable", @target]} in cmds
+
+      # a disabled label refuses to bootstrap, so enable comes first
+      assert Enum.find_index(cmds, &(&1 == {"launchctl", ["enable", @target]})) <
+               Enum.find_index(cmds, &(&1 == {"launchctl", ["bootstrap", "gui/501", plist]}))
+
       refute Enum.any?(cmds, fn {c, _} -> c in ["systemctl", "loginctl"] end)
     end
 
@@ -173,6 +178,39 @@ defmodule WardmastCli.Cmd.InstallServiceLaunchdTest do
       cmds = cmds()
       assert {"launchctl", ["kickstart", "-k", @target]} in cmds
       refute Enum.any?(cmds, fn {c, _} -> c == "systemctl" end)
+    end
+
+    test "restart bootstraps an installed-but-unloaded agent from its plist", %{agents: agents} do
+      stub_get("/api/workspaces", %{
+        "data" => [%{"id" => "ws-1", "name" => "d", "prefix" => "bd"}]
+      })
+
+      File.mkdir_p!(agents)
+      plist = Path.join(agents, "com.wardmast.server.plist")
+      File.write!(plist, "<plist/>")
+
+      not_loaded = "Could not find service \"com.wardmast.server\" in domain"
+      loaded = :counters.new(1, [])
+
+      record_cmds(fn
+        "launchctl", ["bootstrap" | _] ->
+          :counters.put(loaded, 1, 1)
+          {"", 0}
+
+        "launchctl", ["print", _] ->
+          if :counters.get(loaded, 1) == 1,
+            do: {"x = {\n\tstate = running\n}\n", 0},
+            else: {not_loaded, 113}
+
+        "launchctl", ["kickstart" | _] ->
+          {not_loaded, 113}
+
+        _, _ ->
+          {"", 0}
+      end)
+
+      assert {:ok, [{:systemd_restart, :ok, nil}], _} = Restart.perform("/tmp/x", 5_000)
+      assert {"launchctl", ["bootstrap", "gui/501", plist]} in cmds()
     end
 
     test "stop boots the job out" do

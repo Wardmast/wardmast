@@ -43,9 +43,14 @@ defmodule WardmastCli.Supervisor.Launchd do
         :managed
 
       {out, code} ->
-        if not_loaded?(out, code),
-          do: :not_found,
-          else: {:unreachable, "launchctl exited #{code}: #{String.trim(out)}"}
+        cond do
+          # Installed but not loaded (after `bootout` or a failed bootstrap) is
+          # still ours, like a stopped systemd unit: `restart_service/0`
+          # bootstraps it from the plist.
+          not_loaded?(out, code) and File.exists?(plist_path()) -> :managed
+          not_loaded?(out, code) -> :not_found
+          true -> {:unreachable, "launchctl exited #{code}: #{String.trim(out)}"}
+        end
     end
   rescue
     e in ErlangError ->
@@ -200,9 +205,12 @@ defmodule WardmastCli.Supervisor.Launchd do
     # keep running the old plist: unload first so a re-install takes effect.
     _ = launchctl(["bootout", target()])
 
+    # `enable` first: a label that was ever `launchctl disable`d makes
+    # `bootstrap` refuse the job.
+    _ = launchctl(["enable", target()])
+
     case launchctl(["bootstrap", domain(), plist_path()]) do
       {_out, 0} ->
-        _ = launchctl(["enable", target()])
         :ok
 
       {out, code} ->

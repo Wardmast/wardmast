@@ -75,14 +75,29 @@ defmodule WardmastCli.Supervisor.Launchd.PlistTest do
     end
   end
 
+  defp wrapper_dirs do
+    tmp = Path.join(System.tmp_dir!(), "arb-plist-wrap-#{System.unique_integer([:positive])}")
+    root = Path.join(tmp, "checkout")
+    home = Path.join(tmp, "home")
+    File.mkdir_p!(root)
+    File.mkdir_p!(home)
+    on_exit(fn -> File.rm_rf(tmp) end)
+    {root, home}
+  end
+
+  defp run_wrapper(root, home) do
+    wrapper = Path.join(home, "launchd-run.sh")
+    File.write!(wrapper, Plist.wrapper_script(root: root, arbiter_home: home))
+    assert {_out, 0} = System.cmd("/bin/sh", [wrapper], stderr_to_stdout: true)
+  end
+
   describe "wrapper_script/1" do
-    test "sources wardmast.env with allexport, cd's to the root, and execs .run-server.sh" do
+    test "loads wardmast.env literally, cd's to the root, and execs .run-server.sh" do
       script = Plist.wrapper_script(@opts)
 
       assert String.starts_with?(script, "#!/bin/sh\n")
-      assert script =~ "set -a"
-      assert script =~ ". '/Users/me/.wardmast/wardmast.env'"
-      assert script =~ "set +a"
+      assert script =~ "env_file='/Users/me/.wardmast/wardmast.env'"
+      refute script =~ ". '/Users/me/.wardmast/wardmast.env'"
       assert script =~ "cd '/Users/me/dev/wardmast'"
       assert script =~ "exec /bin/sh '/Users/me/dev/wardmast/.run-server.sh'"
     end
@@ -90,7 +105,48 @@ defmodule WardmastCli.Supervisor.Launchd.PlistTest do
     test "tolerates a missing env file and single quotes in paths" do
       script = Plist.wrapper_script(Keyword.put(@opts, :arbiter_home, "/Users/o'neil/.wardmast"))
 
-      assert script =~ ~s([ -f '/Users/o'\\''neil/.wardmast/wardmast.env' ])
+      assert script =~ ~s(env_file='/Users/o'\\''neil/.wardmast/wardmast.env')
+      assert script =~ ~s([ -f "$env_file" ])
+    end
+
+    test "running the wrapper exports systemd-style lines literally" do
+      {root, home} = wrapper_dirs()
+      out = Path.join(root, "out.txt")
+
+      File.write!(Path.join(root, ".run-server.sh"), """
+      {
+        printf 'PATH=%s\\n' "$PATH"
+        printf 'SECRET=%s\\n' "$SECRET"
+        printf 'ODD=%s\\n' "$ODD"
+        printf 'SKIPPED=%s\\n' "${SKIPPED-unset}"
+      } > '#{out}'
+      """)
+
+      File.write!(Path.join(home, "wardmast.env"), """
+      # comment
+      PATH=/Applications/Visual Studio Code.app/Contents/Resources/app/bin:/usr/bin:/bin
+
+      SECRET=pa$$word `echo pwned` $(echo pwned) a;b #not-a-comment
+      ODD=trailing=equals=kept
+      bad-name=ignored
+      SKIPPED
+      """)
+
+      run_wrapper(root, home)
+
+      lines = out |> File.read!() |> String.split("\n", trim: true)
+
+      assert "PATH=/Applications/Visual Studio Code.app/Contents/Resources/app/bin:/usr/bin:/bin" in lines
+      assert "SECRET=pa$$word `echo pwned` $(echo pwned) a;b #not-a-comment" in lines
+      assert "ODD=trailing=equals=kept" in lines
+      assert "SKIPPED=unset" in lines
+    end
+
+    test "a missing env file is fine" do
+      {root, home} = wrapper_dirs()
+      File.write!(Path.join(root, ".run-server.sh"), "exit 0\n")
+
+      run_wrapper(root, home)
     end
   end
 

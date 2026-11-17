@@ -29,6 +29,14 @@ defmodule WardmastCli.Supervisor.LaunchdTest do
     end)
   end
 
+  defp drain_launchctl(acc \\ []) do
+    receive do
+      {:cmd, "launchctl", args} -> drain_launchctl([args | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
   defp touch_plist(dir), do: File.write!(Path.join(dir, "com.wardmast.server.plist"), "<plist/>")
 
   describe "Supervisor.impl_for/1" do
@@ -48,6 +56,12 @@ defmodule WardmastCli.Supervisor.LaunchdTest do
     test "'could not find service' (exit 113) is :not_found" do
       stub(fn _, _, _ -> {"Could not find service \"com.wardmast.server\" in domain", 113} end)
       assert Launchd.service_state() == :not_found
+    end
+
+    test "not loaded but the plist is on disk is still :managed", %{dir: dir} do
+      touch_plist(dir)
+      stub(fn _, _, _ -> {"Could not find service \"com.wardmast.server\" in domain", 113} end)
+      assert Launchd.service_state() == :managed
     end
 
     test "a missing launchctl binary is :not_found" do
@@ -179,16 +193,20 @@ defmodule WardmastCli.Supervisor.LaunchdTest do
       assert Launchd.daemon_reload(:user) == :ok
     end
 
-    test "enable_now boots out any old copy, bootstraps the plist and enables the job", %{
+    test "enable_now boots out any old copy, enables the job, then bootstraps the plist", %{
       dir: dir
     } do
       plist = Path.join(dir, "com.wardmast.server.plist")
       stub(fn _, _, _ -> {"", 0} end)
 
       assert Launchd.enable_now(:user) == :ok
-      assert_received {:cmd, "launchctl", ["bootout", @target]}
-      assert_received {:cmd, "launchctl", ["bootstrap", "gui/501", ^plist]}
-      assert_received {:cmd, "launchctl", ["enable", @target]}
+
+      # `enable` must precede `bootstrap`: a disabled label refuses to bootstrap.
+      assert [
+               ["bootout", @target],
+               ["enable", @target],
+               ["bootstrap", "gui/501", ^plist]
+             ] = drain_launchctl()
     end
 
     test "enable_now dies when bootstrap fails" do
