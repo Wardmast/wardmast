@@ -17,6 +17,7 @@ defmodule Wardmast.Boot.ReconcileSweepTest do
 
   defmodule RecordingReconciler do
     @moduledoc false
+    def sweep_worker_process_groups(_), do: note(:groups)
     def reconcile_orphaned_runs(_), do: note(:orphans)
     def reconcile_shutdown_casualties(_), do: note(:casualties)
     def sweep_worker_scopes(_), do: note(:scopes)
@@ -45,6 +46,16 @@ defmodule Wardmast.Boot.ReconcileSweepTest do
     defdelegate restarted_ids(lists), to: Wardmast.Workers.Reconciler
     defdelegate reconcile_open_pr_tasks(opts), to: Wardmast.Workers.Reconciler
 
+    # Never a real process: the rows these tests write record no group, but a
+    # stray one must not let the sweep signal anything on the host.
+    def sweep_worker_process_groups(opts) do
+      no_process = [ps: fn _pid -> {"", 1} end, kill: fn _args -> {"", 1} end]
+
+      Wardmast.Workers.Reconciler.sweep_worker_process_groups(
+        Keyword.put(opts, :process_group_opts, no_process)
+      )
+    end
+
     # Never the real systemd user manager: the sweep would `systemctl --user stop`
     # every live `arb-run-*` scope on the host (bd-8h3h3z). Same sweep, `:cmd` stubbed.
     def sweep_worker_scopes(opts) do
@@ -66,7 +77,10 @@ defmodule Wardmast.Boot.ReconcileSweepTest do
     end
   end
 
-  @reconcile_steps ~w(orphans casualties scopes ci_waits passes held_resumes open_prs resume)a
+  # bd-568ib9: the process groups a crash left running are killed first, while
+  # their rows still say which runs were live, and before anything is resumed
+  # into those worktrees.
+  @reconcile_steps ~w(groups orphans casualties scopes ci_waits passes held_resumes open_prs resume)a
 
   setup do
     Application.put_env(:wardmast, :sweep_test_pid, self())

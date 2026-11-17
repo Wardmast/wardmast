@@ -65,6 +65,7 @@ defmodule Wardmast.Workers.Reconciler do
   alias Wardmast.Worker
   alias Wardmast.Worker.Dispatch
   alias Wardmast.Worker.HeldResume
+  alias Wardmast.Worker.ProcessGroup
   alias Wardmast.Worker.ResumeSlot
   alias Wardmast.Worker.ReviewPass
   alias Wardmast.Worker.Watchdog
@@ -150,6 +151,60 @@ defmodule Wardmast.Workers.Reconciler do
     e ->
       Logger.warning("Workers.Reconciler: worker scope sweep failed: #{Exception.message(e)}")
       []
+  end
+
+  @doc """
+  Kill the OS process group each orphaned live run recorded, when its agent is
+  still running (bd-568ib9, MAC P2-1). A crash, or a teardown that overran
+  `Wardmast.Worker.shutdown_grace_ms/0`, can leave an agent and what it
+  started running, still writing into the worktree the resume sweep is about to
+  hand to a new agent. Under systemd the worker's scope dies with the service
+  (`Wardmast.Worker.MemoryScope`); under launchd, or with no scope, nothing else
+  stops them.
+
+  The candidates are the runs `reconcile_orphaned_runs/1` is about to write off
+  (live, no registered worker, not in `:skip_run_ids`, not on a node) that
+  recorded a group, so this runs before it. Each group is killed only while its
+  leader is the recorded process: same pid, still leading the group, same start
+  time (`Wardmast.Worker.ProcessGroup.sweep/2`); a pid the OS has handed to
+  something else since is left alone. Primary-gated like the orphan sweep.
+  Returns the killed groups, each with its `run_id` and `task_id`.
+
+  `:process_group_opts` is passed to `ProcessGroup.sweep/2` (test seam).
+  """
+  @spec sweep_worker_process_groups(keyword()) :: [ProcessGroup.t()]
+  def sweep_worker_process_groups(opts \\ []) do
+    if Keyword.get(opts, :primary?, true) do
+      skip_run_ids = Keyword.get(opts, :skip_run_ids, [])
+
+      Run
+      |> Ash.Query.filter(
+        state in [:starting, :working, :waiting] and not is_nil(os_pgid) and is_nil(node_id)
+      )
+      |> Ash.read!()
+      |> Enum.reject(&(live_worker?(&1) or &1.id in skip_run_ids))
+      |> Enum.map(&recorded_group/1)
+      |> ProcessGroup.sweep(Keyword.get(opts, :process_group_opts, []))
+    else
+      []
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Workers.Reconciler: worker process group sweep failed: #{Exception.message(e)}"
+      )
+
+      []
+  end
+
+  defp recorded_group(%Run{} = run) do
+    %{
+      pid: run.os_pid,
+      pgid: run.os_pgid,
+      started_at: run.os_started_at,
+      run_id: run.id,
+      task_id: run.task_id
+    }
   end
 
   defp do_reconcile(skip_run_ids) do
