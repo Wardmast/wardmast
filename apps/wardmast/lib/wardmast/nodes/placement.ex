@@ -422,8 +422,15 @@ defmodule Wardmast.Nodes.Placement do
     case existing_layout(request) do
       :private_clone -> :podman
       :linked_worktree -> :bwrap
-      _ -> Map.get(request, :local_backend) || :bwrap
+      _ -> fresh_local_backend(request)
     end
+  end
+
+  # A provider with no container wrap point (agy) stays on bwrap whatever `local_backend` says.
+  defp fresh_local_backend(request) do
+    if container_provider?(Map.get(request, :provider)),
+      do: Map.get(request, :local_backend) || :bwrap,
+      else: :bwrap
   end
 
   @doc """
