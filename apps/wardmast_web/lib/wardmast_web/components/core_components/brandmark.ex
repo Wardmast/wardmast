@@ -1,6 +1,6 @@
 defmodule WardmastWeb.CoreComponents.Brandmark do
   @moduledoc """
-  The Wardmast brandmark: `[/]` (icon) and `[arbiter]` (wordmark) forms of one
+  The Wardmast brandmark: `[/]` (icon) and `[wardmast]` (wordmark) forms of one
   identity — two brackets around either a rising slash or the lowercase word.
 
   Geometry is copied verbatim from the brandmark design handoff (bd-3vqk9m,
@@ -23,7 +23,7 @@ defmodule WardmastWeb.CoreComponents.Brandmark do
   attr(:form, :string,
     default: "icon",
     values: ~w(icon wordmark),
-    doc: "icon renders [/], wordmark renders [arbiter]"
+    doc: "icon renders [/], wordmark renders [wardmast]"
   )
 
   attr(:size, :integer,
@@ -63,7 +63,7 @@ defmodule WardmastWeb.CoreComponents.Brandmark do
     # the child. The "noformat" sigil modifier exempts this template from
     # that reformatting instead.
     ~H"""
-    <svg viewBox="0 0 200 48" width={@size} height={@height} role="img" aria-label="arbiter" class={@class} {@rest}><rect :if={@colors.tile_bg} width="200" height="48" rx="8" fill={@colors.tile_bg} /><path d="M38 7 H28 V41 H38" fill="none" stroke={@colors.bracket} stroke-width={@stroke} stroke-linecap="square" /><path d="M162 7 H172 V41 H162" fill="none" stroke={@colors.bracket} stroke-width={@stroke} stroke-linecap="square" /><text x="100" y="33" text-anchor="middle" font-family="Geist Mono, ui-monospace, SFMono-Regular, Menlo, monospace" font-weight="500" font-size="26" letter-spacing="-0.035em" fill={@colors.content}>arbiter</text></svg>
+    <svg viewBox="0 0 200 48" width={@size} height={@height} role="img" aria-label="Wardmast" class={@class} {@rest}><rect :if={@colors.tile_bg} width="200" height="48" rx="8" fill={@colors.tile_bg} /><path d="M38 7 H28 V41 H38" fill="none" stroke={@colors.bracket} stroke-width={@stroke} stroke-linecap="square" /><path d="M162 7 H172 V41 H162" fill="none" stroke={@colors.bracket} stroke-width={@stroke} stroke-linecap="square" /><text x="100" y="33" text-anchor="middle" font-family="Geist Mono, ui-monospace, SFMono-Regular, Menlo, monospace" font-weight="500" font-size="24" letter-spacing="-0.035em" fill={@colors.content}>wardmast</text></svg>
     """noformat
   end
 

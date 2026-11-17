@@ -258,7 +258,7 @@ defmodule WardmastWeb.WorkspaceDetail.RepoPathsComponent do
                   label="Repo"
                   value=""
                   size="sm"
-                  placeholder="arbiter"
+                  placeholder="wardmast"
                   required
                 />
               </div>
