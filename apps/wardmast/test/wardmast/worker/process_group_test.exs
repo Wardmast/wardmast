@@ -10,6 +10,7 @@ defmodule Wardmast.Worker.ProcessGroupTest do
   # staged for real (a reused pid, a gone leader) inject `ps` / `kill`.
   use ExUnit.Case, async: true
 
+  alias Wardmast.Test.OrphanedAgent
   alias Wardmast.Worker.OsProcess
   alias Wardmast.Worker.ProcessGroup
 
@@ -77,7 +78,8 @@ defmodule Wardmast.Worker.ProcessGroupTest do
     end
   end
 
-  # A `ps` that answers for one pid only, the way `ps -o pgid=,lstart= -p` does.
+  # A `ps` that answers for one pid only, the way `ps -o pgid=,ppid=,lstart= -p`
+  # does.
   defp fake_ps(answers) do
     fn pid ->
       case Map.fetch(answers, pid) do
@@ -116,7 +118,7 @@ defmodule Wardmast.Worker.ProcessGroupTest do
     end
 
     test "parses ps's lstart (C locale, UTC), including a space-padded day" do
-      ps = fake_ps(%{4242 => "  4242 Sat Nov  7 09:05:03 2026\n"})
+      ps = fake_ps(%{4242 => "  4242     1 Sat Nov  7 09:05:03 2026\n"})
 
       assert ProcessGroup.describe(4242, ps: ps) ==
                %{pid: 4242, pgid: 4242, started_at: ~U[2026-11-07 09:05:03Z]}
@@ -130,14 +132,14 @@ defmodule Wardmast.Worker.ProcessGroupTest do
     end
 
     test "a process in someone else's group records no group at all" do
-      ps = fake_ps(%{4242 => "999 Sat Nov  7 09:05:03 2026\n"})
+      ps = fake_ps(%{4242 => "999 1 Sat Nov  7 09:05:03 2026\n"})
 
       assert %{pid: 4242, pgid: nil, started_at: ~U[2026-11-07 09:05:03Z]} =
                ProcessGroup.describe(4242, ps: ps, retries: 0)
     end
 
     test "unparseable ps output records no start time" do
-      ps = fake_ps(%{4242 => "4242 yesterday-ish\n"})
+      ps = fake_ps(%{4242 => "4242 1 yesterday-ish\n"})
       assert %{pid: 4242, pgid: 4242, started_at: nil} = ProcessGroup.describe(4242, ps: ps)
     end
   end
@@ -191,6 +193,33 @@ defmodule Wardmast.Worker.ProcessGroupTest do
 
   describe "sweep/2" do
     test "kills a recorded group whose leader is still the process the run spawned" do
+      {leader, orphan} = OrphanedAgent.spawn!()
+      group = ProcessGroup.describe(leader)
+      assert group.pgid == leader
+
+      assert [^group] = ProcessGroup.sweep([group])
+
+      assert OrphanedAgent.gone?(leader)
+      assert OrphanedAgent.gone?(orphan)
+    end
+
+    test "leaves a live process alone when its start time is not the recorded one (pid reuse)" do
+      {leader, orphan} = OrphanedAgent.spawn!()
+      %{started_at: started_at} = group = ProcessGroup.describe(leader)
+
+      # The row says a process with this pid started an hour earlier: whatever
+      # holds the pid now is not that process.
+      reused = %{group | started_at: DateTime.add(started_at, -3_600, :second)}
+
+      assert ProcessGroup.sweep([reused]) == []
+      assert alive?(leader)
+      assert alive?(orphan)
+    end
+
+    test "never kills an agent a running BEAM still owns (its parent is an erl_child_setup)" do
+      # What a server booted against a copy of another install's database would
+      # see: that install's live agents, recorded exactly. This BEAM is the other
+      # install here; its port child is still parented by its `erl_child_setup`.
       {port, os_pid} =
         open_sh("(sleep 60 >/dev/null 2>&1 & echo $!); echo ready; exec sleep 60")
 
@@ -198,26 +227,47 @@ defmodule Wardmast.Worker.ProcessGroupTest do
       assert line(port) == "ready"
       group = ProcessGroup.describe(os_pid)
 
-      assert [^group] = ProcessGroup.sweep([group])
-
-      refute alive?(os_pid)
-      refute alive?(orphan)
+      assert ProcessGroup.sweep([group]) == []
+      assert alive?(os_pid)
+      assert alive?(orphan)
     end
 
-    test "leaves a live process alone when its start time is not the recorded one (pid reuse)" do
-      {_port, os_pid} = open_sh("exec sleep 60")
-      %{started_at: started_at} = group = ProcessGroup.describe(os_pid)
+    test "asks for the leader's parent unless it is init, and skips one it cannot name" do
+      test_pid = self()
+      started_at = ~U[2026-11-07 09:05:03Z]
 
-      # The row says a process with this pid started an hour earlier: whatever
-      # holds the pid now is not that process.
-      reused = %{group | started_at: DateTime.add(started_at, -3_600, :second)}
+      ps =
+        fake_ps(%{
+          4242 => "4242 1 Sat Nov  7 09:05:03 2026\n",
+          4343 => "4343 900 Sat Nov  7 09:05:03 2026\n",
+          4444 => "4444 901 Sat Nov  7 09:05:03 2026\n",
+          4545 => "4545 902 Sat Nov  7 09:05:03 2026\n"
+        })
 
-      assert ProcessGroup.sweep([reused]) == []
-      assert alive?(os_pid)
+      comm = fn ppid ->
+        send(test_pid, {:comm, ppid})
+
+        case ppid do
+          900 -> {"/usr/lib/erlang/erts-16.1/bin/erl_child_setup\n", 0}
+          901 -> {"systemd\n", 0}
+          902 -> {"", 1}
+        end
+      end
+
+      groups =
+        for pid <- [4242, 4343, 4444, 4545], do: %{pid: pid, pgid: pid, started_at: started_at}
+
+      assert [%{pid: 4242}, %{pid: 4444}] =
+               ProcessGroup.sweep(groups, ps: ps, comm: comm, kill: recording_kill(test_pid))
+
+      refute_received {:comm, 1}
+      assert_received {:kill, ["-KILL", "--", "-4242"]}
+      assert_received {:kill, ["-KILL", "--", "-4444"]}
+      refute_received {:kill, _}
     end
 
     test "tolerates a start time a few seconds off (Linux derives lstart from btime)" do
-      ps = fake_ps(%{4242 => "4242 Sat Nov  7 09:05:05 2026\n"})
+      ps = fake_ps(%{4242 => "4242 1 Sat Nov  7 09:05:05 2026\n"})
       group = %{pid: 4242, pgid: 4242, started_at: ~U[2026-11-07 09:05:03Z]}
 
       assert [^group] = ProcessGroup.sweep([group], ps: ps, kill: recording_kill(self()))
@@ -230,7 +280,7 @@ defmodule Wardmast.Worker.ProcessGroupTest do
 
       gone = %{pid: 4242, pgid: 4242, started_at: started_at}
       demoted = %{pid: 4343, pgid: 4343, started_at: started_at}
-      ps = fake_ps(%{4343 => "777 Sat Nov  7 09:05:03 2026\n"})
+      ps = fake_ps(%{4343 => "777 1 Sat Nov  7 09:05:03 2026\n"})
 
       assert ProcessGroup.sweep([gone, demoted], ps: ps, kill: kill) == []
       refute_received {:kill, _}
@@ -259,7 +309,7 @@ defmodule Wardmast.Worker.ProcessGroupTest do
 
     test "never kills the server's own process, whatever the row says" do
       self_pid = String.to_integer(System.pid())
-      ps = fake_ps(%{self_pid => "#{self_pid} Sat Nov  7 09:05:03 2026\n"})
+      ps = fake_ps(%{self_pid => "#{self_pid} 1 Sat Nov  7 09:05:03 2026\n"})
       group = %{pid: self_pid, pgid: self_pid, started_at: ~U[2026-11-07 09:05:03Z]}
 
       assert ProcessGroup.sweep([group], ps: ps, kill: recording_kill(self())) == []

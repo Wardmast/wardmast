@@ -56,7 +56,7 @@ defmodule Wardmast.Worker.ProcessGroup do
   ## What is recorded (`describe/2`)
 
   The agent's pid, its process group and its start time, read with `ps -o
-  pgid=,lstart=` in the C locale and UTC, and stored on the run
+  pgid=,ppid=,lstart=` in the C locale and UTC, and stored on the run
   (`worker_runs.os_pid`, `os_pgid`, `os_started_at`).
 
   ## Killing
@@ -69,7 +69,11 @@ defmodule Wardmast.Worker.ProcessGroup do
       the host may even have rebooted, so a group is killed only when its leader
       is still alive and is the recorded process: the same pid, still leading
       the group, and started within #{@start_tolerance_s} s of the recorded start time. A
-      pid reused by anything else since fails that check and is left alone.
+      pid reused by anything else since fails that check and is left alone. Nor
+      is a leader killed while its parent is an `erl_child_setup`: that
+      `erl_child_setup` exits the moment its BEAM dies, so a leader still
+      parented by one belongs to a server that is running, such as the install
+      whose database this one was booted from a copy of.
 
   Neither ever signals a target that cannot be a worker's group: a pgid of 1 or
   less, or the server's own pid or process group.
@@ -175,14 +179,14 @@ defmodule Wardmast.Worker.ProcessGroup do
   # `ps` that lands in between.
   defp do_describe(os_pid, ps, retries) do
     case read(os_pid, ps) do
-      {:ok, ^os_pid, started_at} ->
+      {:ok, %{pgid: ^os_pid, started_at: started_at}} ->
         %{pid: os_pid, pgid: os_pid, started_at: started_at}
 
-      {:ok, _other, _started_at} when retries > 0 ->
+      {:ok, _other_group} when retries > 0 ->
         Process.sleep(10)
         do_describe(os_pid, ps, retries - 1)
 
-      {:ok, _other, started_at} ->
+      {:ok, %{started_at: started_at}} ->
         %{pid: os_pid, pgid: nil, started_at: started_at}
 
       :error ->
@@ -218,20 +222,26 @@ defmodule Wardmast.Worker.ProcessGroup do
   @doc """
   The boot sweep: kill each recorded group whose leader is still alive and is
   still the process that was recorded (same pid, leading the same group, started
-  within #{@start_tolerance_s} s of `started_at`). A group recorded without a pgid or a start
-  time, whose leader is gone, or whose pid now belongs to another process is
-  left alone. Each kill is logged. Returns the groups it killed.
+  within #{@start_tolerance_s} s of `started_at`), and is no running BEAM's port child (its
+  parent is not an `erl_child_setup`). A group recorded without a pgid or a
+  start time, whose leader is gone, whose pid now belongs to another process,
+  or that a running server still owns is left alone. Each kill is logged.
+  Returns the groups it killed.
 
-  Options (test seams): `:ps`, `:kill`, `:tolerance_s`.
+  Options (test seams): `:ps`, `:comm` (`fn ppid -> {output, exit_status} end`,
+  the parent's command name), `:kill`, `:tolerance_s`.
   """
   @spec sweep([t()], keyword()) :: [t()]
   def sweep(groups, opts \\ []) do
-    ps = Keyword.get(opts, :ps, &ps/1)
-    tolerance = Keyword.get(opts, :tolerance_s, @start_tolerance_s)
+    check = %{
+      ps: Keyword.get(opts, :ps, &ps/1),
+      comm: Keyword.get(opts, :comm, &comm/1),
+      tolerance: Keyword.get(opts, :tolerance_s, @start_tolerance_s)
+    }
 
     for group <- groups, reduce: [] do
       acc ->
-        case sweep_one(group, ps, tolerance, opts) do
+        case sweep_one(group, check, opts) do
           :killed -> [group | acc]
           _ -> acc
         end
@@ -239,9 +249,9 @@ defmodule Wardmast.Worker.ProcessGroup do
     |> Enum.reverse()
   end
 
-  defp sweep_one(group, ps, tolerance, opts) do
+  defp sweep_one(group, check, opts) do
     with :ok <- verifiable(group),
-         :ours <- identify(group, ps, tolerance),
+         :ours <- identify(group, check),
          :ok <- kill(group.pgid, opts) do
       Logger.warning(
         "ProcessGroup: killed orphaned worker process group #{group.pgid}#{owner(group)}"
@@ -253,6 +263,14 @@ defmodule Wardmast.Worker.ProcessGroup do
         Logger.info(
           "ProcessGroup: pid #{group.pid}#{owner(group)} now belongs to another process; " <>
             "left alone"
+        )
+
+        :skipped
+
+      {:skip, :owned} ->
+        Logger.warning(
+          "ProcessGroup: process group #{group.pgid}#{owner(group)} belongs to a running " <>
+            "server (its leader's parent is an erl_child_setup); left alone"
         )
 
         :skipped
@@ -283,23 +301,43 @@ defmodule Wardmast.Worker.ProcessGroup do
 
   defp verifiable(_group), do: {:skip, :unverifiable}
 
-  defp identify(%{pid: pid, started_at: recorded}, ps, tolerance) do
-    case read(pid, ps) do
+  defp identify(%{pid: pid, started_at: recorded}, check) do
+    case read(pid, check.ps) do
       :error ->
         {:skip, :gone}
 
-      {:ok, ^pid, %DateTime{} = started_at} ->
-        if abs(DateTime.diff(started_at, recorded)) <= tolerance,
-          do: :ours,
-          else: {:skip, :reused}
+      {:ok, %{pgid: ^pid, started_at: %DateTime{} = started_at, ppid: ppid}} ->
+        cond do
+          abs(DateTime.diff(started_at, recorded)) > check.tolerance -> {:skip, :reused}
+          running_server_child?(ppid, check.comm) -> {:skip, :owned}
+          true -> :ours
+        end
 
-      {:ok, ^pid, nil} ->
+      {:ok, %{pgid: ^pid}} ->
         {:skip, :unverifiable}
 
-      {:ok, _other_pgid, _started_at} ->
+      {:ok, _other_group} ->
         {:skip, :reused}
     end
   end
+
+  # `erl_child_setup` `_exit`s as soon as its BEAM's socket closes, so after a
+  # crash the agent has been reparented (to init, or a subreaper). Still being an
+  # `erl_child_setup`'s child means a live BEAM owns it. A parent that cannot be
+  # named (it exited just now, or is outside this pid namespace) is not ruled
+  # out either: skipping only leaves the group to its warden.
+  defp running_server_child?(1, _comm), do: false
+
+  defp running_server_child?(ppid, comm) when is_integer(ppid) and ppid > 1 do
+    case comm.(ppid) do
+      {out, 0} -> out |> String.trim() |> Path.basename() == "erl_child_setup"
+      _ -> true
+    end
+  rescue
+    _ -> true
+  end
+
+  defp running_server_child?(_ppid, _comm), do: true
 
   defp owner(%{task_id: task_id, run_id: run_id}), do: " (task #{task_id}, run #{run_id})"
   defp owner(_group), do: ""
@@ -372,7 +410,7 @@ defmodule Wardmast.Worker.ProcessGroup do
       :unknown ->
         pgid =
           case read(self_pid, &ps/1) do
-            {:ok, pgid, _} -> pgid
+            {:ok, %{pgid: pgid}} -> pgid
             :error -> nil
           end
 
@@ -393,23 +431,22 @@ defmodule Wardmast.Worker.ProcessGroup do
     _ -> :error
   end
 
-  # `<pgid> <Dow> <Mon> <day> <HH:MM:SS> <year>`; the first line that starts
-  # with a number (a `ps` warning on stderr cannot be mistaken for it).
+  # `<pgid> <ppid> <Dow> <Mon> <day> <HH:MM:SS> <year>`; the first line that
+  # starts with two numbers (a `ps` warning on stderr cannot be mistaken for it).
   defp parse(out) do
     out
     |> String.split("\n", trim: true)
-    |> Enum.find_value(:error, fn line ->
-      case String.split(line, ~r/\s+/, trim: true) do
-        [pgid | lstart] ->
-          case Integer.parse(pgid) do
-            {pgid, ""} -> {:ok, pgid, parse_lstart(lstart)}
-            _ -> nil
-          end
+    |> Enum.find_value(:error, &parse_line/1)
+  end
 
-        _ ->
-          nil
-      end
-    end)
+  defp parse_line(line) do
+    with [pgid, ppid | lstart] <- String.split(line, ~r/\s+/, trim: true),
+         {pgid, ""} <- Integer.parse(pgid),
+         {ppid, ""} <- Integer.parse(ppid) do
+      {:ok, %{pgid: pgid, ppid: ppid, started_at: parse_lstart(lstart)}}
+    else
+      _ -> nil
+    end
   end
 
   defp parse_lstart([_dow, mon, day, time, year]) do
@@ -429,11 +466,15 @@ defmodule Wardmast.Worker.ProcessGroup do
 
   # `ps`/`kill` are spelled out literally (the release-env guard's rule 1).
   defp ps(os_pid) do
-    System.cmd("ps", ["-o", "pgid=,lstart=", "-p", Integer.to_string(os_pid)],
+    System.cmd("ps", ["-o", "pgid=,ppid=,lstart=", "-p", Integer.to_string(os_pid)],
       stderr_to_stdout: true,
       env: [{"LC_ALL", "C"}, {"TZ", "UTC0"}]
     )
   end
+
+  # The command name only; on macOS it is the executable's path.
+  defp comm(os_pid),
+    do: System.cmd("ps", ["-o", "comm=", "-p", Integer.to_string(os_pid)], env: [{"LC_ALL", "C"}])
 
   defp run_kill(args), do: System.cmd("kill", args, stderr_to_stdout: true)
 end

@@ -204,49 +204,17 @@ defmodule Wardmast.Workers.ReconcilerTest do
   describe "sweep_worker_process_groups/1" do
     alias Wardmast.Worker.ProcessGroup
 
-    # A real agent stand-in: leads its own group (a port child), with a child
-    # reparented to init in that group. Group-killed again on exit.
+    alias Wardmast.Test.OrphanedAgent
+
+    # A real agent left running by a crash (reparented, leading its own group,
+    # with a child in it): only the filter a test is about can protect it.
     defp spawn_agent! do
-      port =
-        Port.open({:spawn_executable, "/bin/sh"}, [
-          :binary,
-          :exit_status,
-          {:line, 1024},
-          args: ["-c", "echo $$; (sleep 60 >/dev/null 2>&1 & echo $!); exec sleep 60"]
-        ])
-
-      [leader, orphan] =
-        for _ <- 1..2 do
-          receive do
-            {^port, {:data, {:eol, line}}} -> String.to_integer(line)
-          after
-            5_000 -> flunk("the agent stand-in printed nothing")
-          end
-        end
-
-      on_exit(fn ->
-        System.cmd("kill", ["-KILL", "--", "-#{leader}"], stderr_to_stdout: true)
-        System.cmd("kill", ["-KILL", "#{orphan}"], stderr_to_stdout: true)
-      end)
-
+      {leader, orphan} = OrphanedAgent.spawn!()
       {ProcessGroup.describe(leader), orphan}
     end
 
-    defp alive?(pid),
-      do: match?({_, 0}, System.cmd("kill", ["-0", "#{pid}"], stderr_to_stdout: true))
-
-    # SIGKILLed processes linger as zombies until reaped: poll, bounded.
-    defp gone?(pid, attempts \\ 100)
-    defp gone?(_pid, 0), do: false
-
-    defp gone?(pid, attempts) do
-      if alive?(pid) do
-        Process.sleep(20)
-        gone?(pid, attempts - 1)
-      else
-        true
-      end
-    end
+    defp alive?(pid), do: OrphanedAgent.alive?(pid)
+    defp gone?(pid), do: OrphanedAgent.gone?(pid)
 
     defp recorded_run!(task_id, state, group, extra \\ %{}) do
       Ash.create!(
