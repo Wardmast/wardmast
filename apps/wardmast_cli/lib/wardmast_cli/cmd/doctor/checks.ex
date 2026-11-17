@@ -1540,7 +1540,8 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
           detail: "podman is not installed, but a workspace's sandbox backend is podman",
           hint:
             "Install podman (e.g. `sudo dnf install podman`), or move the workspace off " <>
-              "`agent.security.sandbox.backend: podman`.",
+              "`agent.security.sandbox.backend: podman` (`auto` runs podman on cluster nodes " <>
+              "only and bwrap here, unless `sandbox.local_backend` is podman).",
           blocks_readiness: false
         }
 

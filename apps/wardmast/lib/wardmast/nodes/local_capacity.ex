@@ -248,25 +248,68 @@ defmodule Wardmast.Nodes.LocalCapacity do
   @spec gate_with_reason(Placement.request(), keyword()) ::
           {:ok, :local, term()} | {:ok, {:node, map()}} | {:error, {:no_node_capacity, map()}}
   def gate_with_reason(request, opts \\ []) do
+    if request.mode == :prefer_local and Placement.eligible(request) == :ok,
+      do: local_first(request, opts),
+      else: place_then_admit(request, opts)
+  end
+
+  defp place_then_admit(request, opts) do
     case Placement.place(request, opts) do
       {:ok, {:node, _row}} = placed ->
         placed
 
       {:ok, {:local, why}} ->
-        admit_opts =
-          opts
-          |> Keyword.take([:force, :actor, :follow_up])
-          |> Keyword.merge(
-            reason: why,
-            provider: request.provider,
-            workspace_id: Map.get(request, :workspace_id)
-          )
-
-        with :ok <- admit(request.task_id, request.kind, admit_opts), do: {:ok, :local, why}
+        with :ok <- admit(request.task_id, request.kind, local_admit_opts(request, opts, why)),
+             do: {:ok, :local, why}
 
       {:error, _} = refused ->
         refused
     end
+  end
+
+  # `worker.placement: prefer_local`: the primary first, a node only when the primary has no
+  # slot. The slot is taken by `admit/3` itself, so a burst cannot overbook it; a run that
+  # then finds no node either is refused with the primary's own phrase (it names both sides).
+  defp local_first(request, opts) do
+    case admit(request.task_id, request.kind, local_admit_opts(request, opts, :prefer_local)) do
+      :ok ->
+        {:ok, :local, :prefer_local}
+
+      {:error, _} = full ->
+        case Placement.place(request, opts) do
+          {:ok, {:node, _row}} = placed -> placed
+          {:ok, {:local, why}} -> retry_local(request, opts, why, full)
+          {:error, _} = refused -> refused
+        end
+    end
+  end
+
+  # A slot may have freed between the first look and the node search; otherwise the refusal
+  # is rebuilt with the reason the node search gave (`:no_node`, `{:node_skipped, _}`).
+  defp retry_local(request, opts, why, full) do
+    case admit(request.task_id, request.kind, local_admit_opts(request, opts, why)) do
+      :ok -> {:ok, :local, why}
+      {:error, _} = refused -> if why == :prefer_local, do: full, else: refused
+    end
+  end
+
+  defp local_admit_opts(request, opts, why) do
+    opts
+    |> Keyword.take([:force, :actor, :follow_up])
+    |> Keyword.merge(
+      reason: why,
+      provider: request.provider,
+      workspace_id: Map.get(request, :workspace_id)
+    )
+    |> put_auto_backend(request)
+  end
+
+  # bd-56z2wz: under `sandbox.backend: auto` the hold names the backend the run would have
+  # had on the primary, so it reads as both sides being full.
+  defp put_auto_backend(admit_opts, request) do
+    if Map.get(request, :auto?, false) == true,
+      do: Keyword.put(admit_opts, :auto_backend, Placement.local_backend(request)),
+      else: admit_opts
   end
 
   @doc """
@@ -363,7 +406,9 @@ defmodule Wardmast.Nodes.LocalCapacity do
   end
 
   defp refuse(task_id, kind, cap, holders, opts) do
-    phrase = phrase(cap, holders, Keyword.get(opts, :reason), Keyword.get(opts, :provider), kind)
+    phrase =
+      phrase(cap, holders, Keyword.get(opts, :reason), Keyword.get(opts, :provider), kind, opts)
+
     phrase = derate_phrase(opts) || phrase
 
     info = %{
@@ -387,14 +432,34 @@ defmodule Wardmast.Nodes.LocalCapacity do
 
   # ---- phrases ---------------------------------------------------------------
 
-  defp phrase(cap, holders, reason, provider, kind) do
+  defp phrase(cap, holders, reason, provider, kind, opts) do
     head =
       if cap == 0,
         do: "held — local capacity 0",
         else: "held — local capacity full (cap #{cap}, #{length(holders)} running)"
 
-    head <> suffix(reason, provider, kind)
+    case Keyword.get(opts, :auto_backend) do
+      nil -> head <> suffix(reason, provider, kind)
+      backend -> head <> auto_suffix(reason, provider, kind, backend)
+    end
   end
+
+  # bd-56z2wz, `sandbox.backend: auto`: a hold names both sides, the reason the node side
+  # was not used and the primary's backend that is full too.
+  defp auto_suffix(reason, provider, kind, backend) do
+    " (auto: " <> auto_cause(reason, provider, kind) <> "; local #{backend} has no slot either)"
+  end
+
+  defp auto_cause({:local_only, why}, provider, kind),
+    do: "run is local-only: #{Placement.reason_phrase(why, %{provider: provider, kind: kind})}"
+
+  defp auto_cause(:no_node, _provider, _kind), do: "no node had a free slot"
+
+  defp auto_cause({:node_skipped, skipped}, _provider, _kind),
+    do: Placement.skipped_phrase(skipped)
+
+  defp auto_cause(:prefer_local, _provider, _kind), do: "worker.placement is prefer_local"
+  defp auto_cause(_reason, _provider, _kind), do: "no node"
 
   # bd-6w7usy: "held — local thermal 96 °C", the machine and what it sensed.
   defp derate_phrase(opts) do

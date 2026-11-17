@@ -19,6 +19,9 @@ defmodule Wardmast.Doctor.Scope do
       `Wardmast.Providers.Pause.blocking/2`) with its `pause_reason`.
     * `podman_in_use` — a workspace, or a repo override, resolves
       `agent.security.sandbox.backend` or `agent.security.sandbox.review_backend` to podman.
+      `sandbox.backend: auto` (bd-56z2wz) counts only when its `sandbox.local_backend` is
+      podman: under auto, podman runs on a cluster node (probed by that node's own
+      doctor rows), and this machine's runs are the local backend, bwrap by default.
     * `egress_enforced` — a workspace or repo override resolves a non-`open`
       egress.
   """

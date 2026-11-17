@@ -18,6 +18,7 @@ defmodule Wardmast.Worker.GitLayout do
   """
 
   alias Wardmast.Agents.SecurityPolicy
+  alias Wardmast.Worker.PrivateClone
 
   @type t :: :linked_worktree | :private_clone
 
@@ -29,6 +30,46 @@ defmodule Wardmast.Worker.GitLayout do
       _ -> :linked_worktree
     end
   end
+
+  @doc """
+  The layout of the checkout that already exists at `path` (`nil`: nothing there, or a
+  stub with no `.git`): `:linked_worktree` when `.git` is the `gitdir:` file `git worktree
+  add` writes, `:private_clone` when it is a real directory (`PrivateClone.clone?/1`).
+
+  `sandbox.backend: auto` (bd-56z2wz) never changes it: the same dir name cannot be a
+  linked worktree for one run and a private clone for the next, whose stale records make
+  the second fail the tamper check (bd-1h0zhg).
+  """
+  @spec existing(Path.t() | nil) :: t() | nil
+  def existing(path) when is_binary(path) do
+    case File.lstat(Path.join(path, ".git")) do
+      {:ok, %File.Stat{type: :directory}} -> :private_clone
+      {:ok, %File.Stat{type: :regular}} -> :linked_worktree
+      {:ok, %File.Stat{type: :symlink}} -> if PrivateClone.clone?(path), do: :private_clone
+      _ -> nil
+    end
+  end
+
+  def existing(_path), do: nil
+
+  @doc """
+  `policy`, with an `auto` backend (bd-56z2wz) fixed to what the checkout at `path` already
+  is: a private clone is a container, a linked worktree is bwrap, no checkout yet the
+  `local_backend`. A pass that works in an existing checkout (a merge-queue fix or conflict
+  pass, a ReviewGate fix round) runs where that checkout lives, so it never changes the
+  layout at the dir. Any other policy is returned unchanged.
+  """
+  @spec concretize(SecurityPolicy.t(), Path.t() | nil) :: SecurityPolicy.t()
+  def concretize(%SecurityPolicy{} = policy, path),
+    do: SecurityPolicy.concretize(policy, existing(path) || :local)
+
+  @doc """
+  `for_workspace/3` for a pass in the existing checkout at `path`: under `auto` the layout
+  that checkout already has.
+  """
+  @spec for_checkout(term(), String.t() | nil, Path.t() | nil) :: t()
+  def for_checkout(workspace, repo, path),
+    do: workspace |> SecurityPolicy.resolve(%{}, repo) |> concretize(path) |> for_policy()
 
   @doc """
   The layout a ReviewGate reviewer's checkout gets under `policy` (bd-7ays3v):

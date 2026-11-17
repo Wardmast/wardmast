@@ -47,7 +47,9 @@ defmodule WardmastCli.Cmd.Doctor.Scope do
   def applies?(%__MODULE__{}, :always), do: :yes
 
   def applies?(%__MODULE__{podman_in_use: false}, :podman),
-    do: {:no, "no workspace uses the podman sandbox backend"}
+    do:
+      {:no,
+       "no workspace runs podman on this machine (sandbox.backend podman, or auto with local_backend podman; auto otherwise runs podman on cluster nodes only)"}
 
   def applies?(%__MODULE__{egress_enforced: false}, :egress),
     do:

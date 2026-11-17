@@ -37,8 +37,9 @@ defmodule Wardmast.Tasks.Workspace.Changes.ValidateConfig do
       `host:port` entries the egress proxy accepts as a baseline.
     * If `"agent.security.sandbox.backend"` (or a per-repo override) is present,
       it must be one of `Wardmast.Agents.SecurityPolicy.valid_sandbox_backends/0`
-      (`"bwrap"`, `"podman"`) (bd-btcdrf). `"review_backend"` takes the same
-      values (bd-4rvf98); `"podman"` there is accepted but refuses every review
+      (`"bwrap"`, `"auto"`, `"podman"`; bd-btcdrf, bd-56z2wz). `"review_backend"` and
+      `"local_backend"` (what `auto` runs on the primary) take `"bwrap"` or `"podman"` only
+      (bd-4rvf98); `"podman"` as a `review_backend` is accepted but refuses every review
       spawn, so it parks them rather than run unjailed.
     * If `"routing"` is present, it must be a map.
     * If `"routing.policy"` is present, it must be one of the values in
@@ -104,7 +105,7 @@ defmodule Wardmast.Tasks.Workspace.Changes.ValidateConfig do
       map with a `"job"` and a repo-relative `"baseline_dir"`, plus the optional keys of
       `Wardmast.Worker.VisualBaselines.Config` (bd-9obzu9, GitHub #936).
     * If `"worker.placement"` is present it must be `"local_only"` (the default),
-      `"prefer_remote"` or `"remote_only"` (RW8, `Wardmast.Nodes.Placement`).
+      `"prefer_remote"`, `"prefer_local"` or `"remote_only"` (RW8, `Wardmast.Nodes.Placement`).
     * If `"worker.placement_nodes"` is present it must be a list of node selectors
       (`name:<node>`, `label:<k=v>`, `kind:<cluster,machine>`; bd-d7tb2d).
     * If `"attention"` is present, it must be a map whose
@@ -236,13 +237,14 @@ defmodule Wardmast.Tasks.Workspace.Changes.ValidateConfig do
       :error ->
         changeset
 
-      {:ok, mode} when mode in ["local_only", "prefer_remote", "remote_only"] ->
+      {:ok, mode} when mode in ["local_only", "prefer_remote", "prefer_local", "remote_only"] ->
         changeset
 
       {:ok, _} ->
         Changeset.add_error(changeset,
           field: :config,
-          message: ~s(worker.placement must be "local_only", "prefer_remote" or "remote_only")
+          message:
+            ~s(worker.placement must be "local_only", "prefer_remote", "prefer_local" or "remote_only")
         )
     end
   end
@@ -1121,6 +1123,7 @@ defmodule Wardmast.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_allow_hosts(Map.get(sandbox, "allow_hosts"), label)
     |> validate_sandbox_backend(Map.get(sandbox, "backend"), "backend", label)
     |> validate_sandbox_backend(Map.get(sandbox, "review_backend"), "review_backend", label)
+    |> validate_sandbox_backend(Map.get(sandbox, "local_backend"), "local_backend", label)
   end
 
   defp validate_sandbox_egress(changeset, _block, _label), do: changeset
@@ -1145,7 +1148,7 @@ defmodule Wardmast.Tasks.Workspace.Changes.ValidateConfig do
   defp validate_sandbox_backend(changeset, nil, _key, _label), do: changeset
 
   defp validate_sandbox_backend(changeset, backend, key, label) do
-    valid = Wardmast.Agents.SecurityPolicy.valid_sandbox_backends()
+    valid = valid_backends(key)
 
     if is_binary(backend) and backend in Enum.map(valid, &Atom.to_string/1) do
       changeset
@@ -1158,6 +1161,15 @@ defmodule Wardmast.Tasks.Workspace.Changes.ValidateConfig do
       )
     end
   end
+
+  # `backend` may be `auto` (bd-56z2wz); `review_backend` and `local_backend` name a
+  # concrete sandbox, so they may not.
+  defp valid_backends("backend"), do: Wardmast.Agents.SecurityPolicy.valid_sandbox_backends()
+
+  defp valid_backends("review_backend"),
+    do: Wardmast.Agents.SecurityPolicy.valid_review_backends()
+
+  defp valid_backends("local_backend"), do: Wardmast.Agents.SecurityPolicy.valid_local_backends()
 
   defp validate_allow_hosts(changeset, nil, _label), do: changeset
 

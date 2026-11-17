@@ -295,7 +295,8 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassDispatcher do
       task_id: task.id,
       kind: :fix_pass,
       provider: provider,
-      layout: GitLayout.for_workspace(workspace, context.repo),
+      layout:
+        GitLayout.for_checkout(workspace, context.repo, Worktree.worktree_path(context.branch)),
       workspace: workspace,
       workspace_id: task.workspace_id,
       clone_path: Worktree.worktree_path(context.branch),
@@ -486,7 +487,12 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassDispatcher do
   # bd-4wy1w1: in the git layout its sandbox needs — a private clone under a
   # container backend (`Wardmast.Worker.GitLayout`).
   defp create_worktree(%{repo_path: repo_path, branch: branch} = context, node) do
-    layout = GitLayout.for_workspace(context.workspace, context.repo)
+    layout =
+      GitLayout.for_checkout(
+        context.workspace,
+        context.repo,
+        Worktree.worktree_path(branch)
+      )
 
     # The home clone of a run placed on a node is thin (no deps seeding): the node's
     # shadow clone is what the container works in.
@@ -666,15 +672,31 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassDispatcher do
   # bd-7rxy1c: a pass in a podman container holds no credential; the host
   # pushes for it (`Worker.push_and_deliver_fix_pass/1`).
   defp container_pass?(context, provider),
-    do: not is_nil(ContainerSpawn.pass_policy(context.workspace, context.repo, provider))
+    do:
+      not is_nil(
+        ContainerSpawn.pass_policy(
+          context.workspace,
+          context.repo,
+          provider,
+          checkout_path(context)
+        )
+      )
 
   # bd-bg87oz: `ClaudeSession` hands the run to `Executor.Node` when the opts name a `:node`.
   # The pass's resolved target rides along: the node is seeded with `origin/<target>`.
   defp node_opts(nil, _context), do: []
   defp node_opts(node, context), do: [node: node, base_branch: context.target_branch]
 
+  # bd-56z2wz: the checkout the pass runs in, whose layout `sandbox.backend: auto` keeps.
+  defp checkout_path(%{branch: branch}), do: Worktree.worktree_path(branch)
+
   defp container_opts(context, provider) do
-    case ContainerSpawn.pass_policy(context.workspace, context.repo, provider) do
+    case ContainerSpawn.pass_policy(
+           context.workspace,
+           context.repo,
+           provider,
+           checkout_path(context)
+         ) do
       nil -> []
       policy -> ContainerSpawn.session_opts(policy, context.workspace, repo: context.repo)
     end

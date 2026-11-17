@@ -285,6 +285,7 @@ defmodule Wardmast.Board.CapacityExplainer do
 
   defp mode_phrase(:local_only), do: "this machine only"
   defp mode_phrase(:prefer_remote), do: "this machine and the nodes"
+  defp mode_phrase(:prefer_local), do: "this machine, then the nodes"
   defp mode_phrase(:remote_only), do: "the nodes only"
   defp mode_phrase(other), do: to_string(other)
 
@@ -332,7 +333,8 @@ defmodule Wardmast.Board.CapacityExplainer do
       "Change with `arb node set local --max-workers N` (this machine) or `arb node set <node> --max-workers N`."
 
   defp change_hint(:placement, _terms, _a),
-    do: "Change with `arb config set worker.placement local_only|prefer_remote|remote_only`."
+    do:
+      "Change with `arb config set worker.placement local_only|prefer_remote|prefer_local|remote_only`."
 
   defp change_hint(:placement_free, _terms, _a),
     do: "Frees up as runs finish; raise a node's cap with `arb node set <node> --max-workers N`."

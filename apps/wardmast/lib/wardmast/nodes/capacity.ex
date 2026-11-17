@@ -27,7 +27,8 @@ defmodule Wardmast.Nodes.Capacity do
   it (`Wardmast.Nodes.Placement`):
 
     * `local_only` (default) — the primary only;
-    * `prefer_remote` — the primary and every available node;
+    * `prefer_remote` and `prefer_local` — the primary and every available node
+      (they differ only in which is tried first, which the board does not need);
     * `remote_only` — the available nodes only (the primary never runs it).
 
   Each answer is a `cap` (a total, in the board's frame) and a `free` count (the
@@ -108,7 +109,7 @@ defmodule Wardmast.Nodes.Capacity do
   def placement(:local_only, opts),
     do: %{cap: Keyword.get_lazy(opts, :local_cap, &local_cap/0), free: :unlimited}
 
-  def placement(mode, opts) when mode in [:prefer_remote, :remote_only] do
+  def placement(mode, opts) when mode in [:prefer_remote, :prefer_local, :remote_only] do
     breakdown = breakdown(opts)
     reserved = reserved_counts()
 
@@ -121,7 +122,7 @@ defmodule Wardmast.Nodes.Capacity do
       :remote_only ->
         %{cap: breakdown.remote, free: node_free}
 
-      :prefer_remote ->
+      _both_sides ->
         local_free = max(0, breakdown.local - length(LocalCapacity.holders()))
         %{cap: breakdown.sum, free: local_free + node_free}
     end

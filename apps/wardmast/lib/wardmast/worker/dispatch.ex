@@ -796,6 +796,8 @@ defmodule Wardmast.Worker.Dispatch do
       |> Keyword.put(:resume, true)
       |> Keyword.put(:existing_pr_ref, task.pr_ref)
       |> Keyword.put(:node, node)
+      # bd-56z2wz: an adopted run is a node's, so under `sandbox.backend: auto` it is podman
+      |> Keyword.put(:auto_placed, :node)
       |> Keyword.put(:adopt, adopt)
 
     put_security_policy(task, opts)
@@ -822,7 +824,9 @@ defmodule Wardmast.Worker.Dispatch do
   defp podman_policy(opts) do
     case Keyword.get(opts, :resolved_policy) do
       {_repo, %SecurityPolicy{} = policy} ->
-        if ContainerSpawn.podman?(policy), do: :ok, else: {:error, :not_podman}
+        if policy |> concretize_auto(opts) |> ContainerSpawn.podman?(),
+          do: :ok,
+          else: {:error, :not_podman}
 
       _ ->
         {:error, :no_policy}
@@ -1105,7 +1109,25 @@ defmodule Wardmast.Worker.Dispatch do
       provider: provider,
       workspace_id: task.workspace_id,
       follow_up: resume_follow_up?(task, opts, provider)
-    ]
+    ] ++ auto_backend_opt(task, opts)
+  end
+
+  # bd-56z2wz: a resume held at the primary's cap under `sandbox.backend: auto` names the
+  # backend it would run there, like a fresh run's hold does.
+  defp auto_backend_opt(%Issue{} = task, opts) do
+    workspace = load_workspace(task)
+
+    if auto_backend?(workspace, opts) do
+      backend =
+        Placement.local_backend(%{
+          existing_layout: existing_checkout_layout(task, opts),
+          local_backend: workspace |> dispatch_policy(opts) |> SecurityPolicy.local_backend()
+        })
+
+      [auto_backend: backend]
+    else
+      []
+    end
   end
 
   # DC8 (design §2.2, I9): asked before routing has picked the resume's account,
@@ -2642,9 +2664,25 @@ defmodule Wardmast.Worker.Dispatch do
   defp dispatch_policy(workspace, opts) do
     repo = Keyword.get(opts, :repo)
 
-    case Keyword.get(opts, :resolved_policy) do
-      {^repo, %SecurityPolicy{} = policy} -> policy
-      _ -> SecurityPolicy.resolve(workspace, security_override(opts), repo)
+    policy =
+      case Keyword.get(opts, :resolved_policy) do
+        {^repo, %SecurityPolicy{} = policy} -> policy
+        _ -> SecurityPolicy.resolve(workspace, security_override(opts), repo)
+      end
+
+    concretize_auto(policy, opts)
+  end
+
+  # bd-56z2wz: under `sandbox.backend: auto` placement decides the backend, so the policy
+  # a dispatch reads is only fixed once `ensure_node_capacity/2` has set `:auto_placed`
+  # (`:node`, `:local`, or the layout of a checkout that already exists). Before that an
+  # `:auto` policy reads as its local backend (`SecurityPolicy.sandbox_backend/1`). Every
+  # later read (the checkout's layout, the spawn's sandbox, the prompt) goes through here, so
+  # they cannot disagree about what the run is.
+  defp concretize_auto(%SecurityPolicy{} = policy, opts) do
+    case Keyword.get(opts, :auto_placed) do
+      nil -> policy
+      where -> SecurityPolicy.concretize(policy, where)
     end
   end
 
@@ -2665,6 +2703,7 @@ defmodule Wardmast.Worker.Dispatch do
         :routed_agent_type,
         :routed_model,
         :resolved_policy,
+        :auto_placed,
         :admission_shadow,
         :planned,
         :admission_mode
@@ -3037,9 +3076,17 @@ defmodule Wardmast.Worker.Dispatch do
     gate_opts = node_gate_opts(task, opts)
 
     case LocalCapacity.gate_with_reason(request, gate_opts) do
-      {:ok, {:node, node}} -> image_gate(task, workspace, request, node, opts, gate_opts)
-      {:ok, :local, why} -> {:ok, put_outdated_note(opts, request, why)}
-      {:error, _} = held -> held
+      {:ok, {:node, node}} ->
+        task
+        |> image_gate(workspace, request, node, opts, gate_opts)
+        |> place_backend(workspace, request, {:node, node})
+
+      {:ok, :local, why} ->
+        {:ok, put_outdated_note(opts, request, why)}
+        |> place_backend(workspace, request, {:local, why})
+
+      {:error, _} = held ->
+        held
     end
   rescue
     e ->
@@ -3059,6 +3106,60 @@ defmodule Wardmast.Worker.Dispatch do
             "held — the node capacity check crashed for #{task.id} (#{Exception.message(e)}); " <>
               "the run is not admitted until the check succeeds."
         }}}
+  end
+
+  # bd-56z2wz: `sandbox.backend: auto` is settled here, right after placement picked the
+  # machine. A node is podman on a private clone; the primary runs the ticket's checkout as
+  # it already is (a private clone stays a container, a linked worktree stays bwrap-shaped),
+  # else its `local_backend`. `:auto_placed` is what every later policy read concretizes by
+  # (`concretize_auto/2`); the run's routing decision records the backend and why.
+  #
+  # A node run that fell back to the primary (its image could not be published) is local.
+  defp place_backend({:ok, opts}, workspace, %{auto?: true} = request, outcome) do
+    outcome =
+      case {outcome, Keyword.get(opts, :node)} do
+        {{:node, _}, nil} -> {:local, :no_node}
+        _ -> outcome
+      end
+
+    where =
+      case outcome do
+        {:node, _} -> :node
+        {:local, _} -> request.existing_layout || :local
+      end
+
+    opts =
+      opts
+      |> Keyword.put(:auto_placed, where)
+      |> put_backend_note(Placement.backend_phrase(request, outcome))
+
+    with :ok <- ensure_auto_provider(workspace, request, opts), do: {:ok, opts}
+  end
+
+  defp place_backend(result, _workspace, _request, _outcome), do: result
+
+  # The only way an `auto` run can be refused for its provider: its checkout is already a
+  # private clone and the provider has no container wrap point, so neither side can run it.
+  defp ensure_auto_provider(workspace, request, opts) do
+    case Keyword.get(opts, :auto_placed) do
+      :private_clone ->
+        case ProviderRouting.backend_refusal(dispatch_policy(workspace, opts), request.provider) do
+          nil -> :ok
+          detail -> {:error, {:sandbox_backend, request.provider, "held — " <> detail}}
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp put_backend_note(opts, phrase) do
+    note =
+      opts
+      |> Keyword.get(:placement_note, %{})
+      |> Map.put("sandbox_backend", phrase)
+
+    Keyword.put(opts, :placement_note, note)
   end
 
   # bd-5u99ki: a `prefer_remote` run that stayed on the primary because every remote node was
@@ -3171,12 +3272,17 @@ defmodule Wardmast.Worker.Dispatch do
   end
 
   defp node_request(%Issue{} = task, workspace, opts) do
+    auto? = auto_backend?(workspace, opts)
+
     %{
       task_id: task.id,
       workspace_id: task.workspace_id,
       kind: node_kind(task, opts),
       provider: quota_gate_provider(task, workspace, opts),
-      layout: node_layout(task, workspace, opts),
+      layout: if(auto?, do: :private_clone, else: node_layout(task, workspace, opts)),
+      auto?: auto?,
+      local_backend: workspace |> dispatch_policy(opts) |> SecurityPolicy.local_backend(),
+      existing_layout: if(auto?, do: existing_checkout_layout(task, opts)),
       no_pr?: Keyword.get(opts, :review) != true and no_private_clone?(task, opts),
       inspect?: Keyword.get(opts, :review) != true and inspect_checkout?(task, opts),
       local_work?: local_work?(task, opts, Placement.mode(workspace)),
@@ -3187,6 +3293,28 @@ defmodule Wardmast.Worker.Dispatch do
       mode: Placement.mode(workspace),
       allowed_nodes: Wardmast.Nodes.Allowlist.selectors(workspace)
     }
+  end
+
+  # bd-56z2wz: is this run's backend left to placement (`sandbox.backend: auto`)? A
+  # `review: true` dispatch runs under `sandbox.review_backend`, which is never `auto`, and
+  # a dispatch placement already settled is not asked again.
+  defp auto_backend?(workspace, opts) do
+    Keyword.get(opts, :review) != true and Keyword.get(opts, :auto_placed) == nil and
+      workspace |> dispatch_policy(opts) |> SecurityPolicy.auto?()
+  end
+
+  # The layout the ticket's branch checkout already has on disk (`nil`: none yet). A layout
+  # is never changed under `auto`: the same dir name cannot be a linked worktree for one run
+  # and a private clone for the next (bd-1h0zhg). A dispatch with no branch checkout of its
+  # own has nothing to keep.
+  defp existing_checkout_layout(%Issue{} = task, opts) do
+    if no_private_clone?(task, opts) do
+      nil
+    else
+      task |> BranchNamer.derive() |> Worktree.worktree_path() |> GitLayout.existing()
+    end
+  rescue
+    _ -> nil
   end
 
   # The layout the run's checkout would get. A `review: true` dispatch has no

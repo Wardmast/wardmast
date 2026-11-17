@@ -248,16 +248,22 @@ defmodule Wardmast.Worker.ContainerSpawn do
 
   @doc """
   The policy a merge-queue pass (CI fix pass, conflict pass) runs in a container
-  under, or `nil` when it does not (bd-7ays3v). The pass resolves the workspace's
+  under, or `nil` when it does not (bd-7ays3v). `checkout` is the pass's existing checkout:
+  under `sandbox.backend: auto` (bd-56z2wz) the pass runs where that checkout lives, a
+  private clone in a container, a linked worktree not. The pass resolves the workspace's
   posture scoped to `repo` exactly as the task worker does
   (`SecurityPolicy.resolve/3`), so the egress decisions and `egress_events` match
   the implementer's; it runs in the container when that is podman and the
   provider is Claude. For anything else the pass spawns as it always did.
   """
-  @spec pass_policy(term(), String.t() | nil, atom() | String.t()) ::
+  @spec pass_policy(term(), String.t() | nil, atom() | String.t(), Path.t() | nil) ::
           SecurityPolicy.t() | nil
-  def pass_policy(workspace, repo, provider) do
-    policy = SecurityPolicy.resolve(workspace, %{}, repo)
+  def pass_policy(workspace, repo, provider, checkout \\ nil) do
+    policy =
+      workspace
+      |> SecurityPolicy.resolve(%{}, repo)
+      |> Wardmast.Worker.GitLayout.concretize(checkout)
+
     if podman?(policy) and provider in [:claude, "claude"], do: policy
   end
 
