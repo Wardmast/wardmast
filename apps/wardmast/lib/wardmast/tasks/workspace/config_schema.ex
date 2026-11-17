@@ -306,6 +306,26 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
       sandbox.enabled           bool                                     (default: true)
       sandbox.filesystem        one of: #{Enum.join(@sandbox_filesystems, ", ")}       (default: worktree)
       sandbox.network           bool — false cuts network-egress tools   (default: true)
+      sandbox.backend           one of: bwrap, auto, podman              (default: bwrap)
+                                bwrap — every run on this machine in a linked worktree;
+                                podman — every run in a rootless container on a private
+                                clone (Claude and Codex only), here or on a node;
+                                auto — placement decides first: a run placed on a cluster
+                                node is podman on a private clone, a run placed on this
+                                machine uses sandbox.local_backend (bwrap by default) with
+                                the checkout it already has. A provider with no container
+                                wrap point (agy) stays local and is never refused. Held only
+                                when neither side has a slot (worker.placement still picks
+                                the order: prefer_remote / prefer_local, or the one side
+                                for remote_only / local_only). A resume keeps the layout of
+                                the checkout that exists. Most restrictive wins across
+                                layers: a repo can pin podman over a workspace auto, but
+                                cannot loosen auto back to bwrap. Under auto reviewers
+                                still run under sandbox.review_backend.
+      sandbox.local_backend     one of: bwrap, podman — what auto runs on this machine
+                                (default: bwrap)
+      sandbox.review_backend    one of: bwrap, podman — reviewers and revise passes
+                                (default: bwrap; never auto)
 
       DEPRECATED (backward compat only, do not use in new configs):
         - top-level security.mode (use agent.security.permissions.mode instead)
@@ -516,10 +536,16 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
       placement       "local_only" (default — every run stays on this machine),
                       "prefer_remote" (the podman-backed Claude implementer
                       goes to an enrolled node with a free slot, else runs
-                      here) or "remote_only" (never here: held when no node
-                      has a free slot). Reviewers, fix/conflict passes, other
+                      here), "prefer_local" (runs here while this machine has
+                      a free slot, overflows to a node only when it is full)
+                      or "remote_only" (never here: held when no node has a
+                      free slot). Reviewers, fix/conflict passes, other
                       providers and bwrap-jailed runs always stay local
-                      whatever this says. See `arb node`.
+                      whatever this says, except under
+                      agent.security.sandbox.backend "auto", where placement
+                      decides the backend: a node runs podman on a private
+                      clone, this machine runs sandbox.local_backend (bwrap
+                      by default). See `arb node`.
       placement_nodes list of node selectors — with prefer_remote / remote_only,
                       only matching nodes are considered: "name:<node>",
                       "label:<k=v>" or "kind:<cluster,machine>" (bare "machine",

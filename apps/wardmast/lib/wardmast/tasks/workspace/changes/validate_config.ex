@@ -105,7 +105,7 @@ defmodule Wardmast.Tasks.Workspace.Changes.ValidateConfig do
       map with a `"job"` and a repo-relative `"baseline_dir"`, plus the optional keys of
       `Wardmast.Worker.VisualBaselines.Config` (bd-9obzu9, GitHub #936).
     * If `"worker.placement"` is present it must be `"local_only"` (the default),
-      `"prefer_remote"` or `"remote_only"` (RW8, `Wardmast.Nodes.Placement`).
+      `"prefer_remote"`, `"prefer_local"` or `"remote_only"` (RW8, `Wardmast.Nodes.Placement`).
     * If `"worker.placement_nodes"` is present it must be a list of node selectors
       (`name:<node>`, `label:<k=v>`, `kind:<cluster,machine>`; bd-d7tb2d).
     * If `"attention"` is present, it must be a map whose
@@ -237,13 +237,14 @@ defmodule Wardmast.Tasks.Workspace.Changes.ValidateConfig do
       :error ->
         changeset
 
-      {:ok, mode} when mode in ["local_only", "prefer_remote", "remote_only"] ->
+      {:ok, mode} when mode in ["local_only", "prefer_remote", "prefer_local", "remote_only"] ->
         changeset
 
       {:ok, _} ->
         Changeset.add_error(changeset,
           field: :config,
-          message: ~s(worker.placement must be "local_only", "prefer_remote" or "remote_only")
+          message:
+            ~s(worker.placement must be "local_only", "prefer_remote", "prefer_local" or "remote_only")
         )
     end
   end

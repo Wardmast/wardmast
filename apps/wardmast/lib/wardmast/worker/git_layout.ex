@@ -18,6 +18,7 @@ defmodule Wardmast.Worker.GitLayout do
   """
 
   alias Wardmast.Agents.SecurityPolicy
+  alias Wardmast.Worker.PrivateClone
 
   @type t :: :linked_worktree | :private_clone
 
@@ -29,6 +30,27 @@ defmodule Wardmast.Worker.GitLayout do
       _ -> :linked_worktree
     end
   end
+
+  @doc """
+  The layout of the checkout that already exists at `path` (`nil`: nothing there, or a
+  stub with no `.git`): `:linked_worktree` when `.git` is the `gitdir:` file `git worktree
+  add` writes, `:private_clone` when it is a real directory (`PrivateClone.clone?/1`).
+
+  `sandbox.backend: auto` (bd-56z2wz) never changes it: the same dir name cannot be a
+  linked worktree for one run and a private clone for the next, whose stale records make
+  the second fail the tamper check (bd-1h0zhg).
+  """
+  @spec existing(Path.t() | nil) :: t() | nil
+  def existing(path) when is_binary(path) do
+    case File.lstat(Path.join(path, ".git")) do
+      {:ok, %File.Stat{type: :directory}} -> :private_clone
+      {:ok, %File.Stat{type: :regular}} -> :linked_worktree
+      {:ok, %File.Stat{type: :symlink}} -> if PrivateClone.clone?(path), do: :private_clone
+      _ -> nil
+    end
+  end
+
+  def existing(_path), do: nil
 
   @doc """
   The layout a ReviewGate reviewer's checkout gets under `policy` (bd-7ays3v):
