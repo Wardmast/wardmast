@@ -120,9 +120,10 @@ defmodule Wardmast.Nodes.Placement do
   alias Wardmast.Settings
   alias Wardmast.Worker.GitCredential
   alias Wardmast.Worker.Image.RepoConfig
+  alias Wardmast.Worker.Sandbox
 
   @registry __MODULE__.Registry
-  @modes [:local_only, :prefer_remote, :remote_only]
+  @modes [:local_only, :prefer_remote, :prefer_local, :remote_only]
   @kinds [
     :implementer,
     :redispatch,
@@ -230,7 +231,7 @@ defmodule Wardmast.Nodes.Placement do
     end
   end
 
-  @type mode :: :local_only | :prefer_remote | :remote_only
+  @type mode :: :local_only | :prefer_remote | :prefer_local | :remote_only
   @type reason ::
           :follow_up
           | :provider_not_remote
@@ -240,6 +241,8 @@ defmodule Wardmast.Nodes.Placement do
           | :unpushed_commits
           | :placement_local_only
           | :scoped_git_credential
+          | :provider_no_container
+          | :existing_linked_worktree
   @type request :: %{
           required(:task_id) => String.t(),
           required(:kind) => atom(),
@@ -247,6 +250,9 @@ defmodule Wardmast.Nodes.Placement do
           required(:layout) => atom() | nil,
           required(:mode) => mode(),
           optional(:workspace_id) => String.t() | nil,
+          optional(:auto?) => boolean(),
+          optional(:local_backend) => :bwrap | :podman,
+          optional(:existing_layout) => :linked_worktree | :private_clone | nil,
           optional(:no_pr?) => boolean(),
           optional(:inspect?) => boolean(),
           optional(:local_work?) => boolean(),
@@ -302,7 +308,9 @@ defmodule Wardmast.Nodes.Placement do
     cond do
       request.kind not in @remote_kinds -> {:local_only, :follow_up}
       not remote_provider?(request.provider) -> {:local_only, :provider_not_remote}
-      request.layout != :private_clone -> {:local_only, :not_podman}
+      auto?(request) and not container_provider?(request.provider) -> {:local_only, :provider_no_container}
+      auto?(request) and existing_layout(request) == :linked_worktree -> {:local_only, :existing_linked_worktree}
+      not auto?(request) and request.layout != :private_clone -> {:local_only, :not_podman}
       no_checkout?(request) -> {:local_only, :no_private_clone}
       reason = checkout_holds_work(request) -> {:local_only, reason}
       request.mode == :local_only -> {:local_only, :placement_local_only}
@@ -368,6 +376,58 @@ defmodule Wardmast.Nodes.Placement do
 
   defp remote_provider?(provider), do: provider_key(provider) in @remote_providers
 
+  # bd-56z2wz: `sandbox.backend: auto`. The run's layout is not known until placement has
+  # chosen: a node means podman on a private clone, the primary its local backend. The
+  # request says `auto?: true` and `existing_layout`, the layout the ticket's checkout
+  # already has on disk (`nil`: none yet), which placement never changes.
+  defp auto?(request), do: Map.get(request, :auto?, false) == true
+  defp existing_layout(request), do: Map.get(request, :existing_layout)
+
+  # A provider with a podman wrap point (`Sandbox.module(:podman, provider)`): the only
+  # ones that can run on a node, or in a container at all. agy has none today.
+  defp container_provider?(provider), do: match?({:ok, _}, Sandbox.module(:podman, provider))
+
+  @doc """
+  The backend an `auto` run gets once placement has said where it goes: `:podman` on a
+  node, else the primary's: an existing private clone stays a container, an existing
+  linked worktree stays bwrap-shaped, anything else is the request's `local_backend`
+  (`:bwrap` by default). The pure counterpart of `SecurityPolicy.concretize/2`.
+  """
+  @spec local_backend(request()) :: :bwrap | :podman
+  def local_backend(request) do
+    case existing_layout(request) do
+      :private_clone -> :podman
+      :linked_worktree -> :bwrap
+      _ -> Map.get(request, :local_backend) || :bwrap
+    end
+  end
+
+  @doc """
+  The one-line account of an `auto` placement, for the run's routing decision and the
+  card: `auto: mesaana had a free slot -> podman`, `auto: no node slot -> local bwrap`.
+  `outcome` is `{:node, row}` or `{:local, why}` (`place/2`'s).
+  """
+  @spec backend_phrase(request(), {:node, map()} | {:local, term()}) :: String.t()
+  def backend_phrase(_request, {:node, row}),
+    do: "auto: #{Map.get(row, :name) || Map.get(row, :id)} had a free slot -> podman"
+
+  def backend_phrase(request, {:local, why}) do
+    "auto: #{local_cause(request, why)} -> local #{local_backend(request)}"
+  end
+
+  defp local_cause(request, :no_node) do
+    if existing_layout(request) == :private_clone,
+      do: "no node slot, its checkout is a private clone",
+      else: "no node slot"
+  end
+
+  defp local_cause(_request, :prefer_local),
+    do: "prefer_local, the primary had a free slot"
+
+  defp local_cause(request, {:local_only, reason}), do: reason_phrase(reason, request)
+  defp local_cause(_request, {:node_skipped, skipped}), do: skipped_phrase(skipped)
+  defp local_cause(_request, _why), do: "no node"
+
   @doc "Why a run is local-only, as a phrase for a hold message."
   @spec reason_phrase(reason(), map()) :: String.t()
   def reason_phrase(:follow_up, %{kind: kind}),
@@ -394,10 +454,22 @@ defmodule Wardmast.Nodes.Placement do
 
   def reason_phrase(:placement_local_only, _), do: "workspace worker.placement is local_only"
 
+  def reason_phrase(:provider_no_container, %{provider: provider}),
+    do: "provider #{provider_label(provider)} has no container wrap point"
+
+  def reason_phrase(:provider_no_container, _), do: "provider has no container wrap point"
+
+  def reason_phrase(:existing_linked_worktree, _),
+    do: "its checkout is already a linked worktree on the primary"
+
   def reason_phrase(:scoped_git_credential, _),
     do:
       "it pushes with its repo's scoped git credential, a deploy key or token that cannot " <>
         "be carried to a node (only a GitHub App's, GitLab project token or GitLab bot token can)"
+
+  defp provider_label(provider) do
+    if provider_key(provider) == "gemini", do: "agy", else: to_string(provider)
+  end
 
   @doc """
   True when placement may return a node (`Executor.Node` exists since RW9, so the
@@ -463,7 +535,7 @@ defmodule Wardmast.Nodes.Placement do
         candidates = Enum.filter(rows, &candidate?(&1, request, reserved))
 
         case candidates |> rank(reserved, request) |> prefer(Keyword.get(opts, :prefer)) do
-          [%{constrained?: true} | _] when request.mode == :prefer_remote ->
+          [%{constrained?: true} | _] when request.mode in [:prefer_remote, :prefer_local] ->
             none(request, rows)
 
           [row | _] ->
@@ -489,7 +561,7 @@ defmodule Wardmast.Nodes.Placement do
 
   # Under `prefer_remote` the run goes local; when an online node was passed over only because
   # its agent is older than this server, that is the reason, not "no node had a free slot".
-  defp none(%{mode: :prefer_remote} = request, rows) do
+  defp none(%{mode: mode} = request, rows) when mode in [:prefer_remote, :prefer_local] do
     case outdated_skipped(rows) ++ provider_skipped(request, rows) do
       [] -> {:ok, {:local, :no_node}}
       skipped -> {:ok, {:local, {:node_skipped, skipped}}}
