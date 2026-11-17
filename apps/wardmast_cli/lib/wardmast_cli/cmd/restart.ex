@@ -444,7 +444,8 @@ defmodule WardmastCli.Cmd.Restart do
   defp describe_verdict(:unknown), do: "not a `mix phx.server` process"
   defp describe_verdict({:unreadable, r}), do: "cmdline unreadable (#{inspect(r)})"
 
-  # /proc/<pid>/cmdline is NUL-separated argv. The `:bd2_proc_cmdline` seam
+  # Portable (no /proc): `ps -o command=` prints the command line space-joined, enough for
+  # the token/regex classifier. The `:bd2_proc_cmdline` seam
   # lets tests supply fake pids' argv.
   defp proc_cmdline(pid) do
     case Process.get(:bd2_proc_cmdline) do
@@ -452,12 +453,26 @@ defmodule WardmastCli.Cmd.Restart do
         fun.(pid)
 
       _ ->
-        case File.read("/proc/#{pid}/cmdline") do
-          {:ok, ""} -> {:error, :empty}
-          {:ok, raw} -> {:ok, String.split(raw, <<0>>, trim: true)}
-          {:error, _} = err -> err
-        end
+        ps_command(pid)
     end
+  end
+
+  @doc false
+  @spec parse_ps_command(String.t()) :: {:ok, [String.t()]} | {:error, :empty}
+  def parse_ps_command(out) do
+    case String.split(out) do
+      [] -> {:error, :empty}
+      argv -> {:ok, argv}
+    end
+  end
+
+  defp ps_command(pid) do
+    case run_cmd("ps", ["-p", to_string(pid), "-o", "command="], stderr_to_stdout: true) do
+      {out, 0} -> parse_ps_command(out)
+      {_out, _} -> {:error, :enoent}
+    end
+  rescue
+    ErlangError -> {:error, :enoent}
   end
 
   # Pids of processes LISTENing on `port`. Tries lsof first; if lsof is absent
