@@ -381,7 +381,7 @@ defmodule Wardmast.Sessions.ProvisioningTest do
                |> Layout.mcp_config_path()
                |> File.read!()
                |> Jason.decode!()
-               |> get_in(["mcpServers", "arbiter", "headers", "Authorization"])
+               |> get_in(["mcpServers", "wardmast", "headers", "Authorization"])
                |> String.trim_leading("Bearer ")
 
       assert {:ok, %{mode: mode}} = File.stat(token_path)
