@@ -138,7 +138,7 @@ defmodule WardmastCli.WorkspaceTest do
       assert {:error, msg} = Workspace.resolve()
       refute msg =~ "ARB_WORKSPACE"
       assert msg =~ "no workspaces found"
-      assert msg =~ "arb workspace create"
+      assert msg =~ "ward workspace create"
     end
 
     test "errors when ambiguous: multiple workspaces, none named \"default\"" do
@@ -166,7 +166,7 @@ defmodule WardmastCli.WorkspaceTest do
 
       assert {:error, msg} = Workspace.resolve()
       assert msg =~ "nonexistent"
-      assert msg =~ "arb workspace create"
+      assert msg =~ "ward workspace create"
     end
 
     test "resolve/1 accepts explicit target by id or name and ignores ARB_WORKSPACE" do

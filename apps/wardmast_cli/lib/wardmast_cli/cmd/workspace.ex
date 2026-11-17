@@ -5,7 +5,7 @@ defmodule WardmastCli.Cmd.Workspace do
 
       arb workspace list                       all workspaces (name, prefix, id)
       arb workspace show <id>                  one workspace's detail incl. config
-      arb workspace create <name>              create a new workspace
+      ward workspace create <name>              create a new workspace
         [--prefix bd] [--tracker-type none] [--merger-strategy direct]
         [--description "..."]
 
@@ -180,7 +180,7 @@ defmodule WardmastCli.Cmd.Workspace do
     name =
       case rest do
         [name] -> name
-        [] -> Output.die("workspace create requires a name", "arb workspace create <name>")
+        [] -> Output.die("workspace create requires a name", "ward workspace create <name>")
         _ -> Output.die("workspace create takes exactly one positional argument: the name")
       end
 
