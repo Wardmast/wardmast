@@ -68,6 +68,8 @@ defmodule Wardmast.Worker.SpawnEnv do
   alias Wardmast.Agents.Gemini.ConfigDir, as: GeminiConfigDir
   alias Wardmast.Worker.ReleaseEnv
 
+  require Logger
+
   # Why each entry is here: a worker runs real toolchains (`mise`-shimmed
   # erlang/elixir/node, git, gh/glab, the agent CLI itself), so it needs a PATH
   # and HOME, a locale/terminal, temp and cache roots, the tool-home overrides,
@@ -135,12 +137,51 @@ defmodule Wardmast.Worker.SpawnEnv do
   credentials), which win on a name collision.
   """
   @spec port_env([pair()], String.t() | atom() | nil) :: [pair()]
-  def port_env(extras, provider) when is_list(extras) do
+  def port_env(extras, provider, os \\ :os.type()) when is_list(extras) do
     provider = normalize_provider(provider)
 
     (unset_pairs(provider) ++ drop_foreign_credentials(extras, provider))
     |> ReleaseEnv.port_env()
     |> dedupe()
+    |> ensure_baseline_path(os, System.get_env("HOME"))
+  end
+
+  @doc """
+  On darwin, appends the baseline tool dirs (`/opt/homebrew/bin`,
+  `/usr/local/bin`, `~/.local/bin`) to `path` when absent; returns
+  `{new_path, appended_dirs}`. Other OSes return `path` unchanged. A
+  launchd-started server has a minimal PATH without Homebrew.
+  """
+  @spec darwin_baseline_path(String.t() | nil, {atom(), atom()}, String.t() | nil) ::
+          {String.t() | nil, [String.t()]}
+  def darwin_baseline_path(path, {:unix, :darwin}, home) do
+    local = if home in [nil, ""], do: [], else: [Path.join(home, ".local/bin")]
+    present = String.split(path || "", ":", trim: true)
+    missing = Enum.reject(["/opt/homebrew/bin", "/usr/local/bin"] ++ local, &(&1 in present))
+    {Enum.join(present ++ missing, ":"), missing}
+  end
+
+  def darwin_baseline_path(path, _os, _home), do: {path, []}
+
+  defp ensure_baseline_path(pairs, os, home) do
+    current =
+      case List.keyfind(pairs, "PATH", 0) do
+        {_, value} when is_binary(value) -> value
+        nil -> System.get_env("PATH")
+        _ -> nil
+      end
+
+    case darwin_baseline_path(current, os, home) do
+      {_, []} ->
+        pairs
+
+      {path, missing} ->
+        Logger.warning(
+          "SpawnEnv: worker PATH lacked darwin baseline dirs; appended #{Enum.join(missing, ", ")}"
+        )
+
+        List.keystore(pairs, "PATH", 0, {"PATH", path})
+    end
   end
 
   @doc "`port_env/2` translated to `System.cmd/3`'s `nil`-means-unset convention."
