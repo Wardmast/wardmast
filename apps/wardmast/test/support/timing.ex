@@ -12,6 +12,25 @@ defmodule Wardmast.Test.Timing do
 
   @default_ms 100
 
+  @doc """
+  Poll `fun` every 10 ms until it returns truthy, for at most `scale(budget_ms)`.
+  Returns whether it did. For "N periodic fires happened" assertions, which a
+  fixed `Process.sleep/1` makes a bet on the runner's speed.
+  """
+  @spec await((-> as_boolean(term())), non_neg_integer()) :: boolean()
+  def await(fun, budget_ms \\ 1_000) do
+    deadline = System.monotonic_time(:millisecond) + scale(budget_ms)
+    do_await(fun, deadline)
+  end
+
+  defp do_await(fun, deadline) do
+    cond do
+      fun.() -> true
+      System.monotonic_time(:millisecond) > deadline -> false
+      true -> Process.sleep(10) && do_await(fun, deadline)
+    end
+  end
+
   @doc "`ms` multiplied by how much slower than a dev box the configured host is."
   @spec scale(non_neg_integer()) :: non_neg_integer()
   def scale(ms) do

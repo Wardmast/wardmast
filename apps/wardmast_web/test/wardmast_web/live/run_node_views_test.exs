@@ -41,6 +41,17 @@ defmodule WardmastWeb.RunNodeViewsTest do
     view
   end
 
+  # The ticket page's run roster arrives in a later async load than the header, so
+  # one `render_async/2` can return before it has started (a slow runner). Keep
+  # draining until the element is there.
+  defp await_element(view, selector, tries \\ 20) do
+    cond do
+      has_element?(view, selector) -> :ok
+      tries == 0 -> :timeout
+      true -> render_async(view, @async_timeout) && await_element(view, selector, tries - 1)
+    end
+  end
+
   defp history_run(ctx, attrs) do
     Ash.create!(
       Run,
@@ -124,6 +135,7 @@ defmodule WardmastWeb.RunNodeViewsTest do
     remote = history_run(ctx, %{node_id: ctx.node.id})
 
     view = open(conn, ~p"/tasks/#{ctx.ticket.id}")
+    await_element(view, ~s([data-node-badge="gpu-box"]))
     assert has_element?(view, ~s([data-node-badge="gpu-box"]))
 
     render_click(view, "toggle_run", %{"run" => remote.id})

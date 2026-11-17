@@ -300,9 +300,8 @@ defmodule Wardmast.Workflows.ReviewPatrolTest do
       })
 
       {_pid, name} = start_patrol(ws, interval_ms: 50)
-      Process.sleep(250)
 
-      assert ReviewPatrol.state(name).ticks >= 2,
+      assert Wardmast.Test.Timing.await(fn -> ReviewPatrol.state(name).ticks >= 2 end),
              "expected at least 2 auto-ticks; got #{ReviewPatrol.state(name).ticks}"
     end
   end

@@ -23,4 +23,9 @@ defmodule Wardmast.Test.TimingTest do
     Application.put_env(:ex_unit, :assert_receive_timeout, 10)
     assert Timing.scale(500) == 500
   end
+
+  test "await/2 returns true as soon as the condition holds, false once the budget is spent" do
+    assert Timing.await(fn -> true end, 50)
+    refute Timing.await(fn -> false end, 30)
+  end
 end
