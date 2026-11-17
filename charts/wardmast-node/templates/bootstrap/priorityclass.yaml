@@ -1,16 +1,16 @@
-{{- if and (include "arbiter-node.bootstrap" .) .Values.placement.priorityClass.create }}
+{{- if and (include "wardmast-node.bootstrap" .) .Values.placement.priorityClass.create }}
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
   name: {{ .Values.placement.priorityClass.name }}
   labels:
-    {{- include "arbiter-node.labels" . | nindent 4 }}
+    {{- include "wardmast-node.labels" . | nindent 4 }}
 value: {{ .Values.placement.priorityClass.value }}
 preemptionPolicy: Never
 globalDefault: false
-description: "Arbiter worker pods: every other workload wins a contention."
+description: "Wardmast worker pods: every other workload wins a contention."
 {{- end }}
-{{- if and (include "arbiter-node.bootstrap" .) .Values.controller.priorityClass.create .Values.controller.priorityClassName }}
+{{- if and (include "wardmast-node.bootstrap" .) .Values.controller.priorityClass.create .Values.controller.priorityClassName }}
 {{- if le (int .Values.controller.priorityClass.value) (int .Values.placement.priorityClass.value) }}
 {{- fail "controller.priorityClass.value must be greater than placement.priorityClass.value: losing the controller interrupts every run on the node, so it must outrank the workers" }}
 {{- end }}
@@ -20,9 +20,9 @@ kind: PriorityClass
 metadata:
   name: {{ .Values.controller.priorityClassName }}
   labels:
-    {{- include "arbiter-node.labels" . | nindent 4 }}
+    {{- include "wardmast-node.labels" . | nindent 4 }}
 value: {{ .Values.controller.priorityClass.value }}
 preemptionPolicy: {{ .Values.controller.priorityClass.preemptionPolicy }}
 globalDefault: false
-description: "Arbiter node controller: losing it interrupts every run on the node, so it outranks batch work."
+description: "Wardmast node controller: losing it interrupts every run on the node, so it outranks batch work."
 {{- end }}

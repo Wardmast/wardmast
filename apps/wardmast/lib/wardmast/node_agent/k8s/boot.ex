@@ -19,7 +19,7 @@ defmodule Wardmast.NodeAgent.K8s.Boot do
   start it
 
     1. builds the in-cluster API client (the service account, `Client.in_cluster/1`);
-    2. reads the node credential from the Secret `arbiter-node-credential`, or redeems the
+    2. reads the node credential from the Secret `wardmast-node-credential`, or redeems the
        operator's join token at `POST /nodes/enroll` and stores the answer there
        (`Wardmast.NodeAgent.K8s.Credential`);
     3. asks the primary for the install id, `nodes.registry` and the canary's image
@@ -323,7 +323,7 @@ defmodule Wardmast.NodeAgent.K8s.Boot do
   defp describe(:credential, :no_join_token),
     do:
       "no node credential and no join token: create the join Secret " <>
-        "(kubectl -n <namespace> create secret generic arbiter-join --from-file=token=/dev/stdin)"
+        "(kubectl -n <namespace> create secret generic wardmast-join --from-file=token=/dev/stdin)"
 
   defp describe(:credential, {:enroll_refused, status, message}),
     do: "the primary refused the join token (#{status}: #{message}); mint a new one"

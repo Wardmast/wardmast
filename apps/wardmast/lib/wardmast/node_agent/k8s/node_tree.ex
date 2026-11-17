@@ -5,10 +5,10 @@ defmodule Wardmast.NodeAgent.K8s.NodeTree do
   primary's facts and the controller's identity are in hand. `:rest_for_one`, in this
   order:
 
-      PodChannel             the CA (Secret `arbiter-controller-ca`), leaves, :9443/:9444
+      PodChannel             the CA (Secret `wardmast-controller-ca`), leaves, :9443/:9444
       ConfigLoader           /etc/arb/config/controller.yaml, re-read every 30 s
       Informer               the pods labelled with this install and node
-      Lease                  `arbiter-controller`: one active controller (K§3.5)
+      Lease                  `wardmast-controller`: one active controller (K§3.5)
       ControllerSupervisor   ReadinessMonitor (the canary), then Controller (the run table)
       Upgrader               the image self-upgrade (K§2.4)
       Connection             the WebSocket to the primary, last: it reports the others
@@ -44,7 +44,7 @@ defmodule Wardmast.NodeAgent.K8s.NodeTree do
   @informer Wardmast.NodeAgent.K8s.Informer
   @lease Wardmast.NodeAgent.K8s.Lease
   @upgrader Wardmast.NodeAgent.K8s.Upgrader
-  @service "arbiter-controller"
+  @service "wardmast-controller"
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts), do: Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
@@ -67,7 +67,7 @@ defmodule Wardmast.NodeAgent.K8s.NodeTree do
          )},
         {Lease,
          Keyword.merge(
-           [client: client, identity: identity.own_pod || "arbiter-controller", name: @lease],
+           [client: client, identity: identity.own_pod || "wardmast-controller", name: @lease],
            tree[:lease] || []
          )},
         {ControllerSupervisor,
@@ -102,8 +102,8 @@ defmodule Wardmast.NodeAgent.K8s.NodeTree do
   # The label selector of K§3.3: this install's pods on this node, nothing else.
   defp selector(identity) do
     Client.label_selector(%{
-      "arbiter.dev/install" => identity.install_id,
-      "arbiter.dev/node" => identity.node_id
+      "wardmast.dev/install" => identity.install_id,
+      "wardmast.dev/node" => identity.node_id
     })
   end
 

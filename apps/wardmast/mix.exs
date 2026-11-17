@@ -113,7 +113,7 @@ defmodule Wardmast.MixProject do
       {:bandit, "~> 1.5"},
       {:plug, "~> 1.15"},
 
-      # The k8s controller's operator config (ConfigMap `arbiter-controller-config`,
+      # The k8s controller's operator config (ConfigMap `wardmast-controller-config`,
       # Wardmast.NodeAgent.K8s.ControllerConfig): YAML, parsed into a closed schema.
       # Already in the lock through ash's reactor.
       {:yaml_elixir, "~> 2.11"},

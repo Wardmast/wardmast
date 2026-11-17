@@ -90,8 +90,8 @@ defmodule Mix.Tasks.Wardmast.ContainerfileTest do
     test "publishes controller, worker base and chart to GHCR" do
       assert @workflow =~ "publish-oci:"
       assert @workflow =~ "packages: write"
-      assert @workflow =~ "arbiter-controller"
-      assert @workflow =~ "arbiter-worker-base"
+      assert @workflow =~ "wardmast-controller"
+      assert @workflow =~ "wardmast-worker-base"
       assert @workflow =~ "helm push"
     end
 

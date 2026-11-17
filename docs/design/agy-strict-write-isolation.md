@@ -64,7 +64,7 @@ vendor, the kernel, or Arbiter's dispatch.
 | 2. OS isolation (bwrap) | **Yes, for every write path**: native tools, `run_command`, and any child process. The kernel returns EROFS. Proven live below | One adapter change plus a doctor check. `bwrap` is packaged on every target checked | Toolchain caches need writable paths. Unprivileged user namespaces must be enabled on the host (checked by the self-test) | **Chosen** |
 | 2'. Restricted Unix user | Yes | High: a second account, keyring/OAuth for that user, and group-writable worktrees and `.git` | Breaks the same-user keyring auth agy relies on (see worker-security.md, "Credentials are untouched") | No |
 | 2''. Container (podman) | Yes | High: image per toolchain, keyring over D-Bus into the container, UID mapping on bind mounts | Heavier start-up per spawn. Duplicates what bwrap does with one binary | No, for now |
-| 3. Detect and revert | **No.** The write has already happened by the time it's noticed. A write to `~/.arbiter` (the live install and DB), the main checkout (hot-reload cascade) or `~/.ssh` does its damage before any audit | inotify can't watch "everything outside the worktree", and a snapshot diff of `$HOME` is slow and noisy | False sense of safety. "Revert" can't undo a secret already read and sent, or a DB already corrupted | **Rejected** |
+| 3. Detect and revert | **No.** The write has already happened by the time it's noticed. A write to `~/.wardmast` (the live install and DB), the main checkout (hot-reload cascade) or `~/.ssh` does its damage before any audit | inotify can't watch "everything outside the worktree", and a snapshot diff of `$HOME` is slow and noisy | False sense of safety. "Revert" can't undo a secret already read and sent, or a DB already corrupted | **Rejected** |
 | 4. agy ineligible for `:strict` | Yes, by never running agy there | Small | agy never carries `:strict` load, which contradicts the operator's 2026-09-25 ruling that agy is ready only when `:strict` works | **Kept as the fail-closed fallback** for hosts that can't jail |
 
 Option 4 also exposes a gap beyond agy. Codex answers
@@ -155,7 +155,7 @@ Starting recipe for bd-5gvqgc:
 
 * **Read-only `/`.** Everything else in the operator's `$HOME`, including
   the `ConfigDir` symlink passthrough targets, is visible but not writable.
-  That also protects `~/.arbiter` (the live release and DB) and the main
+  That also protects `~/.wardmast` (the live release and DB) and the main
   checkout, where a stray worker write has cascaded into every running
   worker before.
 * **Git common dir read-write.** Commits need it, because worktree objects

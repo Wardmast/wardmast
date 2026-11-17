@@ -303,7 +303,7 @@ defmodule WardmastWeb.NodeClusterJoinTest do
 
       assert cluster["apply_command"] =~ cluster["manifest_url"]
       assert cluster["secret_command"] =~ "read -rs T"
-      assert cluster["secret_command"] =~ "-n ci-workers create secret generic arbiter-join"
+      assert cluster["secret_command"] =~ "-n ci-workers create secret generic wardmast-join"
       assert cluster["image"] == "#{@registry}/controller:#{release.tag}"
 
       # The secret never travels in anything the operator pastes.
@@ -358,7 +358,7 @@ defmodule WardmastWeb.NodeClusterJoinTest do
       assert helm["install_command"] =~ "helm install k3s "
       assert helm["install_command"] =~ "--namespace ci-workers"
       assert helm["namespace_command"] =~ "kubectl create namespace ci-workers"
-      assert helm["secret_command"] =~ "-n ci-workers create secret generic arbiter-join"
+      assert helm["secret_command"] =~ "-n ci-workers create secret generic wardmast-join"
     end
 
     test "a value the renderer refuses is a 422 and mints nothing" do

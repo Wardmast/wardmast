@@ -1,8 +1,8 @@
 defmodule Wardmast.NodeAgent.PodChannel.CAStore do
   @moduledoc """
   Where the per-install CA lives between boots (`docs/design/remote-workers.md`
-  §16 K§2.4, K§12). In a cluster it is the Secret `arbiter-controller-ca`
-  (private key, controller-only RBAC) plus the ConfigMap `arbiter-ca` (public
+  §16 K§2.4, K§12). In a cluster it is the Secret `wardmast-controller-ca`
+  (private key, controller-only RBAC) plus the ConfigMap `wardmast-ca` (public
   certificate, mounted into worker pods): `Wardmast.NodeAgent.PodChannel.CAStore.Secret`
   (K14). `Wardmast.NodeAgent.PodChannel.CAStore.Dir` is the plain filesystem one.
 

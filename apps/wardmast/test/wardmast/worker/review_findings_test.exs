@@ -87,7 +87,7 @@ defmodule Wardmast.Worker.ReviewFindingsTest do
       # bd-6d3h8m / PR #2074: an approving round's item 3 ("**[Low]**
       # ... non-blocking") spawned three extra severity-:unknown (fail-closed
       # blocking) findings from its own continuation bullets, and one of them
-      # cited a path (`~/.arbiter/arbiter.sqlite3`) no revision could ever
+      # cited a path (`~/.wardmast/arbiter.sqlite3`) no revision could ever
       # "touch", tripping the approval-gap guard on a clean APPROVE.
       findings = """
       VERDICT: REQUEST_CHANGES
@@ -592,7 +592,7 @@ defmodule Wardmast.Worker.ReviewFindingsTest do
     1. **Severity: Medium** — the PR description (PR #2086 body, "## Screenshots" section; images in `docs/pr-2086-screenshots/`) has no "before" mobile screenshots, which acceptance criterion 3 requires.
        - Fix: check out the fork point `ef2effa5` in a scratch worktree and copy in `scripts/verify_mobile_touch.mjs` and `mobile_touch_browser_test.exs`. The script's checks will fail there, which is expected; the screenshots are still written. Run it with `ARB_MOBILE_TOUCH_SCREENSHOT=<path>` so it captures `375-{light,dark}-worker-output` and `375/414-*-session-dock-before-maximize` from the unfixed code. Add them to the PR as clearly labelled Before/After pairs.
     2. **Severity: Low** — the "Test plan" in the PR body leaves `mix precommit` as `[~]`.
-       - Fix: re-run `mix precommit && mix audit` with `ARB_WORKER_BEAD_ID`, `WARDMAST_RELEASE_REPO`, `ARB_PRIMARY_CHECKOUT` and `ARB_WORKSPACE` unset (the 6 env-dependent failures are a known artifact of running inside a worker). Re-run any flaky timing test such as `ProcessTeardownTest` on its own, and record the resulting pass in the PR.
+       - Fix: re-run `mix precommit && mix audit` with `ARB_WORKER_BEAD_ID`, `WARDMAST_RELEASE_REPO`, `WARDMAST_PRIMARY_CHECKOUT` and `ARB_WORKSPACE` unset (the 6 env-dependent failures are a known artifact of running inside a worker). Re-run any flaky timing test such as `ProcessTeardownTest` on its own, and record the resulting pass in the PR.
     3. **Severity: Low (optional)** — `docs/pr-2086-screenshots/*.png` commits about 230KB of PR-only images to the repo permanently.
        - Fix: once the PR body points at hosted copies, consider dropping `docs/pr-2086-screenshots/` from the branch before merge, or confirm with the coordinator that screenshots belong in the repo.
     The code changes themselves were checked in a real browser and I found no correctness defects in them. Changing `log_stream/1` also affects the run and task detail panes: they now scroll sideways instead of cutting off long lines with an ellipsis. That is consistent with the ticket, and the PR says so.

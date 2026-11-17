@@ -11,12 +11,12 @@ defmodule Wardmast.NodeAgent.K8s.E2ENamespaceParityTest do
     present = kinds(objects)
 
     for want <- [
-          {"ServiceAccount", "arbiter-worker"},
-          {"ConfigMap", "arbiter-ca"},
-          {"LimitRange", "arbiter-workers"},
-          {"ResourceQuota", "arbiter-workers"},
-          {"Deployment", "arbiter-controller"},
-          {"Service", "arbiter-controller"}
+          {"ServiceAccount", "wardmast-worker"},
+          {"ConfigMap", "wardmast-ca"},
+          {"LimitRange", "wardmast-workers"},
+          {"ResourceQuota", "wardmast-workers"},
+          {"Deployment", "wardmast-controller"},
+          {"Service", "wardmast-controller"}
         ] do
       assert want in present
     end
@@ -80,8 +80,8 @@ defmodule Wardmast.NodeAgent.K8s.E2ENamespaceParityTest do
 
   test "pod_spec still names the objects the helper provides" do
     src = File.read!(Path.join(File.cwd!(), "lib/wardmast/node_agent/k8s/pod_spec.ex"))
-    assert src =~ "arbiter-worker"
-    assert src =~ "arbiter-ca"
+    assert src =~ "wardmast-worker"
+    assert src =~ "wardmast-ca"
     assert Code.ensure_loaded?(PodSpec)
   end
 end

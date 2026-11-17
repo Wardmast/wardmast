@@ -13,7 +13,7 @@ defmodule WardmastCli.Supervisor.Systemd do
   alias WardmastCli.Cmd.Start
   alias WardmastCli.Output
 
-  @unit "arbiter.service"
+  @unit "wardmast.service"
 
   # ---- service probe / lifecycle (arb restart) -------------------------------
 
@@ -245,7 +245,7 @@ defmodule WardmastCli.Supervisor.Systemd do
   # installs have root so journalctl works directly.
   @impl true
   def logs_cmd(:user) do
-    log_file = Path.join([Unit.arbiter_home_path(), "log", "arbiter.log"])
+    log_file = Path.join([Unit.arbiter_home_path(), "log", "wardmast.log"])
     "tail -f #{log_file}"
   end
 

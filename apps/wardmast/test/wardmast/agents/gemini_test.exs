@@ -760,7 +760,7 @@ defmodule Wardmast.Agents.GeminiTest do
     end
 
     # bd-3q2djr (G3): the agy spawn asks for the hidden read paths; the data
-    # dir (`~/.arbiter`, the install DB) is one of them.
+    # dir (`~/.wardmast`, the install DB) is one of them.
     test "an agy spawn hides the install data dir behind a tmpfs", %{worktree: worktree} do
       Application.put_env(:wardmast, :worker_jail_network, false)
       data_dir = Path.join(worktree, "../hide-data-#{System.unique_integer([:positive])}")

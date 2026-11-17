@@ -26,7 +26,7 @@ defmodule Wardmast.Sessions.InstructionsTest do
     struct!(
       %Session{
         id: "sess1234",
-        cwd: "/home/operator/.arbiter/sessions/sess1234/workspace",
+        cwd: "/home/operator/.wardmast/sessions/sess1234/workspace",
         workspace_id: nil,
         can_dispatch: false
       },

@@ -111,7 +111,7 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
       {{"get", "/api/server/worker_jail_unmask"}, {%{"paths" => []}, 200}},
       {{"get", "/api/server/worker_memory"},
        {%{
-          "service_unit" => "arbiter.service",
+          "service_unit" => "wardmast.service",
           "oom_policy" => "continue",
           "capped" => true,
           "cap" => "12G"

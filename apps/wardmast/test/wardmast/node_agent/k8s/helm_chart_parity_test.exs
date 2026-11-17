@@ -1,7 +1,7 @@
 defmodule Wardmast.NodeAgent.K8s.HelmChartParityTest do
   @moduledoc """
   KH6 (bd-19mn3u, `docs/design/remote-workers.md` §20.14, OD9): the hand-written
-  `charts/arbiter-node` chart and `InstallManifest.render/2` are two renderers of one
+  `charts/wardmast-node` chart and `InstallManifest.render/2` are two renderers of one
   install, and this test is what keeps them from drifting.
 
   For each equivalent configuration both are rendered and every document is compared,
@@ -22,11 +22,11 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartParityTest do
   alias Wardmast.NodeAgent.K8s.{ControllerConfig, InstallManifest}
 
   @moduletag :helm
-  @chart Path.expand("../../../../../../charts/arbiter-node", __DIR__)
+  @chart Path.expand("../../../../../../charts/wardmast-node", __DIR__)
   @helm System.find_executable("helm")
   @moduletag skip: is_nil(@helm) && "helm is not installed"
 
-  @image_repository "ghcr.io/wardmast/arbiter-controller"
+  @image_repository "ghcr.io/wardmast/wardmast-controller"
   @image_tag "9.9.9"
   @primary_url "https://arbiter.example.test"
   @primary_cidrs "100.64.0.10/32,100.64.0.11/32"
@@ -59,13 +59,13 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartParityTest do
     {"admission policy and a registry pull secret",
      %{
        "admission" => "policy",
-       "registries" => "#{@registry}/=arbiter-registry",
+       "registries" => "#{@registry}/=wardmast-registry",
        "self_upgrade" => "off"
      },
      [
        "admissionPolicy.enabled=true",
        "registries[0].prefix=#{@registry}",
-       "registries[0].pullSecret=arbiter-registry"
+       "registries[0].pullSecret=wardmast-registry"
      ]},
     {"node selector, API server addresses and another namespace",
      %{
@@ -112,10 +112,10 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartParityTest do
       refute Enum.any?(chart, &(&1["kind"] == "Namespace"))
       assert Enum.any?(raw, &(&1["kind"] == "Namespace"))
 
-      env = chart |> find!("Deployment", "arbiter-controller") |> controller_env()
+      env = chart |> find!("Deployment", "wardmast-controller") |> controller_env()
       for name <- @helm_env, do: assert(Map.has_key?(env, name), "chart lacks #{name}")
 
-      raw_env = raw |> find!("Deployment", "arbiter-controller") |> controller_env()
+      raw_env = raw |> find!("Deployment", "wardmast-controller") |> controller_env()
       for name <- @helm_env, do: refute(Map.has_key?(raw_env, name))
     end
   end
@@ -148,14 +148,14 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartParityTest do
               "placement.spread.whenUnsatisfiable=DoNotSchedule",
               "placement.priorityClass.name=arbiter-ci",
               "registries[0].prefix=#{@registry}",
-              "registries[0].pullSecret=arbiter-registry"
+              "registries[0].pullSecret=wardmast-registry"
             ]
         )
 
       assert {:ok, config} = controller_config(docs)
 
       assert config.max_concurrent == 3
-      assert config.namespace == "arbiter-workers"
+      assert config.namespace == "wardmast-workers"
 
       assert config.worker["requests"] == %{
                "cpu" => "500m",
@@ -181,7 +181,7 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartParityTest do
       assert config.placement["priority_class"] == "arbiter-ci"
       assert config.placement["spread"]["max_skew"] == 2
       assert config.placement["spread"]["when_unsatisfiable"] == "DoNotSchedule"
-      assert [%{"prefix" => prefix, "pull_secret" => "arbiter-registry"}] = config.registries
+      assert [%{"prefix" => prefix, "pull_secret" => "wardmast-registry"}] = config.registries
       assert String.starts_with?(prefix, @registry)
     end
 
@@ -338,7 +338,7 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartParityTest do
   end
 
   defp normalise_controller_yaml(
-         %{"kind" => "ConfigMap", "metadata" => %{"name" => "arbiter-controller-config"}} = doc
+         %{"kind" => "ConfigMap", "metadata" => %{"name" => "wardmast-controller-config"}} = doc
        ) do
     {:ok, config} = ControllerConfig.parse(doc["data"]["controller.yaml"])
     # The chart spells out the default placement; the raw renderer leaves it to the
@@ -392,7 +392,7 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartParityTest do
 
   defp helm_template(sets, opts \\ []) do
     release = Keyword.get(opts, :release, "mesaana")
-    namespace = Keyword.get(opts, :namespace, "arbiter-workers")
+    namespace = Keyword.get(opts, :namespace, "wardmast-workers")
     args = Enum.flat_map(["image.tag=#{@image_tag}" | sets], &["--set", &1])
 
     case System.cmd(
@@ -412,7 +412,7 @@ defmodule Wardmast.NodeAgent.K8s.HelmChartParityTest do
 
   defp controller_config(docs) do
     docs
-    |> find!("ConfigMap", "arbiter-controller-config")
+    |> find!("ConfigMap", "wardmast-controller-config")
     |> get_in(["data", "controller.yaml"])
     |> ControllerConfig.parse()
   end

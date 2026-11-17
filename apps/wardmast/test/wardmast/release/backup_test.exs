@@ -36,7 +36,7 @@ defmodule Wardmast.Release.BackupTest do
 
   test "takes an online backup of a live WAL database, including uncheckpointed rows", %{dir: dir} do
     {src, _conn} = live_db(dir, 25)
-    dest = Path.join([dir, "snapshots", "arbiter-pre-v1.sqlite3"])
+    dest = Path.join([dir, "snapshots", "wardmast-pre-v1.sqlite3"])
 
     assert {:ok, %{path: ^dest, bytes: bytes}} = Backup.take(src, dest)
     assert bytes > 0

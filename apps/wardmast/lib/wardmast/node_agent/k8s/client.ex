@@ -5,7 +5,7 @@ defmodule Wardmast.NodeAgent.K8s.Client do
   service-account auth, and exactly the verbs the controller's RBAC grants on
   `pods` — list, watch, create, delete — plus the `pods/log` read and follow, and
   the named objects the Role lists (K5, K9, K14): `resourcequotas`, the Lease, the
-  controller's own Deployment, the credential and CA Secrets, the `arbiter-ca`
+  controller's own Deployment, the credential and CA Secrets, the `wardmast-ca`
   ConfigMap and the controller's Service. No `exec`, no `attach`, no create of
   anything but pods: there is nothing here the Role does not allow.
 
@@ -284,7 +284,7 @@ defmodule Wardmast.NodeAgent.K8s.Client do
 
   @doc """
   A `coordination.k8s.io` Lease by name. The install pre-creates the single
-  `arbiter-controller` Lease, and the Role grants `get`/`update` on that name only,
+  `wardmast-controller` Lease, and the Role grants `get`/`update` on that name only,
   so there is no create here.
   """
   @spec get_lease(t(), String.t()) :: {:ok, map()} | {:error, error()}
@@ -309,7 +309,7 @@ defmodule Wardmast.NodeAgent.K8s.Client do
   # --- the controller's own Deployment (K9 self-upgrade) -------------------------------
 
   @doc """
-  An `apps/v1` Deployment by name. The Role grants `get` on `deployments/arbiter-controller`
+  An `apps/v1` Deployment by name. The Role grants `get` on `deployments/wardmast-controller`
   only (the owner-reference UID, and the image `Wardmast.NodeAgent.K8s.SelfUpgrade` compares).
   """
   @spec get_deployment(t(), String.t()) :: {:ok, map()} | {:error, error()}
@@ -317,7 +317,7 @@ defmodule Wardmast.NodeAgent.K8s.Client do
 
   @doc """
   A strategic merge patch (`patch` is the decoded body) of a Deployment. The Role grants
-  `patch` on `deployments/arbiter-controller` only, and only when `rbac.selfUpgrade` is on:
+  `patch` on `deployments/wardmast-controller` only, and only when `rbac.selfUpgrade` is on:
   anything else is `{:error, {:forbidden, message}}`.
   """
   @spec patch_deployment(t(), String.t(), map()) :: {:ok, map()} | {:error, error()}
@@ -336,8 +336,8 @@ defmodule Wardmast.NodeAgent.K8s.Client do
   # --- the node-agent boot (K14): credential, CA, Service ------------------------------
 
   @doc """
-  A Secret by name. The Role grants `get`/`update` on `arbiter-node-credential` and
-  `arbiter-controller-ca` only: the node credential and the pod-channel CA.
+  A Secret by name. The Role grants `get`/`update` on `wardmast-node-credential` and
+  `wardmast-controller-ca` only: the node credential and the pod-channel CA.
   """
   @spec get_secret(t(), String.t()) :: {:ok, map()} | {:error, error()}
   def get_secret(client, name), do: request(client, :get, core_path(client, "secrets", name), [])
@@ -350,7 +350,7 @@ defmodule Wardmast.NodeAgent.K8s.Client do
   @spec update_secret(t(), map()) :: {:ok, map()} | {:error, error()}
   def update_secret(client, secret), do: put_object(client, "secrets", secret)
 
-  @doc "A ConfigMap by name (the Role: `get`/`update` on `arbiter-ca` only)."
+  @doc "A ConfigMap by name (the Role: `get`/`update` on `wardmast-ca` only)."
   @spec get_config_map(t(), String.t()) :: {:ok, map()} | {:error, error()}
   def get_config_map(client, name),
     do: request(client, :get, core_path(client, "configmaps", name), [])
@@ -360,7 +360,7 @@ defmodule Wardmast.NodeAgent.K8s.Client do
   def update_config_map(client, config_map), do: put_object(client, "configmaps", config_map)
 
   @doc """
-  A Service by name (the Role: `get` on `arbiter-controller` only; its `clusterIP` is the
+  A Service by name (the Role: `get` on `wardmast-controller` only; its `clusterIP` is the
   address worker pods dial and the pod-channel certificate names).
   """
   @spec get_service(t(), String.t()) :: {:ok, map()} | {:error, error()}

@@ -7,7 +7,7 @@ defmodule WardmastCli.Cmd.Session do
       arb session attach <id> [--read-only]  attach tmux directly (-r for read-only)
 
   Deliberately reads systemd and tmux **directly**, never through the Phoenix
-  API — the point of this command is to work when `arbiter.service` (and
+  API — the point of this command is to work when `wardmast.service` (and
   therefore `arb`'s usual HTTP path) is down entirely. It duplicates the tiny
   bit of naming convention `Wardmast.Sessions.Naming` owns server-side
   (`arb-session-<id>.scope`, `session-<id>.sock`, tmux session `coord`)

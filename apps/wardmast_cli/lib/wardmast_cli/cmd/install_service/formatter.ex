@@ -63,7 +63,7 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
     if log_paths do
       {config_path, state_file} = log_paths
       IO.puts("")
-      IO.puts("Logs are written to #{Path.join([arbiter_home, "log", "arbiter.log"])}.")
+      IO.puts("Logs are written to #{Path.join([arbiter_home, "log", "wardmast.log"])}.")
 
       IO.puts(
         "A daily systemd timer (#{Unit.logrotate_timer_name()}) rotates logs automatically."

@@ -3,7 +3,7 @@ defmodule Wardmast.Worker.DevServerEnv do
   Overrides `DATABASE_PATH` and `PORT` in worker child environments so a
   worker's own manual `mix phx.server` — started to visually/via-curl verify
   a rendering change per the verification-before-completion skill — never
-  collides with the live coordinator-facing `arbiter.service` instance
+  collides with the live coordinator-facing `wardmast.service` instance
   (bd-bzsqbu, bd-b49kqb).
 
   Worker children no longer inherit the coordinator's OS environment
@@ -13,7 +13,7 @@ defmodule Wardmast.Worker.DevServerEnv do
   them verbatim, and without an override a
   worker-started dev server silently points at the live, shared database
   AND binds the coordinator's own HTTP port (`config/dev.exs` reads `PORT`,
-  defaulting to 4848 — the same port `arbiter.service` uses). A worker
+  defaulting to 4848 — the same port `wardmast.service` uses). A worker
   hitting `EADDRINUSE` on 4848 and "freeing" the port has repeatedly killed
   the live coordinator (bd-b49kqb). `pairs/1` returns a task-scoped
   throwaway sqlite path and a task-scoped port so any dev server a worker

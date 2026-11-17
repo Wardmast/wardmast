@@ -30,24 +30,24 @@ defmodule Wardmast.NodeAgent.K8s.BootTest do
     File.mkdir_p!(home)
     on_exit(fn -> File.rm_rf!(home) end)
 
-    cluster = FakeK8sApi.start!(namespace: "arbiter-workers")
+    cluster = FakeK8sApi.start!(namespace: "wardmast-workers")
     api = cluster.api
     FakeK8sApi.set_clock(api, DateTime.utc_now())
 
-    for name <- ~w(arbiter-node-credential arbiter-controller-ca) do
+    for name <- ~w(wardmast-node-credential wardmast-controller-ca) do
       FakeK8sApi.put_secret(api, %{"metadata" => %{"name" => name}, "type" => "Opaque"})
     end
 
-    FakeK8sApi.put_config_map(api, %{"metadata" => %{"name" => "arbiter-ca"}})
+    FakeK8sApi.put_config_map(api, %{"metadata" => %{"name" => "wardmast-ca"}})
 
     FakeK8sApi.put_service(api, %{
-      "metadata" => %{"name" => "arbiter-controller"},
+      "metadata" => %{"name" => "wardmast-controller"},
       "spec" => %{"clusterIP" => "127.0.0.1"}
     })
 
     FakeK8sApi.put_deployment(api, %{
       "metadata" => %{
-        "name" => "arbiter-controller",
+        "name" => "wardmast-controller",
         "uid" => "5f0c2a1e-1111-4222-8333-444455556666"
       },
       "spec" => %{
@@ -61,7 +61,7 @@ defmodule Wardmast.NodeAgent.K8s.BootTest do
       }
     })
 
-    FakeK8sApi.put_lease(api, %{"metadata" => %{"name" => "arbiter-controller"}, "spec" => %{}})
+    FakeK8sApi.put_lease(api, %{"metadata" => %{"name" => "wardmast-controller"}, "spec" => %{}})
 
     hard = %{"pods" => "8", "requests.cpu" => "16", "requests.memory" => "64Gi"}
 
@@ -115,7 +115,7 @@ defmodule Wardmast.NodeAgent.K8s.BootTest do
          "ARB_K8S_SELF_UPGRADE" => "true",
          "KUBERNETES_SERVICE_HOST" => "10.43.0.1",
          "KUBERNETES_SERVICE_PORT" => "443",
-         "HOSTNAME" => "arbiter-controller-6d9c7-x2b4q"
+         "HOSTNAME" => "wardmast-controller-6d9c7-x2b4q"
        },
        app_config: [],
        node_home: ctx.home,
@@ -224,7 +224,7 @@ defmodule Wardmast.NodeAgent.K8s.BootTest do
              "k8s_version" => "v1.31.2+fake"
            } = Jason.decode!(body)
 
-    assert stored(ctx.api, "arbiter-node-credential", "credential") == @credential
+    assert stored(ctx.api, "wardmast-node-credential", "credential") == @credential
     refute File.read!(Path.join(ctx.home, "status.json")) =~ "CCCCCCCC"
     assert status(ctx)["node_id"] == "node-7"
   end
@@ -244,7 +244,7 @@ defmodule Wardmast.NodeAgent.K8s.BootTest do
       |> Enum.find(&(&1.method == "GET" and String.ends_with?(&1.path, "/pods")))
 
     assert informer_list.params["labelSelector"] ==
-             "arbiter.dev/install=#{@install},arbiter.dev/node=node-7"
+             "wardmast.dev/install=#{@install},wardmast.dev/node=node-7"
   end
 
   test "the pod channel's CA goes to its Secret, the certificate to the ConfigMap", ctx do
@@ -252,9 +252,9 @@ defmodule Wardmast.NodeAgent.K8s.BootTest do
     boot!(ctx)
     wait_until(&booted?/0)
 
-    assert stored(ctx.api, "arbiter-controller-ca", "ca.key") =~ "PRIVATE KEY"
-    cert = stored(ctx.api, "arbiter-controller-ca", "ca.crt")
-    assert FakeK8sApi.config_map(ctx.api, "arbiter-ca")["data"] == %{"ca.crt" => cert}
+    assert stored(ctx.api, "wardmast-controller-ca", "ca.key") =~ "PRIVATE KEY"
+    cert = stored(ctx.api, "wardmast-controller-ca", "ca.crt")
+    assert FakeK8sApi.config_map(ctx.api, "wardmast-ca")["data"] == %{"ca.crt" => cert}
   end
 
   # KH8: the chart sets these on the Deployment; the controller reports them in `caps.install`.
@@ -262,11 +262,11 @@ defmodule Wardmast.NodeAgent.K8s.BootTest do
     assert Boot.install_from_env(%{
              "ARB_INSTALL_METHOD" => "helm",
              "ARB_HELM_RELEASE" => "node-a",
-             "ARB_CHART_REF" => "oci://ghcr.io/acme/charts/arbiter-node"
+             "ARB_CHART_REF" => "oci://ghcr.io/acme/charts/wardmast-node"
            }) == %{
              method: "helm",
              release: "node-a",
-             chart: "oci://ghcr.io/acme/charts/arbiter-node"
+             chart: "oci://ghcr.io/acme/charts/wardmast-node"
            }
 
     assert Boot.install_from_env(%{"ARB_INSTALL_METHOD" => "helm", "ARB_CHART_REF" => ""}) ==
@@ -292,7 +292,7 @@ defmodule Wardmast.NodeAgent.K8s.BootTest do
              )
 
     containers =
-      FakeK8sApi.deployment(ctx.api, "arbiter-controller")["spec"]["template"]["spec"][
+      FakeK8sApi.deployment(ctx.api, "wardmast-controller")["spec"]["template"]["spec"][
         "containers"
       ]
 
@@ -311,14 +311,14 @@ defmodule Wardmast.NodeAgent.K8s.BootTest do
 
     # Once the API lets it, the same credential is stored: one enrolment, no second token.
     wait_until(&booted?/0)
-    assert stored(ctx.api, "arbiter-node-credential", "credential") == @credential
+    assert stored(ctx.api, "wardmast-node-credential", "credential") == @credential
     assert_receive {:primary, "POST", "/nodes/enroll", _}
     refute_received {:primary, "POST", "/nodes/enroll", _}
   end
 
   test "a later boot reads the Secret and never enrols", ctx do
     FakeK8sApi.put_secret(ctx.api, %{
-      "metadata" => %{"name" => "arbiter-node-credential"},
+      "metadata" => %{"name" => "wardmast-node-credential"},
       "data" => %{"credential" => Base.encode64(@credential)}
     })
 
@@ -358,7 +358,7 @@ defmodule Wardmast.NodeAgent.K8s.BootTest do
 
   test "a credential the primary refuses keeps the controller down, retrying", ctx do
     FakeK8sApi.put_secret(ctx.api, %{
-      "metadata" => %{"name" => "arbiter-node-credential"},
+      "metadata" => %{"name" => "wardmast-node-credential"},
       "data" => %{"credential" => Base.encode64(@credential)}
     })
 

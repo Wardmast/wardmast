@@ -4,7 +4,7 @@ defmodule Wardmast.Sessions.Adoption do
   item 1, §4.3).
 
   Wardmast holds no handle to a session's PTY, which is the whole point — it is
-  also why, after `systemctl --user restart arbiter`, the BEAM comes back
+  also why, after `systemctl --user restart wardmast`, the BEAM comes back
   knowing nothing about the sessions that are still running. This sweep is the
   reconnection: it asks systemd and tmux what is alive, and reconciles that
   against the `sessions` table.

@@ -1,10 +1,10 @@
-{{- if include "arbiter-node.node" . }}
+{{- if include "wardmast-node.node" . }}
 apiVersion: coordination.k8s.io/v1
 kind: Lease
 metadata:
-  name: arbiter-controller
+  name: wardmast-controller
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "arbiter-node.labels" . | nindent 4 }}
+    {{- include "wardmast-node.labels" . | nindent 4 }}
 spec: {}
 {{- end }}

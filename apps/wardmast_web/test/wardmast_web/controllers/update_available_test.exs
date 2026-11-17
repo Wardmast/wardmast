@@ -273,13 +273,13 @@ defmodule WardmastWeb.UpdateAvailableTest do
         "state" => "succeeded",
         "tag" => "v99.0.0",
         "finished_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
-        "backup_path" => "/h/snapshots/arbiter-pre-v99.0.0-x.sqlite3"
+        "backup_path" => "/h/snapshots/wardmast-pre-v99.0.0-x.sqlite3"
       })
 
       {:ok, view, _} = live(conn, ~p"/")
 
       assert has_element?(view, "#deploy-status[data-state='succeeded']", "v99.0.0")
-      assert has_element?(view, "#deploy-status", "arbiter-pre-v99.0.0-x.sqlite3")
+      assert has_element?(view, "#deploy-status", "wardmast-pre-v99.0.0-x.sqlite3")
     end
 
     test "after the restart the outcome is shown: rollback, with the restored database", %{

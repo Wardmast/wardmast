@@ -23,7 +23,7 @@ defmodule WardmastCli.Cmd.Node do
                       the join Secret with the token read from the terminal
                       (`read -rs`), so it is never in shell history or argv.
                       --format helm prints the namespace, Secret and `helm
-                      install` commands for the arbiter-node chart instead (-o
+                      install` commands for the wardmast-node chart instead (-o
                       saves its values file and installs from it). --format
                       values prints that values file to stdout (needs
                       --token-file or -o). Without --format: the manifests, or
@@ -393,7 +393,7 @@ defmodule WardmastCli.Cmd.Node do
           :stderr,
           "Join token minted (expires #{expires || "soon"}), written to #{token_file}. " <>
             "Create the join Secret from it:\n  kubectl -n #{cluster["namespace"]} create secret " <>
-            "generic arbiter-join --from-file=token=#{token_file}"
+            "generic wardmast-join --from-file=token=#{token_file}"
         )
 
       other ->
@@ -422,7 +422,7 @@ defmodule WardmastCli.Cmd.Node do
     IO.puts("Once the controller is up, `arb node list` shows it. The Secret is spent after")
 
     IO.puts(
-      "first boot: delete it with `kubectl -n #{cluster["namespace"]} delete secret arbiter-join`."
+      "first boot: delete it with `kubectl -n #{cluster["namespace"]} delete secret wardmast-join`."
     )
   end
 
@@ -450,7 +450,7 @@ defmodule WardmastCli.Cmd.Node do
     IO.puts("Once the controller is up, `arb node list` shows it. The Secret is spent after")
 
     IO.puts(
-      "first boot: delete it with `kubectl -n #{cluster["namespace"]} delete secret arbiter-join`."
+      "first boot: delete it with `kubectl -n #{cluster["namespace"]} delete secret wardmast-join`."
     )
   end
 
@@ -461,7 +461,7 @@ defmodule WardmastCli.Cmd.Node do
       IO.puts("")
 
       IO.puts(
-        "  kubectl -n #{cluster["namespace"]} create secret generic arbiter-join " <>
+        "  kubectl -n #{cluster["namespace"]} create secret generic wardmast-join " <>
           "--from-file=token=#{token_file}"
       )
 

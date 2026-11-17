@@ -142,7 +142,7 @@ private, also as designed. But **`systemd-run --user` exited 0, and
 `--ro-bind / /` exposes `/run/user/1000/bus` and
 `/run/user/1000/systemd/private`. Any jailed process can therefore ask the
 user's systemd manager to run a command outside the jail. That command gets
-unrestricted writes (`~/.arbiter`, the main checkout, `~/.ssh`) and full
+unrestricted writes (`~/.wardmast`, the main checkout, `~/.ssh`) and full
 network access. With `--unshare-net` added, `systemd-run --user --pipe curl
 https://example.com` still returned `http_code=200`.
 
@@ -202,7 +202,7 @@ as well.
 
 **Consequences.**
 - **The vault key.** `ARBITER_CLOAK_KEY` is the ash_cloak vault key. Reads
-  are unrestricted, so any worker can open `~/.arbiter/arbiter.sqlite3` and
+  are unrestricted, so any worker can open `~/.wardmast/arbiter.sqlite3` and
   decrypt every workspace secret and provider credential.
 - **Token forgery.** `SECRET_KEY_BASE` is the default MCP token-signing key
   (`apps/wardmast/lib/wardmast/mcp.ex:203-216`: `secret/0` falls back to the

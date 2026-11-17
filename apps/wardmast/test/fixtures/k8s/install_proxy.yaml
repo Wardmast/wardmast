@@ -1,7 +1,7 @@
 # Wardmast cluster node mesaana-k3s -- rendered by the primary. This file contains no
 # secret: no join token, no node credential, no CA key. Create the join Secret
 # separately (the token is read from your terminal):
-#   read -rs T && printf %s "$T" | kubectl -n arbiter-workers create secret generic arbiter-join --from-file=token=/dev/stdin
+#   read -rs T && printf %s "$T" | kubectl -n wardmast-workers create secret generic wardmast-join --from-file=token=/dev/stdin
 # bootstrap (cluster-admin, once) comes first, then node.
 ---
 apiVersion: v1
@@ -12,25 +12,25 @@ metadata:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest
     pod-security.kubernetes.io/warn: restricted
-  name: arbiter-workers
+  name: wardmast-workers
 
 ---
 apiVersion: scheduling.k8s.io/v1
-description: 'Arbiter worker pods: every other workload wins a contention.'
+description: 'Wardmast worker pods: every other workload wins a contention.'
 globalDefault: false
 kind: PriorityClass
 metadata:
-  name: arbiter-worker
+  name: wardmast-worker
 preemptionPolicy: Never
 value: -100
 
 ---
 apiVersion: scheduling.k8s.io/v1
-description: 'Arbiter node controller: losing it interrupts every run on the node, so it outranks batch work.'
+description: 'Wardmast node controller: losing it interrupts every run on the node, so it outranks batch work.'
 globalDefault: false
 kind: PriorityClass
 metadata:
-  name: arbiter-controller
+  name: wardmast-controller
 preemptionPolicy: PreemptLowerPriority
 value: 1000
 
@@ -38,8 +38,8 @@ value: 1000
 apiVersion: v1
 kind: ResourceQuota
 metadata:
-  name: arbiter-workers
-  namespace: arbiter-workers
+  name: wardmast-workers
+  namespace: wardmast-workers
 spec:
   hard:
     limits.cpu: 6300m
@@ -54,8 +54,8 @@ spec:
 apiVersion: v1
 kind: LimitRange
 metadata:
-  name: arbiter-workers
-  namespace: arbiter-workers
+  name: wardmast-workers
+  namespace: wardmast-workers
 spec:
   limits:
     - default:
@@ -85,7 +85,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny
-  namespace: arbiter-workers
+  namespace: wardmast-workers
 spec:
   podSelector: {}
   policyTypes:
@@ -97,7 +97,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: worker-to-controller
-  namespace: arbiter-workers
+  namespace: wardmast-workers
 spec:
   egress:
     - ports:
@@ -120,7 +120,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: controller-ingress-from-workers
-  namespace: arbiter-workers
+  namespace: wardmast-workers
 spec:
   ingress:
     - from:
@@ -143,7 +143,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: controller-egress
-  namespace: arbiter-workers
+  namespace: wardmast-workers
 spec:
   egress:
     - ports:
@@ -182,23 +182,23 @@ spec:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: arbiter-controller
-  namespace: arbiter-workers
+  name: wardmast-controller
+  namespace: wardmast-workers
 
 ---
 apiVersion: v1
 automountServiceAccountToken: false
 kind: ServiceAccount
 metadata:
-  name: arbiter-worker
-  namespace: arbiter-workers
+  name: wardmast-worker
+  namespace: wardmast-workers
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: arbiter-controller
-  namespace: arbiter-workers
+  name: wardmast-controller
+  namespace: wardmast-workers
 rules:
   - apiGroups:
       - ""
@@ -234,7 +234,7 @@ rules:
   - apiGroups:
       - ""
     resourceNames:
-      - arbiter-controller
+      - wardmast-controller
     resources:
       - services
     verbs:
@@ -242,8 +242,8 @@ rules:
   - apiGroups:
       - ""
     resourceNames:
-      - arbiter-node-credential
-      - arbiter-controller-ca
+      - wardmast-node-credential
+      - wardmast-controller-ca
     resources:
       - secrets
     verbs:
@@ -252,7 +252,7 @@ rules:
   - apiGroups:
       - ""
     resourceNames:
-      - arbiter-ca
+      - wardmast-ca
     resources:
       - configmaps
     verbs:
@@ -261,7 +261,7 @@ rules:
   - apiGroups:
       - coordination.k8s.io
     resourceNames:
-      - arbiter-controller
+      - wardmast-controller
     resources:
       - leases
     verbs:
@@ -270,7 +270,7 @@ rules:
   - apiGroups:
       - apps
     resourceNames:
-      - arbiter-controller
+      - wardmast-controller
     resources:
       - deployments
     verbs:
@@ -281,31 +281,31 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: arbiter-controller
-  namespace: arbiter-workers
+  name: wardmast-controller
+  namespace: wardmast-workers
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: arbiter-controller
+  name: wardmast-controller
 subjects:
   - kind: ServiceAccount
-    name: arbiter-controller
-    namespace: arbiter-workers
+    name: wardmast-controller
+    namespace: wardmast-workers
 
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: arbiter-node-credential
-  namespace: arbiter-workers
+  name: wardmast-node-credential
+  namespace: wardmast-workers
 type: Opaque
 
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: arbiter-controller-ca
-  namespace: arbiter-workers
+  name: wardmast-controller-ca
+  namespace: wardmast-workers
 type: Opaque
 
 ---
@@ -313,7 +313,7 @@ apiVersion: v1
 data:
   controller.yaml: |
     max_concurrent: 2
-    namespace: arbiter-workers
+    namespace: wardmast-workers
     worker:
       limits:
         cpu: '2'
@@ -324,30 +324,30 @@ data:
         memory: 2Gi
 kind: ConfigMap
 metadata:
-  name: arbiter-controller-config
-  namespace: arbiter-workers
+  name: wardmast-controller-config
+  namespace: wardmast-workers
 
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: arbiter-ca
-  namespace: arbiter-workers
+  name: wardmast-ca
+  namespace: wardmast-workers
 
 ---
 apiVersion: coordination.k8s.io/v1
 kind: Lease
 metadata:
-  name: arbiter-controller
-  namespace: arbiter-workers
+  name: wardmast-controller
+  namespace: wardmast-workers
 spec: {}
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: arbiter-controller
-  namespace: arbiter-workers
+  name: wardmast-controller
+  namespace: wardmast-workers
 spec:
   ports:
     - name: bridge
@@ -359,27 +359,27 @@ spec:
       protocol: TCP
       targetPort: 9444
   selector:
-    app.kubernetes.io/name: arbiter-controller
+    app.kubernetes.io/name: wardmast-controller
   type: ClusterIP
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: arbiter-controller
-  namespace: arbiter-workers
+  name: wardmast-controller
+  namespace: wardmast-workers
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: arbiter-controller
+      app.kubernetes.io/name: wardmast-controller
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
         app.kubernetes.io/component: controller
-        app.kubernetes.io/name: arbiter-controller
+        app.kubernetes.io/name: wardmast-controller
     spec:
       containers:
         - env:
@@ -428,21 +428,21 @@ spec:
               readOnly: true
             - mountPath: /tmp
               name: tmp
-      priorityClassName: arbiter-controller
+      priorityClassName: wardmast-controller
       securityContext:
         runAsGroup: 10001
         runAsNonRoot: true
         runAsUser: 10001
         seccompProfile:
           type: RuntimeDefault
-      serviceAccountName: arbiter-controller
+      serviceAccountName: wardmast-controller
       volumes:
         - name: join
           secret:
             optional: true
-            secretName: arbiter-join
+            secretName: wardmast-join
         - configMap:
-            name: arbiter-controller-config
+            name: wardmast-controller-config
           name: config
         - emptyDir:
             sizeLimit: 512Mi

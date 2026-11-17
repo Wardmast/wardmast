@@ -4,8 +4,8 @@ defmodule Wardmast.Worker.MemoryScope.DiagnosisTest do
   alias Wardmast.Worker.MemoryScope
   alias Wardmast.Worker.MemoryScope.Diagnosis
 
-  @user_cgroup "0::/user.slice/user-1000.slice/user@1000.service/app.slice/arbiter.service\n"
-  @system_cgroup "0::/system.slice/arbiter.service\n"
+  @user_cgroup "0::/user.slice/user-1000.slice/user@1000.service/app.slice/wardmast.service\n"
+  @system_cgroup "0::/system.slice/wardmast.service\n"
 
   setup do
     prev = Application.get_env(:wardmast, :worker_memory_max)
@@ -55,7 +55,7 @@ defmodule Wardmast.Worker.MemoryScope.DiagnosisTest do
     Application.put_env(:wardmast, :worker_memory_max, "12G")
 
     assert %{
-             "service_unit" => "arbiter.service",
+             "service_unit" => "wardmast.service",
              "service_manager" => "user",
              "oom_policy" => "stop",
              "memory_max" => "infinity",
@@ -65,13 +65,13 @@ defmodule Wardmast.Worker.MemoryScope.DiagnosisTest do
              "cap" => "12G"
            } = Diagnosis.run(opts(@user_cgroup, "stop"))
 
-    assert_received {:cmd, "systemctl", ["--user", "show", "arbiter.service" | _]}
+    assert_received {:cmd, "systemctl", ["--user", "show", "wardmast.service" | _]}
   end
 
   test "asks the system manager (no --user) for a system unit" do
     Diagnosis.run(opts(@system_cgroup, "continue"))
 
-    assert_received {:cmd, "systemctl", ["show", "arbiter.service" | _]}
+    assert_received {:cmd, "systemctl", ["show", "wardmast.service" | _]}
   end
 
   test "an uncapped server is reported as such" do

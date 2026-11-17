@@ -25,7 +25,7 @@ grok ── GROK_AUTH_PROVIDER_COMMAND ──►   POST /api/grok/token   (worke
   broker, the doctor and the login relay:
   1. `config :wardmast, :grok_broker, auth_path:` when set (an explicit pin);
   2. else the **grok provider account's** `<accounts_root>/grok-<slug>/auth.json`
-     (`~/.arbiter/accounts/grok-default/auth.json`), which is where the dashboard
+     (`~/.wardmast/accounts/grok-default/auth.json`), which is where the dashboard
      login relay writes (`GROK_HOME=<that dir>`). With several grok accounts,
      the `default` slug wins, else the first with a file;
   3. else, **only when no grok account exists**, `~/.grok/auth.json`.

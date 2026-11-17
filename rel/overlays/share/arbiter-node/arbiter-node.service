@@ -4,7 +4,7 @@
 # credential lives in ~/.config/arbiter-node/credential (0600), not here.
 #
 # ARB_DATA_HOME keeps the release's cookie under ~/.arbiter-node instead of the
-# primary's ~/.arbiter, and RELEASE_NODE gives the VM a name of its own, so a node
+# primary's ~/.wardmast, and RELEASE_NODE gives the VM a name of its own, so a node
 # on the primary's machine (a test rig) cannot collide with it.
 [Unit]
 Description=Arbiter node agent

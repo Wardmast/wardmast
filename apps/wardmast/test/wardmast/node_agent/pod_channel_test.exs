@@ -45,7 +45,7 @@ defmodule Wardmast.NodeAgent.PodChannelTest do
              ip: @loopback,
              bridge_port: 0,
              boot_port: 0,
-             server_names: ["arbiter-controller", "localhost"],
+             server_names: ["wardmast-controller", "localhost"],
              server_ips: [@loopback]
            ]}
       )

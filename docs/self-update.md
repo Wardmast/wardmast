@@ -41,7 +41,7 @@ Both end up running `arb server deploy --version <tag> --json`.
 
 Before the swap, the deploy takes an **online** SQLite backup into
 
-    <data-home>/snapshots/arbiter-pre-<tag>-<utc>.sqlite3
+    <data-home>/snapshots/wardmast-pre-<tag>-<utc>.sqlite3
 
 It is made by the release being deployed (`bin/wardmast eval
 Wardmast.Release.Backup.eval_from_env`) with `VACUUM INTO` on a normal connection —
@@ -52,7 +52,7 @@ only gets its final name if it passes. The path is in the deploy's text and
 
 - No database file yet (a fresh host) → the backup is skipped, and the output
   says so.
-- The database path is `DATABASE_PATH`, else the one in `<data-home>/arbiter.env`,
+- The database path is `DATABASE_PATH`, else the one in `<data-home>/wardmast.env`,
   else `<data-home>/arbiter.sqlite3`.
 - `ARB_DEPLOY_BACKUP_RETAIN` (default `5`) is how many snapshots to keep.
 - No `sqlite3` CLI is needed anywhere.
@@ -70,7 +70,7 @@ If the new release does not come back green within `--timeout` (default 60 s):
 
 Restoring never deletes anything: the database the failed release left behind
 (and its `-wal`) is **moved aside** to
-`<data-home>/snapshots/arbiter-failed-<tag>-<utc>.sqlite3[-wal]`, and the snapshot
+`<data-home>/snapshots/wardmast-failed-<tag>-<utc>.sqlite3[-wal]`, and the snapshot
 itself is kept, so a restore can be repeated by hand.
 
 What a restore costs: writes the *old* release made between the snapshot and the
@@ -97,16 +97,16 @@ be determined).
   it deploys the release the update check offered.
 - **What it does.** Launches the deploy **outside the server's own BEAM**:
 
-      systemd-run --user --unit=arbiter-deploy-<tag> --collect \
-        --property=EnvironmentFile=-<data-home>/arbiter.env \
+      systemd-run --user --unit=wardmast-deploy-<tag> --collect \
+        --property=EnvironmentFile=-<data-home>/wardmast.env \
         --setenv=WARDMAST_DATA_HOME=<data-home> \
         ~/.local/bin/arb server deploy --version <tag> --json
 
-  because the deploy restarts `arbiter.service`. The transient unit belongs to the
+  because the deploy restarts `wardmast.service`. The transient unit belongs to the
   user manager, not to the service, so the restart cannot kill it. Secrets (the
   `GITHUB_TOKEN`) reach it through the environment file, never argv.
 - **One at a time.** A second trigger is refused (409 / a notice) while any
-  `arbiter-deploy-*` unit is active or the status file records a live deploy. A
+  `wardmast-deploy-*` unit is active or the status file records a live deploy. A
   record whose process died does not block future deploys.
 - **Progress and outcome.** The CLI writes `<data-home>/deploy-status.json` as it
   goes (`running` + phase → `succeeded`, `rolled_back`, `refused`, `failed`),
@@ -130,7 +130,7 @@ systemd cannot be reached); `422` is a version that is not a plain `vX.Y.Z` tag.
 database backup path:
 
     [ ok ] last deploy
-           last deploy v1.4.0 succeeded at 2026-10-06T12:00:00Z backup /home/me/.arbiter/snapshots/arbiter-pre-v1.4.0-20261006T115955Z.sqlite3
+           last deploy v1.4.0 succeeded at 2026-10-06T12:00:00Z backup /home/me/.arbiter/snapshots/wardmast-pre-v1.4.0-20261006T115955Z.sqlite3
 
 A rolled-back, refused, failed or interrupted deploy shows as `[fail]` with a
 hint, but never blocks readiness or fails `arb doctor`.
@@ -141,8 +141,8 @@ hint, but never blocks readiness or fails `arb doctor`.
 |---|---|
 | `WARDMAST_RELEASE_REPO` | `owner/repo` to take releases from (optional; see above). |
 | `GITHUB_TOKEN` | Authenticates the Releases API / asset downloads (private repos). Never printed or logged. |
-| `WARDMAST_DATA_HOME` | Deploy root (default `~/.arbiter`). |
-| `DATABASE_PATH` | The SQLite database to back up (default from `arbiter.env`, else `<data-home>/arbiter.sqlite3`). |
+| `WARDMAST_DATA_HOME` | Deploy root (default `~/.wardmast`). |
+| `DATABASE_PATH` | The SQLite database to back up (default from `wardmast.env`, else `<data-home>/arbiter.sqlite3`). |
 | `ARB_DEPLOY_BACKUP_RETAIN` | Backups to keep (default `5`). |
 | `ARB_INSTALL_BIN` | Where the `arb` escript is installed (default `~/.local/bin/arb`); the button runs this one. |
 
@@ -151,9 +151,9 @@ hint, but never blocks readiness or fails `arb doctor`.
 If a rollback could not restore the database (or you want to do it by hand):
 
 ```sh
-systemctl --user stop arbiter.service
+systemctl --user stop wardmast.service
 # keep what is there, then put the snapshot back
-mv ~/.arbiter/arbiter.sqlite3{,-wal,-shm} ~/.arbiter/snapshots/ 2>/dev/null
-cp ~/.arbiter/snapshots/arbiter-pre-<tag>-<utc>.sqlite3 ~/.arbiter/arbiter.sqlite3
+mv ~/.wardmast/arbiter.sqlite3{,-wal,-shm} ~/.wardmast/snapshots/ 2>/dev/null
+cp ~/.wardmast/snapshots/wardmast-pre-<tag>-<utc>.sqlite3 ~/.wardmast/arbiter.sqlite3
 arb server deploy --version <prior-tag> --force
 ```

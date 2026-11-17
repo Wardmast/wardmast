@@ -19,7 +19,7 @@ defmodule Wardmast.Worker.Image.KnownHosts do
   updated, and the base image rebuilt. A self-hosted forge is not covered.
 
   This fixes images built on the Wardmast base. A repo whose image is built by its
-  own CI (`Wardmast.Worker.Image.Prebuilt`, `FROM ghcr.io/<owner>/arbiter-worker-base:<hash>`)
+  own CI (`Wardmast.Worker.Image.Prebuilt`, `FROM ghcr.io/<owner>/wardmast-worker-base:<hash>`)
   keeps failing until that CI rebuilds on the new base hash.
   """
 

@@ -7,7 +7,7 @@ defmodule Wardmast.NodeAgent.PodChannelKit do
   alias Wardmast.NodeAgent.PodChannel.{Cert, Runs, Tls}
   alias Wardmast.NodeAgent.RunSpec
 
-  @server_names ["arbiter-controller", "localhost"]
+  @server_names ["wardmast-controller", "localhost"]
 
   def ca(opts \\ []) do
     now = DateTime.utc_now()
@@ -81,7 +81,7 @@ defmodule Wardmast.NodeAgent.PodChannelKit do
       key: {:ECPrivateKey, key_der},
       cacerts: [ca.der],
       verify: :verify_peer,
-      server_name_indication: ~c"arbiter-controller",
+      server_name_indication: ~c"wardmast-controller",
       customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)]
     ] ++ extra
   end
@@ -90,7 +90,7 @@ defmodule Wardmast.NodeAgent.PodChannelKit do
     [
       cacerts: [ca.der],
       verify: :verify_peer,
-      server_name_indication: ~c"arbiter-controller"
+      server_name_indication: ~c"wardmast-controller"
     ]
   end
 

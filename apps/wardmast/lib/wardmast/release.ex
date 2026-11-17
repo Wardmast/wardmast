@@ -34,7 +34,7 @@ defmodule Wardmast.Release do
   it for that reason (bd-bksulf) — the ordinary path is `Wardmast.Boot.Migrator`,
   which migrates synchronously during the new release's boot, before the
   endpoint opens. Reach for this eval only for a deliberate out-of-band
-  migration with `systemctl --user stop arbiter.service` already done.
+  migration with `systemctl --user stop wardmast.service` already done.
   """
   def migrate do
     Application.load(@app)
@@ -905,7 +905,7 @@ defmodule Wardmast.Release do
   node that already has the app running.
 
   The vault resolves `WARDMAST_CLOAK_KEY` from the environment, so a
-  `bin/wardmast eval` needs `~/.arbiter/arbiter.env` loaded first; a missing
+  `bin/wardmast eval` needs `~/.wardmast/wardmast.env` loaded first; a missing
   key raises `Wardmast.Vault.key!/0`'s own explanation before anything starts.
   """
   @spec start_release_vault! :: :ok
@@ -927,7 +927,7 @@ defmodule Wardmast.Release do
   Provider-accounts P0 census, release-callable: the logic behind
   `mix wardmast.accounts.census` (a thin wrapper over this).
 
-      bin/wardmast eval 'Wardmast.Release.accounts_census(plan: "/home/me/.arbiter/accounts.json")'
+      bin/wardmast eval 'Wardmast.Release.accounts_census(plan: "/home/me/.wardmast/accounts.json")'
 
   Decrypts every workspace's `worker_env` in memory, prints the census
   (workspace names, env var names, counts, truncated sha256 fingerprints — never
@@ -1007,8 +1007,8 @@ defmodule Wardmast.Release do
   Provider-accounts P2 extraction, release-callable: the logic behind
   `mix wardmast.accounts.migrate` (a thin wrapper over this).
 
-      bin/wardmast eval 'Wardmast.Release.accounts_migrate(plan: "/home/me/.arbiter/accounts.json", dry_run?: true)'
-      bin/wardmast eval 'Wardmast.Release.accounts_migrate(plan: "/home/me/.arbiter/accounts.json")'
+      bin/wardmast eval 'Wardmast.Release.accounts_migrate(plan: "/home/me/.wardmast/accounts.json", dry_run?: true)'
+      bin/wardmast eval 'Wardmast.Release.accounts_migrate(plan: "/home/me/.wardmast/accounts.json")'
 
   Applies an operator-edited census plan: creates the account, credential and
   workspace-join rows, writes a Vault-encrypted backup row per affected

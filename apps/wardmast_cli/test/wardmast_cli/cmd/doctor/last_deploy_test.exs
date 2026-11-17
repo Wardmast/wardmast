@@ -26,14 +26,14 @@ defmodule WardmastCli.Cmd.Doctor.LastDeployTest do
 
   test "reports the tag, time, outcome and backup path of a successful deploy" do
     Status.start("v2.0.0", %{})
-    Status.finish("succeeded", %{backup_path: "/h/snapshots/arbiter-pre-v2.0.0-x.sqlite3"})
+    Status.finish("succeeded", %{backup_path: "/h/snapshots/wardmast-pre-v2.0.0-x.sqlite3"})
 
     assert %{status: :ok, detail: detail, blocks_readiness: false} =
              Checks.check_last_deploy()
 
     assert detail =~ "v2.0.0"
     assert detail =~ "succeeded"
-    assert detail =~ "/h/snapshots/arbiter-pre-v2.0.0-x.sqlite3"
+    assert detail =~ "/h/snapshots/wardmast-pre-v2.0.0-x.sqlite3"
     assert detail =~ ~r/\d{4}-\d{2}-\d{2}T/
   end
 

@@ -6,8 +6,8 @@ defmodule Wardmast.NodeAgent.K8s.Sweeper do
   RBAC cannot scope `delete` by label, so the **only** safety is here. A pod is
   selected only when **all** of these hold:
 
-    * it carries all three labels `arbiter.dev/install`, `arbiter.dev/node` and
-      `arbiter.dev/run`, the first two equal to this controller's own (a node
+    * it carries all three labels `wardmast.dev/install`, `wardmast.dev/node` and
+      `wardmast.dev/run`, the first two equal to this controller's own (a node
       enrolled to two installs, or two controllers in a namespace, can never sweep
       each other) and the run non-empty;
     * it is not the controller's own pod (by name or uid: the controller's pod has
@@ -20,9 +20,9 @@ defmodule Wardmast.NodeAgent.K8s.Sweeper do
   An empty install or node id selects nothing, like the machine agent's reaper.
   """
 
-  @install "arbiter.dev/install"
-  @node "arbiter.dev/node"
-  @run "arbiter.dev/run"
+  @install "wardmast.dev/install"
+  @node "wardmast.dev/node"
+  @run "wardmast.dev/run"
 
   @type selection :: %{name: String.t(), uid: String.t() | nil, run: String.t()}
 

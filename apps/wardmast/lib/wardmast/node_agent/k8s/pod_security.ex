@@ -17,7 +17,7 @@ defmodule Wardmast.NodeAgent.K8s.PodSecurity do
       namespace: KH1), a read-only root everywhere, **no
       `appArmorProfile` and no `seLinuxOptions` at all** (K1-A2, §8.1), exactly
       `drop: [ALL]` with no `add`, the service account and no token, only
-      `emptyDir` and the `arbiter-ca` ConfigMap as volumes, no network (DNS
+      `emptyDir` and the `wardmast-ca` ConfigMap as volumes, no network (DNS
       `None`, no ports, no service links), the default seccomp profile, and
       digest-pinned images under the registry.
 
@@ -54,8 +54,8 @@ defmodule Wardmast.NodeAgent.K8s.PodSecurity do
                    net.ipv4.tcp_keepalive_probes)
   @restricted_volumes ~w(configMap csi downwardAPI emptyDir ephemeral persistentVolumeClaim projected secret)
   @apparmor_annotation "container.apparmor.security.beta.kubernetes.io/"
-  @service_account "arbiter-worker"
-  @ca_configmap "arbiter-ca"
+  @service_account "wardmast-worker"
+  @ca_configmap "wardmast-ca"
   @own_images ~w(seed snapshotter worker)
 
   @doc "The rule table: `%{id, level, description, check}`."
@@ -144,8 +144,8 @@ defmodule Wardmast.NodeAgent.K8s.PodSecurity do
         "drop is exactly [ALL], no add, privileged false, procMount Default",
         &strict_capabilities/2
       ),
-      rule(:service_account, :wardmast, "arbiter-worker with no token", &service_account/2),
-      rule(:volumes, :wardmast, "only emptyDir and the arbiter-ca ConfigMap", &volumes/2),
+      rule(:service_account, :wardmast, "wardmast-worker with no token", &service_account/2),
+      rule(:volumes, :wardmast, "only emptyDir and the wardmast-ca ConfigMap", &volumes/2),
       rule(
         :network,
         :wardmast,

@@ -1,6 +1,6 @@
 defmodule Wardmast.NodeAgent.K8s.ControllerManifest do
   @moduledoc """
-  The `Deployment arbiter-controller` of `docs/design/remote-workers.md` §2.2,
+  The `Deployment wardmast-controller` of `docs/design/remote-workers.md` §2.2,
   with the reachability variant of §2.3 (`?reach=`):
 
     * `:direct` (default) — the controller dials `primary_url` itself, which must
@@ -10,7 +10,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerManifest do
       (`TS_USERSPACE=true`): no `NET_ADMIN`, no `/dev/net/tun`, no privilege. It
       exposes an outbound HTTP proxy on `127.0.0.1:1055`, and the controller is
       pointed at it with `ARB_NODE_PROXY`. The auth key comes from the Secret
-      `arbiter-tailscale` (key `authkey`): an ephemeral, pre-authorised key tagged
+      `wardmast-tailscale` (key `authkey`): an ephemeral, pre-authorised key tagged
       `tag:arbiter-node`. Readiness is `tailscale status` = Running, not "the proxy
       port is open": a logged-out `tailscaled` listens and answers every CONNECT
       with 500. The image is pinned to a release and a digest: the pod holds a standing
@@ -25,13 +25,13 @@ defmodule Wardmast.NodeAgent.K8s.ControllerManifest do
   alias Wardmast.NodeAgent.K8s.Quota
 
   @uid 10_001
-  @name "arbiter-controller"
-  # bd-bmecet: not the workers' preemptible `arbiter-worker` (-100): a busy cluster would evict
+  @name "wardmast-controller"
+  # bd-bmecet: not the workers' preemptible `wardmast-worker` (-100): a busy cluster would evict
   # the controller first and interrupt every run on the node. `InstallManifest` creates it.
-  @priority_class "arbiter-controller"
+  @priority_class "wardmast-controller"
   @proxy_addr "127.0.0.1:1055"
   @tailscale_image "ghcr.io/tailscale/tailscale:v1.104.1@sha256:87c55d6be56ad85b3d8bceca5f87f73de288c609131460dd1be1874c250cc41d"
-  @tailscale_secret "arbiter-tailscale"
+  @tailscale_secret "wardmast-tailscale"
   @tailscale_tag "tag:arbiter-node"
   @socket "/tmp/tailscaled.sock"
 
@@ -50,7 +50,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerManifest do
 
   @doc """
   Options: `:image`, `:primary_url`, `:node_name` (required), `:namespace`
-  (default `arbiter-workers`), `:reach` (default `:direct`), `:proxy_url` (required for
+  (default `wardmast-workers`), `:reach` (default `:direct`), `:proxy_url` (required for
   `reach: :proxy`), `:self_upgrade`
   (default `true`; `ARB_K8S_SELF_UPGRADE`, whether the Role lets the controller patch
   its own Deployment's image, see `Wardmast.NodeAgent.K8s.SelfUpgrade`).
@@ -64,7 +64,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerManifest do
          {:ok, node_name} <- fetch(opts, :node_name),
          true <- reach in [:direct, :tailscale, :proxy] || {:error, {:bad_reach, reach}},
          {:ok, proxy_url} <- proxy_url(opts, reach) do
-      namespace = Keyword.get(opts, :namespace, "arbiter-workers")
+      namespace = Keyword.get(opts, :namespace, "wardmast-workers")
       self_upgrade = Keyword.get(opts, :self_upgrade, true) == true
       {:ok, build(image, primary_url, node_name, namespace, {reach, proxy_url}, self_upgrade)}
     end
@@ -189,12 +189,12 @@ defmodule Wardmast.NodeAgent.K8s.ControllerManifest do
   end
 
   # `join` is the operator's one-shot Secret (optional: the controller keeps the
-  # credential in `arbiter-node-credential` afterwards), `config` the closed-schema
+  # credential in `wardmast-node-credential` afterwards), `config` the closed-schema
   # ConfigMap (K§4.1), `tmp` the only writable path (shared with the sidecar).
   defp volumes do
     [
-      %{"name" => "join", "secret" => %{"secretName" => "arbiter-join", "optional" => true}},
-      %{"name" => "config", "configMap" => %{"name" => "arbiter-controller-config"}},
+      %{"name" => "join", "secret" => %{"secretName" => "wardmast-join", "optional" => true}},
+      %{"name" => "config", "configMap" => %{"name" => "wardmast-controller-config"}},
       %{"name" => "tmp", "emptyDir" => %{"sizeLimit" => "512Mi"}}
     ]
   end

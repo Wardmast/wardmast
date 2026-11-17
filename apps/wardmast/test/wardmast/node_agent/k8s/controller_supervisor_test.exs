@@ -27,7 +27,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerSupervisorTest do
   """
 
   setup %{tmp_dir: dir} do
-    env = FakeK8sApi.start!(namespace: "arbiter-workers")
+    env = FakeK8sApi.start!(namespace: "wardmast-workers")
     FakeK8sApi.enforce_psa(env.api)
     FakeK8sApi.set_clock(env.api, DateTime.utc_now())
 
@@ -53,8 +53,8 @@ defmodule Wardmast.NodeAgent.K8s.ControllerSupervisorTest do
          client: env.client,
          label_selector:
            Client.label_selector(%{
-             "arbiter.dev/install" => "inst-1",
-             "arbiter.dev/node" => "node-1"
+             "wardmast.dev/install" => "inst-1",
+             "wardmast.dev/node" => "node-1"
            }),
          backoff_ms: {5, 20},
          name: nil},
@@ -101,7 +101,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerSupervisorTest do
          owner_uid: "0b6c1d7e-8f35-4a58-9c1f-3d2f1b1c1a11",
          bridge_addr: "10.43.98.199",
          gate_addr: "10.43.0.1:443",
-         own_pod: "arbiter-controller-7d9f-abc",
+         own_pod: "wardmast-controller-7d9f-abc",
          max_wall_s: 3600
        }}
     )

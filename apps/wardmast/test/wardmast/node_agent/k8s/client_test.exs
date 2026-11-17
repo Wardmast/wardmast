@@ -4,7 +4,7 @@ defmodule Wardmast.NodeAgent.K8s.ClientTest do
   alias Wardmast.NodeAgent.K8s.Client
   alias Wardmast.Test.FakeK8sApi
 
-  @labels %{"arbiter.dev/install" => "inst-1", "arbiter.dev/node" => "node-1"}
+  @labels %{"wardmast.dev/install" => "inst-1", "wardmast.dev/node" => "node-1"}
 
   defp pod(name, labels \\ @labels),
     do: %{"metadata" => %{"name" => name, "labels" => labels}, "spec" => %{}}
@@ -18,7 +18,7 @@ defmodule Wardmast.NodeAgent.K8s.ClientTest do
 
     defp write_sa(dir, token \\ "sa-token-1\n") do
       File.write!(Path.join(dir, "token"), token)
-      File.write!(Path.join(dir, "namespace"), "arbiter-workers\n")
+      File.write!(Path.join(dir, "namespace"), "wardmast-workers\n")
 
       File.write!(
         Path.join(dir, "ca.crt"),
@@ -35,7 +35,7 @@ defmodule Wardmast.NodeAgent.K8s.ClientTest do
       assert {:ok, client} = Client.in_cluster(sa_dir: write_sa(dir), env: env)
 
       assert client.base_url == "https://10.96.0.1:443"
-      assert client.namespace == "arbiter-workers"
+      assert client.namespace == "wardmast-workers"
       assert {:file, Path.join(dir, "token")} == client.token
 
       assert client.req_options[:connect_options][:transport_opts][:cacertfile] ==
@@ -100,13 +100,13 @@ defmodule Wardmast.NodeAgent.K8s.ClientTest do
 
     test "sends the label selector and filters by it", %{client: client, api: api} do
       FakeK8sApi.put_pod(api, pod("mine"))
-      FakeK8sApi.put_pod(api, pod("other", %{"arbiter.dev/install" => "someone-else"}))
+      FakeK8sApi.put_pod(api, pod("other", %{"wardmast.dev/install" => "someone-else"}))
 
       assert {:ok, %{items: [%{"metadata" => %{"name" => "mine"}}]}} =
                Client.list_pods(client, label_selector: Client.label_selector(@labels))
 
       [%{params: params}] = FakeK8sApi.requests(api)
-      assert params["labelSelector"] == "arbiter.dev/install=inst-1,arbiter.dev/node=node-1"
+      assert params["labelSelector"] == "wardmast.dev/install=inst-1,wardmast.dev/node=node-1"
     end
 
     test "follows continue tokens across pages", %{client: client, api: api} do
@@ -203,11 +203,11 @@ defmodule Wardmast.NodeAgent.K8s.ClientTest do
       do: %{"metadata" => %{"name" => name}, "type" => "Opaque", "data" => data}
 
     test "get_secret reads one Secret; a missing one is :not_found", %{client: client, api: api} do
-      FakeK8sApi.put_secret(api, secret("arbiter-node-credential", %{"credential" => "YQ=="}))
+      FakeK8sApi.put_secret(api, secret("wardmast-node-credential", %{"credential" => "YQ=="}))
 
       assert {:ok,
               %{"data" => %{"credential" => "YQ=="}, "metadata" => %{"resourceVersion" => _}}} =
-               Client.get_secret(client, "arbiter-node-credential")
+               Client.get_secret(client, "wardmast-node-credential")
 
       assert {:error, :not_found} = Client.get_secret(client, "nope")
     end
@@ -216,22 +216,22 @@ defmodule Wardmast.NodeAgent.K8s.ClientTest do
       client: client,
       api: api
     } do
-      FakeK8sApi.put_secret(api, secret("arbiter-controller-ca", nil))
-      {:ok, held} = Client.get_secret(client, "arbiter-controller-ca")
+      FakeK8sApi.put_secret(api, secret("wardmast-controller-ca", nil))
+      {:ok, held} = Client.get_secret(client, "wardmast-controller-ca")
 
       assert {:ok, %{"data" => %{"ca.crt" => "Yw=="}}} =
                Client.update_secret(client, Map.put(held, "data", %{"ca.crt" => "Yw=="}))
 
       assert %{"data" => %{"ca.crt" => "Yw=="}} =
-               FakeK8sApi.secret(api, "arbiter-controller-ca")
+               FakeK8sApi.secret(api, "wardmast-controller-ca")
 
-      assert %{method: "PUT", path: "/api/v1/namespaces/arb/secrets/arbiter-controller-ca"} =
+      assert %{method: "PUT", path: "/api/v1/namespaces/arb/secrets/wardmast-controller-ca"} =
                api |> FakeK8sApi.requests() |> List.last()
     end
 
     test "update_secret with a stale resourceVersion is :conflict", %{client: client, api: api} do
-      FakeK8sApi.put_secret(api, secret("arbiter-controller-ca", nil))
-      {:ok, held} = Client.get_secret(client, "arbiter-controller-ca")
+      FakeK8sApi.put_secret(api, secret("wardmast-controller-ca", nil))
+      {:ok, held} = Client.get_secret(client, "wardmast-controller-ca")
       {:ok, _} = Client.update_secret(client, Map.put(held, "data", %{"a" => "Yg=="}))
 
       assert {:error, :conflict} =
@@ -243,24 +243,24 @@ defmodule Wardmast.NodeAgent.K8s.ClientTest do
     end
 
     test "get_config_map and update_config_map", %{client: client, api: api} do
-      FakeK8sApi.put_config_map(api, %{"metadata" => %{"name" => "arbiter-ca"}})
-      assert {:ok, cm} = Client.get_config_map(client, "arbiter-ca")
+      FakeK8sApi.put_config_map(api, %{"metadata" => %{"name" => "wardmast-ca"}})
+      assert {:ok, cm} = Client.get_config_map(client, "wardmast-ca")
 
       assert {:ok, %{"data" => %{"ca.crt" => "PEM"}}} =
                Client.update_config_map(client, Map.put(cm, "data", %{"ca.crt" => "PEM"}))
 
-      assert %{"data" => %{"ca.crt" => "PEM"}} = FakeK8sApi.config_map(api, "arbiter-ca")
+      assert %{"data" => %{"ca.crt" => "PEM"}} = FakeK8sApi.config_map(api, "wardmast-ca")
       assert {:error, :not_found} = Client.get_config_map(client, "other")
     end
 
     test "get_service reads the controller's Service", %{client: client, api: api} do
       FakeK8sApi.put_service(api, %{
-        "metadata" => %{"name" => "arbiter-controller"},
+        "metadata" => %{"name" => "wardmast-controller"},
         "spec" => %{"clusterIP" => "10.43.98.199"}
       })
 
       assert {:ok, %{"spec" => %{"clusterIP" => "10.43.98.199"}}} =
-               Client.get_service(client, "arbiter-controller")
+               Client.get_service(client, "wardmast-controller")
 
       assert {:error, :not_found} = Client.get_service(client, "other")
     end

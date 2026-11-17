@@ -24,8 +24,8 @@ defmodule Wardmast.Worker.Jail.Hide do
       `~/.git-credentials`. `~/.grok` also holds the grok binary and its
       bundled assets, so `~/.grok/bin`, `downloads` and `bundled` are bound
       back read-only (`grok_keep/1`); `auth.json` and the rest stay masked.
-    * **The install**: the data dir (`~/.arbiter`: the DB and its WAL, the
-      account configs, `arbiter.env`, the release cookie, releases), the
+    * **The install**: the data dir (`~/.wardmast`: the DB and its WAL, the
+      account configs, `wardmast.env`, the release cookie, releases), the
       configured DB path and its `-wal` / `-shm` / `-journal` sidecars when it
       lives elsewhere, and the accounts and sessions roots.
     * **Other workers**: the durable output-log root, the worktree root (every
@@ -38,7 +38,7 @@ defmodule Wardmast.Worker.Jail.Hide do
   Only paths that exist are listed (bwrap cannot create a mount point under
   the read-only root, and an absent path is no vector). A symlinked path is
   masked at its real location: a mask on the link would leave the target
-  readable. The agy HOME symlinks `.ssh`, `.arbiter` and `.config` back to
+  readable. The agy HOME symlinks `.ssh`, `.wardmast` and `.config` back to
   the operator's, so masking the real directories covers the passthrough too.
 
   ## What stays visible on purpose
@@ -279,7 +279,7 @@ defmodule Wardmast.Worker.Jail.Hide do
           operator_home()} do
       {{:ok, dir}, _, _} when is_binary(dir) -> dir
       {_, dir, _} when is_binary(dir) and dir != "" -> dir
-      {_, _, home} when is_binary(home) -> Path.join(home, ".arbiter")
+      {_, _, home} when is_binary(home) -> Path.join(home, ".wardmast")
       _ -> nil
     end
   end

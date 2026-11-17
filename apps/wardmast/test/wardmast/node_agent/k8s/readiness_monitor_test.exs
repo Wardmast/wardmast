@@ -17,7 +17,7 @@ defmodule Wardmast.NodeAgent.K8s.ReadinessMonitorTest do
   """
 
   setup do
-    cluster = FakeK8sApi.start!(namespace: "arbiter-workers")
+    cluster = FakeK8sApi.start!(namespace: "wardmast-workers")
     FakeK8sApi.set_clock(cluster.api, DateTime.utc_now())
     FakeK8sApi.enforce_psa(cluster.api)
     FakeK8sApi.put_quota(cluster.api, quota())
@@ -123,7 +123,7 @@ defmodule Wardmast.NodeAgent.K8s.ReadinessMonitorTest do
     server = start!(ctx)
     assert_receive {:k8s_readiness, ^server, %{degraded: []}}, 5_000
 
-    FakeK8sApi.fail_next(ctx.api, :create, {403, "exceeded quota: arbiter-workers"})
+    FakeK8sApi.fail_next(ctx.api, :create, {403, "exceeded quota: wardmast-workers"})
     Agent.update(ctx.clock, fn _ -> 500 end)
 
     report = ReadinessMonitor.refresh(server)
@@ -137,7 +137,7 @@ defmodule Wardmast.NodeAgent.K8s.ReadinessMonitorTest do
     server = start!(ctx)
     assert_receive {:k8s_readiness, ^server, %{degraded: []}}, 5_000
 
-    FakeK8sApi.fail_next(ctx.api, :create, {403, "exceeded quota: arbiter-workers"})
+    FakeK8sApi.fail_next(ctx.api, :create, {403, "exceeded quota: wardmast-workers"})
     Agent.update(ctx.clock, fn _ -> 5_000 end)
 
     report = ReadinessMonitor.refresh(server)
@@ -146,7 +146,7 @@ defmodule Wardmast.NodeAgent.K8s.ReadinessMonitorTest do
   end
 
   test "an inconclusive first run is unenforced", ctx do
-    FakeK8sApi.fail_next(ctx.api, :create, {403, "exceeded quota: arbiter-workers"})
+    FakeK8sApi.fail_next(ctx.api, :create, {403, "exceeded quota: wardmast-workers"})
     server = start!(ctx)
 
     assert_receive {:k8s_readiness, ^server, report}, 5_000

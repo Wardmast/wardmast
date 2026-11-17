@@ -57,7 +57,7 @@ defmodule Wardmast.NodeAgent.K8s.AdmissionPolicyTest do
       for v <- AdmissionPolicy.variables(), do: assert(doc =~ normalise(v.expression))
 
       assert doc =~
-               "request.userInfo.username == 'system:serviceaccount:arbiter-workers:arbiter-controller'"
+               "request.userInfo.username == 'system:serviceaccount:wardmast-workers:wardmast-controller'"
     end
 
     test "there are seven validations and their names are unique" do
@@ -111,7 +111,7 @@ defmodule Wardmast.NodeAgent.K8s.AdmissionPolicyTest do
       {"host-namespaces", "hostPID", &spec.(&1, "hostPID", true)},
       {"host-namespaces", "hostIPC", &spec.(&1, "hostIPC", true)},
       {"volumes", "Secret",
-       &add_volume(&1, %{"name" => "s", "secret" => %{"secretName" => "arbiter-node-credential"}})},
+       &add_volume(&1, %{"name" => "s", "secret" => %{"secretName" => "wardmast-node-credential"}})},
       {"volumes", "hostPath", &add_volume(&1, %{"name" => "h", "hostPath" => %{"path" => "/"}})},
       {"volumes", "PVC",
        &add_volume(&1, %{"name" => "p", "persistentVolumeClaim" => %{"claimName" => "x"}})},
@@ -276,7 +276,7 @@ defmodule Wardmast.NodeAgent.K8s.AdmissionPolicyTest do
       assert binding["spec"]["policyName"] == policy["metadata"]["name"]
 
       assert binding["spec"]["matchResources"]["namespaceSelector"]["matchLabels"] ==
-               %{"kubernetes.io/metadata.name" => "arbiter-workers"}
+               %{"kubernetes.io/metadata.name" => "wardmast-workers"}
     end
 
     test "registries prefixes widen the image rule: both registries' images are admitted (KH13)" do

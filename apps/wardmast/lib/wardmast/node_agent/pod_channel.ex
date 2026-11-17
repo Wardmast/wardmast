@@ -38,7 +38,7 @@ defmodule Wardmast.NodeAgent.PodChannel do
   primary and its credential, for the seed/checkpoint legs), `:bridge`
   (`Wardmast.NodeAgent.Bridge` server, default its module name), `:ip`,
   `:bridge_port` (9443), `:boot_port` (9444), `:server_names`
-  (`["arbiter-controller"]`), `:server_ips`, `:server_ttl_s`, `:rotate_after_ms`,
+  (`["wardmast-controller"]`), `:server_ips`, `:server_ttl_s`, `:rotate_after_ms`,
   `:notify`, `:max_upload_bytes`, `:name`.
 
   The controller's run lifecycle (K5) drives it: `register/2` at `assign`,

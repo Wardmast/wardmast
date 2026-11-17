@@ -11,7 +11,7 @@ defmodule Mix.Tasks.Wardmast.Containerfile do
       mix wardmast.containerfile worker-base [--pin] [--arb-otp N] [--out PATH] [--hash-out PATH]
 
     * `controller` is `Wardmast.Worker.Image.Publisher.Pipeline.controller_containerfile/0`:
-      the image `ghcr.io/<owner>/arbiter-controller` is built from, with the
+      the image `ghcr.io/<owner>/wardmast-controller` is built from, with the
       release tarball as `release.tar.gz` in the build context.
     * `worker-base` is `Wardmast.Worker.Image.base_containerfile/1`: the shared
       base of every worker image (empty build context), for arb's Erlang/OTP
@@ -24,7 +24,7 @@ defmodule Mix.Tasks.Wardmast.Containerfile do
       as the primary does before it hashes or builds. Release CI always pins.
     * `--out PATH` writes the Containerfile there instead of stdout.
     * `--hash-out PATH` (worker-base, needs `--pin`) writes the base's content hash,
-      the tag of `ghcr.io/<owner>/arbiter-worker-base:<hash>`, and the one a primary tags
+      the tag of `ghcr.io/<owner>/wardmast-worker-base:<hash>`, and the one a primary tags
       the same base with.
 
   Needs no database and does not start the application.

@@ -1,6 +1,6 @@
 defmodule Wardmast.K8s.ChartInstallE2ETest do
   @moduledoc """
-  KH6 (bd-19mn3u, `docs/design/remote-workers.md` §20.14): the `charts/arbiter-node` Helm
+  KH6 (bd-19mn3u, `docs/design/remote-workers.md` §20.14): the `charts/wardmast-node` Helm
   chart installed on a **disposable** kind or k3d cluster, and the readiness canary run
   against what that install made. Guarded exactly like `Wardmast.K8s.ReadinessE2ETest`
   (`Wardmast.Test.K8sE2E`; `scripts/k8s-e2e.sh`; `docs/remote-workers-k8s-runbook.md`) and
@@ -63,7 +63,7 @@ defmodule Wardmast.K8s.ChartInstallE2ETest do
              ))
 
     for kind <- ~w(resourcequota limitrange),
-        do: K8sE2E.kubectl!(ctx.env, ["-n", ctx.ns.namespace, "get", kind, "arbiter-workers"])
+        do: K8sE2E.kubectl!(ctx.env, ["-n", ctx.ns.namespace, "get", kind, "wardmast-workers"])
 
     K8sE2E.kubectl!(ctx.env, ["get", "priorityclass", ctx.ns.priority_class])
   end

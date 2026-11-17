@@ -4,34 +4,34 @@ owns it: ARB_K8S_SELF_UPGRADE=false and the Role has no write verb on it, so the
 reports `helm upgrade ...` instead of repointing its own image (§20.7). The pod builder
 owns the worker pods; nothing about them is a value here.
 */ -}}
-{{- if include "arbiter-node.node" . }}
+{{- if include "wardmast-node.node" . }}
 {{- $reach := .Values.reach.mode }}
 {{- $primary := required "primary.url is required" .Values.primary.url }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: arbiter-controller
+  name: wardmast-controller
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "arbiter-node.labels" . | nindent 4 }}
+    {{- include "wardmast-node.labels" . | nindent 4 }}
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: arbiter-controller
+      app.kubernetes.io/name: wardmast-controller
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: arbiter-controller
+        app.kubernetes.io/name: wardmast-controller
         app.kubernetes.io/component: controller
     spec:
-      serviceAccountName: arbiter-controller
+      serviceAccountName: wardmast-controller
       {{- with .Values.controller.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
-      {{- with include "arbiter-node.pullSecrets" . }}
+      {{- with include "wardmast-node.pullSecrets" . }}
       imagePullSecrets:
         {{- . | nindent 8 }}
       {{- end }}
@@ -43,7 +43,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: controller
-          image: {{ include "arbiter-node.image" . | quote }}
+          image: {{ include "wardmast-node.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - name: ARB_ROLE
@@ -53,7 +53,7 @@ spec:
             - name: ARB_PRIMARY_URL
               value: {{ $primary | quote }}
             - name: ARB_NODE_NAME
-              value: {{ include "arbiter-node.nodeName" . | quote }}
+              value: {{ include "wardmast-node.nodeName" . | quote }}
             - name: ARB_K8S_SELF_UPGRADE
               value: "false"
             - name: ARB_INSTALL_METHOD
@@ -96,7 +96,7 @@ spec:
               mountPath: /tmp
         {{- if eq $reach "tailscale" }}
         - name: tailscale
-          image: {{ include "arbiter-node.tailscaleImage" . | quote }}
+          image: {{ include "wardmast-node.tailscaleImage" . | quote }}
           env:
             - name: TS_USERSPACE
               value: "true"
@@ -139,14 +139,14 @@ spec:
         {{- end }}
       volumes:
         # The operator's one-shot Secret; optional, the controller keeps its credential in
-        # arbiter-node-credential afterwards.
+        # wardmast-node-credential afterwards.
         - name: join
           secret:
             secretName: {{ .Values.join.existingSecret }}
             optional: true
         - name: config
           configMap:
-            name: arbiter-controller-config
+            name: wardmast-controller-config
         - name: tmp
           emptyDir:
             sizeLimit: 512Mi

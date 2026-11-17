@@ -15,17 +15,17 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.Backup do
   `eval` that runs `VACUUM INTO` on a normal connection (consistent against the
   live WAL-mode database) and `PRAGMA integrity_check` on the *copy*, exiting
   non-zero if either fails. The eval needs the service's environment
-  (`runtime.exs` raises without `SECRET_KEY_BASE`), so `<data-home>/arbiter.env`
+  (`runtime.exs` raises without `SECRET_KEY_BASE`), so `<data-home>/wardmast.env`
   is passed through (read, never copied: each snapshot gets only a
   `.env-fingerprint.json` sidecar of key names and hash prefixes, see
   `fingerprint_path/1`). Snapshots land in `<data-home>/snapshots/` as
-  `arbiter-pre-<tag>-<utc>.sqlite3`; the newest `retain/0` are kept.
+  `wardmast-pre-<tag>-<utc>.sqlite3`; the newest `retain/0` are kept.
 
   ## Restoring it
 
   Only ever with the service stopped (SQLite has one writer). Nothing is
   deleted: the database the failed release left behind, and its `-wal`, are
-  moved aside as `arbiter-failed-<tag>-<utc>.sqlite3[-wal]` before the snapshot
+  moved aside as `wardmast-failed-<tag>-<utc>.sqlite3[-wal]` before the snapshot
   is copied into place (temp file + rename, so the live path is never
   half-written). The snapshot itself is kept so a restore can be repeated.
 
@@ -92,7 +92,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.Backup do
   end
 
   defp do_take(release_dir, tag, db) do
-    dest = Path.join(snapshots_dir(), "arbiter-pre-#{tag}-#{utc_stamp()}.sqlite3")
+    dest = Path.join(snapshots_dir(), "wardmast-pre-#{tag}-#{utc_stamp()}.sqlite3")
     File.mkdir_p!(snapshots_dir())
 
     env =
@@ -128,7 +128,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.Backup do
   @doc """
   The sidecar written next to a snapshot: `<snapshot>.env-fingerprint.json`.
 
-  A deploy snapshot never copies `arbiter.env` (it holds secrets, and a copy is
+  A deploy snapshot never copies `wardmast.env` (it holds secrets, and a copy is
   one more file for a host secret scanner to flag). It records each key name
   with a short SHA-256 prefix of its value instead, so a later redeploy can show
   the environment did not change without the values ever being stored.
@@ -185,7 +185,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.Backup do
           do: snapshots_dir(),
           else: Path.dirname(db)
 
-      failed = Path.join(dir, "arbiter-failed-#{tag}-#{utc_stamp()}.sqlite3")
+      failed = Path.join(dir, "wardmast-failed-#{tag}-#{utc_stamp()}.sqlite3")
 
       for src <- present do
         suffix = String.replace_prefix(src, db, "")
@@ -224,16 +224,16 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.Backup do
   """
   @spec prune(String.t(), String.t() | nil) :: [String.t()]
   def prune(dir, keep) do
-    ["arbiter-pre-", "arbiter-failed-"]
-    |> Enum.flat_map(fn prefix -> prune_kind(dir, prefix, keep) end)
+    [["wardmast-pre-", "arbiter-pre-"], ["wardmast-failed-", "arbiter-failed-"]]
+    |> Enum.flat_map(fn prefixes -> prune_kind(dir, prefixes, keep) end)
   end
 
-  defp prune_kind(dir, prefix, keep) do
+  defp prune_kind(dir, prefixes, keep) do
     names =
       case File.ls(dir) do
         {:ok, names} ->
           names
-          |> Enum.filter(&(String.starts_with?(&1, prefix) and stamp_of(&1) != nil))
+          |> Enum.filter(&(String.starts_with?(&1, prefixes) and stamp_of(&1) != nil))
           |> Enum.sort_by(&stamp_of/1)
 
         {:error, _} ->
@@ -252,7 +252,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.Backup do
     end)
   end
 
-  # `arbiter-pre-<tag>-<stamp>.sqlite3` → `<stamp>` (UTC, sorts chronologically).
+  # `wardmast-pre-<tag>-<stamp>.sqlite3` → `<stamp>` (UTC, sorts chronologically).
   defp stamp_of(name) do
     case Regex.run(~r/-(\d{8}T\d{6}Z)\.sqlite3\z/, name) do
       [_, stamp] -> stamp
@@ -282,7 +282,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.Backup do
   # `arb install service` writes only ever holds plain or single/double-quoted
   # values.
   defp env_file do
-    path = Path.join(ReleaseFiles.data_home(), "arbiter.env")
+    path = Path.join(ReleaseFiles.data_home(), "wardmast.env")
 
     case File.read(path) do
       {:ok, body} ->

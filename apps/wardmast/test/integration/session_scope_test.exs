@@ -8,7 +8,7 @@ defmodule Wardmast.Integration.SessionScopeTest do
   thing the design actually rests on: that `systemd-run --user --scope`
   really places the tmux server in a **sibling cgroup** of whatever spawned
   it (RFC §4.1). Getting that wrong is silent — the session looks fine until
-  the next `systemctl --user restart arbiter` kills it — so it is measured
+  the next `systemctl --user restart wardmast` kills it — so it is measured
   here against the real host.
 
   ## Not part of the default suite
@@ -146,8 +146,8 @@ defmodule Wardmast.Integration.SessionScopeTest do
            "tmux (pid #{pid}) is not in #{session.scope_unit}:\n#{scope_cgroup}"
 
     # …and NOT in the cgroup of the process that spawned it. That is the whole
-    # mechanism: under `arbiter.service` this is what makes
-    # `systemctl --user restart arbiter` — which signals every process in the
+    # mechanism: under `wardmast.service` this is what makes
+    # `systemctl --user restart wardmast` — which signals every process in the
     # service's cgroup — unable to reach the session (§4.1).
     refute String.trim(scope_cgroup) == String.trim(own_cgroup),
            "the scope shares the spawner's cgroup, so a restart would kill it:\n#{own_cgroup}"

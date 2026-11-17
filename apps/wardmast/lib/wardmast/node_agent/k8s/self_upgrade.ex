@@ -9,7 +9,7 @@ defmodule Wardmast.NodeAgent.K8s.SelfUpgrade do
 
   ## What it will and will not touch
 
-    * One Deployment, `arbiter-controller`, in the controller's own namespace (the
+    * One Deployment, `wardmast-controller`, in the controller's own namespace (the
       `Client`'s), and one container in it, `controller`. Those are constants here, not
       options and not fields of the spec: a spec that names another Deployment, container
       or namespace is read for its `image` only. The Role the renderer emits grants `get`
@@ -27,7 +27,7 @@ defmodule Wardmast.NodeAgent.K8s.SelfUpgrade do
 
   alias Wardmast.NodeAgent.K8s.Client
 
-  @deployment "arbiter-controller"
+  @deployment "wardmast-controller"
   @container "controller"
 
   @image_re ~r|\A[a-z0-9][a-z0-9._-]*(:\d{1,5})?(/[a-z0-9][a-z0-9._-]*)+(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(@sha256:[0-9a-f]{64})?\z|

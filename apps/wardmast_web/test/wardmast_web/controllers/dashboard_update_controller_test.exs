@@ -76,7 +76,7 @@ defmodule WardmastWeb.DashboardUpdateControllerTest do
     assert redirected_to(conn) == "/"
     assert Phoenix.Flash.get(conn.assigns.flash, :info) =~ "v99.0.0"
     assert_received {:cmd, "systemd-run", args}
-    assert "--unit=arbiter-deploy-v99.0.0" in args
+    assert "--unit=wardmast-deploy-v99.0.0" in args
   end
 
   test "only the offered release can be deployed from the button" do
@@ -88,8 +88,8 @@ defmodule WardmastWeb.DashboardUpdateControllerTest do
 
     assert redirected_to(conn) == "/"
     assert_received {:cmd, "systemd-run", args}
-    assert "--unit=arbiter-deploy-v99.0.0" in args
-    refute "--unit=arbiter-deploy-v1.0.0" in args
+    assert "--unit=wardmast-deploy-v99.0.0" in args
+    refute "--unit=wardmast-deploy-v1.0.0" in args
   end
 
   test "with no update available it launches nothing and says so" do

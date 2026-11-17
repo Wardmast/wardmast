@@ -9,7 +9,7 @@ defmodule Wardmast.NodeAgent.Config do
       loopback; plain `http` is accepted **only** for a loopback host (a
       same-host rig, or `ssh -L`). It is a URL, not a secret.
     * `ARB_NODE_HOME` — the data dir, default `~/.arbiter-node` (deliberately
-      not `~/.arbiter`, the primary's default data home).
+      not `~/.wardmast`, the primary's default data home).
     * `ARB_NODE_CREDENTIAL_FILE` — default
       `~/.config/arbiter-node/credential`, 0600. The `arbn_<id>.<secret>`
       credential is the **only** secret an agent keeps at rest; it is read from

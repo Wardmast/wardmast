@@ -56,7 +56,7 @@ defmodule Wardmast.Config.Paths do
   """
   @spec accounts_root() :: String.t()
   def accounts_root do
-    resolve("WARDMAST_ACCOUNTS_ROOT", :accounts_root, "~/.arbiter/accounts")
+    resolve("WARDMAST_ACCOUNTS_ROOT", :accounts_root, "~/.wardmast/accounts")
   end
 
   @doc """
@@ -65,7 +65,7 @@ defmodule Wardmast.Config.Paths do
   """
   @spec image_root() :: String.t()
   def image_root do
-    resolve("WARDMAST_IMAGE_ROOT", :image_root, "~/.arbiter/images")
+    resolve("WARDMAST_IMAGE_ROOT", :image_root, "~/.wardmast/images")
   end
 
   @doc """
@@ -144,7 +144,7 @@ defmodule Wardmast.Config.Paths do
   """
   @spec memory_root() :: String.t()
   def memory_root do
-    resolve("WARDMAST_MEMORY_ROOT", :memory_root, "~/.arbiter/memory")
+    resolve("WARDMAST_MEMORY_ROOT", :memory_root, "~/.wardmast/memory")
   end
 
   @doc """
@@ -155,10 +155,10 @@ defmodule Wardmast.Config.Paths do
   `WardmastCli.Cmd.Start.project_root/0` so all three agree on what "the live
   checkout" means:
 
-    1. `ARB_PRIMARY_CHECKOUT` — the explicit override, same as the script's.
+    1. `WARDMAST_PRIMARY_CHECKOUT` — the explicit override, same as the script's.
     2. `config :wardmast, :primary_checkout` — explicit configuration.
     3. `ARB_HOME` — how the server is started.
-    4. `~/.config/arbiter/home` — recorded by `arb install-service`.
+    4. `~/.config/wardmast/home` — recorded by `arb install-service`.
     5. `~/dev/arbiter`.
 
   Note the order differs from `worktree_root/0` and friends above, which put
@@ -166,7 +166,7 @@ defmodule Wardmast.Config.Paths do
   it is exported into every process the server spawns (including every worker
   and every test run started from a checkout), so treating it the way those
   roots treat their dedicated `WARDMAST_*` vars would mean an explicit
-  configuration could never win. `ARB_PRIMARY_CHECKOUT` is the dedicated
+  configuration could never win. `WARDMAST_PRIMARY_CHECKOUT` is the dedicated
   override and keeps its place at the top.
 
   Returns `nil` when nothing resolves (no `HOME`), which callers must treat as
@@ -176,7 +176,7 @@ defmodule Wardmast.Config.Paths do
   """
   @spec primary_checkout() :: String.t() | nil
   def primary_checkout do
-    env("ARB_PRIMARY_CHECKOUT") || configured_checkout() || env("ARB_HOME") ||
+    env("WARDMAST_PRIMARY_CHECKOUT") || configured_checkout() || env("ARB_HOME") ||
       recorded_home() || home_relative("dev/arbiter")
   end
 
@@ -188,14 +188,14 @@ defmodule Wardmast.Config.Paths do
   end
 
   defp env(name) do
-    case System.get_env(name) do
+    case Wardmast.Env.read(name) do
       value when is_binary(value) and value != "" -> Path.expand(value)
       _ -> nil
     end
   end
 
   defp recorded_home do
-    with path when is_binary(path) <- home_relative(".config/arbiter/home"),
+    with path when is_binary(path) <- home_relative(".config/wardmast/home"),
          {:ok, contents} <- File.read(path),
          trimmed when trimmed != "" <- String.trim(contents) do
       Path.expand(trimmed)

@@ -181,7 +181,7 @@ defmodule Wardmast.NodeAgent.K8s.PodSecurityTest do
       {:service_account, "token field absent",
        fn pod -> update_in(pod, ["spec"], &Map.delete(&1, "automountServiceAccountToken")) end},
       {:volumes, "secret volume",
-       &add_volume(&1, %{"name" => "s", "secret" => %{"secretName" => "arbiter-node-credential"}})},
+       &add_volume(&1, %{"name" => "s", "secret" => %{"secretName" => "wardmast-node-credential"}})},
       {:volumes, "other configMap",
        &add_volume(&1, %{"name" => "c", "configMap" => %{"name" => "other"}})},
       {:volumes, "pvc",

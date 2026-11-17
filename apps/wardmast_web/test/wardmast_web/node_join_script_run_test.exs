@@ -514,7 +514,7 @@ defmodule WardmastWeb.NodeJoinScriptRunTest do
       assert unit =~ "Restart=always"
 
       assert log(ctx) =~ "systemctl --user enable arbiter-node.service"
-      assert log(ctx) =~ "systemctl --user restart arbiter-node.service"
+      assert log(ctx) =~ "systemctl --user restart wardmast-node.service"
 
       # server side: one node, the credential works, the token is spent, events written
       credential = cfg |> Path.join("credential") |> File.read!() |> String.trim()

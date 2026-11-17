@@ -23,7 +23,7 @@ defmodule Wardmast.NodeAgent.Backend.K8sTest do
   @credential "arbn_node-1." <> String.duplicate("A", 52)
 
   setup %{tmp_dir: dir} do
-    env = FakeK8sApi.start!(namespace: "arbiter-workers")
+    env = FakeK8sApi.start!(namespace: "wardmast-workers")
     hard = %{"pods" => "8", "requests.cpu" => "16", "requests.memory" => "64Gi"}
 
     FakeK8sApi.put_quota(env.api, %{
@@ -42,8 +42,8 @@ defmodule Wardmast.NodeAgent.Backend.K8sTest do
          client: env.client,
          label_selector:
            Client.label_selector(%{
-             "arbiter.dev/install" => "inst-1",
-             "arbiter.dev/node" => "node-1"
+             "wardmast.dev/install" => "inst-1",
+             "wardmast.dev/node" => "node-1"
            }),
          backoff_ms: {5, 20},
          name: nil},
@@ -79,7 +79,11 @@ defmodule Wardmast.NodeAgent.Backend.K8sTest do
         read_credential: fn _ -> {:ok, @credential} end,
         version: "1.2.3",
         backend: Backend.K8s,
-        cluster: %{namespace: "arbiter-workers", k8s_version: "v1.31.2+fake", self_upgrade?: true}
+        cluster: %{
+          namespace: "wardmast-workers",
+          k8s_version: "v1.31.2+fake",
+          self_upgrade?: true
+        }
       )
 
     Map.merge(env, %{config: config, path: path, loader: loader})
@@ -157,7 +161,7 @@ defmodule Wardmast.NodeAgent.Backend.K8sTest do
                "bridge_streams" => "mux",
                "upgrade" => "image",
                "self_upgrade" => true,
-               "namespace" => "arbiter-workers",
+               "namespace" => "wardmast-workers",
                "install" => %{"method" => "manifest"},
                "registries" => ["#{Fx.registry()}/"]
              }
@@ -174,7 +178,7 @@ defmodule Wardmast.NodeAgent.Backend.K8sTest do
 
     test "a helm install reports its release and chart in caps.install", env do
       cluster = %{
-        namespace: "arbiter-workers",
+        namespace: "wardmast-workers",
         self_upgrade?: false,
         install: %{
           method: "helm",

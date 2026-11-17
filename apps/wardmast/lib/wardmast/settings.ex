@@ -866,7 +866,7 @@ defmodule Wardmast.Settings do
   # metacharacters, since the primary prints it into a command the operator pastes.
   @chart_ref_re ~r|\A[A-Za-z0-9][A-Za-z0-9._:/~+-]*\z|
 
-  @doc "`nodes.chart_ref`, the `arbiter-node` chart reference for `helm upgrade`, or `nil`."
+  @doc "`nodes.chart_ref`, the `wardmast-node` chart reference for `helm upgrade`, or `nil`."
   @spec nodes_chart_ref() :: String.t() | nil
   def nodes_chart_ref, do: read_setting(:nodes_chart_ref)
 

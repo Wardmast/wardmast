@@ -17,7 +17,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerRunLifecycleTest do
   @moduletag :tmp_dir
 
   @t0 ~U[2026-10-10 12:00:00Z]
-  @labels %{"arbiter.dev/install" => "inst-1", "arbiter.dev/node" => "node-1"}
+  @labels %{"wardmast.dev/install" => "inst-1", "wardmast.dev/node" => "node-1"}
   @scheduled %{"type" => "PodScheduled", "status" => "True"}
 
   setup %{tmp_dir: dir} do
@@ -76,7 +76,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerRunLifecycleTest do
            owner_uid: "0b6c1d7e-8f35-4a58-9c1f-3d2f1b1c1a11",
            bridge_addr: "10.43.98.199",
            gate_addr: "10.43.0.1:443",
-           own_pod: "arbiter-controller-7d9f-abc",
+           own_pod: "wardmast-controller-7d9f-abc",
            max_wall_s: 3600
          },
          sink: self(),
@@ -433,7 +433,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerRunLifecycleTest do
       controller = start_controller(env)
       run = assign!(controller, 1)
       pod = FakeK8sApi.handle(env.api, {:get, pod_name(1)})
-      record = pod["metadata"]["annotations"]["arbiter.dev/channel"]
+      record = pod["metadata"]["annotations"]["wardmast.dev/channel"]
       assert Jason.decode!(record) == %{"fake" => "record", "run" => run}
     end
 

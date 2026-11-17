@@ -15,8 +15,8 @@ defmodule Wardmast.Sessions do
   and from then on every control operation — kill, enumerate, adopt — shells
   out to `tmux` or `systemctl --user` and exits. The session's processes live
   in a transient systemd **scope**, which is a *sibling* cgroup of
-  `arbiter.service`, so `systemctl --user restart arbiter` cannot reach them
-  (§4.1: `arbiter.service` has no `KillMode`, so systemd's default
+  `wardmast.service`, so `systemctl --user restart wardmast` cannot reach them
+  (§4.1: `wardmast.service` has no `KillMode`, so systemd's default
   `KillMode=control-group` signals every process in the unit's cgroup — and
   `setsid`, daemonising and double-forking do **not** move a process between
   cgroups, which is why the intuitive "detach it" answer was measured dead).

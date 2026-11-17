@@ -19,10 +19,10 @@ defmodule Wardmast.NodeAgent.K8s.UpgraderTest do
   @spec_new %{"version" => "0.2.43", "image" => @new}
 
   setup %{tmp_dir: dir} do
-    env = FakeK8sApi.start!(namespace: "arbiter-workers")
+    env = FakeK8sApi.start!(namespace: "wardmast-workers")
 
     FakeK8sApi.put_deployment(env.api, %{
-      "metadata" => %{"name" => "arbiter-controller", "namespace" => "arbiter-workers"},
+      "metadata" => %{"name" => "wardmast-controller", "namespace" => "wardmast-workers"},
       "spec" => %{
         "template" => %{"spec" => %{"containers" => [%{"name" => "controller", "image" => @old}]}}
       }
@@ -57,7 +57,7 @@ defmodule Wardmast.NodeAgent.K8s.UpgraderTest do
   defp image(env),
     do:
       env.api
-      |> FakeK8sApi.deployment("arbiter-controller")
+      |> FakeK8sApi.deployment("wardmast-controller")
       |> get_in(["spec", "template", "spec", "containers"])
       |> hd()
       |> Map.fetch!("image")

@@ -5,13 +5,13 @@ defmodule Wardmast.Release.SelfDeploy do
 
   ## Why a separate systemd unit
 
-  The deploy restarts `arbiter.service`, i.e. kills this BEAM mid-deploy. So it
+  The deploy restarts `wardmast.service`, i.e. kills this BEAM mid-deploy. So it
   cannot run as a child of the server, nor even in its cgroup. It is started with
 
-      systemd-run --user --unit=arbiter-deploy-<tag> --collect … arb server deploy --version <tag> --json
+      systemd-run --user --unit=wardmast-deploy-<tag> --collect … arb server deploy --version <tag> --json
 
   which makes a transient service of the *user manager*, outside
-  `arbiter.service`, that survives the restart and runs the same deploy an
+  `wardmast.service`, that survives the restart and runs the same deploy an
   operator would run by hand (backup, swap, health check, rollback, CLI update).
   Its progress and outcome are the CLI's own status file
   (`Wardmast.Release.DeployStatus`), which the dashboard reads once the server is
@@ -22,11 +22,11 @@ defmodule Wardmast.Release.SelfDeploy do
     * Only a plain `vX.Y.Z` tag is deployable: the tag is an argv element of a
       process run as the operator, so it is validated rather than escaped, and a
       branch, ref or option can never reach it.
-    * One deploy at a time: refused while any `arbiter-deploy-*` unit is active
+    * One deploy at a time: refused while any `wardmast-deploy-*` unit is active
       or the status file says a live deploy is running. A record whose process
       died does not block.
     * Secrets never travel in argv or logs. The unit gets the service's
-      environment through `EnvironmentFile=-<data-home>/arbiter.env` (where
+      environment through `EnvironmentFile=-<data-home>/wardmast.env` (where
       `GITHUB_TOKEN` already lives), and anything printed back is scrubbed of
       the token's value.
 
@@ -41,7 +41,7 @@ defmodule Wardmast.Release.SelfDeploy do
   alias Wardmast.Worker.ReleaseEnv
 
   @tag_re ~r/\Av\d+\.\d+\.\d+\z/
-  @unit_prefix "arbiter-deploy-"
+  @unit_prefix "wardmast-deploy-"
 
   @type error ::
           :invalid_tag
@@ -135,7 +135,7 @@ defmodule Wardmast.Release.SelfDeploy do
         "--unit=#{unit}",
         "--collect",
         "--description=Wardmast self-update to #{tag}",
-        "--property=EnvironmentFile=-" <> Path.join(home, "arbiter.env"),
+        "--property=EnvironmentFile=-" <> Path.join(home, "wardmast.env"),
         "--setenv=WARDMAST_DATA_HOME=#{home}",
         # The `arb` CLI (renamed in a sibling ticket) still reads ARB_DATA_HOME.
         "--setenv=ARB_DATA_HOME=#{home}",

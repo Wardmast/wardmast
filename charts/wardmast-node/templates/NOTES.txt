@@ -1,5 +1,5 @@
-{{- if include "arbiter-node.bootstrap" . }}
-Arbiter node guardrails installed in namespace {{ .Release.Namespace }}:
+{{- if include "wardmast-node.bootstrap" . }}
+Wardmast node guardrails installed in namespace {{ .Release.Namespace }}:
 PriorityClass, ResourceQuota, LimitRange and the four NetworkPolicies.
 {{- if eq .Values.mode "bootstrap" }}
 
@@ -7,9 +7,9 @@ Now have a namespace admin install the controller into the same namespace:
   helm install <NODE-NAME> {{ .Chart.Name }} -n {{ .Release.Namespace }} --set mode=node --set primary.url=... -f values.yaml
 {{- end }}
 {{- end }}
-{{- if include "arbiter-node.node" . }}
+{{- if include "wardmast-node.node" . }}
 
-Arbiter node {{ include "arbiter-node.nodeName" . }}: controller installed in namespace {{ .Release.Namespace }}.
+Wardmast node {{ include "wardmast-node.nodeName" . }}: controller installed in namespace {{ .Release.Namespace }}.
 
 ONE RELEASE PER NAMESPACE: every object name is fixed. The node name is the release name
 ({{ .Release.Name }}) unless node.name is set.
@@ -31,12 +31,12 @@ Next steps:
        read -rs K && printf %s "$K" | kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.reach.tailscale.authKeySecret }} --from-file=authkey=/dev/stdin
 {{- end }}
   Then watch it join:
-       kubectl -n {{ .Release.Namespace }} logs deploy/arbiter-controller
-       arb node show {{ include "arbiter-node.nodeName" . }}
+       kubectl -n {{ .Release.Namespace }} logs deploy/wardmast-controller
+       arb node show {{ include "wardmast-node.nodeName" . }}
 
 Helm owns the controller image: upgrade with
   helm upgrade {{ .Release.Name }} {{ .Values.chartRef }} --version <VERSION> -n {{ .Release.Namespace }} --reset-then-reuse-values
 
 `helm uninstall` removes the node's credential Secret. Revoke the node on the primary
-(`arb node revoke {{ include "arbiter-node.nodeName" . }}`) so no credential row is left behind.
+(`arb node revoke {{ include "wardmast-node.nodeName" . }}`) so no credential row is left behind.
 {{- end }}

@@ -52,13 +52,13 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.BackupTest do
   describe "db_path/0" do
     test "DATABASE_PATH wins", %{home: home} do
       System.put_env("DATABASE_PATH", "/srv/arb/a.sqlite3")
-      File.write!(Path.join(home, "arbiter.env"), "DATABASE_PATH=/other.sqlite3\n")
+      File.write!(Path.join(home, "wardmast.env"), "DATABASE_PATH=/other.sqlite3\n")
       assert Backup.db_path() == "/srv/arb/a.sqlite3"
     end
 
-    test "then the service's arbiter.env", %{home: home} do
+    test "then the service's wardmast.env", %{home: home} do
       File.write!(
-        Path.join(home, "arbiter.env"),
+        Path.join(home, "wardmast.env"),
         "# c\nexport DATABASE_PATH=\"/srv/env/b.sqlite3\"\nPATH=/bin\n"
       )
 
@@ -83,7 +83,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.BackupTest do
       assert {:ok, %{path: path, bytes: bytes, db: ^db}} = Backup.take(rd, "v2")
 
       assert Path.dirname(path) == Path.join(home, "snapshots")
-      assert Path.basename(path) =~ ~r/\Aarbiter-pre-v2-\d{8}T\d{6}Z\.sqlite3\z/
+      assert Path.basename(path) =~ ~r/\Awardmast-pre-v2-\d{8}T\d{6}Z\.sqlite3\z/
       assert File.read!(path) == @magic <> "snapshot"
       assert bytes == byte_size(@magic <> "snapshot")
 
@@ -97,7 +97,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.BackupTest do
     test "gives the eval the service's environment file (runtime.exs needs it)",
          %{home: home, release_dir: rd, db: db} do
       File.write!(db, @magic)
-      File.write!(Path.join(home, "arbiter.env"), "SECRET_KEY_BASE=abc123\nFOO='bar baz'\n")
+      File.write!(Path.join(home, "wardmast.env"), "SECRET_KEY_BASE=abc123\nFOO='bar baz'\n")
       backup_runner()
 
       assert {:ok, _} = Backup.take(rd, "v2")
@@ -113,7 +113,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.BackupTest do
       File.write!(db, @magic)
 
       File.write!(
-        Path.join(home, "arbiter.env"),
+        Path.join(home, "wardmast.env"),
         "SECRET_KEY_BASE=super-secret-value-123\nARBITER_CLOAK_KEY_REF=aws-sm:prod/arbiter#k\n"
       )
 
@@ -124,7 +124,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.BackupTest do
       sidecar = Backup.fingerprint_path(path)
       raw = File.read!(sidecar)
       refute raw =~ "super-secret-value-123"
-      refute File.ls!(Path.dirname(path)) |> Enum.any?(&(&1 =~ "arbiter.env"))
+      refute File.ls!(Path.dirname(path)) |> Enum.any?(&(&1 =~ "wardmast.env"))
 
       assert %{"env" => env} = Jason.decode!(raw)
       keys = Enum.map(env, & &1["key"])
@@ -173,7 +173,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.BackupTest do
          %{home: home, db: db} do
       snapshots = Path.join(home, "snapshots")
       File.mkdir_p!(snapshots)
-      backup = Path.join(snapshots, "arbiter-pre-v2-20260101T000000Z.sqlite3")
+      backup = Path.join(snapshots, "wardmast-pre-v2-20260101T000000Z.sqlite3")
       File.write!(backup, @magic <> "good")
 
       File.write!(db, @magic <> "migrated-by-bad-release")
@@ -190,7 +190,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.BackupTest do
       assert File.read!(failed) == @magic <> "migrated-by-bad-release"
       assert File.read!(failed <> "-wal") == "wal-frames"
       assert Path.dirname(failed) == snapshots
-      assert Path.basename(failed) =~ ~r/\Aarbiter-failed-v2-\d{8}T\d{6}Z\.sqlite3\z/
+      assert Path.basename(failed) =~ ~r/\Awardmast-failed-v2-\d{8}T\d{6}Z\.sqlite3\z/
 
       # The snapshot itself survives, so the restore can be repeated.
       assert File.read!(backup) == @magic <> "good"
@@ -233,7 +233,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.BackupTest do
 
       names =
         for i <- 1..8 do
-          name = "arbiter-pre-v#{i}-2026010#{i}T000000Z.sqlite3"
+          name = "wardmast-pre-v#{i}-2026010#{i}T000000Z.sqlite3"
           File.write!(Path.join(snapshots, name), @magic)
           name
         end
@@ -246,8 +246,28 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.BackupTest do
       remaining = snapshots |> File.ls!() |> Enum.sort()
       assert "unrelated.txt" in remaining
 
-      assert Enum.filter(remaining, &String.starts_with?(&1, "arbiter-pre-")) ==
+      assert Enum.filter(remaining, &String.starts_with?(&1, "wardmast-pre-")) ==
                Enum.drop(names, 3)
+    end
+
+    test "snapshots taken before the rename (arbiter-pre-*) still count toward retention", %{
+      home: home
+    } do
+      snapshots = Path.join(home, "snapshots")
+      File.mkdir_p!(snapshots)
+
+      names =
+        for i <- 1..8 do
+          prefix = if i <= 4, do: "arbiter-pre-", else: "wardmast-pre-"
+          name = "#{prefix}v#{i}-2026010#{i}T000000Z.sqlite3"
+          File.write!(Path.join(snapshots, name), @magic)
+          name
+        end
+
+      removed = Backup.prune(snapshots, Path.join(snapshots, List.last(names)))
+
+      assert Enum.sort(removed) == Enum.sort(Enum.take(names, 3))
+      assert snapshots |> File.ls!() |> Enum.sort() == Enum.sort(Enum.drop(names, 3))
     end
 
     test "operator-made snapshots in another name format are never pruned or counted", %{
@@ -258,14 +278,14 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.BackupTest do
 
       foreign =
         for i <- 1..6 do
-          name = "arbiter-pre-v0.2.#{i}-20261008-12000#{i}.sqlite3"
+          name = "wardmast-pre-v0.2.#{i}-20261008-12000#{i}.sqlite3"
           File.write!(Path.join(snapshots, name), @magic)
           name
         end
 
       auto =
         for i <- 1..7 do
-          name = "arbiter-pre-v#{i}-2026010#{i}T000000Z.sqlite3"
+          name = "wardmast-pre-v#{i}-2026010#{i}T000000Z.sqlite3"
           File.write!(Path.join(snapshots, name), @magic)
           name
         end
@@ -286,7 +306,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.BackupTest do
       for i <- 1..4,
           do:
             File.write!(
-              Path.join(snapshots, "arbiter-pre-v#{i}-2026010#{i}T000000Z.sqlite3"),
+              Path.join(snapshots, "wardmast-pre-v#{i}-2026010#{i}T000000Z.sqlite3"),
               "x"
             )
 

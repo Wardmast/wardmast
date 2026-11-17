@@ -38,13 +38,13 @@ defmodule Wardmast.Nodes.Agent do
   @spec archive_root() :: String.t()
   def archive_root, do: @archive_root
 
-  @doc "The deploy data home: `:data_dir` app env, `WARDMAST_DATA_HOME`, else `~/.arbiter`."
+  @doc "The deploy data home: `:data_dir` app env, `WARDMAST_DATA_HOME`, else `~/.wardmast`."
   @spec data_home() :: String.t()
   def data_home do
     case {Application.fetch_env(:wardmast, :data_dir), Wardmast.Env.get("WARDMAST_DATA_HOME")} do
       {{:ok, dir}, _} when is_binary(dir) -> Path.expand(dir)
       {_, dir} when is_binary(dir) and dir != "" -> Path.expand(dir)
-      _ -> Path.join(System.user_home!(), ".arbiter")
+      _ -> Path.join(System.user_home!(), ".wardmast")
     end
   end
 

@@ -166,7 +166,7 @@ test("a socket close shows reconnecting, and a rejoin goes back to live", () => 
 })
 
 test("a clean 1000 close still schedules a reconnect", () => {
-  // A graceful `systemctl --user restart arbiter` closes every WebSocket with
+  // A graceful `systemctl --user restart wardmast` closes every WebSocket with
   // 1000, and phoenix.js does not reconnect after a normal closure. For a
   // session that outlives the server by design (§4.3) that is the wrong
   // reading: it means "back shortly", not "stop watching".

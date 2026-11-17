@@ -630,7 +630,7 @@ WRAPPER
 start_agent() {
   systemctl --user daemon-reload
   systemctl --user enable arbiter-node.service >/dev/null 2>&1
-  systemctl --user restart arbiter-node.service
+  systemctl --user restart wardmast-node.service
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     if systemctl --user is-active --quiet arbiter-node.service; then
       ok "arbiter-node.service is running"

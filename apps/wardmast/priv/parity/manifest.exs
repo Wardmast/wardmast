@@ -2134,8 +2134,8 @@
       rest: nil,
       status: :excluded,
       absent: %{
-        mcp: {:intentional, "Host-local systemd/linger/env-file writer (captures secrets into `arbiter.env`)."},
-        rest: {:intentional, "Host-local systemd/linger/env-file writer (captures secrets into `arbiter.env`)."}
+        mcp: {:intentional, "Host-local systemd/linger/env-file writer (captures secrets into `wardmast.env`)."},
+        rest: {:intentional, "Host-local systemd/linger/env-file writer (captures secrets into `wardmast.env`)."}
       }
     },
     %{

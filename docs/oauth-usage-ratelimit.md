@@ -49,8 +49,8 @@ Setup, on the Arbiter host:
 
 ```sh
 cd /tmp   # a neutral dir: never the admiral dir or a repo
-CLAUDE_CONFIG_DIR=~/.arbiter/quota-claude claude auth login
-arb account rotate claude:default --kind cli_credentials_path --secret ~/.arbiter/quota-claude
+CLAUDE_CONFIG_DIR=~/.wardmast/quota-claude claude auth login
+arb account rotate claude:default --kind cli_credentials_path --secret ~/.wardmast/quota-claude
 ```
 
 The refresher then pages once, naming that login command, if a refresh
@@ -118,8 +118,8 @@ Both procedures need the dedicated grant to exist:
 
 ```sh
 cd /tmp   # neutral: never the admiral dir or a repo
-CLAUDE_CONFIG_DIR=~/.arbiter/quota-claude claude auth login
-arb account rotate claude:default --kind cli_credentials_path --secret ~/.arbiter/quota-claude
+CLAUDE_CONFIG_DIR=~/.wardmast/quota-claude claude auth login
+arb account rotate claude:default --kind cli_credentials_path --secret ~/.wardmast/quota-claude
 ```
 
 Observe both grants with this helper. It prints metadata and a short hash of
@@ -135,13 +135,13 @@ print(sys.argv[1], "expiresAt", t(o.get("expiresAt")),
       "refreshToken#", hashlib.sha256(o["refreshToken"].encode()).hexdigest()[:12])
 PY
 }
-grant ~/.arbiter/quota-claude/.credentials.json
+grant ~/.wardmast/quota-claude/.credentials.json
 grant ~/.claude/.credentials.json
 ```
 
 - **P1: does the refresher's argv renew?** Right after the dedicated grant's
   `expiresAt` passes (it is ~8h after login), look for the server log line
-  `Wardmast.Quota.GrantRefresher: renewed ~/.arbiter/quota-claude/.credentials.json`,
+  `Wardmast.Quota.GrantRefresher: renewed ~/.wardmast/quota-claude/.credentials.json`,
   and run `grant` on the file. The expected result is that `expiresAt` jumped
   about 8h later and `refreshToken#` changed. A failure shows up as the
   escalation "Anthropic quota grant needs re-login — …" instead. Record the

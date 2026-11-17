@@ -16,7 +16,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.ReleaseFiles do
   def data_home do
     case System.get_env("ARB_DATA_HOME") do
       dir when is_binary(dir) and dir != "" -> Path.expand(dir)
-      _ -> Path.join(System.user_home!(), ".arbiter")
+      _ -> Path.join(System.user_home!(), ".wardmast")
     end
   end
 

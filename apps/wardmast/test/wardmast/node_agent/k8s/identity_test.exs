@@ -17,21 +17,21 @@ defmodule Wardmast.NodeAgent.K8s.IdentityTest do
   @env %{
     "KUBERNETES_SERVICE_HOST" => "10.43.0.1",
     "KUBERNETES_SERVICE_PORT" => "443",
-    "HOSTNAME" => "arbiter-controller-6d9c7-x2b4q"
+    "HOSTNAME" => "wardmast-controller-6d9c7-x2b4q"
   }
 
   setup do
-    env = FakeK8sApi.start!(namespace: "arbiter-workers")
+    env = FakeK8sApi.start!(namespace: "wardmast-workers")
 
     FakeK8sApi.put_deployment(env.api, %{
       "metadata" => %{
-        "name" => "arbiter-controller",
+        "name" => "wardmast-controller",
         "uid" => "5f0c2a1e-1111-4222-8333-444455556666"
       }
     })
 
     FakeK8sApi.put_service(env.api, %{
-      "metadata" => %{"name" => "arbiter-controller"},
+      "metadata" => %{"name" => "wardmast-controller"},
       "spec" => %{"clusterIP" => "10.43.98.199"}
     })
 
@@ -110,7 +110,7 @@ defmodule Wardmast.NodeAgent.K8s.IdentityTest do
                owner_uid: "5f0c2a1e-1111-4222-8333-444455556666",
                bridge_addr: "10.43.98.199",
                gate_addr: "10.43.0.1:443",
-               own_pod: "arbiter-controller-6d9c7-x2b4q",
+               own_pod: "wardmast-controller-6d9c7-x2b4q",
                max_wall_s: 86_400
              }
     end
@@ -141,7 +141,7 @@ defmodule Wardmast.NodeAgent.K8s.IdentityTest do
     end
 
     test "the Deployment or the Service missing is an error naming it" do
-      cluster = FakeK8sApi.start!(namespace: "arbiter-workers")
+      cluster = FakeK8sApi.start!(namespace: "wardmast-workers")
       facts = %{install_id: "i1234567890123456", registry: "r.example/a"}
       config = config(primary(500, %{}))
 
@@ -149,14 +149,14 @@ defmodule Wardmast.NodeAgent.K8s.IdentityTest do
                Identity.resolve(cluster.client, config, facts, env: @env)
 
       FakeK8sApi.put_deployment(cluster.api, %{
-        "metadata" => %{"name" => "arbiter-controller", "uid" => "u-1"}
+        "metadata" => %{"name" => "wardmast-controller", "uid" => "u-1"}
       })
 
       assert {:error, {:service, :not_found}} =
                Identity.resolve(cluster.client, config, facts, env: @env)
 
       FakeK8sApi.put_service(cluster.api, %{
-        "metadata" => %{"name" => "arbiter-controller"},
+        "metadata" => %{"name" => "wardmast-controller"},
         "spec" => %{"clusterIP" => "None"}
       })
 

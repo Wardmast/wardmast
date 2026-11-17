@@ -294,7 +294,7 @@ defmodule Wardmast.Agents.Claude.ConfigDir do
   # `Port.open`'s `{:env, …}` extends the BEAM's own process environment
   # rather than replacing it (`Wardmast.Worker.ClaudeSession.open_port/1`) —
   # so a bare `[]` here would let an install-wide `CLAUDE_CODE_OAUTH_TOKEN`
-  # set on the arbiter server process (`.arbiter.env` / the service unit)
+  # set on the arbiter server process (`.wardmast.env` / the service unit)
   # leak into every spawn regardless of what `oauth_token/1` decided — and
   # `Wardmast.Agents.Claude.CredentialCheck`, which asks `oauth_token/1` the
   # same question, would then refuse a dispatch whose child in fact carries
