@@ -952,4 +952,14 @@ defmodule Wardmast.Nodes.PlacementTest do
       refute Placement.warm?(row("a", images: %{"digests" => [@digest]}), nil)
     end
   end
+
+  describe "local_backend/1 provider handling" do
+    test "a Claude request keeps local_backend podman" do
+      assert :podman == Placement.local_backend(%{provider: :claude, local_backend: :podman})
+    end
+
+    test "a provider with no container wrap point stays bwrap" do
+      assert :bwrap == Placement.local_backend(%{provider: :agy, local_backend: :podman})
+    end
+  end
 end

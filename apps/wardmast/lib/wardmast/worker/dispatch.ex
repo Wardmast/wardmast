@@ -1109,17 +1109,18 @@ defmodule Wardmast.Worker.Dispatch do
       provider: provider,
       workspace_id: task.workspace_id,
       follow_up: resume_follow_up?(task, opts, provider)
-    ] ++ auto_backend_opt(task, opts)
+    ] ++ auto_backend_opt(task, opts, provider)
   end
 
   # bd-56z2wz: a resume held at the primary's cap under `sandbox.backend: auto` names the
   # backend it would run there, like a fresh run's hold does.
-  defp auto_backend_opt(%Issue{} = task, opts) do
+  defp auto_backend_opt(%Issue{} = task, opts, provider) do
     workspace = load_workspace(task)
 
     if auto_backend?(workspace, opts) do
       backend =
         Placement.local_backend(%{
+          provider: provider,
           existing_layout: existing_checkout_layout(task, opts),
           local_backend: workspace |> dispatch_policy(opts) |> SecurityPolicy.local_backend()
         })
