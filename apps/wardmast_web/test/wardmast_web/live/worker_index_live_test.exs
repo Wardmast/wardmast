@@ -39,7 +39,10 @@ defmodule WardmastWeb.WorkerIndexLiveTest do
   # The worker walk arrives by `start_async/3` after the connected mount
   # (bd-4gtia5); everything but the async tests themselves wants the page
   # once it has landed.
-  @async_timeout 5_000
+  # Must outlast `Worker.safe_snapshot/1`'s 5 s probe: the suspended worker in the
+  # "degraded entry" test only degrades once that call times out, so a 5 s budget
+  # here was a coin flip even on Linux.
+  @async_timeout 15_000
 
   defp live_workers(conn, path \\ ~p"/workers") do
     {:ok, view, _html} = live(conn, path)

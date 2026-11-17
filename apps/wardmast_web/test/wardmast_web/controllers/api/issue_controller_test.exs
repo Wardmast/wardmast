@@ -614,6 +614,10 @@ defmodule WardmastWeb.Api.IssueControllerTest do
     # bd-3j4ch4 AC5: `arb ticket show` renders the cost estimate, and this is
     # where it gets the numbers from.
     test "carries the cost estimate when the ledger has enough history", %{conn: conn, ws: ws} do
+      # One instant for every row: the estimate is recency weighted, so rows that
+      # straddle a clock second (a slow runner) weigh differently and move the median.
+      occurred_at = DateTime.utc_now()
+
       for cost <- Enum.map(1..10, &(&1 * 1.0)) do
         {:ok, past} =
           Ash.create(Issue, %{
@@ -634,7 +638,7 @@ defmodule WardmastWeb.Api.IssueControllerTest do
             step: :work,
             workspace_id: ws.id,
             cost_usd: cost,
-            occurred_at: DateTime.utc_now()
+            occurred_at: occurred_at
           })
       end
 

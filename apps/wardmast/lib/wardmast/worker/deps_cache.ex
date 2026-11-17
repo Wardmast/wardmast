@@ -63,6 +63,7 @@ defmodule Wardmast.Worker.DepsCache do
   alias Wardmast.Worker.Container
   alias Wardmast.Worker.DepsRelocate
   alias Wardmast.Worker.Image
+  alias Wardmast.Worker.PortableCp
   alias Wardmast.Worker.PrivateClone
   alias Wardmast.Worker.ReleaseEnv
 
@@ -479,7 +480,7 @@ defmodule Wardmast.Worker.DepsCache do
   defp run_cp(args) do
     case System.find_executable("cp") do
       nil -> {"cp: not found", 127}
-      cp -> ReleaseEnv.cmd(cp, args, stderr_to_stdout: true)
+      cp -> ReleaseEnv.cmd(cp, PortableCp.args(args), stderr_to_stdout: true)
     end
   end
 

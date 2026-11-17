@@ -472,7 +472,7 @@ defmodule Wardmast.Loop.CanaryCycleTest do
       seed_arm!(ws, canary, :control, 20, 18, "con")
 
       # Note: no `poll/1` call anywhere below.
-      start_supervised!({CanaryTicker, name: nil, enabled: true, interval_ms: 25})
+      ticker = start_supervised!({CanaryTicker, name: nil, enabled: true, interval_ms: 25})
 
       assert eventually(fn -> is_nil(get_in(reload!(ws).config, ["loop", "canary"])) end),
              "a regressing canary must be reverted by the ticker's timer alone"
@@ -482,7 +482,15 @@ defmodule Wardmast.Loop.CanaryCycleTest do
       refute get_in(reverted.config, ["routing", "rules", "D2"]),
              "an unattended revert must not leave the canaried rule behind"
 
-      assert Ash.get!(PendingWrite, ctx.proposal.id).state == :rejected
+      # The config is cleared first and the proposal rejected a moment later, in the
+      # same tick; a slow runner can read between the two.
+      assert eventually(fn -> Ash.get!(PendingWrite, ctx.proposal.id).state == :rejected end),
+             "the reverted proposal must end up :rejected"
+
+      # The ticker keeps firing every 25 ms; park it between ticks so ExUnit's
+      # teardown never kills it mid-query while it holds the shared sandbox
+      # connection.
+      Wardmast.ProcessTeardown.quiesce(ticker)
     end
   end
 

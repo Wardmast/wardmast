@@ -2157,6 +2157,8 @@ defmodule Wardmast.Workflows.CodeReviewTest do
 
     # -- bd-dl49fo regression: large-diff E2BIG (MAX_ARG_STRLEN) fix ----------
 
+    # Linux-only: MAX_ARG_STRLEN (E2BIG at 131_072 B per argument) is a Linux kernel limit; macOS allows far larger arguments
+    @tag :linux
     test "root-cause doc: System.cmd with arg > MAX_ARG_STRLEN (131_072 B) exits 7" do
       # Linux enforces a per-argument limit of 131_072 bytes (MAX_ARG_STRLEN).
       # When exceeded, execve returns errno E2BIG = 7.  Erlang's System.cmd

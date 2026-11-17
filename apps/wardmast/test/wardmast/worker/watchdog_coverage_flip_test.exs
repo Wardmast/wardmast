@@ -150,7 +150,7 @@ defmodule Wardmast.Worker.WatchdogCoverageFlipTest do
   # returns the snapshot that matched, so a whole set of assertions can be made
   # against one consistent view of the Watchdog.
   defp wait_for_state(pid, fun, timeout \\ 3_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait_state(pid, fun, deadline)
   end
 

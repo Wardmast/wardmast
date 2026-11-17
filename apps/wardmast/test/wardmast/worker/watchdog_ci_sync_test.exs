@@ -101,7 +101,7 @@ defmodule Wardmast.Worker.WatchdogCiSyncTest do
   end
 
   defp wait_until(fun, timeout \\ 2_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
@@ -356,7 +356,10 @@ defmodule Wardmast.Worker.WatchdogCiSyncTest do
       StubMerger.queue_get("!th2", [red("old"), red("old"), running("synced"), green("synced")])
 
       reviewed_then_synced("!th2")
-      wpid = start_watchdog(task_id, "!th2", last_reviewed_sha: "old")
+      # A slow poll is what let the queue run past `red("old")` while the hold was
+      # still being observed (15 ms polls vs a test that sleeps 10 ms between looks),
+      # so the watchdog never saw a head to sync. A slower cadence closes the window.
+      wpid = start_watchdog(task_id, "!th2", last_reviewed_sha: "old", interval_ms: 100)
       wait_until(fn -> :sys.get_state(wpid).ci_hold != nil end)
 
       StubMerger.set_branch_pipeline({:ok, %{id: 778, sha: "def", status: "success", url: nil}})

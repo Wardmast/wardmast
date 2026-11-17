@@ -584,9 +584,8 @@ defmodule Wardmast.Workflows.MergedPRFinalizerTest do
       stub(fn conn -> conn |> Plug.Conn.put_status(200) |> Req.Test.json([]) end)
 
       {_pid, name} = start_finalizer(ws, interval_ms: 50)
-      Process.sleep(250)
 
-      assert MergedPRFinalizer.state(name).ticks >= 2,
+      assert Wardmast.Test.Timing.await(fn -> MergedPRFinalizer.state(name).ticks >= 2 end),
              "expected at least 2 auto-ticks; got #{MergedPRFinalizer.state(name).ticks}"
     end
   end

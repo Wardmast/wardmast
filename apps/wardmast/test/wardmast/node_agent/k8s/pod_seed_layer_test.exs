@@ -62,6 +62,8 @@ defmodule Wardmast.NodeAgent.K8s.PodSeedLayerTest do
     assert seed =~ "seed-layer"
   end
 
+  # Linux-only: the pod init-container scripts (priv/k8s_pod) use GNU coreutils flags and only run in the Linux worker image
+  @tag :linux
   test "a layer installed by the pod passes the offline gate without rebuilding",
        %{tmp_dir: tmp, bin: bin, built: built} do
     # The checkout the init container builds (committed files) and the layer's contents
@@ -91,6 +93,8 @@ defmodule Wardmast.NodeAgent.K8s.PodSeedLayerTest do
     assert Fixture.rebuilt?(out), out
   end
 
+  # Linux-only: the pod init-container scripts (priv/k8s_pod) use GNU coreutils flags and only run in the Linux worker image
+  @tag :linux
   test "the manifests name where the worker runs, which is not where the init container copies",
        %{tmp_dir: tmp, bin: bin, built: built} do
     wt = Fixture.checkout(Path.join(tmp, "work/wt"), built)
@@ -104,6 +108,8 @@ defmodule Wardmast.NodeAgent.K8s.PodSeedLayerTest do
     refute recorded =~ wt
   end
 
+  # Linux-only: the pod init-container scripts (priv/k8s_pod) use GNU coreutils flags and only run in the Linux worker image
+  @tag :linux
   test "a layer with no stamp still installs, and says the dependencies will rebuild",
        %{tmp_dir: tmp, bin: bin, built: built} do
     File.rm!(Path.join(built.layer, ".complete"))
@@ -114,6 +120,8 @@ defmodule Wardmast.NodeAgent.K8s.PodSeedLayerTest do
     assert File.regular?(Path.join(wt, "deps/nifdep/priv/nif.so"))
   end
 
+  # Linux-only: the pod init-container scripts (priv/k8s_pod) use GNU coreutils flags and only run in the Linux worker image
+  @tag :linux
   test "an image without elixir installs the layer and says the dependencies will rebuild",
        %{tmp_dir: tmp, bin: bin, built: built} do
     wt = Fixture.checkout(Path.join(tmp, "work/wt"), built)

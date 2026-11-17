@@ -134,6 +134,12 @@ jobs:
       - name: Fetch dependencies
         run: mix deps.get
 
+      # The pod/join script lint tests (not tagged :linux: linting is
+      # host-independent) flunk under CI when shellcheck is not on PATH, and the
+      # macos-15 image does not ship it (ubuntu-latest does).
+      - name: Install shellcheck
+        run: brew install shellcheck
+
       # Reports what the host can and cannot do, so a red shard is easy to read:
       # the subset is whatever is NOT tagged :linux on THIS runner image.
       - name: Host facts

@@ -377,7 +377,7 @@ defmodule WardmastWeb.TaskDetailLiveTest do
       })
       |> render_submit()
 
-      assert render_async(view) =~ "assign this task a repo"
+      assert render_async(view, 10_000) =~ "assign this task a repo"
     end
   end
 

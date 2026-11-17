@@ -193,6 +193,9 @@ defmodule WardmastCli.Cmd.ServerTest do
       System.put_env("ARB_HOME", "/tmp/arbiter-server-deploy-test")
       System.delete_env("ARB_RELEASE_REPO")
       on_exit(fn -> System.delete_env("ARB_HOME") end)
+      # These tests are about the release-vs-git-pull choice, not the platform guard,
+      # which refuses a macOS host before it gets that far.
+      Process.put(:bd2_host_platform, {:linux, "x86_64"})
       Process.put(:bd2_sleep, fn _ms -> :ok end)
       Process.put(:bd2_port_check, fn _port -> true end)
 
