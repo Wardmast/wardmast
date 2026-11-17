@@ -12,7 +12,14 @@ defmodule Wardmast.Worker.WatchdogBaselineCarryTest do
 
   alias Wardmast.ReviewGate.{Resolutions, Round, RoundsReport}
   alias Wardmast.Tasks.{Issue, Workspace}
-  alias Wardmast.Test.{StubAutoResumeDispatcher, StubFixPassDispatcher, StubMerger}
+
+  alias Wardmast.Test.{
+    ProcessCleanup,
+    StubAutoResumeDispatcher,
+    StubFixPassDispatcher,
+    StubMerger
+  }
+
   alias Wardmast.Worker.Watchdog
 
   @ref "!carry1"
@@ -116,7 +123,7 @@ defmodule Wardmast.Worker.WatchdogBaselineCarryTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+      ProcessCleanup.stop(pid)
     end)
 
     pid
