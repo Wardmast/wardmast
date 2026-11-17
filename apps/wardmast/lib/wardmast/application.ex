@@ -160,6 +160,9 @@ defmodule Wardmast.Application do
         # Wardmast.Nodes.Placement and Wardmast.Nodes.LocalCapacity.
         {Registry, keys: :unique, name: Wardmast.Nodes.Placement.Registry},
         {DynamicSupervisor, strategy: :one_for_one, name: Wardmast.Worker.Supervisor},
+        # App previews (`Wardmast.Preview`): one supervised Runner per running preview.
+        {Registry, keys: :unique, name: Wardmast.Preview.Registry},
+        {DynamicSupervisor, strategy: :one_for_one, name: Wardmast.Preview.Supervisor},
         # bd-1754qj: the per-target merge head the auto-merge lane's Watchdogs share.
         Wardmast.Worker.MergeTrain,
         {DynamicSupervisor, strategy: :one_for_one, name: Wardmast.Worker.WatchdogSupervisor},
@@ -395,8 +398,12 @@ defmodule Wardmast.Application do
         # — auto-dispatch spends money, so an upgrade must not discover it by
         # finding four agents running.
         Wardmast.Board.Autopilot
-      ] ++ boot_tasks(auto_start?)
+      ] ++ preview_sweeper(auto_start?) ++ boot_tasks(auto_start?)
   end
+
+  # The preview lifecycle sweep; gated off in test like the other timers.
+  defp preview_sweeper(true), do: [Wardmast.Preview.Sweeper]
+  defp preview_sweeper(false), do: []
 
   # bd-35gvrj: closed before Autopilot can plan, reopened by the boot reconcile
   # task once it has re-registered the runs the restart cut off. Only when boot

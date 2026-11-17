@@ -18,6 +18,8 @@ defmodule WardmastWeb.WorkerDetailLive do
 
   use WardmastWeb, :live_view
 
+  on_mount {WardmastWeb.PreviewHook, :ticket}
+
   import WardmastWeb.StatusHelpers
 
   alias WardmastWeb.CoreComponents.Core
@@ -1096,6 +1098,18 @@ defmodule WardmastWeb.WorkerDetailLive do
                     <% true -> %>
                   <% end %>
                 </span>
+              </div>
+
+              <div
+                :if={@preview && (@preview.configured? or @preview.row)}
+                id="worker-preview-strip"
+                class="px-4 py-3 bg-[var(--surface-panel)] border-b border-[var(--border-default)]"
+              >
+                <WardmastWeb.PreviewPanel.preview_panel
+                  preview={@preview}
+                  busy={@preview_busy}
+                  error={@preview_error}
+                />
               </div>
 
               <div class="grid gap-px bg-[var(--border-default)] grid-cols-1 lg:grid-cols-[minmax(0,1fr)_272px]">

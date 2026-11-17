@@ -473,6 +473,13 @@ defmodule WardmastWeb.Router do
     get("/breakers", BreakerController, :index)
     post("/breakers/reset", BreakerController, :reset)
 
+    # App previews: run a ticket's checkout as a live app (`ward preview ...`)
+    get("/previews", PreviewController, :index)
+    post("/previews", PreviewController, :create)
+    get("/previews/:task_id", PreviewController, :show)
+    get("/previews/:task_id/logs", PreviewController, :logs)
+    post("/previews/:task_id/stop", PreviewController, :stop)
+
     # Grok credential broker (bd-9p4lx9): the worker's GROK_AUTH_PROVIDER_COMMAND
     # (`arb grok-token`) asks for a short-lived access token here
     post("/grok/token", GrokTokenController, :create)
