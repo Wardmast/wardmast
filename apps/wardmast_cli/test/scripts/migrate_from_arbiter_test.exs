@@ -242,6 +242,53 @@ defmodule WardmastCli.Scripts.MigrateFromArbiterTest do
       assert out =~ "systemctl --user start wardmast.service"
     end
 
+    test "rewrites systemd %h paths (the unit `install service` generates)", %{home: home} do
+      legacy_install!(home)
+      units = Path.join(home, ".config/systemd/user")
+
+      File.write!(Path.join(units, "arbiter.service"), """
+      [Unit]
+      Description=Arbiter stack
+      [Service]
+      WorkingDirectory=%h/.arbiter
+      EnvironmentFile=-%h/.arbiter/arbiter.env
+      ExecStart=%h/.arbiter/current/bin/arbiter start
+      [Install]
+      WantedBy=default.target
+      """)
+
+      File.write!(
+        Path.join(units, "arbiter.service.d/worktree.conf"),
+        "[Service]\nEnvironment=ARBITER_WORKTREE_ROOT=#{home}/wt\n"
+      )
+
+      {out, code} = run(home)
+      assert code == 0, out
+
+      unit = File.read!(Path.join(units, "wardmast.service"))
+      assert unit =~ "EnvironmentFile=-%h/.wardmast/wardmast.env\n"
+      assert unit =~ "WorkingDirectory=%h/.wardmast\n"
+      assert unit =~ "ExecStart=%h/.wardmast/current/bin/wardmast start\n"
+
+      dropin = File.read!(Path.join(units, "wardmast.service.d/worktree.conf"))
+      assert dropin =~ "Environment=WARDMAST_WORKTREE_ROOT="
+    end
+
+    test "fails loudly when a generated EnvironmentFile= names a missing file", %{home: home} do
+      legacy_install!(home)
+      units = Path.join(home, ".config/systemd/user")
+
+      File.write!(
+        Path.join(units, "arbiter.service.d/extra.conf"),
+        "[Service]\nEnvironmentFile=-%h/.arbiter/missing.env\n"
+      )
+
+      {out, code} = run(home)
+      refute code == 0
+      assert out =~ "EnvironmentFile"
+      assert out =~ "missing.env"
+    end
+
     test "a systemctl that rejects daemon-reload/enable does not abort the migration", %{
       home: home
     } do
