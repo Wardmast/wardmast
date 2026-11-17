@@ -237,8 +237,11 @@ defmodule Wardmast.Worker.DispatchLocalCapacityResumeTest do
   describe "with no override" do
     test "the hardware suggestion applies (enforced), and a resume under it is admitted",
          %{a: a} do
+      # Pin the hardware: the suggestion is floor(cpus / 2), so on a 2-vCPU runner it is
+      # 1 and B (live) fills the cap, refusing the resume. Not a property under test.
+      put_app_env(:wardmast, :local_hardware, %{cpus: 12, mem_total: 31 * 1024 * 1024 * 1024})
       ResumeSlotFixture.put_local_cap(nil)
-      assert %{source: :suggestion} = Wardmast.Nodes.LocalCapacity.cap()
+      assert %{source: :suggestion, cap: 6} = Wardmast.Nodes.LocalCapacity.cap()
 
       assert {:ok, _result} =
                Dispatch.resume(a.id, start_driver: false, claude_command: ["sleep", "2"])
