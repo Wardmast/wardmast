@@ -545,4 +545,81 @@ defmodule Wardmast.NodeAgent.RunSpecTest do
     refute inspect(redacted) =~ "secret prompt"
     assert redacted["secrets"] == %{"CLAUDE_CODE_OAUTH_TOKEN" => "[redacted]"}
   end
+
+  # bd-b2t0kw: a credential the CLI reads from a FILE (agy's Google Cloud service-account
+  # key, and its MCP config, which carries a bearer agy does not expand from the env).
+  # Delivered like `secrets`, never logged; a cluster pod keeps them on its memory volume.
+  describe "secret_files" do
+    @key ~s({"type":"service_account","private_key":"-----BEGIN PRIVATE KEY-----\\nMIIEvSPEC\\n"})
+
+    defp with_secret_files(files, extra \\ %{}) do
+      mounts =
+        spec()["mounts"] ++ [%{"kind" => "config_dir", "path" => "/tmp/run/home/.gemini"}]
+
+      spec(Map.merge(%{"secret_files" => files, "mounts" => mounts}, extra))
+    end
+
+    test "a file and a linked file are accepted; the struct holds the bytes" do
+      assert {:ok, spec} =
+               RunSpec.validate(
+                 with_secret_files(%{
+                   "agy-adc.json" => %{"content" => Base.encode64(@key)},
+                   "agy-mcp.json" => %{
+                     "content" => Base.encode64(~s({"mcpServers":{}})),
+                     "link" => "config/mcp_config.json"
+                   }
+                 })
+               )
+
+      assert spec.secret_files == %{
+               "agy-adc.json" => %{content: @key, link: nil},
+               "agy-mcp.json" => %{content: ~s({"mcpServers":{}}), link: "config/mcp_config.json"}
+             }
+    end
+
+    test "never printed: not by inspect, not by redact/1" do
+      raw = with_secret_files(%{"agy-adc.json" => %{"content" => Base.encode64(@key)}})
+      {:ok, spec} = RunSpec.validate(raw)
+
+      refute inspect(spec) =~ "PRIVATE KEY"
+      refute inspect(spec) =~ "MIIEvSPEC"
+      redacted = inspect(RunSpec.redact(raw))
+      refute redacted =~ Base.encode64(@key)
+      assert redacted =~ "agy-adc.json"
+    end
+
+    test "refuses a bad name, bad content, a link out of the config dir and a link with no config dir" do
+      for files <- [
+            %{"../escape" => %{"content" => Base.encode64("x")}},
+            %{".hidden" => %{"content" => Base.encode64("x")}},
+            %{"a/b" => %{"content" => Base.encode64("x")}},
+            %{"ok.json" => %{"content" => "not base64!"}},
+            %{"ok.json" => "not a map"},
+            %{"ok.json" => %{"content" => Base.encode64("x"), "link" => "../outside"}},
+            %{"ok.json" => %{"content" => Base.encode64("x"), "link" => "/abs/path"}},
+            %{"ok.json" => %{"content" => Base.encode64("x"), "link" => "a/../../b"}},
+            %{"ok.json" => %{"content" => Base.encode64("x"), "other" => 1}}
+          ] do
+        assert {:error, {:refused, _}} = RunSpec.validate(with_secret_files(files)),
+               inspect(files)
+      end
+
+      no_config_dir =
+        spec(%{
+          "secret_files" => %{
+            "ok.json" => %{"content" => Base.encode64("x"), "link" => "config/mcp_config.json"}
+          }
+        })
+
+      assert {:error, {:refused, {:bad_value, "secret_files"}}} = RunSpec.validate(no_config_dir)
+    end
+
+    test "counts against the same 64 KiB as secrets" do
+      # 65,520 bytes of file plus the spec's own secret is past the shared 65,536.
+      big = Base.encode64(String.duplicate("k", 65_520))
+
+      assert {:error, {:refused, {:too_large, "secrets"}}} =
+               RunSpec.validate(with_secret_files(%{"big.json" => %{"content" => big}}))
+    end
+  end
 end

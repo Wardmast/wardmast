@@ -1083,13 +1083,16 @@ defmodule Wardmast.Worker.ContainerSpawn do
 
     with :ok <- remote_provider(provider),
          :ok <- container_backend(policy, provider),
+         {:ok, agy_key} <- agy_credential(provider, opts),
          {:ok, git} <- GitCredential.remote_delivery(material),
          {:ok, worktree} <- fetch_worktree(opts),
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
          {:ok, image} <- remote_image(opts, worktree, node),
          {:ok, set, cli} <- remote_cli(provider, image, opts),
          {:ok, services} <- remote_services(opts),
-         {:ok, home, config_dir} <- remote_dirs(tmp_dir),
+         {:ok, home, config_dir} <- remote_dirs(provider, tmp_dir),
+         {:ok, config_files, secret_files} <-
+           remote_config(provider, opts, policy, worktree, home, agy_key),
          {:ok, checkout} <- remote_checkout(opts, worktree, config_dir),
          {:ok, worktree_files, worktree_secrets} <- worktree_files(worktree),
          {:ok, network, spec} <- start_egress(provider, opts, policy, worktree) do
@@ -1115,12 +1118,13 @@ defmodule Wardmast.Worker.ContainerSpawn do
          withheld: GitCredential.withheld_values(remote_workspace(opts)),
          home: home,
          config_dir: config_dir,
-         config_files: config_files(Keyword.get(opts, :workspace)),
+         config_files: config_files,
+         secret_files: secret_files,
          tmp_dir: tmp_dir,
          cli: cli,
          prompt_paths: prompt_paths(Keyword.get(opts, :argv)),
          network: network,
-         env: container_env(spec, nil) ++ git.env ++ services.env,
+         env: container_env(spec, nil) ++ git.env ++ services.env ++ agy_remote_env(agy_key),
          services: services.presets,
          limits: remote_limits(node),
          task_id: Keyword.get(opts, :task_id)
@@ -1500,7 +1504,19 @@ defmodule Wardmast.Worker.ContainerSpawn do
   # slug `claude --resume` keys its session store on is the same on both sides.
   # The directories exist here too, so the transcript the node uploads has a
   # place to land.
-  defp remote_dirs(tmp_dir) do
+  # agy's config dir is `$HOME/.gemini` (bd-b2t0kw): the pod mounts it inside the HOME.
+  defp remote_dirs("gemini", tmp_dir) do
+    home = Path.join(tmp_dir, "home")
+    config_dir = Path.join(home, ".gemini")
+
+    with :ok <- File.mkdir_p(config_dir) do
+      {:ok, home, config_dir}
+    else
+      {:error, reason} -> {:error, {:run_dirs_failed, reason}}
+    end
+  end
+
+  defp remote_dirs(_provider, tmp_dir) do
     home = Path.join(tmp_dir, "home")
     config_dir = Path.join(tmp_dir, "claude-config")
 
@@ -1620,6 +1636,74 @@ defmodule Wardmast.Worker.ContainerSpawn do
 
   defp regular_file?(path), do: match?({:ok, %File.Stat{type: :regular}}, File.lstat(path))
 
+  # What a remote run's config dir is seeded with (`config_dir.files`), and the file
+  # credentials it carries (`secret_files`, bd-b2t0kw). agy's config files are generated
+  # from the spawn's own policy, as a local container's (`run_dirs/4`), into the run's
+  # HOME on the primary and sent from there; its service-account key and its MCP config
+  # (a bearer agy reads literally) are file secrets: the pod keeps them on its memory
+  # volume and links the MCP config into the config dir, where agy looks for it.
+  @agy_mcp_link "config/mcp_config.json"
+
+  defp remote_config("gemini", _opts, policy, worktree, home, agy_key) do
+    seed =
+      GeminiConfigDir.seed(home,
+        security: policy,
+        worktree: worktree,
+        source_home: nil,
+        boundary: Path.dirname(home)
+      )
+
+    with :ok <- seed,
+         {:ok, settings} <- File.read(Path.join(home, ".gemini/antigravity-cli/settings.json")),
+         {:ok, memory} <- File.read(Path.join(home, ".gemini/GEMINI.md")),
+         {:ok, mcp} <- host_agy_mcp_config(worktree) do
+      secret_files =
+        %{@agy_key_target => %{"content" => Base.encode64(agy_key)}}
+        |> then(fn files ->
+          if mcp,
+            do:
+              Map.put(files, "agy-mcp.json", %{
+                "content" => Base.encode64(mcp),
+                "link" => @agy_mcp_link
+              }),
+            else: files
+        end)
+
+      {:ok, %{"antigravity-cli/settings.json" => settings, "GEMINI.md" => memory}, secret_files}
+    else
+      {:error, reason} -> {:error, {:run_dirs_failed, reason}}
+    end
+  end
+
+  defp remote_config(_provider, opts, _policy, _worktree, _home, _agy_key),
+    do: {:ok, config_files(Keyword.get(opts, :workspace)), %{}}
+
+  # The MCP config dispatch wrote into the host's per-worktree agy HOME, as JSON text;
+  # `nil` when the spawn has none (no MCP scope, isolation off).
+  defp host_agy_mcp_config(worktree) do
+    source =
+      Path.join(GeminiConfigDir.path(worktree: worktree), GeminiConfigDir.mcp_config_path())
+
+    with {:ok, %File.Stat{type: :regular}} <- File.lstat(source),
+         {:ok, body} <- File.read(source),
+         {:ok, %{}} <- Jason.decode(body) do
+      {:ok, body}
+    else
+      {:error, :enoent} -> {:ok, nil}
+      {:ok, _other} -> {:error, {:mcp_config_unreadable, source}}
+      {:error, reason} -> {:error, {:mcp_config_unreadable, source, reason}}
+    end
+  end
+
+  # The pod reads the key from its memory volume (`priv/k8s_pod/seed`: `/run/arb/creds`).
+  defp agy_remote_env(nil), do: []
+
+  defp agy_remote_env(key) when is_binary(key),
+    do: [
+      {"AGY_ADC_AUTH", "true"},
+      {"GOOGLE_APPLICATION_CREDENTIALS", "/run/arb/creds/" <> @agy_key_target}
+    ]
+
   defp config_files(workspace) do
     case ConfigDir.ensure(workspace) do
       {:ok, source} ->
@@ -1724,7 +1808,8 @@ defmodule Wardmast.Worker.ContainerSpawn do
          "command" => remote_network_command(request, jail, argv)
        }
        |> put_checkout(request.checkout)
-       |> put_pull_auth(request.image)}
+       |> put_pull_auth(request.image)
+       |> put_secret_files(Map.get(request, :secret_files, %{}))}
     end
   end
 
@@ -1834,6 +1919,11 @@ defmodule Wardmast.Worker.ContainerSpawn do
 
   defp put_worktree_files(mount, files),
     do: Map.put(mount, "files", Map.new(files, fn {k, v} -> {k, Base.encode64(v)} end))
+
+  # bd-b2t0kw: file credentials (agy's key, its MCP config), only when the run has any,
+  # so every other provider's spec is unchanged.
+  defp put_secret_files(spec, files) when map_size(files) == 0, do: spec
+  defp put_secret_files(spec, files), do: Map.put(spec, "secret_files", files)
 
   defp put_checkout(spec, nil), do: spec
 

@@ -110,6 +110,39 @@ defmodule Wardmast.NodeAgent.PodChannel.BootBundleTest do
     assert Enum.sort(manifest["bridges"]) == ["arb", "proxy"]
   end
 
+  # bd-b2t0kw: a file credential (agy's service-account key, its MCP config) rides the
+  # same tar as `secrets`, 0600, and the links the pod makes to them are named apart.
+  test "secret files ride the tar 0600; their links are listed, with no secret, in secret_links" do
+    tar =
+      BootBundle.build(
+        spec!(%{
+          "secret_files" => %{
+            "agy-adc.json" => %{"content" => Base.encode64(~s({"private_key":"PK"}))},
+            "agy-mcp.json" => %{
+              "content" => Base.encode64(~s({"bearer":"mcp-tok"})),
+              "link" => "config/mcp_config.json"
+            }
+          }
+        }),
+        leaves()
+      )
+
+    files = unpack(tar)
+    assert files["secret_files/agy-adc.json"] == ~s({"private_key":"PK"})
+    assert files["secret_files/agy-mcp.json"] == ~s({"bearer":"mcp-tok"})
+    assert files["secret_links"] == "agy-mcp.json config/mcp_config.json\n"
+
+    {:ok, headers} = :erl_tar.table({:binary, tar}, [:verbose])
+
+    for {name, :regular, _size, _mtime, mode, _uid, _gid} <- headers,
+        String.starts_with?(to_string(name), "secret_files/") do
+      assert mode == 0o600, "#{name} is #{Integer.to_string(mode, 8)}"
+    end
+
+    refute files["manifest.json"] =~ "PK"
+    refute files["manifest.json"] =~ "mcp-tok"
+  end
+
   test "the manifest holds no secret" do
     files = unpack(BootBundle.build(spec!(), leaves()))
 

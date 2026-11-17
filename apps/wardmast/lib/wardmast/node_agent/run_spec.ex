@@ -26,6 +26,7 @@ defmodule Wardmast.NodeAgent.RunSpec do
   | `bridges` | `[%{"name" => n, "path" => container path}]`: the per-run sockets (RW10) |
   | `env` | non-secret environment, `%{name => value}` |
   | `secrets` | `%{name => value}`: delivered by a tmpfs file, **never** as `-e NAME` (§11, RW2/U13) |
+  | `secret_files` | optional (bd-b2t0kw): `%{name => %{"content" => base64, "link" => path}}`, a credential the CLI reads from a file (agy's Google Cloud service-account key, and its MCP config, whose bearer agy never expands from the env). Never logged; counted with `secrets` against the same 64 KiB. A cluster pod keeps each at `/run/arb/creds/<name>` (its memory volume, 0600) for the run's life; `link`, a relative path under the `config_dir` mount, is where the pod puts a symlink to it. A machine node refuses a spec that carries them (no tmpfs layout for them there yet) |
   | `limits` | `%{"memory", "memory_swap", "cpus"}`, each emitted only when its cgroup controller is delegated |
   | `network` | `"none"` (default) or `"pasta"` |
   | `services` | test-services definitions (`Wardmast.Worker.TestServices` specs), or `[]` |
@@ -56,7 +57,7 @@ defmodule Wardmast.NodeAgent.RunSpec do
 
   alias Wardmast.NodeAgent.PullAuth
 
-  @derive {Inspect, except: [:secrets, :pull_auth]}
+  @derive {Inspect, except: [:secrets, :secret_files, :pull_auth]}
   defstruct [
     :run,
     :task,
@@ -72,6 +73,7 @@ defmodule Wardmast.NodeAgent.RunSpec do
     bridges: [],
     env: %{},
     secrets: %{},
+    secret_files: %{},
     limits: %{},
     services: [],
     labels: %{}
@@ -79,10 +81,14 @@ defmodule Wardmast.NodeAgent.RunSpec do
 
   @type t :: %__MODULE__{}
 
-  @allowed_keys ~w(version run task name install image cwd mounts bridges env secrets limits network services command extra_args checkout pull_auth)
+  @allowed_keys ~w(version run task name install image cwd mounts bridges env secrets secret_files limits network services command extra_args checkout pull_auth)
   @mount_kinds ~w(worktree home config_dir tmp cli prompt)
   @dir_kinds ~w(worktree home config_dir tmp)
-  @config_files ~w(settings.json CLAUDE.md)
+  # Claude's generated settings and memory, and agy's (bd-b2t0kw: its config dir is
+  # `$HOME/.gemini`, the posture at `antigravity-cli/settings.json`).
+  @config_files ~w(settings.json CLAUDE.md antigravity-cli/settings.json GEMINI.md)
+  @secret_file_re ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/
+  @secret_link_re ~r/\A[A-Za-z0-9][A-Za-z0-9_.\/-]{0,199}\z/
   # What a worktree mount may be seeded with: the roots of the agent config
   # `Wardmast.Worker.Dispatch` writes into a worktree and git does not carry.
   @worktree_file_roots [".mcp.json", ".claude/skills"]
@@ -134,6 +140,8 @@ defmodule Wardmast.NodeAgent.RunSpec do
          {:ok, bridges} <- bridges(spec["bridges"] || []),
          {:ok, env} <- env_map(spec["env"] || %{}, "env"),
          {:ok, secrets} <- secrets(spec["secrets"] || %{}),
+         {:ok, secret_files} <- secret_files(spec["secret_files"] || %{}, mounts),
+         :ok <- secret_budget(secrets, secret_files),
          :ok <- disjoint(env, secrets),
          {:ok, limits} <- limits(spec["limits"] || %{}),
          {:ok, network} <- network(spec["network"]),
@@ -154,6 +162,7 @@ defmodule Wardmast.NodeAgent.RunSpec do
          bridges: bridges,
          env: env,
          secrets: secrets,
+         secret_files: secret_files,
          limits: limits,
          network: network,
          services: services,
@@ -173,9 +182,15 @@ defmodule Wardmast.NodeAgent.RunSpec do
       "secrets",
       Map.new(Map.get(spec, "secrets") || %{}, fn {k, _} -> {k, "[redacted]"} end)
     )
+    |> Map.replace_lazy("secret_files", &redact_secret_files/1)
     |> Map.replace("mounts", Enum.map(Map.get(spec, "mounts") || [], &redact_mount/1))
     |> Map.replace_lazy("pull_auth", &redact_pull_auth/1)
   end
+
+  defp redact_secret_files(%{} = files),
+    do: Map.new(files, fn {name, _file} -> {name, "[redacted]"} end)
+
+  defp redact_secret_files(_other), do: "[redacted]"
 
   defp redact_pull_auth(%{} = auth) do
     registry = Map.get(auth, "registry") || Map.get(auth, :registry)
@@ -604,6 +619,58 @@ defmodule Wardmast.NodeAgent.RunSpec do
       total = map |> Enum.map(fn {k, v} -> byte_size(k) + byte_size(v) end) |> Enum.sum()
       if total <= @max_secret_bytes, do: {:ok, map}, else: refuse({:too_large, "secrets"})
     end
+  end
+
+  # bd-b2t0kw: a file credential, by a plain name, its bytes base64, and optionally the
+  # path (relative, under the run's `config_dir` mount, no `..`) where the pod links it.
+  defp secret_files(files, mounts) when is_map(files) do
+    config_dir? = Enum.any?(mounts, &(&1.kind == "config_dir"))
+
+    Enum.reduce_while(files, {:ok, %{}}, fn {name, file}, {:ok, acc} ->
+      case secret_file(name, file, config_dir?) do
+        {:ok, entry} -> {:cont, {:ok, Map.put(acc, name, entry)}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp secret_files(_files, _mounts), do: refuse({:bad_value, "secret_files"})
+
+  defp secret_file(name, %{"content" => content} = file, config_dir?)
+       when is_binary(name) and is_binary(content) do
+    link = Map.get(file, "link")
+
+    with true <- Regex.match?(@secret_file_re, name),
+         true <- Enum.all?(Map.keys(file), &(&1 in ~w(content link))),
+         {:ok, bytes} <- Base.decode64(content),
+         :ok <- secret_link(link, config_dir?) do
+      {:ok, %{content: bytes, link: link}}
+    else
+      _ -> refuse({:bad_value, "secret_files"})
+    end
+  end
+
+  defp secret_file(_name, _file, _config_dir?), do: refuse({:bad_value, "secret_files"})
+
+  defp secret_link(nil, _config_dir?), do: :ok
+
+  defp secret_link(link, true) when is_binary(link) do
+    if Regex.match?(@secret_link_re, link) and ".." not in Path.split(link),
+      do: :ok,
+      else: :error
+  end
+
+  defp secret_link(_link, _config_dir?), do: :error
+
+  defp secret_budget(secrets, secret_files) do
+    env = secrets |> Enum.map(fn {k, v} -> byte_size(k) + byte_size(v) end) |> Enum.sum()
+
+    files =
+      secret_files
+      |> Enum.map(fn {k, %{content: v}} -> byte_size(k) + byte_size(v) end)
+      |> Enum.sum()
+
+    if env + files <= @max_secret_bytes, do: :ok, else: refuse({:too_large, "secrets"})
   end
 
   defp disjoint(env, secrets) do

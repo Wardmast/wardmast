@@ -302,6 +302,120 @@ defmodule Wardmast.Worker.ContainerSpawnAgyTest do
     refute_received {:secret_created, _, _}
   end
 
+  # The cluster pod (`docs/design/remote-workers.md` K§12): the key and the MCP config
+  # ride the run spec's `secret_files`, through the controller's memory and `/boot`, to
+  # the pod's memory volume. Never the pod spec, never its env, never a log.
+  describe "a run placed on a cluster node" do
+    alias Wardmast.NodeAgent.K8s.PodSpec
+    alias Wardmast.NodeAgent.PodChannel.BootBundle
+    alias Wardmast.NodeAgent.RunSpec
+    alias Wardmast.Test.K8sPodFixtures, as: Fx
+
+    defp remote_request!(ctx, ws) do
+      ref = "#{Fx.registry()}/beam@sha256:#{Fx.digest()}"
+
+      node = %{
+        id: Ecto.UUID.generate(),
+        kind: "cluster",
+        caps: %{"image" => "registry", "agy" => true}
+      }
+
+      opts =
+        [workspace: ws, node: node, publish: [stub: fn _ -> {:ok, %{ref: ref}} end]] ++ ctx.opts
+
+      {:ok, request} = ContainerSpawn.prepare_remote(opts)
+      request
+    end
+
+    defp wire_spec!(request) do
+      port_args = %{
+        argv: [ContainerSpawn.provider_path("gemini"), "-p", "the prompt"],
+        env: ContainerSpawn.apply_env([], request)
+      }
+
+      {:ok, spec} = ContainerSpawn.remote_spec(request, port_args, "run-agy-1")
+      spec |> Jason.encode!() |> Jason.decode!()
+    end
+
+    test "prepare_remote/1 gives agy its HOME's config dir and generated config files", ctx do
+      request = remote_request!(ctx, workspace!(true))
+
+      assert request.provider == "gemini"
+      assert request.config_dir == Path.join(request.home, ".gemini")
+
+      assert request.config_files |> Map.keys() |> Enum.sort() ==
+               ["GEMINI.md", "antigravity-cli/settings.json"]
+
+      assert {:ok, %{}} = Jason.decode(request.config_files["antigravity-cli/settings.json"])
+    end
+
+    test "the key and the MCP config ride secret_files only; spec env names the key's pod path",
+         ctx do
+      wire = wire_spec!(remote_request!(ctx, workspace!(true)))
+
+      assert %{"agy-adc.json" => %{"content" => key64}} = wire["secret_files"]
+      assert Base.decode64!(key64) == key_json()
+
+      assert %{"content" => mcp64, "link" => "config/mcp_config.json"} =
+               wire["secret_files"]["agy-mcp.json"]
+
+      assert Jason.decode!(Base.decode64!(mcp64)) == ctx.mcp
+
+      env = Map.merge(wire["env"], wire["secrets"])
+      assert env["AGY_ADC_AUTH"] == "true"
+      assert env["GOOGLE_APPLICATION_CREDENTIALS"] == "/run/arb/creds/agy-adc.json"
+
+      config_dir = Enum.find(wire["mounts"], &(&1["kind"] == "config_dir"))
+      assert config_dir["path"] =~ ~r{/home/\.gemini$}
+
+      outside = wire |> Map.delete("secret_files") |> Jason.encode!()
+      refute outside =~ "PRIVATE KEY"
+      refute outside =~ "MIIEvAGYPODMANfake"
+      refute outside =~ key64
+      refute outside =~ "mcp-scope-token"
+    end
+
+    test "the pod spec holds neither; the boot bundle carries both, 0600, and the link", ctx do
+      wire = wire_spec!(remote_request!(ctx, workspace!(true)))
+
+      assert {:ok, spec} = RunSpec.validate(wire)
+      refute inspect(spec) =~ "PRIVATE KEY"
+
+      assert {:ok, pod} = PodSpec.build(spec, Fx.config(%{install_id: spec.install}))
+      pod_json = Jason.encode!(pod)
+      refute pod_json =~ "PRIVATE KEY"
+      refute pod_json =~ "MIIEvAGYPODMANfake"
+      refute pod_json =~ "mcp-scope-token"
+
+      {:ok, files} = :erl_tar.extract({:binary, BootBundle.build(spec, %{})}, [:memory])
+      files = Map.new(files, fn {name, body} -> {to_string(name), body} end)
+
+      assert files["secret_files/agy-adc.json"] == key_json()
+      assert files["secret_links"] == "agy-mcp.json config/mcp_config.json\n"
+      assert files["config_dir/GEMINI.md"] =~ "arb done"
+      refute files["manifest.json"] =~ "PRIVATE KEY"
+    end
+
+    test "a workspace with no key is refused before anything is published", ctx do
+      ws = workspace!(false)
+      node = %{id: Ecto.UUID.generate(), kind: "cluster", caps: %{"image" => "registry"}}
+      test = self()
+
+      stub = fn _ ->
+        send(test, :published)
+        {:ok, %{ref: "x"}}
+      end
+
+      assert {:error, {:agy_credential_missing, _}} =
+               ContainerSpawn.prepare_remote(
+                 [workspace: ws, node: node, publish: [stub: stub]] ++ ctx.opts
+               )
+
+      refute_received :published
+      refute_received {:egress, _}
+    end
+  end
+
   test "the git secrets reaper also removes an agy key whose container is gone" do
     test_pid = self()
 

@@ -12,6 +12,8 @@ defmodule Wardmast.NodeAgent.PodChannel.BootBundle do
   | `tls/<bridge>.crt`, `.key` | the run's leaf for each bridge in its spec (`CN` run, `OU` bridge) |
   | `tls/control.crt`, `.key` | the leaf for `:9444` (seed, checkpoint, transcripts, commands) |
   | `secrets.env` | the spec's `secrets` as `export NAME='value'` lines (mode `0600`), as `Wardmast.NodeAgent.Secrets.render/1` writes them |
+  | `secret_files/<name>` | the spec's `secret_files` (bd-b2t0kw: agy's service-account key, its MCP config), mode `0600`; `seed` keeps them at `/run/arb/creds/<name>` |
+  | `secret_links` | one `<name> <link>` line per secret file that names a `link` (a path under the config dir). **No secret** |
   | `worktree/<path>` | the spec's worktree seed files (`.mcp.json` with the worker-tier bearer, `.claude/skills/…`) |
   | `config_dir/<name>` | the spec's config-dir files (`settings.json`, `CLAUDE.md`) |
   | `prompt/<n>` | the spec's prompt mounts, in order |
@@ -29,7 +31,9 @@ defmodule Wardmast.NodeAgent.PodChannel.BootBundle do
 
     entries =
       [{"manifest.json", Jason.encode!(manifest(spec, prompts)), 0o644}] ++
-        tls(leaves) ++ secrets(spec.secrets) ++ seed_files(spec.mounts) ++ prompts(prompts)
+        tls(leaves) ++
+        secrets(spec.secrets) ++
+        secret_files(spec.secret_files) ++ seed_files(spec.mounts) ++ prompts(prompts)
 
     Tar.encode(entries)
   end
@@ -77,6 +81,16 @@ defmodule Wardmast.NodeAgent.PodChannel.BootBundle do
 
   defp secrets(secrets) when map_size(secrets) == 0, do: []
   defp secrets(secrets), do: [{"secrets.env", Secrets.render(secrets), 0o600}]
+
+  defp secret_files(files) when map_size(files) == 0, do: []
+
+  defp secret_files(files) do
+    sorted = Enum.sort(files)
+    links = for {name, %{link: link}} <- sorted, is_binary(link), do: "#{name} #{link}\n"
+
+    for({name, %{content: bytes}} <- sorted, do: {"secret_files/#{name}", bytes, 0o600}) ++
+      if(links == [], do: [], else: [{"secret_links", Enum.join(links), 0o644}])
+  end
 
   defp seed_files(mounts) do
     for %{kind: kind, files: files} <- mounts,

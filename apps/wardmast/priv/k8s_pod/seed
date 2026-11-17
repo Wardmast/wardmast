@@ -96,6 +96,25 @@ else
 fi
 chmod 600 "$run_dir/env"
 
+# Secret files (bd-b2t0kw: agy's service-account key, its MCP config) are read by
+# the CLI from a file, so they stay on the memory volume for the run's life,
+# owner-only, and never in the tree, the HOME or the config dir.
+creds=$run_dir/creds
+rm -rf "$creds"
+mkdir -p "$creds"
+chmod 700 "$creds"
+if [ -d "$stage/secret_files" ]; then
+  for f in "$stage"/secret_files/*; do
+    [ -f "$f" ] || continue
+    name=${f##*/}
+    case $name in
+      .*|*[!A-Za-z0-9_.-]*) die "the boot bundle names a bad secret file" ;;
+    esac
+    mv "$f" "$creds/$name"
+    chmod 600 "$creds/$name"
+  done
+fi
+
 # Prompt files are mounted from `run` by sub-path; a sub-path whose source is
 # missing is created as a directory, so every source is made here, first.
 if [ -d "$stage/prompt" ]; then
@@ -295,6 +314,23 @@ if [ -d "$stage/worktree" ]; then
 fi
 if [ -d "$stage/config_dir" ]; then
   cp -R "$stage/config_dir/." "$root/claude-config/"
+fi
+# A secret file the CLI looks for inside its config dir (agy's MCP config) is a
+# link there to the memory copy: the config dir is on the disk volume.
+if [ -f "$stage/secret_links" ]; then
+  while read -r name link; do
+    [ -n "$name" ] || continue
+    case $name in
+      .*|*[!A-Za-z0-9_.-]*) die "the boot bundle names a bad secret file" ;;
+    esac
+    case $link in
+      /*|*..*|*[!A-Za-z0-9_./-]*|"") die "the boot bundle names a bad secret link" ;;
+    esac
+    [ -f "$creds/$name" ] || die "the boot bundle links a secret file it does not carry"
+    mkdir -p "$(dirname "$root/claude-config/$link")"
+    rm -f "$root/claude-config/$link"
+    ln -s "$creds/$name" "$root/claude-config/$link"
+  done <"$stage/secret_links"
 fi
 
 # -- 7. the session transcript -------------------------------------------------
