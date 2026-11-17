@@ -86,18 +86,26 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.HostCheck do
   @spec platform() :: {atom(), String.t()}
   def platform do
     case Process.get(:bd2_host_platform) do
-      {_, _} = p ->
-        p
-
-      _ ->
-        os = if match?({:unix, :linux}, :os.type()), do: :linux, else: elem(:os.type(), 1)
-
-        arch =
-          :erlang.system_info(:system_architecture) |> to_string() |> String.split("-") |> hd()
-
-        {os, arch}
+      {os, arch} when is_atom(os) and is_binary(arch) -> normalize({os, arch})
+      _ -> parse_platform(:os.type(), :erlang.system_info(:system_architecture))
     end
   end
+
+  @doc """
+  Pure parse of `:os.type/0` plus `:erlang.system_info(:system_architecture)`.
+  Apple Silicon reports `aarch64-apple-darwin<ver>`; it is normalised to
+  `{:darwin, "arm64"}` here so every consumer agrees on one spelling.
+  """
+  @spec parse_platform({atom(), atom()}, charlist() | String.t()) :: {atom(), String.t()}
+  def parse_platform({_, os}, system_architecture) do
+    arch = system_architecture |> to_string() |> String.split("-") |> hd()
+    normalize({os, arch})
+  end
+
+  @doc false
+  @spec normalize({atom(), String.t()}) :: {atom(), String.t()}
+  def normalize({:darwin, "aarch64"}), do: {:darwin, "arm64"}
+  def normalize(platform), do: platform
 
   defp port_owner(port) do
     case Process.get(:bd2_port_owner) do

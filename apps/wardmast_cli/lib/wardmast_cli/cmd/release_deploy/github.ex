@@ -113,8 +113,13 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.Github do
   # The Linux name is unchanged so older `arb` binaries keep finding it.
   @spec asset_name(String.t(), {atom(), String.t()}) :: String.t()
   def asset_name(tag, platform \\ HostCheck.platform())
-  def asset_name(tag, {:darwin, "arm64"}), do: "arbiter-#{tag}-darwin-arm64.tar.gz"
-  def asset_name(tag, _platform), do: "arbiter-#{tag}-linux.tar.gz"
+  # HostCheck refuses unsupported platforms before any asset is resolved.
+  def asset_name(tag, platform) do
+    case HostCheck.normalize(platform) do
+      {:darwin, "arm64"} -> "arbiter-#{tag}-darwin-arm64.tar.gz"
+      _ -> "arbiter-#{tag}-linux.tar.gz"
+    end
+  end
 
   @spec download_binary(String.t()) :: binary()
   def download_binary(url) do

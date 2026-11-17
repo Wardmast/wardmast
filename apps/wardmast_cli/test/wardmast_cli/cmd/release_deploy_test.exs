@@ -2097,6 +2097,27 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       assert :ok = WardmastCli.Cmd.ReleaseDeploy.HostCheck.check(this_host: true)
     end
 
+    test "parse_platform normalises real system_architecture triplets" do
+      alias WardmastCli.Cmd.ReleaseDeploy.HostCheck
+
+      assert HostCheck.parse_platform({:unix, :darwin}, ~c"aarch64-apple-darwin23.4.0") ==
+               {:darwin, "arm64"}
+
+      assert HostCheck.parse_platform({:unix, :linux}, ~c"x86_64-pc-linux-gnu") ==
+               {:linux, "x86_64"}
+
+      assert HostCheck.parse_platform({:unix, :linux}, ~c"aarch64-unknown-linux-gnu") ==
+               {:linux, "aarch64"}
+    end
+
+    test "darwin/aarch64 form is accepted and gets the darwin asset" do
+      alias WardmastCli.Cmd.ReleaseDeploy.{Github, HostCheck}
+      Process.put(:bd2_host_platform, {:darwin, "aarch64"})
+      assert :ok = HostCheck.check(this_host: true)
+      assert Github.asset_name("v1") == "arbiter-v1-darwin-arm64.tar.gz"
+      assert Github.asset_name("v1", {:darwin, "aarch64"}) == "arbiter-v1-darwin-arm64.tar.gz"
+    end
+
     test "asset_name is platform-aware; Linux name unchanged" do
       alias WardmastCli.Cmd.ReleaseDeploy.Github
       assert Github.asset_name("v1", {:linux, "x86_64"}) == "arbiter-v1-linux.tar.gz"
