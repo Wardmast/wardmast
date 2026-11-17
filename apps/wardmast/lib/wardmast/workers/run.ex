@@ -106,6 +106,9 @@ defmodule Wardmast.Workers.Run do
         :session_id,
         :config_dir,
         :cgroup_scopes,
+        :os_pid,
+        :os_pgid,
+        :os_started_at,
         :difficulty_at_dispatch,
         :resolved_skills,
         :standing_orders_digest,
@@ -149,6 +152,9 @@ defmodule Wardmast.Workers.Run do
         :session_id,
         :config_dir,
         :cgroup_scopes,
+        :os_pid,
+        :os_pgid,
+        :os_started_at,
         :resolved_skills,
         :standing_orders_digest,
         :routing_policy,
@@ -458,6 +464,34 @@ defmodule Wardmast.Workers.Run do
                     "agent spawn of this run, in spawn order. A kernel OOM / journal line that " <>
                     "names one of these identifies the run. Nil when the run was not spawned " <>
                     "in a scope (memory cap disabled or unavailable) or predates the column."
+    end
+
+    # bd-568ib9 (MAC P2-1): the OS process group the run's agent leads
+    # (`Wardmast.Worker.ProcessGroup`). Whatever the agent leaves behind is killed
+    # as one group after it exits and on shutdown; after a crash the boot sweep
+    # kills it only while the process at `os_pid` still started at
+    # `os_started_at`, so a pid reused since is never signalled.
+    attribute :os_pid, :integer do
+      public? true
+
+      description "OS pid of the run's latest local agent spawn (the port's process). Nil for " <>
+                    "a run on a node and for runs that predate the column."
+    end
+
+    attribute :os_pgid, :integer do
+      public? true
+
+      description "Process group the agent leads (its own pid: every port child leads its own " <>
+                    "session). What the post-exit reap, the shutdown kill and the boot sweep " <>
+                    "signal. Nil when the agent was not leading its own group."
+    end
+
+    attribute :os_started_at, :utc_datetime do
+      public? true
+
+      description "When that process started (ps lstart, to the second). The boot sweep kills " <>
+                    "the recorded group only while the process at os_pid still started then. " <>
+                    "Nil when it could not be read."
     end
 
     # ---- Run provenance (bd-dzz6ly) ---------------------------------------

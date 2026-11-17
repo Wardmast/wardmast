@@ -176,7 +176,10 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
       target_red_ignore_jobs list of strings (per repo) — (bd-dtbsgx) failed jobs on the target
                             branch's pipeline that do not count as "target red" (the repo's
                             deploy_watch jobs are always ignored). target_red_stages: list of
-                            stage names ignored the same way (default ["deploy", "release"]).
+                            stage names ignored the same way (default ["deploy", "release", "macOS smoke"];
+                            GitHub's stage is the workflow name). target_red_workflows: allowlist
+                            of workflow/stage names; when set, only failures there count as
+                            target red (e.g. the required workflows).
       up_to_date_tolerance  non-negative integer — first-parent target commits (about one per
                             merged PR, not per commit inside it) a branch may lack and still
                             merge unsynced (default: 0 = sync for any). Trade-off: a higher

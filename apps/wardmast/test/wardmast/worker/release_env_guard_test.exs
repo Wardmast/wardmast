@@ -167,6 +167,10 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # (and now shared with `Wardmast.Agents.Preflight`'s probe teardown). Spawns
     # only `kill` and `pgrep`.
     "apps/wardmast/lib/wardmast/worker/os_process.ex" => :pure_tool,
+    # bd-568ib9: a worker's process group: `ps` for its pgid and start time,
+    # `kill` for the group kill. The perl launcher it builds runs through
+    # `ClaudeSession.open_port/1`, scrubbed there.
+    "apps/wardmast/lib/wardmast/worker/process_group.ex" => :pure_tool,
     # bd-6zuoo6: `systemd-run` / `systemctl` for the per-worker memory scope,
     # through `ReleaseEnv.cmd/3` (the probe runs only `printf` and `cat` in it).
     # The agent itself is still opened by `ClaudeSession.open_port/1`.

@@ -186,6 +186,11 @@ CLI command yet for a dev-mode unit (one whose `ExecStart` runs
 that unit file yourself; see [Deploying: pick the path for your install
 shape](#deploying-pick-the-path-for-your-install-shape) below.
 
+However the server is supervised (systemd, launchd or by hand), each worker
+agent leads its own process group, killed as a whole when the agent exits,
+when the server stops, and at the next boot after a crash — see
+[docs/worker-process-groups.md](docs/worker-process-groups.md).
+
 ### Deploying: pick the path for your install shape
 
 Wardmast supports two install shapes, and the deploy command differs between

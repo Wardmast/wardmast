@@ -151,6 +151,51 @@ defmodule Wardmast.WorkerShutdownTest do
       assert run_for(task_id).outcome == :interrupted
     end
 
+    # bd-568ib9 (MAC P2-1): under launchd nothing else kills a worker's processes
+    # when the server stops (the agent leads its own process group, and with
+    # `AbandonProcessGroup` launchd would not kill even the server's), so the
+    # shutdown kill must reach what the tree walk cannot: a child reparented to
+    # init. The group warden is off so the kill is the shutdown's own.
+    test "kills what the agent left running in its process group" do
+      put_env!(:worker_group_warden, false)
+      sup = start_sup!()
+      {pid, task_id} = start_worker!(sup)
+      :ok = Worker.advance(pid, :implement)
+      cwd = tmp_dir!("shutdown-group")
+      pidfile = Path.join(cwd, "orphan.pid")
+
+      {:ok, port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: [
+            "sh",
+            "-c",
+            "(sleep 60 >/dev/null 2>&1 & echo $! > orphan.pid); exec sleep 60"
+          ]
+        )
+
+      {:os_pid, os_pid} = Port.info(port, :os_pid)
+
+      orphan =
+        eventually(fn ->
+          with {:ok, body} <- File.read(pidfile),
+               {pid, "\n"} <- Integer.parse(body),
+               do: pid,
+               else: (_ -> nil)
+        end)
+
+      on_exit(fn -> System.cmd("kill", ["-KILL", "#{orphan}"], stderr_to_stdout: true) end)
+      eventually(fn -> orphan not in OsProcess.descendants(os_pid) end)
+      assert os_process_alive?(orphan)
+
+      stop_sup!()
+
+      refute os_process_alive?(os_pid)
+      eventually(fn -> not os_process_alive?(orphan) end)
+      assert run_for(task_id).outcome == :interrupted
+    end
+
     test "a worker that ignores the shutdown is killed after its grace and the supervisor still stops" do
       sup = start_sup!()
       {pid, task_id} = start_worker!(sup, shutdown: 200)

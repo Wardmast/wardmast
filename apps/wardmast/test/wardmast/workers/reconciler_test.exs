@@ -199,6 +199,109 @@ defmodule Wardmast.Workers.ReconcilerTest do
     end
   end
 
+  # ---- the agents a crash left running (bd-568ib9, MAC P2-1) ---------------
+
+  describe "sweep_worker_process_groups/1" do
+    alias Wardmast.Worker.ProcessGroup
+
+    alias Wardmast.Test.OrphanedAgent
+
+    # A real agent left running by a crash (reparented, leading its own group,
+    # with a child in it): only the filter a test is about can protect it.
+    defp spawn_agent! do
+      {leader, orphan} = OrphanedAgent.spawn!()
+      {ProcessGroup.describe(leader), orphan}
+    end
+
+    defp alive?(pid), do: OrphanedAgent.alive?(pid)
+    defp gone?(pid), do: OrphanedAgent.gone?(pid)
+
+    defp recorded_run!(task_id, state, group, extra \\ %{}) do
+      Ash.create!(
+        Run,
+        Map.merge(
+          %{
+            task_id: task_id,
+            repo: "arbiter",
+            workspace_id: "ws-reconcile",
+            state: state,
+            started_at: DateTime.utc_now(),
+            output_lines: [],
+            os_pid: group.pid,
+            os_pgid: group.pgid,
+            os_started_at: group.started_at
+          },
+          extra
+        )
+      )
+    end
+
+    test "kills the group of an orphaned live run whose leader is still the recorded process" do
+      {group, orphan} = spawn_agent!()
+      task_id = "bd-pg-orphan-#{System.unique_integer([:positive])}"
+      run = recorded_run!(task_id, :working, group)
+
+      assert [killed] = Reconciler.sweep_worker_process_groups()
+      assert %{pgid: pgid, run_id: run_id, task_id: ^task_id} = killed
+      assert pgid == group.pgid
+      assert run_id == run.id
+
+      assert gone?(group.pid)
+      assert gone?(orphan)
+    end
+
+    test "leaves a pid alone that another process holds now (start time differs)" do
+      {group, orphan} = spawn_agent!()
+      earlier = %{group | started_at: DateTime.add(group.started_at, -3_600, :second)}
+      recorded_run!("bd-pg-reused-#{System.unique_integer([:positive])}", :working, earlier)
+
+      assert [] = Reconciler.sweep_worker_process_groups()
+      assert alive?(group.pid)
+      assert alive?(orphan)
+    end
+
+    test "leaves alone a run whose worker is live, a finished run, and a run recovery owns" do
+      {group, orphan} = spawn_agent!()
+
+      live_task = "bd-pg-live-#{System.unique_integer([:positive])}"
+      {:ok, pid} = Worker.start(task_id: live_task, repo: "arbiter", workspace_id: "ws-reconcile")
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      recorded_run!(live_task, :working, group)
+
+      recorded_run!("bd-pg-done-#{System.unique_integer([:positive])}", :finished, group, %{
+        outcome: :succeeded,
+        completed_at: DateTime.utc_now()
+      })
+
+      owned = recorded_run!("bd-pg-node-#{System.unique_integer([:positive])}", :working, group)
+
+      assert [] = Reconciler.sweep_worker_process_groups(skip_run_ids: [owned.id])
+      assert alive?(group.pid)
+      assert alive?(orphan)
+    end
+
+    test "never touches a run that ran on a node" do
+      {group, orphan} = spawn_agent!()
+
+      recorded_run!("bd-pg-remote-#{System.unique_integer([:positive])}", :working, group, %{
+        node_id: Ash.UUID.generate()
+      })
+
+      assert [] = Reconciler.sweep_worker_process_groups()
+      assert alive?(group.pid)
+      assert alive?(orphan)
+    end
+
+    test "a non-primary instance sweeps nothing" do
+      {group, orphan} = spawn_agent!()
+      recorded_run!("bd-pg-nonprimary-#{System.unique_integer([:positive])}", :working, group)
+
+      assert [] = Reconciler.sweep_worker_process_groups(primary?: false)
+      assert alive?(group.pid)
+      assert alive?(orphan)
+    end
+  end
+
   # ---- on-disk usage backfill for node-crash orphans (bd-au3xrq) -------
 
   alias Wardmast.Usage.ClaudeSessionFile
