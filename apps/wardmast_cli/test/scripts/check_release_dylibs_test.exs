@@ -24,14 +24,22 @@ defmodule WardmastCli.Scripts.CheckReleaseDylibsTest do
     dir
   end
 
-  # A fake otool: prints the contents of "<file>.deps" as otool -L would.
+  # A fake otool: `-L` prints "<file>.deps" the way otool -L would (with the
+  # file's own install name first when "<file>.id" exists, as for a dylib, and
+  # a fat-binary slice header when "<file>.fat" exists); `-D` prints the id.
   defp stub_otool!(dir) do
     path = Path.join(dir, "fake-otool")
 
     File.write!(path, """
     #!/bin/sh
-    # usage: otool -L <file>
-    echo "$2:"
+    # usage: otool -L|-D <file>
+    if [ "$1" = "-D" ]; then
+      echo "$2:"
+      if [ -f "$2.id" ]; then cat "$2.id"; fi
+      exit 0
+    fi
+    if [ -f "$2.fat" ]; then echo "$2 (architecture arm64):"; else echo "$2:"; fi
+    if [ -f "$2.id" ]; then printf '\\t%s (compatibility version 0.0.0, current version 0.0.0)\\n' "$(cat "$2.id")"; fi
     cat "$2.deps"
     """)
 
@@ -88,6 +96,38 @@ defmodule WardmastCli.Scripts.CheckReleaseDylibsTest do
     assert {out, 1} = run(dir, root)
     assert out =~ "crypto.so"
     assert out =~ "/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib"
+  end
+
+  test "ignores a dylib's own install name (absolute build path from -dynamiclib)" do
+    dir = tmp_dir!()
+    root = release!(dir, ["/usr/lib/libSystem.B.dylib"])
+
+    File.write!(
+      Path.join(root, "lib/crypto.so.id"),
+      "/Users/runner/work/arbiter/_build/prod/lib/exqlite/priv/sqlite3_nif.so\n"
+    )
+
+    assert {out, 0} = run(dir, root)
+    assert out =~ "OK"
+  end
+
+  test "still fails a Homebrew dependency of a dylib that has its own install name" do
+    dir = tmp_dir!()
+    root = release!(dir, ["/opt/homebrew/lib/libcrypto.3.dylib"])
+    File.write!(Path.join(root, "lib/crypto.so.id"), "/Users/runner/build/crypto.so\n")
+
+    assert {out, 1} = run(dir, root)
+    assert out =~ "/opt/homebrew/lib/libcrypto.3.dylib"
+    refute out =~ "links /Users/runner"
+  end
+
+  test "does not treat fat-binary slice headers as dependencies" do
+    dir = tmp_dir!()
+    root = release!(dir, ["/usr/lib/libSystem.B.dylib"])
+    File.write!(Path.join(root, "lib/crypto.so.fat"), "")
+
+    assert {out, 0} = run(dir, root)
+    assert out =~ "OK"
   end
 
   test "fails when the scan finds no Mach-O files" do

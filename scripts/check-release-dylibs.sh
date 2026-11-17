@@ -82,14 +82,21 @@ scan_dir() {
     [ -L "$file" ] && continue
     is_macho "$file" || continue
     scanned=$((scanned + 1))
-    # `otool -L` prints "<file>:" then one "\t<path> (compatibility ...)" line
-    # per dependency.
+    # `otool -L` prints "<file>:" (one "<file> (architecture X):" header per
+    # slice of a fat binary) then one "\t<path> (compatibility ...)" line per
+    # dependency. For a dylib/bundle (e.g. a `-dynamiclib` NIF) the first entry
+    # is the file's own install name (LC_ID_DYLIB), typically the absolute build
+    # path, which is not a dependency: `otool -D` lists those, so skip them.
+    own_ids=$("$OTOOL" -D "$file" | sed -n '/:$/!p')
     while IFS= read -r dep; do
+      if [ -n "$own_ids" ] && printf '%s\n' "$own_ids" | grep -qxF -- "$dep"; then
+        continue
+      fi
       if ! allowed "$dep"; then
         echo "FAIL: ${file#"$root"/} links $dep, which is not a system or relative library" >&2
         bad=$((bad + 1))
       fi
-    done < <("$OTOOL" -L "$file" | sed -n 's/^[[:space:]]*\([^[:space:]][^[:space:]]*\) (.*/\1/p')
+    done < <("$OTOOL" -L "$file" | sed -n 's/^[[:space:]]\{1,\}\([^[:space:]]\{1,\}\) (.*/\1/p')
   done < <(find "$root" -type f -print0)
 }
 
