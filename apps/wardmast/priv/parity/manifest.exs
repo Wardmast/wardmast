@@ -1976,6 +1976,17 @@
       status: :full
     },
     %{
+      id: "misc/private_clone_records",
+      title: "Stale private-clone ledger/identity records: report and retire",
+      mcp: nil,
+      cli: ["arb server doctor"],
+      rest: ["GET /api/server/private_clone_records", "POST /api/server/private_clone_records/retire"],
+      status: :partial,
+      absent: %{
+        mcp: {:intentional, "Host-local clone bookkeeping is an operator-host fact; the doctor check and `--retire-stale-clones` are the operator surface."}
+      }
+    },
+    %{
       id: "misc/host_posture_diagnostics_13_bind_address",
       title: "Host posture diagnostics (17): bind_address, agy_write_jail, agy_models, egress_jail, guardrails, claude_credentials, grok_auth, provider_accounts, merge_routing, tmux, worker_tmp, podman_sandbox, worker_memory, dashboard_auth, doctor_scope, spawn_canary, cli_versions",
       mcp: nil,

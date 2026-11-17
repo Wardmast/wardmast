@@ -22,6 +22,8 @@ defmodule WardmastWeb.Api.ServerController do
       Its `network` key (bd-cfktou, `Wardmast.Worker.Jail.diagnose_network/0`)
       is a third: whether the jail can run in a network namespace with its
       `socat` bridges, which an agy spawn needs for its only route out.
+    * `GET /api/server/private_clone_records` / `POST .../retire` — private-clone
+      ledger and identity records no clone backs, and retiring them (bd-1h0zhg)
     * `GET /api/server/egress_jail` — the "egress jail" self-test (bd-5yydxh,
       G10, `Wardmast.Worker.Egress.SelfTest`): `bwrap --unshare-net` and `socat`
       present, a proxy listener up, and against a local stand-in (no internet)
@@ -152,6 +154,21 @@ defmodule WardmastWeb.Api.ServerController do
         json(conn, jail_diagnosis(SelfTest.explain(reason)))
     end
   end
+
+  # bd-1h0zhg (#1394): private-clone ledger entries / identity records that no
+  # clone backs (a clone moved aside by hand never ran its clean-up).
+  def private_clone_records(conn, _params) do
+    records = Wardmast.Worker.PrivateClone.stale_records(Wardmast.Config.Paths.worktree_root())
+    json(conn, %{stale: Enum.map(records, &clone_record/1)})
+  end
+
+  def retire_private_clone_records(conn, _params) do
+    records = Wardmast.Worker.PrivateClone.retire_stale(Wardmast.Config.Paths.worktree_root())
+    json(conn, %{retired: Enum.map(records, &clone_record/1)})
+  end
+
+  defp clone_record(rec),
+    do: Map.take(rec, [:leaf, :repo, :ledger?, :identity?, :reason])
 
   # bd-anwb0u (G11): the guardrail posture, per workspace: each attached
   # subject's tier, and what is inconsistent or unmeetable on this host

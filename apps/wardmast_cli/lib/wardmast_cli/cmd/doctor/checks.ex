@@ -90,6 +90,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
        plain(&check_agy_ssh_transport/0)},
       {"egress_jail", :sandboxes, nil, :egress, &check_egress_jail/1},
       {"podman_sandbox", :sandboxes, nil, :podman, &check_podman_sandbox/1},
+      {"private_clone_records", :sandboxes, nil, :always, plain(&check_private_clone_records/0)},
       {"worker_tmp", :sandboxes, nil, :always, plain(&check_worker_tmp/0)},
       {"worker_memory", :sandboxes, nil, :always, plain(&check_worker_memory/0)},
       {"spawn", :sandboxes, nil, :always, plain(fn -> check_spawn(opts[:spawn] || :auto) end)},
@@ -1221,6 +1222,37 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
               "WARDMAST_SOCKET_ROOT (e.g. /tmp/arb) for the rest. The socket is silently unusable otherwise.",
           blocks_readiness: false
         }
+    end
+  end
+
+  # bd-1h0zhg (#1394): ledger entries / identity records no private clone backs.
+  # A later linked worktree at the same leaf would otherwise read as a swapped clone.
+  defp check_private_clone_records do
+    case Client.get("/api/server/private_clone_records") do
+      {:ok, %{"stale" => []}} ->
+        %Result{
+          name: "private clone records",
+          status: :ok,
+          detail: "no ledger entry or identity record without a private clone",
+          blocks_readiness: false
+        }
+
+      {:ok, %{"stale" => stale}} when is_list(stale) ->
+        leaves = Enum.map_join(stale, ", ", &Map.get(&1, "leaf"))
+
+        %Result{
+          name: "private clone records",
+          status: :warn,
+          detail: "#{length(stale)} stale private-clone record(s): #{leaves}",
+          hint: "Retire them with `arb server doctor --retire-stale-clones`.",
+          blocks_readiness: false
+        }
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status != 404 ->
+        server_error_result("private clone records", err)
+
+      other ->
+        unknown_result("private clone records", other)
     end
   end
 

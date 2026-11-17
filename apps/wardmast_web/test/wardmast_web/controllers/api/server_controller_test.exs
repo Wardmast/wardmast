@@ -534,6 +534,46 @@ defmodule WardmastWeb.Api.ServerControllerTest do
     end
   end
 
+  # bd-1h0zhg (#1394): stale private-clone ledger / identity records.
+  describe "private clone records" do
+    setup do
+      root =
+        Path.join(System.tmp_dir!(), "arb-pcr-#{System.unique_integer([:positive])}/worktrees")
+
+      File.mkdir_p!(root <> ".private-clones")
+      prior = Application.fetch_env(:wardmast, :worktree_root)
+      Application.put_env(:wardmast, :worktree_root, root)
+
+      on_exit(fn ->
+        case prior do
+          {:ok, v} -> Application.put_env(:wardmast, :worktree_root, v)
+          :error -> Application.delete_env(:wardmast, :worktree_root)
+        end
+
+        File.rm_rf(Path.dirname(root))
+      end)
+
+      # a ledger entry for a leaf that no longer exists, written an hour+ ago
+      ledger = Path.join(root <> ".private-clones", "bugfix-728")
+      File.write!(ledger, Path.dirname(root) <> "\n")
+      old = System.os_time(:second) - 7200
+      File.touch!(ledger, old)
+      {:ok, ledger: ledger}
+    end
+
+    test "GET lists them and POST retires them", %{conn: conn, ledger: ledger} do
+      resp = conn |> get("/api/server/private_clone_records") |> json_response(200)
+      assert [%{"leaf" => "bugfix-728", "reason" => "directory missing"}] = resp["stale"]
+
+      resp = conn |> post("/api/server/private_clone_records/retire") |> json_response(200)
+      assert [%{"leaf" => "bugfix-728"}] = resp["retired"]
+      refute File.exists?(ledger)
+
+      assert (conn |> get("/api/server/private_clone_records") |> json_response(200))["stale"] ==
+               []
+    end
+  end
+
   # bd-5yydxh (G10): the doctor's "egress jail" self-test. The jail-presence
   # half is the `:worker_jail_network_available` override, so these run the
   # real proxy and local stand-in on any host.

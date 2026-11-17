@@ -175,6 +175,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
     "/api/server/merge_routing",
     "/api/server/migrations",
     "/api/server/podman_sandbox",
+    "/api/server/private_clone_records",
     "/api/server/provider_accounts",
     "/api/server/tmux",
     "/api/server/worker_jail_unmask",
