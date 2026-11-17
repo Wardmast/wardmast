@@ -1410,7 +1410,7 @@ defmodule Wardmast.Tasks.WorkspaceTest do
     end
 
     test "accepts each sandbox.backend, workspace-wide and per repo" do
-      for backend <- ["bwrap", "podman"] do
+      for backend <- ["bwrap", "auto", "podman"] do
         assert {:ok, _} =
                  Ash.create(Workspace, %{
                    name: "be-ok-#{System.unique_integer([:positive])}",
@@ -1428,7 +1428,7 @@ defmodule Wardmast.Tasks.WorkspaceTest do
 
       message = Exception.message(err)
       assert message =~ "agent.security.sandbox.backend must be one of"
-      assert message =~ "bwrap, podman"
+      assert message =~ "bwrap, auto, podman"
 
       assert {:error, %Ash.Error.Invalid{} = err} =
                Ash.create(Workspace, %{
@@ -1450,6 +1450,37 @@ defmodule Wardmast.Tasks.WorkspaceTest do
                      })
                  })
       end
+    end
+
+    test "sandbox.local_backend takes bwrap or podman, and review_backend refuses auto" do
+      for backend <- ["bwrap", "podman"] do
+        assert {:ok, _} =
+                 Ash.create(Workspace, %{
+                   name: "lbe-ok-#{System.unique_integer([:positive])}",
+                   config:
+                     security_config(%{"backend" => "auto", "local_backend" => backend}, %{
+                       "local_backend" => backend
+                     })
+                 })
+      end
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "lbe-bad1",
+                 config: security_config(%{"local_backend" => "auto"})
+               })
+
+      assert Exception.message(err) =~ "agent.security.sandbox.local_backend must be one of"
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{
+                 name: "rbe-auto",
+                 config: security_config(%{"review_backend" => "auto"})
+               })
+
+      message = Exception.message(err)
+      assert message =~ "agent.security.sandbox.review_backend must be one of"
+      refute message =~ "auto, podman"
     end
 
     test "rejects an unknown sandbox.review_backend, naming the key and the valid backends" do

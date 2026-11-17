@@ -277,6 +277,7 @@ defmodule Wardmast.Agents.SecurityPolicy do
   @type filesystem :: :worktree | :none
   @type egress :: :open | :allowlist | :none
   @type sandbox_backend :: :bwrap | :podman
+  @type configured_backend :: sandbox_backend() | :auto
   @type egress_class :: :infra | :toolchain | :extras | :grants
 
   @type t :: %__MODULE__{
@@ -295,8 +296,9 @@ defmodule Wardmast.Agents.SecurityPolicy do
             egress_tunnels: [String.t()],
             egress: egress(),
             allow_hosts: [String.t()],
-            backend: sandbox_backend(),
-            review_backend: sandbox_backend()
+            backend: configured_backend(),
+            review_backend: sandbox_backend(),
+            local_backend: sandbox_backend()
           }
         }
 
@@ -304,7 +306,14 @@ defmodule Wardmast.Agents.SecurityPolicy do
   # Loosest first, so `:open` is the default and a "tighter" level sorts later.
   @valid_egress [:open, :allowlist, :none]
   # Loosest first, so a "tighter" backend sorts later and wins a merge (P2).
-  @valid_sandbox_backends [:bwrap, :podman]
+  # `:auto` (bd-56z2wz) sits between: it may run in a container (on a cluster node) where
+  # `:bwrap` never does, but it can also stay on the primary, which `:podman` never does.
+  # A repo can therefore pin `:podman` over a workspace's `:auto`, and nothing can loosen
+  # `:auto` back to `:bwrap`.
+  @valid_sandbox_backends [:bwrap, :auto, :podman]
+  # `review_backend` and `local_backend` name a concrete sandbox: there is no placement
+  # step to resolve an `:auto` for them.
+  @valid_concrete_backends [:bwrap, :podman]
   # Design §4.4: which host classes each level can reach.
   @egress_classes %{
     open: [:infra, :toolchain, :extras, :grants],
@@ -396,8 +405,16 @@ defmodule Wardmast.Agents.SecurityPolicy do
   def valid_filesystems, do: @valid_filesystems
 
   @doc "Valid `sandbox.backend` atoms, loosest first (the last one wins a merge)."
-  @spec valid_sandbox_backends() :: [sandbox_backend()]
+  @spec valid_sandbox_backends() :: [configured_backend()]
   def valid_sandbox_backends, do: @valid_sandbox_backends
+
+  @doc "Valid `sandbox.review_backend` atoms: the concrete backends, never `:auto`."
+  @spec valid_review_backends() :: [sandbox_backend()]
+  def valid_review_backends, do: @valid_concrete_backends
+
+  @doc "Valid `sandbox.local_backend` atoms: what `:auto` runs on the primary."
+  @spec valid_local_backends() :: [sandbox_backend()]
+  def valid_local_backends, do: @valid_concrete_backends
 
   @doc "Valid `sandbox.egress` atoms, loosest first."
   @spec valid_egress_levels() :: [egress()]
@@ -447,7 +464,8 @@ defmodule Wardmast.Agents.SecurityPolicy do
         egress: :open,
         allow_hosts: [],
         backend: :bwrap,
-        review_backend: :bwrap
+        review_backend: :bwrap,
+        local_backend: :bwrap
       }
     }
   end
@@ -766,16 +784,27 @@ defmodule Wardmast.Agents.SecurityPolicy do
           Map.get(base, :allow_hosts, []),
           raw |> get(:allow_hosts) |> list_of_strings() |> Enum.filter(&valid_allow_host?/1)
         ),
-      backend: merge_backend(Map.get(base, :backend, :bwrap), get(raw, :backend)),
+      backend:
+        merge_backend(Map.get(base, :backend, :bwrap), get(raw, :backend), @valid_sandbox_backends),
       review_backend:
-        merge_backend(Map.get(base, :review_backend, :bwrap), get(raw, :review_backend))
+        merge_backend(
+          Map.get(base, :review_backend, :bwrap),
+          get(raw, :review_backend),
+          @valid_concrete_backends
+        ),
+      local_backend:
+        merge_backend(
+          Map.get(base, :local_backend, :bwrap),
+          get(raw, :local_backend),
+          @valid_concrete_backends
+        )
     }
   end
 
   # Most restrictive wins: the later of the two in `@valid_sandbox_backends`.
   # An unknown or absent raw value leaves the inherited backend alone.
-  defp merge_backend(base, raw) do
-    case parse_backend(raw) do
+  defp merge_backend(base, raw, valid) do
+    case parse_backend(raw, valid) do
       nil -> base
       layer -> Enum.max_by([base, layer], &backend_rank/1)
     end
@@ -783,11 +812,11 @@ defmodule Wardmast.Agents.SecurityPolicy do
 
   defp backend_rank(backend), do: Enum.find_index(@valid_sandbox_backends, &(&1 == backend))
 
-  defp parse_backend(nil), do: nil
+  defp parse_backend(nil, _valid), do: nil
 
-  defp parse_backend(value) do
+  defp parse_backend(value, valid) do
     case to_atom(value) do
-      b when b in @valid_sandbox_backends -> b
+      b when is_atom(b) and not is_nil(b) -> if b in valid, do: b
       _ -> nil
     end
   end
@@ -877,9 +906,58 @@ defmodule Wardmast.Agents.SecurityPolicy do
   def grants_allowed?(%__MODULE__{sandbox: sandbox}),
     do: egress_class_allowed?(Map.get(sandbox, :egress, :open), :grants)
 
-  @doc "The resolved `sandbox.backend` of `policy` (`:bwrap` when unset)."
+  @doc """
+  The backend `policy` runs a spawn in (`:bwrap` when unset). An **unresolved**
+  `sandbox.backend: auto` reads as its `local_backend`: every caller that is not
+  placement-aware (an adapter, `Sandbox`, `GitLayout`) is a run on the primary, and
+  `Wardmast.Worker.Dispatch` replaces `:auto` with the placed backend
+  (`concretize/2`) before the spawn it places. `configured_backend/1` is the raw value.
+  """
   @spec sandbox_backend(t()) :: sandbox_backend()
-  def sandbox_backend(%__MODULE__{sandbox: sandbox}), do: Map.get(sandbox, :backend, :bwrap)
+  def sandbox_backend(%__MODULE__{} = policy) do
+    case configured_backend(policy) do
+      :auto -> local_backend(policy)
+      backend -> backend
+    end
+  end
+
+  @doc "The raw `sandbox.backend` of `policy`, `:auto` included (`:bwrap` when unset)."
+  @spec configured_backend(t()) :: configured_backend()
+  def configured_backend(%__MODULE__{sandbox: sandbox}), do: Map.get(sandbox, :backend, :bwrap)
+
+  @doc "Is `policy`'s `sandbox.backend` `:auto`: placement picks the backend (bd-56z2wz)?"
+  @spec auto?(t()) :: boolean()
+  def auto?(%__MODULE__{} = policy), do: configured_backend(policy) == :auto
+
+  @doc "The backend `:auto` runs on the primary: `sandbox.local_backend` (`:bwrap` when unset)."
+  @spec local_backend(t()) :: sandbox_backend()
+  def local_backend(%__MODULE__{sandbox: sandbox}), do: Map.get(sandbox, :local_backend, :bwrap)
+
+  @doc """
+  Fix an `:auto` policy to the backend the run was placed with; any other policy is
+  returned unchanged. `where` is what placement decided:
+
+    * `:node` or `:private_clone` — `:podman`: a node's run, and a checkout that is
+      already a private clone, are containers;
+    * `:local` — the primary's `local_backend`;
+    * `:linked_worktree` — `:bwrap`: a checkout that is already a linked worktree is
+      never handed to a container, whatever `local_backend` says.
+  """
+  @spec concretize(t(), :node | :local | :private_clone | :linked_worktree) :: t()
+  def concretize(%__MODULE__{sandbox: sandbox} = policy, where) do
+    if auto?(policy) do
+      backend =
+        case where do
+          where when where in [:node, :private_clone] -> :podman
+          :linked_worktree -> :bwrap
+          :local -> local_backend(policy)
+        end
+
+      %{policy | sandbox: Map.put(sandbox, :backend, backend)}
+    else
+      policy
+    end
+  end
 
   @doc "The resolved `sandbox.review_backend` of `policy` (`:bwrap` when unset)."
   @spec review_backend(t()) :: sandbox_backend()
@@ -990,8 +1068,9 @@ defmodule Wardmast.Agents.SecurityPolicy do
         "egress_tunnels" => Map.get(p.sandbox, :egress_tunnels, []),
         "egress" => p.sandbox |> Map.get(:egress, :open) |> Atom.to_string(),
         "allow_hosts" => Map.get(p.sandbox, :allow_hosts, []),
-        "backend" => p |> sandbox_backend() |> Atom.to_string(),
-        "review_backend" => p |> review_backend() |> Atom.to_string()
+        "backend" => p |> configured_backend() |> Atom.to_string(),
+        "review_backend" => p |> review_backend() |> Atom.to_string(),
+        "local_backend" => p |> local_backend() |> Atom.to_string()
       }
     }
   end
@@ -1009,7 +1088,7 @@ defmodule Wardmast.Agents.SecurityPolicy do
       "fs=#{p.sandbox.filesystem}",
       "net=#{if p.sandbox.network, do: "on", else: "tools-off"}",
       egress_part(egress(p)),
-      backend_part(sandbox_backend(p)),
+      backend_part(configured_backend(p), local_backend(p)),
       review_backend_part(review_backend(p)),
       "#{deny_count} #{if deny_count == 1, do: "deny", else: "denies"}"
     ]
@@ -1046,8 +1125,10 @@ defmodule Wardmast.Agents.SecurityPolicy do
     end
   end
 
-  defp backend_part(:bwrap), do: nil
-  defp backend_part(backend), do: "sandbox=#{backend}"
+  defp backend_part(:bwrap, _local), do: nil
+  defp backend_part(:auto, :bwrap), do: "sandbox=auto"
+  defp backend_part(:auto, local), do: "sandbox=auto(local=#{local})"
+  defp backend_part(backend, _local), do: "sandbox=#{backend}"
 
   defp review_backend_part(:bwrap), do: nil
   defp review_backend_part(backend), do: "review-sandbox=#{backend}"

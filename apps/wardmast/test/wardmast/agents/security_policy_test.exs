@@ -24,7 +24,8 @@ defmodule Wardmast.Agents.SecurityPolicyTest do
                egress: :open,
                allow_hosts: [],
                backend: :bwrap,
-               review_backend: :bwrap
+               review_backend: :bwrap,
+               local_backend: :bwrap
              }
     end
 
@@ -364,7 +365,87 @@ defmodule Wardmast.Agents.SecurityPolicyTest do
     end
 
     test "valid_sandbox_backends/0 lists the backends, loosest first" do
-      assert SecurityPolicy.valid_sandbox_backends() == [:bwrap, :podman]
+      assert SecurityPolicy.valid_sandbox_backends() == [:bwrap, :auto, :podman]
+      assert SecurityPolicy.valid_review_backends() == [:bwrap, :podman]
+      assert SecurityPolicy.valid_local_backends() == [:bwrap, :podman]
+    end
+
+    test "auto: a workspace can select it, a repo can raise it to podman but not drop it to bwrap" do
+      ws = backend_ws(%{"sandbox" => %{"backend" => "auto"}})
+      p = SecurityPolicy.resolve(ws)
+      assert p.sandbox.backend == :auto
+      assert SecurityPolicy.auto?(p)
+
+      # most-restrictive-wins: bwrap cannot loosen a workspace auto, podman pins the repo
+      ws =
+        backend_ws(%{"sandbox" => %{"backend" => "auto"}}, %{
+          "a" => %{"sandbox" => %{"backend" => "bwrap"}},
+          "b" => %{"sandbox" => %{"backend" => "podman"}}
+        })
+
+      assert SecurityPolicy.resolve(ws, %{}, "a").sandbox.backend == :auto
+      assert SecurityPolicy.resolve(ws, %{}, "b").sandbox.backend == :podman
+      assert SecurityPolicy.resolve(ws, %{}, "other").sandbox.backend == :auto
+
+      # a repo can opt into auto under a bwrap workspace
+      ws = backend_ws(%{}, %{"a" => %{"sandbox" => %{"backend" => "auto"}}})
+      assert SecurityPolicy.resolve(ws).sandbox.backend == :bwrap
+      assert SecurityPolicy.resolve(ws, %{}, "a").sandbox.backend == :auto
+    end
+
+    test "review_backend never accepts auto" do
+      p = SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"review_backend" => "auto"}})
+      assert SecurityPolicy.review_backend(p) == :bwrap
+    end
+
+    test "an unresolved auto reads as the local backend everywhere that is not placement-aware" do
+      p = SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "auto"}})
+      assert SecurityPolicy.configured_backend(p) == :auto
+      assert SecurityPolicy.sandbox_backend(p) == :bwrap
+      assert SecurityPolicy.local_backend(p) == :bwrap
+
+      p = SecurityPolicy.merge(p, %{"sandbox" => %{"local_backend" => "podman"}})
+      assert SecurityPolicy.local_backend(p) == :podman
+      assert SecurityPolicy.sandbox_backend(p) == :podman
+    end
+
+    test "local_backend is most-restrictive-wins and ignores unknown values" do
+      p = SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"local_backend" => "podman"}})
+      assert p.sandbox.local_backend == :podman
+      p = SecurityPolicy.merge(p, %{"sandbox" => %{"local_backend" => "bwrap"}})
+      assert p.sandbox.local_backend == :podman
+
+      for bad <- ["auto", "docker", 3, nil] do
+        p = SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"local_backend" => bad}})
+        assert p.sandbox.local_backend == :bwrap
+      end
+    end
+
+    test "concretize/2 fixes an auto policy to the placed backend and leaves others alone" do
+      auto = SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "auto"}})
+
+      assert SecurityPolicy.concretize(auto, :node).sandbox.backend == :podman
+      assert SecurityPolicy.concretize(auto, :private_clone).sandbox.backend == :podman
+      assert SecurityPolicy.concretize(auto, :linked_worktree).sandbox.backend == :bwrap
+      assert SecurityPolicy.concretize(auto, :local).sandbox.backend == :bwrap
+
+      podman_local = SecurityPolicy.merge(auto, %{"sandbox" => %{"local_backend" => "podman"}})
+      assert SecurityPolicy.concretize(podman_local, :local).sandbox.backend == :podman
+      # an existing linked worktree is never handed to a container
+      assert SecurityPolicy.concretize(podman_local, :linked_worktree).sandbox.backend == :bwrap
+
+      refute SecurityPolicy.auto?(SecurityPolicy.concretize(auto, :node))
+
+      podman = SecurityPolicy.merge(SecurityPolicy.base(), %{sandbox: %{backend: :podman}})
+      assert SecurityPolicy.concretize(podman, :local) == podman
+      assert SecurityPolicy.concretize(SecurityPolicy.base(), :node) == SecurityPolicy.base()
+    end
+
+    test "summary and one_line name auto and the local backend" do
+      auto = SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "auto"}})
+      assert SecurityPolicy.summary(auto)["sandbox"]["backend"] == "auto"
+      assert SecurityPolicy.summary(auto)["sandbox"]["local_backend"] == "bwrap"
+      assert SecurityPolicy.one_line(auto) =~ "sandbox=auto"
     end
 
     test "a layer can raise bwrap to podman, as a string or an atom" do
