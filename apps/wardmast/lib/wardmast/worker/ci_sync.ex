@@ -36,7 +36,7 @@ defmodule Wardmast.Worker.CiSync do
   def check(workspace, repo, base, head),
     do: MergeFreshness.check(workspace, LocalCompare.repo_path(workspace, repo), base, head)
 
-  @default_ignored_stages ["deploy", "release"]
+  @default_ignored_stages ["deploy", "release", "macos smoke"]
 
   @doc """
   `"target branch red: <pipeline>"` when `base`'s newest settled pipeline failed
@@ -48,7 +48,11 @@ defmodule Wardmast.Worker.CiSync do
   `deploy-worker` left vstim's main "red" while every test passed, bd-dtbsgx),
   so a failed job is ignored when it is named in `merge.repos.<repo>.deploy_watch`
   (`jobs`/`job`) or `target_red_ignore_jobs`, or sits in a stage listed in
-  `target_red_stages` (default `deploy`, `release`). When the adapter reports
+  `target_red_stages` (default `deploy`, `release` and `macOS smoke`, the
+  informational non-required workflow, bd-a4vl6w). `target_red_workflows` is the
+  inverse, an allowlist: when set, only failures in those workflows (GitHub's
+  job `stage` is the workflow name) count, so a non-required workflow red on the
+  target never holds a PR's remediation. When the adapter reports
   no job detail the pipeline-level verdict stands. The reason names the failing
   job(s).
   """
@@ -99,12 +103,14 @@ defmodule Wardmast.Worker.CiSync do
 
   defp judge(%{jobs: jobs}, workspace, repo) when is_list(jobs) do
     failed = Enum.filter(jobs, &(Map.get(&1, :status) == "failed"))
-    {ignore_jobs, ignore_stages} = ignored(workspace, repo)
+    {ignore_jobs, ignore_stages, only} = ignored(workspace, repo)
 
     {skipped, culprits} =
       Enum.split_with(failed, fn j ->
-        Map.get(j, :name) in ignore_jobs or
-          String.downcase(to_string(Map.get(j, :stage) || "")) in ignore_stages
+        stage = String.downcase(to_string(Map.get(j, :stage) || ""))
+
+        Map.get(j, :name) in ignore_jobs or stage in ignore_stages or
+          (only != nil and stage != "" and stage not in only)
       end)
 
     cond do
@@ -128,7 +134,13 @@ defmodule Wardmast.Worker.CiSync do
         _ -> @default_ignored_stages
       end
 
-    {jobs, Enum.map(stages, &String.downcase(to_string(&1)))}
+    only =
+      case cfg["target_red_workflows"] do
+        [_ | _] = l -> Enum.map(l, &String.downcase(to_string(&1)))
+        _ -> nil
+      end
+
+    {jobs, Enum.map(stages, &String.downcase(to_string(&1))), only}
   end
 
   defp describe_pipeline(base, pipeline) do

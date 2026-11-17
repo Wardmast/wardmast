@@ -66,6 +66,36 @@ defmodule Wardmast.Worker.CiSyncTargetHoldTest do
     refute why =~ "deploy-worker"
   end
 
+  test "only the informational macOS smoke workflow red on main is not red (bd-a4vl6w)" do
+    Wardmast.Test.StubMerger.set_branch_pipeline(
+      failed([job("test", "CI", "success"), job("smoke", "macOS smoke")])
+    )
+
+    assert hold(workspace(%{})) == nil
+  end
+
+  test "a required workflow red on main still holds beside macOS smoke (bd-a4vl6w)" do
+    Wardmast.Test.StubMerger.set_branch_pipeline(
+      failed([job("unit", "CI"), job("smoke", "macOS smoke")])
+    )
+
+    why = hold(workspace(%{}))
+    assert why =~ "target branch red"
+    assert why =~ "unit"
+    refute why =~ "smoke"
+  end
+
+  test "target_red_workflows allowlist counts only the listed workflows" do
+    Wardmast.Test.StubMerger.set_branch_pipeline(
+      failed([job("lint", "Nightly"), job("unit", "CI")])
+    )
+
+    assert hold(workspace(%{"target_red_workflows" => ["ci"]})) =~ "unit"
+
+    Wardmast.Test.StubMerger.set_branch_pipeline(failed([job("lint", "Nightly")]))
+    assert hold(workspace(%{"target_red_workflows" => ["CI"]})) == nil
+  end
+
   test "no job detail keeps the pipeline-level verdict" do
     Wardmast.Test.StubMerger.set_branch_pipeline(failed(nil))
     assert hold(workspace(%{})) =~ "target branch red"
