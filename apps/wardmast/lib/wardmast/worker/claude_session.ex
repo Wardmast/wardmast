@@ -103,6 +103,7 @@ defmodule Wardmast.Worker.ClaudeSession do
   alias Wardmast.Worker.ContainerSpawn
   alias Wardmast.Worker.GitCredential
   alias Wardmast.Worker.OutputLog
+  alias Wardmast.Worker.ProcessGroup
   alias Wardmast.Worker.RunTmp
   alias Wardmast.Worker.StepSummary
   alias Wardmast.Workers.RunStep
@@ -2574,6 +2575,12 @@ defmodule Wardmast.Worker.ClaudeSession do
   scope when one is available (`Wardmast.Worker.MemoryScope`, bd-6zuoo6), and
   returns the scope (`nil` when the spawn is uncapped) so the owner can record
   it on the run and ask systemd afterwards whether it was OOM-killed.
+
+  A local spawn (the agent, or the `podman` client of a container run) is
+  launched through `Wardmast.Worker.ProcessGroup.wrap/2` (bd-568ib9): the agent
+  leads its own process group, and the group's warden kills what it leaves
+  behind once it exits. The launcher is outermost and execs everything else in
+  place, so the port's OS pid is still the agent's.
   """
   @spec open_scoped_port(map(), String.t() | nil) ::
           {port() | Wardmast.Worker.Executor.handle(), Wardmast.Worker.MemoryScope.scope() | nil}
@@ -2592,14 +2599,14 @@ defmodule Wardmast.Worker.ClaudeSession do
     # service for a runaway to take down and no scope to wrap the `podman`
     # client in.
     case ContainerSpawn.wrap_port(port_args) do
-      {:ok, wrapped} -> {open_port(wrapped), nil}
+      {:ok, wrapped} -> {open_port(ProcessGroup.wrap(wrapped)), nil}
       {:error, reason} -> raise "container spawn refused: #{inspect(reason)}"
     end
   end
 
   def open_scoped_port(port_args, task_id) do
     {wrapped, scope} = Wardmast.Worker.MemoryScope.wrap(port_args, task_id)
-    {open_port(wrapped), scope}
+    {open_port(ProcessGroup.wrap(wrapped)), scope}
   end
 
   defp replace_remote(remote, port_args) do

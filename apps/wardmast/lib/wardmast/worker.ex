@@ -136,6 +136,7 @@ defmodule Wardmast.Worker do
   alias Wardmast.Worker.EvidenceIntegrity
   alias Wardmast.Worker.OsProcess
   alias Wardmast.Worker.PRTemplate
+  alias Wardmast.Worker.ProcessGroup
   alias Wardmast.Worker.Registry, as: PRegistry
   alias Wardmast.Worker.RepeatUnmetCriterion
   alias Wardmast.Worker.ReviewVerification
@@ -2905,6 +2906,7 @@ defmodule Wardmast.Worker do
     state = record_preassigned_session(state, adapter, spawn_args, adopted)
 
     {port, scope} = Wardmast.Worker.ClaudeSession.open_scoped_port(spawn_args, state.task_id)
+    group = process_group_for(port)
     # A run placed on a node consumed its handle; what is stashed for re-opens
     # must place it again (a no-op for a local spawn).
     pristine_args = Wardmast.Worker.ClaudeSession.strip_prepared(pristine_args)
@@ -2918,6 +2920,7 @@ defmodule Wardmast.Worker do
       )
       |> Map.put(:port, port)
       |> Map.put(:scope, scope)
+      |> Map.put(:process_group, group)
       |> Map.put(:prompt_tmpfile, get_prompt_tmpfile(adapter, spawn_args.argv))
       |> Map.put(:output_lines, [])
       |> Map.put(:line_buf, "")
@@ -2974,6 +2977,7 @@ defmodule Wardmast.Worker do
     }
 
     new_state = note_scope(new_state, scope)
+    new_state = note_process_group(new_state, group)
     new_state = sync_session_meta(new_state, port)
     record_session_opened(new_state, port, adopted, {provider, config_dir, session_config})
 
@@ -3187,6 +3191,53 @@ defmodule Wardmast.Worker do
   defp release_remote({:remote, _} = handle), do: Wardmast.Worker.Executor.Node.release(handle)
   defp release_remote(_port), do: :ok
 
+  # bd-568ib9 (MAC P2-1): the process group a local spawn leads
+  # (`Wardmast.Worker.ProcessGroup`), read right after the port opens. nil for a
+  # run on a node (no local process) or a port that already closed.
+  defp process_group_for(port) when is_port(port) do
+    case safe_port_os_pid(port) do
+      {:ok, os_pid} -> ProcessGroup.describe(os_pid)
+      :error -> nil
+    end
+  end
+
+  defp process_group_for(_handle), do: nil
+
+  # Recorded on the run (the latest spawn's), so the boot sweep can kill the
+  # group a crash leaves running, and only it (`os_started_at` tells a reused
+  # pid apart).
+  defp note_process_group(%State{run_id: run_id} = state, %{pid: pid} = group)
+       when is_binary(run_id) do
+    backfill_run_fields(
+      run_id,
+      %{os_pid: pid, os_pgid: group.pgid, os_started_at: group.started_at},
+      state.task_id
+    )
+
+    state
+  end
+
+  defp note_process_group(%State{} = state, _group), do: state
+
+  # bd-568ib9: the agent has exited (or is being torn down); kill whatever is
+  # still in its process group: what it backgrounded, including children that
+  # were reparented to init and that no tree walk reaches. Once only: the
+  # session forgets the group, as its pgid may be reused once the group is gone.
+  defp reap_process_group(%{process_group: %{pgid: pgid} = group} = session)
+       when is_integer(pgid) do
+    case ProcessGroup.kill(group) do
+      result when result in [:ok, :gone] ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Worker: could not kill agent process group #{pgid}: #{inspect(reason)}")
+    end
+
+    Map.put(session, :process_group, nil)
+  end
+
+  defp reap_process_group(session), do: session
+
   # bd-6zm33r: the agent has exited; anything it backgrounded is still in its
   # scope and would run on after the run ends. Stop the scope.
   defp reap_scope(session) do
@@ -3377,6 +3428,7 @@ defmodule Wardmast.Worker do
         cleanup_prompt_tmpfile(session)
         session = mark_memory_cap(session, status)
         reap_scope(session)
+        session = reap_process_group(session)
         release_remote(port)
         updated = Wardmast.Worker.ClaudeSession.handle_exit(session, status)
         sessions = Map.put(state.claude_sessions, port, updated)
@@ -4334,37 +4386,50 @@ defmodule Wardmast.Worker do
 
   defp terminate_live_sessions(%State{claude_sessions: sessions} = state, leave_to_node?)
        when map_size(sessions) > 0 do
-    Enum.each(sessions, fn {port, session} ->
-      cond do
-        not is_nil(Map.get(session, :exit_status)) ->
-          :ok
+    # The sessions are kept with their process group dropped once it is killed:
+    # a later teardown of this Worker (a fail, then its stop) must not signal a
+    # pgid the OS may have handed out again by then.
+    sessions =
+      Map.new(sessions, fn {port, session} ->
+        session = terminate_session(state, port, session, leave_to_node?)
 
-        # The node session monitors this Worker too and would read its death as
-        # "owner down: cancel the run". Say first that the run is left alone.
-        # bd-4p1vui: and record how far its stdout was processed, so a Worker
-        # adopting it after the restart delivers none of it twice (§10.4.5).
-        leave_to_node? and remote_handle?(port) ->
-          Wardmast.Worker.Executor.Node.abandon(port)
-          record_stdout_offset(state, session)
-
-        true ->
-          terminate_session_port(state, port)
-      end
-
-      # bd-6zm33r: `kill_tree` cannot reach what the agent backgrounded (already
-      # reparented), so stop the scope too. Idempotent if already reaped.
-      reap_scope(session)
-    end)
+        # bd-6zm33r: `kill_tree` cannot reach what the agent backgrounded (already
+        # reparented), so stop the scope too. Idempotent if already reaped.
+        reap_scope(session)
+        {port, session}
+      end)
 
     # bd-d2o3xb: killing the `podman` client does not reliably stop its
     # container (design §6.4), so a container spawn is removed by name too.
     # Idempotent, and a no-op for any other spawn. bd-dmcbos: this also removes
     # its test-services pod, and runs with no live session too (the clause
     # below), since a pod outlives the container (`--rm` removes only that).
-    teardown_container(state)
+    teardown_container(%State{state | claude_sessions: sessions})
   end
 
   defp terminate_live_sessions(%State{} = state, _leave_to_node?), do: teardown_container(state)
+
+  defp terminate_session(state, port, session, leave_to_node?) do
+    cond do
+      not is_nil(Map.get(session, :exit_status)) ->
+        session
+
+      # The node session monitors this Worker too and would read its death as
+      # "owner down: cancel the run". Say first that the run is left alone.
+      # bd-4p1vui: and record how far its stdout was processed, so a Worker
+      # adopting it after the restart delivers none of it twice (§10.4.5).
+      leave_to_node? and remote_handle?(port) ->
+        Wardmast.Worker.Executor.Node.abandon(port)
+        record_stdout_offset(state, session)
+        session
+
+      true ->
+        terminate_session_port(state, port)
+        # bd-568ib9: nor can the tree walk reach what was reparented to init;
+        # the group kill does, scope or no scope (macOS has none).
+        reap_process_group(session)
+    end
+  end
 
   defp remote_handle?({:remote, _}), do: true
   defp remote_handle?(_port), do: false
@@ -6110,6 +6175,8 @@ defmodule Wardmast.Worker do
         "retrying in #{backoff}ms (attempt #{attempt}/#{container_create_retry_cap()})"
     )
 
+    session = reap_process_group(session)
+
     Process.send_after(
       self(),
       {:__retry_container_create__, Map.put(session, :exit_status, status)},
@@ -6131,11 +6198,13 @@ defmodule Wardmast.Worker do
     case safe_open_port(spawn_args, state.task_id) do
       {:ok, port, scope} ->
         now = DateTime.utc_now()
+        group = process_group_for(port)
 
         session =
           failed_session
           |> Map.put(:port, port)
           |> Map.put(:scope, scope)
+          |> Map.put(:process_group, group)
           |> Map.put(:output_lines, [])
           |> Map.put(:line_buf, "")
           |> Map.put(:exit_status, nil)
@@ -6145,7 +6214,10 @@ defmodule Wardmast.Worker do
           |> Map.put(:activity_at, now)
 
         sessions = Map.put(state.claude_sessions, port, session)
-        note_scope(%State{state | claude_sessions: sessions}, scope)
+
+        %State{state | claude_sessions: sessions}
+        |> note_scope(scope)
+        |> note_process_group(group)
 
       {:error, reason} ->
         Logger.warning(
@@ -6186,6 +6258,7 @@ defmodule Wardmast.Worker do
       append_prompt(state, nudge, session_config)
 
       now = DateTime.utc_now()
+      group = process_group_for(port)
 
       adapter = agent_adapter_for_provider(provider)
 
@@ -6193,6 +6266,7 @@ defmodule Wardmast.Worker do
         session_config
         |> Map.put(:port, port)
         |> Map.put(:scope, scope)
+        |> Map.put(:process_group, group)
         # inject_nudge_argv/3 always leaves the prompt inline (a nudge is
         # short), so this is always nil — kept for parity with the other two
         # open-port sites rather than a real leak risk here.
@@ -6215,16 +6289,15 @@ defmodule Wardmast.Worker do
       sessions = Map.put(state.claude_sessions, port, session)
 
       {:ok,
-       note_scope(
-         %State{
-           state
-           | claude_sessions: sessions,
-             meta: new_meta,
-             state: :working,
-             step_started_at: DateTime.utc_now()
-         },
-         scope
-       )}
+       %State{
+         state
+         | claude_sessions: sessions,
+           meta: new_meta,
+           state: :working,
+           step_started_at: DateTime.utc_now()
+       }
+       |> note_scope(scope)
+       |> note_process_group(group)}
     else
       :no_spawn_args -> {:error, :no_spawn_args}
       {:error, _} = err -> err
