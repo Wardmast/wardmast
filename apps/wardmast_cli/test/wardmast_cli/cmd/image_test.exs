@@ -170,7 +170,7 @@ defmodule WardmastCli.Cmd.ImageTest do
         capture(fn -> WardmastCli.Cmd.Image.run(["build", "--bogus", "value"]) end)
 
       assert code == 1
-      assert err =~ "unknown option --bogus for arb image"
+      assert err =~ "unknown option --bogus for ward image"
     end
   end
 end

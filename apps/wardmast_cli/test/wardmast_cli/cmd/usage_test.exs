@@ -555,7 +555,7 @@ defmodule WardmastCli.Cmd.UsageTest do
       {_out, err, code} = capture(fn -> WardmastCli.Cmd.Usage.run(["--sinse", "7d"]) end)
 
       assert code == 1
-      assert err =~ "unknown option --sinse for arb usage"
+      assert err =~ "unknown option --sinse for ward usage"
     end
 
     test "--session honours --account/--step/--source instead of dropping them" do

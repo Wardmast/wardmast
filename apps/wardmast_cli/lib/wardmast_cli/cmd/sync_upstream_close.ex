@@ -18,7 +18,7 @@ defmodule WardmastCli.Cmd.SyncUpstreamClose do
       IO.puts(@moduledoc)
     else
       {opts, rest, _mode} =
-        ArgParser.parse(argv, command: "arb ticket sync-upstream-close", switches: @switches)
+        ArgParser.parse(argv, command: "ward ticket sync-upstream-close", switches: @switches)
 
       mode = if opts[:json], do: :json, else: :text
 

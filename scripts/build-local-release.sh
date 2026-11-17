@@ -182,8 +182,8 @@ else
   echo "warning: $SHLIB_GUARD is missing — skipping the shared-library check." >&2
 fi
 
-ESCRIPT="$OUTPUT_DIR/arb-local-${SHA}-${TIMESTAMP}"
-cp "$CLONE_PATH/apps/wardmast_cli/arb" "$ESCRIPT"
+ESCRIPT="$OUTPUT_DIR/ward-local-${SHA}-${TIMESTAMP}"
+cp "$CLONE_PATH/apps/wardmast_cli/ward" "$ESCRIPT"
 chmod +x "$ESCRIPT"
 
 echo "TARBALL=$TARBALL"

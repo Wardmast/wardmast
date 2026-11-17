@@ -33,7 +33,7 @@ defmodule WardmastCli.Cmd.Image do
       IO.puts(@moduledoc)
     else
       {opts, rest, mode} =
-        ArgParser.parse(argv, command: "arb image", switches: [workspace: :string])
+        ArgParser.parse(argv, command: "ward image", switches: [workspace: :string])
 
       case rest do
         ["list" | _] -> list(mode)

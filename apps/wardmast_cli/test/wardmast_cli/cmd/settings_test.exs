@@ -183,14 +183,14 @@ defmodule WardmastCli.Cmd.SettingsTest do
         capture(fn -> Settings.run(["set", "nodes.public_url", "https://x", "--force"]) end)
 
       assert code == 1
-      assert err =~ "unknown option --force for arb settings"
+      assert err =~ "unknown option --force for ward settings"
     end
 
     test "`get --foo` is rejected rather than querying a key named --foo" do
       {_out, err, code} = capture(fn -> Settings.run(["get", "--foo"]) end)
 
       assert code == 1
-      assert err =~ "unknown option --foo for arb settings"
+      assert err =~ "unknown option --foo for ward settings"
     end
   end
 end

@@ -26,7 +26,7 @@ defmodule WardmastCli.Cmd.Repo do
   end
 
   defp list(argv) do
-    {opts, _rest, _mode} = ArgParser.parse(argv, command: "arb repo", switches: @switches)
+    {opts, _rest, _mode} = ArgParser.parse(argv, command: "ward repo", switches: @switches)
     mode = if opts[:json], do: :json, else: :text
 
     case Client.get("/api/repos") do
@@ -59,7 +59,7 @@ defmodule WardmastCli.Cmd.Repo do
   end
 
   defp show(argv) do
-    {_opts, rest, mode} = ArgParser.parse(argv, command: "arb repo show", switches: [])
+    {_opts, rest, mode} = ArgParser.parse(argv, command: "ward repo show", switches: [])
 
     name =
       case rest do

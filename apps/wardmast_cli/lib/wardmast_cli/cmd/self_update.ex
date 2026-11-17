@@ -1,15 +1,16 @@
 defmodule WardmastCli.Cmd.SelfUpdate do
   @moduledoc """
-  `arb self-update [--version vX.Y.Z] [--json] [--force]`
-  — refresh the local `arb` CLI escript from a **GitHub Release**.
+  `ward self-update [--version vX.Y.Z] [--json] [--force]`
+  — refresh the local `ward` CLI escript from a **GitHub Release**.
 
-  Downloads the `arb` escript asset published by `.github/workflows/release.yml`,
-  verifies its SHA-256 checksum, backs up the existing binary, and atomically
-  swaps in the new one.
+  Downloads the `ward` escript asset published by `.github/workflows/release.yml`,
+  verifies its SHA-256 checksum, backs up the existing binary, atomically swaps
+  in the new `ward` binary, and ensures the `wm` symlink and the one-release
+  `arb` deprecation shim sit beside it.
 
   This is the production CLI-update path: the machine no longer needs a source
   checkout or a Mix/Elixir toolchain to stay current. It mirrors
-  `arb server deploy` — download a released artifact, verify, swap — so CLI
+  `ward server deploy` — download a released artifact, verify, swap — so CLI
   and server self-maintain the same way.
 
   ## What it does
@@ -19,19 +20,21 @@ defmodule WardmastCli.Cmd.SelfUpdate do
        `ARB_RELEASE_REPO`; a `GITHUB_TOKEN`, if set, authenticates the request.
     2. **No-op if already current.** Compare the running escript's version
        against the release tag. Skips the download unless `--force` is passed.
-    3. **Download the asset + checksum.** Fetch the `arb` escript asset and its
-       `arb.sha256` sidecar from the release.
+    3. **Download the asset + checksum.** Fetch the `ward` escript asset and its
+       `ward.sha256` sidecar from the release (falling back to `arb` /
+       `arb.sha256` when deploying a pre-rename release tag).
     4. **Verify sha256.** Recompute the download's SHA-256 and compare to the
        published checksum. A mismatch aborts before anything touches disk state.
-    5. **Atomic swap.** Back up the existing binary to `<install_path>.bak`,
+    5. **Atomic swap + links.** Back up the existing binary to `<install_path>.bak`,
        write the new binary to a temp file, `chmod +x`, then rename it over the
-       existing path (rename(2) is atomic on POSIX).
+       existing path (rename(2) is atomic on POSIX). Alongside `ward`, create
+       the `wm` symlink (`wm -> ward`) and the `arb` deprecation shim.
 
   ## Configuration
 
     * `ARB_RELEASE_REPO` — `owner/repo` to pull releases from (required).
     * `GITHUB_TOKEN` — optional; authenticates the Releases API request.
-    * `ARB_INSTALL_BIN` — install path (default `~/.local/bin/arb`).
+    * `WARDMAST_INSTALL_BIN` (or `ARB_INSTALL_BIN`) — install path (default `~/.local/bin/ward`).
     * `ARB_GITHUB_API` — Releases API base (default `https://api.github.com`).
 
   ## Exit codes
@@ -57,7 +60,7 @@ defmodule WardmastCli.Cmd.SelfUpdate do
   end
 
   defp do_self_update(argv) do
-    {opts, _rest, mode} = ArgParser.parse(argv, command: "arb self-update", strict: @switches)
+    {opts, _rest, mode} = ArgParser.parse(argv, command: "ward self-update", strict: @switches)
     force = opts[:force] || false
 
     try do
@@ -115,16 +118,16 @@ defmodule WardmastCli.Cmd.SelfUpdate do
     if not force and tag_version == current_version do
       {:already_current, current_version}
     else
-      {arb_url, sha_url} = cli_assets(release, tag)
+      {ward_url, sha_url} = cli_assets(release, tag)
 
-      log("Downloading arb escript from #{repo}@#{tag}…")
-      arb_bytes = download_binary(arb_url)
+      log("Downloading ward escript from #{repo}@#{tag}…")
+      ward_bytes = download_binary(ward_url)
       expected_sha = parse_sha256(download_binary(sha_url))
 
-      verify_sha256!(arb_bytes, expected_sha)
+      verify_sha256!(ward_bytes, expected_sha)
       log("Checksum verified (sha256 #{String.slice(expected_sha, 0, 12)}…).")
 
-      atomic_swap!(install_path(), arb_bytes)
+      atomic_swap!(install_path(), ward_bytes)
       {:updated, current_version}
     end
   end
@@ -192,30 +195,41 @@ defmodule WardmastCli.Cmd.SelfUpdate do
   defp release_tag(_),
     do: fail("release metadata has no tag_name", "The Releases API response was malformed.")
 
-  # Locate the `arb` escript asset and its `arb.sha256` sidecar.
+  # Locate the `ward` escript asset and its `ward.sha256` sidecar (falling back
+  # to `arb` / `arb.sha256` for pre-rename release tags).
   defp cli_assets(%{"assets" => assets}, tag) when is_list(assets) do
-    arb_url = asset_url(assets, "arb")
-    sha_url = asset_url(assets, "arb.sha256")
+    case asset_url(assets, "ward") do
+      url when is_binary(url) ->
+        require_sha_url(assets, url, "ward.sha256", tag)
 
-    cond do
-      is_nil(arb_url) ->
-        fail(
-          "release #{tag} has no asset named `arb`",
-          "The release workflow should publish it; re-run the build if it's missing."
-        )
+      nil ->
+        case asset_url(assets, "arb") do
+          url when is_binary(url) ->
+            require_sha_url(assets, url, "arb.sha256", tag)
 
-      is_nil(sha_url) ->
-        fail(
-          "release #{tag} has no checksum asset named `arb.sha256`",
-          "Refusing to update without a checksum to verify the download against."
-        )
-
-      true ->
-        {arb_url, sha_url}
+          nil ->
+            fail(
+              "release #{tag} has no asset named `ward`",
+              "The release workflow should publish it; re-run the build if it's missing."
+            )
+        end
     end
   end
 
   defp cli_assets(_, tag), do: fail("release #{tag} has no assets")
+
+  defp require_sha_url(assets, bin_url, sha_name, tag) do
+    case asset_url(assets, sha_name) do
+      sha_url when is_binary(sha_url) ->
+        {bin_url, sha_url}
+
+      nil ->
+        fail(
+          "release #{tag} has no checksum asset named `#{sha_name}`",
+          "Refusing to update without a checksum to verify the download against."
+        )
+    end
+  end
 
   defp asset_url(assets, name) do
     Enum.find_value(assets, fn
@@ -284,15 +298,7 @@ defmodule WardmastCli.Cmd.SelfUpdate do
       {:error, reason} -> fail("could not create #{install_dir}: #{inspect(reason)}")
     end
 
-    # Back up the existing binary so the user can roll back manually.
-    if File.exists?(install_path) do
-      bak = install_path <> ".bak"
-
-      case File.copy(install_path, bak) do
-        {:ok, _} -> log("Backed up existing binary to #{bak}")
-        {:error, reason} -> fail("could not back up #{install_path}: #{inspect(reason)}")
-      end
-    end
+    backup_existing!(install_path, install_dir)
 
     # Write to a temp file alongside the target, then rename(2) over it.
     tmp = install_path <> ".new"
@@ -300,21 +306,104 @@ defmodule WardmastCli.Cmd.SelfUpdate do
 
     with :ok <- File.write(tmp, bytes),
          :ok <- File.chmod(tmp, 0o755),
-         :ok <- File.rename(tmp, install_path) do
+         :ok <- File.rename(tmp, install_path),
+         :ok <- install_links(install_path) do
       :ok
     else
       {:error, reason} ->
         _ = File.rm(tmp)
-        fail("failed to install arb to #{install_path}", inspect(reason))
+        fail("failed to install ward to #{install_path}", inspect(reason))
     end
+  end
+
+  defp backup_existing!(install_path, install_dir) do
+    # Back up the existing binary so the user can roll back manually. When
+    # crossing the `arb` -> `ward` rename on a host that only has `arb` so far,
+    # back up that `arb` binary before the shim replaces it.
+    source =
+      cond do
+        File.exists?(install_path) -> install_path
+        File.regular?(Path.join(install_dir, "arb")) -> Path.join(install_dir, "arb")
+        true -> nil
+      end
+
+    if source do
+      bak = install_path <> ".bak"
+
+      case File.copy(source, bak) do
+        {:ok, _} -> log("Backed up existing binary to #{bak}")
+        {:error, reason} -> fail("could not back up #{source}: #{inspect(reason)}")
+      end
+    end
+  end
+
+  @doc """
+  Create the `wm` symlink (`wm -> <target>`) and the one-release `arb`
+  deprecation shim alongside `install_path`.
+  """
+  @spec install_links(String.t()) :: :ok | {:error, term()}
+  def install_links(install_path) do
+    install_dir = Path.dirname(install_path)
+    target_name = Path.basename(install_path)
+    wm_path = Path.join(install_dir, "wm")
+    wm_tmp = wm_path <> ".new"
+    arb_path = Path.join(install_dir, "arb")
+    arb_tmp = arb_path <> ".new"
+
+    _ = File.rm(wm_tmp)
+    _ = File.rm(arb_tmp)
+
+    with :ok <- File.ln_s(target_name, wm_tmp),
+         :ok <- File.rename(wm_tmp, wm_path),
+         :ok <- File.write(arb_tmp, arb_shim(target_name)),
+         :ok <- File.chmod(arb_tmp, 0o755),
+         :ok <- File.rename(arb_tmp, arb_path) do
+      :ok
+    else
+      {:error, reason} ->
+        _ = File.rm(wm_tmp)
+        _ = File.rm(arb_tmp)
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  The one-release `arb` deprecation shim installed alongside `ward`: prints a
+  one-line deprecation notice to stderr and `exec`s `ward` with the caller's
+  `argv`.
+  """
+  @spec arb_shim(String.t()) :: String.t()
+  def arb_shim(target_name \\ "ward") do
+    """
+    #!/bin/sh
+    echo 'arb: note: `arb` is deprecated; use `ward` (or `wm`) instead.' >&2
+    dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)
+    if [ -n "$dir" ] && [ -x "$dir/#{target_name}" ]; then
+      exec "$dir/#{target_name}" "$@"
+    fi
+    exec #{target_name} "$@"
+    """
   end
 
   # ---- paths / config ------------------------------------------------------
 
-  defp install_path do
-    case System.get_env("ARB_INSTALL_BIN") do
-      path when is_binary(path) and path != "" -> Path.expand(path)
-      _ -> Path.join(System.user_home!(), ".local/bin/arb")
+  @doc "Where the `ward` escript is installed (`WARDMAST_INSTALL_BIN` / `ARB_INSTALL_BIN`, default `~/.local/bin/ward`)."
+  @spec install_path() :: String.t()
+  def install_path do
+    case Wardmast.Env.get("WARDMAST_INSTALL_BIN") do
+      path when is_binary(path) and path != "" ->
+        normalize_install_path(Path.expand(path))
+
+      _ ->
+        Path.join(System.user_home!(), ".local/bin/ward")
+    end
+  end
+
+  defp normalize_install_path(path) do
+    if Path.basename(path) == "arb" do
+      Path.join(Path.dirname(path), "ward")
+    else
+      path
     end
   end
 
@@ -386,9 +475,13 @@ defmodule WardmastCli.Cmd.SelfUpdate do
   defp emit_updated(:text, tag, prior_version) do
     install = install_path()
     IO.puts("")
-    IO.puts("Updated arb to #{tag}" <> if(prior_version, do: " (was #{prior_version})", else: ""))
+
+    IO.puts(
+      "Updated ward to #{tag}" <> if(prior_version, do: " (was #{prior_version})", else: "")
+    )
+
     IO.puts("Installed at #{install}")
     IO.puts("")
-    IO.puts("Run `arb version` to confirm the new version is active.")
+    IO.puts("Run `ward version` to confirm the new version is active.")
   end
 end

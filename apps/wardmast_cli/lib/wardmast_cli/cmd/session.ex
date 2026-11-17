@@ -38,7 +38,7 @@ defmodule WardmastCli.Cmd.Session do
     else
       {opts, rest, mode} =
         ArgParser.parse(argv,
-          command: "arb session",
+          command: "ward session",
           switches: [read_only: :boolean],
           aliases: [r: :read_only]
         )

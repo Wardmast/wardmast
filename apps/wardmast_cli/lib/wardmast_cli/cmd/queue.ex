@@ -94,7 +94,7 @@ defmodule WardmastCli.Cmd.Queue do
   defp dispatch([cmd | tail]) when cmd in ["rerun-ci", "rerun_ci"] do
     {opts, rest, mode} =
       ArgParser.parse(tail,
-        command: "arb queue rerun-ci",
+        command: "ward queue rerun-ci",
         switches: [mode: :string, workflow: :string, input: [:string, :keep]]
       )
 
@@ -105,7 +105,7 @@ defmodule WardmastCli.Cmd.Queue do
   end
 
   defp dispatch(argv) do
-    {_opts, rest, mode} = ArgParser.parse(argv, command: "arb queue", switches: [])
+    {_opts, rest, mode} = ArgParser.parse(argv, command: "ward queue", switches: [])
 
     case rest do
       [cmd, task_id | _] when cmd in ["retry-auto-resolve", "retry_auto_resolve"] ->

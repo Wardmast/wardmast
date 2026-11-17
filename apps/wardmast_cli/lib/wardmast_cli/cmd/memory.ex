@@ -52,7 +52,7 @@ defmodule WardmastCli.Cmd.Memory do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {opts, rest, mode} = ArgParser.parse(argv, command: "arb memory", switches: @switches)
+      {opts, rest, mode} = ArgParser.parse(argv, command: "ward memory", switches: @switches)
       Workspace.reject_flag!("arb memory (the memory layer is installation-wide)")
 
       dispatch(rest, opts, mode)

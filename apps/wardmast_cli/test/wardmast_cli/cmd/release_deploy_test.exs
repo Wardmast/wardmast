@@ -24,9 +24,11 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
     Process.delete(:bd2_deploy_status_path)
     System.put_env("ARB_RELEASE_REPO", @repo)
     # A green deploy self-updates the CLI; never let a test write the real one.
-    System.put_env("ARB_INSTALL_BIN", Path.join(home, "bin/arb"))
+    System.put_env("WARDMAST_INSTALL_BIN", Path.join(home, "bin/ward"))
+    System.delete_env("ARB_INSTALL_BIN")
     System.delete_env("DATABASE_PATH")
     System.delete_env("ARB_DEPLOY_BACKUP_RETAIN")
+    System.delete_env("WARDMAST_HOST")
     System.delete_env("ARB_HOST")
     System.delete_env("GITHUB_TOKEN")
     System.delete_env("ARB_WORKER_BEAD_ID")
@@ -35,6 +37,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
     on_exit(fn ->
       System.delete_env("ARB_DATA_HOME")
       System.delete_env("ARB_RELEASE_REPO")
+      System.delete_env("WARDMAST_INSTALL_BIN")
       System.delete_env("ARB_INSTALL_BIN")
       File.rm_rf(home)
     end)
@@ -88,8 +91,8 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
 
   defp tarball_path(tag), do: "/dl/arbiter-#{tag}-linux.tar.gz"
   defp sha_path(tag), do: tarball_path(tag) <> ".sha256"
-  defp arb_path(tag), do: "/dl/#{tag}/arb"
-  defp arb_bytes(tag), do: "#!/usr/bin/env escript\n% fake arb #{tag}\n"
+  defp ward_path(tag), do: "/dl/#{tag}/ward"
+  defp ward_bytes(tag), do: "#!/usr/bin/env escript\n% fake ward #{tag}\n"
 
   # The GitHub release JSON for `tag`, with assets pointing at our stub paths.
   defp release_json(tag) do
@@ -103,10 +106,10 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
           "name" => name <> ".sha256",
           "browser_download_url" => "https://dl.test#{sha_path(tag)}"
         },
-        %{"name" => "arb", "browser_download_url" => "https://dl.test#{arb_path(tag)}"},
+        %{"name" => "ward", "browser_download_url" => "https://dl.test#{ward_path(tag)}"},
         %{
-          "name" => "arb.sha256",
-          "browser_download_url" => "https://dl.test#{arb_path(tag)}.sha256"
+          "name" => "ward.sha256",
+          "browser_download_url" => "https://dl.test#{ward_path(tag)}.sha256"
         }
       ]
     }
@@ -124,8 +127,14 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
     workspaces = Keyword.get(opts, :workspaces, @green)
     latest? = Keyword.get(opts, :latest, true)
     version_resp = Keyword.get(opts, :version_resp)
-    arb_body = Keyword.get(opts, :arb_body, arb_bytes(tag))
-    arb_sha_text = Keyword.get(opts, :arb_sha_text, "#{sha256_hex(arb_bytes(tag))}  arb\n")
+    ward_body = Keyword.get(opts, :ward_body, Keyword.get(opts, :arb_body, ward_bytes(tag)))
+
+    ward_sha_text =
+      Keyword.get(
+        opts,
+        :ward_sha_text,
+        Keyword.get(opts, :arb_sha_text, "#{sha256_hex(ward_bytes(tag))}  ward\n")
+      )
 
     api_path =
       if latest?,
@@ -140,9 +149,9 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
         {{"get", api_path}, {release_json(tag), 200}},
         {{"get", tarball_path(tag)}, fn conn -> raw_response(conn, 200, tarball) end},
         {{"get", sha_path(tag)}, fn conn -> raw_response(conn, 200, sha_text) end},
-        {{"get", arb_path(tag)}, fn conn -> raw_response(conn, 200, arb_body) end},
-        {{"get", arb_path(tag) <> ".sha256"},
-         fn conn -> raw_response(conn, 200, arb_sha_text) end},
+        {{"get", ward_path(tag)}, fn conn -> raw_response(conn, 200, ward_body) end},
+        {{"get", ward_path(tag) <> ".sha256"},
+         fn conn -> raw_response(conn, 200, ward_sha_text) end},
         {{"get", "/api/workspaces"}, {workspaces, 200}},
         {{"get", "/api/repos"},
          {%{"data" => [%{"name" => "tonic", "source" => "acme", "path" => "/srv/tonic"}]}, 200}},
@@ -1971,7 +1980,8 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
   # ---- matching CLI after a green deploy (bd-6umf7z) -----------------------
 
   describe "CLI self-update after a green deploy" do
-    test "installs the escript for the same tag and reports it", %{home: home} do
+    test "installs the `ward` escript, `wm` symlink, and `arb` shim for the same tag and reports it",
+         %{home: home} do
       {tarball, sha} = release_tarball_with_sha(@vsn)
       stub_release(@vsn, tarball, sha)
       stub_cmds()
@@ -1981,7 +1991,9 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       assert code == 0
       assert {:ok, payload} = Jason.decode(String.trim(out))
       assert %{"updated" => true, "version" => @vsn} = payload["cli_update"]
-      assert File.read!(Path.join(home, "bin/arb")) == arb_bytes(@vsn)
+      assert File.read!(Path.join(home, "bin/ward")) == ward_bytes(@vsn)
+      assert {:ok, "ward"} = File.read_link(Path.join(home, "bin/wm"))
+      assert File.exists?(Path.join(home, "bin/arb"))
     end
 
     test "text output says the CLI was updated", %{home: home} do
@@ -1991,7 +2003,9 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
 
       {out, _err, 0} = capture(fn -> ReleaseDeploy.run([]) end)
 
-      assert out =~ "Updated arb to #{@vsn}"
+      assert out =~ "Updated ward to #{@vsn}"
+      assert File.exists?(Path.join(home, "bin/ward"))
+      assert {:ok, "ward"} = File.read_link(Path.join(home, "bin/wm"))
       assert File.exists?(Path.join(home, "bin/arb"))
     end
 
@@ -2004,7 +2018,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
 
       assert {:ok, payload} = Jason.decode(String.trim(out))
       assert payload["cli_update"] == nil
-      refute File.exists?(Path.join(home, "bin/arb"))
+      refute File.exists?(Path.join(home, "bin/ward"))
     end
 
     test "a failing self-update does not fail the (already healthy) deploy", %{home: home} do
@@ -2012,8 +2026,8 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
 
       # The escript download no longer matches its published checksum.
       stub_release(@vsn, tarball, "#{sha256_hex(tarball)}  x\n",
-        arb_body: "tampered",
-        arb_sha_text: "#{sha256_hex("the real one")}  arb\n"
+        ward_body: "tampered",
+        ward_sha_text: "#{sha256_hex("the real one")}  ward\n"
       )
 
       stub_cmds()
@@ -2026,7 +2040,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       assert payload["ok"] == true
       assert payload["cli_update"]["updated"] == false
       assert payload["cli_update"]["error"] =~ "checksum"
-      refute File.exists?(Path.join(home, "bin/arb"))
+      refute File.exists?(Path.join(home, "bin/ward"))
     end
 
     test "--local deploys do not touch the CLI (a local build has no matching release)",
@@ -2037,7 +2051,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       {_out, _err, 0} =
         capture(fn -> ReleaseDeploy.run(["--local", local_release_dir()]) end)
 
-      refute File.exists?(Path.join(home, "bin/arb"))
+      refute File.exists?(Path.join(home, "bin/ward"))
     end
 
     test "the output names the release repo and where it was resolved from" do

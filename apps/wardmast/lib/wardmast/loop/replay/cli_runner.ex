@@ -312,6 +312,8 @@ defmodule Wardmast.Loop.Replay.CliRunner do
 
     [
       {"ARB_HOST", @nowhere},
+      {"WARDMAST_HOST", @nowhere},
+      {"WARDMAST_WORKSPACE", false},
       {"ARB_WORKSPACE", false},
       {"ARB_TOKEN", false},
       {"ARBITER_MCP_TOKEN", false},

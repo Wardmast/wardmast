@@ -51,7 +51,7 @@ very first time, bootstrap it once by hand:
 
 ```sh
 cd apps/wardmast_cli && mix escript.build && cd ../..
-mkdir -p ~/.local/bin && cp apps/wardmast_cli/arb ~/.local/bin/
+mkdir -p ~/.local/bin && cp apps/wardmast_cli/ward ~/.local/bin/
 ```
 
 Re-run `arb install cli` any time you pull changes to `apps/wardmast_cli`.

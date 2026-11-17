@@ -61,7 +61,7 @@ defmodule WardmastCli.Cmd.Mcp do
     else
       {opts, _rest, _mode} =
         ArgParser.parse(argv,
-          command: "arb mcp token mint",
+          command: "ward mcp token mint",
           switches: [tier: :string, ttl: :integer, workspace: :string, json: :boolean],
           aliases: [w: :workspace]
         )
@@ -132,7 +132,7 @@ defmodule WardmastCli.Cmd.Mcp do
       IO.puts(@moduledoc)
     else
       {opts, rest, mode} =
-        ArgParser.parse(argv, command: "arb mcp token verify", switches: [file: :string])
+        ArgParser.parse(argv, command: "ward mcp token verify", switches: [file: :string])
 
       token =
         case {rest, opts[:file]} do

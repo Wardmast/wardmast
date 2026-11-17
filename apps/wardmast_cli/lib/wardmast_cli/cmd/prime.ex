@@ -95,7 +95,7 @@ defmodule WardmastCli.Cmd.Prime do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {_opts, _rest, mode} = ArgParser.parse(argv, command: "arb prime", switches: [])
+      {_opts, _rest, mode} = ArgParser.parse(argv, command: "ward prime", switches: [])
       sections = gather()
 
       case mode do
@@ -171,7 +171,7 @@ defmodule WardmastCli.Cmd.Prime do
   end
 
   defp gather_workspaces do
-    ws_target = System.get_env("ARB_WORKSPACE")
+    ws_target = Wardmast.Env.get("WARDMAST_WORKSPACE")
 
     if is_binary(ws_target) and ws_target != "" do
       case WardmastCli.Workspace.resolve(ws_target) do

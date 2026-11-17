@@ -22,7 +22,7 @@ defmodule Wardmast.Loop.Replay.CliRunnerTest do
   alias Wardmast.Test.GitFixture
   alias Wardmast.Worker.PrivateClone
 
-  @inherited ~w(GH_TOKEN ARB_TOKEN ARB_HOST ARB_WORKSPACE PATH)
+  @inherited ~w(GH_TOKEN ARB_TOKEN ARB_HOST ARB_WORKSPACE WARDMAST_HOST WARDMAST_WORKSPACE PATH)
 
   setup do
     root =
@@ -58,6 +58,8 @@ defmodule Wardmast.Loop.Replay.CliRunnerTest do
     System.put_env("ARB_TOKEN", "arb-from-the-server-env")
     System.put_env("ARB_HOST", "http://127.0.0.1:4848")
     System.put_env("ARB_WORKSPACE", "default")
+    System.put_env("WARDMAST_HOST", "http://127.0.0.1:4848")
+    System.put_env("WARDMAST_WORKSPACE", "default")
 
     on_exit(fn ->
       Enum.each(prior, fn
@@ -215,7 +217,9 @@ defmodule Wardmast.Loop.Replay.CliRunnerTest do
 
       # No `arb` call reaches the server, and no forge or server token is passed on.
       assert env["ARB_HOST"] == "http://127.0.0.1:9"
+      assert env["WARDMAST_HOST"] == "http://127.0.0.1:9"
       refute Map.has_key?(env, "ARB_WORKSPACE")
+      refute Map.has_key?(env, "WARDMAST_WORKSPACE")
       refute Map.has_key?(env, "ARB_TOKEN")
       refute Map.has_key?(env, "GH_TOKEN")
 

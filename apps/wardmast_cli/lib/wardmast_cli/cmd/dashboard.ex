@@ -29,7 +29,7 @@ defmodule WardmastCli.Cmd.Dashboard do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
-      {_opts, rest, mode} = ArgParser.parse(argv, command: "arb dashboard", switches: [])
+      {_opts, rest, mode} = ArgParser.parse(argv, command: "ward dashboard", switches: [])
 
       case rest do
         ["login" | _] -> login(mode)

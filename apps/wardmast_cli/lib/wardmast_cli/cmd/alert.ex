@@ -22,7 +22,7 @@ defmodule WardmastCli.Cmd.Alert do
     else
       {opts, rest, mode} =
         ArgParser.parse(argv,
-          command: "arb alert",
+          command: "ward alert",
           switches: [workspace: :string, kind: :string]
         )
 

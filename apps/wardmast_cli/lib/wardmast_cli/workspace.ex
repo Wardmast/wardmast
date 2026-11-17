@@ -2,14 +2,14 @@ defmodule WardmastCli.Workspace do
   @moduledoc """
   Resolves the active workspace.
 
-  Lookup order when `ARB_WORKSPACE` is unset:
+  Lookup order when `WARDMAST_WORKSPACE` (and the deprecated `ARB_WORKSPACE`) is unset:
     1. Workspace literally named `"default"`
     2. The sole workspace, if exactly one exists (an install that never had —
        or has since deleted — a workspace named `"default"` should still just
        work when there's no ambiguity about which workspace is "active")
 
-  When `ARB_WORKSPACE` (or `--workspace`) is set, it is matched exactly by
-  name or id and no fallback applies — an explicit selector that doesn't
+  When `WARDMAST_WORKSPACE` / `ARB_WORKSPACE` (or `--workspace`) is set, it is matched
+  exactly by name or id and no fallback applies — an explicit selector that doesn't
   match is always an error.
 
   Returns `{:ok, workspace_map}` or `{:error, reason_string}`.
@@ -66,7 +66,7 @@ defmodule WardmastCli.Workspace do
 
   @spec resolve(String.t() | nil) :: {:ok, map()} | {:error, String.t()}
   def resolve(target \\ nil) do
-    target = target || System.get_env("ARB_WORKSPACE")
+    target = target || Wardmast.Env.get("WARDMAST_WORKSPACE")
 
     case Client.get("/api/workspaces") do
       {:ok, %{"data" => list}} ->
@@ -85,7 +85,7 @@ defmodule WardmastCli.Workspace do
       nil ->
         {:error,
          "no workspace named #{inspect(target)}. " <>
-           "Set ARB_WORKSPACE or create one with `arb workspace create`."}
+           "Set WARDMAST_WORKSPACE or create one with `ward workspace create`."}
 
       ws ->
         {:ok, ws}
@@ -97,7 +97,7 @@ defmodule WardmastCli.Workspace do
   # no ambiguity to warn about. Only error when the choice is genuinely
   # ambiguous (multiple workspaces, none named "default").
   defp resolve_from_list([], nil) do
-    {:error, "no workspaces found. Create one with `arb workspace create`."}
+    {:error, "no workspaces found. Create one with `ward workspace create`."}
   end
 
   defp resolve_from_list(list, nil) do
@@ -110,7 +110,7 @@ defmodule WardmastCli.Workspace do
           _ ->
             {:error,
              "no workspace named \"default\" and #{length(list)} workspaces exist — " <>
-               "set ARB_WORKSPACE to pick one."}
+               "set WARDMAST_WORKSPACE (or ARB_WORKSPACE) to pick one."}
         end
 
       ws ->
@@ -120,12 +120,12 @@ defmodule WardmastCli.Workspace do
 
   @doc """
   The id of the workspace selected by `explicit` (a `-w` value, id or name) or
-  else `ARB_WORKSPACE`; `nil` when neither is set. A selector that matches no
-  workspace halts rather than widening the request.
+  else `WARDMAST_WORKSPACE` (falling back to `ARB_WORKSPACE`); `nil` when neither
+  is set. A selector that matches no workspace halts rather than widening the request.
   """
   @spec selected_id(String.t() | nil) :: String.t() | nil
   def selected_id(explicit \\ nil) do
-    case explicit || System.get_env("ARB_WORKSPACE") do
+    case explicit || Wardmast.Env.get("WARDMAST_WORKSPACE") do
       target when is_binary(target) and target != "" -> id_or_halt(target)
       _ -> nil
     end
@@ -141,6 +141,7 @@ defmodule WardmastCli.Workspace do
   def put_selected(nil), do: Process.delete(:arb_workspace_flag) && :ok
 
   def put_selected(name) when is_binary(name) do
+    System.put_env("WARDMAST_WORKSPACE", name)
     System.put_env("ARB_WORKSPACE", name)
     Process.put(:arb_workspace_flag, true)
     :ok

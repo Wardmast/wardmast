@@ -28,10 +28,10 @@ defmodule WardmastCli.Cmd.CreateTest do
     refute out =~ "Optional, and unnecessary in a single-repo workspace"
 
     # The remediation the operator reads when creation is refused has to name a
-    # command that exists: config writes are `arb config set`, not a
-    # (nonexistent) `arb workspace config set`.
-    assert out =~ "arb config set default_repo"
-    refute out =~ "arb workspace config set"
+    # command that exists: config writes are `ward config set`, not a
+    # (nonexistent) `ward workspace config set`.
+    assert out =~ "ward config set default_repo"
+    refute out =~ "ward workspace config set"
   end
 
   test "--no-lint sends no_lint: true; without it the key is absent" do

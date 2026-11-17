@@ -121,24 +121,24 @@ defmodule WardmastCli.Cmd.Node do
   defp dispatch(["set" | rest], mode), do: set(rest, mode)
 
   defp dispatch(["pending" | rest], mode) do
-    _ = positional!(rest, "arb node pending")
+    _ = positional!(rest, "ward node pending")
     pending(mode)
   end
 
-  defp dispatch(["deny" | rest], mode), do: deny(positional!(rest, "arb node deny"), mode)
+  defp dispatch(["deny" | rest], mode), do: deny(positional!(rest, "ward node deny"), mode)
 
   defp dispatch(["list" | rest], mode) do
-    _ = positional!(rest, "arb node list")
+    _ = positional!(rest, "ward node list")
     list(mode)
   end
 
-  defp dispatch(["show" | rest], mode), do: show(positional!(rest, "arb node show"), mode)
+  defp dispatch(["show" | rest], mode), do: show(positional!(rest, "ward node show"), mode)
 
   defp dispatch(["events" | rest], mode),
-    do: events(positional!(rest, "arb node events"), mode)
+    do: events(positional!(rest, "ward node events"), mode)
 
   defp dispatch([verb | rest], mode) when verb in @verbs,
-    do: verb(verb, positional!(rest, "arb node #{verb}"), mode)
+    do: verb(verb, positional!(rest, "ward node #{verb}"), mode)
 
   defp dispatch(_argv, _mode) do
     IO.puts(:stderr, "arb: unknown node subcommand")
@@ -157,7 +157,7 @@ defmodule WardmastCli.Cmd.Node do
 
   defp add(argv, mode) do
     {opts, _rest, _} =
-      ArgParser.parse_strict!(argv, "arb node add", strict: @add_switches, aliases: [o: :output])
+      ArgParser.parse_strict!(argv, "ward node add", strict: @add_switches, aliases: [o: :output])
 
     case opts[:kind] || "machine" do
       "machine" -> add_machine(opts, mode)
@@ -630,7 +630,7 @@ defmodule WardmastCli.Cmd.Node do
 
   defp approve(argv, mode) do
     {opts, rest, _} =
-      ArgParser.parse_strict!(argv, "arb node approve", strict: @approve_switches)
+      ArgParser.parse_strict!(argv, "ward node approve", strict: @approve_switches)
 
     typed = pairing_ref!(rest, "approve")
     yes? = opts[:yes] == true
@@ -1020,7 +1020,7 @@ defmodule WardmastCli.Cmd.Node do
   # ---- set -------------------------------------------------------------------
 
   defp set(argv, mode) do
-    {opts, rest, _} = ArgParser.parse_strict!(argv, "arb node set", strict: @set_switches)
+    {opts, rest, _} = ArgParser.parse_strict!(argv, "ward node set", strict: @set_switches)
     ref = ref!(rest, "set")
 
     if ref == "local" and not local_applicable?(opts),

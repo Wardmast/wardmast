@@ -128,7 +128,8 @@ defmodule WardmastCli.FanOut do
   def arb_cmdline?(argv) do
     case Enum.drop_while(argv, &(&1 != "-extra")) do
       ["-extra", script | _] ->
-        "escript" in argv and Path.basename(script) in ["arb", "arb.escript"]
+        "escript" in argv and
+          Path.basename(script) in ["ward", "wm", "arb", "arb.escript", "ward.escript"]
 
       _ ->
         false

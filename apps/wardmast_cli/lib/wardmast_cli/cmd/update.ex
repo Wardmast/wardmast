@@ -257,7 +257,7 @@ defmodule WardmastCli.Cmd.Update do
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp do_deploy(argv) do
     {opts, _rest, mode} =
-      ArgParser.parse_strict!(argv, "arb update",
+      ArgParser.parse_strict!(argv, "ward update",
         strict: @deploy_switches,
         hint: fn flag ->
           "To deploy, run `arb update` with no ticket id. To edit a ticket, " <>
@@ -377,7 +377,7 @@ defmodule WardmastCli.Cmd.Update do
     refuse_status_flag!(argv)
 
     {opts, rest, mode} =
-      ArgParser.parse(argv, command: "arb ticket update", switches: @all_edit_switches)
+      ArgParser.parse(argv, command: "ward ticket update", switches: @all_edit_switches)
 
     opts = ArgParser.coerce_difficulty(opts)
 

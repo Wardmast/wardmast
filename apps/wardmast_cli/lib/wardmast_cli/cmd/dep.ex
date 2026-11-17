@@ -66,7 +66,7 @@ defmodule WardmastCli.Cmd.Dep do
     else
       {opts, rest, mode} =
         ArgParser.parse(argv,
-          command: "arb dep",
+          command: "ward dep",
           switches: [type: :string, workspace: :string, json: :boolean, stdin: :boolean]
         )
 
@@ -157,7 +157,10 @@ defmodule WardmastCli.Cmd.Dep do
   defp removed_count(_), do: 1
 
   defp list(positional, opts, mode) do
-    if opts[:workspace], do: System.put_env("ARB_WORKSPACE", opts[:workspace])
+    if opts[:workspace] do
+      System.put_env("WARDMAST_WORKSPACE", opts[:workspace])
+      System.put_env("ARB_WORKSPACE", opts[:workspace])
+    end
 
     case positional do
       [] -> list_workspace(opts, mode)

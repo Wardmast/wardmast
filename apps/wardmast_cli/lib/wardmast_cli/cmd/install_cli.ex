@@ -18,7 +18,7 @@ defmodule WardmastCli.Cmd.InstallCli do
     * `1` — build or install failed, or project root could not be located.
   """
 
-  alias WardmastCli.{ArgParser, Cmd.Start, Output}
+  alias WardmastCli.{ArgParser, Cmd.SelfUpdate, Cmd.Start, Output}
 
   @switches [json: :boolean]
 
@@ -27,7 +27,7 @@ defmodule WardmastCli.Cmd.InstallCli do
       IO.puts(@moduledoc)
     else
       {opts, _rest, _mode} =
-        ArgParser.parse(argv, command: "arb install cli", switches: @switches)
+        ArgParser.parse(argv, command: "ward install cli", switches: @switches)
 
       mode = if opts[:json], do: :json, else: :text
 
@@ -75,17 +75,15 @@ defmodule WardmastCli.Cmd.InstallCli do
 
     case Start.run_cmd("mix", ["escript.build"], cd: cli_dir, stderr_to_stdout: true) do
       {_out, 0} ->
-        escript_path = Path.join(cli_dir, "arb")
-
-        install_path =
-          System.get_env("ARB_INSTALL_BIN") || Path.join(System.user_home!(), ".local/bin/arb")
+        escript_path = Path.join(cli_dir, "ward")
+        install_path = SelfUpdate.install_path()
 
         # Ensure ~/.local/bin exists
         install_dir = Path.dirname(install_path)
 
         case File.mkdir_p(install_dir) do
           :ok ->
-            # Copy the escript to ~/.local/bin/arb
+            # Copy the escript to ~/.local/bin/ward
             case File.copy(escript_path, install_path) do
               {:ok, _} ->
                 # Make it executable
@@ -93,13 +91,13 @@ defmodule WardmastCli.Cmd.InstallCli do
                 # wired Credo up. Thresholds stay at the tool's own default so new
                 # code is held to it; see the note in .credo.exs.
                 # credo:disable-for-next-line Credo.Check.Refactor.Nesting
-                case File.chmod(install_path, 0o755) do
-                  :ok ->
-                    Start.log_text("Installed CLI escript to #{install_path}")
-                    :ok
-
+                with :ok <- File.chmod(install_path, 0o755),
+                     :ok <- SelfUpdate.install_links(install_path) do
+                  Start.log_text("Installed CLI escript to #{install_path}")
+                  :ok
+                else
                   {:error, reason} ->
-                    {:error, "Could not make escript executable: #{inspect(reason)}"}
+                    {:error, "Could not finalize escript install: #{inspect(reason)}"}
                 end
 
               {:error, reason} ->
@@ -119,8 +117,7 @@ defmodule WardmastCli.Cmd.InstallCli do
   end
 
   defp emit_success(:json, _root) do
-    install_path =
-      System.get_env("ARB_INSTALL_BIN") || Path.join(System.user_home!(), ".local/bin/arb")
+    install_path = SelfUpdate.install_path()
 
     IO.puts(
       Jason.encode!(%{
@@ -132,11 +129,10 @@ defmodule WardmastCli.Cmd.InstallCli do
   end
 
   defp emit_success(:text, _root) do
-    install_path =
-      System.get_env("ARB_INSTALL_BIN") || Path.join(System.user_home!(), ".local/bin/arb")
+    install_path = SelfUpdate.install_path()
 
     IO.puts("")
     IO.puts("CLI escript built and installed at #{install_path}")
-    IO.puts("Run `arb help` to verify the new version is on your PATH.")
+    IO.puts("Run `ward help` to verify the new version is on your PATH.")
   end
 end

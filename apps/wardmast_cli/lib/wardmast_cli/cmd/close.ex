@@ -25,7 +25,7 @@ defmodule WardmastCli.Cmd.Close do
       IO.puts(@moduledoc)
     else
       {opts, rest, mode} =
-        ArgParser.parse(argv, command: "arb ticket close", switches: @switches)
+        ArgParser.parse(argv, command: "ward ticket close", switches: @switches)
 
       body =
         %{}
