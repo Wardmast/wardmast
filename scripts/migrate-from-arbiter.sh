@@ -192,7 +192,7 @@ KEYS_ALT="$(printf '%s' "$REWRITE_KEYS" | tr ' ' '|')"
 # inline here for `Environment=` lines in units.
 rewrite_text() {
   sed -E \
-    -e "s#(${HOME_RE}|~|\\\$HOME|\\\$\\{HOME\\})/\\.arbiter(/|[^A-Za-z0-9_.-]|\$)#\\1/.wardmast\\2#g" \
+    -e "s#(${HOME_RE}|~|%h|\\\$HOME|\\\$\\{HOME\\})/\\.arbiter(/|[^A-Za-z0-9_.-]|\$)#\\1/.wardmast\\2#g" \
     -e 's#(/\.wardmast/)arbiter\.env#\1wardmast.env#g' \
     -e 's#(/\.wardmast/log/)arbiter\.log#\1wardmast.log#g' \
     -e 's#/bin/arbiter( |$)#/bin/wardmast\1#g' \
@@ -440,6 +440,22 @@ migrate_units() {
     fi
     park "$UNITS/arbiter-logrotate.service"
     park "$UNITS/arbiter-logrotate.timer"
+  fi
+
+  # Every EnvironmentFile= in the new unit must exist: a leading `-` makes systemd
+  # skip a missing file silently, so the server would boot with no env at all.
+  if [ "$DRY_RUN" != 1 ] && [ -f "$UNITS/wardmast.service" ]; then
+    local f line path
+    for f in "$UNITS/wardmast.service" "$UNITS"/wardmast.service.d/*.conf; do
+      [ -f "$f" ] || continue
+      while IFS= read -r line; do
+        case "$line" in EnvironmentFile=*) ;; *) continue ;; esac
+        path="${line#EnvironmentFile=}"
+        path="${path#-}"
+        path="${path//%h/$HOME}"
+        [ -e "$path" ] || die "EnvironmentFile= in $f names a file that does not exist: $path (systemd would ignore it and start the server with no env)"
+      done <"$f"
+    done
   fi
 
   if [ "$DRY_RUN" != 1 ] && [ "$UNITS_TOUCHED" = 1 ] && [ "$have_systemctl" = 1 ]; then
