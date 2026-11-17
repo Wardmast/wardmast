@@ -52,8 +52,9 @@ defmodule Wardmast.ToolchainPinsTest do
   test "release.yml installs the pinned Elixir for the pinned OTP major" do
     release = read!(".github/workflows/release.yml")
 
-    assert scan(release, ~r/ELIXIR_VERSION="([^"]+)"/) == [elixir()]
-    assert scan(release, ~r/OTP_MAJOR="([^"]+)"/) == [otp_major()]
+    # Two jobs install it: the Linux `build` job and `build-macos`.
+    assert scan(release, ~r/ELIXIR_VERSION="([^"]+)"/) == List.duplicate(elixir(), 2)
+    assert scan(release, ~r/OTP_MAJOR="([^"]+)"/) == List.duplicate(otp_major(), 2)
     assert release =~ "Build Erlang/OTP #{otp_major()} with static OpenSSL"
   end
 

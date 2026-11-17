@@ -73,6 +73,7 @@ defmodule Wardmast.Quota.CloudCode do
   alias Wardmast.Quota.GoogleQuota
   alias Wardmast.Worker.ReleaseEnv
   alias Wardmast.Worker.SpawnEnv
+  alias Wardmast.Worker.Timeout
 
   # Normalized base — the provider only hands us a fraction, not raw units, so
   # we mirror 9router's arbitrary 1000-unit base for used/total. Percentage is
@@ -625,7 +626,7 @@ defmodule Wardmast.Quota.CloudCode do
             "/bin/sh",
             [
               "-c",
-              ~s(exec timeout -k 1 #{timeout_s} "$0" #{Enum.join(@agy_usage_args, " ")} >"$1" 2>/dev/null </dev/null),
+              ~s(exec #{Timeout.shell_prefix(timeout_s)}"$0" #{Enum.join(@agy_usage_args, " ")} >"$1" 2>/dev/null </dev/null),
               path,
               tmp
             ],

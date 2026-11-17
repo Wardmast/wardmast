@@ -8,7 +8,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.HostCheck do
   with an SSH tunnel on `127.0.0.1:4848`). Two refusals, both before anything is
   downloaded or written:
 
-    * **Platform** — only a `-linux` x86_64/aarch64 release is published, so any
+    * **Platform** — only a `-linux` x86_64/aarch64 or `-darwin-arm64` release is published, so any
       other host OS/arch cannot run it.
     * **Remote target** — there is no existing install at the data home *and* the
       CLI targets a remote server (a non-loopback `ARB_HOST`, or a loopback port
@@ -37,11 +37,11 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.HostCheck do
   defp check_platform do
     {os, arch} = platform()
 
-    if os == :linux and arch in ["x86_64", "aarch64"] do
+    if (os == :linux and arch in ["x86_64", "aarch64"]) or (os == :darwin and arch == "arm64") do
       :ok
     else
       {:error, "this host (#{os}/#{arch}) cannot run the published server release",
-       "Only a Linux release is published. Run `arb server deploy` on the machine that " <>
+       "Only Linux and macOS arm64 releases are published. Run `arb server deploy` on the machine that " <>
          "hosts the server (e.g. over ssh), not on a workstation that merely talks to it."}
     end
   end
@@ -82,20 +82,30 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.HostCheck do
     end
   end
 
-  defp platform do
+  @doc false
+  @spec platform() :: {atom(), String.t()}
+  def platform do
     case Process.get(:bd2_host_platform) do
-      {_, _} = p ->
-        p
-
-      _ ->
-        os = if match?({:unix, :linux}, :os.type()), do: :linux, else: elem(:os.type(), 1)
-
-        arch =
-          :erlang.system_info(:system_architecture) |> to_string() |> String.split("-") |> hd()
-
-        {os, arch}
+      {os, arch} when is_atom(os) and is_binary(arch) -> normalize({os, arch})
+      _ -> parse_platform(:os.type(), :erlang.system_info(:system_architecture))
     end
   end
+
+  @doc """
+  Pure parse of `:os.type/0` plus `:erlang.system_info(:system_architecture)`.
+  Apple Silicon reports `aarch64-apple-darwin<ver>`; it is normalised to
+  `{:darwin, "arm64"}` here so every consumer agrees on one spelling.
+  """
+  @spec parse_platform({atom(), atom()}, charlist() | String.t()) :: {atom(), String.t()}
+  def parse_platform({_, os}, system_architecture) do
+    arch = system_architecture |> to_string() |> String.split("-") |> hd()
+    normalize({os, arch})
+  end
+
+  @doc false
+  @spec normalize({atom(), String.t()}) :: {atom(), String.t()}
+  def normalize({:darwin, "aarch64"}), do: {:darwin, "arm64"}
+  def normalize(platform), do: platform
 
   defp port_owner(port) do
     case Process.get(:bd2_port_owner) do

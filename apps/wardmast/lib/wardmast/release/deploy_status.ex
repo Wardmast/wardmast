@@ -58,7 +58,14 @@ defmodule Wardmast.Release.DeployStatus do
 
   def dismiss_key(_), do: nil
 
-  defp alive?(pid) when is_binary(pid) and pid != "", do: File.exists?("/proc/" <> pid)
+  # Portable (no /proc): `ps -p` exits 0 iff the pid exists, whatever its owner.
+  defp alive?(pid) when is_binary(pid) and pid != "" do
+    String.match?(pid, ~r/^\d+$/) and
+      match?({_, 0}, System.cmd("ps", ["-p", pid, "-o", "pid="], stderr_to_stdout: true))
+  rescue
+    ErlangError -> false
+  end
+
   defp alive?(_), do: false
 
   defp fresh?(nil), do: true
