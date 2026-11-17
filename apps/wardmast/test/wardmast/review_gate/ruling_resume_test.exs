@@ -217,6 +217,48 @@ defmodule Wardmast.ReviewGate.RulingResumeTest do
       assert StubMerger.merge_count(@ref) == 0
     end
 
+    # bd-dhrb7j (#1435): amend put the ticket on the merge path; a send_back 16s
+    # later was recorded and nothing else moved — the ticket stayed Merging, its
+    # Watchdog kept the merge permission, and only converting the PR to draft
+    # stopped it.
+    for revoking <- [:send_back, :reject] do
+      test "#{revoking} after an amend on the same head revokes the permission", _ctx do
+        ws = workspace(%{"auto_merge" => false})
+        task = parked_ticket(ws)
+        StubMerger.next_open_ref(@ref)
+        StubMerger.queue_get(@ref, [green()])
+
+        rule(task, :amend)
+
+        wait_until(fn -> ticket(task.id).attention_cause == :awaiting_manual_merge end)
+        assert ticket(task.id).state == :merging
+        assert Watchdog.whereis(task.id) != nil
+        assert ticket(task.id).last_reviewed_sha == @head
+        assert :ok = Wardmast.ReviewGate.MergeAuthorization.check(task.id, @head)
+
+        rule(task, unquote(revoking))
+
+        # Back In progress, off the merge train, no standing merge permission.
+        assert ticket(task.id).state == :active
+        assert Watchdog.whereis(task.id) == nil
+        assert ticket(task.id).last_reviewed_sha != @head
+        assert ticket(task.id).attention_cause != :awaiting_manual_merge
+        assert ticket(task.id).pending_merge == nil
+
+        assert {:error, {:review_not_approved, %{resolution: unquote(revoking)}}} =
+                 Wardmast.ReviewGate.MergeAuthorization.check(task.id, @head)
+
+        assert StubMerger.merge_count(@ref) == 0
+      end
+    end
+
+    test "a send_back on a ticket that was not merging changes nothing about its state", _ctx do
+      ws = workspace(%{"auto_merge" => true})
+      task = parked_ticket(ws)
+      rule(task, :send_back)
+      assert ticket(task.id).state == :active
+    end
+
     test "a ticket that was never parked by the gate is left alone", _ctx do
       ws = workspace(%{"auto_merge" => true})
       {:ok, task} = Ash.create(Issue, %{title: "bare", workspace_id: ws.id})

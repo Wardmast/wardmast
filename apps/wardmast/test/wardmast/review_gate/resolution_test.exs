@@ -134,6 +134,81 @@ defmodule Wardmast.ReviewGate.ResolutionTest do
     end
   end
 
+  # bd-dhrb7j (#1435): an `amend` after a REQUEST_CHANGES round whose fix-round
+  # budget was spent read as "one more pass" and was in fact a permit to merge
+  # the head with the findings unaddressed.
+  describe "amend on a round the gate did not approve (explicit merge confirmation)" do
+    @head "5ff594325aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    defp amend_attrs(task, extra \\ %{}) do
+      Map.merge(
+        %{
+          task_id: task.id,
+          decision: :amend,
+          reasoning: "new ACs and implementer directions",
+          head_sha: @head
+        },
+        extra
+      )
+    end
+
+    setup %{task: task} do
+      review_round(task, 1, :request_changes, "VERDICT: REQUEST_CHANGES r1")
+      impl_round(task, 1)
+      review_round(task, 2, :request_changes, "VERDICT: REQUEST_CHANGES r2")
+      :ok
+    end
+
+    test "is refused, naming the head it would permit, until confirmed", %{task: task} do
+      assert {:error, {:invalid, msg}} =
+               Resolutions.record(amend_attrs(task), require_confirm_merge: true)
+
+      assert msg =~ "permits merging #{@head}"
+      assert msg =~ "REQUEST_CHANGES"
+      assert msg =~ "round 2"
+      assert msg =~ "--send-back"
+      assert msg =~ "--confirm-merge"
+      assert Resolutions.list(task.id) == []
+    end
+
+    test "confirm_merge records it, as the permit it is", %{task: task} do
+      assert {:ok, %Resolution{decision: :amend, head_sha: @head}} =
+               Resolutions.record(amend_attrs(task, %{"confirm_merge" => true}),
+                 require_confirm_merge: true
+               )
+    end
+
+    test "send_back, reject and accept_as_is are not held to it", %{task: task} do
+      for decision <- [:send_back, :reject, :accept_as_is] do
+        assert {:ok, _} =
+                 Resolutions.record(amend_attrs(task, %{decision: decision}),
+                   require_confirm_merge: true
+                 )
+      end
+    end
+
+    test "an amend on an approved round needs no confirmation", %{task: task} do
+      review_round(task, 3, :approve, "VERDICT: APPROVE")
+
+      assert {:ok, _} = Resolutions.record(amend_attrs(task), require_confirm_merge: true)
+    end
+
+    test "MCP review_gate_resolve and the head it names", %{task: task, coordinator: coord} do
+      args = %{
+        "task_id" => task.id,
+        "decision" => "amend",
+        "reasoning" => "x",
+        "head_sha" => @head
+      }
+
+      assert {:error, {:invalid, msg}} = Tools.review_gate_resolve(coord, args)
+      assert msg =~ "permits merging #{@head}"
+
+      assert {:ok, %{resolution: %{decision: :amend}}} =
+               Tools.review_gate_resolve(coord, Map.put(args, "confirm_merge", true))
+    end
+  end
+
   describe "review_gate_resolve MCP tool" do
     test "records a resolution in one call and returns it", %{task: task, coordinator: coord} do
       assert {:ok, %{resolution: res}} =
@@ -264,7 +339,8 @@ defmodule Wardmast.ReviewGate.ResolutionTest do
                  "gate" => "review_gate",
                  "decision" => "amend",
                  "reasoning" => reasoning,
-                 "actor" => "coordinator"
+                 "actor" => "coordinator",
+                 "confirm_merge" => true
                })
 
       # The record names the decision, its reasoning, who and when, and the

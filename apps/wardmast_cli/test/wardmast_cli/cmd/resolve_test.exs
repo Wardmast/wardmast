@@ -48,6 +48,37 @@ defmodule WardmastCli.Cmd.ResolveTest do
     assert out =~ "bd-001"
   end
 
+  test "--confirm-merge is sent as confirm_merge, and a permit says what it permits" do
+    stub_resolve()
+
+    {out, _err, code} =
+      capture(fn ->
+        Resolve.run(["bd-001", "--amend", "new ACs", "--confirm-merge"])
+      end)
+
+    assert code == 0
+    assert_received {:request, "POST", _, body}
+    assert body == %{"decision" => "amend", "reasoning" => "new ACs", "confirm_merge" => true}
+    # The stubbed resolution carries no head; the wording still says what amend does.
+    assert out =~ "permits merging"
+    assert out =~ "dispatches no further pass"
+  end
+
+  test "a send_back does not claim to permit a merge" do
+    test_pid = self()
+
+    Req.Test.stub(Process.get(:bd2_stub_name), fn conn ->
+      send(test_pid, :called)
+
+      conn
+      |> Plug.Conn.put_status(201)
+      |> Req.Test.json(Map.put(@resolution, "decision", "send_back"))
+    end)
+
+    {out, _err, 0} = capture(fn -> Resolve.run(["bd-001", "--send-back", "again"]) end)
+    refute out =~ "permits merging"
+  end
+
   test "each decision flag maps to its decision, with gate / round passed through" do
     for {flag, decision} <- [
           {"--accept-as-is", "accept_as_is"},
