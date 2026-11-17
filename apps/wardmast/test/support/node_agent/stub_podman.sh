@@ -124,8 +124,13 @@ case "$sub" in
     done
     if [ -n "$authfile" ]; then
       echo "$authfile" > "$D/pull.authfile"
-      stat -c '%a' "$authfile" > "$D/pull.authfile.mode"
-      sha256sum "$authfile" | cut -d' ' -f1 > "$D/pull.authfile.sha256"
+      # GNU `stat -c` / `sha256sum` on Linux; BSD `stat -f` / `shasum` on macOS.
+      { stat -c '%a' "$authfile" 2>/dev/null || stat -f '%Lp' "$authfile"; } > "$D/pull.authfile.mode"
+      if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$authfile" | cut -d' ' -f1 > "$D/pull.authfile.sha256"
+      else
+        shasum -a 256 "$authfile" | cut -d' ' -f1 > "$D/pull.authfile.sha256"
+      fi
     fi
     # a slow pull: holds until `pull_wait` is removed
     while [ -e "$D/pull_wait" ]; do sleep 0.05; done
