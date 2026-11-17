@@ -152,7 +152,7 @@ defmodule Wardmast.NodeAgent.K8s.PodRuntimeTest do
   # literally) stay on the memory volume for the run's life, 0600; the config dir holds
   # only a link to the MCP config, where agy looks for it.
   @agy_key ~s({"type":"service_account","private_key":"-----BEGIN PRIVATE KEY-----\\nMIIEvPOD\\n"})
-  @agy_mcp ~s({"mcpServers":{"arbiter":{"headers":{"Authorization":"Bearer mcp-pod-token"}}}})
+  @agy_mcp ~s({"mcpServers":{"wardmast":{"headers":{"Authorization":"Bearer mcp-pod-token"}}}})
 
   describe "secret files (bd-b2t0kw)" do
     @describetag spec: %{

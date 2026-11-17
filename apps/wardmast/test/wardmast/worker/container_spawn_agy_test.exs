@@ -139,7 +139,7 @@ defmodule Wardmast.Worker.ContainerSpawnAgyTest do
     # config in the host's per-worktree agy HOME, bearer and all.
     mcp = %{
       "mcpServers" => %{
-        "arbiter" => %{
+        "wardmast" => %{
           "serverUrl" => "http://127.0.0.1:41002/mcp",
           "headers" => %{"Authorization" => "Bearer mcp-scope-token"}
         }

@@ -161,10 +161,10 @@ on the memory volume beside the key and is linked into the config dir.
 
 ## What was and was not verified
 
-Verified in the test suite: the credential kind and its encryption, the `arb` command,
-the container's mounts, secret and env, the pod's `/boot` delivery and memory-volume
-layout (the real `seed` script), the pod spec holding no key, the controller's
-`caps.agy`, and placement sending an agy run to an agy node.
+Verified in the test suite: the credential kind and its encryption, the
+`ward account rotate` command, the container's mounts, secret and env, the pod's
+`/boot` delivery and memory-volume layout (the real `seed` script), the pod spec holding
+no key, the controller's `caps.agy`, and placement sending an agy run to an agy node.
 
 Not verified, because no Google Cloud project and no live cluster were available: a real
 key signing in through Vertex AI, the exact roles Google requires (the two above are
