@@ -154,6 +154,120 @@ defmodule Wardmast.Worker.ResumeSlotSeatTest do
     end
   end
 
+  describe "enforce: the pool is the one the resume will run on (provider / model)" do
+    # A ticket pinned to an agy account whose Gemini pool is full, while Claude
+    # has room (bd-dhrb7j: a resume under `--require-provider claude` was refused
+    # on antigravity:default gemini, the pool of the run's original provider).
+    setup ctx do
+      agy =
+        Ash.create!(ProviderAccount, %{
+          provider: :antigravity,
+          slug: "rss-agy-#{System.unique_integer([:positive])}",
+          max_concurrent: 3
+        })
+
+      Ash.create!(WorkspaceProviderAccount, %{
+        workspace_id: ctx.ws.id,
+        provider: :antigravity,
+        provider_account_id: agy.id
+      })
+
+      {:ok, pinned} =
+        ctx.ticket
+        |> Ash.Changeset.for_update(:pin_implementer, %{
+          implementer_account_id: agy.id,
+          implementer_family: "google"
+        })
+        |> Ash.update()
+
+      budget = fn pool, n ->
+        %Budget{
+          account: agy.id,
+          pool: pool,
+          budget: n,
+          binding: {:window, "5h"},
+          reason: "agy #{pool} stopped"
+        }
+      end
+
+      %{agy: agy, pinned: in_state(pinned, :merging), budget: budget}
+    end
+
+    test "without a provider the pin account is checked (the stranded case)", ctx do
+      seat_opts = [
+        budgets: [ctx.budget.("antigravity:gemini_models", 1)],
+        holders: %{{ctx.agy.id, "antigravity:gemini_models"} => ["bd-seat-1"]}
+      ]
+
+      assert {:defer, %{seat: %{account_id: account_id}}} =
+               ResumeSlot.admit(ctx.pinned,
+                 mode: :enforce,
+                 origin: :automatic,
+                 seat_opts: seat_opts
+               )
+
+      assert account_id == ctx.agy.id
+    end
+
+    test "a provider the resume will run on replaces the pin's account", ctx do
+      claude = seats(ctx, 3, 1)
+
+      seat_opts = [
+        budgets: [ctx.budget.("antigravity:gemini_models", 1) | claude[:budgets]],
+        holders:
+          Map.put(claude[:holders], {ctx.agy.id, "antigravity:gemini_models"}, ["bd-seat-9"])
+      ]
+
+      assert {:ok, :acquired} =
+               ResumeSlot.admit(ctx.pinned,
+                 mode: :enforce,
+                 origin: :human,
+                 provider: :claude,
+                 seat_opts: seat_opts
+               )
+    end
+
+    test "the provider's own account being full refuses, naming it", ctx do
+      assert {:error, {:slot_cap_full, %{seat: %{account_id: account_id, pool: "claude"}}}} =
+               ResumeSlot.admit(ctx.pinned,
+                 mode: :enforce,
+                 origin: :human,
+                 provider: :claude,
+                 seat_opts: seats(ctx, 1, 1)
+               )
+
+      assert account_id == ctx.account.id
+    end
+
+    test "a model selects the pool inside the provider's account", ctx do
+      seat_opts = [
+        budgets: [
+          ctx.budget.("antigravity:gemini_models", 1),
+          ctx.budget.("antigravity:claude_and_gpt_models", 2)
+        ],
+        holders: %{{ctx.agy.id, "antigravity:gemini_models"} => ["bd-seat-1"]}
+      ]
+
+      assert {:ok, :acquired} =
+               ResumeSlot.admit(ctx.pinned,
+                 mode: :enforce,
+                 origin: :human,
+                 provider: :antigravity,
+                 model: "claude-sonnet-5-5",
+                 seat_opts: seat_opts
+               )
+
+      assert {:error, {:slot_cap_full, %{seat: %{pool: "antigravity:gemini_models"}}}} =
+               ResumeSlot.admit(ctx.pinned,
+                 mode: :enforce,
+                 origin: :human,
+                 provider: :antigravity,
+                 model: "gemini-3.8-flash-high",
+                 seat_opts: seat_opts
+               )
+    end
+  end
+
   describe "a CI fix or conflict pass (follow_up: true)" do
     test "enforce: never held for a full pool (I9)", ctx do
       ticket = in_state(ctx.ticket, :merging)

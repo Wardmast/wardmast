@@ -999,19 +999,66 @@ defmodule Wardmast.Worker.Dispatch do
   # worktree is a better answer than a full cap) and before the prior worker is
   # stopped, so a refusal or a deferral leaves the task exactly as it was. See
   # `Wardmast.Worker.ResumeSlot` for the rule.
+  #
+  # bd-dhrb7j: under `scheduler_admission: enforce` the seat is on the pool the
+  # resume will RUN on — the caller's provider, the ticket's `provider_constraint`
+  # or routing's pick, and the caller's `--model` — not the original run's pin.
+  # Reading the pin refused a `--require-provider claude` resume on the stopped
+  # agy pool the ticket was being moved off.
   defp resume_slot(%Issue{} = task, kind, opts) do
-    admit_opts = [
-      origin: Keyword.get(opts, :resume_origin, :human),
-      force: Keyword.get(opts, :force_slot) == true,
-      actor: Keyword.get(opts, :slot_override_actor),
-      slot_admitted: Keyword.get(opts, :slot_admitted) == true
-    ]
+    admit_opts =
+      [
+        origin: Keyword.get(opts, :resume_origin, :human),
+        force: Keyword.get(opts, :force_slot) == true,
+        actor: Keyword.get(opts, :slot_override_actor),
+        slot_admitted: Keyword.get(opts, :slot_admitted) == true,
+        provider: admission_provider(task, opts),
+        model: Keyword.get(opts, :model)
+      ] ++ Keyword.take(opts, [:seat_opts])
 
     case ResumeSlot.admit(task, admit_opts) do
       {:ok, :forced} -> {:ok, Keyword.put(opts, :slot_cap_override, true)}
       {:ok, _admitted} -> {:ok, opts}
       {:defer, info} -> defer_resume(task, kind, opts, info)
       {:error, _} = error -> error
+    end
+  end
+
+  # The provider the resume will most likely run on, for the admission's pool:
+  # the caller's, else what routing and
+  # the ticket's constraint resolve now. `nil` (the pin decides) when it cannot
+  # be predicted — admission must never fail on the prediction itself.
+  defp admission_provider(task, opts) do
+    caller_override(opts) || predicted_resume_provider(task, opts)
+  end
+
+  defp predicted_resume_provider(task, opts) do
+    workspace = load_workspace(task)
+
+    {provider, _fallback, _decision} =
+      ProviderRouting.implementer_provider(
+        task,
+        workspace,
+        Keyword.get(opts, :routing_role, :resume),
+        security: routing_security(workspace, opts),
+        repo: Keyword.get(opts, :repo)
+      )
+
+    constrained_provider(task, workspace, provider)
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  # A pick the ticket's constraint forbids is replaced by the pool pick the
+  # constraint allows (the one `constraint_verdict/2` would hold on).
+  defp constrained_provider(task, workspace, provider) do
+    with false <- ProviderConstraint.allows?(task, provider),
+         {:ok, picked} <- ProviderConstraint.pick(workspace, task) do
+      picked
+    else
+      _ -> provider
     end
   end
 
