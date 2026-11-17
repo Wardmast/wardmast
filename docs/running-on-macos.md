@@ -46,7 +46,7 @@ that is not a source checkout.
 | `arb restart` | `launchctl kickstart -k` (bootstraps the plist if not loaded) |
 | `arb stop` | `launchctl bootout` (unloads the job so `KeepAlive` does not respawn it) |
 | `arb status` | reports the service state from `launchctl print` |
-| `arb uninstall service` | unloads the job and removes the plist (idempotent) |
+| `arb install service --uninstall` | unloads the job and removes the plist (idempotent) |
 
 Re-run `arb install service` after changing `PATH` or secrets to refresh
 `wardmast.env`.
