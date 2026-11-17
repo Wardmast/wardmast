@@ -70,7 +70,14 @@ defmodule Wardmast.ReviewGate.Resolutions do
       |> case do
         {:ok, resolution} ->
           broadcast(resolution)
-          if Keyword.get(opts, :resume, true), do: RulingResume.resume_async(resolution)
+
+          if Keyword.get(opts, :resume, true) do
+            RulingResume.resume_async(resolution)
+            # bd-dhrb7j: a send_back / reject withdraws an earlier amend's merge
+            # permission, and the merge path it set going.
+            RulingResume.revoke_async(resolution)
+          end
+
           {:ok, resolution}
 
         {:error, err} ->

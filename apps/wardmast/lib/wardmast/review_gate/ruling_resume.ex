@@ -57,6 +57,7 @@ defmodule Wardmast.ReviewGate.RulingResume do
 
   require Logger
 
+  alias Wardmast.Mergers.PendingMerge
   alias Wardmast.ReviewGate.{MergeAuthorization, Resolution, Resolutions}
   alias Wardmast.Tasks.{Attention, Issue, ReviewPark}
   alias Wardmast.Worker
@@ -152,6 +153,149 @@ defmodule Wardmast.ReviewGate.RulingResume do
       _ -> :none
     end
   end
+
+  # ---- revoking a ruling ------------------------------------------------------
+
+  @revoking [:send_back, :reject]
+
+  @doc "Whether `decision` withdraws an earlier merge-permitting ruling."
+  @spec revoking?(atom()) :: boolean()
+  def revoking?(decision), do: decision in @revoking
+
+  @doc """
+  `revoke/1`, off the caller's process unless `config :wardmast, :ruling_resume`
+  says `:sync` or `:off` (the same switch as `resume_async/1`).
+  """
+  @spec revoke_async(Resolution.t()) :: :ok
+  def revoke_async(%Resolution{gate: :review_gate, decision: decision} = resolution)
+      when decision in @revoking do
+    case Application.get_env(:wardmast, :ruling_resume, :async) do
+      :off ->
+        :ok
+
+      :sync ->
+        _ = revoke(resolution)
+        :ok
+
+      _async ->
+        _ = Task.Supervisor.start_child(Wardmast.TaskSupervisor, fn -> revoke(resolution) end)
+        :ok
+    end
+  end
+
+  def revoke_async(_resolution), do: :ok
+
+  @doc """
+  A `send_back` / `reject` after an `accept_as_is` / `amend` withdraws the merge
+  permission (bd-dhrb7j, #1435).
+
+  `MergeAuthorization` already reads the newest answer, so the ruling stops
+  covering the head by itself. What outlived it was everything the ruling had
+  *set in motion*: the ticket sat in Merging under a Watchdog, with a pending
+  merge armed and the ruled head stamped as the reviewed baseline the
+  stale-SHA guards merge against. Revoking undoes that, mirroring what a
+  revise resume of a Merging ticket does (`Dispatch`): the Watchdog stops (so
+  the ticket leaves the merge train), the pending merge is dropped, the ticket
+  goes back In progress, the stamped head stops counting as reviewed and the
+  "ready to merge" attention clears. Nothing is dispatched — the coordinator
+  resumes the worker with the usual verbs.
+
+  Does nothing for a ticket no earlier ruling had permitted. Never raises;
+  returns `{:ok, :revoked}` or `{:skipped, why}`.
+  """
+  @spec revoke(Resolution.t()) :: {:ok, :revoked} | {:skipped, term()}
+  def revoke(%Resolution{gate: :review_gate, decision: decision} = resolution)
+      when decision in @revoking do
+    with {:ok, task} <- fetch(resolution.task_id),
+         %Resolution{} = prior <- prior_permission(resolution) do
+      do_revoke(task, prior, resolution)
+    else
+      {:skip, why} -> {:skipped, why}
+      nil -> {:skipped, :no_standing_ruling}
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "RulingResume: revoking task=#{resolution.task_id} raised: #{Exception.message(e)}"
+      )
+
+      {:skipped, :raised}
+  catch
+    :exit, reason ->
+      Logger.warning(
+        "RulingResume: revoking task=#{resolution.task_id} exited: #{inspect(reason)}"
+      )
+
+      {:skipped, :exited}
+  end
+
+  def revoke(_resolution), do: {:skipped, :not_revoking}
+
+  # The newest merge-permitting ruling before `resolution`, when no other
+  # revoking answer already sits between them.
+  defp prior_permission(%Resolution{} = resolution) do
+    earlier =
+      resolution.task_id
+      |> Resolutions.list()
+      |> Enum.filter(&(&1.gate == :review_gate and &1.id != resolution.id))
+      |> Enum.filter(&(DateTime.compare(&1.inserted_at, resolution.inserted_at) != :gt))
+
+    case List.last(earlier) do
+      %Resolution{decision: decision} = last when decision in @authorising -> last
+      _ -> nil
+    end
+  end
+
+  defp do_revoke(task, prior, resolution) do
+    # The Watchdog stops before the ticket moves: one mid-poll could otherwise
+    # land the merge the ruling permitted.
+    :ok = Watchdog.stop(task.id)
+    _ = PendingMerge.clear(task.id)
+    clear_stamped_head(task, prior)
+
+    if task.state == :merging do
+      :ok = Issue.back_to_work(task.id)
+    end
+
+    clear_ready_to_merge(task.id)
+
+    announce(
+      task,
+      "revoked",
+      resolution,
+      "#{prior.decision} ruling on #{short(prior.head_sha)} revoked by #{resolution.decision}"
+    )
+
+    {:ok, :revoked}
+  end
+
+  # The ruled head was stamped as the reviewed baseline (`stamp_reviewed_head/2`);
+  # left in place the stale-SHA guards would still merge it.
+  defp clear_stamped_head(%Issue{id: id}, %Resolution{head_sha: sha}) when is_binary(sha) do
+    with {:ok, %Issue{last_reviewed_sha: ^sha} = fresh} <- Ash.get(Issue, id),
+         {:error, reason} <- Ash.update(fresh, %{last_reviewed_sha: nil}) do
+      Logger.warning(
+        "RulingResume: could not clear the ruled head #{sha} from task=#{id}: #{inspect(reason)}"
+      )
+    end
+
+    :ok
+  end
+
+  defp clear_stamped_head(_task, _prior), do: :ok
+
+  defp clear_ready_to_merge(id) do
+    case Ash.get(Issue, id) do
+      {:ok, %Issue{attention_cause: :awaiting_manual_merge}} ->
+        Attention.clear(id, :ruling_revoked)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp short(sha) when is_binary(sha), do: String.slice(sha, 0, 12)
+  defp short(_), do: "an unknown head"
 
   # ---- the paths ------------------------------------------------------------
 
