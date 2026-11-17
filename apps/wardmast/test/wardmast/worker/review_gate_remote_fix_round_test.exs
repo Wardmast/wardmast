@@ -29,6 +29,7 @@ defmodule Wardmast.Worker.ReviewGateRemoteFixRoundTest do
   @revise_amend Path.expand("../../fixtures/revise_amend_message.sh", __DIR__)
   @revise_rewrite Path.expand("../../fixtures/revise_rewrite.sh", __DIR__)
   @revise_hang Path.expand("../../fixtures/revise_hang.sh", __DIR__)
+  @revise_gated Path.expand("../../fixtures/revise_commit_when_released.sh", __DIR__)
 
   setup do
     CircuitBreaker.reset_all()
@@ -471,8 +472,13 @@ defmodule Wardmast.Worker.ReviewGateRemoteFixRoundTest do
       %{current_id: failed_id} = :sys.get_state(gate)
 
       # A node with room is still there; the re-run must not go back to it. The
-      # re-run answers at once, with a commit.
-      :sys.replace_state(gate, fn s -> %{s | revise_command: [@revise_commit]} end)
+      # re-run answers with a commit, but only once released below: were it free to
+      # finish at once the gate would advance to round 2 (and push) on its own
+      # clock, and the round/forge assertions would race that, not test the gate.
+      release = Path.join(ctx.tmp, "release-rf-9")
+      # Never leave the fixture polling forever if an assertion fails first.
+      on_exit(fn -> File.write(release, "") end)
+      :sys.replace_state(gate, fn s -> %{s | revise_command: [@revise_gated, release]} end)
 
       # What `ClaudeSession` broadcasts for a node that reported `"checkout": "failed…"`.
       topic = "worker:" <> failed_id
@@ -485,9 +491,11 @@ defmodule Wardmast.Worker.ReviewGateRemoteFixRoundTest do
       assert state.fix_round_local? == true
       assert state.round == 1
 
-      # The failed pass was not finished: nothing was pushed for it, and the re-run's
-      # work is what gets reviewed.
+      # The failed pass was not finished: nothing was pushed for it (the re-run is
+      # still blocked, so this holds for the re-run too), and the re-run's work is
+      # what gets reviewed once it is released.
       assert forge_head(ctx, rig.branch) == before_push
+      File.write!(release, "")
       wait_until(fn -> Ash.get!(Issue, rig.task.id).last_reviewed_sha != nil end, 60_000)
     end
   end

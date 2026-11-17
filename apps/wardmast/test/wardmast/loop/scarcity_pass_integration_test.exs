@@ -184,6 +184,12 @@ defmodule Wardmast.Loop.ScarcityPassIntegrationTest do
     assert md =~ "| 7d calibration |"
     assert md =~ "mean 7d share"
     assert md =~ "**7d-window share:**"
-    refute md =~ "5h"
+
+    # The report names tasks by their id (`scpw-5hx9x1`), and the id suffix is
+    # random base-36: about 1 in 170 runs draws one containing "5h", which made
+    # this refute flake. Blank the ids out so only report *prose* is checked
+    # for a stale 5h window; every other 5h mention must still be absent.
+    prose = String.replace(md, ~r/#{ws.prefix}-[a-z0-9]+/, "<task-id>")
+    refute prose =~ "5h"
   end
 end
