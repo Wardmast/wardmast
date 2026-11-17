@@ -400,27 +400,35 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
 
   describe "unit_contents/3 (release mode — root is not a source checkout)" do
     test "user units omit docker ordering (can't cross the manager boundary)" do
-      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
+      contents =
+        InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
+
       refute contents =~ "docker.service"
       assert contents =~ "WantedBy=default.target"
       assert contents =~ "EnvironmentFile=-/home/user/.wardmast/wardmast.env"
     end
 
     test "uses the release binary as ExecStart" do
-      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
+      contents =
+        InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
+
       assert contents =~ "ExecStart=/home/user/.wardmast/current/bin/wardmast start"
       assert contents =~ "Type=exec"
       refute contents =~ "RemainAfterExit"
     end
 
     test "does not bake MIX_HOME or PATH directly into the unit (PATH goes in EnvironmentFile instead)" do
-      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
+      contents =
+        InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
+
       refute contents =~ "MIX_HOME"
       refute contents =~ ~r/Environment=PATH=/
     end
 
     test "includes Restart=on-failure and RestartSec so systemd auto-retries" do
-      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
+      contents =
+        InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
+
       assert contents =~ "Restart=on-failure"
       assert contents =~ "RestartSec=10"
     end
@@ -451,7 +459,9 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
     end
 
     test "user unit routes output to a file so logs survive reboots without journald group" do
-      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
+      contents =
+        InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
+
       assert contents =~ "StandardOutput=append:/home/user/.wardmast/log/wardmast.log"
       assert contents =~ "StandardError=append:/home/user/.wardmast/log/wardmast.log"
     end
@@ -465,7 +475,9 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
     end
 
     test "a root with no mix.exs/apps is release mode even if it happens to share a path prefix" do
-      contents = InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
+      contents =
+        InstallService.unit_contents(:user, "/home/user/.wardmast", "/home/user/.wardmast")
+
       refute contents =~ ".run-server.sh"
     end
 

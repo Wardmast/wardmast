@@ -58,7 +58,8 @@ defmodule Wardmast.NodeAgent.K8s.SelfUpgradeTest do
       paths = for r <- FakeK8sApi.requests(api), do: {r.method, r.path}
 
       assert paths == [
-               {"GET", "/apis/apps/v1/namespaces/wardmast-workers/deployments/wardmast-controller"},
+               {"GET",
+                "/apis/apps/v1/namespaces/wardmast-workers/deployments/wardmast-controller"},
                {"PATCH",
                 "/apis/apps/v1/namespaces/wardmast-workers/deployments/wardmast-controller"}
              ]

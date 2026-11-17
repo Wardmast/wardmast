@@ -219,7 +219,10 @@ defmodule WardmastCli.Scripts.MigrateFromArbiterTest do
       assert dropin =~ "OOMPolicy=continue"
 
       assert File.exists?(Path.join(units, "wardmast-logrotate.timer"))
-      assert File.read!(Path.join(units, "wardmast-logrotate.service")) =~ "#{home}/.wardmast/log/"
+
+      assert File.read!(Path.join(units, "wardmast-logrotate.service")) =~
+               "#{home}/.wardmast/log/"
+
       assert File.read!(Path.join(home, ".wardmast/log/logrotate.conf")) =~ "wardmast.log"
 
       # The old unit and its drop-ins are gone from the unit search path.

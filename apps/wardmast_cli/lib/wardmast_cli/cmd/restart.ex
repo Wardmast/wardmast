@@ -227,7 +227,10 @@ defmodule WardmastCli.Cmd.Restart do
   defp probe_systemd, do: Supervisor.impl().service_state()
 
   defp refuse_if_unit_file_on_disk! do
-    case Enum.find(Supervisor.impl().unit_dirs(), &File.exists?(Path.join(&1, "wardmast.service"))) do
+    case Enum.find(
+           Supervisor.impl().unit_dirs(),
+           &File.exists?(Path.join(&1, "wardmast.service"))
+         ) do
       nil ->
         :ok
 

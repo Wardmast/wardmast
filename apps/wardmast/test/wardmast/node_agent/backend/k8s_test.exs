@@ -79,7 +79,11 @@ defmodule Wardmast.NodeAgent.Backend.K8sTest do
         read_credential: fn _ -> {:ok, @credential} end,
         version: "1.2.3",
         backend: Backend.K8s,
-        cluster: %{namespace: "wardmast-workers", k8s_version: "v1.31.2+fake", self_upgrade?: true}
+        cluster: %{
+          namespace: "wardmast-workers",
+          k8s_version: "v1.31.2+fake",
+          self_upgrade?: true
+        }
       )
 
     Map.merge(env, %{config: config, path: path, loader: loader})

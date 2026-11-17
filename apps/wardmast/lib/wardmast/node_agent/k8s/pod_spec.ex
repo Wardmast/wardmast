@@ -671,7 +671,8 @@ defmodule Wardmast.NodeAgent.K8s.PodSpec do
 
     if spread["enabled"] do
       selector = %{
-        "matchLabels" => Map.take(run.labels, ["app.kubernetes.io/component", "wardmast.dev/node"])
+        "matchLabels" =>
+          Map.take(run.labels, ["app.kubernetes.io/component", "wardmast.dev/node"])
       }
 
       for key <- spread["topology_keys"] do

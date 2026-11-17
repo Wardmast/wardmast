@@ -128,7 +128,16 @@ defmodule Wardmast.Worker.JailHideTest do
 
       # `.grok` holds the canonical grok refresh token (bd-9p4lx9): the broker is
       # its only reader, so a jailed worker must not see it under `--ro-bind / /`.
-      for d <- [".claude", ".codex", ".grok", ".config/gh", ".ssh", ".aws", ".gemini", ".wardmast"] do
+      for d <- [
+            ".claude",
+            ".codex",
+            ".grok",
+            ".config/gh",
+            ".ssh",
+            ".aws",
+            ".gemini",
+            ".wardmast"
+          ] do
         assert Path.join(h, d) in dirs, "#{d} not masked"
       end
 

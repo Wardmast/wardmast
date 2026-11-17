@@ -35,7 +35,10 @@ defmodule Wardmast.Release.SelfDeployTest do
   defp stub_cmds(arb, opts \\ []) do
     test_pid = self()
     active = Keyword.get(opts, :active_units, "")
-    run = Keyword.get(opts, :systemd_run, {"Running as unit: wardmast-deploy-v1.2.3.service\n", 0})
+
+    run =
+      Keyword.get(opts, :systemd_run, {"Running as unit: wardmast-deploy-v1.2.3.service\n", 0})
+
     list = Keyword.get(opts, :list, {active, 0})
 
     fun = fn cmd, args, run_opts ->

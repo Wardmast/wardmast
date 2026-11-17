@@ -69,7 +69,8 @@ defmodule WardmastCli.Supervisor.SystemdTest do
     test "failure carries the die title and detail" do
       stub(fn _, _, _ -> {"nope\n", 1} end)
 
-      assert {:error, "systemctl --user restart wardmast.service failed (exit 1)", "Output:\nnope"} =
+      assert {:error, "systemctl --user restart wardmast.service failed (exit 1)",
+              "Output:\nnope"} =
                Systemd.restart_service()
     end
 

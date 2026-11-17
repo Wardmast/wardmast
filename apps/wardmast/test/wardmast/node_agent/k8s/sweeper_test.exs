@@ -13,7 +13,8 @@ defmodule Wardmast.NodeAgent.K8s.SweeperTest do
   end
 
   defp run_pod(run, extra_labels \\ %{}, meta \\ %{}),
-    do: pod("pod-#{run}", Map.merge(@labels, Map.put(extra_labels, "wardmast.dev/run", run)), meta)
+    do:
+      pod("pod-#{run}", Map.merge(@labels, Map.put(extra_labels, "wardmast.dev/run", run)), meta)
 
   defp select(pods, overrides \\ []) do
     opts =
@@ -51,7 +52,10 @@ defmodule Wardmast.NodeAgent.K8s.SweeperTest do
 
   test "another install's or another node's pods are never selected" do
     other_install =
-      pod("a", %{@labels | "wardmast.dev/install" => "inst-2"} |> Map.put("wardmast.dev/run", "r1"))
+      pod(
+        "a",
+        %{@labels | "wardmast.dev/install" => "inst-2"} |> Map.put("wardmast.dev/run", "r1")
+      )
 
     other_node =
       pod("b", %{@labels | "wardmast.dev/node" => "node-2"} |> Map.put("wardmast.dev/run", "r2"))

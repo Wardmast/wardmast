@@ -800,7 +800,10 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifestTest do
   end
 
   describe "values/2 (KH9: GET /nodes/join/values.yaml)" do
-    @chart_schema Path.expand("../../../../../../charts/wardmast-node/values.schema.json", __DIR__)
+    @chart_schema Path.expand(
+                    "../../../../../../charts/wardmast-node/values.schema.json",
+                    __DIR__
+                  )
     @values_server [
       primary_url: "https://arbiter.tail1234.ts.net",
       registry: "registry.example.test/arbiter",
