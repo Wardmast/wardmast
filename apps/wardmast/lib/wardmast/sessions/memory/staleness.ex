@@ -69,7 +69,9 @@ defmodule Wardmast.Sessions.Memory.Staleness do
   @behavioural ~w(user feedback)
   @stale_statuses [:file_missing, :anchor_missing, :line_out_of_range, :undefined, :missing]
   @anchor_hash ~r/\A[0-9a-f]{16}\z/
-  @definition ~S"^\s*(defmodule|defprotocol)\s+[A-Z][A-Za-z0-9_.]*"
+  # POSIX classes, not `\s`: this runs under `git grep -E`, and macOS's regex
+  # engine reads `\s` as a literal `s`, so no definition matched there (bd-datu4q).
+  @definition ~S"^[[:space:]]*(defmodule|defprotocol)[[:space:]]+[A-Z][A-Za-z0-9_.]*"
 
   @type status :: :ok | :stale | :unverified
 

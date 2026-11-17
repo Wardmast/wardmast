@@ -215,7 +215,7 @@ defmodule Wardmast.Reviews.ConflictResolutionTest do
     } do
       main_moves(dir, "line 4", "line 4 (main)")
 
-      git(dir, ["checkout", "-q", "-b", "head", "feat"])
+      git(dir, ["checkout", "-q", "-b", "resolved", "feat"])
       git(dir, ["rebase", "main"], allow_failure: true)
       git(dir, ["rm", "-q", "-f", "f.txt"])
       git(dir, ["-c", "core.editor=true", "rebase", "--continue"])

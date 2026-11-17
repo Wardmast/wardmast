@@ -534,7 +534,7 @@ defmodule Wardmast.Worker.Jail do
     mkdir -p "$r" && chmod 700 "$r" || exit 125
     find "$r" -mindepth 1 -maxdepth 1 -type d -mmin +60 -exec rm -rf {} + 2>/dev/null
     d=$(mktemp -d "$r/run.XXXXXX") || exit 125
-    n=$(printf %s "$d/bus" | wc -c)
+    n=$(printf %s "$d/bus" | wc -c | tr -d " ")
     if [ "$n" -gt 107 ]; then
       echo "keyring proxy socket path too long ($n bytes): $d/bus" >&2
       rm -rf "$d"; exit 125

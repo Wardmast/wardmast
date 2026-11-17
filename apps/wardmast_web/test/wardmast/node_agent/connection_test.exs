@@ -298,7 +298,7 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
 
     # the container was removed by name, the run reported cancelled "fenced"
     assert_receive {:run_push, "f1", "exit", %{"cancelled" => true, "reason" => "fenced"}}, 5_000
-    assert File.read!(Path.join(stub, "calls")) =~ "rm --force --ignore --time 0 arb-f1"
+    assert stub_calls(stub) =~ "rm --force --ignore --time 0 arb-f1"
     assert File.dir?(Path.join([config.node_home, "runs", "f1", "worktree"]))
   end
 
@@ -424,7 +424,7 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
       stop_supervised!(FakeNode.Endpoint)
 
       wait_until(fn ->
-        File.read!(Path.join(stub, "calls")) =~ "rm --force --ignore --time 0 arb-g1"
+        stub_calls(stub) =~ "rm --force --ignore --time 0 arb-g1"
       end)
 
       assert status(config)["fenced_at"] != nil
@@ -445,7 +445,7 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
 
       # well past the grace the first disconnect would have run out at: nothing was fenced
       refute_receive {:run_push, "g2", "exit", _}, 1_200
-      refute File.read!(Path.join(stub, "calls")) =~ "rm --force"
+      refute stub_calls(stub) =~ "rm --force"
       assert Wardmast.NodeAgent.Run.info("g2")["state"] == "running"
     end
   end
@@ -609,6 +609,15 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
       {:fake_node, _, _} -> flush_fake_node()
     after
       0 -> :ok
+    end
+  end
+
+  # The stand-in podman creates `calls` on its first invocation; polling before then
+  # (a slow runner) must read "nothing yet", not raise.
+  defp stub_calls(stub) do
+    case File.read(Path.join(stub, "calls")) do
+      {:ok, calls} -> calls
+      {:error, :enoent} -> ""
     end
   end
 

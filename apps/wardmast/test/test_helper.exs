@@ -1,3 +1,13 @@
+# bd-datu4q: macOS host tuning (TMPDIR realpath, wider assert_receive_timeout). Must
+# run before anything calls System.tmp_dir!/0. A no-op on Linux; see the script.
+host_tuning =
+  "../../../scripts/test_host_tuning.exs"
+  |> Path.expand(__DIR__)
+  |> Code.eval_file()
+  |> elem(0)
+
+host_tuning.normalize_tmpdir.(System.get_env(), :os.type())
+
 # SI1: the CLIs a container spawn mounts and a publish layers come from the
 # pinned upstream cache (`Wardmast.Worker.CliSet`), never from a CLI installed on
 # the host. The suite gets a fixture cache by default; a test about an empty or
@@ -117,7 +127,7 @@ ExUnit.start(
       ] ++
         tmux_exclude ++ qwen_exclude ++ linux_exclude
   ] ++
-    max_cases_opts
+    host_tuning.ex_unit_opts.(System.get_env(), :os.type()) ++ max_cases_opts
 )
 
 # `mix test` applies its `--include`/`--exclude` before loading this file, so

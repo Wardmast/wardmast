@@ -133,6 +133,8 @@ defmodule Wardmast.Worker.MemoryCapWorkerTest do
     end
   end
 
+  # Linux-only: the memory-cap scope is a systemd-run cgroup scope; systemd/cgroups exist only on Linux
+  @tag :linux
   test "the agent runs through the scope wrapper and the scope is recorded on the run",
        %{argv_log: argv_log} do
     {_state, run, task_id} = run_agent(["sh", "-c", "echo hi $5; exit 3"])
@@ -147,6 +149,8 @@ defmodule Wardmast.Worker.MemoryCapWorkerTest do
   end
 
   # bd-6zm33r AC1 (wiring half; the real-process half is the :live_systemd test).
+  # Linux-only: the memory-cap scope is a systemd-run cgroup scope; systemd/cgroups exist only on Linux
+  @tag :linux
   test "the run's scope is stopped once the agent exits, on any outcome",
        %{stop_log: stop_log} do
     {_state, run, _task_id} = run_agent(["sh", "-c", "exit 0"])
@@ -160,6 +164,8 @@ defmodule Wardmast.Worker.MemoryCapWorkerTest do
 
   # bd-6zm33r AC1, teardown path: the worker is stopped while the agent still runs,
   # so no :exit_status ever arrives; `terminate/2` must stop the scope itself.
+  # Linux-only: the memory-cap scope is a systemd-run cgroup scope; systemd/cgroups exist only on Linux
+  @tag :linux
   test "the run's scope is stopped when the worker is torn down with the agent still running",
        %{stop_log: stop_log} do
     task_id = "bd-memcap-#{System.unique_integer([:positive])}"
@@ -185,6 +191,8 @@ defmodule Wardmast.Worker.MemoryCapWorkerTest do
     assert File.read!(stop_log) |> String.split("\n", trim: true) == [scope]
   end
 
+  # Linux-only: the memory-cap scope is a systemd-run cgroup scope; systemd/cgroups exist only on Linux
+  @tag :linux
   test "a scope systemd OOM-killed fails the run as memory_cap_exceeded",
        %{oom_marker: oom_marker, reset_marker: reset_marker} do
     File.write!(oom_marker, "")

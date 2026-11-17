@@ -668,11 +668,31 @@ defmodule Wardmast.Worker.DispatchTest do
       tmp = Path.join(System.tmp_dir!(), "dispatch-claude-#{:erlang.unique_integer([:positive])}")
       File.mkdir_p!(tmp)
 
-      on_exit(fn -> File.rm_rf!(tmp) end)
+      on_exit(fn -> rm_rf_settled!(tmp) end)
       # Registered after the rm_rf, so it runs first (on_exit is LIFO).
       on_exit(&await_mcp_verify_tasks/0)
 
       %{tmp: tmp}
+    end
+
+    # A stubbed provider CLI or a late worktree cleanup can still be writing under
+    # `tmp` when teardown starts (slower on a macOS runner), and a recursive delete
+    # that races a write fails with "file already exists". Retry until it settles.
+    defp rm_rf_settled!(path, tries \\ 50) do
+      case File.rm_rf(path) do
+        {:ok, _} ->
+          :ok
+
+        {:error, _reason, _file} when tries > 1 ->
+          Process.sleep(100)
+          rm_rf_settled!(path, tries - 1)
+
+        {:error, reason, file} ->
+          raise File.Error,
+            reason: reason,
+            action: "remove files and directories recursively from",
+            path: file
+      end
     end
 
     # A codex dispatch fires `Codex.verify_connection/1` and
@@ -715,7 +735,10 @@ defmodule Wardmast.Worker.DispatchTest do
 
       File.write!(stub, """
       #!/bin/sh
-      for a in "$@"; do echo "$a" >> #{argv_file}; done
+      # Built beside the file and moved into place, so a reader polling for it sees
+      # the whole argv or nothing (appending in place let a slow runner read half).
+      for a in "$@"; do echo "$a" >> #{argv_file}.part; done
+      [ -e #{argv_file}.part ] && mv #{argv_file}.part #{argv_file}
       exit 0
       """)
 

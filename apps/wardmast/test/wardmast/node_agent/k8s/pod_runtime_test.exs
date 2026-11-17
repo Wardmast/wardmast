@@ -130,6 +130,8 @@ defmodule Wardmast.NodeAgent.K8s.PodRuntimeTest do
                    ]
                  }
 
+    # Linux-only: the pod init-container scripts (priv/k8s_pod) use GNU coreutils flags and only run in the Linux worker image
+    @tag :linux
     test "land in the tree, the config dir and the run volume; the seed layer is copied in",
          ctx do
       layer = Path.join(ctx.tmp_dir, "layer")
@@ -210,6 +212,8 @@ defmodule Wardmast.NodeAgent.K8s.PodRuntimeTest do
     # The deps cache ships `mix_home/` in the seed layer for a podman run's `HOME`; a pod
     # takes Hex from the image's MIX_HOME, so a copy in the checkout is only a stray
     # untracked directory that trips the commit gate.
+    # Linux-only: the pod init-container scripts (priv/k8s_pod) use GNU coreutils flags and only run in the Linux worker image
+    @tag :linux
     test "is not copied into the worktree, and dirs a run points MIX_HOME at are git-excluded",
          ctx do
       layer = Path.join(ctx.tmp_dir, "layer")
@@ -319,6 +323,8 @@ defmodule Wardmast.NodeAgent.K8s.PodRuntimeTest do
       assert {0, _} = terminate(snap)
     end
 
+    # Linux-only: the pod init-container scripts (priv/k8s_pod) use GNU coreutils flags and only run in the Linux worker image
+    @tag :linux
     test "vetoes a tree with too much untracked payload and exits 1", ctx do
       File.write!(Path.join(ctx.wt, "big.bin"), :binary.copy("x", 5_000))
       snap = start_snapshotter(put_env(ctx.snap_env, "ARB_MAX_UNTRACKED_BYTES", "1000"))

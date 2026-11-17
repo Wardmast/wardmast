@@ -2,6 +2,7 @@ defmodule Wardmast.Worker.Worktree do
   require Logger
 
   alias Wardmast.Worker.DepsRelocate
+  alias Wardmast.Worker.PortableCp
   alias Wardmast.Worker.PrivateClone
   alias Wardmast.Worker.ReleaseEnv
 
@@ -2666,7 +2667,7 @@ defmodule Wardmast.Worker.Worktree do
           # code is held to it; see the note in .credo.exs.
           # credo:disable-for-next-line Credo.Check.Refactor.Nesting
           unless File.exists?(dest_dep) do
-            System.cmd("cp", ["-a", "--reflink=auto", source_dep, dest_dep],
+            System.cmd("cp", PortableCp.args(["-a", "--reflink=auto", source_dep, dest_dep]),
               stderr_to_stdout: true
             )
           end
@@ -2730,7 +2731,9 @@ defmodule Wardmast.Worker.Worktree do
   defp copy_seed_entry(source, dest, rel) do
     File.mkdir_p!(Path.dirname(dest))
 
-    case System.cmd("cp", ["-a", "--reflink=auto", source, dest], stderr_to_stdout: true) do
+    case System.cmd("cp", PortableCp.args(["-a", "--reflink=auto", source, dest]),
+           stderr_to_stdout: true
+         ) do
       {_out, 0} -> true
       {out, code} -> warn_seed_failure(rel, "cp exited #{code}: #{String.trim(out)}")
     end
@@ -2814,7 +2817,9 @@ defmodule Wardmast.Worker.Worktree do
         dest_dep = Path.join(dest_deps, dep)
 
         unless File.exists?(dest_dep) do
-          System.cmd("cp", ["-a", "--reflink=auto", source_dep, dest_dep], stderr_to_stdout: true)
+          System.cmd("cp", PortableCp.args(["-a", "--reflink=auto", source_dep, dest_dep]),
+            stderr_to_stdout: true
+          )
         end
       end)
     end
