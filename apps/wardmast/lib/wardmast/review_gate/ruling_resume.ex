@@ -237,8 +237,10 @@ defmodule Wardmast.ReviewGate.RulingResume do
     earlier =
       resolution.task_id
       |> Resolutions.list()
-      |> Enum.filter(&(&1.gate == :review_gate and &1.id != resolution.id))
-      |> Enum.filter(&(DateTime.compare(&1.inserted_at, resolution.inserted_at) != :gt))
+      |> Enum.filter(fn r ->
+        r.gate == :review_gate and r.id != resolution.id and
+          DateTime.compare(r.inserted_at, resolution.inserted_at) != :gt
+      end)
 
     case List.last(earlier) do
       %Resolution{decision: decision} = last when decision in @authorising -> last
