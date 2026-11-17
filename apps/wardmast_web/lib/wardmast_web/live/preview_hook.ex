@@ -23,7 +23,7 @@ defmodule WardmastWeb.PreviewHook do
   """
 
   import Phoenix.Component, only: [assign: 3]
-  import Phoenix.LiveView, only: [attach_hook: 4, connected?: 1]
+  import Phoenix.LiveView, only: [attach_hook: 4, connected?: 1, start_async: 3]
 
   alias Wardmast.Preview
 
@@ -36,9 +36,11 @@ defmodule WardmastWeb.PreviewHook do
       |> assign(:preview_task_id, task_id)
       |> assign(:preview_busy, false)
       |> assign(:preview_error, nil)
-      |> assign(:preview, if(connected?(socket), do: load(task_id)))
+      |> assign(:preview, nil)
       |> attach_hook(:preview_events, :handle_event, &ticket_event/3)
       |> attach_hook(:preview_info, :handle_info, &ticket_info/2)
+      |> attach_hook(:preview_async, :handle_async, &ticket_async/3)
+      |> load_async(task_id)
 
     {:cont, socket}
   end
@@ -48,15 +50,50 @@ defmodule WardmastWeb.PreviewHook do
 
     socket =
       socket
-      |> assign(:previews, if(connected?(socket), do: Preview.list(), else: []))
+      |> assign(:previews, if(connected?(socket), do: load_list([]), else: []))
       |> attach_hook(:preview_list_events, :handle_event, &list_event/3)
       |> attach_hook(:preview_list_info, :handle_info, &list_info/2)
 
     {:cont, socket}
   end
 
-  defp load(nil), do: nil
-  defp load(task_id), do: Preview.overview(task_id)
+  # The preview panel is an add-on to pages that have their own data to load;
+  # a failed read here (DB busy, a crashed lookup) must leave the page up and
+  # the panel at its previous state rather than take the LiveView down.
+  defp load(nil, _fallback), do: nil
+
+  defp load(task_id, fallback) do
+    Preview.overview(task_id)
+  rescue
+    _ -> fallback
+  catch
+    :exit, _ -> fallback
+  end
+
+  # First read, off the LiveView process: the page decides when it is ready, a
+  # preview lookup must not hold up (or break) its mount.
+  defp load_async(socket, nil), do: socket
+
+  defp load_async(socket, task_id) do
+    if connected?(socket),
+      do: start_async(socket, :preview_load, fn -> Preview.overview(task_id) end),
+      else: socket
+  end
+
+  defp ticket_async(:preview_load, {:ok, overview}, socket),
+    do: {:halt, assign(socket, :preview, overview)}
+
+  # A failed read leaves the panel as it was (the page keeps working).
+  defp ticket_async(:preview_load, {:exit, _reason}, socket), do: {:halt, socket}
+  defp ticket_async(_name, _result, socket), do: {:cont, socket}
+
+  defp load_list(fallback) do
+    Preview.list()
+  rescue
+    _ -> fallback
+  catch
+    :exit, _ -> fallback
+  end
 
   # ---- ticket page ---------------------------------------------------------
 
@@ -83,7 +120,7 @@ defmodule WardmastWeb.PreviewHook do
   defp ticket_info(:previews_changed, socket) do
     {:halt,
      socket
-     |> assign(:preview, load(socket.assigns.preview_task_id))
+     |> assign(:preview, load(socket.assigns.preview_task_id, socket.assigns.preview))
      |> assign(:preview_busy, false)}
   end
 
@@ -98,7 +135,7 @@ defmodule WardmastWeb.PreviewHook do
      socket
      |> assign(:preview_busy, false)
      |> assign(:preview_error, error)
-     |> assign(:preview, load(socket.assigns.preview_task_id))}
+     |> assign(:preview, load(socket.assigns.preview_task_id, socket.assigns.preview))}
   end
 
   defp ticket_info(_msg, socket), do: {:cont, socket}
@@ -118,7 +155,7 @@ defmodule WardmastWeb.PreviewHook do
   defp list_event(_event, _params, socket), do: {:cont, socket}
 
   defp list_info(:previews_changed, socket),
-    do: {:halt, assign(socket, :previews, Preview.list())}
+    do: {:halt, assign(socket, :previews, load_list(socket.assigns.previews))}
 
   defp list_info(_msg, socket), do: {:cont, socket}
 end
