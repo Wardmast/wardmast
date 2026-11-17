@@ -108,6 +108,12 @@ The server log says what it did:
 - A process that leaves the group on purpose (a daemon calling `setsid`) is out
   of reach of a group kill. While its parent is alive, teardown's process-tree
   walk still finds it.
+- The Linux worker jail is such a case, and needs no group kill:
+  `bwrap --new-session` runs the agent in a session of its own inside a private
+  pid namespace (`--unshare-pid`), so the recorded group holds only the jail's
+  outer `bwrap` and the warden. The outer `bwrap` exits when the agent does,
+  and `--die-with-parent` then takes the namespace's init down, which ends
+  every process left in the namespace; killing the outer `bwrap` does the same.
 - Only a run's latest spawn is recorded. An earlier spawn of the same run that
   is still running when the server crashes is left to its warden.
 - If the warden itself is killed by hand while its agent's leftovers are

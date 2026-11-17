@@ -82,8 +82,11 @@ defmodule Wardmast.Worker.ProcessGroup do
 
   A process that leaves the group on purpose (a daemon calling `setsid`) is out
   of reach of a group kill; the tree walk still catches it while it has a
-  parent in the tree. Only a run's latest spawn is recorded; an earlier one
-  still running when the server crashes is left to its warden.
+  parent in the tree. The bwrap jail's agent is one (`--new-session`), but its
+  private pid namespace ends with the outer `bwrap`, which is in the group
+  (`--unshare-pid --die-with-parent`, `Wardmast.Worker.Jail`). Only a run's
+  latest spawn is recorded; an earlier one still running when the server
+  crashes is left to its warden.
   """
 
   require Logger
