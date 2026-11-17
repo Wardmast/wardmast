@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 48" width="200" height="48" role="img" aria-label="Wardmast">
+  <path d="M38 7 H28 V41 H38" fill="none" stroke="#4d7c0f" stroke-width="4" stroke-linecap="square"/>
+  <path d="M162 7 H172 V41 H162" fill="none" stroke="#4d7c0f" stroke-width="4" stroke-linecap="square"/>
+  <text x="100" y="33" text-anchor="middle" font-family="Geist Mono, ui-monospace, SFMono-Regular, Menlo, monospace" font-weight="500" font-size="24" letter-spacing="-0.035em" fill="#1f2430">wardmast</text>
+</svg>
