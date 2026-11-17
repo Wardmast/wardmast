@@ -150,6 +150,7 @@ defmodule WardmastCli.Cmd.Update.Git do
             File.chmod!(install_path, 0o755)
             :ok = SelfUpdate.install_links(install_path)
             Start.log_text("Installed CLI escript to #{install_path}")
+            _ = SelfUpdate.flush_pending_shim()
             :ok
 
           {:error, reason} ->

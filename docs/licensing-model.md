@@ -2,6 +2,7 @@
 
 **Status:** Decided — the 2026-09-18 Apache-2.0 decision is **superseded** by §0 (2026-11-14)  
 **Date:** 2026-09-18 (original); 2026-11-14 (FSL revision); 2026-11-15 (paid-tier distribution, §0.1)  
+**Prior versions:** versions released before the FSL relicense (#1361) remain licensed under Apache-2.0 permanently.  
 **Task:** bd-gjw1ze · **Tracker:** github:1868  
 
 ---
@@ -24,10 +25,10 @@
 
 > **Supersedes** the 2026-09-18 Apache-2.0 open-core decision recorded in §1–§6 below. Those sections are kept as the historical record; where they conflict with this section, this section governs.
 
-**Decision.** Future releases of the Arbiter core are licensed under the **Functional Source License, Version 1.1, ALv2 Future License (`FSL-1.1-ALv2`)**. The owner is the sole copyright holder (see `NOTICE`).
+**Decision.** Future releases of the Wardmast core are licensed under the **Functional Source License, Version 1.1, ALv2 Future License (`FSL-1.1-ALv2`)**. The owner is the sole copyright holder (see `NOTICE`).
 
 1. **Delayed conversion to Apache-2.0.** Each release converts automatically to Apache-2.0 on the second anniversary of the date it was made available. Releases already published under Apache-2.0 stay Apache-2.0 permanently (§6 point 2 is unchanged).
-2. **Rationale — supersedes §2.2.** §2.2 rejected BUSL/FSL on the grounds that no source-available license defends Arbiter against a real threat and that it costs OSI status. That reasoning is withdrawn. The goal now is to protect the product against others selling it commercially (a competing paid product or hosted service built from our code) while the code stays public and free to use, modify and self-host for any permitted purpose. FSL's competing-use restriction does that; the two-year conversion keeps the long-run commitment to open source. The accepted cost is that Arbiter is source-available, not OSI-approved open source, until each release converts.
+2. **Rationale — supersedes §2.2.** §2.2 rejected BUSL/FSL on the grounds that no source-available license defends Wardmast against a real threat and that it costs OSI status. That reasoning is withdrawn. The goal now is to protect the product against others selling it commercially (a competing paid product or hosted service built from our code) while the code stays public and free to use, modify and self-host for any permitted purpose. FSL's competing-use restriction does that; the two-year conversion keeps the long-run commitment to open source. The accepted cost is that Wardmast is source-available, not OSI-approved open source, until each release converts.
 3. **Package-level boundary stays.** *(Distribution wording superseded by §0.1.)* A separate commercial "Arbiter Pro" package, closed-source and historically planned for distribution through an authenticated private Hex repository, was the model; there is still no in-repo license zoning and no dual licensing (§1).
 4. **§6 "additive only" is revised.** Point 3 of §6 (no capability subtractions) no longer holds absolutely: some existing team/infrastructure features are planned to move to the commercial tier. Which features, and how they are gated, is a separate design ticket and is deliberately **not** decided or enumerated here. Already-published releases remain Apache-2.0 and forkable regardless.
 
@@ -37,7 +38,7 @@ Elsewhere in this document, "Apache-2.0" describes the 2026-09-18 position and r
 
 ## 1. The Decision, in Short (superseded 2026-11-14 — see §0)
 
-Arbiter adopts an **open-core** licensing and distribution model:
+Wardmast adopts an **open-core** licensing and distribution model:
 
 * **Core:** Licensed under the **Apache License, Version 2.0 (Apache-2.0)** and developed openly in this repository.
 * **Commercial ("Arbiter Pro"):** *(Distribution superseded by §0.1: a private repo shipped as a licence-keyed compiled bundle, no Hex.)* Was planned as a separate, closed-source Hex package in a dedicated private repository, distributed through an authenticated private Hex repository (the Oban model).
@@ -63,7 +64,7 @@ Drawing the boundary strictly at the **package level** keeps the core repository
 * **Rationale for rejection:** MIT lacks an explicit patent grant (Section 3 of Apache-2.0) and lacks a patent-retaliation termination clause. In AI orchestration, agent tooling, and developer infrastructure—spaces with high concentrations of aggressive software patent filings—an explicit patent grant is vital protection for both the project and downstream adopters. Furthermore, corporate legal teams regularly clear Apache-2.0 projects without friction, whereas MIT without patent indemnification occasionally prompts extended legal scrutiny.
 
 ### 2.2. BUSL-1.1 / Functional Source License (FSL) — superseded 2026-11-14 (FSL adopted, see §0)
-* **Rationale for rejection:** Source-available licenses (such as Business Source License 1.1 or FSL) are primarily designed to defend cloud-hosted software products against hyperscalers and managed-service competitors (e.g., AWS launching a hosted wrapper around an open database). Arbiter is a self-hosted control plane that coordinates local git worktrees and agent sessions on developer machines; nobody runs or consumes Arbiter as a generic multi-tenant hosted SaaS. The realistic competitive threat to Arbiter is platform vendors shipping native fleet orchestration within their own developer tools—a scenario no source-available license prevents. In exchange for zero competitive defense, adopting BUSL/FSL imposes a substantial "adoption tax" by forfeiting OSI-approved open-source status, creating friction for corporate evaluation and community contribution.
+* **Rationale for rejection:** Source-available licenses (such as Business Source License 1.1 or FSL) are primarily designed to defend cloud-hosted software products against hyperscalers and managed-service competitors (e.g., AWS launching a hosted wrapper around an open database). Wardmast is a self-hosted control plane that coordinates local git worktrees and agent sessions on developer machines; nobody runs or consumes Wardmast as a generic multi-tenant hosted SaaS. The realistic competitive threat to Wardmast is platform vendors shipping native fleet orchestration within their own developer tools—a scenario no source-available license prevents. In exchange for zero competitive defense, adopting BUSL/FSL imposes a substantial "adoption tax" by forfeiting OSI-approved open-source status, creating friction for corporate evaluation and community contribution.
 
 ### 2.3. AGPLv3 + Commercial Exception
 * **Rationale for rejection:** While an AGPL + commercial exception model can monetize enterprises whose corporate policies strictly forbid AGPL in developer environments, AGPL's core enforcement mechanism—the network-use copyleft trigger—does not bite for a self-hosted developer CLI and workspace control plane. More critically, at early-stage adoption with zero existing users, frictionless adoption is vastly more valuable than a monetization barrier that no user exists to pay for.
@@ -72,7 +73,7 @@ Drawing the boundary strictly at the **package level** keeps the core repository
 
 ## 3. Arbiter Pro Protection: Contract and Trade Secret, Not Copyright
 
-Arbiter is an **agent-authored codebase**. Under current United States Copyright Office policy and guidance regarding machine-generated output, copyright protection over purely AI-generated code is thin; legal copyright extends primarily to human selection, coordination, and arrangement.
+Wardmast is an **agent-authored codebase**. Under current United States Copyright Office policy and guidance regarding machine-generated output, copyright protection over purely AI-generated code is thin; legal copyright extends primarily to human selection, coordination, and arrangement.
 
 * For the **Apache-2.0 core**, thin copyright is immaterial: the core code is freely licensed, redistributable, and modified under clear permissive terms.
 * For **Arbiter Pro**, relying solely on copyright enforcement would introduce critical legal vulnerability.
@@ -99,7 +100,7 @@ Therefore, executing a CLA prior to accepting outside contributions is non-optio
 
 ## 5. Extension Seams in the Existing Codebase
 
-The Arbiter architecture defines 16 `@callback`-bearing Elixir behaviours. While these behaviours designate candidate extension points, open registration mechanisms are required before external packages can supply implementations without modifying core (see [Core/Pro Extension Seams](pro-extension-seams.md)).
+The Wardmast architecture defines 16 `@callback`-bearing Elixir behaviours. While these behaviours designate candidate extension points, open registration mechanisms are required before external packages can supply implementations without modifying core (see [Core/Pro Extension Seams](pro-extension-seams.md)).
 
 The following six behaviours are designated as the intended core/Pro extension seams (module names spelled exactly as defined):
 
@@ -137,9 +138,9 @@ To maintain trust with the open-source community while sustaining commercial via
 
 The following questions remain unresolved and are explicitly deferred:
 
-1. **Trademark Clearance on "Arbiter":**
+1. **Trademark Clearance on "Wardmast":**
    * *Status:* Unresolved.
-   * *Detail:* The name "Arbiter" is generic and has established usage across distributed systems vocabularies (e.g., etcd consensus arbiters, Kubernetes cluster arbiters, MongoDB arbiters).
+   * *Detail:* The name "Wardmast" is generic and has established usage across distributed systems vocabularies (e.g., etcd consensus arbiters, Kubernetes cluster arbiters, MongoDB arbiters).
    * *Next Step:* Conduct a comprehensive trademark knockout search to evaluate registration viability and conflict risks.
 2. **Arbiter Pro Tier Scope:**
    * *Status:* Unresolved.
