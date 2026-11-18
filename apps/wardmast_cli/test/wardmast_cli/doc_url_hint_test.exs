@@ -23,4 +23,18 @@ defmodule WardmastCli.DocUrlHintTest do
   defp decode_hint do
     {:error, %{hint: apply(WardmastCli.OperatorSocket, :__hint__, [%{}])}}
   end
+
+  test "no user-facing string under lib/ cites a repo-relative docs/ path" do
+    lib = Path.expand("../../lib", __DIR__)
+
+    offenders =
+      for file <- Path.wildcard(Path.join(lib, "**/*.ex")),
+          {line, n} <- file |> File.read!() |> String.split("\n") |> Enum.with_index(1),
+          line =~ ~r{(?i)\bsee\s+docs/|^\s+docs/[\w/-]+\.md\.?$},
+          not String.contains?(line, "doc_url"),
+          not String.starts_with?(String.trim(line), "#"),
+          do: "#{Path.relative_to(file, lib)}:#{n}: #{String.trim(line)}"
+
+    assert offenders == []
+  end
 end
