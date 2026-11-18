@@ -72,6 +72,19 @@ defmodule Wardmast.Worker.WorktreeTest do
       assert File.dir?(path1)
     end
 
+    test "refuses a path differing only by case from an existing worktree (APFS)",
+         %{repo: repo, root: root} do
+      assert {:ok, _} = Worktree.create(repo, "Feature/Case", "main")
+
+      assert {:error, {:path_case_collision, path, existing}} =
+               Worktree.create(repo, "feature/case", "main")
+
+      assert path == Path.join(root, "feature-case")
+      assert existing == Path.join(root, "Feature-Case")
+      refute File.exists?(path)
+      assert {:error, {:path_case_collision, _, _}} = Worktree.attach(repo, "feature/case")
+    end
+
     test "empty branch name returns :invalid_branch_name", %{repo: repo} do
       assert {:error, :invalid_branch_name} = Worktree.create(repo, "", "main")
     end
