@@ -2753,7 +2753,8 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   # SI4a (§21.4): where a machine node's worker image comes from. `registry`: it pulls the
   # published digest. `build`: an agent too old to pull (SI13 retired the plan path),
   # which takes no runs.
-  # Registry hosts the node reports unreachable, or whose last pull it was refused (`pull_failed` / `contract_mismatch`), are a warning: it is passed over for them.
+  # Registry hosts the node reports unreachable, or whose last pull it was refused
+  # (`pull_failed` / `contract_mismatch`), are a warning: it is passed over for them.
   defp image_source_result(%{"image_source" => source} = n) when is_binary(source) do
     reach =
       for {host, "unreachable"} <- Map.get(n, "registry_reach") || %{}, do: "#{host} unreachable"
