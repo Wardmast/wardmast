@@ -20,19 +20,18 @@ defmodule Wardmast.Workflows.CIFailureFollowUp do
   `check_names` is the list of failing required check names, folded into the
   instructions so the dispatched worker knows exactly which job(s) to triage.
   """
-  @spec instructions([String.t()], [map()]) :: String.t()
-  def instructions(check_names, failing_checks \\ []) when is_list(check_names) do
+  @spec instructions([String.t()], [map()], :github | :gitlab) :: String.t()
+  def instructions(check_names, failing_checks \\ [], forge \\ :github)
+      when is_list(check_names) do
     """
     ## Required-check failure triage protocol (bd-ayetel)
 
     Failing required check(s): #{Enum.join(check_names, ", ")}.
-    #{render_logs(failing_checks)}
+    #{render_logs(failing_checks, forge)}
     A CI failure needs triage BEFORE a fix — do not blindly push a change to
     make it green. For each failing check:
 
-      1. Pull the failed job's logs (`gh run view`, `gh run watch` and
-         `gh pr checks --watch` are denied; use the check's own details URL or
-         `gh api repos/<owner>/<repo>/actions/jobs/<job_id>/logs`) and determine which of these applies:
+      1. Pull the failed job's logs (#{log_source(forge)}) and determine which of these applies:
            - FLAKE: re-running the same job with no code change passes →
              re-run the failed job(s) and note in the PR that it was a flake.
            - PRE-EXISTING ON BASE: the failure also reproduces on the PR's
@@ -57,18 +56,40 @@ defmodule Wardmast.Workflows.CIFailureFollowUp do
 
   # The host-fetched failing jobs and their log excerpts (bd-8r2iat), so a
   # worker with no forge CLI or CI tools can still triage.
-  defp render_logs([]), do: ""
+  defp log_source(:gitlab) do
+    "`glab ci trace`/`glab ci view` are denied; use the job's trace URL — the job's " <>
+      "own URL plus `/raw` — or `glab api projects/<id>/jobs/<job_id>/trace`"
+  end
 
-  defp render_logs(checks) do
+  defp log_source(_github) do
+    "`gh run view`, `gh run watch` and\n         `gh pr checks --watch` are denied; use the check's own details URL or\n         `gh api repos/<owner>/<repo>/actions/jobs/<job_id>/logs`"
+  end
+
+  defp render_logs([], _forge), do: ""
+
+  defp render_logs(checks, forge) do
     body =
       Enum.map_join(checks, "\n\n", fn check ->
         url = Map.get(check, :url)
         summary = check |> Map.get(:summary, "") |> to_string() |> String.slice(0, @log_limit)
-        header = "### #{Map.get(check, :name)}" <> if(url, do: " (#{url})", else: "")
+
+        header =
+          "### #{Map.get(check, :name)}" <> if(url, do: " (#{url_label(url, forge)})", else: "")
+
         header <> "\n```\n" <> summary <> "\n```"
       end)
 
     "\nFailing job logs (fetched by Wardmast; a sandboxed run has no CI tools):\n\n" <>
       body <> "\n"
   end
+
+  # A GitLab job's `web_url` is the HTML page; its raw trace is `<web_url>/raw`.
+  defp url_label(url, :gitlab) do
+    case Wardmast.Mergers.ForgeCli.job_trace_url(url) do
+      nil -> url
+      trace -> "#{url}, trace: #{trace}"
+    end
+  end
+
+  defp url_label(url, _github), do: url
 end
