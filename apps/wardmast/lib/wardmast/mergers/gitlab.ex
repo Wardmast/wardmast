@@ -1223,19 +1223,20 @@ defmodule Wardmast.Mergers.Gitlab do
   # can't be built (no refs, lookup failed, or no usable file/line).
   defp finding_position(cfg, iid, file, line)
        when is_binary(file) and is_integer(line) and line > 0 do
-    with {:ok, %{"diff_refs" => %{"base_sha" => base, "start_sha" => start, "head_sha" => head}}}
-         when is_binary(base) and is_binary(start) and is_binary(head) <-
-           request(cfg, :get, "/merge_requests/#{iid}", []) |> handle_json() do
-      %{
-        "position_type" => "text",
-        "base_sha" => base,
-        "start_sha" => start,
-        "head_sha" => head,
-        "new_path" => file,
-        "new_line" => line
-      }
-    else
-      _ -> nil
+    case request(cfg, :get, "/merge_requests/#{iid}", []) |> handle_json() do
+      {:ok, %{"diff_refs" => %{"base_sha" => base, "start_sha" => start, "head_sha" => head}}}
+      when is_binary(base) and is_binary(start) and is_binary(head) ->
+        %{
+          "position_type" => "text",
+          "base_sha" => base,
+          "start_sha" => start,
+          "head_sha" => head,
+          "new_path" => file,
+          "new_line" => line
+        }
+
+      _ ->
+        nil
     end
   end
 
