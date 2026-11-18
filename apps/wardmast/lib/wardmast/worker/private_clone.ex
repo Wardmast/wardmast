@@ -585,8 +585,10 @@ defmodule Wardmast.Worker.PrivateClone do
         scan_marker(rest, key, in_arbiter?, found)
 
       String.starts_with?(trimmed, "[") ->
-        case Regex.run(~r/\A\[([A-Za-z0-9.-]+)\]\z/, trimmed) do
+        # `[remote "origin"]` and friends carry a subsection: never ours
+        case Regex.run(~r/\A\[([A-Za-z0-9.-]+)( "[^"\\]*")?\]\z/, trimmed) do
           [_, section] -> scan_marker(rest, key, String.downcase(section) == "arbiter", found)
+          [_, _section, _sub] -> scan_marker(rest, key, false, found)
           nil -> :fallback
         end
 
