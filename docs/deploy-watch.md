@@ -1,7 +1,7 @@
 # Post-merge deploy watch
 
 Wardmast used to stop caring at merge. On a deploy-on-merge repo a broken CD was
-invisible: on 2026-10-18 three tonic `main` pipelines (after !367) reported
+invisible: on 2026-10-18 three app `main` pipelines (after !367) reported
 SUCCESS while `build` and `deploy` were SKIPPED, and nothing noticed for ~2.5h.
 
 `merge.repos.<repo>.deploy_watch` turns the watch on for one repo. **Unset means
@@ -12,8 +12,8 @@ off.**
   "merge": {
     "strategy": "gitlab",
     "repos": {
-      "tonic": { "deploy_watch": { "job": "deploy", "timeout_minutes": 90 } },
-      "vstim": { "deploy_watch": { "jobs": ["deploy-web", "deploy-worker"] } }
+      "app": { "deploy_watch": { "job": "deploy", "timeout_minutes": 90 } },
+      "my-app": { "deploy_watch": { "jobs": ["deploy-web", "deploy-worker"] } }
     }
   }
 }

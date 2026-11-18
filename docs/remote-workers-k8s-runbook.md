@@ -208,9 +208,9 @@ stalled on several of them. Where the doctor has no dedicated row, the check is 
 | the `claude` CLI on the primary's `PATH`, as the server's own environment sees it (e.g. its systemd unit) | the primary runs Claude for the canary | no doctor row. Manual: `command -v claude` in the server's environment; `arb release deploy` also warns when `claude` is not found on PATH |
 
 Design k8s §13 calls the operator's k3s a sensible **test bed** and not yet a
-production target for sensitive workspaces: one server (`mesanna`) and one worker
-(`aginor`, on Wi-Fi), runc only, no PSA enforcement, **zero NetworkPolicies so far**,
-and the cluster also hosts the vstim production workers and the CI runner. Room for
+production target for sensitive workspaces: one server (`my-cluster`) and one worker
+(`worker-1`, on Wi-Fi), runc only, no PSA enforcement, **zero NetworkPolicies so far**,
+and the cluster also hosts the my-app production workers and the CI runner. Room for
 about two 2-CPU pods.
 
 Work through the list **in order**. Do not skip a step because a later one "covers
@@ -233,14 +233,14 @@ it". Each step has a pass criterion; stop at the first that fails.
 3. **ResourceQuota.** Apply the quota for `max_concurrent: 2` (the install manifest's
    §4.3 block: pods 4, requests 3 CPU / 6 GiB, limits 6 CPU / 10 GiB). **Pass:**
    `kubectl -n wardmast-workers describe resourcequota` lists it. This is what keeps
-   workers from starving vstim prod and CI.
+   workers from starving my-app prod and CI.
 4. **Low priority.** Create the PriorityClass `wardmast-worker` with `value: -100` and
    `preemptionPolicy: Never`. **Pass:** `kubectl get priorityclass wardmast-worker`
    shows `-100`. Workers must never preempt anything else. Also create the controller's
    own class `wardmast-controller` (`value: 1000`, `preemptionPolicy: PreemptLowerPriority`),
    which the controller Deployment references: the controller must **not** share the
    workers' `-100`, or a busy cluster (CI pods at priority 0) preempts it first, the node
-   counts as lost and every run on it is interrupted (mesaana, 2026-10-29). `PreemptLowerPriority`
+   counts as lost and every run on it is interrupted (my-cluster, 2026-10-29). `PreemptLowerPriority`
    lets a rescheduled controller make room on a full cluster; set `Never` if it must not
    evict anything. **Pass:** `kubectl get priorityclass wardmast-controller` shows `1000`.
 5. **NetworkPolicies.** Apply `default-deny`, `worker-to-controller`,
@@ -276,7 +276,7 @@ it". Each step has a pass criterion; stop at the first that fails.
    `placement` row. If the canary fails, go to §3; do not set
    `allow_unenforced_network` on this cluster.
 9. **The operator accepts shared tenancy, in writing.** Untrusted LLM-driven code runs
-   in pods that share a kernel and nodes (runc, no gVisor/Kata) with vstim prod and the CI
+   in pods that share a kernel and nodes (runc, no gVisor/Kata) with my-app prod and the CI
    runner; the PriorityClass (low, non-preempting), quota, LimitRange, NetworkPolicies and
    namespace ring-fence them but do not remove that. The operator records the acceptance
    (in the ticket) before any real run goes there. A sandboxed `RuntimeClass`
@@ -368,7 +368,7 @@ existing objects into a release is possible but optional.
 
 ### Known pitfalls (first enrollment)
 
-The first real enrollment (mesaana k3s, 2026-10-26) hit these (the last was found right after).
+The first real enrollment (my-cluster k3s, 2026-10-26) hit these (the last was found right after).
 
 1. **tailscale sidecar crash-loops.** Symptom: `missing get permission on secret
    "tailscale"`. containerboot wants a `tailscale` Secret unless `TS_KUBE_SECRET=""`.
@@ -384,8 +384,8 @@ The first real enrollment (mesaana k3s, 2026-10-26) hit these (the last was foun
 4. **API CIDRs on multi-node k3s.** Take the API server address from the `kubernetes`
    EndpointSlice (`kubectl get endpointslice -l kubernetes.io/service-name=kubernetes`),
    not from `nodes[0]`, or the controller → API egress rule allows the wrong /32 and
-   checks report false FAILs. Fix: bd-6vlqu8 (`k2-operator-check.sh`). mesaana's is
-   192.168.1.169.
+   checks report false FAILs. Fix: bd-6vlqu8 (`k2-operator-check.sh`). my-cluster's is
+   10.0.0.10.
 5. **Run ids rejected as `bad_name`.** Synthetic `#review` run ids are not valid k8s
    object names, so the Job/Pod create is rejected with `bad_name` (bd-1chty2).
 

@@ -1512,7 +1512,7 @@ Per the operator's decision ("a stale memory is worse"), a session mounts memory
 | `user` | always, all sessions | read | who the operator is — behavioural, doesn't rot |
 | `feedback` | always, all sessions | read | working doctrine — behavioural, doesn't rot |
 | `reference` | always, all sessions | read | pointers to external resources |
-| `project` | **only** the session's bound workspace | read | cites `file:line`/modules; rots fast; a vstim session must not load Wardmast internals |
+| `project` | **only** the session's bound workspace | read | cites `file:line`/modules; rots fast; a my-app session must not load Wardmast internals |
 
 A `project` memory scopes to a workspace via its own `metadata.workspace_id`
 frontmatter key (the workspace's id, matching `session.workspace_id`). A
@@ -1646,7 +1646,7 @@ Remaining guards:
   Wardmast's API (it would kill the caller mid-call). Reject with a clear error;
   the operator kills it from the dashboard or the CLI.
 
-### 10.2 Hazard 2 — reach into `/home/ryan/dev/arbiter`
+### 10.2 Hazard 2 — reach into `/home/me/dev/wardmast`
 
 Careless edits in the primary checkout have broken the running server before, via
 Phoenix hot-reload picking up a half-written file.

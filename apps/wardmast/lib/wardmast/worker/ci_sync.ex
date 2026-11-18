@@ -2,7 +2,7 @@ defmodule Wardmast.Worker.CiSync do
   @moduledoc """
   Keeps a CI-failure remediation from re-testing a stale branch (bd-5owt7w).
 
-  On vstim 44% of three days' failed pipelines were one test that `main` had
+  On my-app 44% of three days' failed pipelines were one test that `main` had
   already fixed: the Watchdog's `:ci_failed` auto-resolve and `ci_rerun` kept
   re-testing MR heads that did not contain the fix, each attempt failing the
   same way and burning budget until the lane escalated. bd-5z9yvb synced a
@@ -45,7 +45,7 @@ defmodule Wardmast.Worker.CiSync do
   nothing.
 
   Deploy and post-merge jobs do not say the code is broken (a timed-out
-  `deploy-worker` left vstim's main "red" while every test passed, bd-dtbsgx),
+  `deploy-worker` left my-app's main "red" while every test passed, bd-dtbsgx),
   so a failed job is ignored when it is named in `merge.repos.<repo>.deploy_watch`
   (`jobs`/`job`) or `target_red_ignore_jobs`, or sits in a stage listed in
   `target_red_stages` (default `deploy`, `release` and `macOS smoke`, the

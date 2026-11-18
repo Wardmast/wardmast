@@ -28,7 +28,7 @@ binding (below). `gitlab_project_token` is the GitLab counterpart; `gitlab_bot_t
 Secrets go in the workspace's encrypted store; the config names them.
 
 ```sh
-arb workspace secret set TONIC_DEPLOY_KEY --file tonic-deploy-key
+arb workspace secret set APP_DEPLOY_KEY --file app-deploy-key
 arb workspace secret set ARBITER_APP_KEY  --file arbiter-app.private-key.pem
 ```
 
@@ -39,8 +39,8 @@ workspace `config` (`arb workspace config`, or the dashboard):
 "git_credentials": {
   "legacy_operator": false,
   "repos": {
-    "tonic":   {"kind": "deploy_key", "key_secret": "TONIC_DEPLOY_KEY"},
-    "vstim":   {"kind": "github_app", "app_id": "123456", "installation_id": "7890123",
+    "app":   {"kind": "deploy_key", "key_secret": "APP_DEPLOY_KEY"},
+    "my-app":   {"kind": "github_app", "app_id": "123456", "installation_id": "7890123",
                 "private_key_secret": "ARBITER_APP_KEY"},
     "infra":   {"kind": "token", "token_secret": "INFRA_TOKEN",
                 "host": "gitlab.com", "username": "oauth2"},
@@ -66,10 +66,10 @@ A spawn that can push (an implementer: first dispatch, revise round, CI fix pass
 conflict pass that is not pushed by the host) is **refused** when its repo has no
 scoped credential, with:
 
-> no scoped git credential is configured for repo tonic, and a worker that pushes
+> no scoped git credential is configured for repo app, and a worker that pushes
 > must not run on the operator's ssh-agent or keys. Register a per-repo deploy
 > key, GitHub App or repo-scoped token under the workspace's config
-> git_credentials.repos.tonic (docs/git-credentials.md), or opt in to the
+> git_credentials.repos.app (docs/git-credentials.md), or opt in to the
 > operator's credential with git_credentials.legacy_operator: true
 
 This applies to **every** workspace, with or without a `git_credentials` block and
@@ -201,7 +201,7 @@ mergers' own branch pushes still run as the operator.
 
 `gitlab_project_token` needs project access tokens, which GitLab.com offers only on
 **Premium or Ultimate**. On a **Free** group (checked 2026-10-27: both
-`serious-alchemy` and `emricare` report `plan: free`) there is nothing to mint. The
+`acme-org` and `acme` report `plan: free`) there is nothing to mint. The
 Free-tier kind is the operator's own **bot user** with a long-lived personal access
 token, limited to the projects *by membership*, and delivered to a node like the minted
 kinds. It is an explicit opt-in and it is **weaker**; read "Compared with
@@ -211,7 +211,7 @@ kinds. It is an explicit opt-in and it is **weaker**; read "Compared with
 
 1. Create a **dedicated GitLab user** for Wardmast (a normal user account, not your own).
    Add it as **Developer**, and nothing else, on exactly the projects workers push to
-   (for example `vstim`, `tonic`, `tonic_device`). It must be a member of **no other**
+   (for example `my-app`, `app`, `app_device`). It must be a member of **no other**
    project or group: Wardmast refuses the spawn if it is.
 2. Sign in as the bot (or use an admin to impersonate it) and create a **personal access
    token** with scopes **`read_api`, `read_repository`, `write_repository`** and an
@@ -222,12 +222,12 @@ kinds. It is an explicit opt-in and it is **weaker**; read "Compared with
    ```json
    "git_credentials": {
      "repos": {
-       "vstim":        {"kind": "gitlab_bot_token", "secret": "GITLAB_BOT_PAT",
-                        "remote": "serious-alchemy/vstim",
-                        "projects": ["emricare/tonic", "emricare/tonic_device"],
+       "my-app":        {"kind": "gitlab_bot_token", "secret": "GITLAB_BOT_PAT",
+                        "remote": "acme-org/my-app",
+                        "projects": ["acme/app", "acme/app_device"],
                         "expires_at": "2027-05-01"},
-       "tonic":        {"kind": "gitlab_bot_token", "secret": "GITLAB_BOT_PAT"},
-       "tonic_device": {"kind": "gitlab_bot_token", "secret": "GITLAB_BOT_PAT"}
+       "app":        {"kind": "gitlab_bot_token", "secret": "GITLAB_BOT_PAT"},
+       "app_device": {"kind": "gitlab_bot_token", "secret": "GITLAB_BOT_PAT"}
      }
    }
    ```
@@ -331,7 +331,7 @@ shape), the spawn is refused; nothing is delivered on a guess.
 For each `gitlab_bot_token` entry with a `remote`, doctor asks what the entry's token
 reaches (the bot's memberships for a classic PAT, the token's own resources for a
 fine-grained one) and warns once per repo that is missing, for example
-`git_credentials.repos.tonic_device bot token (GL_BOT) cannot reach emricare/tonic_device`.
+`git_credentials.repos.app_device bot token (GL_BOT) cannot reach acme/app_device`.
 Set `remote` on each entry to have it checked. If GitLab cannot be asked or its answer cannot
 be read, doctor stays silent about reach (the dispatch guard still refuses).
 

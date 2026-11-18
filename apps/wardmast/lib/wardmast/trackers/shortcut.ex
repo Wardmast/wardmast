@@ -3,8 +3,8 @@ defmodule Wardmast.Trackers.Shortcut do
   Shortcut adapter implementing `Wardmast.Trackers.Tracker`.
 
   Wraps Shortcut's REST API v3 (`api.app.shortcut.com/api/v3`) for story
-  fetch/update/transition flows. Used by the Emricare domains (Varek/tonic,
-  Soren/tonic_device) to sync tasks with their Shortcut board.
+  fetch/update/transition flows. Used by the Acme domains (Varek/app,
+  Soren/app_device) to sync tasks with their Shortcut board.
 
   ## Active-workspace contract
 

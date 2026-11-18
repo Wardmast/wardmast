@@ -4982,7 +4982,7 @@ defmodule Wardmast.Worker.Dispatch do
   #   - review dispatches (`review: true`) — read-only code review, no branch
   #
   # On a developer host that shared checkout is a human contributor's working
-  # directory. Nothing kept it current: the `tonic` checkout that produced this
+  # directory. Nothing kept it current: the `app` checkout that produced this
   # bug was 72 commits and a full month behind `origin/main`, its HEAD predating
   # the very merge the audit was asked about. The audit read that tree, found no
   # encryption, and reported "PHI is stored in plaintext" as a release-gating

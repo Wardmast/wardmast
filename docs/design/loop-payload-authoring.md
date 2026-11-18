@@ -176,17 +176,17 @@ workspace's own `routing.rules` merged on top:
 | workspace | policy | own rules |
 |---|---|---|
 | `default` (repo `arbiter`) | `by_difficulty` | `D4 => flagship/xhigh` |
-| `vstim` (repo `vstim`) | `by_difficulty` | `D4 => flagship/xhigh` |
-| `emricare` (repos `tonic`, `tonic_device`) | `by_difficulty` | `D4 => flagship/xhigh` |
+| `my-app` (repo `my-app`) | `by_difficulty` | `D4 => flagship/xhigh` |
+| `acme` (repos `app`, `app_device`) | `by_difficulty` | `D4 => flagship/xhigh` |
 
 Resolving each live cluster's `D<from> → D<to>` step:
 
 | live cluster row | patch it would carry | identity? |
 |---|---|---|
-| D3/vstim → D4 | `routing.rules.D3 = flagship/xhigh` | no (vstim overrides D4) |
-| D2/vstim → D3 | `routing.rules.D2 = premium/high` | no |
+| D3/my-app → D4 | `routing.rules.D3 = flagship/xhigh` | no (my-app overrides D4) |
+| D2/my-app → D3 | `routing.rules.D2 = premium/high` | no |
 | D2/arbiter → D3 | `routing.rules.D2 = premium/high` | no |
-| D1/vstim → D2 | `routing.rules.D1 = standard/medium` | no |
+| D1/my-app → D2 | `routing.rules.D1 = standard/medium` | no |
 | D1/arbiter → D2 | `routing.rules.D1 = standard/medium` | no |
 | D0/arbiter → D1 | `routing.rules.D0 = economy/low` | no |
 
@@ -271,7 +271,7 @@ Every input is a value already in hand. No prose. No model. No ambiguity.
    per-difficulty and workspace-wide; there is no per-repo routing key. A
    D2/`arbiter` cluster patching `routing.rules.D2` therefore also moves D2
    dispatches for every other repo in that workspace. Today that is a
-   non-issue (`default` has exactly one repo), and `emricare` — the one
+   non-issue (`default` has exactly one repo), and `acme` — the one
    two-repo workspace — has no live clusters. It will stop being a non-issue.
    The row's gist must say what it actually changes, and the follow-up issue
    must decide between (i) keeping `repo` as a fingerprint input while the
