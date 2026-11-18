@@ -11,8 +11,8 @@ defmodule Wardmast.Server.LogRotator do
   the (now empty) file. Lines written between the copy and the truncate are lost —
   the inherent copytruncate trade-off.
 
-  Config (`config :wardmast, :log_rotation`): `:enabled` (default `true`; `false`
-  in test), `:interval_ms` (default 60 000), `:max_bytes` (default 10 MiB),
+  Config (`config :wardmast, :log_rotation`): `:enabled` (default `true` on macOS only — Linux
+  installs already rotate via the systemd logrotate timer; `false` in test), `:interval_ms` (default 60 000), `:max_bytes` (default 10 MiB),
   `:keep` (rotated files retained, default 5), `:path` (default
   `Wardmast.Config.Paths.server_log_path/0`).
   """
@@ -73,7 +73,7 @@ defmodule Wardmast.Server.LogRotator do
   @impl true
   def init(opts) do
     state = %{
-      enabled: cfg(:enabled, opts, true),
+      enabled: cfg(:enabled, opts, match?({:unix, :darwin}, :os.type())),
       interval_ms: cfg(:interval_ms, opts, @default_interval_ms),
       opts: [
         path: cfg(:path, opts, nil),
@@ -104,7 +104,7 @@ defmodule Wardmast.Server.LogRotator do
   defp cfg(key, opts, default) do
     case Keyword.fetch(opts, key) do
       {:ok, v} -> v
-      :error -> Application.get_env(:wardmast, :log_rotation, [])[key] || default
+      :error -> Keyword.get(Application.get_env(:wardmast, :log_rotation, []), key, default)
     end
   end
 end

@@ -45,17 +45,35 @@ defmodule Wardmast.Server.LogRotatorTest do
     :ok = :file.close(fd)
   end
 
-  test "the GenServer rotates on its tick", %{path: path} do
+  test "the GenServer rotates on a tick", %{path: path} do
     File.write!(path, String.duplicate("x", 50))
 
     pid =
       start_supervised!(
-        {LogRotator, name: nil_name(), path: path, max_bytes: 10, interval_ms: 10, enabled: true}
+        {LogRotator,
+         name: nil_name(), path: path, max_bytes: 10, interval_ms: 3_600_000, enabled: true}
       )
 
-    ref = Process.monitor(pid)
-    refute_receive {:DOWN, ^ref, _, _, _}, 200
+    send(pid, :tick)
+    _ = :sys.get_state(pid)
     assert File.exists?(path <> ".1")
+  end
+
+  test "enabled: false from app config is honoured", %{path: path} do
+    prev = Application.get_env(:wardmast, :log_rotation)
+    Application.put_env(:wardmast, :log_rotation, enabled: false, interval_ms: 1)
+
+    on_exit(fn ->
+      if prev,
+        do: Application.put_env(:wardmast, :log_rotation, prev),
+        else: Application.delete_env(:wardmast, :log_rotation)
+    end)
+
+    File.write!(path, String.duplicate("x", 50))
+    pid = start_supervised!({LogRotator, name: nil_name(), path: path, max_bytes: 10})
+    assert :sys.get_state(pid).enabled == false
+    _ = :sys.get_state(pid)
+    refute File.exists?(path <> ".1")
   end
 
   defp nil_name, do: :"lr_#{System.unique_integer([:positive])}"
