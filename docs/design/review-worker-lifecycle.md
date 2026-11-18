@@ -8,7 +8,7 @@
 
 ## Overview
 
-When Arbiter reviews a colleague's PR (`arb review --pr <url>`), it creates a
+When Wardmast reviews a colleague's PR (`arb review --pr <url>`), it creates a
 **review engagement**: an `Issue` with `review_only: true` and `source_pr` set.
 Unlike normal implementation tasks, review engagements have a long lifecycle
 that does not end after the first verdict. **ReviewPatrol** owns that lifecycle

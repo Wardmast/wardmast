@@ -8,7 +8,7 @@ bd-37d191, 2026-10-06). Scope: REST + CLI. Node-tier endpoints (`/node/*`,
 the server host as the operator's Unix user. Loopback therefore proves only
 "same host". What separates the operator from a session is **operator proof**:
 a coordinator token minted over `Wardmast.MCP.OperatorSocket`, which checks the
-peer's kernel credentials and refuses any process Arbiter spawned
+peer's kernel credentials and refuses any process Wardmast spawned
 (`Scope.operator?/1`; see `docs/worker-security.md`). A plain coordinator token
 (`ARB_TOKEN`, a session's own) is *not* operator proof.
 

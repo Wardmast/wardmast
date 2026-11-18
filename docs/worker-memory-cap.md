@@ -143,7 +143,7 @@ policy to judge and reports ok.
 
 ## Reproducing by hand
 
-Without Arbiter, on any host that can run the scope:
+Without Wardmast, on any host that can run the scope:
 
 ```sh
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
@@ -155,7 +155,7 @@ systemctl --user show arb-demo.scope -p Result,MemoryPeak,ActiveState
 systemctl --user reset-failed arb-demo.scope
 ```
 
-The end-to-end proof inside Arbiter is the opt-in `:live_systemd` test:
+The end-to-end proof inside Wardmast is the opt-in `:live_systemd` test:
 
 ```sh
 XDG_RUNTIME_DIR=/run/user/$(id -u) \

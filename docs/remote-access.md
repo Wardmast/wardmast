@@ -1,10 +1,10 @@
-# Remote access to the Arbiter dashboard and browser sessions
+# Remote access to the Wardmast dashboard and browser sessions
 
-The Arbiter dashboard and browser-based session terminal are **loopback-only** by design — they bind to `127.0.0.1:4848` and do not accept off-network connections. To use the dashboard and terminal from another device (e.g., accessing an Arbiter instance on an AWS dev box from a laptop), forward the port over SSH.
+The Wardmast dashboard and browser-based session terminal are **loopback-only** by design — they bind to `127.0.0.1:4848` and do not accept off-network connections. To use the dashboard and terminal from another device (e.g., accessing a Wardmast instance on an AWS dev box from a laptop), forward the port over SSH.
 
 > Looking to run workers on other machines rather than reach the dashboard remotely? See the [remote workers runbook](remote-workers-runbook.md) (and the [design](design/remote-workers.md)).
 
-SSH provides both authentication (implicit) and encryption, and the forwarded connection appears to Arbiter as loopback traffic, so all existing security properties hold.
+SSH provides both authentication (implicit) and encryption, and the forwarded connection appears to Wardmast as loopback traffic, so all existing security properties hold.
 
 ## Quick start: one-off SSH tunnel
 
@@ -55,7 +55,7 @@ Once you're done accessing the dashboard and terminal, close port 4848 on the re
 
 - **Cloud security group (AWS, GCP, etc.):** Remove or disable the ingress rule for port 4848
 - **Host firewall (ufw, firewalld, etc.):** Ensure `iptables` rules or firewall rules do not expose 4848
-- By default, Arbiter binds to loopback only, so it is not exposed without explicit firewall configuration
+- By default, Wardmast binds to loopback only, so it is not exposed without explicit firewall configuration
 
 ## Alternative: Remote Control (mode B)
 
@@ -63,7 +63,7 @@ For persistent, multi-session access with full browser support and auditing, con
 
 ## Trust assumption: loopback means the same Unix user (bd-5b5hq7, bd-8381tk)
 
-"Loopback" is **not an identity**. Every process that can reach `127.0.0.1:4848` runs as the **same Unix user**: the operator's own shell, `arb`, every worker and every Arbiter session. Since bd-asawcq, `WardmastWeb.Plugs.ApiAuth` lets a request with no bearer token reach only `GET /api/version` and `GET /api/server/migrations`, on loopback as off it. Every other `/api` route answers 401 without a token and checks the token's tier and scope (`WardmastWeb.ApiPolicy`). The local `arb` still needs no setup: with no `ARB_TOKEN` it mints a short-lived coordinator token over the operator socket below, in memory, once per invocation. The browser dashboard is gated separately, by the login described in the next section.
+"Loopback" is **not an identity**. Every process that can reach `127.0.0.1:4848` runs as the **same Unix user**: the operator's own shell, `arb`, every worker and every Wardmast session. Since bd-asawcq, `WardmastWeb.Plugs.ApiAuth` lets a request with no bearer token reach only `GET /api/version` and `GET /api/server/migrations`, on loopback as off it. Every other `/api` route answers 401 without a token and checks the token's tier and scope (`WardmastWeb.ApiPolicy`). The local `arb` still needs no setup: with no `ARB_TOKEN` it mints a short-lived coordinator token over the operator socket below, in memory, once per invocation. The browser dashboard is gated separately, by the login described in the next section.
 
 **Token minting is no longer part of that trust (bd-8381tk).** An anonymous `POST /api/mcp/tokens` is refused (401 since bd-asawcq; 403 before) and gets no token of any tier. That removes the one route by which any worker could turn loopback into a coordinator token for `/mcp`. The operator mints with `arb mcp token mint` (and `arb init`) on the server host. Those commands prove operator identity over a local Unix socket that checks the caller's kernel-attested peer credentials and refuses any process the server itself started. From another machine, run `ssh <host> arb mcp token mint`. The mechanism, why a 0600 credential file wouldn't have been a boundary, and what it does and doesn't stop are in [worker-security.md](worker-security.md#operator-proof-for-token-minting-bd-8381tk).
 
@@ -73,7 +73,7 @@ Still in place from bd-5b5hq7:
   * inside a session, `arb` always authenticates with the session's own token, never the operator socket (`WardmastCli.Client`, env var `ARB_SESSION_ID`);
   * the session's generated `settings.json` denies `Bash(arb mcp token mint:*)` outright.
 
-**Closed by bd-asawcq:** the rest of the `/api` REST surface (dispatch, workspace config writes, issue close, loop apply) used to be reachable without a token by any same-user process. It no longer is. Workers' own `arb` authenticates with the worker-tier token their dispatch minted (`ARB_TOKEN`), which can act only on its own task. The details are in [worker-security.md](worker-security.md#bearer-tokens-on-every-api-route-bd-asawcq). The same-UID limits there still apply: if Arbiter sessions ever run as a separate Unix user from the operator, this assumption should be revisited.
+**Closed by bd-asawcq:** the rest of the `/api` REST surface (dispatch, workspace config writes, issue close, loop apply) used to be reachable without a token by any same-user process. It no longer is. Workers' own `arb` authenticates with the worker-tier token their dispatch minted (`ARB_TOKEN`), which can act only on its own task. The details are in [worker-security.md](worker-security.md#bearer-tokens-on-every-api-route-bd-asawcq). The same-UID limits there still apply: if Wardmast sessions ever run as a separate Unix user from the operator, this assumption should be revisited.
 
 ## Dashboard login (bd-3gycsz)
 

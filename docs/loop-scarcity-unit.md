@@ -130,7 +130,7 @@ perfectly good evidence that this plan has windows at all.
 
 ### Coverage: capacity is a lower bound, shares are upper bounds
 
-The numerator of the calibration is *Arbiter's* observed draw; the denominator is
+The numerator of the calibration is *Wardmast's* observed draw; the denominator is
 the *account's* reported utilization. Those two populations are not identical, and
 the asymmetry runs one way.
 
@@ -144,7 +144,7 @@ the reciprocal of the coverage ratio — enough to push shares past 100% of a
 window.
 
 The part that is *not* fixable from the ledger is traffic that never passes
-through Arbiter at all: an interactive Claude Code session on the same plan
+through Wardmast at all: an interactive Claude Code session on the same plan
 raises utilization without writing a `usage_events` row, and on this
 installation that is the common case rather than an edge case. So:
 

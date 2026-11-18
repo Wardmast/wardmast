@@ -2,7 +2,7 @@
 
 When a GitLab MR is behind its target — the forge reports `behind_base`, or the
 pre-merge freshness check (`merge.require_up_to_date`) finds the head lacks the
-target tip — Arbiter syncs the branch once and waits for CI on the new head.
+target tip — Wardmast syncs the branch once and waits for CI on the new head.
 `merge.sync_strategy` picks how.
 
 | value | what happens | head SHAs |
@@ -89,7 +89,7 @@ until they are the head:
    (`Watchdog.note_ci_skipped_push/2`, recorded on the ticket's lane as
    `ci_skipped_head`). `merge.train_ci_skip=false` turns it off.
 3. **CI for the head.** When a CI-skipped MR is current and is the merge head,
-   Arbiter triggers its pipeline (GitLab: a merge request pipeline through the
+   Wardmast triggers its pipeline (GitLab: a merge request pipeline through the
    API; GitHub: a `workflow_dispatch` of `merge.train_ci_workflow` on the head
    branch) and merges only once that pipeline reports success. A skipped, neutral
    or missing pipeline never merges; a trigger the forge refuses is retried up to
@@ -158,9 +158,9 @@ default) is the serial train above, unchanged. The train decides freshness, so i
 runs where the merge-time freshness check does (`merge.require_up_to_date`,
 on by default) and needs the repo in `repo_paths`.
 
-**Where cars live.** A car is a merge commit Arbiter builds with git plumbing
+**Where cars live.** A car is a merge commit Wardmast builds with git plumbing
 (`merge-tree --write-tree` + `commit-tree`) in the repo's `repo_paths` checkout
-and pushes to an Arbiter-owned branch, `arbiter/train/<task>`
+and pushes to a Wardmast-owned branch, `arbiter/train/<task>`
 (`merge.train.ref_prefix`). No MR branch and no worktree is touched. GitLab's
 own merge trains are Premium-only; these refs work on any tier and on GitHub.
 CI runs on the car ref: GitLab — the ref is pushed with `-o ci.skip` and the

@@ -1,6 +1,6 @@
 # Post-merge deploy watch
 
-Arbiter used to stop caring at merge. On a deploy-on-merge repo a broken CD was
+Wardmast used to stop caring at merge. On a deploy-on-merge repo a broken CD was
 invisible: on 2026-10-18 three tonic `main` pipelines (after !367) reported
 SUCCESS while `build` and `deploy` were SKIPPED, and nothing noticed for ~2.5h.
 

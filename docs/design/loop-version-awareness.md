@@ -2,7 +2,7 @@
 
 Research task `bd-7shbxy` (#1222). **No implementation.** This is the
 design-options writeup the task asks for: what `arb loop analyze` should do
-with arbiter's own version, given that every release changes the generative
+with Wardmast's own version, given that every release changes the generative
 process behind the corpus it reads.
 
 Everything in [What I verified](#what-i-verified) was checked against the

@@ -312,7 +312,7 @@ target skill refuses to apply and says so.
 
 ## Autonomous routing-tier adjustment (Stage 3, `bd-6edc0u`) — opt-in, default off
 
-Stage 3 lets Arbiter apply **one** narrow class of queued proposal without a
+Stage 3 lets Wardmast apply **one** narrow class of queued proposal without a
 human: a routing-tier adjustment — a single `D<n>` tier's `model_tier` /
 `thinking`. Nothing else. Skill bodies and `standing_orders` are prose that
 bloats every future prompt and can contradict itself; a routing rule is
@@ -545,7 +545,7 @@ earlier in a long run (240–2500+ lines, agent kept going after the crash) was
 never seen and stayed `unclassified` — verified against the live corpus on
 2026-08-09. The fix keeps the tail read for everything else and adds a
 full-scan pass restricted to this narrow, unambiguous fingerprint list — safe
-because these strings can only come from Arbiter's own infrastructure, so a
+because these strings can only come from Wardmast's own infrastructure, so a
 whole-file scan carries no false-positive risk, and the corpus is small
 (tens of files, single-digit MB). This scan is per-failed-run and its cost
 is included in the pass's own `duration_ms` usage-event row.

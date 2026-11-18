@@ -1,6 +1,6 @@
 # Migrating a release install to provider accounts
 
-**Audience:** an operator running Arbiter as an OTP release
+**Audience:** an operator running Wardmast as an OTP release
 (`~/.wardmast/current/bin/wardmast`, managed by `wardmast.service`), which has no
 Mix toolchain. On a source checkout, the `mix wardmast.accounts.*` tasks do the
 same things. They are thin wrappers over the functions used here.

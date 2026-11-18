@@ -18,7 +18,7 @@ during quota polling integration.
 - **The credentials-file token lapses without an interactive session.** Its
   access token lasts about 8h and only refreshes while a `claude` process
   runs against it (see "Dedicated quota grant" below for what refreshes it
-  and how Arbiter now keeps its own grant alive). When it expires (401) or the file disappears,
+  and how Wardmast now keeps its own grant alive). When it expires (401) or the file disappears,
   `Wardmast.Quota.CloudProbe` escalates once, after 3 failed cycles, naming
   the lapsed interactive login and the fix (run `claude` on the host) — when
   workers run on their own token. With no worker token anywhere, workers are
@@ -42,10 +42,10 @@ operator's interactive login: the operator logs in once into a separate config
 dir, the account references that dir by **path** (a `cli_credentials_path`
 credential), `Wardmast.Quota` re-reads the access token from the file on every
 poll, and `Wardmast.Quota.GrantRefresher` has the `claude` CLI refresh it before
-it expires. Arbiter never calls the OAuth token endpoint and never stores the
+it expires. Wardmast never calls the OAuth token endpoint and never stores the
 grant's tokens.
 
-Setup, on the Arbiter host:
+Setup, on the Wardmast host:
 
 ```sh
 cd /tmp   # a neutral dir: never the admiral dir or a repo
