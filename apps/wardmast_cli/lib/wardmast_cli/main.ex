@@ -209,6 +209,8 @@ defmodule WardmastCli.Main do
       ward preview show    <ticket> [--repo R] [--json]
       ward preview logs    <ticket> [-f] [--lines N] [--repo R]
 
+      ward support bundle  [--out <file>]      redacted diagnostics archive (version, doctor, config, logs)
+
       ward grok-token                          a grok worker's GROK_AUTH_PROVIDER_COMMAND:
                                    prints {"access_token","expires_in"} from the server
 

@@ -61,6 +61,22 @@
     </section>
 
     <section class="card bg-base-200 p-4">
+      <h2 class="text-lg font-semibold mb-2">Diagnostics</h2>
+      <p class="text-sm mb-3">
+        Download a redacted bundle (version, doctor snapshot, config, recent logs)
+        to attach to a bug report. Same as <code>arb support bundle</code>.
+      </p>
+      <a
+        id="support-bundle-button"
+        href={~p"/support/bundle"}
+        download
+        class="btn btn-sm btn-primary w-fit"
+      >
+        <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Download diagnostics bundle
+      </a>
+    </section>
+
+    <section class="card bg-base-200 p-4">
       <h2 class="text-lg font-semibold mb-2">Stack</h2>
       <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm mb-4">
         <dt class="font-semibold">Wardmast</dt>

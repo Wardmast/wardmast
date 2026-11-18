@@ -1025,6 +1025,17 @@
       }
     },
     %{
+      id: "misc/support_diagnostics_bundle",
+      title: "Support diagnostics bundle (redacted version, doctor, config, logs)",
+      mcp: nil,
+      cli: ["arb support"],
+      rest: ["GET /api/support/bundle"],
+      status: :excluded,
+      absent: %{
+        mcp: {:intentional, "Operator-only file download for bug reports (`arb support bundle`, dashboard About button); not a model-facing operation."}
+      }
+    },
+    %{
       id: "accounts/fetch_short_lived_grok_access_token",
       title: "Fetch short-lived grok access token",
       mcp: nil,
