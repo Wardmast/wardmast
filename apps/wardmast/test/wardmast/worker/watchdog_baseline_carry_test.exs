@@ -139,7 +139,7 @@ defmodule Wardmast.Worker.WatchdogBaselineCarryTest do
     start_watchdog(ws, task)
 
     task_id = task.id
-    assert_receive {:watchdog, ^task_id, {:merged, _}}, 5_000
+    assert_receive {:watchdog, ^task_id, {:merged, _}}, Wardmast.Test.Timing.scale(5_000)
     assert StubMerger.update_branch_count(@ref) >= 1
     assert StubMerger.last_merge() == {@ref, synced}
     assert Ash.get!(Issue, task.id).state == :closed
@@ -160,7 +160,7 @@ defmodule Wardmast.Worker.WatchdogBaselineCarryTest do
     start_watchdog(ws, task)
 
     task_id = task.id
-    assert_receive {:watchdog, ^task_id, {:merged, _}}, 5_000
+    assert_receive {:watchdog, ^task_id, {:merged, _}}, Wardmast.Test.Timing.scale(5_000)
     assert StubMerger.last_merge() == {@ref, synced}
     assert [%{baseline: "ruling"}] = RoundsReport.build(task.id).carries
   end
@@ -175,7 +175,10 @@ defmodule Wardmast.Worker.WatchdogBaselineCarryTest do
     start_watchdog(ws, task)
 
     task_id = task.id
-    assert_receive {:watchdog, ^task_id, {:unreviewed_head, ^synced}}, 5_000
+
+    assert_receive {:watchdog, ^task_id, {:unreviewed_head, ^synced}},
+                   Wardmast.Test.Timing.scale(5_000)
+
     assert StubMerger.merge_count(@ref) == 0
     assert RoundsReport.build(task.id).carries == []
     assert length(Resolutions.list(task.id)) == 1

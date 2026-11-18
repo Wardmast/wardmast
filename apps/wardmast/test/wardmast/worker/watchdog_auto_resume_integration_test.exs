@@ -129,7 +129,7 @@ defmodule Wardmast.Worker.WatchdogAutoResumeIntegrationTest do
   defp driver_under?(_pid, _root), do: false
 
   defp wait_until(fun, timeout \\ 5_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
@@ -262,7 +262,7 @@ defmodule Wardmast.Worker.WatchdogAutoResumeIntegrationTest do
 
       # The timeout is still announced — the PR really did sit past its
       # ceiling. bd-741sid: there is no run to record it on.
-      assert_receive {:watchdog, ^task_id, {:timed_out, 2}}, 5_000
+      assert_receive {:watchdog, ^task_id, {:timed_out, 2}}, Wardmast.Test.Timing.scale(5_000)
       wait_until(fn -> escalations(ws) != [] end)
 
       # No fourth resume: no run was started on the ticket.
@@ -289,7 +289,7 @@ defmodule Wardmast.Worker.WatchdogAutoResumeIntegrationTest do
 
       start_watchdog(task.id, "!e2e-3", ws, [])
 
-      assert_receive {:watchdog, ^task_id, {:timed_out, 2}}, 5_000
+      assert_receive {:watchdog, ^task_id, {:timed_out, 2}}, Wardmast.Test.Timing.scale(5_000)
       wait_until(fn -> escalations(ws) != [] end)
 
       failed = Enum.find(escalations(ws), &(&1.subject =~ "auto-resume FAILED"))

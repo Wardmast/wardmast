@@ -479,7 +479,7 @@ defmodule Wardmast.Worker.ReviewGateRemotePlacementTest do
       assert_received {:rearmed, {:ok, regate}}
 
       ref = Process.monitor(regate)
-      assert_receive {:DOWN, ^ref, :process, ^regate, reason}, 30_000
+      assert_receive {:DOWN, ^ref, :process, ^regate, reason}, Wardmast.Test.Timing.scale(30_000)
       assert reason in [:normal, :noproc]
 
       assert passes(ctx) == 2
@@ -492,14 +492,14 @@ defmodule Wardmast.Worker.ReviewGateRemotePlacementTest do
 
   defp assert_gate_reports(gate, _rig) do
     ref = Process.monitor(gate)
-    assert_receive {:DOWN, ^ref, :process, ^gate, reason}, 30_000
+    assert_receive {:DOWN, ^ref, :process, ^gate, reason}, Wardmast.Test.Timing.scale(30_000)
     assert reason in [:normal, :noproc]
   end
 
   defp stop_gate(gate) do
     ref = Process.monitor(gate)
     GenServer.stop(gate, :normal)
-    assert_receive {:DOWN, ^ref, :process, ^gate, _}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(5_000)
   end
 
   # The node stops: the author and the pass workers go with `:shutdown`, the gate
@@ -509,7 +509,7 @@ defmodule Wardmast.Worker.ReviewGateRemotePlacementTest do
 
     gate_ref = Process.monitor(gate)
     Process.exit(gate, :kill)
-    assert_receive {:DOWN, ^gate_ref, :process, ^gate, _}, 5_000
+    assert_receive {:DOWN, ^gate_ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(5_000)
 
     for suffix <- ["#review", "#review#r2"], pid = Worker.whereis(rig.task.id <> suffix) do
       ref = Process.monitor(pid)
@@ -520,7 +520,7 @@ defmodule Wardmast.Worker.ReviewGateRemotePlacementTest do
         :exit, _ -> :ok
       end
 
-      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, Wardmast.Test.Timing.scale(5_000)
     end
 
     wait_until(fn -> Worker.whereis(rig.task.id) == nil end)
@@ -657,7 +657,7 @@ defmodule Wardmast.Worker.ReviewGateRemotePlacementTest do
   end
 
   defp wait_until(fun, timeout \\ 5_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 

@@ -136,12 +136,12 @@ defmodule Wardmast.Worker.WatchdogCoverageFlipTest do
   # bd-741sid: the merge finishes the ticket (`PullRequest.merged/2`), where it
   # used to complete the worker paired with the Watchdog.
   defp assert_merged(task_id, timeout \\ 2_000) do
-    assert_receive {:watchdog, ^task_id, {:merged, _}}, timeout
+    assert_receive {:watchdog, ^task_id, {:merged, _}}, Wardmast.Test.Timing.scale(timeout)
     assert Ash.get!(Issue, task_id).state == :closed
   end
 
   defp wait_until(fun, timeout \\ 2_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 

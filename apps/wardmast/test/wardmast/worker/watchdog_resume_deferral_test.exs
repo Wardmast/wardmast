@@ -117,7 +117,7 @@ defmodule Wardmast.Worker.WatchdogResumeDeferralTest do
   end
 
   defp wait_until(fun, timeout) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
@@ -165,7 +165,7 @@ defmodule Wardmast.Worker.WatchdogResumeDeferralTest do
 
       wait_until(fn -> StubAutoResumeDispatcher.resume_count() >= 2 end, 5_000)
       assert StubAutoResumeDispatcher.escalations() == []
-      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(5_000)
     end
 
     test "the resume re-fires when the blocking fix pass completes, not on a retry tick that may never come",
@@ -189,7 +189,7 @@ defmodule Wardmast.Worker.WatchdogResumeDeferralTest do
 
       wait_until(fn -> StubAutoResumeDispatcher.resume_count() >= 2 end, 5_000)
       assert StubAutoResumeDispatcher.escalations() == []
-      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(5_000)
     end
   end
 
@@ -220,7 +220,7 @@ defmodule Wardmast.Worker.WatchdogResumeDeferralTest do
       send(blocker, :finish)
 
       wait_until(fn -> StubAutoResumeDispatcher.resume_count() >= 2 end, 5_000)
-      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(5_000)
 
       # Still attempt 3 — the deferral never spent one, and it never gave one
       # back either. Resuming as attempt 1 here would record 1 on the ticket's
@@ -244,7 +244,7 @@ defmodule Wardmast.Worker.WatchdogResumeDeferralTest do
         )
 
       wref = Process.monitor(wpid)
-      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(5_000)
 
       assert [{^task_id, _ws_id, "!strand7", 2, {:resume_blocked, _blocked_by, 2}}] =
                StubAutoResumeDispatcher.escalations()
@@ -263,7 +263,7 @@ defmodule Wardmast.Worker.WatchdogResumeDeferralTest do
         start_watchdog(task_id, "!strand3", ws, interval_ms: 20, max_resume_deferrals: 2)
 
       wref = Process.monitor(wpid)
-      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(5_000)
 
       # One initial attempt + exactly two deferred retries, then stop.
       assert StubAutoResumeDispatcher.resume_count() == 3
@@ -291,7 +291,7 @@ defmodule Wardmast.Worker.WatchdogResumeDeferralTest do
         start_watchdog(task_id, "!strand4", ws, interval_ms: 20, max_resume_deferrals: 30)
 
       wref = Process.monitor(wpid)
-      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(5_000)
 
       # Nothing can ever signal completion for a blocker that is already gone,
       # so this must NOT sit out all 30 deferrals.
@@ -343,7 +343,7 @@ defmodule Wardmast.Worker.WatchdogResumeDeferralTest do
       send(blocker, :finish)
 
       wait_until(fn -> StubAutoResumeDispatcher.resume_count() >= 2 end, 5_000)
-      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(5_000)
 
       assert StubAutoResumeDispatcher.resume_count() == 2
       assert StubAutoResumeDispatcher.escalations() == []

@@ -113,7 +113,7 @@ defmodule Wardmast.Worker.ReviewGateTicketVerdictTest do
   end
 
   defp wait_until(fun, timeout \\ 3_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
@@ -281,7 +281,7 @@ defmodule Wardmast.Worker.ReviewGateTicketVerdictTest do
         )
 
       ref = Process.monitor(gate)
-      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 8_000
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(8_000)
 
       refute Process.alive?(author)
       wait_until(fn -> ticket(task.id).state == :closed end)

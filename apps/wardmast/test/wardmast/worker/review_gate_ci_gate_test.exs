@@ -572,7 +572,7 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
         )
 
       ref = Process.monitor(gate)
-      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 30_000
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(30_000)
 
       # (RC_OTHER discloses a partial verification, which earns a re-prompt pass.)
       assert passes(rig) >= 1
@@ -715,7 +715,7 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
 
       gate = start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 1)
       ref = Process.monitor(gate)
-      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 20_000
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(20_000)
 
       assert passes(rig) == 0
       assert remote_head(ctx, rig) == rig.head
@@ -895,7 +895,9 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
       wait_until(fn -> awaiting_ci?(gate) end)
 
       task_id = rig.task.id
-      assert_receive {:event, %{topic: "worker_slot_released", task_id: ^task_id}}, 2_000
+
+      assert_receive {:event, %{topic: "worker_slot_released", task_id: ^task_id}},
+                     Wardmast.Test.Timing.scale(2_000)
     end
 
     test "holds no scheduler slot and no agent, and shows its state", ctx do
@@ -1053,7 +1055,7 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
 
       gate = start_gate(rig, ctx, command: [@probe, "RC_SUITE"])
       ref = Process.monitor(gate)
-      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 20_000
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(20_000)
 
       assert passes(rig) == 1
     end
@@ -1064,7 +1066,7 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
 
       gate = start_gate(rig, ctx, command: [@probe, "RC_OTHER"])
       ref = Process.monitor(gate)
-      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 20_000
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(20_000)
 
       assert passes(rig) == 2
     end
@@ -1075,7 +1077,7 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
 
       gate = start_gate(rig, Map.put(ctx, :ws, ws), command: [@probe, "RC_SUITE"])
       ref = Process.monitor(gate)
-      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 20_000
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(20_000)
 
       assert passes(rig) == 2
       # #1146: only the reviewer brief reads the forge (one read per reviewer prompt), no CI wait.
@@ -1110,7 +1112,7 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
 
       gate = start_gate(rig, ctx, command: [script])
       ref = Process.monitor(gate)
-      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 20_000
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(20_000)
       {rig, Ash.get!(Issue, rig.task.id)}
     end
 
@@ -1291,7 +1293,7 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
 
       gate = start_gate(rig, ctx)
       ref = Process.monitor(gate)
-      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 20_000
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(20_000)
 
       assert passes(rig) == 1
       # #1146: the one read is the reviewer brief, not a CI wait.
@@ -1387,7 +1389,7 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
       # Several liveness ticks, well past the stall limit.
       probes_before = StubMerger.get_count(@pr)
       wait_until(fn -> StubMerger.get_count(@pr) >= probes_before + 40 end, 10_000)
-      Process.sleep(600)
+      Process.sleep(Wardmast.Test.Timing.scale(600))
 
       assert Process.alive?(gate)
       assert awaiting_ci?(gate)
@@ -1695,7 +1697,7 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
     for pid <- [gate, rig.author] do
       ref = Process.monitor(pid)
       Process.exit(pid, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, Wardmast.Test.Timing.scale(5_000)
     end
 
     # The registry drops the killed author asynchronously; a restart starts empty.
@@ -1708,7 +1710,7 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
   defp stop_gate(gate) do
     ref = Process.monitor(gate)
     GenServer.stop(gate, :normal)
-    assert_receive {:DOWN, ^ref, :process, ^gate, _}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(5_000)
   end
 
   # ---- app rig -------------------------------------------------------------
@@ -1812,7 +1814,7 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
   end
 
   defp wait_until(fun, timeout \\ 15_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 

@@ -138,7 +138,7 @@ defmodule Wardmast.Worker.WatchdogSpeculativeTrainTest do
   end
 
   defp wait_until(fun, timeout \\ 8_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
@@ -319,7 +319,7 @@ defmodule Wardmast.Worker.WatchdogSpeculativeTrainTest do
 
       # A goes green and merges; B, now first and red, is ejected.
       StubMerger.set_car_status(ca.sha, "success")
-      assert_receive {:watchdog, "a", {:merged, _}}, 8_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(8_000)
       wait_until(fn -> :sys.get_state(w["b"]).train_ejected_head == heads["b"] end)
       wait_until(fn -> TrainForge.head(forge, "arbiter/train/b") == nil end)
 
@@ -334,7 +334,7 @@ defmodule Wardmast.Worker.WatchdogSpeculativeTrainTest do
       assert TrainForge.parents(forge, new_c.sha) == [main_now, heads["c"]]
 
       StubMerger.set_car_status(new_c.sha, "success")
-      assert_receive {:watchdog, "c", {:merged, _}}, 8_000
+      assert_receive {:watchdog, "c", {:merged, _}}, Wardmast.Test.Timing.scale(8_000)
       assert TrainForge.tree(forge, "main") == new_c.tree
       assert StubMerger.merge_count(mr("b")) == 0
     end
@@ -448,7 +448,7 @@ defmodule Wardmast.Worker.WatchdogSpeculativeTrainTest do
         ]
       })
 
-      assert_receive {:watchdog, "a", {:merged, _}}, 8_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(8_000)
       assert TrainForge.tree(forge, "main") == ca.tree
     end
   end
@@ -490,7 +490,9 @@ defmodule Wardmast.Worker.WatchdogSpeculativeTrainTest do
       StubMerger.set_car_status(cb.sha, "success")
 
       # The unreviewed head goes to a review round; B leaves the train.
-      assert_receive {:watchdog, "b", {:unreviewed_head, ^pushed}}, 8_000
+      assert_receive {:watchdog, "b", {:unreviewed_head, ^pushed}},
+                     Wardmast.Test.Timing.scale(8_000)
+
       wait_until(fn -> TrainForge.head(forge, "arbiter/train/b") == nil end)
       assert StubMerger.merge_count(mr("b")) == 0
 
@@ -596,8 +598,8 @@ defmodule Wardmast.Worker.WatchdogSpeculativeTrainTest do
         watch(id, ws, heads[id], merge_train: t2, train_car: lane_car)
       end
 
-      assert_receive {:watchdog, "a", {:merged, _}}, 8_000
-      assert_receive {:watchdog, "b", {:merged, _}}, 8_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(8_000)
+      assert_receive {:watchdog, "b", {:merged, _}}, Wardmast.Test.Timing.scale(8_000)
       assert StubMerger.merge_count(mr("a")) == 1
       assert StubMerger.merge_count(mr("b")) == 1
       assert TrainForge.tree(forge, "main") == cars["b"].tree
@@ -682,7 +684,7 @@ defmodule Wardmast.Worker.WatchdogSpeculativeTrainTest do
       heads = stale_mrs(forge, ~w(a))
       watch("a", workspace(forge, %{"up_to_date_tolerance" => 1}), heads["a"])
 
-      assert_receive {:watchdog, "a", {:merged, _}}, 8_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(8_000)
       assert StubMerger.car_runs() == []
     end
   end
@@ -724,7 +726,7 @@ defmodule Wardmast.Worker.WatchdogSpeculativeTrainTest do
       assert StubMerger.merge_count(mr("a")) == 0
 
       serve(forge, "a")
-      assert_receive {:watchdog, "a", {:merged, _}}, 8_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(8_000)
       assert [{"!a", _}] = StubMerger.pipeline_triggers()
       assert StubMerger.car_runs() == []
     end

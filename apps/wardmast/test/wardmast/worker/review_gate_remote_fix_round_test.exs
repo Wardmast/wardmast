@@ -552,7 +552,7 @@ defmodule Wardmast.Worker.ReviewGateRemoteFixRoundTest do
       :exit, _ -> :ok
     end
 
-    assert_receive {:DOWN, ^ref, :process, ^gate, _}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(5_000)
   end
 
   # The reviewer fixture's round marker, outside every checkout.
@@ -689,7 +689,7 @@ defmodule Wardmast.Worker.ReviewGateRemoteFixRoundTest do
   end
 
   defp wait_until(fun, timeout \\ 5_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 

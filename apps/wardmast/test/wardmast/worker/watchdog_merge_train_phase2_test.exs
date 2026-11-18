@@ -187,7 +187,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
   defp role(wpid), do: :sys.get_state(wpid).train_role
 
   defp wait_until(fun, timeout \\ 3_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
@@ -240,7 +240,9 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       a = seat_head(ws)
       b = seat_waiter(ws, log, {:conflict, ["lib/a.ex"]})
 
-      assert_receive {:conflict_pass, "b", %{pr_ref: "!b", task_id: "b"}}, 3_000
+      assert_receive {:conflict_pass, "b", %{pr_ref: "!b", task_id: "b"}},
+                     Wardmast.Test.Timing.scale(3_000)
+
       assert role(b) == {:wait, "a"}
       # the conflict pass is the only thing b did: no sync, no merge, no head change for a
       assert syncs("b") == 0
@@ -319,7 +321,8 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       _a = seat_head(ws)
       _b = seat_waiter(ws, log, {:conflict, ["lib/a.ex"]})
 
-      assert_receive {:conflict_pass, "b", %{ci_skip: {:push_option, "ci.skip"}}}, 3_000
+      assert_receive {:conflict_pass, "b", %{ci_skip: {:push_option, "ci.skip"}}},
+                     Wardmast.Test.Timing.scale(3_000)
     end
 
     test "without a mechanism (or with merge.train_ci_skip=false) the pass is ordinary", %{
@@ -329,7 +332,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       freshness(%{"a0" => 4, "a1" => 0, "b0" => 4})
       _a = seat_head(ws)
       _b = seat_waiter(ws, log, {:conflict, ["lib/a.ex"]})
-      assert_receive {:conflict_pass, "b", args}, 3_000
+      assert_receive {:conflict_pass, "b", args}, Wardmast.Test.Timing.scale(3_000)
       refute Map.has_key?(args, :ci_skip)
 
       StubMerger.set_ci_skip_mechanism({:push_option, "ci.skip"})
@@ -342,7 +345,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       _d =
         watch("d", ws2, conflict_probe: probe_fn(log, "d", {:conflict, ["lib/a.ex"]}))
 
-      assert_receive {:conflict_pass, "d", args2}, 3_000
+      assert_receive {:conflict_pass, "d", args2}, Wardmast.Test.Timing.scale(3_000)
       refute Map.has_key?(args2, :ci_skip)
     end
 
@@ -353,7 +356,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       StubMerger.queue_get(mr("a"), [Map.put(green("a0"), :block_reason, :conflict)])
       _a = watch("a", ws)
 
-      assert_receive {:conflict_pass, "a", args}, 3_000
+      assert_receive {:conflict_pass, "a", args}, Wardmast.Test.Timing.scale(3_000)
       refute Map.has_key?(args, :ci_skip)
     end
   end
@@ -382,7 +385,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       assert StubMerger.merge_count("!a") == 0
 
       StubMerger.queue_get(mr("a"), [green("a0")])
-      assert_receive {:watchdog, "a", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
       assert StubMerger.merge_count("!a") == 1
       assert length(StubMerger.pipeline_triggers()) == 1
     end
@@ -432,7 +435,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       assert StubMerger.merge_count("!a") == 0
 
       StubMerger.queue_get(mr("a"), [green("a0")])
-      assert_receive {:watchdog, "a", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
     end
 
     test "a head that moved on (a sync, a new push) is no longer skipped", %{ws: ws} do
@@ -441,7 +444,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       StubMerger.queue_get(mr("a"), [green("a1")])
       watch("a", ws, ci_skipped_head: "a0")
 
-      assert_receive {:watchdog, "a", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
       assert StubMerger.pipeline_triggers() == []
     end
 
@@ -472,7 +475,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       StubMerger.queue_get(mr("a"), [green("a0")])
       watch("a", ws, conflict_probe: probe_fn(log, "a", {:conflict, ["x"]}))
 
-      assert_receive {:watchdog, "a", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
       assert StubMerger.merge_count("!a") == 1
       assert probed(log, "a") == 0
       assert StubMerger.pipeline_triggers() == []
@@ -489,7 +492,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       ])
 
       watch("a", ws)
-      assert_receive {:watchdog, "a", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
       assert syncs("a") == 1
       assert StubMerger.pipeline_triggers() == []
     end

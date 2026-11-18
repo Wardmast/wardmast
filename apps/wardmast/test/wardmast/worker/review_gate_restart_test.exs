@@ -157,7 +157,7 @@ defmodule Wardmast.Worker.ReviewGateRestartTest do
       # marker along — nothing to revive at the next boot.
       ref = Process.monitor(gate)
       :ok = GenServer.stop(rig.author, :normal)
-      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 5_000
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(5_000)
       stop_workers(rig, :shutdown)
 
       assert pass_marker(rig) == nil
@@ -180,7 +180,9 @@ defmodule Wardmast.Worker.ReviewGateRestartTest do
       put_app_env(:wardmast, :worker_node_stopping_override, true)
       gate_ref = Process.monitor(gate)
       send(gate, {:worker_exited, rig.task.id <> "#review", 137})
-      assert_receive {:DOWN, ^gate_ref, :process, ^gate, :shutdown}, 5_000
+
+      assert_receive {:DOWN, ^gate_ref, :process, ^gate, :shutdown},
+                     Wardmast.Test.Timing.scale(5_000)
 
       # No park, no escalation, and the marker survives for the boot sweep.
       refute Wardmast.Tasks.ReviewPark.parked?(Ash.get!(Issue, rig.task.id))
@@ -215,7 +217,9 @@ defmodule Wardmast.Worker.ReviewGateRestartTest do
 
       # The node flips to stopping inside the grace window.
       put_app_env(:wardmast, :worker_node_stopping_override, true)
-      assert_receive {:DOWN, ^gate_ref, :process, ^gate, :shutdown}, 5_000
+
+      assert_receive {:DOWN, ^gate_ref, :process, ^gate, :shutdown},
+                     Wardmast.Test.Timing.scale(5_000)
 
       refute Wardmast.Tasks.ReviewPark.parked?(Ash.get!(Issue, rig.task.id))
       assert %{"phase" => "reviewing", "round" => 1} = pass_marker(rig)
@@ -231,7 +235,9 @@ defmodule Wardmast.Worker.ReviewGateRestartTest do
       put_app_env(:wardmast, :worker_node_stopping_override, false)
       gate_ref = Process.monitor(gate)
       send(gate, {:worker_exited, rig.task.id <> "#review", 137})
-      assert_receive {:DOWN, ^gate_ref, :process, ^gate, :normal}, 5_000
+
+      assert_receive {:DOWN, ^gate_ref, :process, ^gate, :normal},
+                     Wardmast.Test.Timing.scale(5_000)
 
       assert Wardmast.Tasks.ReviewPark.reason(Ash.get!(Issue, rig.task.id)) == :reviewer_failed
     end
@@ -298,7 +304,9 @@ defmodule Wardmast.Worker.ReviewGateRestartTest do
       put_app_env(:wardmast, :worker_node_stopping_override, true)
       gate_ref = Process.monitor(gate)
       send(gate, {:worker_exited, impl_id, 143})
-      assert_receive {:DOWN, ^gate_ref, :process, ^gate, :shutdown}, 5_000
+
+      assert_receive {:DOWN, ^gate_ref, :process, ^gate, :shutdown},
+                     Wardmast.Test.Timing.scale(5_000)
 
       # The author saw the gate go. It must not read that as "no verdict".
       _ = :sys.get_state(rig.author)
@@ -437,7 +445,7 @@ defmodule Wardmast.Worker.ReviewGateRestartTest do
 
     gate_ref = Process.monitor(gate)
     Process.exit(gate, :kill)
-    assert_receive {:DOWN, ^gate_ref, :process, ^gate, _}, 5_000
+    assert_receive {:DOWN, ^gate_ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(5_000)
 
     stop_workers(rig, :shutdown)
     wait_until(fn -> Worker.whereis(rig.task.id) == nil end)
@@ -455,7 +463,7 @@ defmodule Wardmast.Worker.ReviewGateRestartTest do
         :exit, _ -> :ok
       end
 
-      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, Wardmast.Test.Timing.scale(5_000)
     end
 
     :ok
@@ -489,7 +497,7 @@ defmodule Wardmast.Worker.ReviewGateRestartTest do
 
   defp assert_gate_reports(gate) do
     ref = Process.monitor(gate)
-    assert_receive {:DOWN, ^ref, :process, ^gate, reason}, 30_000
+    assert_receive {:DOWN, ^ref, :process, ^gate, reason}, Wardmast.Test.Timing.scale(30_000)
     assert reason in [:normal, :noproc]
   end
 
@@ -653,7 +661,7 @@ defmodule Wardmast.Worker.ReviewGateRestartTest do
   end
 
   defp wait_until(fun, timeout \\ 5_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 

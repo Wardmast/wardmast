@@ -139,7 +139,7 @@ defmodule Wardmast.Worker.WatchdogMergeFreshnessTest do
 
     start_watchdog(task, "!mf1", ws)
 
-    assert_receive {:watchdog, _, {:merged, _}}, 3_000
+    assert_receive {:watchdog, _, {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
     assert StubMerger.update_branch_count("!mf1") == 1
     # The production call path hands the adapter the workspace and repo, which is
     # how a GitLab adapter reads `merge.sync_strategy` and finds the checkout.
@@ -165,7 +165,9 @@ defmodule Wardmast.Worker.WatchdogMergeFreshnessTest do
 
     start_watchdog(task, "!mf2", ws)
 
-    assert_receive {:watchdog, _, {:unreviewed_head, "sha-authored"}}, 3_000
+    assert_receive {:watchdog, _, {:unreviewed_head, "sha-authored"}},
+                   Wardmast.Test.Timing.scale(3_000)
+
     assert StubMerger.merge_count("!mf2") == 0
   end
 
@@ -237,7 +239,7 @@ defmodule Wardmast.Worker.WatchdogMergeFreshnessTest do
     StubMerger.queue_get("!mf5", [open("sha-reviewed", %{pipeline: :success, ci_clean: true})])
     start_watchdog(task, "!mf5", ws)
 
-    assert_receive {:watchdog, _, {:merged, _}}, 3_000
+    assert_receive {:watchdog, _, {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
     assert StubMerger.update_branch_count("!mf5") == 0
     assert_received {:probed, "main", "sha-reviewed"}
   end
@@ -253,7 +255,7 @@ defmodule Wardmast.Worker.WatchdogMergeFreshnessTest do
     StubMerger.queue_get("!mf6", [open("sha-reviewed", %{pipeline: :success, ci_clean: true})])
     start_watchdog(task, "!mf6", ws)
 
-    assert_receive {:watchdog, _, {:merged, _}}, 3_000
+    assert_receive {:watchdog, _, {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
     assert StubMerger.update_branch_count("!mf6") == 0
   end
 
@@ -276,7 +278,7 @@ defmodule Wardmast.Worker.WatchdogMergeFreshnessTest do
 
     start_watchdog(task, "!mf9", ws)
 
-    assert_receive {:watchdog, _, {:merged, _}}, 5_000
+    assert_receive {:watchdog, _, {:merged, _}}, Wardmast.Test.Timing.scale(5_000)
     assert StubMerger.update_branch_count("!mf9") == 4
   end
 
@@ -313,7 +315,7 @@ defmodule Wardmast.Worker.WatchdogMergeFreshnessTest do
   end
 
   defp wait_until(fun, timeout \\ 2_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
 
     Stream.repeatedly(fn ->
       cond do

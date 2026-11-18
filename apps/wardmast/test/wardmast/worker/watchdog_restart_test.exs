@@ -91,14 +91,14 @@ defmodule Wardmast.Worker.WatchdogRestartTest do
         )
       )
 
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, Wardmast.Test.Timing.scale(2_000)
     assert Ash.get!(Issue, task.id).state == :merging
     assert Watchdog.whereis(task.id) == nil
     :ok
   end
 
   defp wait_until(fun, timeout \\ 2_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
