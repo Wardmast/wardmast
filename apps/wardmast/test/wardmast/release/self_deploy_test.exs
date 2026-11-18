@@ -50,7 +50,7 @@ defmodule Wardmast.Release.SelfDeployTest do
       end
     end
 
-    Application.put_env(:wardmast, :self_deploy, cmd: fun, arb_path: arb)
+    Application.put_env(:wardmast, :self_deploy, cmd: fun, arb_path: arb, os: {:unix, :linux})
   end
 
   describe "start/1" do
@@ -195,6 +195,127 @@ defmodule Wardmast.Release.SelfDeployTest do
 
       assert {:error, {:cli_missing, ^missing}} = SelfDeploy.start("v1.2.3")
       refute_received {:cmd, "systemd-run", _, _}
+    end
+  end
+
+  # The darwin path: a detached launchd job instead of `systemd-run --user`.
+  defp stub_darwin(arb, opts \\ []) do
+    test_pid = self()
+    list = Keyword.get(opts, :list, {"PID\tStatus\tLabel\n-\t0\tcom.apple.Finder\n", 0})
+    bootstrap = Keyword.get(opts, :bootstrap, {"", 0})
+    job = Keyword.get(opts, :job, {"Could not find service in domain\n", 113})
+
+    fun = fn cmd, args, run_opts ->
+      send(test_pid, {:cmd, cmd, args, run_opts})
+
+      case {cmd, args} do
+        {"id", ["-u"]} -> {"501\n", 0}
+        {"launchctl", ["list"]} -> list
+        {"launchctl", ["list", _label]} -> job
+        {"launchctl", ["bootout" | _]} -> {"No such process\n", 3}
+        {"launchctl", ["bootstrap" | _]} -> bootstrap
+      end
+    end
+
+    Application.put_env(:wardmast, :self_deploy, cmd: fun, arb_path: arb, os: {:unix, :darwin})
+  end
+
+  describe "start/1 on darwin" do
+    test "launches a detached launchd job and never calls systemd", %{home: home, arb: arb} do
+      stub_darwin(arb)
+
+      assert {:ok, %{unit: "wardmast-deploy-v1.2.3", tag: "v1.2.3"}} = SelfDeploy.start("v1.2.3")
+
+      refute_received {:cmd, "systemd-run", _, _}
+      refute_received {:cmd, "systemctl", _, _}
+
+      plist = Path.join(home, "wardmast-deploy-v1.2.3.plist")
+      assert_received {:cmd, "launchctl", ["bootstrap", "gui/501", ^plist], _}
+
+      body = File.read!(plist)
+      assert body =~ "<string>wardmast-deploy-v1.2.3</string>"
+      assert body =~ "<string>#{arb}</string>"
+      assert body =~ "<string>v1.2.3</string>"
+      assert body =~ "<string>--json</string>"
+      assert body =~ "<key>WARDMAST_DATA_HOME</key>"
+      assert body =~ "<key>ARB_DATA_HOME</key>"
+      # Runs once; launchd must never respawn a finished deploy.
+      refute body =~ "<key>KeepAlive</key>"
+    end
+
+    test "the service env file is sourced by the job, never inlined in the plist",
+         %{home: home, arb: arb} do
+      System.put_env("GITHUB_TOKEN", "ghp_supersecrettokenvalue123")
+      stub_darwin(arb)
+      assert {:ok, _} = SelfDeploy.start("v1.2.3")
+
+      body = File.read!(Path.join(home, "wardmast-deploy-v1.2.3.plist"))
+      assert body =~ Path.join(home, "wardmast.env")
+      refute body =~ "ghp_supersecrettokenvalue123"
+    end
+
+    test "refuses while a deploy job has a live process", %{arb: arb} do
+      stub_darwin(arb, list: {"PID\tStatus\tLabel\n4242\t0\twardmast-deploy-v1.2.2\n", 0})
+
+      assert {:error, :already_running} = SelfDeploy.start("v1.2.3")
+      refute_received {:cmd, "launchctl", ["bootstrap" | _], _}
+    end
+
+    test "a duplicate request for a label whose job is live is refused without bootout",
+         %{home: home, arb: arb} do
+      live = {~s({\n\t"Label" = "wardmast-deploy-v1.2.3";\n\t"PID" = 4242;\n};\n), 0}
+      stub_darwin(arb, job: live)
+
+      assert {:error, :already_running} = SelfDeploy.start("v1.2.3")
+
+      assert_received {:cmd, "launchctl", ["list", "wardmast-deploy-v1.2.3"], _}
+      refute_received {:cmd, "launchctl", ["bootout" | _], _}
+      refute_received {:cmd, "launchctl", ["bootstrap" | _], _}
+      refute File.exists?(Path.join(home, "wardmast-deploy-v1.2.3.plist"))
+    end
+
+    test "a lingering finished job (no PID) is booted out before bootstrap", %{arb: arb} do
+      stub_darwin(arb,
+        job: {~s({\n\t"Label" = "wardmast-deploy-v1.2.3";\n\t"LastExitStatus" = 0;\n};\n), 0}
+      )
+
+      assert {:ok, _} = SelfDeploy.start("v1.2.3")
+
+      assert_received {:cmd, "launchctl", ["bootout", "gui/501/wardmast-deploy-v1.2.3"], _}
+      assert_received {:cmd, "launchctl", ["bootstrap", "gui/501", _], _}
+    end
+
+    test "losing the bootstrap race reads as already running", %{arb: arb} do
+      stub_darwin(arb, bootstrap: {"Bootstrap failed: service already loaded", 5})
+      assert {:error, :already_running} = SelfDeploy.start("v1.2.3")
+    end
+
+    test "a finished job still listed (no PID) does not block the next deploy", %{arb: arb} do
+      stub_darwin(arb, list: {"PID\tStatus\tLabel\n-\t0\twardmast-deploy-v1.2.2\n", 0})
+      assert {:ok, _} = SelfDeploy.start("v1.2.3")
+    end
+
+    test "a failing bootstrap is a launch failure with the token scrubbed", %{arb: arb} do
+      System.put_env("GITHUB_TOKEN", "ghp_supersecrettokenvalue123")
+      stub_darwin(arb, bootstrap: {"Bootstrap failed ghp_supersecrettokenvalue123", 5})
+
+      capture_log(fn ->
+        assert {:error, {:launch_failed, message}} = SelfDeploy.start("v1.2.3")
+        assert message =~ "Bootstrap failed"
+        refute message =~ "ghp_supersecrettokenvalue123"
+      end)
+    end
+
+    test "an unreachable launchd is a clear error, not a launch", %{arb: arb} do
+      stub_darwin(arb, list: {"launchctl: boom\n", 1})
+      assert {:error, :systemd_unavailable} = SelfDeploy.start("v1.2.3")
+      refute_received {:cmd, "launchctl", ["bootstrap" | _], _}
+    end
+
+    test "an invalid tag never reaches launchctl", %{arb: arb} do
+      stub_darwin(arb)
+      assert {:error, :invalid_tag} = SelfDeploy.start("v1.2.3 --force")
+      refute_received {:cmd, "launchctl", _, _}
     end
   end
 
