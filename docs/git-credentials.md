@@ -201,7 +201,7 @@ mergers' own branch pushes still run as the operator.
 
 `gitlab_project_token` needs project access tokens, which GitLab.com offers only on
 **Premium or Ultimate**. On a **Free** group (checked 2026-10-27: both
-`serious-alchemy` and `acme` report `plan: free`) there is nothing to mint. The
+`acme-org` and `acme` report `plan: free`) there is nothing to mint. The
 Free-tier kind is the operator's own **bot user** with a long-lived personal access
 token, limited to the projects *by membership*, and delivered to a node like the minted
 kinds. It is an explicit opt-in and it is **weaker**; read "Compared with
@@ -223,7 +223,7 @@ kinds. It is an explicit opt-in and it is **weaker**; read "Compared with
    "git_credentials": {
      "repos": {
        "my-app":        {"kind": "gitlab_bot_token", "secret": "GITLAB_BOT_PAT",
-                        "remote": "serious-alchemy/my-app",
+                        "remote": "acme-org/my-app",
                         "projects": ["acme/app", "acme/app_device"],
                         "expires_at": "2027-05-01"},
        "app":        {"kind": "gitlab_bot_token", "secret": "GITLAB_BOT_PAT"},

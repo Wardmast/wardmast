@@ -278,7 +278,7 @@ One append-only table. Nothing mutates a row; a new approval adds a row.
 %{
   id:           uuid,
   task_id:      "bd-6woz0x",              # the AUTHORING task, always
-  mr_ref:       "ryanrborn/arbiter#1631", # the PR this coverage is about
+  mr_ref:       "acme/wardmast#1631", # the PR this coverage is about
   head_sha:     "8e7a69ea…",              # 40 hex, the commit covered
   base_ref:     "main",                   # what the net diff was taken against
   net_diff_id:  "e3d29b52…",              # NetDiff.fingerprint(base...head_sha)

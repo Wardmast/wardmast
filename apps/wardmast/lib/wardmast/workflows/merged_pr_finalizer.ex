@@ -389,7 +389,7 @@ defmodule Wardmast.Workflows.MergedPRFinalizer do
   # bd-6dghdv: that query alone also matches every ordinary GitHub-issue-
   # tracked task, and a tracker_ref there is an ISSUE number. This used to rely
   # on the PR API 404ing on an issue number, which is only true in the repo
-  # that issued it: after the move to serious-alchemy/arbiter renumbered issues
+  # that issued it: after the move to acme/wardmast renumbered issues
   # 1–38, each matched a merged PR of the same number in the queried repo, and
   # 20 ordinary tasks were closed. A tracker_ref is now treated as a PR number
   # only when the task is positively a PRPatrol follow-up (see
