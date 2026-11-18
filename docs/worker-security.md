@@ -1549,8 +1549,10 @@ reply, and every mint and refusal is logged with the peer pid.
 
 Socket path, shared by the server and `arb`:
 `/run/user/<uid>/arbiter/operator-<port>.sock`, or
-`~/.wardmast/run/operator-<port>.sock` on a host without a per-user runtime
-dir. `<port>` is the HTTP port, so a dev server and the release don't
+`<data home>/run/operator-<port>.sock` on a host without a per-user runtime
+dir (`<data home>` is `:data_dir`, else `WARDMAST_DATA_HOME`/`ARB_DATA_HOME`, else
+`~/.wardmast`; `ARB_HOME`, the checkout, is ignored; `Jail.mask_paths/0` masks
+the relocated dir via `socket_dir/0`). `<port>` is the HTTP port, so a dev server and the release don't
 collide. `ARB_OPERATOR_SOCKET` overrides the path on both sides. Keep an
 override **outside** every worker-writable path: the jail's writable binds
 come after its masks and would re-expose it. Set

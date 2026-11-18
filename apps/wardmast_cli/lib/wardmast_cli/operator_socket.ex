@@ -13,7 +13,8 @@ defmodule WardmastCli.OperatorSocket do
   Path, which must match `Wardmast.MCP.OperatorProof.socket_path/1`:
   `ARB_OPERATOR_SOCKET` if set, else
   `/run/user/<uid>/arbiter/operator-<port>.sock` when the host has a
-  per-user runtime dir, else `~/.wardmast/run/operator-<port>.sock`. `<port>`
+  per-user runtime dir, else `<data home>/run/operator-<port>.sock` (`WARDMAST_DATA_HOME`, legacy
+  `ARB_DATA_HOME`, default `~/.wardmast`; never `ARB_HOME`). `<port>`
   is `ARB_HOST`'s port (default 4848). Tests use the `:bd2_operator_socket`
   process-dict hook.
   """
@@ -116,6 +117,21 @@ defmodule WardmastCli.OperatorSocket do
 
     if runtime && File.dir?(runtime),
       do: Path.join(runtime, "arbiter"),
-      else: Path.expand("~/.wardmast/run")
+      else: run_dir()
+  end
+
+  # Mirrors `Wardmast.MCP.OperatorProof.run_dir/0` (the CLI does not depend on
+  # the server app at runtime): the data home is `WARDMAST_DATA_HOME`
+  # (legacy `ARB_DATA_HOME`), else `~/.wardmast`; never `ARB_HOME` (the checkout).
+  @doc false
+  @spec run_dir() :: String.t()
+  def run_dir do
+    home =
+      case Wardmast.Env.get("WARDMAST_DATA_HOME") do
+        dir when is_binary(dir) and dir != "" -> dir
+        _ -> "~/.wardmast"
+      end
+
+    Path.join(Path.expand(home), "run")
   end
 end
