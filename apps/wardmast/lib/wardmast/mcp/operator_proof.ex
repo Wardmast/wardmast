@@ -139,8 +139,8 @@ defmodule Wardmast.MCP.OperatorProof do
   @doc """
   Directory the operator socket lives in: `/run/user/<uid>/arbiter` when the
   host has a per-user runtime dir (systemd hosts; the agy jail blanks it),
-  else `<home>/run` (`ARB_HOME`, default `~/.wardmast/run`, which `Wardmast.Worker.Jail`
-  masks explicitly). `ARB_OPERATOR_SOCKET` overrides the whole path, see
+  else `<data home>/run` (see `run_dir/0`; default `~/.wardmast/run`), which
+  `Wardmast.Worker.Jail.mask_paths/0` masks explicitly through this function. `ARB_OPERATOR_SOCKET` overrides the whole path, see
   `socket_path/1`.
 
   Both the server and the `arb` CLI derive the path the same way from the
@@ -179,15 +179,17 @@ defmodule Wardmast.MCP.OperatorProof do
   end
 
   @doc """
-  Fallback runtime dir `<home>/run`, where `<home>` is the configured home:
-  the `:data_dir` app env, else `ARB_HOME` (how a non-default home is
-  selected), else `~/.wardmast`. `WardmastCli.OperatorSocket` mirrors this
-  so both sides resolve the same socket from the same home.
+  Fallback runtime dir `<data home>/run`. The data home is the `:data_dir`
+  app env, else `WARDMAST_DATA_HOME` (`ARB_DATA_HOME` legacy spelling, via
+  `Wardmast.Env`), else `~/.wardmast`, the same resolution as the release
+  env and `Wardmast.Worker.Jail`. `ARB_HOME` is the source checkout, not the
+  data home, so it is deliberately ignored. `WardmastCli.OperatorSocket`
+  mirrors this so the client finds the socket without the server's env.
   """
   @spec run_dir() :: String.t()
   def run_dir do
     home =
-      case {Application.fetch_env(:wardmast, :data_dir), System.get_env("ARB_HOME")} do
+      case {Application.fetch_env(:wardmast, :data_dir), Wardmast.Env.get("WARDMAST_DATA_HOME")} do
         {{:ok, dir}, _} when is_binary(dir) and dir != "" -> dir
         {_, dir} when is_binary(dir) and dir != "" -> dir
         _ -> "~/.wardmast"
