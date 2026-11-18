@@ -21,7 +21,7 @@ defmodule WardmastCli.Cmd.Doctor.LastDeployTest do
 
   test "no deploy recorded is n/a" do
     assert %{name: "last deploy", status: :na, detail: detail} = Checks.check_last_deploy()
-    assert detail =~ "no `arb server deploy` recorded"
+    assert detail =~ "no `ward server deploy` recorded"
   end
 
   test "reports the tag, time, outcome and backup path of a successful deploy" do
