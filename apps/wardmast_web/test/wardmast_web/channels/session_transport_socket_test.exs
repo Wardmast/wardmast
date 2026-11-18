@@ -60,7 +60,7 @@ defmodule WardmastWeb.SessionTransportSocketTest do
   @total byte_size(@head) + byte_size(@tail) + byte_size(@during) + byte_size(@resumed)
 
   setup %{tmp_dir: tmp_dir} do
-    put_env(:sessions_runtime_dir, tmp_dir)
+    put_env(:sessions_runtime_dir, Wardmast.Test.SessionEnv.short_runtime_dir(tmp_dir))
     put_env(:sessions_terminal, ScriptedPty)
     put_env(:sessions_runner, NoopRunner)
 

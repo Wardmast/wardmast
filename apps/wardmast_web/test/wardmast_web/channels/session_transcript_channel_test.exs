@@ -27,7 +27,7 @@ defmodule WardmastWeb.SessionTranscriptChannelTest do
 
   setup %{tmp_dir: tmp_dir} do
     Wardmast.Test.SessionEnv.sandbox("transcript-channel")
-    put_env(:sessions_runtime_dir, tmp_dir)
+    put_env(:sessions_runtime_dir, Wardmast.Test.SessionEnv.short_runtime_dir(tmp_dir))
     put_env(:sessions_runner, NoopRunner)
 
     {:ok, session} = Sessions.launch(runner: NoopRunner, ensure_reader: false)

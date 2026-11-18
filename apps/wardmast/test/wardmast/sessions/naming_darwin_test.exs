@@ -30,6 +30,16 @@ defmodule Wardmast.Sessions.NamingDarwinTest do
     :ok
   end
 
+  defp put_env_restoring(name, value) do
+    prior = System.get_env(name)
+
+    on_exit(fn ->
+      if prior, do: System.put_env(name, prior), else: System.delete_env(name)
+    end)
+
+    if value, do: System.put_env(name, value), else: System.delete_env(name)
+  end
+
   defp restore(key, nil), do: Application.delete_env(:wardmast, key)
   defp restore(key, value), do: Application.put_env(:wardmast, key, value)
 
@@ -42,6 +52,36 @@ defmodule Wardmast.Sessions.NamingDarwinTest do
       assert {:ok, sock} = Naming.socket_path(@id)
       assert byte_size(sock) < 104
       assert Path.basename(sock) == "session-#{@id}.sock"
+    end
+
+    test "a long stock $TMPDIR does not push the default darwin socket past the limit" do
+      Application.put_env(:wardmast, :sessions_os, :darwin)
+      put_env_restoring("TMPDIR", "/var/folders/2s/" <> String.duplicate("x", 30) <> "/T")
+      put_env_restoring("WARDMAST_SOCKET_ROOT", nil)
+
+      assert {:ok, sock} = Naming.socket_path(@id)
+      assert String.starts_with?(sock, "/tmp/")
+      assert byte_size(sock) <= 103
+      assert {:ok, login} = Naming.login_socket_path(@id, "acct")
+      assert byte_size(login) <= 103
+    end
+
+    test "SessionEnv.sandbox keeps the darwin socket path short under a long $TMPDIR" do
+      Application.put_env(:wardmast, :sessions_os, :darwin)
+      put_env_restoring("TMPDIR", "/var/folders/2s/" <> String.duplicate("x", 30) <> "/T")
+      put_env_restoring("WARDMAST_SOCKET_ROOT", nil)
+
+      Wardmast.Test.SessionEnv.sandbox("session-dock")
+
+      assert {:ok, sock} = Naming.socket_path(@id)
+      assert byte_size(sock) <= 103
+    end
+
+    test "WARDMAST_SOCKET_ROOT override too long is still refused" do
+      Application.put_env(:wardmast, :sessions_os, :darwin)
+      put_env_restoring("WARDMAST_SOCKET_ROOT", "/tmp/" <> String.duplicate("b", 90))
+
+      assert {:error, {:socket_path_too_long, _, 103}} = Naming.socket_path(@id)
     end
 
     test "linux without XDG_RUNTIME_DIR is still :no_runtime_dir" do
@@ -79,8 +119,7 @@ defmodule Wardmast.Sessions.NamingDarwinTest do
     @tag :tmp_dir
     test "creates the darwin short dir and its parent private (0700)", %{tmp_dir: tmp} do
       Application.put_env(:wardmast, :sessions_os, :darwin)
-      System.put_env("WARDMAST_SOCKET_ROOT", Path.join(tmp, "arb-root"))
-      on_exit(fn -> System.delete_env("WARDMAST_SOCKET_ROOT") end)
+      put_env_restoring("WARDMAST_SOCKET_ROOT", Path.join(tmp, "arb-root"))
 
       assert {:ok, dir} = Naming.ensure_socket_dir()
       assert dir == Path.join([tmp, "arb-root", "sessions"])

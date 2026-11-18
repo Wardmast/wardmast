@@ -58,7 +58,7 @@ defmodule WardmastWeb.SessionPageBrowserTest do
 
   setup %{tmp_dir: tmp_dir} do
     Wardmast.Test.SessionEnv.sandbox("session-page")
-    put_env(:sessions_runtime_dir, tmp_dir)
+    put_env(:sessions_runtime_dir, Wardmast.Test.SessionEnv.short_runtime_dir(tmp_dir))
     put_env(:sessions_terminal, ScriptedPty)
     put_env(:sessions_runner, NoopRunner)
     put_env(Wardmast.Sessions.Stream, poll_interval_ms: 5, alive_interval_ms: 50)

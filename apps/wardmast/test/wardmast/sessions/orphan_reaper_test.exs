@@ -17,7 +17,11 @@ defmodule Wardmast.Sessions.OrphanReaperTest do
   alias Wardmast.Test.SessionRunnerStub
 
   setup do
-    runtime = Path.join(System.tmp_dir!(), "bd-3qkbch-or-#{System.unique_integer([:positive])}")
+    runtime =
+      Wardmast.Test.SessionEnv.short_runtime_dir(
+        Path.join(System.tmp_dir!(), "bd-3qkbch-or-#{System.unique_integer([:positive])}")
+      )
+
     previous = Application.get_env(:wardmast, :sessions_runtime_dir)
     Application.put_env(:wardmast, :sessions_runtime_dir, runtime)
     File.mkdir_p!(Path.join(runtime, "arbiter"))

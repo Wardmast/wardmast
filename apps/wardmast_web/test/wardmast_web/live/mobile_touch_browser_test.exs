@@ -40,7 +40,7 @@ defmodule WardmastWeb.MobileTouchBrowserTest do
 
   setup %{tmp_dir: tmp_dir} do
     Wardmast.Test.SessionEnv.sandbox("mobile-touch")
-    put_env(:sessions_runtime_dir, tmp_dir)
+    put_env(:sessions_runtime_dir, Wardmast.Test.SessionEnv.short_runtime_dir(tmp_dir))
     put_env(:sessions_runner, NoopRunner)
 
     for snap <- Worker.list_children() do

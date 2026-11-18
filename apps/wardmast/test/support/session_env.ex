@@ -58,9 +58,11 @@ defmodule Wardmast.Test.SessionEnv do
     unique = "#{tag}-#{System.unique_integer([:positive])}"
     base = Path.join(System.tmp_dir!(), "arbiter-session-test-#{unique}")
 
+    runtime = runtime_dir(base)
+
     overrides = [
       sessions_root: Path.join(base, "sessions"),
-      sessions_runtime_dir: Path.join(base, "runtime"),
+      sessions_runtime_dir: runtime,
       accounts_root: Path.join(base, "accounts"),
       primary_checkout: Path.join(base, "checkout"),
       sessions_credentials_source: Path.join(base, "operator"),
@@ -71,9 +73,40 @@ defmodule Wardmast.Test.SessionEnv do
     File.mkdir_p!(overrides[:primary_checkout])
     File.mkdir_p!(overrides[:sessions_credentials_source])
     File.mkdir_p!(overrides[:sessions_agy_source_home])
-    ExUnit.Callbacks.on_exit(fn -> Wardmast.Worker.RunTmp.force_rm_rf(base) end)
+
+    ExUnit.Callbacks.on_exit(fn ->
+      Wardmast.Worker.RunTmp.force_rm_rf(base)
+      if runtime != Path.join(base, "runtime"), do: Wardmast.Worker.RunTmp.force_rm_rf(runtime)
+    end)
 
     override(overrides)
+  end
+
+  # On darwin `$TMPDIR` is a long `/var/folders/...` path, so a socket under it
+  # overflows the 103-byte limit (bd-15labm). Use a short `/tmp` dir there.
+  defp runtime_dir(base), do: short_runtime_dir(Path.join(base, "runtime"))
+
+  @doc """
+  A `:sessions_runtime_dir` value that keeps `<dir>/arbiter/session-<uuid>.sock`
+  under the 103-byte Unix-socket limit (bd-15labm).
+
+  On darwin it is a fresh `/tmp/arb-s-N` directory (created, removed on exit);
+  elsewhere it is `fallback`, returned untouched, so Linux placement is unchanged.
+  """
+  @spec short_runtime_dir(Path.t()) :: Path.t()
+  def short_runtime_dir(fallback) do
+    darwin? =
+      Application.get_env(:wardmast, :sessions_os) == :darwin or
+        match?({:unix, :darwin}, :os.type())
+
+    if darwin? do
+      dir = Path.join("/tmp", "arb-s-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      ExUnit.Callbacks.on_exit(fn -> Wardmast.Worker.RunTmp.force_rm_rf(dir) end)
+      dir
+    else
+      fallback
+    end
   end
 
   @doc """

@@ -22,7 +22,11 @@ defmodule Wardmast.Sessions.Runner.DarwinTest do
   @id "0197a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
 
   setup do
-    runtime = Path.join(System.tmp_dir!(), "bd-a1pnnv-#{System.unique_integer([:positive])}")
+    runtime =
+      Wardmast.Test.SessionEnv.short_runtime_dir(
+        Path.join(System.tmp_dir!(), "bd-a1pnnv-#{System.unique_integer([:positive])}")
+      )
+
     File.mkdir_p!(Path.join(runtime, "arbiter"))
 
     prior =
