@@ -11,6 +11,8 @@ defmodule WardmastCli.Cmd.Support do
   Needs an operator token (`GET /api/support/bundle`).
   """
 
+  alias WardmastCli.Cmd.Doctor
+  alias WardmastCli.Cmd.Doctor.Formatter
   alias WardmastCli.{ArgParser, Client, Output}
 
   def run(argv) do
@@ -31,7 +33,7 @@ defmodule WardmastCli.Cmd.Support do
   defp doctor_text do
     checks =
       Application.get_env(:wardmast_cli, :support_doctor_checks, fn ->
-        WardmastCli.Cmd.Doctor.checks(spawn: :skip)
+        Doctor.checks(spawn: :skip)
       end)
 
     {:ok, io} = StringIO.open("")
@@ -39,7 +41,7 @@ defmodule WardmastCli.Cmd.Support do
     Process.group_leader(self(), io)
 
     try do
-      WardmastCli.Cmd.Doctor.Formatter.emit_text(checks.(), all: true)
+      Formatter.emit_text(checks.(), all: true)
     rescue
       e -> IO.puts("doctor checks unavailable: " <> Exception.message(e))
     after
