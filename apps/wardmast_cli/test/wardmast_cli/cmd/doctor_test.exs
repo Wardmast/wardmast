@@ -142,7 +142,38 @@ defmodule WardmastCli.Cmd.DoctorTest do
     assert exit_code == 1
     assert out =~ "[fail] phoenix reachable"
     refute out =~ "mix phx.server"
-    assert out =~ "systemctl --user start arbiter"
+
+    assert out =~
+             if(:os.type() == {:unix, :darwin},
+               do: "launchctl kickstart",
+               else: "systemctl --user start arbiter"
+             )
+  end
+
+  test "connection refused collapses the dependent 'could not check' warnings into one row" do
+    stub_transport_error(:get, "/api/workspaces", :econnrefused)
+
+    {out, _err, _exit} = capture(fn -> Doctor.run(["--all"]) end)
+    assert out =~ ~r/\d+ checks skipped: server unreachable/
+    assert length(String.split(out, "could not check")) <= 2
+  end
+
+  test "a rejected token collapses the dependent warnings as 'token rejected'" do
+    System.put_env("ARB_TOKEN", "stale-token")
+    on_exit(fn -> System.delete_env("ARB_TOKEN") end)
+    stub_get("/api/workspaces", %{}, 401)
+
+    {out, _err, _exit} = capture(fn -> Doctor.run(["--all"]) end)
+    assert out =~ ~r/\d+ checks skipped: token rejected/
+    assert out =~ "was rejected; it may belong to another server"
+  end
+
+  test "doctor output never tells the user to run the old `arb` name" do
+    stub_transport_error(:get, "/api/workspaces", :econnrefused)
+
+    {out, _err, _exit} = capture(fn -> Doctor.run(["--all"]) end)
+    refute out =~ "`arb "
+    refute out =~ "arb server doctor"
   end
 
   test "no workspaces → workspace check fails with hint" do
@@ -328,13 +359,13 @@ defmodule WardmastCli.Cmd.DoctorTest do
     # hint should tell operator to rebuild and reinstall the arb CLI, not restart the server.
     res = Checks.check_versions("0.1.67", "41474cae", "0.1.68", "41474cae")
     assert res.status == :fail
-    assert res.hint =~ "rebuild and reinstall the `arb` CLI"
+    assert res.hint =~ "rebuild and reinstall the `ward` CLI"
     refute res.hint =~ "restart the server"
 
     # Also test with different SHAs where CLI sha is ancestor of server sha
     res_sha = Checks.check_versions("0.1.67", "f21bdd4d", "0.1.68", "41474cae")
     assert res_sha.status == :fail
-    assert res_sha.hint =~ "rebuild and reinstall the `arb` CLI"
+    assert res_sha.hint =~ "rebuild and reinstall the `ward` CLI"
     refute res_sha.hint =~ "restart the server"
 
     # And verify via Doctor.run with a newer server version (same major)
@@ -356,7 +387,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
 
     {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
     assert out =~ "[fail] version"
-    assert out =~ "rebuild and reinstall the `arb` CLI"
+    assert out =~ "rebuild and reinstall the `ward` CLI"
     refute out =~ "restart the server"
   end
 
@@ -595,11 +626,11 @@ defmodule WardmastCli.Cmd.DoctorTest do
       ])
 
       {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
-      assert out =~ "arb server restart"
+      assert out =~ "ward server restart"
       assert out =~ "Wardmast.Release.migrate_config"
 
       [hint] = Regex.run(~r/hint: .*/, out)
-      restart_at = :binary.match(hint, "arb server restart") |> elem(0)
+      restart_at = :binary.match(hint, "ward server restart") |> elem(0)
       mix_at = :binary.match(hint, "mix wardmast.migrate_rig_paths") |> elem(0)
       assert restart_at < mix_at
     end
@@ -839,7 +870,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
       assert out =~ "[warn] safe to restart"
       assert out =~ "conflict_resolver"
       assert out =~ "vs-3fpek0"
-      assert out =~ "arb scheduler wait"
+      assert out =~ "ward scheduler wait"
       assert Doctor.green?() == true
     end
 
@@ -874,7 +905,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
       assert out =~ "[warn] safe to restart"
       assert out =~ "not a safe restart point"
       refute out =~ "[ ok ] safe to restart"
-      assert out =~ "arb scheduler pause && arb scheduler wait"
+      assert out =~ "ward scheduler pause && ward scheduler wait"
     end
 
     test "an unreadable scheduler status is a warn, never an all-clear" do
@@ -3414,7 +3445,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
 
       assert detail =~ "0"
       assert detail =~ "wait"
-      assert hint =~ "arb node set local"
+      assert hint =~ "ward node set local"
     end
 
     test "the capacity is green and shows the breakdown, with no ceiling to compare it to" do
@@ -3443,7 +3474,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
       assert %{status: :warn, detail: ^advisory, hint: hint} =
                named(nodes_results(), "conductor_system_max_concurrent removed")
 
-      assert hint =~ "arb node set local"
+      assert hint =~ "ward node set local"
     end
 
     test "a placement still in flight past the placement timeout is a warn naming the run" do
@@ -3471,7 +3502,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
       assert detail =~ "placing on mesaana for 2h0m"
       assert detail =~ "stage assign"
       assert detail =~ "timeout 30m"
-      assert hint =~ "arb worker stop bd-7jluyk"
+      assert hint =~ "ward worker stop bd-7jluyk"
     end
 
     test "placements within their budget add no line" do

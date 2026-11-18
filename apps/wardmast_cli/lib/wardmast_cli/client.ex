@@ -402,7 +402,7 @@ defmodule WardmastCli.Client do
             error.message,
         hint:
           "The Wardmast server is shedding load; wait a moment and retry, " <>
-            "or run fewer `arb` commands at once."
+            "or run fewer `ward` commands at once."
     }
   end
 
@@ -518,11 +518,22 @@ defmodule WardmastCli.Client do
     case Process.get(:bd2_mint_error) do
       %Error{message: message} ->
         "no ARB_TOKEN, and minting one over the operator socket failed: #{message}. " <>
-          "Run arb from your own shell on the server host, or set ARB_TOKEN to a token you hold."
+          "Run ward from your own shell on the server host, or set ARB_TOKEN to a token you hold."
 
       nil ->
-        "set ARB_TOKEN — remote arb requires a token (mint one on the server host with " <>
-          "`arb mcp token mint`)"
+        cond do
+          System.get_env("ARB_TOKEN") not in [nil, ""] ->
+            "ARB_TOKEN is set but was rejected; it may belong to another server. " <>
+              "Unset it, or set one minted on this server (`ward mcp token mint`)."
+
+          loopback_host?() ->
+            "set ARB_TOKEN to a token you hold (mint one on the server host with " <>
+              "`ward mcp token mint`)"
+
+          true ->
+            "set ARB_TOKEN — a remote server requires a token (mint one on the server host with " <>
+              "`ward mcp token mint`)"
+        end
     end
   end
 

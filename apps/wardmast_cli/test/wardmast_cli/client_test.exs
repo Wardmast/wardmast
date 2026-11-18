@@ -75,6 +75,45 @@ defmodule WardmastCli.ClientTest do
     assert hint =~ "mint"
   end
 
+  describe "401 hint wording (bd-7nbg5z)" do
+    setup do
+      keys = ~w(ARB_TOKEN WARDMAST_HOST ARB_HOST ARBITER_HOST)
+      saved = for k <- keys, do: {k, System.get_env(k)}
+      for k <- keys, do: System.delete_env(k)
+
+      on_exit(fn ->
+        for {k, v} <- saved, do: if(v, do: System.put_env(k, v), else: System.delete_env(k))
+      end)
+
+      :ok
+    end
+
+    test "a rejected ARB_TOKEN says it may belong to another server" do
+      System.put_env("ARB_TOKEN", "stale-token")
+      stub_get("/api/workspaces", %{}, 401)
+
+      assert {:error, %Client.Error{status: 401, hint: hint}} = Client.get("/api/workspaces")
+      assert hint =~ "was rejected; it may belong to another server"
+    end
+
+    test "loopback host without a token does not say 'remote'" do
+      System.put_env("ARB_HOST", "http://127.0.0.1:4848")
+      stub_get("/api/workspaces", %{}, 401)
+
+      assert {:error, %Client.Error{status: 401, hint: hint}} = Client.get("/api/workspaces")
+      assert hint =~ "ARB_TOKEN"
+      refute hint =~ "remote"
+    end
+
+    test "non-loopback host without a token says a remote server requires one" do
+      System.put_env("ARB_HOST", "http://wardmast.example.test:4848")
+      stub_get("/api/workspaces", %{}, 401)
+
+      assert {:error, %Client.Error{status: 401, hint: hint}} = Client.get("/api/workspaces")
+      assert hint =~ "remote server requires a token"
+    end
+  end
+
   describe "base_url/0" do
     setup do
       port = System.get_env("WARDMAST_PORT")

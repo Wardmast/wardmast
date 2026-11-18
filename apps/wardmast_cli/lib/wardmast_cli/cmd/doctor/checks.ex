@@ -154,6 +154,42 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     end)
     |> Kernel.++(if darwin?, do: Darwin.checks(darwin_opts(opts, platform)), else: [])
     |> Enum.sort_by(&group_rank(&1.group))
+    |> collapse_skipped()
+  end
+
+  # One root failure (server unreachable, or a rejected token) makes every
+  # server-backed check print the same "could not check" warning. Once
+  # `phoenix reachable` has failed, fold those into a single row.
+  defp collapse_skipped(results) do
+    root = Enum.find(results, &(&1.name == "phoenix reachable" and &1.status == :fail))
+    skipped = Enum.filter(results, &skipped?/1)
+
+    if root == nil or skipped == [] do
+      results
+    else
+      reason =
+        if is_binary(root.hint) and root.hint =~ "ARB_TOKEN",
+          do: "token rejected",
+          else: "server unreachable"
+
+      row = %{
+        hd(skipped)
+        | id: "skipped",
+          group: :core,
+          parent: nil,
+          name: "#{length(skipped)} checks skipped: #{reason}",
+          detail: "see `phoenix reachable` above",
+          hint: root.hint
+      }
+
+      {core, rest} = Enum.split_while(results -- skipped, &(&1.group == :core))
+      core ++ [row | rest]
+    end
+  end
+
+  defp skipped?(r) do
+    r.status == :warn and is_binary(r.detail) and
+      String.starts_with?(r.detail, "could not check: ")
   end
 
   # An older server without the endpoint, or an error, is "not darwin".
@@ -328,7 +364,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
         %Result{
           name: "last deploy",
           status: :na,
-          detail: "no `arb server deploy` recorded on this host",
+          detail: "no `ward server deploy` recorded on this host",
           blocks_readiness: false
         }
 
@@ -342,7 +378,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
           hint:
             if(good?,
               do: nil,
-              else: "See #{Status.path()}; `arb server deploy` again once the cause is fixed."
+              else: "See #{Status.path()}; `ward server deploy` again once the cause is fixed."
             ),
           blocks_readiness: false
         }
@@ -368,7 +404,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   # runtime in a release build), so `cli_sha == server_sha` is NOT evidence of
   # a real match and must never be used as one.
   #
-  # `arb server deploy` installs the matching CLI after a green deploy, but a
+  # `ward server deploy` installs the matching CLI after a green deploy, but a
   # CLI that's a release behind the server is still possible (`--no-self-update`,
   # a failed self-update, a deploy from another machine) — reported as a warning
   # (`fatal: false`), never as a reason to auto-roll-back a deploy.
@@ -396,12 +432,12 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
         hint =
           if dev_install?() do
             if cli_behind?(cli_vsn, cli_sha, server_vsn, server_sha) do
-              "The `arb` CLI is older than the server — rebuild and reinstall the `arb` CLI (e.g. `arb install-cli`)."
+              "The `ward` CLI is older than the server — rebuild and reinstall the `ward` CLI (e.g. `ward install-cli`)."
             else
               "The server's compiled version is stale — restart the server via your process manager (e.g. `systemctl --user restart wardmast`)."
             end
           else
-            "Run `arb self-update --version v#{server_vsn}` to install the CLI matching the server."
+            "Run `ward self-update --version v#{server_vsn}` to install the CLI matching the server."
           end
 
         %Result{
@@ -471,9 +507,20 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     if dev_install?() do
       "Phoenix app isn't running. Start it with `mix phx.server` from the umbrella root."
     else
-      "Phoenix app isn't running. Start it with `systemctl --user start arbiter` " <>
-        "(or `<data-home>/current/bin/wardmast start` if not managed by systemd)."
+      restart_hint(:os.type())
     end
+  end
+
+  @doc false
+  def restart_hint({:unix, :darwin}) do
+    "Phoenix app isn't running. Start it with " <>
+      "`launchctl kickstart gui/$(id -u)/com.wardmast.server` " <>
+      "(or `<data-home>/current/bin/wardmast start` if not managed by launchd)."
+  end
+
+  def restart_hint(_os) do
+    "Phoenix app isn't running. Start it with `systemctl --user start arbiter` " <>
+      "(or `<data-home>/current/bin/wardmast start` if not managed by systemd)."
   end
 
   # `fatal: true` — this is still an operator-actionable misconfiguration
@@ -482,7 +529,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   # `Workspace.resolve/0` (`arb ticket`, `arb ready`, `arb where`, `arb
   # config`). But `blocks_readiness: false` — it says which workspace CLI
   # commands will operate against, not whether the deployed server is
-  # healthy, so `green?/0` (which backs `arb server deploy`'s auto-rollback
+  # healthy, so `green?/0` (which backs `ward server deploy`'s auto-rollback
   # wait) must not treat it as a reason to roll back an otherwise-healthy
   # deploy (see bd-8ix2tw: every deploy auto-rolled-back on an install whose
   # only workspace wasn't named "default").
@@ -562,11 +609,11 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   defp workspace_phrase(names), do: "#{length(names)} workspaces"
 
   # Lead with the remediation that works on every install shape. Production
-  # installs are Mix-less releases (`arb server deploy` ships a tarball), so
+  # installs are Mix-less releases (`ward server deploy` ships a tarball), so
   # `mix wardmast.migrate_rig_paths` is unrunnable there and belongs last.
   defp legacy_key_hint do
     "Its repo map is intact but nothing reads it. Restart the server " <>
-      "(`arb server restart`) — the boot config migrator moves it to `repo_paths` " <>
+      "(`ward server restart`) — the boot config migrator moves it to `repo_paths` " <>
       "automatically. To migrate without a restart: `bin/wardmast eval " <>
       "Wardmast.Release.migrate_config` on a release install, or " <>
       "`mix wardmast.migrate_rig_paths --apply` from a source checkout."
@@ -605,7 +652,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
           "`repo_paths` keys: #{Enum.join(names, ", ")}",
       hint:
         "Repoint the tickets to a configured key (`ticket_update repo: <key>`), " <>
-          "or add the repo to the workspace's `repo_paths`; see `arb repo list`.",
+          "or add the repo to the workspace's `repo_paths`; see `ward repo list`.",
       blocks_readiness: false
     }
   end
@@ -638,7 +685,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       name: "repos resolved",
       status: :fail,
       detail: "no repos registered",
-      hint: "Register a repo with `arb config set repo_paths.<repo>.path <path>`.",
+      hint: "Register a repo with `ward config set repo_paths.<repo>.path <path>`.",
       blocks_readiness: false
     }
   end
@@ -728,7 +775,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       status: :warn,
       detail: "disabled (pr_patrol.enabled=false) in #{Enum.join(off, ", ")}",
       hint:
-        "No PR follow-ups are filed there. Re-enable with `arb config set pr_patrol.enabled true`.",
+        "No PR follow-ups are filed there. Re-enable with `ward config set pr_patrol.enabled true`.",
       blocks_readiness: false
     }
   end
@@ -1285,7 +1332,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
           name: "private clone records",
           status: :warn,
           detail: "#{length(stale)} stale private-clone record(s): #{leaves}",
-          hint: "Retire them with `arb server doctor --retire-stale-clones`.",
+          hint: "Retire them with `ward server doctor --retire-stale-clones`.",
           blocks_readiness: false
         }
 
@@ -1352,7 +1399,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       %Result{
         name: "spawn canary",
         status: :na,
-        detail: "not run in a readiness poll (`arb server doctor --spawn` runs it)"
+        detail: "not run in a readiness poll (`ward server doctor --spawn` runs it)"
       }
     ]
   end
@@ -1393,7 +1440,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       name: "spawn canary",
       status: :warn,
       detail: "could not check: another spawn canary is already running on the server",
-      hint: "Re-run `arb server doctor --spawn` in a minute.",
+      hint: "Re-run `ward server doctor --spawn` in a minute.",
       blocks_readiness: false
     }
   end
@@ -1418,8 +1465,8 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
         "#{spawn_stage(p)}: #{p["error"]}" <>
           if(p["exit_code"], do: " (exit #{p["exit_code"]}, #{p["duration_ms"]} ms)", else: ""),
       hint:
-        "A worker cannot spawn this provider. See the server log and `arb server doctor --all`; " <>
-          "re-run `arb server doctor --spawn` after fixing it.",
+        "A worker cannot spawn this provider. See the server log and `ward server doctor --all`; " <>
+          "re-run `ward server doctor --spawn` after fixing it.",
       blocks_readiness: false
     }
   end
@@ -1435,7 +1482,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       name: spawn_name(p),
       status: :warn,
       detail: "could not check: the server reported status #{inspect(p["status"])}",
-      hint: "Re-run `arb server doctor --spawn`; check that the CLI and server versions match.",
+      hint: "Re-run `ward server doctor --spawn`; check that the CLI and server versions match.",
       blocks_readiness: false
     }
   end
@@ -1522,7 +1569,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     policy_hint =
       "Add a drop-in: `systemctl --user edit wardmast.service` with " <>
         "`[Service]` / `OOMPolicy=continue`, then `systemctl --user daemon-reload` " <>
-        "(or re-run `arb install service`, which now writes it). See docs/worker-memory-cap.md."
+        "(or re-run `ward install service`, which now writes it). See docs/worker-memory-cap.md."
 
     cap_hint =
       if Map.get(body, "capped"),
@@ -1851,8 +1898,8 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
           status: :fail,
           detail: Enum.map_join(problems, "; ", &routing_problem/1),
           hint:
-            "Set a per-repo override with `arb config set merge.repos.<repo>.…` " <>
-              "(see `arb config schema`, merge.repos).",
+            "Set a per-repo override with `ward config set merge.repos.<repo>.…` " <>
+              "(see `ward config schema`, merge.repos).",
           blocks_readiness: false
         }
 
@@ -1918,7 +1965,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   # every spawn in those workspaces (and its server-env token is read by
   # nothing), so it is an operator-actionable failure (non-zero exit). Like
   # the Claude credential check it says nothing about whether the server is
-  # healthy, so it never blocks deploy readiness: an upgrade's `arb server
+  # healthy, so it never blocks deploy readiness: an upgrade's `ward server
   # deploy` must not roll back over it.
   defp check_provider_accounts do
     case Client.get("/api/server/provider_accounts") do
@@ -1968,7 +2015,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
         {"unresolved", _} ->
           {:warn,
            "could not check: provider accounts are not resolved yet — the server is still booting",
-           "Re-run `arb server doctor` once the server has finished booting."}
+           "Re-run `ward server doctor` once the server has finished booting."}
 
         {_, true} ->
           {:warn,
@@ -2085,7 +2132,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       detail: Enum.join(offenders, "; "),
       hint:
         "Wardmast.Quota.Gate resolves each ceiling as min(account, workspace) — the account's " <>
-          "quota_config is a floor the workspace may only tighten, never loosen. `arb account " <>
+          "quota_config is a floor the workspace may only tighten, never loosen. `ward account " <>
           "set <ref> --threshold-mode ... / --weekly-threshold ...` adjusts the account side.",
       blocks_readiness: false
     }
@@ -2185,7 +2232,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       :warn,
       "no version pinned",
       "Published worker images carry no #{name}. The daily bump pins the newest stable " <>
-        "version, or set it: arb settings set worker.cli.versions '{\"#{name}\": \"x.y.z\"}'"
+        "version, or set it: ward settings set worker.cli.versions '{\"#{name}\": \"x.y.z\"}'"
     )
   end
 
@@ -2224,7 +2271,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       "local published image",
       :warn,
       "off: local runs build locally and bind-mount the CLIs; the local image GC is idle",
-      "Re-enable: arb settings set worker.image.local_published null"
+      "Re-enable: ward settings set worker.image.local_published null"
     )
   end
 
@@ -2232,7 +2279,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     nodes_result(
       "local published image",
       :ok,
-      "on (switch off: arb settings set worker.image.local_published false)"
+      "on (switch off: ward settings set worker.image.local_published false)"
     )
   end
 
@@ -2245,7 +2292,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       "cli set hold",
       :warn,
       "held at #{hold}: CLI version bumps are frozen",
-      "Clear it to resume bumps: arb settings set worker.cli_set.hold null"
+      "Clear it to resume bumps: ward settings set worker.cli_set.hold null"
     )
   end
 
@@ -2264,8 +2311,8 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
         "cli republish #{repo}",
         :warn,
         "#{ref}: republish failed (#{reason})",
-        "Check registry credentials and permissions (`arb workspace secret` / " <>
-          "`arb settings get nodes.registry`), then republish or bump the CLI set."
+        "Check registry credentials and permissions (`ward workspace secret` / " <>
+          "`ward settings get nodes.registry`), then republish or bump the CLI set."
       )
     end
   end
@@ -2365,7 +2412,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
         :warn,
         "#{url} would be refused by a cluster controller (insecure_url)",
         "Cluster controllers need https (or http to loopback): " <>
-          "arb settings set nodes.public_url https://<primary>.<tailnet>.ts.net"
+          "ward settings set nodes.public_url https://<primary>.<tailnet>.ts.net"
       )
     end
   end
@@ -2395,7 +2442,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       "nodes.public_url reachable",
       :warn,
       "nodes are enrolled but nodes.public_url is not set",
-      "arb settings set nodes.public_url https://<primary>.<tailnet>.ts.net"
+      "ward settings set nodes.public_url https://<primary>.<tailnet>.ts.net"
     )
   end
 
@@ -2453,7 +2500,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       :warn,
       "#{image["ref"]}: #{image["error"] || "not usable"}",
       "Runs for #{image["repo"]} cannot get an image until this clears. Check " <>
-        "worker.repos.#{image["repo"]}.image.ref and credentials_ref (`arb workspace config`); " <>
+        "worker.repos.#{image["repo"]}.image.ref and credentials_ref (`ward workspace config`); " <>
         "the image must be built by the repo's CI from the default branch, FROM " <>
         "ghcr.io/<owner>/wardmast-worker-base, with the label arbiter.runtime-contract=1."
     )
@@ -2493,8 +2540,8 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
         name,
         :warn,
         "#{entry["registry"]}: #{Enum.join(problems, "; ")}",
-        "Check worker.image.registry / credentials_ref (`arb workspace config`) and the " <>
-          "workspace secret (`arb workspace secret`, value `user:password`). The repositories " <>
+        "Check worker.image.registry / credentials_ref (`ward workspace config`) and the " <>
+          "workspace secret (`ward workspace secret`, value `user:password`). The repositories " <>
           "hold private sources and the provider CLI: use a private registry, or set " <>
           "`public_ok: true` on this registry to accept a public one."
       )
@@ -2554,7 +2601,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
         :warn,
         "#{name}: #{Enum.join(problems, "; ")}",
         "Check nodes.registry, nodes.registry_username and nodes.registry_password " <>
-          "(`arb settings get nodes.registry`); registry nodes cannot get an image until a push works."
+          "(`ward settings get nodes.registry`); registry nodes cannot get an image until a push works."
       )
     end
   end
@@ -2659,7 +2706,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       :warn,
       "no readiness report yet: the controller has not sent its first hello with one",
       "Check the controller pod (`kubectl -n wardmast-workers logs deploy/wardmast-controller`); " <>
-        "a controller older than this server does not report readiness. Run `arb node upgrade #{node}`."
+        "a controller older than this server does not report readiness. Run `ward node upgrade #{node}`."
     )
   end
 
@@ -2729,7 +2776,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
           :warn,
           "build (legacy path: the node builds the worker image from a plan)",
           "Pull needs an agent that lists `registry` in caps.image_sources and " <>
-            "nodes.machine_image_source auto (`arb settings get nodes.machine_image_source`)."
+            "nodes.machine_image_source auto (`ward settings get nodes.machine_image_source`)."
         )
 
       true ->
@@ -2883,7 +2930,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   # An outdated node is excluded from placement: say who, which versions, and how to fix it.
   defp outdated_result(n) do
     name = n["name"]
-    cmd = n["upgrade_command"] || "arb node upgrade #{name}"
+    cmd = n["upgrade_command"] || "ward node upgrade #{name}"
 
     nodes_result(
       "node #{name}: outdated",
@@ -2920,13 +2967,13 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   defp node_hint(state, _health) when state in ["offline", "suspect"],
     do: "The agent is not heartbeating. Check `systemctl --user status arbiter-node` on the node."
 
-  defp node_hint(_state, "outdated"), do: "Run `arb node upgrade <name>`."
-  defp node_hint(_state, "ahead"), do: "Run `arb node upgrade <name>` to move it back."
+  defp node_hint(_state, "outdated"), do: "Run `ward node upgrade <name>`."
+  defp node_hint(_state, "ahead"), do: "Run `ward node upgrade <name>` to move it back."
 
   defp node_hint(_state, "incompatible"),
     do: "The agent speaks a protocol this primary does not; upgrade it."
 
-  defp node_hint(_state, _health), do: "See `arb node show <name>`."
+  defp node_hint(_state, _health), do: "See `ward node show <name>`."
 
   defp local_cap_result(%{"local" => %{"max" => 0}}) do
     nodes_result(
@@ -2934,7 +2981,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       :warn,
       "the local cap is 0: work that can only run on this machine (reviewers, fix and " <>
         "conflict passes, agy/codex runs, research) will wait",
-      "Raise it with `arb node set local --max-workers N`."
+      "Raise it with `ward node set local --max-workers N`."
     )
   end
 
@@ -2953,7 +3000,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
         "placing on #{entry["node_name"] || entry["node_id"] || "?"} for " <>
           "#{duration_text(div(entry["age_ms"] || 0, 1000))} (stage #{entry["stage"] || "?"}, " <>
           "timeout #{timeout_text(placements["timeout_ms"])})",
-        "Stop the run (`arb worker stop #{entry["task_id"]}`) and resume it; the cause is in the " <>
+        "Stop the run (`ward worker stop #{entry["task_id"]}`) and resume it; the cause is in the " <>
           "server log (`placement started ... task=#{entry["task_id"]}` with no outcome line)."
       )
     end
@@ -2981,7 +3028,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
         "conductor_system_max_concurrent removed",
         :warn,
         advisory,
-        "Setting the local cap (`arb node set local --max-workers N`) clears this note."
+        "Setting the local cap (`ward node set local --max-workers N`) clears this note."
       )
     ]
   end
@@ -3174,7 +3221,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
             hint:
               "Anyone who can reach this server (a tailscale serve proxy arrives from " <>
                 "127.0.0.1) gets the whole dashboard. Upgrade the server (bd-3gycsz); " <>
-                "then `arb dashboard login` signs your browser in."
+                "then `ward dashboard login` signs your browser in."
         }
 
       {:error, %Client.Error{kind: :http, status: s}} when s in 300..399 ->
@@ -3272,7 +3319,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     restart_safety(
       :warn,
       "scheduler " <> SchedulerState.headline(body) <> Enum.join(lines),
-      "Wait for it to drain: `arb scheduler wait`, then restart promptly."
+      "Wait for it to drain: `ward scheduler wait`, then restart promptly."
     )
   end
 
@@ -3280,7 +3327,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     restart_safety(
       :warn,
       "scheduler #{SchedulerState.headline(body)}",
-      "To reach a safe restart point: `arb scheduler pause && arb scheduler wait`."
+      "To reach a safe restart point: `ward scheduler pause && ward scheduler wait`."
     )
   end
 
@@ -3291,7 +3338,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     restart_safety(
       :warn,
       "could not check: the scheduler reported a state this CLI does not recognise",
-      "Upgrade the CLI (`arb self-update`), or read `arb scheduler status`."
+      "Upgrade the CLI (`ward self-update`), or read `ward scheduler status`."
     )
   end
 
@@ -3315,7 +3362,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       status: :warn,
       detail: "could not check: " <> unknown_reason(other),
       hint:
-        "Re-run `arb server doctor`; if it persists, check the server log and `arb server version`.",
+        "Re-run `ward server doctor`; if it persists, check the server log and `ward server version`.",
       blocks_readiness: false
     }
   end

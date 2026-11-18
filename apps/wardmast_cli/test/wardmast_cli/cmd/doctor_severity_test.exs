@@ -170,7 +170,7 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
       {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
 
       assert exit_code == 0
-      assert out =~ "arb doctor"
+      assert out =~ "ward server doctor"
       assert out =~ ~r/\d+ ok · 0 warn · 0 fail/
       refute out =~ "[ ok ]"
       refute out =~ "phoenix reachable"
@@ -424,7 +424,7 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
 
       assert result.status == :warn
       assert result.detail =~ "not a safe restart point"
-      assert (result.hint || "") =~ "arb scheduler pause"
+      assert (result.hint || "") =~ "ward scheduler pause"
     end
 
     test "never renders [ ok ] together with 'not a safe restart point'" do
