@@ -60,6 +60,7 @@ defmodule Wardmast.MCP.OperatorProof do
   """
 
   alias Wardmast.Sessions.Naming
+  alias Wardmast.Sessions.Runner.Darwin
 
   @type peer :: %{pid: integer(), uid: integer(), gid: integer()}
   @type reason ::
@@ -84,9 +85,20 @@ defmodule Wardmast.MCP.OperatorProof do
       check 3 (`dedicated_cgroup/1` of `/proc/self/cgroup`). Check 4 runs
       either way.
     * `:proc_root`: `"/proc"`
+    * `:os`: which inspection to use, `:darwin` (`ps` and session pidfiles,
+      see "macOS" above) or anything else (`/proc` and cgroups). Defaults to
+      the host's, except that passing a `:proc_root` selects `/proc`.
+    * `:ps` (darwin): `fn args -> {output, exit_status} end` standing in for
+      `/bin/ps`
+    * `:session_dir` (darwin): where `Wardmast.Sessions.Runner.Darwin` keeps
+      its session pidfiles (`Wardmast.Sessions.Naming.socket_dir/0`)
   """
   @spec authorize(peer(), keyword()) :: :ok | {:error, reason()}
-  def authorize(%{pid: pid, uid: uid}, opts \\ []) do
+  def authorize(%{pid: _, uid: _} = peer, opts \\ []) do
+    if darwin?(opts), do: authorize_darwin(peer, opts), else: authorize_proc(peer, opts)
+  end
+
+  defp authorize_proc(%{pid: pid, uid: uid}, opts) do
     proc = Keyword.get(opts, :proc_root, "/proc")
     server_uid = Keyword.get_lazy(opts, :server_uid, &own_uid/0)
     server_pid = Keyword.get_lazy(opts, :server_pid, fn -> String.to_integer(System.pid()) end)
@@ -124,14 +136,19 @@ defmodule Wardmast.MCP.OperatorProof do
 
   def describe(:in_session_scope),
     do:
-      "the connecting process is inside an Wardmast session's scope; a session uses the " <>
-        "token the server minted for it at provisioning"
+      "the connecting process is inside a Wardmast session (its systemd scope, or below its " <>
+        "tmux server on macOS); a session uses the token the server minted for it at provisioning"
 
   def describe(:peer_unreadable),
-    do: "the connecting process could not be inspected through /proc, so it is refused"
+    do:
+      "the connecting process could not be inspected (through /proc on Linux, ps on macOS), " <>
+        "so it is refused"
 
   def describe(:unknown_peer), do: "the kernel reported no process for the connection"
-  def describe(:no_peercred), do: "peer credentials are unavailable on this platform"
+
+  def describe(:no_peercred),
+    do: "the kernel did not report the connecting process's pid and uid, so it is refused"
+
   def describe(other), do: "refused (#{inspect(other)})"
 
   # ---- socket location ---------------------------------------------------
@@ -206,6 +223,23 @@ defmodule Wardmast.MCP.OperatorProof do
     do: {:ok, %{pid: pid, uid: uid, gid: gid}}
 
   def parse_peercred(_), do: :error
+
+  @doc """
+  Decode macOS's peer credentials: the `LOCAL_PEERCRED` payload (a
+  version-0 `struct xucred`: `u_int` version, `uid_t` uid, `short` ngroups,
+  then `gid_t` groups[16] at offset 12, 76 bytes; groups[0] is the effective
+  gid) and the `LOCAL_PEERPID` payload (the peer's pid as an `int`).
+  """
+  @spec parse_local_peercred(binary(), binary()) :: {:ok, peer()} | :error
+  def parse_local_peercred(
+        <<0::native-unsigned-32, uid::native-unsigned-32, ngroups::native-signed-16, _::16,
+          gid::native-unsigned-32, _more_groups::binary-size(60)>>,
+        <<pid::native-signed-32>>
+      )
+      when ngroups in 1..16,
+      do: {:ok, %{pid: pid, uid: uid, gid: gid}}
+
+  def parse_local_peercred(_xucred, _peerpid), do: :error
 
   @doc """
   The server's cgroup path from the contents of `/proc/<pid>/cgroup` when it
@@ -316,4 +350,126 @@ defmodule Wardmast.MCP.OperatorProof do
       _ -> nil
     end
   end
+
+  # ---- darwin (bd-5tg348) ----------------------------------------------------
+
+  # `:os` when given. Otherwise a `:proc_root`, the /proc walk's own seam,
+  # selects /proc on any host, and the host decides the rest.
+  defp darwin?(opts) do
+    case Keyword.fetch(opts, :os) do
+      {:ok, os} -> os == :darwin
+      :error -> not Keyword.has_key?(opts, :proc_root) and match?({:unix, :darwin}, :os.type())
+    end
+  end
+
+  defp authorize_darwin(%{pid: pid, uid: uid}, opts) do
+    ps = Keyword.get(opts, :ps, &run_ps/1)
+    server_pid = Keyword.get_lazy(opts, :server_pid, &own_pid/0)
+
+    with {:ok, server_uid} <- darwin_server_uid(opts, ps),
+         :ok <- check_peer(pid, uid, server_uid),
+         {:ok, chain} <- ps_walk(ps, pid, server_pid, [], 0) do
+      servers = Darwin.recorded_server_pids(Keyword.get(opts, :session_dir))
+      check_session_servers(ps, chain, servers)
+    end
+  end
+
+  # The VM's effective uid, as `ps` reports it for its own pid (no /proc to
+  # stat). The same uid `LOCAL_PEERCRED` reports for a peer.
+  defp darwin_server_uid(opts, ps) do
+    case Keyword.fetch(opts, :server_uid) do
+      {:ok, uid} -> {:ok, uid}
+      :error -> with :error <- ps_int(ps, "uid=", own_pid()), do: {:error, :peer_unreadable}
+    end
+  end
+
+  defp check_peer(_pid, uid, server_uid) when uid != server_uid, do: {:error, :foreign_uid}
+
+  defp check_peer(pid, _uid, _server_uid) when not is_integer(pid) or pid <= 0,
+    do: {:error, :unknown_peer}
+
+  defp check_peer(_pid, _uid, _server_uid), do: :ok
+
+  # Check 2 on darwin: the peer and its ancestors, nearest first, up to (not
+  # including) launchd or the kernel. Reaching the server's pid is a refusal.
+  # A pid met twice is a cycle, and a parent that can't be read, at any depth,
+  # fails closed, as does a chain deeper than @max_depth.
+  defp ps_walk(_ps, pid, server_pid, _chain, _depth) when pid == server_pid,
+    do: {:error, :spawned_by_arbiter}
+
+  defp ps_walk(_ps, pid, _server_pid, chain, _depth) when pid in [0, 1],
+    do: {:ok, Enum.reverse(chain)}
+
+  defp ps_walk(_ps, _pid, _server_pid, _chain, depth) when depth > @max_depth,
+    do: {:error, :peer_unreadable}
+
+  defp ps_walk(ps, pid, server_pid, chain, depth) do
+    with false <- pid in chain,
+         {:ok, parent} <- ps_int(ps, "ppid=", pid) do
+      ps_walk(ps, parent, server_pid, [pid | chain], depth + 1)
+    else
+      _ -> {:error, :peer_unreadable}
+    end
+  end
+
+  # Check 4 on darwin: refuse a chain that passes through a session's tmux
+  # server. A recorded pid that no longer runs a tmux was reused and is not a
+  # session (Runner.Darwin judges liveness the same way). One whose command
+  # can't be read fails closed.
+  defp check_session_servers(ps, chain, servers) do
+    chain
+    |> Enum.filter(&(&1 in servers))
+    |> Enum.reduce_while(:ok, fn pid, :ok ->
+      case ps_comm(ps, pid) do
+        {:ok, comm} ->
+          if Darwin.tmux_command?(comm),
+            do: {:halt, {:error, :in_session_scope}},
+            else: {:cont, :ok}
+
+        :error ->
+          {:halt, {:error, :peer_unreadable}}
+      end
+    end)
+  end
+
+  # One header-less number, `ps -o <field> -p <pid>`. Anything but exit 0 with
+  # exactly one non-negative integer is :error.
+  defp ps_int(ps, field, pid) do
+    with {out, 0} <- call_ps(ps, ["-o", field, "-p", Integer.to_string(pid)]),
+         {n, ""} when n >= 0 <- Integer.parse(String.trim(out)) do
+      {:ok, n}
+    else
+      _ -> :error
+    end
+  end
+
+  # The process's command, as Runner.Darwin's liveness check reads it. `-ww`
+  # so a narrow COLUMNS in the server's env can't truncate it.
+  defp ps_comm(ps, pid) do
+    case call_ps(ps, ["-ww", "-o", "comm=", "-p", Integer.to_string(pid)]) do
+      {out, 0} ->
+        case String.trim(out) do
+          "" -> :error
+          comm -> {:ok, comm}
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  # A `ps` that raises (it can't be spawned, say) is a failed read, never a pass.
+  defp call_ps(ps, args) do
+    ps.(args)
+  rescue
+    _ -> {"", 127}
+  end
+
+  # `/bin/ps` by absolute path, not through PATH. The server's PATH comes from
+  # the operator's shell (captured into wardmast.env) and can lead with a
+  # directory the same uid can write, Homebrew's for one, where a planted `ps`
+  # could vouch for any ancestry. `/bin` is on macOS's sealed system volume.
+  defp run_ps(args), do: System.cmd("/bin/ps", args, env: [{"LC_ALL", "C"}])
+
+  defp own_pid, do: String.to_integer(System.pid())
 end

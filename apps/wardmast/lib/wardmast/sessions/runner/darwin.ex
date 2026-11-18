@@ -184,6 +184,50 @@ defmodule Wardmast.Sessions.Runner.Darwin do
     end
   end
 
+  # -- recorded servers (the operator proof's session check) -------------------
+
+  @doc """
+  The tmux server pid recorded in every session pidfile in `dir` (default: the
+  session socket dir, `Wardmast.Sessions.Naming.socket_dir/0`), whether or not
+  that process is still alive. A file that is not a session pidfile, or does
+  not parse, is skipped, as `list-units` skips it.
+
+  `Wardmast.MCP.OperatorProof` reads this for its session check on macOS
+  (bd-5tg348). A session has no scope there, so a process below one of these
+  servers is a session's, provided the pid still runs a tmux
+  (`tmux_command?/1`, the same liveness rule as `list-units`).
+  """
+  @spec recorded_server_pids(String.t() | nil) :: [pos_integer()]
+  def recorded_server_pids(dir \\ nil) do
+    case dir || default_dir() do
+      nil -> []
+      dir -> dir |> Naming.pid_glob() |> Path.wildcard() |> Enum.flat_map(&recorded_pid/1)
+    end
+  end
+
+  @doc """
+  Whether `ps -o comm=` output names a tmux: how a pidfile's pid is told apart
+  from an unrelated process that reused it.
+  """
+  @spec tmux_command?(String.t()) :: boolean()
+  def tmux_command?(comm) when is_binary(comm), do: String.contains?(comm, "tmux")
+
+  defp default_dir do
+    case Naming.socket_dir() do
+      {:ok, dir} -> dir
+      {:error, _} -> nil
+    end
+  end
+
+  defp recorded_pid(path) do
+    with id when is_binary(id) <- Naming.session_id_from_pidfile(path),
+         {:ok, pid, _socket} <- read_pidfile(path) do
+      [pid]
+    else
+      _ -> []
+    end
+  end
+
   # -- stop -------------------------------------------------------------------
 
   defp stop(unit) do
@@ -226,7 +270,7 @@ defmodule Wardmast.Sessions.Runner.Darwin do
   # itself misbehaved, which must not be read as "dead".
   defp alive_tmux?(pid) do
     case inner().run("ps", ["-p", Integer.to_string(pid), "-o", "comm="], stderr_to_stdout: true) do
-      {out, 0} -> if String.contains?(out, "tmux"), do: :alive, else: :dead
+      {out, 0} -> if tmux_command?(out), do: :alive, else: :dead
       {_out, 1} -> :dead
       {out, status} -> {:error, out, status}
     end

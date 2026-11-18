@@ -167,6 +167,9 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # (and now shared with `Wardmast.Agents.Preflight`'s probe teardown). Spawns
     # only `kill` and `pgrep`.
     "apps/wardmast/lib/wardmast/worker/os_process.ex" => :pure_tool,
+    # bd-5tg348: the operator proof's macOS checks walk a peer's ancestry and
+    # read the server's own uid with `/bin/ps` (no /proc there). `ps` only.
+    "apps/wardmast/lib/wardmast/mcp/operator_proof.ex" => :pure_tool,
     # bd-568ib9: a worker's process group: `ps` for its pgid and start time,
     # `kill` for the group kill. The perl launcher it builds runs through
     # `ClaudeSession.open_port/1`, scrubbed there.
