@@ -158,6 +158,24 @@ defmodule WardmastCli.Cmd.DoctorTest do
     assert length(String.split(out, "could not check")) <= 2
   end
 
+  test "a rejected token collapses the dependent warnings as 'token rejected'" do
+    System.put_env("ARB_TOKEN", "stale-token")
+    on_exit(fn -> System.delete_env("ARB_TOKEN") end)
+    stub_get("/api/workspaces", %{}, 401)
+
+    {out, _err, _exit} = capture(fn -> Doctor.run(["--all"]) end)
+    assert out =~ ~r/\d+ checks skipped: token rejected/
+    assert out =~ "was rejected; it may belong to another server"
+  end
+
+  test "doctor output never tells the user to run the old `arb` name" do
+    stub_transport_error(:get, "/api/workspaces", :econnrefused)
+
+    {out, _err, _exit} = capture(fn -> Doctor.run(["--all"]) end)
+    refute out =~ "`arb "
+    refute out =~ "arb server doctor"
+  end
+
   test "no workspaces → workspace check fails with hint" do
     stub_routes([
       {{"get", "/api/workspaces"}, {%{"data" => []}, 200}},
@@ -341,13 +359,13 @@ defmodule WardmastCli.Cmd.DoctorTest do
     # hint should tell operator to rebuild and reinstall the arb CLI, not restart the server.
     res = Checks.check_versions("0.1.67", "41474cae", "0.1.68", "41474cae")
     assert res.status == :fail
-    assert res.hint =~ "rebuild and reinstall the `arb` CLI"
+    assert res.hint =~ "rebuild and reinstall the `ward` CLI"
     refute res.hint =~ "restart the server"
 
     # Also test with different SHAs where CLI sha is ancestor of server sha
     res_sha = Checks.check_versions("0.1.67", "f21bdd4d", "0.1.68", "41474cae")
     assert res_sha.status == :fail
-    assert res_sha.hint =~ "rebuild and reinstall the `arb` CLI"
+    assert res_sha.hint =~ "rebuild and reinstall the `ward` CLI"
     refute res_sha.hint =~ "restart the server"
 
     # And verify via Doctor.run with a newer server version (same major)
@@ -369,7 +387,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
 
     {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
     assert out =~ "[fail] version"
-    assert out =~ "rebuild and reinstall the `arb` CLI"
+    assert out =~ "rebuild and reinstall the `ward` CLI"
     refute out =~ "restart the server"
   end
 

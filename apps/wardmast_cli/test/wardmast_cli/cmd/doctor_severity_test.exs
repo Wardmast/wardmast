@@ -424,7 +424,7 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
 
       assert result.status == :warn
       assert result.detail =~ "not a safe restart point"
-      assert (result.hint || "") =~ "arb scheduler pause"
+      assert (result.hint || "") =~ "ward scheduler pause"
     end
 
     test "never renders [ ok ] together with 'not a safe restart point'" do

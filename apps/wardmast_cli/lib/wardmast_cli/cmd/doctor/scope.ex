@@ -64,7 +64,7 @@ defmodule WardmastCli.Cmd.Doctor.Scope do
         {:no, "#{label} is not configured for any workspace"}
 
       %{"paused" => true} ->
-        {:no, "#{label} is paused (`arb provider resume`), so no spawn uses it"}
+        {:no, "#{label} is paused (`ward provider resume`), so no spawn uses it"}
 
       _ ->
         :yes

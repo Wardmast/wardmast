@@ -518,7 +518,7 @@ defmodule WardmastCli.Client do
     case Process.get(:bd2_mint_error) do
       %Error{message: message} ->
         "no ARB_TOKEN, and minting one over the operator socket failed: #{message}. " <>
-          "Run arb from your own shell on the server host, or set ARB_TOKEN to a token you hold."
+          "Run ward from your own shell on the server host, or set ARB_TOKEN to a token you hold."
 
       nil ->
         cond do
