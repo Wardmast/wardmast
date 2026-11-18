@@ -4,10 +4,14 @@ defmodule WardmastCli.Supervisor.Launchd do
   one of only two modules in the CLI that spawn a service-manager executable
   (here `launchctl`).
 
-  It manages one per-user LaunchAgent (`com.wardmast.server`, in the
-  `gui/<uid>` domain) that runs a dev checkout or a release install
-  (`<data-home>/current/bin/wardmast start`) via an env-sourcing wrapper
-  (see `Launchd.Plist`). It sits under the same restart/health state machine
+  It manages one launchd job (`com.wardmast.server`) in one of two shapes: the
+  free single-developer **LaunchAgent** (per-user, `gui/<uid>` domain) or, on a
+  shared team Mac, a system-wide **LaunchDaemon** (`/Library/LaunchDaemons`,
+  `system` domain, `UserName` = a dedicated service account, started at boot).
+  `service_mode/0` tells them apart from which plist is on disk, and every call
+  below targets the one that is installed. The job runs a dev checkout (agent
+  only) or a release install (`<data-home>/current/bin/wardmast start`) via an
+  env-sourcing wrapper (see `Launchd.Plist`). It sits under the same restart/health state machine
   as systemd, with these mappings:
 
     * restart  — `launchctl kickstart -k`: kill + start in one synchronous
@@ -21,9 +25,9 @@ defmodule WardmastCli.Supervisor.Launchd do
     * state    — `launchctl print`: exit 0 is managed, 113 / "Could not find
       service" is not.
 
-  Not available in phase 1, reported rather than faked: boot-before-login
-  start (a LaunchAgent starts at login), logrotate timers, `arb-session-*`
-  scopes (a systemd concept), and the system (`--system`) scope.
+  Not available, reported rather than faked: logrotate timers and
+  `arb-session-*` scopes (a systemd concept). A LaunchAgent starts at login;
+  for start-at-boot use the LaunchDaemon (`arb install service --system`).
   """
 
   @behaviour WardmastCli.Supervisor
@@ -72,12 +76,110 @@ defmodule WardmastCli.Supervisor.Launchd do
     end
   end
 
-  @doc "Full path of the service's plist."
+  @doc "Directory of the system-wide LaunchDaemon plist; `:bd3_launchd_daemon_dir` seam for tests."
+  @spec daemon_dir() :: Path.t()
+  def daemon_dir do
+    case Process.get(:bd3_launchd_daemon_dir) do
+      dir when is_binary(dir) -> dir
+      _ -> Plist.daemon_dir()
+    end
+  end
+
+  @doc "Path of the per-user LaunchAgent plist."
+  @spec agent_plist_path() :: Path.t()
+  def agent_plist_path, do: Path.join(plist_dir(), Plist.file_name())
+
+  @doc "Path of the system-wide LaunchDaemon plist."
+  @spec daemon_plist_path() :: Path.t()
+  def daemon_plist_path, do: Path.join(daemon_dir(), Plist.file_name())
+
+  @doc "Full path of the installed service's plist (the daemon's when one is installed)."
   @spec plist_path() :: Path.t()
-  def plist_path, do: Path.join(plist_dir(), Plist.file_name())
+  def plist_path, do: plist_path(active_scope())
+
+  @doc "The plist path for `scope` (`:user` = LaunchAgent, `:system` = LaunchDaemon)."
+  @spec plist_path(:user | :system) :: Path.t()
+  def plist_path(:user), do: agent_plist_path()
+  def plist_path(:system), do: daemon_plist_path()
+
+  @doc """
+  Which launchd shape is installed, read from the plists on disk (never from
+  `launchctl`, so it works unprivileged and with the job unloaded):
+
+    * `:mode` — `:agent`, `:daemon`, `:both` (a conflict: two servers, one
+      port) or `:none`
+    * `:plist` — the installed plist (the daemon's when both exist), or `nil`
+    * `:user` / `:group` — the daemon's `UserName` / `GroupName`; `user: nil`
+      for a daemon plist means launchd would run it as **root**
+    * `:owner_uid` / `:file_mode` — the daemon plist's owner and permission
+      bits (launchd refuses a daemon plist that is not root-owned or is
+      group/world-writable)
+  """
+  @spec service_mode() :: %{
+          mode: :agent | :daemon | :both | :none,
+          plist: Path.t() | nil,
+          user: String.t() | nil,
+          group: String.t() | nil,
+          owner_uid: non_neg_integer() | nil,
+          file_mode: non_neg_integer() | nil
+        }
+  def service_mode do
+    base = %{plist: nil, user: nil, group: nil, owner_uid: nil, file_mode: nil}
+
+    case {File.exists?(agent_plist_path()), File.exists?(daemon_plist_path())} do
+      {false, false} -> Map.put(base, :mode, :none)
+      {true, false} -> base |> Map.put(:plist, agent_plist_path()) |> Map.put(:mode, :agent)
+      {false, true} -> daemon_info(base, :daemon)
+      {true, true} -> daemon_info(base, :both)
+    end
+  end
+
+  defp daemon_info(base, mode) do
+    path = daemon_plist_path()
+
+    xml =
+      case File.read(path) do
+        {:ok, body} -> body
+        _ -> ""
+      end
+
+    {owner_uid, file_mode} =
+      case File.stat(path) do
+        {:ok, st} -> {st.uid, Bitwise.band(st.mode, 0o777)}
+        _ -> {nil, nil}
+      end
+
+    base
+    |> Map.merge(%{
+      mode: mode,
+      plist: path,
+      user: plist_string(xml, "UserName"),
+      group: plist_string(xml, "GroupName"),
+      owner_uid: owner_uid,
+      file_mode: file_mode
+    })
+  end
+
+  defp plist_string(xml, key) do
+    case Regex.run(~r{<key>#{key}</key>\s*<string>([^<]*)</string>}, xml) do
+      [_, value] ->
+        value
+        |> String.replace("&lt;", "<")
+        |> String.replace("&gt;", ">")
+        |> String.replace("&amp;", "&")
+
+      _ ->
+        nil
+    end
+  end
+
+  # A daemon, once installed, is the service `arb restart` / `arb stop` mean.
+  defp active_scope do
+    if File.exists?(daemon_plist_path()), do: :system, else: :user
+  end
 
   @impl true
-  def unit_dirs, do: [plist_dir()]
+  def unit_dirs, do: [plist_dir(), daemon_dir()]
 
   @impl true
   def unit_file_name, do: Plist.file_name()
@@ -99,6 +201,21 @@ defmodule WardmastCli.Supervisor.Launchd do
   # queued job to poll for — the caller's await sees `running` straight away.
   @impl true
   def restart_service do
+    if active_scope() == :system and not root?() do
+      # launchd answers a non-root kickstart of the system domain with a bare
+      # "Operation not permitted"; say what to do instead.
+      {:error, "restarting the system-wide LaunchDaemon needs root",
+       "Run `#{restart_cmd()}` (or `sudo ward restart`)."}
+    else
+      kickstart()
+    end
+  rescue
+    e in ErlangError ->
+      {:error, "could not run launchctl: #{inspect(e.original)}",
+       "Ensure launchctl is on your PATH."}
+  end
+
+  defp kickstart do
     case launchctl(["kickstart", "-k", target()]) do
       {_out, 0} ->
         :ok
@@ -106,10 +223,6 @@ defmodule WardmastCli.Supervisor.Launchd do
       {out, code} ->
         if not_loaded?(out, code), do: bootstrap_unloaded(), else: kickstart_failed(out, code)
     end
-  rescue
-    e in ErlangError ->
-      {:error, "could not run launchctl: #{inspect(e.original)}",
-       "Ensure launchctl is on your PATH."}
   end
 
   # The job was stopped (`bootout`) or never loaded: load it from its plist,
@@ -226,8 +339,8 @@ defmodule WardmastCli.Supervisor.Launchd do
     Unit.write_unit(wrapper, Plist.wrapper_script(opts))
     File.chmod!(wrapper, 0o755)
     File.mkdir_p!(Path.dirname(Plist.log_path(arbiter_home)))
-    Unit.write_unit(plist_path(), Plist.plist(opts))
-    plist_path()
+    Unit.write_unit(agent_plist_path(), Plist.plist(opts))
+    agent_plist_path()
   end
 
   # launchd has no unit cache to refresh.
@@ -236,24 +349,23 @@ defmodule WardmastCli.Supervisor.Launchd do
 
   @impl true
   def enable_now(scope) do
-    require_user_scope!(scope)
     Start.log_text("Loading and starting #{Plist.label()}…")
 
     # A job that is already loaded makes `bootstrap` fail with EIO, and would
     # keep running the old plist: unload first so a re-install takes effect.
-    _ = launchctl(["bootout", target()])
+    _ = launchctl(["bootout", target(scope)])
 
     # `enable` first: a label that was ever `launchctl disable`d makes
     # `bootstrap` refuse the job.
-    _ = launchctl(["enable", target()])
+    _ = launchctl(["enable", target(scope)])
 
-    case launchctl(["bootstrap", domain(), plist_path()]) do
+    case launchctl(["bootstrap", domain(scope), plist_path(scope)]) do
       {_out, 0} ->
         :ok
 
       {out, code} ->
         Output.die(
-          "launchctl bootstrap #{domain()} #{plist_path()} failed (exit #{code})",
+          "launchctl bootstrap #{domain(scope)} #{plist_path(scope)} failed (exit #{code})",
           "Inspect it with `#{status_cmd(scope)}` and `#{logs_cmd(scope)}`. Output:\n" <>
             String.trim_trailing(out)
         )
@@ -269,14 +381,14 @@ defmodule WardmastCli.Supervisor.Launchd do
   # Idempotent unload. Whether the job was actually loaded (a not-loaded job is
   # not fatal).
   @impl true
-  def disable_now(_scope) do
-    match?({_out, 0}, launchctl(["bootout", target()]))
+  def disable_now(scope) do
+    match?({_out, 0}, launchctl(["bootout", target(scope)]))
   rescue
     _ -> false
   end
 
-  # A LaunchAgent starts at login, not at boot. Starting before login needs a
-  # root-owned LaunchDaemon, which phase 1 does not install.
+  # A LaunchAgent starts at login, not at boot. Starting before login needs the
+  # root-owned LaunchDaemon (`arb install service --system`).
   @impl true
   def enable_boot_start, do: :failed
 
@@ -287,10 +399,12 @@ defmodule WardmastCli.Supervisor.Launchd do
   def disable_timer(_unit), do: {"log rotation timers are not supported on launchd", 1}
 
   @impl true
-  def status_cmd(_scope), do: "launchctl print gui/$(id -u)/#{Plist.label()}"
+  def status_cmd(:system), do: "sudo launchctl print #{shell_target(:system)}"
+  def status_cmd(:user), do: "launchctl print #{shell_target(:user)}"
 
   @impl true
-  def logs_cmd(_scope), do: "tail -f #{Plist.log_path(Unit.arbiter_home_path())}"
+  def logs_cmd(:system), do: "tail -f #{Plist.daemon_log_path()}"
+  def logs_cmd(:user), do: "tail -f #{Plist.log_path(Unit.arbiter_home_path())}"
 
   # ---- operator hints (restart / deploy reports) ----------------------------
 
@@ -298,13 +412,13 @@ defmodule WardmastCli.Supervisor.Launchd do
   def manager_name, do: "launchd"
 
   @impl true
-  def restart_cmd, do: "launchctl kickstart -k #{shell_target()}"
+  def restart_cmd, do: hint_cmd("launchctl kickstart -k #{shell_target()}")
 
   @impl true
-  def start_cmd, do: "launchctl kickstart #{shell_target()}"
+  def start_cmd, do: hint_cmd("launchctl kickstart #{shell_target()}")
 
   @impl true
-  def stop_cmd, do: "launchctl bootout #{shell_target()}"
+  def stop_cmd, do: hint_cmd("launchctl bootout #{shell_target()}")
 
   # `bootout` first (it fails harmlessly when nothing is loaded), then load the
   # plist again, which starts the job.
@@ -312,30 +426,34 @@ defmodule WardmastCli.Supervisor.Launchd do
   def recover_cmds do
     [
       stop_cmd(),
-      "launchctl bootstrap gui/$(id -u) #{plist_path()}",
-      status_cmd(:user)
+      hint_cmd("launchctl bootstrap #{shell_domain()} #{plist_path()}"),
+      status_cmd(active_scope())
     ]
   end
 
-  defp shell_target, do: "gui/$(id -u)/#{Plist.label()}"
+  # The system domain is root's: every operator command for it needs `sudo`.
+  defp hint_cmd(cmd), do: if(active_scope() == :system, do: "sudo " <> cmd, else: cmd)
+
+  defp shell_domain(scope \\ active_scope())
+  defp shell_domain(:system), do: "system"
+  defp shell_domain(:user), do: "gui/$(id -u)"
+
+  defp shell_target(scope \\ active_scope()), do: shell_domain(scope) <> "/" <> Plist.label()
 
   # ---- internals ------------------------------------------------------------
-
-  defp require_user_scope!(:user), do: :ok
-
-  defp require_user_scope!(:system) do
-    Output.die(
-      "--system is not supported on macOS yet",
-      "Install the per-user LaunchAgent: run `arb install service` without --system."
-    )
-  end
 
   defp not_loaded?(out, code), do: code in [3, 113] or Regex.match?(@not_loaded, out)
 
   defp failed(verb, out, code), do: "launchctl #{verb} exited #{code}: #{String.trim(out)}"
 
-  defp domain, do: "gui/" <> uid()
-  defp target, do: domain() <> "/" <> Plist.label()
+  defp domain, do: domain(active_scope())
+  defp domain(:user), do: "gui/" <> uid()
+  defp domain(:system), do: "system"
+
+  defp target, do: target(active_scope())
+  defp target(scope), do: domain(scope) <> "/" <> Plist.label()
+
+  defp root?, do: uid() == "0"
 
   defp uid do
     case run_cmd("id", ["-u"], stderr_to_stdout: true) do
