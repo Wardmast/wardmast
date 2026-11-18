@@ -1,10 +1,10 @@
 # Remote workers runbook
 
-How to add a second machine to an Arbiter install so it runs workers, and how to
+How to add a second machine to a Wardmast install so it runs workers, and how to
 operate and debug it. The design is [`design/remote-workers.md`](design/remote-workers.md)
 (section numbers below refer to it); this page is the procedure.
 
-**What a node is.** The same Arbiter release the primary runs, started with
+**What a node is.** The same Wardmast release the primary runs, started with
 `ARB_ROLE=agent` as a *user* systemd unit by a join script. It holds one secret (a
 node credential), no database, and no forge access. It dials **out** to the primary
 over one WebSocket, builds hardened rootless `podman` containers from run specs the
@@ -40,7 +40,7 @@ nothing inbound is opened on either machine.
 
    Do **not** use `tailscale funnel` or any public tunnel: public exposure is refused by
    default (doctor warns on a non-private `nodes.public_url`).
-3. **Tell Arbiter its public URL** (the join script and the nodes' config embed it):
+3. **Tell Wardmast its public URL** (the join script and the nodes' config embed it):
 
    ```sh
    arb settings set nodes.public_url https://<primary>.<tailnet>.ts.net

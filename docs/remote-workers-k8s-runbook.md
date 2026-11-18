@@ -1,6 +1,6 @@
 # Remote workers on Kubernetes: readiness, canary and rollout runbook
 
-How to tell whether a Kubernetes cluster can take Arbiter worker pods, what to do
+How to tell whether a Kubernetes cluster can take Wardmast worker pods, what to do
 when it says no, how the end-to-end suite is run, and the checklist for rolling the
 operator's k3s out as a **test bed**. The design is
 [`design/remote-workers.md`](design/remote-workers.md) §16 (section numbers below
@@ -201,7 +201,7 @@ stalled on several of them. Where the doctor has no dedicated row, the check is 
 | prerequisite | why | confirm with |
 |---|---|---|
 | `nodes.public_url` set to an address the cluster can reach (`arb settings set nodes.public_url https://…`) | pods and the controller call back to the primary here | doctor row `nodes.public_url reachable` (ok = the URL answers `/nodes/ping`) |
-| `nodes.registry` set to a registry **the primary can push to** (`arb settings set nodes.registry …`). GHCR was not pushable in K16b; use one whose credentials the primary holds | the primary publishes the worker/controller image there; the kubelet then pulls it | doctor: `identity` is `:no_registry` while unset, and `registry_pull` (section 1) fails with the kubelet's message if the image was never pushed. Manual: `podman login <registry>` as the Arbiter user and push a test tag |
+| `nodes.registry` set to a registry **the primary can push to** (`arb settings set nodes.registry …`). GHCR was not pushable in K16b; use one whose credentials the primary holds | the primary publishes the worker/controller image there; the kubelet then pulls it | doctor: `identity` is `:no_registry` while unset, and `registry_pull` (section 1) fails with the kubelet's message if the image was never pushed. Manual: `podman login <registry>` as the Wardmast user and push a test tag |
 | the release `current` symlink exists and points at the running release | image builds and self-update read the release through it | no doctor row. Manual: `readlink -f <releases>/current` matches the version `arb version` reports |
 | the **podman sandbox backend** on the workspace (`agent.security.sandbox.backend: podman`) | the worker image is built and run through rootless podman | doctor row `podman sandbox readiness`; it only runs when a workspace uses podman and otherwise reports that none does |
 | `worker.placement: remote_only` for a canary (`arb config set worker.placement remote_only`) | a canary must not silently fall back to running locally; with no capacity the card is held, not failed | no doctor row. Manual: `arb config get worker.placement`; a held card says no node has capacity |
@@ -259,7 +259,7 @@ it". Each step has a pass criterion; stop at the first that fails.
 6. **Placement: spread, do not pin.** Leave `placement.node_selector` empty and add no
    taints or tolerations: workers spread across every schedulable node (the default
    `topologySpreadConstraints` on `kubernetes.io/hostname`, `ScheduleAnyway`). No node is
-   dedicated to Arbiter. Make the worker image pullable from every node that may run a
+   dedicated to Wardmast. Make the worker image pullable from every node that may run a
    pod (a registry the nodes reach, plus `registries[].pullSecret` if it is private, see
    §4a); do not pre-pull it on one machine. A node that is a poor fit (a Wi-Fi link, the CI
    runner) is excluded by a node selector or `nodeAffinity` the operator chooses
@@ -481,7 +481,7 @@ kubelet port. A target that cannot be named is `skipped`, shown in the detail
 
 ## 7. The controller's boot (K14), and when it does not come up
 
-The controller is the Arbiter release with `ARB_ROLE=agent` and
+The controller is the Wardmast release with `ARB_ROLE=agent` and
 `ARB_AGENT_BACKEND=k8s`, as the rendered Deployment runs it. Before it can label, build
 or watch a pod it has to learn who it is, so its boot (`Wardmast.NodeAgent.K8s.Boot`)
 does, on every start:

@@ -577,7 +577,7 @@ Token fields use Gemini's `usageMetadata` naming, **not** Claude's:
 
 Crucially, **the Gemini CLI emits no per-session dollar cost** — there is no
 analogue to Claude's `result.total_cost_usd`. Cost must be *derived* from token
-counts × a per-model price table, which Arbiter does not currently have for any
+counts × a per-model price table, which Wardmast does not currently have for any
 provider (Claude's cost comes straight from the CLI).
 
 > Note: live capture against the installed CLI was blocked by an

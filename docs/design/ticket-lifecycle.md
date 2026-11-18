@@ -531,7 +531,7 @@ worker, and announces its outcomes on `Watchdog.subscribe/1`:
 A PR opened before this change has no lane. `watch_opts/1` then uses the
 workspace's adapter and puts the PR on the ReviewGate's lane when the gate's
 approval stamp (`last_reviewed_sha`) is on the row — without it a restarted
-Watchdog would wait on a forge approval an Arbiter-authored PR never gets.
+Watchdog would wait on a forge approval a Wardmast-authored PR never gets.
 
 ### Fix and conflict passes are ordinary runs, with a fast lane
 

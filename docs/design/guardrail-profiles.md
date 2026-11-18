@@ -37,9 +37,9 @@ here is implemented. The ticket plan is in
    keys and sockets aren't mounted, and hosts aren't reachable. A worker that
    needs more asks through a new MCP tool. It never grants itself anything.
    See [§5](#5-ticket-declared-permissions).
-3. **The kernel enforces egress; Arbiter decides it.** Each worker runs in
+3. **The kernel enforces egress; Wardmast decides it.** Each worker runs in
    bubblewrap's `--unshare-net`, a network namespace with only loopback. The
-   only way out is a per-worker Unix socket to an Arbiter-owned filtering
+   only way out is a per-worker Unix socket to a Wardmast-owned filtering
    CONNECT proxy. The proxy allows or denies by host:port and logs every
    decision.
    - Probed end to end on the Fedora laptop.
@@ -123,7 +123,7 @@ Egress and reach were probed on the Fedora 44 laptop (kernel 7.2.7, SELinux
 enforcing, bubblewrap 0.12.0, `user.max_user_namespaces = 126539`). All
 scratch state was under a private `/tmp/bd8apkz6`. No agent CLI was run, and
 the live coordinator was not touched: a stand-in HTTP server played
-Arbiter's endpoint. The scripts and raw output are in
+Wardmast's endpoint. The scripts and raw output are in
 [Appendix A](#appendix-a-probes).
 
 ### 2.1 The jail can be escaped through the systemd user manager
@@ -340,7 +340,7 @@ ordered `quarantine < probation < trusted < privileged`.
 - **`egress`.** `open | allowlist | none`, a ceiling that composes as most
   restrictive (§4.4).
   - `none` still permits the *infra* hosts the worker protocol needs (the
-    agent CLI's own API, Arbiter and the git remote) and the workspace's
+    agent CLI's own API, Wardmast and the git remote) and the workspace's
     *toolchain* registries.
   - Anything other than `open` needs the egress jail. A host that fails its
     self-test makes the subject ineligible there. The drop reason is
@@ -411,14 +411,14 @@ the same "the workspace may only tighten" rule the quota policy uses
 
 ### 4.1 Requirements
 
-- **Fail closed.** No route out exists except the one Arbiter controls, for
+- **Fail closed.** No route out exists except the one Wardmast controls, for
   every process in the worker, whether native tools, shells, or children
   those spawn.
 - **Host:port granularity**, per worker. Ticket grants are per ticket, so
   policy must be per run.
-- **An audit trail in Arbiter's DB**, feeding the trust record (§6).
+- **An audit trail in Wardmast's DB**, feeding the trust record (§6).
 - **The agent keeps its infrastructure.** The CLI still reaches its model
-  API, Arbiter (`arb` and MCP) and the git remote.
+  API, Wardmast (`arb` and MCP) and the git remote.
 - **No TLS interception.**
 - **Both targets.** It must work on the Fedora laptop and the RHEL 8 dev EC2.
 
@@ -432,12 +432,12 @@ kernel settings were not read.**
 | Option | Enforces for every process? | Cost | Fedora laptop | RHEL 8 dev EC2 | Verdict |
 |---|---|---|---|---|---|
 | **E1. Permission-layer host rules** (extend today's `WebFetch(domain:…)` / `Bash(curl *host*)` / agy `read_url` denies into allowlists) | **No.** `python -c`, git, ssh, package managers and flag reordering all get past it. agy's `command()` is a literal prefix and can't match hosts. Codex has no rules at all | Config only | Same as today | Same | **Keep as the second fence** and for readable denials. It is not the boundary |
-| **E2. bwrap `--unshare-net` + an Arbiter filtering CONNECT proxy on per-worker Unix sockets + in-namespace `socat` bridges** | **Yes, once G1 hides the host sockets (§2.1).** The namespace has only `lo`. The only exit is the proxy, and DNS is resolved host-side (probed, §4.3) | Three D3 tickets for agy (G5, G6, G9); G7 and G8 extend it to Claude and Codex. At run time: one `socat` per bridge, **4.2 MB RSS** each (measured), plus a listener per run in the BEAM. A fresh HTTPS connection took a median **~49 ms direct vs ~70 ms proxied** (6 samples each, noisy; the probe proxy was Python). That is negligible next to model-API turns | **Works end to end**: bubblewrap 0.12.0, socat 1.8.1.1 | **Userland present:**<br>- bubblewrap **0.4.0** (BaseOS) runs the same recipe, including `--unshare-net` and the §2.1 tmpfs mounts; the el8 binary was run on the laptop kernel.<br>- socat **1.7.4.1** (AppStream) has the `tcp-listen`, `unix-connect`, `unix-listen` and `proxy` addresses; installation on the EC2 was not checked.<br><br>**Unverified:** the EC2's userns and netns sysctls (bd-8xy1mf's two-host check is still pending). If the self-test fails there, subjects that need egress are ineligible on that host | **Chosen** |
-| **E3. Vendor-native sandboxes** (Claude Code's own sandbox, Codex `workspace-write`, agy `--sandbox`) | **No, not uniformly:**<br>- **Claude.** Claude Code 2.1.285 ships a bwrap `--unshare-net` sandbox with HTTP and SOCKS bridge sockets and a filtering proxy. Its strings include `sandbox.network.httpProxyPort`, `allowUnixSockets`, `allowManagedDomainsOnly` and "Linux HTTP bridge socket". It sandboxes the commands Claude runs, not the CLI process itself, so the CLI's own traffic (the model API, and any in-process fetches) stays outside. This is from binary strings and wasn't run.<br>- **Codex.** Network is on/off only (`apps/wardmast/lib/wardmast/agents/codex.ex:421-432`).<br>- **agy.** `--sandbox` disables its allowlist gate (bd-25ivqe) | Per-vendor config with three semantics to keep in sync. There's no per-worker identity or audit in Arbiter. Nesting it inside Arbiter's jail is untested; the binary's `enableWeakerNestedSandbox` setting suggests nested use needs a weaker mode | Claude's needs bwrap + socat, which are present | Same packages as E2 | **Rejected** as the boundary. It is the same architecture as E2, but per vendor and partial |
+| **E2. bwrap `--unshare-net` + a Wardmast filtering CONNECT proxy on per-worker Unix sockets + in-namespace `socat` bridges** | **Yes, once G1 hides the host sockets (§2.1).** The namespace has only `lo`. The only exit is the proxy, and DNS is resolved host-side (probed, §4.3) | Three D3 tickets for agy (G5, G6, G9); G7 and G8 extend it to Claude and Codex. At run time: one `socat` per bridge, **4.2 MB RSS** each (measured), plus a listener per run in the BEAM. A fresh HTTPS connection took a median **~49 ms direct vs ~70 ms proxied** (6 samples each, noisy; the probe proxy was Python). That is negligible next to model-API turns | **Works end to end**: bubblewrap 0.12.0, socat 1.8.1.1 | **Userland present:**<br>- bubblewrap **0.4.0** (BaseOS) runs the same recipe, including `--unshare-net` and the §2.1 tmpfs mounts; the el8 binary was run on the laptop kernel.<br>- socat **1.7.4.1** (AppStream) has the `tcp-listen`, `unix-connect`, `unix-listen` and `proxy` addresses; installation on the EC2 was not checked.<br><br>**Unverified:** the EC2's userns and netns sysctls (bd-8xy1mf's two-host check is still pending). If the self-test fails there, subjects that need egress are ineligible on that host | **Chosen** |
+| **E3. Vendor-native sandboxes** (Claude Code's own sandbox, Codex `workspace-write`, agy `--sandbox`) | **No, not uniformly:**<br>- **Claude.** Claude Code 2.1.285 ships a bwrap `--unshare-net` sandbox with HTTP and SOCKS bridge sockets and a filtering proxy. Its strings include `sandbox.network.httpProxyPort`, `allowUnixSockets`, `allowManagedDomainsOnly` and "Linux HTTP bridge socket". It sandboxes the commands Claude runs, not the CLI process itself, so the CLI's own traffic (the model API, and any in-process fetches) stays outside. This is from binary strings and wasn't run.<br>- **Codex.** Network is on/off only (`apps/wardmast/lib/wardmast/agents/codex.ex:421-432`).<br>- **agy.** `--sandbox` disables its allowlist gate (bd-25ivqe) | Per-vendor config with three semantics to keep in sync. There's no per-worker identity or audit in Wardmast. Nesting it inside Wardmast's jail is untested; the binary's `enableWeakerNestedSandbox` setting suggests nested use needs a weaker mode | Claude's needs bwrap + socat, which are present | Same packages as E2 | **Rejected** as the boundary. It is the same architecture as E2, but per vendor and partial |
 | **E4. Host firewall per worker cgroup or UID** (nftables `socket cgroupv2` / `meta skuid` + DNS-derived IP sets) | For TCP and UDP by **IP only**. CDN-fronted hosts (github.com, model APIs) share and rotate IPs, and there is no hostname in the audit trail | Needs root to install rules and a privileged helper for per-worker changes. Each worker also needs its own systemd scope | nftables 1.1.6, cgroup v2 (`cgroup2fs`): feasible **with root** | nftables 1.0.4 (BaseOS). But "RHEL 8 mounts `cgroups-v1` by default" ([Red Hat, RHEL 8 kernel guide](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/8/html/managing_monitoring_and_updating_the_kernel/using-cgroups-v2-to-control-distribution-of-cpu-time-for-applications_managing-monitoring-and-updating-the-kernel)). `socket cgroupv2` needs `systemd.unified_cgroup_hierarchy=1` and a reboot. UID matching needs a second Unix user, which bd-ca7xko rejected because it breaks keyring auth | **Rejected** |
 | **E5. User-mode networking into the namespace** (pasta or slirp4netns) **+ nftables inside the namespace** | Only if the rules are installed before capabilities drop, and it's IP-level again | The tool differs per host. General outbound is the default, so missing rules fail open | pasta (passt 2026-07-28) installed; slirp4netns not installed | slirp4netns 1.2.3 (AppStream, container-tools); **pasta not packaged** | **Rejected** |
 | **E6. Rootless container per worker** (podman, network none + proxy) | Yes (same model as E2) | An image per toolchain, the keyring passed into the container, UID mapping on binds. Heavier start-up | podman installed | container-tools module: slirp4netns 1.2.3 present; podman itself not queried | **Rejected**, as in bd-ca7xko (2''): it duplicates what bwrap does with one binary. **Revisited 2026-10-02** in [podman-worker-containers.md](podman-worker-containers.md) (bd-jk49nc), which proposes it as a second backend for Claude and Codex |
-| **E7. TLS-intercepting proxy** (URL-level rules, e.g. allow PR comments but not gists) | Yes, at URL level | A CA injected into every client (Bun, Go, curl, git, hex). Breaks pinning. Tokens pass in cleartext through Arbiter | squid not installed | squid 4.15 (AppStream) | **Rejected.** Action-level scoping comes from scoped credentials instead (§5.5) |
+| **E7. TLS-intercepting proxy** (URL-level rules, e.g. allow PR comments but not gists) | Yes, at URL level | A CA injected into every client (Bun, Go, curl, git, hex). Breaks pinning. Tokens pass in cleartext through Wardmast | squid not installed | squid 4.15 (AppStream) | **Rejected.** Action-level scoping comes from scoped credentials instead (§5.5) |
 | **E8. DNS-only filtering** | **No.** Direct IPs bypass it, and so does the resolved leak in §2.2 | Low | — | — | **Rejected** |
 
 ### 4.3 Evidence for E2
@@ -469,7 +469,7 @@ run covered each one. The allowlist was `example.com:443` and
 
 ```
  host                                     │ worker jail: bwrap --unshare-net --unshare-pid ...
- Arbiter BEAM                             │   (/run/user/$UID, /run/dbus, /run/systemd/resolve hidden)
+ Wardmast BEAM                             │   (/run/user/$UID, /run/dbus, /run/systemd/resolve hidden)
   ├─ egress proxy  <run>.proxy.sock ◄─────┼── socat 127.0.0.1:3128 ◄── HTTPS_PROXY/HTTP_PROXY/ALL_PROXY:
   │    CONNECT host:port → policy(run)    │                              agent CLI, git (https), gh, hex, curl
   │    allow → dial; deny → 403; log      │   ssh: ProxyCommand 'socat - PROXY:127.0.0.1:%h:%p,proxyport=3128'
@@ -486,7 +486,7 @@ run covered each one. The allowlist was `example.com:443` and
 
   | Class | Contents | Allowed at `egress` |
   |---|---|---|
-  | infra | The adapter's own API hosts (new callback `egress_infra/1`, list recorded by the G4 spike), Arbiter (by bridge, never by host) and the ticket's git remote host:port | `none`, `allowlist` |
+  | infra | The adapter's own API hosts (new callback `egress_infra/1`, list recorded by the G4 spike), Wardmast (by bridge, never by host) and the ticket's git remote host:port | `none`, `allowlist` |
   | toolchain | Registries the repo's build needs (`repo.hex.pm`, `builds.hex.pm`, …), from the workspace/repo baseline | `none`, `allowlist` |
   | extras | Other workspace/repo baseline hosts | `allowlist` |
   | ticket grants | `network:` entries and the hosts of any declared permission's binding (§5) | `allowlist` |
@@ -501,7 +501,7 @@ run covered each one. The allowlist was `example.com:443` and
   resolves inside. The resolver sockets are hidden (§2.2).
 - **Identity comes from the socket.** The socket a request arrives on
   identifies the run, and through it the task, subject and grants. The
-  Arbiter bridge authenticates everything arriving on it as that worker's
+  Wardmast bridge authenticates everything arriving on it as that worker's
   MCP scope, so it is never anonymous loopback (G9). That closes §2.5's
   self-grant path for jailed workers: `POST /api/mcp/tokens` through a
   worker bridge can't mint above worker scope.
@@ -512,7 +512,7 @@ run covered each one. The allowlist was `example.com:443` and
   it, and so does each workspace's first days on `allowlist`, to catch
   missing toolchain hosts.
 - **It fails closed.** If the proxy is down, a worker's egress fails. If
-  Arbiter itself restarts, jailed workers already die with it: `bwrap
+  Wardmast itself restarts, jailed workers already die with it: `bwrap
   --die-with-parent` ties the jail to the port that spawned it. So the proxy
   adds no new failure domain for them.
 - **Loopback services.** A test suite that needs a host-loopback Postgres
@@ -775,7 +775,7 @@ tightening is always safe. The coordinator may:
 It may not promote, and it may not raise a binding's `grant_by` authority or
 a workspace cap.
 
-"Operator-only" needs an authority Arbiter doesn't have yet. MCP has worker,
+"Operator-only" needs an authority Wardmast doesn't have yet. MCP has worker,
 coordinator and refine tiers (`apps/wardmast/lib/wardmast/mcp/scope.ex:81`), and the coordinator can
 already rewrite `agent.security` through `workspace_config_set`. This design
 proposes:
@@ -953,10 +953,10 @@ before it. Each ticket's type is one of:
 | **Phase 1: egress** | | | | |
 | G4 | Spike: run claude, agy and codex behind `--unshare-net` plus the proxy in learn mode, on the laptop and on the RHEL 8 EC2. Record the infra host set per CLI, whether proxy env is honoured (Bun, agy, Rust), keyring and auth behaviour, and each workspace's loopback test dependencies. Needs operator-approved quota | 2 | G1 | net (spike) |
 | G5 | `Wardmast.Worker.Egress`: host-side filtering CONNECT proxy on per-run Unix sockets. Host:port policy with live grants, the public-upload hard deny, an `egress_events` table and migration, learn and enforce modes | 3 | — | net |
-| G6 | agy jail network mode: `--unshare-net`, in-namespace socat bridges (proxy, Arbiter, fixed-destination tunnels), proxy env, git-over-SSH `ProxyCommand` in the jail's `GIT_SSH_COMMAND` | 3 | G1, G4, G5 | jail + net |
+| G6 | agy jail network mode: `--unshare-net`, in-namespace socat bridges (proxy, Wardmast, fixed-destination tunnels), proxy env, git-over-SSH `ProxyCommand` in the jail's `GIT_SSH_COMMAND` | 3 | G1, G4, G5 | jail + net |
 | G7 | Claude under the jail, for the first time, with network mode. Covers the `CLAUDE_CONFIG_DIR` bind, token env, and the MCP and `arb` bridges | 3 | G6 | jail + net |
 | G8 | Codex under the jail with network mode. Fold into bd-99emmd or run as its sibling | 3 | G6, bd-99emmd | jail + net |
-| G9 | Arbiter bridge identity: every request arriving through a worker bridge is that worker's scope and never anonymous loopback. Token minting is refused through a bridge. bd-8381tk (filed, P1) removes anonymous coordinator minting for everyone; this ticket covers only the jailed worker's bridge | 3 | G6, bd-8381tk | net |
+| G9 | Wardmast bridge identity: every request arriving through a worker bridge is that worker's scope and never anonymous loopback. Token minting is refused through a bridge. bd-8381tk (filed, P1) removes anonymous coordinator minting for everyone; this ticket covers only the jailed worker's bridge | 3 | G6, bd-8381tk | net |
 | G10 | `SecurityPolicy` `sandbox.egress` (`open`/`allowlist`/`none`) and `sandbox.allow_hosts`, with their layering. Posture fields and the doctor "egress jail" self-test against a local stand-in | 2 | G5, G6 | config + net |
 | **Phase 2: profiles and ticket permissions** | | | | |
 | G11 | **Implemented (bd-anwb0u); see [worker-security](../worker-security.md#guardrail-profiles-tiers-the-floor-and-who-may-loosen-bd-anwb0u-g11).** `Wardmast.Guardrails`: tier bundles (code plus app env), the `guardrail_subjects` table, the workspace `guardrails` block with `ValidateConfig`, pure `effective/3` and `floor/2` wired after `SecurityPolicy.resolve/3`, and `egress_confinement/1`. Loosening edits to `guardrails.*` and `agent.security` become operator-only; the coordinator keeps tighten-only edits. Doctor checks | 3 | G10 | config |
@@ -1003,7 +1003,7 @@ before it. Each ticket's type is one of:
    operator from the coordinator, for example with a WebAuthn-confirmed
    dashboard action?
 2. **PHI agreements.** Which accounts may hold `phi_data` is a compliance
-   decision for the operator, outside Arbiter. The design only records it.
+   decision for the operator, outside Wardmast. The design only records it.
 3. **Infra host sets per CLI,** and whether agy's and Codex's own HTTP stacks
    honour `HTTPS_PROXY` (G4). The claude binary carries Bun's proxy-env
    handling (`HTTPS_PROXY`, `NO_PROXY` strings in 2.1.285). That is not a
@@ -1027,11 +1027,11 @@ before it. Each ticket's type is one of:
 ## Appendix A: probes
 
 Everything ran as the operator's user on the laptop, under
-`/tmp/bd8apkz6`. No agent CLI was run, and the live Arbiter endpoint was not
+`/tmp/bd8apkz6`. No agent CLI was run, and the live Wardmast endpoint was not
 contacted. `egress_proxy.py` is a ~40-line Python asyncio CONNECT proxy on a
 Unix socket with an in-code allowlist of `{("example.com", 443),
 ("github.com", 22)}`. It logs `ALLOW`/`DENY host:port socket=<path>`. A
-`python3 -m http.server` on a random loopback port stood in for Arbiter,
+`python3 -m http.server` on a random loopback port stood in for Wardmast,
 reached through a host-side `socat UNIX-LISTEN:…arbiter.sock,fork
 TCP:127.0.0.1:<port>`.
 

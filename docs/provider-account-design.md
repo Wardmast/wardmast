@@ -20,7 +20,7 @@ Three answers up front, because they are the ones that decide whether this
 works:
 
 1. **Account identity is operator-asserted, never derived from the credential.**
-   A spike run for this RFC (§2.1) established that the credential Arbiter
+   A spike run for this RFC (§2.1) established that the credential Wardmast
    actually injects into workers — the workspace `sk-ant-oat01-…`
    `CLAUDE_CODE_OAUTH_TOKEN` — **cannot be asked who it belongs to**:
    `/api/oauth/profile` and `/api/oauth/validate` both return
@@ -96,7 +96,7 @@ Two conclusions, and they point in opposite directions:
 * **A provider-reported account identity exists** — `account.uuid` /
   `organization.uuid`, stable across token rotation, and it is exactly what the
   Claude Code CLI caches into `~/.claude.json`'s `oauthAccount` block.
-* **The credential Arbiter injects into workers cannot obtain it.** The
+* **The credential Wardmast injects into workers cannot obtain it.** The
   long-lived `sk-ant-oat01-…` grant minted by `claude setup-token` is
   inference-scoped. Every endpoint that would name its account rejects it.
 
@@ -456,7 +456,7 @@ first-come-first-served between Conductors, which is exactly the policy
 `system_max` already has today, so this introduces no new fairness regression —
 but it is a real property and it is stated here rather than discovered later. An
 operator who wants a *guarantee* rather than a cap wants a reservation, which
-needs cross-Conductor admission ordering Arbiter does not have; that is named as
+needs cross-Conductor admission ordering Wardmast does not have; that is named as
 future work in §10, not designed here.
 
 ### 4.4 Migration default: the ceiling is opt-in, the hold is not

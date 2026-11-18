@@ -144,13 +144,13 @@ already refused a valid `--provider gemini` dispatch once, with a diagnosis
 that was factually wrong: *"agent produced no output within the watchdog
 window (possible hang)."* Nothing had hung. The probe authenticated, made 21
 model calls and answered in 102s — against a hard-coded 30s watchdog, and with
-the child left running for another 72s after Arbiter gave up on it. Two
+the child left running for another 72s after Wardmast gave up on it. Two
 earlier probes the same day finished in 16s and 17s. The gate was a coin flip.
 
 The cause was that a one-word prompt is not a cheap round-trip to an agentic
 CLI: the gemini probe ran a full turn, tools enabled, `toolPermission:
 always-proceed`, rooted in whatever directory the BEAM was in (on this host,
-the live checkout Phoenix hot-reloads from), carrying an Arbiter-worker
+the live checkout Phoenix hot-reloads from), carrying a Wardmast-worker
 `GEMINI.md`. It read `ping` as a task.
 
 The probe is now bounded on five axes:
@@ -192,10 +192,10 @@ did in fact arrive — that branch keyed on `exit_status == nil` alone.
 Bounding the probe surfaced a second, sharper defect. Measured live on
 2026-09-18 with the bounded argv above: agy answered `ping` with a **14-step
 agentic turn** — 7 `run_command` calls, ~71K input tokens, 31.9s — because the
-Arbiter-worker `GEMINI.md` in its isolated `$HOME` tells it it is a worker with
+Wardmast-worker `GEMINI.md` in its isolated `$HOME` tells it it is a worker with
 a task. One of those commands was `arb prime`. The backlog it printed contained
 a task titled *"Auth pre-flight P2: free expiry signals for codex and agy —
-generalise the 401-shaped detection"*, and Arbiter's line-scraping classifier
+generalise the 401-shaped detection"*, and Wardmast's line-scraping classifier
 read that text as proof its own credentials had expired. On a probe that
 authenticated fine and exited 0.
 
@@ -308,7 +308,7 @@ killed afterwards.
   worker sessions is a separate, larger change.
 * **A live CLI check.** The wire format above follows the Claude Agent SDK
   control protocol as described in the t3code research; it is exercised here
-  only against a stub. Verify on the arbiter host after deploy (see the PR's
+  only against a stub. Verify on the Wardmast host after deploy (see the PR's
   "Not verifiable pre-merge" note).
 
 ## Which providers the dashboard shows (bd-i2gwwn)
@@ -690,7 +690,7 @@ read-only. `arb quota --account <ref>` shows the cap, its mode and the current
 | Claude | `<config dir>/.credentials.json`       | login Keychain (a `.credentials.json` on disk wins) |
 | agy    | freedesktop Secret Service over D-Bus  | login Keychain (`security` CLI must be on `PATH`)  |
 
-Arbiter never reads the Keychain. Consequences, each logged as a
+Wardmast never reads the Keychain. Consequences, each logged as a
 `[credential-store]` warning rather than failing silently:
 
 - **Claude mode B** (`seeded_credentials`) copies `.credentials.json`; with a

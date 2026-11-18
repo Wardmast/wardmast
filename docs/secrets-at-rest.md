@@ -1,8 +1,8 @@
 # Secrets at rest: keeping secret values off the host's disk
 
-By default every secret arbiter needs ends up as plaintext in the systemd
+By default every secret Wardmast needs ends up as plaintext in the systemd
 `EnvironmentFile` (`~/.wardmast/wardmast.env`), and a host secret scanner flags that
-file and every copy of it. Arbiter can instead hold **pointers** to a secret
+file and every copy of it. Wardmast can instead hold **pointers** to a secret
 manager and fetch the value into memory when it needs it.
 
 ## Reference forms
@@ -90,4 +90,4 @@ enough to verify a redeploy did not change a value, not to recover it.
   `WARDMAST_CLOAK_KEY` / `SECRET_KEY_BASE` is inline, while an inline value is
   shadowed by its pointer, or when a pointer has an unrecognised scheme.
 * Old copies of the env file (backups, snapshots, logs from older versions)
-  are outside what arbiter manages; rotate the secrets they hold.
+  are outside what Wardmast manages; rotate the secrets they hold.

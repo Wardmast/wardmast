@@ -65,7 +65,7 @@ No timer, mount, session event or checker pass ever promotes anything.
      candidate if anything is stale.
    - **[A5]** It stamps provenance: `source_session`, `author_model`,
      `promoted_by`, `promoted_at`, plus `verified_sha` and `anchors`.
-     `author_model` comes from what Arbiter recorded, not from the candidate:
+     `author_model` comes from what Wardmast recorded, not from the candidate:
      the newest model in the session's usage ledger, else the session's
      provider, else `unknown`.
    - It writes the memory atomically into `<memory_root>`, together with its
@@ -134,7 +134,7 @@ extension. `host:port` forms, bare file names, URLs, absolute paths and `..`
 paths are never treated as citations.
 
 **Modules.** A dotted name counts as a citation only when the workspace owns
-its namespace: either its root module is defined there (`defmodule Arbiter`),
+its namespace: either its root module is defined there (`defmodule Wardmast`),
 or the cited name's parent is. Anything else, such as `Ecto.Changeset` or
 `Mix.Project`, is a mention of a dependency. A repo that defines `Mix.Tasks.*`
 does not thereby own `Mix`, and an indented, nested `defmodule Config` does

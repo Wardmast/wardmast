@@ -13,7 +13,7 @@ GitHub accounts its primary quota (~5,000 REST req/hr, plus the GraphQL points
 budget) **per owning account** — not per token. Every Personal Access Token
 owned by the same account draws from **one** pool, and so does the operator's
 interactive `gh`. A separate PAT does *not* buy a separate pool (empirically
-confirmed 2026-07-31: arbiter's own PAT shares the operator's pool). Only a
+confirmed 2026-07-31: Wardmast's own PAT shares the operator's pool). Only a
 GitHub **App installation** or a distinct **machine-user account** would add a
 genuinely separate pool.
 
@@ -28,7 +28,7 @@ Two consequences:
    under-issues.
 
 2. **The operator's interactive `gh` is invisible to the limiter** — it runs
-   outside arbiter entirely. Because that traffic can't be accounted, **precise
+   outside Wardmast entirely. Because that traffic can't be accounted, **precise
    accounting is impossible**; reserving headroom is the only workable strategy.
 
 ## Strategy: reserve headroom, back off hard on secondary limits
@@ -149,7 +149,7 @@ sees a request after its caller has already decided to make it.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `:github_limiter_background_headroom` | `1000` | Remaining primary quota at/below which background traffic pauses. |
-| `:github_limiter_foreground_reserve` | `0` (off) | Remaining primary quota at/below which **all** arbiter traffic stops, foreground included. See below. |
+| `:github_limiter_foreground_reserve` | `0` (off) | Remaining primary quota at/below which **all** Wardmast traffic stops, foreground included. See below. |
 | `:github_limiter_secondary_cooldown_ms` | `120_000` | How long background stays fully paused after a secondary-limit hit (re-armed on each hit). |
 | `:github_limiter_probe` | `true` (`false` in test) | Whether to resolve owning accounts (`GET /user`) and poll the exempt `/rate_limit` endpoint. |
 | `:merged_pr_finalizer_max_checks_per_tick` | `25` | Tasks the merged-PR sweep checks per tick (non-positive disables the cap). |
@@ -165,11 +165,11 @@ sees a request after its caller has already decided to make it.
 
 ### The foreground reserve
 
-Foreground being un-throttleable protects arbiter's own work, but GitHub meters
-per *user* across every token: an arbiter that spends the pool to zero starves
+Foreground being un-throttleable protects Wardmast's own work, but GitHub meters
+per *user* across every token: a Wardmast that spends the pool to zero starves
 the operator's interactive `gh`, unrelated CI, and every other tool on the
 account — a separate PAT buys no relief. The reserve puts a hard floor under
-that: at or below `remaining`, arbiter stops issuing entirely, leaving the band
+that: at or below `remaining`, Wardmast stops issuing entirely, leaving the band
 for a human.
 
 It is **off by default**. Below a nearly-exhausted pool a foreground call would
@@ -206,5 +206,5 @@ this way and still resolve like any other token.
 - `bd-1m8k7d` (#1002) — ReviewPatrol rate-limit circuit breaker: one caller
   hitting a limit; this is system-wide prioritisation.
 - `bd-2wilou` (#1023) — tracker-sync retry/backoff: symptom vs. allocation.
-- `bd-4jcf3m` — dedicated arbiter credential: worth doing for credential
+- `bd-4jcf3m` — dedicated Wardmast credential: worth doing for credential
   hygiene, but does **not** relieve pool contention (it shares the pool).

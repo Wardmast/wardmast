@@ -30,7 +30,7 @@ failed. The version check passes. The "use our ChatGPT login this way" check doe
   `requires_openai_auth`". Probed on 0.166.0: adding `requires_openai_auth = true` makes Codex
   refuse to start with
   `Error loading config.toml: model_providers.arb: provider auth cannot be combined with requires_openai_auth`.
-  Arbiter's Codex fleet runs on the ChatGPT login (`auth_mode: "chatgpt"`), which is the
+  Wardmast's Codex fleet runs on the ChatGPT login (`auth_mode: "chatgpt"`), which is the
   `requires_openai_auth` path. The helper is only for a *custom* provider that takes a plain
   bearer token (an API-key gateway, Azure, Vault-fetched keys).
 - **Making it carry a ChatGPT token means working around Codex's own login path.** A custom

@@ -29,7 +29,7 @@
 
 1. **Delayed conversion to Apache-2.0.** Each release converts automatically to Apache-2.0 on the second anniversary of the date it was made available. Releases already published under Apache-2.0 stay Apache-2.0 permanently (§6 point 2 is unchanged).
 2. **Rationale — supersedes §2.2.** §2.2 rejected BUSL/FSL on the grounds that no source-available license defends Wardmast against a real threat and that it costs OSI status. That reasoning is withdrawn. The goal now is to protect the product against others selling it commercially (a competing paid product or hosted service built from our code) while the code stays public and free to use, modify and self-host for any permitted purpose. FSL's competing-use restriction does that; the two-year conversion keeps the long-run commitment to open source. The accepted cost is that Wardmast is source-available, not OSI-approved open source, until each release converts.
-3. **Package-level boundary stays.** *(Distribution wording superseded by §0.1.)* A separate commercial "Arbiter Pro" package, closed-source and historically planned for distribution through an authenticated private Hex repository, was the model; there is still no in-repo license zoning and no dual licensing (§1).
+3. **Package-level boundary stays.** *(Distribution wording superseded by §0.1.)* A separate commercial "Wardmast Pro" package, closed-source and historically planned for distribution through an authenticated private Hex repository, was the model; there is still no in-repo license zoning and no dual licensing (§1).
 4. **§6 "additive only" is revised.** Point 3 of §6 (no capability subtractions) no longer holds absolutely: some existing team/infrastructure features are planned to move to the commercial tier. Which features, and how they are gated, is a separate design ticket and is deliberately **not** decided or enumerated here. Already-published releases remain Apache-2.0 and forkable regardless.
 
 Elsewhere in this document, "Apache-2.0" describes the 2026-09-18 position and releases published under it. The CLA (§4) already grants the Maintainer relicensing rights, so it covers this change.
@@ -41,7 +41,7 @@ Elsewhere in this document, "Apache-2.0" describes the 2026-09-18 position and r
 Wardmast adopts an **open-core** licensing and distribution model:
 
 * **Core:** Licensed under the **Apache License, Version 2.0 (Apache-2.0)** and developed openly in this repository.
-* **Commercial ("Arbiter Pro"):** *(Distribution superseded by §0.1: a private repo shipped as a licence-keyed compiled bundle, no Hex.)* Was planned as a separate, closed-source Hex package in a dedicated private repository, distributed through an authenticated private Hex repository (the Oban model).
+* **Commercial ("Wardmast Pro"):** *(Distribution superseded by §0.1: a private repo shipped as a licence-keyed compiled bundle, no Hex.)* Was planned as a separate, closed-source Hex package in a dedicated private repository, distributed through an authenticated private Hex repository (the Oban model).
 
 This architecture is **explicitly not dual licensing**, and **explicitly not in-repo license zoning** (such as an `ee/` directory or per-file proprietary markers).
 
@@ -71,14 +71,14 @@ Drawing the boundary strictly at the **package level** keeps the core repository
 
 ---
 
-## 3. Arbiter Pro Protection: Contract and Trade Secret, Not Copyright
+## 3. Wardmast Pro Protection: Contract and Trade Secret, Not Copyright
 
 Wardmast is an **agent-authored codebase**. Under current United States Copyright Office policy and guidance regarding machine-generated output, copyright protection over purely AI-generated code is thin; legal copyright extends primarily to human selection, coordination, and arrangement.
 
 * For the **Apache-2.0 core**, thin copyright is immaterial: the core code is freely licensed, redistributable, and modified under clear permissive terms.
-* For **Arbiter Pro**, relying solely on copyright enforcement would introduce critical legal vulnerability.
+* For **Wardmast Pro**, relying solely on copyright enforcement would introduce critical legal vulnerability.
 
-Consequently, Arbiter Pro's commercial protection rests on **contractual agreements and non-distribution of source (trade secret protection)**, backed by authenticated package repository access controls, rather than relying on statutory copyright infringement claims. Any commercial tier whose defense depends solely on copyright must not be built.
+Consequently, Wardmast Pro's commercial protection rests on **contractual agreements and non-distribution of source (trade secret protection)**, backed by authenticated package repository access controls, rather than relying on statutory copyright infringement claims. Any commercial tier whose defense depends solely on copyright must not be built.
 
 ---
 
@@ -130,7 +130,7 @@ To maintain trust with the open-source community while sustaining commercial via
 1. **Sole Copyright Retains Relicensing Rights:** As sole copyright holder (or via CLA grant), licensing the core codebase under Apache-2.0 grants broad rights to third parties but surrenders none. The author may copy core code into Pro and distribute it under proprietary terms at any time.
 2. **Published Releases are Permanent:** Once a version or module is published under Apache-2.0, that grant is irrevocable. Every release published under Apache-2.0 remains Apache-2.0 forever and remains publicly forkable. Removing a capability from future versions of the core repository does not erase it from the public domain or historical tags.
 3. **Additive Pattern Only (No Capability Subtractions) — revised 2026-11-14, see §0:** Pro features must follow an **additive pattern**: Pro provides more capable implementations behind established core behaviours, or introduces entirely new capabilities that never existed in core. Core capabilities that users depend on must **not** be stripped or retroactively gated behind a paywall. Gating previously open features behind commercial licenses is what caused severe community backlash in the Redis, Elastic, and Terraform relicensing controversies.
-4. **Operational Consequence:** Any feature or capability intended for Arbiter Pro must **never be shipped in the core repository first**. Once published in core under Apache-2.0, that code is permanently public and cannot be withdrawn.
+4. **Operational Consequence:** Any feature or capability intended for Wardmast Pro must **never be shipped in the core repository first**. Once published in core under Apache-2.0, that code is permanently public and cannot be withdrawn.
 
 ---
 
@@ -142,9 +142,9 @@ The following questions remain unresolved and are explicitly deferred:
    * *Status:* Unresolved.
    * *Detail:* The name "Wardmast" is generic and has established usage across distributed systems vocabularies (e.g., etcd consensus arbiters, Kubernetes cluster arbiters, MongoDB arbiters).
    * *Next Step:* Conduct a comprehensive trademark knockout search to evaluate registration viability and conflict risks.
-2. **Arbiter Pro Tier Scope:**
+2. **Wardmast Pro Tier Scope:**
    * *Status:* Unresolved.
-   * *Detail:* The precise boundaries and feature set of Arbiter Pro (e.g., advanced multi-tenant analytics, proprietary enterprise tracker integrations, complex fleet coordination policies) are deferred until customer demand and commercial feedback are established.
+   * *Detail:* The precise boundaries and feature set of Wardmast Pro (e.g., advanced multi-tenant analytics, proprietary enterprise tracker integrations, complex fleet coordination policies) are deferred until customer demand and commercial feedback are established.
 
 ---
 
