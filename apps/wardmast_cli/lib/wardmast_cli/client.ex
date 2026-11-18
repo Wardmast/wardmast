@@ -521,8 +521,19 @@ defmodule WardmastCli.Client do
           "Run arb from your own shell on the server host, or set ARB_TOKEN to a token you hold."
 
       nil ->
-        "set ARB_TOKEN — remote arb requires a token (mint one on the server host with " <>
-          "`arb mcp token mint`)"
+        cond do
+          System.get_env("ARB_TOKEN") not in [nil, ""] ->
+            "ARB_TOKEN is set but was rejected; it may belong to another server. " <>
+              "Unset it, or set one minted on this server (`ward mcp token mint`)."
+
+          loopback_host?() ->
+            "set ARB_TOKEN to a token you hold (mint one on the server host with " <>
+              "`ward mcp token mint`)"
+
+          true ->
+            "set ARB_TOKEN — a remote server requires a token (mint one on the server host with " <>
+              "`ward mcp token mint`)"
+        end
     end
   end
 

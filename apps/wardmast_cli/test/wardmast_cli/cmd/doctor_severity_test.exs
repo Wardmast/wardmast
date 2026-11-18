@@ -170,7 +170,7 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
       {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
 
       assert exit_code == 0
-      assert out =~ "arb doctor"
+      assert out =~ "ward server doctor"
       assert out =~ ~r/\d+ ok · 0 warn · 0 fail/
       refute out =~ "[ ok ]"
       refute out =~ "phoenix reachable"

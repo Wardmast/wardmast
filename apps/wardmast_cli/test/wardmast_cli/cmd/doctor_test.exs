@@ -142,7 +142,20 @@ defmodule WardmastCli.Cmd.DoctorTest do
     assert exit_code == 1
     assert out =~ "[fail] phoenix reachable"
     refute out =~ "mix phx.server"
-    assert out =~ "systemctl --user start arbiter"
+
+    assert out =~
+             if(:os.type() == {:unix, :darwin},
+               do: "launchctl kickstart",
+               else: "systemctl --user start arbiter"
+             )
+  end
+
+  test "connection refused collapses the dependent 'could not check' warnings into one row" do
+    stub_transport_error(:get, "/api/workspaces", :econnrefused)
+
+    {out, _err, _exit} = capture(fn -> Doctor.run(["--all"]) end)
+    assert out =~ ~r/\d+ checks skipped: server unreachable/
+    assert length(String.split(out, "could not check")) <= 2
   end
 
   test "no workspaces → workspace check fails with hint" do

@@ -124,7 +124,7 @@ defmodule WardmastCli.Cmd.Doctor.Formatter do
       ]
       |> Enum.filter(& &1)
 
-    "arb doctor — " <> Enum.join(parts, " · ")
+    "ward server doctor — " <> Enum.join(parts, " · ")
   end
 
   defp plural([_]), do: ""

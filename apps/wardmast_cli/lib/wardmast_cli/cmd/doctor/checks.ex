@@ -154,6 +154,42 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     end)
     |> Kernel.++(if darwin?, do: Darwin.checks(darwin_opts(opts, platform)), else: [])
     |> Enum.sort_by(&group_rank(&1.group))
+    |> collapse_skipped()
+  end
+
+  # One root failure (server unreachable, or a rejected token) makes every
+  # server-backed check print the same "could not check" warning. Once
+  # `phoenix reachable` has failed, fold those into a single row.
+  defp collapse_skipped(results) do
+    root = Enum.find(results, &(&1.name == "phoenix reachable" and &1.status == :fail))
+    skipped = Enum.filter(results, &skipped?/1)
+
+    if root == nil or skipped == [] do
+      results
+    else
+      reason =
+        if is_binary(root.hint) and root.hint =~ "ARB_TOKEN",
+          do: "token rejected",
+          else: "server unreachable"
+
+      row = %{
+        hd(skipped)
+        | id: "skipped",
+          group: :core,
+          parent: nil,
+          name: "#{length(skipped)} checks skipped: #{reason}",
+          detail: "see `phoenix reachable` above",
+          hint: root.hint
+      }
+
+      {core, rest} = Enum.split_while(results -- skipped, &(&1.group == :core))
+      core ++ [row | rest]
+    end
+  end
+
+  defp skipped?(r) do
+    r.status == :warn and is_binary(r.detail) and
+      String.starts_with?(r.detail, "could not check: ")
   end
 
   # An older server without the endpoint, or an error, is "not darwin".
@@ -461,9 +497,20 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     if dev_install?() do
       "Phoenix app isn't running. Start it with `mix phx.server` from the umbrella root."
     else
-      "Phoenix app isn't running. Start it with `systemctl --user start arbiter` " <>
-        "(or `<data-home>/current/bin/wardmast start` if not managed by systemd)."
+      restart_hint(:os.type())
     end
+  end
+
+  @doc false
+  def restart_hint({:unix, :darwin}) do
+    "Phoenix app isn't running. Start it with " <>
+      "`launchctl kickstart gui/$(id -u)/com.wardmast.server` " <>
+      "(or `<data-home>/current/bin/wardmast start` if not managed by launchd)."
+  end
+
+  def restart_hint(_os) do
+    "Phoenix app isn't running. Start it with `systemctl --user start arbiter` " <>
+      "(or `<data-home>/current/bin/wardmast start` if not managed by systemd)."
   end
 
   # `fatal: true` — this is still an operator-actionable misconfiguration
@@ -1275,7 +1322,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
           name: "private clone records",
           status: :warn,
           detail: "#{length(stale)} stale private-clone record(s): #{leaves}",
-          hint: "Retire them with `arb server doctor --retire-stale-clones`.",
+          hint: "Retire them with `ward server doctor --retire-stale-clones`.",
           blocks_readiness: false
         }
 
@@ -1342,7 +1389,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       %Result{
         name: "spawn canary",
         status: :na,
-        detail: "not run in a readiness poll (`arb server doctor --spawn` runs it)"
+        detail: "not run in a readiness poll (`ward server doctor --spawn` runs it)"
       }
     ]
   end
@@ -1383,7 +1430,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       name: "spawn canary",
       status: :warn,
       detail: "could not check: another spawn canary is already running on the server",
-      hint: "Re-run `arb server doctor --spawn` in a minute.",
+      hint: "Re-run `ward server doctor --spawn` in a minute.",
       blocks_readiness: false
     }
   end
@@ -1408,8 +1455,8 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
         "#{spawn_stage(p)}: #{p["error"]}" <>
           if(p["exit_code"], do: " (exit #{p["exit_code"]}, #{p["duration_ms"]} ms)", else: ""),
       hint:
-        "A worker cannot spawn this provider. See the server log and `arb server doctor --all`; " <>
-          "re-run `arb server doctor --spawn` after fixing it.",
+        "A worker cannot spawn this provider. See the server log and `ward server doctor --all`; " <>
+          "re-run `ward server doctor --spawn` after fixing it.",
       blocks_readiness: false
     }
   end
@@ -1425,7 +1472,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       name: spawn_name(p),
       status: :warn,
       detail: "could not check: the server reported status #{inspect(p["status"])}",
-      hint: "Re-run `arb server doctor --spawn`; check that the CLI and server versions match.",
+      hint: "Re-run `ward server doctor --spawn`; check that the CLI and server versions match.",
       blocks_readiness: false
     }
   end
@@ -1958,7 +2005,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
         {"unresolved", _} ->
           {:warn,
            "could not check: provider accounts are not resolved yet — the server is still booting",
-           "Re-run `arb server doctor` once the server has finished booting."}
+           "Re-run `ward server doctor` once the server has finished booting."}
 
         {_, true} ->
           {:warn,
@@ -3305,7 +3352,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       status: :warn,
       detail: "could not check: " <> unknown_reason(other),
       hint:
-        "Re-run `arb server doctor`; if it persists, check the server log and `arb server version`.",
+        "Re-run `ward server doctor`; if it persists, check the server log and `arb server version`.",
       blocks_readiness: false
     }
   end
