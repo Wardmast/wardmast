@@ -2264,7 +2264,8 @@ defmodule Wardmast.Mergers.GitlabTest do
         end
       end)
 
-      assert {:ok, _} = Gitlab.post_inline_comment(@ref, @finding, %{})
+      assert {:ok, resp} = Gitlab.post_inline_comment(@ref, @finding, %{})
+      refute Map.has_key?(resp, "positioned")
       assert_received {:posted, body}
       assert body["body"] =~ "nil deref"
       assert body["body"] =~ "WARNING"
@@ -2303,7 +2304,7 @@ defmodule Wardmast.Mergers.GitlabTest do
         end
       end)
 
-      assert {:ok, _} = Gitlab.post_inline_comment(@ref, @finding, %{})
+      assert {:ok, %{"positioned" => false}} = Gitlab.post_inline_comment(@ref, @finding, %{})
       assert_received {:posted, %{"position" => _}}
       assert_received {:posted, fallback}
       refute Map.has_key?(fallback, "position")

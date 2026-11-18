@@ -361,6 +361,7 @@ defmodule Wardmast.Reviews.ExternalReview do
          ) do
       {:ok, verdict_posted} ->
         mark_greenlit(record, posted)
+        record_unpositioned(record, posted)
 
         Logger.info(
           "ExternalReview.greenlight: #{mr_ref} posted #{length(posted)}/#{length(proposed)} " <>
@@ -446,9 +447,17 @@ defmodule Wardmast.Reviews.ExternalReview do
                to_finding(comment),
                adapter_opts
              ]) do
-          {:ok, _resp} -> {[comment | posted_acc], failed_acc}
-          :ok -> {[comment | posted_acc], failed_acc}
-          {:error, _} = err -> {posted_acc, [%{comment: comment, reason: err} | failed_acc]}
+          {:ok, %{"positioned" => false}} ->
+            {[Map.put(comment, :unpositioned, true) | posted_acc], failed_acc}
+
+          {:ok, _resp} ->
+            {[comment | posted_acc], failed_acc}
+
+          :ok ->
+            {[comment | posted_acc], failed_acc}
+
+          {:error, _} = err ->
+            {posted_acc, [%{comment: comment, reason: err} | failed_acc]}
         end
       end)
 
@@ -522,6 +531,28 @@ defmodule Wardmast.Reviews.ExternalReview do
   # Record the outcome: :posted when at least one comment actually posted,
   # :none when nothing did — whether because the coordinator approved nothing,
   # or every approved comment was skipped as out-of-diff / failed to post.
+  # A comment the adapter had to post unpositioned (e.g. GitLab rejected the
+  # line) is out-of-diff in effect: relabel it on the record so
+  # `in_diff_count` / `out_of_diff_count` reflect the outcome.
+  defp record_unpositioned(%Record{} = record, posted) do
+    fell_back = for %{unpositioned: true} = c <- posted, do: {comment_file(c), comment_line(c)}
+
+    if fell_back != [] do
+      updated =
+        Enum.map(record.proposed_comments || [], fn c ->
+          if {comment_file(c), comment_line(c)} in fell_back,
+            do: Map.put(c, "in_diff", false),
+            else: c
+        end)
+
+      Ash.update(record, %{proposed_comments: updated}, action: :greenlight)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
   defp mark_greenlit(%Record{} = record, posted) do
     status = if posted == [], do: :none, else: :posted
 

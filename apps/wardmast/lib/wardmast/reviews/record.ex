@@ -142,7 +142,10 @@ defmodule Wardmast.Reviews.Record do
     # were posted to the PR (bd-36qzgx). `greenlight_status` flips to :posted
     # (or :none when the coordinator approved nothing).
     update :greenlight do
-      accept [:greenlight_status, :verdict]
+      # Non-atomic: see :complete (array column on SQLite).
+      require_atomic? false
+
+      accept [:greenlight_status, :verdict, :proposed_comments]
     end
   end
 

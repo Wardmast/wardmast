@@ -1200,12 +1200,12 @@ defmodule Wardmast.Mergers.Gitlab do
       # diff), the discussion is posted unpositioned instead.
       case finding_position(cfg, iid, file, line) do
         nil ->
-          post_discussion(cfg, iid, %{"body" => body})
+          cfg |> post_discussion(iid, %{"body" => body}) |> mark_unpositioned()
 
         position ->
           case post_discussion(cfg, iid, %{"body" => body, "position" => position}) do
             {:error, %Error{kind: :validation_failed}} ->
-              post_discussion(cfg, iid, %{"body" => body})
+              cfg |> post_discussion(iid, %{"body" => body}) |> mark_unpositioned()
 
             other ->
               other
@@ -1213,6 +1213,11 @@ defmodule Wardmast.Mergers.Gitlab do
       end
     end
   end
+
+  # Tag a fallback (unpositioned) discussion so callers can tell it did not
+  # land on the line and count it as out-of-diff.
+  defp mark_unpositioned({:ok, %{} = resp}), do: {:ok, Map.put(resp, "positioned", false)}
+  defp mark_unpositioned(other), do: other
 
   defp post_discussion(cfg, iid, payload) do
     request(cfg, :post, "/merge_requests/#{iid}/discussions", json: payload)
