@@ -250,9 +250,6 @@ defmodule Wardmast.Sessions.Layout do
     do: outside?(path, checkout)
 
   defp outside?(path, checkout) do
-    expanded = Path.expand(path)
-    root = Path.expand(checkout)
-
-    expanded != root and not String.starts_with?(expanded, root <> "/")
+    not Wardmast.Worker.PathGuard.within?(path, checkout)
   end
 end
