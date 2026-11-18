@@ -54,7 +54,102 @@ defmodule WardmastCli.Cmd.Doctor.DarwinTest do
     end
   end
 
+  describe "launchd service mode (agent vs daemon)" do
+    @agent %{
+      mode: :agent,
+      plist: "/Users/me/Library/LaunchAgents/com.wardmast.server.plist",
+      user: nil,
+      group: nil,
+      owner_uid: 501,
+      file_mode: 0o644
+    }
+    @daemon %{
+      mode: :daemon,
+      plist: "/Library/LaunchDaemons/com.wardmast.server.plist",
+      user: "_wardmast",
+      group: "staff",
+      owner_uid: 0,
+      file_mode: 0o644
+    }
+
+    defp mode_check(service), do: by_id(Darwin.checks(service: service), "darwin_service_mode")
+
+    test "a LaunchAgent is reported as agent mode, per-user, starting at login" do
+      r = mode_check(@agent)
+
+      assert r.status == :ok
+      assert r.detail =~ "agent mode"
+      assert r.detail =~ "LaunchAgent"
+      assert r.detail =~ "login"
+      assert r.detail =~ @agent.plist
+    end
+
+    test "a LaunchDaemon is reported as daemon mode with the account it runs as" do
+      r = mode_check(@daemon)
+
+      assert r.status == :ok
+      assert r.detail =~ "daemon mode"
+      assert r.detail =~ "LaunchDaemon"
+      assert r.detail =~ "_wardmast"
+      assert r.detail =~ "boot"
+    end
+
+    test "a daemon plist with no UserName would run as root: warn" do
+      r = mode_check(%{@daemon | user: nil})
+
+      assert r.status == :warn
+      assert r.detail =~ "root"
+      assert r.hint =~ "--service-user"
+    end
+
+    test "a daemon plist naming root is the same hazard" do
+      assert mode_check(%{@daemon | user: "root"}).status == :warn
+    end
+
+    test "a daemon plist not owned by root is warned about (launchd would ignore it)" do
+      r = mode_check(%{@daemon | owner_uid: 501})
+
+      assert r.status == :warn
+      assert r.detail =~ "root-owned"
+    end
+
+    test "a group/world-writable daemon plist is warned about" do
+      r = mode_check(%{@daemon | file_mode: 0o666})
+
+      assert r.status == :warn
+      assert r.detail =~ "writable"
+    end
+
+    test "both installed is a conflict" do
+      r = mode_check(%{@daemon | mode: :both})
+
+      assert r.status == :warn
+      assert r.detail =~ "both"
+      assert r.hint =~ "--uninstall"
+    end
+
+    test "neither installed (server started by hand) is n/a, not a failure" do
+      r = mode_check(%{@agent | mode: :none, plist: nil})
+      assert r.status == :na
+    end
+
+    test "a CLI that is not on the macOS host does not probe, and says so" do
+      r = mode_check(nil)
+
+      assert r.status == :na
+      assert r.detail =~ "not probed"
+    end
+
+    test "Checks.run(os: darwin) carries it in the sandboxes group" do
+      stub_routes([])
+      results = Checks.run(os: @darwin, spawn: :skip, darwin: darwin_opts() ++ [service: @daemon])
+
+      assert %{group: :sandboxes, status: :ok} = by_id(results, "darwin_service_mode")
+    end
+  end
+
   describe "Checks.run(os: darwin)" do
+
     test "Linux-only checks report n/a, not fail" do
       stub_routes([])
       results = Checks.run(os: @darwin, spawn: :skip, darwin: darwin_opts())

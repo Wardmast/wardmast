@@ -166,8 +166,18 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
 
   defp darwin_opts(opts, platform) do
     Keyword.get_lazy(opts, :darwin, fn ->
-      [path: platform["path"] || "", tools: platform["tools"] || %{}]
+      [
+        path: platform["path"] || "",
+        tools: platform["tools"] || %{},
+        service: local_service_mode()
+      ]
     end)
+  end
+
+  # The plists are on the host running the server; they are readable only when
+  # this CLI is on a macOS host (a remote darwin server's plists are not).
+  defp local_service_mode do
+    if Darwin.darwin?(:os.type()), do: WardmastCli.Supervisor.Launchd.service_mode()
   end
 
   @group_order [:core, :auth, :sandboxes, :security]
