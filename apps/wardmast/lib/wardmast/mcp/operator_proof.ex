@@ -139,7 +139,7 @@ defmodule Wardmast.MCP.OperatorProof do
   @doc """
   Directory the operator socket lives in: `/run/user/<uid>/arbiter` when the
   host has a per-user runtime dir (systemd hosts; the agy jail blanks it),
-  else `<data_dir>/run` (`~/.wardmast/run`, which `Wardmast.Worker.Jail`
+  else `<home>/run` (`ARB_HOME`, default `~/.wardmast/run`, which `Wardmast.Worker.Jail`
   masks explicitly). `ARB_OPERATOR_SOCKET` overrides the whole path, see
   `socket_path/1`.
 
@@ -174,8 +174,26 @@ defmodule Wardmast.MCP.OperatorProof do
     if runtime && File.dir?(runtime) do
       Path.join(runtime, "arbiter")
     else
-      Path.join(Application.get_env(:wardmast, :data_dir, Path.expand("~/.wardmast")), "run")
+      run_dir()
     end
+  end
+
+  @doc """
+  Fallback runtime dir `<home>/run`, where `<home>` is the configured home:
+  the `:data_dir` app env, else `ARB_HOME` (how a non-default home is
+  selected), else `~/.wardmast`. `WardmastCli.OperatorSocket` mirrors this
+  so both sides resolve the same socket from the same home.
+  """
+  @spec run_dir() :: String.t()
+  def run_dir do
+    home =
+      case {Application.fetch_env(:wardmast, :data_dir), System.get_env("ARB_HOME")} do
+        {{:ok, dir}, _} when is_binary(dir) and dir != "" -> dir
+        {_, dir} when is_binary(dir) and dir != "" -> dir
+        _ -> "~/.wardmast"
+      end
+
+    Path.join(Path.expand(home), "run")
   end
 
   # ---- helpers -------------------------------------------------------------
