@@ -56,7 +56,7 @@ The finding (bd-25ivqe, re-confirmed below): agy's native `write_to_file`
 ignores every `write_file(...)` deny, `disabledTools`, and `--sandbox`.
 agy has no setting that confines it, so any fix inside agy's own settings
 is off the table. That leaves three places to enforce the boundary: the
-vendor, the kernel, or Arbiter's dispatch.
+vendor, the kernel, or Wardmast's dispatch.
 
 | Option | Prevents the escape? | Cost | Risk | Verdict |
 |---|---|---|---|---|
@@ -166,7 +166,7 @@ Starting recipe for bd-5gvqgc:
   disappears with the jail. As a side effect this also ends cross-worker
   `/tmp` collisions, e.g. the test DB under `System.tmp_dir!/0`.
 * **`--unshare-pid` + `--die-with-parent`.** Killing the `bwrap` process
-  that Arbiter spawned takes down agy *and* anything agy backgrounded
+  that Wardmast spawned takes down agy *and* anything agy backgrounded
   (`run_command` goes async), which is tighter teardown than today.
 * **Toolchain caches.** `~/.hex`, `~/.mix`, `~/.cache/rebar3` and similar
   are read-only in the jail. `mix compile` doesn't need them, but a

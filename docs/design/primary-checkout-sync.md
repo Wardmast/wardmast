@@ -11,7 +11,7 @@
 A workspace's `repo_paths` config points at a repo's *primary*
 local checkout — a shared directory a human/coordinator may `cd` into
 directly, distinct from a worker's isolated per-task worktree. Before this
-change, nothing in Arbiter ever fast-forwarded that checkout's local branch
+change, nothing in Wardmast ever fast-forwarded that checkout's local branch
 after a merge.
 
 `Wardmast.Worker.Worktree.fetch_origin/2`, called from `Dispatch` before

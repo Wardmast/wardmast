@@ -1,4 +1,4 @@
-# Running Arbiter on macOS (dev mode)
+# Running Wardmast on macOS (dev mode)
 
 macOS support is **phase 1, dev mode**: you run the coordinator from a source
 checkout, supervised by a per-user LaunchAgent. There is no release install and

@@ -12,10 +12,10 @@ MCP work reuses both seams.
 ## TL;DR
 
 Stand up **`Wardmast.MCP`**, a single in-process Model Context Protocol server
-that exposes Arbiter's domain operations (tasks, convoys, dependencies,
+that exposes Wardmast's domain operations (tasks, convoys, dependencies,
 messages, workers, workspace) as schema-backed MCP tools, and connect agent
 sessions to it. Capability is a **scope token** presented at connection time,
-not a code fork. This replaces the model's current route back into Arbiter —
+not a code fork. This replaces the model's current route back into Wardmast —
 constructing `arb …` CLI invocations and parsing `--json` — with validated tool
 calls and structured returns, and it is agent-agnostic because Claude Code,
 Gemini CLI, and Codex all speak MCP.
@@ -31,7 +31,7 @@ codebase actually is today:
 
 2. **Scope tiers: `worker` and `coordinator`.** The issue proposed themed
    names (*Mayor* for the broad tier, now retired in favor of `coordinator`).
-   There is **no Mayor agent** in Arbiter today — that is a future possibility,
+   There is **no Mayor agent** in Wardmast today — that is a future possibility,
    now called "autonomous coordinator agent". The broad-capability client today
    is the **human operator** driving `arb` + the LiveView dashboard, plus
    internal GenServers (merge queue / watchdog, review gate). The spec keeps the
@@ -49,7 +49,7 @@ the Gemini and Codex config adapters.
 The issue's framing is GT-era. Two corrections matter for the design:
 
 - **The current structured route is the `arb` CLI, not `bd2`.** A worker's only
-  structured path back into Arbiter today is shelling out to the **`arb`
+  structured path back into Wardmast today is shelling out to the **`arb`
   escript**, which talks to the Phoenix REST API at `http://127.0.0.1:4848`
   (`apps/wardmast_cli/lib/wardmast_cli/client.ex`, base URL + `ARB_HOST`). The
   work prompt literally instructs the agent to run `arb inbox <task>`,
@@ -129,7 +129,7 @@ already came back on its POST, so it blocks to its 30s ceiling and reports
 (Claude Code `"type": "sse"`, Antigravity / `agy` in its SSE mode) must be
 pointed at the streamable-HTTP entry instead; every such client supports one.
 
-Every MCP config Arbiter generates already uses **Streamable HTTP**:
+Every MCP config Wardmast generates already uses **Streamable HTTP**:
 `Wardmast.MCP.AgentConfig.Claude` writes `"type": "http"`, `.Gemini` writes
 `httpUrl`, `.Codex` writes `[mcp_servers.wardmast] url`, and the `arb init`
 template (`apps/wardmast_cli/priv/templates/mcp_json.eex`) writes `"type":
@@ -141,7 +141,7 @@ Note that `/.well-known/oauth-protected-resource` (and `/.../mcp`) must stay
 **unrouted**: an unauthenticated `/mcp` is a bare `401`, which makes MCP clients
 probe that path for OAuth discovery. A `404` tells them there is no OAuth and
 they fall back to the configured token; anything else (e.g. the MCP plug's
-`405`) strands them in the OAuth branch. Arbiter uses a scope token, not OAuth.
+`405`) strands them in the OAuth branch. Wardmast uses a scope token, not OAuth.
 
 ### 2.2 Build vs. buy the protocol layer
 
@@ -225,7 +225,7 @@ Notes:
   or touch another task through it.
 - **`arb done` stays a stdout sentinel, not a tool.** Completion detection is a
   regex on the agent's stdout (`Worker.ClaudeSession`, `~r/\barb done\b/` against
-  assistant text only). It is not an Arbiter API call and does not become an MCP
+  assistant text only). It is not a Wardmast API call and does not become an MCP
   tool — the agent still prints the line.
 
 ### 3.1 Explicitly out of scope (and why)
@@ -388,7 +388,7 @@ The tools are written once; only the spawn-time config file differs. This rides
 the **existing** worker-spawn seam — no new spawn path.
 
 A small behaviour `Wardmast.MCP.AgentConfig` with one callback per agent type
-emits the right config pointing at the same Arbiter MCP URL with the right scope
+emits the right config pointing at the same Wardmast MCP URL with the right scope
 token:
 
 ```elixir

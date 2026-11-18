@@ -19,7 +19,7 @@ MCP scope tiers (`docs/mcp-server-design.md`, bd-b2eqn5).
 ## TL;DR
 
 Run each coordinator session as **`tmux` inside its own transient systemd user
-unit**, spawned by Arbiter via `systemd-run --user --scope`, and attach the
+unit**, spawned by Wardmast via `systemd-run --user --scope`, and attach the
 browser to it through a Phoenix Channel carrying raw ANSI. Meter it by
 **ingesting the session's own Claude Code JSONL** — no proxy — into the existing
 `Usage.Event` ledger under `source: :coordinator_session`.
@@ -46,7 +46,7 @@ observations):
    than the reported refusal.** It does not error. It starts a completely normal
    interactive session, runs turns fine, and just never establishes the bridge —
    zero `bridge-session` records, no `bridge*` keys, no `oauthAccount`. An
-   operator would believe they had an AFK-reachable session and would not. Arbiter
+   operator would believe they had an AFK-reachable session and would not. Wardmast
    must **verify the bridge**, not trust the flag (§8.3).
 
 The headline number for §1: that single measured session cost **$325.78** and
@@ -74,7 +74,7 @@ quarter of total consumption**. A cost report that omits a quarter of spend is n
 a rounding error; it is the wrong answer, and it is wrong in the direction that
 makes the fleet look cheaper than it is.
 
-Two further motivations, both from the ticket: hosting the session lets Arbiter
+Two further motivations, both from the ticket: hosting the session lets Wardmast
 **inject the context a coordinator needs** (workspace state, task queues, memory
 layers) instead of relying on the operator to paste it, and it makes the session a
 **first-class object** — startable, nameable, reattachable, auditable — rather
@@ -145,7 +145,7 @@ see §6.5. The channel below it is unchanged.
 
 The load-bearing property is the **restart boundary**: everything below it lives
 in a cgroup that is a *sibling* of `wardmast.service`, so `systemctl --user restart
-arbiter` cannot reach it. Arbiter holds no handle to the PTY that matters — on
+wardmast` cannot reach it. Wardmast holds no handle to the PTY that matters — on
 reboot it re-discovers sessions by listing scope units and tmux sockets.
 
 ## 4. The PTY harness (research task 1)
@@ -238,7 +238,7 @@ tmux -S $SOCK attach -t coord      # 0 -> 1, client renders live ticks 32,33,34
 Continuity across the whole cycle: `ticks 1..34, count 34` — no gaps introduced by
 attaching, detaching, restarting, or reattaching.
 
-**Observed — arbiter never returning:**
+**Observed — Wardmast never returning:**
 
 ```
 $ systemctl --user stop arbspike1581-host.service
@@ -246,7 +246,7 @@ host: inactive   scope: active
 tmux still serving: coord: 1 windows
 ```
 
-The session outlives arbiter indefinitely. See §4.6.
+The session outlives Wardmast indefinitely. See §4.6.
 
 Teardown was by exact unit and socket name (`systemctl --user stop <unit>`,
 `tmux -S <sock> kill-server`); `systemctl --user is-active wardmast.service`
@@ -276,13 +276,13 @@ Why this pair, rather than either alone:
 - **tmux gives the PTY, the scrollback and the second door.** It is a real PTY
   master with SIGWINCH handling, 30k lines of replay buffer, `pipe-pane` for a
   live byte stream, and — decisively for AC 6 — a **CLI attach path that does not
-  involve Arbiter at all** (§4.7).
+  involve Wardmast at all** (§4.7).
 
 tmux 3.7c is already installed on this host; `dtach`, `abduco` and `screen` are
 not, and `script` is not either. Adding a dependency that is already present beats
 adding one that is not.
 
-Arbiter holds **no** long-lived handle to the PTY. It shells out for control
+Wardmast holds **no** long-lived handle to the PTY. It shells out for control
 operations and keeps one reader per attached browser. This is the property that
 makes restart survival true by construction rather than by careful coding: there
 is no supervision link to sever.
@@ -319,7 +319,7 @@ byte stream separately), but §12 flags raising it as a tuning question.
 
 The spike refined the prediction here in a way that matters. The transient scope
 **self-reaps when its payload exits** — no `RemainAfterExit` needed. But when
-arbiter was *stopped entirely*, the scope stayed `active` and tmux kept serving
+Wardmast was *stopped entirely*, the scope stayed `active` and tmux kept serving
 indefinitely. So systemd garbage-collects the *unit*, never the *session*.
 
 The orphan is therefore a live agent process with nobody watching it, which is
@@ -328,7 +328,7 @@ bills against quota with no HUD showing it.
 
 Proposed reaping, in order of preference:
 
-1. **Adoption sweep on boot.** Arbiter enumerates `arb-session-*` scopes at
+1. **Adoption sweep on boot.** Wardmast enumerates `arb-session-*` scopes at
    startup, matches them against its `sessions` table, and re-adopts. Anything
    with no matching row is an orphan from a previous era → kill. This is also how
    reattach works after a restart, so it is not extra machinery.
@@ -336,11 +336,11 @@ Proposed reaping, in order of preference:
    A sweep terminates sessions idle beyond a configured TTL (suggest 24 h), with
    the operator able to pin a session as `keep_alive`.
 3. **A dead-man's switch inside the scope.** The scope's payload is a wrapper that
-   polls for arbiter's liveness and exits after a grace window (suggest 1 h) with
-   no arbiter *and* no attached client. This is the only mechanism that works if
-   arbiter never comes back at all, which is the case §4.2 measured.
+   polls for Wardmast's liveness and exits after a grace window (suggest 1 h) with
+   no Wardmast *and* no attached client. This is the only mechanism that works if
+   Wardmast never comes back at all, which is the case §4.2 measured.
 
-(3) is the honest answer to "what if arbiter never returns" and should not be
+(3) is the honest answer to "what if Wardmast never returns" and should not be
 skipped just because (1) covers the common case.
 
 ### 4.7 Fallback path when the web app is down (AC 6)
@@ -350,7 +350,7 @@ Because the browser is intended to **replace** the terminal, the failure mode
 avoided by the recommendation, and this is a large part of why tmux wins:
 
 ```sh
-# list live sessions without Arbiter running at all
+# list live sessions without Wardmast running at all
 systemctl --user list-units 'arb-session-*' --no-legend
 
 # attach directly, full interactivity, no Phoenix in the path
@@ -530,18 +530,18 @@ which checks the preconditions, runs the test from `apps/wardmast` (an umbrella
    needs.
 3. **In-scope dead-man's switch (`watchdog.sh`, generated by
    `Wardmast.Sessions.Provisioning`).** The only mechanism that still works if
-   arbiter never comes back at all (§4.2's measured case). `launch.sh`
+   Wardmast never comes back at all (§4.2's measured case). `launch.sh`
    backgrounds it before `exec`ing the agent — cgroup membership is inherited
    by `fork()` and untouched by the parent shell being replaced, so it
    survives as a sibling of the agent inside the same scope, the same
    property that keeps the tmux server itself alive (§4.1). It polls (default
    60s) two independent liveness signals and only kills the pane (`tmux
    kill-session`) when **both** fail for the grace window (default 1h,
-   `config :wardmast, :sessions_deadman`): arbiter's own heartbeat file
+   `config :wardmast, :sessions_deadman`): Wardmast's own heartbeat file
    (`Wardmast.Sessions.Heartbeat` touches it periodically; the watchdog reads
-   its mtime, so it needs no connection *to* arbiter, only that one existed at
+   its mtime, so it needs no connection *to* Wardmast, only that one existed at
    some point) and `tmux list-clients` reporting zero attached clients. Either
-   signal alone being healthy is enough to hold off — a plain `arbiter`
+   signal alone being healthy is enough to hold off — a plain `wardmast`
    restart, or a client that briefly detached, must not reap an otherwise-fine
    session. Tested by running the *actual* generated shell script as a real
    `/bin/sh` subprocess against a fake `tmux` on `PATH` and a heartbeat file
@@ -563,7 +563,7 @@ which checks the preconditions, runs the test from `apps/wardmast` (an umbrella
    'arb-session-*' --no-legend` and `tmux -S $XDG_RUNTIME_DIR/arbiter/session-
    <id>.sock attach [-r] -t coord` are the raw commands underneath it, and
    verifying `arb session attach <id>` behaves the same with
-   `systemctl --user stop arbiter` first is the check to run on the live host.
+   `systemctl --user stop wardmast` first is the check to run on the live host.
    `XDG_RUNTIME_DIR` unset is a hard `die` naming the real cause (a systemd
    user session, not `/tmp`) rather than deriving a socket path the server
    side (`Wardmast.Sessions.Naming.runtime_dir/0`) could never itself have
@@ -630,7 +630,7 @@ bounded ring (suggest 2 MB) of recent frames.
   `capture-pane` and resets the client's sequence. Cheap and always correct.
 
 This is why resume is keyed to **session id + seq**, not to a socket: a flaky
-connection, a laptop sleeping, and an arbiter restart are all the same event to
+connection, a laptop sleeping, and an Wardmast restart are all the same event to
 the client.
 
 **Backpressure.** A browser on a slow link cannot keep up with a build log. Phoenix
@@ -693,7 +693,7 @@ per attached browser". tmux makes that impossible: `pipe-pane` is a property
 of the pane, singular — issuing it twice replaces the first pipe. It is also
 the wrong shape for §5.3, which wants one `seq` space and one ring *per
 session* so two clients resuming from different points are talking about the
-same numbers. The property §4.3 actually cares about is untouched: an `arbiter`
+same numbers. The property §4.3 actually cares about is untouched: a `wardmast`
 restart drops the reader, never the session. A detach does not even drop the
 reader — it keeps running, unattended, for as long as the session does, since
 it is also what owns §11's raw capture (bd-5pelo2, round 2).
@@ -702,9 +702,9 @@ it is also what owns §11's raw capture (bd-5pelo2, round 2).
 out of `pipe-pane -O 'cat >> <path>'` and is the most useful invariant in the
 phase. Resume arithmetic becomes `pread(file, last_seq, head - last_seq)`; the
 in-memory ring becomes a fast path that preserves frame boundaries rather than
-the source of truth; and a reconnect after an `arbiter` restart is **gapless**
+the source of truth; and a reconnect after a `wardmast` restart is **gapless**
 rather than a repaint, because the `cat` tmux spawned lives in the *session's*
-scope, keeps appending while arbiter is dead, and a new reader picks the
+scope, keeps appending while Wardmast is dead, and a new reader picks the
 numbering back up from the file size. §12 item 7's ring size therefore matters
 less than it looked: outside the ring is not automatically a repaint.
 
@@ -818,7 +818,7 @@ must be vendored into `assets/css/` and imported from `app.css`.
 **`@xterm/addon-canvas`.** Justification specific to this app:
 
 - The WebGL addon is faster on large, fast-scrolling output, but it consumes a
-  WebGL context. Browsers cap live contexts (~8–16); the Arbiter dashboard is a
+  WebGL context. Browsers cap live contexts (~8–16); the Wardmast dashboard is a
   multi-panel app the operator keeps open across tabs, and decision 2 asks for
   **multiple concurrent sessions**. Several terminals plus any future chart is
   exactly the shape that hits context loss, which manifests as a blank terminal —
@@ -1131,7 +1131,7 @@ is real and correctly handled.
 |---|---|
 | **JSONL ingestion** (recommended) | Works today, in both auth modes, with Remote Control, with **no launch-time configuration the session could omit**. Carries tokens *and* dollars *and* per-model breakdown. ~80% of the reader already exists. |
 | **Reintroduce a proxy for sessions** | **Rejected.** #1605 removed it deliberately; re-adding it for data already on disk is a regression. It would also need `ANTHROPIC_BASE_URL` in the session env — a single misconfiguration silently unmeters a session, the exact failure this feature exists to fix. It is *more* fragile than the file, not less. Worth noting it also fails on a technicality: it cannot see cache-read/cache-write split pricing decisions the CLI makes, and would force us to re-derive cost the CLI already computed. |
-| **Claude Code OpenTelemetry export** | **Rejected for now.** Claude Code can export OTel metrics, but it needs a collector endpoint configured at launch (same silent-misconfiguration risk as the proxy), adds an infrastructure dependency Arbiter does not otherwise have, and is aggregate-oriented. Reasonable *later* as a cross-provider unifier; not the first implementation. |
+| **Claude Code OpenTelemetry export** | **Rejected for now.** Claude Code can export OTel metrics, but it needs a collector endpoint configured at launch (same silent-misconfiguration risk as the proxy), adds an infrastructure dependency Wardmast does not otherwise have, and is aggregate-oriented. Reasonable *later* as a cross-provider unifier; not the first implementation. |
 | **`CloudProbe` / `/api/oauth/usage`** | **Not viable.** Account-level utilisation percentages, not per-session tokens (#1602). It answers "how close to the cap", not "what did this session cost". Complementary, not a substitute. |
 | **Parse the rendered terminal output** | **Rejected.** Scraping `/cost` output is brittle and only available on demand. |
 
@@ -1140,7 +1140,7 @@ is real and correctly handled.
 The schema is already correct. Required changes are small:
 
 1. **Write rows.** New `Wardmast.Sessions.UsageIngest` creates `Usage.Event` with
-   `source: :coordinator_session`, `session_id: <arbiter session id>`,
+   `source: :coordinator_session`, `session_id: <Wardmast session id>`,
    `task_id: nil`. No migration needed for the discriminator — `:66` already lists
    it.
 2. **Cost.** `cost_usd` from `cost-state.totalCostUSD` (delta since last row).
@@ -1345,7 +1345,7 @@ is **choosing per session** and being explicit about the trade.
 
 ### 8.2 Mode B is primary (Amendment 2), and what "isolation" then means
 
-Arbiter is LAN-only and stays that way; the host moves between tailnets; so when
+Wardmast is LAN-only and stays that way; the host moves between tailnets; so when
 the operator is away, **Remote Control is the only way to reach a session** — and
 it needs no inbound ports and outsources remote auth to Anthropic. Since Remote
 Control requires mode B (§8.3), **mode B is the default**, not the exception.
@@ -1406,13 +1406,13 @@ token does not carry it.
 1. `--remote-control` must be **disabled in the UI when mode A is selected**, with
    the reason shown. Offering a toggle that silently does nothing is the worst
    outcome.
-2. When mode B + Remote Control is selected, Arbiter must **verify the bridge
+2. When mode B + Remote Control is selected, Wardmast must **verify the bridge
    came up** — poll the session JSONL for a `bridge-session` record within a
    timeout and surface `bridge_unavailable` (§5.2 `error`) if absent. Never report
    "reachable remotely" on the strength of having passed a flag.
 3. `--remote-control [name]` and `--remote-control-session-name-prefix` let
-   Arbiter name sessions. The remote session title combines the operator-provided
-   name with the Arbiter session id for traceability: `<name> · <first-8-chars-of-id>`
+   Wardmast name sessions. The remote session title combines the operator-provided
+   name with the Wardmast session id for traceability: `<name> · <first-8-chars-of-id>`
    when named, or just the full id when unnamed. This keeps the claude.ai session
    traceable back to its row while remaining readable.
 
@@ -1487,7 +1487,7 @@ with `"type" => "http"` pointing at the loopback MCP endpoint
 **It goes in the session's cwd** (`workspace/`), not at the session root. Claude
 Code auto-loads `.mcp.json` from the working directory only, and `launch.sh`
 `cd`s into `workspace/` before `exec`ing the agent — a copy one level up is a
-copy the session never reads, and the session would start with no Arbiter MCP
+copy the session never reads, and the session would start with no Wardmast MCP
 server registered at all. This corrects an earlier draft of the §9.1 tree above,
 which drew it at the session root.
 
@@ -1512,7 +1512,7 @@ Per the operator's decision ("a stale memory is worse"), a session mounts memory
 | `user` | always, all sessions | read | who the operator is — behavioural, doesn't rot |
 | `feedback` | always, all sessions | read | working doctrine — behavioural, doesn't rot |
 | `reference` | always, all sessions | read | pointers to external resources |
-| `project` | **only** the session's bound workspace | read | cites `file:line`/modules; rots fast; a vstim session must not load arbiter internals |
+| `project` | **only** the session's bound workspace | read | cites `file:line`/modules; rots fast; a vstim session must not load Wardmast internals |
 
 A `project` memory scopes to a workspace via its own `metadata.workspace_id`
 frontmatter key (the workspace's id, matching `session.workspace_id`). A
@@ -1554,7 +1554,7 @@ never a writer of the shared layer (Amendment 3.5).
 `Wardmast.Sessions.TranscriptDistillation` makes one bounded model pass over an
 ended session's archived JSONL (§11). It does not read the raw PTY stream,
 because Claude Code's TUI paints with cursor positioning, so that stream strips
-down to run-together redraws. The model answers in JSON, and Arbiter renders
+down to run-together redraws. The model answers in JSON, and Wardmast renders
 each candidate's frontmatter itself. It stamps `source_transcript` (the archive
 path) and a `turn_range` checked against the window of numbered turns the model
 was shown, and it drops anything it cannot anchor or that promotion would
@@ -1636,14 +1636,14 @@ sees a brief "reconnecting" state, not a dead terminal.
 
 Remaining guards:
 
-- **Restart recursion.** A session that restarts arbiter on a crash-loop can wedge
+- **Restart recursion.** A session that restarts Wardmast on a crash-loop can wedge
   the fleet. Rate-limit: refuse more than N restarts per window from session-origin
   callers, and surface it rather than failing silently.
 - **Dispatch recursion.** Already modelled: `can_dispatch` (`scope.ex:20`) is the
   documented coordinator-only guardrail. Default **off**; on is a deliberate
   pre-launch choice.
 - **Self-kill.** A session must not be able to terminate *its own* scope through
-  Arbiter's API (it would kill the caller mid-call). Reject with a clear error;
+  Wardmast's API (it would kill the caller mid-call). Reject with a clear error;
   the operator kills it from the dashboard or the CLI.
 
 ### 10.2 Hazard 2 — reach into `/home/ryan/dev/arbiter`
@@ -1776,7 +1776,7 @@ reader instead of being stuck behind it. An eager start that fails to open
 (tmux not reachable yet at launch) is retried by the first real `attach/2`
 rather than surfacing as a stale error to a caller who didn't cause it.
 
-**Closed: an `arbiter` restart no longer drops the bytes written while no
+**Closed: a `wardmast` restart no longer drops the bytes written while no
 reader was alive.** The moduledoc's claim that a restart "drops the reader
 but never the session" is true of the pipe file (`tmux pipe-pane` keeps
 appending to it regardless of whether anything is reading) but used to not be

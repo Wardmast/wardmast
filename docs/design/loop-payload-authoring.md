@@ -129,7 +129,7 @@ operator reads first. Hence `bd-bldypb`.
 ### The `Loop` determinism guarantee still holds
 
 Re-verified today, and the module list has grown since the ticket was
-written without breaking it. Outbound `Arbiter.*` references from
+written without breaking it. Outbound `Wardmast.*` references from
 `lib/wardmast/loop.ex` + `lib/wardmast/loop/`:
 
 ```

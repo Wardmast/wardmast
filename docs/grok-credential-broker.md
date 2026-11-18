@@ -4,12 +4,12 @@ grok's OIDC `refresh_token` **rotates on every refresh**, and grok **deletes
 `auth.json`** when a refresh is permanently refused. Giving each worker a copy of
 the operator's `auth.json` would therefore race: the first copy to refresh
 invalidates the operator's token and every other copy (the bd-6umoh9 problem),
-and each loser then deletes its own file. Arbiter never copies it.
+and each loser then deletes its own file. Wardmast never copies it.
 
 ## Shape
 
 ```
-worker jail                              Arbiter server
+worker jail                              Wardmast server
 -----------                              --------------
 grok ── GROK_AUTH_PROVIDER_COMMAND ──►   POST /api/grok/token   (worker ARB_TOKEN)
         <GROK_HOME>/arbiter-grok-token         │
