@@ -247,7 +247,7 @@ defmodule WardmastCli.Cmd.InstallService.Launchd do
     Output.die(
       "service account #{user} does not exist (or has no home directory)",
       "Create it first, e.g. `sudo sysadminctl -addUser #{user} -home /Users/#{user} -shell /usr/bin/false` " <>
-        "and make sure /Users/#{user} exists; see docs/running-on-macos.md (team Mac). " <>
+        "and make sure /Users/#{user} exists; see #{WardmastCli.Version.doc_url("docs/running-on-macos.md")} (team Mac). " <>
         "Or pass an existing unprivileged account with --service-user."
     )
   end
