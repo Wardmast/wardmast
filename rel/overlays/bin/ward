@@ -1,0 +1,44 @@
+#!/bin/sh
+# Toolchain-free launcher for the `ward` escript (bd-d5mg29).
+#
+# Runs the escript on this release's bundled erts, so no system Erlang/Elixir
+# is needed (macOS release install, customer boxes). An escript boots
+# `no_dot_erlang` from <release>/bin, and that boot script refers to
+# $RELEASE_LIB; neither is present in a bare release, so supply both here.
+#
+# The escript is bin/ward.escript beside this file, or $WARD_ESCRIPT.
+set -e
+
+SELF="$0"
+while [ -h "$SELF" ]; do
+  LINK=$(readlink "$SELF")
+  case "$LINK" in
+    /*) SELF="$LINK" ;;
+    *) SELF="$(dirname "$SELF")/$LINK" ;;
+  esac
+done
+BIN=$(cd "$(dirname "$SELF")" && pwd -P)
+ROOT=$(dirname "$BIN")
+
+ERTS=
+for d in "$ROOT"/erts-*; do
+  [ -d "$d/bin" ] && ERTS="$d"
+done
+[ -n "$ERTS" ] || { echo "ward: no erts-* directory under $ROOT" >&2; exit 1; }
+
+ESCRIPT="${WARD_ESCRIPT:-$BIN/ward.escript}"
+[ -f "$ESCRIPT" ] || {
+  echo "ward: escript not found at $ESCRIPT (set WARD_ESCRIPT to its path)" >&2
+  exit 1
+}
+
+if [ ! -f "$BIN/no_dot_erlang.boot" ]; then
+  VSN=$(awk '{print $2}' "$ROOT/releases/start_erl.data")
+  cp "$ROOT/releases/$VSN/start_clean.boot" "$BIN/no_dot_erlang.boot"
+fi
+
+PATH="$ERTS/bin:$PATH"
+export PATH
+ERL_FLAGS="${ERL_FLAGS:+$ERL_FLAGS }-boot_var RELEASE_LIB $ROOT/lib"
+export ERL_FLAGS
+exec "$ERTS/bin/escript" "$ESCRIPT" "$@"

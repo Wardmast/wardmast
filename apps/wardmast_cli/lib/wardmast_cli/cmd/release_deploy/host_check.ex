@@ -24,8 +24,6 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.HostCheck do
   alias WardmastCli.{Client, Cmd.Restart}
   alias WardmastCli.Cmd.ReleaseDeploy.ReleaseFiles
 
-  @default_port 4848
-
   @doc "`:ok`, or `{:error, message, hint}` when the deploy must be refused."
   @spec check(keyword()) :: :ok | {:error, String.t(), String.t()}
   def check(opts) do
@@ -78,7 +76,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.HostCheck do
   defp port do
     case URI.parse(Client.base_url()) do
       %URI{port: p} when is_integer(p) -> p
-      _ -> @default_port
+      _ -> Wardmast.Env.port()
     end
   end
 

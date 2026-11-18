@@ -32,7 +32,7 @@ defmodule WardmastWeb.DashboardUpdateControllerTest do
     previous_dir = Application.fetch_env(:wardmast, :data_dir)
     previous_cfg = Application.fetch_env(:wardmast, :self_deploy)
     Application.put_env(:wardmast, :data_dir, home)
-    Application.put_env(:wardmast, :self_deploy, cmd: runner, arb_path: arb)
+    Application.put_env(:wardmast, :self_deploy, cmd: runner, arb_path: arb, os: {:unix, :linux})
 
     on_exit(fn ->
       restore(:data_dir, previous_dir)

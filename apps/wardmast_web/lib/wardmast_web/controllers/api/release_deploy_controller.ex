@@ -5,7 +5,7 @@ defmodule WardmastWeb.Api.ReleaseDeployController do
   anonymous callers are refused before this runs.
 
     * `POST /api/release/deploy` — launch `arb server deploy --version <tag>
-      --json` in its own `wardmast-deploy-<tag>` systemd user unit
+      --json` in its own `wardmast-deploy-<tag>` systemd user unit (a detached launchd job on macOS)
       (`Wardmast.Release.SelfDeploy`), outside this BEAM, because the deploy
       restarts it. Body `{"version": "vX.Y.Z"}`, or empty for the latest
       release when `update_available`. `202` with the unit; `409` when a deploy
@@ -51,7 +51,9 @@ defmodule WardmastWeb.Api.ReleaseDeployController do
     do: {:conflict, "a deploy is already running; wait for it to finish"}
 
   def error(:systemd_unavailable),
-    do: {:conflict, "cannot reach the systemd user manager to launch the deploy"}
+    do:
+      {:conflict,
+       "cannot reach the service manager (systemd user manager or launchd) to launch the deploy"}
 
   def error({:cli_missing, path}),
     do: {:conflict, "the arb CLI is not installed at #{path}; install it first"}
