@@ -77,12 +77,12 @@ defmodule WardmastCli.ClientTest do
 
   describe "base_url/0" do
     setup do
-      port = System.get_env("PORT")
-      for k <- ~w(WARDMAST_HOST ARB_HOST ARBITER_HOST PORT), do: System.delete_env(k)
+      port = System.get_env("WARDMAST_PORT")
+      for k <- ~w(WARDMAST_HOST ARB_HOST ARBITER_HOST WARDMAST_PORT), do: System.delete_env(k)
       Wardmast.Env.reset_warnings()
 
       on_exit(fn ->
-        if port, do: System.put_env("PORT", port)
+        if port, do: System.put_env("WARDMAST_PORT", port)
         for k <- ~w(WARDMAST_HOST ARB_HOST ARBITER_HOST), do: System.delete_env(k)
         Wardmast.Env.reset_warnings()
       end)

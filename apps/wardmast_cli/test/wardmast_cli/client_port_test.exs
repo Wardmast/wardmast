@@ -4,7 +4,7 @@ defmodule WardmastCli.ClientPortTest do
 
   alias WardmastCli.Client
 
-  @vars ~w(PORT WARDMAST_HOST ARB_HOST ARBITER_HOST)
+  @vars ~w(PORT WARDMAST_PORT ARB_PORT WARDMAST_HOST ARB_HOST ARBITER_HOST)
 
   setup do
     saved = Map.new(@vars, &{&1, System.get_env(&1)})
@@ -22,13 +22,20 @@ defmodule WardmastCli.ClientPortTest do
     assert Client.base_url() == "http://127.0.0.1:4848"
   end
 
-  test "base_url honours a non-default PORT" do
-    System.put_env("PORT", "5151")
+  test "base_url honours a non-default WARDMAST_PORT" do
+    System.put_env("WARDMAST_PORT", "5151")
     assert Client.base_url() == "http://127.0.0.1:5151"
   end
 
-  test "an explicit WARDMAST_HOST wins over PORT" do
-    System.put_env("PORT", "5151")
+  test "a worker's dev-server PORT never redirects the client" do
+    System.put_env("PORT", "23456")
+    assert Client.base_url() == "http://127.0.0.1:4848"
+    System.put_env("WARDMAST_PORT", "5151")
+    assert Client.base_url() == "http://127.0.0.1:5151"
+  end
+
+  test "an explicit WARDMAST_HOST wins over WARDMAST_PORT" do
+    System.put_env("WARDMAST_PORT", "5151")
     System.put_env("WARDMAST_HOST", "http://10.0.0.1:9000")
     assert Client.base_url() == "http://10.0.0.1:9000"
   end

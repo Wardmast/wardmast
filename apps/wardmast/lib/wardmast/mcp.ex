@@ -222,7 +222,7 @@ defmodule Wardmast.MCP do
     :wardmast_web
     |> Application.get_env(WardmastWeb.Endpoint, [])
     |> Keyword.get(:http, [])
-    |> Keyword.get(:port, Wardmast.Env.port())
+    |> Keyword.get(:port, Wardmast.Env.server_port())
   end
 
   defp config(key, default \\ nil) do
