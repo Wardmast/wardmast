@@ -827,7 +827,7 @@ throwaway `$HOME`:
   that makes the worktree the only writable project path (probed live: a
   jailed `write_to_file` outside it fails with `read-only file system`).
   **Landed in bd-5gvqgc:** under `:strict`, `Gemini.default_argv/2` runs
-  agy inside the OS write jail (see [The OS write jail](#the-os-write-jail-arbiterworkerjail-bd-5gvqgc-bd-3s82pf))
+  agy inside the OS write jail (see [The OS write jail](#the-os-write-jail-wardmastworkerjail-bd-5gvqgc-bd-3s82pf))
   and `Gemini.write_confinement/1` answers `:os_jail`, so the gate admits
   agy, on a host that passes `Jail.available?/0` with worker config
   isolation and `sandbox.enabled` on. Where it can't jail, `write_confinement`
