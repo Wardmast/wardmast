@@ -201,7 +201,8 @@ defmodule Wardmast.Worker.WatchdogCiSyncTest do
       wpid = start_watchdog(task_id, "!cs4")
 
       wait_until(fn -> :sys.get_state(wpid).last_block_reason == :conflict end)
-      Process.sleep(Wardmast.Test.Timing.scale(80))
+      seen = StubMerger.get_count("!cs4")
+      wait_until(fn -> StubMerger.get_count("!cs4") >= seen + 3 end)
       assert StubFixPassDispatcher.call_count() == 0
       assert StubMerger.update_branch_count("!cs4") == 1
       assert :sys.get_state(wpid).auto_resolve_attempts == 0

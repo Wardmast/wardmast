@@ -1334,12 +1334,15 @@ defmodule Wardmast.Worker.WatchdogTest do
       # still be ~1 poll per interval_ms, not 4x — a second, independent
       # `Process.send_after/3` chain per re-arm would multiply it (bd-bspakl
       # review round 1).
-      Process.sleep(Wardmast.Test.Timing.scale(200))
-      after_rearm = StubMerger.get_count("!rar3") - baseline
+      # Sync on the poll count (not a sleep) so a slow runner can't skew it:
+      # 10 polls from one chain take >= ~200ms; extra chains would be faster.
+      started = System.monotonic_time(:millisecond)
+      wait_until(fn -> StubMerger.get_count("!rar3") - baseline >= 10 end)
+      elapsed = System.monotonic_time(:millisecond) - started
 
-      assert after_rearm <= 15,
-             "expected roughly one poll chain (~10 polls/200ms at interval_ms=20), " <>
-               "got #{after_rearm} — looks like re-arming started an extra poll chain"
+      assert elapsed >= 100,
+             "expected roughly one poll chain (10 polls >= ~200ms at interval_ms=20), " <>
+               "10 polls took only #{elapsed}ms — looks like re-arming started an extra poll chain"
     end
 
     test "the re-arm bump doesn't leak into a later, unrelated block episode" do
@@ -2915,7 +2918,7 @@ defmodule Wardmast.Worker.WatchdogTest do
 
       # Several poll cycles while CI is still running: no merge attempt, no
       # completion — the Watchdog must just keep waiting.
-      Process.sleep(Wardmast.Test.Timing.scale(120))
+      wait_until(fn -> StubMerger.get_count("!ci1") >= 3 end)
       assert StubMerger.merge_count("!ci1") == 0
       refute_received {:watchdog, ^task_id, {:merged, _}}
 
@@ -2987,7 +2990,8 @@ defmodule Wardmast.Worker.WatchdogTest do
       # Fewer polls than @not_started_grace_polls (5) so the grace-bounded
       # fallthrough (bd-aeb9wv round 2) doesn't fire yet — see the dedicated
       # "falls through ... once grace polls are exhausted" test below for that.
-      Process.sleep(Wardmast.Test.Timing.scale(40))
+      wait_until(fn -> StubMerger.get_count("!ci5") >= 2 end)
+      assert StubMerger.get_count("!ci5") < 5
       assert StubMerger.merge_count("!ci5") == 0
       refute_received {:watchdog, ^task_id, {:merged, _}}
 
