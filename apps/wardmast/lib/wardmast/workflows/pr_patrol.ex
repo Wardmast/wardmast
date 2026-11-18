@@ -1010,6 +1010,9 @@ defmodule Wardmast.Workflows.PRPatrol do
     end
   end
 
+  defp forge_of(Wardmast.Mergers.Gitlab), do: :gitlab
+  defp forge_of(_adapter), do: :github
+
   defp check_trigger(adapter, mr_ref, signals) do
     case required_check_failure_names(adapter, mr_ref, signals) do
       [] ->
@@ -1017,7 +1020,11 @@ defmodule Wardmast.Workflows.PRPatrol do
 
       names ->
         {"#{length(names)} required check(s) failing: #{Enum.join(names, ", ")}",
-         CIFailureFollowUp.instructions(names, failing_check_logs(adapter, mr_ref)), nil}
+         CIFailureFollowUp.instructions(
+           names,
+           failing_check_logs(adapter, mr_ref),
+           forge_of(adapter)
+         ), nil}
     end
   end
 

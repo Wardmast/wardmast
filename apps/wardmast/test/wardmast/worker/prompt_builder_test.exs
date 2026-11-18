@@ -1323,3 +1323,94 @@ defmodule Wardmast.Worker.PromptBuilderTest do
     end
   end
 end
+
+defmodule Wardmast.Worker.PromptBuilderGitlabTest do
+  use Wardmast.DataCase, async: true
+
+  alias Wardmast.Tasks.Issue
+  alias Wardmast.Tasks.Workspace
+  alias Wardmast.Worker.PromptBuilder
+
+  defp ws(strategy),
+    do: %Workspace{id: "ws-fc", name: "fc", config: %{"merge" => %{"strategy" => strategy}}}
+
+  defp task(overrides) do
+    struct!(
+      %Issue{
+        id: "bd-fc1",
+        title: "t",
+        description: "d",
+        acceptance: "a",
+        issue_type: :bug,
+        tracker_type: :none,
+        tracker_ref: nil,
+        pr_ref: nil,
+        source_pr: nil
+      },
+      overrides
+    )
+  end
+
+  test "a GitLab PRPatrol follow-up uses glab, not gh" do
+    prompt =
+      PromptBuilder.prompt_for_task(task(%{issue_type: :research, source_pr: "42"}),
+        workspace: ws("gitlab")
+      )
+
+    assert prompt =~ "glab mr checkout 42"
+    assert prompt =~ "glab mr create"
+    refute prompt =~ "gh pr checkout"
+  end
+
+  test "the GitHub follow-up is unchanged" do
+    prompt =
+      PromptBuilder.prompt_for_task(task(%{issue_type: :research, source_pr: "42"}),
+        workspace: ws("github")
+      )
+
+    assert prompt =~ "gh pr checkout 42"
+  end
+
+  test "a GitLab task reads existing MR comments with glab" do
+    prompt = PromptBuilder.prompt_for_task(task(%{pr_ref: "grp/proj!7"}), workspace: ws("gitlab"))
+    assert prompt =~ "glab mr view 7 --comments"
+    refute prompt =~ "gh pr view"
+  end
+
+  test "the PR-body step points at the GitLab template and closes GitLab issues" do
+    prompt =
+      PromptBuilder.prompt_for_task(task(%{tracker_type: :gitlab, tracker_ref: "9"}),
+        workspace: ws("gitlab")
+      )
+
+    assert prompt =~ ".gitlab/merge_request_templates/Default.md"
+    refute prompt =~ ".github/pull_request_template.md"
+    assert prompt =~ "For GitLab-tracked tasks, include a closing keyword `Closes #9`"
+  end
+
+  test "the PR-body step keeps the GitHub template by default" do
+    prompt = PromptBuilder.prompt_for_task(task(%{}), [])
+    assert prompt =~ ".github/pull_request_template.md"
+  end
+end
+
+defmodule Wardmast.Workflows.CIFailureFollowUpGitlabTest do
+  use ExUnit.Case, async: true
+
+  alias Wardmast.Workflows.CIFailureFollowUp
+
+  @checks [%{name: "rspec", url: "https://gl.example/g/p/-/jobs/9", summary: "boom"}]
+
+  test "GitLab pipelines get the job trace URL and glab guidance" do
+    text = CIFailureFollowUp.instructions(["rspec"], @checks, :gitlab)
+    assert text =~ "https://gl.example/g/p/-/jobs/9/raw"
+    assert text =~ "glab api projects/<id>/jobs/<job_id>/trace"
+    refute text =~ "actions/jobs"
+  end
+
+  test "GitHub output is unchanged" do
+    text = CIFailureFollowUp.instructions(["rspec"], @checks)
+    assert text =~ "actions/jobs/<job_id>/logs"
+    assert text =~ "### rspec (https://gl.example/g/p/-/jobs/9)"
+  end
+end
