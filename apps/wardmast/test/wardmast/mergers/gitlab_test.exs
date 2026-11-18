@@ -2242,6 +2242,145 @@ defmodule Wardmast.Mergers.GitlabTest do
     end
   end
 
+  describe "post_inline_comment/3" do
+    @finding %{severity: :warning, file: "lib/foo.ex", line: 9, message: "nil deref"}
+    @diff_refs %{"base_sha" => "b1", "start_sha" => "s1", "head_sha" => "h1"}
+
+    test "posts a positioned discussion using the MR's diff_refs" do
+      test_pid = self()
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", path} ->
+            assert path == "#{base_path()}/#{@iid}"
+            Req.Test.json(conn, %{"iid" => @iid, "diff_refs" => @diff_refs})
+
+          {"POST", path} ->
+            assert path == "#{base_path()}/#{@iid}/discussions"
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:posted, Jason.decode!(body)})
+
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "d1"})
+        end
+      end)
+
+      assert {:ok, _} = Gitlab.post_inline_comment(@ref, @finding, %{})
+      assert_received {:posted, body}
+      assert body["body"] =~ "nil deref"
+      assert body["body"] =~ "WARNING"
+
+      assert body["position"] == %{
+               "position_type" => "text",
+               "base_sha" => "b1",
+               "start_sha" => "s1",
+               "head_sha" => "h1",
+               "new_path" => "lib/foo.ex",
+               "new_line" => 9
+             }
+    end
+
+    test "falls back to an unpositioned discussion when GitLab rejects the position (400)" do
+      test_pid = self()
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", _} ->
+            Req.Test.json(conn, %{"iid" => @iid, "diff_refs" => @diff_refs})
+
+          {"POST", path} ->
+            assert path == "#{base_path()}/#{@iid}/discussions"
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            send(test_pid, {:posted, decoded})
+
+            if Map.has_key?(decoded, "position") do
+              conn
+              |> Plug.Conn.put_status(400)
+              |> Req.Test.json(%{"message" => "line_code can't be blank"})
+            else
+              conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "d2"})
+            end
+        end
+      end)
+
+      assert {:ok, _} = Gitlab.post_inline_comment(@ref, @finding, %{})
+      assert_received {:posted, %{"position" => _}}
+      assert_received {:posted, fallback}
+      refute Map.has_key?(fallback, "position")
+      assert fallback["body"] =~ "lib/foo.ex:9"
+      assert fallback["body"] =~ "nil deref"
+    end
+
+    test "posts unpositioned when the MR has no diff_refs" do
+      test_pid = self()
+
+      stub(fn conn ->
+        case conn.method do
+          "GET" ->
+            Req.Test.json(conn, %{"iid" => @iid})
+
+          "POST" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:posted, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "d3"})
+        end
+      end)
+
+      assert {:ok, _} = Gitlab.post_inline_comment(@ref, @finding, %{})
+      assert_received {:posted, body}
+      refute Map.has_key?(body, "position")
+      refute_received {:posted, _}
+    end
+
+    test "a non-position error (500) is returned, not swallowed" do
+      stub(fn conn ->
+        case conn.method do
+          "GET" -> Req.Test.json(conn, %{"iid" => @iid, "diff_refs" => @diff_refs})
+          "POST" -> conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "boom"})
+        end
+      end)
+
+      assert {:error, %Error{kind: :server_error}} =
+               Gitlab.post_inline_comment(@ref, @finding, %{})
+    end
+
+    test "our own posted finding shows up as an open review thread" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+
+        Req.Test.json(conn, [
+          %{
+            "id" => "d1",
+            "notes" => [
+              %{
+                "resolvable" => true,
+                "resolved" => false,
+                "body" => "**WARNING** at `lib/foo.ex:9`: nil deref",
+                "author" => %{"username" => "arbiter-bot"},
+                "position" => %{"new_path" => "lib/foo.ex", "new_line" => 9}
+              }
+            ]
+          },
+          %{
+            "id" => "d2",
+            "notes" => [
+              %{
+                "resolvable" => true,
+                "resolved" => false,
+                "body" => "**INFO** at `lib/bar.ex:3`: out of diff",
+                "author" => %{"username" => "arbiter-bot"}
+              }
+            ]
+          }
+        ])
+      end)
+
+      assert {:ok, [t1, t2]} = Gitlab.list_open_review_threads(@ref)
+      assert {t1.id, t1.path, t1.line} == {"d1", "lib/foo.ex", 9}
+      assert t2.id == "d2"
+    end
+  end
+
   describe "list_open_review_threads/1" do
     test "GETs discussions and returns only unresolved resolvable threads, normalized" do
       stub(fn conn ->

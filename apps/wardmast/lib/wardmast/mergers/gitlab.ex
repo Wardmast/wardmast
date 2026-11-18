@@ -1193,10 +1193,53 @@ defmodule Wardmast.Mergers.Gitlab do
       %{severity: sev, file: file, line: line, message: msg} = finding
       body = "**#{sev |> Atom.to_string() |> String.upcase()}** at `#{file}:#{line}`: #{msg}"
 
-      request(cfg, :post, "/merge_requests/#{iid}/notes", json: %{"body" => body})
-      |> handle_json()
+      # A finding is a resolvable *discussion*, never a plain note, so
+      # `list_open_review_threads/1` (ReviewPatrol / ReviewReply) sees it.
+      # In-diff findings are anchored to the line; if the MR has no
+      # `diff_refs`, or GitLab rejects the position (400: line not in the
+      # diff), the discussion is posted unpositioned instead.
+      case finding_position(cfg, iid, file, line) do
+        nil ->
+          post_discussion(cfg, iid, %{"body" => body})
+
+        position ->
+          case post_discussion(cfg, iid, %{"body" => body, "position" => position}) do
+            {:error, %Error{kind: :validation_failed}} ->
+              post_discussion(cfg, iid, %{"body" => body})
+
+            other ->
+              other
+          end
+      end
     end
   end
+
+  defp post_discussion(cfg, iid, payload) do
+    request(cfg, :post, "/merge_requests/#{iid}/discussions", json: payload)
+    |> handle_json()
+  end
+
+  # The `position` for a text discussion, from the MR's `diff_refs`; nil when it
+  # can't be built (no refs, lookup failed, or no usable file/line).
+  defp finding_position(cfg, iid, file, line)
+       when is_binary(file) and is_integer(line) and line > 0 do
+    with {:ok, %{"diff_refs" => %{"base_sha" => base, "start_sha" => start, "head_sha" => head}}}
+         when is_binary(base) and is_binary(start) and is_binary(head) <-
+           request(cfg, :get, "/merge_requests/#{iid}", []) |> handle_json() do
+      %{
+        "position_type" => "text",
+        "base_sha" => base,
+        "start_sha" => start,
+        "head_sha" => head,
+        "new_path" => file,
+        "new_line" => line
+      }
+    else
+      _ -> nil
+    end
+  end
+
+  defp finding_position(_cfg, _iid, _file, _line), do: nil
 
   @impl true
   def submit_review(mr_ref, verdict, body, _opts)
