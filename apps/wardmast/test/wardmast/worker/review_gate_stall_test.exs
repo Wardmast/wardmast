@@ -122,9 +122,22 @@ defmodule Wardmast.Worker.ReviewGateStallTest do
 
     test "leaves a gate with a genuine reviewer in flight alone", %{repo: repo, ws: ws} do
       {task, pid} =
-        start_live_gate(repo, ws, %{review_gate_liveness_ms: 50, review_gate_stall_ms: 300})
+        start_live_gate(repo, ws, %{review_gate_liveness_ms: 50, review_gate_stall_ms: 300_000})
 
       gate = wait_until_review_gate()
+
+      # The gate is up before its reviewer is: on a slow host the launch can
+      # outlast a short stall limit, and the author would rightly see "no pass
+      # in flight". Sync on the reviewer being registered, THEN arm the short
+      # stall limit so the window below measures a live reviewer.
+      wait_until_reviewer_alive(gate)
+
+      :sys.replace_state(pid, fn s ->
+        meta =
+          s.meta |> Map.put(:review_gate_stall_ms, 300) |> Map.delete(:review_gate_stalled_since)
+
+        %{s | meta: meta}
+      end)
 
       # Several liveness ticks and well past the stall limit.
       Process.sleep(Wardmast.Test.Timing.scale(800))
@@ -308,6 +321,27 @@ defmodule Wardmast.Worker.ReviewGateStallTest do
         Process.sleep(15)
         do_wait(fun, deadline)
     end
+  end
+
+  defp wait_until_reviewer_alive(gate) do
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(10_000)
+
+    Stream.repeatedly(fn ->
+      try do
+        match?(%{reviewer_alive: true}, GenServer.call(gate, :snapshot, 1_000))
+      catch
+        :exit, _ -> false
+      end
+    end)
+    |> Enum.find(fn
+      true ->
+        true
+
+      false ->
+        if System.monotonic_time(:millisecond) > deadline,
+          do: flunk("reviewer never came alive"),
+          else: Process.sleep(15) && false
+    end)
   end
 
   defp wait_until_review_gate(timeout \\ 4_000) do
