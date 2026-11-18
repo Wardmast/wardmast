@@ -438,9 +438,17 @@ config :wardmast, Wardmast.Reports.Cache, enabled: false
 # at a scratch path under test so nothing in the suite can create a socket
 # beside a live session's. Tests that assert on paths override this per test
 # with their own `tmp_dir`.
-config :wardmast,
-       :sessions_runtime_dir,
-       Path.join(System.tmp_dir!(), "arbiter-test-sessions-runtime")
+#
+# On macOS `System.tmp_dir!()` is the long per-user `/var/folders/...` path,
+# which pushes `<dir>/arbiter/session-<uuid>.sock` past the 103-byte Unix-socket
+# limit (bd-15labm), so darwin uses a short per-user dir under `/tmp` instead.
+sessions_runtime_tmp =
+  case :os.type() do
+    {:unix, :darwin} -> Path.join("/tmp", "arb-t-#{System.get_env("USER", "u")}")
+    _ -> Path.join(System.tmp_dir!(), "arbiter-test-sessions-runtime")
+  end
+
+config :wardmast, :sessions_runtime_dir, sessions_runtime_tmp
 
 # Per-session provisioning scaffolds (bd-aprlbb, RFC §9.1). Under tmp so the
 # suite never scaffolds into a real `~/dev/arbiter-sessions`, and — with

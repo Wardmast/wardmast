@@ -44,6 +44,34 @@ defmodule Wardmast.Sessions.NamingDarwinTest do
       assert Path.basename(sock) == "session-#{@id}.sock"
     end
 
+    test "a long stock $TMPDIR does not push the default darwin socket past the limit" do
+      Application.put_env(:wardmast, :sessions_os, :darwin)
+      prior = {System.get_env("TMPDIR"), System.get_env("HOME")}
+      long = "/var/folders/2s/" <> String.duplicate("x", 30) <> "/T"
+      System.put_env("TMPDIR", long)
+      System.delete_env("WARDMAST_SOCKET_ROOT")
+
+      on_exit(fn ->
+        {tmp, home} = prior
+        if tmp, do: System.put_env("TMPDIR", tmp), else: System.delete_env("TMPDIR")
+        if home, do: System.put_env("HOME", home)
+      end)
+
+      assert {:ok, sock} = Naming.socket_path(@id)
+      assert String.starts_with?(sock, "/tmp/")
+      assert byte_size(sock) <= 103
+      assert {:ok, login} = Naming.login_socket_path(@id, "acct")
+      assert byte_size(login) <= 103
+    end
+
+    test "WARDMAST_SOCKET_ROOT override too long is still refused" do
+      Application.put_env(:wardmast, :sessions_os, :darwin)
+      System.put_env("WARDMAST_SOCKET_ROOT", "/tmp/" <> String.duplicate("b", 90))
+      on_exit(fn -> System.delete_env("WARDMAST_SOCKET_ROOT") end)
+
+      assert {:error, {:socket_path_too_long, _, 103}} = Naming.socket_path(@id)
+    end
+
     test "linux without XDG_RUNTIME_DIR is still :no_runtime_dir" do
       Application.put_env(:wardmast, :sessions_os, :linux)
 
