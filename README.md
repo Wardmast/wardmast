@@ -323,7 +323,7 @@ echo "WARDMAST_WORKER_JAIL_UNMASK=~/.config/glab-cli" >> ~/.wardmast/wardmast.en
 ```
 
 Malformed (non-absolute) entries are skipped with a warning and never block
-boot. Don't use `ERL_FLAGS=-arbiter worker_jail_unmask ...`: systemd strips the
+boot. Don't use `ERL_FLAGS=-wardmast worker_jail_unmask ...`: systemd strips the
 quotes and every release then refuses to boot. `ward server doctor` lists the
 unmasked paths ("worker jail unmask").
 
