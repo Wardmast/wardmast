@@ -41,17 +41,17 @@ defmodule WardmastCli.OperatorSocketHomeTest do
     assert OperatorSocket.run_dir() == Path.join(Path.expand("~/.wardmast"), "run")
   end
 
-  test "socket_path/0 matches OperatorProof.socket_path/1 when /run/user is absent" do
+  test "path/0 matches OperatorProof.socket_path/1 when /run/user is absent" do
     System.put_env("WARDMAST_DATA_HOME", "/srv/other-home")
     port = URI.parse(WardmastCli.Client.base_url()).port || Wardmast.Env.port()
 
     if File.dir?("/run/user") do
       # Per-user runtime dir exists on this host: both sides take that branch.
-      assert Path.dirname(OperatorSocket.socket_path()) ==
+      assert Path.dirname(OperatorSocket.path()) ==
                Path.dirname(Wardmast.MCP.OperatorProof.socket_path(port))
     else
-      assert OperatorSocket.socket_path() == Wardmast.MCP.OperatorProof.socket_path(port)
-      assert OperatorSocket.socket_path() == "/srv/other-home/run/operator-#{port}.sock"
+      assert OperatorSocket.path() == Wardmast.MCP.OperatorProof.socket_path(port)
+      assert OperatorSocket.path() == "/srv/other-home/run/operator-#{port}.sock"
     end
   end
 end
