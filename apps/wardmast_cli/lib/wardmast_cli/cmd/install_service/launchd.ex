@@ -143,6 +143,7 @@ defmodule WardmastCli.Cmd.InstallService.Launchd do
     end
   end
 
+  @spec not_root!(String.t()) :: no_return()
   defp not_root!(what) do
     Output.die(
       "cannot #{what}: --system needs root",
@@ -210,6 +211,7 @@ defmodule WardmastCli.Cmd.InstallService.Launchd do
     end
   end
 
+  @spec missing_account!(String.t()) :: no_return()
   defp missing_account!(user) do
     Output.die(
       "service account #{user} does not exist (or has no home directory)",
