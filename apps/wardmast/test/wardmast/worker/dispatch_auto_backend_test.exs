@@ -77,7 +77,7 @@ defmodule Wardmast.Worker.DispatchAutoBackendTest do
         live: 0,
         workspace_ids: [],
         labels: [],
-        caps: %{}
+        caps: %{"image" => "registry"}
       },
       Map.new(attrs)
     )
@@ -131,7 +131,14 @@ defmodule Wardmast.Worker.DispatchAutoBackendTest do
       issue.id,
       Keyword.merge(
         @auto ++
-          [repo: @repo, start_driver: false, nodes: nodes, start_claude: true] ++
+          [
+            repo: @repo,
+            start_driver: false,
+            publish: Wardmast.DispatchImageStub.publish(),
+            plan: Wardmast.DispatchImageStub.plan(),
+            nodes: nodes,
+            start_claude: true
+          ] ++
           [claude_start: capture_spawn()],
         extra
       )
@@ -240,7 +247,7 @@ defmodule Wardmast.Worker.DispatchAutoBackendTest do
       sa_key!(ws)
       issue = ready!(ws, "auto agy with key")
 
-      agy_node = node_row(caps: %{"agy" => true})
+      agy_node = node_row(caps: %{"agy" => true, "image" => "registry"})
 
       assert {:ok, %{worker_pid: pid}} =
                dispatch(issue, [agy_node], agent_type: :gemini)

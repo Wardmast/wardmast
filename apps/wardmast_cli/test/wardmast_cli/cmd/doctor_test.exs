@@ -3113,7 +3113,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
       assert hint =~ "podman image rm"
     end
 
-    test "SI4a: a machine node gets an image source row; build is the legacy-path warning" do
+    test "SI4a: a machine node gets an image source row; build is a warning: no run is placed on it" do
       stub_nodes(
         nodes_resp(%{
           "nodes" => [
@@ -3130,8 +3130,8 @@ defmodule WardmastCli.Cmd.DoctorTest do
       assert %{status: :warn, detail: detail, hint: hint} =
                named(results, "node builds image source")
 
-      assert detail =~ "legacy"
-      assert hint =~ "nodes.machine_image_source"
+      assert detail =~ "no run is placed"
+      assert hint =~ "caps.image_sources"
     end
 
     test "SI4a: a node that cannot reach a registry or was refused a pull is a warning" do

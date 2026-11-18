@@ -140,7 +140,10 @@ defmodule WardmastWeb.RemoteReviewTest do
       "run" => run,
       "task" => "bd-e2e",
       "name" => "arb-#{run}",
-      "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "plan" => nil},
+      "image" => %{
+        "tag" => "localhost/arbiter-dev/beam:abc123",
+        "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+      },
       "cwd" => "/work/tree",
       "mounts" => [
         %{"kind" => "worktree", "path" => "/work/tree"},

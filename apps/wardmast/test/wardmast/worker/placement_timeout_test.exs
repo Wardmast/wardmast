@@ -71,7 +71,7 @@ defmodule Wardmast.Worker.PlacementTimeoutTest do
       "agent_version" => "1.2.3",
       "proto" => 1,
       "kind" => "cluster",
-      "caps" => %{"backend" => "k8s", "limits" => "pod"},
+      "caps" => %{"backend" => "k8s", "limits" => "pod", "image" => "registry"},
       "capacity" => %{"ceiling" => 6},
       "runs" => []
     }
@@ -84,7 +84,13 @@ defmodule Wardmast.Worker.PlacementTimeoutTest do
       [
         security:
           SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}}),
-        node: node,
+        node: Map.put(node, :caps, hello["caps"]),
+        publish: [
+          stub: fn _ctx ->
+            {:ok,
+             %{ref: "registry.example.com/arbiter/worker@sha256:" <> String.duplicate("a", 64)}}
+          end
+        ],
         image: "localhost/arb-test/claude:1",
         podman: "/usr/bin/podman",
         egress: egress,
