@@ -2,6 +2,7 @@ defmodule Wardmast.Worker.Worktree do
   require Logger
 
   alias Wardmast.Worker.DepsRelocate
+  alias Wardmast.Worker.PathGuard
   alias Wardmast.Worker.PortableCp
   alias Wardmast.Worker.PrivateClone
   alias Wardmast.Worker.ReleaseEnv
@@ -107,15 +108,17 @@ defmodule Wardmast.Worker.Worktree do
              is_list(opts) do
     seed_paths = seed_paths(opts)
 
-    with_stub_cleared(branch_name, fn ->
-      case layout(opts) do
-        :private_clone ->
-          create_clone(repo_path, branch_name, base_branch, seed_paths)
+    with :ok <- PathGuard.case_collision(worktree_path(branch_name)) do
+      with_stub_cleared(branch_name, fn ->
+        case layout(opts) do
+          :private_clone ->
+            create_clone(repo_path, branch_name, base_branch, seed_paths)
 
-        :linked_worktree ->
-          create_linked(repo_path, branch_name, base_branch, seed_paths, local_base?(opts))
-      end
-    end)
+          :linked_worktree ->
+            create_linked(repo_path, branch_name, base_branch, seed_paths, local_base?(opts))
+        end
+      end)
+    end
   end
 
   # A leaf holding nothing but `.arbiter/` (no `.git`) is a stub a late mailbox
@@ -883,15 +886,17 @@ defmodule Wardmast.Worker.Worktree do
       when is_binary(repo_path) and is_binary(branch_name) and is_list(opts) do
     seed_paths = seed_paths(opts)
 
-    with_stub_cleared(branch_name, fn ->
-      case layout(opts) do
-        :private_clone ->
-          attach_clone(repo_path, branch_name, Keyword.get(opts, :base), seed_paths)
+    with :ok <- PathGuard.case_collision(worktree_path(branch_name)) do
+      with_stub_cleared(branch_name, fn ->
+        case layout(opts) do
+          :private_clone ->
+            attach_clone(repo_path, branch_name, Keyword.get(opts, :base), seed_paths)
 
-        :linked_worktree ->
-          attach_linked(repo_path, branch_name, seed_paths)
-      end
-    end)
+          :linked_worktree ->
+            attach_linked(repo_path, branch_name, seed_paths)
+        end
+      end)
+    end
   end
 
   defp attach_clone(repo_path, branch_name, base, seed_paths) do
