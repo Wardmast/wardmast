@@ -402,7 +402,7 @@ defmodule WardmastCli.Client do
             error.message,
         hint:
           "The Wardmast server is shedding load; wait a moment and retry, " <>
-            "or run fewer `arb` commands at once."
+            "or run fewer `ward` commands at once."
     }
   end
 
