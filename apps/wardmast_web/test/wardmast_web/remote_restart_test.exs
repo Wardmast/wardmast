@@ -146,7 +146,7 @@ defmodule WardmastWeb.RemoteRestartTest do
       "task" => "bd-e2e",
       "name" => "arb-#{run}",
       "install" => Nodes.InstallId.get(),
-      "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "plan" => nil},
+      "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)},
       "cwd" => "/work/tree",
       "mounts" => [
         %{"kind" => "worktree", "path" => "/work/tree"},

@@ -23,7 +23,11 @@ defmodule Wardmast.Worker.ContainerSpawnRemoteSpecTest do
 
     request = %{
       name: "arb-t-1",
-      image: %{tag: "localhost/x:1", plan: nil},
+      image: %{
+        tag: "localhost/x:1",
+        plan: nil,
+        ref: "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+      },
       worktree: "/work/tree",
       home: "/work/home",
       config_dir: "/work/config",
@@ -107,7 +111,7 @@ defmodule Wardmast.Worker.ContainerSpawnRemoteSpecTest do
     assert {:ok, spec} =
              ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
 
-    assert spec["image"] == %{"tag" => "localhost/x:1", "plan" => nil, "ref" => ref}
+    assert spec["image"] == %{"tag" => "localhost/x:1", "ref" => ref}
     refute Map.has_key?(spec, "pull_auth")
   end
 
@@ -141,7 +145,6 @@ defmodule Wardmast.Worker.ContainerSpawnRemoteSpecTest do
 
     assert spec["image"] == %{
              "tag" => "localhost/x:1",
-             "plan" => nil,
              "ref" => ref,
              "cli_set" => "0a1b2c3d",
              "provider" => "claude",
@@ -298,13 +301,6 @@ defmodule Wardmast.Worker.ContainerSpawnRemoteSpecTest do
     assert spec["secrets"]["GITLAB_HOST"] == "gitlab.com"
     refute inspect(spec["env"]) =~ "glpat-bot"
     refute inspect(spec["command"]) =~ "glpat-bot"
-  end
-
-  test "no ref, no ref key: a build node's spec is unchanged", %{request: request} do
-    assert {:ok, spec} =
-             ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
-
-    assert spec["image"] == %{"tag" => "localhost/x:1", "plan" => nil}
   end
 
   describe "worktree files and host paths (bd-8y8ztm)" do
@@ -473,8 +469,8 @@ defmodule Wardmast.Worker.ContainerSpawnRegistryImageTest do
     [publish: [stub: fn _ctx -> Agent.get(server, & &1) end]]
   end
 
-  test "a build node keeps the plan and nothing is published" do
-    assert {:ok, @plan} =
+  test "a node that cannot take the published image is refused and nothing is published" do
+    assert {:error, {:image_unavailable, :node_cannot_pull}} =
              ContainerSpawn.registry_image(@plan, build_node(), @ctx,
                publish: [stub: fn _ -> flunk("published") end]
              )
@@ -507,7 +503,7 @@ defmodule Wardmast.Worker.ContainerSpawnRegistryImageTest do
 
   # SI4 (`docs/design/remote-workers.md` §21.2.1, §21.4): the per-run choice of source
   # replaces `registry_node?/1`; a machine node that lists `registry` in
-  # `caps.image_sources` pulls under `nodes.machine_image_source: auto`.
+  # `caps.image_sources` pulls.
   describe "a machine node that can pull (SI4)" do
     @push_pw "PUSH-pw-NEVER-ON-A-NODE"
     @install %{
@@ -524,7 +520,7 @@ defmodule Wardmast.Worker.ContainerSpawnRegistryImageTest do
         name: "oryx",
         kind: :machine,
         workspace_ids: [],
-        caps: %{"image" => "build", "image_sources" => ["registry", "build"]}
+        caps: %{"image" => "registry", "image_sources" => ["registry"]}
       }
 
     defp source(extra),
@@ -533,7 +529,7 @@ defmodule Wardmast.Worker.ContainerSpawnRegistryImageTest do
     test "under auto it gets the ref, the image's CLI set and a pull credential, no plan" do
       opts =
         publish_opts({:ok, %{ref: @ref, cli_set: "0a1b2c3d"}}) ++
-          source(machine_image_source: "auto")
+          source([])
 
       assert {:ok, image} = ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
 
@@ -553,34 +549,26 @@ defmodule Wardmast.Worker.ContainerSpawnRegistryImageTest do
       refute inspect(image, limit: :infinity, printable_limit: :infinity) =~ @push_pw
     end
 
-    test "build forces the plan: the same node keeps it, nothing is published" do
-      opts =
-        [publish: [stub: fn _ -> flunk("published") end]] ++ source(machine_image_source: "build")
-
-      assert {:ok, @plan} = ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
-    end
-
-    test "under auto with no pull credential it keeps the plan; the push credential is not used" do
+    test "with no pull credential it is refused; the push credential is not used" do
       no_pull = Map.drop(@install, [:pull_username, :pull_password])
 
       opts =
         [publish: [stub: fn _ -> flunk("published") end]] ++
-          source(machine_image_source: "auto", config: no_pull)
+          source(config: no_pull)
 
-      assert {:ok, image} = ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
-      assert image == @plan
+      assert {:error, {:image_unavailable, :no_pull_credential}} =
+               ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
     end
 
-    test "an explicit image (no plan) on a machine node stays a tag it holds" do
-      opts =
-        [publish: [stub: fn _ -> flunk("published") end]] ++ source(machine_image_source: "auto")
-
+    test "an explicit image (no plan) has nothing to publish: refused" do
       image = %{tag: "localhost/x:1", plan: nil}
-      assert {:ok, ^image} = ContainerSpawn.registry_image(image, machine_node(), %{}, opts)
+
+      assert {:error, {:image_unavailable, :no_plan_to_publish}} =
+               ContainerSpawn.registry_image(image, machine_node(), %{}, source([]))
     end
 
     test "a publish that fails is image_unavailable, as for a cluster" do
-      opts = publish_opts({:error, {:timeout, 5}}) ++ source(machine_image_source: "auto")
+      opts = publish_opts({:error, {:timeout, 5}}) ++ source([])
 
       assert {:error, {:image_unavailable, {:timeout, 5}}} =
                ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
@@ -597,20 +585,13 @@ defmodule Wardmast.Worker.ContainerSpawnRegistryImageTest do
         on_done: fn _key, _result -> :ok end
       ]
 
-      opts = [publish: publish] ++ source(machine_image_source: "auto")
+      opts = [publish: publish] ++ source([])
 
       assert {:error, {:image_pending, :image_key_1}} =
                ContainerSpawn.registry_image(@plan, machine_node(), @ctx, opts)
 
       assert {:error, {:image_pending, :image_key_1}} =
                ContainerSpawn.registry_image(@plan, registry_node(), @ctx, publish: publish)
-
-      # forced to build, the same node builds: nothing is published or held
-      build =
-        [publish: [stub: fn _ -> flunk("published") end, wait: false]] ++
-          source(machine_image_source: "build")
-
-      assert {:ok, @plan} = ContainerSpawn.registry_image(@plan, machine_node(), @ctx, build)
     end
   end
 end

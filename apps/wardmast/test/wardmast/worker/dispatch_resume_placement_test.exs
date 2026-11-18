@@ -87,7 +87,7 @@ defmodule Wardmast.Worker.DispatchResumePlacementTest do
       live: 0,
       workspace_ids: [],
       labels: [],
-      caps: %{}
+      caps: %{"image" => "registry"}
     }
   end
 

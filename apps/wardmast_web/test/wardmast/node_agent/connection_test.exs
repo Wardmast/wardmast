@@ -278,7 +278,7 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
       "version" => 1,
       "run" => "f1",
       "name" => "arb-f1",
-      "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "plan" => nil},
+      "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)},
       "cwd" => "/work/tree",
       "mounts" => [
         %{"kind" => "worktree", "path" => "/work/tree"},
@@ -350,7 +350,7 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
         "version" => 1,
         "run" => run,
         "name" => "arb-#{run}",
-        "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "plan" => nil},
+        "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)},
         "cwd" => "/work/tree",
         "mounts" => [
           %{"kind" => "worktree", "path" => "/work/tree"},

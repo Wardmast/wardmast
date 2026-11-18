@@ -5,7 +5,6 @@ defmodule Wardmast.NodeAgent.Supervisor do
       TaskSupervisor      readiness probes, the upgrade download
       Status              <node_home>/status.json (what `arbiter-node status` reads)
       Upgrader            one self-upgrade at a time
-      Image.Builder       builds a run's image from the plan the spec carries
       RunRegistry         the run table (RW9: `Wardmast.NodeAgent.Runs`)
       RunSupervisor       one `Wardmast.NodeAgent.Run` per assigned run
       Monitor             senses temperature and memory pressure, derates (bd-6w7usy)
@@ -32,7 +31,6 @@ defmodule Wardmast.NodeAgent.Supervisor do
   alias Wardmast.NodeAgent.Runs
   alias Wardmast.NodeAgent.Status
   alias Wardmast.NodeAgent.Upgrader
-  alias Wardmast.Worker.Image
 
   require Logger
 
@@ -53,6 +51,8 @@ defmodule Wardmast.NodeAgent.Supervisor do
 
     case Config.load(opts) do
       {:ok, config} ->
+        # SI13: the one-time removal of the retired shelf and seed scratch, before any run.
+        _ = Wardmast.NodeAgent.LegacyCleanup.run(config.node_home)
         backend = config.backend
         # The run table before the connection: `Connection` addresses runs.
         config = %{
@@ -67,7 +67,6 @@ defmodule Wardmast.NodeAgent.Supervisor do
             {Status, path: config.status_path},
             {Upgrader, config: config}
           ] ++
-            image_builder() ++
             Runs.child_specs() ++
             [{Wardmast.NodeAgent.ImageGC, config: config}, prefetch_spec(config)] ++
             [
@@ -128,13 +127,6 @@ defmodule Wardmast.NodeAgent.Supervisor do
   defp own_cap(config) do
     suggestion = Wardmast.NodeAgent.Protocol.capacity_facts()["suggestion"]
     if config.max_workers, do: min(suggestion, config.max_workers), else: suggestion
-  end
-
-  # `Image.Builder` builds a plan's image on this node (RW9). An agent boots
-  # without the primary's application tree, so it starts its own; an
-  # embedded one (a test that runs the primary tree alongside) already has it.
-  defp image_builder do
-    if Process.whereis(Image.Builder), do: [], else: [{Image.Builder, []}]
   end
 
   defp record_unconfigured(opts, reason) do

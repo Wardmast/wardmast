@@ -47,7 +47,6 @@ defmodule Wardmast.NodeAgent.RunTest do
       sink: self(),
       node_id: "n1",
       image_fun: fn _image, _opts -> :ok end,
-      files_fun: fn _sha, _name -> {:ok, cli} end,
       delegated_fun: fn -> ["memory", "pids", "cpu"] end,
       exit_retention_ms: 60_000
     ]
@@ -63,7 +62,10 @@ defmodule Wardmast.NodeAgent.RunTest do
         "task" => "bd-abc",
         "name" => "arb-#{run}",
         "install" => "inst1",
-        "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "plan" => nil},
+        "image" => %{
+          "tag" => "localhost/arbiter-dev/beam:abc123",
+          "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+        },
         "cwd" => "/work/tree",
         "mounts" => [
           %{"kind" => "worktree", "path" => "/work/tree"},
@@ -73,13 +75,7 @@ defmodule Wardmast.NodeAgent.RunTest do
             "path" => "/work/config",
             "files" => %{"settings.json" => Base.encode64("{}")}
           },
-          %{"kind" => "tmp", "path" => "/work/tmp"},
-          %{
-            "kind" => "cli",
-            "name" => "claude",
-            "sha256" => String.duplicate("a", 64),
-            "path" => "/opt/arbiter/cli/claude"
-          }
+          %{"kind" => "tmp", "path" => "/work/tmp"}
         ],
         "env" => %{"ARB_HOST" => "http://127.0.0.1:4848"},
         "secrets" => %{"CLAUDE_CODE_OAUTH_TOKEN" => @token},
@@ -317,7 +313,7 @@ defmodule Wardmast.NodeAgent.RunTest do
 
       # path transparency: the container sees the primary's paths
       assert Enum.any?(argv, &String.ends_with?(&1, ":/work/tree:rw,Z"))
-      assert "/opt/arbiter/cli/claude" in Enum.map(argv, &(&1 |> String.split(":") |> Enum.at(1)))
+      refute Enum.any?(argv, &String.contains?(&1, "/opt/arbiter/cli"))
 
       for flag <- ~w(--privileged --cap-add --device --pid=host --network=host --userns=host) do
         refute flag in argv
@@ -689,13 +685,10 @@ defmodule Wardmast.NodeAgent.RunTest do
           %{
             "image" => %{
               "tag" => "localhost/arbiter-dev/beam:abc123",
-              "plan" => nil,
               "ref" => @pull_ref,
               "cli_set" => "0a1b2c3d",
               "provider" => "claude"
             },
-            # a registry run is sent no CLI files: the CLIs are image layers
-            "mounts" => Enum.reject(base["mounts"], &(&1["kind"] == "cli")),
             "pull_auth" => %{
               "registry" => "registry.example.com",
               "username" => "deploy-token-9",
@@ -943,14 +936,13 @@ defmodule Wardmast.NodeAgent.RunTest do
           "checkout" => %{"branch" => "feature/x", "read_only" => true},
           "image" => %{
             "tag" => "localhost/arbiter-dev/beam:abc123",
-            "plan" => nil,
             "ref" => @pull_ref,
             "cli_set" => "0a1b2c3d",
             "provider" => "claude"
           }
         })
 
-      Map.update!(spec, "mounts", fn mounts -> Enum.reject(mounts, &(&1["kind"] == "cli")) end)
+      spec
     end
 
     test "a pull run installs the pulled image's seed layer, relocated to the container path",
@@ -1027,26 +1019,6 @@ defmodule Wardmast.NodeAgent.RunTest do
         Enum.find(pulled_checkout_spec("sl2")["mounts"], &(&1["kind"] == "worktree"))
 
       assert seed_opts[:retarget_to] == worktree_mount["path"]
-    end
-
-    test "a run that builds its image from a plan never tries a seed layer",
-         %{opts: opts} do
-      test = self()
-
-      opts =
-        Keyword.merge(opts,
-          deps_cache: true,
-          deps_fun: fn _, _, _ -> {:ok, %{}} end,
-          seed_layer_fun: fn _, _, _ ->
-            send(test, :layer_tried)
-            {:ok, %{}}
-          end,
-          checkout_fun: &fake_checkout/3
-        )
-
-      assert {:ok, "sl3"} = Runs.assign(checkout_spec("sl3"), opts)
-      wait_event("sl3", "exit")
-      refute_received :layer_tried
     end
 
     test "a seed that fails does not refuse a run that has network: the worker fetches for itself",

@@ -4,7 +4,7 @@ defmodule WardmastWeb.RemotePullTest do
   the real halves: a machine node runs a repo's **published image, pulled from a
   registry**, with no CLI file mounted.
 
-    * **The primary** is real: the settings (`nodes.machine_image_source: auto`, the
+    * **The primary** is real: the settings (the
       install-wide `nodes.registry` with its push login and its read-only pull login,
       Cloak-encrypted), `ContainerSpawn.prepare_remote/1` (the plan path, the per-run
       source choice, the reach rule, no shelved CLI), `remote_spec/3`,
@@ -308,7 +308,6 @@ defmodule WardmastWeb.RemotePullTest do
   test "the node pulls the published image with a tmpfs credential and runs it with no CLI mount; " <>
          "neither credential reaches a log or the node's disk, and the push one never leaves the primary",
        ctx do
-    {:ok, _} = Settings.set_nodes_machine_image_source("auto")
     previous_level = Logger.level()
     Logger.configure(level: :debug)
     on_exit(fn -> Logger.configure(level: previous_level) end)
@@ -387,38 +386,17 @@ defmodule WardmastWeb.RemotePullTest do
     end
   end
 
-  test "build forces the legacy path: the same node is sent the plan and its CLI files, and no credential",
-       ctx do
-    assert Settings.machine_image_source() == "auto"
-    {:ok, _} = Settings.set_nodes_machine_image_source("build")
-
-    opts = prepare_opts(ctx, publish: [stub: fn _ -> flunk("published under build") end])
-    assert {:ok, request} = ContainerSpawn.prepare_remote(opts)
-
-    assert request.image.plan != nil
-    refute Map.has_key?(request.image, :ref)
-    assert [_ | _] = request.cli
-
-    assert {:ok, spec} = ContainerSpawn.remote_spec(request, port_args(request), "si4-build")
-    refute Map.has_key?(spec, "pull_auth")
-    body = Jason.encode!(spec)
-    for marker <- markers(), do: refute(body =~ marker)
-  end
-
   test "a node pinned to a workspace is never handed the install-wide pull credential", ctx do
-    {:ok, _} = Settings.set_nodes_machine_image_source("auto")
 
     {:ok, _} =
       Nodes.update_node(ctx.node, %{workspace_ids: [ctx.ws.id]}, Wardmast.Actor.operator("test"))
 
     opts = prepare_opts(ctx, publish: [stub: fn _ -> flunk("published for a pinned node") end])
-    assert {:ok, request} = ContainerSpawn.prepare_remote(opts)
-    assert request.image.plan != nil
-    refute Map.has_key?(request.image, :pull)
+    # SI13: with no credential it may hold there is no plan to fall back to
+    assert {:error, {:image_unavailable, _}} = ContainerSpawn.prepare_remote(opts)
   end
 
   test "an assign that dies with the spec in its exit reason prints no credential", ctx do
-    {:ok, _} = Settings.set_nodes_machine_image_source("auto")
     assert {:ok, request} = ContainerSpawn.prepare_remote(prepare_opts(ctx))
     assert {:ok, spec} = ContainerSpawn.remote_spec(request, port_args(request), "si4-dead")
 

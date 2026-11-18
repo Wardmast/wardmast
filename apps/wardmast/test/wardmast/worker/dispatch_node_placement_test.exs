@@ -200,7 +200,7 @@ defmodule Wardmast.Worker.DispatchNodePlacementTest do
         live: 0,
         workspace_ids: [],
         labels: [],
-        caps: %{}
+        caps: %{"image" => "registry"}
       }
     end
 
@@ -445,7 +445,7 @@ defmodule Wardmast.Worker.DispatchNodePlacementTest do
         live: 0,
         workspace_ids: [],
         labels: [],
-        caps: %{}
+        caps: %{"image" => "registry"}
       }
 
       assert {:ok, %{worker_pid: _pid}} = dispatch(issue, @podman ++ [nodes: [row]])

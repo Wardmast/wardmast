@@ -19,7 +19,7 @@ defmodule Wardmast.NodeAgent.RunSpec do
   | `version` | `1` |
   | `run`, `task`, `name` | the run id, the ticket id and the container name (`arb-…`) |
   | `install` | the primary's install id (label `arbiter.install`; reaping, RW12) |
-  | `image` | `%{"tag" => tag, "plan" => plan \| nil}`; a plan is built on the node. A registry node (A2) gets `"ref"`, a digest-pinned reference the primary pushed, and no plan. A machine node that pulls it (SI4) also gets `"cli_set"` (the image's `arbiter.cli-set`), `"provider"` (whose `arbiter.cli.<provider>.*` labels it must carry) and, for a registry the operator marked insecure, `"insecure": true` |
+  | `image` | `%{"tag" => tag, "ref" => ref}`: `ref` is the digest-pinned reference the primary published, always required (SI13 retired build-from-plan; a `"plan"` is refused). A machine node also gets `"cli_set"` (the image's `arbiter.cli-set`), `"provider"` (whose `arbiter.cli.<provider>.*` labels it must carry) and, for a registry the operator marked insecure, `"insecure": true` |
   | `pull_auth` | optional (SI4): `%{"registry", "username", "password"}`, the read credential for one pull of `image.ref` from its own registry host (`Wardmast.NodeAgent.PullAuth`); written only to a 0600 auth file on the run's tmpfs and deleted after the pull. Absent: an anonymous pull |
   | `cwd` | the container-side working directory (the primary's own path: path transparency) |
   | `mounts` | `[%{"kind" => k, "path" => container path, …}]`; kinds below |
@@ -82,7 +82,7 @@ defmodule Wardmast.NodeAgent.RunSpec do
   @type t :: %__MODULE__{}
 
   @allowed_keys ~w(version run task name install image cwd mounts bridges env secrets secret_files limits network services command extra_args checkout pull_auth)
-  @mount_kinds ~w(worktree home config_dir tmp cli prompt)
+  @mount_kinds ~w(worktree home config_dir tmp prompt)
   @dir_kinds ~w(worktree home config_dir tmp)
   # Claude's generated settings and memory, and agy's (bd-b2t0kw: its config dir is
   # `$HOME/.gemini`, the posture at `antigravity-cli/settings.json`).
@@ -103,7 +103,6 @@ defmodule Wardmast.NodeAgent.RunSpec do
   # image resolves to; `@` is only ever allowed as that digest suffix.
   @tag_re ~r/\A[a-z0-9][a-z0-9._\/:-]{0,200}(@sha256:[0-9a-f]{64})?\z/
   @cli_name_re ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/
-  @cli_dir "/opt/arbiter/cli/"
   @max_secret_bytes 65_536
   @max_prompt_bytes 4_194_304
   @max_session_bytes 536_870_912
@@ -257,10 +256,10 @@ defmodule Wardmast.NodeAgent.RunSpec do
     if String.starts_with?(tag, "-") or not Regex.match?(@tag_re, tag) do
       refuse({:bad_value, "image.tag"})
     else
-      with {:ok, plan} <- plan(image["plan"]),
+      with :ok <- no_plan(image),
            {:ok, ref} <- image_ref(image),
            {:ok, pulled} <- pulled_image(image) do
-        {:ok, %{tag: tag, plan: plan} |> Map.merge(ref) |> Map.merge(pulled)}
+        {:ok, %{tag: tag} |> Map.merge(ref) |> Map.merge(pulled)}
       end
     end
   end
@@ -361,45 +360,11 @@ defmodule Wardmast.NodeAgent.RunSpec do
       else: refuse({:bad_value, "image.ref"})
   end
 
-  defp image_ref(_), do: {:ok, %{}}
+  defp image_ref(_), do: refuse({:missing, "image.ref"})
 
-  defp plan(nil), do: {:ok, nil}
-
-  defp plan(
-         %{"tag" => tag, "name" => name, "hash" => hash, "containerfile" => text, "base" => base} =
-           plan
-       )
-       when is_binary(tag) and is_binary(name) and is_binary(hash) and is_binary(text) and
-              is_map(base) do
-    with {:ok, args} <- build_args(plan["build_args"] || []),
-         {:ok, base} <- layer(base) do
-      {:ok,
-       %{
-         tag: tag,
-         name: name,
-         hash: hash,
-         containerfile: text,
-         build_args: args,
-         base: base
-       }}
-    end
-  end
-
-  defp plan(_), do: refuse({:bad_value, "image.plan"})
-
-  defp layer(%{"tag" => tag, "name" => name, "hash" => hash, "containerfile" => text})
-       when is_binary(tag) and is_binary(name) and is_binary(hash) and is_binary(text),
-       do: {:ok, %{tag: tag, name: name, hash: hash, containerfile: text}}
-
-  defp layer(_), do: refuse({:bad_value, "image.plan.base"})
-
-  defp build_args(args) when is_list(args) do
-    if Enum.all?(args, &match?([k, v] when is_binary(k) and is_binary(v), &1)),
-      do: {:ok, Enum.map(args, fn [k, v] -> {k, v} end)},
-      else: refuse({:bad_value, "image.plan.build_args"})
-  end
-
-  defp build_args(_), do: refuse({:bad_value, "image.plan.build_args"})
+  # SI13: the node never builds an image from a plan.
+  defp no_plan(%{"plan" => plan}) when not is_nil(plan), do: refuse({:bad_value, "image.plan"})
+  defp no_plan(_), do: :ok
 
   # -- paths ------------------------------------------------------------------------
 
@@ -463,18 +428,6 @@ defmodule Wardmast.NodeAgent.RunSpec do
   end
 
   defp mount_for(kind, path, _mount) when kind in @dir_kinds, do: {:ok, %{kind: kind, path: path}}
-
-  defp mount_for("cli", path, %{"name" => name, "sha256" => sha})
-       when is_binary(name) and is_binary(sha) do
-    cond do
-      not Regex.match?(@cli_name_re, name) -> refuse({:bad_value, "mounts.cli.name"})
-      not Regex.match?(@sha_re, sha) -> refuse({:bad_value, "mounts.cli.sha256"})
-      not String.starts_with?(path, @cli_dir) -> refuse({:forbidden_path, path})
-      true -> {:ok, %{kind: "cli", path: path, name: name, sha256: sha}}
-    end
-  end
-
-  defp mount_for("cli", _path, _mount), do: refuse({:bad_value, "mounts.cli"})
 
   defp mount_for("prompt", path, %{"content" => content}) when is_binary(content) do
     case Base.decode64(content) do

@@ -13,7 +13,7 @@ defmodule Wardmast.Settings.RegistryTest do
            nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
            nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.chart_ref nodes.registry_username
            nodes.registry_password nodes.registry_insecure nodes.registry_public_ok nodes.registry.publish_timeout_ms
-           nodes.registry_pull_username nodes.registry_pull_password nodes.machine_image_source
+           nodes.registry_pull_username nodes.registry_pull_password
            worker.cli.versions worker.cli.manual worker.cli_set.hold worker.image.local_published)
 
   test "keys/0 lists every installation setting" do
@@ -129,31 +129,8 @@ defmodule Wardmast.Settings.RegistryTest do
   end
 
   # SI4 (`docs/design/remote-workers.md` §21.4, §21.6): the install-wide read credential a
-  # machine node may be handed for one pull, and the switch that lets machines pull at all.
+  # machine node may be handed for one pull,.
   describe "machine-node pull settings (SI4)" do
-    test "nodes.machine_image_source is auto or build, defaults to auto, operator-only" do
-      assert %{value: "auto", default: "auto", overridden: false, allowed: ["auto", "build"]} =
-               Registry.describe("nodes.machine_image_source")
-
-      assert Settings.machine_image_source() == "auto"
-
-      for bad <- ["registry", "Auto", "", 1, true] do
-        assert {:error, msg} = Registry.cast("nodes.machine_image_source", bad)
-        assert msg =~ "auto or build"
-      end
-
-      assert "nodes.machine_image_source" in Registry.operator_only_keys()
-
-      assert {:error, {:unauthorized, _}} =
-               Registry.put("nodes.machine_image_source", "auto", authority: :coordinator)
-
-      assert {:ok, "auto"} = Registry.put("nodes.machine_image_source", "auto")
-      assert Settings.machine_image_source() == "auto"
-      assert {:ok, nil} = Registry.put("nodes.machine_image_source", nil)
-      assert Settings.machine_image_source() == "auto"
-      assert {:error, :invalid_value} = Settings.set_nodes_machine_image_source("registry")
-    end
-
     test "the pull login is a registry username, operator-only" do
       assert {:ok, "deploy-token-1"} =
                Registry.put("nodes.registry_pull_username", "deploy-token-1")
@@ -468,7 +445,7 @@ defmodule Wardmast.Settings.RegistryTest do
                       nodes.public_url nodes.allow_public_endpoint nodes.join_token_ttl_minutes
                       nodes.fence_after_s nodes.lost_after_s nodes.registry nodes.registry_username
                       nodes.registry_password nodes.registry_insecure nodes.registry_public_ok nodes.registry.publish_timeout_ms nodes.chart_ref
-                      nodes.registry_pull_username nodes.registry_pull_password nodes.machine_image_source
+                      nodes.registry_pull_username nodes.registry_pull_password
                       worker.cli.versions worker.cli.manual worker.cli_set.hold worker.image.local_published)
 
     test "operator_only_keys/0 is the schema's operator-only set" do

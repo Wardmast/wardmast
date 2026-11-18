@@ -1029,33 +1029,6 @@ defmodule Wardmast.Settings do
 
   # ---- machine-node pulls (SI4) ----------------------------------------------
 
-  @machine_image_sources ~w(auto build)
-
-  @doc "The `nodes.machine_image_source` values."
-  @spec machine_image_sources() :: [String.t()]
-  def machine_image_sources, do: @machine_image_sources
-
-  @doc """
-  Whether a machine node may be handed the published image to pull (SI4,
-  `docs/design/remote-workers.md` §21.6): `"auto"` (the default, SI4a), or `"build"`,
-  under which every machine node builds from a plan as before.
-  """
-  @spec machine_image_source() :: String.t()
-  def machine_image_source, do: nodes_machine_image_source() || "auto"
-
-  @doc "The persisted `nodes.machine_image_source` override."
-  @spec nodes_machine_image_source() :: String.t() | nil
-  def nodes_machine_image_source, do: read_setting(:nodes_machine_image_source)
-
-  @spec set_nodes_machine_image_source(String.t() | nil) ::
-          {:ok, String.t() | nil} | {:error, term()}
-  def set_nodes_machine_image_source(nil), do: write_setting(:nodes_machine_image_source, nil)
-
-  def set_nodes_machine_image_source(source) when source in @machine_image_sources,
-    do: write_setting(:nodes_machine_image_source, source)
-
-  def set_nodes_machine_image_source(_), do: {:error, :invalid_value}
-
   @doc "The read-only login machine nodes pull from `nodes.registry` with, or `nil`."
   @spec nodes_registry_pull_username() :: String.t() | nil
   def nodes_registry_pull_username, do: read_setting(:nodes_registry_pull_username)

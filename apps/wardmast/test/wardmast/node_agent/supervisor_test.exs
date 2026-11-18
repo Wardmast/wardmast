@@ -45,8 +45,6 @@ defmodule Wardmast.NodeAgent.SupervisorTest do
 
     children = AgentSupervisor |> Supervisor.which_children() |> Enum.map(&elem(&1, 0))
 
-    # `Image.Builder` is the primary app tree's here, so the agent doesn't start
-    # a second one; a bare agent boot does.
     assert Enum.sort(children) ==
              Enum.sort([
                Wardmast.NodeAgent.TaskSupervisor,

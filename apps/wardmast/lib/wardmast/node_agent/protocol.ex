@@ -41,11 +41,10 @@ defmodule Wardmast.NodeAgent.Protocol do
       # as they land.
       "caps" => %{
         "backend" => "podman",
-        "image" => "build",
-        # SI4 (§21.2.1, §21.6): the primary may hand this node a digest-pinned ref of the
-        # published image to pull (`NodeAgent.ImagePull`) instead of a plan to build; it
-        # chooses per run. `image` stays `build` until the plan path is retired.
-        "image_sources" => ["registry", "build"],
+        # SI13: every machine agent takes the published, digest-pinned image
+        # (`NodeAgent.ImagePull`); build-from-plan is gone.
+        "image" => "registry",
+        "image_sources" => ["registry"],
         "runtime_contracts" => ImagePull.runtime_contracts(),
         # SI7: the primary may send `image.prefetch{ref, cli_set, pull_auth}` after a publish.
         "image_prefetch" => true,

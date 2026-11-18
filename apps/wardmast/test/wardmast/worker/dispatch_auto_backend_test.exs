@@ -77,7 +77,7 @@ defmodule Wardmast.Worker.DispatchAutoBackendTest do
         live: 0,
         workspace_ids: [],
         labels: [],
-        caps: %{}
+        caps: %{"image" => "registry"}
       },
       Map.new(attrs)
     )

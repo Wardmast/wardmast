@@ -58,14 +58,14 @@ defmodule Wardmast.NodeAgent.ProtocolTest do
 
     # SI4 (`docs/design/remote-workers.md` §21.2.1, §21.6): the sources the node can take
     # (the primary chooses per run) and the image runtime contracts it runs. `image`
-    # stays `build` until the plan path is retired (SI13).
-    test "advertises pulling the published image beside building, and its runtime contracts" do
+    # is `registry` since SI13 (build-from-plan is retired).
+    test "advertises pulling the published image, and its runtime contracts" do
       caps = Protocol.hello(config([]), %{})["caps"]
-      assert caps["image_sources"] == ["registry", "build"]
+      assert caps["image_sources"] == ["registry"]
       assert caps["runtime_contracts"] == Wardmast.NodeAgent.ImagePull.runtime_contracts()
       assert caps["runtime_contracts"] == [1]
       assert caps["image_prefetch"] == true
-      assert caps["image"] == "build"
+      assert caps["image"] == "registry"
     end
   end
 

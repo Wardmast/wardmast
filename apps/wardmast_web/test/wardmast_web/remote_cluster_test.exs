@@ -221,7 +221,7 @@ defmodule WardmastWeb.RemoteClusterTest do
           "run" => run,
           "name" => "arb-#{run}",
           "install" => InstallId.get(),
-          "image" => %{"tag" => "arbiter-dev/beam:abc", "plan" => nil, "ref" => @canary_image}
+          "image" => %{"tag" => "arbiter-dev/beam:abc", "ref" => @canary_image}
         },
         overrides
       )
@@ -341,7 +341,7 @@ defmodule WardmastWeb.RemoteClusterTest do
       node_id = boot_agent(ctx)
       lease_held!()
 
-      unpinned = %{"tag" => "x", "plan" => nil, "ref" => "docker.io/library/alpine:latest"}
+      unpinned = %{"tag" => "x", "ref" => "docker.io/library/alpine:latest"}
 
       assert {:error, {:refused, "bad_spec", detail}} =
                Executor.prepare(%{id: node_id}, spec("run-e2", %{"image" => unpinned}),
@@ -358,7 +358,6 @@ defmodule WardmastWeb.RemoteClusterTest do
 
       outside = %{
         "tag" => "x",
-        "plan" => nil,
         "ref" => "docker.io/library/alpine@sha256:#{Fx.digest()}"
       }
 
