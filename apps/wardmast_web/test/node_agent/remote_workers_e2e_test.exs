@@ -821,7 +821,11 @@ defmodule WardmastWeb.NodeAgent.RemoteWorkersE2ETest do
 
       request = %{
         name: "arb-m1",
-        image: %{tag: ctx.image, plan: nil, ref: "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)},
+        image: %{
+          tag: ctx.image,
+          plan: nil,
+          ref: "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+        },
         worktree: ctx.repo,
         home: Path.join(run_dir, "home"),
         config_dir: Path.join(run_dir, "claude-config"),

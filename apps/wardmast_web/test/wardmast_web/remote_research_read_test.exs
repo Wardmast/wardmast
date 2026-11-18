@@ -203,7 +203,7 @@ defmodule WardmastWeb.RemoteResearchReadTest do
       live: 0,
       workspace_ids: [],
       labels: [],
-      caps: %{}
+      caps: %{"image" => "registry"}
     }
 
     sockets = Path.join(ctx.root, "dispatch-sockets")
@@ -225,6 +225,11 @@ defmodule WardmastWeb.RemoteResearchReadTest do
       preflight: false,
       nodes: [row],
       image: "localhost/arbiter-dev/beam:abc123",
+      publish: [
+        stub: fn _ ->
+          {:ok, %{ref: "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)}}
+        end
+      ],
       egress: egress
     )
   end

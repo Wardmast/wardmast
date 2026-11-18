@@ -146,7 +146,10 @@ defmodule WardmastWeb.RemoteRestartTest do
       "task" => "bd-e2e",
       "name" => "arb-#{run}",
       "install" => Nodes.InstallId.get(),
-      "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)},
+      "image" => %{
+        "tag" => "localhost/arbiter-dev/beam:abc123",
+        "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+      },
       "cwd" => "/work/tree",
       "mounts" => [
         %{"kind" => "worktree", "path" => "/work/tree"},
@@ -279,9 +282,14 @@ defmodule WardmastWeb.RemoteRestartTest do
         SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}}),
       provider: "claude",
       image: "localhost/arbiter-dev/beam:abc123",
+      publish: [
+        stub: fn _ ->
+          {:ok, %{ref: "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)}}
+        end
+      ],
       egress: egress,
       arb_token: "arb-tok",
-      node: %{id: ctx.node.id, capacity: %{}}
+      node: %{id: ctx.node.id, capacity: %{}, caps: %{"image" => "registry"}}
     ]
   end
 
@@ -834,9 +842,14 @@ defmodule WardmastWeb.RemoteRestartTest do
                  security: policy,
                  provider: "claude",
                  image: "localhost/arbiter-dev/beam:abc123",
+                 publish: [
+                   stub: fn _ ->
+                     {:ok, %{ref: "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)}}
+                   end
+                 ],
                  egress: egress,
                  arb_token: "arb-tok",
-                 node: %{id: ctx.node.id, capacity: %{}}
+                 node: %{id: ctx.node.id, capacity: %{}, caps: %{"image" => "registry"}}
                )
 
       assert Executor.live?(handle)

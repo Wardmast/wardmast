@@ -224,7 +224,10 @@ defmodule WardmastWeb.NodeBridgeE2ETest do
       "run" => run,
       "task" => ctx.task.id,
       "name" => "arb-#{run}",
-      "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)},
+      "image" => %{
+        "tag" => "localhost/arbiter-dev/beam:abc123",
+        "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+      },
       "cwd" => "/work/tree",
       "mounts" => [
         %{"kind" => "worktree", "path" => "/work/tree"},

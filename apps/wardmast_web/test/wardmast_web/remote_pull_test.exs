@@ -322,7 +322,6 @@ defmodule WardmastWeb.RemotePullTest do
         # the primary chose the pull: the published digest, no plan, no CLI file
         assert request.image.ref == ctx.ref
         assert request.image.plan == nil
-        assert request.cli == []
 
         assert {:ok, spec} = ContainerSpawn.remote_spec(request, port_args(request), run_id)
         # The checkout round trip (seed bundle in, snapshot out) has suites of its own;
@@ -387,7 +386,6 @@ defmodule WardmastWeb.RemotePullTest do
   end
 
   test "a node pinned to a workspace is never handed the install-wide pull credential", ctx do
-
     {:ok, _} =
       Nodes.update_node(ctx.node, %{workspace_ids: [ctx.ws.id]}, Wardmast.Actor.operator("test"))
 

@@ -44,6 +44,11 @@ defmodule WardmastWeb.RemoteResumeTest do
   @secret "tok_WORKSPACE_SECRET_4ic681"
 
   setup %{tmp_dir: tmp_dir} do
+    # SI13: a node pulls the published image, so the install has a registry and a read login
+    {:ok, _} = Wardmast.Settings.set_nodes_registry("registry.example.com/arb")
+    {:ok, _} = Wardmast.Settings.set_nodes_registry_pull_username("reader")
+    {:ok, _} = Wardmast.Settings.set_nodes_registry_pull_password("pull-only")
+
     root = Path.join(System.tmp_dir!(), "rz-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
     on_exit(fn -> File.rm_rf(root) end)
@@ -356,7 +361,10 @@ defmodule WardmastWeb.RemoteResumeTest do
       "task" => ctx.issue.id,
       "name" => "arb-#{run.id}",
       "install" => Nodes.InstallId.get(),
-      "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)},
+      "image" => %{
+        "tag" => "localhost/arbiter-dev/beam:abc123",
+        "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+      },
       "cwd" => ctx.home,
       "mounts" => [
         %{"kind" => "worktree", "path" => ctx.home},
@@ -419,7 +427,7 @@ defmodule WardmastWeb.RemoteResumeTest do
       live: 0,
       workspace_ids: [],
       labels: [],
-      caps: %{}
+      caps: %{"image" => "registry"}
     }
 
     egress = fn _opts ->
@@ -442,6 +450,11 @@ defmodule WardmastWeb.RemoteResumeTest do
       preflight: false,
       nodes: [row],
       image: "localhost/arbiter-dev/beam:abc123",
+      publish: [
+        stub: fn _ ->
+          {:ok, %{ref: "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)}}
+        end
+      ],
       egress: egress
     ]
   end

@@ -830,8 +830,13 @@ defmodule Wardmast.Nodes.Placement do
 
   @doc """
   KH13: can `row` pull images from `registry` (the repo's registry reference, e.g.
+<<<<<<< HEAD
   `registry.gitlab.com/my-app`)? True without a registry to check, for a node that does not
   advertise `caps.registries` (a machine node builds from a plan; an older controller
+=======
+  `registry.gitlab.com/vstim`)? True without a registry to check, for a node that does not
+  advertise `caps.registries` (a machine node; an older controller
+>>>>>>> 8f62cec4 (SI13: retire build-from-plan for nodes, the CLI shelf and /nodes/files)
   predates the cap), and for a cluster node when one of its prefixes (each ending in `/`)
   covers `registry`.
   """

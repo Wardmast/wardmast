@@ -117,7 +117,10 @@ defmodule WardmastWeb.RemoteRunTest do
         "run" => run,
         "task" => "bd-e2e",
         "name" => "arb-#{run}",
-        "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)},
+        "image" => %{
+          "tag" => "localhost/arbiter-dev/beam:abc123",
+          "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+        },
         "cwd" => "/work/tree",
         "mounts" => [
           %{"kind" => "worktree", "path" => "/work/tree"},
@@ -358,9 +361,18 @@ defmodule WardmastWeb.RemoteRunTest do
           security: policy,
           provider: "claude",
           image: "localhost/arbiter-dev/beam:abc123",
+          publish: [
+            stub: fn _ ->
+              {:ok, %{ref: "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)}}
+            end
+          ],
           egress: egress,
           arb_token: "arb-tok",
-          node: %{id: ctx.node.id, capacity: %{"mem_total" => 8 * 1024 * 1024 * 1024}}
+          node: %{
+            id: ctx.node.id,
+            capacity: %{"mem_total" => 8 * 1024 * 1024 * 1024},
+            caps: %{"image" => "registry"}
+          }
         )
       end
 
@@ -383,15 +395,6 @@ defmodule WardmastWeb.RemoteRunTest do
                Worker.state(pid).meta.claude_spawn
 
       assert String.starts_with?(name, "arb-bd-rw9e2e")
-
-      # The shelf the node fetches from is the CliSet (SI1): the hashes handed to
-      # the node are the set's claude and arb files, nothing from the host.
-      {:ok, set} = Wardmast.Worker.CliSet.resolve([])
-
-      expected =
-        for cli <- set.clis, cli.name in ["claude", "arb"], f <- cli.files, do: f.sha256
-
-      assert Enum.sort(for {sha, _name, _dest} <- request.cli, do: sha) == Enum.sort(expected)
 
       GenServer.stop(pid, :normal)
       _ = handle
@@ -455,9 +458,18 @@ defmodule WardmastWeb.RemoteRunTest do
                  security: policy,
                  provider: "claude",
                  image: "localhost/arbiter-dev/beam:abc123",
+                 publish: [
+                   stub: fn _ ->
+                     {:ok, %{ref: "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)}}
+                   end
+                 ],
                  egress: egress,
                  arb_token: "arb-tok",
-                 node: %{id: ctx.node.id, capacity: %{"mem_total" => 8 * 1024 * 1024 * 1024}}
+                 node: %{
+                   id: ctx.node.id,
+                   capacity: %{"mem_total" => 8 * 1024 * 1024 * 1024},
+                   caps: %{"image" => "registry"}
+                 }
                )
 
       assert_receive {:worker_exited, ^task_id, 0}, WardmastWeb.Test.Timing.scale(10_000)
@@ -527,8 +539,13 @@ defmodule WardmastWeb.RemoteRunTest do
                  security: policy,
                  provider: "claude",
                  image: "localhost/arbiter-dev/beam:abc123",
+                 publish: [
+                   stub: fn _ ->
+                     {:ok, %{ref: "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)}}
+                   end
+                 ],
                  egress: egress,
-                 node: %{id: ctx.node.id, capacity: %{}}
+                 node: %{id: ctx.node.id, capacity: %{}, caps: %{"image" => "registry"}}
                )
 
       refute File.exists?(Path.join(ctx.stub, "run.argv"))
