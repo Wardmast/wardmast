@@ -26,7 +26,8 @@ defmodule WardmastWeb.BoardAgentsLiveTest do
         ref
       end
 
-    for ref <- refs, do: assert_receive({:DOWN, ^ref, :process, _, _}, WardmastWeb.Test.Timing.scale(2_000))
+    for ref <- refs,
+        do: assert_receive({:DOWN, ^ref, :process, _, _}, WardmastWeb.Test.Timing.scale(2_000))
 
     Autopilot.resume(Autopilot)
     on_exit(fn -> Autopilot.pause(Autopilot) end)
