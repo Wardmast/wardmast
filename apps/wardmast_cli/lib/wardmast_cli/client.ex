@@ -74,11 +74,9 @@ defmodule WardmastCli.Client do
           }
   end
 
-  @default_base "http://127.0.0.1:4848"
-
   @spec base_url() :: String.t()
   def base_url do
-    Wardmast.Env.get("WARDMAST_HOST", @default_base)
+    Wardmast.Env.get("WARDMAST_HOST", Wardmast.Env.default_base_url())
   end
 
   @doc """

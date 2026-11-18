@@ -2409,7 +2409,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
           "nodes.public_url reachable",
           :warn,
           "#{url}/nodes/ping did not answer: #{probe_reason(reason)}",
-          "Nodes dial this address. Run `tailscale serve --https=443 http://127.0.0.1:4848` " <>
+          "Nodes dial this address. Run `tailscale serve --https=443 http://127.0.0.1:#{client_port()}` " <>
             "on the primary, and check that this machine is on the same tailnet."
         )
     end
@@ -3070,7 +3070,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
             "Off-loopback peers get no terminal. If this is intentional " <>
               "(e.g. a VPN-reachable install), unset ARB_BIND_ADDRESS to fall " <>
               "back to loopback-only and use SSH port-forwarding instead " <>
-              "(`ssh -L 4848:127.0.0.1:4848 <host>`), or leave it set only if " <>
+              "(`ssh -L #{client_port()}:127.0.0.1:#{client_port()} <host>`), or leave it set only if " <>
               "you understand the exposure.",
           blocks_readiness: false
         }
@@ -3331,4 +3331,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
 
   defp unknown_reason({:error, %Client.Error{message: message}}), do: to_string(message)
   defp unknown_reason({:ok, _body}), do: "the server answered in a shape this CLI does not read"
+
+  # The port the CLI actually targets (host override, else the configured default).
+  defp client_port, do: URI.parse(Client.base_url()).port || Wardmast.Env.port()
 end

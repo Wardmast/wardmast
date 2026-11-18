@@ -209,6 +209,25 @@ Then install the `arb` CLI from the same release and register the service:
 `arb install service` writes the LaunchAgent so it runs
 `<data-home>/current/bin/wardmast start`. Verify with `arb doctor`.
 
+### Running `ward` without a system Erlang
+
+The tarball carries `bin/ward` (a launcher) and `bin/ward.escript` (the CLI),
+plus `bin/no_dot_erlang.boot`. The launcher runs the CLI on the release's
+bundled erts and sets the `RELEASE_LIB` boot variable, so no `ERL_FLAGS` or
+manual file copies are needed and nothing has to be on `PATH`:
+
+```sh
+"$D/current/bin/ward" --version
+ln -sf "$D/current/bin/ward" "$HOME/.local/bin/ward"   # optional; symlinks are resolved
+```
+
+Running the bare `ward` escript directly needs an Erlang on `PATH`; with only
+the release's `erts-*/bin` on `PATH` it dies with `cannot get bootfile …
+no_dot_erlang.boot`. Use `bin/ward` instead (set `WARD_ESCRIPT` to point it at a
+different escript). The release workflow runs
+`scripts/check-release-ward.sh` on both the Linux and macOS builds to keep this
+working.
+
 ### Gatekeeper / quarantine (`xattr`)
 
 Files downloaded through a browser get the `com.apple.quarantine` attribute, and

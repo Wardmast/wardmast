@@ -103,7 +103,7 @@ defmodule WardmastCli.OperatorSocket do
   end
 
   defp default_path do
-    port = URI.parse(Client.base_url()).port || 4848
+    port = URI.parse(Client.base_url()).port || Wardmast.Env.port()
     Path.join(default_dir(), "operator-#{port}.sock")
   end
 
