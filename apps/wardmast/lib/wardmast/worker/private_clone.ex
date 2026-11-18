@@ -542,18 +542,69 @@ defmodule Wardmast.Worker.PrivateClone do
   def branch(path) when is_binary(path), do: marker(path, "branch")
   def branch(_), do: nil
 
+  # Read from the clone's `.git/config` as data. Every caller asks for one key
+  # at a time and the worker path asks dozens of times (63 of the ~176 git
+  # spawns of one clone completion), which on macOS — where each spawn costs
+  # tens of milliseconds — was the bulk of the wall time. So the plain shape
+  # `git config` itself writes (`[arbiter]` / `\tkey = simple value`) is read
+  # in-process, last value wins as `--get` does; anything else (quoting,
+  # escapes, comments, odd section headers, a valueless key) falls back to
+  # `git config --file --get`, the authority on the format.
   defp marker(path, key) do
     dot_git = Path.join(path, ".git")
+    config = Path.join(dot_git, "config")
 
     with {:ok, %File.Stat{type: :directory}} <- File.lstat(dot_git),
-         {:ok, value} <-
-           git(["config", "--file", Path.join(dot_git, "config"), "--get", "arbiter." <> key],
-             cd: nil
-           ),
+         {:ok, value} <- read_marker(config, key),
          value when value != "" <- String.trim(value) do
       value
     else
       _ -> nil
+    end
+  end
+
+  defp read_marker(config, key) do
+    with {:ok, text} <- File.read(config),
+         {:ok, value} <- scan_marker(String.split(text, "\n"), String.downcase(key), false, nil) do
+      if value, do: {:ok, value}, else: {:error, :unset}
+    else
+      :fallback -> git(["config", "--file", config, "--get", "arbiter." <> key], cd: nil)
+      {:error, _} = error -> error
+    end
+  end
+
+  defp scan_marker([], _key, _in_arbiter?, found), do: {:ok, found}
+
+  defp scan_marker([line | rest], key, in_arbiter?, found) do
+    trimmed = String.trim(line)
+
+    cond do
+      trimmed == "" or String.starts_with?(trimmed, ["#", ";"]) ->
+        # comments only ever sit on their own line in what git writes; one
+        # hiding inside a value is caught below by the character check
+        scan_marker(rest, key, in_arbiter?, found)
+
+      String.starts_with?(trimmed, "[") ->
+        case Regex.run(~r/\A\[([A-Za-z0-9.-]+)\]\z/, trimmed) do
+          [_, section] -> scan_marker(rest, key, String.downcase(section) == "arbiter", found)
+          nil -> :fallback
+        end
+
+      not in_arbiter? ->
+        scan_marker(rest, key, in_arbiter?, found)
+
+      true ->
+        case Regex.run(~r/\A([A-Za-z][A-Za-z0-9-]*)[ \t]*=[ \t]*(.*)\z/, trimmed) do
+          [_, name, value] ->
+            cond do
+              String.contains?(value, ["\"", "\\", "#", ";"]) -> :fallback
+              String.downcase(name) == key -> scan_marker(rest, key, in_arbiter?, value)
+              true -> scan_marker(rest, key, in_arbiter?, found)
+            end
+
+          nil ->
+            :fallback
+        end
     end
   end
 
