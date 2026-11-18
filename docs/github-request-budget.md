@@ -149,7 +149,7 @@ sees a request after its caller has already decided to make it.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `:github_limiter_background_headroom` | `1000` | Remaining primary quota at/below which background traffic pauses. |
-| `:github_limiter_foreground_reserve` | `0` (off) | Remaining primary quota at/below which **all** arbiter traffic stops, foreground included. See below. |
+| `:github_limiter_foreground_reserve` | `0` (off) | Remaining primary quota at/below which **all** Wardmast traffic stops, foreground included. See below. |
 | `:github_limiter_secondary_cooldown_ms` | `120_000` | How long background stays fully paused after a secondary-limit hit (re-armed on each hit). |
 | `:github_limiter_probe` | `true` (`false` in test) | Whether to resolve owning accounts (`GET /user`) and poll the exempt `/rate_limit` endpoint. |
 | `:merged_pr_finalizer_max_checks_per_tick` | `25` | Tasks the merged-PR sweep checks per tick (non-positive disables the cap). |
