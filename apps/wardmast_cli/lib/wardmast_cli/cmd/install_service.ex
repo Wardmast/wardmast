@@ -4,7 +4,7 @@ defmodule WardmastCli.Cmd.InstallService do
   unit so the Wardmast stack comes up automatically at machine boot.
 
   On macOS the same command installs a per-user launchd LaunchAgent instead
-  (`Cmd.InstallService.Launchd`), or with `--system` a system-wide LaunchDaemon
+  (`Cmd.InstallService.Launchd`; source checkout or release install), or with `--system` a system-wide LaunchDaemon
   for a shared team Mac: `sudo ward install service --system [--service-user
   NAME]` (default `_wardmast`; the account must already exist, release mode
   only, runs as that account at boot). Everything below about systemd and

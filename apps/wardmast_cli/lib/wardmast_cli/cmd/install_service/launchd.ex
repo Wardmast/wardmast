@@ -55,9 +55,11 @@ defmodule WardmastCli.Cmd.InstallService.Launchd do
     root = resolve_root()
     dev? = Unit.dev_checkout?(root)
 
+    arbiter_home = if dev?, do: Unit.arbiter_home_path(), else: release_home(root)
+    unless dev?, do: require_release_bin!(arbiter_home)
+
     # Persist the root so `arb start/restart/update` resolve it from any cwd.
     Start.record_home(root)
-    arbiter_home = Unit.arbiter_home_path()
     if dev?, do: Unit.ensure_run_server_script(root)
 
     secrets = EnvFile.capture_secrets(arbiter_home)
@@ -129,6 +131,35 @@ defmodule WardmastCli.Cmd.InstallService.Launchd do
     Supervisor.impl().daemon_reload(:system)
 
     Formatter.emit_uninstalled_launchd_daemon(mode, path, disabled?, removed?)
+  end
+
+  # The data home a release install runs from. The test seam wins; otherwise an
+  # explicit `ARB_HOME` is honoured (`<ARB_HOME>/.wardmast`, or `ARB_HOME`
+  # itself when that is where `current` lives); else the default `~/.wardmast`.
+  defp release_home(root) do
+    nested = Path.join(root, ".wardmast")
+
+    cond do
+      Process.get(:bd2_arbiter_home) -> Unit.arbiter_home_path()
+      System.get_env("ARB_HOME") in [nil, ""] -> Unit.arbiter_home_path()
+      File.exists?(Plist.release_bin(nested)) -> nested
+      File.exists?(Plist.release_bin(root)) -> root
+      true -> nested
+    end
+  end
+
+  defp require_release_bin!(arbiter_home) do
+    bin = Plist.release_bin(arbiter_home)
+
+    unless File.exists?(bin) do
+      Output.die(
+        "release binary not found: #{bin}",
+        "Install a release into #{arbiter_home} first (`arb server deploy`), or set ARB_HOME " <>
+          "to the home that holds `current/`, then re-run `arb install service`."
+      )
+    end
+
+    :ok
   end
 
   # ---- daemon pieces ---------------------------------------------------------
