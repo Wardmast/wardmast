@@ -1152,18 +1152,44 @@ defmodule Wardmast.Settings do
     _ -> :ok
   end
 
+  # `installation_settings` holds exactly one row (unique index, migration
+  # 20261117210000); the order is still pinned so the read is deterministic.
+  defp read_rows do
+    Installation
+    |> Ash.Query.sort(created_at: :asc, id: :asc)
+    |> Ash.Query.limit(1)
+    |> Ash.read()
+  end
+
   defp singleton do
-    case Ash.read(Installation) do
+    case read_rows() do
       {:ok, [row | _]} -> row
       _ -> nil
     end
   end
 
+  # Two first writers can both see an empty table; the unique index rejects the
+  # loser's insert, which then re-reads the winner's row.
   defp get_or_create_singleton do
-    case Ash.read(Installation) do
+    case read_rows() do
+      {:ok, [row | _]} ->
+        {:ok, row}
+
+      {:ok, []} ->
+        case Ash.create(Installation, %{}) do
+          {:ok, row} -> {:ok, row}
+          {:error, _} = error -> reread_after_lost_race(error)
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp reread_after_lost_race(error) do
+    case read_rows() do
       {:ok, [row | _]} -> {:ok, row}
-      {:ok, []} -> Ash.create(Installation, %{})
-      {:error, reason} -> {:error, reason}
+      _ -> error
     end
   end
 end

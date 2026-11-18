@@ -4,8 +4,8 @@ defmodule Wardmast.Settings.Installation do
   only changeable by editing `config/*.exs` and redeploying (bd-2ogep0).
 
   Exactly one row is expected to exist at any time — enforced in
-  `Wardmast.Settings` (get-or-create-singleton on first read/write), not at the
-  DB layer, so future settings can be added here as plain nullable columns
+  `Wardmast.Settings` (get-or-create-singleton on first read/write) and at the
+  DB layer by a unique expression index (`installation_settings_singleton_index`), so future settings can be added here as plain nullable columns
   without a new singleton mechanism.
 
   ## Fields
