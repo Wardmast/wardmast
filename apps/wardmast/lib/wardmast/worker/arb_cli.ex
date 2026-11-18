@@ -4,7 +4,7 @@ defmodule Wardmast.Worker.ArbCli do
 
   `arb` is an escript compiled by the host's Erlang/OTP, and a BEAM file loads
   only on the OTP release it was compiled on or a newer one: the OTP 28 and 29
-  builds fail on a repo image that pins OTP 27.1.2 (emricare tonic) with
+  builds fail on a repo image that pins OTP 27.1.2 (acme app) with
   `corrupt atom table`, and an image with no Erlang cannot run it at all.
 
   ## The build stamp

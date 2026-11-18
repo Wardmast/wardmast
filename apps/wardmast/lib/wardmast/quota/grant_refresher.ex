@@ -38,7 +38,7 @@ defmodule Wardmast.Quota.GrantRefresher do
   ## Neutral cwd
 
   The CLI runs from `:cwd` (default `<scratch_root>/quota-grant-refresh`) —
-  never the admiral dir, where a `claude` session reads the coordinator's
+  never the coordinator dir, where a `claude` session reads the coordinator's
   instructions and becomes one, and never a repo. `neutral_cwd?/1` enforces
   it: no `.git`, `CLAUDE.md` or `AGENTS.md` in the directory or any
   ancestor, and not under the primary checkout. A non-neutral cwd is a
@@ -136,7 +136,7 @@ defmodule Wardmast.Quota.GrantRefresher do
 
   @doc """
   Whether `dir` is a safe cwd for a `claude` run: no `.git`, `CLAUDE.md` or
-  `AGENTS.md` in it or any ancestor (not a repo, not the admiral dir or
+  `AGENTS.md` in it or any ancestor (not a repo, not the coordinator dir or
   anything else that would hand the session agent instructions), and not
   under the primary checkout.
   """

@@ -20,7 +20,7 @@ defmodule Wardmast.Trackers.GitHub.Config do
   `workspace.config["tracker"]["type"] == "github"`):
 
       %{
-        "owner" => "ryanrborn",
+        "owner" => "acme",
         "repo" => "arbiter",
         "credentials_ref" => "env:GITHUB_TOKEN",
         # optional:

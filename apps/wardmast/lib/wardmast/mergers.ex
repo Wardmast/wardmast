@@ -263,7 +263,7 @@ defmodule Wardmast.Mergers do
   @doc """
   Like `prepare/1`, but also overrides the per-process merger config with a
   repo-specific one, using `repo` (the workspace's `repo_paths` key, e.g.
-  `"tonic_device"`) to look up the override.
+  `"app_device"`) to look up the override.
 
   For `:github`, overrides `owner`/`repo` from an explicit `"owner/repo"`
   slug — used by `Wardmast.Workflows.PRPatrol` so each per-repo patrol

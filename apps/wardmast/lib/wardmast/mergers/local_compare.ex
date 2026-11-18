@@ -8,7 +8,7 @@ defmodule Wardmast.Mergers.LocalCompare do
   reports: its **net diff** against the base (`base...head`, three-dot) and,
   for rule 2, whether one commit is an **ancestor** of another. Both hosted
   adapters serve them from their compare endpoints, so any compare outage —
-  the captured one was GitLab's 403 `insufficient_granular_scope` on vstim
+  the captured one was GitLab's 403 `insufficient_granular_scope` on my-app
   !270 (vs-4v8cf0), but a 404, a 5xx or a timeout is the same shape — left an
   approved MR undecided (`diff_unavailable`) until it parked, while the answer
   sat one `git merge-base --is-ancestor` away in a repo Wardmast already has

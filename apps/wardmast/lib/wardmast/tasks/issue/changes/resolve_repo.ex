@@ -17,7 +17,7 @@ defmodule Wardmast.Tasks.Issue.Changes.ResolveRepo do
   `:update` is hooked too, but only when the update *changes* `repo` to a
   non-blank value: that value is canonicalized onto its configured key or
   refused with the valid keys (bd-7u1b6n — a hand-set or tool-set
-  `emricare/tonic` used to persist, then dispatch and the reconciler's resume
+  `acme/app` used to persist, then dispatch and the reconciler's resume
   disagreed about it). Clearing the repo stays possible, and an update that
   leaves `repo` alone never re-validates it, so an issue already holding a
   stale value can still be edited — and repaired.

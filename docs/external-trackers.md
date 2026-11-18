@@ -3,7 +3,7 @@
 A workspace's `tracker` block binds it to an external tracker (`github`, `gitlab`,
 `jira`, `linear`, `shortcut`, or `none`):
 
-    "tracker": {"type": "github", "config": {"owner": "acme", "repo": "tonic",
+    "tracker": {"type": "github", "config": {"owner": "acme", "repo": "app",
                                               "credentials_ref": "secret:github_token"}}
 
 ## GitHub Issues
@@ -25,8 +25,8 @@ name. In order:
 1. the repo the call is about: the **ticket's repo** (`issue.repo`) wherever a
    ticket is in hand (`Trackers.prepare_with_repo/3`), which also applies the
    `tracker.config.repos.<repo>` override;
-2. an entry keyed by the tracker's `owner/repo` slug (`acme/tonic` finds
-   `repos.tonic`);
+2. an entry keyed by the tracker's `owner/repo` slug (`acme/app` finds
+   `repos.app`);
 3. a repo key whose forge config targets that slug: the repo's effective
    `merge.config` `owner`/`repo` (workspace-level, deep-merged with
    `merge.repos.<key>.config`) or a `tracker.config.repos.<key>` `owner`/`repo`.

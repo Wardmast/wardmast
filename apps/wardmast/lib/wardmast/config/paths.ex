@@ -237,7 +237,7 @@ defmodule Wardmast.Config.Paths do
   Each entry is a `<config_dir>/projects/<project-slug>` directory — i.e. the
   directory the `<session-id>.jsonl` files live in, not the config dir above
   them. On the dogfood host that is
-  `~/.claude/projects/-home-ryan-dev-admiral`.
+  `~/.claude/projects/-home-me-dev-coordinator`.
 
   Same resolution order as the roots above, except the **default is `[]`**:
   metering someone's `~/.claude` is opt-in. A wrong guess here would either

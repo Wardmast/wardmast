@@ -163,7 +163,7 @@ coordinator can resolve them directly rather than asking workers to retry:
 
 6. **Authorization is required** before force-pushing. A worker's branch is
    in-flight work — the coordinator must obtain explicit sign-off (e.g. from
-   the ticket owner, the Admiral, or standing orders) before pushing, especially
+   the ticket owner, a human operator, or standing orders) before pushing, especially
    if the branch is tied to another worker's active dispatch. Unilateral
    force-pushes can corrupt a worker's worktree state or undo their progress.
 

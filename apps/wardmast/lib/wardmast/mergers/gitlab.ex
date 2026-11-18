@@ -4,7 +4,7 @@ defmodule Wardmast.Mergers.Gitlab do
 
   Wraps GitLab's REST API v4 for merge-request open / inspect / merge /
   close / comment / review flows. This is the priority hosted-forge merger:
-  the `tonic` and `tonic_device` projects live on GitLab.
+  the `app` and `app_device` projects live on GitLab.
 
   ## Active-workspace contract
 
