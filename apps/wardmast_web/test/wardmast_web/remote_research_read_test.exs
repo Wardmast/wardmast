@@ -98,7 +98,7 @@ defmodule WardmastWeb.RemoteResearchReadTest do
     for spec <- Runs.child_specs(), do: start_supervised!(spec)
     start_supervised!({Connection, config: config})
 
-    assert_receive {:node_state, id, :online}, 10_000
+    assert_receive {:node_state, id, :online}, WardmastWeb.Test.Timing.scale(10_000)
     assert id == node.id
 
     repo = Path.join(root, "repo")
@@ -263,7 +263,7 @@ defmodule WardmastWeb.RemoteResearchReadTest do
   defp stop_worker(pid) do
     ref = Process.monitor(pid)
     GenServer.stop(pid, :normal)
-    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}, WardmastWeb.Test.Timing.scale(5_000)
   end
 
   defp api(token, verb, path) do

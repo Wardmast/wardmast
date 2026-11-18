@@ -15,15 +15,17 @@ defmodule Wardmast.NodeAgent.K8s.EventFollowerTest do
 
     {:ok, pid} =
       LogFollower.start(
-        [
-          run: @run,
-          pod: "pod-1",
-          source: :events,
-          client: nil,
-          owner: me,
-          emit: fn frame -> send(me, {:frame, frame}) end,
-          final_wait_ms: 100
-        ] ++ opts
+        Keyword.merge(
+          [final_wait_ms: 60_000],
+          [
+            run: @run,
+            pod: "pod-1",
+            source: :events,
+            client: nil,
+            owner: me,
+            emit: fn frame -> send(me, {:frame, frame}) end
+          ] ++ opts
+        )
       )
 
     on_exit(fn -> if Process.alive?(pid), do: LogFollower.stop(pid) end)

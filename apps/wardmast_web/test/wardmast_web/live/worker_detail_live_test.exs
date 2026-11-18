@@ -920,7 +920,7 @@ defmodule WardmastWeb.WorkerDetailLiveTest do
         })
 
       # The run ends once its PR is open (bd-741sid).
-      assert_receive {:DOWN, ^run, :process, ^pid, _}, 2_000
+      assert_receive {:DOWN, ^run, :process, ^pid, _}, WardmastWeb.Test.Timing.scale(2_000)
       ref
     end
 

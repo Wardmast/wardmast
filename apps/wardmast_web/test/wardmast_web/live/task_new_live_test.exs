@@ -57,7 +57,7 @@ defmodule WardmastWeb.TaskNewLiveTest do
 
     {:ok, view, html} = live(conn, ~p"/tasks/new")
 
-    assert_receive {:workspaces_loading, loader}, 2_000
+    assert_receive {:workspaces_loading, loader}, WardmastWeb.Test.Timing.scale(2_000)
     assert has?(html, "#task-new-workspaces-loading")
     assert has_element?(view, "#task-new-workspaces-loading")
     refute has_element?(view, "#task-new-form")

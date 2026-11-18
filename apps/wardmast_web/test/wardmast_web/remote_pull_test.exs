@@ -161,7 +161,7 @@ defmodule WardmastWeb.RemotePullTest do
     start_supervised!({Status, path: config.status_path})
     for spec <- Runs.child_specs(), do: start_supervised!(spec)
     start_supervised!({Connection, config: config})
-    assert_receive {:node_state, _id, :online}, 10_000
+    assert_receive {:node_state, _id, :online}, WardmastWeb.Test.Timing.scale(10_000)
 
     # The repo and the private clone a remote run is placed from.
     git = GitFixture.forge_and_checkout(%{"README.md" => "readme\n"})

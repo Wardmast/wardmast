@@ -22,7 +22,7 @@ defmodule WardmastWeb.TrustLiveTest do
 
   # The list and the selected subject arrive by `start_async/3` on the
   # connected mount, like the `/loop` page.
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   setup do
     n = System.unique_integer([:positive])

@@ -8,7 +8,7 @@ defmodule WardmastWeb.AuditLogLiveTest do
   # The audit query arrives via `start_async/3` after the connected mount
   # (bd-7or1v7); everything but the async-path tests themselves wants the
   # page once it has landed.
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   defp live_audit(conn, path \\ "/audit") do
     {:ok, view, _html} = live(conn, path)

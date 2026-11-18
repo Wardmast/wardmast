@@ -8,7 +8,7 @@ defmodule WardmastWeb.RunDetailLiveTest do
   # The run load arrives via `start_async/3` after the connected mount
   # (bd-ap05jy); everything but the async-path tests themselves wants the
   # page once it has landed.
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   defp run(attrs) do
     {:ok, r} =

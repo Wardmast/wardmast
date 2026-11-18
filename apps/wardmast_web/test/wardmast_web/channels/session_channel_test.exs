@@ -297,10 +297,12 @@ defmodule WardmastWeb.SessionChannelTest do
       ScriptedPty.emit(session.id, "shared")
       assert_push "stdout", {:binary, frame}
       assert {:ok, 6, "shared"} = Frame.decode(frame)
-      assert_receive {:second, :push, "stdout", {:binary, ^frame}}, 1_000
+
+      assert_receive {:second, :push, "stdout", {:binary, ^frame}},
+                     WardmastWeb.Test.Timing.scale(1_000)
 
       ref = push(second, "resize", %{"cols" => 132, "rows" => 43})
-      assert_receive {:second, :reply, ^ref, :ok, _payload}, 1_000
+      assert_receive {:second, :reply, ^ref, :ok, _payload}, WardmastWeb.Test.Timing.scale(1_000)
 
       assert_push "meta", %{cols: 132, rows: 43, attached_clients: 2}
       assert {:resize, 132, 43} in ScriptedPty.calls(session.id)
@@ -418,7 +420,9 @@ defmodule WardmastWeb.SessionChannelTest do
 
       push(socket, "detach", %{})
 
-      assert_receive {:DOWN, ^ref, :process, ^channel, _reason}, 1_000
+      assert_receive {:DOWN, ^ref, :process, ^channel, _reason},
+                     WardmastWeb.Test.Timing.scale(1_000)
+
       assert ScriptedPty.fetch(session.id).alive?
       assert {:ok, %{status: :running}} = Sessions.get(session.id)
     end
@@ -472,8 +476,10 @@ defmodule WardmastWeb.SessionChannelTest do
 
       ScriptedPty.put(session.id, alive?: false)
 
-      assert_push "exit", %{code: nil, reason: "exited"}, 2_000
-      assert_receive {:DOWN, ^ref, :process, ^channel, _reason}, 2_000
+      assert_push "exit", %{code: nil, reason: "exited"}, WardmastWeb.Test.Timing.scale(2_000)
+
+      assert_receive {:DOWN, ^ref, :process, ^channel, _reason},
+                     WardmastWeb.Test.Timing.scale(2_000)
     end
   end
 
@@ -538,7 +544,7 @@ defmodule WardmastWeb.SessionChannelTest do
       relay(parent)
     end)
 
-    assert_receive {:second, :joined, socket}, 2_000
+    assert_receive {:second, :joined, socket}, WardmastWeb.Test.Timing.scale(2_000)
     socket
   end
 
@@ -561,7 +567,9 @@ defmodule WardmastWeb.SessionChannelTest do
   # push to find the one it wants — useless for asserting *order*. This takes
   # the next push whatever it is, so a sequence of calls is mailbox order.
   defp next_push do
-    assert_receive %Phoenix.Socket.Message{event: event, payload: payload}, 1_000
+    assert_receive %Phoenix.Socket.Message{event: event, payload: payload},
+                   WardmastWeb.Test.Timing.scale(1_000)
+
     {event, payload}
   end
 

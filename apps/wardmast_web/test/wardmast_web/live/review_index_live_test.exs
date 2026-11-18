@@ -11,7 +11,7 @@ defmodule WardmastWeb.ReviewIndexLiveTest do
   # `start_async/3` on the connected mount / event only (bd-blnnu3); tests
   # that aren't exercising the loading/error states themselves want the
   # page once every pending async has landed.
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   setup do
     {:ok, ws} =

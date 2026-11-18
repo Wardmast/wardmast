@@ -122,7 +122,7 @@ defmodule WardmastWeb.Spike.BridgeMuxProductTest do
     start_supervised!({Bridge, node_home: home})
     start_supervised!({Connection, config: config})
 
-    assert_receive {:node_state, _id, :online}, 10_000
+    assert_receive {:node_state, _id, :online}, WardmastWeb.Test.Timing.scale(10_000)
     session = Registry.lookup(node.id)
 
     client = :sys.get_state(Connection).client

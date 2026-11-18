@@ -377,7 +377,8 @@ defmodule WardmastWeb.TaskDetailLiveTest do
       })
       |> render_submit()
 
-      assert render_async(view, 10_000) =~ "assign this task a repo"
+      assert render_async(view, WardmastWeb.Test.Timing.scale(10_000)) =~
+               "assign this task a repo"
     end
   end
 
@@ -1102,7 +1103,7 @@ defmodule WardmastWeb.TaskDetailLiveTest do
         end)
 
       on_exit(fn -> send(pid, :release) end)
-      assert_receive {:held, {:ok, :admitted}}, 5_000
+      assert_receive {:held, {:ok, :admitted}}, WardmastWeb.Test.Timing.scale(5_000)
 
       task = ready_issue(ws, "account full")
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")

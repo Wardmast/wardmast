@@ -10,7 +10,7 @@ defmodule WardmastWeb.TaskDetailLiveHelpers do
   import Phoenix.LiveViewTest
 
   # Generous: a loaded suite can outrun render_async's 100 ms default.
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   @doc """
   `live/2` against a task detail path, returning the fully loaded HTML in

@@ -124,7 +124,7 @@ defmodule WardmastWeb.NodeBridgeE2ETest do
     {:ok, pod_ca} = CA.load_or_create(PodChannel.ca_store())
     start_supervised!({Connection, config: config})
 
-    assert_receive {:node_state, id, :online}, 10_000
+    assert_receive {:node_state, id, :online}, WardmastWeb.Test.Timing.scale(10_000)
     assert id == node.id
 
     ws =

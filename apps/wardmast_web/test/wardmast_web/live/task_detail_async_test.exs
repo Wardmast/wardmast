@@ -15,7 +15,7 @@ defmodule WardmastWeb.TaskDetailAsyncTest do
   alias Wardmast.Workers.Run
   alias WardmastWeb.TaskDetailLive
 
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   setup do
     {:ok, ws} =

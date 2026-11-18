@@ -18,7 +18,7 @@ defmodule WardmastWeb.ProvidersLoginTest do
 
   @moduletag :tmux
   @moduletag timeout: 60_000
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
   @secret "PASTED-CODE-8675309"
 
   setup do

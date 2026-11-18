@@ -172,8 +172,11 @@ defmodule WardmastWeb.TaskDetailLiveSpendTest do
       {:ok, view, _html} = live_task(conn, ~p"/tasks/#{task.id}")
       :erlang.trace(view.pid, true, [:receive])
 
-      assert_receive {:trace, _, :receive, :refresh_live_spend}, 2_000
-      assert_receive {:trace, _, :receive, :refresh_live_spend}, 2_000
+      assert_receive {:trace, _, :receive, :refresh_live_spend},
+                     WardmastWeb.Test.Timing.scale(2_000)
+
+      assert_receive {:trace, _, :receive, :refresh_live_spend},
+                     WardmastWeb.Test.Timing.scale(2_000)
     end
 
     test "worker_list, worker_show and the /api/workers JSON report the page's number",

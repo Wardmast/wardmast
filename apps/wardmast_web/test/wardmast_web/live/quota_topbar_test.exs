@@ -22,7 +22,7 @@ defmodule WardmastWeb.QuotaTopbarTest do
   # the inbox's and the quota load), and its 100ms default flakes on a loaded
   # box; a test that times out mid-query also takes the sandbox connection
   # down with it for the tests after it.
-  @async_wait 2_000
+  @async_wait WardmastWeb.Test.Timing.scale(2_000)
 
   # Claude and Antigravity, the providers the operator's own install runs.
   @both %{"agent" => %{"type" => ["claude", "gemini"]}}

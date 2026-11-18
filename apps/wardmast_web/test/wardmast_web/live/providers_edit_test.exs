@@ -12,7 +12,7 @@ defmodule WardmastWeb.ProvidersEditTest do
   alias Wardmast.Accounts.ProviderAccount
   alias Wardmast.Tasks.Workspace
 
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   defp live_providers(conn) do
     {:ok, view, _html} = live(conn, ~p"/providers")

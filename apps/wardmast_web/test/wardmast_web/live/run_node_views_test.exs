@@ -12,7 +12,7 @@ defmodule WardmastWeb.RunNodeViewsTest do
   alias Wardmast.Worker
   alias Wardmast.Workers.Run
 
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   setup do
     for snap <- Worker.list_children(), do: Worker.stop(snap.registry_key)

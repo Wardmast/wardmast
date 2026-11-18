@@ -110,7 +110,7 @@ defmodule WardmastWeb.RemoteTaskTest do
     for spec <- Runs.child_specs(), do: start_supervised!(spec)
     start_supervised!({Bridge, node_home: home})
     start_supervised!({Connection, config: config})
-    assert_receive {:node_state, _id, :online}, 10_000
+    assert_receive {:node_state, _id, :online}, WardmastWeb.Test.Timing.scale(10_000)
 
     # The primary's repo and the read-only inspect checkout `Dispatch` cuts from it.
     repo = Path.join(root, "primary")
@@ -282,7 +282,7 @@ defmodule WardmastWeb.RemoteTaskTest do
 
     assert {:ok, prepared} = place(ctx, egress)
     assert {:ok, handle} = Executor.open(prepared)
-    assert_receive {^handle, {:data, {:eol, "line-1"}}}, 10_000
+    assert_receive {^handle, {:data, {:eol, "line-1"}}}, WardmastWeb.Test.Timing.scale(10_000)
 
     # Seeded at the target tip.
     assert File.read!(Path.join(ctx.stub, "seeded.head")) |> String.trim() == ctx.tip

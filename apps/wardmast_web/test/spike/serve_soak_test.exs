@@ -70,11 +70,16 @@ defmodule WardmastWeb.Spike.ServeSoakTest do
     {:ok, c} = WsClient.start_link(url: wss(@full_port, "/node/socket/websocket"), owner: self())
     assert {:ok, _} = WsClient.join(c, "node:spike")
     WsClient.push(c, "node:spike", "hb", %{"seq" => 1, "t" => 0})
-    assert_receive {:ws, :push, "node:spike", "hb_ack", %{"seq" => 1}}, 10_000
+
+    assert_receive {:ws, :push, "node:spike", "hb_ack", %{"seq" => 1}},
+                   WardmastWeb.Test.Timing.scale(10_000)
 
     payload = :crypto.strong_rand_bytes(1_000_000)
     WsClient.push(c, "node:spike", "echo_bin", {:binary, payload})
-    assert_receive {:ws, :push, "node:spike", "echo_bin", {:binary, ^payload}}, 30_000
+
+    assert_receive {:ws, :push, "node:spike", "echo_bin", {:binary, ^payload}},
+                   WardmastWeb.Test.Timing.scale(30_000)
+
     report("ws_whole_app", %{joined: true, binary_bytes_echoed: byte_size(payload)})
   end
 
@@ -95,9 +100,12 @@ defmodule WardmastWeb.Spike.ServeSoakTest do
       WsClient.start_link(url: wss(@path_port, "/other/socket/websocket"), owner: self())
 
     ref = Process.monitor(c2)
-    assert_receive {:ws, :closed, {:upgrade_rejected, status, _}}, 10_000
+
+    assert_receive {:ws, :closed, {:upgrade_rejected, status, _}},
+                   WardmastWeb.Test.Timing.scale(10_000)
+
     assert status in [404, 403, 502]
-    assert_receive {:DOWN, ^ref, _, _, _}, 5_000
+    assert_receive {:DOWN, ^ref, _, _, _}, WardmastWeb.Test.Timing.scale(5_000)
 
     # What path does the backend actually see? (--set-path strips or keeps the mount.)
     seen = get(https(@path_port, "/nodes/headers")).body |> Jason.decode!()

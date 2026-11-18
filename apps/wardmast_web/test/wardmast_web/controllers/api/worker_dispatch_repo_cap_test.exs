@@ -46,7 +46,7 @@ defmodule WardmastWeb.Api.WorkerDispatchRepoCapTest do
       end)
 
     on_exit(fn -> send(pid, :release) end)
-    assert_receive {:held, {:ok, :admitted}}, 5_000
+    assert_receive {:held, {:ok, :admitted}}, WardmastWeb.Test.Timing.scale(5_000)
 
     {:ok, task} = Ash.create(Issue, %{title: "to dispatch", workspace_id: ws.id})
 

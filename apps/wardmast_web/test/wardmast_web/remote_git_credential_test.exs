@@ -145,7 +145,7 @@ defmodule WardmastWeb.RemoteGitCredentialTest do
     for spec <- Runs.child_specs(), do: start_supervised!(spec)
     start_supervised!({Connection, config: config})
 
-    assert_receive {:node_state, id, :online}, 10_000
+    assert_receive {:node_state, id, :online}, WardmastWeb.Test.Timing.scale(10_000)
     assert id == node.id
 
     pem = rsa_pem()
@@ -301,7 +301,7 @@ defmodule WardmastWeb.RemoteGitCredentialTest do
   defp stop_worker(pid) do
     ref = Process.monitor(pid)
     GenServer.stop(pid, :normal)
-    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}, WardmastWeb.Test.Timing.scale(5_000)
   end
 
   describe "an implementer of a GitHub App repo (the host pushes its branch)" do
@@ -321,7 +321,9 @@ defmodule WardmastWeb.RemoteGitCredentialTest do
       log =
         capture_all(fn ->
           assert {:ok, {:remote, _}} = start_on_node(ctx, pid, task_id, plan)
-          assert_receive {:worker_output, ^task_id, "line-1"}, 10_000
+
+          assert_receive {:worker_output, ^task_id, "line-1"},
+                         WardmastWeb.Test.Timing.scale(10_000)
 
           spec = node_spec()
           refute Map.has_key?(spec.secrets, "ARB_GIT_TOKEN")
@@ -374,7 +376,9 @@ defmodule WardmastWeb.RemoteGitCredentialTest do
       log =
         capture_all(fn ->
           assert {:ok, {:remote, _}} = start_on_node(ctx, pid, task_id, plan)
-          assert_receive {:worker_output, ^task_id, "line-1"}, 10_000
+
+          assert_receive {:worker_output, ^task_id, "line-1"},
+                         WardmastWeb.Test.Timing.scale(10_000)
 
           spec = node_spec()
           refute Map.has_key?(spec.secrets, "APP_PEM")
@@ -548,7 +552,9 @@ defmodule WardmastWeb.RemoteGitCredentialTest do
           assert {:ok, %{worker_pid: pid}} = dispatch_to_node(ctx)
           ref = Process.monitor(pid)
           assert placed_node(pid) == ctx.node.id
-          assert_receive {:worker_output, ^task_id, "line-1"}, 10_000
+
+          assert_receive {:worker_output, ^task_id, "line-1"},
+                         WardmastWeb.Test.Timing.scale(10_000)
 
           spec = node_spec()
           refute Map.has_key?(spec.secrets, "ARB_GIT_TOKEN")
@@ -563,7 +569,7 @@ defmodule WardmastWeb.RemoteGitCredentialTest do
           File.write!(Path.join(ctx.stub, "go"), "")
 
           # Opening the PR ends the run.
-          assert_receive {:DOWN, ^ref, :process, ^pid, _}, 30_000
+          assert_receive {:DOWN, ^ref, :process, ^pid, _}, WardmastWeb.Test.Timing.scale(30_000)
           stop_watchdog(task_id)
         end)
 
@@ -670,7 +676,7 @@ defmodule WardmastWeb.RemoteGitCredentialTest do
       log =
         capture_all(fn ->
           assert {:ok, {:remote, _}} = start_on_node(ctx, ctx.pid, ctx.task_id, ctx.plan)
-          assert_receive {:worker_output, _, "line-1"}, 10_000
+          assert_receive {:worker_output, _, "line-1"}, WardmastWeb.Test.Timing.scale(10_000)
 
           # Minted on the primary for the one repo, with a worker's push permissions.
           assert_receive {:mint, "/app/installations/7/access_tokens", body}
@@ -710,7 +716,7 @@ defmodule WardmastWeb.RemoteGitCredentialTest do
       log =
         capture_all(fn ->
           assert {:ok, {:remote, _}} = start_on_node(ctx, ctx.pid, task_id, ctx.plan)
-          assert_receive {:worker_exited, ^task_id, 0}, 10_000
+          assert_receive {:worker_exited, ^task_id, 0}, WardmastWeb.Test.Timing.scale(10_000)
 
           assert File.read!(Path.join(ctx.stub, "secrets.seen")) =~ @app_token
           assert_eventually(fn -> Secrets.runs(ctx.rt) == [] end)
@@ -718,7 +724,9 @@ defmodule WardmastWeb.RemoteGitCredentialTest do
           refute_received {:revoke, _, _}
 
           stop_worker(ctx.pid)
-          assert_receive {:revoke, "/installation/token", ["Bearer " <> @app_token]}, 5_000
+
+          assert_receive {:revoke, "/installation/token", ["Bearer " <> @app_token]},
+                         WardmastWeb.Test.Timing.scale(5_000)
         end)
 
       refute log =~ @app_token
@@ -732,14 +740,16 @@ defmodule WardmastWeb.RemoteGitCredentialTest do
       log =
         capture_all(fn ->
           assert {:ok, {:remote, _}} = start_on_node(ctx, ctx.pid, task_id, ctx.plan)
-          assert_receive {:worker_exited, ^task_id, 137}, 10_000
+          assert_receive {:worker_exited, ^task_id, 137}, WardmastWeb.Test.Timing.scale(10_000)
 
           assert File.read!(Path.join(ctx.stub, "secrets.seen")) =~ @app_token
           assert_eventually(fn -> Secrets.runs(ctx.rt) == [] end)
           refute node_disk_after_run(ctx) =~ @app_token
 
           stop_worker(ctx.pid)
-          assert_receive {:revoke, "/installation/token", ["Bearer " <> @app_token]}, 5_000
+
+          assert_receive {:revoke, "/installation/token", ["Bearer " <> @app_token]},
+                         WardmastWeb.Test.Timing.scale(5_000)
         end)
 
       refute log =~ @app_token
@@ -751,7 +761,7 @@ defmodule WardmastWeb.RemoteGitCredentialTest do
       log =
         capture_all(fn ->
           assert {:ok, {:remote, _}} = start_on_node(ctx, ctx.pid, ctx.task_id, ctx.plan)
-          assert_receive {:worker_output, _, "line-1"}, 10_000
+          assert_receive {:worker_output, _, "line-1"}, WardmastWeb.Test.Timing.scale(10_000)
           [run] = Secrets.runs(ctx.rt)
           assert File.read!(Secrets.file(ctx.rt, run)) =~ @app_token
 
@@ -764,7 +774,9 @@ defmodule WardmastWeb.RemoteGitCredentialTest do
 
           assert_eventually(fn -> Secrets.runs(ctx.rt) == [] end)
           refute node_disk_after_run(ctx) =~ @app_token
-          assert_receive {:revoke, "/installation/token", ["Bearer " <> @app_token]}, 5_000
+
+          assert_receive {:revoke, "/installation/token", ["Bearer " <> @app_token]},
+                         WardmastWeb.Test.Timing.scale(5_000)
         end)
 
       refute log =~ @app_token

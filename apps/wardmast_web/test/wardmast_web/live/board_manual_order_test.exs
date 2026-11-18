@@ -11,7 +11,7 @@ defmodule WardmastWeb.BoardManualOrderTest do
 
   alias Wardmast.Tasks.{Dependencies, Issue, Workspace}
 
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   setup do
     on_exit(fn -> Wardmast.Settings.set_scheduling_max_lifted_in_flight(nil) end)

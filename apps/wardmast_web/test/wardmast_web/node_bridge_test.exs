@@ -284,11 +284,11 @@ defmodule WardmastWeb.NodeBridgeTest do
 
       # Stream 2 and the heartbeat both still answer, promptly.
       push(ctx.socket, "bridge.data", {:binary, Frame.encode(0, 2, "alive")})
-      assert_push "bridge.data", {:binary, frame}, 1_000
+      assert_push "bridge.data", {:binary, frame}, WardmastWeb.Test.Timing.scale(1_000)
       assert %{stream: 2, bytes: "alive"} = Frame.decode!(frame)
 
       push(ctx.socket, "hb", %{"seq" => 1})
-      assert_push "hb_ack", %{"seq" => 1}, 1_000
+      assert_push "hb_ack", %{"seq" => 1}, WardmastWeb.Test.Timing.scale(1_000)
     end
   end
 
@@ -311,7 +311,7 @@ defmodule WardmastWeb.NodeBridgeTest do
 
       push(ctx.socket, "bridge.open", %{"run" => "run1", "name" => "arb", "stream" => 1})
       push(ctx.socket, "bridge.data", {:binary, "garbage"})
-      assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
+      assert_receive {:DOWN, ^ref, :process, _, _}, WardmastWeb.Test.Timing.scale(2_000)
     end
 
     test "the streams die with the channel", ctx do
@@ -324,7 +324,7 @@ defmodule WardmastWeb.NodeBridgeTest do
       bridge = :sys.get_state(ctx.socket.channel_pid).assigns.bridge
       ref = Process.monitor(bridge)
       Process.exit(ctx.socket.channel_pid, :kill)
-      assert_receive {:DOWN, ^ref, :process, _, _}, 2_000
+      assert_receive {:DOWN, ^ref, :process, _, _}, WardmastWeb.Test.Timing.scale(2_000)
     end
   end
 
