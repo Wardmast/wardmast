@@ -42,6 +42,13 @@ defmodule WardmastCli.Cmd.InstallServiceLaunchdTest do
     {:ok, root: root, arbiter_home: arbiter_home, agents: agents}
   end
 
+  defp make_release_bin(home) do
+    bin = Path.join([home, "current", "bin", "wardmast"])
+    File.mkdir_p!(Path.dirname(bin))
+    File.write!(bin, "#!/bin/sh\n")
+    File.chmod!(bin, 0o755)
+  end
+
   defp record_cmds(answer \\ fn _, _ -> {"", 0} end) do
     test_pid = self()
 
@@ -131,6 +138,7 @@ defmodule WardmastCli.Cmd.InstallServiceLaunchdTest do
     } do
       File.rm_rf!(Path.join(root, "apps"))
       File.rm!(Path.join(root, "mix.exs"))
+      make_release_bin(home)
       record_cmds()
       plist = Path.join(agents, "com.wardmast.server.plist")
 
@@ -150,6 +158,44 @@ defmodule WardmastCli.Cmd.InstallServiceLaunchdTest do
       cmds = cmds()
       assert {"launchctl", ["bootstrap", "gui/501", plist]} in cmds
       refute Enum.any?(cmds, fn {c, _} -> c in ["systemctl", "loginctl"] end)
+    end
+
+    test "a release install fails without loading a job when current/bin/wardmast is missing", %{
+      root: root,
+      arbiter_home: home,
+      agents: agents
+    } do
+      File.rm_rf!(Path.join(root, "apps"))
+      File.rm!(Path.join(root, "mix.exs"))
+      record_cmds()
+
+      assert {_, err, 1} = capture(fn -> InstallService.run([]) end)
+      assert err =~ "#{home}/current/bin/wardmast"
+      refute File.exists?(Path.join(agents, "com.wardmast.server.plist"))
+      refute File.exists?(Path.join(home, "launchd-run.sh"))
+      assert cmds() == []
+    end
+
+    test "a release install honours ARB_HOME's .wardmast data home", %{
+      root: root,
+      agents: agents
+    } do
+      File.rm_rf!(Path.join(root, "apps"))
+      File.rm!(Path.join(root, "mix.exs"))
+      Process.delete(:bd2_arbiter_home)
+      data = Path.join(root, ".wardmast")
+      make_release_bin(data)
+      File.write!(Path.join(data, "wardmast.env"), "SECRET_KEY_BASE=abc\n")
+      record_cmds()
+
+      {_out, _err, code} = capture(fn -> InstallService.run([]) end)
+
+      assert code == 0
+      xml = File.read!(Path.join(agents, "com.wardmast.server.plist"))
+      assert xml =~ "<key>WorkingDirectory</key>\n  <string>#{data}</string>"
+      wrapper = File.read!(Path.join(data, "launchd-run.sh"))
+      assert wrapper =~ "exec '#{data}/current/bin/wardmast' start"
+      assert wrapper =~ "'#{data}/wardmast.env'"
     end
 
     test "--system without root is refused (the LaunchDaemon install needs root)" do
