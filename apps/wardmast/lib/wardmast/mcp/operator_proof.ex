@@ -10,8 +10,9 @@ defmodule Wardmast.MCP.OperatorProof do
 
   `Wardmast.MCP.OperatorSocket` accepts connections on a Unix domain socket,
   reads the kernel-attested peer credentials (`SO_PEERCRED`: pid, uid, gid,
-  recorded at `connect()` time and not forgeable by the client), and asks
-  `authorize/2` whether that peer is the operator:
+  recorded at `connect()` time and not forgeable by the client; macOS uses
+  other sources, see "macOS" below), and asks `authorize/2` whether that peer
+  is the operator:
 
     1. **Same Unix user as the server.** Any other uid is refused. (The socket
        file is also mode 0600 in a 0700 directory, so another user can't
@@ -40,7 +41,34 @@ defmodule Wardmast.MCP.OperatorProof do
        sessions the same way).
 
   Anything unreadable fails closed: a peer whose `/proc` entry disappears
-  mid-walk, a pid of 0, a host without `/proc`.
+  mid-walk, a pid of 0, a Linux host without `/proc`.
+
+  ## macOS (bd-5tg348)
+
+  macOS has no `SO_PEERCRED`, no `/proc` and no cgroups, so `authorize/2`
+  applies the same policy through other sources (`os: :darwin`):
+
+    * **Peer credentials.** `LOCAL_PEERCRED` (a `struct xucred`, see
+      `parse_local_peercred/2`) gives the uid as of `connect()`, and
+      `LOCAL_PEERPID` gives the pid.
+    * **Check 1** compares that uid with the server's effective uid, which
+      `ps -o uid=` reports for the server's own pid.
+    * **Check 2** walks the parent chain one pid at a time with
+      `/bin/ps -o ppid= -p <pid>`, up to launchd (pid 1). Reaching the
+      server's pid, or starting there, is `:spawned_by_arbiter`, as on Linux.
+    * **There is no check 3.** A worker's double-forked orphan is reparented
+      to launchd, and nothing like a cgroup records where it came from, so
+      it gets past check 2. This is the main gap on macOS.
+    * **Check 4** has no scope to look for. Instead it reads the tmux server
+      pids that `Wardmast.Sessions.Runner.Darwin` records in each session's
+      pidfile (`Runner.Darwin.recorded_server_pids/1`). A chain that passes
+      through one of them, while that pid still runs a tmux, is
+      `:in_session_scope`. A recorded pid that now runs something else was
+      reused and does not count.
+
+  Each of these fails closed with `:peer_unreadable`: a pid `ps` doesn't
+  know, a `ps` that fails, can't be run or prints anything but one number, a
+  cycle in the chain, and a chain deeper than 256.
 
   ## What this does and does not stop
 
@@ -55,8 +83,11 @@ defmodule Wardmast.MCP.OperatorProof do
   `systemd-run --user --scope` or by moving itself to another cgroup. For
   such a worker this is a guardrail, not a hard boundary. The same holds for
   an Wardmast session's processes (check 4): they are unjailed, so one that
-  re-launches itself into another unit on purpose gets past the check. See
-  docs/worker-security.md, "Operator proof for token minting".
+  re-launches itself into another unit on purpose gets past the check. On
+  macOS the guardrail is weaker still: a double fork is enough to get past
+  check 2, and a session process that double-forks, or deletes its
+  session's pidfile, gets past check 4. See docs/worker-security.md,
+  "Operator proof for token minting".
   """
 
   alias Wardmast.Sessions.Naming
@@ -71,7 +102,8 @@ defmodule Wardmast.MCP.OperatorProof do
           | :in_arbiter_cgroup
           | :in_session_scope
 
-  # Deeper than any real process tree; bounds the walk against a /proc loop.
+  # Deeper than any real process tree; bounds either walk (/proc, or ps on
+  # macOS) against a parent loop.
   @max_depth 256
 
   @doc """

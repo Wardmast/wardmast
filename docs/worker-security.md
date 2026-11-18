@@ -1520,8 +1520,9 @@ scope or an ssh `session-N.scope`.
 `Wardmast.MCP.OperatorSocket` listens on a Unix domain socket (only when the
 HTTP endpoint serves). For each connection it reads `SO_PEERCRED`: the
 connecting process's pid and uid, recorded by the kernel at `connect()` and
-not forgeable by the client. `Wardmast.MCP.OperatorProof.authorize/2` then
-requires all of:
+not forgeable by the client. (macOS has neither `SO_PEERCRED` nor `/proc` nor
+cgroups; see "On macOS" below for what replaces each.)
+`Wardmast.MCP.OperatorProof.authorize/2` then requires all of:
 
 1. **the server's uid** (the socket is also 0600 in a 0700 directory);
 2. **not descended from the server**: the parent chain is walked through
@@ -1560,6 +1561,74 @@ come after its masks and would re-expose it. Set
 listener off. Tokens can then only be minted by a caller that already holds
 one.
 
+### On macOS (bd-5tg348)
+
+macOS has no `SO_PEERCRED`, no `/proc` and no cgroups. Before bd-5tg348 the
+socket refused every caller on a Mac (`no_peercred`). The same policy now
+runs on other sources there. `OperatorProof.authorize/2` picks them on a
+darwin host (`os: :darwin`); Linux is unchanged.
+
+| | Linux | macOS |
+|---|---|---|
+| Peer credentials | `SO_PEERCRED`: pid, uid and gid as of `connect()` | `LOCAL_PEERCRED` (a `struct xucred`): the uid as of `connect()`. `LOCAL_PEERPID`: the pid |
+| 1. The server's uid | the owner of `/proc/self` | `ps -o uid=` for the server's own pid |
+| 2. Not descended from the server | walk `/proc/<pid>/stat` | walk `/bin/ps -o ppid= -p <pid>`, one pid at a time, up to launchd (pid 1) |
+| 3. Not in the server's service cgroup | the `wardmast.service` cgroup | **none**: macOS has no cgroups |
+| 4. Not in a session | a cgroup segment starting `arb-session-` | below a session's tmux server: the pid `Wardmast.Sessions.Runner.Darwin` records in the session's pidfile (`session-<id>.pid`, beside its socket), as long as that pid still runs a tmux |
+
+Every failure fails closed with `peer_unreadable`, as on Linux: a pid `ps`
+doesn't know (the process is gone), a `ps` that exits non-zero, can't be run
+or prints anything but one number, a cycle in the parent chain, a chain
+deeper than 256, a session server whose command can't be read, and a server
+uid `ps` can't report. A `LOCAL_PEERCRED` or `LOCAL_PEERPID` read that fails,
+or returns anything but a version-0 `xucred` and an `int`, is `no_peercred`.
+
+`ps` runs as `/bin/ps`, not through `PATH`. The server's `PATH` is captured
+from the operator's shell and usually leads with Homebrew's directory, which
+the same uid can write, and a `ps` planted there could vouch for any
+ancestry. `/bin` is on the sealed system volume.
+
+A pidfile pid that now runs something other than a tmux has been reused, and
+the session check ignores it. `Runner.Darwin` judges a session live the same
+way.
+
+**On macOS this is a guardrail, not a boundary, the same as for unjailed
+workers on Linux (see the same-UID reasoning below), and it is weaker:**
+
+* **A double-forked orphan gets past check 2.** With no cgroup there is no
+  check 3. A worker process that double-forks, or calls `setsid` and lets its
+  parent exit, is reparented to launchd, and nothing records that the server
+  started it. From there `arb mcp token mint` gets a coordinator token. On
+  Linux the release's `wardmast.service` cgroup catches this. On macOS
+  nothing does, in agent and daemon mode alike.
+* **Check 4 trusts the pidfile.** A session process that double-forks gets
+  past it the same way, and so does one that deletes its session's pidfile
+  (the directory belongs to the server's user). A session whose server pid
+  could not be recorded at launch (`Runner.Darwin` logs "no pidfile
+  recorded") is not recognized at all.
+* **`LOCAL_PEERPID` is the pid of the last process to use the peer's
+  socket** (xnu's `last_pid`), not necessarily the one that called
+  `connect()`. A connected socket handed to another process, by fd passing
+  or by a fork that inherits it, can be attributed to that process instead.
+  That gives a worker nothing a double fork doesn't already give it.
+* **pid reuse** between the read and the walk is the same theoretical gap
+  as on Linux (see "Known open gaps").
+* There is no OS jail for workers on macOS (see
+  [running-on-macos.md](running-on-macos.md#limitations)), so no worker there
+  gets the jailed-worker protections described below.
+
+**What was verified, and where.** Everything above was built and tested on
+Linux. The policy, with every check and failure, runs against an injected
+process table in `apps/wardmast/test/wardmast/mcp/operator_proof_darwin_test.exs`.
+The darwin socket read runs against a stand-in `getopts` in
+`operator_socket_peercred_test.exs`, and the `ps` walk runs against real
+processes and the host's own `ps`. Those real-process cases, and a real
+connection to the socket, are not tagged `:linux`, so the macOS CI job
+(`.github/workflows/macos.yml`) runs them against BSD `ps` and the macOS
+kernel after merge. **Not yet seen on a real Mac:** `arb mcp token mint`
+succeeding from the operator's shell, and the same command refused from
+inside a worker and from a session pane.
+
 ### Who mints what, now
 
 | Caller | Path | Result |
@@ -1572,6 +1641,7 @@ one.
 | Wardmast coordinator/refine sessions | minted by the server at provisioning (`Scope.mint_session` / `mint_refine`) | unchanged |
 | `arb mcp token mint` (or a raw socket client) run inside a worker | operator socket | refused: `spawned_by_arbiter`, or `in_arbiter_cgroup` for a double-forked orphan (release / systemd unit only; on a dev server an orphan passes) |
 | `arb mcp token mint` (or a raw socket client, with `ARB_SESSION_ID`/`ARB_TOKEN` cleared) run inside a Wardmast session | operator socket | refused: `in_session_scope` |
+| The same, on macOS | operator socket | refused: `spawned_by_arbiter` inside a worker, `in_session_scope` below a session's tmux server. A double-forked orphan of either **gets a token** (no cgroup; see "On macOS" above) |
 
 ### What the jail adds
 
@@ -1687,7 +1757,10 @@ page carries, and the pages are refused.
 * **pid reuse between `connect()` and the `/proc` walk** is theoretically
   possible. A reused pid would belong to a process the attacker doesn't
   control, and a worker-spawned reuser would still be caught by the cgroup
-  check.
+  check. On macOS the same holds for the `ps` walk, except that there is no
+  cgroup check to catch a worker-spawned reuser.
+* **macOS has no check 3.** A worker's or a session's double-forked orphan
+  gets a coordinator token (see "On macOS" above).
 
 ### Migration
 
