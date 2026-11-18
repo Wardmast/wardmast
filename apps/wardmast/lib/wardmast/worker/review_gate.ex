@@ -226,6 +226,7 @@ defmodule Wardmast.Worker.ReviewGate do
   alias Wardmast.Agents.SecurityPolicy
   alias Wardmast.CircuitBreaker
   alias Wardmast.Guardrails.Gate
+  alias Wardmast.Mergers.ForgeCli
   alias Wardmast.Mergers.NetDiff
   alias Wardmast.Messages.CoordinatorNotifier
   alias Wardmast.Nodes.LocalCapacity
@@ -9836,11 +9837,26 @@ defmodule Wardmast.Worker.ReviewGate do
   # nothing when no PR was opened (no hosted merger configured) — the reviewer
   # then falls back to the `git diff` instructions that follow.
   defp pr_review_block(state) do
-    case pr_number(Map.get(state, :pr_ref)) do
-      nil ->
+    pr_ref = Map.get(state, :pr_ref)
+
+    case {ForgeCli.forge_from_ref(pr_ref), pr_number(pr_ref)} do
+      {_, nil} ->
         ""
 
-      number ->
+      {:gitlab, number} ->
+        """
+        A GitLab merge request is already open for this branch: MR !#{number}. Prefer
+        reviewing it through the MR so your verdict lands against the real diff:
+
+            glab mr diff #{number}
+            glab mr view #{number} --comments
+
+        You may leave review comments with `glab mr note #{number}`. The local
+        `git diff` below is equivalent if `glab` is unavailable.
+
+        """
+
+      {_, number} ->
         """
         A GitHub pull request is already open for this branch: PR ##{number}. Prefer
         reviewing it through the PR so your verdict lands against the real diff:
@@ -9858,20 +9874,7 @@ defmodule Wardmast.Worker.ReviewGate do
   # Extract the numeric PR/MR id from a merger ref. Handles both the bare
   # ("#42") and embedded ("owner/repo#42") forms; returns nil for anything
   # without a trailing number.
-  defp pr_number(ref) when is_binary(ref) do
-    case ref |> String.split("#") |> List.last() do
-      n when is_binary(n) ->
-        case Integer.parse(n) do
-          {int, ""} -> int
-          _ -> nil
-        end
-
-      _ ->
-        nil
-    end
-  end
-
-  defp pr_number(_), do: nil
+  defp pr_number(ref), do: ForgeCli.ref_number(ref)
 
   @doc """
   Build the reviewer's re-review prompt for round >= 2: the base review prompt,

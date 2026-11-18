@@ -11,7 +11,7 @@ defmodule Wardmast.Mergers.RoutingCheck do
       it: the worker pushes its branch to `origin` first. This is the
       remote-less infra repo inheriting the workspace's `github` strategy.
     * `:remote_mismatch` — the strategy is `github` and the effective
-      `merge.config.owner` / `.repo` are pinned to a different repository than
+      `merge.config.owner` / `.repo` (or, for `gitlab`, a path-form `project_id`) are pinned to a different repository than
       the checkout's `origin` (compared case-insensitively). Its PRs would be
       opened against the wrong repository.
 
@@ -64,7 +64,7 @@ defmodule Wardmast.Mergers.RoutingCheck do
   defp check_repo(workspace, key, path) do
     strategy = Mergers.strategy(workspace, key)
     merge = Mergers.merge_config(workspace, key)
-    remote = remote_slug(path)
+    remote = remote_slug(strategy, path)
     expected = pinned_slug(strategy, merge)
 
     problem =
@@ -90,7 +90,22 @@ defmodule Wardmast.Mergers.RoutingCheck do
 
   defp checkout?(path), do: is_binary(path) and File.dir?(path)
 
-  defp remote_slug(path) do
+  # GitLab project paths nest (`group/sub/project`), which the two-segment
+  # GitHub resolver cannot parse.
+  defp remote_slug(:gitlab, path) do
+    with true <- checkout?(path),
+         {out, 0} <-
+           System.cmd("git", ["-C", path, "remote", "get-url", "origin"], stderr_to_stdout: true),
+         {:ok, project} <- Wardmast.Mergers.Gitlab.parse_remote_project(String.trim(out)) do
+      project
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp remote_slug(_strategy, path) do
     if checkout?(path) do
       case RepoResolver.from_remote(path) do
         {:ok, {owner, name}} -> "#{owner}/#{name}"
@@ -103,6 +118,14 @@ defmodule Wardmast.Mergers.RoutingCheck do
        when is_binary(owner) and owner != "" and is_binary(repo) and repo != "",
        do: "#{owner}/#{repo}"
 
+  # A GitLab `project_id` is only comparable when it is the URL-encoded path
+  # form (`group/project` / `group%2Fproject`); a numeric id says nothing about
+  # the remote's path, so it is never flagged.
+  defp pinned_slug(:gitlab, %{"config" => %{"project_id" => id}}) when is_binary(id) do
+    path = URI.decode(id)
+    if String.contains?(path, "/"), do: path, else: nil
+  end
+
   defp pinned_slug(_strategy, _merge), do: nil
 
   defp fix(nil, _ws, _key, _strategy, _remote), do: nil
@@ -110,6 +133,11 @@ defmodule Wardmast.Mergers.RoutingCheck do
   defp fix(:no_remote, ws, key, strategy, _remote) do
     "`arb config set merge.repos.#{key}.strategy direct#{workspace_flag(ws)}` to merge it " <>
       "locally, or add an `origin` remote for the #{strategy} repository it belongs to"
+  end
+
+  defp fix(:remote_mismatch, ws, key, :gitlab, remote) do
+    "`arb config set merge.repos.#{key}.config.project_id #{remote}#{workspace_flag(ws)}` to open its " <>
+      "MRs against its own project, or `merge.repos.#{key}.strategy direct` to merge it locally"
   end
 
   defp fix(:remote_mismatch, ws, key, _strategy, remote) do
