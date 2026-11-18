@@ -227,6 +227,10 @@ defmodule Wardmast.Application do
         # (bd-73bfml) so the durable log backing `GET /events?since=` doesn't
         # grow without bound. See `Wardmast.Events.Retention` for config.
         Wardmast.Events.Retention,
+        # In-server size-capped rotation of the launchd-owned server log (macOS;
+        # copytruncate). A no-op where the log file does not exist. See
+        # Wardmast.Server.LogRotator.
+        Wardmast.Server.LogRotator,
         # Clears `worker_runs.output_lines` / `worker_run_steps.output_summary`
         # for old runs once their on-disk transcript / session archive is
         # verified present (bd-6jcebm). See `Wardmast.Workers.OutputOffload`.
