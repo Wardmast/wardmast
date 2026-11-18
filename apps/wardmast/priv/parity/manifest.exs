@@ -1029,7 +1029,7 @@
       title: "Support diagnostics bundle (redacted version, doctor, config, logs)",
       mcp: nil,
       cli: ["arb support"],
-      rest: ["GET /api/support/bundle"],
+      rest: ["GET /api/support/bundle", "POST /api/support/bundle"],
       status: :excluded,
       absent: %{
         mcp: {:intentional, "Operator-only file download for bug reports (`arb support bundle`, dashboard About button); not a model-facing operation."}

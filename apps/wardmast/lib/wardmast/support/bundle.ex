@@ -10,8 +10,11 @@ defmodule Wardmast.Support.Bundle do
   (`secret`, `token`, `password`, `key`, `cookie`, `credential`, `auth`) are
   masked outright, so a bundle is safe to share.
 
-  Options (for tests): `:log_path`, `:config` (keyword to render instead of
-  the `:wardmast` application env), `:log_bytes`.
+  Options: `:extra_files` (a `%{name => text}` map of client-side files, e.g.
+  the CLI's `arb doctor` check results; names are restricted to
+  `[A-Za-z0-9._-]+`, stored under `client/`, and redacted like the rest).
+  For tests: `:log_path`, `:config` (keyword to render instead of the
+  `:wardmast` application env), `:log_bytes`.
   """
 
   alias Wardmast.Redaction
@@ -49,8 +52,19 @@ defmodule Wardmast.Support.Bundle do
       {"config.txt", inspect(mask(config), pretty: true, limit: :infinity, printable_limit: 500)},
       {"logs/wardmast.log", log_tail(log_path, log_bytes)}
     ]
+    |> Kernel.++(extra_files(Keyword.get(opts, :extra_files, %{})))
     |> Enum.map(fn {name, content} -> {name, Redaction.redact_patterns(content)} end)
   end
+
+  defp extra_files(files) when is_map(files) do
+    for {name, content} <- files,
+        is_binary(name) and is_binary(content),
+        name =~ ~r/\A[A-Za-z0-9._-]{1,100}\z/,
+        name not in [".", ".."],
+        do: {"client/" <> name, content}
+  end
+
+  defp extra_files(_), do: []
 
   defp version_text do
     v = Wardmast.Server.Status.version()
@@ -93,6 +107,10 @@ defmodule Wardmast.Support.Bundle do
 
   defp mask(map) when is_map(map) and not is_struct(map),
     do: map |> Map.to_list() |> mask() |> Map.new()
+
+  defp mask(struct) when is_struct(struct), do: struct |> Map.from_struct() |> mask()
+
+  defp mask(t) when is_tuple(t), do: t |> Tuple.to_list() |> mask() |> List.to_tuple()
 
   defp mask(v), do: v
 end

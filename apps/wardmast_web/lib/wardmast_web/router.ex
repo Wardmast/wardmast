@@ -403,6 +403,7 @@ defmodule WardmastWeb.Router do
 
     # Diagnostics bundle (`arb support bundle`); operator-only.
     get("/support/bundle", SupportBundleController, :show)
+    post("/support/bundle", SupportBundleController, :create)
 
     # Server health (migrations, etc.)
     get("/server/migrations", ServerController, :migrations)

@@ -48,6 +48,28 @@ defmodule Wardmast.Support.BundleTest do
     assert all =~ "line one"
   end
 
+  test "masks secret keys inside tuples and structs, and redacts extra client files" do
+    config = [
+      oauth: {SomeMod, [client_secret: "hunter2-super-secret-value", ok: 1]},
+      uri: %URI{userinfo: "hunter2-super-secret-value", host: "example.test"}
+    ]
+
+    extra = %{"doctor-checks.txt" => "x " <> Enum.at(@secrets, 0), "../evil" => "no"}
+
+    assert {:ok, %{data: data}} =
+             Bundle.build(log_path: "/nonexistent/x.log", config: config, extra_files: extra)
+
+    {:ok, files} = :erl_tar.extract({:binary, data}, [:memory, :compressed])
+    names = Enum.map(files, fn {n, _} -> to_string(n) end)
+    assert "client/doctor-checks.txt" in names
+    refute Enum.any?(names, &(&1 =~ "evil"))
+
+    all = files |> Enum.map(fn {_, c} -> c end) |> Enum.join("\n")
+    refute all =~ "hunter2-super-secret-value"
+    refute all =~ Enum.at(@secrets, 0)
+    assert all =~ "example.test"
+  end
+
   test "missing log file does not break the bundle" do
     assert {:ok, %{data: data}} = Bundle.build(log_path: "/nonexistent/x.log", config: [])
     {:ok, files} = :erl_tar.extract({:binary, data}, [:memory, :compressed])

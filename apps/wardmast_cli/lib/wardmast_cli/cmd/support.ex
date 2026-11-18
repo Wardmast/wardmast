@@ -3,9 +3,11 @@ defmodule WardmastCli.Cmd.Support do
   arb support bundle [--out <file>]
 
   Write a diagnostics archive (`.tar.gz`) for a bug report: server version,
-  doctor snapshot, config and the tail of the server log. The server redacts
+  platform snapshot, config and the tail of the server log, plus this CLI's
+  `arb doctor` check results (`client/doctor-checks.txt`). The server redacts
   known secret shapes and secret-looking config values
-  (`Wardmast.Support.Bundle`); the dashboard's About page has the same button.
+  (`Wardmast.Support.Bundle`), including the doctor text; the dashboard's
+  About page has the same button (without the CLI-side doctor checks).
   Needs an operator token (`GET /api/support/bundle`).
   """
 
@@ -25,8 +27,34 @@ defmodule WardmastCli.Cmd.Support do
     end
   end
 
+  # Every doctor check, as `arb doctor --all` prints them. The server redacts it.
+  defp doctor_text do
+    checks =
+      Application.get_env(:wardmast_cli, :support_doctor_checks, fn ->
+        WardmastCli.Cmd.Doctor.checks(spawn: :skip)
+      end)
+
+    {:ok, io} = StringIO.open("")
+    previous = Process.group_leader()
+    Process.group_leader(self(), io)
+
+    try do
+      WardmastCli.Cmd.Doctor.Formatter.emit_text(checks.(), all: true)
+    rescue
+      e -> IO.puts("doctor checks unavailable: " <> Exception.message(e))
+    after
+      Process.group_leader(self(), previous)
+    end
+
+    {_, text} = StringIO.contents(io)
+    StringIO.close(io)
+    text
+  end
+
   defp bundle(opts) do
-    case Client.get("/api/support/bundle") do
+    body = %{"extra_files" => %{"doctor-checks.txt" => doctor_text()}}
+
+    case Client.post("/api/support/bundle", body) do
       {:ok, %{"filename" => filename, "data_base64" => b64}} ->
         path = Path.expand(opts[:out] || filename)
 
