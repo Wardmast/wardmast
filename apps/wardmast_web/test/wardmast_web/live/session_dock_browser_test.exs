@@ -51,7 +51,7 @@ defmodule WardmastWeb.SessionDockBrowserTest do
 
   setup %{tmp_dir: tmp_dir} do
     Wardmast.Test.SessionEnv.sandbox("session-dock-browser")
-    put_env(:sessions_runtime_dir, tmp_dir)
+    put_env(:sessions_runtime_dir, Wardmast.Test.SessionEnv.short_runtime_dir(tmp_dir))
     put_env(:sessions_runner, NoopRunner)
     :ok
   end

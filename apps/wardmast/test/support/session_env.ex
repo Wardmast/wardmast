@@ -84,14 +84,29 @@ defmodule Wardmast.Test.SessionEnv do
 
   # On darwin `$TMPDIR` is a long `/var/folders/...` path, so a socket under it
   # overflows the 103-byte limit (bd-15labm). Use a short `/tmp` dir there.
-  defp runtime_dir(base) do
+  defp runtime_dir(base), do: short_runtime_dir(Path.join(base, "runtime"))
+
+  @doc """
+  A `:sessions_runtime_dir` value that keeps `<dir>/arbiter/session-<uuid>.sock`
+  under the 103-byte Unix-socket limit (bd-15labm).
+
+  On darwin it is a fresh `/tmp/arb-s-N` directory (created, removed on exit);
+  elsewhere it is `fallback`, returned untouched, so Linux placement is unchanged.
+  """
+  @spec short_runtime_dir(Path.t()) :: Path.t()
+  def short_runtime_dir(fallback) do
     darwin? =
       Application.get_env(:wardmast, :sessions_os) == :darwin or
         match?({:unix, :darwin}, :os.type())
 
-    if darwin?,
-      do: Path.join("/tmp", "arb-s-#{System.unique_integer([:positive])}"),
-      else: Path.join(base, "runtime")
+    if darwin? do
+      dir = Path.join("/tmp", "arb-s-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      ExUnit.Callbacks.on_exit(fn -> Wardmast.Worker.RunTmp.force_rm_rf(dir) end)
+      dir
+    else
+      fallback
+    end
   end
 
   @doc """

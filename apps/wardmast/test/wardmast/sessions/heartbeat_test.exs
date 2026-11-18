@@ -9,7 +9,11 @@ defmodule Wardmast.Sessions.HeartbeatTest do
   alias Wardmast.Sessions.Naming
 
   setup do
-    runtime = Path.join(System.tmp_dir!(), "bd-3qkbch-hb-#{System.unique_integer([:positive])}")
+    runtime =
+      Wardmast.Test.SessionEnv.short_runtime_dir(
+        Path.join(System.tmp_dir!(), "bd-3qkbch-hb-#{System.unique_integer([:positive])}")
+      )
+
     previous = Application.get_env(:wardmast, :sessions_runtime_dir)
     Application.put_env(:wardmast, :sessions_runtime_dir, runtime)
 
