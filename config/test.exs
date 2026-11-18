@@ -528,3 +528,6 @@ config :wardmast, :gitlab_bot_verify, backoff_ms: [0, 0], cache_ttl_ms: 0
 # (network) on first use. No suite run installs Hex into a real home; the
 # toolchain tests that cover seeding pass their own `:seed`.
 config :wardmast, :worker_toolchain_mix_seed, false
+
+# In-server log rotation is off in the suite; tests drive `LogRotator.rotate/2` directly.
+config :wardmast, :log_rotation, enabled: false
