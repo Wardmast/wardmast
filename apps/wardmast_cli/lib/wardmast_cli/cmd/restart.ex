@@ -64,7 +64,6 @@ defmodule WardmastCli.Cmd.Restart do
 
   # Fallback API port when ARB_HOST carries no explicit one (matches Client's
   # default of http://127.0.0.1:4848).
-  @default_port 4848
 
   def run(argv) do
     if Output.help?(argv) do
@@ -779,7 +778,7 @@ defmodule WardmastCli.Cmd.Restart do
   defp api_port do
     case URI.parse(Client.base_url()) do
       %URI{port: port} when is_integer(port) -> port
-      _ -> @default_port
+      _ -> Wardmast.Env.port()
     end
   end
 

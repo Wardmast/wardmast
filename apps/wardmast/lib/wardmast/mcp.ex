@@ -69,7 +69,6 @@ defmodule Wardmast.MCP do
   @default_worker_max_age 14_400
   @default_max_depth 3
   @default_server_name "wardmast"
-  @default_port 4848
   @default_sse_keepalive_ms 15_000
   @default_sse_max_lifetime_ms :infinity
 
@@ -223,7 +222,7 @@ defmodule Wardmast.MCP do
     :wardmast_web
     |> Application.get_env(WardmastWeb.Endpoint, [])
     |> Keyword.get(:http, [])
-    |> Keyword.get(:port, @default_port)
+    |> Keyword.get(:port, Wardmast.Env.port())
   end
 
   defp config(key, default \\ nil) do

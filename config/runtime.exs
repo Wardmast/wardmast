@@ -1,7 +1,6 @@
 import Config
 
-config :wardmast_web, WardmastWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PORT", "4848"))]
+config :wardmast_web, WardmastWeb.Endpoint, http: [port: Wardmast.Env.port()]
 
 # Max concurrent `/api` requests before the server answers 503 + Retry-After
 # (WardmastWeb.Plugs.ApiConcurrencyLimit, bd-66anxj). `0` disables the limit.
@@ -139,7 +138,7 @@ if config_env() == :prod and not agent? do
     server: true,
     url: [
       host: System.get_env("PHX_HOST") || "localhost",
-      port: String.to_integer(System.get_env("PORT", "4848")),
+      port: Wardmast.Env.port(),
       scheme: "http"
     ],
     check_origin: false

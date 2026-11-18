@@ -18,6 +18,8 @@ System.delete_env("ARBITER_WORKSPACE")
 System.delete_env("WARDMAST_HOST")
 System.delete_env("ARB_HOST")
 System.delete_env("ARBITER_HOST")
+# The server port is `PORT`; a worker/dev shell exports one. Tests assume the 4848 default.
+System.delete_env("PORT")
 
 # Never let a test exec `mix`, `systemctl`, `lsof` or `kill` for real through
 # `WardmastCli.Cmd.Start.run_cmd/3`: an unstubbed restart test once killed the

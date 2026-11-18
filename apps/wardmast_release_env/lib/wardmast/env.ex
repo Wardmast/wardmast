@@ -95,6 +95,28 @@ defmodule Wardmast.Env do
   def read(@prefix <> _ = name), do: get(name)
   def read(name), do: System.get_env(name)
 
+  @default_port 4848
+
+  @doc """
+  The one place the server port is decided: the plain `PORT` variable (what
+  `config/runtime.exs` binds Phoenix to), default 4848. The `arb` client
+  default, `arb doctor`, the MCP URL and the `.mcp.json` rendering all derive
+  from this. An unset, empty or non-numeric value means the default.
+  """
+  @spec port() :: pos_integer()
+  def port do
+    with value when is_binary(value) <- System.get_env("PORT"),
+         {port, ""} when port > 0 <- Integer.parse(value) do
+      port
+    else
+      _ -> @default_port
+    end
+  end
+
+  @doc "The loopback base URL for `port/0` (the `arb` client's default host)."
+  @spec default_base_url() :: String.t()
+  def default_base_url, do: "http://127.0.0.1:#{port()}"
+
   @doc "Forget which deprecations were already logged. Test seam."
   @spec reset_warnings() :: :ok
   def reset_warnings do
