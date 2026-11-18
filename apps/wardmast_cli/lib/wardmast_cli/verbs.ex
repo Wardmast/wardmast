@@ -254,6 +254,7 @@ defmodule WardmastCli.Verbs do
      [workspace: :none, host_local?: true, probes: [[]]]},
     {"preflip-gate", Module.concat(@cmd, PreflipGate), [workspace: :none, probes: [[]]]},
     {"grok-token", Module.concat(@cmd, GrokToken), [workspace: :none, probes: [[]]]},
+    {"support", Module.concat(@cmd, Support), [workspace: :none, probes: [["bundle"]]]},
     {"help", WardmastCli.Main, [workspace: :none, host_local?: true, probes: []]}
   ]
 

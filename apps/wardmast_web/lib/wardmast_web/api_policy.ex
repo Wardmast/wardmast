@@ -223,6 +223,8 @@ defmodule WardmastWeb.ApiPolicy do
     # ---- operator self-update (bd-6umf7z): launches `arb server deploy` -------
     {:post, "/api/release/deploy"} => :operator,
     {:get, "/api/release/deploy"} => :operator,
+    {:get, "/api/support/bundle"} => :operator,
+    {:post, "/api/support/bundle"} => :operator,
     {:post, "/api/providers/pause"} => :coordinator,
     {:post, "/api/providers/resume"} => :coordinator,
     {:get, "/api/accounts"} => :coordinator,

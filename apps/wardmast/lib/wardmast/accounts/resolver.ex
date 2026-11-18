@@ -162,7 +162,7 @@ defmodule Wardmast.Accounts.Resolver do
 
   @doc """
   Every workspace metered under `account_id`, sorted by name — the
-  "N workspaces: default, emricare, vstim" breakdown §6's `arb quota` header
+  "N workspaces: default, acme, my-app" breakdown §6's `arb quota` header
   prints.
   """
   @spec workspaces(String.t() | nil) :: [Workspace.t()]

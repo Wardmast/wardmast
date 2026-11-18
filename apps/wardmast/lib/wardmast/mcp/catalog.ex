@@ -680,7 +680,7 @@ defmodule Wardmast.MCP.Catalog do
             "type" => "string",
             "description" =>
               "The repo this ticket belongs to, as a configured `repo_paths` key " <>
-                ~s[(e.g. "tonic" — the key, not the forge slug "owner/tonic"). Every ticket carries one (bd-9dwbvt); omit it and ] <>
+                ~s[(e.g. "app" — the key, not the forge slug "owner/app"). Every ticket carries one (bd-9dwbvt); omit it and ] <>
                 "it is resolved for you — the workspace's only repo, else its `default_repo`. " <>
                 "Creation is REFUSED, listing the configured keys, when a multi-repo " <>
                 "workspace has no `default_repo`, and a repo that is not a configured key is " <>
@@ -888,7 +888,7 @@ defmodule Wardmast.MCP.Catalog do
             "type" => "string",
             "description" =>
               "The repo this ticket belongs to, as a configured `repo_paths` key " <>
-                "(e.g. \"tonic\" — the key, not the forge slug \"owner/tonic\")."
+                "(e.g. \"app\" — the key, not the forge slug \"owner/app\")."
           }
         },
         "required" => [],
@@ -2312,7 +2312,7 @@ defmodule Wardmast.MCP.Catalog do
             "type" => "string",
             "description" =>
               "The repo this ticket belongs to, as a configured `repo_paths` key " <>
-                ~s[(e.g. "tonic" — the key, not the forge slug "owner/tonic"). Optional — only needed in a multi-repo workspace, ] <>
+                ~s[(e.g. "app" — the key, not the forge slug "owner/app"). Optional — only needed in a multi-repo workspace, ] <>
                 "where dispatch otherwise can't tell which checkout the claimed issue is for."
           }
         },

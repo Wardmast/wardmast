@@ -48,7 +48,7 @@ grant's tokens.
 Setup, on the Wardmast host:
 
 ```sh
-cd /tmp   # a neutral dir: never the admiral dir or a repo
+cd /tmp   # a neutral dir: never the coordinator dir or a repo
 CLAUDE_CONFIG_DIR=~/.wardmast/quota-claude claude auth login
 arb account rotate claude:default --kind cli_credentials_path --secret ~/.wardmast/quota-claude
 ```
@@ -117,7 +117,7 @@ within 7 days.
 Both procedures need the dedicated grant to exist:
 
 ```sh
-cd /tmp   # neutral: never the admiral dir or a repo
+cd /tmp   # neutral: never the coordinator dir or a repo
 CLAUDE_CONFIG_DIR=~/.wardmast/quota-claude claude auth login
 arb account rotate claude:default --kind cli_credentials_path --secret ~/.wardmast/quota-claude
 ```

@@ -3,7 +3,7 @@ defmodule Wardmast.Workflows.DeployWatch do
   Watches the post-merge deploy on deploy-on-merge repos (#967).
 
   Wardmast's responsibility used to end at merge. On a repo whose main pipeline
-  deploys (tonic, vstim) a broken CD was invisible: on 2026-10-18 three main
+  deploys (app, my-app) a broken CD was invisible: on 2026-10-18 three main
   pipelines reported SUCCESS while `build` and `deploy` were SKIPPED, and
   nothing noticed for 2.5h.
 

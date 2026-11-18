@@ -272,7 +272,7 @@ defmodule Wardmast.Loop.FixPassClassifier do
   @doc """
   What kind of gate one failing check is. The job's log tail is read first
   (a runner failure, a formatter/linter message, a test-failure count) and
-  outranks its name, because one job can run several gates — vstim's `test`
+  outranks its name, because one job can run several gates — my-app's `test`
   job also runs the formatter.
   """
   @spec check_kind(check()) :: check_kind()

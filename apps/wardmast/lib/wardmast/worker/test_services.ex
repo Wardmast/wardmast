@@ -38,14 +38,14 @@ defmodule Wardmast.Worker.TestServices do
     * `:postgres` — `docker.io/library/postgres:<version>-alpine`, user and
       password `postgres`, on `127.0.0.1:5432`; options `:version` (default
       16), `:database` (default `"app_test"`).
-    * `:s3` — `docker.io/pgsty/silo` (the MinIO fork tonic's compose uses),
-      credentials `minioadmin`, with the SSE-S3 test key tonic needs, on
+    * `:s3` — `docker.io/pgsty/silo` (the MinIO fork the app's compose uses),
+      credentials `minioadmin`, with the SSE-S3 test key the app needs, on
       `127.0.0.1:9000`.
 
   `for_repo/1` resolves a repo's list: `config :wardmast, :worker_test_services`
   (`%{"repo" => [spec, …]}`, a spec being a preset atom, `{preset, opts}`, or a
-  full service map) over the built-in default for tonic (Postgres 15 + S3).
-  `%{"repo" => []}` switches a default off. vstim has none on purpose: its
+  full service map) over the built-in default for the app (Postgres 15 + S3).
+  `%{"repo" => []}` switches a default off. Another app has none on purpose: its
   container starts its own per-container Postgres, and an injected
   `DATABASE_URL` would override it.
 
@@ -202,7 +202,7 @@ defmodule Wardmast.Worker.TestServices do
         {"MINIO_ROOT_USER", "minioadmin"},
         {"MINIO_ROOT_PASSWORD", "minioadmin"},
         # SSE-S3 (AES256) support: without a KMS key silo answers
-        # NotImplemented to the header tonic sends on every PHI-bearing PUT.
+        # NotImplemented to the header the app sends on every PHI-bearing PUT.
         {"MINIO_KMS_SECRET_KEY", "tonic-dev-key:DeVeLYqwANQlgD5S1i+5+EKa0Qemll5hfObx4DeRPd0="}
       ],
       command: [

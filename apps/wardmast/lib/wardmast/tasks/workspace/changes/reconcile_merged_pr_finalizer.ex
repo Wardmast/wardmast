@@ -5,7 +5,7 @@ defmodule Wardmast.Tasks.Workspace.Changes.ReconcileMergedPRFinalizer do
 
   A finalizer is pinned to the `owner/repo` it was started for, and only
   workspace `:create` and boot start one. Without this, a config edit that
-  moved the repo — the move to `serious-alchemy/arbiter` changed
+  moved the repo — the move to `acme/wardmast` changed
   `merge.config.owner` — left the live finalizer sweeping the old repo until a
   server restart. `MergedPRFinalizerSupervisor.reconcile/1` stops a finalizer
   whose repo the config no longer resolves to and starts one for each repo

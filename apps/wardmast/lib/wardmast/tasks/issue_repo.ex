@@ -88,7 +88,7 @@ defmodule Wardmast.Tasks.IssueRepo do
   The repo name dispatch, resume and adoption should look up for a repo value
   that is already stored (on a ticket or a run): the configured key it matches,
   else `repo` unchanged. Rows written before create/update validated the value
-  (bd-7u1b6n) may hold a forge slug such as `acme/tonic`; this is the one place
+  (bd-7u1b6n) may hold a forge slug such as `acme/app`; this is the one place
   that turns it back into the key, so every consumer resolves it identically.
   """
   @spec canonical_repo(String.t() | nil, String.t() | nil) :: String.t() | nil
@@ -166,7 +166,7 @@ defmodule Wardmast.Tasks.IssueRepo do
   # key it matched — the issue must persist the key dispatch will look up, not
   # the caller's spelling of it. Matching on keys rather than mapping an entry
   # back to a key by value keeps two keys that alias the same checkout
-  # (`%{"tonic" => "/srv/x", "tonic-alias" => "/srv/x"}`) distinct.
+  # (`%{"app" => "/srv/x", "app-alias" => "/srv/x"}`) distinct.
   defp canonical_key(repo_maps, repo) do
     Enum.find_value(repo_maps, &usable_key(&1, repo)) || slug_key(repo_maps, repo)
   end

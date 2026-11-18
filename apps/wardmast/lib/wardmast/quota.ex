@@ -665,7 +665,7 @@ defmodule Wardmast.Quota do
 
   `workspaces` carries each workspace metered under the account with its own
   30-day spend for `provider`, so the CLI can render
-  `default $A · emricare $B · vstim $C` under the account total. Empty when
+  `default $A · acme $B · my-app $C` under the account total. Empty when
   the account has no workspaces linked to it yet.
 
   `cache` is an optional `spend_cache/1` memo. Each `workspace_spend/1` term

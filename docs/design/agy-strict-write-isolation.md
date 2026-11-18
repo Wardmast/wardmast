@@ -95,7 +95,7 @@ Jailed:
 
 | Run | Outside write | Inside write |
 |---|---|---|
-| **jailed** | `state: "ERROR"`, `open /home/ryan/.cache/agy-bwrap-probe-bd-ca7xko-jail.txt: read-only file system`. No file on the host | `DONE`, file present |
+| **jailed** | `state: "ERROR"`, `open /home/me/.cache/agy-bwrap-probe-bd-ca7xko-jail.txt: read-only file system`. No file on the host | `DONE`, file present |
 | control (same, no `bwrap`) | `DONE`. The file **was created on the host** (removed after the probe) | `DONE`, file present |
 
 Other results from the jailed run:

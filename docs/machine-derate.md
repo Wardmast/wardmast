@@ -110,7 +110,7 @@ Restart the agent (`systemctl --user restart wardmast-node`) to apply.
   `↳ hard derate: thermal 96 °C — offering 2 of 4` line under a derated row.
 * The dashboard: the machine chips in the capacity strip (`box 2/2 of 6`, red
   for hard, amber for soft; the popup says why) and the nodes page.
-* Held cards: `held — ryan-oryx-pro thermal 96 °C (self-derated: no new slots
+* Held cards: `held — gpu-box-1 thermal 96 °C (self-derated: no new slots
   until the readings stay clear; running workers continue)`; a dispatch refused
   on the primary says `held — local thermal 96 °C`.
 

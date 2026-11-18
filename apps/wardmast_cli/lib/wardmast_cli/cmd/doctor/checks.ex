@@ -202,8 +202,18 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
 
   defp darwin_opts(opts, platform) do
     Keyword.get_lazy(opts, :darwin, fn ->
-      [path: platform["path"] || "", tools: platform["tools"] || %{}]
+      [
+        path: platform["path"] || "",
+        tools: platform["tools"] || %{},
+        service: local_service_mode()
+      ]
     end)
+  end
+
+  # The plists are on the host running the server; they are readable only when
+  # this CLI is on a macOS host (a remote darwin server's plists are not).
+  defp local_service_mode do
+    if Darwin.darwin?(:os.type()), do: WardmastCli.Supervisor.Launchd.service_mode()
   end
 
   @group_order [:core, :auth, :sandboxes, :security]
@@ -681,7 +691,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   end
 
   # bd-4420va: a workspace that pinned `agent.security.permissions.safe_defaults`
-  # before a new default category shipped (vstim pinning the 4 categories that
+  # before a new default category shipped (my-app pinning the 4 categories that
   # existed pre-v0.1.78) used to silently resolve fewer categories than a
   # workspace that never pinned, with nothing surfacing the gap. The legacy
   # `safe_defaults` key is now inert (see `Wardmast.Agents.SecurityPolicy`), so
@@ -1092,8 +1102,8 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     end
   end
 
-  # "default: claude=privileged, antigravity/gemini-3.8-flash-low=quarantine; emricare: …",
-  # then each GitLab bot token's expiry (bd-8ufzng): "; default: tonic bot token expires 2027-01-31 (60d)".
+  # "default: claude=privileged, antigravity/gemini-3.8-flash-low=quarantine; acme: …",
+  # then each GitLab bot token's expiry (bd-8ufzng): "; default: app bot token expires 2027-01-31 (60d)".
   defp guardrail_tiers_detail(workspaces) do
     tiers = guardrail_subjects_detail(workspaces)
 
