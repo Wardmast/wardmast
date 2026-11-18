@@ -278,10 +278,14 @@ defmodule Wardmast.Sessions.Naming do
   @spec pid_glob() :: {:ok, String.t()} | {:error, :no_runtime_dir}
   def pid_glob do
     case socket_dir() do
-      {:ok, dir} -> {:ok, Path.join(dir, @socket_prefix <> "*" <> @pid_suffix)}
+      {:ok, dir} -> {:ok, pid_glob(dir)}
       error -> error
     end
   end
+
+  @doc "Glob matching every session pidfile in `dir`."
+  @spec pid_glob(String.t()) :: String.t()
+  def pid_glob(dir) when is_binary(dir), do: Path.join(dir, @socket_prefix <> "*" <> @pid_suffix)
 
   @doc "The session id a pidfile path belongs to, or `nil`."
   @spec session_id_from_pidfile(String.t()) :: String.t() | nil
