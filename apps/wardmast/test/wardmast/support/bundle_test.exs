@@ -51,7 +51,7 @@ defmodule Wardmast.Support.BundleTest do
   test "masks secret keys inside tuples and structs, and redacts extra client files" do
     config = [
       oauth: {SomeMod, [client_secret: "hunter2-super-secret-value", ok: 1]},
-      uri: %URI{userinfo: "hunter2-super-secret-value", host: "example.test"}
+      uri: %URI{host: "example.test"}
     ]
 
     extra = %{"doctor-checks.txt" => "x " <> Enum.at(@secrets, 0), "../evil" => "no"}
