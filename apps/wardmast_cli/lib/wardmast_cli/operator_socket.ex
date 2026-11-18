@@ -13,7 +13,8 @@ defmodule WardmastCli.OperatorSocket do
   Path, which must match `Wardmast.MCP.OperatorProof.socket_path/1`:
   `ARB_OPERATOR_SOCKET` if set, else
   `/run/user/<uid>/arbiter/operator-<port>.sock` when the host has a
-  per-user runtime dir, else `<home>/run/operator-<port>.sock` (`ARB_HOME`, default `~/.wardmast`). `<port>`
+  per-user runtime dir, else `<data home>/run/operator-<port>.sock` (`WARDMAST_DATA_HOME`, legacy
+  `ARB_DATA_HOME`, default `~/.wardmast`; never `ARB_HOME`). `<port>`
   is `ARB_HOST`'s port (default 4848). Tests use the `:bd2_operator_socket`
   process-dict hook.
   """
