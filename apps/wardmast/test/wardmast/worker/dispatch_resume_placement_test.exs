@@ -58,7 +58,14 @@ defmodule Wardmast.Worker.DispatchResumePlacementTest do
     {:ok, first} =
       Dispatch.dispatch(
         task.id,
-        [force: true, repo: @repo, start_driver: false, nodes: [row("n-first")]] ++ @podman
+        [
+          force: true,
+          repo: @repo,
+          start_driver: false,
+          publish: Wardmast.DispatchImageStub.publish(),
+          plan: Wardmast.DispatchImageStub.plan(),
+          nodes: [row("n-first")]
+        ] ++ @podman
       )
 
     :ok = Worker.fail(first.worker_pid, :review_gate_rejected)
@@ -103,7 +110,13 @@ defmodule Wardmast.Worker.DispatchResumePlacementTest do
 
   defp resume_opts(extra) do
     Keyword.merge(
-      [start_driver: false, claude_start: capture(), nodes: [row()]] ++ @podman,
+      [
+        start_driver: false,
+        claude_start: capture(),
+        publish: Wardmast.DispatchImageStub.publish(),
+        plan: Wardmast.DispatchImageStub.plan(),
+        nodes: [row()]
+      ] ++ @podman,
       extra
     )
   end
@@ -172,7 +185,14 @@ defmodule Wardmast.Worker.DispatchResumePlacementTest do
       full = %{row() | live: 2}
 
       assert {:error, {:no_node_capacity, info}} =
-               Dispatch.resume(task.id, resume_opts(nodes: [full]))
+               Dispatch.resume(
+                 task.id,
+                 resume_opts(
+                   publish: Wardmast.DispatchImageStub.publish(),
+                   plan: Wardmast.DispatchImageStub.plan(),
+                   nodes: [full]
+                 )
+               )
 
       assert info.node == "local"
       assert info.kind == :resume
@@ -365,19 +385,43 @@ defmodule Wardmast.Worker.DispatchResumePlacementTest do
     end
 
     test "a node with room is room, with the primary full", %{task: task} do
-      assert Dispatch.resume_room?(task.id, Keyword.merge(@podman, nodes: [row()]))
+      assert Dispatch.resume_room?(
+               task.id,
+               Keyword.merge(@podman,
+                 publish: Wardmast.DispatchImageStub.publish(),
+                 plan: Wardmast.DispatchImageStub.plan(),
+                 nodes: [row()]
+               )
+             )
+
       assert Placement.reservations() == []
     end
 
     test "with the primary full and no node free there is none", %{task: task} do
-      refute Dispatch.resume_room?(task.id, Keyword.merge(@podman, nodes: [%{row() | live: 2}]))
+      refute Dispatch.resume_room?(
+               task.id,
+               Keyword.merge(@podman,
+                 publish: Wardmast.DispatchImageStub.publish(),
+                 plan: Wardmast.DispatchImageStub.plan(),
+                 nodes: [%{row() | live: 2}]
+               )
+             )
     end
 
     test "a run that stays on the primary waits for the primary's cap", %{task: task} do
-      refute Dispatch.resume_room?(task.id, nodes: [row()])
+      refute Dispatch.resume_room?(task.id,
+               publish: Wardmast.DispatchImageStub.publish(),
+               plan: Wardmast.DispatchImageStub.plan(),
+               nodes: [row()]
+             )
 
       ResumeSlotFixture.put_local_cap(2)
-      assert Dispatch.resume_room?(task.id, nodes: [row()])
+
+      assert Dispatch.resume_room?(task.id,
+               publish: Wardmast.DispatchImageStub.publish(),
+               plan: Wardmast.DispatchImageStub.plan(),
+               nodes: [row()]
+             )
     end
 
     test "remote_only with no node free is no room, even with the primary idle" do
@@ -460,7 +504,15 @@ defmodule Wardmast.Worker.DispatchResumePlacementTest do
                Dispatch.resume_session(task_id, resume_opts(resume_origin: :automatic))
 
       assert [{^task_id, :resume_session, _}] = StubResumeDeferrer.deferrals()
-      refute Dispatch.resume_room?(task_id, Keyword.merge(@podman, nodes: [row()]))
+
+      refute Dispatch.resume_room?(
+               task_id,
+               Keyword.merge(@podman,
+                 publish: Wardmast.DispatchImageStub.publish(),
+                 plan: Wardmast.DispatchImageStub.plan(),
+                 nodes: [row()]
+               )
+             )
     end
 
     test "a run the node quiesced and retained holds the resume the same way", c do
@@ -550,12 +602,26 @@ defmodule Wardmast.Worker.DispatchResumePlacementTest do
       pid = scheduler!(self())
       task_id = task.id
 
-      full = Keyword.merge(@podman, nodes: [%{row() | live: 2}], held_for: :local_capacity)
+      full =
+        Keyword.merge(@podman,
+          publish: Wardmast.DispatchImageStub.publish(),
+          plan: Wardmast.DispatchImageStub.plan(),
+          nodes: [%{row() | live: 2}],
+          held_for: :local_capacity
+        )
+
       :ok = Wardmast.Board.Autopilot.defer_resume(pid, task_id, :resume_session, full)
       Wardmast.Board.Autopilot.tick(pid)
       refute_received {:replayed, _, _, _}
 
-      free = Keyword.merge(@podman, nodes: [row()], held_for: :local_capacity)
+      free =
+        Keyword.merge(@podman,
+          publish: Wardmast.DispatchImageStub.publish(),
+          plan: Wardmast.DispatchImageStub.plan(),
+          nodes: [row()],
+          held_for: :local_capacity
+        )
+
       :ok = Wardmast.Board.Autopilot.defer_resume(pid, task_id, :resume_session, free)
       Wardmast.Board.Autopilot.tick(pid)
       assert_receive {:replayed, ^task_id, :resume_session, opts}, 5_000

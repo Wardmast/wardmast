@@ -176,12 +176,12 @@ defmodule Wardmast.Worker.PassPlacementTest do
 
     defp registry_node, do: %{id: "n", name: "mesaana", caps: %{"image" => "registry"}}
 
-    test "a local pass and a node that builds its own image publish nothing" do
+    test "a local pass publishes nothing; a node that cannot take the image is passed over" do
       boom = fn _ -> flunk("must not publish") end
       assert {:ok, nil} = PassPlacement.ensure_image(nil, image_ctx(:prefer_remote, boom))
 
       node = %{id: "n", name: "plain", caps: %{}}
-      assert {:ok, ^node} = PassPlacement.ensure_image(node, image_ctx(:prefer_remote, boom))
+      assert {:ok, nil} = PassPlacement.ensure_image(node, image_ctx(:prefer_remote, boom))
     end
 
     test "a registry node whose image publishes is kept" do

@@ -399,7 +399,6 @@ defmodule Wardmast.Worker.ContainerSpawnRemoteSpecTest do
           home: Path.join(dir, "run/home"),
           config_dir: Path.join(dir, "run/claude-config"),
           tmp_dir: Path.join(dir, "run"),
-          cli: [{String.duplicate("a", 64), "claude", ContainerSpawn.claude_path()}],
           worktree_files: files,
           worktree_secrets: secrets
         })
@@ -424,7 +423,10 @@ defmodule Wardmast.Worker.ContainerSpawnRemoteSpecTest do
       assert Enum.any?(paths, &String.ends_with?(&1, "/.mcp.json")),
              "the argv should carry --mcp-config: #{inspect(spec["command"] |> Enum.take(-8))}"
 
-      for path <- paths, path not in ["/dev/null"] do
+      # the provider CLI is an image layer (SI13: no `cli` mount)
+      for path <- paths,
+          path != "/dev/null",
+          not String.starts_with?(path, "/opt/arbiter/cli/") do
         under =
           Enum.find(mounts, &(path == &1["path"] or String.starts_with?(path, &1["path"] <> "/")))
 

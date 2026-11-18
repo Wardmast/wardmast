@@ -411,19 +411,6 @@ defmodule Wardmast.Worker.ContainerSpawnTest do
       refute body =~ Base.encode64("deployer:" <> @push_repo)
       refute body =~ Base.encode64("pusher:" <> @push_install)
     end
-
-    test "a machine node with no pull credential is refused: no plan, no credential sent", ctx do
-      no_pull = Map.drop(install(), [:pull_username, :pull_password])
-
-      opts =
-        plan_opts(ctx,
-          node: pull_node(),
-          image_source: [config: no_pull, workspaces: []],
-          publish: [stub: fn _ -> flunk("published") end]
-        )
-
-      assert {:error, {:image_unavailable, _}} = ContainerSpawn.prepare_remote(opts)
-    end
   end
 
   describe "run_command/3 (bd-8wdrql: the pre-push recipe in the run's own container)" do

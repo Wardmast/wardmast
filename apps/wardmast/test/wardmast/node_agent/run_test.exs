@@ -919,7 +919,8 @@ defmodule Wardmast.NodeAgent.RunTest do
       wait_event("dc1", "exit")
 
       shadow = Path.join([home, "runs", "dc1", "worktree"])
-      assert_received {:deps, ^shadow, "localhost/arbiter-dev/beam:abc123", seed_opts}
+      image = "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+      assert_received {:deps, ^shadow, ^image, seed_opts}
       assert seed_opts[:root] == Path.join(home, "deps-cache")
       assert seed_opts[:scratch] == Path.join(home, "deps-seed")
       assert seed_opts[:home] == Path.join([home, "runs", "dc1", "home"])
