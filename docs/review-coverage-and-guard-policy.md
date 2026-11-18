@@ -6,7 +6,7 @@ no implementation — this PR changes nothing under `apps/*/lib`)
 **Task:** bd-6woz0x · **Tracker:** github:1631
 **Author:** worker
 **Adopted from:** recommendation 2 of the follow-up-rate investigation
-(bd-bc0n3k, `admiral:notes/2026-09-13-follow-up-rate-investigation.md` §3.3–3.4,
+(bd-bc0n3k, `notes/2026-09-13-follow-up-rate-investigation.md` §3.3–3.4,
 §5 — the operator's notes repo, not this one),
 adopted by the operator 2026-09-13.
 **Freeze:** until this design merges, new review/merge-guard bugs route here
@@ -1047,7 +1047,7 @@ Read-only. No code under `apps/*/lib` was changed by this PR.
 * "Patches" counts the distinct `bd-…` tasks named in the comments governing
   that guard, which is a lower bound on how many times it has been revised.
 * Line counts, commit counts, run counts and dollar figures are quoted from
-  bd-bc0n3k's investigation (`admiral:notes/2026-09-13-follow-up-rate-investigation.md`
+  bd-bc0n3k's investigation (`notes/2026-09-13-follow-up-rate-investigation.md`
   §3.1–3.4), which read them from `~/dev/arbiter_dev.sqlite3` in `mode=ro`.
 * `apps/wardmast/test/wardmast/review_coverage_design_test.exs` re-checks every
   anchored `` `path:line` (`symbol`) `` citation in this document on every test

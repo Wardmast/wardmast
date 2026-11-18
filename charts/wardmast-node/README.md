@@ -18,7 +18,7 @@ kubectl label namespace wardmast-workers \
 read -rs T && printf %s "$T" | kubectl -n wardmast-workers create secret generic wardmast-join --from-file=token=/dev/stdin
 
 # 3. install; the release name is the node name
-helm install mesaana ./charts/wardmast-node -n wardmast-workers \
+helm install my-cluster ./charts/wardmast-node -n wardmast-workers \
   --set primary.url=https://arbiter.example.ts.net \
   --set 'networkPolicy.controllerEgress.primaryCIDRs={100.64.0.10/32}'
 ```
@@ -31,8 +31,8 @@ helm install mesaana ./charts/wardmast-node -n wardmast-workers \
 | `bootstrap` | `PriorityClass`, `ResourceQuota`, `LimitRange`, four `NetworkPolicy`, optional `RuntimeClass` and `ValidatingAdmissionPolicy` | a cluster-admin, once |
 | `node` | two `ServiceAccount`s, `Role`, `RoleBinding`, placeholder `Secret`s, `ConfigMap`s, `Lease`, `Service`, `Deployment` | a namespace admin |
 
-`bootstrap` and `node` are two releases (`helm install mesaana-bootstrap ... --set mode=bootstrap`,
-`helm install mesaana ... --set mode=node`). This is the same split as `?part=` of the raw manifests.
+`bootstrap` and `node` are two releases (`helm install my-cluster-bootstrap ... --set mode=bootstrap`,
+`helm install my-cluster ... --set mode=node`). This is the same split as `?part=` of the raw manifests.
 
 ## Rules the chart keeps
 

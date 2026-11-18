@@ -157,7 +157,7 @@ Read from the repos on the laptop on 2026-10-02.
 | **vstim** (`~/dev/trading/vstim`) | Elixir `~> 1.18` (Dockerfile.worker: 1.19.4-erlang-28.2), Node (`assets/package.json`) | **Postgres 15** (compose) / **16** (`.gitlab-ci.yml`, `postgres:16-alpine`), nginx for dev only | No `.tool-versions`. Workers can reach prod through SSH today (vs-adx9r7, guardrail-profiles); under a container that reach disappears unless G14 grants it |
 | **emricare/tonic** | Elixir **1.17.3**, Erlang **27.1.2** (`.tool-versions`); Node via assets | **Postgres 15** and an S3-compatible store (`pgsty/silo`) per `docker-compose.yml` | PHI repo; its own CI image `test_runner:1.17.3`. Pinned compose uses a bind of `../tonic_database` and `../db_socket` outside the repo |
 | **emricare/tonic_device** | **Nix** (NixOS modules, `tests/` as Nix VM tests, `hosts/`, `secrets/` with age keys) | Nix VM tests need KVM and `/dev/kvm`, which a default container does not have | Not a BEAM repo. Needs a `nix` image; may be a poor fit for rootless containers (nested virtualisation, `secrets/`) |
-| **mesaana** | Kubernetes manifests (`infra/`, `namespaces/`); `kubectl`, `helm` | None for tests | Mostly docs and manifests; the container's value here is withholding cluster credentials |
+| **my-cluster** | Kubernetes manifests (`infra/`, `namespaces/`); `kubectl`, `helm` | None for tests | Mostly docs and manifests; the container's value here is withholding cluster credentials |
 
 CLIs the base image needs: `claude` (a 244 MB dynamically linked bun binary;
 ran on glibc 2.36 without change), `codex`, `agy`, `grok` (no adapter exists:

@@ -195,7 +195,7 @@ Needs `nodes.public_url` and `nodes.registry` (the controller image is
 click **Add node → Kubernetes cluster** on the Nodes page, or:
 
 ```sh
-arb node add --kind cluster --name mesaana-k3s --namespace wardmast-workers --max-workers 2 \
+arb node add --kind cluster --name my-cluster-k3s --namespace wardmast-workers --max-workers 2 \
   --primary-cidrs 100.64.0.10/32 \
   [--reach tailscale|proxy] [--admission policy] [--self-upgrade on|off] -o manifests.yaml
 ```

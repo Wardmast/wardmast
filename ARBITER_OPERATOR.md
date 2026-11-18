@@ -516,7 +516,7 @@ back field by field. `<repo>` is the `repo_paths` key. The typical case is a
 local infra repo with no git remote in a workspace that merges via GitHub:
 
 ```bash
-arb config set merge.repos.mesaana.strategy direct
+arb config set merge.repos.infra.strategy direct
 ```
 
 Its tickets then merge locally (`git merge --no-ff` in the checkout; with no

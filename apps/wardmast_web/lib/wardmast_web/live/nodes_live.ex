@@ -1520,7 +1520,7 @@ defmodule WardmastWeb.NodesLive do
         label="Name"
         hint={if(@add.kind == "cluster", do: "required", else: "optional")}
         value={@add.form["name"].value}
-        placeholder={if(@add.kind == "cluster", do: "mesaana-k3s", else: "gpu-box-1")}
+        placeholder={if(@add.kind == "cluster", do: "my-cluster-k3s", else: "gpu-box-1")}
       />
 
       <%= if @add.kind == "cluster" do %>
@@ -1577,7 +1577,7 @@ defmodule WardmastWeb.NodesLive do
           label="Node selector"
           hint="optional, key=value,key=value"
           value={@add.form["node_selector"].value}
-          placeholder="kubernetes.io/hostname=mesanna"
+          placeholder="kubernetes.io/hostname=my-cluster"
         />
         <Forms.input
           name="pull_secret"

@@ -102,7 +102,7 @@ defmodule WardmastCli.Cmd.Config.Formatter do
   defp merge_lines(_), do: []
 
   # bd-73zv62: `merge.repos.<repo>` — per-repo overrides of the block above,
-  # one line per repo (`repos.mesaana: strategy=direct`).
+  # one line per repo (`repos.infra: strategy=direct`).
   defp repo_override_lines(repos) when is_map(repos) do
     repos
     |> Enum.sort_by(fn {k, _} -> k end)

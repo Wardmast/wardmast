@@ -278,11 +278,11 @@ subject that matches no rule is `quarantine`, the fail-safe default.
 [
   %{match: %{provider: "claude"}, tier: :privileged},
   %{match: %{provider: "antigravity", family: :anthropic}, tier: :probation,
-    scope: %{"default" => ["arbiter", "mesaana"]}},
+    scope: %{"default" => ["arbiter", "my-cluster"]}},
   %{match: %{provider: "antigravity", model: "gemini-*-flash-*"}, tier: :quarantine,
     scope: %{"default" => ["arbiter"]}},
   %{match: %{provider: "antigravity"}, tier: :probation,
-    scope: %{"default" => ["arbiter", "mesaana"]}},
+    scope: %{"default" => ["arbiter", "my-cluster"]}},
   %{match: %{provider: "codex"}, tier: :quarantine}
 ]
 ```

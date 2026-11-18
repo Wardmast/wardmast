@@ -27,7 +27,7 @@ check() {
   shift
   echo "== $name"
   # shellcheck disable=SC2068 # the arguments are already split
-  helm template mesaana "$chart" --namespace "$ns" $@ |
+  helm template my-cluster "$chart" --namespace "$ns" $@ |
     kubeconform -strict -summary -kubernetes-version "$kube_version" -
 }
 
@@ -55,7 +55,7 @@ refuse() {
   shift
   echo "== refused: $name"
   # shellcheck disable=SC2068
-  if helm template mesaana "$chart" --namespace "$ns" $@ >/dev/null 2>&1; then
+  if helm template my-cluster "$chart" --namespace "$ns" $@ >/dev/null 2>&1; then
     echo "helm-chart-check: expected '$name' to be refused" >&2
     exit 1
   fi

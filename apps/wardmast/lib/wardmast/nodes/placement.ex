@@ -189,7 +189,7 @@ defmodule Wardmast.Nodes.Placement do
   # bd-2esasx: `gemini` (agy, the Antigravity CLI) joins, per node on `caps.agy`: the node
   # advertises it only when its image carries agy (`arbiter.cli-providers`) AND the
   # antigravity login reached it. A node that says nothing has neither, so it is skipped
-  # with a named reason ("agy not available on mesaana (no credential)").
+  # with a named reason ("agy not available on my-cluster (no credential)").
   @remote_providers ["claude", "codex", "gemini"]
 
   @doc "The providers a run may be placed remotely with (`ContainerSpawn` reads the same set)."
@@ -460,7 +460,7 @@ defmodule Wardmast.Nodes.Placement do
 
   @doc """
   The one-line account of an `auto` placement, for the run's routing decision and the
-  card: `auto: mesaana had a free slot -> podman`, `auto: no node slot -> local bwrap`.
+  card: `auto: my-cluster had a free slot -> podman`, `auto: no node slot -> local bwrap`.
   `outcome` is `{:node, row}` or `{:local, why}` (`place/2`'s).
   """
   @spec backend_phrase(request(), {:node, map()} | {:local, term()}) :: String.t()
@@ -654,7 +654,7 @@ defmodule Wardmast.Nodes.Placement do
 
   # A `remote_only` agy run with no node that could ever take it: some online node is
   # healthy, and none of them is an agy node. The hold names each, so the operator reads
-  # "agy not available on mesaana (no credential)" rather than a full fleet.
+  # "agy not available on my-cluster (no credential)" rather than a full fleet.
   defp provider_unavailable(request, rows) do
     skipped = provider_skipped(request, rows)
 
@@ -677,8 +677,8 @@ defmodule Wardmast.Nodes.Placement do
 
   @doc """
   The one-line account of nodes skipped, for the run's placement record, the board and the
-  hold phrase: `remote skipped: mesaana outdated (0.2.88 < 0.2.90)`, or, for a node that
-  cannot run the run's provider, `remote skipped: agy not available on mesaana (no credential)`.
+  hold phrase: `remote skipped: my-cluster outdated (0.2.88 < 0.2.90)`, or, for a node that
+  cannot run the run's provider, `remote skipped: agy not available on my-cluster (no credential)`.
   """
   @spec skipped_phrase([map()]) :: String.t()
   def skipped_phrase(skipped) do
