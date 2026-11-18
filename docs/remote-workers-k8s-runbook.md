@@ -209,7 +209,7 @@ stalled on several of them. Where the doctor has no dedicated row, the check is 
 
 Design k8s §13 calls the operator's k3s a sensible **test bed** and not yet a
 production target for sensitive workspaces: one server (`my-cluster`) and one worker
-(`aginor`, on Wi-Fi), runc only, no PSA enforcement, **zero NetworkPolicies so far**,
+(`worker-1`, on Wi-Fi), runc only, no PSA enforcement, **zero NetworkPolicies so far**,
 and the cluster also hosts the vstim production workers and the CI runner. Room for
 about two 2-CPU pods.
 
@@ -385,7 +385,7 @@ The first real enrollment (my-cluster k3s, 2026-10-26) hit these (the last was f
    EndpointSlice (`kubectl get endpointslice -l kubernetes.io/service-name=kubernetes`),
    not from `nodes[0]`, or the controller → API egress rule allows the wrong /32 and
    checks report false FAILs. Fix: bd-6vlqu8 (`k2-operator-check.sh`). my-cluster's is
-   192.168.1.169.
+   10.0.0.10.
 5. **Run ids rejected as `bad_name`.** Synthetic `#review` run ids are not valid k8s
    object names, so the Job/Pod create is rejected with `bad_name` (bd-1chty2).
 
