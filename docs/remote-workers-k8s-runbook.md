@@ -210,7 +210,7 @@ stalled on several of them. Where the doctor has no dedicated row, the check is 
 Design k8s §13 calls the operator's k3s a sensible **test bed** and not yet a
 production target for sensitive workspaces: one server (`my-cluster`) and one worker
 (`worker-1`, on Wi-Fi), runc only, no PSA enforcement, **zero NetworkPolicies so far**,
-and the cluster also hosts the vstim production workers and the CI runner. Room for
+and the cluster also hosts the my-app production workers and the CI runner. Room for
 about two 2-CPU pods.
 
 Work through the list **in order**. Do not skip a step because a later one "covers
@@ -233,7 +233,7 @@ it". Each step has a pass criterion; stop at the first that fails.
 3. **ResourceQuota.** Apply the quota for `max_concurrent: 2` (the install manifest's
    §4.3 block: pods 4, requests 3 CPU / 6 GiB, limits 6 CPU / 10 GiB). **Pass:**
    `kubectl -n wardmast-workers describe resourcequota` lists it. This is what keeps
-   workers from starving vstim prod and CI.
+   workers from starving my-app prod and CI.
 4. **Low priority.** Create the PriorityClass `wardmast-worker` with `value: -100` and
    `preemptionPolicy: Never`. **Pass:** `kubectl get priorityclass wardmast-worker`
    shows `-100`. Workers must never preempt anything else. Also create the controller's
@@ -276,7 +276,7 @@ it". Each step has a pass criterion; stop at the first that fails.
    `placement` row. If the canary fails, go to §3; do not set
    `allow_unenforced_network` on this cluster.
 9. **The operator accepts shared tenancy, in writing.** Untrusted LLM-driven code runs
-   in pods that share a kernel and nodes (runc, no gVisor/Kata) with vstim prod and the CI
+   in pods that share a kernel and nodes (runc, no gVisor/Kata) with my-app prod and the CI
    runner; the PriorityClass (low, non-preempting), quota, LimitRange, NetworkPolicies and
    namespace ring-fence them but do not remove that. The operator records the acceptance
    (in the ticket) before any real run goes there. A sandboxed `RuntimeClass`

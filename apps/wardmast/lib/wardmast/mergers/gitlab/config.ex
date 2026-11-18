@@ -39,7 +39,7 @@ defmodule Wardmast.Mergers.Gitlab.Config do
   ## Per-repo overrides (multi-project workspaces)
 
   A workspace with several repos that map to *different* GitLab projects
-  (e.g. `emricare/tonic` and `emricare/tonic_device`) can't be served by the
+  (e.g. `acme/app` and `acme/app_device`) can't be served by the
   single flat `config["merge"]["config"]` shape above — that resolves to one
   `project_id` for the whole workspace, so every repo but one gets the wrong
   project. Such workspaces add a `"repos"` map, keyed by the same repo name
@@ -50,7 +50,7 @@ defmodule Wardmast.Mergers.Gitlab.Config do
         "project_id" => 111,               # default / single-repo fallback
         "credentials_ref" => "env:GITLAB_TOKEN",
         "repos" => %{
-          "tonic_device" => %{"project_id" => 222}
+          "app_device" => %{"project_id" => 222}
         }
       }
 

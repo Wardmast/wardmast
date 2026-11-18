@@ -22,7 +22,7 @@
         # In the latter case `**/*.{ex,exs}` will be used.
         #
         # Application source only — matching the house style already in use in
-        # the sibling codebases this coordinator manages (tonic's .credo.exs
+        # the sibling codebases this coordinator manages (app's .credo.exs
         # scopes to "lib/" as well). Test code is deliberately excluded: it
         # leans on idioms strict Credo flags but which are correct in a test
         # (multi-branch `cond` fixture tables, deeply nested `setup` blocks,

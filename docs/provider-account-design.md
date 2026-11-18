@@ -84,7 +84,7 @@ Exactly what was run is in Appendix A.
 | Probe | Result |
 |---|---|
 | `~/.claude/.credentials.json` → `claudeAiOauth` block, key names only | `accessToken`, `refreshToken`, `expiresAt`, `refreshTokenExpiresAt`, `scopes`, `subscriptionType: "max"`, `rateLimitTier: "default_claude_max_5x"` — **no account, email, or organisation identifier of any kind** |
-| Workspace tokens, `default` / `emricare` / `vstim` | 1 distinct token across 3 workspaces (sha256 prefix `d82e44fc13d0`, 108 bytes); each `worker_env` holds that key and nothing else — confirms bd-3x0na3 |
+| Workspace tokens, `default` / `acme` / `my-app` | 1 distinct token across 3 workspaces (sha256 prefix `d82e44fc13d0`, 108 bytes); each `worker_env` holds that key and nothing else — confirms bd-3x0na3 |
 | Operator `~/.claude` token vs workspace token | **different** tokens (`96cf89b03c3c` vs `d82e44fc13d0`), same account — the rotation counter-example, reconfirmed |
 | `GET /api/oauth/profile` with the **operator's** interactive grant | **200.** Returns `account.uuid`, `account.email`, `account.created_at`, `account.has_claude_max`, `organization.uuid`, `organization.name`, `organization.billing_type`, `organization.rate_limit_tier`, `organization.subscription_status` |
 | `GET /api/oauth/profile` with the **workspace** `sk-ant-oat01-…` token | **403** — `oauth_scope_insufficient`, `required_scopes: ["user:profile", "user:office"]`. That grant does not carry them (the operator's grant does: `user:profile` is in its `scopes` list) |
@@ -399,13 +399,13 @@ account_headroom(a, ws) =
   Conductor's other state is (rebuilt from live processes, not remembered).
 * `quota_headroom` takes an **account**, so a 90% weekly hold on the account
   holds every workspace on it. This is the correctness fix: `default` held while
-  `vstim` keeps dispatching against the same exhausted account becomes
+  `my-app` keeps dispatching against the same exhausted account becomes
   impossible.
 * Gate **thresholds split**: the account carries the default
   (`quota_config.weekly_threshold` etc.), a workspace may set a *stricter* one,
   and the effective value is `min(account, workspace)` — never looser. That makes
   differentiated thresholds the way an operator expresses priority when several
-  workspaces share one budget ("`vstim` stops at 70% so `default` can run to
+  workspaces share one budget ("`my-app` stops at 70% so `default` can run to
   90%"), while keeping the account's number a hard floor nobody can raise.
   Today's readers are `Gate.threshold/1`
   (`apps/wardmast/lib/wardmast/quota/gate.ex:97`), `weekly_threshold/1`
@@ -433,11 +433,11 @@ account_headroom(a, ws) =
 > (grok is routed by the workspace's own setting). Credentials, rotation and login
 > are not in the registry and not on MCP.
 
-### 4.3 "vstim may use at most 2 of my 4 slots"
+### 4.3 "my-app may use at most 2 of my 4 slots"
 
 ```
 arb account set personal-max --max-concurrent 4
-arb account attach vstim claude personal-max --share 2
+arb account attach my-app claude personal-max --share 2
 ```
 
 > **As shipped (P8, bd-1k6pgv).** The share's write surface is P11's
@@ -553,11 +553,11 @@ from the row with the newest `oauth_captured_at`. `codex_quotas` and
 same numbers if you ask three times. After:
 
 ```
-Anthropic quota (account personal-max · claude · 3 workspaces: default, emricare, vstim)
+Anthropic quota (account personal-max · claude · 3 workspaces: default, acme, my-app)
   representative window: five_hour
   ...
   recent spend (30d): $NN.NN            ← account total
-    default $A · emricare $B · vstim $C ← workspace breakdown
+    default $A · acme $B · my-app $C ← workspace breakdown
 ```
 
 `--workspace` is kept as a lookup shorthand that resolves to that workspace's

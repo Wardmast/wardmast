@@ -183,7 +183,7 @@ arb doctor             # the "nodes" section
 
 On the node: `~/.arbiter-node/bin/arbiter-node status | logs | leave`.
 
-A real second node has been enrolled this way: `ryan-oryx-pro`, reached over the Vstim
+A real second node has been enrolled this way: `gpu-box-1`, reached over the my-app
 tailnet through `tailscale serve`, agent 0.2.23, health `ready`, `max_workers` 1
 (enrolled 2026-10-07, per the coordinator's notes on bd-afcoop; it does not run real
 work until placement is turned on).

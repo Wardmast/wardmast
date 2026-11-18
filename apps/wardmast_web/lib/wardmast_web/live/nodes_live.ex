@@ -1593,7 +1593,7 @@ defmodule WardmastWeb.NodesLive do
           label="Registries"
           hint="optional, prefix=Secret,prefix=Secret: each registry's images use only its own pull Secret"
           value={@add.form["registries"].value}
-          placeholder="registry.gitlab.com/vstim/=gitlab-vstim,ghcr.io/ryan/=ghcr-arbiter"
+          placeholder="registry.gitlab.com/my-app/=gitlab-my-app,ghcr.io/acme/=ghcr-arbiter"
         />
         <Forms.input
           name="primary_cidrs"

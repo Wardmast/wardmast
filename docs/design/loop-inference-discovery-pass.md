@@ -270,7 +270,7 @@ merely "40 lines but more of them":
   wasted turns, misread instructions, an agent doing the wrong thing
   confidently for an hour. All invisible.
 * **Temporal, cross-task and throughput patterns.** "Failures cluster after
-  deploys", "D3 tasks in `vstim` regressed this week", "the same file is
+  deploys", "D3 tasks in `my-app` regressed this week", "the same file is
   touched by three tasks a week". Residue units carry no time series and the
   slice is one window.
 * **Cost and quota patterns.** No `usage_events` in the slice; that is

@@ -27,7 +27,7 @@ defmodule Wardmast.NodeAgent.K8s.PodConfig do
   | `services_resources` | `requests` / `limits` for the `seed`, `snapshotter` and service containers |
   | `placement` | `node_selector`, `tolerations`, `priority_class`, `runtime_class`, `runtime_handler` (the class's handler, which the Role cannot read: `runsc*` marks a kernel sandbox, see `kernel_sandboxed?/1`), `spread` (`enabled`, `topology_keys`, `max_skew`, `when_unsatisfiable`: §20.2, a soft hostname spread by default) |
   | `image_pull_secrets` | names; the legacy flat list, referenced by a pod whose image is under `registry` and under no `registries` prefix |
-  | `registries` | KH13 (§20.10): `[%{prefix, pull_secret}]`, the image prefixes this node can pull from (`registry.gitlab.com/vstim/`) and the **one** pull secret a pod whose image is under that prefix references (longest prefix wins; omitted = anonymous pull). `registry` stays the derived default prefix |
+  | `registries` | KH13 (§20.10): `[%{prefix, pull_secret}]`, the image prefixes this node can pull from (`registry.gitlab.com/my-app/`) and the **one** pull secret a pod whose image is under that prefix references (longest prefix wins; omitted = anonymous pull). `registry` stays the derived default prefix |
   | `timeouts` | `grace_s` (pod grace), `gate_timeout_s`; the others belong to the controller |
   | `snapshot_interval_s` | default 300 |
   | `service_image_allowlist` | extra service image prefixes (`docker.io/pgsty/`) |
@@ -300,7 +300,7 @@ defmodule Wardmast.NodeAgent.K8s.PodConfig do
 
   defp prefixes(_), do: :error
 
-  # KH13: `[%{prefix, pull_secret}]`. A prefix ends in `/` (so `ghcr.io/ryan/` never
+  # KH13: `[%{prefix, pull_secret}]`. A prefix ends in `/` (so `ghcr.io/acme/` never
   # matches `ghcr.io/ryan-evil/…`), appears once, and names at most one Secret.
   defp registries(list) when is_list(list) do
     with {:ok, entries} <- collect(list, &registry_entry/1),

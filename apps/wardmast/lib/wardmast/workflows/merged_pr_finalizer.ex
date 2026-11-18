@@ -303,8 +303,8 @@ defmodule Wardmast.Workflows.MergedPRFinalizer do
   # bd-3lj713: whether `task`'s merge ref is one this finalizer — pinned to
   # `repo` — may look up. A GitHub ref in a multi-repo workspace is qualified
   # (`owner/repo#N`) and names its own repo, but a GitLab ref is a bare
-  # per-project iid (`!29`): `!29` in `emricare/tonic` and `!29` in
-  # `emricare/tonic_device` are unrelated MRs. Sweeping every task through
+  # per-project iid (`!29`): `!29` in `acme/app` and `!29` in
+  # `acme/app_device` are unrelated MRs. Sweeping every task through
   # every finalizer looked the iid up in the wrong project, found a long-merged
   # MR with that number, and moved a ticket whose own MR was still open to
   # Verifying (emr-bg6dwa). So in a workspace with more than one forge repo a

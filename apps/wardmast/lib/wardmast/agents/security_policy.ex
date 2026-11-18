@@ -212,7 +212,7 @@ defmodule Wardmast.Agents.SecurityPolicy do
   the resolved set. It used to — a workspace that pinned a subset (say, the 4
   categories that existed before v0.1.78 added 4 more) silently never
   resolved a category added after it pinned, with nothing surfacing the gap
-  (vstim missed `:no_public_upload`, `:no_pr_create`, `:no_async_wait` and
+  (my-app missed `:no_public_upload`, `:no_pr_create`, `:no_async_wait` and
   `:no_gh_publish` this way). No manual migration is required: an old pinned
   `safe_defaults` list keeps parsing, it just no longer excludes anything —
   every current default category applies unless separately named in
@@ -566,7 +566,7 @@ defmodule Wardmast.Agents.SecurityPolicy do
   per-dispatch `override` map applied last and an optional `repo` name that
   pulls in a per-repo override layer. See the moduledoc for precedence.
 
-  `repo` is the workspace's `repo_paths` key (e.g. `"tonic_device"`), the same
+  `repo` is the workspace's `repo_paths` key (e.g. `"app_device"`), the same
   identifier the merger per-repo overrides key on. `nil`/`""` disables the
   repo layer, so `resolve/2` behaves exactly as before.
   """

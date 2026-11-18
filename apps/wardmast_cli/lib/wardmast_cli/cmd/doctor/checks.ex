@@ -634,7 +634,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   end
 
   # bd-4420va: a workspace that pinned `agent.security.permissions.safe_defaults`
-  # before a new default category shipped (vstim pinning the 4 categories that
+  # before a new default category shipped (my-app pinning the 4 categories that
   # existed pre-v0.1.78) used to silently resolve fewer categories than a
   # workspace that never pinned, with nothing surfacing the gap. The legacy
   # `safe_defaults` key is now inert (see `Wardmast.Agents.SecurityPolicy`), so
@@ -1045,8 +1045,8 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     end
   end
 
-  # "default: claude=privileged, antigravity/gemini-3.8-flash-low=quarantine; emricare: …",
-  # then each GitLab bot token's expiry (bd-8ufzng): "; default: tonic bot token expires 2027-01-31 (60d)".
+  # "default: claude=privileged, antigravity/gemini-3.8-flash-low=quarantine; acme: …",
+  # then each GitLab bot token's expiry (bd-8ufzng): "; default: app bot token expires 2027-01-31 (60d)".
   defp guardrail_tiers_detail(workspaces) do
     tiers = guardrail_subjects_detail(workspaces)
 

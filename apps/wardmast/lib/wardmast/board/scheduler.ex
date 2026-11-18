@@ -100,7 +100,7 @@ defmodule Wardmast.Board.Scheduler do
        ranked like `Wardmast.Nodes.Placement` (lowest load, then name).
     3. **Skip, don't stop.** A card that fits nowhere is skipped with that
        layer's reason (`waiting for claude:default: 3 of 3 seats`, `repo
-       vstim: 2 of 2 implementer runs`, `no machine slot for … work: local 6
+       my-app: 2 of 2 implementer runs`, `no machine slot for … work: local 6
        of 6`) and the next card is tried. A skipped card is first in line on
        the next pass, because every pass starts from the top.
     4. **Many placements per plan (§4.3).** Each placement takes a seat, a

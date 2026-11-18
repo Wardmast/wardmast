@@ -829,7 +829,7 @@ becomes the only machine bound.
 |---|---|
 | Key | `worker.repos.<repo>.max_concurrent`: a positive integer, unset by default. It goes in the existing per-repo `worker` block, which `validate_worker_repos/2` already validates (`validate_config.ex:198-215`) |
 | Counts | **Implementer runs** in that workspace's repo: the implementer (fresh, re-dispatched, resumed), a ReviewGate fix round, a CI fix pass and a conflict pass, plus admission reservations. Reviewers (ReviewGate reviewers, `review: true` dispatches) are excluded |
-| Holds | A fresh dispatch whose repo is at its cap waits in Ready: "repo vstim: 2 of 2 implementer runs". The walk skips it |
+| Holds | A fresh dispatch whose repo is at its cap waits in Ready: "repo my-app: 2 of 2 implementer runs". The walk skips it |
 | Never holds | Follow-ups (§2.2). They finish the tickets the cap already admitted, and finishing is what cuts merge churn |
 | Enforced | In the walk, and in a new `ensure_repo_capacity/2` after `ensure_node_capacity/2`, with a reservation under the same `:global.trans` pattern |
 | Who may set it | The operator or the coordinator. It only tightens |
@@ -862,7 +862,7 @@ written at once, and that bounds:
 - the conflicts that racing branches cause.
 
 **What it doesn't bound.** A pipeline still running after its run ended
-(Merging) isn't counted, so with vstim's roughly 30-minute GitLab CI the cap
+(Merging) isn't counted, so with my-app's roughly 30-minute GitLab CI the cap
 limits new MRs, not live pipelines. O3 asks whether a Merging ticket with a
 pipeline in flight should count.
 
@@ -900,7 +900,7 @@ per workspace, so they don't order cards across workspaces anyway. Across bands,
 priority still wins: a P1 is never skipped for another workspace's P3.
 
 **What happens to `share`.** The existing link `share` stays, unchanged, as an
-optional **hard** per-workspace ceiling ("vstim may use at most 2"), composed
+optional **hard** per-workspace ceiling ("my-app may use at most 2"), composed
 `min(budget, max_concurrent, share)`. Re-purposing it as the fair weight would
 silently change the meaning of a stored value (§13).
 
@@ -999,8 +999,8 @@ uses today. "Why claude's budget is 3" shows:
 Its detail names the layer:
 - "claude: 3 of 3 seats (7d ahead of pace)";
 - "local: 6 of 6";
-- "repo vstim: 2 of 2 implementer runs";
-- "fair share: default holds 3 of claude's 4; vstim has a P1 waiting".
+- "repo my-app: 2 of 2 implementer runs";
+- "fair share: default holds 3 of claude's 4; my-app has a P1 waiting".
 
 Planned cards read "next" and "starting". `CapacityExplainer` gains the pool,
 node, repo and fair-share lines, and loses `:ceiling` and `:workspace`.
@@ -1030,7 +1030,7 @@ Providers                          budget  seats  free  why
 Machines                              cap   live  free
   local                                 6      3     3
 Repos                                 cap   implementer runs
-  default/vstim                         2      1
+  default/my-app                         2      1
 Slots used: 3 (bd-…, bd-…, bd-…)
 ```
 

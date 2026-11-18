@@ -102,7 +102,7 @@ defmodule Wardmast.Nodes.Placement do
   `psa_unenforced` (KH4: Pod Security `restricted` is not enforced on the namespace), under the
   same override. A request that names the `:registry` its images live in (KH13, §20.10:
   `image_registry/2`) is not placed on a cluster node whose `caps.registries` does not cover
-  it (`registry_covered?/2`), so a repo whose images are in the vstim GitLab registry never
+  it (`registry_covered?/2`), so a repo whose images are in the my-app GitLab registry never
   reaches a node that cannot pull from it. A node that reports no `caps.registries` (an older
   controller) and every machine node are not filtered. The cap is
   `Hello.effective_max_workers/2`:
@@ -769,7 +769,7 @@ defmodule Wardmast.Nodes.Placement do
   end
 
   # bd-6w7usy: the online nodes that have derated themselves (thermal or memory pressure),
-  # for the hold: "held — ryan-oryx-pro thermal 96 °C".
+  # for the hold: "held — gpu-box-1 thermal 96 °C".
   defp derated(rows) do
     for row <- rows,
         row.state == :online,
@@ -824,13 +824,13 @@ defmodule Wardmast.Nodes.Placement do
   defp registry_usable?(row, registry),
     do: registry_covered?(row, registry) and registry_pullable?(row, registry)
 
-  @doc "The host of a registry reference (`registry.gitlab.com/vstim` is `registry.gitlab.com`)."
+  @doc "The host of a registry reference (`registry.gitlab.com/my-app` is `registry.gitlab.com`)."
   @spec registry_host(String.t()) :: String.t()
   def registry_host(registry), do: registry |> String.split("/", parts: 2) |> hd()
 
   @doc """
   KH13: can `row` pull images from `registry` (the repo's registry reference, e.g.
-  `registry.gitlab.com/vstim`)? True without a registry to check, for a node that does not
+  `registry.gitlab.com/my-app`)? True without a registry to check, for a node that does not
   advertise `caps.registries` (a machine node builds from a plan; an older controller
   predates the cap), and for a cluster node when one of its prefixes (each ending in `/`)
   covers `registry`.
