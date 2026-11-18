@@ -178,15 +178,13 @@ jobs:
       # cancelled group is surfaced as a warning so it stays visible.
       # Step-level timeout-minutes (below the job limits) make a hung or slow
       # step fail rather than cancel the job, so timeouts still go red.
-      - name: Require compile and every shard green (cancelled is neutral)
+      - name: Require compile and every shard green (cancelled or abandoned is neutral)
         env:
           COMPILE: ${{ needs.compile.result }}
           SHARDS: ${{ needs.test-shard.result }}
         run: |
           echo "compile: $COMPILE"
           echo "test-shard: $SHARDS"
-          if [ "$COMPILE" = "cancelled" ] || [ "$SHARDS" = "cancelled" ]; then
-            echo "::warning::macOS run cancelled (runner not acquired or run superseded); not a test failure"
-          fi
-          case "$COMPILE" in success|cancelled) ;; *) exit 1 ;; esac
-          case "$SHARDS" in success|cancelled|skipped) ;; *) exit 1 ;; esac
+          case "$COMPILE $SHARDS" in *cancelled*|*abandoned*) echo "::warning::macOS run cancelled or abandoned (runner not acquired or run superseded); not a test failure" ;; esac
+          case "$COMPILE" in success|cancelled|abandoned) ;; *) exit 1 ;; esac
+          case "$SHARDS" in success|cancelled|abandoned|skipped) ;; *) exit 1 ;; esac
