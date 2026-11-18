@@ -1090,7 +1090,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
             end) <> " — " <> guardrail_tiers_detail(workspaces),
           hint:
             "Fix the subject rules (guardrail_subjects) or the workspace `guardrails` block; " <>
-              "see docs/design/guardrail-profiles.md §7.",
+              "see #{WardmastCli.Version.doc_url("docs/design/guardrail-profiles.md")} §7.",
           blocks_readiness: false
         }
 
@@ -1569,7 +1569,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     policy_hint =
       "Add a drop-in: `systemctl --user edit wardmast.service` with " <>
         "`[Service]` / `OOMPolicy=continue`, then `systemctl --user daemon-reload` " <>
-        "(or re-run `ward install service`, which now writes it). See docs/worker-memory-cap.md."
+        "(or re-run `ward install service`, which now writes it). See #{WardmastCli.Version.doc_url("docs/worker-memory-cap.md")}."
 
     cap_hint =
       if Map.get(body, "capped"),
@@ -2052,7 +2052,10 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     Enum.join(workspaces ++ server, "; ")
   end
 
-  defp runbook(status), do: status["runbook"] || "docs/provider-accounts-release-runbook.md"
+  defp runbook(status),
+    do:
+      status["runbook"] ||
+        WardmastCli.Version.doc_url("docs/provider-accounts-release-runbook.md")
 
   # bd-c7ll4t: `Wardmast.Quota.Gate` resolves every threshold as
   # `min(account, workspace)` — the account's `quota_config` is a floor a
@@ -2686,7 +2689,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
         "worker pods use the node's default runtime and share its kernel with every other pod; " <>
           "a kernel escape reaches the host and its neighbours",
         "Set worker placement.runtime_class to a sandboxed RuntimeClass (gVisor) on a shared cluster. " <>
-          "See docs/design/remote-workers.md, section 20."
+          "See #{WardmastCli.Version.doc_url("docs/design/remote-workers.md")}, section 20."
       )
     end
   end
@@ -2734,7 +2737,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   defp placement_hint(words) do
     netpol =
       "The cluster's CNI does not enforce the worker NetworkPolicies (or the canary could not prove it). " <>
-        "See docs/remote-workers-k8s-runbook.md, 'The canary says netpol_unenforced'."
+        "See #{WardmastCli.Version.doc_url("docs/remote-workers-k8s-runbook.md")}, 'The canary says netpol_unenforced'."
 
     psa =
       "The namespace does not enforce Pod Security restricted: label it " <>

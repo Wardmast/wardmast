@@ -85,6 +85,24 @@ defmodule WardmastCli.Version do
   @spec release_repo() :: String.t() | nil
   def release_repo, do: @release_repo
 
+  @doc """
+  URL of a repo doc (e.g. `"docs/worker-security.md"`) on GitHub at this
+  binary's tag, so a release-only install (which ships no `docs/`) can open it.
+  Falls back to `main` when the version is not a real release (`0.0.0`).
+  """
+  @spec doc_url(String.t(), String.t() | nil) :: String.t()
+  def doc_url(path, anchor \\ nil) do
+    repo = @release_repo || "Wardmast/wardmast"
+
+    ref =
+      case app_version() do
+        "0.0.0" -> "main"
+        v -> "v" <> v
+      end
+
+    "https://github.com/#{repo}/blob/#{ref}/#{path}" <> if(anchor, do: "#" <> anchor, else: "")
+  end
+
   @doc "Short git SHA at build time, suffixed with `*` when the tree was dirty."
   def git_sha, do: if(@git_dirty, do: "#{@git_sha}*", else: @git_sha)
 

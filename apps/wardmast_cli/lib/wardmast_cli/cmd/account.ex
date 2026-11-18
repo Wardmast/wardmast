@@ -154,7 +154,7 @@ defmodule WardmastCli.Cmd.Account do
                                      that GOOGLE_APPLICATION_CREDENTIALS
                                      names (the default --env-var), never as
                                      a value. See
-                                     docs/agy-service-account-runbook.md.
+                                     #{WardmastCli.Version.doc_url("docs/agy-service-account-runbook.md")}
       arb account merge  <from-ref> --into <into-ref>
                                      Re-points usage_events, provider_credentials
                                      and workspace_provider_accounts from

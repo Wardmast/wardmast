@@ -270,7 +270,7 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
           "\n           " <>
           Enum.join(inline, ", ") <>
           " sit inline in the env file; set <NAME>_REF=aws-sm:<id>#<key> (or aws-ssm:/file:)\n" <>
-          "           and remove the value to keep it off this disk. See docs/secrets-at-rest.md."
+          "           and remove the value to keep it off this disk. See #{WardmastCli.Version.doc_url("docs/secrets-at-rest.md")}."
     end
   end
 
