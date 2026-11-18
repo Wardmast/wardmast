@@ -73,7 +73,7 @@ defmodule Wardmast.Worker.ReviewGateRefusedFixRoundTest do
     capture_log(fn ->
       gate = start_gate(rig, ctx, session_start: start, fix_refusal_max_retries: 1)
       ref = Process.monitor(gate)
-      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 10_000
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(10_000)
     end)
 
     # reviewer + first attempt + one retry
@@ -87,7 +87,7 @@ defmodule Wardmast.Worker.ReviewGateRefusedFixRoundTest do
     capture_log(fn ->
       gate = start_gate(rig, ctx, session_start: start, fix_refusal_max_retries: 2)
       ref = Process.monitor(gate)
-      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 10_000
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(10_000)
     end)
 
     assert calls_made(calls) == 2
@@ -174,7 +174,7 @@ defmodule Wardmast.Worker.ReviewGateRefusedFixRoundTest do
       :exit, _ -> :ok
     end
 
-    assert_receive {:DOWN, ^ref, :process, ^gate, _}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(5_000)
   end
 
   defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
@@ -272,7 +272,7 @@ defmodule Wardmast.Worker.ReviewGateRefusedFixRoundTest do
   end
 
   defp wait_until(fun, timeout \\ 8_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 

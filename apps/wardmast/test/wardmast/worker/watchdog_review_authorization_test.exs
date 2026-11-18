@@ -105,7 +105,7 @@ defmodule Wardmast.Worker.WatchdogReviewAuthorizationTest do
 
     # The refusal buys a reviewer round (a new run on the ticket) and the
     # Watchdog's episode ends there; the merge is never attempted.
-    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}, Wardmast.Test.Timing.scale(2_000)
 
     assert [%{task_id: task_id, attempt: 1, briefing: briefing}] =
              StubAutoResumeDispatcher.resumes()
@@ -127,7 +127,7 @@ defmodule Wardmast.Worker.WatchdogReviewAuthorizationTest do
     pid = start_watchdog(task, "!ra3", ws, via_review_gate: true, max_auto_resumes: 0)
     ref = Process.monitor(pid)
 
-    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}, Wardmast.Test.Timing.scale(2_000)
 
     assert [{task_id, _ws, "!ra3", 0, {:review_not_approved, "sha-fix", _refusal}}] =
              StubAutoResumeDispatcher.escalations()
@@ -156,7 +156,7 @@ defmodule Wardmast.Worker.WatchdogReviewAuthorizationTest do
     approved_get("!ra4")
     start_watchdog(task, "!ra4", ws, via_review_gate: true)
 
-    assert_receive {:watchdog, _, {:merged, _}}, 2_000
+    assert_receive {:watchdog, _, {:merged, _}}, Wardmast.Test.Timing.scale(2_000)
     assert StubMerger.merge_count("!ra4") == 1
     assert StubAutoResumeDispatcher.resume_count() == 0
   end
@@ -170,7 +170,7 @@ defmodule Wardmast.Worker.WatchdogReviewAuthorizationTest do
     approved_get("!ra2")
     start_watchdog(task, "!ra2", ws)
 
-    assert_receive {:watchdog, _, {:merged, _}}, 2_000
+    assert_receive {:watchdog, _, {:merged, _}}, Wardmast.Test.Timing.scale(2_000)
     assert StubMerger.merge_count("!ra2") == 1
   end
 end

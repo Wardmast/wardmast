@@ -114,7 +114,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainDetachedTest do
   defp polls(pid), do: :sys.get_state(pid).poll_count
 
   defp wait_until(fun, timeout \\ 3_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
 
     Stream.repeatedly(fn ->
       cond do
@@ -182,7 +182,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainDetachedTest do
     # Closed is written before the retry's poll ends; wait for both to exit.
     for p <- [pa, pb] do
       ref = Process.monitor(p)
-      assert_receive {:DOWN, ^ref, :process, ^p, _}, 3_000
+      assert_receive {:DOWN, ^ref, :process, ^p, _}, Wardmast.Test.Timing.scale(3_000)
     end
 
     assert StubMerger.merge_count("!da") == 1

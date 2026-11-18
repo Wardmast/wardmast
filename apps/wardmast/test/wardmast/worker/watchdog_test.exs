@@ -276,7 +276,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       ref = Process.monitor(wpid)
 
       assert_merged(task_id)
-      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 1_000
+      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(1_000)
     end
 
     test "closed MR fails the worker with :mr_closed and stops the watchdog" do
@@ -287,7 +287,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       ref = Process.monitor(wpid)
 
       assert_closed(task_id, "!2")
-      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 1_000
+      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(1_000)
     end
 
     test "approved + auto_merge merges then completes" do
@@ -423,7 +423,7 @@ defmodule Wardmast.Worker.WatchdogTest do
         conflict_resolver: StubConflictResolver
       )
 
-      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, Wardmast.Test.Timing.scale(1_000)
       wait_until(fn -> StubMerger.get_count("!b1") >= 2 end)
 
       # Auto-resolve must not fail the worker — it stays parked while the worker
@@ -462,7 +462,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       )
 
       # Let well more than `max_polls` intervals elapse (interval_ms: 20).
-      Process.sleep(150)
+      Process.sleep(Wardmast.Test.Timing.scale(150))
 
       refute_ended(task_id)
     end
@@ -510,7 +510,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       )
 
       # Let well more than `max_polls` intervals elapse after the signal lapses.
-      Process.sleep(150)
+      Process.sleep(Wardmast.Test.Timing.scale(150))
 
       refute_ended(task_id)
     end
@@ -672,7 +672,7 @@ defmodule Wardmast.Worker.WatchdogTest do
 
       wait_until(fn -> StubMerger.update_branch_count("!ar2") >= 2 end)
       # Let several more poll intervals elapse — the count must stay capped at 2.
-      Process.sleep(120)
+      Process.sleep(Wardmast.Test.Timing.scale(120))
       assert StubMerger.update_branch_count("!ar2") == 2
       refute_ended(task_id)
     end
@@ -689,7 +689,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       )
 
       wait_until(fn -> StubMerger.update_branch_count("!ar3") >= 1 end)
-      Process.sleep(80)
+      Process.sleep(Wardmast.Test.Timing.scale(80))
       # It attempted update-branch but, on failure, never merged or failed the worker.
       assert StubMerger.merge_count("!ar3") == 0
       refute_ended(task_id)
@@ -756,7 +756,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       )
 
       wait_until(fn -> StubFixPassDispatcher.call_count() >= 2 end)
-      Process.sleep(120)
+      Process.sleep(Wardmast.Test.Timing.scale(120))
       assert StubFixPassDispatcher.call_count() == 2
     end
 
@@ -869,7 +869,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       flake_watchdog("!flk1")
 
       wait_until(fn -> length(reruns("!flk1")) == 1 end)
-      Process.sleep(100)
+      Process.sleep(Wardmast.Test.Timing.scale(100))
       assert length(reruns("!flk1")) == 1
       assert StubFixPassDispatcher.call_count() == 0
     end
@@ -917,7 +917,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       StubMerger.queue_get("!flk3", [pending("h1"), red("h1"), pending("h1")])
 
       wait_until(fn -> length(reruns("!flk3")) == 2 end)
-      Process.sleep(100)
+      Process.sleep(Wardmast.Test.Timing.scale(100))
       assert StubFixPassDispatcher.call_count() == 0
     end
 
@@ -946,7 +946,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       flake_watchdog("!kf1", diff: @flaky_diff)
 
       wait_until(fn -> length(reruns("!kf1")) == 1 end)
-      Process.sleep(100)
+      Process.sleep(Wardmast.Test.Timing.scale(100))
       assert length(reruns("!kf1")) == 1
       assert StubFixPassDispatcher.call_count() == 0
     end
@@ -1182,7 +1182,7 @@ defmodule Wardmast.Worker.WatchdogTest do
 
       assert Watchdog.retry_auto_resolve(task_id) == :ok
       wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
-      Process.sleep(100)
+      Process.sleep(Wardmast.Test.Timing.scale(100))
       assert StubFixPassDispatcher.call_count() == 1
     end
 
@@ -1216,7 +1216,7 @@ defmodule Wardmast.Worker.WatchdogTest do
 
       # Let well more than `max_polls` intervals elapse after exhaustion — the
       # worker must still be alive to pick up the eventual green state.
-      Process.sleep(150)
+      Process.sleep(Wardmast.Test.Timing.scale(150))
       refute_ended(task_id)
 
       # The out-of-band fix lands (a manual pipeline retry makes the MR green).
@@ -1252,14 +1252,14 @@ defmodule Wardmast.Worker.WatchdogTest do
       # "resumes and merges" test above) before simulating the dismissal, so
       # this test exercises the park-revocation bug rather than racing ahead of
       # the park ever being established.
-      Process.sleep(60)
+      Process.sleep(Wardmast.Test.Timing.scale(60))
 
       # The approval gets dismissed by the push that retriggered CI — the PR is
       # still effectively blocked (CI hasn't gone green yet), just unapproved now.
       StubMerger.queue_get("!cf4", [%{status: :open, approved: false, block_reason: nil}])
 
       # Let well more than `max_polls` intervals elapse after the dismissal.
-      Process.sleep(150)
+      Process.sleep(Wardmast.Test.Timing.scale(150))
 
       refute_ended(task_id)
     end
@@ -1281,7 +1281,7 @@ defmodule Wardmast.Worker.WatchdogTest do
 
       wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
       # Let the budget actually exhaust and the park kick in before re-arming.
-      Process.sleep(60)
+      Process.sleep(Wardmast.Test.Timing.scale(60))
 
       assert Watchdog.retry_auto_resolve(task_id) == :ok
 
@@ -1323,7 +1323,7 @@ defmodule Wardmast.Worker.WatchdogTest do
 
       wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
       # Let the budget exhaust and the park kick in.
-      Process.sleep(60)
+      Process.sleep(Wardmast.Test.Timing.scale(60))
 
       baseline = StubMerger.get_count("!rar3")
       assert Watchdog.retry_auto_resolve(task_id) == :ok
@@ -1334,7 +1334,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       # still be ~1 poll per interval_ms, not 4x — a second, independent
       # `Process.send_after/3` chain per re-arm would multiply it (bd-bspakl
       # review round 1).
-      Process.sleep(200)
+      Process.sleep(Wardmast.Test.Timing.scale(200))
       after_rearm = StubMerger.get_count("!rar3") - baseline
 
       assert after_rearm <= 15,
@@ -1357,7 +1357,7 @@ defmodule Wardmast.Worker.WatchdogTest do
         )
 
       wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
-      Process.sleep(60)
+      Process.sleep(Wardmast.Test.Timing.scale(60))
 
       assert Watchdog.retry_auto_resolve(task_id) == :ok
       assert :sys.get_state(wpid).max_auto_resolve_attempts == 2
@@ -1408,7 +1408,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       task1 = Task.async(fn -> Watchdog.retry_auto_resolve(task_id) end)
       task2 = Task.async(fn -> Watchdog.retry_auto_resolve(task_id) end)
       # Give both calls time to land in the Watchdog's mailbox before resuming.
-      Process.sleep(50)
+      Process.sleep(Wardmast.Test.Timing.scale(50))
 
       :sys.resume(wpid)
 
@@ -1464,7 +1464,7 @@ defmodule Wardmast.Worker.WatchdogTest do
         conflict_resolver: StubConflictResolver
       )
 
-      assert_receive {:resolve_called, args}, 1_000
+      assert_receive {:resolve_called, args}, Wardmast.Test.Timing.scale(1_000)
       assert args.task_id == task_id
       assert args.pr_ref == "!c1"
     end
@@ -1487,8 +1487,8 @@ defmodule Wardmast.Worker.WatchdogTest do
           interval_ms: 15
         )
 
-      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
-      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, Wardmast.Test.Timing.scale(1_000)
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, Wardmast.Test.Timing.scale(1_000)
       refute_receive {:escalate_called, ^task_id, _, _, _}, 100
       state = :sys.get_state(wpid)
       refute state.conflict_escalated
@@ -1545,12 +1545,12 @@ defmodule Wardmast.Worker.WatchdogTest do
           interval_ms: 15
         )
 
-      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
-      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, Wardmast.Test.Timing.scale(1_000)
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, Wardmast.Test.Timing.scale(1_000)
 
       StubConflictResolver.arm(task_id, self(), pid: :running)
 
-      assert_receive {:resolver_spawned, _worker}, 1_000
+      assert_receive {:resolver_spawned, _worker}, Wardmast.Test.Timing.scale(1_000)
       # The resolver is in flight: no second pass is asked for while it works.
       flush_resolve_calls(task_id)
       refute_receive {:resolver_spawned, _}, 150
@@ -1575,7 +1575,9 @@ defmodule Wardmast.Worker.WatchdogTest do
           interval_ms: 15
         )
 
-      assert_receive {:escalate_called, ^task_id, _ws, _branch, reason}, 2_000
+      assert_receive {:escalate_called, ^task_id, _ws, _branch, reason},
+                     Wardmast.Test.Timing.scale(2_000)
+
       assert reason =~ "capacity refusal"
       assert reason =~ "unschedulable"
       assert reason =~ "mesaana"
@@ -1638,11 +1640,11 @@ defmodule Wardmast.Worker.WatchdogTest do
           interval_ms: 15
         )
 
-      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
-      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, Wardmast.Test.Timing.scale(1_000)
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, Wardmast.Test.Timing.scale(1_000)
 
       StubConflictResolver.arm(task_id, self(), pid: :running)
-      assert_receive {:resolver_spawned, _worker}, 1_000
+      assert_receive {:resolver_spawned, _worker}, Wardmast.Test.Timing.scale(1_000)
 
       state = :sys.get_state(wpid)
       assert state.conflict_attempts == 1
@@ -1664,7 +1666,9 @@ defmodule Wardmast.Worker.WatchdogTest do
           interval_ms: 15
         )
 
-      assert_receive {:escalate_called, ^task_id, _ws, _branch, reason}, 2_000
+      assert_receive {:escalate_called, ^task_id, _ws, _branch, reason},
+                     Wardmast.Test.Timing.scale(2_000)
+
       assert reason =~ "still live"
       assert reason =~ "working"
       refute reason =~ "exhausted"
@@ -1700,9 +1704,12 @@ defmodule Wardmast.Worker.WatchdogTest do
         interval_ms: 15
       )
 
-      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
-      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
-      assert_receive {:escalate_called, ^task_id, _ws, _branch, reason}, 1_000
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, Wardmast.Test.Timing.scale(1_000)
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, Wardmast.Test.Timing.scale(1_000)
+
+      assert_receive {:escalate_called, ^task_id, _ws, _branch, reason},
+                     Wardmast.Test.Timing.scale(1_000)
+
       assert reason =~ "exhausted"
       assert reason =~ "2 rebase attempt"
       # Escalation must not fail the worker — it stays parked for a human.
@@ -1727,8 +1734,8 @@ defmodule Wardmast.Worker.WatchdogTest do
         interval_ms: 15
       )
 
-      assert_receive {:resolver_spawned, first}, 1_000
-      assert_receive {:resolver_spawned, second}, 1_000
+      assert_receive {:resolver_spawned, first}, Wardmast.Test.Timing.scale(1_000)
+      assert_receive {:resolver_spawned, second}, Wardmast.Test.Timing.scale(1_000)
       assert first != second
       # The second attempt only dispatches after the first is stopped, freeing its
       # registry slot — so the first resolver is no longer alive.
@@ -1748,9 +1755,9 @@ defmodule Wardmast.Worker.WatchdogTest do
         interval_ms: 15
       )
 
-      assert_receive {:resolve_called, _}, 1_000
-      assert_receive {:resolve_called, _}, 1_000
-      assert_receive {:escalate_called, _, _, _, _}, 1_000
+      assert_receive {:resolve_called, _}, Wardmast.Test.Timing.scale(1_000)
+      assert_receive {:resolve_called, _}, Wardmast.Test.Timing.scale(1_000)
+      assert_receive {:escalate_called, _, _, _, _}, Wardmast.Test.Timing.scale(1_000)
       # Past the cap the Watchdog stays parked and must not keep spawning workers
       # or re-paging on every subsequent poll.
       refute_receive {:resolve_called, _}, 200
@@ -1778,7 +1785,7 @@ defmodule Wardmast.Worker.WatchdogTest do
           interval_ms: 15
         )
 
-      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, Wardmast.Test.Timing.scale(1_000)
       # A phantom conflict must cost a log line, not an operator's attention.
       refute_receive {:escalate_called, _, _, _, _}, 300
 
@@ -1818,7 +1825,7 @@ defmodule Wardmast.Worker.WatchdogTest do
         interval_ms: 15
       )
 
-      assert_receive {:resolve_called, args}, 1_000
+      assert_receive {:resolve_called, args}, Wardmast.Test.Timing.scale(1_000)
       assert args.target_branch == "integration/dolphin"
     end
 
@@ -1835,7 +1842,7 @@ defmodule Wardmast.Worker.WatchdogTest do
         interval_ms: 15
       )
 
-      assert_receive {:resolve_called, args}, 1_000
+      assert_receive {:resolve_called, args}, Wardmast.Test.Timing.scale(1_000)
       # An explicit nil would look like "the caller supplied a target" to the
       # resolver, defeating its own derivation — the key must simply be absent.
       refute Map.has_key?(args, :target_branch)
@@ -1856,10 +1863,15 @@ defmodule Wardmast.Worker.WatchdogTest do
             interval_ms: 15
           )
 
-          assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
-          assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+          assert_receive {:resolve_called, %{task_id: ^task_id}},
+                         Wardmast.Test.Timing.scale(1_000)
+
+          assert_receive {:resolve_called, %{task_id: ^task_id}},
+                         Wardmast.Test.Timing.scale(1_000)
+
           # Let the repeat-warning land before we read the captured log.
-          assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+          assert_receive {:resolve_called, %{task_id: ^task_id}},
+                         Wardmast.Test.Timing.scale(1_000)
         end)
 
       assert log =~ "zero divergence"
@@ -1888,8 +1900,8 @@ defmodule Wardmast.Worker.WatchdogTest do
           interval_ms: 15
         )
 
-      assert_receive {:resolve_called, _}, 1_000
-      assert_receive {:resolver_spawned, resolver}, 1_000
+      assert_receive {:resolve_called, _}, Wardmast.Test.Timing.scale(1_000)
+      assert_receive {:resolver_spawned, resolver}, Wardmast.Test.Timing.scale(1_000)
       ref = Process.monitor(resolver)
       wait_until(fn -> StubMerger.get_count("!c9") >= 4 end)
 
@@ -1917,17 +1929,17 @@ defmodule Wardmast.Worker.WatchdogTest do
           interval_ms: 15
         )
 
-      assert_receive {:resolve_called, _}, 1_000
-      assert_receive {:escalate_called, ^task_id, _, _, _}, 1_000
+      assert_receive {:resolve_called, _}, Wardmast.Test.Timing.scale(1_000)
+      assert_receive {:escalate_called, ^task_id, _, _, _}, Wardmast.Test.Timing.scale(1_000)
       refute_receive {:resolve_called, _}, 100
       assert Watchdog.parked_on(task_id) == :conflict
 
       assert :ok = Watchdog.retry_auto_resolve(task_id)
 
-      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, Wardmast.Test.Timing.scale(1_000)
       # The one re-armed attempt is spent and did not clear it: parked and paged
       # again, not retried forever.
-      assert_receive {:escalate_called, ^task_id, _, _, reason}, 1_000
+      assert_receive {:escalate_called, ^task_id, _, _, reason}, Wardmast.Test.Timing.scale(1_000)
       assert reason =~ "2 rebase attempt"
       refute_receive {:resolve_called, _}, 100
       assert :sys.get_state(wpid).conflict_escalated
@@ -1945,7 +1957,7 @@ defmodule Wardmast.Worker.WatchdogTest do
         interval_ms: 15
       )
 
-      assert_receive {:resolve_called, _}, 1_000
+      assert_receive {:resolve_called, _}, Wardmast.Test.Timing.scale(1_000)
       assert {:error, :not_parked_on_ci_failed} = Watchdog.retry_auto_resolve(task_id)
     end
 
@@ -1965,7 +1977,7 @@ defmodule Wardmast.Worker.WatchdogTest do
         interval_ms: 15
       )
 
-      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, Wardmast.Test.Timing.scale(1_000)
       # Conflict cleared on the next poll → counter resets → no escalation ever.
       refute_receive {:escalate_called, _, _, _, _}, 300
     end
@@ -2026,7 +2038,9 @@ defmodule Wardmast.Worker.WatchdogTest do
 
           # One rebase pass, then the cap is hit. With no workspace_id the
           # coordinator page has no addressable mailbox, so nothing is sent…
-          assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+          assert_receive {:resolve_called, %{task_id: ^task_id}},
+                         Wardmast.Test.Timing.scale(1_000)
+
           refute_receive {:escalate_called, _, _, _, _}, 300
         end)
 
@@ -2112,7 +2126,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       wref = Process.monitor(wpid)
 
       # Watchdog stops without failing the worker.
-      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 2_000
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(2_000)
       refute_ended(task_id)
     end
 
@@ -2398,7 +2412,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       wpid = start_timeout_watchdog(task_id, "!arr-manual", auto_merge: false)
       wref = Process.monitor(wpid)
 
-      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 2_000
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(2_000)
       refute_ended(task_id)
       assert StubAutoResumeDispatcher.resume_count() == 0
     end
@@ -2466,7 +2480,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       # ...and no coordinator page, because it self-healed.
       assert StubAutoResumeDispatcher.escalations() == []
 
-      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(5_000)
     end
 
     test "the deferral bound escalates once and stops, rather than retrying forever" do
@@ -2477,7 +2491,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       wpid = start_blocked_watchdog(task_id, "!blk2", max_resume_deferrals: 2)
       wref = Process.monitor(wpid)
 
-      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(5_000)
 
       # One initial attempt + exactly two deferred retries. Never a fourth.
       assert StubAutoResumeDispatcher.resume_count() == 3
@@ -2493,7 +2507,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       wpid = start_blocked_watchdog(task_id, "!blk3", max_resume_deferrals: 5)
       wref = Process.monitor(wpid)
 
-      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(5_000)
 
       # Retrying a cleaned-up worktree can never succeed, so it must not be
       # deferred: one attempt, one page.
@@ -2520,7 +2534,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       wpid = start_blocked_watchdog(task_id, "!blk5", max_resume_deferrals: 5)
       wref = Process.monitor(wpid)
 
-      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(5_000)
 
       # Exactly one attempt, no deferred retries, and no coordinator page.
       assert StubAutoResumeDispatcher.resume_count() == 1
@@ -2552,7 +2566,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       wpid = start_blocked_watchdog(task_id, "!blk6", max_resume_deferrals: 5)
       wref = Process.monitor(wpid)
 
-      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(5_000)
 
       assert StubAutoResumeDispatcher.resume_count() == 1
       assert StubAutoResumeDispatcher.escalations() == []
@@ -2567,7 +2581,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       wpid = start_blocked_watchdog(task_id, "!blk4", workspace: ws)
       wref = Process.monitor(wpid)
 
-      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 5_000
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(5_000)
 
       assert StubAutoResumeDispatcher.resume_count() == 2
 
@@ -2693,7 +2707,7 @@ defmodule Wardmast.Worker.WatchdogTest do
           # Wait until at least 3 consecutive failures have accumulated.
           wait_until(fn -> StubMerger.merge_count("!sm2") >= 3 end)
           # Give it a bit more time so any additional log lines would have appeared.
-          Process.sleep(60)
+          Process.sleep(Wardmast.Test.Timing.scale(60))
         end)
 
       # The warning about the stall must appear.
@@ -2901,7 +2915,7 @@ defmodule Wardmast.Worker.WatchdogTest do
 
       # Several poll cycles while CI is still running: no merge attempt, no
       # completion — the Watchdog must just keep waiting.
-      Process.sleep(120)
+      Process.sleep(Wardmast.Test.Timing.scale(120))
       assert StubMerger.merge_count("!ci1") == 0
       refute_received {:watchdog, ^task_id, {:merged, _}}
 
@@ -2924,7 +2938,7 @@ defmodule Wardmast.Worker.WatchdogTest do
             merge_fail_notify_threshold: 2
           )
 
-          Process.sleep(120)
+          Process.sleep(Wardmast.Test.Timing.scale(120))
         end)
 
       assert StubMerger.merge_count("!ci2") == 0
@@ -2973,7 +2987,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       # Fewer polls than @not_started_grace_polls (5) so the grace-bounded
       # fallthrough (bd-aeb9wv round 2) doesn't fire yet — see the dedicated
       # "falls through ... once grace polls are exhausted" test below for that.
-      Process.sleep(40)
+      Process.sleep(Wardmast.Test.Timing.scale(40))
       assert StubMerger.merge_count("!ci5") == 0
       refute_received {:watchdog, ^task_id, {:merged, _}}
 
@@ -3057,7 +3071,7 @@ defmodule Wardmast.Worker.WatchdogTest do
       assert args.checks == [%{name: "mix test", summary: "boom", url: nil}]
 
       # Several more polls: still no merge, and the worker is not "completed".
-      Process.sleep(120)
+      Process.sleep(Wardmast.Test.Timing.scale(120))
       assert StubMerger.merge_count("!rg1") == 0
       refute_received {:watchdog, ^task_id, {:merged, _}}
     end
@@ -3072,7 +3086,7 @@ defmodule Wardmast.Worker.WatchdogTest do
 
       start_watchdog(task_id, "!rg2", auto_merge: true, interval_ms: 15)
 
-      Process.sleep(150)
+      Process.sleep(Wardmast.Test.Timing.scale(150))
       assert StubMerger.merge_count("!rg2") == 0
       refute_received {:watchdog, ^task_id, {:merged, _}}
     end
@@ -3114,7 +3128,7 @@ defmodule Wardmast.Worker.WatchdogTest do
         fix_pass_dispatcher: StubFixPassDispatcher
       )
 
-      Process.sleep(150)
+      Process.sleep(Wardmast.Test.Timing.scale(150))
       assert StubMerger.merge_count("!rg5") == 0
       # The human-decides lane never auto-resolves — that's an auto_merge-only path.
       assert StubFixPassDispatcher.call_count() == 0
@@ -3142,7 +3156,7 @@ defmodule Wardmast.Worker.WatchdogTest do
         Worker.open_mr(pid, "feature/x", "Fix it", "", %{adapter: StubMerger, workspace: nil})
 
       assert mr_ref == "!oom1"
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, Wardmast.Test.Timing.scale(1_000)
     end
   end
 
@@ -3226,7 +3240,7 @@ defmodule Wardmast.Worker.WatchdogTest do
           wait_until(fn -> Watchdog.parked_on(task_id) == :ci_failed end)
           :ok = Watchdog.mark_ci_external(task_id, "day-wide infra outage, not this diff")
           wait_until(fn -> Watchdog.parked_on(task_id) == :ci_failed_external end)
-          Process.sleep(60)
+          Process.sleep(Wardmast.Test.Timing.scale(60))
         end)
 
       assert log =~ "ci_failed_external"
@@ -3324,9 +3338,10 @@ defmodule Wardmast.Worker.WatchdogTest do
       wait_until(fn -> Watchdog.parked_on(task_id) == :ci_failed_external end)
       assert :sys.get_state(wpid).max_polls == :infinity
 
-      # Poll on the park for a while so `poll_count` climbs well past whatever
-      # it can reach in the moment between the clearing poll and the assertion.
-      Process.sleep(300)
+      # Poll on the park until `poll_count` has climbed well past whatever it
+      # can reach in the moment between the clearing poll and the assertion.
+      # Synced on the count itself, not a fixed sleep a slow runner undershoots.
+      wait_until(fn -> :sys.get_state(wpid).poll_count > 5 end, 5_000)
       parked_poll_count = :sys.get_state(wpid).poll_count
       assert parked_poll_count > 5
 

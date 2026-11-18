@@ -123,7 +123,7 @@ defmodule Wardmast.Worker.WatchdogConflictReviewTest do
   end
 
   defp wait_until(fun, timeout \\ 8_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
 
     Stream.repeatedly(fn ->
       cond do
@@ -150,7 +150,7 @@ defmodule Wardmast.Worker.WatchdogConflictReviewTest do
       serve_head(mr_ref, head)
 
       start_watchdog(task, mr_ref, ws, fx.reviewed)
-      assert_receive {:watchdog, _, {:merged, _}}, 8_000
+      assert_receive {:watchdog, _, {:merged, _}}, Wardmast.Test.Timing.scale(8_000)
 
       assert StubMerger.last_merge() == {mr_ref, head}
       assert StubAutoResumeDispatcher.resume_count() == 0

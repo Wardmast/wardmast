@@ -138,7 +138,7 @@ defmodule Wardmast.Worker.WatchdogReviewedShaTest do
     do: assert_receive({:watchdog, ^task_id, {:unreviewed_head, ^head}}, timeout)
 
   defp wait_until(fun, timeout \\ 2_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
@@ -260,7 +260,7 @@ defmodule Wardmast.Worker.WatchdogReviewedShaTest do
       # The merge loop is TERMINAL on a stale head: the Watchdog stops rather
       # than re-attempting the merge ~1/min forever (303+ attempts observed in
       # the incident).
-      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(2_000)
 
       assert StubMerger.merge_count("!rsha5") == 0
       assert [args] = StubAutoResumeDispatcher.resumes()
@@ -297,7 +297,7 @@ defmodule Wardmast.Worker.WatchdogReviewedShaTest do
         )
 
       ref = Process.monitor(wpid)
-      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(2_000)
 
       assert StubMerger.merge_count("!rsha6") == 0
       assert StubAutoResumeDispatcher.resume_count() == 0
@@ -312,7 +312,7 @@ defmodule Wardmast.Worker.WatchdogReviewedShaTest do
       assert {:stale_reviewed_sha, "sha-reviewed", "sha-foreign"} = reason
 
       # And it stays at one: the Watchdog is gone, so nothing re-pages.
-      Process.sleep(60)
+      Process.sleep(Wardmast.Test.Timing.scale(60))
       assert length(StubAutoResumeDispatcher.escalations()) == 1
     end
   end
@@ -372,7 +372,7 @@ defmodule Wardmast.Worker.WatchdogReviewedShaTest do
         )
 
       ref = Process.monitor(wpid)
-      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
+      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(3_000)
 
       assert StubMerger.merge_count("!rsha10") == 0
       assert StubAutoResumeDispatcher.resume_count() == 1
@@ -407,7 +407,7 @@ defmodule Wardmast.Worker.WatchdogReviewedShaTest do
         )
 
       ref = Process.monitor(wpid)
-      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
+      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(3_000)
 
       assert StubMerger.merge_count("!rsha8") == 0,
              "a commit nobody reviewed must never be merged"

@@ -108,7 +108,7 @@ defmodule Wardmast.Worker.WatchdogFailureTest do
   end
 
   defp wait_until(fun, timeout \\ 2_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
@@ -142,7 +142,7 @@ defmodule Wardmast.Worker.WatchdogFailureTest do
       # Wait until at least 3 merge attempts have been made.
       wait_until(fn -> StubMerger.merge_count("!stall1") >= 3 end)
       # Let a poll interval pass to ensure the notifier call fires.
-      Process.sleep(60)
+      Process.sleep(Wardmast.Test.Timing.scale(60))
 
       escalations = Message.inbox("admiral", workspace_id: ws.id)
 
@@ -173,7 +173,7 @@ defmodule Wardmast.Worker.WatchdogFailureTest do
 
       # Let 6+ failures accumulate (2× the threshold).
       wait_until(fn -> StubMerger.merge_count("!stall2") >= 6 end)
-      Process.sleep(40)
+      Process.sleep(Wardmast.Test.Timing.scale(40))
 
       escalations = Message.inbox("admiral", workspace_id: ws.id)
 
@@ -216,7 +216,7 @@ defmodule Wardmast.Worker.WatchdogFailureTest do
 
       # The run ends normally: a Watchdog that will not start neither crashes
       # it (the bd-91rnwq CaseClauseError) nor strands the MR on it.
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, Wardmast.Test.Timing.scale(2_000)
 
       ticket = Ash.get!(Issue, task.id)
       assert ticket.state == :merging
@@ -247,7 +247,7 @@ defmodule Wardmast.Worker.WatchdogFailureTest do
 
       # Give the synchronous escalation call time to commit (it happens inline,
       # but the Ecto sandbox may need a moment to flush the write).
-      Process.sleep(50)
+      Process.sleep(Wardmast.Test.Timing.scale(50))
 
       escalations = Message.inbox("admiral", workspace_id: ws.id)
 
@@ -348,7 +348,8 @@ defmodule Wardmast.Worker.WatchdogFailureTest do
 
       assert_merged(task.id)
 
-      assert_receive {:jira_transition, %{"transition" => %{"id" => "444"}}}, 1_000
+      assert_receive {:jira_transition, %{"transition" => %{"id" => "444"}}},
+                     Wardmast.Test.Timing.scale(1_000)
     end
 
     test "Watchdog fires :merged tracker lifecycle on auto-merge path" do
@@ -398,7 +399,8 @@ defmodule Wardmast.Worker.WatchdogFailureTest do
 
       assert_merged(task.id)
 
-      assert_receive {:jira_transition, %{"transition" => %{"id" => "445"}}}, 1_000
+      assert_receive {:jira_transition, %{"transition" => %{"id" => "445"}}},
+                     Wardmast.Test.Timing.scale(1_000)
     end
   end
 end

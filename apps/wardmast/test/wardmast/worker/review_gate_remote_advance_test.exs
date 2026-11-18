@@ -229,7 +229,7 @@ defmodule Wardmast.Worker.ReviewGateRemoteAdvanceTest do
   end
 
   defp wait_until(fun, timeout \\ 5_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
@@ -252,7 +252,7 @@ defmodule Wardmast.Worker.ReviewGateRemoteAdvanceTest do
   # moment a condition becomes true, since the gate process can exit normally
   # (a completed review) shortly after and take that state with it.
   defp wait_until_value(fun, timeout) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait_value(fun, deadline)
   end
 

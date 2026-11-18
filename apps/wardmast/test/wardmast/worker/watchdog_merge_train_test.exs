@@ -156,7 +156,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainTest do
   defp role(wpid), do: :sys.get_state(wpid).train_role
 
   defp wait_until(fun, timeout \\ 3_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
@@ -210,7 +210,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainTest do
       assert syncs("b") == 0
 
       let_ci_pass("a")
-      assert_receive {:watchdog, "a", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
 
       wait_until(fn -> syncs("b") == 1 end)
       assert role(b) == :head
@@ -219,7 +219,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainTest do
       assert StubMerger.merge_count("!b") == 0
 
       let_ci_pass("b")
-      assert_receive {:watchdog, "b", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "b", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
       assert StubMerger.merge_count("!a") == 1
       assert StubMerger.merge_count("!b") == 1
       assert syncs("a") == 1
@@ -253,7 +253,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainTest do
       after_polls(d, 2)
 
       let_ci_pass("a")
-      assert_receive {:watchdog, "a", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
 
       wait_until(fn -> syncs("c") == 1 end)
       after_polls(b, 3)
@@ -261,7 +261,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainTest do
       assert syncs("d") == 0
 
       let_ci_pass("c")
-      assert_receive {:watchdog, "c", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "c", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
       wait_until(fn -> syncs("d") == 1 end)
       after_polls(b, 3)
       assert syncs("b") == 0
@@ -281,7 +281,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainTest do
       assert role(a) == :head
 
       watch("b", ws)
-      assert_receive {:watchdog, "b", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "b", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
       assert StubMerger.merge_count("!b") == 1
       assert syncs("b") == 0
       assert syncs("a") == 1
@@ -299,7 +299,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainTest do
       assert StubMerger.merge_count("!b") == 0
 
       :ok = MergeTrain.release_merge({ws.id, nil, "main"}, "someone-else")
-      assert_receive {:watchdog, "b", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "b", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
       assert StubMerger.merge_count("!b") == 1
     end
 
@@ -310,7 +310,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainTest do
 
       assert :ok = MergeTrain.acquire_merge({ws.id, nil, "main"}, "someone-else")
       watch("b", ws)
-      assert_receive {:watchdog, "b", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "b", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
     end
   end
 
@@ -341,7 +341,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainTest do
       assert syncs("b") == 0
 
       serve("a", "main", :closed)
-      assert_receive {:watchdog, "a", {:closed, _}}, 3_000
+      assert_receive {:watchdog, "a", {:closed, _}}, Wardmast.Test.Timing.scale(3_000)
       wait_until(fn -> syncs("b") == 1 end)
       assert role(b) == :head
     end
@@ -517,7 +517,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainTest do
       assert syncs("b") == 0
 
       let_ci_pass("a")
-      assert_receive {:watchdog, "a", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
       wait_until(fn -> syncs("b") == 1 end)
       assert StubFixPassDispatcher.call_count() == 0
     end
@@ -531,7 +531,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainTest do
 
       wait_until(fn -> syncs("a") == 1 end)
       let_ci_pass("a")
-      assert_receive {:watchdog, "a", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
       assert syncs("a") == 1
       assert StubMerger.merge_count("!a") == 1
     end
@@ -616,7 +616,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainTest do
       watch("a", ws)
       wait_until(fn -> syncs("a") == 1 end)
       let_ci_pass("a")
-      assert_receive {:watchdog, "a", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
       assert StubMerger.merge_count("!a") == 1
     end
 
@@ -742,7 +742,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainTest do
       assert syncs("a") == 1
 
       let_ci_pass("a")
-      assert_receive {:watchdog, "a", {:merged, _}}, 3_000
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
       wait_until(fn -> syncs("b") == 1 end)
     end
 
@@ -918,7 +918,7 @@ defmodule Wardmast.Worker.WatchdogMergeTrainTest do
       # Leaving the sync place clears the sync, not the merge-ready time.
 
       serve(id, "main", :closed)
-      assert_receive {:watchdog, ^id, {:closed, _}}, 3_000
+      assert_receive {:watchdog, ^id, {:closed, _}}, Wardmast.Test.Timing.scale(3_000)
       wait_until(fn -> Ash.get!(Issue, id).merge_watch["train_synced_from"] == nil end)
       lane = Ash.get!(Issue, id).merge_watch
       assert lane["train_synced_from"] == nil

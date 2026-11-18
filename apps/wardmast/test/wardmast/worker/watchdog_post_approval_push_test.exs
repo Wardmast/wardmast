@@ -248,7 +248,7 @@ defmodule Wardmast.Worker.WatchdogPostApprovalPushTest do
   end
 
   defp wait_until(fun, timeout \\ 3_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
@@ -299,7 +299,7 @@ defmodule Wardmast.Worker.WatchdogPostApprovalPushTest do
         wpid = start_watchdog(task.id, mr_ref, ws)
         ref = Process.monitor(wpid)
 
-        assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
+        assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(3_000)
 
         assert StubFixPassDispatcher.call_count() == 1
 
@@ -340,7 +340,7 @@ defmodule Wardmast.Worker.WatchdogPostApprovalPushTest do
         wpid = start_watchdog(task.id, mr_ref, ws)
         ref = Process.monitor(wpid)
 
-        assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
+        assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(3_000)
 
         assert StubMerger.merge_count(mr_ref) == 0
         assert StubAutoResumeDispatcher.resume_count() == 1
@@ -412,7 +412,7 @@ defmodule Wardmast.Worker.WatchdogPostApprovalPushTest do
         )
 
       ref = Process.monitor(wpid)
-      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
+      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(3_000)
 
       assert StubMerger.merge_count(mr_ref) == 0
       assert StubAutoResumeDispatcher.resume_count() == 1
@@ -454,7 +454,7 @@ defmodule Wardmast.Worker.WatchdogPostApprovalPushTest do
 
       wpid = start_watchdog(task.id, mr_ref, ws, max_auto_resolve_attempts: 2)
       ref = Process.monitor(wpid)
-      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
+      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(3_000)
 
       assert StubMerger.update_branch_count(mr_ref) >= 1
       assert StubMerger.merge_count(mr_ref) == 0
@@ -497,7 +497,7 @@ defmodule Wardmast.Worker.WatchdogPostApprovalPushTest do
 
       wpid = start_watchdog(task.id, mr_ref, ws, max_auto_resolve_attempts: 2)
       ref = Process.monitor(wpid)
-      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
+      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(3_000)
 
       assert StubMerger.update_branch_count(mr_ref) == 1
       assert StubFixPassDispatcher.call_count() == 1
@@ -558,7 +558,7 @@ defmodule Wardmast.Worker.WatchdogPostApprovalPushTest do
       send(blocker, :finish)
 
       wait_until(fn -> StubAutoResumeDispatcher.resume_count() >= 2 end)
-      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 3_000
+      assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, Wardmast.Test.Timing.scale(3_000)
       assert StubAutoResumeDispatcher.escalations() == []
       assert StubMerger.merge_count(mr_ref) == 0
     end

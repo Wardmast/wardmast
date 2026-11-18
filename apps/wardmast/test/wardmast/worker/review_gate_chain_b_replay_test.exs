@@ -74,7 +74,7 @@ defmodule Wardmast.Worker.ReviewGateChainBReplayTest do
   end
 
   defp wait_until(fun, timeout) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 

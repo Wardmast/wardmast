@@ -477,7 +477,7 @@ defmodule Wardmast.Worker.ReviewGateTest do
   end
 
   defp wait_until(fun, timeout \\ 2_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
@@ -1466,7 +1466,7 @@ defmodule Wardmast.Worker.ReviewGateTest do
 
       File.write!(stub, """
       #!/bin/sh
-      for a in "$@"; do echo "$a" >> #{argv_file}; done
+      for a in "$@"; do echo "$a"; done > #{argv_file}.tmp && mv #{argv_file}.tmp #{argv_file}
       # Exit without printing a verdict — we don't care about the outcome here.
       exit 0
       """)
@@ -1540,7 +1540,7 @@ defmodule Wardmast.Worker.ReviewGateTest do
 
       File.write!(stub, """
       #!/bin/sh
-      for a in "$@"; do echo "$a" >> #{argv_file}; done
+      for a in "$@"; do echo "$a"; done > #{argv_file}.tmp && mv #{argv_file}.tmp #{argv_file}
       exit 0
       """)
 
@@ -1606,7 +1606,7 @@ defmodule Wardmast.Worker.ReviewGateTest do
 
       File.write!(stub, """
       #!/bin/sh
-      for a in "$@"; do echo "$a" >> #{argv_file}; done
+      for a in "$@"; do echo "$a"; done > #{argv_file}.tmp && mv #{argv_file}.tmp #{argv_file}
       exit 0
       """)
 
@@ -1691,13 +1691,13 @@ defmodule Wardmast.Worker.ReviewGateTest do
 
       File.write!(Path.join(stub_dir, "claude"), """
       #!/bin/sh
-      for a in "$@"; do echo "$a" >> #{argv_file}; done
+      for a in "$@"; do echo "$a"; done > #{argv_file}.tmp && mv #{argv_file}.tmp #{argv_file}
       exit 0
       """)
 
       File.write!(Path.join(stub_dir, "agy"), """
       #!/bin/sh
-      for a in "$@"; do echo "$a" >> #{gemini_argv_file}; done
+      for a in "$@"; do echo "$a"; done > #{gemini_argv_file}.tmp && mv #{gemini_argv_file}.tmp #{gemini_argv_file}
       exit 0
       """)
 
@@ -1779,7 +1779,7 @@ defmodule Wardmast.Worker.ReviewGateTest do
 
       File.write!(stub, """
       #!/bin/sh
-      for a in "$@"; do echo "$a" >> #{argv_file}; done
+      for a in "$@"; do echo "$a"; done > #{argv_file}.tmp && mv #{argv_file}.tmp #{argv_file}
       exit 0
       """)
 
@@ -4630,7 +4630,9 @@ defmodule Wardmast.Worker.ReviewGateTest do
       :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      assert_receive {:event, %{topic: "gate_cap_hit"} = event}, 10_000
+      assert_receive {:event, %{topic: "gate_cap_hit"} = event},
+                     Wardmast.Test.Timing.scale(10_000)
+
       assert event.task_id == task.id
       assert event.gate == "review_gate"
       assert event.rounds == 2
@@ -5768,7 +5770,7 @@ defmodule Wardmast.Worker.ReviewGateTest do
         )
 
       ref = Process.monitor(gate)
-      assert_receive {:DOWN, ^ref, :process, ^gate, _}, 15_000
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(15_000)
 
       impl_runs =
         Wardmast.Workers.Run
@@ -6521,7 +6523,7 @@ defmodule Wardmast.Worker.ReviewGateTest do
 
   # Poll for the live ReviewGate child of the worker supervisor; return its pid.
   defp wait_until_review_gate(timeout \\ 4_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait_review_gate(deadline)
   end
 

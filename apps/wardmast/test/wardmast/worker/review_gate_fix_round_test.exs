@@ -66,7 +66,7 @@ defmodule Wardmast.Worker.ReviewGateFixRoundTest do
   end
 
   defp wait_until(fun, timeout \\ 2_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
@@ -286,7 +286,7 @@ defmodule Wardmast.Worker.ReviewGateFixRoundTest do
       # Nothing dispatched, and no second escalation on top of the ReviewGate's
       # own rejection page — an operator who turned this off asked for the
       # pre-bd-a9zb7w behaviour exactly.
-      Process.sleep(120)
+      Process.sleep(Wardmast.Test.Timing.scale(120))
       assert StubFixRoundDispatcher.dispatch_count() == 0
       assert StubFixRoundDispatcher.escalations() == []
     end
@@ -357,7 +357,7 @@ defmodule Wardmast.Worker.ReviewGateFixRoundTest do
 
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
 
-      Process.sleep(120)
+      Process.sleep(Wardmast.Test.Timing.scale(120))
       assert StubFixRoundDispatcher.dispatch_count() == 0
       assert StubFixRoundDispatcher.escalations() == []
     end

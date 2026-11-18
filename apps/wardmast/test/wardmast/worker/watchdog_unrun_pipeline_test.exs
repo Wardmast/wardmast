@@ -128,7 +128,7 @@ defmodule Wardmast.Worker.WatchdogUnrunPipelineTest do
   end
 
   defp wait_until(fun, timeout \\ 3_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
 
     Stream.repeatedly(fn ->
       cond do

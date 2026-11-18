@@ -71,7 +71,7 @@ defmodule Wardmast.Worker.ReviewGateParkTest do
   end
 
   defp wait_until(fun, timeout \\ 2_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
@@ -216,7 +216,7 @@ defmodule Wardmast.Worker.ReviewGateParkTest do
 
       # A second report of the same episode must not page again.
       Worker.review_gate_verdict(pid, {:parked, :inconclusive, "no parseable VERDICT line"})
-      Process.sleep(50)
+      Process.sleep(Wardmast.Test.Timing.scale(50))
 
       assert length(escalations(ws, task)) == 1
     end
@@ -236,7 +236,7 @@ defmodule Wardmast.Worker.ReviewGateParkTest do
       pid = start_parked_author(task, repo)
 
       deliver(pid, {:parked, :verdict_guard_exhausted, "VERDICT: APPROVE\nbut F1.1 is open"})
-      Process.sleep(50)
+      Process.sleep(Wardmast.Test.Timing.scale(50))
 
       assert StubFixRoundDispatcher.dispatch_count() == 0
     end
@@ -364,7 +364,7 @@ defmodule Wardmast.Worker.ReviewGateParkTest do
       assert reload(task).attention_since == nil
       assert reload(task).state == :merging
 
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, Wardmast.Test.Timing.scale(2_000)
       assert run_for(task.id).outcome == :succeeded
     end
   end

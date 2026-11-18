@@ -114,7 +114,7 @@ defmodule Wardmast.Worker.ReviewGateStallTest do
       :sys.suspend(gate)
 
       wait_finished(pid)
-      assert_receive {:DOWN, ^gate_ref, :process, ^gate, _}, 10_000
+      assert_receive {:DOWN, ^gate_ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(10_000)
 
       task = Ash.get!(Issue, task.id)
       assert task.attention_cause == :reviewer_timeout
@@ -127,7 +127,7 @@ defmodule Wardmast.Worker.ReviewGateStallTest do
       gate = wait_until_review_gate()
 
       # Several liveness ticks and well past the stall limit.
-      Process.sleep(800)
+      Process.sleep(Wardmast.Test.Timing.scale(800))
 
       assert Process.alive?(gate)
       assert %{state: :waiting, waiting_on: :review_gate} = Worker.state(pid)
@@ -292,7 +292,7 @@ defmodule Wardmast.Worker.ReviewGateStallTest do
   end
 
   defp wait_until(fun, timeout \\ 4_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
     do_wait(fun, deadline)
   end
 
@@ -311,7 +311,7 @@ defmodule Wardmast.Worker.ReviewGateStallTest do
   end
 
   defp wait_until_review_gate(timeout \\ 4_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
 
     Stream.repeatedly(fn ->
       Wardmast.Worker.Supervisor

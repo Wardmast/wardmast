@@ -157,7 +157,7 @@ defmodule Wardmast.Worker.WatchdogVisualBaselinesTest do
 
     pid = start_watchdog(task, mr_ref, ws)
     ref = Process.monitor(pid)
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 3_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, Wardmast.Test.Timing.scale(3_000)
 
     assert_received {:refresh, ctx}
     assert ctx.repo == "tonic"
@@ -186,7 +186,7 @@ defmodule Wardmast.Worker.WatchdogVisualBaselinesTest do
     StubMerger.queue_get(mr_ref, [red(head)])
     start_watchdog(task, mr_ref, ws)
 
-    assert_receive {:refresh, _}, 3_000
+    assert_receive {:refresh, _}, Wardmast.Test.Timing.scale(3_000)
     wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
     assert StubFixPassDispatcher.call_count() >= 1
   end
@@ -256,7 +256,7 @@ defmodule Wardmast.Worker.WatchdogVisualBaselinesTest do
   end
 
   defp wait_until(fun, timeout \\ 3_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
+    deadline = System.monotonic_time(:millisecond) + Wardmast.Test.Timing.scale(timeout)
 
     Stream.repeatedly(fn ->
       cond do
