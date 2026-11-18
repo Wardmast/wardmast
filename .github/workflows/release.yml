@@ -182,6 +182,9 @@ jobs:
         run: |
           TAG="${{ steps.tag.outputs.name }}"
           TARBALL="arbiter-${TAG}-linux.tar.gz"
+          # bd-d5mg29: bin/ward (overlay) runs this escript on the bundled erts.
+          cp apps/wardmast_cli/ward _build/prod/rel/wardmast/bin/ward.escript
+          scripts/check-release-ward.sh _build/prod/rel/wardmast apps/wardmast_cli/ward
           tar -czf "${TARBALL}" -C _build/prod/rel/wardmast .
           sha256sum "${TARBALL}" > "${TARBALL}.sha256"
           sha256sum apps/wardmast_cli/ward > ward.sha256
@@ -386,6 +389,18 @@ jobs:
           MIX_ENV=prod mix release wardmast
         env:
           RELEASE_VERSION: ${{ steps.tag.outputs.name }}
+
+      - name: Build ward escript and smoke-test it on the bundled erts
+        # bd-d5mg29: the tarball ships bin/ward + bin/ward.escript; `ward
+        # --version` must work with only the release's erts on PATH (no system
+        # Erlang), which is what a toolchain-free macOS install has.
+        run: |
+          (cd apps/wardmast_cli && MIX_ENV=prod mix escript.build)
+          cp apps/wardmast_cli/ward _build/prod/rel/wardmast/bin/ward.escript
+          scripts/check-release-ward.sh _build/prod/rel/wardmast apps/wardmast_cli/ward
+        env:
+          RELEASE_VERSION: ${{ steps.tag.outputs.name }}
+          MIX_ENV: prod
 
       - name: Ad-hoc codesign Mach-O files and verify
         # arm64 macOS refuses to run unsigned code. Sign every Mach-O file
