@@ -2714,10 +2714,12 @@ defmodule Wardmast.Worker.WatchdogTest do
         end)
 
       # The warning about the stall must appear.
-      assert log =~ "consecutive failure 3"
+      # The trailing `)` anchors the count: with a scaled window the log also
+      # holds "consecutive failure 30".."39", which a bare prefix would match.
+      assert log =~ "consecutive failure 3)"
       # It must NOT repeat on every subsequent poll — only logged once per
       # stall episode (the merge_stall_notified latch prevents re-firing).
-      occurrences = log |> String.split("consecutive failure 3") |> length() |> Kernel.-(1)
+      occurrences = log |> String.split("consecutive failure 3)") |> length() |> Kernel.-(1)
       assert occurrences == 1
     end
 
