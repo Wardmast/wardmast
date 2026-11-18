@@ -42,7 +42,7 @@ defmodule WardmastWeb.WorkerIndexLiveTest do
   # Must outlast `Worker.safe_snapshot/1`'s 5 s probe: the suspended worker in the
   # "degraded entry" test only degrades once that call times out, so a 5 s budget
   # here was a coin flip even on Linux.
-  @async_timeout 15_000
+  @async_timeout WardmastWeb.Test.Timing.scale(15_000)
 
   defp live_workers(conn, path \\ ~p"/workers") do
     {:ok, view, _html} = live(conn, path)
@@ -120,7 +120,7 @@ defmodule WardmastWeb.WorkerIndexLiveTest do
     :ok = Worker.advance(pid, :integrate)
     run = Process.monitor(pid)
     {:ok, _} = Worker.open_mr(pid, "feature/test", "Test", "", merge_opts())
-    assert_receive {:DOWN, ^run, :process, ^pid, _}, 2_000
+    assert_receive {:DOWN, ^run, :process, ^pid, _}, WardmastWeb.Test.Timing.scale(2_000)
     task
   end
 

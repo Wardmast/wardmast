@@ -117,7 +117,7 @@ defmodule WardmastWeb.RemotePassTest do
     start_supervised!({Status, path: config.status_path})
     for spec <- Runs.child_specs(), do: start_supervised!(spec)
     start_supervised!({Connection, config: config})
-    assert_receive {:node_state, _id, :online}, 10_000
+    assert_receive {:node_state, _id, :online}, WardmastWeb.Test.Timing.scale(10_000)
 
     # The repo, its bare forge, and a ticket whose branch conflicts with main.
     repo = Path.join(root, "repo")

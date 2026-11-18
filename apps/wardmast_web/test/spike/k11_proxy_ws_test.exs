@@ -62,7 +62,10 @@ defmodule WardmastWeb.Spike.K11ProxyWsTest do
     {:ok, c} = WsClient.start_link(url: direct_url(), owner: self(), transport_opts: tls(certdir))
     assert {:ok, _} = WsClient.join(c, "node:spike")
     WsClient.push(c, "node:spike", "hb", %{"seq" => 1, "t" => 0})
-    assert_receive {:ws, :push, "node:spike", "hb_ack", %{"seq" => 1}}, 10_000
+
+    assert_receive {:ws, :push, "node:spike", "hb_ack", %{"seq" => 1}},
+                   WardmastWeb.Test.Timing.scale(10_000)
+
     report("baseline_direct", %{joined: true})
   end
 
@@ -81,12 +84,16 @@ defmodule WardmastWeb.Spike.K11ProxyWsTest do
     assert {:ok, _} = WsClient.join(c, "node:spike")
     connect_ms = System.monotonic_time(:millisecond) - t0
     WsClient.push(c, "node:spike", "hb", %{"seq" => 1, "t" => 0})
-    assert_receive {:ws, :push, "node:spike", "hb_ack", %{"seq" => 1}}, 10_000
+
+    assert_receive {:ws, :push, "node:spike", "hb_ack", %{"seq" => 1}},
+                   WardmastWeb.Test.Timing.scale(10_000)
 
     payload = :crypto.strong_rand_bytes(1_000_000)
     t1 = System.monotonic_time(:millisecond)
     WsClient.push(c, "node:spike", "echo_bin", {:binary, payload})
-    assert_receive {:ws, :push, "node:spike", "echo_bin", {:binary, ^payload}}, 30_000
+
+    assert_receive {:ws, :push, "node:spike", "echo_bin", {:binary, ^payload}},
+                   WardmastWeb.Test.Timing.scale(30_000)
 
     report("proxy_ws", %{
       connect_join_ms: connect_ms,

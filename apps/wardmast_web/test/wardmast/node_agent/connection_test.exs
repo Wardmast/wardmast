@@ -92,8 +92,8 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
                     {:connect, %{"proto" => "1", "agent_version" => "1.0.0"}}},
                    5_000
 
-    assert_receive {:fake_node, :joined, "node:node123"}, 5_000
-    assert_receive {:fake_node, :hello, hello}, 5_000
+    assert_receive {:fake_node, :joined, "node:node123"}, WardmastWeb.Test.Timing.scale(5_000)
+    assert_receive {:fake_node, :hello, hello}, WardmastWeb.Test.Timing.scale(5_000)
 
     assert hello["agent_version"] == "1.0.0"
     assert hello["proto"] == 1
@@ -122,9 +122,11 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
        ctx do
     {_conn, config} = start_agent(ctx)
 
-    assert_receive {:fake_node, :hb, %{"seq" => 1, "runs" => []}}, 5_000
-    assert_receive {:fake_node, :hb, %{"seq" => 2}}, 5_000
-    assert_receive {:fake_node, :hb, %{"seq" => 3}}, 5_000
+    assert_receive {:fake_node, :hb, %{"seq" => 1, "runs" => []}},
+                   WardmastWeb.Test.Timing.scale(5_000)
+
+    assert_receive {:fake_node, :hb, %{"seq" => 2}}, WardmastWeb.Test.Timing.scale(5_000)
+    assert_receive {:fake_node, :hb, %{"seq" => 3}}, WardmastWeb.Test.Timing.scale(5_000)
 
     st = status(config)
     assert st["state"] == "ready"
@@ -138,21 +140,21 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
     Application.put_env(:wardmast_web, :fake_node_style, :push)
     {_conn, config} = start_agent(ctx)
 
-    assert_receive {:fake_node, :hb, %{"seq" => 2}}, 5_000
+    assert_receive {:fake_node, :hb, %{"seq" => 2}}, WardmastWeb.Test.Timing.scale(5_000)
     wait_until(fn -> status(config)["last_hb_ack_at"] != nil end)
     assert status(config)["state"] == "ready"
   end
 
   test "reconnects with backoff after the server drops the socket, and says hello again", ctx do
     {conn, _config} = start_agent(ctx)
-    assert_receive {:fake_node, :hello, _}, 5_000
-    assert_receive {:fake_node, :hb, _}, 5_000
+    assert_receive {:fake_node, :hello, _}, WardmastWeb.Test.Timing.scale(5_000)
+    assert_receive {:fake_node, :hb, _}, WardmastWeb.Test.Timing.scale(5_000)
 
     flush_fake_node()
     FakeNode.Endpoint.broadcast("node_socket:fake", "disconnect", %{})
 
-    assert_receive {:fake_node, :hello, _}, 5_000
-    assert_receive {:fake_node, :hb, _}, 5_000
+    assert_receive {:fake_node, :hello, _}, WardmastWeb.Test.Timing.scale(5_000)
+    assert_receive {:fake_node, :hb, _}, WardmastWeb.Test.Timing.scale(5_000)
     assert Connection.info(conn).phase == :ready
     # readiness is cached across reconnects: the (container-starting) probe ran once
     assert_received :readiness_probed
@@ -162,7 +164,7 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
   test "keeps retrying while the primary is down, with a growing attempt count, then recovers",
        ctx do
     {conn, config} = start_agent(ctx)
-    assert_receive {:fake_node, :hello, _}, 5_000
+    assert_receive {:fake_node, :hello, _}, WardmastWeb.Test.Timing.scale(5_000)
 
     stop_supervised!(FakeNode.Endpoint)
 
@@ -175,7 +177,7 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
     refute Connection.info(conn).phase == :ready
 
     start_supervised!(FakeNode.endpoint_spec(port: ctx.port))
-    assert_receive {:fake_node, :hello, _}, 5_000
+    assert_receive {:fake_node, :hello, _}, WardmastWeb.Test.Timing.scale(5_000)
     wait_until(fn -> Connection.info(conn).phase == :ready end)
     # attempt resets on hello_ok
     assert Connection.info(conn).attempt == 0
@@ -199,12 +201,12 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
       "fence_after" => 0.12
     })
 
-    assert_receive {:fake_node, :hello, _}, 5_000
-    assert_receive {:fake_node, :hb, _}, 5_000
+    assert_receive {:fake_node, :hello, _}, WardmastWeb.Test.Timing.scale(5_000)
+    assert_receive {:fake_node, :hb, _}, WardmastWeb.Test.Timing.scale(5_000)
 
     wait_until(fn -> status(config)["fenced_at"] != nil end)
     # and it came back for another hello rather than sitting fenced
-    assert_receive {:fake_node, :hello, _}, 5_000
+    assert_receive {:fake_node, :hello, _}, WardmastWeb.Test.Timing.scale(5_000)
   end
 
   # RW12 (§10.4): what the agent quiesced is on disk, so it outlives the agent and is listed
@@ -227,7 +229,7 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
     )
 
     start_agent(ctx)
-    assert_receive {:fake_node, :hello, hello}, 5_000
+    assert_receive {:fake_node, :hello, hello}, WardmastWeb.Test.Timing.scale(5_000)
 
     assert [%{"run" => "kept", "task" => "bd-1", "checkout" => %{"bytes" => 9}} = report] =
              hello["inventory"]["retained"]
@@ -292,12 +294,14 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
 
     opts = [config: config, sink: self(), node_id: config.node_id] ++ config.run_opts
     assert {:ok, "f1"} = Runs.assign(spec, opts)
-    assert_receive {:run_push, "f1", "run.ready", _}, 5_000
+    assert_receive {:run_push, "f1", "run.ready", _}, WardmastWeb.Test.Timing.scale(5_000)
 
     wait_until(fn -> status(config)["fenced_at"] != nil end)
 
     # the container was removed by name, the run reported cancelled "fenced"
-    assert_receive {:run_push, "f1", "exit", %{"cancelled" => true, "reason" => "fenced"}}, 5_000
+    assert_receive {:run_push, "f1", "exit", %{"cancelled" => true, "reason" => "fenced"}},
+                   WardmastWeb.Test.Timing.scale(5_000)
+
     assert stub_calls(stub) =~ "rm --force --ignore --time 0 arb-f1"
     assert File.dir?(Path.join([config.node_home, "runs", "f1", "worktree"]))
   end
@@ -362,7 +366,7 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
 
       opts = [config: config, sink: self(), node_id: config.node_id] ++ config.run_opts
       assert {:ok, ^run} = Runs.assign(spec, opts)
-      assert_receive {:run_push, ^run, "run.ready", _}, 5_000
+      assert_receive {:run_push, ^run, "run.ready", _}, WardmastWeb.Test.Timing.scale(5_000)
     end
 
     defp refused(run) do
@@ -384,8 +388,8 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
       })
 
       start_agent(ctx)
-      assert_receive {:fake_node, :channel, channel}, 5_000
-      assert_receive {:fake_node, :hello, _}, 5_000
+      assert_receive {:fake_node, :channel, channel}, WardmastWeb.Test.Timing.scale(5_000)
+      assert_receive {:fake_node, :hello, _}, WardmastWeb.Test.Timing.scale(5_000)
 
       # a held run goes on to the run table (no process for it here, so: gone)
       send(channel, {:push, "adopt", %{"run" => "held1"}})
@@ -405,8 +409,8 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
 
       flush_fake_node()
       FakeNode.Endpoint.broadcast("node_socket:fake", "disconnect", %{})
-      assert_receive {:fake_node, :channel, channel}, 5_000
-      assert_receive {:fake_node, :hello, _}, 5_000
+      assert_receive {:fake_node, :channel, channel}, WardmastWeb.Test.Timing.scale(5_000)
+      assert_receive {:fake_node, :hello, _}, WardmastWeb.Test.Timing.scale(5_000)
 
       send(channel, {:push, "adopt", %{"run" => "held2"}})
       assert refused("held2") == "not_held"
@@ -416,7 +420,7 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
       {config, stub} =
         hang_agent(ctx, %{"hb_interval" => 0.03, "fence_after" => 60, "restart_grace" => 0.3})
 
-      assert_receive {:fake_node, :hello, _}, 5_000
+      assert_receive {:fake_node, :hello, _}, WardmastWeb.Test.Timing.scale(5_000)
       wait_until(fn -> status(config)["state"] == "ready" end)
       place_hanging!(config, "g1")
 
@@ -435,13 +439,13 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
       {config, stub} =
         hang_agent(ctx, %{"hb_interval" => 0.03, "fence_after" => 60, "restart_grace" => 0.8})
 
-      assert_receive {:fake_node, :hello, _}, 5_000
+      assert_receive {:fake_node, :hello, _}, WardmastWeb.Test.Timing.scale(5_000)
       wait_until(fn -> status(config)["state"] == "ready" end)
       place_hanging!(config, "g2")
 
       stop_supervised!(FakeNode.Endpoint)
       start_supervised!(FakeNode.endpoint_spec(port: ctx.port))
-      assert_receive {:fake_node, :hello, _}, 5_000
+      assert_receive {:fake_node, :hello, _}, WardmastWeb.Test.Timing.scale(5_000)
 
       # well past the grace the first disconnect would have run out at: nothing was fenced
       refute_receive {:run_push, "g2", "exit", _}, 1_200
@@ -485,8 +489,8 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
 
       {_conn, config} = start_agent(ctx)
 
-      assert_receive {:fake_node, :download, "2.0.0.tar.gz"}, 5_000
-      assert_receive :halted, 5_000
+      assert_receive {:fake_node, :download, "2.0.0.tar.gz"}, WardmastWeb.Test.Timing.scale(5_000)
+      assert_receive :halted, WardmastWeb.Test.Timing.scale(5_000)
 
       assert File.read_link!(Path.join(ctx.home, "current")) == "releases/2.0.0"
       assert File.read!(Path.join(ctx.home, "releases/2.0.0/bin/wardmast")) =~ "echo 2.0.0"
@@ -501,7 +505,7 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
       })
 
       start_agent(ctx)
-      assert_receive {:fake_node, :hb, %{"seq" => 2}}, 5_000
+      assert_receive {:fake_node, :hb, %{"seq" => 2}}, WardmastWeb.Test.Timing.scale(5_000)
       refute_received :halted
       refute_received {:fake_node, :download, _}
     end
@@ -523,14 +527,14 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
       assert File.read_link!(Path.join(ctx.home, "current")) == "releases/1.0.0"
       assert get_in(status(config), ["upgrade", "error"]) =~ "sha256_mismatch"
       refute_received :halted
-      assert_receive {:fake_node, :hb, %{"seq" => 3}}, 5_000
+      assert_receive {:fake_node, :hb, %{"seq" => 3}}, WardmastWeb.Test.Timing.scale(5_000)
     end
 
     test "the first hello_ok after an upgrade confirms it", ctx do
       File.write!(Path.join(ctx.home, "upgrade.pending"), "from=releases/0.9.0\nto=1.0.0\nat=1\n")
       start_agent(ctx)
 
-      assert_receive {:fake_node, :hello, _}, 5_000
+      assert_receive {:fake_node, :hello, _}, WardmastWeb.Test.Timing.scale(5_000)
       wait_until(fn -> File.exists?(Path.join(ctx.home, "confirmed")) end)
       refute File.exists?(Path.join(ctx.home, "upgrade.pending"))
     end
@@ -573,8 +577,8 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
   describe "an assign the backend refuses (K14)" do
     test "goes back as run.refused with the backend's reason and detail", ctx do
       start_agent(ctx, backend: RefusingBackend)
-      assert_receive {:fake_node, :channel, channel}, 5_000
-      assert_receive {:fake_node, :hello, _}, 5_000
+      assert_receive {:fake_node, :channel, channel}, WardmastWeb.Test.Timing.scale(5_000)
+      assert_receive {:fake_node, :hello, _}, WardmastWeb.Test.Timing.scale(5_000)
 
       send(channel, {:push, "assign", %{"run" => "full", "spec" => %{}}})
 
@@ -596,11 +600,11 @@ defmodule Wardmast.NodeAgent.ConnectionTest do
 
     test "a repeated assign asks the backend to say again where the run is", ctx do
       start_agent(ctx, backend: RefusingBackend)
-      assert_receive {:fake_node, :channel, channel}, 5_000
-      assert_receive {:fake_node, :hello, _}, 5_000
+      assert_receive {:fake_node, :channel, channel}, WardmastWeb.Test.Timing.scale(5_000)
+      assert_receive {:fake_node, :hello, _}, WardmastWeb.Test.Timing.scale(5_000)
 
       send(channel, {:push, "assign", %{"run" => "again", "spec" => %{}}})
-      assert_receive {:backend_attach, "again"}, 5_000
+      assert_receive {:backend_attach, "again"}, WardmastWeb.Test.Timing.scale(5_000)
     end
   end
 

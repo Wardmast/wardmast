@@ -198,7 +198,7 @@ defmodule WardmastWeb.RemoteClusterTest do
        ]}
     )
 
-    assert_receive {:node_state, node_id, :online}, 15_000
+    assert_receive {:node_state, node_id, :online}, WardmastWeb.Test.Timing.scale(15_000)
     node_id
   end
 
@@ -285,7 +285,10 @@ defmodule WardmastWeb.RemoteClusterTest do
 
       File.write!(ctx.config_path, "max_concurrent: 3\n")
       ConfigLoader.reload(ConfigLoader)
-      assert_receive {:node_capacity, ^node_id, %{"ceiling" => 3}}, 5_000
+
+      assert_receive {:node_capacity, ^node_id, %{"ceiling" => 3}},
+                     WardmastWeb.Test.Timing.scale(5_000)
+
       assert Session.snapshot(node_id).max_workers == 3
     end
 
@@ -439,9 +442,14 @@ defmodule WardmastWeb.RemoteClusterTest do
       handle = place!(ctx, node_id, "run-s1")
 
       FakeK8sApi.push_log(ctx.api, "arb-run-s1", "hello from the pod")
-      assert_receive {^handle, {:data, {:eol, "hello from the pod"}}}, 10_000
+
+      assert_receive {^handle, {:data, {:eol, "hello from the pod"}}},
+                     WardmastWeb.Test.Timing.scale(10_000)
+
       FakeK8sApi.push_log(ctx.api, "arb-run-s1", "second line")
-      assert_receive {^handle, {:data, {:eol, "second line"}}}, 10_000
+
+      assert_receive {^handle, {:data, {:eol, "second line"}}},
+                     WardmastWeb.Test.Timing.scale(10_000)
 
       # the worker ends; the snapshotter is still forwarding the final checkpoint
       FakeK8sApi.push_log(ctx.api, "arb-run-s1", "the last line")
@@ -449,9 +457,14 @@ defmodule WardmastWeb.RemoteClusterTest do
       refute_receive {^handle, {:outcome, _}}, 400
 
       pod_status(ctx, "arb-run-s1", :exited, :complete)
-      assert_receive {^handle, {:data, {:eol, "the last line"}}}, 10_000
-      assert_receive {^handle, {:outcome, %{exit_code: 0, oom?: false}}}, 10_000
-      assert_receive {^handle, {:exit_status, 0}}, 10_000
+
+      assert_receive {^handle, {:data, {:eol, "the last line"}}},
+                     WardmastWeb.Test.Timing.scale(10_000)
+
+      assert_receive {^handle, {:outcome, %{exit_code: 0, oom?: false}}},
+                     WardmastWeb.Test.Timing.scale(10_000)
+
+      assert_receive {^handle, {:exit_status, 0}}, WardmastWeb.Test.Timing.scale(10_000)
 
       # the primary has the exit: the controller lets the clean pod go
       wait_until(fn -> FakeK8sApi.handle(ctx.api, {:get, "arb-run-s1"}) == nil end)
@@ -462,7 +475,7 @@ defmodule WardmastWeb.RemoteClusterTest do
       lease_held!()
       handle = place!(ctx, node_id, "run-s2")
       pod_status(ctx, "arb-run-s2", :exited, :complete)
-      assert_receive {^handle, {:outcome, %{exit_code: 0}}}, 10_000
+      assert_receive {^handle, {:outcome, %{exit_code: 0}}}, WardmastWeb.Test.Timing.scale(10_000)
     end
 
     test "after a controller restart the adopted pod's bridges work again and its output resumes",
@@ -488,7 +501,9 @@ defmodule WardmastWeb.RemoteClusterTest do
       assert {:ok, %{run: "run-s3", name: "proxy"}} = Runs.authorize(Runs, :bridge, proxy, ip)
 
       FakeK8sApi.push_log(ctx.api, "arb-run-s3", "before the restart")
-      assert_receive {^handle, {:data, {:eol, "before the restart"}}}, 10_000
+
+      assert_receive {^handle, {:data, {:eol, "before the restart"}}},
+                     WardmastWeb.Test.Timing.scale(10_000)
 
       # the controller restarts: every process of the tree, the pod channel's run table with it
       old = Process.whereis(Runs)
@@ -505,7 +520,10 @@ defmodule WardmastWeb.RemoteClusterTest do
       # and the output carries on after what the owner already has, with no replay
       wait_until(fn -> Session.run_started?(Registry.lookup(node_id), "run-s3") end)
       FakeK8sApi.push_log(ctx.api, "arb-run-s3", "after the restart")
-      assert_receive {^handle, {:data, {:eol, "after the restart"}}}, 15_000
+
+      assert_receive {^handle, {:data, {:eol, "after the restart"}}},
+                     WardmastWeb.Test.Timing.scale(15_000)
+
       refute_received {^handle, {:data, {:eol, "before the restart"}}}
       refute_received {^handle, {:outcome, _}}
     end

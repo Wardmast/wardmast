@@ -66,7 +66,7 @@ defmodule WardmastWeb.UsageLiveTest do
     })
 
     {:ok, view, _html} = live(conn, ~p"/usage")
-    html = render_async(view, 5_000)
+    html = render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
     assert html =~ "Usage"
     assert html =~ "Total spend"
@@ -109,7 +109,7 @@ defmodule WardmastWeb.UsageLiveTest do
     })
 
     {:ok, view, _html} = live(conn, ~p"/usage")
-    html = render_async(view, 5_000)
+    html = render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
     assert html =~ "$3.50"
     assert [_] = Regex.scan(~r/Probe task two/, html)
@@ -123,7 +123,7 @@ defmodule WardmastWeb.UsageLiveTest do
     event!(%{task_id: task.id, workspace_id: ws.id, model: "claude-opus-4-6", cost_usd: 0.5})
 
     {:ok, view, _html} = live(conn, ~p"/usage")
-    render_async(view, 5_000)
+    render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
     html =
       view
@@ -140,7 +140,7 @@ defmodule WardmastWeb.UsageLiveTest do
     event!(%{task_id: task.id, workspace_id: ws.id, repo: "apex-api", cost_usd: 0.4})
 
     {:ok, view, _html} = live(conn, ~p"/usage")
-    render_async(view, 5_000)
+    render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
     html =
       view
@@ -168,7 +168,7 @@ defmodule WardmastWeb.UsageLiveTest do
     })
 
     {:ok, view, _html} = live(conn, ~p"/usage")
-    render_async(view, 5_000)
+    render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
     html =
       view
@@ -189,20 +189,20 @@ defmodule WardmastWeb.UsageLiveTest do
     })
 
     {:ok, view, _html} = live(conn, ~p"/usage")
-    render_async(view, 5_000)
+    render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
     view
     |> element("button[phx-value-option='all']")
     |> render_click()
 
-    html = render_async(view, 5_000)
+    html = render_async(view, WardmastWeb.Test.Timing.scale(5_000))
     assert html =~ "$5.00"
 
     view
     |> element("button[phx-value-option='7d']")
     |> render_click()
 
-    html = render_async(view, 5_000)
+    html = render_async(view, WardmastWeb.Test.Timing.scale(5_000))
     refute html =~ "$5.00"
   end
 
@@ -223,7 +223,7 @@ defmodule WardmastWeb.UsageLiveTest do
     assert dead_html =~ "usage-loading"
     refute dead_html =~ "$5.00"
 
-    html = render_async(view, 5_000)
+    html = render_async(view, WardmastWeb.Test.Timing.scale(5_000))
     refute html =~ "usage-loading"
     assert html =~ "$5.00"
   end
@@ -245,7 +245,7 @@ defmodule WardmastWeb.UsageLiveTest do
     })
 
     {:ok, view, _html} = live(conn, ~p"/usage")
-    html = render_async(view, 5_000)
+    html = render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
     [_, total_spend_value] =
       Regex.run(~r/Total spend\s*<\/span><span[^>]*>\s*([^<]+?)\s*<\/span>/s, html)
@@ -295,7 +295,7 @@ defmodule WardmastWeb.UsageLiveTest do
         {:ok, view, dead_html} = live(conn, ~p"/usage")
         refute dead_html =~ "One read"
 
-        render_async(view, 5_000)
+        render_async(view, WardmastWeb.Test.Timing.scale(5_000))
       after
         :telemetry.detach(ref)
       end
@@ -354,7 +354,7 @@ defmodule WardmastWeb.UsageLiveTest do
     end)
 
     {:ok, view, _html} = live(conn, ~p"/usage")
-    render_async(view, 5_000)
+    render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
     assert has_element?(view, "#usage-error")
     refute has_element?(view, "#usage-loading")
@@ -371,14 +371,14 @@ defmodule WardmastWeb.UsageLiveTest do
 
   test "shows an empty state when there is no usage yet", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/usage")
-    html = render_async(view, 5_000)
+    html = render_async(view, WardmastWeb.Test.Timing.scale(5_000))
     assert html =~ "Usage"
     assert html =~ "$0.00"
   end
 
   test "renders Rate limits and Rework panels", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/usage")
-    html = render_async(view, 5_000)
+    html = render_async(view, WardmastWeb.Test.Timing.scale(5_000))
     assert html =~ "Rate limits"
     assert html =~ "Rework"
     assert html =~ "hairline is elapsed time"
@@ -388,7 +388,7 @@ defmodule WardmastWeb.UsageLiveTest do
     conn: conn
   } do
     {:ok, view, _html} = live(conn, ~p"/usage")
-    html = render_async(view, 5_000)
+    html = render_async(view, WardmastWeb.Test.Timing.scale(5_000))
     # Stat row should stack 2x2 on mobile (grid-cols-2) and 4-across on desktop (sm:grid-cols-4)
     assert html =~ "grid-cols-2"
     assert html =~ "sm:grid-cols-4"
@@ -409,7 +409,7 @@ defmodule WardmastWeb.UsageLiveTest do
       antigravity_quota!(ws)
 
       {:ok, view, _html} = live(conn, ~p"/usage")
-      html = render_async(view, 5_000)
+      html = render_async(view, WardmastWeb.Test.Timing.scale(5_000))
       doc = LazyHTML.from_fragment(html)
 
       assert quota_bars(doc, "#usage-quota-claude") == 2
@@ -433,7 +433,7 @@ defmodule WardmastWeb.UsageLiveTest do
       antigravity_quota!(ws, message: agy_missing_message())
 
       {:ok, view, _html} = live(conn, ~p"/usage")
-      render_async(view, 5_000)
+      render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
       assert has_element?(view, "#usage-quota-antigravity [data-quota-bar][data-quota-stale]")
 
@@ -457,7 +457,7 @@ defmodule WardmastWeb.UsageLiveTest do
       antigravity_quota!(ws, models: [])
 
       {:ok, view, _html} = live(conn, ~p"/usage")
-      html = render_async(view, 5_000)
+      html = render_async(view, WardmastWeb.Test.Timing.scale(5_000))
       doc = LazyHTML.from_fragment(html)
 
       assert quota_bars(doc, "#usage-quota-antigravity") == 1
@@ -500,7 +500,7 @@ defmodule WardmastWeb.UsageLiveTest do
       assert LazyHTML.query(doc, "#usage-quota-loading") |> Enum.count() == 1
       assert LazyHTML.query(doc, "#overage-indicator") |> Enum.count() == 0
 
-      render_async(view, 5_000)
+      render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
       refute has_element?(view, "#usage-quota-loading")
       assert has_element?(view, "#usage-quota-claude")
@@ -517,7 +517,7 @@ defmodule WardmastWeb.UsageLiveTest do
       end)
 
       {:ok, view, _html} = live(conn, ~p"/usage")
-      render_async(view, 5_000)
+      render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
       assert has_element?(view, "#usage-quota-error")
       refute has_element?(view, "#overage-indicator")

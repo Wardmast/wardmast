@@ -201,7 +201,7 @@ defmodule WardmastWeb.ContainerSpawnLiveTest do
              )
 
     assert is_port(port)
-    assert_receive {:worker_exited, _, status}, 240_000
+    assert_receive {:worker_exited, _, status}, WardmastWeb.Test.Timing.scale(240_000)
 
     lines = collect([])
     IO.puts("\n---- container transcript (exit #{status}) ----")

@@ -16,7 +16,7 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Worker
 
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
   @acct "acct-claude"
   @agy "acct-agy"
 

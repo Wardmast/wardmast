@@ -15,7 +15,7 @@ defmodule WardmastWeb.WorkspaceIndexLiveTest do
 
   alias Wardmast.Tasks.Workspace
 
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   defp new_workspace(attrs \\ %{}) do
     base = %{name: "ws-#{System.unique_integer([:positive])}", prefix: "wx"}

@@ -518,7 +518,7 @@ defmodule WardmastWeb.NodeAgent.RemoteWorkersE2ETest do
       Placement.release(ctx.task.id)
 
       assert {:ok, _} = Nodes.revoke(ctx.node, @operator)
-      assert_receive {:node_revoked, id}, 5_000
+      assert_receive {:node_revoked, id}, WardmastWeb.Test.Timing.scale(5_000)
       assert id == ctx.node.id
 
       # the session is closed, and the real agent's retries are refused: it never comes back
@@ -557,7 +557,9 @@ defmodule WardmastWeb.NodeAgent.RemoteWorkersE2ETest do
         )
 
       # while it runs: the container is the one `Container.wrap/2` builds, not an ad hoc argv
-      assert_receive {^handle, {:data, {:eol, "hello-from-podman"}}}, 60_000
+      assert_receive {^handle, {:data, {:eol, "hello-from-podman"}}},
+                     WardmastWeb.Test.Timing.scale(60_000)
+
       assert inspect_container(ctx, "arb-n1", "{{.HostConfig.ReadonlyRootfs}}") == "true"
       assert inspect_container(ctx, "arb-n1", "{{.HostConfig.NetworkMode}}") == "none"
 
@@ -590,7 +592,7 @@ defmodule WardmastWeb.NodeAgent.RemoteWorkersE2ETest do
 
     test "stop/1 removes the container by name and the owner hears a cancelled exit", ctx do
       handle = open!(ctx, spec(ctx, "n2", "echo up; sleep 600"))
-      assert_receive {^handle, {:data, {:eol, "up"}}}, 60_000
+      assert_receive {^handle, {:data, {:eol, "up"}}}, WardmastWeb.Test.Timing.scale(60_000)
       assert container_exists?(ctx, "arb-n2")
 
       assert :ok = Executor.stop(handle)
@@ -988,7 +990,7 @@ defmodule WardmastWeb.NodeAgent.RemoteWorkersE2ETest do
       handle =
         open!(ctx, spec(ctx, "k2", command, checkout_spec()), checkout: checkout_context(ctx))
 
-      assert_receive {^handle, {:data, {:eol, "up"}}}, 60_000
+      assert_receive {^handle, {:data, {:eol, "up"}}}, WardmastWeb.Test.Timing.scale(60_000)
 
       refute File.exists?(Path.join(ctx.repo, "mid.txt"))
       assert {:ok, %{head: head}} = Executor.collect(handle, :checkout)
@@ -1049,7 +1051,7 @@ defmodule WardmastWeb.NodeAgent.RemoteWorkersE2ETest do
       handle =
         open!(ctx, spec(ctx, id, command, checkout_spec()), checkout: checkout_context(ctx))
 
-      assert_receive {^handle, {:data, {:eol, "up"}}}, 60_000
+      assert_receive {^handle, {:data, {:eol, "up"}}}, WardmastWeb.Test.Timing.scale(60_000)
       assert container_exists?(ctx, "arb-#{id}")
       refute File.exists?(Path.join(ctx.repo, "edited.txt"))
 
@@ -1105,7 +1107,7 @@ defmodule WardmastWeb.NodeAgent.RemoteWorkersE2ETest do
       handle =
         open!(ctx, spec(ctx, id, command, checkout_spec()), checkout: checkout_context(ctx))
 
-      assert_receive {^handle, {:data, {:eol, "up"}}}, 60_000
+      assert_receive {^handle, {:data, {:eol, "up"}}}, WardmastWeb.Test.Timing.scale(60_000)
       restart_primary!(ctx)
 
       # the real agent reconnects and says hello before anything asks for the run
@@ -1299,7 +1301,7 @@ defmodule WardmastWeb.NodeAgent.RemoteWorkersE2ETest do
              "placement failed; agent log:\n" <> RealAgent.log_tail(ctx.agent)
 
       _ = Worker.advance(old, :claude)
-      assert_receive {:worker_output, ^task_id, "up"}, 60_000
+      assert_receive {:worker_output, ^task_id, "up"}, WardmastWeb.Test.Timing.scale(60_000)
 
       %{run_id: id, meta: %{claude_spawn: %{remote: %{request: %{name: name} = old_request}}}} =
         Worker.state(old)
@@ -1397,8 +1399,8 @@ defmodule WardmastWeb.NodeAgent.RemoteWorkersE2ETest do
 
       # a blip, not a restart: the transport closes, the session survives
       assert :ok = WardmastWeb.NodeSocket.disconnect(ctx.node.id)
-      assert_receive {:node_connection, _, :down}, 10_000
-      assert_receive {:node_connection, _, :up}, 90_000
+      assert_receive {:node_connection, _, :down}, WardmastWeb.Test.Timing.scale(10_000)
+      assert_receive {:node_connection, _, :up}, WardmastWeb.Test.Timing.scale(90_000)
       assert [{_session, _}] = Registry.list()
       assert Executor.live?(handle)
       assert container_exists?(ctx, "arb-#{row.id}")

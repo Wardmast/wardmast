@@ -73,7 +73,7 @@ defmodule WardmastWeb.PreviewLiveTest do
   # The ticket page loads its body asynchronously.
   defp mount_task(conn, issue) do
     {:ok, view, _html} = live(conn, ~p"/tasks/#{issue.id}")
-    render_async(view, 15_000)
+    render_async(view, WardmastWeb.Test.Timing.scale(15_000))
     view
   end
 

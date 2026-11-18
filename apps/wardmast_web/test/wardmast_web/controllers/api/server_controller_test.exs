@@ -266,7 +266,7 @@ defmodule WardmastWeb.Api.ServerControllerTest do
           end
         end)
 
-      assert_receive :locked, 5_000
+      assert_receive :locked, WardmastWeb.Test.Timing.scale(5_000)
 
       resp = conn |> post("/api/server/spawn_canary", %{}) |> json_response(409)
       assert resp["error"] == "busy"

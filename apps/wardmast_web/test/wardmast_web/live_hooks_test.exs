@@ -44,7 +44,7 @@ defmodule WardmastWeb.LiveHooksTest do
       # and call the actual production WardmastWeb.LiveHooks.on_mount function
       # (not a local copy). This is the critical fix to Finding 2.
       {:ok, view, _html} = live(conn, ~p"/")
-      html = render_async(view, 5_000)
+      html = render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
       # The on_mount hook is attached in the router and runs automatically
       # when the LiveView connects. The presence of a valid page confirms
@@ -106,7 +106,7 @@ defmodule WardmastWeb.LiveHooksTest do
       codex_quota!(ws, session_used_percent: 50.0)
 
       {:ok, view, _html} = live(conn, ~p"/")
-      html = render_async(view, 5_000)
+      html = render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
       # Both Claude and Codex should be present
       assert html =~ "Claude"
@@ -130,7 +130,7 @@ defmodule WardmastWeb.LiveHooksTest do
       codex_quota!(ws, session_used_percent: 80.0)
 
       {:ok, view, _html} = live(conn, ~p"/")
-      html = render_async(view, 5_000)
+      html = render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
       # Both configured providers should be shown
       assert html =~ "Claude"
@@ -152,7 +152,7 @@ defmodule WardmastWeb.LiveHooksTest do
         )
 
       {:ok, view, _html} = live(conn, ~p"/")
-      html = render_async(view, 5_000)
+      html = render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
       # The `agy` CLI `/usage` probe superseded the stale-token reason
       # Antigravity was hidden for, so it renders alongside Claude.
@@ -169,7 +169,7 @@ defmodule WardmastWeb.LiveHooksTest do
         )
 
       {:ok, view, _html} = live(conn, ~p"/")
-      render_async(view, 5_000)
+      render_async(view, WardmastWeb.Test.Timing.scale(5_000))
       assert has_element?(view, "#quota-ring-claude")
       # Used but not captured yet (bd-i2gwwn): listed, with no data.
       assert has_element?(view, "#quota-ring-antigravity[data-ring-state=no-data]")
@@ -203,7 +203,7 @@ defmodule WardmastWeb.LiveHooksTest do
       assert ws_id == ws.id
 
       {:ok, view, _html} = live(conn, ~p"/")
-      render_async(view, 2_000)
+      render_async(view, WardmastWeb.Test.Timing.scale(2_000))
 
       {:ok, _} =
         Wardmast.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.60"}],
@@ -275,7 +275,7 @@ defmodule WardmastWeb.LiveHooksTest do
       assert has?(html, "#coordinator-mailbox-loading")
       refute has?(html, "#quota-ring-claude")
 
-      render_async(view, 5_000)
+      render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
       assert has_element?(view, "#quota-ring-claude")
       refute has_element?(view, "#quota-topbar-loading")
@@ -295,7 +295,7 @@ defmodule WardmastWeb.LiveHooksTest do
       :meck.expect(Message, :inbox, fn _ref, _opts -> raise "database is locked" end)
 
       {:ok, view, _html} = live(conn, ~p"/")
-      render_async(view, 5_000)
+      render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
       assert has_element?(view, "#quota-topbar-error")
       refute has_element?(view, "#quota-topbar-loading")
@@ -311,7 +311,7 @@ defmodule WardmastWeb.LiveHooksTest do
 
     test "a quota broadcast after the load merges into the loaded bars", %{conn: conn, ws: ws} do
       {:ok, view, _html} = live(conn, ~p"/")
-      render_async(view, 5_000)
+      render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
       {:ok, _} =
         Wardmast.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.50"}],
@@ -324,7 +324,7 @@ defmodule WardmastWeb.LiveHooksTest do
 
     test "coordinator mail broadcast after the load lands in the drawer", %{conn: conn, ws: ws} do
       {:ok, view, _html} = live(conn, ~p"/")
-      render_async(view, 5_000)
+      render_async(view, WardmastWeb.Test.Timing.scale(5_000))
       assert has_element?(view, "#coordinator-mailbox-empty")
 
       {:ok, _} =
@@ -371,7 +371,7 @@ defmodule WardmastWeb.LiveHooksTest do
       end)
 
       {:ok, view, _html} = live(conn, ~p"/")
-      render_async(view, 5_000)
+      render_async(view, WardmastWeb.Test.Timing.scale(5_000))
       assert has_element?(view, "#quota-topbar-error")
 
       # Hold the retried load until the test releases it, so the transient
@@ -393,7 +393,7 @@ defmodule WardmastWeb.LiveHooksTest do
       assert has_element?(view, "#quota-topbar-loading")
 
       send(fetch_pid, :release_fetch)
-      render_async(view, 5_000)
+      render_async(view, WardmastWeb.Test.Timing.scale(5_000))
       refute has_element?(view, "#quota-topbar-error")
       assert has_element?(view, "#quota-ring-claude")
     end
@@ -407,13 +407,13 @@ defmodule WardmastWeb.LiveHooksTest do
       :meck.expect(Message, :inbox, fn _ref, _opts -> raise "database is locked" end)
 
       {:ok, view, _html} = live(conn, ~p"/")
-      render_async(view, 5_000)
+      render_async(view, WardmastWeb.Test.Timing.scale(5_000))
       assert has_element?(view, "#coordinator-mailbox-error", "database is locked")
 
       :meck.expect(Message, :inbox, fn ref, opts -> :meck.passthrough([ref, opts]) end)
 
       view |> element("#coordinator-mailbox-retry") |> render_click()
-      render_async(view, 5_000)
+      render_async(view, WardmastWeb.Test.Timing.scale(5_000))
 
       refute has_element?(view, "#coordinator-mailbox-error")
       refute has_element?(view, "#coordinator-inbox-error-badge")
@@ -477,7 +477,7 @@ defmodule WardmastWeb.LiveHooksTest do
       assert has_element?(view, "#coordinator-mailbox-list", "sent while loading")
 
       send(loader, :release)
-      render_async(view, 5_000)
+      render_async(view, WardmastWeb.Test.Timing.scale(5_000))
       assert has_element?(view, "#coordinator-mailbox-list", "sent while loading")
 
       {:ok, _} =

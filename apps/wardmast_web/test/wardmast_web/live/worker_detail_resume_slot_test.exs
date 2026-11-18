@@ -30,7 +30,7 @@ defmodule WardmastWeb.WorkerDetailResumeSlotTest do
     refute has_element?(view, "#worker-retry-force-btn")
 
     render_click(view, "retry")
-    html = render_async(view, 10_000)
+    html = render_async(view, WardmastWeb.Test.Timing.scale(10_000))
 
     assert html =~ "cap is 1"
     assert html =~ ctx.b.id
@@ -44,10 +44,10 @@ defmodule WardmastWeb.WorkerDetailResumeSlotTest do
     {:ok, view, _html} = live_worker(conn, ctx.a.id)
     view |> element("#worker-toolbar-resume-btn") |> render_click()
     render_click(view, "retry")
-    render_async(view, 10_000)
+    render_async(view, WardmastWeb.Test.Timing.scale(10_000))
 
     view |> element("#worker-retry-force-btn") |> render_click()
-    html = render_async(view, 10_000)
+    html = render_async(view, WardmastWeb.Test.Timing.scale(10_000))
 
     assert html =~ "Resumed #{ctx.a.id}"
     refute has_element?(view, "#worker-retry-modal")

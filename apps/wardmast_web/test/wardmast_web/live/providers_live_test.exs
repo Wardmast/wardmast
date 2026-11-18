@@ -21,7 +21,7 @@ defmodule WardmastWeb.ProvidersLiveTest do
   # The account/pool/pace/credential/cost overview arrives by `start_async/3`
   # on the connected mount (bd-34f7gt); every test but the loading/error ones
   # themselves wants the page once it has landed.
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   defp live_providers(conn, path \\ ~p"/providers") do
     {:ok, view, _html} = live(conn, path)

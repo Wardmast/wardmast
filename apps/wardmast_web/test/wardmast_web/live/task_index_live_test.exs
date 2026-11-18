@@ -9,7 +9,7 @@ defmodule WardmastWeb.TaskIndexLiveTest do
   # Both the filter-option lists and the result page arrive by
   # `start_async/3` after the connected mount (bd-y9civj); everything but the
   # async tests themselves wants the page once it has landed.
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   defp live_tasks(conn, path) do
     {:ok, view, _html} = live(conn, path)

@@ -85,7 +85,7 @@ defmodule WardmastWeb.RemoteRestartTest do
     start_supervised!({Status, path: config.status_path})
     for spec <- Runs.child_specs(), do: start_supervised!(spec)
     start_supervised!({Connection, config: config})
-    assert_receive {:node_state, _id, :online}, 10_000
+    assert_receive {:node_state, _id, :online}, WardmastWeb.Test.Timing.scale(10_000)
 
     repo = Path.join(root, "primary-home")
     base = home!(repo)
@@ -466,7 +466,7 @@ defmodule WardmastWeb.RemoteRestartTest do
       # the container prints after the adoption: it reaches the new Worker, and the line the
       # old one had already taken is not delivered again
       File.write!(Path.join(ctx.stub, "go"), "")
-      assert_receive {:worker_output, ^task_id, "line-2"}, 10_000
+      assert_receive {:worker_output, ^task_id, "line-2"}, WardmastWeb.Test.Timing.scale(10_000)
       refute_received {:worker_output, ^task_id, "line-1"}
 
       :ok = Worker.stop(adopter, :normal)
@@ -582,7 +582,7 @@ defmodule WardmastWeb.RemoteRestartTest do
       StubPodman.write_mode(ctx.stub, "hang")
       assert {:ok, prepared} = place(ctx, id)
       assert {:ok, handle} = Executor.open(prepared)
-      assert_receive {^handle, {:data, {:eol, "line-1"}}}, 10_000
+      assert_receive {^handle, {:data, {:eol, "line-1"}}}, WardmastWeb.Test.Timing.scale(10_000)
       refute File.exists?(Path.join(ctx.repo, "edited.txt"))
 
       restart_primary!()
@@ -630,7 +630,7 @@ defmodule WardmastWeb.RemoteRestartTest do
       StubPodman.write_mode(ctx.stub, "hang")
       assert {:ok, prepared} = place(ctx, id)
       assert {:ok, handle} = Executor.open(prepared)
-      assert_receive {^handle, {:data, {:eol, "line-1"}}}, 10_000
+      assert_receive {^handle, {:data, {:eol, "line-1"}}}, WardmastWeb.Test.Timing.scale(10_000)
 
       restart_primary!()
 
@@ -671,7 +671,7 @@ defmodule WardmastWeb.RemoteRestartTest do
       StubPodman.write_mode(ctx.stub, "hang")
       assert {:ok, prepared} = place(ctx, id)
       assert {:ok, handle} = Executor.open(prepared)
-      assert_receive {^handle, {:data, {:eol, "line-1"}}}, 10_000
+      assert_receive {^handle, {:data, {:eol, "line-1"}}}, WardmastWeb.Test.Timing.scale(10_000)
 
       restart_primary!()
 
@@ -700,7 +700,7 @@ defmodule WardmastWeb.RemoteRestartTest do
       StubPodman.write_mode(ctx.stub, "hang")
       assert {:ok, prepared} = place(ctx, id)
       assert {:ok, handle} = Executor.open(prepared)
-      assert_receive {^handle, {:data, {:eol, "line-1"}}}, 10_000
+      assert_receive {^handle, {:data, {:eol, "line-1"}}}, WardmastWeb.Test.Timing.scale(10_000)
 
       restart_primary!()
 
@@ -713,14 +713,14 @@ defmodule WardmastWeb.RemoteRestartTest do
       StubPodman.write_mode(ctx.stub, "hang")
       assert {:ok, prepared} = place(ctx, row.id)
       assert {:ok, handle} = Executor.open(prepared)
-      assert_receive {^handle, {:data, {:eol, "line-1"}}}, 10_000
+      assert_receive {^handle, {:data, {:eol, "line-1"}}}, WardmastWeb.Test.Timing.scale(10_000)
 
       # a socket blip, not a restart: the session survives, the run is known
       [{pid, _}] = Registry.list()
       Process.exit(Process.info(pid) |> then(fn _ -> channel_of(pid) end), :kill)
 
-      assert_receive {:node_connection, _, :down}, 5_000
-      assert_receive {:node_connection, _, :up}, 10_000
+      assert_receive {:node_connection, _, :down}, WardmastWeb.Test.Timing.scale(5_000)
+      assert_receive {:node_connection, _, :up}, WardmastWeb.Test.Timing.scale(10_000)
       assert Executor.live?(handle)
       assert Retained.list(ctx.agent_config) == []
       refute calls(ctx.stub) =~ "rm --force"
@@ -851,7 +851,7 @@ defmodule WardmastWeb.RemoteRestartTest do
       assert snap.outcome == :interrupted
       assert snap.meta.stop_reason.category == :node_lost
       assert Map.get(snap.meta, :resume_attempts, 0) == 0
-      assert_receive {:resumed, ^task_id}, 2_000
+      assert_receive {:resumed, ^task_id}, WardmastWeb.Test.Timing.scale(2_000)
 
       run = Ash.get!(Run, snap.run_id)
       assert run.outcome == :interrupted and run.stop_category == "node_lost"

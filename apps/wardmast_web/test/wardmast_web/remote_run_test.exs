@@ -90,7 +90,7 @@ defmodule WardmastWeb.RemoteRunTest do
     for spec <- Runs.child_specs(), do: start_supervised!(spec)
     start_supervised!({Connection, config: config})
 
-    assert_receive {:node_state, id, :online}, 10_000
+    assert_receive {:node_state, id, :online}, WardmastWeb.Test.Timing.scale(10_000)
     assert id == node.id
     session = Registry.lookup(node.id)
     assert is_pid(session)
@@ -217,7 +217,7 @@ defmodule WardmastWeb.RemoteRunTest do
           Process.sleep(:infinity)
         end)
 
-      assert_receive {:placed, handle}, 10_000
+      assert_receive {:placed, handle}, WardmastWeb.Test.Timing.scale(10_000)
       assert Executor.live?(handle)
       Process.exit(owner, :kill)
 
@@ -234,12 +234,12 @@ defmodule WardmastWeb.RemoteRunTest do
       StubPodman.write_mode(ctx.stub, "slow")
       {:ok, prepared} = Executor.prepare(ctx.node.id, spec("b1"), owner: self())
       {:ok, handle} = Executor.open(prepared)
-      assert_receive {^handle, {:data, {:eol, "line-1"}}}, 10_000
+      assert_receive {^handle, {:data, {:eol, "line-1"}}}, WardmastWeb.Test.Timing.scale(10_000)
 
       # Drop the socket under the run, and let the agent come back.
       NodeSocket.disconnect(ctx.node.id)
-      assert_receive {:node_connection, _, :down}, 10_000
-      assert_receive {:node_connection, _, :up}, 10_000
+      assert_receive {:node_connection, _, :down}, WardmastWeb.Test.Timing.scale(10_000)
+      assert_receive {:node_connection, _, :up}, WardmastWeb.Test.Timing.scale(10_000)
 
       # The container kept running through the blip; its remaining output now flows.
       File.write!(Path.join(ctx.stub, "go"), "")
@@ -278,7 +278,7 @@ defmodule WardmastWeb.RemoteRunTest do
       StubPodman.write_mode(ctx.stub, "hang")
       {:ok, prepared} = Executor.prepare(ctx.node.id, spec("s1"), owner: self())
       {:ok, handle} = Executor.open(prepared)
-      assert_receive {^handle, {:data, {:eol, "line-1"}}}, 10_000
+      assert_receive {^handle, {:data, {:eol, "line-1"}}}, WardmastWeb.Test.Timing.scale(10_000)
 
       argv = File.read!(Path.join(ctx.stub, "run.argv"))
       refute argv =~ @token
@@ -365,9 +365,9 @@ defmodule WardmastWeb.RemoteRunTest do
       end
 
       assert {:ok, {:remote, {_, _, _}} = handle} = start.()
-      assert_receive {:worker_output, ^task_id, "line-1"}, 10_000
-      assert_receive {:worker_output, ^task_id, "line-2"}, 10_000
-      assert_receive {:worker_exited, ^task_id, 0}, 10_000
+      assert_receive {:worker_output, ^task_id, "line-1"}, WardmastWeb.Test.Timing.scale(10_000)
+      assert_receive {:worker_output, ^task_id, "line-2"}, WardmastWeb.Test.Timing.scale(10_000)
+      assert_receive {:worker_exited, ^task_id, 0}, WardmastWeb.Test.Timing.scale(10_000)
 
       # What the container was started with: the primary's paths, the memory cap
       # from the node's reported memory, the token in the file, not on argv.
@@ -460,7 +460,7 @@ defmodule WardmastWeb.RemoteRunTest do
                  node: %{id: ctx.node.id, capacity: %{"mem_total" => 8 * 1024 * 1024 * 1024}}
                )
 
-      assert_receive {:worker_exited, ^task_id, 0}, 10_000
+      assert_receive {:worker_exited, ^task_id, 0}, WardmastWeb.Test.Timing.scale(10_000)
 
       argv = ctx.stub |> Path.join("run.argv") |> File.read!() |> String.split("\n")
       assert ["--resume", ^sid | _] = Enum.drop_while(argv, &(&1 != "--resume"))

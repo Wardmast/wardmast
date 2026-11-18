@@ -10,7 +10,7 @@ defmodule WardmastWeb.LoopProposalIndexLiveTest do
   # The evidence-bar + proposal-list load arrives by `start_async/3`
   # (bd-cgcplc) on the connected mount only; every test but the async ones
   # themselves wants the page once it has landed.
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   defp live_loop(conn, path \\ ~p"/loop") do
     {:ok, view, _html} = live(conn, path)

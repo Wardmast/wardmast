@@ -14,7 +14,7 @@ defmodule WardmastWeb.RefineEntryPointTest do
 
   # The board loads by start_async (bd-15bn6s) and a real Snapshot.load can
   # outrun render_async's 100ms default under a loaded suite.
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   alias Wardmast.Sessions
   alias Wardmast.Tasks.Issue

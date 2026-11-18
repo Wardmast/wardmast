@@ -9,7 +9,7 @@ defmodule WardmastWeb.BoardCapacityPopupLiveTest do
 
   import Phoenix.LiveViewTest
 
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   alias Wardmast.Board.Autopilot
   alias Wardmast.Settings

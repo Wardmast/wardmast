@@ -81,7 +81,7 @@ defmodule WardmastWeb.RemoteCheckoutTest do
     start_supervised!({Status, path: config.status_path})
     for spec <- Runs.child_specs(), do: start_supervised!(spec)
     start_supervised!({Connection, config: config})
-    assert_receive {:node_state, _id, :online}, 10_000
+    assert_receive {:node_state, _id, :online}, WardmastWeb.Test.Timing.scale(10_000)
 
     repo = Path.join(root, "primary-home")
     base = home!(repo)
@@ -198,7 +198,7 @@ defmodule WardmastWeb.RemoteCheckoutTest do
     StubPodman.write_mode(ctx.stub, "slow")
     {:ok, prepared} = place(ctx, "c2")
     {:ok, handle} = Executor.open(prepared)
-    assert_receive {^handle, {:data, {:eol, "line-1"}}}, 10_000
+    assert_receive {^handle, {:data, {:eol, "line-1"}}}, WardmastWeb.Test.Timing.scale(10_000)
 
     refute File.exists?(Path.join(ctx.repo, "edited.txt"))
     assert {:ok, %{head: head, filtered: [".mcp.json"]}} = Executor.collect(handle, :checkout)

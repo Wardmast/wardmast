@@ -8,7 +8,7 @@ defmodule WardmastWeb.RunIndexLiveTest do
   # The result page arrives by `start_async/3` after the connected mount
   # (bd-1gshps); everything but the async tests themselves wants the page
   # once it has landed.
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   defp live_runs(conn, path) do
     {:ok, view, _html} = live(conn, path)

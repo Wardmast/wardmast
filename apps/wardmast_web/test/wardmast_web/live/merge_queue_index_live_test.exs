@@ -11,7 +11,7 @@ defmodule WardmastWeb.MergeQueueIndexLiveTest do
   # all arrive by `start_async/3` on the connected mount (bd-aebiwf); every
   # test but the loading/error ones themselves wants the page once it has
   # landed.
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   defp live_merge_queue(conn, path) do
     {:ok, view, _html} = live(conn, path)

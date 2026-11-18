@@ -739,7 +739,7 @@ defmodule WardmastWeb.Api.WorkerControllerTest do
       assert body["task_id"] == task.id
       assert body["stopped"] == true
 
-      assert_receive {:DOWN, ^ref, :process, _pid, _reason}, 1_000
+      assert_receive {:DOWN, ^ref, :process, _pid, _reason}, WardmastWeb.Test.Timing.scale(1_000)
       assert Worker.whereis(task.id) == nil
     end
 

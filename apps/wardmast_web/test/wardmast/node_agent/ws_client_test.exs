@@ -37,14 +37,17 @@ defmodule Wardmast.NodeAgent.WsClientTest do
     port: port
   } do
     {:ok, client} = WsClient.start(url: url(port), owner: self())
-    assert_receive {:ws, ^client, :open}, 5_000
+    assert_receive {:ws, ^client, :open}, WardmastWeb.Test.Timing.scale(5_000)
 
     join = WsClient.join(client, "node:fake", %{})
-    assert_receive {:ws, ^client, :reply, ^join, "ok", %{}}, 5_000
+    assert_receive {:ws, ^client, :reply, ^join, "ok", %{}}, WardmastWeb.Test.Timing.scale(5_000)
     assert_receive {:fake_node, :joined, "node:fake"}
 
     ref = WsClient.push(client, "node:fake", "hello", %{"agent_version" => "9.9.9"})
-    assert_receive {:ws, ^client, :reply, ^ref, "ok", %{"hb_interval" => 10}}, 5_000
+
+    assert_receive {:ws, ^client, :reply, ^ref, "ok", %{"hb_interval" => 10}},
+                   WardmastWeb.Test.Timing.scale(5_000)
+
     assert_receive {:fake_node, :hello, %{"agent_version" => "9.9.9"}}
   end
 
@@ -52,10 +55,12 @@ defmodule Wardmast.NodeAgent.WsClientTest do
     Application.put_env(:wardmast_web, :fake_node_style, :push)
     {:ok, client} = WsClient.start(url: url(port), owner: self())
     join = WsClient.join(client, "node:fake", %{})
-    assert_receive {:ws, ^client, :reply, ^join, "ok", _}, 5_000
+    assert_receive {:ws, ^client, :reply, ^join, "ok", _}, WardmastWeb.Test.Timing.scale(5_000)
 
     WsClient.push(client, "node:fake", "hello", %{})
-    assert_receive {:ws, ^client, :push, "node:fake", "hello_ok", %{"hb_interval" => 10}}, 5_000
+
+    assert_receive {:ws, ^client, :push, "node:fake", "hello_ok", %{"hb_interval" => 10}},
+                   WardmastWeb.Test.Timing.scale(5_000)
   end
 
   test "calls made before the upgrade finishes are replayed in order", %{port: port} do
@@ -63,13 +68,15 @@ defmodule Wardmast.NodeAgent.WsClientTest do
     join = WsClient.join(client, "node:fake", %{})
     ref = WsClient.push(client, "node:fake", "hello", %{})
 
-    assert_receive {:ws, ^client, :reply, ^join, "ok", _}, 5_000
-    assert_receive {:ws, ^client, :reply, ^ref, "ok", _}, 5_000
+    assert_receive {:ws, ^client, :reply, ^join, "ok", _}, WardmastWeb.Test.Timing.scale(5_000)
+    assert_receive {:ws, ^client, :reply, ^ref, "ok", _}, WardmastWeb.Test.Timing.scale(5_000)
   end
 
   test "a wrong credential is refused at the upgrade and the owner is told", %{port: port} do
     {:ok, client} = WsClient.start(url: url(port, "arbn_fake.wrong"), owner: self())
-    assert_receive {:ws, ^client, :closed, {:upgrade_rejected, 403, _}}, 5_000
+
+    assert_receive {:ws, ^client, :closed, {:upgrade_rejected, 403, _}},
+                   WardmastWeb.Test.Timing.scale(5_000)
   end
 
   test "nothing listening is an error from start/1, not a crash" do
@@ -83,10 +90,10 @@ defmodule Wardmast.NodeAgent.WsClientTest do
   test "the server going away is reported as :closed", %{port: port} do
     {:ok, client} = WsClient.start(url: url(port), owner: self())
     join = WsClient.join(client, "node:fake", %{})
-    assert_receive {:ws, ^client, :reply, ^join, "ok", _}, 5_000
+    assert_receive {:ws, ^client, :reply, ^join, "ok", _}, WardmastWeb.Test.Timing.scale(5_000)
 
     FakeNode.Endpoint.broadcast("node_socket:fake", "disconnect", %{})
-    assert_receive {:ws, ^client, :closed, _reason}, 5_000
+    assert_receive {:ws, ^client, :closed, _reason}, WardmastWeb.Test.Timing.scale(5_000)
   end
 
   test "the client stops when its owner dies", %{port: port} do
@@ -94,13 +101,13 @@ defmodule Wardmast.NodeAgent.WsClientTest do
     {:ok, client} = WsClient.start(url: url(port), owner: owner)
     ref = Process.monitor(client)
     Process.exit(owner, :kill)
-    assert_receive {:DOWN, ^ref, :process, ^client, _}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^client, _}, WardmastWeb.Test.Timing.scale(5_000)
   end
 
   test "phoenix-level heartbeats keep an otherwise idle socket open", %{port: port} do
     {:ok, client} = WsClient.start(url: url(port), owner: self(), phoenix_heartbeat_ms: 20)
     join = WsClient.join(client, "node:fake", %{})
-    assert_receive {:ws, ^client, :reply, ^join, "ok", _}, 5_000
+    assert_receive {:ws, ^client, :reply, ^join, "ok", _}, WardmastWeb.Test.Timing.scale(5_000)
 
     # many heartbeat intervals pass; the client does not report them to the owner
     # and does not time out because every one is answered
@@ -120,10 +127,12 @@ defmodule Wardmast.NodeAgent.WsClientTest do
           phoenix_heartbeat_ms: 20
         )
 
-      assert_receive {:proxy_request, "GET http://127.0.0.1:" <> _}, 5_000
-      assert_receive {:ws, ^client, :open}, 5_000
+      assert_receive {:proxy_request, "GET http://127.0.0.1:" <> _},
+                     WardmastWeb.Test.Timing.scale(5_000)
+
+      assert_receive {:ws, ^client, :open}, WardmastWeb.Test.Timing.scale(5_000)
       join = WsClient.join(client, "node:fake", %{})
-      assert_receive {:ws, ^client, :reply, ^join, "ok", _}, 5_000
+      assert_receive {:ws, ^client, :reply, ^join, "ok", _}, WardmastWeb.Test.Timing.scale(5_000)
 
       refute_receive {:ws, ^client, :closed, _}, 300
     end
@@ -134,8 +143,10 @@ defmodule Wardmast.NodeAgent.WsClientTest do
       {:ok, client} =
         WsClient.start(url: url(port), owner: self(), proxy: "http://127.0.0.1:#{proxy_port}")
 
-      assert_receive {:proxy_request, "GET http://127.0.0.1:" <> _}, 5_000
-      assert_receive {:ws, ^client, :open}, 5_000
+      assert_receive {:proxy_request, "GET http://127.0.0.1:" <> _},
+                     WardmastWeb.Test.Timing.scale(5_000)
+
+      assert_receive {:ws, ^client, :open}, WardmastWeb.Test.Timing.scale(5_000)
     end
 
     test "a proxy nothing listens on is an error from start/1", %{port: port} do

@@ -34,7 +34,7 @@ defmodule WardmastWeb.BoardLiveTest do
 
   # The board loads by start_async (bd-15bn6s) and a real Snapshot.load can
   # outrun render_async's 100ms default under a loaded suite.
-  @async_timeout 5_000
+  @async_timeout WardmastWeb.Test.Timing.scale(5_000)
 
   alias Wardmast.Board.Autopilot
   alias Wardmast.Board.Snapshot
@@ -133,7 +133,7 @@ defmodule WardmastWeb.BoardLiveTest do
         initial_delay_ms: 600_000
       })
 
-    assert_receive {:DOWN, ^run, :process, ^pid, _}, 2_000
+    assert_receive {:DOWN, ^run, :process, ^pid, _}, WardmastWeb.Test.Timing.scale(2_000)
     task
   end
 
@@ -851,7 +851,7 @@ defmodule WardmastWeb.BoardLiveTest do
           watchdog_start_error: true
         })
 
-      assert_receive {:DOWN, ^run, :process, ^pid, _}, 2_000
+      assert_receive {:DOWN, ^run, :process, ^pid, _}, WardmastWeb.Test.Timing.scale(2_000)
       task
     end
 
@@ -1454,14 +1454,14 @@ defmodule WardmastWeb.BoardLiveTest do
       settle(view)
       refute_received :board_read
 
-      assert_receive :board_read, 2_000
+      assert_receive :board_read, WardmastWeb.Test.Timing.scale(2_000)
       render_async(view, @async_timeout)
       refute_receive :board_read, 400
       assert has_element?(view, ~s(#board[data-state="loaded"]))
 
       # A task event is not debounced, and the board still reflects it.
       task = issue(ws, "created after the burst")
-      assert_receive :board_read, 2_000
+      assert_receive :board_read, WardmastWeb.Test.Timing.scale(2_000)
       render_async(view, @async_timeout)
       assert has_element?(view, "#card-#{task.id}")
     end

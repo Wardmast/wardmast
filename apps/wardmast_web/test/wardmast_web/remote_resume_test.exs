@@ -151,7 +151,7 @@ defmodule WardmastWeb.RemoteResumeTest do
     write_agent_script!(ctx, node_a_work())
     assert {:ok, prepared} = place_on_a(ctx, r1)
     assert {:ok, handle} = Executor.open(prepared)
-    assert_receive {^handle, {:data, {:eol, "line-1"}}}, 15_000
+    assert_receive {^handle, {:data, {:eol, "line-1"}}}, WardmastWeb.Test.Timing.scale(15_000)
     node_a_commit = seen(ctx, "node_a.head")
 
     # 2. The primary restarts. The agent reconnects and is told to hold the run.
@@ -240,7 +240,7 @@ defmodule WardmastWeb.RemoteResumeTest do
     write_agent_script!(ctx, node_a_work())
     assert {:ok, prepared} = place_on_a(ctx, r1)
     assert {:ok, handle} = Executor.open(prepared)
-    assert_receive {^handle, {:data, {:eol, "line-1"}}}, 15_000
+    assert_receive {^handle, {:data, {:eol, "line-1"}}}, WardmastWeb.Test.Timing.scale(15_000)
 
     restart_primary!()
     await_hold!(ctx.node_a.id, run_id)
@@ -485,7 +485,7 @@ defmodule WardmastWeb.RemoteResumeTest do
 
     node_id = node.id
     start_supervised!({Connection, config: config})
-    assert_receive {:node_state, ^node_id, :online}, 10_000
+    assert_receive {:node_state, ^node_id, :online}, WardmastWeb.Test.Timing.scale(10_000)
   end
 
   # The primary restarting: every session is gone with its run table, and the new BEAM

@@ -524,13 +524,17 @@ defmodule WardmastWeb.NodeChannelTest do
       assert {:ok, %{}} = WsClient.join(client, topic)
 
       WsClient.push(client, topic, "hello", hello())
-      assert_receive {:ws, :push, ^topic, "hello_ok", %{"boot_epoch" => _}}, 5_000
+
+      assert_receive {:ws, :push, ^topic, "hello_ok", %{"boot_epoch" => _}},
+                     WardmastWeb.Test.Timing.scale(5_000)
 
       WsClient.push(client, topic, "hb", %{"seq" => 1})
-      assert_receive {:ws, :push, ^topic, "hb_ack", %{"seq" => 1}}, 5_000
+
+      assert_receive {:ws, :push, ^topic, "hb_ack", %{"seq" => 1}},
+                     WardmastWeb.Test.Timing.scale(5_000)
 
       {:ok, _} = Nodes.revoke(node, "operator:test")
-      assert_receive {:ws, :closed, _reason}, 5_000
+      assert_receive {:ws, :closed, _reason}, WardmastWeb.Test.Timing.scale(5_000)
       assert Registry.lookup(node.id) == nil
     end
 
@@ -538,8 +542,11 @@ defmodule WardmastWeb.NodeChannelTest do
       Process.flag(:trap_exit, true)
       {:ok, client} = WsClient.start_link(url: url(port, "arbn_nope"), owner: self())
       ref = Process.monitor(client)
-      assert_receive {:ws, :closed, {:upgrade_rejected, 403, _}}, 5_000
-      assert_receive {:DOWN, ^ref, :process, ^client, _}, 5_000
+
+      assert_receive {:ws, :closed, {:upgrade_rejected, 403, _}},
+                     WardmastWeb.Test.Timing.scale(5_000)
+
+      assert_receive {:DOWN, ^ref, :process, ^client, _}, WardmastWeb.Test.Timing.scale(5_000)
     end
 
     test "a revoked credential is refused at the upgrade", %{
@@ -551,8 +558,11 @@ defmodule WardmastWeb.NodeChannelTest do
       {:ok, _} = Nodes.revoke(node, "operator:test")
       {:ok, client} = WsClient.start_link(url: url(port, credential), owner: self())
       ref = Process.monitor(client)
-      assert_receive {:ws, :closed, {:upgrade_rejected, 403, _}}, 5_000
-      assert_receive {:DOWN, ^ref, :process, ^client, _}, 5_000
+
+      assert_receive {:ws, :closed, {:upgrade_rejected, 403, _}},
+                     WardmastWeb.Test.Timing.scale(5_000)
+
+      assert_receive {:DOWN, ^ref, :process, ^client, _}, WardmastWeb.Test.Timing.scale(5_000)
     end
   end
 

@@ -26,13 +26,17 @@ defmodule WardmastWeb.Spike.WsTransportTest do
 
     ref = WsClient.push(client, "node:spike", "echo", %{"hello" => "node", "n" => 1})
     ref = to_string(ref)
-    assert_receive {:ws, :reply, ^ref, "ok", %{"hello" => "node", "n" => 1}}, 5_000
+
+    assert_receive {:ws, :reply, ^ref, "ok", %{"hello" => "node", "n" => 1}},
+                   WardmastWeb.Test.Timing.scale(5_000)
 
     WsClient.push(client, "node:spike", "hb", %{"seq" => 7, "t" => 1.5})
-    assert_receive {:ws, :push, "node:spike", "hb_ack", %{"seq" => 7, "t" => 1.5}}, 5_000
+
+    assert_receive {:ws, :push, "node:spike", "hb_ack", %{"seq" => 7, "t" => 1.5}},
+                   WardmastWeb.Test.Timing.scale(5_000)
 
     hb = to_string(WsClient.heartbeat(client))
-    assert_receive {:ws, :reply, ^hb, "ok", %{}}, 5_000
+    assert_receive {:ws, :reply, ^hb, "ok", %{}}, WardmastWeb.Test.Timing.scale(5_000)
   end
 
   test "binary frames survive both directions at every size up to max_frame_size", %{url: url} do
@@ -43,7 +47,9 @@ defmodule WardmastWeb.Spike.WsTransportTest do
     for size <- [0, 1, 255, 16_384, 65_535, 65_536, 262_144, 1_000_000] do
       payload = :crypto.strong_rand_bytes(size)
       WsClient.push(client, "node:spike", "echo_bin", {:binary, payload})
-      assert_receive {:ws, :push, "node:spike", "echo_bin", {:binary, ^payload}}, 10_000
+
+      assert_receive {:ws, :push, "node:spike", "echo_bin", {:binary, ^payload}},
+                     WardmastWeb.Test.Timing.scale(10_000)
     end
   end
 
@@ -58,7 +64,7 @@ defmodule WardmastWeb.Spike.WsTransportTest do
       {:binary, :crypto.strong_rand_bytes(1_100_000)}
     )
 
-    assert_receive {:ws, :closed, _reason}, 10_000
+    assert_receive {:ws, :closed, _reason}, WardmastWeb.Test.Timing.scale(10_000)
   end
 
   test "a wrong token is refused at the upgrade, with no channel ever opened", %{port: port} do
@@ -67,8 +73,10 @@ defmodule WardmastWeb.Spike.WsTransportTest do
     {:ok, client} = WsClient.start_link(url: url, owner: self())
     ref = Process.monitor(client)
     # The upgrade is answered with an HTTP 403, not a 101.
-    assert_receive {:ws, :closed, {:upgrade_rejected, 403, _}}, 5_000
-    assert_receive {:DOWN, ^ref, :process, ^client, _}, 5_000
+    assert_receive {:ws, :closed, {:upgrade_rejected, 403, _}},
+                   WardmastWeb.Test.Timing.scale(5_000)
+
+    assert_receive {:DOWN, ^ref, :process, ^client, _}, WardmastWeb.Test.Timing.scale(5_000)
   end
 
   test "the client reconnects to a restarted server (new socket, fresh join)", %{
@@ -80,8 +88,8 @@ defmodule WardmastWeb.Spike.WsTransportTest do
     ref = Process.monitor(client)
     Process.unlink(client)
     stop_supervised!(Endpoint)
-    assert_receive {:ws, :closed, _}, 10_000
-    assert_receive {:DOWN, ^ref, :process, ^client, _}, 5_000
+    assert_receive {:ws, :closed, _}, WardmastWeb.Test.Timing.scale(10_000)
+    assert_receive {:DOWN, ^ref, :process, ^client, _}, WardmastWeb.Test.Timing.scale(5_000)
 
     # The design's agent owns the retry loop (backoff 1s -> 30s); the spike only
     # shows that a *fresh* client on the same URL joins cleanly after the restart.

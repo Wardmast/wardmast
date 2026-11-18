@@ -85,14 +85,14 @@ defmodule WardmastWeb.Api.QueueControllerTest do
       on_exit(fn -> stop_watchdog(task.id) end)
       assert is_pid(wpid)
 
-      assert_receive {:conflict_resolve_called, _}, 1_000
-      assert_receive {:conflict_escalated, _}, 1_000
+      assert_receive {:conflict_resolve_called, _}, WardmastWeb.Test.Timing.scale(1_000)
+      assert_receive {:conflict_escalated, _}, WardmastWeb.Test.Timing.scale(1_000)
       assert Watchdog.parked_on(task.id) == :conflict
 
       body = conn |> post("/api/queue/#{task.id}/retry_auto_resolve") |> json_response(200)
       assert body == %{"retried" => true, "task_id" => task.id}
 
-      assert_receive {:conflict_resolve_called, _}, 1_000
+      assert_receive {:conflict_resolve_called, _}, WardmastWeb.Test.Timing.scale(1_000)
     end
 
     test "409s when the watchdog has nothing to re-arm", %{conn: conn, ws: ws} do
