@@ -626,11 +626,11 @@ defmodule WardmastCli.Cmd.DoctorTest do
       ])
 
       {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
-      assert out =~ "arb server restart"
+      assert out =~ "ward server restart"
       assert out =~ "Wardmast.Release.migrate_config"
 
       [hint] = Regex.run(~r/hint: .*/, out)
-      restart_at = :binary.match(hint, "arb server restart") |> elem(0)
+      restart_at = :binary.match(hint, "ward server restart") |> elem(0)
       mix_at = :binary.match(hint, "mix wardmast.migrate_rig_paths") |> elem(0)
       assert restart_at < mix_at
     end
@@ -870,7 +870,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
       assert out =~ "[warn] safe to restart"
       assert out =~ "conflict_resolver"
       assert out =~ "vs-3fpek0"
-      assert out =~ "arb scheduler wait"
+      assert out =~ "ward scheduler wait"
       assert Doctor.green?() == true
     end
 
@@ -905,7 +905,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
       assert out =~ "[warn] safe to restart"
       assert out =~ "not a safe restart point"
       refute out =~ "[ ok ] safe to restart"
-      assert out =~ "arb scheduler pause && arb scheduler wait"
+      assert out =~ "ward scheduler pause && ward scheduler wait"
     end
 
     test "an unreadable scheduler status is a warn, never an all-clear" do
@@ -3445,7 +3445,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
 
       assert detail =~ "0"
       assert detail =~ "wait"
-      assert hint =~ "arb node set local"
+      assert hint =~ "ward node set local"
     end
 
     test "the capacity is green and shows the breakdown, with no ceiling to compare it to" do
@@ -3474,7 +3474,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
       assert %{status: :warn, detail: ^advisory, hint: hint} =
                named(nodes_results(), "conductor_system_max_concurrent removed")
 
-      assert hint =~ "arb node set local"
+      assert hint =~ "ward node set local"
     end
 
     test "a placement still in flight past the placement timeout is a warn naming the run" do
@@ -3502,7 +3502,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
       assert detail =~ "placing on mesaana for 2h0m"
       assert detail =~ "stage assign"
       assert detail =~ "timeout 30m"
-      assert hint =~ "arb worker stop bd-7jluyk"
+      assert hint =~ "ward worker stop bd-7jluyk"
     end
 
     test "placements within their budget add no line" do
