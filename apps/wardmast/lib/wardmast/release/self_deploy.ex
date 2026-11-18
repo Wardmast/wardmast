@@ -30,6 +30,18 @@ defmodule Wardmast.Release.SelfDeploy do
       `GITHUB_TOKEN` already lives), and anything printed back is scrubbed of
       the token's value.
 
+  ## On macOS: a detached launchd job
+
+  There is no systemd on darwin, so the runner is a one-shot launchd job instead:
+  `<data-home>/wardmast-deploy-<tag>.plist` (label `wardmast-deploy-<tag>`, no
+  `KeepAlive`, `RunAtLoad`) is `launchctl bootstrap`ped into the user's `gui/<uid>`
+  domain. launchd, not this BEAM, owns the process, so the restart it triggers
+  cannot take it down. launchd has no `EnvironmentFile=`, so the job's `/bin/sh -c`
+  wrapper sources `<data-home>/wardmast.env` itself (the plist never carries the
+  token) and `exec`s the CLI; the tag is a positional argument of that script,
+  never interpolated into it. "A deploy is running" is a job in `launchctl list`
+  with a live PID — a finished job lingers listed with `-` and does not block.
+
   Authorisation is the caller's job and is operator-only: the REST route is
   `:operator` in `WardmastWeb.ApiPolicy`, the browser route sits behind the
   dashboard login. This module trusts that.
@@ -105,11 +117,37 @@ defmodule Wardmast.Release.SelfDeploy do
     if DeployStatus.running?(DeployStatus.read()) do
       {:error, :already_running}
     else
-      case active_units() do
+      case active_jobs() do
         {:ok, []} -> :ok
         {:ok, _units} -> {:error, :already_running}
         :error -> {:error, :systemd_unavailable}
       end
+    end
+  end
+
+  defp active_jobs do
+    if darwin?(), do: active_launchd_jobs(), else: active_units()
+  end
+
+  # `launchctl list` prints `PID<TAB>Status<TAB>Label`; PID is `-` once a job has
+  # exited. Only a job with a live PID counts as a running deploy.
+  defp active_launchd_jobs do
+    case run("launchctl", ["list"]) do
+      {out, 0} ->
+        jobs =
+          out
+          |> String.split("\n", trim: true)
+          |> Enum.filter(fn line ->
+            case String.split(line, ~r/\s+/, trim: true) do
+              [pid, _status, @unit_prefix <> _] -> pid =~ ~r/\A\d+\z/
+              _ -> false
+            end
+          end)
+
+        {:ok, jobs}
+
+      _ ->
+        :error
     end
   end
 
@@ -126,6 +164,135 @@ defmodule Wardmast.Release.SelfDeploy do
   # ---- launch ------------------------------------------------------------------
 
   defp launch(tag) do
+    if darwin?(), do: launch_launchd(tag), else: launch_systemd(tag)
+  end
+
+  defp launch_launchd(tag) do
+    unit = unit_name(tag)
+    home = Wardmast.Nodes.Agent.data_home()
+    plist = Path.join(home, unit <> ".plist")
+
+    with {:ok, domain} <- launchd_domain(),
+         # A near-simultaneous duplicate request must be refused, never allowed to
+         # `bootout` (SIGTERM) the deploy the first request just started.
+         :ok <- ensure_label_idle(unit),
+         :ok <- write_plist(plist, plist_xml(unit, tag, home)),
+         # A finished job lingers loaded; it must go before the label can be reused.
+         _ = run("launchctl", ["bootout", "#{domain}/#{unit}"]),
+         {_out, 0} <- run("launchctl", ["bootstrap", domain, plist]) do
+      Logger.info(
+        "Wardmast.Release.SelfDeploy: started launchd job #{unit} (arb server deploy --version #{tag})"
+      )
+
+      {:ok, %{unit: unit, tag: tag}}
+    else
+      {:error, :already_running} ->
+        {:error, :already_running}
+
+      {:error, reason} ->
+        {:error,
+         {:launch_failed, scrub_message("could not prepare launchd job: #{inspect(reason)}")}}
+
+      {out, code} ->
+        classify_bootstrap_failure(out, code)
+    end
+  end
+
+  # `launchctl list <label>` prints the job's dict (with `"PID" = N;` while it
+  # runs) and exits non-zero when no such job is loaded.
+  defp ensure_label_idle(unit) do
+    case run("launchctl", ["list", unit]) do
+      {out, 0} -> if out =~ ~r/"PID"\s*=\s*\d+/, do: {:error, :already_running}, else: :ok
+      _ -> :ok
+    end
+  end
+
+  # Losing the bootstrap race for the same label reads as "already running",
+  # matching `classify_failure/1` on the systemd path.
+  defp classify_bootstrap_failure(out, code) do
+    if code == 17 or out =~ ~r/already (loaded|bootstrapped)/i do
+      {:error, :already_running}
+    else
+      message = scrub_message(out)
+      Logger.warning("Wardmast.Release.SelfDeploy: launchctl bootstrap failed: #{message}")
+      {:error, {:launch_failed, message}}
+    end
+  end
+
+  defp launchd_domain do
+    with {out, 0} <- run("id", ["-u"]),
+         uid = String.trim(out),
+         true <- uid =~ ~r/\A\d+\z/ do
+      {:ok, "gui/" <> uid}
+    else
+      _ -> {:error, :bad_uid}
+    end
+  end
+
+  defp write_plist(path, xml) do
+    with :ok <- File.mkdir_p(Path.dirname(path)), do: File.write(path, xml)
+  end
+
+  # `$1` is the env file, the rest is the command: nothing from `tag` is ever
+  # spliced into the script text.
+  @launch_script ~S|set -a; [ -f "$1" ] && . "$1"; set +a; shift; exec "$@"|
+
+  defp plist_xml(unit, tag, home) do
+    argv =
+      ["/bin/sh", "-c", @launch_script, unit, Path.join(home, "wardmast.env")] ++
+        [cli_path(), "server", "deploy", "--version", tag, "--json"]
+
+    env = [
+      {"WARDMAST_DATA_HOME", home},
+      # The `arb` CLI still reads the pre-rename name.
+      {"ARB_DATA_HOME", home},
+      {"PATH", System.get_env("PATH") || "/usr/bin:/bin:/usr/sbin:/sbin"}
+    ]
+
+    log = Path.join(home, unit <> ".log")
+    strings = Enum.map_join(argv, "\n", &"    <string>#{xml(&1)}</string>")
+
+    pairs =
+      Enum.map_join(env, "\n", fn {k, v} ->
+        "    <key>#{xml(k)}</key>\n    <string>#{xml(v)}</string>"
+      end)
+
+    """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+      <key>Label</key>
+      <string>#{xml(unit)}</string>
+      <key>ProgramArguments</key>
+      <array>
+    #{strings}
+      </array>
+      <key>EnvironmentVariables</key>
+      <dict>
+    #{pairs}
+      </dict>
+      <key>RunAtLoad</key>
+      <true/>
+      <key>AbandonProcessGroup</key>
+      <true/>
+      <key>StandardOutPath</key>
+      <string>#{xml(log)}</string>
+      <key>StandardErrorPath</key>
+      <string>#{xml(log)}</string>
+    </dict>
+    </plist>
+    """
+  end
+
+  defp xml(text) do
+    text
+    |> String.replace("&", "&amp;")
+    |> String.replace("<", "&lt;")
+    |> String.replace(">", "&gt;")
+  end
+
+  defp launch_systemd(tag) do
     unit = unit_name(tag)
     home = Wardmast.Nodes.Agent.data_home()
 
@@ -166,7 +333,7 @@ defmodule Wardmast.Release.SelfDeploy do
     if out =~ ~r/already (loaded|exists)|already.*fragment/i do
       {:error, :already_running}
     else
-      message = out |> to_string() |> String.trim() |> scrub() |> String.slice(0, 400)
+      message = scrub_message(out)
       Logger.warning("Wardmast.Release.SelfDeploy: systemd-run failed: #{message}")
       {:error, {:launch_failed, message}}
     end
@@ -198,6 +365,13 @@ defmodule Wardmast.Release.SelfDeploy do
   rescue
     e in ErlangError -> {"could not run #{cmd}: #{inspect(e.original)}", 127}
   end
+
+  defp scrub_message(out) do
+    out |> to_string() |> String.trim() |> scrub() |> String.slice(0, 400)
+  end
+
+  # `:os` is a test seam alongside `:cmd` (an `:os.type/0` tuple).
+  defp darwin?, do: match?({:unix, :darwin}, config(:os) || :os.type())
 
   defp scrub(text) do
     case Wardmast.SecretRefs.External.env_value("GITHUB_TOKEN") do
