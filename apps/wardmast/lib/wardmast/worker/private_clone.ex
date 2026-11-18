@@ -578,35 +578,48 @@ defmodule Wardmast.Worker.PrivateClone do
   defp scan_marker([line | rest], key, in_arbiter?, found) do
     trimmed = String.trim(line)
 
+    # comments only ever sit on their own line in what git writes; one hiding
+    # inside a value is caught by the character check in `key_value/1`
+    case scan_line(trimmed, key, in_arbiter?, found) do
+      :fallback -> :fallback
+      {in_arbiter?, found} -> scan_marker(rest, key, in_arbiter?, found)
+    end
+  end
+
+  defp scan_line(line, key, in_arbiter?, found) do
     cond do
-      trimmed == "" or String.starts_with?(trimmed, ["#", ";"]) ->
-        # comments only ever sit on their own line in what git writes; one
-        # hiding inside a value is caught below by the character check
-        scan_marker(rest, key, in_arbiter?, found)
+      line == "" or String.starts_with?(line, ["#", ";"]) ->
+        {in_arbiter?, found}
 
-      String.starts_with?(trimmed, "[") ->
-        # `[remote "origin"]` and friends carry a subsection: never ours
-        case Regex.run(~r/\A\[([A-Za-z0-9.-]+)( "[^"\\]*")?\]\z/, trimmed) do
-          [_, section] -> scan_marker(rest, key, String.downcase(section) == "arbiter", found)
-          [_, _section, _sub] -> scan_marker(rest, key, false, found)
-          nil -> :fallback
-        end
+      String.starts_with?(line, "[") ->
+        with in_arbiter? when is_boolean(in_arbiter?) <- section_header(line),
+             do: {in_arbiter?, found}
 
-      not in_arbiter? ->
-        scan_marker(rest, key, in_arbiter?, found)
+      in_arbiter? ->
+        with {name, value} <- key_value(line),
+             do: {in_arbiter?, if(name == key, do: value, else: found)}
 
       true ->
-        case Regex.run(~r/\A([A-Za-z][A-Za-z0-9-]*)[ \t]*=[ \t]*(.*)\z/, trimmed) do
-          [_, name, value] ->
-            cond do
-              String.contains?(value, ["\"", "\\", "#", ";"]) -> :fallback
-              String.downcase(name) == key -> scan_marker(rest, key, in_arbiter?, value)
-              true -> scan_marker(rest, key, in_arbiter?, found)
-            end
+        {in_arbiter?, found}
+    end
+  end
 
-          nil ->
-            :fallback
-        end
+  # true/false: is this the `[arbiter]` section. `[remote "origin"]` and
+  # friends carry a subsection: never ours.
+  defp section_header(line) do
+    case Regex.run(~r/\A\[([A-Za-z0-9.-]+)( "[^"\\]*")?\]\z/, line) do
+      [_, section] -> String.downcase(section) == "arbiter"
+      [_, _section, _sub] -> false
+      nil -> :fallback
+    end
+  end
+
+  defp key_value(line) do
+    with [_, name, value] <- Regex.run(~r/\A([A-Za-z][A-Za-z0-9-]*)[ \t]*=[ \t]*(.*)\z/, line),
+         false <- String.contains?(value, ["\"", "\\", "#", ";"]) do
+      {String.downcase(name), value}
+    else
+      _ -> :fallback
     end
   end
 
