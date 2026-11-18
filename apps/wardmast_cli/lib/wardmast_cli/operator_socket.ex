@@ -88,13 +88,19 @@ defmodule WardmastCli.OperatorSocket do
     end
   end
 
+  @doc false
+  def __hint__(err), do: hint(err)
+
   defp hint(%{"reason" => reason})
        when reason in ["spawned_by_arbiter", "in_arbiter_cgroup", "in_session_scope"] do
     "only the operator mints coordinator tokens, from their own shell. Workers and " <>
-      "sessions get their token from the server at dispatch (see docs/worker-security.md)."
+      "sessions get their token from the server at dispatch (see #{WardmastCli.Version.doc_url("docs/worker-security.md")})."
   end
 
-  defp hint(_), do: "see docs/worker-security.md, \"Operator proof for token minting\""
+  defp hint(_) do
+    "see #{WardmastCli.Version.doc_url("docs/worker-security.md", "operator-proof-for-token-minting")}, " <>
+      "\"Operator proof for token minting\""
+  end
 
   defp env_path do
     case System.get_env("ARB_OPERATOR_SOCKET") do

@@ -57,7 +57,7 @@ defmodule WardmastCli.Cmd.Doctor.SecretsAtRest do
           hint:
             "Keep secret values out of wardmast.env: set e.g. WARDMAST_CLOAK_KEY_REF=aws-sm:<id>#<key> " <>
               "(also SECRET_KEY_BASE_REF, GITHUB_TOKEN_REF; aws-ssm:/file: work too) and remove the inline " <>
-              "value. See docs/secrets-at-rest.md.",
+              "value. See #{WardmastCli.Version.doc_url("docs/secrets-at-rest.md")}.",
           meta: %{secrets: report(entries)}
         }
     end

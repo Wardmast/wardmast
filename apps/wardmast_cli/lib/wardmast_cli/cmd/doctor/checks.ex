@@ -1569,7 +1569,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     policy_hint =
       "Add a drop-in: `systemctl --user edit wardmast.service` with " <>
         "`[Service]` / `OOMPolicy=continue`, then `systemctl --user daemon-reload` " <>
-        "(or re-run `ward install service`, which now writes it). See docs/worker-memory-cap.md."
+        "(or re-run `ward install service`, which now writes it). See #{WardmastCli.Version.doc_url("docs/worker-memory-cap.md")}."
 
     cap_hint =
       if Map.get(body, "capped"),
@@ -2052,7 +2052,10 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     Enum.join(workspaces ++ server, "; ")
   end
 
-  defp runbook(status), do: status["runbook"] || "docs/provider-accounts-release-runbook.md"
+  defp runbook(status),
+    do:
+      status["runbook"] ||
+        WardmastCli.Version.doc_url("docs/provider-accounts-release-runbook.md")
 
   # bd-c7ll4t: `Wardmast.Quota.Gate` resolves every threshold as
   # `min(account, workspace)` — the account's `quota_config` is a floor a
