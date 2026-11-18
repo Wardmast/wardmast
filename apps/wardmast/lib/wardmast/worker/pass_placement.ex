@@ -116,8 +116,8 @@ defmodule Wardmast.Worker.PassPlacement do
 
   `ctx`: `:task_id`, `:workspace`, `:repo`, `:repo_path` (the main checkout the image is
   planned from), `:mode` (`worker.placement`) and optionally `:image_opts`
-  (`ContainerSpawn.preflight_image/3`'s `:image` / `:publish`). A node that builds its own
-  image (and `nil`, a local pass) publishes nothing.
+  (`ContainerSpawn.preflight_image/3`'s `:image` / `:publish`).
+  A `nil` node (a local pass) publishes nothing.
   """
   @spec ensure_image(map() | nil, map()) ::
           {:ok, map() | nil} | {:error, {:no_node_capacity, map()}}

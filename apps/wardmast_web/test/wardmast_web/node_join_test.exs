@@ -299,26 +299,4 @@ defmodule WardmastWeb.NodeJoinTest do
       assert conn.status == 401
     end
   end
-
-  describe "GET /nodes/files/:sha" do
-    test "serves the artifact by content hash, to a node credential only", %{release: release} do
-      resp = enrolled!()
-      path = "/nodes/files/#{release.sha256}"
-
-      assert raw(:get, path).status == 401
-
-      conn = raw(:get, path, headers: [{"authorization", "Bearer #{resp["credential"]}"}])
-      assert conn.status == 200
-      assert conn.resp_body == File.read!(release.tarball)
-    end
-
-    test "an unknown or malformed hash is a 404" do
-      resp = enrolled!()
-      auth = [{"authorization", "Bearer #{resp["credential"]}"}]
-
-      assert raw(:get, "/nodes/files/#{String.duplicate("0", 64)}", headers: auth).status == 404
-      assert raw(:get, "/nodes/files/..%2F..%2Fetc%2Fpasswd", headers: auth).status == 404
-      assert raw(:get, "/nodes/files/short", headers: auth).status == 404
-    end
-  end
 end

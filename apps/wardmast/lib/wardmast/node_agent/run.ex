@@ -10,10 +10,9 @@ defmodule Wardmast.NodeAgent.Run do
           │
           └─► refused / cancelled
 
-  `prepare` (in a task, so a long image build never blocks a `cancel`): the
-  run's directories under `<node_home>/runs/<run>/`, the image (built from the
-  plan the spec carries when the node lacks it), the CLI files
-  (`Wardmast.NodeAgent.Files`), prompt and config-dir seeds (with, for a session
+  `prepare` (in a task, so a long image pull never blocks a `cancel`): the
+  run's directories under `<node_home>/runs/<run>/`, the pinned image (pulled when the
+  node lacks it: `Wardmast.NodeAgent.ImagePull`), prompt and config-dir seeds (with, for a session
   resume, the transcript it continues: `Wardmast.NodeAgent.Transcripts.fetch_session/4`,
   bd-4ic681), the secrets file on
   tmpfs (`Wardmast.NodeAgent.Secrets`), the bridge sockets, the cgroup limits for
@@ -71,7 +70,6 @@ defmodule Wardmast.NodeAgent.Run do
     Cgroups,
     Checkout,
     Exec,
-    Files,
     ImageGC,
     ImagePull,
     Retained,
@@ -83,7 +81,7 @@ defmodule Wardmast.NodeAgent.Run do
   }
 
   alias Wardmast.Nodes.StdoutFrame
-  alias Wardmast.Worker.{Container, DepsCache, DepsSeedWatch, Image, TestServices}
+  alias Wardmast.Worker.{Container, DepsCache, DepsSeedWatch, TestServices}
   alias Wardmast.Worker.ReleaseEnv
 
   require Logger
@@ -430,7 +428,6 @@ defmodule Wardmast.NodeAgent.Run do
          :ok <- seed_worktree_files(spec, dirs),
          :ok <- ensure_image(spec, opts),
          :ok <- seed_deps(spec, dirs, config, opts),
-         {:ok, cli} <- cli_files(spec, config, opts),
          {:ok, prompts} <- prompt_files(spec, run_dir),
          :ok <- seed_config(spec, dirs),
          :ok <- seed_session(spec, config, dirs, opts),
@@ -442,7 +439,6 @@ defmodule Wardmast.NodeAgent.Run do
            build_argv(spec, opts, %{
              dirs: dirs,
              config: config,
-             cli: cli,
              prompts: prompts,
              limit_opts: limit_opts,
              bridge_paths: bridge_paths,
@@ -693,8 +689,8 @@ defmodule Wardmast.NodeAgent.Run do
 
   # SI5: a run that pulled the published image takes its deps from that image's seed
   # layer, extracted once per layer and installed (reflink and relocation) when the
-  # checkout's lockfile is the layer's. A run built from a plan has no such layer.
-  defp seed_layer(%RunSpec{image: %{ref: ref, plan: nil}, run: run}, shadow, seed_opts, opts)
+  # checkout's lockfile is the layer's.
+  defp seed_layer(%RunSpec{image: %{ref: ref}, run: run}, shadow, seed_opts, opts)
        when is_binary(ref) do
     install = Keyword.get(opts, :seed_layer_fun, &SeedLayer.install/3)
 
@@ -782,48 +778,11 @@ defmodule Wardmast.NodeAgent.Run do
   # SI4 (§21.2.1): a digest-pinned ref is the image the primary published. It is found
   # or pulled (`ImagePull`: the credential only ever on this run's tmpfs) and its labels
   # are checked; nothing is built. Its errors are already refusal-coded.
-  defp default_image(%RunSpec{image: %{ref: ref, plan: nil}} = spec, opts) when is_binary(ref),
+  defp default_image(%RunSpec{image: %{ref: ref}} = spec, opts) when is_binary(ref),
     do: ImagePull.ensure(spec, opts)
 
-  defp default_image(%RunSpec{image: image}, opts), do: image_result(built_image(image, opts))
-
-  # The image the container (and the deps seed job) runs: the pulled digest for a pull
-  # spec, else the tag this node built or already holds.
-  defp run_image(%{ref: ref, plan: nil}) when is_binary(ref), do: ref
-  defp run_image(%{tag: tag}), do: tag
-
-  defp built_image(%{tag: tag, plan: nil}, opts) do
-    case Container.cmd(runner_opts(opts), podman_path(opts), ["image", "exists", tag],
-           timeout: 30_000
-         ) do
-      {_, 0} -> :ok
-      _ -> {:error, {:image_missing, tag}}
-    end
-  end
-
-  defp built_image(%{tag: tag, plan: %{tag: tag} = plan}, opts) do
-    case Image.Builder.ensure(Image.Builder, plan, runner_opts(opts)) do
-      {:ok, _} -> :ok
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp built_image(_image, _opts), do: {:error, :plan_tag_mismatch}
-
-  defp cli_files(spec, config, opts) do
-    fetch = Keyword.get(opts, :files_fun, &Files.ensure(config, &1, &2))
-
-    Enum.reduce_while(spec.mounts, {:ok, []}, fn
-      %{kind: "cli", sha256: sha, name: name, path: dest}, {:ok, acc} ->
-        case fetch.(sha, name) do
-          {:ok, host} -> {:cont, {:ok, acc ++ [{host, dest}]}}
-          {:error, reason} -> {:halt, {:error, {:image_unavailable, {:cli_file, name, reason}}}}
-        end
-
-      _other, acc ->
-        {:cont, acc}
-    end)
-  end
+  # The image the container (and the deps seed job) runs: the pulled digest.
+  defp run_image(%{ref: ref}) when is_binary(ref), do: ref
 
   defp prompt_files(spec, run_dir) do
     prompts = Enum.filter(spec.mounts, &(&1.kind == "prompt"))
@@ -997,7 +956,6 @@ defmodule Wardmast.NodeAgent.Run do
         home: dirs["home"] && dirs["home"].host,
         writable_paths: for(kind <- ~w(config_dir tmp), d = dirs[kind], do: d.host),
         readonly_paths: Enum.map(prompts, &elem(&1, 0)) ++ store_objects,
-        cli_mounts: parts.cli,
         bridges: Enum.map(bridge_paths, &elem(&1, 1)),
         env: Map.to_list(spec.env) ++ parts.service_env,
         network: spec.network,

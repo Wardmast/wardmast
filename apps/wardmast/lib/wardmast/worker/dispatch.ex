@@ -3273,7 +3273,7 @@ defmodule Wardmast.Worker.Dispatch do
 
     image_opts =
       [workspace: workspace, repo: repo, publish: image_publish_opts(opts)] ++
-        Keyword.take(opts, [:image, :provider])
+        Keyword.take(opts, [:image, :provider, :plan])
 
     case publish_image(task, repo, node, image_opts) do
       :ok ->
@@ -5474,7 +5474,7 @@ defmodule Wardmast.Worker.Dispatch do
   # The inputs `ClaudeSession` needs to wrap a `sandbox.backend: podman` spawn;
   # none for any other backend, so a bwrap or unsandboxed spawn is unchanged.
   #
-  # `:egress`, `:podman` and `:image` are the spawn's own injection points
+  # `:egress`, `:podman`, `:image`, `:publish`, `:plan` and `:image_source` are the spawn's own injection points
   # (`ContainerSpawn.prepare/1`), threaded so a test can drive a real dispatch or
   # resume against a stand-in egress run and `podman` (bd-dh1gg1); `:cli_*`
   # select the CLI cache a run is handed its CLIs from (`Worker.CliSet`).
@@ -5493,6 +5493,9 @@ defmodule Wardmast.Worker.Dispatch do
             :egress,
             :podman,
             :image,
+            :publish,
+            :plan,
+            :image_source,
             :adopt
           ] ++ Wardmast.Worker.CliSet.option_keys()
         )

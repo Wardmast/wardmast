@@ -2751,9 +2751,10 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   end
 
   # SI4a (§21.4): where a machine node's worker image comes from. `registry`: it pulls the
-  # published digest. `build`: the legacy plan path, kept during the migration window
-  # (SI13 retires it). Registry hosts the node reports unreachable, or whose last pull it was
-  # refused (`pull_failed` / `contract_mismatch`), are a warning: it is passed over for them.
+  # published digest. `build`: an agent too old to pull (SI13 retired the plan path),
+  # which takes no runs.
+  # Registry hosts the node reports unreachable, or whose last pull it was refused
+  # (`pull_failed` / `contract_mismatch`), are a warning: it is passed over for them.
   defp image_source_result(%{"image_source" => source} = n) when is_binary(source) do
     reach =
       for {host, "unreachable"} <- Map.get(n, "registry_reach") || %{}, do: "#{host} unreachable"
@@ -2777,9 +2778,8 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
         nodes_result(
           name,
           :warn,
-          "build (legacy path: the node builds the worker image from a plan)",
-          "Pull needs an agent that lists `registry` in caps.image_sources and " <>
-            "nodes.machine_image_source auto (`ward settings get nodes.machine_image_source`)."
+          "build (the node builds nothing since SI13: no run is placed on it)",
+          "Upgrade the node agent: it must list `registry` in caps.image_sources."
         )
 
       true ->

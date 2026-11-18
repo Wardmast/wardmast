@@ -107,7 +107,6 @@ defmodule Wardmast.NodeAgent.K8s.ControllerPrimaryDoneTest do
       "name" => "arb-run-" <> binary_part(Base.encode16(<<n::64>>, case: :lower), 4, 12),
       "image" => %{
         "tag" => "arbiter-dev/beam:abc",
-        "plan" => nil,
         "ref" => "#{K8sPodFixtures.registry()}/beam@sha256:#{K8sPodFixtures.digest()}"
       }
     })

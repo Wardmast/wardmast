@@ -301,6 +301,53 @@ defmodule Wardmast.Sessions.Runner.DarwinTest do
     end
   end
 
+  describe "recorded_server_pids/1" do
+    test "every session pidfile's server pid, live or not; other files are skipped", %{dir: dir} do
+      write_pidfile!(dir, @id, 4242)
+      write_pidfile!(dir, "0197a1b2-c3d4-7e5f-8a9b-00000000dead", 99)
+      File.write!(Path.join(dir, "heartbeat-abc"), "7\n")
+      File.write!(Path.join(dir, "session-#{@id}.sock"), "")
+      File.write!(Path.join(dir, Naming.pid_basename("garbage")), "not-a-pid\n/x.sock\n")
+
+      assert Enum.sort(Darwin.recorded_server_pids(dir)) == [99, 4242]
+      assert Darwin.recorded_server_pids(Path.join(dir, "missing")) == []
+    end
+
+    test "defaults to the session socket dir", %{dir: dir} do
+      write_pidfile!(dir, @id, 4242)
+      assert Darwin.recorded_server_pids() == [4242]
+    end
+  end
+
+  # bd-5tg348: check 4 of the operator proof on macOS. A session has no scope
+  # to find its processes by, so the proof refuses anything below the tmux
+  # server pid this runner records at launch.
+  describe "the operator proof's session check reads the pidfile a launch records" do
+    test "a process below the launched session's tmux server is refused; the operator is not",
+         %{dir: dir} do
+      host(server_pid: "4242")
+      {_session, args} = launch_args(dir)
+      assert {_, 0} = Darwin.run("systemd-run", args, [])
+
+      ps =
+        Wardmast.Test.FakePs.runner(%{
+          1 => {0, "/sbin/launchd"},
+          4242 => {1, "/opt/homebrew/bin/tmux"},
+          4300 => {4242, "-zsh"},
+          4301 => {4300, "/opt/homebrew/bin/claude"},
+          600 => {1, "Terminal"},
+          601 => {600, "-zsh"}
+        })
+
+      opts = [os: :darwin, ps: ps, server_pid: 500, server_uid: 501]
+
+      assert {:error, :in_session_scope} =
+               Wardmast.MCP.OperatorProof.authorize(%{pid: 4301, uid: 501, gid: 20}, opts)
+
+      assert :ok = Wardmast.MCP.OperatorProof.authorize(%{pid: 601, uid: 501, gid: 20}, opts)
+    end
+  end
+
   describe "default runner" do
     test "Sessions.runner/1 picks Darwin on darwin and Host elsewhere" do
       Application.delete_env(:wardmast, :sessions_runner)

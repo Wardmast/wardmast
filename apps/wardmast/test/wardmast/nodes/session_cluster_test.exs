@@ -270,7 +270,7 @@ defmodule Wardmast.Nodes.SessionClusterTest do
     end
 
     defp pull_spec,
-      do: %{"image" => %{"tag" => "localhost/x:1", "plan" => nil, "ref" => @pull_ref}}
+      do: %{"image" => %{"tag" => "localhost/x:1", "ref" => @pull_ref}}
 
     test "is ten minutes by default, sized for a pull, under the 25 a build gets" do
       assert Session.default_pull_prepare_timeout_ms() == 10 * 60_000

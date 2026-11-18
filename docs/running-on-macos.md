@@ -165,15 +165,18 @@ login. Read these before putting it on a shared machine:
   from outside the server's process tree (`sudo -H -u _wardmast ward mcp token
   mint`), which makes "who may be operator" an explicit `sudoers` decision
   instead of an accident of who is logged in.
-  **Not verified on a Mac:** the socket's peer-credential read and its
-  process-ancestry checks are Linux-only (`SO_PEERCRED`, `/proc`; see
-  `Wardmast.MCP.OperatorProof`). Reading the code, on macOS the socket cannot
-  identify a caller and refuses every one (`peer credentials are unavailable
-  on this platform`), in agent and daemon mode alike. Until a macOS
-  peer-credential implementation lands, treat operator-proof-gated actions as
-  unavailable on a Mac host and do them against a Linux coordinator. The
-  `sudo -u` model above describes the intended boundary, not behaviour
-  confirmed on macOS.
+  On macOS the socket identifies the caller with `LOCAL_PEERCRED` (uid) and
+  `LOCAL_PEERPID` (pid), walks its ancestry with `ps`, and recognizes a
+  session's processes by the tmux server pid in the session's pidfile
+  (bd-5tg348; see [worker-security.md](worker-security.md#on-macos-bd-5tg348)).
+  There is no cgroup, so a worker's double-forked orphan is **not** refused:
+  on a Mac, operator proof is a guardrail against the paths an agent normally
+  takes, not a boundary.
+  **Not verified on a Mac yet:** it was built and tested on Linux, with the
+  macOS mechanism driven by an injected process table and by Linux's own
+  `ps`. The macOS CI job runs the portable tests after merge, and a run on a
+  real Mac is still owed. The `sudo -u` model above describes the intended
+  boundary, not behaviour confirmed on macOS.
 - **Remote access** is unchanged: bind to loopback and use SSH or the
   documented token login (see [remote-access.md](remote-access.md)); do not
   expose the port to the team LAN without it.
@@ -284,6 +287,7 @@ aside rather than deleting it.
 | Terminal sessions (`arb-session-*`) | **Supported, without a scope.** Each session is a detached tmux server (`Wardmast.Sessions.Runner.Darwin`) in `/tmp/arb-<hash>/sessions` (short, `0700`: macOS's 104-byte socket limit rules out `$TMPDIR`), tracked by a pidfile plus `tmux has-session`. They survive a server restart (`AbandonProcessGroup = true`) and are re-adopted at boot. A stop is `tmux kill-server` + `SIGTERM`, not a cgroup kill, so a deliberately `nohup`-ed grandchild can outlive it. `arb session list` / `attach` work with the server down. | Supported (systemd scope) |
 | Worker sandbox | **None.** Workers run unconfined as your user. | bwrap sandbox |
 | Per-worker memory cap | **None.** There is no cgroup equivalent, so a runaway worker is not capped. | systemd cgroup limits |
+| Operator proof (`ward mcp token mint`, dashboard login) | **Supported, without the cgroup check.** The peer comes from `LOCAL_PEERCRED`/`LOCAL_PEERPID`, its ancestry from `ps`, and sessions from their pidfiles. A worker's double-forked orphan is reparented to launchd and is not refused. See [worker-security.md](worker-security.md#on-macos-bd-5tg348). | Ancestry, service cgroup and session scope |
 | `:strict` isolation mode | **Unavailable**, because it depends on the sandbox. | Available |
 | Workers surviving a server restart | **No.** The plist sets `AbandonProcessGroup = true` (so detached terminal sessions survive), which means launchd no longer kills the group; the server's own shutdown and the boot-time orphan sweep reap each worker's process group instead. Re-run `arb install service` to refresh an older plist that still says `false`. | Supported |
 | Start before login | **Agent: no** (it starts at login). **Daemon: yes** (starts at boot), see [Team Mac](#team-mac-system-wide-launchdaemon). | `loginctl enable-linger` |

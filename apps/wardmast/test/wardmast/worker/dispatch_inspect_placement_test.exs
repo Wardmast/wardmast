@@ -85,6 +85,8 @@ defmodule Wardmast.Worker.DispatchInspectPlacementTest do
       image: "localhost/arb-test/claude:1",
       podman: podman,
       egress: egress,
+      publish: Wardmast.DispatchImageStub.publish(),
+      plan: Wardmast.DispatchImageStub.plan(),
       nodes: [ghost_node()]
     ]
 
@@ -101,7 +103,7 @@ defmodule Wardmast.Worker.DispatchInspectPlacementTest do
       live: 0,
       workspace_ids: [],
       labels: [],
-      caps: %{}
+      caps: %{"image" => "registry"}
     }
   end
 

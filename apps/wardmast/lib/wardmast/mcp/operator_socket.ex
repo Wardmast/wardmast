@@ -7,8 +7,9 @@ defmodule Wardmast.MCP.OperatorSocket do
   every worker shares the operator's host and Unix user and loopback proves
   nothing. Instead `arb mcp token mint` and `arb init` connect here. For each
   connection the listener reads `SO_PEERCRED` (the connecting process's pid
-  and uid, recorded by the kernel at `connect()`) and lets
-  `Wardmast.MCP.OperatorProof.authorize/2` decide. A process the server
+  and uid, recorded by the kernel at `connect()`; on macOS `LOCAL_PEERCRED`
+  for the uid and `LOCAL_PEERPID` for the pid, see `peer_credentials/3`) and
+  lets `Wardmast.MCP.OperatorProof.authorize/2` decide. A process the server
   started, or anything inside its service cgroup, is refused before its
   request is even read.
 
@@ -51,6 +52,12 @@ defmodule Wardmast.MCP.OperatorSocket do
   # SOL_SOCKET / SO_PEERCRED on Linux; the payload is a 12-byte struct ucred.
   @sol_socket 1
   @so_peercred 17
+  # SOL_LOCAL / LOCAL_PEERCRED and LOCAL_PEERPID on macOS (sys/un.h): a 76-byte
+  # struct xucred (uid and groups, no pid), and the peer's pid as an int.
+  @sol_local 0
+  @local_peercred 1
+  @local_peerpid 2
+  @xucred_bytes 76
 
   def start_link(opts) do
     case Keyword.get(opts, :name, __MODULE__) do
@@ -227,8 +234,33 @@ defmodule Wardmast.MCP.OperatorSocket do
   defp request_response({:error, _}, _peer),
     do: error("malformed request: send one JSON object per line", "bad_request")
 
-  defp peercred(sock) do
-    case :inet.getopts(sock, [{:raw, @sol_socket, @so_peercred, 12}]) do
+  defp peercred(sock), do: peer_credentials(sock, elem(:os.type(), 1), &:inet.getopts/2)
+
+  @doc """
+  The kernel's record of who is on the other end of `sock`, read with
+  `getopts` (`:inet.getopts/2`; a test seam) for the host OS family `os`.
+
+  Linux: `SO_PEERCRED`, the pid, uid and gid as of `connect()`. macOS has no
+  `SO_PEERCRED`: `LOCAL_PEERCRED` gives the uid (and groups) as of
+  `connect()`, and `LOCAL_PEERPID` the pid of the process that last used the
+  peer's socket. Any failure is `{:error, :no_peercred}`, which is a refusal.
+  """
+  @spec peer_credentials(term(), atom(), (term(), list() -> term())) ::
+          {:ok, OperatorProof.peer()} | {:error, :no_peercred}
+  def peer_credentials(sock, :darwin, getopts) do
+    with {:ok, [{:raw, @sol_local, @local_peercred, xucred}]} <-
+           getopts.(sock, [{:raw, @sol_local, @local_peercred, @xucred_bytes}]),
+         {:ok, [{:raw, @sol_local, @local_peerpid, pid}]} <-
+           getopts.(sock, [{:raw, @sol_local, @local_peerpid, 4}]),
+         {:ok, peer} <- OperatorProof.parse_local_peercred(xucred, pid) do
+      {:ok, peer}
+    else
+      _ -> {:error, :no_peercred}
+    end
+  end
+
+  def peer_credentials(sock, _os, getopts) do
+    case getopts.(sock, [{:raw, @sol_socket, @so_peercred, 12}]) do
       {:ok, [{:raw, @sol_socket, @so_peercred, bin}]} ->
         case OperatorProof.parse_peercred(bin) do
           {:ok, peer} -> {:ok, peer}

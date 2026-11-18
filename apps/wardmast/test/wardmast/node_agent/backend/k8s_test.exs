@@ -97,7 +97,6 @@ defmodule Wardmast.NodeAgent.Backend.K8sTest do
         "name" => "arb-run-#{n}",
         "image" => %{
           "tag" => "t",
-          "plan" => nil,
           "ref" => "#{Fx.registry()}/beam@sha256:#{Fx.digest()}"
         }
       })

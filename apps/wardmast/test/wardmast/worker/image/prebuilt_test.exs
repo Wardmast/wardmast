@@ -112,7 +112,10 @@ defmodule Wardmast.Worker.Image.PrebuiltTest do
         "task" => "bd-abc",
         "name" => "arb-bd-abc-1234",
         "install" => "inst1",
-        "image" => %{"tag" => plan.tag, "plan" => nil},
+        "image" => %{
+          "tag" => plan.tag,
+          "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+        },
         "cwd" => "/work/tree",
         "mounts" => [%{"kind" => "worktree", "path" => "/work/tree"}],
         "command" => ["/bin/true"]
