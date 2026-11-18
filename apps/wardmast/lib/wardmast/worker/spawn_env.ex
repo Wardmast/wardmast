@@ -141,7 +141,7 @@ defmodule Wardmast.Worker.SpawnEnv do
   def port_env(extras, provider, os \\ :os.type()) when is_list(extras) do
     provider = normalize_provider(provider)
 
-    (unset_pairs(provider) ++ drop_foreign_credentials(extras, provider))
+    (unset_pairs(provider, os) ++ drop_foreign_credentials(extras, provider))
     |> ReleaseEnv.port_env()
     |> dedupe()
     |> ensure_baseline_path(os, System.get_env("HOME"))
@@ -210,21 +210,26 @@ defmodule Wardmast.Worker.SpawnEnv do
     end)
   end
 
-  defp unset_pairs(provider) do
+  defp unset_pairs(provider, os) do
+    bus = bus_names(provider, os)
+
     System.get_env()
     |> Map.keys()
-    |> Enum.reject(&(allowed?(&1) or &1 in bus_names(provider)))
+    |> Enum.reject(&(allowed?(&1) or &1 in bus))
     |> Enum.sort()
     |> Enum.map(&{&1, false})
   end
 
   # agy's keyring exception — see the moduledoc.
-  defp bus_names("gemini"), do: if(bus_reachable?(), do: ["DBUS_SESSION_BUS_ADDRESS"], else: [])
-  defp bus_names(_), do: []
+  defp bus_names("gemini", os),
+    do: if(bus_reachable?(os), do: ["DBUS_SESSION_BUS_ADDRESS"], else: [])
+
+  defp bus_names(_, _os), do: []
 
   # A macOS Keychain is not reached over D-Bus: never pass the bus through for it.
-  defp bus_reachable?,
-    do: CredentialStore.secret_service?() and GeminiConfigDir.keyring_available?()
+  # `os` is the same host the baseline PATH is decided for, so a test can pin it.
+  defp bus_reachable?(os),
+    do: CredentialStore.secret_service?(os: os) and GeminiConfigDir.keyring_available?(os: os)
 
   defp normalize_provider(nil), do: "claude"
   defp normalize_provider(provider) when is_atom(provider), do: Atom.to_string(provider)
