@@ -102,7 +102,7 @@ defmodule Wardmast.Nodes.Placement do
   `psa_unenforced` (KH4: Pod Security `restricted` is not enforced on the namespace), under the
   same override. A request that names the `:registry` its images live in (KH13, §20.10:
   `image_registry/2`) is not placed on a cluster node whose `caps.registries` does not cover
-  it (`registry_covered?/2`), so a repo whose images are in the vstim GitLab registry never
+  it (`registry_covered?/2`), so a repo whose images are in the my-app GitLab registry never
   reaches a node that cannot pull from it. A node that reports no `caps.registries` (an older
   controller) and every machine node are not filtered. The cap is
   `Hello.effective_max_workers/2`:
@@ -189,7 +189,7 @@ defmodule Wardmast.Nodes.Placement do
   # bd-2esasx: `gemini` (agy, the Antigravity CLI) joins, per node on `caps.agy`: the node
   # advertises it only when its image carries agy (`arbiter.cli-providers`) AND the
   # antigravity login reached it. A node that says nothing has neither, so it is skipped
-  # with a named reason ("agy not available on mesaana (no credential)").
+  # with a named reason ("agy not available on my-cluster (no credential)").
   @remote_providers ["claude", "codex", "gemini"]
 
   @doc "The providers a run may be placed remotely with (`ContainerSpawn` reads the same set)."
@@ -460,7 +460,7 @@ defmodule Wardmast.Nodes.Placement do
 
   @doc """
   The one-line account of an `auto` placement, for the run's routing decision and the
-  card: `auto: mesaana had a free slot -> podman`, `auto: no node slot -> local bwrap`.
+  card: `auto: my-cluster had a free slot -> podman`, `auto: no node slot -> local bwrap`.
   `outcome` is `{:node, row}` or `{:local, why}` (`place/2`'s).
   """
   @spec backend_phrase(request(), {:node, map()} | {:local, term()}) :: String.t()
@@ -654,7 +654,7 @@ defmodule Wardmast.Nodes.Placement do
 
   # A `remote_only` agy run with no node that could ever take it: some online node is
   # healthy, and none of them is an agy node. The hold names each, so the operator reads
-  # "agy not available on mesaana (no credential)" rather than a full fleet.
+  # "agy not available on my-cluster (no credential)" rather than a full fleet.
   defp provider_unavailable(request, rows) do
     skipped = provider_skipped(request, rows)
 
@@ -677,8 +677,8 @@ defmodule Wardmast.Nodes.Placement do
 
   @doc """
   The one-line account of nodes skipped, for the run's placement record, the board and the
-  hold phrase: `remote skipped: mesaana outdated (0.2.88 < 0.2.90)`, or, for a node that
-  cannot run the run's provider, `remote skipped: agy not available on mesaana (no credential)`.
+  hold phrase: `remote skipped: my-cluster outdated (0.2.88 < 0.2.90)`, or, for a node that
+  cannot run the run's provider, `remote skipped: agy not available on my-cluster (no credential)`.
   """
   @spec skipped_phrase([map()]) :: String.t()
   def skipped_phrase(skipped) do
@@ -769,7 +769,7 @@ defmodule Wardmast.Nodes.Placement do
   end
 
   # bd-6w7usy: the online nodes that have derated themselves (thermal or memory pressure),
-  # for the hold: "held — ryan-oryx-pro thermal 96 °C".
+  # for the hold: "held — gpu-box-1 thermal 96 °C".
   defp derated(rows) do
     for row <- rows,
         row.state == :online,
@@ -824,13 +824,13 @@ defmodule Wardmast.Nodes.Placement do
   defp registry_usable?(row, registry),
     do: registry_covered?(row, registry) and registry_pullable?(row, registry)
 
-  @doc "The host of a registry reference (`registry.gitlab.com/vstim` is `registry.gitlab.com`)."
+  @doc "The host of a registry reference (`registry.gitlab.com/my-app` is `registry.gitlab.com`)."
   @spec registry_host(String.t()) :: String.t()
   def registry_host(registry), do: registry |> String.split("/", parts: 2) |> hd()
 
   @doc """
   KH13: can `row` pull images from `registry` (the repo's registry reference, e.g.
-  `registry.gitlab.com/vstim`)? True without a registry to check, for a node that does not
+  `registry.gitlab.com/my-app`)? True without a registry to check, for a node that does not
   advertise `caps.registries` (a machine node builds from a plan; an older controller
   predates the cap), and for a cluster node when one of its prefixes (each ending in `/`)
   covers `registry`.

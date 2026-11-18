@@ -12,7 +12,7 @@ defmodule Wardmast.Reviews.RemoteHead do
   ticket's own implement run had none, so a rebase whose commits no longer
   patch-match the remote's (main's `mix format` changed their context) was
   refused as diverged and parked `head_not_pushed` — on 2026-10-31 three
-  approved vstim tickets, each after a `conflict` pass on the cluster was
+  approved my-app tickets, each after a `conflict` pass on the cluster was
   interrupted and an `implement` run resumed on `local`.
 
   So every push Wardmast makes, and every time its review gate sees the remote

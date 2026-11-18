@@ -6,7 +6,7 @@ defmodule Wardmast.Worker.VisualBaselines.Config do
   `worker.repos.<repo>.visual_baselines` is merged over `worker.visual_baselines`, the repo's keys
   winning. Nothing set at either level means the feature is off (`:none`).
 
-      {"worker": {"repos": {"tonic": {"visual_baselines": {
+      {"worker": {"repos": {"app": {"visual_baselines": {
         "job": "visual",
         "artifact_path": "test-results",
         "actual_suffix": "-actual.png",

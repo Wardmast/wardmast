@@ -122,6 +122,9 @@ defmodule WardmastWeb.Router do
 
     get("/about", PageController, :home)
 
+    # Diagnostics bundle download (the About page button).
+    get("/support/bundle", SupportBundleController, :show)
+
     # bd-6umf7z: the update banner's "Update to vX.Y.Z" button. A dashboard
     # login only; deploys the release the update check offered.
     post("/release/deploy", DashboardUpdateController, :create)
@@ -397,6 +400,10 @@ defmodule WardmastWeb.Router do
 
     # Version stamp
     get("/version", VersionController, :show)
+
+    # Diagnostics bundle (`arb support bundle`); operator-only.
+    get("/support/bundle", SupportBundleController, :show)
+    post("/support/bundle", SupportBundleController, :create)
 
     # Server health (migrations, etc.)
     get("/server/migrations", ServerController, :migrations)

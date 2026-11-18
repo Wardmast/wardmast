@@ -1622,7 +1622,7 @@ defmodule Wardmast.Messages.CoordinatorNotifier do
     [
       quota_grant_cause(cause, path),
       "Fix: on the Wardmast host, from a neutral directory (e.g. `cd /tmp` — never the " <>
-        "admiral dir or a repo), run `CLAUDE_CONFIG_DIR=#{config_dir} claude auth login` " <>
+        "coordinator dir or a repo), run `CLAUDE_CONFIG_DIR=#{config_dir} claude auth login` " <>
         "and complete the browser login. Use this dedicated config dir only: logging in " <>
         "there does not touch the operator's own `~/.claude` session. The next poll " <>
         "picks the new grant up; nothing needs restarting.",

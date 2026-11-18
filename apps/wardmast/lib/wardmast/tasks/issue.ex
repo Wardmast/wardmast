@@ -1717,7 +1717,7 @@ defmodule Wardmast.Tasks.Issue do
       constraints max_length: 255, trim?: true
 
       description """
-      The repo this task belongs to, as a `repo_paths` key (e.g. "org/tonic").
+      The repo this task belongs to, as a `repo_paths` key (e.g. "org/app").
 
       Resolved at creation by `Wardmast.Tasks.Issue.Changes.ResolveRepo` —
       explicit, else the workspace's only repo, else its `default_repo`, else

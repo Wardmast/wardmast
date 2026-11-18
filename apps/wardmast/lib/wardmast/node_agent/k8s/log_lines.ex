@@ -17,7 +17,7 @@ defmodule Wardmast.NodeAgent.K8s.LogLines do
       instead of keeping a window of line hashes that a controller restart would lose.
   """
 
-  # RFC 3339: `Z`, or a `±HH:MM` offset (a kubelet in a local zone, e.g. mesaana's `-04:00`).
+  # RFC 3339: `Z`, or a `±HH:MM` offset (a kubelet in a local zone, e.g. my-cluster's `-04:00`).
   @ts ~r/\A(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?(Z|[+-]\d\d:\d\d)\z/
   @epoch "0001-01-01T00:00:00Z"
 

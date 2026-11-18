@@ -41,7 +41,7 @@
   # roots Wardmast itself allocated. Re-examine this entry the day a controller
   # or LiveView starts accepting a filename.
   #
-  # Same reasoning and same entry as the sibling codebases (tonic, vstim).
+  # Same reasoning and same entry as the sibling codebases (app, my-app).
   ignore: ["Traversal.FileModule"],
   ignore_files: [],
   version: false

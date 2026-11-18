@@ -163,7 +163,7 @@ defmodule Wardmast.Umbrella.MixProject do
         "do --app wardmast_cli --app wardmast_release_env --app wardmast_web test"
       ],
       # Static analysis + security scan. Mirrors the `mix audit` alias the
-      # sibling codebases (tonic, vstim) run. Ordered cheapest-first so a
+      # sibling codebases (app, my-app) run. Ordered cheapest-first so a
       # formatting slip fails in seconds rather than after dialyzer's PLT work.
       # `format --check-formatted` (not `format`) deliberately: audit reports,
       # it never rewrites.

@@ -33,8 +33,8 @@ against scratch clones under `/tmp`. The ticket plan is in
 3. **Per-repo dev images: yes, but keyed by toolchain, not by repo.** One
    shared base image (OS, git, build tools, `procps`, `socat`, the provider
    CLIs and `arb`), plus a thin toolchain layer per distinct `(Erlang, Elixir,
-   Node)` tuple. Wardmast and vstim today want the same tuple, so they share an
-   image; tonic wants a different one. A repo maps to an image through its
+   Node)` tuple. Wardmast and my-app today want the same tuple, so they share an
+   image; app wants a different one. A repo maps to an image through its
    `.arbiter/Containerfile` (toolchain only, built from the default branch,
    never from a worker's branch). Mise-at-start and a fat image are worse
    ([§2.1](#21-the-unit-of-an-image)).
@@ -116,9 +116,9 @@ problem was one write-escape in one provider. Three things have changed:
 
 | Option | Shape | For | Against | Verdict |
 |---|---|---|---|---|
-| **A. One image per repo** | `arbiter-dev/arbiter`, `.../vstim`, `.../tonic`, ... | Simple mental model; each repo owns its file | Wardmast and vstim want the same Erlang 28.2 and Elixir 1.19.4, so two identical builds. The CLIs and OS layer are duplicated and drift apart. Three of five repos are not BEAM repos at all (see 2.3) | **Close, but wrong unit** |
+| **A. One image per repo** | `arbiter-dev/arbiter`, `.../my-app`, `.../app`, ... | Simple mental model; each repo owns its file | Wardmast and my-app want the same Erlang 28.2 and Elixir 1.19.4, so two identical builds. The CLIs and OS layer are duplicated and drift apart. Three of five repos are not BEAM repos at all (see 2.3) | **Close, but wrong unit** |
 | **B. Shared base + toolchain layer per distinct tuple** | `base` (OS, git, procps, socat, CLIs) → `beam-1.19.4-28.2`, `beam-1.17.3-27.1.2`, `nix`, `kube` | One CLI/OS surface to patch; identical toolchains built once; layers cache | Needs a mapping from repo to tuple (a config line) | **Chosen** |
-| **C. Shared base + mise installs from `.tool-versions` at container start** | One image; the worker pays the install each run | No image per toolchain to track | Only tonic has a `.tool-versions`. Wardmast and vstim take versions from the *global* `~/.config/mise/config.toml` (elixir 1.19.4, erlang 28.2) and Wardmast's CI pins OTP 28.5, so three sources disagree already. Installing Erlang at start is minutes per run unless precompiled (not measured). Needs network at start, which `--network=none` forbids | Rejected |
+| **C. Shared base + mise installs from `.tool-versions` at container start** | One image; the worker pays the install each run | No image per toolchain to track | Only app has a `.tool-versions`. Wardmast and my-app take versions from the *global* `~/.config/mise/config.toml` (elixir 1.19.4, erlang 28.2) and Wardmast's CI pins OTP 28.5, so three sources disagree already. Installing Erlang at start is minutes per run unless precompiled (not measured). Needs network at start, which `--network=none` forbids | Rejected |
 | **D. One fat image with every runtime** | Everything, all versions | One build | ~GBs; one CVE rebuilds all; every worker gets every tool (reach the profile design wants to withhold, G14) | Rejected |
 
 Measured sizes (Debian 12 `hexpm/elixir` base, `build-essential`, `git`,
@@ -140,11 +140,11 @@ Split it by who can be trusted with the content:
 `.arbiter/Containerfile`, by Wardmast, never from a worker's branch. A worker
 that edits the file changes nothing until a human merges it. The build itself
 runs unprivileged and with the network, so it is a supply-chain surface
-(`hexpm/elixir` and the apt mirrors); pin the base by digest, as tonic already
+(`hexpm/elixir` and the apt mirrors); pin the base by digest, as app already
 does for `pgsty/silo`.
 
-tonic already has two image pipelines to reuse: `registry.gitlab.com/emricare/tonic/build_base:1.17.3`
-and `test_runner:1.17.3` (its Dockerfile and `.gitlab-ci.yml`). vstim keeps
+app already has two image pipelines to reuse: `registry.gitlab.com/acme/app/build_base:1.17.3`
+and `test_runner:1.17.3` (its Dockerfile and `.gitlab-ci.yml`). my-app keeps
 `Dockerfile.worker` and `ci/docker_files/`.
 
 ### 2.3 What each repo needs
@@ -154,17 +154,17 @@ Read from the repos on the laptop on 2026-10-02.
 | Repo | Runtimes | Services for tests | Notes |
 |---|---|---|---|
 | **wardmast** (umbrella: `wardmast_web`, `wardmast_cli`, `wardmast_release_env`) | Elixir 1.20.4, Erlang 29.1.1 (`.tool-versions`; `mix.exs` says `~> 1.20`; CI pins the same pair; was 1.19.4 / 28.2 before bd-7nl3x0). Node for assets (esbuild and tailwind binaries come from `mix`). C toolchain for `exqlite` | **None.** SQLite. `compose.yml` has a Postgres on 5433 for dev only; tests do not use it | In-container tests need `procps` (`pgrep`, used by `OsProcess` and `teardown_test.exs`), `git`, `tmux`/systemd tests are excluded by tag. `mdex_native` downloads a precompiled NIF at build, which needs network at *image* build time |
-| **vstim** (`~/dev/trading/vstim`) | Elixir `~> 1.18` (Dockerfile.worker: 1.19.4-erlang-28.2), Node (`assets/package.json`) | **Postgres 15** (compose) / **16** (`.gitlab-ci.yml`, `postgres:16-alpine`), nginx for dev only | No `.tool-versions`. Workers can reach prod through SSH today (vs-adx9r7, guardrail-profiles); under a container that reach disappears unless G14 grants it |
-| **emricare/tonic** | Elixir **1.17.3**, Erlang **27.1.2** (`.tool-versions`); Node via assets | **Postgres 15** and an S3-compatible store (`pgsty/silo`) per `docker-compose.yml` | PHI repo; its own CI image `test_runner:1.17.3`. Pinned compose uses a bind of `../tonic_database` and `../db_socket` outside the repo |
-| **emricare/tonic_device** | **Nix** (NixOS modules, `tests/` as Nix VM tests, `hosts/`, `secrets/` with age keys) | Nix VM tests need KVM and `/dev/kvm`, which a default container does not have | Not a BEAM repo. Needs a `nix` image; may be a poor fit for rootless containers (nested virtualisation, `secrets/`) |
-| **mesaana** | Kubernetes manifests (`infra/`, `namespaces/`); `kubectl`, `helm` | None for tests | Mostly docs and manifests; the container's value here is withholding cluster credentials |
+| **my-app** (`~/dev/my-app`) | Elixir `~> 1.18` (Dockerfile.worker: 1.19.4-erlang-28.2), Node (`assets/package.json`) | **Postgres 15** (compose) / **16** (`.gitlab-ci.yml`, `postgres:16-alpine`), nginx for dev only | No `.tool-versions`. Workers can reach prod through SSH today (vs-adx9r7, guardrail-profiles); under a container that reach disappears unless G14 grants it |
+| **acme/app** | Elixir **1.17.3**, Erlang **27.1.2** (`.tool-versions`); Node via assets | **Postgres 15** and an S3-compatible store (`pgsty/silo`) per `docker-compose.yml` | PHI repo; its own CI image `test_runner:1.17.3`. Pinned compose uses a bind of `../tonic_database` and `../db_socket` outside the repo |
+| **acme/app_device** | **Nix** (NixOS modules, `tests/` as Nix VM tests, `hosts/`, `secrets/` with age keys) | Nix VM tests need KVM and `/dev/kvm`, which a default container does not have | Not a BEAM repo. Needs a `nix` image; may be a poor fit for rootless containers (nested virtualisation, `secrets/`) |
+| **my-cluster** | Kubernetes manifests (`infra/`, `namespaces/`); `kubectl`, `helm` | None for tests | Mostly docs and manifests; the container's value here is withholding cluster credentials |
 
 CLIs the base image needs: `claude` (a 244 MB dynamically linked bun binary;
 ran on glibc 2.36 without change), `codex`, `agy`, `grok` (no adapter exists:
 only a disabled login recipe in `accounts/login_recipes.ex`), `gh`, `glab`
 and `arb`. `arb` is an **escript**, so it needs an Erlang/OTP at least as new
-as the one that compiled it, which a repo's own Erlang need not be (emricare
-tonic pins OTP 27; the `kube` and `nix` images have none). The base image
+as the one that compiled it, which a repo's own Erlang need not be (acme
+app pins OTP 27; the `kube` and `nix` images have none). The base image
 therefore carries an Erlang for arb alone ([§4.3](#43-arb-in-a-worker-container-bd-59m96o)).
 
 ### 2.4 Build, rebuild and versioning, laptop and EC2
@@ -575,7 +575,7 @@ mid-turn does not.
 
 `arb` is an escript compiled by the host's Erlang/OTP, and a BEAM file loads
 only on the release that compiled it or a newer one. The OTP 28 and 29 builds
-die on emricare tonic's OTP 27 (`beam/beam_load.c(150): Error loading module
+die on acme app's OTP 27 (`beam/beam_load.c(150): Error loading module
 nil_escript: corrupt atom table`, then `undefined function nil_escript:main/1`),
 and an image with no Erlang cannot run arb at all. A worker without arb still
 has the MCP tools, but not `arb message`, `arb inbox` and the rest of the CLI.
@@ -811,7 +811,7 @@ difficulty.
 | P7 | **Done (bd-d2o3xb, `Wardmast.Worker.ContainerSpawn`).** Claude under the container backend (replaces G7 bd-d2o3xb): config dir, token env, `.mcp.json`, `arb`, proxy and Wardmast bridges via G5's sockets, wrap point in `ClaudeSession`. See [§4.1](#41-claude-under-podman-p7) | 3 | P3, P5, G5 |
 | P8 | **Done (bd-50d5j6, `ContainerSpawn` `provider: "codex"`, `Codex.AuthSync`).** Codex under the container backend (replaces G8 bd-50d5j6, with bd-99emmd): per-run `CODEX_HOME`, refresh-token rotation handling. See [§4.2](#42-codex-under-podman-p8) and [Appendix F](#appendix-f-p8-codex-live-run-bd-50d5j6) | 3 | P7 |
 | P9 | Deploy-key delivery as `--secret` (the body of G16 bd-9cygoo and the per-run-agent part of G14) | 3 | P7 |
-| P10 | **Done (bd-dmcbos, `Wardmast.Worker.TestServices`).** Test services: a per-worker pod with a Postgres sidecar on the pod's `lo` for vstim and tonic (Postgres 15/16, plus an S3 store for tonic). Optional; Wardmast needs none. See [Appendix E](#appendix-e-p10-test-services-probes-bd-dmcbos) | 3 | P7 |
+| P10 | **Done (bd-dmcbos, `Wardmast.Worker.TestServices`).** Test services: a per-worker pod with a Postgres sidecar on the pod's `lo` for my-app and app (Postgres 15/16, plus an S3 store for app). Optional; Wardmast needs none. See [Appendix E](#appendix-e-p10-test-services-probes-bd-dmcbos) | 3 | P7 |
 | P11 | Re-plan the six tickets in [§7.2](#72-what-happens-to-each-guardrail-ticket): re-scope G7 and G8, shrink G3 and G14, annotate G6 and G16 | 1 | this decision |
 
 **What to do first.** P1 and P2 are independent and cheap, and P1 decides
@@ -960,8 +960,8 @@ Run 2026-10-03 on the Fedora 44 laptop (podman 5.8.7, SELinux enforcing).
 Reproduced by `test_services_podman_test.exs` (`--include podman`; needs
 `postgres:15-alpine`, `postgres:16-alpine` and `pgsty/silo` locally).
 
-`TestServices` gives a repo with a service definition (vstim: Postgres 16;
-tonic: Postgres 15 and `pgsty/silo`; others none) a pod created with
+`TestServices` gives a repo with a service definition (my-app: Postgres 16;
+app: Postgres 15 and `pgsty/silo`; others none) a pod created with
 `--network none --userns keep-id`. The services are hardened members
 (`--read-only`, `--cap-drop=all`, tmpfs state, no host mounts) and the worker
 container joins with `--pod`.
@@ -971,18 +971,18 @@ container joins with `--pod`.
 | Worker container in the pod, `psql "$DATABASE_URL"`: DDL, inserts, a read | works; `current_database()` is `vstim_test`; the container's only interface is `lo`, its uid is the host's |
 | A TCP listener on the host's `127.0.0.1` (the control connects from the host) | `nc -z` from the worker: **unreachable**. Checked by hand as well: with the host's Wardmast on 4848 and epmd on 4369 both listening, neither was reachable from a pod member |
 | The pod's Postgres from the host (`127.0.0.1:5432`) | `econnrefused`: nothing is published |
-| tonic's pod | Postgres 15 and silo (`/minio/health/ready` over `127.0.0.1:9000`) both answer the worker |
+| app's pod | Postgres 15 and silo (`/minio/health/ready` over `127.0.0.1:9000`) both answer the worker |
 | Bridge socket, pod member, `label=disable` | `psql -h <dir>` to a host unix listener connects; default label: `Permission denied`. §5.3 holds inside a pod |
 | `--userns=keep-id` on a pod member | refused (`cannot set user namespace mode when joining pod with infra container`), even when the pod has it. So the pod carries `--userns keep-id` and the worker takes no `--userns`/`--network` of its own |
 | Postgres as the host uid on a read-only root | initdb needs a writable owned `PGDATA`: a tmpfs is root-owned under keep-id, and `--tmpfs …,uid=` is rejected, so the data and socket tmpfs are mode 1777 with `PGDATA` a subdirectory; the entrypoint's `chmod` of `/var/run/postgresql` fails and is harmless. `PGHOST` cannot move the socket (the entrypoint unsets it) |
 | `podman exec <ctr> -- cmd` | runs a command named `--` (as `run … image -- cmd` does): readiness argvs carry no `--` |
 | Pod removal | `podman pod rm --force --ignore --time 0 <pod>` removes the worker container and every sidecar. `--rm` on the worker container does **not** remove the pod, so the pod has its own teardown: `ContainerSpawn.teardown/1`, a monitor-based `TestServices.Reaper` for any worker death (including `:kill`), and a boot sweep of pods whose recorded server pid is gone |
 
-What was **not** run: vstim's or tonic's own `mix test`. Neither repo's image or
+What was **not** run: my-app's or app's own `mix test`. Neither repo's image or
 deps exist in this container (no network, by design), so the suite in the test
 is a stand-in (DDL and queries through the injected `DATABASE_URL`). The first
 run of a real suite needs the repo's image (P4/P6) and a deps cache, then is
-checked by dispatching a vstim ticket with `agent.security.sandbox.backend: podman`.
+checked by dispatching a my-app ticket with `agent.security.sandbox.backend: podman`.
 
 
 ## Appendix F: P8 Codex live run (bd-50d5j6)
@@ -1017,7 +1017,7 @@ the CLI's own `:auto` sandbox was **not** run live. `socat` logs one `waitpid` w
 ## Appendix G: arb on an OTP 27 image (bd-59m96o)
 
 **The check, on a host with podman.** The opt-in test builds the real base and
-an Elixir 1.17.3 / OTP 27 toolchain image (tonic's `.tool-versions`), mounts an
+an Elixir 1.17.3 / OTP 27 toolchain image (app's `.tool-versions`), mounts an
 escript compiled by the test VM's OTP the way a dispatch mounts arb, and runs
 it with `Container.run/2`:
 
@@ -1026,7 +1026,7 @@ it with `Container.run/2`:
 It asserts that the image's `erl` is still OTP 27, that the image's own
 `escript` still fails to load the fixture (`corrupt atom table`), that `arb`
 runs it on the base's runtime, and that a base-only image with no Erlang runs
-`arb` too. By hand, after a deploy: `arb image build <tonic repo>`, then
+`arb` too. By hand, after a deploy: `arb image build <app repo>`, then
 
     podman run --rm --pull=never \
       -v ~/.wardmast/images/cli/arb-launcher-<hash>:/opt/arbiter/cli/arb:ro \
@@ -1044,7 +1044,7 @@ built this ran in a podman container with no podman of its own, so the test
 above was **not** run. Instead the image was assembled from the real layers,
 the way the generated Containerfiles build it: the amd64 layers of
 `erlang:29-slim` (OTP 29.1.1, trixie) and `elixir:1.17.3-otp-27-slim`
-(OTP 27.3.4.18, the toolchain source tonic's `.tool-versions` resolves to) were
+(OTP 27.3.4.18, the toolchain source app's `.tool-versions` resolves to) were
 fetched from Docker Hub; `/usr/local/lib/erlang` of the first went to
 `/opt/arbiter/otp` and through the prune `RUN` taken verbatim from
 `Image.base_containerfile/1` (173 MB to 120 MB); `/usr/local` of the second
@@ -1056,7 +1056,7 @@ image's `PATH` (`env -i`):
 
 | Image | Command | Result |
 |---|---|---|
-| tonic's (OTP 27 toolchain, new base) | `erl … otp_release` | `27` (27.3.4.18), Elixir 1.17.3 |
+| app's (OTP 27 toolchain, new base) | `erl … otp_release` | `27` (27.3.4.18), Elixir 1.17.3 |
 | same | `escript /opt/arbiter/cli/arb.escript version` | `Error loading module nil_escript: corrupt atom table`, `undefined function nil_escript:main/1`: the bug, still there for the image's own Erlang |
 | same | `arb version` | the CLI block, exit 0 |
 | no Erlang (`/usr/local` empty) | `arb version` | the CLI block, exit 0 |

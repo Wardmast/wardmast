@@ -150,7 +150,7 @@ defmodule Wardmast.Workflows.PRPatrol do
   # an hour — it never actually stops. A `repo` that can never resolve (e.g.
   # a forge project id threaded in where a repo_paths key was expected)
   # therefore re-files a brand new follow-up task forever, one per backoff
-  # window, piling up closed task ids indefinitely (bd-7rxwzc — the vstim
+  # window, piling up closed task ids indefinitely (bd-7rxwzc — the my-app
   # incident: 4 closed tasks for one PR in under 4 hours, still going). Once a
   # PR's consecutive dispatch-failure count reaches this bound, PRPatrol gives
   # up on it permanently: no further follow-up is filed, and one final

@@ -76,8 +76,8 @@ defmodule WardmastCli.Supervisor.LaunchdTest do
   end
 
   describe "unit_dirs/0 and unit_file_name/0" do
-    test "point at the LaunchAgents dir and the plist", %{dir: dir} do
-      assert Launchd.unit_dirs() == [dir]
+    test "point at the LaunchAgents and LaunchDaemons dirs and the plist", %{dir: dir} do
+      assert Launchd.unit_dirs() == [dir, "/Library/LaunchDaemons"]
       assert Launchd.unit_file_name() == "com.wardmast.server.plist"
     end
   end

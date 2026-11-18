@@ -233,7 +233,7 @@ defmodule Wardmast.Sessions.Layout do
   behaviour of warning rather than refusing when the checkout is unknown.
   Comparison is on expanded paths with a trailing separator so a sibling
   directory whose name merely *starts* with the checkout path
-  (`/home/ryan/dev/arbiter-sessions` vs `/home/ryan/dev/arbiter`) is not
+  (`/home/me/dev/wardmast-sessions` vs `/home/me/dev/wardmast`) is not
   mistaken for a child.
   """
   @spec outside_primary_checkout?(String.t(), String.t() | nil) :: boolean()

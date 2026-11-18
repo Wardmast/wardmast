@@ -11,7 +11,7 @@ defmodule Wardmast.Sessions.Memory do
       that doesn't rot and isn't specific to one repo.
     * `project` — mounted **only** for the session's bound workspace. A
       session bound to one workspace must not see another workspace's
-      `project` memories (a vstim session must not load arbiter internals) —
+      `project` memories (a my-app session must not load arbiter internals) —
       and a cross-workspace session (`workspace_id: nil`) gets none at all,
       since there is no single workspace to scope them to.
 

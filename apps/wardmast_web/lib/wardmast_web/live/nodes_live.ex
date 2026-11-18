@@ -1520,7 +1520,7 @@ defmodule WardmastWeb.NodesLive do
         label="Name"
         hint={if(@add.kind == "cluster", do: "required", else: "optional")}
         value={@add.form["name"].value}
-        placeholder={if(@add.kind == "cluster", do: "mesaana-k3s", else: "gpu-box-1")}
+        placeholder={if(@add.kind == "cluster", do: "my-cluster-k3s", else: "gpu-box-1")}
       />
 
       <%= if @add.kind == "cluster" do %>
@@ -1577,7 +1577,7 @@ defmodule WardmastWeb.NodesLive do
           label="Node selector"
           hint="optional, key=value,key=value"
           value={@add.form["node_selector"].value}
-          placeholder="kubernetes.io/hostname=mesanna"
+          placeholder="kubernetes.io/hostname=my-cluster"
         />
         <Forms.input
           name="pull_secret"
@@ -1593,7 +1593,7 @@ defmodule WardmastWeb.NodesLive do
           label="Registries"
           hint="optional, prefix=Secret,prefix=Secret: each registry's images use only its own pull Secret"
           value={@add.form["registries"].value}
-          placeholder="registry.gitlab.com/vstim/=gitlab-vstim,ghcr.io/ryan/=ghcr-arbiter"
+          placeholder="registry.gitlab.com/my-app/=gitlab-my-app,ghcr.io/acme/=ghcr-arbiter"
         />
         <Forms.input
           name="primary_cidrs"

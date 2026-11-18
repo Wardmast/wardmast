@@ -41,8 +41,10 @@ defmodule WardmastCli.Cmd.Doctor.Darwin do
   def darwin?(_), do: false
 
   @doc """
-  The darwin checks. Options: `:path` (the server's captured PATH) and `:tools`
-  (`%{name => resolved path | nil}`, as the server reports them).
+  The darwin checks. Options: `:path` (the server's captured PATH), `:tools`
+  (`%{name => resolved path | nil}`, as the server reports them) and `:service`
+  (`WardmastCli.Supervisor.Launchd.service_mode/0`, probed on this host; `nil`
+  when the CLI is not on the macOS host, so the plists cannot be read).
   """
   @spec checks(keyword()) :: [Result.t()]
   def checks(opts \\ []) do
@@ -78,6 +80,7 @@ defmodule WardmastCli.Cmd.Doctor.Darwin do
         "toolchain manager",
         "brew install mise"
       ),
+      service_mode(Keyword.get(opts, :service)),
       write_confinement(),
       egress()
     ]
@@ -124,6 +127,85 @@ defmodule WardmastCli.Cmd.Doctor.Darwin do
         }
     end
   end
+
+  # Agent (per-user, free tier) vs daemon (system-wide, team Mac), read from the
+  # plists on disk by `Supervisor.Launchd.service_mode/0`.
+  defp service_mode(nil) do
+    %Result{
+      id: "darwin_service_mode",
+      name: "launchd mode",
+      status: :na,
+      detail:
+        "not probed: this CLI is not on the macOS host running the server, so its launchd plists cannot be read"
+    }
+  end
+
+  defp service_mode(%{mode: :none}) do
+    %Result{
+      id: "darwin_service_mode",
+      name: "launchd mode",
+      status: :na,
+      detail:
+        "no launchd job installed (server started by hand?); `ward install service` adds one"
+    }
+  end
+
+  defp service_mode(%{mode: :agent} = svc) do
+    %Result{
+      id: "darwin_service_mode",
+      name: "launchd mode",
+      status: :ok,
+      detail:
+        "agent mode: per-user LaunchAgent (#{svc.plist}), runs as the logged-in user and starts at login"
+    }
+  end
+
+  defp service_mode(%{mode: :both} = svc) do
+    %Result{
+      id: "darwin_service_mode",
+      name: "launchd mode",
+      status: :warn,
+      detail:
+        "both a LaunchAgent and a LaunchDaemon (#{svc.plist}) are installed: two servers would fight over one port",
+      hint:
+        "Keep one: `ward install service --uninstall` (agent) or `sudo ward install service --system --uninstall` (daemon)."
+    }
+  end
+
+  defp service_mode(%{mode: :daemon} = svc) do
+    base = %Result{id: "darwin_service_mode", name: "launchd mode", status: :ok}
+
+    case daemon_problem(svc) do
+      nil ->
+        %{
+          base
+          | detail:
+              "daemon mode: system-wide LaunchDaemon (#{svc.plist}), starts at boot and runs as #{svc.user}"
+        }
+
+      {detail, hint} ->
+        %{base | status: :warn, detail: "daemon mode (#{svc.plist}): " <> detail, hint: hint}
+    end
+  end
+
+  defp daemon_problem(%{user: user}) when user in [nil, "", "root"] do
+    {"no unprivileged UserName, so launchd would run the server as root",
+     "Re-run `sudo ward install service --system --service-user <dedicated account>`."}
+  end
+
+  defp daemon_problem(%{owner_uid: uid}) when is_integer(uid) and uid != 0 do
+    {"the plist is not root-owned, so launchd will refuse to load it",
+     "sudo chown root:wheel the plist, or re-run `sudo ward install service --system`."}
+  end
+
+  defp daemon_problem(%{file_mode: mode}) when is_integer(mode) do
+    if Bitwise.band(mode, 0o022) != 0 do
+      {"the plist is group/world-writable (mode #{Integer.to_string(mode, 8)}), so launchd will refuse to load it",
+       "sudo chmod 644 the plist, or re-run `sudo ward install service --system`."}
+    end
+  end
+
+  defp daemon_problem(_), do: nil
 
   defp write_confinement do
     %Result{

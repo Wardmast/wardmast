@@ -11,8 +11,8 @@ defmodule Wardmast.Worker.GitCredential do
       "git_credentials": {
         "legacy_operator": false,
         "repos": {
-          "tonic":  {"kind": "deploy_key", "key_secret": "TONIC_DEPLOY_KEY"},
-          "vstim":  {"kind": "github_app", "app_id": "123", "installation_id": "456",
+          "app":  {"kind": "deploy_key", "key_secret": "APP_DEPLOY_KEY"},
+          "my-app":  {"kind": "github_app", "app_id": "123", "installation_id": "456",
                      "private_key_secret": "ARBITER_APP_KEY"},
           "infra":  {"kind": "token", "token_secret": "INFRA_TOKEN", "host": "gitlab.com",
                      "username": "oauth2"},

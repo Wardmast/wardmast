@@ -1,7 +1,7 @@
 defmodule Wardmast.Machine.Hold do
   @moduledoc """
   Names the self-derated machines behind a board hold (bd-6w7usy): "held —
-  ryan-oryx-pro thermal 96 °C". `Wardmast.Board.Snapshot` asks it which machines
+  gpu-box-1 thermal 96 °C". `Wardmast.Board.Snapshot` asks it which machines
   a workspace's placement mode could have used (`derated/2`) and, when the
   workspace's capacity is exhausted, rewrites the note with them (`note/2`).
 

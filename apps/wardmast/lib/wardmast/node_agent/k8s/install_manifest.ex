@@ -301,7 +301,7 @@ defmodule Wardmast.NodeAgent.K8s.InstallManifest do
        else:
          {:error,
           "must be comma separated prefix=secret pairs, each prefix a registry path ending in / " <>
-            "(registry.gitlab.com/vstim/=gitlab-vstim), listed once"}
+            "(registry.gitlab.com/my-app/=gitlab-my-app), listed once"}
   end
 
   defp registry_entry?(%{prefix: prefix, pull_secret: secret}) do

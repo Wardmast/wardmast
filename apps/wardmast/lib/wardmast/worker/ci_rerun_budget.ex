@@ -8,7 +8,7 @@ defmodule Wardmast.Worker.CiRerunBudget do
   (`merge.ci.triage_rerun_budget`, 2), the cancelled-run re-runs (2), the
   not-the-merge-head hold re-run (1), the ReviewGate's CI-wait re-run and its
   no-change re-run — and the counters do not know about each other, so on one
-  commit they add up. In the 7 days to 2026-11-05 vstim ran 99 pipelines on a
+  commit they add up. In the 7 days to 2026-11-05 my-app ran 99 pipelines on a
   commit that had already failed (10,438 runner-minutes; 42 passed the second
   time, 57 failed again). This module is the shared bound: all sites ask
   `check/3` before they re-run and call `record/3` once the forge accepted it.
