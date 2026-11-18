@@ -149,7 +149,6 @@ defmodule WardmastCli.Cmd.Doctor.DarwinTest do
   end
 
   describe "Checks.run(os: darwin)" do
-
     test "Linux-only checks report n/a, not fail" do
       stub_routes([])
       results = Checks.run(os: @darwin, spawn: :skip, darwin: darwin_opts())

@@ -180,7 +180,10 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
     IO.puts("  unloaded: #{if disabled?, do: "yes", else: "was not loaded"}")
     IO.puts("  removed:  #{if removed?, do: path, else: "no plist at #{path}"}")
     IO.puts("")
-    IO.puts("The service account, its data home and #{Plist.daemon_log_dir()} were left in place.")
+
+    IO.puts(
+      "The service account, its data home and #{Plist.daemon_log_dir()} were left in place."
+    )
   end
 
   def emit_uninstalled_launchd(:json, path, disabled?, removed?) do

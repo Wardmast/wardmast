@@ -158,14 +158,25 @@ defmodule WardmastCli.Cmd.InstallServiceLaunchdDaemonTest do
 
     test "--service-user picks a different account", ctx do
       Process.put(:bd2_cmd_runner, fn
-        "id", ["-u"], _ -> {"0\n", 0}
-        "id", ["-u", "ci"], _ -> {"401\n", 0}
-        "id", ["-gn", "ci"], _ -> {"staff\n", 0}
-        "dscl", [".", "-read", "/Users/ci", _], _ -> {"NFSHomeDirectory: #{ctx.service_home}\n", 0}
-        _, _, _ -> {"", 0}
+        "id", ["-u"], _ ->
+          {"0\n", 0}
+
+        "id", ["-u", "ci"], _ ->
+          {"401\n", 0}
+
+        "id", ["-gn", "ci"], _ ->
+          {"staff\n", 0}
+
+        "dscl", [".", "-read", "/Users/ci", _], _ ->
+          {"NFSHomeDirectory: #{ctx.service_home}\n", 0}
+
+        _, _, _ ->
+          {"", 0}
       end)
 
-      assert {_, _, 0} = capture(fn -> InstallService.run(["--system", "--service-user", "ci"]) end)
+      assert {_, _, 0} =
+               capture(fn -> InstallService.run(["--system", "--service-user", "ci"]) end)
+
       assert File.read!(plist_path(ctx)) =~ "<key>UserName</key>\n  <string>ci</string>"
     end
 
@@ -205,7 +216,9 @@ defmodule WardmastCli.Cmd.InstallServiceLaunchdDaemonTest do
       record_cmds(ctx)
 
       assert {_, err, 1} =
-               capture(fn -> InstallService.run(["--system", "--service-user", "nobody_here"]) end)
+               capture(fn ->
+                 InstallService.run(["--system", "--service-user", "nobody_here"])
+               end)
 
       assert err =~ "nobody_here"
       assert err =~ "does not exist"

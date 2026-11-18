@@ -126,11 +126,10 @@ defmodule WardmastCli.Cmd.InstallService do
         true ->
           Restart.guard_worker_session!()
           Restart.guard_active_workers!(force)
-          
+
           if launchd?,
             do: LaunchdInstall.install(scope, mode, service_user: opts[:service_user]),
             else: install(scope, mode)
-
       end
     end)
   end

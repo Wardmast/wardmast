@@ -89,12 +89,16 @@ defmodule WardmastCli.Cmd.InstallService.Launchd do
     Supervisor.impl().daemon_reload(:system)
     Supervisor.impl().enable_now(:system)
 
-    Formatter.emit_installed_launchd_daemon(mode, %{
-      path: path,
-      account: account,
-      arbiter_home: arbiter_home,
-      log_path: Plist.daemon_log_path()
-    }, secrets)
+    Formatter.emit_installed_launchd_daemon(
+      mode,
+      %{
+        path: path,
+        account: account,
+        arbiter_home: arbiter_home,
+        log_path: Plist.daemon_log_path()
+      },
+      secrets
+    )
   end
 
   @spec uninstall(:user | :system, :text | :json) :: :ok

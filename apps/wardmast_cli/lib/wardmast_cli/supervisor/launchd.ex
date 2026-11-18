@@ -214,8 +214,7 @@ defmodule WardmastCli.Supervisor.Launchd do
     if active_scope() == :system and not root?() do
       # launchd answers a non-root kickstart of the system domain with a bare
       # "Operation not permitted"; say what to do instead.
-      {:error, "restarting the system-wide LaunchDaemon needs root",
-       "Run `#{restart_cmd()}` (or `sudo ward restart`)."}
+      {:error, "restarting the system-wide LaunchDaemon needs root", "Run `#{restart_cmd()}`."}
     else
       kickstart()
     end
