@@ -119,8 +119,7 @@ defmodule Wardmast.Sessions.NamingDarwinTest do
     @tag :tmp_dir
     test "creates the darwin short dir and its parent private (0700)", %{tmp_dir: tmp} do
       Application.put_env(:wardmast, :sessions_os, :darwin)
-      System.put_env("WARDMAST_SOCKET_ROOT", Path.join(tmp, "arb-root"))
-      on_exit(fn -> System.delete_env("WARDMAST_SOCKET_ROOT") end)
+      put_env_restoring("WARDMAST_SOCKET_ROOT", Path.join(tmp, "arb-root"))
 
       assert {:ok, dir} = Naming.ensure_socket_dir()
       assert dir == Path.join([tmp, "arb-root", "sessions"])
