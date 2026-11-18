@@ -4,8 +4,11 @@ defmodule WardmastCli.Cmd.InstallService do
   unit so the Wardmast stack comes up automatically at machine boot.
 
   On macOS the same command installs a per-user launchd LaunchAgent instead
-  (`Cmd.InstallService.Launchd`; dev-mode checkout only, no `--system`);
-  everything below about systemd and `systemctl` describes the Linux path.
+  (`Cmd.InstallService.Launchd`), or with `--system` a system-wide LaunchDaemon
+  for a shared team Mac: `sudo ward install service --system [--service-user
+  NAME]` (default `_wardmast`; the account must already exist, release mode
+  only, runs as that account at boot). Everything below about systemd and
+  `systemctl` describes the Linux path.
 
   Two modes, chosen automatically from the resolved project root (the same
   root `arb start` resolves via `ARB_HOME` / the recorded home / a directory
@@ -93,7 +96,13 @@ defmodule WardmastCli.Cmd.InstallService do
   alias WardmastCli.Output
   alias WardmastCli.Supervisor
 
-  @switches [system: :boolean, uninstall: :boolean, json: :boolean, force: :boolean]
+  @switches [
+    system: :boolean,
+    uninstall: :boolean,
+    json: :boolean,
+    force: :boolean,
+    service_user: :string
+  ]
 
   @logrotate_service_name "wardmast-logrotate.service"
 
@@ -117,7 +126,11 @@ defmodule WardmastCli.Cmd.InstallService do
         true ->
           Restart.guard_worker_session!()
           Restart.guard_active_workers!(force)
-          if launchd?, do: LaunchdInstall.install(scope, mode), else: install(scope, mode)
+          
+          if launchd?,
+            do: LaunchdInstall.install(scope, mode, service_user: opts[:service_user]),
+            else: install(scope, mode)
+
       end
     end)
   end

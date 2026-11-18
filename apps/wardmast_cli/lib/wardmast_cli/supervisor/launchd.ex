@@ -85,7 +85,17 @@ defmodule WardmastCli.Supervisor.Launchd do
     end
   end
 
+  @doc "Log directory of the LaunchDaemon; `:bd3_launchd_log_dir` seam for tests."
+  @spec daemon_log_dir() :: Path.t()
+  def daemon_log_dir do
+    case Process.get(:bd3_launchd_log_dir) do
+      dir when is_binary(dir) -> dir
+      _ -> Plist.daemon_log_dir()
+    end
+  end
+
   @doc "Path of the per-user LaunchAgent plist."
+
   @spec agent_plist_path() :: Path.t()
   def agent_plist_path, do: Path.join(plist_dir(), Plist.file_name())
 

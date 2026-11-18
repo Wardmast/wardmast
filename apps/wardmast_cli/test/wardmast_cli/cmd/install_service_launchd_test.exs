@@ -152,10 +152,10 @@ defmodule WardmastCli.Cmd.InstallServiceLaunchdTest do
       refute Enum.any?(cmds, fn {c, _} -> c in ["systemctl", "loginctl"] end)
     end
 
-    test "--system is refused" do
+    test "--system without root is refused (the LaunchDaemon install needs root)" do
       record_cmds()
       assert {_, err, 1} = capture(fn -> InstallService.run(["--system"]) end)
-      assert err =~ "--system"
+      assert err =~ "needs root"
     end
   end
 
