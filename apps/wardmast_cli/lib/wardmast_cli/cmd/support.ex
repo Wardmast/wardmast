@@ -11,9 +11,9 @@ defmodule WardmastCli.Cmd.Support do
   Needs an operator token (`GET /api/support/bundle`).
   """
 
+  alias WardmastCli.{ArgParser, Client, Output}
   alias WardmastCli.Cmd.Doctor
   alias WardmastCli.Cmd.Doctor.Formatter
-  alias WardmastCli.{ArgParser, Client, Output}
 
   def run(argv) do
     if Output.help?(argv) do
