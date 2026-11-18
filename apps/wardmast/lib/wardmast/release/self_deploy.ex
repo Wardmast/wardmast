@@ -173,6 +173,9 @@ defmodule Wardmast.Release.SelfDeploy do
     plist = Path.join(home, unit <> ".plist")
 
     with {:ok, domain} <- launchd_domain(),
+         # A near-simultaneous duplicate request must be refused, never allowed to
+         # `bootout` (SIGTERM) the deploy the first request just started.
+         :ok <- ensure_label_idle(unit),
          :ok <- write_plist(plist, plist_xml(unit, tag, home)),
          # A finished job lingers loaded; it must go before the label can be reused.
          _ = run("launchctl", ["bootout", "#{domain}/#{unit}"]),
@@ -183,14 +186,36 @@ defmodule Wardmast.Release.SelfDeploy do
 
       {:ok, %{unit: unit, tag: tag}}
     else
+      {:error, :already_running} ->
+        {:error, :already_running}
+
       {:error, reason} ->
         {:error,
          {:launch_failed, scrub_message("could not prepare launchd job: #{inspect(reason)}")}}
 
-      {out, _code} ->
-        message = scrub_message(out)
-        Logger.warning("Wardmast.Release.SelfDeploy: launchctl bootstrap failed: #{message}")
-        {:error, {:launch_failed, message}}
+      {out, code} ->
+        classify_bootstrap_failure(out, code)
+    end
+  end
+
+  # `launchctl list <label>` prints the job's dict (with `"PID" = N;` while it
+  # runs) and exits non-zero when no such job is loaded.
+  defp ensure_label_idle(unit) do
+    case run("launchctl", ["list", unit]) do
+      {out, 0} -> if out =~ ~r/"PID"\s*=\s*\d+/, do: {:error, :already_running}, else: :ok
+      _ -> :ok
+    end
+  end
+
+  # Losing the bootstrap race for the same label reads as "already running",
+  # matching `classify_failure/1` on the systemd path.
+  defp classify_bootstrap_failure(out, code) do
+    if code == 17 or out =~ ~r/already (loaded|bootstrapped)/i do
+      {:error, :already_running}
+    else
+      message = scrub_message(out)
+      Logger.warning("Wardmast.Release.SelfDeploy: launchctl bootstrap failed: #{message}")
+      {:error, {:launch_failed, message}}
     end
   end
 
