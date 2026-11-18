@@ -259,7 +259,7 @@ defmodule Wardmast.Quota.Gate do
   `{account, workspace}` resolves each setting `min(account, workspace)` —
   the account's number is a floor nobody can raise, and a workspace may only
   tighten it. This is how an operator expresses priority between workspaces
-  sharing one budget ("`vstim` stops at 70% so `default` can run to 90%").
+  sharing one budget ("`my-app` stops at 70% so `default` can run to 90%").
 
   A bare `Workspace` (or `nil`) is still accepted and resolves workspace-only,
   which is exactly pre-P7 behaviour for the surfaces whose own re-key is a

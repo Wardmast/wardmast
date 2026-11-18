@@ -307,7 +307,7 @@ defmodule Wardmast.Worker.Image.Registry do
 
   @doc """
   Whether anyone can read `repository` (a name under the registry, e.g.
-  `vstim/worker`) without a login: `:public`, `:private`, or `{:unknown, reason}`
+  `my-app/worker`) without a login: `:public`, `:private`, or `{:unknown, reason}`
   when the registry did not give a usable answer (never `:public` on a guess).
 
   An unauthenticated `GET /v2/<repository>/tags/list`. GitLab and GHCR answer

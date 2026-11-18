@@ -95,6 +95,44 @@ defmodule Wardmast.Env do
   def read(@prefix <> _ = name), do: get(name)
   def read(name), do: System.get_env(name)
 
+  @default_port 4848
+
+  @doc """
+  The one place the Wardmast port is decided: `WARDMAST_PORT` (legacy
+  `ARB_PORT`/`ARBITER_PORT`), default 4848. The `arb` client default, `arb
+  doctor`, the MCP URL and the `.mcp.json` rendering derive from this.
+
+  Deliberately NOT the bare `PORT`: host workers get a task-scoped `PORT` for
+  their own dev server, and operator shells export `PORT` for unrelated apps,
+  so the client must never aim at it. Only the server's own bind
+  (`server_port/0`) also honours `PORT`. An unset, empty or non-numeric value
+  means the default.
+  """
+  @spec port() :: pos_integer()
+  def port, do: parse_port(get(@prefix <> "PORT")) || @default_port
+
+  @doc """
+  The port the server binds: `WARDMAST_PORT`, else the conventional `PORT`
+  (Phoenix/PaaS), else 4848. Server-side only (`config/runtime.exs`).
+  """
+  @spec server_port() :: pos_integer()
+  def server_port do
+    parse_port(get(@prefix <> "PORT")) || parse_port(System.get_env("PORT")) || @default_port
+  end
+
+  defp parse_port(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {port, ""} when port > 0 -> port
+      _ -> nil
+    end
+  end
+
+  defp parse_port(_), do: nil
+
+  @doc "The loopback base URL for `port/0` (the `arb` client's default host)."
+  @spec default_base_url() :: String.t()
+  def default_base_url, do: "http://127.0.0.1:#{port()}"
+
   @doc "Forget which deprecations were already logged. Test seam."
   @spec reset_warnings() :: :ok
   def reset_warnings do

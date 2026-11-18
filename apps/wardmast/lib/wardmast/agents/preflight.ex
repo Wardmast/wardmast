@@ -80,7 +80,7 @@ defmodule Wardmast.Agents.Preflight do
   ## Where the probe runs (bd-svczq4)
 
   `Port.open` carried no `:cd`, so the probe inherited the BEAM's cwd — on the
-  dogfooded host, `/home/ryan/dev/arbiter`, the live checkout Phoenix
+  dogfooded host, `/home/me/dev/wardmast`, the live checkout Phoenix
   hot-reloads from. An agy probe's generated settings carry
   `toolPermission: "always-proceed"`; the failing run only *read* six files,
   but nothing in the argv stopped the next one writing, and a write there has

@@ -5,10 +5,10 @@ defmodule Wardmast.Worker.Image.RepoConfig do
   per-repo wins (the resolution `Wardmast.Worker.SeedPaths.effective/2` gives every
   per-repo `worker.*` key).
 
-      {"worker": {"repos": {"vstim": {"image": {
+      {"worker": {"repos": {"my-app": {"image": {
         "source": "generated",       // auto (default) | containerfile | generated | prebuilt
         "ref": "…",                  // prebuilt only; per repo only
-        "registry": "registry.example.com/vstim",
+        "registry": "registry.example.com/my-app",
         "credentials_ref": "secret:KEY",
         "pull_credentials_ref": "secret:READ_KEY", // SI4: what a machine node pulls with
         "public_ok": false,          // allow a registry that answers anonymous reads

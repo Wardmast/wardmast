@@ -2289,7 +2289,7 @@ defmodule Wardmast.Worker.Watchdog do
   # head, a fix on the base branch followed by a fresh pipeline, or a new head
   # (which the stale-SHA guard in `detached_merge/1` still has to accept) can
   # all turn it green, and nobody attached to the PR will tell us. Giving up
-  # here was the v0.1.72 regression — emricare/tonic !292 sat green and
+  # here was the v0.1.72 regression — acme/app !292 sat green and
   # unmerged for half an hour after an infra failure cleared, because the
   # retry had paged "abandoned" on the red pipeline and latched the stamp.
   #
@@ -6441,7 +6441,7 @@ defmodule Wardmast.Worker.Watchdog do
 
   # bd-az0dcu. The hand-off bounds, per workspace: `merge.train_ci_wait_ms` (how
   # long the head may run CI on one head SHA, queued time excluded, before the
-  # next MR takes over; default 240 polls, two hours at the 30s poll, vstim's CI
+  # next MR takes over; default 240 polls, two hours at the 30s poll, my-app's CI
   # queue) and `merge.train_ready_ticks` (polls a head may report itself ready
   # to merge without merging).
   defp train_ci_wait_ticks(state) do
@@ -7969,7 +7969,7 @@ defmodule Wardmast.Worker.Watchdog do
   # bd-ch9pmk / #1614. Is the head this poll reported provably older than what
   # this worker put on the branch?
   #
-  # The captured incidents (bd-4fbpto / arbiter #1607, vs-bdrbp0 / vstim !219)
+  # The captured incidents (bd-4fbpto / arbiter #1607, vs-bdrbp0 / my-app !219)
   # both failed an APPROVED fix round because the guard ran within seconds of
   # the push that carried the fix-round commits:
   #

@@ -67,13 +67,13 @@ carries the auto-refresh commit, which the heuristic refuses, so the normal fix 
 | `ignore_paths` | globs (`*`, `**`, `?`) of files that never render a page; other own changes block the refresh |
 | `max_snapshots` | refuse to refresh more than this many at once (default 50) |
 
-### Example: tonic (GitLab)
+### Example: app (GitLab)
 
 ```json
 {
   "worker": {
     "repos": {
-      "tonic": {
+      "app": {
         "visual_baselines": {
           "job": "visual",
           "artifact_path": "test/visual/test-results",
@@ -93,7 +93,7 @@ The baseline directory follows Playwright's default `snapshotPathTemplate`
 (`{arg}-{projectName}-{platform}{ext}`, e.g. `app.visual.spec.ts/patient-summary-mobile-dark-linux.png`);
 actuals are `test/visual/test-results/<test>-<project>[-retryN]/<arg>-actual.png`. The `playwright`
 layout reads the project from the results directory name. `artifact_path` must be the
-directory the repo's `visual` job lists under `artifacts:paths` (tonic: `test/visual/test-results/`,
+directory the repo's `visual` job lists under `artifacts:paths` (app: `test/visual/test-results/`,
 with `when: on_failure`, which satisfies the upload-on-failure requirement below). For GitHub add
 `"artifact": "<name the workflow uploads>"`; Actions artifacts belong to a workflow run,
 not a job.

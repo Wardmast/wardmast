@@ -74,7 +74,7 @@ defmodule Wardmast.Umbrella.MixProject do
         applications: [wardmast: :permanent, wardmast_web: :permanent],
         include_executables_for: [:unix],
         version: @version,
-        steps: [:assemble, &restrict_cookie/1]
+        steps: [:assemble, &restrict_cookie/1, &ship_no_dot_erlang_boot/1]
       ]
     ]
   end
@@ -86,6 +86,19 @@ defmodule Wardmast.Umbrella.MixProject do
   # build owner-only. env.sh re-tightens it on every start too.
   defp restrict_cookie(release) do
     File.chmod!(Path.join(release.path, "releases/COOKIE"), 0o600)
+    release
+  end
+
+  # bd-d5mg29: an escript boots `no_dot_erlang` from <release>/bin, which a
+  # bare release does not ship, so `ward` died on any box without a system
+  # Erlang. start_clean.boot is that boot script (it needs the RELEASE_LIB
+  # boot var, which the bin/ward launcher sets).
+  defp ship_no_dot_erlang_boot(release) do
+    File.cp!(
+      Path.join([release.path, "releases", release.version, "start_clean.boot"]),
+      Path.join([release.path, "bin", "no_dot_erlang.boot"])
+    )
+
     release
   end
 
@@ -150,7 +163,7 @@ defmodule Wardmast.Umbrella.MixProject do
         "do --app wardmast_cli --app wardmast_release_env --app wardmast_web test"
       ],
       # Static analysis + security scan. Mirrors the `mix audit` alias the
-      # sibling codebases (tonic, vstim) run. Ordered cheapest-first so a
+      # sibling codebases (app, my-app) run. Ordered cheapest-first so a
       # formatting slip fails in seconds rather than after dialyzer's PLT work.
       # `format --check-formatted` (not `format`) deliberately: audit reports,
       # it never rewrites.

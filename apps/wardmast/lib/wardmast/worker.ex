@@ -2811,7 +2811,7 @@ defmodule Wardmast.Worker do
   # round already parked the author reports that approval to a worker whose run
   # finished :failed. Refusing it there froze the task on the stale rejection:
   # the branch had a passing re-review and green CI, but nothing ever handed it
-  # to the merger, so the MR sat open until a human merged it by hand (vstim
+  # to the merger, so the MR sat open until a human merged it by hand (my-app
   # vs-33ulbf). Reconcile forward instead — but ONLY when the rejection is the
   # sole reason this run failed. A run that failed for any other reason (a
   # merge conflict, a stopped subprocess) must not be resurrected by a stray

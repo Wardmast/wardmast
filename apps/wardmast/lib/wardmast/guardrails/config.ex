@@ -6,7 +6,7 @@ defmodule Wardmast.Guardrails.Config do
       "guardrails": {
         "bindings": {"prod_read": {"grant_by": "coordinator", "min_tier": "privileged", ...}},
         "defaults": {"permissions": ["network:repo.hex.pm"]},
-        "repos":    {"tonic": {"defaults": {...}, "subjects": [...]}},
+        "repos":    {"app": {"defaults": {...}, "subjects": [...]}},
         "subjects": [{"match": {"provider": "antigravity"}, "max_tier": "probation"}]
       }
 

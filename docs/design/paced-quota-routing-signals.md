@@ -137,9 +137,9 @@ consequences:
 
 | Item | Value |
 |---|---|
-| Workspaces | `default`: `routing.policy: by_difficulty`, `provider_selection: most_quota`, `quota.threshold_mode: paced`, `review_agent.cross_family: true`, `agent.type: [claude, gemini]`. `emricare` and `vstim`: `by_difficulty`, paced, Claude only |
+| Workspaces | `default`: `routing.policy: by_difficulty`, `provider_selection: most_quota`, `quota.threshold_mode: paced`, `review_agent.cross_family: true`, `agent.type: [claude, gemini]`. `acme` and `my-app`: `by_difficulty`, paced, Claude only |
 | Accounts | `claude/default`: enabled, `quota_config {threshold_mode: paced, weekly_threshold: 0.99}`, `max_concurrent 2`. `antigravity/default`: **disabled**, `max_concurrent 0` (the operator keeps agy paused, bd-1e80nw). `codex/default`: enabled, attached for metering only, with no role position |
-| Implementer candidates | One in every workspace, Claude. In `default` that's because agy is disabled and Codex has no role position; in `emricare` and `vstim`, because `agent.type` is Claude only |
+| Implementer candidates | One in every workspace, Claude. In `default` that's because agy is disabled and Codex has no role position; in `acme` and `my-app`, because `agent.type` is Claude only |
 | Loop | A Stage 3 canary is running in `default` at D3 (`standard/high` against `premium/high`, started 2026-09-29, `canary_auto_promote: false`) |
 | Claude snapshot, 13:56Z | 5h: 0.05 used, ceiling 0.35, headroom 0.30. 7d: 0.38 used against a paced line of 0.416, headroom **0.036**, `:approaching` |
 

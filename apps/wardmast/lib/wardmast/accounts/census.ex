@@ -69,7 +69,7 @@ defmodule Wardmast.Accounts.Census do
                 "suggested": false,
                 "source": {
                   "type": "workspace_worker_env",
-                  "workspaces": ["default", "emricare"]
+                  "workspaces": ["default", "acme"]
                 }
               }
             ],

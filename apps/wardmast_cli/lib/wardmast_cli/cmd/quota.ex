@@ -29,7 +29,7 @@ defmodule WardmastCli.Cmd.Quota do
   one budget and now share one row. Each block is therefore headed by the
   account, the provider it is metered under, and the workspaces on it:
 
-      Anthropic quota (account personal-max · claude · 3 workspaces: default, emricare, vstim):
+      Anthropic quota (account personal-max · claude · 3 workspaces: default, acme, my-app):
 
   and `recent spend (30d)` is the **account** total, with the per-workspace
   breakdown on the line beneath it.

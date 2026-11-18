@@ -83,8 +83,8 @@ side effects of other config. The live configuration, read on 2026-09-30:
 
 | Rule | How it's expressed today | What actually enforces it |
 |---|---|---|
-| emricare stays on Claude, because tonic handles PHI | `agent.type: ["claude"]` on emricare. The claude, antigravity and codex accounts are all attached there with no role positions, so both roles fall back to `agent.type` | Nothing per ticket. If agy were ever added to `agent.type`, or given a role position, it would get tonic tickets too |
-| vstim gets no agy, because workers there can reach the prod DB and broker credentials | `agent.type: ["claude"]` on vstim, with the same all-nil role positions | Nothing stops a *Claude* worker from reaching prod either. vs-adx9r7's worker ran read-only SQL on prod over SSH on 09-29, and the ticket's "investigate prod read-only" constraint was prose |
+| acme stays on Claude, because app handles PHI | `agent.type: ["claude"]` on acme. The claude, antigravity and codex accounts are all attached there with no role positions, so both roles fall back to `agent.type` | Nothing per ticket. If agy were ever added to `agent.type`, or given a role position, it would get app tickets too |
+| my-app gets no agy, because workers there can reach the prod DB and broker credentials | `agent.type: ["claude"]` on my-app, with the same all-nil role positions | Nothing stops a *Claude* worker from reaching prod either. vs-adx9r7's worker ran read-only SQL on prod over SSH on 09-29, and the ticket's "investigate prod read-only" constraint was prose |
 | agy works only on low-sensitivity arbiter tickets | Coordinator judgment at dispatch. The default workspace has `agent.type: ["claude", "gemini"]` with `provider_selection: most_quota` | Nothing. `most_quota` routes any default-workspace ticket to agy when agy has the most headroom |
 
 Incidents this design has to answer:
@@ -278,11 +278,11 @@ subject that matches no rule is `quarantine`, the fail-safe default.
 [
   %{match: %{provider: "claude"}, tier: :privileged},
   %{match: %{provider: "antigravity", family: :anthropic}, tier: :probation,
-    scope: %{"default" => ["arbiter", "mesaana"]}},
+    scope: %{"default" => ["arbiter", "my-cluster"]}},
   %{match: %{provider: "antigravity", model: "gemini-*-flash-*"}, tier: :quarantine,
     scope: %{"default" => ["arbiter"]}},
   %{match: %{provider: "antigravity"}, tier: :probation,
-    scope: %{"default" => ["arbiter", "mesaana"]}},
+    scope: %{"default" => ["arbiter", "my-cluster"]}},
   %{match: %{provider: "codex"}, tier: :quarantine}
 ]
 ```
@@ -543,7 +543,7 @@ run covered each one. The allowlist was `example.com:443` and
 A permission is either an **action** (reach the worker gets) or a **data
 class** (a restriction on who may see the worktree). Each workspace
 **binds** each permission it uses (§7): the binding says what `prod_read`
-*means* in vstim.
+*means* in my-app.
 
 | Permission | Kind | Projected at dispatch, only when declared | Default `min_tier` | Default `grant_by` |
 |---|---|---|---|---|
@@ -592,8 +592,8 @@ the posture shows it.
 1. **Workspace and repo defaults, at creation.** A `ResolvePermissions`
    change runs on every create path, the way `ResolveRepo` does
    (`apps/wardmast/lib/wardmast/tasks/issue.ex:212-215`). It records `defaulted` events. For example,
-   `guardrails.repos.tonic.defaults.permissions: ["phi_data"]`, and the same
-   for `tonic_device`, makes every emricare tonic ticket carry `phi_data`
+   `guardrails.repos.app.defaults.permissions: ["phi_data"]`, and the same
+   for `app_device`, makes every acme app ticket carry `phi_data`
    without anyone remembering to add it.
 2. **The filer, by hand:**
    - the CLI: `arb ticket create --permission prod_read --permission network:api.tradovate.com`;
@@ -853,14 +853,14 @@ That name was chosen so they can't be confused with
       "tracker_write": {"token_secret": "github_worker_token"}
     },
     "defaults": {"permissions": []},
-    "repos": {"tonic": {"defaults": {"permissions": ["phi_data"]}}},
+    "repos": {"app": {"defaults": {"permissions": ["phi_data"]}}},
     "subjects": [{"match": {"provider": "antigravity"}, "max_tier": "probation"}]
   },
   "agent": {"security": {"sandbox": {"egress": "allowlist", "allow_hosts": ["repo.hex.pm", "builds.hex.pm"]}}}
 }
 ```
 
-The hosts and secret names above are placeholders, not vstim's real ones.
+The hosts and secret names above are placeholders, not my-app's real ones.
 
 ### 7.2 Composition with `security.mode` and repo overrides
 
@@ -932,7 +932,7 @@ shows `permissions` with their provenance, plus each run's
 
 ## 9. Rollout and ticket plan
 
-**Egress comes first,** because agy can't go near vstim without it. But
+**Egress comes first,** because agy can't go near my-app without it. But
 egress can't be trusted while §2.1's escape is open, so Phase 0 comes
 before it. Each ticket's type is one of:
 
@@ -970,7 +970,7 @@ before it. Each ticket's type is one of:
 | G18 | `Loop.SubjectStats` (shared with bd-9ck2a7) and `Loop.Trust`: records, automatic suspension and demotion with coordinator confirm or dismiss, the operator-only `trust_promotion` PendingWrite kind, `arb trust show` / `arb trust promote` (bd-8381tk's operator proof, with TTY confirmation as the fallback; refused over MCP), and a dashboard view | 3 | G11, G17, bd-8381tk | loop |
 | G19 | **Implemented (bd-c5kggd); see [worker-security](../worker-security.md#per-tier-spend-caps-bd-c5kggd-g19).** Per-tier spend caps: token and wall-clock caps that park and escalate for `quarantine`/`probation`, and BudgetPatrol paging for higher tiers. Calibrated from the ledger | 2 | G11 | routing |
 | **Phase 4: operator configuration** (actions, not worker tickets) | | | | |
-| G20 | Assign the initial tiers (§3.1 proposal) and declare account data agreements. Write the vstim bindings (`prod_read`, `prod_ssh`, broker `secrets:`) and the emricare tonic `phi_data` defaults. Opt workspaces into `egress: allowlist` after a learn-mode week. Only then attach agy for non-prod vstim tickets | — | G13, G14, G10 | operator |
+| G20 | Assign the initial tiers (§3.1 proposal) and declare account data agreements. Write the my-app bindings (`prod_read`, `prod_ssh`, broker `secrets:`) and the acme app `phi_data` defaults. Opt workspaces into `egress: allowlist` after a learn-mode week. Only then attach agy for non-prod my-app tickets | — | G13, G14, G10 | operator |
 
 - **Parallel work.** G1, G2 and G5 can start at once, and G2 is independent
   of everything. The operator's egress priority is G1 → G4/G5 → G6 → G9/G10.
@@ -986,7 +986,7 @@ before it. Each ticket's type is one of:
 | Alternative | Why not |
 |---|---|
 | Keep coordinator judgment (today) | It isn't enforced or auditable, and the incidents above happened under it |
-| Per-workspace provider lists only (`agent.type`, role positions) | They can't express per-ticket need: agy could take non-prod vstim tickets once egress lands. They don't withhold reach either, since every worker gets every credential (§2.3, §2.4) |
+| Per-workspace provider lists only (`agent.type`, role positions) | They can't express per-ticket need: agy could take non-prod my-app tickets once egress lands. They don't withhold reach either, since every worker gets every credential (§2.3, §2.4) |
 | Permissions as routing hints only, without withholding | The operator asked for grants. A hint doesn't stop a worker that can reach prod anyway (vs-adx9r7) |
 | Profiles per account only | One agy account runs four pools and three families that behave differently (§3.1) |
 | Automatic promotion by the Loop | Promotion loosens security. The Loop's inputs have already been wrong in provider-correlated ways (bd-28t80i, bd-96mn8i in bd-9ck2a7's notes), so a human stays in the loop. Demotion stays automatic |

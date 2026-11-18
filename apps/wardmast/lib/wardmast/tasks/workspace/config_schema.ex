@@ -239,7 +239,7 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                             over the workspace-level merge block, so unset
                             fields fall back field by field; e.g. a remote-less
                             repo in a github workspace:
-                              arb config set merge.repos.mesaana.strategy direct
+                              arb config set merge.repos.infra.strategy direct
                             `arb server doctor` flags a forge-strategy repo with
                             no origin remote, or one whose origin is not the
                             effective merge.config owner/repo.

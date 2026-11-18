@@ -166,8 +166,18 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
 
   defp darwin_opts(opts, platform) do
     Keyword.get_lazy(opts, :darwin, fn ->
-      [path: platform["path"] || "", tools: platform["tools"] || %{}]
+      [
+        path: platform["path"] || "",
+        tools: platform["tools"] || %{},
+        service: local_service_mode()
+      ]
     end)
+  end
+
+  # The plists are on the host running the server; they are readable only when
+  # this CLI is on a macOS host (a remote darwin server's plists are not).
+  defp local_service_mode do
+    if Darwin.darwin?(:os.type()), do: WardmastCli.Supervisor.Launchd.service_mode()
   end
 
   @group_order [:core, :auth, :sandboxes, :security]
@@ -634,7 +644,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   end
 
   # bd-4420va: a workspace that pinned `agent.security.permissions.safe_defaults`
-  # before a new default category shipped (vstim pinning the 4 categories that
+  # before a new default category shipped (my-app pinning the 4 categories that
   # existed pre-v0.1.78) used to silently resolve fewer categories than a
   # workspace that never pinned, with nothing surfacing the gap. The legacy
   # `safe_defaults` key is now inert (see `Wardmast.Agents.SecurityPolicy`), so
@@ -1045,8 +1055,8 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     end
   end
 
-  # "default: claude=privileged, antigravity/gemini-3.8-flash-low=quarantine; emricare: …",
-  # then each GitLab bot token's expiry (bd-8ufzng): "; default: tonic bot token expires 2027-01-31 (60d)".
+  # "default: claude=privileged, antigravity/gemini-3.8-flash-low=quarantine; acme: …",
+  # then each GitLab bot token's expiry (bd-8ufzng): "; default: app bot token expires 2027-01-31 (60d)".
   defp guardrail_tiers_detail(workspaces) do
     tiers = guardrail_subjects_detail(workspaces)
 
@@ -2399,7 +2409,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
           "nodes.public_url reachable",
           :warn,
           "#{url}/nodes/ping did not answer: #{probe_reason(reason)}",
-          "Nodes dial this address. Run `tailscale serve --https=443 http://127.0.0.1:4848` " <>
+          "Nodes dial this address. Run `tailscale serve --https=443 http://127.0.0.1:#{client_port()}` " <>
             "on the primary, and check that this machine is on the same tailnet."
         )
     end
@@ -3060,7 +3070,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
             "Off-loopback peers get no terminal. If this is intentional " <>
               "(e.g. a VPN-reachable install), unset ARB_BIND_ADDRESS to fall " <>
               "back to loopback-only and use SSH port-forwarding instead " <>
-              "(`ssh -L 4848:127.0.0.1:4848 <host>`), or leave it set only if " <>
+              "(`ssh -L #{client_port()}:127.0.0.1:#{client_port()} <host>`), or leave it set only if " <>
               "you understand the exposure.",
           blocks_readiness: false
         }
@@ -3321,4 +3331,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
 
   defp unknown_reason({:error, %Client.Error{message: message}}), do: to_string(message)
   defp unknown_reason({:ok, _body}), do: "the server answered in a shape this CLI does not read"
+
+  # The port the CLI actually targets (host override, else the configured default).
+  defp client_port, do: URI.parse(Client.base_url()).port || Wardmast.Env.port()
 end
