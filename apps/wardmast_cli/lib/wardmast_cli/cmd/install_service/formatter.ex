@@ -117,6 +117,75 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
     IO.puts("Remove it with `arb install service --uninstall`.")
   end
 
+  def emit_installed_launchd_daemon(:json, info, secrets) do
+    {env_path, captured} =
+      case secrets do
+        {:written, p, keys} -> {p, keys}
+        {:none, p} -> {p, []}
+      end
+
+    Output.emit_json(%{
+      action: "install",
+      scope: "system",
+      unit: Plist.label(),
+      unit_path: info.path,
+      service_user: info.account.user,
+      service_group: info.account.group,
+      data_home: info.arbiter_home,
+      log_path: info.log_path,
+      env_file: env_path,
+      secrets_captured: captured,
+      secrets_at_rest: at_rest_report(env_path),
+      status_cmd: Supervisor.impl().status_cmd(:system),
+      logs_cmd: Supervisor.impl().logs_cmd(:system),
+      base_url: Client.base_url(),
+      ok: true
+    })
+  end
+
+  def emit_installed_launchd_daemon(:text, info, secrets) do
+    IO.puts("Installed #{Plist.label()} (LaunchDaemon, system scope).")
+    IO.puts("  plist:   #{info.path}")
+    IO.puts("  runs as: #{info.account.user}:#{info.account.group} (never root)")
+    IO.puts("  data:    #{info.arbiter_home} (0700, #{info.account.user} only)")
+    IO.puts("  logs:    #{info.log_path}")
+    IO.puts("  starts:  #{Client.base_url()} at boot, before any login")
+    IO.puts(secrets_note(secrets))
+    IO.puts(at_rest_note(elem(secrets, 1)))
+    IO.puts("")
+    IO.puts("Check it with:")
+    IO.puts("  #{Supervisor.impl().status_cmd(:system)}")
+    IO.puts("  #{Supervisor.impl().logs_cmd(:system)}")
+    IO.puts("")
+    IO.puts("A release is deployed into the data home above, as the service account:")
+    IO.puts("  sudo -H -u #{info.account.user} arb server deploy")
+    IO.puts("")
+    IO.puts("Remove it with `sudo arb install service --system --uninstall`.")
+  end
+
+  def emit_uninstalled_launchd_daemon(:json, path, disabled?, removed?) do
+    Output.emit_json(%{
+      action: "uninstall",
+      scope: "system",
+      unit: Plist.label(),
+      unit_path: path,
+      disabled: disabled?,
+      removed: removed?,
+      ok: true
+    })
+  end
+
+  def emit_uninstalled_launchd_daemon(:text, path, disabled?, removed?) do
+    IO.puts("Uninstalled #{Plist.label()} (LaunchDaemon, system scope).")
+    IO.puts("  unloaded: #{if disabled?, do: "yes", else: "was not loaded"}")
+    IO.puts("  removed:  #{if removed?, do: path, else: "no plist at #{path}"}")
+    IO.puts("")
+
+    IO.puts(
+      "The service account, its data home and #{Plist.daemon_log_dir()} were left in place."
+    )
+  end
+
   def emit_uninstalled_launchd(:json, path, disabled?, removed?) do
     Output.emit_json(%{
       action: "uninstall",
