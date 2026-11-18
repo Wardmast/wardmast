@@ -158,7 +158,6 @@ defmodule Wardmast.Worker.ContainerSpawn do
   alias Wardmast.Guardrails.Projection
   alias Wardmast.Mergers
   alias Wardmast.Nodes.Checkout, as: NodeCheckout
-  alias Wardmast.Nodes.Files
   alias Wardmast.Nodes.Placement
   alias Wardmast.Worker.CliSet
   alias Wardmast.Worker.Container
@@ -731,8 +730,7 @@ defmodule Wardmast.Worker.ContainerSpawn do
 
   # The provider CLI and `arb` come from `Wardmast.Worker.CliSet`: the verified,
   # pinned upstream releases in SI1a's cache, never a CLI installed on this
-  # host (SI1). The same set feeds the remote file shelf (`remote_cli/2`) and
-  # the published image's CLI layers, so a local run and a remote one run the
+  # host (SI1). The same set feeds the published image's CLI layers, so a local run and a remote one run the
   # same bytes. The provider CLI is mandatory; a set without `arb` still gets
   # a worker, minus the CLI.
   @doc false
@@ -1080,10 +1078,9 @@ defmodule Wardmast.Worker.ContainerSpawn do
   node's row: `:id`, and `:capacity` for the memory cap).
 
   It starts the run's egress proxy and bridges (the policy never leaves the
-  primary), resolves the image **plan** instead of building it, publishes the
-  provider CLI and `arb` on the primary's file shelf (`Wardmast.Nodes.Files`) and
-  reads the config files and prompt a node cannot reach. The node builds the
-  image, fetches the files, makes the run's directories and starts the
+  primary), publishes the run image (a digest-pinned ref the node pulls) and
+  reads the config files and prompt a node cannot reach. The node pulls the
+  image, makes the run's directories and starts the
   container itself. The returned request rides in `port_args.remote`; each open
   turns it into a spec with `remote_spec/3`.
 
@@ -1111,7 +1108,7 @@ defmodule Wardmast.Worker.ContainerSpawn do
          {:ok, worktree} <- fetch_worktree(opts),
          {:ok, tmp_dir} <- fetch_tmp_dir(opts),
          {:ok, image} <- remote_image(opts, worktree, node),
-         {:ok, set, cli} <- remote_cli(provider, image, opts),
+         {:ok, set} <- provenance_cli_set(provider, opts),
          {:ok, services} <- remote_services(opts),
          {:ok, home, config_dir} <- remote_dirs(provider, tmp_dir),
          {:ok, config_files, secret_files} <-
@@ -1144,7 +1141,6 @@ defmodule Wardmast.Worker.ContainerSpawn do
          config_files: config_files,
          secret_files: secret_files,
          tmp_dir: tmp_dir,
-         cli: cli,
          prompt_paths: prompt_paths(Keyword.get(opts, :argv)),
          network: network,
          env: container_env(spec, nil) ++ git.env ++ services.env ++ agy_remote_env(agy_key),
@@ -1261,9 +1257,10 @@ defmodule Wardmast.Worker.ContainerSpawn do
   # published image can run it, a cluster or (SI4) a machine node that pulls it. A
   # node that builds its own image has nothing to pull it from.
   defp prebuilt_node(%{source: :prebuilt}, repo, node, ctx, opts) do
-    if node_source(node, ctx, opts) == :build,
-      do: {:error, {:prebuilt_needs_registry, repo}},
-      else: :ok
+    case node_source(node, ctx, opts) do
+      {:error, _} -> {:error, {:prebuilt_needs_registry, repo}}
+      _ -> :ok
+    end
   end
 
   defp prebuilt_node(_image, _repo, _node, _ctx, _opts), do: :ok
@@ -1311,11 +1308,8 @@ defmodule Wardmast.Worker.ContainerSpawn do
 
   @doc """
   Publish the run image for a node **before** the run is committed to it
-  (`Worker.Dispatch`). `:ok` for a run whose node builds its own image (nothing to
-  publish); for a run that takes the published image (a cluster, or SI4's machine
-  node that pulls: `Wardmast.Worker.Image.Source.choose/3`) the same
-  `registry_image/4` the spawn will call, so its single-flight cache makes the
-  spawn's own call instant. `{:error, {:image_unavailable, reason}}` is what
+  (`Worker.Dispatch`): the same `registry_image/4` the spawn will call, so its
+  single-flight cache makes the spawn's own call instant. `{:error, {:image_unavailable, reason}}` is what
   `Publisher.fallback/2` maps to local or a hold. Options are `prepare_remote/1`'s
   `:image`, `:workspace`, `:repo`, `:publish`, `:plan` (extra `Image.plan/3`
   options) and `:image_source` (`Image.Source.choose/3`'s options; tests).
@@ -1325,18 +1319,15 @@ defmodule Wardmast.Worker.ContainerSpawn do
     explicit = explicit_image(opts)
 
     source =
-      if is_binary(explicit),
-        do: source_for(%{tag: explicit, plan: nil}, node, %{}, opts),
-        else:
-          node_source(
-            node,
-            %{workspace: Keyword.get(opts, :workspace), repo: Keyword.get(opts, :repo)},
-            opts
-          )
+      node_source(
+        node,
+        %{workspace: Keyword.get(opts, :workspace), repo: Keyword.get(opts, :repo)},
+        opts
+      )
 
     cond do
-      source == :build ->
-        prebuilt_preflight(opts)
+      match?({:error, _}, source) ->
+        {:error, {:image_unavailable, elem(source, 1)}}
 
       is_binary(explicit) ->
         with {:ok, _} <- registry_image(%{tag: explicit, plan: nil}, node, %{}, opts), do: :ok
@@ -1349,36 +1340,23 @@ defmodule Wardmast.Worker.ContainerSpawn do
     end
   end
 
-  # A repo that sources a prebuilt image cannot run on a node with no registry.
-  defp prebuilt_preflight(opts) do
-    repo = Keyword.get(opts, :repo)
-
-    with nil <- explicit_image(opts),
-         %{source: :prebuilt} <- RepoConfig.resolve(Keyword.get(opts, :workspace), repo) do
-      {:error, {:image_unavailable, {:prebuilt_needs_registry, repo}}}
-    else
-      _ -> :ok
-    end
-  end
-
   @doc false
-  # A2 (`docs/design/remote-workers.md` §11): a node that advertises
-  # `caps.image = "registry"` never receives a build plan. The primary publishes
+  # A2 (`docs/design/remote-workers.md` §11): no node receives a build plan (SI13). The primary publishes
   # the image (`Image.Publisher.ensure_ready/2`: bounded wait, single flight) and
   # the spec carries its digest-pinned `ref`. A publish that times out or fails
   # is `image_unavailable`, the same refusal a node would give; `Publisher.fallback/2`
   # is the placement policy for it.
   #
   # SI4 (§21.2.1, §21.4): which image a run takes is chosen per run
-  # (`Image.Source.choose/3`), not read off `caps.image` alone. A machine node that
+  # (`Image.Source.choose/3`). A machine node that
   # pulls gets the same pinned `ref`, plus the image's CLI set and the read credential
-  # it may hold (`:pull`, `PullCredential`); the spec carries no `cli` mount
-  # (`remote_cli/3`). Any other node, and an install with no registry, keep the plan
-  # exactly as before.
+  # it may hold (`:pull`, `PullCredential`); the spec carries no `cli` mount.
+  # A node that cannot take the image, and an install with no
+  # registry, is refused (`image_unavailable`): there is no plan to fall back to.
   def registry_image(image, node, ctx, opts) do
-    case source_for(image, node, ctx, opts) do
-      :build ->
-        {:ok, image}
+    case node_source(node, ctx, opts) do
+      {:error, reason} ->
+        {:error, {:image_unavailable, reason}}
 
       source ->
         case publish_image(image, ctx, Keyword.get(opts, :publish, [])) do
@@ -1414,13 +1392,6 @@ defmodule Wardmast.Worker.ContainerSpawn do
 
   defp provider_in_image(_published, _provider), do: :ok
 
-  # An explicit `:image` has no plan to publish: a cluster still asks for it (and is
-  # refused for it), a machine node keeps taking it as a tag it holds.
-  defp source_for(%{plan: nil}, node, _ctx, _opts),
-    do: if(ImageSource.registry_only?(node), do: :registry, else: :build)
-
-  defp source_for(_image, node, ctx, opts), do: node_source(node, ctx, opts)
-
   defp node_source(node, ctx, opts),
     do: ImageSource.choose(node, ctx, Keyword.get(opts, :image_source, []))
 
@@ -1453,28 +1424,10 @@ defmodule Wardmast.Worker.ContainerSpawn do
   defp publish_planned(%{plan: plan}, ctx, opts),
     do: Publisher.ensure_ready(Map.put(ctx, :plan, plan), opts)
 
-  # SI4 (§21.2.1): a run that takes the published image (a digest-pinned `ref`) has its
-  # CLIs as image layers, so nothing is shelved and the spec carries no `cli` mount. The
-  # set is still resolved, for the run's provenance (SI3).
-  defp remote_cli(provider, %{ref: ref}, opts) when is_binary(ref) do
-    with {:ok, set, _mounts} <- resolve_cli(provider, opts), do: {:ok, set, []}
-  end
-
-  # `[{sha256, name, container path}]`: the node fetches by hash.
-  defp remote_cli(provider, _image, opts) do
-    with {:ok, set, mounts} <- resolve_cli(provider, opts),
-         {:ok, files} <- publish_cli(mounts) do
-      {:ok, set, files}
-    end
-  end
-
-  defp publish_cli(mounts) do
-    Enum.reduce_while(mounts, {:ok, []}, fn {host, dest}, {:ok, acc} ->
-      case Files.publish(host) do
-        {:ok, sha} -> {:cont, {:ok, acc ++ [{sha, Path.basename(dest), dest}]}}
-        {:error, reason} -> {:halt, {:error, {:cli_unavailable, reason}}}
-      end
-    end)
+  # SI4 (§21.2.1): the CLIs are image layers, so nothing is shelved and the spec carries no
+  # `cli` mount. The set is still resolved, for the run's provenance (SI3).
+  defp provenance_cli_set(provider, opts) do
+    with {:ok, set, _mounts} <- resolve_cli(provider, opts), do: {:ok, set}
   end
 
   # Presets only cross the wire (`Wardmast.NodeAgent.RunSpec`); a custom service
@@ -1817,9 +1770,7 @@ defmodule Wardmast.Worker.ContainerSpawn do
              ),
              %{"kind" => "tmp", "path" => request.tmp_dir}
            ] ++
-             Enum.map(request.cli, fn {sha, name, dest} ->
-               %{"kind" => "cli", "name" => name, "sha256" => sha, "path" => dest}
-             end) ++ prompts,
+             prompts,
          "bridges" => bridges(request.network),
          "env" => Map.new(literal),
          "secrets" =>
@@ -2008,8 +1959,7 @@ defmodule Wardmast.Worker.ContainerSpawn do
   # against (the CLI set, the run's provider) and, for a registry the operator marked
   # insecure, `--tls-verify=false`.
   defp image_json(image, request) do
-    base = %{"tag" => image.tag, "plan" => plan_json(image.plan)}
-    base = if is_binary(Map.get(image, :ref)), do: Map.put(base, "ref", image.ref), else: base
+    base = %{"tag" => image.tag, "ref" => image.ref}
 
     case Map.get(image, :pull) do
       %{} = pull ->
@@ -2034,23 +1984,6 @@ defmodule Wardmast.Worker.ContainerSpawn do
     do: Map.put(spec, "pull_auth", auth)
 
   defp put_pull_auth(spec, _image), do: spec
-
-  defp plan_json(nil), do: nil
-
-  defp plan_json(plan) do
-    %{
-      "tag" => plan.tag,
-      "name" => plan.name,
-      "hash" => plan.hash,
-      "containerfile" => plan.containerfile,
-      "build_args" => Enum.map(plan.build_args, fn {k, v} -> [k, v] end),
-      "base" =>
-        Map.new(
-          ~w(tag name hash containerfile)a,
-          &{Atom.to_string(&1), Map.fetch!(plan.base, &1)}
-        )
-    }
-  end
 
   # -- wrap ----------------------------------------------------------------------
 

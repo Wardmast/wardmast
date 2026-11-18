@@ -625,7 +625,7 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                                          "user:password" (e.g. a deploy token with
                                          read_registry) that a machine node is handed
                                          for one pull of the published image under
-                                         nodes.machine_image_source auto (SI4); never
+                                         nodes.registry_pull_* (SI4); never
                                          the credentials_ref secret. Per repo it goes
                                          to any node; workspace-wide only to a node
                                          whose pin admits the workspace. Unset (and

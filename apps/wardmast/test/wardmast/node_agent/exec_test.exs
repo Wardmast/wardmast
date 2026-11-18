@@ -57,7 +57,10 @@ defmodule Wardmast.NodeAgent.ExecTest do
       "task" => "bd-abc",
       "name" => "arb-#{run}",
       "install" => "inst1",
-      "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "plan" => nil},
+      "image" => %{
+        "tag" => "localhost/arbiter-dev/beam:abc123",
+        "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+      },
       "cwd" => "/work/tree",
       "mounts" => [
         %{"kind" => "worktree", "path" => "/work/tree"},
@@ -108,7 +111,7 @@ defmodule Wardmast.NodeAgent.ExecTest do
 
     argv = argv(stub)
     assert ["sh", "-c", "mix format --check-formatted"] = Enum.take(argv, -3)
-    assert "localhost/arbiter-dev/beam:abc123" in argv
+    assert ("reg.example/r/worker@sha256:" <> String.duplicate("a", 64)) in argv
     assert "--rm" in argv
     assert "--read-only" in argv and "--cap-drop=all" in argv
     assert "--network=none" in argv

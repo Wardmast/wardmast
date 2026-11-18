@@ -29,7 +29,6 @@ defmodule WardmastWeb.NodeController do
 
     * `GET /nodes/agent/<version>.tar.gz` — the agent build the primary runs
       (`Wardmast.Nodes.Agent`), only for the version the enroll response named.
-    * `GET /nodes/files/<sha256>` — the same bytes addressed by content hash.
     * `GET /nodes/cluster` — a cluster controller's boot facts (K14): the install id,
       `nodes.registry` and the canary's image
       (`Wardmast.Nodes.ClusterInstall.controller_facts/1`). A machine node gets a 404.
@@ -377,13 +376,6 @@ defmodule WardmastWeb.NodeController do
     end
   end
 
-  def file(conn, %{"sha" => sha}) do
-    case Agent.find_by_sha(sha) do
-      {:ok, artifact} -> send_artifact(conn, artifact)
-      :error -> send_shelved(conn, sha)
-    end
-  end
-
   # K14: a cluster controller's boot facts (`ClusterInstall.controller_facts/1`). Only a
   # cluster node is answered; a machine has no use for them.
   def cluster(%Plug.Conn{assigns: %{current_node: %{kind: "cluster"}}} = conn, _params) do
@@ -394,24 +386,6 @@ defmodule WardmastWeb.NodeController do
 
   def cluster(conn, _params), do: error(conn, 404, "Not a cluster node")
 
-  # A file the primary published for a run (`Wardmast.Nodes.Files`: the provider
-  # CLI and `arb`). The path comes from the primary's own shelf; the request
-  # contributes only a hash that must already be on it.
-  # sobelow_skip ["Traversal.SendFile"]
-  defp send_shelved(conn, sha) do
-    case Wardmast.Nodes.Files.lookup(sha) do
-      {:ok, path} ->
-        conn
-        |> put_resp_content_type("application/octet-stream")
-        |> put_resp_header("x-content-sha256", sha)
-        |> put_resp_header("cache-control", "no-store")
-        |> send_file(200, path)
-
-      :error ->
-        error(conn, 404, "Not found")
-    end
-  end
-
   defp version_of(file) do
     case String.split_at(file, -7) do
       {version, ".tar.gz"} when version != "" -> {:ok, version}
@@ -421,8 +395,7 @@ defmodule WardmastWeb.NodeController do
 
   # `artifact.path` is never request input: `Wardmast.Nodes.Agent` derives it
   # from the deploy data home and the running release's tag (validated against
-  # a character set), and `file/2` matches the request's hash against that
-  # artifact's own hash. The request chooses nothing about the path.
+  # a character set). The request chooses nothing about the path.
   # sobelow_skip ["Traversal.SendFile"]
   defp send_artifact(conn, artifact) do
     conn

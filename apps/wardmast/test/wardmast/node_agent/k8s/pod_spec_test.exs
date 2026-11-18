@@ -443,11 +443,6 @@ defmodule Wardmast.NodeAgent.K8s.PodSpecTest do
       assert {:error, {:bad_spec, {:registry_not_configured, ^ref}}} =
                PodSpec.build(put_ref(run_spec(), ref), config())
     end
-
-    test "a spec with no image reference is bad_spec" do
-      {:ok, spec} = Wardmast.NodeAgent.RunSpec.validate(wire_spec())
-      assert {:error, {:bad_spec, {:missing, "image.ref"}}} = PodSpec.build(spec, config())
-    end
   end
 
   describe "§8 row 17: --init" do

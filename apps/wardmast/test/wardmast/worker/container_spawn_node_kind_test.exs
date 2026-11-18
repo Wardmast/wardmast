@@ -30,7 +30,11 @@ defmodule Wardmast.Worker.ContainerSpawnNodeKindTest do
 
     request = %{
       name: "arb-t-1",
-      image: %{tag: "localhost/x:1", plan: nil},
+      image: %{
+        tag: "localhost/x:1",
+        plan: nil,
+        ref: "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+      },
       worktree: "/work/tree",
       home: "/work/home",
       config_dir: "/work/config",

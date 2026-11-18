@@ -41,7 +41,11 @@ defmodule Wardmast.Worker.ContainerSpawnRemoteSessionTest do
     request = %{
       name: "arb-t-1",
       provider: "claude",
-      image: %{tag: "localhost/x:1", plan: nil},
+      image: %{
+        tag: "localhost/x:1",
+        plan: nil,
+        ref: "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+      },
       worktree: worktree,
       home: Path.join(base, "run/home"),
       config_dir: Path.join(base, "run/claude-config"),

@@ -360,7 +360,7 @@ defmodule Wardmast.Worker.ContainerSpawnTest do
             {:ok, %{ref: ref, cli_set: "0a1b2c3d"}}
           end
         ],
-        image_source: [machine_image_source: "auto", config: install(), workspaces: []]
+        image_source: [config: install(), workspaces: []]
       )
       |> Keyword.merge(extra)
     end
@@ -374,7 +374,6 @@ defmodule Wardmast.Worker.ContainerSpawnTest do
       opts = Keyword.merge(ctx.opts, node: node, publish: [stub: fn _ -> {:ok, %{ref: ref}} end])
       assert {:ok, request} = ContainerSpawn.prepare_remote(opts)
 
-      assert request.cli == []
       assert request.image.ref == ref
       refute Map.has_key?(request.image, :pull)
     end
@@ -385,7 +384,6 @@ defmodule Wardmast.Worker.ContainerSpawnTest do
                ContainerSpawn.prepare_remote(plan_opts(ctx, node: pull_node()))
 
       assert_received {:published, "vstim"}
-      assert request.cli == []
       assert request.image.plan == nil
       assert request.image.cli_set == "0a1b2c3d"
       assert request.cli_set == "0a1b2c3d"
@@ -412,30 +410,6 @@ defmodule Wardmast.Worker.ContainerSpawnTest do
       refute body =~ @push_install
       refute body =~ Base.encode64("deployer:" <> @push_repo)
       refute body =~ Base.encode64("pusher:" <> @push_install)
-    end
-
-    test "machine_image_source build sends the plan and CLI files, and no credential at all",
-         ctx do
-      opts =
-        plan_opts(ctx,
-          node: pull_node(),
-          image_source: [machine_image_source: "build", config: install(), workspaces: []],
-          publish: [stub: fn _ -> flunk("published") end]
-        )
-
-      assert {:ok, request} = ContainerSpawn.prepare_remote(opts)
-      assert request.image.plan != nil
-      refute Map.has_key?(request.image, :ref)
-      assert [_ | _] = request.cli
-
-      assert {:ok, spec} =
-               ContainerSpawn.remote_spec(request, port_args(ctx, request), "run-si4b")
-
-      body = Jason.encode!(spec)
-      refute Map.has_key?(spec, "pull_auth")
-
-      for secret <- [@push_repo, @push_install, @pull_repo, "PULL-install-read-only"],
-          do: refute(body =~ secret)
     end
   end
 

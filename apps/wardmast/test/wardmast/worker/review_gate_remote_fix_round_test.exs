@@ -106,6 +106,7 @@ defmodule Wardmast.Worker.ReviewGateRemoteFixRoundTest do
         health: :ready,
         labels: [],
         workspace_ids: [],
+        caps: %{"image" => "registry"},
         live: 0,
         max: 2
       },
@@ -254,6 +255,7 @@ defmodule Wardmast.Worker.ReviewGateRemoteFixRoundTest do
           command_provider: "claude",
           rounds: 2,
           placement_opts: placement_opts,
+          image_opts: ok_publish(),
           local_capacity_retry_ms: 25
         )
       end
@@ -664,6 +666,18 @@ defmodule Wardmast.Worker.ReviewGateRemoteFixRoundTest do
     author
   end
 
+  defp ok_publish do
+    [
+      image: "registry.gitlab.com/g/p/vstim/worker:abc",
+      publish: [
+        stub: fn _ctx ->
+          {:ok,
+           %{ref: "registry.gitlab.com/g/p/vstim/worker@sha256:" <> String.duplicate("a", 64)}}
+        end
+      ]
+    ]
+  end
+
   defp start_gate(rig, ctx, opts) do
     {:ok, gate} =
       ReviewGate.start(
@@ -679,7 +693,8 @@ defmodule Wardmast.Worker.ReviewGateRemoteFixRoundTest do
             timeout_ms: 15_000,
             command: [@two_rounds, marker(ctx, rig), rig.branch],
             command_provider: "claude",
-            placement_opts: placement([node_row("a")])
+            placement_opts: placement([node_row("a")]),
+            image_opts: ok_publish()
           ],
           opts
         )

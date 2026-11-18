@@ -22,7 +22,6 @@ defmodule Wardmast.Nodes.Agent do
   """
 
   @tag_re ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
-  @sha_re ~r/\A[0-9a-f]{64}\z/
   @archive_root "wardmast"
   @excluded_names ["COOKIE", "tmp"]
   @cache_key {__MODULE__, :sha_cache}
@@ -76,21 +75,6 @@ defmodule Wardmast.Nodes.Agent do
       _ -> {:error, :unavailable}
     end
   end
-
-  @doc "The artifact whose sha256 is `sha` (lowercase hex), if it is the one being served."
-  @spec find_by_sha(term(), String.t()) :: {:ok, artifact()} | :error
-  def find_by_sha(sha, home \\ data_home())
-
-  def find_by_sha(sha, home) when is_binary(sha) do
-    with true <- Regex.match?(@sha_re, sha),
-         {:ok, %{sha256: ^sha} = art} <- artifact(home) do
-      {:ok, art}
-    else
-      _ -> :error
-    end
-  end
-
-  def find_by_sha(_sha, _home), do: :error
 
   # ---- source of the bytes -------------------------------------------------
 

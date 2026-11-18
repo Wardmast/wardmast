@@ -16,7 +16,10 @@ defmodule Wardmast.NodeAgent.RunsSecretFilesTest do
         "version" => 1,
         "run" => "run-sf-1",
         "name" => "arb-bd-sf-1234",
-        "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "plan" => nil},
+        "image" => %{
+          "tag" => "localhost/arbiter-dev/beam:abc123",
+          "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+        },
         "cwd" => "/work/tree",
         "mounts" => [
           %{"kind" => "worktree", "path" => "/work/tree"},

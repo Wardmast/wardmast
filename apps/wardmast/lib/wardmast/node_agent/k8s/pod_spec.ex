@@ -90,13 +90,12 @@ defmodule Wardmast.NodeAgent.K8s.PodSpec do
   @memory_re ~r/\A[1-9]\d*[bkmg]?\z/i
   @cpus_re ~r/\A\d+(\.\d+)?\z/
 
-  @mount_kinds ~w(worktree home config_dir tmp cli prompt)
+  @mount_kinds ~w(worktree home config_dir tmp prompt)
   @mount_fields %{
     "worktree" => [:kind, :path, :files],
     "home" => [:kind, :path],
     "config_dir" => [:kind, :path, :files, :session],
     "tmp" => [:kind, :path],
-    "cli" => [:kind, :path, :name, :sha256],
     "prompt" => [:kind, :path, :content]
   }
   @bridge_fields [:name, :path]
@@ -389,9 +388,6 @@ defmodule Wardmast.NodeAgent.K8s.PodSpec do
   defp mount(%{}), do: bad_spec({:unknown_mount_kind, nil})
   defp mount(_), do: bad_spec({:bad_value, :mounts})
 
-  # The image's own CLI directory is not something a mount can land on.
-  defp reserved("cli", mount), do: {:ok, mount}
-
   defp reserved(_kind, %{path: path} = mount),
     do: if(reserved?(path), do: bad_spec({:reserved_path, path}), else: {:ok, mount})
 
@@ -421,7 +417,7 @@ defmodule Wardmast.NodeAgent.K8s.PodSpec do
   defp clear_of_git(mounts, wt) do
     case Enum.find(
            mounts,
-           &(&1.kind != "worktree" and &1.kind != "cli" and under?(&1.path, wt <> "/.git"))
+           &(&1.kind != "worktree" and under?(&1.path, wt <> "/.git"))
          ) do
       nil -> :ok
       %{path: path} -> bad_spec({:reserved_path, path})
@@ -429,7 +425,7 @@ defmodule Wardmast.NodeAgent.K8s.PodSpec do
   end
 
   defp unique_paths(mounts) do
-    paths = for %{kind: k, path: p} <- mounts, k != "cli", k != "tmp" or p != "/tmp", do: p
+    paths = for %{kind: k, path: p} <- mounts, k != "tmp" or p != "/tmp", do: p
 
     case paths -- Enum.uniq(paths) do
       [] -> :ok

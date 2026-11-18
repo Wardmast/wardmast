@@ -1315,6 +1315,7 @@ defmodule Wardmast.Worker.ReviewGate do
       fix_refusal_retries: 0,
       fix_refusal_max_retries: Keyword.get(opts, :fix_refusal_max_retries, 2),
       placement_opts: Keyword.get(opts, :placement_opts, []),
+      image_opts: Keyword.get(opts, :image_opts),
       # Where the wait resumes when CI clears: `:first` (the gate's opening
       # review) or `{:next, review_id}` (a later round). Set on every gate pass.
       ci_entry: nil,

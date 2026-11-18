@@ -23,19 +23,16 @@ defmodule Wardmast.Test.K8sPodFixtures do
         "task" => "bd-1nfuq5",
         "name" => "arb-run-0123456789ab",
         "install" => "inst-1",
-        "image" => %{"tag" => "arbiter-dev/beam:abc123", "plan" => nil},
+        "image" => %{
+          "tag" => "arbiter-dev/beam:abc123",
+          "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+        },
         "cwd" => "/home/arbiter/worktrees/bd-1nfuq5",
         "mounts" => [
           %{"kind" => "worktree", "path" => "/home/arbiter/worktrees/bd-1nfuq5"},
           %{"kind" => "home", "path" => "/var/lib/arb/run/home"},
           %{"kind" => "config_dir", "path" => "/var/lib/arb/run/claude-config"},
           %{"kind" => "tmp", "path" => "/tmp"},
-          %{
-            "kind" => "cli",
-            "name" => "claude",
-            "sha256" => String.duplicate("a", 64),
-            "path" => "/opt/arbiter/cli/claude"
-          },
           %{
             "kind" => "prompt",
             "path" => "/var/lib/arb/run/prompt.md",

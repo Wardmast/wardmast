@@ -215,15 +215,6 @@ defmodule Wardmast.Settings.Registry do
           "(reads stdin). Operator-only."
     },
     %{
-      key: "nodes.machine_image_source",
-      type: "machine_image_source",
-      description:
-        "auto: a machine node that can pull runs the repo's published image when the repo " <>
-          "has a registry and a pull credential that node may hold (no CLI files, no build " <>
-          "on the node); build: every machine node builds from a plan, as before. " <>
-          "null = auto (the default since SI4a). Operator-only."
-    },
-    %{
       key: "worker.cli.versions",
       type: "cli_versions",
       description:
@@ -274,7 +265,6 @@ defmodule Wardmast.Settings.Registry do
                     nodes.registry_insecure nodes.registry_public_ok nodes.chart_ref
                     nodes.registry.publish_timeout_ms
                     nodes.registry_pull_username nodes.registry_pull_password
-                    nodes.machine_image_source
                     worker.cli.versions worker.cli.manual worker.cli_set.hold
                     worker.image.local_published)
 
@@ -283,7 +273,7 @@ defmodule Wardmast.Settings.Registry do
   # Values that are strings whatever they look like: a password of "12345" must not
   # be unwrapped to an integer.
   @secret_mask "********"
-  @string_types ~w(registry_ref registry_user secret chart_ref cli_set_hold machine_image_source)
+  @string_types ~w(registry_ref registry_user secret chart_ref cli_set_hold)
 
   @key_atoms Map.new(@keys, &{&1, String.to_atom(&1)})
 
@@ -312,7 +302,6 @@ defmodule Wardmast.Settings.Registry do
   defp allowed("quota_provider_list"), do: Wardmast.Quota.Visibility.provider_codes()
   defp allowed("admission_mode"), do: Settings.scheduler_admission_modes()
   defp allowed("cli_name_list"), do: Settings.cli_names()
-  defp allowed("machine_image_source"), do: Settings.machine_image_sources()
   defp allowed(_), do: nil
 
   @doc """
@@ -430,15 +419,6 @@ defmodule Wardmast.Settings.Registry do
   end
 
   defp do_cast("cli_set_hold", _), do: {:error, "value must be a short token string, or null"}
-
-  defp do_cast("machine_image_source", source) when is_binary(source) do
-    if source in Settings.machine_image_sources(),
-      do: {:ok, source},
-      else: {:error, "value must be auto or build, or null"}
-  end
-
-  defp do_cast("machine_image_source", _),
-    do: {:error, "value must be auto or build, or null"}
 
   defp do_cast("admission_mode", mode) when is_binary(mode) do
     if mode in Settings.scheduler_admission_modes(),
@@ -587,9 +567,6 @@ defmodule Wardmast.Settings.Registry do
   defp write("nodes.registry_pull_password", v),
     do: wrap(Settings.set_nodes_registry_pull_password(v))
 
-  defp write("nodes.machine_image_source", v),
-    do: wrap(Settings.set_nodes_machine_image_source(v))
-
   defp write("worker.cli.versions", v), do: wrap(Settings.set_worker_cli_versions(v))
   defp write("worker.cli.manual", v), do: wrap(Settings.set_worker_cli_manual(v))
   defp write("worker.cli_set.hold", v), do: wrap(Settings.set_worker_cli_set_hold(v))
@@ -639,7 +616,6 @@ defmodule Wardmast.Settings.Registry do
 
   def override("nodes.registry_public_ok"), do: Settings.nodes_registry_public_ok()
   def override("nodes.registry_pull_username"), do: Settings.nodes_registry_pull_username()
-  def override("nodes.machine_image_source"), do: Settings.nodes_machine_image_source()
   def override("worker.cli.versions"), do: Settings.worker_cli_versions()
   def override("worker.cli.manual"), do: Settings.worker_cli_manual()
   def override("worker.cli_set.hold"), do: Settings.worker_cli_set_hold()
@@ -688,7 +664,6 @@ defmodule Wardmast.Settings.Registry do
   def default("nodes.registry_public_ok"), do: false
   def default("nodes.registry_pull_username"), do: nil
   def default("nodes.registry_pull_password"), do: nil
-  def default("nodes.machine_image_source"), do: "auto"
   def default("worker.cli.versions"), do: nil
   def default("worker.cli.manual"), do: []
   def default("worker.cli_set.hold"), do: nil

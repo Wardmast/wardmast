@@ -134,11 +134,15 @@ defmodule Wardmast.Worker.ContainerSpawnRepoImageTest do
     end
   end
 
-  test "a node that builds its own image never touches any of this", %{tmp_dir: tmp} do
+  test "a node that cannot take the published image is refused: there is no plan to build", %{
+    tmp_dir: tmp
+  } do
     repo_path = repo!(tmp, %{"README.md" => "hi\n"})
     build_node = %{id: "n2", caps: %{"image" => "build"}}
 
-    assert :ok = ContainerSpawn.preflight_image(repo_path, build_node, opts(nil, "vstim"))
+    assert {:error, {:image_unavailable, :node_cannot_pull}} =
+             ContainerSpawn.preflight_image(repo_path, build_node, opts(nil, "vstim"))
+
     refute_received {:published, _}
   end
 
@@ -154,7 +158,7 @@ defmodule Wardmast.Worker.ContainerSpawnRepoImageTest do
       name: "oryx",
       kind: :machine,
       workspace_ids: [],
-      caps: %{"image" => "build", "image_sources" => ["registry", "build"]}
+      caps: %{"image" => "registry", "image_sources" => ["registry"]}
     }
 
     install = %{
@@ -172,7 +176,7 @@ defmodule Wardmast.Worker.ContainerSpawnRepoImageTest do
       on_done: fn _key, _result -> :ok end
     ]
 
-    pulling = [image_source: [machine_image_source: "auto", config: install, workspaces: []]]
+    pulling = [image_source: [config: install, workspaces: []]]
     opts = Keyword.put(opts(nil, "vstim"), :publish, nowait) ++ pulling
 
     assert {:error, {:image_pending, :image_key_1}} =
@@ -260,7 +264,7 @@ defmodule Wardmast.Worker.ContainerSpawnRepoImageTest do
         name: "oryx",
         kind: :machine,
         workspace_ids: [],
-        caps: %{"image" => "build", "image_sources" => ["registry", "build"]}
+        caps: %{"image" => "registry", "image_sources" => ["registry"]}
       }
 
       install = %{
@@ -269,25 +273,19 @@ defmodule Wardmast.Worker.ContainerSpawnRepoImageTest do
         pull_password: "pull-only"
       }
 
-      pulling = [image_source: [machine_image_source: "auto", config: install, workspaces: []]]
+      pulling = [image_source: [config: install, workspaces: []]]
 
       assert :ok =
                ContainerSpawn.preflight_image(repo_path, machine, prebuilt_opts(tip) ++ pulling)
 
       assert_received {:published, %{repo: "vstim"}}
-
-      # the same machine forced to build (nodes.machine_image_source build) cannot
-      building = [image_source: [machine_image_source: "build", config: install, workspaces: []]]
-
-      assert {:error, {:image_unavailable, {:prebuilt_needs_registry, "vstim"}}} =
-               ContainerSpawn.preflight_image(repo_path, machine, prebuilt_opts(tip) ++ building)
     end
 
     test "a node that builds its own image cannot run a prebuilt repo", %{tmp_dir: tmp} do
       repo_path = repo!(tmp, %{"README.md" => "hi\n"})
       build_node = %{id: "n2", caps: %{"image" => "build"}}
 
-      assert {:error, {:image_unavailable, {:prebuilt_needs_registry, "vstim"}}} =
+      assert {:error, {:image_unavailable, :node_cannot_pull}} =
                ContainerSpawn.preflight_image(repo_path, build_node, prebuilt_opts("x"))
 
       refute_received {:skopeo, _}
