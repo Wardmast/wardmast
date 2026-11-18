@@ -1,9 +1,8 @@
 defmodule Wardmast.Worker.CliSet do
   @moduledoc """
   The one resolver for the CLIs a worker runs: the local bind mounts
-  (`Wardmast.Worker.ContainerSpawn.cli_mounts/2`), the remote file shelf
-  (`ContainerSpawn`'s `remote_cli/2`) and the published image's CLI layers
-  (`Wardmast.Worker.Image.Publisher.Pipeline`) all read it (SI1,
+  (`Wardmast.Worker.ContainerSpawn.cli_mounts/2`) and the published image's CLI layers
+  (`Wardmast.Worker.Image.Publisher.Pipeline`) both read it (SI1,
   `docs/design/remote-workers.md` §21.2.3, OD13/OD14).
 
   ## Where the bytes come from

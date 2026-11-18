@@ -1944,7 +1944,7 @@
       title: "Node enrolment + agent download",
       mcp: nil,
       cli: nil,
-      rest: ["GET /nodes/join", "GET /nodes/ping", "POST /nodes/enroll", "POST /nodes/pair", "POST /nodes/pair/poll", "GET /nodes/agent/:file", "GET /nodes/files/:sha"],
+      rest: ["GET /nodes/join", "GET /nodes/ping", "POST /nodes/enroll", "POST /nodes/pair", "POST /nodes/pair/poll", "GET /nodes/agent/:file"],
       status: :excluded,
       absent: %{
         mcp: {:intentional, "Node-tier machine endpoint (join token / node credential), disjoint from Scope and ApiPolicy; not an agent or CLI surface."},

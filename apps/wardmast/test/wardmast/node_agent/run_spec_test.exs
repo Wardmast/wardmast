@@ -17,17 +17,14 @@ defmodule Wardmast.NodeAgent.RunSpecTest do
         "task" => "bd-abc",
         "name" => "arb-bd-abc-1234",
         "install" => "inst1",
-        "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "plan" => nil},
+        "image" => %{
+          "tag" => "localhost/arbiter-dev/beam:abc123",
+          "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+        },
         "cwd" => "/work/tree",
         "mounts" => [
           %{"kind" => "worktree", "path" => "/work/tree"},
-          %{"kind" => "home", "path" => "/tmp/run/home"},
-          %{
-            "kind" => "cli",
-            "name" => "claude",
-            "sha256" => String.duplicate("a", 64),
-            "path" => "/opt/arbiter/cli/claude"
-          }
+          %{"kind" => "home", "path" => "/tmp/run/home"}
         ],
         "bridges" => [],
         "env" => %{"FOO" => "bar"},
@@ -45,7 +42,7 @@ defmodule Wardmast.NodeAgent.RunSpecTest do
 
     assert s.limits == %{memory: "2g"}
     assert s.secrets == %{"CLAUDE_CODE_OAUTH_TOKEN" => "tok"}
-    assert Enum.map(s.mounts, & &1.kind) == ["worktree", "home", "cli"]
+    assert Enum.map(s.mounts, & &1.kind) == ["worktree", "home"]
   end
 
   # bd-4ic681: a session resume's transcript, fetched from the primary into the run's
@@ -210,7 +207,14 @@ defmodule Wardmast.NodeAgent.RunSpecTest do
             "reg.example.com:5000/org/ci:main@" <> digest
           ] do
         assert {:ok, %{image: %{tag: ^tag}}} =
-                 RunSpec.validate(spec(%{"image" => %{"tag" => tag, "plan" => nil}}))
+                 RunSpec.validate(
+                   spec(%{
+                     "image" => %{
+                       "tag" => tag,
+                       "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+                     }
+                   })
+                 )
       end
     end
 
@@ -234,7 +238,14 @@ defmodule Wardmast.NodeAgent.RunSpecTest do
             "@sha256:" <> good
           ] do
         assert {:error, {:refused, {:bad_value, "image.tag"}}} =
-                 RunSpec.validate(spec(%{"image" => %{"tag" => tag, "plan" => nil}})),
+                 RunSpec.validate(
+                   spec(%{
+                     "image" => %{
+                       "tag" => tag,
+                       "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+                     }
+                   })
+                 ),
                "expected #{inspect(tag)} refused"
       end
     end
@@ -268,9 +279,9 @@ defmodule Wardmast.NodeAgent.RunSpecTest do
       end
     end
 
-    test "an image with no ref has none" do
-      assert {:ok, run} = RunSpec.validate(spec(%{}))
-      refute Map.has_key?(run.image, :ref)
+    test "an image with no ref is refused (SI13: nothing is built on the node)" do
+      assert {:error, {:refused, {:missing, "image.ref"}}} =
+               RunSpec.validate(spec(%{"image" => %{"tag" => "localhost/x:1"}}))
     end
 
     test "host networking and unknown networks" do
@@ -293,27 +304,17 @@ defmodule Wardmast.NodeAgent.RunSpecTest do
                )
     end
 
-    test "a cli mount outside /opt/arbiter/cli, and one with a bad hash" do
+    test "the cli mount kind is retired (SI13)" do
       cli = %{
         "kind" => "cli",
         "name" => "x",
         "sha256" => String.duplicate("b", 64),
-        "path" => "/usr/bin/x"
+        "path" => "/opt/arbiter/cli/x"
       }
 
-      assert {:error, {:refused, {:forbidden_path, "/usr/bin/x"}}} =
+      assert {:error, {:refused, {:unknown_mount_kind, "cli"}}} =
                RunSpec.validate(
                  spec(%{"mounts" => [%{"kind" => "worktree", "path" => "/w"}, cli]})
-               )
-
-      assert {:error, {:refused, {:bad_value, "mounts.cli.sha256"}}} =
-               RunSpec.validate(
-                 spec(%{
-                   "mounts" => [
-                     %{"kind" => "worktree", "path" => "/w"},
-                     %{cli | "sha256" => "zz", "path" => "/opt/arbiter/cli/x"}
-                   ]
-                 })
                )
     end
 
@@ -421,7 +422,6 @@ defmodule Wardmast.NodeAgent.RunSpecTest do
         Map.merge(
           %{
             "tag" => "localhost/arbiter-dev/beam:abc123",
-            "plan" => nil,
             "ref" => @pull_ref,
             "cli_set" => "0a1b2c3d",
             "provider" => "claude"
@@ -466,8 +466,14 @@ defmodule Wardmast.NodeAgent.RunSpecTest do
     end
 
     test "a credential with nothing to pull, or for another registry than the ref's, is refused" do
-      no_ref = pull_spec(%{"image" => %{"tag" => "localhost/x:1", "plan" => nil}})
-      assert {:error, {:refused, {:bad_value, "pull_auth"}}} = RunSpec.validate(no_ref)
+      no_ref =
+        pull_spec(%{
+          "image" => %{
+            "tag" => "localhost/x:1"
+          }
+        })
+
+      assert {:error, {:refused, {:missing, "image.ref"}}} = RunSpec.validate(no_ref)
 
       for other <- ["evil.example.com", "registry.example.com", "registry.example.com:5001"] do
         bad = put_in(pull_spec()["pull_auth"]["registry"], other)

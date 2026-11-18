@@ -233,6 +233,7 @@ defmodule WardmastWeb.RemotePassTest do
       name: "co-node",
       state: :online,
       health: :ready,
+      caps: %{"image" => "registry"},
       labels: [],
       workspace_ids: [],
       live: 0,
@@ -247,7 +248,15 @@ defmodule WardmastWeb.RemotePassTest do
         repo: "test/repo",
         start_claude: false,
         slot_admitted: true,
-        placement_opts: [nodes: [row], remote_available?: true]
+        placement_opts: [nodes: [row], remote_available?: true],
+        image_opts: [
+          image: "localhost/arbiter-dev/beam:abc123",
+          publish: [
+            stub: fn _ ->
+              {:ok, %{ref: "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)}}
+            end
+          ]
+        ]
       })
 
     on_exit(fn ->
@@ -278,7 +287,10 @@ defmodule WardmastWeb.RemotePassTest do
       "run" => run,
       "task" => ctx.issue.id,
       "name" => "arb-#{run}",
-      "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "plan" => nil},
+      "image" => %{
+        "tag" => "localhost/arbiter-dev/beam:abc123",
+        "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+      },
       "cwd" => "/work/tree",
       "mounts" => [
         %{"kind" => "worktree", "path" => "/work/tree"},

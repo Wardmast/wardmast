@@ -134,6 +134,7 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassRemoteTest do
         checks: [],
         start_claude: true,
         placement_opts: [remote_available?: true, nodes: [node_row()]],
+        image_opts: ok_publish(),
         slot_admitted: true,
         pr_status: fn -> {:ok, %{status: :open, pipeline: :failed}} end
       })
@@ -225,11 +226,24 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassRemoteTest do
         health: :ready,
         labels: [],
         workspace_ids: [],
+        caps: %{"image" => "registry"},
         live: 0,
         max: 2
       },
       Map.new(attrs)
     )
+  end
+
+  defp ok_publish do
+    [
+      image: "registry.gitlab.com/g/p/vstim/worker:abc",
+      publish: [
+        stub: fn _ctx ->
+          {:ok,
+           %{ref: "registry.gitlab.com/g/p/vstim/worker@sha256:" <> String.duplicate("a", 64)}}
+        end
+      ]
+    ]
   end
 
   defp pass!(ctx, opts) do
@@ -249,7 +263,7 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassRemoteTest do
       checks: [],
       start_claude: false,
       placement_opts: placement,
-      image_opts: Keyword.get(opts, :image_opts, []),
+      image_opts: Keyword.get(opts, :image_opts, ok_publish()),
       slot_admitted: true,
       pr_status: fn -> {:ok, %{status: :open, pipeline: :failed}} end
     })

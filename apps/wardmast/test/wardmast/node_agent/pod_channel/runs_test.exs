@@ -19,7 +19,10 @@ defmodule Wardmast.NodeAgent.PodChannel.RunsTest do
         "run" => run,
         "task" => "bd-abc",
         "name" => "arb-#{run}",
-        "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "plan" => nil},
+        "image" => %{
+          "tag" => "localhost/arbiter-dev/beam:abc123",
+          "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+        },
         "cwd" => "/work/tree",
         "mounts" => [%{"kind" => "worktree", "path" => "/work/tree"}],
         "bridges" => Enum.map(bridges, &%{"name" => &1, "path" => "/var/eg/#{&1}.sock"}),

@@ -19,7 +19,10 @@ defmodule Wardmast.NodeAgent.PodChannel.BootBundleTest do
             "run" => "run-1",
             "task" => "bd-abc",
             "name" => "arb-bd-abc-1234",
-            "image" => %{"tag" => "localhost/arbiter-dev/beam:abc123", "plan" => nil},
+            "image" => %{
+              "tag" => "localhost/arbiter-dev/beam:abc123",
+              "ref" => "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)
+            },
             "cwd" => "/work/tree",
             "mounts" => [
               %{

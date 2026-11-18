@@ -106,12 +106,4 @@ defmodule Wardmast.Nodes.AgentTest do
     install(home, "v9", %{"README" => "no bin/wardmast"})
     assert {:error, :unavailable} = Agent.artifact(home)
   end
-
-  test "find_by_sha only matches the served artifact", %{tmp_dir: home} do
-    install(home, "local-1", %{"bin/wardmast" => "x"})
-    {:ok, art} = Agent.artifact(home)
-    assert {:ok, ^art} = Agent.find_by_sha(art.sha256, home)
-    assert :error = Agent.find_by_sha(String.duplicate("a", 64), home)
-    assert :error = Agent.find_by_sha("../../etc/passwd", home)
-  end
 end

@@ -149,7 +149,17 @@ defmodule Wardmast.Worker.DispatchNodePlacementTest do
         caps: %{"image" => "registry", "registries" => ["ghcr.io/ryan/"]}
       }
 
-      assert {:error, {:no_node_capacity, info}} = dispatch(issue, @podman ++ [nodes: [row]])
+      assert {:error, {:no_node_capacity, info}} =
+               dispatch(
+                 issue,
+                 @podman ++
+                   [
+                     publish: Wardmast.DispatchImageStub.publish(),
+                     plan: Wardmast.DispatchImageStub.plan(),
+                     nodes: [row]
+                   ]
+               )
+
       assert info.mode == :remote_only
       # refused at placement (no candidate), not after reserving the node and failing its image
       refute Map.has_key?(info, :image_error)
@@ -200,7 +210,7 @@ defmodule Wardmast.Worker.DispatchNodePlacementTest do
         live: 0,
         workspace_ids: [],
         labels: [],
-        caps: %{}
+        caps: %{"image" => "registry"}
       }
     end
 
@@ -221,7 +231,13 @@ defmodule Wardmast.Worker.DispatchNodePlacementTest do
                dispatch(
                  issue,
                  @podman ++
-                   [nodes: [node_row()], start_claude: true, claude_start: capture_spawn()]
+                   [
+                     publish: Wardmast.DispatchImageStub.publish(),
+                     plan: Wardmast.DispatchImageStub.plan(),
+                     nodes: [node_row()],
+                     start_claude: true,
+                     claude_start: capture_spawn()
+                   ]
                )
 
       assert_receive {:spawned, %{id: "n-scoped"}, plan}
@@ -244,7 +260,13 @@ defmodule Wardmast.Worker.DispatchNodePlacementTest do
                dispatch(
                  issue,
                  @podman ++
-                   [nodes: [node_row()], start_claude: true, claude_start: capture_spawn()]
+                   [
+                     publish: Wardmast.DispatchImageStub.publish(),
+                     plan: Wardmast.DispatchImageStub.plan(),
+                     nodes: [node_row()],
+                     start_claude: true,
+                     claude_start: capture_spawn()
+                   ]
                )
 
       assert_receive {:spawned, %{id: "n-scoped"}, %{mode: :not_needed}}
@@ -312,7 +334,15 @@ defmodule Wardmast.Worker.DispatchNodePlacementTest do
     end
 
     defp redispatch_opts,
-      do: @podman ++ [nodes: [node_row()], start_claude: true, claude_start: spawn_to_test()]
+      do:
+        @podman ++
+          [
+            publish: Wardmast.DispatchImageStub.publish(),
+            plan: Wardmast.DispatchImageStub.plan(),
+            nodes: [node_row()],
+            start_claude: true,
+            claude_start: spawn_to_test()
+          ]
 
     test "a first attempt that failed before the agent started is placed on a node again" do
       for category <- ~w(spawn_failed placement_refused container_create_failed) do
@@ -445,10 +475,19 @@ defmodule Wardmast.Worker.DispatchNodePlacementTest do
         live: 0,
         workspace_ids: [],
         labels: [],
-        caps: %{}
+        caps: %{"image" => "registry"}
       }
 
-      assert {:ok, %{worker_pid: _pid}} = dispatch(issue, @podman ++ [nodes: [row]])
+      assert {:ok, %{worker_pid: _pid}} =
+               dispatch(
+                 issue,
+                 @podman ++
+                   [
+                     publish: Wardmast.DispatchImageStub.publish(),
+                     plan: Wardmast.DispatchImageStub.plan(),
+                     nodes: [row]
+                   ]
+               )
 
       assert %{
                "placement" => %{

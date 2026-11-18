@@ -247,9 +247,18 @@ defmodule WardmastWeb.RemoteGitCredentialTest do
         SecurityPolicy.merge(SecurityPolicy.base(), %{"sandbox" => %{"backend" => "podman"}}),
       provider: "claude",
       image: "localhost/arbiter-dev/beam:abc123",
+      publish: [
+        stub: fn _ ->
+          {:ok, %{ref: "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)}}
+        end
+      ],
       egress: egress,
       arb_token: "arb-tok",
-      node: %{id: ctx.node.id, capacity: %{"mem_total" => 8 * 1024 * 1024 * 1024}},
+      node: %{
+        id: ctx.node.id,
+        capacity: %{"mem_total" => 8 * 1024 * 1024 * 1024},
+        caps: %{"image" => "registry"}
+      },
       git_credential: plan
     )
   end
@@ -615,7 +624,7 @@ defmodule WardmastWeb.RemoteGitCredentialTest do
       live: 0,
       workspace_ids: [],
       labels: [],
-      caps: %{}
+      caps: %{"image" => "registry"}
     }
 
     sockets = Path.join(ctx.root, "dispatch-sockets")
@@ -636,6 +645,11 @@ defmodule WardmastWeb.RemoteGitCredentialTest do
       preflight: false,
       nodes: [row],
       image: "localhost/arbiter-dev/beam:abc123",
+      publish: [
+        stub: fn _ ->
+          {:ok, %{ref: "reg.example/r/worker@sha256:" <> String.duplicate("a", 64)}}
+        end
+      ],
       egress: egress
     )
   end

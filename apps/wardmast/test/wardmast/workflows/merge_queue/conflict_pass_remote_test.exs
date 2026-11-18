@@ -105,6 +105,7 @@ defmodule Wardmast.Workflows.MergeQueue.ConflictPassRemoteTest do
                  repo_path: ctx.repo,
                  repo: "test/repo",
                  start_claude: true,
+                 image_opts: ok_publish(),
                  placement_opts: [remote_available?: true, nodes: [node_row()]],
                  slot_admitted: true
                })
@@ -317,11 +318,24 @@ defmodule Wardmast.Workflows.MergeQueue.ConflictPassRemoteTest do
         health: :ready,
         labels: [],
         workspace_ids: [],
+        caps: %{"image" => "registry"},
         live: 0,
         max: 2
       },
       Map.new(attrs)
     )
+  end
+
+  defp ok_publish do
+    [
+      image: "registry.gitlab.com/g/p/vstim/worker:abc",
+      publish: [
+        stub: fn _ctx ->
+          {:ok,
+           %{ref: "registry.gitlab.com/g/p/vstim/worker@sha256:" <> String.duplicate("a", 64)}}
+        end
+      ]
+    ]
   end
 
   defp resolve(ctx, opts) do
@@ -335,6 +349,7 @@ defmodule Wardmast.Workflows.MergeQueue.ConflictPassRemoteTest do
       repo: "test/repo",
       start_claude: false,
       placement_opts: placement,
+      image_opts: Keyword.get(opts, :image_opts, ok_publish()),
       slot_admitted: true
     })
   end

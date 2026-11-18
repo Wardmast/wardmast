@@ -115,7 +115,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerTest do
         %{
           "run" => id,
           "name" => "arb-run-" <> binary_part(Base.encode16(<<n::64>>, case: :lower), 4, 12),
-          "image" => %{"tag" => "arbiter-dev/beam:abc", "plan" => nil, "ref" => image_ref()}
+          "image" => %{"tag" => "arbiter-dev/beam:abc", "ref" => image_ref()}
         },
         overrides
       )
@@ -313,7 +313,7 @@ defmodule Wardmast.NodeAgent.K8s.ControllerTest do
       assert {:error, {:refuse, :image_unavailable, detail}} =
                Controller.assign(
                  controller,
-                 wire(1, %{"image" => %{"tag" => "x", "plan" => nil, "ref" => ref}})
+                 wire(1, %{"image" => %{"tag" => "x", "ref" => ref}})
                )
 
       assert detail == "no pull secret for evil.example on this node"
