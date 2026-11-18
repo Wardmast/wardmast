@@ -49,6 +49,15 @@ defmodule Wardmast.Config.Paths do
   end
 
   @doc """
+  The server's own log file (`~/.wardmast/log/wardmast.log`), the file launchd
+  appends stdout/stderr to on macOS. Read by `Wardmast.Server.LogRotator`.
+  """
+  @spec server_log_path() :: String.t()
+  def server_log_path do
+    resolve("WARDMAST_SERVER_LOG", :server_log_path, "~/.wardmast/log/wardmast.log")
+  end
+
+  @doc """
   Root holding one dedicated CLI config dir per provider account
   (`<accounts_root>/<provider>-<slug>/`), the dir a dashboard login runs its
   CLI against (`Wardmast.Accounts.LoginRunner`, bd-c99hys). Credentials land
