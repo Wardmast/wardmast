@@ -26,7 +26,7 @@ defmodule WardmastCli.Cmd.Session do
   """
 
   alias Wardmast.Worker.ReleaseEnv
-  alias WardmastCli.{ArgParser, Output, Supervisor}
+  alias WardmastCli.{ArgParser, Output, SessionSockets, Supervisor}
 
   @unit_prefix "arb-session-"
   @socket_prefix "session-"
@@ -163,23 +163,41 @@ defmodule WardmastCli.Cmd.Session do
     end
   end
 
-  # Server-side (`Wardmast.Sessions.Naming.runtime_dir/0`) has no `/tmp`
-  # fallback — `Sessions.launch/1` refuses to launch at all without
-  # `XDG_RUNTIME_DIR`, so a socket can never actually exist under `/tmp`.
-  # Inventing that path here would send the operator chasing a location the
-  # server would never have used; die with the real cause instead.
+  # Linux: `$XDG_RUNTIME_DIR/arbiter/session-<id>.sock`. macOS has no
+  # `XDG_RUNTIME_DIR`: the server keeps sockets in a short `/tmp/arb-*/sessions`
+  # directory (the 104-byte `sun_path` limit rules out `$TMPDIR`), found by
+  # `WardmastCli.SessionSockets`. Anywhere else, inventing a path would send the
+  # operator chasing a location the server never used; die with the real cause.
   defp require_socket_path(id) do
     case System.get_env("XDG_RUNTIME_DIR") do
-      nil ->
+      runtime_dir when is_binary(runtime_dir) and runtime_dir != "" ->
+        Path.join([runtime_dir, "arbiter", @socket_prefix <> id <> ".sock"])
+
+      _ ->
+        case SessionSockets.find_socket(id) do
+          {:ok, socket} -> socket
+          :error -> no_runtime_dir(id)
+        end
+    end
+  end
+
+  @spec no_runtime_dir(String.t()) :: no_return()
+  defp no_runtime_dir(id) do
+    case :os.type() do
+      {:unix, :darwin} ->
+        Output.die(
+          "no tmux socket for session #{id}",
+          "Looked in #{Enum.join(SessionSockets.dirs(), ", ")}. " <>
+            "Run `arb session list` to see live sessions."
+        )
+
+      _ ->
         Output.die(
           "XDG_RUNTIME_DIR is unset",
           "Coordinator sessions live under a systemd user session's runtime " <>
             "dir. Run from a real login session, or `loginctl enable-linger $USER` " <>
             "and `export XDG_RUNTIME_DIR=/run/user/$(id -u)`."
         )
-
-      runtime_dir ->
-        Path.join([runtime_dir, "arbiter", @socket_prefix <> id <> ".sock"])
     end
   end
 end

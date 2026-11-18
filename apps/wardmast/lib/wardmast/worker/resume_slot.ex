@@ -80,6 +80,7 @@ defmodule Wardmast.Worker.ResumeSlot do
   alias Wardmast.Accounts.Resolver
   alias Wardmast.Accounts.SeatCheck
   alias Wardmast.Accounts.SlotLimit
+  alias Wardmast.Agents.ModelFamily
   alias Wardmast.Board.Autopilot
   alias Wardmast.Board.Snapshot
   alias Wardmast.Tasks.IdleTickets
@@ -123,6 +124,10 @@ defmodule Wardmast.Worker.ResumeSlot do
       own drain.
     * `:tickets` / `:cap` — seams: the tickets to count holders among and the
       effective cap, read from the repo and `Snapshot` when absent.
+    * `:provider` / `:model` — the provider and model the resume will run on
+      (the caller's, a `provider_constraint`'s, routing's), under `enforce`: the seat
+      is checked on that provider's account and the model's pool instead of the
+      original run's pin (bd-dhrb7j).
     * `:follow_up` — a CI fix or conflict pass (DC8): under `enforce` never
       held for a full pool; ignored otherwise.
   """
@@ -156,7 +161,7 @@ defmodule Wardmast.Worker.ResumeSlot do
   # The pin account and its effective mode; `:slot` for today's rule. An
   # unreadable account or mode reads as `legacy`, today's rule.
   defp enforced_account(%Issue{} = task, opts) do
-    account = Keyword.get_lazy(opts, :account, fn -> pin_account(task) end)
+    account = Keyword.get_lazy(opts, :account, fn -> pin_account(task, opts) end)
 
     if Keyword.get_lazy(opts, :mode, fn -> AdmissionMode.mode(account) end) == :enforce,
       do: {:enforce, account},
@@ -167,12 +172,33 @@ defmodule Wardmast.Worker.ResumeSlot do
     :exit, _ -> :slot
   end
 
-  defp pin_account(%Issue{implementer_account_id: id}) when is_binary(id), do: Resolver.get(id)
+  # bd-dhrb7j: the seat a resume takes is on the pool it will RUN on. The pin
+  # (`implementer_account_id`, else the last authoring provider's account) is
+  # where the run started; a resume that moves to another provider — the
+  # caller's, a `provider_constraint`'s, routing's — is admitted on that
+  # provider's account, or a ticket whose original provider is stopped could
+  # never be resumed elsewhere. `:provider` is that prediction, nil when the
+  # resume stays where it was.
+  defp pin_account(%Issue{} = task, opts) do
+    provider = Keyword.get(opts, :provider)
+    pinned = original_account(task)
 
-  defp pin_account(%Issue{id: id, workspace_id: ws_id}) do
+    cond do
+      is_nil(provider) -> pinned
+      pinned && same_provider?(pinned.provider, provider) -> pinned
+      true -> Resolver.account(task.workspace_id, provider) || pinned
+    end
+  end
+
+  defp original_account(%Issue{implementer_account_id: id}) when is_binary(id),
+    do: Resolver.get(id)
+
+  defp original_account(%Issue{id: id, workspace_id: ws_id}) do
     provider = Run.latest_authoring_provider(id) || Wardmast.Quota.default_provider(ws_id)
     Resolver.account(ws_id, provider)
   end
+
+  defp same_provider?(a, b), do: Resolver.provider_atom(a) == Resolver.provider_atom(b)
 
   defp admit_seat(%Issue{} = task, account, opts) do
     cond do
@@ -183,13 +209,17 @@ defmodule Wardmast.Worker.ResumeSlot do
     end
   end
 
-  # No predicted model here: the pin pool is the account's lowest budget (§3.1).
+  # With no `:model` the pin pool is the account's lowest budget (§3.1); a
+  # model (`--model`, routing's pick) names its own pool and weighs its seat.
   defp acquire_seat(%Issue{} = task, account, opts) do
+    model = presence(Keyword.get(opts, :model))
+
     seat_opts =
       Keyword.merge(
         [
           workspace_id: task.workspace_id,
-          pool: nil,
+          pool: model && ModelFamily.classify(account.provider, model).pool,
+          model: model,
           priority: task.priority,
           exclude_task: task.id
         ],
@@ -252,6 +282,9 @@ defmodule Wardmast.Worker.ResumeSlot do
     do: "#{length(holders)} held by #{Enum.join(holders, ", ")}"
 
   # ---- internals -----------------------------------------------------------
+
+  defp presence(v) when is_binary(v) and v != "", do: v
+  defp presence(_), do: nil
 
   # A stale copy of the ticket being resumed in the list is not a holder: the
   # ticket itself was just judged not to hold a slot.

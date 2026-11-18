@@ -126,6 +126,50 @@ defmodule WardmastCli.Cmd.SessionTest do
       assert err =~ Path.join([runtime_dir, "arbiter", "session-nonexistent-id.sock"])
     end
 
+    test "without XDG_RUNTIME_DIR it finds a macOS socket under WARDMAST_SOCKET_ROOT", %{
+      base: base,
+      fake_bin: fake_bin
+    } do
+      System.delete_env("XDG_RUNTIME_DIR")
+      root = Path.join(base, "sockroot")
+      File.mkdir_p!(Path.join(root, "sessions"))
+      File.write!(Path.join([root, "sessions", "session-abc.sock"]), "")
+      prior_root = System.get_env("WARDMAST_SOCKET_ROOT")
+      System.put_env("WARDMAST_SOCKET_ROOT", root)
+
+      on_exit(fn ->
+        if prior_root,
+          do: System.put_env("WARDMAST_SOCKET_ROOT", prior_root),
+          else: System.delete_env("WARDMAST_SOCKET_ROOT")
+      end)
+
+      # Reaching the "tmux not found" branch proves the socket was resolved.
+      System.put_env("PATH", fake_bin)
+
+      {_out, err, code} = capture(fn -> Session.run(["attach", "abc"]) end)
+
+      assert code == 1
+      assert err =~ "tmux not found on PATH"
+    end
+
+    test "without XDG_RUNTIME_DIR and no socket anywhere, dies with the real cause" do
+      System.delete_env("XDG_RUNTIME_DIR")
+      prior_root = System.get_env("WARDMAST_SOCKET_ROOT")
+      System.put_env("WARDMAST_SOCKET_ROOT", "/nonexistent-arb-root")
+
+      on_exit(fn ->
+        if prior_root,
+          do: System.put_env("WARDMAST_SOCKET_ROOT", prior_root),
+          else: System.delete_env("WARDMAST_SOCKET_ROOT")
+      end)
+
+      {_out, err, code} = capture(fn -> Session.run(["attach", "zzz-none"]) end)
+
+      assert code == 1
+      # macOS names the session; Linux keeps the systemd-session explanation.
+      assert err =~ ~r/no tmux socket for session zzz-none|XDG_RUNTIME_DIR is unset/
+    end
+
     test "--read-only is accepted alongside the id", %{runtime_dir: runtime_dir} do
       # Same missing-socket failure, just proving the flag doesn't get read
       # as the session id.

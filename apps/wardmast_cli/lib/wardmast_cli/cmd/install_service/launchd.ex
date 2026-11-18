@@ -3,10 +3,11 @@ defmodule WardmastCli.Cmd.InstallService.Launchd do
   The macOS half of `arb install service`: install or remove the per-user
   LaunchAgent (`com.wardmast.server`) through `WardmastCli.Supervisor.Launchd`.
 
-  Phase 1 supports a dev-mode source checkout only (the plist runs the
-  checkout's `.run-server.sh` through an env-sourcing wrapper); a release
-  install and the system scope are refused with a message rather than
-  half-installed. Everything the service manager is asked goes through
+  Mirrors the systemd install's two modes, chosen by the same
+  `Unit.dev_checkout?/1` test: a source checkout runs its `.run-server.sh`; a
+  release install runs `<data-home>/current/bin/wardmast start`, which is what
+  `arb server deploy` re-points. Both go through an env-sourcing wrapper. The
+  system scope is refused with a message rather than half-installed. Everything the service manager is asked goes through
   `Supervisor.impl()`.
   """
 
@@ -20,24 +21,19 @@ defmodule WardmastCli.Cmd.InstallService.Launchd do
   def install(scope, mode) do
     refuse_system!(scope)
     root = resolve_root()
-
-    unless Unit.dev_checkout?(root) do
-      Output.die(
-        "#{root} is not a source checkout (no mix.exs + apps/)",
-        "The macOS service currently runs a dev checkout only. Set ARB_HOME to your " <>
-          "Wardmast checkout, or run `arb install service` from inside it."
-      )
-    end
+    dev? = Unit.dev_checkout?(root)
 
     # Persist the root so `arb start/restart/update` resolve it from any cwd.
     Start.record_home(root)
     arbiter_home = Unit.arbiter_home_path()
-    Unit.ensure_run_server_script(root)
+    if dev?, do: Unit.ensure_run_server_script(root)
 
     secrets = EnvFile.capture_secrets(arbiter_home)
     EnvFile.capture_path(arbiter_home)
 
-    path = Launchd.write_service_files(root, arbiter_home, forwarded_env())
+    path =
+      Launchd.write_service_files(if(dev?, do: root), arbiter_home, forwarded_env())
+
     Supervisor.impl().daemon_reload(scope)
     Supervisor.impl().enable_now(scope)
 

@@ -60,6 +60,16 @@ defmodule Wardmast.Config.Paths do
   end
 
   @doc """
+  Root holding one directory per app preview (`<preview_root>/<repo>/<task_id>/`):
+  its log, its setup marker and, when the ticket's own checkout cannot be used,
+  the preview checkout (`Wardmast.Preview`).
+  """
+  @spec preview_root() :: String.t()
+  def preview_root do
+    resolve("WARDMAST_PREVIEW_ROOT", :preview_root, "~/.wardmast/previews")
+  end
+
+  @doc """
   Root holding the worker-image state (`Wardmast.Worker.Image.Pins`: the
   base-image digest pins and the last weekly refresh, bd-9r5jdt).
   """

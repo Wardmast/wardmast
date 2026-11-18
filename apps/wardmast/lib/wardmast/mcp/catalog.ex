@@ -112,6 +112,10 @@ defmodule Wardmast.MCP.Catalog do
   | `alert_list` | coordinator | `Wardmast.Alerts.active/1` (system alerts, bd-7gt8rm) |
   | `breaker_list` | coordinator | `Wardmast.CircuitBreaker.list/1` + `call_sites/0` |
   | `breaker_reset` | coordinator | `Wardmast.CircuitBreaker.reset/1` / `reset_all/1` |
+  | `preview_start` | coordinator | `Wardmast.Preview.start/2` (app preview of a ticket's checkout) |
+  | `preview_stop` | coordinator | `Wardmast.Preview.stop/2` |
+  | `preview_list` | coordinator | `Wardmast.Preview.list/1` / `get/2` |
+  | `preview_logs` | coordinator | `Wardmast.Preview.logs/2` |
   | `repo_list` | coordinator | `Wardmast.Tasks.RepoConfig.list_repos()` (mirrors `arb repo list`) |
   | `repo_show` | coordinator | single repo from `list_repos()` |
   | `quota_get` | worker, coordinator | `Wardmast.Quota` snapshot per provider (or one account) |
@@ -2066,6 +2070,10 @@ defmodule Wardmast.MCP.Catalog do
           "of the head they were recorded against). send_back means ANOTHER REVIEW ROUND FOLLOWS " <>
           "the implementer's next completion — it never authorises a merge, and a PR whose " <>
           "latest reviewer verdict is not APPROVE stays unmerged until that round approves. " <>
+          "An amend on a round that did not approve is refused unless `confirm_merge: true`: " <>
+          "it permits merging that head with the findings unaddressed and dispatches no pass " <>
+          "(use send_back for one). A later send_back/reject revokes an earlier amend's " <>
+          "permission and takes the ticket off the merge path. " <>
           "CLI: `arb review resolve <ticket> --amend \"<reasoning>\"`.",
       input_schema: %{
         "type" => "object",
@@ -2105,6 +2113,14 @@ defmodule Wardmast.MCP.Catalog do
           "fix_round_attempt" => %{
             "type" => "integer",
             "description" => "The fix-round pass `round` belongs to (default 0 with `round`)."
+          },
+          "confirm_merge" => %{
+            "type" => "boolean",
+            "description" =>
+              "Required to record an `amend` while the ticket's latest reviewer round did not " <>
+                "approve: that amend PERMITS MERGING the head with the findings unaddressed " <>
+                "and dispatches no further pass. Without it the amend is refused, naming the " <>
+                "head. To get another pass use `send_back` instead."
           },
           "head_sha" => %{
             "type" => "string",
@@ -3742,6 +3758,101 @@ defmodule Wardmast.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.alert_list/2
+    },
+    # ---- app previews (`Wardmast.Preview`) ----------------------------------
+    %{
+      name: "preview_start",
+      tiers: @coordinator,
+      description:
+        "Start a ticket's app so you can SEE what its worktree does: runs the repo's " <>
+          "configured `worker.repos.<repo>.preview.command` in the ticket's checkout (or, when " <>
+          "a worker is live or the checkout is on a cluster node, a separate checkout — never " <>
+          "the worker's own) on a port leased from the preview range, bound to 127.0.0.1. " <>
+          "Returns at once with `status: starting`; pass `wait: true` to block until it is " <>
+          "`running` (with the `url`) or `failed` (with `error` and a `log_tail`). Starting " <>
+          "an already-running preview returns it. Auto-stops when the ticket closes or " <>
+          "merges, its worktree is removed, or after the idle TTL. Coordinator only.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{"type" => "string", "description" => "The ticket to preview."},
+          "repo" => %{
+            "type" => "string",
+            "description" => "Repo whose preview config to use (default: the ticket's repo)."
+          },
+          "wait" => %{
+            "type" => "boolean",
+            "description" => "Block until the preview is running or failed (default false)."
+          },
+          "workspace" => %{"type" => "string", "description" => "Workspace id or name."}
+        },
+        "required" => ["task_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.preview_start/2
+    },
+    %{
+      name: "preview_stop",
+      tiers: @coordinator,
+      description:
+        "Stop a ticket's app preview: kills its whole process group, releases its port and " <>
+          "drops the record (the log stays readable). Coordinator only.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{"type" => "string", "description" => "The ticket whose preview to stop."},
+          "repo" => %{"type" => "string", "description" => "Narrow to one repo's preview."},
+          "workspace" => %{"type" => "string", "description" => "Workspace id or name."}
+        },
+        "required" => ["task_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.preview_stop/2
+    },
+    %{
+      name: "preview_list",
+      tiers: @coordinator,
+      description:
+        "List running / starting / failed app previews with their port, URL, checkout kind " <>
+          "(`worktree`, `snapshot` of a live worker's HEAD, or `remote_head` — the pushed head " <>
+          "of a ticket whose checkout is on a cluster node) and any error. With `task_id`, " <>
+          "return just that ticket's preview (a failed one includes its `log_tail`). " <>
+          "Coordinator only.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{"type" => "string", "description" => "Show one ticket's preview."},
+          "repo" => %{"type" => "string", "description" => "Narrow to one repo's preview."},
+          "workspace" => %{"type" => "string", "description" => "Workspace id or name."}
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.preview_list/2
+    },
+    %{
+      name: "preview_logs",
+      tiers: @coordinator,
+      description:
+        "Read a ticket's app-preview log (setup, startup and the app's own output): the last " <>
+          "`lines` (default 200), or everything after byte `offset` to follow it — the " <>
+          "response's `offset` is what to pass next. Readable after a stop or a failure. " <>
+          "Coordinator only.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{"type" => "string", "description" => "The ticket."},
+          "repo" => %{"type" => "string", "description" => "Narrow to one repo's preview."},
+          "lines" => %{"type" => "integer", "description" => "Return the last N lines."},
+          "offset" => %{
+            "type" => "integer",
+            "description" => "Return the bytes after this offset (follow mode)."
+          },
+          "workspace" => %{"type" => "string", "description" => "Workspace id or name."}
+        },
+        "required" => ["task_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.preview_logs/2
     },
     # ---- shared circuit breaker (bd-5jr49o) ---------------------------------
     %{

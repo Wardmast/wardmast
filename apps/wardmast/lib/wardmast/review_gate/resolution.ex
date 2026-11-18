@@ -52,6 +52,14 @@ defmodule Wardmast.ReviewGate.Resolution do
   through the existing verbs, as it did before. What changes is that the
   decision is addressable: who, when, which round, and why.
 
+  An `:amend` (and `:accept_as_is`) is the coordinator ruling that the work ships,
+  so it does **not** dispatch another pass. When the latest reviewer round did
+  not approve, the operator-facing writers (REST/CLI, MCP) refuse an `:amend`
+  that lacks `confirm_merge`, naming the head it would permit to merge
+  (bd-dhrb7j). A later `:send_back` / `:reject` revokes the permission and what it
+  set going — Watchdog, pending merge, the stamped reviewed head, the Merging
+  state — see `Wardmast.ReviewGate.RulingResume.revoke/1`.
+
   It is also a *gate on merging*, in one direction only. The merge path
   (`Wardmast.ReviewGate.MergeAuthorization`) refuses a ticket whose latest
   reviewer round did not approve, and only an `:accept_as_is` / `:amend`

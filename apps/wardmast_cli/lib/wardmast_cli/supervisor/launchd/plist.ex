@@ -6,8 +6,10 @@ defmodule WardmastCli.Supervisor.Launchd.Plist do
   launchd has no `EnvironmentFile=`, so the plist does not exec the server
   directly. It runs `<arbiter_home>/launchd-run.sh`, which loads
   `<arbiter_home>/wardmast.env` (captured secrets and `PATH`, written by
-  `arb install service`; read as literal `KEY=value` lines) and then execs the checkout's `.run-server.sh`
-  (which in turn sources the checkout's own `.wardmast.env`). Every hop is an
+  `arb install service` and refreshed by every `arb server deploy`; read as
+  literal `KEY=value` lines) and then execs the checkout's `.run-server.sh`
+  (which in turn sources the checkout's own `.wardmast.env`) in dev mode, or
+  `<arbiter_home>/current/bin/wardmast start` for a release install. Every hop is an
   `exec`, so the PID launchd tracks is the BEAM.
 
   The plist mirrors the systemd unit's behaviour:
@@ -18,9 +20,12 @@ defmodule WardmastCli.Supervisor.Launchd.Plist do
     * `ThrottleInterval = 10` — `RestartSec=10`.
     * `StandardOutPath`/`StandardErrorPath` — the same `log/wardmast.log` the
       user unit appends to.
-    * `AbandonProcessGroup = false` (explicit) — phase 1: when the service
-      stops, launchd also kills everything left in its process group. Workers
-      do not yet survive a server restart on macOS.
+    * `AbandonProcessGroup = true` — when the service stops, launchd does *not*
+      kill what is left in its process group. Detached tmux sessions
+      (`Wardmast.Sessions.Runner.Darwin`, MAC P3-1) must outlive a server
+      restart, and the P2-1 containment (each worker leads its own group,
+      reaped by the server's own shutdown and the boot-time orphan sweep) is
+      what now owns worker cleanup, so launchd no longer has to.
   """
 
   @label "com.wardmast.server"
@@ -50,17 +55,25 @@ defmodule WardmastCli.Supervisor.Launchd.Plist do
   @doc """
   The LaunchAgent plist.
 
-  Options: `:root` (the source checkout), `:arbiter_home`, and `:env` (a list of
-  extra `{name, value}` pairs to forward, e.g. `WARDMAST_HOST`).
+  Options: `:arbiter_home`, `:env` (a list of extra `{name, value}` pairs to
+  forward, e.g. `WARDMAST_HOST`) and, for a dev checkout, `:root`. Without
+  `:root` this is the **release-mode** plist: the working directory is the data
+  home and the wrapper execs `<arbiter_home>/current/bin/wardmast start`, so
+  `arb server deploy`'s symlink swap + restart is all it takes to change
+  versions (the same contract as the systemd release unit).
   """
   @spec plist(keyword()) :: String.t()
   def plist(opts) do
-    root = Keyword.fetch!(opts, :root)
     arbiter_home = Keyword.fetch!(opts, :arbiter_home)
     extra_env = Keyword.get(opts, :env, [])
     log = log_path(arbiter_home)
 
-    env = [{"PATH", @default_path}, {"ARB_HOME", root}] ++ extra_env
+    # Dev mode runs from the checkout; release mode (no `:root`) from the data home.
+    {workdir, env} =
+      case Keyword.get(opts, :root) do
+        nil -> {arbiter_home, [{"PATH", @default_path}] ++ extra_env}
+        root -> {root, [{"PATH", @default_path}, {"ARB_HOME", root}] ++ extra_env}
+      end
 
     """
     <?xml version="1.0" encoding="UTF-8"?>
@@ -75,7 +88,7 @@ defmodule WardmastCli.Supervisor.Launchd.Plist do
         <string>#{esc(wrapper_path(arbiter_home))}</string>
       </array>
       <key>WorkingDirectory</key>
-      <string>#{esc(root)}</string>
+      <string>#{esc(workdir)}</string>
       <key>EnvironmentVariables</key>
       <dict>
     #{env_entries(env)}
@@ -90,7 +103,7 @@ defmodule WardmastCli.Supervisor.Launchd.Plist do
       <key>ThrottleInterval</key>
       <integer>#{@throttle_s}</integer>
       <key>AbandonProcessGroup</key>
-      <false/>
+      <true/>
       <key>StandardOutPath</key>
       <string>#{esc(log)}</string>
       <key>StandardErrorPath</key>
@@ -107,8 +120,17 @@ defmodule WardmastCli.Supervisor.Launchd.Plist do
   """
   @spec wrapper_script(keyword()) :: String.t()
   def wrapper_script(opts) do
-    root = Keyword.fetch!(opts, :root)
-    env_file = opts |> Keyword.fetch!(:arbiter_home) |> Path.join("wardmast.env") |> sq()
+    arbiter_home = Keyword.fetch!(opts, :arbiter_home)
+    env_file = arbiter_home |> Path.join("wardmast.env") |> sq()
+
+    {workdir, launch} =
+      case Keyword.get(opts, :root) do
+        nil ->
+          {arbiter_home, "exec #{sq(release_bin(arbiter_home))} start"}
+
+        root ->
+          {root, "exec /bin/sh #{sq(Path.join(root, ".run-server.sh"))}"}
+      end
 
     """
     #!/bin/sh
@@ -133,10 +155,14 @@ defmodule WardmastCli.Supervisor.Launchd.Plist do
         esac
       done < "$env_file"
     fi
-    cd #{sq(root)}
-    exec /bin/sh #{sq(Path.join(root, ".run-server.sh"))}
+    cd #{sq(workdir)}
+    #{launch}
     """
   end
+
+  @doc "The release binary the release-mode wrapper execs (through the `current` symlink)."
+  @spec release_bin(String.t()) :: String.t()
+  def release_bin(arbiter_home), do: Path.join([arbiter_home, "current", "bin", "wardmast"])
 
   defp env_entries(env) do
     env

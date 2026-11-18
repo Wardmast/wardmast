@@ -22,7 +22,7 @@ defmodule Wardmast.MCP.TaskEstimateTest do
     ws
   end
 
-  defp closed_task_costing!(ws, cost) do
+  defp closed_task_costing!(ws, cost, occurred_at) do
     {:ok, issue} =
       Ash.create(Issue, %{
         title: "history",
@@ -42,7 +42,7 @@ defmodule Wardmast.MCP.TaskEstimateTest do
         step: :work,
         workspace_id: ws.id,
         cost_usd: cost,
-        occurred_at: DateTime.utc_now()
+        occurred_at: occurred_at
       })
 
     closed
@@ -54,7 +54,11 @@ defmodule Wardmast.MCP.TaskEstimateTest do
 
       # Ten closed D2 features at $1..$10 — one clean (difficulty, issue_type)
       # rung, whose nearest-rank p25/median/p75/p90 are $3 / $5 / $8 / $9.
-      Enum.each(1..10, &closed_task_costing!(ws, &1 * 1.0))
+      # One shared timestamp: the estimate weights tasks by recency, so ten events
+      # stamped microseconds (or, on a slow host, hundreds of ms) apart get
+      # unequal weights and the exactly-on-the-boundary median slips a rank.
+      at = DateTime.utc_now()
+      Enum.each(1..10, &closed_task_costing!(ws, &1 * 1.0, at))
 
       {:ok, task} =
         Ash.create(Issue, %{

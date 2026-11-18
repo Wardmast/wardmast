@@ -4,8 +4,9 @@ defmodule WardmastCli.Supervisor.Launchd do
   one of only two modules in the CLI that spawn a service-manager executable
   (here `launchctl`).
 
-  Phase 1 manages one per-user LaunchAgent (`com.wardmast.server`, in the
-  `gui/<uid>` domain) that runs a dev checkout via an env-sourcing wrapper
+  It manages one per-user LaunchAgent (`com.wardmast.server`, in the
+  `gui/<uid>` domain) that runs a dev checkout or a release install
+  (`<data-home>/current/bin/wardmast start`) via an env-sourcing wrapper
   (see `Launchd.Plist`). It sits under the same restart/health state machine
   as systemd, with these mappings:
 
@@ -30,6 +31,7 @@ defmodule WardmastCli.Supervisor.Launchd do
   alias WardmastCli.Cmd.InstallService.Unit
   alias WardmastCli.Cmd.Start
   alias WardmastCli.Output
+  alias WardmastCli.SessionSockets
   alias WardmastCli.Supervisor.Launchd.Plist
 
   @not_loaded ~r/Could not find service|No such process|not find specified service/i
@@ -168,18 +170,54 @@ defmodule WardmastCli.Supervisor.Launchd do
 
   # ---- session scopes (arb session list) -------------------------------------
 
-  # `arb-session-*` are transient systemd scopes; launchd has none, so the
-  # listing is empty rather than an error.
+  # launchd has no transient scopes: a macOS coordinator session is a detached
+  # tmux server recorded in a pidfile (`Wardmast.Sessions.Runner.Darwin`, MAC
+  # P3-1). Rendered in `systemctl list-units` columns so `arb session list`
+  # parses both the same way. A pid that is not (or no longer) a tmux is a
+  # stale pidfile; `ps` itself failing is an error, never "no sessions".
   @impl true
-  def list_scopes(_prefix), do: {:ok, ""}
+  def list_scopes(prefix) do
+    SessionSockets.pidfiles()
+    |> Enum.sort()
+    |> Enum.reduce_while({:ok, []}, fn {id, pid}, {:ok, acc} ->
+      case tmux_alive(pid) do
+        :alive ->
+          {:cont,
+           {:ok, ["#{prefix}#{id}.scope loaded active running tmux server pid #{pid}\n" | acc]}}
+
+        :dead ->
+          {:cont, {:ok, acc}}
+
+        {:error, detail} ->
+          {:halt, {:error, "ps failed while listing sessions", detail}}
+      end
+    end)
+    |> case do
+      {:ok, lines} -> {:ok, lines |> Enum.reverse() |> Enum.join()}
+      error -> error
+    end
+  end
+
+  defp tmux_alive(pid) do
+    case run_cmd("ps", ["-p", Integer.to_string(pid), "-o", "comm="], stderr_to_stdout: true) do
+      {out, 0} -> if String.contains?(out, "tmux"), do: :alive, else: :dead
+      {_out, 1} -> :dead
+      {out, code} -> {:error, "ps exited #{code}: #{String.trim(out)}"}
+    end
+  rescue
+    e in ErlangError -> {:error, "could not run ps: #{inspect(e.original)}"}
+  end
 
   # ---- install / uninstall (arb install service) -----------------------------
 
   @doc """
-  Write the wrapper script and the plist for a dev checkout at `root`.
-  Returns the plist path. Both are regenerated on every install.
+  Write the wrapper script and the plist: for a dev checkout at `root`, or —
+  with `root` `nil` — for a release install under `arbiter_home`. Returns the
+  plist path. Both are regenerated on every install.
   """
-  @spec write_service_files(root :: Path.t(), arbiter_home :: Path.t(), [{String.t(), String.t()}]) ::
+  @spec write_service_files(root :: Path.t() | nil, arbiter_home :: Path.t(), [
+          {String.t(), String.t()}
+        ]) ::
           Path.t()
   def write_service_files(root, arbiter_home, env) do
     opts = [root: root, arbiter_home: arbiter_home, env: env]
@@ -253,6 +291,33 @@ defmodule WardmastCli.Supervisor.Launchd do
 
   @impl true
   def logs_cmd(_scope), do: "tail -f #{Plist.log_path(Unit.arbiter_home_path())}"
+
+  # ---- operator hints (restart / deploy reports) ----------------------------
+
+  @impl true
+  def manager_name, do: "launchd"
+
+  @impl true
+  def restart_cmd, do: "launchctl kickstart -k #{shell_target()}"
+
+  @impl true
+  def start_cmd, do: "launchctl kickstart #{shell_target()}"
+
+  @impl true
+  def stop_cmd, do: "launchctl bootout #{shell_target()}"
+
+  # `bootout` first (it fails harmlessly when nothing is loaded), then load the
+  # plist again, which starts the job.
+  @impl true
+  def recover_cmds do
+    [
+      stop_cmd(),
+      "launchctl bootstrap gui/$(id -u) #{plist_path()}",
+      status_cmd(:user)
+    ]
+  end
+
+  defp shell_target, do: "gui/$(id -u)/#{Plist.label()}"
 
   # ---- internals ------------------------------------------------------------
 

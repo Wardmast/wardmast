@@ -25,7 +25,7 @@
 # macOS (bd-6uq02m): the same recipe runs on an Apple Silicon runner for the
 # darwin-arm64 tarball. Differences: OpenSSL's `darwin64-arm64-cc` target, a
 # pinned MACOSX_DEPLOYMENT_TARGET, `shasum` for `sha256sum`, and
-# `scripts/check-release-dylibs.sh` (otool) for the readelf-based guard.
+# `scripts/check-release-macho-libs.sh` (otool) for the readelf-based guard.
 # glibc does not apply there.
 set -euo pipefail
 
@@ -225,6 +225,6 @@ echo "==> Verifying ${PREFIX}"
 
 # The same linked-library allowlist check the release tarball goes through.
 case "$UNAME_S" in
-  Darwin) bash "$SCRIPT_DIR/check-release-dylibs.sh" "$PREFIX/lib/erlang" ;;
+  Darwin) bash "$SCRIPT_DIR/check-release-macho-libs.sh" "$PREFIX/lib/erlang" ;;
   *) bash "$SCRIPT_DIR/check-release-shared-libs.sh" "$PREFIX/lib/erlang" ;;
 esac

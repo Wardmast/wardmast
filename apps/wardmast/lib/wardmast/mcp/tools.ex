@@ -341,9 +341,11 @@ defmodule Wardmast.MCP.Tools do
          {:ok, _reasoning} <- require_string(args, "reasoning"),
          {:ok, resolution} <-
            args
-           |> Map.take(~w(task_id decision reasoning gate round fix_round_attempt head_sha))
+           |> Map.take(
+             ~w(task_id decision reasoning gate round fix_round_attempt head_sha confirm_merge)
+           )
            |> Map.put("actor", Wardmast.Params.actor_label(scope) || "coordinator")
-           |> Resolutions.record() do
+           |> Resolutions.record(require_confirm_merge: true) do
       {:ok, %{resolution: Resolutions.serialize(resolution)}}
     end
   rescue
@@ -1917,6 +1919,10 @@ defmodule Wardmast.MCP.Tools do
 
   defdelegate breaker_list(scope, args), to: Wardmast.MCP.Tools.Breaker
   defdelegate breaker_reset(scope, args), to: Wardmast.MCP.Tools.Breaker
+  defdelegate preview_start(scope, args), to: Wardmast.MCP.Tools.Preview
+  defdelegate preview_stop(scope, args), to: Wardmast.MCP.Tools.Preview
+  defdelegate preview_list(scope, args), to: Wardmast.MCP.Tools.Preview
+  defdelegate preview_logs(scope, args), to: Wardmast.MCP.Tools.Preview
 
   defdelegate trust_show(scope, args), to: Wardmast.MCP.Tools.Trust
   defdelegate trust_confirm(scope, args), to: Wardmast.MCP.Tools.Trust

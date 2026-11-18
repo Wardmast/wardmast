@@ -78,7 +78,10 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     "apps/wardmast_cli/lib/wardmast_cli/cmd/session.ex" => 1,
     # bd-1o2zh6 (RW9): the node agent's single `podman run` spawn, scrubbed via
     # `ReleaseEnv.port_env/1`.
-    "apps/wardmast/lib/wardmast/node_agent/run.ex" => 1
+    "apps/wardmast/lib/wardmast/node_agent/run.ex" => 1,
+    # bd-d2v4rz: the app-preview runner's single launcher Port (the repo's
+    # configured startup command), env via `SpawnEnv.port_env/2`.
+    "apps/wardmast/lib/wardmast/preview/runner.ex" => 1
   }
 
   # Every file under `apps/*/lib` that contains a subprocess spawn primitive,
@@ -164,6 +167,10 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # (and now shared with `Wardmast.Agents.Preflight`'s probe teardown). Spawns
     # only `kill` and `pgrep`.
     "apps/wardmast/lib/wardmast/worker/os_process.ex" => :pure_tool,
+    # bd-568ib9: a worker's process group: `ps` for its pgid and start time,
+    # `kill` for the group kill. The perl launcher it builds runs through
+    # `ClaudeSession.open_port/1`, scrubbed there.
+    "apps/wardmast/lib/wardmast/worker/process_group.ex" => :pure_tool,
     # bd-6zuoo6: `systemd-run` / `systemctl` for the per-worker memory scope,
     # through `ReleaseEnv.cmd/3` (the probe runs only `printf` and `cat` in it).
     # The agent itself is still opened by `ClaudeSession.open_port/1`.
@@ -214,7 +221,14 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # inventory fails if one starts to).
     "apps/wardmast/lib/wardmast/node_agent/run.ex" => :scrubbed,
     # SI5: the seed layer's `chmod -R` cleanup goes through `ReleaseEnv.cmd/3`.
-    "apps/wardmast/lib/wardmast/node_agent/seed_layer.ex" => :scrubbed
+    "apps/wardmast/lib/wardmast/node_agent/seed_layer.ex" => :scrubbed,
+    # bd-d2v4rz: the preview runner opens the configured startup command in a
+    # Port with the `SpawnEnv.port_env/2` env, and spawns `ps` / `kill` to find
+    # and signal its process group.
+    "apps/wardmast/lib/wardmast/preview/runner.ex" => :scrubbed,
+    # bd-d2v4rz: git only (clone / cat-file / checkout / remote remove) to build
+    # the primary-side read-only preview checkout of a pushed branch head.
+    "apps/wardmast/lib/wardmast/preview/checkout.ex" => :pure_tool
   }
 
   # Spawn primitives that run a command of their own choosing. Rule 1 inspects

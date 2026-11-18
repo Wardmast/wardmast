@@ -14,7 +14,10 @@ defmodule WardmastCli.Supervisor.SystemdTest do
     end)
   end
 
-  test "the default supervisor implementation is Systemd" do
+  test "systemd is the backend for non-darwin hosts and the pinned test backend" do
+    # Host-independent: `impl/0` follows `:os.type/0` on a real host, and the
+    # test helper pins Systemd so these suites behave the same on macOS.
+    assert Supervisor.impl_for({:unix, :linux}) == Systemd
     assert Supervisor.impl() == Systemd
   end
 
@@ -148,6 +151,19 @@ defmodule WardmastCli.Supervisor.SystemdTest do
       assert {"", 0} = Systemd.disable_timer("t.timer")
       assert_received {:cmd, "systemctl", ["--user", "enable", "--now", "t.timer"]}
       assert_received {:cmd, "systemctl", ["--user", "disable", "--now", "t.timer"]}
+    end
+
+    test "operator command hints name systemctl (used in restart/deploy reports)" do
+      assert Systemd.manager_name() == "systemd"
+      assert Systemd.restart_cmd() == "systemctl --user restart wardmast.service"
+      assert Systemd.start_cmd() == "systemctl --user start wardmast.service"
+      assert Systemd.stop_cmd() == "systemctl --user stop wardmast.service"
+
+      assert Systemd.recover_cmds() == [
+               "systemctl --user daemon-reexec",
+               "systemctl --user start wardmast.service",
+               "systemctl --user status wardmast.service"
+             ]
     end
 
     test "status_cmd/logs_cmd are scope-aware" do

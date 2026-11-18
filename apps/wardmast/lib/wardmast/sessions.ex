@@ -177,8 +177,7 @@ defmodule Wardmast.Sessions do
   """
   @spec launch(launch_opts()) :: {:ok, Session.t()} | {:error, term()}
   def launch(opts \\ []) do
-    with {:ok, socket_dir} <- Naming.socket_dir(),
-         :ok <- ensure_socket_dir(socket_dir),
+    with {:ok, _socket_dir} <- Naming.ensure_socket_dir(),
          {:ok, session} <- create_row(opts),
          {:ok, session} <- provision(session, opts) do
       start_scope(session, opts)
@@ -620,14 +619,18 @@ defmodule Wardmast.Sessions do
 
   @doc """
   The command runner module in force: `:runner` option, then application
-  config, then the real one.
+  config, then the real one for this OS — `Runner.Darwin` on macOS (no
+  systemd), `Runner.Host` elsewhere.
   """
   @spec runner(keyword()) :: module()
   def runner(opts \\ []) do
     Keyword.get(opts, :runner) ||
       Application.get_env(:wardmast, :sessions_runner) ||
-      Runner.Host
+      default_runner(Naming.os())
   end
+
+  defp default_runner(:darwin), do: Runner.Darwin
+  defp default_runner(_os), do: Runner.Host
 
   @doc """
   The terminal back end in force: `:terminal` option, then application config,
@@ -644,13 +647,6 @@ defmodule Wardmast.Sessions do
   end
 
   # -- launch internals -------------------------------------------------------
-
-  defp ensure_socket_dir(dir) do
-    case File.mkdir_p(dir) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:socket_dir_unavailable, dir, reason}}
-    end
-  end
 
   defp create_row(opts) do
     Ash.create(Session, %{

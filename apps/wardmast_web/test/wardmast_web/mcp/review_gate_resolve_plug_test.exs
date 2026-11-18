@@ -57,7 +57,8 @@ defmodule WardmastWeb.MCP.ReviewGateResolvePlugTest do
       call(ctx.conn, ctx.coordinator_token, "review_gate_resolve", %{
         "task_id" => ctx.task.id,
         "decision" => "amend",
-        "reasoning" => "heuristic need not be airtight"
+        "reasoning" => "heuristic need not be airtight",
+        "confirm_merge" => true
       })
 
     assert %{"result" => result} = body

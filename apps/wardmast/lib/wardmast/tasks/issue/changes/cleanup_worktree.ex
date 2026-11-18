@@ -98,6 +98,9 @@ defmodule Wardmast.Tasks.Issue.Changes.CleanupWorktree do
   Failures from `Worktree.cleanup/1` are logged but never propagated — the
   `:close` action must succeed even if teardown does not.
 
+  An app preview of the ticket (`Wardmast.Preview`) is stopped first, so no
+  preview process is left running in a directory this hook removes.
+
   Pairs with `Wardmast.Tasks.Issue.Changes.StopWorker`, which handles the
   in-memory side of teardown.
   """
@@ -126,6 +129,10 @@ defmodule Wardmast.Tasks.Issue.Changes.CleanupWorktree do
   end
 
   defp run(issue, merged?) do
+    # An app preview may be running in the very directory about to go: stop it
+    # first (a no-op for the common ticket with no preview).
+    Wardmast.Preview.stop_for_task(issue.id)
+
     case cleanup(issue, merged?) do
       {:kept, work} -> record_leftover(issue, work)
       :ok -> issue

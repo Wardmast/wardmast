@@ -19,7 +19,10 @@ defmodule Wardmast.Sessions.Runner do
   ## Resolution order
 
   `Wardmast.Sessions.runner/1`: the `:runner` option, then
-  `config :wardmast, :sessions_runner`, then `Wardmast.Sessions.Runner.Host`.
+  `config :wardmast, :sessions_runner`, then the OS default:
+  `Wardmast.Sessions.Runner.Darwin` on macOS (no systemd — it implements the
+  `systemd-run` / `systemctl` verbs over detached tmux + a pidfile, bd-a1pnnv),
+  `Wardmast.Sessions.Runner.Host` everywhere else.
   """
 
   @doc """
