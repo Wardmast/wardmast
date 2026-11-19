@@ -1003,6 +1003,95 @@ defmodule Wardmast.Workflows.PRPatrolTest do
     end
   end
 
+  describe "tick/1 — check-failure dedup (bd-7wwz1f)" do
+    @failing [
+      %{
+        "__typename" => "CheckRun",
+        "name" => "audit",
+        "status" => "COMPLETED",
+        "conclusion" => "FAILURE",
+        "isRequired" => true
+      }
+    ]
+
+    defp stub_checks(number, contexts, head_sha) do
+      stub(
+        signals_stub(
+          pulls: [pull(number, head_sha: head_sha)],
+          nodes: %{
+            number =>
+              pr_node(
+                reviews: [%{"state" => "APPROVED", "author" => %{"login" => "a"}}],
+                contexts: contexts
+              )
+          }
+        )
+      )
+    end
+
+    defp close_all!(tasks) do
+      tasks
+      |> Enum.reject(&(&1.state == :closed))
+      |> Enum.each(fn t ->
+        {:ok, _} = Ash.update(t, %{close_reason: :completed}, action: :close)
+      end)
+    end
+
+    test "closed follow-up + same head and failing set → nothing re-filed", %{ws: ws} do
+      stub_checks(80, @failing, "aaa")
+      {_pid, name} = start_patrol(ws)
+
+      :ok = PRPatrol.tick(name)
+      close_all!(tasks_for_repo())
+      :ok = PRPatrol.tick(name)
+      :ok = PRPatrol.tick(name)
+
+      assert length(tasks_for_repo()) == 1
+    end
+
+    test "new head SHA or different failing set re-arms", %{ws: ws} do
+      stub_checks(81, @failing, "aaa")
+      {_pid, name} = start_patrol(ws)
+
+      :ok = PRPatrol.tick(name)
+      close_all!(tasks_for_repo())
+
+      stub_checks(81, @failing, "bbb")
+      :ok = PRPatrol.tick(name)
+      assert length(tasks_for_repo()) == 2
+      close_all!(tasks_for_repo())
+
+      extra = [Map.put(hd(@failing), "name", "lint") | @failing]
+      stub_checks(81, extra, "bbb")
+      :ok = PRPatrol.tick(name)
+      assert length(tasks_for_repo()) == 3
+    end
+
+    test "after the cap on one head, escalates to the coordinator instead of filing", %{ws: ws} do
+      stub_checks(82, @failing, "aaa")
+      {_pid, name} = start_patrol(ws)
+
+      :ok = PRPatrol.tick(name)
+      close_all!(tasks_for_repo())
+      two = [Map.put(hd(@failing), "name", "lint") | @failing]
+      stub_checks(82, two, "aaa")
+      :ok = PRPatrol.tick(name)
+      close_all!(tasks_for_repo())
+
+      three = [Map.put(hd(@failing), "name", "zzz") | two]
+      stub_checks(82, three, "aaa")
+      :ok = PRPatrol.tick(name)
+      :ok = PRPatrol.tick(name)
+
+      assert length(tasks_for_repo()) == 2
+
+      assert [_one] =
+               "coordinator"
+               |> Wardmast.Messages.Message.inbox(workspace_id: ws.id)
+               |> Enum.filter(&(&1.escalation_kind == :pr_patrol_check_follow_up_cap))
+    end
+  end
+
   describe "periodic ticking" do
     test "the :tick message reschedules itself", %{ws: ws} do
       # An open fleet-authored PR task keeps the lazy-stop guard (bd-7tr11p)
@@ -2602,7 +2691,8 @@ defmodule Wardmast.Workflows.PRPatrolTest do
     %{
       "number" => number,
       "title" => Keyword.get(opts, :title, "t#{number}"),
-      "html_url" => Keyword.get(opts, :html_url, "https://gh/pr/#{number}")
+      "html_url" => Keyword.get(opts, :html_url, "https://gh/pr/#{number}"),
+      "head" => %{"sha" => Keyword.get(opts, :head_sha, "sha-default")}
     }
     |> then(fn m ->
       case Keyword.get(opts, :author) do

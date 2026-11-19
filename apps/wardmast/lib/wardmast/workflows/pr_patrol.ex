@@ -57,6 +57,13 @@ defmodule Wardmast.Workflows.PRPatrol do
   `:completed`, that trigger is consumed: the same fingerprint files nothing more
   (bd-9uyoy0), and only new activity re-arms the patrol.
 
+  The failing-required-check trigger is fingerprinted too (bd-7wwz1f):
+  `checks:<head sha>:<hash of sorted failing check names>`, consumed by a
+  follow-up that closed for any reason. Only a new head SHA or a different
+  failing set re-arms it. After `pr_patrol.max_check_follow_ups` (default 2)
+  follow-ups on one head, patrol sends a `:pr_patrol_check_follow_up_cap`
+  escalation to the coordinator (once per head) instead of filing another.
+
   `source_pr` is deliberately NOT `tracker_ref`: `tracker_ref` is the field
   `Wardmast.Trackers.Sync` treats as a writable tracker item to push task
   lifecycle state onto, and a PR number is not a workable tracker issue —
@@ -197,7 +204,10 @@ defmodule Wardmast.Workflows.PRPatrol do
                 # error — so the "only suppress on a persisted escalation"
                 # logic (bd-dtpjlf) can be exercised without corrupting a
                 # real Ash changeset. Production never sets this.
-                escalate_send_fun: nil
+                escalate_send_fun: nil,
+                # {pr_number, head_sha} pairs already escalated for hitting the
+                # per-head check follow-up cap (bd-7wwz1f).
+                check_cap_escalated: MapSet.new()
               ]
 
   @doc """
@@ -465,16 +475,22 @@ defmodule Wardmast.Workflows.PRPatrol do
            mr_ref,
            signals,
            Workspace.pr_patrol_our_login(state.workspace),
-           &handled?(pr_number, state.workspace_id, &1)
+           &handled?(pr_number, state.workspace_id, &1),
+           Map.get(mr, :head_sha)
          ) do
       {reason, extra_protocol, fingerprint} when is_binary(reason) ->
-        if ci_follow_up?(extra_protocol) and
-             (merge_owns_ci?(pr_number, state, reason, extra_protocol) or
-                fix_pass_in_flight?(pr_number, state)) do
-          {state, false}
-        else
-          mr = Map.put(mr, :forge, forge_of(adapter))
-          file_follow_up(mr, pr_number, state, reason, extra_protocol, fingerprint)
+        cond do
+          ci_follow_up?(extra_protocol) and
+              (merge_owns_ci?(pr_number, state, reason, extra_protocol) or
+                 fix_pass_in_flight?(pr_number, state)) ->
+            {state, false}
+
+          check_follow_up_cap_reached?(mr, state, fingerprint) ->
+            {escalate_check_follow_up_cap(mr, state, reason, fingerprint), false}
+
+          true ->
+            mr = Map.put(mr, :forge, forge_of(adapter))
+            file_follow_up(mr, pr_number, state, reason, extra_protocol, fingerprint)
         end
 
       _ ->
@@ -972,11 +988,11 @@ defmodule Wardmast.Workflows.PRPatrol do
   # follow-up. Triggers are tried in priority order and a consumed one is
   # skipped, so a consumed CHANGES_REQUESTED review never hides a newly
   # unresolved thread or a failing required check.
-  defp actionable_reason(adapter, mr_ref, signals, our_login, handled?) do
+  defp actionable_reason(adapter, mr_ref, signals, our_login, handled?, head_sha) do
     [
       fn -> review_trigger(adapter, mr_ref, signals) end,
       fn -> thread_trigger(adapter, mr_ref, signals, our_login) end,
-      fn -> check_trigger(adapter, mr_ref, signals) end
+      fn -> check_trigger(adapter, mr_ref, signals, head_sha) end
     ]
     |> Enum.find_value(fn trigger ->
       case trigger.() do
@@ -1013,18 +1029,25 @@ defmodule Wardmast.Workflows.PRPatrol do
   defp forge_of(Wardmast.Mergers.Gitlab), do: :gitlab
   defp forge_of(_adapter), do: :github
 
-  defp check_trigger(adapter, mr_ref, signals) do
+  # bd-7wwz1f: the failing-check trigger is fingerprinted on (head SHA, sorted
+  # failing check names). Without a fingerprint it was never consumed, so a
+  # follow-up that triaged a failure and closed without changing the MR head
+  # was re-filed on the next tick (MR !404: 4 follow-ups in 5 minutes). Only a
+  # new head SHA or a different failing set changes the key and re-arms it.
+  defp check_trigger(adapter, mr_ref, signals, head_sha) do
     case required_check_failure_names(adapter, mr_ref, signals) do
       [] ->
         nil
 
       names ->
+        names = Enum.sort(names)
+
         {"#{length(names)} required check(s) failing: #{Enum.join(names, ", ")}",
          CIFailureFollowUp.instructions(
            names,
            failing_check_logs(adapter, mr_ref),
            forge_of(adapter)
-         ), nil}
+         ), check_fingerprint(head_sha, names)}
     end
   end
 
@@ -1069,6 +1092,101 @@ defmodule Wardmast.Workflows.PRPatrol do
     end
   end
 
+  @check_fp_prefix "checks:"
+
+  # `checks:<head_sha>:<hash of sorted names>` — the SHA stays readable so the
+  # per-head follow-up count (`check_follow_up_count/3`) can match on a prefix.
+  defp check_fingerprint(head_sha, sorted_names) do
+    digest =
+      Base.encode16(:crypto.hash(:sha256, Enum.join(sorted_names, "\n")), case: :lower)
+
+    "#{check_fp_head_prefix(head_sha)}#{digest}"
+  end
+
+  defp check_fp_head_prefix(head_sha), do: "#{@check_fp_prefix}#{head_sha || "-"}:"
+
+  defp check_fingerprint?(fp), do: is_binary(fp) and String.starts_with?(fp, @check_fp_prefix)
+
+  # Default cap on check-failure follow-ups for one MR head (`max_check_follow_ups`
+  # in the `pr_patrol` config); past it patrol escalates instead of filing.
+  @default_max_check_follow_ups 2
+
+  defp max_check_follow_ups(%Workspace{config: config}) do
+    case get_in(config || %{}, ["pr_patrol", "max_check_follow_ups"]) do
+      n when is_integer(n) and n >= 1 -> n
+      _ -> @default_max_check_follow_ups
+    end
+  end
+
+  defp max_check_follow_ups(_), do: @default_max_check_follow_ups
+
+  defp check_follow_up_count(pr_number, workspace_id, head_prefix) do
+    ref = to_string(pr_number)
+
+    Issue
+    |> Ash.Query.filter(workspace_id == ^workspace_id and source_pr == ^ref)
+    |> Ash.read!()
+    |> Enum.count(fn issue ->
+      is_binary(issue.last_seen_comment_id) and
+        String.starts_with?(issue.last_seen_comment_id, head_prefix)
+    end)
+  end
+
+  defp check_follow_up_cap_reached?(%{number: pr_number, head_sha: head_sha}, state, fp)
+       when is_binary(head_sha) do
+    check_fingerprint?(fp) and
+      check_follow_up_count(pr_number, state.workspace_id, check_fp_head_prefix(head_sha)) >=
+        max_check_follow_ups(state.workspace)
+  end
+
+  # Without a head SHA we cannot tell "no head change" from a push, so the cap
+  # never fires; the (names-only) fingerprint dedup still applies.
+  defp check_follow_up_cap_reached?(_mr, _state, _fp), do: false
+
+  # Escalate once per (PR, head SHA) per patrol process, then stay quiet.
+  defp escalate_check_follow_up_cap(%{number: pr_number} = mr, state, reason, _fp) do
+    key = {pr_number, mr.head_sha}
+
+    if MapSet.member?(state.check_cap_escalated, key) do
+      state
+    else
+      attrs = %{
+        kind: :escalation,
+        escalation_kind: :pr_patrol_check_follow_up_cap,
+        to_ref: Message.coordinator_ref(),
+        from_ref: "pr_patrol",
+        workspace_id: state.workspace_id,
+        subject: "PRPatrol stopped filing check follow-ups for PR ##{pr_number}",
+        body:
+          "PRPatrol has already filed #{max_check_follow_ups(state.workspace)} follow-up(s) " <>
+            "for #{state.repo} PR ##{pr_number} at head #{mr.head_sha} and the failure is " <>
+            "still present (#{reason}). It will not file another until the head SHA or the " <>
+            "failing check set changes. A human or the coordinator needs to look at it."
+      }
+
+      send_fun = state.escalate_send_fun || (&Message.send_mail/1)
+
+      case safe_send(send_fun, attrs) do
+        :ok ->
+          %{state | check_cap_escalated: MapSet.put(state.check_cap_escalated, key)}
+
+        :error ->
+          state
+      end
+    end
+  end
+
+  defp safe_send(send_fun, attrs) do
+    case send_fun.(attrs) do
+      {:ok, _} -> :ok
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  catch
+    :exit, _ -> :error
+  end
+
   defp review_fingerprint(nil), do: nil
   defp review_fingerprint(id), do: "review:#{id}"
 
@@ -1093,6 +1211,21 @@ defmodule Wardmast.Workflows.PRPatrol do
   # Only new activity — a new review id, a new/changed thread — changes the
   # fingerprint and re-arms it. A nil fingerprint is never consumed.
   defp handled?(_pr_number, _workspace_id, nil), do: false
+
+  # bd-7wwz1f: a check-failure fingerprint is consumed by a follow-up that
+  # closed for ANY reason — an open one blocks via `deduped?/2`, and a closed
+  # one means the same (head, failing set) was already triaged.
+  defp handled?(pr_number, workspace_id, "checks:" <> _ = fingerprint) do
+    ref = to_string(pr_number)
+
+    Issue
+    |> Ash.Query.filter(
+      workspace_id == ^workspace_id and source_pr == ^ref and state == :closed and
+        last_seen_comment_id == ^fingerprint
+    )
+    |> Ash.read!()
+    |> Enum.any?()
+  end
 
   defp handled?(pr_number, workspace_id, fingerprint) do
     ref = to_string(pr_number)
