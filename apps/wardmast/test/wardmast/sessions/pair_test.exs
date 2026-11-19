@@ -165,6 +165,71 @@ defmodule Wardmast.Sessions.PairTest do
     end
   end
 
+  describe "open/2 — the write scope (acceptance 3)" do
+    test "the session's settings carry the pair deny rules over the interactive floor", %{
+      issue: issue
+    } do
+      %{session: session} = open!(issue)
+
+      deny =
+        session.config_dir
+        |> Path.join("settings.json")
+        |> File.read!()
+        |> Jason.decode!()
+        |> get_in(["permissions", "deny"])
+
+      assert "Bash(git push origin main:*)" in deny
+      assert "Bash(git push --no-verify:*)" in deny
+      assert "Bash(git push --force:*)" in deny
+
+      checkout = Wardmast.Config.Paths.primary_checkout() |> Path.expand()
+      assert "Edit(/#{checkout}/**)" in deny
+    end
+
+    test "the session's git refuses a push to the default branch from its worktree", %{
+      issue: issue,
+      git: git
+    } do
+      %{session: session} = open!(issue)
+      branch = BranchNamer.derive(issue)
+
+      script = session.id |> Layout.launch_script_path() |> File.read!()
+      hooks = Path.join(Layout.session_dir(session.id), "git-hooks")
+      assert script =~ "export GIT_CONFIG_KEY_0='core.hooksPath'"
+      assert script =~ "export GIT_CONFIG_VALUE_0='#{hooks}'"
+
+      GitFixture.commit!(session.cwd, %{"pair.txt" => "pair\n"}, "pair work")
+      env = Wardmast.Sessions.PairGuard.git_env(hooks)
+      main_before = git!(git.forge, ["rev-parse", "refs/heads/main"])
+
+      assert {out, status} =
+               System.cmd("git", ["-C", session.cwd, "push", "origin", "HEAD:main"],
+                 env: env,
+                 stderr_to_stdout: true
+               )
+
+      assert status != 0
+      assert out =~ "may push only refs/heads/#{branch}"
+      assert git!(git.forge, ["rev-parse", "refs/heads/main"]) == main_before
+
+      assert {_out, 0} =
+               System.cmd("git", ["-C", session.cwd, "push", "-q", "origin", branch],
+                 env: env,
+                 stderr_to_stdout: true
+               )
+    end
+
+    test "a worktree inside the primary checkout cannot host a pair session", %{issue: issue} do
+      checkout = Wardmast.Config.Paths.primary_checkout()
+      Wardmast.DataCase.put_app_env(:wardmast, :worktree_root, Path.join(checkout, "worktrees"))
+
+      assert {:error, {:provisioning_failed, {:inside_primary_checkout, _path, _why}}} =
+               Pair.open(issue, runner: SessionRunnerStub)
+
+      assert Pair.live_session(issue.id) == :none
+    end
+  end
+
   describe "open/2 — eligibility" do
     test "a Backlog, Ready or In-progress ticket can be paired on", %{issue: issue} do
       assert Pair.eligible?(issue)

@@ -95,6 +95,7 @@ defmodule Wardmast.Sessions.Provisioning do
   alias Wardmast.Sessions.Layout
   alias Wardmast.Sessions.Memory
   alias Wardmast.Sessions.Naming
+  alias Wardmast.Sessions.PairGuard
   alias Wardmast.Sessions.Provider
   alias Wardmast.Sessions.RepoCheckout
   alias Wardmast.Sessions.Session
@@ -135,6 +136,13 @@ defmodule Wardmast.Sessions.Provisioning do
       (`Wardmast.Sessions.Instructions.render/2`'s `:refine` option, bd-980x89)
       into the session's **cwd** as both `CLAUDE.md` and `AGENTS.md`, instead
       of the default coordinator `CLAUDE.md` at the session root.
+    * `:pair` — a `:pair` session's context (`Wardmast.Sessions.Pair`,
+      bd-7p6a9o): the ticket, its worktree, branch, base and repo. Renders the
+      pair instructions into the session's `CLAUDE_CONFIG_DIR/CLAUDE.md` (the
+      cwd is the ticket's worktree, whose own `CLAUDE.md` is the repo's), keeps
+      `.mcp.json` out of git, adds `Wardmast.Sessions.PairGuard`'s deny rules
+      to `settings.json`, and installs its push guard — a launch without a
+      branch to guard fails rather than coming up unguarded.
   """
   @spec provision(Session.t(), keyword()) :: {:ok, provisioned()} | {:error, term()}
   def provision(%Session{} = session, opts \\ []) do
@@ -146,6 +154,7 @@ defmodule Wardmast.Sessions.Provisioning do
     with :ok <- check_outside_primary_checkout(paths.root, opts),
          :ok <- check_outside_primary_checkout(cwd, opts),
          :ok <- make_directories(id, config_dir, cwd),
+         {:ok, opts} <- install_pair_guard(session, opts),
          {:ok, opts} <- provision_repo_checkout(session, opts),
          :ok <- write_instructions(session, paths, cwd, opts),
          :ok <- mount_memory(session, opts),
@@ -345,6 +354,38 @@ defmodule Wardmast.Sessions.Provisioning do
     end
   end
 
+  # bd-7p6a9o: a pair session's push guard. Its hooks are written under the
+  # session's own directory and reached only through the env `launch.sh`
+  # exports (`PairGuard.git_env/1`), so no git outside the session is touched.
+  # Fatal when it cannot be written: a pair session must not come up without
+  # the guard its doctrine promises.
+  defp install_pair_guard(%Session{kind: :pair} = session, opts) do
+    pair = Keyword.get(opts, :pair) || %{}
+    hooks = Layout.git_hooks_dir(session.id)
+
+    case PairGuard.install_hooks(hooks, %{branch: Map.get(pair, :branch), worktree: session.cwd}) do
+      :ok ->
+        {:ok, Keyword.update(opts, :extra_env, PairGuard.git_env(hooks), &(&1 ++ PairGuard.git_env(hooks)))}
+
+      {:error, reason} ->
+        {:error, {:pair_guard_failed, reason}}
+    end
+  end
+
+  defp install_pair_guard(_session, opts), do: {:ok, opts}
+
+  defp pair_deny_rules(%Session{kind: :pair}, checkout, opts) do
+    pair = Keyword.get(opts, :pair) || %{}
+
+    PairGuard.deny_rules(%{
+      branch: Map.get(pair, :branch),
+      target_branch: Map.get(pair, :target_branch),
+      primary_checkout: checkout
+    })
+  end
+
+  defp pair_deny_rules(_session, _checkout, _opts), do: []
+
   # A refine session's read-only grounding checkout (bd-1lszsc), provisioned
   # *before* the instructions so they can name the path — or say there is none.
   #
@@ -424,11 +465,15 @@ defmodule Wardmast.Sessions.Provisioning do
   end
 
   defp seed_config_dir(session, config_dir, cwd, opts) do
+    checkout = Keyword.get(opts, :primary_checkout, Paths.primary_checkout())
+
     Interactive.ensure(config_dir,
       cwd: cwd,
       auth_mode: session.auth_mode,
       source_dir: credentials_source(opts),
-      primary_checkout: Keyword.get(opts, :primary_checkout, Paths.primary_checkout()),
+      primary_checkout: checkout,
+      # bd-7p6a9o: a pair session's own write scope, over the interactive floor.
+      extra_deny: pair_deny_rules(session, checkout, opts),
       # Pre-approve exactly the server `write_mcp_config/3` is about to declare,
       # and nothing when it is about to declare none (bd-5xlkkj). Without this a
       # first launch stops on "New MCP server found in this project: arbiter"
