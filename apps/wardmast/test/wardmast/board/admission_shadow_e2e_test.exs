@@ -60,7 +60,6 @@ defmodule Wardmast.Board.AdmissionShadowE2ETest do
 
     %{account: account, first: ready.("first", 1), second: ready.("second", 2)}
   end
-  end
 
   defp run_of(task_id) do
     Run
