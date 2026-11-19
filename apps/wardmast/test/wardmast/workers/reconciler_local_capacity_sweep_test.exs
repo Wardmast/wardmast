@@ -12,11 +12,10 @@ defmodule Wardmast.Workers.ReconcilerLocalCapacitySweepTest do
   """
   use Wardmast.DataCase, async: false
 
-  alias Wardmast.Boot.ReconcileSweep
   alias Wardmast.Tasks.{Issue, Workspace}
   alias Wardmast.Test.{ResumeSlotFixture, StubResumeDeferrer}
   alias Wardmast.Worker
-  alias Wardmast.Workers.{Reconciler, Run}
+  alias Wardmast.Workers.Reconciler
 
   # The real Reconciler for rows and tickets; only the systemd scope sweep is
   # stubbed (it would `systemctl --user stop` every live `arb-run-*` on the host).
