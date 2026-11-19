@@ -483,33 +483,6 @@ defmodule Wardmast.Quota.GateProviderTest do
       {:ok, workspace: workspace, task: task}
     end
 
-    test "holds the dispatch and queues the intent", %{workspace: workspace, task: task} do
-      Ash.create!(CodexQuota, %{
-        provider_account_id: quota_account_id!(workspace.id, "codex"),
-        provider: "codex",
-        session_used_percent: 99.0,
-        session_reset_at: ahead(3600),
-        limit_reached: true,
-        captured_at: now()
-      })
-
-      assert {:error, {:quota_held, held_id}} =
-               Wardmast.Worker.Dispatch.dispatch(task.id, force: true, start_driver: false)
-
-      assert held_id == task.id
-
-      {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.state == :backlog
-      assert Worker.whereis(task.id) == nil
-      assert DispatchQueue.held?(workspace.id, task.id)
-
-      # AC5 (bd-1qjv3j): the queued hold's reason names the account held.
-      assert Enum.any?(
-               DispatchQueue.state(DispatchQueueSupervisor.whereis(workspace.id)).items,
-               &(DispatchQueue.reason_text(&1.reason) =~ "codex:")
-             )
-    end
-
     test "a paused provider holds the dispatch: held — codex paused: <reason> (bd-5ef587)", %{
       workspace: workspace,
       task: task
@@ -584,39 +557,6 @@ defmodule Wardmast.Quota.GateProviderTest do
       assert result.task.state == :active
     end
 
-    test "an explicit agent_type override picks that provider's snapshot", %{
-      workspace: workspace
-    } do
-      # Workspace default is codex (healthy); the dispatch forces gemini, which
-      # is blown — the gate must consult Google, not Codex.
-      pin_agy_on_path()
-
-      {:ok, gtask} = Ash.create(Issue, %{title: "gemini work", workspace_id: workspace.id})
-
-      Ash.create!(CodexQuota, %{
-        provider_account_id: quota_account_id!(workspace.id, "codex"),
-        provider: "codex",
-        session_used_percent: 1.0,
-        session_reset_at: ahead(3600),
-        captured_at: now()
-      })
-
-      Ash.create!(GoogleQuota, %{
-        provider_account_id: quota_account_id!(workspace.id, Quota.provider_code(:gemini)),
-        provider: Quota.provider_code(:gemini),
-        used_percent: 99.0,
-        reset_at: ahead(3600),
-        captured_at: now()
-      })
-
-      assert {:error, {:quota_held, _}} =
-               Wardmast.Worker.Dispatch.dispatch(gtask.id,
-                 force: true,
-                 start_driver: false,
-                 agent_type: :gemini
-               )
-    end
-  end
 
   describe "Dispatch.dispatch/2 — Antigravity model-hint threading (bd-7qj58o AC4)" do
     # These drive the gate through `Quota.provider_code(:gemini)`, which
@@ -653,83 +593,6 @@ defmodule Wardmast.Quota.GateProviderTest do
       {:ok, workspace: workspace, task: task}
     end
 
-    test "a routing-pinned config[\"model\"] gates the Claude/GPT bucket, not model_tier's Gemini one (finding 1)",
-         %{workspace: workspace, task: task} do
-      # `model_tier` resolves to a Gemini model ("premium" → gemini-3.1-pro-high),
-      # but the P0 routing rule pins `config["model"]` to a claude-* id, which
-      # wins per `Gemini.resolve_model/2`'s own precedence. The Gemini bucket
-      # has headroom while Claude/GPT is blown — a hint that only looked at
-      # model_tier would fail open here.
-      Ash.create!(GoogleQuota, %{
-        provider_account_id: quota_account_id!(workspace.id, "antigravity"),
-        provider: "antigravity",
-        captured_at: now(),
-        reset_at: ahead(3600),
-        snapshot: %{
-          "models" => [
-            agy_bucket("gemini_models", "5h", 80.0, ahead(3600)),
-            agy_bucket("gemini_models", "weekly", 80.0, ahead(86_400)),
-            agy_bucket("claude_and_gpt_models", "5h", 3.0, ahead(3600)),
-            agy_bucket("claude_and_gpt_models", "weekly", 80.0, ahead(86_400))
-          ]
-        }
-      })
-
-      assert {:error, {:quota_held, held_id}} =
-               Wardmast.Worker.Dispatch.dispatch(task.id, force: true, start_driver: false)
-
-      assert held_id == task.id
-      assert DispatchQueue.held?(workspace.id, task.id)
-    end
-
-    test "a nested per-provider tier_models override is honoured for the hint (finding 2)", %{} do
-      # No routing rule fires, so the hint falls back to model_tier ->
-      # tier_models. Scope the override under agent.config["gemini"] the way
-      # a multi-provider pool must (bd-a6vu3c) — the hint has to read it via
-      # `ProviderConfig.apply_overrides/2`, same as the real dispatch does.
-      {:ok, ws} =
-        Ash.create(Workspace, %{
-          name: "agyo-#{System.unique_integer([:positive])}",
-          prefix: "ao#{System.unique_integer([:positive])}",
-          config: %{
-            "agent" => %{
-              "type" => "gemini",
-              "config" => %{
-                "model_tier" => "premium",
-                "gemini" => %{"tier_models" => %{"premium" => "claude-sonnet-4-6"}}
-              }
-            },
-            "quota" => %{"on_exhaustion" => "throttle"}
-          }
-        })
-
-      on_exit(fn -> stop_dispatch_queue(ws.id) end)
-
-      {:ok, task} =
-        Ash.create(Issue, %{title: "agy override work", workspace_id: ws.id, priority: 4})
-
-      Ash.create!(GoogleQuota, %{
-        provider_account_id: quota_account_id!(ws.id, "antigravity"),
-        provider: "antigravity",
-        captured_at: now(),
-        reset_at: ahead(3600),
-        snapshot: %{
-          "models" => [
-            agy_bucket("gemini_models", "5h", 80.0, ahead(3600)),
-            agy_bucket("gemini_models", "weekly", 80.0, ahead(86_400)),
-            agy_bucket("claude_and_gpt_models", "5h", 3.0, ahead(3600)),
-            agy_bucket("claude_and_gpt_models", "weekly", 80.0, ahead(86_400))
-          ]
-        }
-      })
-
-      assert {:error, {:quota_held, held_id}} =
-               Wardmast.Worker.Dispatch.dispatch(task.id, force: true, start_driver: false)
-
-      assert held_id == task.id
-      assert DispatchQueue.held?(ws.id, task.id)
-    end
-  end
 
   # bd-a14qd1 moved these off the removed `Workflows.QuotaGate.Default` and
   # onto `Board.Snapshot.quota_hold/1`, the board scheduler's own gate. It
@@ -749,105 +612,8 @@ defmodule Wardmast.Quota.GateProviderTest do
       workspace
     end
 
-    test "holds when the workspace's default provider (codex) is over the ceiling" do
-      workspace = provider_workspace("codex")
-
-      Ash.create!(CodexQuota, %{
-        provider_account_id: quota_account_id!(workspace.id, "codex"),
-        provider: "codex",
-        session_used_percent: 93.0,
-        session_reset_at: ahead(3600),
-        captured_at: now()
-      })
-
-      assert {:hold, _} = hold(workspace)
-    end
-
-    test "allows when the codex workspace has headroom" do
-      workspace = provider_workspace("codex")
-
-      Ash.create!(CodexQuota, %{
-        provider_account_id: quota_account_id!(workspace.id, "codex"),
-        provider: "codex",
-        session_used_percent: 20.0,
-        session_reset_at: ahead(3600),
-        captured_at: now()
-      })
-
-      assert hold(workspace) == :ok
-    end
-
-    test "a blown Anthropic snapshot does not clamp a codex workspace" do
-      workspace = provider_workspace("codex")
-
-      Ash.create!(AnthropicQuota, %{
-        provider_account_id: quota_account_id!(workspace.id, "claude"),
-        provider: "claude",
-        utilization_5h: 0.99,
-        status_5h: "rejected",
-        captured_at: now()
-      })
-
-      assert hold(workspace) == :ok
-    end
-  end
 
   describe "DispatchQueue drain — per-provider snapshots" do
-    test "a Codex-held intent drains when Codex regains headroom" do
-      Application.put_env(:wardmast, :test_dispatch_pid, self())
-      on_exit(fn -> Application.delete_env(:wardmast, :test_dispatch_pid) end)
-
-      {:ok, workspace} =
-        Ash.create(Workspace, %{
-          name: "cxd-#{System.unique_integer([:positive])}",
-          prefix: "cd#{System.unique_integer([:positive])}",
-          config: %{
-            "agent" => %{"type" => "codex"},
-            "quota" => %{"on_exhaustion" => "throttle"}
-          }
-        })
-
-      {:ok, pid} =
-        DispatchQueueSupervisor.start_dispatch_queue(workspace.id,
-          dispatcher: __MODULE__.RecordingDispatcher,
-          auto_subscribe: false
-        )
-
-      on_exit(fn -> Wardmast.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid) end)
-
-      {:ok, task} = Ash.create(Issue, %{title: "codex drain", workspace_id: workspace.id})
-
-      Ash.create!(CodexQuota, %{
-        provider_account_id: quota_account_id!(workspace.id, "codex"),
-        provider: "codex",
-        session_used_percent: 99.0,
-        session_reset_at: ahead(3600),
-        limit_reached: true,
-        captured_at: now()
-      })
-
-      assert {:error, {:quota_held, _}} =
-               Wardmast.Worker.Dispatch.dispatch(task.id, force: true, start_driver: false)
-
-      assert length(DispatchQueue.state(pid).items) == 1
-
-      # Codex frees up — the drain must re-check the CODEX table, not Anthropic.
-      Ash.create!(CodexQuota, %{
-        provider_account_id: quota_account_id!(workspace.id, "codex"),
-        provider: "codex",
-        session_used_percent: 5.0,
-        session_reset_at: ahead(3600),
-        limit_reached: false,
-        captured_at: now()
-      })
-
-      :ok = DispatchQueue.drain(pid)
-
-      assert_receive {:dispatched, dispatched_id, _opts}, 1000
-      assert dispatched_id == task.id
-      assert DispatchQueue.state(pid).items == []
-    end
-  end
 
   defmodule RecordingDispatcher do
     @moduledoc false

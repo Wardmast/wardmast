@@ -41,16 +41,6 @@ defmodule Wardmast.Quota.Gate.Throttle do
     end
   end
 
-  @impl true
-  def board_hold(nil, _policy, _opts), do: :ok
-
-  def board_hold(quota, policy, opts) do
-    case Gate.hold_phrase(quota, policy, Keyword.take(opts, [:priority])) do
-      nil -> :ok
-      phrase -> {:hold, phrase}
-    end
-  end
-
   # The P0 pace exemption (bd-6bxv7h) reads the task's **own** priority, never
   # an epic floor's. A caller-supplied `:priority` wins; no task, no priority.
   defp put_priority(opts, %{priority: priority}) when is_integer(priority),

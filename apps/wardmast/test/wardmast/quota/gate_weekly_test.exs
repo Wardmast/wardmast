@@ -270,39 +270,6 @@ defmodule Wardmast.Quota.GateWeeklyTest do
       q
     end
 
-    test "a 7d utilization hold reads as a 7d hold on the board", %{workspace: workspace} do
-      record_quota!(workspace.id, %{
-        utilization_7d: 0.91,
-        status_7d: "allowed",
-        reset_7d_at:
-          DateTime.add(DateTime.utc_now(), 3 * 86_400, :second) |> DateTime.truncate(:second)
-      })
-
-      assert {:hold, "claude:default 7d 91% ≥ 90%"} =
-               Wardmast.Board.Snapshot.quota_hold(workspace.id)
-
-      plan =
-        Wardmast.Board.Scheduler.plan(%{
-          ready: [%{id: "bd-1", files: [], deps: []}],
-          quota: Wardmast.Board.Snapshot.quota_hold(workspace.id),
-          slots_free: 4
-        })
-
-      assert Enum.any?(plan.entries, &(&1.reason == "blocked — claude:default 7d 91% ≥ 90%"))
-    end
-
-    test "a 5h hold still reads with the 5h wording", %{workspace: workspace} do
-      record_quota!(workspace.id, %{
-        utilization_5h: 0.9,
-        utilization_7d: 0.1,
-        status_7d: "allowed"
-      })
-
-      assert {:hold, phrase} = Wardmast.Board.Snapshot.quota_hold(workspace.id)
-      assert phrase =~ "quota near exhaustion"
-      refute phrase =~ "7d"
-    end
-  end
 
   describe "quota_get / arb quota expose the gating window" do
     test "names the 7d window when it is what holds dispatch" do

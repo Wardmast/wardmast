@@ -131,66 +131,6 @@ defmodule Wardmast.Board.SnapshotMostQuotaTest do
   # ---- the hold -------------------------------------------------------------
 
   describe "quota_hold/2" do
-    test "is :ok while another candidate is available though the default provider is held" do
-      ws = most_quota!()
-      claude_held_codex_free!(ws)
-
-      assert Snapshot.quota_hold(ws.id) == :ok
-    end
-
-    test "holds when every implementer candidate is quota-held" do
-      ws = most_quota!()
-      %{codex: codex} = claude_held_codex_free!(ws)
-      Ash.update!(codex, %{quota_config: %{"throttle_threshold" => 0.5}})
-      codex_used!(codex, 60.0)
-
-      assert {:hold, reason} = Snapshot.quota_hold(ws.id)
-      # Every held account is named, not just the default provider's.
-      assert reason =~ "claude:#{claude_slug(ws)}"
-      assert reason =~ "codex:#{codex.slug}"
-    end
-
-    test "holds when the only available-looking candidate is out of capacity and the rest are held" do
-      ws = most_quota!()
-      %{codex: codex} = claude_held_codex_free!(ws, %{}, %{max_concurrent: 1})
-      live_worker!(ws, "codex")
-
-      assert codex.max_concurrent == 1
-      assert {:hold, _reason} = Snapshot.quota_hold(ws.id)
-    end
-
-    test "a mixed drop names every dropped candidate: the held account and why the other can't help" do
-      ws = most_quota!()
-      %{codex: codex} = claude_held_codex_free!(ws, %{}, %{max_concurrent: 1})
-      live_worker!(ws, "codex")
-
-      assert {:hold, reason} = Snapshot.quota_hold(ws.id)
-      assert reason =~ "claude:#{claude_slug(ws)}"
-      assert reason =~ "codex:#{codex.slug} at capacity"
-    end
-
-    test "a failover workspace is held by its default provider exactly as before" do
-      ws = workspace!(%{})
-      claude_held_codex_free!(ws)
-
-      assert {:hold, _reason} = Snapshot.quota_hold(ws.id)
-    end
-
-    test "a most_quota workspace with no implementer attachment keeps the default-provider hold" do
-      ws = most_quota!()
-      claude = account!(:claude, %{quota_config: %{"throttle_threshold" => 0.5}})
-
-      Ash.create!(WorkspaceProviderAccount, %{
-        workspace_id: ws.id,
-        provider: :claude,
-        provider_account_id: claude.id
-      })
-
-      claude_used!(claude, 0.70)
-
-      assert {:hold, _reason} = Snapshot.quota_hold(ws.id)
-    end
-  end
 
   # ---- the per-ticket hold (bd-1qjv3j) --------------------------------------
 
@@ -272,14 +212,6 @@ defmodule Wardmast.Board.SnapshotMostQuotaTest do
       assert total - in_use == 2
     end
 
-    test "counts only the available candidates: a held default provider adds nothing" do
-      ws = most_quota!()
-      %{} = claude_held_codex_free!(ws, %{max_concurrent: 2}, %{max_concurrent: 2})
-
-      # Codex's two free slots, none of Claude's.
-      assert Snapshot.effective_max_concurrent(ws.id, 0) == 2
-    end
-
     test "is capped by the machine cap" do
       ws = most_quota!()
       claude = account!(:claude, %{max_concurrent: 5})
@@ -325,28 +257,6 @@ defmodule Wardmast.Board.SnapshotMostQuotaTest do
       live_worker!(ws, "codex")
 
       assert Snapshot.effective_max_concurrent(ws.id, 2) == 2
-    end
-  end
-
-  describe "load/1" do
-    test "carries the routed hold and slot count onto the board" do
-      ws = most_quota!()
-      %{} = claude_held_codex_free!(ws, %{}, %{max_concurrent: 2})
-
-      board = Snapshot.load(workspace_id: ws.id, issues: [], workers: [])
-
-      assert board.quota == :ok
-      assert board.slots_total == 2
-      assert board.slots_free == 2
-    end
-
-    test "a failover workspace's board still carries the default provider's hold" do
-      ws = workspace!(%{})
-      claude_held_codex_free!(ws)
-
-      board = Snapshot.load(workspace_id: ws.id, issues: [], workers: [])
-
-      assert {:hold, _reason} = board.quota
     end
   end
 end

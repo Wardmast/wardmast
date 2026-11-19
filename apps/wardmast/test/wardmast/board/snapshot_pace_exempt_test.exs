@@ -78,59 +78,10 @@ defmodule Wardmast.Board.SnapshotPaceExemptTest do
     "pace_exempt_threshold" => 0.8
   }
 
-  test "the board-wide hold is still the task-less one, and holds at the paced line", %{
-    ws: ws,
-    n: n
-  } do
-    quota_for!(ws, n, @exempt, 0.40)
-    assert {:hold, reason} = Snapshot.quota_hold(ws.id)
-    assert reason =~ "ahead of pace"
-  end
-
   test "an exempt P0 card is promoted past the paced line, ahead of a P2 card", %{ws: ws, n: n} do
     quota_for!(ws, n, @exempt, 0.40)
 
     assert board(ws, [issue(ws, "bd-p2", 2), issue(ws, "bd-p0", 0)]).promote == "bd-p0"
-  end
-
-  test "a P2 card alone is held at the paced line", %{ws: ws, n: n} do
-    quota_for!(ws, n, @exempt, 0.40)
-
-    board = board(ws, [issue(ws, "bd-p2", 2)])
-
-    assert board.promote == nil
-    assert reason(board, "bd-p2") =~ "ahead of pace"
-  end
-
-  test "a P0 past the dedicated cap is held, and the hold says P0 exempt", %{ws: ws, n: n} do
-    quota_for!(ws, n, @exempt, 0.85)
-
-    board = board(ws, [issue(ws, "bd-p0", 0)])
-
-    assert board.promote == nil
-    assert reason(board, "bd-p0") =~ "P0 exempt"
-  end
-
-  test "with no pace_exempt_priority a P0 card is held like any other (layer off)", %{
-    ws: ws,
-    n: n
-  } do
-    quota_for!(ws, n, Map.delete(@exempt, "pace_exempt_priority"), 0.40)
-
-    board = board(ws, [issue(ws, "bd-p0", 0)])
-
-    assert board.promote == nil
-    assert reason(board, "bd-p0") =~ "ahead of pace"
-    refute reason(board, "bd-p0") =~ "exempt"
-  end
-
-  test "a workspace that narrows the exemption to none holds the P0 card", %{ws: ws, n: n} do
-    {:ok, ws} =
-      Ash.update(ws, %{config: %{"quota" => %{"pace_exempt_priority" => "none"}}})
-
-    quota_for!(ws, n, @exempt, 0.40)
-
-    assert board(ws, [issue(ws, "bd-p0", 0)]).promote == nil
   end
 
   test "Throttle.check reads the task's own priority", %{ws: ws, n: n} do

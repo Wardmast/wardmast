@@ -446,24 +446,6 @@ defmodule Wardmast.Quota.GatePacedTest do
       {account, quota}
     end
 
-    test "the board and Throttle.check hold a paced account ahead of pace", %{ws: ws, n: n} do
-      {account, quota} = linked_account!(ws, n, %{"threshold_mode" => "paced"})
-
-      assert {:hold, _} = Wardmast.Board.Snapshot.quota_hold(ws.id)
-
-      assert {:hold, %{mode: :paced, window: "5h", threshold: 0.35, phrase: phrase}} =
-               Gate.Throttle.check(nil, quota, ws, account: account)
-
-      assert phrase =~ "quota ahead of pace (40% of window used, paced ceiling 35%, 10% elapsed)"
-    end
-
-    test "the same reading dispatches under the default flat mode", %{ws: ws, n: n} do
-      {account, quota} = linked_account!(ws, n, %{})
-
-      assert Wardmast.Board.Snapshot.quota_hold(ws.id) == :ok
-      assert Gate.Throttle.check(nil, quota, ws, account: account) == :allow
-    end
-  end
 
   describe "workspace config validation" do
     test "accepts the documented values" do

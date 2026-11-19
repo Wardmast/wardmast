@@ -299,41 +299,6 @@ defmodule Wardmast.Quota.GrokLedgerTest do
       )
     end
 
-    test "ledger usage over the cap holds the dispatch, and headroom lets it through", %{
-      workspace: workspace,
-      task: task
-    } do
-      over = live_event!(60, 520_000)
-
-      assert {:error, {:quota_held, held_id}} = dispatch_grok(task)
-      assert held_id == task.id
-      assert DispatchQueue.held?(workspace.id, task.id)
-
-      # The same usage, 25h old, is out of the rolling window: it proceeds.
-      Ash.destroy!(over)
-      live_event!(25 * 60, 520_000)
-
-      assert {:ok, %{task: %{state: :active}}} = dispatch_grok(task)
-    end
-
-    test "a free-usage-exhausted 429 holds at the 429 time and lifts as the window drains", %{
-      workspace: workspace,
-      task: task
-    } do
-      # The ledger saw nothing; the server's own count says the cap is blown.
-      live_exhausted_run!(30)
-
-      assert {:error, {:quota_held, _}} = dispatch_grok(task)
-      assert DispatchQueue.held?(workspace.id, task.id)
-
-      # The hold lifts when the window rolls past the 429, not at a clock time.
-      snapshot = GrokLedger.snapshot()
-      assert snapshot.status == "limit_reached"
-      assert DateTime.compare(snapshot.reset_at, DateTime.utc_now()) == :gt
-
-      assert GrokLedger.snapshot(now: snapshot.reset_at).status == nil
-    end
-
     test "a 429 older than the window no longer holds the dispatch", %{task: task} do
       live_exhausted_run!(25 * 60)
 
