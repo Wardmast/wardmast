@@ -6398,7 +6398,7 @@ defmodule Wardmast.Worker do
   defp inject_nudge_argv(_port_args, _nudge, _provider), do: {:error, :missing_argv}
 
   @doc false
-  @spec commit_nudge_prompt(%State{}, :uncommitted | :no_commits) :: String.t()
+  @spec commit_nudge_prompt(map(), :uncommitted | :no_commits) :: String.t()
   def commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :uncommitted) do
     branch = (meta && Map.get(meta, :branch)) || "(your branch)"
 
