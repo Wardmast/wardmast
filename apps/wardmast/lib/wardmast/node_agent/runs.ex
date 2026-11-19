@@ -42,11 +42,16 @@ defmodule Wardmast.NodeAgent.Runs do
     end
   end
 
-  # bd-b2t0kw: `secret_files` reach a cluster pod's memory volume through `/boot`; a
-  # machine node has no layout for them yet, so it refuses the run rather than start it
-  # without its credential. (Placement sends agy, their only user, to `caps.agy` nodes.)
-  defp machine_deliverable(%RunSpec{secret_files: files}) when map_size(files) > 0,
-    do: {:error, {:refused, {:unsupported, "secret_files"}}}
+  # bd-b2t0kw: `secret_files` reach a cluster pod's memory volume through `/boot`. A
+  # machine node has exactly one layout for them (SI8): the files of a `tmpfs`
+  # `config_dir`, a Codex run's `CODEX_HOME`. Anything else (agy's key, whose only home is a
+  # pod) is refused rather than started without its credential. (Placement sends agy to
+  # `caps.agy` nodes, and Codex to nodes that carry its login back.)
+  defp machine_deliverable(%RunSpec{secret_files: files} = spec) when map_size(files) > 0 do
+    if Enum.any?(spec.mounts, &(&1.kind == "config_dir" and Map.get(&1, :tmpfs, false))),
+      do: :ok,
+      else: {:error, {:refused, {:unsupported, "secret_files"}}}
+  end
 
   defp machine_deliverable(%RunSpec{}), do: :ok
 

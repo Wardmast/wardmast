@@ -67,6 +67,14 @@ defmodule Wardmast.NodeAgent.ProtocolTest do
       assert caps["image_prefetch"] == true
       assert caps["image"] == "registry"
     end
+
+    # SI8 builds the delivery of a Codex login to a node but not the carry-back of its
+    # rotation (SI9, SI9a): until then no node says it can, so placement keeps Codex
+    # (and its refresh token) off every machine node.
+    test "does not advertise credential_sync: Codex is not placed on a node yet" do
+      caps = Protocol.hello(config([]), %{})["caps"]
+      refute Map.has_key?(caps, "credential_sync")
+    end
   end
 
   describe "Config max_workers" do
