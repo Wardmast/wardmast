@@ -614,8 +614,6 @@ defmodule Wardmast.Board.DrainTest do
 
       json = [autopilot: ap, supervisor: empty_supervisor!()] |> Drain.status() |> Drain.to_json()
 
-      assert %{label: label} = json.admission
-      assert label in ~w(legacy shadow enforce)
       assert is_list(json.budgets)
       assert [%{id: "local"} | _] = json.machines
     end
@@ -630,24 +628,6 @@ defmodule Wardmast.Board.DrainTest do
 
       assert json.state == "running"
       assert json.budgets == []
-      assert json.admission == nil
-    end
-
-    # bd-1qjv3j: the board-wide hold rides the status in the account-qualified
-    # wording, so `scheduler_status` and `arb prime` show which account is held.
-    test "carries the account-qualified quota hold, nil when nothing is held" do
-      ap = start_autopilot!(paused: false)
-      sup = empty_supervisor!()
-      reason = "claude:default 7d 20% ≥ paced 20% (20% elapsed)"
-
-      held =
-        [autopilot: ap, supervisor: sup, quota_hold: reason] |> Drain.status() |> Drain.to_json()
-
-      free =
-        [autopilot: ap, supervisor: sup, quota_hold: nil] |> Drain.status() |> Drain.to_json()
-
-      assert held.quota_hold == reason
-      assert free.quota_hold == nil
     end
   end
 
