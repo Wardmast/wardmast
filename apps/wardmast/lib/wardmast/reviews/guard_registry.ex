@@ -1432,7 +1432,7 @@ defmodule Wardmast.Reviews.GuardRegistry do
       bound: {:evaluations, 1},
       episode: {:pr, :author},
       terminal: :skipped,
-      sites: [{PRPatrol, :author_allowed?, 2}],
+      sites: [{PRPatrol, :author_allowed?, 3}],
       anchors: ["author_allowed?"],
       summary: "do not patrol third-party PRs"
     },

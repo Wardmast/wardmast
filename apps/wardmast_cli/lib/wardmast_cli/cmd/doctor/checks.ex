@@ -750,7 +750,13 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
               get_in(ws, ["config", "pr_patrol", "enabled"]) in [false, "false"],
               do: workspace_label(ws)
 
-        pr_patrol_result(off)
+        open =
+          for ws <- list,
+              ws not in off_workspaces(list),
+              patrols_every_author?(ws),
+              do: workspace_label(ws)
+
+        pr_patrol_result(off, open)
 
       {:error, %Client.Error{kind: :http, status: status} = err} when status >= 500 ->
         server_error_result("pr patrol", err)
@@ -760,7 +766,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     end
   end
 
-  defp pr_patrol_result([]) do
+  defp pr_patrol_result([], []) do
     %Result{
       name: "pr patrol",
       status: :ok,
@@ -769,15 +775,67 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     }
   end
 
-  defp pr_patrol_result(off) do
+  defp pr_patrol_result(off, open) do
+    detail =
+      Enum.join(
+        Enum.reject(
+          [
+            off != [] && "disabled (pr_patrol.enabled=false) in #{Enum.join(off, ", ")}",
+            open != [] &&
+              "acts on every author's PRs/MRs (pr_patrol.author_logins=\"*\") in " <>
+                Enum.join(open, ", ")
+          ],
+          &(&1 == false)
+        ),
+        "; "
+      )
+
+    hint =
+      Enum.join(
+        Enum.reject(
+          [
+            off != [] &&
+              "No PR follow-ups are filed where disabled. Re-enable with `ward config set pr_patrol.enabled true`.",
+            open != [] &&
+              "Patrol follow-ups push to the PR's branch, so \"*\" lets Wardmast push onto other " <>
+                "developers' branches. Scope it with `ward config set pr_patrol.author_logins <your-login>`, " <>
+                "or unset author_logins to patrol only the PRs Wardmast opened."
+          ],
+          &(&1 == false)
+        ),
+        " "
+      )
+
     %Result{
       name: "pr patrol",
       status: :warn,
-      detail: "disabled (pr_patrol.enabled=false) in #{Enum.join(off, ", ")}",
-      hint:
-        "No PR follow-ups are filed there. Re-enable with `ward config set pr_patrol.enabled true`.",
+      detail: detail,
+      hint: hint,
       blocks_readiness: false
     }
+  end
+
+  defp off_workspaces(list),
+    do: Enum.filter(list, &(get_in(&1, ["config", "pr_patrol", "enabled"]) in [false, "false"]))
+
+  # bd-cwigjh / #1550: patrol is scoped to Wardmast's own PRs unless
+  # `pr_patrol.author_logins` carries "*" — the explicit opt-in to everyone's. On a
+  # forge workspace that is the state in which patrol pushes onto colleagues'
+  # branches, so doctor names it.
+  defp patrols_every_author?(ws) do
+    logins = get_in(ws, ["config", "pr_patrol", "author_logins"])
+
+    "*" in (logins |> List.wrap() |> Enum.filter(&is_binary/1) |> Enum.map(&String.trim/1)) and
+      forge_workspace?(ws)
+  end
+
+  defp forge_workspace?(ws) do
+    merge = get_in(ws, ["config", "merge"]) || %{}
+    repos = if is_map(merge["repos"]), do: Map.values(merge["repos"]), else: []
+
+    Enum.any?([merge | repos], fn block ->
+      is_map(block) and block["strategy"] in ["github", "gitlab"]
+    end)
   end
 
   defp workspace_label(ws), do: Map.get(ws, "name") || Map.get(ws, "id") || "(unnamed)"
