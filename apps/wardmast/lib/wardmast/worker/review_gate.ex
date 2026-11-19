@@ -240,6 +240,8 @@ defmodule Wardmast.Worker.ReviewGate do
   alias Wardmast.Reviews.Coverage
   alias Wardmast.Reviews.PushState
   alias Wardmast.Reviews.RemoteHead
+  alias Wardmast.Screenshots.Capture
+  alias Wardmast.Screenshots.Capture.Failure, as: CaptureFailure
   alias Wardmast.Tasks.Issue
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Usage.Event, as: UsageEvent
@@ -253,6 +255,7 @@ defmodule Wardmast.Worker.ReviewGate do
   alias Wardmast.Worker.DeferredCriteria
   alias Wardmast.Worker.Dispatch
   alias Wardmast.Worker.EvidenceIntegrity
+  alias Wardmast.Worker.ReviewGate.ScreenshotGate
   alias Wardmast.Worker.GitCredential
   alias Wardmast.Worker.GitLayout
   alias Wardmast.Worker.HostCredential
@@ -1326,6 +1329,16 @@ defmodule Wardmast.Worker.ReviewGate do
       fix_refusal_max_retries: Keyword.get(opts, :fix_refusal_max_retries, 2),
       placement_opts: Keyword.get(opts, :placement_opts, []),
       image_opts: Keyword.get(opts, :image_opts),
+      # bd-84latk: the screenshot step (`ScreenshotGate`). `screenshot_capture` is a test seam
+      # (`(input, opts -> outcome)`, default `Capture.run/2`); `screenshot_opts` are its options.
+      # `screenshot_task` is the capture in flight, `screenshot_checked` the last head that
+      # cleared the step (so a same-head re-dispatch does not capture twice), and
+      # `screenshot_context` what the next reviewer brief carries.
+      screenshot_capture: Keyword.get(opts, :screenshot_capture),
+      screenshot_opts: Keyword.get(opts, :screenshot_opts, []),
+      screenshot_task: nil,
+      screenshot_checked: nil,
+      screenshot_context: nil,
       # Where the wait resumes when CI clears: `:first` (the gate's opening
       # review) or `{:next, review_id}` (a later round). Set on every gate pass.
       ci_entry: nil,
@@ -2411,17 +2424,81 @@ defmodule Wardmast.Worker.ReviewGate do
 
   defp ci_verify_checkout(state, _entry), do: {:ok, state}
 
-  # Where a finished wait goes next. `ci_entry` says which door it came in by.
-  defp ci_reply({:proceed, %{ci_entry: {:next, review_id}} = state}) do
+  # Where a finished wait goes next. `ci_entry` says which door it came in by. Every reviewer
+  # first clears the screenshot step (`screenshot_step/1`), which is a no-op for a repo with no
+  # `screenshots` config.
+  defp ci_reply({:proceed, state}), do: screenshot_step(state)
+  defp ci_reply({tag, state}) when tag in [:wait, :revise], do: {:noreply, state}
+  defp ci_reply({:done, state}), do: {:stop, :normal, state}
+
+  defp ci_proceed(%{ci_entry: {:next, review_id}} = state) do
     case launch_next_reviewer(state, review_id) do
       {:continue, state} -> {:noreply, state}
       {:done, state} -> {:stop, :normal, state}
     end
   end
 
-  defp ci_reply({:proceed, state}), do: launch_first_reviewer_after_ci(state)
-  defp ci_reply({tag, state}) when tag in [:wait, :revise], do: {:noreply, state}
-  defp ci_reply({:done, state}), do: {:stop, :normal, state}
+  defp ci_proceed(state), do: launch_first_reviewer_after_ci(state)
+
+  # ---- UI screenshots before the reviewer (bd-84latk) -------------------------------
+  #
+  # A change that touches the repo's `ui_paths` reaches a reviewer with its screenshots, or not at
+  # all. `ScreenshotGate` decides (see its moduledoc): the capture boots the app twice, so it runs
+  # in a task and the gate stays responsive; its reply lands in `handle_info/2` below.
+  #
+  #   * proceed — the pairs (or the worker's declared skip) go into the reviewer's brief;
+  #   * worker fault (no / invalid manifest, a route that errors) — the revise loop, with the
+  #     instruction as the finding, exactly as red CI is sent down it (`ci_fix/4`);
+  #   * infrastructure fault (boot failure, no Chromium, ...) — one coordinator escalation, no
+  #     revise round and no reviewer: the worker is not at fault, so it is not looped.
+  defp screenshot_step(state) do
+    case ScreenshotGate.plan(state, load_workspace(state.workspace_id)) do
+      :skip ->
+        ci_proceed(%{state | screenshot_context: nil})
+
+      {:cached, outcome} ->
+        screenshot_route(state, outcome)
+
+      {:run, job} ->
+        capture = state.screenshot_capture || (&Capture.run/2)
+        task = Task.async(fn -> ScreenshotGate.run(job, capture) end)
+        {:noreply, %{state | screenshot_task: %{ref: task.ref, head_sha: job.input.head_sha}}}
+    end
+  end
+
+  defp screenshot_route(state, outcome) do
+    case ScreenshotGate.route(outcome) do
+      {:proceed, context} ->
+        checked = %{head_sha: state.head_sha, outcome: outcome}
+        ci_proceed(%{state | screenshot_context: context, screenshot_checked: checked})
+
+      {:send_back, findings} ->
+        screenshot_send_back(state, findings)
+
+      {:escalate, message} ->
+        Logger.warning(
+          "ReviewGate: screenshot capture failed for task=#{state.task_id} for an " <>
+            "infrastructure reason; escalating, no fix round: #{message}"
+        )
+
+        escalate_pre_review(state, message, :screenshot_capture_failed)
+    end
+  end
+
+  defp screenshot_send_back(state, findings) do
+    Logger.warning(
+      "ReviewGate: no usable screenshots manifest for task=#{state.task_id} " <>
+        "(round #{state.round}/#{state.max_rounds}); sending it back to the worker"
+    )
+
+    if state.round >= state.max_rounds do
+      state = record_enter_revise_thread(state, findings, :screenshots)
+      record_round(state, :review, :request_changes, findings, converged: false)
+      ci_reply({:done, finish(state, terminal_reject_verdict(state))})
+    else
+      state |> enter_revise(findings, :screenshots) |> ci_reply()
+    end
+  end
 
   defp ci_next_reply({:proceed, state}, review_id), do: launch_next_reviewer(state, review_id)
 
@@ -3501,6 +3578,18 @@ defmodule Wardmast.Worker.ReviewGate do
 
   def handle_info({:worker_node_lost, _other}, state), do: {:noreply, state}
 
+  # bd-84latk: the screenshot capture finished (or its task died).
+  def handle_info({ref, outcome}, %{screenshot_task: %{ref: ref}} = state)
+      when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    screenshot_route(%{state | screenshot_task: nil}, outcome)
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{screenshot_task: %{ref: ref}} = state) do
+    failure = CaptureFailure.new(:shot_failed, "the capture task died: #{inspect(reason)}")
+    screenshot_route(%{state | screenshot_task: nil}, {:error, failure})
+  end
+
   # Author died before we could report — nothing to do.
   #
   # bd-2yt0d2: unless the author went because the node is stopping. Then the
@@ -4302,6 +4391,9 @@ defmodule Wardmast.Worker.ReviewGate do
   # own, or (bd-cut6uv) the ReviewGate's report that CI is red.
   defp record_enter_revise_thread(state, findings, :reviewer),
     do: record_thread(state, :reviewer, round_subject(state, "REQUEST_CHANGES"), findings)
+
+  defp record_enter_revise_thread(state, findings, :screenshots),
+    do: record_thread(state, :system, "Round #{state.round}: UI screenshots required", findings)
 
   defp record_enter_revise_thread(state, findings, :ci),
     do: record_thread(state, :system, "Round #{state.round}: CI is red", findings)
@@ -8979,7 +9071,7 @@ defmodule Wardmast.Worker.ReviewGate do
 
       Acceptance criteria:
       #{task.acceptance}
-      #{tracker_spec_block(task)}#{tests_not_run_block(state)}
+      #{tracker_spec_block(task)}#{tests_not_run_block(state)}#{ScreenshotGate.reviewer_block(Map.get(state, :screenshot_context))}
       The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`.
       #{head_sha_instruction(state)}#{review_checkout_block(state)}
       #{scope_guidance(state)}

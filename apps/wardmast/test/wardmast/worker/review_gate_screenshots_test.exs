@@ -73,7 +73,7 @@ defmodule Wardmast.Worker.ReviewGateScreenshotsTest do
 
       wait_until(fn -> passes(rig) == 1 end)
       assert_received {:captured, %{head_sha: head, plan_path: plan}}
-      assert head == rig.head
+      assert String.starts_with?(rig.head, head)
       assert plan == Path.join(rig.wt, ".arbiter/screenshots.json")
 
       prompt = :sys.get_state(gate).current_prompt

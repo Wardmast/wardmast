@@ -184,6 +184,7 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGateTest do
 
     test "passes the capture's own result through", %{tmp_dir: tmp} do
       {:run, job} = ScreenshotGate.plan(state(tmp), workspace(@block))
+
       assert ScreenshotGate.run(job, fn _i, _o -> {:skipped, :no_ui_paths} end) ==
                {:skipped, :no_ui_paths}
     end
