@@ -151,7 +151,7 @@ defmodule Wardmast.Board.SnapshotWalkTest do
              cause: "legacy_hold",
              legacy: %{"head" => "bd-ready", "hold" => "no_slot"},
              walk: %{"pick" => "bd-ready", "node" => "oryx", "pool_label" => "claude:default"}
-           } = AdmissionShadow.event(shadowed, :shadow, @now)
+           } = AdmissionShadow.event(shadowed, @now)
   end
 
   @tag capture_log: true

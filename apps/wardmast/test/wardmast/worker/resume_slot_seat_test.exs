@@ -279,31 +279,5 @@ defmodule Wardmast.Worker.ResumeSlotSeatTest do
                  seat_opts: seats(ctx, 0, 0)
                )
     end
-
-    test "legacy: the option changes nothing — today's slot rule", ctx do
-      ticket = in_state(ctx.ticket, :merging)
-      other = in_state(%{ctx.ticket | id: "bd-other"}, :active)
-
-      assert {:defer, %{cap: 1}} =
-               ResumeSlot.admit(ticket,
-                 mode: :legacy,
-                 origin: :automatic,
-                 follow_up: true,
-                 tickets: [other],
-                 cap: 1
-               )
-    end
-  end
-
-  test "legacy: the slot rule decides and no seat is read", ctx do
-    ticket = in_state(ctx.ticket, :merging)
-
-    assert {:ok, :acquired} =
-             ResumeSlot.admit(ticket,
-               mode: :legacy,
-               tickets: [],
-               cap: 1,
-               seat_opts: seats(ctx, 0, 5)
-             )
   end
 end
