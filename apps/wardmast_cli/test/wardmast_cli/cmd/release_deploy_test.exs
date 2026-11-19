@@ -1510,10 +1510,13 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
 
       stub_cmds()
 
-      {_out, _err, code} =
+      {_out, err, code} =
         capture(fn -> ReleaseDeploy.run(["--version", "v9.9.9", "--allow-active-workers"]) end)
 
       assert code == 1
+      # The worker guard was passed; the unknown-version refusal is what stopped it.
+      assert err =~ "release found"
+      refute err =~ "actively working"
     end
 
     test "refuses deploy when workers are actively working (no --force)" do

@@ -73,6 +73,11 @@ defmodule Wardmast.Release.SelfDeployTest do
       assert Enum.at(args, -6) == arb
     end
 
+    test "live_worker_count/0 counts from the supervisor without probing workers" do
+      Application.put_env(:wardmast, :self_deploy, [])
+      assert SelfDeploy.live_worker_count() == 0
+    end
+
     test "allow_active_workers adds only the live-worker override flag", %{arb: arb} do
       stub_cmds(arb)
 

@@ -84,8 +84,8 @@ defmodule Wardmast.Release.SelfDeploy do
   def start(_, _opts), do: {:error, :invalid_tag}
 
   @doc """
-  How many workers are live (working or waiting) — what the CLI's live-worker
-  refusal counts. `:live_workers` (a 0-arity fun) is the test seam.
+  How many workers are running — an upper bound on what the CLI's live-worker
+  refusal counts, read without probing any worker. `:live_workers` (a 0-arity fun) is the test seam.
   """
   @spec live_worker_count() :: non_neg_integer()
   def live_worker_count do
@@ -94,8 +94,11 @@ defmodule Wardmast.Release.SelfDeploy do
         fun.()
 
       _ ->
-        Wardmast.Worker.list_children()
-        |> Enum.count(&(Map.get(&1, :state) in [:working, :waiting]))
+        # A cheap count from the supervisor's child list: no per-worker
+        # GenServer.call, so a slow worker cannot stall a dashboard render.
+        Wardmast.Worker.Supervisor
+        |> DynamicSupervisor.which_children()
+        |> Enum.count(&match?({_id, pid, :worker, [Wardmast.Worker]} when is_pid(pid), &1))
     end
   rescue
     _ -> 0
