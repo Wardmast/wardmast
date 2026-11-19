@@ -134,8 +134,8 @@ defmodule Wardmast.Worker do
   alias Wardmast.Worker.ConflictPassOutcome
   alias Wardmast.Worker.CoordinatorOnlyFindings
   alias Wardmast.Worker.EvidenceIntegrity
-  alias Wardmast.Worker.OsProcess
   alias Wardmast.Worker.MemoryWatchdog
+  alias Wardmast.Worker.OsProcess
   alias Wardmast.Worker.ProcessGroup
   alias Wardmast.Worker.PRTemplate
   alias Wardmast.Worker.Registry, as: PRegistry
