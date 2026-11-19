@@ -4,6 +4,7 @@ defmodule Wardmast.Test.CaptureRecordingSandbox do
   sends the calling process what `browser/3,4` was asked for and wraps the argv in a marker
   (`wrapped-by-sandbox`, run by `sh`), so a test can tell a shooter that goes through the sandbox
   from one that runs its program directly. The wrapper runs the argv as given; it isolates nothing.
+  `command/3` runs app commands as given and sends `{:sandbox_command, argv, box, app}`.
   """
 
   @behaviour Wardmast.Screenshots.Capture.Sandbox
@@ -17,8 +18,12 @@ defmodule Wardmast.Test.CaptureRecordingSandbox do
   @impl true
   def expose(_box, port), do: {:ok, %{port: port}}
 
+  # bd-3glf2a: what an app command was handed (the box carries the boot's services and caches).
   @impl true
-  def command(argv, _box, _app), do: {:ok, argv}
+  def command(argv, box, app) do
+    send(self(), {:sandbox_command, argv, box, app})
+    {:ok, argv}
+  end
 
   @impl true
   def browser(argv, app, writable), do: browser(argv, app, writable, [])

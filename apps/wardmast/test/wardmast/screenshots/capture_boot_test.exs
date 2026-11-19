@@ -425,7 +425,92 @@ defmodule Wardmast.Screenshots.CaptureBootTest do
       assert File.ls!(marks) == []
       refute File.exists?(Path.join([dir, "out", "images"]))
     end
+  end
 
+  # bd-3glf2a: what the boot hands its sandbox and its commands for services and the deps cache.
+  describe "services and the deps cache" do
+    test "reach the box, the env and the checkout's _build", %{
+      tmp_dir: dir
+    } do
+      marks = Path.join(dir, "marks")
+      checkout = Path.join(dir, "checkout")
+      cache = Path.join(dir, "cache")
+      File.mkdir_p!(marks)
+      File.mkdir_p!(checkout)
+      File.mkdir_p!(Path.join(cache, "bin"))
+      File.write!(Path.join(cache, "bin/esbuild-linux-x64"), "#!/bin/sh\n")
+
+      services = [%{name: "postgres", port: 5432, socket: "/sock/postgres", sandbox_socket: nil}]
+
+      deps = %{
+        dir: cache,
+        env: [{"HEX_OFFLINE", "1"}, {"MIX_DEPS_PATH", Path.join(cache, "deps")}],
+        links: [{"_build/esbuild-linux-x64", Path.join(cache, "bin/esbuild-linux-x64")}]
+      }
+
+      spec = %{
+        role: "before",
+        checkout: checkout,
+        scratch: Path.join(dir, "scratch"),
+        seed: nil,
+        config:
+          config(%{
+            setup_cmd: ~s(env > "#{marks}/env.txt"),
+            start_cmd: "exit 3",
+            env: %{"HEX_OFFLINE" => "0", "APP" => "x"}
+          }),
+        task_id: "bd-boot",
+        sandbox: Wardmast.Test.CaptureRecordingSandbox,
+        services: services,
+        deps: deps,
+        ctx: nil
+      }
+
+      assert {:error, {:start, _}} = Booter.Command.boot(spec)
+
+      # Every app command's box carries the services and shows the cache (read-only).
+      assert_received {:sandbox_command, _argv, setup_box, nil}
+      assert_received {:sandbox_command, _argv, start_box, %{port: _}}
+
+      for box <- [setup_box, start_box] do
+        assert box.services == services
+        assert box.cache_dirs == [cache]
+      end
+
+      # The cache's variables are set, and win over a hand-set one; the rest of env stays.
+      env = File.read!(Path.join(marks, "env.txt"))
+      assert env =~ ~r/^HEX_OFFLINE=1$/m
+      refute env =~ ~r/^HEX_OFFLINE=0$/m
+      assert env =~ ~r/^MIX_DEPS_PATH=#{Regex.escape(cache)}\/deps$/m
+      assert env =~ ~r/^APP=x$/m
+
+      # The asset tools are where a stock Phoenix config looks for them.
+      link = Path.join(checkout, "_build/esbuild-linux-x64")
+      assert {:ok, target} = File.read_link(link)
+      assert target == Path.join(cache, "bin/esbuild-linux-x64")
+    end
+
+    test "no services and no deps cache: the box has none", %{tmp_dir: dir} do
+      spec = %{
+        role: "before",
+        checkout: dir,
+        scratch: Path.join(dir, "scratch"),
+        seed: nil,
+        config: config(%{start_cmd: "exit 3"}),
+        task_id: "bd-boot",
+        sandbox: Wardmast.Test.CaptureRecordingSandbox,
+        ctx: nil
+      }
+
+      assert {:error, {:start, _}} = Booter.Command.boot(spec)
+      assert_received {:sandbox_command, _argv, box, %{port: _}}
+      assert box.services == []
+      assert box.cache_dirs == []
+      refute File.exists?(Path.join(dir, "_build"))
+    end
+  end
+
+  describe "fail closed: never unsandboxed, the command booter (bd-bhrsdv)" do
     test "the command booter refuses to run a command without a sandbox", %{tmp_dir: dir} do
       marks = Path.join(dir, "marks")
       File.mkdir_p!(marks)

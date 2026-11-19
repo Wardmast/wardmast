@@ -52,7 +52,11 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
         box: %{
           checkout: spec.checkout,
           scratch: spec.scratch,
-          readonly_paths: readonly_paths(cfg)
+          readonly_paths: readonly_paths(cfg),
+          # bd-3glf2a: the boot's services (reached on 127.0.0.1:<port> inside) and the offline
+          # deps cache (shown read-only).
+          services: Map.get(spec, :services) || [],
+          cache_dirs: deps_dirs(spec)
         },
         checkout: spec.checkout,
         vars: vars,
@@ -61,7 +65,8 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
 
       limits = cfg.limits
 
-      with :ok <- run_once(run, :setup, cfg.setup_cmd, limits["setup_seconds"] || 600),
+      with :ok <- link_deps(spec),
+           :ok <- run_once(run, :setup, cfg.setup_cmd, limits["setup_seconds"] || 600),
            :ok <- run_once(run, :seed, cfg.seed_cmd, limits["seed_seconds"] || 120),
            :ok <-
              run_once(run, :seed, named_seed(cfg, spec.seed), limits["seed_seconds"] || 120) do
@@ -108,6 +113,39 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
       _ -> []
     end
   end
+
+  # bd-3glf2a: the offline deps cache (`Capture.DepsCache`), when the capture built one.
+  defp deps_dirs(%{deps: %{dir: dir}}) when is_binary(dir), do: [dir]
+  defp deps_dirs(_spec), do: []
+
+  defp deps_env(%{deps: %{env: env}}) when is_list(env), do: env
+  defp deps_env(_spec), do: []
+
+  # The cache's asset tools (esbuild, tailwind) linked where a stock Phoenix config looks for them,
+  # `_build/<tool>-<target>` of the checkout: the link resolves inside the sandbox, where the cache
+  # is shown at its own path.
+  defp link_deps(%{deps: %{links: [_ | _] = links}, checkout: checkout}) do
+    Enum.reduce_while(links, :ok, fn {rel, target}, :ok ->
+      link = Path.join(checkout, rel)
+
+      result =
+        with :ok <- File.mkdir_p(Path.dirname(link)) do
+          if match?({:ok, _}, File.lstat(link)), do: :ok, else: File.ln_s(target, link)
+        end
+
+      case result do
+        :ok ->
+          {:cont, :ok}
+
+        {:error, reason} ->
+          {:halt,
+           {:error,
+            {:setup, "could not link #{rel} to the deps cache: #{:file.format_error(reason)}"}}}
+      end
+    end)
+  end
+
+  defp link_deps(_spec), do: :ok
 
   defp named_seed(_cfg, nil), do: nil
   defp named_seed(cfg, seed), do: Map.get(cfg.seeds, seed)
@@ -262,7 +300,10 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
       ]
 
     configured = Enum.map(cfg.env, fn {k, v} -> {k, render(v, vars)} end)
-    base ++ configured ++ [{cfg.port_env, Integer.to_string(port)}]
+
+    # The deps cache's variables come after the config's (`env -i` keeps the last of a name), so
+    # a hand-set MIX_HOME cannot point the boot away from it.
+    base ++ configured ++ deps_env(spec) ++ [{cfg.port_env, Integer.to_string(port)}]
   end
 
   defp free_port({lo, hi}) do
