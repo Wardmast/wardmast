@@ -73,6 +73,19 @@ defmodule Wardmast.Release.SelfDeployTest do
       assert Enum.at(args, -6) == arb
     end
 
+    test "allow_active_workers adds only the live-worker override flag", %{arb: arb} do
+      stub_cmds(arb)
+
+      assert {:ok, _} = SelfDeploy.start("v1.2.3", allow_active_workers: true)
+
+      assert_received {:cmd, "systemd-run", args, _opts}
+
+      assert Enum.take(args, -6) ==
+               ["server", "deploy", "--version", "v1.2.3", "--allow-active-workers", "--json"]
+
+      refute "--force" in args
+    end
+
     test "passes WARDMAST_DATA_HOME to the unit so a non-default home is honoured", %{
       home: home,
       arb: arb

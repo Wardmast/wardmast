@@ -62,17 +62,44 @@ defmodule Wardmast.Release.SelfDeploy do
           | {:cli_missing, String.t()}
           | {:launch_failed, String.t()}
 
-  @doc "Start the deploy of `tag`. Returns the unit it runs in."
-  @spec start(term()) :: {:ok, %{unit: String.t(), tag: String.t()}} | {:error, error()}
-  def start(tag) when is_binary(tag) do
+  @doc """
+  Start the deploy of `tag`. Returns the unit it runs in.
+
+  Option `:allow_active_workers` adds `--allow-active-workers`, which lifts only
+  the CLI's live-worker refusal: a restart marks live workers interrupted and the
+  reconciler resumes them on boot. Every other preflight check still applies.
+  """
+  @spec start(term(), keyword()) ::
+          {:ok, %{unit: String.t(), tag: String.t()}} | {:error, error()}
+  def start(tag, opts \\ [])
+
+  def start(tag, opts) when is_binary(tag) do
     with :ok <- validate_tag(tag),
          :ok <- ensure_cli(),
          :ok <- ensure_not_running() do
-      launch(tag)
+      launch(tag, opts)
     end
   end
 
-  def start(_), do: {:error, :invalid_tag}
+  def start(_, _opts), do: {:error, :invalid_tag}
+
+  @doc """
+  How many workers are live (working or waiting) — what the CLI's live-worker
+  refusal counts. `:live_workers` (a 0-arity fun) is the test seam.
+  """
+  @spec live_worker_count() :: non_neg_integer()
+  def live_worker_count do
+    case config(:live_workers) do
+      fun when is_function(fun, 0) ->
+        fun.()
+
+      _ ->
+        Wardmast.Worker.list_children()
+        |> Enum.count(&(Map.get(&1, :state) in [:working, :waiting]))
+    end
+  rescue
+    _ -> 0
+  end
 
   @doc """
   Which tag a request means: `requested` when given (it still has to be a release
@@ -163,11 +190,11 @@ defmodule Wardmast.Release.SelfDeploy do
 
   # ---- launch ------------------------------------------------------------------
 
-  defp launch(tag) do
-    if darwin?(), do: launch_launchd(tag), else: launch_systemd(tag)
+  defp launch(tag, opts) do
+    if darwin?(), do: launch_launchd(tag, opts), else: launch_systemd(tag, opts)
   end
 
-  defp launch_launchd(tag) do
+  defp launch_launchd(tag, opts) do
     unit = unit_name(tag)
     home = Wardmast.Nodes.Agent.data_home()
     plist = Path.join(home, unit <> ".plist")
@@ -176,7 +203,7 @@ defmodule Wardmast.Release.SelfDeploy do
          # A near-simultaneous duplicate request must be refused, never allowed to
          # `bootout` (SIGTERM) the deploy the first request just started.
          :ok <- ensure_label_idle(unit),
-         :ok <- write_plist(plist, plist_xml(unit, tag, home)),
+         :ok <- write_plist(plist, plist_xml(unit, tag, home, opts)),
          # A finished job lingers loaded; it must go before the label can be reused.
          _ = run("launchctl", ["bootout", "#{domain}/#{unit}"]),
          {_out, 0} <- run("launchctl", ["bootstrap", domain, plist]) do
@@ -237,10 +264,10 @@ defmodule Wardmast.Release.SelfDeploy do
   # spliced into the script text.
   @launch_script ~S|set -a; [ -f "$1" ] && . "$1"; set +a; shift; exec "$@"|
 
-  defp plist_xml(unit, tag, home) do
+  defp plist_xml(unit, tag, home, opts) do
     argv =
       ["/bin/sh", "-c", @launch_script, unit, Path.join(home, "wardmast.env")] ++
-        [cli_path(), "server", "deploy", "--version", tag, "--json"]
+        [cli_path() | deploy_args(tag, opts)]
 
     env = [
       {"WARDMAST_DATA_HOME", home},
@@ -292,7 +319,7 @@ defmodule Wardmast.Release.SelfDeploy do
     |> String.replace(">", "&gt;")
   end
 
-  defp launch_systemd(tag) do
+  defp launch_systemd(tag, opts) do
     unit = unit_name(tag)
     home = Wardmast.Nodes.Agent.data_home()
 
@@ -306,13 +333,8 @@ defmodule Wardmast.Release.SelfDeploy do
         "--setenv=WARDMAST_DATA_HOME=#{home}",
         # The `arb` CLI (renamed in a sibling ticket) still reads ARB_DATA_HOME.
         "--setenv=ARB_DATA_HOME=#{home}",
-        cli_path(),
-        "server",
-        "deploy",
-        "--version",
-        tag,
-        "--json"
-      ]
+        cli_path()
+      ] ++ deploy_args(tag, opts)
 
     case run("systemd-run", args) do
       {_out, 0} ->
@@ -340,6 +362,13 @@ defmodule Wardmast.Release.SelfDeploy do
   end
 
   # ---- helpers -----------------------------------------------------------------
+
+  defp deploy_args(tag, opts) do
+    override =
+      if Keyword.get(opts, :allow_active_workers, false), do: ["--allow-active-workers"], else: []
+
+    ["server", "deploy", "--version", tag] ++ override ++ ["--json"]
+  end
 
   defp cli_path do
     case config(:arb_path) do

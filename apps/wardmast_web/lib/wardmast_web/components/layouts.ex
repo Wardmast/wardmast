@@ -526,6 +526,10 @@ defmodule WardmastWeb.Layouts do
     assigns =
       assigns
       |> assign(:update_visible?, update_visible?(assigns.update, assigns.dismissed))
+      |> assign(
+        :live_workers,
+        update_visible?(assigns.update, assigns.dismissed) |> live_worker_count()
+      )
       |> assign(:deploy_state, deploy_state(assigns.deploy))
       |> assign(:deploy_visible?, deploy_visible?(assigns.deploy))
       |> assign(
@@ -585,13 +589,27 @@ defmodule WardmastWeb.Layouts do
         method="post"
         class="shrink-0"
       >
+        <input
+          :if={@live_workers > 0}
+          type="hidden"
+          name="update[allow_active_workers]"
+          value="true"
+        />
+        <p :if={@live_workers > 0} id="update-live-workers" class="mb-1 text-xs">
+          {@live_workers} live worker(s) will be interrupted and auto-resumed
+        </p>
         <button
           type="submit"
           id="update-deploy-button"
-          data-confirm={update_confirm_text(@update)}
+          data-confirm={update_confirm_text(@update, @live_workers)}
           class="inline-flex items-center gap-1.5 rounded-[var(--radius-field)] border border-solid border-[var(--border-default)] bg-[var(--surface-chrome)] px-3 py-1.5 text-sm font-medium text-[var(--text-title)] cursor-pointer transition-colors duration-150 hover:bg-[var(--arb-raised-hover)]"
         >
-          <.icon name="hero-arrow-down-tray" class="size-4" /> Update to {@update.latest}
+          <.icon name="hero-arrow-down-tray" class="size-4" />
+          <%= if @live_workers > 0 do %>
+            Update anyway
+          <% else %>
+            Update to {@update.latest}
+          <% end %>
         </button>
       </.form>
     </div>
@@ -742,8 +760,17 @@ defmodule WardmastWeb.Layouts do
 
   defp deploy_detail(deploy, state) do
     base = deploy["message"] || "The deploy stopped before finishing (state: #{state})."
-    base <> backup_note(deploy)
+    base <> workers_hint(deploy) <> backup_note(deploy)
   end
+
+  # A live-worker preflight refusal is recoverable from the notice: say how.
+  defp workers_hint(%{"phase" => "preflight", "message" => message}) when is_binary(message) do
+    if message =~ "actively working",
+      do: " Update anyway restarts with them live: they are interrupted and auto-resumed.",
+      else: ""
+  end
+
+  defp workers_hint(_), do: ""
 
   defp backup_note(%{"backup_path" => path}) when is_binary(path), do: " Backup: #{path}"
   defp backup_note(_), do: ""
@@ -751,13 +778,24 @@ defmodule WardmastWeb.Layouts do
   # What the browser asks before it posts: the version, whether migrations are
   # pending (the update check reads the release's migration manifest against this
   # database), and that the server restarts.
-  defp update_confirm_text(update) do
+  defp update_confirm_text(update, live_workers) do
     "Update Wardmast to #{update.latest}?\n\n" <>
       migrations_sentence(update[:migrations_pending]) <>
       "\n\nA database backup is taken first, then the server restarts; if the new release " <>
-      "does not come back healthy it is rolled back. The update will not start while workers " <>
-      "are actively working (a restart would kill their in-flight work) — it stops and says so here."
+      "does not come back healthy it is rolled back. " <> live_workers_sentence(live_workers)
   end
+
+  defp live_workers_sentence(n) when is_integer(n) and n > 0 do
+    "#{n} worker(s) are working right now. Updating anyway interrupts them; they are " <>
+      "automatically resumed when the server is back."
+  end
+
+  defp live_workers_sentence(_) do
+    "The update will not start while workers are actively working — it stops and says so here."
+  end
+
+  defp live_worker_count(true), do: Wardmast.Release.SelfDeploy.live_worker_count()
+  defp live_worker_count(_), do: 0
 
   defp migrations_sentence([]), do: "This update has no pending migrations."
 

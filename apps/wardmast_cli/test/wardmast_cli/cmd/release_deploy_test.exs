@@ -126,6 +126,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
   defp stub_release(tag, tarball, sha_text, opts \\ []) do
     workspaces = Keyword.get(opts, :workspaces, @green)
     latest? = Keyword.get(opts, :latest, true)
+    workers = Keyword.get(opts, :workers, @no_workers)
     version_resp = Keyword.get(opts, :version_resp)
     ward_body = Keyword.get(opts, :ward_body, Keyword.get(opts, :arb_body, ward_bytes(tag)))
 
@@ -155,7 +156,7 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
         {{"get", "/api/workspaces"}, {workspaces, 200}},
         {{"get", "/api/repos"},
          {%{"data" => [%{"name" => "tonic", "source" => "acme", "path" => "/srv/tonic"}]}, 200}},
-        {{"get", "/api/workers"}, {@no_workers, 200}}
+        {{"get", "/api/workers"}, {workers, 200}}
       ] ++ version_route
     )
   end
@@ -1472,6 +1473,34 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
   # ---- worker guard ------------------------------------------------------
 
   describe "active-work guard" do
+    @busy %{"data" => [%{"task_id" => "bd-xyz", "kind" => "implement", "state" => "working"}]}
+
+    test "--allow-active-workers gets past the worker guard and deploys", %{home: home} do
+      tarball = release_tarball(@vsn)
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release(@vsn, tarball, sha, workers: @busy)
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run(["--allow-active-workers"]) end)
+
+      assert code == 0
+      assert out =~ "Deployed release #{@vsn}"
+      assert {:ok, _} = File.read_link(Path.join(home, "current"))
+    end
+
+    test "--allow-active-workers does not bypass the checksum check", %{home: home} do
+      tarball = release_tarball(@vsn)
+      bad_sha = "#{String.duplicate("0", 64)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release(@vsn, tarball, bad_sha, workers: @busy)
+      stub_cmds()
+
+      {_out, err, code} = capture(fn -> ReleaseDeploy.run(["--allow-active-workers"]) end)
+
+      assert code == 1
+      assert err =~ "checksum mismatch"
+      refute File.exists?(Path.join(home, "current"))
+    end
+
     test "refuses deploy when workers are actively working (no --force)" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
