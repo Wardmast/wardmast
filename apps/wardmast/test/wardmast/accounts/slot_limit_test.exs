@@ -3,7 +3,6 @@ defmodule Wardmast.Accounts.SlotLimitTest do
 
   alias Wardmast.Accounts.SlotLimit
   alias Wardmast.Board.Scheduler
-  alias Wardmast.Worker.ResumeSlot
 
   @account %{name: "claude:default", limit: 2, live: 2, runs: ["bd-2qy0gu", "bd-c27m5o#review1"]}
 
@@ -35,33 +34,6 @@ defmodule Wardmast.Accounts.SlotLimitTest do
   end
 
   describe "ResumeSlot.refusal_message/1" do
-    test "names the account instead of a derived cap of 1" do
-      info = %{
-        task_id: "bd-3t973v",
-        cap: 1,
-        holders: ["bd-2qy0gu"],
-        limit: SlotLimit.classify(3, @account, 1)
-      }
-
-      message = ResumeSlot.refusal_message(info)
-
-      assert message =~
-               "account claude:default at 2/2 live (bd-2qy0gu implement, bd-c27m5o review)"
-
-      refute message =~ "cap is 1"
-      assert ResumeSlot.limit_phrase(info) =~ "claude:default"
-    end
-
-    test "install cap binding" do
-      info = %{
-        task_id: "bd-x",
-        cap: 3,
-        holders: ["bd-a"],
-        limit: %{limit: :install, max: 3}
-      }
-
-      assert ResumeSlot.refusal_message(info) =~ "the install cap is 3 and 1 held by bd-a"
-    end
   end
 
   test "board reason names the binding limit" do

@@ -301,7 +301,6 @@ defmodule Wardmast.Board.Drain do
     Enum.uniq(Map.get(autopilot, :held_local_capacity, []) ++ gate_held)
   end
 
-
   # An unreadable table reads as no holders rather than failing the status —
   # the drain verdict above does not depend on it.
   defp tickets_in_progress do

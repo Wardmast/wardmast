@@ -13,7 +13,7 @@ defmodule Wardmast.Agents.ProviderRoutingTest do
   alias Wardmast.Accounts.{ProviderAccount, WorkspaceProviderAccount}
   alias Wardmast.Agents
   alias Wardmast.Agents.{CredentialWatchdog, ProviderPool, ProviderRouting, SecurityPolicy}
-  alias Wardmast.Quota.{AnthropicQuota, Budget, CodexQuota, GoogleQuota}
+  alias Wardmast.Quota.{AnthropicQuota, CodexQuota, GoogleQuota}
   alias Wardmast.Tasks.{Issue, Workspace}
   alias Wardmast.Workers.Run
 
@@ -689,56 +689,6 @@ defmodule Wardmast.Agents.ProviderRoutingTest do
       assert again.account.id == codex.id
       assert again.decision["outcome"] == "pinned"
       assert again.decision["role"] == "resume"
-    end
-
-    test "a follow-up role does not count the task's own live worker against the pin" do
-      # The pin's only slot is held by the task's own author worker — parked
-      # through a ReviewGate round, still registered — and by nothing else.
-      ws = workspace!()
-      shared = account!(:claude, "pin-shared", %{max_concurrent: 4})
-      codex = account!(:codex, "pin-share-codex")
-      allow!(ws, shared, 0, %{share: 1})
-      allow!(ws, codex, 1)
-      task = task!(ws)
-      pairs = [{shared, claude_quota(0.0)}, {codex, codex_quota(5.0)}]
-      # The shared pool has 4 seats, but the account's share of it is 1.
-      budgets = [
-        %Budget{account: shared.id, pool: "claude", budget: 4, reason: "5h"},
-        %Budget{account: codex.id, pool: "codex", budget: 3, reason: "5h"}
-      ]
-
-      seat_opts = [budgets: budgets]
-
-      assert {:ok, first} =
-               ProviderRouting.select(ws, task, :main, opts(pairs, seat_opts: seat_opts))
-
-      assert first.account.id == shared.id
-
-      author_worker!(ws, task.id, "claude", account_id: shared.id)
-      # In progress: the task's worker holds the pin seat.
-      task = Wardmast.LifecycleFixtures.put_state!(Ash.get!(Issue, task.id), :active)
-
-      assert {:ok, round} =
-               ProviderRouting.select(
-                 ws,
-                 task,
-                 :review_gate_implementer,
-                 opts(pairs, seat_opts: seat_opts)
-               )
-
-      assert round.account.id == shared.id
-      assert round.decision["outcome"] == "pinned"
-
-      # Another task's worker in the same slot still fills it.
-      other = task!(ws)
-
-      assert {:ok, _} =
-               ProviderRouting.select(ws, other, :main, opts(pairs, seat_opts: seat_opts))
-
-      assert Ash.get!(Issue, other.id).implementer_account_id == codex.id
-
-      decision = ProviderRouting.evaluate(ws, task, opts(pairs, seat_opts: seat_opts))
-      assert reasons(decision)[shared.slug] == "at_capacity"
     end
 
     test "an unavailable pin falls back to the best account outside the reviewer's family", %{

@@ -70,7 +70,6 @@ defmodule Wardmast.Worker.DispatchLocalCapacityResumeTest do
 
       assert result.worker_pid != first.worker_pid
     end
-
   end
 
   # The production drain end to end: the real `Autopilot.defer_resume/4` queues

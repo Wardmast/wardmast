@@ -278,7 +278,6 @@ defmodule Wardmast.Worker.DispatchResumePlacementTest do
       assert_receive {:spawned, nil}
       assert registry_node(pid) == nil
     end
-
   end
 
   describe "worker.placement: remote_only" do
@@ -510,6 +509,5 @@ defmodule Wardmast.Worker.DispatchResumePlacementTest do
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
       pid
     end
-
   end
 end
