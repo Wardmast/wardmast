@@ -1817,7 +1817,7 @@ defmodule Wardmast.Workflows.CodeReviewTest do
       :ok
     end
 
-    test "fetches /changes, posts notes per finding, approves and posts a summary note" do
+    test "fetches /changes, posts a discussion per finding, approves and posts a summary note" do
       events = :ets.new(:gl_events, [:public, :duplicate_bag])
 
       Req.Test.stub(Wardmast.Mergers.Gitlab.HTTP, fn conn ->
@@ -1838,6 +1838,18 @@ defmodule Wardmast.Workflows.CodeReviewTest do
                 }
               ]
             })
+
+          conn.method == "GET" and path == "/api/v4/projects/99/merge_requests/7" ->
+            conn
+            |> put_status(200)
+            |> Req.Test.json(%{
+              "diff_refs" => %{"base_sha" => "b", "start_sha" => "s", "head_sha" => "h"}
+            })
+
+          conn.method == "POST" and path == "/api/v4/projects/99/merge_requests/7/discussions" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            :ets.insert(events, {:discussion, Jason.decode!(body)})
+            conn |> put_status(201) |> Req.Test.json(%{"id" => "d1"})
 
           conn.method == "POST" and path == "/api/v4/projects/99/merge_requests/7/notes" ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -1877,14 +1889,14 @@ defmodule Wardmast.Workflows.CodeReviewTest do
       assert length(final.findings) == 1
 
       assert [_] = :ets.lookup(events, :get_changes)
-      # Two notes total: the per-finding note, and the verdict summary note
-      # posted by submit_review/4.
-      notes = :ets.lookup(events, :note)
-      assert length(notes) == 2
+      # The finding is a positioned discussion; the verdict summary is a note.
+      assert [{:discussion, disc}] = :ets.lookup(events, :discussion)
+      assert disc["body"] =~ "WARNING"
+      assert disc["position"]["new_path"] == "x.ex"
+      assert disc["position"]["new_line"] == 1
 
-      bodies = Enum.map(notes, fn {:note, body} -> body["body"] end)
-      assert Enum.any?(bodies, &(&1 =~ "WARNING"))
-      assert Enum.any?(bodies, &(&1 =~ "Approved"))
+      assert [{:note, note}] = :ets.lookup(events, :note)
+      assert note["body"] =~ "Approved"
 
       assert [_] = :ets.lookup(events, :approve)
     end
