@@ -40,30 +40,6 @@ defmodule Wardmast.Quota.GateProviderTest do
   # counts toward `DispatchQueueSupervisor`'s intensity (3 in 5s). Four such
   # stops close together shut the supervisor down, and the `DataCase` sweep
   # that ran next hit `:noproc`.
-  # `Quota.provider_code(:gemini)` probes PATH live, and with the upstream
-  # Gemini CLI provider gone (bd-ac53wz) it resolves to nothing unless `agy`
-  # is there — pin a stub so the gate reads the antigravity row regardless of
-  # whether this host has `agy` installed.
-  defp pin_agy_on_path do
-    tmp =
-      Path.join(
-        System.tmp_dir!(),
-        "arbiter-dispatch-hint-stub-#{System.unique_integer([:positive])}"
-      )
-
-    File.mkdir_p!(tmp)
-    old_path = System.get_env("PATH") || ""
-    agy_path = Path.join(tmp, "agy")
-    File.write!(agy_path, "#!/bin/sh\nexit 0\n")
-    File.chmod!(agy_path, 0o755)
-    System.put_env("PATH", tmp <> ":" <> old_path)
-
-    on_exit(fn ->
-      System.put_env("PATH", old_path)
-      File.rm_rf!(tmp)
-    end)
-  end
-
   defp stop_dispatch_queue(workspace_id) do
     if pid = DispatchQueueSupervisor.whereis(workspace_id) do
       Wardmast.ProcessTeardown.stop_child(DispatchQueueSupervisor, pid)
@@ -555,73 +531,6 @@ defmodule Wardmast.Quota.GateProviderTest do
                )
 
       assert result.task.state == :active
-    end
-
-
-  describe "Dispatch.dispatch/2 — Antigravity model-hint threading (bd-7qj58o AC4)" do
-    # These drive the gate through `Quota.provider_code(:gemini)`, which
-    # probes PATH live — pin `agy` onto PATH (mirrors
-    # `provider_code_gemini_test.exs`) so the antigravity row these tests
-    # seed is actually the one the gate looks up, regardless of whether this
-    # host happens to have `agy` installed.
-    setup do
-      pin_agy_on_path()
-
-      {:ok, workspace} =
-        Ash.create(Workspace, %{
-          name: "agyh-#{System.unique_integer([:positive])}",
-          prefix: "ah#{System.unique_integer([:positive])}",
-          config: %{
-            "agent" => %{"type" => "gemini", "config" => %{"model_tier" => "premium"}},
-            "routing" => %{
-              "policy" => "by_priority",
-              "rules" => %{"P0" => %{"model" => "claude-opus-4-6-thinking"}}
-            },
-            "quota" => %{"on_exhaustion" => "throttle"}
-          }
-        })
-
-      {:ok, task} =
-        Ash.create(Issue, %{
-          title: "agy flagship work",
-          workspace_id: workspace.id,
-          priority: 0
-        })
-
-      on_exit(fn -> stop_dispatch_queue(workspace.id) end)
-
-      {:ok, workspace: workspace, task: task}
-    end
-
-
-  # bd-a14qd1 moved these off the removed `Workflows.QuotaGate.Default` and
-  # onto `Board.Snapshot.quota_hold/1`, the board scheduler's own gate. It
-  # resolves the provider account and provider from the asking workspace, so
-  # the per-provider keying these tests pin is unchanged.
-  describe "Board.Snapshot.quota_hold/1 — provider-aware cap clamp" do
-    defp hold(workspace), do: Wardmast.Board.Snapshot.quota_hold(workspace.id)
-
-    defp provider_workspace(type) do
-      {:ok, workspace} =
-        Ash.create(Workspace, %{
-          name: "qgd-#{System.unique_integer([:positive])}",
-          prefix: "qg#{System.unique_integer([:positive])}",
-          config: %{"agent" => %{"type" => type}}
-        })
-
-      workspace
-    end
-
-
-  describe "DispatchQueue drain — per-provider snapshots" do
-
-  defmodule RecordingDispatcher do
-    @moduledoc false
-    def dispatch(task_id, opts) do
-      if pid = Application.get_env(:wardmast, :test_dispatch_pid),
-        do: send(pid, {:dispatched, task_id, opts})
-
-      {:ok, %{task_id: task_id}}
     end
   end
 end

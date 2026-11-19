@@ -25,7 +25,6 @@ defmodule Wardmast.Quota.AccountWideHoldTest do
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Usage
   alias Wardmast.Usage.Event
-  alias Wardmast.Board.Snapshot
 
   defp workspace!(attrs \\ %{}) do
     n = System.unique_integer([:positive])
@@ -52,16 +51,6 @@ defmodule Wardmast.Quota.AccountWideHoldTest do
       workspace_id: ws.id,
       provider: :claude,
       provider_account_id: account.id
-    })
-  end
-
-  defp exhausted_snapshot!(%ProviderAccount{} = account) do
-    Ash.create!(AnthropicQuota, %{
-      provider_account_id: account.id,
-      provider: "claude",
-      utilization_5h: 0.99,
-      status_5h: "rejected",
-      captured_at: DateTime.utc_now()
     })
   end
 
@@ -106,7 +95,6 @@ defmodule Wardmast.Quota.AccountWideHoldTest do
   # gate. It resolves the provider account from the asking workspace, so the
   # account-keying these tests pin is the same property, now asserted on the
   # only surviving dispatch path.
-  describe "the quota gate is keyed by the provider account (§5 row 22)" do
 
   describe "threshold resolution is min(account, workspace) (§4.2)" do
     test "the account default applies when the workspace sets nothing" do

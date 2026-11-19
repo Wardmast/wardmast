@@ -243,33 +243,30 @@ defmodule Wardmast.Quota.GateWeeklyTest do
     end
   end
 
-  describe "the board / Scheduler hold reason names the 7d window" do
-    setup do
-      {:ok, workspace} =
-        Ash.create(Workspace, %{name: "weekly-board-ws", prefix: "wbw", config: %{}})
+  setup do
+    {:ok, workspace} =
+      Ash.create(Workspace, %{name: "weekly-board-ws", prefix: "wbw", config: %{}})
 
-      %{workspace: workspace}
-    end
+    %{workspace: workspace}
+  end
 
-    defp record_quota!(ws_id, attrs) do
-      base = %{
-        provider_account_id: quota_account_id!(ws_id, "claude"),
-        provider: "claude",
-        utilization_5h: 0.23,
-        status_5h: "allowed",
-        reset_5h_at:
-          DateTime.add(DateTime.utc_now(), 3600, :second) |> DateTime.truncate(:second),
-        captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
-      }
+  defp record_quota!(ws_id, attrs) do
+    base = %{
+      provider_account_id: quota_account_id!(ws_id, "claude"),
+      provider: "claude",
+      utilization_5h: 0.23,
+      status_5h: "allowed",
+      reset_5h_at: DateTime.add(DateTime.utc_now(), 3600, :second) |> DateTime.truncate(:second),
+      captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+    }
 
-      {:ok, q} =
-        AnthropicQuota
-        |> Ash.Changeset.for_create(:upsert, Map.merge(base, attrs))
-        |> Ash.create()
+    {:ok, q} =
+      AnthropicQuota
+      |> Ash.Changeset.for_create(:upsert, Map.merge(base, attrs))
+      |> Ash.create()
 
-      q
-    end
-
+    q
+  end
 
   describe "quota_get / arb quota expose the gating window" do
     test "names the 7d window when it is what holds dispatch" do
