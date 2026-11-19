@@ -103,6 +103,20 @@ defmodule Wardmast.Board.SnapshotMostQuotaTest do
     pid
   end
 
+  # Claude is the default provider and is paced out of a dispatch (its 5h
+  # window is over the account's own 0.5 ceiling); Codex has room.
+  defp claude_held_codex_free!(ws, claude_attrs \\ %{}, codex_attrs \\ %{}) do
+    claude =
+      account!(:claude, Map.merge(%{quota_config: %{"throttle_threshold" => 0.5}}, claude_attrs))
+
+    codex = account!(:codex, codex_attrs)
+    allow!(ws, claude, 0)
+    allow!(ws, codex, 1)
+    claude_used!(claude, 0.70)
+    codex_used!(codex, 10.0)
+    %{claude: claude, codex: codex}
+  end
+
   # ---- the slots ------------------------------------------------------------
 
   describe "effective_max_concurrent/3" do
