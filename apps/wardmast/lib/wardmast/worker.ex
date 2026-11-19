@@ -6063,7 +6063,6 @@ defmodule Wardmast.Worker do
     meta = put_screenshots_plan(meta, Map.get(run, :screenshots_plan))
     spec = Map.get(meta, :prepush_spec)
     attempt = Map.get(meta, :prepush_nudge_attempts, 0) + 1
-    plan = Map.get(run, :screenshots_plan)
     Wardmast.Workers.PrepushSteps.record(state.run_id, state.task_id, attempt, steps)
 
     state = %State{

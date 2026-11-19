@@ -184,6 +184,7 @@ defmodule Wardmast.MCP.RefinePolicy do
     "ci_mark_external" => @deny_reason_ops,
     "flake_record" => @deny_reason_ops,
     "run_tests" => @deny_reason_ops,
+    "screenshots_plan_check" => @deny_reason_ops,
     "loop_pending_list" => @deny_reason_ops,
     "loop_pending_diff" => @deny_reason_ops,
     "loop_pending_apply" => @deny_reason_ops,

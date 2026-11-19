@@ -246,6 +246,9 @@ defmodule WardmastWeb.Router do
     # bd-5hlegn: ticket attachments (images); the MCP twins are ticket_attach / ticket_attachment_list.
     get("/issues/:task_id/attachments", AttachmentController, :index)
     post("/issues/:task_id/attachments", AttachmentController, :create)
+
+    # bd-adrym0: the arb-done screenshots-plan check, asked early (MCP twin: screenshots_plan_check).
+    post("/issues/:task_id/screenshots/check", ScreenshotsController, :check)
     patch("/issues/:id", IssueController, :update)
     put("/issues/:id", IssueController, :update)
     post("/issues/:id/close", IssueController, :close)
