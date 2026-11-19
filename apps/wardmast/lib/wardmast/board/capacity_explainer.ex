@@ -184,11 +184,12 @@ defmodule Wardmast.Board.CapacityExplainer do
       end)
 
     users = users(board)
+    used = Map.get(board, :slots_used, 0)
 
     %{
       effective: terms.effective,
-      used: Map.get(board, :slots_used, 0),
-      free: Map.get(board, :slots_free, 0),
+      used: used,
+      free: max(terms.effective - used, 0),
       binding: terms.binding,
       headline: headline(terms, account),
       limits: limits,

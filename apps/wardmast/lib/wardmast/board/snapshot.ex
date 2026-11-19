@@ -58,7 +58,7 @@ defmodule Wardmast.Board.Snapshot do
   `slots_used` is the tickets In progress — stored state `:active` — and
   nothing else (bd-asxw4e): a ticket between ReviewGate rounds holds its slot
   with no agent live, and one Merging on its open PR or Verifying holds none,
-  whatever worker row lingers. `slots_free` means "tickets I could start
+  whatever worker row lingers. A free slot means "tickets I could start
   dispatching right now given the cap", which is a different number from
   `agents_live`, "agents actually burning quota this instant" — see
   `Wardmast.Tasks.SlotGate`'s "A slot is a ticket In progress" section.
@@ -73,7 +73,6 @@ defmodule Wardmast.Board.Snapshot do
   """
 
   alias Wardmast.Accounts.Concurrency
-  alias Wardmast.Agents.ProviderConstraint
   alias Wardmast.Agents.ProviderRouting
   alias Wardmast.Board.CiBackpressure
   alias Wardmast.Board.FileScope
@@ -133,7 +132,7 @@ defmodule Wardmast.Board.Snapshot do
   @orphan_grace_seconds Lifecycle.View.orphan_grace_seconds()
 
   @type t :: %{
-          optional(:walk) => Scheduler.t(),
+          walk: Scheduler.t(),
           backlog: [map()],
           blocked: [map()],
           ready: [Scheduler.entry()],
@@ -142,14 +141,11 @@ defmodule Wardmast.Board.Snapshot do
           verifying: [map()],
           closed_today: [map()],
           attention: [map()],
-          promote: String.t() | nil,
           slots_total: non_neg_integer(),
-          slots_free: non_neg_integer(),
           slots_used: non_neg_integer(),
           slot_holders: [String.t()],
           capacity: map() | nil,
           agents_live: non_neg_integer(),
-          quota: Scheduler.quota(),
           paused: boolean(),
           now: DateTime.t()
         }
@@ -160,7 +156,7 @@ defmodule Wardmast.Board.Snapshot do
   Expected keys: `:issues`, `:workers`, `:blocked_by` (issue id → unsatisfied
   blocker ids, from `EdgeGate.blockers/2`), `:conflicts_with` (`{a, b}` pairs
   from the mutex edges), `:changed_files` (task id → repo-relative paths a worktree has touched),
-  `:now`, `:slots_total`, `:quota` and `:paused`. Every key has a sane
+  `:now`, `:slots_total` and `:paused`. Every key has a sane
   default, so a caller may pass only what it has.
 
   The epic-aware order (ES3) also reads `:scheduling` (the
@@ -193,7 +189,6 @@ defmodule Wardmast.Board.Snapshot do
     changed = Map.get(input, :changed_files, %{})
     now = Map.get(input, :now) || DateTime.utc_now()
     slots_total = Map.get(input, :slots_total, 0)
-    quota = Map.get(input, :quota, :ok)
     paused? = Map.get(input, :paused) == true
     # bd-38of5i: `{parent_id, child_id}` pairs from the `:parent_of` edges. An
     # *input*, like `:blocked_by` — the pure half never goes looking for rows.
@@ -270,7 +265,6 @@ defmodule Wardmast.Board.Snapshot do
     # never enter into it. See `SlotGate`'s "A slot is a ticket In progress".
     idle_opts = [idle_ids: Map.get(input, :idle_ids, [])]
     slots_used = SlotGate.slots_used(issues, idle_opts)
-    slots_free = max(slots_total - slots_used, 0)
 
     # Only the Ready column is the scheduler's queue: a Blocked ticket is held
     # by its dependencies, which `Scheduler.plan/1` would skip over anyway.
@@ -280,23 +274,7 @@ defmodule Wardmast.Board.Snapshot do
       conflict_claims: conflict_claims(authors, gate_workers, issues, worked, now)
     }
 
-    plan =
-      Scheduler.plan(%{
-        ready: queue.ready,
-        running: queue.running,
-        conflict_claims: queue.conflict_claims,
-        slots_free: slots_free,
-        slot_note: Map.get(input, :slot_note),
-        quota: quota,
-        card_quota: Map.get(input, :card_quota, %{}),
-        card_constraint:
-          Map.merge(Map.get(input, :card_constraint, %{}), Map.get(input, :dispatch_holds, %{})),
-        card_guardrail: Map.get(input, :card_guardrail, %{}),
-        card_local: Map.get(input, :card_local, %{}),
-        card_ci: Map.get(input, :card_ci, %{}),
-        card_pair: Map.get(input, :card_pair, %{}),
-        paused: paused?
-      })
+    walk = plan_walk(queue, input, paused?)
 
     decorate = fn cards, budget ->
       cards
@@ -309,7 +287,7 @@ defmodule Wardmast.Board.Snapshot do
       backlog: issues |> backlog_cards(columns, order_ctx) |> decorate.(over_budget),
       blocked: issues |> blocked_cards(columns, views, order_ctx) |> decorate.(over_budget),
       ready:
-        Enum.map(plan.entries, fn entry ->
+        Enum.map(walk.entries, fn entry ->
           %{entry | card: with_view(entry.card, views)}
         end)
         |> with_parents_in_entries(parents)
@@ -324,9 +302,7 @@ defmodule Wardmast.Board.Snapshot do
       # A closed task that ran over is done — there is nothing left to act on,
       # so the Closed column never flags, whatever the input says.
       closed_today: issues |> closed_today_cards(columns, now) |> decorate.(nil),
-      promote: plan.promote,
       slots_total: slots_total,
-      slots_free: slots_free,
       slots_used: slots_used,
       # bd-5fl9sx: the tickets holding the slots just counted, and the terms
       # `slots_total` is the minimum of — what `Wardmast.Board.CapacityExplainer`
@@ -334,24 +310,43 @@ defmodule Wardmast.Board.Snapshot do
       slot_holders: SlotGate.slot_holders(issues, idle_opts),
       capacity: Map.get(input, :capacity),
       agents_live: agents_live,
-      quota: quota,
+      walk: walk,
       paused: paused?,
       now: now
     }
 
-    board
-    |> Map.put(:attention, attention_items(board))
-    |> put_walk(Map.get(input, :walk), queue, input, paused?)
+    Map.put(board, :attention, attention_items(board))
   end
 
-  # DC6: the scheduler walk, planned beside today's plan over the same queue,
-  # only when the input carries its capacity sets (the admission walk
-  # shadow or enforce). It reads nothing today's plan decides with and writes
-  # nothing back to it, so the board's own fields are the same with or without
-  # it (I1, I2). The capacity sets ride with the plan, for the shadow record.
-  # A walk that cannot be planned is left out: losing today's board to it would
-  # read as an unreadable board, and Autopilot would dispatch nothing (I2).
-  defp put_walk(board, %{} = walk, queue, input, paused?) do
+  # The scheduler walk (DC6; the only plan since DC12) over the Ready queue and
+  # the capacity sets the input carries (`:walk`), with the pools and machines it
+  # ran against. Its entries are the board's Ready column. A walk that cannot be
+  # planned (a candidates read that raises) is planned again with no capacity
+  # sets: the board still renders, every free card reads "waiting for capacity",
+  # and Autopilot dispatches nothing that pass (I2).
+  defp plan_walk(queue, input, paused?) do
+    walk = Map.get(input, :walk)
+
+    try do
+      plan_with(queue, input, paused?, walk)
+    rescue
+      e ->
+        Logger.warning(
+          "Board.Snapshot: the scheduler walk was not planned: #{Exception.message(e)}"
+        )
+
+        plan_with(queue, input, paused?, nil)
+    catch
+      kind, reason ->
+        Logger.warning(
+          "Board.Snapshot: the scheduler walk was not planned: #{inspect({kind, reason})}"
+        )
+
+        plan_with(queue, input, paused?, nil)
+    end
+  end
+
+  defp plan_with(queue, input, paused?, walk) do
     plan =
       Scheduler.plan(%{
         ready: queue.ready,
@@ -365,24 +360,8 @@ defmodule Wardmast.Board.Snapshot do
         walk: walk
       })
 
-    Map.put(board, :walk, Map.merge(plan, Map.take(walk, [:pools, :nodes])))
-  rescue
-    e ->
-      Logger.warning(
-        "Board.Snapshot: the scheduler walk was not planned: #{Exception.message(e)}"
-      )
-
-      board
-  catch
-    kind, reason ->
-      Logger.warning(
-        "Board.Snapshot: the scheduler walk was not planned: #{inspect({kind, reason})}"
-      )
-
-      board
+    Map.merge(plan, Map.take(walk || %{}, [:pools, :nodes]))
   end
-
-  defp put_walk(board, _walk, _queue, _input, _paused?), do: board
 
   @needed_issue_fields [
     :id,
@@ -434,7 +413,7 @@ defmodule Wardmast.Board.Snapshot do
   Read the world and derive the board.
 
   Options mirror `derive/1`'s inputs and override what would otherwise be
-  read: `:now`, `:slots_total`, `:quota`, `:paused`,
+  read: `:now`, `:slots_total`, `:paused`,
   `:issues`, `:workers`, `:changed_files`, `:workspace_id`; `:routing_opts` is
   handed to `Wardmast.Agents.ProviderRouting.availability/3` when the
   workspace routes by most quota. `:exclude_engagements?` (default `false`)
@@ -446,7 +425,7 @@ defmodule Wardmast.Board.Snapshot do
   `:walk_opts`, or a ready `:walk`) are always gathered and the board derived
   with them. A walk whose inputs fail to read is left out.
 
-  **Workspace-level scoping:** `slots_total` and `quota` are computed for the
+  **Workspace-level scoping:** `slots_total` is computed for the
   specified workspace (defaulting to the default workspace if not given).
   However, `:issues` and `:workers` span all workspaces. Per-workspace
   concurrency limits are enforced at dispatch by `effective_max_concurrent/1`;
@@ -501,22 +480,10 @@ defmodule Wardmast.Board.Snapshot do
       now: now,
       slots_total: slots_total,
       capacity: capacity,
-      slot_note:
-        Keyword.get_lazy(opts, :slot_note, fn ->
-          slot_note(workspace, issues, slots_total, idle_ids)
-        end),
-      # DC12: no board-wide or per-card quota hold; the walk's pools carry it.
-      quota: Keyword.get(opts, :quota, :ok),
-      card_quota: Keyword.get(opts, :card_quota, %{}),
-      card_constraint:
-        Keyword.get_lazy(opts, :card_constraint, fn ->
-          ticket_constraint_holds(workspace, issues, opts)
-        end),
       card_guardrail:
         Keyword.get_lazy(opts, :card_guardrail, fn ->
           ticket_guardrail_holds(workspace, issues, opts)
         end),
-      card_local: Keyword.get_lazy(opts, :card_local, fn -> ticket_local_holds(issues) end),
       card_ci: Keyword.get_lazy(opts, :card_ci, fn -> ticket_ci_holds(issues, opts) end),
       card_pair: Keyword.get_lazy(opts, :card_pair, fn -> ticket_pair_holds(issues) end),
       dispatch_holds: Keyword.get(opts, :dispatch_holds, %{}),
@@ -630,21 +597,6 @@ defmodule Wardmast.Board.Snapshot do
   defp floored_epic?(issue),
     do: Map.get(issue, :issue_type) == :epic and is_integer(Map.get(issue, :floor_priority))
 
-  # bd-48prlb: why the board is full, named by the binding limit. Read only
-  # when no slot is free, so a board with room pays nothing for it.
-  defp slot_note(%Wardmast.Tasks.Workspace{} = workspace, issues, slots_total, idle_ids) do
-    used = SlotGate.slots_used(issues, idle_ids: idle_ids)
-
-    if used >= slots_total do
-      placement_note(workspace) ||
-        workspace
-        |> Wardmast.Accounts.SlotLimit.binding(used)
-        |> Wardmast.Accounts.SlotLimit.describe(SlotGate.slot_holders(issues, idle_ids: idle_ids))
-    end
-  end
-
-  defp slot_note(_workspace, _issues, _slots_total, _idle_ids), do: nil
-
   # bd-3fbj83: the orphaned tickets, which hold no slot. `:idle_ids` names them
   # outright; `:idle_check` (a 1-arity function over the issues, in production
   # `Wardmast.Tasks.IdleTickets.ids/1`) computes them. Neither: none, so a pure
@@ -657,47 +609,6 @@ defmodule Wardmast.Board.Snapshot do
     end
   rescue
     _ -> []
-  end
-
-  # RW14: the workspace's work has nowhere to go. Phrased like the dispatch-time
-  # RW8 hold (`held — local capacity 0 …`), so the board and the dispatcher say
-  # the same thing.
-  defp placement_note(workspace) do
-    mode = Placement.mode(workspace)
-
-    mode
-    |> capacity_hold()
-    |> Wardmast.Machine.Hold.note(Wardmast.Machine.Hold.derated(mode))
-  rescue
-    _ -> nil
-  end
-
-  # A `local_only` workspace on a derated primary is held outright: it offers no new
-  # slots whether or not something is running (bd-6w7usy).
-  defp capacity_hold(:local_only = mode) do
-    if Wardmast.Machine.Hold.derated(mode) == [],
-      do: exhausted(mode),
-      else: "held — local machine is derated"
-  end
-
-  defp capacity_hold(mode), do: exhausted(mode)
-
-  defp exhausted(mode) do
-    case {mode, Wardmast.Nodes.Capacity.placement(mode)} do
-      {:local_only, %{cap: 0}} ->
-        "held — local capacity 0 (worker.placement is local_only and this machine's cap is 0)"
-
-      {mode, %{cap: 0}} ->
-        "held — no node capacity (worker.placement is #{mode}; no node is available)"
-
-      {mode, %{free: 0}} ->
-        "held — no free slot on #{if mode == :remote_only, do: "any node", else: "this machine or any node"} (worker.placement is #{mode})"
-
-      _ ->
-        nil
-    end
-  rescue
-    _ -> nil
   end
 
   defp safe_capacity_terms(workspace_or_id, used, opts) do
@@ -756,14 +667,12 @@ defmodule Wardmast.Board.Snapshot do
       verifying: [],
       closed_today: [],
       attention: [],
-      promote: nil,
       slots_total: 0,
-      slots_free: 0,
       slots_used: 0,
       slot_holders: [],
       capacity: nil,
       agents_live: 0,
-      quota: :ok,
+      walk: %{promote: nil, entries: [], placements: []},
       paused: true,
       now: now || DateTime.utc_now()
     }
@@ -1021,49 +930,13 @@ defmodule Wardmast.Board.Snapshot do
   # `load/1`'s options for the two board-wide reads, with the routing read done
   # once and shared. Nothing is read when both are overridden.
   defp routing_opts(workspace, opts) do
-    if Keyword.get(opts, :slots_total) && Keyword.has_key?(opts, :quota) do
+    if Keyword.get(opts, :slots_total) do
       [routing: nil]
     else
       routing_opts = Keyword.get(opts, :routing_opts, [])
       [routing: workspace && read_routing(workspace, routing_opts: routing_opts)]
     end
   end
-
-  # bd-13pqcp: a Ready ticket carrying a provider constraint is held — by its
-  # own constraint, not the board's — when no provider the constraint allows
-  # has capacity (`ProviderConstraint.pick/3`, the one read dispatch also
-  # asks), so Autopilot plans past it instead of dispatching into a refusal.
-  # Only constrained tickets are evaluated; everything else yields no entry.
-  #
-  # bd-814vuy: the same read now covers an *unconstrained* ticket, against the
-  # workspace the ticket itself belongs to. A workspace whose `agent.type` pool
-  # is entirely full or paused cannot take any of its tickets, so the head of
-  # the queue behind a full account no longer ends the pass: Autopilot plans
-  # past it to a card another provider can take. Only a hold is recorded for an
-  # unconstrained ticket (one verdict per workspace), so a healthy board is
-  # unchanged.
-  defp ticket_constraint_holds(%Wardmast.Tasks.Workspace{} = default, issues, opts) do
-    queued = Enum.filter(issues, &(Lifecycle.state_of(&1) == :queued and not epic?(&1)))
-    {constrained, plain} = Enum.split_with(queued, &ProviderConstraint.from/1)
-
-    constrained_holds =
-      Map.new(constrained, fn issue ->
-        case ProviderConstraint.pick(default, issue, opts) do
-          {:ok, _provider} -> {issue.id, :ok}
-          {:hold, detail} -> {issue.id, {:hold, detail}}
-        end
-      end)
-
-    plain
-    |> Enum.group_by(&Map.get(&1, :workspace_id))
-    |> Enum.flat_map(fn {ws_id, tickets} -> pool_holds(default, ws_id, tickets, opts) end)
-    |> Map.new()
-    |> Map.merge(constrained_holds)
-  rescue
-    _ -> %{}
-  end
-
-  defp ticket_constraint_holds(_, _, _), do: %{}
 
   # bd-atll60 (G13, design §5.7): a Ready ticket that no model its guardrails
   # allow can take is held on the board by its own `{:guardrail, reason}` block,
@@ -1085,35 +958,6 @@ defmodule Wardmast.Board.Snapshot do
   end
 
   defp ticket_guardrail_holds(_, _, _), do: %{}
-
-  # bd-akp9ae: a Ready card whose workspace places runs on nodes, but whose own run can
-  # only go to the primary (its repo is not sandboxed in podman, it has no checkout to
-  # hand a node, …), while the primary's own cap has no room for it, is held — by its
-  # own hold, the phrase the dispatch would be refused with (`LocalCapacity`) — rather
-  # than read as a board-wide slot hold that names whatever budget binds the count,
-  # which includes the nodes it cannot use. The card behind it may fit on a node.
-  #
-  # The verdict is asked as Claude (the one provider a node runs): a run that cannot go
-  # to a node even as Claude cannot on any provider, and routing is never asked here
-  # (a stateful policy would advance per question). A `local_only` workspace is left
-  # alone: its slot count is the primary's own. Nothing per card is read while the
-  # primary has room, nor for an empty queue.
-  @local_probe "board:local-probe"
-
-  defp ticket_local_holds(issues) do
-    queued = Enum.filter(issues, &(Lifecycle.state_of(&1) == :queued and not epic?(&1)))
-
-    if queued == [] or LocalCapacity.check(@local_probe, :implementer) == :ok do
-      %{}
-    else
-      queued
-      |> Enum.group_by(&Map.get(&1, :workspace_id))
-      |> Enum.flat_map(fn {ws_id, tickets} -> local_holds(safe_workspace(ws_id), tickets) end)
-      |> Map.new()
-    end
-  rescue
-    _ -> %{}
-  end
 
   # bd-7p6a9o: a card a live pair session claims is held by its own hold. One
   # indexed read of the live pair sessions for the whole board; a failed read
@@ -1152,22 +996,6 @@ defmodule Wardmast.Board.Snapshot do
   rescue
     _ -> %{}
   end
-
-  defp local_holds(%Wardmast.Tasks.Workspace{} = ws, tickets) do
-    case Placement.mode(ws) do
-      :local_only ->
-        []
-
-      mode ->
-        for ticket <- tickets,
-            {:local_only, reason} <- [WalkInputs.eligibility(ws, ticket, "claude", mode)],
-            {:error, {:no_node_capacity, %{phrase: phrase}}} <-
-              [LocalCapacity.check(ticket.id, :implementer, reason: {:local_only, reason})],
-            do: {ticket.id, {:hold, phrase}}
-    end
-  end
-
-  defp local_holds(_workspace, _tickets), do: []
 
   defp guardrail_hold(default, issue, opts) do
     ws_id = Map.get(issue, :workspace_id)
@@ -1212,21 +1040,6 @@ defmodule Wardmast.Board.Snapshot do
     ]
     |> Enum.filter(& &1)
     |> Enum.join("; ")
-  end
-
-  defp pool_holds(default, ws_id, [sample | _] = tickets, opts) do
-    workspace = if ws_id in [nil, default.id], do: default, else: safe_workspace(ws_id)
-
-    case workspace && ProviderConstraint.pick(workspace, sample, opts) do
-      {:hold, detail} ->
-        detail = String.trim_leading(detail, ": ")
-        Enum.map(tickets, &{&1.id, {:hold, detail}})
-
-      _ ->
-        []
-    end
-  rescue
-    _ -> []
   end
 
   # ---- shared column classification -----------------------------------------

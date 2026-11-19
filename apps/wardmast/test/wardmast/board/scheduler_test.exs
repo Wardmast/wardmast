@@ -1,6 +1,7 @@
 defmodule Wardmast.Board.SchedulerTest do
   use ExUnit.Case, async: true
 
+  alias Wardmast.Board.OpenWalk
   alias Wardmast.Board.Scheduler
 
   defp card(id, opts \\ []) do
@@ -16,18 +17,22 @@ defmodule Wardmast.Board.SchedulerTest do
     %{task_id: task_id, scope: MapSet.new(files)}
   end
 
+  # `slots_free` is the room an `OpenWalk` offers: that many seats and machine
+  # slots, all free.
   defp plan(overrides) do
+    overrides = Map.new(overrides)
+    {slots, overrides} = Map.pop(overrides, :slots_free, 1)
+
     Scheduler.plan(
       Map.merge(
         %{
           ready: [],
           running: [],
           conflict_claims: %{},
-          slots_free: 1,
-          quota: :ok,
-          paused: false
+          paused: false,
+          walk: OpenWalk.walk(slots: slots)
         },
-        Map.new(overrides)
+        overrides
       )
     )
   end
@@ -37,19 +42,11 @@ defmodule Wardmast.Board.SchedulerTest do
   end
 
   describe "promotion" do
-    test "promotes the top ready card when a slot is free" do
+    test "promotes the top ready card when there is room" do
       plan = plan(ready: [card("bd-1"), card("bd-2")])
 
       assert plan.promote == "bd-1"
       assert %{state: :next, reason: "next up — dispatching..."} = reason(plan, "bd-1")
-    end
-
-    test "promotes at most one card per plan, whatever the headroom" do
-      plan = plan(ready: [card("bd-1"), card("bd-2"), card("bd-3")], slots_free: 3)
-
-      assert plan.promote == "bd-1"
-      assert %{state: :queued, reason: "1 ahead in queue"} = reason(plan, "bd-2")
-      assert %{state: :queued, reason: "2 ahead in queue"} = reason(plan, "bd-3")
     end
 
     test "an empty ready queue promotes nothing" do
@@ -57,13 +54,31 @@ defmodule Wardmast.Board.SchedulerTest do
     end
   end
 
-  describe "concurrency" do
-    test "no free slot holds the top card and names the reason" do
+  describe "capacity" do
+    test "no room holds every free card and names the reason" do
       plan = plan(ready: [card("bd-1"), card("bd-2")], slots_free: 0)
 
       assert plan.promote == nil
-      assert %{state: :blocked, reason: "blocked — no free worker slot"} = reason(plan, "bd-1")
-      assert %{state: :queued, reason: "1 ahead in queue"} = reason(plan, "bd-2")
+      assert %{state: :blocked, reason: "waiting for capacity — " <> _} = reason(plan, "bd-1")
+      assert %{state: :blocked, reason: "waiting for capacity — " <> _} = reason(plan, "bd-2")
+    end
+
+    test "without a walk nothing is placed" do
+      plan = Scheduler.plan(%{ready: [card("bd-1")]})
+
+      assert plan.promote == nil
+
+      assert %{state: :blocked, reason: "waiting for capacity — no provider budget" <> _} =
+               reason(plan, "bd-1")
+    end
+
+    test "places as many cards as there is room, the first as the one to dispatch" do
+      plan = plan(ready: [card("bd-1"), card("bd-2"), card("bd-3")], slots_free: 2)
+
+      assert plan.promote == "bd-1"
+      assert Enum.map(plan.placements, & &1.id) == ["bd-1", "bd-2"]
+      assert %{state: :starting} = reason(plan, "bd-2")
+      assert %{state: :queued} = reason(plan, "bd-3")
     end
   end
 
@@ -117,33 +132,7 @@ defmodule Wardmast.Board.SchedulerTest do
 
       assert plan.promote == "bd-1"
 
-      assert %{state: :queued, hold: nil} = reason(plan, "bd-2")
-    end
-
-    test "a card held by a global block does not claim its files" do
-      plan =
-        plan(
-          ready: [card("bd-1", files: ["lib/a.ex"]), card("bd-2", files: ["lib/a.ex"])],
-          slots_free: 0
-        )
-
-      assert %{state: :blocked, reason: "blocked — no free worker slot"} = reason(plan, "bd-1")
-      assert %{state: :queued, reason: "1 ahead in queue"} = reason(plan, "bd-2")
-    end
-  end
-
-  describe "quota" do
-    test "an exhausted quota holds promotion and surfaces as a blocked reason" do
-      plan = plan(ready: [card("bd-1")], quota: {:hold, "quota exhausted"})
-
-      assert plan.promote == nil
-      assert %{state: :blocked, reason: "blocked — quota exhausted"} = reason(plan, "bd-1")
-    end
-
-    test "quota outranks a missing slot when both would hold" do
-      plan = plan(ready: [card("bd-1")], quota: {:hold, "quota near exhaustion"}, slots_free: 0)
-
-      assert %{reason: "blocked — quota near exhaustion"} = reason(plan, "bd-1")
+      assert %{state: :starting, hold: nil} = reason(plan, "bd-2")
     end
   end
 
@@ -269,25 +258,7 @@ defmodule Wardmast.Board.SchedulerTest do
 
       assert plan.promote == "bd-2"
       assert %{state: :next} = reason(plan, "bd-2")
-      assert %{state: :queued, reason: "1 ahead in queue"} = reason(plan, "bd-3")
-    end
-
-    test "a card held by a global block does not claim the mutex" do
-      plan =
-        plan(
-          ready: [card("bd-1", conflicts_with: ["bd-2"]), card("bd-2", conflicts_with: ["bd-1"])],
-          slots_free: 0
-        )
-
-      assert %{state: :blocked, reason: "blocked — no free worker slot"} = reason(plan, "bd-1")
-      assert %{state: :queued, reason: "1 ahead in queue"} = reason(plan, "bd-2")
-    end
-
-    test "a plan without the key at all behaves exactly as before" do
-      plan =
-        Scheduler.plan(%{ready: [card("bd-1", conflicts_with: ["bd-7"])], slots_free: 1})
-
-      assert plan.promote == "bd-1"
+      assert %{state: :starting} = reason(plan, "bd-3")
     end
   end
 
@@ -409,7 +380,7 @@ defmodule Wardmast.Board.SchedulerTest do
       plan =
         plan(
           ready: [card("bd-1"), card("bd-2")],
-          card_constraint: %{
+          dispatch_holds: %{
             "bd-1" => {:hold, "exclude gemini: no allowed provider has a free slot"}
           }
         )
@@ -423,7 +394,7 @@ defmodule Wardmast.Board.SchedulerTest do
     end
 
     test "a card whose constraint has an eligible provider, or none at all, is unaffected" do
-      plan = plan(ready: [card("bd-1")], card_constraint: %{"bd-1" => :ok})
+      plan = plan(ready: [card("bd-1")], dispatch_holds: %{})
       assert plan.promote == "bd-1"
 
       plan = plan(ready: [card("bd-1")])

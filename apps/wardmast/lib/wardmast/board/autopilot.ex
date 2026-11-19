@@ -200,7 +200,7 @@ defmodule Wardmast.Board.Autopilot do
   scheduler: with dead credentials and several Ready tasks behind free slots,
   a burst of successful-looking dispatches (a dispatch call "succeeds" in the
   sense of starting a worker; the worker then dies on its own auth check) can
-  now happen back-to-back, up to `slots_free` deep, before `AuthHold` opens
+  now happen back-to-back, up to a card per free seat deep, before `AuthHold` opens
   and the board-level hold takes over — instead of one attempt per 15s/60s
   tick. The number of such attempts stays bounded by the number of free
   slots, not unbounded, and `AuthHold`/`promote_or_hold/3` still cuts it off
@@ -226,24 +226,16 @@ defmodule Wardmast.Board.Autopilot do
     * the placement's pair rides into the dispatch as `planned: %{account_id,
       pool, node}`, which routing, account admission (the pool's seat check)
       and placement prefer while they still can;
-    * the **reverse shadow** rides beside it as `admission_shadow`: what
-      today's plan would have done (`AdmissionShadow.reverse_record/2`), which
-      the run stores on its `routing_decision`;
-    * one `Wardmast.Board.AdmissionShadowEvent` row is written each time either
-      side's outcome changes (`Wardmast.Board.AdmissionShadow.signature/1`),
-      never once per pass;
     * a pool's budget that rises (`{:budget_changed, …}` on the `"board"`
       topic) plans a pass, as a freed seat does;
     * a resume deferred for a seat is replayed when its own pin pool has one
       (`Wardmast.Worker.ResumeSlot`), not when the board's slot count frees.
 
-  A board whose walk could not be read dispatches nothing that pass: the
-  fallback to today's plan went with the `legacy` mode.
+  A board whose walk could not be read dispatches nothing that pass.
   """
 
   use GenServer
 
-  alias Wardmast.Board.AdmissionShadow
   alias Wardmast.Board.Drain
   alias Wardmast.Board.Snapshot
   alias Wardmast.Boot.ResumeGate
@@ -417,10 +409,7 @@ defmodule Wardmast.Board.Autopilot do
     * `:snapshot` / `:dispatch` — seams for tests; default to
       `Snapshot.load/1` and `Wardmast.Worker.Dispatch.dispatch/2`. A
       two-argument `:dispatch` also gets the extra dispatch options (the
-      admission shadow's record); a one-argument one gets the id alone.
-    * `:record_shadow` — seam for tests; a 1-arity function that writes an
-      admission hold-change event. Defaults to
-      `Wardmast.Board.AdmissionShadow.record_event/1`.
+      walk's `planned:` pair); a one-argument one gets the id alone.
     * `:resume` — seam for tests; a 3-arity `(task_id, kind, opts)` that
       replays a deferred resume. Defaults to `Dispatch.resume/2` /
       `resume_session/2` (bd-92mx1m).
@@ -643,10 +632,6 @@ defmodule Wardmast.Board.Autopilot do
       follow_up?: Keyword.get(opts, :follow_up, true),
       snapshot: Keyword.get(opts, :snapshot, &Snapshot.load/1),
       dispatch: Keyword.get_lazy(opts, :dispatch, fn -> default_dispatch_fun(self()) end),
-      # DC6: where a hold change is written. `shadow_signature` is the last pass's
-      # outcome on both sides, so a row is written per change, not per pass.
-      record_shadow: Keyword.get(opts, :record_shadow, &AdmissionShadow.record_event/1),
-      shadow_signature: nil,
       resume: Keyword.get(opts, :resume, &default_resume/3),
       local_room: Keyword.get(opts, :local_room, &default_local_room?/2),
       # DC8: under `enforce`, whether a resume deferred for a slot has a seat on
@@ -896,9 +881,8 @@ defmodule Wardmast.Board.Autopilot do
   end
 
   # DC8 (E8, design §3.6): the provider budgets' server announces each published
-  # budget change on this module's "board" topic. A rise is a freed seat: under
-  # `enforce` it plans a pass, as a worker finishing does. A fall stops nothing
-  # (no budget stops a run), and under `legacy` and `shadow` nothing reacts.
+  # budget change on this module's "board" topic. A rise is a freed seat: it plans a pass, as a worker finishing does. A fall stops nothing
+  # (no budget stops a run).
   def handle_info({:budget_changed, _pool, from, to, _reason}, state) do
     if budget_rise?(from, to),
       do: {:noreply, request_plan(state)},
@@ -1051,11 +1035,6 @@ defmodule Wardmast.Board.Autopilot do
       )
 
     state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
-
-    state =
-      shadow_safely(%{state | shadow_signature: nil}, fn ->
-        note_admission(state, read_status, snapshot)
-      end)
 
     cond do
       state.deferred_resumes != [] ->
@@ -1210,23 +1189,22 @@ defmodule Wardmast.Board.Autopilot do
   # ---- the walk decides (DC8) -------------------------------------------------
 
   # The card this pass dispatches and the options riding with it: the walk's
-  # first placement goes, its pair as `planned:` and today's plan's decision
-  # beside it as the reverse shadow. A board whose walk could not be read
-  # dispatches nothing this pass (design §4.3, §4.4); the next pass looks again.
+  # first placement goes, its pair as `planned:`. A board whose walk could not be
+  # read dispatches nothing this pass (design §4.3, §4.4); the next pass looks again.
   defp pass_pick(snapshot) do
     case walk_pick(snapshot) do
-      %{id: id} = placement ->
-        planned = [planned: AdmissionShadow.planned(placement)]
-
-        {id,
-         shadow_safely(planned, fn ->
-           planned ++ [admission_shadow: AdmissionShadow.reverse_record(snapshot, placement)]
-         end)}
-
-      nil ->
-        nil
+      %{id: id} = placement -> {id, [planned: planned(placement)]}
+      nil -> nil
     end
   end
+
+  # The pair a walk placement rides into dispatch as, `opts[:planned]` (design
+  # §4.4): its account, pool and machine. A pool with no account behind it (an
+  # unmetered provider) plans the machine only.
+  defp planned(%{pool: {account_id, pool}, node: node}) when is_binary(account_id),
+    do: %{account_id: account_id, pool: pool, node: node}
+
+  defp planned(%{node: node}), do: %{account_id: nil, pool: nil, node: node}
 
   # The Ready queue is install-wide, so the walk alone decides: its first
   # placement goes, or nothing does.
@@ -1237,48 +1215,6 @@ defmodule Wardmast.Board.Autopilot do
   defp walk_decides?(%{walk: %{placements: _, entries: _}}), do: true
   defp walk_decides?(_snapshot), do: false
 
-  # ---- the reverse shadow (DC6, DC8) -----------------------------------------
-
-  # The shadow is a record: nothing it computes may stop a pass or change a
-  # dispatch (I2). A failure is logged and the pass goes on without it.
-  defp shadow_safely(fallback, fun) do
-    fun.()
-  rescue
-    e ->
-      Logger.warning("board autopilot: admission shadow skipped: #{Exception.message(e)}")
-      fallback
-  catch
-    kind, reason ->
-      Logger.warning("board autopilot: admission shadow skipped: #{inspect({kind, reason})}")
-      fallback
-  end
-
-  # One event row per change of either side's outcome (`AdmissionShadow.signature/1`),
-  # never one per pass. An unreadable board says nothing and keeps the last
-  # signature; a board without a walk forgets it, so the next walk is recorded
-  # from a clean slate.
-  defp note_admission(state, :error, _snapshot), do: state
-
-  defp note_admission(state, :ok, %{walk: %{}} = snapshot) do
-    signature = AdmissionShadow.signature(snapshot)
-
-    if signature != state.shadow_signature,
-      do: record_shadow(state, AdmissionShadow.event(snapshot, state.now.()))
-
-    %{state | shadow_signature: signature}
-  end
-
-  defp note_admission(state, :ok, _snapshot), do: %{state | shadow_signature: nil}
-
-  defp record_shadow(state, attrs) do
-    state.record_shadow.(attrs)
-  rescue
-    e -> Logger.warning("board autopilot: admission shadow not recorded: #{inspect(e)}")
-  catch
-    :exit, reason ->
-      Logger.warning("board autopilot: admission shadow not recorded: #{inspect(reason)}")
-  end
-
   # bd-dtdeff: an idle pass with Ready cards behind it was silent — no log, no
   # status — so a board holding work for a reason read as an Autopilot that had
   # stopped looking. Record each card's reason (the one the board shows) and log
@@ -1287,11 +1223,8 @@ defmodule Wardmast.Board.Autopilot do
   defp note_holds(state, _snapshot, :error), do: state
 
   defp note_holds(state, snapshot, :ok) do
-    # DC8: when the walk decides, its reasons are why nothing went.
-    source =
-      if walk_decides?(snapshot),
-        do: snapshot.walk.entries,
-        else: Map.get(snapshot, :ready, [])
+    # The walk's reasons are why nothing went.
+    source = if walk_decides?(snapshot), do: snapshot.walk.entries, else: []
 
     holds =
       source
@@ -1505,7 +1438,7 @@ defmodule Wardmast.Board.Autopilot do
     }
   end
 
-  # The dispatch seam takes the extra options (the admission shadow's record)
+  # The dispatch seam takes the extra options (the walk's `planned:` pair)
   # when it has room for them; a one-argument seam gets the id alone.
   defp call_dispatch(fun, id, extra) when is_function(fun, 2), do: fun.(id, extra)
   defp call_dispatch(fun, id, _extra), do: fun.(id)
@@ -1812,8 +1745,7 @@ defmodule Wardmast.Board.Autopilot do
   # on the sole-configured-repo auto-select, exactly as before.
   # `dispatched_by` rides into the worker's meta so a drain report can name a
   # board dispatch as one (bd-9fgg04), not just as "a dispatch". `extra` is the
-  # admission shadow's record (DC6): empty under `legacy`, so the options are
-  # exactly today's.
+  # walk's pair (`planned/1`).
   defp default_dispatch(id, extra, notify) do
     Wardmast.Worker.Dispatch.dispatch(
       id,

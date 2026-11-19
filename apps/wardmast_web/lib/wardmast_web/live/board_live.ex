@@ -866,12 +866,10 @@ defmodule WardmastWeb.BoardLive do
     do: Map.get(board, :agents_live) || length(Map.get(board, :in_progress, []))
 
   # bd-45pwo1: what the dispatch cap actually measures — one per ticket In
-  # progress, not one per live agent. An older board map without the key falls
-  # back to `slots_total - slots_free`, which `slots_free` was computed from.
-  defp slots_used(board) do
-    Map.get(board, :slots_used) ||
-      max(Map.get(board, :slots_total, 0) - Map.get(board, :slots_free, 0), 0)
-  end
+  # progress, not one per live agent.
+  defp slots_used(board), do: Map.get(board, :slots_used, 0)
+
+  defp slots_free(board), do: max(Map.get(board, :slots_total, 0) - slots_used(board), 0)
 
   defp elapsed(nil, _now), do: nil
 
@@ -909,9 +907,6 @@ defmodule WardmastWeb.BoardLive do
     />
     """
   end
-
-  defp quota_note({:hold, reason}), do: reason
-  defp quota_note(_), do: nil
 
   defp board_state(_loaded?, error) when is_binary(error), do: "error"
   defp board_state(true, nil), do: "loaded"
@@ -1080,7 +1075,7 @@ defmodule WardmastWeb.BoardLive do
                 </span>
                 <span class="sm:hidden">{slots_used(@board)}/</span>
                 <.slot_cap board={@board} cap={@explain.cap} budget={@explain.budget} />
-                <span class="hidden sm:inline">· {@board.slots_free} slots free</span>
+                <span class="hidden sm:inline">· {slots_free(@board)} slots free</span>
               </span>
               <CapacityComponents.capacity_strip
                 :if={@board_loaded? and @capacity}
@@ -1950,17 +1945,11 @@ defmodule WardmastWeb.BoardLive do
 
   defp ready_foot(%{paused: true}, _), do: "scheduler paused — resume to dispatch"
 
-  defp ready_foot(%{promote: id}, _) when is_binary(id), do: "dispatching #{id}..."
+  defp ready_foot(%{walk: %{promote: id}}, _) when is_binary(id), do: "dispatching #{id}..."
 
   defp ready_foot(board, _) do
-    case quota_note(board.quota) do
-      nil ->
-        if board.slots_free > 0,
-          do: "queue drains automatically",
-          else: "no free worker slot"
-
-      note ->
-        note
-    end
+    if slots_free(board) > 0,
+      do: "queue drains automatically",
+      else: "no free worker slot"
   end
 end

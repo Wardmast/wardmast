@@ -160,8 +160,6 @@ defmodule Wardmast.Worker.Dispatch do
           # bd-asxw4e: dispatch a Backlog or Blocked ticket anyway; recorded.
           force: boolean(),
           dispatched_by: String.t() | nil,
-          # DC6: the admission shadow's record, stored on the run's routing decision.
-          admission_shadow: map() | nil,
           # bd-92mx1m, resume/2 and resume_session/2 only — see ResumeSlot.
           resume_origin: :human | :automatic,
           force_slot: boolean(),
@@ -2836,7 +2834,6 @@ defmodule Wardmast.Worker.Dispatch do
         :routed_model,
         :resolved_policy,
         :auto_placed,
-        :admission_shadow,
         :planned
       ])
 
@@ -3858,28 +3855,17 @@ defmodule Wardmast.Worker.Dispatch do
 
   defp unpushed_count(_worktree_path, _opts), do: nil
 
-  # DC6: the admission shadow's record (`Wardmast.Board.AdmissionShadow`, only
-  # under the admission walk or `enforce`) joins the routing decision
-  # the run stores, as `admission_shadow`. It is a record: the decision's own
-  # keys, and so the run's account and family, are untouched.
+  # The routing decision the run stores, with the placement note (a node the
+  # run was meant for) when there is one.
   defp recorded_decision(opts) do
     opts
-    |> shadowed_decision()
+    |> Keyword.get(:routing_decision)
     |> with_placement_note(Keyword.get(opts, :placement_note))
   end
 
   defp with_placement_note(decision, nil), do: decision
   defp with_placement_note(nil, note), do: %{"placement" => note}
   defp with_placement_note(%{} = decision, note), do: Map.put(decision, "placement", note)
-
-  defp shadowed_decision(opts) do
-    case {Keyword.get(opts, :routing_decision), Keyword.get(opts, :admission_shadow)} do
-      {decision, nil} -> decision
-      {nil, %{} = shadow} -> %{"admission_shadow" => shadow}
-      {%{} = decision, %{} = shadow} -> Map.put(decision, "admission_shadow", shadow)
-      {decision, _other} -> decision
-    end
-  end
 
   defp build_worker_meta(%Issue{} = task, worktree_path, opts) do
     base =

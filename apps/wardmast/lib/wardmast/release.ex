@@ -9,7 +9,6 @@ defmodule Wardmast.Release do
   require Logger
 
   alias Wardmast.Agents.Routing.ShadowReport
-  alias Wardmast.Board.AdmissionShadowReport
   alias Wardmast.Loop.CompetenceGenerator
   alias Wardmast.Loop.Replay
   alias Wardmast.Loop.Replay.Evidence, as: ReplayEvidence
@@ -177,35 +176,6 @@ defmodule Wardmast.Release do
     results = BudgetCalibration.calibrate(Keyword.take(opts, [:since, :until]))
     IO.puts(BudgetCalibration.format(results))
     results
-  end
-
-  @doc """
-  Print the admission shadow report (bd-6cuqcf, DC7 of
-  `docs/design/provider-dynamic-concurrency.md` §10.3-§10.4): under
-  the admission walk how the scheduler walk's recorded decisions
-  compare with today's — agreement and disagreements by cause and pool,
-  throughput each way, pace safety, calibration bias, budget stability, the
-  neighbourhood of each reset — and each §10.4 criterion for the gate to
-  `enforce`. Read-only; starts only the repo.
-
-  Options: `:since` / `:until` (`DateTime`s; default the last 30 days) and
-  `:start` (default `true`; `false` when the repo is already running).
-  Returns the `Wardmast.Board.AdmissionShadowReport.build/1` map.
-
-      bin/wardmast eval 'Wardmast.Release.admission_shadow_report()'
-  """
-  @spec admission_shadow_report(keyword()) :: AdmissionShadowReport.report()
-  def admission_shadow_report(opts \\ []) do
-    if Keyword.get(opts, :start, true), do: start_release_repo!()
-
-    report =
-      opts
-      |> Keyword.take([:since, :until])
-      |> AdmissionShadowReport.collect()
-      |> AdmissionShadowReport.build()
-
-    IO.puts(AdmissionShadowReport.format(report))
-    report
   end
 
   @doc """
