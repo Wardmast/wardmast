@@ -25,8 +25,15 @@ defmodule Wardmast.Mergers.Gitlab.Config do
         # optional:
         "default_target_branch" => "main",
         "default_reviewers" => [],
-        "merge_method" => "merge"
+        "merge_method" => "merge",
+        # self-managed GitLab (all optional):
+        "base_url" => "https://gitlab.internal/gitlab",  # default "https://<host>"; "api_url" is an alias
+        "ca_cacertfile" => "/etc/ssl/internal-ca.pem"     # PEM bundle for an internal CA
       }
+
+  `base_url` (scheme + host + optional path prefix) and `ca_cacertfile` apply to
+  every GitLab HTTP client — merger, tracker and bot credential
+  (`Wardmast.Mergers.Gitlab.Endpoint`).
 
   `project_id` is GitLab's numeric project ID (or a URL-encoded
   `"group/project"` path) — passed through verbatim into the API path, so
@@ -62,7 +69,7 @@ defmodule Wardmast.Mergers.Gitlab.Config do
   """
 
   alias Wardmast.Agents.CredentialsRef
-  alias Wardmast.Mergers.Gitlab.Error
+  alias Wardmast.Mergers.Gitlab.{Endpoint, Error}
   alias Wardmast.Tasks.Workspace
 
   @pdict_key {__MODULE__, :active_workspace_config}
@@ -72,6 +79,8 @@ defmodule Wardmast.Mergers.Gitlab.Config do
 
   @type config :: %{
           host: String.t(),
+          base_url: String.t() | nil,
+          ca_cacertfile: String.t() | nil,
           project_id: String.t(),
           token: String.t(),
           default_target_branch: String.t(),
@@ -167,6 +176,8 @@ defmodule Wardmast.Mergers.Gitlab.Config do
       {:ok,
        %{
          host: host,
+         base_url: Endpoint.from_raw(raw),
+         ca_cacertfile: Endpoint.ca_from_raw(raw),
          project_id: project_id,
          token: token,
          default_target_branch:

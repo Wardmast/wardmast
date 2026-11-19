@@ -20,6 +20,8 @@ defmodule Wardmast.Http.Client do
     * `:gate` — optional `(( -> result) -> result)`. GitHub passes
       `Wardmast.Github.Limiter.gate/2` here so every attempt is metered.
     * `:retry` — optional map enabling a bounded retry loop, see below.
+    * `:connect_options` — optional Req `connect_options` (e.g. a custom CA
+      bundle for a self-managed instance); omitted from the request when empty.
     * `:receive_timeout` — defaults to 15s, as every provider used.
 
   ## Retry
@@ -52,6 +54,7 @@ defmodule Wardmast.Http.Client do
     :stub,
     :gate,
     :retry,
+    connect_options: [],
     receive_timeout: 15_000
   ]
 
@@ -77,9 +80,15 @@ defmodule Wardmast.Http.Client do
       receive_timeout: client.receive_timeout,
       retry: false
     ]
+    |> put_connect_options(client.connect_options)
     |> Keyword.merge(req_opts)
     |> Keyword.merge(stub_opts(client))
   end
+
+  defp put_connect_options(opts, [_ | _] = connect_options),
+    do: Keyword.put(opts, :connect_options, connect_options)
+
+  defp put_connect_options(opts, _), do: opts
 
   @doc """
   Performs a request, returning Req's own `{:ok, resp} | {:error, exception}`.

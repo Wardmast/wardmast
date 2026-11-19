@@ -77,6 +77,7 @@ defmodule Wardmast.Trackers.Gitlab do
 
   alias Wardmast.Http.Client
   alias Wardmast.Http.Error, as: ErrorSpec
+  alias Wardmast.Mergers.Gitlab.Endpoint
   alias Wardmast.Trackers.Gitlab.{Config, Error}
 
   @stub_name Wardmast.Trackers.Gitlab.HTTP
@@ -142,9 +143,9 @@ defmodule Wardmast.Trackers.Gitlab do
 
   @impl true
   def link_for(ref) when is_binary(ref) do
-    host = Config.active_host() || "gitlab.com"
+    base = Config.active_base_url() || "https://#{Config.active_host() || "gitlab.com"}"
     project = Config.active_project_id() || "group/project"
-    "https://#{host}/#{project}/-/issues/#{ref}"
+    "#{base}/#{project}/-/issues/#{ref}"
   end
 
   @impl true
@@ -816,18 +817,21 @@ defmodule Wardmast.Trackers.Gitlab do
   # ---- Internals: HTTP ----------------------------------------------------
 
   # Project-scoped client: prepends /api/v4/projects/:project_id to `path`.
-  defp project_client(cfg),
-    do: build_client(cfg, "https://#{cfg.host}/api/v4/projects/#{cfg.project_id}")
+  @doc false
+  def project_client(cfg),
+    do: build_client(cfg, Endpoint.api_url(cfg) <> "/projects/#{cfg.project_id}")
 
   # Root client: prepends /api/v4 to `path` (for /user, /users — not scoped to
   # a project).
-  defp root_client(cfg), do: build_client(cfg, "https://#{cfg.host}/api/v4")
+  @doc false
+  def root_client(cfg), do: build_client(cfg, Endpoint.api_url(cfg))
 
   defp build_client(cfg, base_url) do
     Client.new(
       base_url: base_url,
       headers: headers(cfg),
       errors: error_spec(),
+      connect_options: Endpoint.connect_options(cfg),
       stub: {:gitlab_http_stub, @stub_name}
     )
   end
