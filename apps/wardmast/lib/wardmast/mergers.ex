@@ -331,6 +331,35 @@ defmodule Wardmast.Mergers do
   end
 
   @doc """
+  The current PR/MR description of `mr_ref` through `adapter`
+  (`Wardmast.Mergers.Merger.get_description/1`). `{:error, :unsupported}` when
+  the adapter has no `get_description/1`.
+  """
+  @spec get_description(adapter, String.t()) :: {:ok, String.t() | nil} | {:error, term()}
+  def get_description(adapter, mr_ref) when is_atom(adapter) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :get_description, 1) do
+      adapter.get_description(mr_ref)
+    else
+      {:error, :unsupported}
+    end
+  end
+
+  @doc """
+  Host `images` through `adapter` so a PR/MR description can embed them
+  (`Wardmast.Mergers.Merger.host_images/3`). `{:error, :unsupported}` when the
+  adapter has no `host_images/3`.
+  """
+  @spec host_images(adapter, String.t(), [map()], map()) ::
+          {:ok, %{String.t() => {:ok, String.t()} | {:error, term()}}} | {:error, term()}
+  def host_images(adapter, mr_ref, images, opts \\ %{}) when is_atom(adapter) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :host_images, 3) do
+      adapter.host_images(mr_ref, images, opts)
+    else
+      {:error, :unsupported}
+    end
+  end
+
+  @doc """
   Calls `adapter.open/4`, retrying when the failure is a 409/422 "an open
   PR/MR already exists for this branch" (bd-636thc).
 
