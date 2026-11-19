@@ -41,8 +41,9 @@ defmodule Wardmast.ToolchainPinsTest do
   test "ci.yml installs the pinned toolchain in every job and keys caches on it" do
     ci = read!(".github/workflows/ci.yml")
 
-    assert scan(ci, ~r/otp-version: "([^"]+)"/) == List.duplicate(erlang(), 2)
-    assert scan(ci, ~r/elixir-version: "([^"]+)"/) == List.duplicate(elixir(), 2)
+    # Three jobs install it: `audit`, `test-shard` and `jail` (bd-bzhpgi).
+    assert scan(ci, ~r/otp-version: "([^"]+)"/) == List.duplicate(erlang(), 3)
+    assert scan(ci, ~r/elixir-version: "([^"]+)"/) == List.duplicate(elixir(), 3)
 
     keys = scan(ci, ~r/\$\{\{ runner\.os \}\}-(otp[^-]+-elixir[^-]+)-/)
     assert keys != []
