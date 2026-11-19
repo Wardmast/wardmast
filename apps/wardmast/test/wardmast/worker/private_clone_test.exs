@@ -175,6 +175,33 @@ defmodule Wardmast.Worker.PrivateCloneTest do
     end
   end
 
+  describe "marker reads agree with `git config --get`" do
+    # The in-process reader must give git's answer for every shape of config,
+    # including the ones it hands to git (quotes, comments, odd headers).
+    test "plain, duplicated, quoted and commented values", ctx do
+      assert {:ok, path} = PrivateClone.create(ctx.checkout, @branch, "main")
+      config = Path.join([path, ".git", "config"])
+      original = File.read!(config)
+
+      for extra <- [
+            "",
+            "[arbiter]\n\tbranch = later-wins\n",
+            "[arbiter]\n\tbranch = \"quoted branch\"\n",
+            "[arbiter]\n\tbranch = with-comment # trailing\n",
+            "[Arbiter]\n\tBranch = mixed-case\n",
+            "[other]\n\tbranch = not-ours\n",
+            "[arbiter \"sub\"]\n\tbranch = subsection\n"
+          ] do
+        File.write!(config, original <> extra)
+
+        {expected, 0} = System.cmd("git", ["config", "--file", config, "--get", "arbiter.branch"])
+
+        assert PrivateClone.branch(path) == String.trim(expected),
+               "config tail: #{inspect(extra)}"
+      end
+    end
+  end
+
   describe "sync_back/1" do
     setup ctx do
       {:ok, path} = PrivateClone.create(ctx.checkout, @branch, "main")
