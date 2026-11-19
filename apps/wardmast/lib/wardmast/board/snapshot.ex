@@ -84,7 +84,6 @@ defmodule Wardmast.Board.Snapshot do
   alias Wardmast.Guardrails.Alternatives
   alias Wardmast.Nodes.LocalCapacity
   alias Wardmast.Nodes.Placement
-  alias Wardmast.Quota.Gate
   alias Wardmast.Sessions.Pair
   alias Wardmast.Tasks.EdgeGate
   alias Wardmast.Tasks.Lifecycle
@@ -506,16 +505,9 @@ defmodule Wardmast.Board.Snapshot do
         Keyword.get_lazy(opts, :slot_note, fn ->
           slot_note(workspace, issues, slots_total, idle_ids)
         end),
-      quota:
-        Keyword.get_lazy(opts, :quota, fn ->
-          quota_hold(workspace || workspace_id, routing_opts)
-        end),
-      card_quota:
-        Keyword.get_lazy(opts, :card_quota, fn ->
-          if Keyword.has_key?(opts, :quota),
-            do: %{},
-            else: ticket_quota_holds(workspace, issues, opts)
-        end),
+      # DC12: no board-wide or per-card quota hold; the walk's pools carry it.
+      quota: Keyword.get(opts, :quota, :ok),
+      card_quota: Keyword.get(opts, :card_quota, %{}),
       card_constraint:
         Keyword.get_lazy(opts, :card_constraint, fn ->
           ticket_constraint_holds(workspace, issues, opts)
@@ -1037,159 +1029,6 @@ defmodule Wardmast.Board.Snapshot do
     end
   end
 
-  @doc """
-  Whether quota permits a dispatch right now, as `:ok` or `{:hold, reason}`.
-
-  Distinguishes an actually-exhausted window ("the provider is refusing") from
-  one that has crossed the throttle threshold ("we chose to stop here"),
-  because the operator's next move differs: wait for the reset, or raise the
-  ceiling.
-
-  Reads the snapshot for the **provider account** the workspace is metered
-  under, on that workspace's default agent provider
-  (`Wardmast.Quota.default_provider/1`), and defers the over-cap decision to
-  `Wardmast.Quota.Gate.hold_phrase/2` (`gating_window/2`) — the same shared
-  implementation the `dispatch/2` quota seam uses (bd-5j6nmn), so Autopilot's
-  one-per-tick promotion gate and the dispatcher agree on the same underlying
-  data.
-
-  A `:continue`-mode workspace (`Wardmast.Quota.continue_mode?/1`) never holds
-  here: the `dispatch/2` seam is the single choke point for the allow/overage decision,
-  so the board must not show a `blocked — quota exhausted` hold that the
-  dispatcher itself would not honor (reviewer round 1, finding 1).
-
-  An open `Wardmast.Agents.AuthHold` on the workspace's default agent provider
-  (bd-21bmdh — N consecutive workers died on auth) rides the same board-wide
-  hold, ahead of the quota window and regardless of `:continue` mode: the
-  dispatcher's auth guard refuses those dispatches unconditionally, so
-  `Wardmast.Board.Autopilot` must not keep promoting a card only to have it
-  refused. This is what stops a reopened auth-failed task from being
-  re-attempted every tick while credentials are dead.
-
-  **Under `routing.provider_selection: most_quota`** (bd-3fvue3) the default
-  provider is not what a dispatch runs on: `Wardmast.Agents.ProviderRouting`
-  sends it to the implementer account with headroom. The workspace is therefore
-  held only when **no** implementer candidate is available — each is
-  quota-held, out of auth, circuit-broken, at capacity or otherwise dropped, as
-  `ProviderRouting.availability/3` decides — and then by the default-provider
-  read above, since a dispatch with no available candidate goes ahead on the
-  pre-routing provider. While one candidate can take a ticket this is `:ok`
-  even if the default provider is paced, so Autopilot promotes the card and
-  dispatch routes it. `opts` are `effective_max_concurrent/3`'s.
-  """
-  @spec quota_hold(String.t() | Wardmast.Tasks.Workspace.t() | nil, keyword()) ::
-          Scheduler.quota()
-  def quota_hold(workspace_or_id \\ nil, opts \\ []) do
-    workspace = safe_workspace(workspace_or_id) || safe_workspace(default_workspace_id())
-
-    case routed_availability(workspace, opts) do
-      nil ->
-        fallback_hold(workspace, routing_view(workspace, opts))
-
-      _routed ->
-        :ok
-    end
-  end
-
-  # The reason when no candidate can take the work: every dropped candidate,
-  # named — `claude:default 7d 20% ≥ paced 20% …; codex:work at capacity …` —
-  # so the operator sees each held account and why the others can't help,
-  # rather than the default provider's phrase alone. `nil` without a dropped
-  # candidate to name.
-  defp dropped_summary([_ | _] = dropped) do
-    Enum.map_join(dropped, "; ", &dropped_phrase/1)
-  end
-
-  defp dropped_summary(_), do: nil
-
-  defp dropped_phrase(%{reason: "quota_held", detail: detail}) when is_binary(detail), do: detail
-
-  defp dropped_phrase(%{reason: reason} = entry) do
-    label =
-      case entry.account do
-        %{provider: provider, slug: slug} -> "#{provider}:#{slug}"
-        _ -> to_string(entry.agent_type)
-      end
-
-    base = "#{label} #{reason |> to_string() |> String.replace("_", " ")}"
-    if is_binary(entry[:detail]), do: "#{base} (#{entry.detail})", else: base
-  end
-
-  # The hold for a workspace where no candidate is available: the default
-  # provider's own hold (auth, then window) with its reason widened to name
-  # every dropped candidate. Still `:ok` when the default provider isn't held.
-  defp fallback_hold(workspace, view) do
-    case auth_hold(workspace) || quota_window_hold(workspace) do
-      {:hold, reason} ->
-        {:hold, (view && dropped_summary(view.dropped)) || reason}
-
-      other ->
-        other
-    end
-  end
-
-  # Per-ticket holds (bd-1qjv3j): each Ready ticket's own routing candidates —
-  # its `by_difficulty`/`by_priority` tier, its agent config — decide whether it
-  # is held, not the nil-task evaluation the workspace-level hold uses. A ticket
-  # with an available candidate is `:ok` even when a sibling's candidates are
-  # all held. Every queued non-epic ticket appears; routing-off workspaces yield
-  # `%{}`.
-  defp ticket_quota_holds(%Wardmast.Tasks.Workspace{} = workspace, issues, opts) do
-    if ProviderRouting.enabled?(workspace) do
-      routing_opts = Keyword.get(opts, :routing_opts, [])
-
-      issues
-      |> Enum.filter(&(Lifecycle.state_of(&1) == :queued and not epic?(&1)))
-      |> Map.new(fn issue ->
-        view = ProviderRouting.availability(workspace, issue, routing_opts)
-
-        verdict =
-          case view do
-            %{available: [_ | _]} -> :ok
-            _ -> fallback_hold(workspace, view)
-          end
-
-        {issue.id, verdict}
-      end)
-    else
-      exempt_card_holds(workspace, issues)
-    end
-  rescue
-    _ -> %{}
-  end
-
-  defp ticket_quota_holds(_, _, _), do: %{}
-
-  # The P0 pace exemption on a routing-off workspace (bd-6bxv7h, design §4.2).
-  # The board-wide `quota_hold/2` evaluates with no task, so it would keep
-  # Autopilot from promoting a card the dispatcher would let through. A card
-  # whose own priority is exempt gets its own verdict instead, read at the
-  # lifted ceiling, so it is held only when the exempt cap is reached too.
-  # Cards that are not exempt get no entry and keep the board-wide hold, and
-  # with no exemption configured nothing is read beyond the account.
-  defp exempt_card_holds(workspace, issues) do
-    ws_id = workspace.id
-    provider = quota_provider(workspace)
-    account = quota_account(ws_id, provider)
-    policy = {account, workspace}
-
-    if Gate.pace_exempt_priority(policy) do
-      issues
-      |> Enum.filter(
-        &(Lifecycle.state_of(&1) == :queued and not epic?(&1) and
-            Gate.pace_exempt?(policy, &1.priority))
-      )
-      |> Enum.group_by(& &1.priority)
-      |> Enum.flat_map(fn {priority, cards} ->
-        verdict = auth_hold(workspace) || quota_window_hold(workspace, priority: priority)
-        Enum.map(cards, &{&1.id, verdict})
-      end)
-      |> Map.new()
-    else
-      %{}
-    end
-  end
-
   # bd-13pqcp: a Ready ticket carrying a provider constraint is held — by its
   # own constraint, not the board's — when no provider the constraint allows
   # has capacity (`ProviderConstraint.pick/3`, the one read dispatch also
@@ -1388,59 +1227,6 @@ defmodule Wardmast.Board.Snapshot do
     end
   rescue
     _ -> []
-  end
-
-  # The board's read of the hold is `AuthHold.held/2`, which fails open: the
-  # dispatch guard's own fail-closed read is the backstop, and a board must
-  # not paint a hold that is not there.
-  defp auth_hold(%Wardmast.Tasks.Workspace{} = workspace) do
-    with adapter when is_atom(adapter) <- Wardmast.Agents.for_workspace(workspace),
-         %{provider: provider, deaths: deaths} <- Wardmast.Agents.AuthHold.held(adapter) do
-      {:hold, "#{provider} auth hold (#{deaths} consecutive auth deaths)"}
-    else
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  end
-
-  defp auth_hold(_), do: nil
-
-  defp quota_window_hold(workspace, opts \\ [])
-
-  defp quota_window_hold(%Wardmast.Tasks.Workspace{} = workspace, opts) do
-    ws_id = workspace.id
-
-    provider = quota_provider(workspace)
-    account = quota_account(ws_id, provider)
-
-    # Seams #6: the workspace's resolved gate answers, the same module the
-    # dispatcher's `check/4` runs, so the board and dispatch cannot disagree.
-    case Wardmast.Quota.gate_for_workspace(workspace).board_hold(
-           latest_quota(account, provider),
-           {account, workspace},
-           opts
-         ) do
-      :ok -> spend_cap_hold(account)
-      hold -> hold
-    end
-  rescue
-    _ -> :ok
-  end
-
-  defp quota_window_hold(_, _opts), do: :ok
-
-  # bd-a6grlr: the account's dollar spend cap, in force whatever the quota
-  # gate says (and with no quota snapshot at all, as an API-key account has
-  # none). The board's question is about fresh work - Autopilot promoting a
-  # Ready card - which is exactly what the cap holds.
-  defp spend_cap_hold(account) do
-    case Wardmast.Quota.SpendCap.check(account, nil) do
-      {:hold, %{phrase: phrase}} -> {:hold, phrase}
-      :ok -> :ok
-    end
-  rescue
-    _ -> :ok
   end
 
   # ---- shared column classification -----------------------------------------
@@ -2530,32 +2316,4 @@ defmodule Wardmast.Board.Snapshot do
   end
 
   defp safe_workspace(_), do: nil
-
-  defp quota_provider(workspace) do
-    Wardmast.Quota.default_provider(workspace)
-  end
-
-  # bd-cwq8b0: grok has no provider account; its snapshot is the ledger estimate.
-  defp latest_quota(_account, :grok) do
-    Wardmast.Quota.latest_for_provider(nil, :grok)
-  rescue
-    _ -> nil
-  end
-
-  defp latest_quota(nil, _provider), do: nil
-
-  defp latest_quota(%{id: account_id}, provider) do
-    Wardmast.Quota.latest_for_provider(account_id, provider)
-  rescue
-    _ -> nil
-  end
-
-  # P7 (§4.2): the snapshot is the account's, so its thresholds are too —
-  # the board would otherwise report headroom the dispatch gate has already
-  # closed whenever the account's threshold is stricter than the workspace's.
-  defp quota_account(ws_id, provider) do
-    Wardmast.Accounts.Resolver.get(Wardmast.Quota.account_id(ws_id, provider))
-  rescue
-    _ -> nil
-  end
 end

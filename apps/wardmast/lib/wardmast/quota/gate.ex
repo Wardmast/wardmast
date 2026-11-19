@@ -280,8 +280,8 @@ defmodule Wardmast.Quota.Gate do
 
   @doc """
   The board-level question (seams #6): is this workspace's provider held, and
-  why? `Wardmast.Board.Snapshot.quota_hold/2` asks the workspace's resolved gate
-  this instead of re-deriving core's hold logic, so the board never paints a
+  why? Core no longer asks (DC12 retired `Snapshot.quota_hold/2`); the callback
+  stays for gates that implement it. The question was: the workspace's resolved gate,
   hold the dispatcher's `check/4` would not honour (or promotes a card it
   would hold).
 
