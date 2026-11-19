@@ -194,6 +194,8 @@ config :wardmast, :image_root, Path.join(scratch_root, "images-test")
 config :wardmast, :preview_root, Path.join(scratch_root, "previews-test")
 config :wardmast, :run_tmp_sweeper, enabled: false
 config :wardmast, :test_services_reaper, enabled: false
+# bd-3glf2a: no boot sweep of screenshot-capture service containers under test.
+config :wardmast, :capture_services_reaper, enabled: false
 
 # RW12: nodes are told to reap only when a test asks (a reap query from a Session in
 # every node test would be noise, and the sandbox owns the connection).

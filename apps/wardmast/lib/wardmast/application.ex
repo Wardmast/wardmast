@@ -117,6 +117,10 @@ defmodule Wardmast.Application do
       # dispatch, PR open/merge/finalize, or tracker transition. Started early
       # (no deps) so every GitHub-calling path can gate through it. See
       # Wardmast.GitHub.Limiter.
+      # bd-3glf2a: removes screenshot-capture service containers whose capture task died, every
+      # one still running at shutdown, and a dead server's at boot. Before the TaskSupervisor,
+      # so it is stopped after the capture tasks that own them.
+      Wardmast.Screenshots.Capture.Services.Reaper,
       {Task.Supervisor, name: Wardmast.TaskSupervisor}
     ] ++
       migration_gate(auto_start?) ++
