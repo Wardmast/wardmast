@@ -60,7 +60,7 @@ defmodule Wardmast.DoctrineTest do
     end
 
     test "render/2 raises for an unknown section" do
-      assert_raise FunctionClauseError, fn -> apply(Doctrine, :render, [:nope, %{}]) end
+      assert_raise FunctionClauseError, fn -> Doctrine.render(Enum.at([:nope], 0), %{}) end
     end
   end
 
