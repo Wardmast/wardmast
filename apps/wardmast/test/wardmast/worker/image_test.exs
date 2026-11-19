@@ -161,8 +161,8 @@ defmodule Wardmast.Worker.ImageTest do
       assert base =~
                ~r/chromium=\d+\.\d+\.\d+\.\d+-\S+ chromium-common=\d+\.\d+\.\d+\.\d+-\S+ fonts-liberation/
 
-      assert base =~ ~r{snapshot\.debian\.org/archive/debian/\d{8}T\d{6}Z/}
-      assert base =~ ~r{snapshot\.debian\.org/archive/debian-security/\d{8}T\d{6}Z/}
+      assert base =~ ~r|snapshot\.debian\.org/archive/debian/\d{8}T\d{6}Z/|
+      assert base =~ ~r|snapshot\.debian\.org/archive/debian-security/\d{8}T\d{6}Z/|
       assert base =~ ~r/LABEL arbiter\.chromium-version="\d+\./
       assert base =~ "ENV ARB_CHROME=/usr/bin/chromium"
     end
