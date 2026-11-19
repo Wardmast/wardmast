@@ -1192,6 +1192,15 @@ defmodule Wardmast.MCP.Tools do
   @spec server_status(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def server_status(%Scope{} = _scope, _args), do: {:ok, Wardmast.Server.Status.snapshot()}
 
+  @doc """
+  Run the release update check now (`Wardmast.Server.Status.update_check/0`, the same
+  action as the dashboard button and `arb server update-check`). Rate-limited to one
+  real GitHub call per minute: inside the window the cached result is returned with
+  `cached: true`. Coordinator only.
+  """
+  @spec update_check(Scope.t(), map()) :: {:ok, map()}
+  def update_check(%Scope{} = _scope, _args), do: {:ok, Wardmast.Server.Status.update_check()}
+
   defp mcp_actor(scope), do: {Wardmast.PaperTrail.actor_label(scope), "mcp"}
 
   # bd-9fgg04: the one drain-state definition, shared with the REST endpoint.
@@ -1883,6 +1892,9 @@ defmodule Wardmast.MCP.Tools do
   defdelegate epic_floor(scope, args), to: Wardmast.MCP.Tools.Task
   defdelegate ticket_handoff(scope, args), to: Wardmast.MCP.Tools.Task
   defdelegate ticket_handback(scope, args), to: Wardmast.MCP.Tools.Task
+  defdelegate pair_open(scope, args), to: Wardmast.MCP.Tools.Pair
+  defdelegate pair_done(scope, args), to: Wardmast.MCP.Tools.Pair
+  defdelegate pair_end(scope, args), to: Wardmast.MCP.Tools.Pair
   defdelegate task_sync_upstream_close(scope, args), to: Wardmast.MCP.Tools.Task
   defdelegate dep_add(scope, args), to: Wardmast.MCP.Tools.Task
   defdelegate dep_remove(scope, args), to: Wardmast.MCP.Tools.Task

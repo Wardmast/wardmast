@@ -311,48 +311,4 @@ defmodule Wardmast.Quota.GateWeeklyStalenessTest do
       refute Gate.in_overage?(%{q | session_reset_at: ago(60)}, ws())
     end
   end
-
-  describe "end to end: Autopilot's dispatch path stays held" do
-    test "a dispatch against the stale 96%/allowed_warning snapshot is held, not spawned" do
-      {:ok, workspace} =
-        Ash.create(Workspace, %{
-          name: "sticky-7d-#{System.unique_integer([:positive])}",
-          prefix: "s7#{System.unique_integer([:positive])}",
-          config: %{"quota" => %{"on_exhaustion" => "throttle"}}
-        })
-
-      {:ok, task} = Ash.create(Issue, %{title: "burns-the-week", workspace_id: workspace.id})
-
-      Ash.create!(AnthropicQuota, %{
-        provider_account_id: quota_account_id!(workspace.id, "claude"),
-        provider: "claude",
-        captured_at: ago(@staleness_seconds + 60) |> DateTime.truncate(:second),
-        utilization_5h: 0.23,
-        status_5h: "allowed",
-        reset_5h_at: ahead(3600) |> DateTime.truncate(:second),
-        utilization_7d: 0.96,
-        status_7d: "allowed_warning",
-        reset_7d_at: ahead(3 * 86_400) |> DateTime.truncate(:second)
-      })
-
-      # The board/Autopilot promotion seam (`Board.Snapshot.quota_hold/1`) sees
-      # the hold, so Autopilot never even offers the task for dispatch...
-      assert {:hold, "claude:default 7d 96% ≥ 90%"} =
-               Wardmast.Board.Snapshot.quota_hold(workspace.id)
-
-      # ...and the dispatch path Autopilot calls (`Dispatch.dispatch/1`) holds
-      # it anyway, which is the choke point that actually matters.
-      assert {:error, {:quota_held, held_id}} =
-               Dispatch.dispatch(task.id, force: true, start_driver: false)
-
-      assert held_id == task.id
-
-      {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.state == :backlog
-      assert Worker.whereis(task.id) == nil
-
-      assert %{gating_window: "7d", gating_reason: "claude:default 7d 96% ≥ 90%"} =
-               Wardmast.Quota.serialize(quota_account_id!(workspace.id))
-    end
-  end
 end

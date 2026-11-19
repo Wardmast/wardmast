@@ -5,6 +5,7 @@ defmodule Wardmast.Board.SnapshotSlotsTest do
   """
   use ExUnit.Case, async: true
 
+  alias Wardmast.Board.OpenWalk
   alias Wardmast.Board.Snapshot
 
   @now ~U[2026-09-16 22:25:00Z]
@@ -105,6 +106,8 @@ defmodule Wardmast.Board.SnapshotSlotsTest do
     )
   end
 
+  defp slots_free(board), do: max(board.slots_total - board.slots_used, 0)
+
   defp derive(overrides) do
     Snapshot.derive(
       Map.merge(
@@ -115,11 +118,11 @@ defmodule Wardmast.Board.SnapshotSlotsTest do
           changed_files: %{},
           now: @now,
           slots_total: 4,
-          quota: :ok,
           paused: false
         },
         Map.new(overrides)
       )
+      |> OpenWalk.put()
     )
   end
 
@@ -189,7 +192,7 @@ defmodule Wardmast.Board.SnapshotSlotsTest do
         )
 
       assert board.slots_used == 1
-      assert board.promote == nil
+      assert board.walk.promote == nil
     end
 
     test "with nothing held no card is flagged" do
@@ -211,8 +214,8 @@ defmodule Wardmast.Board.SnapshotSlotsTest do
         )
 
       assert board.slots_used == 0
-      assert board.slots_free == 1
-      assert board.promote == "bd-ready"
+      assert slots_free(board) == 1
+      assert board.walk.promote == "bd-ready"
     end
 
     test "an :active ticket between ReviewGate rounds with no live agent holds one slot" do
@@ -231,8 +234,8 @@ defmodule Wardmast.Board.SnapshotSlotsTest do
 
         assert board.agents_live == 0
         assert board.slots_used == 1
-        assert board.slots_free == 0
-        assert board.promote == nil
+        assert slots_free(board) == 0
+        assert board.walk.promote == nil
       end
     end
 
@@ -244,7 +247,7 @@ defmodule Wardmast.Board.SnapshotSlotsTest do
         )
 
       assert board.slots_used == 0
-      assert board.slots_free == 1
+      assert slots_free(board) == 1
     end
 
     test "an :active ticket parked on a human keeps its slot" do
@@ -272,7 +275,7 @@ defmodule Wardmast.Board.SnapshotSlotsTest do
       board = derive(slots_total: 1, issues: issues)
 
       assert board.slots_used == 3
-      assert board.slots_free == 0
+      assert slots_free(board) == 0
     end
   end
 

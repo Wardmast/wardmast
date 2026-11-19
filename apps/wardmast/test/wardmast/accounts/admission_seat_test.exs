@@ -1,12 +1,10 @@
 defmodule Wardmast.Accounts.AdmissionSeatTest do
   @moduledoc """
-  `Admission.admit/3` under `scheduler_admission: enforce` (DC8, design
+  `Admission.admit/3` by the seat check (DC8, DC12; design
   `provider-dynamic-concurrency.md` §4.4, E3, E4): a fresh dispatch is admitted
   while the seats on its pool are below `min(budget, max_concurrent, share)`
   (`Wardmast.Accounts.SeatCheck`), under the same per-account lock and with the
-  same reservation, override and refusal as today. Under `legacy` and `shadow`
-  the account's process count against `max_concurrent` decides, exactly as
-  before (AC1).
+  same reservation, override and refusal as before.
   """
   use Wardmast.DataCase, async: false
 
@@ -59,11 +57,11 @@ defmodule Wardmast.Accounts.AdmissionSeatTest do
   defp seated(account, n, pool \\ "claude"),
     do: %{{account.id, pool} => Enum.map(1..n//1, &"bd-held-#{&1}")}
 
-  defp admit(ctx, mode, seat_opts, extra \\ []) do
+  defp admit(ctx, _mode, seat_opts, extra \\ []) do
     Admission.admit(
       ctx.task,
       :claude,
-      [account: ctx.account, mode: mode, seat_opts: seat_opts] ++ extra
+      [account: ctx.account, seat_opts: seat_opts] ++ extra
     )
   end
 
@@ -144,17 +142,6 @@ defmodule Wardmast.Accounts.AdmissionSeatTest do
       assert message =~ "1 of 1 seats"
       assert message =~ "5h ahead of its line"
       assert message =~ ctx.task.id
-    end
-  end
-
-  describe "legacy and shadow (AC1)" do
-    for mode <- [:legacy, :shadow] do
-      test "#{mode}: the budget is not read; max_concurrent against live workers decides", ctx do
-        # A budget of 0 with seats held would refuse under enforce; no live
-        # worker is on the account, so today's check admits.
-        seat_opts = [budgets: [budget(ctx.account, 0)], holders: seated(ctx.account, 3)]
-        assert {:ok, :admitted} = admit(ctx, unquote(mode), seat_opts)
-      end
     end
   end
 end

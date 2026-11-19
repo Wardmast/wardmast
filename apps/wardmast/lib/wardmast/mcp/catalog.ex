@@ -40,6 +40,9 @@ defmodule Wardmast.MCP.Catalog do
   | `epic_floor` | coordinator | `Ash.update(issue, …, action: :set_floor)` (ES2, bd-3e7inj) |
   | `ticket_handoff` | coordinator | `Wardmast.Tasks.Attention.hand_off/3` to the operator (bd-8nlez1) |
   | `ticket_handback` | coordinator | `Wardmast.Tasks.Attention.hand_off/3` back to the coordinator (bd-8nlez1) |
+  | `pair_open` | coordinator | `Wardmast.Sessions.Pair.open/2` — the ticket's pair session (bd-7p6a9o) |
+  | `pair_done` | worker (the pair session's own token only), coordinator | `Wardmast.Sessions.Pair.finish/2` — Done: commit gate, then the worker completion path (bd-7p6a9o) |
+  | `pair_end` | coordinator | `Wardmast.Sessions.Pair.close/2` — end without Done, worktree and branch left (bd-7p6a9o) |
   | `ticket_sync_upstream_close` | coordinator | `Ash.update(issue, …, action: :sync_upstream_close)` |
   | `dep_add` | worker (`parent_of` from own task only), coordinator | `Wardmast.Tasks.Dependencies.add/4` (use `parent_of` to attach a child); `edges` → `Wardmast.Tasks.BulkEdges.run/2` (per-edge results) |
   | `dep_remove` | coordinator | `Wardmast.Tasks.Dependencies.remove/3` |
@@ -105,6 +108,7 @@ defmodule Wardmast.MCP.Catalog do
   | `scheduler_resume` | coordinator | `Wardmast.Board.Autopilot.resume/2` (persisted, bd-pgi97m) |
   | `scheduler_status` | coordinator | `Wardmast.Board.Drain.status/1` |
   | `server_status` | coordinator | `Wardmast.Server.Status.snapshot/0` (P-27) |
+  | `update_check` | coordinator | `Wardmast.Server.Status.update_check/0` (rate-limited manual release check) |
   | `provider_pause` | coordinator | `Wardmast.Providers.Pause.pause/2` (persisted, bd-5ef587) |
   | `provider_resume` | coordinator | `Wardmast.Providers.Pause.resume/2` |
   | `provider_list` | coordinator | `Wardmast.Providers.Pause.to_json/0` (active pauses, P-17) |
@@ -435,8 +439,7 @@ defmodule Wardmast.MCP.Catalog do
           "reads that one account's quota instead of a workspace's, in the REST " <>
           "`GET /api/quota?account=` shape (`workspace` is then ignored). `budget` is one block " <>
           "per account (`account`, `account_id`, `mode`, `decides`, `pools`): each provider pool's " <>
-          "concurrency budget with its reason, labelled shadow until `scheduler_admission` is " <>
-          "`enforce`.",
+          "concurrency budget with its reason.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -1182,6 +1185,71 @@ defmodule Wardmast.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.ticket_handback/2
+    },
+    %{
+      name: "pair_open",
+      tiers: @coordinator,
+      description:
+        "Open the ticket's **pair session** (bd-7p6a9o): a hands-on agent session the operator " <>
+          "works together with, bound to this one ticket. It runs in the ticket's own worktree on " <>
+          "its branch (provisioned as a dispatch would), holds a ticket-scoped token, and claims " <>
+          "the ticket — no worker starts on it while the session lives. A live session is " <>
+          "reopened, never duplicated (`reopened: true`). Backlog, Ready and In-progress " <>
+          "tickets only, and never while a worker drives the ticket. The session opens in the " <>
+          "dashboard's dock. CLI twin: `ward pair <ticket>`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."}
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.pair_open/2
+    },
+    %{
+      name: "pair_done",
+      tiers: @both,
+      description:
+        "Run **Done** on the ticket's pair session (bd-7p6a9o): the commit gate (everything " <>
+          "committed, the repo's pre-push checks green), then the completion path a worker's " <>
+          "`arb done` takes — the ReviewGate when the workspace requires review, the PR " <>
+          "(labelled `pair-authored`), CI and the merge queue — and the session ends, " <>
+          "releasing its claim. A refused Done (`uncommitted`, `no commits`, a red pre-push " <>
+          "step with its output) leaves the session live to fix and retry. The coordinator may " <>
+          "call it with `id`; inside a pair session, the session's own token calls it with no " <>
+          "`id`, on the operator's word. No other worker token may. Waits up to four minutes; " <>
+          "past that it answers `route: running` and Done carries on. CLI twin: " <>
+          "`ward pair done <ticket>`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{
+            "type" => "string",
+            "description" => "Ticket id. Optional from the pair session itself (its own ticket)."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.pair_done/2
+    },
+    %{
+      name: "pair_end",
+      tiers: @coordinator,
+      description:
+        "End the ticket's pair session **without** Done (bd-7p6a9o). Only the session ends: " <>
+          "its token is revoked and its claim released, and the worktree, its commits and the " <>
+          "pushed branch stay exactly as they are, for a later pair session or a worker to " <>
+          "continue from. CLI twin: `ward pair end <ticket>`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Ticket id (required)."}
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.pair_end/2
     },
     %{
       name: "ticket_sync_upstream_close",
@@ -2701,9 +2769,6 @@ defmodule Wardmast.MCP.Catalog do
           "(null = off / 24h); `scheduling_epic_floors_enabled` and " <>
           "`scheduling_max_lifted_in_flight` and the `nodes.*` keys (remote-node enrolment) " <>
           "are operator-only and refused without an operator-proof token. " <>
-          "`scheduler_admission` (`legacy` | `shadow` | `enforce`; null = legacy) picks the " <>
-          "admission mode: shadow records the scheduler walk beside every dispatch; the " <>
-          "coordinator may set legacy or shadow, enforce is operator-only. " <>
           "No restart required. Returns `{key, value}`.",
       input_schema: %{
         "type" => "object",
@@ -2737,9 +2802,7 @@ defmodule Wardmast.MCP.Catalog do
               },
               %{
                 "type" => "string",
-                "description" =>
-                  "http(s) URL for nodes.public_url; legacy, shadow or enforce for " <>
-                    "scheduler_admission."
+                "description" => "http(s) URL for nodes.public_url."
               },
               %{
                 "type" => "array",
@@ -3650,8 +3713,7 @@ defmodule Wardmast.MCP.Catalog do
           "`in_flight` lists every live piece of work — fix passes, conflict resolvers, " <>
           "review rounds and dispatches keep running while paused. Check it before a " <>
           "server restart. " <>
-          "Also `admission` (the `scheduler_admission` mode, labelled shadow until " <>
-          "enforce, with the walk's agreement so far), `budgets` (one per provider pool: " <>
+          "Also `budgets` (one per provider pool: " <>
           "the integer budget, seats, free, binding, the reason and every window's numbers), " <>
           "`machines` (cap, live, free), `repos`, `fair_share` and `ci_backpressure` (one per " <>
           "repo gated by `worker.repos.<repo>.ci_backpressure`: the cached pending MR-pipeline " <>
@@ -3670,6 +3732,18 @@ defmodule Wardmast.MCP.Catalog do
           "to confirm the new build is live before verifying a ticket. Coordinator only.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.server_status/2
+    },
+    %{
+      name: "update_check",
+      tiers: @coordinator,
+      description:
+        "Check GitHub for a newer Wardmast release now (the dashboard's \"Check for updates\" " <>
+          "button, `arb server update-check`). Returns `latest`, `running`, `update_available`, " <>
+          "`release_url`, `checked_at`, `cached` and `error`. Rate-limited to one real GitHub " <>
+          "call per 60 s: inside the window the cached result comes back with `cached: true`. " <>
+          "Coordinator only.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.update_check/2
     },
 
     # ---- provider pause/resume (bd-5ef587) ---------------------------------

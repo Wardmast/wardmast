@@ -1,10 +1,9 @@
 defmodule WardmastWeb.Api.WorkerDispatchRepoCapTest do
   @moduledoc """
   DC9 (bd-7oy77e) on `POST /api/workers/dispatch` — the endpoint behind
-  `arb dispatch`. Under `scheduler_admission: enforce`, a fresh dispatch into a
+  `arb dispatch`. A fresh dispatch into a
   repo at its `worker.repos.<repo>.max_concurrent` is a 409 naming the repo, its
   cap and the holders; `"over_cap": true` goes over and records the override.
-  Under `legacy` the cap decides nothing.
   """
   use WardmastWeb.ConnCase, async: false
 
@@ -21,10 +20,6 @@ defmodule WardmastWeb.Api.WorkerDispatchRepoCapTest do
   setup %{conn: conn} do
     ResumeSlotFixture.setup_repo!()
     ResumeSlotFixture.put_local_cap(10)
-
-    prior = Wardmast.Settings.scheduler_admission_override()
-    {:ok, _} = Wardmast.Settings.set_scheduler_admission("enforce")
-    on_exit(fn -> Wardmast.Settings.set_scheduler_admission(prior) end)
 
     ws =
       Ash.create!(Workspace, %{
@@ -96,13 +91,5 @@ defmodule WardmastWeb.Api.WorkerDispatchRepoCapTest do
 
     assert event.payload["task_id"] == ctx.task.id
     assert event.payload["actor"] == "coordinator"
-  end
-
-  test "under legacy the cap decides nothing", ctx do
-    {:ok, _} = Wardmast.Settings.set_scheduler_admission("legacy")
-
-    conn = post(ctx.conn, ~p"/api/workers/dispatch", params(ctx, %{"no_agent" => false}))
-
-    assert json_response(conn, 201)
   end
 end

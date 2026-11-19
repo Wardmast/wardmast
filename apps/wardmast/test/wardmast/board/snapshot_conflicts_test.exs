@@ -5,6 +5,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
   """
   use ExUnit.Case, async: true
 
+  alias Wardmast.Board.OpenWalk
   alias Wardmast.Board.Snapshot
 
   @now ~U[2026-09-16 17:41:52Z]
@@ -69,11 +70,11 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
           changed_files: %{},
           now: @now,
           slots_total: 4,
-          quota: :ok,
           paused: false
         },
         Map.new(overrides)
       )
+      |> OpenWalk.put()
     )
   end
 
@@ -88,7 +89,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
-      assert board.promote == nil
+      assert board.walk.promote == nil
 
       assert %{state: :blocked, reason: "blocked — conflicts with bd-7 (running)"} =
                entry(board, "bd-1")
@@ -103,7 +104,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
           conflicts_with: [{"bd-7", "bd-1"}]
         )
 
-      assert board.promote == nil
+      assert board.walk.promote == nil
 
       assert %{state: :blocked, reason: "blocked — conflicts with bd-7 (running)"} =
                entry(board, "bd-1")
@@ -126,7 +127,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
             conflicts_with: [{"bd-1", "bd-7"}]
           )
 
-        assert board.promote == nil
+        assert board.walk.promote == nil
 
         assert %{reason: "blocked — conflicts with bd-7 (#{unquote(state)})"} =
                  entry(board, "bd-1")
@@ -150,7 +151,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
-      assert board.promote == nil
+      assert board.walk.promote == nil
       assert %{reason: "blocked — conflicts with bd-7 (merging)"} = entry(board, "bd-1")
     end
 
@@ -165,7 +166,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
-      assert board.promote == nil
+      assert board.walk.promote == nil
       assert %{reason: "blocked — conflicts with bd-7 (in review)"} = entry(board, "bd-1")
     end
 
@@ -179,7 +180,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
-      assert board.promote == nil
+      assert board.walk.promote == nil
       assert %{reason: "blocked — conflicts with bd-7 (fix pass)"} = entry(board, "bd-1")
     end
   end
@@ -192,7 +193,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
-      assert board.promote == "bd-1"
+      assert board.walk.promote == "bd-1"
     end
 
     test "a merged counterpart parked at awaiting_verification releases the card" do
@@ -202,7 +203,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
-      assert board.promote == "bd-1"
+      assert board.walk.promote == "bd-1"
     end
 
     test "a parked (:failed) counterpart releases the card" do
@@ -213,7 +214,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
-      assert board.promote == "bd-1"
+      assert board.walk.promote == "bd-1"
     end
 
     test "an orphaned counterpart — in_progress, no live worker — releases the card" do
@@ -225,7 +226,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
-      assert board.promote == "bd-1"
+      assert board.walk.promote == "bd-1"
     end
 
     test "a counterpart still mid-dispatch holds the card" do
@@ -237,7 +238,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
           conflicts_with: [{"bd-1", "bd-7"}]
         )
 
-      assert board.promote == nil
+      assert board.walk.promote == nil
       assert %{reason: "blocked — conflicts with bd-7 (dispatching)"} = entry(board, "bd-1")
     end
   end
@@ -251,7 +252,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
 
       first = derive(issues: issues, conflicts_with: [{"bd-7srf5d", "bd-1c4pg3"}])
 
-      assert first.promote == "bd-1c4pg3"
+      assert first.walk.promote == "bd-1c4pg3"
 
       assert %{state: :blocked, reason: "blocked — conflicts with bd-1c4pg3 (dispatching)"} =
                entry(first, "bd-7srf5d")
@@ -267,7 +268,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
           conflicts_with: [{"bd-7srf5d", "bd-1c4pg3"}]
         )
 
-      assert second.promote == nil
+      assert second.walk.promote == nil
 
       assert %{reason: "blocked — conflicts with bd-1c4pg3 (running)"} =
                entry(second, "bd-7srf5d")
@@ -282,7 +283,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
           conflicts_with: [{"bd-7srf5d", "bd-1c4pg3"}]
         )
 
-      assert third.promote == "bd-7srf5d"
+      assert third.walk.promote == "bd-7srf5d"
     end
   end
 
@@ -296,7 +297,7 @@ defmodule Wardmast.Board.SnapshotConflictsTest do
           conflicts_with: []
         )
 
-      assert board.promote == "bd-1"
+      assert board.walk.promote == "bd-1"
     end
   end
 

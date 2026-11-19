@@ -52,15 +52,17 @@ defmodule Wardmast.MCP.RunTestsTest do
   end
 
   # An exec that answers the path probe and replays `output` for the run itself.
-  defp start_worker(ctx, output, status) do
+  defp start_worker(ctx, output, status, env \\ {"", 0}) do
     test_pid = self()
 
     exec = fn command, seconds ->
       send(test_pid, {:exec, command, seconds})
 
-      if command =~ "ARB_TEST_LOG",
-        do: {"ARB_TEST_LOG=/run/tmp/arb-test-1.log\n" <> output, status},
-        else: {"apps/core/test/x_test.exs\n", 0}
+      cond do
+        command =~ "test-env.sh" -> env
+        command =~ "ARB_TEST_LOG" -> {"ARB_TEST_LOG=/run/tmp/arb-test-1.log\n" <> output, status}
+        true -> {"apps/core/test/x_test.exs\n", 0}
+      end
     end
 
     {:ok, pid} =
@@ -98,6 +100,33 @@ defmodule Wardmast.MCP.RunTestsTest do
     assert result.summary =~ "5 tests, 0 failures"
     assert result.full_log == "/run/tmp/arb-test-1.log"
     refute inspect(result) =~ "noisy"
+  end
+
+  describe "tests not run (bd-7m35lc)" do
+    test "a test env that cannot come up is a distinct error, not a bare DATABASE_URL failure",
+         ctx do
+      start_worker(ctx, @green, 0, {"cannot reach postgres", 3})
+
+      assert {:tool_error, message, _} =
+               run_tests(ctx.worker, %{"paths" => ["apps/core/test/x_test.exs"]})
+
+      assert message =~ "test env unavailable"
+      assert message =~ "cannot reach postgres"
+      refute message =~ "DATABASE_URL"
+    end
+
+    test "only failed attempts flag the run; a real result clears it", ctx do
+      pid = start_worker(ctx, @green, 0, {"boom", 1})
+      refute Wardmast.Worker.TestSignal.not_run?(:sys.get_state(pid).meta)
+
+      assert {:tool_error, _, _} =
+               run_tests(ctx.worker, %{"paths" => ["apps/core/test/x_test.exs"]})
+
+      assert Wardmast.Worker.TestSignal.not_run?(:sys.get_state(pid).meta)
+
+      Wardmast.Worker.note_test_outcome(ctx.task.id, :ran)
+      refute Wardmast.Worker.TestSignal.not_run?(:sys.get_state(pid).meta)
+    end
   end
 
   test "a red run returns each failure and the log path", ctx do

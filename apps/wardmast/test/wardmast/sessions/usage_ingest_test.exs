@@ -225,6 +225,37 @@ defmodule Wardmast.Sessions.UsageIngestTest do
       assert ev.session_id == sid
       assert_in_delta ev.cost_usd, 2.5, 0.0000001
     end
+
+    # bd-7p6a9o: a pair session works one ticket, so its spend is the ticket's
+    # — a `:task` row the estimate and the ticket's spend both count — and not
+    # task-less coordinator overhead.
+    test "a pair session's spend is filed against its ticket, once" do
+      config_dir = tmp_dir!("pair-session")
+      project_dir = Path.join(config_dir, "projects/-srv-worktrees-feature-x")
+      File.mkdir_p!(project_dir)
+      sid = "pair-#{System.unique_integer([:positive])}"
+
+      write!(project_dir, sid, [
+        turn(sid, "m1", now(), 10, 100),
+        cost_state(sid, 1.25, start_ms())
+      ])
+
+      session = %{config_dir: config_dir, workspace_id: nil, kind: :pair, issue_id: "par-1"}
+
+      assert {:ok, %{rows_written: 1}} = UsageIngest.ingest(dirs: [], sessions: [session])
+
+      assert [ev] = rows_for(sid)
+      assert ev.source == :task
+      assert ev.task_id == "par-1"
+      assert ev.base_task_id == "par-1"
+      assert ev.role == "pair"
+      assert ev.step == :work
+      assert_in_delta ev.cost_usd, 1.25, 0.0000001
+
+      # The ledger is the watermark for this source too: a re-run bills nothing.
+      assert {:ok, %{rows_written: 0}} = UsageIngest.ingest(dirs: [], sessions: [session])
+      assert [_still_one] = rows_for(sid)
+    end
   end
 
   describe "privacy" do

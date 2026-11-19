@@ -102,7 +102,7 @@ defmodule WardmastCli.Main do
       ward account create  <provider> <slug>          [--label ...] [--plan ...] [--max-concurrent N]
                            [--disable] [--provider-account-ref ID] [--provider-org-ref ID] [quota flags]
       ward account set     <ref>                      [--label ...] [--plan ...] [--enable|--disable]
-                           [--max-concurrent N|none] [--budget-split queue|fair] [--admission legacy|shadow|enforce|inherit] [--threshold-mode flat|paced]
+                           [--max-concurrent N|none] [--budget-split queue|fair] [--threshold-mode flat|paced]
                            [--throttle-threshold F]
                            [--weekly-threshold F] [--paced-floor F] [--weekly-paced-floor F]
                            [--pace-curve plateau|ramp] [--daily-burn-cap F|none] [--daily-burn-cap-mode shadow|enforce] [--weekly-warning-policy ignore|hold] [--window-seconds LABEL=SECONDS]
@@ -123,7 +123,7 @@ defmodule WardmastCli.Main do
 
       ward server start    [--timeout SECONDS] [--json]
       ward server restart  [--timeout SECONDS] [--json]
-      ward server deploy   [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]
+      ward server deploy   [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force] [--allow-active-workers]
                            deploy from a GitHub Release (add --git-pull for the
                            legacy git-pull deploy).
       ward server migrate  [--json]
@@ -229,6 +229,12 @@ defmodule WardmastCli.Main do
       ward session list                        works with the server stopped (§4.7):
                                                 reads systemd + tmux directly, never HTTP
       ward session attach <id> [--read-only]
+
+      ward pair <ticket> [--json]               pair on a ticket: a hands-on agent session in
+                                   its worktree, worked with you; no worker starts on it meanwhile
+      ward pair done <ticket> [--json]          Done: commit gate, then PR (pair-authored),
+                                   ReviewGate, CI and the merge queue; ends the session
+      ward pair end <ticket> [--json]           end it without Done; worktree and branch kept
 
   ## Meta commands (no resource)
 

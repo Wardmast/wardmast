@@ -6,6 +6,7 @@ defmodule Wardmast.Board.SnapshotSevenColumnsTest do
   """
   use ExUnit.Case, async: true
 
+  alias Wardmast.Board.OpenWalk
   alias Wardmast.Board.Snapshot
 
   @now ~U[2026-08-22 12:00:00Z]
@@ -52,9 +53,10 @@ defmodule Wardmast.Board.SnapshotSevenColumnsTest do
   defp derive(overrides) do
     Snapshot.derive(
       Map.merge(
-        %{issues: [], workers: [], blocked_by: %{}, now: @now, slots_total: 4, quota: :ok},
+        %{issues: [], workers: [], blocked_by: %{}, now: @now, slots_total: 4},
         Map.new(overrides)
       )
+      |> OpenWalk.put()
     )
   end
 
@@ -139,7 +141,7 @@ defmodule Wardmast.Board.SnapshotSevenColumnsTest do
 
       assert [%{id: "bd-b", blocked_by: ["bd-3", "bd-9"]}] = board.blocked
       assert [%{id: "bd-r", state: :next}] = board.ready
-      assert board.promote == "bd-r"
+      assert board.walk.promote == "bd-r"
     end
 
     test "In progress and Merging cards carry the computed step" do
@@ -203,7 +205,7 @@ defmodule Wardmast.Board.SnapshotSevenColumnsTest do
         )
 
       assert ids(board.ready) == ["bd-a", "bd-b", "bd-c"]
-      assert board.promote == "bd-a"
+      assert board.walk.promote == "bd-a"
     end
   end
 

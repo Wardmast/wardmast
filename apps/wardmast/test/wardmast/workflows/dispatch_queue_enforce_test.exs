@@ -1,16 +1,13 @@
 defmodule Wardmast.Workflows.DispatchQueueEnforceTest do
   @moduledoc """
-  The `DispatchQueue` under `scheduler_admission: enforce` (DC8, design
+  The `DispatchQueue` under seat admission (DC8, design
   `provider-dynamic-concurrency.md` §7, E11):
 
-    * **Fresh quota holds are dropped.** A fresh dispatch is not quota-held under
-      `enforce`: it waits in Ready, where the scheduler walk admits it by seat
-      and in queue order. A fresh intent the gate held before the switch is
-      dropped at the next drain, not replayed past the walk.
+    * **Fresh quota holds are dropped.** A fresh dispatch is not quota-held: it waits
+      in Ready, where the scheduler walk admits it by seat and in queue order.
+      A fresh intent the gate held before DC12 is dropped at the next drain, not replayed past the walk.
     * **A held follow-up drains on the hard rules alone** (`pace: false`): once
       the provider accepts again it goes, even past the paced line (I9, O2).
-
-  Under `legacy` the same queue drains exactly as before.
   """
   use Wardmast.DataCase, async: false
 
@@ -18,7 +15,6 @@ defmodule Wardmast.Workflows.DispatchQueueEnforceTest do
 
   alias Wardmast.Quota.AnthropicQuota
   alias Wardmast.Tasks.{Issue, Workspace}
-  alias Wardmast.Worker.Dispatch
   alias Wardmast.Workflows.{DispatchQueue, DispatchQueueSupervisor}
 
   defmodule RecordingDispatcher do
@@ -33,7 +29,6 @@ defmodule Wardmast.Workflows.DispatchQueueEnforceTest do
 
     on_exit(fn ->
       Application.delete_env(:wardmast, :dq_enforce_test_pid)
-      Wardmast.Settings.set_scheduler_admission(nil)
     end)
 
     ws =
@@ -70,33 +65,24 @@ defmodule Wardmast.Workflows.DispatchQueueEnforceTest do
 
   defp task!(ws), do: Ash.create!(Issue, %{title: "held", workspace_id: ws.id})
 
-  defp mode!(mode), do: {:ok, _} = Wardmast.Settings.set_scheduler_admission(mode)
-
   describe "a fresh quota hold" do
     setup %{ws: ws} do
-      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
       task = task!(ws)
 
-      assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(task.id, force: true, start_driver: false)
+      :ok =
+        DispatchQueue.hold(
+          ws.id,
+          task.id,
+          [force: true],
+          %{window: "5h", signal: :status, phrase: "quota exhausted"},
+          :claude
+        )
 
       assert DispatchQueue.held?(ws.id, task.id)
       %{task: task}
     end
 
-    test "legacy: kept while the gate holds, drained once it allows (today)", ctx do
-      :ok = DispatchQueue.drain(ctx.queue)
-      assert DispatchQueue.held?(ctx.ws.id, ctx.task.id)
-
-      seed_quota(ctx.ws, %{status_5h: "allowed", utilization_5h: 0.10})
-      :ok = DispatchQueue.drain(ctx.queue)
-
-      task_id = ctx.task.id
-      assert_receive {:dispatched, ^task_id, _opts}, 5_000
-    end
-
-    test "enforce: dropped at the next drain — the card waits in Ready for the walk", ctx do
-      mode!(:enforce)
+    test "dropped at the next drain — the card waits in Ready for the walk", ctx do
       seed_quota(ctx.ws, %{status_5h: "allowed", utilization_5h: 0.10})
       :ok = DispatchQueue.drain(ctx.queue)
 
@@ -124,14 +110,7 @@ defmodule Wardmast.Workflows.DispatchQueueEnforceTest do
       %{task: task}
     end
 
-    test "legacy: still held by the line", ctx do
-      :ok = DispatchQueue.drain(ctx.queue)
-      assert DispatchQueue.held?(ctx.ws.id, ctx.task.id)
-      refute_receive {:dispatched, _, _}, 200
-    end
-
-    test "enforce: kept in the queue, and drained on the hard rules alone", ctx do
-      mode!(:enforce)
+    test "kept in the queue, and drained on the hard rules alone", ctx do
       :ok = DispatchQueue.drain(ctx.queue)
 
       task_id = ctx.task.id

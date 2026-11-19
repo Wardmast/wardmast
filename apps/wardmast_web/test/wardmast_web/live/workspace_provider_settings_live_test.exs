@@ -241,68 +241,6 @@ defmodule WardmastWeb.WorkspaceProviderSettingsLiveTest do
       refute has_element?(view2, "#routing-reviewer-note", "own order")
       refute has_element?(view2, "#routing-reviewer-note", "never most_quota")
     end
-
-    test "lists each implementer candidate's headroom or drop reason" do
-      ws =
-        workspace!(%{"routing" => %{"provider_selection" => "most_quota"}})
-
-      held = account!(:claude, "held")
-      free = account!(:codex, "free")
-      link!(ws, held, %{implementer_position: 1})
-      link!(ws, free, %{implementer_position: 2})
-
-      now = DateTime.utc_now() |> DateTime.truncate(:second)
-
-      quota = fn
-        %{id: id} when id == held.id ->
-          %Wardmast.Quota.AnthropicQuota{
-            provider: "claude",
-            utilization_5h: 0.99,
-            reset_5h_at: DateTime.add(now, 9_000),
-            status_5h: "allowed",
-            utilization_7d: 0.0,
-            reset_7d_at: DateTime.add(now, 302_400),
-            status_7d: "allowed",
-            captured_at: now
-          }
-
-        _ ->
-          %Wardmast.Quota.CodexQuota{
-            provider: "codex",
-            session_used_percent: 1.0,
-            session_reset_at: DateTime.add(now, 3_600),
-            weekly_used_percent: 0.0,
-            weekly_reset_at: DateTime.add(now, 302_400),
-            limit_reached: false,
-            captured_at: now
-          }
-      end
-
-      html =
-        render_component(WardmastWeb.WorkspaceDetail.ProviderSettingsComponent,
-          id: "provider-settings-section",
-          section: "providers",
-          workspace: Ash.get!(Workspace, ws.id),
-          agent_types: ["claude", "codex"],
-          routing_opts: [quota_fun: quota]
-        )
-
-      doc = LazyHTML.from_fragment(html)
-
-      assert Enum.count(
-               LazyHTML.query(
-                 doc,
-                 ~s(#routing-ranking [data-account="#{free.id}"][data-status=available])
-               )
-             ) == 1
-
-      assert Enum.count(
-               LazyHTML.query(
-                 doc,
-                 ~s(#routing-ranking [data-account="#{held.id}"][data-status=quota_held])
-               )
-             ) == 1
-    end
   end
 
   describe "scoring (bd-8vkqd3)" do

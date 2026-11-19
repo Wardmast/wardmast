@@ -158,6 +158,12 @@ defmodule WardmastWeb.ApiPolicy do
     {:post, "/api/issues/:id/handoff"} => :coordinator,
     {:post, "/api/issues/:id/handback"} => :coordinator,
     {:post, "/api/issues/:id/permission"} => :coordinator,
+    # bd-7p6a9o: opening, finishing and ending a pair session are the
+    # operator's and the coordinator's. The pair session's own token finishes
+    # its session through MCP `pair_done`, never over REST.
+    {:post, "/api/issues/:id/pair"} => :coordinator,
+    {:post, "/api/issues/:id/pair/done"} => :coordinator,
+    {:delete, "/api/issues/:id/pair"} => :coordinator,
 
     # ---- dependencies -----------------------------------------------------
     {:get, "/api/dependencies"} => :coordinator,
@@ -275,6 +281,7 @@ defmodule WardmastWeb.ApiPolicy do
     # ---- version / server health -------------------------------------------
     {:get, "/api/version"} => :anonymous,
     {:get, "/api/server/migrations"} => :anonymous,
+    {:post, "/api/server/update_check"} => :coordinator,
     {:get, "/api/server/bind_address"} => :coordinator,
     {:get, "/api/server/agy_write_jail"} => :coordinator,
     {:get, "/api/server/agy_models"} => :coordinator,

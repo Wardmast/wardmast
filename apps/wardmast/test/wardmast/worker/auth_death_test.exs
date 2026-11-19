@@ -272,7 +272,7 @@ defmodule Wardmast.Worker.AuthDeathTest do
   end
 
   describe "no dispatch loop (acceptance 4)" do
-    test "with credentials dead, Autopilot dispatches exactly N times and the queue survives",
+    test "with credentials dead, Autopilot starts exactly N workers, later attempts are refused and the queue survives",
          %{ws: ws, tmp: tmp} do
       stub_claude!(tmp, @auth_stub)
       tasks = for i <- 1..4, do: ready_task!(ws, "queued #{i}")
@@ -315,19 +315,21 @@ defmodule Wardmast.Worker.AuthDeathTest do
 
       attempts = drain_attempts()
 
-      assert length(attempts) == AuthHold.threshold(),
-             "expected exactly #{AuthHold.threshold()} dispatch attempts, got " <>
-               "#{length(attempts)}: #{inspect(outcomes)}"
-
       assert AuthHold.open?(Claude)
 
-      # Every later tick saw the hold on the board and never tried.
+      # DC12: the board no longer carries a board-wide auth hold, so every tick
+      # still offers the card; the dispatcher's auth guard refuses each one
+      # before a worker starts. Only the first N attempts start a worker.
+      assert length(attempts) == length(outcomes)
       assert Enum.count(outcomes, &match?({:ok, _}, &1)) == AuthHold.threshold()
-      assert Enum.all?(Enum.drop(outcomes, AuthHold.threshold()), &(&1 == :idle))
+
+      assert Enum.all?(
+               Enum.drop(outcomes, AuthHold.threshold()),
+               &match?({:error, {:auth_check_failed, _}}, &1)
+             )
 
       # Nothing burned: every task is back in Ready, none stranded.
       assert Enum.all?(tasks, &(reload(&1).state == :queued))
-      assert Snapshot.quota_hold(ws.id) |> elem(0) == :hold
     end
   end
 

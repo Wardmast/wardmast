@@ -186,6 +186,14 @@ defmodule Wardmast.Sessions.Layout do
   @spec watchdog_script_path(String.t()) :: String.t()
   def watchdog_script_path(id), do: Path.join(session_dir(id), "watchdog.sh")
 
+  @doc """
+  A pair session's own git hooks (bd-7p6a9o, `Wardmast.Sessions.PairGuard`):
+  the push guard its git reaches through `core.hooksPath`. Under the session's
+  directory, never in the ticket's worktree or its repo's shared `hooks/`.
+  """
+  @spec git_hooks_dir(String.t()) :: String.t()
+  def git_hooks_dir(id), do: Path.join(session_dir(id), "git-hooks")
+
   @doc "Every directory `Wardmast.Sessions.Provisioning` creates, in creation order."
   @spec directories(String.t()) :: [String.t()]
   def directories(id) do

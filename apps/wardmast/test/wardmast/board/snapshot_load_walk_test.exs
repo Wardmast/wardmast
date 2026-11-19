@@ -1,14 +1,13 @@
 defmodule Wardmast.Board.SnapshotLoadWalkTest do
   @moduledoc """
-  `Snapshot.load/1`'s `:admission` (DC6): `legacy` (the default) gathers
-  nothing for the walk and the board carries none; `shadow` and `enforce`
-  gather the walk's inputs (`Wardmast.Board.WalkInputs`) and the board carries
-  the walk beside today's plan, which is the same either way.
+  `Snapshot.load/1` (DC6, DC12) gathers the walk's inputs
+  (`Wardmast.Board.WalkInputs`) and plans the walk: its entries are the board's
+  Ready column. A walk whose inputs cannot be read is planned with no capacity
+  sets, so nothing is placed and every free card waits for capacity.
   """
   use Wardmast.DataCase, async: false
 
   alias Wardmast.Accounts.{ProviderAccount, WorkspaceProviderAccount}
-  alias Wardmast.Board.AdmissionShadow
   alias Wardmast.Board.Snapshot
   alias Wardmast.Quota.Budget
   alias Wardmast.Tasks.{Issue, Workspace}
@@ -56,43 +55,24 @@ defmodule Wardmast.Board.SnapshotLoadWalkTest do
     %{ws: ws, account: account, ready: ready, walk_opts: walk_opts}
   end
 
-  test "legacy, by default or by name, carries no walk", %{ws: ws, walk_opts: walk_opts} do
-    refute Map.has_key?(Snapshot.load(workspace_id: ws.id, walk_opts: walk_opts), :walk)
+  test "the board carries the walk, and its entries are the Ready column", ctx do
+    %{ws: ws, account: account, ready: ready, walk_opts: walk_opts} = ctx
+    now = DateTime.utc_now()
 
-    refute Map.has_key?(
-             Snapshot.load(workspace_id: ws.id, admission: :legacy, walk_opts: walk_opts),
-             :walk
-           )
-  end
+    board = Snapshot.load(workspace_id: ws.id, now: now, walk_opts: walk_opts)
 
-  for mode <- [:shadow, :enforce] do
-    test "#{mode} carries the walk beside today's unchanged plan", ctx do
-      %{ws: ws, account: account, ready: ready, walk_opts: walk_opts} = ctx
-      now = DateTime.utc_now()
+    assert Enum.map(board.ready, & &1.id) == [ready.id]
 
-      today = Snapshot.load(workspace_id: ws.id, now: now, walk_opts: walk_opts)
-
-      board =
-        Snapshot.load(
-          workspace_id: ws.id,
-          now: now,
-          admission: unquote(mode),
-          walk_opts: walk_opts
-        )
-
-      assert Map.delete(board, :walk) == today
-      assert today.promote == ready.id
-
-      assert %{promote: promote, placements: [%{pool: pool, node: "local"}]} = board.walk
-      assert promote == ready.id
-      assert pool == {account.id, "claude"}
-      assert board.walk.pools[{account.id, "claude"}].budget == 2
-    end
+    assert %{promote: promote, placements: [%{pool: pool, node: "local"}]} = board.walk
+    assert promote == ready.id
+    assert pool == {account.id, "claude"}
+    assert board.walk.pools[{account.id, "claude"}].budget == 2
   end
 
   # Seen live (v0.2.43): today's slot total full, the primary over its own cap
   # with review-side runs it never holds, and a node with room.
-  test "shadow places a remote-eligible card on a node's free slot while today has none", ctx do
+  test "the walk places a remote-eligible card on a node's free slot while the primary is full",
+       ctx do
     remote_ws =
       Ash.create!(Workspace, %{
         name: "load-walk-remote-#{System.unique_integer([:positive])}",
@@ -125,16 +105,7 @@ defmodule Wardmast.Board.SnapshotLoadWalkTest do
     now = DateTime.utc_now()
     opts = [workspace_id: remote_ws.id, now: now, slots_total: 0, walk_opts: walk_opts]
 
-    today = Snapshot.load(opts)
-    board = Snapshot.load([admission: :shadow] ++ opts)
-
-    assert Map.delete(board, :walk) == today
-    assert today.promote == nil
-
-    # Today holds the head on the slot total and queues the rest behind it.
-    assert %{state: :blocked, reason: reason} = Enum.find(today.ready, &(&1.id == ctx.ready.id))
-    assert reason =~ "no free worker slot"
-    assert %{state: :queued} = Enum.find(today.ready, &(&1.id == remote.id))
+    board = Snapshot.load(opts)
 
     assert %{promote: promote, placements: [%{node: "oryx"}]} = board.walk
     assert promote == remote.id
@@ -144,37 +115,34 @@ defmodule Wardmast.Board.SnapshotLoadWalkTest do
              Enum.find(board.walk.entries, &(&1.id == ctx.ready.id))
 
     assert local_reason =~ "local 4 of 2"
-
-    assert %{legacy_pick: nil, walk_pick: ^promote, walk: %{"node" => "oryx"}} =
-             AdmissionShadow.event(board, :shadow, now)
   end
 
   @tag capture_log: true
-  test "a walk whose inputs cannot be read leaves the board without one", ctx do
+  test "a walk whose inputs cannot be read places nothing", ctx do
     board =
       Snapshot.load(
         workspace_id: ctx.ws.id,
-        admission: :shadow,
         walk_opts: Keyword.put(ctx.walk_opts, :budgets, :not_a_list)
       )
 
-    refute Map.has_key?(board, :walk)
-    assert board.promote == ctx.ready.id
+    assert %{promote: nil, placements: []} = board.walk
+    assert [%{id: id, state: :blocked}] = board.ready
+    assert id == ctx.ready.id
   end
 
   @tag capture_log: true
-  test "a walk input read that exits leaves the board without one", ctx do
+  test "a walk input read that exits places nothing", ctx do
     # The node overview, read only for the walk, exiting as a dead process would.
     exiting = Stream.map([:row], fn _ -> exit(:node_overview_down) end)
 
     board =
       Snapshot.load(
         workspace_id: ctx.ws.id,
-        admission: :shadow,
         walk_opts: Keyword.merge(ctx.walk_opts, remote_available?: true, nodes: exiting)
       )
 
-    refute Map.has_key?(board, :walk)
-    assert board.promote == ctx.ready.id
+    assert %{promote: nil, placements: []} = board.walk
+    assert [%{id: id, state: :blocked}] = board.ready
+    assert id == ctx.ready.id
   end
 end

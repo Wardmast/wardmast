@@ -270,6 +270,10 @@ defmodule WardmastWeb.Router do
     post("/issues/:id/handback", IssueController, :handback)
     # G15b (bd-lozakf): grant or deny a requested permission.
     post("/issues/:id/permission", IssueController, :permission)
+    # bd-7p6a9o: the ticket's pair session — open (or reopen), Done, end.
+    post("/issues/:id/pair", IssueController, :pair_open)
+    post("/issues/:id/pair/done", IssueController, :pair_done)
+    delete("/issues/:id/pair", IssueController, :pair_end)
 
     # Dependencies
     get("/dependencies", DependencyController, :index)
@@ -413,6 +417,7 @@ defmodule WardmastWeb.Router do
 
     # Server health (migrations, etc.)
     get("/server/migrations", ServerController, :migrations)
+    post("/server/update_check", ServerController, :update_check)
     get("/server/bind_address", ServerController, :bind_address)
     get("/server/worker_jail_unmask", ServerController, :worker_jail_unmask)
     get("/server/agy_write_jail", ServerController, :agy_write_jail)

@@ -199,12 +199,11 @@ defmodule WardmastCli.Cmd.Scheduler do
 
   defp emit_changed(_body), do: IO.puts("Last changed: unknown (no pause or resume recorded)")
 
-  # DC5 (design §9): the admission mode, then one line per provider pool with its
+  # DC5 (design §9): one line per provider pool with its
   # budget and reason, the machines and the repo caps. A server that predates the
   # budgets sends none of these keys and prints none of it.
   defp emit_capacity(body) do
-    emit_admission(body["admission"])
-    emit_table("Providers", ~w(budget seats free mode why), body["budgets"], &pool_row/1)
+    emit_table("Providers", ~w(budget seats free why), body["budgets"], &pool_row/1)
 
     emit_table(
       "Machines",
@@ -225,49 +224,10 @@ defmodule WardmastCli.Cmd.Scheduler do
     emit_table("Fair share", ~w(weight seats share), fair_rows(body["fair_share"]), &fair_row/1)
   end
 
-  defp emit_admission(%{"label" => label} = admission) do
-    IO.puts("Admission: #{label}#{admission_note(admission)}")
-    emit_overrides(admission["overrides"])
-  end
-
-  defp emit_admission(_none), do: :ok
-
-  # O11: accounts whose own `admission` overrides the installation key.
-  defp emit_overrides([_ | _] = overrides) do
-    list = Enum.map_join(overrides, ", ", &"#{&1["account"]}=#{&1["mode"]}")
-    IO.puts("Account overrides: #{list}")
-  end
-
-  defp emit_overrides(_none), do: :ok
-
-  defp admission_note(
-         %{"agreement" => %{"agrees" => agrees, "comparable" => comparable} = a} = adm
-       ) do
-    since = if is_binary(a["since"]), do: " since #{String.slice(a["since"], 0, 10)}", else: ""
-
-    " (the new walk agrees on #{agrees} of #{comparable} comparable decisions#{since}#{decides_note(adm)})"
-  end
-
-  defp admission_note(adm) do
-    case decides_note(adm) do
-      "" -> ""
-      note -> " (" <> String.trim_leading(note, "; ") <> ")"
-    end
-  end
-
-  defp decides_note(%{"decides" => false}), do: "; today's gate and caps still decide"
-  defp decides_note(_), do: ""
-
   defp pool_row(pool) do
     {pool["label"] || pool["pool"],
-     [cell(pool["budget"]), cell(pool["seats"]), cell(pool["free"]), mode_cell(pool)],
-     pool["reason"]}
+     [cell(pool["budget"]), cell(pool["seats"]), cell(pool["free"])], pool["reason"]}
   end
-
-  # O11: the pool's effective admission mode and where it came from.
-  defp mode_cell(%{"mode" => mode, "mode_source" => "account"}), do: "#{mode} (account)"
-  defp mode_cell(%{"mode" => mode}), do: mode
-  defp mode_cell(_), do: "-"
 
   # bd-6w7usy: `offered` is the cap less any self-derate; `why` names the reason when derated.
   defp machine_row(m) do

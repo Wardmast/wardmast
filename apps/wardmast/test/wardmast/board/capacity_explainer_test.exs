@@ -80,7 +80,7 @@ defmodule Wardmast.Board.CapacityExplainerTest do
     key
   end
 
-  defp issue(id, ws, extra \\ %{}) do
+  defp issue(id, ws, extra) do
     now = DateTime.utc_now()
 
     Map.merge(
@@ -264,113 +264,6 @@ defmodule Wardmast.Board.CapacityExplainerTest do
     end
   end
 
-  describe "capacity holds" do
-    setup do
-      local_cap!(1)
-      ws = workspace!()
-      parked = issue("bd-parked", ws, %{state: :active})
-      waiting = issue("bd-waiting", ws)
-      board = Snapshot.load(workspace_id: ws.id, issues: [parked, waiting], workers: [])
-      %{board: board, ws: ws}
-    end
-
-    test "the head of the queue carries the structured no-slot hold", %{board: board} do
-      assert [%{id: "bd-waiting", hold: :no_slot}] = board.ready
-    end
-
-    test "it is explained as waiting for capacity, in words", %{board: board} do
-      %{holds: %{"bd-waiting" => hold}} = CapacityExplainer.explain(board)
-
-      assert hold.kind == :capacity
-      assert hold.badge == "Waiting for capacity"
-      assert hold.summary =~ "Waiting for a free worker slot"
-      assert hold.summary =~ "bd-parked"
-      assert hold.summary =~ "starts when one finishes"
-      refute hold.summary =~ "no_slot"
-      refute hold.summary =~ "max_concurrent"
-      assert hold.details =~ "no free worker slot"
-    end
-
-    test "an account-bound hold names the account's runs" do
-      local_cap!(6)
-      ws = workspace!()
-      account = account!(%{max_concurrent: 1})
-      link!(ws, account)
-      key = live_worker!(ws)
-      waiting = issue("bd-acct-wait", ws)
-      board = Snapshot.load(workspace_id: ws.id, issues: [waiting], workers: [])
-
-      # The account is the only provider the workspace can use and it is full,
-      # so the scheduler holds the card on the pool, not on the slot count.
-      assert [%{hold: {:provider_constraint, _}}] = board.ready
-      %{holds: %{"bd-acct-wait" => hold}} = CapacityExplainer.explain(board)
-
-      assert hold.kind == :capacity
-      assert hold.summary =~ "Waiting for a Claude slot."
-      assert hold.summary =~ "allows 1 at once and it is in use (#{key} implement)"
-      assert hold.summary =~ "It starts when one finishes."
-    end
-  end
-
-  describe "a no-slot hold bound by the account" do
-    test "says which account is full and what is using it" do
-      local_cap!(6)
-      ws = workspace!()
-      account = account!(%{max_concurrent: 2})
-      link!(ws, account)
-      first = live_worker!(ws)
-      second = live_worker!(ws)
-
-      board = %{capacity: Snapshot.capacity_terms(ws, 0, []), slot_holders: []}
-      assert board.capacity.binding == :account
-      assert board.capacity.effective == 0
-
-      hold = CapacityExplainer.hold(:no_slot, board)
-
-      assert hold.summary =~ "Waiting for a Claude slot."
-      assert hold.summary =~ "allows 2 at once and all are in use"
-      assert hold.summary =~ first
-      assert hold.summary =~ second
-    end
-
-    test "routed accounts bound the hold: the provider accounts are named, not the machines" do
-      local_cap!(6)
-      ws = workspace!()
-
-      routing = %{
-        capacity: 2,
-        available: [
-          %{account: %{provider: :claude, slug: "one"}},
-          %{account: %{provider: :codex, slug: "two"}}
-        ]
-      }
-
-      terms = Snapshot.capacity_terms(ws, 2, routing: routing)
-      assert terms.binding == :account
-      assert %{kind: :routed} = terms.account
-
-      hold =
-        CapacityExplainer.hold(:no_slot, %{capacity: terms, slot_holders: ["bd-a", "bd-b"]})
-
-      assert hold.summary =~
-               "The provider accounts (claude:one, codex:two) have room for 2 at once"
-
-      assert hold.summary =~ "bd-a, bd-b"
-      refute hold.summary =~ "available machines"
-    end
-
-    test "a machine-bound hold says every slot on the available machines is in use" do
-      local_cap!(2)
-      ws = workspace!()
-
-      board = %{capacity: Snapshot.capacity_terms(ws, 2, []), slot_holders: ["bd-a", "bd-b"]}
-      hold = CapacityExplainer.hold(:no_slot, board)
-
-      assert hold.summary =~ "All 2 slots on the available machines are in use"
-      assert hold.summary =~ "bd-a, bd-b"
-    end
-  end
-
   describe "other holds" do
     test "a provider-constraint hold at capacity reads as waiting for capacity" do
       detail =
@@ -392,47 +285,6 @@ defmodule Wardmast.Board.CapacityExplainerTest do
 
       assert hold.kind == :paused_provider
       assert hold.badge == "Paused provider"
-    end
-
-    test "a quota hold keeps its own badge and shows the gate's sentence as details" do
-      hold = CapacityExplainer.hold({:quota, "7d quota 62% ≥ paced 55%"}, %{})
-
-      assert hold.kind == :quota
-      assert hold.badge == "Quota hold"
-      assert hold.details == "7d quota 62% ≥ paced 55%"
-    end
-
-    test "a quota hold's summary is plain words whatever the gate's sentence contains" do
-      reasons = [
-        "claude:default 7d 20% ≥ paced 20%",
-        "7d quota warning (weekly_warning_policy: hold)",
-        "claude:default 7d exhausted (status=rejected)",
-        "claude:default 7d 20% ≥ paced 20%; codex:work at capacity " <>
-          "(no concurrency slot left (max_concurrent / share))"
-      ]
-
-      for reason <- reasons do
-        hold = CapacityExplainer.hold({:quota, reason}, %{})
-
-        assert hold.kind == :quota
-        assert hold.details == reason
-        refute hold.summary =~ "="
-        refute hold.summary =~ "_"
-        refute hold.summary =~ "max_concurrent"
-        refute hold.summary =~ "("
-        assert hold.summary =~ "too used up to start new work right now"
-      end
-
-      assert CapacityExplainer.hold({:quota, List.last(reasons)}, %{}).summary =~
-               "The Claude and Codex quotas are too used up"
-
-      assert CapacityExplainer.hold({:quota, "7d quota warning"}, %{}).summary =~
-               "The provider's quota is too used up"
-    end
-
-    test "an auth hold is not called a quota hold" do
-      hold = CapacityExplainer.hold({:quota, "claude auth hold (3 consecutive auth deaths)"}, %{})
-      assert hold.badge == "Auth hold"
     end
 
     test "a paused scheduler" do

@@ -12,7 +12,7 @@ defmodule Wardmast.QuotaGateReportAgreementTest do
   alias Wardmast.Accounts.{ProviderAccount, WorkspaceProviderAccount}
   alias Wardmast.Quota
   alias Wardmast.Quota.AnthropicQuota
-  alias Wardmast.Tasks.{Issue, Workspace}
+  alias Wardmast.Tasks.Workspace
   alias Wardmast.TestSandbox
   alias Wardmast.Worker.Dispatch
 
@@ -98,27 +98,6 @@ defmodule Wardmast.QuotaGateReportAgreementTest do
       put_app_env(:wardmast, :repo_paths, %{"ga/repo" => sandbox.repo})
       on_exit(fn -> TestSandbox.own_live_workers!(sandbox) end)
       :ok
-    end
-
-    test "the refusal text carries the window and numbers and the report names the workspace" do
-      account = account!()
-      _loose = link!(account, "aaa-loose", %{})
-      tight = link!(account, "zzz-tight", %{"quota" => %{"weekly_threshold" => 0.3}})
-      task = Ash.create!(Issue, %{title: "held", workspace_id: tight.id, priority: 2})
-
-      assert {:error, {:quota_held, id}} =
-               Dispatch.dispatch(task.id, force: true, repo: "ga/repo", start_driver: false)
-
-      assert id == task.id
-
-      msg = Dispatch.quota_held_message(task.id)
-      assert msg =~ "quota gate"
-      assert msg =~ "7d"
-      assert msg =~ "37"
-      assert msg =~ "30"
-
-      assert [%{workspace_id: ws_id}] = Quota.serialize(account.id).gating_workspaces
-      assert ws_id == tight.id
     end
   end
 

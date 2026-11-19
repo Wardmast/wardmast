@@ -338,6 +338,9 @@ defmodule Wardmast.Worker do
   # terminal usage event was observed" on THOSE rows is false — a terminal
   # event was observed, it just reported a failure with no usage. Distinguish
   # the two so the note never lies about which case produced the nil.
+  # bd-7p6a9o: the label on a PR a pair session's Done opened (`pair_label/0`).
+  @pair_label "pair-authored"
+
   @terminal_event_no_usage_note "no usage captured: a terminal event was observed on the " <>
                                   "stream but reported no usage (status: "
 
@@ -359,15 +362,38 @@ defmodule Wardmast.Worker do
   """
   @spec start(keyword()) :: DynamicSupervisor.on_start_child()
   def start(opts) when is_list(opts) do
-    case ensure_single_active_task_worker(opts) do
-      :ok ->
-        Wardmast.Worker.Supervisor
-        |> DynamicSupervisor.start_child({__MODULE__, opts})
-        |> tap(&log_worker_start(opts, &1))
-
-      {:error, _reason} = refused ->
-        refused
+    with :ok <- ensure_unclaimed_by_pair(opts),
+         :ok <- ensure_single_active_task_worker(opts) do
+      Wardmast.Worker.Supervisor
+      |> DynamicSupervisor.start_child({__MODULE__, opts})
+      |> tap(&log_worker_start(opts, &1))
     end
+  end
+
+  # bd-7p6a9o: a live pair session's claim, for the starts that never pass
+  # through `Wardmast.Worker.Dispatch` — the merge queue's fix and conflict
+  # passes. Only the ticket's exclusive family is held: a ReviewGate reviewer's
+  # `#`-keyed session reads a PR and never touches the ticket's worktree. A
+  # caller passing `allow_concurrent_task_worker: true` has established
+  # exclusivity itself. A failed read holds nothing here: `Dispatch` has
+  # already asked — failing closed — on every path that starts fresh work.
+  defp ensure_unclaimed_by_pair(opts) do
+    task_id = Keyword.get(opts, :task_id)
+
+    with false <- Keyword.get(opts, :allow_concurrent_task_worker, false),
+         true <- is_binary(task_id) and task_id != "",
+         true <- PRegistry.exclusive_key?(resolve_registry_key(opts, task_id), task_id),
+         session_id when is_binary(session_id) <- pair_claim(task_id) do
+      {:error, {:not_dispatchable, task_id, {:pair_session, session_id}}}
+    else
+      _ -> :ok
+    end
+  end
+
+  defp pair_claim(task_id) do
+    Wardmast.Sessions.Pair.claimed_by(task_id)
+  rescue
+    _ -> nil
   end
 
   @doc """
@@ -942,6 +968,22 @@ defmodule Wardmast.Worker do
   end
 
   @doc """
+  Record what a `run_tests` call came to for task `task_id`'s run (bd-7m35lc):
+  `:ran` (a passing or failing result) or `:not_run`. The commit gate and the
+  ReviewGate read it back through `Wardmast.Worker.TestSignal`. A task with no live
+  worker records nothing.
+  """
+  @spec note_test_outcome(String.t(), Wardmast.Worker.TestSignal.outcome()) :: :ok
+  def note_test_outcome(task_id, outcome) when is_binary(task_id) do
+    case whereis(task_id) do
+      nil -> :ok
+      pid -> GenServer.call(pid, {:note_test_outcome, outcome})
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
   Does this worker currently own an agent subprocess that has not exited?
 
   bd-2aslx6 (#1428): the dispatch path reuses a live worker's registration, so
@@ -1184,6 +1226,118 @@ defmodule Wardmast.Worker do
       apply_ticket_verdict(state, {:approve, Map.get(ruling, :reasoning) || ""})
     end
   end
+
+  @doc """
+  The label a PR carries when a pair session's Done opened it (bd-7p6a9o).
+  """
+  @spec pair_label() :: String.t()
+  def pair_label, do: @pair_label
+
+  @doc """
+  Hand ticket `task_id`'s committed, gate-checked branch to the completion
+  path with no worker resident (bd-7p6a9o) — what a pair session's Done does
+  once its commit gate and pre-push checks have passed in the session's own
+  worktree (`Wardmast.Sessions.Pair.finish/2`).
+
+  It is the routing a worker takes after its own gates
+  (`route_completion/2`), not a parallel one: a workspace that requires review
+  enters the ReviewGate — the PR opened for review where the forge hosts one,
+  a distinct reviewer, and on APPROVE the merge path through the ticket
+  (`Wardmast.Worker.ReviewGate.deliver_verdict/4`, since no author is
+  resident) — and one that does not opens the PR and hands it to the ticket's
+  Watchdog, or merges it for a `direct` repo. Paired work meets the same bar.
+
+  `ctx` carries `:branch` and `:worktree_path` (both required),
+  `:target_branch`, `:repo`, `:repo_path`, `:pair_authored` (labels the PR
+  `pair_label/0`), and the merge/review overrides a test passes
+  (`:merger_adapter_override`, `:merger_workspace_override`, `:watchdog_*`,
+  `:review_required`, `:review_spawn`, `:open_retry_opts`). Runs in the
+  caller's process. Only an In-progress ticket: `{:error, {:not_in_review,
+  state}}` otherwise.
+
+  Returns `{:ok, :in_review}` once the ReviewGate holds the round,
+  `{:ok, :pr_opened}` once the PR is open and watched (or merged), or
+  `{:error, reason}`.
+  """
+  @spec complete_without_author(String.t(), map()) ::
+          {:ok, :in_review | :pr_opened} | {:error, term()}
+  def complete_without_author(task_id, ctx) when is_binary(task_id) and is_map(ctx) do
+    branch = Map.get(ctx, :branch)
+    worktree = Map.get(ctx, :worktree_path)
+
+    with :ok <- authorless_ctx(branch, worktree),
+         {:ok, issue} <- Ash.get(Wardmast.Tasks.Issue, task_id),
+         :ok <- takes_verdict(issue) do
+      routed = route_completion(authorless_state(issue, ctx), branch)
+      drain_run_finished()
+      authorless_outcome(routed)
+    end
+  end
+
+  defp authorless_ctx(branch, worktree)
+       when is_binary(branch) and branch != "" and is_binary(worktree) and worktree != "",
+       do: :ok
+
+  defp authorless_ctx(_branch, _worktree), do: {:error, :no_branch}
+
+  # What a worker would be carrying at the moment its gates passed: the
+  # ticket's latest authoring run (a pair session records one before handing
+  # off), its branch and worktree, and no author for the ReviewGate to report
+  # back to.
+  defp authorless_state(issue, ctx) do
+    run = latest_main_run(issue.id)
+
+    %State{
+      task_id: issue.id,
+      registry_key: issue.id,
+      workspace_id: issue.workspace_id,
+      repo: Map.get(ctx, :repo) || (run && run.repo) || issue.repo || "unknown",
+      current_step: :claude,
+      kind: :implement,
+      state: :working,
+      started_at: DateTime.utc_now(),
+      meta: authorless_meta(issue, ctx),
+      run_id: run && run.id
+    }
+  end
+
+  @authorless_overrides [
+    :merger_adapter_override,
+    :merger_workspace_override,
+    :watchdog_interval_ms,
+    :watchdog_initial_delay_ms,
+    :watchdog_max_polls,
+    :watchdog_auto_resume_dispatcher,
+    :review_required,
+    :review_spawn,
+    :review_command,
+    :open_retry_opts
+  ]
+
+  defp authorless_meta(issue, ctx) do
+    worktree = Map.get(ctx, :worktree_path)
+
+    %{
+      branch: Map.get(ctx, :branch),
+      worktree_path: worktree,
+      repo_path: Map.get(ctx, :repo_path) || worktree,
+      target_branch: Map.get(ctx, :target_branch) || "main",
+      issue_type: issue.issue_type,
+      review_gate_authorless: true,
+      pair_authored: if(Map.get(ctx, :pair_authored) == true, do: true)
+    }
+    |> Map.merge(Map.take(ctx, @authorless_overrides))
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp authorless_outcome(%State{outcome: :failed, meta: meta}),
+    do: {:error, Map.get(meta || %{}, :failure_reason) || :completion_failed}
+
+  defp authorless_outcome(%State{state: :waiting, waiting_on: :review_gate}),
+    do: {:ok, :in_review}
+
+  defp authorless_outcome(%State{}), do: {:ok, :pr_opened}
 
   @doc """
   Record an arbitrary key/value pair in the worker's `:meta` map.
@@ -2652,6 +2806,10 @@ defmodule Wardmast.Worker do
     {:reply, reply, state}
   end
 
+  def handle_call({:note_test_outcome, outcome}, _from, %State{} = state),
+    do:
+      {:reply, :ok, %State{state | meta: Wardmast.Worker.TestSignal.record(state.meta, outcome)}}
+
   # bd-2aslx6: see `agent_session_live?/1`.
   def handle_call(:agent_session_live?, _from, %State{} = state) do
     {:reply, session_live?(state), state}
@@ -3482,7 +3640,7 @@ defmodule Wardmast.Worker do
       )
       when live_run?(run_state, waiting_on) do
     case Map.fetch(state.claude_sessions, port) do
-      {:ok, session} -> {:noreply, on_agent_stopped(state, port, session)}
+      {:ok, session} -> {:noreply, stop_or_fresh_retry(state, port, session)}
       :error -> {:noreply, state}
     end
   end
@@ -3707,6 +3865,16 @@ defmodule Wardmast.Worker do
   # ---- helpers -----------------------------------------------------------
 
   # The deferred stop check proper, for a session this worker owns.
+  # bd-1efc24: ahead of the stop check, because a run that already printed `arb
+  # done` would otherwise re-enter the commit gate on this exit and burn its
+  # last nudge on a launch where the agent never ran.
+  defp stop_or_fresh_retry(%State{} = state, port, session) do
+    if not node_stopping?() and not other_session_live?(state, port) and
+         fresh_session_retry?(state, session),
+       do: retry_with_fresh_session(state, session),
+       else: on_agent_stopped(state, port, session)
+  end
+
   defp on_agent_stopped(%State{} = state, port, session) do
     cond do
       # bd-aje6fj: systemd's control-group SIGTERM reaches the agent at the
@@ -5640,8 +5808,34 @@ defmodule Wardmast.Worker do
   end
 
   defp proceed_after_gate(%State{} = state, branch) do
+    if Wardmast.Worker.TestSignal.not_run?(state.meta) do
+      Logger.warning(
+        "Worker: task=#{state.task_id} completed with tests not run: its run_tests calls " <>
+          "never produced a passing or failing result (bd-7m35lc)"
+      )
+
+      record_tests_not_run(state)
+    end
+
     sync_back_after_run(state)
     route_completion(state, branch)
+  end
+
+  # bd-7m35lc: a durable "tests not run" mark on the task's notes (shown by
+  # `arb worker show` / `ticket_show`), not just a log line. Best effort.
+  defp record_tests_not_run(%State{task_id: task_id}) do
+    with {:ok, task} <- Ash.get(Wardmast.Tasks.Issue, task_id) do
+      current = task.notes || ""
+      note = "TESTS NOT RUN: " <> Wardmast.Worker.TestSignal.note()
+
+      unless String.contains?(current, "TESTS NOT RUN:") do
+        Ash.update!(task, %{append_notes: note})
+      end
+    end
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   # ---- bd-28c6qo: per-repo pre-push check ------------------------------------
@@ -6235,14 +6429,19 @@ defmodule Wardmast.Worker do
   defp respawn_with_nudge(%State{meta: meta} = state, nudge, opts) do
     attempts_key = Keyword.fetch!(opts, :attempts_key)
     label = Keyword.get(opts, :label, "gate")
+    count? = Keyword.get(opts, :count_attempt, true)
     spawn_args = meta && Map.get(meta, :claude_spawn)
 
     {provider, model} = respawn_routing(state)
 
     with %{} = port_args <- spawn_args || :no_spawn_args,
          {:ok, new_args} <- inject_nudge_argv(port_args, nudge, provider),
+         # bd-1efc24: never pass `--resume` for a session that is gone.
+         {new_args, nudge, fresh_sid} <-
+           session_checked_argv(new_args, nudge, provider, Keyword.get(opts, :force_fresh, false)),
          {:ok, port, scope} <- safe_open_port(new_args, state.task_id) do
-      next_attempts = ((meta && Map.get(meta, attempts_key)) || 0) + 1
+      previous_attempts = (meta && Map.get(meta, attempts_key)) || 0
+      next_attempts = if count?, do: previous_attempts + 1, else: previous_attempts
 
       Logger.info(
         "Worker: #{label} for task=#{state.task_id}; " <>
@@ -6285,6 +6484,7 @@ defmodule Wardmast.Worker do
         meta
         |> Map.put(attempts_key, next_attempts)
         |> Map.put(:claude_spawn, new_args)
+        |> adopt_fresh_session_id(fresh_sid, state)
 
       sessions = Map.put(state.claude_sessions, port, session)
 
@@ -6302,6 +6502,93 @@ defmodule Wardmast.Worker do
       :no_spawn_args -> {:error, :no_spawn_args}
       {:error, _} = err -> err
       other -> {:error, {:unexpected, other}}
+    end
+  end
+
+  # bd-1efc24: a nudge argv built by `inject_nudge_argv/3` resumes the run's
+  # Claude session (`--resume <sid>`). If that session has no history on disk or
+  # in the archive (pruned, or the run lived on another node) the CLI exits at
+  # once with "No conversation found" and the attempt is burned. Start a fresh
+  # session instead, with a briefing in front of the nudge. `force?` skips the
+  # lookup (the CLI itself just said the session is missing). Returns
+  # `{argv, prompt, fresh_session_id | nil}`; anything that is not a Claude
+  # `--print --resume <sid> <prompt>` argv is returned untouched.
+  defp session_checked_argv(%{argv: argv} = port_args, nudge, provider, force?)
+       when is_list(argv) do
+    with Wardmast.Agents.Claude <- agent_adapter_for_provider(provider),
+         idx when is_integer(idx) <- Enum.find_index(argv, &(&1 == "--print")),
+         {head, [print, "--resume", sid, _old | rest]} when sid != "" <- Enum.split(argv, idx),
+         true <- force? or not Wardmast.Worker.SessionHistory.available?(sid) do
+      new_sid = Ecto.UUID.generate()
+      briefed = fresh_session_briefing(nudge)
+
+      Logger.warning(
+        "Worker: session #{sid} has no history on disk or in the archive; " <>
+          "relaunching with a fresh session #{new_sid} and a briefing instead of --resume"
+      )
+
+      {%{port_args | argv: head ++ [print, briefed, "--session-id", new_sid | rest]}, briefed,
+       new_sid}
+    else
+      _ -> {port_args, nudge, nil}
+    end
+  end
+
+  defp session_checked_argv(port_args, nudge, _provider, _force?), do: {port_args, nudge, nil}
+
+  defp fresh_session_briefing(nudge) do
+    "Your previous conversation is no longer available (its session history could not " <>
+      "be found), so this is a fresh session in the SAME worktree. Nothing on disk was " <>
+      "lost: run `git status`, `git log` and `git diff` to see the work already done, and " <>
+      "re-read the task with `arb ticket show` if you need its description. Then act on " <>
+      "this instruction:\n\n" <> nudge
+  end
+
+  defp adopt_fresh_session_id(meta, nil, _state), do: meta
+
+  defp adopt_fresh_session_id(meta, sid, %State{run_id: run_id, task_id: task_id}) do
+    if run_id, do: backfill_run_fields(run_id, %{session_id: sid}, task_id)
+
+    meta
+    |> Map.put(:session_id, sid)
+    |> Map.put(:preassigned_session_id, sid)
+  end
+
+  # bd-1efc24: the CLI refused `--resume` ("No conversation found with session
+  # ID"). Relaunch once, fresh and briefed, WITHOUT counting a nudge attempt —
+  # the agent never ran.
+  defp fresh_session_retry?(%State{meta: meta}, session) do
+    Map.get(meta || %{}, :fresh_session_retries, 0) == 0 and
+      classify_stop(session).category == :session_not_found
+  end
+
+  defp stashed_prompt(meta) do
+    argv = Map.get(meta || %{}, :claude_spawn, %{}) |> Map.get(:argv, [])
+
+    case Enum.drop_while(argv, &(&1 != "--print")) do
+      ["--print", "--resume", _sid, p | _] -> p
+      ["--print", p | _] -> p
+      _ -> nil
+    end
+  end
+
+  defp retry_with_fresh_session(
+         %State{meta: meta} = state,
+         session
+       ) do
+    prompt =
+      stashed_prompt(meta) || "Continue the task and print `arb done` when it is complete."
+
+    state = %State{state | meta: Map.put(meta, :fresh_session_retries, 1)}
+
+    case respawn_with_nudge(state, prompt,
+           attempts_key: :fresh_session_attempts,
+           count_attempt: false,
+           force_fresh: true,
+           label: "bd-1efc24 session not found"
+         ) do
+      {:ok, new_state} -> new_state
+      {:error, _} -> maybe_resume_continuation(state, session)
     end
   end
 
@@ -6351,7 +6638,9 @@ defmodule Wardmast.Worker do
 
   defp inject_nudge_argv(_port_args, _nudge, _provider), do: {:error, :missing_argv}
 
-  defp commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :uncommitted) do
+  @doc false
+  @spec commit_nudge_prompt(map(), :uncommitted | :no_commits) :: String.t()
+  def commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :uncommitted) do
     branch = (meta && Map.get(meta, :branch)) || "(your branch)"
 
     """
@@ -6371,10 +6660,11 @@ defmodule Wardmast.Worker do
 
     Do not redo the work — just commit what is already on disk. If a hunk in
     the diff looks half-finished or wrong, finish it first, then commit.
+    #{Wardmast.Worker.TestSignal.block(meta)}
     """
   end
 
-  defp commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :no_commits) do
+  def commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :no_commits) do
     branch = (meta && Map.get(meta, :branch)) || "(your branch)"
     target = (meta && Map.get(meta, :target_branch)) || "main"
 
@@ -6397,6 +6687,7 @@ defmodule Wardmast.Worker do
 
     If you skipped the work, do it now and commit. Then print `arb done`
     again on its own line.
+    #{Wardmast.Worker.TestSignal.block(meta)}
     """
   end
 
@@ -8551,7 +8842,11 @@ defmodule Wardmast.Worker do
     if Map.get(meta, :review_spawn, true) do
       opts =
         [
-          author: self(),
+          # bd-7p6a9o: an authorless completion (`complete_without_author/2`)
+          # has no run to report to — the gate's verdict goes to the ticket
+          # (`ReviewGate.deliver_verdict/4`), exactly as for a gate re-armed
+          # after a restart.
+          author: if(Map.get(meta, :review_gate_authorless) == true, do: nil, else: self()),
           task_id: state.task_id,
           workspace_id: state.workspace_id,
           repo: state.repo,
@@ -8567,6 +8862,8 @@ defmodule Wardmast.Worker do
         |> maybe_opt(:timeout_retries, Map.get(meta, :review_timeout_retries))
         |> maybe_opt(:rounds, resolve_review_rounds(state))
         |> maybe_opt(:pr_ref, Map.get(meta, :review_pr_ref))
+        # bd-7m35lc: the author's `run_tests` never produced a result.
+        |> maybe_opt(:tests_not_run, Wardmast.Worker.TestSignal.not_run?(meta) || nil)
         # bd-cut6uv: test escape hatches over CI-gated review (see
         # `Wardmast.Worker.ReviewCi`); unset in production, where the workspace's
         # `review.require_ci_green` decides.
@@ -9546,7 +9843,10 @@ defmodule Wardmast.Worker do
       watchdog_initial_delay_ms: Map.get(opts, "initial_delay_ms"),
       watchdog_max_polls: Map.get(opts, "max_polls"),
       watchdog_auto_resume_dispatcher:
-        restored_module(Map.get(opts, "auto_resume_dispatcher"), :resume, 1)
+        restored_module(Map.get(opts, "auto_resume_dispatcher"), :resume, 1),
+      # bd-7p6a9o: a pair session's round keeps its `pair-authored` label
+      # through a verdict applied to the ticket.
+      pair_authored: if(Map.get(opts, "pair_authored") == true, do: true)
     }
   end
 
@@ -9581,7 +9881,8 @@ defmodule Wardmast.Worker do
       interval_ms: Map.get(meta, :watchdog_interval_ms),
       initial_delay_ms: Map.get(meta, :watchdog_initial_delay_ms),
       max_polls: Map.get(meta, :watchdog_max_polls),
-      auto_resume_dispatcher: module_name(Map.get(meta, :watchdog_auto_resume_dispatcher))
+      auto_resume_dispatcher: module_name(Map.get(meta, :watchdog_auto_resume_dispatcher)),
+      pair_authored: if(Map.get(meta, :pair_authored) == true, do: true)
     }
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
@@ -10997,7 +11298,15 @@ defmodule Wardmast.Worker do
     |> Map.take([:target_branch, :reviewer_ids, :labels, :repo_path])
     |> maybe_default(:repo_path, Map.get(meta, :repo_path) || Map.get(meta, :worktree_path))
     |> maybe_default(:target_branch, Map.get(meta, :target_branch))
+    |> put_pair_label(meta)
   end
+
+  # bd-7p6a9o: a PR whose work a pair session finished says so, on the forge,
+  # for every reviewer and every later reader of the history.
+  defp put_pair_label(open_opts, %{pair_authored: true}),
+    do: Map.update(open_opts, :labels, [@pair_label], &Enum.uniq(List.wrap(&1) ++ [@pair_label]))
+
+  defp put_pair_label(open_opts, _meta), do: open_opts
 
   # bd-9ahwai: the local `Direct` merge integrates the branch ref by name, so it
   # carries the approved SHA and refuses a branch that moved past it. Forge

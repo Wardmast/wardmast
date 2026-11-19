@@ -14,7 +14,7 @@ defmodule Wardmast.Quota.BudgetCalibrationShadowTest do
   @consumers ~r/BudgetCalibration|budget_calibration/
 
   # The only files allowed to name the calibration: its own module, the two
-  # operator entry points, the admission shadow report (DC7), the budget that consumes it (DC3, bd-6c8g4t: its pure
+  # operator entry points, the budget that consumes it (DC3, bd-6c8g4t: its pure
   # function, server and inputs), and two moduledocs that point at it (`Draw` shares its
   # intervals; `QuotaSnapshot` documents the columns). `seat_weights.ex` (DC11) only
   # cites it in its moduledoc: the weights are calibrated beside it.
@@ -27,8 +27,6 @@ defmodule Wardmast.Quota.BudgetCalibrationShadowTest do
     wardmast/quota/quota_snapshot.ex
     wardmast/release.ex
     mix/tasks/wardmast.budget_calibration.ex
-    wardmast/board/admission_shadow_report.ex
-    wardmast/board/admission_shadow_report/quota.ex
     wardmast/quota/seat_weights.ex
   )
 

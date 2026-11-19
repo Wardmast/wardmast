@@ -7,7 +7,6 @@ defmodule Wardmast.Quota.BurnReportTest do
   use Wardmast.DataCase, async: false
 
   alias Wardmast.Accounts.ProviderAccount
-  alias Wardmast.Board.AdmissionShadowReport
   alias Wardmast.Quota.BurnReport
   alias Wardmast.Quota.QuotaSnapshot
 
@@ -100,32 +99,6 @@ defmodule Wardmast.Quota.BurnReportTest do
 
   test "format/1 with no accounts" do
     assert BurnReport.format(BurnReport.build(data([], []))) =~ "no 7d quota history"
-  end
-
-  describe "in the admission shadow report" do
-    defp shadow(data), do: AdmissionShadowReport.build(Map.merge(base(), data))
-
-    defp base,
-      do: %{
-        since: @t0,
-        until: @until,
-        dispatches: [],
-        events: [],
-        snapshots: [],
-        accounts: %{},
-        calibration: []
-      }
-
-    test "only an account with a cap gets the section" do
-      plain = shadow(data([account("a")], samples("a")))
-      refute AdmissionShadowReport.format(plain) =~ "Burn governor"
-
-      capped = shadow(data([account("a", %{"daily_burn_cap" => 0.10})], samples("a")))
-      text = AdmissionShadowReport.format(capped)
-      assert text =~ "Burn governor"
-      assert text =~ "would have held"
-      assert [%{cap: 0.10}] = capped.burn.accounts
-    end
   end
 
   describe "the report command" do

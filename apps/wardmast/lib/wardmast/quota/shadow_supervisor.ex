@@ -6,7 +6,7 @@ defmodule Wardmast.Quota.ShadowSupervisor do
   v0.2.42 crash-looped: a `Budget.Server` that raised on every recompute
   exhausted the top-level supervisor's restart intensity, and the application
   shut down. A budget component must never be able to do that: under
-  `scheduler_admission: enforce` admission reads the published budgets
+  DC8's seat admission admission reads the published budgets
   (`Wardmast.Accounts.SeatCheck`, DC8), and a table that is gone reads as no
   budget, which leaves the account ceilings to decide. Two layers:
 

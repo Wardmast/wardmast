@@ -96,6 +96,7 @@ defmodule Wardmast.MCP.RefinePolicy do
   @deny_reason_batch_create "a refine session files its children one at a time with ticket_create; batch filing is coordinator authority"
   @deny_reason_attach "a refine session shapes the ticket text; attaching files is the worker's and coordinator's"
   @deny_reason_permission_request "a permission request is the worker's own; a refine session may only suggest permissions"
+  @deny_reason_pair "a refine session shapes a ticket; hands-on pair work on it is the operator's and the coordinator's to start"
 
   @deny %{
     # lifecycle / state
@@ -112,6 +113,10 @@ defmodule Wardmast.MCP.RefinePolicy do
     "epic_floor" => @deny_reason_scheduler,
     "ticket_handoff" => @deny_reason_ops,
     "ticket_handback" => @deny_reason_ops,
+    # bd-7p6a9o: a pair session is hands-on work, which refinement never starts.
+    "pair_open" => @deny_reason_pair,
+    "pair_done" => @deny_reason_pair,
+    "pair_end" => @deny_reason_pair,
 
     # dispatch
     "worker_dispatch" => @deny_reason_dispatch,
@@ -159,6 +164,7 @@ defmodule Wardmast.MCP.RefinePolicy do
     "scheduler_resume" => @deny_reason_scheduler,
     "scheduler_status" => @deny_reason_scheduler,
     "server_status" => @deny_reason_ops,
+    "update_check" => @deny_reason_ops,
     "provider_pause" => @deny_reason_scheduler,
     "provider_resume" => @deny_reason_scheduler,
     "provider_list" => @deny_reason_scheduler,

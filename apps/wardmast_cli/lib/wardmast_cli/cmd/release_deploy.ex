@@ -1,7 +1,7 @@
 defmodule WardmastCli.Cmd.ReleaseDeploy do
   @moduledoc """
   `arb server deploy [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]
-  [--this-host] [--no-self-update]` — deploy the Wardmast server from a **GitHub Release** (the OTP release tarball
+  [--allow-active-workers] [--this-host] [--no-self-update]` — deploy the Wardmast server from a **GitHub Release** (the OTP release tarball
   published by `.github/workflows/release.yml`), rather than a `git pull` + Mix
   rebuild of a working checkout.
 
@@ -25,6 +25,13 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
   `--allow-cross-migration-rollback` all work the same with `--local`;
   `--version` is a GitHub-flow-only option and is ignored when `--local` is
   given.
+
+  `--allow-active-workers` lifts only the live-worker refusal (the dashboard's
+  "Update anyway"; live workers are interrupted and auto-resumed on boot). Unlike
+  `--force` it does not skip the already-current check, and every other preflight
+  check (checksum, unknown version, database backup) still applies. Like
+  `--force`, it also lifts the guard's fail-closed refusal when the server answers
+  401/403 to the worker listing.
 
   This is the production deploy path: the box that runs Wardmast no longer needs
   a source checkout or a Mix/Elixir toolchain — only the prebuilt, self-contained
@@ -201,6 +208,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
     timeout: :integer,
     json: :boolean,
     force: :boolean,
+    allow_active_workers: :boolean,
     local: :string,
     this_host: :boolean,
     allow_cross_migration_rollback: :boolean,
@@ -221,6 +229,9 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
     {opts, _rest, mode} = ArgParser.parse_strict!(argv, "ward server deploy", strict: @switches)
     timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
     force = opts[:force] || false
+    # `--allow-active-workers` lifts only the live-worker refusal (the dashboard's
+    # "Update anyway"); `--force` also skips the already-current check.
+    allow_workers = force or (opts[:allow_active_workers] || false)
 
     # A worker must never bounce the orchestrating server, and an in-flight
     # deploy must not abandon active workers. Same guards as `arb restart`.
@@ -233,7 +244,13 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
       )
     end
 
-    run = %{mode: mode, force: force, timeout_ms: timeout_ms, opts: opts}
+    run = %{
+      mode: mode,
+      force: force,
+      allow_workers: allow_workers,
+      timeout_ms: timeout_ms,
+      opts: opts
+    }
 
     # Refuse an unsupported or remote-targeting host before the early-halt hook is
     # installed: this host is not the deploy target, so it must write no status file.
@@ -256,11 +273,11 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
 
   # ---- source: published GitHub release ------------------------------------
 
-  defp deploy_from_github(%{opts: opts, force: force} = run) do
+  defp deploy_from_github(%{opts: opts, allow_workers: allow_workers} = run) do
     # Resolve the repo first so a misconfiguration fails fast, before we reach
     # for the (HTTP-backed) active-worker check.
     {repo, repo_source} = Github.release_repo()
-    Restart.guard_active_workers!(force)
+    Restart.guard_active_workers!(allow_workers)
 
     release = Github.fetch_release(repo, opts[:version])
     tag = Github.release_tag(release)
@@ -296,8 +313,8 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
   # collide on the same release directory (and the idempotency short-circuit
   # below is effectively a no-op for this source — every local deploy is
   # treated as a new release).
-  defp deploy_from_local(path, %{force: force} = run) do
-    Restart.guard_active_workers!(force)
+  defp deploy_from_local(path, %{allow_workers: allow_workers} = run) do
+    Restart.guard_active_workers!(allow_workers)
 
     unless File.exists?(path) do
       Output.die("--local path does not exist: #{path}")

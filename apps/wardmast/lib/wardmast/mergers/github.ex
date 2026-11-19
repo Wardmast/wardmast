@@ -76,6 +76,7 @@ defmodule Wardmast.Mergers.Github do
     CILogExcerpt,
     CIQueue,
     CIRerun,
+    Github.AssetsBranch,
     Github.BlockedState,
     Github.Config,
     Github.Error,
@@ -235,11 +236,36 @@ defmodule Wardmast.Mergers.Github do
       # POST (or the lookup itself fails).
       case find_existing_open_pr_number(cfg, owner, repo, branch) do
         {:ok, number} ->
+          add_labels(cfg, owner, repo, number, Map.get(opts, :labels))
           {:ok, build_mr_ref(ref_form, owner, repo, number)}
 
         _ ->
           create_pr(cfg, owner, repo, ref_form, branch, title, description, opts)
       end
+    end
+  end
+
+  # bd-7p6a9o: `opts[:labels]` (a pair session's `pair-authored`). GitHub
+  # labels the issue behind a PR, so it is a call of its own, made after a
+  # create *and* after an adopt — the PR a ReviewGate round opened for review
+  # is adopted, never re-created, when the merge path opens it. Best-effort: a
+  # label is decoration, and failing the open over one would strand a merge.
+  defp add_labels(_cfg, _owner, _repo, _number, labels) when labels in [nil, []], do: :ok
+
+  defp add_labels(cfg, owner, repo, number, labels) when is_list(labels) do
+    case request(cfg, :post, "/repos/#{owner}/#{repo}/issues/#{number}/labels",
+           json: %{"labels" => labels}
+         ) do
+      {:ok, %Req.Response{status: status}} when status in 200..299 ->
+        :ok
+
+      other ->
+        Logger.warning(
+          "Mergers.Github: could not label #{owner}/#{repo}##{number} " <>
+            "#{inspect(labels)}: #{inspect(other)}"
+        )
+
+        :ok
     end
   end
 
@@ -263,6 +289,7 @@ defmodule Wardmast.Mergers.Github do
       when status in 200..299 and is_integer(number) ->
         mr_ref = build_mr_ref(ref_form, owner, repo, number)
         maybe_request_reviewers(cfg, owner, repo, number, reviewers(cfg, opts))
+        add_labels(cfg, owner, repo, number, Map.get(opts, :labels))
         {:ok, mr_ref}
 
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
@@ -283,9 +310,15 @@ defmodule Wardmast.Mergers.Github do
         # step is what the caller actually wants on retry.
         if already_exists_error?(body) do
           case find_existing_open_pr_number(cfg, owner, repo, branch) do
-            {:ok, number} -> {:ok, build_mr_ref(ref_form, owner, repo, number)}
-            :none -> {:error, http_error(422, body)}
-            {:error, _} -> {:error, http_error(422, body)}
+            {:ok, number} ->
+              add_labels(cfg, owner, repo, number, Map.get(opts, :labels))
+              {:ok, build_mr_ref(ref_form, owner, repo, number)}
+
+            :none ->
+              {:error, http_error(422, body)}
+
+            {:error, _} ->
+              {:error, http_error(422, body)}
           end
         else
           {:error, http_error(422, body)}
@@ -1341,6 +1374,81 @@ defmodule Wardmast.Mergers.Github do
   end
 
   @impl true
+  def get_description(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, pr} <-
+           cfg |> request(:get, "/repos/#{owner}/#{repo}/pulls/#{number}", []) |> handle_json() do
+      {:ok, Map.get(pr, "body")}
+    end
+  end
+
+  # GitHub has no PR image-upload API, so the images are committed (one commit
+  # per set) to an orphan assets branch and referenced by a commit-pinned
+  # `blob/<sha>/…?raw=true` URL (design §7.2/§7.3). A public or unreadable repo
+  # fails closed unless `opts.public_repo_ok` (§7.4).
+  @impl true
+  def host_images(mr_ref, images, opts) when is_binary(mr_ref) and is_list(images) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, _number}} <- resolve_ref(cfg, mr_ref),
+         :ok <- check_image_visibility(cfg, owner, repo, opts) do
+      branch = Map.get(opts, :assets_branch) || "arbiter-assets"
+      dir = assets_dir(opts)
+
+      files =
+        Enum.map(images, fn image ->
+          %{path: "#{dir}/#{safe_segment(image.name)}", data: image.data}
+        end)
+
+      req = fn method, path, req_opts ->
+        cfg |> request(method, path, req_opts) |> handle_json()
+      end
+
+      message = "Add screenshots for #{Map.get(opts, :task_id) || "adhoc"} [skip ci]"
+
+      with {:ok, commit} <- AssetsBranch.push(req, owner, repo, branch, files, message) do
+        base = "#{web_base(cfg)}/#{owner}/#{repo}/blob/#{commit}/"
+
+        {:ok,
+         images
+         |> Enum.zip(files)
+         |> Map.new(fn {image, file} -> {image.name, {:ok, base <> file.path <> "?raw=true"}} end)}
+      end
+    end
+  end
+
+  defp check_image_visibility(cfg, owner, repo, opts) do
+    if Map.get(opts, :public_repo_ok, false) do
+      :ok
+    else
+      case cfg |> request(:get, "/repos/#{owner}/#{repo}", []) |> handle_json() do
+        {:ok, %{"private" => true}} -> :ok
+        {:ok, %{"visibility" => v}} when v in ["private", "internal"] -> :ok
+        _ -> {:error, :public_repo_blocked}
+      end
+    end
+  end
+
+  # t/<task_id>/<head12>: one directory per capture set.
+  defp assets_dir(opts) do
+    task = safe_segment(to_string(Map.get(opts, :task_id) || "adhoc"))
+    head = opts |> Map.get(:head_sha) |> to_string() |> String.slice(0, 12) |> safe_segment()
+    "t/#{task}/#{if head == "", do: "nohead", else: head}"
+  end
+
+  defp safe_segment(name), do: name |> Path.basename() |> String.replace(~r/[^A-Za-z0-9._-]/, "_")
+
+  # The web host serving `blob/<sha>/…`: github.com for the public API host,
+  # otherwise the Enterprise Server root with its `/api/v3` suffix removed.
+  defp web_base(%{base_url: url}) do
+    if url |> URI.parse() |> Map.get(:host) == "api.github.com" do
+      "https://github.com"
+    else
+      url |> String.trim_trailing("/") |> String.replace_suffix("/api/v3", "")
+    end
+  end
+
+  @impl true
   def add_comment(mr_ref, body) when is_binary(mr_ref) and is_binary(body) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
@@ -1690,7 +1798,8 @@ defmodule Wardmast.Mergers.Github do
             number: number,
             title: pr["title"] || "",
             url: pr["html_url"] || "",
-            author: get_in(pr, ["user", "login"])
+            author: get_in(pr, ["user", "login"]),
+            head_sha: get_in(pr, ["head", "sha"])
           }
         end)
 

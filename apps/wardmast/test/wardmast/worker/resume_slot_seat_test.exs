@@ -1,6 +1,6 @@
 defmodule Wardmast.Worker.ResumeSlotSeatTest do
   @moduledoc """
-  `ResumeSlot.admit/2` under `scheduler_admission: enforce` (DC8, design
+  `ResumeSlot.admit/2` under seat admission (DC8, design
   `provider-dynamic-concurrency.md` §3.2, §7): the board's slot cap becomes the
   pin pool's seat check.
 
@@ -9,11 +9,9 @@ defmodule Wardmast.Worker.ResumeSlotSeatTest do
     * A ticket not In progress (a revise of a Merging ticket, a requeued one)
       goes back into In progress: it needs a free seat on its pin pool
       (`Wardmast.Accounts.SeatCheck`), and is deferred (automatic), refused
-      (human) or forced over, exactly as at a full cap today.
+      (human) or forced over, exactly as at a full cap.
     * A CI fix or conflict pass (`follow_up: true`, `PassAdmission`) is a
       follow-up of in-flight work and is never held for a full pool (I9).
-
-  Under `legacy` the same calls are today's slot rule.
   """
   use Wardmast.DataCase, async: false
 
@@ -279,31 +277,5 @@ defmodule Wardmast.Worker.ResumeSlotSeatTest do
                  seat_opts: seats(ctx, 0, 0)
                )
     end
-
-    test "legacy: the option changes nothing — today's slot rule", ctx do
-      ticket = in_state(ctx.ticket, :merging)
-      other = in_state(%{ctx.ticket | id: "bd-other"}, :active)
-
-      assert {:defer, %{cap: 1}} =
-               ResumeSlot.admit(ticket,
-                 mode: :legacy,
-                 origin: :automatic,
-                 follow_up: true,
-                 tickets: [other],
-                 cap: 1
-               )
-    end
-  end
-
-  test "legacy: the slot rule decides and no seat is read", ctx do
-    ticket = in_state(ctx.ticket, :merging)
-
-    assert {:ok, :acquired} =
-             ResumeSlot.admit(ticket,
-               mode: :legacy,
-               tickets: [],
-               cap: 1,
-               seat_opts: seats(ctx, 0, 5)
-             )
   end
 end

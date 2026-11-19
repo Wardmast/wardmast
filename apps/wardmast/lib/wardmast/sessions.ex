@@ -246,13 +246,14 @@ defmodule Wardmast.Sessions do
   Every session, newest first. `list(status: :running)` filters by status.
 
   `:login` sessions (bd-98oj3s) are **excluded** unless asked for:
-  `include_kinds:` names the kinds to return and defaults to `[:coordinator]`, so
-  every list surface (Sessions page, dock, usage sweep) hides them without
-  knowing they exist.
+  `include_kinds:` names the kinds to return and defaults to
+  `visible_kinds/0` — coordinator and pair sessions (bd-7p6a9o) — so every
+  list surface (Sessions page, dock, usage sweep) hides login sessions without
+  knowing they exist, and shows a pair session like any other.
   """
   @spec list(keyword()) :: [Session.t()]
   def list(opts \\ []) do
-    kinds = Keyword.get(opts, :include_kinds, [:coordinator])
+    kinds = Keyword.get(opts, :include_kinds, visible_kinds())
     query = Session |> Ash.Query.filter(kind in ^kinds) |> Ash.Query.sort(started_at: :desc)
 
     query =
@@ -263,6 +264,13 @@ defmodule Wardmast.Sessions do
 
     Ash.read!(query)
   end
+
+  @doc """
+  The session kinds every ordinary surface shows: coordinator sessions and
+  pair sessions (bd-7p6a9o). Only the unprivileged `:login` relay is hidden.
+  """
+  @spec visible_kinds() :: [atom()]
+  def visible_kinds, do: [:coordinator, :pair]
 
   @doc "One session by id."
   @spec get(String.t()) :: {:ok, Session.t()} | {:error, :not_found}

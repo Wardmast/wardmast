@@ -7,13 +7,9 @@ defmodule Wardmast.Quota.SeatsShadowTest do
   admission stamp what `Wardmast.Quota.Seats` reads.
 
   DC6 (bd-9ycsk4) adds one reader: `Wardmast.Board.WalkInputs`, the scheduler
-  walk's capacity sets, gathered only under `scheduler_admission: shadow` or
-  `enforce` (`Wardmast.Board.AdmissionLegacyTest` pins that `legacy` reads none).
+  walk's capacity sets, gathered on every snapshot.
 
-  DC8 (bd-30d5qo) adds the seat check, `Wardmast.Accounts.SeatCheck`: under
-  `enforce` admission compares the seats on a pool with its budget. It is asked
-  only for an account in `enforce`; under `legacy` and `shadow` today's
-  per-account count still decides.
+  DC8 (bd-30d5qo) adds the seat check, `Wardmast.Accounts.SeatCheck`: admission compares the seats on a pool with its budget.
   """
   use Wardmast.DataCase, async: false
 
@@ -30,9 +26,9 @@ defmodule Wardmast.Quota.SeatsShadowTest do
   @lib Path.expand("../../../lib", __DIR__)
   @consumers ~r/alias Wardmast\.Quota\.Seats|\bSeats\.(counts|count|holders|seats|tally|base_task_id)\(/
 
-  # The seats module, the scheduler walk's inputs (DC6, shadow and enforce only),
+  # The seats module, the scheduler walk's inputs (DC6),
   # the capacity view (DC5, display only: it shows the live holders next to each
-  # budget and decides nothing) and the seat check (DC8, enforce only).
+  # budget and decides nothing) and the seat check (DC8).
   @allowed ~w(wardmast/quota/seats.ex wardmast/board/walk_inputs.ex wardmast/board/capacity_view.ex
               wardmast/accounts/seat_check.ex)
 

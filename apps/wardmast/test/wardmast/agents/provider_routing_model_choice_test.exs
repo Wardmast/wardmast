@@ -149,42 +149,12 @@ defmodule Wardmast.Agents.ProviderRoutingModelChoiceTest do
   end
 
   defp models(entries), do: Enum.map(entries, & &1["model"])
-  defp dropped_reasons(decision), do: Enum.map(decision["dropped"], &{&1["model"], &1["reason"]})
 
   describe "agy worked example (§5.3): a multi-pool provider spends the pool the router picked" do
     # D1 -> economy. agy's Gemini pool is over its line; its Claude/GPT pool is
     # idle. Claude is the other attached implementer, with its 5h window busy.
     defp worked_pairs(%{agy: agy, claude: claude}),
       do: [{agy, agy_quota(99.0, 0.0)}, {claude, claude_quota(0.7, 0.2)}]
-
-    test "today's single model: the Gemini entry is over its line, so Claude takes the work" do
-      s = agy_and_claude(config())
-
-      assert {:ok, selection} = ProviderRouting.select(s.ws, s.task, :main, opts(worked_pairs(s)))
-
-      assert selection.agent_type == :claude
-      assert selection.model == nil
-      assert {@gemini_flash, "quota_held"} in dropped_reasons(selection.decision)
-    end
-
-    test "with the Claude/GPT model listed, agy's second pool is the candidate that wins" do
-      tiers = %{"economy" => [@gemini_flash, @claude_sonnet]}
-      s = agy_and_claude(config(agy_tier_models: tiers))
-
-      assert {:ok, selection} = ProviderRouting.select(s.ws, s.task, :main, opts(worked_pairs(s)))
-
-      assert selection.agent_type == :gemini
-      assert selection.account.id == s.agy.id
-      assert selection.family == :anthropic
-      assert selection.model == @claude_sonnet
-      assert selection.decision["model"] == @claude_sonnet
-      assert selection.decision["pool"] == @agy_claude_gpt_pool
-      assert selection.decision["outcome"] == "selected"
-
-      # The Gemini model on the over-the-line pool is dropped on its own pool.
-      assert {@gemini_flash, "quota_held"} in dropped_reasons(selection.decision)
-      assert @claude_sonnet in models(selection.decision["candidates"])
-    end
 
     test "the same choice under scored/enforce" do
       tiers = %{"economy" => [@gemini_flash, @claude_sonnet]}
@@ -351,17 +321,6 @@ defmodule Wardmast.Agents.ProviderRoutingModelChoiceTest do
       assert selection.decision["outcome"] == "pinned"
       assert selection.family == :google
       assert selection.decision["pool"] == @agy_gemini_pool
-    end
-
-    test "the pinned account's other pool serves when the pinned family's is held" do
-      {ws, agy, task} = pinned_task(%{"economy" => [@gemini_flash, @claude_sonnet]})
-
-      assert {:ok, selection} =
-               ProviderRouting.select(ws, task, :fix_pass, opts([{agy, agy_quota(99.0, 5.0)}]))
-
-      assert selection.decision["outcome"] == "pinned"
-      assert selection.account.id == agy.id
-      assert selection.model == @claude_sonnet
     end
   end
 

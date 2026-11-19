@@ -243,65 +243,29 @@ defmodule Wardmast.Quota.GateWeeklyTest do
     end
   end
 
-  describe "the board / Scheduler hold reason names the 7d window" do
-    setup do
-      {:ok, workspace} =
-        Ash.create(Workspace, %{name: "weekly-board-ws", prefix: "wbw", config: %{}})
+  setup do
+    {:ok, workspace} =
+      Ash.create(Workspace, %{name: "weekly-board-ws", prefix: "wbw", config: %{}})
 
-      %{workspace: workspace}
-    end
+    %{workspace: workspace}
+  end
 
-    defp record_quota!(ws_id, attrs) do
-      base = %{
-        provider_account_id: quota_account_id!(ws_id, "claude"),
-        provider: "claude",
-        utilization_5h: 0.23,
-        status_5h: "allowed",
-        reset_5h_at:
-          DateTime.add(DateTime.utc_now(), 3600, :second) |> DateTime.truncate(:second),
-        captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
-      }
+  defp record_quota!(ws_id, attrs) do
+    base = %{
+      provider_account_id: quota_account_id!(ws_id, "claude"),
+      provider: "claude",
+      utilization_5h: 0.23,
+      status_5h: "allowed",
+      reset_5h_at: DateTime.add(DateTime.utc_now(), 3600, :second) |> DateTime.truncate(:second),
+      captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+    }
 
-      {:ok, q} =
-        AnthropicQuota
-        |> Ash.Changeset.for_create(:upsert, Map.merge(base, attrs))
-        |> Ash.create()
+    {:ok, q} =
+      AnthropicQuota
+      |> Ash.Changeset.for_create(:upsert, Map.merge(base, attrs))
+      |> Ash.create()
 
-      q
-    end
-
-    test "a 7d utilization hold reads as a 7d hold on the board", %{workspace: workspace} do
-      record_quota!(workspace.id, %{
-        utilization_7d: 0.91,
-        status_7d: "allowed",
-        reset_7d_at:
-          DateTime.add(DateTime.utc_now(), 3 * 86_400, :second) |> DateTime.truncate(:second)
-      })
-
-      assert {:hold, "claude:default 7d 91% ≥ 90%"} =
-               Wardmast.Board.Snapshot.quota_hold(workspace.id)
-
-      plan =
-        Wardmast.Board.Scheduler.plan(%{
-          ready: [%{id: "bd-1", files: [], deps: []}],
-          quota: Wardmast.Board.Snapshot.quota_hold(workspace.id),
-          slots_free: 4
-        })
-
-      assert Enum.any?(plan.entries, &(&1.reason == "blocked — claude:default 7d 91% ≥ 90%"))
-    end
-
-    test "a 5h hold still reads with the 5h wording", %{workspace: workspace} do
-      record_quota!(workspace.id, %{
-        utilization_5h: 0.9,
-        utilization_7d: 0.1,
-        status_7d: "allowed"
-      })
-
-      assert {:hold, phrase} = Wardmast.Board.Snapshot.quota_hold(workspace.id)
-      assert phrase =~ "quota near exhaustion"
-      refute phrase =~ "7d"
-    end
+    q
   end
 
   describe "quota_get / arb quota expose the gating window" do

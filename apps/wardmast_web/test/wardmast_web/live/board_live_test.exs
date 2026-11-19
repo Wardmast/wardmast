@@ -556,13 +556,13 @@ defmodule WardmastWeb.BoardLiveTest do
       assert html =~ "next up"
     end
 
-    test "a card behind the head shows its queue position", %{conn: conn, ws: ws} do
+    test "a card the walk places beside the head reads starting", %{conn: conn, ws: ws} do
       issue(ws, "leader", %{priority: 1})
       issue(ws, "follower", %{priority: 3})
 
       {:ok, _view, html} = live_board(conn)
 
-      assert html =~ "1 ahead in queue"
+      assert html =~ "data-layer-state=\"starting\""
     end
 
     test "a dependency-blocked card names the blocker instead of a position", %{
@@ -608,29 +608,6 @@ defmodule WardmastWeb.BoardLiveTest do
   end
 
   describe "the quota hold reason names the account (bd-1qjv3j)" do
-    test "a Ready card says which account is held, in percentages", %{conn: conn, ws: ws} do
-      issue(ws, "held for quota")
-
-      {:ok, account_id} = Wardmast.Quota.ensure_account_id(ws.id, "claude")
-      now = DateTime.utc_now() |> DateTime.truncate(:second)
-
-      Ash.create!(Wardmast.Quota.AnthropicQuota, %{
-        provider_account_id: account_id,
-        provider: "claude",
-        utilization_5h: 0.1,
-        status_5h: "allowed",
-        reset_5h_at: DateTime.add(now, 3600, :second),
-        utilization_7d: 0.95,
-        status_7d: "allowed",
-        reset_7d_at: DateTime.add(now, 3 * 86_400, :second),
-        captured_at: now
-      })
-
-      slug = Wardmast.Accounts.Resolver.get(account_id).slug
-      {:ok, _view, html} = live_board(conn)
-
-      assert html =~ "held — claude:#{slug} 7d 95% ≥ 90%"
-    end
   end
 
   describe "the Ready column: return to Backlog" do

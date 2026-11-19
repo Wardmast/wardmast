@@ -287,11 +287,10 @@ defmodule Wardmast.Board.SnapshotNodeCapacityTest do
       board = Snapshot.load(workspace_id: ws.id, issues: [ready_issue(ws)], workers: [])
 
       assert board.slots_total == 0
-      assert board.slots_free == 0
       assert board.slots_used == 0
-      assert board.promote == nil
+      assert board.walk.promote == nil
       assert [%{id: "bd-rw14", reason: reason, state: :blocked}] = board.ready
-      assert reason =~ "held — local capacity 0"
+      assert reason =~ "waiting for capacity"
     end
 
     test "with a local slot the same card is promoted" do
@@ -301,7 +300,7 @@ defmodule Wardmast.Board.SnapshotNodeCapacityTest do
       board = Snapshot.load(workspace_id: ws.id, issues: [ready_issue(ws)], workers: [])
 
       assert board.slots_total == 1
-      assert board.promote == "bd-rw14"
+      assert board.walk.promote == "bd-rw14"
     end
   end
 end

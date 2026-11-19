@@ -303,6 +303,31 @@ defmodule WardmastCli.Cmd.InitTest do
       end
     end
 
+    # bd-7p6a9o: the session instruction sets under priv/doctrine/sessions/
+    # (the pair session's) ship in the same bundle but are what other session
+    # kinds render *instead of* the coordinator doctrine.
+    test "AGENTS.md never embeds a session kind's own instruction set" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      agents = File.read!(Path.join(dir, "AGENTS.md"))
+
+      session_sets = @doctrine_dir |> Path.join("sessions/*.md.eex") |> Path.wildcard()
+      assert "pair" in Enum.map(session_sets, &Path.basename(&1, ".md.eex"))
+
+      assigns = %{can_dispatch: true, domain_prefix: "emr", primary_checkout: nil}
+
+      for file <- session_sets do
+        rendered = file |> EEx.eval_file(assigns: assigns) |> String.trim()
+
+        refute agents =~ rendered,
+               "AGENTS.md embeds the #{Path.basename(file)} session instruction set"
+      end
+
+      refute agents =~ "## Pair doctrine"
+    end
+
     test "AGENTS.md carries the command reference, concepts and filing conventions" do
       stub_install()
       dir = tmp_dir()

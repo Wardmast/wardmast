@@ -61,7 +61,10 @@ defmodule Wardmast.Worker.Jail.Hide do
   `config :wardmast, :worker_jail_unmask, [path]` is the operator's escape
   hatch (a list of binaries; in a release set `WARDMAST_WORKER_JAIL_UNMASK`, colon- or
   comma-separated absolute paths, read in `config/runtime.exs`): an entry equal to a masked path drops that mask; an entry beneath
-  one is bound back read-only (`~` expands).
+  one is bound back read-only (`~` expands). `~/.config/glab-cli` is exempt
+  from that hatch: its OAuth refresh tokens rotate on use, so a worker that
+  could read them would invalidate the operator's own login (#1545); workers
+  use the injected `GITLAB_TOKEN` instead.
   """
 
   alias Wardmast.Config.Paths
@@ -295,7 +298,17 @@ defmodule Wardmast.Worker.Jail.Hide do
     |> Enum.filter(&is_binary/1)
     |> Enum.map(&expand(&1, home))
     |> Enum.map(&real/1)
-    |> Enum.reject(&is_nil/1)
+    |> Enum.reject(&(is_nil(&1) or glab_login?(&1, home)))
+  end
+
+  # The operator's glab login holds GitLab OAuth tokens that rotate on use: a
+  # worker that can read them refreshes (invalidating the host's copy) and
+  # cannot write the new pair back. They are never unmaskable; the worker's
+  # glab authenticates with the injected `GITLAB_TOKEN` instead (#1545).
+  defp glab_login?(path, home) do
+    glab = join(home, ".config/glab-cli")
+    glab = real(glab) || glab
+    path == glab or String.starts_with?(path, glab <> "/")
   end
 
   defp opt(opts, key, default_fun) do

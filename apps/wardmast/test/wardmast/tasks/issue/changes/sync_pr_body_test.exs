@@ -54,6 +54,16 @@ defmodule Wardmast.Tasks.Issue.Changes.SyncPrBodyTest do
 
   defp set_body(t, body), do: Ash.update(t, %{pr_body: body}, action: :update)
 
+  defp decode(""), do: nil
+  defp decode(body), do: Jason.decode!(body)
+
+  # A write (PUT/PATCH) must not happen; the description read (GET) that
+  # precedes a write is expected and not asserted on.
+  defp refute_write do
+    refute_receive {:req, "PUT", _, _, _, _}, 50
+    refute_receive {:req, "PATCH", _, _, _, _}, 50
+  end
+
   defp stub(mod, test_pid, status \\ 200, resp \\ %{}) do
     Req.Test.stub(mod, fn conn ->
       {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -61,7 +71,7 @@ defmodule Wardmast.Tasks.Issue.Changes.SyncPrBodyTest do
       send(
         test_pid,
         {:req, conn.method, conn.request_path, Plug.Conn.get_req_header(conn, "private-token"),
-         Plug.Conn.get_req_header(conn, "authorization"), Jason.decode!(body)}
+         Plug.Conn.get_req_header(conn, "authorization"), decode(body)}
       )
 
       conn |> Plug.Conn.put_status(status) |> Req.Test.json(resp)
@@ -96,7 +106,7 @@ defmodule Wardmast.Tasks.Issue.Changes.SyncPrBodyTest do
     stub(Wardmast.Mergers.Gitlab.HTTP, self())
 
     assert {:ok, _} = set_body(t, "body")
-    refute_receive {:req, _, _, _, _, _}, 50
+    refute_write()
   end
 
   test "unchanged pr_body: nothing is called" do
@@ -107,7 +117,7 @@ defmodule Wardmast.Tasks.Issue.Changes.SyncPrBodyTest do
     assert_receive {:req, "PUT", _, _, _, _}
 
     assert {:ok, _} = set_body(t, "same")
-    refute_receive {:req, _, _, _, _, _}, 50
+    refute_write()
   end
 
   test "API error: failure recorded on the ticket, update still succeeds, one credential only" do
@@ -126,11 +136,60 @@ defmodule Wardmast.Tasks.Issue.Changes.SyncPrBodyTest do
     assert updated.pr_body == "body"
 
     assert_receive {:req, "PUT", _, ["lit-gl-token"], _, _}
-    refute_receive {:req, _, _, _, _, _}, 50
+    refute_write()
 
     reloaded = Ash.get!(Issue, t.id)
     assert reloaded.attention_cause == :tracker_sync_failed
     assert reloaded.attention_detail =~ "pr_body"
     assert reloaded.attention_detail =~ "403"
+  end
+
+  describe "the Screenshots table owned by Arbiter" do
+    @table "<!-- arbiter:screenshots:start -->\n## Screenshots\n\n| Page/state | Before | After |\n|---|---|---|\n| P | ![before](/uploads/a/b.png) | ![after](/uploads/a/a.png) |\n<!-- arbiter:screenshots:end -->"
+
+    test "GitLab: a worker's pr_body update keeps the table already on the MR" do
+      ws = gitlab_ws()
+      t = ticket(ws, %{pr_ref: "!42"})
+      test = self()
+
+      Req.Test.stub(Wardmast.Mergers.Gitlab.HTTP, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+        case conn.method do
+          "GET" ->
+            Req.Test.json(conn, %{"description" => "old text\n\n" <> @table})
+
+          "PUT" ->
+            send(test, {:put, decode(body)["description"]})
+            Req.Test.json(conn, %{})
+        end
+      end)
+
+      assert {:ok, _} = set_body(t, "new text")
+      assert_receive {:put, put}
+      assert put == "new text\n\n" <> @table
+    end
+
+    test "GitHub: no table on the PR means the body is written as the worker wrote it" do
+      ws = github_ws()
+      t = ticket(ws, %{pr_ref: "57"})
+      test = self()
+
+      Req.Test.stub(Wardmast.Mergers.Github.HTTP, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+        case conn.method do
+          "GET" ->
+            Req.Test.json(conn, %{"body" => "old"})
+
+          "PATCH" ->
+            send(test, {:patch, decode(body)["body"]})
+            Req.Test.json(conn, %{})
+        end
+      end)
+
+      assert {:ok, _} = set_body(t, "new text")
+      assert_receive {:patch, "new text"}
+    end
   end
 end

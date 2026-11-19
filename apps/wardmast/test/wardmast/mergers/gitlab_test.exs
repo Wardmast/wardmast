@@ -414,6 +414,26 @@ defmodule Wardmast.Mergers.GitlabTest do
       assert {:ok, %{pipeline: :pending}} = Gitlab.get(@ref)
     end
 
+    test "a skipped head pipeline is flagged and is not ci_clean (#1564)" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/api/v4/projects/12345/merge_requests/42" ->
+            Req.Test.json(conn, %{
+              "iid" => @iid,
+              "state" => "opened",
+              "merge_status" => "can_be_merged",
+              "detailed_merge_status" => "mergeable"
+            })
+
+          "/api/v4/projects/12345/merge_requests/42/pipelines" ->
+            Req.Test.json(conn, [%{"id" => 5, "status" => "skipped"}])
+        end
+      end)
+
+      assert {:ok, %{pipeline: :neutral, pipeline_skipped: true, ci_clean: false}} =
+               Gitlab.get(@ref)
+    end
+
     test "pipeline is :neutral when the latest pipeline is skipped (settled, not CI-still-running, bd-cnytw3)" do
       stub(fn conn ->
         case conn.request_path do
@@ -2626,6 +2646,19 @@ defmodule Wardmast.Mergers.GitlabTest do
       conn
       |> Plug.Conn.put_status(201)
       |> Req.Test.json(%{"id" => id, "web_url" => "https://gl/p/#{id}"})
+    end
+
+    test "a skipped head pipeline starts a fresh MR pipeline instead of refusing (#1564)" do
+      skipped = %{"id" => 98, "sha" => "abc", "status" => "skipped"}
+      rerun_stub([skipped], [], &created(&1, 101))
+
+      for mode <- [:auto, :failed_jobs, :all_jobs] do
+        assert {:ok, result} = Gitlab.rerun_ci(@ref, %{mode: mode})
+        assert_received {:post, @mr_pipeline_path, _}
+        refute_received {:post, @retry_path, _}
+        assert result.mode == :all_jobs
+        assert result.run_id == 101
+      end
     end
 
     test ":failed_jobs hits the pipeline retry endpoint" do

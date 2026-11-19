@@ -79,8 +79,8 @@ defmodule Wardmast.Worker.DispatchScopedQuotaTest do
     seed_quota!(ws, exhausted_fable())
     issue = ready!(ws, "fable card")
 
-    assert {:error, {:quota_held, _}} = dispatch(issue)
-    assert Dispatch.quota_held_message(issue.id) =~ "7d (Fable)"
+    assert {:error, {:account_at_capacity, %{hard_zero: true} = info}} = dispatch(issue)
+    assert Wardmast.Accounts.Admission.refusal_message(info) =~ "7d (Fable)"
   end
 
   test "a card on another model is not held by the scoped window" do

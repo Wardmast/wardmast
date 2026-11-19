@@ -33,19 +33,16 @@ defmodule WardmastWeb.Api.QuotaControllerTest do
     refute Map.has_key?(resp["data"], "gemini")
   end
 
-  # DC5 (bd-2c2a4g, design §9): a `budget` block per account, labelled with the
-  # admission mode.
-  test "carries a budget block per account, labelled with the admission mode", %{
+  # DC5 (bd-2c2a4g, design §9): a `budget` block per account.
+  test "carries a budget block per account", %{
     conn: conn,
     ws: ws
   } do
     id = account_id!(ws.id)
-    on_exit(fn -> Wardmast.Settings.set_scheduler_admission(nil) end)
-    {:ok, _} = Wardmast.Settings.set_scheduler_admission("shadow")
 
     resp = conn |> get("/api/quota") |> json_response(200)
 
-    assert %{"mode" => "shadow", "decides" => false, "account_id" => ^id, "pools" => pools} =
+    assert %{"account_id" => ^id, "pools" => pools} =
              Enum.find(resp["data"]["budget"], &(&1["account_id"] == id))
 
     assert is_list(pools)

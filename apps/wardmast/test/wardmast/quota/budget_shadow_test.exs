@@ -6,24 +6,18 @@ defmodule Wardmast.Quota.BudgetShadowTest do
   change, and these tests pin the construction.
 
   DC6 (bd-9ycsk4) adds one reader: `Wardmast.Board.WalkInputs`, the scheduler
-  walk's capacity sets, which `Wardmast.Board.Snapshot.load/1` gathers only under
-  `scheduler_admission: shadow` or `enforce` and which decides no dispatch.
-  The admission surfaces below still never name the budget, and
-  `Wardmast.Board.AdmissionLegacyTest` pins at runtime that under `legacy` no
-  admission path calls it.
+  walk's capacity sets, which `Wardmast.Board.Snapshot.load/1` gathers on every load.
+  The admission surfaces below still never name the budget.
 
   DC5 (bd-2c2a4g) adds the display readers: `Wardmast.Board.CapacityView`, the one
   read model behind the board's capacity strip, `scheduler_status` and
   `quota_get`. No admission surface, nor anything that stops a run, names
   `CapacityView`.
 
-  DC8 (bd-30d5qo) makes the budget decide under `scheduler_admission:
-  enforce`, through one module: `Wardmast.Accounts.SeatCheck`, the per-pool seat
+  DC8 (bd-30d5qo) makes the budget decide, through one module: `Wardmast.Accounts.SeatCheck`, the per-pool seat
   check. It is the only admission-path reader of the budget; the admission
   surfaces (`Admission`, `ResumeSlot`, provider and reviewer routing, the
-  dispatch's hard-zero refusal) ask it and never name the budget themselves,
-  and `Wardmast.Board.AdmissionLegacyTest` traces that under `legacy` nothing
-  asks it. I8 (design §11): the budget is read only by admission, the walk and
+  dispatch's hard-zero refusal) ask it and never name the budget themselves. I8 (design §11): the budget is read only by admission, the walk and
   the display; a budget change is handled only by the Autopilot, which plans a
   pass and stops nothing.
   """
@@ -41,8 +35,8 @@ defmodule Wardmast.Quota.BudgetShadowTest do
   @consumers ~r/Quota\.Budget(?!Calibration)\b|\bBudget\.(compute|publish|hysteresis|new_hysteresis|lowest|explore|expiring|Server|Inputs)\b/
 
   # The budget's own modules, the supervision tree that starts its server, the
-  # scheduler walk's inputs (DC6, read only under shadow and enforce) and the
-  # seat check (DC8, asked only under enforce).
+  # scheduler walk's inputs (DC6) and the
+  # seat check (DC8).
   # `quota/seat_weights.ex` (DC11) reads a published budget's window rates for the
   # weight floor; its callers are the seat check and the walk's inputs.
   # `quota/history.ex` only records the published figure on each snapshot row

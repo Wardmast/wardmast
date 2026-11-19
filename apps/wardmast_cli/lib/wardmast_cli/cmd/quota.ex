@@ -122,17 +122,15 @@ defmodule WardmastCli.Cmd.Quota do
   end
 
   # DC5 (design §9): each account's provider concurrency budget, one line per pool
-  # with its reason, labelled shadow until `scheduler_admission` is `enforce`.
+  # with its reason.
   # Silent when no account has a published pool (or the server predates it).
   defp emit_budget([_ | _] = blocks) do
     case Enum.filter(blocks, &match?([_ | _], &1["pools"])) do
       [] ->
         :ok
 
-      [first | _] = shown ->
-        mode = first["mode"] || "shadow"
-        note = if first["decides"] == true, do: "", else: " — today's gate and caps still decide"
-        IO.puts("Concurrency budget (#{mode}#{note}):")
+      shown ->
+        IO.puts("Concurrency budget:")
         Enum.each(shown, fn block -> Enum.each(block["pools"], &emit_pool/1) end)
     end
   end

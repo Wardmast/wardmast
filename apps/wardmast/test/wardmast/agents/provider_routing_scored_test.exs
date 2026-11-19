@@ -267,14 +267,6 @@ defmodule Wardmast.Agents.ProviderRoutingScoredTest do
       assert d["outcome"] == "pinned"
       assert %{"comparable" => false, "agrees" => nil} = d["shadow"]
     end
-
-    test "no feasible candidate still blocks exactly as most_quota does", ctx do
-      %{ws: ws, claude: claude, codex: codex} = ctx
-      pairs = [{claude, claude_quota(0.99, 0.99)}, {codex, codex_quota(99.0)}]
-
-      scored = ProviderRouting.select(ws, task!(ws), :main, opts(pairs))
-      assert {:legacy, %{"outcome" => "no_candidate", "candidates" => []}} = scored
-    end
   end
 
   describe "enforce" do

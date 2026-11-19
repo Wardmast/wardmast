@@ -1,13 +1,10 @@
 defmodule Wardmast.Quota.Seats do
   @moduledoc """
   Per-pool seat occupancy (DC4, bd-5oquxn; design
-  `docs/design/provider-dynamic-concurrency.md` §3.2). Under
-  `scheduler_admission: enforce` admission counts seats through
-  `Wardmast.Accounts.SeatCheck` (DC8); under `legacy` and `shadow` nothing on an
-  admission, gate, dispatch or run-stopping path reads it (I1/I2), and
-  `Wardmast.Accounts.Concurrency` keeps today's per-account process count. The
-  scheduler walk (DC6, `Wardmast.Board.WalkInputs`) reads it under `shadow` and
-  `enforce`.
+  `docs/design/provider-dynamic-concurrency.md` §3.2). Admission counts seats
+  through `Wardmast.Accounts.SeatCheck` (DC8, the only admission since DC12);
+  nothing on a run-stopping path reads it (I8). The scheduler walk (DC6,
+  `Wardmast.Board.WalkInputs`) reads it too.
 
   A **seat** is one unit of in-flight work on an (account, pool) pair:
 

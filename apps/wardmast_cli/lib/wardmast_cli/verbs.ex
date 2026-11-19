@@ -115,7 +115,15 @@ defmodule WardmastCli.Verbs do
     {"server", Module.concat(@cmd, Server),
      [
        workspace: :none,
-       probes: [["start"], ["restart"], ["deploy"], ["migrate"], ["doctor"], ["version"]]
+       probes: [
+         ["start"],
+         ["restart"],
+         ["deploy"],
+         ["migrate"],
+         ["doctor"],
+         ["version"],
+         ["update-check"]
+       ]
      ]},
     {"workspace", Module.concat(@cmd, Workspace),
      [
@@ -199,6 +207,10 @@ defmodule WardmastCli.Verbs do
      ]},
     {"session", Module.concat(@cmd, Session),
      [workspace: :none, host_local?: true, probes: [["list"], ["attach", "s"]]]},
+    # bd-7p6a9o: a pair session addresses one ticket by id, and the ticket
+    # carries its workspace — no workspace dimension for `-w` to select.
+    {"pair", Module.concat(@cmd, Pair),
+     [workspace: :none, probes: [["bd-1"], ["done", "bd-1"], ["end", "bd-1"]]]},
     {"account", Module.concat(@cmd, Account),
      [
        workspace: :resolve,

@@ -35,6 +35,11 @@ defmodule Wardmast.Sessions.UsageIngest do
     * `step: :other` — the escape hatch on `Usage.Event`; a coordinator session
       is not work/review/impl.
 
+  A **pair session** (bd-7p6a9o) is the exception: it works one ticket, so its
+  rows are that ticket's — `source: :task`, `task_id`/`base_task_id` the
+  ticket, `role: "pair"`, `step: :work` — which is what the ticket's spend and
+  `Wardmast.Usage.Estimate` count, as they would a worker run's.
+
   ## Dating — the transcript, never the clock
 
   A coordinator session is not an event, it is a *month*: the live one has been
@@ -149,6 +154,10 @@ defmodule Wardmast.Sessions.UsageIngest do
 
   @default_interval_ms 5 * 60_000
 
+  # The `role` a pair session's spend rows carry (bd-7p6a9o) — the same role its
+  # run row carries (`Wardmast.Sessions.Pair`).
+  @pair_role "pair"
+
   @typedoc "What one `ingest/1` pass did."
   @type report :: %{
           files: non_neg_integer(),
@@ -198,8 +207,8 @@ defmodule Wardmast.Sessions.UsageIngest do
 
     report =
       files_with_ws
-      |> Enum.reduce(%{files: 0, rows_written: 0, errors: 0}, fn {path, workspace_id}, acc ->
-        %{rows: rows, errors: errors} = ingest_file(path, workspace_id)
+      |> Enum.reduce(%{files: 0, rows_written: 0, errors: 0}, fn {path, attribution}, acc ->
+        %{rows: rows, errors: errors} = ingest_file(path, attribution)
 
         %{
           acc
@@ -219,35 +228,48 @@ defmodule Wardmast.Sessions.UsageIngest do
     |> Path.join("*.jsonl")
     |> Path.wildcard()
     |> Enum.sort()
-    |> Enum.map(&{&1, nil})
+    |> Enum.map(&{&1, attribution(%{})})
   end
 
   defp session_files_with_ws(_dir), do: []
+
+  # Whose spend a transcript is (bd-7p6a9o). A pair session works one ticket,
+  # so its spend is that ticket's — a `:task` row, which the ticket's spend and
+  # `Wardmast.Usage.Estimate` both count, exactly as a worker run's would be.
+  # Every other session's is task-less coordinator spend.
+  defp attribution(%{kind: :pair, issue_id: issue_id} = session)
+       when is_binary(issue_id) and issue_id != "",
+       do: %{workspace_id: Map.get(session, :workspace_id), task_id: issue_id}
+
+  defp attribution(session), do: %{workspace_id: Map.get(session, :workspace_id), task_id: nil}
+
+  defp source_for(%{task_id: task_id}) when is_binary(task_id), do: :task
+  defp source_for(_attribution), do: :coordinator_session
 
   # A browser-hosted session's transcript lives two levels deeper than a
   # coordinator dir — `<config_dir>/projects/<slug>/<sid>.jsonl` — because the
   # CLI names the middle directory after the project path, not the session.
   defp browser_session_files_with_ws(%{config_dir: config_dir} = session)
        when is_binary(config_dir) and config_dir != "" do
-    workspace_id = Map.get(session, :workspace_id)
+    attribution = attribution(session)
 
     [config_dir, "projects", "*", "*.jsonl"]
     |> Path.join()
     |> Path.wildcard()
     |> Enum.sort()
-    |> Enum.map(&{&1, workspace_id})
+    |> Enum.map(&{&1, attribution})
   end
 
   defp browser_session_files_with_ws(_session), do: []
 
-  defp ingest_file(path, workspace_id) do
+  defp ingest_file(path, attribution) do
     session_id = Path.basename(path, ".jsonl")
 
     # `session_id:` is the rollover guard — see the moduledoc. No `:since`: the
     # read is deliberately cumulative and the ledger provides the watermark.
     case ClaudeSessionFile.read_totals(path, session_id: session_id) do
       {:ok, totals} ->
-        write_deltas(session_id, totals, path, workspace_id)
+        write_deltas(session_id, totals, path, attribution)
 
       {:error, reason} ->
         Logger.warning("Sessions.UsageIngest: cannot read #{path}: #{inspect(reason)}")
@@ -263,10 +285,16 @@ defmodule Wardmast.Sessions.UsageIngest do
   # One row per (session, UTC day) that gained spend since the last pass. The
   # day comes from the transcript's own timestamps, never from the clock — see
   # the moduledoc's dating section.
-  defp write_deltas(session_id, totals, path, workspace_id) do
-    billed = already_billed_by_day(session_id)
+  defp write_deltas(session_id, totals, path, attribution) do
+    billed = already_billed_by_day(session_id, source_for(attribution))
     note = ClaudeSessionFile.cost_note_for(totals)
-    ctx = %{session_id: session_id, path: path, workspace_id: workspace_id}
+
+    ctx = %{
+      session_id: session_id,
+      path: path,
+      workspace_id: attribution.workspace_id,
+      task_id: attribution.task_id
+    }
 
     totals
     |> day_buckets()
@@ -354,9 +382,11 @@ defmodule Wardmast.Sessions.UsageIngest do
   # the row was filed under. Summing the ledger is what makes a re-run a no-op;
   # doing it per day is what lets a *dated* row be the watermark for its own
   # day without an append to today re-billing last week.
-  defp already_billed_by_day(session_id) do
+  # Per source: a pair session's rows are `:task` rows (bd-7p6a9o), and the
+  # watermark has to read the rows this sweep writes, or every pass re-bills.
+  defp already_billed_by_day(session_id, source) do
     Event
-    |> Ash.Query.filter(session_id == ^session_id and source == :coordinator_session)
+    |> Ash.Query.filter(session_id == ^session_id and source == ^source)
     |> Ash.read!()
     |> Enum.group_by(&row_day/1)
     |> Map.new(fn {day, evs} -> {day, Enum.reduce(evs, blank_billed(), &add_billed/2)} end)
@@ -415,16 +445,20 @@ defmodule Wardmast.Sessions.UsageIngest do
   end
 
   defp insert_row(ctx, totals, day, bucket, delta, billed, note) do
-    %{session_id: session_id, path: path, workspace_id: workspace_id} = ctx
+    %{session_id: session_id, path: path, workspace_id: workspace_id, task_id: task_id} = ctx
     account_id = resolve_account_id(workspace_id)
 
     attrs = %{
-      source: :coordinator_session,
-      # Not a missing value: coordinator spend belongs to no task. See
-      # `Wardmast.Usage.Event`'s source table.
-      task_id: nil,
+      source: source_for(ctx),
+      # Not a missing value for a coordinator session: its spend belongs to no
+      # task (see `Wardmast.Usage.Event`'s source table). A pair session's is
+      # its ticket's (bd-7p6a9o), under a role that is not a worker's "base",
+      # so the estimator never reads it as a second dispatch.
+      task_id: task_id,
+      base_task_id: task_id,
+      role: if(task_id, do: @pair_role),
       session_id: session_id,
-      step: :other,
+      step: if(task_id, do: :work, else: :other),
       provider: "claude",
       workspace_id: workspace_id,
       provider_account_id: account_id,

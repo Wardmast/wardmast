@@ -215,11 +215,6 @@ defmodule Wardmast.MCP.CatalogTest do
       assert problems == []
     end
 
-    test "account_set's admission property has a valid type" do
-      admission = Wardmast.MCP.Catalog.AccountSchema.account_set()["properties"]["admission"]
-      assert admission["type"] == ["string", "null"]
-    end
-
     defp schema_problems(%{} = schema, path) do
       own =
         case Map.fetch(schema, "type") do

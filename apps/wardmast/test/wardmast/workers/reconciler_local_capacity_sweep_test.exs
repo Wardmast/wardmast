@@ -12,13 +12,10 @@ defmodule Wardmast.Workers.ReconcilerLocalCapacitySweepTest do
   """
   use Wardmast.DataCase, async: false
 
-  alias Wardmast.Boot.ReconcileSweep
-  alias Wardmast.Nodes
   alias Wardmast.Tasks.{Issue, Workspace}
   alias Wardmast.Test.{ResumeSlotFixture, StubResumeDeferrer}
   alias Wardmast.Worker
-  alias Wardmast.Worker.Dispatch
-  alias Wardmast.Workers.{Reconciler, Run}
+  alias Wardmast.Workers.Reconciler
 
   # The real Reconciler for rows and tickets; only the systemd scope sweep is
   # stubbed (it would `systemctl --user stop` every live `arb-run-*` on the host).
@@ -98,54 +95,6 @@ defmodule Wardmast.Workers.ReconcilerLocalCapacitySweepTest do
     Reconciler.reconcile_resumable_tasks(resume_fun: resume)
   end
 
-  test "resumes the cap's worth, P0 first, and defers the rest in priority order", %{ws: ws} do
-    p3 = cut_off!(ws, "P3 chore", 3)
-    p0 = cut_off!(ws, "P0 outage", 0)
-    p2 = cut_off!(ws, "P2 feature", 2)
-    p1 = cut_off!(ws, "P1 bug", 1)
-
-    cap!(2)
-    assert {:ok, report} = resumed_sweep()
-
-    assert report.resumed == 2
-    assert report.deferred == 2
-    assert report.escalated == 0
-    assert report.restarted == [p0.id, p1.id]
-
-    assert report.not_restarted == [
-             %{task_id: p2.id, reason: :deferred},
-             %{task_id: p3.id, reason: :deferred}
-           ]
-
-    # Exactly the cap's worth is running on the primary.
-    assert Worker.whereis(p0.id)
-    assert Worker.whereis(p1.id)
-    assert Worker.whereis(p2.id) == nil
-    assert Worker.whereis(p3.id) == nil
-
-    assert StubResumeDeferrer.deferred_resume_ids() == [p2.id, p3.id]
-
-    for {_id, _kind, opts} <- StubResumeDeferrer.deferrals() do
-      assert opts[:held_for] == :local_capacity
-      assert opts[:resume_origin] == :automatic
-    end
-  end
-
-  test "runs already live count against the cap", %{ws: ws} do
-    {:ok, running} = Ash.create(Issue, %{title: "already running", workspace_id: ws.id})
-    ResumeSlotFixture.admit!(ws, running)
-    cut_off = cut_off!(ws, "cut off", 2)
-    other = cut_off!(ws, "cut off too", 2)
-
-    cap!(2)
-    assert {:ok, %{resumed: 1, deferred: 1}} = resumed_sweep()
-
-    assert Worker.whereis(running.id)
-    assert Worker.whereis(cut_off.id)
-    assert Worker.whereis(other.id) == nil
-    assert StubResumeDeferrer.deferred_resume_ids() == [other.id]
-  end
-
   test "with no override the hardware suggestion is far from full, so nothing is deferred", %{
     ws: ws
   } do
@@ -157,85 +106,8 @@ defmodule Wardmast.Workers.ReconcilerLocalCapacitySweepTest do
     assert StubResumeDeferrer.deferrals() == []
   end
 
-  test "a deferred ticket is neither lost nor double-resumed", %{ws: ws} do
-    runner = cut_off!(ws, "first", 1)
-    waiting = cut_off!(ws, "waiting", 2)
-
-    cap!(1)
-    assert {:ok, %{resumed: 1, deferred: 1}} = resumed_sweep()
-    first_pid = Worker.whereis(runner.id)
-    assert is_pid(first_pid)
-
-    # The deferred ticket is still In progress, with no worker: held, not lost.
-    assert Ash.get!(Issue, waiting.id).state == :active
-    assert Worker.whereis(waiting.id) == nil
-
-    # A second sweep (another boot step, a retry) neither double-resumes the
-    # running ticket nor double-queues the deferred one.
-    assert {:ok, %{resumed: 0, deferred: 1}} = resumed_sweep()
-    assert Worker.whereis(runner.id) == first_pid
-    assert StubResumeDeferrer.deferred_resume_ids() == [waiting.id]
-
-    # A slot frees; the scheduler's replay resumes it exactly once.
-    :ok = Worker.stop(first_pid, :normal)
-    replay = [resume_origin: :automatic, slot_admitted: true, start_driver: false]
-
-    assert {:ok, %{worker_pid: pid}} =
-             Dispatch.resume(waiting.id, replay ++ [claude_command: ["sleep", "5"]])
-
-    assert Worker.whereis(waiting.id) == pid
-
-    assert {:error, {:worker_active, _}} =
-             Dispatch.resume(waiting.id, replay ++ [claude_command: ["sleep", "5"]])
-  end
-
   describe "a remote run Recovery collected" do
     # The boot order: Recovery first, then the Reconciler sweeps.
-    test "is deferred like any other when the primary is full, then resumed once", %{ws: ws} do
-      {:ok, running} = Ash.create(Issue, %{title: "local runner", workspace_id: ws.id})
-      ResumeSlotFixture.admit!(ws, running)
-      remote = cut_off!(ws, "was on a node", 1)
-
-      {:ok, %{token: token}} = Nodes.mint_join_token([name: "oryx"], "operator:test")
-      {:ok, %{node: node}} = Nodes.redeem_join_token(token)
-
-      run = Ash.read!(Run) |> Enum.filter(&(&1.task_id == remote.id)) |> List.first()
-
-      run =
-        run
-        |> Ash.Changeset.for_update(:update, %{})
-        |> Ash.Changeset.force_change_attribute(:node_id, node.id)
-        |> Ash.Changeset.force_change_attribute(:state, :working)
-        |> Ash.Changeset.force_change_attribute(:outcome, nil)
-        |> Ash.Changeset.force_change_attribute(:completed_at, nil)
-        |> Ash.update!()
-
-      cap!(1)
-
-      ReconcileSweep.steps(
-        primary?: true,
-        reconciler: SweepReconciler,
-        recovery: fn _opts -> {:ok, %{run.id => :collected}} end
-      )
-
-      assert %{outcome: :interrupted} = Ash.get!(Run, run.id)
-      assert Ash.get!(Issue, remote.id).state == :active
-      assert Worker.whereis(remote.id) == nil
-      assert StubResumeDeferrer.deferred_resume_ids() == [remote.id]
-
-      # Room opens up: the deferred resume is replayed once and runs.
-      :ok = Worker.stop(running.id, :normal)
-
-      assert {:ok, %{worker_pid: pid}} =
-               Dispatch.resume(remote.id,
-                 resume_origin: :automatic,
-                 slot_admitted: true,
-                 start_driver: false,
-                 claude_command: ["sleep", "5"]
-               )
-
-      assert Worker.whereis(remote.id) == pid
-    end
   end
 
   test "the sweep with the default resume reports a held ticket as deferred, not escalated",

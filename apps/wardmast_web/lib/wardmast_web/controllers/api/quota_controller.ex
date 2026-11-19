@@ -50,8 +50,8 @@ defmodule WardmastWeb.Api.QuotaController do
     * `paused_providers` — every provider / account an operator paused
       (`arb provider pause`, bd-5ef587) with who, when and why.
     * `budget` (DC5, bd-2c2a4g) — one block per account (`account`, `account_id`,
-      `mode`, `decides`, `pools`): each provider pool's concurrency budget with its
-      reason, labelled `shadow` until `scheduler_admission` is `enforce`
+      `pools`): each provider pool's concurrency budget with its
+      reason
       (`Wardmast.Board.CapacityView`).
     * `held_dispatches` — every dispatch the workspace's quota gate is holding
       (`Wardmast.Workflows.DispatchQueue.serialize_held/1`): the task, what it

@@ -285,7 +285,8 @@ defmodule Wardmast.Worker.ClaudeSession do
            GitCredential.spawn_env(
              git,
              Keyword.get(opts, :projection) || %{},
-             worker_env,
+             # #1545: glab never sees the operator's rotating OAuth login.
+             Wardmast.Worker.GlabIsolation.env() ++ worker_env,
              []
            ) do
       # bd-2zigo1: the install-wide CLAUDE_CODE_OAUTH_TOKEN (and any

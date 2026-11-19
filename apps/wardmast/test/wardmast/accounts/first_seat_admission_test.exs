@@ -27,7 +27,6 @@ defmodule Wardmast.Accounts.FirstSeatAdmissionTest do
 
   setup do
     on_exit(fn ->
-      Wardmast.Settings.set_scheduler_admission(nil)
       :ets.delete_all_objects(:arbiter_provider_circuit_breakers)
     end)
 
@@ -116,7 +115,7 @@ defmodule Wardmast.Accounts.FirstSeatAdmissionTest do
     Admission.admit(
       task,
       :claude,
-      [account: ctx.account, mode: :enforce, seat_opts: seat_opts] ++ extra
+      [account: ctx.account, seat_opts: seat_opts] ++ extra
     )
   end
 
@@ -200,7 +199,6 @@ defmodule Wardmast.Accounts.FirstSeatAdmissionTest do
       assert {:ok, :acquired} =
                ResumeSlot.admit(ctx.first,
                  account: ctx.account,
-                 mode: :enforce,
                  seat_opts: [budgets: [b], holders: %{}]
                )
 
@@ -209,7 +207,6 @@ defmodule Wardmast.Accounts.FirstSeatAdmissionTest do
       assert {:error, {:slot_cap_full, _}} =
                ResumeSlot.admit(ctx.second,
                  account: ctx.account,
-                 mode: :enforce,
                  seat_opts: [budgets: [b], holders: held, pool: "claude"]
                )
     end
@@ -219,7 +216,6 @@ defmodule Wardmast.Accounts.FirstSeatAdmissionTest do
     setup ctx do
       codex = account!(:codex, "codex", %{max_concurrent: 3})
       allow!(ctx.ws, codex, implementer_position: 1)
-      {:ok, _} = Wardmast.Settings.set_scheduler_admission(:enforce)
       %{codex: codex}
     end
 
@@ -274,7 +270,6 @@ defmodule Wardmast.Accounts.FirstSeatAdmissionTest do
       agy = account!(:antigravity, "ragy", %{})
       allow!(ctx.ws, codex, reviewer_position: 0)
       allow!(ctx.ws, agy, reviewer_position: 1)
-      {:ok, _} = Wardmast.Settings.set_scheduler_admission(:enforce)
 
       task =
         ctx.ws
