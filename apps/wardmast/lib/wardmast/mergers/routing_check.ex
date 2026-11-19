@@ -105,9 +105,9 @@ defmodule Wardmast.Mergers.RoutingCheck do
     _ -> nil
   end
 
-  defp remote_slug(strategy, path) do
+  defp remote_slug(_strategy, path) do
     if checkout?(path) do
-      case RepoResolver.from_remote(path, nested: strategy == :gitlab) do
+      case RepoResolver.from_remote(path) do
         {:ok, {owner, name}} -> "#{owner}/#{name}"
         _ -> nil
       end
