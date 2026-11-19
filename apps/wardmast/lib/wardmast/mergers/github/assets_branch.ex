@@ -75,7 +75,9 @@ defmodule Wardmast.Mergers.Github.AssetsBranch do
   end
 
   defp blob(req, root, data) do
-    case req.(:post, root <> "/git/blobs", json: %{"content" => Base.encode64(data), "encoding" => "base64"}) do
+    case req.(:post, root <> "/git/blobs",
+           json: %{"content" => Base.encode64(data), "encoding" => "base64"}
+         ) do
       {:ok, %{"sha" => sha}} -> {:ok, sha}
       {:ok, _} -> {:error, "GitHub blob response carried no sha"}
       {:error, _} = error -> error
@@ -97,7 +99,6 @@ defmodule Wardmast.Mergers.Github.AssetsBranch do
   defp with_readme(req, root, entries, nil) do
     with {:ok, sha} <- blob(req, root, @readme), do: {:ok, [{"README.md", sha} | entries]}
   end
-
 
   defp base_tree(_req, _root, nil), do: {:ok, nil}
 
@@ -135,7 +136,9 @@ defmodule Wardmast.Mergers.Github.AssetsBranch do
 
   defp move_ref(req, root, branch, _tip, commit) do
     ok_or_error(
-      req.(:patch, root <> "/git/refs/heads/#{branch}", json: %{"sha" => commit, "force" => false})
+      req.(:patch, root <> "/git/refs/heads/#{branch}",
+        json: %{"sha" => commit, "force" => false}
+      )
     )
   end
 
