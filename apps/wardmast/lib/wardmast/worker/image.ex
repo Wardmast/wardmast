@@ -84,6 +84,13 @@ defmodule Wardmast.Worker.Image do
   # KH14: images built FROM the base inherit it; `Image.Prebuilt` requires it.
   @contract_label "arbiter.runtime-contract"
   @contract_version "1"
+
+  # bd-6301r0: the base ships Debian trixie's headless Chromium so UI screenshot capture
+  # and the :browser tests run on any worker (incl. cluster nodes) with nothing installed
+  # per node. Pinned to a major (`chromium=150.*`): trixie-security bumps the patch level
+  # and drops old builds from the mirror, so an exact version would break the build.
+  @chromium_major "150"
+
   @branch_re ~r/\A[A-Za-z0-9][A-Za-z0-9._\/-]*\z/
   @version_re ~r/\A\d+(\.\d+){0,3}\z/
   @sha_re ~r/@sha256:[0-9a-f]{64}\z/
@@ -130,6 +137,7 @@ defmodule Wardmast.Worker.Image do
      && apt-get install -y --no-install-recommends \\
           bc build-essential ca-certificates curl git libncurses6 libsctp1 libssl3t64 \\
           openssh-client procps socat sqlite3 tini tmux \\
+          chromium=#{@chromium_major}.* fonts-liberation \\
      && rm -rf /var/lib/apt/lists/*
     # Pinned forge host keys (bd-290vof): `git fetch origin` over ssh verifies strictly.
     #{KnownHosts.containerfile_run()}
@@ -140,6 +148,8 @@ defmodule Wardmast.Worker.Image do
     COPY --from=arb_otp /usr/local/lib/erlang #{ArbCli.runtime_dir()}
     LABEL #{@arb_otp_label}="#{arb_otp}"
     LABEL #{@contract_label}="#{@contract_version}"
+    LABEL arbiter.chromium-major="#{@chromium_major}"
+    ENV ARB_CHROME=/usr/bin/chromium
     #{PodScripts.image_install()}
     ENV PATH=/opt/arbiter/cli:$PATH
     """
@@ -173,6 +183,10 @@ defmodule Wardmast.Worker.Image do
           required(:base) => layer() | nil,
           optional(:prebuilt) => map()
         }
+
+  @doc "The Chromium major the worker base pins (bd-6301r0)."
+  @spec chromium_major() :: String.t()
+  def chromium_major, do: @chromium_major
 
   @doc "The label every Wardmast dev image carries (and `list/1` filters on)."
   @spec label() :: String.t()

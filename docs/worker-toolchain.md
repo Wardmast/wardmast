@@ -105,3 +105,13 @@ publisher's job.
 * `claude_session_test.exs`, `prepush_check_test.exs`, `test_run_test.exs`: the
   three host call sites (pinned `PATH` first; unavailable runs nothing).
 * `image_test.exs`: unsupported pin and Containerfile mismatch fail the plan.
+
+## Headless Chromium in the base (bd-6301r0)
+
+The shared worker base installs Debian trixie's `chromium` pinned to a major
+(`chromium=150.*`, `Wardmast.Worker.Image.chromium_major/0`) plus `fonts-liberation`,
+and sets `ARB_CHROME=/usr/bin/chromium`, so the `:browser` tests in
+`apps/wardmast_web` run (rather than skip) in the image when Node is present. No
+Playwright driver ships: those tests speak CDP directly. Release CI builds the base
+locally and runs `scripts/worker-image-smoke.sh` (screenshots a page inside the image)
+before pushing it, and prints the image size to the job summary.
