@@ -233,12 +233,32 @@ jobs:
       - name: Compile (warnings as errors)
         run: mix compile --warnings-as-errors
 
+      # bd-485ts3: the CDP capture shooter's fixture-app tests (login, the success check, steps,
+      # full_page, loopback blocking) drive the REAL runner, so the wardmast shards need Node, the
+      # runner's pinned `playwright-core` and a Chrome. ARB_REQUIRE_CDP=1 turns a missing tool into a
+      # failure instead of a skip, so these gate the merge. (The image build installs the same
+      # lockfile with the same Node major.)
+      - name: Set up Node (CDP capture runner)
+        if: ${{ matrix.app == 'wardmast' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install the capture runner's dependencies
+        if: ${{ matrix.app == 'wardmast' }}
+        working-directory: apps/wardmast/priv/capture
+        run: |
+          npm ci --ignore-scripts
+          test -x /usr/bin/google-chrome
+
       - name: Run tests
         working-directory: apps/${{ matrix.app }}
         run: |
           mix test --partitions ${{ matrix.partitions }} --slowest 25
         env:
           MIX_TEST_PARTITION: ${{ matrix.partition }}
+          ARB_REQUIRE_CDP: ${{ matrix.app == 'wardmast' && '1' || '' }}
+          ARB_CHROME: ${{ matrix.app == 'wardmast' && '/usr/bin/google-chrome' || '' }}
 
       - name: Run wardmast_release_env tests
         if: ${{ matrix.app == 'wardmast_cli' }}

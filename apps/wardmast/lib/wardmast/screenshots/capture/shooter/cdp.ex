@@ -220,9 +220,12 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
       )
 
     File.mkdir_p!(Path.dirname(spec_file))
-    # It can hold a fixture password: owner-only, and gone when the shot is.
-    File.write!(spec_file, Jason.encode!(spec_json))
+    # It can hold a fixture password: owner-only from the first byte (created empty and chmodded
+    # before anything is written, so there is no window under the process umask), and gone when
+    # the shot is.
+    File.touch!(spec_file)
     File.chmod!(spec_file, 0o600)
+    File.write!(spec_file, Jason.encode!(spec_json))
 
     try do
       {exec, args} = with_timeout(tools.node, [tools.runner, spec_file], spec.timeout_s * 2 + 10)

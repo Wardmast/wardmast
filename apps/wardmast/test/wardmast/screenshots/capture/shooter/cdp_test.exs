@@ -243,7 +243,7 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
   describe "the real runner against the fixture app" do
     @availability Cdp.available(%{})
     @missing if(@availability == :ok, do: nil, else: elem(@availability, 1))
-    @moduletag skip: if(System.get_env("ARB_REQUIRE_CDP") == "1", do: false, else: @missing)
+    @describetag skip: if(System.get_env("ARB_REQUIRE_CDP") == "1", do: false, else: @missing)
 
     setup %{tmp_dir: dir} do
       bandit = start_supervised!({Bandit, plug: CdpFixtureApp, port: 0, ip: :loopback})
