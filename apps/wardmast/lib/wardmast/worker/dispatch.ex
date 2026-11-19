@@ -1867,7 +1867,11 @@ defmodule Wardmast.Worker.Dispatch do
     end
   end
 
-  defp record_push_refused(%Issue{id: id, workspace_id: ws_id, source_pr: source_pr}, reason, opts) do
+  defp record_push_refused(
+         %Issue{id: id, workspace_id: ws_id, source_pr: source_pr},
+         reason,
+         opts
+       ) do
     require Logger
     Logger.warning("Dispatch: #{id} may not push to PR #{source_pr}: #{reason}")
 
