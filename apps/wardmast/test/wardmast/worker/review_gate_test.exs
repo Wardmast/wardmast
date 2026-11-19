@@ -5963,6 +5963,22 @@ defmodule Wardmast.Worker.ReviewGateTest do
              "review_prompt must offer `gh pr review <n>` for inline comments"
     end
 
+    test "embeds glab mr commands for a GitLab !iid ref", %{ws: ws} do
+      task = new_task(ws)
+
+      state = %{
+        task_id: task.id,
+        branch: "feature/rev",
+        target_branch: "main",
+        pr_ref: "grp/proj!42"
+      }
+
+      prompt = ReviewGate.review_prompt(state)
+      assert prompt =~ "MR !42"
+      assert prompt =~ "glab mr diff 42"
+      refute prompt =~ "gh pr diff"
+    end
+
     test "accepts the bare '#42' ref form", %{ws: ws} do
       task = new_task(ws)
       state = %{task_id: task.id, branch: "feature/rev", target_branch: "main", pr_ref: "#42"}

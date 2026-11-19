@@ -402,6 +402,26 @@ defmodule Wardmast.Board.CiBackpressureTest do
                CiBackpressure.poll(ws, "vstim")
     end
 
+    test "GitLab polls the repo's own project from its merge.config.repos override" do
+      ws =
+        merge_ws(%{
+          "strategy" => "gitlab",
+          "config" => %{
+            "host" => "gitlab.com",
+            "project_id" => 777,
+            "credentials_ref" => "env:#{@env_var}",
+            "repos" => %{"vstim" => %{"project_id" => 888}}
+          }
+        })
+
+      Req.Test.stub(Wardmast.Mergers.Gitlab.HTTP, fn conn ->
+        assert conn.request_path == "/api/v4/projects/888/pipelines"
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+      end)
+
+      assert {:ok, %{pending: 0}} = CiBackpressure.poll(ws, "vstim")
+    end
+
     test "asks GitHub for the repo's queued pull-request runs" do
       ws =
         merge_ws(%{

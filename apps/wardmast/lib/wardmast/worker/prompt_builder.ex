@@ -15,8 +15,10 @@ defmodule Wardmast.Worker.PromptBuilder do
   alias Wardmast.Agents.Gemini.ConfigDir, as: GeminiConfigDir
   alias Wardmast.MCP
   alias Wardmast.MCP.AgentConfig.Gemini, as: GeminiConfig
+  alias Wardmast.Mergers.ForgeCli
   alias Wardmast.ReviewGate.Round
   alias Wardmast.Tasks.Issue
+  alias Wardmast.Tasks.Workspace
   alias Wardmast.Trackers
   alias Wardmast.Worker.AcceptanceSplit
   alias Wardmast.Worker.EvidenceIntegrity
@@ -534,7 +536,7 @@ defmodule Wardmast.Worker.PromptBuilder do
     the correct base branch, using the body you author in the next step.
     Opening your own PR creates a duplicate on the wrong base.
     #{pr_review_instruction(task, opts)}#{verify_after_deploy_step(task, mcp?)}
-    #{AcceptanceSplit.implementer_block()}#{pr_body_step(task, mcp?)}#{completion_notes_step(task, mcp?)}
+    #{AcceptanceSplit.implementer_block()}#{pr_body_step(task, opts, mcp?)}#{completion_notes_step(task, mcp?)}
     #{coordination_section(task, opts)}
     CRITICAL — continuation discipline: NEVER end a response with only a plan
     or a statement of the next step (for example, announcing that you will now
@@ -814,8 +816,10 @@ defmodule Wardmast.Worker.PromptBuilder do
   # directory (when one is provisioned) is a disposable, detached checkout
   # with no branch of its own, so `gh pr checkout` there is always safe: there
   # is nothing Wardmast-owned to collide with or lose.
-  defp pr_follow_up_note(%Issue{id: id, source_pr: source_pr}, opts)
+  defp pr_follow_up_note(%Issue{id: id, source_pr: source_pr} = task, opts)
        when is_binary(source_pr) and source_pr != "" do
+    forge = forge_for(task, opts)
+
     """
 
     This directive is a PRPatrol follow-up against EXISTING pull request ##{source_pr}.
@@ -825,10 +829,10 @@ defmodule Wardmast.Worker.PromptBuilder do
 
     Your current directory is already a checkout of the repository (read-only
     by convention, not a branch of its own) — good enough to inspect the code
-    and run `gh`/`git`. If a fix genuinely is needed: check out the ORIGINAL
-    PR's branch directly — `gh pr checkout #{source_pr}` — right there, and
+    and run `#{forge_cli(forge)}`/`git`. If a fix genuinely is needed: check out the ORIGINAL
+    PR's branch directly — `#{ForgeCli.checkout_cmd(forge, source_pr)}` — right there, and
     commit#{if Keyword.get(opts, :host_pushes?, false), do: " (Wardmast pushes it for you; do NOT `git push`)", else: " + push (`git push`)"}, which updates PR ##{source_pr} in place. Do
-    NOT `git push -u origin <new-branch>` or `gh pr create` — that opens a
+    NOT `git push -u origin <new-branch>` or `#{ForgeCli.cli(forge)} create` — that opens a
     duplicate PR against the original's entire diff.
 
     If the fix is too large or risky to fold in now, do not silently open a new
@@ -860,11 +864,19 @@ defmodule Wardmast.Worker.PromptBuilder do
   # MCP tool rather than the `arb` escript so completion never depends on
   # `~/.local/bin/arb` being present (it is transiently deleted by test runs).
   defp pr_body_step(
-         %Issue{id: id, tracker_type: tracker_type, tracker_ref: tracker_ref},
+         %Issue{id: id, tracker_type: tracker_type, tracker_ref: tracker_ref} = task,
+         opts,
          mcp?
        ) do
+    forge = forge_for(task, opts)
+
     closes_guidance =
       case {tracker_type, is_binary(tracker_ref) && Regex.match?(~r/^\d+$/, tracker_ref)} do
+        {:gitlab, true} ->
+          "\n\n    For GitLab-tracked tasks, include a closing keyword `Closes ##{tracker_ref}`" <>
+            " in the References section — GitLab will auto-close the issue on merge, " <>
+            "acting as a backstop independent of Wardmast's own close mechanism."
+
         {:github, true} ->
           "\n\n    For GitHub-tracked tasks, include a closing keyword `Closes ##{tracker_ref}`" <>
             " in the References section — GitHub will auto-close the issue on merge, " <>
@@ -888,7 +900,7 @@ defmodule Wardmast.Worker.PromptBuilder do
         criterion you could not verify in the worktree, with the reason, and a
         suggestion to move it to `deployment_notes`.
 
-    If the repo has a PR template (`.github/pull_request_template.md`), FILL it
+    If the repo has a PR template (#{ForgeCli.template_hint(forge)}), FILL it
     rather than discard it. #{pr_body_persist(id, mcp?)}
 
     Do this before printing `arb done`.
@@ -1014,14 +1026,16 @@ defmodule Wardmast.Worker.PromptBuilder do
   # (above) are the primary source, but the PR reviews are the canonical
   # record — fetching them explicitly guards against a `Round` row being
   # stale or missing.
-  defp pr_review_instruction(%Issue{pr_ref: pr_ref}, opts)
+  defp pr_review_instruction(%Issue{pr_ref: pr_ref} = task, opts)
        when is_binary(pr_ref) and pr_ref != "" do
+    forge = forge_for(task, opts)
+
     """
 
     This task has an existing PR (##{pr_ref}). Read the PR review comments
     before starting work — the review findings are there:
 
-        gh pr view #{pr_ref} --json reviews,reviewComments
+        #{ForgeCli.reviews_cmd(forge, pr_ref)}
 
     Address every finding (fix the code or rebut with justification), then
     #{if Keyword.get(opts, :host_pushes?, false), do: "commit to the existing branch (Wardmast pushes it; do NOT push)", else: "push commits to the existing branch"}. Do NOT open a new PR.
@@ -1029,6 +1043,24 @@ defmodule Wardmast.Worker.PromptBuilder do
   end
 
   defp pr_review_instruction(_task, _opts), do: ""
+
+  # The forge the task's repo merges through: from the workspace in `opts`
+  # (or the task's loaded one); a GitLab `!iid` ref also implies GitLab. GitHub
+  # otherwise, which keeps the historical wording.
+  defp forge_for(%Issue{} = task, opts) do
+    workspace =
+      case Keyword.get(opts, :workspace) do
+        %Workspace{} = ws -> ws
+        _ -> if match?(%Workspace{}, task.workspace), do: task.workspace
+      end
+
+    case ForgeCli.forge(workspace, task.repo) do
+      :gitlab -> :gitlab
+      _ -> ForgeCli.forge_from_ref(task.pr_ref || task.source_pr)
+    end
+  end
+
+  defp forge_cli(forge), do: if(forge == :gitlab, do: "glab", else: "gh")
 
   # For tracker-backed tasks (an upstream Jira/etc. ticket), completing the
   # work includes producing the gated completion notes the tracker requires

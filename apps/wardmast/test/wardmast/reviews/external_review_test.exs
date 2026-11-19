@@ -2884,6 +2884,110 @@ defmodule Wardmast.Reviews.ExternalReviewTest do
     end)
   end
 
+  describe "greenlight counts on GitLab when the position is rejected" do
+    test "a comment GitLab posts unpositioned flips from in_diff to out_of_diff" do
+      System.put_env(@env_var, "tok")
+      on_exit(fn -> System.delete_env(@env_var) end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "er-gl-counts",
+          prefix: uniq_prefix(),
+          config: %{
+            "merge" => %{
+              "strategy" => "gitlab",
+              "config" => %{
+                "host" => "gitlab.com",
+                "project_id" => 99,
+                "credentials_ref" => "env:#{@env_var}"
+              }
+            }
+          }
+        })
+
+      comment = fn file, line ->
+        %{
+          "severity" => "warning",
+          "file" => file,
+          "line" => line,
+          "message" => "m",
+          "body" => "m",
+          "in_diff" => true
+        }
+      end
+
+      {:ok, rec} =
+        Ash.create(Record, %{
+          pr_ref: "!7",
+          pr: "7",
+          workspace_id: ws.id,
+          strategy: "gitlab",
+          status: :completed_unposted,
+          mode: :report_only,
+          greenlight_status: :pending,
+          proposed_comments: [comment.("a.ex", 1), comment.("b.ex", 2)],
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        })
+
+      Req.Test.stub(Wardmast.Mergers.Gitlab.HTTP, fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and String.ends_with?(path, "/merge_requests/7/changes") ->
+            json(conn, %{
+              "changes" => [
+                %{
+                  "old_path" => "a.ex",
+                  "new_path" => "a.ex",
+                  "diff" => "@@ -0,0 +1,2 @@\n+x\n+y\n"
+                },
+                %{
+                  "old_path" => "b.ex",
+                  "new_path" => "b.ex",
+                  "diff" => "@@ -0,0 +1,2 @@\n+x\n+y\n"
+                }
+              ]
+            })
+
+          conn.method == "GET" and String.ends_with?(path, "/merge_requests/7") ->
+            json(conn, %{
+              "diff_refs" => %{"base_sha" => "b", "start_sha" => "s", "head_sha" => "h"}
+            })
+
+          conn.method == "POST" and String.ends_with?(path, "/merge_requests/7/discussions") ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+            case Jason.decode!(body) do
+              %{"position" => %{"new_path" => "b.ex"}} ->
+                conn
+                |> Plug.Conn.put_resp_header("content-type", "application/json")
+                |> Plug.Conn.resp(400, Jason.encode!(%{"message" => "line_code"}))
+
+              _ ->
+                conn |> Plug.Conn.put_status(201) |> json(%{"id" => "d"})
+            end
+
+          true ->
+            conn |> Plug.Conn.put_status(201) |> json(%{})
+        end
+      end)
+
+      assert {:ok, gl} =
+               ExternalReview.greenlight(record_id: rec.id, select: "all", post_verdict: false)
+
+      assert gl.posted == 2
+
+      reloaded = Ash.get!(Record, rec.id)
+      by_file = Map.new(reloaded.proposed_comments, &{&1["file"], &1["in_diff"]})
+      assert by_file == %{"a.ex" => true, "b.ex" => false}
+
+      summary = Wardmast.Reviews.Serializer.record(reloaded)
+      assert summary.in_diff_count == 1
+      assert summary.out_of_diff_count == 1
+    end
+  end
+
   describe "failure tracking — bd-7rspia" do
     test "stores failure_stage and failure_reason when a record is created with failure info" do
       ws = github_ws("er-fail-stage-reason")

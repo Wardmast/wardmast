@@ -406,10 +406,17 @@ defmodule Wardmast.Board.CiBackpressure do
   # A multi-repo GitHub workspace derives `owner/repo` from each repo's remote
   # rather than pinning it, so the adapter is told the slug (as PRPatrol does).
   defp prepare_slug(adapter, workspace, repo) do
-    slug = Enum.find_value(ForgeRepos.list(workspace), &(&1.repo_key == repo && &1.slug))
-
-    if adapter == Wardmast.Mergers.Github and is_binary(slug),
-      do: adapter.prepare(Mergers.scope(workspace, repo), repo: slug),
-      else: :ok
+    entry = Enum.find(ForgeRepos.list(workspace), &(&1.repo_key == repo))
+    prepare_slug(adapter, workspace, repo, entry)
   end
+
+  defp prepare_slug(Wardmast.Mergers.Github, workspace, repo, %{slug: slug}) when is_binary(slug),
+    do: Wardmast.Mergers.Github.prepare(Mergers.scope(workspace, repo), repo: slug)
+
+  # GitLab needs no slug: `Mergers.prepare(workspace, repo: key)` above already
+  # seeded the repo's own project via `Gitlab.Config.override_repo/2`
+  # (`merge.config.repos.<key>`), so the poll reads that project's pipelines.
+  defp prepare_slug(Wardmast.Mergers.Gitlab, _workspace, _repo, _entry), do: :ok
+
+  defp prepare_slug(_adapter, _workspace, _repo, _entry), do: :ok
 end

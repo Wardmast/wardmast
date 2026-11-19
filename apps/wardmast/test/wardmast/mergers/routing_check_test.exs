@@ -136,4 +136,29 @@ defmodule Wardmast.Mergers.RoutingCheckTest do
   test "a workspace with no repo_paths has nothing to check" do
     assert RoutingCheck.check_workspace(ws(%{"strategy" => "github"}, %{})) == []
   end
+
+  test "GitLab: a path-form project_id pinned to another project is a remote_mismatch", %{
+    tmp_dir: dir
+  } do
+    workspace =
+      ws(
+        %{"strategy" => "gitlab", "config" => %{"project_id" => "other/project"}},
+        %{"app" => checkout(dir, "app", "git@gitlab.com:grp/sub/app.git")}
+      )
+
+    assert %{problem: :remote_mismatch, remote: "grp/sub/app", expected: "other/project"} =
+             hd(RoutingCheck.check_workspace(workspace))
+             |> tap(&assert &1.fix =~ "config.project_id grp/sub/app")
+  end
+
+  test "GitLab: a matching or numeric project_id is clean", %{tmp_dir: dir} do
+    path = checkout(dir, "app", "https://gitlab.com/grp/app.git")
+
+    for id <- ["grp/app", "grp%2Fapp", "123"] do
+      workspace =
+        ws(%{"strategy" => "gitlab", "config" => %{"project_id" => id}}, %{"app" => path})
+
+      assert %{problem: nil, remote: "grp/app"} = hd(RoutingCheck.check_workspace(workspace))
+    end
+  end
 end
