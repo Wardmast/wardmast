@@ -30,8 +30,8 @@ defmodule Wardmast.Board.CapacityExplainerLayersTest do
     }
   end
 
-  defp ready_card(id, hold \\ :no_slot) do
-    %{id: id, hold: hold, reason: "no free worker slot", card: %{workspace_id: nil}}
+  defp ready_card(id, hold \\ {:provider_constraint, "require codex: codex at capacity"}) do
+    %{id: id, hold: hold, reason: "held — provider constraint", card: %{workspace_id: nil}}
   end
 
   describe "a card's layer" do
