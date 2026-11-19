@@ -134,6 +134,7 @@ defmodule Wardmast.Worker.Dispatch do
   alias Wardmast.Workflows.CodeReview
   alias Wardmast.Workflows.DispatchQueue
   alias Wardmast.Workflows.Machine
+  alias Wardmast.Workflows.PRPatrol.AuthorScope
   alias Wardmast.Workflows.Work
 
   require Ash.Query
@@ -1846,6 +1847,37 @@ defmodule Wardmast.Worker.Dispatch do
 
   defp under_way?({:column, column}), do: column in [:in_progress, :merging, :verifying]
   defp under_way?(_hold), do: false
+
+  @doc false
+  # bd-cwigjh / #1550: the push guard. A follow-up worker pushes to the PR it was
+  # filed against, so before one is spawned ask `AuthorScope.push_decision/3`
+  # whether that PR's author is in scope. Out of scope: the dispatch carries
+  # `push_refused: reason` (no push credential, a comment-only briefing) and the
+  # refusal is recorded as a `follow_up_push_refused` event. In scope, or a task
+  # that is no follow-up: opts are returned untouched.
+  @spec apply_push_guard(Issue.t(), keyword(), Workspace.t() | nil) :: keyword()
+  def apply_push_guard(%Issue{} = task, opts, workspace) do
+    case AuthorScope.push_decision(task, workspace, Keyword.get(opts, :repo)) do
+      :ok ->
+        opts
+
+      {:refused, reason} ->
+        record_push_refused(task, reason, opts)
+        Keyword.put(opts, :push_refused, reason)
+    end
+  end
+
+  defp record_push_refused(%Issue{id: id, workspace_id: ws_id, source_pr: source_pr}, reason, opts) do
+    require Logger
+    Logger.warning("Dispatch: #{id} may not push to PR #{source_pr}: #{reason}")
+
+    Wardmast.Events.broadcast(ws_id, "follow_up_push_refused", %{
+      "task_id" => id,
+      "source_pr" => source_pr,
+      "repo" => Keyword.get(opts, :repo),
+      "reason" => reason
+    })
+  end
 
   defp record_forced_dispatch(%Issue{id: id, workspace_id: ws_id}, hold, opts) do
     require Logger
@@ -5275,6 +5307,12 @@ defmodule Wardmast.Worker.Dispatch do
         workspace = load_workspace(task)
         :ok = Agents.prepare(workspace, :agent)
 
+        # bd-cwigjh / #1550: a follow-up on a PR whose author is outside the
+        # workspace's pr_patrol scope may comment, never push. Decided here —
+        # the one seam a fresh dispatch and a resume both pass through — so the
+        # credential plan and the briefing below both see it.
+        opts = apply_push_guard(task, opts, workspace)
+
         # Order matters: apply the provider (agent_type) override first so it
         # can strip the routed, provider-specific model, then the bd-8cn795
         # thrash auto-escalation (a *default*, not an override), then let an
@@ -5724,7 +5762,7 @@ defmodule Wardmast.Worker.Dispatch do
   # A podman run holds no credential by design: the host pushes its branch after
   # `arb done` (bd-capkj9), so it plans as `host_pushes?` (bd-7rxy1c).
   defp git_credential_plan(workspace, policy, opts) do
-    role = if Keyword.get(opts, :review, false), do: :reviewer, else: :implementer
+    role = git_credential_role(opts)
 
     GitCredential.plan(workspace, Keyword.get(opts, :repo),
       role: role,
@@ -5732,6 +5770,14 @@ defmodule Wardmast.Worker.Dispatch do
       host_pushes?: ContainerSpawn.podman?(policy),
       remote_node?: Keyword.get(opts, :node) != nil
     )
+  end
+
+  # A reviewer is handed no push credential. So is a follow-up whose push the
+  # author-scope guard refused (`apply_push_guard/3`, bd-cwigjh).
+  defp git_credential_role(opts) do
+    if Keyword.get(opts, :review, false) or Keyword.has_key?(opts, :push_refused),
+      do: :reviewer,
+      else: :implementer
   end
 
   defp git_credential_checked({:ok, _type} = ok, workspace, policy, opts) do

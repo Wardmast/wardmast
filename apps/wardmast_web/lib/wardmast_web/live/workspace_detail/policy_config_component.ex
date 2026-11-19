@@ -256,6 +256,7 @@ defmodule WardmastWeb.WorkspaceDetail.PolicyConfigComponent do
   defp pr_patrol_author_logins_text(ws) do
     case cfg(ws, ["pr_patrol", "author_logins"]) do
       list when is_list(list) -> Enum.join(list, ", ")
+      login when is_binary(login) -> login
       _ -> ""
     end
   end
@@ -604,7 +605,7 @@ defmodule WardmastWeb.WorkspaceDetail.PolicyConfigComponent do
             <.mobile_group title="PR patrol">
               <.setting_row
                 name="PR-patrol authors"
-                consequence="pr_patrol.author_logins — the patrol only touches PRs from these logins; blank patrols everyone"
+                consequence="pr_patrol.author_logins — the patrol only touches PRs from these logins; blank = only PRs Wardmast opened; * = everyone's"
               >
                 <:control>
                   <Forms.input
