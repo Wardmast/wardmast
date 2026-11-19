@@ -345,6 +345,68 @@ defmodule WardmastWeb.UpdateAvailableTest do
       assert has_element?(view, "#update-deploy-button")
     end
 
+    test "with live workers the control shows the count and the interrupt/auto-resume note",
+         %{conn: conn} do
+      set_live_workers(3)
+      start_checker_with(@release, "0.2.0", fn -> [20_260_101_000_000] end)
+
+      {:ok, view, _} = live(conn, ~p"/")
+      confirm = view |> element("#update-deploy-button") |> render() |> confirm_text()
+
+      assert has_element?(view, "#update-deploy-button", "Update anyway")
+      assert has_element?(view, "#update-live-workers", "3")
+
+      assert has_element?(
+               view,
+               "#update-deploy-form input[name='update[allow_active_workers]'][value=true]"
+             )
+
+      assert confirm =~ "3 worker(s)"
+      assert confirm =~ "interrupts"
+      assert confirm =~ "automatically resumed"
+    end
+
+    test "with no live workers there is no override", %{conn: conn} do
+      set_live_workers(0)
+      start_checker_with(@release, "0.2.0", fn -> [20_260_101_000_000] end)
+
+      {:ok, view, _} = live(conn, ~p"/")
+
+      refute has_element?(view, "#update-live-workers")
+      refute has_element?(view, "#update-deploy-form input[name='update[allow_active_workers]']")
+      assert has_element?(view, "#update-deploy-button", "Update to v99.0.0")
+    end
+
+    test "a live-worker preflight refusal shows its message and the override hint",
+         %{conn: conn, home: home} do
+      set_live_workers(0)
+      start_checker_with(@release, "0.2.0", fn -> [] end)
+
+      write_status(home, %{
+        "state" => "failed",
+        "tag" => "v99.0.0",
+        "phase" => "preflight",
+        "message" => "7 worker(s) are actively working",
+        "finished_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+      })
+
+      {:ok, view, _} = live(conn, ~p"/")
+
+      assert has_element?(
+               view,
+               "#deploy-status[data-state='failed']",
+               "7 worker(s) are actively working"
+             )
+
+      assert has_element?(view, "#deploy-status", "Update anyway")
+    end
+
+    defp set_live_workers(n) do
+      prev = Application.get_env(:wardmast, :self_deploy, [])
+      Application.put_env(:wardmast, :self_deploy, Keyword.put(prev, :live_workers, fn -> n end))
+      on_exit(fn -> Application.put_env(:wardmast, :self_deploy, prev) end)
+    end
+
     defp confirm_text(html) do
       html
       |> LazyHTML.from_fragment()
