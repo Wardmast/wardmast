@@ -1,14 +1,13 @@
 defmodule Wardmast.Board.SnapshotWalkTest do
   @moduledoc """
-  `Snapshot.derive/1` handed a `:walk` (DC6, provider-dynamic-concurrency §4,
-  §10.1): the board carries the scheduler walk *beside* today's plan, and
-  nothing today's plan decides moves — I1 (no `:walk`, no walk) and I2 (the
-  same promotion and the same holds, whatever the walk says).
+  `Snapshot.derive/1` (DC6, provider-dynamic-concurrency §4; the only plan since
+  DC12): the board carries the scheduler walk at `:walk`, and its entries are the
+  Ready column. Without a `:walk`, or with one that cannot be planned, nothing is
+  placed and every free card waits for capacity.
   """
   use ExUnit.Case, async: true
   use ExUnitProperties
 
-  alias Wardmast.Board.AdmissionShadow
   alias Wardmast.Board.Snapshot
 
   @now ~U[2026-10-10 12:00:00Z]
@@ -45,7 +44,6 @@ defmodule Wardmast.Board.SnapshotWalkTest do
         changed_files: %{},
         now: @now,
         slots_total: 4,
-        quota: :ok,
         paused: false
       },
       Map.new(overrides)
@@ -60,13 +58,16 @@ defmodule Wardmast.Board.SnapshotWalkTest do
     }
   end
 
-  test "without :walk the board carries no walk (I1)" do
+  test "without :walk nothing is placed and every free card waits for capacity" do
     board = Snapshot.derive(input(issues: [issue("bd-1")]))
-    refute Map.has_key?(board, :walk)
-    assert board.promote == "bd-1"
+
+    assert %{promote: nil, placements: []} = board.walk
+
+    assert [%{id: "bd-1", state: :blocked, reason: "waiting for capacity — " <> _}] =
+             board.ready
   end
 
-  test "with :walk the walk rides beside today's plan, which is unchanged" do
+  test "the walk's entries are the Ready column" do
     issues = [issue("bd-a", %{priority: 1}), issue("bd-b", %{priority: 2})]
 
     # bd-a can only use the full claude pool; bd-b can use agy's free one.
@@ -75,52 +76,43 @@ defmodule Wardmast.Board.SnapshotWalkTest do
       "bd-b" => [%{pool: @claude, nodes: ["local"]}, %{pool: @gpt, nodes: ["local"]}]
     }
 
-    today = Snapshot.derive(input(issues: issues))
-    shadowed = Snapshot.derive(input(issues: issues, walk: walk(candidates)))
+    board = Snapshot.derive(input(issues: issues, walk: walk(candidates)))
 
-    assert Map.delete(shadowed, :walk) == today
-    assert today.promote == "bd-a"
+    assert Enum.map(board.ready, & &1.id) == Enum.map(board.walk.entries, & &1.id)
 
     assert %{promote: "bd-b", placements: [%{id: "bd-b", pool: @gpt, node: "local"}]} =
-             shadowed.walk
+             board.walk
 
-    assert %{wait_cause: {:capacity, :provider}} =
-             Enum.find(shadowed.walk.entries, &(&1.id == "bd-a"))
+    assert %{wait_cause: {:capacity, :provider}} = Enum.find(board.ready, &(&1.id == "bd-a"))
 
-    # The capacity sets the walk ran against ride with it, for the record.
-    assert shadowed.walk.pools == walk(candidates).pools
-    assert shadowed.walk.nodes == walk(candidates).nodes
+    # The capacity sets the walk ran against ride with it.
+    assert board.walk.pools == walk(candidates).pools
+    assert board.walk.nodes == walk(candidates).nodes
   end
 
-  test "the walk holds on the 15 s retry window, not on today's capacity-folded constraint" do
+  test "the walk holds on the 15 s retry window" do
     issues = [issue("bd-a", %{priority: 1}), issue("bd-b", %{priority: 2})]
     everywhere = fn _card -> [%{pool: @gpt, nodes: ["local"]}] end
 
-    shadowed =
+    board =
       Snapshot.derive(
         input(
           issues: issues,
-          # bd-814vuy's per-workspace pool hold: capacity, which the walk replaces.
-          card_constraint: %{"bd-a" => {:hold, "claude:default at capacity"}},
           # bd-814vuy's 15 s hold after a refused dispatch: the card's own.
           dispatch_holds: %{"bd-b" => {:hold, "dispatch refused (account at capacity)"}},
           walk: walk(everywhere)
         )
       )
 
-    assert shadowed.promote == nil
-    assert shadowed.walk.promote == "bd-a"
-
-    assert %{wait_cause: :own_hold} =
-             Enum.find(shadowed.walk.entries, &(&1.id == "bd-b"))
+    assert board.walk.promote == "bd-a"
+    assert %{wait_cause: :own_hold} = Enum.find(board.walk.entries, &(&1.id == "bd-b"))
   end
 
-  # Seen live (v0.2.43): today's slot total is the machines' caps summed
-  # (local 2 + node 3), and five tickets In progress fill it — four on the
-  # primary (two implementers and two review-side runs its cap never holds),
-  # one on the node. Today has no free worker slot; the walk counts each machine
-  # against its own cap and places the Ready card on the node's free slot.
-  test "a node's free slot is placeable while today's install-wide slot total is full" do
+  # Seen live (v0.2.43): the machines' caps summed (local 2 + node 3), and five
+  # tickets In progress fill it — four on the primary (two implementers and two
+  # review-side runs its cap never holds), one on the node. The walk counts each
+  # machine against its own cap and places the Ready card on the node's free slot.
+  test "a node's free slot is placeable while the primary is over its own cap" do
     issues = Enum.map(1..5, &issue("bd-run-#{&1}", %{state: :active})) ++ [issue("bd-ready")]
 
     walk = %{
@@ -132,36 +124,17 @@ defmodule Wardmast.Board.SnapshotWalkTest do
       candidates: fn _card -> [%{pool: @claude, nodes: [["oryx"], ["local"]]}] end
     }
 
-    today = Snapshot.derive(input(issues: issues, slots_total: 5))
-    shadowed = Snapshot.derive(input(issues: issues, slots_total: 5, walk: walk))
-
-    assert Map.delete(shadowed, :walk) == today
-    assert today.promote == nil
-
-    assert %{state: :blocked, reason: "blocked — no free worker slot"} =
-             Enum.find(today.ready, &(&1.id == "bd-ready"))
+    board = Snapshot.derive(input(issues: issues, slots_total: 5, walk: walk))
 
     assert %{promote: "bd-ready", placements: [%{id: "bd-ready", pool: @claude, node: "oryx"}]} =
-             shadowed.walk
-
-    # The shadow's row: today held on the slot total, the walk on the node.
-    assert %{
-             legacy_pick: nil,
-             walk_pick: "bd-ready",
-             cause: "legacy_hold",
-             legacy: %{"head" => "bd-ready", "hold" => "no_slot"},
-             walk: %{"pick" => "bd-ready", "node" => "oryx", "pool_label" => "claude:default"}
-           } = AdmissionShadow.event(shadowed, @now)
+             board.walk
   end
 
   @tag capture_log: true
-  test "a walk that cannot be planned is left out; today's board is never lost to it" do
+  test "a walk that cannot be planned is planned with no capacity: the board still renders" do
     issues = [issue("bd-a")]
-    today = Snapshot.derive(input(issues: issues))
 
     broken = [
-      # A malformed pool (no budget at all).
-      walk(fn _ -> [%{pool: @claude, nodes: ["local"]}] end, %{@claude => %{seats: 0}}),
       # A candidates function that raises.
       walk(fn _ -> raise "boom" end),
       # Something that is not a walk at all.
@@ -170,12 +143,14 @@ defmodule Wardmast.Board.SnapshotWalkTest do
 
     for walk <- broken do
       board = Snapshot.derive(input(issues: issues, walk: walk))
-      refute Map.has_key?(board, :walk)
-      assert board == today
+
+      assert %{promote: nil, placements: []} = board.walk
+      assert [%{id: "bd-a", state: :blocked}] = board.ready
+      assert Enum.map(board.backlog ++ board.in_progress, & &1.id) == []
     end
   end
 
-  # ---- I2 at the board ----------------------------------------------------------
+  # ---- the walk's entries are the Ready column ------------------------------------
 
   defp issue_gen(id) do
     gen all(
@@ -184,12 +159,6 @@ defmodule Wardmast.Board.SnapshotWalkTest do
           ws <- member_of(["ws-1", "ws-2"])
         ) do
       issue(id, %{state: state, priority: priority, workspace_id: ws})
-    end
-  end
-
-  defp holds_gen(ids, phrase) do
-    gen all(held <- list_of(member_of(ids), max_length: 3)) do
-      Map.new(held, &{&1, {:hold, phrase}})
     end
   end
 
@@ -216,36 +185,20 @@ defmodule Wardmast.Board.SnapshotWalkTest do
     end
   end
 
-  property "I2: whatever the walk says, today's promotion and every hold are unchanged" do
+  property "whatever the capacity, Ready is the walk's entries and a placement is a Ready card" do
     ids = Enum.map(1..6, &"bd-#{&1}")
 
     check all(
             issues <- fixed_list(Enum.map(ids, &issue_gen/1)),
-            slots_total <- integer(0..5),
-            quota <- member_of([:ok, :ok, {:hold, "blocked — quota exhausted"}]),
             paused <- member_of([false, false, false, true]),
-            card_constraint <- holds_gen(ids, "claude:default at capacity"),
-            dispatch_holds <- holds_gen(ids, "dispatch refused"),
-            card_guardrail <- holds_gen(ids, "no eligible model"),
             capacity <- capacity_gen(ids),
             max_runs: 200
           ) do
-      base =
-        input(
-          issues: issues,
-          slots_total: slots_total,
-          quota: quota,
-          paused: paused,
-          card_constraint: card_constraint,
-          dispatch_holds: dispatch_holds,
-          card_guardrail: card_guardrail
-        )
+      board = Snapshot.derive(input(issues: issues, paused: paused, walk: capacity))
 
-      today = Snapshot.derive(base)
-      shadowed = Snapshot.derive(Map.put(base, :walk, capacity))
-
-      assert Map.delete(shadowed, :walk) == today
-      assert is_map(shadowed.walk)
+      assert Enum.map(board.ready, & &1.id) == Enum.map(board.walk.entries, & &1.id)
+      assert Enum.all?(board.walk.placements, &(&1.id in Enum.map(board.ready, fn e -> e.id end)))
+      if paused, do: assert(board.walk.placements == [])
     end
   end
 end
