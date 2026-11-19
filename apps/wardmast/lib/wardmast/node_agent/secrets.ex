@@ -20,6 +20,7 @@ defmodule Wardmast.NodeAgent.Secrets do
   """
 
   @authfile "pull-auth.json"
+  @config_home "config-home"
 
   @doc """
   The runtime directory secrets live under: `:runtime_dir`, else
@@ -105,14 +106,156 @@ defmodule Wardmast.NodeAgent.Secrets do
     end
   end
 
-  @doc "Remove run `run`'s secrets directory, its pull auth file included (idempotent)."
-  @spec remove(Path.t() | nil, String.t()) :: :ok
-  def remove(nil, _run), do: :ok
+  @doc """
+  Where run `run`'s config home is while it lives (SI8): a Codex run's `CODEX_HOME`
+  (its login and generated config), a directory of its own on the tmpfs.
+  """
+  @spec config_home(Path.t(), String.t()) :: Path.t()
+  def config_home(runtime_dir, run), do: Path.join(dir(runtime_dir, run), @config_home)
 
-  def remove(runtime_dir, run) do
+  @doc """
+  Make run `run`'s config home on the tmpfs and write `files` (`%{relative path => bytes}`)
+  into it (SI8, `docs/design/remote-workers.md` §21.3.3): every directory 0700, every file
+  0600 with its mode set before a byte is written, created exclusively so nothing is
+  written through a link. It holds a refresh token, so it is `write/3`'s tmpfs rule and
+  stricter in one respect: even a run with no files gets its (empty) home only on a tmpfs.
+  A path that is absolute, empty or climbs (`..`) is refused. Returns the home's path.
+  Options as `write/3`.
+  """
+  @spec write_config_home(String.t(), %{optional(String.t()) => binary()}, keyword()) ::
+          {:ok, Path.t()} | {:error, term()}
+  def write_config_home(run, files, opts) when is_map(files) do
+    with {:ok, root} <- runtime_dir(opts),
+         :ok <- check_tmpfs(root, Keyword.get(opts, :require_tmpfs, true), opts),
+         :ok <- check_relative(Map.keys(files)),
+         home = config_home(root, run),
+         :ok <- make_private_dir(dir(root, run)),
+         :ok <- make_private_dir(home),
+         :ok <- write_home_files(home, files) do
+      {:ok, home}
+    else
+      {:error, {:secrets_write_failed, _}} = error ->
+        # nothing half-written stays on the tmpfs
+        with {:ok, root} <- runtime_dir(opts), do: remove_config_home(root, run)
+        error
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp check_relative(paths) do
+    bad =
+      Enum.find(paths, fn path ->
+        not is_binary(path) or path == "" or Path.type(path) != :relative or
+          Enum.any?(Path.split(path), &(&1 in ["..", "."])) or String.contains?(path, <<0>>)
+      end)
+
+    if bad, do: {:error, {:secrets_write_failed, {:bad_path, bad}}}, else: :ok
+  end
+
+  defp make_private_dir(dir) do
+    with :ok <- File.mkdir_p(dir),
+         :ok <- File.chmod(dir, 0o700) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:secrets_write_failed, reason}}
+    end
+  end
+
+  defp write_home_files(home, files) do
+    Enum.reduce_while(files, :ok, fn {path, body}, :ok ->
+      file = Path.join(home, path)
+
+      with :ok <- make_private_tree(home, Path.dirname(path)),
+           {:ok, io} <- File.open(file, [:write, :exclusive]) do
+        try do
+          with :ok <- File.chmod(file, 0o600),
+               :ok <- IO.binwrite(io, body) do
+            {:cont, :ok}
+          else
+            {:error, reason} -> {:halt, {:error, {:secrets_write_failed, reason}}}
+          end
+        after
+          File.close(io)
+        end
+      else
+        {:error, {:secrets_write_failed, _}} = error -> {:halt, error}
+        {:error, reason} -> {:halt, {:error, {:secrets_write_failed, reason}}}
+      end
+    end)
+  end
+
+  # `a/b` under `home`: each level made and set 0700 (mkdir_p's own mode follows the umask).
+  defp make_private_tree(_home, "."), do: :ok
+
+  defp make_private_tree(home, rel) do
+    rel
+    |> Path.split()
+    |> Enum.reduce_while({home, :ok}, fn segment, {dir, :ok} ->
+      next = Path.join(dir, segment)
+
+      case make_private_dir(next) do
+        :ok -> {:cont, {next, :ok}}
+        error -> {:halt, {next, error}}
+      end
+    end)
+    |> elem(1)
+  end
+
+  @doc """
+  Remove run `run`'s config home recursively, **without following a link** (SI8): a link
+  anywhere in the tree, the home itself included, is unlinked and its target left alone.
+  Then the run's directory, if nothing else is in it. Idempotent.
+  """
+  @spec remove_config_home(Path.t() | nil, String.t()) :: :ok
+  def remove_config_home(nil, _run), do: :ok
+
+  def remove_config_home(runtime_dir, run) do
+    _ = rm_tree(config_home(runtime_dir, run))
+    _ = File.rmdir(dir(runtime_dir, run))
+    :ok
+  end
+
+  # `File.lstat`, never `stat`: a directory is entered only when it is one itself.
+  defp rm_tree(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory}} ->
+        _ = File.chmod(path, 0o700)
+
+        case File.ls(path) do
+          {:ok, entries} -> Enum.each(entries, &rm_tree(Path.join(path, &1)))
+          {:error, _} -> :ok
+        end
+
+        File.rmdir(path)
+
+      {:ok, _other} ->
+        File.rm(path)
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
+  @doc """
+  Remove run `run`'s secrets directory, its pull auth file and its config home included
+  (idempotent). `keep_config_home: true` leaves the home: the run's own cleanup, which
+  runs before the final upload that still needs it (`remove_config_home/2` follows).
+  """
+  @spec remove(Path.t() | nil, String.t(), keyword()) :: :ok
+  def remove(runtime_dir, run, opts \\ [])
+  def remove(nil, _run, _opts), do: :ok
+
+  def remove(runtime_dir, run, opts) do
     dir = dir(runtime_dir, run)
     _ = File.rm(Path.join(dir, "secrets.env"))
     _ = File.rm(Path.join(dir, @authfile))
+
+    if Keyword.get(opts, :keep_config_home, false),
+      do: :ok,
+      else: remove_config_home(runtime_dir, run)
+
     _ = File.rmdir(dir)
     :ok
   end

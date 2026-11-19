@@ -313,6 +313,11 @@ config :wardmast, :spend_patrol, enabled: false
 # that needs a harness version hands `Wardmast.Agents.HarnessVersion` a fake one.
 config :wardmast, :harness_version, probe: false
 
+# The dispatch CLI-version gate (bd-5wfsj7) is off in the suite; its own tests pass `enforce: true`.
+config :wardmast, Wardmast.Agents.CliDetection, enforce: false, probe: false
+# No login-shell PATH resolution at boot under test; its own tests inject a shell.
+config :wardmast, Wardmast.Boot.LoginShellPath, enabled: false
+
 # bd-b1b3mp: tests call `Wardmast.Tasks.BacklogTailDigest.sweep/1` directly.
 config :wardmast, :backlog_tail_digest, enabled: false
 

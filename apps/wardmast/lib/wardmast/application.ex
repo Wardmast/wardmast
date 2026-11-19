@@ -20,6 +20,9 @@ defmodule Wardmast.Application do
   @impl true
   def start(_type, _args) do
     warn_removed_env()
+    # bd-5wfsj7: a GUI-launched server (minimal launchd/desktop PATH) learns the
+    # operator's real PATH before anything resolves or spawns an agent CLI.
+    Wardmast.Boot.LoginShellPath.run()
 
     with {:ok, role} <- Wardmast.NodeAgent.role(),
          {:ok, children} <- boot_children(role) do

@@ -163,4 +163,118 @@ defmodule Wardmast.NodeAgent.SecretsTest do
       assert {:ok, [], []} = Cgroups.limit_opts(%{}, [])
     end
   end
+
+  # SI8: a Codex run's CODEX_HOME on the node's tmpfs; its login must never reach disk.
+  describe "a run's config home on tmpfs (SI8)" do
+    @files %{
+      "auth.json" => ~s({"tokens":{"refresh_token":"RT-HOME"}}),
+      "config.toml" => "model = \"x\"\n",
+      "rules/arbiter.rules" => "rules"
+    }
+
+    defp tmpfs_info(rt, type) do
+      path = Path.join(rt, "mountinfo-#{type}")
+      File.write!(path, "36 35 98:0 / #{rt} rw,noatime - #{type} none rw\n")
+      path
+    end
+
+    test "files are written 0600 in 0700 directories, under the run's directory", %{rt: rt} do
+      opts = [runtime_dir: rt, mountinfo: tmpfs_info(rt, "tmpfs")]
+
+      assert {:ok, home} = Secrets.write_config_home("c1", @files, opts)
+      assert home == Secrets.config_home(rt, "c1")
+      assert String.starts_with?(home, Secrets.dir(rt, "c1") <> "/")
+
+      assert File.read!(Path.join(home, "auth.json")) == @files["auth.json"]
+      assert File.read!(Path.join(home, "rules/arbiter.rules")) == "rules"
+      assert Bitwise.band(File.stat!(Path.join(home, "auth.json")).mode, 0o777) == 0o600
+      assert Bitwise.band(File.stat!(home).mode, 0o777) == 0o700
+      assert Bitwise.band(File.stat!(Path.join(home, "rules")).mode, 0o777) == 0o700
+    end
+
+    test "refused, and nothing written, when the runtime dir is not a tmpfs", %{rt: rt} do
+      opts = [runtime_dir: rt, mountinfo: tmpfs_info(rt, "ext4")]
+
+      assert {:error, {:secrets_not_on_tmpfs, ^rt, "ext4"}} =
+               Secrets.write_config_home("c2", @files, opts)
+
+      refute File.exists?(Secrets.dir(rt, "c2"))
+      assert {:error, :no_runtime_dir} = Secrets.write_config_home("c2", @files, runtime_dir: "")
+    end
+
+    test "an empty home is still made (a run with nothing seeded), on tmpfs only", %{rt: rt} do
+      assert {:ok, home} =
+               Secrets.write_config_home("c3", %{},
+                 runtime_dir: rt,
+                 mountinfo: tmpfs_info(rt, "tmpfs")
+               )
+
+      assert File.dir?(home)
+
+      assert {:error, {:secrets_not_on_tmpfs, _, _}} =
+               Secrets.write_config_home("c3b", %{},
+                 runtime_dir: rt,
+                 mountinfo: tmpfs_info(rt, "ext4")
+               )
+    end
+
+    test "a path that climbs out of the home is refused", %{rt: rt} do
+      opts = [runtime_dir: rt, require_tmpfs: false]
+
+      for bad <- ["../x", "/abs", "a/../../x", ""] do
+        assert {:error, {:secrets_write_failed, {:bad_path, ^bad}}} =
+                 Secrets.write_config_home("c4", %{bad => "x"}, opts)
+      end
+    end
+
+    test "remove_config_home/2 deletes the tree without following a link in it", %{rt: rt} do
+      opts = [runtime_dir: rt, require_tmpfs: false]
+      {:ok, home} = Secrets.write_config_home("c5", @files, opts)
+
+      outside = Path.join(rt, "outside")
+      File.mkdir_p!(Path.join(outside, "keep"))
+      File.write!(Path.join(outside, "keep/file"), "precious")
+      File.ln_s!(outside, Path.join(home, "sessions"))
+      File.ln_s!(Path.join(outside, "keep/file"), Path.join(home, "rules/link"))
+
+      assert :ok = Secrets.remove_config_home(rt, "c5")
+      refute File.exists?(home)
+      refute File.exists?(Secrets.dir(rt, "c5"))
+      assert File.read!(Path.join(outside, "keep/file")) == "precious"
+      assert :ok = Secrets.remove_config_home(rt, "c5")
+    end
+
+    test "a home that is itself a link is unlinked, not followed", %{rt: rt} do
+      outside = Path.join(rt, "outside2")
+      File.mkdir_p!(outside)
+      File.write!(Path.join(outside, "f"), "precious")
+      File.mkdir_p!(Secrets.dir(rt, "c6"))
+      File.ln_s!(outside, Secrets.config_home(rt, "c6"))
+
+      assert :ok = Secrets.remove_config_home(rt, "c6")
+      assert File.read!(Path.join(outside, "f")) == "precious"
+      refute File.exists?(Secrets.dir(rt, "c6"))
+    end
+
+    test "remove/2 takes the home too; keep_config_home leaves it for the final upload",
+         %{rt: rt} do
+      opts = [runtime_dir: rt, require_tmpfs: false]
+      {:ok, home} = Secrets.write_config_home("c7", @files, opts)
+      {:ok, _} = Secrets.write("c7", %{"A" => "1"}, opts)
+
+      assert :ok = Secrets.remove(rt, "c7", keep_config_home: true)
+      assert File.read!(Path.join(home, "auth.json")) == @files["auth.json"]
+      refute File.exists?(Secrets.file(rt, "c7"))
+
+      assert :ok = Secrets.remove(rt, "c7")
+      refute File.exists?(Secrets.dir(rt, "c7"))
+    end
+
+    test "the reaper's sweep of a run's directory finds a run that only has a home", %{rt: rt} do
+      {:ok, _} =
+        Secrets.write_config_home("c8", @files, runtime_dir: rt, require_tmpfs: false)
+
+      assert "c8" in Secrets.runs(rt)
+    end
+  end
 end
