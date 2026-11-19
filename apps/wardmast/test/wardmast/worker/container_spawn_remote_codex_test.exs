@@ -230,6 +230,98 @@ defmodule Wardmast.Worker.ContainerSpawnRemoteCodexTest do
     assert "config.toml" in links
   end
 
+  # The production call path: the wire spec `remote_spec/3` builds, handed to the real agent
+  # (`Runs.assign/2`, a stub `podman`, a tmpfs runtime dir). The login reaches the container
+  # as files of the tmpfs CODEX_HOME, appears nowhere on disk under the node's home, and the
+  # directory is gone when the run ends.
+  test "the primary's spec runs on the agent: login on tmpfs only, removed at the end", ctx do
+    alias Wardmast.NodeAgent.{Checkout, Config, Run, Runs, Secrets, StubPodman}
+
+    {:ok, request} = ContainerSpawn.prepare_remote(ctx.opts)
+    wire = wire_spec!(ctx, request)
+
+    root = Path.join(ctx.root, "agent")
+    node_home = Path.join(root, "home")
+    rt = Path.join(root, "rt")
+    stub = Path.join(root, "stub")
+    File.mkdir_p!(node_home)
+    File.mkdir_p!(rt)
+    podman = StubPodman.install(stub)
+    StubPodman.write_mode(stub, "hang")
+
+    mountinfo = Path.join(root, "mountinfo")
+
+    File.write!(
+      mountinfo,
+      "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 0:30 / #{rt} rw - tmpfs tmpfs rw\n"
+    )
+
+    start_supervised!({Task.Supervisor, name: Wardmast.NodeAgent.TaskSupervisor})
+    for spec <- Runs.child_specs(), do: start_supervised!(spec)
+
+    config = %Config{
+      node_home: node_home,
+      credential: "arbn_x.y",
+      primary_url: "http://127.0.0.1:1",
+      node_id: "n1",
+      req_options: [plug: fn conn -> Plug.Conn.send_resp(conn, 200, "{}") end]
+    }
+
+    opts = [
+      config: config,
+      podman: podman,
+      runtime_dir: rt,
+      require_tmpfs: true,
+      mountinfo: mountinfo,
+      sink: self(),
+      node_id: "n1",
+      image_fun: fn _image, _opts -> :ok end,
+      bridges_fun: fn run, bridges ->
+        paths = Enum.map(bridges, &Path.join([root, "bridges", run, &1.name]))
+
+        for path <- paths,
+            do:
+              (
+                File.mkdir_p!(Path.dirname(path))
+                File.write!(path, "")
+              )
+
+        {:ok, paths}
+      end,
+      delegated_fun: fn -> ["memory", "pids", "cpu"] end,
+      checkout_fun: fn cfg, _co, shadow ->
+        File.mkdir_p!(Path.join(shadow, ".git/info"))
+        File.mkdir_p!(Checkout.store_objects(cfg))
+        {:ok, %{known: []}}
+      end,
+      exit_retention_ms: 60_000
+    ]
+
+    assert {:ok, "run-si8-1"} = Runs.assign(wire, opts)
+    assert_receive {:run_push, "run-si8-1", "run.ready", _}, 5_000
+    assert_receive {:run_push, "run-si8-1", "stdout", _}, 5_000
+
+    live = Path.join(Secrets.config_home(rt, "run-si8-1"), "auth.json")
+    assert File.read!(live) == auth(@refresh)
+
+    on_disk =
+      node_home
+      |> Path.join("**")
+      |> Path.wildcard(match_dot: true)
+      |> Enum.filter(&match?({:ok, %File.Stat{type: :regular}}, File.lstat(&1)))
+      |> Enum.map_join("\n", &File.read!/1)
+
+    refute on_disk =~ @refresh
+
+    argv = File.read!(Path.join(stub, "run.argv"))
+    assert argv =~ "#{Secrets.config_home(rt, "run-si8-1")}:#{request.config_dir}:rw"
+    refute argv =~ @refresh
+
+    assert :ok = Run.cancel("run-si8-1", "test")
+    assert_receive {:run_push, "run-si8-1", "exit", _}, 5_000
+    refute File.exists?(Secrets.config_home(rt, "run-si8-1"))
+  end
+
   test "placement still keeps Codex off a machine node: nothing advertises credential_sync" do
     node = %{
       id: "n1",
