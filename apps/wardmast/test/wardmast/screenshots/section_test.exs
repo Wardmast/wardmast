@@ -101,4 +101,20 @@ defmodule Wardmast.Screenshots.SectionSizeGuardTest do
     assert out =~ ~r/_\d+ more not shown/
     assert String.ends_with?(out, Section.end_marker())
   end
+
+  test "extract/1 returns the marker block of a description, or nil" do
+    s = Section.render([%{label: "P", before: {:image, "b"}, after: {:image, "a"}}])
+    assert Section.extract("intro\n\n" <> s <> "\n\noutro") == s
+    assert Section.extract("no table here") == nil
+    assert Section.extract(nil) == nil
+  end
+
+  test "preserve/2 carries the existing table into a replaced description" do
+    s = Section.render([%{label: "P", before: {:image, "b"}, after: {:image, "a"}}])
+    assert Section.preserve("new text", "old text\n\n" <> s) == "new text\n\n" <> s
+    assert Section.preserve("new text", "old text") == "new text"
+    assert Section.preserve("new text", nil) == "new text"
+    # the worker echoed the block itself: still exactly one
+    assert Section.preserve("new\n\n" <> s, "old\n\n" <> s) == "new\n\n" <> s
+  end
 end

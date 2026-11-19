@@ -19,6 +19,7 @@ defmodule Wardmast.Tasks.Issue.Changes.SyncPrBody do
   require Logger
 
   alias Wardmast.Mergers
+  alias Wardmast.Screenshots.Section
   alias Wardmast.Tasks.Attention
   alias Wardmast.Tasks.Workspace
 
@@ -41,7 +42,7 @@ defmodule Wardmast.Tasks.Issue.Changes.SyncPrBody do
          true <- Mergers.forge?(Mergers.strategy(ws, issue.repo)) do
       Mergers.prepare(ws, repo: issue.repo)
 
-      case Mergers.update_description(adapter, issue.pr_ref, issue.pr_body) do
+      case Mergers.update_description(adapter, issue.pr_ref, with_screenshots(adapter, issue)) do
         :ok -> :ok
         {:error, reason} -> failed(issue, reason)
       end
@@ -52,6 +53,19 @@ defmodule Wardmast.Tasks.Issue.Changes.SyncPrBody do
     e -> failed(issue, Exception.message(e))
   catch
     :exit, reason -> failed(issue, {:exit, reason})
+  end
+
+  # The `## Screenshots` table is Arbiter's own section of the forge description
+  # (`Screenshots.Section`), not part of the worker's `pr_body`: carry it over so
+  # a worker's later edit does not erase the images. Best effort: a description
+  # that cannot be read is replaced as before.
+  defp with_screenshots(adapter, issue) do
+    case Mergers.get_description(adapter, issue.pr_ref) do
+      {:ok, current} -> Section.preserve(issue.pr_body, current)
+      _ -> issue.pr_body
+    end
+  rescue
+    _ -> issue.pr_body
   end
 
   defp failed(issue, reason) do

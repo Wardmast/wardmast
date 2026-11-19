@@ -21,7 +21,7 @@ defmodule Wardmast.Screenshots.Poster do
   `opts`: `:task_id`, `:head_sha`, `:public_repo_ok`, `:assets_branch` (passed to
   the adapter), `:record` (`(String.t() -> any)`).
 
-  The description is read-modify-written (`adapter.get/1` then
+  The description is read-modify-written (`get_description/2` then
   `update_description/2`); a concurrent edit between the two is last-writer-wins.
   """
 
@@ -110,16 +110,8 @@ defmodule Wardmast.Screenshots.Poster do
     do: {{:text, "upload failed: #{reason}"}, [%{name: name, reason: reason}]}
 
   defp write(adapter, mr_ref, section) do
-    with {:ok, current} <- current_description(adapter, mr_ref) do
+    with {:ok, current} <- Mergers.get_description(adapter, mr_ref) do
       Mergers.update_description(adapter, mr_ref, Section.compose(current, section))
-    end
-  end
-
-  defp current_description(adapter, mr_ref) do
-    case adapter.get(mr_ref) do
-      {:ok, %{body: body}} -> {:ok, body}
-      {:ok, _} -> {:ok, nil}
-      {:error, _} = error -> error
     end
   rescue
     e -> {:error, Exception.message(e)}

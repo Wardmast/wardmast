@@ -112,4 +112,21 @@ defmodule Wardmast.Mergers.GitlabHostImagesTest do
     visibility_stub("internal", fn conn, _ -> json(conn, 201, %{"url" => "/uploads/x/a.png"}) end)
     assert {:ok, _} = Gitlab.host_images(@ref, @images, %{})
   end
+
+  test "get_description/1 reads just the MR description" do
+    stub(fn conn ->
+      assert conn.request_path == @project <> "/merge_requests/42"
+      json(conn, 200, %{"description" => "the body"})
+    end)
+
+    assert {:ok, "the body"} = Gitlab.get_description(@ref)
+  end
+
+  test "get_description/1 is nil for an empty description and an error when unreadable" do
+    stub(fn conn -> json(conn, 200, %{"description" => nil}) end)
+    assert {:ok, nil} = Gitlab.get_description(@ref)
+
+    stub(fn conn -> json(conn, 404, %{"message" => "404 Not found"}) end)
+    assert {:error, _} = Gitlab.get_description(@ref)
+  end
 end

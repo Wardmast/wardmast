@@ -100,6 +100,30 @@ defmodule Wardmast.Screenshots.Section do
     end
   end
 
+  @doc "The marker block (the whole section) of `body`, or `nil` when it has none."
+  @spec extract(String.t() | nil) :: String.t() | nil
+  def extract(body) when is_binary(body) do
+    case Regex.run(@block, body) do
+      [block] -> block
+      nil -> nil
+    end
+  end
+
+  def extract(_), do: nil
+
+  @doc """
+  `new_body` with the marker block of `old_body` carried over, for a caller that
+  replaces the whole description (a worker's `pr_body` update must not erase the
+  table). A block already in `new_body` is kept as the worker wrote it.
+  """
+  @spec preserve(String.t(), String.t() | nil) :: String.t()
+  def preserve(new_body, old_body) when is_binary(new_body) do
+    case {extract(new_body), extract(old_body)} do
+      {nil, block} when is_binary(block) -> compose(new_body, block)
+      _ -> new_body
+    end
+  end
+
   defp cell({:image, url}, alt), do: "![#{alt}](#{url_safe(url)})"
   defp cell({:text, reason}, _alt), do: "_#{escape(reason)}_"
 

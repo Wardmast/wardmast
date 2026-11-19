@@ -957,6 +957,15 @@ defmodule Wardmast.Mergers.Gitlab do
   end
 
   @impl true
+  def get_description(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, mr} <- cfg |> request(:get, "/merge_requests/#{iid}", []) |> handle_json() do
+      {:ok, Map.get(mr, "description")}
+    end
+  end
+
+  @impl true
   def host_images(mr_ref, images, opts) when is_binary(mr_ref) and is_list(images) do
     with {:ok, cfg} <- cfg_for_ref(mr_ref),
          :ok <- check_upload_visibility(cfg, opts) do

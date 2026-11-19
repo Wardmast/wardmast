@@ -26,7 +26,7 @@ defmodule Wardmast.Screenshots.PosterTest do
       end
     end
 
-    def get(_ref), do: {:ok, %{body: Agent.get(agent(), & &1.description)}}
+    def get_description(_ref), do: {:ok, Agent.get(agent(), & &1.description)}
 
     def update_description(_ref, body) do
       case Agent.get(agent(), & &1.update) do
@@ -42,7 +42,7 @@ defmodule Wardmast.Screenshots.PosterTest do
 
   defmodule NoHosting do
     @moduledoc false
-    def get(_ref), do: {:ok, %{body: "desc"}}
+    def get_description(_ref), do: {:ok, "desc"}
     def update_description(_ref, _body), do: :ok
   end
 

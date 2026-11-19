@@ -258,6 +258,9 @@ defmodule Wardmast.Mergers.Merger do
   # `description`; GitHub `PATCH /pulls/:n` `body`) using the merger's own
   # credential. Optional — see `Wardmast.Mergers.update_description/3`.
   @callback update_description(mr_ref, body :: String.t()) :: :ok | {:error, term()}
+  # The current PR/MR description alone (one request, unlike `get/1`); `nil` when
+  # empty. Optional — see `Wardmast.Mergers.get_description/2`.
+  @callback get_description(mr_ref) :: {:ok, String.t() | nil} | {:error, term()}
 
   @typedoc "An image to host: a file `name` (unique within the set) and its bytes."
   @type hosted_image :: %{required(:name) => String.t(), required(:data) => binary()}
@@ -828,6 +831,7 @@ defmodule Wardmast.Mergers.Merger do
   @optional_callbacks prepare: 2,
                       update_description: 2,
                       host_images: 3,
+                      get_description: 1,
                       update_branch: 1,
                       update_branch: 2,
                       ancestor?: 3,

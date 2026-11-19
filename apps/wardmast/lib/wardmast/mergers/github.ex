@@ -1341,6 +1341,16 @@ defmodule Wardmast.Mergers.Github do
     end
   end
 
+  @impl true
+  def get_description(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, pr} <-
+           cfg |> request(:get, "/repos/#{owner}/#{repo}/pulls/#{number}", []) |> handle_json() do
+      {:ok, Map.get(pr, "body")}
+    end
+  end
+
   # GitHub has no PR image-upload API, so the images are committed (one commit
   # per set) to an orphan assets branch and referenced by a commit-pinned
   # `blob/<sha>/…?raw=true` URL (design §7.2/§7.3). A public or unreadable repo

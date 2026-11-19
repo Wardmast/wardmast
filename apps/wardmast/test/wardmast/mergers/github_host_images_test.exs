@@ -221,4 +221,21 @@ defmodule Wardmast.Mergers.GithubHostImagesTest do
 
     assert ref["ref"] == "refs/heads/my-assets"
   end
+
+  test "get_description/1 reads just the PR body", %{log: log} do
+    stub_api(log, fn "GET", "/repos/octo/widget/pulls/42", _, _ ->
+      {200, %{"body" => "pr body"}}
+    end)
+
+    assert {:ok, "pr body"} = Github.get_description(@ref)
+    assert [{"GET", "/repos/octo/widget/pulls/42", nil}] = calls(log)
+  end
+
+  test "get_description/1 is nil for an empty body and an error when unreadable", %{log: log} do
+    stub_api(log, fn _, _, _, _ -> {200, %{"body" => nil}} end)
+    assert {:ok, nil} = Github.get_description(@ref)
+
+    stub_api(log, fn _, _, _, _ -> {404, %{"message" => "Not Found"}} end)
+    assert {:error, _} = Github.get_description(@ref)
+  end
 end
