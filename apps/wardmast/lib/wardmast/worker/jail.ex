@@ -30,6 +30,7 @@ defmodule Wardmast.Worker.Jail do
         --ro-bind <git-common-dir>/worktrees \\
         --bind <own gitdir> --ro-bind-try <own gitdir>/commondir \\
         --ro-bind <worktree>/.git \\
+        [--ro-bind <each :readonly_paths entry>] \\
         --setenv HEX_HOME|MIX_HOME|XDG_CACHE_HOME <per-worker dirs in the agy HOME> \\
         --unshare-pid --die-with-parent --new-session --chdir <worktree> -- <command>
 
@@ -242,10 +243,13 @@ defmodule Wardmast.Worker.Jail do
       exported as `HOME`, and where the per-worker toolchain dirs are made.
     * `:writable_paths` — extra writable paths (`sandbox.writable_paths`);
       normalized by `writable_paths/1`.
-    * `:readonly_paths` — absolute paths `--ro-bind-try`ed after the writable
-      worktree and `:home`, so a path inside either (qwen's system settings dir
-      under its `$HOME`, bd-az8ycn) is read-only even though its parent is
-      writable. Relative and blank entries are dropped.
+    * `:readonly_paths` — absolute paths `--ro-bind`ed after every writable bind
+      and tmpfs (worktree, `:home`, git dirs, the agent socket dir), so one inside
+      a writable parent is still read-only (qwen's system settings dir,
+      bd-az8ycn). `--ro-bind`, not `--ro-bind-try`: a path missing at spawn makes
+      bwrap refuse to start rather than leave it unmounted under a writable
+      parent, where a worker could put its own file (bd-bzhpgi). Relative and
+      blank entries are dropped.
     * `:env` — extra `{name, value}` pairs set inside the jail.
     * `:git_ssh_key` — the path of the worker's repo-scoped deploy key (G16, bd-9cygoo,
       `Wardmast.Worker.GitCredential`). It is bound read-only at its own path over the
@@ -577,10 +581,12 @@ defmodule Wardmast.Worker.Jail do
       if(Map.get(spec, :worktree_readonly, false), do: ro_bind(worktree), else: bind(worktree)),
       Enum.flat_map(Map.get(spec, :worktree_scratch, []), &bind/1),
       if(home, do: bind(home) ++ ["--setenv", "HOME", home], else: []),
-      Enum.flat_map(Map.get(spec, :readonly_paths, []), &["--ro-bind-try", &1, &1]),
       git_args(Map.get(spec, :git), worktree),
       ssh_agent_args(Map.get(spec, :ssh_agent)),
       git_key_args(Map.get(spec, :git_ssh_key)),
+      # After every writable bind and tmpfs, so none can cover them; `--ro-bind`,
+      # never `-try`, so a missing one refuses the jail (bd-bzhpgi).
+      Enum.flat_map(Map.get(spec, :readonly_paths, []), &ro_bind/1),
       secret_args(spec),
       Enum.flat_map(Map.get(spec, :env, []), fn {k, v} -> ["--setenv", k, v] end),
       ssh_agent_env(Map.get(spec, :ssh_agent)),

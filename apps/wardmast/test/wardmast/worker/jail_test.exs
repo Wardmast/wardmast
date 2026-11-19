@@ -284,8 +284,43 @@ defmodule Wardmast.Worker.JailTest do
       spec = Map.put(@spec_linked, :readonly_paths, ["/h/agy/.qwen-system"])
       argv = Jail.argv(spec, ["qwen"])
 
-      assert {"/h/agy/.qwen-system", "/h/agy/.qwen-system"} in flag_pairs(argv, "--ro-bind-try")
+      assert {"/h/agy/.qwen-system", "/h/agy/.qwen-system"} in flag_pairs(argv, "--ro-bind")
       assert index_of_flag(argv, "/h/agy/.qwen-system") > index_of_flag(argv, "/h/agy")
+    end
+
+    # bd-bzhpgi: `--ro-bind-try` skipped a missing source without a word, leaving the
+    # path absent under a writable parent (the hidden home root is a tmpfs), where a
+    # worker could plant settings of its own. `--ro-bind` refuses the jail instead.
+    test "readonly_paths fail closed: never --ro-bind-try" do
+      spec = Map.put(@spec_linked, :readonly_paths, ["/h/agy/.qwen-system"])
+      argv = Jail.argv(spec, ["qwen"])
+
+      refute {"/h/agy/.qwen-system", "/h/agy/.qwen-system"} in flag_pairs(argv, "--ro-bind-try")
+    end
+
+    # bd-bzhpgi: no mount after a read-only path may cover it. Everything writable
+    # (worktree, home, git dirs, the agent socket dir) comes before; only the
+    # /dev/null secret shadows follow, and they cover single files.
+    test "readonly_paths come after every writable bind and tmpfs, before the secret shadows" do
+      ro = "/h/agy/.qwen-system"
+
+      spec =
+        Map.merge(@spec_linked, %{
+          readonly_paths: [ro],
+          ssh_agent: "/run/arb-agent/a.sock",
+          git_ssh_key: "/k/deploy_key",
+          secret_files: ["/h/.wardmast/release.cookie"]
+        })
+
+      argv = Jail.argv(spec, ["qwen"])
+      at = index_of(argv, ["--ro-bind", ro, ro])
+
+      writable =
+        for {flag, i} <- Enum.with_index(argv), flag in ~w(--bind --bind-try --tmpfs), do: i
+
+      assert is_integer(at)
+      assert Enum.all?(writable, &(&1 < at)), inspect(argv)
+      assert index_of(argv, ["--ro-bind", "/dev/null", "/h/.wardmast/release.cookie"]) > at
     end
   end
 
@@ -758,14 +793,15 @@ defmodule Wardmast.Worker.JailTest do
       assert {base, base} in flag_pairs(argv, "--ro-bind")
     end
 
-    test "readonly_paths threads through to a --ro-bind-try, only for absolute paths", %{
+    test "readonly_paths threads through to a --ro-bind, only for absolute paths", %{
       base: base
     } do
       assert {:ok, argv} =
                Jail.wrap(["qwen"], worktree: base, readonly_paths: ["/opt/ro", "relative", ""])
 
-      assert {"/opt/ro", "/opt/ro"} in flag_pairs(argv, "--ro-bind-try")
-      refute {"relative", "relative"} in flag_pairs(argv, "--ro-bind-try")
+      assert {"/opt/ro", "/opt/ro"} in flag_pairs(argv, "--ro-bind")
+      refute {"relative", "relative"} in flag_pairs(argv, "--ro-bind")
+      refute {"", ""} in flag_pairs(argv, "--ro-bind")
     end
 
     test "binds the worker temp root writable so a run's TMPDIR is usable (bd-5ad4ch)", %{
