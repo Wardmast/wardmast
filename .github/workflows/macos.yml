@@ -167,7 +167,8 @@ jobs:
   # Single aggregate check: one name to look at for the whole macOS run.
   macos-smoke:
     name: macOS smoke
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04 and breaks tests; see 26.04 follow-up ticket (#1529).
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [compile, test-shard]
     if: ${{ always() }}
