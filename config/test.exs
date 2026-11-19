@@ -313,6 +313,10 @@ config :wardmast, :attention_sweep, enabled: false
 # `Wardmast.Events.Retention.sweep/1` synchronously.
 config :wardmast, :events_retention, enabled: false
 
+# bd-5hlegn: no background attachment retention sweep in the suite; tests drive
+# `Wardmast.Attachments.Retention.sweep/1` synchronously.
+config :wardmast, :attachments_retention, enabled: false
+
 # bd-6jcebm: no background output-offload sweep in the suite — tests drive
 # `Wardmast.Workers.OutputOffload.sweep/1` synchronously.
 config :wardmast, :output_offload, enabled: false

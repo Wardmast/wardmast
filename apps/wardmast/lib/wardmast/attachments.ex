@@ -469,6 +469,29 @@ defmodule Wardmast.Attachments do
     }
   end
 
+  # --- upstream mirror seam ---------------------------------------------------
+
+  @doc """
+  Mirror an attachment to the ticket's upstream tracker, where the tracker
+  supports files (`Wardmast.Trackers.upload_attachment/2`). A **seam**: it is not
+  called on attach, and no adapter implements the upload yet, so today it is
+  `{:error, :not_supported}`; a per-tracker follow-up adds the adapter callback
+  and a caller. A pruned attachment has no bytes to send (`{:error, :pruned}`).
+  """
+  @spec mirror(Issue.t(), Attachment.t()) :: :ok | {:error, :not_supported | :pruned | term()}
+  def mirror(%Issue{} = issue, %Attachment{} = att) do
+    with {:ok, data} <- read_blob(att) do
+      Wardmast.Trackers.upload_attachment(issue, %{
+        filename: att.filename || "#{att.sha256}.#{ext_of(att)}",
+        content_type: att.content_type,
+        data: data
+      })
+    else
+      {:error, :missing} -> {:error, :pruned}
+      {:error, _} = error -> error
+    end
+  end
+
   # --- retention ------------------------------------------------------------
 
   @doc """
