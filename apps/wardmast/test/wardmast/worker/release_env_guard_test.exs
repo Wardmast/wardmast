@@ -251,7 +251,10 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # (a path, so not a literal) around `sh`, bounded by `timeout`, through
     # `ReleaseEnv.cmd/3`. The boot and browser argv it builds are spawned by
     # `AppProcess` (its Port) and `Shooter.Chromium`, both scrubbed.
-    "apps/wardmast/lib/wardmast/screenshots/capture/sandbox/bwrap.ex" => :scrubbed
+    "apps/wardmast/lib/wardmast/screenshots/capture/sandbox/bwrap.ex" => :scrubbed,
+    # bd-485ts3: the login-capable CDP shooter runs the `arb-capture` Node runner through
+    # `ReleaseEnv.cmd/3`.
+    "apps/wardmast/lib/wardmast/screenshots/capture/shooter/cdp.ex" => :scrubbed
   }
 
   # Spawn primitives that run a command of their own choosing. Rule 1 inspects
