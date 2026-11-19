@@ -242,6 +242,7 @@ defmodule WardmastWeb.Router do
     # Batch create: many tickets + all their edges in one transaction.
     post("/issues/batch", IssueController, :batch_create)
     get("/issues/:id", IssueController, :show)
+
     # bd-5hlegn: ticket attachments (images); the MCP twins are ticket_attach / ticket_attachment_list.
     get("/issues/:task_id/attachments", AttachmentController, :index)
     post("/issues/:task_id/attachments", AttachmentController, :create)

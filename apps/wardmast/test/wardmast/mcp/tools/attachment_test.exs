@@ -134,12 +134,16 @@ defmodule Wardmast.MCP.Tools.AttachmentTest do
       {:ok, _} =
         Attachments.create(
           ctx.mine,
-          %{data: Fixture.png(4, 3, salt: "1"), role: "before", shot_id: "p"}, source: "worker")
+          %{data: Fixture.png(4, 3, salt: "1"), role: "before", shot_id: "p"},
+          source: "worker"
+        )
 
       {:ok, _} =
         Attachments.create(
           ctx.mine,
-          %{data: Fixture.png(4, 3, salt: "2"), role: "after", shot_id: "p"}, source: "worker")
+          %{data: Fixture.png(4, 3, salt: "2"), role: "after", shot_id: "p"},
+          source: "worker"
+        )
 
       {:ok, _} = Attachments.create(ctx.sibling, %{data: Fixture.png()}, source: "worker")
       :ok

@@ -270,6 +270,28 @@
       divergences: ["D-T-20"]
     },
     %{
+      id: "tickets/attach_image",
+      title: "Attach an image (screenshot, mock, evidence) to a ticket",
+      mcp: ["ticket_attach"],
+      cli: nil,
+      rest: ["POST /api/issues/:task_id/attachments"],
+      status: :full,
+      absent: %{
+        cli: {:intentional, "Attaching is an agent/API operation (base64 body over REST or MCP) and the capture pipeline's path; a `arb ticket attach <file>` wrapper is a deferred follow-up (bd-5hlegn), not part of this surface."}
+      }
+    },
+    %{
+      id: "tickets/list_attachments",
+      title: "List a ticket's attachments (metadata and dashboard URL)",
+      mcp: ["ticket_attachment_list"],
+      cli: nil,
+      rest: ["GET /api/issues/:task_id/attachments"],
+      status: :full,
+      absent: %{
+        cli: {:intentional, "The ticket page renders them; a `arb ticket attachments` verb is a deferred follow-up (bd-5hlegn)."}
+      }
+    },
+    %{
       id: "tickets/list_dependency_edges_workspace",
       title: "List dependency edges (workspace)",
       mcp: ["dep_list"],

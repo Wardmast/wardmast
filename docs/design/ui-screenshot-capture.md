@@ -607,6 +607,25 @@ is a seeds-review problem, and `seed_cmd` comes from the repo or config, never f
 * **Serving.** The dashboard route is authenticated like the rest of the dashboard and sets
   `Content-Type` from the stored type, `X-Content-Type-Options: nosniff` and a
   `Content-Security-Policy: sandbox`. MCP/API return metadata and a URL, not bytes.
+* **Implemented (bd-5hlegn).** `Wardmast.Attachments` (`ticket_attachments` table, blobs under
+  `<data home>/attachments`, overridable with `config :wardmast, :attachments, root: …` and the
+  limits above by key). Hand attaches (`ticket_attach` MCP, `POST /api/issues/:task_id/attachments`)
+  carry `source` `worker`/`coordinator`/`operator` derived from the caller's tier; `arbiter-capture`
+  is written only by `Attachments.create_capture/2`. Not yet enforced here, because they belong to
+  the capture pass that rejects a capture whole: the per-capture caps (40 images, 24 MiB) and the
+  "latest 2 head sets" rule. The 2 MiB re-encode/downscale ladder is likewise the capture pass's;
+  the store simply refuses an over-limit image.
+* **Deleting a ticket.** The app never destroys a ticket (its paper-trail history references it, so
+  `Ash.destroy` fails); a ticket leaves by closing, and the **retention rule above** applies:
+  blobs go 90 days after `closed_at`, rows stay with `pruned_at`. A ticket removed out of band
+  (a manual SQL delete) has its attachment rows deleted and its blobs removed unless another
+  row still references them (`Attachments.sweep_orphans/0`, run hourly by
+  `Wardmast.Attachments.Retention` beside the age prune). A reopened ticket is no longer prunable.
+* **Upstream mirror seam.** `Wardmast.Trackers.upload_attachment/2` dispatches to an optional
+  `upload_attachment/2` tracker callback; no adapter implements it, so
+  `Attachments.mirror/2` is `{:error, :not_supported}` today and nothing calls it on attach.
+  Per-tracker implementations (Jira, Linear, Shortcut files; GitHub has no public file API) are
+  follow-ups.
 * **Forge copies are separate.** GitLab uploads are not pruned by Arbiter; GitHub assets are
   pruned per §7.3. Prune ≠ delete from the forge's history.
 
