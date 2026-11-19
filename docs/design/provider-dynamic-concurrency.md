@@ -1363,7 +1363,7 @@ nothing in the budget path.
   `admission_shadow` record on a run's `routing_decision` and its panel on the
   ticket page. `mix wardmast.burn_report` keeps the burn governor's "would have
   held" record.
-- **Not retired here: the `slots_total` number (follow-up).** The board still
+- **Not retired here: the `slots_total` number (split to bd-bux0ej, DC12b).** The board still
   derives `slots_total` from the capacity terms
   (`Snapshot.capacity_terms/3`: machine sum, placement, account headroom), and
   nothing admits or holds a card on it any more. It feeds only the header total
