@@ -19,7 +19,13 @@ defmodule Wardmast.Workflows.PRPatrolGitlabTriggersTest do
   @mr_path @project_path <> "/merge_requests/42"
   @sha "cafe123"
 
+  # The MR head the stub serves; tests flip it to simulate a push.
+  defp current_sha, do: Application.get_env(:wardmast, :prpatrol_gl_test_sha, @sha)
+  defp push!(sha), do: Application.put_env(:wardmast, :prpatrol_gl_test_sha, sha)
+
   setup do
+    on_exit(fn -> Application.delete_env(:wardmast, :prpatrol_gl_test_sha) end)
+
     {:ok, ws} =
       Ash.create(Workspace, %{
         name: "prpatrol-gl-#{System.unique_integer([:positive])}",
@@ -117,7 +123,8 @@ defmodule Wardmast.Workflows.PRPatrolGitlabTriggersTest do
               "iid" => 42,
               "title" => "gitlab mr",
               "web_url" => "https://gitlab.com/g/p/-/merge_requests/42",
-              "author" => %{"username" => "fleet-bot"}
+              "author" => %{"username" => "fleet-bot"},
+              "sha" => current_sha()
             }
           ])
 
@@ -125,7 +132,7 @@ defmodule Wardmast.Workflows.PRPatrolGitlabTriggersTest do
           json.(%{
             "iid" => 42,
             "state" => "opened",
-            "sha" => @sha,
+            "sha" => current_sha(),
             "web_url" => "https://gitlab.com/g/p/-/merge_requests/42",
             "author" => %{"username" => "fleet-bot"},
             "reviewers" => [%{"id" => 7, "username" => "alice"}]
@@ -138,7 +145,7 @@ defmodule Wardmast.Workflows.PRPatrolGitlabTriggersTest do
           json.([])
 
         path == @mr_path <> "/pipelines" ->
-          json.([%{"id" => 900, "sha" => @sha, "status" => pipeline_status}])
+          json.([%{"id" => 900, "sha" => current_sha(), "status" => pipeline_status}])
 
         path == @project_path <> "/pipelines/900/jobs" ->
           json.(jobs)
@@ -204,5 +211,82 @@ defmodule Wardmast.Workflows.PRPatrolGitlabTriggersTest do
     :ok = PRPatrol.tick(name)
 
     assert tasks_for_repo() == []
+  end
+
+  describe "check-failure dedup (bd-7wwz1f)" do
+    defp close_all!(issues) do
+      issues
+      |> Enum.reject(&(&1.state == :closed))
+      |> Enum.each(fn i ->
+        {:ok, _} = Ash.update(i, %{close_reason: :completed}, action: :close)
+      end)
+    end
+
+    defp escalations(ws) do
+      "coordinator"
+      |> Wardmast.Messages.Message.inbox(workspace_id: ws.id)
+      |> Enum.filter(&(&1.escalation_kind == :pr_patrol_check_follow_up_cap))
+    end
+
+    test "a closed follow-up does not re-file for the same head + failing set", %{ws: ws} do
+      gitlab_stub(jobs: [job("audit:hex", "failed", false)])
+      name = start_patrol(ws)
+
+      :ok = PRPatrol.tick(name)
+      [task] = tasks_for_repo()
+      close_all!([task])
+
+      :ok = PRPatrol.tick(name)
+      :ok = PRPatrol.tick(name)
+      assert length(tasks_for_repo()) == 1
+    end
+
+    test "a new head SHA re-arms the trigger", %{ws: ws} do
+      gitlab_stub(jobs: [job("audit:hex", "failed", false)])
+      name = start_patrol(ws)
+
+      :ok = PRPatrol.tick(name)
+      close_all!(tasks_for_repo())
+      push!("beef456")
+      :ok = PRPatrol.tick(name)
+
+      assert length(tasks_for_repo()) == 2
+    end
+
+    test "a different failing set re-arms the trigger", %{ws: ws} do
+      gitlab_stub(jobs: [job("audit:hex", "failed", false)])
+      name = start_patrol(ws)
+
+      :ok = PRPatrol.tick(name)
+      close_all!(tasks_for_repo())
+      gitlab_stub(jobs: [job("audit:hex", "failed", false), job("rspec", "failed", false)])
+      :ok = PRPatrol.tick(name)
+
+      assert length(tasks_for_repo()) == 2
+    end
+
+    test "after N follow-ups on one head, patrol escalates once instead of filing", %{ws: ws} do
+      gitlab_stub(jobs: [job("a", "failed", false)])
+      name = start_patrol(ws)
+
+      :ok = PRPatrol.tick(name)
+      close_all!(tasks_for_repo())
+      gitlab_stub(jobs: [job("a", "failed", false), job("b", "failed", false)])
+      :ok = PRPatrol.tick(name)
+      close_all!(tasks_for_repo())
+      assert length(tasks_for_repo()) == 2
+
+      gitlab_stub(jobs: Enum.map(~w(a b c), &job(&1, "failed", false)))
+      :ok = PRPatrol.tick(name)
+      :ok = PRPatrol.tick(name)
+
+      assert length(tasks_for_repo()) == 2
+      assert [_one] = escalations(ws)
+
+      # A push re-arms filing.
+      push!("beef456")
+      :ok = PRPatrol.tick(name)
+      assert length(tasks_for_repo()) == 3
+    end
   end
 end

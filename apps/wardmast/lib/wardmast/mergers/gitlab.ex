@@ -1700,7 +1700,8 @@ defmodule Wardmast.Mergers.Gitlab do
             number: iid,
             title: mr["title"] || "",
             url: mr["web_url"] || "",
-            author: get_in(mr, ["author", "username"])
+            author: get_in(mr, ["author", "username"]),
+            head_sha: mr["sha"]
           }
         end)
 
