@@ -141,6 +141,33 @@ defmodule Wardmast.Screenshots.CaptureBootTest do
     refute env =~ "ARB_CAPTURE_TEST_SECRET"
   end
 
+  test "the boot PATH drops the release bin dirs", %{tmp_dir: dir} do
+    release_root = Path.join(dir, "fake-release")
+    old_root = System.get_env("RELEASE_ROOT")
+    old_path = System.get_env("PATH")
+    System.put_env("RELEASE_ROOT", release_root)
+    System.put_env("PATH", "#{release_root}/erts-1/bin:#{release_root}/bin:#{old_path}")
+
+    on_exit(fn ->
+      System.put_env("PATH", old_path)
+
+      if old_root,
+        do: System.put_env("RELEASE_ROOT", old_root),
+        else: System.delete_env("RELEASE_ROOT")
+    end)
+
+    repo = repo!(dir, ["/"], ["/", "/x"])
+    marks = Path.join(dir, "marks")
+    File.mkdir_p!(marks)
+    cfg = config(%{setup_cmd: "env > #{marks}/env-{{role}}.txt"})
+
+    assert {:ok, _} = run(dir, repo, plan!(dir, [%{"id" => "home", "path" => "/"}]), cfg)
+
+    env = File.read!(Path.join(marks, "env-before.txt"))
+    assert env =~ ~r/^PATH=/m
+    refute env =~ release_root
+  end
+
   describe "failure reasons" do
     test "a start command that dies is a boot failure at that commit", %{tmp_dir: dir} do
       repo = repo!(dir, ["/"], ["/", "/x"])

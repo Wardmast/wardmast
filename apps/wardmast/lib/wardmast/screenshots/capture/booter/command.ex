@@ -20,6 +20,7 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
   @behaviour Wardmast.Screenshots.Capture.Booter
 
   alias Wardmast.Screenshots.Capture.AppProcess
+  alias Wardmast.Worker.ReleaseEnv
 
   @probe_ms 250
 
@@ -165,7 +166,7 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
   defp build_env(cfg, spec, vars, port) do
     base =
       [
-        {"PATH", System.get_env("PATH") || "/usr/local/bin:/usr/bin:/bin"},
+        {"PATH", clean_path()},
         {"HOME", System.get_env("HOME") || spec.scratch},
         {"LANG", "C.UTF-8"},
         {"TMPDIR", spec.scratch},
@@ -174,6 +175,17 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
 
     configured = Enum.map(cfg.env, fn {k, v} -> {k, render(v, vars)} end)
     base ++ configured ++ [{cfg.port_env, Integer.to_string(port)}]
+  end
+
+  # The VM's PATH with a release's own `erts-*/bin` and `bin` dirs removed (`ReleaseEnv` knows
+  # them), so `mix`/`elixir` in the app's setup/start command do not resolve `erl` from
+  # Wardmast's ERTS. `env -i PATH=...` replaces the scrubbed outer env, so the cleaning has to
+  # happen here.
+  defp clean_path do
+    case List.keyfind(ReleaseEnv.port_env(), "PATH", 0) do
+      {"PATH", path} when is_binary(path) -> path
+      _ -> System.get_env("PATH") || "/usr/local/bin:/usr/bin:/bin"
+    end
   end
 
   defp free_port({lo, hi}) do

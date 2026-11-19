@@ -151,7 +151,10 @@ defmodule Wardmast.Screenshots.Capture.AppProcess do
 
   defp kill(%{os_pid: nil} = state), do: close(state)
 
-  defp kill(%{os_pid: os_pid, group?: group?} = state) do
+  defp kill(%{os_pid: os_pid} = state) do
+    # The perl shim may not have called `setpgrp` yet when `init/1` first looked, so ask again
+    # now that the process has had time to run.
+    group? = state.group? or group_leader?(os_pid)
     descendants = OsProcess.descendants(os_pid)
 
     if group? do
