@@ -166,7 +166,6 @@ defmodule Wardmast.Worker.ImageTest do
 
   # bd-59m96o: an arb compiled on OTP 29 cannot load on a repo image's OTP 27
   # ("corrupt atom table"), so the base carries an Erlang for arb alone.
-
   describe "plan/3: the base carries the Erlang/OTP arb runs on (bd-59m96o)" do
     test "the arb runtime is the official Erlang image of arb's release, pinned, off PATH" do
       repo = repo_with(%{"README.md" => "hi\n"})
