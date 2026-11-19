@@ -61,6 +61,7 @@ defmodule Wardmast.Doctrine do
   """
   @spec render(atom(), map() | keyword()) :: String.t()
   for {name, _path} <- @sections do
+    # sobelow_skip ["DOS.BinToAtom"]
     def render(unquote(name), assigns) do
       unquote(:"render_#{name}")(Map.new(assigns)) |> String.trim()
     end

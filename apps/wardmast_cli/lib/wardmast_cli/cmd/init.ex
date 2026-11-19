@@ -162,6 +162,7 @@ defmodule WardmastCli.Cmd.Init do
   @doctrine_defaults %{can_dispatch: true, primary_checkout: nil}
 
   for {name, _path} <- @doctrine_sections do
+    # sobelow_skip ["DOS.BinToAtom"]
     defp doctrine(unquote(name), assigns) do
       unquote(:"render_doctrine_#{name}")(Map.merge(@doctrine_defaults, assigns))
       |> String.trim()
