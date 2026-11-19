@@ -138,13 +138,13 @@ defmodule Wardmast.Worker.Image do
     FROM docker.io/library/debian:trixie-slim
     RUN printf '%s\\n' \\
           'Types: deb' \\
-          'URIs: https://snapshot.debian.org/archive/debian/#{@chromium_snapshot}/' \\
+          'URIs: http://snapshot.debian.org/archive/debian/#{@chromium_snapshot}/' \\
           'Suites: trixie trixie-updates' \\
           'Components: main' \\
           'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \\
           '' \\
           'Types: deb' \\
-          'URIs: https://snapshot.debian.org/archive/debian-security/#{@chromium_snapshot}/' \\
+          'URIs: http://snapshot.debian.org/archive/debian-security/#{@chromium_snapshot}/' \\
           'Suites: trixie-security' \\
           'Components: main' \\
           'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \\

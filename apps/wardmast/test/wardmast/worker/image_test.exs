@@ -163,6 +163,10 @@ defmodule Wardmast.Worker.ImageTest do
 
       assert base =~ ~r|snapshot\.debian\.org/archive/debian/\d{8}T\d{6}Z/|
       assert base =~ ~r|snapshot\.debian\.org/archive/debian-security/\d{8}T\d{6}Z/|
+      # debian:trixie-slim has no ca-certificates yet: https sources fail at apt-get update.
+      refute base =~ "https://snapshot.debian.org"
+      assert base =~ "URIs: http://snapshot.debian.org/archive/debian/"
+      assert base =~ "URIs: http://snapshot.debian.org/archive/debian-security/"
       assert base =~ ~r/LABEL arbiter\.chromium-version="\d+\./
       assert base =~ "ENV ARB_CHROME=/usr/bin/chromium"
     end
