@@ -2056,9 +2056,13 @@ defmodule Wardmast.Worker.Dispatch do
     end
   end
 
+  # A finished run, or one that stopped between the liveness check and the
+  # snapshot call (`:__run_finished__` stops the worker right after it finishes,
+  # so the call exits `:noproc`/`:normal`) — neither is a live worker to realign.
   defp run_finished?(worker_pid) do
     match?(%{state: :finished}, Worker.state(worker_pid))
   catch
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] -> true
     :exit, _ -> false
   end
 
