@@ -55,6 +55,15 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGateTest do
       assert job.input.repo_path == tmp
       assert job.input.plan_path == Path.join([tmp, ".arbiter", "screenshots.json"])
       assert job.input.head_sha == "a" <> String.duplicate("1", 39)
+      # bd-3glf2a: the deps cache's trusted lockfile comes from the default branch.
+      assert job.input.default_branch == "main"
+    end
+
+    test "the default branch is the workspace's merge base for the repo", %{tmp_dir: tmp} do
+      ws = workspace(@block)
+      ws = put_in(ws, [:config, "merge"], %{"base" => "develop"})
+      assert {:run, job} = ScreenshotGate.plan(state(tmp), ws)
+      assert job.input.default_branch == "develop"
     end
 
     test "the plan the commit gate stored feeds the capture instead of the live file",
@@ -151,6 +160,19 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGateTest do
     end
   end
 
+  # bd-3glf2a: the offline deps cache only trusts a default-branch lockfile.
+  describe "route/2: a change that edits mix.lock (deps_changed)" do
+    test "proceeds, telling the reviewer why there are no screenshots and that it is expected" do
+      reason = "the change edits mix.lock; a capture boot has no network"
+
+      assert {:proceed, context} = ScreenshotGate.route({:skipped, {:deps_changed, reason}})
+      assert context =~ "No screenshots were taken"
+      assert context =~ reason
+      assert context =~ "mix.lock"
+      refute context =~ "lazy"
+    end
+  end
+
   describe "route/2: worker faults go back to the worker" do
     test "no manifest is sent back with the instruction to add one" do
       failure = Failure.new(:manifest_missing, "the worker wrote no screenshots manifest")
@@ -187,6 +209,30 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGateTest do
         assert message =~ "the thing broke"
         assert message =~ "not the worker"
       end
+    end
+  end
+
+  # bd-3glf2a: a capture service that never came up, as `Capture.run/2` records it.
+  describe "route/2: a service that never became ready" do
+    test "escalates with the service, the reason and its log tail in the brief" do
+      failure =
+        Failure.new(
+          :boot_failed,
+          "the app failed to boot at the merge-base (services): service postgres did not " <>
+            "become ready in 60 s (last check: exit 2); its log ends:\nFATAL:  could not " <>
+            "create lock file",
+          role: "before",
+          detail: %{
+            phase: :services,
+            service: "postgres",
+            log_tail: "FATAL:  could not create lock file"
+          }
+        )
+
+      assert {:escalate, message} = ScreenshotGate.route({:error, failure})
+      assert message =~ "service postgres did not become ready in 60 s"
+      assert message =~ "FATAL:  could not create lock file"
+      assert message =~ "not the worker"
     end
   end
 
