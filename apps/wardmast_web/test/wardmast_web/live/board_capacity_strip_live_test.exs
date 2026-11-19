@@ -3,8 +3,7 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
   DC5 (bd-2c2a4g; `docs/design/provider-dynamic-concurrency.md` §9): the board's
   capacity strip (`#board-capacity`: one chip per pool and per machine, each
   opening a popup that explains the budget) and the per-card layer reasons.
-  Everything is labelled with the `scheduler_admission` mode: under `shadow`
-  the budgets are shown but today's gate and caps still decide.
+  The budgets decide admission; there is no mode label (DC12).
   """
   use WardmastWeb.ConnCase, async: false
 
@@ -34,8 +33,6 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
 
     %{ws: ws}
   end
-
-  defp mode!(mode), do: {:ok, _} = Settings.set_scheduler_admission(mode)
 
   defp window do
     %{
@@ -113,14 +110,8 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
     }
   end
 
-  defp view(mode, pools) do
+  defp view(pools) do
     %{
-      admission: %{
-        mode: mode,
-        label: mode,
-        decides: mode == "enforce",
-        agreement: nil
-      },
       pools: pools,
       machines: [
         %{id: "local", name: "local", cap: 6, live: 3, free: 3, state: "online"},
@@ -153,8 +144,7 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
 
   describe "the strip" do
     test "one chip per pool and per machine, each with seats of budget", %{conn: conn} do
-      mode!("shadow")
-      stub_view(view("shadow", [claude_pool(), agy_pool()]))
+      stub_view(view([claude_pool(), agy_pool()]))
       lv = mount_board(conn)
 
       assert has_element?(lv, "#board-capacity")
@@ -174,27 +164,8 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
       assert has_element?(lv, "#node-chip-box [data-chip-state='full']")
     end
 
-    test "is labelled shadow, and says today's gate still decides", %{conn: conn} do
-      mode!("shadow")
-      stub_view(view("shadow", [claude_pool()]))
-      lv = mount_board(conn)
-
-      assert lv |> element("#board-capacity-mode") |> render() =~ "shadow"
-      assert has_element?(lv, "#board-capacity[data-admission='shadow']")
-      assert has_element?(lv, "#board-capacity-mode-note", "today's gate and caps still decide")
-    end
-
-    test "under enforce it is not labelled shadow", %{conn: conn} do
-      mode!("enforce")
-      stub_view(view("enforce", [claude_pool()]))
-      lv = mount_board(conn)
-
-      assert has_element?(lv, "#board-capacity[data-admission='enforce']")
-      refute has_element?(lv, "#board-capacity-mode-note")
-    end
-
     test "without a pool the machines still show", %{conn: conn} do
-      stub_view(view("legacy", []))
+      stub_view(view([]))
       lv = mount_board(conn)
 
       assert has_element?(lv, "#node-chip-local")
@@ -215,8 +186,7 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
 
   describe "a pool's popup" do
     setup %{conn: conn} do
-      mode!("shadow")
-      stub_view(view("shadow", [claude_pool()]))
+      stub_view(view([claude_pool()]))
       %{lv: mount_board(conn)}
     end
 
@@ -227,40 +197,16 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
              )
     end
 
-    test "gives the reason, labelled shadow", %{lv: lv} do
+    test "gives the reason", %{lv: lv} do
       panel = lv |> element("#pool-chip-acct-claude-claude-panel") |> render()
       assert panel =~ "ceiling max_concurrent 3"
-      assert panel =~ "Shadow"
       assert has_element?(lv, "#pool-chip-acct-claude-claude-panel [data-budget-reason]")
-    end
-  end
-
-  describe "a pool under its account's own admission mode (O11)" do
-    setup do
-      mode!("shadow")
-      :ok
-    end
-
-    test "names the account's admission mode and where it came from", %{conn: conn} do
-      stub_view(
-        view("shadow", [claude_pool(%{mode: "enforce", mode_source: "account", decides: true})])
-      )
-
-      lv = mount_board(conn)
-
-      assert has_element?(
-               lv,
-               "#pool-chip-acct-claude-claude-panel [data-pool-admission='enforce'][data-pool-admission-source='account']"
-             )
-
-      refute lv |> element("#pool-chip-acct-claude-claude-panel") |> render() =~ "Shadow:"
     end
   end
 
   describe "a pool's popup (windows)" do
     setup %{conn: conn} do
-      mode!("shadow")
-      stub_view(view("shadow", [claude_pool()]))
+      stub_view(view([claude_pool()]))
       %{lv: mount_board(conn)}
     end
 
@@ -309,8 +255,7 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
 
   describe "a machine's popup" do
     test "says how full the machine is and what changes its cap", %{conn: conn} do
-      mode!("shadow")
-      stub_view(view("shadow", []))
+      stub_view(view([]))
       lv = mount_board(conn)
 
       panel = lv |> element("#node-chip-box-panel") |> render()
@@ -321,8 +266,6 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
     test "a self-derated machine shows offered vs cap, its reading and why (bd-6w7usy)", %{
       conn: conn
     } do
-      mode!("shadow")
-
       derated = %{
         id: "n2",
         name: "oryx",
@@ -337,7 +280,7 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
         psi: %{"some_avg10" => 4.25}
       }
 
-      base = view("shadow", [])
+      base = view([])
       stub_view(%{base | machines: base.machines ++ [derated]})
       lv = mount_board(conn)
 
@@ -355,8 +298,6 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
     end
 
     test "a soft derate reads as attention, not a failure", %{conn: conn} do
-      mode!("shadow")
-
       soft = %{
         id: "n2",
         name: "oryx",
@@ -371,7 +312,7 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
         psi: nil
       }
 
-      base = view("shadow", [])
+      base = view([])
       stub_view(%{base | machines: base.machines ++ [soft]})
       lv = mount_board(conn)
 
@@ -380,18 +321,14 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
   end
 
   describe "the cap popup's budget lines" do
-    test "lists each pool, machine, repo and fair-share line, labelled shadow", %{conn: conn} do
-      mode!("shadow")
-
+    test "lists each pool, machine, repo and fair-share line", %{conn: conn} do
       stub_view(
-        view("shadow", [claude_pool(), agy_pool()])
+        view([claude_pool(), agy_pool()])
         |> Map.put(:repos, [%{label: "vstim", cap: 2, used: 1}])
         |> Map.put(:fair_share, [%{text: "fair share: default holds 3 of claude's 4"}])
       )
 
       lv = mount_board(conn)
-
-      assert has_element?(lv, "#board-slot-cap-budgets", "Shadow")
 
       assert has_element?(
                lv,
@@ -421,11 +358,10 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
   end
 
   describe "per-card layer reasons" do
-    test "a Ready card the walk would start beside the first reads starting, labelled shadow", %{
+    test "a Ready card the walk would start beside the first reads starting", %{
       conn: conn,
       ws: ws
     } do
-      mode!("shadow")
       first = ready_ticket(ws, "first")
       second = ready_ticket(ws, "second")
       lv = mount_board(conn)
@@ -437,26 +373,16 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
 
       assert starting
 
-      assert lv |> element("[data-layer-reason='#{starting.id}']") |> render() =~ "Shadow walk"
       assert lv |> element("[data-layer-reason='#{starting.id}']") |> render() =~ "Starting"
     end
 
     test "the hold badge's popup carries the layer too", %{conn: conn, ws: ws} do
-      mode!("shadow")
       {:ok, _} = Settings.set_nodes_local_max_workers(0)
       ticket = ready_ticket(ws, "no slot at all")
       lv = mount_board(conn)
 
-      assert has_element?(lv, "#hold-#{ticket.id}-panel [data-hold-layer]", "Shadow walk")
+      assert has_element?(lv, "#hold-#{ticket.id}-panel [data-hold-layer]", "Waiting")
       assert has_element?(lv, "#hold-#{ticket.id}-panel [data-hold-layer]", "no machine")
-    end
-
-    test "legacy shows no layer", %{conn: conn, ws: ws} do
-      mode!(nil)
-      ticket = ready_ticket(ws, "legacy card")
-      lv = mount_board(conn)
-
-      refute has_element?(lv, "[data-layer-reason='#{ticket.id}']")
     end
   end
 end

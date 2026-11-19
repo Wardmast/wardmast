@@ -736,7 +736,7 @@ defmodule WardmastWeb.BoardLive do
   # The budgets and machines for the capacity strip (DC5). Display only: a
   # read that fails leaves the board without a strip.
   defp capacity do
-    CapacityView.status()
+    CapacityView.status([])
   rescue
     _ -> nil
   catch

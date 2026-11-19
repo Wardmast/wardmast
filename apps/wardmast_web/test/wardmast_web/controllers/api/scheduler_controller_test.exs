@@ -152,14 +152,13 @@ defmodule WardmastWeb.Api.SchedulerControllerTest do
     end
   end
 
-  # DC5 (bd-2c2a4g, design §9): the budgets ride the status body, labelled shadow.
+  # DC5 (bd-2c2a4g, design §9): the budgets ride the status body.
   describe "GET /api/scheduler/status budgets (DC5)" do
     setup do
       :ok = :meck.new(Wardmast.Board.CapacityView, [:passthrough, :no_link])
       on_exit(fn -> :meck.unload(Wardmast.Board.CapacityView) end)
 
       view = %{
-        admission: %{mode: "shadow", label: "shadow", decides: false, agreement: nil},
         pools: [
           %{
             account: "acct-1",
@@ -181,10 +180,9 @@ defmodule WardmastWeb.Api.SchedulerControllerTest do
       :ok
     end
 
-    test "carries admission, budgets, machines, repos and fair_share", %{conn: conn} do
+    test "carries budgets, machines, repos and fair_share", %{conn: conn} do
       body = conn |> get("/api/scheduler/status") |> json_response(200)
 
-      assert %{"label" => "shadow", "decides" => false} = body["admission"]
 
       assert [
                %{
@@ -202,7 +200,7 @@ defmodule WardmastWeb.Api.SchedulerControllerTest do
     end
 
     test "pause and resume answer with the same body", %{conn: conn} do
-      assert %{"admission" => %{"label" => "shadow"}, "budgets" => [_]} =
+      assert %{"budgets" => [_]} =
                conn |> post("/api/scheduler/pause") |> json_response(200)
     end
   end

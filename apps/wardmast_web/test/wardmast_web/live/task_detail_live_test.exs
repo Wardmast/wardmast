@@ -1117,7 +1117,7 @@ defmodule WardmastWeb.TaskDetailLiveTest do
 
       html = render_async(view)
 
-      assert html =~ "has no free slot"
+      assert html =~ "has no free seat"
       assert html =~ holder.id
       refute html =~ "account_at_capacity"
       assert Ash.get!(Issue, task.id).state == :queued
