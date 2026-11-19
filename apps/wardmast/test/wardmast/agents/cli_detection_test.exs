@@ -13,6 +13,11 @@ defmodule Wardmast.Agents.CliDetectionTest do
     {:ok, dir: dir}
   end
 
+  # The test config turns `--version` probing off; these tests use stub binaries.
+  defp detect(p, opts), do: CliDetection.detect(p, [probe: true] ++ opts)
+  defp detect_all(opts), do: CliDetection.detect_all([probe: true] ++ opts)
+  defp gate(p, opts), do: CliDetection.gate(p, [probe: true] ++ opts)
+
   defp stub(dir, name, output, exit_code \\ 0) do
     path = Path.join(dir, name)
     File.write!(path, "#!/bin/sh\necho '#{output}'\nexit #{exit_code}\n")
@@ -23,7 +28,7 @@ defmodule Wardmast.Agents.CliDetectionTest do
   describe "detect/2" do
     test "installed and current: reports path and version", %{dir: dir} do
       path = stub(dir, "claude", "2.3.4 (Claude Code)")
-      d = CliDetection.detect("claude", path: dir, min_versions: %{"claude" => "2.0.0"})
+      d = detect("claude", path: dir, min_versions: %{"claude" => "2.0.0"})
 
       assert d.provider == "claude"
       assert d.status == :ok
@@ -34,7 +39,7 @@ defmodule Wardmast.Agents.CliDetectionTest do
     end
 
     test "missing: no path, install step offered", %{dir: dir} do
-      d = CliDetection.detect("codex", path: dir)
+      d = detect("codex", path: dir)
 
       assert d.status == :missing
       assert d.path == nil
@@ -46,7 +51,7 @@ defmodule Wardmast.Agents.CliDetectionTest do
 
     test "below the minimum: outdated, flagged with the required version", %{dir: dir} do
       stub(dir, "claude", "1.0.9")
-      d = CliDetection.detect("claude", path: dir, min_versions: %{"claude" => "2.0.0"})
+      d = detect("claude", path: dir, min_versions: %{"claude" => "2.0.0"})
 
       assert d.status == :outdated
       assert d.version == "1.0.9"
@@ -58,7 +63,7 @@ defmodule Wardmast.Agents.CliDetectionTest do
 
     test "an unparseable --version answer is :unknown_version, not outdated", %{dir: dir} do
       stub(dir, "codex", "no digits here")
-      d = CliDetection.detect("codex", path: dir, min_versions: %{"codex" => "0.100.0"})
+      d = detect("codex", path: dir, min_versions: %{"codex" => "0.100.0"})
 
       assert d.status == :unknown_version
       assert d.path == Path.join(dir, "codex")
@@ -67,12 +72,12 @@ defmodule Wardmast.Agents.CliDetectionTest do
 
     test "antigravity resolves agy first, then gemini, with per-binary minimums", %{dir: dir} do
       stub(dir, "gemini", "0.30.0")
-      d = CliDetection.detect("antigravity", path: dir)
+      d = detect("antigravity", path: dir)
       assert d.binary == "gemini"
       assert d.status == :outdated
 
       stub(dir, "agy", "1.5.9")
-      d = CliDetection.detect("agy", path: dir)
+      d = detect("agy", path: dir)
       assert d.binary == "agy"
       assert d.version == "1.5.9"
       assert d.status == :ok
@@ -80,14 +85,14 @@ defmodule Wardmast.Agents.CliDetectionTest do
 
     test "a minimal PATH that lacks the CLI's dir reports it missing", %{dir: dir} do
       stub(dir, "claude", "2.3.4")
-      assert CliDetection.detect("claude", path: "/usr/bin:/bin").status == :missing
-      assert CliDetection.detect("claude", path: "/usr/bin:/bin:" <> dir).status == :ok
+      assert detect("claude", path: "/usr/bin:/bin").status == :missing
+      assert detect("claude", path: "/usr/bin:/bin:" <> dir).status == :ok
     end
   end
 
   describe "detect_all/1" do
     test "covers claude, codex and antigravity in order", %{dir: dir} do
-      rows = CliDetection.detect_all(path: dir)
+      rows = detect_all(path: dir)
       assert Enum.map(rows, & &1.provider) == ["claude", "codex", "antigravity"]
     end
   end
@@ -97,7 +102,7 @@ defmodule Wardmast.Agents.CliDetectionTest do
       stub(dir, "claude", "1.0.9")
 
       assert {:error, {:cli_version, "claude", phrase}} =
-               CliDetection.gate("claude",
+               gate("claude",
                  enforce: true,
                  path: dir,
                  min_versions: %{"claude" => "2.0.0"}
@@ -115,16 +120,16 @@ defmodule Wardmast.Agents.CliDetectionTest do
       stub(dir, "codex", "mystery")
 
       opts = [enforce: true, path: dir, min_versions: %{"claude" => "2.0.0", "codex" => "0.1.0"}]
-      assert :ok = CliDetection.gate("claude", opts)
-      assert :ok = CliDetection.gate("codex", opts)
-      assert :ok = CliDetection.gate("antigravity", opts)
+      assert :ok = gate("claude", opts)
+      assert :ok = gate("codex", opts)
+      assert :ok = gate("antigravity", opts)
     end
 
     test "is a no-op when enforcement is off", %{dir: dir} do
       stub(dir, "claude", "1.0.9")
 
       assert :ok =
-               CliDetection.gate("claude",
+               gate("claude",
                  enforce: false,
                  path: dir,
                  min_versions: %{"claude" => "2.0.0"}
@@ -132,7 +137,7 @@ defmodule Wardmast.Agents.CliDetectionTest do
     end
 
     test "a provider with no detection spec is never refused" do
-      assert :ok = CliDetection.gate("grok", enforce: true)
+      assert :ok = gate("grok", enforce: true)
     end
   end
 

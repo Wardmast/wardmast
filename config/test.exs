@@ -314,7 +314,7 @@ config :wardmast, :spend_patrol, enabled: false
 config :wardmast, :harness_version, probe: false
 
 # The dispatch CLI-version gate (bd-5wfsj7) is off in the suite; its own tests pass `enforce: true`.
-config :wardmast, Wardmast.Agents.CliDetection, enforce: false
+config :wardmast, Wardmast.Agents.CliDetection, enforce: false, probe: false
 # No login-shell PATH resolution at boot under test; its own tests inject a shell.
 config :wardmast, Wardmast.Boot.LoginShellPath, enabled: false
 

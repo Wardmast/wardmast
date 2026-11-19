@@ -29,8 +29,9 @@ defmodule Wardmast.Agents.CliDetection do
   Versions come from `Wardmast.Agents.HarnessVersion` (the binary asked
   `--version`, cached against its size/mtime/inode). Minimums can be overridden
   with `config :wardmast, #{inspect(__MODULE__)}, min_versions: %{"codex" => "…"}`;
-  `enforce: false` (the test config) turns the dispatch gate off so the suite never
-  runs a real agent CLI.
+  `enforce: false` and `probe: false` (the test config) turn the dispatch gate and the
+  `--version` probe off so the suite never runs a real agent CLI; `path:` pins the
+  searched `PATH`.
   """
 
   alias Wardmast.Agents.HarnessVersion
@@ -92,12 +93,13 @@ defmodule Wardmast.Agents.CliDetection do
   @doc """
   Detect one provider's CLI. Options: `:path` (the `PATH` to search; default the
   server's, with the darwin baseline), `:min_versions` (`%{binary => version}`
-  overrides), `:probe` (ask `--version`; default `true`).
+  overrides), `:probe` (ask `--version`; default `true`, config `probe: false`
+  turns it off).
   """
   @spec detect(String.t() | atom(), keyword()) :: t()
   def detect(provider, opts \\ []) do
     spec = spec!(provider)
-    path = Keyword.get_lazy(opts, :path, &search_path/0)
+    path = Keyword.get_lazy(opts, :path, fn -> config(:path) || search_path() end)
     mins = Map.merge(spec.min_versions, configured_mins(spec, opts))
 
     case find(spec.binaries, path) do
@@ -148,9 +150,9 @@ defmodule Wardmast.Agents.CliDetection do
     Enum.find(@specs, &(&1.provider == name))
   end
 
-  defp enforce? do
-    :wardmast |> Application.get_env(__MODULE__, []) |> Keyword.get(:enforce, true)
-  end
+  defp enforce?, do: config(:enforce) != false
+
+  defp config(key), do: :wardmast |> Application.get_env(__MODULE__, []) |> Keyword.get(key)
 
   defp configured_mins(spec, opts) do
     from_config =
@@ -216,7 +218,7 @@ defmodule Wardmast.Agents.CliDetection do
 
   defp found(spec, binary, exe, min, opts) do
     version =
-      if Keyword.get(opts, :probe, true),
+      if Keyword.get_lazy(opts, :probe, fn -> config(:probe) != false end),
         do: HarnessVersion.host(spec.provider, probe: true, executable: exe)
 
     row = %{base(spec) | binary: binary, path: exe, version: version, min_version: min}

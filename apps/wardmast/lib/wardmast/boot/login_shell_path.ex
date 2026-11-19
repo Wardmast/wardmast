@@ -39,7 +39,7 @@ defmodule Wardmast.Boot.LoginShellPath do
           source: :login_shell | :inherited,
           shell: String.t() | nil,
           added: [String.t()],
-          reason: term()
+          reason: String.t() | nil
         }
 
   @doc """
@@ -160,8 +160,12 @@ defmodule Wardmast.Boot.LoginShellPath do
 
   defp record({:applied, info}), do: info
 
+  # `info/0` is served as JSON (`GET /api/server/platform`), so the reason is text.
   defp record({:skipped, reason}),
-    do: %{source: :inherited, shell: nil, added: [], reason: reason}
+    do: %{source: :inherited, shell: nil, added: [], reason: describe(reason)}
+
+  defp describe(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp describe(reason), do: inspect(reason)
 
   defp log({:applied, %{shell: shell, added: added}}),
     do:

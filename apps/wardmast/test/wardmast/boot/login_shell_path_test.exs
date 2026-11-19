@@ -154,7 +154,7 @@ defmodule Wardmast.Boot.LoginShellPathTest do
 
       # CLI detection (default PATH) and the BEAM's own lookup agree...
       assert %{status: :ok, version: "2.4.0"} =
-               CliDetection.detect("claude", min_versions: %{"claude" => "2.0.0"})
+               CliDetection.detect("claude", probe: true, min_versions: %{"claude" => "2.0.0"})
 
       assert System.find_executable("claude") == Path.join(bin, "claude")
 
