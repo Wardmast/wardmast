@@ -43,7 +43,7 @@ defmodule WardmastWeb.WorkspaceDetailComponentsTest do
     save_agent_config add_provider_override rm_provider_override
     save_security confirm_security cancel_security
     add_order rm_order
-    open_secret_modal close_secret_modal set_secret rm_secret
+    open_secret_modal replace_secret close_secret_modal set_secret rm_secret
     open_worker_env_modal close_worker_env_modal set_worker_env rm_worker_env
     toggle_worker_env_secret reveal_worker_env hide_worker_env
   ]
