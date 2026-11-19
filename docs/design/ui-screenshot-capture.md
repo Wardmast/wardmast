@@ -205,9 +205,14 @@ sandbox, or not at all**:
 `Wardmast.Screenshots.Captures`): task, head, base, `plan_hash`, `config_hash` and a state
 (`running | captured | skipped | failed | superseded`). The ReviewGate uses it for three rules:
 
-- **Supersession.** A new head (`ReviewGate.head_moved/2`, or any new capture for a different
-  head) cancels the in-flight capture task and marks its row `superseded`; a row a dead gate left
-  `running` is superseded the same way by the next attempt.
+- **Supersession.** While a capture is in flight the gate polls `origin/<branch>` every
+  `screenshot_head_poll_ms` (default 30s; the `:screenshot_head_poll_ms` gate option, `nil` = off).
+  A remote that strictly advanced past the captured head is fast-forwarded onto, the capture task
+  is cancelled and its row marked `superseded`, and the gate re-enters at the door it came in by
+  (`:first` or `{:next, review_id}`): CI is awaited on the new head when `review.require_ci_green`
+  applies, the review checkout is re-provisioned there, then the new head is captured. Any new
+  capture for a different head also supersedes a row a dead gate left `running`. A force-push the
+  worktree cannot fast-forward to is not seen by the poll (`push_gate/1` owns it).
 - **Re-capture skip.** For a head not yet checked, the set taken at the last captured head is
   reused (and the reviewer's brief says which commit it was taken at) when
   `diff(last_captured_head..head)` misses `ui_paths` and the plan hash is unchanged. A gate that

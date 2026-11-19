@@ -1338,6 +1338,9 @@ defmodule Wardmast.Worker.ReviewGate do
       screenshot_capture: Keyword.get(opts, :screenshot_capture),
       screenshot_opts: Keyword.get(opts, :screenshot_opts, []),
       screenshot_task: nil,
+      # bd-8qj1sa: how often a capture in flight asks `origin/<branch>` whether the head moved
+      # (`nil` = never).
+      screenshot_head_poll_ms: Keyword.get(opts, :screenshot_head_poll_ms, 30_000),
       screenshot_checked: nil,
       screenshot_context: nil,
       # Where the wait resumes when CI clears: `:first` (the gate's opening
@@ -2454,8 +2457,9 @@ defmodule Wardmast.Worker.ReviewGate do
   #     revise round and no reviewer: the worker is not at fault, so it is not looped.
   #
   # bd-8qj1sa: the attempt is a durable row (`Wardmast.Screenshots.Captures`). A head the capture
-  # is not for supersedes it (`head_moved/2`, below); `max_captures_per_ticket` and the re-capture
-  # skip are `ScreenshotGate.plan/3`'s call, from that history.
+  # is not for is superseded: while a capture is in flight the gate polls `origin/<branch>`
+  # (`screenshot_head_poll/2`, below) and a head that advanced cancels it; `max_captures_per_ticket`
+  # and the re-capture skip are `ScreenshotGate.plan/3`'s call, from that history.
   defp screenshot_step(state) do
     plan =
       ScreenshotGate.plan(
@@ -2516,23 +2520,85 @@ defmodule Wardmast.Worker.ReviewGate do
         ScreenshotGate.run(job, capture)
       end)
 
-    {:noreply,
-     %{
-       state
-       | screenshot_task: %{ref: task.ref, pid: task.pid, head_sha: head, record: record}
-     }}
+    state = %{
+      state
+      | screenshot_task: %{ref: task.ref, pid: task.pid, head_sha: head, record: record}
+    }
+
+    {:noreply, schedule_screenshot_head_poll(state, task.ref)}
   end
 
-  @doc """
-  Tell a running gate the PR head moved to `new_head` (bd-8qj1sa). A screenshot capture in flight
-  for another head is cancelled (its row becomes `superseded`) and the capture for `new_head`
-  starts, so a stale set is never posted for a head that is no longer the PR's. A gate with no
-  capture in flight ignores it: it re-reads its head at the next step anyway.
-  """
-  @spec head_moved(GenServer.server(), String.t()) :: :ok
-  def head_moved(gate, new_head) when is_binary(new_head) do
-    send(gate, {:head_moved, new_head})
-    :ok
+  # bd-8qj1sa: the production trigger for supersession. A capture takes minutes (it boots the app
+  # twice), during which a third party or another run can push to the branch. The gate asks
+  # `origin/<branch>` every `screenshot_head_poll_ms` while a capture is in flight (`nil` turns
+  # the poll off); the timer carries the task's ref, so one for a capture that has finished,
+  # been cancelled or been replaced is ignored.
+  defp schedule_screenshot_head_poll(%{screenshot_head_poll_ms: ms} = state, ref)
+       when is_integer(ms) and ms > 0 do
+    Process.send_after(self(), {:screenshot_head_poll, ref}, ms)
+    state
+  end
+
+  defp schedule_screenshot_head_poll(state, _ref), do: state
+
+  # The remote strictly advanced past the head being captured (`remote_advance/1`: our head is an
+  # ancestor of it). Fast-forward the worktree onto it, as `restart_on_remote_head/3` does, and
+  # start the gate over for the new head. Every other shape (a force-push the worktree cannot
+  # fast-forward to, no `origin`, a failed fetch) leaves the capture running: `push_gate/1` owns
+  # those, and this poll only ever avoids a stale set, never creates a refusal.
+  defp screenshot_head_poll(state, ref) do
+    with {:advanced, _remote} <- remote_advance(state),
+         {:ok, _} <- Worktree.sync_from_origin(state.worktree_path, state.branch),
+         new_head when is_binary(new_head) <- current_head_sha(state),
+         true <- new_head != state.screenshot_task.head_sha do
+      screenshot_head_moved(state, new_head)
+    else
+      _ -> {:noreply, schedule_screenshot_head_poll(state, ref)}
+    end
+  end
+
+  # The head under review is now `new_head`: cancel the capture for the old one (its row is
+  # `superseded`), and re-enter the gate for the new head at the door the old one came in by.
+  # Everything keyed to the old head is dropped first: the review checkout (re-provisioned at
+  # the new head once the gate clears), CI's read, and the last cleared screenshot head. So CI
+  # is awaited on the new head (when `review.require_ci_green` applies) before the capture
+  # for it starts, on `:first` and `{:next, review_id}` entries alike.
+  defp screenshot_head_moved(state, new_head) do
+    old = state.screenshot_task.head_sha
+
+    Logger.info(
+      "ReviewGate: head moved to #{String.slice(new_head, 0, 12)} while the screenshot " <>
+        "capture for #{String.slice(old, 0, 12)} was in flight (task=#{state.task_id}); " <>
+        "cancelling it"
+    )
+
+    _ = screenshot_db(fn -> Captures.supersede(state.task_id, new_head) end)
+
+    state =
+      state
+      |> cancel_screenshot_task()
+      |> record_touched_files(state.head_sha, new_head)
+      |> release_review_checkout()
+
+    state = %{
+      state
+      | head_sha: new_head,
+        screenshot_checked: nil,
+        screenshot_context: nil,
+        ci_green: nil,
+        ci_retargets: 0
+    }
+
+    case state.ci_entry do
+      {:next, review_id} ->
+        case state |> ci_gate({:next, review_id}) |> ci_next_reply(review_id) do
+          {:continue, state} -> {:noreply, state}
+          {:done, state} -> {:stop, :normal, state}
+        end
+
+      _first ->
+        state |> ci_gate(:first) |> ci_reply()
+    end
   end
 
   # Stop an in-flight capture task. Its row is left to `Captures.supersede/2`, which the next
@@ -2580,7 +2646,9 @@ defmodule Wardmast.Worker.ReviewGate do
       nil
   end
 
-  defp reuse_meta(%{screenshot_checked: %{reuse: meta}}), do: meta
+  # The "taken at <older head>" note belongs only to the head it was computed for: a cached
+  # outcome for any other head (the cap's fallback in `ScreenshotGate.plan/3`) carries none.
+  defp reuse_meta(%{screenshot_checked: %{reuse: meta, head_sha: head}, head_sha: head}), do: meta
   defp reuse_meta(_state), do: nil
 
   defp screenshot_route(state, outcome, reuse \\ nil) do
@@ -3724,23 +3792,11 @@ defmodule Wardmast.Worker.ReviewGate do
     screenshot_route(%{state | screenshot_task: nil}, {:error, failure})
   end
 
-  # bd-8qj1sa: the PR head moved while a capture for an older head was in flight.
-  def handle_info(
-        {:head_moved, new_head},
-        %{screenshot_task: %{head_sha: old}} = state
-      )
-      when new_head != old do
-    Logger.info(
-      "ReviewGate: head moved to #{String.slice(new_head, 0, 12)} while the screenshot " <>
-        "capture for #{String.slice(old, 0, 12)} was in flight (task=#{state.task_id}); " <>
-        "cancelling it"
-    )
+  # bd-8qj1sa: the in-flight capture's head poll (`schedule_screenshot_head_poll/2`).
+  def handle_info({:screenshot_head_poll, ref}, %{screenshot_task: %{ref: ref}} = state),
+    do: screenshot_head_poll(state, ref)
 
-    _ = screenshot_db(fn -> Captures.supersede(state.task_id, new_head) end)
-    screenshot_step(%{cancel_screenshot_task(state) | head_sha: new_head})
-  end
-
-  def handle_info({:head_moved, _head}, state), do: {:noreply, state}
+  def handle_info({:screenshot_head_poll, _ref}, state), do: {:noreply, state}
 
   # Author died before we could report — nothing to do.
   #
@@ -3922,6 +3978,10 @@ defmodule Wardmast.Worker.ReviewGate do
     # it. A gate killed outright (no `terminate/2`) is covered by the boot
     # sweep, `Wardmast.Reviews.Checkout.sweep_orphans/1`.
     _ = release_review_checkout(state)
+
+    # bd-8qj1sa: the capture task is not linked to the gate (a killed capture must reach `:DOWN`),
+    # so a gate that stops would otherwise leave the app booting for a review that is gone.
+    _ = cancel_screenshot_task(state)
 
     # bd-2yt0d2: a gate that ends on its own terms leaves no pass to restart. One
     # that is stopped because the node is — and one killed outright, which gets
