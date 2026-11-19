@@ -207,7 +207,13 @@ defmodule Wardmast.Agents.QwenTest do
       assert {"QWEN_CODE_MODELS_DEV", "off"} in env
       assert {"QWEN_USAGE_STATISTICS_ENABLED", "false"} in env
 
-      assert {"QWEN_CODE_SYSTEM_SETTINGS_PATH", Path.join(home, ".qwen-system/settings.json")} in env
+      assert {"QWEN_CODE_SYSTEM_SETTINGS_PATH", settings} =
+               List.keyfind(env, "QWEN_CODE_SYSTEM_SETTINGS_PATH", 0)
+
+      assert Path.basename(settings) == "settings.json"
+      # outside the writable home: a read-only mount nested in the rw home bind is what
+      # stopped being read-only under newer hosts (bd-c609gj)
+      refute String.starts_with?(settings, home <> "/")
     end
 
     test "an endpoint passed in opts replaces the scrubbed vars" do
