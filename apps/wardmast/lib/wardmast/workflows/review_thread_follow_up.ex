@@ -41,6 +41,7 @@ defmodule Wardmast.Workflows.ReviewThreadFollowUp do
   def instructions(policy) when is_map(policy) do
     resolve_bot? = Map.get(policy, :resolve_bot_threads, true)
     resolve_human? = Map.get(policy, :resolve_human_threads, false)
+    {reply_how, resolve_how} = forge_commands(Map.get(policy, :forge, :github))
 
     """
     ## Review thread follow-up protocol (bd-76ydsu)
@@ -50,17 +51,13 @@ defmodule Wardmast.Workflows.ReviewThreadFollowUp do
 
       1. Reply directly ON THAT THREAD (not a new top-level PR comment) with:
            "Addressed in <sha>: <one-line summary of what changed>"
-         Use the forge CLI's thread-reply primitive (e.g.
-         `gh api graphql -f query='mutation { addPullRequestReviewThreadReply(...) }'`
-         or `gh pr comment --reply-to <comment-id>`) — a plain top-level
-         comment does not satisfy this.
+    #{reply_how}
 
       2. Resolve policy:
            - Bot / automated-reviewer threads (Copilot, `dependabot[bot]`,
              other `[bot]` logins): #{bot_resolve_line(resolve_bot?)}
            - Human reviewer threads: #{human_resolve_line(resolve_human?)}
-         Resolve via:
-           `gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<thread-id>"}) { thread { id isResolved } } }'`
+    #{resolve_how}
 
     If a suggestion is WRONG or not applicable, do NOT implement it just to
     make the thread go away and do NOT fake an acknowledgement. Instead:
@@ -95,6 +92,38 @@ defmodule Wardmast.Workflows.ReviewThreadFollowUp do
     Never mark or imply a thread is addressed without an actual pushed fix
     and a posted reply.
     """
+  end
+
+  defp forge_commands(:gitlab) do
+    reply = """
+         Use the GitLab discussions API
+         (`POST /projects/:id/merge_requests/:iid/discussions/<discussion-id>/notes`,
+         e.g. via `glab api`) — a plain top-level MR note does not satisfy this.
+         The discussion id is the review thread's `id`.
+    """
+
+    resolve = """
+         Resolve via:
+           `glab api --method PUT "projects/:id/merge_requests/:iid/discussions/<discussion-id>?resolved=true"`
+    """
+
+    {String.trim_trailing(reply), String.trim_trailing(resolve)}
+  end
+
+  defp forge_commands(_github) do
+    reply = """
+         Use the forge CLI's thread-reply primitive (e.g.
+         `gh api graphql -f query='mutation { addPullRequestReviewThreadReply(...) }'`
+         or `gh pr comment --reply-to <comment-id>`) — a plain top-level
+         comment does not satisfy this.
+    """
+
+    resolve = """
+         Resolve via:
+           `gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<thread-id>"}) { thread { id isResolved } } }'`
+    """
+
+    {String.trim_trailing(reply), String.trim_trailing(resolve)}
   end
 
   defp bot_resolve_line(true), do: "resolve it once you've replied"
