@@ -60,6 +60,8 @@ defmodule Wardmast.Screenshots.Capture.Services.Podman do
   alias Wardmast.Screenshots.Capture.Services.Reaper
   alias Wardmast.Worker.Container
 
+  require Logger
+
   @label "arbiter.capture-service"
   @name_prefix "arb-cap-"
   # What a root entrypoint needs to chown its data dir and drop to its own user (gosu, su-exec);
@@ -328,11 +330,21 @@ defmodule Wardmast.Screenshots.Capture.Services.Podman do
 
   # ── removal ─────────────────────────────────────────────────────────────
 
+  # A container podman could not remove stays tracked: the reaper tries again when the capture
+  # task ends, and the boot sweep after that.
   defp cleanup(run, started) do
     Enum.each(started, fn one ->
       if one.bridge, do: run.bridge.stop(one.bridge)
-      _ = remove(one.name, podman_opts(run))
-      untrack(run, {:container, one.name, podman_opts(run)})
+
+      case remove(one.name, podman_opts(run)) do
+        :ok ->
+          untrack(run, {:container, one.name, podman_opts(run)})
+
+        {:error, reason} ->
+          Logger.warning(
+            "Capture.Services.Podman: could not remove #{one.name}: #{inspect(reason)}"
+          )
+      end
     end)
 
     _ = File.rm_rf(run.dir)

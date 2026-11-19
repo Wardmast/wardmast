@@ -61,7 +61,7 @@ defmodule Wardmast.Screenshots.Capture.Services.PodmanTest do
   end
 
   defp answer("podman", ["logs" | _], _), do: {@log, 0}
-  defp answer("podman", ["rm" | _], _), do: {"", 0}
+  defp answer("podman", ["rm" | _], script), do: Map.get(script, :rm, {"", 0})
   defp answer("setpriv", _args, script), do: Map.get(script, :tcp, {"", 0})
   defp answer("nsenter", _args, script), do: Map.get(script, :tcp, {"", 0})
 
@@ -345,6 +345,25 @@ defmodule Wardmast.Screenshots.Capture.Services.PodmanTest do
 
       :ok = stop_supervised(Reaper)
       assert [_] = removed()
+    end
+
+    test "a container podman could not remove stays tracked, for the reaper to retry", %{
+      reaper: reaper
+    } do
+      rm = {"Error: cannot remove container: device busy", 125}
+
+      assert {:ok, running} =
+               Podman.start([@pg], ctx("before", opts(%{rm: rm}, reaper: reaper)))
+
+      [name] = Enum.map(running.handle.started, & &1.name)
+
+      assert :ok = Podman.stop(running)
+      assert [^name] = removed()
+
+      items = :sys.get_state(reaper).owners |> Map.values() |> Enum.flat_map(& &1.items)
+      assert Enum.any?(items, &match?({:container, ^name, _}, &1))
+      # The socket directory itself is gone either way.
+      refute Enum.any?(items, &match?({:dir, _}, &1))
     end
 
     test "a normal stop untracks: the owner's later exit removes nothing again", %{
