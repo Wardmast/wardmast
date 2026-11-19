@@ -1324,6 +1324,15 @@ defmodule Wardmast.Mergers.Gitlab do
   # push must not look like a fresh review and loop), different if a reviewer is
   # removed and re-added.
   #
+  # Known limitation: `created_at` is when the reviewer was added, not when
+  # their state last changed, and the reviewers API returns no state timestamp.
+  # So if the same reviewer goes `requested_changes` -> `reviewed` ->
+  # `requested_changes` (e.g. after a revise push) the id is unchanged and the
+  # MergeQueue `last_handled_review_id` debounce / PRPatrol fingerprint will not
+  # re-trigger a second revise for that reviewer. GitHub mints a new review id
+  # per submission and does re-trigger. Removing and re-adding the reviewer, or
+  # (with the fallback flag on) a new non-author note, produces a new id.
+  #
   # The fallback (opt-in `changes_requested_from_discussions`): an unresolved
   # discussion started by someone other than the MR author. Its id is the
   # highest note id written by a non-author, so a new reviewer note re-triggers

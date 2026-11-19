@@ -36,6 +36,19 @@ defmodule Wardmast.Mergers.Gitlab.Config do
   `"env:NAME"` looks up `System.get_env/1`; a bare string is treated as a
   literal token (discouraged outside of tests).
 
+  ## Changes-requested signal
+
+  The primary "changes requested" signal is the per-reviewer `state` of
+  `GET /merge_requests/:iid/reviewers` being `requested_changes`. GitLab's
+  "Request changes" review action shipped in 16.11 behind the
+  `mr_reviewer_requests_changes` flag (default-on in 17.2, flag removed in
+  17.3; Premium/Ultimate), so treat **17.3+** as the safe floor for reviewer
+  state. The exact release in which the REST reviewers endpoint began
+  returning `requested_changes` is not stated in GitLab's API docs and has not
+  been confirmed. On older instances (or Free tier) set
+  `"changes_requested_from_discussions" => true` to treat an unresolved
+  discussion from a non-author as changes requested. It is off by default.
+
   ## Per-repo overrides (multi-project workspaces)
 
   A workspace with several repos that map to *different* GitLab projects
