@@ -1106,6 +1106,27 @@ defmodule Wardmast.Workflows.PendingMergeSweeperTest do
       assert Watchdog.retry_whereis(task.id) == nil
     end
 
+    test "a conflict resolver the restart cut off is pending resume: no retry, no give-up" do
+      ws = workspace()
+      task = task(ws, "!pm-cutoff")
+      stamp!(task, sha("cutoff"))
+
+      {:ok, _} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          kind: :conflict,
+          state: :finished,
+          outcome: :interrupted,
+          failure_reason: "server shutdown",
+          started_at: DateTime.utc_now()
+        })
+
+      assert %{retried: [], skipped: [{_, :resolver_pending_resume}]} = sweep()
+      assert Watchdog.retry_whereis(task.id) == nil
+    end
+
     test "a running retry stands down when one starts" do
       reviewed = sha("fixpass-mid-retry")
       mr_ref = "!pm-fixpass-mid"

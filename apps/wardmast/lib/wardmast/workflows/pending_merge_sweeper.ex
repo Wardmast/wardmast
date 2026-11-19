@@ -55,6 +55,7 @@ defmodule Wardmast.Workflows.PendingMergeSweeper do
 
   use GenServer
 
+  require Ash.Query
   require Logger
 
   alias Wardmast.Mergers
@@ -185,6 +186,12 @@ defmodule Wardmast.Workflows.PendingMergeSweeper do
       is_pid(Watchdog.retry_whereis(task.id)) ->
         {:skipped, :retry_running}
 
+      # A conflict resolver / fix pass the restart cut off is pending resume:
+      # the Reconciler queued it and the Watchdog re-asks. A worker-less retry
+      # now would read the same conflict and give up on it.
+      resolver_pending_resume?(task.id) ->
+        {:skipped, :resolver_pending_resume}
+
       true ->
         route(task, pending, Watchdog.live_merge_owner(task.id), opts)
     end
@@ -199,6 +206,31 @@ defmodule Wardmast.Workflows.PendingMergeSweeper do
     :exit, reason ->
       Logger.warning("PendingMergeSweeper: task=#{task.id} sweep exited: #{inspect(reason)}")
       {:skipped, :error}
+  end
+
+  @pending_resume_window_s 3_600
+
+  defp resolver_pending_resume?(task_id) do
+    task_id in Wardmast.Board.Autopilot.deferred_resume_ids() or cut_off_pass_recent?(task_id)
+  end
+
+  defp cut_off_pass_recent?(task_id) do
+    Wardmast.Workers.Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [%{kind: kind, outcome: :interrupted, failure_reason: reason, started_at: at}]
+      when kind in [:conflict, :fix_pass] and
+             reason in ["server shutdown", "server restarted"] ->
+        DateTime.diff(DateTime.utc_now(), at) < @pending_resume_window_s
+
+      _ ->
+        false
+    end
+  rescue
+    _ -> false
   end
 
   defp superseded?(%{pr_ref: pr_ref}, %{mr_ref: mr_ref})

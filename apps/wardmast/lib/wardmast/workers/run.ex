@@ -690,7 +690,8 @@ defmodule Wardmast.Workers.Run do
     query =
       Ash.Query.filter(
         __MODULE__,
-        (task_id == ^task_id or base_task_id == ^task_id) and kind == :fix_pass
+        (task_id == ^task_id or base_task_id == ^task_id) and kind == :fix_pass and
+          (is_nil(outcome) or outcome != :interrupted)
       )
 
     query =

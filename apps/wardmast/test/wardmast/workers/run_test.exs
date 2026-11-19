@@ -233,6 +233,21 @@ defmodule Wardmast.Workers.RunTest do
       assert Run.fix_pass_count("bd-fpc2", "#2") == 1
     end
 
+    test "a fix pass the restart cut off does not spend the budget" do
+      run!(%{task_id: "bd-fpc4", kind: :implement, mr_ref: "#1", started_at: at(0)})
+      run!(%{task_id: "bd-fpc4", kind: :fix_pass, started_at: at(5)})
+
+      run!(%{
+        task_id: "bd-fpc4",
+        kind: :fix_pass,
+        outcome: :interrupted,
+        failure_reason: "server shutdown",
+        started_at: at(10)
+      })
+
+      assert Run.fix_pass_count("bd-fpc4", "#1") == 1
+    end
+
     test "counts every fix pass on the task when no run carries the PR ref" do
       run!(%{task_id: "bd-fpc3", kind: :fix_pass, started_at: at(5)})
       run!(%{task_id: "bd-fpc3", kind: :fix_pass, started_at: at(6)})
