@@ -404,7 +404,13 @@ defmodule Wardmast.Screenshots.Capture do
   defp start_services(%{input: %{config: %Config{services: []}}}, _role), do: {:ok, nil}
 
   defp start_services(st, role) do
-    context = %{role: role, task_id: st.input.task_id, opts: st.services_opts}
+    # The capture's budget goes with them: no pull or readiness wait outlives it.
+    context = %{
+      role: role,
+      task_id: st.input.task_id,
+      opts: st.services_opts,
+      deadline: st.deadline
+    }
 
     case call_services(st, st.input.config.services, context) do
       {:ok, running} -> {:ok, running}

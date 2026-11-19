@@ -65,6 +65,10 @@ defmodule Wardmast.Screenshots.Capture.Services.PodmanTest do
   defp answer("setpriv", _args, script), do: Map.get(script, :tcp, {"", 0})
   defp answer("nsenter", _args, script), do: Map.get(script, :tcp, {"", 0})
 
+  # `timeout -k 5 <s> podman …`: answered as the podman call it wraps.
+  defp answer("timeout", ["-k", _grace, _secs, podman | args], script),
+    do: answer(Path.basename(podman), args, script)
+
   defp opts(script \\ %{}, extra \\ []) do
     Keyword.merge(
       [
@@ -77,7 +81,8 @@ defmodule Wardmast.Screenshots.Capture.Services.PodmanTest do
         bridge: CaptureFakeBridge,
         bridge_opts: [test_pid: self()],
         ready_interval_ms: 0,
-        reaper: false
+        reaper: false,
+        timeout_bin: nil
       ],
       extra
     )
@@ -94,7 +99,9 @@ defmodule Wardmast.Screenshots.Capture.Services.PodmanTest do
 
   defp removed do
     {:messages, msgs} = Process.info(self(), :messages)
-    for {:cmd, "podman", ["rm", "--force", "--ignore", "--time", "0", name]} <- msgs, do: name
+
+    for {:cmd, "podman", ["rm", "--force", "--ignore", "--volumes", "--time", "0", name]} <- msgs,
+        do: name
   end
 
   describe "start/2" do
@@ -110,6 +117,8 @@ defmodule Wardmast.Screenshots.Capture.Services.PodmanTest do
         assert seq?(args, ["--network", "none"])
         assert seq?(args, ["--security-opt", "no-new-privileges"])
         assert seq?(args, ["--cap-drop", "all"])
+        # An image's VOLUME is RAM, gone with the container (no anonymous volume to leak).
+        assert seq?(args, ["--image-volume", "tmpfs"])
         refute "--privileged" in args
         refute Enum.any?(args, &String.starts_with?(&1, "-v"))
         refute Enum.any?(args, &String.starts_with?(&1, "--volume"))
@@ -219,6 +228,35 @@ defmodule Wardmast.Screenshots.Capture.Services.PodmanTest do
 
       assert seq?(probe, ["--target", "4242", "--user", "--preserve-credentials", "--net", "--"])
       assert seq?(probe, ["-u", "OPEN:/dev/null"])
+    end
+  end
+
+  describe "start/2: bounded" do
+    test "podman run is killed, not just abandoned, when it hangs (timeout -k)" do
+      assert {:ok, running} =
+               Podman.start([@pg], ctx("before", opts(%{}, timeout_bin: "/usr/bin/timeout")))
+
+      on_exit(fn -> Podman.stop(running) end)
+
+      assert_received {:cmd, "timeout", ["-k", "5", secs, "/usr/bin/podman", "run" | _]}
+      assert String.to_integer(secs) in 1..300
+    end
+
+    test "the capture's budget caps the wait for a service" do
+      slow = %{@pg | ready: %{@pg.ready | timeout_seconds: 60}}
+      deadline = System.monotonic_time(:millisecond) + 600
+      started = System.monotonic_time(:millisecond)
+
+      context =
+        Map.put(
+          ctx("before", opts(%{exec_ok_after: 1_000_000}, ready_interval_ms: 50)),
+          :deadline,
+          deadline
+        )
+
+      assert {:error, failure} = Podman.start([slow], context)
+      assert failure.reason =~ "budget"
+      assert System.monotonic_time(:millisecond) - started < 5_000
     end
   end
 

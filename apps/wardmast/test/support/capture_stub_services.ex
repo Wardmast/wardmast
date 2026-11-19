@@ -8,10 +8,11 @@ defmodule Wardmast.Test.CaptureStubServices do
   @behaviour Wardmast.Screenshots.Capture.Services
 
   @impl true
-  def start(services, %{role: role, opts: opts}) do
+  def start(services, %{role: role, opts: opts} = context) do
     names = Enum.map(services, & &1.name)
     handle = {role, make_ref()}
     send(Keyword.fetch!(opts, :test_pid), {:services_start, role, names, handle})
+    send(Keyword.fetch!(opts, :test_pid), {:services_deadline, role, Map.get(context, :deadline)})
 
     case Map.get(Keyword.get(opts, :fail, %{}), role) do
       {:exit, reason} ->

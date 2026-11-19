@@ -97,7 +97,9 @@ defmodule Wardmast.Screenshots.Capture.Services.Podman do
         rootless: Keyword.get_lazy(opts, :rootless, &rootless?/0),
         bridge: Keyword.get(opts, :bridge, Bridge),
         bridge_opts: Keyword.get(opts, :bridge_opts, []),
-        interval: Keyword.get(opts, :ready_interval_ms, @ready_interval_ms)
+        interval: Keyword.get(opts, :ready_interval_ms, @ready_interval_ms),
+        # The capture's own budget (monotonic ms), when it gave one: no wait outlives it.
+        deadline: Map.get(context, :deadline)
       }
 
       track(run, {:dir, dir})
@@ -178,7 +180,18 @@ defmodule Wardmast.Screenshots.Capture.Services.Podman do
       {"arbiter.capture-role", run.role}
     ]
 
-    case cmd(run, [run.tools.podman | run_args(one.name, one.service, labels)], @run_timeout_ms) do
+    argv = [run.tools.podman | run_args(one.name, one.service, labels)]
+    run_ms = min(@run_timeout_ms, budget_left_ms(run))
+
+    # Under `timeout -k`, a podman stuck (a pull, a storage lock) is killed with its timeout, not
+    # left to create the container after this boot has given up on it.
+    argv =
+      case run.tools.timeout do
+        nil -> argv
+        bin -> [bin, "-k", "5", Integer.to_string(max(div(run_ms, 1000), 1)) | argv]
+      end
+
+    case cmd(run, argv, run_ms + 10_000) do
       {_, 0} ->
         :ok
 
@@ -192,6 +205,9 @@ defmodule Wardmast.Screenshots.Capture.Services.Podman do
   def run_args(name, svc, labels) do
     Enum.concat([
       ["run", "-d", "--name", name, "--network", "none", "--pull=missing"],
+      # An image's VOLUME (postgres declares one) is RAM, gone with the container: no anonymous
+      # volume per boot to leak.
+      ["--image-volume", "tmpfs"],
       ["--security-opt", "no-new-privileges", "--cap-drop", "all"],
       Enum.flat_map(@caps, &["--cap-add", &1]),
       ["--log-driver", "k8s-file"],
@@ -262,13 +278,31 @@ defmodule Wardmast.Screenshots.Capture.Services.Podman do
     end
   end
 
+  # The service's own `ready.timeout_seconds`, or the capture's budget when that ends first.
   defp await_ready(run, one, pid) do
-    ready = one.service.ready
-    deadline = System.monotonic_time(:millisecond) + ready.timeout_seconds * 1000
-    poll(run, one, pid, deadline)
+    own = System.monotonic_time(:millisecond) + one.service.ready.timeout_seconds * 1000
+
+    limit =
+      if is_integer(run.deadline) and run.deadline < own,
+        do: {run.deadline, :budget},
+        else: {own, :timeout}
+
+    poll(run, one, pid, limit)
   end
 
-  defp poll(run, one, pid, deadline) do
+  # What is left of the capture's budget, at least a second; no budget given: no cap.
+  defp budget_left_ms(%{deadline: nil}), do: @run_timeout_ms
+
+  defp budget_left_ms(%{deadline: deadline}),
+    do: max(deadline - System.monotonic_time(:millisecond), 1_000)
+
+  defp not_ready_message(:budget, _one, detail),
+    do: "was not ready when the capture's budget ran out (last check: #{detail})"
+
+  defp not_ready_message(:timeout, one, detail),
+    do: "did not become ready in #{one.service.ready.timeout_seconds} s (last check: #{detail})"
+
+  defp poll(run, one, pid, {deadline, why} = limit) do
     case check_ready(run, one, pid, deadline) do
       :ok ->
         :ok
@@ -282,13 +316,11 @@ defmodule Wardmast.Screenshots.Capture.Services.Podman do
             {:error, "the bridge into its network namespace exited before it was ready"}
 
           System.monotonic_time(:millisecond) >= deadline ->
-            {:error,
-             "did not become ready in #{one.service.ready.timeout_seconds} s " <>
-               "(last check: #{detail})"}
+            {:error, not_ready_message(why, one, detail)}
 
           true ->
             if run.interval > 0, do: Process.sleep(run.interval)
-            poll(run, one, pid, deadline)
+            poll(run, one, pid, limit)
         end
     end
   end
@@ -359,7 +391,7 @@ defmodule Wardmast.Screenshots.Capture.Services.Podman do
   def remove(name, opts) do
     if String.starts_with?(name, @name_prefix) do
       podman = Keyword.get(opts, :podman) || System.find_executable("podman") || "podman"
-      args = ["rm", "--force", "--ignore", "--time", "0", name]
+      args = ["rm", "--force", "--ignore", "--volumes", "--time", "0", name]
 
       case Container.cmd(opts, podman, args, timeout: @cmd_timeout_ms) do
         {_, 0} -> :ok
@@ -423,7 +455,12 @@ defmodule Wardmast.Screenshots.Capture.Services.Podman do
           do: Keyword.get(opts, :setpriv),
           else: find(Atom.to_string(:setpriv), path)
 
-      {:ok, %{podman: podman, nsenter: nsenter, socat: socat, setpriv: setpriv}}
+      timeout =
+        if Keyword.has_key?(opts, :timeout_bin),
+          do: Keyword.get(opts, :timeout_bin),
+          else: find("timeout", path)
+
+      {:ok, %{podman: podman, nsenter: nsenter, socat: socat, setpriv: setpriv, timeout: timeout}}
     end
   end
 

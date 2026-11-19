@@ -127,6 +127,19 @@ defmodule Wardmast.Screenshots.CaptureServicesTest do
       refute before == after_boot
     end
 
+    test "the services get the capture's budget, so no wait for one outlives it", %{tmp_dir: dir} do
+      before = System.monotonic_time(:millisecond)
+
+      assert {:ok, _} =
+               run(dir, plan!(dir, [%{"id" => "home", "path" => "/"}]), budget_seconds: 300)
+
+      assert_received {:services_deadline, "before", deadline}
+      assert is_integer(deadline)
+
+      assert deadline >= before + 299_000 and
+               deadline <= System.monotonic_time(:millisecond) + 300_000
+    end
+
     test "the boot is handed each service's endpoint", %{tmp_dir: dir} do
       assert {:ok, _} = run(dir, plan!(dir, [%{"id" => "home", "path" => "/"}]))
 
