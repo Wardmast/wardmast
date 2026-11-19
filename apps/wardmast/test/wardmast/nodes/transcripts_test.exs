@@ -163,4 +163,114 @@ defmodule Wardmast.Nodes.TranscriptsTest do
     refute File.exists?(Path.join(dest, ".credentials.json"))
     refute File.exists?(Path.join(dest, "projects/p/link.jsonl"))
   end
+
+  # SI8 (`docs/design/remote-workers.md` §21.3.3): a Codex run's rollouts
+  # (`sessions/YYYY/MM/DD/rollout-*.jsonl`) ride the same upload as Claude's `projects/**`;
+  # the credential never does.
+  describe "Codex rollouts (SI8)" do
+    @rollout "sessions/2026/11/19/rollout-2026-11-19T10-00-00-thread1.jsonl"
+
+    defp rollout_body do
+      ~s({"timestamp":"2026-11-19T10:00:00Z","type":"session_meta","payload":{"session_id":"thread1"}}\n) <>
+        ~s({"timestamp":"2026-11-19T10:00:05Z","type":"event_msg","payload":{"type":"token_count",) <>
+        ~s("info":{"total_token_usage":{"input_tokens":1200,"cached_input_tokens":200,) <>
+        ~s("cache_write_input_tokens":0,"output_tokens":340,"reasoning_output_tokens":0}}}}\n)
+    end
+
+    test "extracts *.jsonl under sessions/ and nothing else there", %{tmp_dir: tmp, dest: dest} do
+      tar =
+        tar!(tmp, [
+          {@rollout, rollout_body()},
+          {"sessions/2026/11/19/notes.txt", "no"},
+          {"auth.json", "{\"tokens\":{}}"},
+          {"config.toml", "x"},
+          {"AGENTS.md", "x"},
+          {"rules/arbiter.rules", "x"}
+        ])
+
+      assert {:ok, %{files: 1, skipped: skipped}} = Transcripts.extract(tar, dest)
+
+      assert Enum.sort(skipped) ==
+               [
+                 "AGENTS.md",
+                 "auth.json",
+                 "config.toml",
+                 "rules/arbiter.rules",
+                 "sessions/2026/11/19/notes.txt"
+               ]
+
+      assert File.read!(Path.join(dest, @rollout)) == rollout_body()
+      refute File.exists?(Path.join(dest, "auth.json"))
+      assert File.ls!(dest) == ["sessions"]
+    end
+
+    test "a symlink or a .. path under sessions/ still rejects the whole archive", %{
+      tmp_dir: tmp,
+      dest: dest
+    } do
+      link = tar!(tmp, [{@rollout, "x\n"}, {"sessions/a/l.jsonl", {:symlink, "/etc/passwd"}}])
+      assert {:error, {:unsafe_entry, "sessions/a/l.jsonl", _}} = Transcripts.extract(link, dest)
+
+      up = tar!(tmp, [{@rollout, "x\n"}, {"sessions/../../x.jsonl", "evil"}])
+      assert {:error, {:unsafe_path, _}} = Transcripts.extract(up, dest)
+      assert File.ls!(dest) == []
+    end
+
+    test "will not write through a symlink already at sessions/ in the destination", %{
+      tmp_dir: tmp,
+      dest: dest
+    } do
+      outside = Path.join(tmp, "outside")
+      File.mkdir_p!(outside)
+      File.ln_s!(outside, Path.join(dest, "sessions"))
+
+      assert {:error, {:unsafe_destination, _}} =
+               Transcripts.extract(tar!(tmp, [{@rollout, "x\n"}]), dest)
+
+      assert File.ls!(outside) == []
+    end
+
+    test "pack/2 takes sessions/ rollouts (not links, not the login) and extract/2 takes them back",
+         %{tmp_dir: tmp, dest: dest} do
+      src = Path.join(tmp, "node-config")
+      File.mkdir_p!(Path.join(src, "sessions/2026/11/19"))
+      File.write!(Path.join(src, @rollout), rollout_body())
+      File.write!(Path.join(src, "sessions/2026/11/19/notes.txt"), "no")
+      File.write!(Path.join(src, "auth.json"), "RT-SECRET")
+      File.ln_s!("/etc/passwd", Path.join(src, "sessions/2026/11/19/link.jsonl"))
+
+      out = Path.join(tmp, "out.tar.gz")
+      assert {:ok, %{files: 1}} = Pack.pack(src, out)
+      assert {:ok, %{files: 1, skipped: []}} = Transcripts.extract(out, dest)
+      assert File.read!(Path.join(dest, @rollout)) == rollout_body()
+      refute File.exists?(Path.join(dest, "auth.json"))
+    end
+
+    test "usage is read from the extracted rollouts, where the local readers look", %{
+      tmp_dir: tmp,
+      dest: dest
+    } do
+      src = Path.join(tmp, "node-config")
+      File.mkdir_p!(Path.join(src, "sessions/2026/11/19"))
+      File.write!(Path.join(src, @rollout), rollout_body())
+
+      out = Path.join(tmp, "out.tar.gz")
+      assert {:ok, %{files: 1}} = Pack.pack(src, out)
+      assert {:ok, %{files: 1}} = Transcripts.extract(out, dest)
+
+      assert {:ok, path} = Wardmast.Usage.CodexSessionFile.locate(dest, "thread1")
+      assert path == Path.join(dest, @rollout)
+
+      assert {:ok, %{tokens_in: 1200, tokens_out: 340}} =
+               Wardmast.Usage.CodexSessionFile.usage_for(dest, "thread1")
+    end
+
+    test "a Claude upload is unchanged: projects/ and sessions/ side by side", %{
+      tmp_dir: tmp,
+      dest: dest
+    } do
+      tar = tar!(tmp, [{"projects/p/s.jsonl", "a\n"}, {@rollout, "b\n"}])
+      assert {:ok, %{files: 2}} = Transcripts.extract(tar, dest)
+    end
+  end
 end
