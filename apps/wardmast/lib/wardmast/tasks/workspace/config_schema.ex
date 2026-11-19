@@ -858,8 +858,14 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
       enabled              bool — master switch; false makes PRPatrol file no
                            follow-ups and dispatch nothing for this workspace
                            (`arb server doctor` flags it)             (default: true)
-      author_logins        list of forge logins — when non-empty, PRPatrol only
-                           files follow-ups for PRs authored by one of these logins
+      author_logins        whose PRs/MRs PRPatrol acts on. Unset (the default):
+                           only PRs Wardmast opened — one linked to a Wardmast
+                           ticket, or authored by our_login. A list of forge
+                           logins: only PRs by those authors. "*" (or a list
+                           containing "*"): every open PR/MR, whoever wrote it.
+                           A follow-up worker only pushes to a PR whose author
+                           is in scope; on any other it may reply/comment but
+                           its push is refused and the reason recorded
       resolve_bot_threads  bool — resolve addressed bot/automated-reviewer review
                            threads (e.g. Copilot) after the follow-up worker
                            replies                                    (default: true)
