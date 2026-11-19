@@ -15,6 +15,7 @@ defmodule Wardmast.Screenshots.Capture.AppProcess do
 
   alias Wardmast.Worker.OsProcess
   alias Wardmast.Worker.ProcessGroup
+  alias Wardmast.Worker.ReleaseEnv
 
   @tail_bytes 4096
   @term_grace_polls 150
@@ -81,7 +82,8 @@ defmodule Wardmast.Screenshots.Capture.AppProcess do
         :stderr_to_stdout,
         :hide,
         args: args,
-        cd: cd
+        cd: cd,
+        env: ReleaseEnv.port_env()
       ])
 
     os_pid =

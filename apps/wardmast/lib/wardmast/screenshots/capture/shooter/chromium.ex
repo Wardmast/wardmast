@@ -108,10 +108,10 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
   end
 
   # `exec` is the operator-configured Chromium binary (or the `timeout`
-  # binary found on PATH) and `args` is an argv list handed to `System.cmd/3`
-  # directly, never through a shell; the viewport/URL come from the worker's
-  # manifest but are only ever argv elements, so they cannot inject a command.
-  # sobelow_skip ["CI.System"]
+  # binary found on PATH) and `args` is an argv list handed to
+  # `ReleaseEnv.cmd/3` (a release-env-scrubbed `System.cmd/3`) directly, never
+  # through a shell; the viewport/URL come from the worker's manifest but are
+  # only ever argv elements, so they cannot inject a command.
   defp run(chrome, spec) do
     profile =
       Path.join(
@@ -123,7 +123,10 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
     {exec, args} = with_timeout(chrome, argv(spec, profile), spec.timeout_s)
 
     try do
-      case System.cmd(exec, args, stderr_to_stdout: true, env: [{"TZ", "UTC"}]) do
+      case Wardmast.Worker.ReleaseEnv.cmd(exec, args,
+             stderr_to_stdout: true,
+             env: [{"TZ", "UTC"}]
+           ) do
         {_out, 0} -> :ok
         {out, code} -> {:error, {:shot, "chromium exited with status #{code}: #{tail(out)}"}}
       end

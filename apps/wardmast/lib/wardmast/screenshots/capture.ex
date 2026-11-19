@@ -42,6 +42,7 @@ defmodule Wardmast.Screenshots.Capture do
   alias Wardmast.Screenshots.Capture.Shooter
   alias Wardmast.Screenshots.Config
   alias Wardmast.Screenshots.Plan
+  alias Wardmast.Worker.ReleaseEnv
 
   @type side ::
           %{
@@ -212,7 +213,7 @@ defmodule Wardmast.Screenshots.Capture do
            System.cmd("git", ["-C", repo, "archive", "--format=tar", "-o", tar, sha],
              stderr_to_stdout: true
            ),
-         {_, 0} <- System.cmd("tar", ["-xf", tar, "-C", checkout], stderr_to_stdout: true) do
+         {_, 0} <- ReleaseEnv.cmd("tar", ["-xf", tar, "-C", checkout], stderr_to_stdout: true) do
       File.rm(tar)
       :ok
     else
