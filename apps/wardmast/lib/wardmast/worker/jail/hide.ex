@@ -298,8 +298,7 @@ defmodule Wardmast.Worker.Jail.Hide do
     |> Enum.filter(&is_binary/1)
     |> Enum.map(&expand(&1, home))
     |> Enum.map(&real/1)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.reject(&glab_login?(&1, home))
+    |> Enum.reject(&(is_nil(&1) or glab_login?(&1, home)))
   end
 
   # The operator's glab login holds GitLab OAuth tokens that rotate on use: a
