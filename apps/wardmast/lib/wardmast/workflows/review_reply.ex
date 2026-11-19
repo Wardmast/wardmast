@@ -147,7 +147,7 @@ defmodule Wardmast.Workflows.ReviewReply do
       )
       when is_atom(adapter) and is_binary(mr_ref) and is_integer(comment_id) and is_binary(body) do
     prepare_adapter(state)
-    opts = adapter_opts(state)
+    opts = state |> adapter_opts() |> put_thread_id(state)
 
     Code.ensure_loaded(adapter)
 
@@ -307,6 +307,13 @@ defmodule Wardmast.Workflows.ReviewReply do
   defp prepare_adapter(_), do: :ok
 
   defp adapter_opts(state), do: Map.get(state, :adapter_opts, %{})
+
+  # GitLab replies target a discussion, not a note id: hand the thread's id
+  # (the discussion id for GitLab) to the adapter. GitHub ignores it.
+  defp put_thread_id(opts, %{thread: %{id: id}}) when is_binary(id) and id != "",
+    do: Map.put_new(opts, :thread_id, id)
+
+  defp put_thread_id(opts, _state), do: opts
 
   defp safe_adapter_call(adapter, fun, args) do
     apply(adapter, fun, args)

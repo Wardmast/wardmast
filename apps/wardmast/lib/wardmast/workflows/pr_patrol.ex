@@ -471,6 +471,7 @@ defmodule Wardmast.Workflows.PRPatrol do
                 fix_pass_in_flight?(pr_number, state)) do
           {state, false}
         else
+          mr = Map.put(mr, :forge, forge_of(adapter))
           file_follow_up(mr, pr_number, state, reason, extra_protocol, fingerprint)
         end
 
@@ -939,14 +940,15 @@ defmodule Wardmast.Workflows.PRPatrol do
   # a fix silently. Policy flags default to a nil workspace's defaults
   # (resolve bots, leave humans) so a follow-up filed before the workspace
   # loads still carries a sane instruction.
-  defp follow_up_protocol(%Workspace{} = workspace) do
+  defp follow_up_protocol(%Workspace{} = workspace, forge) do
     ReviewThreadFollowUp.instructions(%{
+      forge: forge,
       resolve_bot_threads: Workspace.pr_patrol_resolve_bot_threads?(workspace),
       resolve_human_threads: Workspace.pr_patrol_resolve_human_threads?(workspace)
     })
   end
 
-  defp follow_up_protocol(_), do: ReviewThreadFollowUp.instructions(%{})
+  defp follow_up_protocol(_, forge), do: ReviewThreadFollowUp.instructions(%{forge: forge})
 
   # The trigger reason this PR is actionable for (a human-readable string folded
   # into the follow-up task), or nil when nothing needs attention.
@@ -1275,7 +1277,7 @@ defmodule Wardmast.Workflows.PRPatrol do
   end
 
   defp create_follow_up(
-         %{number: number, title: title, url: url},
+         %{number: number, title: title, url: url} = mr,
          state,
          reason,
          extra_protocol,
@@ -1291,7 +1293,7 @@ defmodule Wardmast.Workflows.PRPatrol do
 
       Original PR: #{url}
 
-      #{follow_up_protocol(state.workspace)}
+      #{follow_up_protocol(state.workspace, Map.get(mr, :forge, :github))}
       #{extra_protocol}
       """
 

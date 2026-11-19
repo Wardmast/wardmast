@@ -40,13 +40,12 @@ defmodule Wardmast.Mergers.Gitlab do
   GitLab states map as: `"opened" -> :open`, `"merged" -> :merged`,
   `"closed" | "locked" -> :closed`.
 
-  ## Optional callbacks not implemented
+  ## Review threads
 
-  `reply_to_review_comment/4` — GitLab uses a discussion/note model and does
-  not expose a dedicated "reply to comment" endpoint that maps cleanly to
-  GitHub's `POST /pulls/:n/comments/:id/replies`. This optional callback is
-  not exported; callers guard with `function_exported?/3` and fall back to
-  `add_comment/2` when targeting a GitLab MR.
+  `reply_to_review_comment/4` POSTs a note to
+  `/merge_requests/:iid/discussions/:discussion_id/notes` and
+  `resolve_review_thread/3` PUTs `resolved=true` on the discussion. The
+  normalized review thread's `:id` is the discussion id.
 
   ## Tests
 
@@ -1323,6 +1322,58 @@ defmodule Wardmast.Mergers.Gitlab do
         |> Enum.map(&normalize_discussion/1)
 
       {:ok, threads}
+    end
+  end
+
+  # Threaded reply: POST a note onto the discussion. The discussion id comes
+  # from `opts[:thread_id]` (the normalized thread's `:id`); without it we look
+  # the discussion up by the note id (`comment_id`).
+  @impl true
+  def reply_to_review_comment(mr_ref, comment_id, body, opts)
+      when is_binary(mr_ref) and is_integer(comment_id) and is_binary(body) and is_map(opts) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, discussion_id} <- discussion_id_for(cfg, iid, comment_id, opts) do
+      request(cfg, :post, "/merge_requests/#{iid}/discussions/#{discussion_id}/notes",
+        json: %{"body" => body}
+      )
+      |> handle_json()
+    end
+  end
+
+  @impl true
+  def resolve_review_thread(mr_ref, thread_id, _opts)
+      when is_binary(mr_ref) and is_binary(thread_id) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      request(cfg, :put, "/merge_requests/#{iid}/discussions/#{thread_id}",
+        params: [resolved: true]
+      )
+      |> handle_json()
+    end
+  end
+
+  defp discussion_id_for(cfg, iid, comment_id, opts) do
+    case Map.get(opts, :thread_id) do
+      id when is_binary(id) and id != "" ->
+        {:ok, id}
+
+      _ ->
+        with {:ok, discussions} <-
+               request(cfg, :get, "/merge_requests/#{iid}/discussions", params: [per_page: 100])
+               |> handle_json() do
+          found =
+            discussions
+            |> List.wrap()
+            |> Enum.find(fn d ->
+              d
+              |> Map.get("notes")
+              |> List.wrap()
+              |> Enum.any?(&(Map.get(&1, "id") == comment_id))
+            end)
+
+          if found, do: {:ok, Map.get(found, "id")}, else: {:error, :discussion_not_found}
+        end
     end
   end
 

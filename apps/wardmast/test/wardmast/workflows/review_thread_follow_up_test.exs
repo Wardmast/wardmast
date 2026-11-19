@@ -3,6 +3,20 @@ defmodule Wardmast.Workflows.ReviewThreadFollowUpTest do
 
   alias Wardmast.Workflows.ReviewThreadFollowUp
 
+  describe "instructions/1 with forge: :gitlab" do
+    test "uses the GitLab discussions API, not GitHub GraphQL" do
+      text = ReviewThreadFollowUp.instructions(%{forge: :gitlab})
+      assert text =~ "/discussions/"
+      assert text =~ "resolved=true"
+      refute text =~ "addPullRequestReviewThreadReply"
+      refute text =~ "resolveReviewThread"
+    end
+
+    test "default stays GitHub" do
+      assert ReviewThreadFollowUp.instructions(%{}) =~ "resolveReviewThread"
+    end
+  end
+
   describe "instructions/1" do
     test "always requires a per-thread reply naming the fix sha" do
       text = ReviewThreadFollowUp.instructions(%{})
