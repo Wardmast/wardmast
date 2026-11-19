@@ -37,7 +37,8 @@ defmodule Wardmast.Screenshots.Capture do
 
   ## Options
 
-  `:booter` (default `Booter.Command`), `:shooter` (default `Shooter.Chromium`), `:sandbox`
+  `:booter` (default `Booter.Command`), `:shooter` (default `Shooter.Auto`: the command-line
+  browser, or the CDP runner for a shot that needs a login, steps and so on), `:sandbox`
   (default `Sandbox.default/0`, the bwrap sandbox; passed to both), `:ctx` (passed to both),
   `:record` (`(map -> any)`), `:budget_seconds` (default `limits.budget_seconds`; checked
   before every boot and shot, on top of the booter's own per-phase timeouts).
@@ -112,7 +113,7 @@ defmodule Wardmast.Screenshots.Capture do
     %{
       input: input,
       booter: Keyword.get(opts, :booter, Booter.Command),
-      shooter: Keyword.get(opts, :shooter, Shooter.Chromium),
+      shooter: Keyword.get(opts, :shooter, Shooter.Auto),
       sandbox: Keyword.get(opts, :sandbox) || Sandbox.default(),
       ctx: Keyword.get(opts, :ctx),
       record: Keyword.get(opts, :record),

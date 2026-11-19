@@ -37,8 +37,8 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
   This shooter only does what a command line can: a route, a viewport, a colour scheme and a theme
   `query`. A shot that needs steps, `wait_for`, a `target` element, `full_page`, `hide`, a login or
   a theme `local_storage` returns `{:error, {:shot, reason}}` naming what it cannot do rather than a
-  picture that quietly lacks it. Those need the CDP runner of the design's N1; plug it in as another
-  `Shooter`.
+  picture that quietly lacks it. Those go to `Shooter.Cdp` (the design's N1); `Shooter.Auto`, the
+  capture step's default, sends each shot to whichever can do it, using `unsupported/1`.
 
   `ctx[:chrome]` overrides the browser path (a test seam).
   """
@@ -94,11 +94,13 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
         {:error,
          {:shot,
           "#{spec.entry.id} needs #{Enum.join(what, ", ")}, which the command-line Chromium " <>
-            "shooter cannot do (it needs the CDP capture runner)"}}
+            "shooter cannot do (it needs the CDP shooter; use Shooter.Auto)"}}
     end
   end
 
-  defp chrome(spec) do
+  @doc false
+  @spec chrome(map()) :: {:ok, String.t()} | {:error, {:shot, String.t()}}
+  def chrome(spec) do
     override = if is_map(spec.ctx), do: spec.ctx[:chrome]
     found = override || System.get_env("ARB_CHROME") || System.find_executable("chromium")
 
