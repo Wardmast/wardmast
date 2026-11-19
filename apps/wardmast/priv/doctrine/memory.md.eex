@@ -1,4 +1,4 @@
-## Nothing compounds automatically
+<% _ = assigns %>## Nothing compounds automatically
 
 Workers do not read any memory store: every worker starts cold, from its
 issue and the repo alone. (The `memory/shared/` layers a session may have
