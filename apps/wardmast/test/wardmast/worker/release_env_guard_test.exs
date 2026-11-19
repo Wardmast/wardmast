@@ -242,7 +242,9 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # `env -i`) plus `ps` / `kill` for its process group.
     "apps/wardmast/lib/wardmast/screenshots/capture/app_process.ex" => :scrubbed,
     # bd-1ydndq: headless Chromium through `ReleaseEnv.cmd/3`.
-    "apps/wardmast/lib/wardmast/screenshots/capture/shooter/chromium.ex" => :scrubbed
+    "apps/wardmast/lib/wardmast/screenshots/capture/shooter/chromium.ex" => :scrubbed,
+    # bd-adrym0: early plan check: `git merge-base` / `rev-parse` only.
+    "apps/wardmast/lib/wardmast/screenshots/plan_check.ex" => :pure_tool
   }
 
   # Spawn primitives that run a command of their own choosing. Rule 1 inspects
