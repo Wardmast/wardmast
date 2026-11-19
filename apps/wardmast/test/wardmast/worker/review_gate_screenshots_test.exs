@@ -195,6 +195,87 @@ defmodule Wardmast.Worker.ReviewGateScreenshotsTest do
     end
   end
 
+  describe "the capture lifecycle record (bd-8qj1sa)" do
+    alias Wardmast.Screenshots.Captures
+
+    test "writes a row per attempt: head, base, plan_hash, config_hash, state", ctx do
+      Process.put(:test_pid, self())
+      rig = rig(ctx, new_ws(@screenshots), "feature/shots-5")
+      gate = start_gate(rig, ctx, screenshot_capture: fn _i, _o -> {:ok, %{pairs: []}} end)
+
+      wait_until(fn -> passes(rig) == 1 end)
+      assert [row] = Captures.list(rig.task.id)
+      assert row.state == "captured"
+      assert String.starts_with?(rig.head, row.head_sha)
+      assert is_binary(row.base_sha) and is_binary(row.config_hash)
+      assert is_binary(row.plan_hash), "the commit gate's stored plan is hashed"
+      stop_gate(gate)
+    end
+
+    test "a new head cancels an in-flight capture and captures the new head", ctx do
+      Process.put(:test_pid, self())
+      rig = rig(ctx, new_ws(@screenshots), "feature/shots-6")
+      new_head = String.duplicate("f", 40)
+
+      capture = fn input, _opts ->
+        send(ctx_pid(), {:capture_started, self(), input.head_sha})
+
+        if input.head_sha == new_head do
+          {:ok, %{pairs: []}}
+        else
+          Process.sleep(:infinity)
+        end
+      end
+
+      gate = start_gate(rig, ctx, screenshot_capture: capture)
+
+      assert_receive {:capture_started, first, head1}, Wardmast.Test.Timing.scale(15_000)
+      assert String.starts_with?(rig.head, head1)
+      ref = Process.monitor(first)
+
+      ReviewGate.head_moved(gate, new_head)
+
+      assert_receive {:DOWN, ^ref, :process, ^first, _}, Wardmast.Test.Timing.scale(5_000)
+      assert_receive {:capture_started, _second, ^new_head}, Wardmast.Test.Timing.scale(5_000)
+      wait_until(fn -> passes(rig) == 1 end)
+
+      assert [old, new] = Captures.list(rig.task.id)
+      assert {old.state, new.state} == {"superseded", "captured"}
+      assert String.starts_with?(rig.head, old.head_sha)
+      assert new.head_sha == new_head
+      stop_gate(gate)
+    end
+
+    test "max_captures_per_ticket is enforced by the gate", ctx do
+      Process.put(:test_pid, self())
+      block = Map.put(@screenshots, "limits", %{"max_captures_per_ticket" => 1})
+      rig = rig(ctx, new_ws(block), "feature/shots-7")
+
+      {:ok, spent} =
+        Captures.begin_attempt(%{
+          task_id: rig.task.id,
+          head_sha: "0ld",
+          base_sha: "b",
+          config_hash: "c"
+        })
+
+      Captures.finish(spent, {:ok, %{pairs: []}})
+
+      gate =
+        start_gate(rig, ctx,
+          screenshot_capture: fn _i, _o ->
+            send(ctx_pid(), :capture_called)
+            {:ok, %{pairs: []}}
+          end
+        )
+
+      wait_until(fn -> passes(rig) == 1 end)
+      refute_received :capture_called
+      assert :sys.get_state(gate).current_prompt =~ "max_captures_per_ticket"
+      stop_gate(gate)
+    end
+  end
+
   describe "a repo with no screenshots config" do
     test "keeps today's behaviour: no capture, the reviewer is dispatched", ctx do
       Process.put(:test_pid, self())

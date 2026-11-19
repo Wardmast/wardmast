@@ -26,6 +26,7 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
 
   alias Wardmast.Screenshots.Capture
   alias Wardmast.Screenshots.Capture.Failure
+  alias Wardmast.Screenshots.Captures
   alias Wardmast.Screenshots.Config
   alias Wardmast.Screenshots.PlanCheck
 
@@ -36,7 +37,13 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
 
   @worker_codes [:manifest_missing, :manifest_invalid, :route_error]
 
-  @type job :: %{input: map(), config: Config.t(), opts: keyword()}
+  @type job :: %{
+          input: map(),
+          config: Config.t(),
+          opts: keyword(),
+          plan_hash: String.t() | nil,
+          config_hash: String.t()
+        }
   @type outcome :: Capture.run_outcome()
   @type routed ::
           {:proceed, String.t() | nil}
@@ -51,23 +58,86 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
   Whether (and how) to run the step for `state` in `workspace`.
 
   `:skip` leaves the gate as it was; `{:cached, outcome}` reuses the outcome already read for this
-  head; `{:run, job}` is a capture to run with `run/2`.
+  head; `{:run, job}` is a capture to run with `run/2`; `{:reuse, outcome, meta}` keeps the set
+  captured at an earlier head instead of taking a new one (see below).
+
+  `history` is `Wardmast.Screenshots.Captures.history/1` (`nil` = no lifecycle rules, the
+  pre-bd-8qj1sa behaviour). With it, for a head not yet checked:
+
+    * **cap** — `limits.max_captures_per_ticket` attempts already booted: no new capture. The last
+      set is reused (`reason: :cap`) or, with none, the outcome is `{:skipped, {:cap_reached, n}}`;
+    * **unchanged** — the diff `last_captured_head..head` misses `ui_paths` and the plan is the one
+      that was captured: the last set is reused (`reason: :unchanged`). A changed merge-base alone
+      does not re-capture;
+    * otherwise a capture runs.
+
+  Reuse needs the previous outcome in `state.screenshot_checked`, so a restarted gate (which lost
+  it) captures again rather than reuse something it cannot show the reviewer.
   """
-  @spec plan(map(), term()) :: :skip | {:cached, outcome()} | {:run, job()}
-  def plan(%{worktree_path: wt} = state, workspace) when is_binary(wt) do
+  @spec plan(map(), term(), Captures.history() | nil) ::
+          :skip
+          | {:cached, outcome()}
+          | {:reuse, outcome(), map()}
+          | {:run, job()}
+  def plan(state, workspace, history \\ nil)
+
+  def plan(%{worktree_path: wt} = state, workspace, history) when is_binary(wt) do
     with {:ok, %Config{} = config} <- Config.resolve(workspace, Map.get(state, :repo)),
          head when is_binary(head) <- Map.get(state, :head_sha),
          base when is_binary(base) <- Map.get(state, :base_sha) do
       case Map.get(state, :screenshot_checked) do
         %{head_sha: ^head, outcome: outcome} -> {:cached, outcome}
-        _ -> {:run, job(state, config, base, head)}
+        checked -> lifecycle(state, config, base, head, checked, history)
       end
     else
       _ -> :skip
     end
   end
 
-  def plan(_state, _workspace), do: :skip
+  def plan(_state, _workspace, _history), do: :skip
+
+  defp lifecycle(state, config, base, head, _checked, nil),
+    do: {:run, job(state, config, base, head)}
+
+  defp lifecycle(state, config, base, head, checked, history) do
+    max = Map.get(config.limits, "max_captures_per_ticket", 3)
+    last = history.last_captured
+
+    hashes = %{
+      plan_hash: Captures.plan_hash(plan_path(state, state.worktree_path)),
+      config_hash: Captures.config_hash(config),
+      base_sha: base
+    }
+
+    cond do
+      history.attempts >= max -> capped(checked, last, max, hashes)
+      reusable?(state, config, head, checked, last) -> reuse(checked, last, :unchanged, hashes)
+      true -> {:run, job(state, config, base, head)}
+    end
+  end
+
+  defp capped(%{outcome: {:ok, _}} = checked, %{head_sha: from}, max, hashes),
+    do: {:reuse, checked.outcome, Map.merge(hashes, %{reason: :cap, from: from, max: max})}
+
+  defp capped(_checked, _last, max, _hashes), do: {:cached, {:skipped, {:cap_reached, max}}}
+
+  defp reuse(checked, %{head_sha: from}, reason, hashes),
+    do: {:reuse, checked.outcome, Map.merge(hashes, %{reason: reason, from: from})}
+
+  # The set to keep must be on hand, be the last captured head's, rest on the plan now in force,
+  # and the diff since it must provably miss `ui_paths` (a failing diff re-captures).
+  defp reusable?(_state, _config, _head, nil, _last), do: false
+  defp reusable?(_state, _config, _head, _checked, nil), do: false
+
+  defp reusable?(state, config, head, %{outcome: {:ok, %{head_sha: from}}}, %{
+         head_sha: from,
+         plan_hash: plan_hash
+       }) do
+    plan_hash == Captures.plan_hash(plan_path(state, state.worktree_path)) and
+      Config.diff_touches_ui_paths?(config, state.worktree_path, from, head) == {:ok, false}
+  end
+
+  defp reusable?(_state, _config, _head, _checked, _last), do: false
 
   defp job(state, config, base, head) do
     wt = state.worktree_path
@@ -75,15 +145,19 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
     out_dir =
       Path.join([System.tmp_dir!(), "arbiter-review-screenshots", state.task_id, head])
 
+    plan_path = plan_path(state, wt)
+
     %{
       config: config,
+      plan_hash: Captures.plan_hash(plan_path),
+      config_hash: Captures.config_hash(config),
       input: %{
         task_id: state.task_id,
         repo_path: wt,
         base_sha: base,
         head_sha: head,
         config: config,
-        plan_path: plan_path(state, wt),
+        plan_path: plan_path,
         out_dir: out_dir
       },
       opts: Map.get(state, :screenshot_opts, [])
@@ -148,6 +222,15 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
        "result from the diff alone."}
   end
 
+  # bd-8qj1sa: `limits.max_captures_per_ticket` attempts were already spent and none produced a
+  # set. Not the worker's fault, so no send-back; the reviewer judges the diff alone, knowing why.
+  def route({:skipped, {:cap_reached, max}}) do
+    {:proceed,
+     "No screenshots were taken for this head: the ticket already used its " <>
+       "`max_captures_per_ticket` (#{max}) capture attempts. Judge the visual result from the " <>
+       "diff alone."}
+  end
+
   def route({:ok, result}), do: {:proceed, render_result(result)}
 
   def route({:error, %Failure{} = failure}) do
@@ -156,6 +239,34 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
       :infrastructure -> {:escalate, escalation_message(failure)}
     end
   end
+
+  @doc """
+  Route a set kept from an earlier head (`plan/3`'s `{:reuse, outcome, meta}`): `route/1`'s answer
+  with a line saying which commit the screenshots were taken at, so a reviewer is never shown a
+  stale set as if it were the head's.
+  """
+  @spec route_reuse(outcome(), map(), String.t()) :: routed()
+  def route_reuse(outcome, %{reason: reason, from: from} = meta, head) do
+    case route(outcome) do
+      {:proceed, context} when is_binary(context) ->
+        {:proceed, reuse_note(reason, meta, from, head) <> context}
+
+      other ->
+        other
+    end
+  end
+
+  defp reuse_note(:unchanged, _meta, from, head),
+    do:
+      "These screenshots were taken at #{String.slice(from, 0, 12)}; the head is now " <>
+        "#{String.slice(head, 0, 12)}, but nothing under `ui_paths` changed since and the plan " <>
+        "is the same, so they were not retaken.\n\n"
+
+  defp reuse_note(:cap, meta, from, head),
+    do:
+      "These screenshots were taken at #{String.slice(from, 0, 12)}, NOT at the head " <>
+        "#{String.slice(head, 0, 12)}: the ticket reached its `max_captures_per_ticket` " <>
+        "(#{Map.get(meta, :max)}) so the head was not captured. The UI may differ.\n\n"
 
   @doc "The reviewer-prompt block for a context from `route/1` (empty when there is none)."
   @spec reviewer_block(String.t() | nil) :: String.t()
