@@ -43,6 +43,7 @@ defmodule Wardmast.Board.AutopilotDeferredResumeTest do
       paused: false,
       # VM-global gate (`Drain`, `ResumeGate`) that concurrent async tests mutate.
       registry_settled?: fn -> true end,
+      record_shadow: fn _attrs -> :ok end,
       snapshot: fn _ -> board(Agent.get(free, & &1)) end,
       # DC12: a slot waiter replays when its pool has a seat (modelled by `free`).
       slot_room: fn _task_id, _kind -> Agent.get(free, & &1) > 0 end,

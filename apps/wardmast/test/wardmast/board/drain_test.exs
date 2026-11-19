@@ -48,6 +48,7 @@ defmodule Wardmast.Board.DrainTest do
       name: nil,
       interval_ms: :never,
       topics: [],
+      record_shadow: fn _attrs -> :ok end,
       snapshot: fn o -> board(o[:paused]) end
     ]
 
@@ -129,6 +130,7 @@ defmodule Wardmast.Board.DrainTest do
         start_autopilot!(
           paused: false,
           dispatch: dispatch,
+          record_shadow: fn _attrs -> :ok end,
           snapshot: fn o -> board(o[:paused], "bd-promo1") end
         )
 
@@ -209,6 +211,7 @@ defmodule Wardmast.Board.DrainTest do
         start_autopilot!(
           paused: false,
           dispatch: dispatch,
+          record_shadow: fn _attrs -> :ok end,
           snapshot: fn o -> board(o[:paused], "bd-promo2") end
         )
 

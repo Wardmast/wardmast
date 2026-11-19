@@ -38,6 +38,7 @@ defmodule Wardmast.Board.AutopilotConfigTest do
       name: nil,
       interval_ms: :never,
       topics: [],
+      record_shadow: fn _attrs -> :ok end,
       snapshot: fn opts -> board("bd-1", opts[:paused]) end
     ]
 

@@ -68,6 +68,7 @@ defmodule Wardmast.Board.AutopilotImagePendingTest do
         follow_up: false,
         paused: false,
         registry_settled?: fn -> true end,
+        record_shadow: fn _attrs -> :ok end,
         now: fn -> Agent.get(clock, & &1) end,
         escalate: fn id, reason, attempts -> send(test, {:escalated, id, reason, attempts}) end,
         snapshot: snapshot(test),

@@ -42,6 +42,7 @@ defmodule Wardmast.Board.AutopilotTest do
       # The registry gate reads VM-global state (`Drain`, `ResumeGate`) that
       # concurrent async tests mutate; this suite is about the pass itself.
       registry_settled?: fn -> true end,
+      record_shadow: fn _attrs -> :ok end,
       snapshot: fn opts -> board("bd-1", opts[:paused]) end
     ]
 

@@ -45,6 +45,7 @@ defmodule Wardmast.Board.AutopilotRefusedDispatchTest do
       follow_up: false,
       paused: false,
       registry_settled?: fn -> true end,
+      record_shadow: fn _attrs -> :ok end,
       now: fn -> Agent.get(clock, & &1) end,
       escalate: fn id, reason, attempts -> send(test, {:escalated, id, reason, attempts}) end,
       snapshot: fn _ -> board("bd-1") end

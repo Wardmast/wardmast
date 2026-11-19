@@ -45,6 +45,7 @@ defmodule Wardmast.Board.AutopilotLocalCapacityResumeTest do
       follow_up: false,
       paused: false,
       registry_settled?: fn -> true end,
+      record_shadow: fn _attrs -> :ok end,
       snapshot: fn _ -> board(Keyword.get(opts, :slots_free, 0)) end,
       # DC12: a slot waiter replays when its pool has a seat (modelled by `:slots_free`).
       slot_room: fn _task_id, _kind -> Keyword.get(opts, :slots_free, 0) > 0 end,

@@ -63,6 +63,7 @@ defmodule Wardmast.Board.AutopilotStaleDispatchTest do
       follow_up: false,
       paused: false,
       registry_settled?: fn -> true end,
+      record_shadow: fn _attrs -> :ok end,
       ticket_closed?: fn id -> Agent.get(closed, &MapSet.member?(&1, id)) end,
       snapshot: fn _ -> board("bd-1") end,
       dispatch: fn id ->

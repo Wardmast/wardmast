@@ -128,10 +128,6 @@ defmodule Wardmast.Board.SnapshotMostQuotaTest do
     |> then(&Ash.get!(ProviderAccount, &1).slug)
   end
 
-  # ---- the hold -------------------------------------------------------------
-
-  describe "quota_hold/2" do
-
   # ---- the per-ticket hold (bd-1qjv3j) --------------------------------------
 
   describe "load/1 per-ticket holds" do

@@ -9,7 +9,6 @@ defmodule Wardmast.Board.CapacityViewTest do
   use Wardmast.DataCase, async: false
 
   alias Wardmast.Accounts.ProviderAccount
-  alias Wardmast.Board.AdmissionShadowEvent
   alias Wardmast.Board.CapacityView
   alias Wardmast.Quota.Budget
 
