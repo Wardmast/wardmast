@@ -175,7 +175,8 @@ network namespace, so two services cannot talk to each other.
 * **Built once per lockfile and toolchain**, under `<scratch_root>/capture-deps/<lock>-<toolchain>`
   (the toolchain is what `elixir` reports inside the sandbox, so a new Elixir/OTP misses it).
   The seed runs in the default branch's `git archive`, in the same sandbox **with the network
-  on** (trusted code only), with the server's proxy variables: `mix local.hex`/`local.rebar`
+  on** (trusted code only), with the server's proxy variables (never one that carries a
+  credential): `mix local.hex`/`local.rebar`
   when the lock needs them, `mix deps.get`, `mix deps.compile` (which fetches precompiled NIFs,
   `elixir_make`/`rustler_precompiled`, into the cache), and `mix esbuild.install` /
   `tailwind.install` when those deps are present. It takes up to `limits.setup_seconds`, and a

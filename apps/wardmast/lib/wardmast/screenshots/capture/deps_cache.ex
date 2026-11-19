@@ -28,7 +28,8 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
     1. `git archive` of the source commit (no `.git`, nothing a worker wrote);
     2. `seed_script/0` in it, through the sandbox's `fetch_command/2`: the same filesystem
        allowlist as a boot (its `readonly_paths` too) **with the network on**, an environment
-       built from nothing (plus the server's own proxy variables), `MIX_ENV=dev`:
+       built from nothing (plus the server's own proxy variables, never one with a credential in
+       it), `MIX_ENV=dev`:
        `mix local.hex`/`local.rebar` (when the lock needs them), `mix deps.get`, `mix
        deps.compile` (which also downloads precompiled NIFs, `elixir_make` and
        `rustler_precompiled`, into the cache), then `mix esbuild.install`/`tailwind.install`
@@ -354,11 +355,13 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   defp flag(true), do: "1"
   defp flag(false), do: "0"
 
-  # The trusted seed reaches the network the way the server does.
+  # The trusted seed reaches the network the way the server does, but never with a proxy
+  # credential: a URL with userinfo (`user:pass@`) stays with the server.
   defp proxy_env do
     for name <- @proxy_env,
         value = System.get_env(name),
         value not in [nil, ""],
+        not String.contains?(value, "@"),
         do: {name, value}
   end
 

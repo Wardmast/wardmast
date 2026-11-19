@@ -194,6 +194,38 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
       assert Map.keys(env) -- Wardmast.Screenshots.Config.deps_env_names() == []
     end
 
+    test "the seed gets the server's proxy, never one that carries credentials", ctx do
+      saved =
+        Map.new(~w(HTTPS_PROXY HTTP_PROXY https_proxy http_proxy), &{&1, System.get_env(&1)})
+
+      System.put_env("HTTPS_PROXY", "http://proxy.internal:3128")
+      System.put_env("HTTP_PROXY", "http://user:hunter2@proxy.internal:3128")
+      System.delete_env("https_proxy")
+      System.delete_env("http_proxy")
+
+      on_exit(fn ->
+        Enum.each(saved, fn
+          {k, nil} -> System.delete_env(k)
+          {k, v} -> System.put_env(k, v)
+        end)
+      end)
+
+      seen = Path.join(ctx.root <> "-env", "env.txt")
+      File.mkdir_p!(Path.dirname(seen))
+      script = ~s(env > "#{seen}"\n) <> @fake_seed
+
+      assert {:ok, _} =
+               DepsCache.prepare(
+                 input(ctx.repo, ctx.base, ctx.head),
+                 Keyword.put(ctx.opts, :seed_script, script)
+               )
+
+      env = File.read!(seen)
+      assert env =~ ~r/^HTTPS_PROXY=http:\/\/proxy.internal:3128$/m
+      refute env =~ "hunter2"
+      refute env =~ ~r/^HTTP_PROXY=/m
+    end
+
     test "a seed that fails is an error with its output, and publishes nothing", ctx do
       opts = Keyword.put(ctx.opts, :seed_script, "echo 'mix deps.get: nxdomain' >&2; exit 1")
 
