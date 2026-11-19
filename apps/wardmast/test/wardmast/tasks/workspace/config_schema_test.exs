@@ -130,3 +130,37 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchemaTest do
     assert "review_scope" in ConfigSchema.known_top_level_keys()
   end
 end
+
+# bd-3glf2a: the screenshots section names every key Screenshots.Config accepts, including the
+# capture services and the offline deps cache.
+defmodule Wardmast.Tasks.Workspace.ConfigSchemaScreenshotsTest do
+  use ExUnit.Case, async: true
+
+  alias Wardmast.Screenshots.Config
+  alias Wardmast.Tasks.Workspace.ConfigSchema
+
+  defp screenshots_section do
+    text = ConfigSchema.render()
+    [_, after_start] = String.split(text, "\n  screenshots     map", parts: 2)
+    [section | _] = String.split(after_start, "\n  preview         map", parts: 2)
+    section
+  end
+
+  test "every screenshots key is documented" do
+    section = screenshots_section()
+
+    for key <- Config.keys() do
+      assert section =~ ~r/\n\s+#{key}\s/, "screenshots.#{key} is missing from the schema text"
+    end
+  end
+
+  test "services and deps document their own keys" do
+    section = screenshots_section()
+
+    for word <-
+          ~w(image port env command ready socket timeout_seconds tcp cmd mix MIX_DEPS_PATH
+             HEX_OFFLINE deps_changed boot_failed) do
+      assert section =~ word, "#{word} is missing from the screenshots schema text"
+    end
+  end
+end

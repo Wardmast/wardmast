@@ -739,6 +739,33 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                                          /etc, the checkout and the boot's scratch (a
                                          toolchain, a dependency cache), read-only; absolute
                                          or ~/ paths, never the home directory or above
+                        services         map name (^[a-z][a-z0-9-]{0,15}$) -> {image, port,
+                                         env, command, ready, socket}: a container Wardmast
+                                         starts fresh for EVERY boot (before and after get
+                                         their own) with podman --network none, and removes
+                                         after it (also on failure, timeout and shutdown).
+                                         image (required) as given (pin a digest); port
+                                         (required, 1024-65535, outside port_range) is where
+                                         it listens in its container and where the app
+                                         reaches it: 127.0.0.1:<port> inside the sandbox;
+                                         env literal strings; command argv after the image;
+                                         ready {cmd [argv] exec'd in the container until it
+                                         exits 0 | tcp true (default: the port accepts),
+                                         timeout_seconds 60 (max 600)}; socket: a path under
+                                         /run/ or /tmp/ of the sandbox where it also shows
+                                         as a Unix socket. A service that does not start or
+                                         get ready fails the boot (boot_failed, with its
+                                         log tail). Needs podman, nsenter and socat
+                        deps             {mix false}: true fetches the Mix deps of a
+                                         default-branch mix.lock into a read-only cache
+                                         (mix deps.get + deps.compile + the esbuild/tailwind
+                                         installers, network on, trusted code only) and
+                                         points every boot at it: MIX_DEPS_PATH, MIX_HOME,
+                                         HEX_HOME, HEX_OFFLINE=1, ELIXIR_MAKE_CACHE_DIR,
+                                         RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH,
+                                         MIX_ESBUILD_PATH, MIX_TAILWIND_PATH (env may not set
+                                         them). A head whose mix.lock differs is skipped
+                                         (deps_changed): its code never runs with network
                       start_cmd, setup_cmd, seed_cmd, seeds and env values may use {{port}},
                       {{role}} (before/after), {{scratch}}, {{checkout}}, {{task_id}}.
                       Every command and the browser run in a bwrap sandbox with no network

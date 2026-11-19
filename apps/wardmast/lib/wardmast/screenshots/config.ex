@@ -21,7 +21,7 @@ defmodule Wardmast.Screenshots.Config do
   @keys ~w(enabled ui_paths ignore_paths plan_required default_routes start_cmd setup_cmd seed_cmd
            seeds port_env port_range base_url env ready login viewports default_viewports themes
            default_themes fixture_check deny_patterns fixture_email_domains limits hosting attach
-           sandbox)
+           sandbox services deps)
   @placeholders ~w(port role scratch checkout task_id)
   @env_name ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/
   @proxy_keys ~w(HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY)
@@ -60,6 +60,19 @@ defmodule Wardmast.Screenshots.Config do
   }
   @default_emails ~w(example.com example.org example.net test invalid localhost)
   @default_sandbox %{"readonly_paths" => []}
+  @default_deps %{"mix" => false}
+
+  # bd-3glf2a: `services` (per-boot containers bridged into the sandbox) and `deps` (the offline
+  # Mix deps cache).
+  @service_name ~r/\A[a-z][a-z0-9-]{0,15}\z/
+  @service_keys ~w(image port env command ready socket)
+  @image_ref ~r/\A[^\s\x00-][^\s\x00]{0,254}\z/
+  @service_socket ~r{\A/(run|tmp)/[A-Za-z0-9._/-]+\z}
+  @max_socket_bytes 100
+  @service_ready_default_s 60
+  @service_ready_max_s 600
+  @deps_env ~w(MIX_DEPS_PATH MIX_HOME HEX_HOME HEX_OFFLINE MIX_ESBUILD_PATH MIX_TAILWIND_PATH
+               ELIXIR_MAKE_CACHE_DIR RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH)
 
   defstruct ui_paths: [],
             ignore_paths: [],
@@ -85,7 +98,22 @@ defmodule Wardmast.Screenshots.Config do
             limits: @default_limits,
             hosting: @default_hosting,
             attach: true,
-            sandbox: @default_sandbox
+            sandbox: @default_sandbox,
+            services: [],
+            deps: @default_deps
+
+  @typedoc "One `services` entry as resolved (sorted by name; `ready` defaults to `tcp`)."
+  @type service :: %{
+          name: String.t(),
+          image: String.t(),
+          port: 1024..65_535,
+          env: [{String.t(), String.t()}],
+          command: [String.t()],
+          ready:
+            %{kind: :tcp, timeout_seconds: pos_integer()}
+            | %{kind: :cmd, cmd: [String.t()], timeout_seconds: pos_integer()},
+          socket: String.t() | nil
+        }
 
   @type t :: %__MODULE__{}
 
@@ -171,9 +199,46 @@ defmodule Wardmast.Screenshots.Config do
       limits: Map.merge(d.limits, Map.get(block, "limits", %{})),
       hosting: Map.merge(d.hosting, Map.get(block, "hosting", %{})),
       attach: Map.get(block, "attach", true),
-      sandbox: Map.merge(d.sandbox, Map.get(block, "sandbox", %{}))
+      sandbox: Map.merge(d.sandbox, Map.get(block, "sandbox", %{})),
+      services: block |> Map.get("services", %{}) |> build_services(),
+      deps: Map.merge(d.deps, Map.get(block, "deps", %{}))
     }
   end
+
+  # Sorted by name, so a boot starts (and the sandbox relays) them in a stable order.
+  defp build_services(services) do
+    services
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(fn {name, s} ->
+      %{
+        name: name,
+        image: s["image"],
+        port: s["port"],
+        env: s |> Map.get("env", %{}) |> Enum.sort(),
+        command: Map.get(s, "command", []),
+        ready: build_ready(Map.get(s, "ready", %{"tcp" => true})),
+        socket: s["socket"]
+      }
+    end)
+  end
+
+  defp build_ready(%{"cmd" => cmd} = ready) do
+    %{
+      kind: :cmd,
+      cmd: cmd,
+      timeout_seconds: Map.get(ready, "timeout_seconds", @service_ready_default_s)
+    }
+  end
+
+  defp build_ready(ready),
+    do: %{
+      kind: :tcp,
+      timeout_seconds: Map.get(ready, "timeout_seconds", @service_ready_default_s)
+    }
+
+  @doc "The variables the offline deps cache (`deps.mix`) sets in every boot's environment."
+  @spec deps_env_names() :: [String.t()]
+  def deps_env_names, do: @deps_env
 
   # ── ui_paths matching ───────────────────────────────────────────────────
 
@@ -211,7 +276,9 @@ defmodule Wardmast.Screenshots.Config do
   """
   @spec validate(term(), String.t()) :: [String.t()]
   def validate(%{} = block, label) do
-    unknown_errors(block, label) ++ required_errors(block, label) ++ key_errors(block, label)
+    unknown_errors(block, label) ++
+      required_errors(block, label) ++
+      key_errors(block, label) ++ service_range_errors(block, label)
   end
 
   def validate(_block, label), do: ["#{label} must be a map"]
@@ -221,8 +288,14 @@ defmodule Wardmast.Screenshots.Config do
   required `ui_paths` / `start_cmd`, so a repo block may set just the keys it overrides.
   """
   @spec validate_partial(term(), String.t()) :: [String.t()]
-  def validate_partial(%{} = block, label),
-    do: unknown_errors(block, label) ++ key_errors(block, label)
+  def validate_partial(%{} = block, label) do
+    # A repo block may leave `port_range` to the workspace block: only a range set beside the
+    # services can be checked before the merge.
+    range_errors =
+      if Map.has_key?(block, "port_range"), do: service_range_errors(block, label), else: []
+
+    unknown_errors(block, label) ++ key_errors(block, label) ++ range_errors
+  end
 
   def validate_partial(_block, label), do: ["#{label} must be a map"]
 
@@ -288,7 +361,7 @@ defmodule Wardmast.Screenshots.Config do
   end
 
   defp validate_key("base_url", v, label, _b), do: base_url(v, label)
-  defp validate_key("env", v, label, _b), do: env(v, label)
+  defp validate_key("env", v, label, b), do: env(v, label) ++ deps_managed_env(v, label, b)
   defp validate_key("ready", v, label, _b), do: ready(v, label)
   defp validate_key("login", v, label, _b), do: login(v, label)
   defp validate_key("viewports", v, label, _b), do: viewports(v, label)
@@ -313,6 +386,8 @@ defmodule Wardmast.Screenshots.Config do
   defp validate_key("limits", v, label, _b), do: limits(v, label)
   defp validate_key("hosting", v, label, _b), do: hosting(v, label)
   defp validate_key("sandbox", v, label, _b), do: sandbox(v, label)
+  defp validate_key("services", v, label, _b), do: services(v, label)
+  defp validate_key("deps", v, label, _b), do: deps(v, label)
 
   defp map_or_empty(%{} = m), do: m
   defp map_or_empty(_), do: %{}
@@ -756,4 +831,192 @@ defmodule Wardmast.Screenshots.Config do
     home = Path.expand(System.user_home() || "/")
     String.starts_with?(home <> "/", expanded <> "/")
   end
+
+  # ── services and deps (bd-3glf2a) ───────────────────────────────────────
+
+  defp services(%{} = v, label) do
+    Enum.flat_map(Enum.sort(v), fn {name, svc} -> service(name, svc, "#{label}.#{name}") end) ++
+      shared_values(v, "port", label) ++ shared_values(v, "socket", label)
+  end
+
+  defp services(_v, label), do: ["#{label} must be a map of service name -> service"]
+
+  defp service(name, svc, label) do
+    cond do
+      not (is_binary(name) and Regex.match?(@service_name, name)) ->
+        ["#{label}: a service name is 1-16 characters of a-z, 0-9 and -, starting with a letter"]
+
+      not is_map(svc) ->
+        ["#{label} must be a map"]
+
+      true ->
+        unknown_keys(svc, @service_keys, label) ++
+          for(
+            key <- ~w(image port),
+            not Map.has_key?(svc, key),
+            do: "#{label}.#{key} is required"
+          ) ++
+          service_fields(svc, label)
+    end
+  end
+
+  defp service_fields(svc, label) do
+    check(
+      svc,
+      "image",
+      label,
+      &(is_binary(&1) and Regex.match?(@image_ref, &1)),
+      "must be an image reference (no spaces, not starting with -)"
+    ) ++
+      check(
+        svc,
+        "port",
+        label,
+        &(is_integer(&1) and &1 in 1024..65_535),
+        "must be an integer in 1024-65535 (the sandbox cannot bind a lower one)"
+      ) ++
+      service_env(Map.get(svc, "env", %{}), "#{label}.env") ++
+      check(svc, "command", label, &strings?/1, "must be a list of strings") ++
+      service_ready(svc, label) ++ service_socket(svc, label)
+  end
+
+  # Literal values: the container gets them as written (no template is rendered there).
+  defp service_env(%{} = env, label) do
+    Enum.flat_map(env, fn
+      {k, v} when is_binary(k) and is_binary(v) -> service_env_pair(k, v, label)
+      {k, _} when is_binary(k) -> ["#{label}.#{k} must be a string"]
+      {k, _} -> ["#{label} key #{inspect(k)} is not a valid environment variable name"]
+    end)
+  end
+
+  defp service_env(_v, label), do: ["#{label} must be a map of strings"]
+
+  defp service_env_pair(k, v, label) do
+    cond do
+      not Regex.match?(@env_name, k) ->
+        ["#{label} key #{inspect(k)} is not a valid environment variable name"]
+
+      String.upcase(k) in @proxy_keys ->
+        ["#{label}.#{k} may not be set (the service has no network to proxy)"]
+
+      scrubbed?(k) ->
+        ["#{label}.#{k} may not be set (scrubbed from worker environments)"]
+
+      String.contains?(v, ["{{", "\0"]) ->
+        ["#{label}.#{k} must be a literal value (no {{placeholder}} is rendered here)"]
+
+      true ->
+        []
+    end
+  end
+
+  defp strings?(list),
+    do: is_list(list) and Enum.all?(list, &(is_binary(&1) and not String.contains?(&1, "\0")))
+
+  defp service_ready(%{"ready" => %{} = ready}, label) do
+    label = "#{label}.ready"
+
+    unknown_keys(ready, ~w(cmd tcp timeout_seconds), label) ++
+      ready_kind(Map.fetch(ready, "cmd"), Map.fetch(ready, "tcp"), label) ++
+      check(
+        ready,
+        "timeout_seconds",
+        label,
+        &(is_integer(&1) and &1 in 1..@service_ready_max_s),
+        "must be 1-#{@service_ready_max_s}"
+      )
+  end
+
+  defp service_ready(%{"ready" => _}, label), do: ["#{label}.ready must be a map"]
+  defp service_ready(_svc, _label), do: []
+
+  defp ready_kind({:ok, _}, {:ok, _}, label), do: ["#{label} takes cmd or tcp, not both"]
+
+  defp ready_kind(:error, :error, label) do
+    [
+      "#{label} needs cmd (an argv run in the service until it exits 0) or tcp: true " <>
+        "(the port accepts a connection)"
+    ]
+  end
+
+  defp ready_kind({:ok, cmd}, :error, label) do
+    if strings?(cmd) and cmd != [],
+      do: [],
+      else: ["#{label}.cmd must be a non-empty list of strings"]
+  end
+
+  defp ready_kind(:error, {:ok, tcp}, label),
+    do: if(tcp == true, do: [], else: ["#{label}.tcp must be true"])
+
+  # Where the service also shows as a Unix socket inside the sandbox: on its private /run or /tmp
+  # (bwrap makes the mount point there), short enough for sun_path.
+  defp service_socket(%{"socket" => socket}, label) do
+    label = "#{label}.socket"
+
+    cond do
+      not is_binary(socket) ->
+        ["#{label} must be a path"]
+
+      byte_size(socket) > @max_socket_bytes ->
+        ["#{label} is longer than #{@max_socket_bytes} bytes, too long for a Unix socket"]
+
+      not Regex.match?(@service_socket, socket) ->
+        ["#{label} must be an absolute path under /run/ or /tmp/ (letters, digits, . _ - /)"]
+
+      Enum.any?(Path.split(socket), &(&1 in [".", ".."])) or String.ends_with?(socket, "/") ->
+        ["#{label} must name a file, with no . or .. segment"]
+
+      true ->
+        []
+    end
+  end
+
+  defp service_socket(_svc, _label), do: []
+
+  # Two services on one sandbox port (or socket path) would collide inside the sandbox.
+  defp shared_values(services, key, label) do
+    services
+    |> Enum.filter(fn {_name, svc} -> is_map(svc) and scalar?(svc[key]) end)
+    |> Enum.group_by(fn {_name, svc} -> svc[key] end, &elem(&1, 0))
+    |> Enum.filter(fn {_value, names} -> length(names) > 1 end)
+    |> Enum.sort()
+    |> Enum.map(fn {value, names} ->
+      "#{label}: services #{Enum.join(Enum.sort(names), ", ")} share #{key} #{value}"
+    end)
+  end
+
+  defp scalar?(v), do: is_integer(v) or is_binary(v)
+
+  # The app's own port is picked from `port_range`, inside the same sandbox namespace.
+  defp service_range_errors(%{"services" => %{} = services} = block, label) do
+    case parse_range(Map.get(block, "port_range", "32000-32999")) do
+      {:ok, {lo, hi}} ->
+        for {name, %{"port" => port}} <- Enum.sort(services),
+            is_integer(port) and port in lo..hi do
+          "#{label}.services.#{name}.port #{port} is inside port_range #{lo}-#{hi}, where the " <>
+            "app's own port is picked"
+        end
+
+      _ ->
+        []
+    end
+  end
+
+  defp service_range_errors(_block, _label), do: []
+
+  defp deps(%{} = v, label),
+    do:
+      unknown_keys(v, ~w(mix), label) ++
+        check(v, "mix", label, &is_boolean/1, "must be a boolean")
+
+  defp deps(_v, label), do: ["#{label} must be a map"]
+
+  # With the deps cache on, these point at it; a hand-set value would quietly undo that.
+  defp deps_managed_env(%{} = env, label, %{"deps" => %{"mix" => true}}) do
+    for key <- Enum.sort(Map.keys(env)), key in @deps_env do
+      "#{label}.#{key} is set by the offline deps cache (deps.mix); remove it from env"
+    end
+  end
+
+  defp deps_managed_env(_env, _label, _block), do: []
 end

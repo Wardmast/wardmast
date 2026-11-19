@@ -301,6 +301,236 @@ defmodule Wardmast.Screenshots.ConfigTest do
     end
   end
 
+  # bd-3glf2a: per-boot service containers bridged into the capture sandbox.
+  describe "validate/2: services" do
+    defp errors_s(services), do: Config.validate(Map.put(@minimal, "services", services), "s")
+
+    @postgres %{
+      "image" => "docker.io/postgis/postgis:16-3.4@sha256:" <> String.duplicate("a", 64),
+      "port" => 5432,
+      "env" => %{"POSTGRES_PASSWORD" => "postgres", "POSTGRES_DB" => "app"},
+      "command" => ["postgres", "-c", "fsync=off"],
+      "ready" => %{"cmd" => ["pg_isready", "-h", "127.0.0.1"], "timeout_seconds" => 90},
+      "socket" => "/run/postgresql/.s.PGSQL.5432"
+    }
+
+    test "accepts a full service and a minimal one" do
+      assert errors_s(%{"postgres" => @postgres}) == []
+      assert errors_s(%{"s3" => %{"image" => "docker.io/pgsty/silo", "port" => 9000}}) == []
+
+      assert errors_s(%{"s3" => %{"image" => "i", "port" => 9000, "ready" => %{"tcp" => true}}}) ==
+               []
+
+      assert errors_s(%{}) == []
+    end
+
+    test "refuses unknown keys, at the service and in ready" do
+      assert [msg] = errors_s(%{"postgres" => Map.put(@postgres, "network", "host")})
+      assert msg =~ "s.services.postgres has unknown key(s) network"
+
+      assert [msg] =
+               errors_s(%{"postgres" => put_in(@postgres, ["ready", "http"], "/health")})
+
+      assert msg =~ "s.services.postgres.ready has unknown key(s) http"
+    end
+
+    test "image and port are required; names are short and lowercase" do
+      assert [msg] = errors_s(%{"pg" => Map.delete(@postgres, "image")})
+      assert msg =~ "s.services.pg.image is required"
+      assert [msg] = errors_s(%{"pg" => Map.delete(@postgres, "port")})
+      assert msg =~ "s.services.pg.port is required"
+      assert [_] = errors_s(%{"Postgres" => @postgres})
+      assert [_] = errors_s(%{"a-very-long-service-name" => @postgres})
+      assert [_] = errors_s(%{"pg" => "postgres:16"})
+      assert [_] = errors_s(["postgres"])
+    end
+
+    test "image must be a plain reference" do
+      for image <- ["", "-v", "a b", 7] do
+        assert [msg] = errors_s(%{"pg" => Map.put(@postgres, "image", image)})
+        assert msg =~ "s.services.pg.image"
+      end
+    end
+
+    test "port: 1024-65535, unique, and outside the app's port_range" do
+      for port <- [80, 70_000, "5432", 0] do
+        assert [msg] = errors_s(%{"pg" => Map.put(@postgres, "port", port)})
+        assert msg =~ "s.services.pg.port"
+      end
+
+      both = %{
+        "pg" => Map.delete(@postgres, "socket"),
+        "pg2" => Map.delete(@postgres, "socket")
+      }
+
+      assert [msg] = errors_s(both)
+      assert msg =~ "port 5432"
+
+      assert [msg] = errors_s(%{"pg" => Map.put(@postgres, "port", 32_100)})
+      assert msg =~ "port_range"
+
+      assert [] =
+               Config.validate(
+                 Map.merge(@minimal, %{
+                   "port_range" => "40000-40100",
+                   "services" => %{"pg" => Map.put(@postgres, "port", 32_100)}
+                 }),
+                 "s"
+               )
+    end
+
+    test "env: literal strings, no placeholders, proxies or scrubbed credentials" do
+      for {k, v} <- [
+            {"POSTGRES_DB", "app_{{role}}"},
+            {"HTTP_PROXY", "x"},
+            {"ANTHROPIC_API_KEY", "x"},
+            {"bad name", "x"},
+            {"N", 5}
+          ] do
+        assert [msg] = errors_s(%{"pg" => Map.put(@postgres, "env", %{k => v})})
+        assert msg =~ "s.services.pg.env"
+      end
+
+      assert [_] = errors_s(%{"pg" => Map.put(@postgres, "env", ["A=b"])})
+    end
+
+    test "command is a list of strings" do
+      assert [_] = errors_s(%{"pg" => Map.put(@postgres, "command", "postgres -c fsync=off")})
+      assert [_] = errors_s(%{"pg" => Map.put(@postgres, "command", ["postgres", 5])})
+      assert [] = errors_s(%{"pg" => Map.put(@postgres, "command", [])})
+    end
+
+    test "ready is exactly one of cmd or tcp, with a bounded timeout" do
+      for ready <- [
+            %{},
+            %{"cmd" => ["pg_isready"], "tcp" => true},
+            %{"cmd" => []},
+            %{"cmd" => "pg_isready"},
+            %{"tcp" => false},
+            %{"tcp" => true, "timeout_seconds" => 0},
+            %{"tcp" => true, "timeout_seconds" => 601},
+            "tcp"
+          ] do
+        assert [msg] = errors_s(%{"pg" => Map.put(@postgres, "ready", ready)})
+        assert msg =~ "s.services.pg.ready"
+      end
+    end
+
+    test "socket is a short path under /run or /tmp of the sandbox, unique" do
+      for socket <- [
+            "relative/s",
+            "/usr/lib/s",
+            "/run/../etc/s",
+            "/run/" <> String.duplicate("x", 120),
+            "/run/a b",
+            "/run/",
+            7
+          ] do
+        assert [msg] = errors_s(%{"pg" => Map.put(@postgres, "socket", socket)})
+        assert msg =~ "s.services.pg.socket"
+      end
+
+      assert [] = errors_s(%{"pg" => Map.put(@postgres, "socket", "/tmp/pg/.s.PGSQL.5432")})
+
+      twins = %{
+        "pg" => @postgres,
+        "pg2" => Map.put(@postgres, "port", 5433)
+      }
+
+      assert [msg] = errors_s(twins)
+      assert msg =~ "socket"
+    end
+
+    test "validate_partial applies the same rules" do
+      assert [_] =
+               Config.validate_partial(
+                 %{"services" => %{"pg" => Map.put(@postgres, "bogus", 1)}},
+                 "s"
+               )
+    end
+  end
+
+  describe "validate/2: deps" do
+    test "deps.mix is a boolean; unknown keys are refused" do
+      assert [] = errors(%{"deps" => %{"mix" => true}})
+      assert [] = errors(%{"deps" => %{"mix" => false}})
+      assert [] = errors(%{"deps" => %{}})
+      assert [_] = errors(%{"deps" => %{"mix" => "yes"}})
+      assert [msg] = errors(%{"deps" => %{"npm" => true}})
+      assert msg =~ "s.deps has unknown key(s) npm"
+      assert [_] = errors(%{"deps" => true})
+    end
+
+    test "with deps.mix on, env may not set what the deps cache manages" do
+      for key <- ~w(MIX_DEPS_PATH MIX_HOME HEX_HOME HEX_OFFLINE MIX_ESBUILD_PATH MIX_TAILWIND_PATH
+                    ELIXIR_MAKE_CACHE_DIR RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH) do
+        assert [msg] = errors(%{"deps" => %{"mix" => true}, "env" => %{key => "/x"}})
+        assert msg =~ "s.env.#{key}"
+        assert [] = errors(%{"env" => %{key => "/x"}})
+      end
+    end
+  end
+
+  describe "resolve/2: services and deps" do
+    test "default to none and off" do
+      workspace = ws(%{"repos" => %{"app" => %{"screenshots" => @minimal}}})
+      assert {:ok, c} = Config.resolve(workspace, "app")
+      assert c.services == []
+      assert c.deps == %{"mix" => false}
+    end
+
+    test "services resolve to a sorted list with defaults filled in; maps merge by name" do
+      block =
+        Map.merge(@minimal, %{
+          "services" => %{"s3" => %{"image" => "silo", "port" => 9000, "command" => ["silo"]}},
+          "deps" => %{"mix" => true}
+        })
+
+      workspace =
+        ws(%{
+          "screenshots" => %{
+            "services" => %{"pg" => %{"image" => "postgres:16", "port" => 5432}}
+          },
+          "repos" => %{"app" => %{"screenshots" => block}}
+        })
+
+      assert {:ok, c} = Config.resolve(workspace, "app")
+      assert c.deps == %{"mix" => true}
+
+      assert [
+               %{
+                 name: "pg",
+                 image: "postgres:16",
+                 port: 5432,
+                 env: [],
+                 command: [],
+                 ready: %{kind: :tcp, timeout_seconds: 60},
+                 socket: nil
+               },
+               %{name: "s3", image: "silo", port: 9000, command: ["silo"]}
+             ] = c.services
+    end
+
+    test "env is sorted pairs and a cmd ready keeps its argv" do
+      block =
+        Map.put(@minimal, "services", %{
+          "pg" => %{
+            "image" => "postgres:16",
+            "port" => 5432,
+            "env" => %{"B" => "2", "A" => "1"},
+            "ready" => %{"cmd" => ["pg_isready"], "timeout_seconds" => 30},
+            "socket" => "/run/pg/.s.PGSQL.5432"
+          }
+        })
+
+      workspace = ws(%{"repos" => %{"app" => %{"screenshots" => block}}})
+      assert {:ok, %{services: [svc]}} = Config.resolve(workspace, "app")
+      assert svc.env == [{"A", "1"}, {"B", "2"}]
+      assert svc.ready == %{kind: :cmd, cmd: ["pg_isready"], timeout_seconds: 30}
+      assert svc.socket == "/run/pg/.s.PGSQL.5432"
+    end
+  end
+
   describe "resolve/2: sandbox" do
     test "defaults to no extra read-only paths" do
       workspace = ws(%{"repos" => %{"app" => %{"screenshots" => @minimal}}})
