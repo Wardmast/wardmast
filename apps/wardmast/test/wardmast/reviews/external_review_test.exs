@@ -162,6 +162,65 @@ defmodule Wardmast.Reviews.ExternalReviewTest do
       assert prepared.link == url
     end
 
+    test "gitlab: a nested-group MR URL resolves to the full namespace path" do
+      System.put_env(@env_var, "tok")
+      on_exit(fn -> System.delete_env(@env_var) end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "er-gl-nested",
+          prefix: uniq_prefix(),
+          config: %{
+            "merge" => %{
+              "strategy" => "gitlab",
+              "config" => %{
+                "host" => "gitlab.internal",
+                "project_id" => "group/other",
+                "credentials_ref" => "env:#{@env_var}"
+              }
+            }
+          }
+        })
+
+      url = "https://gitlab.internal/group/sub/project/-/merge_requests/30"
+      assert {:ok, prepared} = ExternalReview.prepare(pr: url, workspace: ws.name)
+      assert prepared.mr_ref == "group/sub/project!30"
+      assert prepared.link == url
+    end
+
+    test "gitlab: a nested-group MR URL scopes the workspace to the repo whose remote it names" do
+      System.put_env(@env_var, "tok")
+      on_exit(fn -> System.delete_env(@env_var) end)
+      repo = tmp_git_repo("https://gitlab.internal/group/sub/project.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "er-gl-nested-scope",
+          prefix: uniq_prefix(),
+          config: %{
+            "repo_paths" => %{"project" => repo},
+            "default_repo" => "project",
+            "merge" => %{
+              "strategy" => "direct",
+              "repos" => %{
+                "project" => %{
+                  "strategy" => "gitlab",
+                  "config" => %{
+                    "host" => "gitlab.internal",
+                    "project_id" => "group/sub/project",
+                    "credentials_ref" => "env:#{@env_var}"
+                  }
+                }
+              }
+            }
+          }
+        })
+
+      url = "https://gitlab.internal/group/sub/project/-/merge_requests/30"
+      assert {:ok, prepared} = ExternalReview.prepare(pr: url, workspace: ws.name)
+      assert prepared.mr_ref == "group/sub/project!30"
+    end
+
     test "the :direct merge strategy has no external-PR support" do
       {:ok, ws} =
         Ash.create(Workspace, %{

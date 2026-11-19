@@ -597,11 +597,28 @@ defmodule Wardmast.Reviews.ExternalReview do
   defp scope_workspace(workspace, repo, _pr) when is_binary(repo) and repo != "",
     do: Mergers.scope(workspace, repo)
 
+  # A GitLab MR URL names its project path — arbitrarily nested
+  # (`group/sub/project`), unlike GitHub's two-segment slug (#1521). Both the
+  # URL form and `[gitlab:]group/sub/project!N` scope to that namespace path.
   defp scope_workspace(workspace, _repo, pr) when is_binary(pr) do
-    case Regex.run(~r{^(?:github:|gitlab:)?([^/\s#!]+/[^/\s#!]+)[#!]\d+$}, String.trim(pr)) do
-      [_, slug] -> ForgeRepos.scope(workspace, slug)
-      _ -> workspace
-    end
+    pr = String.trim(pr)
+
+    slug =
+      case Regex.run(~r{^https?://[^/\s]+/(.+?)/-/merge_requests/\d+}, pr) do
+        [_, path] ->
+          path
+
+        _ ->
+          case Regex.run(
+                 ~r{^(?:github:|gitlab:)?((?:[^/\s#!]+/)+[^/\s#!]+)[#!]\d+$},
+                 pr
+               ) do
+            [_, path] -> path
+            _ -> nil
+          end
+      end
+
+    if slug, do: ForgeRepos.scope(workspace, slug), else: workspace
   end
 
   defp scope_workspace(workspace, _repo, _pr), do: workspace

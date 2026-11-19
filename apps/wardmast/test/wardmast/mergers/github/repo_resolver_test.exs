@@ -55,6 +55,46 @@ defmodule Wardmast.Mergers.Github.RepoResolverTest do
     end
   end
 
+  describe "parse/2 with nested: true (GitLab namespaces)" do
+    test "keeps the full namespace path as the owner, SSH and HTTPS" do
+      assert {:ok, {"group/sub", "project"}} =
+               RepoResolver.parse("git@gitlab.internal:group/sub/project.git", nested: true)
+
+      assert {:ok, {"group/sub/deeper", "project"}} =
+               RepoResolver.parse("https://gitlab.internal/group/sub/deeper/project",
+                 nested: true
+               )
+
+      assert {:ok, {"group/sub", "project"}} =
+               RepoResolver.parse("https://gitlab.internal:8443/group/sub/project.git/",
+                 nested: true
+               )
+    end
+
+    test "a path-prefixed instance URL is not mistaken for a namespace only when told so" do
+      assert {:ok, {"gitlab/group", "project"}} =
+               RepoResolver.parse("https://h/gitlab/group/project.git", nested: true)
+    end
+
+    test "two-segment remotes parse the same as without nested" do
+      assert {:ok, {"emricare", "tonic"}} =
+               RepoResolver.parse("git@gitlab.com:emricare/tonic.git", nested: true)
+    end
+
+    test "without nested: true, three segments stay rejected (GitHub parsing unchanged)" do
+      assert {:error, %Error{kind: :config_missing}} =
+               RepoResolver.parse("https://github.com/a/b/c.git")
+
+      assert {:error, %Error{kind: :config_missing}} =
+               RepoResolver.parse("git@github.com:a/b/c.git")
+    end
+
+    test "rejects a bare host and a single segment" do
+      assert {:error, _} = RepoResolver.parse("https://gitlab.internal/project", nested: true)
+      assert {:error, _} = RepoResolver.parse("not a url", nested: true)
+    end
+  end
+
   describe "from_remote/1" do
     setup do
       # A local bare git repo with a configured `origin` remote is the

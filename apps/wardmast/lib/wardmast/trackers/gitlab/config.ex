@@ -60,6 +60,7 @@ defmodule Wardmast.Trackers.Gitlab.Config do
   """
 
   alias Wardmast.Agents.CredentialsRef
+  alias Wardmast.Mergers.Gitlab.Endpoint
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Trackers.Gitlab.Error
 
@@ -77,6 +78,8 @@ defmodule Wardmast.Trackers.Gitlab.Config do
 
   @type config :: %{
           host: String.t(),
+          base_url: String.t() | nil,
+          ca_cacertfile: String.t() | nil,
           project_id: String.t(),
           token: String.t(),
           status_map: %{atom() => status_entry}
@@ -148,6 +151,8 @@ defmodule Wardmast.Trackers.Gitlab.Config do
       {:ok,
        %{
          host: host,
+         base_url: Endpoint.from_raw(raw),
+         ca_cacertfile: Endpoint.ca_from_raw(raw),
          project_id: project_id,
          token: token,
          status_map: status_map(raw)
@@ -193,6 +198,18 @@ defmodule Wardmast.Trackers.Gitlab.Config do
       v when is_binary(v) and v != "" -> v
       _ -> nil
     end
+  end
+
+  @doc """
+  Returns the active instance base URL (`base_url` / `api_url` config), or nil
+  when unset (callers default to `https://<host>`).
+  """
+  @spec active_base_url() :: String.t() | nil
+  def active_base_url do
+    raw =
+      Process.get(@pdict_key) || Application.get_env(:wardmast, :gitlab_tracker_default_config)
+
+    raw && Endpoint.from_raw(raw)
   end
 
   # ---- Internals ----------------------------------------------------------

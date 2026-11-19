@@ -2033,6 +2033,13 @@ defmodule Wardmast.Worker.Dispatch do
           # No live worker to realign — leave the legitimate close intact.
           {:ok, task}
 
+        run_finished?(worker_pid) ->
+          # bd-3x5g5z: a fast run can open its PR, merge (Direct) and have the
+          # Watchdog close the ticket before this window check runs. The worker
+          # is still alive only because it is winding down; reopening would undo
+          # a real close and strand the ticket `:active` with nothing running.
+          {:ok, task}
+
         true ->
           require Logger
 
@@ -2047,6 +2054,16 @@ defmodule Wardmast.Worker.Dispatch do
           end
       end
     end
+  end
+
+  # A finished run, or one that stopped between the liveness check and the
+  # snapshot call (`:__run_finished__` stops the worker right after it finishes,
+  # so the call exits `:noproc`/`:normal`) — neither is a live worker to realign.
+  defp run_finished?(worker_pid) do
+    match?(%{state: :finished}, Worker.state(worker_pid))
+  catch
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] -> true
+    :exit, _ -> false
   end
 
   defp reopen_task(%Issue{} = task) do
@@ -4313,7 +4330,7 @@ defmodule Wardmast.Worker.Dispatch do
       ws_id
       |> candidate_repo_paths()
       |> Enum.find_value(fn path ->
-        case RepoResolver.from_remote(path) do
+        case RepoResolver.from_remote(path, nested: true) do
           {:ok, {owner, name}} ->
             # Pre-existing nesting 4 — baselined when bd-4x2yhq first
             # wired Credo up. Thresholds stay at the tool's own default so new

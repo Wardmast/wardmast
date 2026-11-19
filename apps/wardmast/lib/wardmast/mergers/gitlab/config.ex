@@ -25,8 +25,15 @@ defmodule Wardmast.Mergers.Gitlab.Config do
         # optional:
         "default_target_branch" => "main",
         "default_reviewers" => [],
-        "merge_method" => "merge"
+        "merge_method" => "merge",
+        # self-managed GitLab (all optional):
+        "base_url" => "https://gitlab.internal/gitlab",  # default "https://<host>"; "api_url" is an alias
+        "ca_cacertfile" => "/etc/ssl/internal-ca.pem"     # PEM bundle for an internal CA
       }
+
+  `base_url` (scheme + host + optional path prefix) and `ca_cacertfile` apply to
+  every GitLab HTTP client — merger, tracker and bot credential
+  (`Wardmast.Mergers.Gitlab.Endpoint`).
 
   `project_id` is GitLab's numeric project ID (or a URL-encoded
   `"group/project"` path) — passed through verbatim into the API path, so
@@ -35,6 +42,24 @@ defmodule Wardmast.Mergers.Gitlab.Config do
   `credentials_ref` is the same small DSL the tracker adapters use:
   `"env:NAME"` looks up `System.get_env/1`; a bare string is treated as a
   literal token (discouraged outside of tests).
+
+  ## Changes-requested signal
+
+  The primary "changes requested" signal is the per-reviewer `state` of
+  `GET /merge_requests/:iid/reviewers` being `requested_changes`. GitLab's
+  "Request changes" review action shipped in 16.11 behind the
+  `mr_reviewer_requests_changes` flag (default-on in 17.2, flag removed in
+  17.3; Premium/Ultimate), so treat **17.3+** as the safe floor for reviewer
+  state (source: the "Prevent merge when you request changes" history block in
+  GitLab's merge request reviews docs). GitLab's REST docs for the reviewers
+  endpoint list no `state` values or version note (the example shows only
+  `unreviewed`/`reviewed`), so the exact release where that endpoint began
+  returning `requested_changes` is unconfirmed; 17.3+ is inferred from the
+  feature rollout. The reviewer-state signal carries no timestamp, so a
+  reviewer who re-requests changes after a revise keeps the same debounce id
+  (see `Wardmast.Mergers.Gitlab`). On older instances (or Free tier) set
+  `"changes_requested_from_discussions" => true` to treat an unresolved
+  discussion from a non-author as changes requested. It is off by default.
 
   ## Per-repo overrides (multi-project workspaces)
 
@@ -62,7 +87,7 @@ defmodule Wardmast.Mergers.Gitlab.Config do
   """
 
   alias Wardmast.Agents.CredentialsRef
-  alias Wardmast.Mergers.Gitlab.Error
+  alias Wardmast.Mergers.Gitlab.{Endpoint, Error}
   alias Wardmast.Tasks.Workspace
 
   @pdict_key {__MODULE__, :active_workspace_config}
@@ -72,11 +97,15 @@ defmodule Wardmast.Mergers.Gitlab.Config do
 
   @type config :: %{
           host: String.t(),
+          base_url: String.t() | nil,
+          ca_cacertfile: String.t() | nil,
           project_id: String.t(),
           token: String.t(),
           default_target_branch: String.t(),
           default_reviewers: [term()],
-          merge_method: :merge | :squash | :ff
+          merge_method: :merge | :squash | :ff,
+          changes_requested_from_discussions: boolean(),
+          external_jobs: [String.t()]
         }
 
   @doc """
@@ -167,12 +196,17 @@ defmodule Wardmast.Mergers.Gitlab.Config do
       {:ok,
        %{
          host: host,
+         base_url: Endpoint.from_raw(raw),
+         ca_cacertfile: Endpoint.ca_from_raw(raw),
          project_id: project_id,
          token: token,
          default_target_branch:
            stringy(Map.get(raw, "default_target_branch")) || @default_target_branch,
          default_reviewers: List.wrap(Map.get(raw, "default_reviewers")),
-         merge_method: merge_method(raw)
+         merge_method: merge_method(raw),
+         changes_requested_from_discussions:
+           Map.get(raw, "changes_requested_from_discussions") in [true, "true"],
+         external_jobs: external_jobs(raw)
        }}
     end
   end
@@ -242,6 +276,13 @@ defmodule Wardmast.Mergers.Gitlab.Config do
   defp stringy(nil), do: nil
   defp stringy(v) when is_binary(v) and v != "", do: v
   defp stringy(_), do: nil
+
+  defp external_jobs(raw) do
+    raw
+    |> Map.get("external_jobs")
+    |> List.wrap()
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+  end
 
   defp merge_method(raw) do
     case Map.get(raw, "merge_method") do

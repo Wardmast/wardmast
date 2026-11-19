@@ -40,6 +40,8 @@ defmodule Wardmast.Agents.Qwen.JailBwrapTest do
     echo ok > "$HOME/home-write.txt" && echo HOME_WRITE_OK
     { echo '{}' > "#{sys}"; } 2>&1 | grep -qi 'read-only file system' && echo SETTINGS_EROFS
     { rm -f "#{sys}"; } 2>&1 | grep -qi 'read-only file system' && echo SETTINGS_RM_EROFS
+    # evidence for a failing host: how the settings dir is mounted in the jail
+    grep ' #{Path.dirname(sys)} ' /proc/self/mountinfo | sed 's/^/MOUNTINFO: /'
     exit 0
     """)
 
@@ -90,10 +92,10 @@ defmodule Wardmast.Agents.Qwen.JailBwrapTest do
     {out, status} = run(argv)
 
     assert status == 0, out
-    assert out =~ "WORKTREE_EROFS"
-    assert out =~ "HOME_WRITE_OK"
-    assert out =~ "SETTINGS_EROFS"
-    assert out =~ "SETTINGS_RM_EROFS"
+    assert out =~ "WORKTREE_EROFS", out
+    assert out =~ "HOME_WRITE_OK", out
+    assert out =~ "SETTINGS_EROFS", out
+    assert out =~ "SETTINGS_RM_EROFS", out
     refute File.exists?(Path.join(wt, "review-write.txt"))
   end
 
@@ -111,6 +113,6 @@ defmodule Wardmast.Agents.Qwen.JailBwrapTest do
     refute out =~ "WORKTREE_EROFS"
     assert File.read!(Path.join(wt, "review-write.txt")) == "changed\n"
     # the settings stay read-only for an implementer too
-    assert out =~ "SETTINGS_EROFS"
+    assert out =~ "SETTINGS_EROFS", out
   end
 end
