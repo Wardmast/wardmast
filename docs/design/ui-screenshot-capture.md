@@ -604,9 +604,12 @@ is a seeds-review problem, and `seed_cmd` comes from the repo or config, never f
 * **Storage.** Blobs on disk, content-addressed (`<attachments_root>/<workspace>/<sha256[0:2]>/<sha256>.<ext>`),
   metadata in the DB. Rejected: blobs in the SQLite database (bloats the database file and
   its backups; no streaming reads).
-* **Serving.** The dashboard route is authenticated like the rest of the dashboard and sets
-  `Content-Type` from the stored type, `X-Content-Type-Options: nosniff` and a
-  `Content-Security-Policy: sandbox`. MCP/API return metadata and a URL, not bytes.
+* **Serving.** The dashboard route is authenticated like the rest of the dashboard. It serves
+  only an allowlist of raster types (png, jpeg, webp), re-sniffed by magic number at serve time
+  and required to match the stored type; anything else is `415`, never inline (no SVG, no HTML).
+  Every response sets `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src
+  'none'; img-src 'self'; sandbox` and an explicit `Content-Disposition` (`inline` only for a
+  verified raster). MCP/API return metadata and a URL, not bytes.
 * **Implemented (bd-5hlegn).** `Wardmast.Attachments` (`ticket_attachments` table, blobs under
   `<data home>/attachments`, overridable with `config :wardmast, :attachments, root: …` and the
   limits above by key). Hand attaches (`ticket_attach` MCP, `POST /api/issues/:task_id/attachments`)

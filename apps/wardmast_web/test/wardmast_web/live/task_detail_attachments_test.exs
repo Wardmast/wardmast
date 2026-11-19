@@ -98,7 +98,10 @@ defmodule WardmastWeb.TaskDetailAttachmentsTest do
       assert response(conn, 200) == data
       assert get_resp_header(conn, "content-type") |> hd() =~ "image/png"
       assert get_resp_header(conn, "x-content-type-options") == ["nosniff"]
-      assert get_resp_header(conn, "content-security-policy") == ["sandbox"]
+
+      assert get_resp_header(conn, "content-security-policy") == [
+               "default-src 'none'; img-src 'self'; sandbox"
+             ]
     end
 
     test "needs a dashboard login", %{issue: issue} do
