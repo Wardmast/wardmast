@@ -23,9 +23,15 @@ defmodule WardmastWeb.DashboardUpdateController do
   alias Wardmast.Settings
   alias WardmastWeb.Api.ReleaseDeployController
 
-  def create(conn, _params) do
+  def create(conn, params) do
+    # "Update anyway" (live workers) posts `update[allow_active_workers]=true`; it only
+    # lifts the live-worker refusal, never checksum or migration checks.
+    opts = [
+      allow_active_workers: match?(%{"update" => %{"allow_active_workers" => "true"}}, params)
+    ]
+
     with {:ok, tag} <- SelfDeploy.resolve_tag(nil, UpdateCheck.state()),
-         {:ok, _} <- SelfDeploy.start(tag) do
+         {:ok, _} <- SelfDeploy.start(tag, opts) do
       conn
       |> put_flash(
         :info,

@@ -79,6 +79,38 @@ defmodule WardmastWeb.DashboardUpdateControllerTest do
     assert "--unit=wardmast-deploy-v99.0.0" in args
   end
 
+  test "the plain button does not override the live-worker refusal" do
+    start_checker("v99.0.0", "0.2.0")
+
+    post(session_only(), "/release/deploy", %{})
+
+    assert_received {:cmd, "systemd-run", args}
+    refute "--allow-active-workers" in args
+    refute "--force" in args
+  end
+
+  test "\"Update anyway\" runs the deploy with only the live-worker refusal overridden" do
+    start_checker("v99.0.0", "0.2.0")
+
+    conn =
+      post(session_only(), "/release/deploy", %{"update" => %{"allow_active_workers" => "true"}})
+
+    assert redirected_to(conn) == "/"
+    assert_received {:cmd, "systemd-run", args}
+    assert "--allow-active-workers" in args
+    # `--force` would also skip the already-current check; the override must not.
+    refute "--force" in args
+
+    assert Enum.take(args, -6) == [
+             "server",
+             "deploy",
+             "--version",
+             "v99.0.0",
+             "--allow-active-workers",
+             "--json"
+           ]
+  end
+
   test "only the offered release can be deployed from the button" do
     start_checker("v99.0.0", "0.2.0")
 
