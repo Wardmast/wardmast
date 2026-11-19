@@ -450,8 +450,7 @@ defmodule Wardmast.Board.Scheduler do
     end
   end
 
-  # The 15 s retry window rides where the head-of-line plan carries it, as the
-  # ticket's own constraint-shaped hold (`Wardmast.Board.Autopilot`).
+  # The 15 s retry window rides as the ticket's own constraint-shaped hold (`Wardmast.Board.Autopilot`).
   defp walk_ctx(card, board, acc) do
     %{
       paused: board.paused,

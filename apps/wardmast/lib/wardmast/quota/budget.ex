@@ -12,15 +12,13 @@ defmodule Wardmast.Quota.Budget do
 
   ## Who reads it
 
-  Under DC8's seat admission it decides admission (DC8): the one
+  It decides admission (DC8, the only admission since DC12): the one
   admission-path reader is `Wardmast.Accounts.SeatCheck`, the per-pool seat check
   `Wardmast.Accounts.Admission`, `Wardmast.Worker.ResumeSlot` and routing ask.
-  The scheduler walk (DC6, `Wardmast.Board.WalkInputs`) reads it under `shadow`
-  and `enforce`, and the displays (DC5) read it to show it. Under `legacy`
-  nothing on an admission, gate or dispatch path reads it (I1, I2);
-  `Wardmast.Quota.BudgetShadowTest` pins the readers structurally. The budget
-  stops nothing that runs: it is read only by admission, the walk and the
-  display (I8).
+  The scheduler walk (DC6, `Wardmast.Board.WalkInputs`) reads it, and the
+  displays (DC5) read it to show it. `Wardmast.Quota.BudgetShadowTest` pins the
+  readers structurally. The budget stops nothing that runs: it is read only by
+  admission, the walk and the display (I8).
 
   ## The function (§3.3)
 

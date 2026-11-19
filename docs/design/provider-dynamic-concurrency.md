@@ -1162,7 +1162,7 @@ Autopilot pass.
     minute. *Done in DC8* (§10.4, as built).
   - E21's plan-time lift cap. In shadow the walk keeps today's order, so I4
     holds and the report compares admission, not ordering. *Still open after
-    DC8*: the lift cap reads the stored `slots_total` in every mode.
+    DC8*: the lift cap reads `slots_total`, still the capacity-terms number (§10.5, DC12).
   - The primary's at-cap rule for a resume (bd-b2iigy), which also covers a
     ReviewGate fix round re-dispatched through `Dispatch.resume/2`. I9 holds for
     every follow-up on the provider layer, and for the review-side passes on
@@ -1345,12 +1345,32 @@ nothing in the budget path.
 - **Display.** The capacity strip, `scheduler_status`, `quota_get`'s `budget`
   block and `arb scheduler status` no longer carry a mode, a `decides` flag, the
   shadow agreement or a "Shadow" label.
-
-*Not retired here (follow-up).* The legacy plan still derives `Snapshot.derive/1`'s
-`ready`/`promote`/`slots_total` for the board's columns, and the reverse shadow
-(`AdmissionShadow`, `AdmissionShadowEvent`, the DC7 report) still compares the
-walk with it. Removing them means the board's Ready column reads the walk's
-entries, which is a larger change to `Scheduler.plan/1` and the board LiveView.
+- **The legacy plan and its stored numbers.** `Scheduler.plan/1` is the walk and
+  nothing else: its head-of-line clause (one promotion, the board-wide quota
+  and no-slot holds) is gone. `Snapshot.derive/1` plans the walk once, and its
+  entries are the board's Ready column (`board.walk`, `board.ready`). With no
+  walk input (a pure fixture, or a read that failed) the walk is planned with no
+  capacity sets, so every free card reads `waiting for capacity` and nothing is
+  placed. `Snapshot` no longer derives `promote`, `slots_free` or `quota`, and
+  `load/1` no longer reads the per-card constraint, local-capacity or slot-note
+  holds the legacy plan consumed. `Dispatchable`'s `:quota`, `:slots_free` and
+  `:no_slot` holds went with it, as did `CapacityExplainer`'s explanations of them.
+- **The reverse shadow.** It compared the walk with the legacy plan, so it went
+  with the plan: `AdmissionShadow`, `AdmissionShadowEvent` (the migration
+  `20261119130000_drop_admission_shadow_events` drops the table),
+  `AdmissionShadowReport` (and its `Quota` section), `mix
+  wardmast.admission_shadow_report`, `Release.admission_shadow_report/1`, the
+  `admission_shadow` record on a run's `routing_decision` and its panel on the
+  ticket page. `mix wardmast.burn_report` keeps the burn governor's "would have
+  held" record.
+- **Not retired here: the `slots_total` number (follow-up).** The board still
+  derives `slots_total` from the capacity terms
+  (`Snapshot.capacity_terms/3`: machine sum, placement, account headroom), and
+  nothing admits or holds a card on it any more. It feeds only the header total
+  (with `CapacityExplainer`'s explanation) and the ES lift cap
+  (`QueueOrder.build/6`). §7 wants those two readers on
+  `min(Σ budget over the pools a Ready card can use, Σ machine caps)` instead;
+  that replacement, and the header wording that explains it, is not done.
 
 ### 10.6 Migration notes
 

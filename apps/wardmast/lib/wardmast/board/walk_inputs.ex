@@ -5,11 +5,9 @@ defmodule Wardmast.Board.WalkInputs do
   and each Ready card's candidates, as `Wardmast.Board.Scheduler.plan/1`'s
   `:walk`.
 
-  `Wardmast.Board.Snapshot.load/1` reads this only when the admission walk
-  is `shadow` or `enforce`. Under `legacy` nothing here runs, so no admission
-  path reads a budget or a seat (I1). Under `shadow` the walk it feeds decides
-  no dispatch: `Wardmast.Board.AdmissionShadow` records it beside today's. Under
-  `enforce` (DC8) its placements are what `Wardmast.Board.Autopilot` dispatches.
+  `Wardmast.Board.Snapshot.load/1` reads this on every board load: the walk is
+  the only admission since DC12, and its placements are what
+  `Wardmast.Board.Autopilot` dispatches.
 
   ## The capacity sets
 
@@ -17,7 +15,7 @@ defmodule Wardmast.Board.WalkInputs do
       policy (`Wardmast.Quota.Budget.Server`), keyed `{account_id, pool}`, with
       the seats held on it now (`Wardmast.Quota.Seats`, counted live, never from
       a snapshot), its exempt budget (R7), its reason and the account ceiling
-      (`cap`, for the shadow record). A provider a workspace's agent pool names
+      (`cap`). A provider a workspace's agent pool names
       with no account behind it is `{:unmetered, provider}`, with no budget:
       the machines bound it (§3.5). A metered pool with no published budget is
       absent, and the walk reads it as closed.

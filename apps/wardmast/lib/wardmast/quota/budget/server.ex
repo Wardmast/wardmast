@@ -27,12 +27,11 @@ defmodule Wardmast.Quota.Budget.Server do
 
   ## Who reads it
 
-  Under DC8's seat admission the budgets decide admission through
-  `Wardmast.Accounts.SeatCheck` (DC8). The scheduler walk reads them under
-  `shadow` and `enforce` (DC6, `Wardmast.Board.WalkInputs`), and the board and
-  CLI displays (DC5) show them. Under `legacy` no admission, gate or dispatch
-  path reads them (I1, I2; pinned by `Wardmast.Quota.BudgetShadowTest`). A budget
-  never stops running work (I8).
+  The budgets decide admission through `Wardmast.Accounts.SeatCheck` (DC8, the
+  only admission since DC12). The scheduler walk reads them too (DC6,
+  `Wardmast.Board.WalkInputs`), and the board and CLI displays (DC5) show them.
+  A budget never stops running work (I8; pinned by
+  `Wardmast.Quota.BudgetShadowTest`).
 
   ## Options
 

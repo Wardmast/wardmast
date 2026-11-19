@@ -99,9 +99,8 @@ defmodule Wardmast.Workflows.MergeQueue.PassAdmission do
 
   defp placement_opts(args), do: Map.get(args, :placement_opts, [])
 
-  # DC8: `follow_up: true` — under DC8's seat admission a pass is a
-  # follow-up of in-flight work, never held for a full pool (design §2.2, I9);
-  # under `legacy` and `shadow` the slot rule above is unchanged.
+  # DC8: `follow_up: true` — a pass is a follow-up of in-flight work, never held
+  # for a full pool (design §2.2, I9).
   defp admit_slot(task, kind, args) do
     case ResumeSlot.admit(task,
            origin: :automatic,

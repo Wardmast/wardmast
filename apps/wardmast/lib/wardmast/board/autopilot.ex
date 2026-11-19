@@ -13,8 +13,8 @@ defmodule Wardmast.Board.Autopilot do
 
   ## One card per tick
 
-  `Scheduler.plan/1` promotes at most one card even when several slots are
-  free, and this process does not loop to catch up. Dispatch is slow and has
+  `Scheduler.plan/1` may place several cards, but this process dispatches only
+  the first and does not loop to catch up. Dispatch is slow and has
   side effects — a worktree, a branch, possibly a paid agent session — and a
   card that has just been dispatched does not appear as in-flight work until
   its worker registers. Promoting one card per tick means the next tick reads a

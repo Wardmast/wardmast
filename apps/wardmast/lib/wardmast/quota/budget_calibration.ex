@@ -46,8 +46,7 @@ defmodule Wardmast.Quota.BudgetCalibration do
 
   Read-only, and nothing on an admission, gate or board path calls it
   (`Wardmast.Quota.BudgetCalibrationShadowTest` pins that). Its callers are
-  `mix wardmast.budget_calibration`, `Wardmast.Release.budget_calibration/0` and
-  the admission shadow report (`Wardmast.Board.AdmissionShadowReport`, DC7).
+  `mix wardmast.budget_calibration` and `Wardmast.Release.budget_calibration/0`.
   DC3's `Budget` is the first consumer.
   """
 

@@ -32,8 +32,7 @@ defmodule Wardmast.Quota.SeatWeights do
 
   `rates/3` and `weights/2` are pure. `calibrate/1` is the read the budget
   server runs beside `Wardmast.Quota.BudgetCalibration`, off its own process,
-  at boot and daily; nothing on an admission path calls it, and under `legacy`
-  and `shadow` nothing reads the result (I1, I2).
+  at boot and daily; nothing on an admission path calls it.
   """
 
   require Ash.Query

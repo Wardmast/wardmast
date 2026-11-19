@@ -659,13 +659,11 @@ enforce`, the Providers page, `account_set` with `quota_config.daily_burn_cap*`)
 workspace (`arb config set quota.daily_burn_cap 0.2 --workspace <ws>`, or the workspace
 policy form). `arb account set <ref> --daily-burn-cap none` turns it off.
 
-- **`shadow`** holds nothing. The "would have held" record is the **Burn governor**
-  section of the admission shadow report (`mix wardmast.admission_shadow_report`),
-  which appears once any account sets a cap: how many hourly readings reached it.
+- **`shadow`** holds nothing. The "would have held" record is the burn report
+  (`mix wardmast.burn_report`): how many hourly readings reached the cap.
 - **`enforce`** adds two things, both honouring the P0 pace exemption (an exempt
   priority is never held on the burn): a flat **Gate** rule, `burn_24h >= cap` holds the
-  dispatch (`24h burn 30% ≥ cap 25% (daily_burn_cap)`), and, under `scheduler_admission:
-  enforce`, where the Gate leaves utilization rules to the budget, a **Budget** `24h`
+  dispatch (`24h burn 30% ≥ cap 25% (daily_burn_cap)`), and, where the Gate leaves utilization rules to the budget, a **Budget** `24h`
   window whose line is the cap and whose draw is the 7d window's `ρ`, so the seat count
   shrinks before the cap is reached.
 
