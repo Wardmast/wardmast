@@ -55,6 +55,7 @@ defmodule Wardmast.Workflows.PendingMergeSweeper do
 
   use GenServer
 
+  require Ash.Query
   require Logger
 
   alias Wardmast.Mergers
@@ -142,9 +143,11 @@ defmodule Wardmast.Workflows.PendingMergeSweeper do
   defp do_sweep(opts) do
     case PendingMerge.list_open() do
       {:ok, tasks} ->
+        deferred = deferred_resume_ids()
+
         tasks
         |> Enum.reduce(%{retried: [], rewatched: [], skipped: []}, fn task, acc ->
-          record(acc, task.id, sweep_one(task, opts))
+          record(acc, task.id, sweep_one(task, opts, deferred))
         end)
         |> Map.new(fn {k, v} -> {k, Enum.reverse(v)} end)
         |> log_summary()
@@ -163,7 +166,7 @@ defmodule Wardmast.Workflows.PendingMergeSweeper do
   defp record(acc, id, :rewatched), do: %{acc | rewatched: [id | acc.rewatched]}
   defp record(acc, id, {:skipped, why}), do: %{acc | skipped: [{id, why} | acc.skipped]}
 
-  defp sweep_one(task, opts) do
+  defp sweep_one(task, opts, deferred) do
     pending = PendingMerge.get(task)
 
     cond do
@@ -185,6 +188,12 @@ defmodule Wardmast.Workflows.PendingMergeSweeper do
       is_pid(Watchdog.retry_whereis(task.id)) ->
         {:skipped, :retry_running}
 
+      # A conflict resolver / fix pass the restart cut off is pending resume:
+      # the Reconciler queued it and the Watchdog re-asks. A worker-less retry
+      # now would read the same conflict and give up on it.
+      resolver_pending_resume?(task.id, deferred) ->
+        {:skipped, :resolver_pending_resume}
+
       true ->
         route(task, pending, Watchdog.live_merge_owner(task.id), opts)
     end
@@ -199,6 +208,48 @@ defmodule Wardmast.Workflows.PendingMergeSweeper do
     :exit, reason ->
       Logger.warning("PendingMergeSweeper: task=#{task.id} sweep exited: #{inspect(reason)}")
       {:skipped, :error}
+  end
+
+  @pending_resume_window_s 3_600
+
+  # Read once per sweep, not per ticket: it is a GenServer call.
+  defp deferred_resume_ids do
+    Wardmast.Board.Autopilot.deferred_resume_ids()
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp resolver_pending_resume?(task_id, deferred) do
+    task_id in deferred or cut_off_pass_recent?(task_id)
+  end
+
+  defp cut_off_pass_recent?(task_id) do
+    Wardmast.Workers.Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> case do
+      [
+        %{
+          kind: kind,
+          outcome: :interrupted,
+          failure_reason: reason,
+          started_at: started_at,
+          completed_at: completed_at
+        }
+      ]
+      when kind in [:conflict, :fix_pass] and
+             reason in ["server shutdown", "server restarted"] ->
+        DateTime.diff(DateTime.utc_now(), completed_at || started_at) < @pending_resume_window_s
+
+      _ ->
+        false
+    end
+  rescue
+    _ -> false
   end
 
   defp superseded?(%{pr_ref: pr_ref}, %{mr_ref: mr_ref})

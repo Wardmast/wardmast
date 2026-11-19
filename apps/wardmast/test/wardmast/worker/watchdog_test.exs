@@ -1164,6 +1164,45 @@ defmodule Wardmast.Worker.WatchdogTest do
       end
     end
 
+    # bd-dcjws9: a restarted Watchdog re-dispatches the fix pass the restart cut
+    # off; the interrupted run does not spend the per-task budget (real
+    # `Run.fix_pass_count/2`, not a stub).
+    test "re-dispatches a restart-interrupted fix pass without spending the fix-pass budget" do
+      task_id = new_task_id()
+
+      for {outcome, reason, mins} <- [
+            {:succeeded, nil, -50},
+            {:succeeded, nil, -40},
+            {:interrupted, "server shutdown", -10}
+          ] do
+        {:ok, _} =
+          Ash.create(Wardmast.Workers.Run, %{
+            task_id: task_id,
+            repo: "arbiter",
+            workspace_id: "ws-fp-restart",
+            kind: :fix_pass,
+            state: :finished,
+            outcome: outcome,
+            failure_reason: reason,
+            started_at: DateTime.add(DateTime.utc_now(), mins * 60)
+          })
+      end
+
+      StubMerger.queue_get("!cfrestart", [
+        %{status: :open, approved: true, block_reason: :ci_failed}
+      ])
+
+      wpid =
+        start_watchdog(task_id, "!cfrestart",
+          auto_merge: true,
+          max_fix_passes: 3,
+          fix_pass_dispatcher: StubFixPassDispatcher
+        )
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+      refute :sys.get_state(wpid).park_reason == :ci_failed
+    end
+
     test "retry_auto_resolve/1 grants one more pass past the per-task cap" do
       task_id = new_task_id()
 
@@ -1562,6 +1601,44 @@ defmodule Wardmast.Worker.WatchdogTest do
       state = :sys.get_state(wpid)
       assert state.conflict_attempts == 1
       assert state.conflict_holds == 0
+    end
+
+    # bd-dcjws9: the attempt counter is per Watchdog, so a restart-cut-off
+    # resolver run leaves the restarted Watchdog's first pass at attempt 1/2.
+    test "a restart-interrupted conflict pass leaves the next dispatch at attempt 1" do
+      task_id = new_task_id()
+
+      {:ok, _} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: "ws-cr-restart",
+          kind: :conflict,
+          state: :finished,
+          outcome: :interrupted,
+          failure_reason: "server shutdown",
+          started_at: DateTime.add(DateTime.utc_now(), -300)
+        })
+
+      StubConflictResolver.arm(task_id, self(), pid: :running)
+
+      StubMerger.queue_get("!crestart", [
+        %{status: :open, approved: true, block_reason: :conflict}
+      ])
+
+      wpid =
+        start_watchdog(task_id, "!crestart",
+          workspace: test_workspace(),
+          auto_merge: false,
+          conflict_resolver: StubConflictResolver,
+          max_conflict_attempts: 2,
+          interval_ms: 15
+        )
+
+      assert_receive {:resolver_spawned, _worker}, Wardmast.Test.Timing.scale(1_000)
+      state = :sys.get_state(wpid)
+      assert state.conflict_attempts == 1
+      refute state.conflict_escalated
     end
 
     test "held past max_conflict_holds it escalates once, naming the capacity refusal" do
