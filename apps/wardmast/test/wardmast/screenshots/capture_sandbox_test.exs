@@ -398,6 +398,10 @@ defmodule Wardmast.Screenshots.CaptureSandboxTest do
     git!(dir, ["init", "-q", "-b", "main", repo])
     git!(repo, ["config", "user.email", "t@example.com"])
     git!(repo, ["config", "user.name", "t"])
+    # origin is what the deps cache trusts (`git ls-remote`), never a local ref.
+    forge = Path.join(dir, "forge.git")
+    git!(dir, ["init", "-q", "--bare", "-b", "main", forge])
+    git!(repo, ["remote", "add", "origin", forge])
 
     File.write!(Path.join(repo, "mix.exs"), """
     defmodule App.MixProject do
@@ -426,6 +430,7 @@ defmodule Wardmast.Screenshots.CaptureSandboxTest do
     File.rm_rf!(Path.join(repo, "_build"))
     git!(repo, ["add", "-A"])
     git!(repo, ["commit", "-q", "-m", "base"])
+    git!(repo, ["push", "-q", "origin", "main"])
     base = git!(repo, ["rev-parse", "HEAD"])
     git!(repo, ["checkout", "-q", "-b", "feature"])
     File.write!(Path.join(repo, "routes.txt"), "/\n/x")

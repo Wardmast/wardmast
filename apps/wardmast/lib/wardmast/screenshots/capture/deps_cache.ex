@@ -66,8 +66,8 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   alias Wardmast.Config.Paths
   alias Wardmast.Screenshots.Capture.AppProcess
   alias Wardmast.Screenshots.Capture.Sandbox
-  alias Wardmast.Worker.Image
   alias Wardmast.Worker.ReleaseEnv
+  alias Wardmast.Worker.Worktree
 
   require Logger
 
@@ -76,6 +76,8 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   @git_timeout_ms 120_000
   @proxy_env ~w(HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy)
   @keep_days 14
+  # What the seed produces that boots are pointed at (`bin/` is the host's own).
+  @adopted ~w(deps mix hex cache)
 
   @seed_script """
   set -e
@@ -112,17 +114,27 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
 
   @doc """
   The trusted lockfile for a capture of `base..head` in `repo`: `{:ok, %{source:, lock_hash:,
-  lock:}}` (the commit to seed from), `{:ok, :none}` (no `mix.lock` at either commit), `{:skip,
-  reason}` (the head's lockfile is not one the default branch vouches for) or `{:error, message}`.
+  lock:, repo:}}` (the commit to seed from, in the server-owned repository `repo`), `{:ok, :none}`
+  (no `mix.lock` at either commit), `{:skip, reason}` (the head's lockfile is not one the default
+  branch vouches for) or `{:error, message}`. Options: `:root`.
+
+  Nothing in `repo` (the worker's checkout) is trusted: its refs and objects are writable from the
+  worker's jail. The default branch's tip is read live from origin (`git ls-remote`, whose URL is
+  in the repository config the jail keeps read-only) and taken into a repository under `:root`
+  that only the server writes, through the pack protocol, which names every object by the hash
+  of its own content (so an object forged in the worker's store cannot pass for it). The source
+  is the merge-base when that repository shows it on the default branch, else the tip itself.
   """
-  @spec plan(String.t(), String.t(), String.t(), String.t()) ::
-          {:ok, :none | %{source: String.t(), lock_hash: String.t(), lock: binary()}}
+  @spec plan(String.t(), String.t(), String.t(), String.t(), keyword()) ::
+          {:ok,
+           :none
+           | %{source: String.t(), lock_hash: String.t(), lock: binary(), repo: String.t()}}
           | {:skip, String.t()}
           | {:error, String.t()}
-  def plan(repo, base, head, default_branch) do
+  def plan(repo, base, head, default_branch, opts \\ []) do
     case {lock_at(repo, base), lock_at(repo, head)} do
       {:none, :none} -> {:ok, :none}
-      {same, same} -> trusted_source(repo, base, same, default_branch)
+      {same, same} -> trusted_source(repo, base, same, default_branch, opts)
       {:none, _} -> {:skip, changed("adds a mix.lock")}
       {_, :none} -> {:skip, changed("deletes mix.lock")}
       _ -> {:skip, changed("edits mix.lock")}
@@ -135,16 +147,20 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
       "and lockfile never run with a network)"
   end
 
-  defp trusted_source(repo, base, {:ok, lock}, branch) do
-    with {:ok, ref} <- default_ref(repo, branch) do
-      cond do
-        ancestor?(repo, base, ref) ->
-          {:ok, %{source: base, lock_hash: digest(lock), lock: lock}}
+  defp trusted_source(repo, base, {:ok, head_lock}, branch, opts) do
+    with {:ok, tip} <- live_tip(repo, branch),
+         {:ok, trusted} <- trusted_repo(repo, tip, branch, opts) do
+      # The worker's copy of the base's lockfile is only a hint; what counts is the trusted one.
+      source = if ancestor?(trusted, base, tip), do: base, else: tip
 
-        lock_at(repo, ref) == {:ok, lock} ->
-          {:ok, %{source: rev_parse!(repo, ref), lock_hash: digest(lock), lock: lock}}
+      case lock_at(trusted, source) do
+        {:ok, ^head_lock} ->
+          {:ok, %{source: source, lock_hash: digest(head_lock), lock: head_lock, repo: trusted}}
 
-        true ->
+        _ when source == base ->
+          {:skip, changed("edits mix.lock")}
+
+        _ ->
           {:skip,
            "this change's mix.lock is not one the default branch (#{branch}) has: its merge-base " <>
              "is not on #{branch} and #{branch}'s own lockfile differs. A capture boot only gets " <>
@@ -153,15 +169,84 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
     end
   end
 
-  defp default_ref(repo, branch) do
-    case Image.default_ref(repo, branch) do
-      {:ok, ref} ->
-        {:ok, ref}
+  defp live_tip(repo, branch) do
+    case Worktree.remote_head(repo, branch) do
+      sha when is_binary(sha) ->
+        {:ok, sha}
 
-      {:error, reason} ->
+      nil ->
         {:error,
-         "cannot find the default branch #{inspect(branch)} in #{repo} to check the lockfile " <>
-           "against (#{inspect(reason)})"}
+         "cannot read the default branch #{inspect(branch)} from origin (git ls-remote) to " <>
+           "check the lockfile against; the deps cache trusts origin, never a local ref"}
+    end
+  end
+
+  # `<root>/repos/<common dir hash>.git`, a bare repository only the server writes, holding the
+  # default branch's history as fetched (and hashed) from the checkout's object store.
+  defp trusted_repo(repo, tip, branch, opts) do
+    with {:ok, common} <- common_dir(repo) do
+      trusted =
+        Path.join([root(opts), "repos", binary_part(digest(common), 0, 16) <> ".git"])
+
+      :global.trans({{__MODULE__, trusted}, self()}, fn ->
+        with :ok <- init_bare(trusted) do
+          case verified_fetch(trusted, common, tip) do
+            :ok ->
+              {:ok, trusted}
+
+            {:error, _} ->
+              # The checkout may not have the tip yet (origin moved since its last fetch).
+              _ = git(repo, ["fetch", "--quiet", "--no-tags", "origin", "refs/heads/" <> branch])
+
+              with :ok <- verified_fetch(trusted, common, tip), do: {:ok, trusted}
+          end
+        end
+      end)
+    end
+  end
+
+  defp common_dir(repo) do
+    case git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]) do
+      {out, 0} -> {:ok, String.trim(out)}
+      {out, _} -> {:error, "#{repo} is not a git checkout: #{tail(out)}"}
+    end
+  end
+
+  defp init_bare(dir) do
+    if File.dir?(Path.join(dir, "objects")) do
+      :ok
+    else
+      File.mkdir_p!(Path.dirname(dir))
+
+      case git(Path.dirname(dir), ["init", "--quiet", "--bare", dir]) do
+        {_, 0} -> :ok
+        {out, _} -> {:error, "could not create the trusted repository #{dir}: #{tail(out)}"}
+      end
+    end
+  end
+
+  # Fetching through the pack protocol re-hashes every object it receives, and fsck checks them.
+  defp verified_fetch(trusted, common, tip) do
+    args = [
+      "-c",
+      "transfer.fsckObjects=true",
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "--no-write-fetch-head",
+      "--upload-pack=git -c uploadpack.allowAnySHA1InWant=true upload-pack",
+      "file://" <> common,
+      "+" <> tip <> ":refs/heads/trusted"
+    ]
+
+    case git(trusted, args) do
+      {_, 0} ->
+        :ok
+
+      {out, _} ->
+        {:error,
+         "could not take the default branch's head #{String.slice(tip, 0, 12)} into the trusted " <>
+           "repository: #{tail(out)}"}
     end
   end
 
@@ -175,11 +260,6 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   defp ancestor?(repo, base, ref),
     do: match?({_, 0}, git(repo, ["merge-base", "--is-ancestor", base, ref]))
 
-  defp rev_parse!(repo, ref) do
-    {out, 0} = git(repo, ["rev-parse", "--verify", ref <> "^{commit}"])
-    String.trim(out)
-  end
-
   # ── prepare ─────────────────────────────────────────────────────────────
 
   @doc """
@@ -192,7 +272,7 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   def prepare(input, opts \\ []) do
     with :ok <- can_fetch(input.sandbox),
          {:ok, %{} = source} <-
-           plan(input.repo_path, input.base_sha, input.head_sha, input.default_branch),
+           plan(input.repo_path, input.base_sha, input.head_sha, input.default_branch, opts),
          root = root(opts),
          :ok <- mkdir(root),
          {:ok, toolchain} <- fingerprint(input, source, root) do
@@ -236,7 +316,7 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
     try do
       File.mkdir_p!(home)
 
-      case git(input.repo_path, ["cat-file", "blob", source.source <> ":.tool-versions"]) do
+      case git(source.repo, ["cat-file", "blob", source.source <> ":.tool-versions"]) do
         {versions, 0} -> File.write!(Path.join(probe, ".tool-versions"), versions)
         _ -> :ok
       end
@@ -294,17 +374,20 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
     src = Path.join(work, "src")
     scratch = Path.join(work, "scratch")
     out = Path.join(scratch, "out")
+    # The host's own: never shown to the seed, which can only have written `src` and `scratch`.
+    staging = Path.join(work, "staging")
 
     try do
       Enum.each(
-        [src, Path.join(scratch, "home"), Path.join(scratch, "tmp"), out],
+        [src, Path.join(scratch, "home"), Path.join(scratch, "tmp"), out, staging],
         &File.mkdir_p!/1
       )
 
-      with :ok <- export(input.repo_path, source.source, work, src),
+      with :ok <- export(source.repo, source.source, work, src),
            :ok <- run_seed(input, source, src, scratch, out, opts),
-           :ok <- collect_tools(src, out),
-           :ok <- publish(out, dir, source) do
+           :ok <- adopt(out, staging),
+           :ok <- collect_tools(src, staging),
+           :ok <- publish(staging, dir, source) do
         Logger.info("Capture.DepsCache: seeded #{dir} from #{String.slice(source.source, 0, 12)}")
         prune(Path.dirname(dir), dir, Keyword.get(opts, :keep_days, @keep_days))
         :ok
@@ -375,15 +458,53 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
     ]
   end
 
-  # `mix esbuild.install` / `tailwind.install` put their binary next to `_build/<env>`.
-  defp collect_tools(src, out) do
-    bin = Path.join(out, "bin")
-    File.mkdir_p!(bin)
+  # What the seed leaves is untrusted to the host (a default-branch dependency can be malicious):
+  # its directories are moved whole into the host's staging dir, only when they are real
+  # directories, and the host never writes into them or follows a link it planted.
+  defp adopt(out, staging) do
+    Enum.reduce_while(@adopted, :ok, fn name, :ok ->
+      from = Path.join(out, name)
+      to = Path.join(staging, name)
 
-    for file <- Path.wildcard(Path.join(src, "_build/{esbuild,tailwind}-*")),
-        File.regular?(file) do
-      File.cp!(file, Path.join(bin, Path.basename(file)))
-      File.chmod!(Path.join(bin, Path.basename(file)), 0o755)
+      case File.lstat(from) do
+        {:ok, %File.Stat{type: :directory}} ->
+          case File.rename(from, to) do
+            :ok -> {:cont, :ok}
+            {:error, reason} -> {:halt, {:error, adopt_error(name, reason)}}
+          end
+
+        {:error, :enoent} ->
+          File.mkdir!(to)
+          {:cont, :ok}
+
+        {:ok, %File.Stat{type: type}} ->
+          {:halt,
+           {:error,
+            "the deps seed left #{name} as a #{type}, not a directory; nothing was published"}}
+
+        {:error, reason} ->
+          {:halt, {:error, adopt_error(name, reason)}}
+      end
+    end)
+  end
+
+  defp adopt_error(name, reason),
+    do: "could not keep the deps seed's #{name}: #{:file.format_error(reason)}"
+
+  # `mix esbuild.install` / `tailwind.install` put their binary next to `_build/<env>`: copied only
+  # when `_build` is a real directory and the binary a regular file (never through a link).
+  defp collect_tools(src, staging) do
+    bin = Path.join(staging, "bin")
+    File.mkdir!(bin)
+    build = Path.join(src, "_build")
+
+    if match?({:ok, %File.Stat{type: :directory}}, File.lstat(build)) do
+      for file <- Path.wildcard(Path.join(build, "{esbuild,tailwind}-*")),
+          match?({:ok, %File.Stat{type: :regular}}, File.lstat(file)) do
+        dest = Path.join(bin, Path.basename(file))
+        File.cp!(file, dest)
+        File.chmod!(dest, 0o755)
+      end
     end
 
     :ok
@@ -391,18 +512,15 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
     e in File.Error -> {:error, "could not keep the asset tools: #{Exception.message(e)}"}
   end
 
-  # Every directory the boots are pointed at exists, then the stamp, then the atomic rename: the
-  # final name only ever appears complete.
-  defp publish(out, dir, source) do
-    ~w(deps mix hex cache/elixir_make cache/rustler_precompiled bin)
-    |> Enum.each(&File.mkdir_p!(Path.join(out, &1)))
-
+  # The stamp goes into the host's staging dir, then the atomic rename: the final name only ever
+  # appears complete.
+  defp publish(staging, dir, source) do
     File.write!(
-      Path.join(out, @complete),
+      Path.join(staging, @complete),
       "lock=#{source.lock_hash}\nsource=#{source.source}\n"
     )
 
-    case File.rename(out, dir) do
+    case File.rename(staging, dir) do
       :ok ->
         :ok
 

