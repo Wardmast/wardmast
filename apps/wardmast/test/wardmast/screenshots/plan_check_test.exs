@@ -92,9 +92,12 @@ defmodule Wardmast.Screenshots.PlanCheckTest do
 
   test "store/3 keeps the checked copy that read_stored/2 returns", %{dir: dir} do
     out = Path.join(dir, "store")
-    :ok = PlanCheck.store(out, "t1", %{sha: "abc", body: @valid})
+    :ok = PlanCheck.store(out, "t1", %{sha: PlanCheck.sha(@valid), body: @valid})
     assert PlanCheck.stored_path(out, "t1") |> File.read!() == @valid
-    assert {:ok, "abc"} = PlanCheck.stored_sha(out, "t1")
+    assert {:ok, sha} = PlanCheck.stored_sha(out, "t1")
+    assert sha == PlanCheck.sha(@valid)
+    File.write!(PlanCheck.stored_path(out, "t1"), "tampered")
+    assert :error = PlanCheck.stored_sha(out, "t1")
   end
 
   test "excludes the plan from git", %{dir: dir} do
