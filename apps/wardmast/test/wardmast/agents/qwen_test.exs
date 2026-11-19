@@ -211,8 +211,7 @@ defmodule Wardmast.Agents.QwenTest do
                List.keyfind(env, "QWEN_CODE_SYSTEM_SETTINGS_PATH", 0)
 
       assert Path.basename(settings) == "settings.json"
-      # outside the writable home: a read-only mount nested in the rw home bind is what
-      # stopped being read-only under newer hosts (bd-c609gj)
+      # outside the writable home, a sibling of it (bd-c609gj)
       refute String.starts_with?(settings, home <> "/")
     end
 

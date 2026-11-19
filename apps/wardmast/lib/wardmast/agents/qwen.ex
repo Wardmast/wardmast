@@ -46,7 +46,7 @@ defmodule Wardmast.Agents.Qwen do
   removal, written into the read-only system settings) only steers the model.
   `default_argv/2` wraps qwen in `Wardmast.Worker.Jail`: read-only root, writable
   worktree and per-worker `$HOME`, the system settings directory bound read-only
-  over that home, credential paths hidden, a pid namespace. A review dispatch
+  beside that home, credential paths hidden, a pid namespace. A review dispatch
   (the policy denies `Write`) gets the worktree `--ro-bind`-ed, so a reviewer
   cannot write it however it tries. `:strict` fails closed when the jail cannot
   run; other modes fall back to running unjailed (still HOME-isolated) and
@@ -474,7 +474,7 @@ defmodule Wardmast.Agents.Qwen do
       writable_paths: Map.get(policy.sandbox, :writable_paths, []),
       worktree_readonly: review_dispatch?(policy),
       # The settings (and so the deny rules) are not the worker's to rewrite:
-      # its home is writable, this directory inside it is not.
+      # its home is writable, this directory beside it is a read-only mount.
       readonly_paths: [ConfigDir.system_settings_dir(opts)],
       hide_reads: true,
       env: [

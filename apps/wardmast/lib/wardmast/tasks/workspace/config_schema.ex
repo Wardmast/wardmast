@@ -676,6 +676,57 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                         max_snapshots    default 50
                       Set under worker.repos.<repo>.visual_baselines (merged over a
                       workspace-level worker.visual_baselines). Unset: off.
+      screenshots     map — before/after UI screenshots for a ticket's PR
+                      (docs/design/ui-screenshot-capture.md §6). Set under
+                      worker.repos.<repo>.screenshots, merged key-by-key over a
+                      workspace-level worker.screenshots (repo keys win; env,
+                      viewports, themes, seeds, limits merge by key). Unset, or
+                      enabled=false: off. Unknown keys and bad values are refused.
+                        enabled          default true when the block is present
+                        ui_paths         required, non-empty globs (`*`, `**`, `?`); a
+                                         diff touching one makes the ticket UI work
+                        ignore_paths     globs subtracted from ui_paths
+                        plan_required    default true: a UI diff needs a valid
+                                         .arbiter/screenshots.json (or an explicit skip)
+                        default_routes   paths shot when plan_required is false
+                        start_cmd        required unless preview.command is set (inherited)
+                        setup_cmd        inherits preview.setup
+                        seed_cmd         runs after setup on every boot
+                        seeds            map name -> command, picked by plans
+                        port_env         default "PORT"
+                        port_range       default "32000-32999"; never the worker range
+                        base_url         default "http://127.0.0.1:{{port}}"; loopback only
+                        env              map of variables; no proxy vars, no scrubbed
+                                         credential keys, no non-loopback URLs
+                        ready            {path "/", timeout_seconds 120 (max 3600),
+                                         expect "below_500"|"2xx"}; path/timeout inherit
+                                         preview.ready_path/ready_timeout
+                        login            {kind "none"|"form"|"cmd", default_persona,
+                                         personas, ...}: form takes path, username_selector,
+                                         password_selector, submit_selector, success and a
+                                         personas map of FIXTURE credentials; cmd takes cmd
+                                         (may use {{persona}}) and a personas name list
+                        viewports        map name (^[a-z0-9-]{1,20}$) -> {width 200-3840,
+                                         height 200-4000, device_scale_factor 1-3};
+                                         defaults desktop and mobile
+                        default_viewports  default ["desktop"]
+                        themes           map name -> {color_scheme, local_storage, query};
+                                         defaults light and dark
+                        default_themes   default ["light"]
+                        fixture_check    {marker: {path, contains}} proving fixture data
+                        deny_patterns    extra regexes for the DOM text scan
+                        fixture_email_domains  default example.com/.org/.net, test, invalid,
+                                         localhost
+                        limits           max_shots 20, max_images 40, max_image_bytes,
+                                         max_capture_bytes, setup_seconds, seed_seconds,
+                                         shot_seconds, budget_seconds (max 3600), memory
+                                         ("4g", max 16g), cpus, max_captures_per_ticket 3,
+                                         merge_wait_seconds
+                        hosting          {github {mode "assets_branch", branch},
+                                         public_repo_ok false, retention_days 90}
+                        attach           default true: also store on the ticket
+                      start_cmd, setup_cmd, seed_cmd, seeds and env values may use {{port}},
+                      {{role}} (before/after), {{scratch}}, {{checkout}}, {{task_id}}.
       preview         map — start a ticket's checkout as a running app, on a port
                       Wardmast allocates, to see what a worktree is doing
                       (`arb preview start <ticket>`, the dashboard Preview
@@ -701,7 +752,7 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
       repos           map, repo name -> {seed_paths, image, prepush_check,
                       prepush_check_timeout_seconds, prepush_check_on_timeout,
                       pre_push_checks, pre_push_budget_seconds,
-                      pre_push_max_attempts, visual_baselines, preview, max_concurrent,
+                      pre_push_max_attempts, visual_baselines, screenshots, preview, max_concurrent,
                       ci_backpressure},
                       deep-merged over the workspace-level value (per-repo wins)
                       max_concurrent (per repo only) is a positive integer, unset
