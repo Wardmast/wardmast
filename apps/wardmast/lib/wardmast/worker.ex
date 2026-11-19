@@ -5885,7 +5885,23 @@ defmodule Wardmast.Worker do
         (ctx in [:fix_pass, :revise] or worktree_on_branch?(worktree, branch))
 
     if runnable? do
-      Wardmast.Worker.PrepushCheck.resolve(prepush_workspace(state, ctx), state.repo)
+      workspace = prepush_workspace(state, ctx)
+
+      case Wardmast.Worker.PrepushCheck.resolve(workspace, state.repo) do
+        nil -> screenshots_only_spec(workspace, state.repo)
+        spec -> spec
+      end
+    end
+  end
+
+  # A repo with a screenshots config but no pre-push recipe still gets the plan check at `arb done`.
+  defp screenshots_only_spec(workspace, repo) do
+    case Wardmast.Screenshots.Config.resolve(workspace, repo) do
+      {:ok, _config} ->
+        %{screenshots_only: true, steps: [], timeout_seconds: 60, on_timeout: :proceed}
+
+      _ ->
+        nil
     end
   end
 
@@ -5916,12 +5932,23 @@ defmodule Wardmast.Worker do
     worktree = Map.fetch!(prepush_view(meta), :worktree_path)
 
     run_opts = prepush_run_opts(meta)
+    screenshots = screenshots_gate_config(state, ctx)
+    target = Map.get(meta, :target_branch)
+    task_id = state.task_id
 
     run = fn ->
+      base =
+        if Map.get(spec, :screenshots_only),
+          do: %{result: :ok, steps: []},
+          else: Wardmast.Worker.PrepushCheck.run_steps(spec, worktree, run_opts)
+
+      gate =
+        if screenshots,
+          do: Wardmast.Screenshots.PlanCheck.gate(screenshots, worktree, target, task_id)
+
       send(
         me,
-        {:__prepush_result__, ref, ctx,
-         Wardmast.Worker.PrepushCheck.run_steps(spec, worktree, run_opts)}
+        {:__prepush_result__, ref, ctx, Wardmast.Screenshots.PlanCheck.merge_gate(base, gate)}
       )
     end
 
@@ -5943,6 +5970,13 @@ defmodule Wardmast.Worker do
         )
 
         :proceed
+    end
+  end
+
+  defp screenshots_gate_config(state, ctx) do
+    case Wardmast.Screenshots.Config.resolve(prepush_workspace(state, ctx), state.repo) do
+      {:ok, config} -> config
+      _ -> nil
     end
   end
 
@@ -6024,9 +6058,12 @@ defmodule Wardmast.Worker do
   # branch on, `:fix_pass` finishes the pass. The per-step results are recorded
   # on the run (`Wardmast.Workers.PrepushStep`, shown by `arb worker show`) and
   # kept in meta for the send-back prompt.
-  defp on_prepush_result(%State{meta: meta} = state, ctx, %{result: result, steps: steps}) do
+  defp on_prepush_result(%State{meta: meta} = state, ctx, %{result: result, steps: steps} = run) do
+    # bd-adrym0: the sha of the screenshots plan the gate checked, kept on the run.
+    meta = put_screenshots_plan(meta, Map.get(run, :screenshots_plan))
     spec = Map.get(meta, :prepush_spec)
     attempt = Map.get(meta, :prepush_nudge_attempts, 0) + 1
+    plan = Map.get(run, :screenshots_plan)
     Wardmast.Workers.PrepushSteps.record(state.run_id, state.task_id, attempt, steps)
 
     state = %State{
@@ -6042,6 +6079,11 @@ defmodule Wardmast.Worker do
         handle_prepush_failure(state, ctx, detail)
     end
   end
+
+  defp put_screenshots_plan(meta, %{sha: sha}) when is_binary(sha),
+    do: Map.put(meta, :screenshots_plan_sha, sha)
+
+  defp put_screenshots_plan(meta, _), do: meta
 
   defp prepush_outcome(:ok, _spec), do: :pass
   defp prepush_outcome({:failed, status, output}, _spec), do: {:fail, {:exit, status, output}}
