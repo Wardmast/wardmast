@@ -993,7 +993,7 @@ defmodule Wardmast.Mergers.Gitlab do
       # THAT project, never the workspace's configured one (bd-96d5z4).
       m = Regex.run(~r{^(?:https?://[^/\s]+/)?(.+?)/-/merge_requests/(\d+)}, pr) ->
         [_, path, iid] = m
-        {:ok, qualified_ref(path, iid)}
+        {:ok, qualified_ref(strip_base_path(path), iid)}
 
       # Bare iid or GitLab's own "!<iid>" shorthand: the project comes from the
       # named repo's checkout origin remote; with no checkout the ref stays
@@ -1068,6 +1068,18 @@ defmodule Wardmast.Mergers.Gitlab do
   end
 
   defp qualified_ref(path, iid), do: path <> ref_for(iid)
+
+  # An instance served under a path prefix (`base_url: https://host/gitlab`) has
+  # MR URLs `https://host/gitlab/<namespace>/<project>/-/…`; the prefix is not
+  # part of the project path.
+  defp strip_base_path(path) do
+    with {:ok, %{base_url: base}} when is_binary(base) <- Config.resolve(),
+         prefix when prefix not in [nil, "", "/"] <- URI.parse(base).path do
+      String.replace_prefix(path, String.trim_leading(prefix, "/") <> "/", "")
+    else
+      _ -> path
+    end
+  end
 
   @impl true
   def get_diff(mr_ref, opts) when is_binary(mr_ref) do

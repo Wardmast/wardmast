@@ -160,7 +160,7 @@ defmodule Wardmast.Mergers.ForgeRepos do
   end
 
   defp remote_entry(%{key: key, path: path, strategy: strategy}, opts) do
-    case RepoResolver.from_remote(path) do
+    case RepoResolver.from_remote(path, nested: strategy == :gitlab) do
       {:ok, {owner, name}} ->
         [%{slug: "#{owner}/#{name}", repo_key: key, strategy: strategy}]
 

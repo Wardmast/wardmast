@@ -113,6 +113,25 @@ defmodule Wardmast.Mergers.Gitlab.EndpointTest do
       Config.put_active(raw(%{"base_url" => "http://gl:81/x", "project_id" => "g/s/p"}))
       assert Merger.link_for("g/s/p!3") == "http://gl:81/x/g/s/p/-/merge_requests/3"
     end
+
+    test "ref_for_pr strips the instance's path prefix from a full MR URL" do
+      Config.put_active(raw(%{"base_url" => "https://gl.internal/gitlab"}))
+
+      assert {:ok, "group/sub/project!3"} =
+               Merger.ref_for_pr(
+                 "https://gl.internal/gitlab/group/sub/project/-/merge_requests/3",
+                 %{}
+               )
+
+      # No prefix configured: the whole path is the project path, nested groups included.
+      Config.put_active(raw())
+
+      assert {:ok, "group/sub/project!3"} =
+               Merger.ref_for_pr(
+                 "https://gitlab.internal/group/sub/project/-/merge_requests/3",
+                 %{}
+               )
+    end
   end
 
   describe "tracker" do

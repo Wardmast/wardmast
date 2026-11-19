@@ -91,6 +91,19 @@ defmodule Wardmast.Mergers.ForgeReposTest do
       assert ForgeRepos.slugs(ws(%{"strategy" => "direct"}, %{})) == []
     end
 
+    test "gitlab remote_first resolves a nested-group remote to the full namespace path",
+         %{tmp_dir: dir} do
+      paths = %{"tonic" => checkout(dir, "tonic", "https://gitlab.internal/group/sub/tonic.git")}
+      merge = %{"strategy" => "gitlab", "config" => %{"project_id" => 111}}
+
+      assert ForgeRepos.slugs(ws(merge, paths), gitlab: :remote_first) == ["group/sub/tonic"]
+    end
+
+    test "a github repo with a three-segment remote still does not resolve", %{tmp_dir: dir} do
+      paths = %{"x" => checkout(dir, "x", "https://github.com/a/b/c.git")}
+      assert ForgeRepos.slugs(ws(%{"strategy" => "github"}, paths)) == []
+    end
+
     test "gitlab prefers the pinned project_id unless asked for remotes first", %{tmp_dir: dir} do
       paths = %{"tonic" => checkout(dir, "tonic", "git@gitlab.com:acme/tonic.git")}
       merge = %{"strategy" => "gitlab", "config" => %{"project_id" => 111}}

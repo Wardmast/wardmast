@@ -250,3 +250,20 @@ re-running, a review round, a block) gives its seat up after a few polls.
   it merged first) and no car is skipped (a car merges only when the target
   already carries every car ahead of it — the landing-tree check). A crashed
   Watchdog's car keeps its seat while its restart is awaited.
+
+## Self-managed GitLab
+
+The GitLab merger (`merge.config`) and tracker (`tracker.config`) take two optional keys
+for an instance that is not `https://gitlab.com`:
+
+- `base_url` (alias `api_url`): scheme + host + optional path prefix, e.g.
+  `http://gitlab.internal:8080/gitlab`. Default `https://<host>`. A trailing `/api/v4`
+  on `api_url` is accepted. Every REST/GraphQL call and every MR/issue link is built from it.
+- `ca_cacertfile`: path to a PEM CA bundle, for an instance behind an internal CA. It is
+  passed as the TLS `cacertfile` of every GitLab client (merger, tracker, and the
+  `gitlab_project_token` / `gitlab_bot_token` credentials, whose entry takes the same key
+  plus its own `api_url`). Unset keeps the system trust store.
+
+Projects under nested groups (`group/sub/project`) resolve to the full namespace path
+from an `origin` remote or an MR URL (`…/group/sub/project/-/merge_requests/N`), including
+ad-hoc `worker_review pr:` URLs. GitHub remotes still parse as `owner/repo` only.

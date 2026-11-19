@@ -354,6 +354,7 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
         username          username paired with a token
         remote            remote URL override
         api_url           forge API base URL override
+        ca_cacertfile     gitlab kinds: PEM CA bundle path for a self-managed instance behind an internal CA
         legacy_operator   bool — this repo may use the operator's ambient credentials
 
     guardrails  (map — per-subject guardrail caps and ticket-permission bindings; bd-anwb0u)
