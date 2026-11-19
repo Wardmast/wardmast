@@ -5665,10 +5665,29 @@ defmodule Wardmast.Worker do
         "Worker: task=#{state.task_id} completed with tests not run: its run_tests calls " <>
           "never produced a passing or failing result (bd-7m35lc)"
       )
+
+      record_tests_not_run(state)
     end
 
     sync_back_after_run(state)
     route_completion(state, branch)
+  end
+
+  # bd-7m35lc: a durable "tests not run" mark on the task's notes (shown by
+  # `arb worker show` / `ticket_show`), not just a log line. Best effort.
+  defp record_tests_not_run(%State{task_id: task_id}) do
+    with {:ok, task} <- Ash.get(Wardmast.Tasks.Issue, task_id) do
+      current = task.notes || ""
+      note = "TESTS NOT RUN: " <> Wardmast.Worker.TestSignal.note()
+
+      unless String.contains?(current, "TESTS NOT RUN:") do
+        Ash.update!(task, %{append_notes: note})
+      end
+    end
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   # ---- bd-28c6qo: per-repo pre-push check ------------------------------------
@@ -6378,7 +6397,9 @@ defmodule Wardmast.Worker do
 
   defp inject_nudge_argv(_port_args, _nudge, _provider), do: {:error, :missing_argv}
 
-  defp commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :uncommitted) do
+  @doc false
+  @spec commit_nudge_prompt(%State{}, :uncommitted | :no_commits) :: String.t()
+  def commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :uncommitted) do
     branch = (meta && Map.get(meta, :branch)) || "(your branch)"
 
     """
@@ -6398,10 +6419,11 @@ defmodule Wardmast.Worker do
 
     Do not redo the work — just commit what is already on disk. If a hunk in
     the diff looks half-finished or wrong, finish it first, then commit.
+    #{Wardmast.Worker.TestSignal.block(meta)}
     """
   end
 
-  defp commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :no_commits) do
+  def commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :no_commits) do
     branch = (meta && Map.get(meta, :branch)) || "(your branch)"
     target = (meta && Map.get(meta, :target_branch)) || "main"
 
@@ -6424,6 +6446,7 @@ defmodule Wardmast.Worker do
 
     If you skipped the work, do it now and commit. Then print `arb done`
     again on its own line.
+    #{Wardmast.Worker.TestSignal.block(meta)}
     """
   end
 

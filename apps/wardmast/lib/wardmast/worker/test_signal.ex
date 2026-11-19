@@ -8,8 +8,8 @@ defmodule Wardmast.Worker.TestSignal do
   Every `run_tests` call is recorded on the run's meta as an outcome:
 
     * `:ran` — the suite ran and reported pass or fail;
-    * `:not_run` — it could not give a result (test env unavailable, no tests
-      mapped, the environment could not exec).
+    * `:not_run` — it could not give a result (test env unavailable, the
+      environment could not exec).
 
   `not_run?/1` is true when the worker tried and never got a `:ran`. A worker that
   never called `run_tests` (it ran `mix test` in its shell) is not flagged: the
@@ -47,7 +47,7 @@ defmodule Wardmast.Worker.TestSignal do
   @spec note() :: String.t()
   def note do
     "TESTS NOT RUN: the author's `run_tests` calls never produced a passing or failing " <>
-      "result (the test env could not be provisioned, or nothing ran). Treat its claim " <>
+      "result (the test env could not be provisioned). Treat its claim " <>
       "that the work is verified as unproven: do not accept \"done and clean\" on its " <>
       "word, check `git status` for uncommitted work, and say in your verdict that no " <>
       "test result backs the change."
