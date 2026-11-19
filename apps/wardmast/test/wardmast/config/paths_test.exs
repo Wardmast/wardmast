@@ -32,6 +32,59 @@ defmodule Wardmast.Config.PathsTest do
   defp restore_cfg(key, nil), do: Application.delete_env(:wardmast, key)
   defp restore_cfg(key, val), do: Application.put_env(:wardmast, key, val)
 
+  describe "explicit_primary_checkout/0 (bd-6dpdwm)" do
+    setup do
+      home = Path.join(System.tmp_dir!(), "paths_home_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(home)
+
+      prior =
+        for k <- ["HOME", "WARDMAST_PRIMARY_CHECKOUT", "ARB_HOME"], do: {k, System.get_env(k)}
+
+      prior_cfg = Application.get_env(:wardmast, :primary_checkout)
+
+      System.put_env("HOME", home)
+      System.delete_env("WARDMAST_PRIMARY_CHECKOUT")
+      System.delete_env("ARB_HOME")
+      Application.delete_env(:wardmast, :primary_checkout)
+
+      on_exit(fn ->
+        Enum.each(prior, fn {k, v} -> restore_env(k, v) end)
+        restore_cfg(:primary_checkout, prior_cfg)
+        File.rm_rf(home)
+      end)
+
+      %{home: home}
+    end
+
+    test "is nil when nothing is configured, though primary_checkout/0 still guesses", %{
+      home: home
+    } do
+      assert Paths.explicit_primary_checkout() == nil
+      assert Paths.primary_checkout() == Path.join(home, "dev/arbiter")
+    end
+
+    test "returns the env override" do
+      System.put_env("WARDMAST_PRIMARY_CHECKOUT", "/srv/example/env")
+      assert Paths.explicit_primary_checkout() == "/srv/example/env"
+    end
+
+    test "returns application config" do
+      Application.put_env(:wardmast, :primary_checkout, "/srv/example/cfg")
+      assert Paths.explicit_primary_checkout() == "/srv/example/cfg"
+    end
+
+    test "returns the install-service recorded home", %{home: home} do
+      File.mkdir_p!(Path.join(home, ".config/wardmast"))
+      File.write!(Path.join(home, ".config/wardmast/home"), "/srv/example/recorded\n")
+      assert Paths.explicit_primary_checkout() == "/srv/example/recorded"
+    end
+
+    test "agrees with primary_checkout/0 whenever something is explicit" do
+      Application.put_env(:wardmast, :primary_checkout, "/srv/example/cfg")
+      assert Paths.explicit_primary_checkout() == Paths.primary_checkout()
+    end
+  end
+
   describe "worktree_root/0" do
     test "env var wins over app config and default" do
       System.put_env("WARDMAST_WORKTREE_ROOT", "/tmp/from-env-wt")

@@ -1,0 +1,46 @@
+<%= if assigns[:primary_checkout] do %>### The live checkout is off limits
+
+`<%= assigns[:primary_checkout] %>` is the **primary checkout the running Wardmast server is
+serving from**. Writing there — even a half-saved file — is picked up by
+Phoenix hot-reload and can take down the live server, the coordinator, and
+every worker in flight. This has happened.
+
+* Do **not** edit, create, or delete files under `<%= assigns[:primary_checkout] %>`.
+* Do **not** run `git` commands that write there (`checkout`, `reset`,
+  `stash`, `worktree prune`, …). Reading is fine.
+* Do **not** run `mix` there — not `mix test`, not `mix compile`, not a
+  `mix` alias. The running server owns that `_build`; a second `mix`
+  fighting it for the directory has wedged this install before.
+
+Your permissions deny writes under that path, but the deny list is a
+guardrail against accidents, not a sandbox: you run as the operator's user
+and can reach anything they can. The rule above is the actual boundary.
+
+**Reading** `<%= assigns[:primary_checkout] %>` is fine, and it is usually all an investigation
+needs. This rule and the file-it-don't-fix-it rule above are independent:
+staying out of the live checkout is not permission to implement the fix
+somewhere else instead.
+
+#### Worktrees — only when the operator has asked you to make the change
+
+This is a carve-out, not your standing workflow. If the operator has
+explicitly asked you to make a change yourself, work in a **git worktree
+created under this session directory**, cut from a clone that is **not**
+the live checkout above (the operator keeps one alongside it for exactly
+this; ask which if you do not know):
+
+    git -C <non-live-clone> worktree add <session-workspace>/<branch> <branch>
+
+Nothing here is an invitation to go find a checkout on your own
+initiative. Without that explicit ask, an investigation ends at a filed
+ticket.<% else %>### Repository work, if the operator asks for it
+
+You do not normally need a checkout at all: your output on a bug is a
+filed issue, not a patch (see "Your first move is to file it", above).
+Reading a repository to root-cause something is fine and needs no
+worktree.
+
+**When — and only when — the operator has asked you to make a change
+yourself**, that change goes in a **git worktree created under this session
+directory**, never directly in a shared checkout. Absent that ask, treat this
+section as not applying to you.<% end %>
