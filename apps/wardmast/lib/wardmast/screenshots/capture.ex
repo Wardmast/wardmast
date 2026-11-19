@@ -42,6 +42,7 @@ defmodule Wardmast.Screenshots.Capture do
   alias Wardmast.Screenshots.Capture.Shooter
   alias Wardmast.Screenshots.Config
   alias Wardmast.Screenshots.Plan
+  alias Wardmast.Screenshots.PlanCheck
   alias Wardmast.Worker.ReleaseEnv
 
   @type side ::
@@ -162,13 +163,10 @@ defmodule Wardmast.Screenshots.Capture do
         {:ok, plan}
 
       {:error, :missing} ->
-        {:error,
-         Failure.new(
-           :manifest_missing,
-           "the worker wrote no screenshots manifest (.arbiter/screenshots.json), so there is " <>
-             "nothing to capture",
-           detail: input.plan_path
-         )}
+        case PlanCheck.default_plan(input.config) do
+          {:ok, plan} -> {:ok, plan}
+          nil -> missing_plan(input)
+        end
 
       {:error, {:invalid, errors}} ->
         {:error,
@@ -178,6 +176,16 @@ defmodule Wardmast.Screenshots.Capture do
            detail: errors
          )}
     end
+  end
+
+  defp missing_plan(input) do
+    {:error,
+     Failure.new(
+       :manifest_missing,
+       "the worker wrote no screenshots manifest (.arbiter/screenshots.json), so there is " <>
+         "nothing to capture",
+       detail: input.plan_path
+     )}
   end
 
   defp not_skipped(%Plan{skip: nil}), do: :ok

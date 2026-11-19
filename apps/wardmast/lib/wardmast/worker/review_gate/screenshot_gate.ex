@@ -26,6 +26,7 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
   alias Wardmast.Screenshots.Capture
   alias Wardmast.Screenshots.Capture.Failure
   alias Wardmast.Screenshots.Config
+  alias Wardmast.Screenshots.PlanCheck
 
   # The line a worker prints to declare a fix with no file change (see ReviewGate's
   # `@non_file_fix_marker`): the plan file is gitignored, so adding it moves no head.
@@ -81,11 +82,22 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
         base_sha: base,
         head_sha: head,
         config: config,
-        plan_path: Path.join(wt, @plan_file),
+        plan_path: plan_path(state, wt),
         out_dir: out_dir
       },
       opts: Map.get(state, :screenshot_opts, [])
     }
+  end
+
+  # The plan the commit gate checked (stored outside the worktree) feeds the capture, so a plan
+  # edited after `arb done` is not the one shot; no stored copy falls back to the live file.
+  defp plan_path(state, wt) do
+    root = Map.get(state, :screenshot_plan_root, PlanCheck.store_root())
+
+    case PlanCheck.stored_sha(root, state.task_id) do
+      {:ok, _sha} -> PlanCheck.stored_path(root, state.task_id)
+      :error -> Path.join(wt, @plan_file)
+    end
   end
 
   @doc """

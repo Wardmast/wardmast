@@ -57,6 +57,23 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGateTest do
       assert job.input.head_sha == "a" <> String.duplicate("1", 39)
     end
 
+    test "the plan the commit gate stored feeds the capture instead of the live file",
+         %{tmp_dir: tmp} do
+      root = Path.join(tmp, "plans")
+      body = ~s({"version":1,"skip":"x"})
+
+      :ok =
+        Wardmast.Screenshots.PlanCheck.store(root, "bd-test", %{
+          sha: Wardmast.Screenshots.PlanCheck.sha(body),
+          body: body
+        })
+
+      assert {:run, job} =
+               ScreenshotGate.plan(state(tmp, %{screenshot_plan_root: root}), workspace(@block))
+
+      assert job.input.plan_path == Wardmast.Screenshots.PlanCheck.stored_path(root, "bd-test")
+    end
+
     test "a head already checked is not captured again", %{tmp_dir: tmp} do
       head = "a" <> String.duplicate("1", 39)
       checked = %{head_sha: head, outcome: {:skipped, :no_ui_paths}}

@@ -133,6 +133,53 @@ defmodule Wardmast.Screenshots.PlanCheck do
     end
   end
 
+  @doc "Where the gate keeps checked plans (outside every worktree)."
+  @spec store_root() :: String.t()
+  def store_root, do: Path.join(System.tmp_dir!(), "arbiter-screenshot-plans")
+
+  @doc """
+  The commit-gate step for `arb done`: `nil` when the screenshots gate does not apply, else
+  `%{step:, plan:}` where `step` is a `Wardmast.Worker.PrepushCheck.step_result` (`:passed` or
+  `:failed`) and `plan` is the checked plan (also stored under `store_root/0`, with the plan
+  excluded from git) or `nil`.
+  """
+  @spec gate(Config.t(), String.t(), String.t() | nil, String.t()) :: nil | map()
+  def gate(%Config{} = config, worktree, target, task_id) do
+    started = System.monotonic_time(:millisecond)
+    exclude_plan(worktree)
+
+    case check(config, worktree, target) do
+      :not_applicable ->
+        nil
+
+      {:ok, checked} ->
+        store(store_root(), task_id, checked)
+        %{step: step(:passed, 0, passed_text(checked), started), plan: checked}
+
+      {:error, messages} ->
+        %{step: step(:failed, 1, Enum.join(messages, "\n"), started), plan: nil}
+    end
+  end
+
+  defp passed_text(%{sha: nil}), do: "no plan (plan_required is false); default_routes apply"
+  defp passed_text(%{skip: s}) when is_binary(s), do: "valid skip: #{s}"
+  defp passed_text(%{sha: sha}), do: "plan valid (sha256 #{String.slice(sha, 0, 12)})"
+
+  defp step(status, exit_status, output, started) do
+    %{
+      name: "screenshots plan",
+      cmd: "ward screenshots check",
+      scope: :all,
+      status: status,
+      exit_status: exit_status,
+      duration_ms: max(System.monotonic_time(:millisecond) - started, 0),
+      limit_s: nil,
+      output: output,
+      full_output: nil,
+      reason: nil
+    }
+  end
+
   @doc "Add the plan file to the repo's `info/exclude` (idempotent; worktree-aware)."
   @spec exclude_plan(String.t()) :: :ok
   def exclude_plan(worktree) do
