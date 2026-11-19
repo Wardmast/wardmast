@@ -328,13 +328,20 @@ defmodule Wardmast.Board.Autopilot do
   # workspace, or the primary's own cap (`Wardmast.Nodes.LocalCapacity`) held a
   # local run. Held, never failed: it lifts when a slot frees or the operator
   # raises the cap, and is held as briefly as a full account.
+  #
+  # `:not_dispatchable` (bd-7p6a9o): for an Autopilot dispatch every ordinary
+  # hold comes back as `:task_not_ready` (`Dispatch.admit/3`), so this shape is
+  # only ever a pair session's claim — opened between the plan and the
+  # dispatch. The board holds the card itself from the next tick on; it lifts
+  # when the session ends.
   @self_clearing_dispatch_errors [
     :account_at_capacity,
     :provider_constraint,
     :no_node_capacity,
     :repo_at_capacity,
     :quota_held,
-    :provider_paused
+    :provider_paused,
+    :not_dispatchable
   ]
   @account_cap_retry_ms 15_000
 
@@ -1748,6 +1755,9 @@ defmodule Wardmast.Board.Autopilot do
     do: "repo #{repo}: #{cap} of #{cap} implementer runs"
 
   defp failure_detail({:repo_at_capacity, _}), do: "repo at capacity"
+
+  defp failure_detail({:not_dispatchable, _id, hold}),
+    do: Wardmast.Tasks.Lifecycle.describe_hold(hold)
   defp failure_detail(reason), do: "dispatch refused (#{inspect(error_shape(reason))})"
 
   defp clear_failure(state, id), do: %{state | failures: Map.delete(state.failures, id)}
@@ -1827,6 +1837,12 @@ defmodule Wardmast.Board.Autopilot do
     do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
 
   defp preflight_retry_not_before({:quota_held, _task_id}, _count, now),
+    do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
+
+  # bd-7p6a9o: a pair session's claim lifts when the session ends, which no
+  # clock predicts; the board's own `card_pair` hold takes over from the next
+  # snapshot, so this only has to bridge the pass that raced the open.
+  defp preflight_retry_not_before({:not_dispatchable, _id, {:pair_session, _}}, _count, now),
     do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
 
   defp preflight_retry_not_before({:provider_paused, _provider, _phrase}, _count, now),

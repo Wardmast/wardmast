@@ -163,6 +163,7 @@ defmodule Wardmast.Board.Scheduler do
           optional(:card_guardrail) => %{optional(String.t()) => :ok | {:hold, String.t()}},
           optional(:card_local) => %{optional(String.t()) => {:hold, String.t()}},
           optional(:card_ci) => %{optional(String.t()) => :ok | {:hold, String.t()}},
+          optional(:card_pair) => %{optional(String.t()) => {:hold, String.t()}},
           optional(:dispatch_holds) => %{optional(String.t()) => {:hold, String.t()}},
           optional(:paused) => boolean(),
           optional(:walk) => walk()
@@ -327,6 +328,9 @@ defmodule Wardmast.Board.Scheduler do
       # #1126: per-ticket CI backpressure holds — the card's repo has too many MR
       # pipelines waiting for a runner. A card's own block, like the above.
       card_ci: Map.get(input, :card_ci) || %{},
+      # bd-7p6a9o: tickets a live pair session claims — `{:hold, session_id}`.
+      # A card's own block, and one nothing on the board can lift.
+      card_pair: Map.get(input, :card_pair) || %{},
       slots_free: Map.get(input, :slots_free, 0),
       slot_note: Map.get(input, :slot_note)
     }
@@ -437,6 +441,7 @@ defmodule Wardmast.Board.Scheduler do
       guardrail: Map.get(board.card_guardrail, card.id),
       local_capacity: Map.get(board.card_local, card.id),
       ci_saturated: Map.get(board.card_ci, card.id),
+      pair_session: Map.get(board.card_pair, card.id),
       scope: scope_of(card),
       repo: Map.get(card, :repo),
       in_flight: claims(acc)
@@ -506,6 +511,10 @@ defmodule Wardmast.Board.Scheduler do
   defp phrase({:ci_saturated, _detail} = hold, _mutex),
     do: "held — " <> Lifecycle.describe_hold(hold)
 
+  # bd-7p6a9o: `held — claimed by a live pair session (5b1e0c2a)`.
+  defp phrase({:pair_session, _session_id} = hold, _mutex),
+    do: "held — " <> Lifecycle.describe_hold(hold)
+
   defp phrase(hold, _mutex), do: "blocked — " <> Lifecycle.describe_hold(hold)
 
   # A bare list of ids is accepted so a caller that has no states to report
@@ -563,6 +572,7 @@ defmodule Wardmast.Board.Scheduler do
       paused: Map.get(input, :paused) == true,
       card_guardrail: Map.get(input, :card_guardrail) || %{},
       card_ci: Map.get(input, :card_ci) || %{},
+      card_pair: Map.get(input, :card_pair) || %{},
       dispatch_holds: Map.get(input, :dispatch_holds) || %{}
     }
   end
@@ -602,6 +612,7 @@ defmodule Wardmast.Board.Scheduler do
       provider_constraint: Map.get(board.dispatch_holds, card.id),
       guardrail: Map.get(board.card_guardrail, card.id),
       ci_saturated: Map.get(board.card_ci, card.id),
+      pair_session: Map.get(board.card_pair, card.id),
       scope: scope_of(card),
       repo: Map.get(card, :repo),
       in_flight: acc.in_flight

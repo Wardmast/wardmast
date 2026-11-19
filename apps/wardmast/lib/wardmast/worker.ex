@@ -359,15 +359,38 @@ defmodule Wardmast.Worker do
   """
   @spec start(keyword()) :: DynamicSupervisor.on_start_child()
   def start(opts) when is_list(opts) do
-    case ensure_single_active_task_worker(opts) do
-      :ok ->
-        Wardmast.Worker.Supervisor
-        |> DynamicSupervisor.start_child({__MODULE__, opts})
-        |> tap(&log_worker_start(opts, &1))
-
-      {:error, _reason} = refused ->
-        refused
+    with :ok <- ensure_unclaimed_by_pair(opts),
+         :ok <- ensure_single_active_task_worker(opts) do
+      Wardmast.Worker.Supervisor
+      |> DynamicSupervisor.start_child({__MODULE__, opts})
+      |> tap(&log_worker_start(opts, &1))
     end
+  end
+
+  # bd-7p6a9o: a live pair session's claim, for the starts that never pass
+  # through `Wardmast.Worker.Dispatch` — the merge queue's fix and conflict
+  # passes. Only the ticket's exclusive family is held: a ReviewGate reviewer's
+  # `#`-keyed session reads a PR and never touches the ticket's worktree. A
+  # caller passing `allow_concurrent_task_worker: true` has established
+  # exclusivity itself. A failed read holds nothing here: `Dispatch` has
+  # already asked — failing closed — on every path that starts fresh work.
+  defp ensure_unclaimed_by_pair(opts) do
+    task_id = Keyword.get(opts, :task_id)
+
+    with false <- Keyword.get(opts, :allow_concurrent_task_worker, false),
+         true <- is_binary(task_id) and task_id != "",
+         true <- PRegistry.exclusive_key?(resolve_registry_key(opts, task_id), task_id),
+         session_id when is_binary(session_id) <- pair_claim(task_id) do
+      {:error, {:not_dispatchable, task_id, {:pair_session, session_id}}}
+    else
+      _ -> :ok
+    end
+  end
+
+  defp pair_claim(task_id) do
+    Wardmast.Sessions.Pair.claimed_by(task_id)
+  rescue
+    _ -> nil
   end
 
   @doc """

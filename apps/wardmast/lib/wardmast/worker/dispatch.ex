@@ -97,6 +97,7 @@ defmodule Wardmast.Worker.Dispatch do
   alias Wardmast.Nodes.Refusal
   alias Wardmast.Quota.SpendCap
   alias Wardmast.Reviews.Checkout
+  alias Wardmast.Sessions.Pair
   alias Wardmast.Tasks.EdgeGate
   alias Wardmast.Tasks.Issue
   alias Wardmast.Tasks.IssueRepo
@@ -1809,10 +1810,22 @@ defmodule Wardmast.Worker.Dispatch do
   # dispatch that reaches here has either been planned by the scheduler
   # (which asked with every hold) or is a person overriding it. What the
   # answer means depends on who is asking — `admit/3`.
+  #
+  # bd-7p6a9o: a live pair session's claim is asked first and is not subject to
+  # `admit/3` at all — no force, resume, review or re-dispatch lifts it. An
+  # operator and an agent are working in the ticket's worktree; a worker beside
+  # them would interleave commits on the same branch. Ending the session is
+  # the release. Every dispatch, resume and session resume comes through here.
   defp ensure_dispatchable(%Issue{} = task, opts) do
-    case Lifecycle.dispatchable(task, %{blocked_by: EdgeGate.blockers_of(task)}) do
-      :ok -> :ok
-      {:held, hold} -> admit(task, hold, opts)
+    case Pair.claimed_by(task.id) do
+      nil ->
+        case Lifecycle.dispatchable(task, %{blocked_by: EdgeGate.blockers_of(task)}) do
+          :ok -> :ok
+          {:held, hold} -> admit(task, hold, opts)
+        end
+
+      session_id ->
+        {:error, {:not_dispatchable, task.id, {:pair_session, session_id}}}
     end
   end
 
@@ -1993,6 +2006,14 @@ defmodule Wardmast.Worker.Dispatch do
   the task page.
   """
   @spec refusal_message(String.t(), Lifecycle.Dispatchable.hold()) :: String.t()
+  # bd-7p6a9o: force cannot lift a pair session's claim, so the refusal must
+  # not offer it — it names the way out instead.
+  def refusal_message(task_id, {:pair_session, _session_id} = hold) do
+    "#{task_id} is #{Lifecycle.describe_hold(hold)}, so no worker can start on it while " <>
+      "the session is live. Finish the session with Done (`ward pair done #{task_id}`) or end " <>
+      "it (`ward pair end #{task_id}`) to release the claim."
+  end
+
   def refusal_message(task_id, hold) do
     "#{task_id} is #{Lifecycle.describe_hold(hold)}, so it is not Ready to dispatch. " <>
       next_step(hold) <>
