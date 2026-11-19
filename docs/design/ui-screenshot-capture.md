@@ -118,6 +118,15 @@ runs no agent, and needs no provider account.
    brief carries the manifest summary so a reviewer sees "captured / failed / withheld".
    Rejected: making capture a hard merge gate; flaky browsers would block unrelated work.
 
+**Implemented (bd-84latk, #1328): the ReviewGate step.** Before a reviewer is dispatched (after the CI
+wait), `Wardmast.Worker.ReviewGate.ScreenshotGate` runs the capture for a repo with a `screenshots`
+config and routes the outcome: captured pairs (or the worker's declared `skip`) go into the reviewer's
+brief; a **worker fault** (`manifest_missing`, `manifest_invalid`, `route_error`) goes down the revise
+loop with an instruction to add or fix `.arbiter/screenshots.json`; an **infrastructure fault** (every
+other failure code: boot, checkout, diff, budget, browser) parks `:screenshot_capture_failed` for the
+coordinator and neither loops the worker nor dispatches a reviewer. A repo with no `screenshots`
+config is untouched.
+
 Why not wait inside the worker's commit gate (`arb done`, ≈ 3 min, bounded by the
 pre-push recipe)? Two cold boots exceed it, and the PR does not exist yet. The *plan check*
 (cheap, no boot) does run there.

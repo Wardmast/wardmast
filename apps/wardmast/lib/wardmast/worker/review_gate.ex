@@ -255,7 +255,6 @@ defmodule Wardmast.Worker.ReviewGate do
   alias Wardmast.Worker.DeferredCriteria
   alias Wardmast.Worker.Dispatch
   alias Wardmast.Worker.EvidenceIntegrity
-  alias Wardmast.Worker.ReviewGate.ScreenshotGate
   alias Wardmast.Worker.GitCredential
   alias Wardmast.Worker.GitLayout
   alias Wardmast.Worker.HostCredential
@@ -269,6 +268,7 @@ defmodule Wardmast.Worker.ReviewGate do
   alias Wardmast.Worker.ReviewCi
   alias Wardmast.Worker.ReviewFindings
   alias Wardmast.Worker.ReviewGate.NoVerdictCause
+  alias Wardmast.Worker.ReviewGate.ScreenshotGate
   alias Wardmast.Worker.ReviewMrBrief
   alias Wardmast.Worker.ReviewPass
   alias Wardmast.Worker.ReviewSync
