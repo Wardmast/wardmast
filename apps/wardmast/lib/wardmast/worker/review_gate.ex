@@ -8960,6 +8960,7 @@ defmodule Wardmast.Worker.ReviewGate do
     do: conflict_review_prompt(state, info)
 
   def review_prompt(state) do
+    state = with_prompt_budget(state)
     task = load_task(state.task_id)
 
     standing_orders_section(state) <>
@@ -9616,6 +9617,7 @@ defmodule Wardmast.Worker.ReviewGate do
   defp apply_conflict_tier(opts, _state, _role), do: opts
 
   defp conflict_review_prompt(state, info) do
+    state = with_prompt_budget(state)
     task = load_task(state.task_id)
 
     standing_orders_section(state) <>
@@ -10057,8 +10059,15 @@ defmodule Wardmast.Worker.ReviewGate do
     |> round_timeout_ms(Map.put_new(state, :timeout_override_ms, nil), :reviewer)
   end
 
+  # Resolve the budget once per prompt build: `resolve_timeout_ms/2` may load the
+  # workspace, and every prompt helper below needs the same number.
+  defp with_prompt_budget(state), do: Map.put(state, :prompt_budget_ms, pass_budget_ms(state))
+
+  defp prompt_budget_ms(%{prompt_budget_ms: ms}) when is_integer(ms), do: ms
+  defp prompt_budget_ms(state), do: pass_budget_ms(state)
+
   defp pass_budget_block(state) do
-    budget = pass_budget_ms(state)
+    budget = prompt_budget_ms(state)
 
     """
     PASS BUDGET: #{format_budget(budget)} of wall clock from the moment this session starts.
@@ -10073,7 +10082,8 @@ defmodule Wardmast.Worker.ReviewGate do
   # The longest `timeout N` wrapper a reviewer should use: a cold compile needs
   # up to ~5 min, but never more than half the pass budget (a short conflict-review
   # cap cannot afford a 5 min command), and never under a minute.
-  defp test_timeout_secs(state), do: state |> pass_budget_ms() |> div(2000) |> min(300) |> max(60)
+  defp test_timeout_secs(state),
+    do: state |> prompt_budget_ms() |> div(2000) |> min(300) |> max(60)
 
   defp test_command_example(state, target \\ "") do
     String.trim("timeout #{test_timeout_secs(state)} mix test #{target}")

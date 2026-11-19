@@ -83,6 +83,7 @@ defmodule Wardmast.Worker.ReviewGateTest do
                            "../../fixtures/review_no_verdict_auth_prose.sh",
                            __DIR__
                          )
+  @exit_mid_tool_call Path.expand("../../fixtures/review_exit_mid_tool_call.sh", __DIR__)
   @scan_reset Path.expand("../../fixtures/review_scan_reset.sh", __DIR__)
 
   # ---- pure verdict parsing ------------------------------------------------
@@ -2670,6 +2671,46 @@ defmodule Wardmast.Worker.ReviewGateTest do
 
       assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "expected a re-prompt to have been attempted despite the auth/retry-flavored prose"
+    end
+
+    # bd-3na3d7: a real pass exit (not a direct call to the classifier) whose
+    # transcript stops on an unanswered `⏵ Bash(...)` must park with an
+    # escalation that names the cause, not just "no parseable VERDICT".
+    test "a reviewer cut off mid tool call parks with that cause in the escalation",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@exit_mid_tool_call],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
+
+      findings = Worker.state(pid).meta.review_gate_findings
+      assert findings =~ "tool call was still in flight"
+      assert findings =~ "timeout 300 mix test"
     end
 
     # bd-3y2mda: a REQUEST_CHANGES verdict with NO findings is useless (the
