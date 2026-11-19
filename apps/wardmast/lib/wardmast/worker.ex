@@ -968,6 +968,22 @@ defmodule Wardmast.Worker do
   end
 
   @doc """
+  Record what a `run_tests` call came to for task `task_id`'s run (bd-7m35lc):
+  `:ran` (a passing or failing result) or `:not_run`. The commit gate and the
+  ReviewGate read it back through `Wardmast.Worker.TestSignal`. A task with no live
+  worker records nothing.
+  """
+  @spec note_test_outcome(String.t(), Wardmast.Worker.TestSignal.outcome()) :: :ok
+  def note_test_outcome(task_id, outcome) when is_binary(task_id) do
+    case whereis(task_id) do
+      nil -> :ok
+      pid -> GenServer.call(pid, {:note_test_outcome, outcome})
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
   Does this worker currently own an agent subprocess that has not exited?
 
   bd-2aslx6 (#1428): the dispatch path reuses a live worker's registration, so
@@ -2789,6 +2805,10 @@ defmodule Wardmast.Worker do
 
     {:reply, reply, state}
   end
+
+  def handle_call({:note_test_outcome, outcome}, _from, %State{} = state),
+    do:
+      {:reply, :ok, %State{state | meta: Wardmast.Worker.TestSignal.record(state.meta, outcome)}}
 
   # bd-2aslx6: see `agent_session_live?/1`.
   def handle_call(:agent_session_live?, _from, %State{} = state) do
@@ -5788,8 +5808,34 @@ defmodule Wardmast.Worker do
   end
 
   defp proceed_after_gate(%State{} = state, branch) do
+    if Wardmast.Worker.TestSignal.not_run?(state.meta) do
+      Logger.warning(
+        "Worker: task=#{state.task_id} completed with tests not run: its run_tests calls " <>
+          "never produced a passing or failing result (bd-7m35lc)"
+      )
+
+      record_tests_not_run(state)
+    end
+
     sync_back_after_run(state)
     route_completion(state, branch)
+  end
+
+  # bd-7m35lc: a durable "tests not run" mark on the task's notes (shown by
+  # `arb worker show` / `ticket_show`), not just a log line. Best effort.
+  defp record_tests_not_run(%State{task_id: task_id}) do
+    with {:ok, task} <- Ash.get(Wardmast.Tasks.Issue, task_id) do
+      current = task.notes || ""
+      note = "TESTS NOT RUN: " <> Wardmast.Worker.TestSignal.note()
+
+      unless String.contains?(current, "TESTS NOT RUN:") do
+        Ash.update!(task, %{append_notes: note})
+      end
+    end
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   # ---- bd-28c6qo: per-repo pre-push check ------------------------------------
@@ -6592,7 +6638,9 @@ defmodule Wardmast.Worker do
 
   defp inject_nudge_argv(_port_args, _nudge, _provider), do: {:error, :missing_argv}
 
-  defp commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :uncommitted) do
+  @doc false
+  @spec commit_nudge_prompt(map(), :uncommitted | :no_commits) :: String.t()
+  def commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :uncommitted) do
     branch = (meta && Map.get(meta, :branch)) || "(your branch)"
 
     """
@@ -6612,10 +6660,11 @@ defmodule Wardmast.Worker do
 
     Do not redo the work — just commit what is already on disk. If a hunk in
     the diff looks half-finished or wrong, finish it first, then commit.
+    #{Wardmast.Worker.TestSignal.block(meta)}
     """
   end
 
-  defp commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :no_commits) do
+  def commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :no_commits) do
     branch = (meta && Map.get(meta, :branch)) || "(your branch)"
     target = (meta && Map.get(meta, :target_branch)) || "main"
 
@@ -6638,6 +6687,7 @@ defmodule Wardmast.Worker do
 
     If you skipped the work, do it now and commit. Then print `arb done`
     again on its own line.
+    #{Wardmast.Worker.TestSignal.block(meta)}
     """
   end
 
@@ -8812,6 +8862,8 @@ defmodule Wardmast.Worker do
         |> maybe_opt(:timeout_retries, Map.get(meta, :review_timeout_retries))
         |> maybe_opt(:rounds, resolve_review_rounds(state))
         |> maybe_opt(:pr_ref, Map.get(meta, :review_pr_ref))
+        # bd-7m35lc: the author's `run_tests` never produced a result.
+        |> maybe_opt(:tests_not_run, Wardmast.Worker.TestSignal.not_run?(meta) || nil)
         # bd-cut6uv: test escape hatches over CI-gated review (see
         # `Wardmast.Worker.ReviewCi`); unset in production, where the workspace's
         # `review.require_ci_green` decides.
