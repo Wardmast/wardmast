@@ -408,19 +408,24 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
     end
 
     test "each successive skipped head gets its own trigger (#1564)", %{ws: ws} do
-      freshness(%{"s1" => 0, "s2" => 0, "s3" => 0, "s4" => 0})
-      diffs("a")
+      heads = ["s1", "s2", "s3", "s4"]
+      freshness(Map.new(["a0" | heads], &{&1, 0}))
+      for h <- ["a0" | heads], do: StubMerger.set_diff(mr("a"), h, @reviewed_diff)
       sk = fn h -> skipped(h) |> Map.put(:pipeline_skipped, true) end
-      StubMerger.queue_get(mr("a"), [sk.("s1")])
-      a = watch("a", ws)
+      StubMerger.queue_get(mr("a"), [sk.("a0")])
+      a = watch("a", ws, last_reviewed_sha: "a0")
+      wait_until(fn -> length(StubMerger.pipeline_triggers()) == 1 end)
 
-      for {h, n} <- Enum.with_index(["s1", "s2", "s3", "s4"], 1) do
+      # Each later head is a fresh skipped head (a main-merge push); every one
+      # must get its own trigger, not share a per-Watchdog budget.
+      for {h, n} <- Enum.with_index(heads, 2) do
+        :sys.replace_state(a, fn s -> %{s | reviewed_sha: h} end)
         StubMerger.queue_get(mr("a"), [sk.(h)])
         wait_until(fn -> length(StubMerger.pipeline_triggers()) == n end)
         after_polls(a, 2)
       end
 
-      assert length(StubMerger.pipeline_triggers()) == 4
+      assert length(StubMerger.pipeline_triggers()) == 5
       assert StubMerger.merge_count("!a") == 0
     end
 
