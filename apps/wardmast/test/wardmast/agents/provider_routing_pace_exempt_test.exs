@@ -95,27 +95,6 @@ defmodule Wardmast.Agents.ProviderRoutingPaceExemptTest do
     assert_in_delta decision["headroom"], 0.4, 0.001
   end
 
-  test "a P2 on the same account is held at the paced line (not exempt)" do
-    ws = workspace!()
-    acct = account!(:claude, "p2", exempt(%{"pace_exempt_threshold" => 0.8}))
-    allow!(ws, acct, 0)
-
-    assert {:legacy, decision} = route(ws, task!(ws, 2), [{acct, quota(0.4)}])
-    assert Enum.any?(decision["dropped"], &(&1["reason"] == "quota_held"))
-    refute Map.has_key?(decision, "pace_exempt")
-  end
-
-  test "an exempt P0 past the dedicated cap is still held" do
-    ws = workspace!()
-    acct = account!(:claude, "cap", exempt(%{"pace_exempt_threshold" => 0.8}))
-    allow!(ws, acct, 0)
-
-    assert {:legacy, decision} = route(ws, task!(ws, 0), [{acct, quota(0.8)}])
-
-    assert [%{"reason" => "quota_held", "detail" => detail}] = decision["dropped"]
-    assert detail =~ "P0 exempt"
-  end
-
   test "an exempt P0 under the paced line records no exemption" do
     ws = workspace!()
     acct = account!(:claude, "under", exempt())
@@ -141,16 +120,6 @@ defmodule Wardmast.Agents.ProviderRoutingPaceExemptTest do
       assert same_decision?(p0, p2)
     end
 
-    test "off, a P0 over the paced line is dropped exactly as before" do
-      ws = workspace!()
-      acct = account!(:claude, "off", paced(%{"pace_exempt_threshold" => 0.8}))
-      allow!(ws, acct, 0)
-
-      assert {:legacy, p0} = route(ws, task!(ws, 0), [{acct, quota(0.4)}])
-      assert {:legacy, p2} = route(ws, task!(ws, 2), [{acct, quota(0.4)}])
-      assert same_decision?(p0, p2)
-    end
-
     test "with one eligible account the pick is the same exempt or not (only the headroom reading moves)" do
       ws = workspace!()
       acct = account!(:claude, "solo", exempt())
@@ -161,14 +130,6 @@ defmodule Wardmast.Agents.ProviderRoutingPaceExemptTest do
       pick = &Map.take(&1, ["outcome", "account_id", "agent_type", "provider"])
       assert pick.(p0) == pick.(p3)
       refute Map.has_key?(p0, "pace_exempt")
-    end
-
-    test "a workspace that tightens to none switches the exemption off" do
-      ws = workspace!(Map.put(@most_quota, "quota", %{"pace_exempt_priority" => "none"}))
-      acct = account!(:claude, "none", exempt())
-      allow!(ws, acct, 0)
-
-      assert {:legacy, _decision} = route(ws, task!(ws, 0), [{acct, quota(0.4)}])
     end
   end
 end

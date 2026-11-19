@@ -1325,6 +1325,33 @@ nothing in the budget path.
 6. **DC9 and DC10**, as the operator opts in.
 7. **DC11 and DC12.**
 
+**As built (DC12, bd-b3u00u).** DC8's operator OK was recorded 2026-10-12 and the installation reads
+`enforce`; the operator promoted this ticket on 2026-11-19. Retired in this step:
+- **The modes.** The `scheduler_admission` installation setting, the per-account
+  `admission` override (O11), `Wardmast.Accounts.AdmissionMode`, `arb account
+  set --admission` and the `account_set` MCP field are gone; the migration
+  `20261119120000_drop_scheduler_admission` drops both columns. Admission is the
+  seat walk everywhere: `Admission`, `ResumeSlot`, `DispatchQueue`, provider and
+  reviewer routing and the repo cap no longer branch on a mode. `Autopilot`
+  dispatches the walk's first placement, or nothing when the board carries no
+  walk (the fall-back to today's plan went with `legacy`).
+- **The board-wide quota hold.** `Snapshot.quota_hold/2`, the per-card quota
+  holds, `exempt_card_holds`, `Gate.board_hold/3` and `Drain`'s `quota_hold` are
+  gone; `Snapshot.load/1` always plans the walk.
+- **The gate's pace rules on the admission path.** Every dispatch, drain replay
+  and follow-up asks the gate with `pace: false`; the pace-exemption audit
+  (`record_pace_exempt`) went with it. Reviewer routing still asks the full
+  gate (bd-44qs5l).
+- **Display.** The capacity strip, `scheduler_status`, `quota_get`'s `budget`
+  block and `arb scheduler status` no longer carry a mode, a `decides` flag, the
+  shadow agreement or a "Shadow" label.
+
+*Not retired here (follow-up).* The legacy plan still derives `Snapshot.derive/1`'s
+`ready`/`promote`/`slots_total` for the board's columns, and the reverse shadow
+(`AdmissionShadow`, `AdmissionShadowEvent`, the DC7 report) still compares the
+walk with it. Removing them means the board's Ready column reads the walk's
+entries, which is a larger change to `Scheduler.plan/1` and the board LiveView.
+
 ### 10.6 Migration notes
 
 **Install `conductor_system_max_concurrent` (DC1).** A migration drops the
