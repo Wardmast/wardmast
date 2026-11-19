@@ -390,6 +390,23 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       assert length(StubMerger.pipeline_triggers()) == 1
     end
 
+    test "a skipped pipeline on a head we did not skip is triggered once, then awaited (#1564)",
+         %{ws: ws} do
+      freshness(%{"a0" => 0})
+      diffs("a")
+      StubMerger.queue_get(mr("a"), [skipped("a0") |> Map.put(:pipeline_skipped, true)])
+      a = watch("a", ws)
+
+      wait_until(fn -> length(StubMerger.pipeline_triggers()) == 1 end)
+      after_polls(a, 5)
+      assert StubMerger.merge_count("!a") == 0
+      assert length(StubMerger.pipeline_triggers()) == 1
+
+      StubMerger.queue_get(mr("a"), [green("a0")])
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
+      assert length(StubMerger.pipeline_triggers()) == 1
+    end
+
     test "a skipped pipeline never merges, even after the trigger", %{ws: ws} do
       freshness(%{"a0" => 0})
       diffs("a")

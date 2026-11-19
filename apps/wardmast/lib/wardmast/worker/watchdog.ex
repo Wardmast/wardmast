@@ -6322,6 +6322,13 @@ defmodule Wardmast.Worker.Watchdog do
       else: trigger_skipped_head(state, sha)
   end
 
+  # #1564: a head whose newest pipeline the forge reports as `skipped` (0 jobs,
+  # e.g. after a main-merge push) has no CI result either, whoever pushed it:
+  # start a fresh MR pipeline (once per head SHA, recorded) and wait for it.
+  defp ci_skip_gate(state, %{pipeline_skipped: true} = result, sha) when is_binary(sha) do
+    ci_skip_gate(%{state | ci_skipped_head: sha}, result, sha)
+  end
+
   defp ci_skip_gate(_state, _result, _sha), do: :proceed
 
   defp await_triggered_pipeline(state, result, sha) do
