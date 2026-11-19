@@ -29,6 +29,7 @@ defmodule Wardmast.Screenshots.CaptureBootTest do
     git!(repo, ["config", "user.email", "t@example.com"])
     git!(repo, ["config", "user.name", "t"])
     File.cp!(Path.join(@fixtures, "app.pl"), Path.join(repo, "app.pl"))
+    File.cp!(Path.join(@fixtures, "endless_app.pl"), Path.join(repo, "endless_app.pl"))
     File.write!(Path.join(repo, "routes.txt"), Enum.join(base_routes, "\n"))
     git!(repo, ["add", "-A"])
     git!(repo, ["commit", "-q", "-m", "base"])
@@ -94,6 +95,17 @@ defmodule Wardmast.Screenshots.CaptureBootTest do
 
     File.chmod!(path, 0o755)
     path
+  end
+
+  # Kill the process group whose id a boot recorded in `file`, if any member is still alive. The
+  # id is pinned while a member exists, so this can only ever reach that boot's processes.
+  defp kill_group(file) do
+    pgid = file |> File.read!() |> String.trim()
+
+    with true <- pgid =~ ~r/\A[1-9][0-9]*\z/,
+         {_, 0} <- System.cmd("kill", ["-0", "--", "-" <> pgid], stderr_to_stdout: true) do
+      System.cmd("kill", ["-KILL", "--", "-" <> pgid], stderr_to_stdout: true)
+    end
   end
 
   defp put_envs(pairs) do
@@ -307,6 +319,31 @@ defmodule Wardmast.Screenshots.CaptureBootTest do
     assert env =~ ~r{^HOME=.*/work/before/scratch-default/home$}m
     refute env =~ ~r{^HOME=#{Regex.escape(System.user_home!())}$}m
     assert File.read!(Path.join(marks, "home-before")) == "ok\n"
+  end
+
+  test "an app whose body never ends is probed and shot by its status alone", %{tmp_dir: dir} do
+    repo = repo!(dir, ["/"], ["/", "/x"])
+    pids = Path.join(dir, "pids")
+    File.mkdir_p!(pids)
+
+    # Each boot records its process group (the shell `exec`s the app, so `$$` is the group
+    # AppProcess leads); whatever the outcome, that exact group is gone after the test.
+    on_exit(fn -> pids |> Path.join("*.pid") |> Path.wildcard() |> Enum.each(&kill_group/1) end)
+
+    cfg =
+      config(%{
+        start_cmd: "echo $$ > #{pids}/{{role}}.pid; exec perl endless_app.pl",
+        ready: %{"path" => "/", "timeout_seconds" => 15, "expect" => "below_500"}
+      })
+
+    started = System.monotonic_time(:millisecond)
+
+    # Reading the body would never end; the readiness probe and the status check stop at the
+    # status. (A probe that read it would only wait out its timeouts: the fixture trickles.)
+    assert {:ok, %{pairs: [%{kind: :changed}]}} =
+             run(dir, repo, plan!(dir, [%{"id" => "home", "path" => "/"}]), cfg)
+
+    assert System.monotonic_time(:millisecond) - started < 15_000
   end
 
   describe "the browser (bd-bhrsdv)" do

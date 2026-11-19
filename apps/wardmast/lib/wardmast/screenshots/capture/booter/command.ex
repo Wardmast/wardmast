@@ -228,7 +228,9 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
   end
 
   defp probe(url, expect, reach) do
-    opts = [retry: false, redirect: false, receive_timeout: 3_000, into: &status_only/2] ++ reach
+    opts =
+      [retry: false, redirect: false, receive_timeout: 3_000, request_timeout: 5_000] ++
+        [into: &status_only/2] ++ reach
 
     case Req.get(url, opts) do
       {:ok, %{status: status}} ->
@@ -239,7 +241,9 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
     end
   end
 
-  # Only the status matters: an untrusted app's body is never read into the server.
+  # Only the status matters: an untrusted app's body is never read into the server, and
+  # `request_timeout` bounds the whole exchange, so a trickled answer cannot hold a probe open
+  # past the readiness deadline either.
   defp status_only({:data, _chunk}, acc), do: {:halt, acc}
 
   defp ready_status?(status, "2xx"), do: status in 200..299

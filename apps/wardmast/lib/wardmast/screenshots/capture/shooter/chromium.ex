@@ -120,14 +120,17 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
   end
 
   defp check_status(url, reach) do
-    case Req.get(url, [retry: false, receive_timeout: 10_000, into: &status_only/2] ++ reach) do
+    opts = [retry: false, receive_timeout: 10_000, request_timeout: 20_000, into: &status_only/2]
+
+    case Req.get(url, opts ++ reach) do
       {:ok, %{status: status}} when status < 400 -> :ok
       {:ok, %{status: status}} -> {:error, {:http_status, status}}
       {:error, exception} -> {:error, {:shot, "GET #{url}: #{Exception.message(exception)}"}}
     end
   end
 
-  # Only the status matters: an untrusted app's body is never read into the server.
+  # Only the status matters: an untrusted app's body is never read into the server, and
+  # `request_timeout` bounds the whole exchange, so a trickled answer cannot hold the shot open.
   defp status_only({:data, _chunk}, acc), do: {:halt, acc}
 
   @doc false

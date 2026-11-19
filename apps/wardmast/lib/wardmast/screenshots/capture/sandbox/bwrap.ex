@@ -90,11 +90,12 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
   exec { $ARGV[0] } @ARGV or die "capture sandbox: exec $ARGV[0]: $!\n";
   """
 
-  # Runs inside the app's sandbox: start the relay on fd 3, close fd 3, exec the app.
+  # Runs inside the app's sandbox: start the relay on fd 3, close fd 3, exec the app. The relay
+  # keeps stderr (its own failure is worth the boot's tail) but not the app's stdout.
   @relay_sh ~S"""
   perl=$1 relay=$2 port=$3 socat=$4
   shift 4
-  "$perl" -e "$relay" "$port" "$socat" &
+  "$perl" -e "$relay" "$port" "$socat" >/dev/null &
   exec 3<&-
   exec "$@"
   """
@@ -128,7 +129,7 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
   @bridge_sh ~S"""
   socat=$1 sock=$2 port=$3
   shift 3
-  "$socat" "TCP-LISTEN:$port,bind=127.0.0.1,fork,reuseaddr" "UNIX-CONNECT:$sock" 2>/dev/null &
+  "$socat" "TCP-LISTEN:$port,bind=127.0.0.1,fork,reuseaddr" "UNIX-CONNECT:$sock" >/dev/null 2>&1 &
   pid=$!
   hex=$(printf '%04X' "$port")
   i=0
@@ -405,13 +406,18 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
     end
   end
 
+  # The one on PATH when the sandbox shows it, else the system's own copy (a perlbrew perl first
+  # on PATH does not hide /usr/bin/perl).
   defp find_visible(name, roots) do
-    case System.find_executable(name) do
-      nil ->
-        {:error, {:tool_not_found, name, nil}}
+    found =
+      [System.find_executable(name), "/usr/bin/" <> name, "/bin/" <> name]
+      |> Enum.filter(&(is_binary(&1) and File.regular?(&1)))
+      |> Enum.uniq()
 
-      path ->
-        if under?(path, roots), do: {:ok, path}, else: {:error, {:tool_not_visible, name, path}}
+    case Enum.find(found, &under?(&1, roots)) do
+      nil when found == [] -> {:error, {:tool_not_found, name, nil}}
+      nil -> {:error, {:tool_not_visible, name, hd(found)}}
+      path -> {:ok, path}
     end
   end
 

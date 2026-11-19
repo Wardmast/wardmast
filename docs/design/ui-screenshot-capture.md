@@ -117,6 +117,67 @@ runs no agent, and needs no provider account.
   and `manifest.json` extracted, entry/byte caps). The primary does the hosting
   upload (§7), so **no forge credential ever enters the pod or a node**.
 
+### As implemented: the capture sandbox (bd-bhrsdv)
+
+The capture step that exists today (`Wardmast.Screenshots.Capture`, run by the ReviewGate on the
+primary, §4) boots the app with the **host's** toolchain, not in the pod: placement, images and
+the pod are N2. Until bd-bhrsdv it also ran with the host's network and filesystem, as the
+coordinator's user, so a change's app could reach the coordinator on `127.0.0.1:4848`, any
+external host, and the coordinator user's files. Now **everything a capture boots runs in a
+sandbox, or not at all**:
+
+* **The seam.** `Wardmast.Screenshots.Capture.Sandbox` (behaviour). `Capture.run/2` checks
+  `status/0` right after the `ui_paths` gate, before the plan is read or anything runs; the
+  booter and the shooter refuse a spec without one. There is no unsandboxed implementation.
+* **Fail closed.** A host that cannot provide it gets `{:skipped, {:no_sandbox, reason}}`,
+  `reason` = "capture needs a sandbox: <what is missing>" (recorded in `capture.json` as
+  `skip_kind: no_sandbox`). The ReviewGate proceeds and tells the reviewer no screenshots were
+  taken and that it is the host's setup, not the worker's change. This replaces the "Podman only
+  in v1 ... `skipped: capture needs the podman sandbox`" rule above for host-mode capture.
+* **Pod or bwrap: bwrap, for host mode.** The pod is the right home for N2 (repo image,
+  sidecar browser, placement), but host-mode capture runs the host's toolchain, which a pod
+  would not have, and it needs a guarantee now. `Sandbox.Bwrap` gives it on the host, and its
+  isolation runs for real in CI's `jail` job (`capture_sandbox_test.exs`, real bwrap, where
+  podman tests are opt-in and never run in CI). A pod sandbox can implement the same behaviour
+  when N2 lands.
+* **What the bwrap sandbox is.** `--unshare-all` (its own network namespace: `lo` only, no
+  route, so the host's loopback is an empty one and every other address is unreachable; its own
+  pid namespace; `--die-with-parent`). The filesystem is an **allowlist**: `/usr`, `/bin`,
+  `/sbin`, `/lib*` and `/etc` read-only, private `/tmp`, `/run`, `/var/tmp`, `/dev/shm`, the
+  extracted checkout and the boot's scratch writable, and nothing else (no home, no host `/tmp`,
+  no runtime sockets) unless the operator lists a path in `screenshots.sandbox.readonly_paths`
+  (a toolchain, a dependency cache; never the home directory or above). The server's own
+  secrets and control-socket dirs (`Jail.secret_files/0`, `Jail.mask_paths/0`) are blanked if a
+  listed path would show them. The env stays built from nothing, now with `HOME` in the scratch.
+* **Reaching the app.** The app listens on `127.0.0.1:<port>` in its namespace. The host creates
+  a listening Unix socket in a fresh `0700` dir under `Paths.socket_root/0`, **outside** the
+  sandbox, and passes it in as fd 3; a relay inside hands each connection to the app's port. The
+  app never sees the socket's path, so it cannot swap it for a symlink that would turn the host's
+  readiness probe into a request to another host socket. Host-side probes go through `Req`'s
+  `unix_socket:` and read only the status, never an untrusted body.
+* **The browser.** Chromium runs in a sandbox of its own: only the shot's directory writable,
+  the browser's install dir and the app's socket read-only, a `socat` bridge from
+  `127.0.0.1:<port>` to that socket (so it loads the same `base_url`), an env built from nothing.
+  The image is copied out only if it is a regular file.
+* **`--no-sandbox` stays, deliberately.** Chromium's own sandbox does not start inside this one
+  on hosts that restrict unprivileged user namespaces (its namespace sandbox needs a nested user
+  namespace; Ubuntu's AppArmor policy and container seccomp profiles refuse that, and the podman
+  worker container refuses `unshare --user`) and its setuid helper cannot gain privileges under
+  bwrap's `no_new_privs`. It would also protect the wrong thing: it shields the browser process
+  from a compromised renderer, but that process holds nothing (fresh profile per shot, no
+  cookies, no credentials, empty env) and the page's author already runs arbitrary code as the
+  app in an equivalent sandbox. What must stay unreachable from the page (host loopback, other
+  hosts, host files) is unreachable because of the capture sandbox. The flag is documented at
+  `Shooter.Chromium.argv/2` and must never be used outside `Sandbox.browser/3`.
+* **Consequences.** No network means `setup_cmd` cannot fetch dependencies or download asset
+  tools (`mix deps.get`, `npm ci`, esbuild/tailwind installers) unless they are already in a
+  listed read-only cache (`HEX_OFFLINE`, `MIX_HOME`, ... pointed at it through `env`). The
+  baseline egress allow-list of the "Exits" bullet above is N2's. A toolchain outside the system
+  dirs (asdf, mise) must be listed in `readonly_paths`. `bwrap`, `perl` and `socat` are required
+  (`perl`/`socat`/`sh` inside the system dirs); `status/0` probes the sandbox for real (only `lo`,
+  no route, a host file beside its scratch hidden, the scratch writable), caching a pass and
+  re-probing a failure after a minute.
+
 ### When it runs, and what it blocks
 
 1. **Trigger.** After the PR/MR exists (so there is a head SHA, a base SHA and somewhere to
@@ -231,7 +292,9 @@ pod:       for role in [before(base), after(head)]:
   `route_error`, `shot_failed`, `budget_exceeded`, ...), written to `<out_dir>/capture.json` and
   handed to `opts[:record]`. A boot failure at the base **fails** the capture (it does not degrade
   to `before unavailable`). Differences from the sketch above: it boots on the host, not in the pod
-  (the pod, the `screenshot_captures` table, placement and the merge wait are N2), and
+  (the pod, the `screenshot_captures` table, placement and the merge wait are N2), though since
+  bd-bhrsdv only ever inside the bwrap capture sandbox (§2, "As implemented: the capture
+  sandbox"; no sandbox is `{:skipped, {:no_sandbox, reason}}`), and
   `Shooter.Chromium` cannot run steps, `wait_for`, `target`, `full_page`, `hide`, a login or theme
   `local_storage`: it fails the shot naming the unsupported field (the CDP runner of N1 is a
   drop-in `Shooter`). `Capture.poster_pairs/1` hands the pairs to `Screenshots.Poster`.
@@ -426,7 +489,10 @@ win; `env` and the `viewports`/`themes`/`seeds` maps merge by key, like `preview
       "public_repo_ok": false,               // §7.4
       "retention_days": 90
     },
-    "attach": true                           // also store on the ticket (§10); false = PR/MR only
+    "attach": true,                          // also store on the ticket (§10); false = PR/MR only
+    "sandbox": {                             // bd-bhrsdv: host-mode capture sandbox (§2)
+      "readonly_paths": ["~/.asdf", "~/.mix"] // shown read-only; never ~ or above; default []
+    }
   }}}}
 }
 ```
@@ -603,6 +669,12 @@ time a repo's `.env` is lying around, so this is enforced in layers, from the st
    proves host loopback absence in `podman_test.exs`). The app reads a database that the pod itself
    creates from `setup_cmd`+`seed_cmd` on a pod-private tmpfs or the pod's own Postgres.
    Real data is not *prohibited* from being loaded; it is *unreachable*.
+   **As implemented today (bd-bhrsdv)** host-mode capture gets this layer from the bwrap capture
+   sandbox (§2): no network at all (not even the baseline allow-list), no host loopback, no host
+   files beyond the system dirs and listed read-only paths, and no capture at all on a host
+   that cannot sandbox it. `capture_sandbox_test.exs` proves it against a real bwrap: a probe
+   app and a stand-in browser try a listener on host loopback (which an unsandboxed control
+   reaches), an external address and name, and a host file, and all fail.
 2. **No inherited environment.** The pass env is built from nothing (`SpawnEnv` scrubbing, then
    only `env`, `port_env` and the pass's own variables). The server's `DATABASE_PATH`, the
    operator's `.env`, cloud credentials, forge tokens and `HTTP(S)_PROXY` are absent.
@@ -732,6 +804,13 @@ anywhere before N2 is enabled.
 * **R5. Flaky pixels.** Fixed clock/fonts/animation settings remove the common noise; there
   is no diffing in v1 (the pictures are for humans), so noise is cosmetic, not a gate.
 * **R6. `git archive` omits submodules/LFS.** Such repos are `skipped` in v1.
+* **R7. The host-mode sandbox is strict (bd-bhrsdv).** With no network, a `setup_cmd` that
+  fetches dependencies or downloads asset tools fails the boot, and a toolchain installed under
+  the home directory is invisible until listed in `sandbox.readonly_paths`. Both are boot
+  failures (escalated, never unsandboxed), so the cost is a configuration round, not a leak.
+  Real Chromium inside the bwrap browser sandbox has not been run in the worktree that built it
+  (it had no bwrap); the CI `jail` job runs the isolation test with a stand-in browser, and the
+  first real capture after deploy is the check for the real one.
 * **Not measured.** No boot, no capture and no GitHub/GitLab call was run to write this; the
   timing figures are the podman design's measurements, and the GitLab uploads and GitHub raw-URL
   behaviour is documented API/known behaviour, not observed here.
