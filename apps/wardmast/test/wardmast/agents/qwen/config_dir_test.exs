@@ -176,6 +176,19 @@ defmodule Wardmast.Agents.Qwen.ConfigDirTest do
       assert Path.dirname(ConfigDir.system_settings_path(worktree: wt)) ==
                ConfigDir.system_settings_dir(worktree: wt)
     end
+
+    test "the system settings dir is outside the writable home (bd-c609gj)", %{worktree: wt} do
+      home = ConfigDir.path(worktree: wt)
+      dir = ConfigDir.system_settings_dir(worktree: wt)
+
+      refute dir == home
+      refute String.starts_with?(dir, home <> "/")
+      refute String.starts_with?(home, dir <> "/")
+      assert Path.dirname(dir) == Path.dirname(home)
+
+      {:ok, _} = ConfigDir.ensure(worktree: wt)
+      assert File.regular?(ConfigDir.system_settings_path(worktree: wt))
+    end
   end
 
   defp tree(dir) do

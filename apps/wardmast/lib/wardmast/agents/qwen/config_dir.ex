@@ -16,13 +16,18 @@ defmodule Wardmast.Agents.Qwen.ConfigDir do
 
   ## System settings
 
-  Every `ensure/1` rewrites `<home>/.qwen-system/settings.json`, pointed at by
+  Every `ensure/1` rewrites `<root>/<worktree-key>.qwen-system/settings.json`, pointed at by
   `QWEN_CODE_SYSTEM_SETTINGS_PATH`. System settings outrank user and workspace
   settings in qwen, so a worker (or a repo) cannot loosen them from
   `$QWEN_HOME/settings.json`. The file is `0444`, written to a sibling and
   renamed over the target (a symlink a previous run planted is replaced, never
-  written through), and lives outside `QWEN_HOME`; the jail (Q5) binds it
-  read-only. It holds:
+  written through), and lives outside `QWEN_HOME` and outside the worker's `HOME`
+  too (a sibling of it under the root); the jail (Q5) binds it read-only as a
+  mount of its own. It is deliberately **not** inside `HOME`: the jail binds
+  `HOME` writable, and a read-only mount nested in that writable bind did not
+  stay read-only under newer hosts (Ubuntu 26.04, bd-c609gj), where the worker
+  could rewrite its own deny rules. A non-nested read-only mount is the same
+  shape as the reviewer's read-only worktree, which holds everywhere. It holds:
 
     * the deny baseline: `Read`/`Edit` denied on `Wardmast.Worker.CredentialPaths`;
     * managed memory and auto-dream off, telemetry off, usage statistics off;
@@ -43,7 +48,7 @@ defmodule Wardmast.Agents.Qwen.ConfigDir do
   require Logger
 
   @qwen_dir ".qwen"
-  @system_dir ".qwen-system"
+  @system_suffix ".qwen-system"
   @settings_file "settings.json"
 
   @phone_home_env [
@@ -71,15 +76,16 @@ defmodule Wardmast.Agents.Qwen.ConfigDir do
   @doc "The read-only system settings file, outside `QWEN_HOME`."
   @spec system_settings_path(keyword()) :: String.t()
   def system_settings_path(opts \\ []),
-    do: Path.join([path(opts), @system_dir, @settings_file])
+    do: Path.join(system_settings_dir(opts), @settings_file)
 
   @doc """
-  The directory holding the read-only system settings. The jail binds it
-  read-only over the writable home, so the worker cannot rename a file of its
-  own over the settings.
+  The directory holding the read-only system settings, a sibling of the worker's
+  home (never inside it: see the moduledoc). The jail binds it read-only, so the
+  worker cannot rename a file of its own over the settings.
   """
   @spec system_settings_dir(keyword()) :: String.t()
-  def system_settings_dir(opts \\ []), do: Path.join(path(opts), @system_dir)
+  def system_settings_dir(opts \\ []),
+    do: Path.join(root(), key(worktree(opts)) <> @system_suffix)
 
   @doc "The directory holding every worker's isolated home."
   @spec home_root() :: String.t()
@@ -137,7 +143,7 @@ defmodule Wardmast.Agents.Qwen.ConfigDir do
 
     with :ok <- File.mkdir_p(home),
          :ok <- ensure_dir(Path.join(home, @qwen_dir)),
-         :ok <- ensure_dir(Path.join(home, @system_dir)),
+         :ok <- ensure_dir(system_settings_dir(opts)),
          :ok <- write_settings(system_settings_path(opts), opts) do
       {:ok, home}
     else
