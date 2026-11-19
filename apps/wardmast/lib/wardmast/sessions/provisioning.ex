@@ -301,7 +301,7 @@ defmodule Wardmast.Sessions.Provisioning do
   defp write_instructions(session, paths, cwd, opts) do
     content =
       Instructions.render(session,
-        primary_checkout: Keyword.get(opts, :primary_checkout, Paths.primary_checkout()),
+        primary_checkout: Keyword.get(opts, :primary_checkout, Paths.explicit_primary_checkout()),
         mcp_server_name: MCP.server_name(),
         refine: Keyword.get(opts, :refine)
       )

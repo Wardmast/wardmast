@@ -195,8 +195,25 @@ defmodule Wardmast.Config.Paths do
   """
   @spec primary_checkout() :: String.t() | nil
   def primary_checkout do
+    explicit_primary_checkout() || home_relative("dev/arbiter")
+  end
+
+  @doc """
+  `primary_checkout/0` **without** the `~/dev/arbiter` guess (bd-6dpdwm): the
+  checkout only when the operator or the install actually named one
+  (`WARDMAST_PRIMARY_CHECKOUT`, `config :wardmast, :primary_checkout`,
+  `ARB_HOME`, or the home `arb install-service` recorded), else `nil`.
+
+  The path guard keeps using the guessed value — a guess is a fine place to
+  refuse writes. A prompt is not: telling a session "the live checkout is
+  `~/dev/arbiter`" on an install where that directory does not exist is an
+  invented path, which is worse than no warning at all. Prompt text that names
+  the checkout (`Wardmast.Sessions.Instructions`) reads this function.
+  """
+  @spec explicit_primary_checkout() :: String.t() | nil
+  def explicit_primary_checkout do
     env("WARDMAST_PRIMARY_CHECKOUT") || configured_checkout() || env("ARB_HOME") ||
-      recorded_home() || home_relative("dev/arbiter")
+      recorded_home()
   end
 
   defp configured_checkout do
