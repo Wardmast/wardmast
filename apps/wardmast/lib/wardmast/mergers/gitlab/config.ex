@@ -43,9 +43,14 @@ defmodule Wardmast.Mergers.Gitlab.Config do
   "Request changes" review action shipped in 16.11 behind the
   `mr_reviewer_requests_changes` flag (default-on in 17.2, flag removed in
   17.3; Premium/Ultimate), so treat **17.3+** as the safe floor for reviewer
-  state. The exact release in which the REST reviewers endpoint began
-  returning `requested_changes` is not stated in GitLab's API docs and has not
-  been confirmed. On older instances (or Free tier) set
+  state (source: the "Prevent merge when you request changes" history block in
+  GitLab's merge request reviews docs). GitLab's REST docs for the reviewers
+  endpoint list no `state` values or version note (the example shows only
+  `unreviewed`/`reviewed`), so the exact release where that endpoint began
+  returning `requested_changes` is unconfirmed; 17.3+ is inferred from the
+  feature rollout. The reviewer-state signal carries no timestamp, so a
+  reviewer who re-requests changes after a revise keeps the same debounce id
+  (see `Wardmast.Mergers.Gitlab`). On older instances (or Free tier) set
   `"changes_requested_from_discussions" => true` to treat an unresolved
   discussion from a non-author as changes requested. It is off by default.
 
