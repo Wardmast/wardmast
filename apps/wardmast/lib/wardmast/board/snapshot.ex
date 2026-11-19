@@ -347,18 +347,20 @@ defmodule Wardmast.Board.Snapshot do
   end
 
   defp plan_with(queue, input, paused?, walk) do
-    plan =
-      Scheduler.plan(%{
-        ready: queue.ready,
-        running: queue.running,
-        conflict_claims: queue.conflict_claims,
-        card_guardrail: Map.get(input, :card_guardrail, %{}),
-        card_pair: Map.get(input, :card_pair, %{}),
-        card_ci: Map.get(input, :card_ci, %{}),
-        dispatch_holds: Map.get(input, :dispatch_holds, %{}),
-        paused: paused?,
-        walk: walk
-      })
+    base = %{
+      ready: queue.ready,
+      running: queue.running,
+      conflict_claims: queue.conflict_claims,
+      card_guardrail: Map.get(input, :card_guardrail, %{}),
+      card_pair: Map.get(input, :card_pair, %{}),
+      card_ci: Map.get(input, :card_ci, %{}),
+      dispatch_holds: Map.get(input, :dispatch_holds, %{}),
+      paused: paused?
+    }
+
+    # `:walk` is an optional key of `Scheduler.input`, never `nil`: leave it out
+    # when there are no capacity sets.
+    plan = Scheduler.plan(if(walk, do: Map.put(base, :walk, walk), else: base))
 
     Map.merge(plan, Map.take(walk || %{}, [:pools, :nodes]))
   end
