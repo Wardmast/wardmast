@@ -83,7 +83,7 @@ defmodule Wardmast.Screenshots.Capture.AppProcess do
         :hide,
         args: args,
         cd: cd,
-        env: ReleaseEnv.port_env()
+        env: port_env()
       ])
 
     os_pid =
@@ -120,6 +120,14 @@ defmodule Wardmast.Screenshots.Capture.AppProcess do
   defp keep_tail(bin), do: binary_part(bin, byte_size(bin) - @tail_bytes, @tail_bytes)
 
   # ── process control ─────────────────────────────────────────────────────
+
+  # `Port.open/2` wants charlist pairs, with `false` meaning "unset".
+  defp port_env do
+    Enum.map(ReleaseEnv.port_env([]), fn
+      {name, false} -> {String.to_charlist(name), false}
+      {name, value} -> {String.to_charlist(name), String.to_charlist(value)}
+    end)
+  end
 
   defp launcher(envbin, inner) do
     case System.find_executable("perl") do
