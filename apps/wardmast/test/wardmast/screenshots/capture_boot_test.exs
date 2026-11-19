@@ -363,6 +363,10 @@ defmodule Wardmast.Screenshots.CaptureBootTest do
       assert env =~ ~r/^HOME=/m
       refute env =~ "hunter2"
       refute env =~ "ARB_CAPTURE_TEST_SECRET"
+      # Chromium puts its singleton socket under TMPDIR, and sun_path is 108 bytes: the shot's own
+      # deep directory aborted a real Chromium ("Socket path too long"). /tmp is short, and
+      # private to each browser in the bwrap sandbox.
+      assert env =~ ~r{^TMPDIR=/tmp$}m
     end
 
     test "writes into its own directory; a symlink it leaves there is never followed", %{

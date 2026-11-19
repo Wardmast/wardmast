@@ -167,14 +167,13 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
     dir = spec.scratch
     profile = Path.join(dir, "profile")
     home = Path.join(dir, "home")
-    tmp = Path.join(dir, "tmp")
     shot = Path.join(dir, "shot.png")
-    Enum.each([profile, home, tmp], &File.mkdir_p!/1)
+    Enum.each([profile, home], &File.mkdir_p!/1)
 
     try do
       with {:ok, boxed} <-
              boxed(sandbox, [chrome | argv(%{spec | out_file: shot}, profile)], app, dir) do
-        env = [System.find_executable("env") || "/usr/bin/env", "-i" | browser_env(home, tmp)]
+        env = [System.find_executable("env") || "/usr/bin/env", "-i" | browser_env(home)]
         {exec, args} = with_timeout(env ++ boxed, spec.timeout_s)
 
         case ReleaseEnv.cmd(exec, args, stderr_to_stdout: true) do
@@ -205,9 +204,12 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
   end
 
   # Built from nothing, like the app's: the server's own environment (credentials, tokens,
-  # database URLs) never reaches a process that renders the app's pages.
-  defp browser_env(home, tmp) do
-    ["PATH=#{Sandbox.path()}", "HOME=#{home}", "TMPDIR=#{tmp}", "LANG=C.UTF-8", "TZ=UTC"]
+  # database URLs) never reaches a process that renders the app's pages. TMPDIR is /tmp, never the
+  # shot's directory: Chromium binds its singleton socket under TMPDIR, and the shot's deep path
+  # is past the 108-byte limit of a Unix socket path (Chromium aborts: "Socket path too long").
+  # In the bwrap sandbox /tmp is a private tmpfs of each browser.
+  defp browser_env(home) do
+    ["PATH=#{Sandbox.path()}", "HOME=#{home}", "TMPDIR=/tmp", "LANG=C.UTF-8", "TZ=UTC"]
   end
 
   # The image the browser left in its own directory, copied out only when it is a plain file. A
