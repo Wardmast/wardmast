@@ -136,7 +136,7 @@ defmodule Wardmast.Screenshots.ConfigTest do
             "username_selector" => "#email",
             "password_selector" => "#password",
             "submit_selector" => "button",
-            "success" => %{"selector" => "#nav"},
+            "success" => %{"path_not" => "/login", "url_not_contains" => "/sign-in"},
             "personas" => %{"admin" => %{"username" => "a@example.com", "password" => "pw"}}
           },
           "viewports" => %{
@@ -235,6 +235,51 @@ defmodule Wardmast.Screenshots.ConfigTest do
       assert [_] = errors(%{"login" => %{"kind" => "magic"}})
       assert [_ | _] = errors(%{"login" => %{"kind" => "cmd"}})
       assert [_ | _] = errors(%{"login" => %{"kind" => "form"}})
+    end
+
+    @form_login %{
+      "kind" => "form",
+      "path" => "/login",
+      "username_selector" => "#u",
+      "password_selector" => "#p",
+      "submit_selector" => "#go",
+      "personas" => %{"admin" => %{"username" => "a", "password" => "b"}}
+    }
+
+    test "login.success accepts path_not and url_not_contains" do
+      for success <- [
+            %{"path_not" => "/login"},
+            %{"url_not_contains" => "/sign-in"},
+            %{"path_not" => "/login", "url_not_contains" => "error"}
+          ] do
+        assert errors(%{"login" => Map.put(@form_login, "success", success)}) == []
+      end
+
+      assert errors(%{"login" => @form_login}) == []
+    end
+
+    test "login.success refuses unknown shapes" do
+      for success <- [
+            %{"selector" => "#nav"},
+            %{},
+            %{"path_not" => "login"},
+            %{"path_not" => ""},
+            %{"url_not_contains" => 5},
+            %{"path_not" => "/login", "extra" => "x"},
+            "/login"
+          ] do
+        assert [msg] = errors(%{"login" => Map.put(@form_login, "success", success)})
+        assert msg =~ "login.success"
+      end
+    end
+
+    test "login_success/1 defaults to leaving the login path" do
+      assert Config.login_success(%{"path" => "/login"}) == %{"path_not" => "/login"}
+
+      assert Config.login_success(%{"path" => "/login?next=/"}) == %{"path_not" => "/login"}
+
+      assert Config.login_success(%{"path" => "/l", "success" => %{"url_not_contains" => "x"}}) ==
+               %{"url_not_contains" => "x"}
     end
 
     test "sandbox.readonly_paths takes absolute or ~/ paths, never / or the whole home" do

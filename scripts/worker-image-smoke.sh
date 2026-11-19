@@ -1,6 +1,7 @@
 #!/bin/sh
 # bd-6301r0: prove a page can be screenshotted inside a worker image.
 # Usage: scripts/worker-image-smoke.sh <image> [podman|docker]
+# (bd-485ts3: also runs scripts/worker-image-smoke-capture.sh, the login-capable capture runner.)
 # Runs headless Chromium in the image against a data: page and checks that a
 # non-empty PNG comes out. Exits non-zero (with the reason) otherwise.
 set -eu
@@ -18,3 +19,8 @@ engine="${2:-docker}"
   [ "$size" -gt 1000 ] || { echo "screenshot too small: $size bytes" >&2; exit 1; }
   echo "smoke ok: screenshot $size bytes"
 '
+
+# bd-485ts3: the arb-capture runner (Node + playwright-core, design N1) in the same image: a
+# login-gated loopback page is shot through the real runner, and a wrong password must fail.
+# The script is fed on stdin so it is the very file CI and a host check run.
+"$engine" run --rm -i --entrypoint /bin/sh "$image" -s < "$(dirname "$0")/worker-image-smoke-capture.sh"

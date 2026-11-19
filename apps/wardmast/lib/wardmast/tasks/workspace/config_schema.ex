@@ -705,7 +705,16 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                                          personas, ...}: form takes path, username_selector,
                                          password_selector, submit_selector, success and a
                                          personas map of FIXTURE credentials; cmd takes cmd
-                                         (may use {{persona}}) and a personas name list
+                                         (may use {{persona}}) and a personas name list.
+                                         success = {path_not: "/login"} (the browser left
+                                         that path) and/or {url_not_contains: "/sign-in"}
+                                         (its URL lacks that text); every one given must
+                                         hold after the form is submitted, else the shot
+                                         fails (default: path_not = login.path). Each condition
+                                         must be false on the sign-in page itself (a URL
+                                         text its own URL lacks, like error=, is no condition;
+                                         one it already satisfies is refused at shot time). Any
+                                         other shape is refused. Form logins need the CDP shooter
                         viewports        map name (^[a-z0-9-]{1,20}$) -> {width 200-3840,
                                          height 200-4000, device_scale_factor 1-3};
                                          defaults desktop and mobile

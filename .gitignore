@@ -80,3 +80,6 @@ accounts.json
 # Pre-rename spelling of the checkout env file (scripts/migrate-from-arbiter.sh renames it).
 .arbiter.env
 .arbiter.env.backup
+
+# The CDP capture runner's npm install (bd-485ts3); the worker image runs its own `npm ci`.
+/apps/wardmast/priv/capture/node_modules/

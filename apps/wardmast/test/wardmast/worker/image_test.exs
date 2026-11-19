@@ -15,13 +15,25 @@ defmodule Wardmast.Worker.ImageTest do
 
   defp resolver(digest \\ @digest), do: fn _ref -> {:ok, "sha256:" <> digest} end
 
-  # Answers only for the shared base's FROMs (the OS and arb's Erlang runtime);
+  # Answers only for the shared base's FROMs (the OS, arb's Erlang runtime and
+  # the capture runner's Node);
   # any other ref goes to `other`.
   defp base_only(other \\ fn ref -> flunk("resolver asked for #{ref}") end) do
     fn
-      "docker.io/library/debian:trixie-slim" -> {:ok, "sha256:" <> @digest}
-      "docker.io/library/erlang:" <> _ -> {:ok, "sha256:" <> @digest}
-      ref -> other.(ref)
+      "docker.io/library/debian:trixie-slim" ->
+        {:ok, "sha256:" <> @digest}
+
+      "docker.io/library/erlang:" <> _ ->
+        {:ok, "sha256:" <> @digest}
+
+      # bd-485ts3: the arb-capture runner's Node build stage.
+      "docker.io/library/node:" <> v = ref ->
+        if String.ends_with?(v, "-trixie-slim"),
+          do: {:ok, "sha256:" <> @digest},
+          else: other.(ref)
+
+      ref ->
+        other.(ref)
     end
   end
 
@@ -185,9 +197,15 @@ defmodule Wardmast.Worker.ImageTest do
       assert base =~ ~s(LABEL arbiter.arb-otp="29")
       assert {"docker.io/library/erlang:29-slim", "sha256:" <> @digest} in plan.pins
 
-      # The OS stage is still the last one, and PATH still names only the CLI
-      # dir: the repo's own Erlang stays the one its toolchain layer installs.
-      assert [_, os_stage] = String.split(base, ~r/^FROM /m, parts: 3) |> Enum.drop(1)
+      # The OS stage is still the last one (after the arb_otp and the capture
+      # runner's Node stages), and PATH still names only the CLI dir: the repo's
+      # own Erlang stays the one its toolchain layer installs.
+      assert [_, capture_stage, os_stage] =
+               String.split(base, ~r/^FROM /m, parts: 4) |> Enum.drop(1)
+
+      assert capture_stage =~
+               ~r/\Adocker\.io\/library\/node:\S+-trixie-slim@sha256:[0-9a-f]{64} AS capture/
+
       assert os_stage =~ ~r/\Adocker\.io\/library\/debian:trixie-slim@/
       assert base =~ "ENV PATH=/opt/arbiter/cli:$PATH"
       refute base =~ ~r/^ENV PATH=.*\/opt\/arbiter\/otp/m

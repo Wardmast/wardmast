@@ -466,12 +466,13 @@ defmodule Wardmast.Screenshots.Config do
           do: "#{label}.#{k} must be a non-empty string"
 
     strings ++
+      success(v["success"], label) ++
       personas_form(v["personas"], label) ++
       default_persona(v, label, persona_names(v["personas"]))
   end
 
   defp login(%{"kind" => "cmd"} = v, label) do
-    cmd = command(v["cmd"], "#{label}.cmd", ["persona"])
+    cmd = command(v["cmd"], "#{label}.cmd", ["persona"]) ++ success(v["success"], label)
 
     names =
       case v["personas"] do
@@ -489,6 +490,57 @@ defmodule Wardmast.Screenshots.Config do
 
   defp login(%{} = _v, label), do: [~s(#{label}.kind must be "none", "form" or "cmd")]
   defp login(_v, label), do: ["#{label} must be a map"]
+
+  @success_keys ~w(path_not url_not_contains)
+
+  # `login.success` is how the CDP shooter proves a login worked before it shoots anything: after
+  # submitting, the page's URL must satisfy every condition given. `path_not` is a path the
+  # browser must have left (`"/login"`); `url_not_contains` a substring its URL must not carry
+  # (`"/sign-in"`). Each condition must be FALSE on the sign-in page itself, or it cannot tell a
+  # failed login from a good one: the runner refuses it at shot time (so `"error="`, which the
+  # sign-in page's own URL lacks, is no condition at all; pair it with `path_not`). Nothing else is
+  # accepted: a shape this does not know would be silently ignored, and an ignored success check
+  # is a picture of the sign-in page.
+  defp success(nil, _label), do: []
+
+  defp success(%{} = s, label) when map_size(s) > 0 do
+    unknown =
+      case Map.keys(s) -- @success_keys do
+        [] ->
+          []
+
+        keys ->
+          [
+            "#{label}.success has unknown key(s) #{Enum.join(Enum.sort(keys), ", ")}; use path_not or url_not_contains"
+          ]
+      end
+
+    unknown ++
+      check(s, "path_not", "#{label}.success", &path_not?/1, "must be a path starting with /") ++
+      check(
+        s,
+        "url_not_contains",
+        "#{label}.success",
+        &(is_binary(&1) and &1 != "" and String.length(&1) <= 200),
+        "must be a non-empty string of at most 200 characters"
+      )
+  end
+
+  defp success(_s, label),
+    do: ["#{label}.success must be a map with path_not and/or url_not_contains"]
+
+  defp path_not?(p), do: is_binary(p) and String.starts_with?(p, "/") and String.length(p) <= 300
+
+  @doc """
+  The success condition of a `login` map: its `success`, or, when unset, "the browser has left the
+  login `path`" (`%{"path_not" => path}`), so a login that lands back on the sign-in page always
+  fails.
+  """
+  @spec login_success(map()) :: map()
+  def login_success(%{"success" => %{} = success}) when map_size(success) > 0, do: success
+
+  def login_success(%{"path" => path}),
+    do: %{"path_not" => path |> String.split(["?", "#"]) |> hd()}
 
   defp personas_form(%{} = p, label) when map_size(p) > 0 do
     Enum.flat_map(p, fn

@@ -66,6 +66,7 @@ defmodule Wardmast.Worker.Image do
   """
 
   alias Wardmast.NodeAgent.K8s.PodScripts
+  alias Wardmast.Screenshots.Capture.RunnerImage
   alias Wardmast.Worker.ArbCli
   alias Wardmast.Worker.Image.Builder
   alias Wardmast.Worker.Image.KnownHosts
@@ -138,6 +139,7 @@ defmodule Wardmast.Worker.Image do
     # The Erlang/OTP the arb CLI runs on, whatever a repo pins (bd-59m96o).
     FROM docker.io/library/erlang:#{arb_otp}-slim AS arb_otp
     RUN find /usr/local/lib/erlang -type d \\( -name src -o -name include -o -name doc -o -name examples -o -name c_src \\) -prune -exec rm -rf {} +
+    #{RunnerImage.build_stage()}\
     FROM docker.io/library/debian:trixie-slim
     RUN printf '%s\\n' \\
           'Types: deb' \\
@@ -169,6 +171,7 @@ defmodule Wardmast.Worker.Image do
     LABEL #{@contract_label}="#{@contract_version}"
     LABEL arbiter.chromium-version="#{@chromium_version}"
     ENV ARB_CHROME=/usr/bin/chromium
+    #{RunnerImage.install()}\
     #{PodScripts.image_install()}
     ENV PATH=/opt/arbiter/cli:$PATH
     """

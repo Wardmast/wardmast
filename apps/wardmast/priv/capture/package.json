@@ -1,0 +1,11 @@
+{
+  "name": "arb-capture",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Arbiter screenshot capture runner (Playwright over CDP); see docs/design/ui-screenshot-capture.md",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "dependencies": {
+    "playwright-core": "1.65.1"
+  }
+}

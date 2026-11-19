@@ -286,7 +286,9 @@ defmodule Wardmast.Screenshots.CaptureBootTest do
           }
         ])
 
-      assert {:error, %{code: :shot_failed} = failure} = run(dir, repo, plan, config())
+      assert {:error, %{code: :shot_failed} = failure} =
+               run(dir, repo, plan, config(), shooter: Chromium)
+
       assert failure.message =~ "steps"
     end
 

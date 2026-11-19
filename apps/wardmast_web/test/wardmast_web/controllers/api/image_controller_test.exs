@@ -181,13 +181,16 @@ defmodule WardmastWeb.Api.ImageControllerTest do
     assert Enum.any?(resp["images"], &(&1["name"] == "repo-imgrepo4"))
 
     # The base's OS, and the Erlang/OTP it carries for arb (bd-59m96o; its
-    # release follows the host's arb, so only its shape is pinned here).
+    # release follows the host's arb, so only its shape is pinned here), and
+    # the Node the arb-capture runner is built on (bd-485ts3).
     assert [
              %{"ref" => "docker.io/library/debian:trixie-slim", "digest" => @digest},
-             %{"ref" => "docker.io/library/erlang:" <> erlang, "digest" => @digest}
+             %{"ref" => "docker.io/library/erlang:" <> erlang, "digest" => @digest},
+             %{"ref" => "docker.io/library/node:" <> node, "digest" => @digest}
            ] = Enum.sort_by(resp["pins"], & &1["ref"])
 
     assert erlang =~ ~r/\A\d+-slim\z/
+    assert node =~ ~r/-trixie-slim\z/
     assert resp["refresh_due"] == false
   end
 

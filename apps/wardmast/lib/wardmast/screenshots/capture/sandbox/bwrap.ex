@@ -235,10 +235,27 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
   end
 
   @impl true
-  def browser([browser | args], app, writable) do
+  def browser(argv, app, writable), do: browser(argv, app, writable, [])
+
+  @impl true
+  def browser([browser | args], app, writable, readonly) do
     with {:ok, host} <- host() do
-      {:ok, browser_argv([resolve_links(browser, 40) | args], app, writable, host)}
+      {:ok,
+       browser_argv(
+         [resolve_links(browser, 40) | args],
+         app,
+         writable,
+         Enum.map(readonly, &shown_dir/1),
+         host
+       )}
     end
+  end
+
+  # What a read-only entry shows: the directory itself, or, for a file (a browser binary, perhaps
+  # behind symlinks), the directory it really lives in.
+  defp shown_dir(path) do
+    resolved = resolve_links(path, 40)
+    if File.dir?(resolved), do: resolved, else: Path.dirname(resolved)
   end
 
   @impl true
@@ -278,10 +295,18 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
 
   @doc false
   @spec browser_argv([String.t()], map(), [String.t()], host()) :: [String.t()]
-  def browser_argv([browser | _] = argv, %{port: port, socket: socket}, writable, host) do
+  def browser_argv(argv, app, writable, host), do: browser_argv(argv, app, writable, [], host)
+
+  @doc false
+  @spec browser_argv([String.t()], map(), [String.t()], [String.t()], host()) :: [String.t()]
+  def browser_argv([browser | _] = argv, %{port: port, socket: socket}, writable, readonly, host) do
     t = host.tools
-    install = Path.dirname(browser)
-    shown = if under?(install, visible_roots(host)), do: [], else: [install]
+    visible = visible_roots(host)
+
+    shown =
+      [Path.dirname(browser) | readonly]
+      |> Enum.reject(&under?(&1, visible))
+      |> Enum.uniq()
 
     mounts = %{
       system_try: @fontconfig,

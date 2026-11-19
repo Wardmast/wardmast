@@ -37,8 +37,8 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
   This shooter only does what a command line can: a route, a viewport, a colour scheme and a theme
   `query`. A shot that needs steps, `wait_for`, a `target` element, `full_page`, `hide`, a login or
   a theme `local_storage` returns `{:error, {:shot, reason}}` naming what it cannot do rather than a
-  picture that quietly lacks it. Those need the CDP runner of the design's N1; plug it in as another
-  `Shooter`.
+  picture that quietly lacks it. Those go to `Shooter.Cdp` (the design's N1); `Shooter.Auto`, the
+  capture step's default, sends each shot to whichever can do it, using `unsupported/1`.
 
   `ctx[:chrome]` overrides the browser path (a test seam).
   """
@@ -58,11 +58,13 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
     end
   end
 
-  defp sandboxed(%{sandbox: sandbox, app: %{} = app, scratch: dir})
-       when is_atom(sandbox) and not is_nil(sandbox) and is_binary(dir),
-       do: {:ok, sandbox, app}
+  @doc false
+  @spec sandboxed(map()) :: {:ok, module(), map()} | {:error, {:shot, String.t()}}
+  def sandboxed(%{sandbox: sandbox, app: %{} = app, scratch: dir})
+      when is_atom(sandbox) and not is_nil(sandbox) and is_binary(dir),
+      do: {:ok, sandbox, app}
 
-  defp sandboxed(_spec) do
+  def sandboxed(_spec) do
     {:error,
      {:shot,
       "no capture sandbox (or no booted app to reach) for the browser, and Chromium is never " <>
@@ -94,11 +96,13 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
         {:error,
          {:shot,
           "#{spec.entry.id} needs #{Enum.join(what, ", ")}, which the command-line Chromium " <>
-            "shooter cannot do (it needs the CDP capture runner)"}}
+            "shooter cannot do (it needs the CDP shooter; use Shooter.Auto)"}}
     end
   end
 
-  defp chrome(spec) do
+  @doc false
+  @spec chrome(map()) :: {:ok, String.t()} | {:error, {:shot, String.t()}}
+  def chrome(spec) do
     override = if is_map(spec.ctx), do: spec.ctx[:chrome]
     found = override || System.get_env("ARB_CHROME") || System.find_executable("chromium")
 
@@ -197,7 +201,9 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
     end
   end
 
-  defp describe(sandbox, reason) do
+  @doc false
+  @spec describe(module(), term()) :: String.t()
+  def describe(sandbox, reason) do
     sandbox.describe(reason)
   rescue
     _ -> inspect(reason)
@@ -208,7 +214,9 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
   # shot's directory: Chromium binds its singleton socket under TMPDIR, and the shot's deep path
   # is past the 108-byte limit of a Unix socket path (Chromium aborts: "Socket path too long").
   # In the bwrap sandbox /tmp is a private tmpfs of each browser.
-  defp browser_env(home) do
+  @doc false
+  @spec browser_env(String.t()) :: [String.t()]
+  def browser_env(home) do
     ["PATH=#{Sandbox.path()}", "HOME=#{home}", "TMPDIR=/tmp", "LANG=C.UTF-8", "TZ=UTC"]
   end
 
@@ -225,12 +233,16 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
     end
   end
 
-  defp with_timeout([exec | args], seconds) do
+  @doc false
+  @spec with_timeout([String.t()], pos_integer()) :: {String.t(), [String.t()]}
+  def with_timeout([exec | args], seconds) do
     case System.find_executable("timeout") do
       nil -> {exec, args}
       timeout -> {timeout, ["#{seconds}", exec | args]}
     end
   end
 
-  defp tail(out), do: out |> String.trim() |> String.slice(-500, 500)
+  @doc false
+  @spec tail(String.t()) :: String.t()
+  def tail(out), do: out |> String.trim() |> String.slice(-500, 500)
 end
