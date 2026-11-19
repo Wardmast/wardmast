@@ -72,6 +72,11 @@ defmodule Wardmast.Sessions.Instructions do
       for display and to resolve `Wardmast.Sessions.RefineDoctrine`'s
       per-workspace override). Absent `:refine`, `render/2` produces exactly
       the coordinator-session instructions above — the pre-refine behavior.
+    * `:pair` — a map here switches this to the **pair variant** (bd-7p6a9o),
+      ahead of `:refine`: `:issue` (the bound ticket, required), `:worktree`
+      (default: the session's cwd), `:branch` and `:target_branch`. Its
+      doctrine is the bundled `pair` session instruction set
+      (`priv/doctrine/sessions/pair.md.eex`), never the coordinator doctrine.
   """
   @spec render(Session.t(), keyword()) :: String.t()
   def render(%Session{} = session, opts \\ []) do
@@ -82,10 +87,11 @@ defmodule Wardmast.Sessions.Instructions do
     end
   end
 
-  # bd-7p6a9o: the pair variant. Its doctrine is the bundled `pair` section —
-  # collaborate, explain, ask before large rewrites, stay inside the ACs — and
-  # deliberately *not* the router doctrine the coordinator variant renders: a
-  # pair session does the work a coordinator would route.
+  # bd-7p6a9o: the pair variant. Its doctrine is the bundled `pair` session
+  # instruction set (`priv/doctrine/sessions/`) — collaborate, explain, ask
+  # before large rewrites, stay inside the ACs — and deliberately *not* the
+  # router doctrine the coordinator variant renders: a pair session does the
+  # work a coordinator would route.
   defp render_pair(%Session{} = session, pair, opts) do
     issue = Map.fetch!(pair, :issue)
     worktree = Map.get(pair, :worktree) || session.cwd

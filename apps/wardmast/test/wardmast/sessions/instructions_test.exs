@@ -15,6 +15,7 @@ defmodule Wardmast.Sessions.InstructionsTest do
   """
   use ExUnit.Case, async: true
 
+  alias Wardmast.Doctrine
   alias Wardmast.Sessions.Instructions
   alias Wardmast.Sessions.RefineDoctrine
   alias Wardmast.Sessions.Session
@@ -198,6 +199,24 @@ defmodule Wardmast.Sessions.InstructionsTest do
       refute doc =~ "refine session"
       # The router doctrine's own anchor: a coordinator files and delegates.
       refute doc =~ "worker_dispatch"
+    end
+
+    test "embeds the bundled pair set verbatim, and none of the coordinator doctrine" do
+      doc = render_pair()
+
+      assert doc =~
+               Doctrine.render(:pair, %{
+                 worktree: "/srv/example/worktrees/feature-bd-pair0001-make-widgets-faster",
+                 branch: "feature/bd-pair0001-make-widgets-faster",
+                 target_branch: "main"
+               })
+
+      for name <- Doctrine.sections(), can_dispatch <- [true, false] do
+        section =
+          Doctrine.render(name, %{can_dispatch: can_dispatch, primary_checkout: @checkout})
+
+        refute doc =~ section, "pair instructions embed the coordinator #{name} section"
+      end
     end
 
     test "names the ticket, its acceptance criteria as the scope, and where the session is" do

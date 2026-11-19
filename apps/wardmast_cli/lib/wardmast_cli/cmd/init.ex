@@ -120,20 +120,19 @@ defmodule WardmastCli.Cmd.Init do
   # `Wardmast.Doctrine` also renders into every session's CLAUDE.md. The
   # escript cannot depend on that app, so it embeds the very same files at
   # compile time — one text, two renderers (bd-6dpdwm).
+  #
+  # Only the top level (`*.md.eex`) is the coordinator doctrine. The session
+  # instruction sets under `sessions/` (bd-7p6a9o's `pair`) are what other
+  # session kinds render *instead of* it, so a coordinator home's AGENTS.md
+  # never carries them, and this glob does not descend into that directory.
   @doctrine_dir Path.expand(
                   Path.join([__DIR__, "..", "..", "..", "..", "wardmast", "priv", "doctrine"])
                 )
-
-  # Bundled sections that are not the coordinator's doctrine and so never
-  # appear in a coordinator home's AGENTS.md: `pair` is a pair session's own
-  # instruction set (bd-7p6a9o), rendered only into that session's CLAUDE.md.
-  @session_only_sections ~w(pair)
 
   @doctrine_sections @doctrine_dir
                      |> Path.join("*.md.eex")
                      |> Path.wildcard()
                      |> Enum.sort()
-                     |> Enum.reject(&(Path.basename(&1, ".md.eex") in @session_only_sections))
                      |> Enum.map(fn path ->
                        {path |> Path.basename(".md.eex") |> String.to_atom(), path}
                      end)
@@ -141,11 +140,6 @@ defmodule WardmastCli.Cmd.Init do
   if @doctrine_sections == [] do
     raise "no bundled doctrine found under #{@doctrine_dir}"
   end
-
-  @doc false
-  # The bundled sections a coordinator home's AGENTS.md never carries.
-  @spec session_only_sections() :: [String.t()]
-  def session_only_sections, do: @session_only_sections
 
   # The doctrine directory itself, so a section added there recompiles this
   # module (the per-file resources below only cover files that already exist).

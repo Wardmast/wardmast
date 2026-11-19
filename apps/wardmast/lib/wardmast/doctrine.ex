@@ -26,6 +26,17 @@ defmodule Wardmast.Doctrine do
       `nil`/absent renders the "repository work, if the operator asks"
       variant instead of the warning; **no path is ever invented**.
 
+  ## Session instruction sets
+
+  `priv/doctrine/sessions/<name>.md.eex` holds the instruction sets of the
+  session kinds that are *not* coordinators, rendered **instead of** the
+  doctrine above, never alongside it: `pair` (bd-7p6a9o) is a pair session's
+  — collaborate, explain changes, ask before large rewrites, stay inside the
+  ticket's acceptance criteria. They live in their own directory so that the
+  coordinator doctrine stays exactly `priv/doctrine/*.md.eex` for both
+  consumers: `sections/0` and `arb init`'s glob never see them, and
+  `session_sets/0` names them. `render/2` renders either kind.
+
   ## Installation-agnostic
 
   The files ship to every installation. `Wardmast.DoctrineTest` fails if any
@@ -37,35 +48,58 @@ defmodule Wardmast.Doctrine do
   require EEx
 
   @dir Path.expand("../../priv/doctrine", __DIR__)
+  @sessions_dir Path.join(@dir, "sessions")
 
-  # The directory itself, not only the files found in it: a section *added*
-  # later (bd-7p6a9o's `pair`) changes the directory's mtime, which is what
-  # makes Mix recompile this module to pick it up.
+  # The directories themselves, not only the files found in them: a file
+  # *added* later changes its directory's mtime, which is what makes Mix
+  # recompile this module to pick it up.
   @external_resource @dir
+  @external_resource @sessions_dir
 
-  @sections @dir
-            |> Path.join("*.md.eex")
-            |> Path.wildcard()
-            |> Enum.sort()
-            |> Enum.map(fn path ->
-              {path |> Path.basename(".md.eex") |> String.to_atom(), path}
-            end)
+  bundled = fn dir ->
+    dir
+    |> Path.join("*.md.eex")
+    |> Path.wildcard()
+    |> Enum.sort()
+    |> Enum.map(fn path ->
+      {path |> Path.basename(".md.eex") |> String.to_atom(), path}
+    end)
+  end
 
-  for {name, path} <- @sections do
+  @sections bundled.(@dir)
+  @session_sets bundled.(@sessions_dir)
+
+  for {name, _path} <- @session_sets, Keyword.has_key?(@sections, name) do
+    raise "session instruction set #{name} shares its name with a coordinator doctrine section"
+  end
+
+  for {name, path} <- @sections ++ @session_sets do
     @external_resource path
     EEx.function_from_file(:defp, :"render_#{name}", path, [:assigns])
   end
 
-  @doc "The names of every bundled section."
+  @doc """
+  The names of every bundled coordinator doctrine section — what a
+  coordinator session's `CLAUDE.md` and `arb init`'s `AGENTS.md` embed in
+  full.
+  """
   @spec sections() :: [atom()]
   def sections, do: Enum.map(@sections, &elem(&1, 0))
 
   @doc """
-  Render one bundled section with `assigns` (see the moduledoc). Raises
-  `FunctionClauseError` for an unknown section.
+  The names of the bundled session instruction sets (`priv/doctrine/sessions/`),
+  which a non-coordinator session kind renders instead of the coordinator
+  doctrine.
+  """
+  @spec session_sets() :: [atom()]
+  def session_sets, do: Enum.map(@session_sets, &elem(&1, 0))
+
+  @doc """
+  Render one bundled section or session instruction set with `assigns` (see
+  the moduledoc). Raises `FunctionClauseError` for an unknown name.
   """
   @spec render(atom(), map() | keyword()) :: String.t()
-  for {name, _path} <- @sections do
+  for {name, _path} <- @sections ++ @session_sets do
     # sobelow_skip ["DOS.BinToAtom"]
     def render(unquote(name), assigns) do
       unquote(:"render_#{name}")(Map.new(assigns)) |> String.trim()

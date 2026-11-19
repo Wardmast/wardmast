@@ -49,7 +49,7 @@ defmodule Wardmast.DoctrineTest do
 
   describe "bundled sections" do
     test "the doctrine ships the expected sections" do
-      for name <- [:role, :research, :memory, :filing, :concepts, :commands, :checkout, :pair] do
+      for name <- [:role, :research, :memory, :filing, :concepts, :commands, :checkout] do
         assert name in Doctrine.sections(), "missing doctrine section #{inspect(name)}"
       end
     end
@@ -66,7 +66,11 @@ defmodule Wardmast.DoctrineTest do
 
   describe "leak denylist" do
     test "no bundled template source contains a denylisted string" do
-      for file <- Path.wildcard(Path.join(@priv_dir, "*")) do
+      # Recursive: the session instruction sets live in priv/doctrine/sessions/.
+      files = @priv_dir |> Path.join("**/*") |> Path.wildcard() |> Enum.filter(&File.regular?/1)
+      assert Enum.any?(files, &(Path.basename(Path.dirname(&1)) == "sessions"))
+
+      for file <- files do
         source = file |> File.read!() |> String.downcase()
 
         for needle <- @denylist do
@@ -76,7 +80,7 @@ defmodule Wardmast.DoctrineTest do
     end
 
     test "no rendered section contains a denylisted string under any assigns" do
-      for assigns <- assign_matrix(), name <- Doctrine.sections() do
+      for assigns <- assign_matrix(), name <- Doctrine.sections() ++ Doctrine.session_sets() do
         rendered = name |> Doctrine.render(assigns) |> String.downcase()
 
         for needle <- @denylist do
@@ -175,6 +179,14 @@ defmodule Wardmast.DoctrineTest do
   end
 
   describe "the pair instruction set (bd-7p6a9o)" do
+    test "ships as a session instruction set, apart from the coordinator doctrine" do
+      assert :pair in Doctrine.session_sets()
+      refute :pair in Doctrine.sections()
+
+      session_files = @priv_dir |> Path.join("sessions/*.md.eex") |> Path.wildcard()
+      assert length(session_files) == length(Doctrine.session_sets())
+    end
+
     test "collaborate, explain changes, ask before large rewrites, stay inside the ACs" do
       pair = Doctrine.render(:pair, %{})
 
