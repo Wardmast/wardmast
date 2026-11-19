@@ -127,6 +127,7 @@ defmodule Wardmast.MCP.Catalog do
   | `quota_get` | worker, coordinator | `Wardmast.Quota` snapshot per provider (or one account) |
   | `flake_record` | worker, coordinator | structured flake event for `arb loop analyze` (bd-6vullc) |
   | `run_tests` | worker | `Wardmast.Worker.TestRun.run/3` through `Wardmast.Worker.test_runner/1`: `mix test` in the run's own environment, failures-only (bd-57nhsi) |
+  | `screenshots_plan_check` | worker | `Wardmast.Screenshots.TaskCheck.run/1`: the `arb done` screenshots-plan check, asked early (bd-adrym0) |
   | `external_review_list` | coordinator | `ExternalReview` audit records for a workspace (bd-31fh9e) |
   | `external_review_show` | coordinator | one `ExternalReview` record with its proposed comments |
   | `review_greenlight` | coordinator (`can_dispatch`) | posts the approved subset of a report-only review (bd-36qzgx) |
@@ -4320,6 +4321,28 @@ defmodule Wardmast.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.run_tests/2
+    },
+    %{
+      name: "screenshots_plan_check",
+      tiers: @worker,
+      description:
+        "Check your `.arbiter/screenshots.json` the way the `arb done` commit gate will: when your " <>
+          "branch touches the repo's `ui_paths` and `plan_required` is true, the plan must exist and " <>
+          "validate (a `skip` with a reason counts). Returns `ok`, `status` (`ok`, `skip`, `invalid`, " <>
+          "`no_plan`, `not_applicable`, `not_configured`), the plan's `sha` and `messages` (the " <>
+          "validation errors). Run it before `arb done`; a red result there is sent back to you. " <>
+          "CLI twin: `ward screenshots check`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{
+            "type" => "string",
+            "description" => "Ticket id. Optional; only your own ticket is accepted."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.screenshots_plan_check/2
     },
     %{
       name: "repo_list",

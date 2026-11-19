@@ -209,6 +209,9 @@ defmodule WardmastCli.Main do
       ward preview show    <ticket> [--repo R] [--json]
       ward preview logs    <ticket> [-f] [--lines N] [--repo R]
 
+      ward screenshots check [<ticket>] [--json]
+                                   check .arbiter/screenshots.json as the `arb done` gate will (exit 1 if red)
+
       ward support bundle  [--out <file>]      redacted diagnostics archive (version, doctor, config, logs)
 
       ward grok-token                          a grok worker's GROK_AUTH_PROVIDER_COMMAND:

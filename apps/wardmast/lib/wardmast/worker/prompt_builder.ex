@@ -283,6 +283,33 @@ defmodule Wardmast.Worker.PromptBuilder do
     Wardmast.Skills.Materializer.prompt_section(resolved, materialized?)
   end
 
+  # A repo with a `screenshots` config gets the plan contract in the prompt, so the worker writes
+  # `.arbiter/screenshots.json` before `arb done` instead of learning it from a revise round.
+  defp screenshots_section(%Issue{repo: repo}, opts) do
+    case Wardmast.Screenshots.Config.resolve(Keyword.get(opts, :workspace), repo) do
+      {:ok, config} ->
+        required =
+          if config.plan_required,
+            do: "is required",
+            else: "is optional (the configured default_routes are shot when it is absent)"
+
+        "\n" <>
+          """
+          UI SCREENSHOTS — this repo takes before/after screenshots of UI changes. If your diff
+          touches #{inspect(config.ui_paths)}, `.arbiter/screenshots.json` #{required}: either
+          `{"version": 1, "shots": [{"id": "home", "path": "/"}]}` (what to shoot: paths,
+          optional viewports/themes/steps; never a command, host or credential) or
+          `{"version": 1, "skip": "<why nothing visible changed>"}`. Run `ward screenshots check`
+          (MCP: `screenshots_plan_check`) before `arb done`; the commit gate runs the same check
+          and sends a missing or invalid plan back. The plan file is git-excluded: do not commit it.
+          The copy checked at `arb done` is the one that gets shot.
+          """
+
+      _ ->
+        ""
+    end
+  end
+
   # bd-ld8qde (G14): what the ticket's declared permissions were projected into.
   # Empty for an unguarded spawn, so the prompt is unchanged there.
   defp permissions_section(opts), do: PermissionsBlock.render(Keyword.get(opts, :projection))
@@ -527,7 +554,7 @@ defmodule Wardmast.Worker.PromptBuilder do
     #{isolation_section}
     #{process_kill_discipline_section()}
     #{read_discipline_section()}
-    #{test_tool_section(opts)}#{commit_gate_section(Keyword.get(opts, :prepush_steps), test_tool?(opts), nil)}#{EvidenceIntegrity.worker_block()}#{podman_push_section(opts)}#{workflow_push_section(opts)}#{skills_section(opts)}#{permissions_section(opts)}
+    #{test_tool_section(opts)}#{commit_gate_section(Keyword.get(opts, :prepush_steps), test_tool?(opts), nil)}#{EvidenceIntegrity.worker_block()}#{screenshots_section(task, opts)}#{podman_push_section(opts)}#{workflow_push_section(opts)}#{skills_section(opts)}#{permissions_section(opts)}
     Work the task to completion: load context, design, implement, test,
     commit on this branch#{push_clause(opts)}.
 

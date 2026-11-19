@@ -188,6 +188,36 @@ defmodule Wardmast.Screenshots.CaptureTest do
         do: assert_received({:boot, ^role, ^seed, _})
   end
 
+  test "plan_required false with default_routes shoots the routes when there is no plan",
+       %{tmp_dir: dir} do
+    {repo, base, head} = Process.get(:repo)
+
+    config = %Config{
+      ui_paths: ["web/**"],
+      start_cmd: "true",
+      plan_required: false,
+      default_routes: ["/"]
+    }
+
+    ctx = %{test_pid: self(), routes: %{"before" => %{"/" => 200}, "after" => %{"/" => 200}}}
+
+    assert {:ok, %{pairs: [_ | _]}} =
+             Capture.run(
+               %{
+                 task_id: "bd-test",
+                 repo_path: repo,
+                 base_sha: base,
+                 head_sha: head,
+                 config: config,
+                 plan_path: Path.join(dir, "nope.json"),
+                 out_dir: Path.join(dir, "out")
+               },
+               booter: CaptureStubBooter,
+               shooter: CaptureStubShooter,
+               ctx: ctx
+             )
+  end
+
   describe "failures are distinct and recorded" do
     test "a missing manifest", %{tmp_dir: dir} do
       assert {:error, failure} = run(dir, Path.join(dir, "nope.json"))

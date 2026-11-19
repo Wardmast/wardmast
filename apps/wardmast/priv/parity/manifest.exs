@@ -464,6 +464,14 @@
       }
     },
     %{
+      id: "screenshots/check_the_plan",
+      title: "Worker checks its screenshots plan before arb done",
+      mcp: ["screenshots_plan_check"],
+      cli: ["arb screenshots check"],
+      rest: ["POST /api/issues/:task_id/screenshots/check"],
+      status: :full
+    },
+    %{
       id: "workers/dispatch_a_worker_on_a_ticket",
       title: "Dispatch a worker on a ticket",
       mcp: ["worker_dispatch"],

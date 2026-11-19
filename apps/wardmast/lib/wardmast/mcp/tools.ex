@@ -1944,6 +1944,7 @@ defmodule Wardmast.MCP.Tools do
 
   defdelegate permission_request(scope, args), to: Wardmast.MCP.Tools.PermissionRequest
   defdelegate run_tests(scope, args), to: Wardmast.MCP.Tools.RunTests
+  defdelegate screenshots_plan_check(scope, args), to: Wardmast.MCP.Tools.ScreenshotsPlanCheck
   defdelegate ticket_permission_grant(scope, args), to: Wardmast.MCP.Tools.PermissionGrant
 
   defdelegate worker_dispatch(scope, args), to: Wardmast.MCP.Tools.Worker
