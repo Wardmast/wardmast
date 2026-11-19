@@ -107,7 +107,9 @@ defmodule Wardmast.MCP.PairToolsTest do
     end
 
     test "with no live pair session, says so", ctx do
-      assert {:tool_error, message, _} = call(ctx.coordinator, "pair_end", %{"id" => ctx.issue.id})
+      assert {:tool_error, message, _} =
+               call(ctx.coordinator, "pair_end", %{"id" => ctx.issue.id})
+
       assert message =~ "no live pair session"
     end
   end

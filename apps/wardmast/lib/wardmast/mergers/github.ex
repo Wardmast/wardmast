@@ -313,8 +313,11 @@ defmodule Wardmast.Mergers.Github do
               add_labels(cfg, owner, repo, number, Map.get(opts, :labels))
               {:ok, build_mr_ref(ref_form, owner, repo, number)}
 
-            :none -> {:error, http_error(422, body)}
-            {:error, _} -> {:error, http_error(422, body)}
+            :none ->
+              {:error, http_error(422, body)}
+
+            {:error, _} ->
+              {:error, http_error(422, body)}
           end
         else
           {:error, http_error(422, body)}

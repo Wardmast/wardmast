@@ -637,7 +637,10 @@ defmodule Wardmast.Sessions.Pair do
           ended
 
         {:error, reason} ->
-          Logger.warning("Sessions.Pair: could not end #{session.id} after Done: #{inspect(reason)}")
+          Logger.warning(
+            "Sessions.Pair: could not end #{session.id} after Done: #{inspect(reason)}"
+          )
+
           nil
       end
     end

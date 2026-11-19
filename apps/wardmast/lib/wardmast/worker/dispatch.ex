@@ -4143,10 +4143,6 @@ defmodule Wardmast.Worker.Dispatch do
   # a fresh one.
   defp resuming?(opts), do: Keyword.get(opts, :resume) == true
 
-  # Pre-existing complexity 15 — baselined when bd-4x2yhq first
-  # wired Credo up. Thresholds stay at the tool's own default so new
-  # code is held to it; see the note in .credo.exs.
-  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   @doc """
   Provision — or reuse — `task`'s worktree on its branch exactly as a dispatch
   does: the same repo resolution, branch (`BranchNamer.derive/1`), base
@@ -4206,6 +4202,10 @@ defmodule Wardmast.Worker.Dispatch do
     end
   end
 
+  # Pre-existing complexity 15 — baselined when bd-4x2yhq first
+  # wired Credo up. Thresholds stay at the tool's own default so new
+  # code is held to it; see the note in .credo.exs.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp maybe_provision_worktree(%Issue{} = task, opts) do
     cond do
       Keyword.get(opts, :provision_worktree, true) == false ->

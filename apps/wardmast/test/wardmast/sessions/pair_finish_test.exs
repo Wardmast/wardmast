@@ -40,7 +40,9 @@ defmodule Wardmast.Sessions.PairFinishTest do
         prefix: "pf#{System.unique_integer([:positive])}",
         config:
           Map.merge(
-            %{"repo_paths" => %{"widget" => %{"path" => git.checkout, "target_branch" => "main"}}},
+            %{
+              "repo_paths" => %{"widget" => %{"path" => git.checkout, "target_branch" => "main"}}
+            },
             config
           )
       })
@@ -89,7 +91,9 @@ defmodule Wardmast.Sessions.PairFinishTest do
   end
 
   defp remote_branch(git, branch) do
-    case System.cmd("git", ["-C", git.forge, "rev-parse", "--verify", "-q", "refs/heads/#{branch}"],
+    case System.cmd(
+           "git",
+           ["-C", git.forge, "rev-parse", "--verify", "-q", "refs/heads/#{branch}"],
            stderr_to_stdout: true
          ) do
       {sha, 0} -> String.trim(sha)
@@ -185,6 +189,7 @@ defmodule Wardmast.Sessions.PairFinishTest do
 
       round = Ash.get!(Issue, issue.id)
       assert round.state == :active
+
       assert %{"branch" => ^branch, "merge_opts" => %{"pair_authored" => true}} =
                round.review_gate_state
 

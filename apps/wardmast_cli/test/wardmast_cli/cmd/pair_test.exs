@@ -73,7 +73,8 @@ defmodule WardmastCli.Cmd.PairTest do
            |> Req.Test.json(%{
              "error" => %{
                "type" => "conflict",
-               "message" => "That ticket cannot be paired on: only a Backlog, Ready or In-progress ticket can.",
+               "message" =>
+                 "That ticket cannot be paired on: only a Backlog, Ready or In-progress ticket can.",
                "details" => %{}
              }
            })
@@ -100,7 +101,11 @@ defmodule WardmastCli.Cmd.PairTest do
            conn
            |> Plug.Conn.put_status(200)
            |> Req.Test.json(%{
-             "data" => %{"ticket_id" => "bd-001", "route" => "in_review", "session_end" => "ended"}
+             "data" => %{
+               "ticket_id" => "bd-001",
+               "route" => "in_review",
+               "session_end" => "ended"
+             }
            })
          end}
       ])

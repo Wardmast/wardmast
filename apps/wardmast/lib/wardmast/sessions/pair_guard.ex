@@ -68,7 +68,9 @@ defmodule Wardmast.Sessions.PairGuard do
   def deny_rules(ctx) when is_map(ctx) do
     target = present(Map.get(ctx, :target_branch)) || "main"
 
-    Enum.uniq(push_rules(target) ++ bypass_rules() ++ checkout_rules(Map.get(ctx, :primary_checkout)))
+    Enum.uniq(
+      push_rules(target) ++ bypass_rules() ++ checkout_rules(Map.get(ctx, :primary_checkout))
+    )
   end
 
   @doc """
@@ -102,16 +104,20 @@ defmodule Wardmast.Sessions.PairGuard do
 
         with :ok <- File.mkdir_p(hooks_dir),
              :ok <- write_hook(hooks_dir, "pre-push", pre_push(branch, original)) do
-          original
-          |> wrapped_hooks()
-          |> Enum.reduce_while(:ok, fn name, :ok ->
-            case write_hook(hooks_dir, name, delegate(name, original)) do
-              :ok -> {:cont, :ok}
-              error -> {:halt, error}
-            end
-          end)
+          write_delegates(hooks_dir, original)
         end
     end
+  end
+
+  defp write_delegates(hooks_dir, original) do
+    original
+    |> wrapped_hooks()
+    |> Enum.reduce_while(:ok, fn name, :ok ->
+      case write_hook(hooks_dir, name, delegate(name, original)) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
   end
 
   # ---- rules --------------------------------------------------------------

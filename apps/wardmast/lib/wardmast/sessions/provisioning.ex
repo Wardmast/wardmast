@@ -365,7 +365,13 @@ defmodule Wardmast.Sessions.Provisioning do
 
     case PairGuard.install_hooks(hooks, %{branch: Map.get(pair, :branch), worktree: session.cwd}) do
       :ok ->
-        {:ok, Keyword.update(opts, :extra_env, PairGuard.git_env(hooks), &(&1 ++ PairGuard.git_env(hooks)))}
+        {:ok,
+         Keyword.update(
+           opts,
+           :extra_env,
+           PairGuard.git_env(hooks),
+           &(&1 ++ PairGuard.git_env(hooks))
+         )}
 
       {:error, reason} ->
         {:error, {:pair_guard_failed, reason}}

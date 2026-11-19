@@ -84,8 +84,15 @@ defmodule WardmastCli.Cmd.Pair do
     IO.puts("#{verb} pair session #{short(data["session_id"])} for #{data["ticket_id"]}")
     IO.puts("  name:     #{data["name"]}")
     IO.puts("  worktree: #{data["worktree"]}")
-    IO.puts("It is in the dashboard's dock; attach here with: ward session attach #{data["session_id"]}")
-    IO.puts("Finish with `ward pair done #{data["ticket_id"]}`, or end it with `ward pair end #{data["ticket_id"]}`.")
+
+    IO.puts(
+      "It is in the dashboard's dock; attach here with: ward session attach #{data["session_id"]}"
+    )
+
+    IO.puts(
+      "Finish with `ward pair done #{data["ticket_id"]}`, or end it with `ward pair end #{data["ticket_id"]}`."
+    )
+
     :ok
   end
 

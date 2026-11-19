@@ -107,7 +107,9 @@ defmodule Wardmast.Sessions.PairGuardTest do
 
     test "the ticket's branch pushes", %{git: git, worktree: wt, env: env} do
       assert {_out, 0} = push(wt, env, ["-q", "origin", @branch])
-      assert remote_sha(git, "refs/heads/#{@branch}") == GitFixture.git!(wt, ["rev-parse", "HEAD"])
+
+      assert remote_sha(git, "refs/heads/#{@branch}") ==
+               GitFixture.git!(wt, ["rev-parse", "HEAD"])
     end
 
     test "a push to the default branch is refused and main does not move", %{
@@ -149,7 +151,14 @@ defmodule Wardmast.Sessions.PairGuardTest do
     end
 
     test "the repo's own hooks still run behind the guard", %{git: git, worktree: wt, env: env} do
-      repo_hooks = GitFixture.git!(git.checkout, ["rev-parse", "--path-format=absolute", "--git-path", "hooks"])
+      repo_hooks =
+        GitFixture.git!(git.checkout, [
+          "rev-parse",
+          "--path-format=absolute",
+          "--git-path",
+          "hooks"
+        ])
+
       File.mkdir_p!(repo_hooks)
       marker = Path.join(git.root, "repo-pre-push-ran")
       commit_marker = Path.join(git.root, "repo-pre-commit-ran")
@@ -173,7 +182,14 @@ defmodule Wardmast.Sessions.PairGuardTest do
     end
 
     test "a failing repo pre-push hook still fails the push", %{git: git, worktree: wt, env: env} do
-      repo_hooks = GitFixture.git!(git.checkout, ["rev-parse", "--path-format=absolute", "--git-path", "hooks"])
+      repo_hooks =
+        GitFixture.git!(git.checkout, [
+          "rev-parse",
+          "--path-format=absolute",
+          "--git-path",
+          "hooks"
+        ])
+
       File.mkdir_p!(repo_hooks)
       write_hook!(repo_hooks, "pre-push", "echo repo-hook-says-no >&2; exit 3")
 

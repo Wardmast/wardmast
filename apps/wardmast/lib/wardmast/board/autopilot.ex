@@ -1758,6 +1758,7 @@ defmodule Wardmast.Board.Autopilot do
 
   defp failure_detail({:not_dispatchable, _id, hold}),
     do: Wardmast.Tasks.Lifecycle.describe_hold(hold)
+
   defp failure_detail(reason), do: "dispatch refused (#{inspect(error_shape(reason))})"
 
   defp clear_failure(state, id), do: %{state | failures: Map.delete(state.failures, id)}
