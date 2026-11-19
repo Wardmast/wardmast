@@ -101,6 +101,8 @@ defmodule Wardmast.Tasks.Workspace.Changes.ValidateConfig do
       `Wardmast.Worker.PrepushCheck.Recipe`) adds `"pre_push_checks"` (`"arbiter"`
       or a list of `{name, cmd, timeout_s, scope}` steps), `"pre_push_budget_seconds"`
       (a positive integer) and `"pre_push_max_attempts"` (a non-negative integer).
+    * `"worker.screenshots"` / `"worker.repos.<repo>.screenshots"` are validated key by key
+      (unknown keys and bad values refused) by `Wardmast.Screenshots.Config.validate_partial/2`.
     * `"worker.visual_baselines"` / `"worker.repos.<repo>.visual_baselines"` must be a
       map with a `"job"` and a repo-relative `"baseline_dir"`, plus the optional keys of
       `Wardmast.Worker.VisualBaselines.Config` (bd-9obzu9, GitHub #936).
@@ -376,6 +378,22 @@ defmodule Wardmast.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_prepush_check(block, label)
     |> validate_pre_push_recipe(block, label)
     |> validate_preview(block, label)
+    |> validate_screenshots(block, label)
+  end
+
+  # UI screenshot capture (`Wardmast.Screenshots.Config`, design §6), at either level. A repo
+  # block may set just the keys it overrides, so required keys are checked on the resolved
+  # config (`Config.resolve/2`), not here.
+  defp validate_screenshots(changeset, block, label) do
+    case Map.fetch(block, "screenshots") do
+      :error ->
+        changeset
+
+      {:ok, shots} ->
+        shots
+        |> Wardmast.Screenshots.Config.validate_partial("#{label}.screenshots")
+        |> Enum.reduce(changeset, &Changeset.add_error(&2, field: :config, message: &1))
+    end
   end
 
   # App preview (`Wardmast.Preview.Config`), at either level.

@@ -80,7 +80,7 @@ defmodule Wardmast.ReleaseWorkflowMacosTest do
 
   test "the Linux build job is unchanged", %{jobs: jobs} do
     build = jobs["build"]
-    assert build["runs-on"] == "ubuntu-24.04"
+    assert build["runs-on"] == "ubuntu-latest"
     assert build["container"] == %{"image" => "redhat/ubi8"}
     text = run_text(build)
     assert text =~ "arbiter-${TAG}-linux.tar.gz"

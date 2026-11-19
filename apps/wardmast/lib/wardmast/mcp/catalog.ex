@@ -106,6 +106,7 @@ defmodule Wardmast.MCP.Catalog do
   | `scheduler_resume` | coordinator | `Wardmast.Board.Autopilot.resume/2` (persisted, bd-pgi97m) |
   | `scheduler_status` | coordinator | `Wardmast.Board.Drain.status/1` |
   | `server_status` | coordinator | `Wardmast.Server.Status.snapshot/0` (P-27) |
+  | `update_check` | coordinator | `Wardmast.Server.Status.update_check/0` (rate-limited manual release check) |
   | `provider_pause` | coordinator | `Wardmast.Providers.Pause.pause/2` (persisted, bd-5ef587) |
   | `provider_resume` | coordinator | `Wardmast.Providers.Pause.resume/2` |
   | `provider_list` | coordinator | `Wardmast.Providers.Pause.to_json/0` (active pauses, P-17) |
@@ -3666,6 +3667,18 @@ defmodule Wardmast.MCP.Catalog do
           "to confirm the new build is live before verifying a ticket. Coordinator only.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.server_status/2
+    },
+    %{
+      name: "update_check",
+      tiers: @coordinator,
+      description:
+        "Check GitHub for a newer Wardmast release now (the dashboard's \"Check for updates\" " <>
+          "button, `arb server update-check`). Returns `latest`, `running`, `update_available`, " <>
+          "`release_url`, `checked_at`, `cached` and `error`. Rate-limited to one real GitHub " <>
+          "call per 60 s: inside the window the cached result comes back with `cached: true`. " <>
+          "Coordinator only.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.update_check/2
     },
 
     # ---- provider pause/resume (bd-5ef587) ---------------------------------

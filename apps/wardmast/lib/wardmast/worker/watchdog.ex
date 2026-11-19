@@ -2281,9 +2281,19 @@ defmodule Wardmast.Worker.Watchdog do
         give_up_retry(state, {:blocked, block})
 
       true ->
-        detached_merge(%{state | not_started_polls: 0})
+        detached_merge_unless_skipped(%{state | not_started_polls: 0}, result)
     end
   end
+
+  # #1564: a skipped pipeline is no CI result; never merge on it.
+  defp detached_merge_unless_skipped(state, %{pipeline_skipped: true}),
+    do:
+      detached_wait(
+        state,
+        "the head's pipeline was skipped; it merges once a fresh pipeline is green"
+      )
+
+  defp detached_merge_unless_skipped(state, _result), do: detached_merge(state)
 
   # Red CI on an approved PR is a wait, not a verdict: a re-run on the same
   # head, a fix on the base branch followed by a fresh pipeline, or a new head
@@ -6320,6 +6330,17 @@ defmodule Wardmast.Worker.Watchdog do
     if state.ci_triggered_head == sha,
       do: await_triggered_pipeline(state, result, sha),
       else: trigger_skipped_head(state, sha)
+  end
+
+  # #1564: a head whose newest pipeline the forge reports as `skipped` (0 jobs,
+  # e.g. after a main-merge push) has no CI result either, whoever pushed it:
+  # start a fresh MR pipeline (once per head SHA, recorded) and wait for it.
+  defp ci_skip_gate(state, %{pipeline_skipped: true} = result, sha) when is_binary(sha) do
+    # A newly adopted head gets its own trigger budget.
+    triggers = if state.ci_skipped_head == sha, do: state.ci_triggers, else: 0
+
+    state = %{state | ci_skipped_head: sha, ci_triggers: triggers, ci_trigger_polls: 0}
+    ci_skip_gate(state, result, sha)
   end
 
   defp ci_skip_gate(_state, _result, _sha), do: :proceed

@@ -816,8 +816,50 @@ defmodule Wardmast.Worker.PromptBuilder do
   # directory (when one is provisioned) is a disposable, detached checkout
   # with no branch of its own, so `gh pr checkout` there is always safe: there
   # is nothing Wardmast-owned to collide with or lose.
-  defp pr_follow_up_note(%Issue{id: id, source_pr: source_pr} = task, opts)
+  # bd-cwigjh / #1550: when the PR's author is outside the workspace's pr_patrol
+  # scope (`PRPatrol.AuthorScope.push_decision/3`) the dispatcher passes
+  # `push_refused: reason`. The worker may still read, reply, resolve and
+  # escalate, but must not put a commit on someone else's branch.
+  defp pr_follow_up_note(%Issue{source_pr: source_pr} = task, opts)
        when is_binary(source_pr) and source_pr != "" do
+    case Keyword.get(opts, :push_refused) do
+      reason when is_binary(reason) -> push_refused_note(task, opts, reason)
+      _ -> push_allowed_note(task, opts)
+    end
+  end
+
+  defp pr_follow_up_note(_task, _opts) do
+    """
+
+    No worktree is provisioned by default — you are not expected to edit a repo.
+    If the work genuinely requires inspecting code you may read files, but do
+    not author a branch or open a PR.
+    """
+  end
+
+  defp push_refused_note(%Issue{source_pr: source_pr} = task, opts, reason) do
+    forge = forge_for(task, opts)
+
+    """
+
+    This directive is a PRPatrol follow-up against EXISTING pull request ##{source_pr}.
+
+    PUSH REFUSED — #{reason}.
+    That pull request is not Wardmast's to change: do NOT push to its branch, do NOT
+    `git push` anywhere, and do NOT `#{ForgeCli.cli(forge)} create` a pull request or a branch of
+    your own in its place. You hold no push credential for it, and a push that
+    slips past would be an unrequested commit on another developer's branch.
+
+    You MAY read the code (your current directory is a checkout; `#{forge_cli(forge)}`/`git`
+    work for reading), and you MAY comment: reply on the review threads, say what
+    the fix would be, flag the failing check. Describing the fix in a comment is
+    SUCCESS; completing with no change at all is SUCCESS. Record in your notes that
+    the push was refused and why, so the operator can widen `pr_patrol.author_logins`
+    if they do want this PR patrolled.
+    """
+  end
+
+  defp push_allowed_note(%Issue{id: id, source_pr: source_pr} = task, opts) do
     forge = forge_for(task, opts)
 
     """
@@ -841,15 +883,6 @@ defmodule Wardmast.Worker.PromptBuilder do
     genuinely separate deliverable is warranted, file it as an explicit,
     recorded decision: `arb create <title> --parent #{id} --type feature` —
     a distinct task that gets its own branch/PR by design.
-    """
-  end
-
-  defp pr_follow_up_note(_task, _opts) do
-    """
-
-    No worktree is provisioned by default — you are not expected to edit a repo.
-    If the work genuinely requires inspecting code you may read files, but do
-    not author a branch or open a PR.
     """
   end
 

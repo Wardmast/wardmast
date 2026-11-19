@@ -41,8 +41,7 @@ jobs:
   # config. The dev cache is this job's alone, hence the distinct cache key.
   audit:
     name: mix audit (credo, sobelow, dialyzer)
-    # Pinned: ubuntu-latest moved to 26.04 and breaks tests; see 26.04 follow-up ticket (#1529).
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       MIX_ENV: dev
@@ -181,8 +180,7 @@ jobs:
   # keeps working and there is one place that reports overall pass/fail.
   test-shard:
     name: mix test (${{ matrix.app }} ${{ matrix.partition }}/${{ matrix.partitions }})
-    # Pinned: ubuntu-latest moved to 26.04 and breaks tests; see 26.04 follow-up ticket (#1529).
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
       MIX_ENV: test
@@ -260,8 +258,7 @@ jobs:
   # Single aggregate check, named as the old monolithic job was.
   test:
     name: mix test
-    # Pinned: ubuntu-latest moved to 26.04 and breaks tests; see 26.04 follow-up ticket (#1529).
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: test-shard
     if: ${{ always() }}
@@ -273,6 +270,118 @@ jobs:
           echo "test-shard result: $RESULT"
           [ "$RESULT" = "success" ]
 
+  # bd-bzhpgi (#1541): the real-bwrap jail tests, run for real on both runner
+  # images and on upstream bwrap 0.12 (the operator host's generation; Ubuntu ships
+  # 0.9.0 on 24.04 and 0.11.1 on 26.04). In the shards these tests skip wherever
+  # `Jail.probe/0` fails, and on ubuntu-24.04 they always did: the qwen settings
+  # test was broken from the start and nothing noticed until 26.04 ran it. Here
+  # WARDMAST_TEST_REQUIRE_BWRAP=1 turns that skip into a failure, and `--trace`
+  # lists every test that ran.
+  #
+  # Ubuntu's AppArmor userns restriction (kernel.apparmor_restrict_unprivileged_userns)
+  # stops a bwrap without an AppArmor profile (a source build, or 24.04's package)
+  # from setting up its namespaces. The check step lifts it only when the bwrap under
+  # test cannot start, and prints which bwrap, kernel and setting each leg ran with.
+  jail:
+    name: jail tests (${{ matrix.os }}, bwrap ${{ matrix.bwrap }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    env:
+      MIX_ENV: test
+      # Non-secret test key for Wardmast.Vault (matches config/test.exs).
+      WARDMAST_CLOAK_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      WARDMAST_TEST_REQUIRE_BWRAP: "1"
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, bwrap: system }
+          - { os: ubuntu-26.04, bwrap: system }
+          - os: ubuntu-26.04
+            bwrap: "0.12.0"
+            bwrap_sha256: 9760d007363e3abba7c747489910f9f82d9fca53ba3bd3282e396fa3c97a3314
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bubblewrap (the image's package)
+        if: ${{ matrix.bwrap == 'system' }}
+        run: |
+          command -v bwrap >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q bubblewrap; }
+
+      - name: Build bubblewrap ${{ matrix.bwrap }} from the upstream release
+        if: ${{ matrix.bwrap != 'system' }}
+        env:
+          BWRAP_VERSION: ${{ matrix.bwrap }}
+          BWRAP_SHA256: ${{ matrix.bwrap_sha256 }}
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q meson ninja-build libcap-dev pkg-config
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o bubblewrap.tar.xz \
+            "https://github.com/containers/bubblewrap/releases/download/v${BWRAP_VERSION}/bubblewrap-${BWRAP_VERSION}.tar.xz"
+          echo "${BWRAP_SHA256}  bubblewrap.tar.xz" | sha256sum -c -
+          tar -xJf bubblewrap.tar.xz
+          meson setup bwrap-build "bubblewrap-${BWRAP_VERSION}" \
+            -Dman=disabled -Dtests=false -Dselinux=disabled \
+            -Dbash_completion=disabled -Dzsh_completion=disabled
+          meson compile -C bwrap-build
+          mkdir -p bwrap-bin
+          cp bwrap-build/bwrap bwrap-bin/bwrap
+          echo "$RUNNER_TEMP/bwrap-bin" >> "$GITHUB_PATH"
+
+      - name: Check that bwrap can set up its namespaces
+        run: |
+          echo "bwrap: $(command -v bwrap) ($(bwrap --version))"
+          echo "kernel: $(uname -r)"
+          grep PRETTY_NAME /etc/os-release
+          restrict=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          echo "apparmor_restrict_unprivileged_userns: $(cat "$restrict" 2>/dev/null || echo n/a)"
+          if ! bwrap --ro-bind / / true; then
+            echo "this bwrap cannot set up a user namespace here; lifting the AppArmor restriction"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            bwrap --ro-bind / / true
+          fi
+
+      - name: Install Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "29.1.1"
+          elixir-version: "1.20.4"
+
+      - name: Restore deps/build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-otp29.1.1-elixir1.20.4-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-otp29.1.1-elixir1.20.4-mix-
+
+      - name: Install hex/rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      - name: Compile
+        run: mix compile
+
+      - name: Run the jail tests
+        working-directory: apps/wardmast
+        run: >-
+          mix test --trace
+          test/wardmast/agents/qwen/jail_bwrap_test.exs
+          test/wardmast/agents/gemini/jail_bwrap_test.exs
+          test/wardmast/worker/jail_readonly_paths_test.exs
+          test/wardmast/worker/jail_test.exs
+          test/wardmast/worker/jail_hide_test.exs
+          test/wardmast/agents/grok/jail_test.exs
+
   # The wardmast-node Helm chart (bd-2u4lpp, docs/design/remote-workers.md §20.5):
   # `helm lint --strict`, `helm template` for every mode and reach variant piped through
   # kubeconform, and the renders the schema must refuse. No Elixir toolchain needed.
@@ -280,8 +389,7 @@ jobs:
   # the runner image's); where it is absent those tests skip and this job is the gate.
   helm-chart:
     name: helm lint + kubeconform (charts/wardmast-node)
-    # Pinned: ubuntu-latest moved to 26.04 and breaks tests; see 26.04 follow-up ticket (#1529).
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     env:
       HELM_VERSION: v3.17.3
       KUBECONFORM_VERSION: v0.6.7

@@ -13,10 +13,12 @@ defmodule Wardmast.Worker.JailHideTest do
   # availability override) and the cached probe result.
   use ExUnit.Case, async: false
 
+  alias Wardmast.Test.JailProbe
   alias Wardmast.Worker.Jail
   alias Wardmast.Worker.Jail.Hide
 
   @probe Jail.probe()
+  @bwrap_skip JailProbe.skip_reason(@probe)
 
   setup do
     uniq = "#{System.pid()}-#{System.unique_integer([:positive])}"
@@ -282,6 +284,19 @@ defmodule Wardmast.Worker.JailHideTest do
       refute Path.join(fx.home, ".codex") in dirs
     end
 
+    test ":unmask can never expose the operator's glab OAuth dir (refresh-token rotation, #1545)",
+         %{fx: fx} do
+      glab = Path.join(fx.home, ".config/glab-cli")
+      File.mkdir_p!(glab)
+      File.write!(Path.join(glab, "config.yml"), "token: SECRET")
+
+      for entry <- [glab, Path.join(glab, "config.yml")] do
+        %{dirs: dirs, keep: keep} = Hide.paths(Keyword.put(fx.opts, :unmask, [entry]))
+        assert glab in dirs
+        refute Enum.any?(keep, &String.starts_with?(&1, glab))
+      end
+    end
+
     test "a symlinked credential dir is masked at its real path", %{base: base, fx: fx} do
       real = Path.join(base, "dotfiles-claude")
       File.mkdir_p!(real)
@@ -339,9 +354,7 @@ defmodule Wardmast.Worker.JailHideTest do
   end
 
   describe "real bwrap: one probe per path class" do
-    if @probe != :ok do
-      @describetag skip: "bwrap write jail unavailable on this host: #{inspect(@probe)}"
-    end
+    if @bwrap_skip, do: @describetag(skip: @bwrap_skip)
 
     @describetag :bwrap
 

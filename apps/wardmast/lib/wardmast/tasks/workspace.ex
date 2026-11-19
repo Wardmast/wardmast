@@ -721,13 +721,10 @@ defmodule Wardmast.Tasks.Workspace do
   end
 
   @doc """
-  The PRPatrol author allowlist, from `config["pr_patrol"]["author_logins"]`.
-
-  When set to a non-empty list of forge logins, PRPatrol files follow-ups only
-  for open PRs authored by one of those logins — so a workspace can patrol just
-  its operator's own PRs rather than every open PR in the repo. Returns `[]`
-  when unset / empty / malformed, which PRPatrol treats as "patrol all open PRs"
-  (the backward-compatible default).
+  The PRPatrol author allowlist, from `config["pr_patrol"]["author_logins"]`:
+  the explicit forge logins only. `"*"` is not a login (see
+  `pr_patrol_author_scope/1`), so it is dropped here. Returns `[]` when unset /
+  empty / malformed.
   """
   @spec pr_patrol_author_logins(t()) :: [String.t()]
   def pr_patrol_author_logins(workspace) do
@@ -735,6 +732,38 @@ defmodule Wardmast.Tasks.Workspace do
     |> get_in(["pr_patrol", "author_logins"])
     |> List.wrap()
     |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 in ["", "*"]))
+  end
+
+  @doc """
+  Whose PRs/MRs PRPatrol may act on (bd-cwigjh / #1550), from
+  `config["pr_patrol"]["author_logins"]`:
+
+    * `:own` — unset / empty / malformed. Only PRs Wardmast itself opened: one
+      linked to a Wardmast ticket (`pr_ref`) or authored by the configured fleet
+      login (`pr_patrol.our_login`). This is the safe default — patrol files
+      follow-ups that PUSH to the PR's branch, and doing that on a colleague's
+      branch is an unrequested push under the operator's identity.
+    * `{:logins, logins}` — a non-empty list of forge logins; only PRs authored by
+      one of them.
+    * `:all` — the explicit opt-in: `"*"` (or a list containing `"*"`). Every open
+      PR/MR, whoever authored it.
+  """
+  @spec pr_patrol_author_scope(t()) :: :own | :all | {:logins, [String.t(), ...]}
+  def pr_patrol_author_scope(workspace) do
+    raw =
+      (workspace.config || %{})
+      |> get_in(["pr_patrol", "author_logins"])
+      |> List.wrap()
+      |> Enum.filter(&is_binary/1)
+      |> Enum.map(&String.trim/1)
+
+    case {"*" in raw, Enum.reject(raw, &(&1 == ""))} do
+      {true, _} -> :all
+      {false, []} -> :own
+      {false, logins} -> {:logins, logins}
+    end
   end
 
   @doc """

@@ -84,6 +84,19 @@ defmodule Wardmast.Worker.Image do
   # KH14: images built FROM the base inherit it; `Image.Prebuilt` requires it.
   @contract_label "arbiter.runtime-contract"
   @contract_version "1"
+
+  # bd-6301r0: the base ships Debian trixie's headless Chromium so UI screenshot capture
+  # and the :browser tests run on any worker (incl. cluster nodes) with nothing installed
+  # per node. Pinned to an exact build, fetched from a fixed snapshot.debian.org timestamp
+  # (trixie + trixie-security) so the build can still find it after Debian drops it from
+  # the live mirrors. Bump both together, on purpose: the Containerfile text changes, so
+  # the base hash changes and the release rebuilds it (that is how security updates land).
+  # The snapshot URIs are http:// on purpose: debian:trixie-slim ships no ca-certificates until
+  # the apt-get below installs it, so https would fail at `apt-get update`. Integrity comes
+  # from Signed-By + the signed InRelease.
+  @chromium_snapshot "20261101T000000Z"
+  @chromium_version "156.0.8078.73-1~deb13u1"
+
   @branch_re ~r/\A[A-Za-z0-9][A-Za-z0-9._\/-]*\z/
   @version_re ~r/\A\d+(\.\d+){0,3}\z/
   @sha_re ~r/@sha256:[0-9a-f]{64}\z/
@@ -126,10 +139,24 @@ defmodule Wardmast.Worker.Image do
     FROM docker.io/library/erlang:#{arb_otp}-slim AS arb_otp
     RUN find /usr/local/lib/erlang -type d \\( -name src -o -name include -o -name doc -o -name examples -o -name c_src \\) -prune -exec rm -rf {} +
     FROM docker.io/library/debian:trixie-slim
-    RUN apt-get update \\
+    RUN printf '%s\\n' \\
+          'Types: deb' \\
+          'URIs: http://snapshot.debian.org/archive/debian/#{@chromium_snapshot}/' \\
+          'Suites: trixie trixie-updates' \\
+          'Components: main' \\
+          'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \\
+          '' \\
+          'Types: deb' \\
+          'URIs: http://snapshot.debian.org/archive/debian-security/#{@chromium_snapshot}/' \\
+          'Suites: trixie-security' \\
+          'Components: main' \\
+          'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \\
+          > /etc/apt/sources.list.d/debian.sources
+    RUN apt-get -o Acquire::Check-Valid-Until=false update \\
      && apt-get install -y --no-install-recommends \\
           bc build-essential ca-certificates curl git libncurses6 libsctp1 libssl3t64 \\
           openssh-client procps socat sqlite3 tini tmux \\
+          chromium=#{@chromium_version} chromium-common=#{@chromium_version} fonts-liberation \\
      && rm -rf /var/lib/apt/lists/*
     # Pinned forge host keys (bd-290vof): `git fetch origin` over ssh verifies strictly.
     #{KnownHosts.containerfile_run()}
@@ -140,6 +167,8 @@ defmodule Wardmast.Worker.Image do
     COPY --from=arb_otp /usr/local/lib/erlang #{ArbCli.runtime_dir()}
     LABEL #{@arb_otp_label}="#{arb_otp}"
     LABEL #{@contract_label}="#{@contract_version}"
+    LABEL arbiter.chromium-version="#{@chromium_version}"
+    ENV ARB_CHROME=/usr/bin/chromium
     #{PodScripts.image_install()}
     ENV PATH=/opt/arbiter/cli:$PATH
     """

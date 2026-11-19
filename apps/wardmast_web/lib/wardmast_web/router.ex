@@ -410,6 +410,7 @@ defmodule WardmastWeb.Router do
 
     # Server health (migrations, etc.)
     get("/server/migrations", ServerController, :migrations)
+    post("/server/update_check", ServerController, :update_check)
     get("/server/bind_address", ServerController, :bind_address)
     get("/server/worker_jail_unmask", ServerController, :worker_jail_unmask)
     get("/server/agy_write_jail", ServerController, :agy_write_jail)

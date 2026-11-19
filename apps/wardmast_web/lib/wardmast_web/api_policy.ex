@@ -279,6 +279,7 @@ defmodule WardmastWeb.ApiPolicy do
     # ---- version / server health -------------------------------------------
     {:get, "/api/version"} => :anonymous,
     {:get, "/api/server/migrations"} => :anonymous,
+    {:post, "/api/server/update_check"} => :coordinator,
     {:get, "/api/server/bind_address"} => :coordinator,
     {:get, "/api/server/agy_write_jail"} => :coordinator,
     {:get, "/api/server/agy_models"} => :coordinator,

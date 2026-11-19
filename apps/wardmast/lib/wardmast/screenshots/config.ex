@@ -1,0 +1,661 @@
+defmodule Wardmast.Screenshots.Config do
+  @moduledoc """
+  The `worker.repos.<repo>.screenshots` block (design: `docs/design/ui-screenshot-capture.md` §6, D4).
+
+  Resolves like `Wardmast.Preview.Config`: `worker.repos.<repo>.screenshots` is deep-merged over
+  `worker.screenshots` (repo keys win; `env`, `viewports`, `themes`, `seeds`, `limits` merge by key).
+  `start_cmd`, `setup_cmd` and `ready` fall back to `preview.command`, `preview.setup` and
+  `preview.ready_path` / `preview.ready_timeout` when unset. Nothing set, or `enabled: false`,
+  means the feature is off (`:none`). Every key is documented in
+  `Wardmast.Tasks.Workspace.ConfigSchema`.
+
+  `touches_ui_paths?/2` answers "does this diff touch `ui_paths`?" for the capture pass and the
+  ReviewGate; `diff_touches_ui_paths?/4` runs it over a git diff.
+  """
+
+  alias Wardmast.Preview.Config, as: PreviewConfig
+  alias Wardmast.Worker.SeedPaths
+  alias Wardmast.Worker.SpawnEnv
+  alias Wardmast.Worker.VisualBaselines.Drift
+
+  @keys ~w(enabled ui_paths ignore_paths plan_required default_routes start_cmd setup_cmd seed_cmd
+           seeds port_env port_range base_url env ready login viewports default_viewports themes
+           default_themes fixture_check deny_patterns fixture_email_domains limits hosting attach)
+  @placeholders ~w(port role scratch checkout task_id)
+  @env_name ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/
+  @proxy_keys ~w(HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY)
+  @loopback ~w(127.0.0.1 localhost)
+  @name ~r/\A[a-z0-9-]{1,20}\z/
+  @worker_range {20_000, 29_999}
+  @max_memory_gib 16
+
+  @default_viewports %{
+    "desktop" => %{"width" => 1280, "height" => 800, "device_scale_factor" => 1},
+    "mobile" => %{"width" => 390, "height" => 844, "device_scale_factor" => 2}
+  }
+  @default_themes %{
+    "light" => %{"color_scheme" => "light"},
+    "dark" => %{"color_scheme" => "dark", "local_storage" => %{"theme" => "dark"}, "query" => %{}}
+  }
+  @default_limits %{
+    "max_shots" => 20,
+    "max_images" => 40,
+    "max_image_bytes" => 2_097_152,
+    "max_capture_bytes" => 25_165_824,
+    "setup_seconds" => 600,
+    "seed_seconds" => 120,
+    "shot_seconds" => 30,
+    "budget_seconds" => 1200,
+    "memory" => "4g",
+    "cpus" => 2,
+    "max_captures_per_ticket" => 3,
+    "merge_wait_seconds" => 900
+  }
+  @limit_max %{"budget_seconds" => 3600, "cpus" => 16}
+  @default_hosting %{
+    "github" => %{"mode" => "assets_branch", "branch" => "arbiter-assets"},
+    "public_repo_ok" => false,
+    "retention_days" => 90
+  }
+  @default_emails ~w(example.com example.org example.net test invalid localhost)
+
+  defstruct ui_paths: [],
+            ignore_paths: [],
+            plan_required: true,
+            default_routes: [],
+            start_cmd: nil,
+            setup_cmd: nil,
+            seed_cmd: nil,
+            seeds: %{},
+            port_env: "PORT",
+            port_range: {32_000, 32_999},
+            base_url: "http://127.0.0.1:{{port}}",
+            env: %{},
+            ready: %{"path" => "/", "timeout_seconds" => 120, "expect" => "below_500"},
+            login: %{"kind" => "none"},
+            viewports: @default_viewports,
+            default_viewports: ["desktop"],
+            themes: @default_themes,
+            default_themes: ["light"],
+            fixture_check: nil,
+            deny_patterns: [],
+            fixture_email_domains: @default_emails,
+            limits: @default_limits,
+            hosting: @default_hosting,
+            attach: true
+
+  @type t :: %__MODULE__{}
+
+  @doc "The keys a `screenshots` block may carry."
+  @spec keys() :: [String.t()]
+  def keys, do: @keys
+
+  @doc """
+  The effective config for `repo` in `workspace`: `:none` when unset or disabled, `{:ok, config}`,
+  or `{:error, [message]}` for a block that does not validate (a hand-edited row).
+  """
+  @spec resolve(term(), String.t() | nil) :: {:ok, t()} | :none | {:error, [String.t()]}
+  def resolve(%{config: %{"worker" => %{} = worker}}, repo) do
+    case SeedPaths.effective(worker, repo) do
+      %{"screenshots" => %{} = block} -> resolve_block(block, worker)
+      _ -> :none
+    end
+  end
+
+  def resolve(_workspace, _repo), do: :none
+
+  defp resolve_block(block, worker) do
+    merged = inherit_preview(block, Map.get(worker, "preview"), worker)
+
+    case validate(merged, "screenshots") do
+      [] -> if Map.get(merged, "enabled", true) == false, do: :none, else: {:ok, build(merged)}
+      errors -> {:error, errors}
+    end
+  end
+
+  # `preview` per repo is already merged into `worker` by `SeedPaths.effective/2`.
+  defp inherit_preview(block, preview, _worker) when is_map(preview) do
+    block
+    |> put_new("start_cmd", preview["command"])
+    |> put_new("setup_cmd", preview["setup"])
+    |> inherit_ready(preview)
+  end
+
+  defp inherit_preview(block, _preview, _worker), do: block
+
+  defp inherit_ready(block, preview) do
+    from_preview =
+      %{"path" => preview["ready_path"], "timeout_seconds" => preview["ready_timeout"]}
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+      |> Map.new()
+
+    case Map.get(block, "ready") do
+      %{} = ready -> Map.put(block, "ready", Map.merge(from_preview, ready))
+      nil when from_preview != %{} -> Map.put(block, "ready", from_preview)
+      _ -> block
+    end
+  end
+
+  defp put_new(block, _key, nil), do: block
+  defp put_new(block, key, value), do: Map.put_new(block, key, value)
+
+  defp build(block) do
+    d = %__MODULE__{}
+    {:ok, range} = parse_range(Map.get(block, "port_range", "32000-32999"))
+
+    %__MODULE__{
+      ui_paths: block["ui_paths"],
+      ignore_paths: Map.get(block, "ignore_paths", []),
+      plan_required: Map.get(block, "plan_required", true),
+      default_routes: Map.get(block, "default_routes", []),
+      start_cmd: block["start_cmd"],
+      setup_cmd: block["setup_cmd"],
+      seed_cmd: block["seed_cmd"],
+      seeds: Map.get(block, "seeds", %{}),
+      port_env: Map.get(block, "port_env", d.port_env),
+      port_range: range,
+      base_url: Map.get(block, "base_url", d.base_url),
+      env: Map.get(block, "env", %{}),
+      ready: Map.merge(d.ready, Map.get(block, "ready", %{})),
+      login: Map.get(block, "login", d.login),
+      viewports: Map.get(block, "viewports", %{}) |> then(&Map.merge(d.viewports, &1)),
+      default_viewports: Map.get(block, "default_viewports", d.default_viewports),
+      themes: Map.get(block, "themes", %{}) |> then(&Map.merge(d.themes, &1)),
+      default_themes: Map.get(block, "default_themes", d.default_themes),
+      fixture_check: block["fixture_check"],
+      deny_patterns: Map.get(block, "deny_patterns", []),
+      fixture_email_domains: Map.get(block, "fixture_email_domains", d.fixture_email_domains),
+      limits: Map.merge(d.limits, Map.get(block, "limits", %{})),
+      hosting: Map.merge(d.hosting, Map.get(block, "hosting", %{})),
+      attach: Map.get(block, "attach", true)
+    }
+  end
+
+  # ── ui_paths matching ───────────────────────────────────────────────────
+
+  @doc "Does `file` (repo-relative) match `ui_paths` and not `ignore_paths`?"
+  @spec matches_ui_path?(t(), String.t()) :: boolean()
+  def matches_ui_path?(%__MODULE__{} = config, file) when is_binary(file) do
+    Enum.any?(config.ui_paths, &Drift.glob_match?(&1, file)) and
+      not Enum.any?(config.ignore_paths, &Drift.glob_match?(&1, file))
+  end
+
+  @doc "Does any of the changed `files` match `ui_paths` (and not `ignore_paths`)?"
+  @spec touches_ui_paths?(t(), [String.t()]) :: boolean()
+  def touches_ui_paths?(%__MODULE__{} = config, files) when is_list(files),
+    do: Enum.any?(files, &matches_ui_path?(config, &1))
+
+  @doc """
+  Does the diff `base..head` in `checkout` touch `ui_paths`? `{:error, reason}` when git fails.
+  Pass the merge-base as `base`.
+  """
+  @spec diff_touches_ui_paths?(t(), String.t(), String.t(), String.t()) ::
+          {:ok, boolean()} | {:error, String.t()}
+  def diff_touches_ui_paths?(%__MODULE__{} = config, checkout, base, head) do
+    case Drift.git(checkout, ["diff", "--name-only", "--no-renames", base, head]) do
+      {:ok, out} -> {:ok, touches_ui_paths?(config, String.split(out, "\n", trim: true))}
+      {:error, _} = err -> err
+    end
+  end
+
+  # ── validation ──────────────────────────────────────────────────────────
+
+  @doc """
+  Validate a merged `screenshots` block, returning error messages (`[]` = valid). `label` is the
+  config path, e.g. `"worker.repos.app.screenshots"`. `start_cmd` is required here: callers that
+  allow inheritance from `preview` pass the block through `resolve/2`, or use `validate_partial/2`.
+  """
+  @spec validate(term(), String.t()) :: [String.t()]
+  def validate(%{} = block, label) do
+    unknown_errors(block, label) ++ required_errors(block, label) ++ key_errors(block, label)
+  end
+
+  def validate(_block, label), do: ["#{label} must be a map"]
+
+  @doc """
+  Validate a block as written (before merging or preview inheritance): the same checks minus the
+  required `ui_paths` / `start_cmd`, so a repo block may set just the keys it overrides.
+  """
+  @spec validate_partial(term(), String.t()) :: [String.t()]
+  def validate_partial(%{} = block, label),
+    do: unknown_errors(block, label) ++ key_errors(block, label)
+
+  def validate_partial(_block, label), do: ["#{label} must be a map"]
+
+  defp unknown_errors(block, label) do
+    case Map.keys(block) -- @keys do
+      [] ->
+        []
+
+      keys ->
+        [
+          "#{label} has unknown key(s) #{Enum.join(Enum.sort(Enum.map(keys, &to_string/1)), ", ")} " <>
+            "(expected #{Enum.join(@keys, ", ")})"
+        ]
+    end
+  end
+
+  defp required_errors(block, label) do
+    for key <- ~w(ui_paths start_cmd), not Map.has_key?(block, key) do
+      "#{label}.#{key} is required"
+    end
+  end
+
+  defp key_errors(block, label) do
+    Enum.flat_map(@keys, fn key ->
+      case Map.fetch(block, key) do
+        :error -> []
+        {:ok, value} -> validate_key(key, value, "#{label}.#{key}", block)
+      end
+    end)
+  end
+
+  defp validate_key(key, v, label, _b) when key in ~w(enabled plan_required attach),
+    do: if(is_boolean(v), do: [], else: ["#{label} must be a boolean"])
+
+  defp validate_key("ui_paths", v, label, _b), do: glob_list(v, label, :non_empty)
+  defp validate_key("ignore_paths", v, label, _b), do: glob_list(v, label, :any)
+
+  defp validate_key("default_routes", v, label, _b) do
+    if is_list(v) and Enum.all?(v, &(is_binary(&1) and String.starts_with?(&1, "/"))),
+      do: [],
+      else: ["#{label} must be a list of paths starting with /"]
+  end
+
+  defp validate_key(key, v, label, _b) when key in ~w(start_cmd setup_cmd seed_cmd),
+    do: command(v, label)
+
+  defp validate_key("seeds", %{} = v, label, _b),
+    do: Enum.flat_map(v, fn {k, c} -> command(c, "#{label}.#{k}") end)
+
+  defp validate_key("seeds", _v, label, _b), do: ["#{label} must be a map of commands"]
+
+  defp validate_key("port_env", v, label, _b) do
+    if is_binary(v) and Regex.match?(@env_name, v),
+      do: [],
+      else: ["#{label} must be an environment variable name"]
+  end
+
+  defp validate_key("port_range", v, label, _b) do
+    case parse_range(v) do
+      {:ok, {lo, hi}} -> range_errors(lo, hi, label)
+      :error -> [~s(#{label} must be "lo-hi" or [lo, hi] with lo <= hi)]
+    end
+  end
+
+  defp validate_key("base_url", v, label, _b), do: base_url(v, label)
+  defp validate_key("env", v, label, _b), do: env(v, label)
+  defp validate_key("ready", v, label, _b), do: ready(v, label)
+  defp validate_key("login", v, label, _b), do: login(v, label)
+  defp validate_key("viewports", v, label, _b), do: viewports(v, label)
+  defp validate_key("themes", v, label, _b), do: themes(v, label)
+
+  defp validate_key("default_viewports", v, label, b),
+    do: defaults(v, label, Map.keys(Map.merge(@default_viewports, map_or_empty(b["viewports"]))))
+
+  defp validate_key("default_themes", v, label, b),
+    do: defaults(v, label, Map.keys(Map.merge(@default_themes, map_or_empty(b["themes"]))))
+
+  defp validate_key("fixture_check", v, label, _b), do: fixture_check(v, label)
+
+  defp validate_key("deny_patterns", v, label, _b), do: deny_patterns(v, label)
+
+  defp validate_key("fixture_email_domains", v, label, _b) do
+    if is_list(v) and Enum.all?(v, &(is_binary(&1) and &1 != "")),
+      do: [],
+      else: ["#{label} must be a list of domains"]
+  end
+
+  defp validate_key("limits", v, label, _b), do: limits(v, label)
+  defp validate_key("hosting", v, label, _b), do: hosting(v, label)
+
+  defp map_or_empty(%{} = m), do: m
+  defp map_or_empty(_), do: %{}
+
+  defp glob_list(v, label, mode) do
+    cond do
+      not is_list(v) -> ["#{label} must be a list of globs"]
+      mode == :non_empty and v == [] -> ["#{label} must not be empty"]
+      true -> Enum.flat_map(v, &glob(&1, label))
+    end
+  end
+
+  defp glob(g, label) when is_binary(g) and g != "" do
+    cond do
+      Path.type(g) != :relative -> ["#{label} glob #{inspect(g)} must be repo-relative"]
+      ".." in Path.split(g) -> ["#{label} glob #{inspect(g)} must stay in the repo"]
+      true -> []
+    end
+  end
+
+  defp glob(g, label), do: ["#{label} glob #{inspect(g)} must be a non-empty string"]
+
+  defp command(v, label, extra \\ []) do
+    if is_binary(v) and String.trim(v) != "",
+      do: placeholder_errors(v, label, extra),
+      else: ["#{label} must be a non-empty string"]
+  end
+
+  defp placeholder_errors(value, label, extra \\ []) do
+    known = @placeholders ++ extra
+
+    ~r/\{\{\s*([^{}\s]*)\s*\}\}/
+    |> Regex.scan(value)
+    |> Enum.map(fn [_, name] -> name end)
+    |> Enum.reject(&(&1 in known))
+    |> Enum.uniq()
+    |> Enum.map(&"#{label} uses unknown placeholder {{#{&1}}} (known: #{Enum.join(known, ", ")})")
+  end
+
+  defp parse_range(v), do: PreviewConfig.parse_port_range(v)
+
+  defp range_errors(lo, hi, label) do
+    {wlo, whi} = @worker_range
+
+    cond do
+      lo < 1024 or hi > 65_535 -> ["#{label} must lie within 1024-65535"]
+      lo <= whi and hi >= wlo -> ["#{label} overlaps the worker dev-server range #{wlo}-#{whi}"]
+      true -> []
+    end
+  end
+
+  defp base_url(v, label) when is_binary(v) do
+    rendered = String.replace(v, ~r/\{\{\s*port\s*\}\}/, "1")
+
+    case URI.parse(rendered) do
+      %URI{scheme: s, host: h} when s in ["http", "https"] and is_binary(h) ->
+        if h in @loopback,
+          do: placeholder_errors(v, label),
+          else: ["#{label} host must be 127.0.0.1 or localhost"]
+
+      _ ->
+        ["#{label} must be an http(s) URL"]
+    end
+  end
+
+  defp base_url(_v, label), do: ["#{label} must be a string"]
+
+  defp env(%{} = env, label) do
+    Enum.flat_map(env, fn
+      {k, v} when is_binary(k) and is_binary(v) -> env_pair(k, v, label)
+      {k, _} when is_binary(k) -> ["#{label}.#{k} must be a string"]
+      {k, _} -> ["#{label} key #{inspect(k)} is not a valid environment variable name"]
+    end)
+  end
+
+  defp env(_v, label), do: ["#{label} must be a map of strings"]
+
+  defp env_pair(k, v, label) do
+    cond do
+      not Regex.match?(@env_name, k) ->
+        ["#{label} key #{inspect(k)} is not a valid environment variable name"]
+
+      String.upcase(k) in @proxy_keys ->
+        ["#{label}.#{k} may not be set (the capture pass sets its own proxy rules)"]
+
+      scrubbed?(k) ->
+        ["#{label}.#{k} may not be set (scrubbed from worker environments)"]
+
+      true ->
+        foreign_host_errors(v, "#{label}.#{k}") ++ placeholder_errors(v, "#{label}.#{k}")
+    end
+  end
+
+  defp scrubbed?(k), do: k in SpawnEnv.credential_names() or String.starts_with?(k, "CODEX_")
+
+  # A URL or `host:port` whose host is not loopback.
+  defp foreign_host_errors(value, label) do
+    value = String.replace(value, ~r/\{\{[^{}]*\}\}/, "1")
+
+    hosts =
+      Regex.scan(~r{[a-z][a-z0-9+.-]*://(?:[^/@\s]*@)?([^/:\s?#]+)}i, value,
+        capture: :all_but_first
+      ) ++
+        Regex.scan(
+          ~r"(?<![/\w.@-])((?:[a-z0-9-]+\.)+[a-z0-9-]*[a-z][a-z0-9-]*|\d+\.\d+\.\d+\.\d+):\d{2,5}\b"i,
+          value,
+          capture: :all_but_first
+        )
+
+    if Enum.all?(List.flatten(hosts), &(String.downcase(&1) in @loopback)),
+      do: [],
+      else: ["#{label} may not point at a non-loopback host"]
+  end
+
+  defp ready(%{} = v, label) do
+    unknown_keys(v, ~w(path timeout_seconds expect), label) ++
+      check(
+        v,
+        "path",
+        label,
+        &(is_binary(&1) and String.starts_with?(&1, "/")),
+        "must start with /"
+      ) ++
+      check(v, "timeout_seconds", label, &(is_integer(&1) and &1 in 1..3600), "must be 1-3600") ++
+      check(v, "expect", label, &(&1 in ~w(below_500 2xx)), ~s(must be "below_500" or "2xx"))
+  end
+
+  defp ready(_v, label), do: ["#{label} must be a map"]
+
+  defp unknown_keys(map, allowed, label) do
+    case Map.keys(map) -- allowed do
+      [] -> []
+      keys -> ["#{label} has unknown key(s) #{Enum.join(Enum.sort(keys), ", ")}"]
+    end
+  end
+
+  # An error unless `key` is absent or its value satisfies `pred`.
+  defp check(map, key, label, pred, message) do
+    case Map.fetch(map, key) do
+      {:ok, value} -> if pred.(value), do: [], else: ["#{label}.#{key} #{message}"]
+      :error -> []
+    end
+  end
+
+  defp login(%{"kind" => "none"}, _label), do: []
+
+  defp login(%{"kind" => "form"} = v, label) do
+    strings =
+      for k <- ~w(path username_selector password_selector submit_selector),
+          not (is_binary(v[k]) and v[k] != ""),
+          do: "#{label}.#{k} must be a non-empty string"
+
+    strings ++
+      personas_form(v["personas"], label) ++
+      default_persona(v, label, persona_names(v["personas"]))
+  end
+
+  defp login(%{"kind" => "cmd"} = v, label) do
+    cmd = command(v["cmd"], "#{label}.cmd", ["persona"])
+
+    names =
+      case v["personas"] do
+        l when is_list(l) and l != [] and is_list(l) -> l
+        _ -> nil
+      end
+
+    personas =
+      if is_list(names) and Enum.all?(names, &(is_binary(&1) and &1 != "")),
+        do: [],
+        else: ["#{label}.personas must be a non-empty list of names"]
+
+    cmd ++ personas ++ default_persona(v, label, if(is_list(names), do: names, else: []))
+  end
+
+  defp login(%{} = _v, label), do: [~s(#{label}.kind must be "none", "form" or "cmd")]
+  defp login(_v, label), do: ["#{label} must be a map"]
+
+  defp personas_form(%{} = p, label) when map_size(p) > 0 do
+    Enum.flat_map(p, fn
+      {_n, %{"username" => u, "password" => pw}} when is_binary(u) and is_binary(pw) ->
+        []
+
+      {n, _} ->
+        ["#{label}.personas.#{n} needs a username and password (fixture credentials only)"]
+    end)
+  end
+
+  defp personas_form(_p, label), do: ["#{label}.personas must be a non-empty map"]
+
+  defp persona_names(%{} = p), do: Map.keys(p)
+  defp persona_names(_), do: []
+
+  defp default_persona(v, label, names) do
+    case v["default_persona"] do
+      nil -> []
+      d -> if d in names, do: [], else: ["#{label}.default_persona must name one of the personas"]
+    end
+  end
+
+  defp viewports(%{} = v, label) do
+    Enum.flat_map(v, fn {name, spec} ->
+      l = "#{label}.#{name}"
+
+      cond do
+        not (is_binary(name) and Regex.match?(@name, name)) ->
+          ["#{label} name #{inspect(name)} must match [a-z0-9-]{1,20}"]
+
+        not is_map(spec) ->
+          ["#{l} must be a map"]
+
+        true ->
+          dim(spec["width"], l <> ".width", 200..3840) ++
+            dim(spec["height"], l <> ".height", 200..4000) ++
+            scale(spec["device_scale_factor"], l)
+      end
+    end)
+  end
+
+  defp viewports(_v, label), do: ["#{label} must be a map"]
+
+  defp dim(n, label, range) do
+    if is_integer(n) and n in range,
+      do: [],
+      else: ["#{label} must be #{range.first}-#{range.last}"]
+  end
+
+  defp scale(nil, _l), do: []
+
+  defp scale(s, l) do
+    if is_number(s) and s >= 1 and s <= 3, do: [], else: ["#{l}.device_scale_factor must be 1-3"]
+  end
+
+  defp themes(%{} = v, label) do
+    Enum.flat_map(v, fn {name, spec} ->
+      cond do
+        not (is_binary(name) and Regex.match?(@name, name)) ->
+          ["#{label} name #{inspect(name)} must match [a-z0-9-]{1,20}"]
+
+        not is_map(spec) ->
+          ["#{label}.#{name} must be a map"]
+
+        spec["color_scheme"] not in [nil, "light", "dark"] ->
+          [~s(#{label}.#{name}.color_scheme must be "light" or "dark")]
+
+        true ->
+          []
+      end
+    end)
+  end
+
+  defp themes(_v, label), do: ["#{label} must be a map"]
+
+  defp defaults(v, label, known) do
+    if is_list(v) and v != [] and Enum.all?(v, &(&1 in known)),
+      do: [],
+      else: [
+        "#{label} must be a non-empty list of configured names (#{Enum.join(Enum.sort(known), ", ")})"
+      ]
+  end
+
+  defp fixture_check(%{"marker" => %{"path" => p, "contains" => c}}, _label)
+       when is_binary(p) and is_binary(c) and c != "",
+       do:
+         if(String.starts_with?(p, "/"),
+           do: [],
+           else: ["fixture_check.marker.path must start with /"]
+         )
+
+  defp fixture_check(_v, label),
+    do: ["#{label} must be {\"marker\": {\"path\": \"/..\", \"contains\": \"..\"}}"]
+
+  defp deny_patterns(v, label) when is_list(v) do
+    Enum.flat_map(v, fn
+      p when is_binary(p) ->
+        case Regex.compile(p) do
+          {:ok, _} -> []
+          {:error, _} -> ["#{label} pattern #{inspect(p)} is not a valid regex"]
+        end
+
+      p ->
+        ["#{label} pattern #{inspect(p)} must be a string"]
+    end)
+  end
+
+  defp deny_patterns(_v, label), do: ["#{label} must be a list of regexes"]
+
+  defp limits(%{} = v, label) do
+    unknown = Map.keys(v) -- Map.keys(@default_limits)
+
+    unknown_errors =
+      if unknown == [],
+        do: [],
+        else: ["#{label} has unknown key(s) #{Enum.join(Enum.sort(unknown), ", ")}"]
+
+    unknown_errors ++
+      Enum.flat_map(Map.drop(v, unknown), fn
+        {"memory", m} -> memory(m, label)
+        {k, n} -> positive_limit(k, n, label)
+      end)
+  end
+
+  defp limits(_v, label), do: ["#{label} must be a map"]
+
+  defp positive_limit(k, n, label) do
+    max = Map.get(@limit_max, k)
+
+    cond do
+      not (is_integer(n) and n > 0) -> ["#{label}.#{k} must be a positive integer"]
+      max && n > max -> ["#{label}.#{k} must be at most #{max}"]
+      true -> []
+    end
+  end
+
+  defp memory(m, label) do
+    case is_binary(m) && Regex.run(~r/\A(\d+)([mg])\z/, m) do
+      [_, n, unit] ->
+        gib = String.to_integer(n) / if(unit == "g", do: 1, else: 1024)
+
+        if gib > 0 and gib <= @max_memory_gib,
+          do: [],
+          else: ["#{label}.memory must be > 0 and at most #{@max_memory_gib}g"]
+
+      _ ->
+        [~s(#{label}.memory must look like "512m" or "4g")]
+    end
+  end
+
+  defp hosting(%{} = v, label) do
+    unknown_keys(v, ~w(github public_repo_ok retention_days), label) ++
+      check(v, "public_repo_ok", label, &is_boolean/1, "must be a boolean") ++
+      check(
+        v,
+        "retention_days",
+        label,
+        &(is_integer(&1) and &1 > 0),
+        "must be a positive integer"
+      ) ++
+      check(
+        v,
+        "github",
+        label,
+        &github_hosting?/1,
+        ~s(must be {"mode": "assets_branch", "branch": ".."})
+      )
+  end
+
+  defp hosting(_v, label), do: ["#{label} must be a map"]
+
+  defp github_hosting?(%{"mode" => "assets_branch", "branch" => b}), do: is_binary(b) and b != ""
+  defp github_hosting?(_), do: false
+end

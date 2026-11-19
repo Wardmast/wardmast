@@ -123,7 +123,7 @@ defmodule WardmastCli.Main do
 
       ward server start    [--timeout SECONDS] [--json]
       ward server restart  [--timeout SECONDS] [--json]
-      ward server deploy   [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]
+      ward server deploy   [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force] [--allow-active-workers]
                            deploy from a GitHub Release (add --git-pull for the
                            legacy git-pull deploy).
       ward server migrate  [--json]

@@ -55,7 +55,6 @@
   {"lib/wardmast/worker/review_gate.ex", :pattern_match_cov},
   {"lib/wardmast/worker/watchdog.ex", :pattern_match_cov},
   {"lib/wardmast/workflows/machine.ex", :pattern_match_cov},
-  {"lib/wardmast/workflows/pr_patrol.ex", :pattern_match_cov},
   {"lib/wardmast/workflows/review_patrol.ex", :pattern_match_cov},
   {"lib/wardmast_cli/cmd/loop.ex", :pattern_match_cov},
   {"lib/wardmast_web/live/loop_proposal_index_live.ex", :pattern_match_cov},

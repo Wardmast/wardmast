@@ -66,6 +66,7 @@ defmodule Wardmast.Mergers.Gitlab do
   alias Wardmast.Mergers.CIQueue
   alias Wardmast.Mergers.CIRerun
   alias Wardmast.Mergers.Gitlab.{Budget, Config, Endpoint, Error}
+  alias Wardmast.Mergers.ImageHosting
 
   @stub_name Wardmast.Mergers.Gitlab.HTTP
 
@@ -155,7 +156,11 @@ defmodule Wardmast.Mergers.Gitlab do
            |> recheck_phantom_conflict(cfg, iid) do
         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
           merge_status = Map.get(body, "merge_status", "")
-          {pipeline, pipeline_id} = fetch_pipeline_status(cfg, iid, Map.get(body, "sha"))
+
+          {pipeline, pipeline_id, pipeline_raw} =
+            fetch_pipeline_status(cfg, iid, Map.get(body, "sha"))
+
+          skipped? = pipeline_raw == "skipped"
           status = map_state(Map.get(body, "state"))
           block_reason = block_reason(cfg, body, status, pipeline, pipeline_id)
           review = review_signal(cfg, iid, body, false)
@@ -187,9 +192,15 @@ defmodule Wardmast.Mergers.Gitlab do
              latest_review_id: review.latest_review_id,
              pipeline: pipeline,
              pipeline_id: pipeline_id,
+             # The head's newest pipeline is GitLab's `skipped` (0 jobs, e.g. a
+             # main-merge push the workflow:rules passed over). It maps to
+             # `:neutral` for the merge decision but is no CI result: the
+             # Watchdog starts a fresh MR pipeline for it (#1564).
+             pipeline_skipped: skipped?,
              # No pipeline on a head that needs one is not green CI, whatever the
-             # legacy `merge_status` says (#918).
-             ci_clean: merge_status == "can_be_merged" and block_reason != :no_pipeline,
+             # legacy `merge_status` says (#918); nor is a skipped one.
+             ci_clean:
+               merge_status == "can_be_merged" and block_reason != :no_pipeline and not skipped?,
              conflicting: settled_conflict?(body),
              block_reason: block_reason,
              url: Map.get(body, "web_url") || link_for(ref_for(iid))
@@ -559,6 +570,7 @@ defmodule Wardmast.Mergers.Gitlab do
          {:ok, mr} <- request(cfg, :get, "/merge_requests/#{iid}", []) |> handle_json(),
          {:ok, pipelines} <- head_pipelines(cfg, iid, Map.get(mr, "sha")),
          {:ok, pipeline} <- rerun_base_pipeline(pipelines, requested, Map.get(mr, "sha")) do
+      requested = skipped_rerun_mode(pipeline, requested)
       jobs = rerun_jobs(cfg, Map.get(pipeline, "id"))
 
       decision =
@@ -702,6 +714,10 @@ defmodule Wardmast.Mergers.Gitlab do
   # `:all_jobs` / `:workflow` start a fresh pipeline, so they need no existing one
   # (a head whose workflow:rules created none is exactly when they are wanted).
   defp rerun_base_pipeline([], mode, _sha) when mode in [:all_jobs, :workflow], do: {:ok, %{}}
+
+  # A `skipped` head pipeline ran no job: nothing to retry, and no verdict. Start
+  # a fresh MR pipeline instead of refusing (#1564).
+  defp rerun_base_pipeline([%{"status" => "skipped"} | _], _mode, _sha), do: {:ok, %{}}
   defp rerun_base_pipeline(pipelines, _mode, sha), do: settled_failed_pipeline(pipelines, sha)
 
   defp settled_failed_pipeline([], sha),
@@ -756,6 +772,13 @@ defmodule Wardmast.Mergers.Gitlab do
     |> Map.values()
     |> Enum.max(fn -> 1 end)
   end
+
+  # No base pipeline (a skipped head): only a fresh pipeline can run.
+  defp skipped_rerun_mode(pipeline, mode)
+       when map_size(pipeline) == 0 and mode in [:auto, :failed_jobs],
+       do: :all_jobs
+
+  defp skipped_rerun_mode(_pipeline, mode), do: mode
 
   defp pick_mode(requested, decision, _jobs)
        when requested in [:failed_jobs, :all_jobs, :workflow],
@@ -952,6 +975,55 @@ defmodule Wardmast.Mergers.Gitlab do
          {:ok, iid} <- iid_from_ref(mr_ref) do
       request(cfg, :put, "/merge_requests/#{iid}", json: %{"description" => body})
       |> handle_ok()
+    end
+  end
+
+  @impl true
+  def get_description(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, mr} <- cfg |> request(:get, "/merge_requests/#{iid}", []) |> handle_json() do
+      {:ok, Map.get(mr, "description")}
+    end
+  end
+
+  @impl true
+  def host_images(mr_ref, images, opts) when is_binary(mr_ref) and is_list(images) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         :ok <- check_upload_visibility(cfg, opts) do
+      {:ok, Map.new(images, fn image -> {image.name, upload_image(cfg, image)} end)}
+    end
+  end
+
+  # Public (or unknown/unreadable) projects fail closed: an uploaded image is
+  # world-readable and irrevocable in practice (design §7.4). `internal` is
+  # treated like `private`.
+  defp check_upload_visibility(cfg, opts) do
+    if Map.get(opts, :public_repo_ok, false) do
+      :ok
+    else
+      case cfg |> request(:get, "", []) |> handle_json() do
+        {:ok, %{"visibility" => v}} when v in ["private", "internal"] -> :ok
+        _ -> {:error, :public_repo_blocked}
+      end
+    end
+  end
+
+  # `POST /projects/:id/uploads` (multipart `file`). The client's default
+  # `content-type: application/json` would clobber the multipart boundary, so
+  # it is dropped and Req sets the right one.
+  defp upload_image(cfg, %{name: name, data: data}) do
+    client = client(cfg)
+    headers = Enum.reject(client.headers, fn {k, _} -> String.downcase(k) == "content-type" end)
+    file = {data, filename: name, content_type: ImageHosting.content_type(name)}
+
+    result =
+      Client.request(client, :post, "/uploads", headers: headers, form_multipart: [file: file])
+
+    case handle_json(result) do
+      {:ok, %{"url" => url}} when is_binary(url) and url != "" -> {:ok, url}
+      {:ok, _} -> {:error, "GitLab upload response carried no url"}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -1650,7 +1722,8 @@ defmodule Wardmast.Mergers.Gitlab do
             number: iid,
             title: mr["title"] || "",
             url: mr["web_url"] || "",
-            author: get_in(mr, ["author", "username"])
+            author: get_in(mr, ["author", "username"]),
+            head_sha: mr["sha"]
           }
         end)
 
@@ -2138,12 +2211,16 @@ defmodule Wardmast.Mergers.Gitlab do
         |> head_pipeline_candidates(head_sha)
         |> newest_first()
         |> case do
-          [latest | _] -> {map_pipeline_status(Map.get(latest, "status")), Map.get(latest, "id")}
-          [] -> {:pending, nil}
+          [latest | _] ->
+            raw = Map.get(latest, "status")
+            {map_pipeline_status(raw), Map.get(latest, "id"), raw}
+
+          [] ->
+            {:pending, nil, nil}
         end
 
       _ ->
-        {nil, nil}
+        {nil, nil, nil}
     end
   end
 
