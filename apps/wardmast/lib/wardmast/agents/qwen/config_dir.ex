@@ -26,7 +26,7 @@ defmodule Wardmast.Agents.Qwen.ConfigDir do
   read-only as a mount of its own, after every writable mount, and refuses to
   start without it: inside the jail, writing, deleting or replacing the file and
   moving the directory aside are all refused (`qwen/jail_bwrap_test.exs`, which
-  CI's `jail` job runs on every runner image, bd-bzhpgi). It moved out of `HOME`
+  CI's `jail` job runs on ubuntu-24.04 and ubuntu-26.04, bd-bzhpgi). It moved out of `HOME`
   for a 26.04 failure (bd-c609gj) that turned out to be that test attacking a
   path nothing mounted; a read-only mount nested in the writable home holds too
   (`Wardmast.Worker.Jail`'s `:readonly_paths`). It holds:
