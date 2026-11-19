@@ -63,4 +63,9 @@ defmodule Wardmast.Worker.ReviewGateMrBriefTest do
     assert prompt =~ "MR/PR description and the pipeline data"
     refute prompt =~ "Head pipeline (fetched by Wardmast)"
   end
+
+  test "bd-7m35lc: the prompt flags an author whose tests never ran", %{state: s} do
+    refute ReviewGate.review_prompt(s) =~ "TESTS NOT RUN"
+    assert ReviewGate.review_prompt(Map.put(s, :tests_not_run, true)) =~ "TESTS NOT RUN"
+  end
 end

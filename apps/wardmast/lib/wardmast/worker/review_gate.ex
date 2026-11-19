@@ -1054,6 +1054,8 @@ defmodule Wardmast.Worker.ReviewGate do
       # author opened the PR before the gate ran. nil when no hosted merger is
       # configured — the reviewer then falls back to the local branch diff.
       pr_ref: Keyword.get(opts, :pr_ref),
+      # bd-7m35lc: the author's `run_tests` never produced a pass/fail result.
+      tests_not_run: Keyword.get(opts, :tests_not_run, false),
       command: Keyword.get(opts, :command),
       # bd-869mmg: test-only escape hatch alongside `:command` — tags the
       # fixture reviewer argv's output as a specific provider's wire format
@@ -8977,7 +8979,7 @@ defmodule Wardmast.Worker.ReviewGate do
 
       Acceptance criteria:
       #{task.acceptance}
-      #{tracker_spec_block(task)}
+      #{tracker_spec_block(task)}#{tests_not_run_block(state)}
       The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`.
       #{head_sha_instruction(state)}#{review_checkout_block(state)}
       #{scope_guidance(state)}
@@ -9026,6 +9028,11 @@ defmodule Wardmast.Worker.ReviewGate do
           arb done
       """
   end
+
+  defp tests_not_run_block(%{tests_not_run: true}),
+    do: "\n" <> Wardmast.Worker.TestSignal.note() <> "\n"
+
+  defp tests_not_run_block(_state), do: ""
 
   # A tracker-claimed ticket with no checklist or acceptance section carries the
   # tracker-spec waiver: its description IS the spec. Say so, so the reviewer

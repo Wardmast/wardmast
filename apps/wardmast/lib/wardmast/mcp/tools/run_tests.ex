@@ -15,13 +15,16 @@ defmodule Wardmast.MCP.Tools.RunTests do
   alias Wardmast.MCP.Tools
   alias Wardmast.Worker
   alias Wardmast.Worker.TestRun
+  alias Wardmast.Worker.TestSignal
 
   @spec run_tests(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def run_tests(%Scope{} = scope, args) do
     with {:ok, task_id} <- Tools.resolve_task_id(scope, args, "id"),
          {:ok, request} <- request(args),
          {:ok, runner} <- runner(task_id),
-         {:ok, result} <- run(runner, request) do
+         {:ok, result} <- run(task_id, runner, request) do
+      # Nothing mapped to a test (`ran?: false`) is not an inability: not recorded.
+      if result.ran?, do: Worker.note_test_outcome(task_id, TestSignal.outcome(result))
       {:ok, response(result)}
     end
   end
@@ -59,10 +62,15 @@ defmodule Wardmast.MCP.Tools.RunTests do
     end
   end
 
-  defp run(runner, request) do
+  defp run(task_id, runner, request) do
     case TestRun.run(runner, request) do
-      {:ok, result} -> {:ok, result}
-      {:error, message} -> {:error, {:invalid, message}}
+      {:ok, result} ->
+        {:ok, result}
+
+      {:error, message} ->
+        # bd-7m35lc: an attempt that could not give a result still counts.
+        Worker.note_test_outcome(task_id, :not_run)
+        {:error, {:invalid, message}}
     end
   end
 

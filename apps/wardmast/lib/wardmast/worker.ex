@@ -942,6 +942,22 @@ defmodule Wardmast.Worker do
   end
 
   @doc """
+  Record what a `run_tests` call came to for task `task_id`'s run (bd-7m35lc):
+  `:ran` (a passing or failing result) or `:not_run`. The commit gate and the
+  ReviewGate read it back through `Wardmast.Worker.TestSignal`. A task with no live
+  worker records nothing.
+  """
+  @spec note_test_outcome(String.t(), Wardmast.Worker.TestSignal.outcome()) :: :ok
+  def note_test_outcome(task_id, outcome) when is_binary(task_id) do
+    case whereis(task_id) do
+      nil -> :ok
+      pid -> GenServer.call(pid, {:note_test_outcome, outcome})
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
   Does this worker currently own an agent subprocess that has not exited?
 
   bd-2aslx6 (#1428): the dispatch path reuses a live worker's registration, so
@@ -2651,6 +2667,10 @@ defmodule Wardmast.Worker do
 
     {:reply, reply, state}
   end
+
+  def handle_call({:note_test_outcome, outcome}, _from, %State{} = state),
+    do:
+      {:reply, :ok, %State{state | meta: Wardmast.Worker.TestSignal.record(state.meta, outcome)}}
 
   # bd-2aslx6: see `agent_session_live?/1`.
   def handle_call(:agent_session_live?, _from, %State{} = state) do
@@ -5640,6 +5660,13 @@ defmodule Wardmast.Worker do
   end
 
   defp proceed_after_gate(%State{} = state, branch) do
+    if Wardmast.Worker.TestSignal.not_run?(state.meta) do
+      Logger.warning(
+        "Worker: task=#{state.task_id} completed with tests not run: its run_tests calls " <>
+          "never produced a passing or failing result (bd-7m35lc)"
+      )
+    end
+
     sync_back_after_run(state)
     route_completion(state, branch)
   end
@@ -8567,6 +8594,8 @@ defmodule Wardmast.Worker do
         |> maybe_opt(:timeout_retries, Map.get(meta, :review_timeout_retries))
         |> maybe_opt(:rounds, resolve_review_rounds(state))
         |> maybe_opt(:pr_ref, Map.get(meta, :review_pr_ref))
+        # bd-7m35lc: the author's `run_tests` never produced a result.
+        |> maybe_opt(:tests_not_run, Wardmast.Worker.TestSignal.not_run?(meta) || nil)
         # bd-cut6uv: test escape hatches over CI-gated review (see
         # `Wardmast.Worker.ReviewCi`); unset in production, where the workspace's
         # `review.require_ci_green` decides.
