@@ -121,7 +121,7 @@ defmodule Wardmast.Workflows.PRPatrol.AuthorScope do
         _ -> "Wardmast's own PRs (no linked ticket, not authored by pr_patrol.our_login)"
       end
 
-    "#{ref} is authored by #{author || "an unknown author"}, outside #{scope}; " <>
+    "#{ref} is authored by #{author}, outside #{scope}; " <>
       "set pr_patrol.author_logins to \"*\" to allow pushes to other authors' branches"
   end
 
