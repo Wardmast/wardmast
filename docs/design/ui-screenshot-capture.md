@@ -230,7 +230,11 @@ come from the host side, **without opening the sandbox**. Operator guide: [scree
   TCP:127.0.0.1:<port>`); a container that stops meanwhile fails at once. Any failure is
   `boot_failed` with `detail.phase = services`, the service, the reason and the tail of its
   `podman logs`, in `capture.json` and in the escalation the ReviewGate sends; the app never
-  boots, and nothing runs unsandboxed instead. Whatever the boot started is removed first.
+  boots, and nothing runs unsandboxed instead. Whatever the boot started is removed first. The
+  pull and the waits are bounded by the capture's budget, and `podman run` runs under `timeout
+  -k`, so a hung podman is killed rather than left to create its container later. An image's
+  `VOLUME` is a tmpfs (`--image-volume tmpfs`) and `rm --volumes` removes anything anonymous, so
+  no volume outlives its boot.
 * **Removal on every exit path.** `Capture` stops a boot's services in an `after` (success, a boot,
   shot or budget failure, a crash). `Services.Reaper` covers the rest: containers are tracked
   *before* they run; the owner (the capture task) dying by any means removes them on `:DOWN`;
@@ -245,6 +249,14 @@ come from the host side, **without opening the sandbox**. Operator guide: [scree
     deletes `mix.lock` is `{:skipped, {:deps_changed, reason}}` (`skip_kind: deps_changed`; the
     ReviewGate proceeds and tells the reviewer why). The head's `mix.exs` and lockfile never run
     with a network; running the trusted commit's `mix.exs` is the same trust as merging it.
+  * **Trust comes from origin, never from the checkout** (a review finding): the worker's refs
+    and objects are writable from its jail, so a moved `refs/remotes/origin/main` could have made
+    a worker commit the source. The default branch's tip is read live with `git ls-remote origin`
+    (the URL is in the repository config the jail keeps read-only) and fetched through the pack
+    protocol, which names every object by the hash of its own content (`transfer.fsckObjects`
+    on), into `<root>/repos/<hash>.git`, a bare repository only the server writes. The ancestry
+    check, the trusted lockfile, `.tool-versions` and the seed's `git archive` all come from
+    there. An object forged in the worker's store fails the fetch: `deps_failed`, never its code.
   * **Seeded once per lockfile and toolchain** under `<scratch_root>/capture-deps/<lock12>-<toolchain12>`,
     the toolchain being what `elixir` reports *inside the sandbox* (with the source's
     `.tool-versions`), because Hex, rebar3 and precompiled NIFs are bound to it. The seed runs in
@@ -256,7 +268,10 @@ come from the host side, **without opening the sandbox**. Operator guide: [scree
     `RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH` in the cache) and the esbuild/tailwind installers when
     those deps are present. Published by an atomic rename with a `.complete` stamp; a failure
     leaves nothing and is `deps_failed` (an infrastructure fault). Caches unused for 14 days are
-    pruned.
+    pruned. What the seed leaves is untrusted to the host (a default-branch dependency can be
+    malicious): its directories are moved whole into a staging directory the seed never saw, and
+    only when they are real directories; the asset tools are copied only as regular files from a
+    real `_build`; the stamp and the rename happen in staging. No link it plants is followed.
   * **Read-only in the boot** (`box.cache_dirs`, bound after the masks) and wired through
     `MIX_DEPS_PATH`, `MIX_HOME`, `HEX_HOME`, `HEX_OFFLINE=1`, the two NIF cache variables and
     `MIX_ESBUILD_PATH`/`MIX_TAILWIND_PATH`, set after the config's `env` (which may not set them
@@ -276,7 +291,11 @@ come from the host side, **without opening the sandbox**. Operator guide: [scree
   "internet but not loopback" without a user-mode network stack); it runs only default-branch
   code. A dependency that writes into its own source directory while compiling fails offline (the
   cache is read-only). The bridge runs as the server's user; it only copies bytes between the
-  app's relay and the service.
+  app's relay and the service. The boot sweep judges a server by its OS pid alone (as
+  `TestServices` does): a dead server whose pid was reused keeps its containers until a later
+  boot, and a second Wardmast in another pid namespace sharing the same podman storage could
+  take a live one's for orphans. A checkout that commits `_build` as a link gets no asset-tool
+  links (a setup failure): the host never writes through a path the worker chose.
 * **Tests.** `Services.PodmanTest` (fake podman and bridge: flags, unique names per boot,
   readiness, the log tail, removal on every failure, the reaper on a killed owner and at
   shutdown, the orphan sweep); `PodmanCaptureServicesTest` (`:podman`, opt-in: a real container,

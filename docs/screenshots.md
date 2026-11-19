@@ -141,7 +141,8 @@ an empty database.
 
 **How the app reaches it, and nothing else.** Each container runs with `--network none` (only
 its own `lo`), no published port, nothing of the host mounted, `no-new-privileges` and a short
-capability list. Wardmast reaches it through its own namespace: a `socat` that `nsenter` puts in
+capability list; an image's `VOLUME` is a tmpfs, so a database's data lives in RAM and goes with
+the container. Wardmast reaches it through its own namespace: a `socat` that `nsenter` puts in
 the container's network namespace listens on a Unix socket on the host (a fresh `0700` directory
 under the socket root) and connects to `127.0.0.1:<port>` inside the container. That socket is
 shown read-only inside the app's sandbox, where a relay listens on `127.0.0.1:<port>`. The app
@@ -172,6 +173,10 @@ network namespace, so two services cannot talk to each other.
   on the default branch, else the default branch tip's when it is the same file. A head that
   edits, adds or deletes `mix.lock` is **skipped** (`skip_kind: deps_changed`, with the reason):
   the head's own `mix.exs` and lockfile never run with a network. The reviewer is told why.
+  The default branch's tip is read live from origin (`git ls-remote`) and fetched, with every
+  object re-hashed, into a repository only the server writes (`<scratch_root>/capture-deps/repos/`):
+  nothing the worker can write in its own checkout (a moved ref, a forged object) decides what
+  runs. When origin cannot be read, the capture fails with `deps_failed`.
 * **Built once per lockfile and toolchain**, under `<scratch_root>/capture-deps/<lock>-<toolchain>`
   (the toolchain is what `elixir` reports inside the sandbox, so a new Elixir/OTP misses it).
   The seed runs in the default branch's `git archive`, in the same sandbox **with the network
