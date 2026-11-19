@@ -403,7 +403,7 @@ defmodule Wardmast.Workflows.PRPatrol do
   # bd-bq8c8a: the ReviewGate owns the branch while it is running, and nothing
   # else may commit to it.
   #
-  # `author_allowed?/2` is scoped to the fleet identity precisely so patrol
+  # `author_allowed?/3` is scoped to the fleet identity precisely so patrol
   # answers review threads on the fleet's OWN PRs — which is also every PR the
   # gate could be holding. On 2026-09-17 that overlap fired: two inline Copilot
   # comments landed on a fleet PR whose task was still waiting on the review
