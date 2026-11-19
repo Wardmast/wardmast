@@ -299,8 +299,63 @@ pod:       for role in [before(base), after(head)]:
   bd-bhrsdv only ever inside the bwrap capture sandbox (§2, "As implemented: the capture
   sandbox"; no sandbox is `{:skipped, {:no_sandbox, reason}}`), and
   `Shooter.Chromium` cannot run steps, `wait_for`, `target`, `full_page`, `hide`, a login or theme
-  `local_storage`: it fails the shot naming the unsupported field (the CDP runner of N1 is a
-  drop-in `Shooter`). `Capture.poster_pairs/1` hands the pairs to `Screenshots.Poster`.
+  `local_storage`: it fails the shot naming the unsupported field. `Capture.poster_pairs/1` hands
+  the pairs to `Screenshots.Poster`. (The default shooter is now `Shooter.Auto`; see N1 below.)
+
+* **As implemented: N1 (bd-485ts3), the login-capable capture shooter.** Built as a second
+  `Shooter` behind the seam above rather than the whole runner/manifest of §11's N1 row (the
+  manifest, boot loop and marker/DOM scans already live in `Screenshots.Capture` and the later
+  tickets). What shipped:
+  * `Shooter.Cdp` + `priv/capture/runner.mjs` (Node + `playwright-core` 1.65.1 over CDP): one
+    runner process and one fresh browser context per image. It does a **form login**, `steps`
+    (all eleven actions of §5.2), `wait_for`, `target`, `full_page` (clipped to 8000 px), `hide`
+    and the theme's `local_storage`, with timezone UTC, locale `en-US`, the viewport's size and
+    scale, reduced motion, animations off, a frozen clock (`2026-01-01T12:00:00Z`) and a
+    network-idle + font-ready wait. Isolation as before and a little more: a non-loopback
+    `base_url` is refused, the browser resolves no host but loopback and every non-loopback
+    request is aborted.
+  * `Shooter.Auto` is the capture step's default shooter: the command-line `Shooter.Chromium`
+    keeps every shot it can do, `Shooter.Cdp` takes any shot for which
+    `Shooter.Chromium.unsupported/1` is non-empty (login, steps, `wait_for`, `target`,
+    `full_page`, `hide`, theme `local_storage`); one list, so the two cannot drift.
+  * **Login semantics.** `login.success` is now defined and validated
+    (`Screenshots.Config`): `{"path_not": "/login"}` (the browser has left that path) and/or
+    `{"url_not_contains": "/sign-in"}` (its URL lacks that text), every given condition must hold
+    after the form is submitted; any other shape is refused. Unset, it defaults to
+    `path_not = login.path`. The shot **fails**, with the persona and where the browser ended
+    up, when the condition does not hold within the login timeout (10 s); when the condition
+    already holds on the sign-in page itself (it could not tell a failed login from a good one);
+    and when the shot's route, or a step, lands back on the sign-in page. A sign-in page is
+    never shot as an "after". `login.kind` `cmd` is not supported by this shooter (it fails the
+    shot with that reason).
+  * **Packaging: in the worker image, not a sidecar.** The shared base
+    (`Image.base_containerfile/1`) gets the runner and `playwright-core` (`npm ci
+    --ignore-scripts` from the lockfile, so version and integrity are pinned; no browser
+    download: the image's Chromium is used) under `/opt/arbiter/capture`, and Node's binary
+    from the official Node image, pinned by digest like every other `FROM`, at
+    `/opt/arbiter/capture/bin/node`, off `PATH` so a repo's own Node layer is untouched. The
+    image sets `ARB_CAPTURE_DIR`. Release CI's `scripts/worker-image-smoke.sh` now also runs
+    `scripts/worker-image-smoke-capture.sh` in the built base: a login-gated loopback page is
+    shot through the real runner and a wrong password must fail. This supersedes the sidecar
+    sketch in §4 for the shooter: capture already runs where `$ARB_CHROME` is, and a second image
+    is a second thing to pin and keep in step. (The "one browser build for before and after"
+    argument still holds: both shots come from the same image.)
+  * Tests: `Shooter.CdpTest` drives the real runner against a login-gated fixture app
+    (`Wardmast.Test.CdpFixtureApp`) for correct and wrong credentials, both success conditions, an
+    unmet condition, a session that does not hold, steps, `wait_for`, `target`, `full_page`,
+    theme `local_storage`, determinism and the loopback rule; it is skipped where node,
+    `playwright-core` or Chromium is missing (`ARB_REQUIRE_CDP=1` makes that a failure).
+    `RunnerImageTest` pins the Containerfile (runner and lockfile baked byte for byte, digest
+    pin, node off `PATH`).
+  * **Where it runs today.** `Capture.run/2` still runs in the coordinator process on the host
+    (the pod is N2), so a host needs Node and the runner's dependency: `npm ci` in
+    `apps/wardmast/priv/capture`, or `ARB_CAPTURE_DIR` / `ARB_CAPTURE_NODE` pointing at a
+    checkout or an image's copy. Without them the shot fails with a reason naming what is missing.
+  * **What remains.** The image build itself (and so the image smoke) is exercised only by
+    release CI, not by `mix test`. No `doctor` probe reports a missing runner on the host. No
+    `cmd` login. The §5.3 manifest fields, the §9 marker probe and DOM text scan, the pod and
+    `--network none` (N2/N4) are not part of this. Before-and-after shots log in once per image
+    (one context per shot), which is simple and costs about a second each.
 
 ## 5. The worker → Arbiter contract (D3)
 
@@ -461,7 +516,7 @@ win; `env` and the `viewports`/`themes`/`seeds` maps merge by key, like `preview
       "kind": "form",                        // none | form | cmd
       "default_persona": "admin",
       "path": "/login", "username_selector": "#email", "password_selector": "#password",
-      "submit_selector": "button[type=submit]", "success": {"selector": "#nav"},
+      "submit_selector": "button[type=submit]", "success": {"path_not": "/login"},  // and/or {"url_not_contains": "/sign-in"}; default: path_not = path
       "personas": {"admin": {"username": "admin@example.com", "password": "fixture-only-password"}}
       // kind "cmd": {"cmd": "mix run priv/repo/screenshot_login.exs {{persona}}", "personas": ["admin","viewer"], "default_persona": "admin"}
       //   stdout = Playwright storageState JSON (≤ 64 KiB), run after seeding, in the boot's env
@@ -779,7 +834,7 @@ anywhere before N2 is enabled.
 | **bd-6301r0** Worker images ship headless Chromium | **Retarget.** Do *not* put Chromium in every repo worker image. Build, pin and publish one `arbiter-capture` sidecar image (Chromium + `playwright-core` + the `arb-capture` runner of N1) through the existing image publisher, with a fixed font set. Remove "per-repo Containerfile" wording. Host-mode Chromium stays out of scope. |
 | **bd-3tox5h** Post before/after screenshot table to the MR/PR | Becomes the hosting + composition ticket: (a) merger callbacks `host_images/3` (GitLab uploads API; GitHub assets-branch push + commit-pinned URLs, §7), visibility lookup and `public_repo_ok`; (b) `PrBody.compose/2` used by both `SyncPrBody` and the PR-open path, rendering §8, with the size guard; (c) degraded rows (skip, failed, withheld, blocked). **First acceptance item: a spike proving a `blob/<sha>/…?raw=true` image renders in the description of a PR in a real *private* GitHub repo for a member**, evidence a real screenshot of that PR, run by an operator because no worker holds a credential for it (R1). |
 | **bd-5hlegn** Ticket attachments | Add the §3/§10 fields: `source` (`arbiter-capture` only writable by Arbiter), provenance columns, image-only content types with magic-number checks, caps (per image/ticket/global), content-addressed disk store, prune-after-close job leaving `pruned_at` rows, authenticated serve route with `nosniff` and CSP `sandbox`, API + MCP read twins. It is **in addition** to the PR/MR section and must not be the only place images appear. |
-| **New N1: `arb-capture` runner + manifest** | The Node/Playwright runner: reads `spec.json`, runs the §4 boot loop for two roles, §5.2 steps, §5.3 manifest, §9 marker probe and DOM text scan, determinism settings. Testable with no cluster. |
+| **New N1: `arb-capture` runner + manifest** (login-capable shooter shipped as bd-485ts3, see §4 "As implemented: N1") | The Node/Playwright runner: reads `spec.json`, runs the §4 boot loop for two roles, §5.2 steps, §5.3 manifest, §9 marker probe and DOM text scan, determinism settings. Testable with no cluster. |
 | **New N2: capture pass orchestration** | `:capture_pass` in `Nodes.Placement.eligible/1`/`PassPlacement`; `git archive` seeding; pod assembly (worker image + sidecar + test services, `--network none`, baseline egress only); `screenshot_captures` table and state machine; triggers, debounce, supersession and the merge wait (§2); retry on `node_lost`; tar return path with the Transcripts-style sanitiser; attention causes (`screenshot_capture_failed`, `screenshot_hosting_blocked`, `screenshot_public_repo_blocked`). Sets `verify_after_deploy` (first real run is in the live server). |
 | **New N3: plan contract** | `.arbiter/screenshots.json` validator (§5.2), `arb screenshots check` + MCP twin `screenshots_plan_check` (parity rule), the `arb done` gate step (§5.4), `.git/info/exclude`, the worker-prompt block. |
 | **New N4: data-safety scan** | The §9 text scanner (rules, `fixture_email_domains`, `deny_patterns`), the withholding logic and its tests (including a "matched text never logged" test), plus the config-view note for unmarked repos. |

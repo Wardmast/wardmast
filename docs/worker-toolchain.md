@@ -123,3 +123,24 @@ sets `ARB_CHROME=/usr/bin/chromium`, so the `:browser` tests in
 Playwright driver ships: those tests speak CDP directly. Release CI builds the base
 locally and runs `scripts/worker-image-smoke.sh` (screenshots a page inside the image)
 before pushing it, and prints the image size to the job summary.
+
+## The capture runner in the base (bd-485ts3)
+
+UI screenshot capture of a login-gated app needs more than the command-line Chromium can do, so the
+base also ships the `arb-capture` runner (`apps/wardmast/priv/capture`: `runner.mjs`,
+`package.json`, `package-lock.json`) at `/opt/arbiter/capture`, with `ARB_CAPTURE_DIR` set. It is
+built by a throwaway stage `FROM` the official `node:<ver>-trixie-slim` image (pinned by digest like
+every other `FROM`; `Wardmast.Screenshots.Capture.RunnerImage`): the three files are baked in as
+base64 and `npm ci --omit=dev --ignore-scripts` installs `playwright-core` from the lockfile, so its
+version and integrity hash are pinned and nothing downloads a browser (the image's Chromium is
+used). Node's binary is copied to `/opt/arbiter/capture/bin/node`, deliberately off `PATH`: a repo's
+own Node layer (`.tool-versions` `nodejs`) keeps owning `node`. Bump Node or `playwright-core` on
+purpose (`RunnerImage`, `priv/capture/package*.json`); the Containerfile text changes, so the base
+hash changes and the release rebuilds it.
+
+The release job's `scripts/worker-image-smoke.sh` runs `scripts/worker-image-smoke-capture.sh` in the
+built base (a loopback login-gated page is shot through the real runner; a wrong password must fail
+and write no image). To check a host: `ARB_CHROME=… ARB_CAPTURE_DIR=… ARB_CAPTURE_NODE=… sh
+scripts/worker-image-smoke-capture.sh`. Capture still runs in the coordinator on the host today, so
+that host needs Node and `npm ci` in `apps/wardmast/priv/capture` (or `ARB_CAPTURE_DIR` /
+`ARB_CAPTURE_NODE`); see `docs/design/ui-screenshot-capture.md` §4.

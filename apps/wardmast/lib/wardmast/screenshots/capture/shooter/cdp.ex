@@ -162,16 +162,10 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
   defp tools(spec) do
     ctx = ctx(spec)
 
-    dir =
-      ctx[:capture_dir] || System.get_env("ARB_CAPTURE_DIR") ||
-        Application.app_dir(:wardmast, "priv/capture")
-
+    dir = capture_dir(ctx)
     runner = Path.join(dir, "runner.mjs")
-    node_override = ctx[:node] || System.get_env("ARB_CAPTURE_NODE")
-    bundled = Path.join([dir, "bin", "node"])
-
-    node =
-      node_override || if(File.exists?(bundled), do: bundled) || System.find_executable("node")
+    override = ctx[:node] || System.get_env("ARB_CAPTURE_NODE")
+    node = override || bundled_node(dir) || System.find_executable("node")
 
     cond do
       not File.exists?(runner) ->
@@ -184,8 +178,18 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
             "which ships one)"}}
 
       true ->
-        {:ok, %{dir: dir, runner: runner, node: node, node_override?: node_override != nil}}
+        {:ok, %{dir: dir, runner: runner, node: node, node_override?: override != nil}}
     end
+  end
+
+  defp capture_dir(ctx) do
+    ctx[:capture_dir] || System.get_env("ARB_CAPTURE_DIR") ||
+      Application.app_dir(:wardmast, "priv/capture")
+  end
+
+  defp bundled_node(dir) do
+    bundled = Path.join([dir, "bin", "node"])
+    if File.exists?(bundled), do: bundled
   end
 
   defp chrome(spec) do
