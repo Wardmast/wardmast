@@ -160,6 +160,54 @@ defmodule Wardmast.Worker.CommitGateTest do
 
   # ---- Worktree.completion_state/2 ----------------------------------------
 
+  describe "tests not run (bd-7m35lc)" do
+    @not_run %{test_outcomes: %{ran: 0, not_run: 1}}
+
+    test "both commit-gate nudges carry the signal only when tests were not run" do
+      for reason <- [:uncommitted, :no_commits] do
+        flagged = %Worker.State{task_id: "bd-x", meta: Map.put(@not_run, :branch, "b")}
+        clean = %Worker.State{task_id: "bd-x", meta: %{branch: "b"}}
+        assert Worker.commit_nudge_prompt(flagged, reason) =~ "TESTS NOT RUN"
+        refute Worker.commit_nudge_prompt(clean, reason) =~ "TESTS NOT RUN"
+      end
+    end
+
+    test "a completion with tests not run records it on the task", %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      path = provision_worktree(repo, "bd-gate/#{task.id}")
+      File.write!(Path.join(path, "w.txt"), "w\n")
+      {_, 0} = git(["add", "w.txt"], path)
+      {_, 0} = git(["commit", "-q", "-m", "work"], path)
+
+      pid = start_worker(task, repo, path, Map.put(@not_run, :commit_nudge_cap, 0))
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{waiting_on: :review_gate}, Worker.state(pid)) end)
+      assert Ash.get!(Issue, task.id).notes =~ "TESTS NOT RUN"
+    end
+
+    test "the ReviewGate is spawned with tests_not_run: true", %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      path = provision_worktree(repo, "bd-gate/#{task.id}")
+      File.write!(Path.join(path, "w.txt"), "w\n")
+      {_, 0} = git(["add", "w.txt"], path)
+      {_, 0} = git(["commit", "-q", "-m", "work"], path)
+
+      meta =
+        @not_run
+        |> Map.put(:commit_nudge_cap, 0)
+        |> Map.put(:review_spawn, true)
+        |> Map.put(:review_command, ["sleep", "30"])
+
+      pid = start_worker(task, repo, path, meta)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> is_pid(Map.get(Worker.state(pid).meta, :review_gate_pid)) end)
+      gate = Worker.state(pid).meta.review_gate_pid
+      assert :sys.get_state(gate).tests_not_run == true
+    end
+  end
+
   describe "Worktree.completion_state/2" do
     test "reports :ready when the tree is clean and has commits ahead", %{repo: repo} do
       path = provision_worktree(repo, "feature/ready")

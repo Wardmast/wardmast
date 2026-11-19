@@ -43,6 +43,8 @@ defmodule Wardmast.Worker.TestRun do
 
   @default_timeout_s 600
   @max_timeout_s 1800
+  # Cap on `scripts/test-env.sh up`, taken off the test run's own budget.
+  @env_timeout_s 300
   @probe_timeout_s 60
   @log_marker "ARB_TEST_LOG="
 
@@ -82,8 +84,18 @@ defmodule Wardmast.Worker.TestRun do
     with {:ok, requested, strict?} <- requested(runner, request),
          {:ok, resolved} <- resolve(exec, requested, strict?) do
       case resolved do
-        [] -> {:ok, nothing_to_run()}
-        paths -> execute(exec, paths, timeout_s, opts)
+        [] ->
+          {:ok, nothing_to_run()}
+
+        paths ->
+          started = System.monotonic_time(:second)
+
+          # Bring-up has its own cap and what it used comes off the test run's
+          # budget, so one call never outlasts `max_timeout_s/0`.
+          with :ok <- bring_up_test_env(exec, min(timeout_s, @env_timeout_s)) do
+            used = System.monotonic_time(:second) - started
+            execute(exec, paths, max(timeout_s - used, 1), opts)
+          end
       end
     end
   end
@@ -243,6 +255,37 @@ defmodule Wardmast.Worker.TestRun do
       if [ -n "$r" ]; then echo "$r"; else echo "?$p"; fi
     done
     """
+  end
+
+  # -- the repo's test env -----------------------------------------------------
+
+  @test_env_script "scripts/test-env.sh"
+
+  # A repo that needs a per-worker test env (Postgres, S3, a generated
+  # `config/env.exs`) ships `scripts/test-env.sh`. Bringing it up here, in the
+  # run's own environment, makes `run_tests` provider-independent: a Codex worker
+  # gets the env the same way a Claude worker that ran `up` itself does, instead of
+  # failing before compilation on a missing `DATABASE_URL`. A repo without the
+  # script is untouched.
+  defp bring_up_test_env(exec, timeout_s) do
+    command = """
+    [ -f #{@test_env_script} ] || exit 0
+    if [ -x #{@test_env_script} ]; then ./#{@test_env_script} up 2>&1; else bash #{@test_env_script} up 2>&1; fi
+    """
+
+    case exec.(command, timeout_s) do
+      {_out, 0} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, exec_error(reason, "could not bring up the repo's test env")}
+
+      {out, status} ->
+        {:error,
+         "test env unavailable: `#{@test_env_script} up` exited #{status}, so no tests were " <>
+           "run (the suite needs it: database, object store, config/env.exs). " <>
+           "Output: #{out |> String.trim() |> String.slice(-600, 600)}"}
+    end
   end
 
   # -- running them -----------------------------------------------------------

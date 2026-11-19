@@ -630,7 +630,7 @@ defmodule Wardmast.Worker.PrepushCheck do
     #{intro}
 
     #{check_section(meta, detail, @max_output_bytes)}
-    #{tests_hint_block(meta)}
+    #{tests_hint_block(meta)}#{Wardmast.Worker.TestSignal.block(meta)}
 
     Do EXACTLY this, then print `arb done` again on its own line:
 
