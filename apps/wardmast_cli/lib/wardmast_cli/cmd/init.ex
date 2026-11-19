@@ -136,6 +136,9 @@ defmodule WardmastCli.Cmd.Init do
     raise "no bundled doctrine found under #{@doctrine_dir}"
   end
 
+  # The doctrine directory itself, so a section added there recompiles this
+  # module (the per-file resources below only cover files that already exist).
+  @external_resource @doctrine_dir
   @external_resource @agents_md
   @external_resource @operator_guide
   @external_resource @memory_md

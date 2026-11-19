@@ -75,11 +75,82 @@ defmodule Wardmast.Sessions.Instructions do
   """
   @spec render(Session.t(), keyword()) :: String.t()
   def render(%Session{} = session, opts \\ []) do
-    case Keyword.get(opts, :refine) do
-      nil -> render_coordinator(session, opts)
-      refine -> render_refine(session, refine, opts)
+    case {Keyword.get(opts, :pair), Keyword.get(opts, :refine)} do
+      {pair, _refine} when is_map(pair) -> render_pair(session, pair, opts)
+      {nil, nil} -> render_coordinator(session, opts)
+      {nil, refine} -> render_refine(session, refine, opts)
     end
   end
+
+  # bd-7p6a9o: the pair variant. Its doctrine is the bundled `pair` section —
+  # collaborate, explain, ask before large rewrites, stay inside the ACs — and
+  # deliberately *not* the router doctrine the coordinator variant renders: a
+  # pair session does the work a coordinator would route.
+  defp render_pair(%Session{} = session, pair, opts) do
+    issue = Map.fetch!(pair, :issue)
+    worktree = Map.get(pair, :worktree) || session.cwd
+    branch = Map.get(pair, :branch)
+    target = Map.get(pair, :target_branch)
+
+    primary_checkout =
+      Keyword.get(opts, :primary_checkout, Paths.explicit_primary_checkout())
+
+    """
+    # Wardmast pair session `#{session.id}`
+
+    You are a **pair session**: a #{host(session)} session Wardmast launched
+    into this ticket's own git worktree so that you and the operator can work
+    ticket #{issue_ref(issue)} **together**. You are not the coordinator and
+    you are not a dispatched worker: the operator is here with you, and you
+    cannot dispatch anyone else.
+
+    This file is **generated on every launch** — edits to it are lost.
+
+    #{bound_ticket_section(issue)}
+
+    ## Where you are
+
+    * **worktree** — `#{worktree}` (your working directory)
+    * **branch** — #{format_code(branch)}
+    * **base** — #{format_code(target)} — the branch the PR merges into
+    * **MCP** — the `.mcp.json` in the worktree carries this ticket's own
+      token (git never sees the file). It reads and writes this ticket only,
+      and it stops working when this session ends.
+    #{pair_checkout_line(primary_checkout)}
+
+    #{Doctrine.render(:pair, %{worktree: worktree, branch: branch, target_branch: target})}
+    """
+  end
+
+  defp bound_ticket_section(issue) do
+    """
+    ## The ticket
+
+    * **id** — `#{field(issue, :id)}`
+    * **title** — #{field(issue, :title)}
+    * **type** — `#{field(issue, :issue_type)}`
+    * **repo** — #{format_field(field(issue, :repo))}
+
+    ### Description
+
+    #{format_field(field(issue, :description))}
+
+    ### Acceptance criteria — the scope of this session
+
+    #{format_field(field(issue, :acceptance))}
+    """
+    |> String.trim()
+  end
+
+  defp pair_checkout_line(nil), do: ""
+
+  defp pair_checkout_line(checkout) do
+    "* **primary checkout** — `#{checkout}` is the live source tree; never edit it, " <>
+      "never run git in it."
+  end
+
+  defp format_code(nil), do: "_(unknown)_"
+  defp format_code(value), do: "`#{value}`"
 
   defp render_coordinator(%Session{} = session, opts) do
     id = session.id

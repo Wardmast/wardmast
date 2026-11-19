@@ -195,6 +195,21 @@ defmodule Wardmast.Sessions.Provisioning do
     raise ArgumentError, "session #{session.id} is a :login session; it is issued no MCP token"
   end
 
+  # bd-7p6a9o: a pair session works its ticket the way a worker does, so it
+  # holds the ticket's worker-tier token — own-ticket reads and progress, no
+  # dispatch — carrying its session id so ending the session revokes it. It
+  # must win over the refine clause below, which matches any issue-bound row.
+  def mint_token(%Session{kind: :pair, issue_id: issue_id, workspace_id: ws} = session, opts)
+      when is_binary(issue_id) and issue_id != "" and is_binary(ws) and ws != "" do
+    MCP.Scope.mint_pair(session.id, ws, issue_id, opts)
+  end
+
+  def mint_token(%Session{kind: :pair} = session, _opts) do
+    raise ArgumentError,
+          "session #{session.id} is a :pair session without both its ticket and its " <>
+            "workspace binding; a pair token is the ticket's, and nothing else is a safe substitute"
+  end
+
   def mint_token(%Session{issue_id: issue_id, workspace_id: workspace_id} = session, opts)
       when is_binary(issue_id) and issue_id != "" and is_binary(workspace_id) and
              workspace_id != "" do
@@ -298,22 +313,32 @@ defmodule Wardmast.Sessions.Provisioning do
   # An agy session (bd-7xuvfl) gets one `GEMINI.md` in the cwd, refine or not:
   # agy's directory rules are `GEMINI.md`/`AGENTS.md`, and it reads both
   # names, so writing both would load the same doctrine twice.
+  #
+  # A pair session (bd-7p6a9o) is the one whose cwd is a real checkout — the
+  # ticket's worktree — whose own `CLAUDE.md`/`AGENTS.md` are tracked files of
+  # the repo and not Wardmast's to overwrite. Its instructions go to the
+  # session's `CLAUDE_CONFIG_DIR/CLAUDE.md`, the user-level memory Claude Code
+  # loads from any cwd: the same place a dispatched worker's doctrine lives.
   defp write_instructions(session, paths, cwd, opts) do
     content =
       Instructions.render(session,
         primary_checkout: Keyword.get(opts, :primary_checkout, Paths.explicit_primary_checkout()),
         mcp_server_name: MCP.server_name(),
-        refine: Keyword.get(opts, :refine)
+        refine: Keyword.get(opts, :refine),
+        pair: Keyword.get(opts, :pair)
       )
 
-    case {session.provider, Keyword.get(opts, :refine)} do
-      {:agy, _refine} ->
+    case {session.provider, Keyword.get(opts, :pair), Keyword.get(opts, :refine)} do
+      {:agy, _pair, _refine} ->
         write_file(Provider.Agy.instructions_path(session), content)
 
-      {_provider, nil} ->
+      {_provider, pair, _refine} when is_map(pair) ->
+        write_file(Path.join(session.config_dir || paths.config, "CLAUDE.md"), content)
+
+      {_provider, nil, nil} ->
         write_file(paths.instructions, content)
 
-      {_provider, _refine} ->
+      {_provider, nil, _refine} ->
         with :ok <- write_file(Path.join(cwd, "CLAUDE.md"), content) do
           write_file(Path.join(cwd, "AGENTS.md"), content)
         end
@@ -567,6 +592,7 @@ defmodule Wardmast.Sessions.Provisioning do
       # readable at the default umask. `File.write/2` truncates an existing file
       # without touching its mode, so the adapter's own write inherits 0600.
       with :ok <- touch_secret(path),
+           :ok <- exclude_from_git(session, cwd),
            :ok <-
              ClaudeMCP.write_mcp_config(cwd,
                mcp_url: MCP.server_url(),
@@ -592,8 +618,28 @@ defmodule Wardmast.Sessions.Provisioning do
   # its options straight into `Plug.Crypto.sign/4`. Only the claim-shaping and
   # TTL keys belong in a crypto call.
   defp mint_session_token(session, opts) do
-    mint_token(session, Keyword.take(opts, [:workspace_id, :can_dispatch, :max_age, :depth]))
+    mint_opts = Keyword.take(opts, [:workspace_id, :can_dispatch, :max_age, :depth])
+
+    # bd-7p6a9o: a pair token carries its ticket's repo claim, as a dispatched
+    # worker's does.
+    mint_opts =
+      case Keyword.get(opts, :pair) do
+        %{repo: repo} when is_binary(repo) and repo != "" -> Keyword.put(mint_opts, :repo, repo)
+        _ -> mint_opts
+      end
+
+    mint_token(session, mint_opts)
   end
+
+  # bd-7p6a9o: a pair session's `.mcp.json` lands in the ticket's worktree, a
+  # real checkout. Keep it out of `git add -A` before the token is written —
+  # the same `.git/info/exclude` entry a dispatched worker's `.mcp.json` gets.
+  # Any other session's cwd is a scaffold no git ever looks at. Best-effort
+  # like the worker's: `add_to_git_exclude/2` never fails a launch.
+  defp exclude_from_git(%Session{kind: :pair}, cwd),
+    do: Wardmast.MCP.AgentConfig.add_to_git_exclude(cwd, ClaudeMCP.gitignore_paths())
+
+  defp exclude_from_git(_session, _cwd), do: :ok
 
   defp remove_token_files(paths) do
     _ = File.rm(paths.mcp_token)

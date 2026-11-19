@@ -40,6 +40,9 @@ defmodule Wardmast.Sessions.Session do
       is born with `mcp_token_revoked_at` set, and `can_dispatch` is forced off),
       and it runs on its own tmux socket under `arb-login-<account>-<nonce>`
       names (`Wardmast.Sessions.Naming`). `login_account` is required for it.
+      A `:pair` session (bd-7p6a9o) is the hands-on kind: bound to one ticket,
+      its cwd is that ticket's git worktree and its token is the ticket's
+      (`Wardmast.Sessions.Pair`).
     * `workspace_id` — **nullable on purpose**. `nil` means a cross-workspace
       session, which is the coordinator's normal shape (decision 6: a
       workspace-agnostic coordinator token). A bound session is one deliberately
@@ -455,8 +458,11 @@ defmodule Wardmast.Sessions.Session do
       constraints seam: :session_kind
 
       description """
-      `:coordinator` (default) or `:login` (bd-98oj3s). A login session is hidden
-      from every ordinary list, holds no MCP token and cannot dispatch.
+      `:coordinator` (default), `:login` (bd-98oj3s) or `:pair` (bd-7p6a9o). A
+      login session is hidden from every ordinary list, holds no MCP token and
+      cannot dispatch. A pair session is bound to one ticket (`issue_id`), runs
+      in that ticket's worktree and holds a ticket-scoped worker-tier token —
+      see `Wardmast.Sessions.Pair`.
       """
     end
 

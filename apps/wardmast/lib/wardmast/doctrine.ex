@@ -38,6 +38,11 @@ defmodule Wardmast.Doctrine do
 
   @dir Path.expand("../../priv/doctrine", __DIR__)
 
+  # The directory itself, not only the files found in it: a section *added*
+  # later (bd-7p6a9o's `pair`) changes the directory's mtime, which is what
+  # makes Mix recompile this module to pick it up.
+  @external_resource @dir
+
   @sections @dir
             |> Path.join("*.md.eex")
             |> Path.wildcard()

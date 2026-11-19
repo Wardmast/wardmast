@@ -4126,6 +4126,41 @@ defmodule Wardmast.Worker.Dispatch do
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  @doc """
+  Provision — or reuse — `task`'s worktree on its branch exactly as a dispatch
+  does: the same repo resolution, branch (`BranchNamer.derive/1`), base
+  branch, git layout, reset of an already-merged branch and fall-back to
+  attaching an existing branch (`maybe_provision_worktree/2`). For a caller
+  that is not a dispatch — a pair session (bd-7p6a9o) — so that the session
+  and any worker that later picks the ticket up share one checkout and one
+  branch.
+
+  Returns `{:ok, %{path:, branch:, target_branch:, repo:, repo_path:}}`,
+  `{:error, :no_repo}` for a ticket naming no repo this installation can
+  resolve, or `{:error, {:worktree_failed, reason}}`.
+  """
+  @spec provision_worktree(Issue.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def provision_worktree(%Issue{} = task, opts \\ []) do
+    opts = task |> apply_issue_repo_default(opts) |> Keyword.put(:provision_worktree, true)
+    opts = put_security_policy(task, opts)
+    repo = Keyword.get(opts, :repo)
+
+    with repo_path when is_binary(repo_path) <- resolve_repo_path(task, repo),
+         {:ok, path} when is_binary(path) <- maybe_provision_worktree(task, opts) do
+      {:ok,
+       %{
+         path: path,
+         branch: BranchNamer.derive(task),
+         target_branch: resolve_target_branch(task, opts),
+         repo: repo,
+         repo_path: repo_path
+       }}
+    else
+      {:error, _reason} = error -> error
+      _no_repo -> {:error, :no_repo}
+    end
+  end
+
   defp maybe_provision_worktree(%Issue{} = task, opts) do
     cond do
       Keyword.get(opts, :provision_worktree, true) == false ->
