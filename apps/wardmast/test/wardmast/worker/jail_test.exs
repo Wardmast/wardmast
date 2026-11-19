@@ -12,12 +12,14 @@ defmodule Wardmast.Worker.JailTest do
   use ExUnit.Case, async: false
   import Bitwise
 
+  alias Wardmast.Test.JailProbe
   alias Wardmast.Worker.Jail
   alias Wardmast.Worker.OsProcess
 
   # Evaluated when this file compiles, i.e. at `mix test` time on the host
   # that runs the suite, not when the app is built.
   @probe Jail.probe()
+  @bwrap_skip JailProbe.skip_reason(@probe)
 
   setup do
     uniq = "#{System.pid()}-#{System.unique_integer([:positive])}"
@@ -1307,9 +1309,7 @@ defmodule Wardmast.Worker.JailTest do
   # ---- real bwrap ----------------------------------------------------------
 
   describe "real bwrap with a stub command" do
-    if @probe != :ok do
-      @describetag skip: "bwrap write jail unavailable on this host: #{inspect(@probe)}"
-    end
+    if @bwrap_skip, do: @describetag(skip: @bwrap_skip)
 
     @describetag :bwrap
 
@@ -1538,9 +1538,7 @@ defmodule Wardmast.Worker.JailTest do
   end
 
   describe "real bwrap: escape vectors (bd-7o08mj)" do
-    if @probe != :ok do
-      @describetag skip: "bwrap write jail unavailable on this host: #{inspect(@probe)}"
-    end
+    if @bwrap_skip, do: @describetag(skip: @bwrap_skip)
 
     @describetag :bwrap
 
@@ -1619,9 +1617,7 @@ defmodule Wardmast.Worker.JailTest do
   # host's real /etc/ssh/ssh_config — no fixture, since the bug only exists
   # because that file is root-owned, which we can't fabricate without root.
   describe "real bwrap: ssh config parse (bd-5d5mrs)" do
-    if @probe != :ok do
-      @describetag skip: "bwrap write jail unavailable on this host: #{inspect(@probe)}"
-    end
+    if @bwrap_skip, do: @describetag(skip: @bwrap_skip)
 
     if is_nil(System.find_executable("ssh")) do
       @describetag skip: "no ssh executable on this host"
