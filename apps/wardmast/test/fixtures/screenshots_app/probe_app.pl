@@ -33,7 +33,7 @@ sub first_line {
     $line = <$s>;
     alarm 0;
   };
-  return "failed: $@" if $@;
+  if ($@) { my $e = $@; chomp $e; return "failed: $e" }
   return 'failed: closed with nothing' unless defined $line;
   chomp $line;
   return $line;
