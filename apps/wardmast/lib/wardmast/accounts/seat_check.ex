@@ -34,10 +34,8 @@ defmodule Wardmast.Accounts.SeatCheck do
   A `nil` pool (no predicted model) takes the account's lowest published budget
   and counts that pool's seats (§3.1).
 
-  It decides only under `scheduler_admission: enforce`: `Admission`,
-  `Wardmast.Worker.ResumeSlot`, provider and reviewer routing ask it only for an
-  account in `enforce` (`Wardmast.Accounts.AdmissionMode`). Under `legacy` and
-  `shadow` nothing calls it (I1, `Wardmast.Board.AdmissionLegacyTest`). It reads;
+  It is the admission check (DC8; the only one since DC12): `Admission`,
+  `Wardmast.Worker.ResumeSlot`, provider and reviewer routing ask it. It reads;
   it never reserves (`Admission` does, under its per-account lock), and nothing
   that stops a run reads it (I8).
 

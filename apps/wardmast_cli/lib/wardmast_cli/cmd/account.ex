@@ -18,7 +18,6 @@ defmodule WardmastCli.Cmd.Account do
       arb account create <provider> <slug> [--label ...] [--plan ...]
                                      [--max-concurrent N] [--disable]
                                      [--budget-split queue|fair]
-                                     [--admission legacy|shadow|enforce]
                                      [--provider-account-ref ID]
                                      [--provider-org-ref ID]
                                      [<quota flags>, as for `set`]
@@ -31,7 +30,6 @@ defmodule WardmastCli.Cmd.Account do
                                      [--enable | --disable]
                                      [--max-concurrent N|none]
                                      [--budget-split queue|fair]
-                                     [--admission legacy|shadow|enforce|inherit]
                                      [--threshold-mode flat|paced]
                                      [--throttle-threshold F]
                                      [--weekly-threshold F] [--paced-floor F]
@@ -89,10 +87,7 @@ defmodule WardmastCli.Cmd.Account do
                                      `--label` / `--plan` / `--enable` /
                                      `--disable` (bd-8vkqd3): the display name,
                                      the plan, and whether the account is
-                                     parked. `--admission` (O11) overrides the
-                                     install-wide scheduler_admission for this
-                                     account alone; `inherit` clears it. Node
-                                     caps are always enforced.
+                                     parked. Node caps are always enforced.
                                      `--budget-split fair` (DC10) lets
                                      the workspaces sharing the account split
                                      its budget by link `--weight`: a
@@ -236,7 +231,6 @@ defmodule WardmastCli.Cmd.Account do
                 # ceiling — it is nullable and `nil` means "no ceiling" (§4.4).
                 max_concurrent: :string,
                 budget_split: :string,
-                admission: :string,
                 provider_account_ref: :string,
                 provider_org_ref: :string,
                 unset: [:string, :keep],
@@ -365,7 +359,6 @@ defmodule WardmastCli.Cmd.Account do
     IO.puts("Enabled:     #{account["enabled"]}")
     IO.puts("Max concurrent: #{account["max_concurrent"] || "(none)"}")
     IO.puts("Budget split:  #{account["budget_split"] || "queue"}")
-    IO.puts("Admission:     #{account["admission"] || "(inherits scheduler_admission)"}")
 
     emit_merged_into(account["merged_into_id"])
     emit_spend_cap(account["spend_cap"])
@@ -435,7 +428,6 @@ defmodule WardmastCli.Cmd.Account do
       |> maybe_put("plan", opts[:plan])
       |> maybe_put("max_concurrent", max_concurrent!(opts))
       |> maybe_put("budget_split", budget_split!(opts))
-      |> maybe_put("admission", admission!(opts))
       |> maybe_put("provider_account_ref", opts[:provider_account_ref])
       |> maybe_put("provider_org_ref", opts[:provider_org_ref])
       |> maybe_put("enabled", if(opts[:disable], do: false))
@@ -464,7 +456,7 @@ defmodule WardmastCli.Cmd.Account do
     if payload == %{} do
       Output.die(
         "account set requires at least one of --label, --plan, --enable, --disable, " <>
-          "--max-concurrent, --budget-split, --admission, --unset, " <>
+          "--max-concurrent, --budget-split, --unset, " <>
           Enum.map_join(@quota_keys, ", ", &flag_name/1)
       )
     end
@@ -482,7 +474,6 @@ defmodule WardmastCli.Cmd.Account do
     |> maybe_put("label", opts[:label])
     |> maybe_put("plan", opts[:plan])
     |> maybe_put("budget_split", budget_split!(opts))
-    |> maybe_put("admission", admission!(opts))
     |> maybe_put("enabled", if(opts[:enable], do: true, else: if(opts[:disable], do: false)))
   end
 
@@ -901,26 +892,6 @@ defmodule WardmastCli.Cmd.Account do
       nil -> nil
       value when value in ["queue", "fair"] -> value
       value -> Output.die("--budget-split must be queue or fair (got #{inspect(value)})")
-    end
-  end
-
-  # O11: `inherit` (or none/clear/unset) drops the override so the account
-  # follows the installation-wide `scheduler_admission` key again.
-  defp admission!(opts) do
-    case opts[:admission] do
-      nil ->
-        nil
-
-      value when value in ~w(legacy shadow enforce) ->
-        value
-
-      value when value in ~w(inherit none nil null clear unset) ->
-        :clear
-
-      value ->
-        Output.die(
-          "--admission must be legacy, shadow, enforce or inherit (got #{inspect(value)})"
-        )
     end
   end
 

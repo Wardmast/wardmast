@@ -1,27 +1,20 @@
 defmodule Wardmast.Worker.AdmissionFollowUpTest do
   @moduledoc """
   I9 (DC6, provider-dynamic-concurrency §2.2, §4.5, §11): a follow-up of work
-  already In progress is never held because a layer is full — in any
-  `scheduler_admission` mode.
+  already In progress is never held because a layer is full.
 
-  The fixture fills both layers a dispatch can meet today: the provider
-  account (`max_concurrent: 1`, one live run on it) and, for the review-side
-  roles, the primary's machine cap (1, the same live run). Then each follow-up
-  role of an In-progress ticket starts anyway, over the full layer, under
-  `legacy`, `shadow` and `enforce` alike: the walk plans only Ready cards, so
-  no mode can reach a follow-up.
+  The fixture fills both layers a dispatch can meet: the provider account
+  (`max_concurrent: 1`, one live run on it) and, for the review-side roles, the
+  primary's machine cap (1, the same live run). Then each follow-up role of an
+  In-progress ticket starts anyway, over the full layer: the walk plans only
+  Ready cards, so nothing can reach a follow-up.
 
   What still holds a follow-up is a layer's hard zero (a machine cap of 0, as
   `:zero_only` does), which `Wardmast.Nodes.LocalCapacityTest` covers.
 
-  One rule is older than this: the primary's cap counts a *resume* at its cap
-  (`:at_cap`, bd-b2iigy — a restart's resume sweep once put 5 runs on a cap of
-  2), and a ReviewGate fix round re-dispatched through
-  `ReviewGateFixRoundDispatcher` is a resume. Under `legacy` and `shadow` it is
-  unchanged (I1), so the cases in the loop fill the account, not the machine.
-  DC8 settles §2.2 under `enforce`: a resume of a ticket In progress is a
-  follow-up, held by the primary's cap only at 0 (the last two describes), and
-  the gate holds a follow-up on a hard rule only, never on the paced line (O2).
+  A resume of a ticket In progress is a follow-up, held by the primary's cap
+  only at 0 (the last two describes), and the gate holds a follow-up on a hard
+  rule only, never on the paced line (O2).
   """
   use Wardmast.DataCase, async: false
 
@@ -40,7 +33,6 @@ defmodule Wardmast.Worker.AdmissionFollowUpTest do
   setup do
     sandbox = ResumeSlotFixture.setup_repo!()
     ResumeSlotFixture.put_local_cap(10)
-    on_exit(fn -> Wardmast.Settings.set_scheduler_admission(nil) end)
 
     ws =
       Ash.create!(Workspace, %{
@@ -117,69 +109,62 @@ defmodule Wardmast.Worker.AdmissionFollowUpTest do
     }
   end
 
-  for mode <- [:legacy, :shadow, :enforce] do
-    describe "under #{mode}" do
-      setup do
-        {:ok, _} = Wardmast.Settings.set_scheduler_admission(unquote(mode))
-        :ok
+  describe "follow-ups" do
+    test "the walk never plans a follow-up: an In-progress ticket is not a Ready card", ctx do
+      board = Snapshot.load(workspace_id: ctx.ws.id)
+
+      refute Enum.any?(board.ready, &(&1.id == ctx.ticket.id))
+
+      if walk = Map.get(board, :walk),
+        do: refute(Enum.any?(walk.entries, &(&1.id == ctx.ticket.id)))
+    end
+
+    test "a resume goes over a full account", ctx do
+      assert {:ok, %{worker_pid: pid}} =
+               Dispatch.resume(ctx.ticket.id, start_driver: false, resume_origin: :automatic)
+
+      TestSandbox.own!(ctx.sandbox, pid)
+      assert Concurrency.live_count(ctx.account) == 2
+    end
+
+    test "a re-dispatched ReviewGate fix round goes over a full account", ctx do
+      assert {:ok, %{worker_pid: pid}} =
+               ReviewGateFixRoundDispatcher.dispatch(%{
+                 task_id: ctx.ticket.id,
+                 attempt: 1,
+                 verdict: :request_changes,
+                 claude_command: ["true"]
+               })
+
+      TestSandbox.own!(ctx.sandbox, pid)
+    end
+
+    test "a CI fix pass goes over a full account and a full machine", ctx do
+      context = pass_context(ctx)
+      fill_the_machine!()
+
+      assert {:ok, %{worker_pid: pid}} = FixPassDispatcher.dispatch(context)
+      TestSandbox.own!(ctx.sandbox, pid)
+    end
+
+    test "a conflict pass goes over a full account and a full machine", ctx do
+      context = pass_context(ctx)
+
+      # Move main on, so the branch has something to resolve against.
+      git = fn args ->
+        {_, 0} = System.cmd("git", ["-C", ctx.sandbox.repo | args], stderr_to_stdout: true)
       end
 
-      test "the walk never plans a follow-up: an In-progress ticket is not a Ready card", ctx do
-        board = Snapshot.load(workspace_id: ctx.ws.id, admission: unquote(mode))
+      git.(["checkout", "-q", "main"])
+      File.write!(Path.join(ctx.sandbox.repo, "other.txt"), "other\n")
+      git.(["add", "other.txt"])
+      git.(["commit", "-q", "-m", "other work"])
+      git.(["push", "-q", "origin", "main"])
 
-        refute Enum.any?(board.ready, &(&1.id == ctx.ticket.id))
+      fill_the_machine!()
 
-        if walk = Map.get(board, :walk),
-          do: refute(Enum.any?(walk.entries, &(&1.id == ctx.ticket.id)))
-      end
-
-      test "a resume goes over a full account", ctx do
-        assert {:ok, %{worker_pid: pid}} =
-                 Dispatch.resume(ctx.ticket.id, start_driver: false, resume_origin: :automatic)
-
-        TestSandbox.own!(ctx.sandbox, pid)
-        assert Concurrency.live_count(ctx.account) == 2
-      end
-
-      test "a re-dispatched ReviewGate fix round goes over a full account", ctx do
-        assert {:ok, %{worker_pid: pid}} =
-                 ReviewGateFixRoundDispatcher.dispatch(%{
-                   task_id: ctx.ticket.id,
-                   attempt: 1,
-                   verdict: :request_changes,
-                   claude_command: ["true"]
-                 })
-
-        TestSandbox.own!(ctx.sandbox, pid)
-      end
-
-      test "a CI fix pass goes over a full account and a full machine", ctx do
-        context = pass_context(ctx)
-        fill_the_machine!()
-
-        assert {:ok, %{worker_pid: pid}} = FixPassDispatcher.dispatch(context)
-        TestSandbox.own!(ctx.sandbox, pid)
-      end
-
-      test "a conflict pass goes over a full account and a full machine", ctx do
-        context = pass_context(ctx)
-
-        # Move main on, so the branch has something to resolve against.
-        git = fn args ->
-          {_, 0} = System.cmd("git", ["-C", ctx.sandbox.repo | args], stderr_to_stdout: true)
-        end
-
-        git.(["checkout", "-q", "main"])
-        File.write!(Path.join(ctx.sandbox.repo, "other.txt"), "other\n")
-        git.(["add", "other.txt"])
-        git.(["commit", "-q", "-m", "other work"])
-        git.(["push", "-q", "origin", "main"])
-
-        fill_the_machine!()
-
-        assert {:ok, %{worker_pid: pid}} = ConflictResolver.dispatch(context)
-        TestSandbox.own!(ctx.sandbox, pid)
-      end
+      assert {:ok, %{worker_pid: pid}} = ConflictResolver.dispatch(context)
+      TestSandbox.own!(ctx.sandbox, pid)
     end
   end
 
@@ -203,8 +188,6 @@ defmodule Wardmast.Worker.AdmissionFollowUpTest do
     })
   end
 
-  defp mode!(mode), do: {:ok, _} = Wardmast.Settings.set_scheduler_admission(mode)
-
   describe "a resume on a full primary (DC8 settles §2.2 on the node layer)" do
     setup do
       Wardmast.Test.StubResumeDeferrer.reset()
@@ -212,25 +195,14 @@ defmodule Wardmast.Worker.AdmissionFollowUpTest do
       :ok
     end
 
-    test "legacy: deferred, as it is today (the :at_cap rule, bd-b2iigy)", ctx do
-      mode!(:legacy)
-
-      assert {:ok, %{deferred: true, held_for: :local_capacity}} =
-               Dispatch.resume(ctx.ticket.id, start_driver: false, resume_origin: :automatic)
-    end
-
-    test "enforce: a follow-up of In-progress work goes over the full machine", ctx do
-      mode!(:enforce)
-
+    test "a follow-up of In-progress work goes over the full machine", ctx do
       assert {:ok, %{worker_pid: pid}} =
                Dispatch.resume(ctx.ticket.id, start_driver: false, resume_origin: :automatic)
 
       TestSandbox.own!(ctx.sandbox, pid)
     end
 
-    test "enforce: a re-dispatched ReviewGate fix round goes over the full machine too", ctx do
-      mode!(:enforce)
-
+    test "a re-dispatched ReviewGate fix round goes over the full machine too", ctx do
       assert {:ok, %{worker_pid: pid}} =
                ReviewGateFixRoundDispatcher.dispatch(%{
                  task_id: ctx.ticket.id,
@@ -242,8 +214,7 @@ defmodule Wardmast.Worker.AdmissionFollowUpTest do
       TestSandbox.own!(ctx.sandbox, pid)
     end
 
-    test "enforce: a cap of 0 is a hard zero and still holds it", ctx do
-      mode!(:enforce)
+    test "a cap of 0 is a hard zero and still holds it", ctx do
       ResumeSlotFixture.put_local_cap(0)
 
       assert {:ok, %{deferred: true, held_for: :local_capacity}} =
@@ -257,25 +228,14 @@ defmodule Wardmast.Worker.AdmissionFollowUpTest do
       :ok
     end
 
-    test "legacy: the gate holds a resume past the line in the DispatchQueue", ctx do
-      mode!(:legacy)
-
-      assert {:error, {:quota_held, _}} =
-               Dispatch.resume(ctx.ticket.id, start_driver: false, resume_origin: :automatic)
-    end
-
-    test "enforce: the resume goes ahead — follow-ups are held by the hard rules only", ctx do
-      mode!(:enforce)
-
+    test "the resume goes ahead — follow-ups are held by the hard rules only", ctx do
       assert {:ok, %{worker_pid: pid}} =
                Dispatch.resume(ctx.ticket.id, start_driver: false, resume_origin: :automatic)
 
       TestSandbox.own!(ctx.sandbox, pid)
     end
 
-    test "enforce: a ReviewGate fix round goes ahead too", ctx do
-      mode!(:enforce)
-
+    test "a ReviewGate fix round goes ahead too", ctx do
       assert {:ok, %{worker_pid: pid}} =
                ReviewGateFixRoundDispatcher.dispatch(%{
                  task_id: ctx.ticket.id,

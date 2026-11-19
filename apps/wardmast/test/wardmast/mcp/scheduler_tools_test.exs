@@ -218,20 +218,14 @@ defmodule Wardmast.MCP.SchedulerToolsTest do
     end
   end
 
-  # DC5 (bd-2c2a4g, design §9): the per-pool budgets, machines and the admission
-  # mode ride `scheduler_status`, the same body `GET /api/scheduler/status` gives.
+  # DC5 (bd-2c2a4g, design §9): the per-pool budgets and machines
+  # ride `scheduler_status`, the same body `GET /api/scheduler/status` gives.
   describe "scheduler_status/2 budgets (DC5)" do
     setup do
       :ok = :meck.new(Wardmast.Board.CapacityView, [:passthrough, :no_link])
       on_exit(fn -> :meck.unload(Wardmast.Board.CapacityView) end)
 
       view = %{
-        admission: %{
-          mode: "shadow",
-          label: "shadow",
-          decides: false,
-          agreement: %{comparable: 52, agrees: 47, since: ~U[2026-10-12 00:00:00Z]}
-        },
         pools: [
           %{
             account: "acct-1",
@@ -267,12 +261,9 @@ defmodule Wardmast.MCP.SchedulerToolsTest do
       %{view: view}
     end
 
-    test "carries admission, one budget per pool, machines, repos and fair_share", ctx do
+    test "carries one budget per pool, machines, repos and fair_share", ctx do
       assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
 
-      assert data.admission.label == "shadow"
-      assert data.admission.decides == false
-      assert data.admission.agreement.agrees == 47
       assert [%{pool: "claude", budget: 3, reason: reason}] = data.budgets
       assert reason =~ "ceiling max_concurrent 3"
       assert [%{id: "local", cap: 6, live: 3, free: 3}] = data.machines
@@ -299,7 +290,7 @@ defmodule Wardmast.MCP.SchedulerToolsTest do
       assert {:ok, data} = Tools.scheduler_status(ctx.coordinator, %{})
       rest = Wardmast.Board.Drain.status() |> Wardmast.Board.Drain.to_json()
 
-      for key <- [:admission, :budgets, :machines, :repos, :fair_share, :ci_backpressure] do
+      for key <- [:budgets, :machines, :repos, :fair_share, :ci_backpressure] do
         assert Map.fetch!(data, key) == Map.fetch!(rest, key)
       end
     end

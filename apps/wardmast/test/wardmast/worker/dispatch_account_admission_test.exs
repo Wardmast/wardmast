@@ -249,7 +249,7 @@ defmodule Wardmast.Worker.DispatchAccountAdmissionTest do
       assert Ash.get!(Issue, follow_up.id).state == :backlog
       assert Concurrency.live_count(account) == 2
       # The refusal names the cap and how to override it.
-      assert Admission.refusal_message(info) =~ "its cap is 2"
+      assert Admission.refusal_message(info) =~ "2 of 2 seats"
     end
 
     test "a manual dispatch of a Ready ticket is refused the same way", ctx do

@@ -26,7 +26,7 @@ defmodule Wardmast.Worker.ProviderRoutingDispatchTest do
 
   alias Wardmast.Accounts.{ProviderAccount, WorkspaceProviderAccount}
   alias Wardmast.Agents.ProviderPool
-  alias Wardmast.Board.{Autopilot, Snapshot}
+
   alias Wardmast.Quota.{AnthropicQuota, CodexQuota}
   alias Wardmast.Tasks.{Issue, Workspace}
   alias Wardmast.TestSandbox
@@ -327,79 +327,6 @@ defmodule Wardmast.Worker.ProviderRoutingDispatchTest do
   # ---- bd-3fvue3: Autopilot's promotion gate follows the routing --------------
 
   describe "Autopilot with most_quota on and the default provider held" do
-    test "promotes a Ready card and dispatch routes it to the account with headroom" do
-      for snap <- Worker.list_children(), do: Worker.stop(snap.task_id)
-
-      ws = routed_workspace!(%{})
-
-      ws =
-        Ash.update!(ws, %{config: Map.put(ws.config, "agent", %{"type" => ["claude", "codex"]})})
-
-      # Claude (the workspace's default provider) is over its own 0.5 ceiling;
-      # Codex has room. Each account has two slots, none in use.
-      claude =
-        Ash.create!(ProviderAccount, %{
-          provider: :claude,
-          slug: "claude-#{System.unique_integer([:positive])}",
-          max_concurrent: 2,
-          quota_config: %{"throttle_threshold" => 0.5}
-        })
-
-      codex =
-        Ash.create!(ProviderAccount, %{
-          provider: :codex,
-          slug: "codex-#{System.unique_integer([:positive])}",
-          max_concurrent: 2
-        })
-
-      allow!(ws, claude, 0)
-      allow!(ws, codex, 1)
-      claude_used!(claude, 0.70)
-      codex_used!(codex, 10.0)
-
-      {:ok, created} =
-        Ash.create(Issue, %{
-          title: "promote me",
-          workspace_id: ws.id,
-          priority: 0,
-          acceptance: "- routed by Autopilot"
-        })
-
-      {:ok, task} = Ash.update(created, %{}, action: :promote_to_ready)
-
-      board = Snapshot.load(workspace_id: ws.id)
-      assert board.quota == :ok
-      assert board.slots_total >= 2
-
-      test = self()
-
-      {:ok, pid} =
-        Autopilot.start_link(
-          name: nil,
-          interval_ms: :never,
-          paused: false,
-          topics: [],
-          follow_up: false,
-          snapshot: &Snapshot.load(Keyword.put(&1, :workspace_id, ws.id)),
-          dispatch: fn id ->
-            result = Dispatch.dispatch(id, repo: "r", start_driver: false)
-            send(test, {:dispatched, id, result})
-            result
-          end
-        )
-
-      assert {:ok, promoted} = Autopilot.tick(pid)
-      assert promoted == task.id
-      assert_receive {:dispatched, promoted_id, {:ok, result}}
-      assert promoted_id == task.id
-
-      assert Worker.state(result.worker_pid).meta[:provider] == "codex"
-      run = latest_run(task.id)
-      assert run.provider_account_id == codex.id
-      assert run.routing_decision["outcome"] == "selected"
-      assert [%{"account_slug" => slug}] = run.routing_decision["dropped"]
-      assert slug == claude.slug
-    end
   end
 
   # ---- AC8 -------------------------------------------------------------------

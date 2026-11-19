@@ -3,9 +3,6 @@ defmodule Wardmast.Board.SchedulerWalkPropertyTest do
   Properties of the scheduler walk (DC6, `docs/design/provider-dynamic-concurrency.md`
   §4, §11):
 
-    * **I4** — with one pool, one machine, no repo or fair-share config and the
-      budget equal to today's cap, the walk's first placement is today's
-      `promote`, whatever the queue, its holds and its claims.
     * the walk never places more than a layer has room for, and accounts for
       every Ready card exactly once.
   """
@@ -70,52 +67,11 @@ defmodule Wardmast.Board.SchedulerWalkPropertyTest do
     end
   end
 
-  defp legacy(board, slots_free) do
-    Scheduler.plan(%{
-      ready: board.ready,
-      running: board.running,
-      conflict_claims: board.conflict_claims,
-      slots_free: slots_free,
-      quota: :ok,
-      card_guardrail: board.card_guardrail,
-      # The board hands the 15 s retry window to the head-of-line plan as part of
-      # the constraint map (`Snapshot.derive/1`).
-      card_constraint: board.dispatch_holds,
-      paused: board.paused
-    })
-  end
-
   defp walk(board, walk) do
     board
     |> Map.take([:ready, :running, :conflict_claims, :card_guardrail, :dispatch_holds, :paused])
     |> Map.put(:walk, walk)
     |> Scheduler.plan()
-  end
-
-  # ---- I4 ----------------------------------------------------------------------
-
-  property "I4: one pool, one machine, budget = cap — the first placement is today's promote" do
-    check all(
-            board <- board_gen(),
-            cap <- integer(0..4),
-            seats <- integer(0..5),
-            machine_cap <- integer(0..8),
-            max_runs: 400
-          ) do
-      # Today's cap is the budget; the machine is either generous (the pool
-      # binds) or the same number (both bind together).
-      machine_cap = max(machine_cap, cap)
-      slots_free = max(cap - seats, 0)
-
-      walk =
-        walk(board, %{
-          pools: %{@pool => %{budget: cap, seats: seats}},
-          nodes: %{"local" => %{cap: machine_cap + seats, used: seats}},
-          candidates: fn _card -> [%{pool: @pool, nodes: ["local"]}] end
-        })
-
-      assert walk.promote == legacy(board, slots_free).promote
-    end
   end
 
   # ---- capacity safety ---------------------------------------------------------

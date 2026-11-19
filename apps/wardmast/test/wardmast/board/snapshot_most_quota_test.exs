@@ -117,141 +117,6 @@ defmodule Wardmast.Board.SnapshotMostQuotaTest do
     %{claude: claude, codex: codex}
   end
 
-  defp claude_slug(ws) do
-    ws.id
-    |> then(
-      &(Ash.read!(WorkspaceProviderAccount, authorize?: false)
-        |> Enum.filter(fn w -> w.workspace_id == &1 and w.provider == :claude end))
-    )
-    |> hd()
-    |> Map.fetch!(:provider_account_id)
-    |> then(&Ash.get!(ProviderAccount, &1).slug)
-  end
-
-  # ---- the hold -------------------------------------------------------------
-
-  describe "quota_hold/2" do
-    test "is :ok while another candidate is available though the default provider is held" do
-      ws = most_quota!()
-      claude_held_codex_free!(ws)
-
-      assert Snapshot.quota_hold(ws.id) == :ok
-    end
-
-    test "holds when every implementer candidate is quota-held" do
-      ws = most_quota!()
-      %{codex: codex} = claude_held_codex_free!(ws)
-      Ash.update!(codex, %{quota_config: %{"throttle_threshold" => 0.5}})
-      codex_used!(codex, 60.0)
-
-      assert {:hold, reason} = Snapshot.quota_hold(ws.id)
-      # Every held account is named, not just the default provider's.
-      assert reason =~ "claude:#{claude_slug(ws)}"
-      assert reason =~ "codex:#{codex.slug}"
-    end
-
-    test "holds when the only available-looking candidate is out of capacity and the rest are held" do
-      ws = most_quota!()
-      %{codex: codex} = claude_held_codex_free!(ws, %{}, %{max_concurrent: 1})
-      live_worker!(ws, "codex")
-
-      assert codex.max_concurrent == 1
-      assert {:hold, _reason} = Snapshot.quota_hold(ws.id)
-    end
-
-    test "a mixed drop names every dropped candidate: the held account and why the other can't help" do
-      ws = most_quota!()
-      %{codex: codex} = claude_held_codex_free!(ws, %{}, %{max_concurrent: 1})
-      live_worker!(ws, "codex")
-
-      assert {:hold, reason} = Snapshot.quota_hold(ws.id)
-      assert reason =~ "claude:#{claude_slug(ws)}"
-      assert reason =~ "codex:#{codex.slug} at capacity"
-    end
-
-    test "a failover workspace is held by its default provider exactly as before" do
-      ws = workspace!(%{})
-      claude_held_codex_free!(ws)
-
-      assert {:hold, _reason} = Snapshot.quota_hold(ws.id)
-    end
-
-    test "a most_quota workspace with no implementer attachment keeps the default-provider hold" do
-      ws = most_quota!()
-      claude = account!(:claude, %{quota_config: %{"throttle_threshold" => 0.5}})
-
-      Ash.create!(WorkspaceProviderAccount, %{
-        workspace_id: ws.id,
-        provider: :claude,
-        provider_account_id: claude.id
-      })
-
-      claude_used!(claude, 0.70)
-
-      assert {:hold, _reason} = Snapshot.quota_hold(ws.id)
-    end
-  end
-
-  # ---- the per-ticket hold (bd-1qjv3j) --------------------------------------
-
-  describe "load/1 per-ticket holds" do
-    defp ready_issue(id, ws) do
-      now = now()
-
-      %{
-        id: id,
-        title: "Task #{id}",
-        state: :queued,
-        priority: 2,
-        difficulty: 2,
-        issue_type: :task,
-        workspace_id: ws.id,
-        description: nil,
-        acceptance: nil,
-        notes: nil,
-        created_at: now,
-        updated_at: now,
-        closed_at: nil
-      }
-    end
-
-    defp load_ready(ws, ids) do
-      board =
-        Snapshot.load(
-          workspace_id: ws.id,
-          issues: Enum.map(ids, &ready_issue(&1, ws)),
-          workers: [],
-          slots_total: 3
-        )
-
-      Map.new(board.ready, &{&1.card.id, &1})
-    end
-
-    test "a Ready ticket whose pool has an account with headroom is not shown as held" do
-      ws = most_quota!()
-      claude_held_codex_free!(ws)
-
-      assert %{"t-1" => %{state: :next, reason: reason}} = load_ready(ws, ["t-1"])
-      refute reason =~ "quota"
-    end
-
-    test "every Ready ticket lists each held account when all candidates are held" do
-      ws = most_quota!()
-      %{codex: codex} = claude_held_codex_free!(ws)
-      Ash.update!(codex, %{quota_config: %{"throttle_threshold" => 0.5}})
-      codex_used!(codex, 60.0)
-
-      ready = load_ready(ws, ["t-1", "t-2"])
-
-      for {_id, %{state: :blocked, reason: reason}} <- ready do
-        assert reason =~ "claude:#{claude_slug(ws)}"
-        assert reason =~ "codex:#{codex.slug}"
-      end
-
-      assert map_size(ready) == 2
-    end
-  end
-
   # ---- the slots ------------------------------------------------------------
 
   describe "effective_max_concurrent/3" do
@@ -270,14 +135,6 @@ defmodule Wardmast.Board.SnapshotMostQuotaTest do
 
       assert total == 3
       assert total - in_use == 2
-    end
-
-    test "counts only the available candidates: a held default provider adds nothing" do
-      ws = most_quota!()
-      %{} = claude_held_codex_free!(ws, %{max_concurrent: 2}, %{max_concurrent: 2})
-
-      # Codex's two free slots, none of Claude's.
-      assert Snapshot.effective_max_concurrent(ws.id, 0) == 2
     end
 
     test "is capped by the machine cap" do
@@ -325,28 +182,6 @@ defmodule Wardmast.Board.SnapshotMostQuotaTest do
       live_worker!(ws, "codex")
 
       assert Snapshot.effective_max_concurrent(ws.id, 2) == 2
-    end
-  end
-
-  describe "load/1" do
-    test "carries the routed hold and slot count onto the board" do
-      ws = most_quota!()
-      %{} = claude_held_codex_free!(ws, %{}, %{max_concurrent: 2})
-
-      board = Snapshot.load(workspace_id: ws.id, issues: [], workers: [])
-
-      assert board.quota == :ok
-      assert board.slots_total == 2
-      assert board.slots_free == 2
-    end
-
-    test "a failover workspace's board still carries the default provider's hold" do
-      ws = workspace!(%{})
-      claude_held_codex_free!(ws)
-
-      board = Snapshot.load(workspace_id: ws.id, issues: [], workers: [])
-
-      assert {:hold, _reason} = board.quota
     end
   end
 end

@@ -11,12 +11,10 @@ defmodule Wardmast.Worker.RepoCap do
   admitted, and finishing is what cuts merge churn, so it is never held (I9).
   It only tightens: unset is no cap.
 
-  **Enforced only under `scheduler_admission: enforce`**, with the rest of the
-  layered admission (DC8). Under `legacy` and `shadow` nothing may change a
-  dispatch decision (I1, I2), so `Wardmast.Worker.Dispatch`'s
-  `ensure_repo_capacity/2` is a no-op there and never reads a count. The scheduler walk (`Wardmast.Board.WalkInputs`) and the
-  capacity display (in `Wardmast.Board`) read the same count beside today's
-  decision.
+  **Enforced with the rest of the layered admission** (DC8, the only admission
+  since DC12): `Wardmast.Worker.Dispatch`'s `ensure_repo_capacity/2` reads the
+  count. The scheduler walk (`Wardmast.Board.WalkInputs`) and the capacity
+  display (in `Wardmast.Board`) read the same count.
 
   ## What counts
 

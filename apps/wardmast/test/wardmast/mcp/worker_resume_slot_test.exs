@@ -7,11 +7,9 @@ defmodule Wardmast.MCP.WorkerResumeSlotTest do
   use Wardmast.DataCase, async: false
 
   alias Wardmast.MCP.Scope
-  alias Wardmast.MCP.Tools
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Test.ResumeSlotFixture
   alias Wardmast.Usage.Event, as: UsageEvent
-  alias Wardmast.Worker
 
   setup do
     # bd-80ecol: the resume reaches the real-agent dispatch guard, which
@@ -40,29 +38,6 @@ defmodule Wardmast.MCP.WorkerResumeSlotTest do
       })
 
     Map.merge(%{ws: ws, coordinator: coordinator}, incident)
-  end
-
-  test "refuses at a full cap, naming the cap and the holder", ctx do
-    assert {:error, {:conflict, message}} =
-             Tools.worker_resume(ctx.coordinator, %{"task_id" => ctx.a.id})
-
-    assert message =~ "cap is 1"
-    assert message =~ ctx.b.id
-    assert message =~ "force"
-    assert Worker.whereis(ctx.a.id) == ctx.first.worker_pid
-    assert ResumeSlotFixture.overrides(ctx.ws) == []
-  end
-
-  test "force: true admits it over the cap and records the override", ctx do
-    assert {:ok, data} =
-             Tools.worker_resume(ctx.coordinator, %{"task_id" => ctx.a.id, "force" => true})
-
-    assert data.worker.task_id == ctx.a.id
-    assert Worker.whereis(ctx.a.id) != ctx.first.worker_pid
-
-    assert [event] = ResumeSlotFixture.overrides(ctx.ws)
-    assert event.payload["task_id"] == ctx.a.id
-    assert event.payload["actor"] == "coordinator"
   end
 
   test "the catalog schema accepts `force`" do

@@ -14,78 +14,47 @@ defmodule Wardmast.Worker.ResumeSlot do
   the cap: two tasks in flight under a cap of 1, and the scheduler could admit
   nothing until both merged.
 
-  ## The rule: is the ticket In progress?
+  ## The rule: the pin pool's seat (DC8, the only rule since DC12)
 
-  Not who is resuming it. A ticket holds a slot exactly while its stored state
-  is `:active` (bd-asxw4e) — the same rule the board's `slots_used` counts by
-  (`Wardmast.Tasks.SlotGate.holds_slot?/1`), so the gate can never disagree
-  with the number on the board:
+  For a ticket whose pin account (`implementer_account_id`, else the account
+  its workspace meters its last authoring provider under), the question is the
+  pin pool's **seat** (`docs/design/provider-dynamic-concurrency.md` §3.2, §7):
 
-    * **Held** — the ticket is `:active`, whatever its worker did: working,
-      between ReviewGate rounds, failed mid hand-off so an automatic round can
-      replace it, parked on a human, or cut off by a restart. The resume
-      passes through **uncapped**. This is the #1969/#1995 no-deadlock
-      guarantee: a round for a ticket already In progress is never a new
-      admission.
-    * **Not held** — any other state: `:queued` (requeued, reopened),
-      `:merging` (an open PR holds no slot), `:verifying`. The resume must
-      **acquire** a slot, exactly like a new admission, against the ticket's
-      workspace's effective cap
-      (`Wardmast.Board.Snapshot.effective_max_concurrent/2`).
+    * **In progress** — the ticket holds its pin seat in every phase, held for
+      quota and idle included, so a resume needs nothing new: `{:ok, :held}`.
+      This is the #1969/#1995 no-deadlock guarantee: a round for a ticket
+      already In progress is never a new admission.
+    * **Not In progress** — the resume takes the ticket back into In progress:
+      it needs a free seat on its pin pool (`Wardmast.Accounts.SeatCheck`).
+    * **`follow_up: true`** — a CI fix or conflict pass
+      (`Wardmast.Workflows.MergeQueue.PassAdmission`) is a follow-up of in-flight
+      work and is never held for a full pool (I9): `{:ok, :follow_up}`.
 
-  No worker rows are read. Before bd-asxw4e the answer came from the
-  author row's `Wardmast.Worker.Phase`, so a human-parked ticket had released
-  its slot (the 2026-09-23 incident below) while one parked on an open PR
-  still held it; the stored state now decides both.
+  No worker rows are read; the stored state decides In progress (bd-asxw4e).
 
-  ## When no slot is free
+  ## When no seat is free
 
   Which of the two happens is the only thing the caller's origin decides:
 
     * `origin: :human` (the default — refusing is the one answer that neither
       fails silently nor bypasses) → `{:error, {:slot_cap_full, info}}`, which
-      every human surface renders with `refusal_message/1`: the cap, the tasks
-      holding it, and how to override. `force: true` overrides, and the
-      override is written to the audit log as a `slot_cap_override` event
-      (`Wardmast.Events`) naming the actor, the cap and the holders.
+      every human surface renders with `refusal_message/1`. `force: true`
+      overrides, and the override is written to the audit log as a
+      `slot_cap_override` event (`Wardmast.Events`) naming the actor, the cap
+      and the holders.
     * `origin: :automatic` → `{:defer, info}`. `Dispatch` hands the resume to
       `Wardmast.Board.Autopilot.defer_resume/4`, which starts it as soon as a
-      slot frees, ahead of any new Ready dispatch.
+      seat frees, ahead of any new Ready dispatch.
 
-  `slot_admitted: true` marks a resume the scheduler has already admitted into
-  a free slot (the Autopilot draining a deferred resume); it is not re-checked.
-
-  ## Under `scheduler_admission: enforce` (DC8)
-
-  For a ticket whose pin account (`implementer_account_id`, else the account
-  its workspace meters its last authoring provider under) is in `enforce`, the
-  slot becomes the pin pool's **seat** (`docs/design/provider-dynamic-concurrency.md`
-  §3.2, §7):
-
-    * **In progress** — the ticket holds its pin seat in every phase, held for
-      quota and idle included (the seat is wider than the slot), so a resume
-      needs nothing new: `{:ok, :held}`.
-    * **Not In progress** — the resume takes the ticket back into In progress:
-      it needs a free seat on its pin pool (`Wardmast.Accounts.SeatCheck`), and at
-      a full pool it is deferred, refused or forced exactly as at a full cap.
-    * **`follow_up: true`** — a CI fix or conflict pass
-      (`Wardmast.Workflows.MergeQueue.PassAdmission`) is a follow-up of in-flight
-      work and is never held for a full pool (I9): `{:ok, :follow_up}`.
-
-  Under `legacy` and `shadow` everything above this section is unchanged and
-  no seat is read. `:mode`, `:account` and `:seat_opts` are seams.
+  `slot_admitted: true` marks a resume the scheduler has already admitted
+  (the Autopilot draining a deferred resume); it is not re-checked. `:account`
+  and `:seat_opts` are seams.
   """
 
-  alias Wardmast.Accounts.AdmissionMode
   alias Wardmast.Accounts.Resolver
   alias Wardmast.Accounts.SeatCheck
-  alias Wardmast.Accounts.SlotLimit
   alias Wardmast.Agents.ModelFamily
-  alias Wardmast.Board.Autopilot
-  alias Wardmast.Board.Snapshot
-  alias Wardmast.Tasks.IdleTickets
   alias Wardmast.Tasks.Issue
-  alias Wardmast.Tasks.SlotGate
   alias Wardmast.Workers.Run
 
   require Ash.Query
@@ -96,7 +65,6 @@ defmodule Wardmast.Worker.ResumeSlot do
           required(:task_id) => String.t(),
           required(:cap) => non_neg_integer(),
           required(:holders) => [String.t()],
-          optional(:limit) => SlotLimit.t() | nil,
           optional(:seat) => SeatCheck.info()
         }
 
@@ -119,11 +87,6 @@ defmodule Wardmast.Worker.ResumeSlot do
     * `:force` — override a full cap (human surfaces only); recorded.
     * `:actor` — who forced it, for the audit record.
     * `:slot_admitted` — the scheduler already admitted this resume.
-    * `:held_ids` — tasks the quota gate is holding, which hold no slot
-      (`SlotGate.holds_slot?/2`); the DispatchQueue passes it from inside its
-      own drain.
-    * `:tickets` / `:cap` — seams: the tickets to count holders among and the
-      effective cap, read from the repo and `Snapshot` when absent.
     * `:provider` / `:model` — the provider and model the resume will run on
       (the caller's, a `provider_constraint`'s, routing's), under `enforce`: the seat
       is checked on that provider's account and the model's pool instead of the
@@ -136,40 +99,20 @@ defmodule Wardmast.Worker.ResumeSlot do
     if Keyword.get(opts, :slot_admitted) == true do
       {:ok, :admitted}
     else
-      case enforced_account(task, opts) do
-        {:enforce, account} -> admit_seat(task, account, opts)
-        :slot -> admit_slot(task, opts)
-      end
-    end
-  end
-
-  defp admit_slot(%Issue{} = task, opts) do
-    if SlotGate.holds_slot?(task, slot_opts(opts)) do
-      {:ok, :held}
-    else
-      tickets = Keyword.get_lazy(opts, :tickets, &tickets_in_progress/0)
-      slot_opts = Keyword.put_new_lazy(slot_opts(opts), :idle_ids, fn -> idle_ids(tickets) end)
-      holders = holders_but(tickets, task, slot_opts)
-
-      cap = Keyword.get_lazy(opts, :cap, fn -> cap_for(task, length(holders)) end)
-      acquire(task, %{task_id: task.id, cap: cap, holders: holders}, opts)
+      admit_seat(task, pin_account!(task, opts), opts)
     end
   end
 
   # ---- enforce (DC8) -----------------------------------------------------------
 
-  # The pin account and its effective mode; `:slot` for today's rule. An
-  # unreadable account or mode reads as `legacy`, today's rule.
-  defp enforced_account(%Issue{} = task, opts) do
-    account = Keyword.get_lazy(opts, :account, fn -> pin_account(task, opts) end)
-
-    if Keyword.get_lazy(opts, :mode, fn -> AdmissionMode.mode(account) end) == :enforce,
-      do: {:enforce, account},
-      else: :slot
+  # The pin account. Unreadable reads as no account, which fails open like every
+  # other read of the ceiling (a bug here must not stop the fleet).
+  defp pin_account!(%Issue{} = task, opts) do
+    Keyword.get_lazy(opts, :account, fn -> pin_account(task, opts) end)
   rescue
-    _ -> :slot
+    _ -> nil
   catch
-    :exit, _ -> :slot
+    :exit, _ -> nil
   end
 
   # bd-dhrb7j: the seat a resume takes is on the pool it will RUN on. The pin
@@ -251,15 +194,8 @@ defmodule Wardmast.Worker.ResumeSlot do
       "over — the override is recorded."
   end
 
-  def refusal_message(%{task_id: task_id} = info) do
-    "no free worker slot to resume #{task_id}: #{limit_phrase(info)}. #{task_id} is not In progress, so it holds no slot " <>
-      "and resuming it is a new admission. Wait for a slot to free, or " <>
-      "resume with force (MCP `force: true`, `arb worker resume --force`) to go " <>
-      "over the cap — the override is recorded."
-  end
-
   @doc """
-  Names the binding limit — the account ceiling, the workspace cap or the
+  Names the binding limit — the account ceiling, the workspace share or the
   install cap — and who is counted against it (bd-48prlb). Falls back to the
   workspace-framed number when the binding limit is unknown. Shared by the
   refusal and the deferred-resume log line.
@@ -270,35 +206,10 @@ defmodule Wardmast.Worker.ResumeSlot do
 
   def limit_phrase(%{seat: %{} = seat}), do: SeatCheck.describe(seat)
 
-  def limit_phrase(%{limit: %{} = limit, holders: holders}),
-    do: SlotLimit.describe(limit, holders)
-
-  def limit_phrase(%{cap: cap, holders: holders}),
-    do: "the concurrency cap is #{cap} and #{held_by(holders)}"
-
-  defp held_by([]), do: "no task is holding a slot (the cap itself is 0)"
-
-  defp held_by(holders),
-    do: "#{length(holders)} held by #{Enum.join(holders, ", ")}"
-
   # ---- internals -----------------------------------------------------------
 
   defp presence(v) when is_binary(v) and v != "", do: v
   defp presence(_), do: nil
-
-  # A stale copy of the ticket being resumed in the list is not a holder: the
-  # ticket itself was just judged not to hold a slot.
-  defp holders_but(tickets, %Issue{id: id}, slot_opts),
-    do: tickets |> SlotGate.slot_holders(slot_opts) |> List.delete(id)
-
-  # bd-3fbj83: orphaned tickets (no run, nothing queued) hold no slot.
-  defp idle_ids(tickets) do
-    IdleTickets.ids(tickets, queued_ids: Autopilot.deferred_resume_ids())
-  rescue
-    _ -> []
-  end
-
-  defp slot_opts(opts), do: Keyword.take(opts, [:held_ids, :idle_ids])
 
   @doc """
   Was `task_id`'s latest main run cut off by a restart rather than ended on its
@@ -321,12 +232,6 @@ defmodule Wardmast.Worker.ResumeSlot do
   rescue
     _ -> false
   end
-
-  defp acquire(_task, %{cap: cap, holders: holders}, _opts) when length(holders) < cap,
-    do: {:ok, :acquired}
-
-  defp acquire(task, info, opts),
-    do: over_cap(task, Map.put(info, :limit, limit_for(task, info)), opts)
 
   defp over_cap(task, info, opts) do
     cond do
@@ -355,30 +260,4 @@ defmodule Wardmast.Worker.ResumeSlot do
       "origin" => opts |> Keyword.get(:origin, :human) |> to_string()
     })
   end
-
-  # Every ticket In progress, the board's own count (`Snapshot.derive/1`
-  # counts over every ticket it reads). An unreadable table is no holders:
-  # the cap is still enforced against what could be read.
-  defp tickets_in_progress do
-    Issue
-    |> Ash.Query.filter(state == :active)
-    |> Ash.read!()
-  rescue
-    _ -> []
-  end
-
-  defp limit_for(%Issue{workspace_id: ws_id}, %{holders: holders}) do
-    case Ash.get(Wardmast.Tasks.Workspace, ws_id) do
-      {:ok, ws} -> SlotLimit.binding(ws, length(holders))
-      _ -> nil
-    end
-  rescue
-    _ -> nil
-  end
-
-  # The same cap the board promotes against, for the task's own workspace. The
-  # occupied count is handed in because `effective_max_concurrent/2` folds an
-  # account's headroom into the caller's frame by adding it back.
-  defp cap_for(%Issue{workspace_id: ws_id}, occupied),
-    do: Snapshot.effective_max_concurrent(ws_id, occupied)
 end

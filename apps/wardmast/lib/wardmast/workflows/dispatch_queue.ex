@@ -127,17 +127,15 @@ defmodule Wardmast.Workflows.DispatchQueue do
       (`reroutable?/3`): the item drains early, and the same resume continues the
       work there from the preserved worktree, briefed from its git state.
 
-  ## Under `scheduler_admission: enforce` (DC8)
+  ## Seat admission (DC8, the only admission since DC12)
 
-  For a provider whose account is in `enforce` (`Wardmast.Accounts.AdmissionMode`;
-  design `provider-dynamic-concurrency.md` §7, E11), a fresh dispatch is not
-  quota-held: `Wardmast.Worker.Dispatch` refuses it as a hard zero on its pool
+  A fresh dispatch is not quota-held (design `provider-dynamic-concurrency.md`
+  §7, E11): `Wardmast.Worker.Dispatch` refuses it as a hard zero on its pool
   and it waits in Ready, where the scheduler walk admits it by seat. A fresh
   quota hold still queued from before the switch is dropped at the next drain
   rather than replayed past the walk. Pause, guardrail, spend and quota-stop
   holds stay, and a held follow-up is re-checked on the gate's hard rules
-  alone (`pace: false`). `slot_free?/2`'s `ResumeSlot` is the pin pool's seat
-  check there.
+  alone (`pace: false`).
 
   ## `:continue` — overage alert debounce
 
@@ -171,7 +169,6 @@ defmodule Wardmast.Workflows.DispatchQueue do
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Worker
   alias Wardmast.Worker.PreflightHold
-  alias Wardmast.Worker.ResumeSlot
   alias Wardmast.Workers.Run
   alias Wardmast.Workflows.DispatchQueueSupervisor
 
@@ -620,14 +617,13 @@ defmodule Wardmast.Workflows.DispatchQueue do
     # the drain re-check has to hand it the same account `Dispatch` does or a
     # held intent could drain on a ceiling the dispatcher would re-hold at.
     accounts = provider_accounts(state)
-    enforced = enforced_providers(accounts)
-    state = drop_fresh_quota_holds(state, enforced)
-    drain_items(state, accounts, enforced)
+    state = drop_fresh_quota_holds(state)
+    drain_items(state, accounts)
   end
 
-  defp drain_items(%State{items: []} = state, _accounts, _enforced), do: state
+  defp drain_items(%State{items: []} = state, _accounts), do: state
 
-  defp drain_items(%State{} = state, accounts, enforced) do
+  defp drain_items(%State{} = state, accounts) do
     # A quota-exhausted pre-flight failure holds its item until its own
     # `retry_not_before` passes (bd-8lnnnt) — set aside before the gate check
     # even runs, since the gate has no notion of this per-item hold.
@@ -666,11 +662,8 @@ defmodule Wardmast.Workflows.DispatchQueue do
         provider = item_provider(item)
         quota = Map.get(snapshots, provider)
         account = Map.get(accounts, provider)
-        # DC8: under `enforce` a held follow-up drains on the hard rules alone.
-        gate_opts =
-          if MapSet.member?(enforced, provider),
-            do: [account: account, pace: false],
-            else: [account: account]
+        # DC8: a held follow-up drains on the hard rules alone.
+        gate_opts = [account: account, pace: false]
 
         # bd-5ef587: a pause outlives quota headroom. A paused item is released
         # only when routing now lands on a different, unpaused, ungated
@@ -681,7 +674,7 @@ defmodule Wardmast.Workflows.DispatchQueue do
           task = exempt_task(state, item, account)
 
           not match?({:hold, _}, gate.check(task, quota, state.workspace, gate_opts)) and
-            not Map.has_key?(spend, item.task_id) and slot_free?(state, item)
+            not Map.has_key?(spend, item.task_id)
         end
       end)
 
@@ -691,50 +684,24 @@ defmodule Wardmast.Workflows.DispatchQueue do
     %{state | items: on_hold ++ Enum.map(keep, &refresh_spend_reason(&1, spend))}
   end
 
-  # ---- scheduler_admission: enforce (DC8) -------------------------------------
+  # ---- seat admission (DC8) ---------------------------------------------------
 
-  # The providers whose held intents are judged under `enforce`: the effective
-  # mode of the account each is metered under (O11). Unreadable is `legacy`.
-  defp enforced_providers(accounts) do
-    for {provider, account} <- accounts,
-        safe_mode(account) == :enforce,
-        into: MapSet.new(),
-        do: provider
-  end
-
-  defp safe_mode(account) do
-    Wardmast.Accounts.AdmissionMode.mode(account)
-  rescue
-    _ -> :legacy
-  catch
-    :exit, _ -> :legacy
-  end
-
-  # Design §7, E11: under `enforce` a fresh dispatch is not quota-held — it waits
+  # Design §7, E11: a fresh dispatch is not quota-held — it waits
   # in Ready, where the scheduler walk admits it by seat and in queue order. A
   # fresh intent the quota gate held (before the switch) is dropped rather than
   # replayed past the walk. Pause, guardrail, spend and quota-stop holds, and a
   # follow-up's hold, stay.
-  defp drop_fresh_quota_holds(%State{items: items} = state, enforced) do
-    if MapSet.size(enforced) == 0 do
-      state
-    else
-      {dropped, kept} =
-        Enum.split_with(
-          items,
-          &(MapSet.member?(enforced, item_provider(&1)) and fresh_quota_hold?(&1))
-        )
+  defp drop_fresh_quota_holds(%State{items: items} = state) do
+    {dropped, kept} = Enum.split_with(items, &fresh_quota_hold?/1)
 
-      for item <- dropped do
-        Logger.info(
-          "DispatchQueue: dropped the held #{describe(item).intent} for #{item.task_id}: " <>
-            "under scheduler_admission: enforce a fresh dispatch is not quota-held; it waits " <>
-            "in Ready for a free seat"
-        )
-      end
-
-      %{state | items: kept}
+    for item <- dropped do
+      Logger.info(
+        "DispatchQueue: dropped the held #{describe(item).intent} for #{item.task_id}: " <>
+          "a fresh dispatch is not quota-held; it waits in Ready for a free seat"
+      )
     end
+
+    %{state | items: kept}
   end
 
   # The quota gate's own hold (its binding map carries no `:gate`) on a dispatch
@@ -797,25 +764,6 @@ defmodule Wardmast.Workflows.DispatchQueue do
     end
   rescue
     _ -> nil
-  end
-
-  # bd-zkmvia: a held round for an In-progress ticket holds no slot while it
-  # waits (`SlotGate.holds_slot?/1`), so replaying it is a new admission:
-  # headroom in the quota is not enough, the cap needs room too. The item is
-  # still queued here, so `ResumeSlot.admit/2` judges the ticket as not holding.
-  # Fails open: an unreadable ticket or cap must not strand the round.
-  defp slot_free?(%State{items: items}, %{task_id: task_id, opts: opts}) do
-    with true <- Keyword.get(opts, :review) != true,
-         {:ok, %Issue{state: :active} = task} <- Ash.get(Issue, task_id) do
-      # This process cannot ask itself (`held?/2` is a call), so it names the
-      # held tasks.
-      held_ids = Enum.map(items, & &1.task_id)
-      match?({:ok, _}, ResumeSlot.admit(task, origin: :automatic, held_ids: held_ids))
-    else
-      _ -> true
-    end
-  rescue
-    _ -> true
   end
 
   # bd-5ef587: would a replay of this pause-held item route to another

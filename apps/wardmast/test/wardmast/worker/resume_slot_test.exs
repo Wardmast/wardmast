@@ -52,105 +52,9 @@ defmodule Wardmast.Worker.ResumeSlotTest do
   end
 
   describe "orphaned tickets hold no slot (bd-3fbj83)" do
-    test "an idle ticket is not counted against the workspace cap", %{a: a, b: b} do
-      c = %{in_state(b, :active) | id: "orphan-1"}
-      tickets = [in_state(a, :queued), in_state(b, :active), c]
-
-      assert {:error, {:slot_cap_full, %{holders: holders}}} =
-               ResumeSlot.admit(in_state(a, :queued), tickets: tickets, cap: 2)
-
-      assert "orphan-1" in holders
-
-      assert {:ok, :acquired} =
-               ResumeSlot.admit(in_state(a, :queued),
-                 tickets: tickets,
-                 cap: 2,
-                 idle_ids: ["orphan-1"]
-               )
-    end
   end
 
   describe "a ticket not In progress must acquire a slot" do
-    test "resuming a :queued ticket needs a slot", %{a: a, b: b} do
-      a = in_state(a, :queued)
-      tickets = [a, in_state(b, :active)]
-
-      assert {:ok, :acquired} = ResumeSlot.admit(a, tickets: tickets, cap: 2)
-      assert {:error, {:slot_cap_full, _}} = ResumeSlot.admit(a, tickets: tickets, cap: 1)
-    end
-
-    test "so does a :merging one — an open PR holds no slot", %{a: a, b: b} do
-      a = in_state(a, :merging)
-
-      assert {:defer, %{holders: [holder]}} =
-               ResumeSlot.admit(a,
-                 origin: :automatic,
-                 tickets: [a, in_state(b, :active)],
-                 cap: 1
-               )
-
-      assert holder == b.id
-    end
-
-    test "a human resume at a full cap is refused, naming the cap and the holders", %{
-      a: a,
-      b: b
-    } do
-      a = in_state(a, :queued)
-
-      assert {:error, {:slot_cap_full, info}} =
-               ResumeSlot.admit(a, origin: :human, tickets: [a, in_state(b, :active)], cap: 1)
-
-      assert info.cap == 1
-      assert info.holders == [b.id]
-      assert info.task_id == a.id
-
-      message = ResumeSlot.refusal_message(info)
-      assert message =~ "1"
-      assert message =~ b.id
-      assert message =~ a.id
-      assert message =~ "force"
-    end
-
-    test "the default origin is human — refuse, never bypass", %{a: a, b: b} do
-      a = in_state(a, :queued)
-
-      assert {:error, {:slot_cap_full, _}} =
-               ResumeSlot.admit(a, tickets: [in_state(b, :active)], cap: 1)
-    end
-
-    test "an automatic resume at a full cap is deferred", %{a: a, b: b} do
-      a = in_state(a, :verifying)
-
-      assert {:defer, %{cap: 1, holders: [holder]}} =
-               ResumeSlot.admit(a, origin: :automatic, tickets: [in_state(b, :active)], cap: 1)
-
-      assert holder == b.id
-    end
-
-    test "force overrides the cap and records the override", %{ws: ws, a: a, b: b} do
-      a = in_state(a, :queued)
-
-      assert {:ok, :forced} =
-               ResumeSlot.admit(a,
-                 origin: :human,
-                 force: true,
-                 actor: "coordinator",
-                 tickets: [in_state(b, :active)],
-                 cap: 1
-               )
-
-      [event] =
-        Record
-        |> Ash.Query.filter(workspace_id == ^ws.id and topic == "slot_cap_override")
-        |> Ash.read!()
-
-      assert event.payload["task_id"] == a.id
-      assert event.payload["cap"] == 1
-      assert event.payload["holders"] == [b.id]
-      assert event.payload["actor"] == "coordinator"
-    end
-
     test "force with a free slot is a plain admission, not an override", %{ws: ws, a: a} do
       assert {:ok, :acquired} = ResumeSlot.admit(a, force: true, tickets: [], cap: 1)
 
@@ -174,20 +78,6 @@ defmodule Wardmast.Worker.ResumeSlotTest do
   describe "reading the world" do
     setup do
       put_local_cap(1)
-    end
-
-    test "reads the tickets In progress and the configured cap when not handed them", %{
-      a: a,
-      b: b
-    } do
-      {:ok, b} = Issue.start_work(b)
-      assert b.state == :active
-
-      assert {:error, {:slot_cap_full, %{cap: 1, holders: holders}}} = ResumeSlot.admit(a)
-      assert b.id in holders
-
-      {:ok, a} = Issue.start_work(a)
-      assert {:ok, :held} = ResumeSlot.admit(a)
     end
   end
 end

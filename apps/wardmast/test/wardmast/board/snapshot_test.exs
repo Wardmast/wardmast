@@ -1,6 +1,7 @@
 defmodule Wardmast.Board.SnapshotTest do
   use ExUnit.Case, async: true
 
+  alias Wardmast.Board.OpenWalk
   alias Wardmast.Board.Snapshot
   alias Wardmast.Tasks.Lifecycle
 
@@ -68,13 +69,15 @@ defmodule Wardmast.Board.SnapshotTest do
           changed_files: %{},
           now: @now,
           slots_total: 4,
-          quota: :ok,
           paused: false
         },
         Map.new(overrides)
       )
+      |> OpenWalk.put()
     )
   end
+
+  defp slots_free(board), do: max(board.slots_total - board.slots_used, 0)
 
   defp ids(cards), do: Enum.map(cards, & &1.id)
 
@@ -116,7 +119,7 @@ defmodule Wardmast.Board.SnapshotTest do
 
       assert [
                %{id: "bd-a", state: :next, reason: "next up — dispatching..."},
-               %{id: "bd-b", state: :queued, reason: "1 ahead in queue"}
+               %{id: "bd-b", state: :starting, reason: "starting — claude:default on local"}
              ] = board.ready
     end
 
@@ -131,7 +134,7 @@ defmodule Wardmast.Board.SnapshotTest do
 
       assert ids(board.ready) == ["bd-b"]
       assert [%{id: "bd-a", blocked_by: ["bd-z"]}] = board.blocked
-      assert board.promote == "bd-b"
+      assert board.walk.promote == "bd-b"
     end
 
     test "file overlap with an in-flight worker holds the card" do
@@ -260,7 +263,7 @@ defmodule Wardmast.Board.SnapshotTest do
     test "an unrefined card is never the scheduler's promote, however free the slots" do
       board = derive(issues: [issue("bd-a", %{state: :backlog})], slots_total: 8)
 
-      assert board.promote == nil
+      assert board.walk.promote == nil
     end
 
     test "cards carry what a Backlog card is read by" do
@@ -311,7 +314,7 @@ defmodule Wardmast.Board.SnapshotTest do
         )
 
       assert ids(board.ready) == ["bd-new", "bd-old"]
-      assert board.promote == "bd-new"
+      assert board.walk.promote == "bd-new"
     end
 
     test "priority outranks rank" do
@@ -356,10 +359,8 @@ defmodule Wardmast.Board.SnapshotTest do
       end
 
       assert board.attention == []
-      assert board.promote == nil
+      assert board.walk.promote == nil
       assert board.slots_total == 0
-      assert board.slots_free == 0
-      assert board.quota == :ok
       # Paused, because nothing should claim a queue position in a queue this
       # process could not read.
       assert board.paused
@@ -382,7 +383,7 @@ defmodule Wardmast.Board.SnapshotTest do
 
       assert board.slots_total == 3
       assert board.slots_used == 2
-      assert board.slots_free == 1
+      assert slots_free(board) == 1
     end
 
     test "a ticket Merging on its open PR releases its slot" do
@@ -394,7 +395,7 @@ defmodule Wardmast.Board.SnapshotTest do
           workers: [worker("bd-1", :succeeded)]
         )
 
-      assert board.slots_free == 2
+      assert slots_free(board) == 2
     end
 
     # bd-2g179m: an approved ticket parked for a manual merge (`merge.auto_merge`
@@ -416,8 +417,8 @@ defmodule Wardmast.Board.SnapshotTest do
         )
 
       assert board.slots_used == 0
-      assert board.slots_free == 1
-      assert board.promote == "bd-next"
+      assert slots_free(board) == 1
+      assert board.walk.promote == "bd-next"
     end
 
     test "slots_free is zero exactly when the plan will not dispatch" do
@@ -431,8 +432,8 @@ defmodule Wardmast.Board.SnapshotTest do
           workers: [worker("bd-busy", :review_gate)]
         )
 
-      assert board.slots_free == 0
-      assert board.promote == nil
+      assert slots_free(board) == 0
+      assert board.walk.promote == nil
     end
 
     test "a closed ticket frees its slot" do
@@ -443,7 +444,7 @@ defmodule Wardmast.Board.SnapshotTest do
           workers: [worker("bd-1", :succeeded)]
         )
 
-      assert board.slots_free == 2
+      assert slots_free(board) == 2
     end
 
     test "no free slot holds the queue and says so" do
@@ -454,8 +455,8 @@ defmodule Wardmast.Board.SnapshotTest do
           workers: [worker("bd-1", :working)]
         )
 
-      assert board.promote == nil
-      assert [%{state: :blocked, reason: "blocked — no free worker slot"}] = board.ready
+      assert board.walk.promote == nil
+      assert [%{state: :blocked, reason: "waiting for capacity — " <> _}] = board.ready
     end
   end
 
@@ -1493,7 +1494,7 @@ defmodule Wardmast.Board.SnapshotTest do
       assert board.blocked == [] and board.merging == [] and board.verifying == []
       assert ids(board.closed_today) == ["bd-closed"]
       assert board.slots_total == 4
-      assert board.slots_free == 3
+      assert slots_free(board) == 3
     end
   end
 
@@ -1662,18 +1663,11 @@ defmodule Wardmast.Board.SnapshotTest do
     end
   end
 
-  describe "board-wide holds" do
-    test "an exhausted quota blocks promotion and names itself" do
-      board = derive(issues: [issue("bd-a")], quota: {:hold, "quota exhausted"})
-
-      assert board.promote == nil
-      assert [%{state: :blocked, reason: "blocked — quota exhausted"}] = board.ready
-    end
-
+  describe "a paused board" do
     test "a paused board dispatches nothing" do
       board = derive(issues: [issue("bd-a")], paused: true)
 
-      assert board.promote == nil
+      assert board.walk.promote == nil
       assert [%{state: :blocked, reason: "scheduler paused"}] = board.ready
     end
   end

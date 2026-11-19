@@ -24,8 +24,6 @@ defmodule Wardmast.Quota.Gate do
     * `Wardmast.Quota.Gate.Continue` — always `:allow`, tagging `{:overage, _}`
       when the snapshot shows past-plan usage.
 
-  Each also implements `board_hold/3`, the board-level counterpart of `check/4`.
-
   The concrete module is resolved per-workspace by
   `Wardmast.Quota.gate_for_workspace/1`, which honours the config precedence
   (per-workspace > global > `:throttle`) and the `:wardmast, :quota` `:gate`
@@ -277,21 +275,6 @@ defmodule Wardmast.Quota.Gate do
               workspace :: Workspace.t() | nil,
               opts :: keyword()
             ) :: decision()
-
-  @doc """
-  The board-level question (seams #6): is this workspace's provider held, and
-  why? `Wardmast.Board.Snapshot.quota_hold/2` asks the workspace's resolved gate
-  this instead of re-deriving core's hold logic, so the board never paints a
-  hold the dispatcher's `check/4` would not honour (or promotes a card it
-  would hold).
-
-  `quota` is the latest snapshot for the workspace's default provider and
-  account (`nil` when nothing was captured — fail open with `:ok`); `policy` is
-  the `t:policy/0` pair `{account, workspace}` the snapshot is judged under.
-  Returns `:ok` or `{:hold, reason}` with an operator-facing reason string.
-  """
-  @callback board_hold(quota :: quota_source(), policy :: policy(), opts :: keyword()) ::
-              :ok | {:hold, String.t()}
 
   @doc """
   The configured `utilization_5h` at/above which the throttle gate holds.
@@ -1343,7 +1326,7 @@ defmodule Wardmast.Quota.Gate do
       the staleness checks, so a pinned clock gives a deterministic answer.
     * `:pace` — `false` keeps only the hard rules (1, 2 and 5, as
       `hard_stop/3` does) and drops the utilization rules (3 and 4), paced or
-      flat. Under `scheduler_admission: enforce` every dispatch asks the gate
+      flat. Under DC8's seat admission every dispatch asks the gate
       this way (DC8, `docs/design/provider-dynamic-concurrency.md` §4.5): the
       line is the provider budget's question, answered by the seat check.
       Default `true`, the gate as it always was.

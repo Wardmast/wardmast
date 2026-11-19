@@ -84,6 +84,9 @@ defmodule Wardmast.Agents.ProviderRoutingTest do
     }
   end
 
+  # The provider reports its limit reached: a hard rule, so the gate still holds it.
+  defp limited_codex, do: %{codex_quota(99.0) | limit_reached: true}
+
   defp agy_quota(gemini_used, claude_gpt_used) do
     bucket = fn group, window, used, reset ->
       %{
@@ -119,13 +122,13 @@ defmodule Wardmast.Agents.ProviderRoutingTest do
 
   # A process registered under the worker registry with the dispatch value
   # `Wardmast.Worker.init/1` records — enough for `Concurrency.live_count/2`.
-  defp author_worker!(ws, key, provider) do
+  defp author_worker!(ws, key, provider, opts \\ []) do
     test = self()
 
     pid =
       spawn(fn ->
         {:ok, _} = Registry.register(Wardmast.Worker.Registry, key, nil)
-        :ok = Wardmast.Worker.Registry.put_dispatch(key, ws.id, provider)
+        :ok = Wardmast.Worker.Registry.put_dispatch(key, ws.id, provider, opts)
         send(test, {:registered, self()})
         receive do: (:stop -> :ok)
       end)
@@ -255,53 +258,6 @@ defmodule Wardmast.Agents.ProviderRoutingTest do
 
       decision = ProviderRouting.evaluate(ws, task!(ws), opts([]))
       assert reasons(decision)[merged.slug] == "merged"
-    end
-
-    test "an account the gate holds on its own policy is dropped", %{ws: ws} do
-      held = account!(:codex, "held", %{quota_config: %{"throttle_threshold" => 0.5}})
-      allow!(ws, held, 1)
-
-      decision = ProviderRouting.evaluate(ws, task!(ws), opts([{held, codex_quota(60.0)}]))
-
-      assert reasons(decision)[held.slug] == "quota_held"
-
-      assert Enum.find(decision["dropped"], &(&1["account_slug"] == held.slug))["detail"] =~
-               "ceiling 50%"
-    end
-
-    test "an account the gate holds only on the workspace's stricter policy is dropped" do
-      ws =
-        workspace!(
-          Map.put(@most_quota, "quota", %{
-            "throttle_threshold" => 0.3,
-            "on_exhaustion" => "throttle"
-          })
-        )
-
-      held = account!(:claude, "ws-held")
-      allow!(ws, held, 0)
-
-      decision = ProviderRouting.evaluate(ws, task!(ws), opts([{held, claude_quota(0.4)}]))
-      assert reasons(decision)[held.slug] == "quota_held"
-    end
-
-    test "a paced account ahead of its pace is dropped though its flat ceiling has room" do
-      # A fresh workspace: one account per provider, and setup's is Claude.
-      ws = workspace!()
-
-      paced =
-        account!(:claude, "paced", %{
-          quota_config: %{"threshold_mode" => "paced", "paced_floor" => 0.35}
-        })
-
-      allow!(ws, paced, 0)
-
-      # 5h window reset 4.9h out: elapsed ≈ 0.02, so the paced line is the 0.35
-      # floor — 0.40 is over it, though far under the 0.85 flat default.
-      quota = %{claude_quota(0.40) | reset_5h_at: ahead(17_640)}
-      decision = ProviderRouting.evaluate(ws, task!(ws), opts([{paced, quota}]))
-
-      assert reasons(decision)[paced.slug] == "quota_held"
     end
 
     test "an auth-expired adapter's account is dropped", %{ws: ws} do
@@ -524,10 +480,7 @@ defmodule Wardmast.Agents.ProviderRoutingTest do
       claude = account!(:claude, "open", %{max_concurrent: 2})
 
       held =
-        account!(:codex, "held", %{
-          max_concurrent: 4,
-          quota_config: %{"throttle_threshold" => 0.5}
-        })
+        account!(:codex, "held", %{max_concurrent: 4})
 
       allow!(ws, claude, 0)
       allow!(ws, held, 1)
@@ -536,7 +489,7 @@ defmodule Wardmast.Agents.ProviderRoutingTest do
         ProviderRouting.availability(
           ws,
           nil,
-          opts([{claude, claude_quota(0.1)}, {held, codex_quota(60.0)}])
+          opts([{claude, claude_quota(0.1)}, {held, limited_codex()}])
         )
 
       assert [%{reason: "quota_held"} = dropped] = view.dropped
@@ -738,38 +691,6 @@ defmodule Wardmast.Agents.ProviderRoutingTest do
       assert again.decision["role"] == "resume"
     end
 
-    test "a follow-up role does not count the task's own live worker against the pin" do
-      # The pin's only slot is held by the task's own author worker — parked
-      # through a ReviewGate round, still registered — and by nothing else.
-      ws = workspace!()
-      shared = account!(:claude, "pin-shared", %{max_concurrent: 4})
-      codex = account!(:codex, "pin-share-codex")
-      allow!(ws, shared, 0, %{share: 1})
-      allow!(ws, codex, 1)
-      task = task!(ws)
-      pairs = [{shared, claude_quota(0.0)}, {codex, codex_quota(5.0)}]
-
-      assert {:ok, first} = ProviderRouting.select(ws, task, :main, opts(pairs))
-      assert first.account.id == shared.id
-
-      author_worker!(ws, task.id, "claude")
-      task = Ash.get!(Issue, task.id)
-
-      assert {:ok, round} =
-               ProviderRouting.select(ws, task, :review_gate_implementer, opts(pairs))
-
-      assert round.account.id == shared.id
-      assert round.decision["outcome"] == "pinned"
-
-      # Another task's worker in the same slot still fills it.
-      other = task!(ws)
-      assert {:ok, _} = ProviderRouting.select(ws, other, :main, opts(pairs))
-      assert Ash.get!(Issue, other.id).implementer_account_id == codex.id
-
-      decision = ProviderRouting.evaluate(ws, task, opts(pairs))
-      assert reasons(decision)[shared.slug] == "at_capacity"
-    end
-
     test "an unavailable pin falls back to the best account outside the reviewer's family", %{
       ws: ws,
       claude: claude,
@@ -782,7 +703,7 @@ defmodule Wardmast.Agents.ProviderRoutingTest do
       # The pinned codex is now held; claude has the most headroom but is the
       # reviewer's family, so agy (google) is the fallback.
       pairs = [
-        {codex, codex_quota(99.0)},
+        {codex, limited_codex()},
         {claude, claude_quota(0.0)},
         {agy, agy_quota(50.0, 0.0)}
       ]
@@ -815,10 +736,14 @@ defmodule Wardmast.Agents.ProviderRoutingTest do
       assert {:ok, _} = ProviderRouting.select(ws, task, :main, opts([{codex, codex_quota(5.0)}]))
 
       pairs = [
-        {codex, codex_quota(99.0)},
+        {codex, limited_codex()},
         {claude, claude_quota(0.0)},
-        {agy, agy_quota(99.0, 99.0)}
+        {agy, agy_quota(50.0, 0.0)}
       ]
+
+      # Google reports no hard stop, so the third account is out by a pause.
+      {:ok, _} = Wardmast.Providers.Pause.pause(agy.id, reason: "test", by: "test")
+      on_exit(fn -> Wardmast.Providers.Pause.resume(agy.id) end)
 
       assert {:ok, fallback} =
                ProviderRouting.select(
@@ -847,7 +772,7 @@ defmodule Wardmast.Agents.ProviderRoutingTest do
       |> Ash.update!()
 
       pairs = [
-        {codex, codex_quota(99.0)},
+        {codex, limited_codex()},
         {claude, claude_quota(0.0)},
         {agy, agy_quota(50.0, 0.0)}
       ]
@@ -882,7 +807,7 @@ defmodule Wardmast.Agents.ProviderRoutingTest do
       })
 
       pairs = [
-        {codex, codex_quota(99.0)},
+        {codex, limited_codex()},
         {claude, claude_quota(0.0)},
         {agy, agy_quota(50.0, 0.0)}
       ]
@@ -1077,7 +1002,7 @@ defmodule Wardmast.Agents.ProviderRoutingTest do
       ws = workspace!(@gated)
       {claude, agy, _} = two_accounts!(ws)
       # agy is over its line too — but it is the capability that drops it.
-      pairs = [{claude, claude_quota(0.1)}, {agy, agy_quota(99.0, 99.0)}]
+      pairs = [{claude, claude_quota(0.1)}, {agy, agy_quota(100.0, 100.0)}]
 
       decision = ProviderRouting.evaluate(ws, task!(ws, %{repo: "arbiter"}), opts(pairs))
       assert reasons(decision)[agy.slug] == "capability_missing"

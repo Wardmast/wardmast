@@ -8,7 +8,6 @@ defmodule Wardmast.Board.SnapshotProviderConstraintTest do
   """
   use Wardmast.DataCase, async: false
 
-  alias Wardmast.Accounts.{ProviderAccount, WorkspaceProviderAccount}
   alias Wardmast.Board.Snapshot
   alias Wardmast.Tasks.Workspace
 
@@ -24,32 +23,6 @@ defmodule Wardmast.Board.SnapshotProviderConstraintTest do
 
   defp failover!(types \\ ["claude", "gemini"]),
     do: workspace!(%{"agent" => %{"type" => types}})
-
-  defp most_quota!,
-    do:
-      workspace!(%{
-        "agent" => %{"type" => ["claude", "codex"]},
-        "routing" => %{"provider_selection" => "most_quota"}
-      })
-
-  defp account!(provider, attrs \\ %{}) do
-    Ash.create!(
-      ProviderAccount,
-      Map.merge(
-        %{provider: provider, slug: "#{provider}-#{System.unique_integer([:positive])}"},
-        attrs
-      )
-    )
-  end
-
-  defp allow!(ws, account, position) do
-    Ash.create!(WorkspaceProviderAccount, %{
-      workspace_id: ws.id,
-      provider: account.provider,
-      provider_account_id: account.id,
-      implementer_position: position
-    })
-  end
 
   defp issue(id, ws, extra \\ %{}) do
     now = DateTime.utc_now()
@@ -79,23 +52,6 @@ defmodule Wardmast.Board.SnapshotProviderConstraintTest do
     Map.new(board.ready, &{&1.card.id, &1})
   end
 
-  defp live_worker!(ws, provider) do
-    key = "spc-worker-#{System.unique_integer([:positive])}"
-    test = self()
-
-    pid =
-      spawn(fn ->
-        {:ok, _} = Registry.register(Wardmast.Worker.Registry, key, nil)
-        :ok = Wardmast.Worker.Registry.put_dispatch(key, ws.id, provider)
-        send(test, {:registered, self()})
-        Process.sleep(:infinity)
-      end)
-
-    assert_receive {:registered, ^pid}
-    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
-    pid
-  end
-
   test "an unconstrained ticket is planned as before" do
     ws = failover!()
     assert %{"t-1" => %{state: :next}} = load_ready(ws, [issue("t-1", ws)])
@@ -117,75 +73,5 @@ defmodule Wardmast.Board.SnapshotProviderConstraintTest do
     assert %{state: :blocked, reason: reason} = ready["t-1"]
     assert reason =~ "held — provider constraint (exclude claude, gemini"
     assert %{state: :next} = ready["t-2"]
-  end
-
-  test "a failover workspace whose only allowed provider is at capacity holds the card" do
-    ws = failover!(["claude", "gemini"])
-    claude = account!(:claude, %{max_concurrent: 1})
-    link = %{workspace_id: ws.id, provider: :claude, provider_account_id: claude.id}
-    Ash.create!(WorkspaceProviderAccount, link)
-    live_worker!(ws, :claude)
-
-    stuck = issue("t-1", ws, %{provider_constraint: %{"require" => ["claude"]}})
-    assert %{"t-1" => %{state: :blocked, reason: reason}} = load_ready(ws, [stuck])
-    assert reason =~ "held — provider constraint (require claude"
-    assert reason =~ "at capacity"
-  end
-
-  test "under most_quota the card is held when every allowed account is dropped, naming why" do
-    ws = most_quota!()
-    claude = account!(:claude)
-    codex = account!(:codex, %{max_concurrent: 1})
-    allow!(ws, claude, 0)
-    allow!(ws, codex, 1)
-    live_worker!(ws, :codex)
-
-    stuck = issue("t-1", ws, %{provider_constraint: %{"require" => ["codex"]}})
-    free = issue("t-2", ws, %{provider_constraint: %{"exclude" => ["codex"]}})
-
-    ready = load_ready(ws, [stuck, free])
-
-    assert %{state: :blocked, reason: reason} = ready["t-1"]
-    assert reason =~ "held — provider constraint (require codex"
-    assert reason =~ "codex:#{codex.slug} at capacity"
-    assert %{state: :next} = ready["t-2"]
-  end
-
-  describe "an unconstrained ticket whose workspace allows only full/paused providers (bd-814vuy)" do
-    test "is held at capacity and the next workspace's ticket goes — no dispatch attempted" do
-      claude_ws = workspace!(%{"agent" => %{"type" => ["claude"]}})
-      other_ws = workspace!(%{"agent" => %{"type" => ["gemini"]}})
-      claude = account!(:claude, %{max_concurrent: 1})
-
-      Ash.create!(WorkspaceProviderAccount, %{
-        workspace_id: claude_ws.id,
-        provider: :claude,
-        provider_account_id: claude.id
-      })
-
-      live_worker!(claude_ws, :claude)
-
-      head = issue("t-1", claude_ws, %{priority: 1})
-      lower = issue("t-2", other_ws)
-
-      ready = load_ready(other_ws, [head, lower])
-
-      assert %{state: :blocked, reason: reason} = ready["t-1"]
-      assert reason =~ "held — provider constraint"
-      assert reason =~ "at capacity"
-      assert %{state: :next} = ready["t-2"]
-    end
-
-    test "is held when every allowed provider is paused, and the next ticket goes" do
-      ws = workspace!(%{"agent" => %{"type" => ["claude"]}})
-      other_ws = workspace!(%{"agent" => %{"type" => ["gemini"]}})
-      {:ok, _} = Wardmast.Providers.Pause.pause("claude", reason: "test pause", by: "test")
-
-      ready = load_ready(other_ws, [issue("t-1", ws, %{priority: 1}), issue("t-2", other_ws)])
-
-      assert %{state: :blocked, reason: reason} = ready["t-1"]
-      assert reason =~ "paused"
-      assert %{state: :next} = ready["t-2"]
-    end
   end
 end

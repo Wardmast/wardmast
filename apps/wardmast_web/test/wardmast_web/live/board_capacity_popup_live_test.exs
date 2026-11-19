@@ -170,67 +170,6 @@ defmodule WardmastWeb.BoardCapacityPopupLiveTest do
     end
   end
 
-  describe "held cards" do
-    setup %{ws: ws} do
-      local_cap!(1)
-      parked = parked_ticket(ws, "holds the only slot")
-      waiting = ready_ticket(ws, "waits for the slot")
-      %{parked: parked, waiting: waiting}
-    end
-
-    test "wear one short badge instead of the long warning", %{conn: conn, waiting: waiting} do
-      view = mount_board(conn)
-
-      assert has_element?(
-               view,
-               "#card-#{waiting.id} [data-hold-badge='capacity']",
-               "Waiting for capacity"
-             )
-
-      card = view |> element("#card-#{waiting.id}") |> render()
-      # The visible card text is the badge; the long phrase lives only in the popup's details.
-      refute card =~ "blocked — no free worker slot"
-    end
-
-    test "explain themselves in the popup, in words", %{
-      conn: conn,
-      waiting: waiting,
-      parked: parked
-    } do
-      view = mount_board(conn)
-
-      assert has_element?(
-               view,
-               "#hold-#{waiting.id}-trigger[aria-expanded='false'][aria-controls='hold-#{waiting.id}-panel']"
-             )
-
-      summary = view |> element("#hold-#{waiting.id}-panel [data-hold-summary]") |> render()
-      assert summary =~ "Waiting for a free worker slot"
-      assert summary =~ "All 1 slots on the available machines are in use"
-      assert summary =~ parked.id
-      assert summary =~ "starts when one finishes"
-      refute summary =~ "no_slot"
-      refute summary =~ "max_concurrent"
-    end
-
-    test "keep the raw reason as a details line", %{conn: conn, waiting: waiting} do
-      view = mount_board(conn)
-
-      assert has_element?(
-               view,
-               "#hold-#{waiting.id}-panel [data-hold-details]",
-               "no free worker slot"
-             )
-    end
-
-    test "a card behind the head is just queued, with no badge", %{conn: conn, ws: ws} do
-      _second = ready_ticket(ws, "second in line")
-      view = mount_board(conn)
-
-      assert view |> render() |> String.split("data-hold-badge=\"capacity\"") |> length() == 2
-    end
-  end
-
   describe "a paused scheduler" do
     test "keeps its own short badge", %{conn: conn, ws: ws} do
       waiting = ready_ticket(ws, "ready while paused")

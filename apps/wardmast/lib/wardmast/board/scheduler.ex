@@ -14,49 +14,39 @@ defmodule Wardmast.Board.Scheduler do
   spawns, a worktree lands on disk, tokens burn), so the rule that decides it
   should be testable without a repo, a supervisor, or a quota snapshot.
 
-  ## Why at most one promotion per plan
+  ## Why the caller dispatches one placement per pass
 
-  Even with three slots free, a plan promotes one card. Dispatch is
-  asynchronous: the promoted worker does not appear in `running` until it
-  registers, so a plan that promoted three at once would be reasoning about
-  file overlap and slot count against stale state for the second and third.
-  The board re-plans on every worker and task lifecycle event, so the next
-  promotion follows within milliseconds of the first landing — one-at-a-time
-  costs nothing and keeps each decision made against a picture that is true.
+  A plan places many cards (§4.3), but the caller dispatches the first. Dispatch
+  is asynchronous: the dispatched worker does not appear in `running` until it
+  registers, so dispatching several at once would reason about file overlap and
+  capacity against stale state for the second and third. The board re-plans on
+  every worker and task lifecycle event, so the next placement follows within
+  milliseconds of the first landing.
 
   ## Reason precedence
 
-  A card's own blocks are reported ahead of anything board-wide, because they
-  survive the board-wide condition clearing: telling an operator "no free
-  worker slot" when the card is also waiting on an unmerged dependency would
-  send them to free a slot for nothing.
+  A card's own blocks are reported ahead of anything about capacity, because
+  they survive the capacity clearing: telling an operator "no free seat" when
+  the card is also waiting on an unmerged dependency would send them to free a
+  seat for nothing.
 
     1. an open dependency — `blocked — waiting on bd-9`
     2. a `conflicts_with` counterpart in flight — `blocked — conflicts with
        bd-7 (running)`
     3. file overlap with in-flight work — `blocked — lib/a.ex in flight on bd-7`
     4. scheduler paused — `scheduler paused`
-    5. quota — `blocked — quota exhausted`
-    6. no free worker slot — `blocked — no free worker slot`
+    5. capacity — `waiting for claude:default: 3 of 3 seats`
 
-  Quota outranks the slot count deliberately: a free slot you may not use is
-  not the fact worth showing. A declared mutex outranks a file overlap for the
-  same kind of reason: the overlap is an inference from two scopes, the mutex
-  is a human saying "not at the same time", and only one of those is worth
-  showing when both are true.
+  A declared mutex outranks a file overlap for the same kind of reason: the
+  overlap is an inference from two scopes, the mutex is a human saying "not at
+  the same time", and only one of those is worth showing when both are true.
 
-  Only the *head* of the queue carries a board-wide hold — with one exception.
-  Cards behind the head show their queue position (`2 ahead in queue`) — they
-  aren't blocked, they're waiting, and the distinction is what makes a stalled
-  board readable. A card held by a card-specific block is *skipped over* rather
-  than counted, so the card behind it reads `next up` rather than `1 ahead` of
-  work that isn't going anywhere.
-
-  The exception is **paused**: a queue position implies a queue that is
-  moving, so while the scheduler is paused *every* otherwise-unblocked card
-  reads `scheduler paused`, not just the head. Card-specific blocks still win
-  over it — a paused board should not hide the fact that a card is also
-  waiting on a dependency.
+  A card held by a card-specific block is *skipped over* rather than counted,
+  so the card behind it reads `next up` rather than `1 ahead` of work that
+  isn't going anywhere. The exception is **paused**: a queue position implies a
+  queue that is moving, so while the scheduler is paused *every*
+  otherwise-unblocked card reads `scheduler paused`. Card-specific blocks still
+  win over it.
 
   ## The mutex (bd-6bax7s)
 
@@ -77,13 +67,11 @@ defmodule Wardmast.Board.Scheduler do
 
   ## The walk (DC6, `docs/design/provider-dynamic-concurrency.md` §4)
 
-  Handed a `:walk` (`t:walk/0`), `plan/1` answers the same question the other
-  way: by capacity, not by one board-wide slot count. Without `:walk` the plan
-  is exactly the head-of-line plan above, byte for byte (I1); the walk only
-  runs where `Wardmast.Board.Snapshot` was asked for it. Under
-  `scheduler_admission: shadow` it is recorded beside every dispatch
-  (`Wardmast.Board.AdmissionShadow`); under `enforce` (DC8) `Wardmast.Board.Autopilot`
-  dispatches its placements.
+  `plan/1` answers by capacity (`t:walk/0`), not by one board-wide slot count,
+  and `Wardmast.Board.Autopilot` dispatches its placements. Without a `:walk`
+  there is no capacity to place against: every card with no hold of its own
+  reads `waiting for capacity — no provider budget is published`, and nothing
+  is placed.
 
     1. **Capacity sets first (§4.1).** A pool is open while its seats plus this
        walk's placements are below its budget (or its exempt budget); a machine
@@ -94,7 +82,7 @@ defmodule Wardmast.Board.Scheduler do
     2. **Walk Ready in the ES3 order (§4.2).** A card's own holds come first
        (column, mutex, overlap, guardrail, the 15 s retry window — the same
        `Lifecycle.dispatchable/2` predicate, asked without the board-wide
-       quota and slot holds the walk replaces). Then its candidates, in its
+       board-wide holds the walk replaced). Then its candidates, in its
        own preference order: the pools that have room for it, then its repo,
        then a machine that can run that pool — the first node group with room,
        ranked like `Wardmast.Nodes.Placement` (lowest load, then name).
@@ -155,13 +143,7 @@ defmodule Wardmast.Board.Scheduler do
           optional(:ready) => [card()],
           optional(:running) => [in_flight()],
           optional(:conflict_claims) => conflict_claims() | [String.t()],
-          optional(:slots_free) => integer(),
-          optional(:slot_note) => String.t() | nil,
-          optional(:quota) => quota(),
-          optional(:card_quota) => %{optional(String.t()) => quota()},
-          optional(:card_constraint) => %{optional(String.t()) => :ok | {:hold, String.t()}},
           optional(:card_guardrail) => %{optional(String.t()) => :ok | {:hold, String.t()}},
-          optional(:card_local) => %{optional(String.t()) => {:hold, String.t()}},
           optional(:card_ci) => %{optional(String.t()) => :ok | {:hold, String.t()}},
           optional(:card_pair) => %{optional(String.t()) => {:hold, String.t()}},
           optional(:dispatch_holds) => %{optional(String.t()) => {:hold, String.t()}},
@@ -288,69 +270,19 @@ defmodule Wardmast.Board.Scheduler do
 
   @next_reason "next up — dispatching..."
   @paused_reason "scheduler paused"
-  @no_slot_reason "blocked — no free worker slot"
 
   @doc """
   Plan one dispatch cycle.
 
-  Returns `%{promote: task_id | nil, entries: [...]}` with one entry per Ready
-  card, in queue order. `promote` is the single card the caller should
-  dispatch, or `nil` when nothing is eligible.
-
-  With a `:walk` it is the scheduler walk instead (see "The walk" above): the
-  same keys, plus `placements`, a `wait_cause` on every entry and a `pair` on
-  each placed one. `promote` is then the first placement.
+  The scheduler walk (see "The walk" above). Returns `%{promote: task_id | nil,
+  entries: [...], placements: [...]}` with one entry per Ready card, in queue
+  order, a `wait_cause` on every entry and a `pair` on each placed one.
+  `promote` is the first placement: the card the caller should dispatch, or
+  `nil` when nothing is placed.
   """
   @spec plan(input()) :: t()
-  def plan(%{walk: %{} = walk} = input), do: walk_plan(input, walk)
-
-  def plan(input) when is_map(input) do
-    ready = input |> Map.get(:ready) |> List.wrap() |> order()
-    running = Map.get(input, :running) || []
-
-    board = %{
-      paused: Map.get(input, :paused) == true,
-      quota: Map.get(input, :quota),
-      # Per-ticket quota verdicts (a ticket's own routing candidates), which
-      # take precedence over the board-wide `quota` for that card.
-      card_quota: Map.get(input, :card_quota) || %{},
-      # bd-13pqcp: per-ticket provider-constraint verdicts — a ticket whose
-      # constraint leaves no eligible account is held on its own, which never
-      # advances the queue.
-      card_constraint: Map.get(input, :card_constraint) || %{},
-      # bd-atll60 (G13): per-ticket guardrail verdicts — no eligible model, or a
-      # permission awaiting the operator. A card's own block, like the above.
-      card_guardrail: Map.get(input, :card_guardrail) || %{},
-      # bd-akp9ae: per-ticket local-capacity holds — a card only the primary can
-      # run while the primary's cap is full. A card's own block too: the slot count
-      # above counts the nodes, which this card cannot use.
-      card_local: Map.get(input, :card_local) || %{},
-      # #1126: per-ticket CI backpressure holds — the card's repo has too many MR
-      # pipelines waiting for a runner. A card's own block, like the above.
-      card_ci: Map.get(input, :card_ci) || %{},
-      # bd-7p6a9o: tickets a live pair session claims — `{:hold, session_id}`.
-      # A card's own block, and one nothing on the board can lift.
-      card_pair: Map.get(input, :card_pair) || %{},
-      slots_free: Map.get(input, :slots_free, 0),
-      slot_note: Map.get(input, :slot_note)
-    }
-
-    seed = %{
-      promote: nil,
-      held?: false,
-      ahead: 0,
-      in_flight: Enum.map(running, &in_flight_entry/1),
-      claimed: nil,
-      mutex: conflict_claims(Map.get(input, :conflict_claims))
-    }
-
-    {entries, acc} =
-      Enum.map_reduce(ready, seed, fn card, acc -> step(card, board, acc) end)
-
-    %{promote: acc.promote, entries: entries}
-  end
-
-  def plan(_), do: %{promote: nil, entries: []}
+  def plan(input) when is_map(input), do: walk_plan(input, Map.get(input, :walk) || %{})
+  def plan(_), do: %{promote: nil, entries: [], placements: []}
 
   @doc """
   The queue's order (bd-asxw4e; `docs/design/epic-aware-scheduling.md` §4),
@@ -391,99 +323,17 @@ defmodule Wardmast.Board.Scheduler do
   defp created_key(%{created_at: %DateTime{} = at}), do: DateTime.to_unix(at, :microsecond)
   defp created_key(_card), do: :none
 
-  # One card's standing, from the one dispatch-eligibility predicate
-  # (`Lifecycle.dispatchable/2`, bd-asxw4e). `acc.held?` records that the
-  # board-wide hold has already been shown on the card it actually applies
-  # to; `acc.ahead` counts the cards genuinely queued in front of this one.
-  defp step(card, board, acc) do
-    case Lifecycle.dispatchable(ticket(card), ctx(card, board, acc)) do
-      :ok ->
-        decide(card, nil, acc)
-
-      # Paused holds every otherwise-eligible card, not just the head.
-      {:held, :paused} ->
-        {entry(card, :blocked, @paused_reason, :paused), bump(acc)}
-
-      # Only the head of the queue carries a board-wide hold.
-      {:held, :no_slot} ->
-        card |> decide(no_slot_reason(board.slot_note), acc) |> with_hold(:no_slot)
-
-      {:held, {:quota, _} = hold} ->
-        card |> decide(phrase(hold, acc.mutex), acc) |> with_hold(hold)
-
-      # A card's own block never advances the queue position: the card behind
-      # it is still next in line.
-      {:held, hold} ->
-        {entry(card, :blocked, phrase(hold, acc.mutex), hold), acc}
-    end
-  end
-
-  # bd-5fl9sx: the structured hold rides on the entry beside its phrase, so a
-  # reader that wants to explain it never parses the phrase. A card that was
-  # queued behind the head is not held by it (`N ahead in queue`).
-  defp with_hold({%{state: :blocked} = entry, acc}, hold), do: {%{entry | hold: hold}, acc}
-  defp with_hold(result, _hold), do: result
-
   # A card handed to `plan/1` is a Ready candidate, so one that carries no
   # state of its own (a hand-built plan) reads as queued. `Wardmast.Board.Snapshot`
   # always stamps the ticket's real state, so a card that is no longer Ready
   # by the time it is planned is held in its column rather than dispatched.
   defp ticket(card), do: Map.put_new(card, :state, :queued)
 
-  defp ctx(card, board, acc) do
-    board = Map.put(board, :quota, Map.get(board.card_quota, card.id, board.quota))
-
-    Map.merge(board, %{
-      blocked_by: Map.get(card, :blocked_by),
-      conflicts_with: Map.get(card, :conflicts_with),
-      claimed: acc.mutex,
-      provider_constraint: Map.get(board.card_constraint, card.id),
-      guardrail: Map.get(board.card_guardrail, card.id),
-      local_capacity: Map.get(board.card_local, card.id),
-      ci_saturated: Map.get(board.card_ci, card.id),
-      pair_session: Map.get(board.card_pair, card.id),
-      scope: scope_of(card),
-      repo: Map.get(card, :repo),
-      in_flight: claims(acc)
-    })
-  end
-
-  # bd-48prlb: name the binding limit when the snapshot knows it.
-  defp no_slot_reason(note) when is_binary(note), do: "#{@no_slot_reason} (#{note})"
-  defp no_slot_reason(_note), do: @no_slot_reason
-
-  defp decide(card, _hold, %{held?: true} = acc), do: queued(card, acc)
-  defp decide(card, _hold, %{promote: p} = acc) when p != nil, do: queued(card, acc)
-
-  # The head of the queue: it either goes, or it carries the hold that stopped it.
-  defp decide(card, nil, acc) do
-    acc = %{
-      acc
-      | promote: card.id,
-        claimed: {card.id, MapSet.new(), Map.get(card, :repo)},
-        mutex: Map.put(acc.mutex, card.id, @dispatching_state)
-    }
-
-    {entry(card, :next, @next_reason), bump(acc)}
-  end
-
-  defp decide(card, reason, acc) when is_binary(reason) do
-    {entry(card, :blocked, reason), bump(%{acc | held?: true})}
-  end
-
-  # Already-running work first, then the card promoted this cycle — so a
-  # collision is attributed to the worker that has actually been holding the
-  # file, not to a sibling that only just won the slot.
-  defp claims(%{in_flight: in_flight, claimed: nil}), do: in_flight
-  defp claims(%{in_flight: in_flight, claimed: claim}), do: in_flight ++ [claim]
-
-  defp queued(card, acc), do: {entry(card, :queued, ahead_reason(acc.ahead)), bump(acc)}
-
   defp bump(acc), do: %{acc | ahead: acc.ahead + 1}
 
   defp ahead_reason(n), do: "#{n} ahead in queue"
 
-  defp entry(card, state, reason, hold \\ nil),
+  defp entry(card, state, reason, hold),
     do: %{id: card.id, state: state, reason: reason, hold: hold, card: card}
 
   # The hold, as the card says it. The counterpart's state is the half of a
@@ -600,8 +450,7 @@ defmodule Wardmast.Board.Scheduler do
     end
   end
 
-  # The 15 s retry window rides where the head-of-line plan carries it, as the
-  # ticket's own constraint-shaped hold (`Wardmast.Board.Autopilot`).
+  # The 15 s retry window rides as the ticket's own constraint-shaped hold (`Wardmast.Board.Autopilot`).
   defp walk_ctx(card, board, acc) do
     %{
       paused: board.paused,

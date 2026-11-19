@@ -25,7 +25,7 @@ defmodule Wardmast.Board.DrainTest do
   alias Wardmast.Workflows.MergeQueue.FixPassDispatcher
 
   defp board(paused?, promote \\ nil) do
-    %{
+    Wardmast.Board.WalkFixture.with_walk(%{
       ready: [],
       backlog: [],
       blocked: [],
@@ -40,7 +40,7 @@ defmodule Wardmast.Board.DrainTest do
       quota: :ok,
       paused: paused?,
       now: DateTime.utc_now()
-    }
+    })
   end
 
   defp start_autopilot!(opts) do
@@ -48,6 +48,7 @@ defmodule Wardmast.Board.DrainTest do
       name: nil,
       interval_ms: :never,
       topics: [],
+      record_shadow: fn _attrs -> :ok end,
       snapshot: fn o -> board(o[:paused]) end
     ]
 
@@ -129,6 +130,7 @@ defmodule Wardmast.Board.DrainTest do
         start_autopilot!(
           paused: false,
           dispatch: dispatch,
+          record_shadow: fn _attrs -> :ok end,
           snapshot: fn o -> board(o[:paused], "bd-promo1") end
         )
 
@@ -209,6 +211,7 @@ defmodule Wardmast.Board.DrainTest do
         start_autopilot!(
           paused: false,
           dispatch: dispatch,
+          record_shadow: fn _attrs -> :ok end,
           snapshot: fn o -> board(o[:paused], "bd-promo2") end
         )
 
@@ -548,13 +551,12 @@ defmodule Wardmast.Board.DrainTest do
       assert Jason.encode!(json)
     end
 
-    # DC5 (bd-2c2a4g, design §9): the per-pool budgets ride the status, shadow-labelled.
-    test "carries admission, budgets, machines, repos and fair_share" do
+    # DC5 (bd-2c2a4g, design §9): the per-pool budgets ride the status.
+    test "carries budgets, machines, repos and fair_share" do
       ap = start_autopilot!(paused: false)
       sup = empty_supervisor!()
 
       view = %{
-        admission: %{mode: "shadow", label: "shadow", decides: false, agreement: nil},
         pools: [%{account: "a1", pool: "claude", budget: 3, seats: 3, reason: "ceiling"}],
         machines: [%{id: "local", name: "local", cap: 6, live: 3, free: 3, state: "online"}],
         repos: [],
@@ -564,7 +566,6 @@ defmodule Wardmast.Board.DrainTest do
       json =
         [autopilot: ap, supervisor: sup, capacity: view] |> Drain.status() |> Drain.to_json()
 
-      assert json.admission == view.admission
       assert json.budgets == view.pools
       assert json.machines == view.machines
       assert json.repos == []
@@ -616,8 +617,6 @@ defmodule Wardmast.Board.DrainTest do
 
       json = [autopilot: ap, supervisor: empty_supervisor!()] |> Drain.status() |> Drain.to_json()
 
-      assert %{label: label} = json.admission
-      assert label in ~w(legacy shadow enforce)
       assert is_list(json.budgets)
       assert [%{id: "local"} | _] = json.machines
     end
@@ -632,24 +631,6 @@ defmodule Wardmast.Board.DrainTest do
 
       assert json.state == "running"
       assert json.budgets == []
-      assert json.admission == nil
-    end
-
-    # bd-1qjv3j: the board-wide hold rides the status in the account-qualified
-    # wording, so `scheduler_status` and `arb prime` show which account is held.
-    test "carries the account-qualified quota hold, nil when nothing is held" do
-      ap = start_autopilot!(paused: false)
-      sup = empty_supervisor!()
-      reason = "claude:default 7d 20% ≥ paced 20% (20% elapsed)"
-
-      held =
-        [autopilot: ap, supervisor: sup, quota_hold: reason] |> Drain.status() |> Drain.to_json()
-
-      free =
-        [autopilot: ap, supervisor: sup, quota_hold: nil] |> Drain.status() |> Drain.to_json()
-
-      assert held.quota_hold == reason
-      assert free.quota_hold == nil
     end
   end
 

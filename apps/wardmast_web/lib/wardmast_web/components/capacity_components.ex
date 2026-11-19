@@ -12,67 +12,30 @@ defmodule WardmastWeb.CapacityComponents do
   the seats, the recent changes and the command that changes the ceiling.
 
   It renders `Wardmast.Board.CapacityView.status/1` as it is, and only shows it.
-  Under `scheduler_admission: legacy` and `shadow` the budgets decide nothing,
-  so the strip says so; only `enforce` drops that note.
 
   `<.layer_reason>` is the line on a Ready card the scheduler walk would hold
   or start: the layer's own phrase ("Waiting for claude:default: 3 of 3 seats"),
-  prefixed "Shadow walk" until the walk decides.
+  and nothing else.
   """
   use WardmastWeb, :html
 
   attr :capacity, :map, required: true, doc: "`Wardmast.Board.CapacityView.status/1`"
 
   def capacity_strip(assigns) do
-    assigns = assign(assigns, :admission, assigns.capacity.admission)
-
     ~H"""
     <span
       id="board-capacity"
-      data-admission={@admission.mode}
       class="inline-flex flex-wrap items-center gap-1.5 text-[11px] font-[family-name:var(--font-mono)]"
     >
-      <span
-        id="board-capacity-mode"
-        title={mode_title(@admission)}
-        class={[
-          "px-[6px] py-[1px] rounded-[var(--radius-chip)] border border-solid text-[10px] font-medium uppercase tracking-[0.06em]",
-          if(@admission.decides,
-            do: "border-[var(--arb-live)] text-[var(--arb-live)]",
-            else: "border-[var(--border-default)] text-[var(--text-label)]"
-          )
-        ]}
-      >
-        {@admission.label}
-      </span>
-      <span
-        :if={not @admission.decides}
-        id="board-capacity-mode-note"
-        class="hidden 2xl:inline text-[10px] text-[var(--text-label)]"
-      >
-        today's gate and caps still decide
-      </span>
-      <.pool_chip :for={pool <- @capacity.pools} pool={pool} admission={@admission} />
+      <.pool_chip :for={pool <- @capacity.pools} pool={pool} />
       <.node_chip :for={machine <- @capacity.machines} machine={machine} />
     </span>
     """
   end
 
-  # O11: a pool decides under its own account's mode; older rows carry none.
-  defp pool_decides?(pool, admission), do: Map.get(pool, :decides, admission.decides)
-
-  defp mode_title(%{decides: true}),
-    do: "Budgets admit dispatches (scheduler_admission: enforce)."
-
-  defp mode_title(%{mode: mode}),
-    do:
-      "scheduler_admission: #{mode}. Budgets are shown and recorded beside today's decision; " <>
-        "today's gate and caps still decide."
-
   # ---- a provider pool ----------------------------------------------------------
 
   attr :pool, :map, required: true
-  attr :admission, :map, required: true
 
   defp pool_chip(assigns) do
     ~H"""
@@ -86,22 +49,6 @@ defmodule WardmastWeb.CapacityComponents do
       <:trigger>{@pool.chip_label} {@pool.seats}/{budget_text(@pool.budget)}</:trigger>
       <p class="m-0 font-medium text-[var(--text-title)]">
         {@pool.label}: {@pool.seats} of {budget_text(@pool.budget)} seats
-      </p>
-      <p
-        :if={not pool_decides?(@pool, @admission)}
-        class="m-0 text-[10.5px] text-[var(--text-label)]"
-      >
-        Shadow: the budget is recorded beside today's decision; today's gate and caps still decide.
-      </p>
-      <p
-        :if={Map.get(@pool, :mode)}
-        class="m-0 text-[10.5px] text-[var(--text-label)]"
-        data-pool-admission={@pool.mode}
-        data-pool-admission-source={Map.get(@pool, :mode_source)}
-      >
-        Admission: {@pool.mode} ({if Map.get(@pool, :mode_source) == "account",
-          do: "this account's override",
-          else: "installation default"})
       </p>
       <p class="m-0 text-[var(--text-primary)]" data-budget-reason>{@pool.reason}</p>
       <ul
@@ -289,19 +236,13 @@ defmodule WardmastWeb.CapacityComponents do
   @doc """
   The cap popup's section for the other layers (DC5): a line per provider pool
   with its reason, per machine, per repo and per fair-share row, from
-  `CapacityExplainer.budget/2`. `Shadow` leads it until the budgets decide.
+  `CapacityExplainer.budget/1`.
   """
   def budget_lines(assigns) do
     ~H"""
-    <div id="board-slot-cap-budgets" class="flex flex-col gap-[4px]" data-mode={@budget.label}>
+    <div id="board-slot-cap-budgets" class="flex flex-col gap-[4px]">
       <p class="m-0 font-medium text-[var(--text-title)]">
         Provider budgets
-        <span
-          :if={@budget.shadow?}
-          class="ml-1 text-[10px] uppercase tracking-[0.06em] text-[var(--text-label)]"
-        >
-          Shadow: today's gate and caps still decide
-        </span>
       </p>
       <ul class="m-0 p-0 list-none flex flex-col gap-[4px]">
         <li :for={line <- @budget.pools} data-budget-pool data-state={line.state}>
@@ -323,7 +264,7 @@ defmodule WardmastWeb.CapacityComponents do
 
   @doc """
   The walk's reason for a Ready card, on the card: the layer it waits on or
-  the pair it is planned onto. `Shadow walk:` leads it until the walk decides.
+  the pair it is planned onto.
   """
   def layer_reason(assigns) do
     ~H"""
@@ -333,7 +274,7 @@ defmodule WardmastWeb.CapacityComponents do
       data-layer-state={@layer.state}
       class="text-[10.5px] leading-[1.5] font-[family-name:var(--font-mono)] text-[var(--text-label)]"
     >
-      <span :if={@layer.shadow?}>Shadow walk: </span>{@layer.text}
+      {@layer.text}
     </span>
     """
   end

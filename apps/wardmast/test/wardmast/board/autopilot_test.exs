@@ -5,7 +5,7 @@ defmodule Wardmast.Board.AutopilotTest do
 
   # A board with one promotable card, as `Snapshot.derive/1` would return it.
   defp board(promote, paused? \\ false) do
-    %{
+    Wardmast.Board.WalkFixture.with_walk(%{
       ready: [
         %{id: "bd-1", state: :next, reason: "next up — dispatching...", card: %{id: "bd-1"}}
       ],
@@ -22,7 +22,7 @@ defmodule Wardmast.Board.AutopilotTest do
       quota: :ok,
       paused: paused?,
       now: DateTime.utc_now()
-    }
+    })
   end
 
   # Start an autopilot that never ticks on its own — every test drives it by
@@ -42,6 +42,7 @@ defmodule Wardmast.Board.AutopilotTest do
       # The registry gate reads VM-global state (`Drain`, `ResumeGate`) that
       # concurrent async tests mutate; this suite is about the pass itself.
       registry_settled?: fn -> true end,
+      record_shadow: fn _attrs -> :ok end,
       snapshot: fn opts -> board("bd-1", opts[:paused]) end
     ]
 
@@ -520,7 +521,7 @@ defmodule Wardmast.Board.AutopilotTest do
         end
 
       promote = Enum.find_value(ready, fn e -> if e.state != :blocked, do: e.id end)
-      %{board("bd-1") | ready: ready, promote: promote}
+      %{board("bd-1") | ready: ready, promote: promote} |> Wardmast.Board.WalkFixture.with_walk()
     end
 
     for {label, error, phrase} <- [
@@ -826,8 +827,7 @@ defmodule Wardmast.Board.AutopilotTest do
       end
 
       assert board.attention == []
-      assert board.promote == nil
-      assert board.slots_free == 0
+      assert board.walk.promote == nil
       assert %DateTime{} = board.now
       # It reports itself paused: nothing is draining a queue it cannot read.
       assert board.paused
@@ -936,7 +936,13 @@ defmodule Wardmast.Board.AutopilotTest do
         paused: false
       }
 
-      pid = start(paused: false, snapshot: fn _ -> Map.merge(board(nil), held) end)
+      pid =
+        start(
+          paused: false,
+          snapshot: fn _ ->
+            board(nil) |> Map.merge(held) |> Wardmast.Board.WalkFixture.with_walk()
+          end
+        )
 
       assert :idle = Autopilot.tick(pid)
 

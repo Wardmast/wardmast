@@ -134,7 +134,6 @@ defmodule Wardmast.Board.Drain do
           in_flight: [entry()],
           slots_used: non_neg_integer(),
           slot_holders: [String.t()],
-          quota_hold: String.t() | nil,
           held_local_capacity: [String.t()],
           deferred_resumes: [map()],
           capacity: map() | nil,
@@ -217,8 +216,6 @@ defmodule Wardmast.Board.Drain do
     * `:registry` — the `track/3` registry (default `Wardmast.Board.Drain.Registry`).
     * `:tickets` — the tickets to count slots among (default: every `:active`
       ticket in the repo);
-    * `:quota_hold` — the board-wide hold reason (`nil` for none; default:
-      `Wardmast.Board.Snapshot.quota_hold/0`).
 
   `slots_used` / `slot_holders` (bd-asxw4e) are the dispatch cap's count —
   the tickets In progress, by `Wardmast.Tasks.SlotGate.slot_holders/1`, the
@@ -275,7 +272,6 @@ defmodule Wardmast.Board.Drain do
       in_flight: in_flight,
       slots_used: length(slot_holders),
       slot_holders: slot_holders,
-      quota_hold: Keyword.get_lazy(opts, :quota_hold, &quota_hold/0),
       held_local_capacity: held_local_capacity(autopilot, tickets),
       deferred_resumes: Map.get(autopilot, :deferred_resume_details, []),
       capacity: capacity(Keyword.get(opts, :capacity)),
@@ -283,7 +279,7 @@ defmodule Wardmast.Board.Drain do
     }
   end
 
-  # DC5: the budgets, machines and admission mode (`Wardmast.Board.CapacityView`).
+  # DC5: the budgets and machines (`Wardmast.Board.CapacityView`).
   # A view that cannot be read is `nil`: the drain verdict does not depend on it.
   defp capacity(%{} = view), do: view
 
@@ -303,18 +299,6 @@ defmodule Wardmast.Board.Drain do
       for ticket <- tickets, match?(%{"held" => true}, ReviewPass.stored(ticket)), do: ticket.id
 
     Enum.uniq(Map.get(autopilot, :held_local_capacity, []) ++ gate_held)
-  end
-
-  # The board-wide quota/auth hold in the account-qualified wording the board
-  # card uses (bd-1qjv3j): `nil` when nothing is held. An unreadable hold reads
-  # as none — the drain verdict does not depend on it.
-  defp quota_hold do
-    case Wardmast.Board.Snapshot.quota_hold() do
-      {:hold, reason} -> reason
-      _ -> nil
-    end
-  rescue
-    _ -> nil
   end
 
   # An unreadable table reads as no holders rather than failing the status —
@@ -343,7 +327,6 @@ defmodule Wardmast.Board.Drain do
       in_flight: Enum.map(status.in_flight, &entry_json/1),
       slots_used: Map.get(status, :slots_used, 0),
       slot_holders: Map.get(status, :slot_holders, []),
-      quota_hold: Map.get(status, :quota_hold),
       held_local_capacity:
         for(id <- Map.get(status, :held_local_capacity, []), do: held_json(id)),
       deferred_resumes: Map.get(status, :deferred_resumes, []),
@@ -353,13 +336,12 @@ defmodule Wardmast.Board.Drain do
     |> Map.merge(capacity_json(Map.get(status, :capacity)))
   end
 
-  # DC5 (design §9): `admission` (the mode, labelled shadow until enforce), `budgets`
+  # DC5 (design §9): `budgets`
   # (one per pool), `machines`, `repos`, `fair_share` and `ci_backpressure` (#1126, one
   # per gated repo). The REST body and the
   # MCP `scheduler_status` share this, so they cannot drift.
   defp capacity_json(%{} = view) do
     %{
-      admission: view.admission,
       budgets: view.pools,
       machines: view.machines,
       repos: view.repos,
@@ -370,7 +352,6 @@ defmodule Wardmast.Board.Drain do
 
   defp capacity_json(_none),
     do: %{
-      admission: nil,
       budgets: [],
       machines: [],
       repos: [],

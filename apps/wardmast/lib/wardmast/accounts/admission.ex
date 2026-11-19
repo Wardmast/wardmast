@@ -58,10 +58,9 @@ defmodule Wardmast.Accounts.Admission do
   Like every other read of the ceiling, an unreadable count fails **open**: a
   bug here must not stop the fleet.
 
-  ## Under `scheduler_admission: enforce` (DC8)
+  ## The seat check (DC8, the only admission since DC12)
 
-  For an account whose effective mode is `enforce` (`Wardmast.Accounts.AdmissionMode`,
-  or the caller's `:mode`), the slot rule above becomes the pool's **seat
+  An account admits by the pool's **seat
   check** (`Wardmast.Accounts.SeatCheck`, design `provider-dynamic-concurrency.md`
   §4.4): the seats on the dispatch's pool must be below `min(budget,
   max_concurrent, share)`. The pool is the planned one (`:pool`, which
@@ -70,12 +69,9 @@ defmodule Wardmast.Accounts.Admission do
   lock, the spend cap ahead of it, the reservation (now seated on that pool),
   `force` and its `account_cap_override` record, and the
   `{:account_at_capacity, info}` refusal are unchanged; the refusal's `info`
-  also carries the pool and the seat check behind it (`:seat`). Under `legacy`
-  and `shadow` nothing here reads a budget or a seat.
+  also carries the pool and the seat check behind it (`:seat`).
   """
 
-  alias Wardmast.Accounts.AdmissionMode
-  alias Wardmast.Accounts.Concurrency
   alias Wardmast.Accounts.ProviderAccount
   alias Wardmast.Accounts.Resolver
   alias Wardmast.Accounts.SeatCheck
@@ -127,9 +123,7 @@ defmodule Wardmast.Accounts.Admission do
 
   Options: `:force`, `:actor` (named in the override event), and `:account` —
   a `ProviderAccount` (or `nil`) the caller already resolved, e.g. the one a
-  routing decision picked. `:mode` is the account's `scheduler_admission` mode
-  (read from the account and the installation when absent); under `:enforce`,
-  `:pool` names the pool to seat on and `:seat_opts` are
+  routing decision picked. `:pool` names the pool to seat on and `:seat_opts` are
   `Wardmast.Accounts.SeatCheck.check/2`'s seams (see the moduledoc).
 
   A ticket's provider constraint (`Wardmast.Agents.ProviderConstraint`,
@@ -227,17 +221,6 @@ defmodule Wardmast.Accounts.Admission do
       "the override is recorded."
   end
 
-  def refusal_message(%{task_id: task_id, account: account, cap: cap, holders: holders}) do
-    "provider account #{account} has no free slot to dispatch #{task_id}: its cap is " <>
-      "#{cap} (max_concurrent, or this workspace's share) and #{held_by(holders)}. " <>
-      "Wait for a run to finish — Autopilot dispatches Ready tickets as slots free — " <>
-      "or dispatch over the cap (`arb dispatch --over-cap`, MCP `over_cap: true`); " <>
-      "the override is recorded."
-  end
-
-  defp held_by([]), do: "nothing holds a slot (the cap itself is 0)"
-  defp held_by(holders), do: "#{length(holders)} held by #{Enum.join(holders, ", ")}"
-
   defp seat_holders([]), do: ""
   defp seat_holders(holders), do: ", held by #{Enum.join(holders, ", ")}"
 
@@ -255,16 +238,8 @@ defmodule Wardmast.Accounts.Admission do
 
   defp decide(%Issue{} = task, account, provider, opts) do
     with :ok <- spend_check(task, account, opts) do
-      if enforced?(account, opts),
-        do: decide_seat(task, account, provider, opts),
-        else: decide_slot(task, account, provider, opts)
+      decide_seat(task, account, provider, opts)
     end
-  end
-
-  # The caller's `:mode` (`Dispatch` passes the routed account's), else the
-  # account's own effective mode.
-  defp enforced?(account, opts) do
-    Keyword.get_lazy(opts, :mode, fn -> AdmissionMode.mode(account) end) == :enforce
   end
 
   # A capped account reserves even with no slot ceiling, so the next admission
@@ -277,31 +252,6 @@ defmodule Wardmast.Accounts.Admission do
         :ok -> :ok
         {:hold, reason} -> {:error, {:spend_cap, reason}}
       end
-    end
-  end
-
-  defp decide_slot(%Issue{} = task, account, provider, opts) do
-    case Concurrency.limit(account, task.workspace_id) do
-      nil ->
-        if SpendCap.config(account), do: reserve(task, account, provider, opts)
-        {:ok, :unlimited}
-
-      cap ->
-        holders = Concurrency.holders(account, exclude_task: task.id)
-
-        cond do
-          length(holders) < cap ->
-            reserve(task, account, provider, opts)
-            {:ok, :admitted}
-
-          Keyword.get(opts, :force) == true ->
-            reserve(task, account, provider, opts)
-            record_override(task, info(task, account, cap, holders), opts)
-            {:ok, :forced}
-
-          true ->
-            {:error, {:account_at_capacity, info(task, account, cap, holders)}}
-        end
     end
   end
 
@@ -385,11 +335,6 @@ defmodule Wardmast.Accounts.Admission do
 
   defp code(provider) when is_binary(provider) and provider != "", do: provider
   defp code(_), do: nil
-
-  defp info(%Issue{id: id}, %ProviderAccount{} = account, cap, holders),
-    do: %{task_id: id, account: label(account), cap: cap, holders: holders}
-
-  defp label(%ProviderAccount{provider: provider, slug: slug}), do: "#{provider}:#{slug}"
 
   defp record_override(%Issue{workspace_id: ws_id}, info, opts) do
     Logger.warning(

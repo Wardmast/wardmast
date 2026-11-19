@@ -1,11 +1,10 @@
 defmodule Wardmast.Worker.DispatchEnforceTest do
   @moduledoc """
-  `Dispatch.dispatch/2` under `scheduler_admission: enforce` (DC8, design
+  `Dispatch.dispatch/2` under seat admission (DC8, design
   `provider-dynamic-concurrency.md` §4.4, §4.5, §7, E9):
 
     * **The seat check (AC1).** A fresh dispatch is admitted while the seats on
-      its pool are below `min(budget, max_concurrent, share)`; switching back to
-      `legacy` restores the account's process count against `max_concurrent`.
+      its pool are below `min(budget, max_concurrent, share)`.
     * **No pace hold for a fresh dispatch.** The gate keeps only its hard rules
       (`pace: false`): an account past its paced line still admits while its
       pool has a seat. A hard rule refuses a fresh dispatch as a hard zero on its
@@ -40,7 +39,6 @@ defmodule Wardmast.Worker.DispatchEnforceTest do
     Wardmast.Test.ResumeSlotFixture.put_local_cap(10)
 
     on_exit(fn ->
-      Wardmast.Settings.set_scheduler_admission(nil)
       :ets.delete_all_objects(:arbiter_provider_circuit_breakers)
       TestSandbox.own_live_workers!(sandbox)
     end)
@@ -113,9 +111,6 @@ defmodule Wardmast.Worker.DispatchEnforceTest do
   defp dispatch(task, opts \\ []),
     do: Dispatch.dispatch(task.id, [force: true, repo: @repo, start_driver: false] ++ opts)
 
-  defp enforce!, do: {:ok, "enforce"} = Wardmast.Settings.set_scheduler_admission("enforce")
-  defp legacy!, do: {:ok, nil} = Wardmast.Settings.set_scheduler_admission(nil)
-
   defp latest_run(task_id) do
     Run
     |> Ash.Query.filter(base_task_id == ^task_id)
@@ -140,9 +135,8 @@ defmodule Wardmast.Worker.DispatchEnforceTest do
       %{ws: ws, account: account}
     end
 
-    test "enforce: refused when the pool's seats reach its budget, though max_concurrent has room",
+    test "refused when the pool's seats reach its budget, though max_concurrent has room",
          ctx do
-      enforce!()
       task = task!(ctx.ws)
 
       assert {:error, {:account_at_capacity, info}} =
@@ -152,8 +146,7 @@ defmodule Wardmast.Worker.DispatchEnforceTest do
       assert Ash.get!(Issue, task.id).state != :active
     end
 
-    test "enforce: admitted while the pool has a free seat", ctx do
-      enforce!()
+    test "admitted while the pool has a free seat", ctx do
       task = task!(ctx.ws)
 
       assert {:ok, %{worker_pid: pid}} =
@@ -161,25 +154,6 @@ defmodule Wardmast.Worker.DispatchEnforceTest do
 
       TestSandbox.own!(ctx.sandbox, pid)
       assert Ash.get!(Issue, task.id).state == :active
-    end
-
-    test "switching back to legacy restores today's admission exactly", ctx do
-      enforce!()
-      task = task!(ctx.ws)
-      seat_opts = [seat_opts: [budgets: [budget(ctx.account, 1)]]]
-
-      assert {:error, {:account_at_capacity, _}} = dispatch(task, seat_opts)
-
-      legacy!()
-      assert {:ok, %{worker_pid: pid}} = dispatch(task, seat_opts)
-      TestSandbox.own!(ctx.sandbox, pid)
-    end
-
-    test "a per-account enforce override decides under a legacy installation", ctx do
-      {:ok, _} = Wardmast.Accounts.edit_account(ctx.account.id, %{"admission" => "enforce"})
-
-      assert {:error, {:account_at_capacity, _}} =
-               dispatch(task!(ctx.ws), seat_opts: [budgets: [budget(ctx.account, 1)]])
     end
   end
 
@@ -193,18 +167,7 @@ defmodule Wardmast.Worker.DispatchEnforceTest do
       %{ws: ws, account: account}
     end
 
-    test "legacy: a fresh dispatch past the paced line is held in the DispatchQueue", ctx do
-      claude_quota!(ctx.account, 0.40)
-      task = task!(ctx.ws)
-
-      assert {:error, {:quota_held, _}} =
-               dispatch(task, seat_opts: [budgets: [budget(ctx.account, 2)]])
-
-      assert DispatchQueue.held?(ctx.ws.id, task.id)
-    end
-
-    test "enforce: the same dispatch goes ahead — the seat check decides, not the line", ctx do
-      enforce!()
+    test "the same dispatch goes ahead — the seat check decides, not the line", ctx do
       claude_quota!(ctx.account, 0.40)
       task = task!(ctx.ws)
 
@@ -215,9 +178,8 @@ defmodule Wardmast.Worker.DispatchEnforceTest do
       refute DispatchQueue.held?(ctx.ws.id, task.id)
     end
 
-    test "enforce: a hard rule refuses a fresh dispatch as a hard zero, and queues nothing",
+    test "a hard rule refuses a fresh dispatch as a hard zero, and queues nothing",
          ctx do
-      enforce!()
       claude_quota!(ctx.account, 0.10, status: "rejected")
       task = task!(ctx.ws)
 
@@ -262,7 +224,6 @@ defmodule Wardmast.Worker.DispatchEnforceTest do
     end
 
     test "routing takes the planned account while it is available", ctx do
-      enforce!()
       task = task!(ctx.ws)
       planned = %{account_id: ctx.claude.id, pool: "claude", node: "local"}
 
@@ -275,7 +236,6 @@ defmodule Wardmast.Worker.DispatchEnforceTest do
     end
 
     test "without a plan, routing picks the most headroom as it does today", ctx do
-      enforce!()
       task = task!(ctx.ws)
 
       assert {:ok, %{worker_pid: pid}} = dispatch(task)
@@ -284,7 +244,6 @@ defmodule Wardmast.Worker.DispatchEnforceTest do
     end
 
     test "a planned account that is no longer available is passed over", ctx do
-      enforce!()
       task = task!(ctx.ws)
       planned = %{account_id: Ecto.UUID.generate(), pool: "claude", node: "local"}
 
@@ -295,13 +254,11 @@ defmodule Wardmast.Worker.DispatchEnforceTest do
 
     test "a held intent drops the plan: the drain re-plans" do
       opts = [
-        planned: %{account_id: "a", pool: "claude", node: "local"},
-        admission_mode: :enforce
+        planned: %{account_id: "a", pool: "claude", node: "local"}
       ]
 
       unrouted = Dispatch.unroute(opts)
       refute Keyword.has_key?(unrouted, :planned)
-      refute Keyword.has_key?(unrouted, :admission_mode)
     end
   end
 end

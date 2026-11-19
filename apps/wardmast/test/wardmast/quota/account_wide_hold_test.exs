@@ -25,7 +25,6 @@ defmodule Wardmast.Quota.AccountWideHoldTest do
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Usage
   alias Wardmast.Usage.Event
-  alias Wardmast.Board.Snapshot
 
   defp workspace!(attrs \\ %{}) do
     n = System.unique_integer([:positive])
@@ -52,16 +51,6 @@ defmodule Wardmast.Quota.AccountWideHoldTest do
       workspace_id: ws.id,
       provider: :claude,
       provider_account_id: account.id
-    })
-  end
-
-  defp exhausted_snapshot!(%ProviderAccount{} = account) do
-    Ash.create!(AnthropicQuota, %{
-      provider_account_id: account.id,
-      provider: "claude",
-      utilization_5h: 0.99,
-      status_5h: "rejected",
-      captured_at: DateTime.utc_now()
     })
   end
 
@@ -106,71 +95,6 @@ defmodule Wardmast.Quota.AccountWideHoldTest do
   # gate. It resolves the provider account from the asking workspace, so the
   # account-keying these tests pin is the same property, now asserted on the
   # only surviving dispatch path.
-  describe "the quota gate is keyed by the provider account (§5 row 22)" do
-    test "both workspaces on one exhausted account are held" do
-      account = account!()
-      a = workspace!()
-      b = workspace!()
-      link!(a, account)
-      link!(b, account)
-      exhausted_snapshot!(account)
-
-      assert {:hold, _} = Snapshot.quota_hold(a.id)
-      assert {:hold, _} = Snapshot.quota_hold(b.id)
-    end
-
-    test "a healthy account holds neither workspace" do
-      account = account!()
-      a = workspace!()
-      b = workspace!()
-      link!(a, account)
-      link!(b, account)
-
-      Ash.create!(AnthropicQuota, %{
-        provider_account_id: account.id,
-        provider: "claude",
-        utilization_5h: 0.10,
-        status_5h: "allowed",
-        captured_at: DateTime.utc_now()
-      })
-
-      assert Snapshot.quota_hold(a.id) == :ok
-      assert Snapshot.quota_hold(b.id) == :ok
-    end
-
-    test "a workspace with no linked account fails open" do
-      assert Snapshot.quota_hold(workspace!().id) == :ok
-      assert Snapshot.quota_hold("no-such-workspace") == :ok
-    end
-
-    test "a :continue workspace still defers to the dispatch seam" do
-      account = account!()
-      ws = workspace!(%{config: %{"quota" => %{"on_exhaustion" => "continue"}}})
-      link!(ws, account)
-      exhausted_snapshot!(account)
-
-      assert Snapshot.quota_hold(ws.id) == :ok
-    end
-
-    test "a workspace's stricter threshold holds it while the account's own default would not" do
-      account = account!(%{"throttle_threshold" => 0.90})
-      strict = workspace!(%{config: %{"quota" => %{"throttle_threshold" => 0.50}}})
-      relaxed = workspace!()
-      link!(strict, account)
-      link!(relaxed, account)
-
-      Ash.create!(AnthropicQuota, %{
-        provider_account_id: account.id,
-        provider: "claude",
-        utilization_5h: 0.60,
-        status_5h: "allowed",
-        captured_at: DateTime.utc_now()
-      })
-
-      assert {:hold, _} = Snapshot.quota_hold(strict.id)
-      assert Snapshot.quota_hold(relaxed.id) == :ok
-    end
-  end
 
   describe "threshold resolution is min(account, workspace) (§4.2)" do
     test "the account default applies when the workspace sets nothing" do

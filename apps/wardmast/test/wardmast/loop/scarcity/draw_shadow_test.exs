@@ -16,8 +16,7 @@ defmodule Wardmast.Loop.Scarcity.DrawShadowTest do
   # The only files allowed to name the calibration: its own modules, the
   # `Scarcity` seam, and the two operator entry points. DC2's seat-hour
   # calibration (bd-c1dief) reuses `Calibration.fit/2` and `Draw.intervals/3`
-  # and is itself pinned shadow-only by `Quota.BudgetCalibrationShadowTest`; so
-  # does the admission shadow report (DC7), which only names `Draw.pool/2`.
+  # and is itself pinned shadow-only by `Quota.BudgetCalibrationShadowTest`.
   # `quota/seat_weights.ex` (DC11, bd-8lsfey, R11 folded in) is the one consumer of
   # the per-model fit: it turns it into seat weights the budget server holds, and
   # only `SeatCheck` (enforce) and the walk read those (`SeatWeightsTest` pins it).
@@ -30,8 +29,6 @@ defmodule Wardmast.Loop.Scarcity.DrawShadowTest do
     wardmast/quota/seat_weights.ex
     mix/tasks/wardmast.draw_calibration.ex
     mix/tasks/wardmast.budget_calibration.ex
-    wardmast/board/admission_shadow_report.ex
-    wardmast/board/admission_shadow_report/quota.ex
     wardmast/quota/history.ex
   )
 

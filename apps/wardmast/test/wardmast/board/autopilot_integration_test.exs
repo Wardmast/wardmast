@@ -234,7 +234,7 @@ defmodule Wardmast.Board.AutopilotIntegrationTest do
 
     pid = start_autopilot()
 
-    assert %{promote: promoted} = Autopilot.board(pid, [])
+    assert %{walk: %{promote: promoted}} = Autopilot.board(pid, [])
     assert promoted == ranked_ahead.id
 
     assert {:ok, ^promoted} = Autopilot.tick(pid)

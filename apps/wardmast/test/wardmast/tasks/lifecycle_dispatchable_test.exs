@@ -54,7 +54,7 @@ defmodule Wardmast.Tasks.LifecycleDispatchableTest do
     end
 
     test "the column outranks every scheduler hold" do
-      ctx = %{paused: true, quota: {:hold, "quota exhausted"}, slots_free: 0}
+      ctx = %{paused: true}
       assert Lifecycle.dispatchable(ticket(:backlog), ctx) == {:held, {:column, :backlog}}
     end
   end
@@ -92,23 +92,9 @@ defmodule Wardmast.Tasks.LifecycleDispatchableTest do
                "lib/a.ex in flight on bd-7 (diff)"
     end
 
-    test "paused, then a quota hold, then no free slot" do
-      assert Lifecycle.dispatchable(ticket(:queued), %{paused: true, slots_free: 0}) ==
-               {:held, :paused}
-
-      assert Lifecycle.dispatchable(ticket(:queued), %{
-               quota: {:hold, "quota exhausted"},
-               slots_free: 0
-             }) ==
-               {:held, {:quota, "quota exhausted"}}
-
-      assert Lifecycle.dispatchable(ticket(:queued), %{slots_free: 0}) == {:held, :no_slot}
-      assert Lifecycle.dispatchable(ticket(:queued), %{slots_free: 1}) == :ok
-    end
-
-    test "a hold the caller did not ask about is not held" do
-      # No `:slots_free` key: the caller is not asking about slots.
-      assert Lifecycle.dispatchable(ticket(:queued), %{quota: :ok}) == :ok
+    test "paused holds an otherwise dispatchable ticket" do
+      assert Lifecycle.dispatchable(ticket(:queued), %{paused: true}) == {:held, :paused}
+      assert Lifecycle.dispatchable(ticket(:queued), %{paused: false}) == :ok
     end
   end
 
@@ -117,7 +103,6 @@ defmodule Wardmast.Tasks.LifecycleDispatchableTest do
       assert Lifecycle.describe_hold({:column, :backlog}) == "in Backlog"
       assert Lifecycle.describe_hold({:blocked_by, ["bd-3", "bd-9"]}) == "blocked by bd-3, bd-9"
       assert Lifecycle.describe_hold({:column, :in_progress}) == "already In progress"
-      assert Lifecycle.describe_hold(:no_slot) == "no free worker slot"
     end
   end
 
@@ -164,7 +149,7 @@ defmodule Wardmast.Tasks.LifecycleDispatchableTest do
     @phrase "held — local capacity full (cap 2, 2 running) (run is local-only: sandbox is not podman)"
 
     test "is the ticket's own hold, after the guardrail and ahead of the board-wide ones" do
-      ctx = %{local_capacity: {:hold, @phrase}, paused: true, slots_free: 0}
+      ctx = %{local_capacity: {:hold, @phrase}, paused: true}
 
       assert Lifecycle.dispatchable(ticket(:queued), ctx) == {:held, {:local_capacity, @phrase}}
 

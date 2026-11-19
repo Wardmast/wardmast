@@ -1,13 +1,12 @@
 defmodule Wardmast.Agents.ProviderRoutingEnforceTest do
   @moduledoc """
-  Implementer routing's availability under `scheduler_admission: enforce` (DC8,
-  design `provider-dynamic-concurrency.md` §7 "R5 and R6 routing", E12): for an
-  account in `enforce`, feasibility is a free seat on the candidate's pool
+  Implementer routing's availability under seat admission (DC8,
+  design `provider-dynamic-concurrency.md` §7 "R5 and R6 routing", E12): feasibility is a free seat on the candidate's pool
   (`Wardmast.Accounts.SeatCheck`) and the quota gate keeps only its hard rules.
   So an account past its paced line stays a candidate while its pool has a
   seat, an account whose pool is full drops `at_capacity`, and `capacity` is
   the sum of free seats. A follow-up role is never dropped for a full pool: it
-  holds its ticket's seat already (I9). Under `legacy` nothing changes.
+  holds its ticket's seat already (I9).
   """
   use Wardmast.DataCase, async: false
 
@@ -17,10 +16,7 @@ defmodule Wardmast.Agents.ProviderRoutingEnforceTest do
   alias Wardmast.Tasks.{Issue, Workspace}
 
   setup do
-    on_exit(fn ->
-      Wardmast.Settings.set_scheduler_admission(nil)
-      :ets.delete_all_objects(:arbiter_provider_circuit_breakers)
-    end)
+    on_exit(fn -> :ets.delete_all_objects(:arbiter_provider_circuit_breakers) end)
 
     ws =
       Ash.create!(Workspace, %{
@@ -113,15 +109,7 @@ defmodule Wardmast.Agents.ProviderRoutingEnforceTest do
 
   defp reasons(entries), do: Map.new(entries, &{&1.account.id, &1.reason})
 
-  test "legacy: the paced line drops claude, codex has headroom under max_concurrent", ctx do
-    result = ProviderRouting.availability(ctx.ws, ctx.task, opts(ctx))
-
-    assert Enum.map(result.available, & &1.account.id) == [ctx.codex.id]
-    assert reasons(result.dropped) == %{ctx.paced.id => "quota_held"}
-  end
-
   test "enforce: a free seat is feasibility — past the line stays, a full pool drops", ctx do
-    {:ok, _} = Wardmast.Settings.set_scheduler_admission(:enforce)
     result = ProviderRouting.availability(ctx.ws, ctx.task, opts(ctx))
 
     assert Enum.map(result.available, & &1.account.id) == [ctx.paced.id]
@@ -133,7 +121,6 @@ defmodule Wardmast.Agents.ProviderRoutingEnforceTest do
   end
 
   test "enforce: a hard rule still drops", ctx do
-    {:ok, _} = Wardmast.Settings.set_scheduler_admission(:enforce)
     refusing = %{ahead_of_pace() | status_5h: "rejected"}
     quotas = %{ctx.paced.id => refusing, ctx.codex.id => fresh_codex()}
 
@@ -148,21 +135,9 @@ defmodule Wardmast.Agents.ProviderRoutingEnforceTest do
   end
 
   test "enforce: a follow-up role is never dropped for a full pool", ctx do
-    {:ok, _} = Wardmast.Settings.set_scheduler_admission(:enforce)
     result = ProviderRouting.availability(ctx.ws, ctx.task, opts(ctx, role: :resume))
 
     assert Enum.sort(Enum.map(result.available, & &1.account.id)) ==
              Enum.sort([ctx.paced.id, ctx.codex.id])
-  end
-
-  test "a per-account override: only the enforce account is judged by seats", ctx do
-    {:ok, _} = Wardmast.Accounts.edit_account(ctx.codex.id, %{"admission" => "enforce"})
-    result = ProviderRouting.availability(ctx.ws, ctx.task, opts(ctx))
-
-    # claude stays legacy (dropped on the line); codex is judged by its full pool.
-    assert reasons(result.dropped) == %{
-             ctx.paced.id => "quota_held",
-             ctx.codex.id => "at_capacity"
-           }
   end
 end

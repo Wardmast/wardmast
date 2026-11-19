@@ -52,7 +52,7 @@ defmodule Wardmast.Agents.ReviewerRouting do
   Survivors are ranked by quota headroom (`Wardmast.Quota.Headroom.binding/3`),
   most first, ties to configured order, candidates with no reading last.
 
-  Under `scheduler_admission: enforce` (DC8, design `provider-dynamic-concurrency.md`
+  Since DC8 (design `provider-dynamic-concurrency.md`
   §4.5) a pool with no free seat (`Wardmast.Accounts.SeatCheck`) ranks after
   every pool that has one. The quota gate, paced line included, holds a
   reviewer pool in every mode (bd-44qs5l): a held pool is never spawned on.
@@ -94,7 +94,6 @@ defmodule Wardmast.Agents.ReviewerRouting do
   require Ash.Query
   require Logger
 
-  alias Wardmast.Accounts.AdmissionMode
   alias Wardmast.Accounts.ProviderAccount
   alias Wardmast.Accounts.ProviderSettings
   alias Wardmast.Accounts.SeatCheck
@@ -541,9 +540,7 @@ defmodule Wardmast.Agents.ReviewerRouting do
         Keyword.get_lazy(opts, :gemini_code, fn -> Wardmast.Quota.provider_code("gemini") end),
       capability: CapabilityMatrix.gate(ws, :reviewer, task_repo(task)),
       gate: Wardmast.Quota.gate_for_workspace(ws),
-      # DC8: the installation's `scheduler_admission`, which each candidate's
-      # account follows unless it overrides it, and the seat check's seams.
-      install_mode: Keyword.get_lazy(opts, :scheduler_admission, &AdmissionMode.installation/0),
+      # DC8: the seat check's seams.
       seat_opts: Keyword.get(opts, :seat_opts, []),
       available: [],
       dropped: []
@@ -888,11 +885,10 @@ defmodule Wardmast.Agents.ReviewerRouting do
   defp check_quota(%{account: nil} = entry, _ctx), do: {:ok, entry}
 
   # bd-44qs5l: the full gate (paced line included) holds a reviewer pool in
-  # every mode. DC8: under `enforce`, whether its pool has a free seat is noted
+  # every mode. DC8: whether its pool has a free seat is noted
   # for `rank/1`, which puts such pools first.
   defp check_quota(%{account: account, model: model} = entry, ctx) do
     quota = ctx.quota_fun.(account)
-    enforced? = enforced?(account, ctx)
     gate_opts = [account: account, model: model, now: ctx.now]
 
     case ctx.gate.check(ctx.task, quota, ctx.ws, gate_opts) do
@@ -902,27 +898,20 @@ defmodule Wardmast.Agents.ReviewerRouting do
       _ ->
         headroom = Headroom.binding(quota, {account, ctx.ws}, model: model, now: ctx.now)
         entry = Map.put(entry, :headroom, headroom)
-        {:ok, if(enforced?, do: Map.put(entry, :seat_free?, seat_free?(entry, ctx)), else: entry)}
+        {:ok, Map.put(entry, :seat_free?, seat_free?(entry, ctx))}
     end
   end
 
   # The seat check's reads, once per selection rather than once per pool: the
-  # live holders and this workspace. Only when a candidate's account is in
-  # `enforce`.
-  defp with_seat_reads(ctx, candidates) do
-    if Enum.any?(candidates, &enforced?(Map.get(&1, :account), ctx)) do
-      seat_opts =
-        ctx.seat_opts
-        |> Keyword.put_new_lazy(:holders, &SeatCheck.holders/0)
-        |> Keyword.put_new(:workspace, ctx.ws)
+  # live holders and this workspace.
+  defp with_seat_reads(ctx, _candidates) do
+    seat_opts =
+      ctx.seat_opts
+      |> Keyword.put_new_lazy(:holders, &SeatCheck.holders/0)
+      |> Keyword.put_new(:workspace, ctx.ws)
 
-      %{ctx | seat_opts: seat_opts}
-    else
-      ctx
-    end
+    %{ctx | seat_opts: seat_opts}
   end
-
-  defp enforced?(account, ctx), do: AdmissionMode.mode(account, ctx.install_mode) == :enforce
 
   defp seat_free?(%{account: account, pool: pool} = entry, ctx) do
     SeatCheck.room?(
@@ -944,7 +933,7 @@ defmodule Wardmast.Agents.ReviewerRouting do
 
   defp latest_quota(_), do: nil
 
-  # A pool known to be full (`seat_free?: false`, only ever set under `enforce`)
+  # A pool known to be full (`seat_free?: false`)
   # ranks after every other; the rest is today's order.
   defp rank(entries) do
     Enum.sort_by(entries, fn entry ->

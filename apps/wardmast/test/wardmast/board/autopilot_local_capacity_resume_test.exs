@@ -12,7 +12,7 @@ defmodule Wardmast.Board.AutopilotLocalCapacityResumeTest do
   alias Wardmast.Board.Autopilot
 
   defp board(slots_free) do
-    %{
+    Wardmast.Board.WalkFixture.with_walk(%{
       ready: [],
       backlog: [],
       blocked: [],
@@ -27,7 +27,7 @@ defmodule Wardmast.Board.AutopilotLocalCapacityResumeTest do
       quota: :ok,
       paused: false,
       now: DateTime.utc_now()
-    }
+    })
   end
 
   # `room` is an Agent holding how many local slots are free; `priorities` maps
@@ -45,7 +45,10 @@ defmodule Wardmast.Board.AutopilotLocalCapacityResumeTest do
       follow_up: false,
       paused: false,
       registry_settled?: fn -> true end,
+      record_shadow: fn _attrs -> :ok end,
       snapshot: fn _ -> board(Keyword.get(opts, :slots_free, 0)) end,
+      # DC12: a slot waiter replays when its pool has a seat (modelled by `:slots_free`).
+      slot_room: fn _task_id, _kind -> Keyword.get(opts, :slots_free, 0) > 0 end,
       dispatch: fn id -> {:ok, %{task_id: id}} end,
       resume: fn task_id, kind, resume_opts ->
         send(test, {:resumed, task_id, kind, resume_opts})

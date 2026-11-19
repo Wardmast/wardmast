@@ -570,14 +570,6 @@ defmodule Wardmast.Board.SchedulerWalkTest do
     end
   end
 
-  test "without :walk the plan is today's: no placements key, no wait_cause" do
-    plan = Scheduler.plan(%{ready: [card("bd-1")], slots_free: 1, quota: :ok})
-
-    assert plan.promote == "bd-1"
-    refute Map.has_key?(plan, :placements)
-    refute Enum.any?(plan.entries, &Map.has_key?(&1, :wait_cause))
-  end
-
   describe "a pair-session claim (bd-7p6a9o)" do
     @session "5b1e0c2a-0000-4000-8000-000000000003"
 

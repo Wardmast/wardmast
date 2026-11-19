@@ -77,7 +77,7 @@ defmodule Wardmast.MCP.WorkerDispatchAccountCapTest do
     assert {:error, {:conflict, message}} = Tools.worker_dispatch(ctx.coordinator, args(ctx, %{}))
 
     assert message =~ "claude:#{ctx.account.slug}"
-    assert message =~ "cap is 1"
+    assert message =~ "1 of 1 seats"
     assert message =~ ctx.holder.id
     assert message =~ "over_cap"
     assert Worker.whereis(ctx.task.id) == nil
