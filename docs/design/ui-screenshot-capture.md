@@ -194,6 +194,23 @@ pod:       for role in [before(base), after(head)]:
   Warm `_build` for the "before" is a later optimisation (seed it from the head's after
   compile); v1 pays two compiles.
 
+* **As implemented (bd-1ydndq).** `Wardmast.Screenshots.Capture.run/2` is the deterministic step
+  (no agent turn). It returns `{:skipped, :no_ui_paths}` having run nothing when the diff misses
+  `ui_paths`, reads the worker plan (`Screenshots.Plan`), then extracts each commit with
+  `git archive`, boots it through a `Capture.Booter` (default `Booter.Command`: setup, seed, start,
+  readiness probe, in an empty environment), shoots every `shot x viewport x theme` through a
+  `Capture.Shooter` (default `Shooter.Chromium`, the command-line browser) and stops it: base first,
+  then head. A 404 means *absent at that commit*: absent at the base is a `:new` pair (after-only),
+  absent at the head a `:removed` pair (before-only), absent at both a route error. Failures are
+  `Capture.Failure`s with a distinct `code` (`manifest_missing`, `manifest_invalid`, `boot_failed`,
+  `route_error`, `shot_failed`, `budget_exceeded`, ...), written to `<out_dir>/capture.json` and
+  handed to `opts[:record]`. A boot failure at the base **fails** the capture (it does not degrade
+  to `before unavailable`). Differences from the sketch above: it boots on the host, not in the pod
+  (the pod, the `screenshot_captures` table, placement and the merge wait are N2), and
+  `Shooter.Chromium` cannot run steps, `wait_for`, `target`, `full_page`, `hide`, a login or theme
+  `local_storage`: it fails the shot naming the unsupported field (the CDP runner of N1 is a
+  drop-in `Shooter`). `Capture.poster_pairs/1` hands the pairs to `Screenshots.Poster`.
+
 ## 5. The worker → Arbiter contract (D3)
 
 ### 5.1 Shape
