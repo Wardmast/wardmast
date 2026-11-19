@@ -30,20 +30,27 @@ defmodule Wardmast.Screenshots.PlanCheck do
           :not_applicable | {:ok, checked()} | {:error, [String.t()]}
   def check(%Config{} = config, worktree, target, _opts \\ []) do
     with true <- is_binary(target) and target != "",
-         {:ok, base} <- merge_base(worktree, target),
+         {:ok, base} <- merge_base(config, worktree, target),
          {:ok, true} <- Config.diff_touches_ui_paths?(config, worktree, base, "HEAD") do
       read(config, Path.join(worktree, @plan_file))
     else
+      {:halt, result} -> result
       _ -> :not_applicable
     end
   end
 
-  defp merge_base(worktree, target) do
-    case System.cmd("git", ["merge-base", target, "HEAD"], cd: worktree, stderr_to_stdout: true) do
-      {out, 0} -> {:ok, String.trim(out)}
+  # Same base resolution as ReviewGate (`origin/<target>` first): a stale local branch would
+  # diff in upstream commits. With plan_required an unresolvable base fails closed.
+  defp merge_base(config, worktree, target) do
+    case Wardmast.Worker.Worktree.merge_base(worktree, target) do
+      sha when is_binary(sha) -> {:ok, sha}
+      _ when config.plan_required == true -> {:halt, {:error, [unresolved(target)]}}
       _ -> :error
     end
   end
+
+  defp unresolved(target),
+    do: "could not resolve the merge base against #{target}; cannot check #{@plan_file}"
 
   defp read(config, path) do
     case File.read(path) do

@@ -283,8 +283,6 @@ defmodule Wardmast.Worker.PromptBuilder do
     Wardmast.Skills.Materializer.prompt_section(resolved, materialized?)
   end
 
-  # bd-ld8qde (G14): what the ticket's declared permissions were projected into.
-  # Empty for an unguarded spawn, so the prompt is unchanged there.
   # A repo with a `screenshots` config gets the plan contract in the prompt, so the worker writes
   # `.arbiter/screenshots.json` before `arb done` instead of learning it from a revise round.
   defp screenshots_section(%Issue{repo: repo}, opts) do
@@ -312,6 +310,8 @@ defmodule Wardmast.Worker.PromptBuilder do
     end
   end
 
+  # bd-ld8qde (G14): what the ticket's declared permissions were projected into.
+  # Empty for an unguarded spawn, so the prompt is unchanged there.
   defp permissions_section(opts), do: PermissionsBlock.render(Keyword.get(opts, :projection))
 
   # bd-8cn795: whole-file reads of large modules (or a large PR body / API

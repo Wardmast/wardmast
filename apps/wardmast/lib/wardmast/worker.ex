@@ -5933,7 +5933,7 @@ defmodule Wardmast.Worker do
 
     run_opts = prepush_run_opts(meta)
     screenshots = screenshots_gate_config(state, ctx)
-    target = Map.get(meta, :target_branch)
+    target = Map.get(meta, :target_branch) || "main"
     task_id = state.task_id
 
     run = fn ->

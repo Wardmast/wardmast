@@ -59,6 +59,28 @@ defmodule Wardmast.Screenshots.PlanCheckTest do
     assert :not_applicable = PlanCheck.check(c, dir, "main")
   end
 
+  test "the base is origin/<target>, not a stale local branch", %{dir: dir, config: c} do
+    remote = dir <> "-remote.git"
+    on_exit(fn -> File.rm_rf!(remote) end)
+    {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+    git(dir, ["remote", "add", "origin", remote])
+    commit_ui(dir)
+    git(dir, ["push", "-q", "origin", "main"])
+    git(dir, ["checkout", "-q", "-b", "feat"])
+    # local main lags origin/main; the upstream-only commit touches ui_paths
+    git(dir, ["branch", "-f", "main", "HEAD~1"])
+
+    assert :not_applicable = PlanCheck.check(c, dir, "main")
+  end
+
+  test "an unresolvable base fails closed when plan_required", %{dir: dir, config: c} do
+    assert {:error, [msg]} = PlanCheck.check(c, dir, "no-such-branch")
+    assert msg =~ "merge base"
+
+    assert :not_applicable =
+             PlanCheck.check(config(%{"plan_required" => false}), dir, "no-such-branch")
+  end
+
   test "missing plan on a UI diff is an error", %{dir: dir, config: c} do
     git(dir, ["checkout", "-q", "-b", "feat"])
     commit_ui(dir)
