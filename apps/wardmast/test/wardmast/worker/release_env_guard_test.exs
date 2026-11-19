@@ -201,6 +201,9 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # session's read-only grounding checkout. Same classification as
     # `reviews/checkout.ex`, which does the same thing for a PR head.
     "apps/wardmast/lib/wardmast/sessions/repo_checkout.ex" => :pure_tool,
+    # bd-7p6a9o: git only (`rev-parse --git-path hooks`) to find the repo's own
+    # hooks dir, which a pair session's guard stubs then run. Runs no hooks.
+    "apps/wardmast/lib/wardmast/sessions/pair_guard.ex" => :pure_tool,
     # bd-19qve3: git only (rev-parse / cat-file / grep against a commit) to
     # verify a shared memory's citations. Reads committed trees; runs no hooks.
     "apps/wardmast/lib/wardmast/sessions/memory/staleness.ex" => :pure_tool,
