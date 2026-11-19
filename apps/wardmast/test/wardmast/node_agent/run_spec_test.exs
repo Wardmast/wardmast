@@ -628,4 +628,90 @@ defmodule Wardmast.NodeAgent.RunSpecTest do
                RunSpec.validate(with_secret_files(%{"big.json" => %{"content" => big}}))
     end
   end
+
+  # SI8 (`docs/design/remote-workers.md` §21.3.3): a Codex run's `CODEX_HOME` is a
+  # tmpfs `config_dir` (`"tmpfs": true`) whose files (the login, config, memory, rules)
+  # ride in `secret_files`, each at a `link` from a short allowlist.
+  describe "a tmpfs config_dir carrying a Codex home (SI8)" do
+    @auth ~s({"tokens":{"refresh_token":"RT-SI8-SPEC"}})
+
+    defp codex_files(extra \\ %{}) do
+      Map.merge(
+        %{
+          "codex-auth" => %{"content" => Base.encode64(@auth), "link" => "auth.json"},
+          "codex-config" => %{
+            "content" => Base.encode64("model = \"x\"\n"),
+            "link" => "config.toml"
+          },
+          "codex-agents" => %{"content" => Base.encode64("memory"), "link" => "AGENTS.md"},
+          "codex-rules" => %{
+            "content" => Base.encode64("rules"),
+            "link" => "rules/arbiter.rules"
+          }
+        },
+        extra
+      )
+    end
+
+    defp codex_spec(files, mount_extra \\ %{"tmpfs" => true}) do
+      mounts =
+        spec()["mounts"] ++
+          [Map.merge(%{"kind" => "config_dir", "path" => "/tmp/run/codex-home"}, mount_extra)]
+
+      spec(%{"secret_files" => files, "mounts" => mounts})
+    end
+
+    test "the mount carries tmpfs: true and the four files validate" do
+      assert {:ok, s} = RunSpec.validate(codex_spec(codex_files()))
+      assert %{kind: "config_dir", tmpfs: true} = Enum.find(s.mounts, &(&1.kind == "config_dir"))
+
+      assert s.secret_files |> Map.keys() |> Enum.sort() ==
+               ~w(codex-agents codex-auth codex-config codex-rules)
+
+      assert s.secret_files["codex-auth"] == %{content: @auth, link: "auth.json"}
+    end
+
+    test "a config_dir without the flag is not tmpfs" do
+      assert {:ok, s} = RunSpec.validate(codex_spec(%{}, %{}))
+      refute s.mounts |> Enum.find(&(&1.kind == "config_dir")) |> Map.get(:tmpfs, false)
+    end
+
+    test "tmpfs must be a boolean, and only a config_dir may have it" do
+      assert {:error, {:refused, _}} =
+               RunSpec.validate(codex_spec(codex_files(), %{"tmpfs" => "yes"}))
+
+      bad =
+        spec(%{"mounts" => [%{"kind" => "worktree", "path" => "/work/tree", "tmpfs" => true}]})
+
+      assert {:error, {:refused, _}} = RunSpec.validate(bad)
+    end
+
+    test "on a tmpfs config_dir every file must be linked at an allowlisted path" do
+      for files <- [
+            %{"x" => %{"content" => Base.encode64("x")}},
+            %{"x" => %{"content" => Base.encode64("x"), "link" => "evil.sh"}},
+            %{"x" => %{"content" => Base.encode64("x"), "link" => "rules/other.rules"}},
+            %{"x" => %{"content" => Base.encode64("x"), "link" => "sessions/rollout.jsonl"}}
+          ] do
+        assert {:error, {:refused, {:bad_value, "secret_files"}}} =
+                 RunSpec.validate(codex_spec(files)),
+               inspect(files)
+      end
+    end
+
+    test "two files cannot claim the same path" do
+      files =
+        codex_files(%{"codex-auth2" => %{"content" => Base.encode64("x"), "link" => "auth.json"}})
+
+      assert {:error, {:refused, {:bad_value, "secret_files"}}} =
+               RunSpec.validate(codex_spec(files))
+    end
+
+    test "the login is never printed: not by inspect, not by redact/1" do
+      raw = codex_spec(codex_files())
+      {:ok, s} = RunSpec.validate(raw)
+      refute inspect(s) =~ "RT-SI8-SPEC"
+      refute inspect(RunSpec.redact(raw)) =~ Base.encode64(@auth)
+    end
+  end
 end

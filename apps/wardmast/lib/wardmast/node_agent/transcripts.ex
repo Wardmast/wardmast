@@ -1,11 +1,12 @@
 defmodule Wardmast.NodeAgent.Transcripts do
   @moduledoc """
   The node half of transcript sync (`docs/design/remote-workers.md` §7.6): pack the
-  run's session JSONL (`<config_dir>/projects/**/*.jsonl`, subagents included) into
+  run's session JSONL (`<config_dir>/projects/**/*.jsonl`, subagents included; and,
+  for a Codex run, its rollouts `<config_dir>/sessions/**/*.jsonl`, SI8) into
   a gzipped tar and `PUT /nodes/runs/<run>/transcripts`. Only regular `*.jsonl`
   files are packed (links are never followed or stored), so what the primary's
   sanitising extractor (`Wardmast.Nodes.Transcripts`) accepts is what is sent;
-  `.credentials.json` and the rest of the config dir stay on the node.
+  `.credentials.json`, a Codex `auth.json` and the rest of the config dir stay on the node.
 
   The other direction is one file (`fetch_session/4`, bd-4ic681): the transcript of
   the session a `--resume` run continues, which the primary seeded, redacted, and
@@ -18,7 +19,10 @@ defmodule Wardmast.NodeAgent.Transcripts do
   @spec pack(Path.t(), Path.t()) ::
           {:ok, %{files: non_neg_integer(), bytes: non_neg_integer()}} | {:error, term()}
   def pack(config_dir, dest) do
-    files = config_dir |> Path.join("projects") |> walk() |> Enum.sort()
+    files =
+      ["projects", "sessions"]
+      |> Enum.flat_map(&walk(Path.join(config_dir, &1)))
+      |> Enum.sort()
 
     entries =
       for path <- files do
