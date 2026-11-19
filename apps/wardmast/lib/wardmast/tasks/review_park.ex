@@ -75,6 +75,7 @@ defmodule Wardmast.Tasks.ReviewPark do
           | :head_not_pushed
           | :needs_operator_push
           | :resume_blocked
+          | :screenshot_capture_failed
           | :review_rerun
 
   @reasons %{
@@ -111,6 +112,10 @@ defmodule Wardmast.Tasks.ReviewPark do
       "the branch touches `.github/workflows/`, which the GitHub App credential is not " <>
         "permitted to push (it holds no `workflows` permission, by design) — an operator " <>
         "must push the branch",
+    screenshot_capture_failed:
+      "UI screenshots could not be captured for an infrastructure reason (the app would not boot, " <>
+        "no Chromium, the checkout or diff failed, the budget ran out) — not the worker's fault, so " <>
+        "the change was not sent back and no reviewer was dispatched",
     resume_blocked:
       "the Watchdog could not restart the run after its awaiting-review timeout because " <>
         "another pass on the same task still holds the worker registry slot (W14)"
@@ -136,6 +141,7 @@ defmodule Wardmast.Tasks.ReviewPark do
     empty_net_diff: "the branch's commits contribute no net change against the target",
     head_not_pushed: "the branch is not pushed and could not be",
     needs_operator_push: "the branch touches .github/workflows/ and needs an operator push",
+    screenshot_capture_failed: "UI screenshot capture failed (infrastructure)",
     resume_blocked: "auto-resume is blocked by another pass on the same task"
   }
 
