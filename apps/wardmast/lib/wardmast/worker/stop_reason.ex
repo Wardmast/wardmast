@@ -1115,9 +1115,18 @@ defmodule Wardmast.Worker.StopReason do
   Build a `:memory_cap_exceeded` reason (bd-6zuoo6): the worker's memory-capped
   scope reported `Result=oom-kill`. `info` is `MemoryScope.outcome/2`'s map
   (`:max` the configured cap, `:peak` the scope's high-water mark in bytes or
-  `nil`).
+  `nil`). On macOS (bd-d627b8) there is no scope: `Wardmast.Worker.MemoryWatchdog`
+  killed the process group, and `info.source` is `:watchdog` (`peak` is the
+  highest group RSS it sampled).
   """
-  @spec memory_cap_exceeded(%{max: String.t(), peak: integer() | nil}, integer() | nil) :: t()
+  @spec memory_cap_exceeded(
+          %{
+            required(:max) => String.t(),
+            optional(:peak) => integer() | nil,
+            optional(:source) => atom()
+          },
+          integer() | nil
+        ) :: t()
   def memory_cap_exceeded(%{max: max} = info, exit_status) do
     peak =
       case Map.get(info, :peak) do
@@ -1125,18 +1134,32 @@ defmodule Wardmast.Worker.StopReason do
         _ -> ""
       end
 
+    {summary, remediation} =
+      if Map.get(info, :source) == :watchdog do
+        {"memory cap exceeded: the worker's process group hit its per-worker limit " <>
+           "(#{max}#{peak} RSS) and the memory watchdog killed it — the agent and everything " <>
+           "it had spawned in its group (typically a runaway `mix test` BEAM) were stopped; " <>
+           "the server was not",
+         "Find what grew without bound (the run's transcript names the last command) and " <>
+           "fix or narrow it. Re-dispatching the same work will usually hit the cap again. " <>
+           "If the workload is legitimately large, raise WARDMAST_WORKER_MEMORY_MAX " <>
+           "(e.g. 24G or 60%) and restart the server, or set it to off. The macOS watchdog " <>
+           "is polling-based, so the real peak may have been higher."}
+      else
+        {"memory cap exceeded: the worker's process tree hit its per-worker limit " <>
+           "(MemoryMax=#{max}#{peak}) and was OOM-killed — the agent and everything it had " <>
+           "spawned (typically a runaway `mix test` BEAM) were stopped; the server was not",
+         "Find what grew without bound (the run's transcript names the last command) and " <>
+           "fix or narrow it. Re-dispatching the same work will usually hit the cap again. " <>
+           "If the workload is legitimately large, raise WARDMAST_WORKER_MEMORY_MAX " <>
+           "(e.g. 24G or 60%) and restart the server. The OOM is attributable via the " <>
+           "run's cgroup scope (worker_runs.cgroup_scopes)."}
+      end
+
     %__MODULE__{
       category: :memory_cap_exceeded,
-      summary:
-        "memory cap exceeded: the worker's process tree hit its per-worker limit " <>
-          "(MemoryMax=#{max}#{peak}) and was OOM-killed — the agent and everything it had " <>
-          "spawned (typically a runaway `mix test` BEAM) were stopped; the server was not",
-      remediation:
-        "Find what grew without bound (the run's transcript names the last command) and " <>
-          "fix or narrow it. Re-dispatching the same work will usually hit the cap again. " <>
-          "If the workload is legitimately large, raise WARDMAST_WORKER_MEMORY_MAX " <>
-          "(e.g. 24G or 60%) and restart the server. The OOM is attributable via the " <>
-          "run's cgroup scope (worker_runs.cgroup_scopes).",
+      summary: summary,
+      remediation: remediation,
       exit_status: exit_status,
       signal: signal_for(exit_status)
     }
