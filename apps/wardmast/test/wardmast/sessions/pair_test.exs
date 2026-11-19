@@ -287,6 +287,24 @@ defmodule Wardmast.Sessions.PairTest do
       assert git!(later.cwd, ["rev-parse", "HEAD"]) == sha
     end
 
+    test "a worker dispatched afterwards continues in the same worktree, on the pair's commits",
+         %{issue: issue} do
+      %{session: session} = open!(issue)
+      branch = BranchNamer.derive(issue)
+      sha = GitFixture.commit!(session.cwd, %{"feature.txt" => "pair work\n"}, "pair work")
+      git!(session.cwd, ["push", "-q", "origin", branch])
+      {:ok, _ended} = Pair.close(issue.id, runner: SessionRunnerStub)
+
+      on_exit(fn -> _ = Wardmast.Worker.stop(issue.id, :normal) end)
+
+      assert {:ok, %{worktree_path: worktree}} =
+               Wardmast.Worker.Dispatch.dispatch(issue.id, start_driver: false)
+
+      assert worktree == session.cwd
+      assert git!(worktree, ["rev-parse", "--abbrev-ref", "HEAD"]) == branch
+      assert git!(worktree, ["rev-parse", "HEAD"]) == sha
+    end
+
     test "close with no live session says so", %{issue: issue} do
       assert {:error, :no_pair_session} = Pair.close(issue.id, runner: SessionRunnerStub)
     end
