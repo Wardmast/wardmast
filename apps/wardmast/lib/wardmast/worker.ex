@@ -5884,13 +5884,13 @@ defmodule Wardmast.Worker do
       is_binary(worktree) and File.dir?(worktree) and
         (ctx in [:fix_pass, :revise] or worktree_on_branch?(worktree, branch))
 
-    if runnable? do
-      workspace = prepush_workspace(state, ctx)
+    if runnable?, do: resolve_prepush_spec(prepush_workspace(state, ctx), state.repo)
+  end
 
-      case Wardmast.Worker.PrepushCheck.resolve(workspace, state.repo) do
-        nil -> screenshots_only_spec(workspace, state.repo)
-        spec -> spec
-      end
+  defp resolve_prepush_spec(workspace, repo) do
+    case Wardmast.Worker.PrepushCheck.resolve(workspace, repo) do
+      nil -> screenshots_only_spec(workspace, repo)
+      spec -> spec
     end
   end
 
