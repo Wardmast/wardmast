@@ -107,6 +107,11 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
     ]
   end
 
+  # `exec` is the operator-configured Chromium binary (or the `timeout`
+  # binary found on PATH) and `args` is an argv list handed to `System.cmd/3`
+  # directly, never through a shell; the viewport/URL come from the worker's
+  # manifest but are only ever argv elements, so they cannot inject a command.
+  # sobelow_skip ["CI.System"]
   defp run(chrome, spec) do
     profile =
       Path.join(
