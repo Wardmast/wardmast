@@ -24,10 +24,50 @@ defmodule Wardmast.Doctor.PlatformTest do
   test "linux: the PATH is unchanged" do
     report = Platform.report(os: {:unix, :linux}, path: "/usr/bin", find: fn _, _ -> nil end)
 
-    assert report == %{
-             os: "linux",
-             path: "/usr/bin",
-             tools: Map.new(~w(gtimeout claude gh glab mise), &{&1, nil})
-           }
+    assert report.os == "linux"
+    assert report.path == "/usr/bin"
+    assert report.tools == Map.new(~w(gtimeout claude gh glab mise), &{&1, nil})
+  end
+
+  describe "provider CLI detection (bd-5wfsj7)" do
+    @moduletag :linux
+
+    setup do
+      dir = Path.join(System.tmp_dir!(), "pl#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
+      {:ok, dir: dir}
+    end
+
+    test "reports each CLI's path, version and verdict from the server's PATH", %{dir: dir} do
+      File.write!(Path.join(dir, "claude"), "#!/bin/sh\necho '2.2.0'\n")
+      File.chmod!(Path.join(dir, "claude"), 0o755)
+      File.write!(Path.join(dir, "codex"), "#!/bin/sh\necho '0.1.0'\n")
+      File.chmod!(Path.join(dir, "codex"), 0o755)
+
+      detect = fn path ->
+        Wardmast.Agents.CliDetection.detect_all(path: path, probe: true)
+      end
+
+      report =
+        Platform.report(
+          os: {:unix, :linux},
+          path: "/usr/bin:" <> dir,
+          find: fn _, _ -> nil end,
+          clis: detect.("/usr/bin:" <> dir)
+        )
+
+      by = Map.new(report.clis, &{&1.provider, &1})
+      assert %{status: :ok, version: "2.2.0", path: path} = by["claude"]
+      assert path == Path.join(dir, "claude")
+      assert %{status: :outdated, version: "0.1.0"} = by["codex"]
+      assert %{status: :missing} = by["antigravity"]
+    end
+
+    test "the report encodes as JSON (it is served by /api/server/platform)" do
+      report = Platform.report(os: {:unix, :linux}, path: "/usr/bin", find: fn _, _ -> nil end)
+      assert {:ok, json} = Jason.encode(report)
+      assert %{"clis" => [_, _, _], "path_source" => %{"source" => _}} = Jason.decode!(json)
+    end
   end
 end
