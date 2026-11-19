@@ -108,4 +108,38 @@ defmodule Wardmast.Screenshots.PlanCheckTest do
     exclude = File.read!(Path.join(dir, ".git/info/exclude"))
     assert length(String.split(exclude, ".arbiter/screenshots.json")) == 2
   end
+
+  describe "gate/4 and merge_gate/2" do
+    test "a UI diff with no plan is a red step that fails the run", %{dir: dir, config: c} do
+      git(dir, ["checkout", "-q", "-b", "feat"])
+      commit_ui(dir)
+      gate = PlanCheck.gate(c, dir, "main", "t-gate-red")
+      assert gate.step.status == :failed
+      assert gate.step.name == "screenshots plan"
+
+      merged = PlanCheck.merge_gate(%{result: :ok, steps: []}, gate)
+      assert {:failed, 1, output} = merged.result
+      assert output =~ "screenshots.json"
+      assert [%{status: :failed}] = merged.steps
+    end
+
+    test "a valid skip passes, records the sha and excludes the plan", %{dir: dir, config: c} do
+      git(dir, ["checkout", "-q", "-b", "feat"])
+      commit_ui(dir)
+      write_plan(dir, @skip)
+      gate = PlanCheck.gate(c, dir, "main", "t-gate-ok")
+      assert gate.step.status == :passed
+      merged = PlanCheck.merge_gate(%{result: :ok, steps: []}, gate)
+      assert merged.result == :ok
+      assert merged.screenshots_plan.sha == PlanCheck.sha(@skip)
+      assert {:ok, _} = PlanCheck.stored_sha(PlanCheck.store_root(), "t-gate-ok")
+      File.rm_rf!(Path.join(PlanCheck.store_root(), "t-gate-ok"))
+    end
+
+    test "no UI change adds nothing", %{dir: dir, config: c} do
+      assert PlanCheck.gate(c, dir, "main", "t-gate-none") == nil
+      run = %{result: :ok, steps: []}
+      assert PlanCheck.merge_gate(run, nil) == run
+    end
+  end
 end

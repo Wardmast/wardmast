@@ -180,6 +180,27 @@ defmodule Wardmast.Screenshots.PlanCheck do
     }
   end
 
+  @doc """
+  Fold a `gate/4` outcome into a `PrepushCheck.run_steps` result: the step is appended and a red
+  one turns an otherwise passing (or fail-open) result into `{:failed, 1, output}`. The checked
+  plan's sha rides along as `:screenshots_plan`.
+  """
+  @spec merge_gate(map(), nil | map()) :: map()
+  def merge_gate(run, nil), do: run
+
+  def merge_gate(%{result: result, steps: steps} = run, %{step: step, plan: plan}) do
+    result =
+      case {step.status, result} do
+        {:failed, {:failed, _, _}} -> result
+        {:failed, _} -> {:failed, step.exit_status, step.output}
+        _ -> result
+      end
+
+    run
+    |> Map.merge(%{result: result, steps: steps ++ [step]})
+    |> Map.put(:screenshots_plan, plan && Map.take(plan, [:sha, :skip]))
+  end
+
   @doc "Add the plan file to the repo's `info/exclude` (idempotent; worktree-aware)."
   @spec exclude_plan(String.t()) :: :ok
   def exclude_plan(worktree) do
