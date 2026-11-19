@@ -158,6 +158,7 @@ defmodule Wardmast.Mergers.Gitlab do
           {pipeline, pipeline_id} = fetch_pipeline_status(cfg, iid, Map.get(body, "sha"))
           status = map_state(Map.get(body, "state"))
           block_reason = block_reason(cfg, body, status, pipeline, pipeline_id)
+          review = review_signal(cfg, iid, body, false)
 
           {:ok,
            %{
@@ -182,8 +183,8 @@ defmodule Wardmast.Mergers.Gitlab do
              title: Map.get(body, "title"),
              body: Map.get(body, "description"),
              approved: approved?(body),
-             changes_requested: false,
-             latest_review_id: nil,
+             changes_requested: review.changes_requested,
+             latest_review_id: review.latest_review_id,
              pipeline: pipeline,
              pipeline_id: pipeline_id,
              # No pipeline on a head that needs one is not green CI, whatever the
@@ -1306,13 +1307,200 @@ defmodule Wardmast.Mergers.Gitlab do
     end
   end
 
-  # GitLab has no native "request changes" review verb (see submit_review/4),
-  # so there is no distinct CHANGES_REQUESTED signal to ingest. The auto-revise
-  # path is GitHub-shaped (bd-95lsjb); GitLab no-ops here rather than guessing a
-  # verdict from discussion notes.
+  # Aggregated human review feedback for the auto-revise path (bd-95lsjb,
+  # #1520). `changes_requested` is true when a reviewer's state on
+  # `GET /merge_requests/:iid/reviewers` is `requested_changes`; on instances
+  # without reviewer state, the opt-in `changes_requested_from_discussions`
+  # config flag treats an unresolved discussion from a non-author as changes
+  # requested. See `review_signal/4`.
   @impl true
-  def list_review_feedback(mr_ref) when is_binary(mr_ref),
-    do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+  def list_review_feedback(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, mr} <- request(cfg, :get, "/merge_requests/#{iid}", []) |> handle_json() do
+      {:ok, review_signal(cfg, iid, mr, true)}
+    end
+  end
+
+  # ---- changes-requested signal (#1520) -------------------------------------
+  #
+  # GitLab's MR reviewers API (`GET /merge_requests/:iid/reviewers`) returns a
+  # per-reviewer `state`; `requested_changes` is GitLab's "Request changes"
+  # verdict. That is the primary signal. The reviewers call is skipped when the
+  # MR body lists no reviewers, and any failure of it degrades to "no signal"
+  # (a transient API error must not fail an MR poll).
+  #
+  # `latest_review_id` is the debounce key MergeQueue/PRPatrol dedupe on. GitLab
+  # exposes no review id, so it is built from the requesting reviewers' user ids
+  # and the time each was added to the MR — stable across new commits (a revise
+  # push must not look like a fresh review and loop), different if a reviewer is
+  # removed and re-added.
+  #
+  # Known limitation: `created_at` is when the reviewer was added, not when
+  # their state last changed, and the reviewers API returns no state timestamp.
+  # So if the same reviewer goes `requested_changes` -> `reviewed` ->
+  # `requested_changes` (e.g. after a revise push) the id is unchanged and the
+  # MergeQueue `last_handled_review_id` debounce / PRPatrol fingerprint will not
+  # re-trigger a second revise for that reviewer. GitHub mints a new review id
+  # per submission and does re-trigger. Removing and re-adding the reviewer, or
+  # (with the fallback flag on) a new non-author note, produces a new id.
+  #
+  # The fallback (opt-in `changes_requested_from_discussions`): an unresolved
+  # discussion started by someone other than the MR author. Its id is the
+  # highest note id written by a non-author, so a new reviewer note re-triggers
+  # but the fleet's own replies on the thread do not.
+  #
+  # `with_feedback?` also fetches the discussions to build `:feedback` (only
+  # `list_review_feedback/1` needs them); `get/1` fetches discussions only when
+  # the fallback must decide.
+  defp review_signal(cfg, iid, mr, with_feedback?) do
+    requesting =
+      cfg
+      |> mr_reviewers(iid, mr)
+      |> Enum.filter(&(Map.get(&1, "state") == "requested_changes"))
+
+    fallback? = cfg.changes_requested_from_discussions and requesting == []
+    want_threads? = fallback? or (with_feedback? and (requesting != [] or fallback_enabled?(cfg)))
+    open_threads = if want_threads?, do: nonauthor_open_discussions(cfg, iid, mr), else: []
+
+    {changes_requested, latest_review_id} =
+      review_verdict(requesting, if(fallback?, do: open_threads, else: []), mr)
+
+    feedback =
+      if with_feedback?,
+        do:
+          Enum.map(requesting, &reviewer_feedback_item/1) ++
+            Enum.map(open_threads, &discussion_feedback_item/1),
+        else: []
+
+    %{
+      changes_requested: changes_requested,
+      latest_review_id: latest_review_id,
+      feedback: feedback
+    }
+  end
+
+  defp fallback_enabled?(cfg), do: cfg.changes_requested_from_discussions
+
+  # Reviewer state wins; the discussion fallback only speaks when no reviewer
+  # requested changes (`fallback_threads` is `[]` unless the flag is on).
+  defp review_verdict([_ | _] = requesting, _fallback_threads, _mr),
+    do: {true, reviewer_review_id(requesting)}
+
+  defp review_verdict([], [_ | _] = fallback_threads, mr),
+    do: {true, discussion_review_id(fallback_threads, mr)}
+
+  defp review_verdict([], [], _mr), do: {false, nil}
+
+  defp mr_reviewers(cfg, iid, %{"reviewers" => [_ | _]}) do
+    case request(cfg, :get, "/merge_requests/#{iid}/reviewers", []) |> handle_json() do
+      {:ok, reviewers} when is_list(reviewers) -> reviewers
+      _ -> []
+    end
+  end
+
+  defp mr_reviewers(_cfg, _iid, _mr), do: []
+
+  defp nonauthor_open_discussions(cfg, iid, mr) do
+    author = get_in(mr, ["author", "username"])
+
+    case request(cfg, :get, "/merge_requests/#{iid}/discussions", params: [per_page: 100])
+         |> handle_json() do
+      {:ok, discussions} ->
+        discussions
+        |> List.wrap()
+        |> Enum.filter(&unresolved_discussion?/1)
+        |> Enum.map(&normalize_discussion/1)
+        |> Enum.reject(&(&1.author == author and not is_nil(author)))
+
+      _ ->
+        []
+    end
+  end
+
+  defp reviewer_review_id(requesting) do
+    ids =
+      requesting
+      |> Enum.map(fn r ->
+        "#{get_in(r, ["user", "id"])}@#{Map.get(r, "created_at")}"
+      end)
+      |> Enum.sort()
+
+    "reviewer:" <> Enum.join(ids, ",")
+  end
+
+  defp discussion_review_id(threads, mr) do
+    author = get_in(mr, ["author", "username"])
+
+    max_note =
+      threads
+      |> Enum.flat_map(& &1.comments)
+      |> Enum.reject(&(&1.author == author and not is_nil(author)))
+      |> Enum.map(& &1.id)
+      |> Enum.filter(&is_integer/1)
+      |> Enum.max(fn -> 0 end)
+
+    "discussion:#{max_note}"
+  end
+
+  defp reviewer_feedback_item(reviewer) do
+    %{
+      kind: :review,
+      author: get_in(reviewer, ["user", "username"]),
+      state: "CHANGES_REQUESTED",
+      path: nil,
+      line: nil,
+      body: ""
+    }
+  end
+
+  defp discussion_feedback_item(thread) do
+    %{
+      kind: :comment,
+      author: thread.author,
+      state: nil,
+      path: thread.path,
+      line: thread.line,
+      body: thread.body || ""
+    }
+  end
+
+  # The settled, REQUIRED failing checks on the MR's head pipeline (#1520) —
+  # PRPatrol's failed-required-check trigger. GitLab has no GitHub-style
+  # "required check" flag; a job is required unless it is `allow_failure: true`
+  # (it never reddens the pipeline) or the workspace marked it external
+  # (`external_jobs` in the merge config). Only the pipeline on the MR's current
+  # head sha is read, so a previous head's red does not count.
+  @impl true
+  def list_required_check_failures(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, mr} <- request(cfg, :get, "/merge_requests/#{iid}", []) |> handle_json(),
+         {:ok, pipelines} <- mr_pipelines(cfg, iid) do
+      case head_pipeline_candidates(pipelines, Map.get(mr, "sha")) do
+        [%{"id" => id} | _] ->
+          with {:ok, jobs} <- pipeline_jobs(cfg, id) do
+            {:ok, required_job_failures(jobs, cfg.external_jobs)}
+          end
+
+        [] ->
+          {:ok, []}
+      end
+    end
+  end
+
+  defp required_job_failures(jobs, external) do
+    for job <- jobs,
+        Map.get(job, "status") == "failed",
+        Map.get(job, "allow_failure") != true,
+        Map.get(job, "name") not in external do
+      %{
+        name: Map.get(job, "name") || "",
+        summary: Map.get(job, "failure_reason") || "failed",
+        url: Map.get(job, "web_url")
+      }
+    end
+  end
 
   # The unresolved review threads on an MR — the provider-agnostic "open review
   # feedback" signal PRPatrol triggers on (bd-823q7e). GitLab models a review
