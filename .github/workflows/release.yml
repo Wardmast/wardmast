@@ -543,6 +543,7 @@ jobs:
 
       - name: Build and push the worker base
         id: base
+        shell: bash
         run: |
           REF="${WORKER_BASE}:${BASE_HASH}"
           # The tag is the content hash of the pinned Containerfile: an existing tag is
@@ -570,7 +571,9 @@ jobs:
             | tee -a "$GITHUB_STEP_SUMMARY"
           docker tag worker-base-smoke "${REF}"
           docker push "${REF}" | tee "${RUNNER_TEMP}/base-push.log"
-          sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/digest=\1/p' "${RUNNER_TEMP}/base-push.log" | tail -n1 >> "$GITHUB_OUTPUT"
+          digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' "${RUNNER_TEMP}/base-push.log" | tail -n1)"
+          test -n "${digest}" || { echo "docker push printed no digest" >&2; exit 1; }
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Install Helm
         uses: azure/setup-helm@v4
