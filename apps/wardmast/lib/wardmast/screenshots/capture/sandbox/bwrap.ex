@@ -337,8 +337,9 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
   # it gets back is the network; the filesystem is an app command's.
   @spec fetch_argv([String.t()], map(), host()) :: [String.t()]
   def fetch_argv(argv, box, host) do
+    # With the read-only paths: after the private /run, which would otherwise hide it again.
     mounts = app_mounts(box)
-    mounts = %{mounts | system_try: mounts.system_try ++ List.wrap(Map.get(host, :resolv_conf))}
+    mounts = %{mounts | readonly: mounts.readonly ++ List.wrap(Map.get(host, :resolv_conf))}
 
     [host.tools.bwrap | sandbox_args(mounts, host, network: true)] ++
       ["--chdir", box.checkout, "--" | argv]

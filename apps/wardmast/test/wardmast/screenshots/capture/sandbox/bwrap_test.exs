@@ -313,11 +313,15 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.BwrapTest do
       host = Map.put(@host, :resolv_conf, "/run/systemd/resolve/stub-resolv.conf")
       argv = Bwrap.fetch_argv(["true"], @box, host)
 
-      assert seq?(argv, [
-               "--ro-bind-try",
-               "/run/systemd/resolve/stub-resolv.conf",
-               "/run/systemd/resolve/stub-resolv.conf"
-             ])
+      bind = [
+        "--ro-bind-try",
+        "/run/systemd/resolve/stub-resolv.conf",
+        "/run/systemd/resolve/stub-resolv.conf"
+      ]
+
+      assert seq?(argv, bind)
+      # After the private /run, or that tmpfs would hide it again.
+      assert index(argv, bind) > index(argv, ["--tmpfs", "/run"])
 
       refute seq?(Bwrap.command_argv(["true"], @box, nil, host), [
                "--ro-bind-try",
