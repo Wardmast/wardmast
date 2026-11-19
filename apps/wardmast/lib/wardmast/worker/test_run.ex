@@ -86,8 +86,14 @@ defmodule Wardmast.Worker.TestRun do
           {:ok, nothing_to_run()}
 
         paths ->
-          with :ok <- bring_up_test_env(exec, timeout_s),
-               do: execute(exec, paths, timeout_s, opts)
+          started = System.monotonic_time(:second)
+
+          # Bring-up has its own cap and what it used comes off the test run's
+          # budget, so one call never outlasts `max_timeout_s/0`.
+          with :ok <- bring_up_test_env(exec, min(timeout_s, @env_timeout_s)) do
+            used = System.monotonic_time(:second) - started
+            execute(exec, paths, max(timeout_s - used, 1), opts)
+          end
       end
     end
   end
@@ -252,6 +258,7 @@ defmodule Wardmast.Worker.TestRun do
   # -- the repo's test env -----------------------------------------------------
 
   @test_env_script "scripts/test-env.sh"
+  @env_timeout_s 300
 
   # A repo that needs a per-worker test env (Postgres, S3, a generated
   # `config/env.exs`) ships `scripts/test-env.sh`. Bringing it up here, in the
@@ -262,7 +269,7 @@ defmodule Wardmast.Worker.TestRun do
   defp bring_up_test_env(exec, timeout_s) do
     command = """
     [ -f #{@test_env_script} ] || exit 0
-    sh #{@test_env_script} up 2>&1
+    if [ -x #{@test_env_script} ]; then ./#{@test_env_script} up 2>&1; else bash #{@test_env_script} up 2>&1; fi
     """
 
     case exec.(command, timeout_s) do

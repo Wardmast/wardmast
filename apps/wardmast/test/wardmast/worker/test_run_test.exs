@@ -307,6 +307,25 @@ defmodule Wardmast.Worker.TestRunTest do
       assert File.read!(marker) == "up\n"
     end
 
+    test "honours the script's bash shebang (bash-only syntax works)", ctx do
+      File.mkdir_p!(Path.join(ctx.repo, "scripts"))
+      File.write!(ctx.out, "1 test, 0 failures\n")
+      marker = Path.join(ctx.tmp, "env-bash")
+
+      File.write!(Path.join(ctx.repo, "scripts/test-env.sh"), """
+      #!/usr/bin/env bash
+      arr=(one two)
+      [[ "${arr[1]}" == two ]] && echo "$1" > "#{marker}"
+      """)
+
+      File.chmod!(Path.join(ctx.repo, "scripts/test-env.sh"), 0o755)
+
+      assert {:ok, %{ran?: true}} =
+               TestRun.run(runner(ctx), %{paths: ["apps/core/test/b_test.exs"]}, mix: ctx.fake)
+
+      assert File.read!(marker) == "up\n"
+    end
+
     test "a repo without the script runs as before", ctx do
       File.write!(ctx.out, "1 test, 0 failures\n")
 
