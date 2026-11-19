@@ -258,6 +258,21 @@ defmodule Wardmast.Mergers.Merger do
   # `description`; GitHub `PATCH /pulls/:n` `body`) using the merger's own
   # credential. Optional — see `Wardmast.Mergers.update_description/3`.
   @callback update_description(mr_ref, body :: String.t()) :: :ok | {:error, term()}
+
+  @typedoc "An image to host: a file `name` (unique within the set) and its bytes."
+  @type hosted_image :: %{required(:name) => String.t(), required(:data) => binary()}
+
+  # Host before/after screenshots so the PR/MR description can render them
+  # inline (`docs/design/ui-screenshot-capture.md` §7). GitLab: the project
+  # uploads API. GitHub (no upload API): an orphan assets branch, images
+  # referenced by commit-pinned `blob/<sha>/…?raw=true` URLs. Returns a
+  # per-image `{:ok, url} | {:error, reason}` map, or `{:error, reason}` when
+  # the whole set cannot be hosted (`:public_repo_blocked` for a public/unknown
+  # repo without `opts.public_repo_ok`; a refused push). Optional — see
+  # `Wardmast.Mergers.host_images/4`. `opts`: `:public_repo_ok`, `:task_id`,
+  # `:head_sha`, `:assets_branch` (GitHub).
+  @callback host_images(mr_ref, [hosted_image()], opts :: map()) ::
+              {:ok, %{String.t() => {:ok, String.t()} | {:error, term()}}} | {:error, term()}
   @callback request_review(mr_ref, reviewers :: [term()]) :: :ok | {:error, term()}
   @callback link_for(mr_ref) :: String.t()
 
@@ -812,6 +827,7 @@ defmodule Wardmast.Mergers.Merger do
 
   @optional_callbacks prepare: 2,
                       update_description: 2,
+                      host_images: 3,
                       update_branch: 1,
                       update_branch: 2,
                       ancestor?: 3,

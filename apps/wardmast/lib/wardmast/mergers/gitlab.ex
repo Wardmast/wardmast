@@ -66,6 +66,7 @@ defmodule Wardmast.Mergers.Gitlab do
   alias Wardmast.Mergers.CIQueue
   alias Wardmast.Mergers.CIRerun
   alias Wardmast.Mergers.Gitlab.{Budget, Config, Endpoint, Error}
+  alias Wardmast.Mergers.ImageHosting
 
   @stub_name Wardmast.Mergers.Gitlab.HTTP
 
@@ -952,6 +953,46 @@ defmodule Wardmast.Mergers.Gitlab do
          {:ok, iid} <- iid_from_ref(mr_ref) do
       request(cfg, :put, "/merge_requests/#{iid}", json: %{"description" => body})
       |> handle_ok()
+    end
+  end
+
+  @impl true
+  def host_images(mr_ref, images, opts) when is_binary(mr_ref) and is_list(images) do
+    with {:ok, cfg} <- cfg_for_ref(mr_ref),
+         :ok <- check_upload_visibility(cfg, opts) do
+      {:ok, Map.new(images, fn image -> {image.name, upload_image(cfg, image)} end)}
+    end
+  end
+
+  # Public (or unknown/unreadable) projects fail closed: an uploaded image is
+  # world-readable and irrevocable in practice (design §7.4). `internal` is
+  # treated like `private`.
+  defp check_upload_visibility(cfg, opts) do
+    if Map.get(opts, :public_repo_ok, false) do
+      :ok
+    else
+      case cfg |> request(:get, "", []) |> handle_json() do
+        {:ok, %{"visibility" => v}} when v in ["private", "internal"] -> :ok
+        _ -> {:error, :public_repo_blocked}
+      end
+    end
+  end
+
+  # `POST /projects/:id/uploads` (multipart `file`). The client's default
+  # `content-type: application/json` would clobber the multipart boundary, so
+  # it is dropped and Req sets the right one.
+  defp upload_image(cfg, %{name: name, data: data}) do
+    client = client(cfg)
+    headers = Enum.reject(client.headers, fn {k, _} -> String.downcase(k) == "content-type" end)
+    file = {data, filename: name, content_type: ImageHosting.content_type(name)}
+
+    result =
+      Client.request(client, :post, "/uploads", headers: headers, form_multipart: [file: file])
+
+    case handle_json(result) do
+      {:ok, %{"url" => url}} when is_binary(url) and url != "" -> {:ok, url}
+      {:ok, _} -> {:error, "GitLab upload response carried no url"}
+      {:error, reason} -> {:error, reason}
     end
   end
 
