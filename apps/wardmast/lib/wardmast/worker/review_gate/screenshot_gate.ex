@@ -8,6 +8,7 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
   |---|---|
   | the change does not touch `ui_paths` | proceeds, nothing added (today's behaviour) |
   | pairs were captured, or the worker declared a `skip` | proceeds, the pairs (file paths) or the skip reason go into the reviewer's brief |
+  | this host cannot sandbox the capture ("capture needs a sandbox", bd-bhrsdv) | proceeds; the reviewer is told no screenshots were taken and why, and that it is not the worker's doing. Nothing was booted |
   | a **worker fault**: no manifest, an invalid manifest, a named route that errors | sends the change back to the worker with an instruction (`{:send_back, findings}`) |
   | an **infrastructure fault**: the app would not boot, no Chromium, the checkout or diff failed, the budget ran out | escalates to the coordinator (`{:escalate, message}`) and does **not** loop the worker |
 
@@ -134,6 +135,17 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
      "The worker declared a screenshots **skip** for this UI change: #{inspect(reason)}. " <>
        "No screenshots were taken. Judge whether that skip is honest: if the diff changes " <>
        "what a user sees, a lazy skip is a finding."}
+  end
+
+  # The capture never boots a change's app unsandboxed (bd-bhrsdv). Not the worker's fault, so not
+  # a send-back; not a broken capture either, so no escalation per change: the reviewer judges the
+  # diff alone, knowing why.
+  def route({:skipped, {:no_sandbox, reason}}) do
+    {:proceed,
+     "No screenshots were taken: #{reason}. Arbiter only boots a change's app inside a " <>
+       "sandbox, and this host cannot provide one; that is the host's setup, not the worker's " <>
+       "doing, so do not hold the missing screenshots against the change. Judge the visual " <>
+       "result from the diff alone."}
   end
 
   def route({:ok, result}), do: {:proceed, render_result(result)}

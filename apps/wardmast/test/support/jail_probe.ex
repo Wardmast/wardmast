@@ -16,13 +16,16 @@ defmodule Wardmast.Test.JailProbe do
 
   @doc """
   `nil` when the jail runs on this host, else the reason to skip. Raises instead
-  when `WARDMAST_TEST_REQUIRE_BWRAP=1`.
+  when `WARDMAST_TEST_REQUIRE_BWRAP=1`. `what` names the bwrap sandbox the probe
+  was for (the write jail by default; the capture sandbox passes its own).
   """
-  @spec skip_reason(:ok | {:error, term()}) :: String.t() | nil
-  def skip_reason(:ok), do: nil
+  @spec skip_reason(:ok | {:error, term()}, String.t()) :: String.t() | nil
+  def skip_reason(probe, what \\ "bwrap write jail")
 
-  def skip_reason(probe) do
-    reason = "bwrap write jail unavailable on this host: #{inspect(probe)}"
+  def skip_reason(:ok, _what), do: nil
+
+  def skip_reason(probe, what) do
+    reason = "#{what} unavailable on this host: #{inspect(probe)}"
 
     if System.get_env(@require_env) == "1",
       do: raise("#{@require_env}=1, but the real-bwrap tests cannot run: " <> reason),

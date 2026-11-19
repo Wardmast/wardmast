@@ -1,26 +1,34 @@
 defmodule Wardmast.Screenshots.Capture.Booter.Command do
   @moduledoc """
   The real `Wardmast.Screenshots.Capture.Booter`: runs the configured commands in the extracted
-  source tree and waits for the app to answer.
+  source tree, inside the capture's sandbox, and waits for the app to answer.
 
   Per boot, in order: `setup_cmd`, `seed_cmd`, the named seed's command (when a shot asked for
   one), then `start_cmd` (long-running) until `ready.path` answers (`below_500` or `2xx`).
   Each setup/seed command is bounded by `limits.setup_seconds` / `limits.seed_seconds`, the
-  readiness wait by `ready.timeout_seconds`. Every command runs under
-  `Wardmast.Screenshots.Capture.AppProcess` with an environment built from nothing: `PATH`,
-  `HOME`, `LANG`, `TMPDIR` (the boot's scratch dir), the config's `env` and the port variable. The
-  operator's own environment (database URLs, provider and forge credentials, proxies) is never
-  inherited. Templates `{{port}}`, `{{role}}`, `{{scratch}}`, `{{checkout}}`, `{{task_id}}`
-  are rendered in commands, `env` values and `base_url`.
+  readiness wait by `ready.timeout_seconds`.
 
-  The port is a free one picked from `port_range` on this host. Isolating the boot from the host
-  network is the pass's sandbox (pod, design §2), not this module's job.
+  Every command runs in `spec.sandbox` (a `Wardmast.Screenshots.Capture.Sandbox`; in production
+  `Sandbox.Bwrap`: no network, and of the host only its system directories, the checkout, the
+  boot's scratch and any `sandbox.readonly_paths`), under
+  `Wardmast.Screenshots.Capture.AppProcess`, with an environment built from nothing: `PATH`,
+  `HOME` (`<scratch>/home`), `LANG`, `TMPDIR` (the boot's scratch dir), `TZ`, the config's `env`
+  and the port variable. The operator's own environment (database URLs, provider and forge
+  credentials, proxies) is never inherited. A spec without a sandbox runs nothing
+  (`{:error, {:start, _}}`): there is no unsandboxed boot. Templates `{{port}}`, `{{role}}`,
+  `{{scratch}}`, `{{checkout}}`, `{{task_id}}` are rendered in commands, `env` values and
+  `base_url`.
+
+  The app listens on `127.0.0.1:<port>` (`port` picked from `port_range`) inside the sandbox,
+  which makes it reachable (`expose/2`); the readiness probe goes through the sandbox's `reach/1`
+  and never reads a response body. The boot result carries the exposed `app`, which the shooter
+  needs to give the browser its way to it.
   """
 
   @behaviour Wardmast.Screenshots.Capture.Booter
 
   alias Wardmast.Screenshots.Capture.AppProcess
-  alias Wardmast.Worker.ReleaseEnv
+  alias Wardmast.Screenshots.Capture.Sandbox
 
   @probe_ms 250
 
@@ -28,7 +36,9 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
   def boot(spec) do
     cfg = spec.config
 
-    with {:ok, port} <- free_port(cfg.port_range) do
+    with {:ok, sandbox} <- sandbox(spec),
+         {:ok, port} <- free_port(cfg.port_range),
+         {:ok, home} <- home(spec) do
       vars = %{
         "port" => port,
         "role" => spec.role,
@@ -37,97 +47,171 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
         "task_id" => spec.task_id
       }
 
-      env = build_env(cfg, spec, vars, port)
+      run = %{
+        sandbox: sandbox,
+        box: %{
+          checkout: spec.checkout,
+          scratch: spec.scratch,
+          readonly_paths: readonly_paths(cfg)
+        },
+        checkout: spec.checkout,
+        vars: vars,
+        env: build_env(cfg, home, spec, vars, port)
+      }
+
       limits = cfg.limits
 
-      with :ok <- run_once(:setup, cfg.setup_cmd, spec, vars, env, limits["setup_seconds"] || 600),
-           :ok <- run_once(:seed, cfg.seed_cmd, spec, vars, env, limits["seed_seconds"] || 120),
+      with :ok <- run_once(run, :setup, cfg.setup_cmd, limits["setup_seconds"] || 600),
+           :ok <- run_once(run, :seed, cfg.seed_cmd, limits["seed_seconds"] || 120),
            :ok <-
-             run_once(
-               :seed,
-               named_seed(cfg, spec.seed),
-               spec,
-               vars,
-               env,
-               limits["seed_seconds"] || 120
-             ) do
-        start_app(cfg, spec, vars, env, port)
+             run_once(run, :seed, named_seed(cfg, spec.seed), limits["seed_seconds"] || 120) do
+        start_app(run, cfg, port)
       end
     end
   end
 
   @impl true
-  def stop(_spec, %{app: app}) do
-    AppProcess.stop(app)
+  def stop(_spec, %{process: process} = handle) do
+    AppProcess.stop(process)
+
+    case handle do
+      %{sandbox: sandbox, exposed: exposed} -> sandbox.release(exposed)
+      _ -> :ok
+    end
+
+    :ok
+  end
+
+  defp sandbox(%{sandbox: sandbox}) when is_atom(sandbox) and not is_nil(sandbox),
+    do: {:ok, sandbox}
+
+  defp sandbox(_spec),
+    do:
+      {:error, {:start, "no capture sandbox was given, and the app is never booted unsandboxed"}}
+
+  defp home(spec) do
+    home = Path.join(spec.scratch, "home")
+
+    case File.mkdir_p(home) do
+      :ok ->
+        {:ok, home}
+
+      {:error, reason} ->
+        {:error,
+         {:setup, "could not create the app's HOME #{home}: #{:file.format_error(reason)}"}}
+    end
+  end
+
+  defp readonly_paths(cfg) do
+    case Map.get(cfg, :sandbox) do
+      %{"readonly_paths" => paths} when is_list(paths) -> paths
+      _ -> []
+    end
   end
 
   defp named_seed(_cfg, nil), do: nil
   defp named_seed(cfg, seed), do: Map.get(cfg.seeds, seed)
 
-  defp run_once(_phase, nil, _spec, _vars, _env, _timeout_s), do: :ok
+  defp run_once(_run, _phase, nil, _timeout_s), do: :ok
 
-  defp run_once(phase, command, spec, vars, env, timeout_s) do
-    {:ok, app} =
-      AppProcess.start_link(%{command: render(command, vars), cd: spec.checkout, env: env})
+  defp run_once(run, phase, command, timeout_s) do
+    case start(run, command, nil) do
+      {:ok, process} ->
+        try do
+          case AppProcess.await_exit(process, timeout_s * 1000) do
+            {:exited, 0, _tail} ->
+              :ok
 
-    try do
-      case AppProcess.await_exit(app, timeout_s * 1000) do
-        {:exited, 0, _tail} ->
-          :ok
+            {:exited, code, tail} ->
+              {:error, {phase, "`#{command}` exited with status #{code}: #{tail}"}}
 
-        {:exited, code, tail} ->
-          {:error, {phase, "`#{command}` exited with status #{code}: #{tail}"}}
-
-        {:timeout, tail} ->
-          {:error, {phase, "`#{command}` did not finish in #{timeout_s} s: #{tail}"}}
-      end
-    after
-      AppProcess.stop(app)
-    end
-  end
-
-  defp start_app(cfg, spec, vars, env, port) do
-    case cfg.start_cmd do
-      nil ->
-        {:error, {:start, "no start_cmd is configured"}}
-
-      command ->
-        {:ok, app} =
-          AppProcess.start_link(%{command: render(command, vars), cd: spec.checkout, env: env})
-
-        base_url = String.trim_trailing(render(cfg.base_url, vars), "/")
-
-        case wait_ready(app, base_url, cfg.ready) do
-          :ok ->
-            {:ok, %{handle: %{app: app, port: port}, base_url: base_url}}
-
-          {:error, _} = error ->
-            AppProcess.stop(app)
-            error
+            {:timeout, tail} ->
+              {:error, {phase, "`#{command}` did not finish in #{timeout_s} s: #{tail}"}}
+          end
+        after
+          AppProcess.stop(process)
         end
+
+      {:error, reason} ->
+        {:error, {phase, "the capture sandbox could not run `#{command}`: #{why(run, reason)}"}}
     end
   end
 
-  defp wait_ready(app, base_url, ready) do
+  # `command` wrapped by the sandbox, run with exactly the boot's environment.
+  defp start(run, command, exposed) do
+    argv = [System.find_executable("sh") || "/bin/sh", "-c", render(command, run.vars)]
+
+    with {:ok, boxed} <- run.sandbox.command(argv, run.box, exposed) do
+      AppProcess.start_link(%{argv: boxed, cd: run.checkout, env: run.env})
+    end
+  end
+
+  defp start_app(_run, %{start_cmd: nil}, _port),
+    do: {:error, {:start, "no start_cmd is configured"}}
+
+  defp start_app(run, cfg, port) do
+    with {:ok, exposed} <- expose(run, port),
+         {:ok, process} <- start_exposed(run, cfg.start_cmd, exposed) do
+      base_url = String.trim_trailing(render(cfg.base_url, run.vars), "/")
+
+      case wait_ready(process, base_url, cfg.ready, run.sandbox.reach(exposed)) do
+        :ok ->
+          {:ok,
+           %{
+             handle: %{process: process, sandbox: run.sandbox, exposed: exposed},
+             base_url: base_url,
+             app: exposed
+           }}
+
+        {:error, _} = error ->
+          AppProcess.stop(process)
+          run.sandbox.release(exposed)
+          error
+      end
+    end
+  end
+
+  defp expose(run, port) do
+    case run.sandbox.expose(run.box, port) do
+      {:ok, exposed} ->
+        {:ok, exposed}
+
+      {:error, reason} ->
+        {:error, {:start, "the capture sandbox could not expose the app: #{why(run, reason)}"}}
+    end
+  end
+
+  defp start_exposed(run, command, exposed) do
+    case start(run, command, exposed) do
+      {:ok, process} ->
+        {:ok, process}
+
+      {:error, reason} ->
+        run.sandbox.release(exposed)
+        {:error, {:start, "the capture sandbox could not run `#{command}`: #{why(run, reason)}"}}
+    end
+  end
+
+  defp why(run, reason) do
+    run.sandbox.describe(reason)
+  rescue
+    _ -> inspect(reason)
+  end
+
+  defp wait_ready(process, base_url, ready, reach) do
     timeout_s = ready["timeout_seconds"] || 120
     deadline = System.monotonic_time(:millisecond) + timeout_s * 1000
-
-    do_wait(
-      app,
-      base_url <> (ready["path"] || "/"),
-      ready["expect"] || "below_500",
-      deadline,
-      timeout_s
-    )
+    url = base_url <> (ready["path"] || "/")
+    do_wait(process, url, ready["expect"] || "below_500", {deadline, timeout_s}, reach)
   end
 
-  defp do_wait(app, url, expect, deadline, timeout_s) do
-    case AppProcess.status(app) do
+  defp do_wait(process, url, expect, {deadline, timeout_s} = limit, reach) do
+    case AppProcess.status(process) do
       {{:exited, code}, tail} ->
         {:error, {:start, "the app exited with status #{code} before it was ready: #{tail}"}}
 
       {:running, tail} ->
-        case probe(url, expect) do
+        case probe(url, expect, reach) do
           :ready ->
             :ok
 
@@ -137,19 +221,16 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
                {:ready, "not ready after #{timeout_s} s (GET #{url}: #{detail}): #{tail}"}}
             else
               Process.sleep(@probe_ms)
-              do_wait(app, url, expect, deadline, timeout_s)
+              do_wait(process, url, expect, limit, reach)
             end
         end
     end
   end
 
-  defp probe(url, expect) do
-    case Req.get(url,
-           retry: false,
-           redirect: false,
-           receive_timeout: 3_000,
-           connect_options: [timeout: 2_000]
-         ) do
+  defp probe(url, expect, reach) do
+    opts = [retry: false, redirect: false, receive_timeout: 3_000, into: &status_only/2] ++ reach
+
+    case Req.get(url, opts) do
       {:ok, %{status: status}} ->
         if ready_status?(status, expect), do: :ready, else: {:not_ready, "status #{status}"}
 
@@ -158,16 +239,19 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
     end
   end
 
+  # Only the status matters: an untrusted app's body is never read into the server.
+  defp status_only({:data, _chunk}, acc), do: {:halt, acc}
+
   defp ready_status?(status, "2xx"), do: status in 200..299
   defp ready_status?(status, _below_500), do: status < 500
 
   # ── environment, ports, templates ───────────────────────────────────────
 
-  defp build_env(cfg, spec, vars, port) do
+  defp build_env(cfg, home, spec, vars, port) do
     base =
       [
-        {"PATH", clean_path()},
-        {"HOME", System.get_env("HOME") || spec.scratch},
+        {"PATH", Sandbox.path()},
+        {"HOME", home},
         {"LANG", "C.UTF-8"},
         {"TMPDIR", spec.scratch},
         {"TZ", "UTC"}
@@ -175,17 +259,6 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
 
     configured = Enum.map(cfg.env, fn {k, v} -> {k, render(v, vars)} end)
     base ++ configured ++ [{cfg.port_env, Integer.to_string(port)}]
-  end
-
-  # The VM's PATH with a release's own `erts-*/bin` and `bin` dirs removed (`ReleaseEnv` knows
-  # them), so `mix`/`elixir` in the app's setup/start command do not resolve `erl` from
-  # Wardmast's ERTS. `env -i PATH=...` replaces the scrubbed outer env, so the cleaning has to
-  # happen here.
-  defp clean_path do
-    case List.keyfind(ReleaseEnv.port_env(), "PATH", 0) do
-      {"PATH", path} when is_binary(path) -> path
-      _ -> System.get_env("PATH") || "/usr/local/bin:/usr/bin:/bin"
-    end
   end
 
   defp free_port({lo, hi}) do

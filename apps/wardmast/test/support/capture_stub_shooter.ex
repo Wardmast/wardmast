@@ -3,12 +3,20 @@ defmodule Wardmast.Test.CaptureStubShooter do
   A `Wardmast.Screenshots.Capture.Shooter` that answers from `ctx.routes`, a
   `%{role => %{path => status}}` (a path not listed is a 404) and writes `"png:<role>:<path>"`
   as the image. `ctx.shoot_error` returns that error for every shot; `ctx.shoot_raise` raises.
+  Each shot also reports the sandbox, the boot's app and the per-shot dir it was handed.
   """
   @behaviour Wardmast.Screenshots.Capture.Shooter
 
   @impl true
   def shoot(%{ctx: ctx} = spec) do
     send(ctx.test_pid, {:shoot, spec.role, spec.path, spec.entry.viewport, spec.entry.theme})
+    scratch = Map.get(spec, :scratch)
+
+    send(
+      ctx.test_pid,
+      {:shot_env, spec.role, Map.get(spec, :sandbox), Map.get(spec, :app), scratch,
+       is_binary(scratch) and File.dir?(scratch)}
+    )
 
     cond do
       msg = ctx[:shoot_raise] ->

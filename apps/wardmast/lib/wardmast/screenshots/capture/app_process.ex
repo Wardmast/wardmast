@@ -1,14 +1,17 @@
 defmodule Wardmast.Screenshots.Capture.AppProcess do
   @moduledoc """
   Owns one OS process of a capture boot (a setup script, a seed command or the app itself): runs
-  `sh -c <command>` in its own process group with an **empty** environment plus the given pairs,
-  keeps the last #{4096} bytes of its output, and kills the whole group on `stop/1` or when its
-  owner dies (it is linked to the process that started it).
+  `argv` (the command as the capture sandbox wrapped it, executable first; see
+  `Wardmast.Screenshots.Capture.Sandbox.command/3`) in its own process group with an **empty**
+  environment plus the given pairs, keeps the last #{4096} bytes of its output, and kills the
+  whole group on `stop/1` or when its owner dies (it is linked to the process that started it).
 
   The group is what makes `stop/1` reliable: `mix phx.server`'s BEAM and any watcher it spawned
   share the shell's group, so one signal reaches them all. The shell is made a group leader by a
   tiny perl `setpgrp` shim when it does not already lead one (the `Wardmast.Preview.Runner`
   technique); without perl the descendant walk (`Wardmast.Worker.OsProcess`) is the fallback.
+  Under the bwrap sandbox the group holds bwrap itself, and its death takes the sandbox's whole
+  pid namespace with it (`--die-with-parent`).
   """
 
   use GenServer, restart: :temporary
@@ -22,8 +25,8 @@ defmodule Wardmast.Screenshots.Capture.AppProcess do
 
   @type status :: :running | {:exited, integer()}
 
-  @doc "Start `command` (`sh -c`) in `cd` with exactly `env` (`[{name, value}]`) as its environment."
-  @spec start_link(%{command: String.t(), cd: String.t(), env: [{String.t(), String.t()}]}) ::
+  @doc "Start `argv` in `cd` with exactly `env` (`[{name, value}]`) as its environment."
+  @spec start_link(%{argv: [String.t(), ...], cd: String.t(), env: [{String.t(), String.t()}]}) ::
           GenServer.on_start()
   def start_link(args), do: GenServer.start_link(__MODULE__, args)
 
@@ -68,11 +71,10 @@ defmodule Wardmast.Screenshots.Capture.AppProcess do
   # ── server ──────────────────────────────────────────────────────────────
 
   @impl true
-  def init(%{command: command, cd: cd, env: env}) do
+  def init(%{argv: [_ | _] = argv, cd: cd, env: env}) do
     Process.flag(:trap_exit, true)
-    sh = System.find_executable("sh") || "/bin/sh"
     envbin = System.find_executable("env") || "/usr/bin/env"
-    inner = ["-i"] ++ Enum.map(env, fn {k, v} -> "#{k}=#{v}" end) ++ [sh, "-c", command]
+    inner = ["-i"] ++ Enum.map(env, fn {k, v} -> "#{k}=#{v}" end) ++ argv
     {exec, args} = launcher(envbin, inner)
 
     port =
