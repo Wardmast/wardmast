@@ -379,6 +379,7 @@ jobs:
         run: >-
           mix test --trace
           test/wardmast/agents/qwen/jail_bwrap_test.exs
+          test/wardmast/agents/gemini/jail_bwrap_test.exs
           test/wardmast/worker/jail_readonly_paths_test.exs
           test/wardmast/worker/jail_test.exs
           test/wardmast/worker/jail_hide_test.exs

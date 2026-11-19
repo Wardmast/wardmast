@@ -51,6 +51,22 @@ defmodule Wardmast.Agents.Gemini.ConfigDir do
   user either way — this is a config-inheritance boundary, not a security
   boundary against a hostile process.
 
+  ### The posture file is read-only in the jail
+
+  Inside the agy jail the HOME is writable, but `settings.json` (the
+  `toolPermission` and `permissions.deny` posture) is bound read-only on top
+  of it (`Wardmast.Worker.Jail`'s `:readonly_paths`, wired in
+  `Wardmast.Agents.Gemini`): a write fails with EROFS, an unlink or a rename
+  over it with EBUSY, so neither agy nor a command it runs can rewrite or
+  replace its own deny list for the rest of the session or for an agy it
+  launches (bd-8oqkj2). Only the file is bound: agy writes other files in the
+  same directory (`cache/onboarding.json`), so the directory stays writable.
+  Residual, accepted: a jailed process can still move the *directory* aside
+  and create a fresh one with its own `settings.json`, which only a
+  directory-level bind would stop. The change lasts only for that spawn,
+  since `ensure/1` regenerates the file on the next one. The rest of the HOME
+  stays the config-inheritance boundary described above.
+
   ### Credentials
 
   On a host with a working freedesktop Secret Service (D-Bus), agy stores its
@@ -138,6 +154,14 @@ defmodule Wardmast.Agents.Gemini.ConfigDir do
   """
   @spec path(keyword()) :: String.t()
   def path(opts \\ []), do: Path.join(root(), key(worktree(opts)))
+
+  @doc """
+  The generated posture file (`<home>/.gemini/antigravity-cli/settings.json`)
+  for a spawn. The jail binds exactly this file read-only (bd-8oqkj2); see the
+  moduledoc's "The posture file is read-only in the jail".
+  """
+  @spec settings_path(keyword()) :: String.t()
+  def settings_path(opts \\ []), do: Path.join(path(opts), @settings_path)
 
   @doc """
   Ensure the isolated `$HOME` exists and is seeded; return `{:ok, dir}`.
