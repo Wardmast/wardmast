@@ -1,12 +1,38 @@
 defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
   @moduledoc """
   The built-in `Wardmast.Screenshots.Capture.Shooter`: one headless Chromium run per image
-  (`$ARB_CHROME`, which the worker image sets; `chromium` on `PATH` otherwise).
+  (`$ARB_CHROME`, which the worker image sets; `chromium` on `PATH` otherwise), inside the
+  capture's sandbox.
 
-  It asks the app for the route first (`GET`, no redirects followed beyond the browser's own) to
-  learn the HTTP status, because the Chromium CLI does not report it: 404 means "absent at this
-  commit", any other 4xx/5xx is a route error. It then screenshots at the viewport's size and
-  device scale factor with the theme's colour scheme, timezone UTC and `en-US`.
+  It asks the app for the route first (`GET` through the sandbox's `reach/1`, reading only the
+  status) to learn the HTTP status, because the Chromium CLI does not report it: 404 means
+  "absent at this commit", any other 4xx/5xx is a route error. It then screenshots at the
+  viewport's size and device scale factor with the theme's colour scheme, timezone UTC and
+  `en-US`.
+
+  The browser runs in a sandbox of its own (`Wardmast.Screenshots.Capture.Sandbox.browser/3`):
+  no network but its bridge to the app, nothing of the host but the system directories and the
+  browser's install directory, nothing writable but the shot's own directory (`spec.scratch`),
+  and an environment built from nothing. The image is copied from there to `out_file` only when
+  it is a regular file, so a page that took over the browser cannot get the server to read some
+  other file in its place. A spec without a sandbox (or without the boot's `app`) starts no
+  browser at all.
+
+  ## Chromium's own sandbox is off (`--no-sandbox`)
+
+  The capture sandbox is the boundary, and Chromium's would add nothing to it:
+
+    * It does not start there. Chromium's namespace sandbox needs a user namespace nested inside
+      the capture sandbox's, which hosts that restrict unprivileged user namespaces (Ubuntu's
+      AppArmor policy, a container's seccomp profile: the podman worker container refuses
+      `unshare --user`) do not allow, and its setuid helper cannot gain privileges under the
+      `no_new_privs` bwrap sets. Keeping it would make capture fail on those hosts.
+    * It protects the wrong thing here. It keeps a compromised renderer from the browser
+      process, but that process holds nothing worth taking (a fresh profile per shot, no
+      cookies, no credentials, an empty environment), and whoever wrote the page already runs
+      arbitrary code as the app, in an equivalent sandbox. What must not be reachable from the
+      page (the host's loopback, other hosts, the host's files) is out of reach because of the
+      capture sandbox, not Chromium's.
 
   This shooter only does what a command line can: a route, a viewport, a colour scheme and a theme
   `query`. A shot that needs steps, `wait_for`, a `target` element, `full_page`, `hide`, a login or
@@ -19,13 +45,28 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
 
   @behaviour Wardmast.Screenshots.Capture.Shooter
 
+  alias Wardmast.Screenshots.Capture.Sandbox
+  alias Wardmast.Worker.ReleaseEnv
+
   @impl true
   def shoot(spec) do
-    with :ok <- supported(spec),
+    with {:ok, sandbox, app} <- sandboxed(spec),
+         :ok <- supported(spec),
          {:ok, chrome} <- chrome(spec),
-         :ok <- check_status(url(spec)) do
-      run(chrome, spec)
+         :ok <- check_status(url(spec), sandbox.reach(app)) do
+      run(chrome, spec, sandbox, app)
     end
+  end
+
+  defp sandboxed(%{sandbox: sandbox, app: %{} = app, scratch: dir})
+       when is_atom(sandbox) and not is_nil(sandbox) and is_binary(dir),
+       do: {:ok, sandbox, app}
+
+  defp sandboxed(_spec) do
+    {:error,
+     {:shot,
+      "no capture sandbox (or no booted app to reach) for the browser, and Chromium is never " <>
+        "run unsandboxed"}}
   end
 
   @doc false
@@ -78,13 +119,19 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
     end
   end
 
-  defp check_status(url) do
-    case Req.get(url, retry: false, receive_timeout: 10_000, connect_options: [timeout: 5_000]) do
+  defp check_status(url, reach) do
+    opts = [retry: false, receive_timeout: 10_000, request_timeout: 20_000, into: &status_only/2]
+
+    case Req.get(url, opts ++ reach) do
       {:ok, %{status: status}} when status < 400 -> :ok
       {:ok, %{status: status}} -> {:error, {:http_status, status}}
       {:error, exception} -> {:error, {:shot, "GET #{url}: #{Exception.message(exception)}"}}
     end
   end
+
+  # Only the status matters: an untrusted app's body is never read into the server, and
+  # `request_timeout` bounds the whole exchange, so a trickled answer cannot hold the shot open.
+  defp status_only({:data, _chunk}, acc), do: {:halt, acc}
 
   @doc false
   @spec argv(map(), String.t()) :: [String.t()]
@@ -93,6 +140,9 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
 
     [
       "--headless=new",
+      # Chromium's own sandbox cannot start inside the capture sandbox on most hosts and would
+      # guard nothing the capture sandbox does not; see the moduledoc and
+      # docs/design/ui-screenshot-capture.md §2. Never run this argv outside `Sandbox.browser/3`.
       "--no-sandbox",
       "--disable-gpu",
       "--hide-scrollbars",
@@ -111,34 +161,74 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
   # binary found on PATH) and `args` is an argv list handed to
   # `ReleaseEnv.cmd/3` (a release-env-scrubbed `System.cmd/3`) directly, never
   # through a shell; the viewport/URL come from the worker's manifest but are
-  # only ever argv elements, so they cannot inject a command.
-  defp run(chrome, spec) do
-    profile =
-      Path.join(
-        Path.dirname(spec.out_file),
-        ".chrome-profile-#{System.unique_integer([:positive])}"
-      )
-
-    File.mkdir_p!(profile)
-    {exec, args} = with_timeout(chrome, argv(spec, profile), spec.timeout_s)
+  # only ever argv elements, so they cannot inject a command. The browser
+  # itself runs under `env -i` inside the capture sandbox.
+  defp run(chrome, spec, sandbox, app) do
+    dir = spec.scratch
+    profile = Path.join(dir, "profile")
+    home = Path.join(dir, "home")
+    shot = Path.join(dir, "shot.png")
+    Enum.each([profile, home], &File.mkdir_p!/1)
 
     try do
-      case Wardmast.Worker.ReleaseEnv.cmd(exec, args,
-             stderr_to_stdout: true,
-             env: [{"TZ", "UTC"}]
-           ) do
-        {_out, 0} -> :ok
-        {out, code} -> {:error, {:shot, "chromium exited with status #{code}: #{tail(out)}"}}
+      with {:ok, boxed} <-
+             boxed(sandbox, [chrome | argv(%{spec | out_file: shot}, profile)], app, dir) do
+        env = [System.find_executable("env") || "/usr/bin/env", "-i" | browser_env(home)]
+        {exec, args} = with_timeout(env ++ boxed, spec.timeout_s)
+
+        case ReleaseEnv.cmd(exec, args, stderr_to_stdout: true) do
+          {_out, 0} -> collect(shot, spec.out_file)
+          {out, code} -> {:error, {:shot, "chromium exited with status #{code}: #{tail(out)}"}}
+        end
       end
     after
-      File.rm_rf(profile)
+      File.rm_rf(dir)
     end
   end
 
-  defp with_timeout(chrome, args, seconds) do
+  defp boxed(sandbox, browser, app, dir) do
+    case sandbox.browser(browser, app, [dir]) do
+      {:ok, argv} ->
+        {:ok, argv}
+
+      {:error, reason} ->
+        {:error,
+         {:shot, "the capture sandbox could not start the browser: #{describe(sandbox, reason)}"}}
+    end
+  end
+
+  defp describe(sandbox, reason) do
+    sandbox.describe(reason)
+  rescue
+    _ -> inspect(reason)
+  end
+
+  # Built from nothing, like the app's: the server's own environment (credentials, tokens,
+  # database URLs) never reaches a process that renders the app's pages. TMPDIR is /tmp, never the
+  # shot's directory: Chromium binds its singleton socket under TMPDIR, and the shot's deep path
+  # is past the 108-byte limit of a Unix socket path (Chromium aborts: "Socket path too long").
+  # In the bwrap sandbox /tmp is a private tmpfs of each browser.
+  defp browser_env(home) do
+    ["PATH=#{Sandbox.path()}", "HOME=#{home}", "TMPDIR=/tmp", "LANG=C.UTF-8", "TZ=UTC"]
+  end
+
+  # The image the browser left in its own directory, copied out only when it is a plain file. A
+  # symlink there (to a host file the page wanted posted) is never followed: the shot simply has
+  # no image, which the capture step reports.
+  defp collect(shot, out_file) do
+    with {:ok, %File.Stat{type: :regular}} <- File.lstat(shot),
+         {:ok, data} <- File.read(shot) do
+      File.write!(out_file, data)
+      :ok
+    else
+      _ -> :ok
+    end
+  end
+
+  defp with_timeout([exec | args], seconds) do
     case System.find_executable("timeout") do
-      nil -> {chrome, args}
-      timeout -> {timeout, ["#{seconds}", chrome | args]}
+      nil -> {exec, args}
+      timeout -> {timeout, ["#{seconds}", exec | args]}
     end
   end
 

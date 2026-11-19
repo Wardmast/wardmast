@@ -3,6 +3,8 @@ defmodule Wardmast.Screenshots.CaptureTest do
 
   alias Wardmast.Screenshots.Capture
   alias Wardmast.Screenshots.Config
+  alias Wardmast.Test.CaptureHostSandbox
+  alias Wardmast.Test.CaptureNoSandbox
   alias Wardmast.Test.CaptureStubBooter
   alias Wardmast.Test.CaptureStubShooter
 
@@ -62,7 +64,15 @@ defmodule Wardmast.Screenshots.CaptureTest do
         plan_path: plan_path,
         out_dir: Path.join(dir, "out")
       },
-      [booter: CaptureStubBooter, shooter: CaptureStubShooter, ctx: ctx] ++ opts
+      Keyword.merge(
+        [
+          booter: CaptureStubBooter,
+          shooter: CaptureStubShooter,
+          sandbox: CaptureHostSandbox,
+          ctx: ctx
+        ],
+        opts
+      )
     )
   end
 
@@ -178,6 +188,7 @@ defmodule Wardmast.Screenshots.CaptureTest do
                },
                booter: CaptureStubBooter,
                shooter: CaptureStubShooter,
+               sandbox: CaptureHostSandbox,
                ctx: ctx
              )
 
@@ -213,6 +224,7 @@ defmodule Wardmast.Screenshots.CaptureTest do
                  out_dir: Path.join(dir, "out")
                },
                booter: CaptureStubBooter,
+               sandbox: CaptureHostSandbox,
                shooter: CaptureStubShooter,
                ctx: ctx
              )
@@ -327,6 +339,100 @@ defmodule Wardmast.Screenshots.CaptureTest do
       refute_received {:shoot, _, _, _, _}
       refute File.exists?(Path.join(dir, "out"))
     end
+  end
+
+  describe "when this host cannot sandbox the capture (bd-bhrsdv)" do
+    test "it is skipped with 'capture needs a sandbox' before anything is read or booted", %{
+      tmp_dir: dir
+    } do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+      parent = self()
+
+      assert {:skipped, {:no_sandbox, reason}} =
+               run(dir, plan, %{},
+                 sandbox: CaptureNoSandbox,
+                 record: fn event -> send(parent, {:event, event}) end
+               )
+
+      assert reason =~ "capture needs a sandbox"
+      assert reason =~ "this test host has no sandbox"
+      refute_received {:boot, _, _, _}
+      refute_received {:shoot, _, _, _, _}
+      assert_received {:event, %{state: :skipped, kind: :no_sandbox, reason: ^reason}}
+
+      manifest = recorded(dir)
+      assert manifest["state"] == "skipped"
+      assert manifest["skip_kind"] == "no_sandbox"
+      assert manifest["skip"] == reason
+    end
+
+    test "a missing manifest is not the worker's fault then: nothing could be captured", %{
+      tmp_dir: dir
+    } do
+      assert {:skipped, {:no_sandbox, _}} =
+               run(dir, Path.join(dir, "nope.json"), %{}, sandbox: CaptureNoSandbox)
+    end
+
+    test "the default sandbox is bwrap, and where it is unavailable the capture skips", %{
+      tmp_dir: dir
+    } do
+      # config/test.exs turns the bwrap sandbox off (`:capture_sandbox_available` false), the
+      # answer every host without bwrap gets.
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+      {repo, base, head} = Process.get(:repo)
+
+      assert {:skipped, {:no_sandbox, reason}} =
+               Capture.run(
+                 %{
+                   task_id: "t",
+                   repo_path: repo,
+                   base_sha: base,
+                   head_sha: head,
+                   config: @config,
+                   plan_path: plan,
+                   out_dir: Path.join(dir, "out")
+                 },
+                 booter: CaptureStubBooter,
+                 shooter: CaptureStubShooter,
+                 ctx: %{test_pid: self(), routes: %{}}
+               )
+
+      assert reason =~ "capture needs a sandbox"
+      refute_received {:boot, _, _, _}
+    end
+  end
+
+  test "the booter and the shooter run under the capture's sandbox; each shot has its own dir", %{
+    tmp_dir: dir
+  } do
+    plan =
+      write_plan!(dir, [%{"id" => "home", "path" => "/", "viewports" => ["desktop", "mobile"]}])
+
+    assert {:ok, _result} = run(dir, plan)
+
+    assert_received {:boot_sandbox, "before", CaptureHostSandbox}
+    assert_received {:boot_sandbox, "after", CaptureHostSandbox}
+
+    {:messages, msgs} = Process.info(self(), :messages)
+
+    shots =
+      for {:shot_env, role, sandbox, app, scratch, dir?} <- msgs,
+          do: {role, sandbox, app, scratch, dir?}
+
+    assert length(shots) == 4
+
+    images = Path.join([dir, "out", "images"])
+
+    for {role, sandbox, app, scratch, dir?} <- shots do
+      assert sandbox == CaptureHostSandbox
+      # the boot's own handle on the app, handed on so the browser can reach it
+      assert app == %{port: 1, role: role}
+      # a fresh directory per shot, outside the images the other shots wrote
+      assert dir?
+      refute String.starts_with?(scratch, images)
+    end
+
+    assert shots |> Enum.map(&elem(&1, 3)) |> Enum.uniq() |> length() == 4
   end
 
   test "a plan that skips is reported as skipped, with its reason", %{tmp_dir: dir} do

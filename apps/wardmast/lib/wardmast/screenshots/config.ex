@@ -20,7 +20,8 @@ defmodule Wardmast.Screenshots.Config do
 
   @keys ~w(enabled ui_paths ignore_paths plan_required default_routes start_cmd setup_cmd seed_cmd
            seeds port_env port_range base_url env ready login viewports default_viewports themes
-           default_themes fixture_check deny_patterns fixture_email_domains limits hosting attach)
+           default_themes fixture_check deny_patterns fixture_email_domains limits hosting attach
+           sandbox)
   @placeholders ~w(port role scratch checkout task_id)
   @env_name ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/
   @proxy_keys ~w(HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY)
@@ -58,6 +59,7 @@ defmodule Wardmast.Screenshots.Config do
     "retention_days" => 90
   }
   @default_emails ~w(example.com example.org example.net test invalid localhost)
+  @default_sandbox %{"readonly_paths" => []}
 
   defstruct ui_paths: [],
             ignore_paths: [],
@@ -82,7 +84,8 @@ defmodule Wardmast.Screenshots.Config do
             fixture_email_domains: @default_emails,
             limits: @default_limits,
             hosting: @default_hosting,
-            attach: true
+            attach: true,
+            sandbox: @default_sandbox
 
   @type t :: %__MODULE__{}
 
@@ -167,7 +170,8 @@ defmodule Wardmast.Screenshots.Config do
       fixture_email_domains: Map.get(block, "fixture_email_domains", d.fixture_email_domains),
       limits: Map.merge(d.limits, Map.get(block, "limits", %{})),
       hosting: Map.merge(d.hosting, Map.get(block, "hosting", %{})),
-      attach: Map.get(block, "attach", true)
+      attach: Map.get(block, "attach", true),
+      sandbox: Map.merge(d.sandbox, Map.get(block, "sandbox", %{}))
     }
   end
 
@@ -308,6 +312,7 @@ defmodule Wardmast.Screenshots.Config do
 
   defp validate_key("limits", v, label, _b), do: limits(v, label)
   defp validate_key("hosting", v, label, _b), do: hosting(v, label)
+  defp validate_key("sandbox", v, label, _b), do: sandbox(v, label)
 
   defp map_or_empty(%{} = m), do: m
   defp map_or_empty(_), do: %{}
@@ -658,4 +663,45 @@ defmodule Wardmast.Screenshots.Config do
 
   defp github_hosting?(%{"mode" => "assets_branch", "branch" => b}), do: is_binary(b) and b != ""
   defp github_hosting?(_), do: false
+
+  # bd-bhrsdv: what the capture sandbox shows of the host beyond its system directories.
+  defp sandbox(%{} = v, label) do
+    paths_label = "#{label}.readonly_paths"
+
+    unknown_keys(v, ~w(readonly_paths), label) ++
+      case Map.get(v, "readonly_paths", []) do
+        paths when is_list(paths) -> Enum.flat_map(paths, &readonly_path(&1, paths_label))
+        _ -> ["#{paths_label} must be a list of paths"]
+      end
+  end
+
+  defp sandbox(_v, label), do: ["#{label} must be a map"]
+
+  # A path the sandbox shows read-only (a toolchain, a dependency cache): absolute or under `~/`,
+  # and never the home directory or anything above it, which would hand the app the very files
+  # the sandbox exists to hide.
+  defp readonly_path(path, label) when is_binary(path) and path != "" do
+    cond do
+      not (String.starts_with?(path, "/") or String.starts_with?(path, "~/")) ->
+        ["#{label}: #{inspect(path)} must be an absolute path or start with ~/"]
+
+      covers_home?(Path.expand(path)) ->
+        [
+          "#{label}: #{inspect(path)} would show the whole home directory (or more) to the " <>
+            "app; list only the directories it needs"
+        ]
+
+      true ->
+        []
+    end
+  end
+
+  defp readonly_path(path, label), do: ["#{label}: #{inspect(path)} must be a non-empty path"]
+
+  defp covers_home?("/"), do: true
+
+  defp covers_home?(expanded) do
+    home = Path.expand(System.user_home() || "/")
+    String.starts_with?(home <> "/", expanded <> "/")
+  end
 end

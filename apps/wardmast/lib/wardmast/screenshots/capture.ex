@@ -7,12 +7,19 @@ defmodule Wardmast.Screenshots.Capture do
 
   1. **Gate.** If the diff `base..head` does not touch `ui_paths`, return
      `{:skipped, :no_ui_paths}` having read, booted and written nothing.
-  2. **Plan.** Read the worker's `.arbiter/screenshots.json` (`Wardmast.Screenshots.Plan`). A plan
+  2. **Sandbox.** Everything booted from here on is the repo's code at a commit a worker wrote, so
+     it runs only inside a `Wardmast.Screenshots.Capture.Sandbox` (default `Sandbox.Bwrap`: no
+     network, no host loopback, no host files beyond the system directories). A host that cannot
+     provide it is `{:skipped, {:no_sandbox, reason}}` ("capture needs a sandbox: ..."), before
+     the plan is read or anything runs. A capture is never run unsandboxed.
+  3. **Plan.** Read the worker's `.arbiter/screenshots.json` (`Wardmast.Screenshots.Plan`). A plan
      that is `skip` is `{:skipped, {:plan_skip, reason}}`.
-  3. **Two boots, one after the other.** Extract the base tree with `git archive`, boot it via the
+  4. **Two boots, one after the other.** Extract the base tree with `git archive`, boot it via the
      `Booter`, shoot every entry with the `Shooter`, stop it; then the same for the head. A route
-     that answers 404 is *absent* at that commit, not an error.
-  4. **Pairs.** present at both is `:changed`; absent at the base is `:new` (after-only); absent at
+     that answers 404 is *absent* at that commit, not an error. Both get the sandbox; each shot
+     also gets a fresh directory of its own (`scratch`), so a browser never writes beside the
+     images other shots produced.
+  5. **Pairs.** present at both is `:changed`; absent at the base is `:new` (after-only); absent at
      the head is `:removed` (before-only); absent at both is a route error.
 
   Every failure is a `Wardmast.Screenshots.Capture.Failure` with a distinct `code`
@@ -30,8 +37,9 @@ defmodule Wardmast.Screenshots.Capture do
 
   ## Options
 
-  `:booter` (default `Booter.Command`), `:shooter` (default `Shooter.Chromium`), `:ctx` (passed
-  to both), `:record` (`(map -> any)`), `:budget_seconds` (default `limits.budget_seconds`; checked
+  `:booter` (default `Booter.Command`), `:shooter` (default `Shooter.Chromium`), `:sandbox`
+  (default `Sandbox.default/0`, the bwrap sandbox; passed to both), `:ctx` (passed to both),
+  `:record` (`(map -> any)`), `:budget_seconds` (default `limits.budget_seconds`; checked
   before every boot and shot, on top of the booter's own per-phase timeouts).
   """
 
@@ -39,6 +47,7 @@ defmodule Wardmast.Screenshots.Capture do
 
   alias Wardmast.Screenshots.Capture.Booter
   alias Wardmast.Screenshots.Capture.Failure
+  alias Wardmast.Screenshots.Capture.Sandbox
   alias Wardmast.Screenshots.Capture.Shooter
   alias Wardmast.Screenshots.Config
   alias Wardmast.Screenshots.Plan
@@ -77,7 +86,7 @@ defmodule Wardmast.Screenshots.Capture do
 
   @type run_outcome ::
           {:ok, result()}
-          | {:skipped, :no_ui_paths | {:plan_skip, String.t()}}
+          | {:skipped, :no_ui_paths | {:plan_skip, String.t()} | {:no_sandbox, String.t()}}
           | {:error, Failure.t()}
 
   @doc "Run the capture step. See the moduledoc."
@@ -104,6 +113,7 @@ defmodule Wardmast.Screenshots.Capture do
       input: input,
       booter: Keyword.get(opts, :booter, Booter.Command),
       shooter: Keyword.get(opts, :shooter, Shooter.Chromium),
+      sandbox: Keyword.get(opts, :sandbox) || Sandbox.default(),
       ctx: Keyword.get(opts, :ctx),
       record: Keyword.get(opts, :record),
       budget: budget,
@@ -113,15 +123,24 @@ defmodule Wardmast.Screenshots.Capture do
   end
 
   defp capture(%{input: input} = st) do
-    with {:ok, plan} <- read_plan(st),
+    with :ok <- sandboxed(st),
+         {:ok, plan} <- read_plan(st),
          :ok <- not_skipped(plan),
          {:ok, before_run} <- run_role(st, "before", input.base_sha, plan.shots),
          {:ok, after_run} <- run_role(st, "after", input.head_sha, plan.shots),
          {:ok, pairs} <- pair(plan.shots, before_run.outcomes, after_run.outcomes) do
       {:ok, st, plan, pairs, [before_run.boot, after_run.boot]}
     else
-      {:skip, reason} -> {:skip, st, reason}
+      {:skip, kind, reason} -> {:skip, st, kind, reason}
       {:error, %Failure{} = failure} -> {:error, st, failure}
+    end
+  end
+
+  # Fail closed: no sandbox, no boot.
+  defp sandboxed(st) do
+    case Sandbox.check(st.sandbox) do
+      :ok -> :ok
+      {:error, reason} -> {:skip, :no_sandbox, reason}
     end
   end
 
@@ -141,9 +160,17 @@ defmodule Wardmast.Screenshots.Capture do
     {:ok, result}
   end
 
-  defp finish({:skip, st, reason}) do
-    record(st, %{state: :skipped, reason: reason}, manifest(st, "skipped", skip: reason))
-    {:skipped, {:plan_skip, reason}}
+  defp finish({:skip, st, kind, reason}) do
+    if kind == :no_sandbox,
+      do: Logger.warning("Screenshots.Capture #{st.input.task_id}: skipped: #{reason}")
+
+    record(
+      st,
+      %{state: :skipped, kind: kind, reason: reason},
+      manifest(st, "skipped", skip: {kind, reason})
+    )
+
+    {:skipped, {kind, reason}}
   end
 
   defp finish({:error, st, failure}), do: fail(st, failure)
@@ -189,7 +216,7 @@ defmodule Wardmast.Screenshots.Capture do
   end
 
   defp not_skipped(%Plan{skip: nil}), do: :ok
-  defp not_skipped(%Plan{skip: reason}), do: {:skip, reason}
+  defp not_skipped(%Plan{skip: reason}), do: {:skip, :plan_skip, reason}
 
   # ── one role: extract, boot, shoot every entry, stop ────────────────────
 
@@ -263,13 +290,22 @@ defmodule Wardmast.Screenshots.Capture do
       seed: seed,
       config: st.input.config,
       task_id: st.input.task_id,
+      sandbox: st.sandbox,
       ctx: st.ctx
     }
 
     case boot(st, spec) do
-      {:ok, %{handle: handle, base_url: base_url}} ->
+      {:ok, %{handle: handle, base_url: base_url} = booted} ->
+        # `app` is how the sandbox reaches the booted app; the shooter needs it to give the
+        # browser its (only) way there.
+        target = %{
+          base_url: base_url,
+          app: Map.get(booted, :app),
+          shots: Path.join(work, "shots")
+        }
+
         try do
-          shoot_all(st, spec, base_url, group)
+          shoot_all(st, spec, target, group)
         after
           safe_stop(st, spec, handle)
         end
@@ -297,10 +333,10 @@ defmodule Wardmast.Screenshots.Capture do
     e -> Logger.warning("Screenshots.Capture: stopping the app failed: #{Exception.message(e)}")
   end
 
-  defp shoot_all(st, spec, base_url, group) do
+  defp shoot_all(st, spec, target, group) do
     Enum.reduce_while(group, {:ok, %{}}, fn entry, {:ok, acc} ->
       with :ok <- check_budget(st),
-           {:ok, outcome} <- shoot_one(st, spec, base_url, entry) do
+           {:ok, outcome} <- shoot_one(st, spec, target, entry) do
         {:cont, {:ok, Map.put(acc, key(entry), outcome)}}
       else
         {:error, _} = error -> {:halt, error}
@@ -308,17 +344,21 @@ defmodule Wardmast.Screenshots.Capture do
     end)
   end
 
-  defp shoot_one(st, spec, base_url, entry) do
+  defp shoot_one(st, spec, target, entry) do
     role = spec.role
     path = if role == "before", do: entry.before_path || entry.path, else: entry.path
     name = "#{entry.id}__#{entry.viewport}-#{entry.theme}__#{role}.png"
     File.mkdir_p!(st.images)
     out_file = Path.join(st.images, name)
     cfg = st.input.config
+    # The shot's own directory: the only place its browser may write (never `images/`, where the
+    # other shots' pictures are, and never the app's checkout or scratch).
+    scratch = Path.join(target.shots, Integer.to_string(System.unique_integer([:positive])))
+    File.mkdir_p!(scratch)
 
     shot = %{
       role: role,
-      base_url: base_url,
+      base_url: target.base_url,
       path: path,
       entry: entry,
       out_file: out_file,
@@ -326,13 +366,20 @@ defmodule Wardmast.Screenshots.Capture do
       viewport: Map.fetch!(cfg.viewports, entry.viewport),
       theme: Map.fetch!(cfg.themes, entry.theme),
       timeout_s: Map.get(cfg.limits, "shot_seconds", 30),
+      sandbox: st.sandbox,
+      app: target.app,
+      scratch: scratch,
       ctx: st.ctx
     }
 
-    case call_shooter(st.shooter, shot) do
-      :ok -> image(out_file, name, role, entry)
-      {:error, {:http_status, 404}} -> {:ok, :absent}
-      {:error, reason} -> {:error, shot_failure(reason, role, entry, path)}
+    try do
+      case call_shooter(st.shooter, shot) do
+        :ok -> image(out_file, name, role, entry)
+        {:error, {:http_status, 404}} -> {:ok, :absent}
+        {:error, reason} -> {:error, shot_failure(reason, role, entry, path)}
+      end
+    after
+      File.rm_rf(scratch)
     end
   end
 
@@ -494,9 +541,14 @@ defmodule Wardmast.Screenshots.Capture do
     }
 
     Enum.reduce(extra, base, fn
-      {:failure, f}, acc -> Map.put(acc, "failure", Failure.to_map(f))
-      {:skip, reason}, acc -> Map.put(acc, "skip", reason)
-      {:result, r}, acc -> Map.merge(acc, result_json(r))
+      {:failure, f}, acc ->
+        Map.put(acc, "failure", Failure.to_map(f))
+
+      {:skip, {kind, reason}}, acc ->
+        Map.merge(acc, %{"skip" => reason, "skip_kind" => "#{kind}"})
+
+      {:result, r}, acc ->
+        Map.merge(acc, result_json(r))
     end)
   end
 

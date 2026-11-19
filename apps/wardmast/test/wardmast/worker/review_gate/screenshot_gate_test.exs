@@ -139,6 +139,16 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGateTest do
     test "a change outside ui_paths proceeds with no screenshot context" do
       assert ScreenshotGate.route({:skipped, :no_ui_paths}) == {:proceed, nil}
     end
+
+    test "a host that cannot sandbox the capture proceeds, telling the reviewer why there are none" do
+      reason = "capture needs a sandbox: bubblewrap (bwrap) is not installed"
+
+      assert {:proceed, context} = ScreenshotGate.route({:skipped, {:no_sandbox, reason}})
+      assert context =~ reason
+      assert context =~ "No screenshots were taken"
+      # the worker did nothing wrong, so the reviewer must not hold it against them
+      assert context =~ "not the worker"
+    end
   end
 
   describe "route/2: worker faults go back to the worker" do

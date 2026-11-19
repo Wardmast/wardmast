@@ -236,6 +236,39 @@ defmodule Wardmast.Screenshots.ConfigTest do
       assert [_ | _] = errors(%{"login" => %{"kind" => "cmd"}})
       assert [_ | _] = errors(%{"login" => %{"kind" => "form"}})
     end
+
+    test "sandbox.readonly_paths takes absolute or ~/ paths, never / or the whole home" do
+      ok = %{"sandbox" => %{"readonly_paths" => ["~/.asdf", "/opt/erlang", "~/.mix"]}}
+      assert [] = errors(ok)
+      assert [] = errors(%{"sandbox" => %{}})
+
+      assert [_] = errors(%{"sandbox" => %{"readonly_paths" => ["relative/dir"]}})
+      assert [_] = errors(%{"sandbox" => %{"readonly_paths" => ["/"]}})
+      assert [_] = errors(%{"sandbox" => %{"readonly_paths" => ["/usr/.."]}})
+      assert [_] = errors(%{"sandbox" => %{"readonly_paths" => ["~"]}})
+      assert [_] = errors(%{"sandbox" => %{"readonly_paths" => ["~/"]}})
+      assert [_] = errors(%{"sandbox" => %{"readonly_paths" => [System.user_home!()]}})
+      assert [_] = errors(%{"sandbox" => %{"readonly_paths" => [""]}})
+      assert [_] = errors(%{"sandbox" => %{"readonly_paths" => [7]}})
+      assert [_] = errors(%{"sandbox" => %{"readonly_paths" => "/opt"}})
+      assert [_] = errors(%{"sandbox" => %{"writable_paths" => ["/opt"]}})
+      assert [_] = errors(%{"sandbox" => "bwrap"})
+    end
+  end
+
+  describe "resolve/2: sandbox" do
+    test "defaults to no extra read-only paths" do
+      workspace = ws(%{"repos" => %{"app" => %{"screenshots" => @minimal}}})
+      assert {:ok, c} = Config.resolve(workspace, "app")
+      assert c.sandbox == %{"readonly_paths" => []}
+    end
+
+    test "carries the operator's read-only paths through" do
+      block = Map.put(@minimal, "sandbox", %{"readonly_paths" => ["~/.asdf"]})
+      workspace = ws(%{"repos" => %{"app" => %{"screenshots" => block}}})
+      assert {:ok, c} = Config.resolve(workspace, "app")
+      assert c.sandbox == %{"readonly_paths" => ["~/.asdf"]}
+    end
   end
 
   describe "touches_ui_paths?/2" do

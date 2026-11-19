@@ -82,8 +82,8 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # bd-d2v4rz: the app-preview runner's single launcher Port (the repo's
     # configured startup command), env via `SpawnEnv.port_env/2`.
     "apps/wardmast/lib/wardmast/preview/runner.ex" => 1,
-    # bd-1ydndq: the screenshot capture boot's one process Port (`env -i … sh -c`),
-    # env via `ReleaseEnv.port_env/1`.
+    # bd-1ydndq: the screenshot capture boot's one process Port (`env -i` + the
+    # capture sandbox's argv: `bwrap … sh -c`, bd-bhrsdv), env via `ReleaseEnv.port_env/1`.
     "apps/wardmast/lib/wardmast/screenshots/capture/app_process.ex" => 1
   }
 
@@ -239,12 +239,19 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # bd-1ydndq: capture step. `git archive` directly, `tar` through `ReleaseEnv.cmd/3`.
     "apps/wardmast/lib/wardmast/screenshots/capture.ex" => :scrubbed,
     # bd-1ydndq: the boot process owner: one Port (`ReleaseEnv.port_env/1`, under
-    # `env -i`) plus `ps` / `kill` for its process group.
+    # `env -i`, running the capture sandbox's argv) plus `ps` / `kill` for its
+    # process group.
     "apps/wardmast/lib/wardmast/screenshots/capture/app_process.ex" => :scrubbed,
-    # bd-1ydndq: headless Chromium through `ReleaseEnv.cmd/3`.
+    # bd-1ydndq: headless Chromium (bd-bhrsdv: inside the capture sandbox's bwrap)
+    # through `ReleaseEnv.cmd/3`.
     "apps/wardmast/lib/wardmast/screenshots/capture/shooter/chromium.ex" => :scrubbed,
     # bd-adrym0: early plan check: `git merge-base` / `rev-parse` only.
-    "apps/wardmast/lib/wardmast/screenshots/plan_check.ex" => :pure_tool
+    "apps/wardmast/lib/wardmast/screenshots/plan_check.ex" => :pure_tool,
+    # bd-bhrsdv: the capture sandbox's availability probe runs the configured bwrap
+    # (a path, so not a literal) around `sh`, bounded by `timeout`, through
+    # `ReleaseEnv.cmd/3`. The boot and browser argv it builds are spawned by
+    # `AppProcess` (its Port) and `Shooter.Chromium`, both scrubbed.
+    "apps/wardmast/lib/wardmast/screenshots/capture/sandbox/bwrap.ex" => :scrubbed
   }
 
   # Spawn primitives that run a command of their own choosing. Rule 1 inspects

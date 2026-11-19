@@ -222,6 +222,17 @@ config :wardmast, :worker_gemini_keyring_available, true
 config :wardmast, :git_credential_unenforced, true
 config :wardmast, :worker_jail_probe_root, Path.join(scratch_root, "jail-probe-test")
 
+# bd-bhrsdv: the same for the screenshot-capture sandbox. Whether this host has bwrap must not
+# decide what a capture test sees: off by default, so a capture with the default sandbox skips
+# ("capture needs a sandbox"). Tests about the boot pass `Wardmast.Test.CaptureHostSandbox`;
+# `capture_sandbox_test.exs` is gated on `Capture.Sandbox.Bwrap.probe/0` (it ignores this) and
+# turns it on. The probe's scratch dir is disk-backed and off /tmp.
+config :wardmast, :capture_sandbox_available, false
+
+config :wardmast,
+       :capture_sandbox_probe_root,
+       Path.join(scratch_root, "capture-sandbox-probe-test")
+
 # Stalled-worker detection (bd-awi4nw): shorten the post-exit grace so the
 # deferred classify+escalate check fires fast under test. Still > 0 so a normal
 # completion's in-flight `arb done` wins the race before the check runs.

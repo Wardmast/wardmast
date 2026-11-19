@@ -725,8 +725,17 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                         hosting          {github {mode "assets_branch", branch},
                                          public_repo_ok false, retention_days 90}
                         attach           default true: also store on the ticket
+                        sandbox          {readonly_paths [...]}: what the capture sandbox
+                                         shows of the host beyond /usr, /bin, /sbin, /lib*,
+                                         /etc, the checkout and the boot's scratch (a
+                                         toolchain, a dependency cache), read-only; absolute
+                                         or ~/ paths, never the home directory or above
                       start_cmd, setup_cmd, seed_cmd, seeds and env values may use {{port}},
                       {{role}} (before/after), {{scratch}}, {{checkout}}, {{task_id}}.
+                      Every command and the browser run in a bwrap sandbox with no network
+                      (no host loopback, no external host) and HOME in the boot's scratch; a
+                      host without a working bwrap, perl and socat skips the capture
+                      ("capture needs a sandbox"), never runs it unsandboxed.
       preview         map — start a ticket's checkout as a running app, on a port
                       Wardmast allocates, to see what a worktree is doing
                       (`arb preview start <ticket>`, the dashboard Preview

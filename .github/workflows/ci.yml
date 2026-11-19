@@ -305,6 +305,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # bd-bhrsdv: the screenshot-capture sandbox bridges the app's port with socat (and a perl
+      # relay); its probe needs both, and capture_sandbox_test.exs runs it for real here.
+      - name: Install socat (the capture sandbox's bridges)
+        run: |
+          command -v socat >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q socat; }
+          echo "socat: $(command -v socat) ($(socat -V | sed -n 2p))"
+          echo "perl: $(command -v perl)"
+
       - name: Install bubblewrap (the image's package)
         if: ${{ matrix.bwrap == 'system' }}
         run: |
@@ -381,6 +389,7 @@ jobs:
           test/wardmast/worker/jail_test.exs
           test/wardmast/worker/jail_hide_test.exs
           test/wardmast/agents/grok/jail_test.exs
+          test/wardmast/screenshots/capture_sandbox_test.exs
 
   # The wardmast-node Helm chart (bd-2u4lpp, docs/design/remote-workers.md §20.5):
   # `helm lint --strict`, `helm template` for every mode and reach variant piped through
