@@ -38,6 +38,25 @@ defmodule Wardmast.Worker.ReviewGate.NoVerdictCauseTest do
       assert text =~ "exit 0"
     end
 
+    test "the session footer after an unanswered tool call does not hide it" do
+      lines = [
+        "reading the diff",
+        "⏵ Bash(timeout 300 mix test test/foo_test.exs)",
+        "⚙ claude session success · 270.1s · $0.80"
+      ]
+
+      assert %{cause: :exited_mid_tool_call, text: text} = classify(lines: lines)
+      assert text =~ "timeout 300 mix test"
+
+      assert %{cause: :exited_mid_tool_call} =
+               classify(lines: lines ++ ["", "arb done"])
+    end
+
+    test "a footer after an answered tool call is still a plain no-verdict exit" do
+      lines = ["⏵ Bash(mix test)", "⏴ ok", "⚙ claude session success · 12.0s · $0.10"]
+      assert %{cause: :ended_without_verdict} = classify(lines: lines)
+    end
+
     test "a tool call whose result arrived is not mid-call" do
       lines = ["⏵ Bash(mix test)", "⏴ 3 tests, 0 failures", "I am done reviewing."]
       assert %{cause: :ended_without_verdict} = classify(lines: lines)

@@ -46,6 +46,23 @@ defmodule Wardmast.Worker.ReviewGateNoVerdictCauseTest do
     assert msg =~ "Durable transcript"
   end
 
+  test "the closing session footer after the unanswered call does not hide it" do
+    lines =
+      Enum.reverse([
+        "reading the diff",
+        "⏵ Bash(timeout 300 mix test test/foo_test.exs)",
+        "⚙ claude session success · 270.1s · $0.80"
+      ])
+
+    msg =
+      state()
+      |> ReviewGate.note_no_verdict_cause(0, lines, nil)
+      |> ReviewGate.no_verdict_scan_message()
+
+    assert msg =~ "tool call was still in flight"
+    assert msg =~ "timeout 300 mix test"
+  end
+
   test "a killed reviewer says killed, with the signal" do
     reason = %StopReason{category: :killed, summary: "k", exit_status: 137, signal: 9}
 

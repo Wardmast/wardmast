@@ -112,17 +112,25 @@ defmodule Wardmast.Worker.ReviewGate.NoVerdictCause do
 
   # The transcript's last meaningful line is a tool-call header ("⏵ Bash(...)")
   # with no result line ("⏴ ...") after it: the call never answered.
+  #
+  # The session closes with a `⚙ claude session <status> · Ns · $X` footer (and a
+  # reviewer may print `arb done`) AFTER the unanswered call, so those trailing
+  # lines are skipped before the last line is read — otherwise the footer hides
+  # the call on every clean exit.
   defp in_flight_call(lines) do
     lines
     |> Enum.filter(&is_binary/1)
     |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
+    |> Enum.reject(&(&1 == "" or footer_line?(&1)))
     |> List.last()
     |> case do
       @tool_call_prefix <> call -> String.slice(call, 0, @max_call_chars)
       _ -> nil
     end
   end
+
+  defp footer_line?("⚙" <> _), do: true
+  defp footer_line?(line), do: Regex.match?(~r/\barb done\b/, line)
 
   defp in_flight_note(input) do
     case in_flight_call(input.lines) do

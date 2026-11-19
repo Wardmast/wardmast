@@ -9001,7 +9001,7 @@ defmodule Wardmast.Worker.ReviewGate do
 
       #{ci_prompt_block(state)}#{mr_brief_block(state)}NOTE: If you run tests or any build command, wrap it with a hard timeout so
       a cold compilation pass cannot exhaust the reviewer session — e.g.
-      `timeout 120 mix test`. If the command times out or fails to compile, issue
+      `#{test_command_example(state)}`. If the command times out or fails to compile, issue
       your VERDICT based on the diff alone and note that live test verification
       was unavailable — do not wait indefinitely for output that will not arrive.
 
@@ -9887,7 +9887,7 @@ defmodule Wardmast.Worker.ReviewGate do
     worktree. Edit/Write are denied here and the source tree is read-only; do not
     commit or push from it. `_build` and `deps` are writable (pre-seeded with the
     implementer's compiled deps), so you may compile and run targeted tests in it,
-    e.g. `timeout 120 mix test path/to/file_test.exs` (same timeout rule as below).
+    e.g. `#{test_command_example(state, "path/to/file_test.exs")}` (same timeout rule as below).
     It is deleted when this round ends.
 
     """
@@ -10066,11 +10066,34 @@ defmodule Wardmast.Worker.ReviewGate do
     as a failed review, never as a lenient one. A cold `mix test` (nothing compiled
     yet) can take 4-6 minutes by itself, so before you start a build or test command
     check it can finish inside what is left of the budget, prefer the narrowest test
-    files, and decide from the diff when it cannot. Your `timeout N` wrapper must be
-    SHORTER than the Bash tool's own `timeout` parameter, and that parameter must be
-    set explicitly (the tool's default limit is 2 minutes; a call that outruns it is
-    backgrounded and ends your session with no verdict).\
+    files, and decide from the diff when it cannot. #{tool_limit_sentence(state)}\
     """
+  end
+
+  # The longest `timeout N` wrapper a reviewer should use: a cold compile needs
+  # up to ~5 min, but never more than half the pass budget (a short conflict-review
+  # cap cannot afford a 5 min command), and never under a minute.
+  defp test_timeout_secs(state), do: state |> pass_budget_ms() |> div(2000) |> min(300) |> max(60)
+
+  defp test_command_example(state, target \\ "") do
+    String.trim("timeout #{test_timeout_secs(state)} mix test #{target}")
+  end
+
+  # Per-adapter wording of the command-tool limit. Only Claude's tool is called
+  # "Bash tool" and has an explicit `timeout` parameter (ms) that defaults to 2 min.
+  defp tool_limit_sentence(state) do
+    secs = test_timeout_secs(state)
+
+    if block_adapter(state) == Wardmast.Agents.Claude do
+      "Your `timeout N` wrapper must be SHORTER than the Bash tool's own `timeout` " <>
+        "parameter, and that parameter must be set explicitly (its default limit is 2 " <>
+        "minutes, which a cold compile outruns): for `timeout #{secs}` pass a Bash tool " <>
+        "`timeout` of at least #{(secs + 60) * 1000} ms."
+    else
+      "Wrap build and test commands in a `timeout N` shorter than whatever per-command " <>
+        "limit your CLI applies (e.g. `timeout #{secs}`), so the command ends before the " <>
+        "session does."
+    end
   end
 
   defp format_budget(ms) when rem(ms, 60_000) == 0, do: "#{div(ms, 60_000)} minutes"

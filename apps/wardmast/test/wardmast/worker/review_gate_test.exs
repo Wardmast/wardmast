@@ -6457,7 +6457,7 @@ defmodule Wardmast.Worker.ReviewGateTest do
       task = new_task(ws)
       prompt = ReviewGate.review_prompt(state_for(task, ws))
 
-      assert prompt =~ "timeout 120 mix test",
+      assert prompt =~ "timeout 300 mix test",
              "review_prompt must recommend a hard timeout wrapper for mix test"
 
       assert prompt =~ "VERDICT based on the diff alone",
@@ -6476,10 +6476,24 @@ defmodule Wardmast.Worker.ReviewGateTest do
       prompt = ReviewGate.review_prompt(state_for(task, ws, %{timeout_override_ms: 600_000}))
       assert prompt =~ "PASS BUDGET: 10 minutes"
       assert prompt =~ "Bash tool"
+      assert prompt =~ "timeout 300 mix test"
+      assert prompt =~ "at least 360000 ms"
+      refute prompt =~ "timeout 120 mix test"
       assert prompt =~ "cold"
 
       default = ReviewGate.review_prompt(state_for(task, ws))
       assert default =~ "PASS BUDGET: 20 minutes"
+
+      # A non-Claude reviewer is not told about Claude's "Bash tool".
+      codex =
+        ReviewGate.review_prompt(
+          task
+          |> state_for(ws, %{timeout_override_ms: 600_000})
+          |> Map.put(:reviewer_provider, :codex)
+        )
+
+      assert codex =~ "PASS BUDGET: 10 minutes"
+      refute codex =~ "Bash tool"
     end
 
     test "review_prompt/1 requires the VERIFICATION disclosure and forbids stale re-flags (bd-4te55l)",
