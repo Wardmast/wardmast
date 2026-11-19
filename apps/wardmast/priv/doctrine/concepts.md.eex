@@ -1,0 +1,17 @@
+## Concepts
+
+- **Ticket** — a unit of work (formerly *issue*; `arb issue` and the
+  `task_*` MCP tools remain as deprecated aliases). Has an id like
+  `<%= assigns[:domain_prefix] || "<prefix>" %>-001` and an `issue_type`:
+  `task`, `research`, `bug`, `feature`, `chore`, `decision`, or `epic`. See
+  "Filing conventions" below — picking the right type isn't cosmetic.
+- **Epic** — a parent ticket grouping related tickets via `parent_of` edges;
+  rolls up child progress and can auto-close when its children are done.
+- **Worker** — a worker agent. Dispatching a ticket starts a worker to work it
+  in its own git worktree; it opens a PR, and ReviewGate reviews that PR
+  before merge.
+- **Repo** — a local git repository a worker can provision a worktree in.
+- **Workspace** — a project scope. Holds repos, tracker config, and merge
+  settings.
+- **Dependency edge** — `blocks`, `parent_of` and friends between tickets; a
+  ticket is *ready* once everything blocking it is closed.

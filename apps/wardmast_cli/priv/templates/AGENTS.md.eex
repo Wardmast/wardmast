@@ -109,179 +109,24 @@ This directory is your home base.
 The Wardmast web dashboard is at `<%= @host %>`. It shows active workers,
 workspaces, repos, and the audit log.
 
-## Key commands
+<%= doctrine(:commands, assigns) %>
 
-MCP tool first; `arb` CLI is the fallback for when MCP isn't connected, or
-for the handful of verbs with no MCP equivalent yet (marked **—**).
-
-| Command | MCP tool | What it does |
-|---------|----------|--------------|
-| `arb doctor` | — | Health check — server reachable, workspace exists |
-| `arb prime` | — | Full mission briefing + standing orders — run at session start |
-| `arb ticket list` | `ticket_list` | List tickets |
-| `arb ticket ready` | `ticket_ready` | Tickets with all dependencies closed — ready to work |
-| `arb ticket show <id>` | `ticket_show` | Detail on a single ticket |
-| `arb ticket create <title>` | `ticket_create` | Create a new ticket |
-| `arb ticket update <id>` | `ticket_update` | Update a ticket's fields |
-| `arb ticket close <id>` | `ticket_close` | Close a ticket |
-| `arb ticket reopen <id>` | `ticket_reopen` | Reopen a closed ticket |
-| `arb ticket claim <ref>` | `tracker_claim` | Claim an upstream tracker issue as a local directive |
-| `arb ticket sync` | `tracker_sync` | Reconcile tickets against the tracker (claim assigned-but-untracked, close orphaned) |
-| `arb dep add <from> <type> <to>` | `dep_add` | Add a dependency (e.g. `arb dep add <%= @domain_prefix %>-1 blocks <%= @domain_prefix %>-2`) |
-| `arb dep remove <from> <to>` | `dep_remove` | Remove a dependency |
-| `arb ticket dispatch <id> [<repo>] --provider claude` | `worker_dispatch` | Dispatch with a live worker subprocess (**costs API credits**) |
-| `arb worker list` | `worker_list` | List active workers |
-| `arb worker show <task-id>` | — | Show worker detail and output (no MCP equivalent yet) |
-| `arb worker stop <task-id>` | `worker_stop` | Stop a running worker |
-| `arb worker resume <task-id>` | `worker_resume` | Reattach a fresh session to a preserved worktree |
-| `arb worker review <task-id>` | `worker_review` | Review a PR/MR tracker-side (fetches the diff, posts findings) |
-| `arb message inbox <task-id>` | `inbox_check` | Read/clear a ticket's mailbox |
-| `arb message send <recipient> <body>` | `message_send` | Leave a message in a ticket's mailbox |
-| `arb config get / set / unset <key>` | `workspace_config_get` / `_set` / `_unset` | Read or deep-merge-update workspace config (never raw API PATCH) |
-| `arb quota` | `quota_get` | Current Anthropic rate-limit/quota state |
-| `arb where` | `workspace_show` | Show which workspace is active |
-
-All `mcp__wardmast__*` tool names above are shown without their prefix for
-readability. All CLI commands accept `--json` for machine-readable output.
 The CLI talks to Phoenix at `<%= @host %>` by default (override with
 `ARB_HOST`).
 
-Use `-w, --workspace <name>` (or `ARB_WORKSPACE`) to target a specific
-workspace. The active workspace is **<%= @domain_name %>** (prefix `<%= @domain_prefix %>`).
+The active workspace is **<%= @domain_name %>** (prefix `<%= @domain_prefix %>`).
 
-## Concepts
+<%= doctrine(:concepts, assigns) %>
 
-- **Ticket** — a unit of work (formerly *issue*; `arb issue` and the
-  `task_*` MCP tools remain as deprecated aliases for one release). Has an
-  id like `<%= @domain_prefix %>-001` and
-  an `issue_type`: `task`, `research`, `bug`, `feature`, `chore`, `decision`, or `epic`.
-  See "Filing convention: issue_type signals whether a PR is expected" below
-  — picking the right one isn't cosmetic.
-- **Epic** — a parent ticket grouping related tickets via `parent_of` edges;
-  rolls up child progress and can auto-close when its children are done.
-- **Worker** — a worker agent. Dispatching a ticket starts a worker to work it.
-- **Repo** — a local git repository a worker can provision a worktree in.
-- **Workspace** — a project scope. Holds repos, tracker config, and merge
-  settings.
+<%= doctrine(:filing, assigns) %>
 
-## Filing convention: set difficulty up front
+<%= doctrine(:role, assigns) %>
 
-Every ticket you file should carry **two** orthogonal axes:
+<%= doctrine(:checkout, assigns) %>
 
-- `--priority 0..4` (P0..P4) — *how urgent* (drives scheduling order).
-- `--difficulty 0..5` (D0..D5) — *how hard* (drives the model + thinking
-  budget routed to the worker).
+<%= doctrine(:research, assigns) %>
 
-A P0 can be a one-line config bump (D0); a P3 can be a hard refactor
-(D3). Don't conflate them.
-
-Use the MAX over: scope (files/modules touched), design uncertainty,
-reasoning depth (mechanical vs concurrency/correctness), blast radius,
-breadth of context required.
-
-```
-D0 Trivial  — single-file, fully specified, no judgment
-              (typo, rename, config bump, doc edit).
-D1 Simple   — localized, clear approach, light reasoning.
-D2 Moderate — multi-file or some design choice (default if omitted).
-D3 Hard     — cross-cutting, non-obvious design, correctness-critical.
-D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass.
-D5 Flagship — a deliberate escalation, never an ordinary rating: work
-              judged worth a full quota window on the flagship model.
-              Reach for it only when D4 (premium model, max effort) has
-              already failed or is plainly inadequate — "harder than D4"
-              is not a reason. Set by the operator, by hand.
-```
-
-When filing, also drop a one-line **difficulty justification** in the
-description ("D3 because the change spans the routing dispatcher, two
-adapter configs, and the review_gate seam") so reviewers can sanity-check
-your call. `arb ticket create --help` carries the same rubric inline.
-
-## Filing convention: issue_type signals whether a PR is expected
-
-`issue_type` isn't just a label — it tells the dispatched worker (and you,
-reading the result later) whether a committed code change is expected:
-
-- **`bug` / `feature` / `chore`** — the worker is expected to make a change,
-  commit it, and open a PR. ReviewGate engages on that PR before merge.
-- **`research`** — no PR. Use it for an investigation whose output is
-  findings: tracing a bug to its root cause, a spike, "read the code and
-  report back." A `research` worker must report findings via
-  `ticket_update_progress` notes (a notes gate refuses completion without
-  them) and closes with no diff and no PR.
-- **`task`** — no PR. A plain operational action: a restart, a config flip —
-  no research, no code. A `task` worker completes when it reports the action
-  done, with a short outcome note via `ticket_update_progress`; no findings
-  are required.
-- Neither `research` nor `task` may be used for code work: both skip the
-  commit gate and ReviewGate.
-- **`decision`** — a choice to be made/documented, not implemented (compare
-  a design-options writeup, not a code change).
-- **`epic`** — a parent ticket grouping children via `parent_of` edges; not
-  worked directly.
-
-**Why this matters beyond labeling:** ReviewGate only engages when a PR
-actually exists (see `docs/reviewgate.md`). File a pure research assignment
-as `bug` and a worker that (correctly) produces no diff can dead-end waiting
-on a review that has nothing to review. File it as `research` instead — it
-completes cleanly with `pr_ref: nil` and no ReviewGate involvement at all,
-which is the *correct* outcome for that kind of work, not a shortcut around
-review.
-
-**Get this right before you dispatch, not after.** A running worker's
-worktree-provisioning decision is made once, from `issue_type` as it stood
-*at dispatch time* — fixing the ticket's `issue_type` afterward with
-`ticket_update` (the only way to change it after filing; the CLI's
-`arb ticket update` has no `--issue-type` flag as of this writing) does
-**not** retroactively exempt an already-dispatched worker from the commit
-gate (`docs/worktrees-and-workers.md`). If you catch the mistake early,
-stop the worker and re-dispatch fresh instead of patching a live run. If you
-catch it only after the worker already finished and the commit gate tripped
-on a legitimately no-diff completion, that's a false positive to rule on
-yourself (`ticket_close` with a reason) — see the commit-gate section in
-`docs/worktrees-and-workers.md` for the full playbook.
-
-## No direct file edits to managed repos
-
-You are a coordinator, not a coder. **Never make direct file edits to managed repos yourself.**
-If a repository's code needs to change, file a ticket (`bug`, `feature`, or `chore` issue_type) and dispatch a worker to implement it. Your job is to orchestrate, not to write product code.
-
-## Research discipline: delegate the digging, keep the judgment
-
-Reading source, chasing logs/traces, and tracing a bug to its root cause
-belongs in a delegate, not inline in your own context — that raw material
-rarely turns out to be memory-worthy and just inflates your context for the
-rest of the session without leaving anything durable behind.
-
-- **In-conversation exploratory digging** ("go find out what happened,
-  report back") → fork yourself, if your harness supports it (e.g., `agy`'s
-  `invoke_subagent` tool or Claude Code's agent invocation — an agent
-  invocation that inherits your context and runs in the background,
-  keeping its raw tool output out of yours). It stays as fast as digging
-  inline since it shares your context, and you can keep talking to the
-  operator while it runs.
-- **Investigation substantial enough to be worth the project remembering** —
-  recurring issues, "why does this keep happening," anything a future
-  worker in that repo would benefit from already knowing — dispatch a real
-  `research`-type worker instead (see "issue_type signals whether a PR is
-  expected" above). Workers read/write their own per-project memory, so
-  findings compound in the project over time, not just in your own
-  session.
-
-Delegating research doesn't make you a messenger. Cross-workspace
-judgment, prioritization, filing discipline, and the actual back-and-forth
-with the operator on tradeoffs stay with you — only the file-reading and
-log-chasing legwork moves out.
-
-## Memory discipline
-
-At the end of each session, update `memory/MEMORY.md` with anything worth
-carrying forward. Each memory file holds one fact with a short body; link
-related memories with `[[filename]]`. Keep the index lean.
-
-When the operator gives explicit direction ("remember that...", "note
-that..."), write it to memory immediately — don't wait for end of session.
+<%= doctrine(:memory, assigns) %>
 
 ## Deeper references (read on demand, not up front)
 
