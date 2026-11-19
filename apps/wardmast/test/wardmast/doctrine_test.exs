@@ -49,7 +49,7 @@ defmodule Wardmast.DoctrineTest do
 
   describe "bundled sections" do
     test "the doctrine ships the expected sections" do
-      for name <- [:role, :research, :memory, :filing, :concepts, :commands, :checkout] do
+      for name <- [:role, :research, :memory, :filing, :concepts, :commands, :checkout, :pair] do
         assert name in Doctrine.sections(), "missing doctrine section #{inspect(name)}"
       end
     end
@@ -171,6 +171,52 @@ defmodule Wardmast.DoctrineTest do
       assert filing =~ "--priority"
       assert filing =~ "ticket_update_progress"
       assert filing =~ ~r/no PR/i
+    end
+  end
+
+  describe "the pair instruction set (bd-7p6a9o)" do
+    test "collaborate, explain changes, ask before large rewrites, stay inside the ACs" do
+      pair = Doctrine.render(:pair, %{})
+
+      assert pair =~ "**Collaborate.**"
+      assert pair =~ "**Explain your changes.**"
+      assert pair =~ "**Ask before large rewrites.**"
+      assert pair =~ "**Stay inside the ticket's acceptance criteria.**"
+    end
+
+    test "is not the router doctrine" do
+      pair = Doctrine.render(:pair, %{can_dispatch: true})
+      role = Doctrine.render(:role, %{can_dispatch: true})
+
+      refute pair =~ "worker_dispatch"
+      refute pair == role
+      assert pair =~ ~r/not the\s+coordinator's job/
+    end
+
+    test "states the write scope and fills in what it is given" do
+      bare = Doctrine.render(:pair, %{})
+      assert bare =~ "the default branch"
+      assert bare =~ "never force-push"
+
+      filled =
+        Doctrine.render(:pair, %{
+          worktree: "/srv/example/wt",
+          branch: "feature/ex-1-thing",
+          target_branch: "trunk"
+        })
+
+      assert filled =~ "(`/srv/example/wt`)"
+      assert filled =~ "(`feature/ex-1-thing`)"
+      assert filled =~ "Never push to `trunk`"
+    end
+
+    test "Done runs the worker's completion path, and the review bar does not drop" do
+      pair = Doctrine.render(:pair, %{})
+
+      assert pair =~ "`pair-authored`"
+      assert pair =~ "ReviewGate"
+      assert pair =~ "review bar does not drop"
+      assert pair =~ ~r/without\*\* Done leaves the branch and the\s+worktree/
     end
   end
 end

@@ -162,6 +162,72 @@ defmodule Wardmast.Sessions.InstructionsTest do
     end
   end
 
+  describe "the pair variant (bd-7p6a9o)" do
+    defp render_pair(pair_overrides \\ %{}) do
+      pair =
+        Map.merge(
+          %{
+            issue: %{
+              id: "bd-pair0001",
+              title: "Make widgets faster",
+              description: "The widgets are slow.",
+              acceptance: "- p95 under 50ms",
+              issue_type: :feature,
+              repo: "widget"
+            },
+            worktree: "/srv/example/worktrees/feature-bd-pair0001-make-widgets-faster",
+            branch: "feature/bd-pair0001-make-widgets-faster",
+            target_branch: "main"
+          },
+          pair_overrides
+        )
+
+      Instructions.render(
+        session(cwd: pair.worktree, kind: :pair),
+        primary_checkout: @checkout,
+        pair: pair
+      )
+    end
+
+    test "is the pair doctrine, not the router doctrine" do
+      doc = render_pair()
+
+      assert doc =~ "pair session"
+      assert doc =~ "## Pair doctrine"
+      refute doc =~ "coordinator session"
+      refute doc =~ "refine session"
+      # The router doctrine's own anchor: a coordinator files and delegates.
+      refute doc =~ "worker_dispatch"
+    end
+
+    test "names the ticket, its acceptance criteria as the scope, and where the session is" do
+      doc = render_pair()
+
+      assert doc =~ "`bd-pair0001`"
+      assert doc =~ "Make widgets faster"
+      assert doc =~ "- p95 under 50ms"
+      assert doc =~ "the scope of this session"
+      assert doc =~ "`/srv/example/worktrees/feature-bd-pair0001-make-widgets-faster`"
+      assert doc =~ "`feature/bd-pair0001-make-widgets-faster`"
+    end
+
+    test "states the write scope and the primary checkout it must not touch" do
+      doc = render_pair()
+
+      assert doc =~ "Never push to `main`"
+      assert doc =~ "`#{@checkout}` is the live source tree"
+    end
+
+    test "says how Done finishes it" do
+      doc = render_pair()
+
+      assert doc =~ "ward pair done"
+      assert doc =~ "pair_done"
+      assert doc =~ "`pair-authored`"
+      assert doc =~ "ReviewGate"
+    end
+  end
+
   describe "the refine variant (bd-980x89, task AC1, AC2, AC4)" do
     defp fixture_issue(overrides \\ %{}) do
       Map.merge(
