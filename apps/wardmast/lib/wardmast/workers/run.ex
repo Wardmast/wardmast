@@ -680,7 +680,9 @@ defmodule Wardmast.Workers.Run do
   Fix-pass rows carry no `mr_ref` of their own, so "on this PR" means started
   at or after the task's earliest run that does carry `mr_ref`. When no run
   carries it (or `mr_ref` is nil), every fix pass on the task counts. Returns 0
-  when the read fails. The Watchdog also keeps an in-memory count, so a failed
+  when the read fails. Interrupted runs (`outcome: :interrupted`, whatever the
+  cause: server restart, node lost, placement refused) are not counted: an
+  interruption is not an attempt. The Watchdog also keeps an in-memory count, so a failed
   read does not disable the cap.
   """
   @spec fix_pass_count(String.t(), String.t() | nil) :: non_neg_integer()

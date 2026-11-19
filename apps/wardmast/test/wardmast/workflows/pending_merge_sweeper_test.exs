@@ -1127,6 +1127,27 @@ defmodule Wardmast.Workflows.PendingMergeSweeperTest do
       assert Watchdog.retry_whereis(task.id) == nil
     end
 
+    test "the pending-resume window runs from when the restart cut the pass off" do
+      ws = workspace()
+      task = task(ws, "!pm-cutoff-long")
+      stamp!(task, sha("cutoff-long"))
+
+      {:ok, _} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          kind: :fix_pass,
+          state: :finished,
+          outcome: :interrupted,
+          failure_reason: "server shutdown",
+          started_at: DateTime.add(DateTime.utc_now(), -2 * 3_600),
+          completed_at: DateTime.utc_now()
+        })
+
+      assert %{retried: [], skipped: [{_, :resolver_pending_resume}]} = sweep()
+    end
+
     test "a running retry stands down when one starts" do
       reviewed = sha("fixpass-mid-retry")
       mr_ref = "!pm-fixpass-mid"
