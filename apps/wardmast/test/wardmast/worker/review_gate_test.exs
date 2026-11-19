@@ -6464,6 +6464,24 @@ defmodule Wardmast.Worker.ReviewGateTest do
              "review_prompt must instruct the reviewer to fall back to diff-only VERDICT when tests cannot complete"
     end
 
+    test "review_prompt/1 states the pass's real wall-clock budget up front (bd-3na3d7)", %{
+      ws: ws
+    } do
+      # Reviewers on cluster pods were cut off ~4.5 min into a cold-compile
+      # `timeout 300 mix test` with no idea they were on a clock. The prompt now
+      # names the budget the gate will actually enforce on this pass, and how a
+      # test command must fit inside it.
+      task = new_task(ws)
+
+      prompt = ReviewGate.review_prompt(state_for(task, ws, %{timeout_override_ms: 600_000}))
+      assert prompt =~ "PASS BUDGET: 10 minutes"
+      assert prompt =~ "Bash tool"
+      assert prompt =~ "cold"
+
+      default = ReviewGate.review_prompt(state_for(task, ws))
+      assert default =~ "PASS BUDGET: 20 minutes"
+    end
+
     test "review_prompt/1 requires the VERIFICATION disclosure and forbids stale re-flags (bd-4te55l)",
          %{ws: ws} do
       task = new_task(ws)
