@@ -9,7 +9,7 @@ defmodule Wardmast.Board.AutopilotDeferredResumeTest do
   alias Wardmast.Board.Autopilot
 
   defp board(slots_free, promote \\ "bd-ready") do
-    %{
+    Wardmast.Board.WalkFixture.with_walk(%{
       ready: [%{id: "bd-ready", state: :next, reason: "next up", card: %{id: "bd-ready"}}],
       backlog: [],
       blocked: [],
@@ -24,7 +24,7 @@ defmodule Wardmast.Board.AutopilotDeferredResumeTest do
       quota: :ok,
       paused: false,
       now: DateTime.utc_now()
-    }
+    })
   end
 
   # `free` is an Agent holding the board's slots_free, so a test can "free a
@@ -44,6 +44,8 @@ defmodule Wardmast.Board.AutopilotDeferredResumeTest do
       # VM-global gate (`Drain`, `ResumeGate`) that concurrent async tests mutate.
       registry_settled?: fn -> true end,
       snapshot: fn _ -> board(Agent.get(free, & &1)) end,
+      # DC12: a slot waiter replays when its pool has a seat (modelled by `free`).
+      slot_room: fn _task_id, _kind -> Agent.get(free, & &1) > 0 end,
       dispatch: fn id ->
         send(test, {:dispatched, id})
         {:ok, %{task_id: id}}

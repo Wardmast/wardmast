@@ -15,7 +15,7 @@ defmodule Wardmast.Board.AutopilotRefusedDispatchTest do
   @migrations_refusal {:migrations_check_failed, :unreachable}
 
   defp board(promote) do
-    %{
+    Wardmast.Board.WalkFixture.with_walk(%{
       ready: [%{id: "bd-1", state: :next, reason: "next up", card: %{id: "bd-1"}}],
       backlog: [],
       blocked: [],
@@ -30,7 +30,7 @@ defmodule Wardmast.Board.AutopilotRefusedDispatchTest do
       quota: :ok,
       paused: false,
       now: DateTime.utc_now()
-    }
+    })
   end
 
   defp start(opts) do

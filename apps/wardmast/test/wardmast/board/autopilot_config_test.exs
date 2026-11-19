@@ -5,7 +5,7 @@ defmodule Wardmast.Board.AutopilotConfigTest do
 
   # A board with one promotable card, as `Snapshot.derive/1` would return it.
   defp board(promote, paused? \\ false) do
-    %{
+    Wardmast.Board.WalkFixture.with_walk(%{
       ready: [
         %{id: "bd-1", state: :next, reason: "next up — dispatching...", card: %{id: "bd-1"}}
       ],
@@ -22,7 +22,7 @@ defmodule Wardmast.Board.AutopilotConfigTest do
       quota: :ok,
       paused: paused?,
       now: DateTime.utc_now()
-    }
+    })
   end
 
   # Start an autopilot that never ticks on its own — every test drives it by

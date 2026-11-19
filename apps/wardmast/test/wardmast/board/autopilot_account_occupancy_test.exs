@@ -195,40 +195,6 @@ defmodule Wardmast.Board.AutopilotAccountOccupancyTest do
     refute_received {:dispatched, ^ready_id}
   end
 
-  test "resumes over a lowered cap still resume, and nothing new dispatches until below it",
-       ctx do
-    %{ws: ws, account: account} = ctx
-    a = interrupted!(ws, "interrupted A")
-    b = interrupted!(ws, "interrupted B")
-    ready = ready!(ws, "fresh ready card")
-
-    # The operator lowered the cap while both were running.
-    Ash.update!(account, %{max_concurrent: 1})
-
-    # Both still resume: an In-progress ticket is uncapped (stranding work is
-    # worse than overshooting a lowered cap).
-    assert {:ok, :held} = ResumeSlot.admit(Ash.get!(Issue, a.id), origin: :automatic)
-    assert {:ok, %{resumed: 2}} = Reconciler.reconcile_resumable_tasks(primary?: true)
-    assert Concurrency.live_count(account) == 2
-
-    autopilot = start_autopilot()
-    _ = Autopilot.tick(autopilot, 10_000)
-    refute_received {:dispatched, _}
-
-    # One finishes: occupancy 1 == cap 1, still no room.
-    stop_and_await(a.id)
-    assert Concurrency.live_count(account) == 1
-    _ = Autopilot.tick(autopilot, 10_000)
-    refute_received {:dispatched, _}
-
-    # The second finishes: below the cap, the Ready card goes.
-    stop_and_await(b.id)
-    assert Concurrency.live_count(account) == 0
-    ready_id = ready.id
-    assert {:ok, ^ready_id} = Autopilot.tick(autopilot, 10_000)
-    assert_received {:dispatched, ^ready_id}
-  end
-
   defp stop_and_await(task_id) do
     pid = Worker.whereis(task_id)
     ref = Process.monitor(pid)

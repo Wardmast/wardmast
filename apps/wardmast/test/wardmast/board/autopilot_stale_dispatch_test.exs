@@ -10,7 +10,7 @@ defmodule Wardmast.Board.AutopilotStaleDispatchTest do
   alias Wardmast.Board.Autopilot
 
   defp board(promote) do
-    %{
+    Wardmast.Board.WalkFixture.with_walk(%{
       ready: [
         %{id: "bd-2", state: :next, reason: "next up", card: %{id: "bd-2"}}
       ],
@@ -27,7 +27,7 @@ defmodule Wardmast.Board.AutopilotStaleDispatchTest do
       quota: :ok,
       paused: false,
       now: DateTime.utc_now()
-    }
+    })
   end
 
   # `closed` is an Agent holding the ids of closed tickets.
