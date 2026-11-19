@@ -7,11 +7,9 @@ defmodule Wardmast.MCP.WorkerResumeSlotTest do
   use Wardmast.DataCase, async: false
 
   alias Wardmast.MCP.Scope
-  alias Wardmast.MCP.Tools
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Test.ResumeSlotFixture
   alias Wardmast.Usage.Event, as: UsageEvent
-  alias Wardmast.Worker
 
   setup do
     # bd-80ecol: the resume reaches the real-agent dispatch guard, which
