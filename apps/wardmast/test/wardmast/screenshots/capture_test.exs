@@ -223,7 +223,7 @@ defmodule Wardmast.Screenshots.CaptureTest do
                  plan_path: Path.join(dir, "nope.json"),
                  out_dir: Path.join(dir, "out")
                },
-               shooter: CaptureStubShooter,
+               booter: CaptureStubBooter,
                sandbox: CaptureHostSandbox,
                shooter: CaptureStubShooter,
                ctx: ctx
