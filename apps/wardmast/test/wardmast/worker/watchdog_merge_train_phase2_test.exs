@@ -390,6 +390,45 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       assert length(StubMerger.pipeline_triggers()) == 1
     end
 
+    test "a skipped pipeline on a head we did not skip is triggered once, then awaited (#1564)",
+         %{ws: ws} do
+      freshness(%{"a0" => 0})
+      diffs("a")
+      StubMerger.queue_get(mr("a"), [skipped("a0") |> Map.put(:pipeline_skipped, true)])
+      a = watch("a", ws)
+
+      wait_until(fn -> length(StubMerger.pipeline_triggers()) == 1 end)
+      after_polls(a, 5)
+      assert StubMerger.merge_count("!a") == 0
+      assert length(StubMerger.pipeline_triggers()) == 1
+
+      StubMerger.queue_get(mr("a"), [green("a0")])
+      assert_receive {:watchdog, "a", {:merged, _}}, Wardmast.Test.Timing.scale(3_000)
+      assert length(StubMerger.pipeline_triggers()) == 1
+    end
+
+    test "each successive skipped head gets its own trigger (#1564)", %{ws: ws} do
+      heads = ["s1", "s2", "s3", "s4"]
+      freshness(Map.new(["a0" | heads], &{&1, 0}))
+      for h <- ["a0" | heads], do: StubMerger.set_diff(mr("a"), h, @reviewed_diff)
+      sk = fn h -> skipped(h) |> Map.put(:pipeline_skipped, true) end
+      StubMerger.queue_get(mr("a"), [sk.("a0")])
+      a = watch("a", ws, last_reviewed_sha: "a0")
+      wait_until(fn -> length(StubMerger.pipeline_triggers()) == 1 end)
+
+      # Each later head is a fresh skipped head (a main-merge push); every one
+      # must get its own trigger, not share a per-Watchdog budget.
+      for {h, n} <- Enum.with_index(heads, 2) do
+        :sys.replace_state(a, fn s -> %{s | reviewed_sha: h} end)
+        StubMerger.queue_get(mr("a"), [sk.(h)])
+        wait_until(fn -> length(StubMerger.pipeline_triggers()) == n end)
+        after_polls(a, 2)
+      end
+
+      assert length(StubMerger.pipeline_triggers()) == 5
+      assert StubMerger.merge_count("!a") == 0
+    end
+
     test "a skipped pipeline never merges, even after the trigger", %{ws: ws} do
       freshness(%{"a0" => 0})
       diffs("a")
