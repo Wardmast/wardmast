@@ -17,7 +17,8 @@ on:
 jobs:
   build:
     name: Build OTP Release
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04 and breaks tests; see 26.04 follow-up ticket (#1529).
+    runs-on: ubuntu-24.04
     container:
       image: redhat/ubi8
 
@@ -470,7 +471,8 @@ jobs:
     # a gate. Operator checks after the first release: the package visibility on the
     # GHCR packages page (H7) and an arm64 node (H4, the image is linux/amd64 only).
     needs: build
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04 and breaks tests; see 26.04 follow-up ticket (#1529).
+    runs-on: ubuntu-24.04
 
     permissions:
       contents: read
