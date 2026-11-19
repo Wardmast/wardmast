@@ -531,7 +531,11 @@ defmodule Wardmast.Board.AutopilotTest do
            "repo vstim: 2 of 2 implementer runs"},
           {"quota held", {:quota_held, "bd-1"}, "quota held"},
           {"paused provider", {:provider_paused, :claude, "held — claude paused: x"},
-           "claude paused"}
+           "claude paused"},
+          # bd-7p6a9o: a pair session opened between the plan and the dispatch.
+          {"pair session claim",
+           {:not_dispatchable, "bd-1", {:pair_session, "5b1e0c2a-0000-4000-8000-000000000004"}},
+           "claimed by a live pair session (5b1e0c2a)"}
         ] do
       test "#{label}: the next card is dispatched, quietly" do
         test = self()

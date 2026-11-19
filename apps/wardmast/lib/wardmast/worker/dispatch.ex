@@ -97,6 +97,7 @@ defmodule Wardmast.Worker.Dispatch do
   alias Wardmast.Nodes.Refusal
   alias Wardmast.Quota.SpendCap
   alias Wardmast.Reviews.Checkout
+  alias Wardmast.Sessions.Pair
   alias Wardmast.Tasks.EdgeGate
   alias Wardmast.Tasks.Issue
   alias Wardmast.Tasks.IssueRepo
@@ -134,6 +135,7 @@ defmodule Wardmast.Worker.Dispatch do
   alias Wardmast.Workflows.CodeReview
   alias Wardmast.Workflows.DispatchQueue
   alias Wardmast.Workflows.Machine
+  alias Wardmast.Workflows.PRPatrol.AuthorScope
   alias Wardmast.Workflows.Work
 
   require Ash.Query
@@ -1809,10 +1811,22 @@ defmodule Wardmast.Worker.Dispatch do
   # dispatch that reaches here has either been planned by the scheduler
   # (which asked with every hold) or is a person overriding it. What the
   # answer means depends on who is asking — `admit/3`.
+  #
+  # bd-7p6a9o: a live pair session's claim is asked first and is not subject to
+  # `admit/3` at all — no force, resume, review or re-dispatch lifts it. An
+  # operator and an agent are working in the ticket's worktree; a worker beside
+  # them would interleave commits on the same branch. Ending the session is
+  # the release. Every dispatch, resume and session resume comes through here.
   defp ensure_dispatchable(%Issue{} = task, opts) do
-    case Lifecycle.dispatchable(task, %{blocked_by: EdgeGate.blockers_of(task)}) do
-      :ok -> :ok
-      {:held, hold} -> admit(task, hold, opts)
+    case Pair.claimed_by(task.id) do
+      nil ->
+        case Lifecycle.dispatchable(task, %{blocked_by: EdgeGate.blockers_of(task)}) do
+          :ok -> :ok
+          {:held, hold} -> admit(task, hold, opts)
+        end
+
+      session_id ->
+        {:error, {:not_dispatchable, task.id, {:pair_session, session_id}}}
     end
   end
 
@@ -1846,6 +1860,41 @@ defmodule Wardmast.Worker.Dispatch do
 
   defp under_way?({:column, column}), do: column in [:in_progress, :merging, :verifying]
   defp under_way?(_hold), do: false
+
+  @doc false
+  # bd-cwigjh / #1550: the push guard. A follow-up worker pushes to the PR it was
+  # filed against, so before one is spawned ask `AuthorScope.push_decision/3`
+  # whether that PR's author is in scope. Out of scope: the dispatch carries
+  # `push_refused: reason` (no push credential, a comment-only briefing) and the
+  # refusal is recorded as a `follow_up_push_refused` event. In scope, or a task
+  # that is no follow-up: opts are returned untouched.
+  @spec apply_push_guard(Issue.t(), keyword(), Workspace.t() | nil) :: keyword()
+  def apply_push_guard(%Issue{} = task, opts, workspace) do
+    case AuthorScope.push_decision(task, workspace, Keyword.get(opts, :repo)) do
+      :ok ->
+        opts
+
+      {:refused, reason} ->
+        record_push_refused(task, reason, opts)
+        Keyword.put(opts, :push_refused, reason)
+    end
+  end
+
+  defp record_push_refused(
+         %Issue{id: id, workspace_id: ws_id, source_pr: source_pr},
+         reason,
+         opts
+       ) do
+    require Logger
+    Logger.warning("Dispatch: #{id} may not push to PR #{source_pr}: #{reason}")
+
+    Wardmast.Events.broadcast(ws_id, "follow_up_push_refused", %{
+      "task_id" => id,
+      "source_pr" => source_pr,
+      "repo" => Keyword.get(opts, :repo),
+      "reason" => reason
+    })
+  end
 
   defp record_forced_dispatch(%Issue{id: id, workspace_id: ws_id}, hold, opts) do
     require Logger
@@ -1993,6 +2042,14 @@ defmodule Wardmast.Worker.Dispatch do
   the task page.
   """
   @spec refusal_message(String.t(), Lifecycle.Dispatchable.hold()) :: String.t()
+  # bd-7p6a9o: force cannot lift a pair session's claim, so the refusal must
+  # not offer it — it names the way out instead.
+  def refusal_message(task_id, {:pair_session, _session_id} = hold) do
+    "#{task_id} is #{Lifecycle.describe_hold(hold)}, so no worker can start on it while " <>
+      "the session is live. Finish the session with Done (`ward pair done #{task_id}`) or end " <>
+      "it (`ward pair end #{task_id}`) to release the claim."
+  end
+
   def refusal_message(task_id, hold) do
     "#{task_id} is #{Lifecycle.describe_hold(hold)}, so it is not Ready to dispatch. " <>
       next_step(hold) <>
@@ -4122,6 +4179,65 @@ defmodule Wardmast.Worker.Dispatch do
   # a fresh one.
   defp resuming?(opts), do: Keyword.get(opts, :resume) == true
 
+  @doc """
+  Provision — or reuse — `task`'s worktree on its branch exactly as a dispatch
+  does: the same repo resolution, branch (`BranchNamer.derive/1`), base
+  branch, git layout, reset of an already-merged branch and fall-back to
+  attaching an existing branch (`maybe_provision_worktree/2`). For a caller
+  that is not a dispatch — a pair session (bd-7p6a9o) — so that the session
+  and any worker that later picks the ticket up share one checkout and one
+  branch.
+
+  Returns `{:ok, %{path:, branch:, target_branch:, repo:, repo_path:}}`,
+  `{:error, :no_repo}` for a ticket naming no repo this installation can
+  resolve, or `{:error, {:worktree_failed, reason}}`.
+  """
+  @spec provision_worktree(Issue.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def provision_worktree(%Issue{} = task, opts \\ []) do
+    opts = task |> apply_issue_repo_default(opts) |> Keyword.put(:provision_worktree, true)
+    opts = put_security_policy(task, opts)
+
+    with {:ok, checkout} <- ticket_checkout(task, opts),
+         {:ok, path} when is_binary(path) <- maybe_provision_worktree(task, opts) do
+      {:ok, %{checkout | path: path}}
+    else
+      {:error, _reason} = error -> error
+      {:ok, nil} -> {:error, :no_repo}
+    end
+  end
+
+  @doc """
+  Where `task`'s work lives, without touching git: its branch, the base it
+  merges into, its repo, that repo's local path, and the worktree path a
+  dispatch provisions — the same resolution `provision_worktree/2` uses. What
+  a pair session's Done checks its worktree against (bd-7p6a9o).
+
+  `{:error, :no_repo}` for a ticket naming no repo this installation can
+  resolve.
+  """
+  @spec ticket_checkout(Issue.t(), keyword()) :: {:ok, map()} | {:error, :no_repo}
+  def ticket_checkout(%Issue{} = task, opts \\ []) do
+    opts = apply_issue_repo_default(task, opts)
+    repo = Keyword.get(opts, :repo)
+
+    case resolve_repo_path(task, repo) do
+      repo_path when is_binary(repo_path) ->
+        branch = BranchNamer.derive(task)
+
+        {:ok,
+         %{
+           path: Worktree.worktree_path(branch),
+           branch: branch,
+           target_branch: resolve_target_branch(task, opts),
+           repo: repo,
+           repo_path: repo_path
+         }}
+
+      _ ->
+        {:error, :no_repo}
+    end
+  end
+
   # Pre-existing complexity 15 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new
   # code is held to it; see the note in .credo.exs.
@@ -5275,6 +5391,12 @@ defmodule Wardmast.Worker.Dispatch do
         workspace = load_workspace(task)
         :ok = Agents.prepare(workspace, :agent)
 
+        # bd-cwigjh / #1550: a follow-up on a PR whose author is outside the
+        # workspace's pr_patrol scope may comment, never push. Decided here —
+        # the one seam a fresh dispatch and a resume both pass through — so the
+        # credential plan and the briefing below both see it.
+        opts = apply_push_guard(task, opts, workspace)
+
         # Order matters: apply the provider (agent_type) override first so it
         # can strip the routed, provider-specific model, then the bd-8cn795
         # thrash auto-escalation (a *default*, not an override), then let an
@@ -5724,7 +5846,7 @@ defmodule Wardmast.Worker.Dispatch do
   # A podman run holds no credential by design: the host pushes its branch after
   # `arb done` (bd-capkj9), so it plans as `host_pushes?` (bd-7rxy1c).
   defp git_credential_plan(workspace, policy, opts) do
-    role = if Keyword.get(opts, :review, false), do: :reviewer, else: :implementer
+    role = git_credential_role(opts)
 
     GitCredential.plan(workspace, Keyword.get(opts, :repo),
       role: role,
@@ -5732,6 +5854,14 @@ defmodule Wardmast.Worker.Dispatch do
       host_pushes?: ContainerSpawn.podman?(policy),
       remote_node?: Keyword.get(opts, :node) != nil
     )
+  end
+
+  # A reviewer is handed no push credential. So is a follow-up whose push the
+  # author-scope guard refused (`apply_push_guard/3`, bd-cwigjh).
+  defp git_credential_role(opts) do
+    if Keyword.get(opts, :review, false) or Keyword.has_key?(opts, :push_refused),
+      do: :reviewer,
+      else: :implementer
   end
 
   defp git_credential_checked({:ok, _type} = ok, workspace, policy, opts) do

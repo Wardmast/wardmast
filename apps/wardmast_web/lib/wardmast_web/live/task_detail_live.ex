@@ -70,6 +70,7 @@ defmodule WardmastWeb.TaskDetailLive do
   alias Wardmast.Mergers
   alias Wardmast.Messages.Message
   alias Wardmast.ReviewGate.Round
+  alias Wardmast.Sessions.Pair
   alias Wardmast.Sessions.Refine
   alias Wardmast.Skills.Selection
   alias Wardmast.Tasks.Attention
@@ -221,11 +222,15 @@ defmodule WardmastWeb.TaskDetailLive do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Wardmast.PubSub, @tasks_topic)
       Phoenix.PubSub.subscribe(Wardmast.PubSub, @workers_topic)
+      # bd-7p6a9o: a pair session ended elsewhere (the dock's Kill, the idle
+      # reaper) swaps Done/End back for Pair on this page.
+      Phoenix.PubSub.subscribe(Wardmast.PubSub, Wardmast.Sessions.lifecycle_topic())
     end
 
     {:ok,
      socket
      |> assign(:task_id, task_id)
+     |> assign(:pair_finishing, false)
      |> assign(:parent_refs, [])
      |> assign(:priority_schedule, nil)
      |> assign(:floor_summary, nil)
@@ -358,6 +363,9 @@ defmodule WardmastWeb.TaskDetailLive do
   def handle_info({:mailbox_cleared, _workspace_id}, socket) do
     {:noreply, refresh_messages(socket)}
   end
+
+  # bd-7p6a9o: any session ending may be this ticket's pair session.
+  def handle_info({:session_ended, _session_id}, socket), do: {:noreply, refresh_pair(socket)}
 
   # bd-8vnuy3: re-read the in-flight spend while a pass is running. Only the
   # spend and its threshold state move; the estimate it is read against was
@@ -571,6 +579,35 @@ defmodule WardmastWeb.TaskDetailLive do
   def handle_event("refine", _params, socket) do
     {:noreply, WardmastWeb.RefineEntry.open(socket, socket.assigns.task)}
   end
+
+  # bd-7p6a9o: the pair session. The rules live in `Wardmast.Sessions.Pair`;
+  # `WardmastWeb.PairEntry` says what happened.
+  def handle_event("pair", _params, %{assigns: %{task: %Issue{} = task}} = socket) do
+    {:noreply, socket |> WardmastWeb.PairEntry.open(task) |> refresh_pair()}
+  end
+
+  def handle_event("pair_end", _params, %{assigns: %{task: %Issue{} = task}} = socket) do
+    {:noreply, socket |> WardmastWeb.PairEntry.close(task) |> refresh_pair()}
+  end
+
+  # A second Done while one runs would only be refused by the lock; say nothing.
+  def handle_event("pair_done", _params, %{assigns: %{pair_finishing: true}} = socket),
+    do: {:noreply, socket}
+
+  # Done runs the repo's pre-push checks — minutes, not milliseconds — so it
+  # goes through `start_async/3`, like Dispatch, and reports when it lands.
+  def handle_event("pair_done", _params, %{assigns: %{task: %Issue{}}} = socket) do
+    task_id = socket.assigns.task_id
+
+    {:noreply,
+     socket
+     |> assign(:pair_finishing, true)
+     |> put_flash(:info, "Running Done: the commit gate first, then the hand-off.")
+     |> start_async(:pair_done, fn -> Pair.finish(task_id) end)}
+  end
+
+  def handle_event(event, _params, socket) when event in ~w(pair pair_end pair_done),
+    do: {:noreply, socket}
 
   def handle_event("promote_to_ready", _params, socket) do
     case socket.assigns.task do
@@ -883,6 +920,22 @@ defmodule WardmastWeb.TaskDetailLive do
      |> refresh_all()}
   end
 
+  def handle_async(:pair_done, {:ok, result}, socket) do
+    {:noreply,
+     socket
+     |> assign(:pair_finishing, false)
+     |> WardmastWeb.PairEntry.done_result(result)
+     |> refresh_all()}
+  end
+
+  def handle_async(:pair_done, {:exit, reason}, socket) do
+    {:noreply,
+     socket
+     |> assign(:pair_finishing, false)
+     |> WardmastWeb.PairEntry.done_result({:error, {:finish_crashed, reason}})
+     |> refresh_all()}
+  end
+
   # The task/worktree may have been left half-provisioned, so refresh rather
   # than assuming nothing happened.
   def handle_async(:dispatch, {:exit, reason}, socket) do
@@ -1123,6 +1176,7 @@ defmodule WardmastWeb.TaskDetailLive do
     |> assign(:load_tokens, %{})
     |> assign(task: nil, acceptance_items: [], implementer_pin: nil, workspace: nil, worker: nil)
     |> assign(:attention, nil)
+    |> assign(:pair_session, nil)
     |> assign(runs: [], usage_by_run: %{}, issue_repo: nil, prior_mr_refs: [])
     |> assign(review_rounds: [], review_summary: nil)
     |> assign(:relationship_groups, @empty_relationship_groups)
@@ -1261,9 +1315,24 @@ defmodule WardmastWeb.TaskDetailLive do
       implementer_pin: implementer_pin(task),
       workspace: fetch_workspace(task),
       worker: fetch_worker(task_id),
-      attention: attention_for(task)
+      attention: attention_for(task),
+      pair_session: live_pair_session(task_id)
     }
   end
+
+  # bd-7p6a9o: the ticket's live pair session, which swaps the Pair button for
+  # Done and End and steps Dispatch aside.
+  defp live_pair_session(task_id) do
+    case Pair.live_session(task_id) do
+      {:ok, session} -> session
+      :none -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp refresh_pair(socket),
+    do: assign(socket, :pair_session, live_pair_session(socket.assigns.task_id))
 
   # bd-8nlez1: the ticket's attention — who has to act on it, and the note a
   # hand-off or an expired limit left — for the header's attention strip.
@@ -2441,6 +2510,33 @@ defmodule WardmastWeb.TaskDetailLive do
               :if={WardmastWeb.RefineEntry.eligible?(@task)}
               id="task-refine"
             />
+            <%!-- Pair (bd-7p6a9o): a hands-on agent session in this ticket's
+                  worktree, worked together. Offered where
+                  `Wardmast.Sessions.Pair.eligible?/1` accepts the ticket and
+                  no worker is on it; while the session lives it claims the
+                  ticket, Done and End stand in its place, and Dispatch steps
+                  aside — no worker can start on a claimed ticket. --%>
+            <WardmastWeb.PairEntry.pair_button
+              :if={
+                is_nil(@pair_session) and is_nil(@worker) and WardmastWeb.PairEntry.eligible?(@task)
+              }
+              id="task-pair"
+            />
+            <span
+              :if={@pair_session}
+              id="task-pair-claim"
+              class="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-field)] text-xs font-medium text-[var(--arb-live)] bg-[var(--arb-raised-hover)] transition-colors duration-150"
+              title="A live pair session claims this ticket: no worker starts on it until the session ends"
+            >
+              <WardmastWeb.CoreComponents.Core.icon name="hero-user-group-mini" /> Pairing
+            </span>
+            <WardmastWeb.PairEntry.done_button
+              :if={@pair_session}
+              id="task-pair-done"
+              finishing={@pair_finishing}
+              variant={if @task.state == :backlog, do: "secondary", else: "primary"}
+            />
+            <WardmastWeb.PairEntry.end_button :if={@pair_session} id="task-pair-end" />
             <%!-- The one door out of Backlog. Gone the moment it is used —
                   nothing to click twice. --%>
             <WardmastWeb.CoreComponents.Core.button
@@ -2474,7 +2570,7 @@ defmodule WardmastWeb.TaskDetailLive do
                   is promotion. Dispatching Backlog work stays possible — it
                   just stops being the thing the eye lands on. --%>
             <WardmastWeb.CoreComponents.Core.button
-              :if={is_nil(@worker)}
+              :if={is_nil(@worker) and is_nil(@pair_session)}
               size="sm"
               variant={if @task.state == :backlog, do: "secondary", else: "primary"}
               phx-click="open_dispatch"

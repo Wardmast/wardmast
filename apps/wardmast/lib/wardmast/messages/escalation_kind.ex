@@ -94,6 +94,7 @@ defmodule Wardmast.Messages.EscalationKind do
     :operator_login_lapsed,
     :overage_alert,
     :engagement_failed,
+    :pr_patrol_check_follow_up_cap,
     :pr_patrol_dispatch_failed,
     :quota_grant_failing,
     :quota_poll_failing,

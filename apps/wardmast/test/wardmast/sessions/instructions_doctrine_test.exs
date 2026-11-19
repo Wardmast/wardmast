@@ -40,6 +40,19 @@ defmodule Wardmast.Sessions.InstructionsDoctrineTest do
       end
     end
 
+    # bd-7p6a9o: a session kind's own instruction set (the pair session's) is
+    # rendered instead of the coordinator doctrine, never into it.
+    test "never embeds a session kind's own instruction set" do
+      assert :pair in Doctrine.session_sets()
+
+      for can_dispatch <- [true, false], name <- Doctrine.session_sets() do
+        doc = Instructions.render(session(), primary_checkout: nil, can_dispatch: can_dispatch)
+
+        refute doc =~ Doctrine.render(name, %{can_dispatch: can_dispatch}),
+               "coordinator session instructions embed the #{name} session instruction set"
+      end
+    end
+
     test "carries the command reference and the filing conventions" do
       doc = Instructions.render(session(), primary_checkout: nil)
 

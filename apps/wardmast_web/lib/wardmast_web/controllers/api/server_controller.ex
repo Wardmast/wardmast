@@ -130,6 +130,8 @@ defmodule WardmastWeb.Api.ServerController do
       |> Application.get_env(:worker_jail_unmask, [])
       |> List.wrap()
       |> Enum.filter(&is_binary/1)
+      # #1545: `Hide.unmask/2` ignores the glab OAuth dir, so don't report it.
+      |> Enum.reject(&String.contains?(&1, ".config/glab-cli"))
 
     json(conn, %{paths: paths})
   end

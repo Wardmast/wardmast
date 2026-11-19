@@ -604,6 +604,79 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
       assert result.status == :warn
       assert result.detail =~ "off-ws"
     end
+
+    # bd-cwigjh / #1550: `author_logins: "*"` makes patrol act on every PR/MR in
+    # the repo — pushing merge commits onto colleagues' branches.
+    test "warns when author_logins \"*\" makes patrol act on everyone's PRs/MRs on a forge" do
+      ws = %{
+        "name" => "open-ws",
+        "config" => %{
+          "merge" => %{"strategy" => "gitlab"},
+          "pr_patrol" => %{"author_logins" => "*"}
+        }
+      }
+
+      stub_healthy([{{"get", "/api/workspaces"}, {%{"data" => [ws]}, 200}}])
+
+      result = by_id(Checks.run(), "pr_patrol")
+      assert result.status == :warn
+      assert result.detail =~ "open-ws"
+      assert result.detail =~ "every author"
+      assert result.hint =~ "author_logins"
+    end
+
+    test "a list containing \"*\" warns too" do
+      ws = %{
+        "name" => "open-ws",
+        "config" => %{
+          "merge" => %{"strategy" => "github"},
+          "pr_patrol" => %{"author_logins" => ["alice", "*"]}
+        }
+      }
+
+      stub_healthy([{{"get", "/api/workspaces"}, {%{"data" => [ws]}, 200}}])
+      assert by_id(Checks.run(), "pr_patrol").status == :warn
+    end
+
+    test "does not warn for the safe default (unset) or an explicit login list" do
+      unset = %{
+        "name" => "default-ws",
+        "config" => %{"merge" => %{"strategy" => "gitlab"}}
+      }
+
+      listed = %{
+        "name" => "listed-ws",
+        "config" => %{
+          "merge" => %{"strategy" => "github"},
+          "pr_patrol" => %{"author_logins" => ["ryanborn"]}
+        }
+      }
+
+      stub_healthy([{{"get", "/api/workspaces"}, {%{"data" => [unset, listed]}, 200}}])
+      assert by_id(Checks.run(), "pr_patrol").status == :ok
+    end
+
+    test "does not warn for \"*\" on a workspace with patrol disabled or no forge" do
+      off = %{
+        "name" => "off-ws",
+        "config" => %{
+          "merge" => %{"strategy" => "github"},
+          "pr_patrol" => %{"author_logins" => "*", "enabled" => false}
+        }
+      }
+
+      no_forge = %{
+        "name" => "direct-ws",
+        "config" => %{"pr_patrol" => %{"author_logins" => "*"}}
+      }
+
+      stub_healthy([{{"get", "/api/workspaces"}, {%{"data" => [no_forge]}, 200}}])
+      assert by_id(Checks.run(), "pr_patrol").status == :ok
+
+      stub_healthy([{{"get", "/api/workspaces"}, {%{"data" => [off]}, 200}}])
+      result = by_id(Checks.run(), "pr_patrol")
+      refute result.detail =~ "every author"
+    end
   end
 
   # SI1a (OD13): the pinned upstream CLI versions.

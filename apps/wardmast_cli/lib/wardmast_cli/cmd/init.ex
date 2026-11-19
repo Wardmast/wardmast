@@ -120,6 +120,11 @@ defmodule WardmastCli.Cmd.Init do
   # `Wardmast.Doctrine` also renders into every session's CLAUDE.md. The
   # escript cannot depend on that app, so it embeds the very same files at
   # compile time — one text, two renderers (bd-6dpdwm).
+  #
+  # Only the top level (`*.md.eex`) is the coordinator doctrine. The session
+  # instruction sets under `sessions/` (bd-7p6a9o's `pair`) are what other
+  # session kinds render *instead of* it, so a coordinator home's AGENTS.md
+  # never carries them, and this glob does not descend into that directory.
   @doctrine_dir Path.expand(
                   Path.join([__DIR__, "..", "..", "..", "..", "wardmast", "priv", "doctrine"])
                 )
@@ -136,6 +141,9 @@ defmodule WardmastCli.Cmd.Init do
     raise "no bundled doctrine found under #{@doctrine_dir}"
   end
 
+  # The doctrine directory itself, so a section added there recompiles this
+  # module (the per-file resources below only cover files that already exist).
+  @external_resource @doctrine_dir
   @external_resource @agents_md
   @external_resource @operator_guide
   @external_resource @memory_md

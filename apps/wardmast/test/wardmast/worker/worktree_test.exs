@@ -877,6 +877,41 @@ defmodule Wardmast.Worker.WorktreeTest do
     end
   end
 
+  # bd-7p6a9o: the hooks a pair session's push guard runs behind it.
+  describe "hooks_dir/1" do
+    test "a linked worktree shares its repository's hooks dir, not its own gitdir", %{
+      repo: repo
+    } do
+      {:ok, path} = Worktree.create(repo, "feature/hooks", "main")
+
+      hooks = Worktree.hooks_dir(path)
+
+      assert is_binary(hooks)
+      assert Path.type(hooks) == :absolute
+      assert hooks == Worktree.hooks_dir(repo)
+      assert hooks |> Path.dirname() |> Path.basename() == ".git"
+      assert Path.basename(hooks) == "hooks"
+    end
+
+    test "the repository's core.hooksPath wins", %{repo: repo, tmp: tmp} do
+      {:ok, path} = Worktree.create(repo, "feature/hooks-path", "main")
+      custom = Path.join(tmp, "custom-hooks")
+      File.mkdir_p!(custom)
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "core.hooksPath", custom])
+
+      hooks = Worktree.hooks_dir(path)
+
+      # Compared by inode: git prints a realpath, and the tmp dir may sit
+      # behind a symlink (macOS).
+      assert File.stat!(hooks).inode == File.stat!(custom).inode
+    end
+
+    test "nil for a path that does not exist, or no path", %{tmp: tmp} do
+      assert Worktree.hooks_dir(Path.join(tmp, "missing")) == nil
+      assert Worktree.hooks_dir(nil) == nil
+    end
+  end
+
   describe "has_uncommitted?/1" do
     test "false on a clean worktree, true once a file is touched", %{repo: repo} do
       {:ok, path} = Worktree.create(repo, "feature/dirty", "main")

@@ -801,6 +801,76 @@ defmodule Wardmast.Workflows.MergeQueueConflictTest do
       assert Wardmast.Worker.whereis(task.id) == nil
     end
 
+    # bd-7x0crw: the forge's head is `origin/<branch>`; a stale/divergent local
+    # branch ref that already contains the target's tip must not make a real
+    # conflict on the pushed head read as phantom.
+    test "a conflict on the pushed head is not phantom when the local branch ref is stale",
+         %{workspace: ws, task: task, repo: repo, tmp: tmp} do
+      branch = Wardmast.Worker.BranchNamer.derive(task)
+
+      # Remote branch: cut from the initial commit, edits README.
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", branch])
+      File.write!(Path.join(repo, "README.md"), "branch side\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-am", "branch edit"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", branch])
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "main"])
+
+      # Target moves on with a conflicting edit (pushed from another clone).
+      other = Path.join(tmp, "other")
+      {_, 0} = System.cmd("git", ["clone", "-q", Path.join(tmp, "repo-remote.git"), other])
+      {_, 0} = System.cmd("git", ["-C", other, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", other, "config", "user.name", "T"])
+      File.write!(Path.join(other, "README.md"), "main side\n")
+      {_, 0} = System.cmd("git", ["-C", other, "commit", "-q", "-am", "main edit"])
+      {_, 0} = System.cmd("git", ["-C", other, "push", "-q", "origin", "main"])
+
+      # Local branch ref is stale/divergent AND already contains the new
+      # target tip; local `main` is stale too.
+      {_, 0} = System.cmd("git", ["-C", repo, "fetch", "-q", "origin", "main"])
+      {_, 0} = System.cmd("git", ["-C", repo, "branch", "-f", branch, "origin/main"])
+
+      assert {:ok, info} =
+               Wardmast.Workflows.MergeQueue.ConflictResolver.resolve(%{
+                 task_id: task.id,
+                 workspace_id: ws.id,
+                 repo_path: repo,
+                 repo: "test/repo",
+                 target_branch: "main",
+                 start_claude: false
+               })
+
+      refute info == :no_op
+      stop_pass(info)
+    end
+
+    test "a phantom verdict is re-evaluated when the target sha changes",
+         %{workspace: ws, task: task, repo: repo} do
+      branch = Wardmast.Worker.BranchNamer.derive(task)
+      {_, 0} = System.cmd("git", ["-C", repo, "branch", branch, "main"])
+
+      args = %{
+        task_id: task.id,
+        workspace_id: ws.id,
+        repo_path: repo,
+        repo: "test/repo",
+        target_branch: "main",
+        start_claude: false
+      }
+
+      assert {:ok, :no_op} = Wardmast.Workflows.MergeQueue.ConflictResolver.resolve(args)
+
+      File.write!(Path.join(repo, "README.md"), "moved\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-am", "target moved"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      assert {:ok, info} = Wardmast.Workflows.MergeQueue.ConflictResolver.resolve(args)
+      refute info == :no_op
+      stop_pass(info)
+    end
+
+    defp stop_pass(%{worker_pid: pid}) when is_pid(pid), do: GenServer.stop(pid, :normal, 1_000)
+    defp stop_pass(_), do: :ok
+
     # bd-4wy1w1 (P5): in git layout B the task branch lives in the worker's
     # private clone, and the main repo has it only once it is synced back. A
     # clone already at the target's tip must still read as nothing to rebase.

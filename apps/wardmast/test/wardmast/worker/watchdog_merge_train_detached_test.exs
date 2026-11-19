@@ -190,4 +190,17 @@ defmodule Wardmast.Worker.WatchdogMergeTrainDetachedTest do
     assert :ok = MergeTrain.acquire_merge(key, "another-mr")
     :ok = MergeTrain.release_merge(key, "another-mr")
   end
+
+  test "a skipped head is never merged by the worker-less retry (#1564)", %{ws: ws} do
+    reviewed = sha("skipped")
+    task = pending_task(ws, "!ds", reviewed)
+
+    StubMerger.queue_get("!ds", [
+      green(reviewed) |> Map.put(:pipeline, :neutral) |> Map.put(:pipeline_skipped, true)
+    ])
+
+    pid = start_retry(task, "!ds", ws, reviewed)
+    wait_until(fn -> polls(pid) >= 4 end)
+    assert StubMerger.merge_count("!ds") == 0
+  end
 end

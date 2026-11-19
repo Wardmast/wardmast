@@ -113,6 +113,12 @@ defmodule Wardmast.Sessions.Refine do
   "Live" means the row is not `:ended` — `:starting` counts, because a session
   whose scope is still coming up is exactly the one a second click must not
   duplicate.
+
+  Only a refine session answers: a refine session is a `:coordinator`-kind row
+  carrying an `issue_id`, and a `:pair` session (bd-7p6a9o) is bound to its
+  ticket through the same column. Without the kind filter
+  `Wardmast.Sessions.RefineLifecycle` would read a live pair session as its
+  ticket's refine session and end it on the ticket's first non-Backlog update.
   """
   @spec live_session(String.t() | nil) :: {:ok, Session.t()} | :none
   def live_session(nil), do: :none
@@ -120,7 +126,7 @@ defmodule Wardmast.Sessions.Refine do
 
   def live_session(issue_id) when is_binary(issue_id) do
     Session
-    |> Ash.Query.filter(issue_id == ^issue_id and status != :ended)
+    |> Ash.Query.filter(issue_id == ^issue_id and kind == :coordinator and status != :ended)
     |> Ash.Query.sort(started_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()
@@ -182,7 +188,7 @@ defmodule Wardmast.Sessions.Refine do
 
   def latest_session(issue_id) when is_binary(issue_id) do
     Session
-    |> Ash.Query.filter(issue_id == ^issue_id)
+    |> Ash.Query.filter(issue_id == ^issue_id and kind == :coordinator)
     |> Ash.Query.sort(started_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()

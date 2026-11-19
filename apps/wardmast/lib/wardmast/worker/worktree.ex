@@ -1740,6 +1740,33 @@ defmodule Wardmast.Worker.Worktree do
   end
 
   @doc """
+  The hooks directory git runs for the checkout at `path`, as an absolute
+  path: the repository's own `core.hooksPath` when it sets one, else
+  `<common git dir>/hooks` — so a linked worktree shares its repository's. `nil`
+  when `path` is not a git checkout.
+
+  Resolved through this module's guarded git (bd-6t7u81), so a checkout whose
+  `.git` a worker replaced answers `nil` rather than a hooks directory the
+  worker chose. A pair session's push guard (`Wardmast.Sessions.PairGuard`,
+  bd-7p6a9o) runs the hooks found here behind it.
+  """
+  @spec hooks_dir(path() | nil) :: path() | nil
+  def hooks_dir(path) when is_binary(path) do
+    case run_git(["rev-parse", "--path-format=absolute", "--git-path", "hooks"], cd: path) do
+      {:ok, out} ->
+        case String.trim(out) do
+          "" -> nil
+          dir -> dir
+        end
+
+      {:error, _} ->
+        nil
+    end
+  end
+
+  def hooks_dir(_path), do: nil
+
+  @doc """
   Top-level directories under `root` that are dead worktree leaves: their
   `.git` is a `gitdir: <path>` file whose metadata directory no longer exists
   (pruned, or its repository was deleted), so no `git worktree` command will

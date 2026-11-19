@@ -1892,6 +1892,9 @@ defmodule Wardmast.MCP.Tools do
   defdelegate epic_floor(scope, args), to: Wardmast.MCP.Tools.Task
   defdelegate ticket_handoff(scope, args), to: Wardmast.MCP.Tools.Task
   defdelegate ticket_handback(scope, args), to: Wardmast.MCP.Tools.Task
+  defdelegate pair_open(scope, args), to: Wardmast.MCP.Tools.Pair
+  defdelegate pair_done(scope, args), to: Wardmast.MCP.Tools.Pair
+  defdelegate pair_end(scope, args), to: Wardmast.MCP.Tools.Pair
   defdelegate task_sync_upstream_close(scope, args), to: Wardmast.MCP.Tools.Task
   defdelegate dep_add(scope, args), to: Wardmast.MCP.Tools.Task
   defdelegate dep_remove(scope, args), to: Wardmast.MCP.Tools.Task

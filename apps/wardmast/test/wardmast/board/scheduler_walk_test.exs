@@ -577,4 +577,19 @@ defmodule Wardmast.Board.SchedulerWalkTest do
     refute Map.has_key?(plan, :placements)
     refute Enum.any?(plan.entries, &Map.has_key?(&1, :wait_cause))
   end
+
+  describe "a pair-session claim (bd-7p6a9o)" do
+    @session "5b1e0c2a-0000-4000-8000-000000000003"
+
+    test "a claimed card is an own hold, never placed, and the next card goes" do
+      plan = walk(ready: [card("bd-1"), card("bd-2")], card_pair: %{"bd-1" => {:hold, @session}})
+
+      claimed = entry(plan, "bd-1")
+
+      assert %{state: :blocked, wait_cause: :own_hold, hold: {:pair_session, @session}} = claimed
+      assert claimed.reason =~ "held — claimed by a live pair session"
+      assert plan.promote == "bd-2"
+      refute Enum.any?(plan.placements, &(&1.id == "bd-1"))
+    end
+  end
 end

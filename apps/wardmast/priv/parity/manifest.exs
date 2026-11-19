@@ -221,6 +221,31 @@
       status: :partial,
       note: "Same handoff behaviour and divergences as ticket_handoff (D-T-13, D-T-28)."
     },
+    # bd-7p6a9o: the pair session — a hands-on agent session bound to one ticket.
+    %{
+      id: "tickets/open_a_pair_session",
+      title: "Open a pair session on a ticket",
+      mcp: ["pair_open"],
+      cli: ["arb pair"],
+      rest: ["POST /api/issues/:id/pair"],
+      status: :full
+    },
+    %{
+      id: "tickets/finish_a_pair_session",
+      title: "Finish a pair session (Done)",
+      mcp: ["pair_done"],
+      cli: ["arb pair done"],
+      rest: ["POST /api/issues/:id/pair/done"],
+      status: :full
+    },
+    %{
+      id: "tickets/end_a_pair_session",
+      title: "End a pair session without Done",
+      mcp: ["pair_end"],
+      cli: ["arb pair end"],
+      rest: ["DELETE /api/issues/:id/pair"],
+      status: :full
+    },
     %{
       id: "tickets/grant_or_deny_a_requested_permission",
       title: "Grant or deny a requested permission",
