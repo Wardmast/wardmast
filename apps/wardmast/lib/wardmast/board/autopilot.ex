@@ -881,8 +881,9 @@ defmodule Wardmast.Board.Autopilot do
   end
 
   # DC8 (E8, design §3.6): the provider budgets' server announces each published
-  # budget change on this module's "board" topic. A rise is a freed seat: it plans a pass, as a worker finishing does. A fall stops nothing
-  # (no budget stops a run).
+  # budget change on this module's "board" topic. A rise is a freed seat: it plans
+  # a pass, as a worker finishing does. A fall stops nothing (no budget stops a
+  # run).
   def handle_info({:budget_changed, _pool, from, to, _reason}, state) do
     if budget_rise?(from, to),
       do: {:noreply, request_plan(state)},
