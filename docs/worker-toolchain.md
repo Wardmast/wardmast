@@ -105,3 +105,21 @@ publisher's job.
 * `claude_session_test.exs`, `prepush_check_test.exs`, `test_run_test.exs`: the
   three host call sites (pinned `PATH` first; unavailable runs nothing).
 * `image_test.exs`: unsupported pin and Containerfile mismatch fail the plan.
+
+## Headless Chromium in the base (bd-6301r0)
+
+The shared worker base installs `chromium` and `chromium-common` pinned to an exact
+build (`@chromium_version` in `Wardmast.Worker.Image`), fetched from a fixed
+`snapshot.debian.org` timestamp (`@chromium_snapshot`, trixie + trixie-security) so the
+build still finds it after Debian drops superseded builds from the live mirrors. Bump the
+version and the snapshot together, on purpose; the Containerfile text changes, so the base
+hash changes and the release rebuilds it. The snapshot sources are `http://` because
+`debian:trixie-slim` has no `ca-certificates` until the first `apt-get install`; integrity
+comes from `Signed-By` (the Debian archive keyring) and the signed `InRelease`, with
+`Check-Valid-Until=false` because snapshot metadata is old by design. `fonts-liberation`
+is installed too. The installed version is recorded in the release job summary. The image
+sets `ARB_CHROME=/usr/bin/chromium`, so the `:browser` tests in
+`apps/wardmast_web` run (rather than skip) in the image when Node is present. No
+Playwright driver ships: those tests speak CDP directly. Release CI builds the base
+locally and runs `scripts/worker-image-smoke.sh` (screenshots a page inside the image)
+before pushing it, and prints the image size to the job summary.

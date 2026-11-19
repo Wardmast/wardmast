@@ -284,6 +284,19 @@ defmodule Wardmast.Worker.JailHideTest do
       refute Path.join(fx.home, ".codex") in dirs
     end
 
+    test ":unmask can never expose the operator's glab OAuth dir (refresh-token rotation, #1545)",
+         %{fx: fx} do
+      glab = Path.join(fx.home, ".config/glab-cli")
+      File.mkdir_p!(glab)
+      File.write!(Path.join(glab, "config.yml"), "token: SECRET")
+
+      for entry <- [glab, Path.join(glab, "config.yml")] do
+        %{dirs: dirs, keep: keep} = Hide.paths(Keyword.put(fx.opts, :unmask, [entry]))
+        assert glab in dirs
+        refute Enum.any?(keep, &String.starts_with?(&1, glab))
+      end
+    end
+
     test "a symlinked credential dir is masked at its real path", %{base: base, fx: fx} do
       real = Path.join(base, "dotfiles-claude")
       File.mkdir_p!(real)

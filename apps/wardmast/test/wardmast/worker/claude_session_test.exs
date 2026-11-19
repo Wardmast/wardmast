@@ -202,6 +202,29 @@ defmodule Wardmast.Worker.ClaudeSessionTest do
                ClaudeSession.start(worktree_path: System.tmp_dir!(), command: [@fixture])
     end
 
+    test "the child's GLAB_CONFIG_DIR is the isolated dir, never the operator's glab login (#1545)" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("cs-glab-iso")
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: ["sh", "-c", ~s(echo "glabdir=$GLAB_CONFIG_DIR"; echo arb done)],
+          topic: "worker:#{task_id}"
+        )
+
+      eventually(fn ->
+        case Worker.state(pid) do
+          %{meta: %{exit_status: status}} when not is_nil(status) -> status
+          _ -> nil
+        end
+      end)
+
+      expected = "glabdir=" <> Wardmast.Worker.GlabIsolation.dir()
+      assert Enum.any?(Worker.state(pid).meta.output_lines, &String.contains?(&1, expected))
+    end
+
     test "redacts a CLAUDE_CODE_OAUTH_TOKEN carried in the caller-explicit :env from output (bd-2zigo1)" do
       {pid, task_id} = start_worker()
       cwd = tmp_dir!("cs-oauth-redact")

@@ -4,6 +4,7 @@ defmodule Wardmast.Agents.GeminiTest do
   require Ash.Query
 
   alias Wardmast.Agents.Gemini
+  alias Wardmast.Agents.Gemini.ConfigDir
   alias Wardmast.Agents.SecurityPolicy
   alias Wardmast.Guardrails.Projection
   alias Wardmast.Worker.Jail
@@ -257,7 +258,7 @@ defmodule Wardmast.Agents.GeminiTest do
                )
 
       {jail, command} = jail_and_command(argv)
-      home = Wardmast.Agents.Gemini.ConfigDir.path(worktree_path: worktree)
+      home = ConfigDir.path(worktree_path: worktree)
 
       assert [^bwrap, "--ro-bind", "/", "/" | _] = jail
       assert ["--bind", worktree, worktree] in Enum.chunk_every(jail, 3, 1)
@@ -268,6 +269,45 @@ defmodule Wardmast.Agents.GeminiTest do
       assert [^agy, "-p", "the prompt" | _] = command
       refute "--sandbox" in command
       refute "--dangerously-skip-permissions" in command
+    end
+
+    # bd-8oqkj2: the posture (`toolPermission` + `permissions.deny`) is a file in
+    # the writable agy HOME; only the file is read-only, because agy writes other
+    # files beside it (`cache/onboarding.json`).
+    test "settings.json is bound read-only, after the writable HOME, and is there to bind",
+         %{worktree: worktree} do
+      assert {:ok, argv} =
+               default_argv("p", security: policy(:bypass), worktree_path: worktree)
+
+      jail = jail_argv_only(argv)
+      chunks = Enum.chunk_every(jail, 3, 1)
+      home = ConfigDir.path(worktree_path: worktree)
+      settings = ConfigDir.settings_path(worktree_path: worktree)
+
+      assert settings == Path.join([home, ".gemini", "antigravity-cli", "settings.json"])
+      # `--ro-bind`, not `-try`: a missing file refuses the jail rather than
+      # leaving the posture writable
+      assert ["--ro-bind", settings, settings] in chunks
+      refute ["--ro-bind-try", settings, settings] in chunks
+      assert Enum.find_index(jail, &(&1 == settings)) > Enum.find_index(jail, &(&1 == home))
+
+      # the directory and the HOME stay writable: agy's cache lives beside it
+      assert ["--bind", home, home] in chunks
+      refute ["--ro-bind", Path.dirname(settings), Path.dirname(settings)] in chunks
+
+      # generated before the jail binds it, carrying this spawn's deny list
+      assert File.read!(settings) =~ "deny"
+    end
+
+    test "a spawn whose settings.json cannot be generated is refused, not jailed without it",
+         %{worktree: worktree, base: base} do
+      # a regular file where the HOME root must be a directory
+      blocker = Path.join(base, "not-a-dir")
+      File.write!(blocker, "")
+      Application.put_env(:wardmast, :worker_agy_home_root, blocker)
+
+      assert {:error, _} =
+               default_argv("p", security: policy(:bypass), worktree_path: worktree)
     end
 
     # bd-cfktou (G6): agy's jail runs in a network namespace whose only way
@@ -765,10 +805,13 @@ defmodule Wardmast.Agents.GeminiTest do
         assert {:ok, ^jailed} =
                  Jail.wrap(command,
                    worktree: worktree,
-                   home: Wardmast.Agents.Gemini.ConfigDir.path(worktree_path: worktree),
+                   home: ConfigDir.path(worktree_path: worktree),
+                   readonly_paths: [
+                     ConfigDir.settings_path(worktree_path: worktree)
+                   ],
                    writable_paths: ["/opt/extra"],
                    worktree_readonly: false,
-                   keyring: Wardmast.Agents.Gemini.ConfigDir.keyring_available?(),
+                   keyring: ConfigDir.keyring_available?(),
                    hide_reads: true
                  )
 

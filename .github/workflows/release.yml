@@ -541,6 +541,7 @@ jobs:
 
       - name: Build and push the worker base
         id: base
+        shell: bash
         run: |
           REF="${WORKER_BASE}:${BASE_HASH}"
           # The tag is the content hash of the pinned Containerfile: an existing tag is
@@ -552,18 +553,25 @@ jobs:
             exit 0
           fi
           mkdir -p "${RUNNER_TEMP}/empty-context"
-          docker buildx build \
-            --platform linux/amd64 \
-            --provenance=false --sbom=false \
+          # Build once with --load, smoke it, then push that very image (retagged), so the
+          # published base is exactly the one that was tested.
+          docker buildx build --platform linux/amd64 --load \
             --file dist/Containerfile.worker-base \
             --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.licenses=FSL-1.1-ALv2" \
             --label "org.opencontainers.image.description=Wardmast shared worker image base" \
-            --tag "${REF}" \
-            --metadata-file "${RUNNER_TEMP}/base-metadata.json" \
-            --push \
+            --tag worker-base-smoke \
             "${RUNNER_TEMP}/empty-context"
-          jq -r '"digest=" + .["containerimage.digest"]' "${RUNNER_TEMP}/base-metadata.json" >> "$GITHUB_OUTPUT"
+          scripts/worker-image-smoke.sh worker-base-smoke docker
+          echo "worker base chromium: $(docker run --rm --entrypoint /bin/sh worker-base-smoke -c '"$ARB_CHROME" --version')" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "worker base size: $(docker image inspect worker-base-smoke --format '{{.Size}}') bytes" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          docker tag worker-base-smoke "${REF}"
+          docker push "${REF}" | tee "${RUNNER_TEMP}/base-push.log"
+          digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' "${RUNNER_TEMP}/base-push.log" | tail -n1)"
+          test -n "${digest}" || { echo "docker push printed no digest" >&2; exit 1; }
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Install Helm
         uses: azure/setup-helm@v4
