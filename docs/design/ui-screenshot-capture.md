@@ -311,8 +311,19 @@ pod:       for role in [before(base), after(head)]:
     (all eleven actions of §5.2), `wait_for`, `target`, `full_page` (clipped to 8000 px), `hide`
     and the theme's `local_storage`, with timezone UTC, locale `en-US`, the viewport's size and
     scale, reduced motion, animations off, a frozen clock (`2026-01-01T12:00:00Z`) and a
-    network-idle + font-ready wait. Isolation as before and a little more: a non-loopback
-    `base_url` is refused, the browser resolves no host but loopback and every non-loopback
+    network-idle + font-ready wait.
+  * **Isolation: the same capture sandbox as the command-line shooter, plus a little more.** The
+    runner (Node and Chromium) is started through `sandbox.browser/4`, never on the host: a
+    namespace of its own with no network but the `socat` bridge from `127.0.0.1:<port>` to the
+    booted app's socket (the only way to reach an app that listens inside its own sandbox), the
+    capture directory and the Chromium binary's directory read-only, the shot's `scratch` the
+    only writable path, and `env -i`. This is also what justifies Chromium's `--no-sandbox`
+    (§2). `Cdp.shoot/1` refuses a spec with no sandbox, booted `app` or scratch dir ("no capture
+    sandbox"), like `Shooter.Chromium`. The spec file (it can hold a fixture password) is
+    created `0600` in `scratch`, deleted by the runner as soon as it has read it, and `scratch` is
+    removed after the shot; the image is copied to `out_file` only when it is a regular file, and
+    a runner that answers "ok" with no image is a failed shot. Inside the browser, a
+    non-loopback `base_url` is refused, no host but loopback resolves and every non-loopback
     request is aborted.
   * `Shooter.Auto` is the capture step's default shooter: the command-line `Shooter.Chromium`
     keeps every shot it can do, `Shooter.Cdp` takes any shot for which
@@ -327,7 +338,10 @@ pod:       for role in [before(base), after(head)]:
     already holds on the sign-in page itself (it could not tell a failed login from a good one);
     and when the shot's route, or a step, lands back on the sign-in page. A sign-in page is
     never shot as an "after". `login.kind` `cmd` is not supported by this shooter (it fails the
-    shot with that reason).
+    shot with that reason). Each condition must be false on the sign-in page itself: one
+    its own URL already satisfies (say `url_not_contains: "error="` alone) cannot tell a failed
+    login from a good one, and the runner refuses the shot rather than trust it; use `path_not`
+    (or leave `success` unset) for that.
   * **Packaging: in the worker image, not a sidecar.** The shared base
     (`Image.base_containerfile/1`) gets the runner and `playwright-core` (`npm ci
     --ignore-scripts` from the lockfile, so version and integrity are pinned; no browser
@@ -347,6 +361,13 @@ pod:       for role in [before(base), after(head)]:
     `playwright-core` or Chromium is missing (`ARB_REQUIRE_CDP=1` makes that a failure).
     `RunnerImageTest` pins the Containerfile (runner and lockfile baked byte for byte, digest
     pin, node off `PATH`).
+    `CdpTest` also proves the sandbox seam: a recording sandbox shows the runner argv goes through
+    `browser/4` (capture directory and Chromium read-only, `scratch` the only writable path), and a
+    spec without sandbox, `app` or scratch starts nothing; `Bwrap.browser_argv/5` is unit-tested for
+    the extra read-only mounts. **Not covered:** the real runner is driven there through a
+    pass-through host sandbox (the fixture app listens on host loopback), so the real bwrap bridge
+    to Chromium's `--no-sandbox` renderer with the node runner is only checked by those argv tests,
+    not end to end on a host with bwrap.
   * **Where it runs today.** `Capture.run/2` still runs in the coordinator process on the host
     (the pod is N2), so a host needs Node and the runner's dependency: `npm ci` in
     `apps/wardmast/priv/capture`, or `ARB_CAPTURE_DIR` / `ARB_CAPTURE_NODE` pointing at a

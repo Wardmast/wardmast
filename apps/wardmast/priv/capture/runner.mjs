@@ -21,7 +21,7 @@
 // login does not succeed, or the shot's own navigation lands back on the sign-in page, the shot
 // fails with the reason.
 
-import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, unlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -389,6 +389,13 @@ async function main() {
   let spec
   try {
     spec = JSON.parse(readFileSync(process.argv[2], "utf8"))
+    // It can hold a fixture password and lives in the shot's directory, which the browser can
+    // see: gone before the browser starts.
+    try {
+      unlinkSync(process.argv[2])
+    } catch {
+      // the caller removes it too
+    }
   } catch (err) {
     emit({ ok: false, kind: "shot", reason: `cannot read the spec: ${firstLine(err)}` })
     return 0

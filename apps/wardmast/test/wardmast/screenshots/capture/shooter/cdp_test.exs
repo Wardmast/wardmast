@@ -10,6 +10,8 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
   alias Wardmast.Screenshots.Capture.Shooter.Cdp
   alias Wardmast.Screenshots.Capture.Shooter.Chromium
   alias Wardmast.Screenshots.Config
+  alias Wardmast.Test.CaptureHostSandbox
+  alias Wardmast.Test.CaptureRecordingSandbox
   alias Wardmast.Test.CdpFixtureApp
 
   @moduletag :tmp_dir
@@ -59,6 +61,12 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
         path: "/home",
         entry: entry(entry_overrides),
         out_file: Path.join(dir, "shot.png"),
+        # The shooter only ever runs node and Chromium through the capture sandbox, in the
+        # shot's own `scratch` (removed when the shot is done). This one passes the argv through
+        # to the host; the sandbox seam itself is exercised with a recording one below.
+        sandbox: CaptureHostSandbox,
+        app: %{port: 1},
+        scratch: Path.join(dir, "scratch-#{System.unique_integer([:positive])}"),
         config: struct!(Config, login: login),
         viewport: %{"width" => 800, "height" => 600, "device_scale_factor" => 1},
         theme: theme,
@@ -156,6 +164,99 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
     end
   end
 
+  describe "the capture sandbox" do
+    defp node_script(dir, name, body) do
+      path = Path.join(dir, name)
+      File.write!(path, "#!/bin/sh\n" <> body)
+      File.chmod!(path, 0o755)
+      path
+    end
+
+    defp capture_dir(dir) do
+      capture_dir = Path.join(dir, "capture")
+      File.mkdir_p!(capture_dir)
+      File.write!(Path.join(capture_dir, "runner.mjs"), "")
+      capture_dir
+    end
+
+    test "node and Chromium run through sandbox.browser/4, with only the scratch dir writable", %{
+      tmp_dir: dir
+    } do
+      node = node_script(dir, "recording-node", ~s(echo "$@" > #{dir}/node-argv\necho '{"ok":true}'\n))
+      capture_dir = capture_dir(dir)
+      scratch = Path.join(dir, "scratch")
+      app = %{port: 4321, socket: "/s/sock"}
+
+      spec =
+        shot(dir, %{
+          sandbox: CaptureRecordingSandbox,
+          app: app,
+          scratch: scratch,
+          ctx: %{node: node, capture_dir: capture_dir, chrome: "/bin/sh"}
+        })
+
+      # The runner "succeeds" but leaves no image: not a success.
+      assert {:error, {:shot, msg}} = Cdp.shoot(spec)
+      assert msg =~ "no image"
+
+      assert_received {:sandbox_browser, [^node, runner, spec_file], ^app, [^scratch], readonly}
+      assert runner == Path.join(capture_dir, "runner.mjs")
+      assert Path.dirname(spec_file) == scratch
+      # what the runner needs of the host: its own dir (node_modules) and the browser
+      assert capture_dir in readonly
+      assert "/bin/sh" in readonly
+      # it really ran, inside the wrapper
+      assert File.read!(Path.join(dir, "node-argv")) =~ "runner.mjs"
+      refute File.exists?(scratch)
+    end
+
+    test "the runner writes the image into the scratch dir and it is copied out", %{tmp_dir: dir} do
+      node =
+        node_script(dir, "writing-node", """
+        out=$(grep -o '"out_file":"[^"]*"' "$2" | cut -d'"' -f4)
+        printf 'PNGDATA' > "$out"
+        echo '{"ok":true}'
+        """)
+
+      spec =
+        shot(dir, %{
+          sandbox: CaptureRecordingSandbox,
+          ctx: %{node: node, capture_dir: capture_dir(dir), chrome: "/bin/sh"}
+        })
+
+      assert :ok = Cdp.shoot(spec)
+      assert File.read!(spec.out_file) == "PNGDATA"
+      refute File.exists?(spec.scratch)
+    end
+
+    test "a sandbox that cannot start the browser fails the shot with its reason", %{tmp_dir: dir} do
+      spec =
+        shot(dir, %{
+          sandbox: CaptureRecordingSandbox,
+          app: %{port: 1, fail: true},
+          ctx: %{node: "/bin/sh", capture_dir: capture_dir(dir), chrome: "/bin/sh"}
+        })
+
+      assert {:error, {:shot, msg}} = Cdp.shoot(spec)
+      assert msg =~ "could not start the browser"
+      assert msg =~ ":boom"
+    end
+
+    test "a spec without a sandbox, a booted app or a scratch dir starts nothing", %{tmp_dir: dir} do
+      ctx = %{node: "/bin/sh", chrome: "/bin/sh"}
+
+      for overrides <- [%{sandbox: nil}, %{app: nil}, %{scratch: nil}] do
+        assert {:error, {:shot, msg}} = Cdp.shoot(shot(dir, Map.merge(%{ctx: ctx}, overrides)))
+        assert msg =~ "no capture sandbox"
+      end
+
+      no_keys = dir |> shot(%{ctx: ctx}) |> Map.drop([:sandbox, :app, :scratch])
+      assert {:error, {:shot, msg}} = Cdp.shoot(no_keys)
+      assert msg =~ "no capture sandbox"
+      refute_received {:sandbox_browser, _, _, _, _}
+    end
+  end
+
   describe "refusals before any browser starts" do
     test "a login kind the runner cannot do is a clear shot error", %{tmp_dir: dir} do
       login = %{"kind" => "cmd", "cmd" => "x", "personas" => ["a"], "default_persona" => "a"}
@@ -234,9 +335,11 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
       assert msg =~ "no answer"
     end
 
-    test "the spec file (it holds a fixture password) is removed afterwards", %{tmp_dir: dir} do
-      assert :ok = run_fake(dir, ~s({"ok":true}))
-      assert Path.wildcard(Path.join(dir, ".cdp-spec-*")) == []
+    test "the shot's scratch dir (it held the spec with a fixture password) is gone afterwards",
+         %{tmp_dir: dir} do
+      spec = shot(dir, %{ctx: %{node: fake_node(dir, ~s({"ok":false}), 0), chrome: "/bin/sh"}})
+      assert {:error, {:shot, _}} = Cdp.shoot(spec)
+      refute File.exists?(spec.scratch)
     end
   end
 

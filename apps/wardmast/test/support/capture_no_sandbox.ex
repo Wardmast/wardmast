@@ -23,6 +23,10 @@ defmodule Wardmast.Test.CaptureNoSandbox do
     do: raise("CaptureNoSandbox.browser/3 must never be called")
 
   @impl true
+  def browser(_argv, _app, _writable, _readonly),
+    do: raise("CaptureNoSandbox.browser/4 must never be called")
+
+  @impl true
   def reach(_app), do: raise("CaptureNoSandbox.reach/1 must never be called")
 
   @impl true

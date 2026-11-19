@@ -58,11 +58,13 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
     end
   end
 
-  defp sandboxed(%{sandbox: sandbox, app: %{} = app, scratch: dir})
+  @doc false
+  @spec sandboxed(map()) :: {:ok, module(), map()} | {:error, {:shot, String.t()}}
+  def sandboxed(%{sandbox: sandbox, app: %{} = app, scratch: dir})
        when is_atom(sandbox) and not is_nil(sandbox) and is_binary(dir),
        do: {:ok, sandbox, app}
 
-  defp sandboxed(_spec) do
+  def sandboxed(_spec) do
     {:error,
      {:shot,
       "no capture sandbox (or no booted app to reach) for the browser, and Chromium is never " <>
@@ -199,7 +201,9 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
     end
   end
 
-  defp describe(sandbox, reason) do
+  @doc false
+  @spec describe(module(), term()) :: String.t()
+  def describe(sandbox, reason) do
     sandbox.describe(reason)
   rescue
     _ -> inspect(reason)
@@ -210,7 +214,9 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
   # shot's directory: Chromium binds its singleton socket under TMPDIR, and the shot's deep path
   # is past the 108-byte limit of a Unix socket path (Chromium aborts: "Socket path too long").
   # In the bwrap sandbox /tmp is a private tmpfs of each browser.
-  defp browser_env(home) do
+  @doc false
+  @spec browser_env(String.t()) :: [String.t()]
+  def browser_env(home) do
     ["PATH=#{Sandbox.path()}", "HOME=#{home}", "TMPDIR=/tmp", "LANG=C.UTF-8", "TZ=UTC"]
   end
 
@@ -227,12 +233,16 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
     end
   end
 
-  defp with_timeout([exec | args], seconds) do
+  @doc false
+  @spec with_timeout([String.t()], pos_integer()) :: {String.t(), [String.t()]}
+  def with_timeout([exec | args], seconds) do
     case System.find_executable("timeout") do
       nil -> {exec, args}
       timeout -> {timeout, ["#{seconds}", exec | args]}
     end
   end
 
-  defp tail(out), do: out |> String.trim() |> String.slice(-500, 500)
+  @doc false
+  @spec tail(String.t()) :: String.t()
+  def tail(out), do: out |> String.trim() |> String.slice(-500, 500)
 end

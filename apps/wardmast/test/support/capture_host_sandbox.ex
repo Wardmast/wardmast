@@ -28,6 +28,9 @@ defmodule Wardmast.Test.CaptureHostSandbox do
   def browser(argv, _app, _writable), do: {:ok, argv}
 
   @impl true
+  def browser(argv, _app, _writable, _readonly), do: {:ok, argv}
+
+  @impl true
   def reach(_app), do: [connect_options: [timeout: 2_000]]
 
   @impl true

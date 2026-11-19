@@ -23,7 +23,16 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
 
   ## Isolation and determinism
 
-  The runner refuses a non-loopback `base_url`, resolves no host but loopback inside the browser
+  Node and Chromium never run on the host as themselves. The runner is started through the capture
+  sandbox's `browser/4` (`Wardmast.Screenshots.Capture.Sandbox`), as `Shooter.Chromium` starts its
+  browser: a namespace of its own with no network but the bridge from `127.0.0.1:<port>` to the
+  booted app, the capture directory and Chromium read-only, the shot's `scratch` directory the only
+  writable path, and an environment built from nothing (`env -i`). That is also what makes
+  Chromium's `--no-sandbox` acceptable (see `Shooter.Chromium`), and why `base_url` is reachable at
+  all: the app listens inside its own sandbox, which the host cannot dial. A spec without a sandbox
+  or the boot's `app` starts nothing (`{:error, {:shot, "no capture sandbox ..."}}`).
+
+  The runner also refuses a non-loopback `base_url`, resolves no host but loopback inside the browser
   and aborts any request to one; timezone UTC, locale `en-US`, the viewport's size and scale, the
   theme's colour scheme, reduced motion, animations off and a frozen clock
   (`2026-01-01T12:00:00Z`). A 404 from the route is `{:error, {:http_status, 404}}` (absent at this
@@ -49,10 +58,11 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
 
   @impl true
   def shoot(spec) do
-    with {:ok, login} <- login(spec),
+    with {:ok, sandbox, app} <- Chromium.sandboxed(spec),
+         {:ok, login} <- login(spec),
          {:ok, tools} <- tools(spec),
          {:ok, chrome} <- chrome(spec) do
-      run(tools, build_spec(spec, chrome, login), spec)
+      run(tools, chrome, login, spec, sandbox, app)
     end
   end
 
@@ -209,53 +219,63 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
 
   # ── run ─────────────────────────────────────────────────────────────────
 
-  # `node` is the operator-configured or image-shipped binary and the argv is a list handed to
-  # `ReleaseEnv.cmd/3` directly, never through a shell; the spec file carries the worker-declared
-  # values as data the runner reads, not as arguments.
-  defp run(tools, spec_json, spec) do
-    spec_file =
-      Path.join(
-        Path.dirname(spec.out_file),
-        ".cdp-spec-#{System.unique_integer([:positive])}.json"
-      )
-
-    File.mkdir_p!(Path.dirname(spec_file))
-    # It can hold a fixture password: owner-only from the first byte (created empty and chmodded
-    # before anything is written, so there is no window under the process umask), and gone when
-    # the shot is.
-    File.touch!(spec_file)
-    File.chmod!(spec_file, 0o600)
-    File.write!(spec_file, Jason.encode!(spec_json))
+  # Node and Chromium run in the capture's browser sandbox (`sandbox.browser/4`), exactly as
+  # `Shooter.Chromium` runs its browser: the argv is wrapped, run under `env -i` with an
+  # environment built from nothing, and the shot is written into the shot's own `scratch` dir (the
+  # only writable path) and copied to `out_file` only when it is a regular file. `node` is the
+  # operator-configured or image-shipped binary and the argv is a list handed to `ReleaseEnv.cmd/3`
+  # directly, never through a shell; the spec file carries the worker-declared values as data the
+  # runner reads (and deletes at once), not as arguments.
+  defp run(tools, chrome, login, spec, sandbox, app) do
+    dir = spec.scratch
+    shot = Path.join(dir, "shot.png")
+    home = Path.join(dir, "home")
+    spec_file = Path.join(dir, "cdp-spec.json")
+    File.mkdir_p!(home)
 
     try do
-      {exec, args} = with_timeout(tools.node, [tools.runner, spec_file], spec.timeout_s * 2 + 10)
+      write_spec(spec_file, build_spec(%{spec | out_file: shot}, chrome, login))
+      argv = [tools.node, tools.runner, spec_file]
 
-      {out, code} =
-        ReleaseEnv.cmd(exec, args,
-          stderr_to_stdout: true,
-          cd: tools.dir,
-          env: [{"TZ", "UTC"}]
-        )
+      with {:ok, boxed} <- boxed(sandbox, argv, app, dir, [tools.dir, chrome]) do
+        env = [System.find_executable("env") || "/usr/bin/env", "-i" | Chromium.browser_env(home)]
+        {exec, args} = Chromium.with_timeout(env ++ boxed, spec.timeout_s * 2 + 10)
 
-      interpret(out, code)
+        {out, code} = ReleaseEnv.cmd(exec, args, stderr_to_stdout: true)
+        interpret(out, code, shot, spec.out_file)
+      end
     after
-      File.rm(spec_file)
+      File.rm_rf(dir)
     end
   end
 
-  defp with_timeout(node, args, seconds) do
-    case System.find_executable("timeout") do
-      nil -> {node, args}
-      timeout -> {timeout, ["#{seconds}", node | args]}
+  # It can hold a fixture password: owner-only from the first byte (created empty and chmodded
+  # before anything is written, so there is no window under the process umask).
+  defp write_spec(path, json) do
+    File.touch!(path)
+    File.chmod!(path, 0o600)
+    File.write!(path, Jason.encode!(json))
+  end
+
+  defp boxed(sandbox, argv, app, dir, readonly) do
+    case sandbox.browser(argv, app, [dir], readonly) do
+      {:ok, boxed} ->
+        {:ok, boxed}
+
+      {:error, reason} ->
+        {:error,
+         {:shot,
+          "the capture sandbox could not start the browser: #{Chromium.describe(sandbox, reason)}"}}
     end
   end
+
 
   # The runner's answer is the last line of output that is a JSON object with an `ok` key. No such
   # line is never a success, whatever the exit status.
-  defp interpret(out, code) do
+  defp interpret(out, code, shot, out_file) do
     case answer(out) do
       %{"ok" => true} ->
-        :ok
+        collect(shot, out_file)
 
       %{"ok" => false, "kind" => "http_status", "status" => status} when is_integer(status) ->
         {:error, {:http_status, status}}
@@ -264,10 +284,10 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
         {:error, {:shot, to_string(answer["reason"] || "the capture runner failed")}}
 
       nil when code == 0 ->
-        {:error, {:shot, "the capture runner gave no answer: #{tail(out)}"}}
+        {:error, {:shot, "the capture runner gave no answer: #{Chromium.tail(out)}"}}
 
       nil ->
-        {:error, {:shot, "the capture runner exited with status #{code}: #{tail(out)}"}}
+        {:error, {:shot, "the capture runner exited with status #{code}: #{Chromium.tail(out)}"}}
     end
   end
 
@@ -283,5 +303,16 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
     end)
   end
 
-  defp tail(out), do: out |> String.trim() |> String.slice(-500, 500)
+  # The image the runner left in the shot's own directory, copied out only when it is a plain
+  # file: a symlink there (to a host file the page wanted posted) is never followed. A runner that
+  # said "ok" and left no image is a failed shot, never a silent success.
+  defp collect(shot, out_file) do
+    with {:ok, %File.Stat{type: :regular}} <- File.lstat(shot),
+         {:ok, data} <- File.read(shot) do
+      File.write!(out_file, data)
+      :ok
+    else
+      _ -> {:error, {:shot, "the capture runner reported success but left no image"}}
+    end
+  end
 end

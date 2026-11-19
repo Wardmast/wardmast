@@ -35,6 +35,9 @@ defmodule Wardmast.Screenshots.Capture.Sandbox do
       result for the app itself.
     * `browser/3`: the argv that runs the browser `argv` in a sandbox of its own that can reach
       `app` on `127.0.0.1:<port>` and nothing else, and write only the `writable` dirs.
+    * `browser/4`: as `browser/3`, with `readonly` paths visible too (a directory, or a file such
+      as a browser binary, whose directory is shown): for a runner that needs more of the host
+      than its own executable's directory (the CDP shooter's `node_modules` and Chromium).
     * `reach/1`: the `Req` options that reach `app` from the host.
     * `release/1`: undo `expose/2` (a socket dir, say) once the app is stopped.
 
@@ -59,6 +62,12 @@ defmodule Wardmast.Screenshots.Capture.Sandbox do
               {:ok, [String.t()]} | {:error, term()}
   @callback browser(argv :: [String.t()], app(), writable :: [String.t()]) ::
               {:ok, [String.t()]} | {:error, term()}
+  @callback browser(
+              argv :: [String.t()],
+              app(),
+              writable :: [String.t()],
+              readonly :: [String.t()]
+            ) :: {:ok, [String.t()]} | {:error, term()}
   @callback reach(app()) :: keyword()
   @callback release(app()) :: :ok
 

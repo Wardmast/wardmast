@@ -710,8 +710,11 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                                          that path) and/or {url_not_contains: "/sign-in"}
                                          (its URL lacks that text); every one given must
                                          hold after the form is submitted, else the shot
-                                         fails (default: path_not = login.path). Any other
-                                         shape is refused. Form logins need the CDP shooter
+                                         fails (default: path_not = login.path). Each condition
+                                         must be false on the sign-in page itself (a URL
+                                         text its own URL lacks, like error=, is no condition;
+                                         one it already satisfies is refused at shot time). Any
+                                         other shape is refused. Form logins need the CDP shooter
                         viewports        map name (^[a-z0-9-]{1,20}$) -> {width 200-3840,
                                          height 200-4000, device_scale_factor 1-3};
                                          defaults desktop and mobile

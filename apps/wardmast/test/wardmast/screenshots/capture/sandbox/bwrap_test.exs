@@ -193,7 +193,7 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.BwrapTest do
     end
   end
 
-  describe "browser_argv/4" do
+  describe "browser_argv/4,5" do
     setup do
       shot = "/tmp/cap/work/after/shots/7"
 
@@ -251,6 +251,30 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.BwrapTest do
     test "a browser under the system dirs needs no extra bind" do
       argv = Bwrap.browser_argv(["/usr/lib/chromium/chromium"], @app, ["/s"], @host)
       refute "/usr/lib/chromium" in argv
+    end
+
+    test "read-only extras (a runner's own dir, a browser binary) are shown beside the executable" do
+      argv =
+        Bwrap.browser_argv(
+          ["/opt/node/bin/node", "/opt/arbiter/capture/runner.mjs"],
+          @app,
+          ["/s"],
+          ["/opt/arbiter/capture", "/usr/lib/chromium", "/opt/node/bin"],
+          @host
+        )
+
+      assert seq?(argv, ["--ro-bind", "/opt/node/bin", "/opt/node/bin"])
+      assert seq?(argv, ["--ro-bind", "/opt/arbiter/capture", "/opt/arbiter/capture"])
+      # under the system dirs already: no extra bind; and each is bound once
+      refute seq?(argv, ["--ro-bind", "/usr/lib/chromium", "/usr/lib/chromium"])
+      assert Enum.count(mounts(argv), &(elem(&1, 1) == "/opt/node/bin")) == 1
+      # none of them is writable
+      refute seq?(argv, ["--bind", "/opt/arbiter/capture", "/opt/arbiter/capture"])
+    end
+
+    test "browser/3 is browser/4 with nothing extra" do
+      assert Bwrap.browser_argv(["/opt/b/chrome"], @app, ["/s"], @host) ==
+               Bwrap.browser_argv(["/opt/b/chrome"], @app, ["/s"], [], @host)
     end
 
     test "a browser reached through a symlinked system dir (merged /usr) needs none either" do

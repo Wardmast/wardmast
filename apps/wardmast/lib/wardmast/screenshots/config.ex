@@ -496,8 +496,11 @@ defmodule Wardmast.Screenshots.Config do
   # `login.success` is how the CDP shooter proves a login worked before it shoots anything: after
   # submitting, the page's URL must satisfy every condition given. `path_not` is a path the
   # browser must have left (`"/login"`); `url_not_contains` a substring its URL must not carry
-  # (`"/sign-in"`, `"error="`). Nothing else is accepted: a shape this does not know would be
-  # silently ignored, and an ignored success check is a picture of the sign-in page.
+  # (`"/sign-in"`). Each condition must be FALSE on the sign-in page itself, or it cannot tell a
+  # failed login from a good one: the runner refuses it at shot time (so `"error="`, which the
+  # sign-in page's own URL lacks, is no condition at all; pair it with `path_not`). Nothing else is
+  # accepted: a shape this does not know would be silently ignored, and an ignored success check
+  # is a picture of the sign-in page.
   defp success(nil, _label), do: []
 
   defp success(%{} = s, label) when map_size(s) > 0 do
