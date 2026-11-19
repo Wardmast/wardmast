@@ -265,6 +265,7 @@ defmodule Wardmast.Worker.ReviewGate do
   alias Wardmast.Worker.ResumeContext
   alias Wardmast.Worker.ReviewCi
   alias Wardmast.Worker.ReviewFindings
+  alias Wardmast.Worker.ReviewGate.NoVerdictCause
   alias Wardmast.Worker.ReviewMrBrief
   alias Wardmast.Worker.ReviewPass
   alias Wardmast.Worker.ReviewSync
@@ -1122,6 +1123,12 @@ defmodule Wardmast.Worker.ReviewGate do
       # re-reads each of these passes' durable transcripts fresh before giving
       # up — see `recover_verdict_from_scans/1`.
       verdict_scans: [],
+      # bd-3na3d7: why each no-verdict pass of this round ended (oldest first;
+      # `NoVerdictCause`), and the monotonic ms the current pass was armed at,
+      # so the escalation can say killed / budget / mid tool call instead of a
+      # bare "inconclusive".
+      no_verdict_causes: [],
+      pass_started_ms: nil,
       # bd-cwe9n2: agy commands a headless soft-deny refused across this gate's
       # reviewer passes (named in a no-verdict escalation), whether the pass
       # that just exited was ended by one, and how many times the gate has
@@ -3737,6 +3744,14 @@ defmodule Wardmast.Worker.ReviewGate do
       :no_verdict ->
         reason = classify_stop(status, state.lines)
 
+        state =
+          note_no_verdict_cause(
+            state,
+            status,
+            state.lines,
+            cause_stop_reason(status, state.lines, reason)
+          )
+
         if reviewer_spawn_failure?(status, state.lines, reason),
           do: handle_reviewer_spawn_failure(state, reason),
           else: finish_no_verdict(state, reason, lines, run_id)
@@ -4962,6 +4977,7 @@ defmodule Wardmast.Worker.ReviewGate do
         disposition_source: nil,
         verdict_scan: nil,
         verdict_scans: [],
+        no_verdict_causes: [],
         # bd-3hb4ih: the reviewer provider pin and the round's timed-out
         # providers are per-ROUND state. A new round reviews a different diff,
         # so a provider that timed out on the previous one starts even again.
@@ -6131,7 +6147,49 @@ defmodule Wardmast.Worker.ReviewGate do
 
   defp denied_commands_note(_state), do: ""
 
-  defp no_verdict_scan_message(state), do: scan_message(state) <> denied_commands_note(state)
+  # bd-3na3d7: record why THIS pass ended without a verdict. `lines` is the
+  # gate's newest-first capture; `stop_reason` the exit's `StopReason` (nil when
+  # it carries no known signature). Appended to the round's causes (oldest
+  # first) so the final escalation can name every pass.
+  @doc false
+  @spec note_no_verdict_cause(map(), integer() | nil, [String.t()], StopReason.t() | nil) :: map()
+  def note_no_verdict_cause(state, status, lines, stop_reason) do
+    elapsed_ms =
+      case Map.get(state, :pass_started_ms) do
+        started when is_integer(started) -> System.monotonic_time(:millisecond) - started
+        _ -> nil
+      end
+
+    cause =
+      NoVerdictCause.classify(%{
+        status: status,
+        lines: Enum.reverse(lines),
+        stop_reason: stop_reason,
+        elapsed_ms: elapsed_ms,
+        timeout_ms: Map.get(state, :timeout_ms)
+      })
+
+    Logger.warning(
+      "ReviewGate: reviewer for task=#{Map.get(state, :task_id)} ended without a verdict: " <>
+        "#{cause.cause} — #{cause.text}"
+    )
+
+    Map.update(state, :no_verdict_causes, [cause], &(&1 ++ [cause]))
+  end
+
+  # `classify_stop/2` keeps only the clean-exit reasons that change routing; the
+  # cause wants the full classification (an abandoned async wait, a kill).
+  defp cause_stop_reason(0, lines, _reason), do: StopReason.classify(0, Enum.reverse(lines))
+  defp cause_stop_reason(_status, _lines, reason), do: reason
+
+  @doc false
+  @spec no_verdict_scan_message(map()) :: String.t()
+  def no_verdict_scan_message(state) do
+    case NoVerdictCause.render(Map.get(state, :no_verdict_causes, [])) do
+      "" -> scan_message(state) <> denied_commands_note(state)
+      cause -> cause <> " " <> scan_message(state) <> denied_commands_note(state)
+    end
+  end
 
   defp scan_message(%{verdict_scan: %{memory: 0, durable: durable}} = state)
        when durable in [0, nil] do
@@ -7857,6 +7915,7 @@ defmodule Wardmast.Worker.ReviewGate do
             denial_pending: false,
             current_prompt: prompt,
             timeout_ms: timeout_ms,
+            pass_started_ms: System.monotonic_time(:millisecond),
             reviewed_sha: if(role == :reviewer, do: state.head_sha, else: state.reviewed_sha),
             reviewer_refusals: if(role == :reviewer, do: 0, else: state.reviewer_refusals)
         }
@@ -8901,6 +8960,7 @@ defmodule Wardmast.Worker.ReviewGate do
     do: conflict_review_prompt(state, info)
 
   def review_prompt(state) do
+    state = with_prompt_budget(state)
     task = load_task(state.task_id)
 
     standing_orders_section(state) <>
@@ -8938,9 +8998,11 @@ defmodule Wardmast.Worker.ReviewGate do
 
       #{async_tool_block(state)}
 
+      #{pass_budget_block(state)}
+
       #{ci_prompt_block(state)}#{mr_brief_block(state)}NOTE: If you run tests or any build command, wrap it with a hard timeout so
       a cold compilation pass cannot exhaust the reviewer session — e.g.
-      `timeout 120 mix test`. If the command times out or fails to compile, issue
+      `#{test_command_example(state)}`. If the command times out or fails to compile, issue
       your VERDICT based on the diff alone and note that live test verification
       was unavailable — do not wait indefinitely for output that will not arrive.
 
@@ -9555,6 +9617,7 @@ defmodule Wardmast.Worker.ReviewGate do
   defp apply_conflict_tier(opts, _state, _role), do: opts
 
   defp conflict_review_prompt(state, info) do
+    state = with_prompt_budget(state)
     task = load_task(state.task_id)
 
     standing_orders_section(state) <>
@@ -9589,6 +9652,8 @@ defmodule Wardmast.Worker.ReviewGate do
       no `mix run`. (Reading files and running `git` is fine.)
 
       #{async_tool_block(state)}
+
+      #{pass_budget_block(state)}
 
       #{ci_prompt_block(state)}#{EvidenceIntegrity.reviewer_block()}
       When you have decided, print your verdict on its own line, EXACTLY one of:
@@ -9824,7 +9889,7 @@ defmodule Wardmast.Worker.ReviewGate do
     worktree. Edit/Write are denied here and the source tree is read-only; do not
     commit or push from it. `_build` and `deps` are writable (pre-seeded with the
     implementer's compiled deps), so you may compile and run targeted tests in it,
-    e.g. `timeout 120 mix test path/to/file_test.exs` (same timeout rule as below).
+    e.g. `#{test_command_example(state, "path/to/file_test.exs")}` (same timeout rule as below).
     It is deleted when this round ends.
 
     """
@@ -9977,6 +10042,72 @@ defmodule Wardmast.Worker.ReviewGate do
         """
     end
   end
+
+  # bd-3na3d7: tell the reviewer the clock it is actually on. The pass budget
+  # the gate enforces (`review_gate.timeout_ms`, or the short conflict-review
+  # cap) is resolved exactly as `spawn_pass/5` resolves it, so the prompt can
+  # never name a budget the pass will not get. Reviewers on cluster pods were
+  # ending ~4.5 min into a cold-compile `timeout 300 mix test` with no idea a
+  # test command had to fit inside a budget, or that the Bash tool's own limit
+  # (2 min by default) sits below their `timeout` wrapper.
+  @doc false
+  @spec pass_budget_ms(map()) :: pos_integer()
+  def pass_budget_ms(state) do
+    state
+    |> Map.get(:workspace_id)
+    |> resolve_timeout_ms(Map.get(state, :timeout_override_ms))
+    |> round_timeout_ms(Map.put_new(state, :timeout_override_ms, nil), :reviewer)
+  end
+
+  # Resolve the budget once per prompt build: `resolve_timeout_ms/2` may load the
+  # workspace, and every prompt helper below needs the same number.
+  defp with_prompt_budget(state), do: Map.put(state, :prompt_budget_ms, pass_budget_ms(state))
+
+  defp prompt_budget_ms(%{prompt_budget_ms: ms}) when is_integer(ms), do: ms
+  defp prompt_budget_ms(state), do: pass_budget_ms(state)
+
+  defp pass_budget_block(state) do
+    budget = prompt_budget_ms(state)
+
+    """
+    PASS BUDGET: #{format_budget(budget)} of wall clock from the moment this session starts.
+    When it runs out the gate ends the pass: a pass with no VERDICT line is escalated
+    as a failed review, never as a lenient one. A cold `mix test` (nothing compiled
+    yet) can take 4-6 minutes by itself, so before you start a build or test command
+    check it can finish inside what is left of the budget, prefer the narrowest test
+    files, and decide from the diff when it cannot. #{tool_limit_sentence(state)}\
+    """
+  end
+
+  # The longest `timeout N` wrapper a reviewer should use: a cold compile needs
+  # up to ~5 min, but never more than half the pass budget (a short conflict-review
+  # cap cannot afford a 5 min command), and never under a minute.
+  defp test_timeout_secs(state),
+    do: state |> prompt_budget_ms() |> div(2000) |> min(300) |> max(60)
+
+  defp test_command_example(state, target \\ "") do
+    String.trim("timeout #{test_timeout_secs(state)} mix test #{target}")
+  end
+
+  # Per-adapter wording of the command-tool limit. Only Claude's tool is called
+  # "Bash tool" and has an explicit `timeout` parameter (ms) that defaults to 2 min.
+  defp tool_limit_sentence(state) do
+    secs = test_timeout_secs(state)
+
+    if block_adapter(state) == Wardmast.Agents.Claude do
+      "Your `timeout N` wrapper must be SHORTER than the Bash tool's own `timeout` " <>
+        "parameter, and that parameter must be set explicitly (its default limit is 2 " <>
+        "minutes, which a cold compile outruns): for `timeout #{secs}` pass a Bash tool " <>
+        "`timeout` of at least #{(secs + 60) * 1000} ms."
+    else
+      "Wrap build and test commands in a `timeout N` shorter than whatever per-command " <>
+        "limit your CLI applies (e.g. `timeout #{secs}`), so the command ends before the " <>
+        "session does."
+    end
+  end
+
+  defp format_budget(ms) when rem(ms, 60_000) == 0, do: "#{div(ms, 60_000)} minutes"
+  defp format_budget(ms), do: "#{div(ms, 1000)} seconds"
 
   # Returns the async-tool instruction block appropriate for the adapter that
   # actually runs this reviewer pass: the rotation's pin, else the

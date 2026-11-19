@@ -1,0 +1,66 @@
+<% _ = assigns %>## Filing conventions
+
+### Set difficulty up front
+
+Every ticket you file should carry **two** orthogonal axes:
+
+- `--priority 0..4` (P0..P4) — *how urgent* (drives scheduling order).
+- `--difficulty 0..5` (D0..D5) — *how hard* (drives the model + thinking
+  budget routed to the worker).
+
+A P0 can be a one-line config bump (D0); a P3 can be a hard refactor (D3).
+Don't conflate them.
+
+Use the MAX over: scope (files/modules touched), design uncertainty,
+reasoning depth (mechanical vs concurrency/correctness), blast radius,
+breadth of context required.
+
+```
+D0 Trivial  — single-file, fully specified, no judgment
+              (typo, rename, config bump, doc edit).
+D1 Simple   — localized, clear approach, light reasoning.
+D2 Moderate — multi-file or some design choice (default if omitted).
+D3 Hard     — cross-cutting, non-obvious design, correctness-critical.
+D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass.
+D5 Flagship — a deliberate escalation, never an ordinary rating: work
+              judged worth a full quota window on the flagship model.
+              Reach for it only when D4 (premium model, max effort) has
+              already failed or is plainly inadequate — "harder than D4"
+              is not a reason. Set by the operator, by hand.
+```
+
+When filing, also drop a one-line **difficulty justification** in the
+description ("D3 because the change spans the routing dispatcher, two
+adapter configs, and the review_gate seam") so reviewers can sanity-check
+your call. `arb ticket create --help` carries the same rubric inline.
+
+### `issue_type` signals whether a PR is expected
+
+`issue_type` isn't just a label — it tells the dispatched worker (and you,
+reading the result later) whether a committed code change is expected:
+
+- **`bug` / `feature` / `chore`** — the worker is expected to make a change,
+  commit it, and open a PR. ReviewGate engages on that PR before merge.
+- **`research`** — no PR. An investigation whose output is findings: tracing a
+  bug to its root cause, a spike, "read the code and report back." A
+  `research` worker must report findings via `ticket_update_progress` notes (a
+  notes gate refuses completion without them) and closes with no diff.
+- **`task`** — no PR. A plain operational action: a restart, a config flip —
+  no research, no code. A `task` worker completes when it reports the action
+  done, with a short outcome note via `ticket_update_progress`.
+- Neither `research` nor `task` may be used for code work: both skip the
+  commit gate and ReviewGate.
+- **`decision`** — a choice to be made/documented, not implemented.
+- **`epic`** — a parent ticket grouping children via `parent_of` edges; not
+  worked directly.
+
+**Why this matters:** ReviewGate only engages when a PR actually exists. File
+a pure research assignment as `bug` and a worker that (correctly) produces no
+diff can dead-end waiting on a review that has nothing to review. File it as
+`research` and it completes cleanly with no PR and no ReviewGate involvement.
+
+**Get this right before you dispatch, not after.** A worker's
+worktree-provisioning decision is made once, from `issue_type` as it stood
+*at dispatch time*; fixing the type afterward with `ticket_update` does
+**not** retroactively exempt an already-dispatched worker from the commit
+gate. If you catch the mistake early, stop the worker and re-dispatch fresh.

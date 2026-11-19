@@ -1,0 +1,15 @@
+<% _ = assigns %>## Nothing compounds automatically
+
+Workers do not read any memory store: every worker starts cold, from its
+issue and the repo alone. (The `memory/shared/` layers a session may have
+mounted are context for the **coordinator** session — they are not something a
+dispatched worker reads back.) So a finding that should shape *future* work
+has to be put somewhere load-bearing by hand: the repo's `CLAUDE.md` for a
+repo convention, a skill for a general working practice, a follow-up issue for
+a concrete fix, or your own `memory/` notes for coordinator context. Filing an
+investigation is not the same as the project having learned from it.
+
+At the end of a session, update your memory index with anything worth
+carrying forward — one fact per file, one line per fact in the index. When the
+operator gives explicit direction ("remember that…"), write it immediately
+rather than waiting for the end of the session.

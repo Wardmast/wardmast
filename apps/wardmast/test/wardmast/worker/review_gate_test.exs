@@ -83,6 +83,7 @@ defmodule Wardmast.Worker.ReviewGateTest do
                            "../../fixtures/review_no_verdict_auth_prose.sh",
                            __DIR__
                          )
+  @exit_mid_tool_call Path.expand("../../fixtures/review_exit_mid_tool_call.sh", __DIR__)
   @scan_reset Path.expand("../../fixtures/review_scan_reset.sh", __DIR__)
 
   # ---- pure verdict parsing ------------------------------------------------
@@ -2670,6 +2671,46 @@ defmodule Wardmast.Worker.ReviewGateTest do
 
       assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "expected a re-prompt to have been attempted despite the auth/retry-flavored prose"
+    end
+
+    # bd-3na3d7: a real pass exit (not a direct call to the classifier) whose
+    # transcript stops on an unanswered `⏵ Bash(...)` must park with an
+    # escalation that names the cause, not just "no parseable VERDICT".
+    test "a reviewer cut off mid tool call parks with that cause in the escalation",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@exit_mid_tool_call],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        6_000
+      )
+
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
+
+      findings = Worker.state(pid).meta.review_gate_findings
+      assert findings =~ "tool call was still in flight"
+      assert findings =~ "timeout 300 mix test"
     end
 
     # bd-3y2mda: a REQUEST_CHANGES verdict with NO findings is useless (the
@@ -6457,11 +6498,43 @@ defmodule Wardmast.Worker.ReviewGateTest do
       task = new_task(ws)
       prompt = ReviewGate.review_prompt(state_for(task, ws))
 
-      assert prompt =~ "timeout 120 mix test",
+      assert prompt =~ "timeout 300 mix test",
              "review_prompt must recommend a hard timeout wrapper for mix test"
 
       assert prompt =~ "VERDICT based on the diff alone",
              "review_prompt must instruct the reviewer to fall back to diff-only VERDICT when tests cannot complete"
+    end
+
+    test "review_prompt/1 states the pass's real wall-clock budget up front (bd-3na3d7)", %{
+      ws: ws
+    } do
+      # Reviewers on cluster pods were cut off ~4.5 min into a cold-compile
+      # `timeout 300 mix test` with no idea they were on a clock. The prompt now
+      # names the budget the gate will actually enforce on this pass, and how a
+      # test command must fit inside it.
+      task = new_task(ws)
+
+      prompt = ReviewGate.review_prompt(state_for(task, ws, %{timeout_override_ms: 600_000}))
+      assert prompt =~ "PASS BUDGET: 10 minutes"
+      assert prompt =~ "Bash tool"
+      assert prompt =~ "timeout 300 mix test"
+      assert prompt =~ "at least 360000 ms"
+      refute prompt =~ "timeout 120 mix test"
+      assert prompt =~ "cold"
+
+      default = ReviewGate.review_prompt(state_for(task, ws))
+      assert default =~ "PASS BUDGET: 20 minutes"
+
+      # A non-Claude reviewer is not told about Claude's "Bash tool".
+      codex =
+        ReviewGate.review_prompt(
+          task
+          |> state_for(ws, %{timeout_override_ms: 600_000})
+          |> Map.put(:reviewer_provider, :codex)
+        )
+
+      assert codex =~ "PASS BUDGET: 10 minutes"
+      refute codex =~ "Bash tool"
     end
 
     test "review_prompt/1 requires the VERIFICATION disclosure and forbids stale re-flags (bd-4te55l)",

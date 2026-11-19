@@ -10,8 +10,12 @@ defmodule WardmastCli.Cmd.Init do
 
     * `AGENTS.md`              — the coordinator role doc: session-start
                                  checklist (`arb doctor` / `arb prime`), the
-                                 arb command reference, core concepts, and
-                                 memory discipline. Rendered with this
+                                 arb command reference, core concepts, the
+                                 filing conventions, and memory discipline —
+                                 the latter four are the server's bundled
+                                 doctrine (`apps/wardmast/priv/doctrine`),
+                                 the same text every session's CLAUDE.md
+                                 carries. Rendered with this
                                  install's domain and host. Contains NO
                                  persona — that is the operator's private
                                  layer.
@@ -110,6 +114,28 @@ defmodule WardmastCli.Cmd.Init do
   @doc_pr_patrol Path.join(@docs_templates_dir, "pr-patrol.md.eex")
   @doc_external_trackers Path.join(@docs_templates_dir, "external-trackers.md.eex")
 
+  # The coordinator doctrine (role, research, memory, concepts, command
+  # reference, filing conventions) is NOT kept here: it is the server's one
+  # bundled source, `apps/wardmast/priv/doctrine/*.md.eex`, which
+  # `Wardmast.Doctrine` also renders into every session's CLAUDE.md. The
+  # escript cannot depend on that app, so it embeds the very same files at
+  # compile time — one text, two renderers (bd-6dpdwm).
+  @doctrine_dir Path.expand(
+                  Path.join([__DIR__, "..", "..", "..", "..", "wardmast", "priv", "doctrine"])
+                )
+
+  @doctrine_sections @doctrine_dir
+                     |> Path.join("*.md.eex")
+                     |> Path.wildcard()
+                     |> Enum.sort()
+                     |> Enum.map(fn path ->
+                       {path |> Path.basename(".md.eex") |> String.to_atom(), path}
+                     end)
+
+  if @doctrine_sections == [] do
+    raise "no bundled doctrine found under #{@doctrine_dir}"
+  end
+
   @external_resource @agents_md
   @external_resource @operator_guide
   @external_resource @memory_md
@@ -125,6 +151,23 @@ defmodule WardmastCli.Cmd.Init do
   @external_resource @doc_pr_patrol
   @external_resource @doc_external_trackers
   @external_resource @runbook_event_monitor
+
+  for {name, path} <- @doctrine_sections do
+    @external_resource path
+    EEx.function_from_file(:defp, :"render_doctrine_#{name}", path, [:assigns])
+  end
+
+  # `arb init` scaffolds the operator's own coordinator home: it can dispatch,
+  # and there is no live source checkout to warn it about.
+  @doctrine_defaults %{can_dispatch: true, primary_checkout: nil}
+
+  for {name, _path} <- @doctrine_sections do
+    # sobelow_skip ["DOS.BinToAtom"]
+    defp doctrine(unquote(name), assigns) do
+      unquote(:"render_doctrine_#{name}")(Map.merge(@doctrine_defaults, assigns))
+      |> String.trim()
+    end
+  end
 
   EEx.function_from_file(:defp, :render_agents_md, @agents_md, [:assigns])
   EEx.function_from_file(:defp, :render_operator_guide, @operator_guide, [:assigns])

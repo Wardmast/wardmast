@@ -1,0 +1,37 @@
+<% prefix = assigns[:domain_prefix] || "<prefix>" %>## Command reference
+
+MCP tool first; the `arb` CLI is the fallback for when MCP isn't connected, or
+for the handful of verbs with no MCP equivalent yet (marked **—**). If you are
+telling the *operator* to do something, give them the `arb` command, never
+MCP tool-call syntax — they only have a terminal.
+
+| Command | MCP tool | What it does |
+|---------|----------|--------------|
+| `arb doctor` | — | Health check — server reachable, workspace exists |
+| `arb prime` | — | Session-start briefing + standing orders |
+| `arb ticket list` | `ticket_list` | List tickets |
+| `arb ticket ready` | `ticket_ready` | Tickets with all dependencies closed — ready to work |
+| `arb ticket show <id>` | `ticket_show` | Detail on a single ticket |
+| `arb ticket create <title>` | `ticket_create` | Create a ticket (`--priority`, `--difficulty`, `--type`) |
+| `arb ticket update <id>` | `ticket_update` | Update a ticket's fields |
+| `arb ticket close <id>` | `ticket_close` | Close a ticket |
+| `arb ticket reopen <id>` | `ticket_reopen` | Reopen a closed ticket |
+| `arb ticket claim <ref>` | `tracker_claim` | Claim an upstream tracker issue as a local ticket |
+| `arb ticket sync` | `tracker_sync` | Reconcile tickets against the tracker |
+| `arb dep add <from> <type> <to>` | `dep_add` | Add a dependency (e.g. `arb dep add <%= prefix %>-1 blocks <%= prefix %>-2`) |
+| `arb dep remove <from> <to>` | `dep_remove` | Remove a dependency |
+<%= if assigns[:can_dispatch] do %>| `arb ticket dispatch <id> [<repo>] --provider claude` | `worker_dispatch` | Dispatch a ticket to a live worker (**costs API credits**) |
+<% end %>| `arb worker list` | `worker_list` | List active workers |
+| `arb worker show <task-id>` | `worker_show` | Worker detail and output |
+| `arb worker stop <task-id>` | `worker_stop` | Stop a running worker |
+| `arb worker resume <task-id>` | `worker_resume` | Reattach a fresh session to a preserved worktree |
+| `arb worker review <task-id>` | `worker_review` | Review a PR/MR tracker-side |
+| `arb attention` | `coordinator_inbox` | Unread events needing the coordinator |
+| `arb message inbox <task-id>` | `inbox_check` | Read/clear a ticket's mailbox |
+| `arb message send <recipient> <body>` | `message_send` | Leave a message in a ticket's mailbox |
+| `arb config get / set / unset <key>` | `workspace_config_get` / `_set` / `_unset` | Read or deep-merge-update workspace config (never raw API PATCH) |
+| `arb quota` | `quota_get` | Current provider rate-limit/quota state |
+| `arb where` | `workspace_show` | Which workspace is active |
+
+All CLI commands accept `--json` for machine-readable output. Use
+`-w, --workspace <name>` (or `ARB_WORKSPACE`) to target a specific workspace.

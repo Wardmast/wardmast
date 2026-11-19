@@ -33,14 +33,18 @@ defmodule Wardmast.Sessions.Instructions do
   `Wardmast.Sessions.InstructionsTest` so it cannot silently go missing again
   the way it silently was missing.
 
-  Deliberately **not** shared with `WardmastCli.Cmd.Init`'s templates. Those are
-  compiled into the escript (`apps/wardmast_cli`), which the server app does not
-  and must not depend on; and they scaffold an operator's coordinator *home*,
-  which is a durable, hand-edited directory — not a per-session dir that is
-  regenerated on every launch.
+  The doctrine text — role, research discipline, memory wording, concepts, the
+  command reference, the filing conventions and the live-checkout warning —
+  lives in **one place**, `apps/wardmast/priv/doctrine/*.md.eex`, rendered by
+  `Wardmast.Doctrine`. `WardmastCli.Cmd.Init` embeds the same files into the
+  `AGENTS.md` that `arb init` scaffolds, so the two cannot drift. What stays
+  here is only what is genuinely per-session: the workspace binding, the MCP
+  config location, and the event-monitor mechanics.
   """
 
   alias Wardmast.Agents.Gemini.ConfigDir, as: AgyConfigDir
+  alias Wardmast.Config.Paths
+  alias Wardmast.Doctrine
   alias Wardmast.MCP.RefinePolicy
   alias Wardmast.Sessions.Layout
   alias Wardmast.Sessions.RefineDoctrine
@@ -53,7 +57,10 @@ defmodule Wardmast.Sessions.Instructions do
 
     * `:primary_checkout` — the live source tree to warn about; `nil` omits the
       warning rather than printing a placeholder path (an invented path is
-      worse than no rule).
+      worse than no rule). When the option is absent it defaults to
+      `Wardmast.Config.Paths.explicit_primary_checkout/0` — the warning renders
+      only for an installation that actually configured one, never for a
+      guessed `~/dev/arbiter`.
     * `:mcp_server_name` — the `.mcp.json` server key, default `"arbiter"`.
     * `:can_dispatch` — overrides the session row's value, for rendering a
       preview before the row exists.
@@ -84,6 +91,17 @@ defmodule Wardmast.Sessions.Instructions do
     can_dispatch = Keyword.get(opts, :can_dispatch, session.can_dispatch)
     server = Keyword.get(opts, :mcp_server_name, "arbiter")
 
+    # Only an explicitly configured checkout earns the live-checkout warning;
+    # `Paths.primary_checkout/0`'s `~/dev/arbiter` guess is for the path guard,
+    # not for prose (an invented path is worse than no rule).
+    primary_checkout = Keyword.get(opts, :primary_checkout, Paths.explicit_primary_checkout())
+
+    doctrine = %{
+      can_dispatch: can_dispatch,
+      primary_checkout: primary_checkout,
+      domain_prefix: nil
+    }
+
     """
     # Wardmast coordinator session `#{id}`
 
@@ -95,9 +113,9 @@ defmodule Wardmast.Sessions.Instructions do
     This file is **generated on every launch** — edits to it are lost. Durable
     notes go in `memory/candidates/` (see "Memory", below).
 
-    #{delegation_section(can_dispatch)}
+    #{Doctrine.render(:role, doctrine)}
 
-    #{research_section(can_dispatch)}
+    #{Doctrine.render(:research, doctrine)}
 
     ## Your workspace
 
@@ -107,7 +125,7 @@ defmodule Wardmast.Sessions.Instructions do
     created for this session — deliberately **not** a checkout of anything. The
     only thing in it is #{cwd_contents(session)}.
 
-    #{checkout_section(Keyword.get(opts, :primary_checkout, default_checkout()))}
+    #{Doctrine.render(:checkout, doctrine)}
 
     ## Talking to Wardmast
 
@@ -122,6 +140,12 @@ defmodule Wardmast.Sessions.Instructions do
     You cannot kill your own session through Wardmast's API — the call would
     terminate you mid-call. Ask the operator to kill it from the dashboard or
     the CLI.
+
+    #{Doctrine.render(:commands, doctrine)}
+
+    #{Doctrine.render(:concepts, doctrine)}
+
+    #{Doctrine.render(:filing, doctrine)}
 
     #{event_monitor_section(session)}
 
@@ -142,6 +166,8 @@ defmodule Wardmast.Sessions.Instructions do
       context, tag it `metadata.type: project` with `metadata.workspace_id`
       set to this workspace's id — an untagged or mistagged candidate simply
       never mounts for anyone, so when in doubt, tag it.
+
+    #{Doctrine.render(:memory, doctrine)}
 
     ## Process discipline
 
@@ -414,189 +440,6 @@ defmodule Wardmast.Sessions.Instructions do
     |> String.trim()
   end
 
-  defp checkout_section(nil) do
-    """
-    ### Repository work, if the operator asks for it
-
-    You do not normally need a checkout at all: your output on a bug is a
-    filed issue, not a patch (see "Your first move is to file it", above).
-    Reading a repository to root-cause something is fine and needs no
-    worktree.
-
-    **When — and only when — the operator has asked you to make a change
-    yourself**, that change goes in a **git worktree created under this
-    session directory**, never directly in a shared checkout. Absent that
-    ask, treat this section as not applying to you.
-    """
-    |> String.trim()
-  end
-
-  defp checkout_section(checkout) do
-    """
-    ### The live checkout is off limits
-
-    `#{checkout}` is the **primary checkout the running Wardmast server is
-    serving from**. Writing there — even a half-saved file — is picked up by
-    Phoenix hot-reload and can take down the live server, the coordinator, and
-    every worker in flight. This has happened.
-
-    * Do **not** edit, create, or delete files under `#{checkout}`.
-    * Do **not** run `git` commands that write there (`checkout`, `reset`,
-      `stash`, `worktree prune`, …). Reading is fine.
-    * Do **not** run `mix` there — not `mix test`, not `mix compile`, not a
-      `mix` alias. The running server owns that `_build`; a second `mix`
-      fighting it for the directory has wedged this install before.
-
-    Your permissions deny writes under that path, but the deny list is a
-    guardrail against accidents, not a sandbox: you run as the operator's user
-    and can reach anything they can. The rule above is the actual boundary.
-
-    **Reading** `#{checkout}` is fine, and it is usually all an investigation
-    needs. This rule and the file-it-don't-fix-it rule above are independent:
-    staying out of the live checkout is not permission to implement the fix
-    somewhere else instead.
-
-    #### Worktrees — only when the operator has asked you to make the change
-
-    This is a carve-out, not your standing workflow. If the operator has
-    explicitly asked you to make a change yourself, work in a **git worktree
-    created under this session directory**, cut from a clone that is **not**
-    the live checkout above (the operator keeps one alongside it for exactly
-    this; ask which if you do not know):
-
-        git -C <non-live-clone> worktree add #{Path.join("<session-workspace>", "<branch>")} <branch>
-
-    Nothing here is an invitation to go find a checkout on your own
-    initiative. Without that explicit ask, an investigation ends at a filed
-    ticket.
-    """
-    |> String.trim()
-  end
-
-  # bd-5v8f8l. The role inversion this guards against did not violate any rule
-  # that existed: a session obeyed the live-checkout prohibition exactly, made
-  # a legitimate worktree under its own session directory, and started
-  # implementing — because the prompt described worktree mechanics as its
-  # standing way of doing repository work and never named filing as the
-  # alternative. The prompt layer has to carry this one: the offending write
-  # and an operator-requested write are the same write to the same
-  # session-owned path, so no path- or tool-scoped guard in
-  # `Wardmast.Sessions.Guards` can tell them apart. Hence "early and
-  # prominent" rather than "thorough but buried".
-  defp delegation_section(can_dispatch) do
-    """
-    ## Your first move is to file it, not to fix it
-
-    You route work; you do not do it. When you find a bug — or the operator
-    reports one — what you produce is a **filed issue**, not a patch.
-    Investigate it to root cause, write the evidence down, and stop before the
-    edit.
-
-    **This is not "don't look into it."** The investigation is the valuable
-    half and you should do all of it:
-
-    * reproduce the problem, read the code, and land on concrete `file:line`
-      root-cause references;
-    * a suggested implementation shape, and the design decisions whoever
-      implements it will have to make;
-    * acceptance criteria specific enough to act on.
-
-    That write-up is what turns a report into a ticket someone can pick up.
-    File it with `ticket_create` and put the investigation in the body.
-
-    **Then stop.** Cutting a branch, creating a worktree, editing a file, or
-    running a test suite against a fix are not yours. #{dispatch_tail(can_dispatch)}
-
-    A hand-edit from here also has no pull request, so it is never reviewed —
-    ReviewGate only sees work that arrives as a PR from a dispatched worker.
-
-    ### Two carve-outs
-
-    * **The operator can ask you to make a change directly.** If they have,
-      do it — in a worktree, per "the live checkout is off limits" below. It
-      is the *unasked-for* fix this rule forbids, not every edit you ever
-      make.
-    * **Coordinator-owned files are yours.** `memory/candidates/`, your own
-      notes and `ticket_update_progress` notes, and scratch under this session
-      directory you write freely, with no ticket and no ceremony. They are
-      not "the code".
-    """
-    |> String.trim()
-  end
-
-  defp dispatch_tail(true) do
-    "Dispatching is enabled for this session, so once the issue is filed you " <>
-      "may hand it to a worker with `worker_dispatch` — which is still not " <>
-      "you implementing it."
-  end
-
-  defp dispatch_tail(false) do
-    "Dispatching workers is **disabled** for this session (the default), so " <>
-      "promoting the issue and dispatching a worker are the operator's to do. " <>
-      "Say the ticket is filed and ready, and leave it there. A closed " <>
-      "dispatch route is not a reason to conclude that implementing it " <>
-      "yourself is the only way left to help — it is not, and it is worse " <>
-      "than filing."
-  end
-
-  # The second half of bd-5v8f8l: the file, silent on *how* to investigate,
-  # left the session doing all the digging inline. Mirrors the operator's own
-  # coordinator doc ("Research discipline: delegate the digging, keep the
-  # judgment") so the two do not drift.
-  defp research_section(can_dispatch) do
-    """
-    ## Research discipline: delegate the digging, keep the judgment
-
-    Reading source, chasing logs, and tracing a report to its root cause
-    belongs in a delegate rather than inline in your own context. The reason
-    is what makes the rule stick: that raw tool output rarely turns out to be
-    worth keeping, and every line of it inflates your context for the rest of
-    your life — and you are a long-lived session, unlike a worker.
-
-    * **Exploratory digging you need answered in this conversation** ("go read
-      the code and report back") → a **host subagent / fork** (Claude Code's
-      `Agent` tool; other hosts expose their own). It inherits your context,
-      its raw output stays out of yours, and you stay responsive to the
-      operator while it runs.
-    * **Investigation substantial enough to need a durable, citable record** —
-      recurring failures, "why does this keep happening", anything you will
-      want to point at weeks from now → a **`task`-type Wardmast issue**. What
-      makes that durable is the tracked issue: the findings land in
-      `ticket_update_progress` notes and in the issue body, which are
-      paper-trailed and survive you, and the run is addressable by its
-      `run_id`. A fork's output exists only in a context window that is going
-      to end.
-      #{research_dispatch_tail(can_dispatch)}
-
-    **Nothing compounds automatically.** Wardmast has no memory subsystem — no
-    store one worker writes and a later worker reads back. Every worker starts
-    cold from its issue and the repo. So a finding that should shape *future*
-    work has to be put somewhere load-bearing by hand: the repo's `CLAUDE.md`
-    for a repo convention, a skill for a general working practice, a follow-up
-    issue for a concrete fix, or `memory/candidates/` for coordinator context.
-    Filing an investigation is not the same as the project having learned from
-    it.
-
-    Delegating research does not make you a messenger. Prioritization, filing
-    discipline, cross-workspace calls, and the actual back-and-forth with the
-    operator on tradeoffs all stay with you. Only the file-reading and
-    log-chasing legwork moves.
-    """
-    |> String.trim()
-  end
-
-  defp research_dispatch_tail(true) do
-    "Dispatching is enabled here, so you can file that issue and start the " <>
-      "worker yourself."
-  end
-
-  defp research_dispatch_tail(false) do
-    "Dispatching is disabled for this session (the default), so that worker " <>
-      "is not a route you can take: file the research issue and leave it for " <>
-      "the operator to promote. Until they do, a fork is your way to an " <>
-      "answer inside this conversation."
-  end
-
   defp dispatch_section(true) do
     "Dispatching workers is **enabled** for this session, so a worker you " <>
       "dispatch can itself reach Wardmast. Watch for recursion."
@@ -606,6 +449,4 @@ defmodule Wardmast.Sessions.Instructions do
     "Dispatching workers is **disabled** for this session (the default). Ask " <>
       "the operator to relaunch with it enabled if you need it."
   end
-
-  defp default_checkout, do: Wardmast.Config.Paths.primary_checkout()
 end

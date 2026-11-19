@@ -273,6 +273,63 @@ defmodule WardmastCli.Cmd.InitTest do
     end
   end
 
+  describe "bundled doctrine (bd-6dpdwm)" do
+    @doctrine_dir Path.expand("../../../../wardmast/priv/doctrine", __DIR__)
+
+    defp doctrine_section(name, assigns) do
+      @doctrine_dir
+      |> Path.join("#{name}.md.eex")
+      |> EEx.eval_file(assigns: assigns)
+      |> String.trim()
+    end
+
+    test "AGENTS.md embeds every server-side bundled section verbatim" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      agents = File.read!(Path.join(dir, "AGENTS.md"))
+
+      files = @doctrine_dir |> Path.join("*.md.eex") |> Path.wildcard()
+      assert files != []
+
+      assigns = %{can_dispatch: true, domain_prefix: "emr", primary_checkout: nil}
+
+      for file <- files do
+        name = Path.basename(file, ".md.eex")
+
+        assert agents =~ doctrine_section(name, assigns),
+               "AGENTS.md does not embed the bundled #{name} section verbatim"
+      end
+    end
+
+    test "AGENTS.md carries the command reference, concepts and filing conventions" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      agents = File.read!(Path.join(dir, "AGENTS.md"))
+
+      assert agents =~ "## Command reference"
+      assert agents =~ "arb dep add emr-1 blocks emr-2"
+      assert agents =~ "## Concepts"
+      assert agents =~ "D3 Hard"
+      assert agents =~ "`issue_type` signals whether a PR is expected"
+      assert agents =~ "--difficulty"
+    end
+
+    test "AGENTS.md names no live checkout and no no-memory claim" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      agents = File.read!(Path.join(dir, "AGENTS.md"))
+
+      refute agents =~ "The live checkout is off limits"
+      refute agents =~ ~r/no memory subsystem/i
+    end
+  end
+
   describe "--dev mode" do
     test "AGENTS.md covers both bare and systemd-wrapped dev sub-cases" do
       stub_install()
