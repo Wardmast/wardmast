@@ -295,11 +295,20 @@ defmodule WardmastCli.Cmd.InitTest do
 
       assigns = %{can_dispatch: true, domain_prefix: "emr", primary_checkout: nil}
 
-      for file <- files do
-        name = Path.basename(file, ".md.eex")
-
+      for file <- files,
+          name = Path.basename(file, ".md.eex"),
+          name not in Init.session_only_sections() do
         assert agents =~ doctrine_section(name, assigns),
                "AGENTS.md does not embed the bundled #{name} section verbatim"
+      end
+
+      # bd-7p6a9o: a session's own instruction set (the pair doctrine) ships in
+      # the same bundle but is not a coordinator home's doctrine.
+      assert "pair" in Init.session_only_sections()
+
+      for name <- Init.session_only_sections() do
+        refute agents =~ doctrine_section(name, assigns),
+               "AGENTS.md embeds the session-only #{name} section"
       end
     end
 

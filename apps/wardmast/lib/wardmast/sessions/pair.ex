@@ -250,6 +250,121 @@ defmodule Wardmast.Sessions.Pair do
     end
   end
 
+  @doc """
+  A pair session as every surface reports it: its id, name, ticket, worktree,
+  status and — once ended — why.
+  """
+  @spec summary(Session.t()) :: map()
+  def summary(%Session{} = session) do
+    %{
+      session_id: session.id,
+      name: session.name,
+      ticket_id: session.issue_id,
+      worktree: session.cwd,
+      status: session.status,
+      end_reason: session.end_reason
+    }
+  end
+
+  @doc """
+  What `finish/2`'s `{:ok, result}` reports to a caller: the route the work
+  took (`:in_review`, `:pr_opened`, or `:running` when the caller stopped
+  waiting), the run recorded against the ticket, and how the session ended.
+  """
+  @spec done_summary(String.t(), map()) :: map()
+  def done_summary(ticket_id, %{route: :running}) do
+    %{
+      ticket_id: ticket_id,
+      route: :running,
+      message:
+        "Done is still running (the pre-push checks take a while); watch the ticket for the " <>
+          "outcome."
+    }
+  end
+
+  def done_summary(ticket_id, result) do
+    %{
+      ticket_id: ticket_id,
+      route: result.route,
+      run_id: Map.get(result, :run_id),
+      session_end: session_end(Map.get(result, :session))
+    }
+  end
+
+  defp session_end(:deferred), do: :deferred
+  defp session_end(%Session{status: status}), do: status
+  defp session_end(_), do: nil
+
+  @doc """
+  The operator-facing sentence for any `{:error, reason}` this module returns —
+  one wording for the ticket page, `ward pair`, its REST route and the MCP
+  tools, so the same refusal never reads two ways.
+  """
+  @spec describe_error(term()) :: String.t()
+  def describe_error(:issue_not_found), do: "That ticket does not exist."
+
+  def describe_error(:not_pairable),
+    do: "That ticket cannot be paired on: only a Backlog, Ready or In-progress ticket can."
+
+  def describe_error(:no_workspace),
+    do: "That ticket belongs to no workspace, and a pair session has to be bound to one."
+
+  def describe_error(:no_repo),
+    do:
+      "That ticket names no repo this installation has a checkout of, so there is no " <>
+        "worktree to pair in."
+
+  def describe_error(:worker_active),
+    do:
+      "A worker is driving that ticket. Stop it before pairing, so two agents never share " <>
+        "one worktree."
+
+  def describe_error(:refine_session_live),
+    do: "That ticket's refine session is still open; finish or end it before pairing."
+
+  def describe_error(:no_pair_session), do: "That ticket has no live pair session."
+  def describe_error(:finish_in_progress), do: "Done is already running for that ticket."
+
+  def describe_error({:not_finishable, state}),
+    do: "That ticket is #{state}; Done finishes a Backlog, Ready or In-progress ticket."
+
+  def describe_error({:commit_gate, :uncommitted}),
+    do: "Done refused: the worktree has uncommitted changes. Commit them, then run Done again."
+
+  def describe_error({:commit_gate, :no_commits}),
+    do: "Done refused: the branch has no commits ahead of its base, so there is nothing to ship."
+
+  def describe_error({:commit_gate, :secret_in_commit}),
+    do:
+      "Done refused: a commit on the branch carries injected agent config (`.mcp.json` " <>
+        "or similar), which holds a token. Take it out of the branch history first."
+
+  def describe_error({:commit_gate, {:wrong_branch, current, expected}}),
+    do: "Done refused: the worktree is on `#{current}`, not the ticket's branch `#{expected}`."
+
+  def describe_error({:commit_gate, {:git_failed, reason}}),
+    do: "Done refused: git could not read the worktree (#{inspect(reason)}). Try again."
+
+  def describe_error({:prepush_failed, %{output: output}}),
+    do:
+      "Done refused: a pre-push check failed. Fix it, commit, and run Done again.\n\n" <>
+        output
+
+  def describe_error({:hand_off_failed, reason}),
+    do:
+      "The checks passed but the hand-off failed (#{inspect(reason)}); the ticket carries " <>
+        "the failure, and the session is still live."
+
+  def describe_error({:finish_crashed, reason}), do: "Done crashed: #{inspect(reason)}"
+
+  def describe_error({:provisioning_failed, {:inside_primary_checkout, _path, message}}),
+    do: "Could not open a pair session: #{message}"
+
+  def describe_error(%{__exception__: true} = error),
+    do: "Could not open a pair session: #{Exception.message(error)}"
+
+  def describe_error(reason), do: "Pair session error: #{inspect(reason)}"
+
   @doc "The session's display name — `Pair <id>: <title>`."
   @spec display_name(Issue.t()) :: String.t()
   def display_name(%Issue{id: id, title: title}) do

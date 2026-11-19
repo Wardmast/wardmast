@@ -51,6 +51,7 @@ defmodule WardmastWeb.Api.IssueController do
 
   alias Wardmast.Guardrails.Authority
   alias Wardmast.Params
+  alias Wardmast.Sessions.Pair
   alias Wardmast.Tasks.AcceptanceLint
   alias Wardmast.Tasks.AssigneeCompat
   alias Wardmast.Tasks.BatchCreate
@@ -891,6 +892,64 @@ defmodule WardmastWeb.Api.IssueController do
   (optional).
   """
   def handback(conn, %{"id" => id} = params), do: move_attention(conn, id, :coordinator, params)
+
+  # ---- pair sessions (bd-7p6a9o) ----
+
+  # How long `POST /api/issues/:id/pair/done` waits on Done before answering
+  # that it is still running; `ward pair done` waits a little longer than this.
+  @pair_done_wait_ms 280_000
+
+  @doc """
+  Open — or reopen — the ticket's pair session (bd-7p6a9o), and ask every open
+  dock to show it. What `ward pair <ticket>` wraps; the twin of MCP
+  `pair_open`.
+  """
+  def pair_open(conn, %{"id" => id}) do
+    with {:ok, issue} <- Ash.get(Issue, id) do
+      case Pair.open(issue) do
+        {:ok, %{session: session, reopened?: reopened?}} ->
+          _ = Wardmast.Sessions.request_open(session.id)
+          json(conn, %{data: Map.put(Pair.summary(session), :reopened, reopened?)})
+
+        {:error, reason} ->
+          pair_error(reason)
+      end
+    end
+  end
+
+  @doc """
+  Run Done on the ticket's pair session (bd-7p6a9o): the commit gate, then the
+  worker completion path. What `ward pair done <ticket>` wraps; the twin of MCP
+  `pair_done`. A refusal is a 409 carrying the reason, the pre-push output
+  included.
+  """
+  def pair_done(conn, %{"id" => id}) do
+    with {:ok, issue} <- Ash.get(Issue, id) do
+      case Pair.finish(issue, timeout: @pair_done_wait_ms) do
+        {:ok, result} -> json(conn, %{data: Pair.done_summary(issue.id, result)})
+        {:error, reason} -> pair_error(reason)
+      end
+    end
+  end
+
+  @doc """
+  End the ticket's pair session without Done (bd-7p6a9o), leaving the worktree
+  and the branch. What `ward pair end <ticket>` wraps; the twin of MCP
+  `pair_end`.
+  """
+  def pair_end(conn, %{"id" => id}) do
+    with {:ok, issue} <- Ash.get(Issue, id) do
+      case Pair.close(issue) do
+        {:ok, ended} -> json(conn, %{data: Pair.summary(ended)})
+        {:error, reason} -> pair_error(reason)
+      end
+    end
+  end
+
+  defp pair_error(reason) when reason in [:issue_not_found, :no_pair_session],
+    do: {:error, {:not_found, Pair.describe_error(reason)}}
+
+  defp pair_error(reason), do: {:error, {:conflict, Pair.describe_error(reason)}}
 
   defp move_attention(conn, id, to, params) do
     note = if is_binary(params["note"]), do: params["note"]

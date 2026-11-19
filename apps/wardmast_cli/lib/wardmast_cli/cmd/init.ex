@@ -124,10 +124,16 @@ defmodule WardmastCli.Cmd.Init do
                   Path.join([__DIR__, "..", "..", "..", "..", "wardmast", "priv", "doctrine"])
                 )
 
+  # Bundled sections that are not the coordinator's doctrine and so never
+  # appear in a coordinator home's AGENTS.md: `pair` is a pair session's own
+  # instruction set (bd-7p6a9o), rendered only into that session's CLAUDE.md.
+  @session_only_sections ~w(pair)
+
   @doctrine_sections @doctrine_dir
                      |> Path.join("*.md.eex")
                      |> Path.wildcard()
                      |> Enum.sort()
+                     |> Enum.reject(&(Path.basename(&1, ".md.eex") in @session_only_sections))
                      |> Enum.map(fn path ->
                        {path |> Path.basename(".md.eex") |> String.to_atom(), path}
                      end)
@@ -135,6 +141,11 @@ defmodule WardmastCli.Cmd.Init do
   if @doctrine_sections == [] do
     raise "no bundled doctrine found under #{@doctrine_dir}"
   end
+
+  @doc false
+  # The bundled sections a coordinator home's AGENTS.md never carries.
+  @spec session_only_sections() :: [String.t()]
+  def session_only_sections, do: @session_only_sections
 
   # The doctrine directory itself, so a section added there recompiles this
   # module (the per-file resources below only cover files that already exist).

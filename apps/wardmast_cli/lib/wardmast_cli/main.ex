@@ -230,6 +230,12 @@ defmodule WardmastCli.Main do
                                                 reads systemd + tmux directly, never HTTP
       ward session attach <id> [--read-only]
 
+      ward pair <ticket> [--json]               pair on a ticket: a hands-on agent session in
+                                   its worktree, worked with you; no worker starts on it meanwhile
+      ward pair done <ticket> [--json]          Done: commit gate, then PR (pair-authored),
+                                   ReviewGate, CI and the merge queue; ends the session
+      ward pair end <ticket> [--json]           end it without Done; worktree and branch kept
+
   ## Meta commands (no resource)
 
       ward prime                Mission briefing — run at the start of a session
