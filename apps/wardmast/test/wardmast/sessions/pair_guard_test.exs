@@ -11,7 +11,10 @@ defmodule Wardmast.Sessions.PairGuardTest do
       `core.hooksPath` that only the session's own processes carry — exercised
       with real `git push`es against a real bare remote.
   """
-  use ExUnit.Case, async: true
+  # async: false — `GitFixture.forge_and_checkout/0` points the worktree root
+  # (Application env) at a private directory, and the guard's hooks lookup
+  # reads it (`Worktree.hooks_dir/1`, through `PrivateClone.guard/1`).
+  use ExUnit.Case, async: false
 
   alias Wardmast.Sessions.PairGuard
   alias Wardmast.Test.GitFixture

@@ -33,7 +33,14 @@ defmodule Wardmast.Sessions.PairGuard do
   installs mid-session still runs; the two it fires on every ref or index
   update are wrapped only when the repo already has them, since a stub there
   would fork a shell on every `git status`.
+
+  The repo's hooks dir comes from `Wardmast.Worker.Worktree.hooks_dir/1`, the
+  guarded host-side git every worker checkout is read through (bd-6t7u81): a
+  checkout whose `.git` a worker replaced yields no hooks dir, so the session
+  never wraps hooks a worker planted. This module spawns nothing itself.
   """
+
+  alias Wardmast.Worker.Worktree
 
   # Client-side hooks git fires at most once per command: always wrapped.
   @wrapped_hooks ~w(
@@ -100,7 +107,9 @@ defmodule Wardmast.Sessions.PairGuard do
         {:error, :no_branch}
 
       branch ->
-        original = original_hooks_dir(Map.get(ctx, :worktree))
+        # The repo's own hooks dir, resolved now — without the session's
+        # override — so the stubs can run it later. `nil` for no worktree.
+        original = Worktree.hooks_dir(Map.get(ctx, :worktree))
 
         with :ok <- File.mkdir_p(hooks_dir),
              :ok <- write_hook(hooks_dir, "pre-push", pre_push(branch, original)) do
@@ -170,22 +179,6 @@ defmodule Wardmast.Sessions.PairGuard do
   end
 
   # ---- hooks --------------------------------------------------------------
-
-  # The hooks dir the repo itself uses — its own `core.hooksPath` if it sets
-  # one, else `<common git dir>/hooks` — resolved now, without the session's
-  # override, so the stubs can call it later. `nil` for no worktree.
-  defp original_hooks_dir(worktree) when is_binary(worktree) do
-    case System.cmd(
-           "git",
-           ["-C", worktree, "rev-parse", "--path-format=absolute", "--git-path", "hooks"],
-           stderr_to_stdout: true
-         ) do
-      {out, 0} -> out |> String.trim() |> present()
-      _ -> nil
-    end
-  end
-
-  defp original_hooks_dir(_worktree), do: nil
 
   # No repo hooks dir at all: nothing to run, so nothing to wrap.
   defp wrapped_hooks(nil), do: []

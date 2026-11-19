@@ -21,6 +21,7 @@ defmodule Wardmast.Worker.PrivateCloneGitSwapTest do
 
   import ExUnit.CaptureLog
 
+  alias Wardmast.Sessions.PairGuard
   alias Wardmast.Test.GitFixture
   alias Wardmast.Worker.PrivateClone
   alias Wardmast.Worker.Worktree
@@ -208,6 +209,31 @@ defmodule Wardmast.Worker.PrivateCloneGitSwapTest do
       assert {:error, {:tampered, _}} = PrivateClone.sync_back(ctx.path)
       assert {:error, {:tampered, _}} = reclaim(ctx.path)
       git!(ctx.path, ["update-ref", "refs/heads/#{@branch}", "HEAD"])
+      assert fired(ctx) == []
+    end
+
+    # bd-7p6a9o: a pair session's push guard runs the checkout's own hooks
+    # behind it, found through `Worktree.hooks_dir/1`. The hooks dir a
+    # recreated config names must never become one the session runs.
+    test "a pair session's guard does not wrap the hooks a recreated config names", ctx do
+      assert is_binary(Worktree.hooks_dir(ctx.path))
+
+      swap_with_hooks_path!(ctx)
+      planted = ctx.marker_dir <> "-hooks"
+
+      assert Worktree.hooks_dir(ctx.path) == nil
+
+      session_hooks = Path.join(ctx.root, "pair-session-hooks")
+      assert :ok = PairGuard.install_hooks(session_hooks, %{branch: @branch, worktree: ctx.path})
+
+      # The push guard itself is still there; nothing it installed runs the
+      # worker's hooks.
+      assert File.read!(Path.join(session_hooks, "pre-push")) =~ "refs/heads/#{@branch}"
+
+      for name <- File.ls!(session_hooks) do
+        refute File.read!(Path.join(session_hooks, name)) =~ planted
+      end
+
       assert fired(ctx) == []
     end
   end
