@@ -74,7 +74,12 @@ defmodule Wardmast.Worker.ReviewGateScreenshotsTest do
       wait_until(fn -> passes(rig) == 1 end)
       assert_received {:captured, %{head_sha: head, plan_path: plan}}
       assert String.starts_with?(rig.head, head)
-      assert plan == Path.join(rig.wt, ".arbiter/screenshots.json")
+      # bd-adrym0: the copy the commit gate checked feeds the capture, not the live worktree file.
+      assert plan ==
+               Wardmast.Screenshots.PlanCheck.stored_path(
+                 Wardmast.Screenshots.PlanCheck.store_root(),
+                 rig.task.id
+               )
 
       prompt = :sys.get_state(gate).current_prompt
       assert prompt =~ "UI SCREENSHOTS"
@@ -328,6 +333,11 @@ defmodule Wardmast.Worker.ReviewGateScreenshotsTest do
   end
 
   defp start_author(task, ws, ctx, branch, wt) do
+    # The commit gate (bd-adrym0) wants a valid plan on a UI diff before it routes on; the capture
+    # itself is a stub here, so a skip is enough to reach the ReviewGate.
+    File.mkdir_p!(Path.join(wt, ".arbiter"))
+    File.write!(Path.join(wt, ".arbiter/screenshots.json"), ~s({"version":1,"skip":"test"}))
+
     {:ok, author} =
       Worker.start(
         task_id: task.id,
