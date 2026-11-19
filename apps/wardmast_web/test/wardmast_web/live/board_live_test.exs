@@ -556,13 +556,13 @@ defmodule WardmastWeb.BoardLiveTest do
       assert html =~ "next up"
     end
 
-    test "a card behind the head shows its queue position", %{conn: conn, ws: ws} do
+    test "a card the walk places beside the head reads starting", %{conn: conn, ws: ws} do
       issue(ws, "leader", %{priority: 1})
       issue(ws, "follower", %{priority: 3})
 
       {:ok, _view, html} = live_board(conn)
 
-      assert html =~ "1 ahead in queue"
+      assert html =~ "data-layer-state=\"starting\""
     end
 
     test "a dependency-blocked card names the blocker instead of a position", %{
