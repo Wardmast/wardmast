@@ -81,7 +81,12 @@ defmodule Wardmast.Worker.WorktreeTest do
 
       assert path == Path.join(root, "feature-case")
       assert existing == Path.join(root, "Feature-Case")
-      refute File.exists?(path)
+      # File.exists?/1 can't tell on case-insensitive filesystems (APFS): the
+      # case-variant resolves to the existing dir. Assert on exact-case names.
+      assert root
+             |> File.ls!()
+             |> Enum.filter(&(String.downcase(&1) == "feature-case")) == ["Feature-Case"]
+
       assert {:error, {:path_case_collision, _, _}} = Worktree.attach(repo, "feature/case")
     end
 
