@@ -1339,29 +1339,37 @@ defmodule Wardmast.Mergers.Gitlab do
       |> Enum.filter(&(Map.get(&1, "state") == "requested_changes"))
 
     fallback? = cfg.changes_requested_from_discussions and requesting == []
-
-    open_threads =
-      if fallback? or
-           (with_feedback? and (requesting != [] or cfg.changes_requested_from_discussions)),
-         do: nonauthor_open_discussions(cfg, iid, mr),
-         else: []
-
-    reviews = Enum.map(requesting, &reviewer_feedback_item/1)
-    comments = Enum.map(open_threads, &discussion_feedback_item/1)
+    want_threads? = fallback? or (with_feedback? and (requesting != [] or fallback_enabled?(cfg)))
+    open_threads = if want_threads?, do: nonauthor_open_discussions(cfg, iid, mr), else: []
 
     {changes_requested, latest_review_id} =
-      cond do
-        requesting != [] -> {true, reviewer_review_id(requesting)}
-        fallback? and open_threads != [] -> {true, discussion_review_id(open_threads, mr)}
-        true -> {false, nil}
-      end
+      review_verdict(requesting, if(fallback?, do: open_threads, else: []), mr)
+
+    feedback =
+      if with_feedback?,
+        do:
+          Enum.map(requesting, &reviewer_feedback_item/1) ++
+            Enum.map(open_threads, &discussion_feedback_item/1),
+        else: []
 
     %{
       changes_requested: changes_requested,
       latest_review_id: latest_review_id,
-      feedback: if(with_feedback?, do: reviews ++ comments, else: [])
+      feedback: feedback
     }
   end
+
+  defp fallback_enabled?(cfg), do: cfg.changes_requested_from_discussions
+
+  # Reviewer state wins; the discussion fallback only speaks when no reviewer
+  # requested changes (`fallback_threads` is `[]` unless the flag is on).
+  defp review_verdict([_ | _] = requesting, _fallback_threads, _mr),
+    do: {true, reviewer_review_id(requesting)}
+
+  defp review_verdict([], [_ | _] = fallback_threads, mr),
+    do: {true, discussion_review_id(fallback_threads, mr)}
+
+  defp review_verdict([], [], _mr), do: {false, nil}
 
   defp mr_reviewers(cfg, iid, %{"reviewers" => [_ | _]}) do
     case request(cfg, :get, "/merge_requests/#{iid}/reviewers", []) |> handle_json() do
