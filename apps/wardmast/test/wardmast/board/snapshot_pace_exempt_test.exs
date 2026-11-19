@@ -81,7 +81,7 @@ defmodule Wardmast.Board.SnapshotPaceExemptTest do
   test "an exempt P0 card is promoted past the paced line, ahead of a P2 card", %{ws: ws, n: n} do
     quota_for!(ws, n, @exempt, 0.40)
 
-    assert board(ws, [issue(ws, "bd-p2", 2), issue(ws, "bd-p0", 0)]).promote == "bd-p0"
+    assert board(ws, [issue(ws, "bd-p2", 2), issue(ws, "bd-p0", 0)]).walk.promote == "bd-p0"
   end
 
   test "Throttle.check reads the task's own priority", %{ws: ws, n: n} do
