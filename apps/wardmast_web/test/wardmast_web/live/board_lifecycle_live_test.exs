@@ -185,7 +185,7 @@ defmodule WardmastWeb.BoardLifecycleLiveTest do
       view = live_board(conn)
 
       assert has_element?(view, ~s(#card-#{head.id}), "next up")
-      assert has_element?(view, ~s(#card-#{behind.id}), "1 ahead in queue")
+      assert has_element?(view, "[data-layer-reason='#{behind.id}'][data-layer-state='starting']")
     end
 
     test "a Ready card held by the scheduler says held, not blocked", %{conn: conn, ws: ws} do
@@ -460,7 +460,7 @@ defmodule WardmastWeb.BoardLifecycleLiveTest do
       planned = plan.ready |> Enum.map(& &1.id) |> Enum.filter(&(&1 in displayed))
 
       assert planned == displayed
-      assert plan.promote == hd(displayed)
+      assert plan.walk.promote == hd(displayed)
     end
 
     test "a reorder naming a card that is not in that column changes nothing", %{

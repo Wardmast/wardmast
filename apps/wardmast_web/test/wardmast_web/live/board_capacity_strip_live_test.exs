@@ -376,13 +376,13 @@ defmodule WardmastWeb.BoardCapacityStripLiveTest do
       assert lv |> element("[data-layer-reason='#{starting.id}']") |> render() =~ "Starting"
     end
 
-    test "the hold badge's popup carries the layer too", %{conn: conn, ws: ws} do
+    test "a card that waits on a full machine names the layer", %{conn: conn, ws: ws} do
       {:ok, _} = Settings.set_nodes_local_max_workers(0)
       ticket = ready_ticket(ws, "no slot at all")
       lv = mount_board(conn)
 
-      assert has_element?(lv, "#hold-#{ticket.id}-panel [data-hold-layer]", "Waiting")
-      assert has_element?(lv, "#hold-#{ticket.id}-panel [data-hold-layer]", "no machine")
+      assert has_element?(lv, "[data-layer-reason='#{ticket.id}']", "Waiting")
+      assert has_element?(lv, "[data-layer-reason='#{ticket.id}']", "no machine")
     end
   end
 end
