@@ -148,6 +148,38 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
   exec "$@"
   """
 
+  # bd-3glf2a. Runs inside an app command's sandbox, before the command: for each service, a relay
+  # from 127.0.0.1:<port> to the service's socket (bound in read-only from the host), all up before
+  # the command starts (or exit 125: a migration never runs against a missing database). The
+  # relays never hold the app's inherited listening socket (fd 3).
+  @services_sh ~S"""
+  socat=$1
+  shift
+  relays=
+  while [ "$#" -gt 1 ] && [ "$1" != "--" ]; do
+    "$socat" "TCP-LISTEN:$1,bind=127.0.0.1,fork,reuseaddr" "UNIX-CONNECT:$2" </dev/null >/dev/null 2>&1 3<&- &
+    relays="$relays $1:$!"
+    shift 2
+  done
+  [ "$1" = "--" ] && shift
+  for relay in $relays; do
+    port=${relay%%:*}
+    pid=${relay#*:}
+    hex=$(printf '%04X' "$port")
+    i=0
+    until grep -qi "^ *[0-9]*: 0100007F:$hex 00000000:0000 0A" /proc/net/tcp; do
+      kill -0 "$pid" 2>/dev/null || { echo "capture sandbox: the relay to the service on 127.0.0.1:$port exited at start-up" >&2; exit 125; }
+      i=$((i + 1))
+      if [ "$i" -ge 200 ]; then
+        echo "capture sandbox: the relay to the service on 127.0.0.1:$port did not come up" >&2
+        exit 125
+      fi
+      sleep 0.05
+    done
+  done
+  exec "$@"
+  """
+
   @probe_script ~S"""
   awk -F'[: ]+' 'NR>2 {print "if:" $2}' /proc/net/dev
   echo "routes:$(awk 'NR>1' /proc/net/route | wc -l)"
@@ -157,10 +189,11 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
 
   @type tools :: %{bwrap: String.t(), perl: String.t(), socat: String.t(), sh: String.t()}
   @type host :: %{
-          tools: tools(),
-          system: [{String.t(), :dir | {:symlink, String.t()}}],
-          secret_files: [String.t()],
-          mask_dirs: [String.t()]
+          required(:tools) => tools(),
+          required(:system) => [{String.t(), :dir | {:symlink, String.t()}}],
+          required(:secret_files) => [String.t()],
+          required(:mask_dirs) => [String.t()],
+          optional(:resolv_conf) => String.t() | nil
         }
 
   # ── the contract ────────────────────────────────────────────────────────
@@ -235,6 +268,11 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
   end
 
   @impl true
+  def fetch_command(argv, box) do
+    with {:ok, host} <- host(), do: {:ok, fetch_argv(argv, box, host)}
+  end
+
+  @impl true
   def browser(argv, app, writable), do: browser(argv, app, writable, [])
 
   @impl true
@@ -282,15 +320,40 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
   @spec command_argv([String.t()], map(), map() | nil, host()) :: [String.t()]
   def command_argv(argv, box, nil, host) do
     [host.tools.bwrap | sandbox_args(app_mounts(box), host)] ++
-      ["--chdir", box.checkout, "--" | argv]
+      ["--chdir", box.checkout, "--"] ++ services_prelude(box, host) ++ argv
   end
 
   def command_argv(argv, box, %{port: port, socket: socket}, host) do
     t = host.tools
 
     [t.perl, "-e", @listen, socket, t.bwrap | sandbox_args(app_mounts(box), host)] ++
-      ["--chdir", box.checkout, "--", t.sh, "-c", @relay_sh, "sh", t.perl, @relay] ++
-      [Integer.to_string(port), t.socat | argv]
+      ["--chdir", box.checkout, "--"] ++
+      services_prelude(box, host) ++
+      [t.sh, "-c", @relay_sh, "sh", t.perl, @relay, Integer.to_string(port), t.socat | argv]
+  end
+
+  @doc false
+  # bd-3glf2a: the deps cache seed. Trusted code only (a default-branch tree), so the one thing
+  # it gets back is the network; the filesystem is an app command's.
+  @spec fetch_argv([String.t()], map(), host()) :: [String.t()]
+  def fetch_argv(argv, box, host) do
+    mounts = app_mounts(box)
+    mounts = %{mounts | system_try: mounts.system_try ++ List.wrap(Map.get(host, :resolv_conf))}
+
+    [host.tools.bwrap | sandbox_args(mounts, host, network: true)] ++
+      ["--chdir", box.checkout, "--" | argv]
+  end
+
+  # A relay per service (`@services_sh`) in front of the command, when the boot has services.
+  defp services_prelude(box, host) do
+    case Map.get(box, :services, []) do
+      [] ->
+        []
+
+      services ->
+        pairs = Enum.flat_map(services, &[Integer.to_string(&1.port), &1.socket])
+        [host.tools.sh, "-c", @services_sh, "sh", host.tools.socat | pairs] ++ ["--"]
+    end
   end
 
   @doc false
@@ -312,6 +375,7 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
       system_try: @fontconfig,
       readonly: [],
       ro: shown ++ [socket],
+      ro_at: [],
       rw: Enum.uniq(writable)
     }
 
@@ -320,11 +384,17 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
       [Integer.to_string(port) | argv]
   end
 
+  # bd-3glf2a: a boot's service sockets (`box.services`, each at its host path and, when the
+  # config declares one, at its `sandbox_socket` path too) and the deps cache (`box.cache_dirs`)
+  # are Wardmast's own files: read-only, and re-opened after the masks like the boot's own dirs.
   defp app_mounts(box) do
+    services = Map.get(box, :services, [])
+
     %{
       system_try: [],
       readonly: box |> Map.get(:readonly_paths, []) |> Enum.map(&Path.expand/1) |> Enum.uniq(),
-      ro: [],
+      ro: Enum.uniq(Enum.map(services, & &1.socket) ++ Map.get(box, :cache_dirs, [])),
+      ro_at: for(%{sandbox_socket: at} = s <- services, is_binary(at), do: {s.socket, at}),
       rw: Enum.uniq([box.checkout, box.scratch])
     }
   end
@@ -334,9 +404,12 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
   # (they hide what a listed path would show of the server's own files and sockets) and before
   # the boot's own binds, which re-open exactly their own paths: a mask over a parent of the
   # checkout cannot hide it, and nothing else of the masked tree comes back.
-  defp sandbox_args(mounts, host) do
+  # `network: true` is `fetch_argv/3`'s alone: trusted code fetching dependencies.
+  defp sandbox_args(mounts, host, opts \\ []) do
     Enum.concat([
-      ["--unshare-all", "--die-with-parent", "--new-session"],
+      ["--unshare-all"],
+      if(Keyword.get(opts, :network, false), do: ["--share-net"], else: []),
+      ["--die-with-parent", "--new-session"],
       system_args(host.system),
       ["--ro-bind", "/etc", "/etc"],
       Enum.flat_map(mounts.system_try, &["--ro-bind-try", &1, &1]),
@@ -345,6 +418,7 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
       Enum.flat_map(mounts.readonly, &["--ro-bind-try", &1, &1]),
       mask_args(mounts, host),
       Enum.flat_map(mounts.ro, &["--ro-bind", &1, &1]),
+      Enum.flat_map(mounts.ro_at, fn {src, dest} -> ["--ro-bind", src, dest] end),
       Enum.flat_map(mounts.rw, &["--bind", &1, &1])
     ])
   end
@@ -389,8 +463,26 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
          tools: tools,
          system: system,
          secret_files: Jail.secret_files(),
-         mask_dirs: mask_dirs()
+         mask_dirs: mask_dirs(),
+         resolv_conf: resolv_conf()
        }}
+    end
+  end
+
+  # The first place /etc/resolv.conf points to outside /etc (systemd-resolved's stub under /run):
+  # the fetch sandbox binds it (bwrap follows the rest of the chain), or no name would resolve
+  # there. `nil` when the file is in /etc (already shown).
+  defp resolv_conf(path \\ "/etc/resolv.conf", hops \\ 10)
+  defp resolv_conf(_path, 0), do: nil
+
+  defp resolv_conf(path, hops) do
+    case File.read_link(path) do
+      {:ok, target} ->
+        next = Path.expand(target, Path.dirname(path))
+        if under?(next, ["/etc"]), do: resolv_conf(next, hops - 1), else: next
+
+      {:error, _} ->
+        nil
     end
   end
 

@@ -193,6 +193,140 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.BwrapTest do
     end
   end
 
+  # bd-3glf2a: a boot's service containers, reached through host sockets the services layer made.
+  describe "command_argv/4: services" do
+    @services [
+      %{
+        name: "postgres",
+        port: 5432,
+        socket: "/run/user/1000/arbiter/svc-ab12/postgres",
+        sandbox_socket: "/run/postgresql/.s.PGSQL.5432"
+      },
+      %{name: "s3", port: 9000, socket: "/run/user/1000/arbiter/svc-ab12/s3", sandbox_socket: nil}
+    ]
+
+    defp services_box, do: Map.put(@box, :services, @services)
+
+    test "each service's host socket is shown read-only at its own path, after the masks" do
+      argv = Bwrap.command_argv(["sh", "-c", "mix ecto.setup"], services_box(), nil, @host)
+
+      for svc <- @services do
+        assert seq?(argv, ["--ro-bind", svc.socket, svc.socket])
+      end
+
+      # /run/user/1000 is a mask dir of the host; the binds are re-opened after it, and nothing
+      # else of the socket's directory is mounted.
+      refute Enum.any?(mounts(argv), fn {_f, src} -> src == "/run/user/1000/arbiter/svc-ab12" end)
+
+      assert index(argv, ["--ro-bind", hd(@services).socket, hd(@services).socket]) >
+               index(argv, ["--tmpfs", "/run"])
+    end
+
+    test "a declared socket path also shows the service there" do
+      argv = Bwrap.command_argv(["true"], services_box(), nil, @host)
+
+      assert seq?(argv, [
+               "--ro-bind",
+               "/run/user/1000/arbiter/svc-ab12/postgres",
+               "/run/postgresql/.s.PGSQL.5432"
+             ])
+    end
+
+    test "a relay per service listens on 127.0.0.1:<port> before the command runs" do
+      argv = Bwrap.command_argv(["sh", "-c", "mix ecto.setup"], services_box(), nil, @host)
+      after_sep = argv |> Enum.drop_while(&(&1 != "--")) |> tl()
+
+      assert [
+               "/usr/bin/sh",
+               "-c",
+               services_sh,
+               "sh",
+               "/usr/bin/socat",
+               "5432",
+               "/run/user/1000/arbiter/svc-ab12/postgres",
+               "9000",
+               "/run/user/1000/arbiter/svc-ab12/s3",
+               "--",
+               "sh",
+               "-c",
+               "mix ecto.setup"
+             ] = after_sep
+
+      assert services_sh =~ "TCP-LISTEN:"
+      assert services_sh =~ "bind=127.0.0.1"
+      assert services_sh =~ "UNIX-CONNECT:"
+      # The relays never hold the app's inherited listening socket.
+      assert services_sh =~ "3<&-"
+      assert services_sh =~ "/proc/net/tcp"
+    end
+
+    test "the started app gets the services first, then its own relay" do
+      argv = Bwrap.command_argv(["sh", "-c", "mix phx.server"], services_box(), @app, @host)
+      after_sep = argv |> Enum.drop_while(&(&1 != "--")) |> tl()
+
+      assert ["/usr/bin/sh", "-c", services_sh, "sh", "/usr/bin/socat" | rest] = after_sep
+      assert services_sh =~ "TCP-LISTEN:"
+      assert ["5432", _, "9000", _, "--", "/usr/bin/sh", "-c", relay_sh | _] = rest
+      assert relay_sh =~ "exec 3<&-"
+      assert List.last(argv) == "mix phx.server"
+    end
+
+    test "no services: the argv is unchanged" do
+      plain = Bwrap.command_argv(["true"], @box, nil, @host)
+      assert Bwrap.command_argv(["true"], Map.put(@box, :services, []), nil, @host) == plain
+    end
+
+    test "the browser never sees a service" do
+      argv = Bwrap.browser_argv(["/usr/bin/chromium"], @app, ["/tmp/shot"], @host)
+      refute Enum.any?(argv, &String.contains?(&1, "svc-ab12"))
+    end
+  end
+
+  # bd-3glf2a: the deps cache a boot is pointed at.
+  describe "command_argv/4: cache dirs" do
+    test "are shown read-only, after the masks, and never writable" do
+      box = Map.put(@box, :cache_dirs, ["/home/op/.cache/arbiter/scratch/capture-deps/abc-def"])
+      argv = Bwrap.command_argv(["true"], box, nil, @host)
+      dir = "/home/op/.cache/arbiter/scratch/capture-deps/abc-def"
+
+      assert seq?(argv, ["--ro-bind", dir, dir])
+      refute seq?(argv, ["--bind", dir, dir])
+    end
+  end
+
+  # bd-3glf2a: trusted, default-branch code (the deps cache seed) with the network on.
+  describe "fetch_argv/3" do
+    test "shares the network and nothing else back, with the same filesystem allowlist" do
+      argv = Bwrap.fetch_argv(["sh", "-c", "mix deps.get"], @box, @host)
+      plain = Bwrap.command_argv(["sh", "-c", "mix deps.get"], @box, nil, @host)
+
+      assert hd(argv) == "/usr/bin/bwrap"
+      assert "--unshare-all" in argv
+      assert "--share-net" in argv
+      # The one difference from an app command: the network.
+      assert List.delete(argv, "--share-net") == plain
+      assert seq?(argv, ["--bind", @box.checkout, @box.checkout])
+      assert Enum.take(argv, -3) == ["sh", "-c", "mix deps.get"]
+    end
+
+    test "a resolv.conf that points into /run is shown, so names resolve" do
+      host = Map.put(@host, :resolv_conf, "/run/systemd/resolve/stub-resolv.conf")
+      argv = Bwrap.fetch_argv(["true"], @box, host)
+
+      assert seq?(argv, [
+               "--ro-bind-try",
+               "/run/systemd/resolve/stub-resolv.conf",
+               "/run/systemd/resolve/stub-resolv.conf"
+             ])
+
+      refute seq?(Bwrap.command_argv(["true"], @box, nil, host), [
+               "--ro-bind-try",
+               "/run/systemd/resolve/stub-resolv.conf",
+               "/run/systemd/resolve/stub-resolv.conf"
+             ])
+    end
+  end
+
   describe "browser_argv/4,5" do
     setup do
       shot = "/tmp/cap/work/after/shots/7"
