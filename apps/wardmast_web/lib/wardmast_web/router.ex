@@ -141,6 +141,9 @@ defmodule WardmastWeb.Router do
     get("/sessions/:id/transcript", SessionTranscriptController, :raw)
     get("/sessions/:id/jsonl", SessionTranscriptController, :jsonl)
 
+    # bd-5hlegn: a ticket attachment's bytes (the image the ticket page shows).
+    get("/attachments/:id", AttachmentController, :show)
+
     # A dashboard login's redacted final screen (bd-bh50vs) — a download, so
     # it sits outside the live_session like the session artefacts above.
     get("/providers/logins/:id/transcript", LoginTranscriptController, :show)
