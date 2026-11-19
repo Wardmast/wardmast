@@ -20,6 +20,10 @@ defmodule Wardmast.Screenshots.Captures do
   # Failures that happen before anything is booted (the worker's plan is bad): not an attempt.
   @no_boot_codes ~w(manifest_missing manifest_invalid)
 
+  # A capture's own outcome, or a skip the gate records itself (`{:skipped, {:unchanged | :cap, why}}`).
+  @type outcome ::
+          Wardmast.Screenshots.Capture.run_outcome() | {:skipped, {atom(), String.t()}}
+
   @type history :: %{attempts: non_neg_integer(), last_captured: CaptureRecord.t() | nil}
 
   @doc "Insert a `running` row. `attrs`: task_id, workspace_id, head_sha, base_sha, plan_hash, config_hash, out_dir."
@@ -39,8 +43,7 @@ defmodule Wardmast.Screenshots.Captures do
   Record how `record`'s capture ended. A row already `superseded` stays superseded: the capture
   that was cancelled does not get to claim it finished.
   """
-  @spec finish(CaptureRecord.t(), Wardmast.Screenshots.Capture.run_outcome()) ::
-          {:ok, CaptureRecord.t()}
+  @spec finish(CaptureRecord.t(), outcome()) :: {:ok, CaptureRecord.t()}
   def finish(%CaptureRecord{id: id}, outcome) do
     changes = outcome_changes(outcome) |> Map.put(:finished_at, DateTime.utc_now())
 
