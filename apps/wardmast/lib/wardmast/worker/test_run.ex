@@ -43,6 +43,8 @@ defmodule Wardmast.Worker.TestRun do
 
   @default_timeout_s 600
   @max_timeout_s 1800
+  # Cap on `scripts/test-env.sh up`, taken off the test run's own budget.
+  @env_timeout_s 300
   @probe_timeout_s 60
   @log_marker "ARB_TEST_LOG="
 
@@ -258,7 +260,6 @@ defmodule Wardmast.Worker.TestRun do
   # -- the repo's test env -----------------------------------------------------
 
   @test_env_script "scripts/test-env.sh"
-  @env_timeout_s 300
 
   # A repo that needs a per-worker test env (Postgres, S3, a generated
   # `config/env.exs`) ships `scripts/test-env.sh`. Bringing it up here, in the
