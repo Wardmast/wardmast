@@ -32,7 +32,7 @@ defmodule Wardmast.Board.AutopilotImagePendingTest do
 
       promote = Enum.find(["bd-1", "bd-2"], &(not Map.has_key?(holds, &1)))
 
-      %{
+      Wardmast.Board.WalkFixture.with_walk(%{
         ready:
           for(
             id <- ["bd-1", "bd-2"],
@@ -51,7 +51,7 @@ defmodule Wardmast.Board.AutopilotImagePendingTest do
         quota: :ok,
         paused: false,
         now: DateTime.utc_now()
-      }
+      })
     end
   end
 

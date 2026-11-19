@@ -181,7 +181,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
 
       assert {:error, {:quota_held, task_id}} =
-               Dispatch.dispatch(task.id, force: true, start_driver: false)
+               Dispatch.dispatch(task.id, force: true, resume: true, start_driver: false)
 
       assert task_id == task.id
 
@@ -216,10 +216,10 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(p2.id, force: true, start_driver: false)
+               Dispatch.dispatch(p2.id, force: true, resume: true, start_driver: false)
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(p0.id, force: true, start_driver: false)
+               Dispatch.dispatch(p0.id, force: true, resume: true, start_driver: false)
 
       assert length(DispatchQueue.state(pid).items) == 2
 
@@ -239,8 +239,8 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
     end
   end
 
-  describe "P0 pace exemption (bd-6bxv7h) — the drain reads the held ticket's own priority" do
-    test "a held P0 drains once under its exempt cap while a held P2 stays held" do
+  describe "the drain asks the hard rules only (DC8, DC12)" do
+    test "a held P2 drains once the hard rules clear: pace is not asked" do
       Application.put_env(:wardmast, :test_dispatch_pid, self())
       on_exit(fn -> Application.delete_env(:wardmast, :test_dispatch_pid) end)
 
@@ -248,24 +248,19 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
 
       {:ok, _} =
         Wardmast.Accounts.set_quota_config(quota_account_id!(ws.id), %{
-          "threshold_mode" => "paced",
-          "pace_exempt_priority" => 0,
-          "pace_exempt_threshold" => 0.8
+          "threshold_mode" => "paced"
         })
 
       pid = start_queue(ws, dispatcher: RecordingDispatcher, auto_subscribe: false)
       p2 = make_task(ws, %{priority: 2})
-      p0 = make_task(ws, %{priority: 0})
 
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(p2.id, force: true, start_driver: false)
+               Dispatch.dispatch(p2.id, force: true, resume: true, start_driver: false)
 
-      assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(p0.id, force: true, start_driver: false)
-
-      # 40% used, ~2% elapsed: past the paced 0.35 line, under the 0.8 cap.
+      # 40% used, ~2% elapsed: past the paced 0.35 line, under the flat cap. The
+      # paced line no longer holds a drain; only the hard rules do.
       seed_quota(ws, %{
         status_5h: "allowed",
         utilization_5h: 0.40,
@@ -276,10 +271,8 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       :ok = DispatchQueue.drain(pid)
 
       assert_receive {:dispatched, dispatched, _opts}
-      assert dispatched == p0.id
-      refute_receive {:dispatched, _, _}, 100
-      assert [%{task_id: held}] = DispatchQueue.state(pid).items
-      assert held == p2.id
+      assert dispatched == p2.id
+      assert DispatchQueue.state(pid).items == []
     end
   end
 
@@ -296,7 +289,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
 
       for task <- tasks do
         assert {:error, {:quota_held, _}} =
-                 Dispatch.dispatch(task.id, force: true, start_driver: false)
+                 Dispatch.dispatch(task.id, force: true, resume: true, start_driver: false)
       end
 
       seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
@@ -431,7 +424,10 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       seed_usage(ws, 5.0)
 
       t1 = make_task(ws)
-      assert {:ok, result} = Dispatch.dispatch(t1.id, force: true, repo: "r", start_driver: false)
+
+      assert {:ok, result} =
+               Dispatch.dispatch(t1.id, force: true, resume: true, repo: "r", start_driver: false)
+
       assert result.task.state == :active
       assert is_pid(result.worker_pid)
 
@@ -443,7 +439,10 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       # A second dispatch in the same window (same crossing) must NOT re-alert,
       # and must still proceed.
       t2 = make_task(ws)
-      assert {:ok, _} = Dispatch.dispatch(t2.id, force: true, repo: "r", start_driver: false)
+
+      assert {:ok, _} =
+               Dispatch.dispatch(t2.id, force: true, resume: true, repo: "r", start_driver: false)
+
       refute_receive {:overage_alert, _, _, _}, 100
     end
   end
@@ -527,7 +526,10 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
 
       t = make_task(ws)
-      assert {:ok, _} = Dispatch.dispatch(t.id, force: true, repo: "r", start_driver: false)
+
+      assert {:ok, _} =
+               Dispatch.dispatch(t.id, force: true, resume: true, repo: "r", start_driver: false)
+
       assert [%{key: key}] = overage_alerts(ws)
       assert key == "#{ws.id}:codex"
     end
@@ -540,7 +542,12 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       # No AnthropicQuota row seeded → latest/2 is nil → fail open.
 
       assert {:ok, result} =
-               Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 resume: true,
+                 repo: "r",
+                 start_driver: false
+               )
 
       assert result.task.state == :active
     end
@@ -563,7 +570,12 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
 
       # Gate must fail open and dispatch proceeds normally.
       assert {:ok, result} =
-               Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 resume: true,
+                 repo: "r",
+                 start_driver: false
+               )
 
       assert result.task.state == :active
     end
@@ -581,7 +593,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       })
 
       assert {:error, {:quota_held, task_id}} =
-               Dispatch.dispatch(task.id, force: true, start_driver: false)
+               Dispatch.dispatch(task.id, force: true, resume: true, start_driver: false)
 
       assert task_id == task.id
       assert DispatchQueue.held?(ws.id, task.id)
@@ -612,7 +624,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       task = make_task(ws)
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(task.id, force: true, start_driver: false)
+               Dispatch.dispatch(task.id, force: true, resume: true, start_driver: false)
 
       assert DispatchQueue.held?(ws.id, task.id)
 
@@ -654,7 +666,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       task = make_task(ws)
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(task.id, force: true, start_driver: false)
+               Dispatch.dispatch(task.id, force: true, resume: true, start_driver: false)
 
       # The gate holds the item on the very first `hold/5` call, before any
       # dispatcher is ever invoked — so no probe attempt yet.
@@ -717,7 +729,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       task = make_task(ws)
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(task.id, force: true, start_driver: false)
+               Dispatch.dispatch(task.id, force: true, resume: true, start_driver: false)
 
       past = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.truncate(:second)
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99, reset_5h_at: past})
@@ -767,7 +779,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       task = make_task(ws)
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(task.id, force: true, start_driver: false)
+               Dispatch.dispatch(task.id, force: true, resume: true, start_driver: false)
 
       past = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.truncate(:second)
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99, reset_5h_at: past})
@@ -804,10 +816,10 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(boom.id, force: true, start_driver: false)
+               Dispatch.dispatch(boom.id, force: true, resume: true, start_driver: false)
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(ok.id, force: true, start_driver: false)
+               Dispatch.dispatch(ok.id, force: true, resume: true, start_driver: false)
 
       seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
       :ok = DispatchQueue.drain(pid)
@@ -833,7 +845,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
 
       # Without force, this would be held by the quota gate.
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(task.id, force: true, start_driver: false)
+               Dispatch.dispatch(task.id, force: true, resume: true, start_driver: false)
 
       # With force: true (via skip_quota_gate internal opt), dispatch proceeds.
       assert {:ok, result} =
@@ -855,7 +867,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(task.id, force: true, start_driver: false)
+               Dispatch.dispatch(task.id, force: true, resume: true, start_driver: false)
 
       # Simulate a restart: kill the queue process. The held intent is in-memory
       # and lost, BUT the task was never transitioned, so it is still resolvable
@@ -873,7 +885,12 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
 
       assert {:ok, result} =
-               Dispatch.dispatch(task.id, force: true, repo: "r", start_driver: false)
+               Dispatch.dispatch(task.id,
+                 force: true,
+                 resume: true,
+                 repo: "r",
+                 start_driver: false
+               )
 
       assert result.task.state == :active
 
@@ -901,7 +918,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(task.id, force: true, start_driver: false)
+               Dispatch.dispatch(task.id, force: true, resume: true, start_driver: false)
 
       assert DispatchQueue.held?(ws.id, task.id)
 
@@ -925,7 +942,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(task.id, force: true, start_driver: false)
+               Dispatch.dispatch(task.id, force: true, resume: true, start_driver: false)
 
       assert DispatchQueue.held?(ws.id, task.id)
 
@@ -962,7 +979,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(task.id, force: true, start_driver: false)
+               Dispatch.dispatch(task.id, force: true, resume: true, start_driver: false)
 
       assert length(DispatchQueue.state(pid).items) == 1
 
@@ -991,7 +1008,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(task.id, force: true, start_driver: false)
+               Dispatch.dispatch(task.id, force: true, resume: true, start_driver: false)
 
       seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
       :ok = DispatchQueue.drain(pid)
@@ -1054,7 +1071,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99})
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(task.id, force: true, start_driver: false)
+               Dispatch.dispatch(task.id, force: true, resume: true, start_driver: false)
 
       seed_quota(ws, %{status_5h: "allowed", utilization_5h: 0.10})
 
@@ -1123,7 +1140,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       end)
 
       task = make_task(ws)
-      :ok = DispatchQueue.hold(ws.id, task.id, [], %{phrase: "7d quota 91% ≥ 90%"})
+      :ok = DispatchQueue.hold(ws.id, task.id, [resume: true], %{phrase: "7d quota 91% ≥ 90%"})
 
       # Well past K=2: every replay is answered "still held".
       for _ <- 1..5 do
@@ -1194,7 +1211,7 @@ defmodule Wardmast.Workflows.DispatchQueueTest do
       task_id = task.id
 
       assert {:error, {:quota_held, _}} =
-               Dispatch.dispatch(task_id, force: true, start_driver: false)
+               Dispatch.dispatch(task_id, force: true, resume: true, start_driver: false)
 
       # Fail the gate open (stale snapshot) so the drain actually reaches the
       # dispatcher and exercises the real pre-flight failure path.

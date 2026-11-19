@@ -65,8 +65,6 @@ defmodule Wardmast.Board.CapacityViewTest do
       accounts: @accounts,
       local: %{cap: 6, used: 3},
       nodes: [],
-      mode: :shadow,
-      agreement: nil,
       changes: fn _key -> [] end
     ]
 
@@ -412,95 +410,28 @@ defmodule Wardmast.Board.CapacityViewTest do
     end
   end
 
-  describe "admission" do
-    test "shadow is labelled shadow and decides nothing" do
-      assert %{mode: "shadow", label: "shadow", decides: false} = status().admission
-    end
+  describe "no admission modes (DC12)" do
+    test "the view carries no admission block and no per-pool mode" do
+      view = status()
 
-    test "legacy and enforce" do
-      assert %{mode: "legacy", label: "legacy", decides: false} =
-               status(mode: :legacy).admission
-
-      assert %{mode: "enforce", label: "enforce", decides: true} =
-               status(mode: :enforce).admission
-    end
-
-    test "carries the shadow agreement when given one" do
-      agreement = %{comparable: 52, agrees: 47, since: ~U[2026-10-12 00:00:00Z]}
-      assert %{agreement: ^agreement} = status(agreement: agreement).admission
-    end
-
-    test "agreement is read from the admission shadow events of the current mode" do
-      record = fn attrs ->
-        Ash.create!(
-          AdmissionShadowEvent,
-          Map.merge(
-            %{
-              at: DateTime.utc_now(),
-              policy: "shadow",
-              agrees: true,
-              comparable: true,
-              legacy: %{},
-              walk: %{},
-              budgets: []
-            },
-            attrs
-          ),
-          action: :record
-        )
-      end
-
-      early = ~U[2026-10-01 00:00:00.000000Z]
-      record.(%{at: early})
-      record.(%{agrees: false})
-      record.(%{comparable: false, agrees: false})
-      record.(%{policy: "enforce"})
-
-      view =
-        CapacityView.status(
-          budgets: [],
-          holders: %{},
-          accounts: [],
-          local: %{cap: 1, used: 0},
-          nodes: [],
-          mode: :shadow
-        )
-
-      assert %{comparable: 2, agrees: 1, since: since} = view.admission.agreement
-      assert DateTime.compare(since, early) == :eq
-    end
-
-    test "no agreement under legacy, and none before any event" do
-      assert status(mode: :legacy).admission.agreement == nil
-
-      view =
-        CapacityView.status(
-          budgets: [],
-          holders: %{},
-          accounts: [],
-          local: %{cap: 1, used: 0},
-          nodes: [],
-          mode: :shadow
-        )
-
-      assert view.admission.agreement == nil
+      refute Map.has_key?(view, :admission)
+      refute Enum.any?(view.pools, &(Map.has_key?(&1, :mode) or Map.has_key?(&1, :decides)))
     end
   end
 
   describe "account_blocks/2 (quota_get)" do
-    test "one block per account, with its pools and the mode" do
+    test "one block per account, with its pools" do
       blocks =
         CapacityView.account_blocks(
           [@acct, @agy],
           budgets: status_budgets(),
           holders: %{},
           accounts: @accounts,
-          mode: :shadow,
           changes: fn _ -> [] end
         )
 
       assert [claude, agy] = blocks
-      assert %{account: "claude:default", account_id: @acct, mode: "shadow"} = claude
+      assert %{account: "claude:default", account_id: @acct} = claude
       assert [%{pool: "claude", budget: 3}] = claude.pools
       assert length(agy.pools) == 2
     end
@@ -511,7 +442,6 @@ defmodule Wardmast.Board.CapacityViewTest do
                  budgets: [],
                  holders: %{},
                  accounts: [],
-                 mode: :legacy,
                  changes: fn _ -> [] end
                )
     end
@@ -523,55 +453,5 @@ defmodule Wardmast.Board.CapacityViewTest do
       budget(account: @agy, pool: "antigravity:gemini_models", budget: 0),
       budget(account: @agy, pool: "antigravity:claude_and_gpt_models", budget: 4)
     ]
-  end
-
-  describe "per-account admission mode (O11)" do
-    test "each pool carries its account's effective mode and where it came from" do
-      accounts = [
-        %ProviderAccount{id: @acct, provider: :claude, slug: "default", admission: :enforce},
-        %ProviderAccount{id: @agy, provider: :antigravity, slug: "default"}
-      ]
-
-      view = status(accounts: accounts)
-
-      assert %{mode: "enforce", mode_source: "account", decides: true} =
-               pool(view, @acct, "claude")
-
-      assert %{mode: "shadow", mode_source: "installation", decides: false} =
-               pool(view, @agy, "antigravity:gemini_models")
-    end
-
-    test "the admission block keeps the installation mode and lists the overrides" do
-      accounts = [
-        %ProviderAccount{id: @acct, provider: :claude, slug: "default", admission: :enforce},
-        %ProviderAccount{id: @agy, provider: :antigravity, slug: "default"}
-      ]
-
-      view = status(accounts: accounts)
-
-      assert %{mode: "shadow", decides: false} = view.admission
-
-      assert [%{account: "claude:default", mode: "enforce", decides: true}] =
-               view.admission.overrides
-    end
-
-    test "account_blocks report the mode per account" do
-      accounts = [
-        %ProviderAccount{id: @acct, provider: :claude, slug: "default", admission: :enforce},
-        %ProviderAccount{id: @agy, provider: :antigravity, slug: "default"}
-      ]
-
-      assert [
-               %{mode: "enforce", mode_source: "account"},
-               %{mode: "shadow", mode_source: "installation"}
-             ] =
-               CapacityView.account_blocks([@acct, @agy],
-                 budgets: [],
-                 holders: %{},
-                 accounts: accounts,
-                 mode: :shadow,
-                 changes: fn _ -> [] end
-               )
-    end
   end
 end

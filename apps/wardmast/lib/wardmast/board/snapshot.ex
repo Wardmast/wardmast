@@ -360,6 +360,7 @@ defmodule Wardmast.Board.Snapshot do
         conflict_claims: queue.conflict_claims,
         card_guardrail: Map.get(input, :card_guardrail, %{}),
         card_pair: Map.get(input, :card_pair, %{}),
+        card_ci: Map.get(input, :card_ci, %{}),
         dispatch_holds: Map.get(input, :dispatch_holds, %{}),
         paused: paused?,
         walk: walk
