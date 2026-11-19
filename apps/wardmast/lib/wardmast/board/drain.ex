@@ -283,7 +283,7 @@ defmodule Wardmast.Board.Drain do
     }
   end
 
-  # DC5: the budgets, machines and admission mode (`Wardmast.Board.CapacityView`).
+  # DC5: the budgets and machines (`Wardmast.Board.CapacityView`).
   # A view that cannot be read is `nil`: the drain verdict does not depend on it.
   defp capacity(%{} = view), do: view
 
@@ -353,13 +353,12 @@ defmodule Wardmast.Board.Drain do
     |> Map.merge(capacity_json(Map.get(status, :capacity)))
   end
 
-  # DC5 (design §9): `admission` (the mode, labelled shadow until enforce), `budgets`
+  # DC5 (design §9): `budgets`
   # (one per pool), `machines`, `repos`, `fair_share` and `ci_backpressure` (#1126, one
   # per gated repo). The REST body and the
   # MCP `scheduler_status` share this, so they cannot drift.
   defp capacity_json(%{} = view) do
     %{
-      admission: view.admission,
       budgets: view.pools,
       machines: view.machines,
       repos: view.repos,
@@ -370,7 +369,6 @@ defmodule Wardmast.Board.Drain do
 
   defp capacity_json(_none),
     do: %{
-      admission: nil,
       budgets: [],
       machines: [],
       repos: [],

@@ -88,18 +88,6 @@ defmodule Wardmast.Settings.Registry do
           "tiebreak; null = 24. Takes effect on the next scheduler tick."
     },
     %{
-      key: "scheduler_admission",
-      type: "admission_mode",
-      description:
-        "Admission mode (provider-dynamic-concurrency §10): legacy (null; today's plan, gate " <>
-          "and caps), shadow (dispatch unchanged; the scheduler walk's decision is recorded " <>
-          "beside every dispatch and hold change) or enforce (operator-only; the walk and the " <>
-          "pool budgets admit — seats < min(budget, max_concurrent, share) per pool — and " <>
-          "today's decision is recorded beside each dispatch). Takes effect on the next " <>
-          "Autopilot pass.",
-      operator_only_values: ["enforce"]
-    },
-    %{
       key: "machine.derate",
       type: "derate_config",
       description:
@@ -300,7 +288,6 @@ defmodule Wardmast.Settings.Registry do
 
   defp allowed("agent_type_list"), do: Wardmast.Agents.valid_agent_types()
   defp allowed("quota_provider_list"), do: Wardmast.Quota.Visibility.provider_codes()
-  defp allowed("admission_mode"), do: Settings.scheduler_admission_modes()
   defp allowed("cli_name_list"), do: Settings.cli_names()
   defp allowed(_), do: nil
 
@@ -420,15 +407,6 @@ defmodule Wardmast.Settings.Registry do
 
   defp do_cast("cli_set_hold", _), do: {:error, "value must be a short token string, or null"}
 
-  defp do_cast("admission_mode", mode) when is_binary(mode) do
-    if mode in Settings.scheduler_admission_modes(),
-      do: {:ok, mode},
-      else: {:error, "value must be legacy, shadow or enforce, or null"}
-  end
-
-  defp do_cast("admission_mode", _),
-    do: {:error, "value must be legacy, shadow or enforce, or null"}
-
   defp do_cast("cli_name_list", list) do
     valid = allowed("cli_name_list")
 
@@ -488,10 +466,8 @@ defmodule Wardmast.Settings.Registry do
 
   defp authorize(_key, _authority), do: :ok
 
-  # A key whose *values* split by authority (`operator_only_values`): DC6's
-  # `scheduler_admission`, where the coordinator may set `legacy` or `shadow` —
-  # the kill switch, and tightening — but only the operator may set `enforce`
-  # (provider-dynamic-concurrency §10.1, §10.4).
+  # A key whose *values* split by authority (`operator_only_values`); none does
+  # since DC12 retired `scheduler_admission`, the only one that did.
   defp authorize_value(_key, _value, :operator), do: :ok
 
   defp authorize_value(key, value, _authority) do
@@ -535,8 +511,6 @@ defmodule Wardmast.Settings.Registry do
 
   defp write("scheduling_finish_first_max_wait_hours", v),
     do: wrap(Settings.set_scheduling_finish_first_max_wait_hours(v))
-
-  defp write("scheduler_admission", v), do: wrap(Settings.set_scheduler_admission(v))
 
   defp write("machine.derate", v), do: wrap(Settings.set_machine_derate(v))
   defp write("nodes.public_url", v), do: wrap(Settings.set_nodes_public_url(v))
@@ -597,8 +571,6 @@ defmodule Wardmast.Settings.Registry do
   def override("scheduling_finish_first_max_wait_hours"),
     do: Settings.scheduling_finish_first_max_wait_hours()
 
-  def override("scheduler_admission"), do: Settings.scheduler_admission_override()
-
   def override("machine.derate"), do: Settings.machine_derate()
   def override("nodes.public_url"), do: Settings.nodes_public_url()
   def override("nodes.allow_public_endpoint"), do: Settings.nodes_allow_public_endpoint()
@@ -649,8 +621,6 @@ defmodule Wardmast.Settings.Registry do
 
   # nil = max(slots_total - 1, 1), which depends on the board.
   def default("scheduling_max_lifted_in_flight"), do: nil
-
-  def default("scheduler_admission"), do: "legacy"
 
   def default("machine.derate"), do: DerateConfig.defaults()
   def default("nodes.public_url"), do: nil

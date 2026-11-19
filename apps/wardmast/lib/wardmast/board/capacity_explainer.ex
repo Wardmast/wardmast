@@ -49,10 +49,7 @@ defmodule Wardmast.Board.CapacityExplainer do
   card (`%{ticket_id => hold}`), and (DC5, §9) the walk's layer reason per card
   and the budget lines.
 
-  Options: `:mode` (the `scheduler_admission` mode; `:legacy` by default, which
-  shows no layer) and `:capacity` (a `Wardmast.Board.CapacityView.status/1`).
-  Under `shadow` every layer and budget line is labelled shadow: the walk
-  records what it would do, and today's gate and caps still decide.
+  Option: `:capacity` (a `Wardmast.Board.CapacityView.status/1`).
   """
   @spec explain(map(), keyword()) :: %{
           cap: map() | nil,
@@ -61,8 +58,7 @@ defmodule Wardmast.Board.CapacityExplainer do
           budget: map() | nil
         }
   def explain(board, opts \\ []) when is_map(board) do
-    mode = Keyword.get(opts, :mode, :legacy)
-    layers = layers(board, mode, Keyword.get(opts, :pool_mode))
+    layers = layers(board)
 
     # Only the holds that have something to say: a mutex or file-overlap hold
     # is already one short line on its card.
@@ -85,7 +81,7 @@ defmodule Wardmast.Board.CapacityExplainer do
       cap: cap(board),
       holds: Map.merge(ready, quota_held),
       layers: layers,
-      budget: budget(Keyword.get(opts, :capacity), Keyword.get(opts, :install_mode, mode))
+      budget: budget(Keyword.get(opts, :capacity))
     }
   end
 
@@ -95,49 +91,31 @@ defmodule Wardmast.Board.CapacityExplainer do
   # ---- the walk's layers (DC5) ------------------------------------------------
 
   # What the scheduler walk says about a card: the layer it waits on (the
-  # walk's own phrase) or the pair it is planned onto. Nothing under `legacy`,
-  # where no walk is planned.
-  # `mode` only gates whether a walk is shown; whether a layer is a shadow is the
-  # mode of the account its pool belongs to (`pool_mode`, O11), else `mode`.
-  defp layers(%{walk: %{entries: entries} = walk}, mode, pool_mode)
-       when mode in [:shadow, :enforce] do
-    for entry <- entries,
-        layer = layer(entry, walk, entry_mode(entry, mode, pool_mode)),
-        into: %{} do
+  # walk's own phrase) or the pair it is planned onto. Nothing for a board that
+  # carries no walk.
+  defp layers(%{walk: %{entries: entries} = walk}) do
+    for entry <- entries, layer = layer(entry, walk), into: %{} do
       {entry.id, layer}
     end
   end
 
-  defp layers(_board, _mode, _pool_mode), do: %{}
+  defp layers(_board), do: %{}
 
-  defp entry_mode(%{pair: %{pool: pool}}, _mode, pool_mode) when is_function(pool_mode, 1),
-    do: pool_mode.(pool)
+  defp layer(%{wait_cause: {:capacity, layer}, reason: reason}, _walk),
+    do: %{layer: layer, state: :waiting, text: upcase(reason)}
 
-  defp entry_mode(_entry, _mode, pool_mode) when is_function(pool_mode, 1), do: pool_mode.(nil)
-  defp entry_mode(_entry, mode, _pool_mode), do: mode
+  defp layer(%{state: :next, pair: %{} = pair}, walk), do: planned(:next, "Next", pair, walk)
 
-  defp layer(%{wait_cause: {:capacity, layer}, reason: reason}, _walk, mode) do
-    %{layer: layer, state: :waiting, text: upcase(reason), shadow?: mode != :enforce}
-  end
+  defp layer(%{state: :starting, pair: %{} = pair}, walk),
+    do: planned(:starting, "Starting", pair, walk)
 
-  defp layer(%{state: :next, pair: %{} = pair}, walk, mode),
-    do: planned(:next, "Next", pair, walk, mode)
+  defp layer(_entry, _walk), do: nil
 
-  defp layer(%{state: :starting, pair: %{} = pair}, walk, mode),
-    do: planned(:starting, "Starting", pair, walk, mode)
-
-  defp layer(_entry, _walk, _mode), do: nil
-
-  defp planned(state, word, pair, walk, mode) do
+  defp planned(state, word, pair, walk) do
     pool = get_in(walk, [:pools, pair.pool, :label]) || inspect(pair.pool)
     node = get_in(walk, [:nodes, pair.node, :label]) || pair.node
 
-    %{
-      layer: nil,
-      state: state,
-      text: "#{word} — #{pool} on #{node}",
-      shadow?: mode != :enforce
-    }
+    %{layer: nil, state: state, text: "#{word} — #{pool} on #{node}"}
   end
 
   defp upcase(<<first::utf8, rest::binary>>), do: String.upcase(<<first::utf8>>) <> rest
@@ -152,13 +130,11 @@ defmodule Wardmast.Board.CapacityExplainer do
   changes its ceiling), one per machine, repo and fair-share row. `nil` without
   a view.
   """
-  @spec budget(map() | nil, atom()) :: map() | nil
-  def budget(nil, _mode), do: nil
+  @spec budget(map() | nil) :: map() | nil
+  def budget(nil), do: nil
 
-  def budget(%{pools: pools, machines: machines} = view, mode) do
+  def budget(%{pools: pools, machines: machines} = view) do
     %{
-      label: Atom.to_string(mode),
-      shadow?: mode != :enforce,
       pools: Enum.map(pools, &pool_line/1),
       machines: Enum.map(machines, &machine_line/1),
       repos: Enum.map(Map.get(view, :repos, []), &repo_line/1),

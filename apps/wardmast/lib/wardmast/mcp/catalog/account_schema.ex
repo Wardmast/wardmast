@@ -51,9 +51,6 @@ defmodule Wardmast.MCP.Catalog.AccountSchema do
   defp json_type(%{type: :text}), do: %{"type" => ["string", "null"]}
   defp json_type(%{type: :budget_split}), do: %{"type" => "string", "enum" => ["queue", "fair"]}
 
-  defp json_type(%{type: :admission}),
-    do: %{"type" => ["string", "null"], "enum" => ["legacy", "shadow", "enforce", nil]}
-
   # Every quota value may be null (a clear) and numbers may arrive as strings.
   defp quota_type(:fraction), do: ["number", "string", "null"]
   defp quota_type(:usd), do: ["number", "string", "null"]

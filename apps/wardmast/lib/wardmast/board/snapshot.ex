@@ -442,11 +442,9 @@ defmodule Wardmast.Board.Snapshot do
   the operator's board sets it, the Autopilot does not. Every read is
   best-effort — a board that renders seven columns beats one that raises.
 
-  `:admission` (DC6, default `:legacy`) is the `scheduler_admission` mode the
-  caller plans under. `:shadow` and `:enforce` also gather the scheduler walk's
-  inputs (`Wardmast.Board.WalkInputs`, its seams in `:walk_opts`, or a ready
-  `:walk`) and derive the board with them; `:legacy` gathers nothing, so no
-  budget or seat is read. A walk whose inputs fail to read is left out.
+  The scheduler walk's inputs (DC6; `Wardmast.Board.WalkInputs`, its seams in
+  `:walk_opts`, or a ready `:walk`) are always gathered and the board derived
+  with them. A walk whose inputs fail to read is left out.
 
   **Workspace-level scoping:** `slots_total` and `quota` are computed for the
   specified workspace (defaulting to the default workspace if not given).
@@ -536,23 +534,20 @@ defmodule Wardmast.Board.Snapshot do
       watchdog_live: Keyword.get_lazy(opts, :watchdog_live, fn -> watchdog_live(issues) end),
       over_budget: Keyword.get_lazy(opts, :over_budget, fn -> Budget.over_budget_ids(issues) end)
     }
-    |> put_walk_inputs(Keyword.get(opts, :admission, :legacy), workspace, issues, opts)
+    |> put_walk_inputs(workspace, issues, opts)
     |> derive()
   end
 
-  # DC6: under `scheduler_admission: shadow` or `enforce` the board also plans
-  # the scheduler walk, so it gathers the walk's capacity sets here. Under
-  # `legacy` nothing is gathered — no budget, seat or walk read runs (I1). A
-  # walk whose inputs cannot be read is left out; today's plan never waits on
-  # it. `:walk_opts` are `Wardmast.Board.WalkInputs.gather/3`'s seams.
-  defp put_walk_inputs(input, mode, workspace, issues, opts) when mode in [:shadow, :enforce] do
+  # DC6: the board plans the scheduler walk, so it gathers the walk's capacity sets
+  # here. A walk whose inputs cannot be read is left out (Autopilot then
+  # dispatches nothing that pass). `:walk_opts` are
+  # `Wardmast.Board.WalkInputs.gather/3`'s seams.
+  defp put_walk_inputs(input, workspace, issues, opts) do
     case Keyword.fetch(opts, :walk) do
       {:ok, walk} -> Map.put(input, :walk, walk)
       :error -> gather_walk(input, workspace, issues, Keyword.get(opts, :walk_opts, []))
     end
   end
-
-  defp put_walk_inputs(input, _mode, _workspace, _issues, _opts), do: input
 
   defp gather_walk(input, workspace, issues, walk_opts) do
     Map.put(input, :walk, WalkInputs.gather(workspace, issues, walk_opts))

@@ -42,13 +42,9 @@ defmodule Wardmast.Agents.ProviderRouting do
       healthy probe is all they need — no account credential row is required
       of any candidate;
     * `circuit_broken` — `ProviderPool.healthy?/1` is false;
-    * `at_capacity` — `Wardmast.Accounts.Concurrency.account_headroom/3` is 0:
-      the account is at `max_concurrent` or at this workspace's share. For
-      every role but `:main` the task's own live workers are left out of the
-      count (`exclude_task:`): the role replaces them rather than running
-      beside them — the author worker parked through a ReviewGate round
-      still holds its registry slot, and counting it would drop the pin for
-      a slot it is not using;
+    * `at_capacity` — no free seat on the candidate's pool: it is at
+      `min(budget, max_concurrent, share)` seats (`Wardmast.Accounts.SeatCheck`),
+      never for a follow-up role, which holds its ticket's seat already;
     * `write_confinement_none` — the scope is `:strict` and the adapter's
       `write_confinement/1` (bd-1abj7u) is `:none`. An adapter that does not
       implement the callback answers `:none`;
@@ -73,7 +69,7 @@ defmodule Wardmast.Agents.ProviderRouting do
       dispatch on this account's snapshot (account ∧ workspace policy, paced
       included) for the model it would run.
 
-  For an account in `scheduler_admission: enforce` (DC8, design
+  Since DC8 (design
   `provider-dynamic-concurrency.md` §7, E12) feasibility is a free seat:
   `at_capacity` is the candidate's pool at `min(budget, max_concurrent, share)`
   seats (`Wardmast.Accounts.SeatCheck`, never for a follow-up role, which holds
@@ -131,8 +127,6 @@ defmodule Wardmast.Agents.ProviderRouting do
   require Ash.Query
   require Logger
 
-  alias Wardmast.Accounts.AdmissionMode
-  alias Wardmast.Accounts.Concurrency
   alias Wardmast.Accounts.Credentials
   alias Wardmast.Accounts.ProviderAccount
   alias Wardmast.Accounts.ProviderSettings
@@ -239,7 +233,7 @@ defmodule Wardmast.Agents.ProviderRouting do
     * `:record` — the decision map `evaluate/3` returns;
     * `:available` — the ranked available entries, best first; each carries its
       `:account`, `:agent_type`, `:model`, `:family`, `:headroom` (quota) and
-      `:capacity` (`Concurrency.account_headroom/3`: a positive integer, or
+      `:capacity` (the pool's free seats: a positive integer, or
       `:unlimited`);
     * `:dropped` — the dropped entries, each with a `:reason` and `:detail`;
     * `:capacity` — how many more workers the available candidates can take
@@ -471,7 +465,7 @@ defmodule Wardmast.Agents.ProviderRouting do
     _ -> nil
   end
 
-  # DC8 (design provider-dynamic-concurrency §4.4): under `enforce` the
+  # DC8 (design provider-dynamic-concurrency §4.4): the
   # scheduler walk placed the card on a (pool, node) pair, and that pair rides
   # in as `:planned`. Its account is taken while it is still an available
   # candidate on the planned pool, and pinned when the ticket has no pin yet. A
@@ -926,22 +920,9 @@ defmodule Wardmast.Agents.ProviderRouting do
       guardrails: guardrail_gate(task, opts),
       gate: Wardmast.Quota.gate_for_workspace(ws),
       walk?: walk?(opts),
-      # DC8: the installation's `scheduler_admission`, which each candidate's
-      # account follows unless it overrides it. The walk asks no capacity or
-      # pace question, so it reads nothing.
-      install_mode: if(walk?(opts), do: nil, else: install_mode(opts)),
       seat_opts: Keyword.get(opts, :seat_opts, [])
     }
   end
-
-  defp install_mode(opts) do
-    Keyword.get_lazy(opts, :scheduler_admission, &AdmissionMode.installation/0)
-  end
-
-  # DC8 (design provider-dynamic-concurrency §7, E12): whether this candidate's
-  # account admits by the budgets — its own `admission`, else the installation's.
-  defp enforced?(account, %{install_mode: install}),
-    do: AdmissionMode.mode(account, install) == :enforce
 
   # R9: `routing.scoring.allow_upgrade` (default 0: the policy's tier only).
   defp allow_upgrade(%Workspace{config: config}) do
@@ -1323,18 +1304,9 @@ defmodule Wardmast.Agents.ProviderRouting do
       else: {:drop, "circuit_broken", nil}
   end
 
-  defp check_capacity(%{account: account} = entry, ctx) do
-    if enforced?(account, ctx) do
-      check_seat(entry, ctx)
-    else
-      case Concurrency.account_headroom(account, ctx.ws, capacity_opts(ctx)) do
-        0 -> {:drop, "at_capacity", "no concurrency slot left (max_concurrent / share)"}
-        capacity -> {:ok, Map.put(entry, :capacity, capacity)}
-      end
-    end
-  end
+  defp check_capacity(entry, ctx), do: check_seat(entry, ctx)
 
-  # DC8 (§4.4, §7): under `enforce` a fresh dispatch is feasible on a pool with a
+  # DC8 (§4.4, §7): a fresh dispatch is feasible on a pool with a
   # free seat (`seats < min(budget, max_concurrent, share)`), and its capacity
   # is that pool's free seats. A follow-up role already holds its ticket's seat,
   # so a full pool never drops it (I9).
@@ -1361,29 +1333,18 @@ defmodule Wardmast.Agents.ProviderRouting do
   end
 
   # The seat check's reads, once per evaluation rather than once per candidate:
-  # the live holders and this workspace (for the exemption). Only when a fresh
-  # dispatch has a candidate whose account is in `enforce`.
-  defp with_seat_reads(%{walk?: false, role: :main} = ctx, candidates) do
-    if Enum.any?(candidates, &enforced?(&1.account, ctx)) do
-      seat_opts =
-        ctx.seat_opts
-        |> Keyword.put_new_lazy(:holders, &SeatCheck.holders/0)
-        |> Keyword.put_new(:workspace, ctx.ws)
+  # the live holders and this workspace (for the exemption). Only for a fresh
+  # dispatch (`:main`) that is not the walk.
+  defp with_seat_reads(%{walk?: false, role: :main} = ctx, _candidates) do
+    seat_opts =
+      ctx.seat_opts
+      |> Keyword.put_new_lazy(:holders, &SeatCheck.holders/0)
+      |> Keyword.put_new(:workspace, ctx.ws)
 
-      %{ctx | seat_opts: seat_opts}
-    else
-      ctx
-    end
+    %{ctx | seat_opts: seat_opts}
   end
 
   defp with_seat_reads(ctx, _candidates), do: ctx
-
-  # A follow-up role replaces the task's own workers on the account (see the
-  # moduledoc's `at_capacity`); a first dispatch adds to what is running.
-  defp capacity_opts(%{role: role, task: %Issue{id: id}}) when role != :main,
-    do: [exclude_task: id]
-
-  defp capacity_opts(_ctx), do: []
 
   defp check_confinement(
          %{adapter: adapter} = entry,
@@ -1436,12 +1397,11 @@ defmodule Wardmast.Agents.ProviderRouting do
 
   defp spend_hold(_account, _ctx), do: :ok
 
-  # DC8: under `enforce` the gate keeps its hard rules only (`pace: false`); the
+  # DC8: the gate keeps its hard rules only (`pace: false`); the
   # paced line is the pool's budget, answered by `check_seat/2`.
   defp check_quota_window(%{account: account, model: model} = entry, ctx) do
     quota = ctx.quota_fun.(account)
-    gate_opts = [account: account, model: model, now: ctx.now]
-    gate_opts = if enforced?(account, ctx), do: [{:pace, false} | gate_opts], else: gate_opts
+    gate_opts = [account: account, model: model, now: ctx.now, pace: false]
 
     case ctx.gate.check(ctx.task, quota, ctx.ws, gate_opts) do
       {:hold, reason} ->

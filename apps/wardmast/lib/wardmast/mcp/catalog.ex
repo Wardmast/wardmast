@@ -437,8 +437,7 @@ defmodule Wardmast.MCP.Catalog do
           "reads that one account's quota instead of a workspace's, in the REST " <>
           "`GET /api/quota?account=` shape (`workspace` is then ignored). `budget` is one block " <>
           "per account (`account`, `account_id`, `mode`, `decides`, `pools`): each provider pool's " <>
-          "concurrency budget with its reason, labelled shadow until `scheduler_admission` is " <>
-          "`enforce`.",
+          "concurrency budget with its reason.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -2698,9 +2697,6 @@ defmodule Wardmast.MCP.Catalog do
           "(null = off / 24h); `scheduling_epic_floors_enabled` and " <>
           "`scheduling_max_lifted_in_flight` and the `nodes.*` keys (remote-node enrolment) " <>
           "are operator-only and refused without an operator-proof token. " <>
-          "`scheduler_admission` (`legacy` | `shadow` | `enforce`; null = legacy) picks the " <>
-          "admission mode: shadow records the scheduler walk beside every dispatch; the " <>
-          "coordinator may set legacy or shadow, enforce is operator-only. " <>
           "No restart required. Returns `{key, value}`.",
       input_schema: %{
         "type" => "object",
@@ -2734,9 +2730,7 @@ defmodule Wardmast.MCP.Catalog do
               },
               %{
                 "type" => "string",
-                "description" =>
-                  "http(s) URL for nodes.public_url; legacy, shadow or enforce for " <>
-                    "scheduler_admission."
+                "description" => "http(s) URL for nodes.public_url."
               },
               %{
                 "type" => "array",
@@ -3647,8 +3641,7 @@ defmodule Wardmast.MCP.Catalog do
           "`in_flight` lists every live piece of work — fix passes, conflict resolvers, " <>
           "review rounds and dispatches keep running while paused. Check it before a " <>
           "server restart. " <>
-          "Also `admission` (the `scheduler_admission` mode, labelled shadow until " <>
-          "enforce, with the walk's agreement so far), `budgets` (one per provider pool: " <>
+          "Also `budgets` (one per provider pool: " <>
           "the integer budget, seats, free, binding, the reason and every window's numbers), " <>
           "`machines` (cap, live, free), `repos`, `fair_share` and `ci_backpressure` (one per " <>
           "repo gated by `worker.repos.<repo>.ci_backpressure`: the cached pending MR-pipeline " <>

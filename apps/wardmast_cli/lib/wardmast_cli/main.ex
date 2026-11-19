@@ -102,7 +102,7 @@ defmodule WardmastCli.Main do
       ward account create  <provider> <slug>          [--label ...] [--plan ...] [--max-concurrent N]
                            [--disable] [--provider-account-ref ID] [--provider-org-ref ID] [quota flags]
       ward account set     <ref>                      [--label ...] [--plan ...] [--enable|--disable]
-                           [--max-concurrent N|none] [--budget-split queue|fair] [--admission legacy|shadow|enforce|inherit] [--threshold-mode flat|paced]
+                           [--max-concurrent N|none] [--budget-split queue|fair] [--threshold-mode flat|paced]
                            [--throttle-threshold F]
                            [--weekly-threshold F] [--paced-floor F] [--weekly-paced-floor F]
                            [--pace-curve plateau|ramp] [--daily-burn-cap F|none] [--daily-burn-cap-mode shadow|enforce] [--weekly-warning-policy ignore|hold] [--window-seconds LABEL=SECONDS]

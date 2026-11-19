@@ -7,7 +7,7 @@ defmodule Wardmast.Board.CapacityView do
 
   It **only reads**: the budgets `Wardmast.Quota.Budget.Server` published, the
   seats held (`Wardmast.Quota.Seats`), the primary's and the nodes' capacity,
-  and the admission shadow's own records. Nothing here decides a dispatch and
+  and the nodes' own numbers. Nothing here decides a dispatch and
   nothing on an admission path calls it (I1, I2, I8; pinned by
   `Wardmast.Quota.BudgetShadowTest`). Every surface goes through this one
   function so the same pool reads the same everywhere.
@@ -15,7 +15,6 @@ defmodule Wardmast.Board.CapacityView do
   ## Shape (`status/1`)
 
       %{
-        admission: %{mode: "shadow", label: "shadow", decides: false, agreement: nil | %{...}},
         pools: [pool],        # one per (account, pool); Budget.to_json/1 plus the display fields
         machines: [machine],  # the primary, then every node
         repos: [repo],        # one per capped repo (DC9): label, cap, used, free, state
@@ -32,30 +31,26 @@ defmodule Wardmast.Board.CapacityView do
 
   A pool's `state` is `free`, `full`, `held_pace` (budget 0 because a quota
   window is ahead of its line) or `held_hard` (budget 0 by a hard rule: paused,
-  provider refusing, quota stop, unavailable, no reading). `decides` is true
-  only under `enforce`: under `legacy` and `shadow` the budgets are shown, but
-  today's gate and caps still decide.
+  provider refusing, quota stop, unavailable, no reading). The budgets decide
+  admission (DC12 retired the `legacy` and `shadow` modes).
 
   A repo is one `worker.repos.<repo>.max_concurrent` (`Wardmast.Worker.RepoCap`):
   its `cap`, the implementer runs `used` now (live, with the `holders`), `free`,
-  and `state` (`free` or `full`). Only capped repos are listed. Like a pool, it
-  decides a dispatch only under `enforce`.
+  and `state` (`free` or `full`). Only capped repos are listed.
 
   A `ci_backpressure` row (#1126, `Wardmast.Board.CiBackpressure`) is one
   `worker.repos.<repo>.ci_backpressure`: the repo's cached `pending` MR pipeline count
   and `oldest_pending_min`, the thresholds, and `state` (`held`, `clear` or `unknown`).
   Only gated repos are listed.
 
-  Options (all seams): `:mode`, `:budgets`, `:holders`, `:weights`, `:accounts`, `:local`,
-  `:nodes`, `:remote_available?`, `:changes`, `:agreement`, `:workspaces`,
+  Options (all seams): `:budgets`, `:holders`, `:weights`, `:accounts`, `:local`,
+  `:nodes`, `:remote_available?`, `:changes`, `:workspaces`,
   `:repo_holders`, `:ci_backpressure` (that module's `status/2` options).
   """
 
   require Ash.Query
 
-  alias Wardmast.Accounts.AdmissionMode
   alias Wardmast.Accounts.ProviderAccount
-  alias Wardmast.Board.AdmissionShadowEvent
   alias Wardmast.Board.CiBackpressure
   alias Wardmast.Board.FairShare
   alias Wardmast.Board.WalkInputs
@@ -71,13 +66,10 @@ defmodule Wardmast.Board.CapacityView do
   @hard_zero ~w(paused provider_refusing weekly_warning quota_stop unavailable no_reading error)
   @recent_changes 5
 
-  @doc "The whole view: admission, pools, machines, repos and fair share."
+  @doc "The whole view: pools, machines, repos and fair share."
   @spec status(keyword()) :: map()
   def status(opts \\ []) do
-    mode = mode(opts)
-
     %{
-      admission: admission(mode, opts),
       pools: pools(opts),
       machines: machines(opts),
       repos: repos(opts),
@@ -86,100 +78,23 @@ defmodule Wardmast.Board.CapacityView do
     }
   end
 
-  @doc "Just the admission block of `status/1`."
-  @spec admission(keyword()) :: map()
-  def admission(opts \\ []), do: admission(mode(opts), opts)
-
   @doc """
   The pools of the given accounts, grouped by account, for `quota_get`'s
-  `budget` block: `[%{account:, account_id:, mode:, decides:, pools: [pool]}]`
+  `budget` block: `[%{account:, account_id:, pools: [pool]}]`
   in the order the ids were given. An account with nothing published has no
   pools.
   """
   @spec account_blocks([String.t()], keyword()) :: [map()]
   def account_blocks(account_ids, opts \\ []) do
-    install = mode(opts)
     accounts = accounts(opts)
     pools = pools(opts)
 
     for id <- account_ids do
-      %{mode: mode, source: source} = AdmissionMode.effective(Map.get(accounts, id), install)
-
       %{
         account: account_name(Map.get(accounts, id), id),
         account_id: id,
-        mode: Atom.to_string(mode),
-        mode_source: Atom.to_string(source),
-        decides: mode == :enforce,
         pools: Enum.filter(pools, &(&1.account == id))
       }
-    end
-  end
-
-  # ---- admission --------------------------------------------------------------
-
-  defp mode(opts) do
-    case Keyword.fetch(opts, :mode) do
-      {:ok, mode} -> mode
-      :error -> safe(fn -> Wardmast.Settings.scheduler_admission() end, :legacy)
-    end
-  end
-
-  defp admission(mode, opts) do
-    %{
-      mode: Atom.to_string(mode),
-      label: Atom.to_string(mode),
-      decides: mode == :enforce,
-      agreement: agreement(mode, opts),
-      overrides: overrides(mode, opts)
-    }
-  end
-
-  # The accounts whose own `admission` differs from the installation key, each
-  # with its effective mode (O11); an account following the key is not listed.
-  defp overrides(install, opts) do
-    opts
-    |> accounts()
-    |> Map.values()
-    |> Enum.filter(&(AdmissionMode.effective(&1, install).source == :account))
-    |> Enum.sort_by(&account_name(&1, &1.id))
-    |> Enum.map(fn account ->
-      %{
-        account: account_name(account, account.id),
-        mode: Atom.to_string(account.admission),
-        decides: account.admission == :enforce
-      }
-    end)
-  end
-
-  # How often the new walk and today's plan agreed, since the first record of
-  # this mode. Read off the hold-change rows `Wardmast.Board.AdmissionShadow`
-  # writes; the full comparison is DC7's report.
-  defp agreement(mode, opts) when mode in [:shadow, :enforce] do
-    case Keyword.fetch(opts, :agreement) do
-      {:ok, agreement} -> agreement
-      :error -> safe(fn -> read_agreement(Atom.to_string(mode)) end, nil)
-    end
-  end
-
-  defp agreement(_legacy, _opts), do: nil
-
-  defp read_agreement(policy) do
-    comparable =
-      AdmissionShadowEvent
-      |> Ash.Query.filter(policy == ^policy and comparable == true)
-      |> Ash.read!()
-
-    case comparable do
-      [] ->
-        nil
-
-      rows ->
-        %{
-          comparable: length(rows),
-          agrees: Enum.count(rows, & &1.agrees),
-          since: rows |> Enum.map(& &1.at) |> Enum.min(DateTime)
-        }
     end
   end
 
@@ -187,19 +102,17 @@ defmodule Wardmast.Board.CapacityView do
 
   defp pools(opts) do
     accounts = accounts(opts)
-    install = mode(opts)
     holders = Keyword.get_lazy(opts, :holders, &Seats.holders/0)
     changes = Keyword.get(opts, :changes, &read_changes/1)
 
     opts
     |> Keyword.get_lazy(:budgets, &BudgetServer.all/0)
     |> Enum.filter(&(&1.policy_workspace == nil))
-    |> Enum.map(&pool(&1, Map.get(accounts, &1.account), holders, changes, install))
+    |> Enum.map(&pool(&1, Map.get(accounts, &1.account), holders, changes))
     |> Enum.sort_by(&{&1.account_name, &1.pool})
   end
 
-  defp pool(%Budget{} = b, account, holders, changes, install) do
-    %{mode: mode, source: source} = AdmissionMode.effective(account, install)
+  defp pool(%Budget{} = b, account, holders, changes) do
     name = account_name(account, b.account)
     label = WalkInputs.pool_label(account, b.pool)
     held = Map.get(holders, {b.account, b.pool}, [])
@@ -213,9 +126,6 @@ defmodule Wardmast.Board.CapacityView do
       account_name: name,
       label: label,
       chip_label: chip_label(label),
-      mode: Atom.to_string(mode),
-      mode_source: Atom.to_string(source),
-      decides: mode == :enforce,
       state: state(b),
       holders: held,
       recent_changes: changes.({b.account, b.pool, b.policy_workspace}),

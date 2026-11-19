@@ -216,42 +216,29 @@ defmodule Wardmast.Board.Autopilot do
   formality: a hold that clears right after a pass can wait up to a minute
   before the tick notices. `promote_or_hold/3`'s hold logic is unchanged.
 
-  ## The admission shadow (DC6, bd-9ycsk4)
+  ## The walk decides (DC6, DC8; the only admission since DC12)
 
-  Every pass reads `scheduler_admission` (`docs/design/provider-dynamic-concurrency.md`
-  §10.1). Under `legacy`, the default, the pass is exactly as above: the board
-  is asked for nothing new and the dispatch gets today's options. Under
-  `shadow` the board also plans the scheduler walk (`Wardmast.Board.Scheduler`'s
-  `:walk`, at `board.walk`), and this process records it beside today's
-  decision and never in its place:
-
-    * the card it dispatches is today's `promote`, as under `legacy` (I2), with
-      the walk's decision riding along as `admission_shadow`, which the run
-      stores on its `routing_decision`;
-    * one `Wardmast.Board.AdmissionShadowEvent` row is written each time either
-      side's outcome changes (`Wardmast.Board.AdmissionShadow.signature/1`),
-      never once per pass.
-
-  ## Under `enforce`: the walk decides (DC8)
-
-  Under an installation in `enforce` the walk's first placement is the card
-  dispatched, and nothing goes when it places nothing (design §4.3, §4.4):
+  Every pass plans the scheduler walk (`Wardmast.Board.Scheduler`'s `:walk`, at
+  `board.walk`; `docs/design/provider-dynamic-concurrency.md` §4). Its first
+  placement is the card dispatched, and nothing goes when it places nothing
+  (design §4.3, §4.4):
 
     * the placement's pair rides into the dispatch as `planned: %{account_id,
       pool, node}`, which routing, account admission (the pool's seat check)
       and placement prefer while they still can;
     * the **reverse shadow** rides beside it as `admission_shadow`: what
-      today's plan would have done (`AdmissionShadow.reverse_record/2`), and the
-      hold-change events are written as under `shadow`;
+      today's plan would have done (`AdmissionShadow.reverse_record/2`), which
+      the run stores on its `routing_decision`;
+    * one `Wardmast.Board.AdmissionShadowEvent` row is written each time either
+      side's outcome changes (`Wardmast.Board.AdmissionShadow.signature/1`),
+      never once per pass;
     * a pool's budget that rises (`{:budget_changed, …}` on the `"board"`
-      topic) plans a pass, as a freed slot does;
-    * a resume deferred for a slot is replayed when its own pin pool has a seat
+      topic) plans a pass, as a freed seat does;
+    * a resume deferred for a seat is replayed when its own pin pool has one
       (`Wardmast.Worker.ResumeSlot`), not when the board's slot count frees.
 
-  An account trialling `enforce` under another installation mode (O11) has its
-  placements dispatched by the walk; every other card is today's plan's. A
-  board whose walk could not be read is today's plan's in every mode (the fail
-  safe). Switching back to `legacy` restores today's pass exactly.
+  A board whose walk could not be read dispatches nothing that pass: the
+  fallback to today's plan went with the `legacy` mode.
   """
 
   use GenServer
@@ -431,9 +418,6 @@ defmodule Wardmast.Board.Autopilot do
       `Snapshot.load/1` and `Wardmast.Worker.Dispatch.dispatch/2`. A
       two-argument `:dispatch` also gets the extra dispatch options (the
       admission shadow's record); a one-argument one gets the id alone.
-    * `:admission` — seam for tests; a 0-arity function returning the
-      `scheduler_admission` mode, read on every pass. Defaults to
-      `Wardmast.Board.AdmissionShadow.mode/0`.
     * `:record_shadow` — seam for tests; a 1-arity function that writes an
       admission hold-change event. Defaults to
       `Wardmast.Board.AdmissionShadow.record_event/1`.
@@ -659,15 +643,8 @@ defmodule Wardmast.Board.Autopilot do
       follow_up?: Keyword.get(opts, :follow_up, true),
       snapshot: Keyword.get(opts, :snapshot, &Snapshot.load/1),
       dispatch: Keyword.get_lazy(opts, :dispatch, fn -> default_dispatch_fun(self()) end),
-      # DC6: the `scheduler_admission` mode, read on every pass, and where a
-      # hold change under the shadow is written. `shadow_signature` is the last
-      # pass's outcome on both sides, so a row is written per change, not per pass.
-      admission: Keyword.get(opts, :admission, &AdmissionShadow.mode/0),
-      admission_seam?: Keyword.has_key?(opts, :admission),
-      # DC8 seams: the installation's own mode and a pool's account mode (O11),
-      # when a test needs them apart from `:admission`.
-      install_mode_seam: Keyword.get(opts, :install_mode),
-      pool_mode_seam: Keyword.get(opts, :pool_mode),
+      # DC6: where a hold change is written. `shadow_signature` is the last pass's
+      # outcome on both sides, so a row is written per change, not per pass.
       record_shadow: Keyword.get(opts, :record_shadow, &AdmissionShadow.record_event/1),
       shadow_signature: nil,
       resume: Keyword.get(opts, :resume, &default_resume/3),
@@ -923,7 +900,7 @@ defmodule Wardmast.Board.Autopilot do
   # `enforce` it plans a pass, as a worker finishing does. A fall stops nothing
   # (no budget stops a run), and under `legacy` and `shadow` nothing reacts.
   def handle_info({:budget_changed, _pool, from, to, _reason}, state) do
-    if budget_rise?(from, to) and admission_mode(state) == :enforce,
+    if budget_rise?(from, to),
       do: {:noreply, request_plan(state)},
       else: {:noreply, state}
   end
@@ -1064,30 +1041,26 @@ defmodule Wardmast.Board.Autopilot do
   defp registry_settled?, do: ResumeGate.open?() and not Drain.dispatch_pending?()
 
   defp plan(state) do
-    mode = admission_mode(state)
-
     {read_status, snapshot} =
       read_board(
         state,
-        [
-          dispatch_holds: dispatch_holds(state),
-          resume_queued: queued_resume_ids(state),
-          local_held: local_held_ids(state),
-          idle_check: idle_check(state)
-        ] ++ walk_opts(mode)
+        dispatch_holds: dispatch_holds(state),
+        resume_queued: queued_resume_ids(state),
+        local_held: local_held_ids(state),
+        idle_check: idle_check(state)
       )
 
     state = if read_status == :ok, do: prune_failures(state, snapshot), else: state
 
     state =
       shadow_safely(%{state | shadow_signature: nil}, fn ->
-        note_admission(state, mode, read_status, snapshot)
+        note_admission(state, read_status, snapshot)
       end)
 
     cond do
       state.deferred_resumes != [] ->
-        case resume_or_wait(state, read_status, snapshot, mode) do
-          {:idle, state} when read_status == :ok -> past_stalled_resumes(state, snapshot, mode)
+        case resume_or_wait(state, read_status, snapshot) do
+          {:idle, state} when read_status == :ok -> past_stalled_resumes(state, snapshot)
           other -> other
         end
 
@@ -1095,9 +1068,9 @@ defmodule Wardmast.Board.Autopilot do
         {:paused, state}
 
       true ->
-        case pass_pick(state, snapshot, mode) do
+        case pass_pick(snapshot) do
           {id, extra} -> promote_or_hold(%{state | holds: []}, id, extra)
-          nil -> {:idle, note_holds(state, snapshot, read_status, mode)}
+          nil -> {:idle, note_holds(state, snapshot, read_status)}
         end
     end
   end
@@ -1108,7 +1081,7 @@ defmodule Wardmast.Board.Autopilot do
   # every waiting resume's account goes. "Resumes first" still holds within an
   # account: its cards wait. A local-capacity waiter, an unknown account, or a
   # walk that does not decide keeps the old hold-everything behaviour.
-  defp past_stalled_resumes(state, snapshot, mode) do
+  defp past_stalled_resumes(state, snapshot) do
     slot_waiters = Enum.filter(state.deferred_resumes, &(&1.wait == :slot))
     state = track_stalls(state, slot_waiters)
 
@@ -1116,7 +1089,7 @@ defmodule Wardmast.Board.Autopilot do
       slot_waiters |> Enum.map(&waiting_account(state, &1)) |> Enum.uniq()
 
     passable? =
-      all_slot_waiters?(state, slot_waiters, blocked) and walk_decides?(state, snapshot, mode)
+      all_slot_waiters?(state, slot_waiters, blocked) and walk_decides?(snapshot)
 
     placements = if passable?, do: snapshot.walk.placements, else: []
     {held, open} = Enum.split_with(placements, &(pool_account(&1.pool) in blocked))
@@ -1127,7 +1100,7 @@ defmodule Wardmast.Board.Autopilot do
     pick =
       if open == [],
         do: nil,
-        else: pass_pick(state, put_in(snapshot.walk.placements, open), mode)
+        else: pass_pick(put_in(snapshot.walk.placements, open))
 
     case pick do
       {id, extra} -> promote_or_hold(%{state | holds: []}, id, extra)
@@ -1234,15 +1207,15 @@ defmodule Wardmast.Board.Autopilot do
     end
   end
 
-  # ---- under enforce: the walk decides (DC8) ----------------------------------
+  # ---- the walk decides (DC8) -------------------------------------------------
 
-  # The card this pass dispatches and the options riding with it. Under
-  # `enforce` the walk decides (`walk_pick/3`): its placement goes, its pair as
-  # `planned:` and today's decision beside it as the reverse shadow. Otherwise
-  # today's `promote` goes, with the walk's decision beside it under `shadow`.
-  defp pass_pick(state, snapshot, mode) do
-    case walk_pick(state, snapshot, mode) do
-      {:walk, %{id: id} = placement} ->
+  # The card this pass dispatches and the options riding with it: the walk's
+  # first placement goes, its pair as `planned:` and today's plan's decision
+  # beside it as the reverse shadow. A board whose walk could not be read
+  # dispatches nothing this pass (design §4.3, §4.4); the next pass looks again.
+  defp pass_pick(snapshot) do
+    case walk_pick(snapshot) do
+      %{id: id} = placement ->
         planned = [planned: AdmissionShadow.planned(placement)]
 
         {id,
@@ -1250,74 +1223,21 @@ defmodule Wardmast.Board.Autopilot do
            planned ++ [admission_shadow: AdmissionShadow.reverse_record(snapshot, placement)]
          end)}
 
-      {:walk, nil} ->
+      nil ->
         nil
-
-      :today ->
-        case Map.get(snapshot, :promote) do
-          id when is_binary(id) ->
-            {id, shadow_safely([], fn -> shadow_opts(state, snapshot, mode) end)}
-
-          _ ->
-            nil
-        end
     end
   end
 
-  # Who picks the card (design §10.1, O11). The Ready queue is install-wide, so
-  # under an installation in `enforce` the walk alone decides: its first
-  # placement goes, or nothing does. Under another installation mode with an
-  # account trialling `enforce`, a placement on that account's pool is the
-  # walk's to dispatch, and anything else is today's plan's. A board that
-  # carries no walk (its inputs could not be read) is today's plan's: the fail
-  # safe, whatever the mode.
-  defp walk_pick(state, %{walk: %{placements: placements}} = snapshot, :enforce) do
-    if install_mode(state, :enforce) == :enforce do
-      {:walk, List.first(placements)}
-    else
-      case AdmissionShadow.enforced_placement(snapshot, pool_resolver(state, :enforce)) do
-        nil -> :today
-        placement -> {:walk, placement}
-      end
-    end
-  end
+  # The Ready queue is install-wide, so the walk alone decides: its first
+  # placement goes, or nothing does.
+  defp walk_pick(%{walk: %{placements: placements}}), do: List.first(placements)
+  defp walk_pick(_snapshot), do: nil
 
-  defp walk_pick(_state, _snapshot, _mode), do: :today
+  # Whether the walk is whole on this board, so its entries are why nothing went.
+  defp walk_decides?(%{walk: %{placements: _, entries: _}}), do: true
+  defp walk_decides?(_snapshot), do: false
 
-  # Whether the walk decides this pass's dispatch: an `enforce` installation
-  # with a whole walk on the board (one `walk_pick/3` would also act on).
-  defp walk_decides?(state, %{walk: %{placements: _, entries: _}}, :enforce),
-    do: install_mode(state, :enforce) == :enforce
-
-  defp walk_decides?(_state, _snapshot, _mode), do: false
-
-  # ---- the admission shadow (DC6) --------------------------------------------
-
-  # `legacy` asks the board for nothing new; `shadow` and `enforce` ask it to
-  # plan the scheduler walk beside today's plan (`Snapshot.load/1`).
-  defp walk_opts(mode), do: if(AdmissionShadow.walks?(mode), do: [admission: mode], else: [])
-
-  # O11: a pass's event is recorded under the installation's mode and a dispatch
-  # under the placed account's mode; the walk-wide `mode` only gates the walk.
-  # A test-supplied `:admission` seam is the mode for both, unless the
-  # `:install_mode` / `:pool_mode` seams name them apart.
-  defp install_mode(%{install_mode_seam: seam}, _mode) when is_atom(seam) and seam != nil,
-    do: seam
-
-  defp install_mode(%{admission_seam?: true}, mode), do: mode
-  defp install_mode(_state, _mode), do: Wardmast.Accounts.AdmissionMode.installation()
-
-  defp pool_resolver(%{pool_mode_seam: seam}, _mode) when is_function(seam, 1), do: seam
-  defp pool_resolver(%{admission_seam?: true}, mode), do: mode
-  defp pool_resolver(_state, _mode), do: Wardmast.Accounts.AdmissionMode.pool_resolver()
-
-  defp admission_mode(state) do
-    state.admission.()
-  rescue
-    _ -> :legacy
-  catch
-    :exit, _ -> :legacy
-  end
+  # ---- the reverse shadow (DC6, DC8) -----------------------------------------
 
   # The shadow is a record: nothing it computes may stop a pass or change a
   # dispatch (I2). A failure is logged and the pass goes on without it.
@@ -1335,28 +1255,20 @@ defmodule Wardmast.Board.Autopilot do
 
   # One event row per change of either side's outcome (`AdmissionShadow.signature/1`),
   # never one per pass. An unreadable board says nothing and keeps the last
-  # signature; a board without a walk (or `legacy`) forgets it, so the next
-  # walk is recorded from a clean slate.
-  defp note_admission(state, _mode, :error, _snapshot), do: state
+  # signature; a board without a walk forgets it, so the next walk is recorded
+  # from a clean slate.
+  defp note_admission(state, :error, _snapshot), do: state
 
-  defp note_admission(state, mode, :ok, %{walk: %{}} = snapshot) do
-    if AdmissionShadow.walks?(mode) do
-      signature = {mode, AdmissionShadow.signature(snapshot)}
+  defp note_admission(state, :ok, %{walk: %{}} = snapshot) do
+    signature = AdmissionShadow.signature(snapshot)
 
-      if signature != state.shadow_signature,
-        do:
-          record_shadow(
-            state,
-            AdmissionShadow.event(snapshot, install_mode(state, mode), state.now.())
-          )
+    if signature != state.shadow_signature,
+      do: record_shadow(state, AdmissionShadow.event(snapshot, state.now.()))
 
-      %{state | shadow_signature: signature}
-    else
-      %{state | shadow_signature: nil}
-    end
+    %{state | shadow_signature: signature}
   end
 
-  defp note_admission(state, _mode, :ok, _snapshot), do: %{state | shadow_signature: nil}
+  defp note_admission(state, :ok, _snapshot), do: %{state | shadow_signature: nil}
 
   defp record_shadow(state, attrs) do
     state.record_shadow.(attrs)
@@ -1367,29 +1279,17 @@ defmodule Wardmast.Board.Autopilot do
       Logger.warning("board autopilot: admission shadow not recorded: #{inspect(reason)}")
   end
 
-  # What rides on the dispatch: the walk's decision beside today's, as
-  # `routing_decision.admission_shadow`. Nothing under `legacy`, or without a walk.
-  defp shadow_opts(state, snapshot, mode) do
-    with true <- AdmissionShadow.walks?(mode),
-         resolver = pool_resolver(state, mode),
-         %{} = record <- AdmissionShadow.dispatch_record(snapshot, resolver, snapshot.promote) do
-      [admission_shadow: record]
-    else
-      _ -> []
-    end
-  end
-
   # bd-dtdeff: an idle pass with Ready cards behind it was silent — no log, no
   # status — so a board holding work for a reason read as an Autopilot that had
   # stopped looking. Record each card's reason (the one the board shows) and log
   # it when it changes, so a held queue is one line per change, not per tick.
   # An unreadable board says nothing about the queue; keep the last answer.
-  defp note_holds(state, _snapshot, :error, _mode), do: state
+  defp note_holds(state, _snapshot, :error), do: state
 
-  defp note_holds(state, snapshot, :ok, mode) do
+  defp note_holds(state, snapshot, :ok) do
     # DC8: when the walk decides, its reasons are why nothing went.
     source =
-      if walk_decides?(state, snapshot, mode),
+      if walk_decides?(snapshot),
         do: snapshot.walk.entries,
         else: Map.get(snapshot, :ready, [])
 
@@ -1424,8 +1324,8 @@ defmodule Wardmast.Board.Autopilot do
   # board's slot count does not see: a slot waiter is replayed when
   # `Wardmast.Worker.ResumeSlot` finds its pool a seat (`:slot_room`), and one
   # whose pool is full does not hold back another whose pool has room.
-  defp resume_or_wait(%{deferred_resumes: [_ | _] = queue} = state, :ok, snapshot, mode) do
-    case next_resume(state, queue, Map.get(snapshot, :slots_free, 0), mode) do
+  defp resume_or_wait(%{deferred_resumes: [_ | _] = queue} = state, :ok, _snapshot) do
+    case next_resume(state, queue) do
       nil ->
         waiting(state)
 
@@ -1435,21 +1335,10 @@ defmodule Wardmast.Board.Autopilot do
     end
   end
 
-  defp resume_or_wait(state, _read_status, _snapshot, _mode), do: waiting(state)
+  defp resume_or_wait(state, _read_status, _snapshot), do: waiting(state)
 
-  defp next_resume(state, queue, slots_free, mode) do
-    slot_waiter =
-      cond do
-        mode == :enforce ->
-          Enum.find(queue, &(&1.wait == :slot and slot_room?(state, &1)))
-
-        slots_free > 0 ->
-          Enum.find(queue, &(&1.wait == :slot))
-
-        true ->
-          nil
-      end
-
+  defp next_resume(state, queue) do
+    slot_waiter = Enum.find(queue, &(&1.wait == :slot and slot_room?(state, &1)))
     slot_waiter || next_local_resume(state, queue)
   end
 

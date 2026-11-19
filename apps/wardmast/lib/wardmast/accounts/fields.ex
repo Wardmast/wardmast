@@ -108,16 +108,6 @@ defmodule Wardmast.Accounts.Fields do
           "share yields to another under its share, in the same band). It reorders; it never loosens a limit."
     },
     %{
-      name: "admission",
-      type: :admission,
-      clearable?: true,
-      phases: [:create, :update],
-      mcp?: true,
-      doc:
-        "Per-account scheduler_admission override: legacy, shadow or enforce. null / blank = " <>
-          "follow the installation-wide key. Node-layer caps are always enforced."
-    },
-    %{
       name: "provider_account_ref",
       type: :text,
       clearable?: true,
@@ -345,16 +335,6 @@ defmodule Wardmast.Accounts.Fields do
       "queue" -> {:ok, :queue}
       "fair" -> {:ok, :fair}
       _ -> invalid_account("budget_split must be queue or fair")
-    end
-  end
-
-  defp cast_field(%{type: :admission}, value, _phase) do
-    case value |> to_string() |> String.trim() |> String.downcase() do
-      "" -> {:ok, nil}
-      "legacy" -> {:ok, :legacy}
-      "shadow" -> {:ok, :shadow}
-      "enforce" -> {:ok, :enforce}
-      _ -> invalid_account("admission must be legacy, shadow or enforce")
     end
   end
 

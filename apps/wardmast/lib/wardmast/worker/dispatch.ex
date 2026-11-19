@@ -259,7 +259,6 @@ defmodule Wardmast.Worker.Dispatch do
          :ok <- ensure_no_live_agent_session(task_id, opts),
          opts = put_routing_choice(task, opts),
          opts = route_implementer(task, opts),
-         opts = put_admission_mode(task, opts),
          :ok <- ensure_provider_constraint(task, opts),
          :ok <- ensure_guardrails(task, opts),
          :ok <- ensure_sandbox_backend(task, opts),
@@ -1182,25 +1181,9 @@ defmodule Wardmast.Worker.Dispatch do
     end
   end
 
-  # DC8 (design §2.2, I9): asked before routing has picked the resume's account,
-  # so the mode is that of the account the workspace meters `provider` under. A
-  # resume of a ticket In progress under `enforce` is a follow-up, held by the
-  # primary's cap only at 0 (`node_follow_up?/2` asks the same at the real gate).
-  defp resume_follow_up?(%Issue{state: :active} = task, opts, provider) do
-    case Keyword.get(opts, :scheduler_admission) do
-      nil ->
-        account = Wardmast.Accounts.Resolver.account(task.workspace_id, provider)
-        Wardmast.Accounts.AdmissionMode.mode(account) == :enforce
-
-      explicit ->
-        explicit == :enforce
-    end
-  rescue
-    _ -> false
-  catch
-    :exit, _ -> false
-  end
-
+  # DC8 (design §2.2, I9): a resume of a ticket In progress is a follow-up, held by
+  # the primary's cap only at 0 (`node_follow_up?/2` asks the same at the real gate).
+  defp resume_follow_up?(%Issue{state: :active}, _opts, _provider), do: true
   defp resume_follow_up?(_task, _opts, _provider), do: false
 
   # Where would placement put this resume right now? `:node_possible` (a node has
@@ -2301,7 +2284,6 @@ defmodule Wardmast.Worker.Dispatch do
       # DC8 (§4.4): the scheduler walk's planned pair, preferred while available,
       # and the admission seams routing's seat check shares with `Admission`.
       planned: Keyword.get(opts, :planned),
-      scheduler_admission: Keyword.get(opts, :scheduler_admission),
       seat_opts: Keyword.get(opts, :seat_opts, [])
     ]
 
@@ -2857,8 +2839,7 @@ defmodule Wardmast.Worker.Dispatch do
         :resolved_policy,
         :auto_placed,
         :admission_shadow,
-        :planned,
-        :admission_mode
+        :planned
       ])
 
     opts =
@@ -3147,11 +3128,10 @@ defmodule Wardmast.Worker.Dispatch do
   # the node and account reservations the earlier gates took are released with
   # this one when the dispatch returns.
   #
-  # It decides only under `scheduler_admission: enforce`, with the rest of the
-  # layered admission (DC8), and reads no count otherwise (I1, I2).
+  # It is part of the layered admission (DC8).
   # `:force_slot` goes over the cap, recorded as a `repo_cap_override`.
   defp ensure_repo_capacity(%Issue{} = task, opts) do
-    if fresh_admission?(task, opts) and admission_enforced?(task, opts) do
+    if fresh_admission?(task, opts) do
       admit_opts = [
         force: Keyword.get(opts, :force_slot) == true,
         actor: Keyword.get(opts, :slot_override_actor) || Keyword.get(opts, :dispatched_by)
@@ -3164,51 +3144,6 @@ defmodule Wardmast.Worker.Dispatch do
     else
       :ok
     end
-  end
-
-  # DC8: the `scheduler_admission` mode of the account this dispatch runs on,
-  # resolved once routing has picked that account and carried as
-  # `:admission_mode` to every gate after it: the quota gate, account admission,
-  # the primary's cap and the repo cap. `unroute/1` drops it, so a held intent
-  # is judged afresh when it drains.
-  defp put_admission_mode(%Issue{} = task, opts),
-    do: Keyword.put(opts, :admission_mode, admission_mode(task, opts))
-
-  defp admission_enforced?(task, opts) do
-    case Keyword.fetch(opts, :admission_mode) do
-      {:ok, mode} -> mode == :enforce
-      :error -> admission_mode(task, opts) == :enforce
-    end
-  end
-
-  # The explicit `:scheduler_admission` opt (a test seam) wins; otherwise the
-  # effective mode of the account this dispatch runs on (O11: its override, else
-  # the installation key). Unreadable is `legacy`: today's gates.
-  defp admission_mode(task, opts) do
-    case Keyword.get(opts, :scheduler_admission) do
-      nil -> dispatch_account_mode(task, opts)
-      explicit -> explicit
-    end
-  rescue
-    _ -> :legacy
-  catch
-    :exit, _ -> :legacy
-  end
-
-  defp dispatch_account_mode(%Issue{} = task, opts) do
-    account =
-      case Keyword.get(opts, :routing_decision) do
-        %{"account_id" => id} when is_binary(id) ->
-          Wardmast.Accounts.Resolver.get(id)
-
-        _ ->
-          Wardmast.Accounts.Resolver.account(
-            task.workspace_id,
-            quota_gate_provider(task, load_workspace(task), opts)
-          )
-      end
-
-    Wardmast.Accounts.AdmissionMode.mode(account)
   end
 
   # RW8 (bd-3igo6h): the second admission gate, after the provider account's.
@@ -3619,11 +3554,10 @@ defmodule Wardmast.Worker.Dispatch do
     ] ++ Keyword.take(opts, [:nodes]) ++ planned_node(opts)
   end
 
-  # DC8 (design §2.2, I9): under `enforce` a run of a ticket already In progress
-  # (a resume, a re-dispatch) is a follow-up, which the primary's cap holds only
-  # at 0 or on a hard derate (`LocalCapacity`'s `follow_up:`). Under `legacy` and
-  # `shadow` the `:at_cap` rule is unchanged.
-  defp node_follow_up?(%Issue{state: :active} = task, opts), do: admission_enforced?(task, opts)
+  # DC8 (design §2.2, I9): a run of a ticket already In progress (a resume, a
+  # re-dispatch) is a follow-up, which the primary's cap holds only at 0 or on a
+  # hard derate (`LocalCapacity`'s `follow_up:`).
+  defp node_follow_up?(%Issue{state: :active}, _opts), do: true
   defp node_follow_up?(_task, _opts), do: false
 
   # DC8 (§4.4): the node the scheduler walk planned the run on goes first.
@@ -3661,29 +3595,15 @@ defmodule Wardmast.Worker.Dispatch do
           admission
       end
 
-    put_seat_opts(admission, task, provider, opts)
+    admission
+    |> Keyword.put(:pool, seat_pool(admission, task, provider, opts))
+    |> Keyword.put(:seat_opts, Keyword.get(opts, :seat_opts, []))
   end
 
-  # DC8: under `enforce` the account admits by its pool's seats. The pool is the
-  # walk's planned one when the run landed on the planned account, else the one
-  # routing chose; with neither, `Admission` takes the model's or the account's
-  # lowest budget. `:seat_opts` are `SeatCheck`'s seams (tests).
-  defp put_seat_opts(admission, task, provider, opts) do
-    case Keyword.get(opts, :admission_mode) do
-      :enforce ->
-        admission
-        |> Keyword.put(:mode, :enforce)
-        |> Keyword.put(:pool, seat_pool(admission, task, provider, opts))
-        |> Keyword.put(:seat_opts, Keyword.get(opts, :seat_opts, []))
-
-      mode when mode in [:legacy, :shadow] ->
-        Keyword.put(admission, :mode, mode)
-
-      _ ->
-        admission
-    end
-  end
-
+  # DC8: the account admits by its pool's seats. The pool is the walk's planned one
+  # when the run landed on the planned account, else the one routing chose; with
+  # neither, `Admission` takes the model's or the account's lowest budget.
+  # `:seat_opts` are `SeatCheck`'s seams (tests).
   defp seat_pool(admission, %Issue{} = task, provider, opts) do
     account_id =
       case Keyword.fetch(admission, :account) do
@@ -3726,7 +3646,7 @@ defmodule Wardmast.Worker.Dispatch do
     :exit, _ -> nil
   end
 
-  # DC8 (design §4.5, E9): under `scheduler_admission: enforce` the gate keeps
+  # DC8 (design §4.5, E9): the gate keeps
   # only its hard rules (`pace: false`) for every dispatch — fresh or follow-up:
   # the paced line is the pool's budget, which the seat check answers. A hard
   # rule that holds a *fresh* dispatch is that pool's hard zero (§3.5): the card
@@ -3737,7 +3657,6 @@ defmodule Wardmast.Worker.Dispatch do
     gate = Wardmast.Quota.gate_for_workspace(workspace)
     account = safe_gate_account(ws_id, provider)
     quota = safe_quota_latest(account, provider)
-    enforced? = admission_enforced?(task, opts)
     # The model hint (bd-7qj58o AC4) is scoped to this `gate.check/4` call
     # only — `opts` itself (used below for `DispatchQueue.hold/5`, replayed
     # verbatim on drain) must stay exactly what the caller passed, or a
@@ -3748,7 +3667,7 @@ defmodule Wardmast.Worker.Dispatch do
       |> maybe_add_gemini_model_hint(task, workspace, opts)
       |> maybe_add_claude_model_hint(task, workspace, quota)
       |> Keyword.put(:account, account)
-      |> then(&if(enforced?, do: Keyword.put(&1, :pace, false), else: &1))
+      |> Keyword.put(:pace, false)
 
     case gate.check(task, quota, workspace, gate_opts) do
       :allow ->
@@ -3757,20 +3676,12 @@ defmodule Wardmast.Worker.Dispatch do
         # snapshot is not evidence either way, so it leaves the alert alone.
         if quota, do: CoordinatorNotifier.overage_cleared(ws_id, provider)
 
-        # Under `enforce` the gate never asked about pace, so no exemption
-        # decided anything here; the exempt budget answers it at admission.
-        unless enforced?,
-          do: record_pace_exempt(task, ws_id, provider, account, quota, workspace, gate_opts)
-
         :ok
 
-      {:hold, reason} when enforced? ->
+      {:hold, reason} ->
         if fresh_admission?(task, opts),
           do: {:error, {:account_at_capacity, hard_zero(task, account, provider, reason, opts)}},
           else: quota_hold(task, ws_id, provider, reason, opts)
-
-      {:hold, reason} ->
-        quota_hold(task, ws_id, provider, reason, opts)
 
       {:overage, spend_usd} ->
         _ = DispatchQueue.record_overage(ws_id, task, spend_usd, provider)
@@ -3819,53 +3730,6 @@ defmodule Wardmast.Worker.Dispatch do
         :ok
     end
   end
-
-  # The P0 pace exemption (bd-6bxv7h, design §4.2): a dispatch the gate let
-  # through only because its own priority is exempt is audited — the same
-  # `pace_exempt` the routing decision carries, as a `quota_pace_exempt` event
-  # next to `quota_gate_bypass`. Best-effort: the audit must never fail a
-  # dispatch the gate allowed.
-  defp record_pace_exempt(
-         %Issue{priority: priority} = task,
-         ws_id,
-         provider,
-         account,
-         quota,
-         workspace,
-         gate_opts
-       )
-       when is_integer(priority) do
-    case Wardmast.Quota.Gate.pace_exemption(
-           quota,
-           {account, workspace},
-           Keyword.put(gate_opts, :priority, priority)
-         ) do
-      nil ->
-        :ok
-
-      exemption ->
-        Wardmast.Events.broadcast(ws_id, "quota_pace_exempt", %{
-          "task_id" => task.id,
-          "priority" => priority,
-          "provider" => to_string(provider),
-          "account" => account && account.slug,
-          "pace_exempt" => %{
-            "window" => exemption.window,
-            "used" => exemption.used,
-            "paced" => exemption.paced,
-            "cap" => exemption.cap
-          }
-        })
-    end
-  rescue
-    e ->
-      require Logger
-      Logger.warning("Dispatch: pace-exempt audit failed for #{task.id}: #{Exception.message(e)}")
-      :ok
-  end
-
-  defp record_pace_exempt(_task, _ws_id, _provider, _account, _quota, _workspace, _gate_opts),
-    do: :ok
 
   # bd-cwq8b0: grok has no provider account (the free tier's cap belongs to the
   # one xAI account), so its ledger snapshot is served whatever `account` is.

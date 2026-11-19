@@ -688,19 +688,16 @@ defmodule WardmastWeb.BoardLive do
     running? = InstallationSettings.scheduler_running?()
     paused? = not running? or InstallationSettings.scheduler_paused?()
 
-    mode = admission_mode()
-
     board =
       Snapshot.load(
         now: DateTime.utc_now(),
         paused: paused?,
-        admission: mode,
         exclude_engagements?: true,
         local_held: local_held_ids(),
         idle_check: idle_check()
       )
 
-    capacity = capacity(Wardmast.Accounts.AdmissionMode.installation())
+    capacity = capacity()
     exit_if_view_gone(view)
     alerts = load_alerts()
     exit_if_view_gone(view)
@@ -715,7 +712,7 @@ defmodule WardmastWeb.BoardLive do
       scheduler_running: running?,
       workspaces: workspaces,
       capacity: capacity,
-      explain: explain(board, mode, capacity)
+      explain: explain(board, capacity)
     }
   end
 
@@ -736,21 +733,10 @@ defmodule WardmastWeb.BoardLive do
     end
   end
 
-  # DC5: the `scheduler_admission` mode the board plans under. Under `shadow` and
-  # `enforce` the board also carries the scheduler walk, whose per-card layer
-  # reasons it shows; today's fields are the same either way (I1, I2).
-  # The strictest of the installation key and any account's override (O11): a
-  # single account trialling `shadow` or `enforce` still gets a walk.
-  defp admission_mode do
-    Wardmast.Accounts.AdmissionMode.walk_mode()
-  rescue
-    _ -> :legacy
-  end
-
-  # The budgets, machines and mode for the capacity strip (DC5). Display only: a
+  # The budgets and machines for the capacity strip (DC5). Display only: a
   # read that fails leaves the board without a strip.
-  defp capacity(mode) do
-    CapacityView.status(mode: mode)
+  defp capacity do
+    CapacityView.status()
   rescue
     _ -> nil
   catch
@@ -759,13 +745,8 @@ defmodule WardmastWeb.BoardLive do
 
   # The explanation is presentation: a read of it that fails leaves the board
   # as it was, with the figures and no popups.
-  defp explain(board, mode, capacity) do
-    CapacityExplainer.explain(board,
-      mode: mode,
-      install_mode: Wardmast.Accounts.AdmissionMode.installation(),
-      pool_mode: Wardmast.Accounts.AdmissionMode.pool_resolver(),
-      capacity: capacity
-    )
+  defp explain(board, capacity) do
+    CapacityExplainer.explain(board, capacity: capacity)
   rescue
     _ -> empty_explain()
   end
@@ -1745,7 +1726,7 @@ defmodule WardmastWeb.BoardLive do
         class="m-0 text-[11px] text-[var(--text-secondary)]"
         data-hold-layer
       >
-        <span :if={@hold.layer.shadow?}>Shadow walk: </span>{@hold.layer.text}
+        {@hold.layer.text}
       </p>
       <p
         :if={@hold.details}

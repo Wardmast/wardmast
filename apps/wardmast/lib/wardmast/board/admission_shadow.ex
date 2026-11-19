@@ -1,112 +1,34 @@
 defmodule Wardmast.Board.AdmissionShadow do
   @moduledoc """
-  What `scheduler_admission` records (DC6, bd-9ycsk4;
-  `docs/design/provider-dynamic-concurrency.md` §10.1-§10.2).
-
-  ## The modes
-
-  `mode/0` reads the installation setting (`Wardmast.Settings.scheduler_admission/0`):
-
-    * `legacy` (the default) — today's plan, gate and caps; nothing new runs
-      or is recorded (I1).
-    * `shadow` — dispatch is unchanged (I2); the board also plans the
-      scheduler walk (`Wardmast.Board.Snapshot.load/1`, `Wardmast.Board.WalkInputs`)
-      and `Wardmast.Board.Autopilot` records it beside today's decision.
-    * `enforce` (DC8) — dispatches by the walk and the budgets: the walk's
-      placement goes, its pair riding into dispatch as `planned/1`, and
-      today's decision is recorded beside it (the reverse shadow). Under an
-      installation that is not in `enforce`, only a placement on an account
-      trialling it (O11, `enforced_placement/2`) is the walk's to dispatch.
+  What the admission walk records beside today's plan (DC6, bd-9ycsk4;
+  `docs/design/provider-dynamic-concurrency.md` §10.1-§10.2). Since DC12 the walk
+  is the only admission: its placement goes, its pair riding into dispatch as
+  `planned/1`, and today's decision is recorded beside it (the reverse shadow).
 
   ## What is recorded
 
-    * **Beside every dispatch** — `dispatch_record/3`, stored on the run as
-      `routing_decision.admission_shadow`: the walk's first pick and its
-      (pool, machine) pair, whether it agrees with the card dispatched, whether
-      the pass was comparable (both sides had a candidate), and — when they
-      differ — why the walk would not have dispatched ours (`cause`,
-      `reason`). Under `enforce` it is `reverse_record/2` instead: the same
-      keys, with `pick` being today's plan's card and `cause` why today would
-      not have dispatched the walk's (`queued`, `legacy_hold`).
+    * **Beside every dispatch** — `reverse_record/2`, stored on the run as
+      `routing_decision.admission_shadow`: `pick` is today's plan's card, `agrees`
+      whether it is the card dispatched, `comparable` whether both sides had a
+      candidate, and `cause` why today would not have dispatched the walk's
+      (`queued`, `legacy_hold`); the (pool, machine) pair is the walk's.
     * **On every hold change** — `signature/1` is what a pass decided on each
       side: today's pick or the head it holds and why, the walk's first
       placement or the head it skips and why, and the pools whose budget sits
       below today's cap. Autopilot writes one `Wardmast.Board.AdmissionShadowEvent`
-      (`event/3`, `record_event/1`) when the signature changes, so a steady
+      (`event/2`, `record_event/1`) when the signature changes, so a steady
       board writes nothing however often it is planned.
 
-  Everything else here is a record: only `enforced_placement/2` and
-  `planned/1` reach a dispatch, and only under `enforce`.
+  Everything else here is a record: only `planned/1` reaches a dispatch.
   """
 
   require Logger
 
   alias Wardmast.Board.AdmissionShadowEvent
 
-  @type mode :: :legacy | :shadow | :enforce
-
   @board_holds [:no_slot, :quota, :paused]
 
-  @doc "The mode the walk is planned under: the strictest of the installation key and every account override (`Wardmast.Accounts.AdmissionMode.walk_mode/0`)."
-  @spec mode() :: mode()
-  def mode, do: Wardmast.Accounts.AdmissionMode.walk_mode()
-
-  @doc "Whether `mode` plans the scheduler walk beside today's plan."
-  @spec walks?(mode()) :: boolean()
-  def walks?(mode), do: mode in [:shadow, :enforce]
-
-  # ---- beside a dispatch -------------------------------------------------------
-
-  @doc """
-  The `admission_shadow` record for a dispatch of `dispatched` off `board`, or
-  `nil` when the board carries no walk. String keys: it is stored as-is.
-  """
-  @spec dispatch_record(map(), mode() | (term() -> mode()), String.t()) :: map() | nil
-  def dispatch_record(%{walk: %{} = walk}, mode, dispatched) when is_binary(dispatched) do
-    pick = walk.promote
-    mode = pick_mode(walk, mode)
-
-    walk
-    |> pick_fields()
-    |> Map.merge(%{
-      "policy" => to_string(mode),
-      "dispatched" => dispatched,
-      "pick" => pick,
-      "agrees" => pick == dispatched,
-      "comparable" => not is_nil(pick),
-      "cause" => cause(walk, dispatched),
-      "reason" => if(pick == dispatched, do: nil, else: walk_reason(walk, dispatched)),
-      "placements" => length(walk.placements)
-    })
-  end
-
-  def dispatch_record(_board, _mode, _dispatched), do: nil
-
-  # `mode` is a fixed mode, or a pool-key resolver (`AdmissionMode.pool_resolver/0`):
-  # the dispatch is recorded under the mode of the account it was placed on.
-  defp pick_mode(_walk, mode) when is_atom(mode), do: mode
-
-  defp pick_mode(%{placements: [first | _]}, resolver) when is_function(resolver, 1),
-    do: resolver.(first.pool)
-
-  defp pick_mode(_walk, resolver) when is_function(resolver, 1), do: resolver.(nil)
-
-  defp resolve(mode, _pool) when is_atom(mode), do: mode
-  defp resolve(resolver, pool) when is_function(resolver, 1), do: resolver.(pool)
-
-  # ---- under enforce: the walk decides (DC8) -------------------------------------
-
-  @doc """
-  The walk's first placement on a pool whose account is in `enforce` — the card
-  an `enforce` pass dispatches when the installation itself is not in `enforce`
-  (an account trialling it, O11) — or `nil`. `mode` is a fixed mode or a
-  pool-key resolver, as for `dispatch_record/3`.
-  """
-  @spec enforced_placement(map(), mode() | (term() -> mode())) :: map() | nil
-  def enforced_placement(%{walk: %{placements: placements}}, mode),
-    do: Enum.find(placements, &(resolve(mode, &1.pool) == :enforce))
-
-  def enforced_placement(_board, _mode), do: nil
+  # ---- the walk decides (DC8) ------------------------------------------------
 
   @doc """
   The pair a walk placement rides into dispatch as, `opts[:planned]` (design
@@ -127,7 +49,7 @@ defmodule Wardmast.Board.AdmissionShadow do
   today would not have dispatched ours: `queued` (it would have dispatched
   another card first) or `legacy_hold` (it held ours, or held the queue at its
   head; `legacy_hold` names the hold). The pair and the placement count are the
-  walk's, as in `dispatch_record/3`. String keys: it is stored as-is.
+  walk's. String keys: it is stored as-is.
   """
   @spec reverse_record(map(), map()) :: map()
   def reverse_record(%{walk: %{} = walk} = board, %{id: dispatched} = placement) do
@@ -178,15 +100,15 @@ defmodule Wardmast.Board.AdmissionShadow do
   end
 
   @doc "The `AdmissionShadowEvent` attributes for `board`'s pass at `at`."
-  @spec event(map(), mode(), DateTime.t()) :: map()
-  def event(board, mode, %DateTime{} = at) do
+  @spec event(map(), DateTime.t()) :: map()
+  def event(board, %DateTime{} = at) do
     walk = Map.get(board, :walk) || %{promote: nil, placements: [], entries: [], pools: %{}}
     legacy_pick = Map.get(board, :promote)
     walk_pick = walk.promote
 
     %{
       at: at,
-      policy: to_string(mode),
+      policy: "enforce",
       legacy_pick: legacy_pick,
       walk_pick: walk_pick,
       agrees: legacy_pick == walk_pick,
@@ -350,13 +272,6 @@ defmodule Wardmast.Board.AdmissionShadow do
   defp event_cause(_walk, pick, pick), do: nil
   defp event_cause(_walk, nil, _walk_pick), do: "legacy_hold"
   defp event_cause(walk, legacy_pick, _walk_pick), do: cause(walk, legacy_pick)
-
-  defp walk_reason(walk, id) do
-    case Enum.find(walk.entries, &(&1.id == id)) do
-      %{reason: reason} -> reason
-      nil -> nil
-    end
-  end
 
   defp entry_reason(ready, id) do
     case Enum.find(ready || [], &(&1.id == id)) do
