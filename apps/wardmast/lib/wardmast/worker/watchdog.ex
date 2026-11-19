@@ -2280,6 +2280,13 @@ defmodule Wardmast.Worker.Watchdog do
       not is_nil(block) ->
         give_up_retry(state, {:blocked, block})
 
+      # #1564: a skipped pipeline is no CI result; never merge on it.
+      Map.get(result, :pipeline_skipped) == true ->
+        detached_wait(
+          state,
+          "the head's pipeline was skipped; it merges once a fresh pipeline is green"
+        )
+
       true ->
         detached_merge(%{state | not_started_polls: 0})
     end
@@ -6326,7 +6333,11 @@ defmodule Wardmast.Worker.Watchdog do
   # e.g. after a main-merge push) has no CI result either, whoever pushed it:
   # start a fresh MR pipeline (once per head SHA, recorded) and wait for it.
   defp ci_skip_gate(state, %{pipeline_skipped: true} = result, sha) when is_binary(sha) do
-    ci_skip_gate(%{state | ci_skipped_head: sha}, result, sha)
+    # A newly adopted head gets its own trigger budget.
+    triggers = if state.ci_skipped_head == sha, do: state.ci_triggers, else: 0
+
+    state = %{state | ci_skipped_head: sha, ci_triggers: triggers, ci_trigger_polls: 0}
+    ci_skip_gate(state, result, sha)
   end
 
   defp ci_skip_gate(_state, _result, _sha), do: :proceed

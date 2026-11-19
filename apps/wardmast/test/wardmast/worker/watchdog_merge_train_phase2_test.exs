@@ -407,6 +407,23 @@ defmodule Wardmast.Worker.WatchdogMergeTrainPhase2Test do
       assert length(StubMerger.pipeline_triggers()) == 1
     end
 
+    test "each successive skipped head gets its own trigger (#1564)", %{ws: ws} do
+      freshness(%{"s1" => 0, "s2" => 0, "s3" => 0, "s4" => 0})
+      diffs("a")
+      sk = fn h -> skipped(h) |> Map.put(:pipeline_skipped, true) end
+      StubMerger.queue_get(mr("a"), [sk.("s1")])
+      a = watch("a", ws)
+
+      for {h, n} <- Enum.with_index(["s1", "s2", "s3", "s4"], 1) do
+        StubMerger.queue_get(mr("a"), [sk.(h)])
+        wait_until(fn -> length(StubMerger.pipeline_triggers()) == n end)
+        after_polls(a, 2)
+      end
+
+      assert length(StubMerger.pipeline_triggers()) == 4
+      assert StubMerger.merge_count("!a") == 0
+    end
+
     test "a skipped pipeline never merges, even after the trigger", %{ws: ws} do
       freshness(%{"a0" => 0})
       diffs("a")
