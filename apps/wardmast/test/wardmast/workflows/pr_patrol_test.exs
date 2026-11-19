@@ -28,7 +28,11 @@ defmodule Wardmast.Workflows.PRPatrolTest do
               "repo" => "repo",
               "credentials_ref" => "env:GITHUB_TOKEN"
             }
-          }
+          },
+          # bd-cwigjh: an unset `author_logins` patrols only Wardmast-opened PRs;
+          # the bulk of this file exercises the trigger machinery against
+          # arbitrary authors, so the default workspace opts in explicitly.
+          "pr_patrol" => %{"author_logins" => "*"}
         }
       })
 
@@ -1051,6 +1055,7 @@ defmodule Wardmast.Workflows.PRPatrolTest do
           name: "multi-repo-#{System.unique_integer([:positive])}",
           prefix: "mr",
           config: %{
+            "pr_patrol" => %{"author_logins" => "*"},
             "merge" => %{
               "strategy" => "github",
               "config" => %{
@@ -1128,6 +1133,7 @@ defmodule Wardmast.Workflows.PRPatrolTest do
           name: "unresolvable-#{System.unique_integer([:positive])}",
           prefix: "ur",
           config: %{
+            "pr_patrol" => %{"author_logins" => "*"},
             "merge" => %{
               "strategy" => "github",
               # The workspace must resolve to the patrol's repo (bd-7feiul: a
@@ -1226,7 +1232,23 @@ defmodule Wardmast.Workflows.PRPatrolTest do
           }
         })
 
-      {:ok, scoped: scoped}
+      {:ok, unscoped} =
+        Ash.create(Workspace, %{
+          name: "pp-unscoped-#{System.unique_integer([:positive])}",
+          prefix: "ppu#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "owner",
+                "repo" => "repo",
+                "credentials_ref" => "env:GITHUB_TOKEN"
+              }
+            }
+          }
+        })
+
+      {:ok, scoped: scoped, unscoped: unscoped}
     end
 
     test "PR by an allowlisted author → task created", %{scoped: ws} do
@@ -1283,9 +1305,63 @@ defmodule Wardmast.Workflows.PRPatrolTest do
       assert tasks_for_repo() == []
     end
 
-    # Back-compat: a workspace with no allowlist patrols all authors. Uses the
-    # default `ws` from the outer setup (github merge config, no `pr_patrol` key).
-    test "no allowlist configured → PR by any author is patrolled", %{ws: ws} do
+    # bd-cwigjh / #1550: an UNSET allowlist no longer means "everyone". It means
+    # "only what Wardmast itself opened" — patrolling a colleague's PR pushes
+    # unrequested commits onto their branch under the operator's identity.
+    test "no allowlist → a PR by a foreign author is NOT patrolled", %{unscoped: ws} do
+      pulls_stub(72, "anyone-at-all")
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert tasks_for_repo() == []
+    end
+
+    test "no allowlist, PR authored by the configured fleet login → patrolled",
+         %{unscoped: ws} do
+      {:ok, ws} =
+        Ash.update(ws, %{patch: %{"pr_patrol" => %{"our_login" => "fleet-bot"}}},
+          action: :patch_config
+        )
+
+      pulls_stub(74, "fleet-bot")
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert [task] = tasks_for_repo()
+      assert task.source_pr == "74"
+    end
+
+    test "no allowlist, PR linked to a Wardmast ticket (pr_ref) → patrolled", %{unscoped: ws} do
+      create_pr_task!(ws, "owner/repo#75")
+      pulls_stub(75, "operator-who-pushed-it")
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert [task] = tasks_for_repo()
+      assert task.source_pr == "75"
+    end
+
+    test "no allowlist: a ticket's pr_ref does not vouch for a DIFFERENT PR number",
+         %{unscoped: ws} do
+      create_pr_task!(ws, "owner/repo#75")
+      pulls_stub(76, "someone-else")
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert tasks_for_repo() == []
+    end
+
+    test "author_logins \"*\" (explicit opt-in) → PR by any author is patrolled",
+         %{unscoped: ws} do
+      {:ok, ws} =
+        Ash.update(ws, %{patch: %{"pr_patrol" => %{"author_logins" => "*"}}},
+          action: :patch_config
+        )
+
       pulls_stub(72, "anyone-at-all")
 
       {_pid, name} = start_patrol(ws)
@@ -1293,6 +1369,20 @@ defmodule Wardmast.Workflows.PRPatrolTest do
 
       assert [task] = tasks_for_repo()
       assert task.source_pr == "72"
+    end
+
+    test "author_logins [\"*\"] is the same opt-in", %{unscoped: ws} do
+      {:ok, ws} =
+        Ash.update(ws, %{patch: %{"pr_patrol" => %{"author_logins" => ["*"]}}},
+          action: :patch_config
+        )
+
+      pulls_stub(72, "anyone-at-all")
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert [_task] = tasks_for_repo()
     end
   end
 
@@ -1401,6 +1491,7 @@ defmodule Wardmast.Workflows.PRPatrolTest do
           name: "pp-unconfigured-#{System.unique_integer([:positive])}",
           prefix: "ppu#{System.unique_integer([:positive])}",
           config: %{
+            "pr_patrol" => %{"author_logins" => "*"},
             "merge" => %{
               "strategy" => "github",
               "config" => %{
@@ -1546,6 +1637,7 @@ defmodule Wardmast.Workflows.PRPatrolTest do
           name: "pp-backoff-#{System.unique_integer([:positive])}",
           prefix: "ppb#{System.unique_integer([:positive])}",
           config: %{
+            "pr_patrol" => %{"author_logins" => "*"},
             "merge" => %{
               "strategy" => "github",
               "config" => %{
@@ -1633,6 +1725,7 @@ defmodule Wardmast.Workflows.PRPatrolTest do
           name: "pp-escalate-fail-#{System.unique_integer([:positive])}",
           prefix: "ppe#{System.unique_integer([:positive])}",
           config: %{
+            "pr_patrol" => %{"author_logins" => "*"},
             "merge" => %{
               "strategy" => "github",
               "config" => %{
@@ -1737,6 +1830,7 @@ defmodule Wardmast.Workflows.PRPatrolTest do
           name: "pp-reescalate-#{System.unique_integer([:positive])}",
           prefix: "ppr#{System.unique_integer([:positive])}",
           config: %{
+            "pr_patrol" => %{"author_logins" => "*"},
             "merge" => %{
               "strategy" => "github",
               "config" => %{
@@ -1820,6 +1914,7 @@ defmodule Wardmast.Workflows.PRPatrolTest do
           name: "pp-exhaust-#{System.unique_integer([:positive])}",
           prefix: "ppx#{System.unique_integer([:positive])}",
           config: %{
+            "pr_patrol" => %{"author_logins" => "*"},
             "merge" => %{
               "strategy" => "github",
               "config" => %{
@@ -1936,6 +2031,7 @@ defmodule Wardmast.Workflows.PRPatrolTest do
           name: "pp-breaker-#{System.unique_integer([:positive])}",
           prefix: "ppb#{System.unique_integer([:positive])}",
           config: %{
+            "pr_patrol" => %{"author_logins" => "*"},
             "merge" => %{
               "strategy" => "github",
               "config" => %{
@@ -2188,6 +2284,7 @@ defmodule Wardmast.Workflows.PRPatrolTest do
           name: "pp-exhaust-fail-#{System.unique_integer([:positive])}",
           prefix: "ppxf#{System.unique_integer([:positive])}",
           config: %{
+            "pr_patrol" => %{"author_logins" => "*"},
             "merge" => %{
               "strategy" => "github",
               "config" => %{

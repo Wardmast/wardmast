@@ -131,6 +131,7 @@ defmodule Wardmast.Workflows.PRPatrol do
     ReviewThreadFollowUp
   }
 
+  alias Wardmast.Workflows.PRPatrol.AuthorScope
   alias Wardmast.Workflows.PRPatrolSupervisor
   require Ash.Query
   require Logger
@@ -309,7 +310,8 @@ defmodule Wardmast.Workflows.PRPatrol do
         # Only the survivors enter the batched request below — so a steady-state
         # tick where every open PR already has a follow-up filed issues ZERO
         # GraphQL requests, preserving the inter-sweep-trickle→0 win.
-        candidates = Enum.filter(mrs, &dispatch_candidate?(&1, base_state))
+        own_refs = AuthorScope.own_refs(state.workspace_id)
+        candidates = Enum.filter(mrs, &dispatch_candidate?(&1, base_state, own_refs))
 
         # bd-3byp1n: fetch every candidate's three trigger signals in ONE batched
         # forge request, replacing the ~3 calls per PR. Any candidate the batch
@@ -391,9 +393,9 @@ defmodule Wardmast.Workflows.PRPatrol do
   # report. Gating here means a PR that already has an open follow-up (the common
   # steady-state case) never enters the batched request at all — so a fully
   # deduped sweep makes zero signal requests.
-  defp dispatch_candidate?(%{number: pr_number} = mr, state) do
+  defp dispatch_candidate?(%{number: pr_number} = mr, state, own_refs) do
     not backing_off?(pr_number, state) and
-      author_allowed?(mr, state.workspace) and
+      author_allowed?(mr, state, own_refs) and
       not deduped?(pr_number, state.workspace_id) and
       not review_gate_holds?(pr_number, state)
   end
@@ -919,21 +921,17 @@ defmodule Wardmast.Workflows.PRPatrol do
       :error
   end
 
-  # When the workspace sets `config["pr_patrol"]["author_logins"]`, only patrol
-  # PRs authored by one of those logins — so a workspace can scope PRPatrol to
-  # its operator's own PRs instead of every open PR in the repo. An empty/unset
-  # allowlist patrols all PRs (the backward-compatible default). When an
-  # allowlist IS set but the MR carries no resolvable author, the PR is skipped
-  # (fail-closed: better to under-patrol than to file follow-ups we can't
-  # attribute to an allowed author).
-  defp author_allowed?(mr, %Workspace{} = workspace) do
-    case Workspace.pr_patrol_author_logins(workspace) do
-      [] -> true
-      logins -> Map.get(mr, :author) in logins
-    end
-  end
+  # Whose PRs patrol acts on (bd-cwigjh / #1550), per
+  # `Workspace.pr_patrol_author_scope/1`: unset → only PRs Wardmast opened (a linked
+  # ticket or the fleet login); a login list → only those authors; `"*"` →
+  # everyone, the explicit opt-in. Unset used to mean everyone, which on GitLab
+  # (once its triggers went live) pushed to colleagues' MR branches. Fail-closed
+  # when the MR carries no resolvable author and a login list is set: better to
+  # under-patrol than to file follow-ups we can't attribute to an allowed author.
+  defp author_allowed?(mr, %{workspace: %Workspace{} = workspace, repo: repo}, own_refs),
+    do: AuthorScope.in_scope?(mr, workspace, own_refs, repo)
 
-  defp author_allowed?(_mr, _workspace), do: true
+  defp author_allowed?(_mr, _state, _own_refs), do: false
 
   # The reply/resolve/pushback protocol text (bd-76ydsu), folded into the
   # follow-up Issue's description so the dispatched worker doesn't just push
