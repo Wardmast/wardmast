@@ -38,6 +38,75 @@ defmodule Wardmast.Mergers.GithubTest do
     conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
   end
 
+  describe "open/4 labels (bd-7p6a9o)" do
+    # GitHub labels the issue behind a PR, so a label is a call of its own —
+    # made after a create *and* after an adopt, since the PR a ReviewGate
+    # round opened is adopted, never re-created, when the merge path opens it.
+    test "labels a freshly created PR" do
+      test = self()
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls"} ->
+            stub_no_existing_pr(conn)
+
+          {"POST", "/repos/octo/widget/pulls"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 42})
+
+          {"POST", "/repos/octo/widget/pulls/42/requested_reviewers"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/octo/widget/issues/42/labels"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test, {:labelled, 42, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([%{"name" => "pair-authored"}])
+        end
+      end)
+
+      assert {:ok, "#42"} = Github.open("feature/x", "T", "B", %{labels: ["pair-authored"]})
+      assert_receive {:labelled, 42, %{"labels" => ["pair-authored"]}}
+    end
+
+    test "labels an adopted PR too" do
+      test = self()
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"number" => 68, "state" => "open"}])
+
+          {"POST", "/repos/octo/widget/issues/68/labels"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test, {:labelled, 68, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+        end
+      end)
+
+      assert {:ok, "#68"} = Github.open("feature/x", "T", "B", %{labels: ["pair-authored"]})
+      assert_receive {:labelled, 68, %{"labels" => ["pair-authored"]}}
+    end
+
+    test "a label the forge refuses does not fail the open" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"number" => 68, "state" => "open"}])
+
+          {"POST", "/repos/octo/widget/issues/68/labels"} ->
+            conn |> Plug.Conn.put_status(403) |> Req.Test.json(%{"message" => "no"})
+        end
+      end)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, "#68"} = Github.open("feature/x", "T", "B", %{labels: ["pair-authored"]})
+      end)
+    end
+  end
+
   describe "open/4" do
     test "with no existing PR: looks up the head branch, then POSTs and returns {:ok, mr_ref}" do
       stub(fn conn ->

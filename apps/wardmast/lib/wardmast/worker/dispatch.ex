@@ -4164,21 +4164,45 @@ defmodule Wardmast.Worker.Dispatch do
   def provision_worktree(%Issue{} = task, opts \\ []) do
     opts = task |> apply_issue_repo_default(opts) |> Keyword.put(:provision_worktree, true)
     opts = put_security_policy(task, opts)
-    repo = Keyword.get(opts, :repo)
 
-    with repo_path when is_binary(repo_path) <- resolve_repo_path(task, repo),
+    with {:ok, checkout} <- ticket_checkout(task, opts),
          {:ok, path} when is_binary(path) <- maybe_provision_worktree(task, opts) do
-      {:ok,
-       %{
-         path: path,
-         branch: BranchNamer.derive(task),
-         target_branch: resolve_target_branch(task, opts),
-         repo: repo,
-         repo_path: repo_path
-       }}
+      {:ok, %{checkout | path: path}}
     else
       {:error, _reason} = error -> error
-      _no_repo -> {:error, :no_repo}
+      {:ok, nil} -> {:error, :no_repo}
+    end
+  end
+
+  @doc """
+  Where `task`'s work lives, without touching git: its branch, the base it
+  merges into, its repo, that repo's local path, and the worktree path a
+  dispatch provisions — the same resolution `provision_worktree/2` uses. What
+  a pair session's Done checks its worktree against (bd-7p6a9o).
+
+  `{:error, :no_repo}` for a ticket naming no repo this installation can
+  resolve.
+  """
+  @spec ticket_checkout(Issue.t(), keyword()) :: {:ok, map()} | {:error, :no_repo}
+  def ticket_checkout(%Issue{} = task, opts \\ []) do
+    opts = apply_issue_repo_default(task, opts)
+    repo = Keyword.get(opts, :repo)
+
+    case resolve_repo_path(task, repo) do
+      repo_path when is_binary(repo_path) ->
+        branch = BranchNamer.derive(task)
+
+        {:ok,
+         %{
+           path: Worktree.worktree_path(branch),
+           branch: branch,
+           target_branch: resolve_target_branch(task, opts),
+           repo: repo,
+           repo_path: repo_path
+         }}
+
+      _ ->
+        {:error, :no_repo}
     end
   end
 

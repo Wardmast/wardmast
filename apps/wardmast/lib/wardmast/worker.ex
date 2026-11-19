@@ -338,6 +338,9 @@ defmodule Wardmast.Worker do
   # terminal usage event was observed" on THOSE rows is false — a terminal
   # event was observed, it just reported a failure with no usage. Distinguish
   # the two so the note never lies about which case produced the nil.
+  # bd-7p6a9o: the label on a PR a pair session's Done opened (`pair_label/0`).
+  @pair_label "pair-authored"
+
   @terminal_event_no_usage_note "no usage captured: a terminal event was observed on the " <>
                                   "stream but reported no usage (status: "
 
@@ -1207,6 +1210,118 @@ defmodule Wardmast.Worker do
       apply_ticket_verdict(state, {:approve, Map.get(ruling, :reasoning) || ""})
     end
   end
+
+  @doc """
+  The label a PR carries when a pair session's Done opened it (bd-7p6a9o).
+  """
+  @spec pair_label() :: String.t()
+  def pair_label, do: @pair_label
+
+  @doc """
+  Hand ticket `task_id`'s committed, gate-checked branch to the completion
+  path with no worker resident (bd-7p6a9o) — what a pair session's Done does
+  once its commit gate and pre-push checks have passed in the session's own
+  worktree (`Wardmast.Sessions.Pair.finish/2`).
+
+  It is the routing a worker takes after its own gates
+  (`route_completion/2`), not a parallel one: a workspace that requires review
+  enters the ReviewGate — the PR opened for review where the forge hosts one,
+  a distinct reviewer, and on APPROVE the merge path through the ticket
+  (`Wardmast.Worker.ReviewGate.deliver_verdict/4`, since no author is
+  resident) — and one that does not opens the PR and hands it to the ticket's
+  Watchdog, or merges it for a `direct` repo. Paired work meets the same bar.
+
+  `ctx` carries `:branch` and `:worktree_path` (both required),
+  `:target_branch`, `:repo`, `:repo_path`, `:pair_authored` (labels the PR
+  `pair_label/0`), and the merge/review overrides a test passes
+  (`:merger_adapter_override`, `:merger_workspace_override`, `:watchdog_*`,
+  `:review_required`, `:review_spawn`, `:open_retry_opts`). Runs in the
+  caller's process. Only an In-progress ticket: `{:error, {:not_in_review,
+  state}}` otherwise.
+
+  Returns `{:ok, :in_review}` once the ReviewGate holds the round,
+  `{:ok, :pr_opened}` once the PR is open and watched (or merged), or
+  `{:error, reason}`.
+  """
+  @spec complete_without_author(String.t(), map()) ::
+          {:ok, :in_review | :pr_opened} | {:error, term()}
+  def complete_without_author(task_id, ctx) when is_binary(task_id) and is_map(ctx) do
+    branch = Map.get(ctx, :branch)
+    worktree = Map.get(ctx, :worktree_path)
+
+    with :ok <- authorless_ctx(branch, worktree),
+         {:ok, issue} <- Ash.get(Wardmast.Tasks.Issue, task_id),
+         :ok <- takes_verdict(issue) do
+      routed = route_completion(authorless_state(issue, ctx), branch)
+      drain_run_finished()
+      authorless_outcome(routed)
+    end
+  end
+
+  defp authorless_ctx(branch, worktree)
+       when is_binary(branch) and branch != "" and is_binary(worktree) and worktree != "",
+       do: :ok
+
+  defp authorless_ctx(_branch, _worktree), do: {:error, :no_branch}
+
+  # What a worker would be carrying at the moment its gates passed: the
+  # ticket's latest authoring run (a pair session records one before handing
+  # off), its branch and worktree, and no author for the ReviewGate to report
+  # back to.
+  defp authorless_state(issue, ctx) do
+    run = latest_main_run(issue.id)
+
+    %State{
+      task_id: issue.id,
+      registry_key: issue.id,
+      workspace_id: issue.workspace_id,
+      repo: Map.get(ctx, :repo) || (run && run.repo) || issue.repo || "unknown",
+      current_step: :claude,
+      kind: :implement,
+      state: :working,
+      started_at: DateTime.utc_now(),
+      meta: authorless_meta(issue, ctx),
+      run_id: run && run.id
+    }
+  end
+
+  @authorless_overrides [
+    :merger_adapter_override,
+    :merger_workspace_override,
+    :watchdog_interval_ms,
+    :watchdog_initial_delay_ms,
+    :watchdog_max_polls,
+    :watchdog_auto_resume_dispatcher,
+    :review_required,
+    :review_spawn,
+    :review_command,
+    :open_retry_opts
+  ]
+
+  defp authorless_meta(issue, ctx) do
+    worktree = Map.get(ctx, :worktree_path)
+
+    %{
+      branch: Map.get(ctx, :branch),
+      worktree_path: worktree,
+      repo_path: Map.get(ctx, :repo_path) || worktree,
+      target_branch: Map.get(ctx, :target_branch) || "main",
+      issue_type: issue.issue_type,
+      review_gate_authorless: true,
+      pair_authored: if(Map.get(ctx, :pair_authored) == true, do: true)
+    }
+    |> Map.merge(Map.take(ctx, @authorless_overrides))
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp authorless_outcome(%State{outcome: :failed, meta: meta}),
+    do: {:error, Map.get(meta || %{}, :failure_reason) || :completion_failed}
+
+  defp authorless_outcome(%State{state: :waiting, waiting_on: :review_gate}),
+    do: {:ok, :in_review}
+
+  defp authorless_outcome(%State{}), do: {:ok, :pr_opened}
 
   @doc """
   Record an arbitrary key/value pair in the worker's `:meta` map.
@@ -8574,7 +8689,11 @@ defmodule Wardmast.Worker do
     if Map.get(meta, :review_spawn, true) do
       opts =
         [
-          author: self(),
+          # bd-7p6a9o: an authorless completion (`complete_without_author/2`)
+          # has no run to report to — the gate's verdict goes to the ticket
+          # (`ReviewGate.deliver_verdict/4`), exactly as for a gate re-armed
+          # after a restart.
+          author: if(Map.get(meta, :review_gate_authorless) == true, do: nil, else: self()),
           task_id: state.task_id,
           workspace_id: state.workspace_id,
           repo: state.repo,
@@ -9569,7 +9688,10 @@ defmodule Wardmast.Worker do
       watchdog_initial_delay_ms: Map.get(opts, "initial_delay_ms"),
       watchdog_max_polls: Map.get(opts, "max_polls"),
       watchdog_auto_resume_dispatcher:
-        restored_module(Map.get(opts, "auto_resume_dispatcher"), :resume, 1)
+        restored_module(Map.get(opts, "auto_resume_dispatcher"), :resume, 1),
+      # bd-7p6a9o: a pair session's round keeps its `pair-authored` label
+      # through a verdict applied to the ticket.
+      pair_authored: if(Map.get(opts, "pair_authored") == true, do: true)
     }
   end
 
@@ -9604,7 +9726,8 @@ defmodule Wardmast.Worker do
       interval_ms: Map.get(meta, :watchdog_interval_ms),
       initial_delay_ms: Map.get(meta, :watchdog_initial_delay_ms),
       max_polls: Map.get(meta, :watchdog_max_polls),
-      auto_resume_dispatcher: module_name(Map.get(meta, :watchdog_auto_resume_dispatcher))
+      auto_resume_dispatcher: module_name(Map.get(meta, :watchdog_auto_resume_dispatcher)),
+      pair_authored: if(Map.get(meta, :pair_authored) == true, do: true)
     }
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
@@ -11020,7 +11143,15 @@ defmodule Wardmast.Worker do
     |> Map.take([:target_branch, :reviewer_ids, :labels, :repo_path])
     |> maybe_default(:repo_path, Map.get(meta, :repo_path) || Map.get(meta, :worktree_path))
     |> maybe_default(:target_branch, Map.get(meta, :target_branch))
+    |> put_pair_label(meta)
   end
+
+  # bd-7p6a9o: a PR whose work a pair session finished says so, on the forge,
+  # for every reviewer and every later reader of the history.
+  defp put_pair_label(open_opts, %{pair_authored: true}),
+    do: Map.update(open_opts, :labels, [@pair_label], &Enum.uniq(List.wrap(&1) ++ [@pair_label]))
+
+  defp put_pair_label(open_opts, _meta), do: open_opts
 
   # bd-9ahwai: the local `Direct` merge integrates the branch ref by name, so it
   # carries the approved SHA and refuses a branch that moved past it. Forge

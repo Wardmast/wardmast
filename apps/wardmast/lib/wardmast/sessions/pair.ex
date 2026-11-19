@@ -58,8 +58,21 @@ defmodule Wardmast.Sessions.Pair do
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Worker
   alias Wardmast.Worker.Dispatch
+  alias Wardmast.Worker.PrepushCheck
+  alias Wardmast.Worker.Worktree
+  alias Wardmast.Workers.Run
 
   @pairable_states [:backlog, :queued, :active]
+
+  # The `role` a pair session's run carries — distinct from a worker's "base",
+  # so the estimator never counts it as a second dispatch of the ticket.
+  @run_role "pair"
+
+  # How long a caller waits on Done (the pre-push recipe's own budget is
+  # about three minutes), and how long a session ending itself waits for its
+  # answer to reach it.
+  @finish_timeout_ms :timer.minutes(10)
+  @self_end_delay_ms 2_000
 
   @typedoc "What `open/2` hands back: the session, and whether it already existed."
   @type opened :: %{session: Session.t(), reopened?: boolean()}
@@ -171,6 +184,69 @@ defmodule Wardmast.Sessions.Pair do
         session.id,
         Keyword.merge([reason: "pair session closed without done"], Keyword.take(opts, [:runner]))
       )
+    end
+  end
+
+  @doc """
+  **Done**: finish the ticket's pair session through the completion path a
+  worker's `arb done` takes.
+
+    1. **The commit gate**, in the session's worktree: on the ticket's branch,
+       nothing uncommitted, at least one commit ahead of the base, no injected
+       agent config committed (`{:error, {:commit_gate, reason}}`); then the
+       repo's pre-push recipe (`worker.repos.<repo>.pre_push_checks`), whose
+       red step comes back with its output (`{:error, {:prepush_failed,
+       %{status:, output:}}}`). A refused Done changes nothing: the session,
+       its claim and the ticket stay exactly as they were, so the pair fixes
+       it and runs Done again.
+    2. **The hand-off**: the ticket goes In progress, a run is recorded
+       against it (`kind: :implement`, `role: "pair"`), and
+       `Wardmast.Worker.complete_without_author/2` routes the branch the way a
+       worker's would be routed — the ReviewGate first when the workspace
+       requires review, then the PR (labelled `pair-authored`), CI and the
+       merge queue's Watchdog.
+    3. **The end**: the session ends with reason `"done"`, which releases the
+       claim. When the caller *is* the session (`:caller_session_id`, the
+       agent calling `pair_done`), the end waits a moment so its answer can
+       reach it first.
+
+  Runs supervised and unlinked from the caller — a client that disconnects
+  mid-way cannot interrupt a hand-off half done — and one at a time per
+  ticket (`{:error, :finish_in_progress}`). The caller waits up to `:timeout`
+  (default ten minutes); past it the answer is `{:ok, %{route: :running}}` and
+  the work completes regardless.
+
+  Returns `{:ok, %{route: :in_review | :pr_opened, ...}}`, `{:error,
+  :no_pair_session}`, or one of the refusals above.
+
+  ## Options
+
+    * `:runner` — the session command runner, for tests.
+    * `:caller_session_id` — the calling session's id, when Done comes from
+      inside a session.
+    * `:completion` — extra context for `Wardmast.Worker.complete_without_author/2`
+      (the merge and review overrides tests pass).
+    * `:timeout` — how long the caller waits, in milliseconds.
+  """
+  @spec finish(Issue.t() | String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def finish(issue_or_id, opts \\ []) do
+    with {:ok, session} <- live_session_for(issue_or_id) do
+      task =
+        Task.Supervisor.async_nolink(Wardmast.TaskSupervisor, fn ->
+          locked_finish(session, opts)
+        end)
+
+      case Task.yield(task, Keyword.get(opts, :timeout, @finish_timeout_ms)) do
+        {:ok, result} ->
+          result
+
+        {:exit, reason} ->
+          {:error, {:finish_crashed, reason}}
+
+        nil ->
+          _ = Task.ignore(task)
+          {:ok, %{route: :running}}
+      end
     end
   end
 
@@ -291,6 +367,164 @@ defmodule Wardmast.Sessions.Pair do
     case Refine.live_session(issue_id) do
       {:ok, _session} -> {:error, :refine_session_live}
       :none -> :ok
+    end
+  end
+
+  # ---- Done ---------------------------------------------------------------
+
+  # One Done per ticket at a time: a double click must not run two hand-offs.
+  defp locked_finish(%Session{issue_id: issue_id} = session, opts) do
+    lock = {{__MODULE__, :finish, issue_id}, self()}
+
+    case :global.trans(lock, fn -> do_finish(session, opts) end, [node()], 0) do
+      :aborted -> {:error, :finish_in_progress}
+      result -> result
+    end
+  end
+
+  defp do_finish(%Session{} = session, opts) do
+    with {:ok, issue} <- fetch_issue(session.issue_id),
+         :ok <- finishable(issue),
+         {:ok, checkout} <- Dispatch.ticket_checkout(issue),
+         :ok <- on_ticket_branch(session.cwd, checkout.branch),
+         :ok <- commit_gate(session.cwd, checkout.target_branch),
+         :ok <- prepush(issue, checkout, session.cwd),
+         {:ok, issue} <- Issue.start_work(issue),
+         {:ok, run} <- record_run(issue, session, checkout),
+         {:ok, route} <- hand_off(issue, session, checkout, opts) do
+      {:ok, %{route: route, run_id: run.id, session: end_session(session, opts)}}
+    end
+  end
+
+  defp fetch_issue(issue_id) do
+    case Ash.get(Issue, issue_id) do
+      {:ok, issue} -> {:ok, issue}
+      {:error, _} -> {:error, :issue_not_found}
+    end
+  end
+
+  defp finishable(%Issue{} = issue) do
+    if eligible?(issue), do: :ok, else: {:error, {:not_finishable, issue.state}}
+  end
+
+  # The branch a worker would push for this ticket: Done hands *that* branch
+  # on, so a worktree someone switched elsewhere is refused, not shipped.
+  defp on_ticket_branch(worktree, branch) do
+    case Worktree.current_branch(worktree) do
+      {:ok, ^branch} -> :ok
+      {:ok, other} -> {:error, {:commit_gate, {:wrong_branch, other, branch}}}
+      {:error, reason} -> {:error, {:commit_gate, {:git_failed, reason}}}
+    end
+  end
+
+  # The worker's commit gate (`Wardmast.Worker`'s `commit_gate/1`), except that
+  # a git error refuses rather than failing open: an interactive Done can
+  # simply be run again, where a headless run would be stranded.
+  defp commit_gate(worktree, target) do
+    case Worktree.completion_state(worktree, target) do
+      {:ok, :ready} ->
+        case Worktree.has_injected_config_in_commits?(worktree, target) do
+          {:ok, true} -> {:error, {:commit_gate, :secret_in_commit}}
+          _ -> :ok
+        end
+
+      {:ok, reason} ->
+        {:error, {:commit_gate, reason}}
+
+      {:error, reason} ->
+        {:error, {:commit_gate, {:git_failed, reason}}}
+    end
+  end
+
+  # The repo's pre-push recipe, run in the worktree on the host — the pair
+  # session's own machine. A red step refuses Done with its output; a timeout
+  # or a recipe that could not run fails open, as it does for a worker
+  # (`Wardmast.Worker.PrepushCheck`'s outcomes), CI being the backstop.
+  defp prepush(%Issue{} = issue, checkout, worktree) do
+    case PrepushCheck.resolve(workspace(issue.workspace_id), checkout.repo) do
+      nil ->
+        :ok
+
+      spec ->
+        case PrepushCheck.run_steps(spec, worktree, target: checkout.target_branch) do
+          %{result: :ok} ->
+            :ok
+
+          %{result: {:failed, status, output}} ->
+            {:error, {:prepush_failed, %{status: status, output: PrepushCheck.tail(output)}}}
+
+          %{result: other} ->
+            Logger.warning(
+              "Sessions.Pair: pre-push checks for #{issue.id} did not run to a verdict " <>
+                "(#{inspect(other)}); failing open as the worker gate does"
+            )
+
+            :ok
+        end
+    end
+  end
+
+  # The pair session's run, against the ticket like a worker's: the ticket's
+  # history shows who worked it, and the completion path writes its outcome.
+  defp record_run(%Issue{} = issue, %Session{} = session, checkout) do
+    Ash.create(Run, %{
+      task_id: issue.id,
+      base_task_id: issue.id,
+      task_title: issue.title,
+      repo: checkout.repo || issue.repo,
+      workspace_id: issue.workspace_id,
+      kind: :implement,
+      role: @run_role,
+      state: :working,
+      provider: "claude",
+      session_id: session.provider_session_id,
+      started_at: session.started_at
+    })
+  end
+
+  defp hand_off(%Issue{} = issue, %Session{} = session, checkout, opts) do
+    ctx =
+      Map.merge(
+        %{
+          branch: checkout.branch,
+          worktree_path: session.cwd,
+          target_branch: checkout.target_branch,
+          repo: checkout.repo,
+          repo_path: checkout.repo_path,
+          pair_authored: true
+        },
+        Keyword.get(opts, :completion, %{})
+      )
+
+    case Worker.complete_without_author(issue.id, ctx) do
+      {:ok, route} -> {:ok, route}
+      {:error, reason} -> {:error, {:hand_off_failed, reason}}
+    end
+  end
+
+  # Done releases the claim by ending the session. A session ending itself
+  # (the agent called `pair_done`) is given a moment for the answer to reach
+  # it before its pane goes.
+  defp end_session(%Session{id: id} = session, opts) do
+    if Keyword.get(opts, :caller_session_id) == id do
+      delay = Keyword.get(opts, :self_end_delay_ms, @self_end_delay_ms)
+
+      {:ok, _pid} =
+        Task.Supervisor.start_child(Wardmast.TaskSupervisor, fn ->
+          Process.sleep(delay)
+          _ = Sessions.kill(id, reason: "done", runner: opts[:runner])
+        end)
+
+      :deferred
+    else
+      case Sessions.kill(id, reason: "done", runner: opts[:runner]) do
+        {:ok, ended} ->
+          ended
+
+        {:error, reason} ->
+          Logger.warning("Sessions.Pair: could not end #{session.id} after Done: #{inspect(reason)}")
+          nil
+      end
     end
   end
 
