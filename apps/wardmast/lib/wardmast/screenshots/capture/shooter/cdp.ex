@@ -82,10 +82,18 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
 
   defp playwright_core(_tools), do: :ok
 
+  # Resolves the shot's login itself; a refusal (unsupported kind, no persona) raises, as
+  # `shoot/1` never reaches here with one. For callers that have not resolved the login.
+  @doc false
+  @spec build_spec(map(), String.t()) :: map()
+  def build_spec(spec, chrome) do
+    {:ok, login} = login(spec)
+    build_spec(spec, chrome, login)
+  end
+
   @doc false
   @spec build_spec(map(), String.t(), map() | nil) :: map()
-  def build_spec(spec, chrome, login \\ :resolve) do
-    login = if login == :resolve, do: elem(login(spec), 1), else: login
+  def build_spec(spec, chrome, login) do
     entry = spec.entry
 
     %{

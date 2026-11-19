@@ -57,7 +57,8 @@ const firstLine = (err) =>
 function successMatcher(success) {
   const conds = []
   if (success && typeof success.path_not === "string" && success.path_not !== "") {
-    conds.push((u) => new URL(u).pathname !== success.path_not)
+    const trim = (p) => (p.length > 1 ? p.replace(/\/+$/, "") : p)
+    conds.push((u) => trim(new URL(u).pathname) !== trim(success.path_not))
   }
   if (success && typeof success.url_not_contains === "string" && success.url_not_contains !== "") {
     conds.push((u) => !u.includes(success.url_not_contains))
