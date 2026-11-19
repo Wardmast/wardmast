@@ -97,9 +97,11 @@ defmodule Wardmast.Agents.Qwen.JailBwrapTest do
     {:ok, wt: wt}
   end
 
-  defp run(argv) do
+  defp run(argv, label) do
     [cmd | args] = argv
-    System.cmd(cmd, args, stderr_to_stdout: true, env: [{"LC_ALL", "C"}])
+    {out, status} = System.cmd(cmd, args, stderr_to_stdout: true, env: [{"LC_ALL", "C"}])
+    JailProbe.evidence("qwen #{label}: system settings", out)
+    {out, status}
   end
 
   # What `ConfigDir.ensure/1` wrote for this spawn, read on the host before the run.
@@ -146,7 +148,7 @@ defmodule Wardmast.Agents.Qwen.JailBwrapTest do
              Qwen.default_argv("review", worktree: wt, security: policy, owner: self())
 
     before = settings_before(wt)
-    {out, status} = run(argv)
+    {out, status} = run(argv, "reviewer")
 
     assert status == 0, out
     assert out =~ "WORKTREE_EROFS", out
@@ -164,7 +166,7 @@ defmodule Wardmast.Agents.Qwen.JailBwrapTest do
              )
 
     before = settings_before(wt)
-    {out, status} = run(argv)
+    {out, status} = run(argv, "implementer")
 
     assert status == 0, out
     refute out =~ "WORKTREE_EROFS"

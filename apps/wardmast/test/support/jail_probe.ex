@@ -28,4 +28,18 @@ defmodule Wardmast.Test.JailProbe do
       do: raise("#{@require_env}=1, but the real-bwrap tests cannot run: " <> reason),
       else: reason
   end
+
+  @doc """
+  On CI (`CI` set, as GitHub Actions does), print what a jailed stub reported
+  (its `MOUNTINFO:` lines, each attack's raw error) under `[jail evidence]`: a
+  passing run prints nothing else, and its log is the evidence that the jail
+  held on that runner. A no-op elsewhere.
+  """
+  @spec evidence(String.t(), String.t()) :: :ok
+  def evidence(label, out) do
+    if System.get_env("CI") in ["true", "1"],
+      do: IO.puts("\n[jail evidence] #{label}\n" <> String.trim_trailing(out))
+
+    :ok
+  end
 end

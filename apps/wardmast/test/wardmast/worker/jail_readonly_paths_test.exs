@@ -67,10 +67,14 @@ defmodule Wardmast.Worker.JailReadonlyPathsTest do
     file
   end
 
-  defp run_attack(opts, ro) do
+  defp run_attack(opts, ro, label) do
     {:ok, [bwrap | args]} = Jail.wrap(["sh", "-c", @attack], opts)
 
-    System.cmd(bwrap, args, stderr_to_stdout: true, env: [{"LC_ALL", "C"}, {"RO", ro}])
+    {out, status} =
+      System.cmd(bwrap, args, stderr_to_stdout: true, env: [{"LC_ALL", "C"}, {"RO", ro}])
+
+    JailProbe.evidence("readonly_paths, #{label}", out)
+    {out, status}
   end
 
   defp assert_held(out, ro, file) do
@@ -88,7 +92,8 @@ defmodule Wardmast.Worker.JailReadonlyPathsTest do
     ro = Path.join(home, ".policy")
     file = policy_dir!(ro)
 
-    {out, status} = run_attack([worktree: wt, home: home, readonly_paths: [ro]], ro)
+    {out, status} =
+      run_attack([worktree: wt, home: home, readonly_paths: [ro]], ro, "nested in the home")
 
     assert status == 0, out
     assert_held(out, ro, file)
@@ -103,7 +108,11 @@ defmodule Wardmast.Worker.JailReadonlyPathsTest do
     file = policy_dir!(ro)
 
     {out, status} =
-      run_attack([worktree: wt, home: home, writable_paths: [homes], readonly_paths: [ro]], ro)
+      run_attack(
+        [worktree: wt, home: home, writable_paths: [homes], readonly_paths: [ro]],
+        ro,
+        "beside the home"
+      )
 
     assert status == 0, out
     assert_held(out, ro, file)
@@ -117,6 +126,7 @@ defmodule Wardmast.Worker.JailReadonlyPathsTest do
       Jail.wrap(["sh", "-c", "echo JAIL_RAN"], worktree: wt, readonly_paths: [missing])
 
     {out, status} = System.cmd(bwrap, args, stderr_to_stdout: true, env: [{"LC_ALL", "C"}])
+    JailProbe.evidence("readonly_paths, missing at spawn (exit #{status})", out)
 
     assert status != 0, out
     refute out =~ "JAIL_RAN"
