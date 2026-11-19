@@ -65,7 +65,7 @@ defmodule Wardmast.Mergers.Gitlab do
   alias Wardmast.Mergers.CILogExcerpt
   alias Wardmast.Mergers.CIQueue
   alias Wardmast.Mergers.CIRerun
-  alias Wardmast.Mergers.Gitlab.{Budget, Config, Error}
+  alias Wardmast.Mergers.Gitlab.{Budget, Config, Endpoint, Error}
 
   @stub_name Wardmast.Mergers.Gitlab.HTTP
 
@@ -978,7 +978,7 @@ defmodule Wardmast.Mergers.Gitlab do
     with {:ok, cfg} <- cfg_for_ref(mr_ref),
          {:ok, iid} <- iid_from_ref(mr_ref),
          {:ok, path} <- resolve_project_path(cfg) do
-      "https://#{cfg.host}/#{path}/-/merge_requests/#{iid}"
+      "#{Endpoint.base_url(cfg)}/#{path}/-/merge_requests/#{iid}"
     else
       _ -> ""
     end
@@ -994,7 +994,7 @@ defmodule Wardmast.Mergers.Gitlab do
       # THAT project, never the workspace's configured one (bd-96d5z4).
       m = Regex.run(~r{^(?:https?://[^/\s]+/)?(.+?)/-/merge_requests/(\d+)}, pr) ->
         [_, path, iid] = m
-        {:ok, qualified_ref(path, iid)}
+        {:ok, qualified_ref(strip_base_path(path), iid)}
 
       # Bare iid or GitLab's own "!<iid>" shorthand: the project comes from the
       # named repo's checkout origin remote; with no checkout the ref stays
@@ -1069,6 +1069,18 @@ defmodule Wardmast.Mergers.Gitlab do
   end
 
   defp qualified_ref(path, iid), do: path <> ref_for(iid)
+
+  # An instance served under a path prefix (`base_url: https://host/gitlab`) has
+  # MR URLs `https://host/gitlab/<namespace>/<project>/-/…`; the prefix is not
+  # part of the project path.
+  defp strip_base_path(path) do
+    with {:ok, %{base_url: base}} when is_binary(base) <- Config.resolve(),
+         prefix when prefix not in [nil, "", "/"] <- URI.parse(base).path do
+      String.replace_prefix(path, String.trim_leading(prefix, "/") <> "/", "")
+    else
+      _ -> path
+    end
+  end
 
   @impl true
   def get_diff(mr_ref, opts) when is_binary(mr_ref) do
@@ -2229,7 +2241,7 @@ defmodule Wardmast.Mergers.Gitlab do
     with {:ok, path} <- resolve_project_path(cfg),
          {:ok, %{"data" => %{"project" => %{"pipeline" => %{} = pipeline}}}} <-
            cfg
-           |> build_client("https://#{cfg.host}/api")
+           |> build_client(Endpoint.base_url(cfg) <> "/api")
            |> Client.request(:post, "/graphql",
              json: %{
                "query" => @pipeline_reason_query,
@@ -2499,20 +2511,23 @@ defmodule Wardmast.Mergers.Gitlab do
   # ---- Internals: HTTP ----------------------------------------------------
 
   # Project-scoped client: prepends /api/v4/projects/:project_id to `path`.
-  defp client(cfg),
-    do: build_client(cfg, "https://#{cfg.host}/api/v4/projects/#{encode_project(cfg.project_id)}")
+  @doc false
+  def client(cfg),
+    do: build_client(cfg, Endpoint.api_url(cfg) <> "/projects/#{encode_project(cfg.project_id)}")
 
   defp encode_project(id), do: id |> to_string() |> URI.encode(&URI.char_unreserved?/1)
 
   # Root client: prepends /api/v4 to `path` (for `GET /user`, which is not
   # scoped to a project).
-  defp root_client(cfg), do: build_client(cfg, "https://#{cfg.host}/api/v4")
+  @doc false
+  def root_client(cfg), do: build_client(cfg, Endpoint.api_url(cfg))
 
   defp build_client(cfg, base_url) do
     Client.new(
       base_url: base_url,
       headers: headers(cfg),
       errors: error_spec(),
+      connect_options: Endpoint.connect_options(cfg),
       stub: {:gitlab_http_stub, @stub_name},
       gate: fn {method, url}, fun ->
         Budget.gate(cfg.host, Budget.site(method, url), fun)

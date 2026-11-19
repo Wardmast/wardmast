@@ -160,6 +160,29 @@ defmodule Wardmast.Worker.GitCredentialGitlabTest do
   end
 
   describe "materialize/3" do
+    test "ca_cacertfile is accepted, carried on the material and applied to the TLS options" do
+      stub_gitlab()
+      ws = workspace(%{"ca_cacertfile" => "/etc/ssl/internal-ca.pem"})
+      assert :ok = GitCredential.validate(ws.config["git_credentials"])
+
+      assert {:ok, %Material{ca_cacertfile: "/etc/ssl/internal-ca.pem"} = material} =
+               GitCredential.materialize(
+                 plan(ws),
+                 ws,
+                 [remote: "acme/tonic"] ++ req_options()
+               )
+
+      assert_receive {:gitlab, "POST", _, _, _}
+
+      assert GitCredential.gitlab_req_options(material, [])[:connect_options] ==
+               [transport_opts: [cacertfile: "/etc/ssl/internal-ca.pem"]]
+
+      refute Keyword.has_key?(
+               GitCredential.gitlab_req_options(gitlab_material(), []),
+               :connect_options
+             )
+    end
+
     test "mints a project access token for the one project, read_api + write_repository only" do
       stub_gitlab()
 

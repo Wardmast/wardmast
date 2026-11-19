@@ -196,7 +196,7 @@ defmodule Wardmast.Tasks.IssueRepo do
   defp match_slug_in_map(map, target) do
     Enum.find_value(map, fn {k, v} ->
       with path when is_binary(path) <- RepoConfig.repo_path_from_config(v),
-           {:ok, {owner, name}} <- RepoResolver.from_remote(path),
+           {:ok, {owner, name}} <- RepoResolver.from_remote(path, nested: true),
            true <- RepoConfig.normalize_slug("#{owner}/#{name}") == target do
         k
       else

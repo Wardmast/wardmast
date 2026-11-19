@@ -57,6 +57,7 @@ loose). Optional per-repo keys: `host` (default `github.com`; `gitlab.com` for
 `group/subgroup/project` on GitLab; default is parsed from the checkout's `origin`),
 `api_url` (GitHub Enterprise; for `gitlab_project_token` the REST base of a self-managed
 instance, `https://git.example.com/api/v4`, default `https://<host>/api/v4`),
+`ca_cacertfile` (GitLab kinds: PEM CA bundle path for an instance behind an internal CA, applied to every request to it; default the system trust store),
 `expires_in_days` (`gitlab_project_token` only: 1 to 7, default 2). `gitlab_bot_token` takes `secret` (required), `projects` and `expires_at` (below).
 The config is validated on write; a typo is refused rather than read as "unset".
 

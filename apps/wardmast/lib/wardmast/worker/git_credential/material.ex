@@ -12,6 +12,8 @@ defmodule Wardmast.Worker.GitCredential.Material do
       `tracker_write` (when one was asked for). `api_url` is a `github_app`
       entry's API base (GitHub Enterprise; `nil` is api.github.com), which its
       tokens are revoked at (`Wardmast.Worker.GitCredential.revoke/2`).
+      `ca_cacertfile` (GitLab kinds) is a PEM CA bundle for a self-managed instance
+      behind an internal CA, applied to every request made to it.
     * `:gitlab_project_token` — `token` is a project access token minted for the
       run (`token_id` is its id, which a revoke names); `parent_token` is the
       long-lived credential that minted it and revokes it. The parent never leaves
@@ -34,6 +36,7 @@ defmodule Wardmast.Worker.GitCredential.Material do
             username: "x-access-token",
             remote: nil,
             api_url: nil,
+            ca_cacertfile: nil,
             read_only: false
 
   @type t :: %__MODULE__{
@@ -48,6 +51,7 @@ defmodule Wardmast.Worker.GitCredential.Material do
           username: String.t(),
           remote: String.t() | nil,
           api_url: String.t() | nil,
+          ca_cacertfile: String.t() | nil,
           read_only: boolean()
         }
 
