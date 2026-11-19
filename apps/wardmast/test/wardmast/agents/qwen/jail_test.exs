@@ -147,13 +147,16 @@ defmodule Wardmast.Agents.Qwen.JailTest do
       assert "--yolo" in flags
     end
 
-    test "the system settings dir is bound read-only over the writable home", %{worktree: wt} do
+    test "the system settings dir is bound read-only, as its own mount beside the writable home",
+         %{worktree: wt} do
       {jail, _, _} = split_jail(argv!(worktree: wt))
       dir = ConfigDir.system_settings_dir(worktree: wt)
 
       assert {dir, dir} in pairs(jail, "--ro-bind-try")
       home = ConfigDir.path(worktree: wt)
       assert Enum.find_index(jail, &(&1 == dir)) > Enum.find_index(jail, &(&1 == home))
+      # never nested in the writable home bind (bd-c609gj)
+      refute String.starts_with?(dir, home <> "/")
     end
 
     test "QWEN_HOME and the settings path are fixed inside the jail too", %{worktree: wt} do

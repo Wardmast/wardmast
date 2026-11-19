@@ -21,6 +21,13 @@
 set -u
 umask 077
 
+# Every curl call goes through this. curl >= 8.2x (Ubuntu 26.04's) exits 100 ("A value or
+# data field grew larger than allowed") before it connects when $HOME is ~240 characters or
+# more, because it builds its rc/state paths from it (-q does not skip that), and a run's
+# HOME is a per-run volume path whose length is not ours to bound. Nothing here needs a
+# curlrc or any other HOME state, so curl gets a short HOME and no ambient config.
+curl() { env HOME=/ curl -q "$@"; }
+
 run=${ARB_RUN:?ARB_RUN is required}
 wt=${ARB_WORKTREE:?ARB_WORKTREE is required}
 run_dir=${ARB_RUN_DIR:-/run/arb}
