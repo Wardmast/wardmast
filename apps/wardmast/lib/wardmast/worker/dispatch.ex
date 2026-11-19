@@ -1326,10 +1326,8 @@ defmodule Wardmast.Worker.Dispatch do
 
   # The account whose pool the resume waits on, so the board holds Ready work
   # for that account only (not the implementer's, which may differ).
-  defp put_waiting_account(opts, %{seat: %{account_id: id}}) when is_binary(id),
+  defp put_waiting_account(opts, %{seat: %{account_id: id}}),
     do: Keyword.put(opts, :waiting_account, id)
-
-  defp put_waiting_account(opts, _info), do: opts
 
   @doc """
   Operator-facing explanation for an `{:error, {:worker_active, run}}`
