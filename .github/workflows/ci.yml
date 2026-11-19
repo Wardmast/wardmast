@@ -41,7 +41,8 @@ jobs:
   # config. The dev cache is this job's alone, hence the distinct cache key.
   audit:
     name: mix audit (credo, sobelow, dialyzer)
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04 and breaks tests; see 26.04 follow-up ticket (#1529).
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       MIX_ENV: dev
@@ -180,7 +181,8 @@ jobs:
   # keeps working and there is one place that reports overall pass/fail.
   test-shard:
     name: mix test (${{ matrix.app }} ${{ matrix.partition }}/${{ matrix.partitions }})
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04 and breaks tests; see 26.04 follow-up ticket (#1529).
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
       MIX_ENV: test
@@ -258,7 +260,8 @@ jobs:
   # Single aggregate check, named as the old monolithic job was.
   test:
     name: mix test
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04 and breaks tests; see 26.04 follow-up ticket (#1529).
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: test-shard
     if: ${{ always() }}
@@ -277,7 +280,8 @@ jobs:
   # the runner image's); where it is absent those tests skip and this job is the gate.
   helm-chart:
     name: helm lint + kubeconform (charts/wardmast-node)
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04 and breaks tests; see 26.04 follow-up ticket (#1529).
+    runs-on: ubuntu-24.04
     env:
       HELM_VERSION: v3.17.3
       KUBECONFORM_VERSION: v0.6.7
