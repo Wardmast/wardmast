@@ -2280,17 +2280,20 @@ defmodule Wardmast.Worker.Watchdog do
       not is_nil(block) ->
         give_up_retry(state, {:blocked, block})
 
-      # #1564: a skipped pipeline is no CI result; never merge on it.
-      Map.get(result, :pipeline_skipped) == true ->
-        detached_wait(
-          state,
-          "the head's pipeline was skipped; it merges once a fresh pipeline is green"
-        )
-
       true ->
-        detached_merge(%{state | not_started_polls: 0})
+        detached_merge_unless_skipped(%{state | not_started_polls: 0}, result)
     end
   end
+
+  # #1564: a skipped pipeline is no CI result; never merge on it.
+  defp detached_merge_unless_skipped(state, %{pipeline_skipped: true}),
+    do:
+      detached_wait(
+        state,
+        "the head's pipeline was skipped; it merges once a fresh pipeline is green"
+      )
+
+  defp detached_merge_unless_skipped(state, _result), do: detached_merge(state)
 
   # Red CI on an approved PR is a wait, not a verdict: a re-run on the same
   # head, a fix on the base branch followed by a fresh pipeline, or a new head
