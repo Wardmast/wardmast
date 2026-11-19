@@ -28,6 +28,27 @@ defmodule Wardmast.Worker.PromptBuilderTest do
     )
   end
 
+  describe "UI SCREENSHOTS block" do
+    defp ws(block),
+      do: %{config: %{"worker" => %{"repos" => %{"o/r" => %{"screenshots" => block}}}}}
+
+    test "a repo with a screenshots config carries the plan contract" do
+      prompt =
+        PromptBuilder.prompt_for_task(task(%{repo: "o/r"}),
+          worktree_path: "/tmp/wt",
+          workspace: ws(%{"ui_paths" => ["web/**"], "start_cmd" => "true"})
+        )
+
+      assert prompt =~ "UI SCREENSHOTS"
+      assert prompt =~ "ward screenshots check"
+    end
+
+    test "a repo without one does not" do
+      refute PromptBuilder.prompt_for_task(task(%{repo: "o/r"}), worktree_path: "/tmp/wt") =~
+               "UI SCREENSHOTS"
+    end
+  end
+
   describe "PERMISSIONS block (G14, bd-ld8qde)" do
     alias Wardmast.Guardrails.Projection
 
