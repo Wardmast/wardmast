@@ -38,7 +38,10 @@ defmodule Wardmast.Workflows.PRPatrolGitlabTriggersTest do
               "project_id" => "owner/repo",
               "credentials_ref" => "test-gitlab-token"
             }
-          }
+          },
+          # bd-cwigjh: an unset `author_logins` patrols only Wardmast-opened MRs;
+          # these tests exercise the triggers against an arbitrary author.
+          "pr_patrol" => %{"author_logins" => "*"}
         }
       })
 
@@ -287,6 +290,95 @@ defmodule Wardmast.Workflows.PRPatrolGitlabTriggersTest do
       push!("beef456")
       :ok = PRPatrol.tick(name)
       assert length(tasks_for_repo()) == 3
+    end
+  end
+
+  # bd-cwigjh / #1550: with `list_required_check_failures/1` live (bd-c1htb2) an
+  # unscoped patrol acts on EVERY MR in the project, including a colleague's.
+  describe "author scope (pr_patrol.author_logins)" do
+    defp set_patrol_config(ws, patch) do
+      {:ok, ws} = Ash.update(ws, %{patch: %{"pr_patrol" => patch}}, action: :patch_config)
+      ws
+    end
+
+    defp failing_ci_stub, do: gitlab_stub(jobs: [job("rspec", "failed", false)])
+
+    test "unset author_logins → a colleague's MR with a failing check is left alone",
+         %{ws: ws} do
+      ws = set_patrol_config(ws, %{"author_logins" => nil})
+      failing_ci_stub()
+
+      name = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert tasks_for_repo() == []
+    end
+
+    test "unset author_logins → an MR authored by the configured fleet login is patrolled",
+         %{ws: ws} do
+      ws = set_patrol_config(ws, %{"author_logins" => nil, "our_login" => "fleet-bot"})
+      failing_ci_stub()
+
+      name = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert [task] = tasks_for_repo()
+      assert task.source_pr == "42"
+    end
+
+    test "unset author_logins → an MR linked to a Wardmast ticket (pr_ref) is patrolled",
+         %{ws: ws} do
+      ws = set_patrol_config(ws, %{"author_logins" => nil})
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "authored",
+          description: "d",
+          issue_type: :feature,
+          tracker_type: :none,
+          workspace_id: ws.id
+        })
+
+      {:ok, _} = Ash.update(task, %{pr_ref: "!42"}, action: :update)
+
+      # A review trigger, not CI: a failing check on a ticket-owned MR is the merge
+      # flow's to fix (`merge_owns_ci?/4`), so patrol deliberately leaves it be.
+      gitlab_stub(
+        pipeline_status: "success",
+        reviewers: [
+          %{
+            "user" => %{"id" => 7, "username" => "alice"},
+            "state" => "requested_changes",
+            "created_at" => "2026-11-01T10:00:00.000Z"
+          }
+        ]
+      )
+
+      name = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert [followup] = tasks_for_repo()
+      assert followup.source_pr == "42"
+    end
+
+    test "author_logins \"*\" → every MR is patrolled again", %{ws: ws} do
+      ws = set_patrol_config(ws, %{"author_logins" => "*"})
+      failing_ci_stub()
+
+      name = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert [_task] = tasks_for_repo()
+    end
+
+    test "an explicit login list still scopes to those logins", %{ws: ws} do
+      ws = set_patrol_config(ws, %{"author_logins" => ["somebody-else"]})
+      failing_ci_stub()
+
+      name = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert tasks_for_repo() == []
     end
   end
 end
