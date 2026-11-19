@@ -141,6 +141,9 @@ defmodule WardmastWeb.Router do
     get("/sessions/:id/transcript", SessionTranscriptController, :raw)
     get("/sessions/:id/jsonl", SessionTranscriptController, :jsonl)
 
+    # bd-5hlegn: a ticket attachment's bytes (the image the ticket page shows).
+    get("/attachments/:id", AttachmentController, :show)
+
     # A dashboard login's redacted final screen (bd-bh50vs) — a download, so
     # it sits outside the live_session like the session artefacts above.
     get("/providers/logins/:id/transcript", LoginTranscriptController, :show)
@@ -239,6 +242,10 @@ defmodule WardmastWeb.Router do
     # Batch create: many tickets + all their edges in one transaction.
     post("/issues/batch", IssueController, :batch_create)
     get("/issues/:id", IssueController, :show)
+
+    # bd-5hlegn: ticket attachments (images); the MCP twins are ticket_attach / ticket_attachment_list.
+    get("/issues/:task_id/attachments", AttachmentController, :index)
+    post("/issues/:task_id/attachments", AttachmentController, :create)
     patch("/issues/:id", IssueController, :update)
     put("/issues/:id", IssueController, :update)
     post("/issues/:id/close", IssueController, :close)

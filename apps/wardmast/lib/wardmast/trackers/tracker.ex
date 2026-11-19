@@ -293,6 +293,22 @@ defmodule Wardmast.Trackers.Tracker do
               :ok | {:error, :not_supported} | {:error, term()}
 
   @doc """
+  Upload a file to the tracked item (bd-5hlegn: mirroring a ticket attachment
+  upstream). `file` is `%{filename:, content_type:, data:}` with the raw bytes.
+
+  Optional — the seam only. No adapter implements it yet; a tracker whose API
+  takes files (Jira attachments, Linear uploads, Shortcut files, GitHub has no
+  public file API) adds it per tracker as a follow-up, and
+  `Wardmast.Trackers.upload_attachment/2` returns `{:error, :not_supported}`
+  for every adapter that doesn't.
+  """
+  @callback upload_attachment(
+              ref,
+              file :: %{filename: String.t(), content_type: String.t(), data: binary()}
+            ) ::
+              :ok | {:error, :not_supported} | {:error, term()}
+
+  @doc """
   Return the fields the tracker *gates* the transition mapped from `status` on
   — the fields the provider requires populated before it will accept the
   transition. Provider-agnostic by design: the adapter (not the sync layer)
@@ -422,6 +438,7 @@ defmodule Wardmast.Trackers.Tracker do
                       prepare: 2,
                       add_remote_link: 3,
                       add_comment: 2,
+                      upload_attachment: 2,
                       check_prior_claim: 1,
                       signal_claim: 3,
                       gating_fields: 2,

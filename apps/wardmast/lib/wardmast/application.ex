@@ -227,6 +227,9 @@ defmodule Wardmast.Application do
         # (bd-73bfml) so the durable log backing `GET /events?since=` doesn't
         # grow without bound. See `Wardmast.Events.Retention` for config.
         Wardmast.Events.Retention,
+        # bd-5hlegn: deletes closed tickets' attachment blobs 90 days after close and
+        # collects the attachments of tickets that no longer exist. Disabled in test.
+        Wardmast.Attachments.Retention,
         # In-server size-capped rotation of the launchd-owned server log (macOS;
         # copytruncate). A no-op where the log file does not exist. See
         # Wardmast.Server.LogRotator.

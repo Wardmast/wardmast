@@ -64,6 +64,7 @@ defmodule Wardmast.MCP.RefinePolicy do
     skill_list
     skill_get
     dep_list
+    ticket_attachment_list
   )
 
   # --- allowed: the subtree write surface ----------------------------------
@@ -93,6 +94,7 @@ defmodule Wardmast.MCP.RefinePolicy do
   @deny_reason_memory "the shared memory layer is coordinator authority"
   @deny_reason_trust "earned trust is coordinator and operator authority"
   @deny_reason_batch_create "a refine session files its children one at a time with ticket_create; batch filing is coordinator authority"
+  @deny_reason_attach "a refine session shapes the ticket text; attaching files is the worker's and coordinator's"
   @deny_reason_permission_request "a permission request is the worker's own; a refine session may only suggest permissions"
   @deny_reason_pair "a refine session shapes a ticket; hands-on pair work on it is the operator's and the coordinator's to start"
 
@@ -105,6 +107,7 @@ defmodule Wardmast.MCP.RefinePolicy do
     "ticket_sync_upstream_close" => @deny_reason_lifecycle,
     "ticket_sync_lifecycle" => @deny_reason_lifecycle,
     "ticket_rank" => @deny_reason_scheduler,
+    "ticket_attach" => @deny_reason_attach,
     "ticket_create_batch" => @deny_reason_batch_create,
     "ticket_resume_review" => @deny_reason_review,
     "epic_floor" => @deny_reason_scheduler,

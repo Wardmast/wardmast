@@ -186,6 +186,35 @@ defmodule Wardmast.Trackers do
     end
   end
 
+  @doc """
+  Upload a file to the task's tracked item — the tracker half of mirroring a
+  ticket attachment (`Wardmast.Attachments.mirror/2`).
+
+  Dispatches to the adapter's optional `upload_attachment/2`. An adapter that
+  doesn't implement it, or a task with no `tracker_ref`, is
+  `{:error, :not_supported}`: nothing to mirror, not a failure. Callers must have
+  seeded the adapter's per-process config first (see `prepare/2`).
+  """
+  @spec upload_attachment(Issue.t(), %{
+          filename: String.t(),
+          content_type: String.t(),
+          data: binary()
+        }) :: :ok | {:error, :not_supported} | {:error, term()}
+  def upload_attachment(%Issue{tracker_ref: ref} = issue, %{data: data} = file)
+      when is_binary(data) do
+    if not is_binary(ref) or ref == "" do
+      {:error, :not_supported}
+    else
+      adapter = for_task(issue)
+
+      if function_exported?(adapter, :upload_attachment, 2) do
+        adapter.upload_attachment(ref, file)
+      else
+        {:error, :not_supported}
+      end
+    end
+  end
+
   @spec list_transitions(Issue.t()) :: {:ok, [Tracker.status()]} | {:error, term()}
   def list_transitions(%Issue{tracker_ref: ref} = issue),
     do: for_task(issue).list_transitions(ref)

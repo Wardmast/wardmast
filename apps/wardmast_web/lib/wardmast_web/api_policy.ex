@@ -135,6 +135,8 @@ defmodule WardmastWeb.ApiPolicy do
     {:post, "/api/issues"} => :issue_create,
     {:post, "/api/issues/batch"} => :issue_batch,
     {:get, "/api/issues/:id"} => :issue_read,
+    {:get, "/api/issues/:task_id/attachments"} => :own_task,
+    {:post, "/api/issues/:task_id/attachments"} => :own_task,
     {:patch, "/api/issues/:id"} => :issue_progress,
     {:put, "/api/issues/:id"} => :issue_progress,
     {:post, "/api/issues/:id/close"} => :coordinator,

@@ -133,7 +133,8 @@ defmodule WardmastWeb.TaskDetailLive do
     :skills,
     :messages,
     :budget,
-    :refine_session
+    :refine_session,
+    :attachments
   ]
 
   @empty_relationship_groups %{
@@ -1181,6 +1182,7 @@ defmodule WardmastWeb.TaskDetailLive do
     |> assign(review_rounds: [], review_summary: nil)
     |> assign(:relationship_groups, @empty_relationship_groups)
     |> assign(versions: [], version_total: 0, skills: [], messages: [], budget: nil)
+    |> assign(:attachment_groups, [])
     |> assign(refine_session: nil, refine_session_archived?: false, refine_session_usage: nil)
     |> derive_roster()
   end
@@ -1352,6 +1354,12 @@ defmodule WardmastWeb.TaskDetailLive do
   defp panel_data(:messages, ctx), do: %{messages: fetch_messages(ctx.task_id)}
   defp panel_data(:budget, ctx), do: %{budget: budget_for(ctx.task)}
   defp panel_data(:refine_session, ctx), do: refine_session_data(ctx.task)
+
+  defp panel_data(:attachments, ctx),
+    do: %{
+      attachment_groups:
+        ctx.task_id |> Wardmast.Attachments.list() |> Wardmast.Attachments.pairs()
+    }
 
   # bd-40pzpj: the provider account `most_quota` routing pinned this task's
   # implementer to, as `%{label:, family:}` — nil when the task was never
@@ -2844,6 +2852,14 @@ defmodule WardmastWeb.TaskDetailLive do
               >
                 <.markdown id="task-description-md" text={@task.description} />
               </.panel>
+
+              <%!-- bd-5hlegn: images attached to the ticket; a before/after pair
+                 renders side by side. Absent until there is one. --%>
+              <WardmastWeb.AttachmentsPanel.attachments_panel
+                :if={@attachment_groups != []}
+                groups={@attachment_groups}
+                class="order-3"
+              />
 
               <%!-- Acceptance criteria are real checkboxes, not decoration:
                  ticking one rewrites the markdown marker on the issue, so
