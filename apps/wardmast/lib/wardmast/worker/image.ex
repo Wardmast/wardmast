@@ -90,6 +90,9 @@ defmodule Wardmast.Worker.Image do
   # per node. Pinned to an exact build, fetched from a fixed snapshot.debian.org timestamp
   # (trixie + trixie-security) so the build can still find it after Debian drops it from
   # the live mirrors. Bump both together, on purpose: the Containerfile text changes, so
+  # The snapshot URIs are http:// on purpose: debian:trixie-slim ships no ca-certificates until
+  # the apt-get below installs it, so https would fail at `apt-get update`. Integrity comes
+  # from Signed-By + the signed InRelease.
   # the base hash changes and the release rebuilds it (that is how security updates land).
   @chromium_snapshot "20261101T000000Z"
   @chromium_version "156.0.8078.73-1~deb13u1"
