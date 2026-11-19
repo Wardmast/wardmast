@@ -146,9 +146,12 @@ sandbox, or not at all**:
   `/sbin`, `/lib*` and `/etc` read-only, private `/tmp`, `/run`, `/var/tmp`, `/dev/shm`, the
   extracted checkout and the boot's scratch writable, and nothing else (no home, no host `/tmp`,
   no runtime sockets) unless the operator lists a path in `screenshots.sandbox.readonly_paths`
-  (a toolchain, a dependency cache; never the home directory or above). The server's own
-  secrets and control-socket dirs (`Jail.secret_files/0`, `Jail.mask_paths/0`) are blanked if a
-  listed path would show them. The env stays built from nothing, now with `HOME` in the scratch.
+  (a toolchain, a dependency cache; never the home directory or above). Whatever a listed path
+  would show of the server itself is blanked: its secrets and control-socket dirs
+  (`Jail.secret_files/0`, `Jail.mask_paths/0`) and its own trees and sockets
+  (`Sandbox.Bwrap.own_roots/0`: other workers' worktrees, scratch and egress/bridge sockets, the
+  data home and accounts). The masks come before the boot's own binds, so a checkout under a
+  masked dir still shows. The env stays built from nothing, now with `HOME` in the scratch.
 * **Reaching the app.** The app listens on `127.0.0.1:<port>` in its namespace. The host creates
   a listening Unix socket in a fresh `0700` dir under `Paths.socket_root/0`, **outside** the
   sandbox, and passes it in as fd 3; a relay inside hands each connection to the app's port. The

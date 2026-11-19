@@ -105,16 +105,50 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.BwrapTest do
                index(argv, ["--bind", @box.checkout])
     end
 
-    test "a server secret under a shown path is blanked, after every bind; others are not named" do
+    test "a server secret under a shown path is blanked; others are not named" do
       box = %{@box | readonly_paths: ["/home/op"]}
       argv = Bwrap.command_argv(["true"], box, nil, @host)
 
       assert seq?(argv, ["--ro-bind", "/dev/null", "/home/op/.wardmast/wardmast.env"])
       assert seq?(argv, ["--tmpfs", "/home/op/.wardmast/run"])
 
-      assert index(argv, ["--ro-bind", "/dev/null"]) > index(argv, ["--bind", @box.scratch])
+      # after the listed path (to hide what it shows), before the boot's own dirs (which a mask
+      # over one of their parents must not hide)
+      assert index(argv, ["--ro-bind", "/dev/null"]) > index(argv, ["--ro-bind-try", "/home/op"])
+      assert index(argv, ["--ro-bind", "/dev/null"]) < index(argv, ["--bind", @box.checkout])
       refute "/srv/app/releases/COOKIE" in argv
       refute "/run/user/1000" in argv
+    end
+
+    test "Wardmast's own dirs under a listed path are hidden, and a checkout inside one still shows" do
+      worktrees = "/home/op/dev/arbiter-worktrees"
+      host = %{@host | mask_dirs: [worktrees | @host.mask_dirs]}
+
+      box = %{
+        checkout: worktrees <> "/cap/before/checkout",
+        scratch: worktrees <> "/cap/before/scratch",
+        readonly_paths: ["/home/op/dev"]
+      }
+
+      argv = Bwrap.command_argv(["true"], box, nil, host)
+
+      assert seq?(argv, ["--tmpfs", worktrees])
+      assert index(argv, ["--tmpfs", worktrees]) < index(argv, ["--bind", box.checkout])
+      assert index(argv, ["--tmpfs", worktrees]) < index(argv, ["--bind", box.scratch])
+    end
+  end
+
+  describe "own_roots/0" do
+    test "names the sockets, trees and data the server keeps, so a listed path cannot show them" do
+      roots = Bwrap.own_roots()
+
+      for root <- [
+            Wardmast.Config.Paths.socket_root(),
+            Wardmast.Config.Paths.scratch_root(),
+            Wardmast.Config.Paths.worktree_root(),
+            Wardmast.Config.Paths.accounts_root()
+          ],
+          do: assert(Path.expand(root) in roots, "#{root} is not masked")
     end
   end
 
@@ -217,6 +251,13 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.BwrapTest do
     test "a browser under the system dirs needs no extra bind" do
       argv = Bwrap.browser_argv(["/usr/lib/chromium/chromium"], @app, ["/s"], @host)
       refute "/usr/lib/chromium" in argv
+    end
+
+    test "a browser reached through a symlinked system dir (merged /usr) needs none either" do
+      # /bin is a symlink to usr/bin inside the sandbox too; binding over it would fight the link
+      argv = Bwrap.browser_argv(["/bin/chromium"], @app, ["/s"], @host)
+      refute seq?(argv, ["--ro-bind", "/bin", "/bin"])
+      assert seq?(argv, ["--symlink", "usr/bin", "/bin"])
     end
   end
 

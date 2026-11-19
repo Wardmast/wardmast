@@ -11,16 +11,19 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
         --ro-bind /etc /etc \\
         --proc /proc --dev /dev --tmpfs /dev/shm --tmpfs /tmp --tmpfs /run --tmpfs /var/tmp \\
         [--ro-bind-try <each screenshots.sandbox.readonly_paths entry>] \\
-        --bind <checkout> --bind <scratch> \\
         [--tmpfs <mask dir> | --ro-bind /dev/null <server secret>] \\
+        --bind <checkout> --bind <scratch> \\
         --chdir <checkout> -- <command>
 
   `--unshare-all` includes the network: the namespace has only its own `lo`, so the host's
   loopback (the coordinator on `:4848`, a database, other workers' servers) is an empty port and
   every other address has no route. Nothing of the host's home, `/tmp`, `/run` (the user's
   runtime sockets, the system bus), `/var` or `/opt` is there unless an operator lists it
-  read-only. The server's own secrets (`Wardmast.Worker.Jail.secret_files/0`) and control-socket
-  dirs (`Jail.mask_paths/0`) are blanked if a listed path would show them.
+  read-only. Whatever a listed path would show of the server itself is blanked: its secrets
+  (`Wardmast.Worker.Jail.secret_files/0`), the control-socket dirs (`Jail.mask_paths/0`) and its
+  own trees and sockets (`own_roots/0`: other workers' checkouts and egress sockets, the data
+  home). The boot's checkout and scratch are bound after the masks, so they show even when one of
+  their parents is masked.
   `--unshare-pid` hides the host's processes; `--die-with-parent` and the pid namespace take
   every process of a boot down with its bwrap.
 
@@ -278,7 +281,7 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
   def browser_argv([browser | _] = argv, %{port: port, socket: socket}, writable, host) do
     t = host.tools
     install = Path.dirname(browser)
-    shown = if under?(install, system_roots(host)), do: [], else: [install]
+    shown = if under?(install, visible_roots(host)), do: [], else: [install]
 
     mounts = %{
       system_try: @fontconfig,
@@ -301,9 +304,11 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
     }
   end
 
-  # Order matters: the private tmpfs mounts come before every bind (a checkout under /tmp must
-  # land on top of the private /tmp, not under it), read-only binds before writable ones (so a
-  # checkout inside a listed path stays writable), and the masks last (so nothing re-opens them).
+  # Order matters. The private tmpfs mounts come before every bind (a checkout under /tmp must land
+  # on top of the private /tmp, not under it). The masks come after the operator's read-only paths
+  # (they hide what a listed path would show of the server's own files and sockets) and before
+  # the boot's own binds, which re-open exactly their own paths: a mask over a parent of the
+  # checkout cannot hide it, and nothing else of the masked tree comes back.
   defp sandbox_args(mounts, host) do
     Enum.concat([
       ["--unshare-all", "--die-with-parent", "--new-session"],
@@ -313,9 +318,9 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
       ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/dev/shm"],
       Enum.flat_map(@private, &["--tmpfs", &1]),
       Enum.flat_map(mounts.readonly, &["--ro-bind-try", &1, &1]),
+      mask_args(mounts, host),
       Enum.flat_map(mounts.ro, &["--ro-bind", &1, &1]),
-      Enum.flat_map(mounts.rw, &["--bind", &1, &1]),
-      mask_args(mounts, host)
+      Enum.flat_map(mounts.rw, &["--bind", &1, &1])
     ])
   end
 
@@ -333,8 +338,14 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
     Enum.flat_map(dirs, &["--tmpfs", &1]) ++ Enum.flat_map(files, &["--ro-bind", "/dev/null", &1])
   end
 
+  # The system dirs mounted from the host (what a mask can sit under)...
   defp system_roots(host) do
     for({path, :dir} <- host.system, do: path) ++ ["/etc"]
+  end
+
+  # ...and every path that resolves inside the sandbox, the symlinks of a merged /usr included.
+  defp visible_roots(host) do
+    for({path, _} <- host.system, do: path) ++ ["/etc"]
   end
 
   defp under?(path, roots),
@@ -353,9 +364,40 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
          tools: tools,
          system: system,
          secret_files: Jail.secret_files(),
-         mask_dirs: Jail.mask_paths()
+         mask_dirs: mask_dirs()
        }}
     end
+  end
+
+  @doc """
+  The server's own trees and sockets: other workers' checkouts, scratch and logs, the egress and
+  bridge sockets (connectable even through a read-only bind, and a way out of "no network"),
+  the accounts' credentials and the data home with its database. None of them is ever shown, but
+  a listed read-only path could contain one, so each is masked when it does.
+  """
+  @spec own_roots() :: [String.t()]
+  def own_roots do
+    Enum.map(
+      [
+        Paths.socket_root(),
+        Paths.scratch_root(),
+        Paths.worktree_root(),
+        Paths.output_log_root(),
+        Paths.sessions_root(),
+        Paths.accounts_root(),
+        Paths.preview_root(),
+        Paths.memory_root(),
+        Application.get_env(:wardmast, :data_dir, "~/.wardmast")
+      ],
+      &Path.expand/1
+    )
+  end
+
+  # Jail's control-socket dirs plus the server's own roots, those that exist (bwrap cannot make a
+  # mount point under a read-only bind, and an absent dir is no vector), outermost only.
+  defp mask_dirs do
+    dirs = (Jail.mask_paths() ++ own_roots()) |> Enum.filter(&File.dir?/1) |> Enum.uniq()
+    Enum.reject(dirs, fn dir -> Enum.any?(dirs, &(&1 != dir and under?(dir, [&1]))) end)
   end
 
   defp system_layout do

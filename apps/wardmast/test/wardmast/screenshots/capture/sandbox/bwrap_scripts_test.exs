@@ -149,7 +149,12 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.BwrapScriptsTest do
     perl = System.find_executable("perl")
 
     argv =
-      Bwrap.browser_argv([perl, "-e", @fetch, "#{bridge}", page], %{app | port: bridge}, [shot], host())
+      Bwrap.browser_argv(
+        [perl, "-e", @fetch, "#{bridge}", page],
+        %{app | port: bridge},
+        [shot],
+        host()
+      )
 
     browser =
       start_supervised!(
