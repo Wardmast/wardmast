@@ -220,7 +220,9 @@ defmodule Wardmast.Screenshots.Capture do
         {:error,
          Failure.new(
            :checkout_failed,
-           "could not extract #{String.slice(sha, 0, 12)}: #{String.trim(out)}", role: role)}
+           "could not extract #{String.slice(sha, 0, 12)}: #{String.trim(out)}",
+           role: role
+         )}
     end
   end
 
