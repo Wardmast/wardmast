@@ -3482,7 +3482,7 @@ defmodule Wardmast.Worker do
       )
       when live_run?(run_state, waiting_on) do
     case Map.fetch(state.claude_sessions, port) do
-      {:ok, session} -> {:noreply, on_agent_stopped(state, port, session)}
+      {:ok, session} -> {:noreply, stop_or_fresh_retry(state, port, session)}
       :error -> {:noreply, state}
     end
   end
@@ -3707,6 +3707,16 @@ defmodule Wardmast.Worker do
   # ---- helpers -----------------------------------------------------------
 
   # The deferred stop check proper, for a session this worker owns.
+  # bd-1efc24: ahead of the stop check, because a run that already printed `arb
+  # done` would otherwise re-enter the commit gate on this exit and burn its
+  # last nudge on a launch where the agent never ran.
+  defp stop_or_fresh_retry(%State{} = state, port, session) do
+    if not node_stopping?() and not other_session_live?(state, port) and
+         fresh_session_retry?(state, session),
+       do: retry_with_fresh_session(state, session),
+       else: on_agent_stopped(state, port, session)
+  end
+
   defp on_agent_stopped(%State{} = state, port, session) do
     cond do
       # bd-aje6fj: systemd's control-group SIGTERM reaches the agent at the
@@ -6235,14 +6245,19 @@ defmodule Wardmast.Worker do
   defp respawn_with_nudge(%State{meta: meta} = state, nudge, opts) do
     attempts_key = Keyword.fetch!(opts, :attempts_key)
     label = Keyword.get(opts, :label, "gate")
+    count? = Keyword.get(opts, :count_attempt, true)
     spawn_args = meta && Map.get(meta, :claude_spawn)
 
     {provider, model} = respawn_routing(state)
 
     with %{} = port_args <- spawn_args || :no_spawn_args,
          {:ok, new_args} <- inject_nudge_argv(port_args, nudge, provider),
+         # bd-1efc24: never pass `--resume` for a session that is gone.
+         {new_args, nudge, fresh_sid} <-
+           session_checked_argv(new_args, nudge, provider, Keyword.get(opts, :force_fresh, false)),
          {:ok, port, scope} <- safe_open_port(new_args, state.task_id) do
-      next_attempts = ((meta && Map.get(meta, attempts_key)) || 0) + 1
+      previous_attempts = (meta && Map.get(meta, attempts_key)) || 0
+      next_attempts = if count?, do: previous_attempts + 1, else: previous_attempts
 
       Logger.info(
         "Worker: #{label} for task=#{state.task_id}; " <>
@@ -6285,6 +6300,7 @@ defmodule Wardmast.Worker do
         meta
         |> Map.put(attempts_key, next_attempts)
         |> Map.put(:claude_spawn, new_args)
+        |> adopt_fresh_session_id(fresh_sid, state)
 
       sessions = Map.put(state.claude_sessions, port, session)
 
@@ -6302,6 +6318,93 @@ defmodule Wardmast.Worker do
       :no_spawn_args -> {:error, :no_spawn_args}
       {:error, _} = err -> err
       other -> {:error, {:unexpected, other}}
+    end
+  end
+
+  # bd-1efc24: a nudge argv built by `inject_nudge_argv/3` resumes the run's
+  # Claude session (`--resume <sid>`). If that session has no history on disk or
+  # in the archive (pruned, or the run lived on another node) the CLI exits at
+  # once with "No conversation found" and the attempt is burned. Start a fresh
+  # session instead, with a briefing in front of the nudge. `force?` skips the
+  # lookup (the CLI itself just said the session is missing). Returns
+  # `{argv, prompt, fresh_session_id | nil}`; anything that is not a Claude
+  # `--print --resume <sid> <prompt>` argv is returned untouched.
+  defp session_checked_argv(%{argv: argv} = port_args, nudge, provider, force?)
+       when is_list(argv) do
+    with Wardmast.Agents.Claude <- agent_adapter_for_provider(provider),
+         idx when is_integer(idx) <- Enum.find_index(argv, &(&1 == "--print")),
+         {head, [print, "--resume", sid, _old | rest]} when sid != "" <- Enum.split(argv, idx),
+         true <- force? or not Wardmast.Worker.SessionHistory.available?(sid) do
+      new_sid = Ecto.UUID.generate()
+      briefed = fresh_session_briefing(nudge)
+
+      Logger.warning(
+        "Worker: session #{sid} has no history on disk or in the archive; " <>
+          "relaunching with a fresh session #{new_sid} and a briefing instead of --resume"
+      )
+
+      {%{port_args | argv: head ++ [print, briefed, "--session-id", new_sid | rest]}, briefed,
+       new_sid}
+    else
+      _ -> {port_args, nudge, nil}
+    end
+  end
+
+  defp session_checked_argv(port_args, nudge, _provider, _force?), do: {port_args, nudge, nil}
+
+  defp fresh_session_briefing(nudge) do
+    "Your previous conversation is no longer available (its session history could not " <>
+      "be found), so this is a fresh session in the SAME worktree. Nothing on disk was " <>
+      "lost: run `git status`, `git log` and `git diff` to see the work already done, and " <>
+      "re-read the task with `arb ticket show` if you need its description. Then act on " <>
+      "this instruction:\n\n" <> nudge
+  end
+
+  defp adopt_fresh_session_id(meta, nil, _state), do: meta
+
+  defp adopt_fresh_session_id(meta, sid, %State{run_id: run_id, task_id: task_id}) do
+    if run_id, do: backfill_run_fields(run_id, %{session_id: sid}, task_id)
+
+    meta
+    |> Map.put(:session_id, sid)
+    |> Map.put(:preassigned_session_id, sid)
+  end
+
+  # bd-1efc24: the CLI refused `--resume` ("No conversation found with session
+  # ID"). Relaunch once, fresh and briefed, WITHOUT counting a nudge attempt —
+  # the agent never ran.
+  defp fresh_session_retry?(%State{meta: meta}, session) do
+    Map.get(meta || %{}, :fresh_session_retries, 0) == 0 and
+      classify_stop(session).category == :session_not_found
+  end
+
+  defp stashed_prompt(meta) do
+    argv = Map.get(meta || %{}, :claude_spawn, %{}) |> Map.get(:argv, [])
+
+    case Enum.drop_while(argv, &(&1 != "--print")) do
+      ["--print", "--resume", _sid, p | _] -> p
+      ["--print", p | _] -> p
+      _ -> nil
+    end
+  end
+
+  defp retry_with_fresh_session(
+         %State{meta: meta} = state,
+         session
+       ) do
+    prompt =
+      stashed_prompt(meta) || "Continue the task and print `arb done` when it is complete."
+
+    state = %State{state | meta: Map.put(meta, :fresh_session_retries, 1)}
+
+    case respawn_with_nudge(state, prompt,
+           attempts_key: :fresh_session_attempts,
+           count_attempt: false,
+           force_fresh: true,
+           label: "bd-1efc24 session not found"
+         ) do
+      {:ok, new_state} -> new_state
+      {:error, _} -> maybe_resume_continuation(state, session)
     end
   end
 
