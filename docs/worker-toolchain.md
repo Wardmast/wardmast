@@ -108,9 +108,10 @@ publisher's job.
 
 ## Headless Chromium in the base (bd-6301r0)
 
-The shared worker base installs Debian trixie's `chromium` pinned to a major
-(`chromium=150.*`, `Wardmast.Worker.Image.chromium_major/0`) plus `fonts-liberation`,
-and sets `ARB_CHROME=/usr/bin/chromium`, so the `:browser` tests in
+The shared worker base installs Debian trixie's `chromium`
+unversioned (the security-tracked build; Debian bumps the major about every 4 weeks and
+drops superseded builds, so a `chromium=<ver>` pin would break the build) plus
+`fonts-liberation`. The installed version is recorded in the release job summary. It sets `ARB_CHROME=/usr/bin/chromium`, so the `:browser` tests in
 `apps/wardmast_web` run (rather than skip) in the image when Node is present. No
 Playwright driver ships: those tests speak CDP directly. Release CI builds the base
 locally and runs `scripts/worker-image-smoke.sh` (screenshots a page inside the image)

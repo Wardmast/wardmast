@@ -152,22 +152,20 @@ defmodule Wardmast.Worker.ImageTest do
     end
   end
 
-  # bd-59m96o: an arb compiled on OTP 29 cannot load on a repo image's OTP 27
-  # ("corrupt atom table"), so the base carries an Erlang for arb alone.
-  describe "plan/3: the base ships a pinned headless Chromium (bd-6301r0)" do
-    test "installs a major-pinned chromium + fonts and points ARB_CHROME at it" do
+  describe "plan/3: the base ships headless Chromium (bd-6301r0)" do
+    test "installs the unversioned (security-tracked) chromium + fonts and points ARB_CHROME at it" do
       repo = repo_with(%{"README.md" => "hi\n"})
       assert {:ok, plan} = Image.plan(repo, "main", opts(arb_otp: "29"))
       base = plan.base.containerfile
-      major = Image.chromium_major()
 
-      assert base =~ "chromium=#{major}.* "
-      assert base =~ "fonts-liberation"
+      assert base =~ "chromium fonts-liberation"
+      refute base =~ "chromium="
       assert base =~ "ENV ARB_CHROME=/usr/bin/chromium"
-      assert base =~ ~s(LABEL arbiter.chromium-major="#{major}")
-      assert {_, ""} = Integer.parse(major)
     end
   end
+
+  # bd-59m96o: an arb compiled on OTP 29 cannot load on a repo image's OTP 27
+  # ("corrupt atom table"), so the base carries an Erlang for arb alone.
 
   describe "plan/3: the base carries the Erlang/OTP arb runs on (bd-59m96o)" do
     test "the arb runtime is the official Erlang image of arb's release, pinned, off PATH" do
