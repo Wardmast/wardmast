@@ -132,17 +132,15 @@ defmodule Wardmast.Attachments do
   def decode_base64(data) when is_binary(data) do
     max = limits().max_image_bytes
     # base64 is 4 chars per 3 bytes; allow slack for line breaks / padding.
-    cond do
-      byte_size(data) > div(max * 4, 3) + 1024 ->
-        {:error, too_large(max)}
+    if byte_size(data) > div(max * 4, 3) + 1024 do
+      {:error, too_large(max)}
+    else
+      cleaned = String.replace(data, ~r/\s+/, "")
 
-      true ->
-        cleaned = String.replace(data, ~r/\s+/, "")
-
-        with :error <- Base.decode64(cleaned, padding: false),
-             :error <- Base.url_decode64(cleaned, padding: false) do
-          {:error, {:invalid, "data is not valid base64", %{reason: "bad_base64"}}}
-        end
+      with :error <- Base.decode64(cleaned, padding: false),
+           :error <- Base.url_decode64(cleaned, padding: false) do
+        {:error, {:invalid, "data is not valid base64", %{reason: "bad_base64"}}}
+      end
     end
   end
 
@@ -480,15 +478,19 @@ defmodule Wardmast.Attachments do
   """
   @spec mirror(Issue.t(), Attachment.t()) :: :ok | {:error, :not_supported | :pruned | term()}
   def mirror(%Issue{} = issue, %Attachment{} = att) do
-    with {:ok, data} <- read_blob(att) do
-      Wardmast.Trackers.upload_attachment(issue, %{
-        filename: att.filename || "#{att.sha256}.#{ext_of(att)}",
-        content_type: att.content_type,
-        data: data
-      })
-    else
-      {:error, :missing} -> {:error, :pruned}
-      {:error, _} = error -> error
+    case read_blob(att) do
+      {:ok, data} ->
+        Wardmast.Trackers.upload_attachment(issue, %{
+          filename: att.filename || "#{att.sha256}.#{ext_of(att)}",
+          content_type: att.content_type,
+          data: data
+        })
+
+      {:error, :missing} ->
+        {:error, :pruned}
+
+      {:error, _} = error ->
+        error
     end
   end
 
