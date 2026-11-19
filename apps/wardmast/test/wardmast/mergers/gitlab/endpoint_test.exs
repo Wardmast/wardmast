@@ -61,6 +61,11 @@ defmodule Wardmast.Mergers.Gitlab.EndpointTest do
 
       assert Endpoint.connect_options(%{ca_cacertfile: ""}) == []
       assert Endpoint.connect_options(%{ca_cacertfile: nil}) == []
+
+      assert Endpoint.req_options(%{ca_cacertfile: "/c.pem"}) ==
+               [connect_options: [transport_opts: [cacertfile: "/c.pem"]]]
+
+      assert Endpoint.req_options(%{host: "h"}) == []
     end
   end
 

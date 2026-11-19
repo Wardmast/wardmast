@@ -34,6 +34,19 @@ defmodule Wardmast.Mergers.Gitlab.Endpoint do
 
   def connect_options(_cfg), do: []
 
+  @doc """
+  `connect_options/1` as top-level Req options (`[connect_options: [...]]`, or
+  `[]`), for callers that build a `Req` request directly rather than through
+  `Wardmast.Http.Client`.
+  """
+  @spec req_options(map()) :: keyword()
+  def req_options(cfg) do
+    case connect_options(cfg) do
+      [] -> []
+      opts -> [connect_options: opts]
+    end
+  end
+
   @doc "The normalised base URL from a raw string-keyed config, or `nil` when unset."
   @spec from_raw(map()) :: String.t() | nil
   def from_raw(raw) when is_map(raw) do
