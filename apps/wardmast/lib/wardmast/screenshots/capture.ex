@@ -14,12 +14,21 @@ defmodule Wardmast.Screenshots.Capture do
      the plan is read or anything runs. A capture is never run unsandboxed.
   3. **Plan.** Read the worker's `.arbiter/screenshots.json` (`Wardmast.Screenshots.Plan`). A plan
      that is `skip` is `{:skipped, {:plan_skip, reason}}`.
-  4. **Two boots, one after the other.** Extract the base tree with `git archive`, boot it via the
-     `Booter`, shoot every entry with the `Shooter`, stop it; then the same for the head. A route
+  4. **Deps** (bd-3glf2a, `deps.mix`). The boot has no network, so its Mix dependencies come from
+     an offline cache built from a **default-branch** `mix.lock` (`Capture.DepsCache`). A head
+     whose `mix.lock` differs is `{:skipped, {:deps_changed, reason}}`: its code never runs with
+     a network, and the cache is never built from it. A cache that cannot be built is a
+     `:deps_failed` failure.
+  5. **Two boots, one after the other.** Extract the base tree with `git archive`, start the
+     boot's **services** (bd-3glf2a, `screenshots.services`: fresh containers for this boot alone,
+     `Capture.Services`), boot it via the `Booter`, shoot every entry with the `Shooter`, stop it,
+     then stop the services; then the same for the head. A service that does not come up is a
+     `:boot_failed` failure carrying its log tail, and nothing boots. The services are stopped on
+     every exit path (a boot, shot or budget failure, a crash). A route
      that answers 404 is *absent* at that commit, not an error. Both get the sandbox; each shot
      also gets a fresh directory of its own (`scratch`), so a browser never writes beside the
      images other shots produced.
-  5. **Pairs.** present at both is `:changed`; absent at the base is `:new` (after-only); absent at
+  6. **Pairs.** present at both is `:changed`; absent at the base is `:new` (after-only); absent at
      the head is `:removed` (before-only); absent at both is a route error.
 
   Every failure is a `Wardmast.Screenshots.Capture.Failure` with a distinct `code`
@@ -33,7 +42,8 @@ defmodule Wardmast.Screenshots.Capture do
   ## Input
 
   `%{task_id:, repo_path:, base_sha:, head_sha:, config:, plan_path:, out_dir:}` where `repo_path`
-  is a git checkout that has both commits and `base_sha` is the merge-base.
+  is a git checkout that has both commits and `base_sha` is the merge-base. Optional:
+  `default_branch` (default `"main"`; the deps cache's trusted lockfile comes from it).
 
   ## Options
 
@@ -41,14 +51,18 @@ defmodule Wardmast.Screenshots.Capture do
   browser, or the CDP runner for a shot that needs a login, steps and so on), `:sandbox`
   (default `Sandbox.default/0`, the bwrap sandbox; passed to both), `:ctx` (passed to both),
   `:record` (`(map -> any)`), `:budget_seconds` (default `limits.budget_seconds`; checked
-  before every boot and shot, on top of the booter's own per-phase timeouts).
+  before every boot and shot, on top of the booter's own per-phase timeouts), `:services`
+  (default `Services.default/0`, podman) with `:services_opts`, `:deps` (default
+  `Capture.DepsCache`) with `:deps_opts`.
   """
 
   require Logger
 
   alias Wardmast.Screenshots.Capture.Booter
+  alias Wardmast.Screenshots.Capture.DepsCache
   alias Wardmast.Screenshots.Capture.Failure
   alias Wardmast.Screenshots.Capture.Sandbox
+  alias Wardmast.Screenshots.Capture.Services
   alias Wardmast.Screenshots.Capture.Shooter
   alias Wardmast.Screenshots.Config
   alias Wardmast.Screenshots.Plan
@@ -87,7 +101,11 @@ defmodule Wardmast.Screenshots.Capture do
 
   @type run_outcome ::
           {:ok, result()}
-          | {:skipped, :no_ui_paths | {:plan_skip, String.t()} | {:no_sandbox, String.t()}}
+          | {:skipped,
+             :no_ui_paths
+             | {:plan_skip, String.t()}
+             | {:no_sandbox, String.t()}
+             | {:deps_changed, String.t()}}
           | {:error, Failure.t()}
 
   @doc "Run the capture step. See the moduledoc."
@@ -117,6 +135,11 @@ defmodule Wardmast.Screenshots.Capture do
       sandbox: Keyword.get(opts, :sandbox) || Sandbox.default(),
       ctx: Keyword.get(opts, :ctx),
       record: Keyword.get(opts, :record),
+      services: Keyword.get(opts, :services) || Services.default(),
+      services_opts: Keyword.get(opts, :services_opts, []),
+      deps: Keyword.get(opts, :deps) || DepsCache,
+      deps_opts: Keyword.get(opts, :deps_opts, []),
+      deps_cache: nil,
       budget: budget,
       deadline: System.monotonic_time(:millisecond) + budget * 1000,
       images: Path.join(input.out_dir, "images")
@@ -127,6 +150,7 @@ defmodule Wardmast.Screenshots.Capture do
     with :ok <- sandboxed(st),
          {:ok, plan} <- read_plan(st),
          :ok <- not_skipped(plan),
+         {:ok, st} <- deps_cache(st),
          {:ok, before_run} <- run_role(st, "before", input.base_sha, plan.shots),
          {:ok, after_run} <- run_role(st, "after", input.head_sha, plan.shots),
          {:ok, pairs} <- pair(plan.shots, before_run.outcomes, after_run.outcomes) do
@@ -143,6 +167,35 @@ defmodule Wardmast.Screenshots.Capture do
       :ok -> :ok
       {:error, reason} -> {:skip, :no_sandbox, reason}
     end
+  end
+
+  # bd-3glf2a: the offline Mix deps every boot compiles from (`deps.mix`), from a trusted lockfile
+  # only. `deps_cache` stays `nil` when the repo has no lockfile or the feature is off.
+  defp deps_cache(%{input: %{config: %Config{deps: %{"mix" => true}}} = input} = st) do
+    deps_input = %{
+      task_id: input.task_id,
+      repo_path: input.repo_path,
+      base_sha: input.base_sha,
+      head_sha: input.head_sha,
+      default_branch: Map.get(input, :default_branch) || "main",
+      sandbox: st.sandbox,
+      readonly_paths: Map.get(input.config.sandbox, "readonly_paths", []),
+      timeout_s: Map.get(input.config.limits, "setup_seconds", 600)
+    }
+
+    case call_deps(st, deps_input) do
+      {:ok, cache} -> {:ok, %{st | deps_cache: cache}}
+      {:skip, reason} -> {:skip, :deps_changed, reason}
+      {:error, message} -> {:error, Failure.new(:deps_failed, detail_text(message))}
+    end
+  end
+
+  defp deps_cache(st), do: {:ok, st}
+
+  defp call_deps(st, deps_input) do
+    st.deps.prepare(deps_input, st.deps_opts)
+  rescue
+    e -> {:error, "the offline deps cache crashed: #{Exception.message(e)}"}
   end
 
   defp finish({:ok, st, plan, pairs, boots}) do
@@ -292,9 +345,26 @@ defmodule Wardmast.Screenshots.Capture do
       config: st.input.config,
       task_id: st.input.task_id,
       sandbox: st.sandbox,
-      ctx: st.ctx
+      ctx: st.ctx,
+      deps: st.deps_cache
     }
 
+    # bd-3glf2a: this boot's own services, up before anything of the app runs and stopped after
+    # it, whatever happened in between.
+    case start_services(st, role) do
+      {:ok, running} ->
+        try do
+          boot_shoot_stop(st, Map.put(spec, :services, endpoints(running)), group, work)
+        after
+          stop_services(st, running)
+        end
+
+      {:error, failure} ->
+        {:error, failure}
+    end
+  end
+
+  defp boot_shoot_stop(st, %{role: role} = spec, group, work) do
     case boot(st, spec) do
       {:ok, %{handle: handle, base_url: base_url} = booted} ->
         # `app` is how the sandbox reaches the booted app; the shooter needs it to give the
@@ -326,6 +396,54 @@ defmodule Wardmast.Screenshots.Capture do
     st.booter.boot(spec)
   rescue
     e -> {:error, {:start, Exception.message(e)}}
+  end
+
+  # No services configured: nothing to start, nothing to stop.
+  defp start_services(%{input: %{config: %Config{services: []}}}, _role), do: {:ok, nil}
+
+  defp start_services(st, role) do
+    context = %{role: role, task_id: st.input.task_id, opts: st.services_opts}
+
+    case call_services(st, st.input.config.services, context) do
+      {:ok, running} -> {:ok, running}
+      {:error, failure} -> {:error, services_failure(failure, role)}
+    end
+  end
+
+  defp call_services(st, services, context) do
+    st.services.start(services, context)
+  rescue
+    e -> {:error, %{service: nil, reason: "starting them crashed: #{Exception.message(e)}"}}
+  end
+
+  defp endpoints(nil), do: []
+  defp endpoints(%{endpoints: endpoints}), do: endpoints
+
+  defp stop_services(_st, nil), do: :ok
+
+  defp stop_services(st, running) do
+    st.services.stop(running)
+  rescue
+    e ->
+      Logger.warning("Screenshots.Capture: stopping the services failed: #{Exception.message(e)}")
+  end
+
+  # A service that did not come up is a boot failure: the app never ran, and the service's own
+  # log says why.
+  defp services_failure(failure, role) do
+    service = Map.get(failure, :service)
+    reason = Map.get(failure, :reason) || inspect(failure)
+    log = Map.get(failure, :log_tail)
+    who = if service, do: "service #{service}", else: "its services"
+    log_text = if is_binary(log) and log != "", do: "; its log ends:\n#{log}", else: ""
+
+    Failure.new(
+      :boot_failed,
+      "the app failed to boot at the #{describe_role(role)} (services): #{who} #{reason}" <>
+        log_text,
+      role: role,
+      detail: %{phase: :services, service: service, reason: reason, log_tail: log}
+    )
   end
 
   defp safe_stop(st, spec, handle) do

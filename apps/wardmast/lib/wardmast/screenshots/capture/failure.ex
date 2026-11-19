@@ -9,7 +9,8 @@ defmodule Wardmast.Screenshots.Capture.Failure do
   | `:manifest_invalid` | it is there but does not validate (`detail` = the errors) |
   | `:diff_failed` | git could not say which files changed |
   | `:checkout_failed` | a commit's source tree could not be extracted |
-  | `:boot_failed` | the app did not boot at `role` (`detail` = phase and output) |
+  | `:boot_failed` | the app did not boot at `role` (`detail` = phase and output; for a capture service that did not come up, phase `:services` with the service, reason and its log tail) |
+  | `:deps_failed` | the offline Mix deps cache (`deps.mix`) could not be built (bd-3glf2a) |
   | `:route_error` | a route answered with an error status (or was missing at both commits) |
   | `:shot_failed` | the browser step failed (a selector, a timeout, a crash) |
   | `:budget_exceeded` | the pass ran out of its `budget_seconds` |
@@ -24,6 +25,7 @@ defmodule Wardmast.Screenshots.Capture.Failure do
           | :diff_failed
           | :checkout_failed
           | :boot_failed
+          | :deps_failed
           | :route_error
           | :shot_failed
           | :budget_exceeded
