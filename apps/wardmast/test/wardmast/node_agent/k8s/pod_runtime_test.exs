@@ -254,6 +254,46 @@ defmodule Wardmast.NodeAgent.K8s.PodRuntimeTest do
     end
   end
 
+
+  describe "a long HOME (bd-c609gj)" do
+    # curl >= 8.2x (Ubuntu 26.04) refuses to start with `curl: (100) A value or data field
+    # grew larger than allowed` when $HOME is about 240 characters or more (it builds its
+    # rc/state paths from it, and -q does not skip that). The shim below fails the same way
+    # on any curl, so the seed's own curl calls are pinned independent of the host's version.
+    setup %{tmp_dir: tmp, env: env} do
+      shim_dir = Path.join(tmp, "shim")
+      File.mkdir_p!(shim_dir)
+      real = System.find_executable("curl")
+
+      File.write!(Path.join(shim_dir, "curl"), """
+      #!/bin/sh
+      if [ "${#HOME}" -ge 200 ]; then
+        echo "curl: (100) A value or data field grew larger than allowed" >&2
+        exit 100
+      fi
+      exec #{real} "$@"
+      """)
+
+      File.chmod!(Path.join(shim_dir, "curl"), 0o755)
+
+      long_home = Path.join(tmp, String.duplicate("h", 220))
+      File.mkdir_p!(long_home)
+
+      env =
+        env
+        |> put_env("HOME", long_home)
+        |> put_env("PATH", shim_dir <> ":" <> System.get_env("PATH"))
+
+      %{env: env}
+    end
+
+    test "seed still redeems the nonce and builds the tree", ctx do
+      assert {out, 0} = sh("seed", ctx.env)
+      assert out =~ "seeded"
+      refute out =~ "curl: (100)"
+    end
+  end
+
   describe "a session transcript the pod cannot trust fails the seed fast, with a reason" do
     @describetag session_body: @transcript,
                  spec:
