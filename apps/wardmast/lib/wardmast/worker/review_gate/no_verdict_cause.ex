@@ -105,8 +105,9 @@ defmodule Wardmast.Worker.ReviewGate.NoVerdictCause do
       call ->
         {:exited_mid_tool_call,
          "the reviewer session ended (exit 0) while a tool call was still in flight — " <>
-           "last call: `#{call}` — so no verdict was printed. A build or test command that " <>
-           "outlives the CLI's tool-call limit ends the session this way"}
+           "last call: `#{call}` — so no verdict was printed. The mechanism is not confirmed; " <>
+           "one possible cause is a command outliving the CLI's tool-call limit, or the " <>
+           "runner ending the CLI under the call"}
     end
   end
 
