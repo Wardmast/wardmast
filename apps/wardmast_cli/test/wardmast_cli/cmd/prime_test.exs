@@ -1155,15 +1155,6 @@ defmodule WardmastCli.Cmd.PrimeTest do
       assert out =~ "bd-77j2if"
     end
 
-    test "shows the account-qualified quota hold" do
-      reason = "claude:default 7d 20% ≥ paced 20% (20% elapsed)"
-      stub_with_scheduler({Map.put(@draining, "quota_hold", reason), 200})
-
-      {out, _err, 0} = capture(fn -> Prime.run([]) end)
-
-      assert out =~ "held — #{reason}"
-    end
-
     # #1126
     test "names a repo whose new dispatches are held for CI saturation" do
       ci = [

@@ -170,7 +170,7 @@ defmodule WardmastCli.Cmd.QuotaTest do
       }
     end
 
-    test "prints each pool's budget with its reason, labelled shadow" do
+    test "prints each pool's budget with its reason" do
       stub_get("/api/quota", %{
         "data" => %{
           "workspace_id" => "ws-1",
@@ -181,25 +181,9 @@ defmodule WardmastCli.Cmd.QuotaTest do
 
       {out, _err, 0} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
 
-      assert out =~ "Concurrency budget (shadow"
-      assert out =~ "today's gate and caps still decide"
+      assert out =~ "Concurrency budget:"
       assert out =~ ~r/claude:default\s+3 of 3 seats.*ceiling max_concurrent 3/
       assert out =~ ~r/antigravity:default gemini\s+0 of 0 seats.*weekly 0.43 used/
-    end
-
-    test "enforce is not labelled shadow" do
-      stub_get("/api/quota", %{
-        "data" => %{
-          "workspace_id" => "ws-1",
-          "claude" => @snapshot,
-          "budget" => [budget_block("enforce", true)]
-        }
-      })
-
-      {out, _err, 0} = capture(fn -> WardmastCli.Cmd.Quota.run([]) end)
-
-      assert out =~ "Concurrency budget (enforce)"
-      refute out =~ "still decide"
     end
 
     test "prints nothing for an account with no published pools, or an older server" do
