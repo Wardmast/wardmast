@@ -1766,7 +1766,8 @@ defmodule Wardmast.Mergers.Github do
             number: number,
             title: pr["title"] || "",
             url: pr["html_url"] || "",
-            author: get_in(pr, ["user", "login"])
+            author: get_in(pr, ["user", "login"]),
+            head_sha: get_in(pr, ["head", "sha"])
           }
         end)
 

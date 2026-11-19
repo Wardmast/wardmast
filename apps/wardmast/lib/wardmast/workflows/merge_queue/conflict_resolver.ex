@@ -177,15 +177,23 @@ defmodule Wardmast.Workflows.MergeQueue.ConflictResolver do
     if is_binary(task_id) and task_id != "" do
       with {:ok, task} <- load_task_or_use(task_id, args),
            {:ok, context} <- resolve_context(task, args) do
-        if zero_divergence?(context) do
-          Logger.info(
-            "ConflictResolver: task=#{task_id} branch=#{context.branch} has zero divergence " <>
-              "from target=#{context.target_branch} — nothing to rebase, skipping dispatch"
-          )
+        case divergence_check(context) do
+          {:zero, shas} ->
+            Logger.info(
+              "ConflictResolver: task=#{task_id} branch=#{context.branch} has zero divergence " <>
+                "from target=#{context.target_branch} — nothing to rebase, skipping dispatch " <>
+                "(#{format_shas(shas)})"
+            )
 
-          {:ok, :no_op}
-        else
-          dispatch(task, context, args)
+            {:ok, :no_op}
+
+          {:diverged, shas} ->
+            Logger.info(
+              "ConflictResolver: task=#{task_id} branch=#{context.branch} diverges from " <>
+                "target=#{context.target_branch} (#{format_shas(shas)})"
+            )
+
+            dispatch(task, context, args)
         end
       end
     else
@@ -421,27 +429,46 @@ defmodule Wardmast.Workflows.MergeQueue.ConflictResolver do
   # failure — since a false "diverged" only costs the resolver its normal
   # (already-tested) path, while a false "zero divergence" would silently
   # skip a real conflict.
-  defp zero_divergence?(%{repo_path: repo_path, branch: branch, target_branch: target_branch}) do
+  #
+  # bd-7x0crw: the verdict is computed fresh on every call (nothing caches a
+  # phantom result per head), against the freshly fetched `origin/<target>`,
+  # and over EVERY known head of the branch — the local ref AND the freshly
+  # fetched `origin/<branch>` (the head the forge actually evaluated). It is
+  # phantom only when all of them already contain the target tip; a stale
+  # local ref can no longer mask a real conflict on the pushed head. Returns
+  # `{verdict, shas}` so the caller can log what was compared.
+  defp divergence_check(%{repo_path: repo_path, branch: branch, target_branch: target_branch}) do
     target_ref = "origin/#{target_branch}"
 
     # bd-4wy1w1: a branch whose worker ran in a private clone (git layout B) is
     # only as fresh in the main repo as its last sync-back.
     _ = Worktree.sync_branch(repo_path, branch)
+    # Best effort: refresh the forge-side head too.
+    _ = git(repo_path, ["fetch", "--no-tags", "origin", branch])
 
     with :ok <- Worktree.fetch_origin(repo_path, target_branch),
-         {:ok, target_sha} <- git(repo_path, ["rev-parse", target_ref]),
-         {:ok, merge_base_sha} <- merge_base_with_target(repo_path, branch, target_ref) do
-      merge_base_sha == target_sha
+         {:ok, target_sha} <- git(repo_path, ["rev-parse", target_ref]) do
+      heads =
+        for ref <- [branch, "origin/" <> branch],
+            {:ok, head_sha} <- [git(repo_path, ["rev-parse", "--verify", ref <> "^{commit}"])],
+            {:ok, base_sha} <- [git(repo_path, ["merge-base", head_sha, target_sha])] do
+          %{ref: ref, head: head_sha, merge_base: base_sha}
+        end
+
+      zero? = heads != [] and Enum.all?(heads, &(&1.merge_base == target_sha))
+      {if(zero?, do: :zero, else: :diverged), %{target: target_sha, heads: heads}}
     else
-      _ -> false
+      _ -> {:diverged, %{target: nil, heads: []}}
     end
   end
 
-  defp merge_base_with_target(repo_path, branch, target_ref) do
-    case git(repo_path, ["merge-base", branch, target_ref]) do
-      {:ok, sha} -> {:ok, sha}
-      {:error, _} -> git(repo_path, ["merge-base", "origin/" <> branch, target_ref])
-    end
+  defp format_shas(%{target: target, heads: heads}) do
+    heads_str =
+      Enum.map_join(heads, " ", fn h ->
+        "#{h.ref}=#{h.head} merge_base=#{h.merge_base}"
+      end)
+
+    "target_sha=#{target || "unknown"} #{heads_str}"
   end
 
   defp git(repo_path, args) do

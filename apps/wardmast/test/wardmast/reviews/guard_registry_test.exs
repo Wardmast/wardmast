@@ -34,6 +34,9 @@ defmodule Wardmast.Reviews.GuardRegistryTest do
     {Wardmast.Workflows.PRPatrol, :mail_owner, 5,
      "bd-8ztyal: mails the CI summary to the ticket that owns the PR instead of filing a " <>
        "follow-up; informational, deduped to one unread note per PR, nothing is refused"},
+    {Wardmast.Workflows.PRPatrol, :escalate_check_follow_up_cap, 4,
+     "bd-7wwz1f: after N failing-check follow-ups for one MR with no head change, mails the " <>
+       "coordinator once instead of filing another; nothing is refused or failed"},
     # --- review_gate.ex ---
     {Wardmast.Worker.ReviewGate, :finish_conflict_pass, 1,
      "bd-7m4c5m: a conflict-resolve pass that left the branch conflicting parks the gate once " <>
