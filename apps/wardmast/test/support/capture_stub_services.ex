@@ -14,6 +14,9 @@ defmodule Wardmast.Test.CaptureStubServices do
     send(Keyword.fetch!(opts, :test_pid), {:services_start, role, names, handle})
 
     case Map.get(Keyword.get(opts, :fail, %{}), role) do
+      {:exit, reason} ->
+        exit(reason)
+
       nil ->
         endpoints =
           for svc <- services,
@@ -34,6 +37,7 @@ defmodule Wardmast.Test.CaptureStubServices do
   @impl true
   def stop(%{handle: {handle, opts}}) do
     send(Keyword.fetch!(opts, :test_pid), {:services_stop, handle})
+    if reason = Keyword.get(opts, :stop_exit), do: exit(reason)
     :ok
   end
 end

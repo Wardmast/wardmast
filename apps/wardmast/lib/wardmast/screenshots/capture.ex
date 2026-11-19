@@ -196,6 +196,8 @@ defmodule Wardmast.Screenshots.Capture do
     st.deps.prepare(deps_input, st.deps_opts)
   rescue
     e -> {:error, "the offline deps cache crashed: #{Exception.message(e)}"}
+  catch
+    :exit, reason -> {:error, "the offline deps cache exited: #{inspect(reason)}"}
   end
 
   defp finish({:ok, st, plan, pairs, boots}) do
@@ -414,6 +416,8 @@ defmodule Wardmast.Screenshots.Capture do
     st.services.start(services, context)
   rescue
     e -> {:error, %{service: nil, reason: "starting them crashed: #{Exception.message(e)}"}}
+  catch
+    :exit, reason -> {:error, %{service: nil, reason: "starting them exited: #{inspect(reason)}"}}
   end
 
   defp endpoints(nil), do: []
@@ -421,11 +425,16 @@ defmodule Wardmast.Screenshots.Capture do
 
   defp stop_services(_st, nil), do: :ok
 
+  # Runs in an `after`: whatever goes wrong here is logged (the reaper still owns the containers),
+  # never allowed to replace the capture's own result.
   defp stop_services(st, running) do
     st.services.stop(running)
   rescue
     e ->
       Logger.warning("Screenshots.Capture: stopping the services failed: #{Exception.message(e)}")
+  catch
+    :exit, reason ->
+      Logger.warning("Screenshots.Capture: stopping the services exited: #{inspect(reason)}")
   end
 
   # A service that did not come up is a boot failure: the app never ran, and the service's own

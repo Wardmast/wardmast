@@ -192,6 +192,15 @@ defmodule Wardmast.Screenshots.CaptureServicesTest do
       assert {:services_stop, _} = List.last(lifecycle())
     end
 
+    test "a stop that exits does not take the capture's result with it", %{tmp_dir: dir} do
+      plan = plan!(dir, [%{"id" => "home", "path" => "/"}])
+
+      assert {:ok, %{pairs: [_]}} =
+               run(dir, plan, services_opts: [stop_exit: :podman_vanished])
+
+      assert {:services_stop, _} = List.last(lifecycle())
+    end
+
     test "the budget running out after the boot", %{tmp_dir: dir} do
       plan = plan!(dir, [%{"id" => "home", "path" => "/"}])
 
@@ -237,6 +246,16 @@ defmodule Wardmast.Screenshots.CaptureServicesTest do
       assert recorded["failure"]["code"] == "boot_failed"
       assert recorded["failure"]["message"] =~ "FATAL:  data directory has wrong ownership"
       assert recorded["failure"]["detail"] =~ "FATAL:  data directory has wrong ownership"
+    end
+
+    test "a services provider that exits is a boot failure too, not a crash", %{tmp_dir: dir} do
+      plan = plan!(dir, [%{"id" => "home", "path" => "/"}])
+
+      assert {:error, %{code: :boot_failed, role: "before"} = failure} =
+               run(dir, plan, services_opts: [fail: %{"before" => {:exit, :podman_vanished}}])
+
+      assert failure.message =~ "podman_vanished"
+      assert [{:services_start, "before", _}] = lifecycle()
     end
 
     test "at the head, after the base was shot", %{tmp_dir: dir} do
@@ -288,6 +307,19 @@ defmodule Wardmast.Screenshots.CaptureServicesTest do
       assert input.sandbox == CaptureHostSandbox
       assert_received {:boot_spec, "before", _, ^cache}
       assert_received {:boot_spec, "after", _, ^cache}
+    end
+
+    test "a deps cache that exits is deps_failed, not a crash", %{tmp_dir: dir} do
+      config = %{@config | deps: %{"mix" => true}}
+
+      assert {:error, %{code: :deps_failed} = failure} =
+               run(dir, plan!(dir, [%{"id" => "home", "path" => "/"}]),
+                 config: config,
+                 deps_opts: [test_pid: self(), answer: {:exit, :global_lock_lost}]
+               )
+
+      assert failure.message =~ "global_lock_lost"
+      assert lifecycle() == []
     end
 
     test "a cache that cannot be built is an infrastructure failure, before any boot", %{
