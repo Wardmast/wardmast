@@ -288,7 +288,8 @@ boundary is `Wardmast.Worker.Jail`.**
 
 **What maps where (bd-az8ycn).** `Wardmast.Agents.Qwen.Security` writes the
 policy into qwen's read-only system settings (`permissions.deny`, `tools.exclude`;
-the jail binds the settings directory read-only over the writable home).
+the jail binds the settings directory read-only, a mount of its own beside the
+writable home, and refuses to start without it).
 `Security.coverage/0` records, per safe-default category, which layer carries it,
 and a test holds that list against `SecurityPolicy.safe_default_categories/0`:
 
