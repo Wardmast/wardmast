@@ -317,10 +317,14 @@ defmodule Wardmast.Worker.TicketWatchdogTest do
       wait_until(fn -> ticket(task.id).state == :active end)
       assert ticket(task.id).attention_cause == :pr_closed
 
-      assert Enum.any?(
-               Message.inbox(Message.coordinator_ref(), workspace_id: ws.id),
-               &(&1.task_ref == task.id and &1.subject =~ "PR closed")
-             )
+      # The page is written *after* the ticket moves (`PullRequest.pr_closed/2`
+      # transitions, then escalates), so the state wait above does not imply it.
+      wait_until(fn ->
+        Enum.any?(
+          Message.inbox(Message.coordinator_ref(), workspace_id: ws.id),
+          &(&1.task_ref == task.id and &1.subject =~ "PR closed")
+        )
+      end)
     end
   end
 

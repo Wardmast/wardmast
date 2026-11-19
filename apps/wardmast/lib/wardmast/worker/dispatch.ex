@@ -2033,6 +2033,13 @@ defmodule Wardmast.Worker.Dispatch do
           # No live worker to realign — leave the legitimate close intact.
           {:ok, task}
 
+        run_finished?(worker_pid) ->
+          # bd-3x5g5z: a fast run can open its PR, merge (Direct) and have the
+          # Watchdog close the ticket before this window check runs. The worker
+          # is still alive only because it is winding down; reopening would undo
+          # a real close and strand the ticket `:active` with nothing running.
+          {:ok, task}
+
         true ->
           require Logger
 
@@ -2047,6 +2054,12 @@ defmodule Wardmast.Worker.Dispatch do
           end
       end
     end
+  end
+
+  defp run_finished?(worker_pid) do
+    match?(%{state: :finished}, Worker.state(worker_pid))
+  catch
+    :exit, _ -> false
   end
 
   defp reopen_task(%Issue{} = task) do
