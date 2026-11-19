@@ -318,6 +318,30 @@ defmodule Wardmast.Screenshots.Capture.Services.PodmanTest do
       assert [_] = removed()
     end
 
+    test "a socket root socat could not take (a comma) is an error, and nothing is started" do
+      if System.get_env("WARDMAST_SOCKET_ROOT") do
+        :ok
+      else
+        saved = Application.fetch_env(:wardmast, :socket_root)
+        # Short, so only the comma can be the reason (the default root is /tmp/arb-<tag> too).
+        root = "/tmp/arb,s-#{System.unique_integer([:positive])}"
+        Application.put_env(:wardmast, :socket_root, root)
+
+        on_exit(fn ->
+          File.rm_rf(root)
+
+          case saved do
+            {:ok, v} -> Application.put_env(:wardmast, :socket_root, v)
+            :error -> Application.delete_env(:wardmast, :socket_root)
+          end
+        end)
+
+        assert {:error, failure} = Podman.start([@pg], ctx("before", opts()))
+        assert failure.reason =~ "socket"
+        assert runs() == []
+      end
+    end
+
     test "no podman on this host is an error, and nothing is started" do
       assert {:error, failure} =
                Podman.start([@pg], ctx("before", opts(%{}, podman: nil, path: "/nonexistent")))

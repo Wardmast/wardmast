@@ -441,6 +441,17 @@ defmodule Wardmast.Screenshots.ConfigTest do
       assert msg =~ "socket"
     end
 
+    test "one service's socket may not sit inside another's" do
+      nested = %{
+        "pg" => Map.put(@postgres, "socket", "/run/pg"),
+        "pg2" => @postgres |> Map.put("port", 5433) |> Map.put("socket", "/run/pg/s")
+      }
+
+      assert [msg] = errors_s(nested)
+      assert msg =~ "/run/pg/s"
+      assert msg =~ "inside"
+    end
+
     test "validate_partial applies the same rules" do
       assert [_] =
                Config.validate_partial(

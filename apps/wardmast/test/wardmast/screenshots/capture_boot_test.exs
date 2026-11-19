@@ -490,6 +490,39 @@ defmodule Wardmast.Screenshots.CaptureBootTest do
       assert target == Path.join(cache, "bin/esbuild-linux-x64")
     end
 
+    test "a checkout's own _build link is never followed to link the asset tools", %{
+      tmp_dir: dir
+    } do
+      checkout = Path.join(dir, "checkout")
+      victim = Path.join(dir, "victim")
+      cache = Path.join(dir, "cache")
+      File.mkdir_p!(checkout)
+      File.mkdir_p!(victim)
+      File.mkdir_p!(Path.join(cache, "bin"))
+      File.ln_s!(victim, Path.join(checkout, "_build"))
+
+      spec = %{
+        role: "before",
+        checkout: checkout,
+        scratch: Path.join(dir, "scratch"),
+        seed: nil,
+        config: config(%{start_cmd: "exit 3"}),
+        task_id: "bd-boot",
+        sandbox: Wardmast.Test.CaptureRecordingSandbox,
+        deps: %{
+          dir: cache,
+          env: [],
+          links: [{"_build/esbuild-linux-x64", Path.join(cache, "bin/esbuild-linux-x64")}]
+        },
+        ctx: nil
+      }
+
+      assert {:error, {:setup, message}} = Booter.Command.boot(spec)
+      assert message =~ "_build"
+      assert File.ls!(victim) == []
+      refute_received {:sandbox_command, _, _, _}
+    end
+
     test "no services and no deps cache: the box has none", %{tmp_dir: dir} do
       spec = %{
         role: "before",

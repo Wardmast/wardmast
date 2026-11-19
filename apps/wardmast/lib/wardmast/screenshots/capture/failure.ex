@@ -48,15 +48,20 @@ defmodule Wardmast.Screenshots.Capture.Failure do
   def to_map(%__MODULE__{} = f) do
     %{
       "code" => Atom.to_string(f.code),
-      "message" => f.message,
+      "message" => String.replace_invalid(f.message),
       "role" => f.role,
       "shot" => f.shot,
       "detail" => json(f.detail)
     }
   end
 
+  # An app's or a service's output need not be UTF-8 (and a tail can cut a character in two):
+  # what goes into `capture.json` always is.
   defp json(nil), do: nil
-  defp json(v) when is_binary(v), do: v
-  defp json(v) when is_list(v), do: if(Enum.all?(v, &is_binary/1), do: v, else: inspect(v))
-  defp json(v), do: inspect(v)
+  defp json(v) when is_binary(v), do: String.replace_invalid(v)
+
+  defp json(v) when is_list(v),
+    do: if(Enum.all?(v, &is_binary/1), do: Enum.map(v, &json/1), else: inspect(v))
+
+  defp json(v), do: String.replace_invalid(inspect(v))
 end

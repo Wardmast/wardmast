@@ -448,7 +448,10 @@ defmodule Wardmast.Screenshots.Capture do
   defp services_failure(failure, role) do
     service = Map.get(failure, :service)
     reason = Map.get(failure, :reason) || inspect(failure)
-    log = Map.get(failure, :log_tail)
+
+    log =
+      with log when is_binary(log) <- Map.get(failure, :log_tail), do: String.replace_invalid(log)
+
     who = if service, do: "service #{service}", else: "its services"
     log_text = if is_binary(log) and log != "", do: "; its log ends:\n#{log}", else: ""
 

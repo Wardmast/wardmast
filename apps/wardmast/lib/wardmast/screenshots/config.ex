@@ -836,10 +836,24 @@ defmodule Wardmast.Screenshots.Config do
 
   defp services(%{} = v, label) do
     Enum.flat_map(Enum.sort(v), fn {name, svc} -> service(name, svc, "#{label}.#{name}") end) ++
-      shared_values(v, "port", label) ++ shared_values(v, "socket", label)
+      shared_values(v, "port", label) ++
+      shared_values(v, "socket", label) ++ nested_sockets(v, label)
   end
 
   defp services(_v, label), do: ["#{label} must be a map of service name -> service"]
+
+  # bwrap cannot bind a socket at a path inside another bound socket.
+  defp nested_sockets(services, label) do
+    sockets =
+      for {name, %{"socket" => s}} <- Enum.sort(services), is_binary(s), do: {name, s}
+
+    for {outer_name, outer} <- sockets,
+        {inner_name, inner} <- sockets,
+        String.starts_with?(inner, outer <> "/") do
+      "#{label}: service #{inner_name}'s socket #{inner} is inside service #{outer_name}'s " <>
+        "socket #{outer}"
+    end
+  end
 
   defp service(name, svc, label) do
     cond do

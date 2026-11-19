@@ -271,6 +271,19 @@ defmodule Wardmast.Screenshots.CaptureServicesTest do
       assert [{:services_start, "before", _}] = lifecycle()
     end
 
+    test "a log tail that is not UTF-8 still makes a readable capture.json", %{tmp_dir: dir} do
+      plan = plan!(dir, [%{"id" => "home", "path" => "/"}])
+      failure = %{@failure | log_tail: <<0xFF, 0xFE>> <> "FATAL:  broken \xC3"}
+
+      assert {:error, %{code: :boot_failed}} =
+               run(dir, plan, services_opts: [fail: %{"before" => failure}])
+
+      recorded = manifest(dir)
+      assert recorded["failure"]["code"] == "boot_failed"
+      assert recorded["failure"]["message"] =~ "FATAL:  broken"
+      assert String.valid?(recorded["failure"]["message"])
+    end
+
     test "at the head, after the base was shot", %{tmp_dir: dir} do
       plan = plan!(dir, [%{"id" => "home", "path" => "/"}])
 

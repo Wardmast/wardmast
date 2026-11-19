@@ -125,6 +125,23 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
   # `_build/<tool>-<target>` of the checkout: the link resolves inside the sandbox, where the cache
   # is shown at its own path.
   defp link_deps(%{deps: %{links: [_ | _] = links}, checkout: checkout}) do
+    # The checkout is the worker's tree: a `_build` it committed as a link is never followed on
+    # the host.
+    case File.lstat(Path.join(checkout, "_build")) do
+      {:ok, %File.Stat{type: type}} when type != :directory ->
+        {:error,
+         {:setup,
+          "the checkout's _build is a #{type}, not a directory, so the deps cache's asset " <>
+            "tools are not linked through it"}}
+
+      _ ->
+        link_tools(links, checkout)
+    end
+  end
+
+  defp link_deps(_spec), do: :ok
+
+  defp link_tools(links, checkout) do
     Enum.reduce_while(links, :ok, fn {rel, target}, :ok ->
       link = Path.join(checkout, rel)
 
@@ -144,8 +161,6 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
       end
     end)
   end
-
-  defp link_deps(_spec), do: :ok
 
   defp named_seed(_cfg, nil), do: nil
   defp named_seed(cfg, seed), do: Map.get(cfg.seeds, seed)

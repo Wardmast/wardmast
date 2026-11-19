@@ -496,6 +496,8 @@ defmodule Wardmast.Screenshots.Capture.Services.Podman do
     dir = Path.join(root, "svc-" <> Base.encode16(:crypto.strong_rand_bytes(6), case: :lower))
 
     with true <- byte_size(dir) + 17 <= @max_socket_path or {:error, :socket_path_too_long},
+         # socat takes the path inside an address (`UNIX-LISTEN:<path>,fork`): no `,` or `:`.
+         true <- Regex.match?(~r{\A[A-Za-z0-9._/-]+\z}, dir) or {:error, :socket_path_unsafe},
          :ok <- File.mkdir_p(root),
          :ok <- File.chmod(root, 0o700),
          :ok <- File.mkdir(dir),
@@ -555,6 +557,10 @@ defmodule Wardmast.Screenshots.Capture.Services.Podman do
 
   defp tail(out, bytes) do
     out = String.trim(out)
-    if byte_size(out) <= bytes, do: out, else: binary_part(out, byte_size(out) - bytes, bytes)
+
+    out =
+      if byte_size(out) <= bytes, do: out, else: binary_part(out, byte_size(out) - bytes, bytes)
+
+    String.replace_invalid(out)
   end
 end
