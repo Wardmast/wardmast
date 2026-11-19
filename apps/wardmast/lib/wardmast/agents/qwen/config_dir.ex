@@ -22,12 +22,14 @@ defmodule Wardmast.Agents.Qwen.ConfigDir do
   `$QWEN_HOME/settings.json`. The file is `0444`, written to a sibling and
   renamed over the target (a symlink a previous run planted is replaced, never
   written through), and lives outside `QWEN_HOME` and outside the worker's `HOME`
-  too (a sibling of it under the root); the jail (Q5) binds it read-only as a
-  mount of its own. It is deliberately **not** inside `HOME`: the jail binds
-  `HOME` writable, and a read-only mount nested in that writable bind did not
-  stay read-only under newer hosts (Ubuntu 26.04, bd-c609gj), where the worker
-  could rewrite its own deny rules. A non-nested read-only mount is the same
-  shape as the reviewer's read-only worktree, which holds everywhere. It holds:
+  too (a sibling of it under the root). The jail (Q5) binds that directory
+  read-only as a mount of its own, after every writable mount, and refuses to
+  start without it: inside the jail, writing, deleting or replacing the file and
+  moving the directory aside are all refused (`qwen/jail_bwrap_test.exs`, which
+  CI's `jail` job runs on every runner image, bd-bzhpgi). It moved out of `HOME`
+  for a 26.04 failure (bd-c609gj) that turned out to be that test attacking a
+  path nothing mounted; a read-only mount nested in the writable home holds too
+  (`Wardmast.Worker.Jail`'s `:readonly_paths`). It holds:
 
     * the deny baseline: `Read`/`Edit` denied on `Wardmast.Worker.CredentialPaths`;
     * managed memory and auto-dream off, telemetry off, usage statistics off;
@@ -80,8 +82,8 @@ defmodule Wardmast.Agents.Qwen.ConfigDir do
 
   @doc """
   The directory holding the read-only system settings, a sibling of the worker's
-  home (never inside it: see the moduledoc). The jail binds it read-only, so the
-  worker cannot rename a file of its own over the settings.
+  home (see the moduledoc). The jail binds it read-only, so the worker cannot
+  rename a file of its own over the settings.
   """
   @spec system_settings_dir(keyword()) :: String.t()
   def system_settings_dir(opts \\ []),
