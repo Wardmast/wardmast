@@ -2461,7 +2461,13 @@ defmodule Wardmast.Worker.ReviewGate do
 
       {:run, job} ->
         capture = state.screenshot_capture || (&Capture.run/2)
-        task = Task.async(fn -> ScreenshotGate.run(job, capture) end)
+        # Unlinked: a capture task killed from outside (which `ScreenshotGate.run/2`'s rescue
+        # cannot catch) must reach the `:DOWN` clause and escalate, not take the gate with it.
+        task =
+          Task.Supervisor.async_nolink(Wardmast.TaskSupervisor, fn ->
+            ScreenshotGate.run(job, capture)
+          end)
+
         {:noreply, %{state | screenshot_task: %{ref: task.ref, head_sha: job.input.head_sha}}}
     end
   end
@@ -2500,7 +2506,17 @@ defmodule Wardmast.Worker.ReviewGate do
     end
   end
 
-  defp ci_next_reply({:proceed, state}, review_id), do: launch_next_reviewer(state, review_id)
+  # Round 2+ clears the screenshot step too (bd-84latk): a fix round can change `ui_paths` files,
+  # and the round after a `manifest_missing` send-back must re-check the manifest even when CI
+  # was already green and nothing had to wait. `screenshot_step/1` answers as a GenServer reply
+  # (it is also the door a finished CI wait comes through, which has set `ci_entry` to
+  # `{:next, review_id}`); this door answers `:continue | :done`.
+  defp ci_next_reply({:proceed, state}, review_id) do
+    case screenshot_step(%{state | ci_entry: {:next, review_id}}) do
+      {:noreply, state} -> {:continue, state}
+      {:stop, :normal, state} -> {:done, state}
+    end
+  end
 
   defp ci_next_reply({tag, state}, _review_id) when tag in [:wait, :revise],
     do: {:continue, state}

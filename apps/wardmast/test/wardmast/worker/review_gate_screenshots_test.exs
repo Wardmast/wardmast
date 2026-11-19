@@ -107,6 +107,64 @@ defmodule Wardmast.Worker.ReviewGateScreenshotsTest do
     end
   end
 
+  describe "the round after a send-back (CI already green, head unchanged)" do
+    test "captures again and the re-review brief carries the screenshots", ctx do
+      after_png = Path.join(ctx.tmp, "home__after.png")
+      File.write!(after_png, "png")
+      calls = :counters.new(1, [])
+      Process.put(:test_pid, self())
+
+      capture = fn input, _opts ->
+        :counters.add(calls, 1, 1)
+        send(ctx_pid(), {:captured, :counters.get(calls, 1), input.head_sha})
+
+        case :counters.get(calls, 1) do
+          1 ->
+            {:error, Failure.new(:manifest_missing, "the worker wrote no screenshots manifest")}
+
+          _ ->
+            {:ok,
+             %{
+               pairs: [
+                 %{
+                   id: "home",
+                   title: "Home",
+                   viewport: "desktop",
+                   theme: "light",
+                   label: "Home · desktop · light",
+                   kind: :added,
+                   before: %{status: :missing},
+                   after: %{status: :ok, file: after_png, name: "a.png", sha256: "y", bytes: 3}
+                 }
+               ],
+               notes: nil
+             }}
+        end
+      end
+
+      rig = rig(ctx, new_ws(@screenshots), "feature/shots-5")
+
+      gate =
+        start_gate(rig, ctx,
+          rounds: 3,
+          revise_command: [Path.expand("../../fixtures/revise_non_file_fix.sh", __DIR__)],
+          screenshot_capture: capture
+        )
+
+      # Round 1 is sent back; the worker's fix round leaves the head alone (CI is off, so the
+      # round-2 gate proceeds straight away). Round 2 must still capture and brief the reviewer.
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+
+      assert_received {:captured, 1, _}
+      assert_received {:captured, 2, _}
+      prompt = :sys.get_state(gate).current_prompt
+      assert prompt =~ "This is review round 2"
+      assert prompt =~ "UI SCREENSHOTS"
+      assert prompt =~ after_png
+      stop_gate(gate)
+    end
+  end
+
   describe "an infrastructure capture failure" do
     test "escalates to the coordinator and does not send the change back", ctx do
       failure =
