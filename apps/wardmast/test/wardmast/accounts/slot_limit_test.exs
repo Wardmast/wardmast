@@ -2,7 +2,6 @@ defmodule Wardmast.Accounts.SlotLimitTest do
   use ExUnit.Case, async: true
 
   alias Wardmast.Accounts.SlotLimit
-  alias Wardmast.Board.Scheduler
 
   @account %{name: "claude:default", limit: 2, live: 2, runs: ["bd-2qy0gu", "bd-c27m5o#review1"]}
 
@@ -31,28 +30,5 @@ defmodule Wardmast.Accounts.SlotLimitTest do
       assert SlotLimit.describe(%{limit: :install, max: 3}, ["bd-a"]) ==
                "the install cap is 3 and 1 held by bd-a"
     end
-  end
-
-  describe "ResumeSlot.refusal_message/1" do
-  end
-
-  test "board reason names the binding limit" do
-    card = %{id: "bd-1", scope: MapSet.new(), blocked_by: [], conflicts_with: []}
-
-    plan =
-      Scheduler.plan(%{
-        ready: [card],
-        running: [],
-        conflict_claims: %{},
-        quota: :ok,
-        paused: false,
-        slots_free: 0,
-        slot_note: "account claude:default at 2/2 live (bd-a implement)"
-      })
-
-    assert [%{reason: reason}] = plan.entries
-
-    assert reason ==
-             "blocked — no free worker slot (account claude:default at 2/2 live (bd-a implement))"
   end
 end

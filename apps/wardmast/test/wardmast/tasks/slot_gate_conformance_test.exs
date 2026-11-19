@@ -14,6 +14,7 @@ defmodule Wardmast.Tasks.SlotGateConformanceTest do
   """
   use ExUnit.Case, async: true
 
+  alias Wardmast.Board.OpenWalk
   alias Wardmast.Board.Snapshot
   alias Wardmast.Tasks.SlotGate
 
@@ -137,11 +138,10 @@ defmodule Wardmast.Tasks.SlotGateConformanceTest do
           changed_files: %{},
           now: @now,
           slots_total: total,
-          quota: :ok,
           paused: false
         })
 
-      assert board.slots_free == SlotGate.slots_free(total, tickets),
+      assert max(board.slots_total - board.slots_used, 0) == SlotGate.slots_free(total, tickets),
              "board disagrees with SlotGate on free slots for #{name} (total=#{total})"
 
       assert board.slots_used == SlotGate.slots_used(tickets),
@@ -149,8 +149,6 @@ defmodule Wardmast.Tasks.SlotGateConformanceTest do
 
       assert board.agents_live == SlotGate.occupied(workers),
              "board disagrees with SlotGate on agent occupancy for #{name} (total=#{total})"
-
-      refute board.slots_free < 0
     end
   end
 
@@ -177,7 +175,6 @@ defmodule Wardmast.Tasks.SlotGateConformanceTest do
       changed_files: %{},
       now: @now,
       slots_total: 1,
-      quota: :ok,
       paused: false
     }
 
@@ -188,19 +185,21 @@ defmodule Wardmast.Tasks.SlotGateConformanceTest do
         common
         |> Map.put(:issues, [ready, ticket("bd-1", :active)])
         |> Map.put(:workers, [worker("bd-1", :working, %{agent_live: agent_live})])
+        |> OpenWalk.put()
         |> Snapshot.derive()
 
-      assert held.slots_free == 0
-      assert held.promote == nil
+      assert held.slots_total - held.slots_used == 0
+      assert held.walk.promote == nil
     end
 
     merging =
       common
       |> Map.put(:issues, [ready, ticket("bd-1", :merging)])
       |> Map.put(:workers, [worker("bd-1", :succeeded, %{agent_live: false})])
+      |> OpenWalk.put()
       |> Snapshot.derive()
 
-    assert merging.slots_free == 1
-    assert merging.promote == ready.id
+    assert merging.slots_total - merging.slots_used == 1
+    assert merging.walk.promote == ready.id
   end
 end

@@ -6,6 +6,7 @@ defmodule Wardmast.Tasks.SlotGateNoDeadlockTest do
   """
   use Wardmast.DataCase, async: false
 
+  alias Wardmast.Board.OpenWalk
   alias Wardmast.Board.Snapshot
   alias Wardmast.Tasks.Issue
   alias Wardmast.Tasks.SlotGate
@@ -112,17 +113,19 @@ defmodule Wardmast.Tasks.SlotGateNoDeadlockTest do
     assert SlotGate.slots_free(2, issues) == 0
 
     board =
-      Snapshot.derive(%{
-        issues: issues,
-        workers: Enum.map(workers, &Map.merge(&1, %{started_at: DateTime.utc_now()})),
-        now: DateTime.utc_now(),
-        slots_total: 2
-      })
+      Snapshot.derive(
+        OpenWalk.put(%{
+          issues: issues,
+          workers: Enum.map(workers, &Map.merge(&1, %{started_at: DateTime.utc_now()})),
+          now: DateTime.utc_now(),
+          slots_total: 2
+        })
+      )
 
     assert board.agents_live == 3
     assert board.slots_used == 3
-    assert board.slots_free == 0
-    assert board.promote == nil
+    assert board.slots_total <= board.slots_used
+    assert board.walk.promote == nil
 
     _ = ws
   end
