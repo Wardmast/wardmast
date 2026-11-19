@@ -153,13 +153,17 @@ defmodule Wardmast.Worker.ImageTest do
   end
 
   describe "plan/3: the base ships headless Chromium (bd-6301r0)" do
-    test "installs the unversioned (security-tracked) chromium + fonts and points ARB_CHROME at it" do
+    test "installs an exact, snapshot-pinned chromium + fonts and points ARB_CHROME at it" do
       repo = repo_with(%{"README.md" => "hi\n"})
       assert {:ok, plan} = Image.plan(repo, "main", opts(arb_otp: "29"))
       base = plan.base.containerfile
 
-      assert base =~ "chromium fonts-liberation"
-      refute base =~ "chromium="
+      assert base =~
+               ~r/chromium=\d+\.\d+\.\d+\.\d+-\S+ chromium-common=\d+\.\d+\.\d+\.\d+-\S+ fonts-liberation/
+
+      assert base =~ ~r{snapshot\.debian\.org/archive/debian/\d{8}T\d{6}Z/}
+      assert base =~ ~r{snapshot\.debian\.org/archive/debian-security/\d{8}T\d{6}Z/}
+      assert base =~ ~r/LABEL arbiter\.chromium-version="\d+\./
       assert base =~ "ENV ARB_CHROME=/usr/bin/chromium"
     end
   end
