@@ -86,8 +86,11 @@ defmodule Wardmast.Worker.Jail do
   `nobody` inside it. OpenSSH's `Include` handling refuses to load a config
   file it doesn't consider owned by root or the current user (`Bad owner or
   permissions on ...`), so a bare `ssh`/`git push` over ssh fails inside the
-  jail on every host that has a system ssh config — which is effectively all
-  of them.
+  jail on every host whose system ssh config `Include`s a file: a drop-in in
+  `/etc/ssh/ssh_config.d/`, such as Fedora's `50-redhat.conf`. Only included
+  files (and `~/.ssh/config`) are checked, never `/etc/ssh/ssh_config` itself,
+  so where `ssh_config.d` is empty a bare `ssh` works in the jail (it exits 0
+  on the ubuntu-24.04 runner image, bd-bzhpgi) and the mirror has nothing to fix.
 
   The fix is `ssh_shadow_config/0`: copy the *content* of
   `/etc/ssh/ssh_config` and everything it `Include`s to a location the

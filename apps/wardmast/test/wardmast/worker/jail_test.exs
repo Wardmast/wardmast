@@ -1613,9 +1613,14 @@ defmodule Wardmast.Worker.JailTest do
     end
   end
 
-  # bd-5d5mrs: proves both the bug (bd-90kjvk) and the fix against this
-  # host's real /etc/ssh/ssh_config — no fixture, since the bug only exists
-  # because that file is root-owned, which we can't fabricate without root.
+  # bd-5d5mrs: the bug (bd-90kjvk) and the fix, against this host's real
+  # /etc/ssh/ssh_config. OpenSSH ownership-checks the files a config Includes,
+  # never /etc/ssh/ssh_config itself, and inside the jail's user namespace a
+  # root-owned file reads back as `nobody`. So a bare ssh fails in the jail only
+  # where the system config Includes a file (a drop-in in ssh_config.d); on the
+  # ubuntu-24.04 runner image it exits 0 (bd-bzhpgi). The Include test reaches
+  # the real, root-owned /etc/ssh/ssh_config through an Include of its own, so
+  # it reproduces the refusal, and the mirror that fixes it, on every host.
   describe "real bwrap: ssh config parse (bd-5d5mrs)" do
     if @bwrap_skip, do: @describetag(skip: @bwrap_skip)
 
@@ -1628,15 +1633,24 @@ defmodule Wardmast.Worker.JailTest do
     # bd-5d5mrs finding 4: without this, these tests write into the
     # operator's real $XDG_CACHE_HOME/arbiter/jail-ssh-shadow, which a
     # concurrently running jailed ssh (another worker, or a parallel test
-    # run) could read mid-write.
+    # run) could read mid-write. The Include test also points the system and
+    # user config paths at fixtures; all three are restored.
     setup %{base: base} do
-      prev_root = Application.get_env(:wardmast, :worker_jail_ssh_shadow_root)
+      keys = [
+        :worker_jail_ssh_shadow_root,
+        :worker_jail_ssh_config_path,
+        :worker_jail_user_ssh_config_path
+      ]
+
+      prev = for key <- keys, do: {key, Application.get_env(:wardmast, key)}
       Application.put_env(:wardmast, :worker_jail_ssh_shadow_root, Path.join(base, "shadow"))
-      on_exit(fn -> restore_env(:worker_jail_ssh_shadow_root, prev_root) end)
+      on_exit(fn -> Enum.each(prev, fn {key, value} -> restore_env(key, value) end) end)
       :ok
     end
 
-    test "reproduces the bug: plain ssh -G fails inside the jail on the real system config" do
+    test "plain ssh -G inside the jail fails on the real system config iff it Includes another user's file",
+         %{base: base} do
+      included = foreign_system_ssh_includes(File.stat!(base).uid)
       {:ok, [bwrap | args]} = Jail.wrap(["ssh", "-G", "localhost"], worktree: System.tmp_dir!())
       # Force GIT_SSH_COMMAND's default back off so this exercises the bare,
       # unfixed transport agy hit in bd-90kjvk.
@@ -1644,8 +1658,49 @@ defmodule Wardmast.Worker.JailTest do
 
       {out, status} = System.cmd(bwrap, args, stderr_to_stdout: true)
 
+      JailProbe.evidence(
+        "plain ssh -G localhost; /etc/ssh/ssh_config Includes #{inspect(included)}",
+        out
+      )
+
+      if included == [] do
+        # Nothing for ssh to ownership-check, so nothing to refuse.
+        assert status == 0, out
+      else
+        assert status != 0
+        assert out =~ ~r/bad owner or permissions/i
+      end
+    end
+
+    test "a root-owned config reached through Include is refused inside the jail; its mirror is not",
+         %{base: base} do
+      system = "/etc/ssh/ssh_config"
+
+      assert File.stat!(system).uid != File.stat!(base).uid,
+             "#{system} is owned by the test user, so the jail would not remap it"
+
+      top = Path.join(base, "include-system.conf")
+      File.write!(top, "Include #{system}\n")
+      File.chmod!(top, 0o644)
+      ssh_g = ["ssh", "-F", top, "-G", "localhost"]
+
+      # The control: outside the jail root is root, and OpenSSH accepts the include.
+      assert {_, 0} = System.cmd("ssh", tl(ssh_g), stderr_to_stdout: true)
+
+      {out, status} = jailed(ssh_g, base)
+      JailProbe.evidence("ssh -F <Include #{system}> -G localhost", out)
       assert status != 0
-      assert out =~ ~r/bad owner or permissions/i
+      assert out =~ "Bad owner or permissions on #{system}"
+
+      # The fix: the same config through ssh_shadow_config/0's self-owned mirror.
+      Application.put_env(:wardmast, :worker_jail_ssh_config_path, top)
+      no_user_config = Path.join(base, "no-user-config")
+      Application.put_env(:wardmast, :worker_jail_user_ssh_config_path, no_user_config)
+      assert {:ok, mirror} = Jail.ssh_shadow_config()
+
+      {out, status} = jailed(["ssh", "-F", mirror, "-G", "localhost"], base)
+      assert status == 0, out
+      refute out =~ ~r/bad owner or permissions/i
     end
 
     test "the real ssh probe passes on this host" do
@@ -1670,6 +1725,31 @@ defmodule Wardmast.Worker.JailTest do
 
   defp drop_setenv([other | rest], name), do: [other | drop_setenv(rest, name)]
   defp drop_setenv([], _name), do: []
+
+  defp jailed(command, worktree) do
+    {:ok, [bwrap | args]} = Jail.wrap(command, worktree: worktree)
+    System.cmd(bwrap, args, stderr_to_stdout: true)
+  end
+
+  # The files /etc/ssh/ssh_config Includes that the jail reads back as another
+  # user's: what a bare ssh ownership-checks there. As OpenSSH does for the
+  # system config, a relative target resolves in /etc/ssh and an unreadable
+  # match is skipped.
+  defp foreign_system_ssh_includes(me) do
+    case File.read("/etc/ssh/ssh_config") do
+      {:ok, conf} ->
+        for line <- String.split(conf, "\n"),
+            [_, value] <- [Regex.run(~r/^\s*include(?:\s*=\s*|\s+)(.*?)\s*$/i, line)],
+            [_ | groups] <- Regex.scan(~r/"([^"]*)"|(\S+)/, value),
+            path <- Path.wildcard(Path.expand(List.last(groups), "/etc/ssh")),
+            match?({:ok, %File.Stat{type: :regular, uid: uid}} when uid != me, File.stat(path)),
+            match?({:ok, _}, File.read(path)),
+            do: path
+
+      {:error, _} ->
+        []
+    end
+  end
 
   defp pids_in_ns(ns) do
     "/proc"
