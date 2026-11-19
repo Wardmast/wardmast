@@ -156,6 +156,7 @@ defmodule Wardmast.Mergers.Gitlab do
            |> recheck_phantom_conflict(cfg, iid) do
         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
           merge_status = Map.get(body, "merge_status", "")
+
           {pipeline, pipeline_id, pipeline_raw} =
             fetch_pipeline_status(cfg, iid, Map.get(body, "sha"))
 
