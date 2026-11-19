@@ -1,10 +1,10 @@
 defmodule Wardmast.Agents.ReviewerRoutingEnforceTest do
   @moduledoc """
-  The ReviewGate reviewer's routing under `scheduler_admission: enforce` (DC8,
+  The ReviewGate reviewer's routing under seat admission (DC8,
   design `provider-dynamic-concurrency.md` §4.5, E10, O2): a reviewer is a
   follow-up of work In progress; the quota gate (paced line included) still
   holds its pool, and among the pools it may use, one with a free seat
-  is preferred. Under `legacy` the gate's full check and today's ranking stand.
+  is preferred.
   """
   use Wardmast.DataCase, async: false
 
@@ -14,10 +14,7 @@ defmodule Wardmast.Agents.ReviewerRoutingEnforceTest do
   alias Wardmast.Tasks.{Issue, Workspace}
 
   setup do
-    on_exit(fn ->
-      Wardmast.Settings.set_scheduler_admission(nil)
-      :ets.delete_all_objects(:arbiter_provider_circuit_breakers)
-    end)
+    on_exit(fn -> :ets.delete_all_objects(:arbiter_provider_circuit_breakers) end)
 
     :ok
   end
@@ -122,15 +119,7 @@ defmodule Wardmast.Agents.ReviewerRoutingEnforceTest do
       %{ws: ws, paced: paced, opts: opts([{paced, agy_quota(40.0, 17_640)}])}
     end
 
-    test "legacy: dropped quota_held, so the review falls back to the same family", ctx do
-      assert {:ok, sel} = ReviewerRouting.select(ctx.ws, task!(ctx.ws), ctx.opts)
-      assert sel.same_family_fallback
-      assert sel.fallback_reason =~ "quota_held"
-    end
-
     test "enforce: dropped too (bd-44qs5l) — a held pool is never spawned on", ctx do
-      {:ok, _} = Wardmast.Settings.set_scheduler_admission(:enforce)
-
       assert {:ok, sel} = ReviewerRouting.select(ctx.ws, task!(ctx.ws), ctx.opts)
       assert sel.same_family_fallback
       assert sel.fallback_reason =~ "quota_held"
@@ -157,12 +146,7 @@ defmodule Wardmast.Agents.ReviewerRoutingEnforceTest do
       %{ws: ws, codex: codex, opts: opts(quotas, seat_opts: seat_opts)}
     end
 
-    test "legacy: the most headroom reviews", ctx do
-      assert {:ok, %{family: :openai}} = ReviewerRouting.select(ctx.ws, task!(ctx.ws), ctx.opts)
-    end
-
     test "enforce: a pool with a free seat is preferred", ctx do
-      {:ok, _} = Wardmast.Settings.set_scheduler_admission(:enforce)
       assert {:ok, %{family: :google}} = ReviewerRouting.select(ctx.ws, task!(ctx.ws), ctx.opts)
     end
   end

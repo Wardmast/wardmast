@@ -3149,7 +3149,6 @@ defmodule Wardmast.MCP.ToolsTest do
         Wardmast.Settings.set_scheduling_max_lifted_in_flight(nil)
         Wardmast.Settings.set_scheduling_finish_first(nil)
         Wardmast.Settings.set_scheduling_finish_first_max_wait_hours(nil)
-        Wardmast.Settings.set_scheduler_admission(nil)
       end)
 
       :ok
@@ -3166,7 +3165,6 @@ defmodule Wardmast.MCP.ToolsTest do
       scheduling_max_lifted_in_flight: nil,
       scheduling_finish_first: nil,
       scheduling_finish_first_max_wait_hours: nil,
-      scheduler_admission: nil,
       "machine.derate": nil,
       "nodes.public_url": nil,
       "nodes.allow_public_endpoint": nil,
@@ -3214,38 +3212,6 @@ defmodule Wardmast.MCP.ToolsTest do
       end
 
       assert Wardmast.Settings.scheduling_max_lifted_in_flight() == nil
-    end
-
-    test "the coordinator may set scheduler_admission to shadow or legacy, never enforce (DC6)",
-         ctx do
-      assert {:ok, %{value: "shadow"}} =
-               Tools.installation_config_set(ctx.coordinator, %{
-                 "key" => "scheduler_admission",
-                 "value" => "shadow"
-               })
-
-      assert {:error, {:unauthorized, msg}} =
-               Tools.installation_config_set(ctx.coordinator, %{
-                 "key" => "scheduler_admission",
-                 "value" => "enforce"
-               })
-
-      assert msg =~ "operator-only"
-      assert Wardmast.Settings.scheduler_admission() == :shadow
-
-      assert {:ok, %{value: "legacy"}} =
-               Tools.installation_config_set(ctx.coordinator, %{
-                 "key" => "scheduler_admission",
-                 "value" => "legacy"
-               })
-
-      operator = %Scope{tier: :coordinator, workspace_id: ctx.ws.id, operator: true}
-
-      assert {:ok, %{value: "enforce"}} =
-               Tools.installation_config_set(operator, %{
-                 "key" => "scheduler_admission",
-                 "value" => "enforce"
-               })
     end
 
     test "an operator-proof coordinator token may set an operator-only key (P-20)", ctx do

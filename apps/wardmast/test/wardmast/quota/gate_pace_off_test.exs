@@ -1,7 +1,7 @@
 defmodule Wardmast.Quota.GatePaceOffTest do
   @moduledoc """
   `pace: false` (DC8, design `provider-dynamic-concurrency.md` §4.5, E9, E10):
-  under `scheduler_admission: enforce` the quota gate keeps only its hard rules
+  the quota gate keeps only its hard rules
   for every dispatch — the primary window past plan (rule 1), the long window
   rejected (rule 2) and `allowed_warning` under `weekly_warning_policy: hold`
   (rule 5). The paced line (rules 3 and 4) is the budget's question, answered by

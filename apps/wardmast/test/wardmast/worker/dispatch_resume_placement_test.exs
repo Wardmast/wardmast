@@ -177,31 +177,6 @@ defmodule Wardmast.Worker.DispatchResumePlacementTest do
       assert StubResumeDeferrer.deferrals() == []
     end
 
-    test "with the primary's cap full and no node free, the resume is held as before" do
-      ws = workspace!("prefer_remote")
-      %{task: task, first: first} = parked!(ws)
-      {:ok, other} = Ash.create(Issue, %{title: "fills the primary", workspace_id: ws.id})
-      ResumeSlotFixture.admit!(ws, other)
-      full = %{row() | live: 2}
-
-      assert {:error, {:no_node_capacity, info}} =
-               Dispatch.resume(
-                 task.id,
-                 resume_opts(
-                   publish: Wardmast.DispatchImageStub.publish(),
-                   plan: Wardmast.DispatchImageStub.plan(),
-                   nodes: [full]
-                 )
-               )
-
-      assert info.node == "local"
-      assert info.kind == :resume
-      assert info.phrase =~ "(no node had a free slot)"
-      refute_received {:spawned, _}
-      # Nothing was stopped: the parked worker is still the task's.
-      assert Worker.whereis(task.id) == first.worker_pid
-    end
-
     # bd-373tce kept a dispatch whose home clone holds uncommitted work local, because
     # the seed carried commits only. A resume's clone is dirty by nature (the run was
     # cut off mid-task), and its seed now carries the work tree
@@ -269,27 +244,6 @@ defmodule Wardmast.Worker.DispatchResumePlacementTest do
       assert registry_node(pid) == nil
     end
 
-    test "so does an automatic resume; a remote_only workspace's is held by the primary's cap" do
-      %{task: task, first: first} = parked!(workspace!("prefer_remote"))
-      commit!(first.worktree_path, "one.txt")
-
-      assert {:ok, %{worker_pid: pid}} =
-               Dispatch.resume_session(task.id, resume_opts(resume_origin: :automatic))
-
-      assert_receive {:spawned, nil}
-      assert registry_node(pid) == nil
-
-      %{task: held, first: held_first} = parked!(workspace!("remote_only"), "remote only")
-      commit!(held_first.worktree_path, "one.txt")
-
-      # The primary's cap (1, held by the first resume) is the gate now: the refusal says
-      # why the run is not going to a node, and nothing was spawned remotely.
-      assert {:error, {:no_node_capacity, info}} = Dispatch.resume(held.id, resume_opts([]))
-      assert info.reason == {:local_only, :unpushed_commits}
-      assert info.phrase =~ "exist on no remote"
-      refute_received {:spawned, _}
-    end
-
     test "ahead of origin/<branch> counts too, and once pushed the resume is placed" do
       %{task: task, first: first} = parked!(workspace!("prefer_remote"))
       path = first.worktree_path
@@ -325,16 +279,6 @@ defmodule Wardmast.Worker.DispatchResumePlacementTest do
       assert registry_node(pid) == nil
     end
 
-    test "and the primary's cap still holds it when full" do
-      ws = workspace!("local_only")
-      %{task: task} = parked!(ws)
-      {:ok, other} = Ash.create(Issue, %{title: "fills the primary", workspace_id: ws.id})
-      ResumeSlotFixture.admit!(ws, other)
-
-      assert {:error, {:no_node_capacity, info}} = Dispatch.resume(task.id, resume_opts([]))
-      assert info.node == "local"
-      assert info.phrase =~ "run is local-only: workspace worker.placement is local_only"
-    end
   end
 
   describe "worker.placement: remote_only" do
@@ -395,33 +339,6 @@ defmodule Wardmast.Worker.DispatchResumePlacementTest do
              )
 
       assert Placement.reservations() == []
-    end
-
-    test "with the primary full and no node free there is none", %{task: task} do
-      refute Dispatch.resume_room?(
-               task.id,
-               Keyword.merge(@podman,
-                 publish: Wardmast.DispatchImageStub.publish(),
-                 plan: Wardmast.DispatchImageStub.plan(),
-                 nodes: [%{row() | live: 2}]
-               )
-             )
-    end
-
-    test "a run that stays on the primary waits for the primary's cap", %{task: task} do
-      refute Dispatch.resume_room?(task.id,
-               publish: Wardmast.DispatchImageStub.publish(),
-               plan: Wardmast.DispatchImageStub.plan(),
-               nodes: [row()]
-             )
-
-      ResumeSlotFixture.put_local_cap(2)
-
-      assert Dispatch.resume_room?(task.id,
-               publish: Wardmast.DispatchImageStub.publish(),
-               plan: Wardmast.DispatchImageStub.plan(),
-               nodes: [row()]
-             )
     end
 
     test "remote_only with no node free is no room, even with the primary idle" do
@@ -594,38 +511,5 @@ defmodule Wardmast.Worker.DispatchResumePlacementTest do
       pid
     end
 
-    test "waits while nothing has room, and replays once a node does" do
-      ws = workspace!("prefer_remote")
-      %{task: task} = parked!(ws)
-      {:ok, other} = Ash.create(Issue, %{title: "fills the primary", workspace_id: ws.id})
-      ResumeSlotFixture.admit!(ws, other)
-      pid = scheduler!(self())
-      task_id = task.id
-
-      full =
-        Keyword.merge(@podman,
-          publish: Wardmast.DispatchImageStub.publish(),
-          plan: Wardmast.DispatchImageStub.plan(),
-          nodes: [%{row() | live: 2}],
-          held_for: :local_capacity
-        )
-
-      :ok = Wardmast.Board.Autopilot.defer_resume(pid, task_id, :resume_session, full)
-      Wardmast.Board.Autopilot.tick(pid)
-      refute_received {:replayed, _, _, _}
-
-      free =
-        Keyword.merge(@podman,
-          publish: Wardmast.DispatchImageStub.publish(),
-          plan: Wardmast.DispatchImageStub.plan(),
-          nodes: [row()],
-          held_for: :local_capacity
-        )
-
-      :ok = Wardmast.Board.Autopilot.defer_resume(pid, task_id, :resume_session, free)
-      Wardmast.Board.Autopilot.tick(pid)
-      assert_receive {:replayed, ^task_id, :resume_session, opts}, 5_000
-      assert opts[:slot_admitted] == true
-    end
   end
 end

@@ -6,7 +6,7 @@ defmodule Wardmast.Agents.ProviderRoutingWalkTest do
   auth, circuit — and leaves capacity and pace to the pool budgets. So an
   account at its `max_concurrent`, or ahead of its paced line, stays a
   candidate; everything else drops exactly as it does for dispatch. Without
-  the option nothing changes.
+  the option the seat check judges capacity.
   """
   use Wardmast.DataCase, async: false
 
@@ -98,11 +98,6 @@ defmodule Wardmast.Agents.ProviderRoutingWalkTest do
 
     task = Ash.create!(Issue, %{title: "walk me", workspace_id: ws.id})
     quota = opts([{paced, ahead_of_pace()}, {full, fresh_codex()}])
-
-    # Dispatch's view: both dropped, on capacity and on pace.
-    legacy = ProviderRouting.availability(ws, task, quota)
-    assert legacy.available == []
-    assert Enum.sort(Enum.map(legacy.dropped, & &1.reason)) == ["at_capacity", "quota_held"]
 
     # The walk's: both eligible, ranked as routing ranks them; the budgets decide.
     walk = ProviderRouting.availability(ws, task, Keyword.put(quota, :admission, :walk))

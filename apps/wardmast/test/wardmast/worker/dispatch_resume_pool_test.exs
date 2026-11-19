@@ -23,8 +23,6 @@ defmodule Wardmast.Worker.DispatchResumePoolTest do
     # held by it, only by the account seat check.
     ResumeSlotFixture.put_local_cap(10)
 
-    on_exit(fn -> Wardmast.Settings.set_scheduler_admission(nil) end)
-
     ws =
       Ash.create!(Workspace, %{
         name: "rp-#{System.unique_integer([:positive])}",
@@ -49,8 +47,6 @@ defmodule Wardmast.Worker.DispatchResumePoolTest do
         implementer_family: "google"
       })
       |> Ash.update!()
-
-    {:ok, "enforce"} = Wardmast.Settings.set_scheduler_admission("enforce")
 
     %{ws: ws, claude: claude, agy: agy, task: task}
   end

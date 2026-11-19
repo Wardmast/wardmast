@@ -1,6 +1,6 @@
 defmodule Wardmast.Board.AdmissionShadowTest do
   @moduledoc """
-  What `scheduler_admission: shadow` records (DC6, provider-dynamic-concurrency
+  What the admission shadow records (DC6, provider-dynamic-concurrency
   §10.2): beside every dispatch, the walk's decision as
   `routing_decision.admission_shadow`; on every hold change, one
   `admission_shadow_events` row with both decisions and every budget —

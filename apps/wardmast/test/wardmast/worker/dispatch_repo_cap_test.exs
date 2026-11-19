@@ -3,7 +3,7 @@ defmodule Wardmast.Worker.DispatchRepoCapTest do
   `ensure_repo_capacity/2` (DC9, bd-7oy77e; design
   `docs/design/provider-dynamic-concurrency.md` §5.2): a fresh dispatch into a
   repo at its `worker.repos.<repo>.max_concurrent` is refused, a follow-up never
-  is, and until `scheduler_admission: enforce` (DC8) it decides nothing (I1, I2).
+  is.
   """
   use Wardmast.DataCase, async: false
 
@@ -50,8 +50,7 @@ defmodule Wardmast.Worker.DispatchRepoCapTest do
     defaults = [
       dispatched_by: "autopilot",
       repo: @repo,
-      start_driver: false,
-      scheduler_admission: :enforce
+      start_driver: false
     ]
 
     Dispatch.dispatch(issue.id, Keyword.merge(defaults, opts))
@@ -63,7 +62,7 @@ defmodule Wardmast.Worker.DispatchRepoCapTest do
     |> Ash.read!()
   end
 
-  describe "under enforce" do
+  describe "repo cap" do
     test "a fresh dispatch is admitted up to the cap, then refused with who holds the run",
          %{ws: ws} do
       first = ready!(ws, "first")
@@ -125,7 +124,7 @@ defmodule Wardmast.Worker.DispatchRepoCapTest do
 
     test "a follow-up of an In-progress ticket is never held by the cap", %{ws: ws} do
       first = backlog!(ws, "interrupted")
-      # Started under `legacy`, where the cap decides nothing.
+      # Started with `force: true`, outside the cap.
       {:ok, %{worker_pid: pid}} =
         Dispatch.dispatch(first.id, force: true, repo: @repo, start_driver: false)
 
@@ -141,72 +140,11 @@ defmodule Wardmast.Worker.DispatchRepoCapTest do
       assert {:ok, %{worker_pid: resumed}} =
                Dispatch.resume(first.id,
                  start_driver: false,
-                 resume_origin: :human,
-                 scheduler_admission: :enforce
+                 resume_origin: :human
                )
 
       assert is_pid(resumed)
       assert RepoCap.count(ws.id, @repo) == 2
-    end
-  end
-
-  describe "before DC8 (legacy and shadow)" do
-    for mode <- [:legacy, :shadow] do
-      test "#{mode}: the cap decides nothing and no count is read", %{ws: ws} do
-        {:ok, _} = dispatch(ready!(ws, "first"), scheduler_admission: unquote(mode))
-        {:ok, _} = dispatch(ready!(ws, "second"), scheduler_admission: unquote(mode))
-
-        assert RepoCap.count(ws.id, @repo) == 2
-        assert RepoCap.pending() == []
-      end
-    end
-
-    test "the mode defaults to the installation's scheduler_admission setting (legacy)", %{ws: ws} do
-      {:ok, _} = dispatch(ready!(ws, "first"), scheduler_admission: nil)
-      assert {:ok, _} = dispatch(ready!(ws, "second"), scheduler_admission: nil)
-    end
-  end
-
-  describe "per-account admission override (O11)" do
-    defp attach!(ws, slug, admission) do
-      {:ok, account} =
-        Ash.create(Wardmast.Accounts.ProviderAccount, %{
-          provider: :claude,
-          slug: slug,
-          admission: admission
-        })
-
-      {:ok, _} = Wardmast.Accounts.attach_workspace(ws.id, :claude, account.id)
-      account
-    end
-
-    test "an account in enforce refuses at the cap while the installation key is legacy", %{
-      ws: ws
-    } do
-      attach!(ws, "o11-enforce", :enforce)
-
-      {:ok, _} = dispatch(ready!(ws, "first"), scheduler_admission: nil)
-
-      assert {:error, {:repo_at_capacity, _}} =
-               dispatch(ready!(ws, "second"), scheduler_admission: nil)
-    end
-
-    test "an account in shadow decides nothing even when the installation key enforces", %{ws: ws} do
-      {:ok, _} = Wardmast.Settings.set_scheduler_admission(:enforce)
-      attach!(ws, "o11-shadow", :shadow)
-
-      {:ok, _} = dispatch(ready!(ws, "first"), scheduler_admission: nil)
-      assert {:ok, _} = dispatch(ready!(ws, "second"), scheduler_admission: nil)
-    end
-
-    test "an account with no override follows the installation key", %{ws: ws} do
-      {:ok, _} = Wardmast.Settings.set_scheduler_admission(:enforce)
-      attach!(ws, "o11-inherit", nil)
-
-      {:ok, _} = dispatch(ready!(ws, "first"), scheduler_admission: nil)
-
-      assert {:error, {:repo_at_capacity, _}} =
-               dispatch(ready!(ws, "second"), scheduler_admission: nil)
     end
   end
 end

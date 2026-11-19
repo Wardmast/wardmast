@@ -487,13 +487,12 @@ defmodule Wardmast.Nodes.LocalCapacityTest do
     end
   end
 
-  # DC8 (design provider-dynamic-concurrency §2.2, I9): under
-  # `scheduler_admission: enforce` a resume or re-dispatch of a ticket already In
+  # DC8 (design provider-dynamic-concurrency §2.2, I9): a resume or re-dispatch of a ticket already In
   # progress is a follow-up of work in flight. `Worker.Dispatch` asks with
   # `follow_up: true`, and the primary's cap then holds it only as it holds the
-  # review-side follow-ups: at 0, or on a hard derate. Without the option (every
-  # legacy and shadow dispatch) the `:at_cap` rule above is unchanged.
-  describe "a follow-up under enforce (follow_up: true)" do
+  # review-side follow-ups: at 0, or on a hard derate.
+  # Without the option the `:at_cap` rule above is unchanged.
+  describe "a follow-up (follow_up: true)" do
     test "a resume or re-dispatch goes over a cap OTHER tickets fill, and is counted", %{ws: ws} do
       {:ok, 2} = Wardmast.Nodes.set_local_max_workers(2, nil)
       fake_worker(ws)

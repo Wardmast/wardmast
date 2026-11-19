@@ -75,7 +75,7 @@ defmodule Wardmast.Worker.GuardrailDispatchTest do
       provider: "claude",
       utilization_5h: u5,
       reset_5h_at: ahead(9_000),
-      status_5h: "allowed",
+      status_5h: if(u5 >= 0.99, do: "rejected", else: "allowed"),
       utilization_7d: 0.0,
       reset_7d_at: ahead(302_400),
       status_7d: "allowed",

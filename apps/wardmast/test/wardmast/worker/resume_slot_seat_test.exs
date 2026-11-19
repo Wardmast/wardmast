@@ -1,6 +1,6 @@
 defmodule Wardmast.Worker.ResumeSlotSeatTest do
   @moduledoc """
-  `ResumeSlot.admit/2` under `scheduler_admission: enforce` (DC8, design
+  `ResumeSlot.admit/2` under seat admission (DC8, design
   `provider-dynamic-concurrency.md` §3.2, §7): the board's slot cap becomes the
   pin pool's seat check.
 
@@ -9,11 +9,9 @@ defmodule Wardmast.Worker.ResumeSlotSeatTest do
     * A ticket not In progress (a revise of a Merging ticket, a requeued one)
       goes back into In progress: it needs a free seat on its pin pool
       (`Wardmast.Accounts.SeatCheck`), and is deferred (automatic), refused
-      (human) or forced over, exactly as at a full cap today.
+      (human) or forced over, exactly as at a full cap.
     * A CI fix or conflict pass (`follow_up: true`, `PassAdmission`) is a
       follow-up of in-flight work and is never held for a full pool (I9).
-
-  Under `legacy` the same calls are today's slot rule.
   """
   use Wardmast.DataCase, async: false
 
