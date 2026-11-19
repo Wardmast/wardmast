@@ -2,13 +2,16 @@ defmodule Wardmast.Doctor.Platform do
   @moduledoc """
   What `arb server doctor` needs to know about the host the *server* runs on
   (`GET /api/server/platform`): its OS, the PATH it hands workers, and where the
-  worker tools resolve on that PATH.
+  worker tools resolve on that PATH, and each provider CLI's detection
+  (`Wardmast.Agents.CliDetection`).
 
   The doctor CLI may run on a different machine (`WARDMAST_HOST`) and from an
   interactive shell whose PATH differs from the launchd-started server's, so the
   platform and tool lookups are answered here, on the server, never by the CLI.
   """
 
+  alias Wardmast.Agents.CliDetection
+  alias Wardmast.Boot.LoginShellPath
   alias Wardmast.Worker.SpawnEnv
 
   @tools ~w(gtimeout claude gh glab mise)
@@ -25,7 +28,11 @@ defmodule Wardmast.Doctor.Platform do
     %{
       os: os_name(os),
       path: path,
-      tools: Map.new(@tools, &{&1, find.(&1, path)})
+      tools: Map.new(@tools, &{&1, find.(&1, path)}),
+      # bd-5wfsj7: each provider CLI's install state and version against its
+      # minimum, and how the server's PATH was built (login shell vs inherited).
+      clis: Keyword.get_lazy(opts, :clis, fn -> CliDetection.detect_all(path: path) end),
+      path_source: Keyword.get_lazy(opts, :path_source, &LoginShellPath.info/0)
     }
   end
 

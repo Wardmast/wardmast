@@ -116,6 +116,9 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # bd-7i9pxn (G18): the host agent CLI's `--version` (the harness version a run
     # records), via `ReleaseEnv.cmd/3`.
     "apps/wardmast/lib/wardmast/agents/harness_version.ex" => :scrubbed,
+    # bd-5wfsj7: the operator's login shell (`$SHELL -l -i -c`) asked for its PATH
+    # once at boot, via `ReleaseEnv.cmd/3`.
+    "apps/wardmast/lib/wardmast/boot/login_shell_path.ex" => :scrubbed,
     # bd-8w5rn3: `git rev-parse --git-common-dir` to find the writable root.
     "apps/wardmast/lib/wardmast/agents/codex.ex" => :pure_tool,
     "apps/wardmast/lib/wardmast/worker/worktree.ex" => :scrubbed,

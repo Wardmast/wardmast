@@ -18,6 +18,7 @@ defmodule Wardmast.Worker.DispatchRefusalKindTest do
     {{:sandbox_backend, :gemini, "p"}, :conflict},
     {{:capability_missing, :claude, "p"}, :conflict},
     {{:below_floor, :claude, "p"}, :conflict},
+    {{:cli_version, "claude", "p"}, :conflict},
     {{:slot_cap_full, %{}}, :conflict},
     {:no_repo_configured, :invalid},
     {{:repo_not_found, "r"}, :invalid},

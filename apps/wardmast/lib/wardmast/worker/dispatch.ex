@@ -68,6 +68,7 @@ defmodule Wardmast.Worker.Dispatch do
   alias Wardmast.Agents
   alias Wardmast.Agents.CapabilityMatrix
   alias Wardmast.Agents.Claude.CredentialCheck
+  alias Wardmast.Agents.CliDetection
   alias Wardmast.Agents.Floors
   alias Wardmast.Agents.Gemini.Config, as: GeminiConfig
   alias Wardmast.Agents.GrokRouting
@@ -260,6 +261,7 @@ defmodule Wardmast.Worker.Dispatch do
          :ok <- ensure_provider_constraint(task, opts),
          :ok <- ensure_guardrails(task, opts),
          :ok <- ensure_sandbox_backend(task, opts),
+         :ok <- ensure_cli_version(task, opts),
          :ok <- ensure_capability(task, opts),
          :ok <- ensure_floor(task, opts),
          :ok <- maybe_pause_gate(task, opts),
@@ -1938,6 +1940,7 @@ defmodule Wardmast.Worker.Dispatch do
              :provider_constraint,
              :guardrail_ineligible,
              :sandbox_backend,
+             :cli_version,
              :capability_missing,
              :below_floor,
              :slot_cap_full
@@ -2346,6 +2349,24 @@ defmodule Wardmast.Worker.Dispatch do
            ProviderRouting.backend_refusal(policy, provider, workspace),
          false <- auto_keeps_local_bwrap?(policy, provider, workspace) do
       {:error, {:sandbox_backend, provider, "held — " <> detail}}
+    else
+      _ -> :ok
+    end
+  end
+
+  # bd-5wfsj7: the host CLI the dispatch will spawn must meet its minimum
+  # supported version, or the dispatch is refused with the installed and the
+  # required version instead of failing mid-run. Not asked for a review (its
+  # provider is picked in `ReviewerRouting`) nor under the podman backend, where
+  # the run uses the image's CLI, not the host's. A missing CLI is `Preflight`'s.
+  defp ensure_cli_version(%Issue{} = task, opts) do
+    workspace = load_workspace(task)
+    policy = routing_security(workspace, opts)
+
+    with false <- Keyword.get(opts, :review, false) == true,
+         %SecurityPolicy{} <- policy,
+         false <- SecurityPolicy.sandbox_backend(policy) == :podman do
+      CliDetection.gate(quota_gate_provider(task, workspace, opts))
     else
       _ -> :ok
     end

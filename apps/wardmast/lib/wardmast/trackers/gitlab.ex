@@ -38,7 +38,11 @@ defmodule Wardmast.Trackers.Gitlab do
 
   ## Auth
 
-  GitLab uses a `PRIVATE-TOKEN` header. The credentials reference lives in the
+  GitLab uses a `PRIVATE-TOKEN` header, and the same token as an
+  `Authorization: Bearer` credential. The header GitLab honours depends on the
+  token kind: a personal/project access token is accepted in either, but an
+  OAuth access token (what the dashboard's device flow stores) is only accepted
+  as a Bearer credential. The credentials reference lives in the
   tracker config; `credentials_ref` is the shared small DSL — `"env:NAME"`
   looks up `System.get_env/1`, `"secret:KEY"` reads a workspace secret, and a
   bare string is treated as a literal token.
@@ -860,6 +864,7 @@ defmodule Wardmast.Trackers.Gitlab do
   defp headers(%{token: token}) do
     [
       {"private-token", token},
+      {"authorization", "Bearer " <> token},
       {"accept", "application/json"},
       {"content-type", "application/json"},
       {"user-agent", "arbiter"}

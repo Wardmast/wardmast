@@ -670,6 +670,12 @@ defmodule Wardmast.MCP.Tools.Worker do
       "#{phrase} — dispatch refused; waiting will not fix it. Raise the model, or change the " <>
         "repo's `routing.floors.repos.<repo>.min_model_tier` (operator-owned)"
 
+  # bd-5wfsj7: the provider's CLI on this host is below its minimum supported
+  # version. The phrase already reads `held — <CLI> <installed> … below the
+  # minimum supported version <min>; upgrade it (`<command>`)`.
+  defp dispatch_error_message({:cli_version, _provider, phrase}),
+    do: "#{phrase} — dispatch refused; it will go through once the CLI is upgraded"
+
   defp dispatch_error_message(other), do: "dispatch failed: #{inspect(other)}"
 
   # bd-8lq2g7: `{:worker_active, …}` is rendered from the /2 arity so the message

@@ -300,6 +300,26 @@ dispatch work you trust to a macOS coordinator, and keep an eye on memory use.
 See [worker-security.md](worker-security.md) and
 [worker-memory-cap.md](worker-memory-cap.md) for what those controls do on Linux.
 
+## Provider CLIs and the server's PATH
+
+The server detects `claude`, `codex` and `agy`/`gemini` (installed? where? which
+version?) and shows the result on the Providers page and in
+`ward server doctor`. Each provider has a minimum supported version
+(`Wardmast.Agents.CliDetection`; override with
+`config :wardmast, Wardmast.Agents.CliDetection, min_versions: %{"codex" => "..."}`):
+dispatch to a provider whose CLI is below it is refused with the installed and
+the required version. A missing or outdated CLI shows the vendor's documented
+install/upgrade command on the Providers page, to copy and run yourself;
+Wardmast never runs an installer.
+
+A server started from a GUI session (a LaunchAgent, a desktop entry) inherits
+only `/usr/bin:/bin:/usr/sbin:/sbin`. When the `PATH` it starts with holds
+nothing else, it asks your login shell once at boot (`$SHELL -l -i -c`, 5 s
+timeout, `/bin/zsh` if `SHELL` is unset) for the `PATH` your rc files build and
+uses it for CLI detection and for every spawn. A richer `PATH` is never
+replaced. `ward server doctor` shows `server PATH` when this happened, or a
+warning when the shell gave no answer.
+
 ## Troubleshooting
 
 - Service not starting: read `<arbiter_home>/log/wardmast.log` and
