@@ -67,11 +67,14 @@ defmodule Wardmast.Agents.Gemini.JailBwrapTest do
     echo "rename: $err"
     # whatever happened above, agy still reads the policy
     grep -q '"deny"' "$sys" && echo SETTINGS_INTACT
+    # how the settings file is mounted in the jail. Read before the directory is
+    # moved: a mount follows its directory, so afterwards $sys is no mount point
+    grep -F " $sys " /proc/self/mountinfo | sed 's/^/MOUNTINFO: /'
     # recorded, not asserted: moving the directory aside is the residual
     # (see ConfigDir's moduledoc); only a directory-level bind would stop it
     err=$(mv "$dir" "$dir.aside" 2>&1) && echo "DIR_RENAME: succeeded" || echo "DIR_RENAME: refused: $err"
-    # how the settings file is mounted in the jail
-    grep -F " $sys " /proc/self/mountinfo | sed 's/^/MOUNTINFO: /'
+    # put it back: the bind went through to the host, whose assertions follow
+    [ -d "$dir.aside" ] && mv "$dir.aside" "$dir"
     exit 0
     """)
 
