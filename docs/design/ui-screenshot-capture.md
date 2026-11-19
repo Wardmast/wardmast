@@ -4,8 +4,9 @@
 **Builds on:** [podman worker containers](podman-worker-containers.md),
 [remote workers](remote-workers.md), [app preview](../app-preview.md),
 [visual-baseline refresh](../visual-baseline-refresh.md),
-[worker security](../worker-security.md) · **Status:** proposed 2026-11-19.
-Nothing here is implemented. The ticket plan is in [§11](#11-changes-to-the-sibling-tickets).
+[worker security](../worker-security.md) · **Status:** proposed 2026-11-19; **partly superseded.** A host-side capture
+run by the ReviewGate shipped instead of the pod pass (§2 and §11 record what shipped).
+Operator guide: [screenshots.md](../screenshots.md).
 
 **Operator requirement (2026-11-19).** The before/after screenshots render **inline in the
 PR/MR description itself on both forges**. The ticket attachment and the dashboard are
@@ -48,6 +49,21 @@ Three findings from the code shaped these and are easy to miss:
 | **B. A CI job whose artifacts Arbiter reads** (as visual-baselines does) | Real CI environment; no capture code in Arbiter | Needs a job *in every repo's pipeline*, and the GitHub App token this deployment uses cannot create or edit `.github/workflows/`, so Arbiter could not even add it. CI runs the head only: the before shot needs a second boot at the merge-base, i.e. a second job plus matrix wiring per repo. Latency is the CI queue; artifacts expire (visual-baselines already documents that); fork/merged-results pipelines run at a different SHA. The worker→Arbiter contract (§5) would have to be a CI input. Visual-baselines can lean on CI because the repo *already* has a Playwright suite; capture-of-arbitrary-routes does not |
 | **C. A separate Arbiter-run pass in a fresh pod (chosen)** | Clean, reproducible, credential-free sandbox; placeable on a node or the primary; same image as the repo's worker, so the app boots with the toolchain it was built for; idempotent, so loss is retried | New pass kind and a Chromium sidecar image |
 | D. On the primary host with the existing `preview` machinery | Already boots the app, allocates ports (`preview_leases`), reads the same `command`/`setup` | Runs on the host with the host's toolchain, not the repo's worker image, and **needs the toolchain installed on the primary** (remote nodes only ever run podman, so the primary may have none). No network isolation: a mis-pointed `DATABASE_URL` reaches whatever the host can reach. The cluster does not help |
+
+### What shipped, and what is superseded
+
+> **Superseded / deferred.** The pod-based `:capture_pass` below (option C, the N2 ticket) was
+> **not built**. What shipped is a **host-side capture gated by the ReviewGate**
+> (`Screenshots.Capture` + `Worker.ReviewGate.ScreenshotGate`): it runs on the Arbiter host
+> before a reviewer is dispatched, boots the app at the merge-base and the head in turn
+> (`Booter.Command`, scrubbed env, no network isolation), shoots with host Chromium
+> (`$ARB_CHROME` or `chromium` on `PATH`, `--no-sandbox`), and routes the result as described
+> under "Implemented" below. It does not use `Nodes.Placement`/`PassPlacement`, a podman pod,
+> the `arbiter-capture` sidecar, `screenshot_captures`, debounce/re-capture, or a merge wait.
+> The pod design stays as the deferred route if network isolation is wanted; the
+> operator-facing trade-offs are in [screenshots.md](../screenshots.md).
+
+The text below up to "Implemented" is the **original proposal**.
 
 ### Decision
 
@@ -669,6 +685,14 @@ is a seeds-review problem, and `seed_cmd` comes from the repo or config, never f
   pruned per §7.3. Prune ≠ delete from the forge's history.
 
 ## 11. Changes to the sibling tickets
+
+> **Status (2026-11-19).** Shipped: config (`bbwppc`), plan contract (N3, in part), hosting and
+> composition (`3tox5h`: GitHub assets branch, GitLab uploads, `public_repo_ok` fail-closed),
+> ticket attachments (`5hlegn`), the ReviewGate capture step, and the operator doc (N5,
+> `docs/screenshots.md`). **Superseded/deferred:** N2 (pod capture pass), the `arbiter-capture`
+> sidecar retarget of `6301r0`, N1's Node runner (the host shooter drives Chromium directly).
+> **Not shipped:** N4 (DOM text scan/withholding, marker probe) and the `screenshot_*`
+> attention causes other than `screenshot_capture_failed`. The table below is the original plan.
 
 The design changes scope in these four, and needs five new tickets. Order:
 `bbwppc` and `6301r0` first (parallel) → N1 → N2 → `3tox5h` and `5hlegn` integrate → N3, N4 land
