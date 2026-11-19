@@ -54,7 +54,7 @@ defmodule Wardmast.Extensions.Core do
 
   defp values do
     types = ~w(task research bug feature epic chore decision)
-    kinds = ~w(coordinator login)
+    kinds = ~w(coordinator login pair)
 
     Enum.map(types, &{:issue_type, &1, Values}) ++ Enum.map(kinds, &{:session_kind, &1, Values})
   end

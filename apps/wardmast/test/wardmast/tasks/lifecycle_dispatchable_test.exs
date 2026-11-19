@@ -181,4 +181,39 @@ defmodule Wardmast.Tasks.LifecycleDispatchableTest do
       assert Lifecycle.dispatchable(ticket(:queued), %{local_capacity: nil}) == :ok
     end
   end
+
+  describe "a pair-session claim (bd-7p6a9o)" do
+    @session "8f2c41d0-0000-4000-8000-000000000001"
+
+    test "is the ticket's own hold, ahead of every scheduler and board-wide hold" do
+      ctx = %{
+        pair_session: {:hold, @session},
+        conflicts_with: ["bd-2"],
+        claimed: ["bd-2"],
+        provider_constraint: {:hold, "no account"},
+        guardrail: {:hold, "no eligible model"},
+        paused: true,
+        slots_free: 0
+      }
+
+      assert Lifecycle.dispatchable(ticket(:queued), ctx) == {:held, {:pair_session, @session}}
+      refute Lifecycle.dispatchable?(ticket(:queued), ctx)
+    end
+
+    test "the column still comes first" do
+      ctx = %{pair_session: {:hold, @session}}
+      assert Lifecycle.dispatchable(ticket(:backlog), ctx) == {:held, {:column, :backlog}}
+    end
+
+    test "names the session that holds the claim" do
+      phrase = Lifecycle.describe_hold({:pair_session, @session})
+      assert phrase =~ "pair session"
+      assert phrase =~ String.slice(@session, 0, 8)
+    end
+
+    test "nil, or a ctx that does not ask, is not held" do
+      assert Lifecycle.dispatchable(ticket(:queued), %{pair_session: nil}) == :ok
+      assert Lifecycle.dispatchable(ticket(:queued), %{}) == :ok
+    end
+  end
 end

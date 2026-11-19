@@ -65,7 +65,7 @@ defmodule Wardmast.Usage.Event do
 
   | source | `task_id` | who writes it |
   |---|---|---|
-  | `:task` | set | `Wardmast.Worker` (work / review / impl), `Wardmast.Reviews.ExternalReview` |
+  | `:task` | set | `Wardmast.Worker` (work / review / impl), `Wardmast.Reviews.ExternalReview`, and a pair session's transcript (`Wardmast.Sessions.UsageIngest`, `role: "pair"`, bd-7p6a9o) |
   | `:probe` | nil | historical: `Wardmast.Quota.RefreshProbe` — one `claude --print` per workspace to refresh the quota snapshot, deleted in bd-atyrrq once the quota poll made it unnecessary |
   | `:preflight` | nil as of bd-2jgs2h (2026-09-18) | `Wardmast.Agents.Preflight` via the `CredentialWatchdog`'s task-less periodic probe — the sole live producer. Task-attributed rows predating bd-2jgs2h are historical: a per-dispatch / per-resume auth check used to write them before it was retired (see `Wardmast.Worker.Dispatch`'s moduledoc and `docs/quota-and-auth.md`) |
   | `:coordinator_session` | nil | a browser-hosted coordinator session (bd-cyxzvq), attributed by `session_id` |

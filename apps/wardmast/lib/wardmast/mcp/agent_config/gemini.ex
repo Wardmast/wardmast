@@ -133,6 +133,10 @@ defmodule Wardmast.MCP.AgentConfig.Gemini do
   # skill tools, kept off a smaller-context agent's menu. The server still
   # authorizes by token, so an excluded tool stays callable; it is just not
   # advertised. `Wardmast.MCP.AgentConfigTest` pins each entry to a real tool.
+  #
+  # `pair_done` (bd-7p6a9o) is worker-tier only so that a pair session's own
+  # ticket token can finish it; a dispatched worker has no pair session, so the
+  # tool would only ever refuse it.
   @excluded_worker_tools ~w(
     quota_get
     dep_list
@@ -142,6 +146,7 @@ defmodule Wardmast.MCP.AgentConfig.Gemini do
     skill_list
     skill_get
     flake_record
+    pair_done
   )
 
   @doc """

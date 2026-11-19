@@ -236,11 +236,36 @@ defmodule Wardmast.Mergers.Github do
       # POST (or the lookup itself fails).
       case find_existing_open_pr_number(cfg, owner, repo, branch) do
         {:ok, number} ->
+          add_labels(cfg, owner, repo, number, Map.get(opts, :labels))
           {:ok, build_mr_ref(ref_form, owner, repo, number)}
 
         _ ->
           create_pr(cfg, owner, repo, ref_form, branch, title, description, opts)
       end
+    end
+  end
+
+  # bd-7p6a9o: `opts[:labels]` (a pair session's `pair-authored`). GitHub
+  # labels the issue behind a PR, so it is a call of its own, made after a
+  # create *and* after an adopt — the PR a ReviewGate round opened for review
+  # is adopted, never re-created, when the merge path opens it. Best-effort: a
+  # label is decoration, and failing the open over one would strand a merge.
+  defp add_labels(_cfg, _owner, _repo, _number, labels) when labels in [nil, []], do: :ok
+
+  defp add_labels(cfg, owner, repo, number, labels) when is_list(labels) do
+    case request(cfg, :post, "/repos/#{owner}/#{repo}/issues/#{number}/labels",
+           json: %{"labels" => labels}
+         ) do
+      {:ok, %Req.Response{status: status}} when status in 200..299 ->
+        :ok
+
+      other ->
+        Logger.warning(
+          "Mergers.Github: could not label #{owner}/#{repo}##{number} " <>
+            "#{inspect(labels)}: #{inspect(other)}"
+        )
+
+        :ok
     end
   end
 
@@ -264,6 +289,7 @@ defmodule Wardmast.Mergers.Github do
       when status in 200..299 and is_integer(number) ->
         mr_ref = build_mr_ref(ref_form, owner, repo, number)
         maybe_request_reviewers(cfg, owner, repo, number, reviewers(cfg, opts))
+        add_labels(cfg, owner, repo, number, Map.get(opts, :labels))
         {:ok, mr_ref}
 
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
@@ -284,9 +310,15 @@ defmodule Wardmast.Mergers.Github do
         # step is what the caller actually wants on retry.
         if already_exists_error?(body) do
           case find_existing_open_pr_number(cfg, owner, repo, branch) do
-            {:ok, number} -> {:ok, build_mr_ref(ref_form, owner, repo, number)}
-            :none -> {:error, http_error(422, body)}
-            {:error, _} -> {:error, http_error(422, body)}
+            {:ok, number} ->
+              add_labels(cfg, owner, repo, number, Map.get(opts, :labels))
+              {:ok, build_mr_ref(ref_form, owner, repo, number)}
+
+            :none ->
+              {:error, http_error(422, body)}
+
+            {:error, _} ->
+              {:error, http_error(422, body)}
           end
         else
           {:error, http_error(422, body)}

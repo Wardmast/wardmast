@@ -85,6 +85,7 @@ defmodule Wardmast.Board.Snapshot do
   alias Wardmast.Nodes.LocalCapacity
   alias Wardmast.Nodes.Placement
   alias Wardmast.Quota.Gate
+  alias Wardmast.Sessions.Pair
   alias Wardmast.Tasks.EdgeGate
   alias Wardmast.Tasks.Lifecycle
   alias Wardmast.Tasks.PullRequest
@@ -294,6 +295,7 @@ defmodule Wardmast.Board.Snapshot do
         card_guardrail: Map.get(input, :card_guardrail, %{}),
         card_local: Map.get(input, :card_local, %{}),
         card_ci: Map.get(input, :card_ci, %{}),
+        card_pair: Map.get(input, :card_pair, %{}),
         paused: paused?
       })
 
@@ -357,6 +359,7 @@ defmodule Wardmast.Board.Snapshot do
         running: queue.running,
         conflict_claims: queue.conflict_claims,
         card_guardrail: Map.get(input, :card_guardrail, %{}),
+        card_pair: Map.get(input, :card_pair, %{}),
         dispatch_holds: Map.get(input, :dispatch_holds, %{}),
         paused: paused?,
         walk: walk
@@ -524,6 +527,7 @@ defmodule Wardmast.Board.Snapshot do
         end),
       card_local: Keyword.get_lazy(opts, :card_local, fn -> ticket_local_holds(issues) end),
       card_ci: Keyword.get_lazy(opts, :card_ci, fn -> ticket_ci_holds(issues, opts) end),
+      card_pair: Keyword.get_lazy(opts, :card_pair, fn -> ticket_pair_holds(issues) end),
       dispatch_holds: Keyword.get(opts, :dispatch_holds, %{}),
       resume_queued: Keyword.get(opts, :resume_queued, []),
       local_held: Keyword.get(opts, :local_held, []),
@@ -1271,6 +1275,20 @@ defmodule Wardmast.Board.Snapshot do
       |> Enum.group_by(&Map.get(&1, :workspace_id))
       |> Enum.flat_map(fn {ws_id, tickets} -> local_holds(safe_workspace(ws_id), tickets) end)
       |> Map.new()
+    end
+  rescue
+    _ -> %{}
+  end
+
+  # bd-7p6a9o: a card a live pair session claims is held by its own hold. One
+  # indexed read of the live pair sessions for the whole board; a failed read
+  # holds nothing here, because `Wardmast.Worker.Dispatch` asks again — fail
+  # closed — before any worker starts.
+  defp ticket_pair_holds(issues) do
+    ids = MapSet.new(issues, &Map.get(&1, :id))
+
+    for {issue_id, session_id} <- Pair.claims(), MapSet.member?(ids, issue_id), into: %{} do
+      {issue_id, {:hold, session_id}}
     end
   rescue
     _ -> %{}

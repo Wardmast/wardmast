@@ -42,6 +42,8 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
     * `:ci_saturated` — `:ok`, or `{:hold, detail}`: the ticket's repo has too many
       MR pipelines waiting on a CI runner (`Wardmast.Board.CiBackpressure`, #1126);
     * `:slots_free` — free slots; absent means "not asked".
+    * `:pair_session` — `{:hold, session_id}` while a live pair session claims
+      the ticket (`Wardmast.Sessions.Pair`, bd-7p6a9o); absent or `nil` otherwise.
 
   ## Holds, in precedence order
 
@@ -54,6 +56,7 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
   | `{:column, :backlog}` | in Backlog — not promoted |
   | `{:blocked_by, ids}` | queued, waiting on these blockers |
   | `{:column, column}` | already past Ready (`:in_progress`, `:merging`, `:verifying`, `:closed`) |
+  | `{:pair_session, session_id}` | a live pair session claims the ticket (bd-7p6a9o) |
   | `{:conflicts_with, id}` | a `:conflicts_with` counterpart is in flight |
   | `{:file_overlap, files, id, source}` | files `id` has changed (`source` is `:diff`) in the same repo that this ticket's text declares; text mentions on the in-flight side never count |
   | `{:provider_constraint, detail}` | the ticket's provider constraint leaves no eligible account |
@@ -81,6 +84,7 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
           | :paused
           | {:quota, String.t()}
           | :no_slot
+          | {:pair_session, String.t()}
 
   @type result :: :ok | {:held, hold()}
 
@@ -96,6 +100,7 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
   @spec dispatchable(map(), map()) :: result()
   def dispatchable(ticket, ctx \\ %{}) when is_map(ticket) and is_map(ctx) do
     with :ok <- column_hold(View.view(ticket, Map.take(ctx, [:blocked_by, :runs, :held]))),
+         :ok <- pair_session_hold(ctx),
          :ok <- mutex_hold(ctx),
          :ok <- overlap_hold(ctx),
          :ok <- provider_constraint_hold(ctx),
@@ -127,7 +132,21 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
   def describe_hold({:quota, reason}), do: reason
   def describe_hold(:no_slot), do: "no free worker slot"
 
+  def describe_hold({:pair_session, session_id}),
+    do: "claimed by a live pair session (#{String.slice(to_string(session_id), 0, 8)})"
+
   # ---- holds ----------------------------------------------------------------
+
+  # bd-7p6a9o: a live pair session claims its ticket outright — an operator
+  # and an agent are working in its worktree, and a worker beside them would
+  # interleave commits on the same branch. The ticket's own hold, and the
+  # strongest one: nothing the scheduler could free up (a slot, a quota
+  # window, a counterpart merging) makes the ticket dispatchable while the
+  # session lives. Ending the session is the only release.
+  defp pair_session_hold(%{pair_session: {:hold, session_id}}),
+    do: {:held, {:pair_session, session_id}}
+
+  defp pair_session_hold(_ctx), do: :ok
 
   defp column_hold(%{column: :ready}), do: :ok
   # bd-abg443: a quota-held active ticket reads Blocked on the board but is

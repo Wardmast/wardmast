@@ -488,4 +488,26 @@ defmodule Wardmast.Board.SchedulerTest do
       assert plan(ready: [card("bd-1")]).promote == "bd-1"
     end
   end
+
+  describe "a pair-session claim (bd-7p6a9o)" do
+    @session "5b1e0c2a-0000-4000-8000-000000000002"
+
+    test "a claimed card is held by its own hold, naming the session, and the next card goes" do
+      plan =
+        plan(
+          ready: [card("bd-1"), card("bd-2")],
+          card_pair: %{"bd-1" => {:hold, @session}}
+        )
+
+      assert %{state: :blocked, reason: reason, hold: {:pair_session, @session}} =
+               reason(plan, "bd-1")
+
+      assert reason =~ "held — claimed by a live pair session"
+      assert plan.promote == "bd-2"
+    end
+
+    test "an unclaimed card is not held" do
+      assert plan(ready: [card("bd-1")], card_pair: %{}).promote == "bd-1"
+    end
+  end
 end

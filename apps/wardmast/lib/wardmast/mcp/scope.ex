@@ -27,6 +27,9 @@ defmodule Wardmast.MCP.Scope do
   | Tier | Reads | Writes | Dispatch |
   |---|---|---|---|
   | `:worker` | its own task, its mailbox, its workspace config | progress/qa/deployment notes on **its own task**; flags to siblings | never |
+
+  A pair session (bd-7p6a9o) holds a `:worker` token too (`mint_pair/4`): the
+  ticket's own scope, with the pair session's `session_id` making it revocable.
   | `:coordinator` | across any workspace on the installation | create/update/close tasks, deps (incl. `parent_of` grouping); dispatch | yes |
   | `:refine` | broadly across its **bound workspace** (tasks, graph reads, repos, skills, workspace config) | title/description/acceptance/typing/notes edits, `ticket_create`, dep edges and `ticket_promote` — **only inside the bound issue's `parent_of` subtree** | never |
 
@@ -244,6 +247,37 @@ defmodule Wardmast.MCP.Scope do
     |> MCP.mint(opts)
   end
 
+  @doc """
+  Mint the token a **pair session** holds (bd-7p6a9o): the ticket's own
+  `:worker`-tier token — reads and progress on that one ticket, its mailbox,
+  never dispatch — plus the `session_id` of the pair session, which makes it
+  revocable exactly like every other session token. A plain worker token
+  carries no session id and keeps verifying until it expires; this one stops
+  the moment the pair session ends (`from_token/1` → `check_revocation/1`).
+
+  The lifetime is the session token's (`MCP.max_age/0`), not a worker spawn's
+  4 h: a pair session is an interactive afternoon, not a one-shot run, and the
+  revocation handle is what bounds it.
+
+  `opts[:repo]` is the ticket's repo claim, as a dispatched worker's carries.
+  """
+  @spec mint_pair(String.t(), String.t(), String.t(), keyword()) :: String.t()
+  def mint_pair(session_id, workspace_id, issue_id, opts \\ [])
+      when is_binary(session_id) and session_id != "" and is_binary(workspace_id) and
+             workspace_id != "" and is_binary(issue_id) and issue_id != "" do
+    %{
+      tier: :worker,
+      workspace_id: workspace_id,
+      task_id: issue_id,
+      repo: nilable_string(Keyword.get(opts, :repo)),
+      session_id: session_id,
+      can_dispatch: false,
+      depth: Keyword.get(opts, :depth, 0),
+      permissions: permissions_claim(Keyword.get(opts, :permissions))
+    }
+    |> MCP.mint(Keyword.drop(opts, [:repo, :permissions, :depth, :workspace_id, :can_dispatch]))
+  end
+
   @doc "Whether `scope` carries operator proof (see `mint_coordinator/2`)."
   @spec operator?(t() | nil) :: boolean()
   def operator?(%__MODULE__{tier: :coordinator, operator: true}), do: true
@@ -274,6 +308,9 @@ defmodule Wardmast.MCP.Scope do
 
   def from_token(_), do: {:error, :invalid}
 
+  # A worker claim may carry a `session_id` only when a pair session minted it
+  # (`mint_pair/4`, bd-7p6a9o); a dispatched worker's never does. Carrying it
+  # through is what subjects the pair token to `check_revocation/1`.
   defp from_claims(%{tier: :worker, workspace_id: ws, task_id: task} = c)
        when is_binary(ws) and is_binary(task) do
     {:ok,
@@ -282,7 +319,7 @@ defmodule Wardmast.MCP.Scope do
        workspace_id: ws,
        task_id: task,
        repo: nilable_string(c[:repo]),
-       session_id: nil,
+       session_id: nilable_string(c[:session_id]),
        can_dispatch: false,
        depth: depth(c[:depth]),
        permissions: permissions_claim(c[:permissions])

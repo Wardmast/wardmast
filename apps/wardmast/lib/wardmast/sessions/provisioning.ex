@@ -95,6 +95,7 @@ defmodule Wardmast.Sessions.Provisioning do
   alias Wardmast.Sessions.Layout
   alias Wardmast.Sessions.Memory
   alias Wardmast.Sessions.Naming
+  alias Wardmast.Sessions.PairGuard
   alias Wardmast.Sessions.Provider
   alias Wardmast.Sessions.RepoCheckout
   alias Wardmast.Sessions.Session
@@ -135,6 +136,13 @@ defmodule Wardmast.Sessions.Provisioning do
       (`Wardmast.Sessions.Instructions.render/2`'s `:refine` option, bd-980x89)
       into the session's **cwd** as both `CLAUDE.md` and `AGENTS.md`, instead
       of the default coordinator `CLAUDE.md` at the session root.
+    * `:pair` — a `:pair` session's context (`Wardmast.Sessions.Pair`,
+      bd-7p6a9o): the ticket, its worktree, branch, base and repo. Renders the
+      pair instructions into the session's `CLAUDE_CONFIG_DIR/CLAUDE.md` (the
+      cwd is the ticket's worktree, whose own `CLAUDE.md` is the repo's), keeps
+      `.mcp.json` out of git, adds `Wardmast.Sessions.PairGuard`'s deny rules
+      to `settings.json`, and installs its push guard — a launch without a
+      branch to guard fails rather than coming up unguarded.
   """
   @spec provision(Session.t(), keyword()) :: {:ok, provisioned()} | {:error, term()}
   def provision(%Session{} = session, opts \\ []) do
@@ -146,6 +154,7 @@ defmodule Wardmast.Sessions.Provisioning do
     with :ok <- check_outside_primary_checkout(paths.root, opts),
          :ok <- check_outside_primary_checkout(cwd, opts),
          :ok <- make_directories(id, config_dir, cwd),
+         {:ok, opts} <- install_pair_guard(session, opts),
          {:ok, opts} <- provision_repo_checkout(session, opts),
          :ok <- write_instructions(session, paths, cwd, opts),
          :ok <- mount_memory(session, opts),
@@ -193,6 +202,21 @@ defmodule Wardmast.Sessions.Provisioning do
   # bd-98oj3s: a login session is unprivileged — never issued a token.
   def mint_token(%Session{kind: :login} = session, _opts) do
     raise ArgumentError, "session #{session.id} is a :login session; it is issued no MCP token"
+  end
+
+  # bd-7p6a9o: a pair session works its ticket the way a worker does, so it
+  # holds the ticket's worker-tier token — own-ticket reads and progress, no
+  # dispatch — carrying its session id so ending the session revokes it. It
+  # must win over the refine clause below, which matches any issue-bound row.
+  def mint_token(%Session{kind: :pair, issue_id: issue_id, workspace_id: ws} = session, opts)
+      when is_binary(issue_id) and issue_id != "" and is_binary(ws) and ws != "" do
+    MCP.Scope.mint_pair(session.id, ws, issue_id, opts)
+  end
+
+  def mint_token(%Session{kind: :pair} = session, _opts) do
+    raise ArgumentError,
+          "session #{session.id} is a :pair session without both its ticket and its " <>
+            "workspace binding; a pair token is the ticket's, and nothing else is a safe substitute"
   end
 
   def mint_token(%Session{issue_id: issue_id, workspace_id: workspace_id} = session, opts)
@@ -298,27 +322,75 @@ defmodule Wardmast.Sessions.Provisioning do
   # An agy session (bd-7xuvfl) gets one `GEMINI.md` in the cwd, refine or not:
   # agy's directory rules are `GEMINI.md`/`AGENTS.md`, and it reads both
   # names, so writing both would load the same doctrine twice.
+  #
+  # A pair session (bd-7p6a9o) is the one whose cwd is a real checkout — the
+  # ticket's worktree — whose own `CLAUDE.md`/`AGENTS.md` are tracked files of
+  # the repo and not Wardmast's to overwrite. Its instructions go to the
+  # session's `CLAUDE_CONFIG_DIR/CLAUDE.md`, the user-level memory Claude Code
+  # loads from any cwd: the same place a dispatched worker's doctrine lives.
   defp write_instructions(session, paths, cwd, opts) do
     content =
       Instructions.render(session,
         primary_checkout: Keyword.get(opts, :primary_checkout, Paths.explicit_primary_checkout()),
         mcp_server_name: MCP.server_name(),
-        refine: Keyword.get(opts, :refine)
+        refine: Keyword.get(opts, :refine),
+        pair: Keyword.get(opts, :pair)
       )
 
-    case {session.provider, Keyword.get(opts, :refine)} do
-      {:agy, _refine} ->
+    case {session.provider, Keyword.get(opts, :pair), Keyword.get(opts, :refine)} do
+      {:agy, _pair, _refine} ->
         write_file(Provider.Agy.instructions_path(session), content)
 
-      {_provider, nil} ->
+      {_provider, pair, _refine} when is_map(pair) ->
+        write_file(Path.join(session.config_dir || paths.config, "CLAUDE.md"), content)
+
+      {_provider, nil, nil} ->
         write_file(paths.instructions, content)
 
-      {_provider, _refine} ->
+      {_provider, nil, _refine} ->
         with :ok <- write_file(Path.join(cwd, "CLAUDE.md"), content) do
           write_file(Path.join(cwd, "AGENTS.md"), content)
         end
     end
   end
+
+  # bd-7p6a9o: a pair session's push guard. Its hooks are written under the
+  # session's own directory and reached only through the env `launch.sh`
+  # exports (`PairGuard.git_env/1`), so no git outside the session is touched.
+  # Fatal when it cannot be written: a pair session must not come up without
+  # the guard its doctrine promises.
+  defp install_pair_guard(%Session{kind: :pair} = session, opts) do
+    pair = Keyword.get(opts, :pair) || %{}
+    hooks = Layout.git_hooks_dir(session.id)
+
+    case PairGuard.install_hooks(hooks, %{branch: Map.get(pair, :branch), worktree: session.cwd}) do
+      :ok ->
+        {:ok,
+         Keyword.update(
+           opts,
+           :extra_env,
+           PairGuard.git_env(hooks),
+           &(&1 ++ PairGuard.git_env(hooks))
+         )}
+
+      {:error, reason} ->
+        {:error, {:pair_guard_failed, reason}}
+    end
+  end
+
+  defp install_pair_guard(_session, opts), do: {:ok, opts}
+
+  defp pair_deny_rules(%Session{kind: :pair}, checkout, opts) do
+    pair = Keyword.get(opts, :pair) || %{}
+
+    PairGuard.deny_rules(%{
+      branch: Map.get(pair, :branch),
+      target_branch: Map.get(pair, :target_branch),
+      primary_checkout: checkout
+    })
+  end
+
+  defp pair_deny_rules(_session, _checkout, _opts), do: []
 
   # A refine session's read-only grounding checkout (bd-1lszsc), provisioned
   # *before* the instructions so they can name the path — or say there is none.
@@ -399,11 +471,15 @@ defmodule Wardmast.Sessions.Provisioning do
   end
 
   defp seed_config_dir(session, config_dir, cwd, opts) do
+    checkout = Keyword.get(opts, :primary_checkout, Paths.primary_checkout())
+
     Interactive.ensure(config_dir,
       cwd: cwd,
       auth_mode: session.auth_mode,
       source_dir: credentials_source(opts),
-      primary_checkout: Keyword.get(opts, :primary_checkout, Paths.primary_checkout()),
+      primary_checkout: checkout,
+      # bd-7p6a9o: a pair session's own write scope, over the interactive floor.
+      extra_deny: pair_deny_rules(session, checkout, opts),
       # Pre-approve exactly the server `write_mcp_config/3` is about to declare,
       # and nothing when it is about to declare none (bd-5xlkkj). Without this a
       # first launch stops on "New MCP server found in this project: arbiter"
@@ -567,6 +643,7 @@ defmodule Wardmast.Sessions.Provisioning do
       # readable at the default umask. `File.write/2` truncates an existing file
       # without touching its mode, so the adapter's own write inherits 0600.
       with :ok <- touch_secret(path),
+           :ok <- exclude_from_git(session, cwd),
            :ok <-
              ClaudeMCP.write_mcp_config(cwd,
                mcp_url: MCP.server_url(),
@@ -592,8 +669,28 @@ defmodule Wardmast.Sessions.Provisioning do
   # its options straight into `Plug.Crypto.sign/4`. Only the claim-shaping and
   # TTL keys belong in a crypto call.
   defp mint_session_token(session, opts) do
-    mint_token(session, Keyword.take(opts, [:workspace_id, :can_dispatch, :max_age, :depth]))
+    mint_opts = Keyword.take(opts, [:workspace_id, :can_dispatch, :max_age, :depth])
+
+    # bd-7p6a9o: a pair token carries its ticket's repo claim, as a dispatched
+    # worker's does.
+    mint_opts =
+      case Keyword.get(opts, :pair) do
+        %{repo: repo} when is_binary(repo) and repo != "" -> Keyword.put(mint_opts, :repo, repo)
+        _ -> mint_opts
+      end
+
+    mint_token(session, mint_opts)
   end
+
+  # bd-7p6a9o: a pair session's `.mcp.json` lands in the ticket's worktree, a
+  # real checkout. Keep it out of `git add -A` before the token is written —
+  # the same `.git/info/exclude` entry a dispatched worker's `.mcp.json` gets.
+  # Any other session's cwd is a scaffold no git ever looks at. Best-effort
+  # like the worker's: `add_to_git_exclude/2` never fails a launch.
+  defp exclude_from_git(%Session{kind: :pair}, cwd),
+    do: Wardmast.MCP.AgentConfig.add_to_git_exclude(cwd, ClaudeMCP.gitignore_paths())
+
+  defp exclude_from_git(_session, _cwd), do: :ok
 
   defp remove_token_files(paths) do
     _ = File.rm(paths.mcp_token)

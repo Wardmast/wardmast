@@ -97,6 +97,7 @@ defmodule Wardmast.Worker.Dispatch do
   alias Wardmast.Nodes.Refusal
   alias Wardmast.Quota.SpendCap
   alias Wardmast.Reviews.Checkout
+  alias Wardmast.Sessions.Pair
   alias Wardmast.Tasks.EdgeGate
   alias Wardmast.Tasks.Issue
   alias Wardmast.Tasks.IssueRepo
@@ -1810,10 +1811,22 @@ defmodule Wardmast.Worker.Dispatch do
   # dispatch that reaches here has either been planned by the scheduler
   # (which asked with every hold) or is a person overriding it. What the
   # answer means depends on who is asking — `admit/3`.
+  #
+  # bd-7p6a9o: a live pair session's claim is asked first and is not subject to
+  # `admit/3` at all — no force, resume, review or re-dispatch lifts it. An
+  # operator and an agent are working in the ticket's worktree; a worker beside
+  # them would interleave commits on the same branch. Ending the session is
+  # the release. Every dispatch, resume and session resume comes through here.
   defp ensure_dispatchable(%Issue{} = task, opts) do
-    case Lifecycle.dispatchable(task, %{blocked_by: EdgeGate.blockers_of(task)}) do
-      :ok -> :ok
-      {:held, hold} -> admit(task, hold, opts)
+    case Pair.claimed_by(task.id) do
+      nil ->
+        case Lifecycle.dispatchable(task, %{blocked_by: EdgeGate.blockers_of(task)}) do
+          :ok -> :ok
+          {:held, hold} -> admit(task, hold, opts)
+        end
+
+      session_id ->
+        {:error, {:not_dispatchable, task.id, {:pair_session, session_id}}}
     end
   end
 
@@ -2029,6 +2042,14 @@ defmodule Wardmast.Worker.Dispatch do
   the task page.
   """
   @spec refusal_message(String.t(), Lifecycle.Dispatchable.hold()) :: String.t()
+  # bd-7p6a9o: force cannot lift a pair session's claim, so the refusal must
+  # not offer it — it names the way out instead.
+  def refusal_message(task_id, {:pair_session, _session_id} = hold) do
+    "#{task_id} is #{Lifecycle.describe_hold(hold)}, so no worker can start on it while " <>
+      "the session is live. Finish the session with Done (`ward pair done #{task_id}`) or end " <>
+      "it (`ward pair end #{task_id}`) to release the claim."
+  end
+
   def refusal_message(task_id, hold) do
     "#{task_id} is #{Lifecycle.describe_hold(hold)}, so it is not Ready to dispatch. " <>
       next_step(hold) <>
@@ -4157,6 +4178,65 @@ defmodule Wardmast.Worker.Dispatch do
   # this dispatch is re-attaching to a preserved worktree rather than cutting
   # a fresh one.
   defp resuming?(opts), do: Keyword.get(opts, :resume) == true
+
+  @doc """
+  Provision — or reuse — `task`'s worktree on its branch exactly as a dispatch
+  does: the same repo resolution, branch (`BranchNamer.derive/1`), base
+  branch, git layout, reset of an already-merged branch and fall-back to
+  attaching an existing branch (`maybe_provision_worktree/2`). For a caller
+  that is not a dispatch — a pair session (bd-7p6a9o) — so that the session
+  and any worker that later picks the ticket up share one checkout and one
+  branch.
+
+  Returns `{:ok, %{path:, branch:, target_branch:, repo:, repo_path:}}`,
+  `{:error, :no_repo}` for a ticket naming no repo this installation can
+  resolve, or `{:error, {:worktree_failed, reason}}`.
+  """
+  @spec provision_worktree(Issue.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def provision_worktree(%Issue{} = task, opts \\ []) do
+    opts = task |> apply_issue_repo_default(opts) |> Keyword.put(:provision_worktree, true)
+    opts = put_security_policy(task, opts)
+
+    with {:ok, checkout} <- ticket_checkout(task, opts),
+         {:ok, path} when is_binary(path) <- maybe_provision_worktree(task, opts) do
+      {:ok, %{checkout | path: path}}
+    else
+      {:error, _reason} = error -> error
+      {:ok, nil} -> {:error, :no_repo}
+    end
+  end
+
+  @doc """
+  Where `task`'s work lives, without touching git: its branch, the base it
+  merges into, its repo, that repo's local path, and the worktree path a
+  dispatch provisions — the same resolution `provision_worktree/2` uses. What
+  a pair session's Done checks its worktree against (bd-7p6a9o).
+
+  `{:error, :no_repo}` for a ticket naming no repo this installation can
+  resolve.
+  """
+  @spec ticket_checkout(Issue.t(), keyword()) :: {:ok, map()} | {:error, :no_repo}
+  def ticket_checkout(%Issue{} = task, opts \\ []) do
+    opts = apply_issue_repo_default(task, opts)
+    repo = Keyword.get(opts, :repo)
+
+    case resolve_repo_path(task, repo) do
+      repo_path when is_binary(repo_path) ->
+        branch = BranchNamer.derive(task)
+
+        {:ok,
+         %{
+           path: Worktree.worktree_path(branch),
+           branch: branch,
+           target_branch: resolve_target_branch(task, opts),
+           repo: repo,
+           repo_path: repo_path
+         }}
+
+      _ ->
+        {:error, :no_repo}
+    end
+  end
 
   # Pre-existing complexity 15 — baselined when bd-4x2yhq first
   # wired Credo up. Thresholds stay at the tool's own default so new

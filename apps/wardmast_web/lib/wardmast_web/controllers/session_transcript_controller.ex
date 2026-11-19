@@ -78,9 +78,11 @@ defmodule WardmastWeb.SessionTranscriptController do
   # what the file path is then built from.
   defp session_id(id) when is_binary(id) do
     with {:ok, uuid} <- Ecto.UUID.cast(id),
-         {:ok, %{kind: :coordinator} = session} <- Sessions.get(uuid) do
+         {:ok, session} <- Sessions.get(uuid),
+         true <- session.kind in Sessions.visible_kinds() do
       # A :login session (bd-98oj3s) is hidden from this API like every list
-      # surface: it 404s exactly as an unknown id does.
+      # surface: it 404s exactly as an unknown id does. A pair session
+      # (bd-7p6a9o) is a visible kind, so its transcript is served.
       {:ok, session.id}
     else
       _ -> :error

@@ -46,7 +46,7 @@ defmodule Wardmast.Extensions.RegisteredAtomTest do
 
     assert Issue.issue_types() == ~w(task research bug feature epic chore decision)a
     assert Issue.tracker_types() == ~w(none jira shortcut linear github gitlab)a
-    assert Session.kinds() == ~w(coordinator login)a
+    assert Session.kinds() == ~w(coordinator login pair)a
     assert Session.providers() == ~w(claude_code agy)a
   end
 
