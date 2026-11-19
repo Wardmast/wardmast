@@ -2382,6 +2382,57 @@ defmodule Wardmast.Mergers.GitlabTest do
     end
   end
 
+  describe "reply_to_review_comment/4 and resolve_review_thread/3" do
+    test "reply POSTs a note to the discussion given :thread_id" do
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "#{base_path()}/#{@iid}/discussions/disc_1/notes"
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(body)["body"] == "Addressed"
+        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 99})
+      end)
+
+      assert {:ok, %{"id" => 99}} =
+               Gitlab.reply_to_review_comment(@ref, 7, "Addressed", %{thread_id: "disc_1"})
+    end
+
+    test "reply finds the discussion by note id when no :thread_id is given" do
+      stub(fn
+        %{method: "GET"} = conn ->
+          assert conn.request_path == "#{base_path()}/#{@iid}/discussions"
+
+          Req.Test.json(conn, [
+            %{"id" => "d_a", "notes" => [%{"id" => 1}]},
+            %{"id" => "d_b", "notes" => [%{"id" => 7}, %{"id" => 8}]}
+          ])
+
+        %{method: "POST"} = conn ->
+          assert conn.request_path == "#{base_path()}/#{@iid}/discussions/d_b/notes"
+          conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 100})
+      end)
+
+      assert {:ok, %{"id" => 100}} = Gitlab.reply_to_review_comment(@ref, 7, "hi", %{})
+    end
+
+    test "reply errors when the note is in no discussion" do
+      stub(fn conn -> Req.Test.json(conn, [%{"id" => "d_a", "notes" => [%{"id" => 1}]}]) end)
+
+      assert {:error, :discussion_not_found} =
+               Gitlab.reply_to_review_comment(@ref, 7, "hi", %{})
+    end
+
+    test "resolve PUTs resolved=true on the discussion" do
+      stub(fn conn ->
+        assert conn.method == "PUT"
+        assert conn.request_path == "#{base_path()}/#{@iid}/discussions/disc_1"
+        assert conn.query_string =~ "resolved=true"
+        Req.Test.json(conn, %{"id" => "disc_1"})
+      end)
+
+      assert {:ok, _} = Gitlab.resolve_review_thread(@ref, "disc_1", %{})
+    end
+  end
+
   describe "list_open_review_threads/1" do
     test "GETs discussions and returns only unresolved resolvable threads, normalized" do
       stub(fn conn ->

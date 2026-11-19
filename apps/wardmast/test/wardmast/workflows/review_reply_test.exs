@@ -58,7 +58,8 @@ defmodule Wardmast.Workflows.ReviewReplyTest.Stubs do
     def list_review_feedback(_), do: {:ok, %{changes_requested: false}}
 
     @impl true
-    def reply_to_review_comment(mr_ref, comment_id, body, _opts) do
+    def reply_to_review_comment(mr_ref, comment_id, body, opts) do
+      send(:review_reply_test_pid, {:replied_opts, opts})
       send(:review_reply_test_pid, {:replied, mr_ref, comment_id, body})
       {:ok, %{id: 9001}}
     end
@@ -440,6 +441,33 @@ defmodule Wardmast.Workflows.ReviewReplyTest do
       }
 
       assert {:error, :forbidden} = ReviewReply.run_step(:post_reply, state)
+    end
+  end
+
+  describe "run_step(:post_reply, ...) — GitLab adapter" do
+    test "exports the in-thread callbacks, so no top-level fallback" do
+      Code.ensure_loaded!(Wardmast.Mergers.Gitlab)
+      assert function_exported?(Wardmast.Mergers.Gitlab, :reply_to_review_comment, 4)
+      assert function_exported?(Wardmast.Mergers.Gitlab, :resolve_review_thread, 3)
+    end
+
+    test "passes the thread's discussion id to the adapter as :thread_id" do
+      Process.register(self(), :review_reply_test_pid)
+
+      try do
+        state = %{
+          adapter: Stubs.ReplySpy,
+          mr_ref: "!5",
+          comment_id: 8,
+          thread: %{id: "disc_x"},
+          reply_body: "hi"
+        }
+
+        assert {:ok, _} = ReviewReply.run_step(:post_reply, state)
+        assert_received {:replied_opts, %{thread_id: "disc_x"}}
+      after
+        Process.unregister(:review_reply_test_pid)
+      end
     end
   end
 
