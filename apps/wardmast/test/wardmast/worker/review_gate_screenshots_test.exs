@@ -133,7 +133,7 @@ defmodule Wardmast.Worker.ReviewGateScreenshotsTest do
                    theme: "light",
                    label: "Home · desktop · light",
                    kind: :added,
-                   before: %{status: :missing},
+                   before: %{status: :absent, reason: "new page"},
                    after: %{status: :ok, file: after_png, name: "a.png", sha256: "y", bytes: 3}
                  }
                ],
