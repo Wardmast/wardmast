@@ -357,7 +357,7 @@ defmodule WardmastWeb.WorkspaceDetail.TrackerConfigComponent do
         </p>
       </.form>
 
-      <.rows :if={DeviceFlow.supported?(@type_preview)} id="device-flow">
+      <.rows :if={DeviceFlow.supported?(@type_preview)}>
         <.setting_row
           name={"Authorize with #{provider_label(@type_preview)}"}
           consequence="approve Wardmast in your browser with a one-time code; the token is stored as a secret and never shown. Or paste a personal access token under Secrets."

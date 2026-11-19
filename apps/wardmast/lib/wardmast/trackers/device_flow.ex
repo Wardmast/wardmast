@@ -149,31 +149,25 @@ defmodule Wardmast.Trackers.DeviceFlow do
     params = [client_id: flow.client_id, device_code: flow.device_code, grant_type: @grant_type]
 
     case post(flow.token_url, params) do
-      {:ok, %{"access_token" => token}} when is_binary(token) and token != "" ->
-        {:ok, token}
-
-      {:ok, %{"error" => "authorization_pending"}} ->
-        :pending
-
-      {:ok, %{"error" => "slow_down"} = body} ->
-        {:slow_down, %{flow | interval: positive_int(body["interval"], flow.interval + 5)}}
-
-      {:ok, %{"error" => "expired_token"}} ->
-        {:error, :expired}
-
-      {:ok, %{"error" => "access_denied"}} ->
-        {:error, :denied}
-
-      {:ok, %{"error" => _} = body} ->
-        {:error, {:provider, provider_message(body)}}
-
-      {:ok, _other} ->
-        {:error, {:provider, "#{label(flow.provider)} returned an unexpected token response"}}
-
-      {:error, message} ->
-        {:error, {:network, message}}
+      {:ok, body} -> classify(body, flow)
+      {:error, message} -> {:error, {:network, message}}
     end
   end
+
+  defp classify(%{"access_token" => token}, _flow) when is_binary(token) and token != "",
+    do: {:ok, token}
+
+  defp classify(%{"error" => "authorization_pending"}, _flow), do: :pending
+
+  defp classify(%{"error" => "slow_down"} = body, flow),
+    do: {:slow_down, %{flow | interval: positive_int(body["interval"], flow.interval + 5)}}
+
+  defp classify(%{"error" => "expired_token"}, _flow), do: {:error, :expired}
+  defp classify(%{"error" => "access_denied"}, _flow), do: {:error, :denied}
+  defp classify(%{"error" => _} = body, _flow), do: {:error, {:provider, provider_message(body)}}
+
+  defp classify(_other, flow),
+    do: {:error, {:provider, "#{label(flow.provider)} returned an unexpected token response"}}
 
   @doc """
   Poll until approved, denied or expired. Blocks the caller (run it in a Task /
