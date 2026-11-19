@@ -49,9 +49,9 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
 
   @impl true
   def shoot(spec) do
-    with {:ok, tools} <- tools(spec),
-         {:ok, chrome} <- chrome(spec),
-         {:ok, login} <- login(spec) do
+    with {:ok, login} <- login(spec),
+         {:ok, tools} <- tools(spec),
+         {:ok, chrome} <- chrome(spec) do
       run(tools, build_spec(spec, chrome, login), spec)
     end
   end
