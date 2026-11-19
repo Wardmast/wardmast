@@ -204,7 +204,7 @@ come from the host side, **without opening the sandbox**. Operator guide: [scree
         --cap-drop all --cap-add CHOWN,DAC_OVERRIDE,FOWNER,FSETID,KILL,NET_BIND_SERVICE,SETGID,SETUID \
         --log-driver k8s-file --label arbiter.capture-service=<server os pid> … -- <image> <command>
 
-* **`--network none` and a bridge, not a loopback-published port (the ticket's choice).** A
+* **`--network none` and a bridge, not a loopback-published port (the choice the ticket left open).** A
   published port needs a container network, and the container could then leave by it: the app
   can usually run code *inside* a service (a Postgres superuser's `COPY … FROM PROGRAM`), so the
   service is on the untrusted side of the line and must have no exit either. A port on the host's
