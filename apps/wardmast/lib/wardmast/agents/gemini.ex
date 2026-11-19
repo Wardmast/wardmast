@@ -874,10 +874,25 @@ defmodule Wardmast.Agents.Gemini do
   end
 
   defp wrap_in_jail(command, opts, policy, mode, network, ssh_agent, git_key) do
+    # bd-8oqkj2: the posture file must exist before the jail binds it, and a
+    # HOME that cannot be prepared is a refusal, never a jail without the bind.
+    case ConfigDir.ensure(Keyword.put(opts, :security, policy)) do
+      {:ok, _home} ->
+        do_wrap_in_jail(command, opts, policy, mode, network, ssh_agent, git_key)
+
+      _ ->
+        {:error, {:agy_home_unavailable, ConfigDir.path(opts)}}
+    end
+  end
+
+  defp do_wrap_in_jail(command, opts, policy, mode, network, ssh_agent, git_key) do
     jail_opts =
       [
         worktree: Keyword.get(opts, :worktree) || Keyword.get(opts, :worktree_path),
         home: ConfigDir.path(opts),
+        # The deny list is not the worker's to rewrite: the HOME is writable,
+        # this one file in it is a read-only mount (bd-8oqkj2).
+        readonly_paths: [ConfigDir.settings_path(opts)],
         writable_paths: Map.get(policy.sandbox, :writable_paths, []),
         worktree_readonly: review_dispatch?(policy),
         keyring: ConfigDir.keyring_available?(),
