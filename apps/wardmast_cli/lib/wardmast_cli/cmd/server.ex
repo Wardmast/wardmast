@@ -56,6 +56,12 @@ defmodule WardmastCli.Cmd.Server do
                           fail). Default output is the failing and warning
                           checks only; --all lists every check, grouped.
       arb server version  [--json]
+      arb server update-check [--json]
+                          check GitHub for a newer release now (at most one real
+                          call a minute; inside that window the cached result is
+                          returned with cached: true). Prints latest, running,
+                          update_available, release_url, checked_at; exit 1 only
+                          when the check itself errored.
 
   ## Dev-runtime deploy runbook
 
@@ -99,6 +105,7 @@ defmodule WardmastCli.Cmd.Server do
       ["migrate" | rest] -> migrate(rest)
       ["doctor" | rest] -> Cmd.Doctor.run(rest)
       ["version" | rest] -> Cmd.Version.run(rest)
+      ["update-check" | rest] -> Cmd.UpdateCheck.run(rest)
       ["--help" | _] -> IO.puts(@moduledoc)
       ["-h" | _] -> IO.puts(@moduledoc)
       [] -> Output.die("server requires a subcommand", usage_hint())
