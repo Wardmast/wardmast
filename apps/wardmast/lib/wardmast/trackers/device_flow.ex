@@ -86,11 +86,15 @@ defmodule Wardmast.Trackers.DeviceFlow do
   """
   @spec configured_client_id(provider()) :: String.t() | nil
   def configured_client_id(provider) do
-    blank_to_nil(Application.get_env(:wardmast, :"#{provider}_oauth_client_id")) ||
-      blank_to_nil(
-        System.get_env("WARDMAST_#{provider |> to_string() |> String.upcase()}_OAUTH_CLIENT_ID")
-      )
+    blank_to_nil(Application.get_env(:wardmast, config_key(provider))) ||
+      blank_to_nil(System.get_env(env_var(provider)))
   end
+
+  defp config_key(:github), do: :github_oauth_client_id
+  defp config_key(:gitlab), do: :gitlab_oauth_client_id
+
+  defp env_var(:github), do: "WARDMAST_GITHUB_OAUTH_CLIENT_ID"
+  defp env_var(:gitlab), do: "WARDMAST_GITLAB_OAUTH_CLIENT_ID"
 
   @doc """
   Request a device + user code.
@@ -234,7 +238,7 @@ defmodule Wardmast.Trackers.DeviceFlow do
       nil ->
         {:error,
          "No #{label(provider)} OAuth client ID is configured. Enter one, or set " <>
-           "WARDMAST_#{provider |> to_string() |> String.upcase()}_OAUTH_CLIENT_ID."}
+           "#{env_var(provider)}."}
 
       id ->
         {:ok, id}

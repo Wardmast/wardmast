@@ -72,7 +72,7 @@ defmodule WardmastWeb.WorkspaceDetail.TrackerConfigComponent do
     type = socket.assigns.type_preview
 
     if DeviceFlow.supported?(type) and device_idle?(socket.assigns.device) do
-      provider = String.to_existing_atom(type)
+      provider = provider_atom(type)
       tracker_config = cfg(ws, ["tracker", "config"], %{})
       client_id = get_in(params, ["device", "client_id"])
 
