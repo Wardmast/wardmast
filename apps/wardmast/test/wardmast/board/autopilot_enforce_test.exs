@@ -1,13 +1,10 @@
 defmodule Wardmast.Board.AutopilotEnforceTest do
   @moduledoc """
   Autopilot under the seat walk (DC8, DC12; design
-  `provider-dynamic-concurrency.md` §4.3, §4.4, §10.1-§10.2):
+  `provider-dynamic-concurrency.md` §4.3, §4.4):
 
-    * the walk decides: the pass dispatches the walk's first placement on a pool
-      in `enforce`, with its pair riding in as `planned: %{account_id, pool,
-      node}`;
-    * the reverse shadow: beside it, `admission_shadow` records what today's
-      plan would have done (`pick`, `agrees`, `comparable`, `cause`);
+    * the walk decides: the pass dispatches the walk's first placement, with its
+      pair riding in as `planned: %{account_id, pool, node}`;
     * a board with no walk (its inputs failed) dispatches nothing that pass;
     * a budget that rises plans a pass, like a freed slot; a fall does not;
     * a resume deferred for a slot is replayed when its own pool has a seat,
@@ -31,8 +28,9 @@ defmodule Wardmast.Board.AutopilotEnforceTest do
     }
   end
 
-  # Today's plan: `legacy` is `{promote, ready}`; the walk places `placements`.
-  defp board(legacy_promote, legacy_ready, placements, opts \\ []) do
+  # The board the walk planned: `placements` are the walk's, and every placed
+  # card is a Ready entry.
+  defp board(placements, opts \\ []) do
     walk_entries =
       for %{id: id} = placement <- placements do
         %{entry(id, :next) | hold: nil}
@@ -40,7 +38,7 @@ defmodule Wardmast.Board.AutopilotEnforceTest do
       end
 
     base = %{
-      ready: legacy_ready,
+      ready: walk_entries,
       backlog: [],
       blocked: [],
       in_progress: [],
@@ -48,10 +46,7 @@ defmodule Wardmast.Board.AutopilotEnforceTest do
       verifying: [],
       closed_today: [],
       attention: [],
-      promote: legacy_promote,
       slots_total: 4,
-      slots_free: Keyword.get(opts, :slots_free, 4),
-      quota: :ok,
       paused: false,
       now: DateTime.utc_now()
     }
@@ -88,10 +83,6 @@ defmodule Wardmast.Board.AutopilotEnforceTest do
         send(test, {:dispatched, id, extra})
         {:ok, %{task_id: id}}
       end,
-      record_shadow: fn attrs ->
-        send(test, {:shadow_event, attrs})
-        :ok
-      end,
       resume: fn task_id, kind, opts ->
         send(test, {:resumed, task_id, kind, opts})
         {:ok, %{task_id: task_id}}
@@ -103,125 +94,63 @@ defmodule Wardmast.Board.AutopilotEnforceTest do
   end
 
   describe "the walk decides" do
-    test "the walk's placement goes, with its planned pair and the reverse shadow" do
-      legacy = [entry("bd-1", :next), entry("bd-2", :queued, reason: "1 ahead in queue")]
+    test "the walk's placement goes, with its planned pair" do
       placements = [%{id: "bd-2", pool: @pool, node: "local"}]
-      pid = start(fn -> board("bd-1", legacy, placements) end)
+      pid = start(fn -> board(placements) end)
 
       assert {:ok, "bd-2"} = Autopilot.tick(pid)
       assert_received {:dispatched, "bd-2", extra}
 
       assert extra[:planned] == %{account_id: "acct", pool: "claude", node: "local"}
-
-      assert %{
-               "policy" => "enforce",
-               "dispatched" => "bd-2",
-               "pick" => "bd-1",
-               "agrees" => false,
-               "comparable" => true,
-               "cause" => "queued",
-               "reason" => "1 ahead in queue",
-               "account_id" => "acct",
-               "pool" => "claude",
-               "node" => "local",
-               "placements" => 1
-             } = extra[:admission_shadow]
+      refute Keyword.has_key?(extra, :admission_shadow)
     end
 
-    test "when today's plan agrees, the record says so" do
-      legacy = [entry("bd-1", :next)]
-      placements = [%{id: "bd-1", pool: @pool, node: "local"}]
-      pid = start(fn -> board("bd-1", legacy, placements) end)
-
-      assert {:ok, "bd-1"} = Autopilot.tick(pid)
-      assert_received {:dispatched, "bd-1", extra}
-      assert %{"agrees" => true, "comparable" => true, "cause" => nil} = extra[:admission_shadow]
-    end
-
-    test "a card today would hold goes, and the record names today's hold" do
-      legacy = [
-        entry("bd-1", :blocked, hold: {:quota, "5h ahead of pace"}, reason: "blocked — quota")
-      ]
-
-      placements = [%{id: "bd-1", pool: @pool, node: "local"}]
-      pid = start(fn -> board(nil, legacy, placements) end)
-
-      assert {:ok, "bd-1"} = Autopilot.tick(pid)
-      assert_received {:dispatched, "bd-1", extra}
-
-      assert %{
-               "pick" => nil,
-               "agrees" => false,
-               "comparable" => false,
-               "cause" => "legacy_hold",
-               "legacy_hold" => "quota",
-               "reason" => "blocked — quota"
-             } = extra[:admission_shadow]
-    end
-
-    test "with nothing placed, nothing goes — whatever today's plan would promote" do
-      legacy = [entry("bd-1", :next)]
-      pid = start(fn -> board("bd-1", legacy, []) end)
+    test "with nothing placed, nothing goes" do
+      pid = start(fn -> board([]) end)
 
       assert :idle = Autopilot.tick(pid)
       refute_received {:dispatched, _, _}
     end
 
     test "an unmetered pool's placement plans its machine only" do
-      legacy = [entry("bd-1", :next)]
       placements = [%{id: "bd-1", pool: {:unmetered, "ollama"}, node: "local"}]
-      pid = start(fn -> board("bd-1", legacy, placements) end)
+      pid = start(fn -> board(placements) end)
 
       assert {:ok, "bd-1"} = Autopilot.tick(pid)
       assert_received {:dispatched, "bd-1", extra}
       assert extra[:planned] == %{account_id: nil, pool: nil, node: "local"}
     end
-
-    test "the hold-change event is still written, once per change" do
-      legacy = [entry("bd-1", :next)]
-      pid = start(fn -> board("bd-1", legacy, []) end)
-
-      assert :idle = Autopilot.tick(pid)
-      assert_received {:shadow_event, %{policy: "enforce", legacy_pick: "bd-1", walk_pick: nil}}
-
-      assert :idle = Autopilot.tick(pid)
-      refute_received {:shadow_event, _}
-    end
   end
 
   @tag capture_log: true
-  test "a walk with no entries or placements is today's plan's, and an idle pass survives it" do
-    legacy = [entry("bd-1", :blocked, hold: :no_slot, reason: "blocked — no free worker slot")]
-    broken = Map.put(board(nil, legacy, [], walk?: false), :walk, %{promote: nil})
+  test "a walk with no entries or placements dispatches nothing, and an idle pass survives it" do
+    broken = Map.put(board([], walk?: false), :walk, %{promote: nil})
     pid = start(fn -> broken end)
 
     assert :idle = Autopilot.tick(pid)
     assert Process.alive?(pid)
-    assert [%{id: "bd-1"}] = :sys.get_state(pid).holds
+    assert [] = :sys.get_state(pid).holds
   end
 
-  test "a board without a walk dispatches nothing (the legacy fallback is retired)" do
-    legacy = [entry("bd-1", :next)]
-    pid = start(fn -> board("bd-1", legacy, [], walk?: false) end)
+  test "a board without a walk dispatches nothing (there is no head-of-line fallback)" do
+    pid = start(fn -> board([], walk?: false) end)
 
     assert :idle = Autopilot.tick(pid)
     refute_received {:dispatched, _, _}
   end
 
   describe "a budget change (E8)" do
-    test "enforce: a rise plans a pass, like a freed seat" do
-      legacy = [entry("bd-1", :next)]
+    test "a rise plans a pass, like a freed seat" do
       placements = [%{id: "bd-1", pool: @pool, node: "local"}]
-      pid = start(fn -> board("bd-1", legacy, placements) end)
+      pid = start(fn -> board(placements) end)
 
       send(pid, {:budget_changed, %{account: "acct", pool: "claude"}, 1, 2, "5h"})
       assert_receive {:dispatched, "bd-1", _extra}, 1_000
     end
 
-    test "enforce: a fall plans nothing" do
-      legacy = [entry("bd-1", :next)]
+    test "a fall plans nothing" do
       placements = [%{id: "bd-1", pool: @pool, node: "local"}]
-      pid = start(fn -> board("bd-1", legacy, placements) end)
+      pid = start(fn -> board(placements) end)
 
       send(pid, {:budget_changed, %{account: "acct", pool: "claude"}, 2, 1, "5h"})
       refute_receive {:dispatched, _, _}, 200
@@ -229,12 +158,11 @@ defmodule Wardmast.Board.AutopilotEnforceTest do
   end
 
   describe "a resume deferred for a slot" do
-    test "enforce: replayed when its pool has a seat, though the board has no free slot" do
+    test "replayed when its pool has a seat, whatever the board's slot count says" do
       test = self()
-      legacy = [entry("bd-1", :next)]
 
       pid =
-        start(fn -> board(nil, legacy, [], slots_free: 0) end,
+        start(fn -> board([]) end,
           slot_room: fn task_id, _kind ->
             send(test, {:asked, task_id})
             true
@@ -248,13 +176,9 @@ defmodule Wardmast.Board.AutopilotEnforceTest do
       assert opts[:slot_admitted] == true
     end
 
-    test "enforce: waits while its pool is full" do
-      legacy = [entry("bd-1", :next)]
-
+    test "waits while its pool is full" do
       pid =
-        start(fn -> board(nil, legacy, [], slots_free: 4) end,
-          slot_room: fn _task_id, _kind -> false end
-        )
+        start(fn -> board([]) end, slot_room: fn _task_id, _kind -> false end)
 
       :ok = Autopilot.defer_resume(pid, "bd-parked", :resume, [])
       assert :idle = Autopilot.tick(pid)
@@ -271,7 +195,7 @@ defmodule Wardmast.Board.AutopilotEnforceTest do
       placements = [placement("bd-ready", @pool)]
 
       pid =
-        start(fn -> board(nil, [entry("bd-ready", :next)], placements) end,
+        start(fn -> board(placements) end,
           slot_room: fn _task_id, _kind -> false end,
           resume_account: fn "bd-parked" -> "acct-codex" end
         )
@@ -287,7 +211,7 @@ defmodule Wardmast.Board.AutopilotEnforceTest do
       placements = [placement("bd-same", @blocked_pool)]
 
       pid =
-        start(fn -> board(nil, [entry("bd-same", :next)], placements) end,
+        start(fn -> board(placements) end,
           slot_room: fn _task_id, _kind -> false end,
           resume_account: fn "bd-parked" -> "acct-codex" end
         )
@@ -301,7 +225,7 @@ defmodule Wardmast.Board.AutopilotEnforceTest do
       placements = [placement("bd-ready", @pool)]
 
       pid =
-        start(fn -> board(nil, [entry("bd-ready", :next)], placements) end,
+        start(fn -> board(placements) end,
           slot_room: fn _task_id, _kind -> false end,
           # the implementer is on the Ready card's (claude) account
           resume_account: fn "bd-parked" -> "acct" end
@@ -321,7 +245,7 @@ defmodule Wardmast.Board.AutopilotEnforceTest do
       placements = [placement("bd-ready", @pool)]
 
       pid =
-        start(fn -> board(nil, [entry("bd-ready", :next)], placements) end,
+        start(fn -> board(placements) end,
           slot_room: fn _task_id, _kind -> false end,
           resume_account: fn "bd-parked" -> "acct" end
         )
@@ -335,7 +259,7 @@ defmodule Wardmast.Board.AutopilotEnforceTest do
       test = self()
 
       pid =
-        start(fn -> board(nil, [], []) end,
+        start(fn -> board([]) end,
           slot_room: fn _task_id, _kind -> false end,
           resume_account: fn _ -> "acct" end,
           park_after: 2,
@@ -356,7 +280,7 @@ defmodule Wardmast.Board.AutopilotEnforceTest do
       test = self()
 
       pid =
-        start(fn -> board(nil, [], []) end,
+        start(fn -> board([]) end,
           slot_room: fn _task_id, _kind -> false end,
           resume_account: fn _ -> "acct-codex" end,
           park_after: 3,
@@ -378,7 +302,7 @@ defmodule Wardmast.Board.AutopilotEnforceTest do
       placements = [placement("bd-same", @blocked_pool)]
 
       pid =
-        start(fn -> board(nil, [entry("bd-same", :next)], placements) end,
+        start(fn -> board(placements) end,
           slot_room: fn _task_id, _kind -> false end,
           resume_account: fn _ -> "acct-codex" end
         )

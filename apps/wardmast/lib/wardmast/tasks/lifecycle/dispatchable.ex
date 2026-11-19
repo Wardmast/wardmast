@@ -30,7 +30,6 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
     * `:scope` — the ticket's declared file scope, and `:in_flight` —
       `[{task_id, changed_files, repo}]` for work already holding files, and `:repo` — the ticket's repo (holds only apply within one repo);
     * `:paused` — the scheduler is paused;
-    * `:quota` — `:ok`, or `{:hold, reason}`;
     * `:provider_constraint` — `:ok`, or `{:hold, detail}`: the ticket's own
       provider constraint (bd-13pqcp) leaves no eligible account with capacity;
     * `:guardrail` — `:ok`, or `{:hold, detail}`: no model the guardrail profiles
@@ -41,7 +40,6 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
       (`Wardmast.Nodes.LocalCapacity`'s phrase, bd-akp9ae);
     * `:ci_saturated` — `:ok`, or `{:hold, detail}`: the ticket's repo has too many
       MR pipelines waiting on a CI runner (`Wardmast.Board.CiBackpressure`, #1126);
-    * `:slots_free` — free slots; absent means "not asked".
     * `:pair_session` — `{:hold, session_id}` while a live pair session claims
       the ticket (`Wardmast.Sessions.Pair`, bd-7p6a9o); absent or `nil` otherwise.
 
@@ -64,8 +62,6 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
   | `{:local_capacity, phrase}` | it can only run on the primary, whose own cap is full |
   | `{:ci_saturated, detail}` | its repo's CI queue is saturated (`worker.repos.<repo>.ci_backpressure`) |
   | `:paused` | the scheduler is paused |
-  | `{:quota, reason}` | a quota or auth hold |
-  | `:no_slot` | no free worker slot |
   """
 
   alias Wardmast.Board.FileScope
@@ -82,8 +78,6 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
           | {:local_capacity, String.t()}
           | {:ci_saturated, String.t()}
           | :paused
-          | {:quota, String.t()}
-          | :no_slot
           | {:pair_session, String.t()}
 
   @type result :: :ok | {:held, hold()}
@@ -129,8 +123,6 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
   def describe_hold({:local_capacity, phrase}), do: phrase
   def describe_hold({:ci_saturated, detail}), do: "CI saturated (#{detail})"
   def describe_hold(:paused), do: "scheduler paused"
-  def describe_hold({:quota, reason}), do: reason
-  def describe_hold(:no_slot), do: "no free worker slot"
 
   def describe_hold({:pair_session, session_id}),
     do: "claimed by a live pair session (#{String.slice(to_string(session_id), 0, 8)})"
@@ -218,11 +210,6 @@ defmodule Wardmast.Tasks.Lifecycle.Dispatchable do
   defp ci_saturated_hold(_ctx), do: :ok
 
   defp board_hold(%{paused: true}), do: {:held, :paused}
-  defp board_hold(%{quota: {:hold, reason}}), do: {:held, {:quota, reason}}
-
-  defp board_hold(%{slots_free: free}) when not (is_integer(free) and free > 0),
-    do: {:held, :no_slot}
-
   defp board_hold(_ctx), do: :ok
 
   defp scope_of(%MapSet{} = scope), do: scope

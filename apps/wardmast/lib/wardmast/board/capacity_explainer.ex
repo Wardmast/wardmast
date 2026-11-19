@@ -353,18 +353,6 @@ defmodule Wardmast.Board.CapacityExplainer do
   @spec hold(term(), map(), keyword()) :: map()
   def hold(hold, board, opts \\ [])
 
-  def hold(:no_slot, board, opts) do
-    terms = Map.get(board, :capacity)
-    account = terms && account_detail(terms)
-
-    %{
-      kind: :capacity,
-      badge: @capacity_badge,
-      summary: no_slot_summary(terms, account, Map.get(board, :slot_holders, [])),
-      details: opts[:raw]
-    }
-  end
-
   def hold({:provider_constraint, detail}, _board, opts) do
     cond do
       String.contains?(detail, "paused") ->
@@ -422,30 +410,6 @@ defmodule Wardmast.Board.CapacityExplainer do
     end
   end
 
-  def hold({:quota, reason}, _board, opts) do
-    if String.contains?(reason, "auth hold") do
-      %{
-        kind: :auth,
-        badge: "Auth hold",
-        summary:
-          "The provider's login failed several times in a row, so new work is held until " <>
-            "its credentials are fixed. Check the Providers page.",
-        details: opts[:raw] || reason
-      }
-    else
-      %{
-        kind: :quota,
-        badge: "Quota hold",
-        summary:
-          "#{quota_subject(reason)} too used up to start new work right now. " <>
-            "The scheduler starts it on its own when the quota window allows.",
-        details: opts[:raw] || reason
-      }
-    end
-  end
-
-  # bd-akp9ae: a run only this machine can take (its repo is not sandboxed in podman,
-  # …), while this machine's own worker cap is full. A free node does not help it.
   def hold({:local_capacity, phrase}, _board, opts) do
     %{
       kind: :capacity,
@@ -518,75 +482,11 @@ defmodule Wardmast.Board.CapacityExplainer do
     }
   end
 
-  # Who is out of quota, in words. The gate's sentence is free text
-  # (`claude:default 7d 20% ≥ paced 20%`, `7d quota warning (weekly_warning_policy:
-  # hold)`), so only the provider names are lifted from it; the sentence itself
-  # stays in `details`.
-  defp quota_subject(reason) do
-    providers =
-      ~r/\b([a-z][a-z0-9]*):[A-Za-z0-9._-]+/
-      |> Regex.scan(reason, capture: :all_but_first)
-      |> List.flatten()
-      |> Enum.uniq()
-      |> Enum.map(&provider_label/1)
-
-    case providers do
-      [] -> "The provider's quota is"
-      [one] -> "The #{one} quota is"
-      many -> "The #{Enum.join(many, " and ")} quotas are"
-    end
-  end
-
   # ---- wording the capacity holds --------------------------------------------------------
-
-  defp no_slot_summary(nil, _account, holders),
-    do: "Waiting for a free worker slot#{using(holders)}. It starts when one finishes."
-
-  defp no_slot_summary(%{binding: :account} = terms, %{kind: :account} = account, holders) do
-    runs = account |> Map.get(:runs, []) |> account_runs(holders)
-
-    "Waiting for a #{provider_label(account.provider)} slot. The " <>
-      "#{account_phrase(terms, account)} allows #{limit_word(account)} at once and " <>
-      "#{in_use(account.limit, length(Map.get(account, :runs, [])))} in use#{runs}. " <>
-      "It starts when one finishes."
-  end
-
-  defp no_slot_summary(
-         %{binding: :account},
-         %{kind: :routed, names: names, capacity: capacity},
-         holders
-       ) do
-    "Waiting for a free worker slot. The provider accounts (#{Enum.join(names, ", ")}) have " <>
-      "room for #{capacity} at once and all are in use" <>
-      "#{using(holders)}. It starts when one finishes."
-  end
-
-  defp no_slot_summary(%{binding: binding} = terms, _account, holders) do
-    "Waiting for a free worker slot. #{binding_reason(binding, terms)}#{using(holders)}. " <>
-      "It starts when one finishes."
-  end
-
-  defp binding_reason(:placement_free, _t),
-    do: "The machines this workspace may use have no free slot"
-
-  defp binding_reason(:placement, t),
-    do: "This workspace may only use #{t.effective} slots and they are all in use"
-
-  defp binding_reason(_nodes, t),
-    do: "All #{t.effective} slots on the available machines are in use"
 
   defp in_use(1, 1), do: "it is"
   defp in_use(limit, live) when limit == live, do: "all are"
   defp in_use(_limit, live), do: "#{live} are"
-
-  defp limit_word(%{limit: limit}) when is_integer(limit), do: to_string(limit)
-  defp limit_word(_), do: "a limited number"
-
-  defp account_runs([], holders), do: using(holders)
-  defp account_runs(keys, _holders), do: " (#{SlotLimit.runs(keys)})"
-
-  defp using([]), do: ""
-  defp using(holders), do: " (held by #{Enum.join(holders, ", ")})"
 
   defp constraint_phrase(detail) do
     case Regex.run(~r/^(require|exclude) ([^:]+):/, detail) do

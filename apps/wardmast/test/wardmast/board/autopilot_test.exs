@@ -827,8 +827,7 @@ defmodule Wardmast.Board.AutopilotTest do
       end
 
       assert board.attention == []
-      assert board.promote == nil
-      assert board.slots_free == 0
+      assert board.walk.promote == nil
       assert %DateTime{} = board.now
       # It reports itself paused: nothing is draining a queue it cannot read.
       assert board.paused
