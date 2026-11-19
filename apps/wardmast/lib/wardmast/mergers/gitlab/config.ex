@@ -76,7 +76,9 @@ defmodule Wardmast.Mergers.Gitlab.Config do
           token: String.t(),
           default_target_branch: String.t(),
           default_reviewers: [term()],
-          merge_method: :merge | :squash | :ff
+          merge_method: :merge | :squash | :ff,
+          changes_requested_from_discussions: boolean(),
+          external_jobs: [String.t()]
         }
 
   @doc """
@@ -172,7 +174,10 @@ defmodule Wardmast.Mergers.Gitlab.Config do
          default_target_branch:
            stringy(Map.get(raw, "default_target_branch")) || @default_target_branch,
          default_reviewers: List.wrap(Map.get(raw, "default_reviewers")),
-         merge_method: merge_method(raw)
+         merge_method: merge_method(raw),
+         changes_requested_from_discussions:
+           Map.get(raw, "changes_requested_from_discussions") in [true, "true"],
+         external_jobs: external_jobs(raw)
        }}
     end
   end
@@ -242,6 +247,13 @@ defmodule Wardmast.Mergers.Gitlab.Config do
   defp stringy(nil), do: nil
   defp stringy(v) when is_binary(v) and v != "", do: v
   defp stringy(_), do: nil
+
+  defp external_jobs(raw) do
+    raw
+    |> Map.get("external_jobs")
+    |> List.wrap()
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+  end
 
   defp merge_method(raw) do
     case Map.get(raw, "merge_method") do
