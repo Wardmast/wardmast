@@ -111,6 +111,17 @@ defmodule WardmastWeb.Layouts do
     # outcome once the server is back.
     assigns = assign(assigns, :deploy, Wardmast.Release.DeployStatus.read())
 
+    # The live-worker count the update button quotes is resolved here, beside the
+    # `update`/`deploy` reads, and only when the notice is actually showing — the
+    # notice component just renders what it is handed.
+    assigns =
+      assign(
+        assigns,
+        :update_live_workers,
+        update_visible?(assigns.update, dismissed_update(assigns.update, assigns.current_path))
+        |> live_worker_count()
+      )
+
     assigns =
       assign(assigns, :coordinator_inbox_now, assigns.coordinator_inbox_now || DateTime.utc_now())
 
@@ -266,6 +277,7 @@ defmodule WardmastWeb.Layouts do
       <.update_notice
         update={@update}
         deploy={@deploy}
+        live_workers={@update_live_workers}
         dismissed={dismissed_update(@update, @current_path)}
       />
       {render_slot(@inner_block)}
@@ -521,15 +533,12 @@ defmodule WardmastWeb.Layouts do
   attr :update, :map, required: true
   attr :deploy, :map, default: nil
   attr :dismissed, :string, default: nil
+  attr :live_workers, :integer, default: 0
 
   def update_notice(assigns) do
     assigns =
       assigns
       |> assign(:update_visible?, update_visible?(assigns.update, assigns.dismissed))
-      |> assign(
-        :live_workers,
-        update_visible?(assigns.update, assigns.dismissed) |> live_worker_count()
-      )
       |> assign(:deploy_state, deploy_state(assigns.deploy))
       |> assign(:deploy_visible?, deploy_visible?(assigns.deploy))
       |> assign(

@@ -1,7 +1,7 @@
 defmodule WardmastCli.Cmd.ReleaseDeploy do
   @moduledoc """
   `arb server deploy [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]
-  [--this-host] [--no-self-update]` — deploy the Wardmast server from a **GitHub Release** (the OTP release tarball
+  [--allow-active-workers] [--this-host] [--no-self-update]` — deploy the Wardmast server from a **GitHub Release** (the OTP release tarball
   published by `.github/workflows/release.yml`), rather than a `git pull` + Mix
   rebuild of a working checkout.
 
@@ -25,6 +25,13 @@ defmodule WardmastCli.Cmd.ReleaseDeploy do
   `--allow-cross-migration-rollback` all work the same with `--local`;
   `--version` is a GitHub-flow-only option and is ignored when `--local` is
   given.
+
+  `--allow-active-workers` lifts only the live-worker refusal (the dashboard's
+  "Update anyway"; live workers are interrupted and auto-resumed on boot). Unlike
+  `--force` it does not skip the already-current check, and every other preflight
+  check (checksum, unknown version, database backup) still applies. Like
+  `--force`, it also lifts the guard's fail-closed refusal when the server answers
+  401/403 to the worker listing.
 
   This is the production deploy path: the box that runs Wardmast no longer needs
   a source checkout or a Mix/Elixir toolchain — only the prebuilt, self-contained

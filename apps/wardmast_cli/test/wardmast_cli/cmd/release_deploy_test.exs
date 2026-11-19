@@ -1501,6 +1501,21 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
       refute File.exists?(Path.join(home, "current"))
     end
 
+    test "--allow-active-workers does not bypass an unknown version (404)" do
+      stub_routes([
+        {{"get", "/repos/#{@repo}/releases/tags/v9.9.9"}, {%{"message" => "Not Found"}, 404}},
+        {{"get", "/api/workers"}, {@busy, 200}},
+        {{"get", "/api/workspaces"}, {@green, 200}}
+      ])
+
+      stub_cmds()
+
+      {_out, _err, code} =
+        capture(fn -> ReleaseDeploy.run(["--version", "v9.9.9", "--allow-active-workers"]) end)
+
+      assert code == 1
+    end
+
     test "refuses deploy when workers are actively working (no --force)" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
@@ -1665,6 +1680,30 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
 
       assert %{"state" => "failed", "tag" => @vsn, "message" => msg} = Status.read()
       assert msg =~ "backup"
+    end
+
+    test "--allow-active-workers does not bypass a failed backup (nothing swapped)",
+         %{home: home} do
+      prior = prior_release(home, [@m_old])
+      write_db(home, "live-data")
+      {tarball, sha} = tagged_release(@vsn, [@m_old, @m_new])
+
+      stub_release(@vsn, tarball, sha,
+        workers: %{
+          "data" => [%{"task_id" => "bd-xyz", "kind" => "implement", "state" => "working"}]
+        }
+      )
+
+      stub_cmds()
+      stub_backup(home, fail: true)
+
+      {_out, err, code} = capture(fn -> ReleaseDeploy.run(["--allow-active-workers"]) end)
+
+      assert code == 1
+      assert err =~ "database backup failed"
+      assert {:ok, link} = File.read_link(Path.join(home, "current"))
+      assert link == prior
+      refute_received {:cmd, "systemctl", ["--user", "restart", "--no-block", "wardmast.service"]}
     end
 
     test "a failed health check of a release with migrations restores the backup and the " <>
