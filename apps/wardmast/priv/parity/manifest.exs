@@ -2021,6 +2021,14 @@
       note: "`Wardmast.Server.Status`; the MCP tool folds in pending-migration status and carries no host paths."
     },
     %{
+      id: "misc/update_check_now",
+      title: "Check for updates now (rate-limited manual release check)",
+      mcp: ["update_check"],
+      cli: ["arb server update-check"],
+      rest: ["POST /api/server/update_check"],
+      status: :full
+    },
+    %{
       id: "misc/pending_migration_status",
       title: "Pending-migration status",
       mcp: ["server_status"],

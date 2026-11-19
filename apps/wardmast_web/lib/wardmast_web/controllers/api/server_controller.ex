@@ -4,6 +4,8 @@ defmodule WardmastWeb.Api.ServerController do
 
   Routes:
     * `GET /api/server/migrations` — check for pending database migrations
+    * `POST /api/server/update_check` — check GitHub for a newer release now,
+      rate-limited to one real call per minute (cached result, `cached: true`)
     * `GET /api/server/bind_address` — what address the HTTP listener is
       actually bound to (bd-1c4pg3). `arb server doctor` uses this to warn
       when a server — possibly remote, via `ARB_HOST` — is reachable
@@ -115,6 +117,9 @@ defmodule WardmastWeb.Api.ServerController do
 
   def migrations(conn, _params), do: json(conn, Wardmast.Server.Status.migrations())
 
+  @doc "POST /api/server/update_check — rate-limited manual release check (`Wardmast.Server.Status.update_check/0`)."
+  def update_check(conn, _params), do: json(conn, Wardmast.Server.Status.update_check())
+
   def dashboard_auth(conn, _params), do: json(conn, WardmastWeb.DashboardAuth.mode())
 
   def bind_address(conn, _params), do: json(conn, WardmastWeb.InstallationSettings.bind_address())
@@ -125,6 +130,8 @@ defmodule WardmastWeb.Api.ServerController do
       |> Application.get_env(:worker_jail_unmask, [])
       |> List.wrap()
       |> Enum.filter(&is_binary/1)
+      # #1545: `Hide.unmask/2` ignores the glab OAuth dir, so don't report it.
+      |> Enum.reject(&String.contains?(&1, ".config/glab-cli"))
 
     json(conn, %{paths: paths})
   end

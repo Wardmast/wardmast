@@ -35,6 +35,8 @@ defmodule Wardmast.Workflows.PRPatrolReviewGateGuardTest do
         name: "pp-gate-#{System.unique_integer([:positive])}",
         prefix: "pg",
         config: %{
+          # bd-cwigjh: an unset author scope patrols only Wardmast-opened PRs.
+          "pr_patrol" => %{"author_logins" => "*"},
           "merge" => %{
             "strategy" => "github",
             "config" => %{

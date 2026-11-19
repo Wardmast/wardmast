@@ -673,4 +673,42 @@ defmodule WardmastWeb.Api.ServerControllerTest do
                entry["git_credential_tokens"]
     end
   end
+
+  test "POST /api/server/update_check runs the check, then returns the cached result", %{
+    conn: conn
+  } do
+    alias Wardmast.Release.UpdateCheck
+
+    Req.Test.stub(
+      UpdateCheck,
+      &Req.Test.json(&1, %{"tag_name" => "v99.0.0", "html_url" => "https://x.test"})
+    )
+
+    pid =
+      start_supervised!(
+        {UpdateCheck,
+         enabled: true,
+         repo: "acme/arbiter",
+         running_version: "0.2.0",
+         initial_delay_ms: :infinity,
+         req_options: [plug: {Req.Test, UpdateCheck}]}
+      )
+
+    Req.Test.allow(UpdateCheck, self(), pid)
+
+    first = conn |> post("/api/server/update_check") |> json_response(200)
+
+    assert %{
+             "latest" => "v99.0.0",
+             "update_available" => true,
+             "release_url" => "https://x.test",
+             "cached" => false,
+             "error" => nil
+           } = first
+
+    assert is_binary(first["running"]) and is_binary(first["checked_at"])
+
+    second = conn |> post("/api/server/update_check") |> json_response(200)
+    assert %{"cached" => true, "latest" => "v99.0.0"} = second
+  end
 end
