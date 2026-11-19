@@ -249,6 +249,7 @@ defmodule WardmastWeb.Layouts do
               <span class="ml-3">About</span>
               <span class="ml-3">v{Wardmast.Version.app_version()}</span>
             </.link>
+            <.update_check_control update={@update} />
             <.theme_toggle />
           </div>
         </:footer>
@@ -505,6 +506,55 @@ defmodule WardmastWeb.Layouts do
   # the right-hand cluster (live badge, inbox, theme toggle) sits beside the
   # chip in the bar, so a popover under the bar can't cover them — and is
   # capped at the viewport width minus the bar's padding.
+
+  @doc """
+  The "Check for updates" control in the rail footer: a button that fires the
+  `check_updates` LiveView event (handled for every LiveView by
+  `WardmastWeb.LiveHooks`' `:banner_dismiss` hook, which runs the shared,
+  rate-limited `Wardmast.Server.Status.update_check/0`), plus the last result.
+  `phx-disable-with` shows "Checking…" while the call runs.
+  """
+  attr :update, :map, required: true
+
+  def update_check_control(assigns) do
+    assigns = assign(assigns, :status, update_check_status(assigns.update))
+
+    ~H"""
+    <div class="flex min-w-0 flex-col">
+      <button
+        type="button"
+        id="update-check-button"
+        phx-click="check_updates"
+        phx-disable-with="Checking…"
+        title="Ask GitHub whether a newer release is out"
+        class="flex items-center whitespace-nowrap rounded-[var(--radius-field)] py-1.5 text-xs text-[var(--text-label)] cursor-pointer transition-colors duration-150 hover:text-[var(--text-title)]"
+      >
+        <span class="flex w-10 flex-none justify-center">
+          <.icon name="hero-arrow-path" size={14} />
+        </span>
+        <span class="ml-3">Check for updates</span>
+      </button>
+      <span
+        :if={@status}
+        id="update-check-status"
+        class="ml-[52px] whitespace-nowrap text-[11px] text-[var(--text-label)]"
+      >
+        {@status}
+      </span>
+    </div>
+    """
+  end
+
+  defp update_check_status(%{error: error}) when is_binary(error), do: "Check failed"
+
+  defp update_check_status(%{update_available?: true, latest: latest}),
+    do: "Update #{latest} available"
+
+  defp update_check_status(%{checked_at: %DateTime{} = at}) do
+    "Up to date (v#{Wardmast.Version.app_version()}, checked #{Calendar.strftime(at, "%H:%M")})"
+  end
+
+  defp update_check_status(_), do: nil
 
   @doc """
   The "update available" notice from `Wardmast.Release.UpdateCheck.state/0`:

@@ -51,6 +51,7 @@ defmodule Wardmast.Release.UpdateCheck do
 
   @default_interval_ms :timer.hours(6)
   @default_initial_delay_ms :timer.minutes(1)
+  @default_manual_interval_ms :timer.seconds(60)
   @default_api "https://api.github.com"
 
   @empty %{
@@ -90,6 +91,21 @@ defmodule Wardmast.Release.UpdateCheck do
   def check_now(server \\ __MODULE__), do: GenServer.call(server, :check_now, 60_000)
 
   @doc """
+  The operator-triggered check behind the dashboard button, `arb server
+  update-check` and the `update_check` MCP tool. Runs a check unless a manual
+  check already ran within `:manual_interval_ms` (default 60 s), in which case
+  the cached result is returned at once, so a stuck button cannot hammer the
+  GitHub API. Returns `{:fresh | :cached, result}`; `{:disabled, result}` when
+  the checker is not running.
+  """
+  @spec check_limited(GenServer.server()) :: {:fresh | :cached | :disabled, map()}
+  def check_limited(server \\ __MODULE__) do
+    GenServer.call(server, :check_limited, 60_000)
+  catch
+    :exit, _ -> {:disabled, @empty}
+  end
+
+  @doc """
   True when `latest` is a stable release newer than `running`.
   """
   @spec newer?(String.t() | nil, String.t() | nil) :: boolean()
@@ -115,6 +131,8 @@ defmodule Wardmast.Release.UpdateCheck do
       running: Keyword.get_lazy(opts, :running_version, &Wardmast.Version.app_version/0),
       applied_migrations: Keyword.get(opts, :applied_migrations, &applied_migrations/0),
       manifest: nil,
+      last_manual_at: nil,
+      manual_interval_ms: Keyword.get(opts, :manual_interval_ms, @default_manual_interval_ms),
       interval_ms: Keyword.get(opts, :interval_ms, interval_ms()),
       req_options: Keyword.get(opts, :req_options, [])
     }
@@ -138,6 +156,18 @@ defmodule Wardmast.Release.UpdateCheck do
   # while GitHub is slow; `check_now/1` callers wait in `:waiters`.
   def handle_call(:check_now, from, state) do
     {:noreply, state |> start_check() |> Map.update!(:waiters, &[from | &1])}
+  end
+
+  def handle_call(:check_limited, from, state) do
+    now = System.monotonic_time(:millisecond)
+
+    if state.task == nil and state.last_manual_at != nil and
+         now - state.last_manual_at < state.manual_interval_ms do
+      {:reply, {:cached, state.result}, state}
+    else
+      state = %{state | last_manual_at: now}
+      {:noreply, state |> start_check() |> Map.update!(:waiters, &[{:fresh, from} | &1])}
+    end
   end
 
   @impl true
@@ -168,7 +198,11 @@ defmodule Wardmast.Release.UpdateCheck do
   defp start_check(state), do: state
 
   defp finish_check(state, %{result: result, etag: etag}) do
-    Enum.each(state.waiters, &GenServer.reply(&1, result))
+    Enum.each(state.waiters, fn
+      {:fresh, from} -> GenServer.reply(from, {:fresh, result})
+      from -> GenServer.reply(from, result)
+    end)
+
     %{state | result: result, etag: etag, waiters: []}
   end
 

@@ -227,6 +227,11 @@ defmodule WardmastWeb.LiveHooks do
           broadcast_banner_dismissed()
           {:halt, bump_banner_rev(socket)}
 
+        "check_updates", _params, socket ->
+          Wardmast.Server.Status.update_check()
+          broadcast_banner_dismissed()
+          {:halt, bump_banner_rev(socket)}
+
         "dismiss_deploy", _params, socket ->
           DashboardUpdateController.save_deploy_dismissal()
           broadcast_banner_dismissed()

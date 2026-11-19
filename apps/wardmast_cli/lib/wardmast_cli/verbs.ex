@@ -115,7 +115,7 @@ defmodule WardmastCli.Verbs do
     {"server", Module.concat(@cmd, Server),
      [
        workspace: :none,
-       probes: [["start"], ["restart"], ["deploy"], ["migrate"], ["doctor"], ["version"]]
+       probes: [["start"], ["restart"], ["deploy"], ["migrate"], ["doctor"], ["version"], ["update-check"]]
      ]},
     {"workspace", Module.concat(@cmd, Workspace),
      [
