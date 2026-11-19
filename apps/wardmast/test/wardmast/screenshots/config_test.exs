@@ -471,6 +471,24 @@ defmodule Wardmast.Screenshots.ConfigTest do
     end
   end
 
+  describe "the operator guide's DB-backed example (docs/screenshots.md)" do
+    test "validates, and resolves to two services and the deps cache" do
+      doc = File.read!(Path.expand("../../../../../docs/screenshots.md", __DIR__))
+      [_, after_marker] = String.split(doc, "<!-- db-backed-example", parts: 2)
+      [_, json_and_rest] = String.split(after_marker, "```json\n", parts: 2)
+      [json | _] = String.split(json_and_rest, "\n```", parts: 2)
+      block = Jason.decode!(json)
+
+      assert Config.validate(block, "screenshots") == []
+
+      assert {:ok, config} =
+               Config.resolve(ws(%{"repos" => %{"app" => %{"screenshots" => block}}}), "app")
+
+      assert Enum.map(config.services, & &1.name) == ["postgres", "s3"]
+      assert config.deps == %{"mix" => true}
+    end
+  end
+
   describe "resolve/2: services and deps" do
     test "default to none and off" do
       workspace = ws(%{"repos" => %{"app" => %{"screenshots" => @minimal}}})
