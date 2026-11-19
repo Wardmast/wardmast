@@ -49,45 +49,10 @@ defmodule Wardmast.Board.CapacityExplainerLayersTest do
           [ready_card("bd-a")]
         )
 
-      assert %{layers: %{"bd-a" => layer}} = CapacityExplainer.explain(board, mode: :shadow)
+      assert %{layers: %{"bd-a" => layer}} = CapacityExplainer.explain(board)
       assert layer.layer == :provider
       assert layer.state == :waiting
       assert layer.text == "Waiting for claude:default: 3 of 3 seats (7d ahead of pace)"
-      assert layer.shadow? == true
-    end
-
-    test "two accounts in different modes: only the enforcing account's layer decides (O11)" do
-      other = {"acct-2", "gpt"}
-      pair_a = %{pool: @pool, node: "local"}
-      pair_b = %{pool: other, node: "local"}
-
-      board =
-        board([
-          walk_entry("bd-a", :next, "next", nil, pair_a),
-          walk_entry("bd-b", :next, "next", nil, pair_b)
-        ])
-
-      pool_mode = fn
-        {"acct-2", _} -> :enforce
-        _ -> :shadow
-      end
-
-      assert %{layers: %{"bd-a" => a, "bd-b" => b}} =
-               CapacityExplainer.explain(board, mode: :enforce, pool_mode: pool_mode)
-
-      assert a.shadow? == true
-      assert b.shadow? == false
-    end
-
-    test "the budget popup is labelled with the installation mode, not the walk's" do
-      view = %{pools: [], machines: []}
-
-      assert %{budget: %{label: "shadow", shadow?: true}} =
-               CapacityExplainer.explain(board([]),
-                 mode: :enforce,
-                 install_mode: :shadow,
-                 capacity: view
-               )
     end
 
     test "the node, repo layers read the same way" do
@@ -107,7 +72,7 @@ defmodule Wardmast.Board.CapacityExplainerLayersTest do
           )
         ])
 
-      %{layers: layers} = CapacityExplainer.explain(board, mode: :shadow)
+      %{layers: layers} = CapacityExplainer.explain(board)
       assert layers["bd-n"].layer == :node
       assert layers["bd-n"].text =~ "local 6 of 6"
       assert layers["bd-r"].layer == :repo
@@ -127,7 +92,7 @@ defmodule Wardmast.Board.CapacityExplainerLayersTest do
           )
         ])
 
-      %{layers: layers} = CapacityExplainer.explain(board, mode: :shadow)
+      %{layers: layers} = CapacityExplainer.explain(board)
       assert %{state: :next, text: "Next — claude:default on local"} = layers["bd-1"]
       assert %{state: :starting, text: "Starting — claude:default on local"} = layers["bd-2"]
     end
@@ -140,19 +105,19 @@ defmodule Wardmast.Board.CapacityExplainerLayersTest do
           walk_entry("bd-p", :blocked, "paused", :paused)
         ])
 
-      assert %{layers: layers} = CapacityExplainer.explain(board, mode: :shadow)
+      assert %{layers: layers} = CapacityExplainer.explain(board)
       assert layers == %{}
     end
 
-    test "under enforce the layer is the decision, not a shadow" do
+    test "the layer is the decision" do
       board =
         board(
           [walk_entry("bd-a", :blocked, "waiting for x: 1 of 1 seats", {:capacity, :provider})],
           [ready_card("bd-a")]
         )
 
-      assert %{layers: %{"bd-a" => %{shadow?: false}}} =
-               CapacityExplainer.explain(board, mode: :enforce)
+      assert %{layers: %{"bd-a" => %{text: _}}} =
+               CapacityExplainer.explain(board)
     end
 
     test "the hold the card already wears carries its layer" do
@@ -162,24 +127,14 @@ defmodule Wardmast.Board.CapacityExplainerLayersTest do
           [ready_card("bd-a")]
         )
 
-      assert %{holds: %{"bd-a" => hold}} = CapacityExplainer.explain(board, mode: :shadow)
+      assert %{holds: %{"bd-a" => hold}} = CapacityExplainer.explain(board)
       assert hold.layer.layer == :provider
       assert hold.layer.text =~ "x: 1 of 1 seats"
-    end
-
-    test "under legacy, or without a walk, there are no layers" do
-      with_walk =
-        board([walk_entry("bd-a", :blocked, "waiting", {:capacity, :provider})])
-
-      assert %{layers: %{}} = legacy = CapacityExplainer.explain(with_walk, mode: :legacy)
-      assert legacy.layers == %{}
-      assert %{layers: %{}} = CapacityExplainer.explain(%{ready: [], blocked: []}, mode: :shadow)
     end
   end
 
   describe "budget lines" do
     @view %{
-      admission: %{mode: "shadow", label: "shadow", decides: false, agreement: nil},
       pools: [
         %{
           account: "acct-1",
@@ -214,15 +169,11 @@ defmodule Wardmast.Board.CapacityExplainerLayersTest do
       fair_share: [%{text: "fair share: default holds 3 of claude's 4; vstim has a P1 waiting"}]
     }
 
-    test "a line per pool: seats of budget, then the reason; labelled shadow" do
+    test "a line per pool: seats of budget, then the reason" do
       assert %{budget: budget} =
                CapacityExplainer.explain(%{ready: [], blocked: []},
-                 mode: :shadow,
                  capacity: @view
                )
-
-      assert budget.label == "shadow"
-      assert budget.shadow? == true
 
       assert [claude, agy] = budget.pools
       assert claude.text == "claude:default: 3 of 3 seats"
@@ -234,7 +185,7 @@ defmodule Wardmast.Board.CapacityExplainerLayersTest do
 
     test "a line per machine, per repo, and the fair-share lines" do
       %{budget: budget} =
-        CapacityExplainer.explain(%{ready: [], blocked: []}, mode: :shadow, capacity: @view)
+        CapacityExplainer.explain(%{ready: [], blocked: []}, capacity: @view)
 
       assert [%{text: "local: 3 of 6 slots"}, %{text: "box: 1 running"}] = budget.machines
       assert [%{text: "repo vstim: 1 of 2 implementer runs"}] = budget.repos
@@ -243,16 +194,13 @@ defmodule Wardmast.Board.CapacityExplainerLayersTest do
                budget.fair_share
     end
 
-    test "enforce is not labelled shadow" do
+    test "the budget lines carry no mode label" do
       %{budget: budget} =
-        CapacityExplainer.explain(%{ready: [], blocked: []}, mode: :enforce, capacity: @view)
-
-      assert budget.label == "enforce"
-      assert budget.shadow? == false
+        CapacityExplainer.explain(%{ready: [], blocked: []}, capacity: @view)
     end
 
     test "no capacity view, no budget lines" do
-      assert %{budget: nil} = CapacityExplainer.explain(%{ready: [], blocked: []}, mode: :shadow)
+      assert %{budget: nil} = CapacityExplainer.explain(%{ready: [], blocked: []})
     end
   end
 end

@@ -25,7 +25,7 @@ defmodule Wardmast.Board.DrainTest do
   alias Wardmast.Workflows.MergeQueue.FixPassDispatcher
 
   defp board(paused?, promote \\ nil) do
-    %{
+    Wardmast.Board.WalkFixture.with_walk(%{
       ready: [],
       backlog: [],
       blocked: [],
@@ -40,7 +40,7 @@ defmodule Wardmast.Board.DrainTest do
       quota: :ok,
       paused: paused?,
       now: DateTime.utc_now()
-    }
+    })
   end
 
   defp start_autopilot!(opts) do
@@ -548,13 +548,12 @@ defmodule Wardmast.Board.DrainTest do
       assert Jason.encode!(json)
     end
 
-    # DC5 (bd-2c2a4g, design §9): the per-pool budgets ride the status, shadow-labelled.
-    test "carries admission, budgets, machines, repos and fair_share" do
+    # DC5 (bd-2c2a4g, design §9): the per-pool budgets ride the status.
+    test "carries budgets, machines, repos and fair_share" do
       ap = start_autopilot!(paused: false)
       sup = empty_supervisor!()
 
       view = %{
-        admission: %{mode: "shadow", label: "shadow", decides: false, agreement: nil},
         pools: [%{account: "a1", pool: "claude", budget: 3, seats: 3, reason: "ceiling"}],
         machines: [%{id: "local", name: "local", cap: 6, live: 3, free: 3, state: "online"}],
         repos: [],
@@ -564,7 +563,6 @@ defmodule Wardmast.Board.DrainTest do
       json =
         [autopilot: ap, supervisor: sup, capacity: view] |> Drain.status() |> Drain.to_json()
 
-      assert json.admission == view.admission
       assert json.budgets == view.pools
       assert json.machines == view.machines
       assert json.repos == []

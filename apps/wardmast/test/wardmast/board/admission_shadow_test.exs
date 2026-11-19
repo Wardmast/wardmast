@@ -80,132 +80,6 @@ defmodule Wardmast.Board.AdmissionShadowTest do
     )
   end
 
-  describe "mode/0" do
-    test "reads the installation setting; legacy by default" do
-      on_exit(fn -> Wardmast.Settings.set_scheduler_admission(nil) end)
-      assert AdmissionShadow.mode() == :legacy
-      {:ok, _} = Wardmast.Settings.set_scheduler_admission("shadow")
-      assert AdmissionShadow.mode() == :shadow
-    end
-  end
-
-  describe "dispatch_record/3: beside every dispatch" do
-    test "a disagreement names the walk's pick, its pair, and why it did not pick ours" do
-      record = AdmissionShadow.dispatch_record(board(), :shadow, "bd-a")
-
-      assert %{
-               "policy" => "shadow",
-               "dispatched" => "bd-a",
-               "pick" => "bd-b",
-               "account_id" => "acct-2",
-               "pool" => "antigravity:claude_and_gpt_models",
-               "pool_label" => "antigravity:default claude-gpt",
-               "node" => "local",
-               "agrees" => false,
-               "comparable" => true,
-               "cause" => "capacity:provider",
-               "reason" => "waiting for claude:default: 3 of 2 seats (5h binds)",
-               "placements" => 1
-             } = record
-
-      # JSON-safe: it is stored on the run as-is.
-      assert record == record |> Jason.encode!() |> Jason.decode!()
-    end
-
-    test "an agreement carries no cause" do
-      board =
-        board(%{
-          walk: %{
-            promote: "bd-a",
-            placements: [%{id: "bd-a", pool: @claude, node: "local"}],
-            entries: [walk_entry("bd-a", :next, nil, pair: %{pool: @claude, node: "local"})],
-            pools: @pools,
-            nodes: %{}
-          }
-        })
-
-      assert %{"agrees" => true, "comparable" => true, "cause" => nil, "reason" => nil} =
-               AdmissionShadow.dispatch_record(board, :enforce, "bd-a")
-
-      assert %{"policy" => "enforce"} = AdmissionShadow.dispatch_record(board, :enforce, "bd-a")
-    end
-
-    test "with a pool resolver, the record carries the placed account's mode (O11)" do
-      resolver = fn
-        @gpt -> :enforce
-        _ -> :shadow
-      end
-
-      # the walk places bd-b on @gpt; bd-a was dispatched
-      assert %{"policy" => "enforce"} = AdmissionShadow.dispatch_record(board(), resolver, "bd-a")
-
-      claude_board =
-        board(%{
-          walk: %{
-            promote: "bd-a",
-            placements: [%{id: "bd-a", pool: @claude, node: "local"}],
-            entries: [walk_entry("bd-a", :next, nil, pair: %{pool: @claude, node: "local"})],
-            pools: @pools,
-            nodes: %{}
-          }
-        })
-
-      assert %{"policy" => "shadow"} =
-               AdmissionShadow.dispatch_record(claude_board, resolver, "bd-a")
-    end
-
-    test "a walk with no candidate is not comparable" do
-      board =
-        board(%{
-          walk: %{
-            promote: nil,
-            placements: [],
-            entries: [
-              walk_entry("bd-a", :blocked, {:capacity, :node},
-                reason: "waiting for capacity — local 6 of 6"
-              )
-            ],
-            pools: @pools,
-            nodes: %{}
-          }
-        })
-
-      assert %{
-               "pick" => nil,
-               "comparable" => false,
-               "agrees" => false,
-               "cause" => "capacity:node"
-             } =
-               AdmissionShadow.dispatch_record(board, :shadow, "bd-a")
-    end
-
-    test "a walk that places our card second blames today's hold on its first pick" do
-      board =
-        board(%{
-          walk: %{
-            promote: "bd-b",
-            placements: [
-              %{id: "bd-b", pool: @gpt, node: "local"},
-              %{id: "bd-a", pool: @claude, node: "local"}
-            ],
-            entries: [
-              walk_entry("bd-a", :starting, nil, pair: %{pool: @claude, node: "local"}),
-              walk_entry("bd-b", :next, nil, pair: %{pool: @gpt, node: "local"})
-            ],
-            pools: @pools,
-            nodes: %{}
-          }
-        })
-
-      assert %{"agrees" => false, "cause" => "legacy_hold"} =
-               AdmissionShadow.dispatch_record(board, :shadow, "bd-a")
-    end
-
-    test "nothing to record without a walk" do
-      assert AdmissionShadow.dispatch_record(Map.delete(board(), :walk), :shadow, "bd-a") == nil
-    end
-  end
-
   describe "signature/1: what a hold change is" do
     test "the same decisions on both sides are the same signature, whatever the reasons say" do
       a = board()
@@ -249,16 +123,16 @@ defmodule Wardmast.Board.AdmissionShadowTest do
     end
   end
 
-  describe "event/3 and record_event/1: one row per hold change" do
+  describe "event/2 and record_event/1: one row per hold change" do
     test "the row carries both decisions and every budget" do
       at = ~U[2026-10-10 12:00:00.000000Z]
-      :ok = AdmissionShadow.record_event(AdmissionShadow.event(board(), :shadow, at))
+      :ok = AdmissionShadow.record_event(AdmissionShadow.event(board(), at))
 
       assert [row] = Ash.read!(AdmissionShadowEvent)
 
       assert %{
                at: ^at,
-               policy: "shadow",
+               policy: "enforce",
                legacy_pick: "bd-a",
                walk_pick: "bd-b",
                agrees: false,
@@ -296,7 +170,7 @@ defmodule Wardmast.Board.AdmissionShadowTest do
           ]
         })
 
-      event = AdmissionShadow.event(board, :shadow, DateTime.utc_now())
+      event = AdmissionShadow.event(board, DateTime.utc_now())
 
       assert %{legacy_pick: nil, walk_pick: "bd-b", comparable: false} = event
 

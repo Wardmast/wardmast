@@ -56,43 +56,23 @@ defmodule Wardmast.Board.SnapshotLoadWalkTest do
     %{ws: ws, account: account, ready: ready, walk_opts: walk_opts}
   end
 
-  test "legacy, by default or by name, carries no walk", %{ws: ws, walk_opts: walk_opts} do
-    refute Map.has_key?(Snapshot.load(workspace_id: ws.id, walk_opts: walk_opts), :walk)
+  test "the board carries the walk beside today's plan", ctx do
+    %{ws: ws, account: account, ready: ready, walk_opts: walk_opts} = ctx
+    now = DateTime.utc_now()
 
-    refute Map.has_key?(
-             Snapshot.load(workspace_id: ws.id, admission: :legacy, walk_opts: walk_opts),
-             :walk
-           )
-  end
+    board = Snapshot.load(workspace_id: ws.id, now: now, walk_opts: walk_opts)
 
-  for mode <- [:shadow, :enforce] do
-    test "#{mode} carries the walk beside today's unchanged plan", ctx do
-      %{ws: ws, account: account, ready: ready, walk_opts: walk_opts} = ctx
-      now = DateTime.utc_now()
+    assert board.promote == ready.id
 
-      today = Snapshot.load(workspace_id: ws.id, now: now, walk_opts: walk_opts)
-
-      board =
-        Snapshot.load(
-          workspace_id: ws.id,
-          now: now,
-          admission: unquote(mode),
-          walk_opts: walk_opts
-        )
-
-      assert Map.delete(board, :walk) == today
-      assert today.promote == ready.id
-
-      assert %{promote: promote, placements: [%{pool: pool, node: "local"}]} = board.walk
-      assert promote == ready.id
-      assert pool == {account.id, "claude"}
-      assert board.walk.pools[{account.id, "claude"}].budget == 2
-    end
+    assert %{promote: promote, placements: [%{pool: pool, node: "local"}]} = board.walk
+    assert promote == ready.id
+    assert pool == {account.id, "claude"}
+    assert board.walk.pools[{account.id, "claude"}].budget == 2
   end
 
   # Seen live (v0.2.43): today's slot total full, the primary over its own cap
   # with review-side runs it never holds, and a node with room.
-  test "shadow places a remote-eligible card on a node's free slot while today has none", ctx do
+  test "the walk places a remote-eligible card on a node's free slot while today has none", ctx do
     remote_ws =
       Ash.create!(Workspace, %{
         name: "load-walk-remote-#{System.unique_integer([:positive])}",
@@ -125,10 +105,9 @@ defmodule Wardmast.Board.SnapshotLoadWalkTest do
     now = DateTime.utc_now()
     opts = [workspace_id: remote_ws.id, now: now, slots_total: 0, walk_opts: walk_opts]
 
-    today = Snapshot.load(opts)
-    board = Snapshot.load([admission: :shadow] ++ opts)
+    board = Snapshot.load(opts)
+    today = Map.delete(board, :walk)
 
-    assert Map.delete(board, :walk) == today
     assert today.promote == nil
 
     # Today holds the head on the slot total and queues the rest behind it.
@@ -146,7 +125,7 @@ defmodule Wardmast.Board.SnapshotLoadWalkTest do
     assert local_reason =~ "local 4 of 2"
 
     assert %{legacy_pick: nil, walk_pick: ^promote, walk: %{"node" => "oryx"}} =
-             AdmissionShadow.event(board, :shadow, now)
+             AdmissionShadow.event(board, now)
   end
 
   @tag capture_log: true
@@ -154,7 +133,6 @@ defmodule Wardmast.Board.SnapshotLoadWalkTest do
     board =
       Snapshot.load(
         workspace_id: ctx.ws.id,
-        admission: :shadow,
         walk_opts: Keyword.put(ctx.walk_opts, :budgets, :not_a_list)
       )
 
@@ -170,7 +148,6 @@ defmodule Wardmast.Board.SnapshotLoadWalkTest do
     board =
       Snapshot.load(
         workspace_id: ctx.ws.id,
-        admission: :shadow,
         walk_opts: Keyword.merge(ctx.walk_opts, remote_available?: true, nodes: exiting)
       )
 
