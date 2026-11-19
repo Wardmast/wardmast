@@ -16,7 +16,11 @@ defmodule Wardmast.Screenshots.Section do
   @block ~r/<!-- arbiter:screenshots:start[^>]*-->.*?<!-- arbiter:screenshots:end -->/s
 
   @type cell :: {:image, String.t()} | {:text, String.t()}
-  @type row :: %{required(:label) => String.t(), required(:before) => cell, required(:after) => cell}
+  @type row :: %{
+          required(:label) => String.t(),
+          required(:before) => cell,
+          required(:after) => cell
+        }
 
   @doc "The opening marker comment."
   @spec start_marker() :: String.t()
@@ -26,22 +30,56 @@ defmodule Wardmast.Screenshots.Section do
   @spec end_marker() :: String.t()
   def end_marker, do: @end_marker
 
-  @doc "Render `rows` as the marker-wrapped `## Screenshots` table."
-  @spec render([row]) :: String.t()
-  def render(rows) when is_list(rows) do
-    lines =
-      [
-        @start_marker,
-        "## Screenshots",
-        "",
-        "| Page/state | Before | After |",
-        "|---|---|---|"
-      ] ++
-        Enum.map(rows, fn row ->
-          "| #{escape(row.label)} | #{cell(row.before, "before")} | #{cell(row.after, "after")} |"
-        end) ++ [@end_marker]
+  @default_max_chars 12_000
 
-    Enum.join(lines, "\n")
+  @doc """
+  Render `rows` as the marker-wrapped `## Screenshots` table.
+
+  `:max_chars` (default #{@default_max_chars}) caps the section so the worker's own
+  description keeps its room (GitHub's body cap is 65,536): rows that do not fit
+  are dropped from the end and counted in a visible note, never silently.
+  """
+  @spec render([row], keyword()) :: String.t()
+  def render(rows, opts \\ []) when is_list(rows) do
+    max = Keyword.get(opts, :max_chars, @default_max_chars)
+
+    head = [
+      @start_marker,
+      "## Screenshots",
+      "",
+      "| Page/state | Before | After |",
+      "|---|---|---|"
+    ]
+
+    lines = Enum.map(rows, &row_line/1)
+
+    # Reserve room for the "N more" note and the closing marker.
+    budget = max - String.length(Enum.join(head, "\n")) - String.length(@end_marker) - 80
+    {kept, dropped} = take_within(lines, budget)
+
+    note =
+      case dropped do
+        0 -> []
+        n -> ["", "_#{n} more not shown (still on the ticket)_"]
+      end
+
+    Enum.join(head ++ kept ++ note ++ [@end_marker], "\n")
+  end
+
+  defp row_line(row),
+    do: "| #{escape(row.label)} | #{cell(row.before, "before")} | #{cell(row.after, "after")} |"
+
+  defp take_within(lines, budget) do
+    {kept, _used} =
+      Enum.reduce_while(lines, {[], 0}, fn line, {acc, used} ->
+        size = String.length(line) + 1
+
+        if used + size <= budget,
+          do: {:cont, {[line | acc], used + size}},
+          else: {:halt, {acc, used}}
+      end)
+
+    {Enum.reverse(kept), length(lines) - length(kept)}
   end
 
   @doc """
