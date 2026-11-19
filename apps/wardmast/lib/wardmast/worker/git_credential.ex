@@ -85,6 +85,7 @@ defmodule Wardmast.Worker.GitCredential do
   """
 
   alias Wardmast.Guardrails.Config, as: GuardrailsConfig
+  alias Wardmast.Mergers.Gitlab.Endpoint
   alias Wardmast.Messages.CoordinatorNotifier
   alias Wardmast.Tasks.RepoConfig
   alias Wardmast.Tasks.Workspace
@@ -99,7 +100,8 @@ defmodule Wardmast.Worker.GitCredential do
   @name_re ~r/\A[A-Za-z0-9_.:-]+\z/
 
   @entry_keys ~w(kind key_secret token_secret private_key_secret parent_token_secret app_id
-                 installation_id host username remote api_url expires_in_days legacy_operator
+                 installation_id host username remote api_url ca_cacertfile expires_in_days
+                 legacy_operator
                  secret projects expires_at)
 
   # GitLab project access tokens expire on a date (midnight UTC), so a token minted
@@ -315,6 +317,7 @@ defmodule Wardmast.Worker.GitCredential do
       username: entry["username"] || if(gitlab?, do: "oauth2", else: "x-access-token"),
       remote: entry["remote"],
       api_url: entry["api_url"],
+      ca_cacertfile: entry["ca_cacertfile"],
       expires_in_days: entry["expires_in_days"] || @gitlab_default_days,
       secret: entry["secret"],
       projects: entry["projects"] || [],
@@ -627,7 +630,8 @@ defmodule Wardmast.Worker.GitCredential do
          host: entry.host,
          username: entry.username,
          remote: remote,
-         api_url: entry.api_url
+         api_url: entry.api_url,
+         ca_cacertfile: entry.ca_cacertfile
        }}
     end
   end
@@ -654,7 +658,8 @@ defmodule Wardmast.Worker.GitCredential do
            host: entry.host,
            username: entry.username,
            remote: remote,
-           api_url: entry.api_url
+           api_url: entry.api_url,
+           ca_cacertfile: entry.ca_cacertfile
          }}
       end
 
@@ -904,7 +909,7 @@ defmodule Wardmast.Worker.GitCredential do
           retry: false,
           receive_timeout: 15_000
         ],
-        forge_req_options(opts)
+        gitlab_req_options(entry, opts)
       )
 
     case Req.post(request) do
@@ -913,7 +918,7 @@ defmodule Wardmast.Worker.GitCredential do
         if gitlab_grant_ok?(body, scopes, level) do
           {:ok, %{id: id, token: token}}
         else
-          _ = gitlab_revoke_token(gitlab_api(entry), remote, id, parent, opts)
+          _ = gitlab_revoke_token(entry, remote, id, parent, opts)
 
           {:error,
            {:git_credential_mint_failed, :too_broad,
@@ -945,9 +950,20 @@ defmodule Wardmast.Worker.GitCredential do
 
   defp gitlab_api(%{host: host}), do: "https://#{host}/api/v4"
 
+  # `forge_req_options/1` plus the entry's/material's CA bundle (`ca_cacertfile`,
+  # for a self-managed instance behind an internal CA) as the TLS `cacertfile`.
+  # The caller's own `:connect_options` (tests) still win.
+  @doc false
+  @spec gitlab_req_options(map(), keyword()) :: keyword()
+  def gitlab_req_options(cfg, opts) do
+    Keyword.merge(Endpoint.req_options(cfg), forge_req_options(opts))
+  end
+
   # `DELETE /projects/:id/access_tokens/:token_id`, with the parent credential. A
   # token already gone (404) is revoked.
-  defp gitlab_revoke_token(api, remote, id, parent, opts) do
+  defp gitlab_revoke_token(cfg, remote, id, parent, opts) do
+    api = gitlab_api(cfg)
+
     request =
       Keyword.merge(
         [
@@ -956,7 +972,7 @@ defmodule Wardmast.Worker.GitCredential do
           retry: false,
           receive_timeout: 15_000
         ],
-        forge_req_options(opts)
+        gitlab_req_options(cfg, opts)
       )
 
     case Req.delete(request) do
@@ -1032,7 +1048,7 @@ defmodule Wardmast.Worker.GitCredential do
 
   def revoke(%Material{kind: :gitlab_project_token, token_id: id, parent_token: parent} = m, opts)
       when is_integer(id) and is_binary(parent),
-      do: gitlab_revoke_token(gitlab_api(m), m.remote, id, parent, opts)
+      do: gitlab_revoke_token(m, m.remote, id, parent, opts)
 
   def revoke(_material, _opts), do: :ok
 

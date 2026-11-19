@@ -96,6 +96,22 @@ defmodule Wardmast.Worker.StopRedispatchTest do
       assert final.state == :active
     end
 
+    test "leaves a legitimate close alone when the worker already finished its run", %{ws: ws} do
+      # bd-3x5g5z: a fast run opens its PR, Direct merges and the Watchdog
+      # closes the ticket while Dispatch is still in its post-start window. The
+      # worker is alive but finished — that close is real, not an orphaning.
+      {:ok, task} = Ash.create(Issue, %{title: "finished then closed", workspace_id: ws.id})
+      put_state!(task, :active)
+      {:ok, _} = Ash.update(task, %{}, action: :close)
+
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(pid, :normal) end)
+      :sys.replace_state(pid, fn st -> %{st | state: :finished, outcome: :succeeded} end)
+
+      assert {:ok, still_closed} = Dispatch.realign_task_if_orphaned(task.id, pid)
+      assert still_closed.state == :closed
+    end
+
     test "reconciler is a no-op when the task is still :active (happy path)", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "no race", workspace_id: ws.id})
       put_state!(task, :active)

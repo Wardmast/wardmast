@@ -13,10 +13,12 @@ defmodule Wardmast.Worker.JailHideTest do
   # availability override) and the cached probe result.
   use ExUnit.Case, async: false
 
+  alias Wardmast.Test.JailProbe
   alias Wardmast.Worker.Jail
   alias Wardmast.Worker.Jail.Hide
 
   @probe Jail.probe()
+  @bwrap_skip JailProbe.skip_reason(@probe)
 
   setup do
     uniq = "#{System.pid()}-#{System.unique_integer([:positive])}"
@@ -339,9 +341,7 @@ defmodule Wardmast.Worker.JailHideTest do
   end
 
   describe "real bwrap: one probe per path class" do
-    if @probe != :ok do
-      @describetag skip: "bwrap write jail unavailable on this host: #{inspect(@probe)}"
-    end
+    if @bwrap_skip, do: @describetag(skip: @bwrap_skip)
 
     @describetag :bwrap
 

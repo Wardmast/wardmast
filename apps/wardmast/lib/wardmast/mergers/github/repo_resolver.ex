@@ -25,13 +25,18 @@ defmodule Wardmast.Mergers.Github.RepoResolver do
 
   Returns `{:error, %Error{kind: :config_missing}}` when the remote is
   missing, malformed, or git fails (e.g. `repo_path` is not a git checkout).
+
+  Options are `parse/2`'s (`nested: true` for GitLab).
   """
-  @spec from_remote(String.t()) :: {:ok, {String.t(), String.t()}} | {:error, Error.t()}
-  def from_remote(repo_path) when is_binary(repo_path) and repo_path != "" do
+  @spec from_remote(String.t(), keyword()) ::
+          {:ok, {String.t(), String.t()}} | {:error, Error.t()}
+  def from_remote(repo_path, opts \\ [])
+
+  def from_remote(repo_path, opts) when is_binary(repo_path) and repo_path != "" do
     case System.cmd("git", ["-C", repo_path, "remote", "get-url", "origin"],
            stderr_to_stdout: true
          ) do
-      {output, 0} -> parse(String.trim(output))
+      {output, 0} -> parse(String.trim(output), opts)
       {output, _} -> {:error, remote_error("git remote get-url origin failed", output)}
     end
   rescue
@@ -39,28 +44,45 @@ defmodule Wardmast.Mergers.Github.RepoResolver do
       {:error, remote_error("git not available on PATH", Exception.message(e))}
   end
 
-  def from_remote(_),
+  def from_remote(_, _opts),
     do: {:error, remote_error("repo_path missing for per-repo repo derivation", nil)}
 
   @doc """
   Parse an `origin` URL into `{owner, repo}`. Public for tests.
+
+  With `nested: true` (GitLab, whose projects live under arbitrarily deep
+  groups), `owner` is the whole namespace path — everything before the final
+  segment, e.g. `{"group/sub", "project"}` for `…/group/sub/project.git`. Without
+  it only two segments parse, exactly as for GitHub.
   """
-  @spec parse(String.t()) :: {:ok, {String.t(), String.t()}} | {:error, Error.t()}
-  def parse(url) when is_binary(url) do
+  @spec parse(String.t(), keyword()) :: {:ok, {String.t(), String.t()}} | {:error, Error.t()}
+  def parse(url, opts \\ []) when is_binary(url) do
+    {ssh_re, https_re} = regexes(Keyword.get(opts, :nested, false))
+
     cond do
       # SSH: git@host:owner/repo(.git)
-      match = Regex.run(~r{^[^@\s]+@[^:\s]+:([^/\s]+)/([^/\s]+?)(?:\.git)?/?$}, url) ->
+      match = Regex.run(ssh_re, url) ->
         [_, owner, repo] = match
         {:ok, {owner, repo}}
 
       # HTTPS / HTTP / git protocol: scheme://host[:port]/owner/repo(.git)
-      match = Regex.run(~r{^[a-z]+://[^/\s]+/([^/\s]+)/([^/\s]+?)(?:\.git)?/?$}, url) ->
+      match = Regex.run(https_re, url) ->
         [_, owner, repo] = match
         {:ok, {owner, repo}}
 
       true ->
         {:error, remote_error("could not parse origin URL #{inspect(url)}", url)}
     end
+  end
+
+  defp regexes(true) do
+    {~r{^[^@\s]+@[^:\s]+:((?:[^/\s]+/)*[^/\s]+)/([^/\s]+?)(?:\.git)?/?$},
+     ~r{^[a-z]+://[^/\s]+/((?:[^/\s]+/)*[^/\s]+)/([^/\s]+?)(?:\.git)?/?$}}
+  end
+
+  defp regexes(false) do
+    {~r{^[^@\s]+@[^:\s]+:([^/\s]+)/([^/\s]+?)(?:\.git)?/?$},
+     ~r{^[a-z]+://[^/\s]+/([^/\s]+)/([^/\s]+?)(?:\.git)?/?$}}
   end
 
   defp remote_error(msg, raw) do

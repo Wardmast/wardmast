@@ -2469,7 +2469,7 @@ defmodule Wardmast.Workflows.ReviewPatrol do
 
     Enum.find_value(repo_map, fn {repo_name, repo_config} ->
       with path when is_binary(path) <- RepoConfig.repo_path_from_config(repo_config),
-           {:ok, {owner, r}} <- RepoResolver.from_remote(path),
+           {:ok, {owner, r}} <- RepoResolver.from_remote(path, nested: true),
            true <- "#{owner}/#{r}" == repo do
         repo_name
       else

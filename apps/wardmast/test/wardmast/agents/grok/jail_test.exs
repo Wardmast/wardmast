@@ -4,16 +4,14 @@ defmodule Wardmast.Agents.Grok.JailTest do
 
   alias Wardmast.Agents.Grok
   alias Wardmast.Agents.SecurityPolicy
+  alias Wardmast.Test.JailProbe
   alias Wardmast.Worker.Jail
 
   @moduletag :capture_log
   @moduletag :bwrap
 
-  @probe Jail.probe()
-
-  if @probe != :ok do
-    @moduletag skip: "bwrap write jail unavailable on this host: #{inspect(@probe)}"
-  end
+  @bwrap_skip JailProbe.skip_reason(Jail.probe())
+  if @bwrap_skip, do: @moduletag(skip: @bwrap_skip)
 
   # AC2 of bd-761q6h: a reviewer grok run cannot write the worktree. The
   # `grok` here is a stub that tries the write; everything else (argv, jail

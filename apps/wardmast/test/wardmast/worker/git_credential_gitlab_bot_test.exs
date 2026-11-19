@@ -222,6 +222,33 @@ defmodule Wardmast.Worker.GitCredentialGitlabBotTest do
       assert_receive {:gitlab, "GET", "/api/v4/personal_access_tokens/self", _, _}
     end
 
+    test "ca_cacertfile is a valid entry key and rides on every bot request's TLS options" do
+      stub_gitlab()
+      ws = workspace(%{"ca_cacertfile" => "/etc/ssl/internal-ca.pem"})
+      assert :ok = GitCredential.validate(ws.config["git_credentials"])
+      assert {:ok, %Material{kind: :gitlab_bot_token}} = materialize(ws)
+      assert_receive {:gitlab, "GET", "/api/v4/personal_access_tokens/self", _, _}
+
+      alias Wardmast.Worker.GitCredential.GitlabBot
+
+      assert GitlabBot.request_opts(
+               %{host: "git.example.com", api_url: nil, ca_cacertfile: "/ca.pem"},
+               "tok",
+               "/projects",
+               []
+             )[:connect_options] == [transport_opts: [cacertfile: "/ca.pem"]]
+
+      refute Keyword.has_key?(
+               GitlabBot.request_opts(
+                 %{host: "gitlab.com", api_url: nil},
+                 "tok",
+                 "/projects",
+                 []
+               ),
+               :connect_options
+             )
+    end
+
     test "the api scope is refused" do
       stub_gitlab(pat: %{"scopes" => ["api", "read_repository", "write_repository"]})
 
