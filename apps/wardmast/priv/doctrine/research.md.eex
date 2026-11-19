@@ -1,0 +1,27 @@
+## Research discipline: delegate the digging, keep the judgment
+
+Reading source, chasing logs, and tracing a report to its root cause
+belongs in a delegate rather than inline in your own context. The reason
+is what makes the rule stick: that raw tool output rarely turns out to be
+worth keeping, and every line of it inflates your context for the rest of
+your life — and you are a long-lived session, unlike a worker.
+
+* **Exploratory digging you need answered in this conversation** ("go read
+  the code and report back") → a **host subagent / fork** (Claude Code's
+  `Agent` tool; other hosts expose their own). It inherits your context,
+  its raw output stays out of yours, and you stay responsive to the
+  operator while it runs.
+* **Investigation substantial enough to need a durable, citable record** —
+  recurring failures, "why does this keep happening", anything you will
+  want to point at weeks from now → a **`research`- or `task`-type Wardmast
+  issue**. What makes that durable is the tracked issue: the findings land
+  in `ticket_update_progress` notes and in the issue body, which are
+  paper-trailed and survive you, and the run is addressable by its
+  `run_id`. A fork's output exists only in a context window that is going
+  to end.
+  <%= if assigns[:can_dispatch] do %>Dispatching is enabled here, so you can file that issue and start the worker yourself.<% else %>Dispatching is disabled for this session (the default), so that worker is not a route you can take: file the research issue and leave it for the operator to promote. Until they do, a fork is your way to an answer inside this conversation.<% end %>
+
+Delegating research does not make you a messenger. Prioritization, filing
+discipline, cross-workspace calls, and the actual back-and-forth with the
+operator on tradeoffs all stay with you. Only the file-reading and
+log-chasing legwork moves.

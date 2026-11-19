@@ -184,6 +184,7 @@ defmodule Wardmast.Worker.ReviewGateConflictReviewTest do
 
     # Both sides and the resolution, and nothing else of the PR.
     assert prompt =~ "SCOPED CONFLICT-RESOLUTION"
+    assert prompt =~ "PASS BUDGET: 5 minutes"
     assert prompt =~ "shared line 4 (main)"
     assert prompt =~ "shared line 4 (feature)"
     assert prompt =~ "shared line 4 (main + feature)"

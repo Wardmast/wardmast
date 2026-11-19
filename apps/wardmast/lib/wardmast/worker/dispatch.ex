@@ -4330,7 +4330,7 @@ defmodule Wardmast.Worker.Dispatch do
       ws_id
       |> candidate_repo_paths()
       |> Enum.find_value(fn path ->
-        case RepoResolver.from_remote(path) do
+        case RepoResolver.from_remote(path, nested: true) do
           {:ok, {owner, name}} ->
             # Pre-existing nesting 4 — baselined when bd-4x2yhq first
             # wired Credo up. Thresholds stay at the tool's own default so new

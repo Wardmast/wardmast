@@ -40,6 +40,7 @@ defmodule Wardmast.Worker.GitCredential.GitlabBot do
   delivery. Nothing here logs or returns the token.
   """
 
+  alias Wardmast.Mergers.Gitlab.Endpoint
   alias Wardmast.Tasks.Workspace
 
   @allowed_scopes ~w(read_api read_repository write_repository)
@@ -429,22 +430,28 @@ defmodule Wardmast.Worker.GitCredential.GitlabBot do
   end
 
   defp get(entry, token, path, params, req_options) do
-    request =
-      Keyword.merge(
-        [
-          url: api(entry) <> path,
-          params: params,
-          headers: [{"private-token", token}],
-          retry: false,
-          receive_timeout: 15_000
-        ],
-        req_options
-      )
+    request = Keyword.merge(request_opts(entry, token, path, params), req_options)
 
     case Req.get(request) do
       {:ok, _} = ok -> ok
       {:error, exception} -> {:error, scrub(Exception.message(exception), token)}
     end
+  end
+
+  # The Req options of one GitLab API call (before the caller's `req_options`):
+  # the entry's `api_url` (default `https://<host>/api/v4`) and, for an instance
+  # behind an internal CA, its `ca_cacertfile` as the TLS `cacertfile`.
+  @doc false
+  @spec request_opts(map(), String.t(), String.t(), keyword()) :: keyword()
+  def request_opts(entry, token, path, params) do
+    [
+      url: api(entry) <> path,
+      params: params,
+      headers: [{"private-token", token}],
+      retry: false,
+      receive_timeout: 15_000
+    ]
+    |> Keyword.merge(Endpoint.req_options(entry))
   end
 
   defp unverifiable(why), do: {:error, {:git_credential_bot_token_unverifiable, why}}
@@ -502,7 +509,8 @@ defmodule Wardmast.Worker.GitCredential.GitlabBot do
   defp expiry_row(repo, entry, store, probe?, req_options) do
     parsed = %{
       host: entry["host"] || "gitlab.com",
-      api_url: entry["api_url"]
+      api_url: entry["api_url"],
+      ca_cacertfile: entry["ca_cacertfile"]
     }
 
     live = if probe?, do: live_expiry(parsed, Map.get(store, entry["secret"]), req_options)
@@ -563,7 +571,7 @@ defmodule Wardmast.Worker.GitCredential.GitlabBot do
         match?(%{"kind" => "gitlab_bot_token", "remote" => r} when is_binary(r), entry)
       end)
       |> Enum.group_by(fn {_repo, e} ->
-        {e["secret"], e["host"] || "gitlab.com", e["api_url"]}
+        {e["secret"], e["host"] || "gitlab.com", e["api_url"], e["ca_cacertfile"]}
       end)
       |> Enum.flat_map(&unreachable_in_group(&1, store, req_options))
       |> Enum.sort_by(& &1.repo)
@@ -572,9 +580,13 @@ defmodule Wardmast.Worker.GitCredential.GitlabBot do
     end
   end
 
-  # One token (secret + host + api_url) and the entries that use it.
-  defp unreachable_in_group({{secret, host, api_url}, group}, store, req_options) do
-    case reached_paths(%{host: host, api_url: api_url}, Map.get(store, secret), req_options) do
+  # One token (secret + host + api_url + CA bundle) and the entries that use it.
+  defp unreachable_in_group({{secret, host, api_url, ca}, group}, store, req_options) do
+    case reached_paths(
+           %{host: host, api_url: api_url, ca_cacertfile: ca},
+           Map.get(store, secret),
+           req_options
+         ) do
       {:ok, paths} ->
         reached = MapSet.new(paths, &String.downcase/1)
 
