@@ -4,6 +4,8 @@ defmodule WardmastWeb.Api.ServerController do
 
   Routes:
     * `GET /api/server/migrations` — check for pending database migrations
+    * `POST /api/server/update_check` — check GitHub for a newer release now,
+      rate-limited to one real call per minute (cached result, `cached: true`)
     * `GET /api/server/bind_address` — what address the HTTP listener is
       actually bound to (bd-1c4pg3). `arb server doctor` uses this to warn
       when a server — possibly remote, via `ARB_HOST` — is reachable
@@ -114,6 +116,9 @@ defmodule WardmastWeb.Api.ServerController do
   action_fallback(WardmastWeb.Api.FallbackController)
 
   def migrations(conn, _params), do: json(conn, Wardmast.Server.Status.migrations())
+
+  @doc "POST /api/server/update_check — rate-limited manual release check (`Wardmast.Server.Status.update_check/0`)."
+  def update_check(conn, _params), do: json(conn, Wardmast.Server.Status.update_check())
 
   def dashboard_auth(conn, _params), do: json(conn, WardmastWeb.DashboardAuth.mode())
 

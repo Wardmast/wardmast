@@ -42,6 +42,29 @@ defmodule Wardmast.Server.Status do
     }
   end
 
+  @doc """
+  The shared backend of the dashboard's "Check for updates" button,
+  `POST /api/server/update_check` (`arb server update-check`) and the
+  `update_check` MCP tool. Runs `UpdateCheck.check_limited/0` (at most one real
+  GitHub call per minute; inside the window the cached result comes back with
+  `cached: true`) and returns `%{latest, running, update_available, release_url,
+  checked_at, cached, error}`; `error` is nil unless the check failed.
+  """
+  @spec update_check() :: map()
+  def update_check do
+    {kind, u} = Wardmast.Release.UpdateCheck.check_limited()
+
+    %{
+      latest: u.latest,
+      running: Wardmast.Version.app_version(),
+      update_available: u.update_available?,
+      release_url: u.release_url,
+      checked_at: u.checked_at && DateTime.to_iso8601(u.checked_at),
+      cached: kind != :fresh,
+      error: if(kind == :disabled, do: "update check is disabled on this server", else: u.error)
+    }
+  end
+
   @doc "Pending-migration status: `ok` (none), `warning` (some) or `unknown` (unreadable)."
   @spec migrations() :: map()
   def migrations do
