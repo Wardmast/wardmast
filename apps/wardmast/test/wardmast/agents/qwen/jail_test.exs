@@ -152,10 +152,12 @@ defmodule Wardmast.Agents.Qwen.JailTest do
       {jail, _, _} = split_jail(argv!(worktree: wt))
       dir = ConfigDir.system_settings_dir(worktree: wt)
 
-      assert {dir, dir} in pairs(jail, "--ro-bind-try")
+      # `--ro-bind`, not `-try`: a missing settings dir refuses the jail (bd-bzhpgi)
+      assert {dir, dir} in pairs(jail, "--ro-bind")
+      refute {dir, dir} in pairs(jail, "--ro-bind-try")
       home = ConfigDir.path(worktree: wt)
       assert Enum.find_index(jail, &(&1 == dir)) > Enum.find_index(jail, &(&1 == home))
-      # never nested in the writable home bind (bd-c609gj)
+      # a sibling of the writable home, not inside it (bd-c609gj)
       refute String.starts_with?(dir, home <> "/")
     end
 
