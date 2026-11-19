@@ -74,11 +74,13 @@ defmodule Wardmast.Screenshots.Capture do
           manifest_path: String.t()
         }
 
-  @doc "Run the capture step. See the moduledoc."
-  @spec run(map(), keyword()) ::
+  @type run_outcome ::
           {:ok, result()}
           | {:skipped, :no_ui_paths | {:plan_skip, String.t()}}
           | {:error, Failure.t()}
+
+  @doc "Run the capture step. See the moduledoc."
+  @spec run(map(), keyword()) :: run_outcome()
   def run(%{config: %Config{} = config} = input, opts \\ []) do
     case Config.diff_touches_ui_paths?(config, input.repo_path, input.base_sha, input.head_sha) do
       {:ok, false} ->
