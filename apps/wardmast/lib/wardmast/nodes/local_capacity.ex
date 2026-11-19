@@ -41,7 +41,7 @@ defmodule Wardmast.Nodes.LocalCapacity do
       deadlock a ticket waiting for its own review
       (`Wardmast.Worker.ResumeSlot`'s no-deadlock rule).
 
-  Under `scheduler_admission: enforce` (DC8, design
+  Under DC8's seat admission (DC8, design
   `provider-dynamic-concurrency.md` §2.2, I9) a resume or re-dispatch of a ticket
   already In progress is a follow-up too: `Worker.Dispatch` asks with
   `follow_up: true`, and it is held only at 0 or on a hard derate, as the
@@ -319,7 +319,7 @@ defmodule Wardmast.Nodes.LocalCapacity do
   Options: `:force` (go over; recorded), `:actor`, `:reason` (why the run is
   local, for the hold phrase), `:provider`, `:workspace_id`, and `:follow_up`
   (DC8: a resume or re-dispatch of a ticket already In progress under
-  `scheduler_admission: enforce`, held only at 0 or on a hard derate).
+  DC8's seat admission, held only at 0 or on a hard derate).
   """
   @spec admit(String.t(), atom(), keyword()) :: :ok | {:error, {:no_node_capacity, info()}}
   def admit(task_id, kind, opts \\ []) when is_binary(task_id) and is_map_key(@kinds, kind) do

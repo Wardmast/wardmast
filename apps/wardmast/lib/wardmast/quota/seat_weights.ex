@@ -4,7 +4,7 @@ defmodule Wardmast.Quota.SeatWeights do
   `docs/design/provider-dynamic-concurrency.md` §3.4 phase 2, §8).
 
   Phase 1 counts every seat as 1. A premium-model ticket draws more of the
-  window per seat-hour than a cheap one, so under `scheduler_admission: enforce`
+  window per seat-hour than a cheap one, so under DC8's seat admission
   (`Wardmast.Accounts.SeatCheck`) a seat weighs
 
       weight_m = ρ_m / ρ̄          ρ_m = c_m × τ_m

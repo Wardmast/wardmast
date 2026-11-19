@@ -2,7 +2,7 @@ defmodule Wardmast.Board.AdmissionShadowReport do
   @moduledoc """
   The admission shadow report (DC7, bd-6cuqcf;
   `docs/design/provider-dynamic-concurrency.md` §10.3-§10.4): under
-  `scheduler_admission: shadow` (or `enforce`, which records the same until
+  the admission walk (or `enforce`, which records the same until
   DC8) the scheduler walk's decision is written beside today's, and this
   reads those records so an operator can decide the gate to `enforce`.
 

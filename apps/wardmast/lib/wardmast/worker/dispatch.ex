@@ -1001,7 +1001,7 @@ defmodule Wardmast.Worker.Dispatch do
   # stopped, so a refusal or a deferral leaves the task exactly as it was. See
   # `Wardmast.Worker.ResumeSlot` for the rule.
   #
-  # bd-dhrb7j: under `scheduler_admission: enforce` the seat is on the pool the
+  # bd-dhrb7j: under DC8's seat admission the seat is on the pool the
   # resume will RUN on — the caller's provider, the ticket's `provider_constraint`
   # or routing's pick, and the caller's `--model` — not the original run's pin.
   # Reading the pin refused a `--require-provider claude` resume on the stopped
@@ -3861,7 +3861,7 @@ defmodule Wardmast.Worker.Dispatch do
   defp unpushed_count(_worktree_path, _opts), do: nil
 
   # DC6: the admission shadow's record (`Wardmast.Board.AdmissionShadow`, only
-  # under `scheduler_admission: shadow` or `enforce`) joins the routing decision
+  # under the admission walk or `enforce`) joins the routing decision
   # the run stores, as `admission_shadow`. It is a record: the decision's own
   # keys, and so the run's account and family, are untouched.
   defp recorded_decision(opts) do

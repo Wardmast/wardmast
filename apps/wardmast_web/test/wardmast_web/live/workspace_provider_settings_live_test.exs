@@ -241,7 +241,6 @@ defmodule WardmastWeb.WorkspaceProviderSettingsLiveTest do
       refute has_element?(view2, "#routing-reviewer-note", "own order")
       refute has_element?(view2, "#routing-reviewer-note", "never most_quota")
     end
-
   end
 
   describe "scoring (bd-8vkqd3)" do

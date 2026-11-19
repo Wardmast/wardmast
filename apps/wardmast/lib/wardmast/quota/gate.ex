@@ -1326,7 +1326,7 @@ defmodule Wardmast.Quota.Gate do
       the staleness checks, so a pinned clock gives a deterministic answer.
     * `:pace` — `false` keeps only the hard rules (1, 2 and 5, as
       `hard_stop/3` does) and drops the utilization rules (3 and 4), paced or
-      flat. Under `scheduler_admission: enforce` every dispatch asks the gate
+      flat. Under DC8's seat admission every dispatch asks the gate
       this way (DC8, `docs/design/provider-dynamic-concurrency.md` §4.5): the
       line is the provider budget's question, answered by the seat check.
       Default `true`, the gate as it always was.

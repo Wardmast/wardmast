@@ -760,7 +760,7 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                       a fix round, a CI fix pass, a conflict pass; never a
                       reviewer) in that repo at once. It holds a fresh
                       dispatch, never a follow-up, and only under
-                      scheduler_admission=enforce (DC9).
+                      DC8's seat admission (DC9).
                       ci_backpressure (per repo only) is a map, unset by default:
                         max_pending              hold at this many pending MR pipelines
                         max_oldest_pending_min   hold once the oldest has waited longer

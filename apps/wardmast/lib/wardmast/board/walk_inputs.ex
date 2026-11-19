@@ -5,7 +5,7 @@ defmodule Wardmast.Board.WalkInputs do
   and each Ready card's candidates, as `Wardmast.Board.Scheduler.plan/1`'s
   `:walk`.
 
-  `Wardmast.Board.Snapshot.load/1` reads this only when `scheduler_admission`
+  `Wardmast.Board.Snapshot.load/1` reads this only when the admission walk
   is `shadow` or `enforce`. Under `legacy` nothing here runs, so no admission
   path reads a budget or a seat (I1). Under `shadow` the walk it feeds decides
   no dispatch: `Wardmast.Board.AdmissionShadow` records it beside today's. Under

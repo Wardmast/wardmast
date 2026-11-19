@@ -81,7 +81,7 @@ defmodule Wardmast.Board.Scheduler do
   way: by capacity, not by one board-wide slot count. Without `:walk` the plan
   is exactly the head-of-line plan above, byte for byte (I1); the walk only
   runs where `Wardmast.Board.Snapshot` was asked for it. Under
-  `scheduler_admission: shadow` it is recorded beside every dispatch
+  the admission walk it is recorded beside every dispatch
   (`Wardmast.Board.AdmissionShadow`); under `enforce` (DC8) `Wardmast.Board.Autopilot`
   dispatches its placements.
 

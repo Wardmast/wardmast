@@ -5122,7 +5122,7 @@ defmodule WardmastWeb.TaskDetailLive do
     """
   end
 
-  # A decision provider routing made. Under `scheduler_admission: shadow` an
+  # A decision provider routing made. Under the admission walk an
   # unrouted run's decision may hold only the admission shadow's record (DC6),
   # which is not a routing decision and gets its own line below.
   defp routed?(%{"outcome" => outcome}) when is_binary(outcome), do: true

@@ -12,7 +12,7 @@ defmodule Wardmast.Quota.Budget do
 
   ## Who reads it
 
-  Under `scheduler_admission: enforce` it decides admission (DC8): the one
+  Under DC8's seat admission it decides admission (DC8): the one
   admission-path reader is `Wardmast.Accounts.SeatCheck`, the per-pool seat check
   `Wardmast.Accounts.Admission`, `Wardmast.Worker.ResumeSlot` and routing ask.
   The scheduler walk (DC6, `Wardmast.Board.WalkInputs`) reads it under `shadow`

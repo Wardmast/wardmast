@@ -2,7 +2,7 @@ defmodule Wardmast.Quota.Seats do
   @moduledoc """
   Per-pool seat occupancy (DC4, bd-5oquxn; design
   `docs/design/provider-dynamic-concurrency.md` §3.2). Under
-  `scheduler_admission: enforce` admission counts seats through
+  DC8's seat admission admission counts seats through
   `Wardmast.Accounts.SeatCheck` (DC8); under `legacy` and `shadow` nothing on an
   admission, gate, dispatch or run-stopping path reads it (I1/I2), and
   `Wardmast.Accounts.Concurrency` keeps today's per-account process count. The

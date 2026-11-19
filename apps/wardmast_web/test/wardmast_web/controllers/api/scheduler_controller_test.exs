@@ -183,7 +183,6 @@ defmodule WardmastWeb.Api.SchedulerControllerTest do
     test "carries budgets, machines, repos and fair_share", %{conn: conn} do
       body = conn |> get("/api/scheduler/status") |> json_response(200)
 
-
       assert [
                %{
                  "pool" => "antigravity:gemini_models",

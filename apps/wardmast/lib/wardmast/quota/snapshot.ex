@@ -15,7 +15,7 @@ defmodule Wardmast.Quota.Snapshot do
   `antigravity`, `gemini_credentials_expired`, `held_dispatches`,
   `paused_providers`, and `budget` (DC5: one block per account with its
   provider-concurrency pools, `Wardmast.Board.CapacityView.account_blocks/2`;
-  labelled `shadow` until `scheduler_admission` is `enforce`).
+  labelled `shadow` until the admission walk is `enforce`).
   """
 
   alias Wardmast.Quota
@@ -117,7 +117,7 @@ defmodule Wardmast.Quota.Snapshot do
   end
 
   # DC5 (bd-2c2a4g): the provider concurrency budget of each account, one block
-  # per account with its pools, labelled with the `scheduler_admission` mode
+  # per account with its pools, labelled with the the admission walk mode
   # (`Wardmast.Board.CapacityView`). Display only: a read that fails is `[]`.
   defp budget(account_ids) do
     account_ids

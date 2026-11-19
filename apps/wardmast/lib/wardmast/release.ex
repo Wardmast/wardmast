@@ -182,7 +182,7 @@ defmodule Wardmast.Release do
   @doc """
   Print the admission shadow report (bd-6cuqcf, DC7 of
   `docs/design/provider-dynamic-concurrency.md` §10.3-§10.4): under
-  `scheduler_admission: shadow` how the scheduler walk's recorded decisions
+  the admission walk how the scheduler walk's recorded decisions
   compare with today's — agreement and disagreements by cause and pool,
   throughput each way, pace safety, calibration bias, budget stability, the
   neighbourhood of each reset — and each §10.4 criterion for the gate to

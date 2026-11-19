@@ -1,6 +1,6 @@
 defmodule Wardmast.Board.AdmissionShadowEvent do
   @moduledoc """
-  One admission hold change under `scheduler_admission: shadow` or `enforce`
+  One admission hold change under the admission walk or `enforce`
   (DC6, `docs/design/provider-dynamic-concurrency.md` §10.2), written by
   `Wardmast.Board.AdmissionShadow` when either side's outcome changes — never
   per tick.

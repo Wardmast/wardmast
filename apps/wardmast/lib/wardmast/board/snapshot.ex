@@ -345,7 +345,7 @@ defmodule Wardmast.Board.Snapshot do
   end
 
   # DC6: the scheduler walk, planned beside today's plan over the same queue,
-  # only when the input carries its capacity sets (`scheduler_admission`
+  # only when the input carries its capacity sets (the admission walk
   # shadow or enforce). It reads nothing today's plan decides with and writes
   # nothing back to it, so the board's own fields are the same with or without
   # it (I1, I2). The capacity sets ride with the plan, for the shadow record.

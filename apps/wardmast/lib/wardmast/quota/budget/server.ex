@@ -27,7 +27,7 @@ defmodule Wardmast.Quota.Budget.Server do
 
   ## Who reads it
 
-  Under `scheduler_admission: enforce` the budgets decide admission through
+  Under DC8's seat admission the budgets decide admission through
   `Wardmast.Accounts.SeatCheck` (DC8). The scheduler walk reads them under
   `shadow` and `enforce` (DC6, `Wardmast.Board.WalkInputs`), and the board and
   CLI displays (DC5) show them. Under `legacy` no admission, gate or dispatch

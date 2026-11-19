@@ -3,7 +3,7 @@ defmodule Mix.Tasks.Wardmast.AdmissionShadowReport do
   @moduledoc """
   Prints the admission shadow report (bd-6cuqcf, DC7 of
   `docs/design/provider-dynamic-concurrency.md` §10.3-§10.4): under
-  `scheduler_admission: shadow`, the agreement between the scheduler walk's
+  the admission walk, the agreement between the scheduler walk's
   recorded decision and the one that dispatched (by cause and pool), the
   minutes each side would have placed a card the other held, pace safety
   (`u − line` at captures, ahead-of-pace admissions, projected exhaustion),

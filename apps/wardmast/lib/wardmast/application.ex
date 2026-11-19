@@ -366,7 +366,7 @@ defmodule Wardmast.Application do
         # (bd-2wnkoq).
         Wardmast.Quota.StalenessWatch,
         # Publishes each provider pool's concurrency budget (bd-6c8g4t, DC3)
-        # into ETS and announces `budget_changed`. Under scheduler_admission:
+        # into ETS and announces `budget_changed`. Under the admission walk:
         # enforce, admission reads it through Wardmast.Accounts.SeatCheck (DC8);
         # see Wardmast.Quota.Budget.Server. Run under its own
         # temporary supervisor: a crash loop here must not stop the app (bd-1p8cxk).
