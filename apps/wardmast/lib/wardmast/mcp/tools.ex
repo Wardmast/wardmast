@@ -1887,6 +1887,8 @@ defmodule Wardmast.MCP.Tools do
   defdelegate dep_add(scope, args), to: Wardmast.MCP.Tools.Task
   defdelegate dep_remove(scope, args), to: Wardmast.MCP.Tools.Task
   defdelegate dep_list(scope, args), to: Wardmast.MCP.Tools.Task
+  defdelegate ticket_attach(scope, args), to: Wardmast.MCP.Tools.Attachment
+  defdelegate ticket_attachment_list(scope, args), to: Wardmast.MCP.Tools.Attachment
   defdelegate dep_list_default_limit(), to: Wardmast.MCP.Tools.Task
 
   defdelegate workspace_show(scope, args), to: Wardmast.MCP.Tools.Workspace

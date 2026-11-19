@@ -11,6 +11,7 @@ defmodule Wardmast.MCP.CatalogTest do
   # `ticket_create` / `dep_add` are here since bd-dtfe9x: a worker files a child
   # of its own task, the same as REST (`Wardmast.Tasks.WorkerFiling`).
   @both_tier ~w(ticket_show inbox_check ticket_update_progress workspace_show quota_get
+                ticket_attach ticket_attachment_list
                 message_send notify_list workspace_config_get workspace_config_overview
                 workspace_config_schema
                 ticket_create dep_add ci_rerun ci_mark_external)
@@ -44,7 +45,7 @@ defmodule Wardmast.MCP.CatalogTest do
                                 workspace_config_overview workspace_config_set workspace_config_unset
                                 workspace_standing_order_add workspace_standing_order_remove
                                 external_review_list skill_create skill_update skill_delete skill_list skill_get
-                                transcript_capture_stats dep_list
+                                transcript_capture_stats dep_list ticket_attach ticket_attachment_list
                                 loop_pending_list loop_pending_diff loop_pending_apply
                                 loop_pending_reject loop_propose_routing loop_analyze loop_propose loop_propose_repo_doc_patch loop_canary_status breaker_list breaker_reset
                                 preview_start preview_stop preview_list preview_logs

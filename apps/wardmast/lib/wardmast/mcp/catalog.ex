@@ -44,6 +44,8 @@ defmodule Wardmast.MCP.Catalog do
   | `dep_add` | worker (`parent_of` from own task only), coordinator | `Wardmast.Tasks.Dependencies.add/4` (use `parent_of` to attach a child); `edges` → `Wardmast.Tasks.BulkEdges.run/2` (per-edge results) |
   | `dep_remove` | coordinator | `Wardmast.Tasks.Dependencies.remove/3` |
   | `dep_list` | worker + coordinator | `Wardmast.Tasks.Dependencies.list/1` |
+  | `ticket_attach` | worker (own task only), coordinator | `Wardmast.Attachments.create/3` (image on a ticket; the source comes from the tier) |
+  | `ticket_attachment_list` | worker (own task only), coordinator | `Wardmast.Attachments.list/1` (metadata + dashboard URL) |
   | `worker_dispatch` | coordinator (`can_dispatch`) | `Wardmast.Worker.Dispatch.dispatch/2` |
   | `worker_resume` | coordinator (`can_dispatch`) | `Wardmast.Worker.Dispatch.resume/2` |
   | `worker_review` | coordinator (`can_dispatch`) | `Wardmast.Worker.Dispatch.dispatch/2` (`review: true`) / `Wardmast.Reviews.ExternalReview.dispatch/1` (`pr`) |
@@ -1278,6 +1280,76 @@ defmodule Wardmast.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.dep_remove/2
+    },
+    %{
+      name: "ticket_attach",
+      tiers: @both,
+      description:
+        "Attach an image (png, webp or jpg) to a ticket: a before/after screenshot, a mock, " <>
+          "evidence. `data` is the file's bytes, base64-encoded (no data: prefix); the type is " <>
+          "read from the bytes, not the filename. Limits: 2 MiB and 3840x8000 px per image, " <>
+          "100 MiB and 200 files per ticket. A worker attaches to its own ticket (`id` may be " <>
+          "omitted); a coordinator names the ticket. Pair a screenshot with its counterpart by " <>
+          "giving both the same `shot_id` (lowercase letters, digits, hyphens) and `role` " <>
+          "`before` / `after` (plus the same `viewport` / `theme` if you use them): the " <>
+          "dashboard renders a pair side by side. The `source` is set from your tier; the " <>
+          "`arbiter-capture` source belongs to the capture pass and cannot be written here. " <>
+          "Returns the attachment's metadata and a dashboard `url`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{
+            "type" => "string",
+            "description" => "Ticket id. A worker may omit it (its own ticket)."
+          },
+          "data" => %{"type" => "string", "description" => "The image bytes, base64-encoded."},
+          "filename" => %{"type" => "string", "description" => "A display name (≤ 120 chars)."},
+          "caption" => %{"type" => "string", "description" => "A caption (≤ 500 chars)."},
+          "role" => %{
+            "type" => "string",
+            "enum" => ["before", "after"],
+            "description" => "Which half of a before/after pair this is."
+          },
+          "shot_id" => %{
+            "type" => "string",
+            "description" =>
+              "Pair key shared by a before and its after: ^[a-z0-9][a-z0-9-]{0,62}$."
+          },
+          "viewport" => %{
+            "type" => "string",
+            "description" => "Optional pair key part, e.g. desktop."
+          },
+          "theme" => %{"type" => "string", "description" => "Optional pair key part, e.g. dark."},
+          "workspace" => %{"type" => "string", "description" => "Workspace name or id. Optional."}
+        },
+        "required" => ["data"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.ticket_attach/2
+    },
+    %{
+      name: "ticket_attachment_list",
+      tiers: @both,
+      description:
+        "List a ticket's attachments, oldest first: id, filename, caption, content_type, " <>
+          "byte_size, width/height, sha256, `source` (worker | coordinator | operator | " <>
+          "arbiter-capture), role / shot_id / viewport / theme (the before/after pairing), " <>
+          "capture provenance (capture_id, head_sha, base_sha), `pruned` (the blob was deleted " <>
+          "by retention; the row remains) and a dashboard `url`. Metadata only; the bytes are " <>
+          "served by the dashboard. A worker reads its own ticket (`id` may be omitted); a " <>
+          "coordinator names the ticket.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{
+            "type" => "string",
+            "description" => "Ticket id. A worker may omit it (its own ticket)."
+          },
+          "workspace" => %{"type" => "string", "description" => "Workspace name or id. Optional."}
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.ticket_attachment_list/2
     },
     %{
       name: "dep_list",

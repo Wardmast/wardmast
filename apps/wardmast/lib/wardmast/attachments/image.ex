@@ -64,7 +64,7 @@ defmodule Wardmast.Attachments.Image do
     skip = len - 2
 
     case seg do
-      <<_::binary-size(skip), next::binary>> -> jpeg_segments(next)
+      <<_::binary-size(^skip), next::binary>> -> jpeg_segments(next)
       _ -> {:error, :corrupt}
     end
   end
