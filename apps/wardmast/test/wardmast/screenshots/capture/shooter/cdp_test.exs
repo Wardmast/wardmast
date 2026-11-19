@@ -182,7 +182,9 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
     test "node and Chromium run through sandbox.browser/4, with only the scratch dir writable", %{
       tmp_dir: dir
     } do
-      node = node_script(dir, "recording-node", ~s(echo "$@" > #{dir}/node-argv\necho '{"ok":true}'\n))
+      node =
+        node_script(dir, "recording-node", ~s(echo "$@" > #{dir}/node-argv\necho '{"ok":true}'\n))
+
       capture_dir = capture_dir(dir)
       scratch = Path.join(dir, "scratch")
       app = %{port: 4321, socket: "/s/sock"}
@@ -291,7 +293,17 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
     # A "node" that ignores the runner and prints `out`, exiting with `code`.
     defp fake_node(dir, out, code) do
       path = Path.join(dir, "fake-node-#{System.unique_integer([:positive])}")
-      File.write!(path, "#!/bin/sh\ncat <<'EOF'\n#{out}\nEOF\nexit #{code}\n")
+      # It also leaves an image where the spec says (an "ok" answer with none is a failure).
+      File.write!(path, """
+      #!/bin/sh
+      img=$(grep -o '"out_file":"[^"]*"' "$2" | cut -d'"' -f4)
+      printf PNG > "$img"
+      cat <<'EOF'
+      #{out}
+      EOF
+      exit #{code}
+      """)
+
       File.chmod!(path, 0o755)
       path
     end

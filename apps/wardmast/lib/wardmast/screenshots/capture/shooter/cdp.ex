@@ -269,7 +269,6 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
     end
   end
 
-
   # The runner's answer is the last line of output that is a JSON object with an `ok` key. No such
   # line is never a success, whatever the exit status.
   defp interpret(out, code, shot, out_file) do

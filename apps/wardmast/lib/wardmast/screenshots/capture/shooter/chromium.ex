@@ -61,8 +61,8 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
   @doc false
   @spec sandboxed(map()) :: {:ok, module(), map()} | {:error, {:shot, String.t()}}
   def sandboxed(%{sandbox: sandbox, app: %{} = app, scratch: dir})
-       when is_atom(sandbox) and not is_nil(sandbox) and is_binary(dir),
-       do: {:ok, sandbox, app}
+      when is_atom(sandbox) and not is_nil(sandbox) and is_binary(dir),
+      do: {:ok, sandbox, app}
 
   def sandboxed(_spec) do
     {:error,
