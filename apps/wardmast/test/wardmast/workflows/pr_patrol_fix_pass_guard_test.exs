@@ -24,8 +24,8 @@ defmodule Wardmast.Workflows.PRPatrolFixPassGuardTest do
   require Ash.Query
 
   alias Wardmast.Messages.Message
-  alias Wardmast.Test.StubResumeDeferrer
   alias Wardmast.Tasks.{Issue, Workspace}
+  alias Wardmast.Test.StubResumeDeferrer
   alias Wardmast.Worker
   alias Wardmast.Workflows.PRPatrol
 
