@@ -254,7 +254,6 @@ defmodule Wardmast.NodeAgent.K8s.PodRuntimeTest do
     end
   end
 
-
   describe "a long HOME (bd-c609gj)" do
     # curl >= 8.2x (Ubuntu 26.04) refuses to start with `curl: (100) A value or data field
     # grew larger than allowed` when $HOME is about 240 characters or more (it builds its
