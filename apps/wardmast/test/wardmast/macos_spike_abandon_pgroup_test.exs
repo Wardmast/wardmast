@@ -1,4 +1,4 @@
-defmodule Arbiter.MacosSpikeAbandonPgroupTest do
+defmodule Wardmast.MacosSpikeAbandonPgroupTest do
   @moduledoc """
   Verifies `scripts/macos-spike/probe-abandon-pgroup.sh` against a fake
   `launchctl` that implements launchd's `AbandonProcessGroup` process-group
