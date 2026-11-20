@@ -511,8 +511,8 @@ defmodule Wardmast.Mergers.Gitlab do
          {:ok, jobs} <- pipeline_jobs(cfg, Map.get(latest, "id")) do
       # Only genuinely `failed` jobs: under fail-fast CI (`auto_cancel:
       # on_job_failure: all`) a cancelled job never uploaded artifacts and is
-      # collateral, not a failure (#1312). `failing_job?/1` is left alone for
-      # its other callers.
+      # collateral, not a failure (#1312). It is the only failing-job filter now; see
+      # `fetch_jobs_for_pipeline/2`.
       failed = Enum.filter(jobs, &genuinely_failed_job?/1)
 
       with %{"id" => job_id} <- Enum.find(failed, &(Map.get(&1, "name") == job_name)),
@@ -2070,6 +2070,11 @@ defmodule Wardmast.Mergers.Gitlab do
       pipeline == :failed ->
         :ci_failed
 
+      # Canceled, not failed: inconclusive, the caller waits for / follows the
+      # newest pipeline (bd-189j66).
+      pipeline == :canceled ->
+        :ci_cancelled
+
       # The project requires a pipeline (`ci_must_pass`) but none exists on the
       # head and the MR carries no `head_pipeline` — its workflow:rules created
       # none, so CI can never go green and merging will only be refused (#918).
@@ -2231,7 +2236,9 @@ defmodule Wardmast.Mergers.Gitlab do
 
   defp map_pipeline_status("success"), do: :success
   defp map_pipeline_status("failed"), do: :failed
-  defp map_pipeline_status("canceled"), do: :failed
+  # A canceled pipeline is inconclusive (our own re-run or GitLab auto-cancel), never a
+  # code failure (bd-189j66).
+  defp map_pipeline_status("canceled"), do: :canceled
   defp map_pipeline_status("running"), do: :running
   # "skipped" (pipeline explicitly skipped) and "manual" (pipeline is done
   # except for an optional manual job) are both *settled*, mergeable outcomes,
@@ -2376,7 +2383,7 @@ defmodule Wardmast.Mergers.Gitlab do
 
     pipelines
     |> Enum.find(fn p ->
-      Map.get(p, "status") in ["failed", "canceled"] and
+      Map.get(p, "status") == "failed" and
         (not is_binary(head) or Map.get(p, "sha") in [nil, head])
     end)
     |> case do
@@ -2390,7 +2397,7 @@ defmodule Wardmast.Mergers.Gitlab do
   defp fetch_jobs_for_pipeline(cfg, pipeline_id) do
     case request(cfg, :get, "/pipelines/#{pipeline_id}/jobs", params: [per_page: 100]) do
       {:ok, %Req.Response{status: status, body: jobs}} when status in 200..299 ->
-        failing_jobs = jobs |> List.wrap() |> Enum.filter(&failing_job?/1)
+        failing_jobs = jobs |> List.wrap() |> Enum.filter(&genuinely_failed_job?/1)
         checks = Enum.map(failing_jobs, &fetch_job_log(cfg, &1))
         {:ok, checks}
 
@@ -2405,9 +2412,6 @@ defmodule Wardmast.Mergers.Gitlab do
   # A job allowed to fail never blocks the pipeline, so it is not a failing check.
   defp genuinely_failed_job?(job),
     do: Map.get(job, "status") == "failed" and Map.get(job, "allow_failure") != true
-
-  defp failing_job?(job),
-    do: Map.get(job, "status") in @failing_job_statuses and Map.get(job, "allow_failure") != true
 
   defp fetch_job_log(cfg, job) do
     job_id = Map.get(job, "id")
