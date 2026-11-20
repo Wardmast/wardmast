@@ -63,6 +63,14 @@ pub fn render(state: &State) -> String {
     )
 }
 
+/// JavaScript that replaces the current document with `render(state)`; the window
+/// layer runs it with `eval`. The HTML is embedded as a JSON string literal, so
+/// quotes, newlines and `</script>` in release output cannot break out of it.
+pub fn eval_script(state: &State) -> String {
+    let literal = serde_json::to_string(&render(state)).expect("a string always serialises");
+    format!("document.open();document.write({literal});document.close();")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +97,23 @@ mod tests {
         assert!(!html.contains("<script>alert"));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
         assert!(!html.contains("<b>x</b>"));
+    }
+
+    #[test]
+    fn the_eval_script_writes_the_page_as_a_js_string_literal() {
+        let state = State::BootFailed {
+            reason: "it's \"bad\"\nnewline".into(),
+            log_tail: vec!["</script><img src=x>".into()],
+        };
+        let js = eval_script(&state);
+        assert!(js.starts_with("document.open();document.write("), "{js}");
+        assert!(js.ends_with(");document.close();"), "{js}");
+        let literal = &js["document.open();document.write(".len()..js.len() - ");document.close();".len()];
+        // The argument round-trips to exactly the rendered page ...
+        let decoded: String = serde_json::from_str(literal).expect("a JSON string literal");
+        assert_eq!(decoded, render(&state));
+        // ... and a raw newline can never terminate the literal early.
+        assert!(!literal.contains('\n'));
     }
 
     #[test]

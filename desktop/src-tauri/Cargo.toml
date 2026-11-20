@@ -1,15 +1,19 @@
-# UNBUILT SKETCH (bd-aisgkf): the window/tray layer over `arbiter-shell-core`.
-# Not a workspace member and never compiled in the environment that produced
-# it (no webview toolchain there). The lifecycle it relies on is what
-# `shell-core`'s tests prove; this file only wires it to Tauri v2 APIs and
-# needs a first real `cargo tauri dev` pass. See docs/desktop-shell.md.
+# The window/tray layer over `arbiter-shell-core` (bd-aisgkf). Not a workspace
+# member: it needs the platform webview toolchain (webkit2gtk-4.1 + GTK dev
+# packages on Linux, Xcode on macOS). All lifecycle behaviour is in
+# `shell-core` and tested there; this crate only maps it onto a window and a
+# tray. See docs/desktop-shell.md for what has and has not been built/run.
 [package]
 name = "arbiter-desktop"
 version = "0.0.0"
 edition = "2021"
 publish = false
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
 arbiter-shell-core = { path = "../shell-core" }
+serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
