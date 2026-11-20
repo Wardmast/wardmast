@@ -59,7 +59,9 @@ Three findings from the code shaped these and are easy to miss:
 > (`Booter.Command`, scrubbed env, no network isolation), shoots with host Chromium
 > (`$ARB_CHROME` or `chromium` on `PATH`, `--no-sandbox`), and routes the result as described
 > under "Implemented" below. It does not use `Nodes.Placement`/`PassPlacement`, a podman pod,
-> the `arbiter-capture` sidecar, `screenshot_captures`, debounce/re-capture, or a merge wait.
+> the `arbiter-capture` sidecar, debounce, or a merge wait. (`screenshot_captures`, supersession,
+> the re-capture skip and `max_captures_per_ticket` *were* built later; see "Capture lifecycle"
+> below.)
 > The pod design stays as the deferred route if network isolation is wanted; the
 > operator-facing trade-offs are in [screenshots.md](../screenshots.md).
 
@@ -192,11 +194,37 @@ sandbox, or not at all**:
    the SHA it was taken at. A changed merge-base alone does not re-capture ("before" is
    labelled with the base it was taken at).
 3. **Gating.** Auto-merge waits for the capture for the **current** head to reach a
-   terminal state (`posted | skipped | failed | withheld`), at most `merge_wait_seconds`
-   (default 900). **A failed capture never fails a merge**: it raises a soft attention
+   terminal state (`posted | skipped | failed | withheld`) (the original proposal also bounded
+   this with a `merge_wait_seconds` limit; it was never built and is removed, see below). **A failed capture never fails a merge**: it raises a soft attention
    (`screenshot_capture_failed`), the PR section says what happened, and the ReviewGate
    brief carries the manifest summary so a reviewer sees "captured / failed / withheld".
    Rejected: making capture a hard merge gate; flaky browsers would block unrelated work.
+
+**Implemented (bd-8qj1sa): capture lifecycle.** Every capture attempt is a row in
+`screenshot_captures` (`Wardmast.Screenshots.CaptureRecord`, written by
+`Wardmast.Screenshots.Captures`): task, head, base, `plan_hash`, `config_hash` and a state
+(`running | captured | skipped | failed | superseded`). The ReviewGate uses it for three rules:
+
+- **Supersession.** While a capture is in flight the gate polls `origin/<branch>` every
+  `screenshot_head_poll_ms` (default 30s; the `:screenshot_head_poll_ms` gate option, `nil` = off).
+  A remote that strictly advanced past the captured head is fast-forwarded onto, the capture task
+  is cancelled and its row marked `superseded`, and the gate re-enters at the door it came in by
+  (`:first` or `{:next, review_id}`): CI is awaited on the new head when `review.require_ci_green`
+  applies, the review checkout is re-provisioned there, then the new head is captured. Any new
+  capture for a different head also supersedes a row a dead gate left `running`. A force-push the
+  worktree cannot fast-forward to is not seen by the poll (`push_gate/1` owns it).
+- **Re-capture skip.** For a head not yet checked, the set taken at the last captured head is
+  reused (and the reviewer's brief says which commit it was taken at) when
+  `diff(last_captured_head..head)` misses `ui_paths` and the plan hash is unchanged. A gate that
+  has lost its in-memory outcome (a restart) captures again rather than reuse a set it cannot show.
+- **Cap.** `limits.max_captures_per_ticket` (default 3) bounds the attempts that booted the app
+  (`skipped` rows and manifest failures do not count). At the cap the last set is reused, or, with
+  none, the reviewer is told no screenshots were taken for that reason.
+
+`merge_wait_seconds` is removed from the schema (a stored value is still accepted and ignored):
+the capture finishes in the ReviewGate, before a reviewer, so there is nothing to wait for at
+merge. No debounce was built either: a capture starts when the ReviewGate reaches the step for a
+head, and a newer head supersedes it.
 
 **Implemented (bd-84latk, #1328): the ReviewGate step.** Before a reviewer is dispatched (after the CI
 wait), `Wardmast.Worker.ReviewGate.ScreenshotGate` runs the capture for a repo with a `screenshots`
@@ -561,7 +589,7 @@ win; `env` and the `viewports`/`themes`/`seeds` maps merge by key, like `preview
     "limits": {
       "max_shots": 20, "max_images": 40, "max_image_bytes": 2097152, "max_capture_bytes": 25165824,
       "setup_seconds": 600, "seed_seconds": 120, "shot_seconds": 30, "budget_seconds": 1200,
-      "memory": "4g", "cpus": 2, "max_captures_per_ticket": 3, "merge_wait_seconds": 900
+      "memory": "4g", "cpus": 2, "max_captures_per_ticket": 3
     },
     "hosting": {
       "github": {"mode": "assets_branch", "branch": "arbiter-assets"},

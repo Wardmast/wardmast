@@ -222,4 +222,141 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGateTest do
       assert ScreenshotGate.reviewer_block(nil) == ""
     end
   end
+
+  describe "plan/3: the capture lifecycle (bd-8qj1sa)" do
+    @ui_block %{"ui_paths" => ["web/**"], "start_cmd" => "true"}
+
+    defp git!(dir, args),
+      do: {_, 0} = System.cmd("git", ["-C", dir | args], stderr_to_stdout: true)
+
+    defp commit!(dir, file, body) do
+      path = Path.join(dir, file)
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, body)
+      git!(dir, ["add", "-A"])
+      git!(dir, ["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-q", "-m", body])
+      {sha, 0} = System.cmd("git", ["-C", dir, "rev-parse", "HEAD"])
+      String.trim(sha)
+    end
+
+    # base → h1 (touches web/) → h2 (docs only) → h3 (touches web/)
+    defp history_repo(tmp) do
+      git!(tmp, ["init", "-q", "-b", "main"])
+      base = commit!(tmp, "README.md", "seed")
+      h1 = commit!(tmp, "web/a.txt", "one")
+      h2 = commit!(tmp, "docs/x.md", "two")
+      h3 = commit!(tmp, "web/a.txt", "three")
+      %{base: base, h1: h1, h2: h2, h3: h3}
+    end
+
+    defp checked(head, plan_hash \\ nil) do
+      %{
+        head_sha: head,
+        plan_hash: plan_hash,
+        outcome: {:ok, %{pairs: [], head_sha: head, notes: nil}}
+      }
+    end
+
+    defp hist(attempts, last_head, plan_hash \\ nil) do
+      %{
+        attempts: attempts,
+        last_captured: last_head && %{head_sha: last_head, plan_hash: plan_hash}
+      }
+    end
+
+    test "re-capture is skipped when the diff since the last captured head misses ui_paths",
+         %{tmp_dir: tmp} do
+      r = history_repo(tmp)
+
+      st =
+        state(tmp, %{
+          base_sha: r.base,
+          head_sha: r.h2,
+          screenshot_checked: checked(r.h1)
+        })
+
+      assert {:reuse, {:ok, _} = outcome, %{reason: :unchanged, from: from}} =
+               ScreenshotGate.plan(st, workspace(@ui_block), hist(1, r.h1))
+
+      assert from == r.h1
+
+      assert {:proceed, ctx} =
+               ScreenshotGate.route_reuse(outcome, %{reason: :unchanged, from: from}, r.h2)
+
+      assert ctx =~ String.slice(r.h1, 0, 12)
+      assert ctx =~ "not retaken"
+    end
+
+    test "re-capture runs when the diff since the last captured head touches ui_paths",
+         %{tmp_dir: tmp} do
+      r = history_repo(tmp)
+
+      st =
+        state(tmp, %{base_sha: r.base, head_sha: r.h3, screenshot_checked: checked(r.h1)})
+
+      assert {:run, _job} = ScreenshotGate.plan(st, workspace(@ui_block), hist(1, r.h1))
+    end
+
+    test "re-capture runs when the plan changed even though the diff misses ui_paths",
+         %{tmp_dir: tmp} do
+      r = history_repo(tmp)
+      plan = Path.join(tmp, ".arbiter/screenshots.json")
+      File.mkdir_p!(Path.dirname(plan))
+      File.write!(plan, ~s({"version":1,"skip":"changed"}))
+
+      st =
+        state(tmp, %{
+          base_sha: r.base,
+          head_sha: r.h2,
+          screenshot_checked: checked(r.h1, "oldhash")
+        })
+
+      assert {:run, _job} =
+               ScreenshotGate.plan(st, workspace(@ui_block), hist(1, r.h1, "oldhash"))
+    end
+
+    test "with no in-memory outcome to reuse (a restarted gate) it captures", %{tmp_dir: tmp} do
+      r = history_repo(tmp)
+      st = state(tmp, %{base_sha: r.base, head_sha: r.h2})
+      assert {:run, _job} = ScreenshotGate.plan(st, workspace(@ui_block), hist(1, r.h1))
+    end
+
+    test "max_captures_per_ticket is enforced: at the cap the last set is reused", %{tmp_dir: tmp} do
+      r = history_repo(tmp)
+      st = state(tmp, %{base_sha: r.base, head_sha: r.h3, screenshot_checked: checked(r.h1)})
+
+      assert {:reuse, {:ok, _}, %{reason: :cap, from: from, max: 3}} =
+               ScreenshotGate.plan(st, workspace(@ui_block), hist(3, r.h1))
+
+      assert from == r.h1
+    end
+
+    test "max_captures_per_ticket is enforced: at the cap with nothing captured, it is a skip",
+         %{tmp_dir: tmp} do
+      r = history_repo(tmp)
+      st = state(tmp, %{base_sha: r.base, head_sha: r.h3})
+
+      assert {:cached, {:skipped, {:cap_reached, 3}} = outcome} =
+               ScreenshotGate.plan(st, workspace(@ui_block), hist(3, nil))
+
+      assert {:proceed, ctx} = ScreenshotGate.route(outcome)
+      assert ctx =~ "max_captures_per_ticket"
+    end
+
+    test "the configured cap is read from limits", %{tmp_dir: tmp} do
+      r = history_repo(tmp)
+      block = Map.put(@ui_block, "limits", %{"max_captures_per_ticket" => 1})
+      st = state(tmp, %{base_sha: r.base, head_sha: r.h3})
+
+      assert {:cached, {:skipped, {:cap_reached, 1}}} =
+               ScreenshotGate.plan(st, workspace(block), hist(1, nil))
+    end
+
+    test "a head already checked still wins over the cap", %{tmp_dir: tmp} do
+      r = history_repo(tmp)
+      c = checked(r.h3)
+      st = state(tmp, %{base_sha: r.base, head_sha: r.h3, screenshot_checked: c})
+      assert ScreenshotGate.plan(st, workspace(@ui_block), hist(5, r.h3)) == {:cached, c.outcome}
+    end
+  end
 end
