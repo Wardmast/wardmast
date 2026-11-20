@@ -241,11 +241,10 @@ defmodule Wardmast.Board.Snapshot do
     # DC12b: the plan-time capacity, the one number the lift cap and the header
     # read (no stored total): the walk's pools and machines,
     # for the cards in the Ready column.
-    {plan_capacity, plan_capacity_binding} =
-      plan_capacity_with_binding(
-        Map.get(input, :walk),
-        Enum.filter(issues, &in_column?(columns, &1.id, :ready))
-      )
+    ready_issues = Enum.filter(issues, &in_column?(columns, &1.id, :ready))
+    memo_walk = memoize_candidates(Map.get(input, :walk), ready_issues)
+    {plan_capacity, plan_capacity_binding} = plan_capacity_with_binding(memo_walk, ready_issues)
+    input = Map.put(input, :walk, memo_walk)
 
     # ES3: what the order key reads beyond a card's own fields — epic floors,
     # the finish-first class, the lift cap. Resolved once over every ticket
@@ -691,8 +690,23 @@ defmodule Wardmast.Board.Snapshot do
     pools |> Map.take(MapSet.to_list(ids)) |> Map.values()
   end
 
+  # The capacity read asks each Ready card's candidates and the scheduler walk
+  # asks again. Answer once per card id and replay, so a board load does the
+  # routing reads one time (a card's candidates depend only on the card).
+  defp memoize_candidates(%{candidates: fun} = walk, ready) when is_function(fun, 1) do
+    memo = Map.new(ready, fn card -> {card.id, fun.(candidate_card(card))} end)
+    %{walk | candidates: fn card -> Map.get_lazy(memo, card.id, fn -> fun.(card) end) end}
+  rescue
+    _ -> walk
+  end
+
+  defp memoize_candidates(walk, _ready), do: walk
+
+  defp candidate_card(card),
+    do: %{id: card.id, workspace_id: Map.get(card, :workspace_id), repo: Map.get(card, :repo)}
+
   defp candidate_pools(candidates, card) do
-    cards = %{id: card.id, workspace_id: Map.get(card, :workspace_id), repo: Map.get(card, :repo)}
+    cards = candidate_card(card)
 
     result =
       case candidates do
