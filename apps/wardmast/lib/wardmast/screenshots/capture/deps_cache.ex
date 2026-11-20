@@ -45,7 +45,8 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
        `seed-<key>-*` work is swept by the next seed of that cache, under the same lock, and any
        left longer than `keep_days` goes with the prune.
 
-  The source's `_build` is discarded: each boot compiles into its own checkout.
+  The seed's compiled dependencies (`_build/<env>/`) are kept as `build/` (bd-8udsgf); the rest
+  of its `_build` is discarded.
 
   ## What a boot gets
 
@@ -61,9 +62,14 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   | `MIX_ESBUILD_PATH`, `MIX_TAILWIND_PATH` | `<cache>/bin/<tool>-<target>`, when installed |
 
   and `_build/<tool>-<target>` in its checkout linked to that binary, where a stock Phoenix
-  config looks for it. A dependency that writes into its own source directory while compiling
-  cannot (it is read-only); the precompiled NIFs the seed fetched are what keeps `exqlite`,
-  `mdex` and the like working.
+  config looks for it.
+
+  The cache stays read-only and is never written by a boot. A dependency that writes into its
+  own source directory while compiling (phoenix copies templates into `priv/`) would fail on it,
+  so `writable/3` gives each boot a copy: `deps/` to `<scratch>/deps` (`MIX_DEPS_PATH` points
+  there; `cp -a --reflink=auto`) and `build/<env>` to `<checkout>/_build/<env>`. Dependencies
+  the seed already compiled are not compiled again; one that does compile writes into the copy.
+  The precompiled NIFs the seed fetched keep `exqlite`, `mdex` and the like working.
 
   ## Options
 
@@ -116,6 +122,8 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
 
   @type cache :: %{
           dir: String.t(),
+          deps: String.t(),
+          build: String.t(),
           env: [{String.t(), String.t()}],
           links: [{String.t(), String.t()}]
         }
@@ -424,6 +432,7 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
            :ok <- run_seed(input, source, src, scratch, out, opts),
            :ok <- adopt(out, staging),
            :ok <- collect_tools(src, staging),
+           :ok <- collect_build(src, staging),
            :ok <- publish(staging, dir, source) do
         Logger.info("Capture.DepsCache: seeded #{dir} from #{String.slice(source.source, 0, 12)}")
         prune(Path.dirname(dir), dir, Keyword.get(opts, :keep_days, @keep_days))
@@ -640,6 +649,27 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
     e in File.Error -> {:error, "could not keep the asset tools: #{Exception.message(e)}"}
   end
 
+  # bd-8udsgf: the seed's compiled dependencies (`_build/<env>/`), kept as `build/`, which a boot
+  # copies into its own checkout's `_build` so it does not recompile them. Only real directories
+  # are moved (never through a link the seed planted); the tools' files are `collect_tools`'s.
+  defp collect_build(src, staging) do
+    build = Path.join(src, "_build")
+    kept = Path.join(staging, "build")
+    File.mkdir!(kept)
+
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(build),
+         {:ok, entries} <- File.ls(build) do
+      for entry <- entries,
+          from = Path.join(build, entry),
+          match?({:ok, %File.Stat{type: :directory}}, File.lstat(from)),
+          do: File.rename!(from, Path.join(kept, entry))
+    end
+
+    :ok
+  rescue
+    e in File.Error -> {:error, "could not keep the compiled deps: #{Exception.message(e)}"}
+  end
+
   # The stamp goes into the host's staging dir, then the atomic rename: the final name only ever
   # appears complete.
   defp publish(staging, dir, source) do
@@ -717,6 +747,8 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
     %{
       dir: dir,
       env: env,
+      deps: Path.join(dir, "deps"),
+      build: Path.join(dir, "build"),
       links: Enum.map(tools, &{Path.join("_build", &1), Path.join([dir, "bin", &1])})
     }
   end
@@ -727,6 +759,114 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
       tool -> [{var, Path.join([dir, "bin", tool])}]
     end
   end
+
+  # ── the boot's writable view ────────────────────────────────────────────
+
+  @doc """
+  Makes the cache usable by one boot without ever writing to it (bd-8udsgf): `deps/` is copied
+  (`cp -a --reflink=auto`, copy-on-write where the filesystem has it) to `<scratch>/deps`, and
+  the seed's compiled `build/<env>` into `<checkout>/_build/<env>`, so a dependency that writes
+  into its own source directory while compiling (phoenix copies templates into `priv/`) writes
+  into the copy, and deps the seed compiled are not compiled again. Returns the environment
+  overrides for the boot (`MIX_DEPS_PATH` at the copy). The cache itself is only read.
+  """
+  @spec writable(cache(), String.t(), String.t()) ::
+          {:ok, [{String.t(), String.t()}]} | {:error, String.t()}
+  def writable(cache, scratch, checkout) do
+    deps = Path.join(scratch, "deps")
+
+    build = Path.join(checkout, "_build")
+
+    with :ok <- copy_tree(cache.deps, deps),
+         :ok <- copy_build(cache.build, build),
+         :ok <- relink_priv(build, deps) do
+      {:ok, [{"MIX_DEPS_PATH", deps}]}
+    end
+  end
+
+  # Mix links `_build/<env>/lib/<dep>/priv` to the dependency's source `priv` with a relative
+  # link, which the seed's layout wrote and the boot's does not share. Re-point every one at the
+  # boot's deps copy (never following the seed's target); drop it when the dep has no `priv`.
+  defp relink_priv(build, deps) do
+    for env <- ls_dirs(build),
+        dep <- ls_dirs(Path.join([build, env, "lib"])) do
+      link = Path.join([build, env, "lib", dep, "priv"])
+
+      case File.lstat(link) do
+        {:ok, %File.Stat{type: :symlink}} ->
+          File.rm(link)
+          source = Path.join([deps, dep, "priv"])
+          if File.dir?(source), do: File.ln_s(source, link)
+
+        _ ->
+          :ok
+      end
+    end
+
+    :ok
+  end
+
+  defp ls_dirs(dir) do
+    case File.ls(dir) do
+      {:ok, entries} -> entries
+      _ -> []
+    end
+  end
+
+  defp copy_build(from, to) do
+    case File.lstat(from) do
+      {:ok, %File.Stat{type: :directory}} ->
+        with :ok <- safe_build_dir(to),
+             :ok <- File.mkdir_p(to),
+             {:ok, entries} <- File.ls(from) do
+          copy_entries(entries, from, to)
+        else
+          {:error, {:unsafe, why}} -> {:error, copy_error(from, why)}
+          {:error, reason} -> {:error, copy_error(from, :file.format_error(reason))}
+        end
+
+      _ ->
+        # A cache from before the seed kept its build: the boot compiles its deps.
+        :ok
+    end
+  end
+
+  defp copy_entries(entries, from, to) do
+    Enum.reduce_while(entries, :ok, fn entry, :ok ->
+      case copy_tree(Path.join(from, entry), Path.join(to, entry)) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  # The checkout is the worker's tree: a `_build` it committed as a link is never written through.
+  defp safe_build_dir(to) do
+    case File.lstat(to) do
+      {:ok, %File.Stat{type: type}} when type != :directory ->
+        {:error, {:unsafe, "#{to} is a #{type}, not a directory"}}
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp copy_tree(from, to) do
+    File.rm_rf!(to)
+
+    with :ok <- File.mkdir_p(Path.dirname(to)),
+         {_, 0} <-
+           ReleaseEnv.cmd("cp", ["-a", "--reflink=auto", "--", from, to], stderr_to_stdout: true),
+         {_, 0} <- ReleaseEnv.cmd("chmod", ["-R", "u+rwX", "--", to], stderr_to_stdout: true) do
+      :ok
+    else
+      {:error, reason} -> {:error, copy_error(from, :file.format_error(reason))}
+      {output, _} -> {:error, copy_error(from, tail(output))}
+    end
+  end
+
+  defp copy_error(from, reason),
+    do: "could not copy the deps cache's #{from} for the boot: #{reason}"
 
   # ── running in the sandbox ──────────────────────────────────────────────
 

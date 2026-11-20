@@ -215,7 +215,7 @@ network namespace, so two services cannot talk to each other.
 
   | variable | value |
   |---|---|
-  | `MIX_DEPS_PATH` | the cached `deps/` |
+  | `MIX_DEPS_PATH` | a per-boot writable copy of the cached `deps/` |
   | `MIX_HOME`, `HEX_HOME` | the cache's Hex and rebar3 |
   | `HEX_OFFLINE` | `1` |
   | `ELIXIR_MAKE_CACHE_DIR`, `RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH` | the precompiled NIFs |
@@ -224,7 +224,22 @@ network namespace, so two services cannot talk to each other.
   The binaries are also linked at `_build/esbuild-<target>` / `_build/tailwind-<target>` in the
   checkout, where a stock Phoenix config looks for them; a config that reads
   `MIX_ESBUILD_PATH` works too. `mix deps.get` in `setup_cmd` is harmless (it finds everything
-  fetched); `mix compile` builds into the checkout's own `_build`.
+  fetched).
+
+  **Writable per boot, immutable cache.** The cache itself is never written by a boot, but a
+  dependency may write into its own source directory while compiling (phoenix copies installer
+  templates into `priv/`), which fails on a read-only mount. So each boot gets copies, made
+  before its commands run (`cp -a --reflink=auto`, copy-on-write on filesystems that have it):
+  the cached `deps/` is copied to `<scratch>/deps` (`MIX_DEPS_PATH` points there, not at the
+  cache), and the seed's compiled `_build/<env>/` (kept in the cache as `build/`, keyed like the
+  cache: lock, toolchain and `MIX_ENV`) into the checkout's `_build/<env>/`. Dependencies the
+  seed compiled are therefore **not recompiled** by the boot (`mix compile` only builds the
+  app); one that does compile writes into the copy. A cache made before the seed kept its build
+  has no `build/`: its boots compile the deps (into the copy) until it is pruned and re-seeded.
+  Mix links each compiled dep's `_build/<env>/lib/<dep>/priv` to its source `priv/` with a
+  relative link that only resolves in the seed's layout, so the boot re-points those links at
+  its own `<scratch>/deps/<dep>/priv`. Expect a real disk and time cost per boot (twice per
+  capture): on filesystems without reflink (ext4) the copy is a full one of `deps/` and `build/`.
 
 ### The seed's environment (`deps.mix_env`, `deps.env`)
 
@@ -237,8 +252,8 @@ repo's screenshots config supplies them:
   cache is compiled, and its precompiled NIFs fetched, under the env the boot uses, which is why
   it is part of the cache's name: a `dev` cache has no `only: :test` dependency a `MIX_ENV=test`
   boot needs. A boot that sets `MIX_ENV` only inside its `start_cmd`/`setup_cmd` must say so here;
-  a `deps.mix_env` that differs from `env.MIX_ENV` is refused. The cache's `_build` is discarded
-  (each boot compiles into its own checkout), so only the fetched deps and NIFs have to match.
+  a `deps.mix_env` that differs from `env.MIX_ENV` is refused. The seed's compiled
+  deps are kept and copied into each boot's `_build` (above).
 * `deps.env` (a map of literal strings, merged over the boot's own `env` values, minus any that
   contain a `{{placeholder}}`, which only mean something in a boot). So an app whose boot `env`
   already sets `DATABASE_URL` and dummy keys needs nothing more; set `deps.env` for values only
@@ -274,8 +289,7 @@ kept (absolute, no `..`); the rest is dropped, and with nothing left the server'
 
 Not covered: npm packages (a `npm ci` in `setup_cmd` has no network; vendor them or list a
 `node_modules` cache under `readonly_paths`), dependencies fetched over SSH or from a private
-Hex organisation (the seed has no credentials), and a dependency that writes into its own
-source directory while compiling (the cache is read-only).
+Hex organisation (the seed has no credentials).
 
 ## What a start script can rely on
 
