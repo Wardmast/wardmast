@@ -29,9 +29,10 @@ defmodule Wardmast.Sessions.LaunchProviders do
       `Wardmast.Agents.write_confinement/2` of `:none` — the fail-closed gate
       a worker dispatch applies, surfaced here before the click.
 
-  An account's own credential rows are *not* a signal: mode B seeds the
-  operator's credentials rather than reading the account's, and a fresh
-  `<provider>:default` join carries none.
+  An account's own credential rows are *not* a signal here (a fresh
+  `<provider>:default` join carries none). What a mode-B Claude launch reads is
+  the chosen account's login dir, and a missing or lapsed one is refused at
+  launch with the fix (`Wardmast.Sessions.AccountCredentials`, bd-oqkeso).
 
   Test seams (`opts`, all optional): `:find_executable` (1-arity, default the
   `:sessions_find_executable` app env, else `System.find_executable/1`),
