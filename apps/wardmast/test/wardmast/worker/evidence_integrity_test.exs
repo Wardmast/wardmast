@@ -38,6 +38,79 @@ defmodule Wardmast.Worker.EvidenceIntegrityTest do
       assert EvidenceIntegrity.flagged?(text)
     end
 
+    test "flags finding lines tagged [FABRICATED-EVIDENCE] across list, bold, and heading formats" do
+      for line <- [
+            "1. [FABRICATED-EVIDENCE] PR body: the test log was edited",
+            "1) [FABRICATED-EVIDENCE] PR body: the test log was edited",
+            "- [FABRICATED-EVIDENCE] PR body: the test log was edited",
+            "* [FABRICATED-EVIDENCE] PR body: the test log was edited",
+            "1. **[High]** `[FABRICATED-EVIDENCE]` PR body: the test log was edited",
+            "- **Critical** — [FABRICATED-EVIDENCE] PR body: the test log was edited",
+            "### 1. [FABRICATED-EVIDENCE] PR body: the test log was edited",
+            "[FABRICATED-EVIDENCE] PR body: the test log was edited",
+            "1. **[FABRICATED-EVIDENCE]** log was edited",
+            "**[FABRICATED-EVIDENCE]** PR body: the test log was edited",
+            "Finding 1: [FABRICATED-EVIDENCE] PR body: the test log was edited",
+            "- **F1** [FABRICATED-EVIDENCE] PR body: the test log was edited",
+            "[High] F1.2 [FABRICATED-EVIDENCE] PR body: the test log was edited"
+          ] do
+        assert EvidenceIntegrity.flagged?("VERDICT: REQUEST_CHANGES\n" <> line),
+               "expected #{inspect(line)} to flag"
+      end
+    end
+
+    test "does not flag a negated 'No `[FABRICATED-EVIDENCE]` findings' line (bd-dm5uun / vs-a4iz8r)" do
+      vs_a4iz8r = """
+      VERDICT: REQUEST_CHANGES
+      CRITERIA:
+      - [NOT MET] AC1 — `lib/vstim_web/live/chart_live.ex:42` missing guard
+      Findings:
+      1. **[Medium] `lib/vstim_web/live/chart_live.ex:42`** — guard nil before rendering.
+      No `[FABRICATED-EVIDENCE]` findings: I reproduced the render claims in the MR description.
+      VERIFICATION: FULL
+      arb done
+      """
+
+      refute EvidenceIntegrity.flagged?(vs_a4iz8r)
+      assert EvidenceIntegrity.flagged_lines(vs_a4iz8r) == []
+    end
+
+    test "does not flag prose or bullet lines that negate or merely quote [FABRICATED-EVIDENCE] in backticks" do
+      for line <- [
+            "No `[FABRICATED-EVIDENCE]` findings: I reproduced the render claims in the MR description.",
+            "No [FABRICATED-EVIDENCE] findings.",
+            "- No `[FABRICATED-EVIDENCE]` findings in this MR.",
+            "* No [FABRICATED-EVIDENCE] issues found.",
+            "There are no `[FABRICATED-EVIDENCE]` findings.",
+            "I found no `[FABRICATED-EVIDENCE]` issues in the PR description.",
+            "Not a `[FABRICATED-EVIDENCE]` finding — the screenshot is genuine.",
+            "None of the findings are `[FABRICATED-EVIDENCE]`.",
+            "Without `[FABRICATED-EVIDENCE]` findings, the gate dispatches a fix round.",
+            "- [NOT MET] A review that tags a finding `[FABRICATED-EVIDENCE]` still escalates as before.",
+            "The parser matches `[FABRICATED-EVIDENCE]` when it tags a finding.",
+            "1. **Severity: medium** — `@tagged_finding` only allows a backtick before `[FABRICATED-EVIDENCE]`."
+          ] do
+        refute EvidenceIntegrity.flagged?(line),
+               "expected #{inspect(line)} not to flag"
+      end
+    end
+
+    test "does not flag a full review that quotes `[FABRICATED-EVIDENCE]` in backticks while discussing the parser" do
+      review = """
+      VERDICT: REQUEST_CHANGES
+      CRITERIA:
+      - [MET] A review saying "No `[FABRICATED-EVIDENCE]` findings" is not treated as fabricated evidence and gets the normal fix round.
+      - [NOT MET] A review that tags a finding `[FABRICATED-EVIDENCE]` still escalates as before.
+      Findings:
+      1. **Severity: medium** — `apps/wardmast/lib/wardmast/worker/evidence_integrity.ex:72`: the regex only allows a backtick directly before `[FABRICATED-EVIDENCE]`.
+      VERIFICATION: FULL
+      arb done
+      """
+
+      refute EvidenceIntegrity.flagged?(review)
+      assert EvidenceIntegrity.flagged_lines(review) == []
+    end
+
     for phrase <- [
           "the screenshots are fabricated",
           "a falsified citation to the press kit",
