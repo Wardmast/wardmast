@@ -245,9 +245,20 @@ If you downloaded in a browser, clear it on the unpacked tree before first run:
 
 ```sh
 xattr -dr com.apple.quarantine "$HOME/.wardmast/releases/$TAG"   # or: xattr -cr
-xattr -lr "$HOME/.wardmast/releases/$TAG" | head                 # expect no output
-codesign --verify --strict "$HOME/.wardmast/releases/$TAG/bin/wardmast"
+xattr -lr "$HOME/.wardmast/releases/$TAG" | head                 # quarantine should be gone
+find "$HOME/.wardmast/releases/$TAG/" -type f \( -perm +111 -o -name '*.so' \) | while read f; do
+  file -b "$f" | grep -q Mach-O && { codesign --verify --strict "$f" || echo "UNSIGNED: $f"; }
+done
 ```
+
+`bin/wardmast` and `bin/ward` are shell scripts, which macOS does not codesign,
+so they are unsigned by design and `codesign` on them reports "code object is
+not signed at all". That is expected. The check above verifies the Mach-O files
+instead (`beam.smp`, `erl_child_setup`, the `*.so` NIFs and the rest of erts).
+
+`xattr -l` may also list `com.apple.provenance` (macOS Ventura and later). It is
+harmless and is not a sign of a problem. Only `com.apple.quarantine` matters for
+Gatekeeper, so that is the attribute to clear.
 
 Do not disable Gatekeeper system-wide, and only clear attributes on files you
 verified against the `.sha256`.
