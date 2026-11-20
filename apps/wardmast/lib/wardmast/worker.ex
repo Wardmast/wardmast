@@ -5809,7 +5809,11 @@ defmodule Wardmast.Worker do
 
     if is_binary(worktree) and File.dir?(worktree) and
          worktree_on_branch?(worktree, expected) do
-      case Wardmast.Worker.Worktree.completion_state(worktree, target) do
+      # Against origin/<target>, not a possibly-stale local branch (bd-2rdfsh).
+      # Resolved (and fetched) once; an `origin/` ref passes through both calls.
+      base = Wardmast.Worker.Worktree.gate_base_ref(worktree, target)
+
+      case Wardmast.Worker.Worktree.completion_state(worktree, base) do
         {:ok, :ready} ->
           # bd-9q966y: belt-and-suspenders — even a "clean, committed" worktree
           # must not carry injected agent-config files (.mcp.json / .gemini/ /
@@ -5817,9 +5821,6 @@ defmodule Wardmast.Worker do
           # tokens. Normally they are gitignored via .git/info/exclude (written
           # by AgentConfig.write/3), but if that was bypassed this gate catches
           # the slip. Fail open on git errors to avoid stranding valid completions.
-          # Against origin/<target>, not a possibly-stale local branch (bd-2rdfsh).
-          base = Wardmast.Worker.Worktree.gate_base_ref(worktree, target)
-
           case Wardmast.Worker.Worktree.has_injected_config_in_commits?(worktree, base) do
             {:ok, true} -> {:gate, :secret_in_commit}
             _ -> :ok

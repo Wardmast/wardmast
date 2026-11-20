@@ -109,3 +109,18 @@ PR with no diff.
   branch / diverged (`PrimarySync.status/2`, reported by `GET /api/repos` as
   `primary_behind`, `primary_sync_blocker`, `auto_sync_primary`).
 - **A skipped sync is logged at warning level**, not info.
+
+### Root cause of the stopped sync (bd-2rdfsh)
+
+`merge.auto_sync_primary` defaults to `false`, so an unconfigured workspace
+never syncs and logs nothing. Separately, even with it on, the sync only ran
+from `MergeQueue.close_task_and_finalize/2`. Most merges never go through
+there: the Watchdog merges a ReviewGate-approved PR itself
+(`Watchdog.finish_merged/1`, `finalize_detached_merge/1`), and the queue then
+skips the already-closed ticket (`do_enqueue/2`). Those merges advanced
+`origin/main` and left the primary's local `main` behind, with no journal line.
+
+The sync is now one shared helper, `PrimarySync.sync_after_merge/1,4`, called
+from `MergeQueue` and from every other merge-success path: `PullRequest.merged/2`
+(both Watchdog paths), `Driver.finalize_merged_task/3` and
+`MergedPRFinalizer.finalize/2`. It stays opt-in and best-effort.

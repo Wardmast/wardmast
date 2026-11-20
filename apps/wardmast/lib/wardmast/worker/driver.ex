@@ -67,6 +67,7 @@ defmodule Wardmast.Worker.Driver do
   alias Wardmast.Tasks.Verification
   alias Wardmast.Worker
   alias Wardmast.Worker.AuthDeath
+  alias Wardmast.Worker.PrimarySync
   alias Wardmast.Worker.Worktree
   alias Wardmast.Workflows.Machine
 
@@ -521,6 +522,9 @@ defmodule Wardmast.Worker.Driver do
         :ok
 
       {:ok, task} ->
+        # bd-2rdfsh: the merge landed; catch the primary checkout up (opt-in).
+        PrimarySync.sync_after_merge(task)
+
         case Verification.finalize_merged(task,
                close_upstream: close_upstream,
                mr_ref: Map.get(worker_state, :mr_ref) || task.pr_ref

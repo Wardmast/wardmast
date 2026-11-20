@@ -263,7 +263,6 @@ defmodule Wardmast.Workflows.MergeQueue do
   alias Wardmast.Reviews.Coverage
   alias Wardmast.Reviews.CoverageShadow
   alias Wardmast.Tasks.Issue
-  alias Wardmast.Tasks.RepoConfig
   alias Wardmast.Tasks.Verification
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Trackers
@@ -2582,73 +2581,27 @@ defmodule Wardmast.Workflows.MergeQueue do
     state
   end
 
-  # bd-bqqnin: `close_task_and_finalize/2` is the single funnel every merge-
-  # success path routes through (a fresh adapter.merge/2, a poll that finds
-  # the MR already merged externally, and the direct/no-PR strategy alike),
-  # so it's the right place to also fast-forward the repo's *primary* local
-  # checkout — the shared directory a human/coordinator may `cd` into,
-  # distinct from a worker's isolated worktree. `Worktree.fetch_origin/2`
-  # already keeps `origin/<base>` fresh in that checkout before dispatch,
-  # but never touches the checkout's own local branch/HEAD/working tree
-  # (see its docstring), so without this the primary checkout drifts
-  # further behind with every merge. Opt-in (`Workspace.auto_sync_primary?/1`,
-  # default false) and always best-effort: never raises into the merge
-  # queue, never blocks task close on it.
+  # bd-bqqnin: after a merge this queue closes (a fresh adapter.merge/2, a
+  # poll that finds the MR already merged externally, and the direct/no-PR
+  # strategy alike), fast-forward the repo's *primary* local checkout — the
+  # shared directory a human/coordinator may `cd` into, distinct from a
+  # worker's isolated worktree. `Worktree.fetch_origin/2` only keeps
+  # `origin/<base>` fresh there, never the checkout's own local branch, so
+  # without this it drifts further behind with every merge. Opt-in
+  # (`Workspace.auto_sync_primary?/1`, default false), best-effort.
+  #
+  # bd-2rdfsh: this is NOT the only merge path. The Watchdog merges a
+  # ReviewGate-approved PR itself and the queue then skips the already-closed
+  # ticket, so the Watchdog, Driver and MergedPRFinalizer finalizers call
+  # `PrimarySync.sync_after_merge/1` too; the shared logic lives there.
   defp safe_sync_primary_checkout(state, item) do
-    if Workspace.auto_sync_primary?(Mergers.scope(state.workspace, item.repo)) do
-      base = item.base || state.base
-
-      case resolve_primary_repo_path(state.workspace, item.repo) do
-        nil ->
-          Logger.info(
-            "MergeQueue: primary-checkout sync skipped for task=#{item.task_id} " <>
-              "(no repo_paths entry for #{inspect(item.repo)})"
-          )
-
-        repo_path when is_binary(base) ->
-          case PrimarySync.fast_forward(repo_path, base) do
-            :ok ->
-              :ok
-
-            {:skipped, reason} ->
-              # A skip leaves the primary's local branch stale; a stale local
-              # target branch once made an empty branch pass the commit gate
-              # (bd-2rdfsh), so say so at warning level, not info.
-              Logger.warning(
-                "MergeQueue: primary-checkout sync skipped for #{repo_path} (#{reason}); " <>
-                  "its local #{base} stays behind origin/#{base} until it is fast-forwarded"
-              )
-
-            {:error, reason} ->
-              Logger.warning(
-                "MergeQueue: primary-checkout sync failed for #{repo_path}: #{inspect(reason)}"
-              )
-          end
-
-        repo_path ->
-          Logger.info(
-            "MergeQueue: primary-checkout sync skipped for task=#{item.task_id} " <>
-              "path=#{repo_path} (no base branch resolved)"
-          )
-      end
-    end
-  rescue
-    e ->
-      Logger.warning(
-        "MergeQueue.safe_sync_primary_checkout: swallowed exception for task=#{item.task_id}: " <>
-          Exception.message(e)
-      )
-  catch
-    :exit, _ -> :ok
+    PrimarySync.sync_after_merge(
+      state.workspace,
+      item.repo,
+      item.base || state.base,
+      "task=#{item.task_id}"
+    )
   end
-
-  defp resolve_primary_repo_path(%Workspace{config: %{} = config}, repo)
-       when is_binary(repo) and repo != "" do
-    RepoConfig.find_path(get_in(config, ["repo_paths"]), repo) ||
-      RepoConfig.find_path(Application.get_env(:wardmast, :repo_paths, %{}), repo)
-  end
-
-  defp resolve_primary_repo_path(_workspace, _repo), do: nil
 
   # ---- helpers ------------------------------------------------------------
 

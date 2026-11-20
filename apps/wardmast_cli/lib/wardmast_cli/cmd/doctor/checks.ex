@@ -682,8 +682,9 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
 
   defp stale_primary_hint(_repo, target) do
     "merge.auto_sync_primary is on and the checkout looks fast-forwardable, yet it is " <>
-      "behind: no merge has been observed since. Check the server log for " <>
-      "`primary-checkout sync`, or fast-forward by hand: " <>
+      "behind: the merge that advanced origin did not run the sync (before bd-2rdfsh a " <>
+      "Watchdog-merged PR never did) or the server predates that fix. Look for " <>
+      "`primary-checkout sync` in the server log, or fast-forward by hand: " <>
       "`git -C <path> merge --ff-only origin/#{target}`."
   end
 
