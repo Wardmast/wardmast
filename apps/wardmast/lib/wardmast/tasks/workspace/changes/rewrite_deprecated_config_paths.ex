@@ -74,10 +74,6 @@ defmodule Wardmast.Tasks.Workspace.Changes.RewriteDeprecatedConfigPaths do
 
   defp rewrite_unsets(other), do: {other, []}
 
-  defp log({deprecated, canonical}) do
-    Logger.warning(
-      "workspace config: `#{deprecated}` is deprecated and read by nothing; " <>
-        "wrote `#{canonical}` instead (bd-4j0nfe)"
-    )
-  end
+  defp log(rewrite),
+    do: Logger.warning("workspace config: " <> DeprecatedConfigPaths.warning(rewrite))
 end

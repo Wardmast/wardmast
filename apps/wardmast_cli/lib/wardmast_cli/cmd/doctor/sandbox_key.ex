@@ -39,7 +39,7 @@ defmodule WardmastCli.Cmd.Doctor.SandboxKey do
     end
   end
 
-  @doc "The check over `GET /api/workspaces` rows (`%{\"name\", \"config\"}`)."
+  @doc ~s|The check over `GET /api/workspaces` rows (`%{"name", "config"}`).|
   @spec check([map()]) :: Result.t()
   def check(workspaces) when is_list(workspaces) do
     case Enum.flat_map(workspaces, &finding/1) do
