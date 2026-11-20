@@ -5817,7 +5817,10 @@ defmodule Wardmast.Worker do
           # tokens. Normally they are gitignored via .git/info/exclude (written
           # by AgentConfig.write/3), but if that was bypassed this gate catches
           # the slip. Fail open on git errors to avoid stranding valid completions.
-          case Wardmast.Worker.Worktree.has_injected_config_in_commits?(worktree, target) do
+          # Against origin/<target>, not a possibly-stale local branch (bd-2rdfsh).
+          base = Wardmast.Worker.Worktree.gate_base_ref(worktree, target)
+
+          case Wardmast.Worker.Worktree.has_injected_config_in_commits?(worktree, base) do
             {:ok, true} -> {:gate, :secret_in_commit}
             _ -> :ok
           end

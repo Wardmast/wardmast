@@ -538,7 +538,10 @@ defmodule Wardmast.Sessions.Pair do
   defp commit_gate(worktree, target) do
     case Worktree.completion_state(worktree, target) do
       {:ok, :ready} ->
-        case Worktree.has_injected_config_in_commits?(worktree, target) do
+        # Against origin/<target>, not a possibly-stale local branch (bd-2rdfsh).
+        base = Worktree.gate_base_ref(worktree, target)
+
+        case Worktree.has_injected_config_in_commits?(worktree, base) do
           {:ok, true} -> {:error, {:commit_gate, :secret_in_commit}}
           _ -> :ok
         end

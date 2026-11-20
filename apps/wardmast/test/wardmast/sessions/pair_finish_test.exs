@@ -126,6 +126,45 @@ defmodule Wardmast.Sessions.PairFinishTest do
       assert {:ok, _live} = Pair.live_session(issue.id)
     end
 
+    # bd-2rdfsh: the checkout's LOCAL main stalled 122 commits behind
+    # origin/main, so an empty pair branch counted as 122 ahead, passed the gate,
+    # pushed, failed the PR open with a 422 and started a ReviewGate round on an
+    # empty diff. The gate must compare against origin/main.
+    test "a branch with nothing on it is refused fast when the checkout's local main is stale",
+         %{git: git} do
+      GitFixture.commit!(git.seed, %{"a.txt" => "a\n"}, "upstream 1")
+      GitFixture.commit!(git.seed, %{"b.txt" => "b\n"}, "upstream 2")
+      GitFixture.commit!(git.seed, %{"c.txt" => "c\n"}, "upstream 3")
+      GitFixture.git!(git.seed, ["push", "-q", "origin", "main"])
+
+      marker = Path.join(git.root, "prepush-ran")
+
+      config = %{
+        "review" => %{"required" => true},
+        "worker" => %{
+          "pre_push_checks" => [%{"name" => "marker", "cmd" => "touch #{marker}"}]
+        }
+      }
+
+      %{ws: ws, issue: issue, session: session} = ticket!(git, config)
+
+      # The checkout's local main never moved; the pair branch is cut from
+      # origin/main, so by the stale local ref it looks 3 commits ahead.
+      local_main = GitFixture.git!(git.checkout, ["rev-parse", "main"])
+      assert GitFixture.git!(session.cwd, ["rev-list", "--count", "main..HEAD"]) == "3"
+
+      assert {:error, {:commit_gate, :no_commits}} = finish(issue, ws, %{review_spawn: false})
+
+      refute File.exists?(marker), "pre-push checks must not run"
+      assert remote_branch(git, BranchNamer.derive(issue)) == nil
+      assert StubMerger.last_open() == nil
+      reloaded = Ash.get!(Issue, issue.id)
+      assert reloaded.state == :queued
+      assert reloaded.review_gate_state in [nil, %{}]
+      assert {:ok, _live} = Pair.live_session(issue.id)
+      assert GitFixture.git!(git.checkout, ["rev-parse", "main"]) == local_main
+    end
+
     test "a red pre-push check comes back with its output, and nothing is pushed", %{git: git} do
       config = %{
         "worker" => %{

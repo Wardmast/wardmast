@@ -208,6 +208,68 @@ defmodule Wardmast.Worker.CommitGateTest do
     end
   end
 
+  # bd-2rdfsh: the primary checkout's LOCAL `main` can fall far behind
+  # origin/main. A branch cut from origin/main with no work of its own then
+  # counted as "ahead" of the stale local `main`, so an empty branch passed.
+  # Stage origin/main N commits ahead of a local `main` that never moved.
+  defp advance_origin_main(repo, commits) do
+    remote = Path.join(Path.dirname(repo), "repo-remote.git")
+    clone = Path.join(Path.dirname(repo), "advancer-#{:erlang.unique_integer([:positive])}")
+    {_, 0} = System.cmd("git", ["clone", "-q", remote, clone], stderr_to_stdout: true)
+    {_, 0} = git(["config", "user.email", "adv@example.com"], clone)
+    {_, 0} = git(["config", "user.name", "Adv"], clone)
+    {_, 0} = git(["config", "commit.gpgsign", "false"], clone)
+
+    for n <- 1..commits do
+      File.write!(Path.join(clone, "adv#{n}.txt"), "#{n}\n")
+      {_, 0} = git(["add", "."], clone)
+      {_, 0} = git(["commit", "-q", "-m", "adv #{n}"], clone)
+    end
+
+    {_, 0} = git(["push", "-q", "origin", "main"], clone)
+    :ok
+  end
+
+  describe "Worktree.completion_state/2 with a stale local target branch (bd-2rdfsh)" do
+    test "a branch equal to origin/main is :no_commits even when local main is far behind",
+         %{repo: repo} do
+      advance_origin_main(repo, 3)
+      path = provision_worktree(repo, "feature/stale-empty")
+
+      # Precondition: local main really is behind the branch's base.
+      {local_ahead, 0} = git(["rev-list", "--count", "main..HEAD"], path)
+      assert String.trim(local_ahead) == "3"
+
+      assert {:ok, :no_commits} = Worktree.completion_state(path, "main")
+      assert {:ok, false} = Worktree.has_commits_ahead?(path, "main")
+    end
+
+    test "the gate fetches: origin/main advanced after the branch was cut", %{repo: repo} do
+      path = provision_worktree(repo, "feature/stale-fetch")
+      advance_origin_main(repo, 2)
+
+      assert {:ok, :no_commits} = Worktree.completion_state(path, "main")
+    end
+
+    test "real commits still pass against a stale local main", %{repo: repo} do
+      advance_origin_main(repo, 3)
+      path = provision_worktree(repo, "feature/stale-real")
+      File.write!(Path.join(path, "real.txt"), "real\n")
+      {_, 0} = git(["add", "real.txt"], path)
+      {_, 0} = git(["commit", "-q", "-m", "real"], path)
+
+      assert {:ok, :ready} = Worktree.completion_state(path, "main")
+      assert {:ok, true} = Worktree.has_commits_ahead?(path, "main")
+    end
+
+    test "no origin remote: falls back to the local base ref", %{repo: repo} do
+      path = provision_worktree(repo, "feature/no-origin")
+      {_, 0} = git(["remote", "remove", "origin"], path)
+
+      assert {:ok, :no_commits} = Worktree.completion_state(path, "main")
+    end
+  end
+
   describe "Worktree.completion_state/2" do
     test "reports :ready when the tree is clean and has commits ahead", %{repo: repo} do
       path = provision_worktree(repo, "feature/ready")
