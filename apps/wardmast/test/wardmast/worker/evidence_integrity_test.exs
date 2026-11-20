@@ -38,6 +38,54 @@ defmodule Wardmast.Worker.EvidenceIntegrityTest do
       assert EvidenceIntegrity.flagged?(text)
     end
 
+    test "flags finding lines tagged [FABRICATED-EVIDENCE] across list and heading formats" do
+      for line <- [
+            "1. [FABRICATED-EVIDENCE] PR body: the test log was edited",
+            "1) [FABRICATED-EVIDENCE] PR body: the test log was edited",
+            "- [FABRICATED-EVIDENCE] PR body: the test log was edited",
+            "* [FABRICATED-EVIDENCE] PR body: the test log was edited",
+            "1. **[High]** `[FABRICATED-EVIDENCE]` PR body: the test log was edited",
+            "- **Critical** — [FABRICATED-EVIDENCE] PR body: the test log was edited",
+            "### 1. [FABRICATED-EVIDENCE] PR body: the test log was edited",
+            "[FABRICATED-EVIDENCE] PR body: the test log was edited"
+          ] do
+        assert EvidenceIntegrity.flagged?("VERDICT: REQUEST_CHANGES\n" <> line),
+               "expected #{inspect(line)} to flag"
+      end
+    end
+
+    test "does not flag a negated 'No `[FABRICATED-EVIDENCE]` findings' line (bd-dm5uun / vs-a4iz8r)" do
+      vs_a4iz8r = """
+      VERDICT: REQUEST_CHANGES
+      CRITERIA:
+      - [NOT MET] AC1 — `lib/vstim_web/live/chart_live.ex:42` missing guard
+      Findings:
+      1. **[Medium] `lib/vstim_web/live/chart_live.ex:42`** — guard nil before rendering.
+      No `[FABRICATED-EVIDENCE]` findings: I reproduced the render claims in the MR description.
+      VERIFICATION: FULL
+      arb done
+      """
+
+      refute EvidenceIntegrity.flagged?(vs_a4iz8r)
+      assert EvidenceIntegrity.flagged_lines(vs_a4iz8r) == []
+    end
+
+    test "does not flag prose or bullet lines that negate [FABRICATED-EVIDENCE]" do
+      for line <- [
+            "No `[FABRICATED-EVIDENCE]` findings: I reproduced the render claims in the MR description.",
+            "No [FABRICATED-EVIDENCE] findings.",
+            "- No `[FABRICATED-EVIDENCE]` findings in this MR.",
+            "* No [FABRICATED-EVIDENCE] issues found.",
+            "There are no `[FABRICATED-EVIDENCE]` findings.",
+            "I found no `[FABRICATED-EVIDENCE]` issues in the PR description.",
+            "Not a `[FABRICATED-EVIDENCE]` finding — the screenshot is genuine.",
+            "None of the findings are `[FABRICATED-EVIDENCE]`."
+          ] do
+        refute EvidenceIntegrity.flagged?(line),
+               "expected #{inspect(line)} not to flag"
+      end
+    end
+
     for phrase <- [
           "the screenshots are fabricated",
           "a falsified citation to the press kit",

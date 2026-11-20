@@ -198,6 +198,45 @@ defmodule Wardmast.Worker.ReviewGateFabricatedEvidenceTest do
                EvidenceIntegrity.marker()
              )
     end
+
+    test "a rejection with 'No `[FABRICATED-EVIDENCE]` findings' gets the gate's revise round (bd-dm5uun / vs-a4iz8r)",
+         %{repo: repo, ws: ws} do
+      script = Path.join(repo, ".git/review_negated_fabricated.sh")
+
+      File.write!(script, """
+      #!/bin/sh
+      git_dir="$(git rev-parse --git-common-dir)"
+      counter_file="$git_dir/review_negated_fabricated_pass"
+      pass=0
+      [ -f "$counter_file" ] && pass="$(cat "$counter_file")"
+      pass=$((pass + 1))
+      echo "$pass" > "$counter_file"
+
+      cat <<'EOF'
+      VERDICT: REQUEST_CHANGES
+      1. **[High] `feature.txt:1`** — needs another pass.
+      No `[FABRICATED-EVIDENCE]` findings: I reproduced the render claims in the MR description.
+      VERIFICATION: FULL
+      arb done
+      EOF
+      exit 0
+      """)
+
+      File.chmod!(script, 0o755)
+
+      task = new_task(ws)
+      pid = run_gate(task, repo, script)
+
+      wait_until(fn -> counter(repo, "revise_commit_pass") == "1" end, 8_000)
+      wait_until(fn -> Worker.finished?(Worker.state(pid)) end, 8_000)
+
+      refute String.starts_with?(
+               Map.get(Worker.state(pid).meta, :review_gate_findings) || "",
+               EvidenceIntegrity.marker()
+             )
+
+      assert StubFixRoundDispatcher.escalations() == []
+    end
   end
 
   # The author parks on a verdict the test hands it directly, the way the

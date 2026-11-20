@@ -32,7 +32,10 @@ defmodule Wardmast.Worker.EvidenceIntegrity do
   A line flags when either:
 
     1. it carries the reviewer tag `[FABRICATED-EVIDENCE]` (`tag/0`), which
-       `reviewer_block/0` asks reviewers to use; or
+       `reviewer_block/0` asks reviewers to use, at the start of a finding
+       (optionally preceded by a list marker, heading, or severity label, and
+       not negated — e.g. `"No [FABRICATED-EVIDENCE] findings"` does not flag,
+       bd-dm5uun); or
     2. it contains an **integrity term** (`fabricat*`, `falsified`,
        `falsification`, `forged`, `forgery`, `doctored`, `misrepresent*`,
        `passed/passes/passing off`)
@@ -58,6 +61,14 @@ defmodule Wardmast.Worker.EvidenceIntegrity do
 
   @tag "[FABRICATED-EVIDENCE]"
   @marker "ReviewGate: reviewer flagged fabricated or falsified evidence"
+
+  # A line where `[FABRICATED-EVIDENCE]` marks a finding rather than a prose
+  # mention (bd-dm5uun: vs-a4iz8r round 1 concluded with "No `[FABRICATED-EVIDENCE]`
+  # findings: I reproduced the render claims in the MR description" and
+  # tripped the old `String.contains?(line, @tag)` check). The tag must open
+  # the line or follow an optional heading (`###`), list marker (`1.`, `1)`,
+  # `-`, `*`), finding id (`F1.1`), or severity label (`[High]`, `**Critical** —`).
+  @tagged_finding ~r/\A(?:\#{1,6}\s+)?(?:(?:[-*]|\d+[.)])\s+)?(?:[*_`]*F\d+\.\d+[*_`]*[\s:—–-]*)?(?:[*_`]*\[?\s*(?:severity\s*:\s*)?(?:critical|blockers?|high|major|medium|moderate|low|minor)\s*\]?[*_`]*[\s:—–-]*)?`?\[FABRICATED-EVIDENCE\]`?(?:\s|\z|:|—|–|-)/i
 
   @integrity ~r/\A(?:fabricat\w*|falsified|falsification|forged|forgery|forgeries|doctored|misrepresent\w*)\z/i
   @pass_off ~r/\A(?:pass|passed|passes|passing)\z/i
@@ -187,11 +198,25 @@ defmodule Wardmast.Worker.EvidenceIntegrity do
   defp flagged_line?(""), do: false
 
   defp flagged_line?(line) do
-    String.contains?(line, @tag) or accusation?(line)
+    tagged_finding?(line) or accusation?(line)
+  end
+
+  defp tagged_finding?(line) do
+    Regex.match?(@tagged_finding, line)
   end
 
   defp accusation?(line) do
-    words = Regex.scan(~r/[\w'’-]+/u, line) |> List.flatten() |> Enum.map(&normalize/1)
+    # Strip `[FABRICATED-EVIDENCE]` before tokenizing so a negated tag mention
+    # ("No `[FABRICATED-EVIDENCE]` findings") is not split into words
+    # `["no", "fabricated-evidence", "findings"]` where `"fabricated-evidence"`
+    # matches `fabricat\w*` alongside `"evidence"`.
+    words =
+      line
+      |> String.replace(~r/`?\[FABRICATED-EVIDENCE\]`?/i, " ")
+      |> then(&Regex.scan(~r/[\w'’-]+/u, &1))
+      |> List.flatten()
+      |> Enum.map(&normalize/1)
+
     indexed = Enum.with_index(words)
 
     Enum.any?(indexed, fn {word, i} ->
