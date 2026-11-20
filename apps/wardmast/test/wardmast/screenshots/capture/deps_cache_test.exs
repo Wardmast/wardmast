@@ -379,6 +379,20 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
       assert env =~ ~r/^MIX_ENV=dev$/m
     end
 
+    test "toolchain_path/2 expands ~ in readonly_paths and reports dropped entries" do
+      kept = Path.join(System.user_home!(), "x/elixir/bin")
+
+      assert {path, []} = DepsCache.toolchain_path(["~/x"], [{"PATH", kept <> ":/usr/bin"}])
+      assert path == kept <> ":/usr/bin"
+
+      assert {path, ["/nope/bin"]} =
+               DepsCache.toolchain_path(["~/x/"], [{"PATH", kept <> ":/nope/bin"}])
+
+      assert path == kept
+      assert DepsCache.path_warning([]) == nil
+      assert DepsCache.path_warning(["/nope/bin"]) =~ "/nope/bin"
+    end
+
     # bd-2qj1ry: the seed runs on the toolchain the boot's env.PATH pins, not the server's.
     defp stub_toolchain!(dir, name, elixir, otp) do
       bin = Path.join([dir, "toolchains", name, "bin"])

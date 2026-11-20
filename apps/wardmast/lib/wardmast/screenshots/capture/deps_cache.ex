@@ -525,24 +525,46 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   # directories the boot could see are kept: absolute, no `..`, under a system dir or one of
   # `readonly_paths`; anything else is dropped. No pin (or nothing left of it) is the server's.
   defp toolchain_path(input) do
+    {path, _dropped} =
+      toolchain_path(Map.get(input, :readonly_paths, []), Map.get(input, :seed_env, []))
+
+    path
+  end
+
+  @doc """
+  The seed/probe PATH for a pinned `env.PATH` and `readonly_paths` (`~` expanded the way the bwrap
+  mounts are): `{path, dropped}`, `dropped` being the pinned entries the filter removed.
+  """
+  @spec toolchain_path([term()], [{String.t(), String.t()}]) :: {String.t(), [String.t()]}
+  def toolchain_path(readonly_paths, seed_env) do
     pinned =
-      input
-      |> Map.get(:seed_env, [])
-      |> Enum.find_value(fn
+      Enum.find_value(seed_env, fn
         {"PATH", value} when is_binary(value) -> value
         _ -> nil
       end)
 
-    allowed = @system_dirs ++ Enum.map(Map.get(input, :readonly_paths, []), &to_string/1)
+    allowed =
+      @system_dirs ++ Enum.map(readonly_paths, fn p -> p |> to_string() |> Path.expand() end)
 
-    kept =
-      for dir <- String.split(pinned || "", ":", trim: true),
-          Path.type(dir) == :absolute,
-          ".." not in Path.split(dir),
-          Enum.any?(allowed, &under?(dir, &1)),
-          do: dir
+    entries = String.split(pinned || "", ":", trim: true)
 
-    if kept == [], do: Sandbox.path(), else: Enum.join(kept, ":")
+    {kept, dropped} =
+      Enum.split_with(entries, fn dir ->
+        Path.type(dir) == :absolute and ".." not in Path.split(dir) and
+          Enum.any?(allowed, &under?(dir, &1))
+      end)
+
+    path = if kept == [], do: Sandbox.path(), else: Enum.join(kept, ":")
+    {path, dropped}
+  end
+
+  @doc "The note naming dropped pinned PATH entries, or `nil` when none were."
+  @spec path_warning([String.t()]) :: String.t() | nil
+  def path_warning([]), do: nil
+
+  def path_warning(dropped) do
+    "pinned PATH entries outside system dirs and readonly_paths were dropped: " <>
+      Enum.join(dropped, ", ")
   end
 
   defp under?(dir, root) do
