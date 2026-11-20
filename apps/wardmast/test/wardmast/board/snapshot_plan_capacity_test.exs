@@ -100,6 +100,9 @@ defmodule Wardmast.Board.SnapshotPlanCapacityTest do
       cap = CapacityExplainer.cap(board)
       assert cap.effective == 4
       assert cap.free == 4
+      assert cap.binding == :budget
+      assert cap.headline =~ "provider budget"
+      assert [%{key: :budget, binding?: true}] = Enum.filter(cap.limits, & &1.binding?)
     end
   end
 end

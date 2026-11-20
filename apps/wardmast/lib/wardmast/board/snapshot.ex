@@ -142,6 +142,7 @@ defmodule Wardmast.Board.Snapshot do
           closed_today: [map()],
           attention: [map()],
           plan_capacity: non_neg_integer(),
+          plan_capacity_binding: :budget | :machines,
           slots_used: non_neg_integer(),
           slot_holders: [String.t()],
           capacity: map() | nil,
@@ -240,8 +241,8 @@ defmodule Wardmast.Board.Snapshot do
     # DC12b: the plan-time capacity, the one number the lift cap and the header
     # read (no stored total): the walk's pools and machines,
     # for the cards in the Ready column.
-    plan_capacity =
-      plan_capacity(
+    {plan_capacity, plan_capacity_binding} =
+      plan_capacity_with_binding(
         Map.get(input, :walk),
         Enum.filter(issues, &in_column?(columns, &1.id, :ready))
       )
@@ -311,6 +312,7 @@ defmodule Wardmast.Board.Snapshot do
       # so the Closed column never flags, whatever the input says.
       closed_today: issues |> closed_today_cards(columns, now) |> decorate.(nil),
       plan_capacity: plan_capacity,
+      plan_capacity_binding: plan_capacity_binding,
       slots_used: slots_used,
       # bd-5fl9sx: the tickets holding the slots just counted, and the old
       # capacity terms — what `Wardmast.Board.CapacityExplainer` lists, so the
@@ -641,22 +643,32 @@ defmodule Wardmast.Board.Snapshot do
   finite one; both unlimited reads the local cap. No walk: 0.
   """
   @spec plan_capacity(map() | nil, [map()]) :: non_neg_integer()
-  def plan_capacity(%{pools: pools, nodes: nodes} = walk, ready)
+  def plan_capacity(walk, ready), do: walk |> plan_capacity_with_binding(ready) |> elem(0)
+
+  @doc """
+  `plan_capacity/2` plus which side set it: `:budget` (the usable pools' budget
+  is the smaller) or `:machines` (the machine caps; also on a tie or when both
+  sides are unlimited). `CapacityExplainer` names the limit by this.
+  """
+  @spec plan_capacity_with_binding(map() | nil, [map()]) ::
+          {non_neg_integer(), :budget | :machines}
+  def plan_capacity_with_binding(%{pools: pools, nodes: nodes} = walk, ready)
       when is_map(pools) and is_map(nodes) do
     budget = pools |> usable_pools(walk, ready) |> sum_caps(& &1.budget)
     machines = sum_caps(Map.values(nodes), & &1.cap)
 
     case {budget, machines} do
-      {:unlimited, :unlimited} -> fallback_capacity()
-      {:unlimited, n} -> n
-      {n, :unlimited} -> n
-      {a, b} -> min(a, b)
+      {:unlimited, :unlimited} -> {fallback_capacity(), :machines}
+      {:unlimited, n} -> {n, :machines}
+      {n, :unlimited} -> {n, :budget}
+      {a, b} when a < b -> {a, :budget}
+      {_, b} -> {b, :machines}
     end
   rescue
-    _ -> 0
+    _ -> {0, :machines}
   end
 
-  def plan_capacity(_walk, _ready), do: 0
+  def plan_capacity_with_binding(_walk, _ready), do: {0, :machines}
 
   defp sum_caps(items, fun) do
     items
@@ -736,6 +748,7 @@ defmodule Wardmast.Board.Snapshot do
       closed_today: [],
       attention: [],
       plan_capacity: 0,
+      plan_capacity_binding: :machines,
       slots_used: 0,
       slot_holders: [],
       capacity: nil,
