@@ -2611,8 +2611,12 @@ defmodule Wardmast.Workflows.MergeQueue do
               :ok
 
             {:skipped, reason} ->
-              Logger.info(
-                "MergeQueue: skipped primary-checkout sync for #{repo_path} (#{reason})"
+              # A skip leaves the primary's local branch stale; a stale local
+              # target branch once made an empty branch pass the commit gate
+              # (bd-2rdfsh), so say so at warning level, not info.
+              Logger.warning(
+                "MergeQueue: primary-checkout sync skipped for #{repo_path} (#{reason}); " <>
+                  "its local #{base} stays behind origin/#{base} until it is fast-forwarded"
               )
 
             {:error, reason} ->

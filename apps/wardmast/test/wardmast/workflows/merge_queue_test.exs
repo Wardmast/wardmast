@@ -2655,6 +2655,37 @@ defmodule Wardmast.Workflows.MergeQueueTest do
       assert File.exists?(Path.join(primary, "MERGED.md"))
     end
 
+    # bd-2rdfsh: a skipped sync leaves the primary's local branch stale, which is
+    # exactly what went unnoticed for 3+ days; it must be loud, not an info line.
+    @tag workspace_config: %{
+           "merge" => %{"strategy" => "direct", "auto_sync_primary" => true},
+           "repo_paths" => %{"widget" => "__PRIMARY__"}
+         }
+    test "a skipped primary-checkout sync is logged as a warning naming the checkout", %{
+      workspace: ws,
+      task: task,
+      primary: primary
+    } do
+      ws = update_repo_paths(ws, primary)
+      :ok = record_run(task, "widget")
+      File.write!(Path.join(primary, "wip.txt"), "uncommitted\n")
+      before = head(primary)
+
+      log =
+        capture_log(fn ->
+          {pid, name} = start_merge_queue(ws)
+          :ok = MergeQueue.enqueue(name, task.id)
+          wait_until_closed(task.id)
+          _ = :sys.get_state(pid)
+        end)
+
+      assert head(primary) == before
+      assert log =~ "[warning]"
+      assert log =~ "primary-checkout sync skipped"
+      assert log =~ primary
+      assert log =~ "uncommitted_changes"
+    end
+
     defp update_repo_paths(ws, primary) do
       config = put_in(ws.config, ["repo_paths", "widget"], primary)
       {:ok, ws} = Ash.update(ws, %{config: config}, action: :update)
