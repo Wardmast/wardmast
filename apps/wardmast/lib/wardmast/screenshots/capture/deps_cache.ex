@@ -189,19 +189,23 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
         Path.join([root(opts), "repos", binary_part(digest(common), 0, 16) <> ".git"])
 
       :global.trans({{__MODULE__, trusted}, self()}, fn ->
-        with :ok <- init_bare(trusted) do
-          case verified_fetch(trusted, common, tip) do
-            :ok ->
-              {:ok, trusted}
-
-            {:error, _} ->
-              # The checkout may not have the tip yet (origin moved since its last fetch).
-              _ = git(repo, ["fetch", "--quiet", "--no-tags", "origin", "refs/heads/" <> branch])
-
-              with :ok <- verified_fetch(trusted, common, tip), do: {:ok, trusted}
-          end
-        end
+        with :ok <- init_bare(trusted),
+             :ok <- take_tip(trusted, repo, common, tip, branch),
+             do: {:ok, trusted}
       end)
+    end
+  end
+
+  # `tip` into the trusted repository from the checkout's object store. The checkout may not have
+  # it yet (origin moved since its last fetch): one fetch from origin into it, then a second try.
+  defp take_tip(trusted, repo, common, tip, branch) do
+    case verified_fetch(trusted, common, tip) do
+      :ok ->
+        :ok
+
+      {:error, _} ->
+        _ = git(repo, ["fetch", "--quiet", "--no-tags", "origin", "refs/heads/" <> branch])
+        verified_fetch(trusted, common, tip)
     end
   end
 
