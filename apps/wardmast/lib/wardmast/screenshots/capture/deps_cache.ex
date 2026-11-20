@@ -19,17 +19,21 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
 
   ## The cache (`prepare/2`)
 
-  `<root>/<lock12>-<toolchain12>` (`root` default `<scratch_root>/capture-deps`): the lock's
+  `<root>/<lock12>-<toolchain12>[-<mix_env>]` (`root` default `<scratch_root>/capture-deps`): the lock's
   SHA-256, and a fingerprint of the toolchain the boot will use (Elixir, OTP, ERTS and the
   architecture, as `elixir` reports them **inside the capture sandbox**, so it is the one the
-  boots run). Hex and rebar3 archives and precompiled NIFs are bound to that toolchain, so a new
+  boots run), and the `MIX_ENV` it was compiled under unless that is `dev` (bd-ur1zty). Hex and rebar3 archives and precompiled NIFs are bound to that toolchain, so a new
   one misses the cache. A miss seeds it, once per key (`:global.trans/4`):
 
     1. `git archive` of the source commit (no `.git`, nothing a worker wrote);
     2. `seed_script/0` in it, through the sandbox's `fetch_command/2`: the same filesystem
        allowlist as a boot (its `readonly_paths` too) **with the network on**, an environment
        built from nothing (plus the server's own proxy variables, never one with a credential in
-       it), `MIX_ENV=dev`:
+       it) and the values the repo's screenshots config wrote (`input.seed_env`, from
+       `Config.deps_seed/1`: `deps.env` over the boot's literal `env`; never the server's own
+       environment, and never the names this module sets itself), `MIX_ENV=<input.mix_env>`
+       (`deps.mix_env`, else the boot's `MIX_ENV`, else `dev`: a strict `config/runtime.exs` that
+       raises without `DATABASE_URL` seeds when the config provides it):
        `mix local.hex`/`local.rebar` (when the lock needs them), `mix deps.get`, `mix
        deps.compile` (which also downloads precompiled NIFs, `elixir_make` and
        `rustler_precompiled`, into the cache), then `mix esbuild.install`/`tailwind.install`
@@ -80,6 +84,10 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   @git_timeout_ms 120_000
   @proxy_env ~w(HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy)
   @keep_days 14
+  # What the seed sets itself: a config value for one of these is dropped, not applied.
+  @host_env ~w(PATH HOME LANG TMPDIR MIX_ENV ARB_NEED_HEX ARB_NEED_REBAR MIX_DEPS_PATH MIX_HOME
+               HEX_HOME HEX_OFFLINE ELIXIR_MAKE_CACHE_DIR RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH
+               MIX_ESBUILD_PATH MIX_TAILWIND_PATH) ++ @proxy_env
   # What the seed produces that boots are pointed at (`bin/` is the host's own).
   @adopted ~w(deps mix hex cache)
 
@@ -284,7 +292,11 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
          root = root(opts),
          :ok <- mkdir(root),
          {:ok, toolchain} <- fingerprint(input, source, root) do
-      dir = Path.join(root, binary_part(source.lock_hash, 0, 12) <> "-" <> toolchain)
+      dir =
+        Path.join(
+          root,
+          binary_part(source.lock_hash, 0, 12) <> "-" <> toolchain <> env_suffix(mix_env(input))
+        )
 
       with :ok <- ensure(dir, input, source, opts) do
         {:ok, cache(dir)}
@@ -292,6 +304,20 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
     else
       {:ok, :none} -> {:ok, nil}
       other -> other
+    end
+  end
+
+  # bd-ur1zty: the cache is built under the MIX_ENV the boot uses (`input.mix_env`, default
+  # "dev"): `mix deps.compile` builds, and downloads the precompiled NIFs of, only the deps that
+  # env uses, so a `dev` cache has no `only: :test` dep a `MIX_ENV=test` boot needs. "dev" keeps
+  # the key it always had (an existing cache stays valid); any other env is part of it.
+  defp env_suffix("dev"), do: ""
+  defp env_suffix(mix_env), do: "-" <> mix_env
+
+  defp mix_env(input) do
+    case Map.get(input, :mix_env) do
+      env when is_binary(env) and env != "" -> env
+      _ -> "dev"
     end
   end
 
@@ -452,10 +478,12 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
         {"HOME", Path.join(scratch, "home")},
         {"LANG", "C.UTF-8"},
         {"TMPDIR", Path.join(scratch, "tmp")},
-        {"MIX_ENV", "dev"},
+        {"MIX_ENV", mix_env(input)},
         {"ARB_NEED_HEX", flag(source.lock =~ "{:hex,")},
         {"ARB_NEED_REBAR", flag(source.lock =~ ":rebar3")}
-      ] ++ proxy_env() ++ seed_paths(out) ++ Keyword.get(opts, :seed_env, [])
+      ] ++
+        proxy_env() ++
+        seed_paths(out) ++ config_env(input) ++ Keyword.get(opts, :seed_env, [])
 
     timeout = Map.get(input, :timeout_s, 600) * 1000
 
@@ -466,6 +494,18 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
       {:error, detail} ->
         {:error, "fetching the Mix deps for the capture failed: #{tail(detail)}"}
     end
+  end
+
+  # bd-ur1zty: the values the repo's screenshots config wrote for the seed (`input.seed_env`,
+  # `Config.deps_seed_env/1`), so an app whose `config/runtime.exs` raises without them (a
+  # `DATABASE_URL`, a `SECRET_KEY_BASE`) can still compile. Only those: the seed's environment is
+  # otherwise built from nothing, so no operator secret reaches it. The host's own names above
+  # (paths, `MIX_ENV`, the proxy) are not the config's to repoint.
+  defp config_env(input) do
+    for {name, value} <- Map.get(input, :seed_env, []),
+        is_binary(name) and is_binary(value),
+        name not in @host_env,
+        do: {name, value}
   end
 
   defp flag(true), do: "1"

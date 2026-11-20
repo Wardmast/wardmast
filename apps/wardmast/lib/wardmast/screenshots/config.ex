@@ -75,6 +75,9 @@ defmodule Wardmast.Screenshots.Config do
   @max_socket_bytes 100
   @service_ready_default_s 60
   @service_ready_max_s 600
+  @mix_env ~r/\A[a-z][a-z0-9_]{0,31}\z/
+  # What the seed sets itself (`Capture.DepsCache`): a `deps.env` value for one would be dropped.
+  @seed_reserved ~w(PATH HOME LANG TMPDIR MIX_ENV ARB_NEED_HEX ARB_NEED_REBAR)
   @deps_env ~w(MIX_DEPS_PATH MIX_HOME HEX_HOME HEX_OFFLINE MIX_ESBUILD_PATH MIX_TAILWIND_PATH
                ELIXIR_MAKE_CACHE_DIR RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH)
 
@@ -391,7 +394,7 @@ defmodule Wardmast.Screenshots.Config do
   defp validate_key("hosting", v, label, _b), do: hosting(v, label)
   defp validate_key("sandbox", v, label, _b), do: sandbox(v, label)
   defp validate_key("services", v, label, _b), do: services(v, label)
-  defp validate_key("deps", v, label, _b), do: deps(v, label)
+  defp validate_key("deps", v, label, b), do: deps(v, label) ++ mix_env_conflict(v, label, b)
 
   defp map_or_empty(%{} = m), do: m
   defp map_or_empty(_), do: %{}
@@ -1024,10 +1027,75 @@ defmodule Wardmast.Screenshots.Config do
 
   defp deps(%{} = v, label),
     do:
-      unknown_keys(v, ~w(mix), label) ++
-        check(v, "mix", label, &is_boolean/1, "must be a boolean")
+      unknown_keys(v, ~w(mix mix_env env), label) ++
+        check(v, "mix", label, &is_boolean/1, "must be a boolean") ++
+        check(
+          v,
+          "mix_env",
+          label,
+          &(is_binary(&1) and Regex.match?(@mix_env, &1)),
+          "must be a Mix environment name (lowercase letters, digits and _)"
+        ) ++ deps_env(Map.get(v, "env", %{}), "#{label}.env")
 
   defp deps(_v, label), do: ["#{label} must be a map"]
+
+  # A cache compiled under one env is no use to a boot of another.
+  defp mix_env_conflict(%{"mix_env" => seed}, label, %{"env" => %{"MIX_ENV" => boot}})
+       when is_binary(seed) and is_binary(boot) and seed != boot,
+       do: ["#{label}.mix_env #{inspect(seed)} differs from env.MIX_ENV #{inspect(boot)}"]
+
+  defp mix_env_conflict(_deps, _label, _block), do: []
+
+  # bd-ur1zty: the seed runs trusted code with the network on, so what it is given is the
+  # config's literal values and nothing else: no placeholder (there is no boot to render it for),
+  # no credential the server scrubs from worker environments (`env/2`), nothing the seed or the
+  # cache sets itself.
+  defp deps_env(%{} = env, label) do
+    env(env, label) ++
+      for {k, v} <- Enum.sort(env),
+          is_binary(k),
+          is_binary(v),
+          error <- deps_env_pair(k, v, label),
+          do: error
+  end
+
+  defp deps_env(_v, label), do: ["#{label} must be a map of strings"]
+
+  defp deps_env_pair(k, v, label) do
+    reserved =
+      cond do
+        k == "MIX_ENV" -> ["#{label}.#{k} is set by deps.mix_env"]
+        k in @seed_reserved or k in @deps_env -> ["#{label}.#{k} is set by the seed itself"]
+        true -> []
+      end
+
+    templated =
+      if String.contains?(v, "{{"),
+        do: ["#{label}.#{k} may not use a placeholder (the seed is not a boot)"],
+        else: []
+
+    reserved ++ templated
+  end
+
+  @doc """
+  What the offline deps seed (`Capture.DepsCache`) runs with (bd-ur1zty): `%{mix_env:, env:}`.
+
+  `mix_env` is `deps.mix_env`, else the `MIX_ENV` the boot's `env` sets, else `"dev"`: the cache
+  is compiled under the env the boot uses. `env` is the boot's literal `env` values (a strict
+  `config/runtime.exs` wants the same `DATABASE_URL` the boot gets; a templated value is the
+  boot's own and is left out) with `deps.env` over them, as `[{name, value}]`. Both are values
+  written in the screenshots config: the seed never gets the server's own environment.
+  """
+  @spec deps_seed(t()) :: %{mix_env: String.t(), env: [{String.t(), String.t()}]}
+  def deps_seed(%__MODULE__{env: env, deps: deps}) do
+    boot =
+      for {k, v} <- env, k != "MIX_ENV", not String.contains?(v, "{{"), into: %{}, do: {k, v}
+
+    %{
+      mix_env: Map.get(deps, "mix_env") || Map.get(env, "MIX_ENV") || "dev",
+      env: boot |> Map.merge(Map.get(deps, "env", %{})) |> Enum.sort()
+    }
+  end
 
   # With the deps cache on, these point at it; a hand-set value would quietly undo that.
   defp deps_managed_env(%{} = env, label, %{"deps" => %{"mix" => true}}) do

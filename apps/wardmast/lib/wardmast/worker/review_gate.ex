@@ -269,6 +269,7 @@ defmodule Wardmast.Worker.ReviewGate do
   alias Wardmast.Worker.ReviewCi
   alias Wardmast.Worker.ReviewFindings
   alias Wardmast.Worker.ReviewGate.NoVerdictCause
+  alias Wardmast.Worker.ReviewGate.ScreenshotAlert
   alias Wardmast.Worker.ReviewGate.ScreenshotGate
   alias Wardmast.Worker.ReviewMrBrief
   alias Wardmast.Worker.ReviewPass
@@ -2637,6 +2638,18 @@ defmodule Wardmast.Worker.ReviewGate do
 
   defp screenshot_finish_record(_task, _outcome), do: :ok
 
+  # bd-ur1zty: a capture-infrastructure failure does not park the ticket (`ScreenshotGate.route/1`
+  # proceeds), so the coordinator hears of it as one soft alert per repo and cause; a capture that
+  # produced its set ends the repo's alerts. Only a capture that actually ran says anything: a
+  # cached or reused outcome is not a new fact.
+  defp screenshot_alert(state, outcome) do
+    case {outcome, ScreenshotGate.infrastructure_failure(outcome)} do
+      {_, {:ok, failure}} -> ScreenshotAlert.raise_failure(state, failure)
+      {{:ok, _result}, :none} -> ScreenshotAlert.clear(state)
+      _ -> :ok
+    end
+  end
+
   # The ledger is bookkeeping: a database hiccup must never take the gate (or a review) down.
   defp screenshot_db(fun) do
     fun.()
@@ -3783,12 +3796,14 @@ defmodule Wardmast.Worker.ReviewGate do
       when is_reference(ref) do
     Process.demonitor(ref, [:flush])
     screenshot_finish_record(state.screenshot_task, outcome)
+    screenshot_alert(state, outcome)
     screenshot_route(%{state | screenshot_task: nil}, outcome)
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{screenshot_task: %{ref: ref}} = state) do
     failure = CaptureFailure.new(:shot_failed, "the capture task died: #{inspect(reason)}")
     screenshot_finish_record(state.screenshot_task, {:error, failure})
+    screenshot_alert(state, {:error, failure})
     screenshot_route(%{state | screenshot_task: nil}, {:error, failure})
   end
 

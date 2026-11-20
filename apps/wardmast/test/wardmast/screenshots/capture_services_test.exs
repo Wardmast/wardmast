@@ -335,6 +335,27 @@ defmodule Wardmast.Screenshots.CaptureServicesTest do
       assert_received {:boot_spec, "after", _, ^cache}
     end
 
+    # bd-ur1zty: the seed is built from the config's own values, under the boot's MIX_ENV.
+    test "the seed is asked for the boot's MIX_ENV and the config's own env", %{tmp_dir: dir} do
+      config = %{
+        @config
+        | deps: %{"mix" => true, "env" => %{"SECRET_KEY_BASE" => "dummy"}},
+          env: %{"MIX_ENV" => "test", "DATABASE_URL" => "ecto://127.0.0.1/capture"}
+      }
+
+      assert {:ok, _} =
+               run(dir, plan!(dir, [%{"id" => "home", "path" => "/"}]),
+                 config: config,
+                 deps_opts: [test_pid: self(), answer: {:ok, nil}]
+               )
+
+      assert_received {:deps_prepare, input}
+      assert input.mix_env == "test"
+
+      assert Enum.sort(input.seed_env) ==
+               [{"DATABASE_URL", "ecto://127.0.0.1/capture"}, {"SECRET_KEY_BASE", "dummy"}]
+    end
+
     test "a deps cache that exits is deps_failed, not a crash", %{tmp_dir: dir} do
       config = %{@config | deps: %{"mix" => true}}
 

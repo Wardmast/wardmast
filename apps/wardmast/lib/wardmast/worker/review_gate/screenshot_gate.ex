@@ -11,7 +11,8 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
   | this host cannot sandbox the capture ("capture needs a sandbox", bd-bhrsdv) | proceeds; the reviewer is told no screenshots were taken and why, and that it is not the worker's doing. Nothing was booted |
   | the change edits `mix.lock` (`deps_changed`, bd-3glf2a: the offline deps cache only trusts a default-branch lockfile) | proceeds; the reviewer is told why there are none. Nothing was booted |
   | a **worker fault**: no manifest, an invalid manifest, a named route that errors | sends the change back to the worker with an instruction (`{:send_back, findings}`) |
-  | an **infrastructure fault**: the app would not boot, no Chromium, the checkout or diff failed, the budget ran out | escalates to the coordinator (`{:escalate, message}`) and does **not** loop the worker |
+  | a failure the **change itself caused** (bd-ur1zty): its app does not boot at the head, which the base's did, and not for a service | parks (`{:escalate, message}`: `screenshot_capture_failed`) and does **not** loop the worker |
+  | an **infrastructure fault**: the deps cache, a service, the base's own boot, no Chromium, the checkout or diff failed, the budget ran out | **proceeds** (bd-ur1zty): the reviewer's brief says `No screenshots: capture failed: <reason>`; the gate raises one soft `ScreenshotAlert` per repo and cause. A failed capture never fails a merge |
 
   A repo with no `screenshots` config (or one that does not validate, or a gate with no worktree)
   is `:skip`: the gate behaves exactly as it did before this step existed.
@@ -20,8 +21,8 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
   app twice and can take minutes.
 
   Classification lives in `classify/1`: `:manifest_missing`, `:manifest_invalid` and `:route_error`
-  are the worker's (it wrote the plan); every other `Wardmast.Screenshots.Capture.Failure` code is
-  infrastructure. `:shot_failed` is infrastructure because it cannot tell a bad selector from a
+  are the worker's (it wrote the plan); a head `:boot_failed` outside the `:services` phase is the
+  change's; every other `Wardmast.Screenshots.Capture.Failure` is infrastructure. `:shot_failed` is infrastructure because it cannot tell a bad selector from a
   browser crash, and looping a worker over a crash is the worse mistake.
   """
 
@@ -214,10 +215,34 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
       {:error, Failure.new(:shot_failed, "the capture exited: #{inspect(reason)}")}
   end
 
-  @doc "Whether a capture failure is the worker's to fix or the infrastructure's."
-  @spec classify(Failure.t()) :: :worker | :infrastructure
+  @doc """
+  Whose a capture failure is (bd-ur1zty): `:worker` (it wrote the plan), `:change` (the change
+  itself broke it: its own app does not boot, at a head whose base did, and not for a service)
+  or `:infrastructure` (anything else: the deps cache, a service, a checkout, the browser, the
+  budget, the base's own boot).
+  """
+  @spec classify(Failure.t()) :: :worker | :change | :infrastructure
   def classify(%Failure{code: code}) when code in @worker_codes, do: :worker
+
+  # Captures boot the base first and stop at the first failure, so a head that fails to boot has a
+  # base that booted. A service that did not come up is the host's (podman, the image), whichever
+  # commit it was booting for.
+  def classify(%Failure{code: :boot_failed, role: "after", detail: %{phase: phase}})
+      when phase != :services,
+      do: :change
+
   def classify(%Failure{}), do: :infrastructure
+
+  @doc """
+  The infrastructure failure in a capture outcome, for the gate to alert on: `{:ok, failure}`, or
+  `:none` for an outcome that is not one (a success, a skip, a worker's or the change's own fault).
+  """
+  @spec infrastructure_failure(outcome()) :: {:ok, Failure.t()} | :none
+  def infrastructure_failure({:error, %Failure{} = failure}) do
+    if classify(failure) == :infrastructure, do: {:ok, failure}, else: :none
+  end
+
+  def infrastructure_failure(_outcome), do: :none
 
   @doc "Route a capture outcome. See the moduledoc table."
   @spec route(outcome()) :: routed()
@@ -265,7 +290,8 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
   def route({:error, %Failure{} = failure}) do
     case classify(failure) do
       :worker -> {:send_back, send_back_findings(failure)}
-      :infrastructure -> {:escalate, escalation_message(failure)}
+      :change -> {:escalate, escalation_message(failure)}
+      :infrastructure -> {:proceed, infrastructure_brief(failure)}
     end
   end
 
@@ -381,8 +407,19 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
     where = if f.role, do: " (at the #{f.role} commit)", else: ""
 
     "ReviewGate could not capture UI screenshots for this change: #{f.message}#{where}. " <>
-      "This is a capture infrastructure failure (#{f.code}), not the worker's: the change was " <>
-      "not sent back and no reviewer was dispatched. Check the capture environment (app boot, " <>
-      "Chromium, the checkout), then resume the review."
+      "The app booted at the merge-base (the base booted) and not at the head, so the change " <>
+      "itself is the likely cause (#{f.code}): it was not sent back and no reviewer was " <>
+      "dispatched. Check whether the head's app boots (a config, migration or dependency the " <>
+      "change broke, or a flake), then resume the review."
+  end
+
+  # bd-ur1zty: the failure is the capture environment's, not the change's and not the worker's,
+  # so the review goes ahead on the diff alone, told why (and the soft attention says it once).
+  defp infrastructure_brief(%Failure{} = f) do
+    where = if f.role, do: " (at the #{f.role} commit)", else: ""
+
+    "No screenshots: capture failed: #{f.message}#{where}. This is a capture-infrastructure " <>
+      "failure (#{f.code}), not the worker's doing, so do not hold the missing screenshots " <>
+      "against the change. Judge the visual result from the diff alone."
   end
 end

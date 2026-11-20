@@ -172,6 +172,8 @@ defmodule Wardmast.Screenshots.Capture do
   # bd-3glf2a: the offline Mix deps every boot compiles from (`deps.mix`), from a trusted lockfile
   # only. `deps_cache` stays `nil` when the repo has no lockfile or the feature is off.
   defp deps_cache(%{input: %{config: %Config{deps: %{"mix" => true}}} = input} = st) do
+    seed = Config.deps_seed(input.config)
+
     deps_input = %{
       task_id: input.task_id,
       repo_path: input.repo_path,
@@ -180,7 +182,9 @@ defmodule Wardmast.Screenshots.Capture do
       default_branch: Map.get(input, :default_branch) || "main",
       sandbox: st.sandbox,
       readonly_paths: Map.get(input.config.sandbox, "readonly_paths", []),
-      timeout_s: Map.get(input.config.limits, "setup_seconds", 600)
+      timeout_s: Map.get(input.config.limits, "setup_seconds", 600),
+      mix_env: seed.mix_env,
+      seed_env: seed.env
     }
 
     case call_deps(st, deps_input) do
