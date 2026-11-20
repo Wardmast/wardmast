@@ -112,7 +112,9 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
     Every top-level key of `workspace.config` (all optional). An unknown
     top-level key is refused by `arb config set` / REST / MCP unless forced, and
     a known leaf written at the wrong root is answered with the canonical path
-    (e.g. `sandbox.backend` -> `agent.security.sandbox.backend`). Enforced
+    (e.g. `permissions.mode` -> `agent.security.permissions.mode`). A root
+    `sandbox.*` is a deprecated alias: it is written to `agent.security.sandbox.*`
+    with a warning. Enforced
     server-side by Wardmast.Tasks.Workspace.Changes.ValidateConfig — this
     reference is tested against that module so it can't silently drift.
 
@@ -282,7 +284,8 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
     security  (map, nested at agent.security)
       CANONICAL PATH: agent.security.permissions.mode
       ALWAYS WRITE THE FULL PATH: `arb config set agent.security.sandbox.backend
-      podman`, never `sandbox.backend` (a root `sandbox` key is refused).
+      podman`. A root `sandbox.*` is DEPRECATED: it is written to
+      `agent.security.sandbox.*` with a warning, never stored as its own key.
 
       permissions.mode          one of: #{Enum.join(@security_modes, ", ")}  (default: bypass)
         bypass  — headless-safe default; skips the interactive permission

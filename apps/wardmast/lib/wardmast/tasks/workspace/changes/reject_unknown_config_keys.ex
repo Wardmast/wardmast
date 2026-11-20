@@ -8,6 +8,10 @@ defmodule Wardmast.Tasks.Workspace.Changes.RejectUnknownConfigKeys do
   chain, so the CLI, REST and MCP all refuse, naming the canonical path when
   `ConfigSchema.suggest_path/1` knows it. `force: true` overrides.
 
+  A root `sandbox` never reaches this check any more (bd-4j0nfe):
+  `RewriteDeprecatedConfigPaths` runs first and moves it onto
+  `agent.security.sandbox`.
+
   Only what the write *sets* is checked: configs already holding an unknown key
   still load, and an unrelated patch is never blocked by it.
   """
