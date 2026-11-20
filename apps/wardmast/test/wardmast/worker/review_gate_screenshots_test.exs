@@ -72,8 +72,11 @@ defmodule Wardmast.Worker.ReviewGateScreenshotsTest do
       gate = start_gate(rig, ctx, screenshot_capture: capture)
 
       wait_until(fn -> passes(rig) == 1 end)
-      assert_received {:captured, %{head_sha: head, plan_path: plan}}
+      assert_received {:captured, %{head_sha: head, plan_path: plan} = input}
       assert String.starts_with?(rig.head, head)
+      # bd-3glf2a: the branch whose mix.lock the offline deps cache trusts (no merge.base: main),
+      # through the lifecycle's plan/3 with the gate's own capture history.
+      assert input.default_branch == "main"
       # bd-adrym0: the copy the commit gate checked feeds the capture, not the live worktree file.
       assert plan ==
                Wardmast.Screenshots.PlanCheck.stored_path(
