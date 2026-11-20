@@ -87,3 +87,4 @@ accounts.json
 # Desktop shell prototype (bd-aisgkf): cargo build output.
 /desktop/target/
 /desktop/src-tauri/target/
+/desktop/src-tauri/gen/

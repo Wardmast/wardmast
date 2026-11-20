@@ -21,19 +21,18 @@ desktop/
     status_page the HTML shown while there is no dashboard (boot failure!)
     bin/fake_release   stand-in server for tests
     bin/headless       windowless shell driven over stdin/stdout (smoke test)
-  src-tauri/    UNBUILT sketch of the Tauri window + tray over shell-core
+  src-tauri/    Tauri window + tray over shell-core (type-checked, never run;
+                see "How it was verified")
 ```
 
-**Shell technology.** The PKG 1 decision record (bd-5n0b4w) was not readable
-from this task's scope, so the choice was inferred, not read: the follow-on
-"Linux desktop build via the same shell" (PKG 22) only makes sense for a
-cross-platform shell, so this is **Tauri (Rust)**. If PKG 1 chose Swift, the
-Rust `shell-core` is still the spec: every rule below is covered by a test that
-can be ported 1:1. Confirm against PKG 1 before building on it.
+**Shell technology: Tauri** (operator decision 2026-11-20; PKG 1 bd-5n0b4w
+closed without a recorded choice), for macOS + Linux and Windows later from one
+shell. The Rust `shell-core` carries every lifecycle rule and is covered by
+tests that do not depend on the GUI layer.
 
 ## How it was verified
 
-`cd desktop && cargo test` (40 tests, ~2 s; needs only a Rust toolchain, no
+`cd desktop && cargo test` (41 tests, ~2 s; needs only a Rust toolchain, no
 webview). Verified on Linux; the Unix-only pieces (`flock`, unix sockets,
 `SIGTERM`) are shared with macOS but macOS was not run.
 
@@ -43,8 +42,18 @@ webview). Verified on Linux; the Unix-only pieces (`flock`, unix sockets,
   ignore-SIGTERM / N workers in flight.
 * `tests/headless.rs` is the scripted smoke test: it runs the real `headless`
   binary as separate OS processes (two launches, close, quit, boot failure).
-* **Not exercised:** a real `mix release` bundle, and the Tauri layer. See
-  [What is left](#what-is-left-for-a-production-shell).
+* **The Tauri layer (`src-tauri`) was type-checked, not built or run.** Its
+  Linux build needs WebKitGTK/GTK dev packages and `pkg-config`, none of which
+  exist in the sandbox this was written in (`cargo check` stops in `glib-sys`).
+  What was done instead: `cargo check --target aarch64-apple-darwin` in
+  `desktop/src-tauri` (macOS needs no system webview libraries; one crate's C
+  build step was stubbed with a no-op `cc`/`ar`, which `check` never links).
+  It compiles `main.rs` against the real Tauri 2 API, including
+  `generate_context!` over `tauri.conf.json`; a deliberately wrong call made it
+  fail, so the check is not vacuous. A real `cargo tauri dev` / build on a
+  machine with the webview toolchain is still to be done.
+* **Not exercised:** a real `mix release` bundle; the window, tray and dialog
+  actually running. See [What is left](#what-is-left-for-a-production-shell).
 
 ## Lifecycle decisions
 
@@ -127,10 +136,12 @@ webview). Verified on Linux; the Unix-only pieces (`flock`, unix sockets,
 
 ## What is left for a production shell
 
-1. **Confirm the shell technology against PKG 1**, then build and run the
-   `src-tauri` layer: it is an unbuilt sketch (Tauri v2 API names unchecked,
-   no icons, no `tauri.conf.json`, no initial status page load, tray quit calls
-   the blocking dialog from the menu thread).
+1. **Build and run the `src-tauri` layer** with the webview toolchain
+   (`cargo tauri dev`): it only type-checks so far. Placeholder icons (the brand
+   mark) and `tauri.conf.json` are in place; missing are bundling/signing
+   config, an app-runtime-dir socket path, and routing the OS-level quit
+   (Cmd+Q, `RunEvent::ExitRequested`) through `request_quit` so it cannot
+   bypass the drain prompt.
 2. **Run against a real release.** `SHELL_RELEASE_DIR=<release> cargo run -p
    arbiter-shell-core --bin headless` is the hand check; verify in particular
    that SIGTERM to `bin/wardmast start` reaches the BEAM (it should: the start
