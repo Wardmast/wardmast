@@ -96,6 +96,7 @@ defmodule Wardmast.Sessions do
           cwd: String.t(),
           name: String.t() | nil,
           auth_mode: atom(),
+          account: String.t() | nil,
           remote_control: boolean(),
           can_dispatch: boolean(),
           provision: boolean(),
@@ -145,6 +146,11 @@ defmodule Wardmast.Sessions do
       exec'ing a bare `claude`, unchanged from before this option existed.
     * `:auth_mode` — `:seeded_credentials` (default, mode B — Amendment 2) or
       `:oauth_token` (mode A).
+    * `:account` — a provider-account ref (slug, `claude:slug` or id) for a
+      mode-B Claude session (bd-oqkeso): credentials are seeded from that
+      account's config dir (`Wardmast.Sessions.AccountCredentials`) instead of
+      `credentials_source/1`, and the launch is refused with a message naming
+      the fix when the account has no usable login.
     * `:can_dispatch` — default `false` (§10.1).
     * `:remote_control` — recorded; phase 8 acts on it.
     * `:provision` — `false` skips provisioning (the phase-1 shape, used by the

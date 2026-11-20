@@ -504,6 +504,109 @@ defmodule WardmastWeb.SessionIndexLiveTest do
     end
   end
 
+  describe "the account picker (bd-oqkeso)" do
+    alias Wardmast.Sessions.Layout
+    alias Wardmast.Test.SessionEnv
+
+    defp account!(slug, attrs \\ %{}) do
+      Ash.create!(
+        Wardmast.Accounts.ProviderAccount,
+        Map.merge(%{provider: :claude, slug: slug}, attrs)
+      )
+    end
+
+    defp account_options(view) do
+      view
+      |> element("#launch-session-account")
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query("option")
+      |> Enum.map(&(&1 |> LazyHTML.attribute("value") |> List.first()))
+    end
+
+    test "offers the enabled claude accounts and not parked ones", %{conn: conn} do
+      account!("work")
+      SessionEnv.connect_claude_login!("work")
+      account!("parked", %{enabled: false})
+
+      {:ok, view, _html} = live_sessions!(conn)
+
+      assert has_element?(view, "#launch-session-account")
+      assert account_options(view) == ["default", "work"]
+      refute has_element?(view, "#launch-session-account-empty")
+    end
+
+    test "offers only the picked workspace's linked accounts", %{conn: conn} do
+      {:ok, workspace} = Ash.create(Wardmast.Tasks.Workspace, %{name: "acct-ws", prefix: "aws"})
+      linked = account!("linked")
+      account!("elsewhere")
+      {:ok, _} = Accounts.attach_workspace(workspace.id, :claude, linked.id)
+
+      {:ok, view, _html} = live_sessions!(conn)
+      assert account_options(view) == ["default", "elsewhere", "linked"]
+
+      view
+      |> form("#launch-session-form", %{"workspace_id" => workspace.id})
+      |> render_change()
+
+      assert account_options(view) == ["linked"]
+    end
+
+    test "launching for an account seeds that account's login, not the server user's", %{
+      conn: conn
+    } do
+      account!("work")
+      dir = SessionEnv.connect_claude_login!("work", accessToken: "sk-ant-oat01-WORK-ONLY")
+
+      {:ok, view, _html} = live_sessions!(conn)
+      view |> form("#launch-session-form", %{"account" => "work"}) |> render_submit()
+
+      assert [session] = Sessions.list()
+      seeded = Path.join(Layout.config_dir(session.id), ".credentials.json")
+      assert File.read!(seeded) == File.read!(Path.join(dir, ".credentials.json"))
+      assert File.read!(seeded) =~ "WORK-ONLY"
+    end
+
+    test "an account with no stored login fails the launch with the fix", %{conn: conn} do
+      account!("fresh")
+
+      {:ok, view, _html} = live_sessions!(conn)
+      html = view |> form("#launch-session-form", %{"account" => "fresh"}) |> render_submit()
+
+      assert html =~ "Could not launch"
+      assert html =~ "Log in"
+      assert html =~ "fresh"
+      assert Sessions.list() |> Enum.all?(&(&1.status == :ended))
+    end
+
+    test "an account the form never offered is refused, not replaced by the server user's login",
+         %{conn: conn} do
+      account!("parked", %{enabled: false})
+      SessionEnv.connect_claude_login!("parked")
+
+      {:ok, view, _html} = live_sessions!(conn)
+
+      html =
+        view
+        |> form("#launch-session-form")
+        |> render_submit(%{"account" => "parked"})
+
+      assert html =~ "Could not launch"
+      assert html =~ "parked"
+      assert Sessions.list() == []
+    end
+
+    test "with no connected account the form says so and links to connect one", %{conn: conn} do
+      {:ok, _} = Accounts.update_account("claude:default", %{enabled: false})
+      {:ok, _} = Accounts.update_account("antigravity:default", %{enabled: false})
+
+      {:ok, view, _html} = live_sessions!(conn)
+
+      refute has_element?(view, "#launch-session-account")
+      assert has_element?(view, "#launch-session-account-empty")
+    end
+  end
+
   describe "workspace binding in the launch form (§9.5)" do
     test "defaults to cross-workspace and lists workspaces to opt into", %{conn: conn} do
       {:ok, workspace} =
