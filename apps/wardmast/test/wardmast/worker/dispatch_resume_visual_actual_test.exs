@@ -171,10 +171,17 @@ defmodule Wardmast.Worker.DispatchResumeVisualActualTest do
           provider: "claude"
         })
 
-      # Re-point the ledger row's session id at the seeded one.
-      for ev <- Ash.read!(UsageEvent), ev.task_id == task.id do
-        Ash.update!(ev, %{session_id: sid})
-      end
+      # A later ledger row carries the seeded session id (the latest one wins).
+      {:ok, _} =
+        Ash.create(UsageEvent, %{
+          task_id: task.id,
+          workspace_id: task.workspace_id,
+          repo: @repo,
+          step: :work,
+          provider: "claude",
+          session_id: sid,
+          occurred_at: DateTime.add(DateTime.utc_now(), 5, :second)
+        })
 
       argv_file = Path.join(tmp, "argv.txt")
       stub_dir = Path.join(tmp, "stub-bin")
@@ -183,8 +190,8 @@ defmodule Wardmast.Worker.DispatchResumeVisualActualTest do
 
       File.write!(stub, """
       #!/bin/sh
-      for a in "$@"; do echo "$a" >> #{argv_file}.part; done
-      mv #{argv_file}.part #{argv_file}
+      for a in "$@"; do echo "$a" >> "#{argv_file}.part"; done
+      mv "#{argv_file}.part" "#{argv_file}"
       exit 0
       """)
 
@@ -197,6 +204,7 @@ defmodule Wardmast.Worker.DispatchResumeVisualActualTest do
                Dispatch.resume_session(task.id,
                  start_driver: false,
                  preflight: false,
+                 agent_type: :claude,
                  ci_adapter: StubMerger
                )
 
