@@ -575,12 +575,13 @@ defmodule Wardmast.Worker.PromptBuilderTest do
 
            FABRICATED EVIDENCE — if the work fabricates or falsifies evidence (a
            mockup presented as a screenshot, a citation to a source the thing did not
-           come from, test output that was never produced), start that finding with
-           `[FABRICATED-EVIDENCE]` and include evidence the coordinator can check: the URL you
-           fetched, the command you ran and what it printed, a hash or byte
-           comparison. That finding sends the task to the coordinator instead of
-           another fix round, so be sure first. Compare against the actual source
-           before you call a provenance claim false; appearance alone is not enough.
+           come from, test output that was never produced), start the finding with
+           the bare tag `[FABRICATED-EVIDENCE]` (never use it in prose) and include
+           evidence the coordinator can check: the URL you fetched, the command you
+           ran and what it printed, a hash or byte comparison. That finding sends the
+           task to the coordinator instead of another fix round, so be sure first.
+           Compare against the actual source before you call a provenance claim false;
+           appearance alone is not enough.
 
            *** ASYNC TOOLS: THIS SESSION IS HEADLESS AND NON-INTERACTIVE: ending your
            turn ends the session outright, and no notification can ever reach you
@@ -712,12 +713,13 @@ defmodule Wardmast.Worker.PromptBuilderTest do
 
            FABRICATED EVIDENCE — if the work fabricates or falsifies evidence (a
            mockup presented as a screenshot, a citation to a source the thing did not
-           come from, test output that was never produced), start that finding with
-           `[FABRICATED-EVIDENCE]` and include evidence the coordinator can check: the URL you
-           fetched, the command you ran and what it printed, a hash or byte
-           comparison. That finding sends the task to the coordinator instead of
-           another fix round, so be sure first. Compare against the actual source
-           before you call a provenance claim false; appearance alone is not enough.
+           come from, test output that was never produced), start the finding with
+           the bare tag `[FABRICATED-EVIDENCE]` (never use it in prose) and include
+           evidence the coordinator can check: the URL you fetched, the command you
+           ran and what it printed, a hash or byte comparison. That finding sends the
+           task to the coordinator instead of another fix round, so be sure first.
+           Compare against the actual source before you call a provenance claim false;
+           appearance alone is not enough.
 
            *** ASYNC TOOLS: THIS SESSION IS HEADLESS AND NON-INTERACTIVE: ending your
            turn ends the session outright, and no notification can ever reach you
