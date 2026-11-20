@@ -11,7 +11,7 @@ defmodule WardmastCli.Cmd.Alert do
   list is exactly what is still wrong. Omitting `-w` lists every workspace.
 
   `--kind` is one of `credential_expired`, `quota_poll_failing`,
-  `quota_snapshot_stale`, `overage_alert`, `budget_exceeded`, `spend_cap`, `machine_derate`, `deploy_failing`, `git_credential_refused`. Coordinator only.
+  `quota_snapshot_stale`, `overage_alert`, `budget_exceeded`, `spend_cap`, `machine_derate`, `deploy_failing`, `git_credential_refused`, `screenshot_capture_failed`. Coordinator only.
   """
 
   alias WardmastCli.{ArgParser, Client, Output, Workspace}

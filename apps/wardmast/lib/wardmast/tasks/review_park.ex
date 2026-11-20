@@ -113,9 +113,10 @@ defmodule Wardmast.Tasks.ReviewPark do
         "permitted to push (it holds no `workflows` permission, by design) — an operator " <>
         "must push the branch",
     screenshot_capture_failed:
-      "UI screenshots could not be captured for an infrastructure reason (the app would not boot, " <>
-        "no Chromium, the checkout or diff failed, the budget ran out) — not the worker's fault, so " <>
-        "the change was not sent back and no reviewer was dispatched",
+      "UI screenshots could not be captured because the change's own app does not boot at the " <>
+        "head although the base's did (capture-infrastructure failures do not park: the review runs " <>
+        "without screenshots and a soft alert is raised) — not the worker's fault, so the change " <>
+        "was not sent back and no reviewer was dispatched",
     resume_blocked:
       "the Watchdog could not restart the run after its awaiting-review timeout because " <>
         "another pass on the same task still holds the worker registry slot (W14)"

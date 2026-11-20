@@ -11,7 +11,8 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
   | this host cannot sandbox the capture ("capture needs a sandbox", bd-bhrsdv) | proceeds; the reviewer is told no screenshots were taken and why, and that it is not the worker's doing. Nothing was booted |
   | the change edits `mix.lock` (`deps_changed`, bd-3glf2a: the offline deps cache only trusts a default-branch lockfile) | proceeds; the reviewer is told why there are none. Nothing was booted |
   | a **worker fault**: no manifest, an invalid manifest, a named route that errors | sends the change back to the worker with an instruction (`{:send_back, findings}`) |
-  | an **infrastructure fault**: the app would not boot, no Chromium, the checkout or diff failed, the budget ran out | escalates to the coordinator (`{:escalate, message}`) and does **not** loop the worker |
+  | a failure the **change itself caused** (bd-ur1zty): its app does not boot at the head, which the base's did, and not for a service | parks (`{:escalate, message}`: `screenshot_capture_failed`) and does **not** loop the worker |
+  | an **infrastructure fault**: the deps cache, a service, the base's own boot, no Chromium, the checkout or diff failed, the budget ran out | **proceeds** (bd-ur1zty): the reviewer's brief says `No screenshots: capture failed: <reason>`; the gate raises one soft `ScreenshotAlert` per repo and cause. A failed capture never fails a merge |
 
   A repo with no `screenshots` config (or one that does not validate, or a gate with no worktree)
   is `:skip`: the gate behaves exactly as it did before this step existed.
@@ -20,8 +21,8 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
   app twice and can take minutes.
 
   Classification lives in `classify/1`: `:manifest_missing`, `:manifest_invalid` and `:route_error`
-  are the worker's (it wrote the plan); every other `Wardmast.Screenshots.Capture.Failure` code is
-  infrastructure. `:shot_failed` is infrastructure because it cannot tell a bad selector from a
+  are the worker's (it wrote the plan); a head `:boot_failed` outside the `:services` phase is the
+  change's; every other `Wardmast.Screenshots.Capture.Failure` is infrastructure. `:shot_failed` is infrastructure because it cannot tell a bad selector from a
   browser crash, and looping a worker over a crash is the worse mistake.
   """
 

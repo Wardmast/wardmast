@@ -21,11 +21,11 @@ operator needs to turn it on and what it does and does not protect.
    pairs the images. A diff that does not touch `ui_paths` skips the capture.
 4. Outcome routing: pairs (or a declared skip) go into the reviewer's brief; a *worker
    fault* (`manifest_missing`, `manifest_invalid`, `route_error`) is sent back to the worker
-   to fix the plan; an *infrastructure fault* (boot, a service that did not come up, the deps
-   cache, checkout, diff, budget, browser) parks `screenshot_capture_failed` for the coordinator
-   and neither loops the worker nor dispatches a reviewer. A host that cannot sandbox the
-   capture, and a change that edits `mix.lock` while `deps.mix` is on, are *skips*: the reviewer
-   is told why there are no screenshots.
+   to fix the plan; a failure the *change itself caused* parks `screenshot_capture_failed` for
+   the coordinator (neither loops the worker nor dispatches a reviewer); an *infrastructure
+   fault* does not park anything (see "Which failures park, which proceed" below). A host that
+   cannot sandbox the capture, and a change that edits `mix.lock` while `deps.mix` is on, are
+   *skips*: the reviewer is told why there are no screenshots.
 5. Images are hosted per forge (below) and rendered in a `## Screenshots` section of the
    PR/MR description, kept between marker comments so a worker's later `pr_body` edit does
    not drop it. Images are also stored as ticket attachments (shown on the dashboard).
@@ -34,6 +34,26 @@ Every outcome is written to `capture.json` in the capture's output directory
 (`$TMPDIR/arbiter-review-screenshots/<task>/<head>/`): `state` (`ok`, `skipped`, `failed`),
 `skip_kind` (`no_sandbox`, `plan_skip`, `deps_changed`) with `skip`, or `failure` (`code`,
 `message`, `role`, `detail`).
+
+### Which failures park, which proceed
+
+A failed capture never fails a merge. What a failure does to the review depends on whose it is
+(`ScreenshotGate.classify/1`):
+
+| failure | whose | the ReviewGate |
+|---|---|---|
+| `manifest_missing`, `manifest_invalid`, `route_error` | the worker's plan | sends the change back to the worker with the instruction to fix `.arbiter/screenshots.json` |
+| `boot_failed` at the **head** (`role: after`) in the `setup`, `start` or `ready` phase | the change: the base booted (the pass boots it first and stops at the first failure) and the head's app did not | **parks** `screenshot_capture_failed` on the ticket (`waiting_on_you`): no reviewer is dispatched and the worker is not looped, so the coordinator can decide whether the head really is broken |
+| `deps_failed`, `boot_failed` at the base (`role: before`), `boot_failed` in the `services` phase (a service that did not come up: podman, the image), `checkout_failed`, `diff_failed`, `shot_failed`, `budget_exceeded`, a crashed capture | the capture environment | **proceeds**: the failure is recorded in `capture.json` and the ticket's capture record (`state: failed`), the reviewer's brief opens with `No screenshots: capture failed: <reason>`, and one coordinator-owned soft **alert** is raised (below). Nothing is parked |
+| `no_sandbox`, `deps_changed`, a worker's declared `skip`, `max_captures_per_ticket` reached | not a fault | proceeds, with the reviewer told why there are no screenshots |
+
+The soft attention is the system alert `screenshot_capture_failed` (`arb alert list`), one per
+workspace, repo and cause (`deps_failed`, `services_failed`, `boot_failed`, ...), **not per
+ticket**: the next ticket in the repo that fails the same way refreshes it (`raise_count`, the
+latest ticket and message) instead of paging again. It clears itself when a capture for that repo
+produces its screenshots. Before this split (bd-ur1zty) every infrastructure fault parked the
+ticket, so with screenshots on, every UI ticket in a repo whose capture could not boot parked
+until the coordinator intervened.
 
 ## Enabling it for a repo
 
@@ -177,11 +197,12 @@ network namespace, so two services cannot talk to each other.
   object re-hashed, into a repository only the server writes (`<scratch_root>/capture-deps/repos/`):
   nothing the worker can write in its own checkout (a moved ref, a forged object) decides what
   runs. When origin cannot be read, the capture fails with `deps_failed`.
-* **Built once per lockfile and toolchain**, under `<scratch_root>/capture-deps/<lock>-<toolchain>`
-  (the toolchain is what `elixir` reports inside the sandbox, so a new Elixir/OTP misses it).
+* **Built once per lockfile, toolchain and `MIX_ENV`**, under
+  `<scratch_root>/capture-deps/<lock>-<toolchain>[-<mix_env>]` (the toolchain is what `elixir`
+  reports inside the sandbox, so a new Elixir/OTP misses it; `-<mix_env>` is absent for `dev`).
   The seed runs in the default branch's `git archive`, in the same sandbox **with the network
   on** (trusted code only), with the server's proxy variables (never one that carries a
-  credential): `mix local.hex`/`local.rebar`
+  credential) and the environment described under "The seed's environment" below: `mix local.hex`/`local.rebar`
   when the lock needs them, `mix deps.get`, `mix deps.compile` (which fetches precompiled NIFs,
   `elixir_make`/`rustler_precompiled`, into the cache), and `mix esbuild.install` /
   `tailwind.install` when those deps are present. It takes up to `limits.setup_seconds`, and a
@@ -204,6 +225,35 @@ network namespace, so two services cannot talk to each other.
   checkout, where a stock Phoenix config looks for them; a config that reads
   `MIX_ESBUILD_PATH` works too. `mix deps.get` in `setup_cmd` is harmless (it finds everything
   fetched); `mix compile` builds into the checkout's own `_build`.
+
+### The seed's environment (`deps.mix_env`, `deps.env`)
+
+The seed compiles the project (`mix deps.compile` loads `config/config.exs` and
+`config/runtime.exs`), so an app whose `runtime.exs` raises without its variables (a
+`DATABASE_URL`, a `SECRET_KEY_BASE`, in every env) cannot seed from an empty environment. The
+repo's screenshots config supplies them:
+
+* `deps.mix_env` (a name like `test`; default: the `MIX_ENV` in the boot's `env`, else `dev`). The
+  cache is compiled, and its precompiled NIFs fetched, under the env the boot uses, which is why
+  it is part of the cache's name: a `dev` cache has no `only: :test` dependency a `MIX_ENV=test`
+  boot needs. A boot that sets `MIX_ENV` only inside its `start_cmd`/`setup_cmd` must say so here;
+  a `deps.mix_env` that differs from `env.MIX_ENV` is refused. The cache's `_build` is discarded
+  (each boot compiles into its own checkout), so only the fetched deps and NIFs have to match.
+* `deps.env` (a map of literal strings, merged over the boot's own `env` values, minus any that
+  contain a `{{placeholder}}`, which only mean something in a boot). So an app whose boot `env`
+  already sets `DATABASE_URL` and dummy keys needs nothing more; set `deps.env` for values only
+  the seed wants.
+* **No operator secrets.** The seed's environment is built from nothing: `PATH`, `HOME`, `LANG`,
+  `TMPDIR`, `MIX_ENV`, the cache's own paths, the server's proxy variables (never one carrying a
+  credential), and **only the values written in the screenshots config**, never the server's own
+  environment. A `deps.env` key is refused, like `env`, when it is a credential Arbiter scrubs from
+  worker environments, a proxy variable, a non-loopback host, or has a placeholder; and when it is
+  one the seed or the cache sets itself (`PATH`, `HOME`, `LANG`, `TMPDIR`, `MIX_ENV` (use
+  `deps.mix_env`), `MIX_DEPS_PATH`, `HEX_HOME`, ...). Unknown keys under `deps` are refused.
+
+```json
+"deps": {"mix": true, "mix_env": "test", "env": {"SECRET_KEY_BASE": "dummy-not-a-secret"}}
+```
 
 Not covered: npm packages (a `npm ci` in `setup_cmd` has no network; vendor them or list a
 `node_modules` cache under `readonly_paths`), dependencies fetched over SSH or from a private

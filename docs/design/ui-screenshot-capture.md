@@ -361,10 +361,21 @@ head, and a newer head supersedes it.
 wait), `Wardmast.Worker.ReviewGate.ScreenshotGate` runs the capture for a repo with a `screenshots`
 config and routes the outcome: captured pairs (or the worker's declared `skip`) go into the reviewer's
 brief; a **worker fault** (`manifest_missing`, `manifest_invalid`, `route_error`) goes down the revise
-loop with an instruction to add or fix `.arbiter/screenshots.json`; an **infrastructure fault** (every
-other failure code: boot, checkout, diff, budget, browser) parks `:screenshot_capture_failed` for the
+loop with an instruction to add or fix `.arbiter/screenshots.json`; a failure the **change itself caused**
+(its app does not boot at the head after the base booted) parks `:screenshot_capture_failed` for the
 coordinator and neither loops the worker nor dispatches a reviewer. A repo with no `screenshots`
 config is untouched.
+
+**Amended (bd-ur1zty): infrastructure faults do not park.** The first real capture (tonic, `deps_failed`:
+the seed's empty environment could not satisfy a strict `runtime.exs`) parked its ticket, and with
+screenshots on that would park every UI ticket of the repo until the coordinator intervened, against
+§2.3 (a failed capture never fails a merge). Every other failure code (deps cache, a service that
+did not come up, the base's own boot, checkout, diff, budget, browser) now lets the review proceed: it
+is recorded in `capture.json` and the capture record, the brief says `No screenshots: capture failed:
+<reason>`, and one coordinator-owned `screenshot_capture_failed` system alert is raised per
+workspace, repo and cause (refreshed, not repeated, by the next ticket; cleared by a capture that
+works). The split is `ScreenshotGate.classify/1`; `docs/screenshots.md` tabulates it. The deps seed's
+environment comes from the repo's config (`deps.mix_env`, `deps.env`), never the server's.
 
 Why not wait inside the worker's commit gate (`arb done`, ≈ 3 min, bounded by the
 pre-push recipe)? Two cold boots exceed it, and the PR does not exist yet. The *plan check*

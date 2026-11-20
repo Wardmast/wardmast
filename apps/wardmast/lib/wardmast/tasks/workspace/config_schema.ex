@@ -765,7 +765,17 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                                          RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH,
                                          MIX_ESBUILD_PATH, MIX_TAILWIND_PATH (env may not set
                                          them). A head whose mix.lock differs is skipped
-                                         (deps_changed): its code never runs with network
+                                         (deps_changed): its code never runs with network.
+                                         mix_env (^[a-z][a-z0-9_]{0,31}$; default the
+                                         MIX_ENV in env, else dev) is the env the seed
+                                         compiles under, which the boot must use too; env
+                                         (map of literal strings, merged over env's own
+                                         placeholder-free values) is what the seed's
+                                         config/runtime.exs needs (DATABASE_URL,
+                                         SECRET_KEY_BASE). The seed gets nothing else of
+                                         yours: no operator secret, no scrubbed credential,
+                                         no proxy, no PATH/HOME/MIX_* name (unknown keys
+                                         refused)
                       start_cmd, setup_cmd, seed_cmd, seeds and env values may use {{port}},
                       {{role}} (before/after), {{scratch}}, {{checkout}}, {{task_id}}.
                       Every command and the browser run in a bwrap sandbox with no network

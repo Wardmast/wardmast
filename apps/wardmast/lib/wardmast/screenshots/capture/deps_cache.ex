@@ -19,17 +19,21 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
 
   ## The cache (`prepare/2`)
 
-  `<root>/<lock12>-<toolchain12>` (`root` default `<scratch_root>/capture-deps`): the lock's
+  `<root>/<lock12>-<toolchain12>[-<mix_env>]` (`root` default `<scratch_root>/capture-deps`): the lock's
   SHA-256, and a fingerprint of the toolchain the boot will use (Elixir, OTP, ERTS and the
   architecture, as `elixir` reports them **inside the capture sandbox**, so it is the one the
-  boots run). Hex and rebar3 archives and precompiled NIFs are bound to that toolchain, so a new
+  boots run), and the `MIX_ENV` it was compiled under unless that is `dev` (bd-ur1zty). Hex and rebar3 archives and precompiled NIFs are bound to that toolchain, so a new
   one misses the cache. A miss seeds it, once per key (`:global.trans/4`):
 
     1. `git archive` of the source commit (no `.git`, nothing a worker wrote);
     2. `seed_script/0` in it, through the sandbox's `fetch_command/2`: the same filesystem
        allowlist as a boot (its `readonly_paths` too) **with the network on**, an environment
        built from nothing (plus the server's own proxy variables, never one with a credential in
-       it), `MIX_ENV=dev`:
+       it) and the values the repo's screenshots config wrote (`input.seed_env`, from
+       `Config.deps_seed/1`: `deps.env` over the boot's literal `env`; never the server's own
+       environment, and never the names this module sets itself), `MIX_ENV=<input.mix_env>`
+       (`deps.mix_env`, else the boot's `MIX_ENV`, else `dev`: a strict `config/runtime.exs` that
+       raises without `DATABASE_URL` seeds when the config provides it):
        `mix local.hex`/`local.rebar` (when the lock needs them), `mix deps.get`, `mix
        deps.compile` (which also downloads precompiled NIFs, `elixir_make` and
        `rustler_precompiled`, into the cache), then `mix esbuild.install`/`tailwind.install`
