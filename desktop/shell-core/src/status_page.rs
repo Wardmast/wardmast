@@ -108,7 +108,8 @@ mod tests {
         let js = eval_script(&state);
         assert!(js.starts_with("document.open();document.write("), "{js}");
         assert!(js.ends_with(");document.close();"), "{js}");
-        let literal = &js["document.open();document.write(".len()..js.len() - ");document.close();".len()];
+        let literal =
+            &js["document.open();document.write(".len()..js.len() - ");document.close();".len()];
         // The argument round-trips to exactly the rendered page ...
         let decoded: String = serde_json::from_str(literal).expect("a JSON string literal");
         assert_eq!(decoded, render(&state));
