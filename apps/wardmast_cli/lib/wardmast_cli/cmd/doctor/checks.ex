@@ -206,7 +206,8 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       [
         path: platform["path"] || "",
         tools: platform["tools"] || %{},
-        service: local_service_mode()
+        service: local_service_mode(),
+        rotator_path: platform["server_log_path"]
       ]
     end)
   end

@@ -66,6 +66,21 @@ defmodule WardmastCli.Supervisor.Launchd.PlistTest do
       assert xml =~ "<key>PATH</key>\n    <string>/opt/homebrew/bin:/usr/local/bin:"
     end
 
+    test "environment carries WARDMAST_SERVER_LOG equal to StandardOutPath" do
+      xml = Plist.plist(@opts)
+      log = "/Users/me/.wardmast/log/wardmast.log"
+
+      assert xml =~ "<key>WARDMAST_SERVER_LOG</key>\n    <string>#{log}</string>"
+    end
+
+    test "WARDMAST_SERVER_LOG follows a non-default data home" do
+      xml = Plist.plist(arbiter_home: "/Volumes/d/wm")
+      log = Plist.log_path("/Volumes/d/wm")
+
+      assert xml =~ "<key>WARDMAST_SERVER_LOG</key>\n    <string>#{log}</string>"
+      assert xml =~ "<key>StandardOutPath</key>\n  <string>#{log}</string>"
+    end
+
     test "XML-escapes values" do
       xml = Plist.plist(Keyword.put(@opts, :env, [{"X", ~s(a&b<c>"d")}]))
 
