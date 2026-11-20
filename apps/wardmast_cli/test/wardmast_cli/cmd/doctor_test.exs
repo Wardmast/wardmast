@@ -615,6 +615,36 @@ defmodule WardmastCli.Cmd.DoctorTest do
       assert out =~ "1 workspace still on the retired `rig_paths` key: acme"
     end
 
+    # bd-4j0nfe: `sandbox.backend: auto` stored at the root while
+    # `agent.security.sandbox.backend` is bwrap — runs stay on bwrap.
+    test "a root sandbox.backend that disagrees with the canonical key is reported with the effective backend" do
+      ws = %{
+        "data" => [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{
+              "sandbox" => %{"backend" => "auto"},
+              "agent" => %{"security" => %{"sandbox" => %{"backend" => "bwrap"}}}
+            }
+          }
+        ]
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {ws, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      {out, _err, _exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert out =~ "[warn] sandbox backend key"
+      assert out =~ "`sandbox.backend: auto` is ignored"
+      assert out =~ "effective backend bwrap (from `agent.security.sandbox.backend`)"
+    end
+
     # A release install has no Mix, so the mix task cannot be the lead
     # instruction — `arb server restart` works everywhere.
     test "the rig_paths hint leads with a remediation that works on a release install" do
