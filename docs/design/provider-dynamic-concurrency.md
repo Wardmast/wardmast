@@ -1363,14 +1363,19 @@ nothing in the budget path.
   `admission_shadow` record on a run's `routing_decision` and its panel on the
   ticket page. `mix wardmast.burn_report` keeps the burn governor's "would have
   held" record.
-- **Not retired here: the `slots_total` number (split to bd-bux0ej, DC12b).** The board still
-  derives `slots_total` from the capacity terms
-  (`Snapshot.capacity_terms/3`: machine sum, placement, account headroom), and
-  nothing admits or holds a card on it any more. It feeds only the header total
-  (with `CapacityExplainer`'s explanation) and the ES lift cap
-  (`QueueOrder.build/6`). §7 wants those two readers on
-  `min(Σ budget over the pools a Ready card can use, Σ machine caps)` instead;
-  that replacement, and the header wording that explains it, is not done.
+- **The stored `slots_total` (DC12b, bd-bux0ej).** Retired. `Snapshot.load/1` no longer
+  folds the capacity terms into a number kept on the board (`capacity_and_slots/5` and
+  `slots_total/2` are gone, and so is the `slots_total` board field). The board carries
+  `plan_capacity`, computed in `derive/1` from the walk's own sets by
+  `Snapshot.plan_capacity/2`: `min(Σ budget over the pools a Ready card can use, Σ
+  machine caps)`. A pool counts when any Ready card's candidates name it (with no
+  Ready card every pool counts, so an empty queue still shows its capacity); an
+  `:unlimited` side yields to the finite one; no walk reads 0. `QueueOrder.build/6`'s
+  lift cap, the board header and `CapacityExplainer.cap/2` (its `effective` and
+  `free`) all read it. `board.capacity` still carries the old terms, but only so the
+  explainer can list which machine, placement or account limit sits behind the
+  number; nothing admits a card on it. `Snapshot.order_context/1` gathers the walk
+  over the queued tickets when an epic has a floor.
 
 ### 10.6 Migration notes
 

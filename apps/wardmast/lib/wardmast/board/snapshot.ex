@@ -141,7 +141,7 @@ defmodule Wardmast.Board.Snapshot do
           verifying: [map()],
           closed_today: [map()],
           attention: [map()],
-          slots_total: non_neg_integer(),
+          plan_capacity: non_neg_integer(),
           slots_used: non_neg_integer(),
           slot_holders: [String.t()],
           capacity: map() | nil,
@@ -156,7 +156,7 @@ defmodule Wardmast.Board.Snapshot do
   Expected keys: `:issues`, `:workers`, `:blocked_by` (issue id → unsatisfied
   blocker ids, from `EdgeGate.blockers/2`), `:conflicts_with` (`{a, b}` pairs
   from the mutex edges), `:changed_files` (task id → repo-relative paths a worktree has touched),
-  `:now`, `:slots_total` and `:paused`. Every key has a sane
+  `:now` and `:paused`. Every key has a sane
   default, so a caller may pass only what it has.
 
   The epic-aware order (ES3) also reads `:scheduling` (the
@@ -188,7 +188,6 @@ defmodule Wardmast.Board.Snapshot do
     conflicts = EdgeGate.adjacency(Map.get(input, :conflicts_with, []))
     changed = Map.get(input, :changed_files, %{})
     now = Map.get(input, :now) || DateTime.utc_now()
-    slots_total = Map.get(input, :slots_total, 0)
     paused? = Map.get(input, :paused) == true
     # bd-38of5i: `{parent_id, child_id}` pairs from the `:parent_of` edges. An
     # *input*, like `:blocked_by` — the pure half never goes looking for rows.
@@ -207,19 +206,6 @@ defmodule Wardmast.Board.Snapshot do
     issues_by_id = Map.new(issues, &{&1.id, &1})
     # Edge endpoints outside `issues` (long-closed): resolve parent chips only.
     ref_by_id = Map.new(Map.get(input, :ref_issues, []), &{&1.id, &1})
-
-    # ES3: what the order key reads beyond a card's own fields — epic floors,
-    # the finish-first class, the lift cap. Resolved once over every ticket
-    # the edges reach, long-closed ones included.
-    order_ctx =
-      QueueOrder.build(
-        Map.values(Map.merge(ref_by_id, issues_by_id)),
-        parent_of,
-        slots_total,
-        Map.get(input, :scheduling),
-        Map.get(input, :ready_since),
-        now
-      )
 
     parents = parent_refs(parent_of, Map.merge(ref_by_id, issues_by_id))
 
@@ -250,6 +236,28 @@ defmodule Wardmast.Board.Snapshot do
       |> Map.reject(fn {id, _view} -> epic?(Map.get(issues_by_id, id)) end)
 
     columns = Map.new(views, fn {id, view} -> {id, view.column} end)
+
+    # DC12b: the plan-time capacity, the one number the lift cap and the header
+    # read (no stored total): the walk's pools and machines,
+    # for the cards in the Ready column.
+    plan_capacity =
+      plan_capacity(
+        Map.get(input, :walk),
+        Enum.filter(issues, &in_column?(columns, &1.id, :ready))
+      )
+
+    # ES3: what the order key reads beyond a card's own fields — epic floors,
+    # the finish-first class, the lift cap. Resolved once over every ticket
+    # the edges reach, long-closed ones included.
+    order_ctx =
+      QueueOrder.build(
+        Map.values(Map.merge(ref_by_id, issues_by_id)),
+        parent_of,
+        plan_capacity,
+        Map.get(input, :scheduling),
+        Map.get(input, :ready_since),
+        now
+      )
 
     # bd-aw2cyt: a live agent session in any role — author, reviewer,
     # implementer round, CI fix pass, conflict resolver. Counted over ALL
@@ -302,11 +310,11 @@ defmodule Wardmast.Board.Snapshot do
       # A closed task that ran over is done — there is nothing left to act on,
       # so the Closed column never flags, whatever the input says.
       closed_today: issues |> closed_today_cards(columns, now) |> decorate.(nil),
-      slots_total: slots_total,
+      plan_capacity: plan_capacity,
       slots_used: slots_used,
-      # bd-5fl9sx: the tickets holding the slots just counted, and the terms
-      # `slots_total` is the minimum of — what `Wardmast.Board.CapacityExplainer`
-      # reads, so the board can say *why* the cap is what it is.
+      # bd-5fl9sx: the tickets holding the slots just counted, and the old
+      # capacity terms — what `Wardmast.Board.CapacityExplainer` lists, so the
+      # board can say *why* machines and accounts limit what they do.
       slot_holders: SlotGate.slot_holders(issues, idle_opts),
       capacity: Map.get(input, :capacity),
       agents_live: agents_live,
@@ -415,7 +423,7 @@ defmodule Wardmast.Board.Snapshot do
   Read the world and derive the board.
 
   Options mirror `derive/1`'s inputs and override what would otherwise be
-  read: `:now`, `:slots_total`, `:paused`,
+  read: `:now`, `:capacity` (the capacity terms), `:paused`,
   `:issues`, `:workers`, `:changed_files`, `:workspace_id`; `:routing_opts` is
   handed to `Wardmast.Agents.ProviderRouting.availability/3` when the
   workspace routes by most quota. `:exclude_engagements?` (default `false`)
@@ -427,7 +435,7 @@ defmodule Wardmast.Board.Snapshot do
   `:walk_opts`, or a ready `:walk`) are always gathered and the board derived
   with them. A walk whose inputs fail to read is left out.
 
-  **Workspace-level scoping:** `slots_total` is computed for the
+  **Workspace-level scoping:** the capacity terms are computed for the
   specified workspace (defaulting to the default workspace if not given).
   However, `:issues` and `:workers` span all workspaces. Per-workspace
   concurrency limits are enforced at dispatch by `effective_max_concurrent/1`;
@@ -461,8 +469,14 @@ defmodule Wardmast.Board.Snapshot do
 
     idle_ids = idle_ids(issues, opts)
 
-    {capacity, slots_total} =
-      capacity_and_slots(workspace || workspace_id, issues, routing_opts, opts, idle_ids)
+    capacity =
+      Keyword.get_lazy(opts, :capacity, fn ->
+        safe_capacity_terms(
+          workspace || workspace_id,
+          SlotGate.slots_used(issues, idle_ids: idle_ids),
+          routing_opts
+        )
+      end)
 
     scheduling =
       QueueOrder.settings(Keyword.get_lazy(opts, :scheduling, &Wardmast.Settings.scheduling/0))
@@ -480,7 +494,6 @@ defmodule Wardmast.Board.Snapshot do
       ready_since: ready_since(opts, scheduling, issues, ref_issues, deps),
       changed_files: Keyword.get(opts, :changed_files, %{}),
       now: now,
-      slots_total: slots_total,
       capacity: capacity,
       card_guardrail:
         Keyword.get_lazy(opts, :card_guardrail, fn ->
@@ -529,26 +542,6 @@ defmodule Wardmast.Board.Snapshot do
       input
   end
 
-  # bd-5fl9sx: `slots_total` is the minimum of the capacity terms, kept so the
-  # board can explain it. A read that fails leaves the pre-terms fallback.
-  defp capacity_and_slots(workspace, issues, routing_opts, opts, idle_ids) do
-    capacity =
-      Keyword.get_lazy(opts, :capacity, fn ->
-        safe_capacity_terms(
-          workspace,
-          SlotGate.slots_used(issues, idle_ids: idle_ids),
-          routing_opts
-        )
-      end)
-
-    slots_total =
-      Keyword.get(opts, :slots_total) ||
-        (capacity && capacity.effective) ||
-        fallback_capacity()
-
-    {capacity, slots_total}
-  end
-
   # ES3: Ready-since only feeds finish-first's aging escape, so the
   # `ticket_transitions` read is skipped while that is off.
   defp ready_since(opts, scheduling, issues, ref_issues, deps) do
@@ -564,10 +557,10 @@ defmodule Wardmast.Board.Snapshot do
   DispatchQueue. It resolves the same issues, edges, settings and lift cap
   `load/1` does, so a listing and the board agree on who is lifted.
 
-  The slot total only feeds the lift cap, which only matters once an epic has a
-  floor, so it is read (routing and account headroom included) only then.
+  The plan-time capacity only feeds the lift cap, which only matters once an epic
+  has a floor, so the walk is gathered only then (over the queued tickets).
   Options: `:now`, `:issues`, `:deps`, `:scheduling`, `:ready_since`,
-  `:slots_total`, `:routing_opts`.
+  `:capacity` (the number itself), `:walk` (a ready walk), `:walk_opts`.
   """
   @spec order_context(keyword()) :: QueueOrder.t()
   def order_context(opts \\ []) do
@@ -581,15 +574,15 @@ defmodule Wardmast.Board.Snapshot do
 
     all = Map.values(Map.merge(Map.new(ref_issues, &{&1.id, &1}), Map.new(issues, &{&1.id, &1})))
 
-    slots_total =
-      Keyword.get_lazy(opts, :slots_total, fn ->
-        if Enum.any?(all, &floored_epic?/1), do: slots_total(issues, opts), else: 0
+    capacity =
+      Keyword.get_lazy(opts, :capacity, fn ->
+        if Enum.any?(all, &floored_epic?/1), do: order_capacity(issues, opts), else: 0
       end)
 
     QueueOrder.build(
       all,
       parent_of_from(deps),
-      slots_total,
+      capacity,
       scheduling,
       ready_since(opts, scheduling, issues, ref_issues, deps),
       now
@@ -619,15 +612,88 @@ defmodule Wardmast.Board.Snapshot do
     _ -> nil
   end
 
-  # What `load/1` reads for `slots_total`, for the default workspace.
-  defp slots_total(issues, opts) do
-    workspace = safe_workspace(default_workspace_id())
+  # The plan-time capacity for `order_context/1`: the walk over the queued tickets
+  # (the Ready column's superset), as `load/1` would gather it.
+  defp order_capacity(issues, opts) do
+    walk =
+      Keyword.get_lazy(opts, :walk, fn ->
+        WalkInputs.gather(
+          safe_workspace(default_workspace_id()),
+          issues,
+          Keyword.get(opts, :walk_opts, [])
+        )
+      end)
 
-    effective_max_concurrent(
-      workspace,
-      SlotGate.slots_used(issues),
-      routing_opts(workspace, opts)
-    )
+    plan_capacity(walk, Enum.filter(issues, &(Lifecycle.state_of(&1) == :queued)))
+  rescue
+    _ -> fallback_capacity()
+  end
+
+  @doc """
+  The plan-time capacity (DC12b): `min(Σ budget over the pools a Ready card can
+  use, Σ machine caps)`, from the walk's pools and machines. The one number the
+  ES lift cap, the board header and `CapacityExplainer` read; nothing admits a
+  card on it (the walk does).
+
+  `ready` is the Ready cards (maps with `:id` and `:workspace_id`), whose
+  candidates name the pools they can use. With no Ready card every pool counts,
+  so an empty queue still shows the capacity. An `:unlimited` side yields to the
+  finite one; both unlimited reads the local cap. No walk: 0.
+  """
+  @spec plan_capacity(map() | nil, [map()]) :: non_neg_integer()
+  def plan_capacity(%{pools: pools, nodes: nodes} = walk, ready)
+      when is_map(pools) and is_map(nodes) do
+    budget = pools |> usable_pools(walk, ready) |> sum_caps(& &1.budget)
+    machines = sum_caps(Map.values(nodes), & &1.cap)
+
+    case {budget, machines} do
+      {:unlimited, :unlimited} -> fallback_capacity()
+      {:unlimited, n} -> n
+      {n, :unlimited} -> n
+      {a, b} -> min(a, b)
+    end
+  rescue
+    _ -> 0
+  end
+
+  def plan_capacity(_walk, _ready), do: 0
+
+  defp sum_caps(items, fun) do
+    items
+    |> Enum.map(fun)
+    |> Enum.reduce(0, fn
+      :unlimited, _ -> :unlimited
+      _, :unlimited -> :unlimited
+      n, acc -> acc + n
+    end)
+  end
+
+  defp usable_pools(pools, _walk, []), do: Map.values(pools)
+
+  defp usable_pools(pools, %{candidates: candidates}, ready) do
+    ids =
+      ready
+      |> Enum.flat_map(&candidate_pools(candidates, &1))
+      |> MapSet.new()
+
+    pools |> Map.take(MapSet.to_list(ids)) |> Map.values()
+  end
+
+  defp candidate_pools(candidates, card) do
+    cards = %{id: card.id, workspace_id: Map.get(card, :workspace_id), repo: Map.get(card, :repo)}
+
+    result =
+      case candidates do
+        fun when is_function(fun, 1) -> fun.(cards)
+        %{} = by_id -> Map.get(by_id, card.id, [])
+      end
+
+    case result do
+      list when is_list(list) -> Enum.map(list, & &1.pool)
+      _ -> []
+    end
+  rescue
+    _ -> []
   end
 
   @doc """
@@ -669,7 +735,7 @@ defmodule Wardmast.Board.Snapshot do
       verifying: [],
       closed_today: [],
       attention: [],
-      slots_total: 0,
+      plan_capacity: 0,
       slots_used: 0,
       slot_holders: [],
       capacity: nil,
@@ -708,13 +774,13 @@ defmodule Wardmast.Board.Snapshot do
   (`docs/provider-account-design.md` §4.2) — the headroom left on the provider
   account this workspace is metered under.
 
-  The account term matters because `slots_total` is what every Ready card's queue position is computed from: a
-  board that ignores a full account promises slots the next scheduler tick will
-  refuse. It can therefore return **0**, which the pre-P8 signature could not.
+  The account term matters because a board that ignores a full account promises
+  slots the next scheduler tick will refuse. It can therefore return **0**,
+  which the pre-P8 signature could not. (The board header and the ES lift cap no
+  longer read this number: they read `plan_capacity/2`.)
 
   The workspace's own live workers are added back before the min (via
-  `Concurrency.clamp/3`) because `load/1` subtracts the running cards from
-  `slots_total` itself — counting them in both places would halve the number.
+  `Concurrency.clamp/3`) because the caller subtracts the running cards itself — counting them in both places would halve the number.
   `already_counted` is exactly what the caller will subtract; since bd-asxw4e
   that is the tickets In progress, so `load/1` passes it rather than letting
   this function guess with `Concurrency.workspace_live_count/2`. Omitting it
@@ -932,7 +998,7 @@ defmodule Wardmast.Board.Snapshot do
   # `load/1`'s options for the two board-wide reads, with the routing read done
   # once and shared. Nothing is read when both are overridden.
   defp routing_opts(workspace, opts) do
-    if Keyword.get(opts, :slots_total) do
+    if Keyword.get(opts, :capacity) do
       [routing: nil]
     else
       routing_opts = Keyword.get(opts, :routing_opts, [])

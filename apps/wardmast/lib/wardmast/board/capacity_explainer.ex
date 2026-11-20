@@ -11,7 +11,8 @@ defmodule Wardmast.Board.CapacityExplainer do
   provider account's headroom. `Wardmast.Board.Snapshot.capacity_terms/3` is
   the one function that folds them, and `effective_max_concurrent/3` *is*
   its `effective`; `Snapshot.load/1` keeps the terms on the board (`capacity`)
-  beside `slots_total`. This module formats those terms and names the binding
+  beside `plan_capacity`, the plan-time number the explanation is about
+  (`Snapshot.plan_capacity/2`). This module formats those terms and names the binding
   one, so an explanation cannot disagree with the number it explains.
 
   Likewise a held Ready card carries the scheduler's structured hold
@@ -169,6 +170,9 @@ defmodule Wardmast.Board.CapacityExplainer do
   def cap(board, opts \\ [])
 
   def cap(%{capacity: %{} = terms} = board, _opts) do
+    # DC12b: the number is the board's plan-time capacity; the terms still say
+    # which machine, placement or account limit sits behind it.
+    terms = with_plan_capacity(terms, board)
     account = account_detail(terms)
 
     limits =
@@ -199,6 +203,11 @@ defmodule Wardmast.Board.CapacityExplainer do
   end
 
   def cap(_board, _opts), do: nil
+
+  defp with_plan_capacity(terms, %{plan_capacity: n}) when is_integer(n),
+    do: %{terms | effective: n}
+
+  defp with_plan_capacity(terms, _board), do: terms
 
   # Which limits to list: the machine total always, the rest only when they
   # exist for this board — an unset limit is not an input.

@@ -233,14 +233,14 @@ defmodule Wardmast.Board.CapacityExplainerTest do
   end
 
   describe "agreement with the board" do
-    test "the board's slots_total is the explainer's effective cap" do
+    test "the board's plan_capacity is the explainer's effective cap" do
       local_cap!(2)
       ws = workspace!()
 
       board = Snapshot.load(workspace_id: ws.id, issues: [], workers: [])
 
-      assert board.slots_total == 2
-      assert CapacityExplainer.cap(board).effective == board.slots_total
+      assert board.plan_capacity == 2
+      assert CapacityExplainer.cap(board).effective == board.plan_capacity
       assert %{cap: %{binding: :nodes}} = CapacityExplainer.explain(board)
     end
   end

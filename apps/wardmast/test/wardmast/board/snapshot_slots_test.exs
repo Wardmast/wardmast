@@ -106,7 +106,7 @@ defmodule Wardmast.Board.SnapshotSlotsTest do
     )
   end
 
-  defp slots_free(board), do: max(board.slots_total - board.slots_used, 0)
+  defp slots_free(board), do: max(board.plan_capacity - board.slots_used, 0)
 
   defp derive(overrides) do
     Snapshot.derive(
