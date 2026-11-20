@@ -35,7 +35,10 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
        `rustler_precompiled`, into the cache), then `mix esbuild.install`/`tailwind.install`
        when the deps include them;
     3. the results (`deps/`, `mix/`, `hex/`, `cache/`, `bin/esbuild-*`, `bin/tailwind-*`) are
-       published by an atomic rename with a `.complete` stamp. A failed seed leaves nothing.
+       published by an atomic rename with a `.complete` stamp. A failed seed leaves nothing. A
+       seed killed with its capture (a newer head cancels it, a shutdown) cannot clean up: its
+       `seed-<key>-*` work is swept by the next seed of that cache, under the same lock, and any
+       left longer than `keep_days` goes with the prune.
 
   The source's `_build` is discarded: each boot compiles into its own checkout.
 
@@ -60,7 +63,8 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   ## Options
 
   `:root`, `:seed_script` and `:seed_env` (`[{name, value}]` added to the seed's environment;
-  tests), `:keep_days` (completed caches unused that long are pruned after a seed; default 14).
+  tests), `:keep_days` (completed caches unused that long, and a killed run's work that old, are
+  pruned after a seed; default 14).
   """
 
   alias Wardmast.Config.Paths
@@ -374,7 +378,8 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   end
 
   defp seed(dir, input, source, opts) do
-    work = Path.join(Path.dirname(dir), "seed-" <> token())
+    # Named for its cache, so the next seed of that cache can tell its leftovers.
+    work = Path.join(Path.dirname(dir), seed_prefix(dir) <> token())
     src = Path.join(work, "src")
     scratch = Path.join(work, "scratch")
     out = Path.join(scratch, "out")
@@ -398,6 +403,30 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
       end
     after
       force_rm_rf(work)
+      clear_leftovers(dir)
+    end
+  end
+
+  defp seed_prefix(dir), do: "seed-" <> Path.basename(dir) <> "-"
+
+  # A seed's `after` does not run when its capture is killed (a newer head cancels it, bd-8qj1sa;
+  # a shutdown stops it), so its work stays. This runs under `dir`'s lock, which a killed seed
+  # released when it died: every other `seed-<key>-*` is one of those. Swept once this seed has
+  # run, by when the killed one's processes (stopped with their owner, `AppProcess`) are gone.
+  defp clear_leftovers(dir) do
+    root = Path.dirname(dir)
+    prefix = seed_prefix(dir)
+
+    case File.ls(root) do
+      {:ok, entries} ->
+        for entry <- entries,
+            String.starts_with?(entry, prefix),
+            do: force_rm_rf(Path.join(root, entry))
+
+        :ok
+
+      {:error, _} ->
+        :ok
     end
   end
 
@@ -537,21 +566,35 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
     e in File.Error -> {:error, "could not publish the deps cache: #{Exception.message(e)}"}
   end
 
-  # Completed caches nobody used for `days` (another lockfile, an old toolchain). Never `keep`.
+  # Completed caches nobody used for `days` (another lockfile, an old toolchain), and work a killed
+  # run left that long ago (`clear_leftovers/1` only sweeps the cache it seeds; a `probe-*` takes
+  # no lock): no seed or probe runs for days. Never `keep`.
   defp prune(root, keep, days) do
     cutoff = System.os_time(:second) - days * 86_400
 
     for entry <- File.ls!(root),
         path = Path.join(root, entry),
         path != keep,
-        Regex.match?(~r/\A[0-9a-f]{12}-[0-9a-f]{12}\z/, entry),
-        stale?(Path.join(path, @complete), cutoff) do
+        prunable?(entry, path, cutoff) do
       force_rm_rf(path)
     end
 
     :ok
   rescue
     _ -> :ok
+  end
+
+  defp prunable?(entry, path, cutoff) do
+    cond do
+      Regex.match?(~r/\A[0-9a-f]{12}-[0-9a-f]{12}\z/, entry) ->
+        stale?(Path.join(path, @complete), cutoff)
+
+      String.starts_with?(entry, ["seed-", "probe-"]) ->
+        stale?(path, cutoff)
+
+      true ->
+        false
+    end
   end
 
   defp stale?(stamp, cutoff) do

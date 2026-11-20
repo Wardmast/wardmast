@@ -367,6 +367,53 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
       assert Enum.reject(File.ls!(ctx.root), &(&1 == "repos")) == []
     end
 
+    # The ReviewGate cancels a capture when a newer head arrives (bd-8qj1sa), and a shutdown stops
+    # it, both as `Task.Supervisor.terminate_child/2` does: the seed dies without its `after`.
+    test "a seed killed with its capture leaves nothing once its lockfile is seeded again", ctx do
+      input = input(ctx.repo, ctx.base, ctx.head)
+      held = Keyword.put(ctx.opts, :seed_script, "exec sleep 60")
+
+      pid =
+        spawn(fn ->
+          receive do
+            :go -> DepsCache.prepare(input, held)
+          end
+        end)
+
+      # The sandbox is asked for the seed's command once its work directory exists.
+      :erlang.trace(pid, true, [:send])
+      send(pid, :go)
+      assert_receive {:trace, ^pid, :send, {:fetch_command, _argv, box}, ^pid}, 60_000
+
+      ref = Process.monitor(pid)
+      Process.exit(pid, :shutdown)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :shutdown}
+      assert File.dir?(Path.dirname(box.checkout)), "the killed seed's work is left behind"
+
+      assert {:ok, cache} = DepsCache.prepare(input, ctx.opts)
+      assert Enum.reject(File.ls!(ctx.root), &(&1 == "repos")) == [Path.basename(cache.dir)]
+    end
+
+    test "after a seed, work a long-dead run left is pruned; a recent one may be live and stays",
+         ctx do
+      long_ago = System.os_time(:second) - 15 * 86_400
+      old_seed = Path.join(ctx.root, "seed-0123456789ab-0123456789ab-0123456789ab")
+      old_probe = Path.join(ctx.root, "probe-0123456789ab")
+      recent = Path.join(ctx.root, "seed-ba9876543210-ba9876543210-ba9876543210")
+
+      for dir <- [old_seed, old_probe, recent], do: File.mkdir_p!(Path.join(dir, "out/ro"))
+      # A compiled tree can hold read-only directories.
+      File.write!(Path.join(old_seed, "out/ro/file"), "x")
+      File.chmod!(Path.join(old_seed, "out/ro"), 0o555)
+      on_exit(fn -> File.chmod(Path.join(old_seed, "out/ro"), 0o755) end)
+      for dir <- [old_seed, old_probe], do: File.touch!(dir, long_ago)
+
+      assert {:ok, _cache} = DepsCache.prepare(input(ctx.repo, ctx.base, ctx.head), ctx.opts)
+      refute File.exists?(old_seed)
+      refute File.exists?(old_probe)
+      assert File.dir?(recent)
+    end
+
     test "a head that changes mix.lock never seeds anything", ctx do
       head = commit!(ctx.repo, %{"mix.lock" => "%{lock: 2}\n"}, "bump")
 

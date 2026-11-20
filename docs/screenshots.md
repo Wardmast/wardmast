@@ -186,7 +186,9 @@ network namespace, so two services cannot talk to each other.
   `elixir_make`/`rustler_precompiled`, into the cache), and `mix esbuild.install` /
   `tailwind.install` when those deps are present. It takes up to `limits.setup_seconds`, and a
   failure is `deps_failed` (an infrastructure fault) with the output. Caches unused for 14
-  days are pruned.
+  days are pruned. A capture cancelled mid-seed (a newer head, a restart) leaves a
+  `seed-<lock>-<toolchain>-*` directory beside the cache; the next seed of that cache removes
+  it.
 * **Read-only in every boot**, wired through the environment (`env` may not set these while
   `deps.mix` is on):
 

@@ -269,7 +269,11 @@ come from the host side, **without opening the sandbox**. Operator guide: [scree
     `RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH` in the cache) and the esbuild/tailwind installers when
     those deps are present. Published by an atomic rename with a `.complete` stamp; a failure
     leaves nothing and is `deps_failed` (an infrastructure fault). Caches unused for 14 days are
-    pruned. What the seed leaves is untrusted to the host (a default-branch dependency can be
+    pruned. A seed killed with its capture (the capture lifecycle below cancels a capture when a
+    newer head arrives; a shutdown stops it) cannot run its own cleanup: its process group dies
+    with it (`AppProcess`), and its work directory, named `seed-<key>-<token>`, is swept by the
+    next seed of the same cache under the same lock, or by the prune once it is 14 days old.
+    What the seed leaves is untrusted to the host (a default-branch dependency can be
     malicious): its directories are moved whole into a staging directory the seed never saw, and
     only when they are real directories; the asset tools are copied only as regular files from a
     real `_build`; the stamp and the rename happen in staging. No link it plants is followed.
