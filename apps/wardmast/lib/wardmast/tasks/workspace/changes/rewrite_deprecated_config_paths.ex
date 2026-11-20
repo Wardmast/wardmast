@@ -23,24 +23,38 @@ defmodule Wardmast.Tasks.Workspace.Changes.RewriteDeprecatedConfigPaths do
   alias Wardmast.Tasks.Workspace.DeprecatedConfigPaths
 
   @impl true
-  def change(changeset, _opts, _context) do
+  def change(%Changeset{action: %{name: :patch_config}} = changeset, _opts, _context) do
     {patch, patch_rewrites} = rewrite_patch(Changeset.get_argument(changeset, :patch))
     {unsets, unset_rewrites} = rewrite_unsets(Changeset.get_argument(changeset, :unset_paths))
 
-    case patch_rewrites ++ unset_rewrites do
-      [] ->
-        changeset
+    changeset
+    |> Changeset.set_argument(:patch, patch)
+    |> Changeset.set_argument(:unset_paths, unsets)
+    |> report(patch_rewrites ++ unset_rewrites)
+  end
 
-      rewrites ->
-        Enum.each(rewrites, &log/1)
-
-        changeset
-        |> Changeset.set_argument(:patch, patch)
-        |> Changeset.set_argument(:unset_paths, unsets)
-        |> Changeset.after_action(fn _changeset, record ->
-          {:ok, Ash.Resource.put_metadata(record, :config_deprecations, rewrites)}
-        end)
+  # `:create` / `:update` take the whole `config`: fold it, canonical winning,
+  # so a root `sandbox` cannot be stored through them either.
+  def change(changeset, _opts, _context) do
+    with true <- Changeset.changing_attribute?(changeset, :config),
+         %{} = config <- Changeset.get_attribute(changeset, :config),
+         {folded, [_ | _] = rewrites} <- DeprecatedConfigPaths.fold(config) do
+      changeset
+      |> Changeset.force_change_attribute(:config, folded)
+      |> report(rewrites)
+    else
+      _ -> changeset
     end
+  end
+
+  defp report(changeset, []), do: changeset
+
+  defp report(changeset, rewrites) do
+    Enum.each(rewrites, &log/1)
+
+    Changeset.after_action(changeset, fn _changeset, record ->
+      {:ok, Ash.Resource.put_metadata(record, :config_deprecations, rewrites)}
+    end)
   end
 
   defp rewrite_patch(%{} = patch), do: DeprecatedConfigPaths.fold(patch)
