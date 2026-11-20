@@ -33,6 +33,7 @@ defmodule Wardmast.Tasks.PullRequest do
   alias Wardmast.Tasks.Issue
   alias Wardmast.Tasks.Verification
   alias Wardmast.Tasks.Workspace
+  alias Wardmast.Worker.PrimarySync
   alias Wardmast.Worker.Watchdog
 
   require Ash.Query
@@ -497,6 +498,12 @@ defmodule Wardmast.Tasks.PullRequest do
   def merged(task_id, opts \\ []) when is_binary(task_id) do
     with {:ok, issue} <- Ash.get(Issue, task_id) do
       mr_ref = Keyword.get(opts, :mr_ref) || issue.pr_ref
+
+      # bd-2rdfsh: the PR landed on origin whatever the ticket does next, so the
+      # primary checkout's local target branch is caught up here too — the
+      # Watchdog merges a ReviewGate ticket itself and the MergeQueue then skips
+      # it as already closed, so its own post-merge sync never runs.
+      PrimarySync.sync_after_merge(issue)
 
       cond do
         issue.review_only == true or Map.get(issue.merge_watch || %{}, "review_only") == true ->

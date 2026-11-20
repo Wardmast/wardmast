@@ -106,6 +106,7 @@ defmodule Wardmast.Workflows.MergedPRFinalizer do
   alias Wardmast.Tasks.Verification
   alias Wardmast.Trackers.Sync
   alias Wardmast.Worker
+  alias Wardmast.Worker.PrimarySync
 
   alias Wardmast.Workflows.{
     DeployWatch,
@@ -462,6 +463,9 @@ defmodule Wardmast.Workflows.MergedPRFinalizer do
     )
 
     task = record_review_waiver(task)
+
+    # bd-2rdfsh: an externally merged PR advanced origin; catch the primary up.
+    PrimarySync.sync_after_merge(task)
 
     Sync.lifecycle(task, :merged)
 

@@ -23,6 +23,7 @@ defmodule Wardmast.Repos do
   alias Wardmast.Tasks.RepoConfig
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Worker
+  alias Wardmast.Worker.PrimarySync
   alias Wardmast.Worker.Worktree
 
   @type repo :: %{
@@ -31,7 +32,11 @@ defmodule Wardmast.Repos do
           source: String.t(),
           workers: non_neg_integer(),
           worktrees: non_neg_integer(),
-          workspace_id: String.t() | nil
+          workspace_id: String.t() | nil,
+          primary_target: String.t(),
+          primary_behind: non_neg_integer() | nil,
+          primary_sync_blocker: PrimarySync.skip_reason() | nil,
+          auto_sync_primary: boolean()
         }
 
   @doc """
@@ -81,14 +86,19 @@ defmodule Wardmast.Repos do
           p when is_binary(p) -> safe_worktree_count(p)
         end
 
+      target = Map.get(entry, :target) || "main"
+
       %{
         name: entry.name,
         path: path,
         source: entry.source,
         workspace_id: entry.workspace_id,
         workers: Map.get(workers_by_repo, entry.name, 0),
-        worktrees: worktree_count
+        worktrees: worktree_count,
+        primary_target: target,
+        auto_sync_primary: Map.get(entry, :auto_sync_primary, false)
       }
+      |> Map.merge(primary_staleness(path, target))
     end)
     |> Enum.sort_by(&{&1.name, &1.source})
   end
@@ -166,8 +176,10 @@ defmodule Wardmast.Repos do
         %{
           name: name,
           path: RepoConfig.repo_path_from_config(raw),
+          target: RepoConfig.repo_target_from_config(raw),
           source: ws.name,
-          workspace_id: ws.id
+          workspace_id: ws.id,
+          auto_sync_primary: Workspace.auto_sync_primary?(ws)
         }
       end)
     end)
@@ -181,6 +193,7 @@ defmodule Wardmast.Repos do
       %{
         name: name,
         path: RepoConfig.repo_path_from_config(raw),
+        target: RepoConfig.repo_target_from_config(raw),
         source: "(app)",
         workspace_id: nil
       }
@@ -230,6 +243,23 @@ defmodule Wardmast.Repos do
       Map.update(acc, repo, 1, &(&1 + 1))
     end)
   end
+
+  # bd-2rdfsh: how far the checkout's LOCAL target branch trails origin, and why
+  # a post-merge sync would not catch it up. `nil` = unknown (no path, not a git
+  # checkout, no such branch): doctor must not warn on what it cannot measure.
+  defp primary_staleness(path, target) when is_binary(path) do
+    case PrimarySync.status(path, target) do
+      {:ok, %{behind: behind, blocker: blocker}} ->
+        %{primary_behind: behind, primary_sync_blocker: blocker}
+
+      {:error, _} ->
+        %{primary_behind: nil, primary_sync_blocker: nil}
+    end
+  rescue
+    _ -> %{primary_behind: nil, primary_sync_blocker: nil}
+  end
+
+  defp primary_staleness(_path, _target), do: %{primary_behind: nil, primary_sync_blocker: nil}
 
   defp safe_worktree_count(path) do
     Worktree.list(path) |> length()

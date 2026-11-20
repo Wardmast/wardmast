@@ -14,7 +14,11 @@ defmodule WardmastWeb.Api.RepoJSON do
       source: repo.source,
       workspace_id: repo.workspace_id,
       workers: repo.workers,
-      worktrees: repo.worktrees
+      worktrees: repo.worktrees,
+      primary_target: repo.primary_target,
+      primary_behind: repo.primary_behind,
+      primary_sync_blocker: repo.primary_sync_blocker && to_string(repo.primary_sync_blocker),
+      auto_sync_primary: repo.auto_sync_primary
     }
   end
 end
