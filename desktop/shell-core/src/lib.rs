@@ -1,0 +1,12 @@
+//! Lifecycle core of the Arbiter desktop shell prototype (bd-aisgkf, PKG 8).
+//!
+//! See `docs/desktop-shell.md` for the decisions this encodes.
+
+pub mod backoff;
+pub mod http;
+pub mod port;
+pub mod quit;
+pub mod shell;
+pub mod single_instance;
+pub mod status_page;
+pub mod supervisor;

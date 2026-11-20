@@ -83,3 +83,8 @@ accounts.json
 
 # The CDP capture runner's npm install (bd-485ts3); the worker image runs its own `npm ci`.
 /apps/wardmast/priv/capture/node_modules/
+
+# Desktop shell prototype (bd-aisgkf): cargo build output.
+/desktop/target/
+/desktop/src-tauri/target/
+/desktop/src-tauri/gen/

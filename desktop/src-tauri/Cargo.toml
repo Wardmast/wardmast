@@ -1,0 +1,19 @@
+# The window/tray layer over `arbiter-shell-core` (bd-aisgkf). Not a workspace
+# member: it needs the platform webview toolchain (webkit2gtk-4.1 + GTK dev
+# packages on Linux, Xcode on macOS). All lifecycle behaviour is in
+# `shell-core` and tested there; this crate only maps it onto a window and a
+# tray. See docs/desktop-shell.md for what has and has not been built/run.
+[package]
+name = "arbiter-desktop"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+arbiter-shell-core = { path = "../shell-core" }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
