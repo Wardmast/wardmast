@@ -1,6 +1,7 @@
 defmodule Wardmast.Server.LogRotator do
   @moduledoc """
-  In-server, size-capped rotation of the server log (`~/.wardmast/log/wardmast.log`).
+  In-server, size-capped rotation of the server log (`Wardmast.Config.Paths.server_log_path/0`, which the launchd plist
+  sets via `WARDMAST_SERVER_LOG`).
 
   On macOS launchd opens the log (`StandardOutPath`) and hands the descriptor to
   the server, so the file cannot be renamed away (the launchd-held fd would keep

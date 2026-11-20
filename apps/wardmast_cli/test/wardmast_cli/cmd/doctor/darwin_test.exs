@@ -54,6 +54,32 @@ defmodule WardmastCli.Cmd.Doctor.DarwinTest do
     end
   end
 
+  describe "log rotator path vs plist StandardOutPath (bd-6f5dmo)" do
+    defp log_check(service, rotator) do
+      by_id(Darwin.checks(service: service, rotator_path: rotator), "darwin_log_rotation")
+    end
+
+    test "matching paths are ok" do
+      svc = %{mode: :agent, plist: "/p", stdout_path: "/d/log/wardmast.log"}
+      assert log_check(svc, "/d/log/wardmast.log").status == :ok
+    end
+
+    test "differing paths warn, naming both" do
+      svc = %{mode: :agent, plist: "/p", stdout_path: "/d/log/wardmast.log"}
+      r = log_check(svc, "/home/me/.wardmast/log/wardmast.log")
+
+      assert r.status == :warn
+      assert r.detail =~ "/d/log/wardmast.log"
+      assert r.detail =~ "/home/me/.wardmast/log/wardmast.log"
+    end
+
+    test "n/a when no plist is installed or the rotator path is unknown" do
+      assert log_check(%{mode: :none}, "/x").status == :na
+      assert log_check(nil, "/x").status == :na
+      assert log_check(%{mode: :agent, plist: "/p", stdout_path: "/x"}, nil).status == :na
+    end
+  end
+
   describe "launchd service mode (agent vs daemon)" do
     @agent %{
       mode: :agent,

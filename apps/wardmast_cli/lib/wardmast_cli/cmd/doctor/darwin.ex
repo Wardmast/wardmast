@@ -81,10 +81,39 @@ defmodule WardmastCli.Cmd.Doctor.Darwin do
         "brew install mise"
       ),
       service_mode(Keyword.get(opts, :service)),
+      log_rotation(Keyword.get(opts, :service), Keyword.get(opts, :rotator_path)),
       write_confinement(),
       egress()
     ]
     |> Enum.map(&%{&1 | group: :sandboxes})
+  end
+
+  # bd-6f5dmo: the server's LogRotator must watch the file launchd writes to.
+  defp log_rotation(%{mode: mode, stdout_path: out} = svc, rotator)
+       when mode in [:agent, :daemon, :both] and is_binary(out) and is_binary(rotator) do
+    base = %Result{id: "darwin_log_rotation", name: "log rotation"}
+
+    if Path.expand(out) == Path.expand(rotator) do
+      %{base | status: :ok, detail: "the log rotator watches launchd's StandardOutPath (#{out})"}
+    else
+      %{
+        base
+        | status: :warn,
+          detail:
+            "the log rotator watches #{rotator} but the plist (#{svc.plist}) writes #{out}: the log never rotates",
+          hint:
+            "Re-run `ward install service` so the plist exports WARDMAST_SERVER_LOG, then restart the server."
+      }
+    end
+  end
+
+  defp log_rotation(_service, _rotator) do
+    %Result{
+      id: "darwin_log_rotation",
+      name: "log rotation",
+      status: :na,
+      detail: "not probed: no readable launchd plist, or the server did not report its log path"
+    }
   end
 
   defp tool(id, name, found, missing_status, why, fix) do

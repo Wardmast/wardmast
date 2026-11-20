@@ -28,6 +28,7 @@ defmodule Wardmast.Doctor.Platform do
     %{
       os: os_name(os),
       path: path,
+      server_log_path: Wardmast.Config.Paths.server_log_path(),
       tools: Map.new(@tools, &{&1, find.(&1, path)}),
       # bd-5wfsj7: each provider CLI's install state and version against its
       # minimum, and how the server's PATH was built (login shell vs inherited).

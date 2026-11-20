@@ -131,18 +131,30 @@ defmodule WardmastCli.Supervisor.Launchd do
           user: String.t() | nil,
           group: String.t() | nil,
           owner_uid: non_neg_integer() | nil,
-          file_mode: non_neg_integer() | nil
+          file_mode: non_neg_integer() | nil,
+          stdout_path: Path.t() | nil
         }
   def service_mode do
-    base = %{plist: nil, user: nil, group: nil, owner_uid: nil, file_mode: nil}
+    base = %{plist: nil, user: nil, group: nil, owner_uid: nil, file_mode: nil, stdout_path: nil}
 
     case {File.exists?(agent_plist_path()), File.exists?(daemon_plist_path())} do
       {false, false} -> Map.put(base, :mode, :none)
-      {true, false} -> base |> Map.put(:plist, agent_plist_path()) |> Map.put(:mode, :agent)
+      {true, false} -> agent_info(base)
       {false, true} -> daemon_info(base, :daemon)
       {true, true} -> daemon_info(base, :both)
     end
   end
+
+  defp agent_info(base) do
+    path = agent_plist_path()
+    xml = File.read(path) |> elem_or_empty()
+
+    base
+    |> Map.merge(%{mode: :agent, plist: path, stdout_path: plist_string(xml, "StandardOutPath")})
+  end
+
+  defp elem_or_empty({:ok, body}), do: body
+  defp elem_or_empty(_), do: ""
 
   defp daemon_info(base, mode) do
     path = daemon_plist_path()
@@ -166,7 +178,8 @@ defmodule WardmastCli.Supervisor.Launchd do
       user: plist_string(xml, "UserName"),
       group: plist_string(xml, "GroupName"),
       owner_uid: owner_uid,
-      file_mode: file_mode
+      file_mode: file_mode,
+      stdout_path: plist_string(xml, "StandardOutPath")
     })
   end
 
