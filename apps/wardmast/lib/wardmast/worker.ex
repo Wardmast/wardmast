@@ -134,6 +134,7 @@ defmodule Wardmast.Worker do
   alias Wardmast.Worker.ConflictPassOutcome
   alias Wardmast.Worker.CoordinatorOnlyFindings
   alias Wardmast.Worker.EvidenceIntegrity
+  alias Wardmast.Worker.MemoryWatchdog
   alias Wardmast.Worker.OsProcess
   alias Wardmast.Worker.ProcessGroup
   alias Wardmast.Worker.PRTemplate
@@ -3354,8 +3355,11 @@ defmodule Wardmast.Worker do
   # run on a node (no local process) or a port that already closed.
   defp process_group_for(port) when is_port(port) do
     case safe_port_os_pid(port) do
-      {:ok, os_pid} -> ProcessGroup.describe(os_pid)
-      :error -> nil
+      {:ok, os_pid} ->
+        os_pid |> ProcessGroup.describe() |> MemoryWatchdog.maybe_start(owner: self())
+
+      :error ->
+        nil
     end
   end
 
@@ -3383,6 +3387,8 @@ defmodule Wardmast.Worker do
   # session forgets the group, as its pgid may be reused once the group is gone.
   defp reap_process_group(%{process_group: %{pgid: pgid} = group} = session)
        when is_integer(pgid) do
+    MemoryWatchdog.stop(Map.get(group, :watchdog))
+
     case ProcessGroup.kill(group) do
       result when result in [:ok, :gone] ->
         :ok
@@ -3557,6 +3563,22 @@ defmodule Wardmast.Worker do
       :error ->
         {:noreply, state}
     end
+  end
+
+  # bd-d627b8 (MAC P3-3): the macOS memory watchdog found this agent's process group over
+  # its cap and is killing it. Remember why, so the exit that follows is classified
+  # `:memory_cap_exceeded` and not a bare SIGKILL.
+  def handle_info({:memory_watchdog_exceeded, pgid, info}, %State{} = state) do
+    sessions =
+      Map.new(state.claude_sessions, fn
+        {handle, %{process_group: %{pgid: ^pgid}} = session} ->
+          {handle, Map.put(session, :memory_cap_exceeded, info)}
+
+        other ->
+          other
+      end)
+
+    {:noreply, %State{state | claude_sessions: sessions}}
   end
 
   def handle_info({port, {:exit_status, status}}, %State{} = state) when session_handle?(port) do

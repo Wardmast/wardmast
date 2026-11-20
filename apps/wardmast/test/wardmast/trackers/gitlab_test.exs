@@ -46,6 +46,15 @@ defmodule Wardmast.Trackers.GitlabTest do
       assert {:ok, %{"iid" => 42, "title" => "Fix the thing"}} = Gitlab.fetch(@ref)
     end
 
+    test "also sends the token as a Bearer credential, which is what a device-flow OAuth token needs" do
+      stub(fn conn ->
+        assert ["Bearer test-gitlab-token"] = Plug.Conn.get_req_header(conn, "authorization")
+        Req.Test.json(conn, %{"iid" => 42, "title" => "t", "state" => "opened"})
+      end)
+
+      assert {:ok, _} = Gitlab.fetch(@ref)
+    end
+
     test "404: returns {:error, %Error{kind: :not_found}}" do
       stub(fn conn ->
         conn

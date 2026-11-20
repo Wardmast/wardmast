@@ -355,6 +355,12 @@ defmodule WardmastWeb.Api.WorkerController do
       {"#{phrase} — #{noun(verb)} refused",
        %{task_id: task_id, provider: provider && to_string(provider)}}
 
+  # bd-5wfsj7: the provider's host CLI is below its minimum supported version.
+  defp refusal_text({:cli_version, provider, phrase}, task_id, verb),
+    do:
+      {"#{phrase} — #{noun(verb)} refused",
+       %{task_id: task_id, provider: provider && to_string(provider)}}
+
   # bd-2aslx6 (#1428): a second agent-spawning dispatch onto a task whose worker
   # is mid-session is refused, naming the live session so a retrying caller can
   # tell "still busy" from a bad request.

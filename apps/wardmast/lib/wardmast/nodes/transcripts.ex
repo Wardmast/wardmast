@@ -1,7 +1,8 @@
 defmodule Wardmast.Nodes.Transcripts do
   @moduledoc """
   The primary's **sanitising transcript extractor** (`docs/design/remote-workers.md`
-  §7.6): a node uploads the run's `projects/**` session JSONL as a tar, and this
+  §7.6): a node uploads the run's `projects/**` session JSONL (Claude) and `sessions/**`
+  rollouts (Codex, SI8: `Usage.CodexSessionFile` reads them from here) as a tar, and this
   puts it into the run's config dir (the same path the local readers use:
   `Usage.ClaudeSessionFile.locate/2`, `SessionArchive.archive_run/2`) without
   trusting a byte of the tar.
@@ -13,8 +14,10 @@ defmodule Wardmast.Nodes.Transcripts do
     * only regular files and directories: a link, device or anything else refuses
       the archive (`{:unsafe_entry, name, type}`);
     * only `*.jsonl` files under `projects/` (subagents live under
-      `projects/<slug>/<session>/subagents/`) are extracted; any other regular file
-      is skipped and reported in `skipped`, never extracted;
+      `projects/<slug>/<session>/subagents/`) or `sessions/` (a Codex rollout,
+      `sessions/YYYY/MM/DD/rollout-*.jsonl`) are extracted; any other regular file
+      (a Codex `auth.json` among them) is skipped and reported in `skipped`, never
+      extracted;
     * caps: entries (`max_entries`, default 20 000), bytes per file
       (`max_file_bytes`, 256 MiB) and in total (`max_bytes`, 512 MiB).
 
@@ -126,8 +129,10 @@ defmodule Wardmast.Nodes.Transcripts do
     end
   end
 
+  @roots ["projects/", "sessions/"]
+
   defp wanted?(path),
-    do: String.starts_with?(path, "projects/") and String.ends_with?(path, ".jsonl")
+    do: Enum.any?(@roots, &String.starts_with?(path, &1)) and String.ends_with?(path, ".jsonl")
 
   # ---- writing -----------------------------------------------------------------------
 

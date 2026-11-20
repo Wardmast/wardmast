@@ -6,6 +6,50 @@ A workspace's `tracker` block binds it to an external tracker (`github`, `gitlab
     "tracker": {"type": "github", "config": {"owner": "acme", "repo": "app",
                                               "credentials_ref": "secret:github_token"}}
 
+## Entering tracker credentials from the dashboard
+
+`/workspaces/:id` → **Secrets** and **Tracker** cover the whole credential
+lifecycle without `arb` or a config file. Credentials live in the workspace's
+encrypted secret vault (`docs/secrets-at-rest.md`) and the tracker points at one
+with `credentials_ref: "secret:<key>"`.
+
+**Secrets are write-only.** *Set secret* stores a key and value; *Replace* on a
+row overwrites the value of an existing key (the old value is never read back, so
+the field starts empty); the trash button deletes it. After the write only the
+key name is ever rendered, returned by `GET /api/workspaces/:id` (`secret_keys`)
+or logged.
+
+**Two ways to get a token into the vault:**
+
+1. **OAuth device flow (GitHub and GitLab).** On the Tracker pane choose
+   *Authorize*. Wardmast shows a one-time code and a URL; open the URL, enter the
+   code and approve. The page polls (honouring the provider's `interval` and any
+   `slow_down`) until you approve, deny, or the code expires, then stores the
+   token as `github_oauth_token` / `gitlab_oauth_token` and — only if the
+   tracker has no `credentials_ref` yet — points it at that secret. Denied,
+   expired and provider errors are shown and nothing is stored; *Cancel* stops
+   polling.
+2. **Paste a personal access token (every tracker, and the fallback for the
+   above).** *Set secret* with the PAT (GitHub, GitLab), API token (Shortcut,
+   Jira, Linear), then pick `secret:<key>` in the tracker's *Credentials* select
+   and save.
+
+Device flow needs an OAuth app's **client ID** (public, no client secret). Wardmast
+ships none: register one (GitHub: an OAuth app with *Enable Device Flow*, scope
+`repo`; GitLab 17.2+: a non-confidential application with the `api` scope, on the
+tracker's `host`), then either type the ID into the Authorize box or set
+`WARDMAST_GITHUB_OAUTH_CLIENT_ID` / `WARDMAST_GITLAB_OAUTH_CLIENT_ID` on the
+server. GitHub Enterprise is detected from `tracker.config.base_url`; GitLab uses
+`tracker.config.host`. The GitLab tracker sends the token as both `PRIVATE-TOKEN`
+and `Authorization: Bearer`, because a device-flow (OAuth) token is only accepted
+as Bearer.
+
+**Test connection.** The button next to *Save tracker config* runs the adapter's
+authenticated identity read (`GET /user`, a `viewer` query, …) with the form's
+*unsaved* values over the saved config, and reports `Connected as <identity>` or
+the tracker's own error text. Stored secret values are scrubbed from that text
+first. Testing never saves the form.
+
 ## GitHub Issues
 
 Every tracker call (create, field sync, lifecycle transitions, close, claim, list)

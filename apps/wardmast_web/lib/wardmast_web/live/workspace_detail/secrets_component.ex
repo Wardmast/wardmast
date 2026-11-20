@@ -17,7 +17,8 @@ defmodule WardmastWeb.WorkspaceDetail.SecretsComponent do
   alias WardmastWeb.CoreComponents.Forms
 
   @impl true
-  def mount(socket), do: {:ok, assign(socket, secret_modal: false, secret_error: nil)}
+  def mount(socket),
+    do: {:ok, assign(socket, secret_modal: false, secret_replace_key: nil, secret_error: nil)}
 
   @impl true
   def update(assigns, socket) do
@@ -33,12 +34,23 @@ defmodule WardmastWeb.WorkspaceDetail.SecretsComponent do
     do: assign(socket, :secret_keys, secret_keys(ws))
 
   @impl true
+  # `key` is present for "Replace": the modal then locks the key to the stored
+  # name and asks only for a new value. The *old* value is never read back, so
+  # there is nothing to pre-fill.
   def handle_event("open_secret_modal", _params, socket) do
-    {:noreply, assign(socket, secret_modal: true, secret_error: nil)}
+    {:noreply, assign(socket, secret_modal: true, secret_replace_key: nil, secret_error: nil)}
+  end
+
+  def handle_event("replace_secret", %{"key" => key}, socket) when is_binary(key) do
+    if key in secret_keys(socket.assigns.workspace) do
+      {:noreply, assign(socket, secret_modal: true, secret_replace_key: key, secret_error: nil)}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_event("close_secret_modal", _params, socket) do
-    {:noreply, assign(socket, secret_modal: false, secret_error: nil)}
+    {:noreply, assign(socket, secret_modal: false, secret_replace_key: nil, secret_error: nil)}
   end
 
   def handle_event("set_secret", %{"secret" => %{"key" => key, "value" => value}}, socket) do
@@ -57,7 +69,7 @@ defmodule WardmastWeb.WorkspaceDetail.SecretsComponent do
             {:noreply,
              socket
              |> apply_workspace(ws, "Secret #{key} stored.")
-             |> assign(secret_modal: false, secret_error: nil)
+             |> assign(secret_modal: false, secret_replace_key: nil, secret_error: nil)
              |> load_derived()}
 
           {:error, msg} ->
@@ -97,6 +109,17 @@ defmodule WardmastWeb.WorkspaceDetail.SecretsComponent do
                 <Core.icon name="hero-lock-closed" size={13} color="var(--text-label)" />
                 <span class="flex-1 truncate">{key}</span>
                 <span class="text-[var(--text-label)]">••••••••</span>
+                <button
+                  type="button"
+                  id={"replace-secret-#{key}"}
+                  class="cursor-pointer border-0 bg-transparent text-[11px] text-[var(--text-label)] transition-colors hover:text-[var(--text-title)]"
+                  phx-click="replace_secret"
+                  phx-target={@myself}
+                  phx-value-key={key}
+                  aria-label={"Replace secret #{key}"}
+                >
+                  Replace
+                </button>
                 <.remove_button
                   label="Remove secret"
                   phx-click="rm_secret"
@@ -124,8 +147,11 @@ defmodule WardmastWeb.WorkspaceDetail.SecretsComponent do
            position-fixed, so where it sits in the tree doesn't matter. --%>
       <div :if={@secret_modal} class="modal modal-open" id="secret-modal">
         <div class="modal-box">
-          <h3 class="mb-3 text-[13px] font-medium text-[var(--text-title)]">Set secret</h3>
+          <h3 class="mb-3 text-[13px] font-medium text-[var(--text-title)]">
+            {if @secret_replace_key, do: "Replace secret", else: "Set secret"}
+          </h3>
           <.form
+            id="secret-form"
             for={%{}}
             as={:secret}
             phx-submit="set_secret"
@@ -135,7 +161,8 @@ defmodule WardmastWeb.WorkspaceDetail.SecretsComponent do
             <Forms.input
               name="secret[key]"
               label="Key"
-              value=""
+              value={@secret_replace_key || ""}
+              readonly={@secret_replace_key != nil}
               size="sm"
               placeholder="tracker_token"
               required
@@ -144,7 +171,11 @@ defmodule WardmastWeb.WorkspaceDetail.SecretsComponent do
               type="password"
               name="secret[value]"
               label="Value"
-              hint="write-only — never shown again"
+              hint={
+                if @secret_replace_key,
+                  do: "the stored value is replaced; the old one is never shown",
+                  else: "write-only — never shown again"
+              }
               value=""
               size="sm"
               autocomplete="off"
@@ -163,7 +194,9 @@ defmodule WardmastWeb.WorkspaceDetail.SecretsComponent do
               >
                 Cancel
               </Core.button>
-              <Core.button type="submit" variant="primary" size="sm">Store</Core.button>
+              <Core.button type="submit" variant="primary" size="sm">
+                {if @secret_replace_key, do: "Replace", else: "Store"}
+              </Core.button>
             </div>
           </.form>
         </div>

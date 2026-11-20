@@ -33,13 +33,22 @@ defmodule Wardmast.NodeAgent.Exec do
   @doc false
   def start_link(_opts \\ []), do: Agent.start_link(fn -> {%{}, []} end, name: @name)
 
-  @doc "Keep the options `run`'s agent container was built with (minus its secrets)."
-  @spec remember(String.t(), keyword()) :: :ok
-  def remember(run, wrap_opts) when is_binary(run) and is_list(wrap_opts) do
+  @doc """
+  Keep the options `run`'s agent container was built with (minus its secrets).
+
+  `placeholders` (SI8) is `%{host path => empty directory}`: a host path the agent's
+  container mounted that will not exist when the gate runs (a Codex run's `CODEX_HOME` on
+  tmpfs, removed after the final upload) is swapped, in the writable paths and the mount
+  map, for an empty directory of the run's own. The gate never runs the CLI.
+  """
+  @spec remember(String.t(), keyword(), %{optional(Path.t()) => Path.t()}) :: :ok
+  def remember(run, wrap_opts, placeholders \\ %{})
+      when is_binary(run) and is_list(wrap_opts) and is_map(placeholders) do
     context =
       wrap_opts
       |> Keyword.drop([:secrets_file, :pod, :bridges, :keep, :interactive, :podman_secrets])
       |> Keyword.update(:mount_map, %{}, & &1)
+      |> substitute(placeholders)
       |> offline()
 
     Agent.update(@name, fn {contexts, order} ->
@@ -121,6 +130,18 @@ defmodule Wardmast.NodeAgent.Exec do
     |> Keyword.update(:env, [], &GateEnv.drop_proxy/1)
     |> Keyword.update(:inherit_env, [], fn names ->
       Enum.reject(names, &GateEnv.proxy_name?/1)
+    end)
+  end
+
+  defp substitute(context, placeholders) when map_size(placeholders) == 0, do: context
+
+  defp substitute(context, placeholders) do
+    swap = &Map.get(placeholders, &1, &1)
+
+    context
+    |> Keyword.update(:writable_paths, [], &Enum.map(&1, swap))
+    |> Keyword.update(:mount_map, %{}, fn map ->
+      Map.new(map, fn {host, dest} -> {swap.(host), dest} end)
     end)
   end
 

@@ -166,6 +166,28 @@ It starts a second worker beside the runaway one and asserts that only the
 runaway is killed, that its run row is `failed` / `memory_cap_exceeded`, and that
 the failed scope was cleared.
 
+## On macOS: an optional RSS watchdog
+
+macOS has no cgroups, so there is nothing for the kernel to enforce. Instead
+(`Wardmast.Worker.MemoryWatchdog`, bd-d627b8) the server **polls**: every 5 s it
+reads `ps -axo pgid=,rss=`, sums the RSS of every process in the worker's
+process group (the agent and what it started, see `Wardmast.Worker.ProcessGroup`),
+and when the sum is above the cap it kills the group. The run is recorded
+exactly as on Linux — failed, stop category `memory_cap_exceeded` — with a reason
+that names the watchdog and the highest RSS it sampled.
+
+It is **opt-in** and uses the same setting as the Linux cap:
+`WARDMAST_WORKER_MEMORY_MAX` (`12G`, `512M`, or a percentage of physical RAM
+read from `sysctl hw.memsize`) or `config :wardmast, :worker_memory_max`. Unset,
+`off`, `0`, `none`, `infinity` or an unparseable value means no watchdog; there
+is no default cap on macOS, because this one is approximate. Linux hosts never
+start it.
+
+Best-effort means: memory can grow well past the cap between two polls, RSS
+double-counts shared pages, a process that left the group (its own `setsid`) is
+not counted, and a failed `ps` skips that sample. Treat the cap as a backstop
+against a slow runaway, not a guarantee.
+
 ## Not covered
 
 Spawns that are not agent sessions — `git`, `gh`, the doctor's probes, a

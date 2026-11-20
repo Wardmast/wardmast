@@ -336,7 +336,7 @@ defmodule Wardmast.Board.Autopilot do
   # (`:unreachable`). Transient: retried on a 5s to 60s backoff and never
   # counted toward "dispatch stuck".
   @held_dispatch_errors @self_clearing_dispatch_errors ++
-                          [:sandbox_backend, :migrations_check_failed]
+                          [:sandbox_backend, :cli_version, :migrations_check_failed]
   @sandbox_backend_backoff_ms 30_000
   @sandbox_backend_backoff_max_ms 600_000
   @migrations_backoff_ms 5_000
@@ -1567,6 +1567,7 @@ defmodule Wardmast.Board.Autopilot do
 
   defp failure_detail({:no_node_capacity, _}), do: "no node capacity"
   defp failure_detail({:sandbox_backend, _provider, phrase}), do: phrase
+  defp failure_detail({:cli_version, _provider, phrase}), do: phrase
 
   defp failure_detail({:migrations_check_failed, why}),
     do: "migrations check failed (#{inspect(why)})"
@@ -1691,6 +1692,11 @@ defmodule Wardmast.Board.Autopilot do
     do: DateTime.add(now, @account_cap_retry_ms, :millisecond)
 
   defp preflight_retry_not_before({:sandbox_backend, _provider, _phrase}, count, now),
+    do: backoff(now, @sandbox_backend_backoff_ms, @sandbox_backend_backoff_max_ms, count)
+
+  # bd-5wfsj7: an outdated host CLI clears when the operator upgrades it; same
+  # slow backoff as a backend the provider cannot run under.
+  defp preflight_retry_not_before({:cli_version, _provider, _phrase}, count, now),
     do: backoff(now, @sandbox_backend_backoff_ms, @sandbox_backend_backoff_max_ms, count)
 
   defp preflight_retry_not_before({:migrations_check_failed, _why}, count, now),
