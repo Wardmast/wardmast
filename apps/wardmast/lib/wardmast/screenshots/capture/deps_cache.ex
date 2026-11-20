@@ -81,6 +81,7 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   alias Wardmast.Config.Paths
   alias Wardmast.Screenshots.Capture.AppProcess
   alias Wardmast.Screenshots.Capture.Sandbox
+  alias Wardmast.Screenshots.Capture.Workdir
   alias Wardmast.Worker.ReleaseEnv
   alias Wardmast.Worker.Worktree
 
@@ -863,17 +864,25 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
     end
   end
 
+  # bd-5eegxz: `to` may be what an earlier attempt left, read-only (a `cp -a` of the read-only
+  # cache that died before its chmod): `Workdir.remove/1` makes it writable first and, whatever
+  # happens, the copy is made writable too, so the next attempt can remove it again.
   defp copy_tree(from, to) do
-    File.rm_rf!(to)
+    with :ok <- Workdir.remove(to),
+         :ok <- File.mkdir_p(Path.dirname(to)) do
+      copied =
+        ReleaseEnv.cmd("cp", ["-a", "--reflink=auto", "--", from, to], stderr_to_stdout: true)
 
-    with :ok <- File.mkdir_p(Path.dirname(to)),
-         {_, 0} <-
-           ReleaseEnv.cmd("cp", ["-a", "--reflink=auto", "--", from, to], stderr_to_stdout: true),
-         {_, 0} <- ReleaseEnv.cmd("chmod", ["-R", "u+rwX", "--", to], stderr_to_stdout: true) do
-      :ok
+      chmod = ReleaseEnv.cmd("chmod", ["-R", "u+rwX", "--", to], stderr_to_stdout: true)
+
+      case {copied, chmod} do
+        {{_, 0}, {_, 0}} -> :ok
+        {{output, status}, _} when status != 0 -> {:error, copy_error(from, tail(output))}
+        {_, {output, _}} -> {:error, copy_error(from, tail(output))}
+      end
     else
+      {:error, reason} when is_binary(reason) -> {:error, copy_error(from, reason)}
       {:error, reason} -> {:error, copy_error(from, :file.format_error(reason))}
-      {output, _} -> {:error, copy_error(from, tail(output))}
     end
   end
 

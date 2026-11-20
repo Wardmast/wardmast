@@ -639,6 +639,31 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
     end
   end
 
+  describe "writable/3: a leftover from an earlier attempt (bd-5eegxz)" do
+    # An attempt that died after `cp -a` (read-only source modes) and before the chmod leaves a
+    # read-only `deps` tree in the boot's scratch. The next attempt must replace it, not raise.
+    test "a read-only leftover copy in the scratch is replaced, not an error", %{tmp_dir: dir} do
+      cache_deps = Path.join(dir, "cache/deps")
+      File.mkdir_p!(Path.join(cache_deps, "tiny"))
+      File.write!(Path.join(cache_deps, "tiny/mix.exs"), "# tiny")
+      cache = %{deps: cache_deps, build: Path.join(dir, "cache/build")}
+
+      scratch = Path.join(dir, "scratch")
+      checkout = Path.join(dir, "checkout")
+      leftover = Path.join(scratch, "deps/stale_pkg")
+      File.mkdir_p!(leftover)
+      File.write!(Path.join(leftover, "old.ex"), "old")
+      {_, 0} = System.cmd("chmod", ["-R", "a-w", Path.join(scratch, "deps")])
+      on_exit(fn -> System.cmd("chmod", ["-R", "u+w", scratch]) end)
+
+      assert {:ok, [{"MIX_DEPS_PATH", deps}]} = DepsCache.writable(cache, scratch, checkout)
+      assert File.read!(Path.join(deps, "tiny/mix.exs")) == "# tiny"
+      refute File.exists?(Path.join(deps, "stale_pkg"))
+      # ...and a second boot right after it is just as fine.
+      assert {:ok, _} = DepsCache.writable(cache, scratch, checkout)
+    end
+  end
+
   describe "offline compile, for real" do
     @describetag timeout: 300_000
 
