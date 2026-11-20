@@ -153,10 +153,39 @@ defmodule Wardmast.Test.SessionEnv do
         {provider, account}
       end
 
+    # A connected account has a stored login; the launch form now seeds from it.
+    connect_claude_login!("default")
+
     for workspace <- workspaces, {provider, account} <- accounts do
       {:ok, _} = Wardmast.Accounts.attach_workspace(workspace.id, provider, account.id)
     end
 
     :ok
+  end
+
+  @doc """
+  Store a live Claude login for the account `slug` where the dashboard login
+  relay would (`<accounts_root>/claude-<slug>/.credentials.json`, bd-oqkeso) —
+  what a mode-B session launched for that account seeds from. Without it the
+  launch is refused with the "log in" message, which is the point of the
+  guard; a test that is not about that wants the account connected.
+  """
+  @spec connect_claude_login!(String.t(), keyword()) :: String.t()
+  def connect_claude_login!(slug, oauth \\ []) do
+    dir = Path.join(Wardmast.Config.Paths.accounts_root(), "claude-#{slug}")
+    File.mkdir_p!(dir)
+
+    grant =
+      Map.merge(
+        %{
+          "accessToken" => "sk-ant-oat01-TEST-LOGIN-#{slug}",
+          "refreshToken" => "sk-ant-ort01-TEST-LOGIN-#{slug}",
+          "expiresAt" => System.os_time(:millisecond) + 3_600_000
+        },
+        Map.new(oauth)
+      )
+
+    File.write!(Path.join(dir, ".credentials.json"), Jason.encode!(%{"claudeAiOauth" => grant}))
+    dir
   end
 end

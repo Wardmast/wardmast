@@ -260,6 +260,9 @@ defmodule WardmastWeb.SessionDockLive do
      # this view is chrome on every page and health changes under it.
      |> assign(:launch_providers, nil)
      |> assign(:launch_auth_mode, "seeded_credentials")
+     # bd-oqkeso: filled by `refresh_launch_providers/1` when the panel opens.
+     |> assign(:launch_accounts, [])
+     |> assign(:launch_account, nil)
      |> assign(:launch_name, nil)
      |> assign(:launch_workspace_id, nil)
      |> assign(:launch_can_dispatch?, false)
@@ -1107,6 +1110,8 @@ defmodule WardmastWeb.SessionDockLive do
         launch_provider={@launch_provider}
         launch_providers={@launch_providers}
         launch_auth_mode={@launch_auth_mode}
+        launch_accounts={@launch_accounts}
+        launch_account={@launch_account}
         launch_name={@launch_name}
         launch_workspace_id={@launch_workspace_id}
         launch_can_dispatch?={@launch_can_dispatch?}
@@ -1432,6 +1437,8 @@ defmodule WardmastWeb.SessionDockLive do
   attr :launch_provider, :string, default: "claude_code"
   attr :launch_providers, :list, default: nil
   attr :launch_auth_mode, :string, required: true
+  attr :launch_accounts, :list, default: []
+  attr :launch_account, :string, default: nil
   attr :launch_name, :string, default: nil
   attr :launch_workspace_id, :string, default: nil
   attr :launch_can_dispatch?, :boolean, default: false
@@ -1469,6 +1476,8 @@ defmodule WardmastWeb.SessionDockLive do
           launch_provider={@launch_provider}
           launch_providers={@launch_providers}
           launch_auth_mode={@launch_auth_mode}
+          launch_accounts={@launch_accounts}
+          launch_account={@launch_account}
           launch_name={@launch_name}
           launch_workspace_id={@launch_workspace_id}
           launch_can_dispatch?={@launch_can_dispatch?}

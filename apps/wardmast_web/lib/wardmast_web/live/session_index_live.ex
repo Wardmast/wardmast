@@ -95,6 +95,7 @@ defmodule WardmastWeb.SessionIndexLive do
   use WardmastWeb, :live_view
 
   alias Wardmast.Sessions
+  alias Wardmast.Sessions.AccountCredentials
   alias Wardmast.Sessions.DisplayName
   alias Wardmast.Sessions.LaunchProviders
   alias Wardmast.Tasks.Workspace
@@ -136,6 +137,10 @@ defmodule WardmastWeb.SessionIndexLive do
       # `LaunchProviders` and `put_launch_providers/3`.
       |> assign(:launch_providers, nil)
       |> assign(:launch_auth_mode, "seeded_credentials")
+      # bd-oqkeso: the connected accounts the form offers (`[]` until the
+      # connected mount's read lands) and the one picked.
+      |> assign(:launch_accounts, [])
+      |> assign(:launch_account, nil)
       |> assign(:launch_name, nil)
       |> assign(:launch_workspace_id, nil)
       |> assign(:launch_can_dispatch?, false)
@@ -304,7 +309,10 @@ defmodule WardmastWeb.SessionIndexLive do
     # re-derives (see `assign_launch_params/2`) rather than taking its answer.
     socket =
       if is_nil(socket.assigns.launch_workspace_id),
-        do: put_launch_providers(socket, providers, socket.assigns.launch_provider),
+        do:
+          socket
+          |> put_launch_providers(providers, socket.assigns.launch_provider)
+          |> put_launch_accounts(nil, socket.assigns.launch_account),
         else: refresh_launch_providers(socket)
 
     {:noreply, socket}
@@ -406,7 +414,9 @@ defmodule WardmastWeb.SessionIndexLive do
   # not styling, and a fork of it is the one thing bd-cdut29 was asked not to
   # build.
   @doc false
-  @spec launch_defaults(map()) :: {:ok, keyword()} | {:error, {:provider_unavailable, term()}}
+  @spec launch_defaults(map()) ::
+          {:ok, keyword()}
+          | {:error, {:provider_unavailable | :account_unavailable, term()}}
   def launch_defaults(params) do
     workspace_id = launch_workspace_id(params, Enum.map(workspaces(), & &1.id))
     entries = LaunchProviders.list(workspace_id)
@@ -416,19 +426,42 @@ defmodule WardmastWeb.SessionIndexLive do
     # `provider` at all is the form's own default.
     requested = Map.get(params, "provider") || LaunchProviders.default(entries)
 
-    if enabled_provider?(entries, requested) do
-      {:ok, launch_opts(params, requested, workspace_id)}
-    else
-      {:error, {:provider_unavailable, requested}}
+    with true <-
+           enabled_provider?(entries, requested) || {:error, {:provider_unavailable, requested}},
+         {:ok, account} <- launch_account(params, requested, workspace_id) do
+      {:ok, launch_opts(params, requested, workspace_id, account)}
     end
   end
 
-  defp launch_opts(params, provider, workspace_id) do
+  # bd-oqkeso: the account a mode-B Claude session authenticates as. Only an
+  # account the form would have offered for this workspace is accepted — a
+  # crafted submit naming another workspace's (or a parked) account is refused
+  # rather than silently falling back to the server user's login. No account
+  # in the submit (nothing connected, or a mode that takes none) is `nil`:
+  # the legacy seeding, unchanged.
+  defp launch_account(params, provider, workspace_id) do
+    ref = params |> Map.get("account") |> then(&if(is_binary(&1), do: String.trim(&1), else: ""))
+
+    cond do
+      ref == "" or launch_auth_mode_param(params, provider) != "seeded_credentials" or
+          provider != "claude_code" ->
+        {:ok, nil}
+
+      Enum.any?(AccountCredentials.options(workspace_id, :claude), &(&1.slug == ref)) ->
+        {:ok, ref}
+
+      true ->
+        {:error, {:account_unavailable, ref}}
+    end
+  end
+
+  defp launch_opts(params, provider, workspace_id, account) do
     auth_mode = launch_auth_mode_param(params, provider)
 
     [
       provider: String.to_existing_atom(provider),
       auth_mode: launch_auth_mode(auth_mode),
+      account: account,
       # Mode A can never carry Remote Control (§8.3), and neither can agy —
       # enforced again here (on top of the disabled checkbox and the `Session`
       # resource's own validation) so a submission that bypassed the disabled
@@ -503,6 +536,7 @@ defmodule WardmastWeb.SessionIndexLive do
     |> Phoenix.Component.assign(:launch_auth_mode, auth_mode)
     |> Phoenix.Component.assign(:launch_name, launch_name(params))
     |> Phoenix.Component.assign(:launch_workspace_id, workspace_id)
+    |> put_launch_accounts(workspace_id, Map.get(params, "account"))
     |> Phoenix.Component.assign(:launch_can_dispatch?, launch_can_dispatch?(params))
     # Mode A never shows Remote Control as checked, even if the box was
     # ticked under mode B before the operator switched — otherwise the
@@ -528,6 +562,7 @@ defmodule WardmastWeb.SessionIndexLive do
     socket
     |> Phoenix.Component.assign(:launch_workspace_id, nil)
     |> refresh_launch_providers(nil)
+    |> put_launch_accounts(nil, nil)
     |> Phoenix.Component.assign(:launch_auth_mode, "seeded_credentials")
     |> Phoenix.Component.assign(:launch_name, nil)
     |> Phoenix.Component.assign(:launch_workspace_id, nil)
@@ -554,12 +589,39 @@ defmodule WardmastWeb.SessionIndexLive do
     requested =
       if requested == :current, do: socket.assigns.launch_provider, else: requested
 
-    put_launch_providers(
-      socket,
+    socket
+    |> put_launch_providers(
       LaunchProviders.list(socket.assigns.launch_workspace_id),
       requested
     )
+    |> put_launch_accounts(socket.assigns.launch_workspace_id, socket.assigns.launch_account)
   end
+
+  @doc false
+  # bd-oqkeso: the account picker. A mode-B Claude session authenticates as one
+  # of the workspace's enabled accounts (`AccountCredentials.options/2`), not as
+  # the server user, so the form offers exactly those and keeps `requested`
+  # selected while it is still offered, else the first.
+  def put_launch_accounts(socket, workspace_id, requested) do
+    accounts =
+      workspace_id
+      |> AccountCredentials.options(:claude)
+      |> Enum.map(&%{slug: &1.slug, label: account_label(&1)})
+
+    selected =
+      if Enum.any?(accounts, &(&1.slug == requested)),
+        do: requested,
+        else: accounts |> List.first() |> then(&(&1 && &1.slug))
+
+    socket
+    |> Phoenix.Component.assign(:launch_accounts, accounts)
+    |> Phoenix.Component.assign(:launch_account, selected)
+  end
+
+  defp account_label(%{label: label, slug: slug}) when is_binary(label) and label != "",
+    do: "#{label} (#{slug})"
+
+  defp account_label(%{slug: slug}), do: slug
 
   @doc false
   # Stores `entries` and the provider to show selected: `requested` while it is
@@ -618,6 +680,21 @@ defmodule WardmastWeb.SessionIndexLive do
   def describe({:provider_unavailable, provider}),
     do: "provider #{inspect(provider)} is not available here (not configured, or unhealthy)"
 
+  def describe({:account_unavailable, ref}),
+    do:
+      "account #{inspect(ref)} is not an enabled account for this workspace — pick another account from the list"
+
+  # bd-oqkeso: an account refusal carries its own message naming the fix.
+  def describe({:provisioning_failed, {tag, message}})
+      when tag in [
+             :account_not_found,
+             :account_disabled,
+             :account_provider_mismatch,
+             :account_credential_missing,
+             :account_credential_expired
+           ] and is_binary(message),
+      do: message
+
   def describe({:provisioning_failed, reason}), do: "provisioning failed (#{inspect(reason)})"
   def describe({:launch_failed, status, _out}), do: "the launch command exited #{status}"
   def describe(reason), do: inspect(reason)
@@ -651,6 +728,8 @@ defmodule WardmastWeb.SessionIndexLive do
               launch_provider={@launch_provider}
               launch_providers={@launch_providers}
               launch_auth_mode={@launch_auth_mode}
+              launch_accounts={@launch_accounts}
+              launch_account={@launch_account}
               launch_name={@launch_name}
               launch_workspace_id={@launch_workspace_id}
               launch_can_dispatch?={@launch_can_dispatch?}
@@ -839,6 +918,12 @@ defmodule WardmastWeb.SessionIndexLive do
       "`Wardmast.Sessions.LaunchProviders.list/2` entries, or nil while they load (Launch stays disabled)"
 
   attr :launch_auth_mode, :string, required: true
+
+  attr :launch_accounts, :list,
+    default: [],
+    doc: "the workspace's enabled `claude` accounts, `[%{slug:, label:}]` (bd-oqkeso)"
+
+  attr :launch_account, :string, default: nil
   attr :launch_name, :string, default: nil
   attr :launch_workspace_id, :string, default: nil
   attr :launch_can_dispatch?, :boolean, default: false
@@ -913,6 +998,35 @@ defmodule WardmastWeb.SessionIndexLive do
         class="text-[11px] text-[var(--text-label)]"
       >
         agy runs on your own Google login, with no Remote Control
+      </span>
+      <%!-- bd-oqkeso: which connected account a mode-B Claude session signs in
+            as (its login is copied from that account's own config dir, not
+            from the server user's ~/.claude). --%>
+      <Forms.select
+        :if={account_picker?(@launch_provider, @launch_auth_mode, @launch_accounts)}
+        name="account"
+        id={"#{@prefix}-account"}
+        size="sm"
+        value={@launch_account}
+        options={Enum.map(@launch_accounts, &{&1.label, &1.slug})}
+      />
+      <span
+        :if={
+          @launch_provider == "claude_code" and @launch_auth_mode == "seeded_credentials" and
+            @launch_accounts == []
+        }
+        id={"#{@prefix}-account-empty"}
+        class="text-[11px] text-[var(--text-label)]"
+      >
+        No connected Claude account —
+        <.link
+          navigate={~p"/providers"}
+          id={"#{@prefix}-account-link"}
+          class="underline hover:text-[var(--text-primary)]"
+        >
+          connect one
+        </.link>
+        to sign the session in as it
       </span>
       <%!-- §9.5: cross-workspace unless the operator opts a session into a
             single workspace. --%>
@@ -989,6 +1103,9 @@ defmodule WardmastWeb.SessionIndexLive do
         {entry.label, entry.provider}
     end)
   end
+
+  defp account_picker?("claude_code", "seeded_credentials", [_ | _]), do: true
+  defp account_picker?(_provider, _auth_mode, _accounts), do: false
 
   defp unavailable_providers(nil), do: []
   defp unavailable_providers(entries), do: Enum.filter(entries, & &1.disabled?)

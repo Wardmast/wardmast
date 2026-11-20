@@ -36,6 +36,8 @@ defmodule Wardmast.Sessions.ProvisioningTest do
     session
   end
 
+  defp future_ms, do: System.os_time(:millisecond) + 3_600_000
+
   defp tmp_dir!(tag) do
     dir =
       Path.join(
@@ -495,6 +497,80 @@ defmodule Wardmast.Sessions.ProvisioningTest do
       assert File.read!(seeded) =~ @token
       # copied, never symlinked — both sides refresh the grant (§8.2)
       assert {:ok, %{type: :regular}} = File.lstat(seeded)
+    end
+
+    test "a session launched for account X seeds that account's grant, not the server user's",
+         %{operator: operator} do
+      account_token = "sk-ant-oat01-ACCOUNT-X-GRANT"
+
+      # The server user's ~/.claude stand-in (the configured credentials
+      # source) holds a *different* grant; it must not be what gets seeded.
+      File.write!(
+        Path.join(operator, ".credentials.json"),
+        ~s({"claudeAiOauth":{"accessToken":"#{@token}","expiresAt":#{future_ms()}}})
+      )
+
+      {:ok, _} = Wardmast.Accounts.create_account(%{provider: :claude, slug: "acct-x"})
+      account_dir = Path.join(Wardmast.Config.Paths.accounts_root(), "claude-acct-x")
+      File.mkdir_p!(account_dir)
+
+      File.write!(
+        Path.join(account_dir, ".credentials.json"),
+        ~s({"claudeAiOauth":{"accessToken":"#{account_token}","expiresAt":#{future_ms()}}})
+      )
+
+      log = capture_log(fn -> send(self(), {:session, launch!(account: "acct-x")}) end)
+      assert_received {:session, session}
+
+      seeded = Path.join(Layout.config_dir(session.id), ".credentials.json")
+      assert File.read!(seeded) =~ account_token
+      refute File.read!(seeded) =~ @token
+      # copied, never symlinked
+      assert {:ok, %{type: :regular}} = File.lstat(seeded)
+
+      # never in argv (the launch script and every runner call) or in logs
+      refute File.read!(Layout.launch_script_path(session.id)) =~ account_token
+      refute inspect(SessionRunnerStub.calls()) =~ account_token
+      refute log =~ account_token
+    end
+
+    test "a missing account credential fails the launch with the fix" do
+      {:ok, _} = Wardmast.Accounts.create_account(%{provider: :claude, slug: "never-logged-in"})
+
+      capture_log(fn ->
+        assert {:error, {:provisioning_failed, {:account_credential_missing, message}}} =
+                 Sessions.launch(runner: SessionRunnerStub, account: "never-logged-in")
+
+        assert message =~ "never-logged-in"
+        assert message =~ "Log in"
+      end)
+    end
+
+    test "an expired account credential fails the launch with the fix" do
+      {:ok, _} = Wardmast.Accounts.create_account(%{provider: :claude, slug: "lapsed"})
+      dir = Path.join(Wardmast.Config.Paths.accounts_root(), "claude-lapsed")
+      File.mkdir_p!(dir)
+
+      File.write!(
+        Path.join(dir, ".credentials.json"),
+        ~s({"claudeAiOauth":{"accessToken":"#{@token}","expiresAt":1}})
+      )
+
+      capture_log(fn ->
+        assert {:error, {:provisioning_failed, {:account_credential_expired, message}}} =
+                 Sessions.launch(runner: SessionRunnerStub, account: "lapsed")
+
+        assert message =~ "Log in again"
+        refute message =~ @token
+      end)
+    end
+
+    test "mode A ignores the account: its token is the credential" do
+      session =
+        launch!(auth_mode: :oauth_token, oauth_token: @token, account: "does-not-matter")
+
+      assert session.auth_mode == :oauth_token
+      refute File.exists?(Path.join(Layout.config_dir(session.id), ".credentials.json"))
     end
 
     test "mode A is recorded and writes its token to a 0600 file, never to argv" do
