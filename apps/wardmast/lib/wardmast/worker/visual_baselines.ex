@@ -227,6 +227,22 @@ defmodule Wardmast.Worker.VisualBaselines do
   end
 
   @doc """
+  The hand-off for any worker (re)started to address a red CI head (the ReviewGate
+  CI-red revise round, a `send_back` or `worker resume` of a ticket parked on it):
+  stage the head's images in `checkout` (`hand_off/2`, exactly `ctx.result.head_sha`
+  only) and return the brief section, `""` when it is not a visual failure.
+  Never raises; Wardmast commits nothing.
+  """
+  @spec stage_brief(ctx(), String.t()) :: String.t()
+  def stage_brief(ctx, checkout) do
+    ctx |> hand_off(checkout) |> hand_off_brief()
+  rescue
+    e -> hand_off_brief({:skip, {:exception, Exception.message(e)}})
+  catch
+    :exit, reason -> hand_off_brief({:skip, {:exit, reason}})
+  end
+
+  @doc """
   The fix-pass brief section for a `hand_off/2` outcome. The agent (and then the
   reviewer) judges the images: Wardmast never copies them over a baseline.
   """

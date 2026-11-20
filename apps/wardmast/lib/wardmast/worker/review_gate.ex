@@ -460,6 +460,7 @@ defmodule Wardmast.Worker.ReviewGate do
           | {:ci_gate, boolean() | nil}
           | {:ci_adapter, module() | nil}
           | {:visual_refresher, (map() -> term())}
+          | {:visual_hand_off, (map(), String.t() -> String.t())}
           | {:ci_poll_ms, pos_integer() | nil}
           | {:local_capacity_retry_ms, pos_integer()}
           | {:reviewer_refusal_max_holds, non_neg_integer()}
@@ -1290,6 +1291,7 @@ defmodule Wardmast.Worker.ReviewGate do
       # bd-6vvpau: the deterministic visual-baseline refresh tried before a CI-red
       # implementer round (`ci_visual_step/3`), injectable for tests.
       visual_refresher: Keyword.get(opts, :visual_refresher, &VisualBaselines.refresh/1),
+      visual_hand_off: Keyword.get(opts, :visual_hand_off, &VisualBaselines.stage_brief/2),
       ci_poll_ms: Keyword.get(opts, :ci_poll_ms),
       ci_max_polls: Keyword.get(opts, :ci_max_polls),
       # The wait in progress (phase `:awaiting_ci`): `ReviewCi.wait/0` plus the
@@ -2282,7 +2284,10 @@ defmodule Wardmast.Worker.ReviewGate do
   defp ci_fix(state, wait, checks, rerun?) do
     state = state |> ci_end_wait() |> Map.put(:approval_gap_pending, nil)
     state = %{state | ci_fix_pending: %{sha: wait.sha, checks: checks}}
-    findings = ReviewCi.failure_findings(wait.sha, state.ci_ctx.pr_ref, checks, rerun?)
+
+    findings =
+      ReviewCi.failure_findings(wait.sha, state.ci_ctx.pr_ref, checks, rerun?) <>
+        visual_actual_brief(state, wait.sha)
 
     Logger.warning(
       "ReviewGate: CI is red on #{wait.sha} for task=#{state.task_id} " <>
@@ -2297,6 +2302,31 @@ defmodule Wardmast.Worker.ReviewGate do
       enter_revise(state, findings, :ci)
     end
   end
+
+  # GitHub #1598: the revise round for a red visual job on the branch's own change runs in
+  # a sandbox that cannot fetch CI artifacts, so the head's rendered images are staged in
+  # its checkout (`.arbiter/visual-actual/`, exactly `sha` only; nothing is committed) and
+  # the findings say so. "" when the repo has no `visual_baselines` or the job did not fail.
+  defp visual_actual_brief(%{ci_ctx: ctx, worktree_path: wt} = state, sha)
+       when is_binary(wt) and is_binary(sha) do
+    if VisualBaselines.configured?(ctx.workspace, state.repo) do
+      "\n" <>
+        state.visual_hand_off.(
+          %{
+            workspace: ctx.workspace,
+            repo: state.repo,
+            adapter: ctx.adapter,
+            mr_ref: ctx.pr_ref,
+            result: %{head_sha: sha}
+          },
+          wt
+        )
+    else
+      ""
+    end
+  end
+
+  defp visual_actual_brief(_state, _sha), do: ""
 
   # Still cancelled after the re-runs: one distinct coordinator escalation, and no
   # implementer round. The reviewer goes ahead and runs the tests itself, as for

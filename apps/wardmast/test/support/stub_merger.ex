@@ -169,6 +169,22 @@ defmodule Wardmast.Test.StubMerger do
     :ok
   end
 
+  @doc "Set the `ci_job_artifacts/3` reply (default: no artifacts)."
+  def set_job_artifacts(reply) do
+    ensure_started()
+    Agent.update(@name, fn s -> Map.put(s, :job_artifacts, reply) end)
+    :ok
+  end
+
+  @impl true
+  def ci_job_artifacts(_ref, _job, _opts) do
+    ensure_started()
+
+    Agent.get(@name, fn s ->
+      Map.get(s, :job_artifacts, {:ok, %{sha: nil, failed_jobs: [], archive: nil}})
+    end)
+  end
+
   # ---- Merger behaviour ---------------------------------------------------
 
   @impl true

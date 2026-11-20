@@ -847,6 +847,125 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
     end
   end
 
+  describe "visual-actual hand-off on the CI-red revise round (GitHub #1598)" do
+    defmodule NoRefresh do
+      @moduledoc false
+      def refresh(_ctx), do: {:skip, {:other_jobs_failed, ["unit tests"]}}
+    end
+
+    setup ctx do
+      ws =
+        new_ws(%{
+          "review" => %{"required" => true, "require_ci_green" => true},
+          "worker" => %{
+            "repos" => %{
+              "trib/repo" => %{
+                "visual_baselines" => %{
+                  "job" => "visual",
+                  "artifact_path" => "test-results",
+                  "baseline_dir" => "e2e",
+                  "baseline_suffix" => "-chromium-linux.png"
+                }
+              }
+            }
+          }
+        })
+
+      # A revise "agent" that records what was in its checkout, then fixes like the usual fixture.
+      seen = Path.join(ctx.tmp, "seen.txt")
+      script = Path.join(ctx.tmp, "revise_seen.sh")
+
+      File.write!(
+        script,
+        "#!/bin/sh\nls .arbiter/visual-actual > #{seen} 2>&1\nexec #{@revise_commit}\n"
+      )
+
+      File.chmod!(script, 0o755)
+      %{ws: ws, seen: seen, script: script}
+    end
+
+    defp archive(files) do
+      {:ok, {_, bin}} =
+        :zip.create(
+          ~c"a.zip",
+          Enum.map(files, fn {n, b} -> {String.to_charlist(n), b} end),
+          [:memory]
+        )
+
+      bin
+    end
+
+    defp rig_with_baseline(ctx, branch) do
+      rig = rig(ctx, branch)
+      File.mkdir_p!(Path.join(rig.wt, "e2e"))
+      File.write!(Path.join(rig.wt, "e2e/page-chromium-linux.png"), "page-0")
+      rig
+    end
+
+    defp run_round(ctx, rig) do
+      StubMerger.set_failing_checks(@pr, [%{name: "visual", summary: "diff", url: "u", files: []}])
+
+      start_forge(ctx, rig, [:failed, :running, :failed, :success])
+
+      gate =
+        start_gate(rig, ctx,
+          revise_command: [ctx.script],
+          rounds: 3,
+          command: [@probe, "HOLD"],
+          visual_refresher: &NoRefresh.refresh/1
+        )
+
+      wait_until(fn -> passes(rig) == 1 end, 30_000)
+      gate
+    end
+
+    test "the revise round's checkout has the head's images and its brief names them", ctx do
+      rig = rig_with_baseline(ctx, "feature/va-1")
+
+      StubMerger.set_job_artifacts(
+        {:ok,
+         %{
+           sha: rig.head,
+           failed_jobs: ["visual"],
+           archive: archive([{"test-results/a/page-actual.png", "page-1"}])
+         }}
+      )
+
+      gate = run_round(ctx, rig)
+
+      assert File.read!(ctx.seen) =~ "page-chromium-linux.png"
+
+      assert inspect(:sys.get_state(gate).thread) =~
+               ".arbiter/visual-actual/page-chromium-linux.png"
+
+      # Wardmast committed nothing: no image in any commit, the baseline untouched.
+      {files, 0} = System.cmd("git", ["log", "--name-only", "--format="], cd: rig.wt)
+      refute files =~ "visual-actual"
+      assert File.read!(Path.join(rig.wt, "e2e/page-chromium-linux.png")) == "page-0"
+      stop_gate(gate)
+    end
+
+    test "images for another head are never staged", ctx do
+      rig = rig_with_baseline(ctx, "feature/va-2")
+
+      StubMerger.set_job_artifacts(
+        {:ok,
+         %{
+           sha: "some-older-head",
+           failed_jobs: ["visual"],
+           archive: archive([{"test-results/a/page-actual.png", "stale"}])
+         }}
+      )
+
+      gate = run_round(ctx, rig)
+
+      refute File.read!(ctx.seen) =~ "page-chromium-linux.png"
+      refute File.exists?(Path.join(rig.wt, ".arbiter/visual-actual"))
+      assert inspect(:sys.get_state(gate).thread) =~ "could not be delivered"
+      stop_gate(gate)
+    end
+  end
+
   describe "cancelled CI (#360)" do
     test "cancelled then green on the re-run proceeds to the reviewer, no fix round", ctx do
       rig = rig(ctx, "feature/ci-cancel-1")
