@@ -96,6 +96,51 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
       assert reason =~ "deletes mix.lock"
     end
 
+    # bd-5eegxz: the branch merged main after main bumped its lockfile, but the merge-base the
+    # gate handed over is the older commit (lock L1). The head's lockfile IS main's current one:
+    # that is not "edits mix.lock".
+    test "a head whose lockfile equals the default branch's tip is trusted, whatever the base",
+         %{tmp_dir: dir} do
+      {repo, base, _head} = branch!(dir, %{})
+      git!(repo, ["checkout", "-q", "main"])
+      tip = commit!(repo, %{"mix.lock" => "%{lock: 2}\n"}, "main bumps live_view")
+      push!(repo)
+      git!(repo, ["checkout", "-q", "feature"])
+      git!(repo, ["merge", "-q", "--no-edit", "main"])
+      head = git!(repo, ["rev-parse", "HEAD"])
+      hash = :crypto.hash(:sha256, "%{lock: 2}\n") |> Base.encode16(case: :lower)
+
+      # base is on main (an ancestor of its tip) but carries the older lock L1.
+      assert {:ok, %{source: ^tip, lock_hash: ^hash}} = plan(repo, base, head)
+    end
+
+    test "a head that adds a mix.lock identical to the default branch's tip is trusted", %{
+      tmp_dir: dir
+    } do
+      {repo, base, head} =
+        branch!(dir, %{"mix.lock" => "%{lock: 1}\n"}, %{"README" => "r"})
+
+      # main (the base) has no lockfile, the tip does, and the head carries the tip's.
+      git!(repo, ["checkout", "-q", "main"])
+      tip = commit!(repo, %{"mix.lock" => "%{lock: 1}\n"}, "main adds a lockfile")
+      push!(repo)
+      assert {:ok, %{source: ^tip}} = plan(repo, base, head)
+    end
+
+    test "a head lockfile that neither the base nor the tip has is still skipped", %{
+      tmp_dir: dir
+    } do
+      {repo, base, _head} = branch!(dir, %{})
+      git!(repo, ["checkout", "-q", "main"])
+      commit!(repo, %{"mix.lock" => "%{lock: 2}\n"}, "main bumps")
+      push!(repo)
+      git!(repo, ["checkout", "-q", "feature"])
+      head = commit!(repo, %{"mix.lock" => "%{lock: 3}\n"}, "own bump")
+
+      assert {:skip, reason} = plan(repo, base, head)
+      assert reason =~ "mix.lock"
+    end
+
     test "no lockfile at either commit: nothing to cache", %{tmp_dir: dir} do
       {repo, base, head} = branch!(dir, %{}, %{"README" => "r"})
       assert {:ok, :none} = plan(repo, base, head)

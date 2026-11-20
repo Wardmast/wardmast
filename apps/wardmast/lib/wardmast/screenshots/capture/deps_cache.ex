@@ -154,12 +154,17 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
           | {:skip, String.t()}
           | {:error, String.t()}
   def plan(repo, base, head, default_branch, opts \\ []) do
-    case {lock_at(repo, base), lock_at(repo, head)} do
-      {:none, :none} -> {:ok, :none}
-      {same, same} -> trusted_source(repo, base, same, default_branch, opts)
-      {:none, _} -> {:skip, changed("adds a mix.lock")}
-      {_, :none} -> {:skip, changed("deletes mix.lock")}
-      _ -> {:skip, changed("edits mix.lock")}
+    base_lock = lock_at(repo, base)
+
+    case {base_lock, lock_at(repo, head)} do
+      {:none, :none} ->
+        {:ok, :none}
+
+      {_, :none} ->
+        {:skip, changed("deletes mix.lock")}
+
+      {_, {:ok, head_lock}} ->
+        trusted_source(repo, base, base_lock, head_lock, default_branch, opts)
     end
   end
 
@@ -169,26 +174,33 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
       "and lockfile never run with a network)"
   end
 
-  defp trusted_source(repo, base, {:ok, head_lock}, branch, opts) do
+  # bd-5eegxz: the head's lockfile is judged against the default branch, never against the
+  # merge-base alone. A branch that merged main after main bumped its lockfile has a (stale)
+  # merge-base with the older lock, yet carries exactly main's current one: not a lockfile edit.
+  defp trusted_source(repo, base, base_lock, head_lock, branch, opts) do
     with {:ok, tip} <- live_tip(repo, branch),
          {:ok, trusted} <- trusted_repo(repo, tip, branch, opts) do
       # The worker's copy of the base's lockfile is only a hint; what counts is the trusted one.
-      source = if ancestor?(trusted, base, tip), do: base, else: tip
+      on_branch? = ancestor?(trusted, base, tip)
+      candidates = if on_branch?, do: Enum.uniq([base, tip]), else: [tip]
 
-      case lock_at(trusted, source) do
-        {:ok, ^head_lock} ->
+      case Enum.find(candidates, &(lock_at(trusted, &1) == {:ok, head_lock})) do
+        nil ->
+          {:skip, not_trusted(base_lock, on_branch?, branch)}
+
+        source ->
           {:ok, %{source: source, lock_hash: digest(head_lock), lock: head_lock, repo: trusted}}
-
-        _ when source == base ->
-          {:skip, changed("edits mix.lock")}
-
-        _ ->
-          {:skip,
-           "this change's mix.lock is not one the default branch (#{branch}) has: its merge-base " <>
-             "is not on #{branch} and #{branch}'s own lockfile differs. A capture boot only gets " <>
-             "dependencies fetched from a default-branch lockfile"}
       end
     end
+  end
+
+  defp not_trusted(:none, _on_branch?, _branch), do: changed("adds a mix.lock")
+  defp not_trusted(_base_lock, true, _branch), do: changed("edits mix.lock")
+
+  defp not_trusted(_base_lock, false, branch) do
+    "this change's mix.lock is not one the default branch (#{branch}) has: its merge-base " <>
+      "is not on #{branch} and #{branch}'s own lockfile differs. A capture boot only gets " <>
+      "dependencies fetched from a default-branch lockfile"
   end
 
   defp live_tip(repo, branch) do
