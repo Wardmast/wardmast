@@ -28,8 +28,12 @@ defmodule Wardmast.Mergers.CILogExcerpt do
 
   # `==> dep` .. `Generated dep app`: a dependency compiling; its warnings are
   # not the failure.
-  @dep_start ~r/^==> \S+\s*$/
-  @dep_end ~r/^Generated \S+ app\s*$/
+  # Only spans that really close (a matching `Generated dep app` follows) count,
+  # so the project's own `==> app` lines never switch the filter on for good.
+  @dep_start ~r/^==> (\S+)\s*$/
+  @dep_warning ~r/^\s*warning:/
+  # Continuation of a warning: indented, `│` / `└─` diagnostic lines, or blank.
+  @dep_continuation ~r/^(\s|│|└─)/u
 
   # Single lines worth keeping, with a little context around them.
   @marker_patterns [
@@ -47,7 +51,7 @@ defmodule Wardmast.Mergers.CILogExcerpt do
     ~r/^---\s+FAIL:/
   ]
 
-  @summary ~r/^\s*\d+ (tests?|doctests?|properties|examples?), \d+ failures?|^\s*\d+ (failed|passed|flaky|skipped|did not run)\s*$/
+  @summary ~r/^\s*\d+ (tests?|doctests?|properties|examples?), \d+ failures?|^\s*\d+ (failed|passed|flaky|skipped|did not run)(\s*\(.*\))?\s*$/
 
   @context_before 1
   @context_after 2
@@ -87,12 +91,7 @@ defmodule Wardmast.Mergers.CILogExcerpt do
       end
 
     if primary == [] and markers == [] do
-      lines
-      |> before_job_failed()
-      |> Enum.take(-@fallback_lines)
-      |> Enum.join("\n")
-      |> String.trim()
-      |> tail(limit)
+      fallback_tail(lines, limit)
     else
       assemble(blocks, summaries, markers, lines, limit)
     end
@@ -111,6 +110,22 @@ defmodule Wardmast.Mergers.CILogExcerpt do
     |> drop_dep_compile_noise()
   end
 
+  # The log up to `ERROR: Job failed` (the lines after it are runner clean-up).
+  # Whole when it fits; over `limit` only the last @fallback_lines lines are
+  # kept, and any cut makes the result truncated.
+  defp fallback_tail(lines, limit) do
+    body = before_job_failed(lines)
+    text = body |> Enum.join("\n") |> String.trim()
+
+    if String.length(text) <= limit do
+      {text, false}
+    else
+      kept = Enum.take(body, -@fallback_lines)
+      {cut, _} = kept |> Enum.join("\n") |> String.trim() |> tail(limit)
+      {cut, true}
+    end
+  end
+
   # The lines up to `ERROR: Job failed` (all of them when it is absent).
   defp before_job_failed(lines) do
     case Enum.find_index(lines, &Regex.match?(@job_failed, &1)) do
@@ -121,32 +136,36 @@ defmodule Wardmast.Mergers.CILogExcerpt do
 
   # Inside a `==> dep` .. `Generated dep app` span, drop each `warning:` block
   # (the line plus its indented / blank continuation); keep everything else.
-  defp drop_dep_compile_noise(lines) do
-    {kept, _state} =
-      Enum.reduce(lines, {[], :outside}, fn line, {acc, state} ->
-        cond do
-          Regex.match?(@dep_start, line) ->
-            {[line | acc], :in_dep}
+  defp drop_dep_compile_noise(lines), do: drop_noise(lines, nil, false, [])
 
-          state == :outside ->
-            {[line | acc], :outside}
+  defp drop_noise([], _dep, _warning?, acc), do: Enum.reverse(acc)
 
-          Regex.match?(@dep_end, line) ->
-            {[line | acc], :outside}
-
-          String.starts_with?(line, "warning:") ->
-            {acc, :in_warning}
-
-          state == :in_warning and (line == "" or String.match?(line, ~r/^\s/)) ->
-            {acc, :in_warning}
-
-          true ->
-            {[line | acc], :in_dep}
-        end
-      end)
-
-    Enum.reverse(kept)
+  defp drop_noise([line | rest], nil, _warning?, acc) do
+    case Regex.run(@dep_start, line) do
+      [_, name] -> drop_noise(rest, dep_span(name, rest), false, [line | acc])
+      nil -> drop_noise(rest, nil, false, [line | acc])
+    end
   end
+
+  defp drop_noise([line | rest], dep, warning?, acc) do
+    cond do
+      line == "Generated #{dep} app" ->
+        drop_noise(rest, nil, false, [line | acc])
+
+      Regex.match?(@dep_warning, line) ->
+        drop_noise(rest, dep, true, acc)
+
+      warning? and (line == "" or Regex.match?(@dep_continuation, line)) ->
+        drop_noise(rest, dep, true, acc)
+
+      true ->
+        drop_noise(rest, dep, false, [line | acc])
+    end
+  end
+
+  # `name` when a `Generated name app` line follows, else nil (not a dep span).
+  defp dep_span(name, rest),
+    do: if(Enum.any?(rest, &(&1 == "Generated #{name} app")), do: name)
 
   # Failure blocks and the run's summary line are what a fix pass needs most,
   # so they are budgeted first (blocks up to 80% of the limit); generic

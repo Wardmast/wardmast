@@ -328,14 +328,29 @@ defmodule Wardmast.Mergers.CILogExcerptTest do
   describe "GitLab traces (bd-4tpm5b)" do
     @gl_ts "2026-11-20T10:00:01.123456Z 01O "
 
-    defp dep_warnings(n) do
+    # Elixir 1.16+ layout: indented `warning:`, `│` lines, `└─ file:line`.
+    defp dep_warnings(n, style \\ :modern) do
       warnings =
         Enum.flat_map(1..n, fn i ->
-          [
-            "warning: variable \"x#{i}\" is unused",
-            "  lib/oban/mod_#{i}.ex:#{i}: Oban.Mod#{i}.run/1",
-            ""
-          ]
+          case style do
+            :modern ->
+              [
+                "    warning: variable \"x#{i}\" is unused",
+                "    │",
+                "  5 │   def run(x#{i}), do: :ok",
+                "    │       ~~~~",
+                "    │",
+                "    └─ lib/oban/mod_#{i}.ex:#{i}:7: Oban.Mod#{i}.run/1",
+                ""
+              ]
+
+            :old ->
+              [
+                "warning: variable \"x#{i}\" is unused",
+                "  lib/oban/mod_#{i}.ex:#{i}: Oban.Mod#{i}.run/1",
+                ""
+              ]
+          end
         end)
 
       ["==> oban", "Compiling 40 files (.ex)"] ++ warnings ++ ["Generated oban app"]
@@ -358,7 +373,7 @@ defmodule Wardmast.Mergers.CILogExcerptTest do
         "ERROR: Job failed: exit code 1"
       ]
 
-      out = CILogExcerpt.extract(stamp(dep_warnings(400) ++ block), 4_000)
+      out = CILogExcerpt.extract(stamp(dep_warnings(250) ++ block), 4_000)
 
       assert out =~ "1) test specialty tabs render (EmrWeb.SpecialtyTabsTest)"
       assert out =~ "specialty_tabs_test.exs:81"
@@ -366,6 +381,37 @@ defmodule Wardmast.Mergers.CILogExcerptTest do
       assert out =~ "4 tests, 1 failure"
       refute out =~ "oban"
       refute out =~ "is unused"
+    end
+
+    test "old-style unindented dependency warnings are dropped too" do
+      block = [
+        "  1) test a (M.T)",
+        "     test/a_test.exs:3",
+        "     boom",
+        "",
+        "1 test, 1 failure"
+      ]
+
+      out = CILogExcerpt.extract(stamp(dep_warnings(100, :old) ++ block), 4_000)
+
+      assert out =~ "1) test a (M.T)"
+      refute out =~ "oban"
+    end
+
+    test "a project's own ==> app span without a Generated line keeps its warnings" do
+      lines = ["==> my_app", "warning: mine is unused", "  lib/my_app/x.ex:1", "done"]
+      assert CILogExcerpt.extract(Enum.join(lines, "\n"), 4_000) =~ "mine is unused"
+    end
+
+    test "the 80-line fallback cut reports truncated; a log that fits is whole" do
+      short = Enum.join(for(i <- 1..300, do: "l#{i}"), "\n")
+
+      assert {whole, false} = CILogExcerpt.extract_with_status(short, 4_000)
+      assert whole =~ "l1\n"
+
+      assert {cut, true} = CILogExcerpt.extract_with_status(short, 500)
+      assert cut =~ "l300"
+      refute cut =~ "l1\n"
     end
 
     test "Playwright: every failure block with Error line and code frame, plus summary" do
@@ -390,7 +436,14 @@ defmodule Wardmast.Mergers.CILogExcerptTest do
           for(i <- 1..80, do: "[#{i}/90] ok tests/a#{i}.spec.ts") ++
           pw.(1, "pharmacy-show") ++
           pw.(2, "pharmacy-edit") ++
-          ["  2 failed", "  86 passed", "  1 flaky", "ERROR: Job failed: exit code 1"]
+          [
+            "  2 failed",
+            "    [mobile-light] › tests/pharmacy-show.mobile.spec.ts:10:5 › opens 1",
+            "  1 flaky",
+            "    [chromium] › tests/x.spec.ts:3:1 › flaky one",
+            "  86 passed (2.1m)",
+            "ERROR: Job failed: exit code 1"
+          ]
 
       out = CILogExcerpt.extract(stamp(lines), 4_000)
 
@@ -399,21 +452,21 @@ defmodule Wardmast.Mergers.CILogExcerptTest do
       assert out =~ "Error: page.waitForURL: Test timeout"
       assert out =~ "> 10 |   await page.waitForURL"
       assert out =~ "2 failed"
-      assert out =~ "86 passed"
+      assert out =~ "86 passed (2.1m)"
       assert out =~ "1 flaky"
       refute out =~ "oban"
     end
 
     test "no marker: the tail before ERROR: Job failed, ANSI and timestamps stripped" do
       lines =
-        for(i <- 1..300, do: "\e[32mstep #{i}\e[0m") ++
+        for(i <- 1..300, do: "\e[32mstep #{i} xxxxxxxxxxxx\e[0m") ++
           ["cleanup output", "ERROR: Job failed: exit code 1"]
 
       out = CILogExcerpt.extract(stamp(lines), 4_000)
 
-      assert out =~ "step 300"
-      assert out =~ "step 222"
-      refute out =~ "step 200\n"
+      assert out =~ "step 300 "
+      assert out =~ "step 222 "
+      refute out =~ "step 200 "
       refute out =~ "ERROR: Job failed"
       refute out =~ "\e["
       refute out =~ "2026-11-20T"
