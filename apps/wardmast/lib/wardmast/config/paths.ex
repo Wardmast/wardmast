@@ -67,9 +67,10 @@ defmodule Wardmast.Config.Paths do
   end
 
   defp data_home_log_path do
-    case env("WARDMAST_HOME") do
+    case System.get_env("WARDMAST_HOME") do
       nil -> expand_default("~/.wardmast/log/wardmast.log", "WARDMAST_SERVER_LOG")
-      home -> Path.join([home, "log", "wardmast.log"])
+      "" -> expand_default("~/.wardmast/log/wardmast.log", "WARDMAST_SERVER_LOG")
+      home -> Path.join([Path.expand(home), "log", "wardmast.log"])
     end
   end
 
