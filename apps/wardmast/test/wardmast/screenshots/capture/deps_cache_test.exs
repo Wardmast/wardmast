@@ -129,6 +129,30 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
       assert message =~ "trunk"
     end
 
+    # The tip is read live from origin, so it can be one the checkout has not fetched yet: the
+    # checkout fetches it from origin once, and only then is it taken into the trusted repository.
+    test "a default branch tip the checkout has not fetched yet is fetched from origin first", %{
+      tmp_dir: dir
+    } do
+      {repo, base, head} = branch!(dir, %{})
+      other = Path.join(dir, "other")
+      git!(dir, ["clone", "-q", Path.join(dir, "forge.git"), other])
+      git!(other, ["config", "user.email", "t@example.com"])
+      git!(other, ["config", "user.name", "t"])
+      tip = commit!(other, %{"web/page.txt" => "v1.1"}, "main moves on")
+      push!(other)
+
+      assert {_, status} =
+               System.cmd("git", ["-C", repo, "cat-file", "-e", tip <> "^{commit}"],
+                 stderr_to_stdout: true
+               )
+
+      refute status == 0
+
+      assert {:ok, %{source: ^base, repo: trusted}} = plan(repo, base, head)
+      assert {_, 0} = System.cmd("git", ["-C", trusted, "cat-file", "-e", tip <> "^{commit}"])
+    end
+
     # The worker's refs are writable from its jail: moving its `origin/main` (and `main`) onto a
     # commit of its own, with the same lockfile and a mix.exs of its choosing, must not make that
     # commit the one the seed runs with the network on.
