@@ -739,10 +739,13 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
         {checkout, _scratch, overrides} = boot_tree!(dir, name, ctx)
         env = mix_env(ctx.home) ++ ctx.cache.env ++ overrides
 
-        assert {:exited, 0, out} =
-                 run!([ctx.mix, "run", "-e", "IO.puts(App.hi())"], checkout, env)
+        expr =
+          ~s|IO.puts(App.hi()); IO.puts(File.read!(Path.join(:code.priv_dir(:tiny), "generated.txt")))|
+
+        assert {:exited, 0, out} = run!([ctx.mix, "run", "-e", expr], checkout, env)
 
         assert out =~ "from_the_cache"
+        assert out =~ "written at compile"
         refute out =~ "==> tiny"
       end
 

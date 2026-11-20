@@ -753,9 +753,41 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   def writable(cache, scratch, checkout) do
     deps = Path.join(scratch, "deps")
 
+    build = Path.join(checkout, "_build")
+
     with :ok <- copy_tree(cache.deps, deps),
-         :ok <- copy_build(cache.build, Path.join(checkout, "_build")) do
+         :ok <- copy_build(cache.build, build),
+         :ok <- relink_priv(build, deps) do
       {:ok, [{"MIX_DEPS_PATH", deps}]}
+    end
+  end
+
+  # Mix links `_build/<env>/lib/<dep>/priv` to the dependency's source `priv` with a relative
+  # link, which the seed's layout wrote and the boot's does not share. Re-point every one at the
+  # boot's deps copy (never following the seed's target); drop it when the dep has no `priv`.
+  defp relink_priv(build, deps) do
+    for env <- ls_dirs(build),
+        dep <- ls_dirs(Path.join([build, env, "lib"])) do
+      link = Path.join([build, env, "lib", dep, "priv"])
+
+      case File.lstat(link) do
+        {:ok, %File.Stat{type: :symlink}} ->
+          File.rm(link)
+          source = Path.join([deps, dep, "priv"])
+          if File.dir?(source), do: File.ln_s(source, link)
+
+        _ ->
+          :ok
+      end
+    end
+
+    :ok
+  end
+
+  defp ls_dirs(dir) do
+    case File.ls(dir) do
+      {:ok, entries} -> entries
+      _ -> []
     end
   end
 

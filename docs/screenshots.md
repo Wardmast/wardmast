@@ -236,6 +236,10 @@ network namespace, so two services cannot talk to each other.
   seed compiled are therefore **not recompiled** by the boot (`mix compile` only builds the
   app); one that does compile writes into the copy. A cache made before the seed kept its build
   has no `build/`: its boots compile the deps (into the copy) until it is pruned and re-seeded.
+  Mix links each compiled dep's `_build/<env>/lib/<dep>/priv` to its source `priv/` with a
+  relative link that only resolves in the seed's layout, so the boot re-points those links at
+  its own `<scratch>/deps/<dep>/priv`. Expect a real disk and time cost per boot (twice per
+  capture): on filesystems without reflink (ext4) the copy is a full one of `deps/` and `build/`.
 
 ### The seed's environment (`deps.mix_env`, `deps.env`)
 
