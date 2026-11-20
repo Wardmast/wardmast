@@ -556,6 +556,75 @@ defmodule WardmastCli.Cmd.DoctorTest do
       assert out =~ "emricare/tonic"
     end
 
+    # bd-2rdfsh: the primary checkout's LOCAL target branch sat 122 commits behind
+    # origin and nothing said so; a gate comparing against it passed an empty branch.
+    defp primary_repos_resp(repo) do
+      %{"data" => [Map.merge(%{"name" => "tonic", "source" => "default"}, repo)]}
+    end
+
+    defp run_doctor_with_repos(resp) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}}
+      ])
+
+      capture(fn -> Doctor.run(["--all"]) end)
+    end
+
+    test "warns when the primary's local target branch is far behind origin" do
+      resp =
+        primary_repos_resp(%{
+          "path" => "/srv/tonic",
+          "primary_target" => "main",
+          "primary_behind" => 122,
+          "primary_sync_blocker" => "uncommitted_changes",
+          "auto_sync_primary" => true
+        })
+
+      {out, _err, _exit_code} = run_doctor_with_repos(resp)
+      assert out =~ "[ ok ] repos resolved"
+      assert out =~ "[warn] primary checkout"
+      assert out =~ "tonic"
+      assert out =~ "122"
+      assert out =~ "main"
+      # The reason the sync could not catch it up is named.
+      assert out =~ "uncommitted"
+    end
+
+    test "tells the operator to opt in when auto_sync_primary is off" do
+      resp =
+        primary_repos_resp(%{
+          "path" => "/srv/tonic",
+          "primary_target" => "main",
+          "primary_behind" => 40,
+          "primary_sync_blocker" => nil,
+          "auto_sync_primary" => false
+        })
+
+      {out, _err, _exit_code} = run_doctor_with_repos(resp)
+      assert out =~ "[warn] primary checkout"
+      assert out =~ "merge.auto_sync_primary"
+    end
+
+    test "stays quiet at or below the threshold, and when staleness is unknown" do
+      for behind <- [0, 3, nil] do
+        resp =
+          primary_repos_resp(%{
+            "path" => "/srv/tonic",
+            "primary_target" => "main",
+            "primary_behind" => behind,
+            "primary_sync_blocker" => nil,
+            "auto_sync_primary" => false
+          })
+
+        {out, _err, _exit_code} = run_doctor_with_repos(resp)
+        assert out =~ "[ ok ] repos resolved"
+        refute out =~ "primary checkout"
+      end
+    end
+
     test "zero repos with a workspace present is a failing, actionable line" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},

@@ -58,6 +58,66 @@ defmodule Wardmast.Worker.PrimarySync do
     end
   end
 
+  @typedoc """
+  `status/2`'s read-only report: `behind` is how many commits `origin/<branch>`
+  has that the LOCAL `<branch>` lacks; `blocker` is why `fast_forward/2` would
+  leave it that way (`nil` when it is current, or when a sync would succeed).
+  """
+  @type status :: %{
+          behind: non_neg_integer(),
+          current_branch: String.t() | nil,
+          blocker: skip_reason() | nil
+        }
+
+  @doc """
+  How far the primary checkout's local `branch` has fallen behind
+  `origin/<branch>`, and what would stop `fast_forward/2` from catching it up
+  (bd-2rdfsh). Compares the LOCAL branch ref, not HEAD, because a bare
+  `git log <branch>` is what a human or an old gate reads. Read-only, no fetch:
+  the `origin/<branch>` it reads is as fresh as the last dispatch/sync fetch.
+  """
+  @spec status(path(), String.t()) :: {:ok, status()} | {:error, Worktree.error_reason()}
+  def status(repo_path, branch) when is_binary(repo_path) and is_binary(branch) do
+    with {:ok, out} <-
+           run_git(
+             ["rev-list", "--count", "refs/heads/#{branch}..refs/remotes/origin/#{branch}"],
+             cd: repo_path
+           ),
+         {behind, _} <- Integer.parse(String.trim(out)),
+         {:ok, current} <- Worktree.current_branch(repo_path) do
+      {:ok,
+       %{
+         behind: behind,
+         current_branch: current,
+         blocker: blocker(repo_path, branch, behind, current)
+       }}
+    else
+      :error -> {:error, {:git_failed, "unparseable rev-list output"}}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp blocker(_repo_path, _branch, 0, _current), do: nil
+
+  defp blocker(_repo_path, branch, _behind, current) when current != branch,
+    do: :not_on_default_branch
+
+  defp blocker(repo_path, branch, _behind, _current) do
+    cond do
+      Worktree.has_uncommitted?(repo_path) != {:ok, false} ->
+        :uncommitted_changes
+
+      match?(
+        {:error, _},
+        run_git(["merge-base", "--is-ancestor", "HEAD", "origin/" <> branch], cd: repo_path)
+      ) ->
+        :not_fast_forwardable
+
+      true ->
+        nil
+    end
+  end
+
   defp with_clean_tree(repo_path, base_branch) do
     case Worktree.has_uncommitted?(repo_path) do
       {:ok, true} -> {:skipped, :uncommitted_changes}

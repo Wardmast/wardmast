@@ -625,7 +625,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     case Client.get("/api/repos") do
       {:ok, %{"data" => [_ | _] = repos}} ->
         case unconfigured_repo_names(repos) do
-          [] -> repos_ok_result(repos)
+          [] -> [repos_ok_result(repos) | stale_primary_results(repos)]
           names -> unconfigured_repos_result(names)
         end
 
@@ -635,6 +635,56 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       other ->
         unknown_result("repos resolved", other)
     end
+  end
+
+  # bd-2rdfsh: a repo's primary checkout whose LOCAL target branch trails origin by
+  # more than this many commits is warned about. On 2026-11-20 it was 122 behind
+  # and silently made an empty pair branch look 122 commits ahead. A few commits
+  # behind between merge and sync is normal; this is "the sync stopped working".
+  @primary_behind_warn 10
+
+  # `/api/repos` reports `primary_behind` (nil = unknown: no path, not a git
+  # checkout) for each repo; one warning row per stale checkout, naming why the
+  # post-merge sync (`merge.auto_sync_primary`) could not catch it up.
+  defp stale_primary_results(repos) do
+    for %{"primary_behind" => behind} = repo <- repos,
+        is_integer(behind) and behind > @primary_behind_warn do
+      stale_primary_result(repo)
+    end
+  end
+
+  defp stale_primary_result(repo) do
+    target = repo["primary_target"] || "main"
+
+    %Result{
+      name: "primary checkout",
+      status: :warn,
+      detail:
+        "#{repo["name"]}: local #{target} at #{repo["path"]} is #{repo["primary_behind"]} " <>
+          "commits behind origin/#{target}",
+      hint: stale_primary_hint(repo, target),
+      blocks_readiness: false
+    }
+  end
+
+  defp stale_primary_hint(%{"auto_sync_primary" => false}, target) do
+    "Post-merge sync is off for this workspace, so nothing advances local #{target}. " <>
+      "Enable it with `ward config set merge.auto_sync_primary true`, or fast-forward " <>
+      "by hand: `git -C <path> merge --ff-only origin/#{target}`."
+  end
+
+  defp stale_primary_hint(%{"primary_sync_blocker" => blocker}, target)
+       when is_binary(blocker) do
+    "merge.auto_sync_primary is on but cannot fast-forward local #{target}: " <>
+      "#{String.replace(blocker, "_", " ")}. Resolve that in the checkout (or " <>
+      "fast-forward by hand: `git -C <path> merge --ff-only origin/#{target}`)."
+  end
+
+  defp stale_primary_hint(_repo, target) do
+    "merge.auto_sync_primary is on and the checkout looks fast-forwardable, yet it is " <>
+      "behind: no merge has been observed since. Check the server log for " <>
+      "`primary-checkout sync`, or fast-forward by hand: " <>
+      "`git -C <path> merge --ff-only origin/#{target}`."
   end
 
   # bd-7u1b6n: `/api/repos` lists, as `(unconfigured)`, every repo name a live

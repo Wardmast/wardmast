@@ -43,6 +43,32 @@ defmodule WardmastWeb.Api.RepoControllerTest do
       assert is_integer(alpha["worktrees"])
     end
 
+    # bd-2rdfsh: the primary-checkout staleness `ward server doctor` warns on.
+    test "reports the primary checkout's staleness and sync opt-in", %{conn: conn} do
+      alias Wardmast.Test.GitFixture
+      git = GitFixture.forge_and_checkout()
+      GitFixture.commit!(git.seed, %{"u.txt" => "u\n"}, "upstream")
+      GitFixture.git!(git.seed, ["push", "-q", "origin", "main"])
+      GitFixture.git!(git.checkout, ["fetch", "-q", "origin"])
+      File.write!(Path.join(git.checkout, "wip.txt"), "wip\n")
+
+      {:ok, _ws} =
+        Ash.create(Workspace, %{
+          name: "stale-ws",
+          prefix: "stw",
+          config: %{"repo_paths" => %{"widget" => git.checkout}}
+        })
+
+      conn = get(conn, ~p"/api/repos")
+      assert %{"data" => data} = json_response(conn, 200)
+      widget = Enum.find(data, &(&1["name"] == "widget"))
+
+      assert widget["primary_target"] == "main"
+      assert widget["primary_behind"] == 1
+      assert widget["primary_sync_blocker"] == "uncommitted_changes"
+      assert widget["auto_sync_primary"] == false
+    end
+
     test "two-workspace same-name fixture returns both entries", %{conn: conn} do
       {:ok, ws1} =
         Ash.create(Workspace, %{

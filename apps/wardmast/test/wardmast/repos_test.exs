@@ -93,6 +93,71 @@ defmodule Wardmast.ReposTest do
     end
   end
 
+  # bd-2rdfsh: each repo reports how far its primary checkout's local target
+  # branch trails origin, and whether the post-merge sync is opted in, so
+  # `ward server doctor` can warn before a stale local branch misleads a gate.
+  describe "primary checkout staleness (bd-2rdfsh)" do
+    alias Wardmast.Test.GitFixture
+
+    setup do
+      git = GitFixture.forge_and_checkout()
+
+      for n <- 1..3,
+          do: GitFixture.commit!(git.seed, %{"u#{n}.txt" => "#{n}\n"}, "upstream #{n}")
+
+      GitFixture.git!(git.seed, ["push", "-q", "origin", "main"])
+      GitFixture.git!(git.checkout, ["fetch", "-q", "origin"])
+      {:ok, git: git}
+    end
+
+    test "reports how far local main trails origin/main", %{git: git} do
+      {:ok, _} =
+        Ash.create(Workspace, %{
+          name: "ws-stale",
+          prefix: "ws",
+          config: %{
+            "repo_paths" => %{"widget" => %{"path" => git.checkout, "target_branch" => "main"}}
+          }
+        })
+
+      assert [%{name: "widget"} = repo] = Repos.list()
+      assert repo.primary_target == "main"
+      assert repo.primary_behind == 3
+      assert repo.primary_sync_blocker == nil
+      assert repo.auto_sync_primary == false
+    end
+
+    test "carries the auto_sync_primary opt-in and a blocker when the tree is dirty", %{git: git} do
+      File.write!(Path.join(git.checkout, "wip.txt"), "wip\n")
+
+      {:ok, _} =
+        Ash.create(Workspace, %{
+          name: "ws-dirty",
+          prefix: "wd",
+          config: %{
+            "merge" => %{"auto_sync_primary" => true},
+            "repo_paths" => %{"widget" => git.checkout}
+          }
+        })
+
+      assert [repo] = Repos.list()
+      assert repo.auto_sync_primary == true
+      assert repo.primary_behind == 3
+      assert repo.primary_sync_blocker == :uncommitted_changes
+    end
+
+    test "is nil (unknown) when the path is not a git checkout" do
+      {:ok, _} =
+        Ash.create(Workspace, %{
+          name: "ws-nogit",
+          prefix: "wn",
+          config: %{"repo_paths" => %{"ghost" => "/nonexistent/ghost"}}
+        })
+
+      assert [%{primary_behind: nil, primary_sync_blocker: nil}] = Repos.list()
+    end
+  end
+
   describe "get/2" do
     test "finds repo by name" do
       {:ok, _ws} =
