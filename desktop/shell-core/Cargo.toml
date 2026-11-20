@@ -1,0 +1,18 @@
+[package]
+name = "arbiter-shell-core"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Lifecycle core of the Arbiter desktop shell prototype (bd-aisgkf)"
+
+[dependencies]
+libc = "0.2"
+serde_json = "1"
+
+[[bin]]
+name = "fake_release"
+path = "src/bin/fake_release.rs"
+
+[[bin]]
+name = "headless"
+path = "src/bin/headless.rs"

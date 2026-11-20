@@ -1,0 +1,11 @@
+# Desktop shell prototype (bd-aisgkf, PKG 8). See docs/desktop-shell.md.
+#
+# `shell-core` is the lifecycle logic (supervise the release, free-port
+# selection, quit/drain, single instance). It has no GUI dependency, so it is
+# built and tested anywhere with `cargo test`. `src-tauri` is the thin window /
+# tray layer on top of it; it is deliberately NOT a workspace member because it
+# needs the platform webview toolchain (webkit2gtk on Linux, Xcode on macOS).
+[workspace]
+members = ["shell-core"]
+exclude = ["src-tauri"]
+resolver = "2"
