@@ -51,14 +51,10 @@ defmodule Wardmast.Screenshots.Capture.Workdir do
     end
   end
 
-  @doc "A fresh, empty directory under `<out_dir>/work` for one capture run."
+  @doc "The (not yet created) directory under `<out_dir>/work` that is one capture run's own."
   @spec attempt_dir(String.t()) :: String.t()
-  def attempt_dir(out_dir) do
-    token = Base.encode16(:crypto.strong_rand_bytes(5), case: :lower)
-    dir = Path.join([out_dir, "work", token])
-    File.mkdir_p!(dir)
-    dir
-  end
+  def attempt_dir(out_dir),
+    do: Path.join([out_dir, "work", Base.encode16(:crypto.strong_rand_bytes(5), case: :lower)])
 
   @doc """
   Remove the run directories under `<out_dir>/work` whose last change is older than `max_age_s`

@@ -64,6 +64,7 @@ defmodule Wardmast.Screenshots.Capture do
   alias Wardmast.Screenshots.Capture.Sandbox
   alias Wardmast.Screenshots.Capture.Services
   alias Wardmast.Screenshots.Capture.Shooter
+  alias Wardmast.Screenshots.Capture.Workdir
   alias Wardmast.Screenshots.Config
   alias Wardmast.Screenshots.Plan
   alias Wardmast.Screenshots.PlanCheck
@@ -116,7 +117,13 @@ defmodule Wardmast.Screenshots.Capture do
         {:skipped, :no_ui_paths}
 
       {:ok, true} ->
-        input |> begin(opts) |> capture() |> finish()
+        st = begin(input, opts)
+
+        try do
+          st |> capture() |> finish()
+        after
+          cleanup(st)
+        end
 
       {:error, msg} ->
         input |> begin(opts) |> fail(Failure.new(:diff_failed, "git diff failed: #{msg}"))
@@ -125,6 +132,8 @@ defmodule Wardmast.Screenshots.Capture do
 
   defp begin(input, opts) do
     File.mkdir_p!(input.out_dir)
+    # The leftovers of runs that were killed before they could clean up (bd-5eegxz).
+    Workdir.sweep(input.out_dir)
     config = input.config
     budget = Keyword.get(opts, :budget_seconds, Map.get(config.limits, "budget_seconds", 1200))
 
@@ -140,6 +149,7 @@ defmodule Wardmast.Screenshots.Capture do
       deps: Keyword.get(opts, :deps) || DepsCache,
       deps_opts: Keyword.get(opts, :deps_opts, []),
       deps_cache: nil,
+      attempt: Workdir.attempt_dir(input.out_dir),
       path_warning: nil,
       budget: budget,
       deadline: System.monotonic_time(:millisecond) + budget * 1000,
@@ -149,7 +159,7 @@ defmodule Wardmast.Screenshots.Capture do
 
   defp capture(%{input: input} = st) do
     with :ok <- sandboxed(st),
-         {:ok, plan} <- read_plan(st),
+         {:ok, plan} <- read_plan_unless_skipped_anyway(st),
          :ok <- not_skipped(plan),
          {:ok, st} <- deps_cache(st),
          {:ok, before_run} <- run_role(st, "before", input.base_sha, plan.shots),
@@ -204,6 +214,24 @@ defmodule Wardmast.Screenshots.Capture do
   end
 
   defp deps_cache(st), do: {:ok, st}
+
+  # bd-5eegxz: a bad manifest is the worker's to fix only when the capture could otherwise run.
+  # When the deps cache says this change cannot boot offline (`deps_changed`) or cannot be built,
+  # that outcome is the one reported (neither is a send-back), so no fix round is spent writing a
+  # manifest for a capture that was going to skip or fail anyway.
+  defp read_plan_unless_skipped_anyway(st) do
+    case read_plan(st) do
+      {:error, %Failure{code: code} = failure}
+      when code in [:manifest_missing, :manifest_invalid] ->
+        case deps_cache(st) do
+          {:ok, _st} -> {:error, failure}
+          other -> other
+        end
+
+      other ->
+        other
+    end
+  end
 
   defp call_deps(st, deps_input) do
     st.deps.prepare(deps_input, st.deps_opts)
@@ -294,7 +322,7 @@ defmodule Wardmast.Screenshots.Capture do
   # ── one role: extract, boot, shoot every entry, stop ────────────────────
 
   defp run_role(st, role, sha, entries) do
-    work = Path.join([st.input.out_dir, "work", role])
+    work = Path.join(st.attempt, role)
     checkout = Path.join(work, "checkout")
     started = System.monotonic_time(:millisecond)
 
@@ -311,9 +339,18 @@ defmodule Wardmast.Screenshots.Capture do
         {:ok, %{outcomes: outcomes, boot: boot}}
       end
     after
-      File.rm_rf(work)
+      remove_work(work)
     end
   end
+
+  defp remove_work(path) do
+    case Workdir.remove(path) do
+      :ok -> :ok
+      {:error, why} -> Logger.warning("Screenshots.Capture: could not clean up: #{why}")
+    end
+  end
+
+  defp cleanup(st), do: remove_work(st.attempt)
 
   defp extract(repo, sha, checkout, role) do
     tar = checkout <> ".tar"
@@ -696,10 +733,13 @@ defmodule Wardmast.Screenshots.Capture do
 
     Enum.reduce(extra, base, fn
       {:failure, f}, acc ->
-        Map.put(acc, "failure", Failure.to_map(f))
+        Map.merge(acc, %{
+          "failure" => Failure.to_map(f),
+          "reason" => String.replace_invalid(f.message)
+        })
 
       {:skip, {kind, reason}}, acc ->
-        Map.merge(acc, %{"skip" => reason, "skip_kind" => "#{kind}"})
+        Map.merge(acc, %{"skip" => reason, "skip_kind" => "#{kind}", "reason" => reason})
 
       {:result, r}, acc ->
         Map.merge(acc, result_json(r))

@@ -369,6 +369,46 @@ defmodule Wardmast.Screenshots.CaptureServicesTest do
       assert lifecycle() == []
     end
 
+    # bd-5eegxz: a capture that cannot run for this change (its lockfile, or the cache) must
+    # say so, not fault the worker's missing manifest: the worker could not fix that.
+    test "a missing manifest does not hide a deps_changed skip", %{tmp_dir: dir} do
+      config = %{@config | deps: %{"mix" => true}}
+      reason = "the change edits mix.lock"
+
+      assert {:skipped, {:deps_changed, ^reason}} =
+               run(dir, Path.join(dir, "nope.json"),
+                 config: config,
+                 deps_opts: [test_pid: self(), answer: {:skip, reason}]
+               )
+
+      assert manifest(dir)["skip_kind"] == "deps_changed"
+      assert manifest(dir)["reason"] == reason
+    end
+
+    test "an invalid manifest does not hide a deps failure", %{tmp_dir: dir} do
+      config = %{@config | deps: %{"mix" => true}}
+      bad = Path.join(dir, "bad.json")
+      File.write!(bad, ~s({"version": 9}))
+
+      assert {:error, %{code: :deps_failed}} =
+               run(dir, bad,
+                 config: config,
+                 deps_opts: [test_pid: self(), answer: {:error, "nxdomain"}]
+               )
+    end
+
+    test "with a deps cache that is fine, the missing manifest is still the worker's", %{
+      tmp_dir: dir
+    } do
+      config = %{@config | deps: %{"mix" => true}}
+
+      assert {:error, %{code: :manifest_missing}} =
+               run(dir, Path.join(dir, "nope.json"),
+                 config: config,
+                 deps_opts: [test_pid: self(), answer: {:ok, nil}]
+               )
+    end
+
     test "a cache that cannot be built is an infrastructure failure, before any boot", %{
       tmp_dir: dir
     } do
