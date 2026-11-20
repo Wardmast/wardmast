@@ -324,4 +324,173 @@ defmodule Wardmast.Mergers.CILogExcerptTest do
       end
     end
   end
+
+  describe "GitLab traces (bd-4tpm5b)" do
+    @gl_ts "2026-11-20T10:00:01.123456Z 01O "
+
+    # Elixir 1.16+ layout: indented `warning:`, `│` lines, `└─ file:line`.
+    defp dep_warnings(n, style \\ :modern) do
+      warnings =
+        Enum.flat_map(1..n, fn i ->
+          case style do
+            :modern ->
+              [
+                "    warning: variable \"x#{i}\" is unused",
+                "    │",
+                "  5 │   def run(x#{i}), do: :ok",
+                "    │       ~~~~",
+                "    │",
+                "    └─ lib/oban/mod_#{i}.ex:#{i}:7: Oban.Mod#{i}.run/1",
+                ""
+              ]
+
+            :old ->
+              [
+                "warning: variable \"x#{i}\" is unused",
+                "  lib/oban/mod_#{i}.ex:#{i}: Oban.Mod#{i}.run/1",
+                ""
+              ]
+          end
+        end)
+
+      ["==> oban", "Compiling 40 files (.ex)"] ++ warnings ++ ["Generated oban app"]
+    end
+
+    defp stamp(lines), do: Enum.map_join(lines, "\n", &(@gl_ts <> &1))
+
+    test "ExUnit failure after ~1,700 lines of dependency warnings: block + summary, no dep noise" do
+      block = [
+        "",
+        "  1) test specialty tabs render (EmrWeb.SpecialtyTabsTest)",
+        "     test/emr_web/specialty_tabs_test.exs:81",
+        "     Expected truthy, got false",
+        "     code: assert has_element?(view, \"#tab\")",
+        "     stacktrace:",
+        "       test/emr_web/specialty_tabs_test.exs:85: (test)",
+        "",
+        "Finished in 3.0 seconds",
+        "4 tests, 1 failure",
+        "ERROR: Job failed: exit code 1"
+      ]
+
+      out = CILogExcerpt.extract(stamp(dep_warnings(250) ++ block), 4_000)
+
+      assert out =~ "1) test specialty tabs render (EmrWeb.SpecialtyTabsTest)"
+      assert out =~ "specialty_tabs_test.exs:81"
+      assert out =~ "Expected truthy, got false"
+      assert out =~ "4 tests, 1 failure"
+      refute out =~ "oban"
+      refute out =~ "is unused"
+    end
+
+    test "old-style unindented dependency warnings are dropped too" do
+      block = [
+        "  1) test a (M.T)",
+        "     test/a_test.exs:3",
+        "     boom",
+        "",
+        "1 test, 1 failure"
+      ]
+
+      out = CILogExcerpt.extract(stamp(dep_warnings(100, :old) ++ block), 4_000)
+
+      assert out =~ "1) test a (M.T)"
+      refute out =~ "oban"
+    end
+
+    test "a project's own ==> app span without a Generated line keeps its warnings" do
+      lines = ["==> my_app", "warning: mine is unused", "  lib/my_app/x.ex:1", "done"]
+      assert CILogExcerpt.extract(Enum.join(lines, "\n"), 4_000) =~ "mine is unused"
+    end
+
+    test "the 80-line fallback cut reports truncated; a log that fits is whole" do
+      short = Enum.join(for(i <- 1..300, do: "l#{i}"), "\n")
+
+      assert {whole, false} = CILogExcerpt.extract_with_status(short, 4_000)
+      assert whole =~ "l1\n"
+
+      assert {cut, true} = CILogExcerpt.extract_with_status(short, 500)
+      assert cut =~ "l300"
+      refute cut =~ "l1\n"
+    end
+
+    test "Playwright: every failure block with Error line and code frame, plus summary" do
+      pw = fn n, spec ->
+        [
+          "  #{n}) [mobile-light] › tests/#{spec}.mobile.spec.ts:10:5 › opens #{n}",
+          "",
+          "    Test timeout of 30000ms exceeded.",
+          "    Error: page.waitForURL: Test timeout of 30000ms exceeded.",
+          "    =========================== logs ===========================",
+          "    waiting for navigation until \"load\"",
+          "",
+          "      8 |   await page.goto('/login')",
+          "    > 10 |   await page.waitForURL('/pharmacy')",
+          "         |              ^",
+          ""
+        ]
+      end
+
+      lines =
+        dep_warnings(300) ++
+          for(i <- 1..80, do: "[#{i}/90] ok tests/a#{i}.spec.ts") ++
+          pw.(1, "pharmacy-show") ++
+          pw.(2, "pharmacy-edit") ++
+          [
+            "  2 failed",
+            "    [mobile-light] › tests/pharmacy-show.mobile.spec.ts:10:5 › opens 1",
+            "  1 flaky",
+            "    [chromium] › tests/x.spec.ts:3:1 › flaky one",
+            "  86 passed (2.1m)",
+            "ERROR: Job failed: exit code 1"
+          ]
+
+      out = CILogExcerpt.extract(stamp(lines), 4_000)
+
+      assert out =~ "1) [mobile-light] › tests/pharmacy-show.mobile.spec.ts:10"
+      assert out =~ "2) [mobile-light] › tests/pharmacy-edit.mobile.spec.ts:10"
+      assert out =~ "Error: page.waitForURL: Test timeout"
+      assert out =~ "> 10 |   await page.waitForURL"
+      assert out =~ "2 failed"
+      assert out =~ "86 passed (2.1m)"
+      assert out =~ "1 flaky"
+      refute out =~ "oban"
+    end
+
+    test "no marker: the tail before ERROR: Job failed, ANSI and timestamps stripped" do
+      lines =
+        for(i <- 1..300, do: "\e[32mstep #{i} xxxxxxxxxxxx\e[0m") ++
+          ["cleanup output", "ERROR: Job failed: exit code 1"]
+
+      out = CILogExcerpt.extract(stamp(lines), 4_000)
+
+      assert out =~ "step 300 "
+      assert out =~ "step 222 "
+      refute out =~ "step 200 "
+      refute out =~ "ERROR: Job failed"
+      refute out =~ "\e["
+      refute out =~ "2026-11-20T"
+    end
+
+    test "stays under the cap and never cuts a block that fits" do
+      mk = fn i ->
+        [
+          "  #{i}) test t#{i} (M.T)",
+          "     test/t_test.exs:#{i}",
+          "     boom #{i}",
+          "     end-of-block-#{i}",
+          ""
+        ]
+      end
+
+      lines = List.flatten(for i <- 1..60, do: mk.(i)) ++ ["60 tests, 60 failures"]
+      out = CILogExcerpt.extract(Enum.join(lines, "\n"), 1_500)
+
+      assert String.length(out) <= 1_550
+
+      for i <- 1..60, out =~ "#{i}) test t#{i} (M.T)" do
+        assert out =~ "end-of-block-#{i}"
+      end
+    end
+  end
 end
