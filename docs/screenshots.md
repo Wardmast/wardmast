@@ -255,6 +255,23 @@ repo's screenshots config supplies them:
 "deps": {"mix": true, "mix_env": "test", "env": {"SECRET_KEY_BASE": "dummy-not-a-secret"}}
 ```
 
+### Pinning the toolchain (mise / asdf projects)
+
+The seed and the boot must run the **same Elixir and OTP**: Mix keeps rebar3 and the Hex archive
+under `$MIX_HOME/elixir/<elixir>-otp-<otp>/`, so a boot on another toolchain than the seed finds
+neither and tries to download rebar (which fails offline). When the boot's `env` sets `PATH`, the
+seed, and the probe that keys the cache, run with that same `PATH`; the cache key then holds that
+toolchain's Elixir/OTP/ERTS, so changing the pin builds a new cache. Only directories under a
+system dir (`/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/opt`) or `sandbox.readonly_paths` are
+kept (absolute, no `..`); the rest is dropped, and with nothing left the server's `PATH` is used.
+`deps.env.PATH` stays refused: pin it once, in `env`.
+
+```json
+"env": {"PATH": "/home/ops/.local/share/mise/installs/elixir/1.20.4-otp-29/bin:/home/ops/.local/share/mise/installs/erlang/29.1.2/bin:/usr/local/bin:/usr/bin:/bin"},
+"sandbox": {"readonly_paths": ["/home/ops/.local/share/mise/installs"]},
+"deps": {"mix": true}
+```
+
 Not covered: npm packages (a `npm ci` in `setup_cmd` has no network; vendor them or list a
 `node_modules` cache under `readonly_paths`), dependencies fetched over SSH or from a private
 Hex organisation (the seed has no credentials), and a dependency that writes into its own

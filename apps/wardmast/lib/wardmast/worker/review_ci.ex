@@ -615,8 +615,12 @@ defmodule Wardmast.Worker.ReviewCi do
   """
   @spec failure_findings(String.t(), String.t(), [map()], boolean()) :: String.t()
   def failure_findings(sha, pr_ref, checks, rerun?) do
+    # Only a real `failed` job proves the re-run failed again: a canceled one is
+    # inconclusive (bd-189j66).
+    failed_again? = rerun? and Enum.any?(checks, &(Map.get(&1, :status) != "canceled"))
+
     rerun_line =
-      if rerun?,
+      if failed_again?,
         do:
           "The failed jobs were re-run once with no code change and failed again, so this is not a flake.",
         else: "The failed jobs could not be re-run, so this is treated as a real failure."
