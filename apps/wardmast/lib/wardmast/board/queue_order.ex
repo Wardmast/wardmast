@@ -30,7 +30,7 @@ defmodule Wardmast.Board.QueueOrder do
   `L` is the number of `:active` tickets that are lifted by today's floors,
   computed at plan time and never stored. When `L >= cap`, every card in the
   queue is ordered by its own priority and says so (`priority_lift: :capped`).
-  The cap is `scheduling_max_lifted_in_flight`, else `max(slots_total - 1, 1)`,
+  The cap is `scheduling_max_lifted_in_flight`, else `max(capacity - 1, 1)`,
   so one slot always serves unlifted work in its own order.
   """
 
@@ -84,10 +84,10 @@ defmodule Wardmast.Board.QueueOrder do
     Map.merge(default_settings(), overrides)
   end
 
-  @doc "The lift cap in force for `slots_total` slots."
+  @doc "The lift cap in force for `capacity` slots."
   @spec lift_cap(settings(), non_neg_integer()) :: pos_integer()
-  def lift_cap(%{max_lifted_in_flight: n}, _slots_total) when is_integer(n) and n > 0, do: n
-  def lift_cap(_settings, slots_total), do: max(slots_total - 1, 1)
+  def lift_cap(%{max_lifted_in_flight: n}, _capacity) when is_integer(n) and n > 0, do: n
+  def lift_cap(_settings, capacity), do: max(capacity - 1, 1)
 
   @doc """
   Resolve the board once. `issues` is every ticket the board reads (reference
@@ -102,10 +102,10 @@ defmodule Wardmast.Board.QueueOrder do
           DateTime.t()
         ) ::
           t()
-  def build(issues, parent_of, slots_total, settings, ready_since, now) do
+  def build(issues, parent_of, capacity, settings, ready_since, now) do
     settings = settings(settings)
     resolutions = resolve(issues, parent_of, settings)
-    cap = lift_cap(settings, slots_total)
+    cap = lift_cap(settings, capacity)
     in_flight = lifted_active(issues, resolutions)
 
     %{

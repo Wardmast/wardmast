@@ -869,7 +869,7 @@ defmodule WardmastWeb.BoardLive do
   # progress, not one per live agent.
   defp slots_used(board), do: Map.get(board, :slots_used, 0)
 
-  defp slots_free(board), do: max(Map.get(board, :slots_total, 0) - slots_used(board), 0)
+  defp slots_free(board), do: max(Map.get(board, :plan_capacity, 0) - slots_used(board), 0)
 
   defp elapsed(nil, _now), do: nil
 
@@ -928,7 +928,7 @@ defmodule WardmastWeb.BoardLive do
   defp head_hue(_), do: nil
 
   defp column_count(%{key: "in_progress"}, items, board),
-    do: "#{length(items)} / #{board.slots_total}"
+    do: "#{length(items)} / #{board.plan_capacity}"
 
   defp column_count(_column, items, _board), do: length(items)
 
@@ -1759,7 +1759,7 @@ defmodule WardmastWeb.BoardLive do
   # popup on hover, focus or tap; without it, just the number.
   defp slot_cap(%{cap: nil} = assigns) do
     ~H"""
-    <span id="board-slot-cap">{@board.slots_total}</span>
+    <span id="board-slot-cap">{@board.plan_capacity}</span>
     """
   end
 
@@ -1767,13 +1767,13 @@ defmodule WardmastWeb.BoardLive do
     ~H"""
     <.info_popup
       id="board-slot-cap"
-      label={"Why the slot cap is #{@board.slots_total}"}
+      label={"Why the slot cap is #{@board.plan_capacity}"}
       align="end"
       trigger_class="px-[3px] underline decoration-dotted underline-offset-[3px] text-[var(--text-primary)] hover:text-[var(--text-title)]"
       data-binding={@cap.binding}
     >
       <:trigger>
-        <span id="board-slot-cap-figure">{@board.slots_total}</span>
+        <span id="board-slot-cap-figure">{@board.plan_capacity}</span>
       </:trigger>
       <p id="board-slot-cap-headline" class="m-0 font-medium text-[var(--text-title)]">
         {@cap.headline}

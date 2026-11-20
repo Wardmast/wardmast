@@ -929,7 +929,7 @@ changes.
 | Node capacity (RW8, RW14) | Chosen after the account (`dispatch.ex:242-243`), so the machine can't influence which account is picked | The walk picks the pair. The pool comes first, then a node that can run it. Non-Claude providers stay local-only (`Placement.eligible/1`'s `non_claude_provider`). Machine capacity is `Nodes.Capacity`'s sum, with no ceiling |
 | The scheduler cap (`slots_total`) | `min` of the terms, in tickets (`snapshot.ex:461-473`) | No independent number. The header shows per-pool seats and per-machine slots. Where a single number is still read (the lift cap and the header total), it's `min(Σ budget over pools any Ready card can use, Σ machine caps)`, computed at plan time |
 | Finish-first and the ES3 order | A held head stops the queue, apart from the skips in §1.1 | The order key is unchanged and the walk keeps it. A skipped card is first in line on the next pass. Finish-first still ranks in-progress epics' children first, and when their pool is full, other work uses the capacity they can't |
-| The ES lift cap (`max_lifted_in_flight`, default `slots_total − 1`) | Static between config changes | `QueueOrder.build/6` (`apps/wardmast/lib/wardmast/board/queue_order.ex:105`) gets the plan-time `slots_total` above, so the lift cap moves with the budgets. With 2 seats it's 1, and one seat still serves unlifted work |
+| The ES lift cap (`max_lifted_in_flight`, default `plan_capacity − 1`) | Static between config changes | `QueueOrder.build/6` (`apps/wardmast/lib/wardmast/board/queue_order.ex:105`) gets the plan-time `plan_capacity` above (`Snapshot.plan_capacity/2`), so the lift cap moves with the budgets. With 2 seats it's 1, and one seat still serves unlifted work |
 | ES7's readout and ES9's switch | Ready wait measured from `ticket_transitions` | Switching to the walk changes Ready wait by itself: skipped cards stop blocking others. ES7's 14-day window must not straddle the `enforce` switch, or it must split at that date. The plan entry gains `wait_cause` (`:queued`, `{:capacity, layer}`, `:own_hold`) so the readout can attribute wait |
 | R7's board hold (`exempt_card_holds`) | Per-card verdict at the exempt line | Replaced in `enforce` by the per-card exempt budget (§3.3) |
 | G13 guardrails | `check_guardrails` first in both routers | Unchanged. A card's candidate pools are its eligible ones, so a card never falls back to an ineligible pool. A card with no eligible pool keeps `:no_eligible_model` |
@@ -1363,14 +1363,19 @@ nothing in the budget path.
   `admission_shadow` record on a run's `routing_decision` and its panel on the
   ticket page. `mix wardmast.burn_report` keeps the burn governor's "would have
   held" record.
-- **Not retired here: the `slots_total` number (split to bd-bux0ej, DC12b).** The board still
-  derives `slots_total` from the capacity terms
-  (`Snapshot.capacity_terms/3`: machine sum, placement, account headroom), and
-  nothing admits or holds a card on it any more. It feeds only the header total
-  (with `CapacityExplainer`'s explanation) and the ES lift cap
-  (`QueueOrder.build/6`). §7 wants those two readers on
-  `min(Σ budget over the pools a Ready card can use, Σ machine caps)` instead;
-  that replacement, and the header wording that explains it, is not done.
+- **The stored `slots_total` (DC12b, bd-bux0ej).** Retired. `Snapshot.load/1` no longer
+  folds the capacity terms into a number kept on the board (`capacity_and_slots/5` and
+  `slots_total/2` are gone, and so is the `slots_total` board field). The board carries
+  `plan_capacity`, computed in `derive/1` from the walk's own sets by
+  `Snapshot.plan_capacity/2`: `min(Σ budget over the pools a Ready card can use, Σ
+  machine caps)`. A pool counts when any Ready card's candidates name it (with no
+  Ready card every pool counts, so an empty queue still shows its capacity); an
+  `:unlimited` side yields to the finite one; no walk reads 0. `QueueOrder.build/6`'s
+  lift cap, the board header and `CapacityExplainer.cap/2` (its `effective` and
+  `free`) all read it. `board.capacity` still carries the old terms, but only so the
+  explainer can list which machine, placement or account limit sits behind the
+  number; nothing admits a card on it. `Snapshot.order_context/1` gathers the walk
+  over the queued tickets when an epic has a floor.
 
 ### 10.6 Migration notes
 

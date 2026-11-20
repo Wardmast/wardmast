@@ -77,7 +77,7 @@ defmodule Wardmast.Board.SnapshotTest do
     )
   end
 
-  defp slots_free(board), do: max(board.slots_total - board.slots_used, 0)
+  defp slots_free(board), do: max(board.plan_capacity - board.slots_used, 0)
 
   defp ids(cards), do: Enum.map(cards, & &1.id)
 
@@ -360,7 +360,7 @@ defmodule Wardmast.Board.SnapshotTest do
 
       assert board.attention == []
       assert board.walk.promote == nil
-      assert board.slots_total == 0
+      assert board.plan_capacity == 0
       # Paused, because nothing should claim a queue position in a queue this
       # process could not read.
       assert board.paused
@@ -381,7 +381,7 @@ defmodule Wardmast.Board.SnapshotTest do
           workers: [worker("bd-1", :working), worker("bd-2", :review_gate)]
         )
 
-      assert board.slots_total == 3
+      assert board.plan_capacity == 3
       assert board.slots_used == 2
       assert slots_free(board) == 1
     end
@@ -1493,7 +1493,7 @@ defmodule Wardmast.Board.SnapshotTest do
       assert ids(board.in_progress) == ["bd-run"]
       assert board.blocked == [] and board.merging == [] and board.verifying == []
       assert ids(board.closed_today) == ["bd-closed"]
-      assert board.slots_total == 4
+      assert board.plan_capacity == 4
       assert slots_free(board) == 3
     end
   end

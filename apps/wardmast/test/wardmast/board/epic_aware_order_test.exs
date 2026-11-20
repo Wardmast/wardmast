@@ -112,7 +112,7 @@ defmodule Wardmast.Board.EpicAwareOrderTest do
           workers: [],
           blocked_by: %{},
           now: @now,
-          slots_total: 3,
+          walk: Wardmast.Board.OpenWalk.walk(slots: 3),
           quota: :ok
         },
         Map.new(extra)
@@ -266,6 +266,17 @@ defmodule Wardmast.Board.EpicAwareOrderTest do
       assert %{priority_lift: :applied} = card(snapshot, "bd-836iuz")
     end
 
+    test "the plan-time capacity sets the cap: 2 usable slots make it 1, so one lifted ticket caps" do
+      b = board(%{"reports" => 1})
+
+      issues =
+        Enum.map(b.issues, fn i -> if i.id == "bd-7o4h44", do: %{i | state: :active}, else: i end)
+
+      snapshot = derive(%{b | issues: issues}, walk: Wardmast.Board.OpenWalk.walk(slots: 2))
+      assert snapshot.plan_capacity == 2
+      assert %{priority_lift: :capped} = card(snapshot, "bd-836iuz")
+    end
+
     test "scheduling_max_lifted_in_flight overrides the derived cap" do
       b = board(%{"reports" => 1})
 
@@ -403,7 +414,7 @@ defmodule Wardmast.Board.EpicAwareOrderTest do
                QueueOrder.settings(%{finish_first: true, bogus: 1, epic_floors_enabled: nil})
     end
 
-    test "the lift cap defaults to max(slots_total - 1, 1) and honours an override" do
+    test "the lift cap defaults to max(capacity - 1, 1) and honours an override" do
       d = QueueOrder.default_settings()
       assert QueueOrder.lift_cap(d, 3) == 2
       assert QueueOrder.lift_cap(d, 1) == 1
