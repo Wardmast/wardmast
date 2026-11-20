@@ -462,6 +462,188 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # macOS Intel release (bd-5sp336): identical to build-macos but on GitHub's
+  # Intel runner image, publishing arbiter-<tag>-darwin-x86_64.tar.gz (+ .sha256).
+  # Independent of build-macos and needed by nothing else, so an Intel runner
+  # outage never holds back the other artifacts. The ad-hoc signing step is
+  # kept for parity (harmless on Intel).
+  build-macos-intel:
+    name: Build OTP Release (macOS Intel x86_64)
+    needs: build
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+
+    permissions:
+      contents: write
+
+    env:
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+      ELIXIR_ERL_OPTIONS: "+fnu"
+      MIX_ENV: prod
+      ARB_BUILD_RELEASE_REPO: ${{ github.repository }}
+      # Lowest macOS the tarball runs on. Read by clang (OpenSSL, OTP) and rustc
+      # (the mdex NIF); scripts/build-release-otp.sh defaults to the same value.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      RUSTLER_PRECOMPILED_FORCE_BUILD_ALL: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore Erlang/OTP build cache
+        id: otp-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/otp
+          key: otp-static-openssl-macos15-x86_64-${{ hashFiles('scripts/build-release-otp.sh') }}
+
+      - name: Build Erlang/OTP 29 with static OpenSSL
+        if: steps.otp-cache.outputs.cache-hit != 'true'
+        run: |
+          bash scripts/build-release-otp.sh --prefix "${HOME}/otp"
+
+      - name: Put Erlang/OTP on PATH
+        run: |
+          echo "${HOME}/otp/bin" >> "$GITHUB_PATH"
+          "${HOME}/otp/bin/erl" -noshell -eval 'ok = crypto:start(), io:format("~p~n", [crypto:info_lib()]), halt().'
+
+      - name: Install Elixir 1.20
+        run: |
+          ELIXIR_VERSION="1.20.4"
+          OTP_MAJOR="29"
+          curl -fsSL "https://repo.hex.pm/builds/elixir/v${ELIXIR_VERSION}-otp-${OTP_MAJOR}.zip" -o "${RUNNER_TEMP}/elixir.zip"
+          mkdir -p "${HOME}/elixir"
+          unzip -q "${RUNNER_TEMP}/elixir.zip" -d "${HOME}/elixir"
+          echo "${HOME}/elixir/bin" >> "$GITHUB_PATH"
+
+      - name: Select the pinned Rust toolchain
+        # Keep RUST_VERSION in step with the `build` job's Install Rust
+        # toolchain step (and at or above the rust-version in
+        # deps/mdex_native/native/mdex_native_nif/Cargo.toml). The runner image
+        # carries rustup; install it only if a future image drops it.
+        run: |
+          RUST_VERSION="1.91.0"
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+            echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="${HOME}/.cargo/bin:${PATH}"
+          fi
+          rustup toolchain install "${RUST_VERSION}" --profile minimal
+          rustup default "${RUST_VERSION}"
+          cargo --version
+          rustc --version
+
+      - name: Bootstrap Hex and Rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Determine tag name
+        id: tag
+        run: |
+          TAG="${{ needs.build.outputs.tag }}"
+          echo "name=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Get production dependencies
+        run: |
+          MIX_ENV=prod mix deps.get --only prod
+
+      - name: Install asset build tools
+        run: |
+          MIX_ENV=prod mix cmd --app wardmast_web mix assets.setup
+        env:
+          RELEASE_VERSION: ${{ steps.tag.outputs.name }}
+
+      - name: Compile (prod)
+        run: |
+          MIX_ENV=prod mix compile
+        env:
+          RELEASE_VERSION: ${{ steps.tag.outputs.name }}
+
+      - name: Build and digest web assets
+        run: |
+          MIX_ENV=prod mix cmd --app wardmast_web mix assets.deploy
+
+      - name: Build OTP release
+        run: |
+          MIX_ENV=prod mix release wardmast
+        env:
+          RELEASE_VERSION: ${{ steps.tag.outputs.name }}
+
+      - name: Build ward escript and smoke-test it on the bundled erts
+        # bd-d5mg29: the tarball ships bin/ward + bin/ward.escript; `ward
+        # --version` must work with only the release's erts on PATH (no system
+        # Erlang), which is what a toolchain-free macOS install has.
+        run: |
+          (cd apps/wardmast_cli && MIX_ENV=prod mix escript.build)
+          cp apps/wardmast_cli/ward _build/prod/rel/wardmast/bin/ward.escript
+          scripts/check-release-ward.sh _build/prod/rel/wardmast apps/wardmast_cli/ward
+        env:
+          RELEASE_VERSION: ${{ steps.tag.outputs.name }}
+          MIX_ENV: prod
+
+      - name: Ad-hoc codesign Mach-O files and verify
+        # arm64 macOS refuses to run unsigned code. Sign every Mach-O file
+        # (ad hoc, no identity) after the release is assembled and before it is
+        # archived, then verify each signature.
+        run: |
+          REL="_build/prod/rel/wardmast"
+          signed=0
+          while IFS= read -r -d '' f; do
+            case "$(head -c 4 "$f" | od -An -tx1 | tr -d ' \n')" in
+              cffaedfe | feedfacf | cefaedfe | feedface | cafebabe | bebafeca) ;;
+              *) continue ;;
+            esac
+            codesign --force -s - "$f"
+            codesign --verify --strict "$f"
+            signed=$((signed + 1))
+          done < <(find "${REL}" -type f -print0)
+          if [ "${signed}" -eq 0 ]; then
+            echo "error: no Mach-O files found to sign under ${REL}" >&2
+            exit 1
+          fi
+          echo "signed and verified ${signed} Mach-O file(s)"
+
+      - name: Package and checksum release
+        run: |
+          TAG="${{ steps.tag.outputs.name }}"
+          TARBALL="arbiter-${TAG}-darwin-x86_64.tar.gz"
+          REL="_build/prod/rel/wardmast"
+          # No systemd on macOS: drop the node agent's user unit overlay.
+          rm -f "${REL}/share/arbiter-node/arbiter-node.service"
+          # Strip extended attributes (quarantine / provenance) so they are not
+          # archived, and keep bsdtar from emitting AppleDouble `._*` files.
+          xattr -cr "${REL}"
+          COPYFILE_DISABLE=1 tar -czf "${TARBALL}" -C "${REL}" .
+          shasum -a 256 "${TARBALL}" > "${TARBALL}.sha256"
+          echo "TARBALL=${TARBALL}" >> "$GITHUB_ENV"
+
+      - name: Check tarball hygiene
+        run: |
+          if tar -tzf "${TARBALL}" | grep -E '(^|/)(\._[^/]*|\.DS_Store|[^/]*\.service)$'; then
+            echo "error: ${TARBALL} contains AppleDouble / .DS_Store / systemd files (listed above)" >&2
+            exit 1
+          fi
+
+      - name: Check shipped binaries only link system libraries
+        # The macOS analogue of the ubi8 shared-lib guard: a Homebrew dylib in
+        # any Mach-O file fails the release here, naming file and library.
+        run: |
+          bash scripts/check-release-macho-libs.sh "${TARBALL}"
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.tag }}
+          name: "Wardmast ${{ needs.build.outputs.tag }}"
+          files: |
+            ${{ env.TARBALL }}
+            ${{ env.TARBALL }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   publish-oci:
     name: Publish controller image, chart and worker base to GHCR
     # KH7 (OD6): the controller image, the wardmast-node chart and the worker base are

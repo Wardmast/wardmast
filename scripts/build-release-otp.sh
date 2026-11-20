@@ -118,8 +118,13 @@ case "${UNAME_S}/${UNAME_M}" in
     SHA256_TOOL="shasum -a 256"
     DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-$DEFAULT_DEPLOYMENT_TARGET}"
     ;;
+  Darwin/x86_64)
+    OPENSSL_TARGET="darwin64-x86_64-cc"
+    SHA256_TOOL="shasum -a 256"
+    DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-$DEFAULT_DEPLOYMENT_TARGET}"
+    ;;
   *)
-    echo "error: unsupported platform: ${UNAME_S}/${UNAME_M} (supported: Linux/x86_64, Darwin/arm64)" >&2
+    echo "error: unsupported platform: ${UNAME_S}/${UNAME_M} (supported: Linux/x86_64, Darwin/arm64, Darwin/x86_64)" >&2
     exit 1
     ;;
 esac

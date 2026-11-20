@@ -78,6 +78,28 @@ defmodule Wardmast.ReleaseWorkflowMacosTest do
     assert env["MIX_ENV"] == "prod"
   end
 
+  test "build-macos-intel publishes a darwin-x86_64 tarball from an Intel runner", %{jobs: jobs} do
+    job = jobs["build-macos-intel"]
+    assert job["runs-on"] == "macos-15-intel"
+    assert job["needs"] == "build"
+    assert job["permissions"] == %{"contents" => "write"}
+    assert job["env"]["MACOSX_DEPLOYMENT_TARGET"] =~ ~r/^\d+\.\d+$/
+    assert job["env"]["RUSTLER_PRECOMPILED_FORCE_BUILD_ALL"] == "1"
+
+    text = run_text(job)
+    assert text =~ ~s(arbiter-${TAG}-darwin-x86_64.tar.gz)
+    assert text =~ "check-release-macho-libs.sh"
+    refute text =~ "darwin-arm64"
+
+    cache = Enum.find(job["steps"], &(to_string(&1["uses"]) =~ "actions/cache"))
+    assert cache["with"]["key"] =~ "x86_64"
+
+    publish = Enum.find(job["steps"], &(to_string(&1["uses"]) =~ "action-gh-release"))
+    assert publish["with"]["files"] =~ "${{ env.TARBALL }}.sha256"
+    # Nothing waits on the Intel job.
+    assert jobs["publish-oci"]["needs"] == "build"
+  end
+
   test "the Linux build job is unchanged", %{jobs: jobs} do
     build = jobs["build"]
     assert build["runs-on"] == "ubuntu-latest"

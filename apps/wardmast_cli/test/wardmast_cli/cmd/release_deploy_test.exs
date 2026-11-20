@@ -2165,25 +2165,35 @@ defmodule WardmastCli.Cmd.ReleaseDeployTest do
   # ---- host check (bd-1sqvlw) --------------------------------------------
 
   describe "host check" do
-    test "refuses on a non-Linux host before downloading or writing anything", %{home: home} do
-      Process.put(:bd2_host_platform, {:darwin, "x86_64"})
+    test "refuses an unsupported host before downloading or writing anything", %{home: home} do
+      Process.put(:bd2_host_platform, {:windows, "x86_64"})
 
       {_out, err, code} = capture(fn -> ReleaseDeploy.run([]) end)
 
       assert code == 1
-      assert err =~ "darwin/x86_64"
+      assert err =~ "windows/x86_64"
       assert err =~ "hosts the server"
       refute File.exists?(Path.join(home, "releases"))
       refute File.exists?(Path.join(home, "deploy-status.json"))
     end
 
     test "--this-host does not waive the platform check" do
-      Process.put(:bd2_host_platform, {:darwin, "x86_64"})
+      Process.put(:bd2_host_platform, {:windows, "x86_64"})
 
       {_out, err, code} = capture(fn -> ReleaseDeploy.run(["--this-host"]) end)
 
       assert code == 1
-      assert err =~ "darwin/x86_64"
+      assert err =~ "windows/x86_64"
+    end
+
+    test "accepts darwin/x86_64 (Intel) and maps it to the darwin-x86_64 asset" do
+      alias WardmastCli.Cmd.ReleaseDeploy.{Github, HostCheck}
+      Process.put(:bd2_host_platform, {:darwin, "x86_64"})
+      assert :ok = HostCheck.check(this_host: true)
+      assert Github.asset_name("v1") == "arbiter-v1-darwin-x86_64.tar.gz"
+
+      assert HostCheck.parse_platform({:unix, :darwin}, ~c"x86_64-apple-darwin23.4.0") ==
+               {:darwin, "x86_64"}
     end
 
     test "accepts darwin/arm64" do

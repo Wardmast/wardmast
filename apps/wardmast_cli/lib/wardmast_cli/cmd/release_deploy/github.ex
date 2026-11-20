@@ -117,6 +117,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.Github do
   def asset_name(tag, platform) do
     case HostCheck.normalize(platform) do
       {:darwin, "arm64"} -> "arbiter-#{tag}-darwin-arm64.tar.gz"
+      {:darwin, "x86_64"} -> "arbiter-#{tag}-darwin-x86_64.tar.gz"
       _ -> "arbiter-#{tag}-linux.tar.gz"
     end
   end
