@@ -379,6 +379,77 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
       assert env =~ ~r/^MIX_ENV=dev$/m
     end
 
+    # bd-2qj1ry: the seed runs on the toolchain the boot's env.PATH pins, not the server's.
+    defp stub_toolchain!(dir, name, elixir, otp) do
+      bin = Path.join([dir, "toolchains", name, "bin"])
+      File.mkdir_p!(bin)
+      exe = Path.join(bin, "elixir")
+
+      File.write!(exe, """
+      #!/bin/sh
+      echo elixir=#{elixir}
+      echo otp=#{otp}
+      echo erts=#{otp}.0
+      echo arch=stub
+      """)
+
+      File.chmod!(exe, 0o755)
+      bin
+    end
+
+    # Like Mix: `$MIX_HOME/elixir/<major>-<minor>-otp-<otp>/rebar3`, for the toolchain on PATH.
+    @rebar_seed """
+    set -e
+    e=$(elixir | sed -n 's/^elixir=//p' | cut -d. -f1,2 | tr . -)
+    o=$(elixir | sed -n 's/^otp=//p')
+    mkdir -p "$MIX_DEPS_PATH" "$MIX_HOME/elixir/$e-otp-$o" "$HEX_HOME" _build
+    touch "$MIX_HOME/elixir/$e-otp-$o/rebar3"
+    echo "$PATH" > "$MIX_DEPS_PATH/seed_path"
+    """
+
+    test "the seed runs on the toolchain the boot's env.PATH pins; a new toolchain, a new cache",
+         %{tmp_dir: dir} = ctx do
+      old = stub_toolchain!(dir, "old", "1.19.4", "28")
+      new = stub_toolchain!(dir, "new", "1.20.4", "29")
+      opts = Keyword.put(ctx.opts, :seed_script, @rebar_seed)
+
+      given = fn bin ->
+        input(ctx.repo, ctx.base, ctx.head, %{
+          readonly_paths: [Path.join(dir, "toolchains")],
+          seed_env: [{"PATH", bin <> ":/usr/bin:/bin"}]
+        })
+      end
+
+      assert {:ok, on_new} = DepsCache.prepare(given.(new), opts)
+      assert File.regular?(Path.join(on_new.dir, "mix/elixir/1-20-otp-29/rebar3"))
+      refute File.exists?(Path.join(on_new.dir, "mix/elixir/1-19-otp-28"))
+      assert File.read!(Path.join(on_new.dir, "deps/seed_path")) == "#{new}:/usr/bin:/bin\n"
+
+      # The other toolchain does not reuse it.
+      assert {:ok, on_old} = DepsCache.prepare(given.(old), opts)
+      refute on_old.dir == on_new.dir
+      assert File.regular?(Path.join(on_old.dir, "mix/elixir/1-19-otp-28/rebar3"))
+
+      # The same one again is a hit.
+      assert {:ok, ^on_new} = DepsCache.prepare(given.(new), opts)
+    end
+
+    test "PATH may only hold system dirs and readonly_paths; the rest is dropped",
+         %{tmp_dir: dir} = ctx do
+      allowed = stub_toolchain!(dir, "ok", "1.20.4", "29")
+      evil = stub_toolchain!(dir, "evil", "1.0.0", "1")
+      opts = Keyword.put(ctx.opts, :seed_script, @rebar_seed)
+
+      given =
+        input(ctx.repo, ctx.base, ctx.head, %{
+          readonly_paths: [Path.join(dir, "toolchains/ok")],
+          seed_env: [{"PATH", Enum.join([evil, allowed, "relative/bin", "/usr/bin"], ":")}]
+        })
+
+      assert {:ok, cache} = DepsCache.prepare(given, opts)
+      assert File.read!(Path.join(cache.dir, "deps/seed_path")) == "#{allowed}:/usr/bin\n"
+    end
+
     # Whatever the seed leaves is untrusted to the host: a symlink it plants is never followed by
     # the host-side copy, write or rename that publishes the cache.
     test "a seed's symlinks are never followed by the host", %{tmp_dir: dir} = ctx do

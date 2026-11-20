@@ -23,7 +23,8 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   SHA-256, and a fingerprint of the toolchain the boot will use (Elixir, OTP, ERTS and the
   architecture, as `elixir` reports them **inside the capture sandbox**, so it is the one the
   boots run), and the `MIX_ENV` it was compiled under unless that is `dev` (bd-ur1zty). Hex and rebar3 archives and precompiled NIFs are bound to that toolchain, so a new
-  one misses the cache. A miss seeds it, once per key (`:global.trans/4`):
+  one misses the cache. The seed and that probe run with the boot's `env.PATH` when it pins a
+  toolchain (only system dirs and `readonly_paths` entries kept; bd-2qj1ry), else the server's. A miss seeds it, once per key (`:global.trans/4`):
 
     1. `git archive` of the source commit (no `.git`, nothing a worker wrote);
     2. `seed_script/0` in it, through the sandbox's `fetch_command/2`: the same filesystem
@@ -84,6 +85,7 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   @git_timeout_ms 120_000
   @proxy_env ~w(HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy)
   @keep_days 14
+  @system_dirs ~w(/usr /bin /sbin /lib /lib64 /opt)
   # What the seed sets itself: a config value for one of these is dropped, not applied.
   @host_env ~w(PATH HOME LANG TMPDIR MIX_ENV ARB_NEED_HEX ARB_NEED_REBAR MIX_DEPS_PATH MIX_HOME
                HEX_HOME HEX_OFFLINE ELIXIR_MAKE_CACHE_DIR RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH
@@ -356,7 +358,7 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
       end
 
       box = %{checkout: probe, scratch: probe, readonly_paths: input.readonly_paths}
-      env = [{"PATH", Sandbox.path()}, {"HOME", home}, {"LANG", "C.UTF-8"}]
+      env = [{"PATH", toolchain_path(input)}, {"HOME", home}, {"LANG", "C.UTF-8"}]
       argv = ["elixir", "-e", @fingerprint_code]
 
       case sandboxed(&input.sandbox.command(&1, &2, nil), argv, box, env, @fingerprint_timeout_ms) do
@@ -474,7 +476,7 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
 
     env =
       [
-        {"PATH", Sandbox.path()},
+        {"PATH", toolchain_path(input)},
         {"HOME", Path.join(scratch, "home")},
         {"LANG", "C.UTF-8"},
         {"TMPDIR", Path.join(scratch, "tmp")},
@@ -506,6 +508,37 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
         is_binary(name) and is_binary(value),
         name not in @host_env,
         do: {name, value}
+  end
+
+  # bd-2qj1ry: the seed (and the fingerprint keying its cache) runs on the toolchain the boot
+  # does. A boot whose `env.PATH` pins one (mise/asdf install dirs) gets that PATH here too, so
+  # Mix's `$MIX_HOME/elixir/<elixir>-otp-<otp>/` (rebar3, the Hex archive) is the boot's. Only
+  # directories the boot could see are kept: absolute, no `..`, under a system dir or one of
+  # `readonly_paths`; anything else is dropped. No pin (or nothing left of it) is the server's.
+  defp toolchain_path(input) do
+    pinned =
+      input
+      |> Map.get(:seed_env, [])
+      |> Enum.find_value(fn
+        {"PATH", value} when is_binary(value) -> value
+        _ -> nil
+      end)
+
+    allowed = @system_dirs ++ Enum.map(Map.get(input, :readonly_paths, []), &to_string/1)
+
+    kept =
+      for dir <- String.split(pinned || "", ":", trim: true),
+          Path.type(dir) == :absolute,
+          ".." not in Path.split(dir),
+          Enum.any?(allowed, &under?(dir, &1)),
+          do: dir
+
+    if kept == [], do: Sandbox.path(), else: Enum.join(kept, ":")
+  end
+
+  defp under?(dir, root) do
+    root = String.trim_trailing(root, "/")
+    root != "" and (dir == root or String.starts_with?(dir, root <> "/"))
   end
 
   defp flag(true), do: "1"
