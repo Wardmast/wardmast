@@ -99,15 +99,20 @@ defmodule Wardmast.Config.PathsTest do
       end)
     end
 
-    test "follows ARB_HOME, the same path the plist writer uses" do
-      System.put_env("ARB_HOME", "/data/home")
-      assert Paths.server_log_path() == "/data/home/log/wardmast.log"
-    end
-
-    test "WARDMAST_HOME wins over ARB_HOME" do
-      System.put_env("ARB_HOME", "/data/arb")
+    test "follows WARDMAST_HOME" do
       System.put_env("WARDMAST_HOME", "/data/ward")
       assert Paths.server_log_path() == "/data/ward/log/wardmast.log"
+    end
+
+    test "ARB_HOME (the checkout in dev mode) does not move the log path" do
+      System.put_env("ARB_HOME", "/src/checkout")
+      assert Paths.server_log_path() == Path.expand("~/.wardmast/log/wardmast.log")
+    end
+
+    test "the plist's exported WARDMAST_SERVER_LOG is what the rotator watches" do
+      System.put_env("ARB_HOME", "/data/home")
+      System.put_env("WARDMAST_SERVER_LOG", "/data/home/.wardmast/log/wardmast.log")
+      assert Paths.server_log_path() == "/data/home/.wardmast/log/wardmast.log"
     end
 
     test "WARDMAST_SERVER_LOG still overrides" do
