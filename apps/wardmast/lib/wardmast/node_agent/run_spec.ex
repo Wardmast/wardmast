@@ -96,7 +96,7 @@ defmodule Wardmast.NodeAgent.RunSpec do
   @secret_link_re ~r/\A[A-Za-z0-9][A-Za-z0-9_.\/-]{0,199}\z/
   # What a worktree mount may be seeded with: the roots of the agent config
   # `Wardmast.Worker.Dispatch` writes into a worktree and git does not carry.
-  @worktree_file_roots [".mcp.json", ".claude/skills"]
+  @worktree_file_roots [".mcp.json", ".claude/skills", ".arbiter/visual-actual"]
   @max_worktree_file_bytes 1_048_576
   @max_worktree_files_bytes 4_194_304
   @max_worktree_files 256

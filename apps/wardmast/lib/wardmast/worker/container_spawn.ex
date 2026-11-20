@@ -1542,7 +1542,7 @@ defmodule Wardmast.Worker.ContainerSpawn do
   def worktree_files(worktree) when is_binary(worktree) do
     with {:ok, mcp, secrets} <- mcp_file(worktree),
          {:ok, skills} <- skill_files(worktree),
-         {:ok, visual} <- visual_actual_files(worktree) do
+         {:ok, visual} <- visual_actual_files(worktree, mcp, skills) do
       {:ok, mcp |> Map.merge(skills) |> Map.merge(visual), secrets}
     end
   end
@@ -1591,20 +1591,34 @@ defmodule Wardmast.Worker.ContainerSpawn do
 
   defp redact_bearer_tokens(config), do: {config, %{}}
 
-  # GitHub #1593: the head's rendered visual images (`VisualBaselines.hand_off/2`) are untracked
-  # like `.mcp.json`, so the bundle cannot carry them either. They ship as worktree files. Over the
-  # caps nothing ships (the brief tells the agent when the directory is empty); never a failed spawn.
+  # RunSpec's caps (per file, total bytes, file count) bind the whole `files` map, so the images
+  # ship only if every one fits beside the `.mcp.json` and skills already in it; otherwise none do
+  # and the dispatcher's brief says they were not delivered (never a failed spawn).
   @visual_dir ".arbiter/visual-actual"
-  @max_visual_files 200
-  @max_visual_bytes 48 * 1024 * 1024
+  @max_visual_file_bytes 1_048_576
+  @max_visual_total_bytes 4_194_304
+  @max_visual_total_files 256
 
-  defp visual_actual_files(worktree) do
+  @doc false
+  @spec visual_actual_shipped?(String.t()) :: boolean()
+  def visual_actual_shipped?(worktree) do
+    case worktree_files(worktree) do
+      {:ok, files, _} -> Enum.any?(Map.keys(files), &String.starts_with?(&1, @visual_dir <> "/"))
+      _ -> false
+    end
+  end
+
+  defp visual_actual_files(worktree, mcp, skills) do
     root = Path.join(worktree, @visual_dir)
+    used = Map.merge(mcp, skills)
+    used_bytes = used |> Map.values() |> Enum.map(&byte_size/1) |> Enum.sum()
 
     with {:ok, %File.Stat{type: :directory}} <- File.lstat(root),
-         paths when length(paths) <= @max_visual_files <- walk_files(root),
+         paths when paths != [] <- walk_files(root),
+         true <- map_size(used) + length(paths) <= @max_visual_total_files,
          sizes = Enum.map(paths, &File.stat!(&1).size),
-         true <- Enum.sum(sizes) <= @max_visual_bytes,
+         true <- Enum.all?(sizes, &(&1 <= @max_visual_file_bytes)),
+         true <- used_bytes + Enum.sum(sizes) <= @max_visual_total_bytes,
          {:ok, files} <- read_skill_files(worktree, paths) do
       {:ok, files}
     else

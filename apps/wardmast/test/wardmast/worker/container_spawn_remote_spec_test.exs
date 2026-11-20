@@ -368,6 +368,39 @@ defmodule Wardmast.Worker.ContainerSpawnRemoteSpecTest do
       refute Map.has_key?(files, ".arbiter/INBOX")
     end
 
+    test "a spec carrying staged visual images passes the node's RunSpec.validate/1", %{
+      request: request,
+      tmp_dir: dir
+    } do
+      worktree = injected_worktree(dir)
+      File.mkdir_p!(Path.join(worktree, ".arbiter/visual-actual"))
+      File.write!(Path.join(worktree, ".arbiter/visual-actual/a-linux.png"), "png-bytes")
+      {:ok, files, secrets} = ContainerSpawn.worktree_files(worktree)
+      request = Map.merge(request, %{worktree_files: files, worktree_secrets: secrets})
+
+      assert {:ok, spec} =
+               ContainerSpawn.remote_spec(request, %{argv: ["claude"], env: []}, "run-1")
+
+      wire = spec |> Jason.encode!() |> Jason.decode!()
+      assert {:ok, %Wardmast.NodeAgent.RunSpec{}} = Wardmast.NodeAgent.RunSpec.validate(wire)
+    end
+
+    test "images over the node's per-file cap are not shipped (never a refused spec)", %{
+      tmp_dir: dir
+    } do
+      worktree = Path.join(dir, "big")
+      File.mkdir_p!(Path.join(worktree, ".arbiter/visual-actual"))
+
+      File.write!(
+        Path.join(worktree, ".arbiter/visual-actual/a-linux.png"),
+        :binary.copy("x", 1_048_577)
+      )
+
+      assert {:ok, files, _} = ContainerSpawn.worktree_files(worktree)
+      assert files == %{}
+      refute ContainerSpawn.visual_actual_shipped?(worktree)
+    end
+
     test "worktree_files/1 of a worktree with nothing injected is empty", %{tmp_dir: dir} do
       File.mkdir_p!(Path.join(dir, "bare"))
       assert {:ok, %{}, %{}} = ContainerSpawn.worktree_files(Path.join(dir, "bare"))

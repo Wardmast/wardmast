@@ -259,7 +259,7 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassDispatcher do
          {:ok, node} <- ensure_node_image(node, task, context, args),
          {:ok, worktree_path} <- create_worktree(context, node),
          {:ok, node, seed} <- seed_node(node, worktree_path, context),
-         context <- stage_visual_actual(context, worktree_path, args),
+         context <- stage_visual_actual(context, worktree_path, args, node),
          {:ok, worker_pid} <-
            start_worker(task, context, worktree_path, provider, {fallback_reason, decision}, %{
              node: node,
@@ -333,20 +333,29 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassDispatcher do
   # fetch CI artifacts, so the head's rendered images are put in its checkout (a node run
   # ships them with the other worktree files, `ContainerSpawn.worktree_files/1`) and the
   # brief says how to use them. Nothing is copied over a baseline here: the agent judges.
-  defp stage_visual_actual(context, worktree_path, args) do
+  defp stage_visual_actual(context, worktree_path, args, node) do
     case Map.get(args, :visual_handoff) do
       %{} = handoff ->
         stage =
           Map.get(args, :visual_hand_off_fun) ||
             fn path -> hand_off_visual(context, handoff, path) end
 
-        outcome = safe_hand_off(stage, worktree_path)
+        outcome = stage |> safe_hand_off(worktree_path) |> shippable(node, worktree_path)
         Map.put(context, :visual_actual, outcome)
 
       _ ->
         context
     end
   end
+
+  # A node run only has what ships in its spec; images the spec cannot carry are not delivered.
+  defp shippable({:ok, _} = outcome, node, path) when not is_nil(node) do
+    if Wardmast.Worker.ContainerSpawn.visual_actual_shipped?(path),
+      do: outcome,
+      else: {:skip, :too_large_to_ship}
+  end
+
+  defp shippable(outcome, _node, _path), do: outcome
 
   defp hand_off_visual(context, handoff, path) do
     Wardmast.Worker.VisualBaselines.hand_off(
