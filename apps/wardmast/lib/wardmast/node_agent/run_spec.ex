@@ -26,7 +26,7 @@ defmodule Wardmast.NodeAgent.RunSpec do
   | `bridges` | `[%{"name" => n, "path" => container path}]`: the per-run sockets (RW10) |
   | `env` | non-secret environment, `%{name => value}` |
   | `secrets` | `%{name => value}`: delivered by a tmpfs file, **never** as `-e NAME` (§11, RW2/U13) |
-  | `secret_files` | optional (bd-b2t0kw): `%{name => %{"content" => base64, "link" => path}}`, a credential the CLI reads from a file (agy's Google Cloud service-account key, and its MCP config, whose bearer agy never expands from the env). Never logged; counted with `secrets` against the same 64 KiB. A cluster pod keeps each at `/run/arb/creds/<name>` (its memory volume, 0600) for the run's life; `link`, a relative path under the `config_dir` mount, is where the pod puts a symlink to it. A machine node refuses a spec that carries them (no tmpfs layout for them there yet) |
+  | `secret_files` | optional (bd-b2t0kw): `%{name => %{"content" => base64, "link" => path}}`, a credential the CLI reads from a file (agy's Google Cloud service-account key, and its MCP config, whose bearer agy never expands from the env). Never logged; counted with `secrets` against the same 64 KiB. A cluster pod keeps each at `/run/arb/creds/<name>` (its memory volume, 0600) for the run's life; `link`, a relative path under the `config_dir` mount, is where the pod puts a symlink to it. A machine node takes them only on a `tmpfs` `config_dir` (SI8): each is written at its `link`, one of `auth.json`, `config.toml`, `AGENTS.md`, `rules/arbiter.rules`, and a spec with them and no tmpfs config dir is refused |
   | `limits` | `%{"memory", "memory_swap", "cpus"}`, each emitted only when its cgroup controller is delegated |
   | `network` | `"none"` (default) or `"pasta"` |
   | `services` | test-services definitions (`Wardmast.Worker.TestServices` specs), or `[]` |
@@ -35,7 +35,9 @@ defmodule Wardmast.NodeAgent.RunSpec do
   | `extra_args` | must be absent or `[]`: there is no way to pass a flag |
 
   Mount kinds: `worktree`, `home`, `config_dir`, `tmp` (directories the agent
-  owns under its own root, mounted at `path`), `cli` (`name`, `sha256`, `path`
+  owns under its own root, mounted at `path`; a `config_dir` with `"tmpfs": true`
+  (SI8, Codex's `CODEX_HOME`) is a directory of its own on the node's tmpfs, with
+  `sessions/` bound from disk), `cli` (`name`, `sha256`, `path`
   under `/opt/arbiter/cli`: a content-addressed file the node fetches and
   caches), `prompt` (`content` base64, mounted read-only at `path`) and, on
   `config_dir`, optional `files` (`settings.json`, `CLAUDE.md`, base64) and an
@@ -87,11 +89,14 @@ defmodule Wardmast.NodeAgent.RunSpec do
   # Claude's generated settings and memory, and agy's (bd-b2t0kw: its config dir is
   # `$HOME/.gemini`, the posture at `antigravity-cli/settings.json`).
   @config_files ~w(settings.json CLAUDE.md antigravity-cli/settings.json GEMINI.md)
+  # SI8: what a tmpfs `config_dir` (a Codex `CODEX_HOME`) may be seeded with, by path
+  # under it: the login, the backend config, the worker memory and the exec-policy rules.
+  @tmpfs_files ~w(auth.json config.toml AGENTS.md rules/arbiter.rules)
   @secret_file_re ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/
   @secret_link_re ~r/\A[A-Za-z0-9][A-Za-z0-9_.\/-]{0,199}\z/
   # What a worktree mount may be seeded with: the roots of the agent config
   # `Wardmast.Worker.Dispatch` writes into a worktree and git does not carry.
-  @worktree_file_roots [".mcp.json", ".claude/skills"]
+  @worktree_file_roots [".mcp.json", ".claude/skills", ".arbiter/visual-actual"]
   @max_worktree_file_bytes 1_048_576
   @max_worktree_files_bytes 4_194_304
   @max_worktree_files 256
@@ -400,13 +405,20 @@ defmodule Wardmast.NodeAgent.RunSpec do
   defp mounts(_), do: refuse({:bad_value, "mounts"})
 
   defp mount(%{"kind" => kind} = mount) when kind in @mount_kinds do
-    with {:ok, path} <- path(mount["path"], "mounts.#{kind}.path") do
+    with {:ok, path} <- path(mount["path"], "mounts.#{kind}.path"),
+         :ok <- tmpfs_flag(kind, Map.get(mount, "tmpfs")) do
       mount_for(kind, path, mount)
     end
   end
 
   defp mount(%{"kind" => kind}), do: refuse({:unknown_mount_kind, to_string(kind)})
+
   defp mount(_), do: refuse({:bad_value, "mounts"})
+
+  # SI8: only a config dir may live on tmpfs, and the flag is a boolean.
+  defp tmpfs_flag(_kind, nil), do: :ok
+  defp tmpfs_flag("config_dir", flag) when is_boolean(flag), do: :ok
+  defp tmpfs_flag(kind, _flag), do: refuse({:bad_value, "mounts.#{kind}.tmpfs"})
 
   # A config dir may be seeded with the install's generated settings and memory
   # (the two files `ContainerSpawn` seeds locally), by name from an allowlist, and may
@@ -418,7 +430,8 @@ defmodule Wardmast.NodeAgent.RunSpec do
       {:ok,
        %{kind: "config_dir", path: path}
        |> put_present(:files, files)
-       |> put_present(:session, session)}
+       |> put_present(:session, session)
+       |> put_tmpfs(Map.get(mount, "tmpfs"))}
     end
   end
 
@@ -474,6 +487,9 @@ defmodule Wardmast.NodeAgent.RunSpec do
   end
 
   defp config_session(_), do: refuse({:bad_value, "mounts.config_dir.session"})
+
+  defp put_tmpfs(mount, true), do: Map.put(mount, :tmpfs, true)
+  defp put_tmpfs(mount, _flag), do: mount
 
   defp put_present(map, _key, nil), do: map
   defp put_present(map, key, value), do: Map.put(map, key, value)
@@ -578,16 +594,34 @@ defmodule Wardmast.NodeAgent.RunSpec do
   # path (relative, under the run's `config_dir` mount, no `..`) where the pod links it.
   defp secret_files(files, mounts) when is_map(files) do
     config_dir? = Enum.any?(mounts, &(&1.kind == "config_dir"))
+    tmpfs? = Enum.any?(mounts, &(&1.kind == "config_dir" and Map.get(&1, :tmpfs, false)))
 
-    Enum.reduce_while(files, {:ok, %{}}, fn {name, file}, {:ok, acc} ->
-      case secret_file(name, file, config_dir?) do
-        {:ok, entry} -> {:cont, {:ok, Map.put(acc, name, entry)}}
-        {:error, _} = error -> {:halt, error}
-      end
-    end)
+    with {:ok, parsed} <-
+           Enum.reduce_while(files, {:ok, %{}}, fn {name, file}, {:ok, acc} ->
+             case secret_file(name, file, config_dir?) do
+               {:ok, entry} -> {:cont, {:ok, Map.put(acc, name, entry)}}
+               {:error, _} = error -> {:halt, error}
+             end
+           end),
+         :ok <- tmpfs_files(parsed, tmpfs?) do
+      {:ok, parsed}
+    end
   end
 
   defp secret_files(_files, _mounts), do: refuse({:bad_value, "secret_files"})
+
+  # SI8: on a tmpfs config dir a file is written at its `link`, so each one names an
+  # allowlisted path, and no two share one.
+  defp tmpfs_files(_files, false), do: :ok
+
+  defp tmpfs_files(files, true) do
+    links = for {_name, %{link: link}} <- files, do: link
+
+    if length(links) == map_size(files) and links == Enum.uniq(links) and
+         Enum.all?(links, &(&1 in @tmpfs_files)),
+       do: :ok,
+       else: refuse({:bad_value, "secret_files"})
+  end
 
   defp secret_file(name, %{"content" => content} = file, config_dir?)
        when is_binary(name) and is_binary(content) do

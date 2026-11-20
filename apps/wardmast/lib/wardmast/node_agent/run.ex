@@ -346,7 +346,7 @@ defmodule Wardmast.NodeAgent.Run do
   def terminate(_reason, state) do
     # Whatever the way out, no container and no secret outlive the process.
     if state.phase in [:preparing, :running], do: stop_container(state)
-    cleanup(state)
+    cleanup_all(state)
     :ok
   end
 
@@ -411,7 +411,7 @@ defmodule Wardmast.NodeAgent.Run do
   end
 
   defp cancelled_before_start(state) do
-    cleanup(state)
+    cleanup_all(state)
     state = %{state | exit: exit_report(state, 137, false)}
     state = state |> push("exit", state.exit) |> arm_retention()
     {:noreply, %{state | phase: :exited}}
@@ -431,6 +431,7 @@ defmodule Wardmast.NodeAgent.Run do
          {:ok, prompts} <- prompt_files(spec, run_dir),
          :ok <- seed_config(spec, dirs),
          :ok <- seed_session(spec, config, dirs, opts),
+         {:ok, credential_home} <- credential_home(spec, dirs, opts),
          {:ok, limit_opts} <- limits(spec, opts),
          {:ok, bridge_paths} <- bridges(spec, opts),
          {:ok, secrets_file} <- secrets(spec, opts),
@@ -443,6 +444,7 @@ defmodule Wardmast.NodeAgent.Run do
              limit_opts: limit_opts,
              bridge_paths: bridge_paths,
              secrets_file: secrets_file,
+             credential_home: credential_home,
              pod: pod,
              service_env: service_env
            }) do
@@ -922,6 +924,40 @@ defmodule Wardmast.NodeAgent.Run do
     end
   end
 
+  # SI8: a `config_dir` that says `tmpfs` is made on the runtime tmpfs, with the spec's
+  # `secret_files` written into it at their links (`Secrets.write_config_home/3`: refused
+  # with nothing written when there is no tmpfs, as `secrets/2` is). `sessions/` stays on
+  # disk, in the run's own config dir, so rollouts are not held in memory and the
+  # transcript upload finds them where it always looks. Without the flag, nothing here.
+  defp credential_home(spec, dirs, opts) do
+    with %{tmpfs: true} <- Enum.find(spec.mounts, &(&1.kind == "config_dir")),
+         %{host: host} <- dirs["config_dir"] do
+      files =
+        Map.new(spec.secret_files, fn {_name, %{content: bytes, link: link}} -> {link, bytes} end)
+
+      with :ok <- make_sessions_dir(host),
+           {:ok, home} <-
+             Secrets.write_config_home(
+               spec.run,
+               files,
+               Keyword.take(opts, [:runtime_dir, :require_tmpfs, :mountinfo])
+             ) do
+        {:ok, home}
+      else
+        {:error, reason} -> {:error, {:unschedulable, reason}}
+      end
+    else
+      _ -> {:ok, nil}
+    end
+  end
+
+  defp make_sessions_dir(config_host) do
+    case File.mkdir_p(Path.join(config_host, "sessions")) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:run_dir, reason}}
+    end
+  end
+
   defp services(%{services: []}, _opts), do: {:ok, nil, []}
 
   defp services(spec, opts) do
@@ -942,10 +978,11 @@ defmodule Wardmast.NodeAgent.Run do
   end
 
   defp build_argv(spec, opts, parts) do
-    %{dirs: dirs, prompts: prompts, bridge_paths: bridge_paths, secrets_file: secrets_file} =
+    %{dirs: run_dirs, prompts: prompts, bridge_paths: bridge_paths, secrets_file: secrets_file} =
       parts
 
     store_objects = store_objects(spec, parts.config)
+    dirs = codex_home_dirs(run_dirs, parts.credential_home)
 
     wrap_opts =
       [
@@ -954,7 +991,7 @@ defmodule Wardmast.NodeAgent.Run do
         image: run_image(spec.image),
         podman: podman_path(opts),
         home: dirs["home"] && dirs["home"].host,
-        writable_paths: for(kind <- ~w(config_dir tmp), d = dirs[kind], do: d.host),
+        writable_paths: for(kind <- ~w(config_dir sessions tmp), d = dirs[kind], do: d.host),
         readonly_paths: Enum.map(prompts, &elem(&1, 0)) ++ store_objects,
         bridges: Enum.map(bridge_paths, &elem(&1, 1)),
         env: Map.to_list(spec.env) ++ parts.service_env,
@@ -970,7 +1007,7 @@ defmodule Wardmast.NodeAgent.Run do
 
     command = if secrets_file, do: Container.secrets_wrapper(spec.command), else: spec.command
     # bd-9rrrgk: what `Wardmast.NodeAgent.Exec` rebuilds a container from afterwards.
-    Exec.remember(spec.run, wrap_opts)
+    Exec.remember(spec.run, wrap_opts, gate_placeholders(spec, parts, run_dirs))
 
     case Container.wrap(command, wrap_opts) do
       {:ok, argv} -> {:ok, argv}
@@ -987,6 +1024,31 @@ defmodule Wardmast.NodeAgent.Run do
   # a run cannot write into objects the node's other runs borrow.
   defp store_objects(%RunSpec{checkout: nil}, _config), do: []
   defp store_objects(%RunSpec{}, config), do: [Checkout.store_objects(config)]
+
+  # SI8: with a tmpfs config dir, CODEX_HOME is the tmpfs directory and its `sessions/` is
+  # the disk directory the run's own config dir holds; the disk config dir itself is not
+  # mounted (the primary's `config_dir` paths are the container-side names of both).
+  defp codex_home_dirs(dirs, nil), do: dirs
+
+  defp codex_home_dirs(%{"config_dir" => %{host: host, container: container}} = dirs, home) do
+    dirs
+    |> Map.put("config_dir", %{host: home, container: container})
+    |> Map.put("sessions", %{
+      host: Path.join(host, "sessions"),
+      container: Path.join(container, "sessions")
+    })
+  end
+
+  # The offline pre-push gate (`Exec`) is rebuilt from this run's options after the
+  # directory is gone, and it never runs the CLI: an empty directory of the run's own, on
+  # disk, stands where the tmpfs home was.
+  defp gate_placeholders(_spec, %{credential_home: nil}, _dirs), do: %{}
+
+  defp gate_placeholders(spec, %{credential_home: home, config: config}, _dirs) do
+    placeholder = Path.join([config.node_home, "runs", spec.run, "config-placeholder"])
+    File.mkdir_p!(placeholder)
+    %{home => placeholder}
+  end
 
   defp mount_map(dirs, prompts, bridge_paths) do
     Map.new(
@@ -1058,15 +1120,18 @@ defmodule Wardmast.NodeAgent.Run do
   # is kept on this node, not uploaded: nothing on the primary would accept it.
   defp finish(%{quiesce?: true} = state, _status) do
     stop_container(state)
-    cleanup(state)
+    cleanup_all(state)
     retain(state)
   end
 
   defp finish(state, status) do
     oom? = oom?(state)
     stop_container(state)
+    # The config home (a Codex run's login) goes after the final upload, not with the
+    # rest: the credential's carry-back (SI9) is ordered between the two.
     cleanup(state)
     state = final_checkout(state)
+    remove_config_home(state)
 
     exit = exit_report(state, status, oom?)
     state = %{state | exit: exit, phase: :exited}
@@ -1077,7 +1142,7 @@ defmodule Wardmast.NodeAgent.Run do
   defp retain(state) do
     if state.cp_task, do: Task.shutdown(state.cp_task, :brutal_kill)
     if state.cp_timer, do: Process.cancel_timer(state.cp_timer)
-    cleanup(state)
+    cleanup_all(state)
 
     checkout = state.spec.checkout
 
@@ -1154,9 +1219,21 @@ defmodule Wardmast.NodeAgent.Run do
       do:
         TestServices.stop(state.pod, runner_opts(state.opts) ++ [podman: podman_path(state.opts)])
 
-    Secrets.remove(runtime_dir(state.opts), state.spec.run)
+    Secrets.remove(runtime_dir(state.opts), state.spec.run, keep_config_home: true)
     release_bridges(state)
     :ok
+  end
+
+  # `cleanup/1` and the config home too: for every end that has no upload still to make.
+  # (A quiesced run's login is not carried back yet: SI9a uploads it before this.)
+  defp cleanup_all(state) do
+    cleanup(state)
+    remove_config_home(state)
+  end
+
+  # SI8: recursive, following no link (`Secrets.remove_config_home/2`); idempotent.
+  defp remove_config_home(state) do
+    Secrets.remove_config_home(runtime_dir(state.opts), state.spec.run)
   end
 
   defp release_bridges(%{spec: %{bridges: [_ | _], run: run}, opts: opts}) do

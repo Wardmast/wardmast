@@ -1111,13 +1111,14 @@ defmodule Wardmast.Worker.ContainerSpawn do
          {:ok, set} <- provenance_cli_set(provider, opts),
          {:ok, services} <- remote_services(opts),
          {:ok, home, config_dir} <- remote_dirs(provider, tmp_dir),
-         {:ok, config_files, secret_files} <-
-           remote_config(provider, opts, policy, worktree, home, agy_key),
+         {:ok, config_files, secret_files, codex_auth} <-
+           remote_config(provider, opts, policy, worktree, home, config_dir, agy_key),
          {:ok, checkout} <- remote_checkout(opts, worktree, config_dir),
          {:ok, worktree_files, worktree_secrets} <- worktree_files(worktree),
          {:ok, network, spec} <- start_egress(provider, opts, policy, worktree) do
       name = container_name(opts)
       :ok = GitCredential.revoke_when_down(Keyword.get(opts, :owner), material, [])
+      track_codex_auth(opts, codex_auth)
       image = pulled_set(image, set)
 
       {:ok,
@@ -1140,6 +1141,7 @@ defmodule Wardmast.Worker.ContainerSpawn do
          config_dir: config_dir,
          config_files: config_files,
          secret_files: secret_files,
+         codex_auth: codex_auth,
          tmp_dir: tmp_dir,
          prompt_paths: prompt_paths(Keyword.get(opts, :argv)),
          network: network,
@@ -1491,6 +1493,21 @@ defmodule Wardmast.Worker.ContainerSpawn do
     end
   end
 
+  # SI8: a Codex run's mirror is `<run tmp>/codex-home`, where a local run keeps its
+  # copy (`run_dirs("codex", ...)`), so the transcript upload's `sessions/**` lands where
+  # `Usage.CodexSessionFile` looks for them.
+  defp remote_dirs("codex", tmp_dir) do
+    home = Path.join(tmp_dir, "home")
+    config_dir = Path.join(tmp_dir, "codex-home")
+
+    with :ok <- File.mkdir_p(home),
+         :ok <- File.mkdir_p(config_dir) do
+      {:ok, home, config_dir}
+    else
+      {:error, reason} -> {:error, {:run_dirs_failed, reason}}
+    end
+  end
+
   defp remote_dirs(_provider, tmp_dir) do
     home = Path.join(tmp_dir, "home")
     config_dir = Path.join(tmp_dir, "claude-config")
@@ -1524,8 +1541,9 @@ defmodule Wardmast.Worker.ContainerSpawn do
           {:ok, %{String.t() => binary()}, %{String.t() => String.t()}} | {:error, term()}
   def worktree_files(worktree) when is_binary(worktree) do
     with {:ok, mcp, secrets} <- mcp_file(worktree),
-         {:ok, skills} <- skill_files(worktree) do
-      {:ok, Map.merge(mcp, skills), secrets}
+         {:ok, skills} <- skill_files(worktree),
+         {:ok, visual} <- visual_actual_files(worktree, mcp, skills) do
+      {:ok, mcp |> Map.merge(skills) |> Map.merge(visual), secrets}
     end
   end
 
@@ -1573,6 +1591,41 @@ defmodule Wardmast.Worker.ContainerSpawn do
 
   defp redact_bearer_tokens(config), do: {config, %{}}
 
+  # RunSpec's caps (per file, total bytes, file count) bind the whole `files` map, so the images
+  # ship only if every one fits beside the `.mcp.json` and skills already in it; otherwise none do
+  # and the dispatcher's brief says they were not delivered (never a failed spawn).
+  @visual_dir ".arbiter/visual-actual"
+  @max_visual_file_bytes 1_048_576
+  @max_visual_total_bytes 4_194_304
+  @max_visual_total_files 256
+
+  @doc false
+  @spec visual_actual_shipped?(String.t()) :: boolean()
+  def visual_actual_shipped?(worktree) do
+    case worktree_files(worktree) do
+      {:ok, files, _} -> Enum.any?(Map.keys(files), &String.starts_with?(&1, @visual_dir <> "/"))
+      _ -> false
+    end
+  end
+
+  defp visual_actual_files(worktree, mcp, skills) do
+    root = Path.join(worktree, @visual_dir)
+    used = Map.merge(mcp, skills)
+    used_bytes = used |> Map.values() |> Enum.map(&byte_size/1) |> Enum.sum()
+
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(root),
+         paths when paths != [] <- walk_files(root),
+         true <- map_size(used) + length(paths) <= @max_visual_total_files,
+         sizes = Enum.map(paths, &File.stat!(&1).size),
+         true <- Enum.all?(sizes, &(&1 <= @max_visual_file_bytes)),
+         true <- used_bytes + Enum.sum(sizes) <= @max_visual_total_bytes,
+         {:ok, files} <- read_skill_files(worktree, paths) do
+      {:ok, files}
+    else
+      _ -> {:ok, %{}}
+    end
+  end
+
   defp skill_files(worktree) do
     root = Path.join(worktree, @skills_dir)
 
@@ -1619,7 +1672,7 @@ defmodule Wardmast.Worker.ContainerSpawn do
   # volume and links the MCP config into the config dir, where agy looks for it.
   @agy_mcp_link "config/mcp_config.json"
 
-  defp remote_config("gemini", _opts, policy, worktree, home, agy_key) do
+  defp remote_config("gemini", _opts, policy, worktree, home, _config_dir, agy_key) do
     seed =
       GeminiConfigDir.seed(home,
         security: policy,
@@ -1644,14 +1697,49 @@ defmodule Wardmast.Worker.ContainerSpawn do
             else: files
         end)
 
-      {:ok, %{"antigravity-cli/settings.json" => settings, "GEMINI.md" => memory}, secret_files}
+      {:ok, %{"antigravity-cli/settings.json" => settings, "GEMINI.md" => memory}, secret_files,
+       nil}
     else
       {:error, reason} -> {:error, {:run_dirs_failed, reason}}
     end
   end
 
-  defp remote_config(_provider, opts, _policy, _worktree, _home, _agy_key),
-    do: {:ok, config_files(Keyword.get(opts, :workspace)), %{}}
+  # SI8 (`docs/design/remote-workers.md` §21.3.3): the primary seeds the *mirror* of the
+  # run's `CODEX_HOME` with `ConfigDir.seed_run_home/2`, as `run_dirs("codex", ...)` does
+  # for a local run, and the node is sent what was generated there as `secret_files`
+  # (the login, the backend `config.toml`, `AGENTS.md`, the exec-policy rules), never the
+  # operator's history. `config.toml` rides here too because a provider table can carry a
+  # header token. The `auth_json` tuple `{source, mirror}` is what `AuthSync` syncs.
+  defp remote_config("codex", opts, policy, _worktree, _home, config_dir, _agy_key) do
+    seed_opts = [security: policy] ++ source_home_opt(opts)
+
+    case CodexConfigDir.seed_run_home(config_dir, seed_opts) do
+      {:ok, %{auth: auth}} -> {:ok, %{}, codex_secret_files(config_dir), auth}
+      {:error, reason} -> {:error, {:run_dirs_failed, reason}}
+    end
+  end
+
+  defp remote_config(_provider, opts, _policy, _worktree, _home, _config_dir, _agy_key),
+    do: {:ok, config_files(Keyword.get(opts, :workspace)), %{}, nil}
+
+  # name => path under `CODEX_HOME`: the only files a tmpfs config dir takes
+  # (`RunSpec`'s allowlist is the same four).
+  @codex_home_files [
+    {"codex-auth", "auth.json"},
+    {"codex-config", "config.toml"},
+    {"codex-agents", "AGENTS.md"},
+    {"codex-rules", "rules/arbiter.rules"}
+  ]
+
+  # Regular files only, never through a link: what the mirror holds, as `secret_files`.
+  defp codex_secret_files(config_dir) do
+    for {name, link} <- @codex_home_files,
+        path = Path.join(config_dir, link),
+        regular_file?(path),
+        {:ok, body} <- [File.read(path)],
+        into: %{},
+        do: {name, %{"content" => Base.encode64(body), "link" => link}}
+  end
 
   # The MCP config dispatch wrote into the host's per-worktree agy HOME, as JSON text;
   # `nil` when the spawn has none (no MCP scope, isolation off).
@@ -1761,11 +1849,15 @@ defmodule Wardmast.Worker.ContainerSpawn do
              ),
              %{"kind" => "home", "path" => request.home},
              put_session(
-               %{
-                 "kind" => "config_dir",
-                 "path" => request.config_dir,
-                 "files" => Map.new(request.config_files, fn {k, v} -> {k, Base.encode64(v)} end)
-               },
+               put_tmpfs(
+                 %{
+                   "kind" => "config_dir",
+                   "path" => request.config_dir,
+                   "files" =>
+                     Map.new(request.config_files, fn {k, v} -> {k, Base.encode64(v)} end)
+                 },
+                 request
+               ),
                session
              ),
              %{"kind" => "tmp", "path" => request.tmp_dir}
@@ -1863,6 +1955,11 @@ defmodule Wardmast.Worker.ContainerSpawn do
   rescue
     e -> {:error, {:secrets_unreadable, Exception.message(e)}}
   end
+
+  # SI8: a Codex run's `CODEX_HOME` holds a refresh token, so on a machine node it is a
+  # directory on the node's tmpfs, never `<node home>/runs/<run>/`.
+  defp put_tmpfs(mount, %{provider: "codex"}), do: Map.put(mount, "tmpfs", true)
+  defp put_tmpfs(mount, _request), do: mount
 
   defp put_session(mount, nil), do: mount
 

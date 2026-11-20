@@ -28,6 +28,7 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
   @behaviour Wardmast.Screenshots.Capture.Booter
 
   alias Wardmast.Screenshots.Capture.AppProcess
+  alias Wardmast.Screenshots.Capture.DepsCache
   alias Wardmast.Screenshots.Capture.Sandbox
 
   @probe_ms 250
@@ -38,7 +39,8 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
 
     with {:ok, sandbox} <- sandbox(spec),
          {:ok, port} <- free_port(cfg.port_range),
-         {:ok, home} <- home(spec) do
+         {:ok, home} <- home(spec),
+         {:ok, writable} <- writable_deps(spec) do
       vars = %{
         "port" => port,
         "role" => spec.role,
@@ -52,16 +54,21 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
         box: %{
           checkout: spec.checkout,
           scratch: spec.scratch,
-          readonly_paths: readonly_paths(cfg)
+          readonly_paths: readonly_paths(cfg),
+          # bd-3glf2a: the boot's services (reached on 127.0.0.1:<port> inside) and the offline
+          # deps cache (shown read-only).
+          services: Map.get(spec, :services) || [],
+          cache_dirs: deps_dirs(spec)
         },
         checkout: spec.checkout,
         vars: vars,
-        env: build_env(cfg, home, spec, vars, port)
+        env: build_env(cfg, home, spec, vars, port, writable)
       }
 
       limits = cfg.limits
 
-      with :ok <- run_once(run, :setup, cfg.setup_cmd, limits["setup_seconds"] || 600),
+      with :ok <- link_deps(spec),
+           :ok <- run_once(run, :setup, cfg.setup_cmd, limits["setup_seconds"] || 600),
            :ok <- run_once(run, :seed, cfg.seed_cmd, limits["seed_seconds"] || 120),
            :ok <-
              run_once(run, :seed, named_seed(cfg, spec.seed), limits["seed_seconds"] || 120) do
@@ -107,6 +114,71 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
       %{"readonly_paths" => paths} when is_list(paths) -> paths
       _ -> []
     end
+  end
+
+  # bd-3glf2a: the offline deps cache (`Capture.DepsCache`), when the capture built one.
+  defp deps_dirs(%{deps: %{dir: dir}}) when is_binary(dir), do: [dir]
+  defp deps_dirs(_spec), do: []
+
+  # bd-8udsgf: the cache is shown read-only, and a dependency may write into its own source
+  # directory while compiling. The boot gets a copy of `deps/` (in its scratch) and of the seed's
+  # compiled `_build` (in its checkout); the returned `MIX_DEPS_PATH` points at the copy.
+  defp writable_deps(%{
+         deps: %{dir: dir, deps: _, build: _} = cache,
+         scratch: scratch,
+         checkout: checkout
+       })
+       when is_binary(dir) do
+    case DepsCache.writable(cache, scratch, checkout) do
+      {:ok, env} -> {:ok, env}
+      {:error, message} -> {:error, {:setup, message}}
+    end
+  end
+
+  defp writable_deps(_spec), do: {:ok, []}
+
+  defp deps_env(%{deps: %{env: env}}) when is_list(env), do: env
+  defp deps_env(_spec), do: []
+
+  # The cache's asset tools (esbuild, tailwind) linked where a stock Phoenix config looks for them,
+  # `_build/<tool>-<target>` of the checkout: the link resolves inside the sandbox, where the cache
+  # is shown at its own path.
+  defp link_deps(%{deps: %{links: [_ | _] = links}, checkout: checkout}) do
+    # The checkout is the worker's tree: a `_build` it committed as a link is never followed on
+    # the host.
+    case File.lstat(Path.join(checkout, "_build")) do
+      {:ok, %File.Stat{type: type}} when type != :directory ->
+        {:error,
+         {:setup,
+          "the checkout's _build is a #{type}, not a directory, so the deps cache's asset " <>
+            "tools are not linked through it"}}
+
+      _ ->
+        link_tools(links, checkout)
+    end
+  end
+
+  defp link_deps(_spec), do: :ok
+
+  defp link_tools(links, checkout) do
+    Enum.reduce_while(links, :ok, fn {rel, target}, :ok ->
+      link = Path.join(checkout, rel)
+
+      result =
+        with :ok <- File.mkdir_p(Path.dirname(link)) do
+          if match?({:ok, _}, File.lstat(link)), do: :ok, else: File.ln_s(target, link)
+        end
+
+      case result do
+        :ok ->
+          {:cont, :ok}
+
+        {:error, reason} ->
+          {:halt,
+           {:error,
+            {:setup, "could not link #{rel} to the deps cache: #{:file.format_error(reason)}"}}}
+      end
+    end)
   end
 
   defp named_seed(_cfg, nil), do: nil
@@ -251,7 +323,7 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
 
   # ── environment, ports, templates ───────────────────────────────────────
 
-  defp build_env(cfg, home, spec, vars, port) do
+  defp build_env(cfg, home, spec, vars, port, writable) do
     base =
       [
         {"PATH", Sandbox.path()},
@@ -262,7 +334,10 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
       ]
 
     configured = Enum.map(cfg.env, fn {k, v} -> {k, render(v, vars)} end)
-    base ++ configured ++ [{cfg.port_env, Integer.to_string(port)}]
+
+    # The deps cache's variables come after the config's (`env -i` keeps the last of a name), so
+    # a hand-set MIX_HOME cannot point the boot away from it.
+    base ++ configured ++ deps_env(spec) ++ writable ++ [{cfg.port_env, Integer.to_string(port)}]
   end
 
   defp free_port({lo, hi}) do

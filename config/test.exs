@@ -194,6 +194,8 @@ config :wardmast, :image_root, Path.join(scratch_root, "images-test")
 config :wardmast, :preview_root, Path.join(scratch_root, "previews-test")
 config :wardmast, :run_tmp_sweeper, enabled: false
 config :wardmast, :test_services_reaper, enabled: false
+# bd-3glf2a: no boot sweep of screenshot-capture service containers under test.
+config :wardmast, :capture_services_reaper, enabled: false
 
 # RW12: nodes are told to reap only when a test asks (a reap query from a Session in
 # every node test would be noise, and the sandbox owns the connection).
@@ -312,6 +314,11 @@ config :wardmast, :spend_patrol, enabled: false
 # G18: a spawn never asks the host's real agent CLI for its `--version`; a test
 # that needs a harness version hands `Wardmast.Agents.HarnessVersion` a fake one.
 config :wardmast, :harness_version, probe: false
+
+# The dispatch CLI-version gate (bd-5wfsj7) is off in the suite; its own tests pass `enforce: true`.
+config :wardmast, Wardmast.Agents.CliDetection, enforce: false, probe: false
+# No login-shell PATH resolution at boot under test; its own tests inject a shell.
+config :wardmast, Wardmast.Boot.LoginShellPath, enabled: false
 
 # bd-b1b3mp: tests call `Wardmast.Tasks.BacklogTailDigest.sweep/1` directly.
 config :wardmast, :backlog_tail_digest, enabled: false

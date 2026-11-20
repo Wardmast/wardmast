@@ -230,6 +230,48 @@ defmodule Wardmast.Screenshots.CaptureTest do
              )
   end
 
+  defmodule PathDeps do
+    def prepare(_input, _opts), do: {:ok, nil}
+  end
+
+  test "pinned PATH entries the filter dropped are named in the result and capture.json",
+       %{tmp_dir: dir} do
+    config = %Config{
+      ui_paths: ["web/**"],
+      start_cmd: "true",
+      env: %{"PATH" => "/opt/ok/bin:/home/nobody/mise/bin"},
+      deps: %{"mix" => true}
+    }
+
+    plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+    {repo, base, head} = Process.get(:repo)
+
+    assert {:ok, result} =
+             Capture.run(
+               %{
+                 task_id: "bd-test",
+                 repo_path: repo,
+                 base_sha: base,
+                 head_sha: head,
+                 config: config,
+                 plan_path: plan,
+                 out_dir: Path.join(dir, "out")
+               },
+               booter: CaptureStubBooter,
+               shooter: CaptureStubShooter,
+               sandbox: CaptureHostSandbox,
+               deps: PathDeps,
+               ctx: %{
+                 test_pid: self(),
+                 routes: %{"before" => %{"/" => 200}, "after" => %{"/" => 200}}
+               }
+             )
+
+    assert result.notes =~ "/home/nobody/mise/bin"
+    refute result.notes =~ "/opt/ok/bin"
+    assert File.read!(result.manifest_path) =~ "/home/nobody/mise/bin"
+  end
+
   describe "failures are distinct and recorded" do
     test "a missing manifest", %{tmp_dir: dir} do
       assert {:error, failure} = run(dir, Path.join(dir, "nope.json"))

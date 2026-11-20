@@ -622,6 +622,12 @@ defmodule Wardmast.Mergers.GitlabTest do
       assert result.block_reason == :ci_failed
     end
 
+    test "a canceled pipeline is :canceled (inconclusive), not :ci_failed (bd-189j66)" do
+      result = block_get(%{}, [%{"id" => 9, "status" => "canceled"}])
+      assert result.pipeline == :canceled
+      assert result.block_reason == :ci_cancelled
+    end
+
     test "not_approved with no resolvable author classifies as :needs_approval" do
       # No `author.username` on the MR → authorship can't be confirmed as the
       # fleet's, so we never call `/user` and fall back to the generic reason.

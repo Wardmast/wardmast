@@ -488,6 +488,14 @@ defmodule Wardmast.Worker.ReviewCiTest do
       assert ReviewCi.failure_findings(@sha, "o/r#7", [], false) =~ "could not be re-run"
     end
 
+    test "failure_findings/4 only claims a failed-again re-run when a real failed job remains" do
+      canceled = [%{name: "test 1/4", url: nil, summary: "", status: "canceled"}]
+      failed = [%{name: "test 1/4", url: nil, summary: "boom", status: "failed"}]
+
+      refute ReviewCi.failure_findings(@sha, "o/r#7", canceled, true) =~ "not a flake"
+      assert ReviewCi.failure_findings(@sha, "o/r#7", failed, true) =~ "not a flake"
+    end
+
     test "failure_findings/4 carries the final status, the saved log path and the no-polling rule" do
       text =
         ReviewCi.failure_findings(

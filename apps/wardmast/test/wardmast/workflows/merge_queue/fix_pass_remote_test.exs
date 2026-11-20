@@ -152,6 +152,27 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassRemoteTest do
     end
   end
 
+  test "a visual hand-off is staged in the pass's checkout, and nothing is committed", ctx do
+    stage = fn path ->
+      File.mkdir_p!(Path.join(path, ".arbiter/visual-actual"))
+      File.write!(Path.join(path, ".arbiter/visual-actual/a.png"), "png")
+      {:ok, [%{baseline: "e2e/a.png", actual: "a.png", diff: nil}]}
+    end
+
+    {:ok, %{worktree_path: wt, worker_pid: pid}} =
+      dispatch(ctx,
+        nodes: [node_row()],
+        extra: %{
+          visual_handoff: %{adapter: nil, mr_ref: "!1", head: "h"},
+          visual_hand_off_fun: stage
+        }
+      )
+
+    on_exit(fn -> stop_quietly(pid) end)
+    assert File.read!(Path.join(wt, ".arbiter/visual-actual/a.png")) == "png"
+    assert git_out(wt, ["status", "--porcelain"]) == ""
+  end
+
   test "it stays on the primary when no node has room", ctx do
     %{worker_pid: pid} = pass!(ctx, nodes: [node_row(live: 2, max: 2)])
 
@@ -255,18 +276,23 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassRemoteTest do
   defp dispatch(ctx, opts) do
     placement = [remote_available?: true] ++ Keyword.take(opts, [:nodes])
 
-    FixPassDispatcher.dispatch(%{
-      task_id: ctx.issue.id,
-      workspace_id: ctx.ws.id,
-      repo_path: ctx.repo,
-      repo: "test/repo",
-      checks: [],
-      start_claude: false,
-      placement_opts: placement,
-      image_opts: Keyword.get(opts, :image_opts, ok_publish()),
-      slot_admitted: true,
-      pr_status: fn -> {:ok, %{status: :open, pipeline: :failed}} end
-    })
+    FixPassDispatcher.dispatch(
+      Map.merge(
+        %{
+          task_id: ctx.issue.id,
+          workspace_id: ctx.ws.id,
+          repo_path: ctx.repo,
+          repo: "test/repo",
+          checks: [],
+          start_claude: false,
+          placement_opts: placement,
+          image_opts: Keyword.get(opts, :image_opts, ok_publish()),
+          slot_admitted: true,
+          pr_status: fn -> {:ok, %{status: :open, pipeline: :failed}} end
+        },
+        Keyword.get(opts, :extra, %{})
+      )
+    )
   end
 
   defp set_placement!(ws, mode) do

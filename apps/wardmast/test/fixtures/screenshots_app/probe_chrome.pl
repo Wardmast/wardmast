@@ -60,4 +60,7 @@ print $o 'BROWSER external_ip=' . tcp('1.1.1.1', 80) . "\n";
 print $o 'BROWSER external_name=' . tcp('example.com', 80) . "\n";
 print $o 'BROWSER canary=' . (open(my $c, '<', $canary) ? 'readable' : "failed: $!") . "\n";
 print $o 'BROWSER env=' . join(',', sort keys %ENV) . "\n";
+# bd-3glf2a: a capture service is the app's, never the browser's.
+print $o 'BROWSER service=' . tcp('127.0.0.1', slurp("$dir/service_port")) . "\n"
+  if -e "$dir/service_port";
 close $o;

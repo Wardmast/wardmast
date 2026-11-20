@@ -30,6 +30,13 @@ defmodule Wardmast.Test.CaptureHostSandbox do
   @impl true
   def browser(argv, _app, _writable, _readonly), do: {:ok, argv}
 
+  # bd-3glf2a: the deps cache seed's network-on command, run as given; the caller is told.
+  @impl true
+  def fetch_command(argv, box) do
+    send(self(), {:fetch_command, argv, box})
+    {:ok, argv}
+  end
+
   @impl true
   def reach(_app), do: [connect_options: [timeout: 2_000]]
 

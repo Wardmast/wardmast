@@ -40,6 +40,14 @@ defmodule WardmastCli.Scripts.BuildReleaseOtpTest do
     assert cfg["SHA256_TOOL"] == "shasum -a 256"
   end
 
+  test "darwin x86_64 uses darwin64-x86_64-cc, a deployment target and shasum" do
+    cfg = config([{"ARB_OTP_UNAME_S", "Darwin"}, {"ARB_OTP_UNAME_M", "x86_64"}])
+
+    assert cfg["OPENSSL_TARGET"] == "darwin64-x86_64-cc"
+    assert cfg["DEPLOYMENT_TARGET"] =~ ~r/^\d+\.\d+$/
+    assert cfg["SHA256_TOOL"] == "shasum -a 256"
+  end
+
   test "the deployment target can be overridden" do
     cfg =
       config([

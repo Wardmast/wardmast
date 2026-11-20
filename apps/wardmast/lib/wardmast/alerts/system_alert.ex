@@ -39,6 +39,7 @@ defmodule Wardmast.Alerts.SystemAlert do
     :overage_alert,
     :quota_poll_failing,
     :quota_snapshot_stale,
+    :screenshot_capture_failed,
     :spend_cap
   ]
   @owners [:operator, :coordinator]

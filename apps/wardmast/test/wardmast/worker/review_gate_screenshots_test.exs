@@ -72,8 +72,11 @@ defmodule Wardmast.Worker.ReviewGateScreenshotsTest do
       gate = start_gate(rig, ctx, screenshot_capture: capture)
 
       wait_until(fn -> passes(rig) == 1 end)
-      assert_received {:captured, %{head_sha: head, plan_path: plan}}
+      assert_received {:captured, %{head_sha: head, plan_path: plan} = input}
       assert String.starts_with?(rig.head, head)
+      # bd-3glf2a: the branch whose mix.lock the offline deps cache trusts (no merge.base: main),
+      # through the lifecycle's plan/3 with the gate's own capture history.
+      assert input.default_branch == "main"
       # bd-adrym0: the copy the commit gate checked feeds the capture, not the live worktree file.
       assert plan ==
                Wardmast.Screenshots.PlanCheck.stored_path(
@@ -170,11 +173,12 @@ defmodule Wardmast.Worker.ReviewGateScreenshotsTest do
     end
   end
 
-  describe "an infrastructure capture failure" do
+  describe "a failure the change itself caused (its app does not boot at the head)" do
     test "escalates to the coordinator and does not send the change back", ctx do
       failure =
-        Failure.new(:boot_failed, "the app failed to boot at the head (setup): no chromium",
-          role: "after"
+        Failure.new(:boot_failed, "the app failed to boot at the head (setup): exit 1",
+          role: "after",
+          detail: %{phase: :setup, output: "exit 1"}
         )
 
       rig = rig(ctx, new_ws(@screenshots), "feature/shots-3")
@@ -192,6 +196,230 @@ defmodule Wardmast.Worker.ReviewGateScreenshotsTest do
       assert passes(rig) == 0
       issue = Ash.get!(Issue, rig.task.id)
       assert issue.attention_cause == :screenshot_capture_failed
+    end
+  end
+
+  # bd-ur1zty: tonic's first real capture failed deps_failed and parked the ticket, so every UI
+  # ticket in the repo parked until the coordinator stepped in.
+  describe "an infrastructure capture failure (bd-ur1zty)" do
+    alias Wardmast.Alerts
+    alias Wardmast.Screenshots.Captures
+
+    test "does not park: the review runs with a no-screenshots brief and a soft attention", ctx do
+      failure =
+        Failure.new(
+          :deps_failed,
+          "fetching the Mix deps for the capture failed: exit 1: ** (RuntimeError) DATABASE_URL is not set"
+        )
+
+      rig = rig(ctx, new_ws(@screenshots), "feature/shots-deps")
+      gate = start_gate(rig, ctx, screenshot_capture: fn _i, _o -> {:error, failure} end)
+
+      wait_until(fn -> passes(rig) == 1 end)
+
+      prompt = :sys.get_state(gate).current_prompt
+      assert prompt =~ "No screenshots: capture failed: fetching the Mix deps"
+      assert prompt =~ "DATABASE_URL is not set"
+
+      # Not parked, no attention on the ticket: the alert is the repo's, not the ticket's.
+      assert Ash.get!(Issue, rig.task.id).attention_cause == nil
+
+      assert [alert] = Alerts.active(kind: :screenshot_capture_failed)
+      assert alert.owner == :coordinator
+      assert alert.detail =~ "DATABASE_URL is not set"
+      assert alert.detail =~ "trib/repo"
+
+      # The lifecycle record still says what happened.
+      assert [row] = Captures.list(rig.task.id)
+      assert row.state == "failed"
+      stop_gate(gate)
+    end
+
+    test "a second ticket of the repo failing the same way refreshes the one alert", ctx do
+      failure = Failure.new(:deps_failed, "fetching the Mix deps for the capture failed: x")
+      capture = fn _i, _o -> {:error, failure} end
+
+      ws = new_ws(@screenshots)
+      rig1 = rig(ctx, ws, "feature/shots-deps-a")
+      gate1 = start_gate(rig1, ctx, screenshot_capture: capture)
+      wait_until(fn -> passes(rig1) == 1 end)
+      stop_gate(gate1)
+
+      rig2 = rig(ctx, ws, "feature/shots-deps-b")
+      gate2 = start_gate(rig2, ctx, screenshot_capture: capture)
+      wait_until(fn -> passes(rig2) == 2 end)
+      stop_gate(gate2)
+
+      assert [alert] = Alerts.active(kind: :screenshot_capture_failed)
+      assert alert.raise_count == 2
+    end
+
+    test "a capture that then works clears the alert", ctx do
+      ws = new_ws(@screenshots)
+      rig1 = rig(ctx, ws, "feature/shots-deps-c")
+
+      gate1 =
+        start_gate(rig1, ctx,
+          screenshot_capture: fn _i, _o ->
+            {:error, Failure.new(:deps_failed, "fetching the Mix deps failed")}
+          end
+        )
+
+      wait_until(fn -> passes(rig1) == 1 end)
+      stop_gate(gate1)
+      assert [_] = Alerts.active(kind: :screenshot_capture_failed)
+
+      rig2 = rig(ctx, ws, "feature/shots-deps-d")
+
+      gate2 =
+        start_gate(rig2, ctx, screenshot_capture: fn _i, _o -> {:ok, %{pairs: []}} end)
+
+      wait_until(fn -> passes(rig2) == 2 end)
+      stop_gate(gate2)
+      assert Alerts.active(kind: :screenshot_capture_failed) == []
+    end
+
+    test "a service that did not come up proceeds too", ctx do
+      failure =
+        Failure.new(:boot_failed, "the app failed to boot at the head (services): service pg x",
+          role: "after",
+          detail: %{phase: :services, service: "pg", log_tail: "boom"}
+        )
+
+      rig = rig(ctx, new_ws(@screenshots), "feature/shots-svc")
+      gate = start_gate(rig, ctx, screenshot_capture: fn _i, _o -> {:error, failure} end)
+
+      wait_until(fn -> passes(rig) == 1 end)
+      assert :sys.get_state(gate).current_prompt =~ "No screenshots: capture failed:"
+      assert [_] = Alerts.active(kind: :screenshot_capture_failed)
+      stop_gate(gate)
+    end
+
+    test "the head's own boot failure still parks, and raises no alert", ctx do
+      failure =
+        Failure.new(:boot_failed, "the app failed to boot at the head (start): exit 1",
+          role: "after",
+          detail: %{phase: :start, output: "exit 1"}
+        )
+
+      rig = rig(ctx, new_ws(@screenshots), "feature/shots-head")
+      gate = start_gate(rig, ctx, screenshot_capture: fn _i, _o -> {:error, failure} end)
+      ref = Process.monitor(gate)
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(20_000)
+
+      assert passes(rig) == 0
+      assert Ash.get!(Issue, rig.task.id).attention_cause == :screenshot_capture_failed
+      assert Alerts.active(kind: :screenshot_capture_failed) == []
+    end
+  end
+
+  describe "the capture lifecycle record (bd-8qj1sa)" do
+    alias Wardmast.Screenshots.Captures
+
+    test "writes a row per attempt: head, base, plan_hash, config_hash, state", ctx do
+      Process.put(:test_pid, self())
+      rig = rig(ctx, new_ws(@screenshots), "feature/shots-5")
+      gate = start_gate(rig, ctx, screenshot_capture: fn _i, _o -> {:ok, %{pairs: []}} end)
+
+      wait_until(fn -> passes(rig) == 1 end)
+      assert [row] = Captures.list(rig.task.id)
+      assert row.state == "captured"
+      assert String.starts_with?(rig.head, row.head_sha)
+      assert is_binary(row.base_sha) and is_binary(row.config_hash)
+      assert is_binary(row.plan_hash), "the commit gate's stored plan is hashed"
+      stop_gate(gate)
+    end
+
+    test "a new head cancels an in-flight capture and captures the new head", ctx do
+      Process.put(:test_pid, self())
+      rig = rig(ctx, new_ws(@screenshots), "feature/shots-6")
+
+      capture = fn input, _opts ->
+        send(ctx_pid(), {:capture_started, self(), input.head_sha})
+
+        if String.starts_with?(rig.head, input.head_sha) do
+          Process.sleep(:infinity)
+        else
+          {:ok, %{pairs: []}}
+        end
+      end
+
+      # The real trigger: no test calls into the gate. The gate's own poll of `origin/<branch>`
+      # finds the head a third party pushed while the capture was running.
+      gate = start_gate(rig, ctx, screenshot_capture: capture, screenshot_head_poll_ms: 50)
+
+      assert_receive {:capture_started, first, head1}, Wardmast.Test.Timing.scale(15_000)
+      assert String.starts_with?(rig.head, head1)
+      ref = Process.monitor(first)
+
+      new_head = push_third_party_commit(ctx, rig)
+
+      assert_receive {:DOWN, ^ref, :process, ^first, _}, Wardmast.Test.Timing.scale(10_000)
+
+      assert_receive {:capture_started, _second, head2}, Wardmast.Test.Timing.scale(10_000)
+      assert String.starts_with?(new_head, head2)
+      wait_until(fn -> passes(rig) == 1 end)
+
+      assert [old, new] = Captures.list(rig.task.id)
+      assert {old.state, new.state} == {"superseded", "captured"}
+      assert String.starts_with?(rig.head, old.head_sha)
+      assert String.starts_with?(new_head, new.head_sha)
+      assert sha(rig.wt, "HEAD") == new_head, "the review runs on the head that was captured"
+      assert :sys.get_state(gate).head_sha == head2
+      stop_gate(gate)
+    end
+
+    test "a head that has not moved leaves the capture running", ctx do
+      Process.put(:test_pid, self())
+      rig = rig(ctx, new_ws(@screenshots), "feature/shots-8")
+
+      capture = fn input, _opts ->
+        send(ctx_pid(), {:capture_started, self(), input.head_sha})
+        Process.sleep(:infinity)
+      end
+
+      gate = start_gate(rig, ctx, screenshot_capture: capture, screenshot_head_poll_ms: 20)
+      assert_receive {:capture_started, task, _head}, Wardmast.Test.Timing.scale(15_000)
+
+      # Several polls later nothing was cancelled or restarted.
+      for _ <- 1..5,
+          do: send(gate, {:screenshot_head_poll, :sys.get_state(gate).screenshot_task.ref})
+
+      _ = :sys.get_state(gate)
+
+      assert Process.alive?(task)
+      refute_received {:capture_started, _, _}
+      assert [%{state: "running"}] = Captures.list(rig.task.id)
+      stop_gate(gate)
+    end
+
+    test "max_captures_per_ticket is enforced by the gate", ctx do
+      Process.put(:test_pid, self())
+      block = Map.put(@screenshots, "limits", %{"max_captures_per_ticket" => 1})
+      rig = rig(ctx, new_ws(block), "feature/shots-7")
+
+      {:ok, spent} =
+        Captures.begin_attempt(%{
+          task_id: rig.task.id,
+          head_sha: "0ld",
+          base_sha: "b",
+          config_hash: "c"
+        })
+
+      Captures.finish(spent, {:ok, %{pairs: []}})
+
+      gate =
+        start_gate(rig, ctx,
+          screenshot_capture: fn _i, _o ->
+            send(ctx_pid(), :capture_called)
+            {:ok, %{pairs: []}}
+          end
+        )
+
+      wait_until(fn -> passes(rig) == 1 end)
+      refute_received :capture_called
+      assert :sys.get_state(gate).current_prompt =~ "max_captures_per_ticket"
+      stop_gate(gate)
     end
   end
 
@@ -283,6 +511,22 @@ defmodule Wardmast.Worker.ReviewGateScreenshotsTest do
       head: sha(wt, "HEAD"),
       author: start_author(task, ws, ctx, branch, wt)
     }
+  end
+
+  # Another actor pushes a commit onto the ticket's branch on origin (from its own clone), the
+  # way a human or a patrol fix pushing to the PR does. Returns the new full head sha.
+  defp push_third_party_commit(ctx, rig) do
+    bare = Path.join(ctx.tmp, "origin.git")
+    other = Path.join(ctx.tmp, "other-#{System.unique_integer([:positive])}")
+    {_, 0} = System.cmd("git", ["clone", "-q", "-b", rig.branch, bare, other])
+    git!(["config", "user.email", "other@example.com"], other)
+    git!(["config", "user.name", "Other"], other)
+    git!(["config", "commit.gpgsign", "false"], other)
+    File.write!(Path.join(other, "more.txt"), "third party\n")
+    git!(["add", "more.txt"], other)
+    git!(["commit", "-q", "-m", "third party push"], other)
+    git!(["push", "-q", "origin", rig.branch], other)
+    sha(other, "HEAD")
   end
 
   defp common_dir(rig) do

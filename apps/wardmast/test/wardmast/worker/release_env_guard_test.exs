@@ -54,6 +54,7 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     systemctl loginctl
     stty
     dolt kubectl
+    sysctl
   )
 
   # Files that may call `Port.open/2`, and how many times. A port child
@@ -115,6 +116,9 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # bd-7i9pxn (G18): the host agent CLI's `--version` (the harness version a run
     # records), via `ReleaseEnv.cmd/3`.
     "apps/wardmast/lib/wardmast/agents/harness_version.ex" => :scrubbed,
+    # bd-5wfsj7: the operator's login shell (`$SHELL -l -i -c`) asked for its PATH
+    # once at boot, via `ReleaseEnv.cmd/3`.
+    "apps/wardmast/lib/wardmast/boot/login_shell_path.ex" => :scrubbed,
     # bd-8w5rn3: `git rev-parse --git-common-dir` to find the writable root.
     "apps/wardmast/lib/wardmast/agents/codex.ex" => :pure_tool,
     "apps/wardmast/lib/wardmast/worker/worktree.ex" => :scrubbed,
@@ -177,6 +181,10 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # `kill` for the group kill. The perl launcher it builds runs through
     # `ClaudeSession.open_port/1`, scrubbed there.
     "apps/wardmast/lib/wardmast/worker/process_group.ex" => :pure_tool,
+    # bd-d627b8 (MAC P3-3): the optional macOS RSS watchdog: `ps -axo pgid=,rss=` to sum a
+    # worker group's memory and `sysctl -n hw.memsize` for a percentage cap. Neither reads
+    # ROOTDIR/BINDIR; the group kill goes through `ProcessGroup.kill/1`.
+    "apps/wardmast/lib/wardmast/worker/memory_watchdog.ex" => :pure_tool,
     # bd-6zuoo6: `systemd-run` / `systemctl` for the per-worker memory scope,
     # through `ReleaseEnv.cmd/3` (the probe runs only `printf` and `cat` in it).
     # The agent itself is still opened by `ClaudeSession.open_port/1`.
@@ -252,6 +260,17 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # `ReleaseEnv.cmd/3`. The boot and browser argv it builds are spawned by
     # `AppProcess` (its Port) and `Shooter.Chromium`, both scrubbed.
     "apps/wardmast/lib/wardmast/screenshots/capture/sandbox/bwrap.ex" => :scrubbed,
+    # bd-3glf2a: the capture's offline deps cache. `git` (`init` / `fetch` / `rev-parse` /
+    # `cat-file` / `merge-base` / `archive`), `tar` and `chmod` through `ReleaseEnv.cmd/3`;
+    # `ls-remote` via `Worktree.remote_head/2` (a literal `git`). The BEAMs it starts (the
+    # `elixir` toolchain fingerprint, the `mix deps.get` seed) run only inside the capture
+    # sandbox's argv, under `AppProcess` (its Port, scrubbed there), never on the host directly.
+    "apps/wardmast/lib/wardmast/screenshots/capture/deps_cache.ex" => :scrubbed,
+    # bd-3glf2a: capture services. Its one direct spawn is `ps -p` (is the server that labelled
+    # an orphan container alive), as `Worker.TestServices`. `podman` / `nsenter` / `socat` /
+    # `timeout` go through `Container.cmd/4` (`ReleaseEnv.cmd/3`), and the long-running
+    # `nsenter … socat` bridge through `Services.Bridge` → `AppProcess` (scrubbed there).
+    "apps/wardmast/lib/wardmast/screenshots/capture/services/podman.ex" => :pure_tool,
     # bd-485ts3: the login-capable CDP shooter runs the `arb-capture` Node runner through
     # `ReleaseEnv.cmd/3`.
     "apps/wardmast/lib/wardmast/screenshots/capture/shooter/cdp.ex" => :scrubbed

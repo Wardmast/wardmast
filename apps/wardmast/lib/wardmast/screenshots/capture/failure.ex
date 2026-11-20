@@ -9,7 +9,8 @@ defmodule Wardmast.Screenshots.Capture.Failure do
   | `:manifest_invalid` | it is there but does not validate (`detail` = the errors) |
   | `:diff_failed` | git could not say which files changed |
   | `:checkout_failed` | a commit's source tree could not be extracted |
-  | `:boot_failed` | the app did not boot at `role` (`detail` = phase and output) |
+  | `:boot_failed` | the app did not boot at `role` (`detail` = phase and output; for a capture service that did not come up, phase `:services` with the service, reason and its log tail) |
+  | `:deps_failed` | the offline Mix deps cache (`deps.mix`) could not be built (bd-3glf2a) |
   | `:route_error` | a route answered with an error status (or was missing at both commits) |
   | `:shot_failed` | the browser step failed (a selector, a timeout, a crash) |
   | `:budget_exceeded` | the pass ran out of its `budget_seconds` |
@@ -24,6 +25,7 @@ defmodule Wardmast.Screenshots.Capture.Failure do
           | :diff_failed
           | :checkout_failed
           | :boot_failed
+          | :deps_failed
           | :route_error
           | :shot_failed
           | :budget_exceeded
@@ -46,15 +48,20 @@ defmodule Wardmast.Screenshots.Capture.Failure do
   def to_map(%__MODULE__{} = f) do
     %{
       "code" => Atom.to_string(f.code),
-      "message" => f.message,
+      "message" => String.replace_invalid(f.message),
       "role" => f.role,
       "shot" => f.shot,
       "detail" => json(f.detail)
     }
   end
 
+  # An app's or a service's output need not be UTF-8 (and a tail can cut a character in two):
+  # what goes into `capture.json` always is.
   defp json(nil), do: nil
-  defp json(v) when is_binary(v), do: v
-  defp json(v) when is_list(v), do: if(Enum.all?(v, &is_binary/1), do: v, else: inspect(v))
-  defp json(v), do: inspect(v)
+  defp json(v) when is_binary(v), do: String.replace_invalid(v)
+
+  defp json(v) when is_list(v),
+    do: if(Enum.all?(v, &is_binary/1), do: Enum.map(v, &json/1), else: inspect(v))
+
+  defp json(v), do: String.replace_invalid(inspect(v))
 end

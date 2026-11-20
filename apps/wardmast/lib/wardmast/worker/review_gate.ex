@@ -242,6 +242,7 @@ defmodule Wardmast.Worker.ReviewGate do
   alias Wardmast.Reviews.RemoteHead
   alias Wardmast.Screenshots.Capture
   alias Wardmast.Screenshots.Capture.Failure, as: CaptureFailure
+  alias Wardmast.Screenshots.Captures
   alias Wardmast.Tasks.Issue
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Usage.Event, as: UsageEvent
@@ -268,6 +269,7 @@ defmodule Wardmast.Worker.ReviewGate do
   alias Wardmast.Worker.ReviewCi
   alias Wardmast.Worker.ReviewFindings
   alias Wardmast.Worker.ReviewGate.NoVerdictCause
+  alias Wardmast.Worker.ReviewGate.ScreenshotAlert
   alias Wardmast.Worker.ReviewGate.ScreenshotGate
   alias Wardmast.Worker.ReviewMrBrief
   alias Wardmast.Worker.ReviewPass
@@ -458,6 +460,7 @@ defmodule Wardmast.Worker.ReviewGate do
           | {:ci_gate, boolean() | nil}
           | {:ci_adapter, module() | nil}
           | {:visual_refresher, (map() -> term())}
+          | {:visual_hand_off, (map(), String.t() -> String.t())}
           | {:ci_poll_ms, pos_integer() | nil}
           | {:local_capacity_retry_ms, pos_integer()}
           | {:reviewer_refusal_max_holds, non_neg_integer()}
@@ -1288,6 +1291,7 @@ defmodule Wardmast.Worker.ReviewGate do
       # bd-6vvpau: the deterministic visual-baseline refresh tried before a CI-red
       # implementer round (`ci_visual_step/3`), injectable for tests.
       visual_refresher: Keyword.get(opts, :visual_refresher, &VisualBaselines.refresh/1),
+      visual_hand_off: Keyword.get(opts, :visual_hand_off, &VisualBaselines.stage_brief/2),
       ci_poll_ms: Keyword.get(opts, :ci_poll_ms),
       ci_max_polls: Keyword.get(opts, :ci_max_polls),
       # The wait in progress (phase `:awaiting_ci`): `ReviewCi.wait/0` plus the
@@ -1337,6 +1341,9 @@ defmodule Wardmast.Worker.ReviewGate do
       screenshot_capture: Keyword.get(opts, :screenshot_capture),
       screenshot_opts: Keyword.get(opts, :screenshot_opts, []),
       screenshot_task: nil,
+      # bd-8qj1sa: how often a capture in flight asks `origin/<branch>` whether the head moved
+      # (`nil` = never).
+      screenshot_head_poll_ms: Keyword.get(opts, :screenshot_head_poll_ms, 30_000),
       screenshot_checked: nil,
       screenshot_context: nil,
       # Where the wait resumes when CI clears: `:first` (the gate's opening
@@ -2277,7 +2284,10 @@ defmodule Wardmast.Worker.ReviewGate do
   defp ci_fix(state, wait, checks, rerun?) do
     state = state |> ci_end_wait() |> Map.put(:approval_gap_pending, nil)
     state = %{state | ci_fix_pending: %{sha: wait.sha, checks: checks}}
-    findings = ReviewCi.failure_findings(wait.sha, state.ci_ctx.pr_ref, checks, rerun?)
+
+    findings =
+      ReviewCi.failure_findings(wait.sha, state.ci_ctx.pr_ref, checks, rerun?) <>
+        visual_actual_brief(state, wait.sha)
 
     Logger.warning(
       "ReviewGate: CI is red on #{wait.sha} for task=#{state.task_id} " <>
@@ -2292,6 +2302,31 @@ defmodule Wardmast.Worker.ReviewGate do
       enter_revise(state, findings, :ci)
     end
   end
+
+  # GitHub #1598: the revise round for a red visual job on the branch's own change runs in
+  # a sandbox that cannot fetch CI artifacts, so the head's rendered images are staged in
+  # its checkout (`.arbiter/visual-actual/`, exactly `sha` only; nothing is committed) and
+  # the findings say so. "" when the repo has no `visual_baselines` or the job did not fail.
+  defp visual_actual_brief(%{ci_ctx: ctx, worktree_path: wt} = state, sha)
+       when is_binary(wt) and is_binary(sha) do
+    if VisualBaselines.configured?(ctx.workspace, state.repo) do
+      "\n" <>
+        state.visual_hand_off.(
+          %{
+            workspace: ctx.workspace,
+            repo: state.repo,
+            adapter: ctx.adapter,
+            mr_ref: ctx.pr_ref,
+            result: %{head_sha: sha}
+          },
+          wt
+        )
+    else
+      ""
+    end
+  end
+
+  defp visual_actual_brief(_state, _sha), do: ""
 
   # Still cancelled after the re-runs: one distinct coordinator escalation, and no
   # implementer round. The reviewer goes ahead and runs the tests itself, as for
@@ -2451,31 +2486,223 @@ defmodule Wardmast.Worker.ReviewGate do
   #     instruction as the finding, exactly as red CI is sent down it (`ci_fix/4`);
   #   * infrastructure fault (boot failure, no Chromium, ...) — one coordinator escalation, no
   #     revise round and no reviewer: the worker is not at fault, so it is not looped.
+  #
+  # bd-8qj1sa: the attempt is a durable row (`Wardmast.Screenshots.Captures`). A head the capture
+  # is not for is superseded: while a capture is in flight the gate polls `origin/<branch>`
+  # (`screenshot_head_poll/2`, below) and a head that advanced cancels it; `max_captures_per_ticket`
+  # and the re-capture skip are `ScreenshotGate.plan/3`'s call, from that history.
   defp screenshot_step(state) do
-    case ScreenshotGate.plan(state, load_workspace(state.workspace_id)) do
+    plan =
+      ScreenshotGate.plan(
+        state,
+        load_workspace(state.workspace_id),
+        screenshot_history(state.task_id)
+      )
+
+    case plan do
       :skip ->
         ci_proceed(%{state | screenshot_context: nil})
 
       {:cached, outcome} ->
-        screenshot_route(state, outcome)
+        screenshot_route(state, outcome, reuse_meta(state))
+
+      {:reuse, outcome, meta} ->
+        screenshot_record_skip(state, meta)
+        screenshot_route(state, outcome, meta)
+
+      # The capture for this very head is already in flight; its reply routes.
+      {:run, %{input: %{head_sha: head}}}
+      when state.screenshot_task != nil and
+             state.screenshot_task.head_sha == head ->
+        {:noreply, state}
 
       {:run, job} ->
-        capture = state.screenshot_capture || (&Capture.run/2)
-        # Unlinked: a capture task killed from outside (which `ScreenshotGate.run/2`'s rescue
-        # cannot catch) must reach the `:DOWN` clause and escalate, not take the gate with it.
-        task =
-          Task.Supervisor.async_nolink(Wardmast.TaskSupervisor, fn ->
-            ScreenshotGate.run(job, capture)
-          end)
-
-        {:noreply, %{state | screenshot_task: %{ref: task.ref, head_sha: job.input.head_sha}}}
+        start_screenshot_capture(state, job)
     end
   end
 
-  defp screenshot_route(state, outcome) do
-    case ScreenshotGate.route(outcome) do
+  defp start_screenshot_capture(state, job) do
+    head = job.input.head_sha
+    state = cancel_screenshot_task(state)
+    # Also covers a row a previous gate instance left `running` when it died.
+    _ = screenshot_db(fn -> Captures.supersede(state.task_id, head) end)
+
+    record =
+      screenshot_db(fn ->
+        case Captures.begin_attempt(%{
+               task_id: state.task_id,
+               workspace_id: state.workspace_id,
+               head_sha: head,
+               base_sha: job.input.base_sha,
+               plan_hash: job.plan_hash,
+               config_hash: job.config_hash,
+               out_dir: job.input.out_dir
+             }) do
+          {:ok, record} -> record
+          _ -> nil
+        end
+      end)
+
+    capture = state.screenshot_capture || (&Capture.run/2)
+    # Unlinked: a capture task killed from outside (which `ScreenshotGate.run/2`'s rescue
+    # cannot catch) must reach the `:DOWN` clause and escalate, not take the gate with it.
+    task =
+      Task.Supervisor.async_nolink(Wardmast.TaskSupervisor, fn ->
+        ScreenshotGate.run(job, capture)
+      end)
+
+    state = %{
+      state
+      | screenshot_task: %{ref: task.ref, pid: task.pid, head_sha: head, record: record}
+    }
+
+    {:noreply, schedule_screenshot_head_poll(state, task.ref)}
+  end
+
+  # bd-8qj1sa: the production trigger for supersession. A capture takes minutes (it boots the app
+  # twice), during which a third party or another run can push to the branch. The gate asks
+  # `origin/<branch>` every `screenshot_head_poll_ms` while a capture is in flight (`nil` turns
+  # the poll off); the timer carries the task's ref, so one for a capture that has finished,
+  # been cancelled or been replaced is ignored.
+  defp schedule_screenshot_head_poll(%{screenshot_head_poll_ms: ms} = state, ref)
+       when is_integer(ms) and ms > 0 do
+    Process.send_after(self(), {:screenshot_head_poll, ref}, ms)
+    state
+  end
+
+  defp schedule_screenshot_head_poll(state, _ref), do: state
+
+  # The remote strictly advanced past the head being captured (`remote_advance/1`: our head is an
+  # ancestor of it). Fast-forward the worktree onto it, as `restart_on_remote_head/3` does, and
+  # start the gate over for the new head. Every other shape (a force-push the worktree cannot
+  # fast-forward to, no `origin`, a failed fetch) leaves the capture running: `push_gate/1` owns
+  # those, and this poll only ever avoids a stale set, never creates a refusal.
+  defp screenshot_head_poll(state, ref) do
+    with {:advanced, _remote} <- remote_advance(state),
+         {:ok, _} <- Worktree.sync_from_origin(state.worktree_path, state.branch),
+         new_head when is_binary(new_head) <- current_head_sha(state),
+         true <- new_head != state.screenshot_task.head_sha do
+      screenshot_head_moved(state, new_head)
+    else
+      _ -> {:noreply, schedule_screenshot_head_poll(state, ref)}
+    end
+  end
+
+  # The head under review is now `new_head`: cancel the capture for the old one (its row is
+  # `superseded`), and re-enter the gate for the new head at the door the old one came in by.
+  # Everything keyed to the old head is dropped first: the review checkout (re-provisioned at
+  # the new head once the gate clears), CI's read, and the last cleared screenshot head. So CI
+  # is awaited on the new head (when `review.require_ci_green` applies) before the capture
+  # for it starts, on `:first` and `{:next, review_id}` entries alike.
+  defp screenshot_head_moved(state, new_head) do
+    old = state.screenshot_task.head_sha
+
+    Logger.info(
+      "ReviewGate: head moved to #{String.slice(new_head, 0, 12)} while the screenshot " <>
+        "capture for #{String.slice(old, 0, 12)} was in flight (task=#{state.task_id}); " <>
+        "cancelling it"
+    )
+
+    _ = screenshot_db(fn -> Captures.supersede(state.task_id, new_head) end)
+
+    state =
+      state
+      |> cancel_screenshot_task()
+      |> record_touched_files(state.head_sha, new_head)
+      |> release_review_checkout()
+
+    state = %{
+      state
+      | head_sha: new_head,
+        screenshot_checked: nil,
+        screenshot_context: nil,
+        ci_green: nil,
+        ci_retargets: 0
+    }
+
+    case state.ci_entry do
+      {:next, review_id} ->
+        case state |> ci_gate({:next, review_id}) |> ci_next_reply(review_id) do
+          {:continue, state} -> {:noreply, state}
+          {:done, state} -> {:stop, :normal, state}
+        end
+
+      _first ->
+        state |> ci_gate(:first) |> ci_reply()
+    end
+  end
+
+  # Stop an in-flight capture task. Its row is left to `Captures.supersede/2`, which the next
+  # attempt runs, so cancelling never claims the cancelled capture finished.
+  defp cancel_screenshot_task(%{screenshot_task: nil} = state), do: state
+
+  defp cancel_screenshot_task(%{screenshot_task: %{ref: ref, pid: pid}} = state) do
+    Process.demonitor(ref, [:flush])
+    _ = Task.Supervisor.terminate_child(Wardmast.TaskSupervisor, pid)
+    %{state | screenshot_task: nil}
+  end
+
+  defp screenshot_history(task_id), do: screenshot_db(fn -> Captures.history(task_id) end)
+
+  defp screenshot_record_skip(state, meta) do
+    screenshot_db(fn ->
+      with {:ok, record} <-
+             Captures.begin_attempt(%{
+               task_id: state.task_id,
+               workspace_id: state.workspace_id,
+               head_sha: state.head_sha,
+               base_sha: Map.get(meta, :base_sha) || state.base_sha || "",
+               plan_hash: Map.get(meta, :plan_hash),
+               config_hash: Map.get(meta, :config_hash) || ""
+             }) do
+        Captures.finish(
+          record,
+          {:skipped, {meta.reason, "reusing the set taken at #{meta.from}"}}
+        )
+      end
+    end)
+  end
+
+  defp screenshot_finish_record(%{record: %{} = record}, outcome),
+    do: screenshot_db(fn -> Captures.finish(record, outcome) end)
+
+  defp screenshot_finish_record(_task, _outcome), do: :ok
+
+  # bd-ur1zty: a capture-infrastructure failure does not park the ticket (`ScreenshotGate.route/1`
+  # proceeds), so the coordinator hears of it as one soft alert per repo and cause; a capture that
+  # produced its set ends the repo's alerts. Only a capture that actually ran says anything: a
+  # cached or reused outcome is not a new fact.
+  defp screenshot_alert(state, outcome) do
+    case {outcome, ScreenshotGate.infrastructure_failure(outcome)} do
+      {_, {:ok, failure}} -> ScreenshotAlert.raise_failure(state, failure)
+      {{:ok, _result}, :none} -> ScreenshotAlert.clear(state)
+      _ -> :ok
+    end
+  end
+
+  # The ledger is bookkeeping: a database hiccup must never take the gate (or a review) down.
+  defp screenshot_db(fun) do
+    fun.()
+  rescue
+    e ->
+      Logger.warning("ReviewGate: screenshot capture record failed: #{Exception.message(e)}")
+      nil
+  end
+
+  # The "taken at <older head>" note belongs only to the head it was computed for: a cached
+  # outcome for any other head (the cap's fallback in `ScreenshotGate.plan/3`) carries none.
+  defp reuse_meta(%{screenshot_checked: %{reuse: meta, head_sha: head}, head_sha: head}), do: meta
+  defp reuse_meta(_state), do: nil
+
+  defp screenshot_route(state, outcome, reuse \\ nil) do
+    routed =
+      if reuse,
+        do: ScreenshotGate.route_reuse(outcome, reuse, state.head_sha),
+        else: ScreenshotGate.route(outcome)
+
+    case routed do
       {:proceed, context} ->
-        checked = %{head_sha: state.head_sha, outcome: outcome}
+        checked = %{head_sha: state.head_sha, outcome: outcome, reuse: reuse}
         ci_proceed(%{state | screenshot_context: context, screenshot_checked: checked})
 
       {:send_back, findings} ->
@@ -3598,13 +3825,23 @@ defmodule Wardmast.Worker.ReviewGate do
   def handle_info({ref, outcome}, %{screenshot_task: %{ref: ref}} = state)
       when is_reference(ref) do
     Process.demonitor(ref, [:flush])
+    screenshot_finish_record(state.screenshot_task, outcome)
+    screenshot_alert(state, outcome)
     screenshot_route(%{state | screenshot_task: nil}, outcome)
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{screenshot_task: %{ref: ref}} = state) do
     failure = CaptureFailure.new(:shot_failed, "the capture task died: #{inspect(reason)}")
+    screenshot_finish_record(state.screenshot_task, {:error, failure})
+    screenshot_alert(state, {:error, failure})
     screenshot_route(%{state | screenshot_task: nil}, {:error, failure})
   end
+
+  # bd-8qj1sa: the in-flight capture's head poll (`schedule_screenshot_head_poll/2`).
+  def handle_info({:screenshot_head_poll, ref}, %{screenshot_task: %{ref: ref}} = state),
+    do: screenshot_head_poll(state, ref)
+
+  def handle_info({:screenshot_head_poll, _ref}, state), do: {:noreply, state}
 
   # Author died before we could report — nothing to do.
   #
@@ -3786,6 +4023,10 @@ defmodule Wardmast.Worker.ReviewGate do
     # it. A gate killed outright (no `terminate/2`) is covered by the boot
     # sweep, `Wardmast.Reviews.Checkout.sweep_orphans/1`.
     _ = release_review_checkout(state)
+
+    # bd-8qj1sa: the capture task is not linked to the gate (a killed capture must reach `:DOWN`),
+    # so a gate that stops would otherwise leave the app booting for a review that is gone.
+    _ = cancel_screenshot_task(state)
 
     # bd-2yt0d2: a gate that ends on its own terms leaves no pass to restart. One
     # that is stopped because the node is — and one killed outright, which gets

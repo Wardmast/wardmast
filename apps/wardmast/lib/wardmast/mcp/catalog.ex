@@ -3887,7 +3887,7 @@ defmodule Wardmast.MCP.Catalog do
           "`quota_poll_failing`, `quota_snapshot_stale` (per Claude account: quota " <>
           "accounting blind, the 5h gate failing open), `overage_alert` (per workspace " <>
           "and provider), `budget_exceeded` (per ticket) and `spend_cap` (per account: " <>
-          "80% of its dollar spend cap, or the cap reached) and `machine_derate` (per machine: it entered a hard thermal derate and takes no new work; clears when it recovers) and `git_credential_refused` (per workspace and repo: the repo's git credential fails the dispatch guard, so every dispatch, fix round and push is refused; clears when the guard passes). Each carries `kind`, `key`, `subject`, " <>
+          "80% of its dollar spend cap, or the cap reached) and `machine_derate` (per machine: it entered a hard thermal derate and takes no new work; clears when it recovers) and `git_credential_refused` (per workspace and repo: the repo's git credential fails the dispatch guard, so every dispatch, fix round and push is refused; clears when the guard passes) and `screenshot_capture_failed` (per workspace, repo and cause: UI screenshots could not be captured for a capture-infrastructure reason and the review ran without them; clears when a capture works). Each carries `kind`, `key`, `subject`, " <>
           "`detail`, `owner` (always `operator`), `raised_at`, `last_raised_at`, " <>
           "`raise_count` and `cleared_at`. An alert clears by itself when its condition " <>
           "does, so the list is exactly what is still wrong. Optional `workspace`, " <>

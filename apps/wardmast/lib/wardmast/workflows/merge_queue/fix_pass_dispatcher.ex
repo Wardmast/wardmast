@@ -88,6 +88,10 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassDispatcher do
           optional(:pr_ref) => term(),
           optional(:checks) => [failing_check()],
           optional(:outside_diff_files) => [String.t()],
+          # GitHub #1593: the head the red visual job ran on (`%{adapter, mr_ref, head}`); its
+          # images are staged under `.arbiter/visual-actual/` for the pass to judge.
+          optional(:visual_handoff) => map(),
+          optional(:visual_hand_off_fun) => (String.t() -> term()),
           # #1144: `CiTriage.render/1` of the red head, briefed to the pass.
           optional(:triage) => String.t() | nil,
           optional(:start_claude) => boolean(),
@@ -255,6 +259,7 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassDispatcher do
          {:ok, node} <- ensure_node_image(node, task, context, args),
          {:ok, worktree_path} <- create_worktree(context, node),
          {:ok, node, seed} <- seed_node(node, worktree_path, context),
+         context <- stage_visual_actual(context, worktree_path, args, node),
          {:ok, worker_pid} <-
            start_worker(task, context, worktree_path, provider, {fallback_reason, decision}, %{
              node: node,
@@ -322,6 +327,55 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassDispatcher do
       mode: Placement.mode(context.workspace),
       image_opts: Map.get(args, :image_opts)
     })
+  end
+
+  # GitHub #1593: a red visual job on the branch's own UI change. The sandboxed pass cannot
+  # fetch CI artifacts, so the head's rendered images are put in its checkout (a node run
+  # ships them with the other worktree files, `ContainerSpawn.worktree_files/1`) and the
+  # brief says how to use them. Nothing is copied over a baseline here: the agent judges.
+  defp stage_visual_actual(context, worktree_path, args, node) do
+    case Map.get(args, :visual_handoff) do
+      %{} = handoff ->
+        stage =
+          Map.get(args, :visual_hand_off_fun) ||
+            fn path -> hand_off_visual(context, handoff, path) end
+
+        outcome = stage |> safe_hand_off(worktree_path) |> shippable(node, worktree_path)
+        Map.put(context, :visual_actual, outcome)
+
+      _ ->
+        context
+    end
+  end
+
+  # A node run only has what ships in its spec; images the spec cannot carry are not delivered.
+  defp shippable({:ok, _} = outcome, node, path) when not is_nil(node) do
+    if Wardmast.Worker.ContainerSpawn.visual_actual_shipped?(path),
+      do: outcome,
+      else: {:skip, :too_large_to_ship}
+  end
+
+  defp shippable(outcome, _node, _path), do: outcome
+
+  defp hand_off_visual(context, handoff, path) do
+    Wardmast.Worker.VisualBaselines.hand_off(
+      %{
+        workspace: context.workspace,
+        repo: context.repo,
+        adapter: handoff.adapter,
+        mr_ref: handoff.mr_ref,
+        result: %{head_sha: handoff.head}
+      },
+      path
+    )
+  end
+
+  defp safe_hand_off(stage, path) do
+    stage.(path)
+  rescue
+    e -> {:skip, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:skip, {:exit, reason}}
   end
 
   # bd-bg87oz: the home clone is brought to the forge's branch head and target tip
@@ -408,6 +462,7 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassDispatcher do
            repo: Map.get(args, :repo) || resolve_repo_name(workspace),
            checks: Map.get(args, :checks) || [],
            outside_diff_files: Map.get(args, :outside_diff_files) || [],
+           visual_handoff: Map.get(args, :visual_handoff),
            triage: Map.get(args, :triage)
          }}
     end
@@ -807,6 +862,7 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassDispatcher do
       #{render_checks(Map.get(context, :checks) || [])}
       #{render_triage(Map.get(context, :triage))}
       #{render_outside_diff(Map.get(context, :outside_diff_files) || [])}
+      #{Wardmast.Worker.VisualBaselines.hand_off_brief(Map.get(context, :visual_actual))}
       DO NOT:
         * re-implement the change set,
         * open a new PR,

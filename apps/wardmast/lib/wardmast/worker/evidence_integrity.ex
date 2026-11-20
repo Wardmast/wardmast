@@ -32,7 +32,10 @@ defmodule Wardmast.Worker.EvidenceIntegrity do
   A line flags when either:
 
     1. it carries the reviewer tag `[FABRICATED-EVIDENCE]` (`tag/0`), which
-       `reviewer_block/0` asks reviewers to use; or
+       `reviewer_block/0` asks reviewers to use, unless the words before it on
+       that line negate it (reuse `@negation` — e.g. `"No [FABRICATED-EVIDENCE]
+       findings"` does not flag, bd-dm5uun) or it is merely quoted inside
+       backticks in prose while discussing the tag/parser; or
     2. it contains an **integrity term** (`fabricat*`, `falsified`,
        `falsification`, `forged`, `forgery`, `doctored`, `misrepresent*`,
        `passed/passes/passing off`)
@@ -58,6 +61,12 @@ defmodule Wardmast.Worker.EvidenceIntegrity do
 
   @tag "[FABRICATED-EVIDENCE]"
   @marker "ReviewGate: reviewer flagged fabricated or falsified evidence"
+
+  # Tokens that may appear in a finding header before `[FABRICATED-EVIDENCE]`
+  # (list numbers, "Finding N", finding IDs `F1`/`F1.2`, severity labels) — used
+  # so a backticked `` `[FABRICATED-EVIDENCE]` `` at the start of a finding still
+  # flags while a mid-sentence backticked quote discussing the tag/parser does not.
+  @finding_prefix_word ~r/\A(?:\d+|findings?|f\d+(?:\.\d+)?|severity|critical|blockers?|high|major|medium|moderate|low|minor)\z/i
 
   @integrity ~r/\A(?:fabricat\w*|falsified|falsification|forged|forgery|forgeries|doctored|misrepresent\w*)\z/i
   @pass_off ~r/\A(?:pass|passed|passes|passing)\z/i
@@ -173,12 +182,13 @@ defmodule Wardmast.Worker.EvidenceIntegrity do
     """
     FABRICATED EVIDENCE — if the work fabricates or falsifies evidence (a
     mockup presented as a screenshot, a citation to a source the thing did not
-    come from, test output that was never produced), start that finding with
-    `#{@tag}` and include evidence the coordinator can check: the URL you
-    fetched, the command you ran and what it printed, a hash or byte
-    comparison. That finding sends the task to the coordinator instead of
-    another fix round, so be sure first. Compare against the actual source
-    before you call a provenance claim false; appearance alone is not enough.
+    come from, test output that was never produced), start the finding with
+    the bare tag `#{@tag}` (never use it in prose) and include
+    evidence the coordinator can check: the URL you fetched, the command you
+    ran and what it printed, a hash or byte comparison. That finding sends the
+    task to the coordinator instead of another fix round, so be sure first.
+    Compare against the actual source before you call a provenance claim false;
+    appearance alone is not enough.
     """
   end
 
@@ -187,11 +197,58 @@ defmodule Wardmast.Worker.EvidenceIntegrity do
   defp flagged_line?(""), do: false
 
   defp flagged_line?(line) do
-    String.contains?(line, @tag) or accusation?(line)
+    tagged_finding?(line) or accusation?(line)
+  end
+
+  # Any occurrence of `[FABRICATED-EVIDENCE]` flags UNLESS the words before it
+  # on that line/sentence carry a negation (`@negation`: "No", "no ... findings",
+  # "none", "not", "without", ...), ignoring markdown punctuation `[*_`]`, or
+  # the tag is merely quoted inside backticks in prose (preceded by non-header
+  # prose words) while discussing the tag or parser (bd-dm5uun).
+  defp tagged_finding?(line) do
+    ~r/(`?)\[FABRICATED-EVIDENCE\]`?/i
+    |> Regex.scan(line, return: :index)
+    |> Enum.any?(fn [{tag_start, _tag_len}, {tick_start, tick_len}] ->
+      prefix =
+        line
+        |> binary_part(0, tag_start)
+        |> last_sentence_segment()
+
+      words = tokenize_words(prefix)
+      quoted_in_prose? = tick_len > 0 and tick_start == tag_start and prose_before_tag?(words)
+
+      not quoted_in_prose? and not Enum.any?(words, &Regex.match?(@negation, &1))
+    end)
+  end
+
+  defp last_sentence_segment(prefix) do
+    prefix
+    |> String.split(~r/[.;!?]\s+/)
+    |> List.last("")
+  end
+
+  defp prose_before_tag?(words) do
+    Enum.any?(words, &(not Regex.match?(@finding_prefix_word, &1)))
+  end
+
+  defp tokenize_words(text) do
+    text
+    |> String.replace(~r/[*_`]+/, " ")
+    |> then(&Regex.scan(~r/[\w'’-]+/u, &1))
+    |> List.flatten()
+    |> Enum.map(&normalize/1)
   end
 
   defp accusation?(line) do
-    words = Regex.scan(~r/[\w'’-]+/u, line) |> List.flatten() |> Enum.map(&normalize/1)
+    # Strip `[FABRICATED-EVIDENCE]` before tokenizing so a negated or quoted
+    # tag mention ("No `[FABRICATED-EVIDENCE]` findings") is not split into words
+    # `["no", "fabricated-evidence", "findings"]` where `"fabricated-evidence"`
+    # matches `fabricat\w*` alongside `"evidence"`.
+    words =
+      line
+      |> String.replace(~r/`?\[FABRICATED-EVIDENCE\]`?/i, " ")
+      |> tokenize_words()
+
     indexed = Enum.with_index(words)
 
     Enum.any?(indexed, fn {word, i} ->
