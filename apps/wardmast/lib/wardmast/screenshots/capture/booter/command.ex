@@ -28,6 +28,7 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
   @behaviour Wardmast.Screenshots.Capture.Booter
 
   alias Wardmast.Screenshots.Capture.AppProcess
+  alias Wardmast.Screenshots.Capture.DepsCache
   alias Wardmast.Screenshots.Capture.Sandbox
 
   @probe_ms 250
@@ -38,7 +39,8 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
 
     with {:ok, sandbox} <- sandbox(spec),
          {:ok, port} <- free_port(cfg.port_range),
-         {:ok, home} <- home(spec) do
+         {:ok, home} <- home(spec),
+         {:ok, writable} <- writable_deps(spec) do
       vars = %{
         "port" => port,
         "role" => spec.role,
@@ -60,7 +62,7 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
         },
         checkout: spec.checkout,
         vars: vars,
-        env: build_env(cfg, home, spec, vars, port)
+        env: build_env(cfg, home, spec, vars, port, writable)
       }
 
       limits = cfg.limits
@@ -117,6 +119,23 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
   # bd-3glf2a: the offline deps cache (`Capture.DepsCache`), when the capture built one.
   defp deps_dirs(%{deps: %{dir: dir}}) when is_binary(dir), do: [dir]
   defp deps_dirs(_spec), do: []
+
+  # bd-8udsgf: the cache is shown read-only, and a dependency may write into its own source
+  # directory while compiling. The boot gets a copy of `deps/` (in its scratch) and of the seed's
+  # compiled `_build` (in its checkout); the returned `MIX_DEPS_PATH` points at the copy.
+  defp writable_deps(%{
+         deps: %{dir: dir, deps: _, build: _} = cache,
+         scratch: scratch,
+         checkout: checkout
+       })
+       when is_binary(dir) do
+    case DepsCache.writable(cache, scratch, checkout) do
+      {:ok, env} -> {:ok, env}
+      {:error, message} -> {:error, {:setup, message}}
+    end
+  end
+
+  defp writable_deps(_spec), do: {:ok, []}
 
   defp deps_env(%{deps: %{env: env}}) when is_list(env), do: env
   defp deps_env(_spec), do: []
@@ -304,7 +323,7 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
 
   # ── environment, ports, templates ───────────────────────────────────────
 
-  defp build_env(cfg, home, spec, vars, port) do
+  defp build_env(cfg, home, spec, vars, port, writable) do
     base =
       [
         {"PATH", Sandbox.path()},
@@ -318,7 +337,7 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
 
     # The deps cache's variables come after the config's (`env -i` keeps the last of a name), so
     # a hand-set MIX_HOME cannot point the boot away from it.
-    base ++ configured ++ deps_env(spec) ++ [{cfg.port_env, Integer.to_string(port)}]
+    base ++ configured ++ deps_env(spec) ++ writable ++ [{cfg.port_env, Integer.to_string(port)}]
   end
 
   defp free_port({lo, hi}) do

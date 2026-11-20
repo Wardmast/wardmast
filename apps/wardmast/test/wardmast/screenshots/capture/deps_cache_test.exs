@@ -584,7 +584,7 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
     @describetag timeout: 300_000
 
     # A dependency fetched with no network at all: a local git repo.
-    defp dep_repo!(dir) do
+    defp dep_repo!(dir, write_priv? \\ false) do
       dep = Path.join(dir, "tiny_dep")
       File.mkdir_p!(Path.join(dep, "lib"))
       git!(dir, ["init", "-q", "-b", "main", dep])
@@ -597,7 +597,19 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
           "mix.exs" => """
           defmodule Tiny.MixProject do
             use Mix.Project
-            def project, do: [app: :tiny, version: "0.1.0", elixir: "~> 1.14"]
+            def project do
+              [app: :tiny, version: "0.1.0", elixir: "~> 1.14", aliases: aliases()]
+            end
+
+            # Like phoenix: a compile alias that writes into the dep's own source dir.
+            defp aliases do
+              if #{write_priv?}, do: [compile: [&write_priv/1, "compile"]], else: []
+            end
+
+            defp write_priv(_) do
+              File.mkdir_p!("priv")
+              File.write!("priv/generated.txt", "written at compile")
+            end
           end
           """,
           "lib/tiny.ex" => "defmodule Tiny do\n  def hello, do: :from_the_cache\nend\n"
@@ -619,6 +631,122 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
       after
         AppProcess.stop(pid)
       end
+    end
+
+    # bd-8udsgf: every path, mode, mtime and content hash under `dir`.
+    defp snapshot(dir) do
+      dir
+      |> Path.join("**")
+      |> Path.wildcard(match_dot: true)
+      |> Enum.map(&Path.relative_to(&1, dir))
+      |> Enum.sort()
+      |> Enum.map(fn rel ->
+        path = Path.join(dir, rel)
+        stat = File.lstat!(path, time: :posix)
+        body = if stat.type == :regular, do: :crypto.hash(:sha256, File.read!(path))
+        {rel, stat.type, stat.mode, stat.mtime, body}
+      end)
+    end
+
+    defp seeded_app!(dir, write_priv?) do
+      dep = dep_repo!(dir, write_priv?)
+      repo = repo!(dir)
+      home = Path.join(dir, "home")
+      File.mkdir_p!(home)
+      mix = System.find_executable("mix")
+
+      File.mkdir_p!(Path.join(repo, "lib"))
+
+      File.write!(Path.join(repo, "mix.exs"), """
+      defmodule App.MixProject do
+        use Mix.Project
+        def project, do: [app: :app, version: "0.1.0", elixir: "~> 1.14", deps: deps()]
+        defp deps, do: [{:tiny, git: "file://#{dep}", tag: "v1"}]
+      end
+      """)
+
+      File.write!(
+        Path.join(repo, "lib/app.ex"),
+        "defmodule App do\n  def hi, do: Tiny.hello()\nend\n"
+      )
+
+      assert {:exited, 0, _} = run!([mix, "deps.get"], repo, mix_env(home))
+      File.rm_rf!(Path.join(repo, "deps"))
+      File.rm_rf!(Path.join(repo, "_build"))
+      base = commit!(repo, %{}, "base")
+      push!(repo)
+      git!(repo, ["checkout", "-q", "-b", "feature"])
+
+      head =
+        commit!(
+          repo,
+          %{"lib/app.ex" => "defmodule App do\n  def hi, do: Tiny.hello()\nend\n# v2\n"},
+          "head"
+        )
+
+      root = Path.join(dir, "cache-root")
+      assert {:ok, cache} = DepsCache.prepare(input(repo, base, head), root: root)
+      %{mix: mix, home: home, repo: repo, head: head, cache: cache}
+    end
+
+    defp boot_tree!(dir, name, ctx) do
+      checkout = Path.join(dir, name)
+      scratch = Path.join(dir, name <> "-scratch")
+      File.mkdir_p!(checkout)
+      File.mkdir_p!(scratch)
+
+      {_, 0} =
+        System.cmd("sh", [
+          "-c",
+          "git -C '#{ctx.repo}' archive #{ctx.head} | tar -x -C '#{checkout}'"
+        ])
+
+      assert {:ok, overrides} = DepsCache.writable(ctx.cache, scratch, checkout)
+      {checkout, scratch, overrides}
+    end
+
+    test "a dep that writes into its own source while compiling boots; the cache is untouched",
+         %{tmp_dir: dir} do
+      ctx = seeded_app!(dir, true)
+      cache = ctx.cache
+      {_, 0} = System.cmd("chmod", ["-R", "a-w", cache.dir])
+      on_exit(fn -> System.cmd("chmod", ["-R", "u+w", cache.dir]) end)
+      before = snapshot(cache.dir)
+
+      {checkout, scratch, overrides} = boot_tree!(dir, "boot", ctx)
+      deps = Path.join(scratch, "deps")
+      assert overrides == [{"MIX_DEPS_PATH", deps}]
+
+      # Force the dep to compile at the boot: drop the copied build and the alias's output.
+      File.rm_rf!(Path.join(checkout, "_build"))
+      File.rm_rf!(Path.join(deps, "tiny/priv"))
+      env = mix_env(ctx.home) ++ cache.env ++ overrides
+
+      assert {:exited, 0, out} = run!([ctx.mix, "run", "-e", "IO.puts(App.hi())"], checkout, env)
+      assert out =~ "==> tiny"
+      assert out =~ "from_the_cache"
+      assert File.read!(Path.join(deps, "tiny/priv/generated.txt")) == "written at compile"
+      assert snapshot(cache.dir) == before
+    end
+
+    test "a second boot of the same cache does not recompile its deps", %{tmp_dir: dir} do
+      ctx = seeded_app!(dir, true)
+      {_, 0} = System.cmd("chmod", ["-R", "a-w", ctx.cache.dir])
+      on_exit(fn -> System.cmd("chmod", ["-R", "u+w", ctx.cache.dir]) end)
+      before = snapshot(ctx.cache.dir)
+
+      for name <- ["boot1", "boot2"] do
+        {checkout, _scratch, overrides} = boot_tree!(dir, name, ctx)
+        env = mix_env(ctx.home) ++ ctx.cache.env ++ overrides
+
+        assert {:exited, 0, out} =
+                 run!([ctx.mix, "run", "-e", "IO.puts(App.hi())"], checkout, env)
+
+        assert out =~ "from_the_cache"
+        refute out =~ "==> tiny"
+      end
+
+      assert snapshot(ctx.cache.dir) == before
     end
 
     test "a head checkout compiles from the read-only cache, with Hex offline", %{tmp_dir: dir} do
