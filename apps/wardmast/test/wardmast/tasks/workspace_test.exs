@@ -379,12 +379,12 @@ defmodule Wardmast.Tasks.WorkspaceTest do
       {:ok, ws} = Ash.create(Workspace, %{name: "unknown-root"})
 
       assert {:error, %Ash.Error.Invalid{} = err} =
-               Ash.update(ws, %{patch: %{"sandbox" => %{"backend" => "podman"}}},
+               Ash.update(ws, %{patch: %{"permissions" => %{"mode" => "strict"}}},
                  action: :patch_config
                )
 
       msg = Exception.message(err)
-      assert msg =~ "agent.security.sandbox.backend"
+      assert msg =~ "agent.security.permissions.mode"
       assert Ash.get!(Workspace, ws.id).config == %{}
     end
 
@@ -430,6 +430,103 @@ defmodule Wardmast.Tasks.WorkspaceTest do
                )
 
       assert updated.config["legacy"] == 1
+    end
+
+    # bd-4j0nfe: a root `sandbox` key is read by nothing. It used to be refused,
+    # and `force` stored it as dead config that `arb config get sandbox` echoed as
+    # if it were live. It is now a deprecated alias of `agent.security.sandbox`.
+    test "a root sandbox patch is rewritten to agent.security.sandbox, with a deprecation warning" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "root-sandbox-alias",
+          config: %{
+            "agent" => %{
+              "security" => %{"sandbox" => %{"backend" => "bwrap", "review_backend" => "podman"}}
+            }
+          }
+        })
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, updated} =
+                   Ash.update(ws, %{patch: %{"sandbox" => %{"backend" => "auto"}}},
+                     action: :patch_config
+                   )
+
+          send(self(), {:updated, updated})
+        end)
+
+      assert_received {:updated, updated}
+      refute Map.has_key?(updated.config, "sandbox")
+
+      assert updated.config["agent"]["security"]["sandbox"] == %{
+               "backend" => "auto",
+               "review_backend" => "podman"
+             }
+
+      assert log =~ "deprecated"
+      assert log =~ "sandbox.backend"
+      assert log =~ "agent.security.sandbox.backend"
+    end
+
+    @tag capture_log: true
+    test "force never stores a root sandbox key" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "root-sandbox-force"})
+
+      assert {:ok, updated} =
+               Ash.update(ws, %{patch: %{"sandbox" => %{"backend" => "podman"}}, force: true},
+                 action: :patch_config
+               )
+
+      refute Map.has_key?(updated.config, "sandbox")
+      assert updated.config["agent"]["security"]["sandbox"]["backend"] == "podman"
+    end
+
+    @tag capture_log: true
+    test "the canonical path wins when one patch names both" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "root-sandbox-both"})
+
+      patch = %{
+        "sandbox" => %{"backend" => "auto", "egress" => "allowlist"},
+        "agent" => %{"security" => %{"sandbox" => %{"backend" => "podman"}}}
+      }
+
+      assert {:ok, updated} = Ash.update(ws, %{patch: patch}, action: :patch_config)
+
+      refute Map.has_key?(updated.config, "sandbox")
+
+      assert updated.config["agent"]["security"]["sandbox"] == %{
+               "backend" => "podman",
+               "egress" => "allowlist"
+             }
+    end
+
+    @tag capture_log: true
+    test "a root sandbox value is still validated on its canonical path" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "root-sandbox-invalid"})
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.update(ws, %{patch: %{"sandbox" => %{"backend" => "docker"}}},
+                 action: :patch_config
+               )
+
+      assert Exception.message(err) =~ "agent.security.sandbox.backend must be one of"
+    end
+
+    @tag capture_log: true
+    test "unset_paths under sandbox removes the canonical key" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "root-sandbox-unset",
+          config: %{"agent" => %{"security" => %{"sandbox" => %{"backend" => "podman"}}}}
+        })
+
+      assert {:ok, updated} =
+               Ash.update(ws, %{patch: %{}, unset_paths: ["sandbox.backend"]},
+                 action: :patch_config
+               )
+
+      refute Map.has_key?(updated.config["agent"]["security"]["sandbox"], "backend")
     end
 
     test "deep-merges a patch without clobbering sibling keys" do
