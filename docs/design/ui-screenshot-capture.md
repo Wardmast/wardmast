@@ -245,9 +245,10 @@ come from the host side, **without opening the sandbox**. Operator guide: [scree
 * **`screenshots.deps`** (`Capture.DepsCache`): `{"mix": true}` gives every boot its Mix
   dependencies with no network.
   * **Trusted lockfile only.** The cache comes from a `mix.lock` the default branch has had
-    (`merge.base`, else `main`): the merge-base's, when the merge-base is on the default branch,
-    else the default branch tip's when it is byte-for-byte the same. A head that edits, adds or
-    deletes `mix.lock` is `{:skipped, {:deps_changed, reason}}` (`skip_kind: deps_changed`; the
+    (`merge.base`, else `main`): the head's lockfile must equal the merge-base's (when the
+    merge-base is on the default branch) or the default branch tip's, byte for byte, so a branch
+    that merged current `main` is never "editing" the lockfile it merely inherited (bd-5eegxz). A
+    head that edits, adds or deletes `mix.lock` beyond that is `{:skipped, {:deps_changed, reason}}` (`skip_kind: deps_changed`; the
     ReviewGate proceeds and tells the reviewer why). The head's `mix.exs` and lockfile never run
     with a network; running the trusted commit's `mix.exs` is the same trust as merging it.
   * **Trust comes from origin, never from the checkout** (a review finding): the worker's refs

@@ -31,6 +31,14 @@ defmodule Wardmast.Screenshots.Capture do
   6. **Pairs.** present at both is `:changed`; absent at the base is `:new` (after-only); absent at
      the head is `:removed` (before-only); absent at both is a route error.
 
+  A bad or missing manifest yields to a deps outcome (bd-5eegxz): the deps cache is consulted
+  before the manifest error is reported, and a `deps_changed` skip or a `:deps_failed` failure is
+  the result instead, so the worker is not sent back for a manifest the capture could not have
+  used. Each run extracts into a work directory of its own (`work/<token>`, `Capture.Workdir`),
+  removed afterwards (read-only trees included) with the leftovers of dead runs swept, so a
+  previous attempt can never make the next boot fail. `capture.json` carries a top-level `reason`
+  for a failed or skipped capture.
+
   Every failure is a `Wardmast.Screenshots.Capture.Failure` with a distinct `code`
   (`:manifest_missing`, `:manifest_invalid`, `:boot_failed`, `:route_error`, ...). Success, skip and
   failure are all recorded in `<out_dir>/capture.json` (once the step has begun) and handed to

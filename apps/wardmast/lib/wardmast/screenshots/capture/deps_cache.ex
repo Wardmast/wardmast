@@ -9,12 +9,12 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
 
   ## Which lockfile is trusted (`plan/4`)
 
-  Only a `mix.lock` the **default branch** has had. The merge-base is the base boot's own tree;
-  when it is an ancestor of the default branch, its lockfile is that, and it is the source. When
-  it is not (a PR into another branch), the default branch's tip is the source, if its lockfile is
-  byte-for-byte the same. The head's lockfile must equal the source's: a head that edits, adds or
-  deletes `mix.lock` is `{:skip, reason}` (`skip_kind: deps_changed`), and nothing is fetched for
-  it. **The head's own `mix.exs` and lockfile never run with a network.** Running the source's
+  Only a `mix.lock` the **default branch** has had. The head's lockfile must be byte-for-byte the
+  one at the merge-base (when that is an ancestor of the default branch: it is then the source)
+  **or at the default branch's current tip** (bd-5eegxz: a branch that merged main after main
+  bumped its lockfile carries the tip's, whatever older merge-base it was handed). Neither: a
+  head that edits, adds or deletes `mix.lock` is `{:skip, reason}` (`skip_kind: deps_changed`),
+  and nothing is fetched for it. **The head's own `mix.exs` and lockfile never run with a network.** Running the source's
   (`mix deps.get` evaluates the project's `mix.exs`) is the same trust as merging it.
 
   ## The cache (`prepare/2`)
