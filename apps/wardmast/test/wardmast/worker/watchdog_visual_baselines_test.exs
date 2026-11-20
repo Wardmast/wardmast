@@ -191,6 +191,35 @@ defmodule Wardmast.Worker.WatchdogVisualBaselinesTest do
     assert StubFixPassDispatcher.call_count() >= 1
   end
 
+  test "a declined refresh hands the fix pass the head to stage images for (#1593)" do
+    ws = workspace(true)
+    mr_ref = "!vb2h"
+    head = sha("head2h")
+    task = approved_task(ws, head)
+    Application.put_env(:wardmast, :visual_refresher_reply, {:skip, {:own_changes, ["a"]}})
+
+    StubMerger.queue_get(mr_ref, [red(head)])
+    start_watchdog(task, mr_ref, ws)
+
+    wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+
+    assert %{visual_handoff: %{head: ^head, mr_ref: ^mr_ref, adapter: StubMerger}} =
+             StubFixPassDispatcher.last_args()
+  end
+
+  test "an unconfigured repo is handed no visual hand-off (#1593)" do
+    ws = workspace(false)
+    mr_ref = "!vb3h"
+    head = sha("head3h")
+    task = approved_task(ws, head)
+
+    StubMerger.queue_get(mr_ref, [red(head)])
+    start_watchdog(task, mr_ref, ws)
+
+    wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+    refute Map.has_key?(StubFixPassDispatcher.last_args(), :visual_handoff)
+  end
+
   test "a repo with no visual_baselines config never calls the refresher" do
     ws = workspace(false)
     mr_ref = "!vb3"

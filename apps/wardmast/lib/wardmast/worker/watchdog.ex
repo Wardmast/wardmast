@@ -4496,9 +4496,22 @@ defmodule Wardmast.Worker.Watchdog do
         _ -> args
       end
 
+    args = put_visual_handoff(args, state)
     args = put_ci_skip(args, state)
     safe(fn -> state.fix_pass_dispatcher.dispatch(args) end)
   end
+
+  # GitHub #1593: when the red head is a repo's visual job failing on the branch's own change
+  # (the refresh declined), the pass is handed that head's rendered images. The head is the
+  # one the CI was last read for; `VisualBaselines.hand_off/2` refuses artifacts of any other.
+  defp put_visual_handoff(args, %{polled_head_sha: head} = state) when is_binary(head) do
+    if VisualBaselines.configured?(state.workspace, state.repo),
+      do:
+        Map.put(args, :visual_handoff, %{adapter: state.adapter, mr_ref: state.mr_ref, head: head}),
+      else: args
+  end
+
+  defp put_visual_handoff(args, _state), do: args
 
   # A suspected-flake re-run counts as running once its head reads anything
   # but red. Only then does a later red on that head mean the re-run failed.

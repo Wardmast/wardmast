@@ -23,7 +23,12 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
 
   alias Wardmast.Worker.VisualBaselines.Config
 
-  @type entry :: %{name: String.t(), baseline: String.t(), bytes: binary()}
+  @type entry :: %{
+          name: String.t(),
+          baseline: String.t(),
+          bytes: binary(),
+          diff: binary() | nil
+        }
 
   @type error ::
           :bad_archive
@@ -70,10 +75,16 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
           String.ends_with?(base, config.actual_suffix),
           name = String.replace_suffix(base, config.actual_suffix, ""),
           name != "" do
-        %{name: name, dir: results_dir(parts), bytes: bytes}
+        %{name: name, dir: results_dir(parts), bytes: bytes, diff: diff_for(files, path, config)}
       end
 
     if found == [], do: {:error, :no_actuals}, else: {:ok, found}
+  end
+
+  # The `<name>-diff.png` Playwright writes beside the actual, when the archive has one.
+  defp diff_for(files, actual_path, config) do
+    wanted = String.replace_suffix(actual_path, config.actual_suffix, "-diff.png")
+    Enum.find_value(files, fn {path, bytes} -> path == wanted && bytes end)
   end
 
   defp results_dir(parts) do
@@ -94,11 +105,11 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
 
     with {:ok, resolved} <- resolve(actuals, config, existing) do
       resolved
-      |> Enum.reduce_while({:ok, []}, fn {name, wanted, bytes}, {:ok, acc} ->
+      |> Enum.reduce_while({:ok, []}, fn {name, wanted, bytes, diff}, {:ok, acc} ->
         case Enum.filter(existing, &wanted.(Path.basename(&1))) do
           [one] ->
             rel = Path.relative_to(one, checkout)
-            {:cont, {:ok, [%{name: name, baseline: rel, bytes: bytes} | acc]}}
+            {:cont, {:ok, [%{name: name, baseline: rel, bytes: bytes, diff: diff} | acc]}}
 
           [] ->
             {:halt, {:error, {:no_baseline, name}}}
@@ -114,7 +125,7 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
     end
   end
 
-  # One `{name, basename_matcher, bytes}` per snapshot to refresh.
+  # One `{name, basename_matcher, bytes, diff}` per snapshot to refresh.
   defp resolve(actuals, %{layout: "playwright"} = config, existing) do
     basenames = Enum.map(existing, &Path.basename/1)
     args = actuals |> Enum.map(& &1.name) |> Enum.uniq()
@@ -138,7 +149,7 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
         {:ok,
          Enum.map(actuals, fn a ->
            wanted = a.name <> config.baseline_suffix
-           {a.name, &(&1 == wanted), a.bytes}
+           {a.name, &(&1 == wanted), a.bytes, a.diff}
          end)}
 
       dup ->
@@ -169,7 +180,7 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
         |> Enum.filter(&project_of?(base, &1))
         |> Enum.max_by(&byte_size/1, fn -> nil end)
 
-      {project, base, retry, a.bytes}
+      {project, base, retry, a.bytes, a.diff}
     end)
     |> Enum.group_by(&elem(&1, 0))
     |> Enum.reduce_while({:ok, []}, fn
@@ -179,9 +190,9 @@ defmodule Wardmast.Worker.VisualBaselines.Archive do
       {project, runs}, {:ok, acc} ->
         case runs |> Enum.map(&elem(&1, 1)) |> Enum.uniq() do
           [_one] ->
-            {_, _, _, bytes} = Enum.max_by(runs, &elem(&1, 2))
+            {_, _, _, bytes, diff} = Enum.max_by(runs, &elem(&1, 2))
             wanted = arg <> "-" <> project <> tail
-            {:cont, {:ok, [{arg <> "-" <> project, &(&1 == wanted), bytes} | acc]}}
+            {:cont, {:ok, [{arg <> "-" <> project, &(&1 == wanted), bytes, diff} | acc]}}
 
           _many ->
             {:halt, {:error, {:duplicate_actual, arg <> "-" <> project}}}

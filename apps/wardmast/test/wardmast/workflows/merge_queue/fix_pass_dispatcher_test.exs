@@ -33,6 +33,27 @@ defmodule Wardmast.Workflows.MergeQueue.FixPassDispatcherTest do
   end
 
   describe "prompt_for/1" do
+    test "briefs the staged visual images when the context carries a hand-off" do
+      context = %{
+        task: %Issue{id: "bd-fix1"},
+        branch: "feature/bd-fix1",
+        target_branch: "main",
+        checks: [],
+        visual_actual:
+          {:ok, [%{baseline: "e2e/a-linux.png", actual: "a-linux.png", diff: "a-linux-diff.png"}]}
+      }
+
+      prompt = FixPassDispatcher.prompt_for(context)
+      assert prompt =~ ".arbiter/visual-actual/a-linux.png"
+      assert prompt =~ "copy them over"
+
+      assert FixPassDispatcher.prompt_for(
+               Map.put(context, :visual_actual, {:skip, :no_artifacts})
+             ) =~ "could not be delivered"
+
+      refute FixPassDispatcher.prompt_for(Map.delete(context, :visual_actual)) =~ "visual-actual"
+    end
+
     test "is narrowly scoped to fixing CI on the same branch and embeds the checks" do
       context = %{
         task: %Issue{id: "bd-fix1"},

@@ -1541,8 +1541,9 @@ defmodule Wardmast.Worker.ContainerSpawn do
           {:ok, %{String.t() => binary()}, %{String.t() => String.t()}} | {:error, term()}
   def worktree_files(worktree) when is_binary(worktree) do
     with {:ok, mcp, secrets} <- mcp_file(worktree),
-         {:ok, skills} <- skill_files(worktree) do
-      {:ok, Map.merge(mcp, skills), secrets}
+         {:ok, skills} <- skill_files(worktree),
+         {:ok, visual} <- visual_actual_files(worktree) do
+      {:ok, mcp |> Map.merge(skills) |> Map.merge(visual), secrets}
     end
   end
 
@@ -1589,6 +1590,27 @@ defmodule Wardmast.Worker.ContainerSpawn do
   end
 
   defp redact_bearer_tokens(config), do: {config, %{}}
+
+  # GitHub #1593: the head's rendered visual images (`VisualBaselines.hand_off/2`) are untracked
+  # like `.mcp.json`, so the bundle cannot carry them either. They ship as worktree files. Over the
+  # caps nothing ships (the brief tells the agent when the directory is empty); never a failed spawn.
+  @visual_dir ".arbiter/visual-actual"
+  @max_visual_files 200
+  @max_visual_bytes 48 * 1024 * 1024
+
+  defp visual_actual_files(worktree) do
+    root = Path.join(worktree, @visual_dir)
+
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(root),
+         paths when length(paths) <= @max_visual_files <- walk_files(root),
+         sizes = Enum.map(paths, &File.stat!(&1).size),
+         true <- Enum.sum(sizes) <= @max_visual_bytes,
+         {:ok, files} <- read_skill_files(worktree, paths) do
+      {:ok, files}
+    else
+      _ -> {:ok, %{}}
+    end
+  end
 
   defp skill_files(worktree) do
     root = Path.join(worktree, @skills_dir)

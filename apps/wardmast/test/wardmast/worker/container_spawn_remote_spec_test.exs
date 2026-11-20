@@ -355,6 +355,19 @@ defmodule Wardmast.Worker.ContainerSpawnRemoteSpecTest do
       assert files[".claude/skills/tdd/SKILL.md"] == "# tdd"
     end
 
+    test "worktree_files/1 ships the staged visual images under .arbiter/visual-actual", %{
+      tmp_dir: dir
+    } do
+      worktree = Path.join(dir, "visual")
+      File.mkdir_p!(Path.join(worktree, ".arbiter/visual-actual"))
+      File.write!(Path.join(worktree, ".arbiter/visual-actual/a-linux.png"), "png-bytes")
+      File.write!(Path.join(worktree, ".arbiter/INBOX"), "mail")
+
+      assert {:ok, files, _} = ContainerSpawn.worktree_files(worktree)
+      assert files[".arbiter/visual-actual/a-linux.png"] == "png-bytes"
+      refute Map.has_key?(files, ".arbiter/INBOX")
+    end
+
     test "worktree_files/1 of a worktree with nothing injected is empty", %{tmp_dir: dir} do
       File.mkdir_p!(Path.join(dir, "bare"))
       assert {:ok, %{}, %{}} = ContainerSpawn.worktree_files(Path.join(dir, "bare"))
