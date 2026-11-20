@@ -480,6 +480,94 @@ defmodule Wardmast.Screenshots.ConfigTest do
       assert [_] = errors(%{"deps" => true})
     end
 
+    # bd-ur1zty: the seed (MIX_ENV=dev, an empty environment) could not compile an app whose
+    # runtime.exs raises without its env.
+    test "deps.mix_env and deps.env configure the seed" do
+      deps = %{
+        "mix" => true,
+        "mix_env" => "test",
+        "env" => %{"DATABASE_URL" => "ecto://127.0.0.1/x"}
+      }
+
+      assert [] = errors(%{"deps" => deps})
+      assert [_] = errors(%{"deps" => %{"mix_env" => "Test Env"}})
+      assert [_] = errors(%{"deps" => %{"mix_env" => ""}})
+      assert [_] = errors(%{"deps" => %{"mix_env" => 5}})
+      assert [_] = errors(%{"deps" => %{"env" => "FOO=1"}})
+      assert [_] = errors(%{"deps" => %{"env" => %{"FOO" => 1}}})
+      assert [msg] = errors(%{"deps" => %{"bogus" => 1}})
+      assert msg =~ "unknown key(s) bogus"
+    end
+
+    test "deps.mix_env may not contradict the MIX_ENV the boot's env sets" do
+      assert [] = errors(%{"deps" => %{"mix_env" => "test"}, "env" => %{"MIX_ENV" => "test"}})
+      assert [] = errors(%{"deps" => %{"mix_env" => "test"}, "env" => %{"FOO" => "1"}})
+
+      assert [msg] =
+               errors(%{"deps" => %{"mix_env" => "dev"}, "env" => %{"MIX_ENV" => "test"}})
+
+      assert msg =~ "s.deps.mix_env"
+      assert msg =~ "test"
+    end
+
+    test "deps.env refuses what would hand the seed a secret or a host path" do
+      refused = fn env -> errors(%{"deps" => %{"env" => env}}) end
+
+      # An operator credential (scrubbed from worker environments) and a proxy rule.
+      assert [msg] = refused.(%{"ANTHROPIC_API_KEY" => "x"})
+      assert msg =~ "s.deps.env.ANTHROPIC_API_KEY"
+      assert [_] = refused.(%{"HTTPS_PROXY" => "http://127.0.0.1:1"})
+      # What the seed sets itself, or the cache manages: MIX_ENV has its own key.
+      for key <- ~w(PATH HOME TMPDIR LANG MIX_ENV MIX_DEPS_PATH HEX_HOME) do
+        assert [msg] = refused.(%{key => "/x"})
+        assert msg =~ "s.deps.env.#{key}"
+      end
+
+      # A placeholder is the boot's: the seed has no port, scratch or checkout of that boot.
+      assert [msg] = refused.(%{"DATABASE_URL" => "ecto://127.0.0.1:{{port}}/x"})
+      assert msg =~ "placeholder"
+      assert [_] = refused.(%{"DATABASE_URL" => "ecto://db.example.com/x"})
+    end
+
+    test "deps_seed/1: the MIX_ENV and env the seed runs with" do
+      resolve = fn block ->
+        assert {:ok, c} =
+                 Config.resolve(
+                   ws(%{"repos" => %{"app" => %{"screenshots" => Map.merge(@minimal, block)}}}),
+                   "app"
+                 )
+
+        Config.deps_seed(c)
+      end
+
+      assert %{mix_env: "dev", env: []} = resolve.(%{})
+
+      # The boot's own MIX_ENV, so the cache is compiled the way the boot uses it; its literal
+      # env values come along (a strict runtime.exs needs them), its templated ones do not.
+      boot = %{
+        "MIX_ENV" => "test",
+        "DATABASE_URL" => "ecto://127.0.0.1/capture",
+        "PORT_URL" => "http://127.0.0.1:{{port}}"
+      }
+
+      assert %{mix_env: "test", env: env} = resolve.(%{"env" => boot})
+      assert env == [{"DATABASE_URL", "ecto://127.0.0.1/capture"}]
+
+      # deps.env wins over the boot's value; deps.mix_env names the env when the boot sets it
+      # elsewhere (in its start_cmd).
+      assert %{mix_env: "prod", env: env} =
+               resolve.(%{
+                 "env" => Map.delete(boot, "MIX_ENV"),
+                 "deps" => %{
+                   "mix" => true,
+                   "mix_env" => "prod",
+                   "env" => %{"DATABASE_URL" => "ecto://127.0.0.1/seed", "X" => "1"}
+                 }
+               })
+
+      assert Enum.sort(env) == [{"DATABASE_URL", "ecto://127.0.0.1/seed"}, {"X", "1"}]
+    end
+
     test "with deps.mix on, env may not set what the deps cache manages" do
       for key <- ~w(MIX_DEPS_PATH MIX_HOME HEX_HOME HEX_OFFLINE MIX_ESBUILD_PATH MIX_TAILWIND_PATH
                     ELIXIR_MAKE_CACHE_DIR RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH) do

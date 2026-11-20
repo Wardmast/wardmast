@@ -173,11 +173,12 @@ defmodule Wardmast.Worker.ReviewGateScreenshotsTest do
     end
   end
 
-  describe "an infrastructure capture failure" do
+  describe "a failure the change itself caused (its app does not boot at the head)" do
     test "escalates to the coordinator and does not send the change back", ctx do
       failure =
-        Failure.new(:boot_failed, "the app failed to boot at the head (setup): no chromium",
-          role: "after"
+        Failure.new(:boot_failed, "the app failed to boot at the head (setup): exit 1",
+          role: "after",
+          detail: %{phase: :setup, output: "exit 1"}
         )
 
       rig = rig(ctx, new_ws(@screenshots), "feature/shots-3")
@@ -195,6 +196,120 @@ defmodule Wardmast.Worker.ReviewGateScreenshotsTest do
       assert passes(rig) == 0
       issue = Ash.get!(Issue, rig.task.id)
       assert issue.attention_cause == :screenshot_capture_failed
+    end
+  end
+
+  # bd-ur1zty: tonic's first real capture failed deps_failed and parked the ticket, so every UI
+  # ticket in the repo parked until the coordinator stepped in.
+  describe "an infrastructure capture failure (bd-ur1zty)" do
+    alias Wardmast.Alerts
+    alias Wardmast.Screenshots.Captures
+
+    test "does not park: the review runs with a no-screenshots brief and a soft attention", ctx do
+      failure =
+        Failure.new(
+          :deps_failed,
+          "fetching the Mix deps for the capture failed: exit 1: ** (RuntimeError) DATABASE_URL is not set"
+        )
+
+      rig = rig(ctx, new_ws(@screenshots), "feature/shots-deps")
+      gate = start_gate(rig, ctx, screenshot_capture: fn _i, _o -> {:error, failure} end)
+
+      wait_until(fn -> passes(rig) == 1 end)
+
+      prompt = :sys.get_state(gate).current_prompt
+      assert prompt =~ "No screenshots: capture failed: fetching the Mix deps"
+      assert prompt =~ "DATABASE_URL is not set"
+
+      # Not parked, no attention on the ticket: the alert is the repo's, not the ticket's.
+      assert Ash.get!(Issue, rig.task.id).attention_cause == nil
+
+      assert [alert] = Alerts.active(kind: :screenshot_capture_failed)
+      assert alert.owner == :coordinator
+      assert alert.detail =~ "DATABASE_URL is not set"
+      assert alert.detail =~ "trib/repo"
+
+      # The lifecycle record still says what happened.
+      assert [row] = Captures.list(rig.task.id)
+      assert row.state == "failed"
+      stop_gate(gate)
+    end
+
+    test "a second ticket of the repo failing the same way refreshes the one alert", ctx do
+      failure = Failure.new(:deps_failed, "fetching the Mix deps for the capture failed: x")
+      capture = fn _i, _o -> {:error, failure} end
+
+      ws = new_ws(@screenshots)
+      rig1 = rig(ctx, ws, "feature/shots-deps-a")
+      gate1 = start_gate(rig1, ctx, screenshot_capture: capture)
+      wait_until(fn -> passes(rig1) == 1 end)
+      stop_gate(gate1)
+
+      rig2 = rig(ctx, ws, "feature/shots-deps-b")
+      gate2 = start_gate(rig2, ctx, screenshot_capture: capture)
+      wait_until(fn -> passes(rig2) == 2 end)
+      stop_gate(gate2)
+
+      assert [alert] = Alerts.active(kind: :screenshot_capture_failed)
+      assert alert.raise_count == 2
+    end
+
+    test "a capture that then works clears the alert", ctx do
+      ws = new_ws(@screenshots)
+      rig1 = rig(ctx, ws, "feature/shots-deps-c")
+
+      gate1 =
+        start_gate(rig1, ctx,
+          screenshot_capture: fn _i, _o ->
+            {:error, Failure.new(:deps_failed, "fetching the Mix deps failed")}
+          end
+        )
+
+      wait_until(fn -> passes(rig1) == 1 end)
+      stop_gate(gate1)
+      assert [_] = Alerts.active(kind: :screenshot_capture_failed)
+
+      rig2 = rig(ctx, ws, "feature/shots-deps-d")
+
+      gate2 =
+        start_gate(rig2, ctx, screenshot_capture: fn _i, _o -> {:ok, %{pairs: []}} end)
+
+      wait_until(fn -> passes(rig2) == 2 end)
+      stop_gate(gate2)
+      assert Alerts.active(kind: :screenshot_capture_failed) == []
+    end
+
+    test "a service that did not come up proceeds too", ctx do
+      failure =
+        Failure.new(:boot_failed, "the app failed to boot at the head (services): service pg x",
+          role: "after",
+          detail: %{phase: :services, service: "pg", log_tail: "boom"}
+        )
+
+      rig = rig(ctx, new_ws(@screenshots), "feature/shots-svc")
+      gate = start_gate(rig, ctx, screenshot_capture: fn _i, _o -> {:error, failure} end)
+
+      wait_until(fn -> passes(rig) == 1 end)
+      assert :sys.get_state(gate).current_prompt =~ "No screenshots: capture failed:"
+      assert [_] = Alerts.active(kind: :screenshot_capture_failed)
+      stop_gate(gate)
+    end
+
+    test "the head's own boot failure still parks, and raises no alert", ctx do
+      failure =
+        Failure.new(:boot_failed, "the app failed to boot at the head (start): exit 1",
+          role: "after",
+          detail: %{phase: :start, output: "exit 1"}
+        )
+
+      rig = rig(ctx, new_ws(@screenshots), "feature/shots-head")
+      gate = start_gate(rig, ctx, screenshot_capture: fn _i, _o -> {:error, failure} end)
+      ref = Process.monitor(gate)
+      assert_receive {:DOWN, ^ref, :process, ^gate, _}, Wardmast.Test.Timing.scale(20_000)
+
+      assert passes(rig) == 0
+      assert Ash.get!(Issue, rig.task.id).attention_cause == :screenshot_capture_failed
+      assert Alerts.active(kind: :screenshot_capture_failed) == []
     end
   end
 

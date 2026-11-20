@@ -309,6 +309,76 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
       refute env =~ ~r/^HTTP_PROXY=/m
     end
 
+    # bd-ur1zty: an app whose config/runtime.exs raises without its env (tonic: DATABASE_URL,
+    # SECRET_KEY_BASE, in every env) could never seed, with MIX_ENV=dev and an empty environment.
+    test "a strict runtime.exs seeds when the screenshots config supplies its env", ctx do
+      strict = "System.get_env(\"DATABASE_URL\") || raise \"DATABASE_URL is not set\"\n"
+
+      {repo, base, head} =
+        branch!(Path.join(ctx.tmp_dir, "strict"), %{}, %{
+          "mix.lock" => "%{lock: 1}\n",
+          "config/runtime.exs" => strict
+        })
+
+      script = "set -e\nelixir config/runtime.exs\n" <> @fake_seed
+
+      # What the host did before: nothing set, so the app's own config refuses.
+      assert {:error, message} =
+               DepsCache.prepare(
+                 input(repo, base, head),
+                 Keyword.put(ctx.opts, :seed_script, script)
+               )
+
+      assert message =~ "DATABASE_URL is not set"
+
+      given = input(repo, base, head, %{seed_env: [{"DATABASE_URL", "ecto://127.0.0.1/capture"}]})
+
+      assert {:ok, cache} = DepsCache.prepare(given, Keyword.put(ctx.opts, :seed_script, script))
+      assert File.regular?(Path.join(cache.dir, ".complete"))
+    end
+
+    test "the seed compiles under the MIX_ENV the boot uses, in a cache of its own", ctx do
+      assert {:ok, dev} = DepsCache.prepare(input(ctx.repo, ctx.base, ctx.head), ctx.opts)
+      assert File.read!(Path.join(dev.dir, "deps/fake/env")) == "dev\n"
+
+      given = input(ctx.repo, ctx.base, ctx.head, %{mix_env: "test"})
+      assert {:ok, test_cache} = DepsCache.prepare(given, ctx.opts)
+      assert File.read!(Path.join(test_cache.dir, "deps/fake/env")) == "test\n"
+
+      # A cache compiled under one env is not served to a boot of another.
+      assert test_cache.dir != dev.dir
+      assert {:ok, ^test_cache} = DepsCache.prepare(given, ctx.opts)
+    end
+
+    test "the seed's env is the config's own values: no operator secrets, no host paths", ctx do
+      System.put_env("ARB_TEST_OPERATOR_SECRET", "hunter2")
+      on_exit(fn -> System.delete_env("ARB_TEST_OPERATOR_SECRET") end)
+
+      seen = Path.join(ctx.root <> "-env", "env.txt")
+      File.mkdir_p!(Path.dirname(seen))
+      script = ~s(env > "#{seen}"\n) <> @fake_seed
+
+      given =
+        input(ctx.repo, ctx.base, ctx.head, %{
+          seed_env: [
+            {"DATABASE_URL", "ecto://127.0.0.1/capture"},
+            # The host's own: a config value cannot repoint them.
+            {"MIX_DEPS_PATH", "/elsewhere"},
+            {"PATH", "/elsewhere"},
+            {"MIX_ENV", "prod"}
+          ]
+        })
+
+      assert {:ok, _} = DepsCache.prepare(given, Keyword.put(ctx.opts, :seed_script, script))
+
+      env = File.read!(seen)
+      assert env =~ ~r/^DATABASE_URL=ecto:\/\/127.0.0.1\/capture$/m
+      refute env =~ "hunter2"
+      refute env =~ "ARB_TEST_OPERATOR_SECRET"
+      refute env =~ "/elsewhere"
+      assert env =~ ~r/^MIX_ENV=dev$/m
+    end
+
     # Whatever the seed leaves is untrusted to the host: a symlink it plants is never followed by
     # the host-side copy, write or rename that publishes the cache.
     test "a seed's symlinks are never followed by the host", %{tmp_dir: dir} = ctx do

@@ -200,49 +200,103 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGateTest do
     end
   end
 
-  describe "route/2: infrastructure faults escalate" do
-    for code <- [:boot_failed, :checkout_failed, :diff_failed, :budget_exceeded, :shot_failed] do
-      test "#{code} escalates and is never sent back", _ctx do
+  # bd-ur1zty: a failed capture never fails a merge (design §2.3). An infrastructure fault is
+  # recorded and alerted, and the review runs with a "no screenshots" brief; only a failure the
+  # change itself caused (its own app does not boot while the base's did) parks.
+  describe "route/2: infrastructure faults let the review proceed" do
+    for code <- [:checkout_failed, :diff_failed, :budget_exceeded, :shot_failed, :deps_failed] do
+      test "#{code} proceeds with a no-screenshots brief and is never sent back", _ctx do
         failure = Failure.new(unquote(code), "the thing broke", role: "after")
 
-        assert {:escalate, message} = ScreenshotGate.route({:error, failure})
-        assert message =~ "the thing broke"
-        assert message =~ "not the worker"
+        assert {:proceed, brief} = ScreenshotGate.route({:error, failure})
+        assert brief =~ "No screenshots: capture failed: the thing broke"
+        assert brief =~ "not the worker"
+      end
+    end
+
+    test "the offline deps cache failing (the first real capture: DATABASE_URL) proceeds" do
+      failure =
+        Failure.new(
+          :deps_failed,
+          "fetching the Mix deps for the capture failed: exit 1: ** (RuntimeError) DATABASE_URL is not set"
+        )
+
+      assert {:proceed, brief} = ScreenshotGate.route({:error, failure})
+      assert brief =~ "No screenshots: capture failed: fetching the Mix deps"
+      assert brief =~ "DATABASE_URL is not set"
+    end
+
+    test "the base's own boot failing is the repo's, not the change's: proceeds" do
+      failure =
+        Failure.new(:boot_failed, "the app failed to boot at the merge-base (start): exit 1",
+          role: "before",
+          detail: %{phase: :start, output: "exit 1"}
+        )
+
+      assert {:proceed, brief} = ScreenshotGate.route({:error, failure})
+      assert brief =~ "No screenshots: capture failed:"
+    end
+  end
+
+  describe "route/2: a failure the change itself caused parks" do
+    test "the head's app failing to boot, after the base booted, escalates" do
+      failure =
+        Failure.new(:boot_failed, "the app failed to boot at the head (start): exit 1",
+          role: "after",
+          detail: %{phase: :start, output: "exit 1"}
+        )
+
+      assert {:escalate, message} = ScreenshotGate.route({:error, failure})
+      assert message =~ "failed to boot at the head"
+      assert message =~ "the base booted"
+    end
+  end
+
+  # bd-3glf2a: a capture service that never came up, as `Capture.run/2` records it. Podman and
+  # the image are the host's, whichever commit was booting.
+  describe "route/2: a service that never became ready" do
+    for role <- ["before", "after"] do
+      test "at #{role}: proceeds with the service, the reason and its log tail in the brief" do
+        failure =
+          Failure.new(
+            :boot_failed,
+            "the app failed to boot at the merge-base (services): service postgres did not " <>
+              "become ready in 60 s (last check: exit 2); its log ends:\nFATAL:  could not " <>
+              "create lock file",
+            role: unquote(role),
+            detail: %{
+              phase: :services,
+              service: "postgres",
+              log_tail: "FATAL:  could not create lock file"
+            }
+          )
+
+        assert {:proceed, brief} = ScreenshotGate.route({:error, failure})
+        assert brief =~ "service postgres did not become ready in 60 s"
+        assert brief =~ "FATAL:  could not create lock file"
       end
     end
   end
 
-  # bd-3glf2a: a capture service that never came up, as `Capture.run/2` records it.
-  describe "route/2: a service that never became ready" do
-    test "escalates with the service, the reason and its log tail in the brief" do
-      failure =
-        Failure.new(
-          :boot_failed,
-          "the app failed to boot at the merge-base (services): service postgres did not " <>
-            "become ready in 60 s (last check: exit 2); its log ends:\nFATAL:  could not " <>
-            "create lock file",
-          role: "before",
-          detail: %{
-            phase: :services,
-            service: "postgres",
-            log_tail: "FATAL:  could not create lock file"
-          }
-        )
-
-      assert {:escalate, message} = ScreenshotGate.route({:error, failure})
-      assert message =~ "service postgres did not become ready in 60 s"
-      assert message =~ "FATAL:  could not create lock file"
-      assert message =~ "not the worker"
-    end
-  end
-
   describe "classify/1" do
-    test "tells worker faults from infrastructure faults" do
+    test "tells worker, change and infrastructure faults apart" do
       for code <- [:manifest_missing, :manifest_invalid, :route_error],
           do: assert(ScreenshotGate.classify(Failure.new(code, "m")) == :worker)
 
-      for code <- [:boot_failed, :checkout_failed, :diff_failed, :budget_exceeded, :shot_failed],
+      for code <- [:checkout_failed, :diff_failed, :budget_exceeded, :shot_failed, :deps_failed],
           do: assert(ScreenshotGate.classify(Failure.new(code, "m")) == :infrastructure)
+
+      boot = fn role, phase ->
+        Failure.new(:boot_failed, "m", role: role, detail: %{phase: phase})
+      end
+
+      assert ScreenshotGate.classify(boot.("after", :start)) == :change
+      assert ScreenshotGate.classify(boot.("after", :setup)) == :change
+      assert ScreenshotGate.classify(boot.("before", :start)) == :infrastructure
+      assert ScreenshotGate.classify(boot.("after", :services)) == :infrastructure
+      # No detail to tell by: not the change's to answer for.
+      assert ScreenshotGate.classify(Failure.new(:boot_failed, "m", role: "after")) ==
+               :infrastructure
     end
   end
 
