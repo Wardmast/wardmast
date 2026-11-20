@@ -140,6 +140,7 @@ defmodule Wardmast.Screenshots.Capture do
       deps: Keyword.get(opts, :deps) || DepsCache,
       deps_opts: Keyword.get(opts, :deps_opts, []),
       deps_cache: nil,
+      path_warning: nil,
       budget: budget,
       deadline: System.monotonic_time(:millisecond) + budget * 1000,
       images: Path.join(input.out_dir, "images")
@@ -188,9 +189,17 @@ defmodule Wardmast.Screenshots.Capture do
     }
 
     case call_deps(st, deps_input) do
-      {:ok, cache} -> {:ok, %{st | deps_cache: cache}}
-      {:skip, reason} -> {:skip, :deps_changed, reason}
-      {:error, message} -> {:error, Failure.new(:deps_failed, detail_text(message))}
+      {:ok, cache} ->
+        {_path, dropped} =
+          DepsCache.toolchain_path(deps_input.readonly_paths, deps_input.seed_env)
+
+        {:ok, %{st | deps_cache: cache, path_warning: DepsCache.path_warning(dropped)}}
+
+      {:skip, reason} ->
+        {:skip, :deps_changed, reason}
+
+      {:error, message} ->
+        {:error, Failure.new(:deps_failed, detail_text(message))}
     end
   end
 
@@ -204,6 +213,10 @@ defmodule Wardmast.Screenshots.Capture do
     :exit, reason -> {:error, "the offline deps cache exited: #{inspect(reason)}"}
   end
 
+  defp join_notes(notes, nil), do: notes
+  defp join_notes(nil, warning), do: warning
+  defp join_notes(notes, warning), do: notes <> "\n" <> warning
+
   defp finish({:ok, st, plan, pairs, boots}) do
     result = %{
       task_id: st.input.task_id,
@@ -211,7 +224,7 @@ defmodule Wardmast.Screenshots.Capture do
       head_sha: st.input.head_sha,
       pairs: pairs,
       boots: boots,
-      notes: plan.notes,
+      notes: join_notes(plan.notes, st.path_warning),
       out_dir: st.input.out_dir,
       manifest_path: manifest_path(st)
     }
