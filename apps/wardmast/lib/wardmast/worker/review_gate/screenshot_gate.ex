@@ -244,11 +244,21 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
 
   def infrastructure_failure(_outcome), do: :none
 
-  @doc "Route a capture outcome. See the moduledoc table."
-  @spec route(outcome()) :: routed()
-  def route({:skipped, :no_ui_paths}), do: {:proceed, nil}
+  @doc """
+  Route a capture outcome. See the moduledoc table.
 
-  def route({:skipped, {:plan_skip, reason}}) do
+  `opts[:health]` is `Wardmast.Screenshots.Captures.health/1` (default `:unknown`). While it is
+  `:failing` (bd-5eegxz) a missing or invalid manifest is not sent back: no fix round is spent on
+  a manifest for a capture that keeps failing or skipping for reasons the worker cannot fix; the
+  reviewer is told instead. A route the manifest names that errors is still the worker's (both
+  apps booted).
+  """
+  @spec route(outcome(), keyword()) :: routed()
+  def route(outcome, opts \\ [])
+
+  def route({:skipped, :no_ui_paths}, _opts), do: {:proceed, nil}
+
+  def route({:skipped, {:plan_skip, reason}}, _opts) do
     {:proceed,
      "The worker declared a screenshots **skip** for this UI change: #{inspect(reason)}. " <>
        "No screenshots were taken. Judge whether that skip is honest: if the diff changes " <>
@@ -258,7 +268,7 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
   # The capture never boots a change's app unsandboxed (bd-bhrsdv). Not the worker's fault, so not
   # a send-back; not a broken capture either, so no escalation per change: the reviewer judges the
   # diff alone, knowing why.
-  def route({:skipped, {:no_sandbox, reason}}) do
+  def route({:skipped, {:no_sandbox, reason}}, _opts) do
     {:proceed,
      "No screenshots were taken: #{reason}. Arbiter only boots a change's app inside a " <>
        "sandbox, and this host cannot provide one; that is the host's setup, not the worker's " <>
@@ -269,7 +279,7 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
   # bd-3glf2a: the boot has no network, and its Mix deps come only from a lockfile the default
   # branch has had. A dependency change is legitimate work, so not a send-back; nothing is broken
   # either, so no escalation: the reviewer judges the diff, knowing why there are no pictures.
-  def route({:skipped, {:deps_changed, reason}}) do
+  def route({:skipped, {:deps_changed, reason}}, _opts) do
     {:proceed,
      "No screenshots were taken: #{reason}. This is expected for a change to the project's " <>
        "dependencies (mix.lock), not the worker's fault, so do not hold the missing screenshots " <>
@@ -278,31 +288,43 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
 
   # bd-8qj1sa: `limits.max_captures_per_ticket` attempts were already spent and none produced a
   # set. Not the worker's fault, so no send-back; the reviewer judges the diff alone, knowing why.
-  def route({:skipped, {:cap_reached, max}}) do
+  def route({:skipped, {:cap_reached, max}}, _opts) do
     {:proceed,
      "No screenshots were taken for this head: the ticket already used its " <>
        "`max_captures_per_ticket` (#{max}) capture attempts. Judge the visual result from the " <>
        "diff alone."}
   end
 
-  def route({:ok, result}), do: {:proceed, render_result(result)}
+  def route({:ok, result}, _opts), do: {:proceed, render_result(result)}
 
-  def route({:error, %Failure{} = failure}) do
+  def route({:error, %Failure{} = failure}, opts) do
     case classify(failure) do
-      :worker -> {:send_back, send_back_findings(failure)}
+      :worker -> route_worker_fault(failure, Keyword.get(opts, :health, :unknown))
       :change -> {:escalate, escalation_message(failure)}
       :infrastructure -> {:proceed, infrastructure_brief(failure)}
     end
   end
+
+  defp route_worker_fault(%Failure{code: code} = failure, :failing)
+       when code in [:manifest_missing, :manifest_invalid] do
+    {:proceed,
+     "No screenshots were taken: #{failure.message}. Captures for this workspace have been " <>
+       "failing or skipping for reasons that are not the worker's (the app does not boot at " <>
+       "the merge-base in the capture sandbox, or the change edits mix.lock), so the manifest " <>
+       "was not sent back for a fix and the missing screenshots are not the worker's doing. " <>
+       "Judge the visual result from the diff alone."}
+  end
+
+  defp route_worker_fault(failure, _health), do: {:send_back, send_back_findings(failure)}
 
   @doc """
   Route a set kept from an earlier head (`plan/3`'s `{:reuse, outcome, meta}`): `route/1`'s answer
   with a line saying which commit the screenshots were taken at, so a reviewer is never shown a
   stale set as if it were the head's.
   """
-  @spec route_reuse(outcome(), map(), String.t()) :: routed()
-  def route_reuse(outcome, %{reason: reason, from: from} = meta, head) do
-    case route(outcome) do
+  @spec route_reuse(outcome(), map(), String.t(), keyword()) :: routed()
+  def route_reuse(outcome, %{reason: reason, from: from} = meta, head, opts \\ []) do
+    case route(outcome, opts) do
       {:proceed, context} when is_binary(context) ->
         {:proceed, reuse_note(reason, meta, from, head) <> context}
 

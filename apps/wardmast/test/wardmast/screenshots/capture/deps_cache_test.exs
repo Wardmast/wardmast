@@ -619,7 +619,8 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
 
       assert {:skip, _} = DepsCache.prepare(input(ctx.repo, ctx.base, head), ctx.opts)
       refute_received {:fetch_command, _, _}
-      refute File.exists?(ctx.root) and File.ls!(ctx.root) != []
+      # Only the trusted repository (the plan reads the default branch from it), never a cache.
+      refute File.exists?(ctx.root) and File.ls!(ctx.root) -- ["repos"] != []
     end
 
     test "no lockfile: no cache, and nothing runs", %{tmp_dir: dir} = ctx do
