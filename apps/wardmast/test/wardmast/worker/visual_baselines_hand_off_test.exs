@@ -132,4 +132,38 @@ defmodule Wardmast.Worker.VisualBaselinesHandOffTest do
     missing = VisualBaselines.hand_off_brief({:skip, :artifacts_for_another_head})
     assert missing =~ "could not be delivered"
   end
+
+  describe "stage_brief/2 (the shared hand-off for any pass restarted on a red head)" do
+    test "stages the head's images and returns the brief; nothing is committed",
+         %{ctx: ctx, checkout: checkout} do
+      artifacts("head1", ["visual"], [{"test-results/a/page-actual.png", "page-1"}])
+
+      brief = VisualBaselines.stage_brief(ctx, checkout)
+
+      assert brief =~ ".arbiter/visual-actual/page-chromium-linux.png"
+      assert File.read!(Path.join(dir(checkout), "page-chromium-linux.png")) == "page-1"
+      assert File.read!(Path.join(checkout, "e2e/page-chromium-linux.png")) == "page-0"
+    end
+
+    test "another head's images are never staged and the brief says so",
+         %{ctx: ctx, checkout: checkout} do
+      artifacts("older-head", ["visual"], [{"test-results/a/page-actual.png", "stale"}])
+
+      brief = VisualBaselines.stage_brief(ctx, checkout)
+
+      assert brief =~ "could not be delivered"
+      refute File.exists?(dir(checkout))
+    end
+
+    test "is empty when the visual job did not fail or the repo is unconfigured",
+         %{ctx: ctx, checkout: checkout} do
+      artifacts("head1", ["lint"], [{"test-results/a/page-actual.png", "page-1"}])
+      assert VisualBaselines.stage_brief(ctx, checkout) == ""
+      assert VisualBaselines.stage_brief(%{ctx | repo: "x"}, checkout) == ""
+    end
+
+    test "a forge that raises is a skip, not a crash", %{ctx: ctx, checkout: checkout} do
+      assert is_binary(VisualBaselines.stage_brief(%{ctx | adapter: NoSuchForge}, checkout))
+    end
+  end
 end

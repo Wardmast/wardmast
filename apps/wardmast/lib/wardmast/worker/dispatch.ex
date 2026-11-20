@@ -606,6 +606,9 @@ defmodule Wardmast.Worker.Dispatch do
       # continues from the preserved worktree.
       context = prepend_revise_feedback(context, opts)
 
+      context =
+        append_visual_actual(context, visual_actual_brief(task, repo, worktree_path, opts))
+
       # Free the registry slot: a stopped worker lingers `:finished`,
       # still registered under task_id. Without stopping it, dispatch/2's
       # start_worker would hit {:already_started, pid} and attach to the dead
@@ -662,6 +665,48 @@ defmodule Wardmast.Worker.Dispatch do
         :ok
     end
   end
+
+  # GitHub #1598: a worker restarted on a ticket whose CI is red on a visual job (a
+  # `send_back` resume, `worker resume` of a CI-red park) cannot fetch the CI artifacts
+  # either, so the head's own rendered images are staged in the preserved worktree
+  # (`.arbiter/visual-actual/`; exactly the worktree's HEAD, nothing committed) and the
+  # briefing says so. "" without a PR, without `visual_baselines`, or when the visual job
+  # did not fail on this head.
+  defp visual_actual_brief(%Issue{pr_ref: pr_ref} = task, repo, worktree_path, opts)
+       when is_binary(pr_ref) and pr_ref != "" do
+    workspace = load_workspace(task)
+
+    with %Workspace{} <- workspace,
+         true <- Wardmast.Worker.VisualBaselines.configured?(workspace, repo),
+         head when is_binary(head) and head != "" <- Worktree.head_sha(worktree_path),
+         {:ok, adapter} <-
+           Wardmast.Worker.ReviewCi.adapter(workspace, repo, Keyword.get(opts, :ci_adapter)) do
+      Wardmast.Worker.VisualBaselines.stage_brief(
+        %{
+          workspace: workspace,
+          repo: repo,
+          adapter: adapter,
+          mr_ref: pr_ref,
+          result: %{head_sha: head}
+        },
+        worktree_path
+      )
+    else
+      _ -> ""
+    end
+  rescue
+    _ -> ""
+  end
+
+  defp visual_actual_brief(_task, _repo, _worktree_path, _opts), do: ""
+
+  defp append_visual_actual(context, ""), do: context
+  defp append_visual_actual(context, brief), do: (context || "") <> "\n" <> brief
+
+  defp put_visual_actual(opts, ""), do: opts
+
+  defp put_visual_actual(opts, brief),
+    do: Keyword.update(opts, :resume_context, brief, &append_visual_actual(&1, brief))
 
   defp prepend_revise_feedback(context, opts) do
     case Keyword.get(opts, :revise_feedback) do
@@ -965,6 +1010,7 @@ defmodule Wardmast.Worker.Dispatch do
         resume_opts
         |> Keyword.put(:resumed_from_run_id, prior_run_id)
         |> Keyword.put(:existing_pr_ref, task.pr_ref)
+        |> put_visual_actual(visual_actual_brief(task, repo, worktree_path, opts))
 
       # Already inside this resume's Drain.track — skip dispatch/2's own.
       do_dispatch(task_id, resume_opts)
