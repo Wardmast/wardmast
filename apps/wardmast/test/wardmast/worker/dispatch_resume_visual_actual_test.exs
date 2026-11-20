@@ -145,4 +145,72 @@ defmodule Wardmast.Worker.DispatchResumeVisualActualTest do
       end
     end
   end
+
+  describe "session-mode resume (--resume <sid>) really sent to the agent" do
+    @tag :tmp_dir
+    test "the spawned argv carries the visual-actual brief", %{tmp_dir: tmp} do
+      %{task: task, head: head} = parked!(true)
+      artifacts(head)
+
+      sid = "aaaaaaaa-1111-2222-3333-#{System.unique_integer([:positive])}"
+      config_dir = Path.join(tmp, "prior-config")
+      File.mkdir_p!(Path.join([config_dir, "projects", "-slug"]))
+      File.write!(Path.join([config_dir, "projects", "-slug", sid <> ".jsonl"]), "{}\n")
+
+      {:ok, _} =
+        Ash.create(Wardmast.Workers.Run, %{
+          task_id: task.id,
+          task_title: task.title,
+          repo: @repo,
+          workspace_id: task.workspace_id,
+          state: :finished,
+          outcome: :failed,
+          started_at: DateTime.utc_now(),
+          session_id: sid,
+          config_dir: config_dir,
+          provider: "claude"
+        })
+
+      # Re-point the ledger row's session id at the seeded one.
+      for ev <- Ash.read!(UsageEvent), ev.task_id == task.id do
+        Ash.update!(ev, %{session_id: sid})
+      end
+
+      argv_file = Path.join(tmp, "argv.txt")
+      stub_dir = Path.join(tmp, "stub-bin")
+      File.mkdir_p!(stub_dir)
+      stub = Path.join(stub_dir, "claude")
+
+      File.write!(stub, """
+      #!/bin/sh
+      for a in "$@"; do echo "$a" >> #{argv_file}.part; done
+      mv #{argv_file}.part #{argv_file}
+      exit 0
+      """)
+
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
+      assert {:ok, _} =
+               Dispatch.resume_session(task.id,
+                 start_driver: false,
+                 preflight: false,
+                 ci_adapter: StubMerger
+               )
+
+      argv = wait_argv(argv_file)
+      assert Enum.at(argv, Enum.find_index(argv, &(&1 == "--resume")) + 1) == sid
+      assert Enum.join(argv, "\n") =~ ".arbiter/visual-actual/page-chromium-linux.png"
+    end
+  end
+
+  defp wait_argv(file, tries \\ 100) do
+    cond do
+      File.exists?(file) -> file |> File.read!() |> String.split("\n", trim: true)
+      tries == 0 -> flunk("claude stub never ran")
+      true -> Process.sleep(50) && wait_argv(file, tries - 1)
+    end
+  end
 end

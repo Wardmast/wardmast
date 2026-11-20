@@ -3121,6 +3121,7 @@ defmodule Wardmast.Worker do
       |> Map.put(:claude_session, true)
       |> Map.put(:claude_spawn, pristine_args)
       |> Map.delete(:resume_session_id)
+      |> Map.delete(:visual_actual_brief)
       |> Map.put(:config_dir, config_dir)
       |> Map.put(:cwd, Map.get(port_args, :cd))
       |> maybe_put(:provider, provider && to_string(provider))
@@ -3509,7 +3510,7 @@ defmodule Wardmast.Worker do
         case inject_resume_argv(
                port_args,
                sid,
-               manual_resume_prompt(state.task_id),
+               visual_actual_prefix(meta) <> manual_resume_prompt(state.task_id),
                provider
              ) do
           {:ok, resumed_args} ->
@@ -3525,6 +3526,12 @@ defmodule Wardmast.Worker do
         {port_args, port_args}
     end
   end
+
+  # GitHub #1598: the `.arbiter/visual-actual/` brief for a session-mode resume.
+  defp visual_actual_prefix(%{visual_actual_brief: brief}) when is_binary(brief) and brief != "",
+    do: brief <> "\n"
+
+  defp visual_actual_prefix(_), do: ""
 
   # bd-11abk2: unlink the stdin-delivery temp file (if this spawn used one —
   # see Wardmast.Agents.Claude.build_argv/3) now that the port has exited and

@@ -705,7 +705,16 @@ defmodule Wardmast.Worker.Dispatch do
 
   defp put_visual_actual(opts, ""), do: opts
 
-  defp put_visual_actual(opts, brief),
+  # Session mode (`--resume <sid>`) never sends the work prompt, so the brief
+  # rides worker meta and `Worker.resume_spawn_args/2` prepends it to the
+  # resume prompt instead of `:resume_context`.
+  defp put_visual_actual(opts, brief) do
+    if Keyword.has_key?(opts, :resume_session_id),
+      do: Keyword.put(opts, :visual_actual_brief, brief),
+      else: put_visual_actual_context(opts, brief)
+  end
+
+  defp put_visual_actual_context(opts, brief),
     do: Keyword.update(opts, :resume_context, brief, &append_visual_actual(&1, brief))
 
   defp prepend_revise_feedback(context, opts) do
@@ -4007,6 +4016,7 @@ defmodule Wardmast.Worker.Dispatch do
         # worker's first spawn opens with `claude --print --resume <id>`. nil on
         # a fresh dispatch or the bd-auma3z fresh-agent resume.
         |> put_if_present(:resume_session_id, Keyword.get(opts, :resume_session_id))
+        |> put_if_present(:visual_actual_brief, Keyword.get(opts, :visual_actual_brief))
         # bd-8eheb6: how many times the Watchdog has auto-resumed this task out
         # of an `{:awaiting_review_timeout, _}`. Each auto-resume mints a fresh
         # worker AND a fresh Watchdog, so the counter has to ride the worker's
