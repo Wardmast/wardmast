@@ -192,8 +192,9 @@ shows `state = running` and the process owner is the service account.
 ## Release install (Apple Silicon)
 
 Each tagged release publishes `arbiter-<tag>-darwin-arm64.tar.gz` and its
-`.sha256` on the GitHub Release. Only arm64 is published; Intel Macs must use
-dev mode. The tarball is the OTP release tree (no Erlang/Elixir needed), its
+`.sha256` on the GitHub Release. Apple Silicon gets `darwin-arm64`; Intel Macs get
+`arbiter-<tag>-darwin-x86_64.tar.gz` (built on the `macos-15-intel` runner; `arb server deploy`
+picks the right one). The tarball is the OTP release tree (no Erlang/Elixir needed), its
 Mach-O files are **ad-hoc codesigned** (not notarized or Developer-ID signed),
 and it contains no systemd unit.
 
@@ -293,7 +294,7 @@ aside rather than deleting it.
 | Start before login | **Agent: no** (it starts at login). **Daemon: yes** (starts at boot), see [Team Mac](#team-mac-system-wide-launchdaemon). | `loginctl enable-linger` |
 | Log rotation timers | Not installed. | logrotate timers |
 | System scope (`--system`) | A system-wide LaunchDaemon, release mode only; see [Team Mac](#team-mac-system-wide-launchdaemon). | Supported |
-| Release install | Apple Silicon (`darwin-arm64`) only; see [Release install](#release-install-apple-silicon). | Supported |
+| Release install | Apple Silicon (`darwin-arm64`) and Intel (`darwin-x86_64`); see [Release install](#release-install-apple-silicon). | Supported |
 
 Because there is no sandbox and the memory cap is optional and approximate, only
 dispatch work you trust to a macOS coordinator, and keep an eye on memory use.
