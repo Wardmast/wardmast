@@ -367,6 +367,21 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGateTest do
       assert {:run, _job} = ScreenshotGate.plan(st, workspace(@ui_block), hist(1, r.h1))
     end
 
+    # bd-3glf2a: the gate always passes a history, so this is the path every production capture
+    # takes; its job must name the branch whose mix.lock the offline deps cache trusts.
+    test "a capture the lifecycle runs carries the default branch the deps cache trusts",
+         %{tmp_dir: tmp} do
+      r = history_repo(tmp)
+      st = state(tmp, %{base_sha: r.base, head_sha: r.h3, screenshot_checked: checked(r.h1)})
+      develop = put_in(workspace(@ui_block), [:config, "merge"], %{"base" => "develop"})
+
+      assert {:run, job} = ScreenshotGate.plan(st, develop, hist(1, r.h1))
+      assert job.input.default_branch == "develop"
+
+      assert {:run, job} = ScreenshotGate.plan(st, workspace(@ui_block), hist(1, r.h1))
+      assert job.input.default_branch == "main"
+    end
+
     test "max_captures_per_ticket is enforced: at the cap the last set is reused", %{tmp_dir: tmp} do
       r = history_repo(tmp)
       st = state(tmp, %{base_sha: r.base, head_sha: r.h3, screenshot_checked: checked(r.h1)})
