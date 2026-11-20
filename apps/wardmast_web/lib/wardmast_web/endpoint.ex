@@ -29,7 +29,12 @@ defmodule WardmastWeb.Endpoint do
   # dashboard grant in the session cookie (or a signed token).
   # No longpoll: `stdin`/`stdout` are binary frames.
   socket "/session", WardmastWeb.SessionSocket,
-    websocket: [connect_info: [:peer_data, session: @session_options], max_frame_size: 1_048_576]
+    websocket: [
+      # `:x_headers` and `:uri` feed the opt-in loopback grant's proxy-header
+      # and Host checks (`DashboardAuth.authenticate_socket/2`).
+      connect_info: [:peer_data, :x_headers, :uri, session: @session_options],
+      max_frame_size: 1_048_576
+    ]
 
   # The node agent's socket (RW6, docs/design/remote-workers.md §4.1): one
   # outbound WebSocket per node, authenticated by an `arbn_` node credential

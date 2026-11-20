@@ -66,7 +66,16 @@ defmodule WardmastWeb.SessionSocket do
 
   defp dashboard_grant?(connect_info) do
     session = Map.get(connect_info, :session) || %{}
-    match?({:ok, _identity}, DashboardAuth.authenticate_session(session))
+
+    # Same two-step check as the LiveView gate (`WardmastWeb.LiveHooks`): the
+    # opt-in loopback marker is only honoured by `authenticate_socket/2`, which
+    # re-verifies peer, proxy headers and Host.
+    with :error <- DashboardAuth.authenticate_session(session),
+         :error <- DashboardAuth.authenticate_socket(session, connect_info) do
+      false
+    else
+      {:ok, _identity} -> true
+    end
   end
 
   defp valid_token?(%{"token" => token}) when is_binary(token) do
