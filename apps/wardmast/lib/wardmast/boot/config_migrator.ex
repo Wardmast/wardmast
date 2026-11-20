@@ -40,6 +40,7 @@ defmodule Wardmast.Boot.ConfigMigrator do
   alias Wardmast.SingleInstance
   alias Wardmast.Tasks.Workspace
   alias Wardmast.Tasks.Workspace.Changes.PatchConfig
+  alias Wardmast.Tasks.Workspace.{ConfigPath, DeprecatedConfigPaths}
 
   @legacy_key "rig_paths"
   @current_key "repo_paths"
@@ -90,6 +91,7 @@ defmodule Wardmast.Boot.ConfigMigrator do
   def start_link(opts \\ []) do
     if Keyword.get_lazy(opts, :primary?, &SingleInstance.primary?/0) do
       migrate_rig_paths()
+      migrate_root_sandbox()
     else
       Logger.info("Boot.ConfigMigrator: not the primary instance — skipping config migrations")
     end
@@ -127,6 +129,133 @@ defmodule Wardmast.Boot.ConfigMigrator do
     |> read_workspaces()
     |> Enum.filter(&legacy_map?/1)
     |> Enum.map(&safe_migrate_workspace(&1, apply?))
+  end
+
+  @typedoc """
+  One workspace's root-`sandbox` fold (bd-4j0nfe). `:moved` lists the
+  `{deprecated, canonical}` leaves written to the canonical path (it had no
+  value); `:dropped` lists the `{deprecated, value}` leaves discarded because the
+  canonical path already held a different value, which wins. A leaf equal to
+  its canonical value is in neither.
+  """
+  @type sandbox_result :: %{
+          workspace: String.t(),
+          workspace_id: String.t(),
+          moved: [{String.t(), String.t()}],
+          dropped: [{String.t(), term()}],
+          status: :migrated | :dry_run | {:error, String.t()}
+        }
+
+  @doc """
+  Fold every workspace's deprecated root `sandbox` key into
+  `agent.security.sandbox` and drop it (`Wardmast.Tasks.Workspace.DeprecatedConfigPaths`).
+
+  Nothing reads a root `sandbox`: `Wardmast.Agents.SecurityPolicy` reads only
+  `agent.security.sandbox`. A `force` write could store one anyway, and
+  `arb config get sandbox` then showed a backend no run used. Where both name a
+  leaf the **canonical value wins**, so the fold never changes the sandbox a
+  workspace actually runs in; each discarded value is logged.
+
+  Idempotent: `[]` once no workspace carries the key. `:apply?` (default
+  `true`) `false` reports without writing.
+  """
+  @spec migrate_root_sandbox(keyword()) :: [sandbox_result()]
+  def migrate_root_sandbox(opts \\ []) do
+    apply? = Keyword.get(opts, :apply?, true)
+
+    Workspace
+    |> read_workspaces()
+    |> Enum.filter(&deprecated_root?/1)
+    |> Enum.map(&safe_fold_workspace(&1, apply?))
+  end
+
+  defp deprecated_root?(%{config: config}) when is_map(config),
+    do: Enum.any?(DeprecatedConfigPaths.roots(), &Map.has_key?(config, &1))
+
+  defp deprecated_root?(_ws), do: false
+
+  defp safe_fold_workspace(ws, apply?) do
+    fold_workspace(ws, apply?)
+  rescue
+    e -> fold_failed(ws, [], [], Exception.message(e))
+  end
+
+  defp fold_workspace(ws, apply?) do
+    config = ws.config
+
+    # A non-map root holds no leaves to move; folding it would put a scalar
+    # where the canonical sandbox map belongs. It is junk: drop it.
+    junk =
+      Enum.filter(
+        DeprecatedConfigPaths.roots(),
+        &(Map.has_key?(config, &1) and not is_map(config[&1]))
+      )
+
+    {folded, rewrites} = config |> Map.drop(junk) |> DeprecatedConfigPaths.fold()
+
+    {moved, dropped} = classify(config, rewrites)
+    dropped = Enum.map(junk, &{&1, config[&1]}) ++ dropped
+
+    base = %{workspace: ws.name, workspace_id: ws.id, moved: moved, dropped: dropped}
+
+    if apply? do
+      case Ash.update(ws, %{config: folded}, action: :update) do
+        {:ok, _} ->
+          Logger.warning(fold_message(ws, "folded", moved, dropped))
+          Map.put(base, :status, :migrated)
+
+        {:error, err} ->
+          fold_failed(ws, moved, dropped, Exception.message(err))
+      end
+    else
+      Logger.info(fold_message(ws, "would fold (dry run)", moved, dropped))
+      Map.put(base, :status, :dry_run)
+    end
+  end
+
+  # A leaf moves when its canonical path had no value, is dropped when the
+  # canonical path held a different one, and is neither when they agreed.
+  defp classify(config, rewrites) do
+    Enum.reduce(Enum.reverse(rewrites), {[], []}, fn {dep, canon} = rewrite, {moved, dropped} ->
+      dep_value = ConfigPath.get(config, ConfigPath.split(dep))
+
+      case ConfigPath.get(config, ConfigPath.split(canon)) do
+        nil -> {[rewrite | moved], dropped}
+        ^dep_value -> {moved, dropped}
+        _other -> {moved, [{dep, dep_value} | dropped]}
+      end
+    end)
+  end
+
+  defp fold_message(ws, verb, moved, dropped) do
+    moved_text = Enum.map_join(moved, ", ", fn {dep, canon} -> "#{dep} -> #{canon}" end)
+
+    dropped_text =
+      Enum.map_join(dropped, ", ", fn {dep, value} ->
+        "#{dep} = #{Jason.encode!(value)} (kept #{DeprecatedConfigPaths.canonical_path(dep)})"
+      end)
+
+    "Boot.ConfigMigrator: workspace #{ws.name} carried the deprecated root `sandbox` key, " <>
+      "which nothing reads — #{verb} into agent.security.sandbox. " <>
+      "Moved: #{blank_none(moved_text)}. Dropped, the canonical value wins: #{blank_none(dropped_text)}."
+  end
+
+  defp blank_none(""), do: "none"
+  defp blank_none(text), do: text
+
+  defp fold_failed(ws, moved, dropped, message) do
+    Logger.error(
+      "Boot.ConfigMigrator: workspace #{ws.name} still carries the deprecated root `sandbox` " <>
+        "key — folding it into agent.security.sandbox FAILED: #{message}"
+    )
+
+    %{
+      workspace: ws.name,
+      workspace_id: ws.id,
+      moved: moved,
+      dropped: dropped,
+      status: {:error, message}
+    }
   end
 
   defp read_workspaces(resource) do

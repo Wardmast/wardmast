@@ -470,6 +470,29 @@ defmodule Wardmast.Tasks.WorkspaceTest do
     end
 
     @tag capture_log: true
+    test "whole-config :create and :update fold a root sandbox too, canonical winning" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "root-sandbox-create",
+          config: %{"sandbox" => %{"backend" => "podman"}}
+        })
+
+      refute Map.has_key?(ws.config, "sandbox")
+      assert ws.config["agent"]["security"]["sandbox"]["backend"] == "podman"
+
+      {:ok, updated} =
+        Ash.update(ws, %{
+          config: %{
+            "sandbox" => %{"backend" => "auto"},
+            "agent" => %{"security" => %{"sandbox" => %{"backend" => "bwrap"}}}
+          }
+        })
+
+      refute Map.has_key?(updated.config, "sandbox")
+      assert updated.config["agent"]["security"]["sandbox"]["backend"] == "bwrap"
+    end
+
+    @tag capture_log: true
     test "force never stores a root sandbox key" do
       {:ok, ws} = Ash.create(Workspace, %{name: "root-sandbox-force"})
 
