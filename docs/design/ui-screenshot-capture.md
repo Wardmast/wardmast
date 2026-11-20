@@ -6,7 +6,9 @@
 [visual-baseline refresh](../visual-baseline-refresh.md),
 [worker security](../worker-security.md) · **Status:** proposed 2026-11-19; **partly superseded.** A host-side capture
 run by the ReviewGate shipped instead of the pod pass (§2 and §11 record what shipped).
-Operator guide: [screenshots.md](../screenshots.md).
+Operator guide: [screenshots.md](../screenshots.md). Since then the host-side capture runs
+only inside a bwrap sandbox (bd-bhrsdv), with capture services and an offline deps cache
+(bd-3glf2a), §2.
 
 **Operator requirement (2026-11-19).** The before/after screenshots render **inline in the
 PR/MR description itself on both forges**. The ticket attachment and the dashboard are
@@ -56,13 +58,15 @@ Three findings from the code shaped these and are easy to miss:
 > **not built**. What shipped is a **host-side capture gated by the ReviewGate**
 > (`Screenshots.Capture` + `Worker.ReviewGate.ScreenshotGate`): it runs on the Arbiter host
 > before a reviewer is dispatched, boots the app at the merge-base and the head in turn
-> (`Booter.Command`, scrubbed env, no network isolation), shoots with host Chromium
-> (`$ARB_CHROME` or `chromium` on `PATH`, `--no-sandbox`), and routes the result as described
-> under "Implemented" below. It does not use `Nodes.Placement`/`PassPlacement`, a podman pod,
-> the `arbiter-capture` sidecar, debounce, or a merge wait. (`screenshot_captures`, supersession,
-> the re-capture skip and `max_captures_per_ticket` *were* built later; see "Capture lifecycle"
-> below.)
-> The pod design stays as the deferred route if network isolation is wanted; the
+> (`Booter.Command`, scrubbed env; when it first shipped with no network isolation, since
+> bd-bhrsdv only inside the bwrap capture sandbox, with no network, and since bd-3glf2a with
+> per-boot capture services and an offline deps cache, both below), shoots with host Chromium
+> (`$ARB_CHROME` or `chromium` on `PATH`, `--no-sandbox`, inside a sandbox of its own), and routes
+> the result as described under "Implemented" below. It does not use
+> `Nodes.Placement`/`PassPlacement`, a podman pod, the `arbiter-capture` sidecar, debounce, or a
+> merge wait. (`screenshot_captures`, supersession, the re-capture skip and
+> `max_captures_per_ticket` *were* built later; see "Capture lifecycle" below.) The pod design
+> stays as the deferred route for capture on remote nodes and in the repo's own image; the
 > operator-facing trade-offs are in [screenshots.md](../screenshots.md).
 
 The text below up to "Implemented" is the **original proposal**.
@@ -181,7 +185,134 @@ sandbox, or not at all**:
   dirs (asdf, mise) must be listed in `readonly_paths`. `bwrap`, `perl` and `socat` are required
   (`perl`/`socat`/`sh` inside the system dirs); `status/0` probes the sandbox for real (only `lo`,
   no route, a host file beside its scratch hidden, the scratch writable), caching a pass and
-  re-probing a failure after a minute.
+  re-probing a failure after a minute. (bd-3glf2a, below, closes the first two: a database and
+  an object store come from capture services, Mix dependencies from an offline cache.)
+
+### As implemented: capture services and the offline deps cache (bd-3glf2a)
+
+The sandbox above leaves a DB-backed app with nowhere to get a database or an object store
+(podman and the host's loopback are out of reach) and no way to fetch its dependencies. Both now
+come from the host side, **without opening the sandbox**. Operator guide: [screenshots.md](../screenshots.md)
+("Services", "The offline deps cache", "What a start script can rely on").
+
+* **`screenshots.services`** (`Screenshots.Config`, validated key by key, unknown keys refused): a
+  map of name -> `{image, port, env, command, ready, socket}`. For every boot (the merge-base boot,
+  the head boot, a named-seed boot) `Capture.run/2` asks `Capture.Services` (default
+  `Services.Podman`) to start each as a fresh container, `arb-cap-<role>-<token>-<name>`, and
+  stops them after the app, so D2's "a fresh database per boot" holds by construction:
+
+      podman run -d --name arb-cap-… --network none --pull=missing --security-opt no-new-privileges \
+        --cap-drop all --cap-add CHOWN,DAC_OVERRIDE,FOWNER,FSETID,KILL,NET_BIND_SERVICE,SETGID,SETUID \
+        --log-driver k8s-file --label arbiter.capture-service=<server os pid> … -- <image> <command>
+
+* **`--network none` and a bridge, not a loopback-published port (the choice the ticket left open).** A
+  published port needs a container network, and the container could then leave by it: the app
+  can usually run code *inside* a service (a Postgres superuser's `COPY … FROM PROGRAM`), so the
+  service is on the untrusted side of the line and must have no exit either. A port on the host's
+  loopback is also reachable by every process on the host, and `--network none` keeps the host's
+  abstract Unix sockets out of reach as well. So the container gets nothing: no network but its
+  own `lo`, no published port, no host mount.
+* **The bridge.** The host reaches the service through the service's own network namespace: a
+  `socat` that `nsenter --target <pid> [--user --preserve-credentials] --net` puts there (rootless,
+  the user namespace that owns it too, the way podman's own `pasta`/`slirp4netns` join a rootless
+  container) listens on a host Unix socket in a fresh `0700` directory under
+  `Paths.socket_root/0` and connects each client to `127.0.0.1:<port>` inside. The container
+  never sees that socket; it only answers connections the bridge opens. `setpriv --pdeathsig KILL`
+  (when installed) takes the bridge down with the server; it is a `Capture.AppProcess`, so it is
+  killed with its owner too.
+* **Inside the sandbox** (`Sandbox.Bwrap`): each socket is bound read-only at its own path (the
+  way the app's socket is shown to the browser) and, for app commands only (setup, seed and the
+  app, not the browser), a relay per service listens on `127.0.0.1:<port>` before the command runs
+  (exit 125, never a command without its services, when one cannot). `socket` binds the same
+  socket at a declared path under the sandbox's private `/run` or `/tmp` for Unix-socket clients.
+  Nothing else of the socket's directory is shown.
+* **Ready, or a visible failure.** `ready.cmd` is `podman exec`ed until it exits 0; `ready.tcp`
+  (the default) connects inside the container's namespace (`socat -u OPEN:/dev/null
+  TCP:127.0.0.1:<port>`); a container that stops meanwhile fails at once. Any failure is
+  `boot_failed` with `detail.phase = services`, the service, the reason and the tail of its
+  `podman logs`, in `capture.json` and in the escalation the ReviewGate sends; the app never
+  boots, and nothing runs unsandboxed instead. Whatever the boot started is removed first. The
+  pull and the waits are bounded by the capture's budget, and `podman run` runs under `timeout
+  -k`, so a hung podman is killed rather than left to create its container later. An image's
+  `VOLUME` is a tmpfs (`--image-volume tmpfs`) and `rm --volumes` removes anything anonymous, so
+  no volume outlives its boot.
+* **Removal on every exit path.** `Capture` stops a boot's services in an `after` (success, a boot,
+  shot or budget failure, a crash). `Services.Reaper` covers the rest: containers are tracked
+  *before* they run; the owner (the capture task) dying by any means removes them on `:DOWN`;
+  the reaper traps exits and removes everything still tracked when the server shuts down (it
+  starts before `Wardmast.TaskSupervisor`, so it stops after the capture tasks); at boot it
+  removes containers labelled with a server pid that is no longer alive, never a live server's.
+* **`screenshots.deps`** (`Capture.DepsCache`): `{"mix": true}` gives every boot its Mix
+  dependencies with no network.
+  * **Trusted lockfile only.** The cache comes from a `mix.lock` the default branch has had
+    (`merge.base`, else `main`): the merge-base's, when the merge-base is on the default branch,
+    else the default branch tip's when it is byte-for-byte the same. A head that edits, adds or
+    deletes `mix.lock` is `{:skipped, {:deps_changed, reason}}` (`skip_kind: deps_changed`; the
+    ReviewGate proceeds and tells the reviewer why). The head's `mix.exs` and lockfile never run
+    with a network; running the trusted commit's `mix.exs` is the same trust as merging it.
+  * **Trust comes from origin, never from the checkout** (a review finding): the worker's refs
+    and objects are writable from its jail, so a moved `refs/remotes/origin/main` could have made
+    a worker commit the source. The default branch's tip is read live with `git ls-remote origin`
+    (the URL is in the repository config the jail keeps read-only) and fetched through the pack
+    protocol, which names every object by the hash of its own content (`transfer.fsckObjects`
+    on), into `<root>/repos/<hash>.git`, a bare repository only the server writes. The ancestry
+    check, the trusted lockfile, `.tool-versions` and the seed's `git archive` all come from
+    there. An object forged in the worker's store fails the fetch: `deps_failed`, never its code.
+  * **Seeded once per lockfile and toolchain** under `<scratch_root>/capture-deps/<lock12>-<toolchain12>`,
+    the toolchain being what `elixir` reports *inside the sandbox* (with the source's
+    `.tool-versions`), because Hex, rebar3 and precompiled NIFs are bound to it. The seed runs in
+    a `git archive` of the trusted commit through `Sandbox.fetch_command/2` (new, optional):
+    `Bwrap.fetch_argv/3` is an app command's argv plus `--share-net` (and the target of an
+    `/etc/resolv.conf` that points into `/run`). Environment from nothing plus the server's proxy
+    variables; `mix local.hex`/`local.rebar` when the lock needs them, `mix deps.get`, `mix
+    deps.compile` (which fetches precompiled NIFs into `ELIXIR_MAKE_CACHE_DIR` /
+    `RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH` in the cache) and the esbuild/tailwind installers when
+    those deps are present. Published by an atomic rename with a `.complete` stamp; a failure
+    leaves nothing and is `deps_failed` (an infrastructure fault). Caches unused for 14 days are
+    pruned. A seed killed with its capture (the capture lifecycle below cancels a capture when a
+    newer head arrives; a shutdown stops it) cannot run its own cleanup: its process group dies
+    with it (`AppProcess`), and its work directory, named `seed-<key>-<token>`, is swept by the
+    next seed of the same cache under the same lock, or by the prune once it is 14 days old.
+    What the seed leaves is untrusted to the host (a default-branch dependency can be
+    malicious): its directories are moved whole into a staging directory the seed never saw, and
+    only when they are real directories; the asset tools are copied only as regular files from a
+    real `_build`; the stamp and the rename happen in staging. No link it plants is followed.
+  * **Read-only in the boot** (`box.cache_dirs`, bound after the masks) and wired through
+    `MIX_DEPS_PATH`, `MIX_HOME`, `HEX_HOME`, `HEX_OFFLINE=1`, the two NIF cache variables and
+    `MIX_ESBUILD_PATH`/`MIX_TAILWIND_PATH`, set after the config's `env` (which may not set them
+    while `deps.mix` is on); the binaries are also linked at `_build/<tool>-<target>` in the
+    checkout. Measured while building it: a fresh checkout compiled and loaded `exqlite`'s NIF
+    from a `chmod a-w` cache with `HEX_OFFLINE=1` and no proxy, and wrote nothing into it.
+* **Deviations from the ticket's sketch.** `command` is a service key (SILO needs its arguments).
+  `port` is the same on both sides and at least 1024 (the sandbox's user namespace has no
+  `CAP_NET_BIND_SERVICE`), and outside `port_range`. Each service has a namespace of its own, so
+  services cannot reach each other (a pod would allow it, but its bridge would then reach every
+  member). The deps cache is keyed on the toolchain as well as the lockfile, and is seeded from
+  the merge-base when that is on the default branch (the base boot runs that tree; the default
+  branch's tip can have moved on). The seed compiles the deps to warm the NIF caches and run the
+  installers, but its `_build` is thrown away: a warm `_build` per boot is still the later
+  optimisation of §4, and npm packages are not cached.
+* **Residual risks.** The seed has the network *and* the host's loopback (bwrap cannot give
+  "internet but not loopback" without a user-mode network stack); it runs only default-branch
+  code. A dependency that writes into its own source directory while compiling fails offline (the
+  cache is read-only). The bridge runs as the server's user; it only copies bytes between the
+  app's relay and the service. The boot sweep judges a server by its OS pid alone (as
+  `TestServices` does): a dead server whose pid was reused keeps its containers until a later
+  boot, and a second Wardmast in another pid namespace sharing the same podman storage could
+  take a live one's for orphans. A checkout that commits `_build` as a link gets no asset-tool
+  links (a setup failure): the host never writes through a path the worker chose.
+* **Tests.** `Services.PodmanTest` (fake podman and bridge: flags, unique names per boot,
+  readiness, the log tail, removal on every failure, the reaper on a killed owner and at
+  shutdown, the orphan sweep); `PodmanCaptureServicesTest` (`:podman`, opt-in: a real container,
+  no network, reached through the bridge, removed on every path); `CaptureServicesTest` (per-boot
+  lifecycle, `boot_failed` with the tail and nothing booted, `deps_changed`);
+  `BwrapServicesScriptsTest` (the relays for real, bwrap cut out); `DepsCacheTest` (the trust
+  rule, seeding, and a real offline compile from a read-only cache); and in CI's `jail` job
+  `capture_sandbox_test.exs` (a stand-in service reached on its endpoints and by no other route,
+  and an offline compile inside a real bwrap). **Not verified in the worktree that built it:** it
+  had neither bwrap nor user namespaces nor podman, so the jail tests run only in CI and the
+  podman test only where an operator runs it; the first real capture of a PostGIS + SILO app on
+  the operator host is the end-to-end check.
 
 ### When it runs, and what it blocks
 
@@ -599,7 +730,18 @@ win; `env` and the `viewports`/`themes`/`seeds` maps merge by key, like `preview
     "attach": true,                          // also store on the ticket (§10); false = PR/MR only
     "sandbox": {                             // bd-bhrsdv: host-mode capture sandbox (§2)
       "readonly_paths": ["~/.asdf", "~/.mix"] // shown read-only; never ~ or above; default []
-    }
+    },
+    "services": {                            // bd-3glf2a: fresh per boot, --network none (§2)
+      "postgres": {
+        "image": "docker.io/postgis/postgis:16-3.4@sha256:…",  // required
+        "port": 5432,                        // required, 1024-65535, outside port_range: 127.0.0.1:5432 in the sandbox
+        "env": {"POSTGRES_PASSWORD": "postgres"},              // literal
+        "command": ["postgres", "-c", "fsync=off"],           // argv after the image
+        "ready": {"cmd": ["pg_isready", "-h", "127.0.0.1"], "timeout_seconds": 90},  // or {"tcp": true} (default)
+        "socket": "/run/postgresql/.s.PGSQL.5432"             // optional: also a Unix socket here
+      }
+    },
+    "deps": {"mix": true}                    // bd-3glf2a: offline Mix deps from a default-branch lockfile (§2)
   }}}}
 }
 ```
@@ -781,7 +923,11 @@ time a repo's `.env` is lying around, so this is enforced in layers, from the st
    files beyond the system dirs and listed read-only paths, and no capture at all on a host
    that cannot sandbox it. `capture_sandbox_test.exs` proves it against a real bwrap: a probe
    app and a stand-in browser try a listener on host loopback (which an unsandboxed control
-   reaches), an external address and name, and a host file, and all fail.
+   reaches), an external address and name, and a host file, and all fail. Since bd-3glf2a the
+   app's database and object store are **capture services**: containers with no network of
+   their own, fresh for each boot, reached only on their declared endpoints inside the sandbox;
+   and its dependencies come from a cache fetched from a default-branch lockfile, so a change's
+   own `mix.exs` never runs with a network.
 2. **No inherited environment.** The pass env is built from nothing (`SpawnEnv` scrubbing, then
    only `env`, `port_env` and the pass's own variables). The server's `DATABASE_PATH`, the
    operator's `.env`, cloud credentials, forge tokens and `HTTP(S)_PROXY` are absent.
@@ -872,6 +1018,8 @@ is a seeds-review problem, and `seed_cmd` comes from the repo or config, never f
 > sidecar retarget of `6301r0`, N1's Node runner (the host shooter drives Chromium directly).
 > **Not shipped:** N4 (DOM text scan/withholding, marker probe) and the `screenshot_*`
 > attention causes other than `screenshot_capture_failed`. The table below is the original plan.
+> **Since then:** the bwrap capture sandbox (bd-bhrsdv), the login-capable CDP shooter (N1 as
+> bd-485ts3), and capture services plus the offline deps cache (bd-3glf2a), all in §2 and §4.
 
 The design changes scope in these four, and needs five new tickets. Order:
 `bbwppc` and `6301r0` first (parallel) → N1 → N2 → `3tox5h` and `5hlegn` integrate → N3, N4 land
@@ -904,15 +1052,21 @@ anywhere before N2 is enabled.
 * **R3. Cold-compile time.** A head that changes `mix.lock` misses the deps cache and compiles
   cold (≈ 200 s per boot measured in the podman design), twice. The default 1200 s budget fits
   the warm case with margin and the cold case tightly; operators with big apps raise
-  `budget_seconds`.
+  `budget_seconds`. (Host mode, bd-3glf2a: a head that changes `mix.lock` is skipped,
+  `deps_changed`, and the offline cache holds fetched sources and precompiled NIFs, not a
+  compiled `_build`, so every boot still compiles its deps: the cold case is the only case, and
+  the first capture of a new lockfile also pays the seed.)
 * **R4. Apps that need external services** (OAuth, payment sandboxes) render their error
   state: there is no network by design. The login hook (`cmd`) and seeds exist so the app
-  does not need them; an operator who adds egress hosts owns that decision.
+  does not need them; an operator who adds egress hosts owns that decision. Services the app
+  can run itself (a database, an object store) are capture services (bd-3glf2a, §2); they have
+  no network either.
 * **R5. Flaky pixels.** Fixed clock/fonts/animation settings remove the common noise; there
   is no diffing in v1 (the pictures are for humans), so noise is cosmetic, not a gate.
 * **R6. `git archive` omits submodules/LFS.** Such repos are `skipped` in v1.
 * **R7. The host-mode sandbox is strict (bd-bhrsdv).** With no network, a `setup_cmd` that
-  fetches dependencies or downloads asset tools fails the boot, and a toolchain installed under
+  fetches dependencies or downloads asset tools fails the boot (unless `deps.mix` provides the
+  Mix ones, bd-3glf2a; npm packages are still not provided), and a toolchain installed under
   the home directory is invisible until listed in `sandbox.readonly_paths`. Both are boot
   failures (escalated, never unsandboxed), so the cost is a configuration round, not a leak.
   Real Chromium inside the bwrap browser sandbox has not been run in the worktree that built it

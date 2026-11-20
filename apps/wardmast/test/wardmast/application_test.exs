@@ -98,7 +98,10 @@ defmodule Wardmast.ApplicationTest do
         Wardmast.TaskSupervisor,
         Wardmast.SingleInstance,
         # In-memory token buckets; never reads the Repo (RW3).
-        Wardmast.Nodes.RateLimit
+        Wardmast.Nodes.RateLimit,
+        # Only runs podman (bd-3glf2a); before the TaskSupervisor so it outlives the capture
+        # tasks whose service containers it removes at shutdown. Never reads the Repo.
+        Wardmast.Screenshots.Capture.Services.Reaper
       ]
 
       last_gate_ix =

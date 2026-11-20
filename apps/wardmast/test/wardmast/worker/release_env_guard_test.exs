@@ -260,6 +260,17 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # `ReleaseEnv.cmd/3`. The boot and browser argv it builds are spawned by
     # `AppProcess` (its Port) and `Shooter.Chromium`, both scrubbed.
     "apps/wardmast/lib/wardmast/screenshots/capture/sandbox/bwrap.ex" => :scrubbed,
+    # bd-3glf2a: the capture's offline deps cache. `git` (`init` / `fetch` / `rev-parse` /
+    # `cat-file` / `merge-base` / `archive`), `tar` and `chmod` through `ReleaseEnv.cmd/3`;
+    # `ls-remote` via `Worktree.remote_head/2` (a literal `git`). The BEAMs it starts (the
+    # `elixir` toolchain fingerprint, the `mix deps.get` seed) run only inside the capture
+    # sandbox's argv, under `AppProcess` (its Port, scrubbed there), never on the host directly.
+    "apps/wardmast/lib/wardmast/screenshots/capture/deps_cache.ex" => :scrubbed,
+    # bd-3glf2a: capture services. Its one direct spawn is `ps -p` (is the server that labelled
+    # an orphan container alive), as `Worker.TestServices`. `podman` / `nsenter` / `socat` /
+    # `timeout` go through `Container.cmd/4` (`ReleaseEnv.cmd/3`), and the long-running
+    # `nsenter … socat` bridge through `Services.Bridge` → `AppProcess` (scrubbed there).
+    "apps/wardmast/lib/wardmast/screenshots/capture/services/podman.ex" => :pure_tool,
     # bd-485ts3: the login-capable CDP shooter runs the `arb-capture` Node runner through
     # `ReleaseEnv.cmd/3`.
     "apps/wardmast/lib/wardmast/screenshots/capture/shooter/cdp.ex" => :scrubbed

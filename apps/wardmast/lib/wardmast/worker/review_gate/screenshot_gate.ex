@@ -9,6 +9,7 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
   | the change does not touch `ui_paths` | proceeds, nothing added (today's behaviour) |
   | pairs were captured, or the worker declared a `skip` | proceeds, the pairs (file paths) or the skip reason go into the reviewer's brief |
   | this host cannot sandbox the capture ("capture needs a sandbox", bd-bhrsdv) | proceeds; the reviewer is told no screenshots were taken and why, and that it is not the worker's doing. Nothing was booted |
+  | the change edits `mix.lock` (`deps_changed`, bd-3glf2a: the offline deps cache only trusts a default-branch lockfile) | proceeds; the reviewer is told why there are none. Nothing was booted |
   | a **worker fault**: no manifest, an invalid manifest, a named route that errors | sends the change back to the worker with an instruction (`{:send_back, findings}`) |
   | an **infrastructure fault**: the app would not boot, no Chromium, the checkout or diff failed, the budget ran out | escalates to the coordinator (`{:escalate, message}`) and does **not** loop the worker |
 
@@ -24,11 +25,13 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
   browser crash, and looping a worker over a crash is the worse mistake.
   """
 
+  alias Wardmast.Mergers
   alias Wardmast.Screenshots.Capture
   alias Wardmast.Screenshots.Capture.Failure
   alias Wardmast.Screenshots.Captures
   alias Wardmast.Screenshots.Config
   alias Wardmast.Screenshots.PlanCheck
+  alias Wardmast.Tasks.Workspace
 
   # The line a worker prints to declare a fix with no file change (see ReviewGate's
   # `@non_file_fix_marker`): the plan file is gitignored, so adding it moves no head.
@@ -86,8 +89,11 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
          head when is_binary(head) <- Map.get(state, :head_sha),
          base when is_binary(base) <- Map.get(state, :base_sha) do
       case Map.get(state, :screenshot_checked) do
-        %{head_sha: ^head, outcome: outcome} -> {:cached, outcome}
-        checked -> lifecycle(state, config, base, head, checked, history)
+        %{head_sha: ^head, outcome: outcome} ->
+          {:cached, outcome}
+
+        checked ->
+          lifecycle(state, config, base, head, checked, history, default_branch(workspace, state))
       end
     else
       _ -> :skip
@@ -96,10 +102,10 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
 
   def plan(_state, _workspace, _history), do: :skip
 
-  defp lifecycle(state, config, base, head, _checked, nil),
-    do: {:run, job(state, config, base, head)}
+  defp lifecycle(state, config, base, head, _checked, nil, branch),
+    do: {:run, job(state, config, base, head, branch)}
 
-  defp lifecycle(state, config, base, head, checked, history) do
+  defp lifecycle(state, config, base, head, checked, history, branch) do
     max = Map.get(config.limits, "max_captures_per_ticket", 3)
     last = history.last_captured
 
@@ -112,7 +118,7 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
     cond do
       history.attempts >= max -> capped(checked, last, max, hashes)
       reusable?(state, config, head, checked, last) -> reuse(checked, last, :unchanged, hashes)
-      true -> {:run, job(state, config, base, head)}
+      true -> {:run, job(state, config, base, head, branch)}
     end
   end
 
@@ -139,7 +145,7 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
 
   defp reusable?(_state, _config, _head, _checked, _last), do: false
 
-  defp job(state, config, base, head) do
+  defp job(state, config, base, head, default_branch) do
     wt = state.worktree_path
 
     out_dir =
@@ -158,10 +164,23 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
         head_sha: head,
         config: config,
         plan_path: plan_path,
-        out_dir: out_dir
+        out_dir: out_dir,
+        default_branch: default_branch
       },
       opts: Map.get(state, :screenshot_opts, [])
     }
+  end
+
+  # bd-3glf2a: the branch whose lockfile the offline deps cache trusts (`merge.base`, else main).
+  defp default_branch(workspace, state) do
+    ws =
+      case workspace do
+        %Workspace{} -> workspace
+        %{config: %{} = config} -> %Workspace{config: config}
+        _ -> nil
+      end
+
+    Mergers.base_branch(ws, Map.get(state, :repo)) || "main"
   end
 
   # The plan the commit gate checked (stored outside the worktree) feeds the capture, so a plan
@@ -220,6 +239,16 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
        "sandbox, and this host cannot provide one; that is the host's setup, not the worker's " <>
        "doing, so do not hold the missing screenshots against the change. Judge the visual " <>
        "result from the diff alone."}
+  end
+
+  # bd-3glf2a: the boot has no network, and its Mix deps come only from a lockfile the default
+  # branch has had. A dependency change is legitimate work, so not a send-back; nothing is broken
+  # either, so no escalation: the reviewer judges the diff, knowing why there are no pictures.
+  def route({:skipped, {:deps_changed, reason}}) do
+    {:proceed,
+     "No screenshots were taken: #{reason}. This is expected for a change to the project's " <>
+       "dependencies (mix.lock), not the worker's fault, so do not hold the missing screenshots " <>
+       "against the change. Judge the visual result from the diff alone."}
   end
 
   # bd-8qj1sa: `limits.max_captures_per_ticket` attempts were already spent and none produced a

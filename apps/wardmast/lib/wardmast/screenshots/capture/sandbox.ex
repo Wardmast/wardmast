@@ -40,16 +40,34 @@ defmodule Wardmast.Screenshots.Capture.Sandbox do
       than its own executable's directory (the CDP shooter's `node_modules` and Chromium).
     * `reach/1`: the `Req` options that reach `app` from the host.
     * `release/1`: undo `expose/2` (a socket dir, say) once the app is stopped.
+    * `fetch_command/2` (optional, bd-3glf2a): the argv that runs **trusted** code (the deps
+      cache seed: a default-branch tree's `mix deps.get`) inside `box` with the network on. Never
+      for anything a worker wrote. A sandbox without it cannot build the offline deps cache.
+
+  A `box` may also carry (bd-3glf2a) `services`, the boot's service endpoints
+  (`Wardmast.Screenshots.Capture.Services`): each `socket` is a host Unix socket that leads to the
+  service, which an app command must reach on `127.0.0.1:<port>` (and at `sandbox_socket`, when
+  set), and `cache_dirs`, directories shown read-only (the deps cache).
 
   The environment is not the sandbox's business: the caller always runs the argv under
   `env -i` with an environment built from nothing.
   """
 
+  @typedoc "A service a boot's app commands reach (`Capture.Services.start/2`)."
+  @type endpoint :: %{
+          required(:name) => String.t(),
+          required(:port) => :inet.port_number(),
+          required(:socket) => String.t(),
+          optional(:sandbox_socket) => String.t() | nil
+        }
+
   @typedoc "One boot's directories: `checkout` and `scratch` are writable, the rest read-only."
   @type box :: %{
           required(:checkout) => String.t(),
           required(:scratch) => String.t(),
-          optional(:readonly_paths) => [String.t()]
+          optional(:readonly_paths) => [String.t()],
+          optional(:services) => [endpoint()],
+          optional(:cache_dirs) => [String.t()]
         }
 
   @typedoc "How the sandbox reaches a started app (`expose/2`)."
@@ -70,6 +88,9 @@ defmodule Wardmast.Screenshots.Capture.Sandbox do
             ) :: {:ok, [String.t()]} | {:error, term()}
   @callback reach(app()) :: keyword()
   @callback release(app()) :: :ok
+  @callback fetch_command(argv :: [String.t()], box()) :: {:ok, [String.t()]} | {:error, term()}
+
+  @optional_callbacks fetch_command: 2
 
   alias Wardmast.Worker.ReleaseEnv
 
