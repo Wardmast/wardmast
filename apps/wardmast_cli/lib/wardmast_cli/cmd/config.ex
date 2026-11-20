@@ -120,7 +120,7 @@ defmodule WardmastCli.Cmd.Config do
     path =
       case args do
         [] -> nil
-        [p] -> p
+        [p] -> canonical_key(p)
         _ -> Output.die("config get takes at most one positional argument: the dotted key")
       end
 
@@ -147,8 +147,8 @@ defmodule WardmastCli.Cmd.Config do
   defp set(args, workspace_opt, force, mode) do
     {key, raw_value} =
       case args do
-        [k, v] -> {k, v}
-        [k | rest] when rest != [] -> {k, Enum.join(rest, " ")}
+        [k, v] -> {canonical_key(k), v}
+        [k | rest] when rest != [] -> {canonical_key(k), Enum.join(rest, " ")}
         [_] -> Output.die("config set requires a value: arb config set <key> <value>")
         [] -> Output.die("config set requires <key> <value>")
       end
@@ -178,7 +178,7 @@ defmodule WardmastCli.Cmd.Config do
   defp unset(args, workspace_opt, force, mode) do
     key =
       case args do
-        [k] -> k
+        [k] -> canonical_key(k)
         [] -> Output.die("config unset requires a key: arb config unset <key>")
         _ -> Output.die("config unset takes exactly one argument: the dotted key")
       end
@@ -200,6 +200,33 @@ defmodule WardmastCli.Cmd.Config do
     case Client.patch("/api/workspaces/" <> ws["id"] <> "/config", payload) do
       {:ok, updated} -> Formatter.emit_workspace_config(updated, mode)
       {:error, err} -> Output.die(err)
+    end
+  end
+
+  # ----- deprecated roots (bd-4j0nfe) -------------------------------------
+
+  # Mirrors the server's `Wardmast.Tasks.Workspace.DeprecatedConfigPaths`: a root
+  # `sandbox.*` is read by nothing, so `get`/`set`/`unset` act on the canonical
+  # path. The server rewrites a write too; the CLI does it first so `get` shows
+  # the value runs actually use and `set`'s diff names the real key.
+  @deprecated_roots %{"sandbox" => "agent.security.sandbox"}
+
+  defp canonical_key(key) do
+    case Value.split(key) do
+      [root | _] when is_map_key(@deprecated_roots, root) ->
+        canonical =
+          Map.fetch!(@deprecated_roots, root) <>
+            binary_part(key, byte_size(root), byte_size(key) - byte_size(root))
+
+        IO.puts(
+          :stderr,
+          "warning: `#{key}` is deprecated and read by nothing; using `#{canonical}`, the key runs read"
+        )
+
+        canonical
+
+      _ ->
+        key
     end
   end
 

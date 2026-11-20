@@ -102,6 +102,33 @@ defmodule WardmastCli.Cmd.ConfigTest do
       assert code == 1
       assert err =~ "key not found"
     end
+
+    # bd-4j0nfe: a stored root `sandbox.backend: auto` used to be what `get`
+    # showed, while runs used the canonical bwrap.
+    test "get sandbox.backend reads the canonical key, with a deprecation warning" do
+      config = %{
+        "sandbox" => %{"backend" => "auto"},
+        "agent" => %{"security" => %{"sandbox" => %{"backend" => "bwrap"}}}
+      }
+
+      stub_routes([{{"get", "/api/workspaces"}, {default_ws(config), 200}}])
+
+      {out, err, code} = capture(fn -> Config.run(["get", "sandbox.backend", "--json"]) end)
+      assert code == 0
+      assert String.trim(out) == ~s("bwrap")
+      assert err =~ "`sandbox.backend` is deprecated"
+      assert err =~ "agent.security.sandbox.backend"
+    end
+
+    test "get sandbox reads the whole canonical sandbox block" do
+      config = %{"agent" => %{"security" => %{"sandbox" => %{"backend" => "podman"}}}}
+      stub_routes([{{"get", "/api/workspaces"}, {default_ws(config), 200}}])
+
+      {out, err, code} = capture(fn -> Config.run(["get", "sandbox", "--json"]) end)
+      assert code == 0
+      assert Jason.decode!(out) == %{"backend" => "podman"}
+      assert err =~ "`sandbox` is deprecated"
+    end
   end
 
   describe "set" do
@@ -217,15 +244,47 @@ defmodule WardmastCli.Cmd.ConfigTest do
              "error" => %{
                "type" => "validation_error",
                "message" =>
-                 "unknown top-level config key \"sandbox\" — did you mean agent.security.sandbox.backend?",
+                 "unknown top-level config key \"permissions\" (did you mean `agent.security.permissions.mode`?)",
                "details" => %{}
              }
            })
          end}
       ])
 
-      {_out, err, code} = capture(fn -> Config.run(["set", "sandbox.backend", "podman"]) end)
+      {_out, err, code} = capture(fn -> Config.run(["set", "permissions.mode", "strict"]) end)
       assert code == 1
+      assert err =~ "agent.security.permissions.mode"
+    end
+
+    # bd-4j0nfe: the acceptance scenario. Root `sandbox.backend: auto` stored,
+    # `agent.security.sandbox.backend: bwrap` the key runs read.
+    test "set sandbox.backend writes agent.security.sandbox.backend, with a deprecation warning" do
+      initial = %{
+        "sandbox" => %{"backend" => "auto"},
+        "agent" => %{"security" => %{"sandbox" => %{"backend" => "bwrap"}}}
+      }
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {default_ws(initial), 200}},
+        {{"patch", "/api/workspaces/" <> @ws_id <> "/config"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+           assert Jason.decode!(body)["patch"] == %{
+                    "agent" => %{"security" => %{"sandbox" => %{"backend" => "auto"}}}
+                  }
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"id" => @ws_id, "name" => "default", "config" => %{}})
+         end}
+      ])
+
+      {_out, err, code} =
+        capture(fn -> Config.run(["set", "sandbox.backend", "auto", "--force"]) end)
+
+      assert code == 0
+      assert err =~ "`sandbox.backend` is deprecated"
       assert err =~ "agent.security.sandbox.backend"
     end
 
@@ -308,6 +367,29 @@ defmodule WardmastCli.Cmd.ConfigTest do
   end
 
   describe "unset" do
+    test "unset sandbox.backend removes the canonical key, with a deprecation warning" do
+      initial = %{"agent" => %{"security" => %{"sandbox" => %{"backend" => "podman"}}}}
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {default_ws(initial), 200}},
+        {{"patch", "/api/workspaces/" <> @ws_id <> "/config"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           assert Jason.decode!(body)["unset_paths"] == ["agent.security.sandbox.backend"]
+
+           conn
+           |> Plug.Conn.put_status(200)
+           |> Req.Test.json(%{"id" => @ws_id, "name" => "default", "config" => %{}})
+         end}
+      ])
+
+      {_out, err, code} =
+        capture(fn -> Config.run(["unset", "sandbox.backend", "--force"]) end)
+
+      assert code == 0
+      assert err =~ "`sandbox.backend` is deprecated"
+    end
+
     test "removes a dotted leaf, server-side via unset_paths" do
       initial = %{
         "tracker" => %{"type" => "jira", "config" => %{"host" => "h", "project_key" => "AX"}}
