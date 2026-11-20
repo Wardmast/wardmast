@@ -12,13 +12,24 @@ defmodule Wardmast.Mergers.CILogExcerpt do
 
   @ansi ~r/\e\[[0-9;?]*[A-Za-z]/
   # GitHub Actions prefixes every line with an ISO timestamp.
-  @gh_timestamp ~r/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z ?/
+  # GitLab adds a stream marker after it (`... 01O text`, `... 00O+ text`).
+  @gh_timestamp ~r/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z(?: \d{2}[A-Z]\+?(?= |$))? ?/
   # GitLab's collapsible-section markers (`section_start:123:name\r\e[0K`).
   @gl_section ~r/section_(start|end):\d+:[\w.\-]+\r?/
 
-  # An ExUnit-style numbered failure header: `  1) test name (Module)`.
-  @block_header ~r/^\s*\d+\) (test|doctest|property) /
-  @block_max_lines 30
+  # An ExUnit-style numbered failure header: `  1) test name (Module)`, or a
+  # Playwright one: `  1) [mobile-light] › tests/x.spec.ts:10:5 › title`.
+  @block_header ~r/^\s*\d+\) (test|doctest|property) |^\s*\d+\) \[/
+  @block_max_lines 40
+
+  # Where a GitLab job's own output ends.
+  @job_failed ~r/^ERROR: Job failed/
+  @fallback_lines 80
+
+  # `==> dep` .. `Generated dep app`: a dependency compiling; its warnings are
+  # not the failure.
+  @dep_start ~r/^==> \S+\s*$/
+  @dep_end ~r/^Generated \S+ app\s*$/
 
   # Single lines worth keeping, with a little context around them.
   @marker_patterns [
@@ -36,7 +47,7 @@ defmodule Wardmast.Mergers.CILogExcerpt do
     ~r/^---\s+FAIL:/
   ]
 
-  @summary ~r/^\s*\d+ (tests?|doctests?|properties|examples?), \d+ failures?/
+  @summary ~r/^\s*\d+ (tests?|doctests?|properties|examples?), \d+ failures?|^\s*\d+ (failed|passed|flaky|skipped|did not run)\s*$/
 
   @context_before 1
   @context_after 2
@@ -66,7 +77,7 @@ defmodule Wardmast.Mergers.CILogExcerpt do
     total = length(lines)
     indexed = Enum.with_index(lines)
 
-    blocks = indexed |> block_ranges(total) |> Enum.sort() |> merge()
+    blocks = indexed |> block_ranges(total) |> Enum.sort()
     summaries = for {line, i} <- indexed, Regex.match?(@summary, line), do: {i, i}
     primary = merge(Enum.sort(blocks ++ summaries))
 
@@ -76,7 +87,12 @@ defmodule Wardmast.Mergers.CILogExcerpt do
       end
 
     if primary == [] and markers == [] do
-      tail(Enum.join(lines, "\n") |> String.trim(), limit)
+      lines
+      |> before_job_failed()
+      |> Enum.take(-@fallback_lines)
+      |> Enum.join("\n")
+      |> String.trim()
+      |> tail(limit)
     else
       assemble(blocks, summaries, markers, lines, limit)
     end
@@ -92,6 +108,44 @@ defmodule Wardmast.Mergers.CILogExcerpt do
     |> String.split("\n")
     |> Enum.map(&Regex.replace(@gh_timestamp, &1, ""))
     |> Enum.map(&String.trim_trailing/1)
+    |> drop_dep_compile_noise()
+  end
+
+  # The lines up to `ERROR: Job failed` (all of them when it is absent).
+  defp before_job_failed(lines) do
+    case Enum.find_index(lines, &Regex.match?(@job_failed, &1)) do
+      nil -> lines
+      i -> Enum.take(lines, i)
+    end
+  end
+
+  # Inside a `==> dep` .. `Generated dep app` span, drop each `warning:` block
+  # (the line plus its indented / blank continuation); keep everything else.
+  defp drop_dep_compile_noise(lines) do
+    {kept, _state} =
+      Enum.reduce(lines, {[], :outside}, fn line, {acc, state} ->
+        cond do
+          Regex.match?(@dep_start, line) ->
+            {[line | acc], :in_dep}
+
+          state == :outside ->
+            {[line | acc], :outside}
+
+          Regex.match?(@dep_end, line) ->
+            {[line | acc], :outside}
+
+          String.starts_with?(line, "warning:") ->
+            {acc, :in_warning}
+
+          state == :in_warning and (line == "" or String.match?(line, ~r/^\s/)) ->
+            {acc, :in_warning}
+
+          true ->
+            {[line | acc], :in_dep}
+        end
+      end)
+
+    Enum.reverse(kept)
   end
 
   # Failure blocks and the run's summary line are what a fix pass needs most,
@@ -109,15 +163,47 @@ defmodule Wardmast.Mergers.CILogExcerpt do
       |> merge()
       |> Enum.reject(&overlaps_any?(&1, blocks ++ summaries))
 
-    kept_markers = take_within(candidate_markers, lines, left, 0, [])
+    # With no failure block, the markers are all there is: favour the end of the
+    # log (where the failure is) over the head (compile noise).
+    kept_markers =
+      if blocks == [],
+        do:
+          candidate_markers
+          |> Enum.reverse()
+          |> take_within(lines, left, 0, [])
+          |> Enum.reverse(),
+        else: take_within(candidate_markers, lines, left, 0, [])
 
-    text = (primary ++ kept_markers) |> Enum.sort() |> render(lines)
+    # The sizes above are per range; the joined text can still run over, so drop
+    # whole trailing ranges (markers first, then blocks) rather than cut mid-block.
+    {ranges, dropped?} = fit(kept_blocks, summaries, kept_markers, lines, limit)
+    text = render(ranges, lines)
 
     truncated? =
-      length(kept_blocks) < length(blocks) or length(kept_markers) < length(candidate_markers) or
-        String.length(text) > limit
+      dropped? or length(kept_blocks) < length(blocks) or
+        length(kept_markers) < length(candidate_markers) or String.length(text) > limit
 
     {bound(text, limit), truncated?}
+  end
+
+  defp fit(blocks, summaries, markers, lines, limit) do
+    all = Enum.sort(blocks ++ summaries ++ markers) |> merge()
+
+    cond do
+      String.length(render(all, lines)) <= limit ->
+        {all, false}
+
+      markers != [] ->
+        {ranges, _} = fit(blocks, summaries, Enum.drop(markers, -1), lines, limit)
+        {ranges, true}
+
+      length(blocks) > 1 ->
+        {ranges, _} = fit(Enum.drop(blocks, -1), summaries, [], lines, limit)
+        {ranges, true}
+
+      true ->
+        {all, false}
+    end
   end
 
   # Greedy, in log order; the first range is always kept so a single oversized
@@ -143,13 +229,17 @@ defmodule Wardmast.Mergers.CILogExcerpt do
         indexed
         |> Enum.drop(i + 1)
         |> Enum.take(@block_max_lines)
-        |> Enum.find_value(fn {l, j} -> if Regex.match?(@block_header, l), do: j - 1 end)
+        |> Enum.find_value(fn {l, j} ->
+          if Regex.match?(@block_header, l) or Regex.match?(@summary, l), do: j - 1
+        end)
 
       {i, stop || min(i + @block_max_lines, total - 1)}
     end
   end
 
-  defp marker?(line), do: Enum.any?(@marker_patterns, &Regex.match?(&1, line))
+  defp marker?(line),
+    do:
+      not Regex.match?(@job_failed, line) and Enum.any?(@marker_patterns, &Regex.match?(&1, line))
 
   defp merge(ranges) do
     ranges
