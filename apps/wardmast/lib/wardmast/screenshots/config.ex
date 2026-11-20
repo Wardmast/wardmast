@@ -49,9 +49,13 @@ defmodule Wardmast.Screenshots.Config do
     "budget_seconds" => 1200,
     "memory" => "4g",
     "cpus" => 2,
-    "max_captures_per_ticket" => 3,
-    "merge_wait_seconds" => 900
+    "max_captures_per_ticket" => 3
   }
+  # Limits that were once documented and did nothing. Still accepted in a stored block (so a
+  # workspace that set one keeps validating) and dropped when the config is built.
+  # `merge_wait_seconds` (bd-8qj1sa): capture finishes in the ReviewGate, before a reviewer and
+  # long before merge, so there is nothing at merge time to wait for.
+  @retired_limits ~w(merge_wait_seconds)
   @limit_max %{"budget_seconds" => 3600, "cpus" => 16}
   @default_hosting %{
     "github" => %{"mode" => "assets_branch", "branch" => "arbiter-assets"},
@@ -196,7 +200,7 @@ defmodule Wardmast.Screenshots.Config do
       fixture_check: block["fixture_check"],
       deny_patterns: Map.get(block, "deny_patterns", []),
       fixture_email_domains: Map.get(block, "fixture_email_domains", d.fixture_email_domains),
-      limits: Map.merge(d.limits, Map.get(block, "limits", %{})),
+      limits: Map.merge(d.limits, Map.drop(Map.get(block, "limits", %{}), @retired_limits)),
       hosting: Map.merge(d.hosting, Map.get(block, "hosting", %{})),
       attach: Map.get(block, "attach", true),
       sandbox: Map.merge(d.sandbox, Map.get(block, "sandbox", %{})),
@@ -727,7 +731,7 @@ defmodule Wardmast.Screenshots.Config do
   defp deny_patterns(_v, label), do: ["#{label} must be a list of regexes"]
 
   defp limits(%{} = v, label) do
-    unknown = Map.keys(v) -- Map.keys(@default_limits)
+    unknown = Map.keys(v) -- (Map.keys(@default_limits) ++ @retired_limits)
 
     unknown_errors =
       if unknown == [],

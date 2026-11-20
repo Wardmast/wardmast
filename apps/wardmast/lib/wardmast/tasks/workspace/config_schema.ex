@@ -729,8 +729,8 @@ defmodule Wardmast.Tasks.Workspace.ConfigSchema do
                         limits           max_shots 20, max_images 40, max_image_bytes,
                                          max_capture_bytes, setup_seconds, seed_seconds,
                                          shot_seconds, budget_seconds (max 3600), memory
-                                         ("4g", max 16g), cpus, max_captures_per_ticket 3,
-                                         merge_wait_seconds
+                                         ("4g", max 16g), cpus, max_captures_per_ticket 3
+                                         (capture attempts that booted the app, per ticket)
                         hosting          {github {mode "assets_branch", branch},
                                          public_repo_ok false, retention_days 90}
                         attach           default true: also store on the ticket

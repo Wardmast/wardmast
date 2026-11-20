@@ -99,6 +99,7 @@ defmodule WardmastWeb.ProvidersLive do
       |> assign(:attach_form, nil)
       |> assign(:attach_error, nil)
       |> assign(:rows, [])
+      |> assign(:clis, [])
       |> assign(:history, %{})
       |> assign(:logins, %{})
       |> assign(:login_topic, "providers-login:" <> Ash.UUID.generate())
@@ -141,6 +142,7 @@ defmodule WardmastWeb.ProvidersLive do
   def handle_async(:providers, {:ok, data}, socket) do
     socket
     |> assign(:rows, data.rows)
+    |> assign(:clis, data.clis)
     |> assign(:history, data.history)
     |> assign(:pauses, data.pauses)
     |> assign(:workspace_options, data.workspace_options)
@@ -537,6 +539,7 @@ defmodule WardmastWeb.ProvidersLive do
     %{
       rows: rows,
       pauses: Map.new(Wardmast.Providers.Pause.list(), &{&1.target, &1}),
+      clis: Wardmast.Agents.CliDetection.detect_all(),
       workspace_options: Overview.workspace_options(),
       history:
         Map.new(rows, &{&1.account.id, Logins.history(&1.account.provider, &1.account.slug)})
@@ -818,6 +821,8 @@ defmodule WardmastWeb.ProvidersLive do
               Retry
             </button>
           </div>
+
+          <.cli_panel :if={@providers_loaded?} clis={@clis} />
 
           <div
             :if={@providers_loaded?}
@@ -1551,4 +1556,114 @@ defmodule WardmastWeb.ProvidersLive do
     </Layouts.app>
     """
   end
+
+  # bd-5wfsj7: the provider CLIs the server detected. A missing or outdated one
+  # shows the vendor's install/upgrade command as text with a copy button — the
+  # operator runs it in their own shell; nothing here executes an installer.
+  attr :clis, :list, required: true
+
+  defp cli_panel(assigns) do
+    ~H"""
+    <WardmastWeb.CoreComponents.Core.panel
+      id="provider-clis"
+      title="Provider CLIs"
+      meta="what the server found on its PATH"
+    >
+      <ul class="m-0 p-0 list-none flex flex-col divide-y divide-[var(--border-default)]">
+        <li
+          :for={cli <- @clis}
+          id={"cli-#{cli.provider}"}
+          data-status={cli.status}
+          class="flex flex-col gap-1.5 py-2.5 first:pt-0 last:pb-0"
+        >
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
+            <span class="font-medium text-[var(--text-title)]">{cli.label}</span>
+            <span
+              id={"cli-#{cli.provider}-status"}
+              class={[
+                "px-1.5 py-px rounded-[var(--radius-chip)] border border-solid text-[11px]",
+                cli_status_class(cli.status)
+              ]}
+            >
+              {cli_status_label(cli.status)}
+            </span>
+            <span :if={cli.version} class="text-[var(--arb-text-muted)]">
+              version
+              <span id={"cli-#{cli.provider}-version"} class="font-[family-name:var(--font-mono)]">
+                {cli.version}
+              </span>
+            </span>
+            <span :if={cli.min_version} class="text-[var(--arb-text-muted)]">
+              minimum
+              <span id={"cli-#{cli.provider}-min"} class="font-[family-name:var(--font-mono)]">
+                {cli.min_version}
+              </span>
+            </span>
+            <span
+              :if={cli.path}
+              id={"cli-#{cli.provider}-path"}
+              class="font-[family-name:var(--font-mono)] text-[11px] text-[var(--arb-text-muted)] break-all"
+            >
+              {cli.path}
+            </span>
+          </div>
+          <p
+            :if={cli.status in [:missing, :outdated]}
+            id={"cli-#{cli.provider}-detail"}
+            class="m-0 text-[12px] text-[var(--arb-text-muted)]"
+          >
+            {cli.detail}
+          </p>
+          <div :if={cli.action} class="flex flex-wrap items-center gap-2 text-[12px]">
+            <span id={"cli-#{cli.provider}-action"} class="font-medium">
+              {cli_action_label(cli.action)}:
+            </span>
+            <code
+              id={"cli-#{cli.provider}-command"}
+              class="px-2 py-1 rounded-[var(--radius-field)] bg-[var(--arb-panel-alt)] font-[family-name:var(--font-mono)] text-[11px] break-all"
+            >
+              {cli_command(cli)}
+            </code>
+            <WardmastWeb.CoreComponents.Core.copy_id
+              id={cli_command(cli)}
+              dom_id={"cli-#{cli.provider}-copy"}
+              label={"Copy the #{cli.label} #{cli.action} command"}
+            />
+            <a
+              href={cli.docs_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="text-[11px] text-[var(--arb-text-muted)] underline"
+            >
+              docs
+            </a>
+          </div>
+        </li>
+      </ul>
+      <p class="m-0 mt-2 text-[11px] text-[var(--arb-text-muted)]">
+        Run the command in a terminal on the server's machine, then reload. Wardmast never runs an installer for you.
+      </p>
+    </WardmastWeb.CoreComponents.Core.panel>
+    """
+  end
+
+  defp cli_command(%{action: :upgrade, upgrade_command: command}), do: command
+  defp cli_command(%{install_command: command}), do: command
+
+  defp cli_action_label(:upgrade), do: "Upgrade"
+  defp cli_action_label(:install), do: "Install"
+
+  defp cli_status_label(:ok), do: "ready"
+  defp cli_status_label(:missing), do: "not installed"
+  defp cli_status_label(:outdated), do: "outdated"
+  defp cli_status_label(:unknown_version), do: "version unknown"
+
+  defp cli_status_class(:ok),
+    do: "border-[var(--arb-live)] text-[var(--arb-live)]"
+
+  defp cli_status_class(:unknown_version),
+    do: "border-[var(--border-default)] text-[var(--arb-text-muted)]"
+
+  defp cli_status_class(_),
+    do: "border-[var(--arb-fail-edge)] bg-[var(--arb-fail-wash)] text-[var(--arb-fail-text)]"
 end

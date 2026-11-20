@@ -37,7 +37,9 @@ defmodule WardmastWeb.CoreComponents.Forms do
   attr :disabled, :boolean, default: false
   attr :required, :boolean, default: false
   attr :class, :any, default: nil
-  attr :rest, :global, include: ~w(pattern title minlength maxlength step min max autocomplete)
+
+  attr :rest, :global,
+    include: ~w(pattern title minlength maxlength step min max autocomplete readonly)
 
   def input(assigns) do
     ~H"""

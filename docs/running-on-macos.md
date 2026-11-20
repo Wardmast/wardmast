@@ -286,7 +286,7 @@ aside rather than deleting it.
 | --- | --- | --- |
 | Terminal sessions (`arb-session-*`) | **Supported, without a scope.** Each session is a detached tmux server (`Wardmast.Sessions.Runner.Darwin`) in `/tmp/arb-<hash>/sessions` (short, `0700`: macOS's 104-byte socket limit rules out `$TMPDIR`), tracked by a pidfile plus `tmux has-session`. They survive a server restart (`AbandonProcessGroup = true`) and are re-adopted at boot. A stop is `tmux kill-server` + `SIGTERM`, not a cgroup kill, so a deliberately `nohup`-ed grandchild can outlive it. `arb session list` / `attach` work with the server down. | Supported (systemd scope) |
 | Worker sandbox | **None.** Workers run unconfined as your user. | bwrap sandbox |
-| Per-worker memory cap | **None.** There is no cgroup equivalent, so a runaway worker is not capped. | systemd cgroup limits |
+| Per-worker memory cap | **Optional, best-effort.** There is no cgroup equivalent, so nothing is enforced by the kernel. Set `WARDMAST_WORKER_MEMORY_MAX` (e.g. `12G`, `40%`) and a watchdog polls the RSS of each worker's process group every 5 s and kills the group over the cap, recording `memory_cap_exceeded`. Off unless set; see [worker-memory-cap.md](worker-memory-cap.md#on-macos-an-optional-rss-watchdog). A runaway can outgrow the cap between polls. | systemd cgroup limits (default 40% of RAM) |
 | Operator proof (`ward mcp token mint`, dashboard login) | **Supported, without the cgroup check.** The peer comes from `LOCAL_PEERCRED`/`LOCAL_PEERPID`, its ancestry from `ps`, and sessions from their pidfiles. A worker's double-forked orphan is reparented to launchd and is not refused. See [worker-security.md](worker-security.md#on-macos-bd-5tg348). | Ancestry, service cgroup and session scope |
 | `:strict` isolation mode | **Unavailable**, because it depends on the sandbox. | Available |
 | Workers surviving a server restart | **No.** The plist sets `AbandonProcessGroup = true` (so detached terminal sessions survive), which means launchd no longer kills the group; the server's own shutdown and the boot-time orphan sweep reap each worker's process group instead. Re-run `arb install service` to refresh an older plist that still says `false`. | Supported |
@@ -295,10 +295,30 @@ aside rather than deleting it.
 | System scope (`--system`) | A system-wide LaunchDaemon, release mode only; see [Team Mac](#team-mac-system-wide-launchdaemon). | Supported |
 | Release install | Apple Silicon (`darwin-arm64`) only; see [Release install](#release-install-apple-silicon). | Supported |
 
-Because there is no sandbox or memory cap, only dispatch work you trust to a
-macOS coordinator, and keep an eye on memory use.
+Because there is no sandbox and the memory cap is optional and approximate, only
+dispatch work you trust to a macOS coordinator, and keep an eye on memory use.
 See [worker-security.md](worker-security.md) and
 [worker-memory-cap.md](worker-memory-cap.md) for what those controls do on Linux.
+
+## Provider CLIs and the server's PATH
+
+The server detects `claude`, `codex` and `agy`/`gemini` (installed? where? which
+version?) and shows the result on the Providers page and in
+`ward server doctor`. Each provider has a minimum supported version
+(`Wardmast.Agents.CliDetection`; override with
+`config :wardmast, Wardmast.Agents.CliDetection, min_versions: %{"codex" => "..."}`):
+dispatch to a provider whose CLI is below it is refused with the installed and
+the required version. A missing or outdated CLI shows the vendor's documented
+install/upgrade command on the Providers page, to copy and run yourself;
+Wardmast never runs an installer.
+
+A server started from a GUI session (a LaunchAgent, a desktop entry) inherits
+only `/usr/bin:/bin:/usr/sbin:/sbin`. When the `PATH` it starts with holds
+nothing else, it asks your login shell once at boot (`$SHELL -l -i -c`, 5 s
+timeout, `/bin/zsh` if `SHELL` is unset) for the `PATH` your rc files build and
+uses it for CLI detection and for every spawn. A richer `PATH` is never
+replaced. `ward server doctor` shows `server PATH` when this happened, or a
+warning when the shell gave no answer.
 
 ## Troubleshooting
 

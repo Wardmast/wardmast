@@ -227,8 +227,16 @@ defmodule Wardmast.Screenshots.ConfigTest do
       assert [_] = errors(%{"limits" => %{"budget_seconds" => 4000}})
       assert [_] = errors(%{"limits" => %{"memory" => "32g"}})
       assert [_] = errors(%{"limits" => %{"max_shots" => 0}})
+      assert [_] = errors(%{"limits" => %{"max_captures_per_ticket" => 0}})
       assert [_] = errors(%{"port_range" => "20000-20100"})
       assert [_] = errors(%{"default_viewports" => ["nope"]})
+    end
+
+    test "merge_wait_seconds is gone from the schema (bd-8qj1sa) but a stored value stays valid" do
+      refute Map.has_key?(%Config{}.limits, "merge_wait_seconds")
+      assert errors(%{"limits" => %{"merge_wait_seconds" => 900}}) == []
+      assert [_] = errors(%{"limits" => %{"merge_wait_seconds" => 0}})
+      assert [_] = errors(%{"limits" => %{"bogus_limit" => 1}})
     end
 
     test "login kinds" do

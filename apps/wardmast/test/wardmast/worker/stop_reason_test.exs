@@ -1261,6 +1261,23 @@ defmodule Wardmast.Worker.StopReasonTest do
       assert StopReason.to_map(reason).category == :memory_cap_exceeded
     end
 
+    test "a watchdog kill (macOS, bd-d627b8) says so rather than claiming an OOM" do
+      reason =
+        StopReason.memory_cap_exceeded(
+          %{max: "12G", peak: 13_958_643_712, source: :watchdog},
+          137
+        )
+
+      assert reason.category == :memory_cap_exceeded
+      assert reason.summary =~ "memory cap exceeded"
+      assert reason.summary =~ "watchdog"
+      assert reason.summary =~ "12G"
+      assert reason.summary =~ "13.0 GiB"
+      refute reason.summary =~ "OOM-killed"
+      refute reason.remediation =~ "cgroup"
+      assert reason.remediation =~ "WARDMAST_WORKER_MEMORY_MAX"
+    end
+
     test "copes with a missing peak" do
       reason = StopReason.memory_cap_exceeded(%{max: "40%", peak: nil}, 137)
 
