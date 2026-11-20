@@ -108,6 +108,65 @@ defmodule Wardmast.Worker.PrimarySyncTest do
     assert head(primary) == before
   end
 
+  # bd-2rdfsh: how stale is the primary's LOCAL target branch (what a bare
+  # `git log main` sees), and why would the post-merge sync leave it alone?
+  describe "status/2" do
+    defp fetch(path), do: {_, 0} = System.cmd("git", ["-C", path, "fetch", "-q", "origin"])
+
+    test "an up-to-date checkout is 0 behind with no blocker", %{primary: primary} do
+      assert {:ok, %{behind: 0, blocker: nil}} = PrimarySync.status(primary, "main")
+    end
+
+    test "counts how many commits local main is behind origin/main", %{
+      seed: seed,
+      remote: remote,
+      primary: primary
+    } do
+      for n <- 1..3, do: advance_remote(seed, remote, "A#{n}.md")
+      fetch(primary)
+
+      assert {:ok, %{behind: 3, blocker: nil, current_branch: "main"}} =
+               PrimarySync.status(primary, "main")
+
+      # Read-only: status never moves the checkout.
+      refute File.exists?(Path.join(primary, "A1.md"))
+    end
+
+    test "names why a sync would skip: dirty tree, other branch, divergence", %{
+      seed: seed,
+      remote: remote,
+      primary: primary
+    } do
+      advance_remote(seed, remote, "A1.md")
+      fetch(primary)
+
+      File.write!(Path.join(primary, "dirty.txt"), "wip\n")
+
+      assert {:ok, %{behind: 1, blocker: :uncommitted_changes}} =
+               PrimarySync.status(primary, "main")
+
+      File.rm!(Path.join(primary, "dirty.txt"))
+
+      {_, 0} = System.cmd("git", ["-C", primary, "checkout", "-q", "-b", "human-wip"])
+
+      assert {:ok, %{behind: 1, blocker: :not_on_default_branch, current_branch: "human-wip"}} =
+               PrimarySync.status(primary, "main")
+
+      {_, 0} = System.cmd("git", ["-C", primary, "checkout", "-q", "main"])
+      File.write!(Path.join(primary, "local_only.txt"), "local\n")
+      {_, 0} = System.cmd("git", ["-C", primary, "add", "local_only.txt"])
+      {_, 0} = System.cmd("git", ["-C", primary, "commit", "-q", "-m", "local"])
+
+      assert {:ok, %{behind: 1, blocker: :not_fast_forwardable}} =
+               PrimarySync.status(primary, "main")
+    end
+
+    test "errors when the local branch or the origin ref does not exist", %{primary: primary} do
+      assert {:error, _} = PrimarySync.status(primary, "no-such-branch")
+      assert {:error, _} = PrimarySync.status(Path.join(primary, "missing"), "main")
+    end
+  end
+
   test "returns an error for a path that is not a git repo" do
     tmp = Path.join(System.tmp_dir!(), "ps009-notrepo-#{:erlang.unique_integer([:positive])}")
     File.rm_rf!(tmp)

@@ -1466,6 +1466,42 @@ defmodule Wardmast.Worker.Worktree do
     do: Enum.any?(seeds, &(file == &1 or String.starts_with?(file, &1 <> "/")))
 
   @doc """
+  The ref a completion gate must compare a branch against: `origin/<target>`,
+  after a best-effort fetch of it (bd-2rdfsh).
+
+  A bare local `<target>` is NOT a safe base. In a primary checkout nothing
+  advances the local target branch but the post-merge sync, and when that
+  stalled (122 commits behind) a branch with no work of its own counted as 122
+  commits "ahead" and sailed through the commit gate. `origin/<target>` is what
+  the PR is opened against, so it is the only honest base.
+
+  Resolution:
+
+    * `base_ref` already starting `origin/` is returned unchanged (the caller
+      resolved it; no second fetch).
+    * Otherwise `origin <base_ref>` is fetched (a failed fetch is tolerated —
+      the existing `origin/<base_ref>` is used) and, when `origin/<base_ref>`
+      resolves, `"origin/" <> base_ref` is returned.
+    * No `origin` remote, or no such remote ref (a local-only repo): `base_ref`
+      itself, so those repos keep gating on their local branch.
+  """
+  @spec gate_base_ref(path(), String.t()) :: String.t()
+  def gate_base_ref(path, base_ref) when is_binary(path) and is_binary(base_ref) do
+    with false <- String.starts_with?(base_ref, "origin/"),
+         :ok <- ensure_origin_remote(path) do
+      _ = fetch_origin_branch(path, base_ref)
+
+      case ensure_origin_ref(path, base_ref) do
+        :ok -> "origin/" <> base_ref
+        {:error, _} -> base_ref
+      end
+    else
+      true -> base_ref
+      {:error, _} -> base_ref
+    end
+  end
+
+  @doc """
   Return `{:ok, true}` if the worktree's current branch has commits not
   present on `base_ref` (default `"main"`), else `{:ok, false}`.
 
@@ -1482,6 +1518,8 @@ defmodule Wardmast.Worker.Worktree do
   @spec has_commits_ahead?(path(), String.t()) ::
           {:ok, boolean()} | {:error, error_reason()}
   def has_commits_ahead?(path, base_ref \\ "main") when is_binary(path) do
+    base_ref = gate_base_ref(path, base_ref)
+
     case run_git(["rev-list", "--count", base_ref <> "..HEAD"], cd: path) do
       {:ok, count_str} ->
         case Integer.parse(String.trim(count_str)) do
@@ -1505,6 +1543,8 @@ defmodule Wardmast.Worker.Worktree do
   """
   @spec commits_ahead_count(path(), String.t()) :: non_neg_integer() | :unknown
   def commits_ahead_count(path, base_ref \\ "main") when is_binary(path) do
+    base_ref = gate_base_ref(path, base_ref)
+
     with {:ok, out} <- run_git(["rev-list", "--count", base_ref <> "..HEAD"], cd: path),
          {n, _} when n >= 0 <- Integer.parse(String.trim(out)) do
       n
