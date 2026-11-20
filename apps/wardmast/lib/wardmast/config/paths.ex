@@ -49,12 +49,28 @@ defmodule Wardmast.Config.Paths do
   end
 
   @doc """
-  The server's own log file (`~/.wardmast/log/wardmast.log`), the file launchd
-  appends stdout/stderr to on macOS. Read by `Wardmast.Server.LogRotator`.
+  The server's own log file, the file launchd appends stdout/stderr to on macOS.
+  Read by `Wardmast.Server.LogRotator`.
+
+  Resolution: `WARDMAST_SERVER_LOG`, then `config :wardmast, :server_log_path`,
+  then `<data home>/log/wardmast.log` where the data home is `WARDMAST_HOME` or
+  `ARB_HOME` (the same home `WardmastCli.Supervisor.Launchd.Plist.log_path/1`
+  writes `StandardOutPath` into), else `~/.wardmast`. The plist also exports
+  `WARDMAST_SERVER_LOG` explicitly, which covers a dev install whose `ARB_HOME`
+  is the checkout rather than the data home (bd-6f5dmo).
   """
   @spec server_log_path() :: String.t()
   def server_log_path do
-    resolve("WARDMAST_SERVER_LOG", :server_log_path, "~/.wardmast/log/wardmast.log")
+    Wardmast.Env.get("WARDMAST_SERVER_LOG") ||
+      Application.get_env(:wardmast, :server_log_path) ||
+      data_home_log_path()
+  end
+
+  defp data_home_log_path do
+    case env("WARDMAST_HOME") || env("ARB_HOME") do
+      nil -> expand_default("~/.wardmast/log/wardmast.log", "WARDMAST_SERVER_LOG")
+      home -> Path.join([home, "log", "wardmast.log"])
+    end
   end
 
   @doc """

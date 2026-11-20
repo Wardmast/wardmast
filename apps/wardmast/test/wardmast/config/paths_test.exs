@@ -85,6 +85,42 @@ defmodule Wardmast.Config.PathsTest do
     end
   end
 
+  describe "server_log_path/0 (bd-6f5dmo)" do
+    setup do
+      keys = ["WARDMAST_SERVER_LOG", "WARDMAST_HOME", "ARB_HOME"]
+      prior = Map.new(keys, &{&1, System.get_env(&1)})
+      prior_cfg = Application.get_env(:wardmast, :server_log_path)
+      Application.delete_env(:wardmast, :server_log_path)
+      Enum.each(keys, &System.delete_env/1)
+
+      on_exit(fn ->
+        Enum.each(prior, fn {k, v} -> restore_env(k, v) end)
+        restore_cfg(:server_log_path, prior_cfg)
+      end)
+    end
+
+    test "follows ARB_HOME, the same path the plist writer uses" do
+      System.put_env("ARB_HOME", "/data/home")
+      assert Paths.server_log_path() == "/data/home/log/wardmast.log"
+    end
+
+    test "WARDMAST_HOME wins over ARB_HOME" do
+      System.put_env("ARB_HOME", "/data/arb")
+      System.put_env("WARDMAST_HOME", "/data/ward")
+      assert Paths.server_log_path() == "/data/ward/log/wardmast.log"
+    end
+
+    test "WARDMAST_SERVER_LOG still overrides" do
+      System.put_env("ARB_HOME", "/data/home")
+      System.put_env("WARDMAST_SERVER_LOG", "/x/y.log")
+      assert Paths.server_log_path() == "/x/y.log"
+    end
+
+    test "defaults to ~/.wardmast when no data home is set" do
+      assert Paths.server_log_path() == Path.expand("~/.wardmast/log/wardmast.log")
+    end
+  end
+
   describe "worktree_root/0" do
     test "env var wins over app config and default" do
       System.put_env("WARDMAST_WORKTREE_ROOT", "/tmp/from-env-wt")
