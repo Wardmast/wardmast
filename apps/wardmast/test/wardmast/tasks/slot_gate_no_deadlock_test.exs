@@ -124,7 +124,7 @@ defmodule Wardmast.Tasks.SlotGateNoDeadlockTest do
 
     assert board.agents_live == 3
     assert board.slots_used == 3
-    assert board.slots_total <= board.slots_used
+    assert board.plan_capacity <= board.slots_used
     assert board.walk.promote == nil
 
     _ = ws

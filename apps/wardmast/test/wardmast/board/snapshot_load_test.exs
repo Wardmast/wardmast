@@ -21,13 +21,13 @@ defmodule Wardmast.Board.SnapshotLoadTest do
       {:ok, _} = Wardmast.Settings.set_nodes_local_max_workers(6)
       on_exit(fn -> Wardmast.Settings.set_nodes_local_max_workers(nil) end)
 
-      assert Snapshot.load(workspace_id: ws.id).slots_total == 6
+      assert Snapshot.load(workspace_id: ws.id).plan_capacity == 6
     end
 
     test "defaults to the primary's hardware suggestion (DC1)", %{ws: ws} do
       put_app_env(:wardmast, :local_hardware, %{cpus: 12, mem_total: 31 * 1024 * 1024 * 1024})
 
-      assert Snapshot.load(workspace_id: ws.id).slots_total == 6
+      assert Snapshot.load(workspace_id: ws.id).plan_capacity == 6
     end
 
     test "a workspace's old conductor.max_concurrent key no longer binds", %{ws: ws} do
@@ -35,14 +35,14 @@ defmodule Wardmast.Board.SnapshotLoadTest do
       ws = Ash.Seed.update!(ws, %{config: %{"conductor" => %{"max_concurrent" => 1}}})
       put_app_env(:wardmast, :local_hardware, %{cpus: 12, mem_total: 31 * 1024 * 1024 * 1024})
 
-      assert Snapshot.load(workspace_id: ws.id).slots_total == 6
+      assert Snapshot.load(workspace_id: ws.id).plan_capacity == 6
     end
 
     test "no regression: the same sum when no workspace_id is passed" do
       {:ok, _} = Wardmast.Settings.set_nodes_local_max_workers(5)
       on_exit(fn -> Wardmast.Settings.set_nodes_local_max_workers(nil) end)
 
-      assert Snapshot.load().slots_total == 5
+      assert Snapshot.load().plan_capacity == 5
     end
   end
 

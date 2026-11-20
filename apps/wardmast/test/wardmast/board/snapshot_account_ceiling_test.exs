@@ -130,13 +130,13 @@ defmodule Wardmast.Board.SnapshotAccountCeilingTest do
   end
 
   describe "load/1" do
-    test "slots_total reflects the account ceiling" do
+    test "the capacity terms reflect the account ceiling" do
       ws = workspace!()
       link!(ws, account!(%{max_concurrent: 2}))
 
       board = Snapshot.load(workspace_id: ws.id, issues: [], workers: [], deps: [])
 
-      assert board.slots_total == 2
+      assert board.capacity.effective == 2
     end
   end
 end

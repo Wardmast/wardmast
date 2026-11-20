@@ -137,11 +137,11 @@ defmodule Wardmast.Tasks.SlotGateConformanceTest do
           blocked_by: %{},
           changed_files: %{},
           now: @now,
-          slots_total: total,
+          walk: Wardmast.Board.OpenWalk.walk(slots: total),
           paused: false
         })
 
-      assert max(board.slots_total - board.slots_used, 0) == SlotGate.slots_free(total, tickets),
+      assert max(board.plan_capacity - board.slots_used, 0) == SlotGate.slots_free(total, tickets),
              "board disagrees with SlotGate on free slots for #{name} (total=#{total})"
 
       assert board.slots_used == SlotGate.slots_used(tickets),
@@ -188,7 +188,7 @@ defmodule Wardmast.Tasks.SlotGateConformanceTest do
         |> OpenWalk.put()
         |> Snapshot.derive()
 
-      assert held.slots_total - held.slots_used == 0
+      assert held.plan_capacity - held.slots_used == 0
       assert held.walk.promote == nil
     end
 
@@ -199,7 +199,7 @@ defmodule Wardmast.Tasks.SlotGateConformanceTest do
       |> OpenWalk.put()
       |> Snapshot.derive()
 
-    assert merging.slots_total - merging.slots_used == 1
+    assert merging.plan_capacity - merging.slots_used == 1
     assert merging.walk.promote == ready.id
   end
 end
