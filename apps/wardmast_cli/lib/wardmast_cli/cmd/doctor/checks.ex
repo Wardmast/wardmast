@@ -102,6 +102,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       {"private_clone_records", :sandboxes, nil, :always, plain(&check_private_clone_records/0)},
       {"worker_tmp", :sandboxes, nil, :always, plain(&check_worker_tmp/0)},
       {"worker_memory", :sandboxes, nil, :always, plain(&check_worker_memory/0)},
+      {"worker_repo_trust", :sandboxes, nil, :always, plain(&check_worker_repo_trust/0)},
       {"spawn", :sandboxes, nil, :always, plain(fn -> check_spawn(opts[:spawn] || :auto) end)},
       {"worker_jail_unmask", :sandboxes, nil, :always, plain(&check_worker_jail_unmask/0)},
       {"bind_address", :security, nil, :always, plain(&check_bind_address/0)},
@@ -1624,6 +1625,39 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
 
   defp answer(%{"detail" => detail}) when is_binary(detail) and detail != "", do: " (#{detail})"
   defp answer(_), do: ""
+
+  # bd-3ipnbp (GitHub #1299): Claude ignores a repo's own `permissions.allow`
+  # unless the worker profile's `.claude.json` trusts that path.
+  defp check_worker_repo_trust do
+    case Client.get("/api/server/worker_trust") do
+      {:ok, %{"untrusted" => [], "checked" => n}} ->
+        %Result{name: "worker repo trust", status: :ok, detail: "#{n} repo(s) trusted"}
+
+      {:ok, %{"untrusted" => [_ | _] = paths} = body} ->
+        dir = body["config_dir"] || "the worker Claude profile"
+
+        missing =
+          if body["profile_present"] == false, do: " (no .claude.json in #{dir})", else: ""
+
+        %Result{
+          name: "worker repo trust",
+          status: :warn,
+          detail:
+            "worker profile has not trusted #{length(paths)} repo(s), so their " <>
+              "`.claude/settings.json` permissions.allow entries are ignored: " <>
+              Enum.join(paths, ", ") <> missing,
+          hint:
+            "Run `CLAUDE_CONFIG_DIR=#{dir} claude` once in each repo and accept the trust " <>
+              "dialog, or set projects.<path>.hasTrustDialogAccepted=true in #{dir}/.claude.json."
+        }
+
+      {:error, %Client.Error{kind: :http, status: status} = err} when status != 404 ->
+        server_error_result("worker repo trust", err)
+
+      other ->
+        unknown_result("worker repo trust", other)
+    end
+  end
 
   # bd-6zuoo6: workers live in the server's cgroup unless the per-worker memory
   # cap puts each in its own scope, and under the default `OOMPolicy=stop` the

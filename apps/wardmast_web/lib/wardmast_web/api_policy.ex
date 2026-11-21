@@ -290,6 +290,7 @@ defmodule WardmastWeb.ApiPolicy do
     {:get, "/api/server/guardrails"} => :coordinator,
     {:get, "/api/server/claude_credentials"} => :coordinator,
     {:get, "/api/server/grok_auth"} => :coordinator,
+    {:get, "/api/server/worker_trust"} => :coordinator,
     {:get, "/api/server/provider_accounts"} => :coordinator,
     {:get, "/api/server/merge_routing"} => :coordinator,
     {:get, "/api/server/cli_versions"} => :coordinator,
