@@ -37,15 +37,9 @@ defmodule Wardmast.Nodes.Agent do
   @spec archive_root() :: String.t()
   def archive_root, do: @archive_root
 
-  @doc "The deploy data home: `:data_dir` app env, `WARDMAST_DATA_HOME`, else `~/.wardmast`."
+  @doc "The deploy data home (`Wardmast.Env.data_home/0`)."
   @spec data_home() :: String.t()
-  def data_home do
-    case {Application.fetch_env(:wardmast, :data_dir), Wardmast.Env.get("WARDMAST_DATA_HOME")} do
-      {{:ok, dir}, _} when is_binary(dir) -> Path.expand(dir)
-      {_, dir} when is_binary(dir) and dir != "" -> Path.expand(dir)
-      _ -> Path.join(System.user_home!(), ".wardmast")
-    end
-  end
+  def data_home, do: Wardmast.Env.data_home()
 
   @doc "The running release's tag (`current` symlink target's basename), or `nil`."
   @spec release_tag(String.t()) :: String.t() | nil

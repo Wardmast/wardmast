@@ -133,6 +133,62 @@ defmodule Wardmast.Env do
   @spec default_base_url() :: String.t()
   def default_base_url, do: "http://127.0.0.1:#{port()}"
 
+  @data_home_dirname ".wardmast"
+
+  @doc """
+  The one place the Wardmast data home is decided (bd-88syir). Every default
+  that lives under it — the SQLite DB, `wardmast.pid`, `wardmast.env`, the
+  accounts / previews / images / memory / log roots, `run/`, `releases/`,
+  `current` — derives from this, on the server and in the `arb` escript alike.
+
+  Precedence, first non-empty wins:
+
+    1. `config :wardmast, :data_dir` (the test seam; never set outside tests);
+    2. `WARDMAST_DATA_HOME` (legacy `ARB_DATA_HOME` via the shim in `get/2`);
+    3. `<user home>/.wardmast`.
+
+  The result is an absolute, expanded path (`~` expands against `$HOME`).
+  Empty values count as unset, so `WARDMAST_DATA_HOME=` falls through.
+
+  Deliberately **never** `ARB_HOME` (ambient: the source checkout in dev mode,
+  exported into every worker) and never `WARDMAST_HOME`.
+
+  `rel/env.sh.eex` resolves the same chain in shell
+  (`${WARDMAST_DATA_HOME:-${ARB_DATA_HOME:-$HOME/.wardmast}}`); a test in
+  `:wardmast` pins the two together, so change both or neither.
+
+  Raises when no variable is set and the user home cannot be determined.
+  """
+  @spec data_home() :: String.t()
+  def data_home do
+    case configured_data_home() do
+      dir when is_binary(dir) -> Path.expand(dir)
+      nil -> Path.join(System.user_home!(), @data_home_dirname)
+    end
+  end
+
+  defp configured_data_home do
+    seam =
+      case Application.fetch_env(:wardmast, :data_dir) do
+        {:ok, dir} when is_binary(dir) and dir != "" -> dir
+        _ -> nil
+      end
+
+    seam || env_data_home()
+  end
+
+  # Unlike `get/2`, an empty `WARDMAST_DATA_HOME` is "unset" and so does not
+  # shadow `ARB_DATA_HOME` — what `rel/env.sh.eex`'s `${A:-${B:-...}}` does.
+  defp env_data_home do
+    case lookup(@prefix <> "DATA_HOME", &non_empty(System.get_env(&1))) do
+      {:ok, dir} -> dir
+      :error -> nil
+    end
+  end
+
+  defp non_empty(""), do: nil
+  defp non_empty(value), do: value
+
   @doc "Forget which deprecations were already logged. Test seam."
   @spec reset_warnings() :: :ok
   def reset_warnings do

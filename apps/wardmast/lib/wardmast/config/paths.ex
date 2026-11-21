@@ -53,25 +53,17 @@ defmodule Wardmast.Config.Paths do
   Read by `Wardmast.Server.LogRotator`.
 
   Resolution: `WARDMAST_SERVER_LOG`, then `config :wardmast, :server_log_path`,
-  then `<WARDMAST_HOME>/log/wardmast.log`, else `~/.wardmast/log/wardmast.log`.
-  `ARB_HOME` is deliberately ignored: it is ambient (the source checkout in dev
-  mode, the parent of `.wardmast` in release mode). The launchd plist exports
-  `WARDMAST_SERVER_LOG` equal to its `StandardOutPath`, which is the source of
-  truth for a non-default data home (bd-6f5dmo).
+  then `<data home>/log/wardmast.log` (`Wardmast.Env.data_home/0`). `ARB_HOME`
+  and `WARDMAST_HOME` are deliberately ignored: `ARB_HOME` is ambient (the
+  source checkout in dev mode, the parent of `.wardmast` in release mode). The
+  launchd plist exports `WARDMAST_SERVER_LOG` equal to its `StandardOutPath`,
+  which stays the explicit source of truth (bd-6f5dmo).
   """
   @spec server_log_path() :: String.t()
   def server_log_path do
     Wardmast.Env.get("WARDMAST_SERVER_LOG") ||
       Application.get_env(:wardmast, :server_log_path) ||
-      data_home_log_path()
-  end
-
-  defp data_home_log_path do
-    case System.get_env("WARDMAST_HOME") do
-      nil -> expand_default("~/.wardmast/log/wardmast.log", "WARDMAST_SERVER_LOG")
-      "" -> expand_default("~/.wardmast/log/wardmast.log", "WARDMAST_SERVER_LOG")
-      home -> Path.join([Path.expand(home), "log", "wardmast.log"])
-    end
+      data_home_path("log/wardmast.log")
   end
 
   @doc """
@@ -82,7 +74,7 @@ defmodule Wardmast.Config.Paths do
   """
   @spec accounts_root() :: String.t()
   def accounts_root do
-    resolve("WARDMAST_ACCOUNTS_ROOT", :accounts_root, "~/.wardmast/accounts")
+    resolve("WARDMAST_ACCOUNTS_ROOT", :accounts_root, fn -> data_home_path("accounts") end)
   end
 
   @doc """
@@ -92,7 +84,7 @@ defmodule Wardmast.Config.Paths do
   """
   @spec preview_root() :: String.t()
   def preview_root do
-    resolve("WARDMAST_PREVIEW_ROOT", :preview_root, "~/.wardmast/previews")
+    resolve("WARDMAST_PREVIEW_ROOT", :preview_root, fn -> data_home_path("previews") end)
   end
 
   @doc """
@@ -101,7 +93,7 @@ defmodule Wardmast.Config.Paths do
   """
   @spec image_root() :: String.t()
   def image_root do
-    resolve("WARDMAST_IMAGE_ROOT", :image_root, "~/.wardmast/images")
+    resolve("WARDMAST_IMAGE_ROOT", :image_root, fn -> data_home_path("images") end)
   end
 
   @doc """
@@ -180,7 +172,7 @@ defmodule Wardmast.Config.Paths do
   """
   @spec memory_root() :: String.t()
   def memory_root do
-    resolve("WARDMAST_MEMORY_ROOT", :memory_root, "~/.wardmast/memory")
+    resolve("WARDMAST_MEMORY_ROOT", :memory_root, fn -> data_home_path("memory") end)
   end
 
   @doc """
@@ -303,8 +295,15 @@ defmodule Wardmast.Config.Paths do
   defp resolve(env_var, config_key, default) do
     Wardmast.Env.get(env_var) ||
       Application.get_env(:wardmast, config_key) ||
-      expand_default(default, env_var)
+      default_path(default, env_var)
   end
+
+  # A default is either a `~/`-relative literal or a thunk (the data-home
+  # defaults, which must follow `Wardmast.Env.data_home/0`).
+  defp default_path(default, _env_var) when is_function(default, 0), do: default.()
+  defp default_path(default, env_var), do: expand_default(default, env_var)
+
+  defp data_home_path(child), do: Path.join(Wardmast.Env.data_home(), child)
 
   defp expand_default("/" <> _ = absolute, _env_var), do: absolute
 

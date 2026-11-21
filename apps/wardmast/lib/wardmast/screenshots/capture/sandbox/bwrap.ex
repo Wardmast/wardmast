@@ -505,7 +505,7 @@ defmodule Wardmast.Screenshots.Capture.Sandbox.Bwrap do
         Paths.accounts_root(),
         Paths.preview_root(),
         Paths.memory_root(),
-        Application.get_env(:wardmast, :data_dir, "~/.wardmast")
+        Wardmast.Env.data_home()
       ],
       &Path.expand/1
     )

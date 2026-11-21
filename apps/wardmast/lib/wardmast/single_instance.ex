@@ -191,10 +191,13 @@ defmodule Wardmast.SingleInstance do
         Path.join(System.tmp_dir!(), "arbiter_lock_#{key}.pid")
 
       true ->
-        data_dir = Application.get_env(:wardmast, :data_dir, Path.expand("~/.wardmast"))
-        Path.join(data_dir, @lock_file_name)
+        lock_path()
     end
   end
+
+  @doc "The default advisory lock file: `<data home>/wardmast.pid` (`Wardmast.Env.data_home/0`)."
+  @spec lock_path() :: String.t()
+  def lock_path, do: Path.join(Wardmast.Env.data_home(), @lock_file_name)
 
   defp ensure_ets_table do
     if :ets.info(@ets_table) == :undefined do
