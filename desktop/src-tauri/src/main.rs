@@ -120,27 +120,23 @@ fn main() {
     };
 
     let release_dir = std::env::var("ARBITER_RELEASE_DIR").expect("bundled release dir");
-<<<<<<< HEAD
-    let mut config = Config::new(ReleaseSpec::for_release_dir(&release_dir));
+    // PKG 9: first run generates the Cloak key and SECRET_KEY_BASE into the OS
+    // keychain; the release gets refs (`keychain:<service>#<account>`), never
+    // values. A locked/missing item is not regenerated: the release fails its
+    // boot with a message naming the item, and the status page shows it.
+    let mut release = ReleaseSpec::for_release_dir(&release_dir);
+    release.env.extend(credentials::prepare(
+        &credentials::OsStore::new(),
+        &credentials::default_data_dir(),
+        &credentials::os_random,
+    ));
+    let mut config = Config::new(release);
     // Adopt-or-refuse an orphaned release instead of starting a second server
     // on the same database (docs/desktop-shell.md, "Orphaned release").
     config.data_home = arbiter_shell_core::release_lock::resolve_data_home();
     config.expected_version =
         arbiter_shell_core::release_lock::bundled_version(std::path::Path::new(&release_dir));
     let shell = Arc::new(Shell::start(config, None));
-=======
-    // PKG 9: first run generates the Cloak key and SECRET_KEY_BASE into the OS
-    // keychain; the release gets refs (`keychain:<service>#<account>`), never
-    // values. A locked/missing item is not regenerated: the release fails its
-    // boot with a message naming the item, and the status page shows it.
-    let mut release = ReleaseSpec::for_release_dir(release_dir);
-    release.env.extend(credentials::prepare(
-        &credentials::OsStore::new(),
-        &credentials::default_data_dir(),
-        &credentials::os_random,
-    ));
-    let shell = Arc::new(Shell::start(Config::new(release), None));
->>>>>>> 6f734a25 (feat(desktop): shell generates Cloak key + SECRET_KEY_BASE into the OS keychain, hands refs only; docs)
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
