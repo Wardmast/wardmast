@@ -470,10 +470,8 @@ fn claim(config: &Config, shared: &Shared, rx: &Receiver<Cmd>) -> Claim {
             Ok(Some(l)) => break l,
             Ok(None) => {}
             Err(e) => {
-                return Claim::Refused(format!(
-                    "cannot lock the data home {}: {e}",
-                    home.display()
-                ))
+                let msg = format!("cannot lock the data home {}: {e}", home.display());
+                return Claim::Refused(msg);
             }
         }
         match rx.recv_timeout(config.poll_interval) {

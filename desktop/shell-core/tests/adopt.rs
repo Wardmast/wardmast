@@ -215,8 +215,14 @@ fn assert_reused_pid_is_not_touched(name: &str, expected: &str, foreign_version:
 
     // Nothing was signalled: both are still running and the foreign server
     // never saw SIGTERM.
-    assert!(release_lock::pid_alive(reused.pid), "reused pid was signalled");
-    assert!(release_lock::pid_alive(foreign.pid), "foreign server was signalled");
+    assert!(
+        release_lock::pid_alive(reused.pid),
+        "reused pid was signalled"
+    );
+    assert!(
+        release_lock::pid_alive(foreign.pid),
+        "foreign server was signalled"
+    );
     let foreign_lines: Vec<String> = std::fs::read_to_string(&foreign_log)
         .unwrap()
         .lines()
@@ -229,8 +235,14 @@ fn assert_reused_pid_is_not_touched(name: &str, expected: &str, foreign_version:
     );
 
     assert_eq!(sup.stop(), StopOutcome::Graceful);
-    assert!(release_lock::pid_alive(reused.pid), "reused pid killed on quit");
-    assert!(release_lock::pid_alive(foreign.pid), "foreign server killed on quit");
+    assert!(
+        release_lock::pid_alive(reused.pid),
+        "reused pid killed on quit"
+    );
+    assert!(
+        release_lock::pid_alive(foreign.pid),
+        "foreign server killed on quit"
+    );
 }
 
 #[test]
