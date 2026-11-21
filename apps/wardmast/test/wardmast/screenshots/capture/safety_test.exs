@@ -17,8 +17,7 @@ defmodule Wardmast.Screenshots.Capture.SafetyTest do
         {"token ghp_" <> String.duplicate("a1B2", 9), "secret:github-token"},
         {"xoxb-1234567890-abcdefghij", "secret:slack-token"},
         {"sk_live_" <> String.duplicate("x9", 12), "secret:stripe-key"},
-        {"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk_lmn-op",
-         "secret:jwt"},
+        {"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk_lmn-op", "secret:jwt"},
         {"Authorization: Bearer abcdef123456", "secret:authorization-header"},
         {String.duplicate("deadbeef", 8), "secret:long-hex"},
         {"AIza" <> String.duplicate("Ab1_-", 7), "secret:gcp-key"}

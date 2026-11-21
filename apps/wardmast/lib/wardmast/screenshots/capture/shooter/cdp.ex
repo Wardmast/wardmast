@@ -268,6 +268,7 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
         spec_file,
         build_spec(Map.merge(spec, %{out_file: shot, text_file: text}), chrome, login)
       )
+
       argv = [tools.node, tools.runner, spec_file]
 
       with {:ok, boxed} <- boxed(sandbox, argv, app, dir, [tools.dir, chrome]) do
@@ -346,8 +347,7 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
       {:ok, %{text: texts}}
     else
       _ ->
-        {:error,
-         {:shot, "the capture runner reported success but left no image or no page text"}}
+        {:error, {:shot, "the capture runner reported success but left no image or no page text"}}
     end
   end
 

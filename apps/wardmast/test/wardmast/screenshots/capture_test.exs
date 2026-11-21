@@ -728,7 +728,10 @@ defmodule Wardmast.Screenshots.CaptureTest do
     end
 
     defp marker_config(contains),
-      do: %{@config | fixture_check: %{"marker" => %{"path" => "/health", "contains" => contains}}}
+      do: %{
+        @config
+        | fixture_check: %{"marker" => %{"path" => "/health", "contains" => contains}}
+      }
 
     test "a matching marker lets the boot proceed", %{tmp_dir: dir, base_url: base_url} do
       plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])

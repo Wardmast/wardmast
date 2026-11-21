@@ -121,7 +121,8 @@ defmodule Wardmast.MCP.Tools.Workspace do
   review_agent, routing, review, review_gate, standing_orders, and the names
   of configured secrets (values never exposed), plus `tier_model_overrides`
   (provider-scoped `agent.config.<provider>.tier_models`, keyed by dotted
-  path). Mirrors `arb config overview`.
+  path), and `screenshots_safety` (per repo with a `screenshots` config: whether it has a
+  `fixture_check`, and a warning when it does not). Mirrors `arb config overview`.
   Resolved from the optional `workspace` arg like `workspace_show`.
   """
   @spec workspace_config_overview(Scope.t(), map()) ::
@@ -144,7 +145,8 @@ defmodule Wardmast.MCP.Tools.Workspace do
          review_gate: Map.get(config, "review_gate", %{}),
          standing_orders: Map.get(config, "standing_orders", []),
          attention: config |> AttentionLimits.with_defaults() |> Map.get("attention"),
-         secret_keys: workspace_secret_keys(ws)
+         secret_keys: workspace_secret_keys(ws),
+         screenshots_safety: Wardmast.Screenshots.Config.safety_overview(ws)
        }}
     end
   end

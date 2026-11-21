@@ -42,7 +42,8 @@ defmodule Wardmast.Screenshots.Capture.Safety do
     {"secret:slack-token", ~r/\bxox[abprs]-[A-Za-z0-9-]{10,}/},
     {"secret:stripe-key", ~r/\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}/},
     {"secret:jwt", ~r/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/},
-    {"secret:authorization-header", ~r/\bauthorization\s*:\s*(?:bearer|basic|token)?\s*[^\s]{8,}/i},
+    {"secret:authorization-header",
+     ~r/\bauthorization\s*:\s*(?:bearer|basic|token)?\s*[^\s]{8,}/i},
     {"secret:long-hex", ~r/(?<![0-9A-Za-z])[0-9a-fA-F]{48,}(?![0-9A-Za-z])/}
   ]
 
@@ -65,7 +66,7 @@ defmodule Wardmast.Screenshots.Capture.Safety do
     if Enum.sum(Enum.map(texts, &byte_size/1)) > @max_text_bytes do
       {:withheld, "scan-too-large"}
     else
-      text = texts |> Enum.map(&String.replace_invalid/1) |> Enum.join("\n")
+      text = Enum.map_join(texts, "\n", &String.replace_invalid/1)
 
       secret(text) || email(text, config.fixture_email_domains) ||
         deny(text, config.deny_patterns) || :clean
@@ -169,7 +170,11 @@ defmodule Wardmast.Screenshots.Capture.Safety do
   names the path and the problem and never the body.
   """
   @spec probe_marker(map(), String.t(), keyword()) :: :ok | {:error, String.t()}
-  def probe_marker(%{fixture_check: %{"marker" => %{"path" => path, "contains" => needle}}}, base_url, reach) do
+  def probe_marker(
+        %{fixture_check: %{"marker" => %{"path" => path, "contains" => needle}}},
+        base_url,
+        reach
+      ) do
     url = base_url <> path
 
     opts =

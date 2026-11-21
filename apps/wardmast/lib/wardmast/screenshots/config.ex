@@ -124,7 +124,38 @@ defmodule Wardmast.Screenshots.Config do
 
   @type t :: %__MODULE__{}
 
+  @doc """
+  What the operator should know about the data safety of each repo that has an effective
+  `screenshots` config (design §9.4, bd-995svb): `[%{repo:, fixture_check: boolean, warnings: [String.t()]}]`
+  sorted by repo. A repo with no `fixture_check` is flagged: it relies on structural isolation
+  alone, with nothing probing that the booted app is on fixture data. Shown by the config overview.
+  """
+  @spec safety_overview(term()) :: [map()]
+  def safety_overview(%{config: %{"worker" => %{"repos" => %{} = repos}}} = workspace) do
+    for repo <- repos |> Map.keys() |> Enum.sort(),
+        {:ok, config} <- [resolve(workspace, repo)] do
+      checked? = config.fixture_check != nil
+
+      %{
+        repo: repo,
+        fixture_check: checked?,
+        warnings:
+          if(checked?,
+            do: [],
+            else: [
+              "no fixture_check: nothing verifies that the app boots on fixture data, so this " <>
+                "repo relies on capture isolation alone. Set screenshots.fixture_check.marker " <>
+                "(an endpoint that says the app runs on fixture data)."
+            ]
+          )
+      }
+    end
+  end
+
+  def safety_overview(_workspace), do: []
+
   @doc "The keys a `screenshots` block may carry."
+
   @spec keys() :: [String.t()]
   def keys, do: @keys
 

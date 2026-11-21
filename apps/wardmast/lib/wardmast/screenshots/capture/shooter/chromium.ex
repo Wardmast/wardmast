@@ -40,11 +40,16 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
   picture that quietly lacks it. Those go to `Shooter.Cdp` (the design's N1); `Shooter.Auto`, the
   capture step's default, sends each shot to whichever can do it, using `unsupported/1`.
 
+  A shot also reports the page's text (`{:ok, %{text: texts}}`), which the capture step scans
+  (`Wardmast.Screenshots.Capture.Safety`, bd-995svb): after the screenshot the same browser is run
+  again to dump the DOM, and its text and `alt` / `title` values are what is reported.
+
   `ctx[:chrome]` overrides the browser path (a test seam).
   """
 
   @behaviour Wardmast.Screenshots.Capture.Shooter
 
+  alias Wardmast.Screenshots.Capture.Safety
   alias Wardmast.Screenshots.Capture.Sandbox
   alias Wardmast.Worker.ReleaseEnv
 
@@ -181,13 +186,44 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
         {exec, args} = with_timeout(env ++ boxed, spec.timeout_s)
 
         case ReleaseEnv.cmd(exec, args, stderr_to_stdout: true) do
-          {_out, 0} -> collect(shot, spec.out_file)
-          {out, code} -> {:error, {:shot, "chromium exited with status #{code}: #{tail(out)}"}}
+          {_out, 0} ->
+            with :ok <- collect(shot, spec.out_file) do
+              page_text(chrome, spec, profile, {sandbox, app, env})
+            end
+
+          {out, code} ->
+            {:error, {:shot, "chromium exited with status #{code}: #{tail(out)}"}}
         end
       end
     after
       File.rm_rf(dir)
     end
+  end
+
+  # bd-995svb (design §9.5): the text the page shows, for the capture step's data-safety scan,
+  # from a second run of the same browser in the same sandbox that dumps the DOM instead of
+  # shooting it. Only the DOM's text and its `alt` / `title` values are kept
+  # (`Capture.Safety.html_text/1`); a run that dumps nothing is a failed shot, never an unscanned one.
+  defp page_text(chrome, spec, profile, {sandbox, app, env}) do
+    argv = [chrome | dump_argv(spec, profile)]
+
+    with {:ok, boxed} <- boxed(sandbox, argv, app, spec.scratch) do
+      {exec, args} = with_timeout(env ++ boxed, spec.timeout_s)
+
+      case ReleaseEnv.cmd(exec, args) do
+        {html, 0} when html != "" ->
+          {:ok, %{text: Safety.html_text(html)}}
+
+        {_html, code} ->
+          {:error, {:shot, "chromium could not dump the page's text (exit status #{code})"}}
+      end
+    end
+  end
+
+  # `argv/2` with the screenshot swapped for a DOM dump (the URL stays last).
+  defp dump_argv(spec, profile) do
+    {flags, [url]} = spec |> argv(profile) |> Enum.split(-1)
+    Enum.reject(flags, &String.starts_with?(&1, "--screenshot=")) ++ ["--dump-dom", url]
   end
 
   defp boxed(sandbox, browser, app, dir) do
@@ -229,7 +265,7 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
       File.write!(out_file, data)
       :ok
     else
-      _ -> :ok
+      _ -> {:error, {:shot, "the browser wrote no image"}}
     end
   end
 

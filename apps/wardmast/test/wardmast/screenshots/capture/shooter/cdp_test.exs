@@ -579,7 +579,9 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
     end
 
     test "full_page captures the whole page, clipped to 8000 px", ctx do
-      assert {:ok, %{text: _}} = real(ctx, %{path: "/tall", entry: %{path: "/tall", full_page: true}})
+      assert {:ok, %{text: _}} =
+               real(ctx, %{path: "/tall", entry: %{path: "/tall", full_page: true}})
+
       {w, h} = png_size(ctx.dir)
       assert w == 800
       assert h > 3000
