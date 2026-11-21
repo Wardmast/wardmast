@@ -137,6 +137,9 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     # bd-5gvqgc: the write-jail probe runs the configured bwrap (a path, so
     # not a literal) around `sh`; `git rev-parse` is the only other spawn.
     "apps/wardmast/lib/wardmast/worker/jail.ex" => :scrubbed,
+    # bd-bwlop5: the `keychain:` secret-ref backend reads one item via the OS
+    # credential CLI (`security` / `secret-tool`) through `ReleaseEnv.cmd/3`.
+    "apps/wardmast/lib/wardmast/secret_refs/keychain.ex" => :scrubbed,
     # bd-bu4ye2: `podman run` / `podman rm` via `ReleaseEnv.cmd/3`.
     "apps/wardmast/lib/wardmast/worker/container.ex" => :scrubbed,
     # bd-9r5jdt: worker-image lifecycle: `git cat-file` on the default branch and

@@ -16,6 +16,7 @@
 //! runs on every state change and after every page load, so a state that
 //! changes while a navigation is in flight is never lost.
 
+use arbiter_shell_core::credentials;
 use arbiter_shell_core::quit::{LiveWork, QuitPrompt};
 use arbiter_shell_core::shell::{CloseAction, QuitOutcome, Shell};
 use arbiter_shell_core::single_instance::{self, Acquired};
@@ -119,7 +120,17 @@ fn main() {
     };
 
     let release_dir = std::env::var("ARBITER_RELEASE_DIR").expect("bundled release dir");
-    let mut config = Config::new(ReleaseSpec::for_release_dir(&release_dir));
+    // PKG 9: first run generates the Cloak key and SECRET_KEY_BASE into the OS
+    // keychain; the release gets refs (`keychain:<service>#<account>`), never
+    // values. A locked/missing item is not regenerated: the release fails its
+    // boot with a message naming the item, and the status page shows it.
+    let mut release = ReleaseSpec::for_release_dir(&release_dir);
+    release.env.extend(credentials::prepare(
+        &credentials::OsStore::new(),
+        &credentials::default_data_dir(),
+        &credentials::os_random,
+    ));
+    let mut config = Config::new(release);
     // Adopt-or-refuse an orphaned release instead of starting a second server
     // on the same database (docs/desktop-shell.md, "Orphaned release").
     config.data_home = arbiter_shell_core::release_lock::resolve_data_home();

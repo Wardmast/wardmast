@@ -1,0 +1,56 @@
+<Layouts.app flash={@flash}>
+  <div id="key-backup" class="mx-auto max-w-2xl space-y-4">
+    <h1 class="text-xl font-semibold">Back up the Cloak key</h1>
+
+    <div id="key-backup-warning" role="alert" class="alert alert-warning">
+      <.icon name="hero-exclamation-triangle" class="w-5 h-5" />
+      <span>{@warning}</span>
+    </div>
+
+    <%= case @status do %>
+      <% {:recorded, record} -> %>
+        <p id="key-backup-recorded" class="text-sm">
+          A backup was recorded on {Calendar.strftime(record.recorded_at, "%Y-%m-%d %H:%M UTC")} ({if record.method ==
+                                                                                                        "export",
+                                                                                                      do:
+                                                                                                        "exported from here",
+                                                                                                      else:
+                                                                                                        "made elsewhere"};
+          key fingerprint <code>{record.fingerprint}</code>). The one-time export is closed.
+        </p>
+      <% :none -> %>
+        <.form
+          for={%{}}
+          action={~p"/settings/key-backup/export"}
+          method="post"
+          id="key-backup-export-form"
+          class="space-y-2"
+        >
+          <p class="text-sm">
+            Download the key once and store it somewhere safe. The key is not shown on this page and
+            the export closes as soon as it is made.
+          </p>
+          <button id="key-backup-export-button" type="submit" class="btn btn-sm btn-primary">
+            <.icon name="hero-arrow-down-tray" class="w-4 h-4" /> Export the key
+          </button>
+        </.form>
+
+        <.form
+          for={%{}}
+          action={~p"/settings/key-backup/acknowledge"}
+          method="post"
+          id="key-backup-ack-form"
+          class="space-y-2"
+        >
+          <p class="text-sm">
+            Already keep the key somewhere (a secret manager, a password manager)? Record that, and
+            <code>arb server doctor</code>
+            stops warning.
+          </p>
+          <button id="key-backup-ack-button" type="submit" class="btn btn-sm">
+            I have backed it up elsewhere
+          </button>
+        </.form>
+    <% end %>
+  </div>
+</Layouts.app>

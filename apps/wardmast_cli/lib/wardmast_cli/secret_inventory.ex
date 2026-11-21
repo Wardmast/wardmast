@@ -31,7 +31,7 @@ defmodule WardmastCli.SecretInventory do
   # at-rest exposure a secret scanner flags first.
   @boot_secrets ~w(ARBITER_CLOAK_KEY WARDMAST_CLOAK_KEY SECRET_KEY_BASE)
 
-  @schemes ~w(aws-sm aws-ssm file)
+  @schemes ~w(aws-sm aws-ssm file keychain)
   @fingerprint_len 8
 
   @type state :: :inline | :ref | :shadowed | :unset
@@ -68,7 +68,7 @@ defmodule WardmastCli.SecretInventory do
     end)
   end
 
-  @doc "The reference scheme of a pointer (aws-sm, aws-ssm, file), or invalid when unrecognised."
+  @doc "The reference scheme of a pointer (aws-sm, aws-ssm, file, keychain), or invalid when unrecognised."
   @spec scheme(String.t()) :: String.t()
   def scheme(ref) do
     Enum.find(@schemes, "invalid", &String.starts_with?(ref, &1 <> ":"))

@@ -12,6 +12,7 @@ manager and fetch the value into memory when it needs it.
 | `aws-sm:<secret-id>[#json-key]` | AWS Secrets Manager `GetSecretValue`. `<secret-id>` is a name or ARN. With `#json-key` the secret string is parsed as a JSON object and that string field is returned. |
 | `aws-ssm:<parameter-name>[#json-key]` | SSM Parameter Store, decrypted (`SecureString`). |
 | `file:<path>` | A file's contents, trailing whitespace trimmed: systemd `LoadCredential=`, a tmpfs, a Kubernetes secret mount. No `#json-key`. |
+| `keychain:<service>#<account>` | An item in the OS credential store: the macOS Keychain (`security find-generic-password`) or the Linux Secret Service (`secret-tool lookup service <service> account <account>`, from `libsecret-tools`). Read-only for the server; both halves are required and `#` is the account, not a JSON key. The desktop shell writes the items (see below). |
 
 AWS authentication is the ambient credential chain: `AWS_ACCESS_KEY_ID` /
 `AWS_SECRET_ACCESS_KEY`, ECS/EKS container credentials, `~/.aws/credentials`
@@ -58,6 +59,36 @@ AWS_REGION=eu-west-1
   `WARDMAST_CLOAK_KEY_OLD_REF` points at the retired key.
 * `bin/wardmast eval` (migrations, the deploy backup) runs `runtime.exs` too, so
   it needs the same ambient AWS access as the service.
+
+### Desktop shell: keychain-held keys and the key backup
+
+The desktop shell (`docs/desktop-shell.md`) generates the Cloak key and
+`SECRET_KEY_BASE` on first run, stores them in the OS keychain under the service
+`dev.arbiter.wardmast` (accounts `cloak-key` and `secret-key-base`) and starts
+the release with only
+
+```
+WARDMAST_CLOAK_KEY_REF=keychain:dev.arbiter.wardmast#cloak-key
+SECRET_KEY_BASE_REF=keychain:dev.arbiter.wardmast#secret-key-base
+```
+
+Values are passed to the keychain tool on stdin, never on a command line, and are
+never written to disk or logged. **A key is never regenerated automatically.**
+The shell only generates an item when the keychain positively reports it missing
+and the shell has not created it before (`<data-home>/keychain-items` lists the
+account names it has created); a locked or unreachable keychain, or an item that
+has gone missing since, fails the boot with a message naming the item and the
+fix (unlock the keychain, or restore the item from your key backup), because a
+new Cloak key would orphan every secret already stored.
+
+**Back up the Cloak key.** Losing it makes every stored secret unreadable. The
+dashboard's key backup page (`/settings/key-backup`, linked from About) offers a
+one-time export of the key, with that warning, and a button to record a backup
+you keep elsewhere. The record, `<data-home>/cloak-key-backup.json`, holds the
+date, the method and a fingerprint (the first 8 hex characters of the key's
+SHA-256), never the key. Once recorded the export is closed; delete the file to
+export again. `arb server doctor` (check `key_backup`) warns until a backup is
+recorded.
 
 ## 3. `GITHUB_TOKEN`
 

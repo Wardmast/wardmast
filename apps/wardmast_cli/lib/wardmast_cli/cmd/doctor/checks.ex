@@ -12,6 +12,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     Darwin,
     DataHome,
     Distribution,
+    KeyBackup,
     ProviderClis,
     Scope,
     SecretsAtRest
@@ -112,6 +113,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       {"erlang_distribution", :security, nil, :always, plain(&Distribution.check/0)},
       {"secrets_at_rest", :security, nil, :always, plain(&SecretsAtRest.check/0)},
       {"data_home", :core, nil, :always, plain(&DataHome.check/0)},
+      {"key_backup", :security, nil, :always, plain(&KeyBackup.check/0)},
       {"safe_default_categories", :security, nil, :always, plain(&check_security_defaults/0)},
       {"guardrails", :security, nil, :always, plain(&check_guardrails/0)}
     ]

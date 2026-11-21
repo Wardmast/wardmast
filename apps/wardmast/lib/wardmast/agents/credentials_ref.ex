@@ -12,7 +12,7 @@ defmodule Wardmast.Agents.CredentialsRef do
 
     * `"secret:KEY"` — looks up `KEY` in the active workspace's encrypted
       `secrets` map (stored at rest via `ash_cloak`, see `Wardmast.Vault`).
-    * `"aws-sm:ID[#json-key]"`, `"aws-ssm:NAME"`, `"file:PATH"` — an external
+    * `"aws-sm:ID[#json-key]"`, `"aws-ssm:NAME"`, `"file:PATH"`, `"keychain:SERVICE#ACCOUNT"` — an external
       secret-manager pointer, fetched lazily and cached in memory only (see
       `Wardmast.SecretRefs.External`), so the token never sits on arbiter's disk.
 

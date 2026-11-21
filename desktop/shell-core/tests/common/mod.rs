@@ -3,10 +3,34 @@ use arbiter_shell_core::backoff::Backoff;
 use arbiter_shell_core::http;
 use arbiter_shell_core::release_lock::{self, Record};
 use arbiter_shell_core::supervisor::{Config, ReleaseSpec};
+use std::collections::HashSet;
+use std::net::TcpListener;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// A loopback port no other `Fake` in this test binary has been handed.
+///
+/// Tests run in parallel and `Config::new` prefers 4848 for everyone. Two
+/// supervisors that probe 4848 before either fake release has bound it both
+/// get it, and then a release that never listens (`FAKE_MODE=hang`) or has
+/// already exited looks "ready" because a *different* test's fake answers
+/// `/api/version` on that port. Handing every `Fake` its own port removes
+/// the cross-talk.
+fn unique_port() -> u16 {
+    static TAKEN: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+    let taken = TAKEN.get_or_init(|| Mutex::new(HashSet::new()));
+    loop {
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        if taken.lock().unwrap().insert(port) {
+            return port;
+        }
+    }
+}
 
 pub struct Fake {
     pub log: PathBuf,
@@ -37,6 +61,7 @@ impl Fake {
             Duration::from_millis(200),
             Duration::from_secs(30),
         );
+        config.preferred_port = unique_port();
         config.ready_timeout = Duration::from_secs(5);
         config.poll_interval = Duration::from_millis(20);
         config.stop_grace = Duration::from_secs(3);

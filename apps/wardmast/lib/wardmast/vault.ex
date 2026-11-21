@@ -10,7 +10,7 @@ defmodule Wardmast.Vault do
 
   To keep the key out of the env file (and every copy of it), set a pointer
   instead — `WARDMAST_CLOAK_KEY_REF=aws-sm:prod/arbiter#cloak_key` (also
-  `aws-ssm:` / `file:`; see `Wardmast.SecretRefs.External`). The pointer wins
+  `aws-ssm:` / `file:` / `keychain:`; see `Wardmast.SecretRefs.External`). The pointer wins
   over an inline value, and `WARDMAST_CLOAK_KEY_OLD_REF` does the same for the
   retired key. An unresolvable pointer aborts the boot, as a missing key does.
 

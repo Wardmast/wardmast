@@ -11,6 +11,11 @@ defmodule Wardmast.SecretRefs.External do
     * `aws-ssm:<parameter-name>` — AWS Systems Manager Parameter Store
       `GetParameter` with decryption (`SecureString`). `#json-key` works the
       same way.
+    * `keychain:<service>#<account>` — an item in the OS credential store: the
+      macOS Keychain or the Linux Secret Service (`Wardmast.SecretRefs.Keychain`).
+      Read-only here: the desktop shell writes the item, and a missing one fails
+      the boot rather than being regenerated. The `#` part is the account (both
+      halves are required), not a JSON key.
     * `file:<path>` — a file's contents, trailing whitespace trimmed (systemd
       `LoadCredential=`, a tmpfs, a Kubernetes secret mount). No `#json-key`:
       the whole text after `file:` is the path.
@@ -41,14 +46,23 @@ defmodule Wardmast.SecretRefs.External do
   and the Vault, which must fail loudly at boot.
   """
 
-  alias Wardmast.SecretRefs.{AwsCredentials, Cache}
+  alias Wardmast.SecretRefs.{AwsCredentials, Cache, Keychain}
 
   require Logger
 
   @default_ttl_s 300
-  @schemes [{"aws-sm:", :aws_sm}, {"aws-ssm:", :aws_ssm}, {"file:", :file}]
+  @schemes [
+    {"aws-sm:", :aws_sm},
+    {"aws-ssm:", :aws_ssm},
+    {"file:", :file},
+    {"keychain:", :keychain}
+  ]
 
-  @type parsed :: %{scheme: :aws_sm | :aws_ssm | :file, target: String.t(), key: String.t() | nil}
+  @type parsed :: %{
+          scheme: :aws_sm | :aws_ssm | :file | :keychain,
+          target: String.t(),
+          key: String.t() | nil
+        }
   @type reason :: term()
 
   @doc "True when `ref` is one of the external reference forms."
@@ -80,6 +94,20 @@ defmodule Wardmast.SecretRefs.External do
 
   defp build(:file, rest) do
     if String.trim(rest) == "", do: :error, else: {:ok, %{scheme: :file, target: rest, key: nil}}
+  end
+
+  # `keychain:<service>#<account>`: the `#` part is the account, not a JSON key,
+  # and both halves are required (`target` is the service, `key` the account).
+  defp build(:keychain, rest) do
+    case String.split(rest, "#", parts: 2) do
+      [service, account] ->
+        if String.trim(service) == "" or String.trim(account) == "",
+          do: :error,
+          else: {:ok, %{scheme: :keychain, target: service, key: account}}
+
+      _ ->
+        :error
+    end
   end
 
   defp build(scheme, rest) do
@@ -226,7 +254,30 @@ defmodule Wardmast.SecretRefs.External do
   @doc "A short, secret-free description of a resolution failure."
   @spec describe_error(reason()) :: String.t()
   def describe_error(:invalid_ref),
-    do: "not a recognised reference (expected aws-sm:, aws-ssm: or file:)"
+    do: "not a recognised reference (expected aws-sm:, aws-ssm:, file: or keychain:)"
+
+  def describe_error({:keychain, :not_found, item}) do
+    "keychain item #{item} was not found. Restore it from your key backup " <>
+      "(keychain: items are read-only to the server, which will not generate a new key: " <>
+      "that would make every secret already stored unreadable)"
+  end
+
+  def describe_error({:keychain, :locked, item}) do
+    "keychain item #{item} is locked or access to it was denied. Unlock the keychain " <>
+      "(macOS: `security unlock-keychain`; Linux: unlock the login/default collection in " <>
+      "your Secret Service, e.g. Seahorse) and start again"
+  end
+
+  def describe_error({:keychain, :unavailable, item}) do
+    "cannot reach the OS keychain to read #{item}. macOS needs `security`; Linux needs " <>
+      "`secret-tool` (libsecret-tools) and a running Secret Service on the D-Bus session bus"
+  end
+
+  def describe_error({:keychain, :unsupported_os, item}),
+    do: "keychain: refs are supported on macOS and Linux only (item #{item})"
+
+  def describe_error({:keychain, :failed, item}),
+    do: "reading keychain item #{item} failed"
 
   def describe_error(:no_aws_credentials), do: "no AWS credentials found in the ambient chain"
   def describe_error(:no_aws_region), do: "no AWS region (set AWS_REGION or use an ARN)"
@@ -249,6 +300,10 @@ defmodule Wardmast.SecretRefs.External do
       {:ok, body} -> non_empty(String.trim(body))
       {:error, posix} -> {:error, {:file, posix}}
     end
+  end
+
+  defp fetch(%{scheme: :keychain, target: service, key: account}) do
+    Keychain.fetch(service, account)
   end
 
   defp fetch(%{scheme: :aws_sm, target: id, key: key}) do

@@ -49,6 +49,9 @@ defmodule WardmastCli.CliCase do
         # nothing so doctor verdicts stay hermetic.
         Process.put(:bd2_secrets_probe, :absent)
 
+        # Likewise the Cloak key backup record under the host data home.
+        Process.put(:bd9_key_backup_probe, :absent)
+
         # `arb restart` refuses to signal anything when an `wardmast.service`
         # unit file exists on disk (bd-3t973v); never read the host's unit
         # dirs from a test.
