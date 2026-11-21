@@ -46,6 +46,7 @@ defmodule Wardmast.Doctor.CaptureRunner do
     node = opts |> Keyword.get(:node_version, &node_version/0) |> then(& &1.())
     chrome = opts |> Keyword.get(:chrome, &chrome/0) |> then(& &1.())
     playwright = playwright_version(dir)
+    pinned = pinned_version(dir)
 
     {node_str, node_problem} =
       case node do
@@ -67,7 +68,10 @@ defmodule Wardmast.Doctor.CaptureRunner do
               "playwright-core is not installed in #{dir} " <>
                 "(run `npm ci --ignore-scripts` there; release builds vendor it)"
           ),
-          if(is_nil(chrome), do: "no headless Chromium found (set ARB_CHROME)")
+          if(is_nil(chrome), do: "no headless Chromium found (set ARB_CHROME)"),
+          if(playwright && pinned && playwright != pinned,
+            do: "playwright-core #{playwright} is installed but package-lock.json pins #{pinned}"
+          )
         ],
         &is_nil/1
       )
@@ -76,7 +80,7 @@ defmodule Wardmast.Doctor.CaptureRunner do
       enabled: true,
       node: node_str,
       playwright_core: playwright,
-      pinned_playwright_core: pinned_version(dir),
+      pinned_playwright_core: pinned,
       chromium: chrome,
       dir: dir,
       problems: problems
@@ -102,6 +106,8 @@ defmodule Wardmast.Doctor.CaptureRunner do
     end
   end
 
+  # sobelow_skip ["CI.System"]
+  # The binary is operator env `ARB_CAPTURE_NODE` or a PATH lookup, never request input.
   defp node_version do
     override = System.get_env("ARB_CAPTURE_NODE")
     node = override || System.find_executable("node")

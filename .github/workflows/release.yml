@@ -73,6 +73,11 @@ jobs:
             which \
             glibc-langpack-en
 
+          # bd-71t1wd: `mix release` vendors playwright-core via npm ci (node >= 22).
+          dnf module enable -y nodejs:22
+          dnf install -y nodejs npm
+          node --version
+
       - uses: actions/checkout@v4
 
       # Erlang/OTP is built from source here, with OpenSSL linked statically
@@ -170,6 +175,10 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.tag.outputs.name }}
           MIX_ENV: prod
+
+      - name: Verify the release vendors playwright-core (bd-71t1wd)
+        run: |
+          scripts/check-release-capture.sh _build/prod/rel/wardmast "${RELEASE_VERSION}"
 
       - name: Build ward escript
         run: |
@@ -380,6 +389,11 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.tag.outputs.name }}
 
+      - name: Set up Node for capture runner vendoring (bd-71t1wd)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Build and digest web assets
         run: |
           MIX_ENV=prod mix cmd --app wardmast_web mix assets.deploy
@@ -389,6 +403,10 @@ jobs:
           MIX_ENV=prod mix release wardmast
         env:
           RELEASE_VERSION: ${{ steps.tag.outputs.name }}
+
+      - name: Verify the release vendors playwright-core (bd-71t1wd)
+        run: |
+          scripts/check-release-capture.sh _build/prod/rel/wardmast "${RELEASE_VERSION}"
 
       - name: Build ward escript and smoke-test it on the bundled erts
         # bd-d5mg29: the tarball ships bin/ward + bin/ward.escript; `ward
@@ -562,6 +580,11 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.tag.outputs.name }}
 
+      - name: Set up Node for capture runner vendoring (bd-71t1wd)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Build and digest web assets
         run: |
           MIX_ENV=prod mix cmd --app wardmast_web mix assets.deploy
@@ -571,6 +594,10 @@ jobs:
           MIX_ENV=prod mix release wardmast
         env:
           RELEASE_VERSION: ${{ steps.tag.outputs.name }}
+
+      - name: Verify the release vendors playwright-core (bd-71t1wd)
+        run: |
+          scripts/check-release-capture.sh _build/prod/rel/wardmast "${RELEASE_VERSION}"
 
       - name: Build ward escript and smoke-test it on the bundled erts
         # bd-d5mg29: the tarball ships bin/ward + bin/ward.escript; `ward

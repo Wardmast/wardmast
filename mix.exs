@@ -104,7 +104,14 @@ defmodule Wardmast.Umbrella.MixProject do
     else
       dir = Path.join([release.path, "lib", "wardmast-#{release.version}", "priv", "capture"])
 
-      case System.cmd("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+      npm =
+        System.find_executable("npm") ||
+          Mix.raise(
+            "npm not found: needed to vendor playwright-core into priv/capture (install node >= 22, " <>
+              "or set ARB_SKIP_CAPTURE_VENDOR=1 to ship without it, which breaks host capture)"
+          )
+
+      case System.cmd(npm, ["ci", "--ignore-scripts", "--no-audit", "--no-fund"],
              cd: dir,
              stderr_to_stdout: true
            ) do
