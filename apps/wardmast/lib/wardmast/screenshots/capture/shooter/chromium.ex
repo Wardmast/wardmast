@@ -109,11 +109,54 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
   @spec chrome(map()) :: {:ok, String.t()} | {:error, {:shot, String.t()}}
   def chrome(spec) do
     override = if is_map(spec.ctx), do: spec.ctx[:chrome]
-    found = override || System.get_env("ARB_CHROME") || System.find_executable("chromium")
 
-    if found && File.exists?(found),
+    found =
+      if override do
+        if File.exists?(override), do: override
+      else
+        find_chrome()
+      end
+
+    if found,
       do: {:ok, found},
       else: {:error, {:shot, "no headless Chromium found (set ARB_CHROME)"}}
+  end
+
+  @candidates ~w(chromium chromium-browser google-chrome google-chrome-stable)
+
+  @doc """
+  The Chromium binary capture will use: `$ARB_CHROME`, else the first of `chromium`,
+  `chromium-browser`, `google-chrome`, `google-chrome-stable` on `PATH`, else a Playwright
+  cache build. `nil` when none exists. The three functions are injectable for tests.
+  """
+  @spec find_chrome(
+          (String.t() -> String.t() | nil),
+          (String.t() -> String.t() | nil),
+          (String.t() -> boolean())
+        ) :: String.t() | nil
+  def find_chrome(
+        env \\ &System.get_env/1,
+        find \\ &System.find_executable/1,
+        exists? \\ &File.exists?/1
+      ) do
+    explicit = env.("ARB_CHROME")
+
+    cond do
+      explicit -> if exists?.(explicit), do: explicit
+      path = Enum.find_value(@candidates, find) -> if exists?.(path), do: path
+      true -> playwright_cache(exists?)
+    end
+  end
+
+  defp playwright_cache(exists?) do
+    home = System.user_home() || ""
+
+    [
+      Path.join(home, ".cache/ms-playwright/chromium-*/chrome-linux*/chrome"),
+      Path.join(home, ".cache/ms-playwright/chromium-*/chrome-linux*/headless_shell")
+    ]
+    |> Enum.flat_map(&(&1 |> Path.wildcard() |> Enum.sort(:desc)))
+    |> Enum.find(exists?)
   end
 
   defp url(spec) do

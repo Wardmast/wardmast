@@ -184,6 +184,34 @@ defmodule WardmastWeb.ProvidersLiveTest do
       refute html =~ @secret
     end
 
+    # bd-6y4pj6
+    test "shows each credential's kind, health and expiry", %{conn: conn} do
+      account = account!(:claude, "pv-health-row")
+
+      {:ok, _} =
+        Accounts.rotate_credential(account.id, %{
+          kind: :oauth_token,
+          env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+          secret: @secret
+        })
+
+      {:ok, view, html} = live_providers(conn)
+
+      assert has_element?(
+               view,
+               "#account-#{account.id}-credential-health-setup_token[data-health=ok]",
+               "setup_token"
+             )
+
+      assert has_element?(
+               view,
+               "#account-#{account.id}-credential-health-setup_token",
+               "(estimated)"
+             )
+
+      refute html =~ @secret
+    end
+
     test "health badge uses correct contrast colors (not -ink on -wash)", %{conn: conn} do
       bare = account!(:claude, "pv-bare-contrast")
       credentialed = account!(:claude, "pv-credentialed-contrast")

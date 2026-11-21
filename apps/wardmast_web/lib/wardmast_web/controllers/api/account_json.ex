@@ -12,7 +12,8 @@ defmodule WardmastWeb.Api.AccountJSON do
   alias Wardmast.Accounts.ProviderAccount
   alias Wardmast.Accounts.Serializer
 
-  def index(%{accounts: accounts}), do: %{data: Enum.map(accounts, &data/1)}
+  def index(%{accounts: accounts}),
+    do: %{data: Enum.map(accounts, &data(&1, credential_health?: true))}
 
   def show(%{account: account}), do: data(account, detailed?: true)
 

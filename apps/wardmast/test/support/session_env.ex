@@ -153,8 +153,12 @@ defmodule Wardmast.Test.SessionEnv do
         {provider, account}
       end
 
-    # A connected account has a stored login; the launch form now seeds from it.
-    connect_claude_login!("default")
+    # A connected claude account has a setup token; the launch form's account
+    # picker launches with it (bd-6y4pj6).
+    {:claude, claude_default} = List.keyfind(accounts, :claude, 0)
+
+    if Wardmast.Accounts.Credentials.account_setup_token(claude_default.id) == :none,
+      do: connect_claude_setup_token!(claude_default)
 
     for workspace <- workspaces, {provider, account} <- accounts do
       {:ok, _} = Wardmast.Accounts.attach_workspace(workspace.id, provider, account.id)
@@ -164,28 +168,25 @@ defmodule Wardmast.Test.SessionEnv do
   end
 
   @doc """
-  Store a live Claude login for the account `slug` where the dashboard login
-  relay would (`<accounts_root>/claude-<slug>/.credentials.json`, bd-oqkeso) —
-  what a mode-B session launched for that account seeds from. Without it the
-  launch is refused with the "log in" message, which is the point of the
-  guard; a test that is not about that wants the account connected.
+  Give a Claude account its `claude setup-token` secret (an `:oauth_token`
+  credential) — what a session launched for that account authenticates with
+  (bd-6y4pj6). Without it the launch is refused with the "run `claude
+  setup-token`" message, which is the point of the guard; a test that is not
+  about that wants the account connected.
   """
-  @spec connect_claude_login!(String.t(), keyword()) :: String.t()
-  def connect_claude_login!(slug, oauth \\ []) do
-    dir = Path.join(Wardmast.Config.Paths.accounts_root(), "claude-#{slug}")
-    File.mkdir_p!(dir)
+  @spec connect_claude_setup_token!(Wardmast.Accounts.ProviderAccount.t(), String.t() | nil) ::
+          String.t()
+  def connect_claude_setup_token!(account, token \\ nil) do
+    token = token || "sk-ant-oat01-TEST-SETUP-#{account.slug}"
 
-    grant =
-      Map.merge(
-        %{
-          "accessToken" => "sk-ant-oat01-TEST-LOGIN-#{slug}",
-          "refreshToken" => "sk-ant-ort01-TEST-LOGIN-#{slug}",
-          "expiresAt" => System.os_time(:millisecond) + 3_600_000
-        },
-        Map.new(oauth)
-      )
+    Ash.create!(Wardmast.Accounts.ProviderCredential, %{
+      provider_account_id: account.id,
+      kind: :oauth_token,
+      env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+      fingerprint: "fp-#{System.unique_integer([:positive])}",
+      secret: token
+    })
 
-    File.write!(Path.join(dir, ".credentials.json"), Jason.encode!(%{"claudeAiOauth" => grant}))
-    dir
+    token
   end
 end

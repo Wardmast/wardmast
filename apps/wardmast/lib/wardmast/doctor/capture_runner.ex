@@ -9,6 +9,7 @@ defmodule Wardmast.Doctor.CaptureRunner do
   `enabled` when some workspace repo has an effective `screenshots` block.
   """
 
+  alias Wardmast.Screenshots.Capture.Shooter.Chromium
   alias Wardmast.Screenshots.Config
   alias Wardmast.Worker.ReleaseEnv
 
@@ -130,8 +131,7 @@ defmodule Wardmast.Doctor.CaptureRunner do
   end
 
   defp chrome do
-    found = System.get_env("ARB_CHROME") || System.find_executable("chromium")
-    if found && File.exists?(found), do: found
+    Chromium.find_chrome()
   end
 
   defp read_workspaces do
