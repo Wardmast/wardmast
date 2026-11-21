@@ -2069,6 +2069,16 @@ defmodule Wardmast.Worker.ReviewGate do
     end
   end
 
+  defp ci_act(state, wait, {:infra, reason}, _result) do
+    ci_log_leave(state, wait, "CI could not vouch (#{reason})")
+    ci_infra(state, reason)
+  end
+
+  defp ci_act(state, wait, {:fallback, reason}, _result) do
+    ci_log_leave(state, wait, "CI could not vouch (#{reason})")
+    {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
+  end
+
   # A head Wardmast deliberately CI-skipped (`ci_skipped_head`, bd-4y9dno: the
   # MR waits behind the train head) is the merge queue's to start, so the gate
   # must not undo the deferral; a head already triggered (`ci_triggered_head`,
@@ -2106,16 +2116,6 @@ defmodule Wardmast.Worker.ReviewGate do
             "fresh MR pipeline could not be started (#{why})."
         )
     end
-  end
-
-  defp ci_act(state, wait, {:infra, reason}, _result) do
-    ci_log_leave(state, wait, "CI could not vouch (#{reason})")
-    ci_infra(state, reason)
-  end
-
-  defp ci_act(state, wait, {:fallback, reason}, _result) do
-    ci_log_leave(state, wait, "CI could not vouch (#{reason})")
-    {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
   end
 
   defp ci_act_red(state, wait, :rerun, _result), do: ci_red_rerun(state, wait)
