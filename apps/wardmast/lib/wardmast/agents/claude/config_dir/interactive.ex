@@ -47,7 +47,7 @@ defmodule Wardmast.Agents.Claude.ConfigDir.Interactive do
   decides whether to seed `.credentials.json` from the worker OAuth-token gate;
   a session's mode is an operator choice recorded on the session row, so this
   module takes `:auth_mode` and calls the matching `ConfigDir` half
-  (`seed_credentials/2` for mode B, `remove_credentials/1` for mode A).
+  (`remove_credentials/1` for mode A; mode B copies nothing — bd-6y4pj6).
 
   ## Preserving what Claude Code writes back
 
@@ -104,8 +104,9 @@ defmodule Wardmast.Agents.Claude.ConfigDir.Interactive do
       launched with or the trust dialog still fires.
     * `:auth_mode` — `:seeded_credentials` (mode B, default) or `:oauth_token`
       (mode A). See §8.1.
-    * `:source_dir` — the operator config dir to seed from. Defaults to
-      `ConfigDir.source_dir/0`; pass `nil` explicitly to seed from nowhere.
+    * `:source_dir` — the operator config dir the Remote Control eligibility
+      cache (`.claude.json`, never `.credentials.json`) is read from. Defaults
+      to `ConfigDir.source_dir/0`; pass `nil` explicitly to seed from nowhere.
     * `:primary_checkout` — the live source tree to deny writes under (§10.2
       layer 3). Defaults to `Wardmast.Config.Paths.primary_checkout/0`; `nil`
       omits the rule.
@@ -326,21 +327,23 @@ defmodule Wardmast.Agents.Claude.ConfigDir.Interactive do
     File.write(path, Jason.encode!(settings(opts), pretty: true))
   end
 
-  # Mode B seeds the operator's grant; mode A must not carry one alongside its
-  # token (two independent refreshers rotate each other out — bd-6umoh9).
+  # Mode A must not carry a grant alongside its token (two independent
+  # refreshers rotate each other out — bd-6umoh9). Mode B no longer seeds one
+  # either (bd-6y4pj6): a copy of a rotating OAuth grant races the original on
+  # refresh and invalidates it, which is what blinded the quota poll on
+  # 2026-11-20. A mode-B session owns whatever login it makes itself in its
+  # own config dir, so an existing `.credentials.json` is left alone.
   defp seed_auth(dir, opts) do
     case Keyword.get(opts, :auth_mode, :seeded_credentials) do
       :oauth_token -> ConfigDir.remove_credentials(dir)
-      _ -> seed_mode_b(dir, opts)
+      _ -> warn_mode_b(opts)
     end
   end
 
-  # macOS keeps Claude's grant in the Keychain, which there is nothing to copy
-  # from — say so instead of seeding an empty dir (`CredentialStore`).
-  defp seed_mode_b(dir, opts) do
-    source = source_dir(opts)
-    CredentialStore.warn(:claude, [source_dir: source] ++ Keyword.take(opts, [:os]))
-    ConfigDir.seed_credentials(dir, source)
+  # macOS keeps Claude's grant in the Keychain (`CredentialStore`); say so.
+  defp warn_mode_b(opts) do
+    _ = CredentialStore.warn(:claude, [source_dir: source_dir(opts)] ++ Keyword.take(opts, [:os]))
+    :ok
   end
 
   defp source_dir(opts) do

@@ -91,7 +91,6 @@ defmodule Wardmast.Sessions.Provisioning do
   alias Wardmast.MCP
   alias Wardmast.MCP.AgentConfig.Claude, as: ClaudeMCP
   alias Wardmast.MCP.AgentConfig.Gemini, as: AgyMCP
-  alias Wardmast.Sessions.AccountCredentials
   alias Wardmast.Sessions.Instructions
   alias Wardmast.Sessions.Layout
   alias Wardmast.Sessions.Memory
@@ -126,12 +125,8 @@ defmodule Wardmast.Sessions.Provisioning do
 
   ## Options
 
-    * `:account` — a provider-account ref (slug, `claude:slug` or id) for a
-      mode-B Claude session (bd-oqkeso): credentials are seeded from that
-      account's config dir (`Wardmast.Sessions.AccountCredentials`) instead of
-      `credentials_source/1`, and the launch is refused with a message naming
-      the fix when the account has no usable login.
-    * `:oauth_token` — mode A's token. Defaults to the one
+    * `:oauth_token` — mode A's token (`Wardmast.Sessions.launch/1` resolves a
+      launch's `:account` to its setup token and passes it here). Defaults to the one
       `ConfigDir.oauth_token/1` resolves for the session's workspace. Ignored
       in mode B.
     * `:primary_checkout` — override for §10.2's live-checkout guard.
@@ -157,9 +152,7 @@ defmodule Wardmast.Sessions.Provisioning do
     cwd = session.cwd || paths.workspace
     config_dir = if Provider.config_dir?(session), do: session.config_dir || paths.config
 
-    # Before any directory exists: a refused account must leave no scaffold.
-    with {:ok, opts} <- resolve_account(session, opts),
-         :ok <- check_outside_primary_checkout(paths.root, opts),
+    with :ok <- check_outside_primary_checkout(paths.root, opts),
          :ok <- check_outside_primary_checkout(cwd, opts),
          :ok <- make_directories(id, config_dir, cwd),
          {:ok, opts} <- install_pair_guard(session, opts),
@@ -182,29 +175,6 @@ defmodule Wardmast.Sessions.Provisioning do
        }}
     end
   end
-
-  # bd-oqkeso: a mode-B Claude session launched `account: <ref>` authenticates as
-  # that provider account — its credentials are seeded from the account's own
-  # config dir (the one the dashboard login relay wrote) instead of the server
-  # OS user's `~/.claude`. A missing / lapsed / unknown account refuses the
-  # launch here, with a message naming the fix, rather than coming up
-  # unauthenticated. Without `:account` the legacy `credentials_source/1` chain
-  # is unchanged; mode A and non-Claude providers ignore it (their credential
-  # is a token / their own home).
-  defp resolve_account(%Session{provider: :claude_code, auth_mode: :seeded_credentials}, opts) do
-    case Keyword.get(opts, :account) do
-      ref when is_binary(ref) and ref != "" ->
-        with {:ok, dir} <-
-               AccountCredentials.resolve(:claude, ref, Keyword.take(opts, [:accounts_root])) do
-          {:ok, Keyword.put(opts, :credentials_source, dir)}
-        end
-
-      _ ->
-        {:ok, opts}
-    end
-  end
-
-  defp resolve_account(_session, opts), do: {:ok, opts}
 
   @doc """
   Mint this session's MCP scope token (§9.3).
@@ -572,15 +542,12 @@ defmodule Wardmast.Sessions.Provisioning do
   end
 
   @doc """
-  The operator config dir mode B copies `.credentials.json` from.
+  The operator config dir a session's Remote Control eligibility cache
+  (`.claude.json` — never `.credentials.json`, bd-6y4pj6) is read from.
 
-  Defaults to `ConfigDir.source_dir/0` — the operator's real `~/.claude`, which
-  is the whole point of mode B (§8.2: every mode-B session authenticates as the
-  operator). `config :wardmast, :sessions_credentials_source, "/path"` overrides
-  it, which is how the **test suite** points it at a directory that does not
-  exist: a suite run must never copy the operator's live grant into a tmp
-  scaffold, and "don't provision in tests" is not available now that
-  provisioning is part of `launch/1`.
+  Defaults to `ConfigDir.source_dir/0`, the operator's real `~/.claude`.
+  `config :wardmast, :sessions_credentials_source, "/path"` overrides it, which
+  is how the **test suite** points it at a directory that does not exist.
   """
   @spec credentials_source(keyword()) :: String.t() | nil
   def credentials_source(opts \\ []) do
