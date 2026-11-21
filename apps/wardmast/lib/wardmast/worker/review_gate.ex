@@ -7675,10 +7675,11 @@ defmodule Wardmast.Worker.ReviewGate do
       # A CRITERIA breakdown line (`- [NOT MET] …`) is a list item to
       # `@finding_item`, but it is verdict payload, not an enumerated finding —
       # exclude it so the count reflects real findings only (bd-4yhv4x).
-      |> Enum.reject(&ReviewVerification.criteria_line?/1)
       # Likewise a DISPOSITIONS line (`- [OBSOLETE] F1.1 — …`) answers an
       # already-counted finding rather than raising a new one.
-      |> Enum.reject(&(ReviewFindings.dispositions(&1) != %{}))
+      |> Enum.reject(
+        &(ReviewVerification.criteria_line?(&1) or ReviewFindings.dispositions(&1) != %{})
+      )
       |> Enum.count(&Regex.match?(@finding_item, &1))
 
     cond do
