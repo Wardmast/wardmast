@@ -101,6 +101,27 @@ defmodule Wardmast.Agents.Codex.AuthSync do
     end
   end
 
+  @doc """
+  Carry a rotation in the `run` copy back into an already-resolved `real`
+  source path without acquiring `:global.trans/4`.
+
+  For callers (such as `Wardmast.Quota.Codex`) that already hold the
+  `{{__MODULE__, real}, self()}` lock around a multi-step refresh transaction,
+  since Erlang `:global` locks are not reference-counted and a nested
+  `:global.trans/4` with the same lock id and requester id would release the
+  outer lock on return.
+  """
+  @spec sync_locked(Path.t(), Path.t()) :: sync_result()
+  def sync_locked(real, run) do
+    with {:ok, body} <- read_regular(run),
+         {:ok, doc} <- decode(body) do
+      reconcile(real, body, doc)
+    else
+      :missing -> :unchanged
+      :invalid -> invalid(run)
+    end
+  end
+
   @doc "Replace an unrotated `run` copy with a strictly newer `source` (see the moduledoc)."
   @spec pull(Path.t(), Path.t()) :: :pulled | :unchanged
   def pull(source, run) do

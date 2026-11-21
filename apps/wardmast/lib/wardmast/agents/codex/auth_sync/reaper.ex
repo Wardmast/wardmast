@@ -43,6 +43,17 @@ defmodule Wardmast.Agents.Codex.AuthSync.Reaper do
     :exit, _ -> :ok
   end
 
+  @doc """
+  Return every live tracked `run` copy path whose `source` resolves to the same
+  real `auth.json` as `source` (or `[]` when the reaper is not running).
+  """
+  @spec runs_for_source(Path.t(), GenServer.server()) :: [Path.t()]
+  def runs_for_source(source, server \\ __MODULE__) when is_binary(source) do
+    GenServer.call(server, {:runs_for_source, source})
+  catch
+    :exit, _ -> []
+  end
+
   @impl true
   def init(:ok), do: {:ok, %{refs: %{}}}
 
@@ -60,6 +71,19 @@ defmodule Wardmast.Agents.Codex.AuthSync.Reaper do
   def handle_call({:flush, owner}, _from, %{refs: refs} = state) do
     for {_ref, {^owner, runs}} <- refs, do: sync_all(runs)
     {:reply, :ok, state}
+  end
+
+  def handle_call({:runs_for_source, source}, _from, %{refs: refs} = state) do
+    target = resolve_symlink(source)
+
+    runs =
+      for {_ref, {_owner, pairs}} <- refs,
+          {src, run} <- pairs,
+          resolve_symlink(src) == target,
+          uniq: true,
+          do: run
+
+    {:reply, runs, state}
   end
 
   @impl true
@@ -80,5 +104,18 @@ defmodule Wardmast.Agents.Codex.AuthSync.Reaper do
         e -> Logger.error("Codex.AuthSync.Reaper: sync failed: #{Exception.message(e)}")
       end
     end)
+  end
+
+  defp resolve_symlink(path, depth \\ 0)
+  defp resolve_symlink(path, depth) when depth > 8, do: path
+
+  defp resolve_symlink(path, depth) do
+    case File.read_link(path) do
+      {:ok, target} ->
+        target |> Path.expand(Path.dirname(path)) |> resolve_symlink(depth + 1)
+
+      {:error, _} ->
+        Path.expand(path)
+    end
   end
 end

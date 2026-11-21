@@ -9,15 +9,32 @@ defmodule Wardmast.Quota.Codex do
   OAuth token the real `codex` CLI already keeps fresh in `~/.codex/auth.json`,
   and upserts the result into `Wardmast.Quota.CodexQuota`.
 
-  ## Credentials — read-only
+  ## Credentials & refresh (bd-6yk7qi)
 
-  We read `tokens.access_token` (sent as `Authorization: Bearer …`) and
-  `tokens.account_id` (sent as the `ChatGPT-Account-ID` header) from
-  `~/.codex/auth.json`. **We never write to that file.** No refresh logic lives
-  here: the `codex` CLI refreshes the token during normal worker dispatch. If
-  the token is expired at read time the endpoint returns `401`, and we skip the
-  cycle gracefully (no snapshot written) rather than trying to refresh it
-  ourselves.
+  We read `tokens.access_token` (sent as `Authorization: Bearer …`),
+  `tokens.refresh_token`, and `tokens.account_id` (sent as the
+  `ChatGPT-Account-ID` header) from `~/.codex/auth.json`.
+
+  When `wham/usage` returns `401` (the access token expired while Codex was
+  idle), we refresh the access token via OpenAI's OAuth token endpoint
+  (`https://auth.openai.com/oauth/token`) using `tokens.refresh_token`, retry
+  the usage GET, and report `auth_expired: true` **only** when the refresh
+  token itself is rejected (`400`/`401`/`403`). A transient refresh failure
+  (`5xx`, `429`, transport error) is treated as neutral (`auth_expired: false`).
+
+  To avoid racing or corrupting a running worker's `auth.json`, refresh and
+  persistence are serialized under the same `:global.trans` lock key as
+  `Wardmast.Agents.Codex.AuthSync`, guarded by a reload before and after the
+  HTTP refresh call: if `auth.json` changed on disk while the refresh was in
+  flight, the poll adopts the worker's file and never overwrites it. Writes use
+  a mode-`0600` `:exclusive` temporary sibling and atomic `File.rename/2`.
+
+  For containerised (podman) workers, which run on a private copy of `auth.json`
+  tracked by `Wardmast.Agents.Codex.AuthSync.Reaper`, the poll first reconciles
+  any newer rotation from live tracked run copies into the source (`AuthSync.sync_locked/2`),
+  and after persisting a poll-initiated rotation pushes the new token into every
+  live tracked run copy (`AuthSync.pull/2`) so neither the container nor the
+  poll is stranded on a retired refresh token.
 
   ## Response shape
 
@@ -41,8 +58,10 @@ defmodule Wardmast.Quota.Codex do
 
   Via `config :wardmast, :codex_quota`:
 
-    * `:auth_path` — override the `~/.codex/auth.json` location (tests).
-    * `:usage_url` — override the usage endpoint URL.
+    * `:auth_path`   — override the `~/.codex/auth.json` location (tests).
+    * `:usage_url`   — override the usage endpoint URL.
+    * `:refresh_url` — override the OAuth token refresh endpoint URL.
+    * `:client_id`   — override the OAuth public client id.
 
   In test, `config :wardmast, :codex_quota_http_stub, true` routes the request
   through `Req.Test` stub `#{inspect(__MODULE__)}.HTTP`.
@@ -52,6 +71,8 @@ defmodule Wardmast.Quota.Codex do
   require Ash.Query
 
   alias Wardmast.Accounts.Resolver
+  alias Wardmast.Agents.Codex.AuthSync
+  alias Wardmast.Agents.Codex.AuthSync.Reaper
   alias Wardmast.Agents.Codex.ConfigDir
   alias Wardmast.Quota.CodexPlanWindows
   alias Wardmast.Quota.CodexQuota
@@ -62,6 +83,8 @@ defmodule Wardmast.Quota.Codex do
 
   @stub_name __MODULE__.HTTP
   @default_usage_url "https://chatgpt.com/backend-api/wham/usage"
+  @default_refresh_url "https://auth.openai.com/oauth/token"
+  @default_client_id "app_EMoamEEZ73f0CkXaXp7hrann"
   @default_provider "codex"
   @request_timeout_ms 15_000
   @history_retention_days 90
@@ -106,14 +129,18 @@ defmodule Wardmast.Quota.Codex do
 
     * creds absent → `%{codex: nil, message: "Codex CLI not authenticated…"}`,
       no HTTP call.
-    * expired-token `401` → `%{codex: nil, message: "Codex connected. Usage
-      API temporarily unavailable (401).", auth_expired: true}`, no snapshot
-      written. `auth_expired` is the free credential-expiry signal
+    * stale-access-token `401` + valid refresh token → refreshes via
+      `https://auth.openai.com/oauth/token`, atomically persists the rotated
+      tokens if `auth.json` did not change on disk in the meantime, and retries
+      the usage GET (`auth_expired: false`).
+    * `401` + refresh token rejected (`400`/`401`/`403`, or no refresh token) →
+      `%{codex: nil, message: "Codex connected. Usage API temporarily
+      unavailable (401).", auth_expired: true}`, no snapshot written.
+      `auth_expired` is the free credential-expiry signal
       `Wardmast.Quota.CloudProbe` feeds to `Wardmast.Agents.CredentialWatchdog`
-      after N consecutive 401s (bd-1fpjgx) — a dedicated boolean rather than
-      something parsed back out of the message text, since any other non-200
-      status produces the same message shape with a different number spliced
-      in.
+      after N consecutive 401s (bd-1fpjgx, bd-6yk7qi).
+    * `401` + transient refresh failure (`5xx`, `429`, transport error) →
+      `%{codex: nil, message: …, auth_expired: false}`, no snapshot written.
     * other non-200 → `%{codex: nil, message: …, auth_expired: false}`, no
       snapshot written.
     * `200` with no window data → `%{codex: nil, message: …, auth_expired:
@@ -123,9 +150,12 @@ defmodule Wardmast.Quota.Codex do
 
   Options:
 
-    * `:credentials` — inject `%{access_token, account_id}`, bypassing the file.
+    * `:credentials` — inject `%{access_token, account_id}` (and optional
+      `refresh_token`), bypassing the file.
     * `:auth_path`   — override the auth file path.
-    * `:usage_url`   — override the endpoint URL.
+    * `:usage_url`   — override the usage endpoint URL.
+    * `:refresh_url` — override the OAuth refresh endpoint URL.
+    * `:client_id`   — override the OAuth client id.
   """
   @spec fetch(String.t(), keyword()) :: result()
   def fetch(workspace_id, opts \\ []) when is_binary(workspace_id) do
@@ -152,23 +182,55 @@ defmodule Wardmast.Quota.Codex do
         handle_ok_body(workspace_id, body)
 
       {:ok, 401, _body} ->
-        %{
-          codex: nil,
-          message: "Codex connected. Usage API temporarily unavailable (401).",
-          auth_expired: true
-        }
+        handle_unauthorized(workspace_id, creds, opts)
 
       {:ok, status, _body} ->
-        %{
-          codex: nil,
-          message: "Codex connected. Usage API temporarily unavailable (#{status}).",
-          auth_expired: false
-        }
+        unavailable_result(status, false)
 
       {:error, reason} ->
         Logger.debug("Wardmast.Quota.Codex: usage request failed: #{inspect(reason)}")
-        %{codex: nil, message: "Codex connected. Usage API unreachable.", auth_expired: false}
+        unreachable_result()
     end
+  end
+
+  defp handle_unauthorized(workspace_id, creds, opts) do
+    case refresh_credentials(creds, opts) do
+      {:ok, refreshed_creds} ->
+        retry_usage_after_refresh(workspace_id, refreshed_creds, opts)
+
+      :auth_expired ->
+        unavailable_result(401, true)
+
+      :transient_error ->
+        unavailable_result(401, false)
+    end
+  end
+
+  defp retry_usage_after_refresh(workspace_id, creds, opts) do
+    case request_usage(creds, opts) do
+      {:ok, 200, body} ->
+        handle_ok_body(workspace_id, body)
+
+      {:ok, status, _body} ->
+        unavailable_result(status, false)
+
+      {:error, reason} ->
+        Logger.debug("Wardmast.Quota.Codex: usage retry after refresh failed: #{inspect(reason)}")
+
+        unreachable_result()
+    end
+  end
+
+  defp unavailable_result(status, auth_expired) do
+    %{
+      codex: nil,
+      message: "Codex connected. Usage API temporarily unavailable (#{status}).",
+      auth_expired: auth_expired
+    }
+  end
+
+  defp unreachable_result do
+    %{codex: nil, message: "Codex connected. Usage API unreachable.", auth_expired: false}
   end
 
   defp handle_ok_body(workspace_id, body) do
@@ -585,25 +647,47 @@ defmodule Wardmast.Quota.Codex do
   # ---- credentials -------------------------------------------------------
 
   @doc """
-  Read `access_token` + `account_id` from a `codex` `auth.json`.
+  Read `access_token`, `account_id` and `refresh_token` from a `codex` `auth.json`.
 
-  Read-only. `{:ok, %{access_token, account_id}}` on success, `{:error, reason}`
-  when the file is absent / unreadable / malformed / lacks an access token.
+  Read-only. `{:ok, %{access_token, account_id, refresh_token}}` on success,
+  `{:error, reason}` when the file is absent / unreadable / malformed / lacks an
+  access token.
   """
   @spec read_credentials(keyword()) ::
-          {:ok, %{access_token: String.t(), account_id: String.t() | nil}} | {:error, term()}
+          {:ok,
+           %{
+             access_token: String.t(),
+             account_id: String.t() | nil,
+             refresh_token: String.t() | nil
+           }}
+          | {:error, term()}
   def read_credentials(opts \\ []) do
     path = auth_path(opts)
 
+    with {:ok, _doc, creds} <- read_auth_doc(path) do
+      {:ok, creds}
+    end
+  end
+
+  defp read_auth_doc(path) do
     with {:ok, raw} <- File.read(path),
          {:ok, json} <- Jason.decode(raw),
          %{"tokens" => %{"access_token" => token}} when is_binary(token) and token != "" <- json do
-      {:ok, %{access_token: token, account_id: get_in(json, ["tokens", "account_id"])}}
+      creds = %{
+        access_token: token,
+        account_id: non_empty_string(get_in(json, ["tokens", "account_id"])),
+        refresh_token: non_empty_string(get_in(json, ["tokens", "refresh_token"]))
+      }
+
+      {:ok, json, creds}
     else
       {:error, reason} -> {:error, reason}
       _ -> {:error, :no_access_token}
     end
   end
+
+  defp non_empty_string(s) when is_binary(s) and s != "", do: s
+  defp non_empty_string(_), do: nil
 
   @doc """
   Probe Codex authentication using the usage API endpoint (`wham/usage`).
@@ -626,16 +710,271 @@ defmodule Wardmast.Quota.Codex do
   defp resolve_credentials(opts) do
     case Keyword.get(opts, :credentials) do
       %{access_token: token} = creds when is_binary(token) and token != "" ->
-        {:ok, creds}
+        {:ok,
+         %{
+           access_token: token,
+           account_id: non_empty_string(Map.get(creds, :account_id)),
+           refresh_token: non_empty_string(Map.get(creds, :refresh_token)),
+           source_path: nil
+         }}
 
       _ ->
-        read_credentials(opts)
+        path = auth_path(opts)
+
+        with {:ok, creds} <- read_credentials(auth_path: path) do
+          {:ok, Map.put(creds, :source_path, path)}
+        end
     end
   end
 
   defp auth_path(opts) do
     (Keyword.get(opts, :auth_path) || cfg(:auth_path, default_auth_path()))
     |> Path.expand()
+  end
+
+  # ---- token refresh -----------------------------------------------------
+
+  defp refresh_credentials(%{source_path: path} = creds, opts) when is_binary(path) do
+    real = resolve_symlink(path)
+
+    :global.trans(
+      {{Wardmast.Agents.Codex.AuthSync, real}, self()},
+      fn -> refresh_file_credentials(real, path, creds, opts) end,
+      [node()],
+      :infinity
+    )
+  end
+
+  defp refresh_credentials(creds, opts) do
+    case non_empty_string(Map.get(creds, :refresh_token)) do
+      nil ->
+        :auth_expired
+
+      refresh_token ->
+        case request_refresh(refresh_token, opts) do
+          {:ok, 200, %{"access_token" => new_access} = body}
+          when is_binary(new_access) and new_access != "" ->
+            new_refresh = non_empty_string(body["refresh_token"]) || refresh_token
+            {:ok, %{creds | access_token: new_access, refresh_token: new_refresh}}
+
+          {:ok, status, _body} when status in [400, 401, 403] ->
+            :auth_expired
+
+          _other ->
+            :transient_error
+        end
+    end
+  end
+
+  defp refresh_file_credentials(real, source_path, creds, opts) do
+    sync_tracked_runs_into_source(real)
+
+    {before_doc, on_disk_creds} =
+      case read_auth_doc(real) do
+        {:ok, doc, disk_creds} -> {doc, disk_creds}
+        _ -> {nil, nil}
+      end
+
+    if not is_nil(on_disk_creds) and on_disk_creds.access_token != creds.access_token do
+      # A running worker or sibling poll task already refreshed auth.json.
+      {:ok, Map.put(on_disk_creds, :source_path, source_path)}
+    else
+      refresh_token =
+        (on_disk_creds && on_disk_creds.refresh_token) || Map.get(creds, :refresh_token)
+
+      do_file_refresh(real, source_path, before_doc, creds, refresh_token, opts)
+    end
+  end
+
+  defp do_file_refresh(_real, _source_path, _before_doc, _creds, nil, _opts), do: :auth_expired
+
+  defp do_file_refresh(real, source_path, before_doc, creds, refresh_token, opts) do
+    case request_refresh(refresh_token, opts) do
+      {:ok, 200, %{"access_token" => new_access} = body}
+      when is_binary(new_access) and new_access != "" ->
+        handle_file_refresh_success(
+          real,
+          source_path,
+          before_doc,
+          creds,
+          refresh_token,
+          new_access,
+          body
+        )
+
+      {:ok, status, _body} when status in [400, 401, 403] ->
+        handle_file_refresh_rejected(real, source_path, creds, refresh_token)
+
+      _other ->
+        :transient_error
+    end
+  end
+
+  defp handle_file_refresh_success(
+         real,
+         source_path,
+         before_doc,
+         creds,
+         refresh_token,
+         new_access,
+         body
+       ) do
+    rotated = %{
+      access_token: new_access,
+      refresh_token: non_empty_string(body["refresh_token"]) || refresh_token,
+      id_token: non_empty_string(body["id_token"])
+    }
+
+    case maybe_persist_refreshed_auth(
+           real,
+           before_doc,
+           creds.access_token,
+           refresh_token,
+           rotated
+         ) do
+      {:ok, adopted} ->
+        {:ok, Map.put(adopted, :source_path, source_path)}
+
+      :persist_failed ->
+        :transient_error
+    end
+  end
+
+  defp handle_file_refresh_rejected(real, source_path, creds, refresh_token) do
+    sync_tracked_runs_into_source(real)
+
+    case read_auth_doc(real) do
+      {:ok, _doc, disk_creds}
+      when disk_creds.access_token != creds.access_token or
+             disk_creds.refresh_token != refresh_token ->
+        # A running worker rotated auth.json on disk while our refresh was in
+        # flight, causing our old refresh token to be rejected.
+        {:ok, Map.put(disk_creds, :source_path, source_path)}
+
+      _ ->
+        :auth_expired
+    end
+  end
+
+  defp maybe_persist_refreshed_auth(real, before_doc, stale_access, used_refresh, rotated) do
+    sync_tracked_runs_into_source(real)
+
+    case read_auth_doc(real) do
+      {:ok, current_doc, disk_creds} ->
+        if unchanged_on_disk?(current_doc, before_doc, stale_access, used_refresh) do
+          updated_doc = put_refreshed_tokens(current_doc, rotated)
+
+          case write_private_atomic(real, Jason.encode!(updated_doc)) do
+            :ok ->
+              pull_source_into_tracked_runs(real)
+
+              {:ok,
+               %{
+                 disk_creds
+                 | access_token: rotated.access_token,
+                   refresh_token: rotated.refresh_token
+               }}
+
+            {:error, reason} ->
+              Logger.error(
+                "Wardmast.Quota.Codex: could not persist rotated auth.json to #{real}: #{inspect(reason)}"
+              )
+
+              :persist_failed
+          end
+        else
+          # A worker modified auth.json while our refresh HTTP call was in flight;
+          # never clobber the worker's file.
+          if disk_creds.access_token != stale_access do
+            {:ok, disk_creds}
+          else
+            :persist_failed
+          end
+        end
+
+      {:error, reason} ->
+        Logger.error(
+          "Wardmast.Quota.Codex: could not persist rotated auth.json to #{real}: #{inspect(reason)}"
+        )
+
+        :persist_failed
+    end
+  end
+
+  defp sync_tracked_runs_into_source(real) do
+    for run <- Reaper.runs_for_source(real) do
+      _ = AuthSync.sync_locked(real, run)
+    end
+
+    :ok
+  end
+
+  defp pull_source_into_tracked_runs(real) do
+    for run <- Reaper.runs_for_source(real) do
+      _ = AuthSync.pull(real, run)
+    end
+
+    :ok
+  end
+
+  defp unchanged_on_disk?(current_doc, before_doc, stale_access, used_refresh)
+       when is_map(current_doc) and is_map(before_doc) do
+    get_in(current_doc, ["tokens", "access_token"]) == stale_access and
+      get_in(current_doc, ["tokens", "refresh_token"]) == used_refresh and
+      current_doc["last_refresh"] == before_doc["last_refresh"] and
+      get_in(current_doc, ["tokens", "account_id"]) ==
+        get_in(before_doc, ["tokens", "account_id"])
+  end
+
+  defp unchanged_on_disk?(_, _, _, _), do: false
+
+  defp put_refreshed_tokens(%{"tokens" => tokens} = doc, rotated) when is_map(tokens) do
+    updated_tokens =
+      tokens
+      |> Map.put("access_token", rotated.access_token)
+      |> Map.put("refresh_token", rotated.refresh_token)
+      |> then(fn t ->
+        if rotated.id_token, do: Map.put(t, "id_token", rotated.id_token), else: t
+      end)
+
+    doc
+    |> Map.put("tokens", updated_tokens)
+    |> Map.put("last_refresh", DateTime.utc_now() |> DateTime.to_iso8601())
+  end
+
+  defp write_private_atomic(path, body) do
+    tmp = "#{path}.arb-#{System.unique_integer([:positive])}"
+
+    with {:ok, io} <- File.open(tmp, [:write, :exclusive, :binary]),
+         :ok <- write_and_close(io, tmp, body),
+         :ok <- File.rename(tmp, path) do
+      :ok
+    else
+      error ->
+        _ = File.rm(tmp)
+        error
+    end
+  end
+
+  defp write_and_close(io, tmp, body) do
+    with :ok <- File.chmod(tmp, 0o600) do
+      IO.binwrite(io, body)
+    end
+  after
+    _ = File.close(io)
+  end
+
+  defp resolve_symlink(path, depth \\ 0)
+  defp resolve_symlink(path, depth) when depth > 8, do: path
+
+  defp resolve_symlink(path, depth) do
+    case File.read_link(path) do
+      {:ok, target} ->
+        target |> Path.expand(Path.dirname(path)) |> resolve_symlink(depth + 1)
+
+      {:error, _} ->
+        path
+    end
   end
 
   # ---- HTTP --------------------------------------------------------------
@@ -655,6 +994,34 @@ defmodule Wardmast.Quota.Codex do
         url: url,
         method: :get,
         headers: headers,
+        receive_timeout: @request_timeout_ms,
+        retry: false
+      )
+      |> maybe_stub()
+
+    case Req.request(req) do
+      {:ok, %Req.Response{status: status, body: body}} -> {:ok, status, body}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp request_refresh(refresh_token, opts) do
+    url = Keyword.get(opts, :refresh_url) || cfg(:refresh_url, @default_refresh_url)
+    client_id = Keyword.get(opts, :client_id) || cfg(:client_id, @default_client_id)
+
+    req =
+      Req.new(
+        url: url,
+        method: :post,
+        headers: [
+          {"accept", "application/json"},
+          {"originator", "codex_cli_rs"}
+        ],
+        form: [
+          grant_type: "refresh_token",
+          client_id: client_id,
+          refresh_token: refresh_token
+        ],
         receive_timeout: @request_timeout_ms,
         retry: false
       )
