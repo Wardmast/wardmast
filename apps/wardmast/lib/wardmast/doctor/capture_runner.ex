@@ -10,6 +10,7 @@ defmodule Wardmast.Doctor.CaptureRunner do
   """
 
   alias Wardmast.Screenshots.Config
+  alias Wardmast.Worker.ReleaseEnv
 
   @min_node 22
 
@@ -119,7 +120,7 @@ defmodule Wardmast.Doctor.CaptureRunner do
     node = override || System.find_executable("node")
 
     with true <- is_binary(node),
-         {out, 0} <- System.cmd(node, ["--version"], stderr_to_stdout: true) do
+         {out, 0} <- ReleaseEnv.cmd(node, ["--version"], stderr_to_stdout: true) do
       {:ok, String.trim(out)}
     else
       _ -> :error
