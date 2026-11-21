@@ -106,9 +106,10 @@ defmodule Wardmast.Worker.Image.LocalPublished do
   end
 
   defp latest(repo, opts) do
-    case PublishLedger.last_ref(repo, ledger_opts(opts)) do
-      ref when is_binary(ref) -> {:ok, ref}
-      _ -> {:fallback, :never_published}
+    case PublishLedger.lookup(repo, ledger_opts(opts)) do
+      {:ok, ref} -> {:ok, ref}
+      :never_published -> {:fallback, :never_published}
+      {:error, reason} -> {:fallback, reason}
     end
   end
 
@@ -185,6 +186,14 @@ defmodule Wardmast.Worker.Image.LocalPublished do
   @doc "The one-line, credential-free form of a fallback reason, as recorded on the run."
   @spec describe(term()) :: String.t()
   def describe(:never_published), do: "never_published: no published image for the repo yet"
+
+  def describe({:ledger_unreadable, reason}),
+    do:
+      "ledger_unreadable: the publish ledger could not be read (#{inspect(reason, limit: 4)}); " <>
+        "the repo may have a published image"
+
+  def describe(:no_ref_recorded),
+    do: "no_ref_recorded: the publish ledger has the repo but no image digest for it"
 
   def describe({:image_unavailable, {:pull_failed, status, _output}}),
     do: "pull_failed: podman pull exited #{status} (registry unreachable or refused)"

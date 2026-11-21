@@ -274,6 +274,29 @@ defmodule Wardmast.NodeAgent.ImageGCTest do
       refute ref(1) in result.removed
     end
 
+    test "a finished run is cleared from the persisted ledger on the next collection", ctx do
+      live = start_supervised!({Agent, fn -> ["r1"] end}, id: :live_runs)
+      {name, _clock} = start_gc(ctx, runs_fun: fn -> Agent.get(live, & &1) end)
+      opts = [name: name]
+      :ok = ImageGC.pulled(ref(1), "r1", opts)
+
+      runs = fn ->
+        ctx.home
+        |> Path.join("images.json")
+        |> File.read!()
+        |> Jason.decode!()
+        |> Map.fetch!("images")
+        |> Enum.flat_map(& &1["runs"])
+      end
+
+      assert {:ok, _} = ImageGC.collect(opts)
+      assert runs.() == ["r1"]
+
+      Agent.update(live, fn _ -> [] end)
+      assert {:ok, _} = ImageGC.collect(opts)
+      assert runs.() == []
+    end
+
     test "pressure that survives GC is reported", ctx do
       {name, _clock} = start_gc(ctx, space_fun: fn -> {100, 5} end)
       opts = [name: name]
