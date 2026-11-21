@@ -173,6 +173,60 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGateTest do
     end
   end
 
+  # bd-5eegxz: until capture works for a repo, a bad manifest is not worth a fix round.
+  describe "route/2: no fix round for a manifest while capture is failing" do
+    for {code, detail} <- [manifest_missing: nil, manifest_invalid: ["plan version must be 1"]] do
+      test "#{code} proceeds with a note when captures in the workspace are failing" do
+        failure = Failure.new(unquote(code), "the manifest problem", detail: unquote(detail))
+
+        assert {:proceed, note} = ScreenshotGate.route({:error, failure}, health: :failing)
+        assert note =~ "No screenshots"
+        assert note =~ "not the worker"
+        refute note =~ "NO-FILE-CHANGE"
+      end
+
+      test "#{code} is still sent back when capture works or nothing is known" do
+        failure = Failure.new(unquote(code), "the manifest problem", detail: unquote(detail))
+
+        for health <- [:working, :unknown] do
+          assert {:send_back, _} = ScreenshotGate.route({:error, failure}, health: health)
+        end
+
+        assert {:send_back, _} = ScreenshotGate.route({:error, failure})
+      end
+    end
+
+    test "a route the manifest names that errors is still the worker's, even while failing" do
+      failure = Failure.new(:route_error, "home: GET /nope answered 404 at both", shot: "home")
+      assert {:send_back, _} = ScreenshotGate.route({:error, failure}, health: :failing)
+    end
+
+    test "skipped and failed captures never route to send_back, whatever the health" do
+      outcomes = [
+        {:skipped, {:deps_changed, "the change edits mix.lock"}},
+        {:skipped, {:no_sandbox, "capture needs a sandbox"}},
+        {:error, Failure.new(:boot_failed, "before: no mix.exs", role: "before")},
+        {:error, Failure.new(:deps_failed, "nxdomain")}
+      ]
+
+      for outcome <- outcomes, health <- [:failing, :working, :unknown] do
+        refute match?({:send_back, _}, ScreenshotGate.route(outcome, health: health))
+      end
+    end
+
+    test "route_reuse passes the health through" do
+      failure = Failure.new(:manifest_missing, "none")
+
+      assert {:proceed, _} =
+               ScreenshotGate.route_reuse(
+                 {:error, failure},
+                 %{reason: :unchanged, from: "abc"},
+                 "def",
+                 health: :failing
+               )
+    end
+  end
+
   describe "route/2: worker faults go back to the worker" do
     test "no manifest is sent back with the instruction to add one" do
       failure = Failure.new(:manifest_missing, "the worker wrote no screenshots manifest")

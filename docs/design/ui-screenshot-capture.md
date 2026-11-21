@@ -245,11 +245,19 @@ come from the host side, **without opening the sandbox**. Operator guide: [scree
 * **`screenshots.deps`** (`Capture.DepsCache`): `{"mix": true}` gives every boot its Mix
   dependencies with no network.
   * **Trusted lockfile only.** The cache comes from a `mix.lock` the default branch has had
-    (`merge.base`, else `main`): the merge-base's, when the merge-base is on the default branch,
-    else the default branch tip's when it is byte-for-byte the same. A head that edits, adds or
-    deletes `mix.lock` is `{:skipped, {:deps_changed, reason}}` (`skip_kind: deps_changed`; the
-    ReviewGate proceeds and tells the reviewer why). The head's `mix.exs` and lockfile never run
-    with a network; running the trusted commit's `mix.exs` is the same trust as merging it.
+    (`merge.base`, else `main`): the head's lockfile must equal the merge-base's (when the
+    merge-base is on the default branch) or the default branch tip's, byte for byte, so a branch
+    that merged current `main` is never "editing" the lockfile it merely inherited (bd-5eegxz). A
+    head that edits, adds or deletes `mix.lock` beyond that is `{:skipped, {:deps_changed,
+    reason}}` (`skip_kind: deps_changed`; the ReviewGate proceeds and tells the reviewer why). The
+    head's `mix.exs` and lockfile never run with a network; running the trusted commit's `mix.exs`
+    is the same trust as merging it.
+  * **The before side gets deps for its own lockfile.** It boots the merge-base's tree, and Mix
+    refuses deps fetched for a different lock. When the merge-base's lockfile is not the head's
+    (a stale merge-base under a branch that merged a bump), the before boot gets a second cache,
+    seeded from the merge-base's own lockfile (which the default branch has had, since the
+    merge-base is on it); a merge-base with no lockfile, or off the default branch with another,
+    is skipped as `deps_changed`.
   * **Trust comes from origin, never from the checkout** (a review finding): the worker's refs
     and objects are writable from its jail, so a moved `refs/remotes/origin/main` could have made
     a worker commit the source. The default branch's tip is read live with `git ls-remote origin`

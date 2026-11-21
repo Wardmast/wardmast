@@ -17,6 +17,7 @@ defmodule Wardmast.Test.CaptureStubBooter do
     # A slow boot, to let a capture's budget run out after it.
     if ms = ctx[:boot_delay_ms], do: Process.sleep(ms)
 
+    send(ctx.test_pid, {:checkout_entries, spec.role, spec.checkout |> File.ls!() |> Enum.sort()})
     send(ctx.test_pid, {:tree, spec.role, File.read!(Path.join(spec.checkout, "web/page.txt"))})
 
     case Map.get(Map.get(ctx, :boot_failures, %{}), spec.role) do

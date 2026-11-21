@@ -318,7 +318,7 @@ defmodule Wardmast.Screenshots.CaptureBootTest do
     assert {:ok, _} = run(dir, repo, plan!(dir, [%{"id" => "home", "path" => "/"}]), cfg)
 
     env = File.read!(Path.join(marks, "env-before.txt"))
-    assert env =~ ~r{^HOME=.*/work/before/scratch-default/home$}m
+    assert env =~ ~r{^HOME=.*/work/[0-9a-f]+/before/scratch-default/home$}m
     refute env =~ ~r{^HOME=#{Regex.escape(System.user_home!())}$}m
     assert File.read!(Path.join(marks, "home-before")) == "ok\n"
   end

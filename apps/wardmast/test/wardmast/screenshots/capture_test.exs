@@ -512,6 +512,80 @@ defmodule Wardmast.Screenshots.CaptureTest do
     assert Enum.map(manifest["boots"], & &1["role"]) == ["before", "after"]
   end
 
+  describe "capture.json records a reason (bd-5eegxz)" do
+    test "a failed capture has a top-level reason: the failure's message", %{tmp_dir: dir} do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+      assert {:error, failure} = run(dir, plan, %{boot_failures: %{"before" => "exit 1"}})
+      manifest = recorded(dir)
+      assert manifest["state"] == "failed"
+      assert manifest["reason"] == failure.message
+      assert manifest["reason"] != ""
+    end
+
+    test "a skipped capture has a top-level reason", %{tmp_dir: dir} do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+
+      assert {:skipped, {:no_sandbox, reason}} = run(dir, plan, %{}, sandbox: CaptureNoSandbox)
+      manifest = recorded(dir)
+      assert manifest["state"] == "skipped"
+      assert manifest["reason"] == reason
+      assert manifest["reason"] != ""
+    end
+
+    test "a plan skip is recorded with its reason too", %{tmp_dir: dir} do
+      plan = Path.join(dir, "skip.json")
+      File.write!(plan, ~s({"version": 1, "skip": "copy only"}))
+      assert {:skipped, {:plan_skip, "copy only"}} = run(dir, plan)
+      assert recorded(dir)["reason"] == "copy only"
+    end
+  end
+
+  describe "the before/after checkouts are idempotent (bd-5eegxz)" do
+    defp read_only_tree!(path) do
+      File.mkdir_p!(Path.join(path, "deps/pkg"))
+      File.write!(Path.join(path, "deps/pkg/mod.ex"), "old")
+      File.write!(Path.join(path, "stale.txt"), "left by a dead attempt")
+      {_, 0} = System.cmd("chmod", ["-R", "a-w", path])
+      on_exit(fn -> System.cmd("chmod", ["-R", "u+w", path], stderr_to_stdout: true) end)
+    end
+
+    test "a work dir an earlier attempt left cannot leak into, or fail, the next boot", %{
+      tmp_dir: dir
+    } do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+      # Exactly where the old code kept it: out/work/<role>/{checkout,scratch-default}.
+      for role <- ["before", "after"] do
+        old = Path.join([dir, "out", "work", role])
+        read_only_tree!(Path.join(old, "checkout"))
+        read_only_tree!(Path.join(old, "scratch-default"))
+      end
+
+      assert {:ok, _} = run(dir, plan)
+      assert_received {:checkout_entries, "before", before_entries}
+      assert_received {:checkout_entries, "after", after_entries}
+      refute "stale.txt" in before_entries
+      refute "stale.txt" in after_entries
+      assert "web" in before_entries
+      assert recorded(dir)["state"] == "ok"
+    end
+
+    test "a stale attempt directory (a killed run's) is swept, a recent one is left", %{
+      tmp_dir: dir
+    } do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+      work = Path.join([dir, "out", "work"])
+      old = Path.join(work, "deadbeef00")
+      recent = Path.join(work, "alive00000")
+      read_only_tree!(Path.join(old, "before"))
+      File.mkdir_p!(recent)
+      File.touch!(old, System.os_time(:second) - 86_400)
+
+      assert {:ok, _} = run(dir, plan)
+      refute File.exists?(old)
+      assert File.dir?(recent)
+    end
+  end
+
   defp recorded(dir),
     do: Path.join([dir, "out", "capture.json"]) |> File.read!() |> Jason.decode!()
 end

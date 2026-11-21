@@ -9,13 +9,20 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
 
   ## Which lockfile is trusted (`plan/4`)
 
-  Only a `mix.lock` the **default branch** has had. The merge-base is the base boot's own tree;
-  when it is an ancestor of the default branch, its lockfile is that, and it is the source. When
-  it is not (a PR into another branch), the default branch's tip is the source, if its lockfile is
-  byte-for-byte the same. The head's lockfile must equal the source's: a head that edits, adds or
-  deletes `mix.lock` is `{:skip, reason}` (`skip_kind: deps_changed`), and nothing is fetched for
-  it. **The head's own `mix.exs` and lockfile never run with a network.** Running the source's
-  (`mix deps.get` evaluates the project's `mix.exs`) is the same trust as merging it.
+  Only a `mix.lock` the **default branch** has had. The head's lockfile must be byte-for-byte the
+  one at the merge-base (when that is an ancestor of the default branch: it is then the source)
+  **or at the default branch's current tip** (bd-5eegxz: a branch that merged main after main
+  bumped its lockfile carries the tip's, whatever older merge-base it was handed). Neither: a
+  head that edits, adds or deletes `mix.lock` is `{:skip, reason}` (`skip_kind: deps_changed`),
+  and nothing is fetched for it. **The head's own `mix.exs` and lockfile never run with a
+  network.** Running the source's (`mix deps.get` evaluates the project's `mix.exs`) is the same
+  trust as merging it.
+
+  The before side boots the merge-base's own tree, whose `mix.lock` Mix checks its deps against
+  (a mismatch aborts the boot, and there is no network to recover). So when the merge-base's
+  lockfile is not the head's, it gets a cache of its own, seeded from its own lockfile (`:base` in
+  the plan, `:before` in the cache): that lockfile must itself be one the default branch has had
+  (the merge-base is an ancestor of its tip), else the capture is skipped as `deps_changed`.
 
   ## The cache (`prepare/2`)
 
@@ -81,6 +88,7 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   alias Wardmast.Config.Paths
   alias Wardmast.Screenshots.Capture.AppProcess
   alias Wardmast.Screenshots.Capture.Sandbox
+  alias Wardmast.Screenshots.Capture.Workdir
   alias Wardmast.Worker.ReleaseEnv
   alias Wardmast.Worker.Worktree
 
@@ -125,8 +133,17 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
           deps: String.t(),
           build: String.t(),
           env: [{String.t(), String.t()}],
-          links: [{String.t(), String.t()}]
+          links: [{String.t(), String.t()}],
+          before: t_cache() | nil
         }
+
+  @typep t_cache :: %{
+           dir: String.t(),
+           deps: String.t(),
+           build: String.t(),
+           env: [{String.t(), String.t()}],
+           links: [{String.t(), String.t()}]
+         }
 
   @doc "What the seed runs in the source tree (for the docs and tests)."
   @spec seed_script() :: String.t()
@@ -150,16 +167,27 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   @spec plan(String.t(), String.t(), String.t(), String.t(), keyword()) ::
           {:ok,
            :none
-           | %{source: String.t(), lock_hash: String.t(), lock: binary(), repo: String.t()}}
+           | %{
+               source: String.t(),
+               lock_hash: String.t(),
+               lock: binary(),
+               repo: String.t(),
+               base: nil | map()
+             }}
           | {:skip, String.t()}
           | {:error, String.t()}
   def plan(repo, base, head, default_branch, opts \\ []) do
-    case {lock_at(repo, base), lock_at(repo, head)} do
-      {:none, :none} -> {:ok, :none}
-      {same, same} -> trusted_source(repo, base, same, default_branch, opts)
-      {:none, _} -> {:skip, changed("adds a mix.lock")}
-      {_, :none} -> {:skip, changed("deletes mix.lock")}
-      _ -> {:skip, changed("edits mix.lock")}
+    base_lock = lock_at(repo, base)
+
+    case {base_lock, lock_at(repo, head)} do
+      {:none, :none} ->
+        {:ok, :none}
+
+      {_, :none} ->
+        {:skip, changed("deletes mix.lock")}
+
+      {_, {:ok, head_lock}} ->
+        trusted_source(repo, base, base_lock, head_lock, default_branch, opts)
     end
   end
 
@@ -169,26 +197,58 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
       "and lockfile never run with a network)"
   end
 
-  defp trusted_source(repo, base, {:ok, head_lock}, branch, opts) do
+  # bd-5eegxz: the head's lockfile is judged against the default branch, never against the
+  # merge-base alone. A branch that merged main after main bumped its lockfile has a (stale)
+  # merge-base with the older lock, yet carries exactly main's current one: not a lockfile edit.
+  defp trusted_source(repo, base, base_lock, head_lock, branch, opts) do
     with {:ok, tip} <- live_tip(repo, branch),
          {:ok, trusted} <- trusted_repo(repo, tip, branch, opts) do
       # The worker's copy of the base's lockfile is only a hint; what counts is the trusted one.
-      source = if ancestor?(trusted, base, tip), do: base, else: tip
+      on_branch? = ancestor?(trusted, base, tip)
+      candidates = if on_branch?, do: Enum.uniq([base, tip]), else: [tip]
 
-      case lock_at(trusted, source) do
-        {:ok, ^head_lock} ->
-          {:ok, %{source: source, lock_hash: digest(head_lock), lock: head_lock, repo: trusted}}
+      case Enum.find(candidates, &(lock_at(trusted, &1) == {:ok, head_lock})) do
+        nil ->
+          {:skip, not_trusted(base_lock, on_branch?, branch)}
 
-        _ when source == base ->
-          {:skip, changed("edits mix.lock")}
-
-        _ ->
-          {:skip,
-           "this change's mix.lock is not one the default branch (#{branch}) has: its merge-base " <>
-             "is not on #{branch} and #{branch}'s own lockfile differs. A capture boot only gets " <>
-             "dependencies fetched from a default-branch lockfile"}
+        source ->
+          # The before side boots the merge-base's own tree, whose `mix.lock` Mix checks the deps
+          # against: when it is not the head's, it needs deps of its own, fetched from its own
+          # (default-branch) lockfile, never the head's (a lock mismatch aborts the boot).
+          with {:ok, base_source} <-
+                 base_source(trusted, base, base_lock, head_lock, on_branch?, branch) do
+            {:ok, Map.put(source_map(trusted, source, head_lock), :base, base_source)}
+          end
       end
     end
+  end
+
+  defp source_map(trusted, source, lock),
+    do: %{source: source, lock_hash: digest(lock), lock: lock, repo: trusted}
+
+  # `nil`: the base's lockfile is the head's, one cache serves both sides.
+  defp base_source(_trusted, _base, {:ok, lock}, lock, _on_branch?, _branch), do: {:ok, nil}
+
+  defp base_source(_trusted, _base, :none, _lock, _on_branch?, branch),
+    do: {:skip, not_trusted(:none, false, branch)}
+
+  defp base_source(trusted, base, {:ok, base_lock}, _head_lock, true, branch) do
+    # Only a lockfile the default branch has had: the trusted repository's, not the worker's copy.
+    if lock_at(trusted, base) == {:ok, base_lock},
+      do: {:ok, source_map(trusted, base, base_lock)},
+      else: {:skip, not_trusted({:ok, base_lock}, true, branch)}
+  end
+
+  defp base_source(_trusted, _base, base_lock, _head_lock, false, branch),
+    do: {:skip, not_trusted(base_lock, false, branch)}
+
+  defp not_trusted(:none, _on_branch?, _branch), do: changed("adds a mix.lock")
+  defp not_trusted(_base_lock, true, _branch), do: changed("edits mix.lock")
+
+  defp not_trusted(_base_lock, false, branch) do
+    "this change's mix.lock is not one the default branch (#{branch}) has: its merge-base " <>
+      "is not on #{branch} and #{branch}'s own lockfile differs. A capture boot only gets " <>
+      "dependencies fetched from a default-branch lockfile"
   end
 
   defp live_tip(repo, branch) do
@@ -301,7 +361,20 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
            plan(input.repo_path, input.base_sha, input.head_sha, input.default_branch, opts),
          root = root(opts),
          :ok <- mkdir(root),
-         {:ok, toolchain} <- fingerprint(input, source, root) do
+         {:ok, cache} <- seed_cache(input, source, root, opts),
+         {:ok, before_cache} <- seed_base(input, source.base, root, opts) do
+      {:ok, Map.put(cache, :before, before_cache)}
+    else
+      {:ok, :none} -> {:ok, nil}
+      other -> other
+    end
+  end
+
+  defp seed_base(_input, nil, _root, _opts), do: {:ok, nil}
+  defp seed_base(input, base, root, opts), do: seed_cache(input, base, root, opts)
+
+  defp seed_cache(input, source, root, opts) do
+    with {:ok, toolchain} <- fingerprint(input, source, root) do
       dir =
         Path.join(
           root,
@@ -311,9 +384,6 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
       with :ok <- ensure(dir, input, source, opts) do
         {:ok, cache(dir)}
       end
-    else
-      {:ok, :none} -> {:ok, nil}
-      other -> other
     end
   end
 
@@ -851,17 +921,25 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
     end
   end
 
+  # bd-5eegxz: `to` may be what an earlier attempt left, read-only (a `cp -a` of the read-only
+  # cache that died before its chmod): `Workdir.remove/1` makes it writable first and, whatever
+  # happens, the copy is made writable too, so the next attempt can remove it again.
   defp copy_tree(from, to) do
-    File.rm_rf!(to)
+    with :ok <- Workdir.remove(to),
+         :ok <- File.mkdir_p(Path.dirname(to)) do
+      copied =
+        ReleaseEnv.cmd("cp", ["-a", "--reflink=auto", "--", from, to], stderr_to_stdout: true)
 
-    with :ok <- File.mkdir_p(Path.dirname(to)),
-         {_, 0} <-
-           ReleaseEnv.cmd("cp", ["-a", "--reflink=auto", "--", from, to], stderr_to_stdout: true),
-         {_, 0} <- ReleaseEnv.cmd("chmod", ["-R", "u+rwX", "--", to], stderr_to_stdout: true) do
-      :ok
+      chmod = ReleaseEnv.cmd("chmod", ["-R", "u+rwX", "--", to], stderr_to_stdout: true)
+
+      case {copied, chmod} do
+        {{_, 0}, {_, 0}} -> :ok
+        {{output, status}, _} when status != 0 -> {:error, copy_error(from, tail(output))}
+        {_, {output, _}} -> {:error, copy_error(from, tail(output))}
+      end
     else
+      {:error, reason} when is_binary(reason) -> {:error, copy_error(from, reason)}
       {:error, reason} -> {:error, copy_error(from, :file.format_error(reason))}
-      {output, _} -> {:error, copy_error(from, tail(output))}
     end
   end
 
