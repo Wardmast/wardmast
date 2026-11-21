@@ -119,6 +119,34 @@ defmodule Wardmast.Worker.Image.PublishLedger do
   def last_ref(_repo, _opts), do: nil
 
   @doc """
+  Like `last_ref/2`, but says why there is no ref: `{:ok, ref}`, `:never_published` (the
+  ledger has nothing for the repo), `{:error, :no_ref_recorded}` (the repo has entries from
+  before digests were kept) or `{:error, {:ledger_unreadable, reason}}` (the file exists but
+  cannot be decoded, which is NOT the same as "never published").
+  """
+  @spec lookup(String.t() | nil, keyword()) ::
+          {:ok, String.t()} | :never_published | {:error, term()}
+  def lookup(repo, opts \\ [])
+
+  def lookup(repo, opts) when is_binary(repo) do
+    with file when is_binary(file) <- path(opts),
+         {:ok, entries} <- read_status(file) do
+      mine = entries |> Map.values() |> Enum.filter(&(elem(&1.key, 0) == repo))
+
+      case last_ref(repo, opts) do
+        ref when is_binary(ref) -> {:ok, ref}
+        _ when mine == [] -> :never_published
+        _ -> {:error, :no_ref_recorded}
+      end
+    else
+      nil -> :never_published
+      {:error, reason} -> {:error, {:ledger_unreadable, reason}}
+    end
+  end
+
+  def lookup(_repo, _opts), do: :never_published
+
+  @doc """
   SI11: per repo, its newest publish as the doctor's `image <repo>` row shows it:
   `%{repo, ref, at, providers, clis, seed}` (the last three are `nil` for a publish
   recorded before they were kept). `[]` while the ledger is off.
@@ -153,17 +181,24 @@ defmodule Wardmast.Worker.Image.PublishLedger do
   end
 
   defp read(file) do
-    case File.read(file) do
-      {:ok, bin} -> decode(bin, file)
-      {:error, :enoent} -> %{}
+    case read_status(file) do
+      {:ok, entries} -> entries
       {:error, reason} -> warn_unreadable(file, reason)
     end
   end
 
-  defp decode(bin, file) do
+  defp read_status(file) do
+    case File.read(file) do
+      {:ok, bin} -> decode(bin)
+      {:error, :enoent} -> {:ok, %{}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp decode(bin) do
     case safe_decode(bin) do
       %{} = entries ->
-        clean(entries)
+        {:ok, clean(entries)}
 
       _ ->
         # An entry written before the Arbiter -> Wardmast rename names `Arbiter.*`
@@ -171,9 +206,9 @@ defmodule Wardmast.Worker.Image.PublishLedger do
         # those atoms to their current names and try once more.
         with rewritten when rewritten != bin <- rewrite_legacy_atoms(bin),
              %{} = entries <- safe_decode(rewritten) do
-          clean(entries)
+          {:ok, clean(entries)}
         else
-          _ -> warn_unreadable(file, :undecodable)
+          _ -> {:error, :undecodable}
         end
     end
   end
@@ -270,9 +305,20 @@ defmodule Wardmast.Worker.Image.PublishLedger do
     end
   end
 
-  # sobelow_skip ["Misc.BinToTerm"]
+  # The ledger is this host's own file, written only by `write/2`, never user input, so
+  # atom exhaustion is not a concern. `:safe` alone refuses any atom the VM has not
+  # loaded yet (a ctx key from a module not touched since boot), which made a fresh
+  # server read a valid ledger as empty ("never_published"). Try `:safe` first, then the
+  # plain decode for exactly that case.
   defp safe_decode(bin) do
     :erlang.binary_to_term(bin, [:safe])
+  rescue
+    ArgumentError -> trusted_decode(bin)
+  end
+
+  # sobelow_skip ["Misc.BinToTerm"]
+  defp trusted_decode(bin) do
+    :erlang.binary_to_term(bin)
   rescue
     ArgumentError -> nil
   end

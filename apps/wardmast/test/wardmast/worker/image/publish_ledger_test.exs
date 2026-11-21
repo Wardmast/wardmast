@@ -141,4 +141,61 @@ defmodule Wardmast.Worker.Image.PublishLedgerTest do
     defp contains_struct?(t) when is_tuple(t), do: t |> Tuple.to_list() |> contains_struct?()
     defp contains_struct?(_), do: false
   end
+
+  describe "lookup/2 right after a boot" do
+    # An entry whose ctx holds an atom this VM has not loaded yet (a module not touched
+    # since boot). `binary_to_term(.., [:safe])` refuses it, which read as an empty
+    # ledger: "never_published" minutes after a publish (bd-6ikux3).
+    defp ledger_with_unloaded_atom(tmp) do
+      file = Path.join(tmp, "ledger.term")
+      placeholder = :ZZplaceholderatomAAAAAAAAAAAA
+      key = {"vstim", "/r"}
+
+      entry = %{
+        key: key,
+        ctx: %{repo: "vstim", repo_path: "/r", extra: placeholder},
+        at: ~U[2026-11-03 09:52:41Z],
+        ref: "reg/vstim@sha256:abc"
+      }
+
+      real = String.duplicate("q", byte_size(Atom.to_string(placeholder)))
+
+      bin =
+        :binary.replace(
+          :erlang.term_to_binary(%{key => entry}),
+          "ZZplaceholderatomAAAAAAAAAAAA",
+          real
+        )
+
+      File.write!(file, bin)
+
+      assert_raise ArgumentError, fn -> :erlang.binary_to_term(bin, [:safe]) end
+      file
+    end
+
+    test "a valid ledger holding a not-yet-loaded atom still yields the ref", %{tmp_dir: tmp} do
+      file = ledger_with_unloaded_atom(tmp)
+      assert {:ok, "reg/vstim@sha256:abc"} = PublishLedger.lookup("vstim", ledger: file)
+      assert "reg/vstim@sha256:abc" == PublishLedger.last_ref("vstim", ledger: file)
+    end
+
+    test "an undecodable ledger is reported as unreadable, not never_published", %{tmp_dir: tmp} do
+      file = Path.join(tmp, "ledger.term")
+      File.write!(file, "not a term")
+
+      assert {:error, {:ledger_unreadable, :undecodable}} =
+               PublishLedger.lookup("vstim", ledger: file)
+    end
+
+    test "absent, empty-for-repo and ref-less ledgers are told apart", %{tmp_dir: tmp} do
+      file = Path.join(tmp, "ledger.term")
+      assert :never_published = PublishLedger.lookup("vstim", ledger: file)
+
+      PublishLedger.record(%{repo: "other", repo_path: "/o"}, ledger: file, ref: "x@sha256:1")
+      assert :never_published = PublishLedger.lookup("vstim", ledger: file)
+
+      PublishLedger.record(%{repo: "vstim", repo_path: "/r"}, ledger: file)
+      assert {:error, :no_ref_recorded} = PublishLedger.lookup("vstim", ledger: file)
+    end
+  end
 end
