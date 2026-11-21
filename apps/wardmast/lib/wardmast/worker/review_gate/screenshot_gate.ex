@@ -376,6 +376,9 @@ defmodule Wardmast.Worker.ReviewGate.ScreenshotGate do
   defp side(%{status: :ok, file: file}), do: file
   defp side(%{status: :absent, reason: reason}), do: reason
 
+  defp side(%{status: :withheld, rule: rule}),
+    do: "withheld by the data-safety scan: #{rule} (no image; do not ask for one)"
+
   defp send_back_findings(%Failure{code: :manifest_missing}) do
     """
     - **High**: this change touches the repo's UI paths but you gave no screenshots manifest.

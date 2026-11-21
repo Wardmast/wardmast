@@ -179,17 +179,21 @@ defmodule Wardmast.Accounts.LoginCompletionTest do
     assert [_one] = active_credentials(account.id)
   end
 
-  test "codex has no quota grant: no credential row, no poll, still records history",
+  test "codex records a credential reference so `arb account show` lists it, but does not poll",
        %{dir: dir} do
-    write_grant(dir, :codex)
-    {:ok, _} = Accounts.create_account(%{provider: :codex, slug: "cx"})
+    path = write_grant(dir, :codex)
+    {:ok, account} = Accounts.create_account(%{provider: :codex, slug: "cx"})
     test_pid = self()
 
-    assert {:ok, %{credential: :unsupported}} =
+    assert {:ok, %{credential: :referenced}} =
              LoginCompletion.complete(info(:codex, "cx", dir),
                outcome: :succeeded,
                quota_refresh: fn id -> send(test_pid, {:quota_poll, id}) end
              )
+
+    assert [credential] = active_credentials(account.id)
+    assert credential.kind == :cli_credentials_path
+    assert credential.secret == path
 
     refute_received {:quota_poll, _}
     assert [record] = LoginRecord |> Ash.read!() |> Enum.filter(&(&1.account == "cx"))

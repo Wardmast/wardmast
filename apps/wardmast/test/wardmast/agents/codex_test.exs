@@ -639,7 +639,7 @@ defmodule Wardmast.Agents.CodexTest do
       assert :skipped = Codex.auth_probe(api_key: "sk-proj-test-key")
     end
 
-    test "honours CODEX_HOME for ChatGPT auth in auth_probe" do
+    test "reads the Codex source home for ChatGPT auth in auth_probe" do
       home_dir =
         Path.join(System.tmp_dir!(), "arbiter_codex_home_#{System.unique_integer([:positive])}")
 
@@ -650,16 +650,16 @@ defmodule Wardmast.Agents.CodexTest do
         Jason.encode!(%{"tokens" => %{"access_token" => "tok-codex-home"}})
       )
 
-      prev_home = System.get_env("CODEX_HOME")
+      prev_home = Application.get_env(:wardmast, :worker_codex_source_home)
       prev_cfg = Application.get_env(:wardmast, :codex_quota)
 
       Application.put_env(:wardmast, :codex_quota, [])
-      System.put_env("CODEX_HOME", home_dir)
+      Application.put_env(:wardmast, :worker_codex_source_home, home_dir)
 
       on_exit(fn ->
         case prev_home do
-          nil -> System.delete_env("CODEX_HOME")
-          v -> System.put_env("CODEX_HOME", v)
+          nil -> Application.delete_env(:wardmast, :worker_codex_source_home)
+          v -> Application.put_env(:wardmast, :worker_codex_source_home, v)
         end
 
         case prev_cfg do

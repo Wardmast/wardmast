@@ -25,6 +25,33 @@ defmodule Wardmast.Accounts.LoginRecipesTest do
     Task.await(task, 10_000)
   end
 
+  describe "config_dir/2" do
+    setup do
+      prev = Application.get_env(:wardmast, :worker_codex_source_home)
+      Application.put_env(:wardmast, :worker_codex_source_home, "/srv/codex-source")
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:wardmast, :worker_codex_source_home, prev),
+          else: Application.delete_env(:wardmast, :worker_codex_source_home)
+      end)
+    end
+
+    test "the default Codex account logs in to the source home polls and workers read" do
+      assert LoginRecipes.config_dir(:codex, "default") == "/srv/codex-source"
+    end
+
+    test "other Codex accounts keep an isolated per-account dir, never the shared home" do
+      dir = LoginRecipes.config_dir(:codex, "second")
+      assert dir == Path.join(Wardmast.Config.Paths.accounts_root(), "codex-second")
+    end
+
+    test "other providers always use the per-account dir" do
+      assert LoginRecipes.config_dir(:claude, "default") ==
+               Path.join(Wardmast.Config.Paths.accounts_root(), "claude-default")
+    end
+  end
+
   describe "registry" do
     test "claude, codex and grok enabled, agy unsupported" do
       assert {:ok, %LoginRecipe{provider: :claude}} = LoginRecipes.fetch(:claude)
