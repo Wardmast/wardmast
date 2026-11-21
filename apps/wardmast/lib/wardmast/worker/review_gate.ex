@@ -1215,6 +1215,11 @@ defmodule Wardmast.Worker.ReviewGate do
       # ADDRESSED answers stood in for the reviewer's own DISPOSITIONS block.
       disposition_check: nil,
       disposition_source: nil,
+      # bd-9isy6t: the findings of a PARTIAL REQUEST_CHANGES pass that is being
+      # re-prompted for a fully-verified pass. Handed to that verifier so it must
+      # confirm or refute each one rather than a fresh mind silently overruling a
+      # reproduced defect it never looked at. Per-round: cleared on advance.
+      partial_findings: nil,
       # bd-9zuvbh: which verdict guard (G9-G12) turned this round's verdict
       # down, when the reject currently being routed came from `fail_closed/3`
       # rather than from a reviewer that really said REQUEST_CHANGES. Only
@@ -5385,6 +5390,7 @@ defmodule Wardmast.Worker.ReviewGate do
         attempt: 0,
         disposition_check: nil,
         disposition_source: nil,
+        partial_findings: nil,
         verdict_scan: nil,
         verdict_scans: [],
         no_verdict_causes: [],
@@ -6719,16 +6725,23 @@ defmodule Wardmast.Worker.ReviewGate do
     spec = verdict_guard_spec(name, ctx)
     stop_worker(state)
 
+    # bd-9isy6t: a PARTIAL REQUEST_CHANGES is a real pass with real findings. The
+    # verifier is handed them (it must confirm or refute each), and the pass is
+    # recorded as its own round once the re-prompt actually spawns.
+    carried = if name == :partial_verification, do: findings
+    launch_state = %{state | retries_left: budget - 1, partial_findings: carried}
+
     case launch_worker(
-           %{state | retries_left: budget - 1},
+           launch_state,
            reprompt_retry_id(state),
            :reviewer,
-           verdict_reprompt_prompt(state, spec.reason),
+           verdict_reprompt_prompt(launch_state, spec.reason),
            state.command
          ) do
-      {:ok, state} ->
-        Logger.info(spec.logs.retry.(state))
-        {:reprompt, state}
+      {:ok, launched} ->
+        if carried, do: record_partial_pass(state, spec, findings)
+        Logger.info(spec.logs.retry.(launched))
+        {:reprompt, launched}
 
       {:error, spawn_error} ->
         # NOTE: `state` here is the pre-launch state — a retry that never
@@ -6754,6 +6767,15 @@ defmodule Wardmast.Worker.ReviewGate do
 
   defp run_verdict_guard(name, state, findings, ctx),
     do: exhausted_verdict_guard(name, state, findings, ctx)
+
+  # bd-9isy6t: persist the partial pass's own verdict + (bannered) findings as a
+  # round BEFORE the re-prompt supersedes it. Without this the pass left no trace
+  # (`review_gate_rounds_list` showed only the verifier's APPROVE) even though it
+  # had reproduced a defect. Takes the PRE-launch state so `pass_usage/1` still
+  # resolves the partial pass's own run, not the re-prompt's.
+  defp record_partial_pass(state, spec, findings) do
+    record_round(state, :review, spec.verdict, spec.banner.(findings), converged: false)
+  end
 
   defp exhausted_verdict_guard(name, state, findings, ctx) do
     spec = verdict_guard_spec(name, ctx)
@@ -7486,7 +7508,7 @@ defmodule Wardmast.Worker.ReviewGate do
     cond do
       role != :review -> nil
       verdict == :timed_out -> 0
-      true -> count_findings(findings)
+      true -> count_findings(findings, verdict)
     end
   end
 
@@ -7583,9 +7605,9 @@ defmodule Wardmast.Worker.ReviewGate do
   # `findings_present?/1` heuristic used to decide whether a REQUEST_CHANGES
   # verdict is actionable at all.
   @finding_item ~r/^\s*(?:[-*]|\d+[.)])\s+\S/
-  defp count_findings(nil), do: nil
+  defp count_findings(nil, _verdict), do: nil
 
-  defp count_findings(findings) when is_binary(findings) do
+  defp count_findings(findings, verdict) when is_binary(findings) do
     items =
       findings
       |> String.split("\n")
@@ -7598,6 +7620,9 @@ defmodule Wardmast.Worker.ReviewGate do
     cond do
       items > 0 -> items
       String.trim(findings) == "" -> 0
+      # bd-9isy6t: an APPROVE that enumerates nothing raised no findings; the
+      # prose-fallback `1` is for a REQUEST_CHANGES whose findings are free text.
+      verdict == :approve -> 0
       true -> 1
     end
   end
@@ -9472,6 +9497,41 @@ defmodule Wardmast.Worker.ReviewGate do
     end
   end
 
+  # bd-9isy6t: the partial pass may have REPRODUCED a defect (a probe that
+  # printed the failure) and flagged PARTIAL only about an unrelated gap, so its
+  # findings must not be silently overruled by a verifier that never looked at
+  # them. Each is put to the verifier to confirm or refute with evidence.
+  defp prior_findings_block(state) do
+    case Map.get(state, :partial_findings) do
+      findings when is_binary(findings) and findings != "" ->
+        """
+        THE PRIOR PASS'S FINDINGS — you MUST rule on every one of them:
+
+        <<<PRIOR FINDINGS
+        #{findings}
+        PRIOR FINDINGS>>>
+
+        The prior pass may have reproduced these with a real probe, and its
+        `VERIFICATION: PARTIAL` may be about an unrelated gap (e.g. an acceptance
+        criterion whose evidence it could not see). Do NOT drop a finding just
+        because you did not think of it yourself. For EACH one, open the cited
+        file at the cited line, re-run or re-derive its probe against the CURRENT
+        diff, and print exactly one line before your VERDICT:
+
+            PRIOR FINDING <n>: CONFIRMED — <file:line and the evidence you saw>
+            PRIOR FINDING <n>: REFUTED — <file:line and the evidence it is fixed or wrong>
+
+        A CONFIRMED finding is a finding of yours: finish with
+        `VERDICT: REQUEST_CHANGES` and enumerate it. Only `VERDICT: APPROVE` if
+        every prior finding is REFUTED with evidence.
+
+        """
+
+      _ ->
+        ""
+    end
+  end
+
   @doc """
   Build the verdict re-prompt used when a prior pass produced a malformed result:
   a missing sentinel (`:no_verdict`) or a REQUEST_CHANGES with no findings
@@ -9613,7 +9673,7 @@ defmodule Wardmast.Worker.ReviewGate do
         honestly still unable to complete verification — and if so, say exactly
         what could not be confirmed.
 
-    """ <> review_prompt(state)
+    """ <> prior_findings_block(state) <> review_prompt(state)
   end
 
   def verdict_reprompt_prompt(state, :empty_findings) do
