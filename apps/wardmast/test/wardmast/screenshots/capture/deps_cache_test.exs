@@ -111,10 +111,21 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
       hash = :crypto.hash(:sha256, "%{lock: 2}\n") |> Base.encode16(case: :lower)
 
       # base is on main (an ancestor of its tip) but carries the older lock L1.
-      assert {:ok, %{source: ^tip, lock_hash: ^hash}} = plan(repo, base, head)
+      # The before side boots the merge-base's tree (lock L1), so it has its own source.
+      assert {:ok, %{source: ^tip, lock_hash: ^hash, base: %{source: ^base} = base_source}} =
+               plan(repo, base, head)
+
+      assert base_source.lock == "%{lock: 1}\n"
+      refute base_source.lock_hash == hash
     end
 
-    test "a head that adds a mix.lock identical to the default branch's tip is trusted", %{
+    test "a head with the merge-base's own lockfile needs no second source", %{tmp_dir: dir} do
+      {repo, base, head} = branch!(dir, %{})
+      assert {:ok, %{source: ^base, base: nil}} = plan(repo, base, head)
+    end
+
+    # The before side would boot a tree with no lockfile against deps fetched for one.
+    test "a merge-base with no lockfile is skipped even when the head carries the tip's", %{
       tmp_dir: dir
     } do
       {repo, base, head} =
@@ -124,7 +135,21 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
       git!(repo, ["checkout", "-q", "main"])
       tip = commit!(repo, %{"mix.lock" => "%{lock: 1}\n"}, "main adds a lockfile")
       push!(repo)
-      assert {:ok, %{source: ^tip}} = plan(repo, base, head)
+      assert tip
+      assert {:skip, reason} = plan(repo, base, head)
+      assert reason =~ "adds a mix.lock"
+    end
+
+    test "a head on the tip's lockfile, a merge-base off the default branch with another: skipped",
+         %{tmp_dir: dir} do
+      {repo, _base, _head} = branch!(dir, %{})
+      git!(repo, ["checkout", "-q", "-b", "elsewhere", "main"])
+      off = commit!(repo, %{"mix.lock" => "%{lock: 9}\n"}, "off-branch lock")
+      git!(repo, ["checkout", "-q", "-b", "pr", off])
+      head = commit!(repo, %{"mix.lock" => "%{lock: 1}\n"}, "pr takes main's lock")
+
+      assert {:skip, reason} = plan(repo, off, head)
+      assert reason =~ "not on main"
     end
 
     test "a head lockfile that neither the base nor the tip has is still skipped", %{
@@ -297,6 +322,28 @@ defmodule Wardmast.Screenshots.Capture.DepsCacheTest do
 
       # Nothing of the seed's work is left beside the cache.
       assert Enum.reject(File.ls!(ctx.root), &(&1 == "repos")) == [Path.basename(cache.dir)]
+    end
+
+    # bd-5eegxz: a branch that merged a lockfile bump has the tip's lock; the merge-base it was
+    # handed is older. The before boot (the merge-base's tree, its own lock) must get deps of
+    # that lock, not the head's: Mix aborts on a lock mismatch.
+    test "a stale merge-base gets its own cache, seeded from its own lockfile", ctx do
+      git!(ctx.repo, ["checkout", "-q", "main"])
+      commit!(ctx.repo, %{"mix.lock" => "%{lock: 2}\n"}, "main bumps")
+      push!(ctx.repo)
+      git!(ctx.repo, ["checkout", "-q", "feature"])
+      git!(ctx.repo, ["merge", "-q", "--no-edit", "main"])
+      head = git!(ctx.repo, ["rev-parse", "HEAD"])
+
+      assert {:ok, cache} = DepsCache.prepare(input(ctx.repo, ctx.base, head), ctx.opts)
+      assert %{before: before} = cache
+      assert before.dir != cache.dir
+      assert File.regular?(Path.join(before.dir, ".complete"))
+      assert File.regular?(Path.join(cache.dir, ".complete"))
+      assert File.read!(ctx.log) == "seeded\nseeded\n"
+
+      assert {:ok, ^cache} = DepsCache.prepare(input(ctx.repo, ctx.base, head), ctx.opts)
+      assert File.read!(ctx.log) == "seeded\nseeded\n"
     end
 
     test "the boot is pointed at the cache: offline, and the asset tools linked", ctx do

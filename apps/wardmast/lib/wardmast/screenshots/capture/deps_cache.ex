@@ -14,8 +14,15 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   **or at the default branch's current tip** (bd-5eegxz: a branch that merged main after main
   bumped its lockfile carries the tip's, whatever older merge-base it was handed). Neither: a
   head that edits, adds or deletes `mix.lock` is `{:skip, reason}` (`skip_kind: deps_changed`),
-  and nothing is fetched for it. **The head's own `mix.exs` and lockfile never run with a network.** Running the source's
-  (`mix deps.get` evaluates the project's `mix.exs`) is the same trust as merging it.
+  and nothing is fetched for it. **The head's own `mix.exs` and lockfile never run with a
+  network.** Running the source's (`mix deps.get` evaluates the project's `mix.exs`) is the same
+  trust as merging it.
+
+  The before side boots the merge-base's own tree, whose `mix.lock` Mix checks its deps against
+  (a mismatch aborts the boot, and there is no network to recover). So when the merge-base's
+  lockfile is not the head's, it gets a cache of its own, seeded from its own lockfile (`:base` in
+  the plan, `:before` in the cache): that lockfile must itself be one the default branch has had
+  (the merge-base is an ancestor of its tip), else the capture is skipped as `deps_changed`.
 
   ## The cache (`prepare/2`)
 
@@ -126,8 +133,17 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
           deps: String.t(),
           build: String.t(),
           env: [{String.t(), String.t()}],
-          links: [{String.t(), String.t()}]
+          links: [{String.t(), String.t()}],
+          before: t_cache() | nil
         }
+
+  @typep t_cache :: %{
+           dir: String.t(),
+           deps: String.t(),
+           build: String.t(),
+           env: [{String.t(), String.t()}],
+           links: [{String.t(), String.t()}]
+         }
 
   @doc "What the seed runs in the source tree (for the docs and tests)."
   @spec seed_script() :: String.t()
@@ -151,7 +167,13 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
   @spec plan(String.t(), String.t(), String.t(), String.t(), keyword()) ::
           {:ok,
            :none
-           | %{source: String.t(), lock_hash: String.t(), lock: binary(), repo: String.t()}}
+           | %{
+               source: String.t(),
+               lock_hash: String.t(),
+               lock: binary(),
+               repo: String.t(),
+               base: nil | map()
+             }}
           | {:skip, String.t()}
           | {:error, String.t()}
   def plan(repo, base, head, default_branch, opts \\ []) do
@@ -190,10 +212,35 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
           {:skip, not_trusted(base_lock, on_branch?, branch)}
 
         source ->
-          {:ok, %{source: source, lock_hash: digest(head_lock), lock: head_lock, repo: trusted}}
+          # The before side boots the merge-base's own tree, whose `mix.lock` Mix checks the deps
+          # against: when it is not the head's, it needs deps of its own, fetched from its own
+          # (default-branch) lockfile, never the head's (a lock mismatch aborts the boot).
+          with {:ok, base_source} <-
+                 base_source(trusted, base, base_lock, head_lock, on_branch?, branch) do
+            {:ok, Map.put(source_map(trusted, source, head_lock), :base, base_source)}
+          end
       end
     end
   end
+
+  defp source_map(trusted, source, lock),
+    do: %{source: source, lock_hash: digest(lock), lock: lock, repo: trusted}
+
+  # `nil`: the base's lockfile is the head's, one cache serves both sides.
+  defp base_source(_trusted, _base, {:ok, lock}, lock, _on_branch?, _branch), do: {:ok, nil}
+
+  defp base_source(_trusted, _base, :none, _lock, _on_branch?, branch),
+    do: {:skip, not_trusted(:none, false, branch)}
+
+  defp base_source(trusted, base, {:ok, base_lock}, _head_lock, true, branch) do
+    # Only a lockfile the default branch has had: the trusted repository's, not the worker's copy.
+    if lock_at(trusted, base) == {:ok, base_lock},
+      do: {:ok, source_map(trusted, base, base_lock)},
+      else: {:skip, not_trusted({:ok, base_lock}, true, branch)}
+  end
+
+  defp base_source(_trusted, _base, base_lock, _head_lock, false, branch),
+    do: {:skip, not_trusted(base_lock, false, branch)}
 
   defp not_trusted(:none, _on_branch?, _branch), do: changed("adds a mix.lock")
   defp not_trusted(_base_lock, true, _branch), do: changed("edits mix.lock")
@@ -314,7 +361,20 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
            plan(input.repo_path, input.base_sha, input.head_sha, input.default_branch, opts),
          root = root(opts),
          :ok <- mkdir(root),
-         {:ok, toolchain} <- fingerprint(input, source, root) do
+         {:ok, cache} <- seed_cache(input, source, root, opts),
+         {:ok, before_cache} <- seed_base(input, source.base, root, opts) do
+      {:ok, Map.put(cache, :before, before_cache)}
+    else
+      {:ok, :none} -> {:ok, nil}
+      other -> other
+    end
+  end
+
+  defp seed_base(_input, nil, _root, _opts), do: {:ok, nil}
+  defp seed_base(input, base, root, opts), do: seed_cache(input, base, root, opts)
+
+  defp seed_cache(input, source, root, opts) do
+    with {:ok, toolchain} <- fingerprint(input, source, root) do
       dir =
         Path.join(
           root,
@@ -324,9 +384,6 @@ defmodule Wardmast.Screenshots.Capture.DepsCache do
       with :ok <- ensure(dir, input, source, opts) do
         {:ok, cache(dir)}
       end
-    else
-      {:ok, :none} -> {:ok, nil}
-      other -> other
     end
   end
 

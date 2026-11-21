@@ -335,6 +335,25 @@ defmodule Wardmast.Screenshots.CaptureServicesTest do
       assert_received {:boot_spec, "after", _, ^cache}
     end
 
+    # bd-5eegxz: the merge-base's tree has its own lockfile when the head merged a bump, so the
+    # before boot gets the cache seeded for it, and the after boot the head's.
+    test "the before boot gets its own cache when the merge-base's lockfile differs", %{
+      tmp_dir: dir
+    } do
+      config = %{@config | deps: %{"mix" => true}}
+      before = %{dir: "/cache/base", env: [{"HEX_OFFLINE", "1"}], links: []}
+      head = %{dir: "/cache/head", env: [{"HEX_OFFLINE", "1"}], links: []}
+
+      assert {:ok, _} =
+               run(dir, plan!(dir, [%{"id" => "home", "path" => "/"}]),
+                 config: config,
+                 deps_opts: [test_pid: self(), answer: {:ok, Map.put(head, :before, before)}]
+               )
+
+      assert_received {:boot_spec, "before", _, ^before}
+      assert_received {:boot_spec, "after", _, ^head}
+    end
+
     # bd-ur1zty: the seed is built from the config's own values, under the boot's MIX_ENV.
     test "the seed is asked for the boot's MIX_ENV and the config's own env", %{tmp_dir: dir} do
       config = %{

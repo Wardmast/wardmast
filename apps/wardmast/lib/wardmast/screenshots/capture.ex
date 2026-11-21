@@ -397,7 +397,21 @@ defmodule Wardmast.Screenshots.Capture do
     end)
   end
 
-  defp boot_and_shoot(st, role, seed, group, work, checkout) do
+  # bd-5eegxz: the before side boots the merge-base's own tree, so it gets the deps fetched for
+  # the merge-base's lockfile when that is not the head's (`DepsCache.prepare/2` puts it at
+  # `:before`); a lock mismatch aborts a Mix boot.
+  defp role_cache(%{before: %{} = before}, "before"), do: before
+  defp role_cache(%{} = cache, _role), do: Map.delete(cache, :before)
+  defp role_cache(cache, _role), do: cache
+
+  defp boot_and_shoot(
+         st,
+         role,
+         seed,
+         group,
+         work,
+         checkout
+       ) do
     scratch = Path.join(work, "scratch-#{seed || "default"}")
     File.mkdir_p!(scratch)
 
@@ -410,7 +424,7 @@ defmodule Wardmast.Screenshots.Capture do
       task_id: st.input.task_id,
       sandbox: st.sandbox,
       ctx: st.ctx,
-      deps: st.deps_cache
+      deps: role_cache(st.deps_cache, role)
     }
 
     # bd-3glf2a: this boot's own services, up before anything of the app runs and stopped after
