@@ -4635,8 +4635,28 @@ defmodule Wardmast.Worker.ReviewGate do
   # instead of growing without bound.
   defp accumulate_open_findings(state, findings) do
     carried = ReviewFindings.carry_over(Map.get(state, :open_findings, []), findings)
-    %{state | open_findings: carried ++ ReviewFindings.extract(findings, state.round)}
+    %{state | open_findings: carried ++ renumber_past(carried, findings, state.round)}
   end
+
+  # bd-9isy6t: a PARTIAL pass's findings are carried into the re-prompt under
+  # THIS round's ids (`F<round>.<n>`). If the verifier then rejects with findings
+  # of its own, extracting them under the same round would reuse those ids, so
+  # the new ones continue the numbering past the highest same-round id already
+  # carried. Outside that case nothing carried shares the round and this is
+  # `ReviewFindings.extract/2` unchanged.
+  defp renumber_past(carried, findings, round) do
+    offset =
+      carried
+      |> Enum.filter(&(&1.round == round))
+      |> Enum.map(&finding_index/1)
+      |> Enum.max(fn -> 0 end)
+
+    findings
+    |> ReviewFindings.extract(round)
+    |> Enum.map(fn f -> %{f | id: "F#{round}.#{finding_index(f) + offset}"} end)
+  end
+
+  defp finding_index(%{id: id}), do: id |> String.split(".") |> List.last() |> String.to_integer()
 
   defp do_route_after_reject(%{round: round, max_rounds: max} = state, findings)
        when round >= max do
@@ -6728,8 +6748,21 @@ defmodule Wardmast.Worker.ReviewGate do
     # bd-9isy6t: a PARTIAL REQUEST_CHANGES is a real pass with real findings. The
     # verifier is handed them (it must confirm or refute each), and the pass is
     # recorded as its own round once the re-prompt actually spawns.
+    #
+    # The findings also join `open_findings`, the set an APPROVE is measured
+    # against (`approval_gap/2`): a verifier that prints a bare APPROVE without
+    # dispositioning them hits the `:unaddressed_findings` guard instead of
+    # merging over a reproduced defect. They stay open for every later re-prompt
+    # of the round (`:no_verdict`, `:empty_findings`, ...), which all embed
+    # `review_prompt/1` and so its open-findings briefing.
     carried = if name == :partial_verification, do: findings
-    launch_state = %{state | retries_left: budget - 1, partial_findings: carried}
+
+    launch_state = %{
+      state
+      | retries_left: budget - 1,
+        partial_findings: carried,
+        open_findings: open_findings_with_partial(state, carried)
+    }
 
     case launch_worker(
            launch_state,
@@ -6773,6 +6806,12 @@ defmodule Wardmast.Worker.ReviewGate do
   # (`review_gate_rounds_list` showed only the verifier's APPROVE) even though it
   # had reproduced a defect. Takes the PRE-launch state so `pass_usage/1` still
   # resolves the partial pass's own run, not the re-prompt's.
+  defp open_findings_with_partial(state, nil), do: Map.get(state, :open_findings, [])
+
+  defp open_findings_with_partial(state, findings) do
+    Map.get(state, :open_findings, []) ++ ReviewFindings.extract(findings, state.round)
+  end
+
   defp record_partial_pass(state, spec, findings) do
     record_round(state, :review, spec.verdict, spec.banner.(findings), converged: false)
   end
@@ -9507,23 +9546,23 @@ defmodule Wardmast.Worker.ReviewGate do
         """
         THE PRIOR PASS'S FINDINGS — you MUST rule on every one of them:
 
-        <<<PRIOR FINDINGS
-        #{findings}
-        PRIOR FINDINGS>>>
-
-        The prior pass may have reproduced these with a real probe, and its
+        The prior pass may have reproduced real defects with a probe, and its
         `VERIFICATION: PARTIAL` may be about an unrelated gap (e.g. an acceptance
-        criterion whose evidence it could not see). Do NOT drop a finding just
-        because you did not think of it yourself. For EACH one, open the cited
-        file at the cited line, re-run or re-derive its probe against the CURRENT
-        diff, and print exactly one line before your VERDICT:
+        criterion whose evidence it could not see). Its findings are listed, each
+        with an id, under OPEN FINDINGS CARRIED FORWARD below. Do NOT drop one just
+        because you did not think of it yourself. For EACH, open the cited file at
+        the cited line, re-run or re-derive its probe against the CURRENT diff, and
+        answer it in the DISPOSITIONS block:
 
-            PRIOR FINDING <n>: CONFIRMED — <file:line and the evidence you saw>
-            PRIOR FINDING <n>: REFUTED — <file:line and the evidence it is fixed or wrong>
+          * still present → `[NOT ADDRESSED] <id> — <file:line and the evidence you
+            saw>`, and finish with `VERDICT: REQUEST_CHANGES`, enumerating it;
+          * wrong, or not reproducible in this diff → `[OBSOLETE] <id> — <the
+            evidence, e.g. the probe's output, that shows it is wrong>`;
+          * already fixed in the CURRENT code → `[ADDRESSED] <id> — <file:line>`.
 
-        A CONFIRMED finding is a finding of yours: finish with
-        `VERDICT: REQUEST_CHANGES` and enumerate it. Only `VERDICT: APPROVE` if
-        every prior finding is REFUTED with evidence.
+        A `VERDICT: APPROVE` that does not disposition every one of these ids will
+        NOT be honored: the gate treats it as malformed, exactly like a missing
+        `VERDICT:` line.
 
         """
 

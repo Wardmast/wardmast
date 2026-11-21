@@ -3112,6 +3112,43 @@ defmodule Wardmast.Worker.ReviewGateTest do
       assert second.finding_count == 0
     end
 
+    # bd-9isy6t: the partial pass's findings join the open-finding set, so a
+    # re-prompt that ignores them cannot merge — the original vs-clxool incident.
+    test "a PARTIAL REQUEST_CHANGES followed by a bare APPROVE does not merge and routes the carried finding to the implementer",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_command: [@partial_verification, "APPROVE_BARE"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(
+        fn -> match?(%{state: :finished, outcome: :failed}, Worker.state(pid)) end,
+        10_000
+      )
+
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
+      assert Worker.state(pid).meta.review_gate_findings =~ "stale contract id on error"
+    end
+
     test "a PARTIAL APPROVE is not recorded as a pass of its own by the re-prompt path",
          %{repo: repo, ws: ws} do
       task = new_task(ws)
@@ -3158,25 +3195,28 @@ defmodule Wardmast.Worker.ReviewGateTest do
          %{ws: ws} do
       task = new_task(ws)
 
+      partial = "- [P2] test/support/owned_tasks.ex:101 waits on the coordinator, not the workers"
+
       state =
         state_for(task, ws, %{
-          partial_findings:
-            "- [P2] test/support/owned_tasks.ex:101 waits on the coordinator, not the workers"
+          partial_findings: partial,
+          open_findings: Wardmast.Worker.ReviewFindings.extract(partial, 1)
         })
 
       prompt = ReviewGate.verdict_reprompt_prompt(state, :unverified)
 
       assert prompt =~ "owned_tasks.ex:101 waits on the coordinator"
-      assert prompt =~ "CONFIRMED"
-      assert prompt =~ "REFUTED"
-      assert prompt =~ "PRIOR FINDING"
+      assert prompt =~ "F1.1"
+      assert prompt =~ "[OBSOLETE]"
+      assert prompt =~ "[NOT ADDRESSED]"
+      assert prompt =~ "THE PRIOR PASS"
     end
 
     test "verdict_reprompt_prompt/2 :unverified without carried findings has no prior-findings block",
          %{ws: ws} do
       task = new_task(ws)
       prompt = ReviewGate.verdict_reprompt_prompt(state_for(task, ws), :unverified)
-      refute prompt =~ "PRIOR FINDING"
+      refute prompt =~ "THE PRIOR PASS"
     end
 
     # bd-869mmg: reproduces the TEXT shape of the bd-atyrrq / run 72947341
