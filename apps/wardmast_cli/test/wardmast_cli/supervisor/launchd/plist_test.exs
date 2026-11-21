@@ -132,6 +132,66 @@ defmodule WardmastCli.Supervisor.Launchd.PlistTest do
     end
   end
 
+  describe "data home pin (bd-56wi24)" do
+    setup do
+      prior = {System.get_env("WARDMAST_DATA_HOME"), System.get_env("ARB_DATA_HOME")}
+      System.delete_env("WARDMAST_DATA_HOME")
+      System.delete_env("ARB_DATA_HOME")
+
+      on_exit(fn ->
+        {w, a} = prior
+        restore_env("WARDMAST_DATA_HOME", w)
+        restore_env("ARB_DATA_HOME", a)
+      end)
+    end
+
+    defp restore_env(key, nil), do: System.delete_env(key)
+    defp restore_env(key, value), do: System.put_env(key, value)
+
+    defp env_entry(key, value), do: "<key>#{key}</key>\n    <string>#{value}</string>"
+
+    test "the release agent plist exports WARDMAST_DATA_HOME and ARB_DATA_HOME = arbiter_home" do
+      xml = Plist.plist(arbiter_home: "/Volumes/s/.wardmast")
+
+      assert xml =~ env_entry("WARDMAST_DATA_HOME", "/Volumes/s/.wardmast")
+      assert xml =~ env_entry("ARB_DATA_HOME", "/Volumes/s/.wardmast")
+
+      # never pin HOME: it also locates ~/.claude, git config, Library paths
+      refute xml =~ "<key>HOME</key>"
+    end
+
+    test "the daemon plist exports the data home next to its HOME pin" do
+      xml =
+        Plist.plist(
+          mode: :daemon,
+          user_name: "_wardmast",
+          user_home: "/Users/_wardmast",
+          arbiter_home: "/Users/_wardmast/.wardmast"
+        )
+
+      assert xml =~ env_entry("WARDMAST_DATA_HOME", "/Users/_wardmast/.wardmast")
+      assert xml =~ env_entry("ARB_DATA_HOME", "/Users/_wardmast/.wardmast")
+      assert xml =~ env_entry("HOME", "/Users/_wardmast")
+    end
+
+    test "the dev plist does not export it, and a dev ARB_HOME never leaks into it" do
+      xml = Plist.plist(@opts)
+
+      refute xml =~ "WARDMAST_DATA_HOME"
+      refute xml =~ "ARB_DATA_HOME"
+      assert xml =~ env_entry("ARB_HOME", "/Users/me/dev/wardmast")
+    end
+
+    test "the dev plist exports it only when WARDMAST_DATA_HOME was set explicitly" do
+      System.put_env("WARDMAST_DATA_HOME", "/Volumes/explicit/wm")
+      xml = Plist.plist(@opts)
+
+      assert xml =~ env_entry("WARDMAST_DATA_HOME", "/Volumes/explicit/wm")
+      assert xml =~ env_entry("ARB_DATA_HOME", "/Volumes/explicit/wm")
+      assert xml =~ env_entry("ARB_HOME", "/Users/me/dev/wardmast")
+    end
+  end
+
   describe "daemon mode (system-wide LaunchDaemon)" do
     @daemon_opts [
       mode: :daemon,

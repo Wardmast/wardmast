@@ -4,13 +4,13 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
   """
 
   alias WardmastCli.Client
-  alias WardmastCli.Cmd.InstallService.Unit
+  alias WardmastCli.Cmd.InstallService.{DataHome, Unit}
   alias WardmastCli.Output
   alias WardmastCli.SecretInventory
   alias WardmastCli.Supervisor
   alias WardmastCli.Supervisor.Launchd.Plist
 
-  def emit_installed(:json, scope, path, root, linger, secrets, log_paths) do
+  def emit_installed(:json, scope, path, data_home, linger, secrets, log_paths) do
     {env_path, captured} =
       case secrets do
         {:written, p, keys} -> {p, keys}
@@ -22,7 +22,9 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
       scope: to_string(scope),
       unit: Unit.unit_name(),
       unit_path: path,
-      root: root,
+      root: data_home.path,
+      data_home: data_home.path,
+      data_home_source: to_string(data_home.source),
       linger: to_string(linger),
       env_file: env_path,
       secrets_captured: captured,
@@ -49,9 +51,11 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
     Output.emit_json(base)
   end
 
-  def emit_installed(:text, scope, path, arbiter_home, linger, secrets, log_paths) do
+  def emit_installed(:text, scope, path, data_home, linger, secrets, log_paths) do
+    arbiter_home = data_home.path
     IO.puts("Installed #{Unit.unit_name()} (#{scope} scope).")
     IO.puts("  unit:   #{path}")
+    IO.puts("  data:   #{arbiter_home} (#{DataHome.source_label(data_home.source)})")
     IO.puts("  starts: #{Client.base_url()} at boot")
     IO.puts(secrets_note(secrets))
     IO.puts(at_rest_note(elem(secrets, 1)))
@@ -81,7 +85,7 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
     )
   end
 
-  def emit_installed_launchd(:json, path, secrets) do
+  def emit_installed_launchd(:json, path, secrets, data_home) do
     {env_path, captured} =
       case secrets do
         {:written, p, keys} -> {p, keys}
@@ -93,6 +97,8 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
       scope: "user",
       unit: Plist.label(),
       unit_path: path,
+      data_home: data_home.path,
+      data_home_source: to_string(data_home.source),
       env_file: env_path,
       secrets_captured: captured,
       secrets_at_rest: at_rest_report(env_path),
@@ -103,9 +109,10 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
     })
   end
 
-  def emit_installed_launchd(:text, path, secrets) do
+  def emit_installed_launchd(:text, path, secrets, data_home) do
     IO.puts("Installed #{Plist.label()} (LaunchAgent, user scope).")
     IO.puts("  plist:  #{path}")
+    IO.puts("  data:   #{data_home.path} (#{DataHome.source_label(data_home.source)})")
     IO.puts("  starts: #{Client.base_url()} at login")
     IO.puts(secrets_note(secrets))
     IO.puts(at_rest_note(elem(secrets, 1)))
@@ -132,6 +139,7 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
       service_user: info.account.user,
       service_group: info.account.group,
       data_home: info.arbiter_home,
+      data_home_source: "default",
       log_path: info.log_path,
       env_file: env_path,
       secrets_captured: captured,
@@ -147,7 +155,12 @@ defmodule WardmastCli.Cmd.InstallService.Formatter do
     IO.puts("Installed #{Plist.label()} (LaunchDaemon, system scope).")
     IO.puts("  plist:   #{info.path}")
     IO.puts("  runs as: #{info.account.user}:#{info.account.group} (never root)")
-    IO.puts("  data:    #{info.arbiter_home} (0700, #{info.account.user} only)")
+
+    IO.puts(
+      "  data:    #{info.arbiter_home} (0700, #{info.account.user} only; " <>
+        "#{DataHome.source_label(:default)}: the service account's home)"
+    )
+
     IO.puts("  logs:    #{info.log_path}")
     IO.puts("  starts:  #{Client.base_url()} at boot, before any login")
     IO.puts(secrets_note(secrets))

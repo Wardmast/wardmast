@@ -90,7 +90,7 @@ defmodule WardmastCli.Cmd.InstallService do
   """
 
   alias WardmastCli.ArgParser
-  alias WardmastCli.Cmd.InstallService.{EnvFile, Formatter, Unit}
+  alias WardmastCli.Cmd.InstallService.{DataHome, EnvFile, Formatter, Unit}
   alias WardmastCli.Cmd.InstallService.Launchd, as: LaunchdInstall
   alias WardmastCli.Cmd.{Restart, Start}
   alias WardmastCli.Output
@@ -140,7 +140,8 @@ defmodule WardmastCli.Cmd.InstallService do
     root = resolve_root()
     # Persist the root so `arb start/restart/update` resolve it from any cwd.
     Start.record_home(root)
-    arbiter_home = Unit.arbiter_home_path()
+    data_home = DataHome.resolve(root)
+    arbiter_home = data_home.path
     path = unit_path(scope)
     if Unit.dev_checkout?(root), do: Unit.ensure_run_server_script(root)
     contents = Unit.unit_contents(scope, arbiter_home, root)
@@ -156,7 +157,15 @@ defmodule WardmastCli.Cmd.InstallService do
     if scope == :user, do: enable_logrotate_timer()
     linger = if scope == :user, do: Supervisor.impl().enable_boot_start(), else: :not_applicable
 
-    Formatter.emit_installed(mode, scope, path, arbiter_home, linger, secrets, log_paths)
+    Formatter.emit_installed(
+      mode,
+      scope,
+      path,
+      data_home,
+      linger,
+      secrets,
+      log_paths
+    )
   end
 
   # Create ~/.wardmast/log/, write a logrotate config, and install a user-scoped

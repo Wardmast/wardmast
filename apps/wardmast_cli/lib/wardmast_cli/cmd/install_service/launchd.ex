@@ -34,7 +34,7 @@ defmodule WardmastCli.Cmd.InstallService.Launchd do
   Everything the service manager is asked goes through `Supervisor.impl()`.
   """
 
-  alias WardmastCli.Cmd.InstallService.{EnvFile, Formatter, Unit}
+  alias WardmastCli.Cmd.InstallService.{DataHome, EnvFile, Formatter, Unit}
   alias WardmastCli.Cmd.Start
   alias WardmastCli.Output
   alias WardmastCli.Supervisor
@@ -55,8 +55,11 @@ defmodule WardmastCli.Cmd.InstallService.Launchd do
     root = resolve_root()
     dev? = Unit.dev_checkout?(root)
 
-    arbiter_home = if dev?, do: Unit.arbiter_home_path(), else: release_home(root)
+    # Resolved once: the wrapper, wardmast.env and the plist's pin all use it.
+    data_home = DataHome.resolve(root)
+    arbiter_home = data_home.path
     unless dev?, do: require_release_bin!(arbiter_home)
+    warn_if_shadowing_real_install(data_home)
 
     # Persist the root so `arb start/restart/update` resolve it from any cwd.
     Start.record_home(root)
@@ -71,7 +74,7 @@ defmodule WardmastCli.Cmd.InstallService.Launchd do
     Supervisor.impl().daemon_reload(:user)
     Supervisor.impl().enable_now(:user)
 
-    Formatter.emit_installed_launchd(mode, path, secrets)
+    Formatter.emit_installed_launchd(mode, path, secrets, data_home)
   end
 
   def install(:system, mode, opts) do
@@ -133,18 +136,40 @@ defmodule WardmastCli.Cmd.InstallService.Launchd do
     Formatter.emit_uninstalled_launchd_daemon(mode, path, disabled?, removed?)
   end
 
-  # The data home a release install runs from. The test seam wins; otherwise an
-  # explicit `ARB_HOME` is honoured (`<ARB_HOME>/.wardmast`, or `ARB_HOME`
-  # itself when that is where `current` lives); else the default `~/.wardmast`.
-  defp release_home(root) do
-    nested = Path.join(root, ".wardmast")
+  # The label `com.wardmast.server` is global per user: a scratch install (a
+  # data home that is not the real user's default) bootouts and replaces a real
+  # one. Warn when a plist for the label is already installed.
+  defp warn_if_shadowing_real_install(%{path: data_home}) do
+    real_home = real_user_home() || System.user_home!()
+    real_default = Path.join(real_home, ".wardmast")
+    real_plist = Path.join([real_home, "Library", "LaunchAgents", Plist.file_name()])
+    existing = Enum.find([real_plist, Launchd.agent_plist_path()], &File.exists?/1)
 
-    cond do
-      Process.get(:bd2_arbiter_home) -> Unit.arbiter_home_path()
-      System.get_env("ARB_HOME") in [nil, ""] -> Unit.arbiter_home_path()
-      File.exists?(Plist.release_bin(nested)) -> nested
-      File.exists?(Plist.release_bin(root)) -> root
-      true -> nested
+    if Path.expand(data_home) != Path.expand(real_default) and existing do
+      IO.puts(
+        :stderr,
+        "warning: the data home #{data_home} differs from the real default #{real_default}, " <>
+          "but #{Plist.label()} is already installed (#{existing}). The launchd label is " <>
+          "global per user: this install replaces that job and points it at #{data_home}."
+      )
+    end
+
+    :ok
+  end
+
+  # The login user's real home, from the directory service (the installing
+  # shell's `HOME` may be a scratch dir). `nil` when it cannot be determined.
+  defp real_user_home do
+    with {out, 0} <- Start.run_cmd("id", ["-un"], stderr_to_stdout: true),
+         user when user != "" <- String.trim(out),
+         {out, 0} <-
+           Start.run_cmd("dscl", [".", "-read", "/Users/#{user}", "NFSHomeDirectory"],
+             stderr_to_stdout: true
+           ),
+         [_, home] <- Regex.run(~r/NFSHomeDirectory:\s*(\S.*)$/m, out) do
+      String.trim(home)
+    else
+      _ -> nil
     end
   end
 
