@@ -168,6 +168,8 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     "apps/wardmast/lib/wardmast/worker/podman_readiness.ex" => :scrubbed,
     # bd-c2cew2: the spawn canary builds its scratch git repo for podman (git only).
     "apps/wardmast/lib/wardmast/doctor/spawn_canary.ex" => :pure_tool,
+    # bd-71t1wd: `node --version` for the capture runner probe via `ReleaseEnv.cmd/3`.
+    "apps/wardmast/lib/wardmast/doctor/capture_runner.ex" => :scrubbed,
     "apps/wardmast/lib/wardmast/single_instance.ex" => :pure_tool,
     "apps/wardmast/lib/wardmast/version.ex" => :pure_tool,
     # bd-svczq4: the OS-process-tree kill helpers extracted out of `worker.ex`

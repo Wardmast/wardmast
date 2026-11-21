@@ -6,7 +6,16 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   """
 
   alias WardmastCli.{Client, OperatorSocket, SchedulerState, Workspace}
-  alias WardmastCli.Cmd.Doctor.{Darwin, Distribution, ProviderClis, Scope, SecretsAtRest}
+
+  alias WardmastCli.Cmd.Doctor.{
+    CaptureRunner,
+    Darwin,
+    Distribution,
+    ProviderClis,
+    Scope,
+    SecretsAtRest
+  }
+
   alias WardmastCli.Cmd.Start
 
   defmodule Result do
@@ -154,6 +163,7 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     end)
     |> Kernel.++(if darwin?, do: Darwin.checks(darwin_opts(opts, platform)), else: [])
     |> Kernel.++(ProviderClis.checks(platform["clis"], platform["path_source"]))
+    |> Kernel.++(CaptureRunner.checks(platform["capture_runner"]))
     |> Enum.sort_by(&group_rank(&1.group))
     |> collapse_skipped()
   end
