@@ -1022,6 +1022,53 @@ defmodule Wardmast.NodeAgent.RunTest do
       assert seed_opts[:retarget_to] == worktree_mount["path"]
     end
 
+    test "LegacyCleanup at startup does not break or delete live deps-seed/ scratch used by seed_job (bd-85cmso)",
+         %{opts: opts, home: home} do
+      for d <- ~w(files deps-seed), do: File.mkdir_p!(Path.join([home, d, "pre-si13"]))
+      assert :ok = Wardmast.NodeAgent.LegacyCleanup.run(home)
+      refute File.exists?(Path.join(home, "files"))
+      refute File.exists?(Path.join(home, "deps-seed"))
+
+      test = self()
+
+      layer_fun = fn _shadow, _ref, layer_opts ->
+        # SeedLayer's stamp probe creates its scratch subdir under <home>/deps-seed.
+        stamp_dir = Path.join(layer_opts[:scratch], "stamp-probe")
+        File.mkdir_p!(stamp_dir)
+        assert :skipped = Wardmast.NodeAgent.LegacyCleanup.run(home)
+        assert File.dir?(stamp_dir)
+        File.rm_rf!(stamp_dir)
+        {:fallback, {:lock_mismatch, "checkout-lock", "layer-lock"}}
+      end
+
+      deps_fun = fn _shadow, _image, seed_opts ->
+        work = Path.join(seed_opts[:scratch], "seed-live")
+        File.mkdir_p!(work)
+        live_file = Path.join(work, "tree.tar")
+        File.write!(live_file, "live-scratch")
+
+        # Any later LegacyCleanup call leaves the in-flight seed_job scratch untouched.
+        assert :skipped = Wardmast.NodeAgent.LegacyCleanup.run(home)
+        send(test, {:live_scratch_intact, File.read(live_file)})
+        File.rm_rf!(work)
+        {:ok, %{}}
+      end
+
+      opts =
+        Keyword.merge(opts,
+          deps_cache: true,
+          deps_fun: deps_fun,
+          seed_layer_fun: layer_fun,
+          checkout_fun: &fake_checkout/3
+        )
+
+      assert {:ok, "sl-cleanup"} = Runs.assign(pulled_checkout_spec("sl-cleanup"), opts)
+      wait_event("sl-cleanup", "exit")
+
+      assert_received {:live_scratch_intact, {:ok, "live-scratch"}}
+      assert File.dir?(Path.join(home, "deps-seed"))
+    end
+
     test "a seed that fails does not refuse a run that has network: the worker fetches for itself",
          %{opts: opts, stub: stub} do
       opts =
