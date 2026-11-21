@@ -12,9 +12,9 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
     Darwin,
     DataHome,
     Distribution,
+    KeyBackup,
     ProviderClis,
     Scope,
-    KeyBackup,
     SecretsAtRest
   }
 
