@@ -86,6 +86,54 @@ defmodule Wardmast.Screenshots.CapturesTest do
     end
   end
 
+  # bd-5eegxz: whether captures in this workspace work at all, so a worker is not looped over a
+  # manifest for a capture that keeps failing or skipping for reasons that are not theirs.
+  describe "health/1" do
+    defp finish!(outcome, n, ws \\ "ws-1") do
+      {:ok, rec} =
+        Captures.begin_attempt(%{
+          @attrs
+          | workspace_id: ws,
+            task_id: "bd-h#{n}",
+            head_sha: "h#{n}"
+        })
+
+      Captures.finish(rec, outcome)
+    end
+
+    test "no captures yet is :unknown: nothing says it is broken" do
+      assert Captures.health("ws-1") == :unknown
+    end
+
+    test "repeated boot failures and deps_changed skips with no success is :failing" do
+      finish!({:error, Failure.new(:boot_failed, "before: no mix.exs", role: "before")}, 1)
+      finish!({:skipped, {:deps_changed, "the change edits mix.lock"}}, 2)
+      finish!({:error, Failure.new(:manifest_missing, "no plan")}, 3)
+      assert Captures.health("ws-1") == :failing
+    end
+
+    test "one success among the recent ones is :working" do
+      finish!({:error, Failure.new(:boot_failed, "x")}, 1)
+      finish!({:ok, %{pairs: []}}, 2)
+      finish!({:skipped, {:deps_changed, "r"}}, 3)
+      assert Captures.health("ws-1") == :working
+    end
+
+    test "a single failure is not enough, and other workspaces do not count" do
+      finish!({:error, Failure.new(:boot_failed, "x")}, 1)
+      assert Captures.health("ws-1") == :unknown
+      finish!({:error, Failure.new(:boot_failed, "x")}, 2, "ws-other")
+      assert Captures.health("ws-1") == :unknown
+    end
+
+    test "a worker's own skips and bad manifests say nothing about the capture" do
+      finish!({:skipped, {:plan_skip, "copy only"}}, 1)
+      finish!({:error, Failure.new(:manifest_invalid, "bad")}, 2)
+      finish!({:skipped, :no_ui_paths}, 3)
+      assert Captures.health("ws-1") == :unknown
+    end
+  end
+
   describe "hashes" do
     test "config_hash is stable and changes with the config" do
       c1 = %Config{ui_paths: ["a"], start_cmd: "x"}

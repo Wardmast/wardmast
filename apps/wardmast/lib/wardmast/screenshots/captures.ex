@@ -114,6 +114,55 @@ defmodule Wardmast.Screenshots.Captures do
     %{attempts: attempts, last_captured: last}
   end
 
+  @health_days 7
+
+  @doc """
+  Whether captures in `workspace_id` work (bd-5eegxz), from the newest three attempts of the last
+  week that say something about the capture itself (a capture, a route error, a boot or deps
+  failure, a `deps_changed` or `no_sandbox` skip; a worker's own skip or bad manifest says
+  nothing): `:working` (one of them produced a set), `:failing` (two or more did not, and none
+  did) or `:unknown`. The ReviewGate does not spend a fix round on a missing manifest while it is
+  `:failing`: the worker cannot make a capture that never boots succeed.
+  """
+  @spec health(String.t() | nil) :: :working | :failing | :unknown
+  def health(workspace_id) when is_binary(workspace_id) do
+    since = DateTime.add(DateTime.utc_now(), -@health_days * 86_400, :second)
+
+    signals =
+      from(c in CaptureRecord,
+        where:
+          c.workspace_id == ^workspace_id and c.state in ["captured", "failed", "skipped"] and
+            c.inserted_at >= ^since,
+        order_by: [desc: c.inserted_at, desc: c.id],
+        limit: 20,
+        select: {c.state, c.failure_code, c.reason}
+      )
+      |> Repo.all()
+      |> Enum.map(&signal/1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.take(3)
+
+    cond do
+      :ok in signals -> :working
+      Enum.count(signals, &(&1 == :bad)) >= 2 -> :failing
+      true -> :unknown
+    end
+  end
+
+  def health(_workspace_id), do: :unknown
+
+  defp signal({"captured", _, _}), do: :ok
+  defp signal({"failed", code, _}) when code in @no_boot_codes, do: nil
+  # Both apps booted and answered: the capture itself works, the manifest's route is wrong.
+  defp signal({"failed", "route_error", _}), do: :ok
+  defp signal({"failed", _, _}), do: :bad
+
+  defp signal({"skipped", _, reason}) when is_binary(reason) do
+    if String.starts_with?(reason, ["deps_changed:", "no_sandbox:"]), do: :bad
+  end
+
+  defp signal(_row), do: nil
+
   @doc "A stable hash of the resolved `screenshots` config."
   @spec config_hash(Config.t()) :: String.t()
   def config_hash(%Config{} = config),

@@ -2692,6 +2692,13 @@ defmodule Wardmast.Worker.ReviewGate do
     %{state | screenshot_task: nil}
   end
 
+  # bd-5eegxz: only a manifest fault asks (it is the one outcome the health changes).
+  defp screenshot_health(state, {:error, %{code: code}})
+       when code in [:manifest_missing, :manifest_invalid],
+       do: screenshot_db(fn -> Captures.health(state.workspace_id) end) || :unknown
+
+  defp screenshot_health(_state, _outcome), do: :unknown
+
   defp screenshot_history(task_id), do: screenshot_db(fn -> Captures.history(task_id) end)
 
   defp screenshot_record_skip(state, meta) do
@@ -2745,10 +2752,12 @@ defmodule Wardmast.Worker.ReviewGate do
   defp reuse_meta(_state), do: nil
 
   defp screenshot_route(state, outcome, reuse \\ nil) do
+    opts = [health: screenshot_health(state, outcome)]
+
     routed =
       if reuse,
-        do: ScreenshotGate.route_reuse(outcome, reuse, state.head_sha),
-        else: ScreenshotGate.route(outcome)
+        do: ScreenshotGate.route_reuse(outcome, reuse, state.head_sha, opts),
+        else: ScreenshotGate.route(outcome, opts)
 
     case routed do
       {:proceed, context} ->

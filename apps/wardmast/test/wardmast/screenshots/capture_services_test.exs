@@ -335,6 +335,25 @@ defmodule Wardmast.Screenshots.CaptureServicesTest do
       assert_received {:boot_spec, "after", _, ^cache}
     end
 
+    # bd-5eegxz: the merge-base's tree has its own lockfile when the head merged a bump, so the
+    # before boot gets the cache seeded for it, and the after boot the head's.
+    test "the before boot gets its own cache when the merge-base's lockfile differs", %{
+      tmp_dir: dir
+    } do
+      config = %{@config | deps: %{"mix" => true}}
+      before = %{dir: "/cache/base", env: [{"HEX_OFFLINE", "1"}], links: []}
+      head = %{dir: "/cache/head", env: [{"HEX_OFFLINE", "1"}], links: []}
+
+      assert {:ok, _} =
+               run(dir, plan!(dir, [%{"id" => "home", "path" => "/"}]),
+                 config: config,
+                 deps_opts: [test_pid: self(), answer: {:ok, Map.put(head, :before, before)}]
+               )
+
+      assert_received {:boot_spec, "before", _, ^before}
+      assert_received {:boot_spec, "after", _, ^head}
+    end
+
     # bd-ur1zty: the seed is built from the config's own values, under the boot's MIX_ENV.
     test "the seed is asked for the boot's MIX_ENV and the config's own env", %{tmp_dir: dir} do
       config = %{
@@ -367,6 +386,46 @@ defmodule Wardmast.Screenshots.CaptureServicesTest do
 
       assert failure.message =~ "global_lock_lost"
       assert lifecycle() == []
+    end
+
+    # bd-5eegxz: a capture that cannot run for this change (its lockfile, or the cache) must
+    # say so, not fault the worker's missing manifest: the worker could not fix that.
+    test "a missing manifest does not hide a deps_changed skip", %{tmp_dir: dir} do
+      config = %{@config | deps: %{"mix" => true}}
+      reason = "the change edits mix.lock"
+
+      assert {:skipped, {:deps_changed, ^reason}} =
+               run(dir, Path.join(dir, "nope.json"),
+                 config: config,
+                 deps_opts: [test_pid: self(), answer: {:skip, reason}]
+               )
+
+      assert manifest(dir)["skip_kind"] == "deps_changed"
+      assert manifest(dir)["reason"] == reason
+    end
+
+    test "an invalid manifest does not hide a deps failure", %{tmp_dir: dir} do
+      config = %{@config | deps: %{"mix" => true}}
+      bad = Path.join(dir, "bad.json")
+      File.write!(bad, ~s({"version": 9}))
+
+      assert {:error, %{code: :deps_failed}} =
+               run(dir, bad,
+                 config: config,
+                 deps_opts: [test_pid: self(), answer: {:error, "nxdomain"}]
+               )
+    end
+
+    test "with a deps cache that is fine, the missing manifest is still the worker's", %{
+      tmp_dir: dir
+    } do
+      config = %{@config | deps: %{"mix" => true}}
+
+      assert {:error, %{code: :manifest_missing}} =
+               run(dir, Path.join(dir, "nope.json"),
+                 config: config,
+                 deps_opts: [test_pid: self(), answer: {:ok, nil}]
+               )
     end
 
     test "a cache that cannot be built is an infrastructure failure, before any boot", %{
