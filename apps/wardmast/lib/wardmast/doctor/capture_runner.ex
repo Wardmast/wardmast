@@ -59,22 +59,7 @@ defmodule Wardmast.Doctor.CaptureRunner do
           {nil, "node not found on the server's PATH (v#{@min_node}+ required)"}
       end
 
-    problems =
-      Enum.reject(
-        [
-          node_problem,
-          if(is_nil(playwright),
-            do:
-              "playwright-core is not installed in #{dir} " <>
-                "(run `npm ci --ignore-scripts` there; release builds vendor it)"
-          ),
-          if(is_nil(chrome), do: "no headless Chromium found (set ARB_CHROME)"),
-          if(playwright && pinned && playwright != pinned,
-            do: "playwright-core #{playwright} is installed but package-lock.json pins #{pinned}"
-          )
-        ],
-        &is_nil/1
-      )
+    problems = problems(node_problem, dir, playwright, pinned, chrome)
 
     %{
       enabled: true,
@@ -86,6 +71,27 @@ defmodule Wardmast.Doctor.CaptureRunner do
       problems: problems
     }
   end
+
+  defp problems(node_problem, dir, playwright, pinned, chrome) do
+    Enum.reject(
+      [
+        node_problem,
+        playwright_problem(dir, playwright, pinned),
+        if(is_nil(chrome), do: "no headless Chromium found (set ARB_CHROME)")
+      ],
+      &is_nil/1
+    )
+  end
+
+  defp playwright_problem(dir, nil, _pinned) do
+    "playwright-core is not installed in #{dir} " <>
+      "(run `npm ci --ignore-scripts` there; release builds vendor it)"
+  end
+
+  defp playwright_problem(_dir, v, pinned) when is_binary(pinned) and v != pinned,
+    do: "playwright-core #{v} is installed but package-lock.json pins #{pinned}"
+
+  defp playwright_problem(_dir, _v, _pinned), do: nil
 
   defp playwright_version(dir) do
     with {:ok, raw} <-
