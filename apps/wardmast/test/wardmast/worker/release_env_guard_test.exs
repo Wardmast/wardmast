@@ -273,7 +273,10 @@ defmodule Wardmast.Worker.ReleaseEnvGuardTest do
     "apps/wardmast/lib/wardmast/screenshots/capture/services/podman.ex" => :pure_tool,
     # bd-485ts3: the login-capable CDP shooter runs the `arb-capture` Node runner through
     # `ReleaseEnv.cmd/3`.
-    "apps/wardmast/lib/wardmast/screenshots/capture/shooter/cdp.ex" => :scrubbed
+    "apps/wardmast/lib/wardmast/screenshots/capture/shooter/cdp.ex" => :scrubbed,
+    # bd-5eegxz: capture work-dir cleanup. `chmod -R u+rwX` (through `ReleaseEnv.cmd/3`) makes a
+    # read-only leftover tree (a deps cache copy) removable before `File.rm_rf`.
+    "apps/wardmast/lib/wardmast/screenshots/capture/workdir.ex" => :scrubbed
   }
 
   # Spawn primitives that run a command of their own choosing. Rule 1 inspects
