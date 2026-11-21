@@ -4962,7 +4962,7 @@ defmodule Wardmast.Worker do
       # pushed and reviewed the old head, the agent's new commit arrived afterwards
       # and was never pushed, and the send-back looked like "no new commit".
       awaits_node_checkout?(meta) and remote_session_live?(state) ->
-        wait_for_remote_pass_exit(state)
+        wait_for_remote_run_exit(state)
 
       awaits_node_checkout?(meta) and remote_checkout_failed?(state) ->
         fail_remote_checkout(state)
@@ -5043,7 +5043,7 @@ defmodule Wardmast.Worker do
 
   defp fail_remote_checkout(%State{task_id: task_id} = state) do
     Logger.warning(
-      "Worker: the node's final checkout of the pass on task=#{task_id} did not come back; " <>
+      "Worker: the node's final checkout of the run on task=#{task_id} did not come back; " <>
         "failing the pass instead of pushing a stale clone"
     )
 
@@ -5053,7 +5053,7 @@ defmodule Wardmast.Worker do
   # `arb done` was seen on a pass whose node run has not exited yet. The agent is on its
   # way out; if it is not gone after the grace, ask the node to stop it, which
   # uploads the checkout all the same.
-  defp wait_for_remote_pass_exit(%State{claude_sessions: sessions} = state) do
+  defp wait_for_remote_run_exit(%State{claude_sessions: sessions} = state) do
     for {handle, session} <- sessions,
         remote_handle?(handle),
         is_nil(Map.get(session, :exit_status)) do
