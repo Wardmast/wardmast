@@ -3432,6 +3432,7 @@ defmodule Wardmast.Worker.Watchdog do
   # been paged, so the ordinary poll ceiling must not fail the worker out.
   defp park_ci_cancelled(state) do
     head = (state.cancel_rerun && state.cancel_rerun.head) || :unknown
+    note_cancel_bound_cap(state, head)
 
     state =
       if state.ci_cancelled_escalated_head != head do
@@ -4630,6 +4631,22 @@ defmodule Wardmast.Worker.Watchdog do
         safe(fn -> note_rerun_capped(state, head, info, checks) end)
         {:error, {:rerun_cap, info.count, info.limit}}
     end
+  end
+
+  # The cancelled-run site's own bound can park the head before the shared
+  # budget is ever consulted again (both default to 2), so the cap note would
+  # never be written. When the tally has reached the limit, note it (once).
+  defp note_cancel_bound_cap(_state, head) when not is_binary(head), do: :ok
+
+  defp note_cancel_bound_cap(state, head) do
+    safe(fn ->
+      limit = CiRerunBudget.limit(state.workspace, state.repo)
+
+      case CiRerunBudget.check(state.task_id, head, limit) do
+        {:capped, info} -> note_rerun_capped(state, head, info, [])
+        :ok -> :ok
+      end
+    end)
   end
 
   defp note_rerun_capped(state, head, info, checks) do
