@@ -442,6 +442,7 @@ defmodule WardmastWeb.Router do
     get("/server/worker_tmp", ServerController, :worker_tmp)
     get("/server/podman_sandbox", ServerController, :podman_sandbox)
     get("/server/worker_memory", ServerController, :worker_memory)
+    get("/server/worker_trust", ServerController, :worker_trust)
     get("/server/dashboard_auth", ServerController, :dashboard_auth)
 
     # Dashboard login (bd-3gycsz): backs `arb dashboard login`.

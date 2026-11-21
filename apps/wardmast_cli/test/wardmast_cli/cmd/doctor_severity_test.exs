@@ -116,6 +116,8 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
           "capped" => true,
           "cap" => "12G"
         }, 200}},
+      {{"get", "/api/server/worker_trust"},
+       {%{"checked" => 1, "untrusted" => [], "profile_present" => true}, 200}},
       {{"get", "/api/server/claude_credentials"}, {%{"checked" => 1, "missing" => []}, 200}},
       {{"get", "/api/server/grok_auth"}, {%{"enabled" => false, "workspaces" => []}, 200}},
       {{"get", "/api/server/provider_accounts"},
@@ -350,6 +352,7 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
       {"/api/server/private_clone_records", "private_clone_records"},
       {"/api/server/worker_tmp", "worker_tmp"},
       {"/api/server/worker_memory", "worker_memory"},
+      {"/api/server/worker_trust", "worker_repo_trust"},
       {"/api/server/claude_credentials", "claude_worker_credentials"},
       {"/api/server/grok_auth", "grok_auth"},
       {"/api/server/provider_accounts", "provider_accounts"},
@@ -856,7 +859,7 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
       last_deploy migrations bind_address anonymous_api dashboard_auth
       erlang_distribution secrets_at_rest restart_safety safe_default_categories agy_write_jail
       agy_jail_escape agy_jail_reads agy_jail_network agy_jail_keyring egress_jail
-      guardrails agy_ssh_transport tmux podman_sandbox private_clone_records worker_tmp socket_paths worker_jail_unmask worker_memory
+      guardrails agy_ssh_transport tmux podman_sandbox private_clone_records worker_tmp socket_paths worker_jail_unmask worker_memory worker_repo_trust
       claude_worker_credentials grok_auth agy_models provider_accounts quota_policy
       merge_routing nodes pr_patrol
     )
