@@ -76,6 +76,20 @@ defmodule WardmastCli.Cmd.Doctor.DataHomeTest do
     assert r.hint =~ "arb install service"
   end
 
+  test "a dev-mode unit with no pin is not legacy; server compared to the CLI", %{tmp_dir: dir} do
+    path = Path.join(dir, "wardmast.service")
+
+    File.write!(
+      path,
+      "[Unit]\nDescription=Wardmast [dev-mode source checkout]\n[Service]\nEnvironment=ARB_HOME=/x\nExecStart=/bin/sh /x/.run-server.sh\n"
+    )
+
+    assert %Result{status: :ok} = run(cli_home: "/h", unit_file: path, server: server("/h"))
+
+    assert %Result{status: :fail} =
+             run(cli_home: "/h", unit_file: path, server: server("/srv/other"))
+  end
+
   test "the server reports a different home than the plist pins: red", %{tmp_dir: dir} do
     r = run(cli_home: "/h", unit_file: plist!(dir, "/h"), server: server("/srv/other"))
 

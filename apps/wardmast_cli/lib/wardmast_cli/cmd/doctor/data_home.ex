@@ -137,13 +137,20 @@ defmodule WardmastCli.Cmd.Doctor.DataHome do
     case File.read(file) do
       {:ok, body} ->
         case pin_from(body) do
-          nil -> :legacy
+          nil -> if dev_mode?(body), do: :dev_unpinned, else: :legacy
           path -> {:pinned, path}
         end
 
       _ ->
         :none
     end
+  end
+
+  # A source-checkout (dev) install leaves the pin out on purpose unless the
+  # installing shell exported WARDMAST_DATA_HOME, so it is not a legacy install.
+  defp dev_mode?(body) do
+    String.contains?(body, ".run-server.sh") or
+      String.contains?(body, "[dev-mode source checkout]")
   end
 
   defp pin_from(body) do
