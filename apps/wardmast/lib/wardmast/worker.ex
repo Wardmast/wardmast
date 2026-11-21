@@ -5975,6 +5975,8 @@ defmodule Wardmast.Worker do
           do: %{result: :ok, steps: []},
           else: Wardmast.Worker.PrepushCheck.run_steps(spec, worktree, run_opts)
 
+      _ = Wardmast.Screenshots.PlanCheck.strip_committed(worktree, target)
+
       gate =
         if screenshots,
           do: Wardmast.Screenshots.PlanCheck.gate(screenshots, worktree, target, task_id)

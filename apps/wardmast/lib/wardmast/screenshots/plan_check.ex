@@ -154,6 +154,7 @@ defmodule Wardmast.Screenshots.PlanCheck do
   def gate(%Config{} = config, worktree, target, task_id) do
     started = System.monotonic_time(:millisecond)
     exclude_plan(worktree)
+    strip_committed(worktree, target)
 
     case check(config, worktree, target) do
       :not_applicable ->
@@ -207,6 +208,43 @@ defmodule Wardmast.Screenshots.PlanCheck do
     |> Map.merge(%{result: result, steps: steps ++ [step]})
     |> Map.put(:screenshots_plan, plan && Map.take(plan, [:sha, :skip]))
   end
+
+  @doc """
+  Commit-gate guard: the manifest is per-change review metadata and must never reach the target
+  branch (two committed copies on main made every other branch conflict on it). If the branch
+  tracks it and the merge base does not, drop it from the index and commit the removal (the
+  working-tree file stays, so the checked copy is still shot). A manifest the target already
+  carries is left alone: deleting it is the operator's one-time cleanup.
+  """
+  @spec strip_committed(String.t(), String.t() | nil) :: :stripped | :clean
+  def strip_committed(worktree, target) do
+    base =
+      if is_binary(target) and target != "",
+        do: Wardmast.Worker.Worktree.merge_base(worktree, target)
+
+    with true <- git_ok?(worktree, ["cat-file", "-e", "HEAD:" <> @plan_file]),
+         false <-
+           is_binary(base) and git_ok?(worktree, ["cat-file", "-e", base <> ":" <> @plan_file]),
+         true <- git_ok?(worktree, ["rm", "--cached", "-q", "--", @plan_file]),
+         true <-
+           git_ok?(worktree, [
+             "-c",
+             "user.name=arbiter",
+             "-c",
+             "user.email=arbiter@localhost",
+             "commit",
+             "-q",
+             "-m",
+             "Remove per-run screenshots manifest (never committed)"
+           ]) do
+      :stripped
+    else
+      _ -> :clean
+    end
+  end
+
+  defp git_ok?(dir, args),
+    do: match?({_, 0}, System.cmd("git", args, cd: dir, stderr_to_stdout: true))
 
   @doc "Add the plan file to the repo's `info/exclude` (idempotent; worktree-aware)."
   @spec exclude_plan(String.t()) :: :ok
