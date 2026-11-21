@@ -967,6 +967,11 @@ time a repo's `.env` is lying around, so this is enforced in layers, from the st
    `data: fixture` when started with a fixture env flag). Recommended for any repo with a
    production-shaped DB. Without it the repo is relying on 1–3 alone, and the dashboard
    config view says so.
+   **As implemented (bd-995svb):** `Capture.Safety.probe_marker/3`, run by `Capture` right after each
+   boot (every seed's boot, both sides); a mismatch is the `:fixture_marker_mismatch` failure
+   (the message names the path, never the body; the app is still stopped). `arb config overview` /
+   MCP `workspace_config_overview` (`screenshots_safety`) flag a repo without `fixture_check`. The
+   probe sits at the boot, not before every shot: one boot serves one group of shots.
 5. **DOM text scan with withholding (the backstop).** Every shot also records the page's
    visible text (`innerText`) and `<img alt>`/`title` attributes, which are scanned
    **before the image leaves the pod** with:
@@ -980,6 +985,14 @@ time a repo's `.env` is lying around, so this is enforced in layers, from the st
    email-domain`. The matched text never appears in a log, the manifest or the PR. This does
    not catch pixels (a chart of real numbers); it catches the common leaks (names, emails,
    tokens) and is explicit that it is a backstop.
+   **As implemented (bd-995svb):** `Capture.Safety.scan/2`. The shooter contract returns
+   `{:ok, %{text: [..]}}`: the CDP runner reads `innerText`, `alt`/`title`/`placeholder`/`aria-label`
+   and form-field values into a file in the shot's scratch dir (never stdout), and the command-line
+   shooter dumps the DOM (`--dump-dom`) and reduces it to text. A shooter that reports no text is
+   withheld as `scan-unavailable` (fail closed), as is text over 1 MB (`scan-too-large`). Rule names:
+   `secret:<kind>`, `email-domain`, `deny-pattern:<n>` (1-based). A hit deletes that image; the side
+   becomes `%{status: :withheld, rule:}`, `capture.json` records `{"status": "withheld", "rule"}`, the
+   PR cell reads `withheld by the data-safety scan: <rule>` and the reviewer's brief likewise.
 6. **Host-only egress of images.** Only the primary uploads, only after extraction (§2) has
    validated the tar, only `png|webp|jpg` with a matching magic number and sane dimensions,
    and the PNG/JPEG are re-encoded so metadata is dropped. The pod and the node never hold a
