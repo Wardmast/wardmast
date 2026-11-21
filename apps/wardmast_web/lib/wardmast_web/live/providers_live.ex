@@ -595,20 +595,6 @@ defmodule WardmastWeb.ProvidersLive do
   defp error_message({:missing, field}), do: "#{humanize(field)} is required."
   defp error_message({:invalid_kind, _}), do: "Pick a credential kind."
 
-  defp credential_health_class(health) when health in [:failing, :expired],
-    do: "text-[var(--arb-fail-text)]"
-
-  defp credential_health_class(:expiring), do: "text-[var(--arb-attention)]"
-  defp credential_health_class(_health), do: "text-[var(--arb-live)]"
-
-  defp credential_expiry(%{expires_at: %DateTime{} = at, expiry: :estimated}),
-    do: "expires ~#{Calendar.strftime(at, "%Y-%m-%d")} (estimated)"
-
-  defp credential_expiry(%{expires_at: %DateTime{} = at}),
-    do: "expires #{Calendar.strftime(at, "%Y-%m-%d")}"
-
-  defp credential_expiry(_entry), do: "expiry unknown"
-
   defp error_message({:invalid_credentials_path, reason}),
     do:
       "No readable Claude grant there (#{reason}). Log the config dir in first: " <>
@@ -646,6 +632,20 @@ defmodule WardmastWeb.ProvidersLive do
     do: "Hard delete needs an account with no usage or credentials, ever."
 
   defp error_message(other), do: inspect(other)
+
+  defp credential_health_class(health) when health in [:failing, :expired],
+    do: "text-[var(--arb-fail-text)]"
+
+  defp credential_health_class(:expiring), do: "text-[var(--arb-attention)]"
+  defp credential_health_class(_health), do: "text-[var(--arb-live)]"
+
+  defp credential_expiry(%{expires_at: %DateTime{} = at, expiry: :estimated}),
+    do: "expires ~#{Calendar.strftime(at, "%Y-%m-%d")} (estimated)"
+
+  defp credential_expiry(%{expires_at: %DateTime{} = at}),
+    do: "expires #{Calendar.strftime(at, "%Y-%m-%d")}"
+
+  defp credential_expiry(_entry), do: "expiry unknown"
 
   defp humanize(field),
     do: field |> to_string() |> String.replace("_", " ") |> String.capitalize()
