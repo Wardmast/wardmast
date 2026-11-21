@@ -53,6 +53,58 @@ impl Drop for Guard {
 const MAX_SOCKET_PATH: usize = 100;
 const FOCUS: &str = "focus";
 const HOW_LONG_TO_WAIT_FOR_PRIMARY: Duration = Duration::from_secs(5);
+const SOCKET_NAME: &str = "shell.sock";
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var(name)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The single-instance socket path in the app runtime directory:
+///
+///  1. `SHELL_SOCKET` or `ARBITER_SHELL_SOCKET` when explicitly set;
+///  2. `$XDG_RUNTIME_DIR/arbiter/shell.sock` on systemd/freedesktop sessions;
+///  3. `/run/user/<uid>/arbiter/shell.sock` when that per-user runtime dir exists;
+///  4. `<data-home>/run/shell.sock` (`WARDMAST_DATA_HOME`, legacy `ARB_DATA_HOME`,
+///     default `~/.wardmast/run`), matching `Wardmast.MCP.OperatorProof.run_dir/0`
+///     on macOS and non-systemd hosts.
+pub fn default_socket_path() -> PathBuf {
+    let explicit = env_path("SHELL_SOCKET").or_else(|| env_path("ARBITER_SHELL_SOCKET"));
+    let xdg = env_path("XDG_RUNTIME_DIR");
+    let run_user = Some(PathBuf::from(format!("/run/user/{}", unsafe {
+        libc::geteuid()
+    })));
+    let data_home = env_path("WARDMAST_DATA_HOME").or_else(|| env_path("ARB_DATA_HOME"));
+    let home = env_path("HOME");
+    socket_path_from(explicit, xdg, run_user, data_home, home)
+}
+
+pub fn socket_path_from(
+    explicit: Option<PathBuf>,
+    xdg_runtime_dir: Option<PathBuf>,
+    run_user_dir: Option<PathBuf>,
+    data_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(p) = explicit {
+        return p;
+    }
+    if let Some(xdg) = xdg_runtime_dir {
+        return xdg.join("arbiter").join(SOCKET_NAME);
+    }
+    if let Some(ru) = run_user_dir.filter(|p| p.is_dir()) {
+        return ru.join("arbiter").join(SOCKET_NAME);
+    }
+    if let Some(dh) = data_home {
+        return dh.join("run").join(SOCKET_NAME);
+    }
+    if let Some(h) = home {
+        return h.join(".wardmast").join("run").join(SOCKET_NAME);
+    }
+    std::env::temp_dir().join("arbiter").join(SOCKET_NAME)
+}
 
 fn lock_path(socket: &Path) -> PathBuf {
     let mut s = socket.as_os_str().to_owned();
@@ -251,5 +303,68 @@ mod tests {
             .map(|h| h.join().unwrap())
             .collect();
         assert_eq!(results.iter().filter(|r| r.is_some()).count(), 1);
+    }
+
+    #[test]
+    fn default_socket_path_honours_explicit_override_first() {
+        assert_eq!(
+            socket_path_from(
+                Some(PathBuf::from("/custom/shell.sock")),
+                Some(PathBuf::from("/run/user/1000")),
+                Some(PathBuf::from("/run/user/1000")),
+                Some(PathBuf::from("/custom/data")),
+                Some(PathBuf::from("/home/u")),
+            ),
+            PathBuf::from("/custom/shell.sock")
+        );
+    }
+
+    #[test]
+    fn default_socket_path_uses_xdg_runtime_dir_app_subdir() {
+        assert_eq!(
+            socket_path_from(
+                None,
+                Some(PathBuf::from("/run/user/1000")),
+                None,
+                Some(PathBuf::from("/home/u/.wardmast")),
+                Some(PathBuf::from("/home/u")),
+            ),
+            PathBuf::from("/run/user/1000/arbiter/shell.sock")
+        );
+    }
+
+    #[test]
+    fn default_socket_path_uses_run_user_uid_when_xdg_runtime_dir_is_unset() {
+        let run_user = std::env::temp_dir().join(format!("si-ru-{}", std::process::id()));
+        fs::create_dir_all(&run_user).unwrap();
+        assert_eq!(
+            socket_path_from(
+                None,
+                None,
+                Some(run_user.clone()),
+                None,
+                Some(PathBuf::from("/home/u")),
+            ),
+            run_user.join("arbiter").join("shell.sock")
+        );
+    }
+
+    #[test]
+    fn default_socket_path_falls_back_to_data_home_run_dir_when_no_runtime_dir_exists() {
+        let missing = PathBuf::from("/nonexistent-run-user-dir-for-test");
+        assert_eq!(
+            socket_path_from(
+                None,
+                None,
+                Some(missing.clone()),
+                Some(PathBuf::from("/Users/u/.wardmast")),
+                Some(PathBuf::from("/Users/u")),
+            ),
+            PathBuf::from("/Users/u/.wardmast/run/shell.sock")
+        );
+        assert_eq!(
+            socket_path_from(None, None, Some(missing), None, Some(PathBuf::from("/Users/u"))),
+            PathBuf::from("/Users/u/.wardmast/run/shell.sock")
+        );
     }
 }
