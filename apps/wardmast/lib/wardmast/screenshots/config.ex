@@ -549,6 +549,7 @@ defmodule Wardmast.Screenshots.Config do
 
     strings ++
       success(v["success"], label) ++
+      post_login_path(v, label) ++
       personas_form(v["personas"], label) ++
       default_persona(v, label, persona_names(v["personas"]))
   end
@@ -626,8 +627,15 @@ defmodule Wardmast.Screenshots.Config do
 
   defp personas_form(%{} = p, label) when map_size(p) > 0 do
     Enum.flat_map(p, fn
-      {_n, %{"username" => u, "password" => pw}} when is_binary(u) and is_binary(pw) ->
-        []
+      {n, %{"username" => u, "password" => pw} = persona} when is_binary(u) and is_binary(pw) ->
+        persona
+        |> Map.drop(["username", "password"])
+        |> Enum.reject(fn {k, v} ->
+          is_binary(k) and k =~ ~r/^[a-z][a-z0-9_]*$/ and is_binary(v)
+        end)
+        |> Enum.map(fn {k, _} ->
+          "#{label}.personas.#{n}.#{k} must be a string under a lowercase [a-z0-9_] key"
+        end)
 
       {n, _} ->
         ["#{label}.personas.#{n} needs a username and password (fixture credentials only)"]
@@ -635,6 +643,42 @@ defmodule Wardmast.Screenshots.Config do
   end
 
   defp personas_form(_p, label), do: ["#{label}.personas must be a non-empty map"]
+
+  # `post_login_path` (bd-b2e1ev): a path the browser opens once after a successful login and
+  # before the shot, e.g. a tenant switch for a persona that belongs to several tenants:
+  # `"/switch-tenant/{{persona.tenant_id}}?return_to={{return_to}}"`. `{{persona.<key>}}` is a
+  # string field of the shot's persona (beyond username/password), `{{return_to}}` the shot's
+  # own path, both URL-encoded. It stays on the app: it must start with a single `/`.
+  @post_login_var ~r/\{\{\s*([^}]*?)\s*\}\}/
+
+  defp post_login_path(%{"post_login_path" => path} = v, label) do
+    if is_binary(path) and String.starts_with?(path, "/") and not String.starts_with?(path, "//") do
+      post_login_vars(path, persona_fields(v["personas"]), label)
+    else
+      ["#{label}.post_login_path must be a path on the app, starting with a single /"]
+    end
+  end
+
+  defp post_login_path(_v, _label), do: []
+
+  defp persona_fields(%{} = personas) do
+    personas
+    |> Map.values()
+    |> Enum.flat_map(&if(is_map(&1), do: Map.keys(&1) -- ["username", "password"], else: []))
+  end
+
+  defp persona_fields(_), do: []
+
+  defp post_login_vars(path, fields, label) do
+    for [_, name] <- Regex.scan(@post_login_var, path),
+        not post_login_var_ok?(name, fields),
+        do:
+          "#{label}.post_login_path uses {{#{name}}}, which is neither return_to nor a persona field"
+  end
+
+  defp post_login_var_ok?("return_to", _fields), do: true
+  defp post_login_var_ok?("persona." <> field, fields), do: field in fields
+  defp post_login_var_ok?(_name, _fields), do: false
 
   defp persona_names(%{} = p), do: Map.keys(p)
   defp persona_names(_), do: []

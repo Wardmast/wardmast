@@ -26,5 +26,15 @@ defmodule Wardmast.Screenshots.Capture.Booter do
                  optional(:app) => map()
                }}
               | {:error, {phase(), term()}}
+  @doc """
+  Optional. Probe the booted app again, right before a side's first navigation: `:ok` or
+  `{:error, detail}` when it no longer answers (it crashed, or it was never really up).
+  """
+  @callback ready(spec(), handle :: term()) :: :ok | {:error, term()}
+
+  @doc "Optional. The tail of the app's own server output, for a failure report."
+  @callback log_tail(spec(), handle :: term()) :: String.t() | nil
+
   @callback stop(spec(), handle :: term()) :: :ok
+  @optional_callbacks ready: 2, log_tail: 2
 end

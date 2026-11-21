@@ -532,6 +532,14 @@ pod:       for role in [before(base), after(head)]:
     sketch in §4 for the shooter: capture already runs where `$ARB_CHROME` is, and a second image
     is a second thing to pin and keep in step. (The "one browser build for before and after"
     argument still holds: both shots come from the same image.)
+  * **Multi-tenant personas and boot diagnostics (bd-b2e1ev).** `login.post_login_path` is a
+    path opened once after a successful login, before the shot, e.g. `"/switch-tenant/{{persona.tenant_id}}?return_to={{return_to}}"`
+    for a persona that would otherwise land on a tenant picker. `{{persona.<key>}}` is a string
+    field of the persona beyond `username`/`password` (never those), `{{return_to}}` the shot's
+    own path, both URL-encoded; the path must start with a single `/`. Before a side's first
+    shot the booter re-probes readiness (`Booter.ready/2`); a dead app fails the capture as
+    `:app_not_ready`, distinct from `:shot_failed`, and every failure for a side carries the tail
+    of the app's server output as `server_log` in `capture.json`.
   * Tests: `Shooter.CdpTest` drives the real runner against a login-gated fixture app
     (`Wardmast.Test.CdpFixtureApp`) for correct and wrong credentials, both success conditions, an
     unmet condition, a session that does not hold, steps, `wait_for`, `target`, `full_page`,
