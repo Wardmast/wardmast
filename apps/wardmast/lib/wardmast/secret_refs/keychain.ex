@@ -21,7 +21,7 @@ defmodule Wardmast.SecretRefs.Keychain do
 
   Tests inject the platform and the command runner with
   `config :wardmast, #{inspect(__MODULE__)}, os: :darwin | :linux, cmd: fun`
-  where `fun.(binary, args)` returns `{output, exit_status}` or `:enoent`.
+  where `fun.(binary, args, opts)` returns `{output, exit_status}` or `:enoent`.
   """
 
   alias Wardmast.Worker.ReleaseEnv
@@ -46,8 +46,11 @@ defmodule Wardmast.SecretRefs.Keychain do
     end
   end
 
+  # The value is read from stdout alone: GLib/D-Bus warnings on stderr must never
+  # end up inside a key. Only a failed lookup is re-run with stderr merged in, to
+  # classify it from the tool's message.
   defp run(binary, args, item) do
-    case command(binary, args) do
+    case command(binary, args, stderr_to_stdout: false) do
       :enoent ->
         {:error, {:keychain, :unavailable, item}}
 
@@ -57,7 +60,13 @@ defmodule Wardmast.SecretRefs.Keychain do
           value -> {:ok, value}
         end
 
-      {output, status} ->
+      {stdout, status} ->
+        output =
+          case command(binary, args, stderr_to_stdout: true) do
+            {merged, _} -> merged
+            _ -> stdout
+          end
+
         {:error, {:keychain, classify(os(), status, output), item}}
     end
   end
@@ -100,19 +109,19 @@ defmodule Wardmast.SecretRefs.Keychain do
     end
   end
 
-  defp command(binary, args) do
+  defp command(binary, args, opts) do
     case Application.get_env(:wardmast, __MODULE__, [])[:cmd] do
-      fun when is_function(fun, 2) -> fun.(binary, args)
-      _ -> system_cmd(binary, args)
+      fun when is_function(fun, 3) -> fun.(binary, args, opts)
+      _ -> system_cmd(binary, args, opts)
     end
   end
 
   # `binary` is a fixed literal ("security" / "secret-tool"), never user input.
   # `ReleaseEnv.cmd/3` spawns it directly (no shell) with the release env scrubbed.
-  defp system_cmd(binary, args) do
+  defp system_cmd(binary, args, opts) do
     case System.find_executable(binary) do
       nil -> :enoent
-      path -> ReleaseEnv.cmd(path, args, stderr_to_stdout: true)
+      path -> ReleaseEnv.cmd(path, args, opts)
     end
   rescue
     _ -> :enoent

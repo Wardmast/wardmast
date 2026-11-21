@@ -29,9 +29,16 @@ defmodule Wardmast.SecretRefs.KeychainTest do
   defp stub(os, reply) do
     test = self()
 
-    cmd = fn binary, args ->
-      send(test, {:cmd, binary, args})
-      if is_function(reply), do: reply.(binary, args), else: reply
+    cmd = fn binary, args, opts ->
+      # Only the primary lookup is announced; the diagnostic re-run (stderr merged
+      # in, failures only) is not a second lookup.
+      unless opts[:stderr_to_stdout], do: send(test, {:cmd, binary, args})
+
+      cond do
+        is_function(reply, 3) -> reply.(binary, args, opts)
+        is_function(reply, 2) -> reply.(binary, args)
+        true -> reply
+      end
     end
 
     Application.put_env(:wardmast, Keychain, os: os, cmd: cmd)
@@ -140,6 +147,27 @@ defmodule Wardmast.SecretRefs.KeychainTest do
       stub(:linux, :enoent)
 
       assert {:error, {:keychain, :unavailable, _}} =
+               External.resolve("keychain:dev.arbiter#cloak-key")
+    end
+
+    test "stderr noise on a successful read never lands in the value" do
+      # The runner only merges stderr into the output when asked to (`stderr_to_stdout: true`).
+      stub(:linux, fn _bin, _args, opts ->
+        noise = if opts[:stderr_to_stdout], do: "GLib-WARNING: noise\n", else: ""
+        {noise <> @cloak_value <> "\n", 0}
+      end)
+
+      assert {:ok, @cloak_value} = External.resolve("keychain:dev.arbiter#cloak-key")
+    end
+
+    test "a failure is still classified from stderr text" do
+      stub(:linux, fn _bin, _args, opts ->
+        if opts[:stderr_to_stdout],
+          do: {"secret-tool: Cannot get secret of a locked object", 1},
+          else: {"", 1}
+      end)
+
+      assert {:error, {:keychain, :locked, _}} =
                External.resolve("keychain:dev.arbiter#cloak-key")
     end
 
