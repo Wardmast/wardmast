@@ -5927,15 +5927,10 @@ defmodule Wardmast.Worker do
     end
   end
 
-  # A repo with a screenshots config but no pre-push recipe still gets the plan check at `arb done`.
-  defp screenshots_only_spec(workspace, repo) do
-    case Wardmast.Screenshots.Config.resolve(workspace, repo) do
-      {:ok, _config} ->
-        %{screenshots_only: true, steps: [], timeout_seconds: 60, on_timeout: :proceed}
-
-      _ ->
-        nil
-    end
+  # A repo with no pre-push recipe still gets the `arb done` housekeeping pass: the screenshots
+  # plan check when configured, and always the strip of a committed manifest (bd-5r2twb).
+  defp screenshots_only_spec(_workspace, _repo) do
+    %{screenshots_only: true, steps: [], timeout_seconds: 60, on_timeout: :proceed}
   end
 
   # A fix round's worker is registered without a workspace (its completion must
