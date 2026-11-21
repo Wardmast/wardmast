@@ -31,7 +31,7 @@ defmodule Wardmast.Quota.Codex do
 
   For containerised (podman) workers, which run on a private copy of `auth.json`
   tracked by `Wardmast.Agents.Codex.AuthSync.Reaper`, the poll first reconciles
-  any newer rotation from live tracked run copies into the source (`AuthSync.sync/2`),
+  any newer rotation from live tracked run copies into the source (`AuthSync.sync_locked/2`),
   and after persisting a poll-initiated rotation pushes the new token into every
   live tracked run copy (`AuthSync.pull/2`) so neither the container nor the
   poll is stranded on a retired refresh token.
@@ -903,7 +903,7 @@ defmodule Wardmast.Quota.Codex do
 
   defp sync_tracked_runs_into_source(real) do
     for run <- Reaper.runs_for_source(real) do
-      _ = AuthSync.sync(real, run)
+      _ = AuthSync.sync_locked(real, run)
     end
 
     :ok
@@ -946,9 +946,7 @@ defmodule Wardmast.Quota.Codex do
     tmp = "#{path}.arb-#{System.unique_integer([:positive])}"
 
     with {:ok, io} <- File.open(tmp, [:write, :exclusive, :binary]),
-         :ok <- File.chmod(tmp, 0o600),
-         :ok <- IO.binwrite(io, body),
-         :ok <- File.close(io),
+         :ok <- write_and_close(io, tmp, body),
          :ok <- File.rename(tmp, path) do
       :ok
     else
@@ -956,6 +954,14 @@ defmodule Wardmast.Quota.Codex do
         _ = File.rm(tmp)
         error
     end
+  end
+
+  defp write_and_close(io, tmp, body) do
+    with :ok <- File.chmod(tmp, 0o600) do
+      IO.binwrite(io, body)
+    end
+  after
+    _ = File.close(io)
   end
 
   defp resolve_symlink(path, depth \\ 0)

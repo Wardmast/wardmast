@@ -669,6 +669,95 @@ defmodule Wardmast.Quota.CodexTest do
       assert source_persisted["tokens"]["refresh_token"] == "container-rt"
     end
 
+    test "keeps the AuthSync global lock held across the entire refresh when a live podman run copy is tracked, serializing concurrent polls (bd-6yk7qi)" do
+      ws1 = workspace!()
+      ws2 = workspace!()
+      test_pid = self()
+
+      auth_path =
+        write_auth_file!("stale-access", "single-use-rt", "acct-123", "2026-11-01T00:00:00Z")
+
+      run_dir =
+        Path.join(
+          System.tmp_dir!(),
+          "codex_podman_lock_#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(run_dir)
+      run_auth = Path.join(run_dir, "auth.json")
+      assert :ok = Wardmast.Agents.Codex.AuthSync.seed(auth_path, run_auth)
+
+      owner =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      on_exit(fn ->
+        Process.exit(owner, :kill)
+        File.rm_rf(run_dir)
+      end)
+
+      :ok = Wardmast.Agents.Codex.AuthSync.Reaper.track(owner, auth_path, run_auth)
+
+      refresh_calls = :counters.new(1, [])
+
+      Req.Test.stub(@stub_name, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/backend-api/wham/usage"} ->
+            case Plug.Conn.get_req_header(conn, "authorization") do
+              ["Bearer stale-access"] -> Plug.Conn.send_resp(conn, 401, "")
+              ["Bearer fresh-access"] -> Req.Test.json(conn, @usage_body)
+            end
+
+          {"POST", "/oauth/token"} ->
+            :counters.add(refresh_calls, 1, 1)
+
+            # While the refresh HTTP call is in flight (after the initial tracked-run sync),
+            # the outer {{AuthSync, auth_path}, caller} global lock must still be held.
+            probe =
+              Task.async(fn ->
+                :global.trans(
+                  {{Wardmast.Agents.Codex.AuthSync, auth_path}, self()},
+                  fn -> :lock_was_dropped end,
+                  [node()],
+                  0
+                )
+              end)
+
+            send(test_pid, {:probe_lock_result, Task.await(probe)})
+
+            {:ok, raw, conn} = Plug.Conn.read_body(conn)
+            params = URI.decode_query(raw)
+
+            if params["refresh_token"] == "single-use-rt" and
+                 :counters.get(refresh_calls, 1) == 1 do
+              Req.Test.json(conn, %{
+                "access_token" => "fresh-access",
+                "refresh_token" => "rotated-refresh"
+              })
+            else
+              conn
+              |> Plug.Conn.put_status(401)
+              |> Req.Test.json(%{"error" => %{"code" => "refresh_token_reused"}})
+            end
+        end
+      end)
+
+      result = Codex.fetch(ws1.id, auth_path: auth_path)
+      assert_receive {:probe_lock_result, :aborted}
+      assert result.auth_expired == false
+      assert result.codex.session.used == 42.5
+      assert :counters.get(refresh_calls, 1) == 1
+
+      # After fetch completes, the lock is released and another fetch sees the fresh token.
+      result2 = Codex.fetch(ws2.id, auth_path: auth_path)
+      assert result2.auth_expired == false
+      assert result2.codex.session.used == 42.5
+      assert :counters.get(refresh_calls, 1) == 1
+    end
+
     test "logs an error and returns a neutral result (auth_expired: false) when persisting the rotated auth.json fails (bd-6yk7qi)" do
       ws = workspace!()
 

@@ -282,4 +282,33 @@ defmodule Wardmast.Agents.Codex.AuthSyncTest do
       assert File.read!(r) == auth("rt-1", "2026-10-02T00:00:00Z")
     end
   end
+
+  describe "sync_locked/2" do
+    test "reconciles the run copy into source without releasing an outer global lock", %{
+      source: s,
+      run: r
+    } do
+      File.write!(s, auth("rt-0", "2026-10-01T00:00:00Z"))
+      AuthSync.seed(s, r)
+      File.write!(r, auth("rt-1", "2026-10-02T00:00:00Z"))
+
+      :global.trans(
+        {{AuthSync, s}, self()},
+        fn ->
+          assert :adopted = AuthSync.sync_locked(s, r)
+
+          probe =
+            Task.async(fn ->
+              :global.trans({{AuthSync, s}, self()}, fn -> :lock_released end, [node()], 0)
+            end)
+
+          assert Task.await(probe) == :aborted
+        end,
+        [node()],
+        :infinity
+      )
+
+      assert File.read!(s) == auth("rt-1", "2026-10-02T00:00:00Z")
+    end
+  end
 end
