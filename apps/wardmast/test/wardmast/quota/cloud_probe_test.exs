@@ -1134,6 +1134,45 @@ defmodule Wardmast.Quota.CloudProbeTest do
       refute CredentialWatchdog.escalated?(Wardmast.Agents.Codex, watchdog)
     end
 
+    test "an operator reset / login clears the 401 streak: one 401 after it does not re-raise" do
+      watchdog = start_watchdog()
+
+      pid =
+        start_probe(
+          enabled: true,
+          interval_ms: 3_600_000,
+          refresh_fun: fn _ws_id -> :ok end,
+          credential_watchdog: watchdog
+        )
+
+      for n <- 1..2 do
+        CloudProbe.probe(pid)
+        send(pid, {:codex_refresh_result, codex_401_result()})
+        wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == n end)
+      end
+
+      assert CredentialWatchdog.escalated?(Wardmast.Agents.Codex, watchdog)
+      CredentialWatchdog.clear(Wardmast.Agents.Codex, watchdog)
+      CloudProbe.reset_401_streak(Wardmast.Agents.Codex, pid)
+      wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 0 end)
+      refute CredentialWatchdog.escalated?(Wardmast.Agents.Codex, watchdog)
+
+      CloudProbe.probe(pid)
+      send(pid, {:codex_refresh_result, codex_401_result()})
+      wait_until(fn -> CloudProbe.state(pid).codex_consecutive_401s == 1 end)
+      refute CredentialWatchdog.escalated?(Wardmast.Agents.Codex, watchdog)
+
+      CloudProbe.probe(pid)
+      send(pid, {:codex_refresh_result, codex_401_result()})
+      wait_until(fn -> CredentialWatchdog.escalated?(Wardmast.Agents.Codex, watchdog) end)
+    end
+
+    test "reset_401_streak for Claude zeroes the oauth streak" do
+      pid = start_probe(enabled: false)
+      CloudProbe.reset_401_streak(Wardmast.Agents.Claude, pid)
+      assert CloudProbe.state(pid).oauth_consecutive_401s == 0
+    end
+
     test "a genuine recovery after expiry calls mark_recovered" do
       watchdog = start_watchdog()
 

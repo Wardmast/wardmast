@@ -233,6 +233,9 @@ defmodule Wardmast.Agents.CredentialWatchdog do
   """
   @spec clear(module(), GenServer.server()) :: :ok
   def clear(adapter, server \\ __MODULE__) when is_atom(adapter) do
+    # The probe's in-memory consecutive-401 streak must not outlive the alert
+    # it raised, or the next stray 401 re-raises immediately.
+    Wardmast.Quota.CloudProbe.reset_401_streak(adapter)
     GenServer.cast(server, {:clear, adapter})
     :ok
   rescue

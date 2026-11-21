@@ -266,6 +266,19 @@ defmodule Wardmast.Quota.CloudProbe do
     end
   end
 
+  @doc """
+  Zero the consecutive-401 streak for `adapter` (Codex, or Claude's oauth
+  usage poll). Called when an operator reset or successful login clears the
+  expiry alert, so the next stray 401 starts a fresh count instead of
+  resuming from the stale in-memory total. Best-effort.
+  """
+  @spec reset_401_streak(module(), GenServer.server()) :: :ok
+  def reset_401_streak(adapter, server \\ __MODULE__) when is_atom(adapter) do
+    GenServer.cast(server, {:reset_401_streak, adapter})
+  catch
+    :exit, _ -> :ok
+  end
+
   # ---- GenServer callbacks -----------------------------------------------
 
   @impl true
@@ -309,6 +322,15 @@ defmodule Wardmast.Quota.CloudProbe do
   def handle_call(:probe, _from, %State{} = state) do
     {:reply, :ok, do_probe_cycle(state)}
   end
+
+  @impl true
+  def handle_cast({:reset_401_streak, Wardmast.Agents.Codex}, %State{} = state),
+    do: {:noreply, %{state | codex_consecutive_401s: 0}}
+
+  def handle_cast({:reset_401_streak, Wardmast.Agents.Claude}, %State{} = state),
+    do: {:noreply, %{state | oauth_consecutive_401s: 0}}
+
+  def handle_cast(_msg, %State{} = state), do: {:noreply, state}
 
   @impl true
   def handle_info(:probe, %State{enabled: false} = state) do
