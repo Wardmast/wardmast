@@ -6,6 +6,7 @@ pub mod backoff;
 pub mod http;
 pub mod port;
 pub mod quit;
+pub mod release_lock;
 pub mod shell;
 pub mod single_instance;
 pub mod status_page;

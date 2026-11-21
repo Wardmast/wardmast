@@ -11,7 +11,8 @@
 //! Environment: `SHELL_SOCKET` (single-instance socket; default under
 //! `$XDG_RUNTIME_DIR`/tmp), `SHELL_RELEASE_DIR` (real release) or
 //! `SHELL_RELEASE_PROGRAM` (any executable), `SHELL_PREFERRED_PORT` (default
-//! 4848), `SHELL_MAX_BOOT_FAILURES`, `SHELL_API_TOKEN`, `SHELL_QUIT_ANSWER`
+//! 4848), `SHELL_MAX_BOOT_FAILURES`, `SHELL_DATA_HOME` (pidfile/lock directory; off
+//! when unset), `SHELL_EXPECTED_VERSION`, `SHELL_API_TOKEN`, `SHELL_QUIT_ANSWER`
 //! (`yes`/`no`, default `yes`).
 //!
 //! Stdin commands: `close`, `quit`, `retry`, `answer yes|no`. EOF quits.
@@ -76,6 +77,15 @@ fn config() -> Config {
     if let Some(p) = env("SHELL_PREFERRED_PORT").and_then(|v| v.parse().ok()) {
         c.preferred_port = p;
     }
+    // Opt-in: the pidfile + launch lock live in this directory (the shell proper
+    // uses `release_lock::resolve_data_home()`; smoke runs must not touch the
+    // real one).
+    c.data_home = env("SHELL_DATA_HOME").map(PathBuf::from);
+    c.expected_version = env("SHELL_EXPECTED_VERSION").or_else(|| {
+        env("SHELL_RELEASE_DIR").and_then(|d| {
+            arbiter_shell_core::release_lock::bundled_version(std::path::Path::new(&d))
+        })
+    });
     if let Some(n) = env("SHELL_MAX_BOOT_FAILURES").and_then(|v| v.parse().ok()) {
         c.max_boot_failures = n;
     }

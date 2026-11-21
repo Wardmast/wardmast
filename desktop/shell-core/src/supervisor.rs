@@ -18,10 +18,16 @@
 //! hide a broken install behind an endless spinner, so after
 //! `max_boot_failures` in a row the supervisor stops and surfaces
 //! `State::BootFailed` with the tail of the release's output.
+//!
+//! With `Config::data_home` set, every launch first goes through `claim`: a
+//! release recorded in the data home's pidfile that is still alive is adopted
+//! (same version) or stopped and replaced (different version), never raced by a
+//! second server on the same database. See `release_lock.rs`.
 
 use crate::backoff::Backoff;
 use crate::http;
 use crate::port::pick_port;
+use crate::release_lock::{self, LaunchLock, Record};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::process::CommandExt;
@@ -73,6 +79,16 @@ pub struct Config {
     pub stop_grace: Duration,
     /// Lines of release output kept for the boot-failure page.
     pub log_lines: usize,
+    /// The release's data home (`WARDMAST_DATA_HOME`). When set, the shell
+    /// records the release it starts in a pidfile there and takes a launch lock
+    /// around every start, so a release orphaned by a shell crash is adopted or
+    /// replaced instead of getting a second server on the same database.
+    /// `None` disables all of that (tests that do not care).
+    pub data_home: Option<PathBuf>,
+    /// The version the bundled release reports on `GET /api/version`. A live
+    /// release of a different version is stopped and replaced; `None` adopts
+    /// whatever version is running.
+    pub expected_version: Option<String>,
 }
 
 impl Config {
@@ -92,6 +108,8 @@ impl Config {
             max_boot_failures: 3,
             stop_grace: Duration::from_secs(45),
             log_lines: 200,
+            data_home: None,
+            expected_version: None,
         }
     }
 }
@@ -258,6 +276,10 @@ impl Release {
             // Its own process group: a terminal Ctrl-C aimed at the shell does
             // not reach it, and a final SIGKILL can take the whole group.
             .process_group(0);
+        if let Some(home) = &config.data_home {
+            // The release must use the very directory the pidfile lives in.
+            cmd.env("WARDMAST_DATA_HOME", home);
+        }
         let mut child = cmd.spawn()?;
         let log: LogBuf = Arc::new(Mutex::new(VecDeque::new()));
         let mut readers = vec![];
@@ -272,6 +294,10 @@ impl Release {
             log,
             readers,
         })
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     fn try_wait(&mut self) -> Option<ExitStatus> {
@@ -405,6 +431,193 @@ fn finish(shared: &Shared, reply: Sender<StopOutcome>, outcome: StopOutcome) {
     let _ = reply.send(outcome);
 }
 
+// ------------------------------------------------- an already-running release
+
+/// What a launch attempt found in the data home.
+enum Claim {
+    /// Nothing live holds the data home: start a release. The launch lock (when
+    /// there is a data home) stays held until the new release's pidfile is
+    /// written, so a second shell cannot slip in between.
+    Fresh(Option<LaunchLock>),
+    /// A live release of the right version owns the data home: connect to it.
+    Adopt { pid: u32, port: u16 },
+    /// A release (or something with its pid) holds the data home and cannot be
+    /// adopted or replaced. Starting another server would risk the database, so
+    /// the launch fails with this reason instead.
+    Refused(String),
+    Stop(Sender<StopOutcome>),
+}
+
+/// Decide, under the launch lock, whether this launch may start a release.
+///
+/// * no record, or a record whose pid is dead (stale: cleaned up) -> `Fresh`
+/// * live pid that answers `/api/version` with the expected version -> `Adopt`
+/// * live pid with a different version -> stopped (SIGTERM, so the server
+///   drains its own workers; SIGKILL only after `stop_grace`), then `Fresh`
+/// * live pid that never answers, or answers as something that is not a
+///   release -> `Refused`. The pid may have been reused by an unrelated
+///   process, which must not be killed on a guess.
+fn claim(config: &Config, shared: &Shared, rx: &Receiver<Cmd>) -> Claim {
+    let Some(home) = config.data_home.as_deref() else {
+        return Claim::Fresh(None);
+    };
+
+    // Wait for any other shell's launch decision; a Stop must stay answerable.
+    let lock = loop {
+        match release_lock::try_lock(home) {
+            Ok(Some(l)) => break l,
+            Ok(None) => {}
+            Err(e) => {
+                return Claim::Refused(format!(
+                    "cannot lock the data home {}: {e}",
+                    home.display()
+                ))
+            }
+        }
+        match rx.recv_timeout(config.poll_interval) {
+            Ok(Cmd::Stop(reply)) => return Claim::Stop(reply),
+            Ok(Cmd::Retry) | Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Claim::Stop(mpsc::channel().0),
+        }
+    };
+
+    let Some(rec) = release_lock::read(home) else {
+        release_lock::remove(home); // unreadable record: nothing to honour
+        return Claim::Fresh(Some(lock));
+    };
+
+    // A release that is still booting (the shell that started it crashed in the
+    // boot window) answers only once ready, so wait for it while its pid lives.
+    let deadline = Instant::now() + config.ready_timeout;
+    let version = loop {
+        if !release_lock::pid_alive(rec.pid) {
+            release_lock::remove(home); // stale
+            return Claim::Fresh(Some(lock));
+        }
+        if let Ok(r) = http::get(
+            rec.port,
+            &config.ready_path,
+            None,
+            Duration::from_millis(500),
+        ) {
+            if r.status == 200 {
+                match release_lock::parse_version(&r.body) {
+                    Some(v) => break v,
+                    None => {
+                        return Claim::Refused(format!(
+                            "pid {} holds the data home and answers on port {}, but not as an \
+                             Arbiter release; stop it, or delete {} if it is stale",
+                            rec.pid,
+                            rec.port,
+                            release_lock::pidfile_path(home).display()
+                        ))
+                    }
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Claim::Refused(format!(
+                "pid {} holds the data home but did not answer on port {} within {}s; stop it, \
+                 or delete {} if it is stale",
+                rec.pid,
+                rec.port,
+                config.ready_timeout.as_secs_f32(),
+                release_lock::pidfile_path(home).display()
+            ));
+        }
+        match rx.recv_timeout(config.poll_interval) {
+            Ok(Cmd::Stop(reply)) => return Claim::Stop(reply),
+            Ok(Cmd::Retry) | Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Claim::Stop(mpsc::channel().0),
+        }
+    };
+
+    let same = match config.expected_version.as_deref() {
+        Some(want) => want == version,
+        None => true,
+    };
+    if same {
+        return Claim::Adopt {
+            pid: rec.pid,
+            port: rec.port,
+        };
+    }
+
+    shared.publish(State::Restarting {
+        delay: Duration::ZERO,
+        reason: format!(
+            "replacing the running release {version} (pid {}) with {}",
+            rec.pid,
+            config.expected_version.as_deref().unwrap_or("?")
+        ),
+    });
+    stop_pid(rec.pid, config.stop_grace);
+    if release_lock::pid_alive(rec.pid) {
+        return Claim::Refused(format!(
+            "could not stop the running release {version} (pid {})",
+            rec.pid
+        ));
+    }
+    release_lock::remove(home);
+    Claim::Fresh(Some(lock))
+}
+
+/// Stop a release this process did not spawn (no `Child` to wait on): SIGTERM,
+/// give the server its own graceful shutdown (it drains workers) for `grace`,
+/// then SIGKILL the group and the pid.
+fn stop_pid(pid: u32, grace: Duration) -> StopOutcome {
+    if !release_lock::pid_alive(pid) {
+        return StopOutcome::NotRunning;
+    }
+    let p = pid as libc::pid_t;
+    unsafe { libc::kill(p, libc::SIGTERM) };
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        if !release_lock::pid_alive(pid) {
+            return StopOutcome::Graceful;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    // The release was started in its own process group (pgid == pid).
+    unsafe {
+        libc::kill(-p, libc::SIGKILL);
+        libc::kill(p, libc::SIGKILL);
+    }
+    for _ in 0..100 {
+        if !release_lock::pid_alive(pid) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    StopOutcome::Killed
+}
+
+enum Adopted {
+    Gone,
+    Stop(Sender<StopOutcome>),
+}
+
+/// Watch an adopted release (no `Child` handle) by its pid.
+fn monitor_pid(pid: u32, config: &Config, rx: &Receiver<Cmd>) -> Adopted {
+    loop {
+        if !release_lock::pid_alive(pid) {
+            return Adopted::Gone;
+        }
+        match rx.recv_timeout(config.poll_interval) {
+            Ok(Cmd::Stop(reply)) => return Adopted::Stop(reply),
+            Ok(Cmd::Retry) | Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Adopted::Stop(mpsc::channel().0),
+        }
+    }
+}
+
+/// The release with `pid` is gone: drop its pidfile record.
+fn clear_record(config: &Config, pid: u32) {
+    if let Some(home) = config.data_home.as_deref() {
+        release_lock::remove_if_pid(home, pid);
+    }
+}
+
 fn run(config: Config, shared: Arc<Shared>, rx: Receiver<Cmd>) {
     let mut backoff = config.backoff.clone();
     let mut boot_failures = 0u32;
@@ -413,10 +626,66 @@ fn run(config: Config, shared: Arc<Shared>, rx: Receiver<Cmd>) {
 
     loop {
         attempt += 1;
+
+        // A release already holding the data home (orphaned by a shell crash,
+        // or just started by a second shell) is adopted or replaced first.
+        let lock = match claim(&config, &shared, &rx) {
+            Claim::Fresh(lock) => lock,
+            Claim::Stop(reply) => {
+                finish(&shared, reply, StopOutcome::NotRunning);
+                return;
+            }
+            Claim::Refused(reason) => {
+                if let Some(reply) = give_up_or_wait(
+                    &shared,
+                    &rx,
+                    &mut boot_failures,
+                    &mut backoff,
+                    &config,
+                    reason,
+                    vec![],
+                ) {
+                    finish(&shared, reply, StopOutcome::NotRunning);
+                    return;
+                }
+                continue;
+            }
+            Claim::Adopt { pid, port } => {
+                last_port = Some(port);
+                boot_failures = 0;
+                let up_since = Instant::now();
+                shared.publish(State::Running { port });
+                match monitor_pid(pid, &config, &rx) {
+                    Adopted::Stop(reply) => {
+                        shared.publish(State::Stopping);
+                        let outcome = stop_pid(pid, config.stop_grace);
+                        clear_record(&config, pid);
+                        finish(&shared, reply, outcome);
+                        return;
+                    }
+                    Adopted::Gone => {
+                        clear_record(&config, pid);
+                        let delay = backoff.next_delay(up_since.elapsed());
+                        shared.publish(State::Restarting {
+                            delay,
+                            reason: format!("adopted release (pid {pid}) exited"),
+                        });
+                        if let Slept::Stop(reply) = sleep_or_stop(&rx, delay) {
+                            finish(&shared, reply, StopOutcome::NotRunning);
+                            return;
+                        }
+                        continue;
+                    }
+                }
+            }
+        };
+
         let preferred = last_port.unwrap_or(config.preferred_port);
         let port = match pick_port(preferred) {
             Ok(p) => p,
             Err(e) => {
+                // Never sit in a backoff while holding the launch lock.
+                drop(lock);
                 if let Some(reply) = give_up_or_wait(
                     &shared,
                     &rx,
@@ -437,6 +706,7 @@ fn run(config: Config, shared: Arc<Shared>, rx: Receiver<Cmd>) {
         let mut release = match Release::spawn(&config, port) {
             Ok(r) => r,
             Err(e) => {
+                drop(lock);
                 let reason = format!("could not launch {}: {e}", config.release.program.display());
                 if let Some(reply) = give_up_or_wait(
                     &shared,
@@ -453,17 +723,54 @@ fn run(config: Config, shared: Arc<Shared>, rx: Receiver<Cmd>) {
                 continue;
             }
         };
+        let pid = release.pid();
+
+        // Record the release before anyone else can look: without the record a
+        // second shell could not know the data home is taken. If it cannot be
+        // written the protection is gone, so the launch fails.
+        if let Some(home) = config.data_home.as_deref() {
+            let record = Record {
+                pid,
+                port,
+                version: config.expected_version.clone(),
+            };
+            if let Err(e) = release_lock::write(home, &record) {
+                release.stop(Duration::from_millis(500));
+                let tail = release.log_tail();
+                drop(lock);
+                let reason = format!(
+                    "could not record the release in {}: {e}",
+                    release_lock::pidfile_path(home).display()
+                );
+                if let Some(reply) = give_up_or_wait(
+                    &shared,
+                    &rx,
+                    &mut boot_failures,
+                    &mut backoff,
+                    &config,
+                    reason,
+                    tail,
+                ) {
+                    finish(&shared, reply, StopOutcome::NotRunning);
+                    return;
+                }
+                continue;
+            }
+        }
+        drop(lock);
 
         match wait_ready(&mut release, &config, port, &rx) {
             Ready::Stop(reply) => {
                 shared.publish(State::Stopping);
                 let outcome = release.stop(config.stop_grace);
+                clear_record(&config, pid);
                 finish(&shared, reply, outcome);
                 return;
             }
             Ready::Failed(reason) => {
                 // Make sure a hung (alive but never ready) release is gone.
                 release.stop(Duration::from_millis(500));
+                clear_record(&config, pid);
                 let tail = release.log_tail();
                 if let Some(reply) = give_up_or_wait(
                     &shared,
@@ -487,10 +794,12 @@ fn run(config: Config, shared: Arc<Shared>, rx: Receiver<Cmd>) {
                     Watched::Stop(reply) => {
                         shared.publish(State::Stopping);
                         let outcome = release.stop(config.stop_grace);
+                        clear_record(&config, pid);
                         finish(&shared, reply, outcome);
                         return;
                     }
                     Watched::Exited(status) => {
+                        clear_record(&config, pid);
                         let delay = backoff.next_delay(up_since.elapsed());
                         shared.publish(State::Restarting {
                             delay,
