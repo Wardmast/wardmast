@@ -102,6 +102,9 @@ defmodule WardmastCli.Cmd.InstallServiceLaunchdDaemonTest do
       assert xml =~ "<string>com.wardmast.server</string>"
       assert xml =~ "<string>#{ctx.data_home}/launchd-run.sh</string>"
       assert xml =~ "<key>HOME</key>\n    <string>#{ctx.service_home}</string>"
+      # the data home is pinned explicitly, next to (not instead of) the HOME pin
+      assert xml =~ "<key>WARDMAST_DATA_HOME</key>\n    <string>#{ctx.data_home}</string>"
+      assert xml =~ "<key>ARB_DATA_HOME</key>\n    <string>#{ctx.data_home}</string>"
       assert xml =~ "/Library/Logs/Wardmast/wardmast.log"
       assert xml =~ "<key>RunAtLoad</key>"
     end

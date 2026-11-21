@@ -55,6 +55,27 @@ source checkout without a release install.
 Re-run `arb install service` after changing `PATH` or secrets to refresh
 `wardmast.env`.
 
+### Data home pin
+
+launchd runs the job with your real `HOME`, not the installing shell's
+environment, so a release install (agent, daemon and the Linux systemd unit)
+exports `WARDMAST_DATA_HOME` (and the legacy `ARB_DATA_HOME`) in the plist, always,
+even when it equals `~/.wardmast`. The install summary prints the resolved data
+home and where it came from:
+
+| Source | When |
+| --- | --- |
+| explicit env | `WARDMAST_DATA_HOME` (or legacy `ARB_DATA_HOME`) was set in the installing shell |
+| ARB_HOME release | release install with `ARB_HOME` set: `<ARB_HOME>/.wardmast`, or `ARB_HOME` itself when `current/` lives there |
+| default | `<HOME>/.wardmast` (so `HOME=<dir> arb install service` uses `<dir>/.wardmast`) |
+
+A source-checkout (dev) install never derives the data home from `ARB_HOME`
+(that is the checkout); it exports `WARDMAST_DATA_HOME` only when you set it
+explicitly. `HOME` itself is never written to the plist or unit. A scratch
+install (data home other than your real `~/.wardmast`) warns when
+`com.wardmast.server` is already installed: the label is global per user, so it
+replaces that job. Re-run `arb install service` after upgrading to pick up the pin.
+
 ## Team Mac: system-wide LaunchDaemon
 
 For a shared Mac (for example a Mac mini that a team uses for Apple

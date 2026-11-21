@@ -292,7 +292,7 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
             :text,
             :user,
             "/u/x",
-            arbiter_home,
+            %{path: arbiter_home, source: :default},
             :enabled,
             secrets,
             nil
@@ -302,6 +302,72 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
       assert out =~ "inline: GITHUB_TOKEN"
       assert out =~ "ARBITER_CLOAK_KEY (aws-sm)"
       refute out =~ "ghp_inline_token_value"
+    end
+  end
+
+  describe "install data home resolution (bd-56wi24, parity with launchd)" do
+    setup do
+      saved = for k <- ~w(HOME WARDMAST_DATA_HOME ARB_DATA_HOME), do: {k, System.get_env(k)}
+      System.delete_env("WARDMAST_DATA_HOME")
+      System.delete_env("ARB_DATA_HOME")
+      Process.delete(:bd2_arbiter_home)
+
+      tmp = Path.join(System.tmp_dir!(), "arb-dh-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+
+      on_exit(fn ->
+        for {k, v} <- saved, do: if(v, do: System.put_env(k, v), else: System.delete_env(k))
+        File.rm_rf(tmp)
+      end)
+
+      {:ok, tmp: tmp}
+    end
+
+    test "a release layout under ARB_HOME uses <ARB_HOME>/.wardmast and pins it", %{
+      unit_dir: dir,
+      tmp: tmp
+    } do
+      root = Path.join(tmp, "release-root")
+      data = Path.join(root, ".wardmast")
+      File.mkdir_p!(Path.join(data, "current/bin"))
+      System.put_env("ARB_HOME", root)
+      record_cmds()
+
+      {out, _err, 0} = capture(fn -> InstallService.run([]) end)
+
+      contents = File.read!(Path.join(dir, "wardmast.service"))
+      assert contents =~ "WorkingDirectory=#{data}\n"
+      assert contents =~ "ExecStart=#{data}/current/bin/wardmast start"
+      assert contents =~ "Environment=WARDMAST_DATA_HOME=#{data}\n"
+      assert contents =~ "Environment=ARB_DATA_HOME=#{data}\n"
+      assert out =~ "data:   #{data} (ARB_HOME release)"
+    end
+
+    test "ARB_HOME that holds current/ itself is the data home", %{unit_dir: dir, tmp: tmp} do
+      root = Path.join(tmp, "flat-root")
+      File.mkdir_p!(Path.join(root, "current/bin"))
+      File.write!(Path.join(root, "current/bin/wardmast"), "#!/bin/sh\n")
+      System.put_env("ARB_HOME", root)
+      record_cmds()
+
+      {_out, _err, 0} = capture(fn -> InstallService.run([]) end)
+
+      assert File.read!(Path.join(dir, "wardmast.service")) =~
+               "Environment=WARDMAST_DATA_HOME=#{root}\n"
+    end
+
+    test "an explicit WARDMAST_DATA_HOME wins and is reported as such", %{tmp: tmp, unit_dir: dir} do
+      explicit = Path.join(tmp, "explicit")
+      System.put_env("WARDMAST_DATA_HOME", explicit)
+      record_cmds()
+
+      {out, _err, 0} = capture(fn -> InstallService.run(["--json"]) end)
+
+      assert File.read!(Path.join(dir, "wardmast.service")) =~
+               "Environment=WARDMAST_DATA_HOME=#{explicit}\n"
+
+      assert %{"data_home" => ^explicit, "data_home_source" => "explicit_env"} =
+               Jason.decode!(out)
     end
   end
 
@@ -491,6 +557,50 @@ defmodule WardmastCli.Cmd.InstallServiceTest do
 
       refute contents =~ ".run-server.sh"
       assert contents =~ "ExecStart=#{root}/current/bin/wardmast start"
+    end
+  end
+
+  describe "unit_contents/3 data home pin (bd-56wi24)" do
+    setup do
+      prior = {System.get_env("WARDMAST_DATA_HOME"), System.get_env("ARB_DATA_HOME")}
+      System.delete_env("WARDMAST_DATA_HOME")
+      System.delete_env("ARB_DATA_HOME")
+
+      on_exit(fn ->
+        {w, a} = prior
+
+        if w,
+          do: System.put_env("WARDMAST_DATA_HOME", w),
+          else: System.delete_env("WARDMAST_DATA_HOME")
+
+        if a, do: System.put_env("ARB_DATA_HOME", a), else: System.delete_env("ARB_DATA_HOME")
+      end)
+    end
+
+    test "release units (user + system) export WARDMAST_DATA_HOME and ARB_DATA_HOME" do
+      for scope <- [:user, :system] do
+        contents = InstallService.unit_contents(scope, "/srv/wm/.wardmast", "/srv/wm/.wardmast")
+
+        assert contents =~ "Environment=WARDMAST_DATA_HOME=/srv/wm/.wardmast\n"
+        assert contents =~ "Environment=ARB_DATA_HOME=/srv/wm/.wardmast\n"
+      end
+    end
+
+    test "a dev unit does not carry them by default, and ARB_HOME never leaks into them" do
+      root = Path.join(System.tmp_dir!(), "arb-devpin-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(Path.join(root, "apps"))
+      File.write!(Path.join(root, "mix.exs"), "# fake\n")
+      on_exit(fn -> File.rm_rf!(root) end)
+
+      contents = InstallService.unit_contents(:user, "/home/u/.wardmast", root)
+      refute contents =~ "DATA_HOME"
+      assert contents =~ "Environment=ARB_HOME=#{root}"
+
+      System.put_env("WARDMAST_DATA_HOME", "/srv/explicit")
+      contents = InstallService.unit_contents(:user, "/home/u/.wardmast", root)
+      assert contents =~ "Environment=WARDMAST_DATA_HOME=/srv/explicit\n"
+      assert contents =~ "Environment=ARB_DATA_HOME=/srv/explicit\n"
+      assert contents =~ "Environment=ARB_HOME=#{root}"
     end
   end
 
