@@ -28,6 +28,8 @@ defmodule WardmastCli.Supervisor.Launchd.Plist do
       what now owns worker cleanup, so launchd no longer has to.
   """
 
+  alias WardmastCli.Cmd.InstallService.DataHome
+
   @label "com.wardmast.server"
   @daemon_dir "/Library/LaunchDaemons"
   @daemon_log_dir "/Library/Logs/Wardmast"
@@ -91,8 +93,14 @@ defmodule WardmastCli.Supervisor.Launchd.Plist do
     # Dev mode runs from the checkout; release mode (no `:root`) from the data home.
     {workdir, env} =
       case Keyword.get(opts, :root) do
-        nil -> {arbiter_home, [{"PATH", @default_path}] ++ extra_env}
-        root -> {root, [{"PATH", @default_path}, {"ARB_HOME", root}] ++ extra_env}
+        nil ->
+          {arbiter_home, [{"PATH", @default_path}] ++ data_home_env(arbiter_home) ++ extra_env}
+
+        root ->
+          # ARB_HOME is the checkout here and is never copied into the data home;
+          # the pin is exported only when the installing shell set one explicitly.
+          pin = data_home_env(DataHome.explicit())
+          {root, [{"PATH", @default_path}, {"ARB_HOME", root}] ++ pin ++ extra_env}
       end
 
     {identity, env, log} =
@@ -146,6 +154,12 @@ defmodule WardmastCli.Supervisor.Launchd.Plist do
     </plist>
     """
   end
+
+  # Pin the data home (and the legacy name an older `arb` reads) so a later HOME
+  # change cannot move the database. Deliberately not HOME itself: that also
+  # locates ~/.claude, git/gh config and Library paths.
+  defp data_home_env(nil), do: []
+  defp data_home_env(dir), do: [{"WARDMAST_DATA_HOME", dir}, {"ARB_DATA_HOME", dir}]
 
   @doc """
   The wrapper `ProgramArguments` runs: export each `KEY=value` line of

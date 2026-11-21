@@ -5,6 +5,7 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
   checkout's unit execs into.
   """
 
+  alias WardmastCli.Cmd.InstallService.DataHome
   alias WardmastCli.Output
 
   @run_server_script_name ".run-server.sh"
@@ -86,7 +87,7 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
     Type=exec
     WorkingDirectory=#{arbiter_home}
     EnvironmentFile=-#{Path.join(arbiter_home, "wardmast.env")}
-    #{release_environment_lines()}
+    #{release_environment_lines(arbiter_home)}
     #{log_directives}ExecStart=#{release_bin} start
     Restart=on-failure
     RestartSec=10
@@ -122,7 +123,7 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
     WorkingDirectory=#{root}
     EnvironmentFile=-#{Path.join(arbiter_home, "wardmast.env")}
     Environment=ARB_HOME=#{root}
-    #{release_environment_lines()}
+    #{release_environment_lines(DataHome.explicit())}
     #{log_directives}ExecStart=/bin/sh #{run_server_sh}
     Restart=on-failure
     RestartSec=10
@@ -230,8 +231,14 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
   # back to ARB_HOST / ARB_WORKSPACE) are forwarded when set so the running node
   # picks up the same coordinator and workspace as the installing shell; secrets
   # live in the EnvironmentFile instead.
-  defp release_environment_lines do
+  #
+  # `data_home` (bd-56wi24) pins WARDMAST_DATA_HOME and the legacy ARB_DATA_HOME:
+  # always for a release unit; for a dev unit only when explicitly set (ARB_HOME
+  # is the checkout there and never feeds it). `nil` omits both.
+  defp release_environment_lines(data_home) do
     [
+      {"WARDMAST_DATA_HOME", data_home},
+      {"ARB_DATA_HOME", data_home},
       {"WARDMAST_HOST", Wardmast.Env.get("WARDMAST_HOST")},
       {"WARDMAST_WORKSPACE", Wardmast.Env.get("WARDMAST_WORKSPACE")}
     ]

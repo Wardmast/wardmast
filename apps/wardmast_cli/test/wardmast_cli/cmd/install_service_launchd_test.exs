@@ -198,6 +198,133 @@ defmodule WardmastCli.Cmd.InstallServiceLaunchdTest do
       assert wrapper =~ "'#{data}/wardmast.env'"
     end
 
+    test "the release plist pins the ARB_HOME-derived data home, not the real HOME's (bd-56wi24)",
+         %{root: root, agents: agents} do
+      File.rm_rf!(Path.join(root, "apps"))
+      File.rm!(Path.join(root, "mix.exs"))
+      Process.delete(:bd2_arbiter_home)
+      data = Path.join(root, ".wardmast")
+      make_release_bin(data)
+      real_default = Path.join(System.user_home!(), ".wardmast/launchd-run.sh")
+      existed? = File.exists?(real_default)
+      record_cmds()
+
+      {_out, _err, 0} = capture(fn -> InstallService.run([]) end)
+
+      xml = File.read!(Path.join(agents, "com.wardmast.server.plist"))
+      assert xml =~ "<key>WARDMAST_DATA_HOME</key>\n    <string>#{data}</string>"
+      assert xml =~ "<key>ARB_DATA_HOME</key>\n    <string>#{data}</string>"
+      refute xml =~ "<key>HOME</key>"
+      assert File.exists?(Path.join(data, "launchd-run.sh"))
+      # the real user's data home is not touched (the wrapper lands under ARB_HOME)
+      assert File.exists?(real_default) == existed?
+    end
+
+    test "an explicit WARDMAST_DATA_HOME wins over ARB_HOME and is reported as such",
+         %{root: root, agents: agents} do
+      File.rm_rf!(Path.join(root, "apps"))
+      File.rm!(Path.join(root, "mix.exs"))
+      Process.delete(:bd2_arbiter_home)
+      explicit = Path.join(Path.dirname(root), "explicit-data")
+      make_release_bin(explicit)
+      System.put_env("WARDMAST_DATA_HOME", explicit)
+      on_exit(fn -> System.delete_env("WARDMAST_DATA_HOME") end)
+      record_cmds()
+
+      {out, _err, 0} = capture(fn -> InstallService.run(["--json"]) end)
+
+      xml = File.read!(Path.join(agents, "com.wardmast.server.plist"))
+      assert xml =~ "<key>WARDMAST_DATA_HOME</key>\n    <string>#{explicit}</string>"
+
+      assert %{"data_home" => ^explicit, "data_home_source" => "explicit_env"} =
+               Jason.decode!(out)
+    end
+
+    test "the summary prints the data home and its source (text, release via ARB_HOME)",
+         %{root: root} do
+      File.rm_rf!(Path.join(root, "apps"))
+      File.rm!(Path.join(root, "mix.exs"))
+      Process.delete(:bd2_arbiter_home)
+      data = Path.join(root, ".wardmast")
+      make_release_bin(data)
+      record_cmds()
+
+      {out, _err, 0} = capture(fn -> InstallService.run([]) end)
+      assert out =~ "data:   #{data} (ARB_HOME release)"
+
+      {json, _err, 0} = capture(fn -> InstallService.run(["--json"]) end)
+
+      assert %{"data_home" => ^data, "data_home_source" => "arb_home_release"} =
+               Jason.decode!(json)
+    end
+
+    test "a dev install never copies ARB_HOME into the data home and exports no pin",
+         %{root: root, agents: agents, arbiter_home: home} do
+      record_cmds()
+
+      {out, _err, 0} = capture(fn -> InstallService.run(["--json"]) end)
+
+      xml = File.read!(Path.join(agents, "com.wardmast.server.plist"))
+      refute xml =~ "DATA_HOME"
+      assert xml =~ "<key>ARB_HOME</key>\n    <string>#{root}</string>"
+      assert %{"data_home" => ^home, "data_home_source" => "default"} = Jason.decode!(out)
+    end
+
+    test "warns when the data home differs from the real user's default and the global label is already installed",
+         %{root: root, arbiter_home: home} do
+      File.rm_rf!(Path.join(root, "apps"))
+      File.rm!(Path.join(root, "mix.exs"))
+      make_release_bin(home)
+      real_home = Path.join(Path.dirname(root), "real-home")
+      real_plist = Path.join([real_home, "Library", "LaunchAgents", "com.wardmast.server.plist"])
+      File.mkdir_p!(Path.dirname(real_plist))
+      File.write!(real_plist, "<plist/>")
+
+      record_cmds(fn
+        "id", ["-un"] ->
+          {"alice\n", 0}
+
+        "dscl", [".", "-read", "/Users/alice", "NFSHomeDirectory"] ->
+          {"NFSHomeDirectory: #{real_home}\n", 0}
+
+        _, _ ->
+          {"", 0}
+      end)
+
+      {_out, err, 0} = capture(fn -> InstallService.run([]) end)
+
+      assert err =~ "warning: the data home #{home} differs from the real default"
+      assert err =~ real_plist
+      assert err =~ "com.wardmast.server"
+    end
+
+    test "no warning when the data home is the real user's default",
+         %{root: root} do
+      File.rm_rf!(Path.join(root, "apps"))
+      File.rm!(Path.join(root, "mix.exs"))
+      real_home = Path.join(Path.dirname(root), "real-home")
+      data = Path.join(real_home, ".wardmast")
+      Process.put(:bd2_arbiter_home, data)
+      make_release_bin(data)
+      real_plist = Path.join([real_home, "Library", "LaunchAgents", "com.wardmast.server.plist"])
+      File.mkdir_p!(Path.dirname(real_plist))
+      File.write!(real_plist, "<plist/>")
+
+      record_cmds(fn
+        "id", ["-un"] ->
+          {"alice\n", 0}
+
+        "dscl", [".", "-read", "/Users/alice", "NFSHomeDirectory"] ->
+          {"NFSHomeDirectory: #{real_home}\n", 0}
+
+        _, _ ->
+          {"", 0}
+      end)
+
+      {_out, err, 0} = capture(fn -> InstallService.run([]) end)
+      refute err =~ "differs from the real default"
+    end
+
     test "--system without root is refused (the LaunchDaemon install needs root)" do
       record_cmds()
       assert {_, err, 1} = capture(fn -> InstallService.run(["--system"]) end)
