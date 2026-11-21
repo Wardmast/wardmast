@@ -592,6 +592,35 @@ defmodule Wardmast.Sessions.ProvisioningTest do
       refute File.exists?(Path.join(Layout.config_dir(session.id), ".credentials.json"))
     end
 
+    test "a session cannot run in the quota poller's grant dir (it would refresh the grant)" do
+      {:ok, account} = Wardmast.Accounts.create_account(%{provider: :claude, slug: "polled"})
+
+      grant_dir =
+        Path.join(System.tmp_dir!(), "quota-claude-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(grant_dir)
+
+      File.write!(
+        Path.join(grant_dir, ".credentials.json"),
+        ~s({"claudeAiOauth":{"accessToken":"x"}})
+      )
+
+      on_exit(fn -> File.rm_rf(grant_dir) end)
+
+      {:ok, _} =
+        Wardmast.Accounts.rotate_credential(account.id, %{
+          kind: :cli_credentials_path,
+          secret: grant_dir
+        })
+
+      capture_log(fn ->
+        assert {:error, {:provisioning_failed, {:config_dir_is_quota_grant, message}}} =
+                 Sessions.launch(runner: SessionRunnerStub, config_dir: grant_dir)
+
+        assert message =~ "second refresher"
+      end)
+    end
+
     test "no code path can copy a credentials file into a session" do
       refute function_exported?(Wardmast.Agents.Claude.ConfigDir, :seed_credentials, 2)
       refute function_exported?(Wardmast.Agents.Claude.ConfigDir, :seed_credentials, 1)

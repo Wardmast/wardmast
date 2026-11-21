@@ -82,6 +82,7 @@ defmodule Wardmast.Sessions.Provisioning do
   revoked token would be worse than one that mints again.
   """
 
+  alias Wardmast.Accounts.Credentials
   alias Wardmast.Agents.Claude.Config, as: ClaudeConfig
   alias Wardmast.Agents.Claude.ConfigDir
   alias Wardmast.Agents.Claude.ConfigDir.Interactive
@@ -91,6 +92,7 @@ defmodule Wardmast.Sessions.Provisioning do
   alias Wardmast.MCP
   alias Wardmast.MCP.AgentConfig.Claude, as: ClaudeMCP
   alias Wardmast.MCP.AgentConfig.Gemini, as: AgyMCP
+  alias Wardmast.Quota.GrantFile
   alias Wardmast.Sessions.Instructions
   alias Wardmast.Sessions.Layout
   alias Wardmast.Sessions.Memory
@@ -152,7 +154,8 @@ defmodule Wardmast.Sessions.Provisioning do
     cwd = session.cwd || paths.workspace
     config_dir = if Provider.config_dir?(session), do: session.config_dir || paths.config
 
-    with :ok <- check_outside_primary_checkout(paths.root, opts),
+    with :ok <- check_not_quota_grant_dir(config_dir),
+         :ok <- check_outside_primary_checkout(paths.root, opts),
          :ok <- check_outside_primary_checkout(cwd, opts),
          :ok <- make_directories(id, config_dir, cwd),
          {:ok, opts} <- install_pair_guard(session, opts),
@@ -278,6 +281,26 @@ defmodule Wardmast.Sessions.Provisioning do
   # §10.2 layer 1, asserted rather than assumed. A misconfigured
   # WARDMAST_SESSIONS_ROOT pointing into the live source tree fails here, loudly,
   # instead of handing an agent a cwd Phoenix hot-reload is watching.
+  # bd-6y4pj6: a session's `claude` refreshes whatever grant lives in its
+  # config dir. If that dir is the quota poller's, the session becomes a second
+  # refresher of the poller's rotating grant — the race that invalidated it.
+  defp check_not_quota_grant_dir(nil), do: :ok
+
+  defp check_not_quota_grant_dir(config_dir) do
+    expanded = Path.expand(config_dir)
+
+    if Enum.any?(Credentials.quota_grants(), fn %{path: path} ->
+         Path.expand(GrantFile.config_dir(path)) == expanded
+       end) do
+      {:error,
+       {:config_dir_is_quota_grant,
+        "#{config_dir} holds the quota poller's rotating Claude grant; a session would become " <>
+          "a second refresher of it and invalidate it. Use another config dir."}}
+    else
+      :ok
+    end
+  end
+
   defp check_outside_primary_checkout(path, opts) do
     checkout = Keyword.get(opts, :primary_checkout, Paths.primary_checkout())
 

@@ -63,6 +63,13 @@ defmodule Wardmast.Quota.GrantRefresherTest do
           ~s(printf '{"claudeAiOauth":{"accessToken":"renewed","refreshToken":"r2","expiresAt":%s}}' ) <>
             ~s("#{now_ms() + 8 * @hour_ms}" > "$CLAUDE_CONFIG_DIR/.credentials.json"\nexit 0)
 
+        :slow_renews ->
+          # Long enough for a concurrent consumer to arrive while this one
+          # still holds the refresh.
+          "sleep 1\n" <>
+            ~s(printf '{"claudeAiOauth":{"accessToken":"renewed","refreshToken":"r2","expiresAt":%s}}' ) <>
+            ~s("#{now_ms() + 8 * @hour_ms}" > "$CLAUDE_CONFIG_DIR/.credentials.json"\nexit 0)
+
         :fails ->
           "echo 'Not logged in' >&2\nexit 1"
 
@@ -155,6 +162,68 @@ defmodule Wardmast.Quota.GrantRefresherTest do
     refute File.read!(ctx.grant) == before
     assert GrantRefresher.state(pid).grants[ctx.grant].status == :ok
     assert escalations() == []
+  end
+
+  describe "one refresher per grant (bd-6y4pj6)" do
+    test "two consumers ticking one refresher at once refresh the grant once", ctx do
+      write_grant!(ctx.grant, now_ms() + 60_000)
+      pid = start_refresher(ctx, fake_cli!(ctx, :slow_renews))
+
+      [a, b] = for _ <- 1..2, do: Task.async(fn -> GrantRefresher.tick(pid) end)
+      Task.await_many([a, b], 30_000)
+
+      assert length(record_lines(ctx.record)) == 4
+      assert GrantRefresher.state(pid).grants[ctx.grant].status == :ok
+      assert escalations() == []
+    end
+
+    test "two refresher processes sharing a grant never both run the CLI", ctx do
+      write_grant!(ctx.grant, now_ms() + 60_000)
+      cli = fake_cli!(ctx, :slow_renews)
+
+      first = start_refresher(ctx, cli)
+
+      second =
+        start_supervised!(
+          {GrantRefresher,
+           [
+             name: nil,
+             enabled: true,
+             interval_ms: @hour_ms,
+             claude_cmd: cli,
+             cwd: ctx.cwd,
+             grants_fun: fn -> [%{account_id: "acct", path: ctx.grant}] end
+           ]},
+          id: :second_refresher
+        )
+
+      tasks = for pid <- [first, second], do: Task.async(fn -> GrantRefresher.tick(pid) end)
+      Task.await_many(tasks, 30_000)
+
+      # One CLI run (four record lines), not two.
+      assert length(record_lines(ctx.record)) == 4
+
+      # The loser saw the winner's fresh grant on its next look and left it be.
+      GrantRefresher.tick(first)
+      GrantRefresher.tick(second)
+      assert length(record_lines(ctx.record)) == 4
+      assert escalations() == []
+      refute File.exists?(Path.join(ctx.config_dir, ".refresh.lock"))
+    end
+
+    test "a refresh lock left by a crashed holder is taken over", ctx do
+      write_grant!(ctx.grant, now_ms() + 60_000)
+      lock = Path.join(ctx.config_dir, ".refresh.lock")
+      File.mkdir_p!(lock)
+      old = System.os_time(:second) - 3_600
+      File.touch!(lock, old)
+
+      pid = start_refresher(ctx, fake_cli!(ctx, :renews), cli_timeout_ms: 1_000)
+      GrantRefresher.tick(pid)
+
+      assert length(record_lines(ctx.record)) == 4
+      assert GrantRefresher.state(pid).grants[ctx.grant].status == :ok
+    end
   end
 
   test "a failed refresh escalates exactly once, naming the re-login command", ctx do
