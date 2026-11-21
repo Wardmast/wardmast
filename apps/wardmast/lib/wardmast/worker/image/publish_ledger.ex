@@ -310,6 +310,7 @@ defmodule Wardmast.Worker.Image.PublishLedger do
   # loaded yet (a ctx key from a module not touched since boot), which made a fresh
   # server read a valid ledger as empty ("never_published"). Try `:safe` first, then the
   # plain decode for exactly that case.
+  # sobelow_skip ["Misc.BinToTerm"]
   defp safe_decode(bin) do
     :erlang.binary_to_term(bin, [:safe])
   rescue
