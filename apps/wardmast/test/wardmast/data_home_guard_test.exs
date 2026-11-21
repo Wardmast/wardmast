@@ -13,7 +13,9 @@ defmodule Wardmast.DataHomeGuardTest do
   # home; each entry says why it is allowed to name the directory.
   @allowed %{
     "apps/wardmast_cli/lib/wardmast_cli/cmd/install_service/launchd.ex" =>
-      "a daemon's data home is the SERVICE user's home, not the installing user's"
+      "a daemon's data home is the SERVICE user's home, not the installing user's",
+    "apps/wardmast_cli/lib/wardmast_cli/cmd/install_service/data_home.ex" =>
+      "a release install's data home may be `<ARB_HOME>/.wardmast`, nested under ARB_HOME rather than HOME (bd-56wi24)"
   }
 
   defp source_files do
