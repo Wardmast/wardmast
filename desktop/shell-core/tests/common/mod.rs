@@ -40,6 +40,11 @@ impl Fake {
         config.ready_timeout = Duration::from_secs(5);
         config.poll_interval = Duration::from_millis(20);
         config.stop_grace = Duration::from_secs(3);
+        // Tests run in parallel and a release that never binds (`FAKE_MODE=hang`)
+        // leaves its probed port free, so a shared preferred port (4848) lets a
+        // sibling test's fake claim it and answer the hang test's readiness probe.
+        // Port 0 gives every launch its own OS-assigned port instead.
+        config.preferred_port = 0;
         let data_home = dir.join("data");
         let _ = std::fs::remove_dir_all(&data_home);
         Fake {
