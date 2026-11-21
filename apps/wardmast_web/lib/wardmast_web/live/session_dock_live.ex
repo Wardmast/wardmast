@@ -266,8 +266,8 @@ defmodule WardmastWeb.SessionDockLive do
      |> assign(:launch_name, nil)
      |> assign(:launch_workspace_id, nil)
      |> assign(:launch_can_dispatch?, false)
-     # §9.5: on when mode B, which is the default auth mode — see
-     # `SessionIndexLive`'s moduledoc.
+     # §9.5: on under mode B; `default_launch_mode/1` picks the real default
+     # once the connected accounts are known.
      |> assign(:launch_remote_control?, true)
      |> assign(:launch_error, nil)
      # The dock's own error notice. It cannot use `put_flash/3`: this view
@@ -366,6 +366,7 @@ defmodule WardmastWeb.SessionDockLive do
         socket
         |> assign(:workspaces, SessionIndexLive.workspaces())
         |> SessionIndexLive.refresh_launch_providers()
+        |> SessionIndexLive.default_launch_mode()
       else
         socket
       end

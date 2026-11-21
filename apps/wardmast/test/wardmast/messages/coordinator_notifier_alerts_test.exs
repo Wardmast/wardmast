@@ -465,6 +465,28 @@ defmodule Wardmast.Messages.CoordinatorNotifierAlertsTest do
       assert alert.detail =~ "trailing 5 hours"
     end
 
+    # bd-6y4pj6: the snapshot state says WHY it is stale.
+    test "the stale alert names the credential that is lapsing and the re-login command" do
+      info =
+        stale_info(%{
+          credentials: [
+            %{
+              kind: "quota_grant",
+              health: "failing",
+              detail: "the refresher could not renew the grant",
+              relogin: "CLAUDE_CONFIG_DIR=/h/q claude auth login"
+            }
+          ]
+        })
+
+      CoordinatorNotifier.quota_snapshot_stale(%{workspace_id: uniq("ws")}, info)
+
+      alert = only_alert(:quota_snapshot_stale)
+      assert alert.detail =~ "Likely cause: claude:default quota_grant is failing"
+      assert alert.detail =~ "could not renew the grant"
+      assert alert.detail =~ "CLAUDE_CONFIG_DIR=/h/q claude auth login"
+    end
+
     test "raises one operator alert saying how long quota accounting has been blind" do
       ws = uniq("ws")
 

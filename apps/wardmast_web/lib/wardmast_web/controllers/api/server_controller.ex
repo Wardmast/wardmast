@@ -43,6 +43,8 @@ defmodule WardmastWeb.Api.ServerController do
       `Wardmast.Agents.Claude.CredentialCheck.workspace_report/0`): the ones
       that used to fall back to a copy of the operator's `.credentials.json`,
       and whose Claude dispatch is now held. `arb server doctor` lists them.
+      The response also carries `accounts` — each Claude account's credential
+      kind, health and expiry (`Wardmast.Accounts.CredentialHealth`, bd-6y4pj6).
       A failed read is a 500, so the doctor reports "could not check" rather
       than a false all-clear.
     * `GET /api/server/agy_models` — the configured agy tier models (built-in
@@ -210,6 +212,7 @@ defmodule WardmastWeb.Api.ServerController do
 
     json(conn, %{
       checked: checked,
+      accounts: Wardmast.Accounts.CredentialHealth.report(:claude),
       missing:
         Enum.map(missing, fn m ->
           %{
