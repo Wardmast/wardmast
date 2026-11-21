@@ -1558,6 +1558,34 @@ defmodule WardmastCli.Cmd.DoctorTest do
       assert out =~ "guardrails are off"
     end
 
+    test "with no subject rules, still shows a configured bot token's expiry" do
+      guardrail_routes(%{
+        "active" => false,
+        "rules" => 0,
+        "issues" => [],
+        "workspaces" => [
+          %{
+            "workspace" => "default",
+            "subjects" => [],
+            "git_credential_tokens" => [
+              %{
+                "repo" => "vstim",
+                "source" => "live",
+                "expires_at" => "2027-11-03",
+                "days_left" => 364
+              }
+            ]
+          }
+        ]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] guardrail profiles"
+      assert out =~ "guardrails are off"
+      assert out =~ "default: vstim bot token expires 2027-11-03 (364d)"
+    end
+
     test "ok, reporting each workspace's effective tiers" do
       guardrail_routes(%{
         "active" => true,

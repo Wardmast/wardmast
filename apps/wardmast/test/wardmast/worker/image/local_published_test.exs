@@ -136,6 +136,47 @@ defmodule Wardmast.Worker.Image.LocalPublishedTest do
       assert reason =~ "never_published"
     end
 
+    test "an unreadable publish ledger is named as such, not as never published", ctx do
+      opts = opts(ctx)
+      File.write!(opts[:ledger], "not a term")
+
+      assert {:fallback, reason} = LocalPublished.resolve(opts)
+      assert reason =~ "ledger_unreadable"
+      refute reason =~ "never_published"
+    end
+
+    test "a ledger entry without a digest says so", ctx do
+      opts = opts(ctx)
+      PublishLedger.record(%{repo: "vstim", repo_path: "/r"}, ledger: opts[:ledger])
+
+      assert {:fallback, reason} = LocalPublished.resolve(opts)
+      assert reason =~ "no_ref_recorded"
+    end
+
+    test "a published and cached image is used though the ledger holds an unloaded atom", ctx do
+      opts = opts(ctx, %{present?: true})
+      placeholder = "ZZplaceholderatomBBBBBBBBBBBB"
+      key = {"vstim", "/r"}
+
+      entry = %{
+        key: key,
+        ctx: %{repo: "vstim", repo_path: "/r", extra: :ZZplaceholderatomBBBBBBBBBBBB},
+        at: DateTime.utc_now(),
+        ref: @ref
+      }
+
+      bin =
+        :binary.replace(
+          :erlang.term_to_binary(%{key => entry}),
+          placeholder,
+          String.duplicate("w", byte_size(placeholder))
+        )
+
+      File.write!(opts[:ledger], bin)
+
+      assert {:published, %{ref: @ref}} = LocalPublished.resolve(opts)
+    end
+
     test "switched off, it is the local build", ctx do
       opts = Keyword.put(opts(ctx), :published_image, false)
       publish!(opts)
