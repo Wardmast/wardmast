@@ -10,9 +10,11 @@ defmodule Wardmast.Accounts.LoginCompletion do
        `:cli_credentials_path` row pointing at the CLI's own credential file in
        the dedicated config dir (`Wardmast.Accounts.reference_credential_path/2`).
        The file is never read into a row or copied: refresh-token rotation
-       locks out copies (bd-6umoh9). Only Claude has a quota-grant consumer for
-       that kind (`Wardmast.Quota.GrantFile`), so other providers are not given
-       a row (`credential: :unsupported`) — the login is still recorded.
+       locks out copies (bd-6umoh9). Claude and Codex get a row (so
+       `arb account show` lists it); other providers are not given one
+       (`credential: :unsupported`) — the login is still recorded. Only Claude
+       has a quota-grant consumer (`Wardmast.Quota.GrantFile`); the Codex poll
+       reads the source home's `auth.json` directly (bd-2cua01).
     2. **Clear the alerts.** The adapter's `credential_expired` system alerts
        (every source), the watchdog's expired mark, and the lapsed-login
        escalation naming the config dir.
@@ -41,6 +43,8 @@ defmodule Wardmast.Accounts.LoginCompletion do
 
   @alert_sources [:worker_report, :usage_poll, :periodic_probe]
   @account_providers [:claude, :codex, :antigravity, :grok]
+  # Providers whose login file is recorded as a `:cli_credentials_path` row.
+  @credential_providers [:claude, :codex]
 
   @type info :: %{
           required(:provider) => atom(),
@@ -109,7 +113,7 @@ defmodule Wardmast.Accounts.LoginCompletion do
 
   defp reference(provider, slug, file) when provider in @account_providers do
     with {:ok, account} <- ensure_account(provider, slug),
-         true <- provider == :claude and is_binary(file),
+         true <- provider in @credential_providers and is_binary(file),
          {:ok, _credential} <- Accounts.reference_credential_path(account, file) do
       {:referenced, account}
     else
