@@ -183,6 +183,32 @@ defmodule Wardmast.Screenshots.PlanCheckTest do
       assert :clean = PlanCheck.strip_committed(dir, "main")
     end
 
+    test "ignores commit signing and hooks", %{dir: dir} do
+      git(dir, ["checkout", "-q", "-b", "feat"])
+      commit_manifest(dir, @valid)
+      git(dir, ["config", "commit.gpgsign", "true"])
+      git(dir, ["config", "gpg.program", "/bin/false"])
+      hook = Path.join(dir, ".git/hooks/pre-commit")
+      File.mkdir_p!(Path.dirname(hook))
+      File.write!(hook, "#!/bin/sh\nexit 1\n")
+      File.chmod!(hook, 0o755)
+
+      assert :stripped = PlanCheck.strip_committed(dir, "main")
+    end
+
+    test "a failing commit errors and restores the index", %{dir: dir} do
+      git(dir, ["checkout", "-q", "-b", "feat"])
+      commit_manifest(dir, @valid)
+      File.write!(Path.join(dir, ".git/refs/heads/feat.lock"), "")
+
+      assert {:error, msg} = PlanCheck.strip_committed(dir, "main")
+      assert msg =~ "screenshots.json"
+      {tree, 0} = System.cmd("git", ["ls-tree", "-r", "--name-only", "HEAD"], cd: dir)
+      assert tree =~ "screenshots.json"
+      {status, 0} = System.cmd("git", ["status", "--porcelain"], cd: dir)
+      refute status =~ "D  "
+    end
+
     test "leaves a manifest the target already carries", %{dir: dir} do
       commit_manifest(dir, @skip)
       git(dir, ["checkout", "-q", "-b", "feat"])

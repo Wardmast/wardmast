@@ -216,7 +216,7 @@ defmodule Wardmast.Screenshots.PlanCheck do
   working-tree file stays, so the checked copy is still shot). A manifest the target already
   carries is left alone: deleting it is the operator's one-time cleanup.
   """
-  @spec strip_committed(String.t(), String.t() | nil) :: :stripped | :clean
+  @spec strip_committed(String.t(), String.t() | nil) :: :stripped | :clean | {:error, String.t()}
   def strip_committed(worktree, target) do
     base =
       if is_binary(target) and target != "",
@@ -224,24 +224,41 @@ defmodule Wardmast.Screenshots.PlanCheck do
 
     with true <- git_ok?(worktree, ["cat-file", "-e", "HEAD:" <> @plan_file]),
          false <-
-           is_binary(base) and git_ok?(worktree, ["cat-file", "-e", base <> ":" <> @plan_file]),
-         true <- git_ok?(worktree, ["rm", "--cached", "-q", "--", @plan_file]),
-         true <-
-           git_ok?(worktree, [
+           is_binary(base) and git_ok?(worktree, ["cat-file", "-e", base <> ":" <> @plan_file]) do
+      do_strip(worktree)
+    else
+      _ -> :clean
+    end
+  end
+
+  defp do_strip(worktree) do
+    with {_, 0} <- git(worktree, ["rm", "--cached", "-q", "--", @plan_file]),
+         {_, 0} <-
+           git(worktree, [
              "-c",
              "user.name=arbiter",
              "-c",
              "user.email=arbiter@localhost",
+             "-c",
+             "commit.gpgsign=false",
              "commit",
              "-q",
+             "--no-verify",
              "-m",
              "Remove per-run screenshots manifest (never committed)"
            ]) do
       :stripped
     else
-      _ -> :clean
+      {out, code} ->
+        # Restore the index so a failed commit leaves no half-staged deletion.
+        git(worktree, ["reset", "-q", "--", @plan_file])
+
+        {:error,
+         "could not strip committed #{@plan_file} (git exit #{code}): " <> String.trim(out)}
     end
   end
+
+  defp git(dir, args), do: System.cmd("git", args, cd: dir, stderr_to_stdout: true)
 
   defp git_ok?(dir, args),
     do: match?({_, 0}, System.cmd("git", args, cd: dir, stderr_to_stdout: true))

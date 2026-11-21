@@ -5975,16 +5975,25 @@ defmodule Wardmast.Worker do
           do: %{result: :ok, steps: []},
           else: Wardmast.Worker.PrepushCheck.run_steps(spec, worktree, run_opts)
 
-      _ = Wardmast.Screenshots.PlanCheck.strip_committed(worktree, target)
+      strip = Wardmast.Screenshots.PlanCheck.strip_committed(worktree, target)
 
       gate =
         if screenshots,
           do: Wardmast.Screenshots.PlanCheck.gate(screenshots, worktree, target, task_id)
 
-      send(
-        me,
-        {:__prepush_result__, ref, ctx, Wardmast.Screenshots.PlanCheck.merge_gate(base, gate)}
-      )
+      merged = Wardmast.Screenshots.PlanCheck.merge_gate(base, gate)
+
+      merged =
+        case strip do
+          {:error, msg} ->
+            Logger.warning("Worker: task=#{task_id} #{msg}")
+            %{merged | result: {:failed, nil, msg}}
+
+          _ ->
+            merged
+        end
+
+      send(me, {:__prepush_result__, ref, ctx, merged})
     end
 
     case Task.Supervisor.start_child(Wardmast.TaskSupervisor, run) do
