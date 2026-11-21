@@ -322,6 +322,30 @@ defmodule WardmastWeb.Api.ServerControllerTest do
       assert entry["fix"] =~ "arb account attach #{ws.id} claude"
       assert entry["summary"] =~ "no Claude setup token"
     end
+
+    # bd-6y4pj6: each Claude account's credential kind, health and expiry.
+    test "reports each Claude account's credential health", %{conn: conn} do
+      {:ok, account} = Wardmast.Accounts.create_account(%{provider: :claude, slug: "health-acct"})
+
+      {:ok, _} =
+        Wardmast.Accounts.rotate_credential(account.id, %{
+          kind: :oauth_token,
+          env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+          secret: "sk-ant-oat01-NEVER-IN-RESPONSE"
+        })
+
+      body = conn |> get("/api/server/claude_credentials") |> response(200)
+      refute body =~ "NEVER-IN-RESPONSE"
+
+      resp = Jason.decode!(body)
+      assert [acct] = Enum.filter(resp["accounts"], &(&1["account"] == "claude:health-acct"))
+      assert acct["health"] == "ok"
+
+      assert [%{"kind" => "setup_token", "health" => "ok", "expires_at" => expires}] =
+               acct["credentials"]
+
+      assert is_binary(expires)
+    end
   end
 
   # bd-cvvb02 / P13 (bd-9gqj8e): provider accounts are always on. An

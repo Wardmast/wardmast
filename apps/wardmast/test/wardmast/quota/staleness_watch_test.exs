@@ -165,6 +165,30 @@ defmodule Wardmast.Quota.StalenessWatchTest do
       assert alert.detail =~ "Quota accounting is blind"
     end
 
+    # bd-6y4pj6: the stale state says why — here the quota grant's file is gone.
+    test "the alert names the credential that went bad and the re-login command" do
+      %{account: account} = blind_install!()
+      dir = Path.join(System.tmp_dir!(), "sw-grant-#{uniq()}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      File.write!(Path.join(dir, ".credentials.json"), ~s({"claudeAiOauth":{"accessToken":"a"}}))
+
+      {:ok, _} =
+        Wardmast.Accounts.rotate_credential(account.id, %{
+          kind: :cli_credentials_path,
+          secret: dir
+        })
+
+      File.rm!(Path.join(dir, ".credentials.json"))
+
+      StalenessWatch.check_now(start_watch())
+
+      assert [alert] = stale_alerts()
+      assert alert.detail =~ "Likely cause: claude:#{account.slug} quota_grant is failing"
+      assert alert.detail =~ "CLAUDE_CONFIG_DIR=#{dir} claude auth login"
+    end
+
     test "the alert says a 7d hold is in force, and when it lifts" do
       reset_7d = ahead(2 * 86_400)
 

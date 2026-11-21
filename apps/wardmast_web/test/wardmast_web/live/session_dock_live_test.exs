@@ -660,14 +660,25 @@ defmodule WardmastWeb.SessionDockLiveTest do
       assert [%{name: nil}, %{name: "first"}] = Sessions.list()
     end
 
-    test "the dock's panel also arrives with Remote Control checked under mode B (§9.5)",
+    test "the dock's panel arrives in mode A with a connected account, and Remote Control checked under mode B (§9.5)",
          %{conn: conn} do
-      # Same default as the index's copy of this form (review finding,
-      # phase 11 round 4) — the dock shares `assign_launch_params/2` and
-      # `reset_launch_params/1`, but its own mount had its own hardcoded
-      # `false` to fix too.
+      # Same defaults as the index's copy of this form — the dock shares
+      # `default_launch_mode/1`, `assign_launch_params/2` and
+      # `reset_launch_params/1`. A connected account defaults to mode A
+      # (setup token, bd-6y4pj6); Remote Control needs mode B's own login.
       {_view, dock} = dock(conn)
       render_click(element(dock, "#session-dock-new-session"))
+
+      assert has_element?(
+               dock,
+               ~s(#session-dock-launch-auth-mode option[value="oauth_token"][selected])
+             )
+
+      refute has_element?(dock, "#session-dock-launch-remote-control[checked]")
+
+      dock
+      |> form("#session-dock-launch-form", %{"auth_mode" => "seeded_credentials"})
+      |> render_change()
 
       assert has_element?(dock, "#session-dock-launch-remote-control[checked]")
 
@@ -683,6 +694,10 @@ defmodule WardmastWeb.SessionDockLiveTest do
       render_click(element(dock, "#session-dock-new-session"))
 
       dock
+      |> form("#session-dock-launch-form", %{"auth_mode" => "seeded_credentials"})
+      |> render_change()
+
+      dock
       |> form("#session-dock-launch-form", %{"remote_control" => "true"})
       |> render_change()
 
@@ -695,19 +710,29 @@ defmodule WardmastWeb.SessionDockLiveTest do
       refute has_element?(dock, "#session-dock-launch-remote-control[checked]")
     end
 
-    test "reopening the launch panel after a launch defaults Remote Control back to checked",
+    test "reopening the launch panel after a launch returns to the mode-A default",
          %{conn: conn} do
       # The panel is removed from the DOM on a successful launch
       # (`:if={@launch_open?}`) and rebuilt on reopen — it must rebuild from
-      # the §9.5 default, not a stale `false` left by the reset (review
-      # finding, phase 11 round 4).
+      # the default (mode A with a connected account, so Remote Control off),
+      # not carry the last launch's choice forward.
       {_view, dock} = dock(conn)
       render_click(element(dock, "#session-dock-new-session"))
+
+      dock
+      |> form("#session-dock-launch-form", %{"auth_mode" => "seeded_credentials"})
+      |> render_change()
 
       dock |> form("#session-dock-launch-form") |> render_submit()
 
       render_click(element(dock, "#session-dock-new-session"))
-      assert has_element?(dock, "#session-dock-launch-remote-control[checked]")
+
+      assert has_element?(
+               dock,
+               ~s(#session-dock-launch-auth-mode option[value="oauth_token"][selected])
+             )
+
+      refute has_element?(dock, "#session-dock-launch-remote-control[checked]")
     end
 
     test "reopening the launch panel picks up a workspace created since the dock mounted",
