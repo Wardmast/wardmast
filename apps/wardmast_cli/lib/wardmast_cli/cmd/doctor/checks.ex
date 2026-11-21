@@ -1856,29 +1856,27 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
       "#{account} #{c["kind"]} #{c["health"]} (#{credential_expiry(c)})"
     end
 
-    cond do
-      problems == [] ->
-        detail = Enum.map_join(entries, "; ", line)
-        %{result | detail: join_detail(result.detail, detail)}
+    if problems == [] do
+      detail = Enum.map_join(entries, "; ", line)
+      %{result | detail: join_detail(result.detail, detail)}
+    else
+      worst =
+        if Enum.any?(problems, fn {_a, c} -> c["health"] in ~w(expired failing) end),
+          do: :fail,
+          else: :warn
 
-      true ->
-        worst =
-          if Enum.any?(problems, fn {_a, c} -> c["health"] in ~w(expired failing) end),
-            do: :fail,
-            else: :warn
+      fixes =
+        problems
+        |> Enum.map(fn {account, c} -> {account, c["relogin"]} end)
+        |> Enum.reject(fn {_a, fix} -> is_nil(fix) end)
+        |> Enum.map_join("; ", fn {account, fix} -> "#{account}: #{fix}" end)
 
-        fixes =
-          problems
-          |> Enum.map(fn {account, c} -> {account, c["relogin"]} end)
-          |> Enum.reject(fn {_a, fix} -> is_nil(fix) end)
-          |> Enum.map_join("; ", fn {account, fix} -> "#{account}: #{fix}" end)
-
-        %{
-          result
-          | status: max_severity(result.status, worst),
-            detail: join_detail(result.detail, Enum.map_join(problems, "; ", line)),
-            hint: join_detail(result.hint, if(fixes == "", do: nil, else: "Fix: " <> fixes))
-        }
+      %{
+        result
+        | status: max_severity(result.status, worst),
+          detail: join_detail(result.detail, Enum.map_join(problems, "; ", line)),
+          hint: join_detail(result.hint, if(fixes == "", do: nil, else: "Fix: " <> fixes))
+      }
     end
   end
 

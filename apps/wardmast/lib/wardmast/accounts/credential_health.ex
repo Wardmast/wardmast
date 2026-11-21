@@ -205,30 +205,40 @@ defmodule Wardmast.Accounts.CredentialHealth do
     end
   end
 
+  # First problem wins: the refresher failing, then the refresh token's life,
+  # then an access token nothing is renewing.
   defp grant_health(grant, refresh, now) do
-    refresh_in_ms =
-      grant.refresh_token_expires_at &&
-        DateTime.diff(grant.refresh_token_expires_at, now, :millisecond)
-
-    access_lapsed? = grant.expires_at && DateTime.compare(grant.expires_at, now) != :gt
-
-    cond do
-      refresh == :failing ->
-        {:failing, "the refresher could not renew the grant"}
-
-      is_integer(refresh_in_ms) and refresh_in_ms <= 0 ->
-        {:expired, "the refresh token has expired; the CLI cannot renew the grant"}
-
-      is_integer(refresh_in_ms) and refresh_in_ms <= @refresh_token_warning_ms ->
-        {:expiring, "the refresh token expires within 2 days"}
-
-      access_lapsed? and refresh != :ok ->
-        {:expired, "the access token has lapsed and nothing renewed it"}
-
-      true ->
-        {:ok, "kept fresh by the quota grant refresher"}
+    with nil <- refresher_problem(refresh),
+         nil <- refresh_token_problem(grant, now),
+         nil <- access_token_problem(grant, refresh, now) do
+      {:ok, "kept fresh by the quota grant refresher"}
     end
   end
+
+  defp refresher_problem(:failing), do: {:failing, "the refresher could not renew the grant"}
+  defp refresher_problem(_status), do: nil
+
+  defp refresh_token_problem(%GrantFile{refresh_token_expires_at: %DateTime{} = at}, now) do
+    case DateTime.diff(at, now, :millisecond) do
+      ms when ms <= 0 ->
+        {:expired, "the refresh token has expired; the CLI cannot renew the grant"}
+
+      ms when ms <= @refresh_token_warning_ms ->
+        {:expiring, "the refresh token expires within 2 days"}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp refresh_token_problem(_grant, _now), do: nil
+
+  defp access_token_problem(%GrantFile{expires_at: %DateTime{} = at}, refresh, now) do
+    if refresh != :ok and DateTime.compare(at, now) != :gt,
+      do: {:expired, "the access token has lapsed and nothing renewed it"}
+  end
+
+  defp access_token_problem(_grant, _refresh, _now), do: nil
 
   defp setup_relogin(_account, :ok), do: nil
 
@@ -250,13 +260,15 @@ defmodule Wardmast.Accounts.CredentialHealth do
 
   # The credential's "secret" is a config dir (or its `.credentials.json`).
   defp grant_path(%ProviderCredential{} = cred) do
-    with location when is_binary(location) and location != "" <- ProviderCredential.secret(cred),
-         expanded = Path.expand(location),
-         path =
-           if(File.dir?(expanded), do: Path.join(expanded, ".credentials.json"), else: expanded) do
-      {:ok, path}
-    else
-      _ -> :error
+    case ProviderCredential.secret(cred) do
+      location when is_binary(location) and location != "" ->
+        expanded = Path.expand(location)
+
+        {:ok,
+         if(File.dir?(expanded), do: Path.join(expanded, ".credentials.json"), else: expanded)}
+
+      _ ->
+        :error
     end
   rescue
     _ -> :error
