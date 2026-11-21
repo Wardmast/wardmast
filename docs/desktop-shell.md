@@ -1,7 +1,7 @@
 # Desktop shell prototype
 
-Status: prototype (bd-aisgkf, PKG 8 of the desktop-product epic). The code is in
-[`desktop/`](../desktop). This page records the lifecycle decisions it encodes
+Status: prototype (bd-aisgkf, PKG 8) that now builds and runs end to end
+(bd-4xp7zx, PKG 25). The code is in [`desktop/`](../desktop). This page records the lifecycle decisions it encodes
 and what a production shell still has to do.
 
 ## What it is
@@ -22,8 +22,10 @@ desktop/
     status_page the HTML shown while there is no dashboard (boot failure!)
     bin/fake_release   stand-in server for tests
     bin/headless       windowless shell driven over stdin/stdout (smoke test)
-  src-tauri/    Tauri window + tray over shell-core (type-checked, never run;
+  src-tauri/    Tauri window + tray over shell-core (built and run on Linux;
                 see "How it was verified")
+  scripts/      stage-release.sh (put a release into the bundle),
+                smoke.sh (start / dashboard / Quit against a built app)
 ```
 
 **Shell technology: Tauri** (operator decision 2026-11-20; PKG 1 bd-5n0b4w
@@ -33,28 +35,34 @@ tests that do not depend on the GUI layer.
 
 ## How it was verified
 
-`cd desktop && cargo test` (~2 s; needs only a Rust toolchain, no
-webview). Verified on Linux; the Unix-only pieces (`flock`, unix sockets,
-`SIGTERM`) are shared with macOS but macOS was not run.
+`cd desktop && cargo test` (needs only a Rust toolchain, no webview) runs the
+unit and integration tests on Linux and macOS in CI (`.github/workflows/desktop.yml`).
+Unix-only pieces (`flock`, unix sockets, `SIGTERM`) are shared by both.
 
 * Unit and integration tests run the supervisor against `fake_release`, a small
   binary that binds `$WARDMAST_PORT` and answers `/api/version` and
   `/api/scheduler/status`, with env switches for crash / hang / boot failure /
   ignore-SIGTERM / N workers in flight.
-* `tests/headless.rs` is the scripted smoke test: it runs the real `headless`
-  binary as separate OS processes (two launches, close, quit, boot failure).
-* **The Tauri layer (`src-tauri`) was type-checked, not built or run.** Its
-  Linux build needs WebKitGTK/GTK dev packages and `pkg-config`, none of which
-  exist in the sandbox this was written in (`cargo check` stops in `glib-sys`).
-  What was done instead: `cargo check --target aarch64-apple-darwin` in
-  `desktop/src-tauri` (macOS needs no system webview libraries; one crate's C
-  build step was stubbed with a no-op `cc`/`ar`, which `check` never links).
-  It compiles `main.rs` against the real Tauri 2 API, including
-  `generate_context!` over `tauri.conf.json`; a deliberately wrong call made it
-  fail, so the check is not vacuous. A real `cargo tauri dev` / build on a
-  machine with the webview toolchain is still to be done.
-* **Not exercised:** a real `mix release` bundle; the window, tray and dialog
-  actually running. See [What is left](#what-is-left-for-a-production-shell).
+* `tests/headless.rs` is the scripted smoke test of the core: it runs the real
+  `headless` binary as separate OS processes (two launches, close, quit, an
+  OS-level quit, the default socket location, boot failure).
+* **The Tauri layer builds and runs.** `cargo tauri build` produces a Linux
+  `.deb` with a real release inside it (`tauri.release.conf.json` ships
+  `src-tauri/release-bundle/` as the app's `release/` resource).
+  `desktop/scripts/smoke.sh` then drives the *installed* app under `xvfb`:
+  the release comes up and answers `/api/version`, the webview reports it
+  loaded the dashboard URL, `arbiter-desktop --quit` (the tray's Quit path) is
+  accepted, the app exits and the release's port stops answering. CI runs that
+  against a real `mix release` (`build-linux` job); on macOS CI builds the app
+  without bundling.
+* **Against a real release** (`mix release wardmast`, prod): `headless` started
+  `bin/wardmast start` with `WARDMAST_PORT`, saw `/api/version` answer, and Quit
+  stopped it gracefully (SIGTERM reached the BEAM: the start script `exec`s, so
+  the pid the shell holds is the VM's, and the port was closed afterwards).
+  `bin/wardmast stop` is therefore not needed.
+* **Not exercised:** macOS (CI compiles it, nothing has run it), signing,
+  notarisation, and an interactive click-through of the tray or dialog (the
+  smoke test sends the quit request over the single-instance socket).
 
 ## Lifecycle decisions
 
@@ -173,6 +181,16 @@ it from `WARDMAST_DATA_HOME` / `ARB_DATA_HOME` / `~/.wardmast`, the same chain a
   sweeps need to pick the runs up on the next start. The 45 s grace is
   deliberately well above that. A kill that lands mid-shutdown is still
   recoverable (the reconciler is the backstop, see its moduledoc), just noisier.
+* **Every** way out goes through `Shell::request_quit`: tray Quit, the
+  single-instance `quit` command (`arbiter-desktop --quit`) and an OS-level
+  exit request. The last one (Cmd+Q, dock menu, logout, `RunEvent::ExitRequested`)
+  used to let the event loop tear down on its own, skipping the prompt and
+  orphaning the release. Now `Shell::on_exit_requested` returns
+  `PreventAndRequestQuit` until `request_quit` has confirmed and stopped the
+  release, the shell calls `api.prevent_exit()` and runs `request_quit`, and
+  only the `app.exit(0)` that follows a confirmed quit is let through.
+  `request_quit` is single-flight: a second Cmd+Q while the dialog is open does
+  not stack a second dialog.
 * Quit does **not** pause the autopilot first. Between the check and SIGTERM a
   tick may dispatch one more worker; it is interrupted like any other and
   resumed next start.
@@ -188,26 +206,29 @@ it from `WARDMAST_DATA_HOME` / `ARB_DATA_HOME` / `~/.wardmast`, the same chain a
   wedges the next launch; a stale socket file is replaced by whoever wins the
   lock. Simultaneous launches elect exactly one primary (tested with six).
 * Socket paths are limited to ~100 bytes (`sun_path`); a longer path is a clear
-  error. Production should use the OS app-runtime dir, not a temp dir.
+  error.
+* The socket lives in the app runtime dir (`single_instance::default_socket_path`):
+  `SHELL_SOCKET` if set, else `$XDG_RUNTIME_DIR/arbiter/shell.sock`, else
+  `/run/user/<uid>/arbiter/shell.sock` if that dir exists, else
+  `<data-home>/run/shell.sock` (`WARDMAST_DATA_HOME`, default `~/.wardmast`),
+  the same place `Wardmast.MCP.OperatorProof.run_dir/0` uses on macOS.
+* Besides `focus` the socket accepts `quit`, which runs the normal Quit path
+  (prompt included). The smoke test and a service manager use it instead of
+  driving the tray.
 
 ## What is left for a production shell
 
-1. **Build and run the `src-tauri` layer** with the webview toolchain
-   (`cargo tauri dev`): it only type-checks so far. Placeholder icons (the brand
-   mark) and `tauri.conf.json` are in place; missing are bundling/signing
-   config, an app-runtime-dir socket path, and routing the OS-level quit
-   (Cmd+Q, `RunEvent::ExitRequested`) through `request_quit` so it cannot
-   bypass the drain prompt.
-2. **Run against a real release.** `SHELL_RELEASE_DIR=<release> cargo run -p
-   arbiter-shell-core --bin headless` is the hand check; verify in particular
-   that SIGTERM to `bin/wardmast start` reaches the BEAM (it should: the start
-   script `exec`s) and that shutdown fits the grace on a loaded box. Prefer
-   `bin/wardmast stop` (distributed `init:stop`) if SIGTERM proves unreliable.
-3. **Credentials (PKG 9):** SECRET_KEY_BASE and the Cloak key are generated on first
-   run into the OS keychain and handed to the release as `keychain:` refs (done:
-   `shell-core/src/credentials.rs`, `docs/secrets-at-rest.md`; the Rust side has
-   not compiled or run: no Rust toolchain was available when it was written). Still open: an API token
-   for the drain check, from the OS keychain; without a token every Quit asks.
+1. ~~Build and run the `src-tauri` layer; OS quit through `request_quit`;
+   app-runtime-dir socket.~~ Done (bd-4xp7zx). Still open: macOS has never been
+   run, signing/notarisation, and AppImage/rpm/dmg packaging (only `.deb` is
+   built and smoke-tested).
+2. ~~Run against a real release.~~ Done: SIGTERM reaches the BEAM. Still worth
+   checking that shutdown fits the 15 s worker grace on a loaded box.
+3. **Credentials (PKG 9):** SECRET_KEY_BASE and the Cloak key are generated on
+   first run into the OS keychain and handed to the release as `keychain:` refs
+   (done: `shell-core/src/credentials.rs`, `docs/secrets-at-rest.md`). Still
+   open: an API token for the drain check, from the OS keychain; without a token
+   every Quit asks.
 4. **Data and logs:** a data dir (`WARDMAST_DATA_HOME`), release output to a
    rotating log file (the ring buffer is lost on shell exit), and a "show logs"
    menu item.
@@ -221,4 +242,5 @@ it from `WARDMAST_DATA_HOME` / `ARB_DATA_HOME` / `~/.wardmast`, the same chain a
 7. **Login-item/autostart, notifications, signing/notarisation, tray icons and
    a real error UI** (retry with details, "copy diagnostics" using the PKG 16
    support bundle).
-8. **CI:** `.github/workflows/desktop.yml` runs `cargo fmt --check` and `cargo test -p arbiter-shell-core` on Linux for PRs touching `desktop/**`. Not yet run on macOS (the macOS-only `ps` start-time path is untested).
+8. ~~CI~~ Done: `.github/workflows/desktop.yml` (`cargo test` on ubuntu and
+   macos, Tauri build on both, Linux smoke test against a real release).

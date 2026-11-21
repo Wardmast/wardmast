@@ -12,7 +12,11 @@
 //!    replying `ok`;
 //!  * a launch that cannot take the lock connects to that socket, sends
 //!    `focus`, waits for the reply and reports `Secondary` (the caller exits
-//!    without touching the release).
+//!    without touching the release);
+//!  * `quit` is the one other command: [`request_quit`] asks the running
+//!    instance to run its normal Quit path (drain prompt included). It exists
+//!    so a script (the CI smoke test, a service manager) can quit the app
+//!    without driving its tray.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
@@ -52,6 +56,7 @@ impl Drop for Guard {
 /// Conservative `sun_path` limit (macOS: 104 including the NUL).
 const MAX_SOCKET_PATH: usize = 100;
 const FOCUS: &str = "focus";
+const QUIT: &str = "quit";
 const HOW_LONG_TO_WAIT_FOR_PRIMARY: Duration = Duration::from_secs(5);
 const SOCKET_NAME: &str = "shell.sock";
 
@@ -117,6 +122,15 @@ pub fn acquire<F>(socket: &Path, on_focus: F) -> io::Result<Acquired>
 where
     F: Fn() + Send + 'static,
 {
+    acquire_with(socket, on_focus, || {})
+}
+
+/// Like [`acquire`], with a handler for the `quit` command too.
+pub fn acquire_with<F, Q>(socket: &Path, on_focus: F, on_quit: Q) -> io::Result<Acquired>
+where
+    F: Fn() + Send + 'static,
+    Q: Fn() + Send + 'static,
+{
     // `sockaddr_un.sun_path` is ~104 bytes on macOS and 108 on Linux; fail with
     // a message instead of an opaque EINVAL from bind.
     if socket.as_os_str().len() > MAX_SOCKET_PATH {
@@ -145,7 +159,7 @@ where
             let listener = UnixListener::bind(socket)?;
             listener.set_nonblocking(true)?;
             let stop = Arc::new(AtomicBool::new(false));
-            let accept = spawn_accept_loop(listener, Arc::clone(&stop), on_focus);
+            let accept = spawn_accept_loop(listener, Arc::clone(&stop), on_focus, on_quit);
             Ok(Acquired::Primary(Guard {
                 socket: socket.to_path_buf(),
                 stop,
@@ -161,13 +175,15 @@ where
     }
 }
 
-fn spawn_accept_loop<F>(
+fn spawn_accept_loop<F, Q>(
     listener: UnixListener,
     stop: Arc<AtomicBool>,
     on_focus: F,
+    on_quit: Q,
 ) -> JoinHandle<()>
 where
     F: Fn() + Send + 'static,
+    Q: Fn() + Send + 'static,
 {
     thread::spawn(move || {
         while !stop.load(Ordering::SeqCst) {
@@ -177,8 +193,12 @@ where
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                     let mut line = String::new();
                     let mut reader = BufReader::new(&stream);
-                    if reader.read_line(&mut line).is_ok() && line.trim() == FOCUS {
-                        on_focus();
+                    if reader.read_line(&mut line).is_ok() {
+                        match line.trim() {
+                            FOCUS => on_focus(),
+                            QUIT => on_quit(),
+                            _ => continue,
+                        }
                         let _ = (&stream).write_all(b"ok\n");
                     }
                 }
@@ -194,9 +214,19 @@ where
 /// The primary holds the lock before it binds, so for a moment the socket may
 /// not exist yet; retry until it does.
 fn request_focus(socket: &Path) -> io::Result<()> {
+    send_command(socket, FOCUS)
+}
+
+/// Ask the running instance to run its Quit path. The reply only says the
+/// request was received: the instance may still be showing the drain prompt.
+pub fn request_quit(socket: &Path) -> io::Result<()> {
+    send_command(socket, QUIT)
+}
+
+fn send_command(socket: &Path, command: &str) -> io::Result<()> {
     let deadline = Instant::now() + HOW_LONG_TO_WAIT_FOR_PRIMARY;
     loop {
-        match try_focus_once(socket) {
+        match try_command_once(socket, command) {
             Ok(()) => return Ok(()),
             Err(e) if Instant::now() >= deadline => return Err(e),
             Err(_) => thread::sleep(Duration::from_millis(50)),
@@ -204,10 +234,10 @@ fn request_focus(socket: &Path) -> io::Result<()> {
     }
 }
 
-fn try_focus_once(socket: &Path) -> io::Result<()> {
+fn try_command_once(socket: &Path, command: &str) -> io::Result<()> {
     let mut stream = UnixStream::connect(socket)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    stream.write_all(format!("{FOCUS}\n").as_bytes())?;
+    stream.write_all(format!("{command}\n").as_bytes())?;
     let mut reply = String::new();
     BufReader::new(&stream).read_line(&mut reply)?;
     if reply.trim() == "ok" {
@@ -215,7 +245,7 @@ fn try_focus_once(socket: &Path) -> io::Result<()> {
     } else {
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "primary did not acknowledge focus",
+            "primary did not acknowledge the command",
         ))
     }
 }
@@ -366,5 +396,23 @@ mod tests {
             socket_path_from(None, None, Some(missing), None, Some(PathBuf::from("/Users/u"))),
             PathBuf::from("/Users/u/.wardmast/run/shell.sock")
         );
+    }
+
+    #[test]
+    fn a_quit_command_reaches_the_primary_and_does_not_focus_it() {
+        let path = sock("quitcmd").join("s");
+        let (focus_tx, focus_rx) = mpsc::channel();
+        let (quit_tx, quit_rx) = mpsc::channel();
+        let Acquired::Primary(_guard) = acquire_with(
+            &path,
+            move || focus_tx.send(()).unwrap(),
+            move || quit_tx.send(()).unwrap(),
+        )
+        .unwrap() else {
+            panic!("expected to be primary");
+        };
+        request_quit(&path).unwrap();
+        quit_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(focus_rx.try_recv().is_err());
     }
 }
