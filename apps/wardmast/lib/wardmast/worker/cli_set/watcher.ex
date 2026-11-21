@@ -118,6 +118,17 @@ defmodule Wardmast.Worker.CliSet.Watcher do
     "try again"
   ]
 
+  # A build that cannot find its context files: a sibling build or a restart's migration
+  # moved or rewrote the staged set dir mid-build. A rebuild sees the settled files.
+  @transient_build_patterns [
+    "no such file or directory",
+    "checking on sources",
+    "no items matching glob",
+    "copier: stat",
+    "text file busy",
+    "no space left on device"
+  ]
+
   @type outcome ::
           :held
           | :unchanged
@@ -185,8 +196,18 @@ defmodule Wardmast.Worker.CliSet.Watcher do
   def classify_error({:registry_credentials, _, _}), do: :permanent
   def classify_error({:cli_unavailable, _}), do: :permanent
 
+  def classify_error({:build_failed, _ref, _status, output}) when is_binary(output) do
+    down = String.downcase(output)
+
+    cond do
+      Enum.any?(@permanent_patterns, &String.contains?(down, &1)) -> :permanent
+      Enum.any?(@transient_build_patterns, &String.contains?(down, &1)) -> :transient
+      true -> classify_text(output)
+    end
+  end
+
   def classify_error({kind, _ref, _status, output})
-      when kind in [:push_failed, :pull_failed, :build_failed, :tag_failed] and is_binary(output) do
+      when kind in [:push_failed, :pull_failed, :tag_failed] and is_binary(output) do
     classify_text(output)
   end
 
@@ -464,7 +485,7 @@ defmodule Wardmast.Worker.CliSet.Watcher do
 
     Logger.warning(
       "CliSet.Watcher: republish of #{inspect(key)} (#{ref}) failed " <>
-        "(transient, attempt #{attempt}, retrying in #{format_delay(delay)}): #{inspect(reason)}"
+        "(transient, attempt #{attempt}, retrying in #{format_delay(delay)}): #{format_reason(reason)}"
     )
 
     retry_entry = %{
@@ -486,7 +507,7 @@ defmodule Wardmast.Worker.CliSet.Watcher do
   defp record_permanent_failure(state, %{key: key} = entry, reason, ref, attempt) do
     Logger.error(
       "CliSet.Watcher: republish of #{inspect(key)} (#{ref}) failed permanently " <>
-        "(will not retry): #{inspect(reason)}"
+        "(will not retry): #{format_reason(reason)}"
     )
 
     state
