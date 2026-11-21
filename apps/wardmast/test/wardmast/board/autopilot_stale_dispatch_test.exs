@@ -49,6 +49,10 @@ defmodule Wardmast.Board.AutopilotStaleDispatchTest do
         end
       end
 
+      # A task that finished on its own (bd-2) is deregistered by the supervisor
+      # asynchronously; flush its pending EXIT before looking.
+      _ = :sys.get_state(Wardmast.TaskSupervisor)
+
       # No fake dispatch outlives the test on the global supervisor.
       leaked = Task.Supervisor.children(Wardmast.TaskSupervisor)
       assert Enum.filter(Agent.get(dispatched, & &1), &(&1 in leaked)) == []

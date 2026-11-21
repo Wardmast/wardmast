@@ -99,7 +99,11 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
       rig = rig(ctx, "feature/ci-2")
       forge = start_forge(ctx, rig, [:running])
 
-      gate = start_gate(rig, ctx, command: [@probe, "HOLD"])
+      # The poll budget (default 40 x 25ms = 1s) is spent while `push_other_commit/2`
+      # clones and pushes; on a loaded runner that exhausts it, the gate gives up
+      # waiting on CI and releases the reviewer, which is a different behaviour from
+      # the one this test pins. Give the wait a budget the push cannot outrun.
+      gate = start_gate(rig, ctx, command: [@probe, "HOLD"], ci_max_polls: 4_000)
       wait_until(fn -> StubMerger.get_count(@pr) >= 2 end)
       assert awaiting_ci?(gate)
 
