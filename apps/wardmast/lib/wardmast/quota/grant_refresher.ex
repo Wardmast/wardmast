@@ -396,14 +396,34 @@ defmodule Wardmast.Quota.GrantRefresher do
         :ok
 
       {:error, :eexist} ->
-        if lock_stale?(lock, state) do
-          _ = File.rm_rf(lock)
-          if File.mkdir(lock) == :ok, do: :ok, else: :busy
-        else
-          :busy
-        end
+        if lock_stale?(lock, state), do: take_over_stale_lock(lock, state), else: :busy
 
       {:error, _} ->
+        :busy
+    end
+  end
+
+  # Two processes can both judge the lock stale. `rm_rf` then `mkdir` would let
+  # the second one delete the first one's fresh lock. A rename is atomic and
+  # only one caller's succeeds (the other gets `:enoent`), so only that caller
+  # goes on to `mkdir`. The renamed directory is re-checked: if the lock we
+  # moved turns out to be a fresh one (a rival took over between our stat and
+  # our rename), put it back and stand down.
+  defp take_over_stale_lock(lock, state) do
+    parked = "#{lock}.stale.#{System.unique_integer([:positive])}"
+
+    with :ok <- File.rename(lock, parked),
+         true <- lock_stale?(parked, state),
+         :ok <- File.mkdir(lock) do
+      _ = File.rm_rf(parked)
+      :ok
+    else
+      false ->
+        # We moved a live lock aside; restore it (best effort) and stand down.
+        _ = File.rename(parked, lock)
+        :busy
+
+      _ ->
         :busy
     end
   end

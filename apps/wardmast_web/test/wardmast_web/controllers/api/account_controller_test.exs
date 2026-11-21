@@ -466,6 +466,27 @@ defmodule WardmastWeb.Api.AccountControllerTest do
       assert "list-a" in slugs and "list-b" in slugs
     end
 
+    test "carries each account's credential health (what `ward account list` prints)", %{
+      conn: conn
+    } do
+      account = create_account!(%{provider: :claude, slug: "health-a"})
+
+      {:ok, _} =
+        Accounts.rotate_credential(account.id, %{
+          kind: :oauth_token,
+          env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+          secret: "sk-ant-oat01-health-test-token"
+        })
+
+      body = json_response(get(conn, ~p"/api/accounts?provider=claude"), 200)
+      entry = Enum.find(body["data"], &(&1["slug"] == "health-a"))
+
+      assert [%{"kind" => "setup_token", "health" => "ok", "expires_at" => at}] =
+               entry["credential_health"]
+
+      assert is_binary(at)
+    end
+
     test "filters by provider", %{conn: conn} do
       create_account!(%{provider: :claude, slug: "filter-a"})
       create_account!(%{provider: :codex, slug: "filter-b"})

@@ -232,6 +232,20 @@ defmodule Wardmast.Quota.GrantRefresherTest do
 
       assert length(record_lines(ctx.record)) == 4
       assert GrantRefresher.state(pid).grants[ctx.grant].status == :ok
+      # The takeover renames the dead lock aside and removes it: nothing left behind.
+      assert Path.wildcard(Path.join(ctx.config_dir, ".refresh.lock*")) == []
+    end
+
+    test "a fresh lock held by a live refresher is left alone", ctx do
+      write_grant!(ctx.grant, now_ms() + 60_000)
+      lock = Path.join(ctx.config_dir, ".refresh.lock")
+      File.mkdir_p!(lock)
+
+      pid = start_refresher(ctx, fake_cli!(ctx, :renews), cli_timeout_ms: 1_000)
+      GrantRefresher.tick(pid)
+
+      assert record_lines(ctx.record) == []
+      assert File.dir?(lock)
     end
   end
 
