@@ -33,7 +33,10 @@ defmodule Wardmast.Doctor.Platform do
       # bd-5wfsj7: each provider CLI's install state and version against its
       # minimum, and how the server's PATH was built (login shell vs inherited).
       clis: Keyword.get_lazy(opts, :clis, fn -> CliDetection.detect_all(path: path) end),
-      path_source: Keyword.get_lazy(opts, :path_source, &LoginShellPath.info/0)
+      path_source: Keyword.get_lazy(opts, :path_source, &LoginShellPath.info/0),
+      # bd-71t1wd: host capture runner readiness (node, playwright-core, chromium).
+      capture_runner:
+        Keyword.get_lazy(opts, :capture_runner, &Wardmast.Doctor.CaptureRunner.report/0)
     }
   end
 
