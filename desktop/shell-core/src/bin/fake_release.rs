@@ -13,6 +13,8 @@
 //!  * `FAKE_IGNORE_TERM=1`     ignore SIGTERM (forces the shell's SIGKILL path)
 //!  * `FAKE_IN_FLIGHT=<n>`     the scheduler status reports n workers in flight
 //!  * `FAKE_TOKEN=<t>`         require `Authorization: Bearer <t>` on the status
+//!  * `FAKE_VERSION=<v>`       the version `/api/version` reports (default `fake`)
+//!  * `FAKE_TERM_DELAY_MS=<n>` take n ms to exit after SIGTERM (a draining server)
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -119,7 +121,13 @@ fn handle(mut s: TcpStream) {
     let path = req.split_whitespace().nth(1).unwrap_or("/");
 
     let (status, body) = match path {
-        "/api/version" => ("200 OK", r#"{"version":"fake"}"#.to_string()),
+        "/api/version" => (
+            "200 OK",
+            format!(
+                r#"{{"version":"{}"}}"#,
+                env("FAKE_VERSION").unwrap_or_else(|| "fake".into())
+            ),
+        ),
         "/api/scheduler/status" => {
             let authed = match env("FAKE_TOKEN") {
                 Some(t) => req.contains(&format!("Authorization: Bearer {t}\r\n")),

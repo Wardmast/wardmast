@@ -119,10 +119,13 @@ fn main() {
     };
 
     let release_dir = std::env::var("ARBITER_RELEASE_DIR").expect("bundled release dir");
-    let shell = Arc::new(Shell::start(
-        Config::new(ReleaseSpec::for_release_dir(release_dir)),
-        None,
-    ));
+    let mut config = Config::new(ReleaseSpec::for_release_dir(&release_dir));
+    // Adopt-or-refuse an orphaned release instead of starting a second server
+    // on the same database (docs/desktop-shell.md, "Orphaned release").
+    config.data_home = arbiter_shell_core::release_lock::resolve_data_home();
+    config.expected_version =
+        arbiter_shell_core::release_lock::bundled_version(std::path::Path::new(&release_dir));
+    let shell = Arc::new(Shell::start(config, None));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())

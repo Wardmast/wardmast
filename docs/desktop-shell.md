@@ -18,6 +18,7 @@ desktop/
     shell       what "close window" and "Quit" mean
     quit        live-work check against GET /api/scheduler/status
     single_instance  flock + unix socket
+    release_lock     pidfile + launch lock: adopt-or-refuse an orphaned release
     status_page the HTML shown while there is no dashboard (boot failure!)
     bin/fake_release   stand-in server for tests
     bin/headless       windowless shell driven over stdin/stdout (smoke test)
@@ -32,7 +33,7 @@ tests that do not depend on the GUI layer.
 
 ## How it was verified
 
-`cd desktop && cargo test` (41 tests, ~2 s; needs only a Rust toolchain, no
+`cd desktop && cargo test` (~2 s; needs only a Rust toolchain, no
 webview). Verified on Linux; the Unix-only pieces (`flock`, unix sockets,
 `SIGTERM`) are shared with macOS but macOS was not run.
 
@@ -93,6 +94,61 @@ webview). Verified on Linux; the Unix-only pieces (`flock`, unix sockets,
   binds 127.0.0.1 unless `WARDMAST_BIND_ADDRESS` says otherwise. The shell must
   not inherit a user-set `WARDMAST_BIND_ADDRESS` (it would probe the wrong
   address); the prototype does not scrub it.
+
+### Orphaned release (shell crash)
+
+The release runs in its own process group, so a SIGKILLed or crashed shell
+leaves it running and holding the database. Without a record the next shell
+would find the port taken, pick another and start a **second server on the same
+data home**. `release_lock.rs` plus the supervisor's `claim` step prevent that
+(PKG 26, bd-d6jdq8). Active when `Config::data_home` is set (the Tauri shell sets
+it from `WARDMAST_DATA_HOME` / `ARB_DATA_HOME` / `~/.wardmast`, the same chain as
+`Wardmast.Env.data_home/0`, and passes it on to the release).
+
+* **Pidfile** `<data home>/desktop-release.json` = `{"pid","port","version","start_time"}`,
+  written atomically right after the shell spawns the release (before readiness)
+  and removed when the shell stops it or sees it exit. If the record cannot be
+  written the launch fails (the protection would be gone).
+* **Launch lock** `<data home>/desktop-release.lock`: an exclusive `flock` held
+  only for the launch decision (read record, adopt / replace / spawn, write the
+  new record). It is what makes two shells started at once produce one server:
+  the second waits, then finds the first one's live record and adopts it. It is
+  not held for the release's lifetime: a flock dies with the shell, the release
+  does not, so only the pid says whether the database is in use.
+* **On every launch, under the lock:**
+
+  | Record | Action |
+  | --- | --- |
+  | none / unreadable | start a release |
+  | pid dead, or alive with a different start time (the pid was reused by an unrelated process) | stale: delete the record, start a release; the reused pid is never signalled and whatever answers on the recorded port is never adopted |
+  | pid is the recorded process, `/api/version` reports the expected version | **adopt**: show the dashboard on the recorded port, start nothing |
+  | pid is the recorded process, different version | SIGTERM it, wait up to `stop_grace` for its own orderly shutdown (workers drain, 15 s each), SIGKILL the group only after that, then start the new release |
+  | pid alive, never answers (`ready_timeout`) or answers as something other than a release | **refuse**: `BootFailed` naming the pid and the pidfile. Never started a second server, never killed a pid on a guess |
+
+  A release that is still booting (its shell died in the boot window) is waited
+  for while its pid lives, up to `ready_timeout`.
+* An adopted release is watched by pid (there is no `Child` to wait on) and
+  stopped on Quit exactly like one the shell spawned; if it dies the shell
+  relaunches it under the usual backoff. Its output is not captured (it
+  belongs to the dead shell's pipes).
+* The expected version comes from the bundle's `releases/start_erl.data`
+  (`release_lock::bundled_version`); `None` adopts whatever is running.
+* **Drain-aware replacement** means SIGTERM and the server's own drain, bounded
+  by `stop_grace`. The shell does not read the scheduler status here (it has no
+  token yet, PKG 9) and has no prompt at launch, so a version replacement does
+  not ask; in-flight workers are interrupted and resumed like on any Quit. The
+  in-app updater (PKG 14) can call the same stop-and-relaunch path.
+* **Process identity.** A pid alone can be reused after the release dies, so the
+  record also holds the process start time (`/proc/<pid>/stat` field 22 on
+  Linux, `ps -o lstart=` on macOS) and `Record::holds_process` requires pid
+  alive AND start time equal before the shell adopts, watches or signals it. A
+  Quit during a version replacement is answered at once (the old release keeps
+  draining; it is not killed). A record with no start time (unreadable when
+  written) falls back to pid-alive plus the port probe.
+* Known limits: a pidfile that was deleted
+  by hand while a release runs cannot be detected (the port probe and the
+  release's own bind failure still catch the common case); Windows is not
+  covered (see item 5 below).
 
 ### Close window vs Quit
 
@@ -155,12 +211,11 @@ webview). Verified on Linux; the Unix-only pieces (`flock`, unix sockets,
 5. **Windows:** single-instance needs a named pipe or mutex; signals need
    `CTRL_BREAK`/`bin/wardmast stop`. Not attempted. macOS and Linux share the
    code but only Linux was run.
-6. **Shell crash/upgrade story:** if the shell is SIGKILLed the release is
-   orphaned (own process group); the next shell would find the port taken, pick
-   another, and start a second server on the same database. Needs a pidfile or
-   adopt-existing-release check, and ties into the in-app updater (PKG 14).
+6. **Shell crash/upgrade story:** done for the orphaned release (pidfile + launch
+   lock, adopt-or-refuse, see [Orphaned release](#orphaned-release-shell-crash)).
+   Still open: calling the same stop-and-relaunch path from the in-app updater
+   (PKG 14), and running it against a real release (item 2).
 7. **Login-item/autostart, notifications, signing/notarisation, tray icons and
    a real error UI** (retry with details, "copy diagnostics" using the PKG 16
    support bundle).
-8. **CI:** `cargo test` in `desktop/` is not wired into any workflow (workflow
-   files are outside what this task could change); add a job on Linux and macOS.
+8. **CI:** `.github/workflows/desktop.yml` runs `cargo fmt --check` and `cargo test -p arbiter-shell-core` on Linux for PRs touching `desktop/**`. Not yet run on macOS (the macOS-only `ps` start-time path is untested).
