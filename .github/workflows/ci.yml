@@ -275,6 +275,31 @@ jobs:
             _build
           key: ${{ runner.os }}-otp29.1.1-elixir1.20.4-mix-${{ hashFiles('**/mix.lock') }}
 
+  # bd-bwlop5: the desktop shell-core crate (lifecycle + keychain credential
+  # generation). It has no GUI dependency, so plain `cargo test` covers it; the
+  # `src-tauri` crate is not a workspace member (needs the webview toolchain)
+  # and is not built here. Linux only on pull requests: see macos.yml for why a
+  # macOS leg is not a PR gate.
+  desktop-shell-core:
+    name: desktop shell-core (cargo test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('desktop/Cargo.lock') }}
+
+      - name: cargo test -p arbiter-shell-core
+        working-directory: desktop
+        run: cargo test -p arbiter-shell-core --locked
+
   # Single aggregate check, named as the old monolithic job was.
   test:
     name: mix test
