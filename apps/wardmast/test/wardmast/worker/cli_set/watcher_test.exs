@@ -331,6 +331,53 @@ defmodule Wardmast.Worker.CliSet.WatcherTest do
     assert Enum.any?(inbox, &(&1.subject =~ "fresh" and &1.body =~ ref))
   end
 
+  test "a permanent build failure's log and inbox notice carry podman's stderr tail", %{
+    opts: opts
+  } do
+    ref = "localhost/arbiter-dev/publish-cli-claude:43b3ce6d0f92-cliab306acc"
+
+    failed =
+      {:build_failed, ref, 1,
+       "STEP 1/3: FROM x\nSTEP 2/3: COPY claude /opt/arbiter/cli/\n" <>
+         "Error: building at STEP \"COPY claude /opt/arbiter/cli/\": unknown instruction: COPYY"}
+
+    publish = fn _ctx -> {:error, failed} end
+    pid = start_supervised!({Watcher, Keyword.put(opts, :publish, publish)})
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:republished, [{_, {:error, ^failed}}]} = Watcher.run_now(pid)
+      end)
+
+    assert log =~ "failed permanently"
+    assert log =~ "unknown instruction: COPYY"
+
+    inbox = Wardmast.Messages.Mailbox.list(to_ref: "coordinator", state: :unread)
+    assert Enum.any?(inbox, &(&1.body =~ "unknown instruction: COPYY"))
+  end
+
+  test "a build failure from a missing context file is transient and retried", %{opts: opts} do
+    missing =
+      {:build_failed, "localhost/x:1", 1,
+       "STEP 2/3: COPY claude /opt/arbiter/cli/\n" <>
+         "Error: building at STEP \"COPY claude /opt/arbiter/cli/\": checking on sources " <>
+         "under \"/ctx/claude\": copier: stat: \"/claude\": no such file or directory"}
+
+    assert Watcher.classify_error(missing) == :transient
+
+    publish = fn _ctx -> {:error, missing} end
+    pid = start_supervised!({Watcher, Keyword.put(opts, :publish, publish)})
+
+    ExUnit.CaptureLog.capture_log(fn -> Watcher.run_now(pid) end)
+
+    status = Watcher.status(pid)
+    assert Map.has_key?(status.retries, {"fresh", "/r/fresh"})
+    assert status.failed == %{}
+
+    assert Watcher.classify_error({:build_failed, "t", 1, "unknown instruction: COPYY"}) ==
+             :permanent
+  end
+
   test "gating on registry reachability defers publish until registry is reachable", %{
     opts: opts
   } do
