@@ -22,6 +22,10 @@ defmodule Wardmast.Screenshots.Capture.Services.Reaper do
 
   use GenServer, shutdown: 30_000
 
+  # Terminate removes every tracked container concurrently, so the whole pass takes about one
+  # removal, not one per container. The per-container cap sits under the shutdown budget.
+  @remove_timeout_ms 20_000
+
   alias Wardmast.Screenshots.Capture.Services.Podman
 
   require Logger
@@ -66,8 +70,17 @@ defmodule Wardmast.Screenshots.Capture.Services.Reaper do
       else: {:ok, state}
   end
 
+  # The sweep (`podman ps`, then a `podman rm` of up to 30 s per orphan) runs in its own process:
+  # in this one it would block `track/3` past its call timeout, which is swallowed, and a
+  # capture starting meanwhile could run a container the reaper never heard of. It only removes
+  # containers of dead servers, so it needs nothing from the state.
   @impl true
   def handle_continue(:sweep, %{sweep_opts: opts} = state) do
+    {:ok, _pid} = Task.start(fn -> sweep(opts) end)
+    {:noreply, state}
+  end
+
+  defp sweep(opts) do
     case Podman.reap_orphans(opts) do
       [] ->
         :ok
@@ -75,12 +88,8 @@ defmodule Wardmast.Screenshots.Capture.Services.Reaper do
       removed ->
         Logger.info("Capture.Services.Reaper: removed orphaned #{Enum.join(removed, ", ")}")
     end
-
-    {:noreply, state}
   rescue
-    e ->
-      Logger.warning("Capture.Services.Reaper: sweep failed: #{Exception.message(e)}")
-      {:noreply, state}
+    e -> Logger.warning("Capture.Services.Reaper: sweep failed: #{Exception.message(e)}")
   end
 
   @impl true
@@ -129,17 +138,27 @@ defmodule Wardmast.Screenshots.Capture.Services.Reaper do
     :ok
   end
 
-  # Containers first (a dir holds only their sockets). A raise here must not lose the rest.
+  # Containers first (a dir holds only their sockets), concurrently; a raise or a timeout on one
+  # must not lose the rest.
   defp clean(items) do
     {containers, dirs} = Enum.split_with(items, &match?({:container, _, _}, &1))
 
-    Enum.each(containers ++ dirs, fn item ->
-      try do
-        clean_one(item)
-      rescue
-        e -> Logger.warning("Capture.Services.Reaper: #{inspect(item)}: #{Exception.message(e)}")
-      end
-    end)
+    containers
+    |> Task.async_stream(&safe_clean_one/1,
+      max_concurrency: max(length(containers), 1),
+      timeout: @remove_timeout_ms,
+      on_timeout: :kill_task,
+      ordered: false
+    )
+    |> Stream.run()
+
+    Enum.each(dirs, &safe_clean_one/1)
+  end
+
+  defp safe_clean_one(item) do
+    clean_one(item)
+  rescue
+    e -> Logger.warning("Capture.Services.Reaper: #{inspect(item)}: #{Exception.message(e)}")
   end
 
   defp clean_one({:container, name, opts}) do

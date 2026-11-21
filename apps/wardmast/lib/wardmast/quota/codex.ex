@@ -52,6 +52,7 @@ defmodule Wardmast.Quota.Codex do
   require Ash.Query
 
   alias Wardmast.Accounts.Resolver
+  alias Wardmast.Agents.Codex.ConfigDir
   alias Wardmast.Quota.CodexPlanWindows
   alias Wardmast.Quota.CodexQuota
   alias Wardmast.Quota.CodexQuotaSnapshot
@@ -73,11 +74,11 @@ defmodule Wardmast.Quota.Codex do
     :weekly_window_minutes
   ]
 
+  # The poll reads the same `auth.json` workers link to and `arb account login
+  # codex:default` writes: the Codex source home (bd-2cua01) — `$CODEX_HOME`,
+  # else `~/.codex`, unless `:worker_codex_source_home` overrides it.
   defp default_auth_path do
-    case System.get_env("CODEX_HOME") do
-      dir when is_binary(dir) and dir != "" -> Path.join(dir, "auth.json")
-      _ -> "~/.codex/auth.json"
-    end
+    Path.join(ConfigDir.source_home(), "auth.json")
   end
 
   @type window :: %{

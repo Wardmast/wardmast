@@ -69,6 +69,7 @@ defmodule Wardmast.Screenshots.Capture do
   alias Wardmast.Screenshots.Capture.Booter
   alias Wardmast.Screenshots.Capture.DepsCache
   alias Wardmast.Screenshots.Capture.Failure
+  alias Wardmast.Screenshots.Capture.Safety
   alias Wardmast.Screenshots.Capture.Sandbox
   alias Wardmast.Screenshots.Capture.Services
   alias Wardmast.Screenshots.Capture.Shooter
@@ -87,6 +88,7 @@ defmodule Wardmast.Screenshots.Capture do
             bytes: non_neg_integer()
           }
           | %{status: :absent, reason: String.t()}
+          | %{status: :withheld, rule: String.t()}
   @type pair :: %{
           id: String.t(),
           title: String.t(),
@@ -455,7 +457,9 @@ defmodule Wardmast.Screenshots.Capture do
         }
 
         try do
-          shoot_all(st, spec, target, group)
+          with :ok <- probe_fixture(st, spec, target) do
+            shoot_all(st, spec, target, group)
+          end
         after
           safe_stop(st, spec, handle)
         end
@@ -467,6 +471,27 @@ defmodule Wardmast.Screenshots.Capture do
            "the app failed to boot at the #{describe_role(role)} (#{phase}): #{detail_text(detail)}",
            role: role,
            detail: %{phase: phase, output: detail_text(detail)}
+         )}
+    end
+  end
+
+  # bd-995svb (design §9.4): with `fixture_check.marker` the app must say it runs on fixture data,
+  # after every boot and before any shot. A mismatch aborts the boot; the failure names the path
+  # and never the body.
+  defp probe_fixture(st, spec, target) do
+    reach = if target.app, do: st.sandbox.reach(target.app), else: []
+
+    case Safety.probe_marker(st.input.config, target.base_url, reach) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error,
+         Failure.new(
+           :fixture_marker_mismatch,
+           "the app at the #{describe_role(spec.role)} did not pass the fixture check, so " <>
+             "nothing was shot: #{reason}",
+           role: spec.role
          )}
     end
   end
@@ -632,7 +657,11 @@ defmodule Wardmast.Screenshots.Capture do
     try do
       case call_shooter(st.shooter, shot) do
         :ok ->
-          image(out_file, name, role, entry)
+          # No page text reported: nothing was scanned, so nothing is trusted.
+          scanned(st, :unscanned, out_file, name, role, entry)
+
+        {:ok, %{text: texts}} when is_list(texts) ->
+          scanned(st, texts, out_file, name, role, entry)
 
         {:error, {:http_status, 404}} ->
           {:ok, :absent}
@@ -643,6 +672,31 @@ defmodule Wardmast.Screenshots.Capture do
       end
     after
       File.rm_rf(scratch)
+    end
+  end
+
+  # bd-995svb (design §9.5): the shot's page text is scanned before its image can leave this step.
+  # A hit deletes the image and records the rule's name, and nothing else about what matched.
+  defp scanned(st, texts, out_file, name, role, entry) do
+    verdict =
+      case texts do
+        :unscanned -> {:withheld, "scan-unavailable"}
+        texts -> Safety.scan(st.input.config, texts)
+      end
+
+    case verdict do
+      :clean ->
+        image(out_file, name, role, entry)
+
+      {:withheld, rule} ->
+        File.rm(out_file)
+
+        Logger.warning(
+          "Screenshots.Capture #{st.input.task_id}: #{entry.id} withheld at the " <>
+            "#{describe_role(role)} by the data-safety scan: #{rule}"
+        )
+
+        {:ok, {:ok, %{status: :withheld, rule: rule}}}
     end
   end
 
@@ -776,6 +830,9 @@ defmodule Wardmast.Screenshots.Capture do
 
   defp poster_side(%{status: :absent, reason: reason}), do: {:text, reason}
 
+  defp poster_side(%{status: :withheld, rule: rule}),
+    do: {:text, "withheld by the data-safety scan: #{rule}"}
+
   # ── budget and recording ────────────────────────────────────────────────
 
   defp check_budget(%{deadline: deadline, budget: budget}) do
@@ -844,6 +901,9 @@ defmodule Wardmast.Screenshots.Capture do
       "sha256" => s.sha256,
       "bytes" => s.bytes
     }
+
+  defp side_json(%{status: :withheld, rule: rule}),
+    do: %{"status" => "withheld", "rule" => rule}
 
   defp side_json(%{status: :absent, reason: reason}),
     do: %{"status" => "absent", "reason" => reason}
