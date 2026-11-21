@@ -203,7 +203,10 @@ it from `WARDMAST_DATA_HOME` / `ARB_DATA_HOME` / `~/.wardmast`, the same chain a
    that SIGTERM to `bin/wardmast start` reaches the BEAM (it should: the start
    script `exec`s) and that shutdown fits the grace on a loaded box. Prefer
    `bin/wardmast stop` (distributed `init:stop`) if SIGTERM proves unreliable.
-3. **Credentials (PKG 9):** SECRET_KEY_BASE, the Cloak key and an API token
+3. **Credentials (PKG 9):** SECRET_KEY_BASE and the Cloak key are generated on first
+   run into the OS keychain and handed to the release as `keychain:` refs (done:
+   `shell-core/src/credentials.rs`, `docs/secrets-at-rest.md`; the Rust side has
+   not compiled or run: no Rust toolchain was available when it was written). Still open: an API token
    for the drain check, from the OS keychain; without a token every Quit asks.
 4. **Data and logs:** a data dir (`WARDMAST_DATA_HOME`), release output to a
    rotating log file (the ring buffer is lost on shell exit), and a "show logs"

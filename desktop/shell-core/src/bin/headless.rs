@@ -17,6 +17,7 @@
 //!
 //! Stdin commands: `close`, `quit`, `retry`, `answer yes|no`. EOF quits.
 
+use arbiter_shell_core::credentials;
 use arbiter_shell_core::quit::{LiveWork, QuitPrompt};
 use arbiter_shell_core::shell::{CloseAction, QuitOutcome, Shell};
 use arbiter_shell_core::single_instance::{self, Acquired};
@@ -73,6 +74,17 @@ fn config() -> Config {
             exit(2);
         }
     };
+    // PKG 9: with SHELL_KEYCHAIN=1 the shell generates the Cloak key and
+    // SECRET_KEY_BASE on first run, stores them in the OS keychain and hands the
+    // release refs only. Off by default so the lifecycle tests need no keychain.
+    let mut release = release;
+    if env("SHELL_KEYCHAIN").as_deref() == Some("1") {
+        release.env.extend(credentials::prepare(
+            &credentials::OsStore::new(),
+            &credentials::default_data_dir(),
+            &credentials::os_random,
+        ));
+    }
     let mut c = Config::new(release);
     if let Some(p) = env("SHELL_PREFERRED_PORT").and_then(|v| v.parse().ok()) {
         c.preferred_port = p;

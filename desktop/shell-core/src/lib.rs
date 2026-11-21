@@ -3,6 +3,7 @@
 //! See `docs/desktop-shell.md` for the decisions this encodes.
 
 pub mod backoff;
+pub mod credentials;
 pub mod http;
 pub mod port;
 pub mod quit;

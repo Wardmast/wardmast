@@ -117,7 +117,8 @@ bind_ip = fn ->
 end
 
 # A boot-time secret given inline (`NAME`) or as a pointer (`NAME_REF`:
-# `aws-sm:<id>[#json-key]`, `aws-ssm:<name>` or `file:<path>`, resolved by
+# `aws-sm:<id>[#json-key]`, `aws-ssm:<name>`, `file:<path>` or
+# `keychain:<service>#<account>`, resolved by
 # `Wardmast.SecretRefs.External`; the pointer wins). It only calls into the
 # resolver when a pointer is set, so an inline-only install never depends on it,
 # and an unresolvable pointer raises, failing the boot as a missing value does.
