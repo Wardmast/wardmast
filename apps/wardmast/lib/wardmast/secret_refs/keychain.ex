@@ -105,6 +105,9 @@ defmodule Wardmast.SecretRefs.Keychain do
     end
   end
 
+  # `binary` is a fixed literal ("security" / "secret-tool"), never user input,
+  # and `System.cmd/3` takes an argv list with no shell.
+  # sobelow_skip ["CI.System"]
   defp system_cmd(binary, args) do
     case System.find_executable(binary) do
       nil -> :enoent
