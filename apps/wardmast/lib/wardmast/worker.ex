@@ -4955,10 +4955,16 @@ defmodule Wardmast.Worker do
       # running; its checkout reaches the home clone with the node's final upload,
       # which precedes the exit. Wait for the exit (`on_agent_stopped/3` re-enters
       # here) rather than push and judge a clone that is as of the last snapshot.
-      pass?(meta) and remote_session_live?(state) ->
+      #
+      # bd-361rwu (#1316): the same holds for the AUTHOR run — a send-back resume
+      # (or any main run) placed on a node. Entering the commit gate / ReviewGate on
+      # `arb done` read the home clone before the node's final upload landed: it
+      # pushed and reviewed the old head, the agent's new commit arrived afterwards
+      # and was never pushed, and the send-back looked like "no new commit".
+      awaits_node_checkout?(meta) and remote_session_live?(state) ->
         wait_for_remote_pass_exit(state)
 
-      pass?(meta) and remote_checkout_failed?(state) ->
+      awaits_node_checkout?(meta) and remote_checkout_failed?(state) ->
         fail_remote_checkout(state)
 
       pass?(meta) ->
@@ -5013,6 +5019,11 @@ defmodule Wardmast.Worker do
   # bd-741sid: a CI fix pass or a conflict pass — an ordinary run on its ticket
   # whose deliverable is a push to the PR's existing branch.
   defp pass?(meta), do: role_from_meta(meta) in [:fix_pass, :conflict_resolver]
+
+  # A run whose deliverable is commits in the home clone: a pass, or a reviewable
+  # author run. A reviewer (read-only clone) and a no-PR run have none to wait for.
+  defp awaits_node_checkout?(meta),
+    do: pass?(meta) or not (review_only?(meta) or no_pr_type?(meta))
 
   defp remote_session_live?(%State{claude_sessions: sessions}) do
     Enum.any?(sessions, fn {handle, session} ->
