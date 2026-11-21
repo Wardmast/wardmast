@@ -24,6 +24,8 @@ defmodule Wardmast.SecretRefs.Keychain do
   where `fun.(binary, args)` returns `{output, exit_status}` or `:enoent`.
   """
 
+  alias Wardmast.Worker.ReleaseEnv
+
   @type kind :: :not_found | :locked | :unavailable | :unsupported_os | :failed
   @type error :: {:keychain, kind(), String.t()}
 
@@ -105,13 +107,12 @@ defmodule Wardmast.SecretRefs.Keychain do
     end
   end
 
-  # `binary` is a fixed literal ("security" / "secret-tool"), never user input,
-  # and `System.cmd/3` takes an argv list with no shell.
-  # sobelow_skip ["CI.System"]
+  # `binary` is a fixed literal ("security" / "secret-tool"), never user input.
+  # `ReleaseEnv.cmd/3` spawns it directly (no shell) with the release env scrubbed.
   defp system_cmd(binary, args) do
     case System.find_executable(binary) do
       nil -> :enoent
-      path -> System.cmd(path, args, stderr_to_stdout: true)
+      path -> ReleaseEnv.cmd(path, args, stderr_to_stdout: true)
     end
   rescue
     _ -> :enoent
