@@ -2058,6 +2058,29 @@ defmodule Wardmast.Worker.ReviewGate do
     end
   end
 
+  # #1564: the head's pipeline is `skipped` (0 jobs, e.g. after a main-merge
+  # push), which is no CI result — the gate would otherwise wait on it until its
+  # budget ran out. `ReviewCi` asks for this once per head: start a fresh MR
+  # pipeline (the adapter's `rerun_ci/2` does that for a skipped one) and wait.
+  defp ci_act(state, wait, :rerun_skipped, _result) do
+    case do_ci_rerun(state) do
+      ok when ok == :ok or ok == {:error, :ci_in_progress} ->
+        Logger.info(
+          "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is a skipped pipeline; " <>
+            "started a fresh MR pipeline and waiting on it"
+        )
+
+        {:wait, ci_schedule(state, wait)}
+
+      {:error, why} ->
+        ci_infra(
+          state,
+          "CI infrastructure: the pipeline on #{wait.sha} was skipped (no jobs ran) and a " <>
+            "fresh MR pipeline could not be started (#{why})."
+        )
+    end
+  end
+
   defp ci_act(state, wait, {:infra, reason}, _result) do
     ci_log_leave(state, wait, "CI could not vouch (#{reason})")
     ci_infra(state, reason)

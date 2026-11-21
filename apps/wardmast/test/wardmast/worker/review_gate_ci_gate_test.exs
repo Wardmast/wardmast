@@ -966,6 +966,34 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
     end
   end
 
+  # #1564: a skipped head pipeline (a main-merge push) is no CI result. The gate
+  # starts a fresh MR pipeline once and reviews only after that one is green.
+  describe "skipped CI (#1564)" do
+    test "skipped starts one fresh pipeline, then reviews once it is green", ctx do
+      rig = rig(ctx, "feature/ci-skipped-1")
+      start_forge(ctx, rig, [:skipped, :skipped, :running, :success])
+
+      start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+
+      wait_until(fn -> passes(rig) == 1 end, 20_000)
+
+      assert length(StubMerger.ci_reruns()) == 1
+      assert remote_head(ctx, rig) == rig.head
+    end
+
+    test "a head that stays skipped never reaches the reviewer as green CI", ctx do
+      rig = rig(ctx, "feature/ci-skipped-2")
+      start_forge(ctx, rig, [:skipped])
+
+      gate = start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+
+      wait_until(fn -> awaiting_ci?(gate) and length(StubMerger.ci_reruns()) == 1 end, 20_000)
+
+      assert passes(rig) == 0
+      assert length(StubMerger.ci_reruns()) == 1
+    end
+  end
+
   describe "cancelled CI (#360)" do
     test "cancelled then green on the re-run proceeds to the reviewer, no fix round", ctx do
       rig = rig(ctx, "feature/ci-cancel-1")
@@ -1912,7 +1940,7 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
         Agent.get_and_update(agent, fn %{script: [pipeline | rest]} = st ->
           next = if rest == [], do: [pipeline], else: rest
           head = st.head || remote_head(ctx, rig)
-          {%{head_sha: head, pipeline: pipeline}, %{st | script: next}}
+          {forge_reading(head, pipeline), %{st | script: next}}
         end)
       end
     ])
@@ -1920,7 +1948,15 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
     agent
   end
 
-  defp set_pipeline(forge, script), do: Agent.update(forge, &%{&1 | script: script})
+  # `:skipped` is GitLab's skipped head pipeline: `:neutral` plus the skipped flag.
+  defp forge_reading(head, :skipped),
+    do: %{head_sha: head, pipeline: :neutral, pipeline_skipped: true}
+
+  defp forge_reading(head, pipeline), do: %{head_sha: head, pipeline: pipeline}
+
+  defp set_pipeline(forge, script),
+    do: Agent.update(forge, &%{&1 | script: script})
+
   defp set_head(forge, head), do: Agent.update(forge, &%{&1 | head: head})
 
   defp awaiting_ci?(gate), do: :sys.get_state(gate).phase == :awaiting_ci
