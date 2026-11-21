@@ -218,17 +218,18 @@ defmodule Wardmast.Screenshots.PlanCheck do
   """
   @spec strip_committed(String.t(), String.t() | nil) :: :stripped | :clean | {:error, String.t()}
   def strip_committed(worktree, target) do
+    if committed?(worktree, target), do: do_strip(worktree), else: :clean
+  end
+
+  @doc "True when the branch tracks the manifest and the merge base does not (it needs stripping)."
+  @spec committed?(String.t(), String.t() | nil) :: boolean()
+  def committed?(worktree, target) do
     base =
       if is_binary(target) and target != "",
         do: Wardmast.Worker.Worktree.merge_base(worktree, target)
 
-    with true <- git_ok?(worktree, ["cat-file", "-e", "HEAD:" <> @plan_file]),
-         false <-
-           is_binary(base) and git_ok?(worktree, ["cat-file", "-e", base <> ":" <> @plan_file]) do
-      do_strip(worktree)
-    else
-      _ -> :clean
-    end
+    git_ok?(worktree, ["cat-file", "-e", "HEAD:" <> @plan_file]) and
+      not (is_binary(base) and git_ok?(worktree, ["cat-file", "-e", base <> ":" <> @plan_file]))
   end
 
   defp do_strip(worktree) do

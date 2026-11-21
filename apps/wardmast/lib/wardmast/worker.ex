@@ -5917,20 +5917,28 @@ defmodule Wardmast.Worker do
       is_binary(worktree) and File.dir?(worktree) and
         (ctx in [:fix_pass, :revise] or worktree_on_branch?(worktree, branch))
 
-    if runnable?, do: resolve_prepush_spec(prepush_workspace(state, ctx), state.repo)
+    target = Map.get(meta || %{}, :target_branch) || "main"
+
+    if runnable?,
+      do: resolve_prepush_spec(prepush_workspace(state, ctx), state.repo, worktree, target)
   end
 
-  defp resolve_prepush_spec(workspace, repo) do
+  defp resolve_prepush_spec(workspace, repo, worktree, target) do
     case Wardmast.Worker.PrepushCheck.resolve(workspace, repo) do
-      nil -> screenshots_only_spec(workspace, repo)
+      nil -> screenshots_only_spec(workspace, repo, worktree, target)
       spec -> spec
     end
   end
 
   # A repo with no pre-push recipe still gets the `arb done` housekeeping pass: the screenshots
-  # plan check when configured, and always the strip of a committed manifest (bd-5r2twb).
-  defp screenshots_only_spec(_workspace, _repo) do
-    %{screenshots_only: true, steps: [], timeout_seconds: 60, on_timeout: :proceed}
+  # plan check when configured, and the strip of a committed manifest when one is tracked
+  # (bd-5r2twb). Otherwise there is nothing to run and completion stays synchronous.
+  defp screenshots_only_spec(workspace, repo, worktree, target) do
+    configured? = match?({:ok, _}, Wardmast.Screenshots.Config.resolve(workspace, repo))
+
+    if configured? or Wardmast.Screenshots.PlanCheck.committed?(worktree, target) do
+      %{screenshots_only: true, steps: [], timeout_seconds: 60, on_timeout: :proceed}
+    end
   end
 
   # A fix round's worker is registered without a workspace (its completion must
