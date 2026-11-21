@@ -161,6 +161,15 @@ defmodule Wardmast.Worker.ReviewCiTest do
       assert ReviewCi.classify(%{head_sha: @sha, pipeline: :neutral}, @sha) == :unknown
     end
 
+    # #1564: a skipped head pipeline (0 jobs) is no CI result: never green, never
+    # a plain unknown — the gate has to start a pipeline for it.
+    test "a skipped head pipeline reads :skipped, never :green" do
+      reading =
+        ReviewCi.classify(%{head_sha: @sha, pipeline: :neutral, pipeline_skipped: true}, @sha)
+
+      assert reading == :skipped
+    end
+
     test "a green pipeline on a different head is never green" do
       assert ReviewCi.classify(%{head_sha: @other, pipeline: :success}, @sha) ==
                {:head_mismatch, @other}
@@ -356,6 +365,24 @@ defmodule Wardmast.Worker.ReviewCiTest do
 
       assert {[{:infra, reason}], _} = run(wait, [:cancelled])
       assert reason =~ "cancelled"
+    end
+
+    # #1564: the gate used to read a skipped pipeline as :unknown and burn its poll
+    # budget without ever starting one.
+    test "skipped starts a fresh pipeline once per head, then waits for it" do
+      assert {[:rerun_skipped], wait} = run(new_wait(30), [:skipped])
+      assert {[:wait, :wait], wait} = run(wait, [:skipped, :skipped])
+      assert {[:wait, :green], wait} = run(wait, [:pending, :green])
+
+      # A newer head gets its own trigger.
+      wait = ReviewCi.retarget(wait, "feedface00")
+      assert {[:rerun_skipped], _} = run(wait, [:skipped])
+    end
+
+    test "skipped never proceeds as green and falls back once the budget is spent" do
+      {[:rerun_skipped], wait} = run(new_wait(3), [:skipped])
+      assert {[:wait, {:fallback, reason}], _} = run(wait, [:skipped, :skipped])
+      assert reason =~ "did not report"
     end
 
     test "cancelled that goes green on the re-run just proceeds" do

@@ -2058,6 +2058,17 @@ defmodule Wardmast.Worker.ReviewGate do
     end
   end
 
+  # #1564: the head's pipeline is `skipped` (0 jobs, e.g. after a main-merge
+  # push), which is no CI result — the gate would otherwise wait on it until its
+  # budget ran out. `ReviewCi` asks for this once per head: start a fresh MR
+  # pipeline (the adapter's `rerun_ci/2` does that for a skipped one) and wait.
+  defp ci_act(state, wait, :rerun_skipped, _result) do
+    case skip_trigger_guard(state.task_id, wait.sha) do
+      :trigger -> ci_trigger_skipped(state, wait)
+      :hold -> {:wait, ci_schedule(state, wait)}
+    end
+  end
+
   defp ci_act(state, wait, {:infra, reason}, _result) do
     ci_log_leave(state, wait, "CI could not vouch (#{reason})")
     ci_infra(state, reason)
@@ -2066,6 +2077,45 @@ defmodule Wardmast.Worker.ReviewGate do
   defp ci_act(state, wait, {:fallback, reason}, _result) do
     ci_log_leave(state, wait, "CI could not vouch (#{reason})")
     {:proceed, state |> ci_end_wait() |> ci_fall_back(reason)}
+  end
+
+  # A head Wardmast deliberately CI-skipped (`ci_skipped_head`, bd-4y9dno: the
+  # MR waits behind the train head) is the merge queue's to start, so the gate
+  # must not undo the deferral; a head already triggered (`ci_triggered_head`,
+  # recorded below) is not triggered again across a gate restart.
+  defp skip_trigger_guard(task_id, sha) do
+    lane =
+      case Ash.get(Issue, task_id) do
+        {:ok, %{merge_watch: %{} = lane}} -> lane
+        _ -> %{}
+      end
+
+    if sha in [Map.get(lane, "ci_skipped_head"), Map.get(lane, "ci_triggered_head")],
+      do: :hold,
+      else: :trigger
+  rescue
+    _ -> :trigger
+  end
+
+  defp ci_trigger_skipped(state, wait) do
+    case do_ci_rerun(state) do
+      ok when ok == :ok or ok == {:error, :ci_in_progress} ->
+        _ = Wardmast.Tasks.PullRequest.record_ci_triggered_head(state.task_id, wait.sha)
+
+        Logger.info(
+          "ReviewGate: CI on #{wait.sha} for task=#{state.task_id} is a skipped pipeline; " <>
+            "started a fresh MR pipeline and waiting on it"
+        )
+
+        {:wait, ci_schedule(state, wait)}
+
+      {:error, why} ->
+        ci_infra(
+          state,
+          "CI infrastructure: the pipeline on #{wait.sha} was skipped (no jobs ran) and a " <>
+            "fresh MR pipeline could not be started (#{why})."
+        )
+    end
   end
 
   defp ci_act_red(state, wait, :rerun, _result), do: ci_red_rerun(state, wait)
