@@ -6954,7 +6954,7 @@ defmodule Wardmast.Worker.ReviewGate do
   # down the shared reject path (escalate if the round budget is spent, else back
   # to the implementer).
   defp fail_closed(spec, state, findings) do
-    bannered = spec.banner.(findings)
+    bannered = spec.banner.(findings) |> with_partial_findings(spec, state)
     recorded = if spec.record == :banner, do: bannered, else: findings
 
     record_round(state, :review, spec.verdict, recorded, converged: false)
@@ -6971,6 +6971,28 @@ defmodule Wardmast.Worker.ReviewGate do
 
     route_after_reject(state, bannered)
   end
+
+  # bd-9isy6t: an APPROVE rejected for ignoring the findings a PARTIAL pass
+  # carried would otherwise route to the implementer as a banner naming ids only
+  # — the implementer never saw that pass's text (it was never routed). Append
+  # the carried findings, as a `⚠️` banner paragraph (blank lines squeezed so
+  # `ReviewFindings` keeps treating the whole thing as banner, not as findings).
+  defp with_partial_findings(bannered, %{reason: :unaddressed_findings}, %{
+         partial_findings: partial
+       })
+       when is_binary(partial) and partial != "" do
+    body =
+      partial
+      |> String.split("\n")
+      |> Enum.reject(&(String.trim(&1) == ""))
+      |> Enum.join("\n")
+
+    bannered <>
+      "\n\n⚠️ FINDINGS FROM THE PRIOR (PARTIAL-VERIFICATION) PASS the approval above " <>
+      "ignored — the implementer must address them:\n" <> body
+  end
+
+  defp with_partial_findings(bannered, _spec, _state), do: bannered
 
   # The re-prompt's task id. For round > 1 it must be based on the round-specific
   # review_id (bd-bgeo6i); round 1 uses the base review_id. Shared with
@@ -7654,6 +7676,9 @@ defmodule Wardmast.Worker.ReviewGate do
       # `@finding_item`, but it is verdict payload, not an enumerated finding —
       # exclude it so the count reflects real findings only (bd-4yhv4x).
       |> Enum.reject(&ReviewVerification.criteria_line?/1)
+      # Likewise a DISPOSITIONS line (`- [OBSOLETE] F1.1 — …`) answers an
+      # already-counted finding rather than raising a new one.
+      |> Enum.reject(&(ReviewFindings.dispositions(&1) != %{}))
       |> Enum.count(&Regex.match?(@finding_item, &1))
 
     cond do
@@ -9564,7 +9589,7 @@ defmodule Wardmast.Worker.ReviewGate do
         NOT be honored: the gate treats it as malformed, exactly like a missing
         `VERDICT:` line.
 
-        """
+        """ <> open_findings_briefing(state) <> "\n"
 
       _ ->
         ""
@@ -9650,7 +9675,7 @@ defmodule Wardmast.Worker.ReviewGate do
         findings — each with a severity, a `file:line` location, and a suggested
         fix — so the implementer can close the gap.
 
-    """ <> review_prompt(state)
+    """ <> prior_findings_block(state) <> review_prompt(state)
   end
 
   def verdict_reprompt_prompt(state, :unmet_criteria) do
@@ -9682,7 +9707,7 @@ defmodule Wardmast.Worker.ReviewGate do
         fix — so the implementer can close the gap. An APPROVE whose breakdown
         still contains a `[NOT MET]` line will not be accepted.
 
-    """ <> review_prompt(state)
+    """ <> prior_findings_block(state) <> review_prompt(state)
   end
 
   def verdict_reprompt_prompt(state, :unverified) do
@@ -9729,7 +9754,7 @@ defmodule Wardmast.Worker.ReviewGate do
     A REQUEST_CHANGES with no enumerated findings will be rejected again. Do not
     include any roleplay or persona text — structured findings only.
 
-    """ <> review_prompt(state)
+    """ <> prior_findings_block(state) <> review_prompt(state)
   end
 
   def verdict_reprompt_prompt(state, _no_verdict) do
@@ -9743,7 +9768,7 @@ defmodule Wardmast.Worker.ReviewGate do
 
     Do not skip the verdict line — without it your review cannot be honored.
 
-    """ <> review_prompt(state)
+    """ <> prior_findings_block(state) <> review_prompt(state)
   end
 
   @doc """

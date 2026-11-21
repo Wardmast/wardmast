@@ -3212,6 +3212,24 @@ defmodule Wardmast.Worker.ReviewGateTest do
       assert prompt =~ "THE PRIOR PASS"
     end
 
+    test "every verdict re-prompt of the round keeps carrying the partial pass's findings",
+         %{ws: ws} do
+      task = new_task(ws)
+      partial = "- [P2] test/support/owned_tasks.ex:101 waits on the coordinator, not the workers"
+
+      state =
+        state_for(task, ws, %{
+          partial_findings: partial,
+          open_findings: Wardmast.Worker.ReviewFindings.extract(partial, 1)
+        })
+
+      for reason <- [:no_verdict, :empty_findings, :unmet_criteria, :missing_criteria] do
+        prompt = ReviewGate.verdict_reprompt_prompt(state, reason)
+        assert prompt =~ "THE PRIOR PASS", "#{reason} dropped the carried findings"
+        assert prompt =~ "F1.1"
+      end
+    end
+
     test "verdict_reprompt_prompt/2 :unverified without carried findings has no prior-findings block",
          %{ws: ws} do
       task = new_task(ws)
