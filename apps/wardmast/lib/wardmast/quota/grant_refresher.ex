@@ -206,11 +206,16 @@ defmodule Wardmast.Quota.GrantRefresher do
   # ---- checks ------------------------------------------------------------
 
   defp check_all(%State{} = state) do
-    paths = state.grants_fun.() |> Enum.map(& &1.path) |> Enum.uniq()
+    listed = state.grants_fun.()
+    account_ids = Map.new(listed, &{&1.path, Map.get(&1, :account_id)})
+    paths = listed |> Enum.map(& &1.path) |> Enum.uniq()
 
     grants =
       Map.new(paths, fn path ->
-        {path, check(path, Map.get(state.grants, path, fresh_entry()), state)}
+        entry =
+          state.grants |> Map.get(path, fresh_entry()) |> Map.put(:account_id, account_ids[path])
+
+        {path, check(path, entry, state)}
       end)
 
     %{state | grants: grants}
@@ -228,7 +233,8 @@ defmodule Wardmast.Quota.GrantRefresher do
       last_refresh_at: nil,
       last_failure_at: nil,
       escalated_failure?: false,
-      warned_refresh_token_expiry: nil
+      warned_refresh_token_expiry: nil,
+      account_id: nil
     }
   end
 
@@ -256,7 +262,7 @@ defmodule Wardmast.Quota.GrantRefresher do
 
     if ms_until(at) <= state.refresh_token_warning_ms and
          entry.warned_refresh_token_expiry != at do
-      escalate(grant.path, {:refresh_token_expiring, at})
+      escalate(grant.path, {:refresh_token_expiring, at}, entry.account_id)
       %{entry | warned_refresh_token_expiry: at}
     else
       entry
@@ -354,7 +360,8 @@ defmodule Wardmast.Quota.GrantRefresher do
         inspect(reason)
     )
 
-    unless entry.escalated_failure?, do: escalate(path, {:refresh_failed, reason})
+    unless entry.escalated_failure?,
+      do: escalate(path, {:refresh_failed, reason}, entry.account_id)
 
     %{entry | status: :failing, last_failure_at: DateTime.utc_now(), escalated_failure?: true}
   end
@@ -470,15 +477,32 @@ defmodule Wardmast.Quota.GrantRefresher do
 
   # ---- escalation --------------------------------------------------------
 
-  defp escalate(path, cause) do
+  defp escalate(path, cause, account_id) do
     case primary_workspace_id() do
-      nil -> :ok
-      ws_id -> CoordinatorNotifier.quota_grant_failing(%{workspace_id: ws_id}, path, cause)
+      nil ->
+        :ok
+
+      ws_id ->
+        CoordinatorNotifier.quota_grant_failing(
+          %{workspace_id: ws_id, account: account_label(account_id)},
+          path,
+          cause
+        )
     end
   rescue
     e ->
       Logger.warning("Wardmast.Quota.GrantRefresher: escalation raised: #{Exception.message(e)}")
   end
+
+  # `claude:default` for the page, so it names the account and not just a dir.
+  defp account_label(id) when is_binary(id) do
+    case Wardmast.Accounts.get_account(id) do
+      {:ok, %{provider: provider, slug: slug}} -> "#{provider}:#{slug}"
+      _ -> nil
+    end
+  end
+
+  defp account_label(_), do: nil
 
   # The oldest workspace, as `Wardmast.Agents.CredentialWatchdog` picks it: the
   # grant is install-wide, so one stable mailbox per episode.

@@ -33,8 +33,17 @@ defmodule Wardmast.Quota.GrantRefresherTest do
     record = Path.join(tmp_dir, "cli-record")
 
     ws = Ash.create!(Workspace, %{name: "grant-refresher-ws"})
+    {:ok, account} = Wardmast.Accounts.create_account(%{provider: :claude, slug: "polled"})
 
-    %{cwd: cwd, config_dir: config_dir, grant: grant, record: record, tmp_dir: tmp_dir, ws: ws}
+    %{
+      cwd: cwd,
+      config_dir: config_dir,
+      grant: grant,
+      record: record,
+      tmp_dir: tmp_dir,
+      ws: ws,
+      account: account
+    }
   end
 
   defp now_ms, do: System.system_time(:millisecond)
@@ -104,7 +113,7 @@ defmodule Wardmast.Quota.GrantRefresherTest do
            interval_ms: @hour_ms,
            claude_cmd: cli,
            cwd: ctx.cwd,
-           grants_fun: fn -> [%{account_id: "acct", path: grant}] end
+           grants_fun: fn -> [%{account_id: ctx.account.id, path: grant}] end
          ],
          opts
        )}
@@ -192,7 +201,7 @@ defmodule Wardmast.Quota.GrantRefresherTest do
              interval_ms: @hour_ms,
              claude_cmd: cli,
              cwd: ctx.cwd,
-             grants_fun: fn -> [%{account_id: "acct", path: ctx.grant}] end
+             grants_fun: fn -> [%{account_id: ctx.account.id, path: ctx.grant}] end
            ]},
           id: :second_refresher
         )
@@ -240,6 +249,8 @@ defmodule Wardmast.Quota.GrantRefresherTest do
     assert msg.kind == :escalation
     assert msg.subject =~ "quota grant needs re-login"
     assert msg.body =~ "CLAUDE_CONFIG_DIR=#{ctx.config_dir} claude auth login"
+    # bd-6y4pj6: the page names the account, not just a directory.
+    assert msg.body =~ "claude:polled"
     assert GrantRefresher.state(pid).grants[ctx.grant].status == :failing
   end
 
