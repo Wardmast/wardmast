@@ -5917,13 +5917,13 @@ defmodule Wardmast.Worker do
       is_binary(worktree) and File.dir?(worktree) and
         (ctx in [:fix_pass, :revise] or worktree_on_branch?(worktree, branch))
 
-    target = Map.get(meta || %{}, :target_branch) || "main"
-
     if runnable?,
-      do: resolve_prepush_spec(prepush_workspace(state, ctx), state.repo, worktree, target)
+      do: resolve_prepush_spec(prepush_workspace(state, ctx), state.repo, worktree, meta)
   end
 
-  defp resolve_prepush_spec(workspace, repo, worktree, target) do
+  defp resolve_prepush_spec(workspace, repo, worktree, meta) do
+    target = Map.get(meta || %{}, :target_branch) || "main"
+
     case Wardmast.Worker.PrepushCheck.resolve(workspace, repo) do
       nil -> screenshots_only_spec(workspace, repo, worktree, target)
       spec -> spec
