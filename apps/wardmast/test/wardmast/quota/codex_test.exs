@@ -491,6 +491,232 @@ defmodule Wardmast.Quota.CodexTest do
       assert result.auth_expired == false
     end
 
+    test "pushes a poll refresh into live podman run copies tracked by AuthSync.Reaper so the container is not stranded on the retired refresh token (bd-6yk7qi)" do
+      ws = workspace!()
+
+      auth_path =
+        write_auth_file!("stale-access", "valid-refresh", "acct-123", "2026-11-01T00:00:00Z")
+
+      run_dir =
+        Path.join(
+          System.tmp_dir!(),
+          "codex_podman_run_#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(run_dir)
+      run_auth = Path.join(run_dir, "auth.json")
+      assert :ok = Wardmast.Agents.Codex.AuthSync.seed(auth_path, run_auth)
+
+      owner =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      on_exit(fn ->
+        Process.exit(owner, :kill)
+        File.rm_rf(run_dir)
+      end)
+
+      :ok = Wardmast.Agents.Codex.AuthSync.Reaper.track(owner, auth_path, run_auth)
+
+      Req.Test.stub(@stub_name, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/backend-api/wham/usage"} ->
+            case Plug.Conn.get_req_header(conn, "authorization") do
+              ["Bearer stale-access"] -> Plug.Conn.send_resp(conn, 401, "")
+              ["Bearer fresh-access"] -> Req.Test.json(conn, @usage_body)
+            end
+
+          {"POST", "/oauth/token"} ->
+            Req.Test.json(conn, %{
+              "access_token" => "fresh-access",
+              "refresh_token" => "rotated-refresh"
+            })
+        end
+      end)
+
+      result = Codex.fetch(ws.id, auth_path: auth_path)
+
+      assert result.auth_expired == false
+      assert result.codex.session.used == 42.5
+
+      run_persisted = run_auth |> File.read!() |> Jason.decode!()
+      assert run_persisted["tokens"]["access_token"] == "fresh-access"
+      assert run_persisted["tokens"]["refresh_token"] == "rotated-refresh"
+    end
+
+    test "syncs a live podman run copy that already rotated its refresh token before refreshing or reporting auth_expired (bd-6yk7qi)" do
+      ws = workspace!()
+
+      auth_path =
+        write_auth_file!("stale-access", "retired-refresh", "acct-123", "2026-11-01T00:00:00Z")
+
+      run_dir =
+        Path.join(
+          System.tmp_dir!(),
+          "codex_podman_rotated_#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(run_dir)
+      run_auth = Path.join(run_dir, "auth.json")
+      assert :ok = Wardmast.Agents.Codex.AuthSync.seed(auth_path, run_auth)
+
+      # Simulate the container's codex CLI rotating its private copy first.
+      File.write!(
+        run_auth,
+        encode_auth("container-fresh", "container-rt", "acct-123", "2026-11-14T12:00:00Z")
+      )
+
+      owner =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      on_exit(fn ->
+        Process.exit(owner, :kill)
+        File.rm_rf(run_dir)
+      end)
+
+      :ok = Wardmast.Agents.Codex.AuthSync.Reaper.track(owner, auth_path, run_auth)
+
+      Req.Test.stub(@stub_name, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/backend-api/wham/usage"} ->
+            case Plug.Conn.get_req_header(conn, "authorization") do
+              ["Bearer stale-access"] -> Plug.Conn.send_resp(conn, 401, "")
+              ["Bearer container-fresh"] -> Req.Test.json(conn, @usage_body)
+            end
+
+          {"POST", "/oauth/token"} ->
+            flunk(
+              "/oauth/token must not be called with the retired source token when a live podman run copy already rotated"
+            )
+        end
+      end)
+
+      result = Codex.fetch(ws.id, auth_path: auth_path)
+
+      assert result.auth_expired == false
+      assert result.codex.session.used == 42.5
+
+      source_persisted = auth_path |> File.read!() |> Jason.decode!()
+      assert source_persisted["tokens"]["access_token"] == "container-fresh"
+      assert source_persisted["tokens"]["refresh_token"] == "container-rt"
+    end
+
+    test "adopts a live podman run copy that rotated while the poll refresh was in flight without firing auth_expired (bd-6yk7qi)" do
+      ws = workspace!()
+
+      auth_path =
+        write_auth_file!("stale-access", "rt-initial", "acct-123", "2026-11-01T00:00:00Z")
+
+      run_dir =
+        Path.join(
+          System.tmp_dir!(),
+          "codex_podman_inflight_#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(run_dir)
+      run_auth = Path.join(run_dir, "auth.json")
+      assert :ok = Wardmast.Agents.Codex.AuthSync.seed(auth_path, run_auth)
+
+      owner =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      on_exit(fn ->
+        Process.exit(owner, :kill)
+        File.rm_rf(run_dir)
+      end)
+
+      :ok = Wardmast.Agents.Codex.AuthSync.Reaper.track(owner, auth_path, run_auth)
+
+      Req.Test.stub(@stub_name, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/backend-api/wham/usage"} ->
+            case Plug.Conn.get_req_header(conn, "authorization") do
+              ["Bearer stale-access"] -> Plug.Conn.send_resp(conn, 401, "")
+              ["Bearer container-fresh"] -> Req.Test.json(conn, @usage_body)
+            end
+
+          {"POST", "/oauth/token"} ->
+            # The container's codex CLI beat us to /oauth/token while our refresh was in flight.
+            File.write!(
+              run_auth,
+              encode_auth("container-fresh", "container-rt", "acct-123", "2026-11-14T12:00:00Z")
+            )
+
+            conn
+            |> Plug.Conn.put_status(400)
+            |> Req.Test.json(%{"error" => %{"code" => "refresh_token_reused"}})
+        end
+      end)
+
+      result = Codex.fetch(ws.id, auth_path: auth_path)
+
+      assert result.auth_expired == false
+      assert result.codex.session.used == 42.5
+
+      source_persisted = auth_path |> File.read!() |> Jason.decode!()
+      assert source_persisted["tokens"]["access_token"] == "container-fresh"
+      assert source_persisted["tokens"]["refresh_token"] == "container-rt"
+    end
+
+    test "logs an error and returns a neutral result (auth_expired: false) when persisting the rotated auth.json fails (bd-6yk7qi)" do
+      ws = workspace!()
+
+      dir =
+        Path.join(
+          System.tmp_dir!(),
+          "codex_readonly_dir_#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(dir)
+      auth_path = Path.join(dir, "auth.json")
+
+      File.write!(
+        auth_path,
+        encode_auth("stale-access", "valid-refresh", "acct-123", "2026-11-01T00:00:00Z")
+      )
+
+      File.chmod!(auth_path, 0o600)
+      File.chmod!(dir, 0o500)
+
+      on_exit(fn ->
+        File.chmod(dir, 0o700)
+        File.rm_rf(dir)
+      end)
+
+      Req.Test.stub(@stub_name, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/backend-api/wham/usage"} ->
+            Plug.Conn.send_resp(conn, 401, "")
+
+          {"POST", "/oauth/token"} ->
+            Req.Test.json(conn, %{
+              "access_token" => "fresh-access",
+              "refresh_token" => "rotated-refresh"
+            })
+        end
+      end)
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :error], fn ->
+          result = Codex.fetch(ws.id, auth_path: auth_path)
+          assert result.codex == nil
+          assert result.auth_expired == false
+        end)
+
+      assert log =~ "could not persist rotated auth.json"
+    end
+
     # bd-1fpjgx: `auth_expired` must be a dedicated flag, not something parsed
     # back out of the message text — any non-401, non-200 status produces the
     # same "temporarily unavailable (N)" message shape.

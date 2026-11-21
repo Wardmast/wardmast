@@ -29,6 +29,13 @@ defmodule Wardmast.Quota.Codex do
   flight, the poll adopts the worker's file and never overwrites it. Writes use
   a mode-`0600` `:exclusive` temporary sibling and atomic `File.rename/2`.
 
+  For containerised (podman) workers, which run on a private copy of `auth.json`
+  tracked by `Wardmast.Agents.Codex.AuthSync.Reaper`, the poll first reconciles
+  any newer rotation from live tracked run copies into the source (`AuthSync.sync/2`),
+  and after persisting a poll-initiated rotation pushes the new token into every
+  live tracked run copy (`AuthSync.pull/2`) so neither the container nor the
+  poll is stranded on a retired refresh token.
+
   ## Response shape
 
   The endpoint returns a `rate_limit` object (also seen as `rate_limits` or
@@ -758,6 +765,8 @@ defmodule Wardmast.Quota.Codex do
   end
 
   defp refresh_file_credentials(real, source_path, creds, opts) do
+    sync_tracked_runs_into_source(real)
+
     {before_doc, on_disk_creds} =
       case read_auth_doc(real) do
         {:ok, doc, disk_creds} -> {doc, disk_creds}
@@ -787,18 +796,23 @@ defmodule Wardmast.Quota.Codex do
           id_token: non_empty_string(body["id_token"])
         }
 
-        adopted =
-          maybe_persist_refreshed_auth(
-            real,
-            before_doc,
-            creds.access_token,
-            refresh_token,
-            rotated
-          )
+        case maybe_persist_refreshed_auth(
+               real,
+               before_doc,
+               creds.access_token,
+               refresh_token,
+               rotated
+             ) do
+          {:ok, adopted} ->
+            {:ok, Map.put(adopted, :source_path, source_path)}
 
-        {:ok, Map.put(adopted, :source_path, source_path)}
+          :persist_failed ->
+            :transient_error
+        end
 
       {:ok, status, _body} when status in [400, 401, 403] ->
+        sync_tracked_runs_into_source(real)
+
         case read_auth_doc(real) do
           {:ok, _doc, disk_creds}
           when disk_creds.access_token != creds.access_token or
@@ -817,27 +831,64 @@ defmodule Wardmast.Quota.Codex do
   end
 
   defp maybe_persist_refreshed_auth(real, before_doc, stale_access, used_refresh, rotated) do
-    fallback = %{
-      access_token: rotated.access_token,
-      refresh_token: rotated.refresh_token,
-      account_id: get_in(before_doc || %{}, ["tokens", "account_id"])
-    }
+    sync_tracked_runs_into_source(real)
 
     case read_auth_doc(real) do
       {:ok, current_doc, disk_creds} ->
         if unchanged_on_disk?(current_doc, before_doc, stale_access, used_refresh) do
           updated_doc = put_refreshed_tokens(current_doc, rotated)
-          _ = write_private_atomic(real, Jason.encode!(updated_doc))
-          %{disk_creds | access_token: rotated.access_token, refresh_token: rotated.refresh_token}
+
+          case write_private_atomic(real, Jason.encode!(updated_doc)) do
+            :ok ->
+              pull_source_into_tracked_runs(real)
+
+              {:ok,
+               %{
+                 disk_creds
+                 | access_token: rotated.access_token,
+                   refresh_token: rotated.refresh_token
+               }}
+
+            {:error, reason} ->
+              Logger.error(
+                "Wardmast.Quota.Codex: could not persist rotated auth.json to #{real}: #{inspect(reason)}"
+              )
+
+              :persist_failed
+          end
         else
           # A worker modified auth.json while our refresh HTTP call was in flight;
           # never clobber the worker's file.
-          if disk_creds.access_token != stale_access, do: disk_creds, else: fallback
+          if disk_creds.access_token != stale_access do
+            {:ok, disk_creds}
+          else
+            :persist_failed
+          end
         end
 
-      _ ->
-        fallback
+      {:error, reason} ->
+        Logger.error(
+          "Wardmast.Quota.Codex: could not persist rotated auth.json to #{real}: #{inspect(reason)}"
+        )
+
+        :persist_failed
     end
+  end
+
+  defp sync_tracked_runs_into_source(real) do
+    for run <- Wardmast.Agents.Codex.AuthSync.Reaper.runs_for_source(real) do
+      _ = Wardmast.Agents.Codex.AuthSync.sync(real, run)
+    end
+
+    :ok
+  end
+
+  defp pull_source_into_tracked_runs(real) do
+    for run <- Wardmast.Agents.Codex.AuthSync.Reaper.runs_for_source(real) do
+      _ = Wardmast.Agents.Codex.AuthSync.pull(real, run)
+    end
+
+    :ok
   end
 
   defp unchanged_on_disk?(current_doc, before_doc, stale_access, used_refresh)

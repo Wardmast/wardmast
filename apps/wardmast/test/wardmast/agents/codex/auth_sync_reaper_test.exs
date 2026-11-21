@@ -69,4 +69,24 @@ defmodule Wardmast.Agents.Codex.AuthSync.ReaperTest do
     :ok = Reaper.flush(pid, ctx.reaper)
     assert Jason.decode!(File.read!(ctx.source))["tokens"]["refresh_token"] == "rt-5"
   end
+
+  test "runs_for_source/2 returns live tracked run copies for a source (including through symlinks)",
+       ctx do
+    pid = owner()
+    on_exit(fn -> Process.exit(pid, :kill) end)
+
+    link_source = ctx.source <> ".link"
+    File.ln_s!(ctx.source, link_source)
+    other_source = ctx.source <> ".other"
+    File.write!(other_source, auth("rt-other", "2026-10-01T00:00:00Z"))
+
+    assert [] == Reaper.runs_for_source(ctx.source, ctx.reaper)
+
+    :ok = Reaper.track(pid, link_source, ctx.run, ctx.reaper)
+    :ok = Reaper.track(pid, other_source, ctx.run <> ".other", ctx.reaper)
+
+    assert [ctx.run] == Reaper.runs_for_source(ctx.source, ctx.reaper)
+    assert [ctx.run] == Reaper.runs_for_source(link_source, ctx.reaper)
+    assert [] == Reaper.runs_for_source(ctx.source, :no_such_reaper)
+  end
 end
