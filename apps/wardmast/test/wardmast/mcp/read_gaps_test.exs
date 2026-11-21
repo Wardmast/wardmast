@@ -67,7 +67,7 @@ defmodule Wardmast.MCP.ReadGapsTest do
       assert count == length(accounts)
       assert Enum.any?(accounts, &(&1.slug == "rg-one"))
 
-      for a <- accounts, do: assert(keys(a) == sorted(@account_keys))
+      for a <- accounts, do: assert(keys(a) == sorted([:credential_health | @account_keys]))
     end
 
     test "filters by provider and rejects an unknown one" do

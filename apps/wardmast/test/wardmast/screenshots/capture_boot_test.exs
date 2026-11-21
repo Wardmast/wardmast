@@ -88,8 +88,10 @@ defmodule Wardmast.Screenshots.CaptureBootTest do
     for a in "$@"; do
       case "$a" in
         --screenshot=*) out="${a#--screenshot=}" ;;
+        --dump-dom) dump=1 ;;
       esac
     done
+    if [ -n "$dump" ]; then echo '<html><body>fake page</body></html>'; exit 0; fi
     #{body}
     """)
 
@@ -369,6 +371,39 @@ defmodule Wardmast.Screenshots.CaptureBootTest do
       # deep directory aborted a real Chromium ("Socket path too long"). /tmp is short, and
       # private to each browser in the bwrap sandbox.
       assert env =~ ~r{^TMPDIR=/tmp$}m
+    end
+
+    test "the page's DOM text is scanned: a leak in it withholds the shot (bd-995svb)", %{
+      tmp_dir: dir
+    } do
+      repo = repo!(dir, ["/"], ["/", "/x"])
+      browser = Path.join(dir, "leaky_chrome.sh")
+
+      File.write!(browser, """
+      #!/bin/sh
+      for a in "$@"; do
+        case "$a" in
+          --screenshot=*) out="${a#--screenshot=}" ;;
+          --dump-dom) dump=1 ;;
+        esac
+      done
+      if [ -n "$dump" ]; then
+        echo '<html><body><img alt="Owner: pat@acme-corp.io"></body></html>'
+        exit 0
+      fi
+      printf 'IMG' > "$out"
+      """)
+
+      File.chmod!(browser, 0o755)
+
+      assert {:ok, %{pairs: [pair]}} =
+               run(dir, repo, plan!(dir, [%{"id" => "home", "path" => "/"}]), config(),
+                 ctx: %{chrome: browser}
+               )
+
+      assert %{status: :withheld, rule: "email-domain"} = pair.after
+      assert Path.wildcard(Path.join([dir, "out", "images", "*"])) == []
+      refute File.read!(Path.join([dir, "out", "capture.json"])) =~ "acme-corp"
     end
 
     test "writes into its own directory; a symlink it leaves there is never followed", %{

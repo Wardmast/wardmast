@@ -47,6 +47,7 @@ defmodule Wardmast.Screenshots.CaptureTest do
 
   defp run(dir, plan_path, ctx_extra \\ %{}, opts \\ []) do
     {repo, base, head} = Process.get(:repo)
+    {config, opts} = Keyword.pop(opts, :config, @config)
 
     ctx =
       Map.merge(
@@ -60,7 +61,7 @@ defmodule Wardmast.Screenshots.CaptureTest do
         repo_path: repo,
         base_sha: base,
         head_sha: head,
-        config: @config,
+        config: config,
         plan_path: plan_path,
         out_dir: Path.join(dir, "out")
       },
@@ -628,6 +629,154 @@ defmodule Wardmast.Screenshots.CaptureTest do
       assert File.dir?(recent)
     end
   end
+
+  describe "data safety: the DOM text scan (bd-995svb)" do
+    import ExUnit.CaptureLog
+
+    alias Wardmast.Screenshots.Section
+    alias Wardmast.Worker.ReviewGate.ScreenshotGate
+
+    @leak "jo.customer@acme-corp.io"
+
+    defp page_plan(dir), do: write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+
+    test "a shot whose text leaks is withheld: no image, the rule is all that is recorded", %{
+      tmp_dir: dir
+    } do
+      plan = page_plan(dir)
+
+      log =
+        capture_log(fn ->
+          send(self(), {:result, run(dir, plan, %{dom_text: ["Welcome", "Mail #{@leak}"]})})
+        end)
+
+      assert_received {:result, {:ok, result}}
+      [pair] = result.pairs
+      assert %{status: :withheld, rule: "email-domain"} = pair.after
+      assert %{status: :withheld, rule: "email-domain"} = pair.before
+      refute File.exists?(Path.join([dir, "out", "images", "home__desktop-light__after.png"]))
+      refute File.exists?(Path.join([dir, "out", "images", "home__desktop-light__before.png"]))
+
+      shot = recorded(dir)["shots"] |> hd()
+      assert shot["after"] == %{"status" => "withheld", "rule" => "email-domain"}
+
+      # the matched text is nowhere: log, capture.json, the PR body, the reviewer brief
+      capture_json = File.read!(Path.join([dir, "out", "capture.json"]))
+
+      pr_body =
+        result |> Capture.poster_pairs() |> Enum.map(&poster_row/1) |> Section.render()
+
+      assert pr_body =~ "withheld by the data-safety scan: email-domain"
+      {:proceed, brief} = ScreenshotGate.route({:ok, result})
+      assert brief =~ "withheld by the data-safety scan: email-domain"
+
+      for surface <- [log, capture_json, pr_body, brief, inspect(result)] do
+        refute surface =~ "acme-corp"
+        refute surface =~ "jo.customer"
+      end
+    end
+
+    test "only the image that leaked is withheld", %{tmp_dir: dir} do
+      plan = page_plan(dir)
+      ctx = %{dom_text: %{"before" => ["fine"], "after" => ["Mail #{@leak}"]}}
+
+      assert {:ok, %{pairs: [pair]}} = run(dir, plan, ctx)
+      assert %{status: :ok} = pair.before
+      assert %{status: :withheld, rule: "email-domain"} = pair.after
+    end
+
+    test "deny_patterns and secret shapes run too, and name only the rule", %{tmp_dir: dir} do
+      plan = page_plan(dir)
+      config = %{@config | deny_patterns: ["Initech"]}
+
+      assert {:ok, %{pairs: [pair]}} =
+               run(dir, plan, %{dom_text: ["Initech Ltd"]}, config: config)
+
+      assert %{rule: "deny-pattern:1"} = pair.after
+
+      assert {:ok, %{pairs: [pair]}} =
+               run(dir, plan, %{dom_text: ["-----BEGIN PRIVATE KEY-----"]})
+
+      assert %{rule: "secret:private-key"} = pair.after
+    end
+
+    test "a clean page keeps its image", %{tmp_dir: dir} do
+      assert {:ok, %{pairs: [pair]}} = run(dir, page_plan(dir), %{dom_text: ["pat@example.com"]})
+      assert %{status: :ok} = pair.after
+    end
+
+    test "a shooter that reports no text is not trusted: the shot is withheld", %{tmp_dir: dir} do
+      assert {:ok, %{pairs: [pair]}} = run(dir, page_plan(dir), %{dom_text: :none})
+      assert %{status: :withheld, rule: "scan-unavailable"} = pair.after
+      refute File.exists?(pair.after |> Map.get(:file, "") |> to_string())
+    end
+
+    test "the reviewer brief never lists a withheld image as a file", %{tmp_dir: dir} do
+      assert {:ok, result} = run(dir, page_plan(dir), %{dom_text: ["x@acme-corp.io"]})
+      assert {:proceed, brief} = ScreenshotGate.route({:ok, result})
+      refute brief =~ ".png"
+    end
+  end
+
+  describe "data safety: the fixture marker probe (bd-995svb)" do
+    alias Wardmast.Test.CaptureMarkerPlug
+
+    setup do
+      bandit = start_supervised!({Bandit, plug: CaptureMarkerPlug, port: 0, ip: :loopback})
+      {:ok, {_ip, port}} = ThousandIsland.listener_info(bandit)
+      {:ok, base_url: "http://127.0.0.1:#{port}"}
+    end
+
+    defp marker_config(contains),
+      do: %{
+        @config
+        | fixture_check: %{"marker" => %{"path" => "/health", "contains" => contains}}
+      }
+
+    test "a matching marker lets the boot proceed", %{tmp_dir: dir, base_url: base_url} do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+
+      assert {:ok, _} =
+               run(dir, plan, %{base_url: base_url}, config: marker_config("data: fixture"))
+
+      assert_received {:shoot, "before", _, _, _}
+    end
+
+    test "a mismatch aborts the boot and fails the capture with a clear reason", %{
+      tmp_dir: dir,
+      base_url: base_url
+    } do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+
+      assert {:error, failure} =
+               run(dir, plan, %{base_url: base_url}, config: marker_config("data: production"))
+
+      assert failure.code == :fixture_marker_mismatch
+      assert failure.role == "before"
+      assert failure.message =~ "fixture_check"
+      assert failure.message =~ "/health"
+      refute failure.message =~ "SECRET-BODY"
+      # nothing was shot, and the app that failed the probe was still stopped
+      refute_received {:shoot, _, _, _, _}
+      assert_received {:stop, "before", _}
+
+      recorded = recorded(dir)
+      assert recorded["state"] == "failed"
+      assert recorded["failure"]["code"] == "fixture_marker_mismatch"
+      refute File.read!(Path.join([dir, "out", "capture.json"])) =~ "SECRET-BODY"
+    end
+
+    test "no fixture_check means no probe", %{tmp_dir: dir} do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+      assert {:ok, _} = run(dir, plan)
+    end
+  end
+
+  defp poster_row(%{label: label, before: b, after: a}),
+    do: %{label: label, before: poster_cell(b), after: poster_cell(a)}
+
+  defp poster_cell({:text, _} = text), do: text
+  defp poster_cell(%{name: name}), do: {:image, "https://example.test/#{name}"}
 
   defp recorded(dir),
     do: Path.join([dir, "out", "capture.json"]) |> File.read!() |> Jason.decode!()

@@ -12,7 +12,13 @@ defmodule Wardmast.Accounts.Serializer do
 
   require Ash.Query
 
-  alias Wardmast.Accounts.{ProviderAccount, ProviderCredential, WorkspaceProviderAccount}
+  alias Wardmast.Accounts.{
+    CredentialHealth,
+    ProviderAccount,
+    ProviderCredential,
+    WorkspaceProviderAccount
+  }
+
   alias Wardmast.Quota.SpendCap
 
   @fingerprint_prefix 12
@@ -20,6 +26,9 @@ defmodule Wardmast.Accounts.Serializer do
   @doc """
   One account. `detailed?: true` adds `credentials`, `workspaces` and `spend_cap`
   (the dollar spend cap with the metered spend so far in its window, or `nil`).
+  `credential_health?: true` adds `credential_health` — each active credential's
+  kind, health and expiry (`Wardmast.Accounts.CredentialHealth`), which is what
+  `ward account list` prints (bd-6y4pj6).
   """
   @spec data(ProviderAccount.t(), keyword()) :: map()
   def data(%ProviderAccount{} = account, opts \\ []) do
@@ -42,6 +51,8 @@ defmodule Wardmast.Accounts.Serializer do
       inserted_at: iso(account.inserted_at),
       updated_at: iso(account.updated_at)
     }
+
+    base = maybe_credential_health(base, account, opts)
 
     if Keyword.get(opts, :detailed?, false) do
       base
@@ -79,6 +90,15 @@ defmodule Wardmast.Accounts.Serializer do
       share: link.share,
       weight: link.weight
     }
+  end
+
+  defp maybe_credential_health(base, account, opts) do
+    if Keyword.get(opts, :credential_health?, false) do
+      health = account |> CredentialHealth.for_account() |> Enum.map(&CredentialHealth.to_map/1)
+      Map.put(base, :credential_health, health)
+    else
+      base
+    end
   end
 
   defp credentials_for(account_id) do

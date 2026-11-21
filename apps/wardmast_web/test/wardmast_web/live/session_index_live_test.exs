@@ -463,9 +463,9 @@ defmodule WardmastWeb.SessionIndexLiveTest do
       assert_push_event(view, "session-dock:open", %{id: opened})
       assert opened == session.id
 
-      # §10.1 / the phase-5 scope: mode B, cross-workspace, dispatch off. The
-      # full pre-launch options UI is phase 11.
-      assert session.auth_mode == :seeded_credentials
+      # §10.1 / the phase-5 scope: cross-workspace, dispatch off — and, with a
+      # connected account, mode A: its setup token, nothing copied (bd-6y4pj6).
+      assert session.auth_mode == :oauth_token
       assert session.workspace_id == nil
       assert session.can_dispatch == false
       assert session.status == :running
@@ -525,8 +525,8 @@ defmodule WardmastWeb.SessionIndexLiveTest do
     end
 
     test "offers the enabled claude accounts and not parked ones", %{conn: conn} do
-      account!("work")
-      SessionEnv.connect_claude_login!("work")
+      work = account!("work")
+      SessionEnv.connect_claude_setup_token!(work)
       account!("parked", %{enabled: false})
 
       {:ok, view, _html} = live_sessions!(conn)
@@ -552,37 +552,37 @@ defmodule WardmastWeb.SessionIndexLiveTest do
       assert account_options(view) == ["linked"]
     end
 
-    test "launching for an account seeds that account's login, not the server user's", %{
+    test "launching for an account uses that account's setup token, copying no login", %{
       conn: conn
     } do
-      account!("work")
-      dir = SessionEnv.connect_claude_login!("work", accessToken: "sk-ant-oat01-WORK-ONLY")
+      work = account!("work")
+      SessionEnv.connect_claude_setup_token!(work, "sk-ant-oat01-WORK-ONLY")
 
       {:ok, view, _html} = live_sessions!(conn)
       view |> form("#launch-session-form", %{"account" => "work"}) |> render_submit()
 
       assert [session] = Sessions.list()
-      seeded = Path.join(Layout.config_dir(session.id), ".credentials.json")
-      assert File.read!(seeded) == File.read!(Path.join(dir, ".credentials.json"))
-      assert File.read!(seeded) =~ "WORK-ONLY"
+      assert session.auth_mode == :oauth_token
+      assert File.read!(Layout.auth_env_path(session.id)) =~ "WORK-ONLY"
+      refute File.exists?(Path.join(Layout.config_dir(session.id), ".credentials.json"))
     end
 
-    test "an account with no stored login fails the launch with the fix", %{conn: conn} do
+    test "an account with no setup token fails the launch with the fix", %{conn: conn} do
       account!("fresh")
 
       {:ok, view, _html} = live_sessions!(conn)
       html = view |> form("#launch-session-form", %{"account" => "fresh"}) |> render_submit()
 
       assert html =~ "Could not launch"
-      assert html =~ "Log in"
+      assert html =~ "claude setup-token"
       assert html =~ "fresh"
       assert Sessions.list() |> Enum.all?(&(&1.status == :ended))
     end
 
     test "an account the form never offered is refused, not replaced by the server user's login",
          %{conn: conn} do
-      account!("parked", %{enabled: false})
-      SessionEnv.connect_claude_login!("parked")
+      parked = account!("parked", %{enabled: false})
+      SessionEnv.connect_claude_setup_token!(parked)
 
       {:ok, view, _html} = live_sessions!(conn)
 
@@ -781,6 +781,10 @@ defmodule WardmastWeb.SessionIndexLiveTest do
       {:ok, view, _html} = live_sessions!(conn)
 
       view
+      |> form("#launch-session-form", %{"auth_mode" => "seeded_credentials"})
+      |> render_change()
+
+      view
       |> form("#launch-session-form", %{"remote_control" => "true"})
       |> render_change()
 
@@ -795,12 +799,29 @@ defmodule WardmastWeb.SessionIndexLiveTest do
   end
 
   describe "Remote Control gating in the launch form (§8.3)" do
-    test "mode B (the default) leaves the Remote Control checkbox enabled and checked, no reason shown",
+    test "a connected account defaults the form to mode A, with Remote Control off (bd-6y4pj6)",
          %{conn: conn} do
-      # §9.5's table: "on when mode B" — a fresh launch panel must arrive
-      # checked, not merely enabled (review finding, phase 11 round 4: this
-      # shipped off by default through round 3).
       {:ok, view, _html} = live_sessions!(conn)
+
+      assert has_element?(
+               view,
+               ~s(#launch-session-auth-mode option[value="oauth_token"][selected])
+             )
+
+      assert has_element?(view, "#launch-session-account")
+      assert has_element?(view, "#launch-session-remote-control[disabled]")
+      refute has_element?(view, "#launch-session-remote-control[checked]")
+    end
+
+    test "mode B leaves the Remote Control checkbox enabled and checked, no reason shown",
+         %{conn: conn} do
+      # §9.5's table: "on when mode B" — arriving in mode B must be checked,
+      # not merely enabled (review finding, phase 11 round 4).
+      {:ok, view, _html} = live_sessions!(conn)
+
+      view
+      |> form("#launch-session-form", %{"auth_mode" => "seeded_credentials"})
+      |> render_change()
 
       refute has_element?(view, "#launch-session-remote-control[disabled]")
       refute has_element?(view, "#launch-session-remote-control-reason")
@@ -868,6 +889,10 @@ defmodule WardmastWeb.SessionIndexLiveTest do
       {:ok, view, _html} = live_sessions!(conn)
 
       view
+      |> form("#launch-session-form", %{"auth_mode" => "seeded_credentials"})
+      |> render_change()
+
+      view
       |> form("#launch-session-form", %{
         "auth_mode" => "seeded_credentials",
         "remote_control" => "true"
@@ -891,11 +916,8 @@ defmodule WardmastWeb.SessionIndexLiveTest do
       # this test's concern) — what matters is that `remote_control` was
       # never `true` on the row it left behind.
       view
-      |> form("#launch-session-form", %{
-        "auth_mode" => "oauth_token",
-        "remote_control" => "true"
-      })
-      |> render_submit()
+      |> form("#launch-session-form")
+      |> render_submit(%{"auth_mode" => "oauth_token", "remote_control" => "true"})
 
       assert [session] = Sessions.list()
       assert session.auth_mode == :oauth_token
@@ -923,8 +945,8 @@ defmodule WardmastWeb.SessionIndexLiveTest do
       {:ok, view, _html} = live_sessions!(conn)
 
       view
-      |> form("#launch-session-form", %{"provider" => "agy", "remote_control" => "true"})
-      |> render_submit()
+      |> form("#launch-session-form", %{"provider" => "agy"})
+      |> render_submit(%{"remote_control" => "true"})
 
       assert [session] = Sessions.list()
       assert session.provider == :agy

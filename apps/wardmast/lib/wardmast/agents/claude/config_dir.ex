@@ -115,15 +115,6 @@ defmodule Wardmast.Agents.Claude.ConfigDir do
 
   require Logger
 
-  # The operator config files `seed_credentials/2` copies — only ever for an
-  # interactive session that explicitly chose mode B
-  # (`ConfigDir.Interactive`); a worker dir never gets them (bd-80ecol).
-  # Deliberately excludes:
-  #   * CLAUDE.md / CLAUDE.local.md — the persona lives there (bd-3y2mda).
-  #   * settings.json — the permission posture; we *generate* a hardened one
-  #     instead of inheriting the operator's (bd-9u10op). See @settings_filename.
-  @seed_links ~w(.credentials.json)
-
   @memory_filename "CLAUDE.md"
   @settings_filename "settings.json"
 
@@ -496,30 +487,6 @@ defmodule Wardmast.Agents.Claude.ConfigDir do
   end
 
   @doc """
-  Copy the operator's `.credentials.json` into `dir` (mode B, §8.2).
-
-  **Never** called for a worker config dir (bd-80ecol — `ensure/1` only
-  ever removes). It exists for `Wardmast.Agents.Claude.ConfigDir.Interactive`,
-  where mode B is an explicit per-session choice recorded on the session row,
-  made by the operator for their own interactive session.
-
-  Best-effort and idempotent: a missing source is `:ok` (the caller falls back
-  to whatever the inherited environment provides), and an already-fresh copy is
-  left alone. Always a **copy**, never a symlink — both sides refresh the grant
-  and a symlink would let the copier write through and corrupt the operator's
-  login (§8.2).
-  """
-  @spec seed_credentials(String.t(), String.t() | nil) :: :ok
-  def seed_credentials(dir, source \\ nil) do
-    case source || source_dir() do
-      nil -> :ok
-      src -> Enum.each(@seed_links, &link_one(src, dir, &1))
-    end
-
-    :ok
-  end
-
-  @doc """
   Remove any `.credentials.json` from `dir` (mode A, §8.1).
 
   Mode-A callers authenticate with a `CLAUDE_CODE_OAUTH_TOKEN` and must not
@@ -530,51 +497,5 @@ defmodule Wardmast.Agents.Claude.ConfigDir do
   def remove_credentials(dir) do
     _ = File.rm(Path.join(dir, ".credentials.json"))
     :ok
-  end
-
-  defp link_one(source, dir, name) do
-    src = Path.join(source, name)
-    dst = Path.join(dir, name)
-
-    cond do
-      not File.exists?(src) ->
-        :ok
-
-      # Never symlink credentials: a worker refreshing its OAuth token would
-      # write through the symlink and corrupt the operator's credentials.
-      # Always copy; refresh whenever the source is newer than the destination.
-      fresh_copy?(src, dst) ->
-        :ok
-
-      true ->
-        recopy(src, dst)
-    end
-  end
-
-  # True when dst is a regular file (not a symlink) whose mtime >= src mtime.
-  defp fresh_copy?(src, dst) do
-    case {File.lstat(src), File.lstat(dst)} do
-      {{:ok, %{type: :regular, mtime: sm}}, {:ok, %{type: :regular, mtime: dm}}} ->
-        dm >= sm
-
-      _ ->
-        false
-    end
-  end
-
-  # Replace dst with a fresh copy of src. Best-effort — failures are logged
-  # but never abort the spawn.
-  defp recopy(src, dst) do
-    _ = File.rm(dst)
-
-    case File.cp(src, dst) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning(
-          "Wardmast.Agents.Claude.ConfigDir: could not seed #{inspect(dst)} (#{inspect(reason)})"
-        )
-    end
   end
 end

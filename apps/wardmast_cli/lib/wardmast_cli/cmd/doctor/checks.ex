@@ -1839,6 +1839,75 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
 
   defp check_claude_worker_credentials do
     case Client.get("/api/server/claude_credentials") do
+      {:ok, %{"accounts" => [_ | _] = accounts} = body} ->
+        body
+        |> Map.delete("accounts")
+        |> then(&claude_worker_credentials_result({:ok, &1}))
+        |> with_credential_health(accounts)
+
+      other ->
+        claude_worker_credentials_result(other)
+    end
+  end
+
+  # bd-6y4pj6: fold each account's credential health (kind, health, expiry) into
+  # the check. An unhealthy credential raises the severity — `:warn` for one
+  # that is expiring, `:fail` for one failing or expired — and the hint carries
+  # the exact re-login command, so the operator hears before the quota is blind.
+  defp with_credential_health(%Result{} = result, accounts) do
+    entries =
+      for %{"account" => account, "credentials" => creds} <- accounts,
+          c <- creds,
+          do: {account, c}
+
+    problems = Enum.filter(entries, fn {_a, c} -> c["health"] in ~w(expiring expired failing) end)
+
+    line = fn {account, c} ->
+      "#{account} #{c["kind"]} #{c["health"]} (#{credential_expiry(c)})"
+    end
+
+    if problems == [] do
+      detail = Enum.map_join(entries, "; ", line)
+      %{result | detail: join_detail(result.detail, detail)}
+    else
+      worst =
+        if Enum.any?(problems, fn {_a, c} -> c["health"] in ~w(expired failing) end),
+          do: :fail,
+          else: :warn
+
+      fixes =
+        problems
+        |> Enum.map(fn {account, c} -> {account, c["relogin"]} end)
+        |> Enum.reject(fn {_a, fix} -> is_nil(fix) end)
+        |> Enum.map_join("; ", fn {account, fix} -> "#{account}: #{fix}" end)
+
+      %{
+        result
+        | status: max_severity(result.status, worst),
+          detail: join_detail(result.detail, Enum.map_join(problems, "; ", line)),
+          hint: join_detail(result.hint, if(fixes == "", do: nil, else: "Fix: " <> fixes))
+      }
+    end
+  end
+
+  defp credential_expiry(%{"expires_at" => at, "expiry" => "estimated"}) when is_binary(at),
+    do: "expires ~#{String.slice(at, 0, 10)}"
+
+  defp credential_expiry(%{"expires_at" => at}) when is_binary(at),
+    do: "expires #{String.slice(at, 0, 10)}"
+
+  defp credential_expiry(_), do: "expiry unknown"
+
+  defp join_detail(nil, b), do: b
+  defp join_detail(a, nil), do: a
+  defp join_detail(a, b), do: a <> " — " <> b
+
+  defp max_severity(:fail, _), do: :fail
+  defp max_severity(_, :fail), do: :fail
+  defp max_severity(_, other), do: other
+
+  defp claude_worker_credentials_result(response) do
+    case response do
       {:ok, %{"checked" => 0, "missing" => []}} ->
         %Result{
           name: "claude worker credentials",

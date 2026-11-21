@@ -144,7 +144,8 @@ defmodule WardmastWeb.SessionIndexLive do
       |> assign(:launch_name, nil)
       |> assign(:launch_workspace_id, nil)
       |> assign(:launch_can_dispatch?, false)
-      # §9.5: on when mode B, which is the default auth mode — see moduledoc.
+      # §9.5: on under mode B; `default_launch_mode/1` picks the real default
+      # once the connected accounts are known.
       |> assign(:launch_remote_control?, true)
       |> assign(:workspaces, [])
       |> assign(:sessions, [])
@@ -312,7 +313,8 @@ defmodule WardmastWeb.SessionIndexLive do
         do:
           socket
           |> put_launch_providers(providers, socket.assigns.launch_provider)
-          |> put_launch_accounts(nil, socket.assigns.launch_account),
+          |> put_launch_accounts(nil, socket.assigns.launch_account)
+          |> default_launch_mode(),
         else: refresh_launch_providers(socket)
 
     {:noreply, socket}
@@ -443,7 +445,7 @@ defmodule WardmastWeb.SessionIndexLive do
     ref = params |> Map.get("account") |> then(&if(is_binary(&1), do: String.trim(&1), else: ""))
 
     cond do
-      ref == "" or launch_auth_mode_param(params, provider) != "seeded_credentials" or
+      ref == "" or launch_auth_mode_param(params, provider) != "oauth_token" or
           provider != "claude_code" ->
         {:ok, nil}
 
@@ -563,18 +565,33 @@ defmodule WardmastWeb.SessionIndexLive do
     |> Phoenix.Component.assign(:launch_workspace_id, nil)
     |> refresh_launch_providers(nil)
     |> put_launch_accounts(nil, nil)
-    |> Phoenix.Component.assign(:launch_auth_mode, "seeded_credentials")
     |> Phoenix.Component.assign(:launch_name, nil)
     |> Phoenix.Component.assign(:launch_workspace_id, nil)
     |> Phoenix.Component.assign(:launch_can_dispatch?, false)
-    # §9.5: on when mode B, which is the default this resets back to.
-    |> Phoenix.Component.assign(:launch_remote_control?, true)
+    |> default_launch_mode()
+  end
+
+  @doc false
+  # bd-6y4pj6: with a connected account the form defaults to mode A (that
+  # account's setup token — nothing is copied, and a setup token is what the
+  # workers use too); with none, mode B, whose session logs in itself. Remote
+  # Control (§9.5) needs mode B's real login, so it is on only there.
+  def default_launch_mode(socket) do
+    mode_a? = socket.assigns.launch_accounts != []
+
+    socket
+    |> Phoenix.Component.assign(
+      :launch_auth_mode,
+      if(mode_a?, do: "oauth_token", else: "seeded_credentials")
+    )
+    |> Phoenix.Component.assign(:launch_remote_control?, not mode_a?)
   end
 
   @doc false
   # agy is mode B, always — whatever a crafted submit says.
   def launch_auth_mode_param(params, provider \\ "claude_code")
   def launch_auth_mode_param(_params, "agy"), do: "seeded_credentials"
+
   def launch_auth_mode_param(%{"auth_mode" => "oauth_token"}, _provider), do: "oauth_token"
   def launch_auth_mode_param(_params, _provider), do: "seeded_credentials"
 
@@ -988,8 +1005,8 @@ defmodule WardmastWeb.SessionIndexLive do
         value={@launch_auth_mode}
         disabled={@launch_provider == "agy"}
         options={[
-          {"Mode B — seeded credentials", "seeded_credentials"},
-          {"Mode A — workspace token", "oauth_token"}
+          {"Mode A — setup token", "oauth_token"},
+          {"Mode B — own login (Remote Control)", "seeded_credentials"}
         ]}
       />
       <span
@@ -999,9 +1016,9 @@ defmodule WardmastWeb.SessionIndexLive do
       >
         agy runs on your own Google login, with no Remote Control
       </span>
-      <%!-- bd-oqkeso: which connected account a mode-B Claude session signs in
-            as (its login is copied from that account's own config dir, not
-            from the server user's ~/.claude). --%>
+      <%!-- bd-oqkeso: which connected account a mode-A Claude session signs in
+            as, by that account's setup token — never a copy of its rotating
+            login (bd-6y4pj6). --%>
       <Forms.select
         :if={account_picker?(@launch_provider, @launch_auth_mode, @launch_accounts)}
         name="account"
@@ -1011,10 +1028,7 @@ defmodule WardmastWeb.SessionIndexLive do
         options={Enum.map(@launch_accounts, &{&1.label, &1.slug})}
       />
       <span
-        :if={
-          @launch_provider == "claude_code" and @launch_auth_mode == "seeded_credentials" and
-            @launch_accounts == []
-        }
+        :if={@launch_provider == "claude_code" and @launch_accounts == []}
         id={"#{@prefix}-account-empty"}
         class="text-[11px] text-[var(--text-label)]"
       >
@@ -1104,7 +1118,7 @@ defmodule WardmastWeb.SessionIndexLive do
     end)
   end
 
-  defp account_picker?("claude_code", "seeded_credentials", [_ | _]), do: true
+  defp account_picker?("claude_code", "oauth_token", [_ | _]), do: true
   defp account_picker?(_provider, _auth_mode, _accounts), do: false
 
   defp unavailable_providers(nil), do: []

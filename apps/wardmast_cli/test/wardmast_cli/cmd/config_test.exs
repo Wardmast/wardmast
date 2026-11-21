@@ -466,6 +466,31 @@ defmodule WardmastCli.Cmd.ConfigTest do
       assert out =~ "repos.mesaana: strategy=direct"
     end
 
+    # bd-995svb: a screenshots repo with no fixture_check is flagged.
+    test "flags a screenshots repo with no fixture_check" do
+      shots = %{"ui_paths" => ["lib/**"], "start_cmd" => "mix phx.server"}
+      marker = %{"marker" => %{"path" => "/health", "contains" => "fixture"}}
+
+      config = %{
+        "worker" => %{
+          "repos" => %{
+            "open" => %{"screenshots" => shots},
+            "guarded" => %{"screenshots" => Map.put(shots, "fixture_check", marker)},
+            "plain" => %{}
+          }
+        }
+      }
+
+      stub_routes([{{"get", "/api/workspaces"}, {default_ws(config), 200}}])
+
+      {out, _err, code} = capture(fn -> Config.run(["overview"]) end)
+      assert code == 0
+      assert out =~ "== Screenshots =="
+      assert out =~ "open: NO fixture_check"
+      assert out =~ "guarded: fixture_check set"
+      refute out =~ "plain"
+    end
+
     test "never prints secret values — only key names" do
       config = %{"tracker" => %{"type" => "github"}}
 

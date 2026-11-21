@@ -2,29 +2,25 @@ defmodule Wardmast.Sessions.AccountCredentials do
   @moduledoc """
   Which provider account a coordinator session authenticates as (bd-oqkeso).
 
-  Mode-B seeding used to copy the **server OS user's** `~/.claude`
-  (`Wardmast.Sessions.Provisioning.credentials_source/1`). The dashboard login
-  relay (`Wardmast.Accounts.LoginRunner`) writes each connected account's grant
-  to its own dir, `<accounts_root>/<provider>-<slug>/`, which a session never
-  read — so a customer who only connected an account in the UI launched an
-  unauthenticated session.
+  A session used to be seeded a *copy* of the account dir's
+  `.credentials.json` (`<accounts_root>/<provider>-<slug>/`, written by the
+  dashboard login relay). That file is a **rotating** OAuth grant, and the quota
+  poller (`Wardmast.Quota.GrantRefresher`) refreshes it; a second holder
+  refreshing the copy rotated the refresh token out from under it and
+  invalidated the grant — the 2026-11-20 22:47Z "quota grant needs re-login"
+  outage (bd-6y4pj6).
 
-  This module is the resolver in between. `resolve/3` turns an account ref (a
-  slug, `provider:slug`, or the account id) into that per-account config dir —
-  the `source_dir` the existing copy-seeding (`ConfigDir.seed_credentials/2`,
-  always a **copy**, never a symlink) reads from — after checking, before any
-  session scaffolding exists, that the account:
+  `resolve/3` therefore hands a session the account's **setup token** (the
+  `claude setup-token` secret, an `:oauth_token` credential: about a year,
+  non-rotating — the same credential workers use), never a file. It checks,
+  before any session scaffolding exists, that the account:
 
     * exists, is enabled, and belongs to the session's provider;
-    * has a readable `.credentials.json` holding an OAuth grant;
-    * is not lapsed: an access token past `expiresAt` is fine while the grant
-      carries a `refreshToken` (Claude Code renews it at start), and refused
-      when it does not.
+    * has an active setup token.
 
-  Each refusal is `{:error, {tag, message}}` where the message names the fix
-  (connect, enable, or log in again from the dashboard). Messages carry the
-  account slug and the dir — never a credential value; the file is parsed only
-  for the presence and expiry of its fields.
+  Each refusal is `{:error, {tag, message}}` where the message names the fix.
+  Messages carry the account slug — never a credential value. Nothing in this
+  module opens a credentials file.
 
   `options/2` is the launch form's account picker: the workspace's linked,
   enabled accounts for the provider, or — when the workspace links none, which
@@ -35,36 +31,26 @@ defmodule Wardmast.Sessions.AccountCredentials do
   require Ash.Query
 
   alias Wardmast.Accounts
+  alias Wardmast.Accounts.Credentials
   alias Wardmast.Accounts.ProviderAccount
   alias Wardmast.Accounts.WorkspaceProviderAccount
-  alias Wardmast.Config.Paths
-
-  @credentials_file ".credentials.json"
 
   @type error ::
           {:account_not_found
            | :account_disabled
            | :account_provider_mismatch
-           | :account_credential_missing
-           | :account_credential_expired, String.t()}
+           | :account_setup_token_missing, String.t()}
 
   @doc """
-  The config dir to seed a `provider` session's credentials from, for the
-  account `ref`.
-
-  Options: `:accounts_root` (default `Wardmast.Config.Paths.accounts_root/0`)
-  and `:now_ms` (tests).
+  The setup token a `provider` session authenticates with, for the account
+  `ref` (a slug, `provider:slug`, or the account id).
   """
   @spec resolve(atom(), String.t(), keyword()) :: {:ok, String.t()} | {:error, error()}
-  def resolve(provider, ref, opts \\ []) when is_atom(provider) and is_binary(ref) do
-    root = Keyword.get_lazy(opts, :accounts_root, &Paths.accounts_root/0)
-
+  def resolve(provider, ref, _opts \\ []) when is_atom(provider) and is_binary(ref) do
     with {:ok, account} <- fetch_account(provider, ref),
          :ok <- ensure_enabled(account),
-         :ok <- ensure_provider(account, provider),
-         dir = Path.join(root, "#{account.provider}-#{account.slug}"),
-         :ok <- check_credential(account, dir, Keyword.get(opts, :now_ms)) do
-      {:ok, dir}
+         :ok <- ensure_provider(account, provider) do
+      setup_token(account)
     end
   end
 
@@ -88,8 +74,7 @@ defmodule Wardmast.Sessions.AccountCredentials do
   # A bare slug is qualified with the session's provider: slugs are only
   # unique within one, and "work" must not turn ambiguous because a codex
   # account is also called "work". Anything with a separator that could walk a
-  # path is not a slug — and `get_account/1` is a DB lookup, never a path join,
-  # so the dir below is only ever built from a stored account's own slug.
+  # path is not a slug, and `get_account/1` is a DB lookup, never a path join.
   defp fetch_account(provider, ref) do
     lookup = if bare_slug?(ref), do: "#{provider}:#{ref}", else: ref
 
@@ -129,44 +114,19 @@ defmodule Wardmast.Sessions.AccountCredentials do
 
   # -- credential --------------------------------------------------------------
 
-  defp check_credential(%ProviderAccount{slug: slug}, dir, now_ms) do
-    path = Path.join(dir, @credentials_file)
+  defp setup_token(%ProviderAccount{id: id, provider: provider, slug: slug}) do
+    case Credentials.account_setup_token(id) do
+      {:ok, token} ->
+        {:ok, token}
 
-    case read_grant(path) do
-      {:ok, grant} -> check_expiry(slug, dir, grant, now_ms || System.os_time(:millisecond))
-      :error -> {:error, {:account_credential_missing, missing_message(slug, dir)}}
+      :none ->
+        {:error,
+         {:account_setup_token_missing,
+          "Account #{inspect(slug)} has no setup token, and a session never borrows the " <>
+            "account's rotating login (it would race the quota poller and invalidate it). " <>
+            "Run `claude setup-token` on a machine you are logged in to, then store the token " <>
+            "with `arb account rotate #{provider}:#{slug} --kind oauth_token --secret <token>`."}}
     end
-  end
-
-  # Parsed only for field presence / expiry; the values never leave this
-  # function (no logging, no error term carries them).
-  defp read_grant(path) do
-    with {:ok, raw} <- File.read(path),
-         {:ok, %{"claudeAiOauth" => %{} = oauth}} <- Jason.decode(raw),
-         token when is_binary(token) and token != "" <- oauth["accessToken"] do
-      {:ok, oauth}
-    else
-      _ -> :error
-    end
-  end
-
-  defp check_expiry(slug, dir, grant, now_ms) do
-    expires_at = grant["expiresAt"]
-    refreshable? = is_binary(grant["refreshToken"]) and grant["refreshToken"] != ""
-
-    if is_integer(expires_at) and expires_at <= now_ms and not refreshable? do
-      {:error,
-       {:account_credential_expired,
-        "The stored login for account #{inspect(slug)} has expired and cannot be renewed " <>
-          "(#{dir}). Log in again from the dashboard (Accounts → #{slug} → Log in), then relaunch."}}
-    else
-      :ok
-    end
-  end
-
-  defp missing_message(slug, dir) do
-    "Account #{inspect(slug)} has no usable login: no readable #{@credentials_file} in #{dir}. " <>
-      "Log in to it from the dashboard (Accounts → #{slug} → Log in), then relaunch."
   end
 
   # -- options -----------------------------------------------------------------
