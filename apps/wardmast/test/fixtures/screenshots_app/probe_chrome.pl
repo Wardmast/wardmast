@@ -9,10 +9,17 @@ use Socket;
 use IO::Handle;
 use File::Basename qw(dirname);
 
-my ($out, $url);
+my ($out, $url, $dump);
 for my $arg (@ARGV) {
   $out = $1 if $arg =~ /^--screenshot=(.+)$/;
+  $dump = 1 if $arg eq '--dump-dom';
   $url = $arg;
+}
+
+# bd-995svb: the shooter's second run (--dump-dom) reads the page's text for the data-safety scan.
+if ($dump) {
+  print "<html><body><p>probe page $url</p></body></html>";
+  exit 0;
 }
 
 sub slurp {

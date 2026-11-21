@@ -41,11 +41,12 @@ defmodule Wardmast.Board.AutopilotStaleDispatchTest do
     # (bd-5ljhfg: a leaked child made every later DataCase test wait 5s).
     on_exit(fn ->
       for task <- Agent.get(dispatched, & &1) do
-        ref = Process.monitor(task)
-        Process.exit(task, :kill)
-
-        receive do
-          {:DOWN, ^ref, :process, ^task, _} -> :ok
+        # Synchronous: the supervisor stops the child (or finds it already gone)
+        # and drops it from its own children before replying, so the leak
+        # check below cannot race the supervisor's EXIT handling.
+        case Task.Supervisor.terminate_child(Wardmast.TaskSupervisor, task) do
+          :ok -> :ok
+          {:error, :not_found} -> :ok
         end
       end
 

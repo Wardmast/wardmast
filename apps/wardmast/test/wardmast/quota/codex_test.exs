@@ -251,7 +251,7 @@ defmodule Wardmast.Quota.CodexTest do
       assert {:error, _} = Codex.read_credentials(auth_path: "/nope/auth.json")
     end
 
-    test "honours CODEX_HOME when auth_path option is not provided" do
+    test "reads the Codex source home when auth_path option is not provided" do
       tmp_dir =
         Path.join(System.tmp_dir!(), "codex_home_test_#{System.unique_integer([:positive])}")
 
@@ -265,24 +265,16 @@ defmodule Wardmast.Quota.CodexTest do
         })
       )
 
-      prev_home = System.get_env("CODEX_HOME")
+      prev_home = Application.get_env(:wardmast, :worker_codex_source_home)
       prev_cfg = Application.get_env(:wardmast, :codex_quota)
 
       # Temporarily clear the test config override so default_auth_path/0 is evaluated
       Application.put_env(:wardmast, :codex_quota, [])
-      System.put_env("CODEX_HOME", tmp_dir)
+      Application.put_env(:wardmast, :worker_codex_source_home, tmp_dir)
 
       on_exit(fn ->
-        case prev_home do
-          nil -> System.delete_env("CODEX_HOME")
-          v -> System.put_env("CODEX_HOME", v)
-        end
-
-        case prev_cfg do
-          nil -> Application.delete_env(:wardmast, :codex_quota)
-          v -> Application.put_env(:wardmast, :codex_quota, v)
-        end
-
+        restore_env(:worker_codex_source_home, prev_home)
+        restore_env(:codex_quota, prev_cfg)
         File.rm_rf(tmp_dir)
       end)
 
@@ -323,7 +315,7 @@ defmodule Wardmast.Quota.CodexTest do
       assert {:error, :enoent} = Codex.probe_auth(auth_path: "/nonexistent/auth.json")
     end
 
-    test "reads credentials from CODEX_HOME when not specified" do
+    test "reads credentials from the Codex source home when not specified" do
       tmp_dir =
         Path.join(System.tmp_dir!(), "codex_home_probe_#{System.unique_integer([:positive])}")
 
@@ -337,23 +329,15 @@ defmodule Wardmast.Quota.CodexTest do
         })
       )
 
-      prev_home = System.get_env("CODEX_HOME")
+      prev_home = Application.get_env(:wardmast, :worker_codex_source_home)
       prev_cfg = Application.get_env(:wardmast, :codex_quota)
 
       Application.put_env(:wardmast, :codex_quota, [])
-      System.put_env("CODEX_HOME", tmp_dir)
+      Application.put_env(:wardmast, :worker_codex_source_home, tmp_dir)
 
       on_exit(fn ->
-        case prev_home do
-          nil -> System.delete_env("CODEX_HOME")
-          v -> System.put_env("CODEX_HOME", v)
-        end
-
-        case prev_cfg do
-          nil -> Application.delete_env(:wardmast, :codex_quota)
-          v -> Application.put_env(:wardmast, :codex_quota, v)
-        end
-
+        restore_env(:worker_codex_source_home, prev_home)
+        restore_env(:codex_quota, prev_cfg)
         File.rm_rf(tmp_dir)
       end)
 

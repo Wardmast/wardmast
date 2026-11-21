@@ -74,7 +74,6 @@ defmodule Wardmast.Accounts.LoginRunner do
   alias Wardmast.Accounts.LoginRecipe
   alias Wardmast.Accounts.LoginRecipes
   alias Wardmast.Accounts.LoginTranscript
-  alias Wardmast.Config.Paths
   alias Wardmast.Sessions
   alias Wardmast.Sessions.Layout
   alias Wardmast.Sessions.Naming
@@ -292,7 +291,7 @@ defmodule Wardmast.Accounts.LoginRunner do
       poll_interval_ms: Keyword.get(opts, :poll_interval_ms, @default_poll_interval_ms),
       status_interval_ms: Keyword.get(opts, :status_interval_ms, @default_status_interval_ms),
       enter_delay_ms: Keyword.get(opts, :enter_delay_ms, 100),
-      config_dir: Path.join(Paths.accounts_root(), "#{provider}-#{account}"),
+      config_dir: LoginRecipes.config_dir(provider, account),
       session: nil,
       status: :starting,
       url: nil,

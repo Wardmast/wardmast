@@ -7,7 +7,8 @@
 # unverified findings at face value.
 #
 #   $1 — what to emit on the re-prompt pass: "APPROVE" / "REQUEST_CHANGES", or
-#        "PARTIAL" (default) to keep disclosing partial verification so the
+#        "APPROVE_BARE" (APPROVE that never rules on the first pass's finding),
+#        or "PARTIAL" (default) to keep disclosing partial verification so the
 #        second unverified result proceeds with the warning banner.
 #
 # A marker file in the CWD (the reviewer's worktree, unique per test) tells the
@@ -21,6 +22,14 @@ if [ -f "$marker" ]; then
   # Re-prompt pass.
   case "$retry" in
     APPROVE)
+      echo "re-reviewing the diff, this time waiting for tests to finish"
+      echo "VERDICT: APPROVE"
+      echo "DISPOSITIONS:"
+      echo "- [OBSOLETE] F1.1 — probed feature.txt:1 against the current diff; it does not reproduce"
+      echo "VERIFICATION: FULL"
+      echo "arb done"
+      ;;
+    APPROVE_BARE)
       echo "re-reviewing the diff, this time waiting for tests to finish"
       echo "VERDICT: APPROVE"
       echo "VERIFICATION: FULL"

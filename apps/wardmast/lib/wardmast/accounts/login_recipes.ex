@@ -15,8 +15,27 @@ defmodule Wardmast.Accounts.LoginRecipes do
   """
 
   alias Wardmast.Accounts.LoginRecipe
+  alias Wardmast.Agents.Codex.ConfigDir
+  alias Wardmast.Config.Paths
 
   @unsupported [:agy]
+
+  @doc """
+  The directory a login for `provider`/`slug` runs in (its `config_dir_env`).
+
+  Normally the isolated `<accounts_root>/<provider>-<slug>`. The exception is the
+  `default` Codex account (bd-2cua01): the usage poll (`Wardmast.Quota.Codex`)
+  and every worker's `CODEX_HOME` (an `auth.json` symlink,
+  `Wardmast.Agents.Codex.ConfigDir`) read the one Codex *source home*, so its
+  login must write there or it fixes nothing. Other Codex slugs stay isolated:
+  nothing reads them yet, and sharing the home would let two accounts
+  overwrite one another's `auth.json`.
+  """
+  @spec config_dir(atom(), String.t()) :: String.t()
+  def config_dir(:codex, "default"), do: ConfigDir.source_home()
+
+  def config_dir(provider, slug),
+    do: Path.join(Paths.accounts_root(), "#{provider}-#{slug}")
 
   @doc "Every defined recipe, enabled or not."
   @spec all() :: [LoginRecipe.t()]

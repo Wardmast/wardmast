@@ -70,7 +70,7 @@ defmodule Wardmast.Worker.ReviewMrBriefTest do
     # "─" is three bytes. The 4_000-byte head cut lands mid-codepoint (4_000 is
     # not a multiple of 3), and the 1_500-byte tail cut lands mid-codepoint
     # because the trailing "x" shifts the window off the character boundary.
-    body = String.duplicate("─", 2_000)
+    body = String.duplicate("─", 4_000)
     summary = String.duplicate("─", 1_000) <> "x"
 
     out =
@@ -81,6 +81,26 @@ defmodule Wardmast.Worker.ReviewMrBriefTest do
     assert String.valid?(out)
     assert out =~ "[...truncated]"
     assert byte_size(out) < 12_000
+  end
+
+  # bd-9isy6t: a head-only cut dropped the END of the description, which is
+  # where a PR's test plan / run-loop evidence lives, so a reviewer marked a
+  # criterion unverifiable. The tail is kept and the marker says what was cut.
+  test "a long description keeps its tail (test plan) and reports the omitted size" do
+    body = "HEADMARK" <> String.duplicate("x", 20_000) <> "- [x] 30-run loop green"
+    out = ReviewMrBrief.render(%{body: body, pipeline: "passed"}, [])
+
+    assert out =~ "HEADMARK"
+    assert out =~ "30-run loop green"
+    assert out =~ ~r/\[\.\.\.truncated \d+ bytes\.\.\.\]/
+    assert byte_size(out) < 12_000
+  end
+
+  test "a description under the cap is shown whole, with no marker" do
+    body = "short body\n- [x] 30-run loop green"
+    out = ReviewMrBrief.render(%{body: body, pipeline: "passed"}, [])
+    assert out =~ "30-run loop green"
+    refute out =~ "truncated"
   end
 
   test "instruction tells the reviewer to check the evidence before NOT MET" do
