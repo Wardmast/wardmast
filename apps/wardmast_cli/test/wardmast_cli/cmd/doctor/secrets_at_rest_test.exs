@@ -43,6 +43,18 @@ defmodule WardmastCli.Cmd.Doctor.SecretsAtRestTest do
     assert bad.detail =~ "SECRET_KEY_BASE_REF is not"
   end
 
+  test "keychain: references are recognised and not flagged as invalid" do
+    result =
+      SecretsAtRest.check(%{
+        "WARDMAST_CLOAK_KEY_REF" => "keychain:dev.arbiter.wardmast#cloak-key",
+        "SECRET_KEY_BASE_REF" => "keychain:dev.arbiter.wardmast#secret-key-base"
+      })
+
+    assert result.status == :ok
+    assert result.detail =~ "WARDMAST_CLOAK_KEY (keychain)"
+    assert result.detail =~ "SECRET_KEY_BASE (keychain)"
+  end
+
   test "an inline provider token alone does not warn" do
     result = SecretsAtRest.check(%{"ANTHROPIC_API_KEY" => "sk-ant-x"})
     assert result.status == :ok

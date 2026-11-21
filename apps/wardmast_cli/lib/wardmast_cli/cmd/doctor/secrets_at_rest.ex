@@ -43,7 +43,7 @@ defmodule WardmastCli.Cmd.Doctor.SecretsAtRest do
     problems =
       Enum.map(inline_boot, &"#{&1} is an inline value") ++
         Enum.map(shadowed -- inline_boot, &"#{&1} has an inline value its _REF pointer overrides") ++
-        Enum.map(invalid, &"#{&1}_REF is not an aws-sm:/aws-ssm:/file: reference")
+        Enum.map(invalid, &"#{&1}_REF is not an aws-sm:/aws-ssm:/file:/keychain: reference")
 
     case problems do
       [] ->
@@ -56,7 +56,7 @@ defmodule WardmastCli.Cmd.Doctor.SecretsAtRest do
           detail: Enum.join(problems, "; ") <> " (" <> summary <> ")",
           hint:
             "Keep secret values out of wardmast.env: set e.g. WARDMAST_CLOAK_KEY_REF=aws-sm:<id>#<key> " <>
-              "(also SECRET_KEY_BASE_REF, GITHUB_TOKEN_REF; aws-ssm:/file: work too) and remove the inline " <>
+              "(also SECRET_KEY_BASE_REF, GITHUB_TOKEN_REF; aws-ssm:/file:/keychain: work too) and remove the inline " <>
               "value. See #{WardmastCli.Version.doc_url("docs/secrets-at-rest.md")}.",
           meta: %{secrets: report(entries)}
         }

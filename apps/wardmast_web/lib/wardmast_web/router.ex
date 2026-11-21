@@ -124,6 +124,12 @@ defmodule WardmastWeb.Router do
     # Diagnostics bundle download (the About page button).
     get("/support/bundle", SupportBundleController, :show)
 
+    # The Cloak key backup page: a one-time export (a POST whose response is the
+    # attachment) and a "backed up elsewhere" record. See Wardmast.KeyBackup.
+    get("/settings/key-backup", KeyBackupController, :show)
+    post("/settings/key-backup/export", KeyBackupController, :export)
+    post("/settings/key-backup/acknowledge", KeyBackupController, :acknowledge)
+
     # bd-6umf7z: the update banner's "Update to vX.Y.Z" button. A dashboard
     # login only; deploys the release the update check offered.
     post("/release/deploy", DashboardUpdateController, :create)
@@ -416,7 +422,6 @@ defmodule WardmastWeb.Router do
 
     # Diagnostics bundle (`arb support bundle`); operator-only.
     get("/support/bundle", SupportBundleController, :show)
-    post("/support/bundle", SupportBundleController, :create)
 
     # Server health (migrations, etc.)
     get("/server/migrations", ServerController, :migrations)

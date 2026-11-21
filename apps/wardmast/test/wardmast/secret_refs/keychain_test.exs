@@ -65,7 +65,10 @@ defmodule Wardmast.SecretRefs.KeychainTest do
     end
 
     test "exit 44 is a missing item, naming the item and the fix" do
-      stub(:darwin, {"security: SecKeychainSearchCopyNext: The specified item could not be found.", 44})
+      stub(
+        :darwin,
+        {"security: SecKeychainSearchCopyNext: The specified item could not be found.", 44}
+      )
 
       assert {:error, {:keychain, :not_found, "dev.arbiter#cloak-key"} = reason} =
                External.resolve("keychain:dev.arbiter#cloak-key")
