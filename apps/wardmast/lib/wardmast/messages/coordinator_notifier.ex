@@ -1444,6 +1444,7 @@ defmodule Wardmast.Messages.CoordinatorNotifier do
         "crossed since then is not detected, recorded or alerted." <>
         cap_reached_note(info.cap_reached_until),
       long_window_line(info.long_window, captured),
+      stale_cause_line(info),
       "This alert reads the snapshot itself, so it fires whether or not anything reports a " <>
         "poll failure. For the cause, check `arb quota` (source and last poll) and any " <>
         "quota_poll_failing alert or quota-grant escalation. It clears by itself when a " <>
@@ -1452,6 +1453,24 @@ defmodule Wardmast.Messages.CoordinatorNotifier do
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
   end
+
+  # bd-6y4pj6: why the snapshot is stale, when a credential of the account is
+  # the answer: its kind, what is wrong, and the exact command that fixes it.
+  defp stale_cause_line(%{credentials: [_ | _] = credentials} = info) do
+    credentials
+    |> Enum.filter(&(to_string(&1.health) in ~w(failing expired expiring)))
+    |> Enum.map_join("\n", fn c ->
+      fix = if c.relogin, do: " Fix: `#{c.relogin}`.", else: ""
+
+      "Likely cause: #{info.account} #{c.kind} is #{c.health} (#{c.detail}).#{fix}"
+    end)
+    |> case do
+      "" -> nil
+      line -> line
+    end
+  end
+
+  defp stale_cause_line(_info), do: nil
 
   defp snapshot_source_label("oauth_poll"), do: "/api/oauth/usage poll"
   defp snapshot_source_label("headers"), do: "proxy rate-limit headers"
@@ -1605,7 +1624,7 @@ defmodule Wardmast.Messages.CoordinatorNotifier do
          ) do
         :skip
       else
-        {subject, quota_grant_body(cause, path, config_dir)}
+        {subject, quota_grant_body(cause, path, config_dir, Map.get(snapshot, :account))}
       end
     end)
   end
@@ -1618,8 +1637,9 @@ defmodule Wardmast.Messages.CoordinatorNotifier do
   defp quota_grant_subject(_cause, config_dir),
     do: "Anthropic quota grant needs re-login — #{config_dir}"
 
-  defp quota_grant_body(cause, path, config_dir) do
+  defp quota_grant_body(cause, path, config_dir, account) do
     [
+      account && "Account: #{account} (first failure; one notice per episode).",
       quota_grant_cause(cause, path),
       "Fix: on the Wardmast host, from a neutral directory (e.g. `cd /tmp` — never the " <>
         "coordinator dir or a repo), run `CLAUDE_CONFIG_DIR=#{config_dir} claude auth login` " <>
@@ -1628,6 +1648,7 @@ defmodule Wardmast.Messages.CoordinatorNotifier do
         "picks the new grant up; nothing needs restarting.",
       quota_grant_impact(cause)
     ]
+    |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
   end
 

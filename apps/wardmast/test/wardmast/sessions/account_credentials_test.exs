@@ -1,9 +1,9 @@
 defmodule Wardmast.Sessions.AccountCredentialsTest do
   @moduledoc """
-  A session authenticates as a chosen provider account (bd-oqkeso): the account
-  resolves to the login relay's `<accounts_root>/claude-<slug>` dir, and a
-  missing / unreadable / lapsed credential is refused with a message naming the
-  fix instead of handing the session an unauthenticated config dir.
+  A session authenticates as a chosen provider account (bd-oqkeso) by that
+  account's setup token (bd-6y4pj6) — never by a copy of the account dir's
+  rotating `.credentials.json`, which the quota poller owns. An account with no
+  setup token is refused with a message naming the fix.
   """
   use Wardmast.DataCase, async: false
 
@@ -23,6 +23,16 @@ defmodule Wardmast.Sessions.AccountCredentialsTest do
     account
   end
 
+  defp setup_token!(account, token \\ @token) do
+    Ash.create!(Wardmast.Accounts.ProviderCredential, %{
+      provider_account_id: account.id,
+      kind: :oauth_token,
+      env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+      fingerprint: "fp-2690",
+      secret: token
+    })
+  end
+
   defp write_credentials!(root, slug, oauth) do
     dir = Path.join(root, "claude-#{slug}")
     File.mkdir_p!(dir)
@@ -31,43 +41,42 @@ defmodule Wardmast.Sessions.AccountCredentialsTest do
   end
 
   defp future_ms, do: System.os_time(:millisecond) + 3_600_000
-  defp past_ms, do: System.os_time(:millisecond) - 3_600_000
 
-  describe "resolve/2" do
-    test "returns the login relay's per-account dir for a connected account", %{
-      accounts_root: root
-    } do
-      account!("work")
-
-      dir =
-        write_credentials!(root, "work", %{"accessToken" => @token, "expiresAt" => future_ms()})
-
-      assert {:ok, ^dir} = AccountCredentials.resolve(:claude, "work")
-    end
-
-    test "accepts a provider-qualified ref and the account id", %{accounts_root: root} do
+  describe "resolve/3 (bd-6y4pj6: the setup token, never a copy of the grant)" do
+    test "returns the account's setup token", %{accounts_root: root} do
       account = account!("work")
+      setup_token!(account)
+      # A rotating grant on disk is irrelevant — and is never read.
+      write_credentials!(root, "work", %{"accessToken" => "ROTATING", "refreshToken" => "r"})
 
-      dir =
-        write_credentials!(root, "work", %{"accessToken" => @token, "expiresAt" => future_ms()})
-
-      assert {:ok, ^dir} = AccountCredentials.resolve(:claude, "claude:work")
-      assert {:ok, ^dir} = AccountCredentials.resolve(:claude, account.id)
+      assert {:ok, @token} = AccountCredentials.resolve(:claude, "work")
     end
 
-    test "an expired access token is fine while a refresh token can renew it", %{
-      accounts_root: root
-    } do
-      account!("work")
+    test "accepts a provider-qualified ref and the account id" do
+      account = account!("work")
+      setup_token!(account)
 
-      dir =
-        write_credentials!(root, "work", %{
-          "accessToken" => @token,
-          "refreshToken" => "r",
-          "expiresAt" => past_ms()
-        })
+      assert {:ok, @token} = AccountCredentials.resolve(:claude, "claude:work")
+      assert {:ok, @token} = AccountCredentials.resolve(:claude, account.id)
+    end
 
-      assert {:ok, ^dir} = AccountCredentials.resolve(:claude, "work")
+    test "an account with only a rotating grant on disk is refused with the setup-token fix",
+         %{accounts_root: root} do
+      account!("grant-only")
+
+      write_credentials!(root, "grant-only", %{
+        "accessToken" => @token,
+        "refreshToken" => "r",
+        "expiresAt" => future_ms()
+      })
+
+      assert {:error, {:account_setup_token_missing, message}} =
+               AccountCredentials.resolve(:claude, "grant-only")
+
+      assert message =~ "grant-only"
+      assert message =~ "claude setup-token"
+      assert message =~ "arb account rotate claude:grant-only --kind oauth_token"
+      refute message =~ @token
     end
 
     test "an unknown account names the fix" do
@@ -79,7 +88,8 @@ defmodule Wardmast.Sessions.AccountCredentialsTest do
     end
 
     test "a parked account is refused" do
-      account!("parked", %{enabled: false})
+      account = account!("parked", %{enabled: false})
+      setup_token!(account)
 
       assert {:error, {:account_disabled, message}} =
                AccountCredentials.resolve(:claude, "parked")
@@ -97,46 +107,13 @@ defmodule Wardmast.Sessions.AccountCredentialsTest do
       assert message =~ "codex"
     end
 
-    test "an account that never logged in names the login fix", %{accounts_root: root} do
-      account!("fresh")
-
-      assert {:error, {:account_credential_missing, message}} =
-               AccountCredentials.resolve(:claude, "fresh")
-
-      assert message =~ "fresh"
-      assert message =~ "Log in"
-      # the path is operator-facing context; the credential itself never is
-      assert message =~ Path.join(root, "claude-fresh")
-    end
-
-    test "an unreadable credential file is treated as missing", %{accounts_root: root} do
-      account!("junk")
-      dir = Path.join(root, "claude-junk")
-      File.mkdir_p!(dir)
-      File.write!(Path.join(dir, ".credentials.json"), "not json " <> @token)
-
-      assert {:error, {:account_credential_missing, message}} =
-               AccountCredentials.resolve(:claude, "junk")
-
-      refute message =~ @token
-    end
-
-    test "a lapsed credential with no refresh token names the re-login fix", %{
-      accounts_root: root
-    } do
-      account!("old")
-      write_credentials!(root, "old", %{"accessToken" => @token, "expiresAt" => past_ms()})
-
-      assert {:error, {:account_credential_expired, message}} =
-               AccountCredentials.resolve(:claude, "old")
-
-      assert message =~ "old"
-      assert message =~ "Log in again"
-      refute message =~ @token
-    end
-
     test "a slug that tries to leave the accounts root never resolves a path" do
       assert {:error, {:account_not_found, _}} = AccountCredentials.resolve(:claude, "../../etc")
+    end
+
+    test "has no path that returns or reads a credentials file" do
+      refute function_exported?(AccountCredentials, :credentials_dir, 2)
+      refute File.read!("lib/wardmast/sessions/account_credentials.ex") =~ ".credentials.json\""
     end
   end
 

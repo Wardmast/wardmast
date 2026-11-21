@@ -341,7 +341,9 @@ defmodule Wardmast.Quota.StalenessWatch do
       capture_source: elem(last_observed(q), 1),
       last_poll_at: nil,
       cap_reached_until: if(Gate.primary_in_overage?(snapshot), do: snapshot.reset_at),
-      long_window: long_window(snapshot, account, workspaces, now)
+      long_window: long_window(snapshot, account, workspaces, now),
+      # bd-6y4pj6: why it went blind, when a credential is the answer.
+      credentials: Wardmast.Accounts.CredentialHealth.for_account(account)
     }
   end
 
