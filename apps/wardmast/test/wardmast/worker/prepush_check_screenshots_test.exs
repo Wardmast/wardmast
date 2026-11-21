@@ -183,4 +183,25 @@ defmodule Wardmast.Worker.PrepushCheckScreenshotsTest do
       File.rm_rf!(Path.join(Wardmast.Screenshots.PlanCheck.store_root(), task.id))
     end
   end
+
+  describe "committed manifest at arb done" do
+    test "is stripped from the branch before the push, with no screenshots config", %{repo: repo} do
+      ws = workspace(nil)
+      task = new_task(ws)
+      path = committed_worktree(repo, "bd-gate/#{task.id}")
+      File.mkdir_p!(Path.join(path, ".arbiter"))
+      File.write!(Path.join(path, ".arbiter/screenshots.json"), ~s({"version":1,"skip":"x"}))
+      {_, 0} = git(["add", "-f", ".arbiter/screenshots.json"], path)
+      {_, 0} = git(["commit", "-q", "-m", "oops manifest"], path)
+
+      pid = start_worker(task, repo, path, %{})
+      done(pid)
+      wait_until(fn -> at_review_gate?(pid) or failed?(pid) end)
+
+      {tree, 0} = git(["ls-tree", "-r", "--name-only", "HEAD"], path)
+      refute tree =~ "screenshots.json"
+      assert tree =~ "real_work.txt"
+      assert File.exists?(Path.join(path, ".arbiter/screenshots.json"))
+    end
+  end
 end

@@ -154,6 +154,7 @@ defmodule Wardmast.Screenshots.PlanCheck do
   def gate(%Config{} = config, worktree, target, task_id) do
     started = System.monotonic_time(:millisecond)
     exclude_plan(worktree)
+    strip_committed(worktree, target)
 
     case check(config, worktree, target) do
       :not_applicable ->
@@ -207,6 +208,61 @@ defmodule Wardmast.Screenshots.PlanCheck do
     |> Map.merge(%{result: result, steps: steps ++ [step]})
     |> Map.put(:screenshots_plan, plan && Map.take(plan, [:sha, :skip]))
   end
+
+  @doc """
+  Commit-gate guard: the manifest is per-change review metadata and must never reach the target
+  branch (two committed copies on main made every other branch conflict on it). If the branch
+  tracks it and the merge base does not, drop it from the index and commit the removal (the
+  working-tree file stays, so the checked copy is still shot). A manifest the target already
+  carries is left alone: deleting it is the operator's one-time cleanup.
+  """
+  @spec strip_committed(String.t(), String.t() | nil) :: :stripped | :clean | {:error, String.t()}
+  def strip_committed(worktree, target) do
+    if committed?(worktree, target), do: do_strip(worktree), else: :clean
+  end
+
+  @doc "True when the branch tracks the manifest and the merge base does not (it needs stripping)."
+  @spec committed?(String.t(), String.t() | nil) :: boolean()
+  def committed?(worktree, target) do
+    base =
+      if is_binary(target) and target != "",
+        do: Wardmast.Worker.Worktree.merge_base(worktree, target)
+
+    git_ok?(worktree, ["cat-file", "-e", "HEAD:" <> @plan_file]) and
+      not (is_binary(base) and git_ok?(worktree, ["cat-file", "-e", base <> ":" <> @plan_file]))
+  end
+
+  defp do_strip(worktree) do
+    with {_, 0} <- git(worktree, ["rm", "--cached", "-q", "--", @plan_file]),
+         {_, 0} <-
+           git(worktree, [
+             "-c",
+             "user.name=arbiter",
+             "-c",
+             "user.email=arbiter@localhost",
+             "-c",
+             "commit.gpgsign=false",
+             "commit",
+             "-q",
+             "--no-verify",
+             "-m",
+             "Remove per-run screenshots manifest (never committed)"
+           ]) do
+      :stripped
+    else
+      {out, code} ->
+        # Restore the index so a failed commit leaves no half-staged deletion.
+        git(worktree, ["reset", "-q", "--", @plan_file])
+
+        {:error,
+         "could not strip committed #{@plan_file} (git exit #{code}): " <> String.trim(out)}
+    end
+  end
+
+  defp git(dir, args), do: System.cmd("git", args, cd: dir, stderr_to_stdout: true)
+
+  defp git_ok?(dir, args),
+    do: match?({_, 0}, System.cmd("git", args, cd: dir, stderr_to_stdout: true))
 
   @doc "Add the plan file to the repo's `info/exclude` (idempotent; worktree-aware)."
   @spec exclude_plan(String.t()) :: :ok
