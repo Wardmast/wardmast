@@ -81,6 +81,9 @@ defmodule Wardmast.Reviews.GuardRegistryTest do
     {Wardmast.Worker.ReviewGate, :ci_act, 4,
      "bd-8o35da: `{:error, :ci_in_progress}` from the CI re-run means the head's latest " <>
        "run/pipeline is unfinished; the gate keeps waiting (no verdict, no fix round, no escalation)"},
+    {Wardmast.Worker.ReviewGate, :ci_trigger_skipped, 2,
+     "#1564: `{:error, :ci_in_progress}` from starting a fresh MR pipeline on a skipped head " <>
+       "means one is already running; the gate waits for it (no verdict, no fix round) — a wait, not a refusal"},
     {Wardmast.Worker.ReviewGate, :do_ci_rerun, 1,
      "bd-8o35da: passes the adapter's `{:error, :ci_in_progress}` through as a wait signal — " <>
        "nothing is refused"},

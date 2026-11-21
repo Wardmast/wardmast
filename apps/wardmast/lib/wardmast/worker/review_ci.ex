@@ -79,6 +79,8 @@ defmodule Wardmast.Worker.ReviewCi do
           | :pending
           | :queued
           | :not_started
+          # A head whose pipeline the forge calls `skipped` (0 jobs): no CI result (#1564).
+          | :skipped
           | :unknown
           | {:head_mismatch, String.t() | nil}
           | {:unavailable, String.t()}
@@ -355,7 +357,9 @@ defmodule Wardmast.Worker.ReviewCi do
     head = Map.get(result, :head_sha)
 
     if same_sha?(head, expected) do
-      pipeline_reading(Map.get(result, :pipeline))
+      if Map.get(result, :pipeline_skipped) == true,
+        do: :skipped,
+        else: pipeline_reading(Map.get(result, :pipeline))
     else
       {:head_mismatch, head}
     end
@@ -400,6 +404,7 @@ defmodule Wardmast.Worker.ReviewCi do
   @type wait :: %{
           optional(:last_info) => String.t() | nil,
           optional(:pipeline_id) => term(),
+          optional(:skip_triggers) => non_neg_integer(),
           sha: String.t(),
           max_polls: pos_integer(),
           polls: non_neg_integer(),
@@ -418,6 +423,7 @@ defmodule Wardmast.Worker.ReviewCi do
           | :wait
           | :rerun
           | :rerun_infra
+          | :rerun_skipped
           | {:infra, String.t()}
           | :fix
           | {:fallback, String.t()}
@@ -501,12 +507,25 @@ defmodule Wardmast.Worker.ReviewCi do
   defp step(wait, :cancelled), do: cancelled(wait)
   defp step(wait, :pending), do: wait |> see_pending() |> reset_streaks() |> spend()
   defp step(wait, :not_started), do: not_started(wait)
+  defp step(wait, :skipped), do: skipped(wait)
 
   defp step(wait, {:head_mismatch, head}),
     do: wait |> reset_streaks() |> spend("the PR head is #{inspect(head)}, not #{wait.sha}")
 
   defp step(wait, {:unavailable, why}), do: unavailable(wait, why)
   defp step(wait, _unknown), do: wait |> reset_streaks() |> spend()
+
+  # #1564: a skipped head pipeline is no CI result, so it is never :green. The
+  # gate starts a fresh MR pipeline once per head (`skip_triggers`); after that a
+  # skipped reading is the forge still listing the old pipeline, so it is waited
+  # out under the ordinary poll budget.
+  defp skipped(wait) do
+    wait = reset_streaks(wait)
+
+    if Map.get(wait, :skip_triggers, 0) == 0,
+      do: {:rerun_skipped, Map.put(wait, :skip_triggers, 1)},
+      else: spend(wait, "the head's pipeline is skipped")
+  end
 
   defp not_started(wait) do
     wait = %{see_pending(wait) | not_started: wait.not_started + 1, unavailable: 0}
@@ -594,15 +613,17 @@ defmodule Wardmast.Worker.ReviewCi do
   """
   @spec retarget(wait(), String.t()) :: wait()
   def retarget(wait, sha),
-    do: %{
-      wait
-      | sha: sha,
-        rerun: nil,
-        not_started: 0,
-        unavailable: 0,
-        infra_reruns: 0,
-        infra_rerun_at: nil
-    }
+    do:
+      %{
+        wait
+        | sha: sha,
+          rerun: nil,
+          not_started: 0,
+          unavailable: 0,
+          infra_reruns: 0,
+          infra_rerun_at: nil
+      }
+      |> Map.put(:skip_triggers, 0)
 
   @doc "Record that the failed jobs were re-run at the wait's current poll."
   @spec rerun_started(wait(), [map()]) :: wait()
