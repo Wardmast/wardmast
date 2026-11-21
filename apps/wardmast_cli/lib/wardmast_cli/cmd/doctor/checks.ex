@@ -1177,19 +1177,22 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   # subject, a tier its adapter cannot enforce here. Computed server-side
   # (`Wardmast.Guardrails.Report`). A FAIL is non-fatal, and with nothing
   # configured the check passes: guardrails are off, not broken.
+  defp guardrails_off_detail(body) do
+    off = "no subject rules configured, so guardrails are off and nothing is tiered"
+
+    case guardrail_token_detail(Map.get(body, "workspaces") || []) do
+      "" -> off
+      tokens -> off <> "; " <> tokens
+    end
+  end
+
   defp check_guardrails do
     case Client.get("/api/server/guardrails") do
       {:ok, %{"active" => false, "issues" => []} = body} ->
-        off = "no subject rules configured, so guardrails are off and nothing is tiered"
-
         %Result{
           name: "guardrail profiles",
           status: :ok,
-          detail:
-            case guardrail_token_detail(Map.get(body, "workspaces") || []) do
-              "" -> off
-              tokens -> off <> "; " <> tokens
-            end,
+          detail: guardrails_off_detail(body),
           blocks_readiness: false
         }
 
