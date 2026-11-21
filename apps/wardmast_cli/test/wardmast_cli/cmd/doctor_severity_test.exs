@@ -861,7 +861,7 @@ defmodule WardmastCli.Cmd.DoctorSeverityTest do
       agy_jail_escape agy_jail_reads agy_jail_network agy_jail_keyring egress_jail
       guardrails agy_ssh_transport tmux podman_sandbox private_clone_records worker_tmp socket_paths worker_jail_unmask worker_memory worker_repo_trust
       claude_worker_credentials grok_auth agy_models provider_accounts quota_policy
-      merge_routing nodes pr_patrol
+      merge_routing nodes pr_patrol data_home
     )
 
     # SI1a: one row per CLI plus the hold.
