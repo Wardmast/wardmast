@@ -1215,6 +1215,11 @@ defmodule Wardmast.Worker.ReviewGate do
       # ADDRESSED answers stood in for the reviewer's own DISPOSITIONS block.
       disposition_check: nil,
       disposition_source: nil,
+      # bd-9isy6t: the findings of a PARTIAL REQUEST_CHANGES pass that is being
+      # re-prompted for a fully-verified pass. Handed to that verifier so it must
+      # confirm or refute each one rather than a fresh mind silently overruling a
+      # reproduced defect it never looked at. Per-round: cleared on advance.
+      partial_findings: nil,
       # bd-9zuvbh: which verdict guard (G9-G12) turned this round's verdict
       # down, when the reject currently being routed came from `fail_closed/3`
       # rather than from a reviewer that really said REQUEST_CHANGES. Only
@@ -4630,8 +4635,28 @@ defmodule Wardmast.Worker.ReviewGate do
   # instead of growing without bound.
   defp accumulate_open_findings(state, findings) do
     carried = ReviewFindings.carry_over(Map.get(state, :open_findings, []), findings)
-    %{state | open_findings: carried ++ ReviewFindings.extract(findings, state.round)}
+    %{state | open_findings: carried ++ renumber_past(carried, findings, state.round)}
   end
+
+  # bd-9isy6t: a PARTIAL pass's findings are carried into the re-prompt under
+  # THIS round's ids (`F<round>.<n>`). If the verifier then rejects with findings
+  # of its own, extracting them under the same round would reuse those ids, so
+  # the new ones continue the numbering past the highest same-round id already
+  # carried. Outside that case nothing carried shares the round and this is
+  # `ReviewFindings.extract/2` unchanged.
+  defp renumber_past(carried, findings, round) do
+    offset =
+      carried
+      |> Enum.filter(&(&1.round == round))
+      |> Enum.map(&finding_index/1)
+      |> Enum.max(fn -> 0 end)
+
+    findings
+    |> ReviewFindings.extract(round)
+    |> Enum.map(fn f -> %{f | id: "F#{round}.#{finding_index(f) + offset}"} end)
+  end
+
+  defp finding_index(%{id: id}), do: id |> String.split(".") |> List.last() |> String.to_integer()
 
   defp do_route_after_reject(%{round: round, max_rounds: max} = state, findings)
        when round >= max do
@@ -5385,6 +5410,7 @@ defmodule Wardmast.Worker.ReviewGate do
         attempt: 0,
         disposition_check: nil,
         disposition_source: nil,
+        partial_findings: nil,
         verdict_scan: nil,
         verdict_scans: [],
         no_verdict_causes: [],
@@ -6719,16 +6745,36 @@ defmodule Wardmast.Worker.ReviewGate do
     spec = verdict_guard_spec(name, ctx)
     stop_worker(state)
 
+    # bd-9isy6t: a PARTIAL REQUEST_CHANGES is a real pass with real findings. The
+    # verifier is handed them (it must confirm or refute each), and the pass is
+    # recorded as its own round once the re-prompt actually spawns.
+    #
+    # The findings also join `open_findings`, the set an APPROVE is measured
+    # against (`approval_gap/2`): a verifier that prints a bare APPROVE without
+    # dispositioning them hits the `:unaddressed_findings` guard instead of
+    # merging over a reproduced defect. They stay open for every later re-prompt
+    # of the round (`:no_verdict`, `:empty_findings`, ...), which all embed
+    # `review_prompt/1` and so its open-findings briefing.
+    carried = if name == :partial_verification, do: findings
+
+    launch_state = %{
+      state
+      | retries_left: budget - 1,
+        partial_findings: carried,
+        open_findings: open_findings_with_partial(state, carried)
+    }
+
     case launch_worker(
-           %{state | retries_left: budget - 1},
+           launch_state,
            reprompt_retry_id(state),
            :reviewer,
-           verdict_reprompt_prompt(state, spec.reason),
+           verdict_reprompt_prompt(launch_state, spec.reason),
            state.command
          ) do
-      {:ok, state} ->
-        Logger.info(spec.logs.retry.(state))
-        {:reprompt, state}
+      {:ok, launched} ->
+        if carried, do: record_partial_pass(state, spec, findings)
+        Logger.info(spec.logs.retry.(launched))
+        {:reprompt, launched}
 
       {:error, spawn_error} ->
         # NOTE: `state` here is the pre-launch state — a retry that never
@@ -6754,6 +6800,21 @@ defmodule Wardmast.Worker.ReviewGate do
 
   defp run_verdict_guard(name, state, findings, ctx),
     do: exhausted_verdict_guard(name, state, findings, ctx)
+
+  # bd-9isy6t: persist the partial pass's own verdict + (bannered) findings as a
+  # round BEFORE the re-prompt supersedes it. Without this the pass left no trace
+  # (`review_gate_rounds_list` showed only the verifier's APPROVE) even though it
+  # had reproduced a defect. Takes the PRE-launch state so `pass_usage/1` still
+  # resolves the partial pass's own run, not the re-prompt's.
+  defp open_findings_with_partial(state, nil), do: Map.get(state, :open_findings, [])
+
+  defp open_findings_with_partial(state, findings) do
+    Map.get(state, :open_findings, []) ++ ReviewFindings.extract(findings, state.round)
+  end
+
+  defp record_partial_pass(state, spec, findings) do
+    record_round(state, :review, spec.verdict, spec.banner.(findings), converged: false)
+  end
 
   defp exhausted_verdict_guard(name, state, findings, ctx) do
     spec = verdict_guard_spec(name, ctx)
@@ -6893,7 +6954,7 @@ defmodule Wardmast.Worker.ReviewGate do
   # down the shared reject path (escalate if the round budget is spent, else back
   # to the implementer).
   defp fail_closed(spec, state, findings) do
-    bannered = spec.banner.(findings)
+    bannered = spec.banner.(findings) |> with_partial_findings(spec, state)
     recorded = if spec.record == :banner, do: bannered, else: findings
 
     record_round(state, :review, spec.verdict, recorded, converged: false)
@@ -6910,6 +6971,28 @@ defmodule Wardmast.Worker.ReviewGate do
 
     route_after_reject(state, bannered)
   end
+
+  # bd-9isy6t: an APPROVE rejected for ignoring the findings a PARTIAL pass
+  # carried would otherwise route to the implementer as a banner naming ids only
+  # — the implementer never saw that pass's text (it was never routed). Append
+  # the carried findings, as a `⚠️` banner paragraph (blank lines squeezed so
+  # `ReviewFindings` keeps treating the whole thing as banner, not as findings).
+  defp with_partial_findings(bannered, %{reason: :unaddressed_findings}, %{
+         partial_findings: partial
+       })
+       when is_binary(partial) and partial != "" do
+    body =
+      partial
+      |> String.split("\n")
+      |> Enum.reject(&(String.trim(&1) == ""))
+      |> Enum.join("\n")
+
+    bannered <>
+      "\n\n⚠️ FINDINGS FROM THE PRIOR (PARTIAL-VERIFICATION) PASS the approval above " <>
+      "ignored — the implementer must address them:\n" <> body
+  end
+
+  defp with_partial_findings(bannered, _spec, _state), do: bannered
 
   # The re-prompt's task id. For round > 1 it must be based on the round-specific
   # review_id (bd-bgeo6i); round 1 uses the base review_id. Shared with
@@ -7486,7 +7569,7 @@ defmodule Wardmast.Worker.ReviewGate do
     cond do
       role != :review -> nil
       verdict == :timed_out -> 0
-      true -> count_findings(findings)
+      true -> count_findings(findings, verdict)
     end
   end
 
@@ -7583,21 +7666,28 @@ defmodule Wardmast.Worker.ReviewGate do
   # `findings_present?/1` heuristic used to decide whether a REQUEST_CHANGES
   # verdict is actionable at all.
   @finding_item ~r/^\s*(?:[-*]|\d+[.)])\s+\S/
-  defp count_findings(nil), do: nil
+  defp count_findings(nil, _verdict), do: nil
 
-  defp count_findings(findings) when is_binary(findings) do
+  defp count_findings(findings, verdict) when is_binary(findings) do
     items =
       findings
       |> String.split("\n")
       # A CRITERIA breakdown line (`- [NOT MET] …`) is a list item to
       # `@finding_item`, but it is verdict payload, not an enumerated finding —
       # exclude it so the count reflects real findings only (bd-4yhv4x).
-      |> Enum.reject(&ReviewVerification.criteria_line?/1)
+      # Likewise a DISPOSITIONS line (`- [OBSOLETE] F1.1 — …`) answers an
+      # already-counted finding rather than raising a new one.
+      |> Enum.reject(
+        &(ReviewVerification.criteria_line?(&1) or ReviewFindings.dispositions(&1) != %{})
+      )
       |> Enum.count(&Regex.match?(@finding_item, &1))
 
     cond do
       items > 0 -> items
       String.trim(findings) == "" -> 0
+      # bd-9isy6t: an APPROVE that enumerates nothing raised no findings; the
+      # prose-fallback `1` is for a REQUEST_CHANGES whose findings are free text.
+      verdict == :approve -> 0
       true -> 1
     end
   end
@@ -9472,6 +9562,41 @@ defmodule Wardmast.Worker.ReviewGate do
     end
   end
 
+  # bd-9isy6t: the partial pass may have REPRODUCED a defect (a probe that
+  # printed the failure) and flagged PARTIAL only about an unrelated gap, so its
+  # findings must not be silently overruled by a verifier that never looked at
+  # them. Each is put to the verifier to confirm or refute with evidence.
+  defp prior_findings_block(state) do
+    case Map.get(state, :partial_findings) do
+      findings when is_binary(findings) and findings != "" ->
+        """
+        THE PRIOR PASS'S FINDINGS — you MUST rule on every one of them:
+
+        The prior pass may have reproduced real defects with a probe, and its
+        `VERIFICATION: PARTIAL` may be about an unrelated gap (e.g. an acceptance
+        criterion whose evidence it could not see). Its findings are listed, each
+        with an id, under OPEN FINDINGS CARRIED FORWARD below. Do NOT drop one just
+        because you did not think of it yourself. For EACH, open the cited file at
+        the cited line, re-run or re-derive its probe against the CURRENT diff, and
+        answer it in the DISPOSITIONS block:
+
+          * still present → `[NOT ADDRESSED] <id> — <file:line and the evidence you
+            saw>`, and finish with `VERDICT: REQUEST_CHANGES`, enumerating it;
+          * wrong, or not reproducible in this diff → `[OBSOLETE] <id> — <the
+            evidence, e.g. the probe's output, that shows it is wrong>`;
+          * already fixed in the CURRENT code → `[ADDRESSED] <id> — <file:line>`.
+
+        A `VERDICT: APPROVE` that does not disposition every one of these ids will
+        NOT be honored: the gate treats it as malformed, exactly like a missing
+        `VERDICT:` line.
+
+        """ <> open_findings_briefing(state) <> "\n"
+
+      _ ->
+        ""
+    end
+  end
+
   @doc """
   Build the verdict re-prompt used when a prior pass produced a malformed result:
   a missing sentinel (`:no_verdict`) or a REQUEST_CHANGES with no findings
@@ -9551,7 +9676,7 @@ defmodule Wardmast.Worker.ReviewGate do
         findings — each with a severity, a `file:line` location, and a suggested
         fix — so the implementer can close the gap.
 
-    """ <> review_prompt(state)
+    """ <> prior_findings_block(state) <> review_prompt(state)
   end
 
   def verdict_reprompt_prompt(state, :unmet_criteria) do
@@ -9583,7 +9708,7 @@ defmodule Wardmast.Worker.ReviewGate do
         fix — so the implementer can close the gap. An APPROVE whose breakdown
         still contains a `[NOT MET]` line will not be accepted.
 
-    """ <> review_prompt(state)
+    """ <> prior_findings_block(state) <> review_prompt(state)
   end
 
   def verdict_reprompt_prompt(state, :unverified) do
@@ -9613,7 +9738,7 @@ defmodule Wardmast.Worker.ReviewGate do
         honestly still unable to complete verification — and if so, say exactly
         what could not be confirmed.
 
-    """ <> review_prompt(state)
+    """ <> prior_findings_block(state) <> review_prompt(state)
   end
 
   def verdict_reprompt_prompt(state, :empty_findings) do
@@ -9630,7 +9755,7 @@ defmodule Wardmast.Worker.ReviewGate do
     A REQUEST_CHANGES with no enumerated findings will be rejected again. Do not
     include any roleplay or persona text — structured findings only.
 
-    """ <> review_prompt(state)
+    """ <> prior_findings_block(state) <> review_prompt(state)
   end
 
   def verdict_reprompt_prompt(state, _no_verdict) do
@@ -9644,7 +9769,7 @@ defmodule Wardmast.Worker.ReviewGate do
 
     Do not skip the verdict line — without it your review cannot be honored.
 
-    """ <> review_prompt(state)
+    """ <> prior_findings_block(state) <> review_prompt(state)
   end
 
   @doc """

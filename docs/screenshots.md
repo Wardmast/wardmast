@@ -373,10 +373,25 @@ Enforced today:
 * Only Arbiter uploads, using the merger's credential; the worker never holds it. Public
   repos fail closed (above). Public paste hosts and gists are never used.
 
-Not enforced (configurable keys exist, but no runtime check ships): the `fixture_check`
-marker probe and the DOM text scan that withholds shots containing emails, secrets or
-`deny_patterns`. Do not rely on them. There is no pixel redaction. Seed fixtures yourself
+* **`fixture_check.marker`** (opt-in): after every boot, before any shot, the capture `GET`s
+  `marker.path` and requires a `200` whose body contains `marker.contains`. A mismatch aborts
+  the capture (`fixture_marker_mismatch`, naming the path, never the body), so an app that
+  reports it is not on fixture data is never shot. Have the app expose e.g. `/health` saying
+  `data: fixture` only when started on fixture data. `arb config overview` (and the MCP
+  `workspace_config_overview`, `screenshots_safety`) flags a repo with no `fixture_check`.
+* **The DOM text scan** (always on): every shot reports the page's visible text, its `alt` /
+  `title` attributes (and, with the CDP runner, placeholders and form-field values). Secret
+  shapes (private keys, AWS/GCP/GitHub/Slack/Stripe-style keys, JWTs, `Authorization:` values,
+  long hex or mixed-case tokens), email addresses outside `fixture_email_domains` and your
+  `deny_patterns` withhold the shot: its image is deleted and the PR row, `capture.json`, the log
+  and the reviewer's brief say only `withheld by the data-safety scan: <rule>` (`secret:jwt`,
+  `email-domain`, `deny-pattern:2`, ...), never the matched text. A shooter that cannot report
+  the page text is not trusted either (`scan-unavailable`). Withholding is per image: a leak at
+  the head does not hide a clean merge-base shot.
+
+There is no pixel redaction (a chart of real numbers is not caught). Seed fixtures yourself
 and treat every screenshot as readable by everyone who can read the repo.
+
 
 Size limits (`screenshots.limits`): 20 shots, 40 images, 2 MiB per image, 25 MiB per capture,
 600 s setup, 120 s seed, 30 s per shot, 1200 s total (max 3600). Ticket attachments are

@@ -247,6 +247,8 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
         node_script(dir, "writing-node", """
         out=$(grep -o '"out_file":"[^"]*"' "$2" | cut -d'"' -f4)
         printf 'PNGDATA' > "$out"
+        txt=$(grep -o '"text_file":"[^"]*"' "$2" | cut -d'"' -f4)
+        printf '["page text"]' > "$txt"
         echo '{"ok":true}'
         """)
 
@@ -256,7 +258,7 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
           ctx: %{node: node, capture_dir: capture_dir(dir), chrome: "/bin/sh"}
         })
 
-      assert :ok = Cdp.shoot(spec)
+      assert {:ok, %{text: _}} = Cdp.shoot(spec)
       assert File.read!(spec.out_file) == "PNGDATA"
       refute File.exists?(spec.scratch)
     end
@@ -328,6 +330,8 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
       #!/bin/sh
       img=$(grep -o '"out_file":"[^"]*"' "$2" | cut -d'"' -f4)
       printf PNG > "$img"
+      txt=$(grep -o '"text_file":"[^"]*"' "$2" | cut -d'"' -f4)
+      printf '["page text"]' > "$txt"
       cat <<'EOF'
       #{out}
       EOF
@@ -343,11 +347,36 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
     end
 
     test "ok", %{tmp_dir: dir} do
-      assert :ok = run_fake(dir, ~s({"ok":true,"blocked":[]}))
+      assert {:ok, %{text: _}} = run_fake(dir, ~s({"ok":true,"blocked":[]}))
+    end
+
+    test "the page text the runner wrote is what the shooter reports (bd-995svb)", %{tmp_dir: dir} do
+      assert {:ok, %{text: ["page text"]}} = run_fake(dir, ~s({"ok":true}))
+    end
+
+    test "an ok answer with an image but no page text is a failed shot, not an unscanned one", %{
+      tmp_dir: dir
+    } do
+      node =
+        node_script(dir, "no-text-node", """
+        out=$(grep -o '"out_file":"[^"]*"' "$2" | cut -d'"' -f4)
+        printf 'PNGDATA' > "$out"
+        echo '{"ok":true}'
+        """)
+
+      spec =
+        shot(dir, %{
+          sandbox: CaptureRecordingSandbox,
+          ctx: %{node: node, capture_dir: capture_dir(dir), chrome: "/bin/sh"}
+        })
+
+      assert {:error, {:shot, msg}} = Cdp.shoot(spec)
+      assert msg =~ "page text"
+      refute File.exists?(spec.out_file)
     end
 
     test "noise before the answer is ignored; the last JSON line wins", %{tmp_dir: dir} do
-      assert :ok = run_fake(dir, "chatter\n{\"x\":1}\n{\"ok\":true}")
+      assert {:ok, %{text: _}} = run_fake(dir, "chatter\n{\"x\":1}\n{\"ok\":true}")
     end
 
     test "an http status answer", %{tmp_dir: dir} do
@@ -397,7 +426,7 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
     end
 
     defp real(%{dir: dir, base: base}, overrides) do
-      Cdp.shoot(shot(dir, Map.merge(%{base_url: base, ctx: %{}}, overrides)))
+      Cdp.shoot(shot(dir, Map.merge(%{base_url: base, ctx: tree_ctx(dir)}, overrides)))
     end
 
     defp png?(dir), do: File.read!(Path.join(dir, "shot.png")) =~ "PNG"
@@ -417,6 +446,7 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
 
       for sub <- ~w(node_modules bin),
           File.exists?(Path.join(src, sub)),
+          not File.exists?(Path.join(tools, sub)),
           do: File.ln_s!(Path.join(src, sub), Path.join(tools, sub))
 
       %{capture_dir: tools}
@@ -438,13 +468,18 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
         )
         |> put_in(["personas", "admin", "tenant_id"], "harbor")
 
-      assert :ok = real(ctx, Map.merge(route, %{login: login, ctx: ctx_map}))
+      assert {:ok, %{text: _}} = real(ctx, Map.merge(route, %{login: login, ctx: ctx_map}))
       assert png?(ctx.dir)
     end
 
     test "correct credentials reach the route and shoot it", ctx do
-      assert :ok = real(ctx, %{})
+      assert {:ok, %{text: _}} = real(ctx, %{})
       assert png?(ctx.dir)
+    end
+
+    test "it reports the page's visible text for the data-safety scan (bd-995svb)", ctx do
+      assert {:ok, %{text: texts}} = real(ctx, %{})
+      assert Enum.join(texts, "\n") =~ "Dashboard"
     end
 
     test "the persona's credentials are the ones typed (a wrong password fails, never a picture)",
@@ -471,7 +506,7 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
 
     test "url_not_contains is honoured", ctx do
       ok = Map.put(@login, "success", %{"url_not_contains" => "/login"})
-      assert :ok = real(ctx, %{login: ok})
+      assert {:ok, %{text: _}} = real(ctx, %{login: ok})
 
       bad = Map.put(@login, "success", %{"url_not_contains" => "/home"})
       assert {:error, {:shot, _}} = real(ctx, %{login: bad})
@@ -512,7 +547,7 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
         %{"action" => "wait_for", "selector" => "#panel", "state" => "visible"}
       ]
 
-      assert :ok = real(ctx, %{entry: %{steps: steps}})
+      assert {:ok, %{text: _}} = real(ctx, %{entry: %{steps: steps}})
 
       assert {:error, {:shot, msg}} =
                real(ctx, %{entry: %{steps: [%{"action" => "click", "selector" => "#absent"}]}})
@@ -524,7 +559,7 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
     test "wait_for, target and hide", ctx do
       steps = [%{"action" => "click", "selector" => "#open"}]
 
-      assert :ok =
+      assert {:ok, %{text: _}} =
                real(ctx, %{
                  entry: %{
                    steps: steps,
@@ -544,19 +579,21 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
     end
 
     test "full_page captures the whole page, clipped to 8000 px", ctx do
-      assert :ok = real(ctx, %{path: "/tall", entry: %{path: "/tall", full_page: true}})
+      assert {:ok, %{text: _}} =
+               real(ctx, %{path: "/tall", entry: %{path: "/tall", full_page: true}})
+
       {w, h} = png_size(ctx.dir)
       assert w == 800
       assert h > 3000
 
-      assert :ok = real(ctx, %{path: "/tall", entry: %{path: "/tall"}})
+      assert {:ok, %{text: _}} = real(ctx, %{path: "/tall", entry: %{path: "/tall"}})
       assert {800, 600} = png_size(ctx.dir)
     end
 
     test "theme local_storage, colour scheme, UTC and en-US are applied", ctx do
       theme = %{"color_scheme" => "dark", "local_storage" => %{"theme" => "dark"}, "query" => %{}}
 
-      assert :ok =
+      assert {:ok, %{text: _}} =
                real(ctx, %{
                  theme: theme,
                  entry: %{target: %{"selector" => "#theme"}}
@@ -565,7 +602,7 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
       # Pixel-compare against the same element with the light theme: they must differ in text.
       first = File.read!(Path.join(ctx.dir, "shot.png"))
 
-      assert :ok =
+      assert {:ok, %{text: _}} =
                real(ctx, %{
                  theme: %{"color_scheme" => "light"},
                  entry: %{target: %{"selector" => "#theme"}}
@@ -577,14 +614,14 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
     test "the same shot twice is byte-identical (the page shows a millisecond clock, frozen)",
          ctx do
       opts = %{entry: %{hide: []}}
-      assert :ok = real(ctx, opts)
+      assert {:ok, %{text: _}} = real(ctx, opts)
       first = File.read!(Path.join(ctx.dir, "shot.png"))
-      assert :ok = real(ctx, opts)
+      assert {:ok, %{text: _}} = real(ctx, opts)
       assert File.read!(Path.join(ctx.dir, "shot.png")) == first
     end
 
     test "a request to a non-loopback host is blocked, not made", ctx do
-      assert :ok =
+      assert {:ok, %{text: _}} =
                real(ctx, %{
                  path: "/outside",
                  entry: %{path: "/outside"},

@@ -211,6 +211,35 @@ defmodule Wardmast.Worker.WatchdogCiRerunCapTest do
     assert :sys.get_state(pid).ci_cancelled_escalated_head == "h1"
   end
 
+  test "cancelled runs parking at the site bound still write the cap note once" do
+    ws = workspace()
+    t = task(ws)
+
+    cancelled = %{
+      status: :open,
+      approved: true,
+      block_reason: :ci_cancelled,
+      pipeline: :canceled,
+      head_sha: "h9",
+      base_ref: "main"
+    }
+
+    StubMerger.queue_get("!rc9", [cancelled])
+    pid = start(t, ws, "!rc9")
+    wait_until(fn -> :sys.get_state(pid).park_reason == :ci_cancelled end)
+
+    assert length(reruns("!rc9")) == 2
+    wait_until(fn -> notes(t) =~ "## CI re-run cap reached" end)
+    note = notes(t)
+    assert note =~ "h9"
+    assert note =~ "2 automatic re-run"
+
+    # Later polls of the parked head do not append it again.
+    before = :sys.get_state(pid).poll_count
+    wait_until(fn -> :sys.get_state(pid).poll_count >= before + 3 end)
+    assert length(String.split(notes(t), "## CI re-run cap reached")) == 2
+  end
+
   describe "manual ci_rerun" do
     test "a worker's re-run is booked and refused at the cap; the coordinator's is counted, never refused" do
       ws = workspace(%{"max_reruns_per_sha" => 2})
