@@ -127,17 +127,9 @@ defmodule WardmastCli.OperatorSocket do
   end
 
   # Mirrors `Wardmast.MCP.OperatorProof.run_dir/0` (the CLI does not depend on
-  # the server app at runtime): the data home is `WARDMAST_DATA_HOME`
-  # (legacy `ARB_DATA_HOME`), else `~/.wardmast`; never `ARB_HOME` (the checkout).
+  # the server app at runtime): both resolve the data home through
+  # `Wardmast.Env.data_home/0`; never `ARB_HOME` (the checkout).
   @doc false
   @spec run_dir() :: String.t()
-  def run_dir do
-    home =
-      case Wardmast.Env.get("WARDMAST_DATA_HOME") do
-        dir when is_binary(dir) and dir != "" -> dir
-        _ -> "~/.wardmast"
-      end
-
-    Path.join(Path.expand(home), "run")
-  end
+  def run_dir, do: Path.join(Wardmast.Env.data_home(), "run")
 end

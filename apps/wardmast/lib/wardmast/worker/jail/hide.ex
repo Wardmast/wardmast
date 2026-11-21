@@ -277,15 +277,7 @@ defmodule Wardmast.Worker.Jail.Hide do
     end
   end
 
-  defp data_dir do
-    case {Application.fetch_env(:wardmast, :data_dir), Wardmast.Env.get("WARDMAST_DATA_HOME"),
-          operator_home()} do
-      {{:ok, dir}, _, _} when is_binary(dir) -> dir
-      {_, dir, _} when is_binary(dir) and dir != "" -> dir
-      {_, _, home} when is_binary(home) -> Path.join(home, ".wardmast")
-      _ -> nil
-    end
-  end
+  defp data_dir, do: Wardmast.Env.data_home()
 
   defp database do
     :wardmast |> Application.get_env(Wardmast.Repo, []) |> Keyword.get(:database)

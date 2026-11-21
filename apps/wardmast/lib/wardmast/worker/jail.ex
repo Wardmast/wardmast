@@ -806,8 +806,8 @@ defmodule Wardmast.Worker.Jail do
       `SECRET_KEY_BASE`, the MCP token signing key, so a worker that reads it
       can sign its own coordinator token.
     * `<data-home>/release.cookie`, the per-install Erlang distribution
-      cookie the release's `env.sh` creates (the data home is the `:data_dir`
-      app env when set, else `WARDMAST_DATA_HOME`, default `~/.wardmast`). The jail
+      cookie the release's `env.sh` creates (the data home is
+      `Wardmast.Env.data_home/0`, default `~/.wardmast`). The jail
       shares the host's network, so with the cookie a worker could reach
       epmd on loopback and `bin/wardmast rpc` straight into the server.
     * `$RELEASE_ROOT/releases/COOKIE`, the build-time cookie, for a release
@@ -819,7 +819,7 @@ defmodule Wardmast.Worker.Jail do
   """
   @spec secret_files() :: [String.t()]
   def secret_files do
-    data_dir = Application.get_env(:wardmast, :data_dir, Path.expand("~/.wardmast"))
+    data_home = Wardmast.Env.data_home()
 
     release_cookie =
       case System.get_env("RELEASE_ROOT") do
@@ -827,9 +827,9 @@ defmodule Wardmast.Worker.Jail do
         _ -> nil
       end
 
-    [Path.join(data_dir, "wardmast.env"), release_cookie]
+    [Path.join(data_home, "wardmast.env"), release_cookie]
     |> Enum.filter(&(is_binary(&1) and File.regular?(&1)))
-    |> Enum.concat(secret_files(release_data_home()))
+    |> Enum.concat(secret_files(data_home))
     |> Enum.map(&Path.expand/1)
     |> Enum.uniq()
   end
@@ -843,18 +843,6 @@ defmodule Wardmast.Worker.Jail do
 
   def secret_files(data_home) do
     Enum.filter([Path.join(data_home, "release.cookie")], &File.regular?/1)
-  end
-
-  # Where env.sh keeps the per-install cookie. An explicit `:data_dir` wins
-  # so tests that repoint it stay hermetic.
-  defp release_data_home do
-    case {Application.fetch_env(:wardmast, :data_dir), Wardmast.Env.get("WARDMAST_DATA_HOME"),
-          System.user_home()} do
-      {{:ok, dir}, _, _} when is_binary(dir) -> Path.expand(dir)
-      {_, dir, _} when is_binary(dir) and dir != "" -> Path.expand(dir)
-      {_, _, home} when is_binary(home) -> Path.join(home, ".wardmast")
-      _ -> nil
-    end
   end
 
   # Last of the binds, so no writable path, HOME or git bind can re-open one.

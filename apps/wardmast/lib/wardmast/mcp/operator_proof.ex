@@ -228,24 +228,14 @@ defmodule Wardmast.MCP.OperatorProof do
   end
 
   @doc """
-  Fallback runtime dir `<data home>/run`. The data home is the `:data_dir`
-  app env, else `WARDMAST_DATA_HOME` (`ARB_DATA_HOME` legacy spelling, via
-  `Wardmast.Env`), else `~/.wardmast`, the same resolution as the release
-  env and `Wardmast.Worker.Jail`. `ARB_HOME` is the source checkout, not the
-  data home, so it is deliberately ignored. `WardmastCli.OperatorSocket`
-  mirrors this so the client finds the socket without the server's env.
+  Fallback runtime dir `<data home>/run`, the data home being
+  `Wardmast.Env.data_home/0` (the one resolver the release env, the jail and
+  the CLI share). `ARB_HOME` is the source checkout, not the data home, so it
+  is deliberately ignored. `WardmastCli.OperatorSocket` calls the same
+  resolver so the client finds the socket without the server's env.
   """
   @spec run_dir() :: String.t()
-  def run_dir do
-    home =
-      case {Application.fetch_env(:wardmast, :data_dir), Wardmast.Env.get("WARDMAST_DATA_HOME")} do
-        {{:ok, dir}, _} when is_binary(dir) and dir != "" -> dir
-        {_, dir} when is_binary(dir) and dir != "" -> dir
-        _ -> "~/.wardmast"
-      end
-
-    Path.join(Path.expand(home), "run")
-  end
+  def run_dir, do: Path.join(Wardmast.Env.data_home(), "run")
 
   # ---- helpers -------------------------------------------------------------
 

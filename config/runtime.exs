@@ -50,13 +50,14 @@ agent? =
 # Single source of truth for the SQLite DB path. Applies to all environments
 # (dev, prod) except test, which sets its own tmp path in config/test.exs.
 #
-# Default: ~/.wardmast/arbiter.sqlite3 (the canonical post-cutover location).
+# Default: <data home>/arbiter.sqlite3 (the canonical post-cutover location), the data
+# home being `Wardmast.Env.data_home/0`: the one resolver the server and `arb` share.
 # Until T7 (DB-copy cutover) completes, set DATABASE_PATH to point at the
 # live database so the server never boots against an empty file.
 if config_env() != :test and not agent? do
   database_path =
     System.get_env("DATABASE_PATH") ||
-      Path.expand("~/.wardmast/arbiter.sqlite3")
+      Path.join(Wardmast.Env.data_home(), "arbiter.sqlite3")
 
   config :wardmast, Wardmast.Repo,
     database: database_path,

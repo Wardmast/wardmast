@@ -87,7 +87,7 @@ defmodule Wardmast.Config.PathsTest do
 
   describe "server_log_path/0 (bd-6f5dmo)" do
     setup do
-      keys = ["WARDMAST_SERVER_LOG", "WARDMAST_HOME", "ARB_HOME"]
+      keys = ["WARDMAST_SERVER_LOG", "WARDMAST_DATA_HOME", "WARDMAST_HOME", "ARB_HOME"]
       prior = Map.new(keys, &{&1, System.get_env(&1)})
       prior_cfg = Application.get_env(:wardmast, :server_log_path)
       Application.delete_env(:wardmast, :server_log_path)
@@ -99,9 +99,14 @@ defmodule Wardmast.Config.PathsTest do
       end)
     end
 
-    test "follows WARDMAST_HOME" do
-      System.put_env("WARDMAST_HOME", "/data/ward")
+    test "follows WARDMAST_DATA_HOME" do
+      System.put_env("WARDMAST_DATA_HOME", "/data/ward")
       assert Paths.server_log_path() == "/data/ward/log/wardmast.log"
+    end
+
+    test "WARDMAST_HOME is not a data home (bd-88syir)" do
+      System.put_env("WARDMAST_HOME", "/data/ward")
+      assert Paths.server_log_path() == Path.expand("~/.wardmast/log/wardmast.log")
     end
 
     test "ARB_HOME (the checkout in dev mode) does not move the log path" do

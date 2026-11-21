@@ -13,12 +13,7 @@ defmodule WardmastCli.Cmd.ReleaseDeploy.ReleaseFiles do
   @retain_prior 3
 
   @spec data_home() :: String.t()
-  def data_home do
-    case System.get_env("ARB_DATA_HOME") do
-      dir when is_binary(dir) and dir != "" -> Path.expand(dir)
-      _ -> Path.join(System.user_home!(), ".wardmast")
-    end
-  end
+  def data_home, do: Wardmast.Env.data_home()
 
   @spec releases_dir() :: String.t()
   def releases_dir, do: Path.join(data_home(), "releases")

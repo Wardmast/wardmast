@@ -21,7 +21,7 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
   def logrotate_timer_name, do: @logrotate_timer_name
 
   @doc """
-  The arbiter data home directory. Defaults to `~/.wardmast`; tests override
+  The arbiter data home directory (`Wardmast.Env.data_home/0`); tests override
   via the `:bd2_arbiter_home` process-dict seam so they write to a tmp dir
   rather than the real `~/.wardmast/wardmast.env`.
   """
@@ -29,7 +29,7 @@ defmodule WardmastCli.Cmd.InstallService.Unit do
   def arbiter_home_path do
     case Process.get(:bd2_arbiter_home) do
       dir when is_binary(dir) -> dir
-      _ -> Path.join(System.user_home!(), ".wardmast")
+      _ -> Wardmast.Env.data_home()
     end
   end
 
