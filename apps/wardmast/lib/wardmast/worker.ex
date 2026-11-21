@@ -4955,10 +4955,16 @@ defmodule Wardmast.Worker do
       # running; its checkout reaches the home clone with the node's final upload,
       # which precedes the exit. Wait for the exit (`on_agent_stopped/3` re-enters
       # here) rather than push and judge a clone that is as of the last snapshot.
-      pass?(meta) and remote_session_live?(state) ->
-        wait_for_remote_pass_exit(state)
+      #
+      # bd-361rwu (#1316): the same holds for the AUTHOR run — a send-back resume
+      # (or any main run) placed on a node. Entering the commit gate / ReviewGate on
+      # `arb done` read the home clone before the node's final upload landed: it
+      # pushed and reviewed the old head, the agent's new commit arrived afterwards
+      # and was never pushed, and the send-back looked like "no new commit".
+      awaits_node_checkout?(meta) and remote_session_live?(state) ->
+        wait_for_remote_run_exit(state)
 
-      pass?(meta) and remote_checkout_failed?(state) ->
+      awaits_node_checkout?(meta) and remote_checkout_failed?(state) ->
         fail_remote_checkout(state)
 
       pass?(meta) ->
@@ -5014,6 +5020,11 @@ defmodule Wardmast.Worker do
   # whose deliverable is a push to the PR's existing branch.
   defp pass?(meta), do: role_from_meta(meta) in [:fix_pass, :conflict_resolver]
 
+  # A run whose deliverable is commits in the home clone: a pass, or a reviewable
+  # author run. A reviewer (read-only clone) and a no-PR run have none to wait for.
+  defp awaits_node_checkout?(meta),
+    do: pass?(meta) or not (review_only?(meta) or no_pr_type?(meta))
+
   defp remote_session_live?(%State{claude_sessions: sessions}) do
     Enum.any?(sessions, fn {handle, session} ->
       remote_handle?(handle) and is_nil(Map.get(session, :exit_status))
@@ -5032,7 +5043,7 @@ defmodule Wardmast.Worker do
 
   defp fail_remote_checkout(%State{task_id: task_id} = state) do
     Logger.warning(
-      "Worker: the node's final checkout of the pass on task=#{task_id} did not come back; " <>
+      "Worker: the node's final checkout of the run on task=#{task_id} did not come back; " <>
         "failing the pass instead of pushing a stale clone"
     )
 
@@ -5042,7 +5053,7 @@ defmodule Wardmast.Worker do
   # `arb done` was seen on a pass whose node run has not exited yet. The agent is on its
   # way out; if it is not gone after the grace, ask the node to stop it, which
   # uploads the checkout all the same.
-  defp wait_for_remote_pass_exit(%State{claude_sessions: sessions} = state) do
+  defp wait_for_remote_run_exit(%State{claude_sessions: sessions} = state) do
     for {handle, session} <- sessions,
         remote_handle?(handle),
         is_nil(Map.get(session, :exit_status)) do
