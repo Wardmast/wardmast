@@ -11,6 +11,7 @@ defmodule Wardmast.Screenshots.Capture.Failure do
   | `:checkout_failed` | a commit's source tree could not be extracted |
   | `:boot_failed` | the app did not boot at `role` (`detail` = phase and output; for a capture service that did not come up, phase `:services` with the service, reason and its log tail) |
   | `:deps_failed` | the offline Mix deps cache (`deps.mix`) could not be built (bd-3glf2a) |
+  | `:fixture_marker_mismatch` | the booted app did not pass `fixture_check.marker` (it may be running on real data); nothing was shot (bd-995svb) |
   | `:app_not_ready` | the booted app stopped answering before the side's first navigation (`server_log` has its output tail) |
   | `:route_error` | a route answered with an error status (or was missing at both commits) |
   | `:shot_failed` | the browser step failed (a selector, a timeout, a crash) |
@@ -28,6 +29,7 @@ defmodule Wardmast.Screenshots.Capture.Failure do
           | :boot_failed
           | :deps_failed
           | :app_not_ready
+          | :fixture_marker_mismatch
           | :route_error
           | :shot_failed
           | :budget_exceeded

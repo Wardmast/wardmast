@@ -2679,6 +2679,33 @@ defmodule Wardmast.MCP.ToolsTest do
       assert is_list(data.secret_keys)
     end
 
+    test "flags a screenshots repo with no fixture_check (bd-995svb)", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{
+            patch: %{
+              "worker" => %{
+                "repos" => %{
+                  "web" => %{
+                    "screenshots" => %{"ui_paths" => ["lib/**"], "start_cmd" => "mix phx.server"}
+                  }
+                }
+              }
+            },
+            unset_paths: []
+          },
+          action: :patch_config
+        )
+
+      assert {:ok, data} = Tools.workspace_config_overview(ctx.worker, %{})
+
+      assert [%{repo: "web", fixture_check: false, warnings: [warning]}] =
+               data.screenshots_safety
+
+      assert warning =~ "fixture_check"
+    end
+
     test "a worker can call overview on its own workspace", ctx do
       assert {:ok, data} = Tools.workspace_config_overview(ctx.worker, %{})
       assert data.workspace.id == ctx.ws.id
