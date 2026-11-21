@@ -334,8 +334,24 @@ defmodule WardmastCli.Cmd.Account do
       state = if a["enabled"], do: "", else: "  [disabled]"
       merged = if a["merged_into_id"], do: "  [merged -> #{a["merged_into_id"]}]", else: ""
       IO.puts("#{a["provider"]}:#{a["slug"]}  (#{a["id"]})#{ceiling}#{state}#{merged}")
+      Enum.each(a["credential_health"] || [], &emit_health_line/1)
     end)
   end
+
+  # bd-6y4pj6: a credential's kind, health and expiry, and — when it needs
+  # attention — the exact command that fixes it.
+  defp emit_health_line(c) do
+    IO.puts("    #{c["kind"]}  #{c["health"]}  #{health_expiry(c)}")
+    if c["relogin"], do: IO.puts("      fix: #{c["relogin"]}")
+  end
+
+  defp health_expiry(%{"expires_at" => at, "expiry" => "estimated"}) when is_binary(at),
+    do: "expires ~#{String.slice(at, 0, 10)} (estimated)"
+
+  defp health_expiry(%{"expires_at" => at}) when is_binary(at),
+    do: "expires #{String.slice(at, 0, 10)}"
+
+  defp health_expiry(_), do: "expiry unknown"
 
   # ---- show ------------------------------------------------------------
 
