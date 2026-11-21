@@ -1917,6 +1917,98 @@ defmodule WardmastCli.Cmd.DoctorTest do
       assert out =~ "arb account rotate claude:bare"
     end
 
+    # bd-6y4pj6
+    test "lists each account's credential kind, health and expiry" do
+      accounts = [
+        %{
+          "account" => "claude:default",
+          "health" => "ok",
+          "credentials" => [
+            %{
+              "kind" => "setup_token",
+              "health" => "ok",
+              "expiry" => "estimated",
+              "expires_at" => "2027-11-20T10:00:00Z"
+            }
+          ]
+        }
+      ]
+
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/claude_credentials"},
+             {%{"checked" => 1, "missing" => [], "accounts" => accounts}, 200}}
+          ]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Doctor.run(["--all"]) end)
+      assert exit_code == 0
+      assert out =~ "[ ok ] claude worker credentials"
+      assert out =~ "claude:default setup_token ok (expires ~2027-11-20)"
+    end
+
+    test "warns about an expiring credential and names the re-login command" do
+      accounts = [
+        %{
+          "account" => "claude:default",
+          "health" => "expiring",
+          "credentials" => [
+            %{
+              "kind" => "quota_grant",
+              "health" => "expiring",
+              "expiry" => "known",
+              "expires_at" => "2026-11-22T00:00:00Z",
+              "relogin" => "CLAUDE_CONFIG_DIR=/h/q claude auth login"
+            }
+          ]
+        }
+      ]
+
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/claude_credentials"},
+             {%{"checked" => 1, "missing" => [], "accounts" => accounts}, 200}}
+          ]
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "claude worker credentials"))
+      assert result.status == :warn
+      assert result.detail =~ "claude:default quota_grant expiring"
+      assert result.hint =~ "CLAUDE_CONFIG_DIR=/h/q claude auth login"
+      refute result.blocks_readiness
+    end
+
+    test "fails on a failing credential" do
+      accounts = [
+        %{
+          "account" => "claude:default",
+          "health" => "failing",
+          "credentials" => [
+            %{
+              "kind" => "quota_grant",
+              "health" => "failing",
+              "expiry" => "unknown",
+              "relogin" => "CLAUDE_CONFIG_DIR=/h/q claude auth login"
+            }
+          ]
+        }
+      ]
+
+      stub_routes(
+        base_routes() ++
+          [
+            {{"get", "/api/server/claude_credentials"},
+             {%{"checked" => 0, "missing" => [], "accounts" => accounts}, 200}}
+          ]
+      )
+
+      result = Enum.find(Checks.run(), &(&1.name == "claude worker credentials"))
+      assert result.status == :fail
+      assert result.hint =~ "claude auth login"
+    end
+
     test "never blocks readiness — a held workspace is not a broken server" do
       stub_routes(
         base_routes() ++

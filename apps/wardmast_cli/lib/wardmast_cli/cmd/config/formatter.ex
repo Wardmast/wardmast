@@ -51,7 +51,8 @@ defmodule WardmastCli.Cmd.Config.Formatter do
       "review" => Map.get(config, "review", %{}),
       "review_gate" => Map.get(config, "review_gate", %{}),
       "standing_orders" => Map.get(config, "standing_orders", []),
-      "secret_keys" => ws["secret_keys"] || []
+      "secret_keys" => ws["secret_keys"] || [],
+      "screenshots_safety" => screenshots_safety(config)
     }
   end
 
@@ -66,10 +67,38 @@ defmodule WardmastCli.Cmd.Config.Formatter do
       section("Routing", routing_lines(Map.get(config, "routing"))),
       section("Review", review_lines(config)),
       section("Standing orders", standing_order_lines(Map.get(config, "standing_orders"))),
+      section("Screenshots", screenshots_lines(config)),
       section("Secrets", secret_lines(ws["secret_keys"] || []))
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
+  end
+
+  # bd-995svb: a repo with a `screenshots` config and no `fixture_check` relies on capture
+  # isolation alone (design §9.4); the overview says so. Mirrors the server's
+  # `Wardmast.Screenshots.Config.safety_overview/1`.
+  defp screenshots_safety(config) do
+    worker = Map.get(config, "worker") || %{}
+    shared = if is_map(worker["screenshots"]), do: worker["screenshots"], else: %{}
+
+    for {repo, %{} = settings} <- Enum.sort(Map.get(worker, "repos") || %{}),
+        block =
+          Map.merge(
+            shared,
+            if(is_map(settings["screenshots"]), do: settings["screenshots"], else: %{})
+          ),
+        block != %{} and Map.get(block, "enabled", true) != false do
+      %{"repo" => repo, "fixture_check" => Map.has_key?(block, "fixture_check")}
+    end
+  end
+
+  defp screenshots_lines(config) do
+    for %{"repo" => repo, "fixture_check" => checked?} <- screenshots_safety(config) do
+      if checked?,
+        do: "#{repo}: fixture_check set",
+        else:
+          "#{repo}: NO fixture_check (relies on capture isolation alone; set screenshots.fixture_check.marker)"
+    end
   end
 
   defp section(_title, []), do: nil

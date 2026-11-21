@@ -731,4 +731,32 @@ defmodule Wardmast.Screenshots.ConfigTest do
       refute Config.matches_ui_path?(c, "assets/vendor/a.js")
     end
   end
+
+  describe "safety_overview/1 (bd-995svb)" do
+    test "flags a repo with no fixture_check and clears one that has it" do
+      marker = %{"marker" => %{"path" => "/health", "contains" => "data: fixture"}}
+
+      workspace =
+        ws(%{
+          "repos" => %{
+            "guarded" => %{"screenshots" => Map.put(@minimal, "fixture_check", marker)},
+            "open" => %{"screenshots" => @minimal},
+            "off" => %{"screenshots" => Map.put(@minimal, "enabled", false)},
+            "plain" => %{}
+          }
+        })
+
+      assert [
+               %{repo: "guarded", fixture_check: true, warnings: []},
+               %{repo: "open", fixture_check: false, warnings: [warning]}
+             ] = Config.safety_overview(workspace)
+
+      assert warning =~ "no fixture_check"
+    end
+
+    test "a workspace with no repos has nothing to flag" do
+      assert Config.safety_overview(ws(%{})) == []
+      assert Config.safety_overview(nil) == []
+    end
+  end
 end

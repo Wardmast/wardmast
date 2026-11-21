@@ -35,6 +35,21 @@ defmodule Wardmast.Quota.GrantRefresher do
   variables from its env, so the CLI authenticates off (and so refreshes)
   the grant file rather than a token the server happens to carry.
 
+  ## One refresher per grant
+
+  A rotating grant is refreshed by exactly one process (bd-6y4pj6): two
+  refreshers of one refresh token rotate each other out and invalidate the
+  grant, which is what blinded the quota poll on 2026-11-20. Within this
+  process the GenServer serialises every check; across processes (a second
+  node, a restarted server overlapping its predecessor) `refresh/3` takes an
+  exclusive lock — an atomic `mkdir` of `.refresh.lock` beside the grant —
+  before running the CLI, and re-reads the grant under it, so a consumer that
+  lost the race sees the winner's fresh `expiresAt` and does nothing. A lock
+  older than the CLI's hard timeout (plus slack) is a crashed holder's and is
+  taken over. Nothing else in Wardmast reads or writes this file for
+  authentication: sessions use the account's setup token
+  (`Wardmast.Sessions.AccountCredentials`), never a copy of it.
+
   ## Neutral cwd
 
   The CLI runs from `:cwd` (default `<scratch_root>/quota-grant-refresh`) —
@@ -191,11 +206,16 @@ defmodule Wardmast.Quota.GrantRefresher do
   # ---- checks ------------------------------------------------------------
 
   defp check_all(%State{} = state) do
-    paths = state.grants_fun.() |> Enum.map(& &1.path) |> Enum.uniq()
+    listed = state.grants_fun.()
+    account_ids = Map.new(listed, &{&1.path, Map.get(&1, :account_id)})
+    paths = listed |> Enum.map(& &1.path) |> Enum.uniq()
 
     grants =
       Map.new(paths, fn path ->
-        {path, check(path, Map.get(state.grants, path, fresh_entry()), state)}
+        entry =
+          state.grants |> Map.get(path, fresh_entry()) |> Map.put(:account_id, account_ids[path])
+
+        {path, check(path, entry, state)}
       end)
 
     %{state | grants: grants}
@@ -213,7 +233,8 @@ defmodule Wardmast.Quota.GrantRefresher do
       last_refresh_at: nil,
       last_failure_at: nil,
       escalated_failure?: false,
-      warned_refresh_token_expiry: nil
+      warned_refresh_token_expiry: nil,
+      account_id: nil
     }
   end
 
@@ -241,7 +262,7 @@ defmodule Wardmast.Quota.GrantRefresher do
 
     if ms_until(at) <= state.refresh_token_warning_ms and
          entry.warned_refresh_token_expiry != at do
-      escalate(grant.path, {:refresh_token_expiring, at})
+      escalate(grant.path, {:refresh_token_expiring, at}, entry.account_id)
       %{entry | warned_refresh_token_expiry: at}
     else
       entry
@@ -270,7 +291,47 @@ defmodule Wardmast.Quota.GrantRefresher do
 
   defp backing_off?(_entry, _state), do: false
 
-  defp refresh(entry, %GrantFile{path: path} = grant, state) do
+  defp refresh(entry, %GrantFile{path: path}, state) do
+    case acquire_lock(path, state) do
+      :ok ->
+        try do
+          refresh_locked(entry, path, state)
+        after
+          release_lock(path)
+        end
+
+      :busy ->
+        # Another process is refreshing this very grant right now; its result
+        # shows on the next tick. Neither a failure nor a second refresh.
+        Logger.debug("Wardmast.Quota.GrantRefresher: #{path} is being refreshed elsewhere")
+        entry
+    end
+  end
+
+  # Under the lock: the grant may have been renewed by whoever held it before
+  # us, so look again before spending a CLI run.
+  defp refresh_locked(entry, path, state) do
+    case GrantFile.read(path) do
+      {:ok, %GrantFile{expires_at: %DateTime{} = at} = grant} ->
+        if ms_until(at) > state.refresh_window_ms do
+          %{
+            recovered(entry)
+            | expires_at: at,
+              refresh_token_expires_at: grant.refresh_token_expires_at
+          }
+        else
+          run_refresh(entry, grant, state)
+        end
+
+      {:ok, grant} ->
+        run_refresh(entry, grant, state)
+
+      {:error, reason} ->
+        fail(entry, path, {:unreadable, reason})
+    end
+  end
+
+  defp run_refresh(entry, %GrantFile{path: path} = grant, state) do
     with {:ok, cwd} <- neutral_cwd(state),
          :ok <- run_cli(path, cwd, state),
          {:ok, renewed} <- reread(path),
@@ -299,7 +360,8 @@ defmodule Wardmast.Quota.GrantRefresher do
         inspect(reason)
     )
 
-    unless entry.escalated_failure?, do: escalate(path, {:refresh_failed, reason})
+    unless entry.escalated_failure?,
+      do: escalate(path, {:refresh_failed, reason}, entry.account_id)
 
     %{entry | status: :failing, last_failure_at: DateTime.utc_now(), escalated_failure?: true}
   end
@@ -320,6 +382,64 @@ defmodule Wardmast.Quota.GrantRefresher do
 
   defp expiry_moved(_before, _after),
     do: {:error, "the CLI ran but the grant's expiresAt did not move"}
+
+  # ---- the refresh lock --------------------------------------------------
+
+  defp lock_path(path), do: Path.join(GrantFile.config_dir(path), ".refresh.lock")
+
+  # `File.mkdir/1` is atomic: exactly one caller creates the directory.
+  defp acquire_lock(path, state) do
+    lock = lock_path(path)
+
+    case File.mkdir(lock) do
+      :ok ->
+        :ok
+
+      {:error, :eexist} ->
+        if lock_stale?(lock, state), do: take_over_stale_lock(lock, state), else: :busy
+
+      {:error, _} ->
+        :busy
+    end
+  end
+
+  # Two processes can both judge the lock stale. `rm_rf` then `mkdir` would let
+  # the second one delete the first one's fresh lock. A rename is atomic and
+  # only one caller's succeeds (the other gets `:enoent`), so only that caller
+  # goes on to `mkdir`. The renamed directory is re-checked: if the lock we
+  # moved turns out to be a fresh one (a rival took over between our stat and
+  # our rename), put it back and stand down.
+  defp take_over_stale_lock(lock, state) do
+    parked = "#{lock}.stale.#{System.unique_integer([:positive])}"
+
+    with :ok <- File.rename(lock, parked),
+         true <- lock_stale?(parked, state),
+         :ok <- File.mkdir(lock) do
+      _ = File.rm_rf(parked)
+      :ok
+    else
+      false ->
+        # We moved a live lock aside; restore it (best effort) and stand down.
+        _ = File.rename(parked, lock)
+        :busy
+
+      _ ->
+        :busy
+    end
+  end
+
+  defp release_lock(path), do: File.rm_rf(lock_path(path))
+
+  # A holder that outlived the CLI's own hard timeout is gone.
+  defp lock_stale?(lock, state) do
+    case File.stat(lock, time: :posix) do
+      {:ok, %File.Stat{mtime: mtime}} ->
+        System.os_time(:second) - mtime > div(state.cli_timeout_ms, 1000) + 60
+
+      _ ->
+        false
+    end
+  end
 
   # ---- the CLI run -------------------------------------------------------
 
@@ -377,15 +497,32 @@ defmodule Wardmast.Quota.GrantRefresher do
 
   # ---- escalation --------------------------------------------------------
 
-  defp escalate(path, cause) do
+  defp escalate(path, cause, account_id) do
     case primary_workspace_id() do
-      nil -> :ok
-      ws_id -> CoordinatorNotifier.quota_grant_failing(%{workspace_id: ws_id}, path, cause)
+      nil ->
+        :ok
+
+      ws_id ->
+        CoordinatorNotifier.quota_grant_failing(
+          %{workspace_id: ws_id, account: account_label(account_id)},
+          path,
+          cause
+        )
     end
   rescue
     e ->
       Logger.warning("Wardmast.Quota.GrantRefresher: escalation raised: #{Exception.message(e)}")
   end
+
+  # `claude:default` for the page, so it names the account and not just a dir.
+  defp account_label(id) when is_binary(id) do
+    case Wardmast.Accounts.get_account(id) do
+      {:ok, %{provider: provider, slug: slug}} -> "#{provider}:#{slug}"
+      _ -> nil
+    end
+  end
+
+  defp account_label(_), do: nil
 
   # The oldest workspace, as `Wardmast.Agents.CredentialWatchdog` picks it: the
   # grant is install-wide, so one stable mailbox per episode.

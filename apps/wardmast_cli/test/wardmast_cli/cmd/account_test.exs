@@ -22,6 +22,44 @@ defmodule WardmastCli.Cmd.AccountTest do
     assert out =~ "claude:personal-max  (acct-1)"
   end
 
+  # bd-6y4pj6: each account's credential kind, health and expiry, with the fix
+  # for an unhealthy one.
+  test "account list shows each credential's kind, health, expiry and the re-login command" do
+    stub_get("/api/accounts", %{
+      "data" => [
+        %{
+          "id" => "acct-1",
+          "provider" => "claude",
+          "slug" => "default",
+          "enabled" => true,
+          "credential_health" => [
+            %{
+              "kind" => "setup_token",
+              "health" => "ok",
+              "expiry" => "estimated",
+              "expires_at" => "2027-11-20T10:00:00Z",
+              "relogin" => nil
+            },
+            %{
+              "kind" => "quota_grant",
+              "health" => "failing",
+              "expiry" => "known",
+              "expires_at" => "2026-12-01T00:00:00Z",
+              "relogin" =>
+                "CLAUDE_CONFIG_DIR=/h/.arbiter/accounts/claude-default claude auth login"
+            }
+          ]
+        }
+      ]
+    })
+
+    {out, _err, exit_code} = capture(fn -> Account.run(["list"]) end)
+    assert exit_code == 0
+    assert out =~ "setup_token  ok  expires ~2027-11-20 (estimated)"
+    assert out =~ "quota_grant  failing  expires 2026-12-01"
+    assert out =~ "fix: CLAUDE_CONFIG_DIR=/h/.arbiter/accounts/claude-default claude auth login"
+  end
+
   test "account list with no accounts" do
     stub_get("/api/accounts", %{"data" => []})
     {out, _err, exit_code} = capture(fn -> Account.run(["list"]) end)

@@ -25,7 +25,7 @@ defmodule Wardmast.Test.CaptureStubBooter do
         {:ok,
          %{
            handle: {spec.role, spec.seed},
-           base_url: "http://127.0.0.1:1",
+           base_url: ctx[:base_url] || "http://127.0.0.1:1",
            app: %{port: 1, role: spec.role}
          }}
 

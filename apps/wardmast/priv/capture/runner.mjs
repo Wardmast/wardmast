@@ -7,7 +7,8 @@
 // `Wardmast.Screenshots.Capture.Shooter.Cdp` writes the spec and reads the answer: the LAST line
 // of stdout is one JSON object,
 //
-//   {"ok":true,"blocked":[...]}                              the image is at spec.out_file
+//   {"ok":true,"blocked":[...]}                              the image is at spec.out_file and the
+//                                                            page's text (JSON) at spec.text_file
 //   {"ok":false,"kind":"http_status","status":404}           the route answered >= 400
 //   {"ok":false,"kind":"shot","reason":"..."}                anything else (login, a step, ...)
 //
@@ -21,7 +22,7 @@
 // login does not succeed, or the shot's own navigation lands back on the sign-in page, the shot
 // fails with the reason.
 
-import { mkdtempSync, readFileSync, rmSync, unlinkSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -353,6 +354,11 @@ async function shoot(spec) {
         .evaluateAll((els) => els.forEach((e) => e.style.setProperty("visibility", "hidden", "important")))
     }
 
+    try {
+      await writeText(page, spec)
+    } catch (err) {
+      throw fail(`reading the page text failed: ${firstLine(err)}`)
+    }
     await capture(page, spec, shot, viewport)
     return { ok: true, blocked }
   } finally {
@@ -373,6 +379,28 @@ function assertStillLoggedIn(page, spec) {
         `persona may not open ${spec.path})`
     )
   }
+}
+
+// bd-995svb (design §9.5): what the page shows, as data for the host's data-safety scan: the
+// visible text (`innerText`), the `alt` / `title` / `placeholder` / `aria-label` attributes and the
+// value of every form field except a password. It goes to a file, never to stdout or the answer,
+// so what the page said is in no log; the host scans it and keeps only the rule that matched.
+async function writeText(page, spec) {
+  if (!spec.text_file) return
+  const texts = await page.evaluate(() => {
+    const out = [document.body ? document.body.innerText : ""]
+    for (const el of document.querySelectorAll("[alt],[title],[placeholder],[aria-label]")) {
+      for (const a of ["alt", "title", "placeholder", "aria-label"]) {
+        const v = el.getAttribute(a)
+        if (v) out.push(v)
+      }
+    }
+    for (const el of document.querySelectorAll("input,textarea,select")) {
+      if (el.type !== "password" && el.value) out.push(String(el.value))
+    }
+    return out
+  })
+  writeFileSync(spec.text_file, JSON.stringify(texts), { mode: 0o600 })
 }
 
 async function capture(page, spec, shot, viewport) {

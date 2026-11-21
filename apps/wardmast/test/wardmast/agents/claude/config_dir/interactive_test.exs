@@ -184,14 +184,14 @@ defmodule Wardmast.Agents.Claude.ConfigDir.InteractiveTest do
   end
 
   describe "auth modes (§8.1)" do
-    test "mode B copies the operator's credentials into the session config dir", %{
+    test "mode B never copies the operator's grant into the session config dir (bd-6y4pj6)", %{
       config: config,
       source: source,
       tmp: tmp
     } do
       File.write!(
         Path.join(source, ".credentials.json"),
-        ~s({"claudeAiOauth":{"accessToken":"sk-secret"}})
+        ~s({"claudeAiOauth":{"accessToken":"sk-secret","refreshToken":"sk-refresh"}})
       )
 
       assert :ok =
@@ -201,11 +201,27 @@ defmodule Wardmast.Agents.Claude.ConfigDir.InteractiveTest do
                  auth_mode: :seeded_credentials
                )
 
-      copied = Path.join(config, ".credentials.json")
-      assert File.exists?(copied)
-      # copied, never symlinked — both sides refresh it (§8.2)
-      assert {:ok, %{type: :regular}} = File.lstat(copied)
-      assert File.read!(copied) =~ "sk-secret"
+      # A copy of a rotating OAuth grant races the original on refresh and
+      # invalidates it; the session logs in itself instead.
+      refute File.exists?(Path.join(config, ".credentials.json"))
+    end
+
+    test "mode B leaves a login the session made itself alone", %{
+      config: config,
+      source: source,
+      tmp: tmp
+    } do
+      File.mkdir_p!(config)
+      File.write!(Path.join(config, ".credentials.json"), ~s({"own":"session-login"}))
+
+      assert :ok =
+               Interactive.ensure(config,
+                 cwd: Path.join(tmp, "workspace"),
+                 source_dir: source,
+                 auth_mode: :seeded_credentials
+               )
+
+      assert File.read!(Path.join(config, ".credentials.json")) =~ "session-login"
     end
 
     test "mode A never seeds credentials, and removes a stale copy", %{

@@ -157,6 +157,49 @@ grant ~/.claude/.credentials.json
   `loggedIn: true` at 48h (AC6). Record the observed sequence here, then
   replace the P2 caveat above.
 
+## Credential ownership (bd-6y4pj6)
+
+Re-logins should be about once per account per year. Two kinds of Claude
+credential exist, and each has exactly one owner:
+
+| Credential | Lifetime | Who holds it | Who may refresh it |
+| --- | --- | --- | --- |
+| Setup token (`claude setup-token`, an `:oauth_token` credential) | ~1 year, non-rotating | workers **and** coordinator/pair sessions | nobody — it does not rotate, so any number of processes can hold it |
+| Quota grant (`claude auth login` into a dir of its own, a `:cli_credentials_path` credential) | ~8h access token, rotating refresh token | the quota poller only | `Wardmast.Quota.GrantRefresher` only, behind a cross-process lock |
+
+**`/api/oauth/usage` does not accept the setup token.** Evidence (measured in
+earlier tasks, not re-measured here — a worker has no credential to spend):
+bd-4ag0nj got `429 rate_limit_error` with `Retry-After: 3600` for the setup
+token while the credentials-file token on the same account got `200` twelve
+seconds later; bd-b632tz re-sent it after a long idle and again 60 s after the
+`Retry-After` lapsed and got the same `429` with a fresh `Retry-After: 3600`
+each time (see "The setup token is refused on every request" above). So the
+poller cannot drop the rotating grant; it is made the grant's sole owner
+instead.
+
+**Sessions never hold a copy of the grant.** Before bd-6y4pj6 a mode-B session
+launched `account: <slug>` was seeded a copy of `<accounts_root>/claude-<slug>/
+.credentials.json` — the same file the quota poller's `:cli_credentials_path`
+pointed at and `GrantRefresher` refreshed. Two `claude` processes then held one
+refresh token. Whichever refreshed first rotated it, and the other's next
+refresh was refused. Now:
+
+* a session launched for an account authenticates with that account's setup
+  token (mode A, `CLAUDE_CODE_OAUTH_TOKEN` through the 0600 `auth.env`);
+* a workspace whose account carries a setup token defaults to mode A too;
+* Remote Control needs a real login (§8.3), so it stays mode B, and a mode-B
+  session logs in itself inside its own config dir — the session owns that
+  grant, nothing is copied (`ConfigDir.seed_credentials/2` is gone);
+* a session may not use the quota grant's dir as its config dir.
+
+**Health and warning.** `ward server doctor`, `ward account list`, the account
+API and the Providers dashboard show each credential's kind, health and expiry
+(`Wardmast.Accounts.CredentialHealth`). The setup token's expiry is estimated
+(creation + 365 days; Anthropic does not expose it). The quota grant's is its
+refresh token's `refreshTokenExpiresAt`. The first failed refresh sends one
+escalation naming the account and the exact `claude auth login` command, and
+the stale-snapshot alert names the failing credential as its likely cause.
+
 ## Response shape and mapping
 
 The endpoint returns quota data as JSON with these keys. They map to the

@@ -29,7 +29,11 @@ defmodule Wardmast.MCP.Tools.Accounts do
         [include_merged: include_merged, include_deleted: include_deleted]
         |> then(&if(provider, do: Keyword.put(&1, :provider, provider), else: &1))
 
-      accounts = opts |> Accounts.list_accounts() |> Enum.map(&Serializer.data/1)
+      accounts =
+        opts
+        |> Accounts.list_accounts()
+        |> Enum.map(&Serializer.data(&1, credential_health?: true))
+
       {:ok, %{accounts: accounts, count: length(accounts)}}
     end
   end
