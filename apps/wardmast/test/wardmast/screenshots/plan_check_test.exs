@@ -164,4 +164,69 @@ defmodule Wardmast.Screenshots.PlanCheckTest do
       assert PlanCheck.merge_gate(run, nil) == run
     end
   end
+
+  describe "strip_committed/2" do
+    defp commit_manifest(dir, body) do
+      write_plan(dir, body)
+      git(dir, ["add", "-f", ".arbiter/screenshots.json"])
+      git(dir, ["commit", "-q", "-m", "manifest"])
+    end
+
+    test "removes a committed manifest from the branch but keeps the file", %{dir: dir} do
+      git(dir, ["checkout", "-q", "-b", "feat"])
+      commit_manifest(dir, @valid)
+
+      assert :stripped = PlanCheck.strip_committed(dir, "main")
+      {tree, 0} = System.cmd("git", ["ls-tree", "-r", "--name-only", "HEAD"], cd: dir)
+      refute tree =~ "screenshots.json"
+      assert File.read!(Path.join(dir, ".arbiter/screenshots.json")) == @valid
+      assert :clean = PlanCheck.strip_committed(dir, "main")
+    end
+
+    test "ignores commit signing and hooks", %{dir: dir} do
+      git(dir, ["checkout", "-q", "-b", "feat"])
+      commit_manifest(dir, @valid)
+      git(dir, ["config", "commit.gpgsign", "true"])
+      git(dir, ["config", "gpg.program", "/bin/false"])
+      hook = Path.join(dir, ".git/hooks/pre-commit")
+      File.mkdir_p!(Path.dirname(hook))
+      File.write!(hook, "#!/bin/sh\nexit 1\n")
+      File.chmod!(hook, 0o755)
+
+      assert :stripped = PlanCheck.strip_committed(dir, "main")
+    end
+
+    test "a failing commit errors and restores the index", %{dir: dir} do
+      git(dir, ["checkout", "-q", "-b", "feat"])
+      commit_manifest(dir, @valid)
+      File.write!(Path.join(dir, ".git/refs/heads/feat.lock"), "")
+
+      assert {:error, msg} = PlanCheck.strip_committed(dir, "main")
+      assert msg =~ "screenshots.json"
+      {tree, 0} = System.cmd("git", ["ls-tree", "-r", "--name-only", "HEAD"], cd: dir)
+      assert tree =~ "screenshots.json"
+      {status, 0} = System.cmd("git", ["status", "--porcelain"], cd: dir)
+      refute status =~ "D  "
+    end
+
+    test "leaves a manifest the target already carries", %{dir: dir} do
+      commit_manifest(dir, @skip)
+      git(dir, ["checkout", "-q", "-b", "feat"])
+      assert :clean = PlanCheck.strip_committed(dir, "main")
+    end
+
+    test "two branches with their own manifest merge without a conflict", %{dir: dir} do
+      for {b, body} <- [{"a", @valid}, {"b", @skip}] do
+        git(dir, ["checkout", "-q", "-b", b, "main"])
+        commit_manifest(dir, body)
+        assert :stripped = PlanCheck.strip_committed(dir, "main")
+      end
+
+      git(dir, ["checkout", "-q", "main"])
+      git(dir, ["merge", "-q", "--no-edit", "a"])
+      git(dir, ["merge", "-q", "--no-edit", "b"])
+      {tree, 0} = System.cmd("git", ["ls-tree", "-r", "--name-only", "HEAD"], cd: dir)
+      refute tree =~ "screenshots.json"
+    end
+  end
 end

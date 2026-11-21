@@ -5917,24 +5917,27 @@ defmodule Wardmast.Worker do
       is_binary(worktree) and File.dir?(worktree) and
         (ctx in [:fix_pass, :revise] or worktree_on_branch?(worktree, branch))
 
-    if runnable?, do: resolve_prepush_spec(prepush_workspace(state, ctx), state.repo)
+    if runnable?,
+      do: resolve_prepush_spec(prepush_workspace(state, ctx), state.repo, worktree, meta)
   end
 
-  defp resolve_prepush_spec(workspace, repo) do
+  defp resolve_prepush_spec(workspace, repo, worktree, meta) do
+    target = Map.get(meta || %{}, :target_branch) || "main"
+
     case Wardmast.Worker.PrepushCheck.resolve(workspace, repo) do
-      nil -> screenshots_only_spec(workspace, repo)
+      nil -> screenshots_only_spec(workspace, repo, worktree, target)
       spec -> spec
     end
   end
 
-  # A repo with a screenshots config but no pre-push recipe still gets the plan check at `arb done`.
-  defp screenshots_only_spec(workspace, repo) do
-    case Wardmast.Screenshots.Config.resolve(workspace, repo) do
-      {:ok, _config} ->
-        %{screenshots_only: true, steps: [], timeout_seconds: 60, on_timeout: :proceed}
+  # A repo with no pre-push recipe still gets the `arb done` housekeeping pass: the screenshots
+  # plan check when configured, and the strip of a committed manifest when one is tracked
+  # (bd-5r2twb). Otherwise there is nothing to run and completion stays synchronous.
+  defp screenshots_only_spec(workspace, repo, worktree, target) do
+    configured? = match?({:ok, _}, Wardmast.Screenshots.Config.resolve(workspace, repo))
 
-      _ ->
-        nil
+    if configured? or Wardmast.Screenshots.PlanCheck.committed?(worktree, target) do
+      %{screenshots_only: true, steps: [], timeout_seconds: 60, on_timeout: :proceed}
     end
   end
 
@@ -5959,6 +5962,31 @@ defmodule Wardmast.Worker do
 
   defp prepush_view(meta), do: meta
 
+  # The `arb done` pass: recipe steps, strip of a committed manifest (bd-5r2twb), plan gate.
+  defp run_prepush(spec, worktree, run_opts, screenshots, target, task_id) do
+    base =
+      if Map.get(spec, :screenshots_only),
+        do: %{result: :ok, steps: []},
+        else: Wardmast.Worker.PrepushCheck.run_steps(spec, worktree, run_opts)
+
+    strip = Wardmast.Screenshots.PlanCheck.strip_committed(worktree, target)
+
+    gate =
+      if screenshots,
+        do: Wardmast.Screenshots.PlanCheck.gate(screenshots, worktree, target, task_id)
+
+    merged = Wardmast.Screenshots.PlanCheck.merge_gate(base, gate)
+
+    case strip do
+      {:error, msg} ->
+        Logger.warning("Worker: task=#{task_id} #{msg}")
+        %{merged | result: {:failed, nil, msg}}
+
+      _ ->
+        merged
+    end
+  end
+
   defp start_prepush_task(%State{meta: meta} = state, ctx, spec) do
     me = self()
     ref = make_ref()
@@ -5970,19 +5998,8 @@ defmodule Wardmast.Worker do
     task_id = state.task_id
 
     run = fn ->
-      base =
-        if Map.get(spec, :screenshots_only),
-          do: %{result: :ok, steps: []},
-          else: Wardmast.Worker.PrepushCheck.run_steps(spec, worktree, run_opts)
-
-      gate =
-        if screenshots,
-          do: Wardmast.Screenshots.PlanCheck.gate(screenshots, worktree, target, task_id)
-
-      send(
-        me,
-        {:__prepush_result__, ref, ctx, Wardmast.Screenshots.PlanCheck.merge_gate(base, gate)}
-      )
+      merged = run_prepush(spec, worktree, run_opts, screenshots, target, task_id)
+      send(me, {:__prepush_result__, ref, ctx, merged})
     end
 
     case Task.Supervisor.start_child(Wardmast.TaskSupervisor, run) do
