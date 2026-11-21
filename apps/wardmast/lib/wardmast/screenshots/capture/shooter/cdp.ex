@@ -111,6 +111,7 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
       "base_url" => spec.base_url,
       "path" => spec.path,
       "out_file" => spec.out_file,
+      "text_file" => Map.get(spec, :text_file),
       "timeout_ms" => spec.timeout_s * 1000,
       "fixed_time" => @fixed_time,
       "viewport" => spec.viewport,
@@ -257,12 +258,16 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
   defp run(tools, chrome, login, spec, sandbox, app) do
     dir = spec.scratch
     shot = Path.join(dir, "shot.png")
+    text = Path.join(dir, "text.json")
     home = Path.join(dir, "home")
     spec_file = Path.join(dir, "cdp-spec.json")
     File.mkdir_p!(home)
 
     try do
-      write_spec(spec_file, build_spec(%{spec | out_file: shot}, chrome, login))
+      write_spec(
+        spec_file,
+        build_spec(Map.merge(spec, %{out_file: shot, text_file: text}), chrome, login)
+      )
       argv = [tools.node, tools.runner, spec_file]
 
       with {:ok, boxed} <- boxed(sandbox, argv, app, dir, [tools.dir, chrome]) do
@@ -270,7 +275,7 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
         {exec, args} = Chromium.with_timeout(env ++ boxed, spec.timeout_s * 2 + 10)
 
         {out, code} = ReleaseEnv.cmd(exec, args, stderr_to_stdout: true)
-        interpret(out, code, shot, spec.out_file)
+        interpret(out, code, shot, spec.out_file, text)
       end
     after
       File.rm_rf(dir)
@@ -299,10 +304,10 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
 
   # The runner's answer is the last line of output that is a JSON object with an `ok` key. No such
   # line is never a success, whatever the exit status.
-  defp interpret(out, code, shot, out_file) do
+  defp interpret(out, code, shot, out_file, text_file) do
     case answer(out) do
       %{"ok" => true} ->
-        collect(shot, out_file)
+        collect(shot, out_file, text_file)
 
       %{"ok" => false, "kind" => "http_status", "status" => status} when is_integer(status) ->
         {:error, {:http_status, status}}
@@ -333,13 +338,29 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
   # The image the runner left in the shot's own directory, copied out only when it is a plain
   # file: a symlink there (to a host file the page wanted posted) is never followed. A runner that
   # said "ok" and left no image is a failed shot, never a silent success.
-  defp collect(shot, out_file) do
+  defp collect(shot, out_file, text_file) do
     with {:ok, %File.Stat{type: :regular}} <- File.lstat(shot),
-         {:ok, data} <- File.read(shot) do
+         {:ok, data} <- File.read(shot),
+         {:ok, texts} <- page_text(text_file) do
       File.write!(out_file, data)
-      :ok
+      {:ok, %{text: texts}}
     else
-      _ -> {:error, {:shot, "the capture runner reported success but left no image"}}
+      _ ->
+        {:error,
+         {:shot, "the capture runner reported success but left no image or no page text"}}
+    end
+  end
+
+  # The page text the runner wrote (bd-995svb), read like the image: a regular file only. A runner
+  # that said "ok" without it scanned nothing, which is a failed shot.
+  defp page_text(path) do
+    with {:ok, %File.Stat{type: :regular}} <- File.lstat(path),
+         {:ok, raw} <- File.read(path),
+         {:ok, [_ | _] = texts} <- Jason.decode(raw),
+         true <- Enum.all?(texts, &is_binary/1) do
+      {:ok, texts}
+    else
+      _ -> :error
     end
   end
 end
