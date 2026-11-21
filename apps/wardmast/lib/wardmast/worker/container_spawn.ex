@@ -1255,9 +1255,9 @@ defmodule Wardmast.Worker.ContainerSpawn do
     end
   end
 
-  # A prebuilt image is overlaid and pushed by the primary: only a node that runs the
-  # published image can run it, a cluster or (SI4) a machine node that pulls it. A
-  # node that builds its own image has nothing to pull it from.
+  # A prebuilt image is overlaid and pushed by the primary: only a node that can take
+  # the published image (`Image.Source.choose/3`: a cluster, or a machine node that can
+  # pull from the repo's registry) can run it.
   defp prebuilt_node(%{source: :prebuilt}, repo, node, ctx, opts) do
     case node_source(node, ctx, opts) do
       {:error, _} -> {:error, {:prebuilt_needs_registry, repo}}

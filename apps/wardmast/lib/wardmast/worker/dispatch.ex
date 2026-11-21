@@ -3347,13 +3347,13 @@ defmodule Wardmast.Worker.Dispatch do
   # first. Do that here, before the run is committed to the node, so a publish
   # that times out or fails is a placement decision (`Publisher.fallback/2`)
   # rather than a spawn failure: `prefer_remote` runs on the primary,
-  # `remote_only` is held. A node that builds its own image skips this.
+  # `remote_only` is held.
   defp image_gate(%Issue{} = task, workspace, request, node, opts, gate_opts) do
     repo = Keyword.get(opts, :repo)
 
     image_opts =
       [workspace: workspace, repo: repo, publish: image_publish_opts(opts)] ++
-        Keyword.take(opts, [:image, :provider, :plan])
+        Keyword.take(opts, [:image, :provider, :plan, :image_source])
 
     case publish_image(task, repo, node, image_opts) do
       :ok ->

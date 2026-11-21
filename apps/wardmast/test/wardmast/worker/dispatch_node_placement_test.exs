@@ -626,6 +626,50 @@ defmodule Wardmast.Worker.DispatchNodePlacementTest do
 
       assert Placement.reservations() == []
     end
+
+    test "preflight_image threads :image_source through image_gate like the spawn does (bd-85cmso)" do
+      ws = workspace!(%{"worker" => %{"placement" => "remote_only"}})
+      issue = ready!(ws, "remote only on a pulling machine node")
+
+      machine_row = %{
+        id: "n-machine",
+        name: "oryx",
+        kind: :machine,
+        state: :online,
+        health: :ready,
+        max: 2,
+        live: 0,
+        workspace_ids: [],
+        labels: [],
+        caps: %{"image" => "registry", "image_sources" => ["registry"]}
+      }
+
+      image_source = [
+        config: %{
+          registry: "install.example.com/arb",
+          username: "pusher",
+          password: "PUSH-install",
+          pull_username: "reader",
+          pull_password: "PULL-install"
+        },
+        workspaces: []
+      ]
+
+      opts =
+        @podman ++
+          [
+            nodes: [machine_row],
+            image: "localhost/arbiter-dev/x:abc",
+            publish: Wardmast.DispatchImageStub.publish(),
+            image_source: image_source
+          ]
+
+      assert {:ok, %{worker_pid: pid}} = dispatch(issue, opts)
+      assert is_pid(pid)
+
+      assert %{node_id: "n-machine"} =
+               Enum.find(Wardmast.Worker.Registry.live_dispatches(), &(&1.pid == pid))
+    end
   end
 
   describe "worker.placement: remote_only, but the run cannot go remote" do
