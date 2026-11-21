@@ -1179,11 +1179,17 @@ defmodule WardmastCli.Cmd.Doctor.Checks do
   # configured the check passes: guardrails are off, not broken.
   defp check_guardrails do
     case Client.get("/api/server/guardrails") do
-      {:ok, %{"active" => false, "issues" => []}} ->
+      {:ok, %{"active" => false, "issues" => []} = body} ->
+        off = "no subject rules configured, so guardrails are off and nothing is tiered"
+
         %Result{
           name: "guardrail profiles",
           status: :ok,
-          detail: "no subject rules configured, so guardrails are off and nothing is tiered",
+          detail:
+            case guardrail_token_detail(Map.get(body, "workspaces") || []) do
+              "" -> off
+              tokens -> off <> "; " <> tokens
+            end,
           blocks_readiness: false
         }
 
