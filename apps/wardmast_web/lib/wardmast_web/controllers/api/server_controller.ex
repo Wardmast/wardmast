@@ -47,6 +47,10 @@ defmodule WardmastWeb.Api.ServerController do
       kind, health and expiry (`Wardmast.Accounts.CredentialHealth`, bd-6y4pj6).
       A failed read is a 500, so the doctor reports "could not check" rather
       than a false all-clear.
+    * `GET /api/server/worker_trust` — configured repo paths the worker Claude
+      profile's `.claude.json` has not trusted (`hasTrustDialogAccepted`), so the
+      repo's own `permissions.allow` is ignored (bd-3ipnbp,
+      `Wardmast.Doctor.WorkerTrust`).
     * `GET /api/server/agy_models` — the configured agy tier models (built-in
       defaults plus each agy workspace role's `tier_models` override) checked
       against a fresh `agy models` listing (bd-7wx2lh,
@@ -246,6 +250,8 @@ defmodule WardmastWeb.Api.ServerController do
   # bd-6zuoo6: is the per-worker memory cap in force, and what does the
   # server's own unit do when the kernel OOM-kills one of its processes?
   def worker_memory(conn, _params), do: json(conn, MemoryDiagnosis.run())
+
+  def worker_trust(conn, _params), do: json(conn, Wardmast.Doctor.WorkerTrust.report())
 
   def tmux(conn, _params), do: json(conn, LoginRunner.tmux_diagnosis())
 

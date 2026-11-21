@@ -211,6 +211,7 @@ defmodule WardmastCli.Cmd.DoctorTest do
     "/api/server/tmux",
     "/api/server/worker_jail_unmask",
     "/api/server/worker_memory",
+    "/api/server/worker_trust",
     "/api/server/worker_tmp"
   ]
 
@@ -2279,6 +2280,53 @@ defmodule WardmastCli.Cmd.DoctorTest do
 
       result = Enum.find(Checks.run(), &(&1.name == "worker temp dir"))
       assert result.status == :ok
+    end
+  end
+
+  # bd-3ipnbp: repos whose trust the worker Claude profile never accepted.
+  describe "worker repo trust check" do
+    defp trust_result(body) do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+        {{"get", "/api/repos"}, {@repos_resp, 200}},
+        {{"get", "/api/version"}, {matching_version_resp(), 200}},
+        {{"get", "/api/server/migrations"}, {%{"status" => "ok", "pending_count" => 0}, 200}},
+        {{"get", "/api/server/worker_trust"}, {body, 200}}
+      ])
+
+      Enum.find(Checks.run(), &(&1.name == "worker repo trust"))
+    end
+
+    test "all repos trusted is ok" do
+      r = trust_result(%{"checked" => 2, "untrusted" => [], "profile_present" => true})
+      assert r.status == :ok
+    end
+
+    test "untrusted repos are listed with the fix" do
+      r =
+        trust_result(%{
+          "config_dir" => "/cfg",
+          "checked" => 2,
+          "untrusted" => ["/r/b"],
+          "profile_present" => true
+        })
+
+      assert r.status == :warn
+      assert r.detail =~ "/r/b"
+      assert r.hint =~ "hasTrustDialogAccepted"
+    end
+
+    test "missing profile is a warn that says so" do
+      r =
+        trust_result(%{
+          "config_dir" => "/cfg",
+          "checked" => 1,
+          "untrusted" => ["/r/a"],
+          "profile_present" => false
+        })
+
+      assert r.status == :warn
+      assert r.detail =~ "no .claude.json in /cfg"
     end
   end
 
