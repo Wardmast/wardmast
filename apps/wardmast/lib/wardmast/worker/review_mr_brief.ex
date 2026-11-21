@@ -10,7 +10,9 @@ defmodule Wardmast.Worker.ReviewMrBrief do
 
   alias Wardmast.Worker.ReviewCi
 
-  @max_body 4_000
+  # bd-9isy6t: the description is kept head + tail. A PR's test plan / run-loop
+  # evidence sits at the END of the body, which a head-only 4_000-byte cut dropped.
+  @max_body 8_000
   @max_tail 1_500
   @max_jobs 8
 
@@ -51,7 +53,7 @@ defmodule Wardmast.Worker.ReviewMrBrief do
   @doc "Render an MR map (`:body`, `:pipeline`) and failed checks as a prompt block."
   @spec render(map(), [map()]) :: String.t()
   def render(mr, checks) do
-    body = mr |> Map.get(:body) |> blank_to("(empty)") |> head(@max_body)
+    body = mr |> Map.get(:body) |> blank_to("(empty)") |> head_tail(@max_body)
 
     jobs =
       case checks do
@@ -84,10 +86,15 @@ defmodule Wardmast.Worker.ReviewMrBrief do
   defp blank_to(v, _d) when is_binary(v), do: v
   defp blank_to(_v, d), do: d
 
-  defp head(s, max) when byte_size(s) > max,
-    do: Wardmast.Text.head_bytes(s, max) <> "\n[...truncated]"
+  defp head_tail(s, max) when byte_size(s) > max do
+    half = div(max, 2)
+    head = Wardmast.Text.head_bytes(s, half)
+    tail = Wardmast.Text.tail_bytes(s, half)
+    omitted = byte_size(s) - byte_size(head) - byte_size(tail)
+    head <> "\n[...truncated #{omitted} bytes...]\n" <> tail
+  end
 
-  defp head(s, _max), do: s
+  defp head_tail(s, _max), do: s
 
   defp tail(s, max) when byte_size(s) > max,
     do: "[...truncated]\n" <> Wardmast.Text.tail_bytes(s, max)
