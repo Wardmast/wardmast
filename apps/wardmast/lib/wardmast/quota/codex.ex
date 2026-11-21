@@ -71,6 +71,8 @@ defmodule Wardmast.Quota.Codex do
   require Ash.Query
 
   alias Wardmast.Accounts.Resolver
+  alias Wardmast.Agents.Codex.AuthSync
+  alias Wardmast.Agents.Codex.AuthSync.Reaper
   alias Wardmast.Agents.Codex.ConfigDir
   alias Wardmast.Quota.CodexPlanWindows
   alias Wardmast.Quota.CodexQuota
@@ -790,43 +792,67 @@ defmodule Wardmast.Quota.Codex do
     case request_refresh(refresh_token, opts) do
       {:ok, 200, %{"access_token" => new_access} = body}
       when is_binary(new_access) and new_access != "" ->
-        rotated = %{
-          access_token: new_access,
-          refresh_token: non_empty_string(body["refresh_token"]) || refresh_token,
-          id_token: non_empty_string(body["id_token"])
-        }
-
-        case maybe_persist_refreshed_auth(
-               real,
-               before_doc,
-               creds.access_token,
-               refresh_token,
-               rotated
-             ) do
-          {:ok, adopted} ->
-            {:ok, Map.put(adopted, :source_path, source_path)}
-
-          :persist_failed ->
-            :transient_error
-        end
+        handle_file_refresh_success(
+          real,
+          source_path,
+          before_doc,
+          creds,
+          refresh_token,
+          new_access,
+          body
+        )
 
       {:ok, status, _body} when status in [400, 401, 403] ->
-        sync_tracked_runs_into_source(real)
-
-        case read_auth_doc(real) do
-          {:ok, _doc, disk_creds}
-          when disk_creds.access_token != creds.access_token or
-                 disk_creds.refresh_token != refresh_token ->
-            # A running worker rotated auth.json on disk while our refresh was in
-            # flight, causing our old refresh token to be rejected.
-            {:ok, Map.put(disk_creds, :source_path, source_path)}
-
-          _ ->
-            :auth_expired
-        end
+        handle_file_refresh_rejected(real, source_path, creds, refresh_token)
 
       _other ->
         :transient_error
+    end
+  end
+
+  defp handle_file_refresh_success(
+         real,
+         source_path,
+         before_doc,
+         creds,
+         refresh_token,
+         new_access,
+         body
+       ) do
+    rotated = %{
+      access_token: new_access,
+      refresh_token: non_empty_string(body["refresh_token"]) || refresh_token,
+      id_token: non_empty_string(body["id_token"])
+    }
+
+    case maybe_persist_refreshed_auth(
+           real,
+           before_doc,
+           creds.access_token,
+           refresh_token,
+           rotated
+         ) do
+      {:ok, adopted} ->
+        {:ok, Map.put(adopted, :source_path, source_path)}
+
+      :persist_failed ->
+        :transient_error
+    end
+  end
+
+  defp handle_file_refresh_rejected(real, source_path, creds, refresh_token) do
+    sync_tracked_runs_into_source(real)
+
+    case read_auth_doc(real) do
+      {:ok, _doc, disk_creds}
+      when disk_creds.access_token != creds.access_token or
+             disk_creds.refresh_token != refresh_token ->
+        # A running worker rotated auth.json on disk while our refresh was in
+        # flight, causing our old refresh token to be rejected.
+        {:ok, Map.put(disk_creds, :source_path, source_path)}
+
+      _ ->
+        :auth_expired
     end
   end
 
@@ -876,16 +902,16 @@ defmodule Wardmast.Quota.Codex do
   end
 
   defp sync_tracked_runs_into_source(real) do
-    for run <- Wardmast.Agents.Codex.AuthSync.Reaper.runs_for_source(real) do
-      _ = Wardmast.Agents.Codex.AuthSync.sync(real, run)
+    for run <- Reaper.runs_for_source(real) do
+      _ = AuthSync.sync(real, run)
     end
 
     :ok
   end
 
   defp pull_source_into_tracked_runs(real) do
-    for run <- Wardmast.Agents.Codex.AuthSync.Reaper.runs_for_source(real) do
-      _ = Wardmast.Agents.Codex.AuthSync.pull(real, run)
+    for run <- Reaper.runs_for_source(real) do
+      _ = AuthSync.pull(real, run)
     end
 
     :ok
