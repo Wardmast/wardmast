@@ -5954,6 +5954,31 @@ defmodule Wardmast.Worker do
 
   defp prepush_view(meta), do: meta
 
+  # The `arb done` pass: recipe steps, strip of a committed manifest (bd-5r2twb), plan gate.
+  defp run_prepush(spec, worktree, run_opts, screenshots, target, task_id) do
+    base =
+      if Map.get(spec, :screenshots_only),
+        do: %{result: :ok, steps: []},
+        else: Wardmast.Worker.PrepushCheck.run_steps(spec, worktree, run_opts)
+
+    strip = Wardmast.Screenshots.PlanCheck.strip_committed(worktree, target)
+
+    gate =
+      if screenshots,
+        do: Wardmast.Screenshots.PlanCheck.gate(screenshots, worktree, target, task_id)
+
+    merged = Wardmast.Screenshots.PlanCheck.merge_gate(base, gate)
+
+    case strip do
+      {:error, msg} ->
+        Logger.warning("Worker: task=#{task_id} #{msg}")
+        %{merged | result: {:failed, nil, msg}}
+
+      _ ->
+        merged
+    end
+  end
+
   defp start_prepush_task(%State{meta: meta} = state, ctx, spec) do
     me = self()
     ref = make_ref()
@@ -5965,29 +5990,7 @@ defmodule Wardmast.Worker do
     task_id = state.task_id
 
     run = fn ->
-      base =
-        if Map.get(spec, :screenshots_only),
-          do: %{result: :ok, steps: []},
-          else: Wardmast.Worker.PrepushCheck.run_steps(spec, worktree, run_opts)
-
-      strip = Wardmast.Screenshots.PlanCheck.strip_committed(worktree, target)
-
-      gate =
-        if screenshots,
-          do: Wardmast.Screenshots.PlanCheck.gate(screenshots, worktree, target, task_id)
-
-      merged = Wardmast.Screenshots.PlanCheck.merge_gate(base, gate)
-
-      merged =
-        case strip do
-          {:error, msg} ->
-            Logger.warning("Worker: task=#{task_id} #{msg}")
-            %{merged | result: {:failed, nil, msg}}
-
-          _ ->
-            merged
-        end
-
+      merged = run_prepush(spec, worktree, run_opts, screenshots, target, task_id)
       send(me, {:__prepush_result__, ref, ctx, merged})
     end
 
