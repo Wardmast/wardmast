@@ -450,7 +450,8 @@ defmodule Wardmast.Screenshots.Capture do
         target = %{
           base_url: base_url,
           app: Map.get(booted, :app),
-          shots: Path.join(work, "shots")
+          shots: Path.join(work, "shots"),
+          handle: handle
         }
 
         try do
@@ -547,14 +548,57 @@ defmodule Wardmast.Screenshots.Capture do
   end
 
   defp shoot_all(st, spec, target, group) do
-    Enum.reduce_while(group, {:ok, %{}}, fn entry, {:ok, acc} ->
-      with :ok <- check_budget(st),
-           {:ok, outcome} <- shoot_one(st, spec, target, entry) do
-        {:cont, {:ok, Map.put(acc, key(entry), outcome)}}
-      else
-        {:error, _} = error -> {:halt, error}
+    with :ok <- recheck_ready(st, spec, target) do
+      Enum.reduce_while(group, {:ok, %{}}, fn entry, {:ok, acc} ->
+        with :ok <- check_budget(st),
+             {:ok, outcome} <- shoot_one(st, spec, target, entry) do
+          {:cont, {:ok, Map.put(acc, key(entry), outcome)}}
+        else
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  # The boot proved the app answered once; it may have crashed since (bd-b2e1ev). Probe again
+  # right before this side's first navigation, so a dead app is reported as "app not ready" (with
+  # its output) rather than as whatever the browser made of a refused or empty response.
+  defp recheck_ready(st, spec, target) do
+    if function_exported?(st.booter, :ready, 2) do
+      case safe_call(fn -> st.booter.ready(spec, target.handle) end, :ok) do
+        :ok ->
+          :ok
+
+        {:error, detail} ->
+          {:error,
+           Failure.new(
+             :app_not_ready,
+             "the app is not ready at the #{describe_role(spec.role)}, before its first shot: #{detail_text(detail)}",
+             role: spec.role,
+             detail: detail_text(detail),
+             server_log: server_log(st, spec, target)
+           )}
       end
-    end)
+    else
+      :ok
+    end
+  end
+
+  defp server_log(st, spec, target) do
+    if function_exported?(st.booter, :log_tail, 2) do
+      case safe_call(fn -> st.booter.log_tail(spec, target.handle) end, nil) do
+        log when is_binary(log) and log != "" -> String.replace_invalid(log)
+        _ -> nil
+      end
+    end
+  end
+
+  defp safe_call(fun, default) do
+    fun.()
+  rescue
+    _ -> default
+  catch
+    :exit, _ -> default
   end
 
   defp shoot_one(st, spec, target, entry) do
@@ -587,9 +631,15 @@ defmodule Wardmast.Screenshots.Capture do
 
     try do
       case call_shooter(st.shooter, shot) do
-        :ok -> image(out_file, name, role, entry)
-        {:error, {:http_status, 404}} -> {:ok, :absent}
-        {:error, reason} -> {:error, shot_failure(reason, role, entry, path)}
+        :ok ->
+          image(out_file, name, role, entry)
+
+        {:error, {:http_status, 404}} ->
+          {:ok, :absent}
+
+        {:error, reason} ->
+          failure = shot_failure(reason, role, entry, path)
+          {:error, %{failure | server_log: server_log(st, spec, target)}}
       end
     after
       File.rm_rf(scratch)

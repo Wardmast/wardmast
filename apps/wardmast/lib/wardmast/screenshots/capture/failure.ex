@@ -11,13 +11,14 @@ defmodule Wardmast.Screenshots.Capture.Failure do
   | `:checkout_failed` | a commit's source tree could not be extracted |
   | `:boot_failed` | the app did not boot at `role` (`detail` = phase and output; for a capture service that did not come up, phase `:services` with the service, reason and its log tail) |
   | `:deps_failed` | the offline Mix deps cache (`deps.mix`) could not be built (bd-3glf2a) |
+  | `:app_not_ready` | the booted app stopped answering before the side's first navigation (`server_log` has its output tail) |
   | `:route_error` | a route answered with an error status (or was missing at both commits) |
   | `:shot_failed` | the browser step failed (a selector, a timeout, a crash) |
   | `:budget_exceeded` | the pass ran out of its `budget_seconds` |
   """
 
   @enforce_keys [:code, :message]
-  defstruct [:code, :message, :role, :shot, :detail]
+  defstruct [:code, :message, :role, :shot, :detail, :server_log]
 
   @type code ::
           :manifest_missing
@@ -26,6 +27,7 @@ defmodule Wardmast.Screenshots.Capture.Failure do
           | :checkout_failed
           | :boot_failed
           | :deps_failed
+          | :app_not_ready
           | :route_error
           | :shot_failed
           | :budget_exceeded
@@ -35,7 +37,8 @@ defmodule Wardmast.Screenshots.Capture.Failure do
           message: String.t(),
           role: String.t() | nil,
           shot: String.t() | nil,
-          detail: term()
+          detail: term(),
+          server_log: String.t() | nil
         }
 
   @doc "Build a failure; `fields` are `:role`, `:shot`, `:detail`."
@@ -51,7 +54,8 @@ defmodule Wardmast.Screenshots.Capture.Failure do
       "message" => String.replace_invalid(f.message),
       "role" => f.role,
       "shot" => f.shot,
-      "detail" => json(f.detail)
+      "detail" => json(f.detail),
+      "server_log" => json(f.server_log)
     }
   end
 

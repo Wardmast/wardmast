@@ -136,6 +136,36 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
       assert spec["login"]["success"] == %{"url_not_contains" => "/sign-in"}
     end
 
+    test "post_login_path is rendered from the persona's fields and the shot's path", %{
+      tmp_dir: dir
+    } do
+      login =
+        @login
+        |> Map.put(
+          "post_login_path",
+          "/switch-tenant/{{persona.tenant_id}}?return_to={{return_to}}"
+        )
+        |> put_in(["personas", "admin", "tenant_id"], "t 1")
+
+      spec =
+        Cdp.build_spec(shot(dir, %{login: login, path: "/reports?a=b"}), "/c")
+
+      assert spec["login"]["post_login_path"] == "/switch-tenant/t+1?return_to=%2Freports%3Fa%3Db"
+    end
+
+    test "post_login_path naming a field the persona lacks refuses the shot", %{tmp_dir: dir} do
+      login = Map.put(@login, "post_login_path", "/switch-tenant/{{persona.tenant_id}}")
+
+      assert {:error, {:shot, msg}} = Cdp.shoot(shot(dir, %{login: login}))
+      assert msg =~ "persona.tenant_id"
+    end
+
+    test "a persona's password is never a post_login_path value", %{tmp_dir: dir} do
+      login = Map.put(@login, "post_login_path", "/x/{{persona.password}}")
+      assert {:error, {:shot, msg}} = Cdp.shoot(shot(dir, %{login: login}))
+      assert msg =~ "persona.password"
+    end
+
     test "no login block when the config has none", %{tmp_dir: dir} do
       spec = Cdp.build_spec(shot(dir, %{login: %{"kind" => "none"}}), "/c")
       assert spec["login"] == nil
@@ -371,6 +401,46 @@ defmodule Wardmast.Screenshots.Capture.Shooter.CdpTest do
     end
 
     defp png?(dir), do: File.read!(Path.join(dir, "shot.png")) =~ "PNG"
+
+    # The default capture dir may hold an older runner; test the one in this tree.
+    defp tree_ctx(dir) do
+      tools = Path.join(dir, "tools")
+      File.mkdir_p!(tools)
+
+      File.cp!(
+        Application.app_dir(:wardmast, "priv/capture/runner.mjs"),
+        Path.join(tools, "runner.mjs")
+      )
+
+      src =
+        System.get_env("ARB_CAPTURE_DIR") || Application.app_dir(:wardmast, "priv/capture")
+
+      for sub <- ~w(node_modules bin),
+          File.exists?(Path.join(src, sub)),
+          do: File.ln_s!(Path.join(src, sub), Path.join(tools, sub))
+
+      %{capture_dir: tools}
+    end
+
+    test "a multi-tenant persona selects its tenant after login, then lands on the route", ctx do
+      route = %{path: "/reports", entry: %{wait_for: %{"selector" => "#reports"}}}
+      ctx_map = tree_ctx(ctx.dir)
+
+      # Without the knob the shot is the tenant picker: #reports never shows.
+      assert {:error, {:shot, msg}} = real(ctx, Map.put(route, :ctx, ctx_map))
+      assert msg =~ "wait_for"
+
+      login =
+        @login
+        |> Map.put(
+          "post_login_path",
+          "/switch-tenant/{{persona.tenant_id}}?return_to={{return_to}}"
+        )
+        |> put_in(["personas", "admin", "tenant_id"], "harbor")
+
+      assert :ok = real(ctx, Map.merge(route, %{login: login, ctx: ctx_map}))
+      assert png?(ctx.dir)
+    end
 
     test "correct credentials reach the route and shoot it", ctx do
       assert :ok = real(ctx, %{})

@@ -9,6 +9,8 @@ defmodule Wardmast.Test.CdpFixtureApp do
       so the browser never leaves the login path.
     * `GET /home` needs the cookie (else redirects to `/login`) and shows the date it is rendered
       with; `#open` reveals `#panel`; `#stamp` carries a time-dependent value to hide.
+    * `GET /reports` shows `#picker` (\"Select an Organization\") until `GET /switch-tenant/:id?return_to=`
+      set the tenant cookie; then it shows `#reports`.
     * `GET /tall` is a page of 3000 px. `GET /boom` answers 500. `GET /expired` bounces to
       `/login` even with the cookie (a session that does not hold). `GET /outside` tries to load
       an image from a non-loopback host.
@@ -77,6 +79,29 @@ defmodule Wardmast.Test.CdpFixtureApp do
       """)
     else
       redirect(conn, "/login")
+    end
+  end
+
+  # A multi-tenant persona: /reports shows a tenant picker until /switch-tenant/:id chose one.
+  get "/switch-tenant/:id" do
+    if logged_in?(conn) do
+      to = Map.get(fetch_query_params(conn).query_params, "return_to", "/home")
+      conn |> put_resp_cookie("tenant", id) |> redirect(to)
+    else
+      redirect(conn, "/login")
+    end
+  end
+
+  get "/reports" do
+    cond do
+      not logged_in?(conn) ->
+        redirect(conn, "/login")
+
+      tenant = fetch_cookies(conn).req_cookies["tenant"] ->
+        html(conn, ~s(<h1 id="reports">Reports for #{tenant}</h1>))
+
+      true ->
+        html(conn, ~s(<h1 id="picker">Select an Organization</h1>))
     end
   end
 

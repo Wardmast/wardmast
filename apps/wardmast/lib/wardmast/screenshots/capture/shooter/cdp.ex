@@ -130,8 +130,9 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
 
   defp login(%{config: %{login: %{"kind" => kind}}}) when kind in [nil, "none"], do: {:ok, nil}
 
-  defp login(%{config: %{login: %{"kind" => "form"} = login}, entry: entry}) do
-    with {:ok, persona, creds} <- persona(login, entry) do
+  defp login(%{config: %{login: %{"kind" => "form"} = login}, entry: entry} = spec) do
+    with {:ok, persona, creds} <- persona(login, entry),
+         {:ok, post} <- post_login_path(login, persona, creds, spec) do
       {:ok,
        Map.merge(
          Map.take(login, ~w(kind path username_selector password_selector submit_selector)),
@@ -139,7 +140,8 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
            "persona" => persona,
            "username" => creds["username"],
            "password" => creds["password"],
-           "success" => Config.login_success(login)
+           "success" => Config.login_success(login),
+           "post_login_path" => post
          }
        )}
     end
@@ -150,6 +152,32 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Cdp do
      {:shot,
       "login.kind #{inspect(kind)} is not supported by the CDP shooter (only \"form\" and \"none\")"}}
   end
+
+  # `login.post_login_path` with `{{persona.<key>}}` (a string field of the persona) and
+  # `{{return_to}}` (the shot's path) filled in, each URL-encoded. A reference the persona cannot
+  # satisfy refuses the shot rather than opening a half-filled path.
+  defp post_login_path(%{"post_login_path" => template}, name, creds, spec)
+       when is_binary(template) do
+    vars = creds |> Map.drop(["username", "password"]) |> Map.put("return_to", spec.path)
+
+    Regex.scan(~r/\{\{\s*([^}]*?)\s*\}\}/, template)
+    |> Enum.reduce_while({:ok, template}, fn [whole, ref], {:ok, acc} ->
+      key = String.replace_prefix(ref, "persona.", "")
+
+      case Map.get(vars, key) do
+        value when is_binary(value) and value != "" ->
+          {:cont, {:ok, String.replace(acc, whole, URI.encode_www_form(value))}}
+
+        _ ->
+          {:halt,
+           {:error,
+            {:shot,
+             "login.post_login_path needs {{#{ref}}}, which persona #{inspect(name)} does not set"}}}
+      end
+    end)
+  end
+
+  defp post_login_path(_login, _name, _creds, _spec), do: {:ok, nil}
 
   defp persona(login, entry) do
     personas = login["personas"] || %{}
