@@ -208,7 +208,7 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
     argv = [chrome | dump_argv(spec, profile)]
 
     with {:ok, boxed} <- boxed(sandbox, argv, app, spec.scratch) do
-      {exec, args} = with_timeout(env ++ boxed, spec.timeout_s)
+      {exec, args} = (env ++ boxed) |> with_timeout(spec.timeout_s) |> discard_stderr()
 
       case ReleaseEnv.cmd(exec, args) do
         {html, 0} when html != "" ->
@@ -219,6 +219,13 @@ defmodule Wardmast.Screenshots.Capture.Shooter.Chromium do
       end
     end
   end
+
+  # The browser's stderr (console and log lines can quote what the page shows) is thrown away
+  # inside the child instead of inheriting the coordinator's own stderr and journal: only the DOM
+  # on stdout is read, and only through the scan's text reduction. `exec "$@"` runs the argv as
+  # given; nothing is parsed by the shell.
+  defp discard_stderr({exec, args}),
+    do: {"/bin/sh", ["-c", ~s(exec "$@" 2>/dev/null), "sh", exec | args]}
 
   # `argv/2` with the screenshot swapped for a DOM dump (the URL stays last).
   defp dump_argv(spec, profile) do

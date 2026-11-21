@@ -179,7 +179,7 @@ defmodule Wardmast.Screenshots.Capture.Safety do
 
     opts =
       [retry: false, redirect: false, receive_timeout: 5_000, request_timeout: 15_000] ++
-        [into: &collect/2] ++ reach
+        [into: &collect/2, decode_body: false, raw: true] ++ reach
 
     case Req.get(url, opts) do
       {:ok, %{status: 200, body: body}} when is_binary(body) ->

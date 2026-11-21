@@ -104,6 +104,21 @@ defmodule Wardmast.Screenshots.Capture.SafetyTest do
       assert :ok == Safety.probe_marker(cfg, "http://127.0.0.1:#{port}", [])
     end
 
+    test "an application/json marker endpoint passes (the body is read raw, never decoded)",
+         %{port: port} do
+      cfg = config(%{"path" => "/health.json", "contains" => ~s("data":"fixture")})
+      assert :ok == Safety.probe_marker(cfg, "http://127.0.0.1:#{port}", [])
+
+      miss = config(%{"path" => "/health.json", "contains" => ~s("data":"real")})
+      assert {:error, reason} = Safety.probe_marker(miss, "http://127.0.0.1:#{port}", [])
+      assert reason =~ "did not contain"
+    end
+
+    test "a JSON body cut off at the read cap still probes", %{port: port} do
+      cfg = config(%{"path" => "/health-long.json", "contains" => ~s("data":"fixture")})
+      assert :ok == Safety.probe_marker(cfg, "http://127.0.0.1:#{port}", [])
+    end
+
     test "a mismatch is an error that names the path but never the body", %{port: port} do
       cfg = config(%{"path" => "/health", "contains" => "data: nonsense"})
       assert {:error, reason} = Safety.probe_marker(cfg, "http://127.0.0.1:#{port}", [])
