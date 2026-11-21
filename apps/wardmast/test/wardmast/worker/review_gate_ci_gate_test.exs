@@ -994,6 +994,22 @@ defmodule Wardmast.Worker.ReviewGateCiGateTest do
     end
   end
 
+  describe "skipped CI on a head Wardmast deliberately CI-skipped (#1564)" do
+    test "the gate leaves it to the merge queue and starts no pipeline", ctx do
+      rig = rig(ctx, "feature/ci-skipped-3")
+      start_forge(ctx, rig, [:skipped])
+
+      :ok = Wardmast.Tasks.PullRequest.record_ci_skipped_head(rig.task.id, rig.head)
+
+      gate = start_gate(rig, ctx, revise_command: [@revise_commit], rounds: 3)
+
+      wait_until(fn -> awaiting_ci?(gate) end, 20_000)
+
+      assert StubMerger.ci_reruns() == []
+      assert passes(rig) == 0
+    end
+  end
+
   describe "cancelled CI (#360)" do
     test "cancelled then green on the re-run proceeds to the reviewer, no fix round", ctx do
       rig = rig(ctx, "feature/ci-cancel-1")

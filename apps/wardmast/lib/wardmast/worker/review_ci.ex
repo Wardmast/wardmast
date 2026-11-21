@@ -613,16 +613,17 @@ defmodule Wardmast.Worker.ReviewCi do
   """
   @spec retarget(wait(), String.t()) :: wait()
   def retarget(wait, sha),
-    do: %{
-      wait
-      | sha: sha,
-        rerun: nil,
-        not_started: 0,
-        unavailable: 0,
-        infra_reruns: 0,
-        infra_rerun_at: nil,
-        skip_triggers: 0
-    }
+    do:
+      %{
+        wait
+        | sha: sha,
+          rerun: nil,
+          not_started: 0,
+          unavailable: 0,
+          infra_reruns: 0,
+          infra_rerun_at: nil
+      }
+      |> Map.put(:skip_triggers, 0)
 
   @doc "Record that the failed jobs were re-run at the wait's current poll."
   @spec rerun_started(wait(), [map()]) :: wait()
