@@ -440,7 +440,7 @@ enum Claim {
     /// written, so a second shell cannot slip in between.
     Fresh(Option<LaunchLock>),
     /// A live release of the right version owns the data home: connect to it.
-    Adopt { pid: u32, port: u16 },
+    Adopt(Record),
     /// A release (or something with its pid) holds the data home and cannot be
     /// adopted or replaced. Starting another server would risk the database, so
     /// the launch fails with this reason instead.
@@ -450,9 +450,11 @@ enum Claim {
 
 /// Decide, under the launch lock, whether this launch may start a release.
 ///
-/// * no record, or a record whose pid is dead (stale: cleaned up) -> `Fresh`
-/// * live pid that answers `/api/version` with the expected version -> `Adopt`
-/// * live pid with a different version -> stopped (SIGTERM, so the server
+/// * no record, or a record whose pid is dead or now has a different start time
+///   (reused by an unrelated process; stale: cleaned up) -> `Fresh`
+/// * the recorded process, answering `/api/version` with the expected version
+///   -> `Adopt`
+/// * the recorded process with a different version -> stopped (SIGTERM, so the server
 ///   drains its own workers; SIGKILL only after `stop_grace`), then `Fresh`
 /// * live pid that never answers, or answers as something that is not a
 ///   release -> `Refused`. The pid may have been reused by an unrelated
@@ -490,7 +492,9 @@ fn claim(config: &Config, shared: &Shared, rx: &Receiver<Cmd>) -> Claim {
     // boot window) answers only once ready, so wait for it while its pid lives.
     let deadline = Instant::now() + config.ready_timeout;
     let version = loop {
-        if !release_lock::pid_alive(rec.pid) {
+        if !rec.holds_process() {
+            // Dead, or the pid now belongs to an unrelated process (reused):
+            // either way no release holds the data home.
             release_lock::remove(home); // stale
             return Claim::Fresh(Some(lock));
         }
@@ -537,10 +541,7 @@ fn claim(config: &Config, shared: &Shared, rx: &Receiver<Cmd>) -> Claim {
         None => true,
     };
     if same {
-        return Claim::Adopt {
-            pid: rec.pid,
-            port: rec.port,
-        };
+        return Claim::Adopt(rec);
     }
 
     shared.publish(State::Restarting {
@@ -551,8 +552,12 @@ fn claim(config: &Config, shared: &Shared, rx: &Receiver<Cmd>) -> Claim {
             config.expected_version.as_deref().unwrap_or("?")
         ),
     });
-    stop_pid(rec.pid, config.stop_grace);
-    if release_lock::pid_alive(rec.pid) {
+    // Drain-aware: SIGTERM, then wait. A Quit during the wait is answered at
+    // once (the old release keeps draining; it is not killed on the way out).
+    if let Stopped::Interrupted(reply) = stop_pid(&rec, config, Some(rx)) {
+        return Claim::Stop(reply);
+    }
+    if rec.holds_process() {
         return Claim::Refused(format!(
             "could not stop the running release {version} (pid {})",
             rec.pid
@@ -562,21 +567,46 @@ fn claim(config: &Config, shared: &Shared, rx: &Receiver<Cmd>) -> Claim {
     Claim::Fresh(Some(lock))
 }
 
+enum Stopped {
+    Done(StopOutcome),
+    /// A `Cmd::Stop` arrived while waiting (only when polling `rx`). SIGTERM was
+    /// already sent, so the release keeps shutting down on its own; it is not
+    /// SIGKILLed on the shell's way out.
+    Interrupted(Sender<StopOutcome>),
+}
+
 /// Stop a release this process did not spawn (no `Child` to wait on): SIGTERM,
-/// give the server its own graceful shutdown (it drains workers) for `grace`,
-/// then SIGKILL the group and the pid.
-fn stop_pid(pid: u32, grace: Duration) -> StopOutcome {
-    if !release_lock::pid_alive(pid) {
-        return StopOutcome::NotRunning;
+/// give the server its own graceful shutdown (it drains workers) for
+/// `config.stop_grace`, then SIGKILL the group and the pid.
+///
+/// Nothing is signalled unless `rec.holds_process()`: the pid must still be the
+/// process that was recorded, never an unrelated process that reused the number.
+/// With `rx`, a `Cmd::Stop` ends the wait early (the launch lock is held while
+/// this runs, and Quit must stay answerable).
+fn stop_pid(rec: &Record, config: &Config, rx: Option<&Receiver<Cmd>>) -> Stopped {
+    if !rec.holds_process() {
+        return Stopped::Done(StopOutcome::NotRunning);
     }
-    let p = pid as libc::pid_t;
+    let p = rec.pid as libc::pid_t;
     unsafe { libc::kill(p, libc::SIGTERM) };
-    let deadline = Instant::now() + grace;
+    let deadline = Instant::now() + config.stop_grace;
     while Instant::now() < deadline {
-        if !release_lock::pid_alive(pid) {
-            return StopOutcome::Graceful;
+        if !rec.holds_process() {
+            return Stopped::Done(StopOutcome::Graceful);
         }
-        thread::sleep(Duration::from_millis(20));
+        match rx {
+            Some(rx) => match rx.recv_timeout(config.poll_interval) {
+                Ok(Cmd::Stop(reply)) => return Stopped::Interrupted(reply),
+                Ok(Cmd::Retry) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Stopped::Interrupted(mpsc::channel().0)
+                }
+            },
+            None => thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    if !rec.holds_process() {
+        return Stopped::Done(StopOutcome::Graceful);
     }
     // The release was started in its own process group (pgid == pid).
     unsafe {
@@ -584,12 +614,12 @@ fn stop_pid(pid: u32, grace: Duration) -> StopOutcome {
         libc::kill(p, libc::SIGKILL);
     }
     for _ in 0..100 {
-        if !release_lock::pid_alive(pid) {
+        if !rec.holds_process() {
             break;
         }
         thread::sleep(Duration::from_millis(20));
     }
-    StopOutcome::Killed
+    Stopped::Done(StopOutcome::Killed)
 }
 
 enum Adopted {
@@ -597,10 +627,10 @@ enum Adopted {
     Stop(Sender<StopOutcome>),
 }
 
-/// Watch an adopted release (no `Child` handle) by its pid.
-fn monitor_pid(pid: u32, config: &Config, rx: &Receiver<Cmd>) -> Adopted {
+/// Watch an adopted release (no `Child` handle) by its recorded identity.
+fn monitor_pid(rec: &Record, config: &Config, rx: &Receiver<Cmd>) -> Adopted {
     loop {
-        if !release_lock::pid_alive(pid) {
+        if !rec.holds_process() {
             return Adopted::Gone;
         }
         match rx.recv_timeout(config.poll_interval) {
@@ -650,15 +680,19 @@ fn run(config: Config, shared: Arc<Shared>, rx: Receiver<Cmd>) {
                 }
                 continue;
             }
-            Claim::Adopt { pid, port } => {
+            Claim::Adopt(rec) => {
+                let (pid, port) = (rec.pid, rec.port);
                 last_port = Some(port);
                 boot_failures = 0;
                 let up_since = Instant::now();
                 shared.publish(State::Running { port });
-                match monitor_pid(pid, &config, &rx) {
+                match monitor_pid(&rec, &config, &rx) {
                     Adopted::Stop(reply) => {
                         shared.publish(State::Stopping);
-                        let outcome = stop_pid(pid, config.stop_grace);
+                        let outcome = match stop_pid(&rec, &config, None) {
+                            Stopped::Done(outcome) => outcome,
+                            Stopped::Interrupted(_) => StopOutcome::NotRunning,
+                        };
                         clear_record(&config, pid);
                         finish(&shared, reply, outcome);
                         return;
@@ -733,6 +767,7 @@ fn run(config: Config, shared: Arc<Shared>, rx: Receiver<Cmd>) {
                 pid,
                 port,
                 version: config.expected_version.clone(),
+                start_time: release_lock::start_time(pid),
             };
             if let Err(e) = release_lock::write(home, &record) {
                 release.stop(Duration::from_millis(500));

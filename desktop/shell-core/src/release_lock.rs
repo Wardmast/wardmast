@@ -5,7 +5,7 @@
 //! would find the port taken, pick another one and start a SECOND server on
 //! the same data home. Two files in the data home prevent that:
 //!
-//! * `desktop-release.json`, `{"pid":…,"port":…,"version":…}`, written
+//! * `desktop-release.json`, `{"pid":…,"port":…,"version":…,"start_time":…}`, written
 //!   (atomically) right after the shell spawns a release and removed when the
 //!   shell stops it. A record whose pid is alive means "a release owns this
 //!   data home".
@@ -37,6 +37,11 @@ pub struct Record {
     /// The version the shell expected when it started the release (the live
     /// `GET /api/version` answer, not this field, decides adopt vs. replace).
     pub version: Option<String>,
+    /// The release process's start time (`start_time(pid)`) when it was
+    /// recorded. It is the identity of the process: a pid alone can be reused by
+    /// an unrelated process after the release dies, and the shell must never
+    /// adopt or signal that. `None` only when it could not be read.
+    pub start_time: Option<String>,
 }
 
 impl Record {
@@ -45,8 +50,27 @@ impl Record {
             "pid": self.pid,
             "port": self.port,
             "version": self.version,
+            "start_time": self.start_time,
         })
         .to_string()
+    }
+
+    /// The record names this very process: its pid is running and its start
+    /// time still matches the recorded one. A different start time means the
+    /// pid was reused, so the record is stale.
+    ///
+    /// A record with no start time (it could not be read when written) cannot
+    /// be told apart, so it falls back to "the pid is running".
+    pub fn holds_process(&self) -> bool {
+        if !pid_alive(self.pid) {
+            return false;
+        }
+        match (&self.start_time, start_time(self.pid)) {
+            (Some(recorded), Some(now)) => *recorded == now,
+            // The process vanished while we looked.
+            (Some(_), None) => false,
+            (None, _) => true,
+        }
     }
 
     /// `None` for anything that is not a well-formed record. A pid of 0 or 1
@@ -63,6 +87,10 @@ impl Record {
             port,
             version: v
                 .get("version")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
+            start_time: v
+                .get("start_time")
                 .and_then(|x| x.as_str())
                 .map(str::to_string),
         })
@@ -144,6 +172,37 @@ pub fn pid_alive(pid: u32) -> bool {
     exists && !is_zombie(pid)
 }
 
+/// An opaque identity for the running process `pid`: its start time. Two
+/// processes that ever had the same pid never share it.
+///
+/// Linux: field 22 of `/proc/<pid>/stat` (clock ticks since boot). Elsewhere
+/// (macOS): `ps -o lstart=` with a fixed locale. `None` when the process does
+/// not exist or the platform tool is unavailable.
+#[cfg(target_os = "linux")]
+pub fn start_time(pid: u32) -> Option<String> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // `pid (comm) state ppid ...`: comm may contain ')', so split on the last
+    // one. What follows starts at field 3 (state); starttime is field 22.
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.split_whitespace().nth(19).map(str::to_string)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn start_time(pid: u32) -> Option<String> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
 #[cfg(target_os = "linux")]
 fn is_zombie(pid: u32) -> bool {
     // /proc/<pid>/stat is `pid (comm) S …`; comm may contain ')' so split on
@@ -214,6 +273,7 @@ mod tests {
             pid: 4242,
             port: 4848,
             version: Some("1.2.3".into()),
+            start_time: Some("123456".into()),
         };
         write(&home, &rec).unwrap();
         assert_eq!(read(&home), Some(rec));
@@ -261,6 +321,7 @@ mod tests {
             pid: 4242,
             port: 1,
             version: None,
+            start_time: None,
         };
         write(&home, &rec).unwrap();
         remove_if_pid(&home, 9999);
@@ -287,6 +348,46 @@ mod tests {
         let pid = child.id();
         child.wait().unwrap();
         assert!(!pid_alive(pid), "reaped child");
+    }
+
+    #[test]
+    fn start_time_identifies_a_process_and_is_gone_with_it() {
+        let own = start_time(std::process::id()).expect("own start time");
+        assert_eq!(start_time(std::process::id()), Some(own));
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let theirs = start_time(child.id()).expect("child start time");
+        assert!(!theirs.is_empty());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(start_time(child.id()), None, "reaped");
+    }
+
+    #[test]
+    fn a_record_holds_its_process_only_while_the_start_time_matches() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let mut rec = Record {
+            pid,
+            port: 1,
+            version: None,
+            start_time: start_time(pid),
+        };
+        assert!(rec.holds_process());
+        // The same pid with another start time is a reused pid: stale.
+        rec.start_time = Some("not-this-process".into());
+        assert!(!rec.holds_process());
+        // No recorded start time: only the pid can be checked.
+        rec.start_time = None;
+        assert!(rec.holds_process());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!rec.holds_process(), "dead pid");
     }
 
     #[test]

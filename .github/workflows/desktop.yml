@@ -1,0 +1,62 @@
+# Desktop shell lifecycle core (bd-d6jdq8, PKG 26): runs `cargo test` for
+# `desktop/shell-core`, the crate that supervises the bundled release and keeps
+# a second server off the data home (pidfile + launch lock). Its tests are the
+# acceptance tests for adopt / stale / version-mismatch / two-shells-at-once.
+#
+# PATH-FILTERED. Wardmast's merger treats every check run on the PR head as part
+# of the pipeline (see the NOTE in ci.yml), so this job is only started for PRs
+# that touch the desktop shell or this file; any other PR gets no check run from
+# it. Because it can gate a merge it must stay deterministic: no `|| true`, no
+# warning-only steps.
+#
+# `src-tauri` is not built here: it needs webkit2gtk / Xcode and is not a
+# workspace member (see desktop/Cargo.toml). `shell-core` has no GUI deps.
+name: Desktop shell
+
+on:
+  pull_request:
+    paths:
+      - "desktop/**"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup ships on the runner image; select stable with rustfmt.
+      - name: Install Rust (stable)
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+          cargo --version
+          rustc --version
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/target
+          key: desktop-${{ runner.os }}-${{ hashFiles('desktop/Cargo.lock') }}
+          restore-keys: desktop-${{ runner.os }}-
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Test
+        run: cargo test -p arbiter-shell-core

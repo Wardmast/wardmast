@@ -4,7 +4,7 @@ mod common;
 
 use arbiter_shell_core::release_lock::{self, Record};
 use arbiter_shell_core::supervisor::{State, StopOutcome, Supervisor};
-use common::{free_port, spawn_orphan, spawn_silent_holder, Fake, WAIT};
+use common::{free_port, spawn_fake, spawn_orphan, spawn_silent_holder, spawn_sleeper, Fake, WAIT};
 use std::process::Command;
 use std::time::Duration;
 
@@ -59,6 +59,7 @@ fn a_stale_pidfile_is_cleaned_up_and_a_fresh_release_starts() {
             pid: dead_pid,
             port: free_port(),
             version: None,
+            start_time: None,
         },
     )
     .unwrap();
@@ -112,7 +113,10 @@ fn a_release_that_ignores_sigterm_is_killed_only_after_the_grace() {
     fake.enable_data_home();
     fake.config.expected_version = Some("2.0.0".into());
     fake.config.stop_grace = Duration::from_millis(500);
-    let old = spawn_orphan(&fake, &[("FAKE_VERSION", "1.0.0"), ("FAKE_IGNORE_TERM", "1")]);
+    let old = spawn_orphan(
+        &fake,
+        &[("FAKE_VERSION", "1.0.0"), ("FAKE_IGNORE_TERM", "1")],
+    );
 
     let sup = Supervisor::start(fake.config.clone());
     sup.wait_for(WAIT, running).expect("replacement is up");
@@ -172,4 +176,98 @@ fn two_shells_launched_at_once_start_exactly_one_server() {
     // before it is stopped too. Both end up stopped either way.
     b.stop();
     a.stop();
+}
+
+/// The recorded release died and an unrelated process reused its pid, while a
+/// different server (`foreign_version`) answers on the recorded port. The shell
+/// must treat the record as stale: signal neither the reused pid nor the
+/// foreign server, adopt nothing, and start its own release.
+fn assert_reused_pid_is_not_touched(name: &str, expected: &str, foreign_version: &str) {
+    let mut fake = Fake::new(name, &[("FAKE_VERSION", expected)]);
+    fake.enable_data_home();
+    fake.config.expected_version = Some(expected.into());
+    let foreign_log = fake.log.with_file_name("foreign.log");
+    let _ = std::fs::remove_file(&foreign_log);
+
+    let foreign = spawn_fake(&foreign_log, &[("FAKE_VERSION", foreign_version)]);
+    let reused = spawn_sleeper();
+    release_lock::write(
+        &fake.data_home,
+        &Record {
+            pid: reused.pid,
+            port: foreign.port,
+            version: None,
+            // Not the start time of `reused`: the pid now belongs to someone else.
+            start_time: Some("start-time-of-the-dead-release".into()),
+        },
+    )
+    .unwrap();
+
+    let sup = Supervisor::start(fake.config.clone());
+    let port = port_of(&sup.wait_for(WAIT, running).expect("its own release"));
+
+    assert_ne!(port, foreign.port, "adopted a server it did not start");
+    assert_eq!(fake.starts(), 1, "log: {:?}", fake.log_lines());
+    let rec = release_lock::read(&fake.data_home).expect("new record");
+    assert_ne!(rec.pid, reused.pid);
+    assert_ne!(rec.pid, foreign.pid);
+    assert_eq!(rec.port, port);
+
+    // Nothing was signalled: both are still running and the foreign server
+    // never saw SIGTERM.
+    assert!(release_lock::pid_alive(reused.pid), "reused pid was signalled");
+    assert!(release_lock::pid_alive(foreign.pid), "foreign server was signalled");
+    let foreign_lines: Vec<String> = std::fs::read_to_string(&foreign_log)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        foreign_lines,
+        vec![format!("start port={}", foreign.port)],
+        "foreign server was told to stop"
+    );
+
+    assert_eq!(sup.stop(), StopOutcome::Graceful);
+    assert!(release_lock::pid_alive(reused.pid), "reused pid killed on quit");
+    assert!(release_lock::pid_alive(foreign.pid), "foreign server killed on quit");
+}
+
+#[test]
+fn a_reused_pid_with_another_version_on_its_port_is_not_signalled() {
+    assert_reused_pid_is_not_touched("reused-mismatch", "2.0.0", "1.0.0");
+}
+
+#[test]
+fn a_reused_pid_with_the_same_version_on_its_port_is_not_adopted() {
+    assert_reused_pid_is_not_touched("reused-same", "1.0.0", "1.0.0");
+}
+
+#[test]
+fn quit_during_a_version_mismatch_replacement_is_answered_at_once() {
+    // The old release takes far longer to drain than the test is willing to wait.
+    let mut fake = Fake::new("mismatch-quit", &[("FAKE_VERSION", "2.0.0")]);
+    fake.enable_data_home();
+    fake.config.expected_version = Some("2.0.0".into());
+    fake.config.stop_grace = Duration::from_secs(30);
+    let old = spawn_orphan(
+        &fake,
+        &[("FAKE_VERSION", "1.0.0"), ("FAKE_TERM_DELAY_MS", "2000")],
+    );
+
+    let sup = Supervisor::start(fake.config.clone());
+    // The shell is replacing the old release: it has sent SIGTERM and waits.
+    sup.wait_for(WAIT, |s| matches!(s, State::Restarting { .. }))
+        .expect("replacing");
+
+    let started = std::time::Instant::now();
+    assert_eq!(sup.stop(), StopOutcome::NotRunning);
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "Quit waited out the grace period: {:?}",
+        started.elapsed()
+    );
+    // No second server was started, and the draining one was not SIGKILLed.
+    assert_eq!(fake.starts(), 1, "log: {:?}", fake.log_lines());
+    drop(old);
 }

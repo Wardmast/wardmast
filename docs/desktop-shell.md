@@ -105,7 +105,7 @@ data home**. `release_lock.rs` plus the supervisor's `claim` step prevent that
 it from `WARDMAST_DATA_HOME` / `ARB_DATA_HOME` / `~/.wardmast`, the same chain as
 `Wardmast.Env.data_home/0`, and passes it on to the release).
 
-* **Pidfile** `<data home>/desktop-release.json` = `{"pid","port","version"}`,
+* **Pidfile** `<data home>/desktop-release.json` = `{"pid","port","version","start_time"}`,
   written atomically right after the shell spawns the release (before readiness)
   and removed when the shell stops it or sees it exit. If the record cannot be
   written the launch fails (the protection would be gone).
@@ -120,10 +120,10 @@ it from `WARDMAST_DATA_HOME` / `ARB_DATA_HOME` / `~/.wardmast`, the same chain a
   | Record | Action |
   | --- | --- |
   | none / unreadable | start a release |
-  | pid dead (stale) | delete the record, start a release |
-  | pid alive, `/api/version` reports the expected version | **adopt**: show the dashboard on the recorded port, start nothing |
-  | pid alive, different version | SIGTERM it, wait up to `stop_grace` for its own orderly shutdown (workers drain, 15 s each), SIGKILL the group only after that, then start the new release |
-  | pid alive, never answers (`ready_timeout`) or answers as something other than a release | **refuse**: `BootFailed` naming the pid and the pidfile. Never started a second server, never killed a pid on a guess (it may have been reused by an unrelated process) |
+  | pid dead, or alive with a different start time (the pid was reused by an unrelated process) | stale: delete the record, start a release; the reused pid is never signalled and whatever answers on the recorded port is never adopted |
+  | pid is the recorded process, `/api/version` reports the expected version | **adopt**: show the dashboard on the recorded port, start nothing |
+  | pid is the recorded process, different version | SIGTERM it, wait up to `stop_grace` for its own orderly shutdown (workers drain, 15 s each), SIGKILL the group only after that, then start the new release |
+  | pid alive, never answers (`ready_timeout`) or answers as something other than a release | **refuse**: `BootFailed` naming the pid and the pidfile. Never started a second server, never killed a pid on a guess |
 
   A release that is still booting (its shell died in the boot window) is waited
   for while its pid lives, up to `ready_timeout`.
@@ -138,8 +138,14 @@ it from `WARDMAST_DATA_HOME` / `ARB_DATA_HOME` / `~/.wardmast`, the same chain a
   token yet, PKG 9) and has no prompt at launch, so a version replacement does
   not ask; in-flight workers are interrupted and resumed like on any Quit. The
   in-app updater (PKG 14) can call the same stop-and-relaunch path.
-* Known limits: pid reuse is guarded only by requiring the recorded port to
-  answer as a release before anything is signalled; a pidfile that was deleted
+* **Process identity.** A pid alone can be reused after the release dies, so the
+  record also holds the process start time (`/proc/<pid>/stat` field 22 on
+  Linux, `ps -o lstart=` on macOS) and `Record::holds_process` requires pid
+  alive AND start time equal before the shell adopts, watches or signals it. A
+  Quit during a version replacement is answered at once (the old release keeps
+  draining; it is not killed). A record with no start time (unreadable when
+  written) falls back to pid-alive plus the port probe.
+* Known limits: a pidfile that was deleted
   by hand while a release runs cannot be detected (the port probe and the
   release's own bind failure still catch the common case); Windows is not
   covered (see item 5 below).
@@ -212,5 +218,4 @@ it from `WARDMAST_DATA_HOME` / `ARB_DATA_HOME` / `~/.wardmast`, the same chain a
 7. **Login-item/autostart, notifications, signing/notarisation, tray icons and
    a real error UI** (retry with details, "copy diagnostics" using the PKG 16
    support bundle).
-8. **CI:** `cargo test` in `desktop/` is not wired into any workflow (workflow
-   files are outside what this task could change); add a job on Linux and macOS.
+8. **CI:** `.github/workflows/desktop.yml` runs `cargo fmt --check` and `cargo test -p arbiter-shell-core` on Linux for PRs touching `desktop/**`. Not yet run on macOS (the macOS-only `ps` start-time path is untested).
