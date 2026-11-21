@@ -130,8 +130,7 @@ defmodule Wardmast.Doctor.CaptureRunner do
   end
 
   defp chrome do
-    found = System.get_env("ARB_CHROME") || System.find_executable("chromium")
-    if found && File.exists?(found), do: found
+    Wardmast.Screenshots.Capture.Shooter.Chromium.find_chrome()
   end
 
   defp read_workspaces do
