@@ -210,6 +210,12 @@ jobs:
           echo "TARBALL=${TARBALL}" >> "$GITHUB_ENV"
           echo "MANIFEST=${MANIFEST}" >> "$GITHUB_ENV"
 
+      - name: Check the tarball contains no symlinks
+        # bd-7w4e4s: ward server deploy's safe unpacker rejects every symlink
+        # (unsafe_symlink); npm's node_modules/.bin links broke v0.6.24.
+        run: |
+          bash scripts/check-release-no-symlinks.sh "${TARBALL}"
+
       - name: Check shipped binaries against the ubi8 glibc baseline
         # Last line of defence for #1728: fail the release here, naming the
         # file, rather than shipping a tarball that cannot boot on RHEL 8.

@@ -111,7 +111,16 @@ defmodule Wardmast.Umbrella.MixProject do
               "or set ARB_SKIP_CAPTURE_VENDOR=1 to ship without it, which breaks host capture)"
           )
 
-      case System.cmd(npm, ["ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+      case System.cmd(
+             npm,
+             [
+               "ci",
+               "--omit=dev",
+               "--ignore-scripts",
+               "--no-bin-links",
+               "--no-audit",
+               "--no-fund"
+             ],
              cd: dir,
              stderr_to_stdout: true
            ) do

@@ -6,8 +6,8 @@ defmodule Wardmast.Agents.CredentialStore do
   Arbiter's credential handling was written against Linux:
 
     * **Claude** keeps its interactive OAuth grant in
-      `<config dir>/.credentials.json`. Mode B session seeding
-      (`Wardmast.Agents.Claude.ConfigDir.seed_credentials/2`) *copies* that file.
+      `<config dir>/.credentials.json`. Wardmast never copies that file into a
+      session (bd-6y4pj6): a copy of a rotating grant races the original on refresh.
     * **agy** keeps its Google grant in the freedesktop Secret Service, reached
       over D-Bus. The keyring is scoped to the OS user session, not `$HOME`, so
       the isolated `$HOME` of `Wardmast.Agents.Gemini.ConfigDir` does not hide it.
@@ -68,8 +68,8 @@ defmodule Wardmast.Agents.CredentialStore do
         arbiter_readable?: false,
         warning:
           "Claude Code on macOS keeps its login in the Keychain, not in a " <>
-            "#{@credentials_file}, so mode B (seeded_credentials) has nothing to copy and " <>
-            "the session would open signed-out. Arbiter does not read the Keychain. " <>
+            "#{@credentials_file}, so mode B (seeded_credentials) has no login for the session and " <>
+            "it would open signed-out. Arbiter does not read the Keychain. " <>
             "Use mode A (a setup token: `claude setup-token`, attached to the workspace's " <>
             "Claude account) instead."
       }

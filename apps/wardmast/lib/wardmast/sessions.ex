@@ -66,6 +66,8 @@ defmodule Wardmast.Sessions do
 
   use Ash.Domain
 
+  alias Wardmast.Accounts.Credentials
+  alias Wardmast.Sessions.AccountCredentials
   alias Wardmast.Sessions.BridgeVerification
   alias Wardmast.Sessions.Guards
   alias Wardmast.Sessions.Naming
@@ -147,10 +149,13 @@ defmodule Wardmast.Sessions do
     * `:auth_mode` — `:seeded_credentials` (default, mode B — Amendment 2) or
       `:oauth_token` (mode A).
     * `:account` — a provider-account ref (slug, `claude:slug` or id) for a
-      mode-B Claude session (bd-oqkeso): credentials are seeded from that
-      account's config dir (`Wardmast.Sessions.AccountCredentials`) instead of
-      `credentials_source/1`, and the launch is refused with a message naming
-      the fix when the account has no usable login.
+      Claude session (bd-oqkeso). The session authenticates with that account's
+      setup token (mode A, `Wardmast.Sessions.AccountCredentials`) — never a
+      copy of its rotating login (bd-6y4pj6) — and the launch is refused with a
+      message naming the fix when the account has no setup token. Ignored with
+      `remote_control: true`, which needs a login of its own (mode B).
+      Without `:auth_mode` or `:account`, a workspace whose account carries a
+      setup token also gets mode A.
     * `:can_dispatch` — default `false` (§10.1).
     * `:remote_control` — recorded; phase 8 acts on it.
     * `:provision` — `false` skips provisioning (the phase-1 shape, used by the
@@ -183,10 +188,74 @@ defmodule Wardmast.Sessions do
   """
   @spec launch(launch_opts()) :: {:ok, Session.t()} | {:error, term()}
   def launch(opts \\ []) do
-    with {:ok, _socket_dir} <- Naming.ensure_socket_dir(),
+    with {:ok, opts} <- plan_auth(opts),
+         {:ok, _socket_dir} <- Naming.ensure_socket_dir(),
          {:ok, session} <- create_row(opts),
          {:ok, session} <- provision(session, opts) do
       start_scope(session, opts)
+    end
+  end
+
+  # bd-6y4pj6: which credential a Claude session authenticates with. A session
+  # never gets a *copy* of a rotating OAuth grant — that races the original on
+  # refresh and invalidates it — so:
+  #
+  #   * `account:` names a provider account → mode A with that account's setup
+  #     token (`AccountCredentials.resolve/3`; a missing token refuses the
+  #     launch with the fix), unless Remote Control is asked for;
+  #   * no explicit `:auth_mode` and the workspace's account carries a setup
+  #     token → mode A with it (what workers already use);
+  #   * otherwise mode B, whose session owns whatever login it makes itself in
+  #     its own config dir (`ConfigDir.Interactive` copies nothing).
+  #
+  # Remote Control only works under a real login (§8.3), so it stays mode B and
+  # ignores the account: the token cannot carry it.
+  defp plan_auth(opts) do
+    account = Keyword.get(opts, :account)
+
+    cond do
+      Keyword.get(opts, :provider, :claude_code) != :claude_code ->
+        {:ok, opts}
+
+      Keyword.get(opts, :remote_control, false) ->
+        {:ok, opts}
+
+      Keyword.has_key?(opts, :oauth_token) ->
+        {:ok, opts}
+
+      is_binary(account) and account != "" ->
+        with {:ok, token} <- account_token(account) do
+          {:ok, opts |> Keyword.put(:auth_mode, :oauth_token) |> Keyword.put(:oauth_token, token)}
+        end
+
+      Keyword.has_key?(opts, :auth_mode) ->
+        {:ok, opts}
+
+      true ->
+        {:ok, default_token_auth(opts)}
+    end
+  end
+
+  defp account_token(ref) do
+    case AccountCredentials.resolve(:claude, ref) do
+      {:ok, token} ->
+        {:ok, token}
+
+      {:error, reason} ->
+        Logger.error(
+          "Wardmast.Sessions.launch/1 refused account #{inspect(ref)}: #{describe(reason)}"
+        )
+
+        {:error, {:provisioning_failed, reason}}
+    end
+  end
+
+  defp default_token_auth(opts) do
+    with ws_id when is_binary(ws_id) and ws_id != "" <- Keyword.get(opts, :workspace_id),
+         {:ok, token} <- Credentials.workspace_credential(ws_id, "CLAUDE_CODE_OAUTH_TOKEN") do
+      opts |> Keyword.put(:auth_mode, :oauth_token) |> Keyword.put(:oauth_token, token)
+    else
+      _ -> opts
     end
   end
 

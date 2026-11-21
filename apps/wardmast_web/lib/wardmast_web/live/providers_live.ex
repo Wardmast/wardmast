@@ -633,6 +633,20 @@ defmodule WardmastWeb.ProvidersLive do
 
   defp error_message(other), do: inspect(other)
 
+  defp credential_health_class(health) when health in [:failing, :expired],
+    do: "text-[var(--arb-fail-text)]"
+
+  defp credential_health_class(:expiring), do: "text-[var(--arb-attention)]"
+  defp credential_health_class(_health), do: "text-[var(--arb-live)]"
+
+  defp credential_expiry(%{expires_at: %DateTime{} = at, expiry: :estimated}),
+    do: "expires ~#{Calendar.strftime(at, "%Y-%m-%d")} (estimated)"
+
+  defp credential_expiry(%{expires_at: %DateTime{} = at}),
+    do: "expires #{Calendar.strftime(at, "%Y-%m-%d")}"
+
+  defp credential_expiry(_entry), do: "expiry unknown"
+
   defp humanize(field),
     do: field |> to_string() |> String.replace("_", " ") |> String.capitalize()
 
@@ -1181,6 +1195,31 @@ defmodule WardmastWeb.ProvidersLive do
                       <span class="text-[var(--arb-text-faint)]" title="sha256 fingerprint prefix">
                         {credential.fingerprint}…
                       </span>
+                    </li>
+                  </ul>
+                  <%!-- bd-6y4pj6: each credential's kind, health and expiry, with the
+                        exact command that fixes one that is lapsing. --%>
+                  <ul
+                    id={"account-#{row.account.id}-credential-health"}
+                    class="flex flex-col gap-1 list-none m-0 p-0"
+                  >
+                    <li
+                      :for={entry <- row.credential_health}
+                      id={"account-#{row.account.id}-credential-health-#{entry.kind}"}
+                      data-health={entry.health}
+                      class="flex flex-col text-[12px]"
+                    >
+                      <span class="font-[family-name:var(--font-mono)]">
+                        <span class="text-[var(--text-title)]">{entry.kind}</span>
+                        <span class={credential_health_class(entry.health)}>{entry.health}</span>
+                        <span class="text-[var(--arb-text-muted)]">{credential_expiry(entry)}</span>
+                      </span>
+                      <code
+                        :if={entry.relogin}
+                        class="text-[11px] text-[var(--arb-text-muted)] break-all"
+                      >
+                        {entry.relogin}
+                      </code>
                     </li>
                   </ul>
                   <span class="text-[11px] text-[var(--arb-text-muted)]">

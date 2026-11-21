@@ -219,6 +219,33 @@ defmodule Wardmast.Accounts.Credentials do
   def worker_oauth_token?(_), do: false
 
   @doc """
+  The account's `claude setup-token` secret (its active `:oauth_token`
+  credential), or `:none` — also for a parked account or a blank id.
+
+  This is what a Claude session authenticates with (bd-6y4pj6): a long-lived,
+  non-rotating token, so any number of processes can hold it without racing a
+  refresh. The most recently created row wins mid-rotation, as in
+  `account_oauth_usage_token/1`.
+  """
+  @spec account_setup_token(String.t() | nil) :: {:ok, String.t()} | :none
+  def account_setup_token(account_id) when is_binary(account_id) and account_id != "" do
+    if enabled_account?(account_id) do
+      [account_id]
+      |> active_credentials()
+      |> Enum.filter(&(&1.kind == :oauth_token))
+      |> Enum.max_by(& &1.created_at, DateTime, fn -> nil end)
+      |> case do
+        nil -> :none
+        credential -> credential |> pair() |> extract_secret()
+      end
+    else
+      :none
+    end
+  end
+
+  def account_setup_token(_), do: :none
+
+  @doc """
   The location of the account's dedicated quota-poller grant (bd-b632tz) —
   the `.credentials.json` path its active `:cli_credentials_path` row names —
   or `:none` (no such row, a parked account, a blank id).
