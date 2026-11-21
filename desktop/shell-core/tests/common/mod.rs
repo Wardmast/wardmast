@@ -3,13 +3,13 @@ use arbiter_shell_core::backoff::Backoff;
 use arbiter_shell_core::http;
 use arbiter_shell_core::release_lock::{self, Record};
 use arbiter_shell_core::supervisor::{Config, ReleaseSpec};
+use std::collections::HashSet;
+use std::net::TcpListener;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
-use std::collections::HashSet;
-use std::net::TcpListener;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// A loopback port no other `Fake` in this test binary has been handed.
 ///

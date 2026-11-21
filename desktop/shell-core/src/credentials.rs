@@ -52,12 +52,22 @@ pub trait SecretStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialError {
     /// The item is gone but the shell created it earlier. Never regenerated.
-    Missing { item: String },
-    Locked { item: String },
-    Unavailable { item: String },
-    StoreFailed { item: String },
+    Missing {
+        item: String,
+    },
+    Locked {
+        item: String,
+    },
+    Unavailable {
+        item: String,
+    },
+    StoreFailed {
+        item: String,
+    },
     /// The random source or the created-items record failed.
-    Local { what: String },
+    Local {
+        what: String,
+    },
 }
 
 impl fmt::Display for CredentialError {
@@ -374,7 +384,11 @@ impl SecretStore for OsStore {
 
     fn set(&self, service: &str, account: &str, value: &str) -> Result<(), StoreError> {
         // The value goes to the tool on stdin, never on its command line.
-        let safe = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
+        let safe = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+        };
         if !safe(service) || !safe(account) {
             return Err(StoreError::Failed);
         }

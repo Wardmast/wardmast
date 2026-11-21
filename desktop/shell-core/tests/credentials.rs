@@ -1,8 +1,8 @@
 //! PKG 9: first-run credentials. The OS keychain is a stub, per platform.
 
 use arbiter_shell_core::credentials::{
-    base64, classify_get, ensure, keychain_ref, prepare, ref_env, CmdOutput, CredentialError,
-    Os, OsStore, SecretStore, StoreError, CLOAK_ACCOUNT, SECRET_KEY_BASE_ACCOUNT, SERVICE,
+    base64, classify_get, ensure, keychain_ref, prepare, ref_env, CmdOutput, CredentialError, Os,
+    OsStore, SecretStore, StoreError, CLOAK_ACCOUNT, SECRET_KEY_BASE_ACCOUNT, SERVICE,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -48,7 +48,9 @@ fn dir(name: &str) -> PathBuf {
 
 // Deterministic, recognisable "random" bytes.
 fn rand(n: usize) -> std::io::Result<Vec<u8>> {
-    Ok((0..n).map(|i| (i as u8).wrapping_mul(7).wrapping_add(3)).collect())
+    Ok((0..n)
+        .map(|i| (i as u8).wrapping_mul(7).wrapping_add(3))
+        .collect())
 }
 
 #[test]
@@ -87,7 +89,10 @@ fn first_run_generates_both_stores_them_and_hands_out_refs_only() {
         assert!(!body.contains(cloak.as_str()) && !body.contains(skb.as_str()));
     }
     let marker = std::fs::read_to_string(d.join("keychain-items")).unwrap();
-    assert_eq!(marker.lines().collect::<Vec<_>>(), ["cloak-key", "secret-key-base"]);
+    assert_eq!(
+        marker.lines().collect::<Vec<_>>(),
+        ["cloak-key", "secret-key-base"]
+    );
 }
 
 #[test]
@@ -210,7 +215,10 @@ fn base64_matches_the_standard_vectors() {
 
 type Calls = Arc<Mutex<Vec<(String, Vec<String>, Option<String>)>>>;
 
-fn stub(os: Os, reply: impl Fn(&str, &[String]) -> std::io::Result<CmdOutput> + Send + Sync + 'static) -> (OsStore, Calls) {
+fn stub(
+    os: Os,
+    reply: impl Fn(&str, &[String]) -> std::io::Result<CmdOutput> + Send + Sync + 'static,
+) -> (OsStore, Calls) {
     let calls: Calls = Arc::default();
     let rec = Arc::clone(&calls);
     let store = OsStore::with_runner(
@@ -226,23 +234,46 @@ fn stub(os: Os, reply: impl Fn(&str, &[String]) -> std::io::Result<CmdOutput> + 
 }
 
 fn ok(stdout: &str) -> std::io::Result<CmdOutput> {
-    Ok(CmdOutput { code: 0, stdout: stdout.into(), stderr: String::new() })
+    Ok(CmdOutput {
+        code: 0,
+        stdout: stdout.into(),
+        stderr: String::new(),
+    })
 }
 
 fn fail(code: i32, stderr: &str) -> std::io::Result<CmdOutput> {
-    Ok(CmdOutput { code, stdout: String::new(), stderr: stderr.into() })
+    Ok(CmdOutput {
+        code,
+        stdout: String::new(),
+        stderr: stderr.into(),
+    })
 }
 
 #[test]
 fn macos_reads_with_security_and_writes_over_stdin() {
     let (store, calls) = stub(Os::MacOs, |_, _| ok("the-value\n"));
-    assert_eq!(store.get(SERVICE, "cloak-key"), Ok(Some("the-value".into())));
-    store.set(SERVICE, "cloak-key", "TOP+SECRET/value==").unwrap();
+    assert_eq!(
+        store.get(SERVICE, "cloak-key"),
+        Ok(Some("the-value".into()))
+    );
+    store
+        .set(SERVICE, "cloak-key", "TOP+SECRET/value==")
+        .unwrap();
 
     let calls = calls.lock().unwrap();
     let (program, args, stdin) = &calls[0];
     assert_eq!(program, "security");
-    assert_eq!(args, &["find-generic-password", "-s", SERVICE, "-a", "cloak-key", "-w"]);
+    assert_eq!(
+        args,
+        &[
+            "find-generic-password",
+            "-s",
+            SERVICE,
+            "-a",
+            "cloak-key",
+            "-w"
+        ]
+    );
     assert!(stdin.is_none());
 
     let (program, args, stdin) = &calls[1];
@@ -252,56 +283,117 @@ fn macos_reads_with_security_and_writes_over_stdin() {
     assert!(line.starts_with("add-generic-password -U -s dev.arbiter.wardmast -a cloak-key"));
     assert!(line.contains("TOP+SECRET/value=="));
     // The value is on stdin only.
-    assert!(calls.iter().all(|(_, a, _)| a.iter().all(|x| !x.contains("TOP+SECRET"))));
+    assert!(calls
+        .iter()
+        .all(|(_, a, _)| a.iter().all(|x| !x.contains("TOP+SECRET"))));
 }
 
 #[test]
 fn linux_reads_with_secret_tool_and_writes_over_stdin() {
     let (store, calls) = stub(Os::Linux, |_, _| ok("the-value\n"));
-    assert_eq!(store.get(SERVICE, "cloak-key"), Ok(Some("the-value".into())));
+    assert_eq!(
+        store.get(SERVICE, "cloak-key"),
+        Ok(Some("the-value".into()))
+    );
     store.set(SERVICE, "secret-key-base", "TOP-SECRET").unwrap();
 
     let calls = calls.lock().unwrap();
     let (program, args, _) = &calls[0];
     assert_eq!(program, "secret-tool");
-    assert_eq!(args, &["lookup", "service", SERVICE, "account", "cloak-key"]);
+    assert_eq!(
+        args,
+        &["lookup", "service", SERVICE, "account", "cloak-key"]
+    );
 
     let (program, args, stdin) = &calls[1];
     assert_eq!(program, "secret-tool");
     assert_eq!(args[0], "store");
     assert_eq!(stdin.as_deref(), Some("TOP-SECRET"));
-    assert!(calls.iter().all(|(_, a, _)| a.iter().all(|x| !x.contains("TOP-SECRET"))));
+    assert!(calls
+        .iter()
+        .all(|(_, a, _)| a.iter().all(|x| !x.contains("TOP-SECRET"))));
 }
 
 #[test]
 fn only_an_unambiguous_missing_answer_is_none() {
-    let out = |code, stderr: &str| CmdOutput { code, stdout: String::new(), stderr: stderr.into() };
-    assert_eq!(classify_get(Os::MacOs, &out(44, "could not be found")), Ok(None));
+    let out = |code, stderr: &str| CmdOutput {
+        code,
+        stdout: String::new(),
+        stderr: stderr.into(),
+    };
+    assert_eq!(
+        classify_get(Os::MacOs, &out(44, "could not be found")),
+        Ok(None)
+    );
     assert_eq!(classify_get(Os::Linux, &out(1, "")), Ok(None));
 
-    assert_eq!(classify_get(Os::MacOs, &out(36, "User interaction is not allowed.")), Err(StoreError::Locked));
-    assert_eq!(classify_get(Os::MacOs, &out(51, "")), Err(StoreError::Locked));
-    assert_eq!(classify_get(Os::Linux, &out(1, "Cannot get secret of a locked object")), Err(StoreError::Locked));
-    assert_eq!(classify_get(Os::Linux, &out(1, "Cannot autolaunch D-Bus without X11")), Err(StoreError::Unavailable));
-    assert_eq!(classify_get(Os::Linux, &out(2, "something odd")), Err(StoreError::Failed));
-    assert_eq!(classify_get(Os::MacOs, &out(1, "something odd")), Err(StoreError::Failed));
+    assert_eq!(
+        classify_get(Os::MacOs, &out(36, "User interaction is not allowed.")),
+        Err(StoreError::Locked)
+    );
+    assert_eq!(
+        classify_get(Os::MacOs, &out(51, "")),
+        Err(StoreError::Locked)
+    );
+    assert_eq!(
+        classify_get(Os::Linux, &out(1, "Cannot get secret of a locked object")),
+        Err(StoreError::Locked)
+    );
+    assert_eq!(
+        classify_get(Os::Linux, &out(1, "Cannot autolaunch D-Bus without X11")),
+        Err(StoreError::Unavailable)
+    );
+    assert_eq!(
+        classify_get(Os::Linux, &out(2, "something odd")),
+        Err(StoreError::Failed)
+    );
+    assert_eq!(
+        classify_get(Os::MacOs, &out(1, "something odd")),
+        Err(StoreError::Failed)
+    );
     // An existing but empty item is never "missing".
-    assert_eq!(classify_get(Os::Linux, &CmdOutput { code: 0, stdout: "\n".into(), stderr: String::new() }), Err(StoreError::Failed));
+    assert_eq!(
+        classify_get(
+            Os::Linux,
+            &CmdOutput {
+                code: 0,
+                stdout: "\n".into(),
+                stderr: String::new()
+            }
+        ),
+        Err(StoreError::Failed)
+    );
 }
 
 #[test]
 fn a_missing_tool_is_unavailable_not_missing() {
     for os in [Os::MacOs, Os::Linux] {
-        let (store, _) = stub(os, |_, _| Err(std::io::Error::from(std::io::ErrorKind::NotFound)));
-        assert_eq!(store.get(SERVICE, "cloak-key"), Err(StoreError::Unavailable));
-        assert_eq!(store.set(SERVICE, "cloak-key", "v"), Err(StoreError::Unavailable));
+        let (store, _) = stub(os, |_, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        });
+        assert_eq!(
+            store.get(SERVICE, "cloak-key"),
+            Err(StoreError::Unavailable)
+        );
+        assert_eq!(
+            store.set(SERVICE, "cloak-key", "v"),
+            Err(StoreError::Unavailable)
+        );
     }
 }
 
 #[test]
 fn a_locked_store_write_is_locked() {
-    let (store, _) = stub(Os::Linux, |_, _| fail(1, "secret-tool: Cannot create an item in a locked collection"));
-    assert_eq!(store.set(SERVICE, "cloak-key", "v"), Err(StoreError::Locked));
+    let (store, _) = stub(Os::Linux, |_, _| {
+        fail(
+            1,
+            "secret-tool: Cannot create an item in a locked collection",
+        )
+    });
+    assert_eq!(
+        store.set(SERVICE, "cloak-key", "v"),
+        Err(StoreError::Locked)
+    );
 }
 
 #[test]
