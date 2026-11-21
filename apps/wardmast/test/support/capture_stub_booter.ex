@@ -35,6 +35,19 @@ defmodule Wardmast.Test.CaptureStubBooter do
   end
 
   @impl true
+  def ready(%{ctx: ctx}, {role, _seed}) do
+    send(ctx.test_pid, {:ready_check, role})
+
+    case Map.get(Map.get(ctx, :not_ready, %{}), role) do
+      nil -> :ok
+      detail -> {:error, detail}
+    end
+  end
+
+  @impl true
+  def log_tail(%{ctx: ctx}, {role, _seed}), do: Map.get(Map.get(ctx, :server_logs, %{}), role)
+
+  @impl true
   def stop(%{ctx: ctx} = _spec, {role, seed}) do
     send(ctx.test_pid, {:stop, role, seed})
     :ok

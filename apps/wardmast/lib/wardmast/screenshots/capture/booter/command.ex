@@ -78,6 +78,38 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
   end
 
   @impl true
+  def ready(_spec, %{
+        process: process,
+        ready_url: url,
+        expect: expect,
+        sandbox: sandbox,
+        exposed: exposed
+      }) do
+    case AppProcess.status(process) do
+      {{:exited, code}, _tail} ->
+        {:error, "the app exited with status #{code}"}
+
+      {:running, _tail} ->
+        case probe(url, expect, sandbox.reach(exposed)) do
+          :ready -> :ok
+          {:not_ready, detail} -> {:error, "GET #{url}: #{detail}"}
+        end
+    end
+  end
+
+  def ready(_spec, _handle), do: :ok
+
+  @impl true
+  def log_tail(_spec, %{process: process}) do
+    {_status, tail} = AppProcess.status(process)
+    tail
+  catch
+    :exit, _ -> nil
+  end
+
+  def log_tail(_spec, _handle), do: nil
+
+  @impl true
   def stop(_spec, %{process: process} = handle) do
     AppProcess.stop(process)
 
@@ -230,7 +262,13 @@ defmodule Wardmast.Screenshots.Capture.Booter.Command do
         :ok ->
           {:ok,
            %{
-             handle: %{process: process, sandbox: run.sandbox, exposed: exposed},
+             handle: %{
+               process: process,
+               sandbox: run.sandbox,
+               exposed: exposed,
+               ready_url: base_url <> (cfg.ready["path"] || "/"),
+               expect: cfg.ready["expect"] || "below_500"
+             },
              base_url: base_url,
              app: exposed
            }}

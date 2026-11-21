@@ -346,6 +346,49 @@ defmodule Wardmast.Screenshots.CaptureTest do
       assert failure.message =~ "#edit"
     end
 
+    test "a shot failure records the tail of the app's server output for that side", %{
+      tmp_dir: dir
+    } do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+
+      ctx = %{
+        shoot_error: {:shot, "page.goto: net::ERR_EMPTY_RESPONSE"},
+        server_logs: %{"before" => "BEFORE-LOG\n** (RuntimeError) boom"}
+      }
+
+      assert {:error, failure} = run(dir, plan, ctx)
+      assert failure.code == :shot_failed
+      assert failure.server_log =~ "BEFORE-LOG"
+      assert recorded(dir)["failure"]["server_log"] =~ "(RuntimeError) boom"
+    end
+
+    test "readiness is re-checked right before a side's first navigation", %{tmp_dir: dir} do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+      assert {:ok, _} = run(dir, plan)
+      assert_received {:ready_check, "before"}
+      assert_received {:ready_check, "after"}
+    end
+
+    test "an app that stopped answering is 'app not ready', distinct from a page error", %{
+      tmp_dir: dir
+    } do
+      plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
+
+      ctx = %{
+        not_ready: %{"after" => "GET /sign-in: connection closed"},
+        server_logs: %{"after" => "AFTER-CRASH-LOG"}
+      }
+
+      assert {:error, failure} = run(dir, plan, ctx)
+      assert failure.code == :app_not_ready
+      assert failure.role == "after"
+      assert failure.message =~ "not ready"
+      assert failure.server_log =~ "AFTER-CRASH-LOG"
+      refute_received {:shoot, "after", _, _, _}
+      assert recorded(dir)["failure"]["code"] == "app_not_ready"
+      assert recorded(dir)["failure"]["server_log"] =~ "AFTER-CRASH-LOG"
+    end
+
     test "the app is stopped even when the shooter crashes", %{tmp_dir: dir} do
       plan = write_plan!(dir, [%{"id" => "home", "path" => "/"}])
 

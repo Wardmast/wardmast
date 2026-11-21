@@ -254,6 +254,27 @@ defmodule Wardmast.Screenshots.ConfigTest do
       "personas" => %{"admin" => %{"username" => "a", "password" => "b"}}
     }
 
+    test "login.post_login_path takes persona fields and return_to, and stays on the app" do
+      persona = %{"username" => "a", "password" => "b", "tenant_id" => "t1"}
+      form = %{@form_login | "personas" => %{"admin" => persona}}
+      ok = "/switch-tenant/{{persona.tenant_id}}?return_to={{return_to}}"
+
+      assert errors(%{"login" => Map.put(form, "post_login_path", ok)}) == []
+      assert [_] = errors(%{"login" => Map.put(form, "post_login_path", "http://evil.test/")})
+      assert [_] = errors(%{"login" => Map.put(form, "post_login_path", "//evil.test/")})
+      assert [_] = errors(%{"login" => Map.put(form, "post_login_path", "/x/{{persona.nope}}")})
+
+      assert [_] =
+               errors(%{"login" => Map.put(form, "post_login_path", "/x/{{persona.password}}")})
+
+      assert [_] = errors(%{"login" => Map.put(form, "post_login_path", "/x/{{port}}")})
+    end
+
+    test "persona extra fields must be strings" do
+      persona = %{"username" => "a", "password" => "b", "tenant_id" => 7}
+      assert [_] = errors(%{"login" => %{@form_login | "personas" => %{"admin" => persona}}})
+    end
+
     test "login.success accepts path_not and url_not_contains" do
       for success <- [
             %{"path_not" => "/login"},

@@ -168,6 +168,21 @@ async function doLogin(page, spec, timeoutMs) {
         `(login.success: ${describeSuccess(login.success)})`
     )
   }
+
+  // A persona that belongs to several tenants lands on a picker after sign-in. The configured
+  // post-login path (already rendered by the caller) selects one, e.g. a tenant switch.
+  if (typeof login.post_login_path === "string" && login.post_login_path !== "") {
+    const target = spec.base_url + login.post_login_path
+    let resp
+    try {
+      resp = await page.goto(target, { waitUntil: "load", timeout: timeoutMs })
+    } catch (err) {
+      throw fail(`login.post_login_path ${login.post_login_path}: ${firstLine(err)}`)
+    }
+    if (resp && resp.status() >= 400) {
+      throw fail(`login.post_login_path ${login.post_login_path} answered ${resp.status()}`)
+    }
+  }
 }
 
 // ── steps ────────────────────────────────────────────────────────────────

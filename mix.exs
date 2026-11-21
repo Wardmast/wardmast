@@ -74,7 +74,12 @@ defmodule Wardmast.Umbrella.MixProject do
         applications: [wardmast: :permanent, wardmast_web: :permanent],
         include_executables_for: [:unix],
         version: @version,
-        steps: [:assemble, &restrict_cookie/1, &ship_no_dot_erlang_boot/1]
+        steps: [
+          :assemble,
+          &restrict_cookie/1,
+          &ship_no_dot_erlang_boot/1,
+          &vendor_capture_runner/1
+        ]
       ]
     ]
   end
@@ -87,6 +92,42 @@ defmodule Wardmast.Umbrella.MixProject do
   defp restrict_cookie(release) do
     File.chmod!(Path.join(release.path, "releases/COOKIE"), 0o600)
     release
+  end
+
+  # bd-71t1wd: the host capture runner (priv/capture/runner.mjs) needs `playwright-core`, which
+  # only worker images baked in. Install the lockfile-pinned copy (pure JS, no browser download)
+  # into the release's own priv/capture so a fresh install can capture without a manual `npm ci`.
+  # ARB_SKIP_CAPTURE_VENDOR=1 skips it (no npm on the build box); the doctor then reports it.
+  defp vendor_capture_runner(release) do
+    if System.get_env("ARB_SKIP_CAPTURE_VENDOR") == "1" do
+      release
+    else
+      dir = Path.join([release.path, "lib", "wardmast-#{release.version}", "priv", "capture"])
+
+      npm =
+        System.find_executable("npm") ||
+          Mix.raise(
+            "npm not found: needed to vendor playwright-core into priv/capture (install node >= 22, " <>
+              "or set ARB_SKIP_CAPTURE_VENDOR=1 to ship without it, which breaks host capture)"
+          )
+
+      case System.cmd(
+             npm,
+             [
+               "ci",
+               "--omit=dev",
+               "--ignore-scripts",
+               "--no-bin-links",
+               "--no-audit",
+               "--no-fund"
+             ],
+             cd: dir,
+             stderr_to_stdout: true
+           ) do
+        {_, 0} -> release
+        {out, code} -> Mix.raise("vendoring playwright-core failed (npm ci exit #{code}): #{out}")
+      end
+    end
   end
 
   # bd-d5mg29: an escript boots `no_dot_erlang` from <release>/bin, which a
