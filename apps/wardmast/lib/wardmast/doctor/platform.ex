@@ -29,6 +29,11 @@ defmodule Wardmast.Doctor.Platform do
       os: os_name(os),
       path: path,
       server_log_path: Wardmast.Config.Paths.server_log_path(),
+      # bd-dt5f6c: the server's own idea of its data home, live database and pid
+      # file, so `arb doctor` can spot a data-home split-brain with the CLI/unit.
+      data_home: Wardmast.Env.data_home(),
+      database_path: Wardmast.Repo.config()[:database],
+      pid_file_path: Wardmast.SingleInstance.lock_path(),
       tools: Map.new(@tools, &{&1, find.(&1, path)}),
       # bd-5wfsj7: each provider CLI's install state and version against its
       # minimum, and how the server's PATH was built (login shell vs inherited).

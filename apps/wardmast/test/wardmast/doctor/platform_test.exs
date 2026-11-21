@@ -29,6 +29,14 @@ defmodule Wardmast.Doctor.PlatformTest do
     assert report.tools == Map.new(~w(gtimeout claude gh glab mise), &{&1, nil})
   end
 
+  test "reports the server's data home, database path and pid file path (bd-dt5f6c)" do
+    report = Platform.report(os: {:unix, :linux}, path: "/usr/bin", find: fn _, _ -> nil end)
+
+    assert report.data_home == Wardmast.Env.data_home()
+    assert report.pid_file_path == Wardmast.SingleInstance.lock_path()
+    assert report.database_path == Wardmast.Repo.config()[:database]
+  end
+
   describe "provider CLI detection (bd-5wfsj7)" do
     @moduletag :linux
 
