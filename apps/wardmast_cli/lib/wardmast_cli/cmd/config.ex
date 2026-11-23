@@ -220,7 +220,7 @@ defmodule WardmastCli.Cmd.Config do
 
         IO.puts(
           :stderr,
-          "warning: `#{key}` is deprecated and read by nothing; using `#{canonical}`, the key runs read"
+          "warning: `#{key}` is deprecated; using `#{canonical}` instead (the key the sandbox is read from)"
         )
 
         canonical

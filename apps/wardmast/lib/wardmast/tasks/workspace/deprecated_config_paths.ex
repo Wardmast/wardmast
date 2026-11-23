@@ -69,7 +69,7 @@ defmodule Wardmast.Tasks.Workspace.DeprecatedConfigPaths do
   @spec warning(rewrite()) :: String.t()
   def warning({deprecated, canonical}),
     do:
-      "`#{deprecated}` is deprecated and read by nothing; using `#{canonical}`, the key runs read"
+      "`#{deprecated}` is deprecated; using `#{canonical}` instead (the key the sandbox is read from)"
 
   @doc "Rewrite one dotted `unset_paths` entry onto its canonical path."
   @spec rewrite_path(String.t()) :: {String.t(), [rewrite()]}

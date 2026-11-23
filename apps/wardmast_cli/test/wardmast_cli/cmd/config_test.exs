@@ -116,8 +116,10 @@ defmodule WardmastCli.Cmd.ConfigTest do
       {out, err, code} = capture(fn -> Config.run(["get", "sandbox.backend", "--json"]) end)
       assert code == 0
       assert String.trim(out) == ~s("bwrap")
-      assert err =~ "`sandbox.backend` is deprecated"
-      assert err =~ "agent.security.sandbox.backend"
+
+      assert err =~
+               "warning: `sandbox.backend` is deprecated; using " <>
+                 "`agent.security.sandbox.backend` instead (the key the sandbox is read from)"
     end
 
     test "get sandbox reads the whole canonical sandbox block" do

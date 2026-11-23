@@ -28,7 +28,10 @@ defmodule Wardmast.MCP.Tools.WorkspaceConfigDeprecatedSandboxTest do
     assert data.value == "bwrap"
     assert data.key == "agent.security.sandbox.backend"
     assert [warning] = data.warnings
-    assert warning =~ "`sandbox.backend` is deprecated"
+
+    assert warning ==
+             "`sandbox.backend` is deprecated; using `agent.security.sandbox.backend` " <>
+               "instead (the key the sandbox is read from)"
   end
 
   test "get on a canonical key carries no warnings", %{coordinator: scope} do
